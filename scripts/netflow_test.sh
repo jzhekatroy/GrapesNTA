@@ -51,10 +51,23 @@ BPFOBJ="$(pwd)/bpf/xdp_flow.o"
 [[ -x "$XDPFLOWD" ]] || { echo "xdpflowd binary not found at $XDPFLOWD"; exit 1; }
 
 # --- Start collectors ---------------------------------------------------------
+
+# Packet capture on loopback — lets us verify our NFv9 datagrams are actually
+# arriving at :2055 regardless of what nfcapd decides to do with them.
+if have tcpdump; then
+  echo "[start] tcpdump capturing NFv9 on lo → $WORKDIR/nfv9.pcap"
+  tcpdump -U -i lo -w "$WORKDIR/nfv9.pcap" "udp port $NFPORT" \
+    >>"$WORKDIR/tcpdump.log" 2>&1 &
+  TCPDUMP_PID=$!
+  sleep 0.5
+fi
+
 echo "[start] nfcapd on 127.0.0.1:$NFPORT → $NFDIR"
 # Run foreground + background-shell so we keep the PID and get all output.
 # -t 60: rotation interval; SIGTERM will cause nfcapd to flush the current file.
-nfcapd -b 127.0.0.1 -p "$NFPORT" -l "$NFDIR" -I xdp -t 60 \
+# -e: print received flows to stderr (so nfcapd.log shows activity even if
+#     no file is produced).
+nfcapd -b 127.0.0.1 -p "$NFPORT" -l "$NFDIR" -I xdp -t 60 -e \
   >> "$WORKDIR/nfcapd.log" 2>&1 &
 NFCAPD_PID=$!
 sleep 1
@@ -113,14 +126,22 @@ wait "$XDP_PID" 2>/dev/null || true
 # Post-shutdown RX counters
 rx1=( $(read_rx) )
 
-# --- Stop nfcapd (SIGTERM triggers flush of the current buffer to disk) -------
+# --- Stop nfcapd (SIGHUP flushes & rotates; then SIGTERM exits cleanly) -------
 if kill -0 "$NFCAPD_PID" 2>/dev/null; then
+  # Force a rotation so even if the -t window hasn't closed, a file is written.
+  kill -HUP "$NFCAPD_PID" 2>/dev/null || true
+  sleep 1
   kill -TERM "$NFCAPD_PID" 2>/dev/null || true
-  # Give nfcapd up to 5 s to flush and exit cleanly
   for _ in 1 2 3 4 5; do
     kill -0 "$NFCAPD_PID" 2>/dev/null || break
     sleep 1
   done
+fi
+
+# Stop packet capture
+if [[ -n "${TCPDUMP_PID:-}" ]] && kill -0 "$TCPDUMP_PID" 2>/dev/null; then
+  kill -TERM "$TCPDUMP_PID" 2>/dev/null || true
+  wait "$TCPDUMP_PID" 2>/dev/null || true
 fi
 
 # --- Analysis ----------------------------------------------------------------
@@ -157,11 +178,26 @@ else
 fi
 echo
 
+echo "--- NFv9 UDP datagrams captured on loopback ---"
+if [[ -s "$WORKDIR/nfv9.pcap" ]]; then
+  pcap_bytes=$(stat -c %s "$WORKDIR/nfv9.pcap" 2>/dev/null || wc -c <"$WORKDIR/nfv9.pcap")
+  echo "  pcap: $WORKDIR/nfv9.pcap  ($pcap_bytes bytes)"
+  if have tcpdump; then
+    pkt_count=$(tcpdump -r "$WORKDIR/nfv9.pcap" 2>/dev/null | wc -l)
+    echo "  datagrams observed: $pkt_count"
+    echo "  first 3 datagrams:"
+    tcpdump -r "$WORKDIR/nfv9.pcap" -nn -c 3 2>/dev/null | sed 's/^/    /'
+  fi
+else
+  echo "  (no pcap — tcpdump missing or capture failed)"
+fi
+echo
+
 echo "--- nfcapd status ---"
 echo "  directory listing:"
 ls -la "$NFDIR" 2>/dev/null | sed 's/^/    /'
-echo "  nfcapd.log tail:"
-tail -10 "$WORKDIR/nfcapd.log" 2>/dev/null | sed 's/^/    /'
+echo "  nfcapd.log (full):"
+cat "$WORKDIR/nfcapd.log" 2>/dev/null | sed 's/^/    /'
 echo
 
 echo "--- nfcapd-collected NetFlow v9 flows (top-20 by bytes) ---"
