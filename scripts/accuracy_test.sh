@@ -34,13 +34,14 @@ need_root() {
 }
 
 ethtool_rx() {
+  # Use /sys/class/net/<iface>/statistics — works on every driver (virtio_net,
+  # mlx5_core, ixgbe, i40e, etc.). ethtool -S has driver-specific key names.
   local iface="$1"
-  # virtio_net: rx_packets / rx_bytes; some drivers use different names — try common keys
-  ethtool -S "$iface" 2>/dev/null | awk '
-    /^[[:space:]]*rx_packets:/ { gsub(/:/,"",$2); pkt=$2 }
-    /^[[:space:]]*rx_bytes:/  { gsub(/:/,"",$2);  byt=$2 }
-    END { print pkt+0, byt+0 }
-  '
+  local p="/sys/class/net/$iface/statistics"
+  local rxp rxb
+  rxp="$(cat "$p/rx_packets" 2>/dev/null || echo 0)"
+  rxb="$(cat "$p/rx_bytes"   2>/dev/null || echo 0)"
+  echo "$rxp $rxb"
 }
 
 read_json_last() {
@@ -149,11 +150,11 @@ run_iperf_phase() {
   read -r S0_TP S0_PE S0_MF S0_FP S0_FB <<<"$(read_json_last "$JSONL")"
 
   if [[ "$proto" == "udp" ]]; then
-    echo "--- iperf3 UDP 10s ---"
-    iperf3 -c "$IPERF3_HOST" -p "$IPERF3_PORT" -u -b 200M -t 10 -l 1200 || true
+    echo "--- iperf3 UDP 10s (reverse: server -> VM) ---"
+    iperf3 -c "$IPERF3_HOST" -p "$IPERF3_PORT" -u -b 200M -t 10 -l 1200 -R || true
   else
-    echo "--- iperf3 TCP 10s ---"
-    iperf3 -c "$IPERF3_HOST" -p "$IPERF3_PORT" -t 10 -P 4 || true
+    echo "--- iperf3 TCP 10s (reverse: server -> VM) ---"
+    iperf3 -c "$IPERF3_HOST" -p "$IPERF3_PORT" -t 10 -P 4 -R || true
   fi
 
   sleep 3
