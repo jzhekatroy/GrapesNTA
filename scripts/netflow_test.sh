@@ -30,8 +30,28 @@ JSON="$WORKDIR/xdpflowd.ndjson"
 NFDIR="$WORKDIR/nfcapd"
 
 mkdir -p "$WORKDIR" "$NFDIR"
+# truncate logs from previous runs so error output is unambiguous
 : > "$LOG"
 : > "$JSON"
+: > "$WORKDIR/nfcapd.log"
+: > "$WORKDIR/tcpdump.log"
+rm -f "$NFDIR"/nfcapd.* "$WORKDIR/nfv9.pcap"
+
+# Kill any stale nfcapd/tcpdump from earlier aborted runs on the same port.
+cleanup_stale() {
+  if ss -ulnp 2>/dev/null | grep -q ":$NFPORT "; then
+    echo "  note: port $NFPORT is busy, killing listeners..."
+    ss -ulnp 2>/dev/null | awk -v p=":$NFPORT " '$0 ~ p {print}' | \
+      grep -oE 'pid=[0-9]+' | awk -F= '{print $2}' | \
+      while read -r pid; do kill -TERM "$pid" 2>/dev/null || true; done
+    sleep 1
+  fi
+  pkill -f "nfcapd.*$NFPORT" 2>/dev/null || true
+  pkill -f "tcpdump.*$NFPORT" 2>/dev/null || true
+  sleep 0.5
+}
+cleanup_stale
+trap 'cleanup_stale' EXIT
 
 have() { command -v "$1" >/dev/null 2>&1; }
 
@@ -63,17 +83,17 @@ if have tcpdump; then
 fi
 
 echo "[start] nfcapd on 127.0.0.1:$NFPORT → $NFDIR"
-# Run foreground + background-shell so we keep the PID and get all output.
-# -t 60: rotation interval; SIGTERM will cause nfcapd to flush the current file.
-# -e: print received flows to stderr (so nfcapd.log shows activity even if
-#     no file is produced).
-nfcapd -b 127.0.0.1 -p "$NFPORT" -l "$NFDIR" -I xdp -t 60 -e \
+# Modern nfdump uses -w for output dir (-l is legacy). Both work for now.
+# -t 60: rotation interval; SIGHUP flushes, SIGTERM stops with final flush.
+# -e: emit the flow stream to stderr so nfcapd.log shows activity even when
+#     no file is produced yet.
+nfcapd -b 127.0.0.1 -p "$NFPORT" -w "$NFDIR" -I xdp -t 60 -e \
   >> "$WORKDIR/nfcapd.log" 2>&1 &
 NFCAPD_PID=$!
 sleep 1
 if ! kill -0 "$NFCAPD_PID" 2>/dev/null; then
-  echo "  ERROR: nfcapd failed to start — tail of $WORKDIR/nfcapd.log:"
-  tail -20 "$WORKDIR/nfcapd.log" | sed 's/^/    /'
+  echo "  ERROR: nfcapd failed to start — full nfcapd.log:"
+  cat "$WORKDIR/nfcapd.log" | sed 's/^/    /'
   exit 1
 fi
 echo "  nfcapd pid=$NFCAPD_PID"
