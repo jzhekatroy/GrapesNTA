@@ -23,7 +23,14 @@
 #   sudo ./scripts/prod_observe.sh [duration_sec] [iface] [alt_port]
 # По умолчанию: 300 сек (5 минут), enp5s0d1, порт 12055.
 #
-# Требуется: clang, libbpf-dev, go 1.23+, ethtool, nfcapd (nfdump пакет),
+# Настройки через env:
+#   XDP_MODE=auto|native|generic|skb     (default: auto — пробует native, при
+#                                         ENOMEM падает в generic)
+#   FLOWS_MAP_SIZE=<N>                   (default: 1000000 — 5 мин наблюдения
+#                                         не требует 4M; экономит ~300MB RAM)
+#   GO=/path/to/go                       (если нужно явно указать Go toolchain)
+#
+# Требуется: clang, libbpf-dev, go 1.21+, ethtool, nfcapd (nfdump пакет),
 #            tcpdump (опционально). Построение происходит автоматически.
 
 set -euo pipefail
@@ -31,6 +38,11 @@ set -euo pipefail
 DURATION="${1:-300}"
 IFACE="${2:-enp5s0d1}"
 ALT_PORT="${3:-12055}"
+
+XDP_MODE="${XDP_MODE:-auto}"
+# для 5-минутного наблюдения 1M entries более чем достаточно; экономим RAM
+# чтобы mlx4_en мог раздобыть crontig. блоки для своих completion queues.
+FLOWS_MAP_SIZE="${FLOWS_MAP_SIZE:-1000000}"
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
@@ -75,14 +87,14 @@ echo "[$(date +%T)] workdir: $WORKDIR"
 echo "[$(date +%T)] iface=$IFACE alt_port=$ALT_PORT duration=${DURATION}s"
 
 # ---------- сборка ----------
-echo "[$(date +%T)] building xdpflowd (FLOWS_MAP_SIZE=4000000)..."
+echo "[$(date +%T)] building xdpflowd (FLOWS_MAP_SIZE=$FLOWS_MAP_SIZE, mode=$XDP_MODE)..."
 # если go.sum нет или go.mod требует обновления — мягко делаем tidy
 : "${GO:=go}"
 if [ ! -f go.sum ]; then
   echo "[$(date +%T)]   go.sum missing, running 'go mod tidy'..."
   "$GO" mod tidy
 fi
-make -s >/dev/null
+make -s FLOWS_MAP_SIZE="$FLOWS_MAP_SIZE" >/dev/null
 [ -x ./bin/xdpflowd ] || { echo "build failed"; exit 1; }
 [ -f ./bpf/xdp_flow.o ] || { echo "bpf object missing"; exit 1; }
 
@@ -108,31 +120,74 @@ if ! kill -0 $NFCAPD_PID 2>/dev/null; then
   exit 1
 fi
 
+# ---------- освобождение памяти перед XDP ----------
+# mlx4_en при attach XDP пересоздаёт completion queues и требует
+# contiguous DMA-блоков (>=256KB). На нагруженных хостах Node 0 обычно
+# фрагментирован — вытягиваем pagecache и форсируем compaction, чтобы
+# дать драйверу шанс собрать свободные большие страницы.
+if [ "$XDP_MODE" = "auto" ] || [ "$XDP_MODE" = "native" ]; then
+  echo "[$(date +%T)] freeing pagecache + compacting memory (helps mlx4_en DMA alloc)"
+  sync || true
+  echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || true
+  echo 1 > /proc/sys/vm/compact_memory 2>/dev/null || true
+  # краткая сводка для отчёта
+  grep -E '^(MemFree|MemAvailable|Buffers|Cached):' /proc/meminfo \
+    > "$WORKDIR/meminfo_before_attach.txt" 2>/dev/null || true
+fi
+
 # ---------- запуск xdpflowd ----------
 # -nf-dst ведёт ТОЛЬКО на alt-порт -> не мешает реальному пайплайну
 # -nf-active 1800s, -nf-idle 15s — те же таймауты, что у ipt_NETFLOW
 # -interval 30s — частота stats/json
-echo "[$(date +%T)] starting xdpflowd (XDP_PASS, alt NFv9 -> 127.0.0.1:$ALT_PORT)"
-./bin/xdpflowd \
-  -iface "$IFACE" \
-  -mode native \
-  -bpf ./bpf/xdp_flow.o \
-  -nf-dst "127.0.0.1:$ALT_PORT" \
-  -nf-active 1800s \
-  -nf-idle 15s \
-  -nf-template-interval 60s \
-  -interval 30s \
-  -json-out "$JSON_OUT" \
-  -json-interval 30s \
-  > "$LOG_XDP" 2>&1 &
-XDP_PID=$!
-sleep 3
-if ! kill -0 $XDP_PID 2>/dev/null; then
-  echo "ERROR: xdpflowd failed to start. Last log:"
-  tail -n 50 "$LOG_XDP"
-  kill -TERM $NFCAPD_PID 2>/dev/null || true
-  exit 1
+start_xdpflowd() {
+  local mode="$1"
+  echo "[$(date +%T)] starting xdpflowd (mode=$mode, XDP_PASS, alt NFv9 -> 127.0.0.1:$ALT_PORT)"
+  ./bin/xdpflowd \
+    -iface "$IFACE" \
+    -mode "$mode" \
+    -bpf ./bpf/xdp_flow.o \
+    -nf-dst "127.0.0.1:$ALT_PORT" \
+    -nf-active 1800s \
+    -nf-idle 15s \
+    -nf-template-interval 60s \
+    -interval 30s \
+    -json-out "$JSON_OUT" \
+    -json-interval 30s \
+    > "$LOG_XDP" 2>&1 &
+  XDP_PID=$!
+  sleep 3
+  kill -0 $XDP_PID 2>/dev/null
+}
+
+# выбираем стартовый режим
+if [ "$XDP_MODE" = "auto" ]; then
+  FIRST_MODE="native"
+else
+  FIRST_MODE="$XDP_MODE"
 fi
+
+if ! start_xdpflowd "$FIRST_MODE"; then
+  # почему упал? Если ENOMEM на native — пробуем generic (только в auto).
+  if [ "$XDP_MODE" = "auto" ] && grep -qi "cannot allocate memory\|create link" "$LOG_XDP"; then
+    echo "[$(date +%T)] WARNING: native XDP failed (ENOMEM); falling back to generic mode"
+    echo "[$(date +%T)]   это OK для этапа наблюдения — eBPF-программа всё равно"
+    echo "[$(date +%T)]   видит те же пакеты, просто после netif_receive_skb."
+    cp "$LOG_XDP" "$LOG_XDP.native_attempt"
+    if ! start_xdpflowd "generic"; then
+      echo "ERROR: xdpflowd failed in BOTH native and generic modes. Last log:"
+      tail -n 60 "$LOG_XDP"
+      kill -TERM $NFCAPD_PID 2>/dev/null || true
+      exit 1
+    fi
+  else
+    echo "ERROR: xdpflowd failed to start. Last log:"
+    tail -n 60 "$LOG_XDP"
+    kill -TERM $NFCAPD_PID 2>/dev/null || true
+    exit 1
+  fi
+fi
+
+echo "[$(date +%T)] xdpflowd attached successfully (pid=$XDP_PID)"
 
 # ---------- cleanup trap ----------
 cleanup() {
@@ -186,6 +241,15 @@ T_START=$(cat "$WORKDIR/t_start.txt")
 T_END=$(cat "$WORKDIR/t_end.txt")
 ELAPSED=$(( T_END - T_START ))
 echo "duration: ${ELAPSED}s"
+
+# какой режим XDP реально использовали: если есть .native_attempt —
+# native упал с ENOMEM и мы откатились в generic.
+if [ -f "$LOG_XDP.native_attempt" ]; then
+  RUN_MODE="generic (native failed with ENOMEM — см. $LOG_XDP.native_attempt)"
+else
+  RUN_MODE="${FIRST_MODE:-unknown}"
+fi
+echo "xdp mode: $RUN_MODE"
 
 # NIC rx delta
 RXB=$(( $(cat "$WORKDIR/rx_bytes_after.txt") - $(cat "$WORKDIR/rx_bytes_before.txt") ))
