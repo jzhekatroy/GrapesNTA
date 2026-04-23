@@ -31,7 +31,7 @@ struct flow_key {
 	__u16 vlan_id;
 	__u8  proto;
 	__u8  ip_version;
-} __attribute__((packed));
+};
 
 struct flow_value {
 	__u64 packets;
@@ -51,7 +51,7 @@ struct flow_value {
 	__u16 pkt_len_max;
 	__u16 ip_frag_count;
 	__u8  _pad[2];
-} __attribute__((packed));
+};
 
 struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
@@ -217,7 +217,7 @@ static __always_inline void flow_update_common(struct flow_value *val, __u64 now
 {
 	__sync_fetch_and_add(&val->packets, 1);
 	__sync_fetch_and_add(&val->bytes, pkt_len);
-	val->last_seen = now;
+	val->last_seen_ns = now;
 	val->tcp_flags_or |= tcp_flags;
 	__sync_fetch_and_add(&val->tcp_syn_count, syn_cnt);
 	__sync_fetch_and_add(&val->tcp_rst_count, rst_cnt);
@@ -312,8 +312,8 @@ int xdp_flow_prog(struct xdp_md *ctx)
 
 			nv.packets = 1;
 			nv.bytes = pkt_len;
-			nv.first_seen = now;
-			nv.last_seen = now;
+			nv.first_seen_ns = now;
+			nv.last_seen_ns = now;
 			nv.ingress_ifindex = ctx->ingress_ifindex;
 			nv.rx_queue = ctx->rx_queue_index;
 			nv.tcp_syn_count = syn_cnt;
@@ -402,8 +402,8 @@ int xdp_flow_prog(struct xdp_md *ctx)
 
 			nv.packets = 1;
 			nv.bytes = pkt_len;
-			nv.first_seen = now;
-			nv.last_seen = now;
+			nv.first_seen_ns = now;
+			nv.last_seen_ns = now;
 			nv.ingress_ifindex = ctx->ingress_ifindex;
 			nv.rx_queue = ctx->rx_queue_index;
 			nv.tcp_syn_count = syn_cnt;
