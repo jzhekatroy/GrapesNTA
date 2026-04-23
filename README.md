@@ -7,7 +7,8 @@ Repository: [github.com/jzhekatroy/GrapesNTA](https://github.com/jzhekatroy/Grap
 **Build (Linux only):** requires `clang`, `libbpf-dev`, `linux-libc-dev` (or kernel headers), Go 1.23+.
 
 ```bash
-cd xdpflowd
+git clone https://github.com/jzhekatroy/GrapesNTA.git
+cd GrapesNTA
 go mod tidy   # first time: populate go.sum
 make clean && make
 # binary: ./bin/xdpflowd
