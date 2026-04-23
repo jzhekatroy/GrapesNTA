@@ -82,6 +82,30 @@ if ! ip link show "$IFACE" >/dev/null 2>&1; then
   exit 1
 fi
 
+# ---------- ОБЯЗАТЕЛЬНЫЙ baseline snapshot ----------
+# Гарантия отката: делаем полный слепок рабочей схемы (iptables, sysctl,
+# модули, порты, docker, ethtool, NIC counters). Если snapshot свежее
+# часа — переиспользуем; иначе создаём новый.
+BASELINE_DIR=""
+LATEST_LINK="/root/xdpflowd_baseline_latest"
+if [ -L "$LATEST_LINK" ] && [ -d "$LATEST_LINK" ]; then
+  age_s=$(( $(date +%s) - $(stat -c %Y "$LATEST_LINK" 2>/dev/null || echo 0) ))
+  if (( age_s < 3600 )); then
+    BASELINE_DIR=$(readlink -f "$LATEST_LINK")
+    echo "[$(date +%T)] reusing fresh baseline: $BASELINE_DIR (${age_s}s old)"
+  fi
+fi
+if [ -z "$BASELINE_DIR" ]; then
+  echo "[$(date +%T)] creating fresh baseline snapshot..."
+  "$REPO_ROOT/scripts/prod_snapshot.sh" "$IFACE" > "$WORKDIR/baseline_snapshot.log" 2>&1
+  BASELINE_DIR=$(readlink -f "$LATEST_LINK")
+  echo "[$(date +%T)] baseline: $BASELINE_DIR"
+fi
+if [ ! -d "$BASELINE_DIR" ]; then
+  echo "ERROR: failed to create baseline snapshot" >&2
+  exit 1
+fi
+
 # ---------- найти правило ----------
 # ipt_NETFLOW обычно сидит в таблице raw, но поищем во всех.
 RULE_TABLE=""
@@ -147,6 +171,7 @@ IFACE=$IFACE
 RULE_TABLE=$RULE_TABLE
 RULE_SPEC='$RULE_SPEC'
 IPT_BACKUP=$IPT_BACKUP
+BASELINE_DIR=$BASELINE_DIR
 EOF
 echo "[$(date +%T)] state saved: $STATE_FILE"
 
@@ -181,11 +206,30 @@ restore_rule() {
       echo "!! CRITICAL: failed to restore iptables rule automatically !!"
       echo "!! Manual recovery:                                         !!"
       echo "!!   iptables -t $RULE_TABLE -I PREROUTING 1 $RULE_SPEC"
-      echo "!! Or full restore:                                         !!"
+      echo "!! Or full restore from baseline snapshot:                  !!"
+      echo "!!   iptables-restore  < $BASELINE_DIR/10_iptables_save_counters.txt"
+      echo "!!   ip6tables-restore < $BASELINE_DIR/10_ip6tables_save_counters.txt"
+      echo "!! Or from script backup:                                   !!"
       echo "!!   iptables-restore < $IPT_BACKUP"
       echo "!!   ./scripts/prod_restore.sh $STATE_FILE                  !!"
       echo "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
     fi
+  fi
+}
+
+run_verify() {
+  echo ""
+  echo "[$(date +%T)] running verify against baseline $BASELINE_DIR ..."
+  if "$REPO_ROOT/scripts/prod_verify.sh" "$BASELINE_DIR" "$IFACE"; then
+    echo "[$(date +%T)] VERIFY: state matches baseline."
+  else
+    echo ""
+    echo "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+    echo "!! VERIFY FAILED — production state differs from baseline  !!"
+    echo "!! Review above, and if needed run:                        !!"
+    echo "!!   iptables-restore  < $BASELINE_DIR/10_iptables_save_counters.txt"
+    echo "!!   ip6tables-restore < $BASELINE_DIR/10_ip6tables_save_counters.txt"
+    echo "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
   fi
 }
 
@@ -202,6 +246,10 @@ cleanup() {
     kill -KILL "$XDP_PID" 2>/dev/null || true
   fi
   restore_rule
+  # verify только если мы реально заходили в swap
+  if [ -n "${BASELINE_DIR:-}" ] && [ -d "$BASELINE_DIR" ]; then
+    run_verify || true
+  fi
 }
 # SIGHUP — обрыв SSH. Обязательно ловим.
 trap cleanup EXIT INT TERM HUP
