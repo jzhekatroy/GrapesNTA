@@ -52,10 +52,18 @@ BPFOBJ="$(pwd)/bpf/xdp_flow.o"
 
 # --- Start collectors ---------------------------------------------------------
 echo "[start] nfcapd on 127.0.0.1:$NFPORT → $NFDIR"
-nfcapd -b 127.0.0.1 -p "$NFPORT" -l "$NFDIR" -I xdp -D \
-  -P "$WORKDIR/nfcapd.pid" \
-  -t 60 >> "$LOG" 2>&1 &
+# Run foreground + background-shell so we keep the PID and get all output.
+# -t 60: rotation interval; SIGTERM will cause nfcapd to flush the current file.
+nfcapd -b 127.0.0.1 -p "$NFPORT" -l "$NFDIR" -I xdp -t 60 \
+  >> "$WORKDIR/nfcapd.log" 2>&1 &
+NFCAPD_PID=$!
 sleep 1
+if ! kill -0 "$NFCAPD_PID" 2>/dev/null; then
+  echo "  ERROR: nfcapd failed to start — tail of $WORKDIR/nfcapd.log:"
+  tail -20 "$WORKDIR/nfcapd.log" | sed 's/^/    /'
+  exit 1
+fi
+echo "  nfcapd pid=$NFCAPD_PID"
 
 # NOTE: iperf3 server must already be running on $REMOTE_HOST (port 5201).
 # We use -R on the client so the server pushes traffic TO this VM, which is
@@ -105,10 +113,14 @@ wait "$XDP_PID" 2>/dev/null || true
 # Post-shutdown RX counters
 rx1=( $(read_rx) )
 
-# --- Stop nfcapd (signal rotates the active file so it becomes readable) ------
-if [[ -f "$WORKDIR/nfcapd.pid" ]]; then
-  kill "$(cat "$WORKDIR/nfcapd.pid")" 2>/dev/null || true
-  sleep 1
+# --- Stop nfcapd (SIGTERM triggers flush of the current buffer to disk) -------
+if kill -0 "$NFCAPD_PID" 2>/dev/null; then
+  kill -TERM "$NFCAPD_PID" 2>/dev/null || true
+  # Give nfcapd up to 5 s to flush and exit cleanly
+  for _ in 1 2 3 4 5; do
+    kill -0 "$NFCAPD_PID" 2>/dev/null || break
+    sleep 1
+  done
 fi
 
 # --- Analysis ----------------------------------------------------------------
@@ -126,40 +138,44 @@ echo
 
 echo "--- xdpflowd final JSON snapshot ---"
 # Last line of NDJSON is the final flush (flushFinal())
-tail -1 "$JSON" | python3 -c '
+if [[ -s "$JSON" ]]; then
+  tail -1 "$JSON" | python3 -c '
 import json, sys
 d = json.loads(sys.stdin.read())
-s, a = d["stats"], d["aggregate"]
-print(f"  total_packets:    {s[\"total_packets\"]}")
-print(f"  parse_errors:     {s[\"parse_errors\"]}")
-print(f"  map_full:         {s[\"map_full\"]}")
-print(f"  non_ip_pass:      {s[\"non_ip_pass\"]}")
-print(f"  sum_flow_packets: {a[\"sum_flow_packets\"]}")
-print(f"  sum_flow_bytes:   {a[\"sum_flow_bytes\"]}")
-print(f"  flows_in_map:     {a[\"flows_in_map\"]}")
+s = d["stats"]
+a = d["aggregate"]
+print("  total_packets:    %d" % s["total_packets"])
+print("  parse_errors:     %d" % s["parse_errors"])
+print("  map_full:         %d" % s["map_full"])
+print("  non_ip_pass:      %d" % s["non_ip_pass"])
+print("  sum_flow_packets: %d" % a["sum_flow_packets"])
+print("  sum_flow_bytes:   %d" % a["sum_flow_bytes"])
+print("  flows_in_map:     %d" % a["flows_in_map"])
 '
+else
+  echo "  (no NDJSON snapshot produced — check $LOG)"
+fi
+echo
+
+echo "--- nfcapd status ---"
+echo "  directory listing:"
+ls -la "$NFDIR" 2>/dev/null | sed 's/^/    /'
+echo "  nfcapd.log tail:"
+tail -10 "$WORKDIR/nfcapd.log" 2>/dev/null | sed 's/^/    /'
 echo
 
 echo "--- nfcapd-collected NetFlow v9 flows (top-20 by bytes) ---"
 # Any file in $NFDIR starts with "nfcapd." (current or rotated); -R reads all.
 if ls "$NFDIR"/nfcapd.* >/dev/null 2>&1; then
-  nfdump -R "$NFDIR" -o 'fmt:%ts %td %pr %sap -> %dap %pkt %byt %fl' -c 20 2>&1 | head -30
+  nfdump -R "$NFDIR" -o long -c 20 2>&1 | head -30
 else
-  echo "  (no nfcapd files produced — check $LOG)"
+  echo "  (no nfcapd files produced)"
 fi
 echo
 
-echo "--- nfcapd aggregate sums (all collected records) ---"
+echo "--- nfcapd grand totals (all records) ---"
 if ls "$NFDIR"/nfcapd.* >/dev/null 2>&1; then
-  nfdump -R "$NFDIR" -q -a -A proto -o 'fmt:%pr sum_pkts=%pkt sum_bytes=%byt flows=%fl' 2>&1 | head -10
-  echo
-  echo "  Grand totals:"
-  nfdump -R "$NFDIR" -s any/bytes -q 2>&1 | grep -E '^Summary:' -A 2 || true
-  # A portable total: nfdump -R ... -o csv and awk
-  echo
-  echo "  Totals via CSV parse:"
-  nfdump -R "$NFDIR" -q -o csv 2>/dev/null | \
-    awk -F, 'NR>1 && NF>8 {p+=$12; b+=$13} END {printf "    records: %d  sum_pkts: %d  sum_bytes: %d\n", NR-1, p, b}'
+  nfdump -R "$NFDIR" -n 0 2>&1 | tail -15
 else
   echo "  (no nfcapd files)"
 fi
