@@ -95,13 +95,16 @@ cat /sys/class/net/"$IFACE"/statistics/rx_packets > "$WORKDIR/rx_packets_before.
 date +%s > "$WORKDIR/t_start.txt"
 
 # ---------- запуск nfcapd ----------
+# nfdump 1.6 (Debian 11) использует -l <dir>; 1.7+ — -w <dir>. Синтаксис
+# -l воспринимается обеими версиями (в 1.7 сохранён как legacy). Используем -l.
 echo "[$(date +%T)] starting nfcapd on 127.0.0.1:$ALT_PORT -> $NFCAPD_DIR"
-nfcapd -b 127.0.0.1 -p "$ALT_PORT" -w "$NFCAPD_DIR" -I xdp -t 60 -e \
+nfcapd -b 127.0.0.1 -p "$ALT_PORT" -l "$NFCAPD_DIR" -I xdp -t 60 -e \
   > "$LOG_NFCAPD" 2>&1 &
 NFCAPD_PID=$!
 sleep 2
 if ! kill -0 $NFCAPD_PID 2>/dev/null; then
   echo "ERROR: nfcapd failed to start, see $LOG_NFCAPD"
+  cat "$LOG_NFCAPD" | sed 's/^/    /'
   exit 1
 fi
 
