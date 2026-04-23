@@ -82,6 +82,32 @@ struct {
 	__type(value, __u64);
 } stats SEC(".maps");
 
+/* Small per-packet accumulator for TCP parsing. Passed by pointer to keep
+ * helper function argument count ≤ 5 — older clang (11 on Debian 11) may
+ * refuse to inline __always_inline helpers and then the BPF backend rejects
+ * calls with >5 args (5-register ABI). Packing these into a struct gives us
+ * a stable 5-arg signature regardless of inliner decisions.
+ */
+struct tcp_acc {
+	__u8  flags;
+	__u32 syn_cnt;
+	__u32 rst_cnt;
+	__u32 fin_cnt;
+};
+
+/* Per-packet context: aggregates everything flow_update_common() needs so we
+ * can keep that helper's signature to 2 args (val, pi). Same rationale as
+ * tcp_acc — keeps BPF ABI happy on old clang.
+ */
+struct pkt_info {
+	struct tcp_acc acc;
+	__u64 now;
+	__u32 pkt_len;
+	__u16 wire_len;
+	__u8  ttl;
+	__u8  frag_inc;
+};
+
 static __always_inline void bump_stat(__u32 idx)
 {
 	__u64 *c = bpf_map_lookup_elem(&stats, &idx);
@@ -122,9 +148,10 @@ static __always_inline void merge_pkt_len(struct flow_value *v, __u16 plen)
 		v->pkt_len_max = plen;
 }
 
-static __always_inline int parse_l4_tcpudp_icmp(struct flow_key *key, __u8 *tcp_flags,
-						  __u32 *syn_cnt, __u32 *rst_cnt, __u32 *fin_cnt,
-						  void *l4_start, void *data_end, __u8 proto)
+static __always_inline int parse_l4_tcpudp_icmp(struct flow_key *key,
+						struct tcp_acc *acc,
+						void *l4_start, void *data_end,
+						__u8 proto)
 {
 	void *l4 = l4_start;
 
@@ -140,23 +167,23 @@ static __always_inline int parse_l4_tcpudp_icmp(struct flow_key *key, __u8 *tcp_
 		key->src_port = tcp->source;
 		key->dst_port = tcp->dest;
 		if (tcp->fin) {
-			*tcp_flags |= 0x01;
-			__sync_fetch_and_add(fin_cnt, 1);
+			acc->flags |= 0x01;
+			acc->fin_cnt++;
 		}
 		if (tcp->syn) {
-			*tcp_flags |= 0x02;
-			__sync_fetch_and_add(syn_cnt, 1);
+			acc->flags |= 0x02;
+			acc->syn_cnt++;
 		}
 		if (tcp->rst) {
-			*tcp_flags |= 0x04;
-			__sync_fetch_and_add(rst_cnt, 1);
+			acc->flags |= 0x04;
+			acc->rst_cnt++;
 		}
 		if (tcp->psh)
-			*tcp_flags |= 0x08;
+			acc->flags |= 0x08;
 		if (tcp->ack)
-			*tcp_flags |= 0x10;
+			acc->flags |= 0x10;
 		if (tcp->urg)
-			*tcp_flags |= 0x20;
+			acc->flags |= 0x20;
 	} else if (proto == IPPROTO_UDP) {
 		struct udphdr *udp = l4;
 
@@ -226,20 +253,22 @@ static __always_inline int skip_ipv6_exthdrs(void **nexthdr_ptr, __u8 *proto,
 	return 0;
 }
 
-static __always_inline void flow_update_common(struct flow_value *val, __u64 now, __u32 pkt_len,
-					       __u8 tcp_flags, __u32 syn_cnt, __u32 rst_cnt,
-					       __u32 fin_cnt, __u8 ttl, __u16 wire_len, int frag_inc)
+static __always_inline void flow_update_common(struct flow_value *val,
+					       const struct pkt_info *pi)
 {
 	__sync_fetch_and_add(&val->packets, 1);
-	__sync_fetch_and_add(&val->bytes, pkt_len);
-	val->last_seen_ns = now;
-	val->tcp_flags_or |= tcp_flags;
-	__sync_fetch_and_add(&val->tcp_syn_count, syn_cnt);
-	__sync_fetch_and_add(&val->tcp_rst_count, rst_cnt);
-	__sync_fetch_and_add(&val->tcp_fin_count, fin_cnt);
-	merge_ttl(val, ttl);
-	merge_pkt_len(val, wire_len);
-	if (frag_inc)
+	__sync_fetch_and_add(&val->bytes, pi->pkt_len);
+	val->last_seen_ns = pi->now;
+	val->tcp_flags_or |= pi->acc.flags;
+	if (pi->acc.syn_cnt)
+		__sync_fetch_and_add(&val->tcp_syn_count, pi->acc.syn_cnt);
+	if (pi->acc.rst_cnt)
+		__sync_fetch_and_add(&val->tcp_rst_count, pi->acc.rst_cnt);
+	if (pi->acc.fin_cnt)
+		__sync_fetch_and_add(&val->tcp_fin_count, pi->acc.fin_cnt);
+	merge_ttl(val, pi->ttl);
+	merge_pkt_len(val, pi->wire_len);
+	if (pi->frag_inc)
 		__sync_fetch_and_add(&val->ip_frag_count, 1);
 }
 
@@ -306,49 +335,47 @@ int xdp_flow_prog(struct xdp_md *ctx)
 		key.vlan_id = vlan_id;
 		key.ip_version = 4;
 
-		__u8 tcp_flags = 0;
-		__u32 syn_cnt = 0, rst_cnt = 0, fin_cnt = 0;
+		struct pkt_info pi = {};
 
-		if (parse_l4_tcpudp_icmp(&key, &tcp_flags, &syn_cnt, &rst_cnt, &fin_cnt,
-					 l4, data_end, ip->protocol) < 0)
+		if (parse_l4_tcpudp_icmp(&key, &pi.acc, l4, data_end, ip->protocol) < 0)
 			return XDP_PASS;
 
-		__u64 now = bpf_ktime_get_ns();
-		__u16 wire_len = (__u16)(pkt_len > 0xFFFF ? 0xFFFF : pkt_len);
-		__u8 ttl = ip->ttl;
-		int frag_inc = is_ipv4_fragment(ip);
+		pi.now = bpf_ktime_get_ns();
+		pi.pkt_len = pkt_len;
+		pi.wire_len = (__u16)(pkt_len > 0xFFFF ? 0xFFFF : pkt_len);
+		pi.ttl = ip->ttl;
+		pi.frag_inc = is_ipv4_fragment(ip) ? 1 : 0;
+
 		struct flow_value *val = bpf_map_lookup_elem(&flows, &key);
 
 		if (val) {
-			flow_update_common(val, now, pkt_len, tcp_flags, syn_cnt, rst_cnt,
-					   fin_cnt, ttl, wire_len, frag_inc);
+			flow_update_common(val, &pi);
 		} else {
 			struct flow_value nv = {};
 
 			nv.packets = 1;
-			nv.bytes = pkt_len;
-			nv.first_seen_ns = now;
-			nv.last_seen_ns = now;
+			nv.bytes = pi.pkt_len;
+			nv.first_seen_ns = pi.now;
+			nv.last_seen_ns = pi.now;
 			nv.ingress_ifindex = ctx->ingress_ifindex;
 			nv.rx_queue = ctx->rx_queue_index;
-			nv.tcp_syn_count = syn_cnt;
-			nv.tcp_rst_count = rst_cnt;
-			nv.tcp_fin_count = fin_cnt;
-			nv.tcp_flags_or = tcp_flags;
+			nv.tcp_syn_count = pi.acc.syn_cnt;
+			nv.tcp_rst_count = pi.acc.rst_cnt;
+			nv.tcp_fin_count = pi.acc.fin_cnt;
+			nv.tcp_flags_or = pi.acc.flags;
 			nv.tos = ip->tos;
-			nv.ttl_min = ttl;
-			nv.ttl_max = ttl;
-			nv.pkt_len_min = wire_len;
-			nv.pkt_len_max = wire_len;
-			nv.ip_frag_count = frag_inc ? 1 : 0;
+			nv.ttl_min = pi.ttl;
+			nv.ttl_max = pi.ttl;
+			nv.pkt_len_min = pi.wire_len;
+			nv.pkt_len_max = pi.wire_len;
+			nv.ip_frag_count = pi.frag_inc;
 
 			long err = bpf_map_update_elem(&flows, &key, &nv, BPF_NOEXIST);
 
 			if (err == -17) {
 				val = bpf_map_lookup_elem(&flows, &key);
 				if (val)
-					flow_update_common(val, now, pkt_len, tcp_flags, syn_cnt,
-							   rst_cnt, fin_cnt, ttl, wire_len, frag_inc);
+					flow_update_common(val, &pi);
 			} else if (err < 0) {
 				bump_stat(2);
 			}
@@ -385,8 +412,7 @@ int xdp_flow_prog(struct xdp_md *ctx)
 			return XDP_PASS;
 		}
 
-		__u8 tcp_flags = 0;
-		__u32 syn_cnt = 0, rst_cnt = 0, fin_cnt = 0;
+		struct pkt_info pi = {};
 
 		if (nxt == IPPROTO_ICMPV6) {
 			struct icmp6hdr *ic = l4;
@@ -398,47 +424,46 @@ int xdp_flow_prog(struct xdp_md *ctx)
 			key.proto = IPPROTO_ICMPV6;
 			key.src_port = bpf_htons((__u16)ic->icmp6_type << 8 | ic->icmp6_code);
 			key.dst_port = 0;
-		} else if (parse_l4_tcpudp_icmp(&key, &tcp_flags, &syn_cnt, &rst_cnt, &fin_cnt,
-						l4, data_end, nxt) < 0) {
+		} else if (parse_l4_tcpudp_icmp(&key, &pi.acc, l4, data_end, nxt) < 0) {
 			return XDP_PASS;
 		}
 
-		__u64 now = bpf_ktime_get_ns();
-		__u16 wire_len = (__u16)(pkt_len > 0xFFFF ? 0xFFFF : pkt_len);
-		__u8 ttl = ip6->hop_limit;
-		int frag_inc = saw_frag;
+		pi.now = bpf_ktime_get_ns();
+		pi.pkt_len = pkt_len;
+		pi.wire_len = (__u16)(pkt_len > 0xFFFF ? 0xFFFF : pkt_len);
+		pi.ttl = ip6->hop_limit;
+		pi.frag_inc = saw_frag ? 1 : 0;
+
 		struct flow_value *val = bpf_map_lookup_elem(&flows, &key);
 
 		if (val) {
-			flow_update_common(val, now, pkt_len, tcp_flags, syn_cnt, rst_cnt, fin_cnt,
-					   ttl, wire_len, frag_inc);
+			flow_update_common(val, &pi);
 		} else {
 			struct flow_value nv = {};
 
 			nv.packets = 1;
-			nv.bytes = pkt_len;
-			nv.first_seen_ns = now;
-			nv.last_seen_ns = now;
+			nv.bytes = pi.pkt_len;
+			nv.first_seen_ns = pi.now;
+			nv.last_seen_ns = pi.now;
 			nv.ingress_ifindex = ctx->ingress_ifindex;
 			nv.rx_queue = ctx->rx_queue_index;
-			nv.tcp_syn_count = syn_cnt;
-			nv.tcp_rst_count = rst_cnt;
-			nv.tcp_fin_count = fin_cnt;
-			nv.tcp_flags_or = tcp_flags;
+			nv.tcp_syn_count = pi.acc.syn_cnt;
+			nv.tcp_rst_count = pi.acc.rst_cnt;
+			nv.tcp_fin_count = pi.acc.fin_cnt;
+			nv.tcp_flags_or = pi.acc.flags;
 			nv.tos = 0;
-			nv.ttl_min = ttl;
-			nv.ttl_max = ttl;
-			nv.pkt_len_min = wire_len;
-			nv.pkt_len_max = wire_len;
-			nv.ip_frag_count = frag_inc ? 1 : 0;
+			nv.ttl_min = pi.ttl;
+			nv.ttl_max = pi.ttl;
+			nv.pkt_len_min = pi.wire_len;
+			nv.pkt_len_max = pi.wire_len;
+			nv.ip_frag_count = pi.frag_inc;
 
 			long err = bpf_map_update_elem(&flows, &key, &nv, BPF_NOEXIST);
 
 			if (err == -17) {
 				val = bpf_map_lookup_elem(&flows, &key);
 				if (val)
-					flow_update_common(val, now, pkt_len, tcp_flags, syn_cnt,
-							   rst_cnt, fin_cnt, ttl, wire_len, frag_inc);
+					flow_update_common(val, &pi);
 			} else if (err < 0) {
 				bump_stat(2);
 			}
