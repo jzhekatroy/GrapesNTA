@@ -76,6 +76,12 @@ echo "[$(date +%T)] iface=$IFACE alt_port=$ALT_PORT duration=${DURATION}s"
 
 # ---------- сборка ----------
 echo "[$(date +%T)] building xdpflowd (FLOWS_MAP_SIZE=4000000)..."
+# если go.sum нет или go.mod требует обновления — мягко делаем tidy
+: "${GO:=go}"
+if [ ! -f go.sum ]; then
+  echo "[$(date +%T)]   go.sum missing, running 'go mod tidy'..."
+  "$GO" mod tidy
+fi
 make -s >/dev/null
 [ -x ./bin/xdpflowd ] || { echo "build failed"; exit 1; }
 [ -f ./bpf/xdp_flow.o ] || { echo "bpf object missing"; exit 1; }

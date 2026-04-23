@@ -15,9 +15,12 @@ BPF_CFLAGS := -O2 -g -Wall -target bpf -I/usr/include/x86_64-linux-gnu \
 
 BPF_O := bpf/xdp_flow.o
 
-.PHONY: all bpf build clean run
+.PHONY: all bpf build clean run tidy
 
 all: build
+
+tidy:
+	$(GO) mod tidy
 
 $(BPF_O): bpf/xdp_flow.c
 	@mkdir -p bpf

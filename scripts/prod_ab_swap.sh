@@ -177,6 +177,11 @@ echo "[$(date +%T)] state saved: $STATE_FILE"
 
 # ---------- сборка ----------
 echo "[$(date +%T)] building xdpflowd..."
+: "${GO:=go}"
+if [ ! -f go.sum ]; then
+  echo "[$(date +%T)]   go.sum missing, running 'go mod tidy'..."
+  "$GO" mod tidy
+fi
 make -s >/dev/null
 [ -x ./bin/xdpflowd ] || { echo "build failed"; exit 1; }
 
