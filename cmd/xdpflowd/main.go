@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/signal"
 	"sort"
+	"strings"
 	"syscall"
 	"time"
 
@@ -286,6 +287,14 @@ func main() {
 	jsonInterval := flag.Duration("json-interval", 0, "JSON dump interval (defaults to -interval)")
 	jsonFlows := flag.Bool("json-include-flows", false, "include per-flow array in JSON (large)")
 	once := flag.Bool("once", false, "attach, wait one -interval, write one JSON line if -json-out set, print top once, then exit")
+
+	// NetFlow v9 export flags
+	nfDsts := flag.String("nf-dst", "", "NetFlow v9 destinations, comma-separated host:port (e.g. 127.0.0.1:2055,127.0.0.1:9999)")
+	nfActive := flag.Duration("nf-active", 120*time.Second, "NetFlow active timeout (export flows older than this)")
+	nfIdle := flag.Duration("nf-idle", 15*time.Second, "NetFlow idle timeout (export flows with no packets for this long)")
+	nfTemplateInterval := flag.Duration("nf-template-interval", 60*time.Second, "NetFlow template re-send interval")
+	nfScan := flag.Duration("nf-scan", 1*time.Second, "how often to walk the flows map for NetFlow export")
+	nfSourceID := flag.Int("nf-source-id", 1, "NetFlow v9 source_id field (exporter observation domain)")
 	flag.Parse()
 
 	log := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
@@ -342,6 +351,28 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
+	var nfExp *nfExporter
+	if *nfDsts != "" {
+		dests := splitCSV(*nfDsts)
+		var err error
+		nfExp, err = newNFExporter(log, dests, uint32(*nfSourceID),
+			*nfActive, *nfIdle, *nfTemplateInterval, *nfScan)
+		if err != nil {
+			log.Error("netflow init", "err", err)
+			os.Exit(1)
+		}
+		defer nfExp.Close()
+		log.Info("netflow v9 export enabled",
+			"dsts", dests,
+			"active_timeout", *nfActive,
+			"idle_timeout", *nfIdle,
+			"template_interval", *nfTemplateInterval,
+			"scan_interval", *nfScan,
+			"source_id", *nfSourceID,
+		)
+		nfExp.sendTemplate()
+	}
+
 	if *once {
 		time.Sleep(*interval)
 		if *jsonOut != "" {
@@ -365,6 +396,12 @@ func main() {
 		defer jsonTicker.Stop()
 	}
 
+	var nfTicker *time.Ticker
+	if nfExp != nil {
+		nfTicker = time.NewTicker(*nfScan)
+		defer nfTicker.Stop()
+	}
+
 	// flushFinal writes a last NDJSON snapshot right before exiting — this closes
 	// the timing gap with external counters (e.g. /sys/class/net/*/statistics/*)
 	// so the accuracy test can compare deltas taken at the same instant.
@@ -378,30 +415,51 @@ func main() {
 		}
 	}
 
+	// Build channels that may be nil-safe in select (nil channel blocks forever).
+	var jsonC, nfC <-chan time.Time
+	if jsonTicker != nil {
+		jsonC = jsonTicker.C
+	}
+	if nfTicker != nil {
+		nfC = nfTicker.C
+	}
+
 	for {
-		if jsonTicker != nil {
-			select {
-			case <-ctx.Done():
-				flushFinal()
-				log.Info("shutdown")
-				return
-			case <-ticker.C:
-				dumpTop(log, objs, *topN)
-			case <-jsonTicker.C:
-				snap := buildSnapshot(objs, *jsonFlows)
-				if err := writeJSONLine(*jsonOut, snap); err != nil {
-					log.Error("json-out", "err", err)
-				}
+		select {
+		case <-ctx.Done():
+			flushFinal()
+			if nfExp != nil {
+				// Final scan: force-export whatever is still in the map so we
+				// don't lose trailing flows when shutting down for A/B swap.
+				_, _ = nfExp.flushAll(objs)
+				nfExp.logMetrics()
 			}
-		} else {
-			select {
-			case <-ctx.Done():
-				flushFinal()
-				log.Info("shutdown")
-				return
-			case <-ticker.C:
-				dumpTop(log, objs, *topN)
+			log.Info("shutdown")
+			return
+		case <-ticker.C:
+			dumpTop(log, objs, *topN)
+			if nfExp != nil {
+				nfExp.logMetrics()
 			}
+		case <-jsonC:
+			snap := buildSnapshot(objs, *jsonFlows)
+			if err := writeJSONLine(*jsonOut, snap); err != nil {
+				log.Error("json-out", "err", err)
+			}
+		case <-nfC:
+			nfExp.scanAndExport(objs)
 		}
 	}
+}
+
+// splitCSV trims and splits "a,b,c" into non-empty fields.
+func splitCSV(s string) []string {
+	var out []string
+	for _, f := range strings.Split(s, ",") {
+		f = strings.TrimSpace(f)
+		if f != "" {
+			out = append(out, f)
+		}
+	}
+	return out
 }

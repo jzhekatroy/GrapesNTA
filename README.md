@@ -34,6 +34,32 @@ sudo ./bin/xdpflowd -iface ens18 -mode native -bpf ./bpf/xdp_flow.o
 | `-json-include-flows` | Include full `flows` array (large) |
 | `-once` | Sleep one `-interval`, optional single JSON line, print top, exit |
 | `-top` | Number of lines in top flows |
+| `-nf-dst` | NetFlow v9 destinations, comma-separated `host:port` (e.g. `127.0.0.1:2055,127.0.0.1:9999`). Empty = disabled. |
+| `-nf-active` | Active timeout — export flows older than this (default `120s`) |
+| `-nf-idle` | Idle timeout — export flows with no packets for this long (default `15s`) |
+| `-nf-template-interval` | Re-send NFv9 template (default `60s`) |
+| `-nf-scan` | How often to walk the map for export (default `1s`) |
+| `-nf-source-id` | NFv9 `source_id` (observation domain, default `1`) |
+
+### NetFlow v9 export
+
+Send flows to `nfcapd` / `goflow2` / any NFv9 collector:
+
+```bash
+sudo ./bin/xdpflowd -iface ens18 -mode native -bpf ./bpf/xdp_flow.o \
+     -nf-dst 127.0.0.1:2055,127.0.0.1:9996 \
+     -nf-active 120s -nf-idle 15s -nf-template-interval 60s
+```
+
+Emitted fields (templates 256 = IPv4, 257 = IPv6, both in one Template FlowSet):
+
+`IN_BYTES` (8), `IN_PKTS` (8), `PROTOCOL`, `SRC_TOS`, `TCP_FLAGS`, `L4_SRC_PORT`, `IPV4_SRC_ADDR` / `IPV6_SRC_ADDR`, `INPUT_SNMP` (= `ingress_ifindex`), `L4_DST_PORT`, `IPV4_DST_ADDR` / `IPV6_DST_ADDR`, `FIRST_SWITCHED`, `LAST_SWITCHED`, `MIN_TTL`, `MAX_TTL`, `MIN_PKT_LNGTH`, `MAX_PKT_LNGTH`, `SRC_VLAN`, `IP_PROTOCOL_VERSION`.
+
+Test end-to-end with [`scripts/netflow_test.sh`](scripts/netflow_test.sh): runs xdpflowd → `nfcapd` → compares xdpflowd JSON totals vs `nfdump` aggregate.
+
+```bash
+sudo ./scripts/netflow_test.sh ens18 192.168.64.1
+```
 
 ### Accuracy / baseline (strict thresholds)
 
