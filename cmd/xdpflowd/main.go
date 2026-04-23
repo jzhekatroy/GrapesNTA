@@ -48,8 +48,7 @@ type FlowValue struct {
 	TTLMax        uint8
 	PktLenMin     uint16
 	PktLenMax     uint16
-	IPFragCount   uint16
-	_             [2]byte
+	IPFragCount   uint32
 }
 
 type jsonSnapshot struct {
@@ -88,7 +87,7 @@ type jsonFlow struct {
 	TTLMax      uint8  `json:"ttl_max"`
 	PktLenMin   uint16 `json:"pkt_len_min"`
 	PktLenMax   uint16 `json:"pkt_len_max"`
-	IPFragCount uint16 `json:"ip_frag_count"`
+	IPFragCount uint32 `json:"ip_frag_count"`
 }
 
 func readStat(objs *loader.Objects, idx uint32) uint64 {

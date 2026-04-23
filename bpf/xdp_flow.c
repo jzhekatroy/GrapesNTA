@@ -49,8 +49,7 @@ struct flow_value {
 	__u8  ttl_max;
 	__u16 pkt_len_min;
 	__u16 pkt_len_max;
-	__u16 ip_frag_count;
-	__u8  _pad[2];
+	__u32 ip_frag_count;
 };
 
 struct {
