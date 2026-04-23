@@ -45,12 +45,14 @@ ethtool_rx() {
 }
 
 read_json_last() {
+  # Returns 6 numbers: total_packets parse_errors map_full non_ip_pass sum_flow_packets sum_flow_bytes
   local f="$1"
-  [[ -f "$f" ]] || { echo "0 0 0 0 0"; return; }
+  [[ -f "$f" ]] || { echo "0 0 0 0 0 0"; return; }
   tail -n 1 "$f" | jq -r '
     [.stats.total_packets, .stats.parse_errors, .stats.map_full,
+     (.stats.non_ip_pass // 0),
      .aggregate.sum_flow_packets, .aggregate.sum_flow_bytes] | @tsv
-  ' 2>/dev/null || echo "0 0 0 0 0"
+  ' 2>/dev/null || echo "0 0 0 0 0 0"
 }
 
 save_gro_state() {
@@ -87,28 +89,51 @@ start_xdpflowd_bg() {
 }
 
 stop_xdpflowd() {
+  # Send SIGTERM so xdpflowd writes its final NDJSON snapshot before exit.
   if [[ -f /tmp/xdpflowd_accuracy.pid ]]; then
-    kill "$(cat /tmp/xdpflowd_accuracy.pid)" 2>/dev/null || true
+    local pid
+    pid="$(cat /tmp/xdpflowd_accuracy.pid)"
+    kill -TERM "$pid" 2>/dev/null || true
+    # Wait up to 3s for graceful exit (flushFinal in main.go)
+    for _ in 1 2 3 4 5 6; do
+      kill -0 "$pid" 2>/dev/null || break
+      sleep 0.5
+    done
+    kill -KILL "$pid" 2>/dev/null || true
+    rm -f /tmp/xdpflowd_accuracy.pid
   fi
-  kill_xdpflowd
 }
 
 compare_deltas() {
   local label="$1"
-  local r0_pkt="$2" r0_byt="$3" r1_pkt="$4" r1_byt="$5"
-  local s0_pkt="$6" s0_flow_pkt="$7" s0_flow_byt="$8"
-  local s1_pkt="$9" s1_flow_pkt="${10}" s1_flow_byt="${11}"
+  local r0_pkt="$2"        r0_byt="$3"        r1_pkt="$4"        r1_byt="$5"
+  local s0_tp="$6"  s0_pe="$7"  s0_mf="$8"  s0_nip="$9"
+  local s0_fp="${10}" s0_fb="${11}"
+  local s1_tp="${12}" s1_pe="${13}" s1_mf="${14}" s1_nip="${15}"
+  local s1_fp="${16}" s1_fb="${17}"
 
   local drx_pkt=$((r1_pkt - r0_pkt))
   local drx_byt=$((r1_byt - r0_byt))
-  local dxdp_pkt=$((s1_pkt - s0_pkt))
-  local dflow_pkt=$((s1_flow_pkt - s0_flow_pkt))
-  local dflow_byt=$((s1_flow_byt - s0_flow_byt))
+  local dxdp_tp=$((s1_tp - s0_tp))
+  local dxdp_pe=$((s1_pe - s0_pe))
+  local dxdp_mf=$((s1_mf - s0_mf))
+  local dxdp_nip=$((s1_nip - s0_nip))
+  local dflow_pkt=$((s1_fp - s0_fp))
+  local dflow_byt=$((s1_fb - s0_fb))
+  local identity=$((dflow_pkt + dxdp_pe + dxdp_mf + dxdp_nip))
 
   echo "=== $label ==="
-  echo "ethtool delta:  rx_packets=$drx_pkt rx_bytes=$drx_byt"
-  echo "xdp stats delta total_packets=$dxdp_pkt"
-  echo "flows aggregate delta sum_flow_packets=$dflow_pkt sum_flow_bytes=$dflow_byt"
+  echo "sysfs delta:   rx_packets=$drx_pkt rx_bytes=$drx_byt"
+  echo "XDP  delta:    total=$dxdp_tp parse_errors=$dxdp_pe map_full=$dxdp_mf non_ip=$dxdp_nip"
+  echo "flow delta:    pkts=$dflow_pkt bytes=$dflow_byt"
+  echo "identity:      flow + parse_err + map_full + non_ip = $identity (must equal total=$dxdp_tp)"
+
+  if [[ "$identity" -ne "$dxdp_tp" ]]; then
+    echo "FAIL: internal identity broken (difference = $((dxdp_tp - identity)) packets)"
+    return 1
+  else
+    echo "PASS: internal identity holds"
+  fi
 
   if [[ "$drx_pkt" -le 0 ]]; then
     echo "WARN: no RX packet delta on interface (wrong iface or idle)."
@@ -116,22 +141,23 @@ compare_deltas() {
   fi
 
   local pct_xdp pct_flow_pkts pct_flow_byts
-  pct_xdp="$(awk -v a="$dxdp_pkt" -v b="$drx_pkt" 'BEGIN{printf "%.6f", (100.0*a/b)}')"
-  pct_flow_pkts="$(awk -v a="$dflow_pkt" -v b="$drx_pkt" 'BEGIN{printf "%.6f", (100.0*a/b)}')"
-  pct_flow_byts="$(awk -v a="$dflow_byt" -v b="$drx_byt" 'BEGIN{if(b<=0)print "0"; else printf "%.6f", (100.0*a/b)}')"
+  pct_xdp="$(awk        -v a="$dxdp_tp"   -v b="$drx_pkt" 'BEGIN{printf "%.6f", (100.0*a/b)}')"
+  pct_flow_pkts="$(awk  -v a="$dflow_pkt" -v b="$drx_pkt" 'BEGIN{printf "%.6f", (100.0*a/b)}')"
+  pct_flow_byts="$(awk  -v a="$dflow_byt" -v b="$drx_byt" 'BEGIN{if(b<=0)print "0"; else printf "%.6f", (100.0*a/b)}')"
 
-  echo "Ratio XDP_stats_pkts vs ethtool_rx_pkts = ${pct_xdp}% (need >= ${THRESH_PKTS}%)"
-  echo "Ratio sum_flow_pkts vs ethtool_rx_pkts = ${pct_flow_pkts}%"
-  echo "Ratio sum_flow_bytes vs ethtool_rx_bytes = ${pct_flow_byts}% (need >= ${THRESH_BYTES}%)"
+  echo "Ratio XDP_total  vs sysfs_rx_pkts  = ${pct_xdp}% (need >= ${THRESH_PKTS}%)"
+  echo "Ratio flow_pkts  vs sysfs_rx_pkts  = ${pct_flow_pkts}% (informational; = XDP - parse_err - map_full - non_ip)"
+  echo "Ratio flow_bytes vs sysfs_rx_bytes = ${pct_flow_byts}% (need >= ${THRESH_BYTES}%)"
 
+  local rc=0
   if ! awk -v p="$pct_xdp" -v t="$THRESH_PKTS" 'BEGIN{exit (p+0 >= t+0) ? 0 : 1}'; then
     echo "FAIL: XDP packet ratio below ${THRESH_PKTS}%"
-    return 1
+    rc=1
   fi
   if ! awk -v p="$pct_flow_byts" -v t="$THRESH_BYTES" 'BEGIN{if (t+0 <= 0) exit 0; exit (p+0 >= t+0) ? 0 : 1}'; then
-    echo "WARN: flow bytes ratio below ${THRESH_BYTES}% (non-IP traffic, GRO, or MTU overhead — inspect pcap / ethtool -k)."
+    echo "WARN: flow bytes ratio below ${THRESH_BYTES}% (GRO, MTU overhead, or non-IP bytes)."
   fi
-  return 0
+  return $rc
 }
 
 run_iperf_phase() {
@@ -145,9 +171,9 @@ run_iperf_phase() {
   save_gro_state
   gro_off
 
-  read -r R0_PKT R0_BYT <<<"$(ethtool_rx "$IFACE")"
   start_xdpflowd_bg
-  read -r S0_TP S0_PE S0_MF S0_FP S0_FB <<<"$(read_json_last "$JSONL")"
+  read -r S0_TP S0_PE S0_MF S0_NIP S0_FP S0_FB <<<"$(read_json_last "$JSONL")"
+  read -r R0_PKT R0_BYT <<<"$(ethtool_rx "$IFACE")"
 
   if [[ "$proto" == "udp" ]]; then
     echo "--- iperf3 UDP 10s (reverse: server -> VM) ---"
@@ -157,16 +183,19 @@ run_iperf_phase() {
     iperf3 -c "$IPERF3_HOST" -p "$IPERF3_PORT" -t 10 -P 4 -R || true
   fi
 
+  # Let in-flight packets settle, then close the timing gap: stop_xdpflowd sends
+  # SIGTERM which triggers flushFinal(); read sysfs immediately after for a
+  # closely-aligned snapshot.
   sleep 3
-  read -r R1_PKT R1_BYT <<<"$(ethtool_rx "$IFACE")"
-  read -r S1_TP S1_PE S1_MF S1_FP S1_FB <<<"$(read_json_last "$JSONL")"
   stop_xdpflowd
+  read -r R1_PKT R1_BYT <<<"$(ethtool_rx "$IFACE")"
+  read -r S1_TP S1_PE S1_MF S1_NIP S1_FP S1_FB <<<"$(read_json_last "$JSONL")"
   gro_restore_defaults
 
   compare_deltas "iperf3-$proto" \
     "$R0_PKT" "$R0_BYT" "$R1_PKT" "$R1_BYT" \
-    "$S0_TP" "$S0_FP" "$S0_FB" \
-    "$S1_TP" "$S1_FP" "$S1_FB"
+    "$S0_TP" "$S0_PE" "$S0_MF" "$S0_NIP" "$S0_FP" "$S0_FB" \
+    "$S1_TP" "$S1_PE" "$S1_MF" "$S1_NIP" "$S1_FP" "$S1_FB"
 }
 
 run_tcpreplay_phase() {
@@ -174,20 +203,20 @@ run_tcpreplay_phase() {
   [[ -f "$PCAP_IN" ]] || { echo "PCAP_IN file missing: $PCAP_IN"; return 1; }
   need_root
   gro_off
-  read -r R0_PKT R0_BYT <<<"$(ethtool_rx "$IFACE")"
   start_xdpflowd_bg
-  read -r S0_TP S0_PE S0_MF S0_FP S0_FB <<<"$(read_json_last "$JSONL")"
+  read -r S0_TP S0_PE S0_MF S0_NIP S0_FP S0_FB <<<"$(read_json_last "$JSONL")"
+  read -r R0_PKT R0_BYT <<<"$(ethtool_rx "$IFACE")"
   echo "--- tcpreplay $PCAP_IN (multiplier 10 Mbps) ---"
   tcpreplay -i "$IFACE" -M 10 "$PCAP_IN" || true
   sleep 2
-  read -r R1_PKT R1_BYT <<<"$(ethtool_rx "$IFACE")"
-  read -r S1_TP S1_PE S1_MF S1_FP S1_FB <<<"$(read_json_last "$JSONL")"
   stop_xdpflowd
+  read -r R1_PKT R1_BYT <<<"$(ethtool_rx "$IFACE")"
+  read -r S1_TP S1_PE S1_MF S1_NIP S1_FP S1_FB <<<"$(read_json_last "$JSONL")"
   gro_restore_defaults
   compare_deltas "tcpreplay" \
     "$R0_PKT" "$R0_BYT" "$R1_PKT" "$R1_BYT" \
-    "$S0_TP" "$S0_FP" "$S0_FB" \
-    "$S1_TP" "$S1_FP" "$S1_FB"
+    "$S0_TP" "$S0_PE" "$S0_MF" "$S0_NIP" "$S0_FP" "$S0_FB" \
+    "$S1_TP" "$S1_PE" "$S1_MF" "$S1_NIP" "$S1_FP" "$S1_FB"
 }
 
 main() {

@@ -57,6 +57,7 @@ type jsonSnapshot struct {
 		TotalPackets uint64 `json:"total_packets"`
 		ParseErrors  uint64 `json:"parse_errors"`
 		MapFull      uint64 `json:"map_full"`
+		NonIPPass    uint64 `json:"non_ip_pass"`
 	} `json:"stats"`
 	Aggregate struct {
 		FlowsInMap      int    `json:"flows_in_map"`
@@ -101,7 +102,7 @@ func readStat(objs *loader.Objects, idx uint32) uint64 {
 func zeroStats(objs *loader.Objects) {
 	var z uint64
 	var k uint32
-	for k = 0; k < 3; k++ {
+	for k = 0; k < 4; k++ {
 		_ = objs.Stats.Update(k, z, 0)
 	}
 }
@@ -112,6 +113,7 @@ func buildSnapshot(objs *loader.Objects, includeFlows bool) jsonSnapshot {
 	snap.Stats.TotalPackets = readStat(objs, 0)
 	snap.Stats.ParseErrors = readStat(objs, 1)
 	snap.Stats.MapFull = readStat(objs, 2)
+	snap.Stats.NonIPPass = readStat(objs, 3)
 
 	var k FlowKey
 	var v FlowValue
@@ -254,6 +256,7 @@ func dumpTop(log *slog.Logger, objs *loader.Objects, topN int) {
 		"total_packets", readStat(objs, 0),
 		"parse_errors", readStat(objs, 1),
 		"map_full", readStat(objs, 2),
+		"non_ip_pass", readStat(objs, 3),
 	)
 	for i := 0; i < topN; i++ {
 		r := rows[i]
@@ -362,10 +365,24 @@ func main() {
 		defer jsonTicker.Stop()
 	}
 
+	// flushFinal writes a last NDJSON snapshot right before exiting — this closes
+	// the timing gap with external counters (e.g. /sys/class/net/*/statistics/*)
+	// so the accuracy test can compare deltas taken at the same instant.
+	flushFinal := func() {
+		if *jsonOut == "" {
+			return
+		}
+		snap := buildSnapshot(objs, *jsonFlows)
+		if err := writeJSONLine(*jsonOut, snap); err != nil {
+			log.Error("json-out final", "err", err)
+		}
+	}
+
 	for {
 		if jsonTicker != nil {
 			select {
 			case <-ctx.Done():
+				flushFinal()
 				log.Info("shutdown")
 				return
 			case <-ticker.C:
@@ -379,6 +396,7 @@ func main() {
 		} else {
 			select {
 			case <-ctx.Done():
+				flushFinal()
 				log.Info("shutdown")
 				return
 			case <-ticker.C:

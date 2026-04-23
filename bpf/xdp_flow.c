@@ -3,7 +3,14 @@
  * xdp_flow.c — XDP flow aggregation (recommended field set).
  *
  * Parses Ethernet (802.1Q optional), IPv4 / IPv6, TCP / UDP / ICMP / ICMPv6.
- * HASH map flows + ARRAY stats (0=total pkts, 1=parse_errors, 2=map_full).
+ * HASH map flows + ARRAY stats:
+ *   stats[0] = total_packets (every packet seen by XDP)
+ *   stats[1] = parse_errors  (truncated L2/L3/L4 headers)
+ *   stats[2] = map_full      (flows HASH table full, insert failed)
+ *   stats[3] = non_ip_pass   (XDP_PASS for non-IPv4/IPv6 traffic: ARP, LLDP, etc.)
+ *
+ * Identity check (userspace should verify):
+ *   total_packets == sum(flow.packets) + parse_errors + map_full + non_ip_pass
  */
 #include <linux/bpf.h>
 #include <linux/if_ether.h>
@@ -61,7 +68,7 @@ struct {
 
 struct {
 	__uint(type, BPF_MAP_TYPE_ARRAY);
-	__uint(max_entries, 3);
+	__uint(max_entries, 4);
 	__type(key, __u32);
 	__type(value, __u64);
 } stats SEC(".maps");
@@ -430,6 +437,8 @@ int xdp_flow_prog(struct xdp_md *ctx)
 		return XDP_PASS;
 	}
 
+	/* Not IPv4 and not IPv6 (ARP, LLDP, STP, 802.1AD with non-IP inner, etc.). */
+	bump_stat(3);
 	return XDP_PASS;
 }
 
