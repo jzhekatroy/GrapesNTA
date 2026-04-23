@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 # netflow_test.sh — verify xdpflowd NetFlow v9 export end-to-end.
 #
-# Setup (on a test VM, e.g. the one we used for accuracy_test.sh):
-#   - xdpflowd attaches XDP to $IFACE, enables NFv9 export to 127.0.0.1:$NFPORT
-#   - nfcapd listens on $NFPORT, writes binary files into $NFDIR
-#   - iperf3 (server on VM, client on host) generates a controlled flow
+# Setup:
+#   - on $REMOTE_HOST (another machine): run  iperf3 -s -p 5201
+#   - on this VM the script:
+#       - builds + launches xdpflowd on $IFACE with NFv9 → 127.0.0.1:$NFPORT
+#       - starts nfcapd listening on 127.0.0.1:$NFPORT → $NFDIR
+#       - runs  iperf3 -c $REMOTE_HOST -R  so traffic flows INTO this VM
 #   - After the run we:
 #       1. compare ethtool/sysfs RX counters vs xdpflowd's final JSON snapshot (accuracy)
 #       2. parse nfcapd files with nfdump, sum bytes/packets, compare vs JSON
@@ -55,10 +57,12 @@ nfcapd -b 127.0.0.1 -p "$NFPORT" -l "$NFDIR" -I xdp -D \
   -t 60 >> "$LOG" 2>&1 &
 sleep 1
 
-# iperf3 server on the VM
-echo "[start] iperf3 server on this VM (listens on 0.0.0.0:5201)"
-iperf3 -s -D -1 --logfile "$WORKDIR/iperf3_server.log" >/dev/null 2>&1 || true
-sleep 1
+# NOTE: iperf3 server must already be running on $REMOTE_HOST (port 5201).
+# We use -R on the client so the server pushes traffic TO this VM, which is
+# what our XDP program needs to observe on $IFACE.
+#
+#   On $REMOTE_HOST:  iperf3 -s -p 5201
+#   On this VM:       (this script) runs iperf3 -c $REMOTE_HOST -R
 
 # --- Sample RX counters before run --------------------------------------------
 read_rx() {
@@ -169,8 +173,7 @@ echo "--- Logs ---"
 echo "  Run log:      $LOG"
 echo "  NDJSON:       $JSON"
 echo "  nfcapd dir:   $NFDIR"
-echo "  iperf3 srv:   $WORKDIR/iperf3_server.log"
-echo "  iperf3 cli:   $WORKDIR/iperf3_client.log"
+echo "  iperf3 cli:   $WORKDIR/iperf3_client.log  (iperf3 -s runs on $REMOTE_HOST)"
 echo
 echo "==================== EXPECTATIONS ===================="
 echo "1. sum_flow_packets ≈ d_rx_pkts   (within a few thousand — FIFO + timing race)"
