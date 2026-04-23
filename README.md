@@ -95,6 +95,48 @@ sudo -E ./scripts/accuracy_test.sh
 sudo IFACE=ens18 ./scripts/pcap_replay_test.sh
 ```
 
+### Production deployment: 2-phase migration from ipt_NETFLOW
+
+Scripts [`scripts/prod_observe.sh`](scripts/prod_observe.sh) (zero-risk parallel) and
+[`scripts/prod_ab_swap.sh`](scripts/prod_ab_swap.sh) (10-min A/B with auto-restore)
+are designed to safely validate and benchmark `xdpflowd` against a running
+`ipt_NETFLOW` on an ISP mirror port. Both are reversible: an SSH drop, Ctrl+C,
+or a crash restores the original `iptables` rule via `EXIT`/`INT`/`TERM`/`HUP` traps.
+
+**Phase 1 — parallel observation (no pipeline changes):**
+
+```bash
+sudo ./scripts/prod_observe.sh 300 enp5s0d1 12055
+```
+
+Runs `xdpflowd` in `XDP_PASS` on the mirror iface, exports NFv9 to a **separate**
+port (12055) to its own `nfcapd`. `ipt_NETFLOW` / `goflow2` / ClickHouse keep
+running untouched. Prints NIC deltas, ipt_NETFLOW /proc counters, xdpflowd stats,
+and `nfdump` aggregates — compare them to confirm `xdpflowd` counts match.
+
+**Phase 2 — temporary swap (writes to real destinations, 10 min):**
+
+```bash
+sudo ./scripts/prod_ab_swap.sh --dry-run                              # rehearse
+sudo ./scripts/prod_ab_swap.sh 600 enp5s0d1 127.0.0.1:9996,127.0.0.1:9999
+```
+
+Detects the exact `-j NETFLOW` rule in `raw`/`mangle`/`nat`, takes a full
+`iptables-save` backup under `/root/iptables-save-before-<TS>.txt`, installs
+traps, removes the rule, starts `xdpflowd` on the same destinations
+(`127.0.0.1:9996`, `127.0.0.1:9999`), runs a watchdog that aborts on stall,
+and always restores the rule on exit. Measure CPU (`mpstat`, `pidstat`),
+NIC drops (`ethtool -S`) and verify ClickHouse still receives rows during
+the window.
+
+**Panic recovery** (if the trap somehow did not run):
+
+```bash
+sudo ./scripts/prod_restore.sh                              # show options
+sudo ./scripts/prod_restore.sh /tmp/xdpflowd_abswap_<TS>/state.env
+sudo ./scripts/prod_restore.sh --full-restore /root/iptables-save-before-<TS>.txt
+```
+
 ### Flow fields (kernel / raw)
 
 Per flow (see `bpf/xdp_flow.c`):

@@ -7,7 +7,11 @@
 
 GO     ?= go
 CLANG  ?= clang
-BPF_CFLAGS := -O2 -g -Wall -target bpf -I/usr/include/x86_64-linux-gnu
+# Override FLOWS_MAP_SIZE at build time to fit peak concurrent flow count, e.g.:
+#   make FLOWS_MAP_SIZE=8000000
+FLOWS_MAP_SIZE ?= 4000000
+BPF_CFLAGS := -O2 -g -Wall -target bpf -I/usr/include/x86_64-linux-gnu \
+              -DFLOWS_MAP_SIZE=$(FLOWS_MAP_SIZE)
 
 BPF_O := bpf/xdp_flow.o
 

@@ -59,9 +59,18 @@ struct flow_value {
 	__u32 ip_frag_count;
 };
 
+/* Max entries for the flow HASH. Production traffic on a 40 Gbit/s mirror
+ * can peak at >2 million concurrent flows (ipt_NETFLOW maxflows=2M hit its
+ * ceiling on one of the audited servers). We default to 4M here — ~400 MB
+ * RAM per map — and allow a compile-time override via -DFLOWS_MAP_SIZE=N.
+ */
+#ifndef FLOWS_MAP_SIZE
+#define FLOWS_MAP_SIZE 4000000
+#endif
+
 struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
-	__uint(max_entries, 1000000);
+	__uint(max_entries, FLOWS_MAP_SIZE);
 	__type(key, struct flow_key);
 	__type(value, struct flow_value);
 } flows SEC(".maps");
