@@ -80,9 +80,11 @@ start_xdpflowd_bg() {
   kill_xdpflowd
   rm -f "$JSONL"
   : >"$JSONL"
-  # Short JSON interval for finer snapshots during iperf
+  # Short JSON interval for finer snapshots during iperf.
+  # json-include-flows=true so we can inspect per-flow deltas (needed for
+  # multi-stream accuracy verification).
   "$XDPFLOWD_BIN" -iface "$IFACE" -mode native -bpf "$BPF_O" \
-    -interval 60s -json-out "$JSONL" -json-interval 2s -json-include-flows=false \
+    -interval 60s -json-out "$JSONL" -json-interval 2s -json-include-flows=true \
     >/tmp/xdpflowd_accuracy.log 2>&1 &
   echo $! >/tmp/xdpflowd_accuracy.pid
   sleep 2
@@ -161,7 +163,12 @@ compare_deltas() {
 }
 
 run_iperf_phase() {
-  local proto="$1" # udp or tcp
+  # $1 = label suffix (e.g. "udp", "tcp", "udp-multi")
+  # $2 = iperf3 args to append to the invocation (without -c/-p/-R)
+  local label="$1"
+  local iperf_args="$2"
+  local expected_flows="${3:-}"
+
   need_root
   [[ -n "${IPERF3_HOST:-}" ]] || { echo "Set IPERF3_HOST=ip.of.iperf.server"; exit 1; }
   [[ -f "$XDPFLOWD_BIN" ]] || { echo "Build xdpflowd first: make -C $ROOT"; exit 1; }
@@ -175,13 +182,9 @@ run_iperf_phase() {
   read -r S0_TP S0_PE S0_MF S0_NIP S0_FP S0_FB <<<"$(read_json_last "$JSONL")"
   read -r R0_PKT R0_BYT <<<"$(ethtool_rx "$IFACE")"
 
-  if [[ "$proto" == "udp" ]]; then
-    echo "--- iperf3 UDP 10s (reverse: server -> VM) ---"
-    iperf3 -c "$IPERF3_HOST" -p "$IPERF3_PORT" -u -b 200M -t 10 -l 1200 -R || true
-  else
-    echo "--- iperf3 TCP 10s (reverse: server -> VM) ---"
-    iperf3 -c "$IPERF3_HOST" -p "$IPERF3_PORT" -t 10 -P 4 -R || true
-  fi
+  echo "--- iperf3 ${label} (reverse: server -> VM) args: ${iperf_args} ---"
+  # shellcheck disable=SC2086
+  iperf3 -c "$IPERF3_HOST" -p "$IPERF3_PORT" -R $iperf_args || true
 
   # Let in-flight packets settle, then close the timing gap: stop_xdpflowd sends
   # SIGTERM which triggers flushFinal(); read sysfs immediately after for a
@@ -192,10 +195,21 @@ run_iperf_phase() {
   read -r S1_TP S1_PE S1_MF S1_NIP S1_FP S1_FB <<<"$(read_json_last "$JSONL")"
   gro_restore_defaults
 
-  compare_deltas "iperf3-$proto" \
+  compare_deltas "iperf3-${label}" \
     "$R0_PKT" "$R0_BYT" "$R1_PKT" "$R1_BYT" \
     "$S0_TP" "$S0_PE" "$S0_MF" "$S0_NIP" "$S0_FP" "$S0_FB" \
     "$S1_TP" "$S1_PE" "$S1_MF" "$S1_NIP" "$S1_FP" "$S1_FB"
+
+  if [[ -n "$expected_flows" ]]; then
+    # Count distinct iperf flows that showed up between iperf source and our VM.
+    # xdpflowd records tcp/udp flows; filter by bytes > 100000 to ignore ARP/SSH.
+    echo "--- flows snapshot (iperf-sized only, bytes>100000) ---"
+    tail -n 1 "$JSONL" | jq -r '
+      .flows // [] | map(select(.bytes > 100000)) |
+      "found \(length) flow(s) with bytes>100000"
+    ' 2>/dev/null || true
+    echo "(expected ${expected_flows} iperf flow(s))"
+  fi
 }
 
 run_tcpreplay_phase() {
@@ -225,8 +239,17 @@ main() {
   command -v ethtool >/dev/null || { echo "Install ethtool"; exit 1; }
 
   if [[ "${SKIP_IPERF:-0}" != "1" ]]; then
-    run_iperf_phase udp
-    run_iperf_phase tcp
+    # Single-stream UDP @ 200 Mbit/s, 1200-byte payload (baseline).
+    run_iperf_phase "udp" "-u -b 200M -t 10 -l 1200"
+
+    # Multi-stream UDP: 4 parallel UDP flows, 50 Mbit/s each (200 Mbit/s total
+    # — same aggregate load as single-stream, but 4 distinct 5-tuples in flows map).
+    # Each iperf3 parallel UDP stream picks its own local port, so we should see
+    # exactly 4 large flows in the HASH map.
+    run_iperf_phase "udp-multi" "-u -b 50M -t 10 -l 1200 -P 4" "4"
+
+    # Single-stream TCP, 4 parallel streams, default bitrate.
+    run_iperf_phase "tcp" "-t 10 -P 4"
   fi
   run_tcpreplay_phase || true
   echo "Done. NDJSON log: $JSONL (last lines):"
