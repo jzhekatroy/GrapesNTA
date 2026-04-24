@@ -322,6 +322,27 @@ iptables -t "$RULE_TABLE" -D PREROUTING $RULE_SPEC
 SWAP_DONE=1
 echo "[$(date +%T)] rule removed. ipt_NETFLOW no longer seeing packets."
 
+# ---------- подготовка памяти для mlx4 native XDP ----------
+# mlx4 при attach выделяет contiguous XDP TX rings; на нагруженном проде
+# buddy-allocator часто фрагментирован так, что крупные заказы (order>=3)
+# падают с ENOMEM. Лечится drop_caches + compact_memory. Делается ДО attach,
+# потому что после падения xdpflowd мы уже потеряли окно (пересобрать его
+# стоит дорого — 3с link flap).
+prepare_memory() {
+  local node0_big node1_big
+  echo "[$(date +%T)] memory prep: drop_caches + compact_memory"
+  sync
+  echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || true
+  echo 1 > /proc/sys/vm/compact_memory 2>/dev/null || true
+  # короткая пауза, даём kcompactd доработать
+  sleep 2
+  # краткий отчёт: сколько больших страниц (2048kB / 4096kB) у каждой ноды
+  if [[ -r /proc/buddyinfo ]]; then
+    awk 'NR<=4 {print "  buddyinfo:",$0}' /proc/buddyinfo
+  fi
+}
+prepare_memory
+
 # ---------- запускаем xdpflowd на реальные destination'ы ----------
 echo "[$(date +%T)] starting xdpflowd -> $NF_DSTS (xdp-action=$XDP_ACTION)"
 if [[ "$XDP_ACTION" == "drop" ]]; then
@@ -348,6 +369,22 @@ for i in $(seq 1 15); do
   if ! kill -0 "$XDP_PID" 2>/dev/null; then
     echo "ERROR: xdpflowd died during startup!"
     tail -n 40 "$LOG_XDP"
+    if grep -q 'cannot allocate memory' "$LOG_XDP" 2>/dev/null; then
+      echo ""
+      echo "============================================================"
+      echo "mlx4 ENOMEM on XDP native attach — памяти фрагментирована."
+      echo "Повтори после ручной подготовки:"
+      echo "  echo 3 > /proc/sys/vm/drop_caches"
+      echo "  echo 1 > /proc/sys/vm/compact_memory"
+      echo "  sleep 3"
+      echo "  ethtool -g $IFACE   # посмотреть текущие размеры колец"
+      echo "  ethtool -G $IFACE rx 1024 tx 1024   # уменьшить (link flap 3s)"
+      echo "  # подождать 30с, затем снова запустить prod_phase3_drop.sh"
+      echo ""
+      echo "Или пересобрать xdpflowd с меньшей картой flows (сейчас 4M ≈ 480MB):"
+      echo "  make clean && make FLOWS_MAP_SIZE=1000000   # 1M ≈ 120MB"
+      echo "============================================================"
+    fi
     exit 1
   fi
   sleep 1
