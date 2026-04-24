@@ -62,9 +62,17 @@ echo "workdir=$WORKDIR"
 echo "======================================================================"
 
 # ---------- проверки ----------
-for c in mpstat ethtool ip bpftool; do
-  command -v "$c" >/dev/null || { echo "ERROR: missing $c (apt install sysstat ethtool iproute2 linux-tools-\$(uname -r))"; exit 1; }
+# Обязательные — без них тест не выполнить
+for c in mpstat ethtool ip; do
+  command -v "$c" >/dev/null || { echo "ERROR: missing $c (apt install sysstat ethtool iproute2)"; exit 1; }
 done
+# Опциональные — просто уменьшают детализацию отчёта
+HAVE_BPFTOOL=0
+HAVE_PERF=0
+command -v bpftool >/dev/null && HAVE_BPFTOOL=1 || \
+  echo "NOTE: bpftool not installed — cycles/packet metric will be skipped (try: apt install bpftool or linux-perf)"
+command -v perf >/dev/null && HAVE_PERF=1 || \
+  echo "NOTE: perf not installed — top kernel functions will be skipped (try: apt install linux-perf)"
 
 if ! ip link show "$IFACE" >/dev/null 2>&1; then
   echo "ERROR: interface $IFACE not found"; exit 1
@@ -97,7 +105,7 @@ collect_window() {
   MPSTAT_PID=$!
 
   # perf top на 10 сек если есть
-  if command -v perf >/dev/null 2>&1; then
+  if (( HAVE_PERF == 1 )); then
     (
       # найти "горячий" CPU по текущему softirq (топ из top)
       HOT_CPU=$(mpstat -P ALL 1 1 2>/dev/null \
@@ -111,7 +119,7 @@ collect_window() {
   fi
 
   # bpftool prog profile (только в окне B — когда xdpflowd живой)
-  if (( with_prog == 1 )); then
+  if (( with_prog == 1 && HAVE_BPFTOOL == 1 )); then
     (
       # найти программу xdp_flow_prog
       local pid=""
