@@ -1,17 +1,18 @@
 #!/usr/bin/env bash
-# prod_restore.sh — аварийное восстановление после prod_ab_swap.sh.
+# prod_restore.sh — аварийное восстановление после prod_ab_swap.sh / prod_ab_swap_afxdp.sh.
 #
 # Когда использовать:
-#   * Если prod_ab_swap.sh аварийно завершился и trap почему-то НЕ восстановил
+#   * Если prod_ab_swap.sh / prod_ab_swap_afxdp.sh аварийно завершился и trap почему-то НЕ восстановил
 #     правило iptables.
 #   * Если вы хотите убедиться, что всё вернулось в исходное состояние.
 #
 # Как пользоваться:
 #   1) Самый простой вариант — с файлом состояния:
 #        sudo ./scripts/prod_restore.sh /tmp/xdpflowd_abswap_<TS>/state.env
+#        sudo ./scripts/prod_restore.sh /tmp/afxdpflowd_abswap_<TS>/state.env
 #   2) С явным указанием полного iptables backup:
 #        sudo ./scripts/prod_restore.sh --full-restore /root/iptables-save-before-<TS>.txt
-#   3) Без аргументов — только убьёт живой xdpflowd и покажет список
+#   3) Без аргументов — только убьёт живые xdpflowd / afxdpflowd и покажет список
 #     кандидатов для восстановления (ничего не меняет).
 
 set -euo pipefail
@@ -21,12 +22,18 @@ if [[ $EUID -ne 0 ]]; then
   exit 1
 fi
 
-# ---------- обязательный шаг: убедиться, что xdpflowd не крутится ----------
+# ---------- обязательный шаг: убедиться, что экспортёры не крутятся ----------
 if pgrep -x xdpflowd >/dev/null; then
   echo "[$(date +%T)] killing xdpflowd..."
   pkill -TERM -x xdpflowd || true
   sleep 2
   pkill -KILL -x xdpflowd || true
+fi
+if pgrep -x afxdpflowd >/dev/null; then
+  echo "[$(date +%T)] killing afxdpflowd..."
+  pkill -TERM -x afxdpflowd || true
+  sleep 2
+  pkill -KILL -x afxdpflowd || true
 fi
 
 # если передан --full-restore <file>
@@ -78,6 +85,7 @@ fi
 # без аргументов — диагностика
 echo "Usage:"
 echo "  $0 /tmp/xdpflowd_abswap_<TS>/state.env"
+echo "  $0 /tmp/afxdpflowd_abswap_<TS>/state.env"
 echo "  $0 --full-restore /root/iptables-save-before-<TS>.txt"
 echo ""
 echo "Current NETFLOW rules in the kernel:"
@@ -89,8 +97,10 @@ for t in raw mangle nat filter; do
   fi
 done
 echo ""
-echo "Available state files:"
+echo "Available state files (xdpflowd):"
 ls -1t /tmp/xdpflowd_abswap_*/state.env 2>/dev/null | head -n 5 | sed 's/^/  /'
+echo "Available state files (afxdpflowd):"
+ls -1t /tmp/afxdpflowd_abswap_*/state.env 2>/dev/null | head -n 5 | sed 's/^/  /'
 echo ""
 echo "Available iptables backups:"
 ls -1t /root/iptables-save-before-*.txt 2>/dev/null | head -n 5 | sed 's/^/  /'

@@ -9,7 +9,7 @@
 #   5) на ключевых UDP-портах (9996/9999/2055) слушает процесс
 #   6) docker-контейнеры goflow2 в состоянии "running"
 #   7) правило NETFLOW присутствует в нужной таблице
-#   8) XDP-программа отцеплена от интерфейса (после теста)
+#   8) XDP/AF_XDP-программа отцеплена от интерфейса (после теста)
 #   9) nfcapd/goflow2 процессы живы
 #
 # Использование:
@@ -155,13 +155,13 @@ else
   warn "docker not installed — skipping"
 fi
 
-# ---------- 7) XDP detached ----------
-hdr "XDP attachment on $IFACE"
-if ip link show "$IFACE" 2>/dev/null | grep -qE 'prog/xdp|xdp[a-z]*[[:space:]]+id'; then
-  bad "XDP program still attached to $IFACE! (expected none after test)"
-  ip -details link show "$IFACE" | grep -iE 'xdp' | head -5 | sed 's/^/    /'
+# ---------- 7) XDP / AF_XDP detached ----------
+hdr "XDP/AF_XDP attachment on $IFACE"
+if ip -details link show "$IFACE" 2>/dev/null | grep -qiE 'prog/xdp|xdpgeneric|xdpoffload|xdpdrv|af_xdp'; then
+  bad "XDP/AF_XDP still attached to $IFACE! (expected none after test)"
+  ip -details link show "$IFACE" | grep -iE 'xdp|af_xdp' | head -8 | sed 's/^/    /'
 else
-  ok "no XDP program on $IFACE"
+  ok "no XDP/AF_XDP program on $IFACE"
 fi
 
 # ---------- 8) процессы ----------
@@ -175,11 +175,16 @@ for proc in nfcapd goflow2; do
     fi
   fi
 done
-# xdpflowd НЕ должен крутиться после теста
+# xdpflowd / afxdpflowd НЕ должны крутиться после теста
 if pgrep -x xdpflowd >/dev/null; then
   bad "xdpflowd still running after test (pid=$(pgrep -x xdpflowd | tr '\n' ' '))"
 else
   ok "xdpflowd not running (as expected after test)"
+fi
+if pgrep -x afxdpflowd >/dev/null; then
+  bad "afxdpflowd still running after test (pid=$(pgrep -x afxdpflowd | tr '\n' ' '))"
+else
+  ok "afxdpflowd not running (as expected after test)"
 fi
 
 # ---------- 9) ipt_NETFLOW counter прогресс ----------
@@ -234,5 +239,6 @@ else
   echo "    iptables-restore  < $SNAP/10_iptables_save_counters.txt"
   echo "    ip6tables-restore < $SNAP/10_ip6tables_save_counters.txt"
   echo "    ./scripts/prod_restore.sh /tmp/xdpflowd_abswap_*/state.env"
+  echo "    ./scripts/prod_restore.sh /tmp/afxdpflowd_abswap_*/state.env"
   exit 1
 fi

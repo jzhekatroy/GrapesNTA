@@ -132,7 +132,8 @@ sudo ./scripts/prod_snapshot.sh enp5s0d1
 At any time later run [`scripts/prod_verify.sh`](scripts/prod_verify.sh) to confirm
 the running state matches the snapshot — it diffs iptables rules, checks the
 `ipt_NETFLOW` rule is back in place, validates `net.netflow.*` sysctls,
-confirms `goflow2` container is running, and asserts XDP is detached.
+confirms `goflow2` container is running, asserts neither `xdpflowd` nor
+`afxdpflowd` is running, and that XDP/AF_XDP is detached from the iface.
 
 ```bash
 sudo ./scripts/prod_verify.sh           # against /root/xdpflowd_baseline_latest
@@ -175,11 +176,31 @@ runs `prod_verify.sh` to confirm the live state matches the baseline**.
 Measure CPU (`mpstat`, `pidstat`), NIC drops (`ethtool -S`) and verify ClickHouse
 still receives rows during the window.
 
+**AF_XDP variant** — same trap / `state.env` / `prod_restore.sh` / `prod_verify.sh`
+discipline, but runs [`scripts/prod_ab_swap_afxdp.sh`](scripts/prod_ab_swap_afxdp.sh)
+(`make build-afxdp`, `./bin/afxdpflowd`). Watchdog uses `wire_ground_truth.packets`
+and/or `packets_out` in the merged log. Rehearse with `--dry-run` or
+`sudo env DRY_RUN=1 ./scripts/prod_ab_swap_afxdp.sh`. **AF_XDP consumes RX on the
+iface** — use only on a SPAN/mirror port (same operational caution as
+`XDP_ACTION=drop` for `xdpflowd`). Optional: `AFXDP_SKB=1` for generic XDP (`-skb`).
+
+```bash
+sudo ./scripts/prod_ab_swap_afxdp.sh --dry-run
+sudo ./scripts/prod_ab_swap_afxdp.sh 120 enp5s0d1 127.0.0.1:9996,127.0.0.1:9999
+```
+
+**Phase-3 style** (same layout as `prod_phase3_drop.sh`: snapshot, optional IRQ tune, window A/B with `mpstat`, then `prod_ab_swap_afxdp` in background). Map `XDP_MODE=generic` → `AFXDP_SKB=1`:
+
+```bash
+XDP_MODE=generic SKIP_IRQ_TUNE=1 ./scripts/prod_phase3_afxdp.sh 120 enp5s0d1 2>&1 | tee /tmp/phase3_afxdp_generic.log
+```
+
 **Panic recovery** (if the trap somehow did not run):
 
 ```bash
 sudo ./scripts/prod_restore.sh                              # show options
 sudo ./scripts/prod_restore.sh /tmp/xdpflowd_abswap_<TS>/state.env
+sudo ./scripts/prod_restore.sh /tmp/afxdpflowd_abswap_<TS>/state.env
 sudo ./scripts/prod_restore.sh --full-restore /root/iptables-save-before-<TS>.txt
 ```
 
