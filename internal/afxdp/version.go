@@ -1,4 +1,4 @@
 package afxdp
 
 // Version of the AF_XDP dataplane package (not the full binary release tag).
-const Version = "0-dev"
+const Version = "0.1.0-dev"

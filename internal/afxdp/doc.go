@@ -33,7 +33,9 @@
 //    afxdp_redirect.c  — tiny XDP: bpf_redirect to AF_XDP socket map (per queue)
 //  bin/
 //    xdpflowd           — make build
-//    afxdpflowd         — make build-afxdp
+//    afxdpflowd         — make build-afxdp (github.com/planktonzp/xdp: libbpf-style xsks map + AF_XDP)
+//
+//  Wire ground truth (JSON on stderr) is for scripts/afxdp_wire_accuracy.sh vs /sys/class/net/.../statistics.
 //
 // # Why cmd/afxdpflowd instead of one binary
 //

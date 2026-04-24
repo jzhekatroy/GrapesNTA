@@ -50,8 +50,8 @@ build: $(BPF_O)
 	@echo "Using Go: $(GO)" && $(GO) version
 	$(GO) build -o bin/xdpflowd ./cmd/xdpflowd
 
-# AF_XDP daemon (WIP on branch feature/afxdp). Builds stub binary + redirect BPF object.
-build-afxdp: $(AFXDP_BPF_O)
+# AF_XDP daemon: uses embedded xsk eBPF (planktonzp/xdp); optional separate bpf/afxdp_redirect.o is not required.
+build-afxdp:
 	@mkdir -p bin
 	@echo "Using Go: $(GO)" && $(GO) version
 	$(GO) build -o bin/afxdpflowd ./cmd/afxdpflowd
