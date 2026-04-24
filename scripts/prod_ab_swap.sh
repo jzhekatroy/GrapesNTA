@@ -94,9 +94,40 @@ need_cmd() { command -v "$1" >/dev/null || { echo "ERROR: missing $1" >&2; exit 
 need_cmd iptables
 need_cmd iptables-save
 need_cmd iptables-restore
-need_cmd go
 need_cmd clang
 need_cmd ss
+
+# ---------- Go >= 1.21 (нужен для log/slog, io/fs, maps, slices) ----------
+go_ver_ok() {
+  local v major minor
+  v=$(go version 2>/dev/null | awk '{print $3}' | sed 's/^go//')
+  [[ -n "$v" ]] || return 1
+  major=${v%%.*}
+  minor=${v#*.}; minor=${minor%%.*}
+  if (( major > 1 )) || (( major == 1 && minor >= 21 )); then return 0; fi
+  return 1
+}
+if ! command -v go >/dev/null || ! go_ver_ok; then
+  for cand in /usr/local/go/bin /opt/go/bin /usr/lib/go-1.22/bin /usr/lib/go-1.23/bin /usr/lib/go-1.24/bin; do
+    if [[ -x "$cand/go" ]]; then
+      OLD_PATH="$PATH"
+      export PATH="$cand:$PATH"
+      if go_ver_ok; then
+        echo "[env] using Go from $cand ($(go version 2>/dev/null | awk '{print $3}'))"
+        break
+      else
+        export PATH="$OLD_PATH"
+      fi
+    fi
+  done
+fi
+if ! command -v go >/dev/null || ! go_ver_ok; then
+  cur=$(go version 2>/dev/null | awk '{print $3}' || echo none)
+  echo "ERROR: no Go >= 1.21 in PATH (found: $cur)" >&2
+  echo "       Install Go 1.22+: https://go.dev/dl/" >&2
+  echo "       Or prepend its bin dir: export PATH=/usr/local/go/bin:\$PATH" >&2
+  exit 1
+fi
 
 if [[ $EUID -ne 0 ]]; then
   echo "ERROR: run as root" >&2
