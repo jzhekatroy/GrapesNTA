@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # afxdp_mirror.sh — copy ingress of SRC_IFACE to a dedicated veth; run afxdpflowd on the mirror (option 2).
 #
-# L3/SSH/iperf on SRC_IFACE (e.g. veth0) keep working. Duplicates are injected into
-# veth-afx0 RX; afxdpflowd attaches there and only "steals" the copy, not the path to the stack.
+# L3/SSH/iperf on SRC_IFACE (e.g. veth0) keep working. Duplicates must be injected as **RX** on
+# veth-afx0 (use `mirred ingress mirror` to dest — `egress mirror` would send copies as TX, AF_XDP
+# would not see the bulk of traffic on RX).
 #
 # Requires: root, tc (iproute2), act_mirred (modprobe if needed), kernel with ingress + mirred.
 #
@@ -65,19 +66,20 @@ up() {
   if ! qdisc_ingress_exists "$src"; then
     tc qdisc add dev "$src" handle ffff: ingress
   fi
-  # Duplicate all ingress; original still goes to stack (mirred mirror, not redirect).
+  # Use **ingress** mirror to dest (not egress): copy must *appear* as RX on $MIR so
+  # AF_XDP sees it. With `egress mirror`, copies leave as TX on $MIR (huge TX in ifconfig, ~0 RX).
   if tc filter show dev "$src" parent ffff: 2>/dev/null | grep -qE "match.*mirred|mirred.*$MIR"; then
     echo "Filter may already exist; add skipped (run 'down' first to reset)." >&2
   else
     if ! tc filter add dev "$src" parent ffff: protocol all prio "$TC_PREF" u32 \
       match u32 0 0 \
-      action mirred egress mirror dev "$MIR"; then
+      action mirred ingress mirror dev "$MIR"; then
       echo "tc filter failed (older iproute2?). Try: ethtool -K $src gro off" >&2
       ip link del "$MIR" 2>/dev/null || true
       exit 1
     fi
   fi
-  echo "OK: mirror $src ingress -> $MIR (AF_XDP + NetFlow on $MIR; keep using $src for L3/iperf)."
+  echo "OK: mirror $src ingress -> $MIR (ingress mirror: RX on $MIR for afxdp; L3 still on $src)."
   echo "  afxdpflowd:  -iface $MIR  (not $src)"
   ip -br link show "$MIR" "$PEER" 2>/dev/null || true
 }
