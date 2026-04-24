@@ -33,6 +33,11 @@ SKIP_IRQ_TUNE="${SKIP_IRQ_TUNE:-0}"
 AUTO_IRQ="${AUTO_IRQ:-0}"
 CPU_LIST="${CPU_LIST:-}"
 XDP_MODE="${XDP_MODE:-native}"
+# XDP_ACTION: drop (default, full replacement test) or pass (diagnostic —
+# BPF runs but packets still go up the kernel stack, useful for isolating
+# "BPF program is slow" vs "XDP infrastructure adds mlx4 overhead").
+XDP_ACTION="${XDP_ACTION:-drop}"
+case "$XDP_ACTION" in pass|drop) ;; *) echo "ERROR: XDP_ACTION must be pass|drop"; exit 1;; esac
 
 if [[ $EUID -ne 0 ]]; then
   echo "ERROR: run as root" >&2
@@ -43,11 +48,11 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
 TS="$(date +%Y%m%d_%H%M%S)"
-WORKDIR="/tmp/phase3_drop_$TS"
+WORKDIR="/tmp/phase3_${XDP_ACTION}_$TS"
 mkdir -p "$WORKDIR"
 
-A_DIR="$WORKDIR/A_baseline"       # замер A: без xdpflowd
-B_DIR="$WORKDIR/B_xdpdrop"        # замер B: xdpflowd в DROP
+A_DIR="$WORKDIR/A_baseline"                   # замер A: без xdpflowd
+B_DIR="$WORKDIR/B_xdp${XDP_ACTION}"           # замер B: xdpflowd активен
 mkdir -p "$A_DIR" "$B_DIR"
 
 LOG="$WORKDIR/orchestrator.log"
@@ -56,8 +61,8 @@ SUMMARY="$WORKDIR/SUMMARY.txt"
 exec > >(tee -a "$LOG") 2>&1
 
 echo "======================================================================"
-echo "Phase 3 DROP test — $TS"
-echo "iface=$IFACE  xdp-mode=$XDP_MODE  drop_duration=${DURATION_DROP}s"
+echo "Phase 3 ${XDP_ACTION^^} test — $TS"
+echo "iface=$IFACE  xdp-mode=$XDP_MODE  xdp-action=$XDP_ACTION  duration=${DURATION_DROP}s"
 echo "workdir=$WORKDIR"
 echo "======================================================================"
 
@@ -226,11 +231,11 @@ echo ""
 echo "===== WINDOW A: baseline (no xdpflowd), after IRQ tune ====="
 collect_window A "$A_DIR" 0
 
-# ---------- 5) Запуск prod_ab_swap с XDP_ACTION=drop в фоне ----------
+# ---------- 5) Запуск prod_ab_swap с заданным XDP_ACTION в фоне ----------
 echo ""
-echo "===== Starting prod_ab_swap (XDP_ACTION=drop, ${DURATION_DROP}s) ====="
+echo "===== Starting prod_ab_swap (XDP_ACTION=$XDP_ACTION, ${DURATION_DROP}s) ====="
 (
-  XDP_ACTION=drop "$REPO_ROOT/scripts/prod_ab_swap.sh" \
+  XDP_ACTION="$XDP_ACTION" "$REPO_ROOT/scripts/prod_ab_swap.sh" \
     "$DURATION_DROP" "$IFACE" \
     > "$WORKDIR/prod_ab_swap.log" 2>&1
 ) &
@@ -256,7 +261,7 @@ sleep 5
 
 # ---------- 6) ЗАМЕР B ----------
 echo ""
-echo "===== WINDOW B: xdpflowd XDP_DROP ====="
+echo "===== WINDOW B: xdpflowd XDP_${XDP_ACTION^^} ====="
 collect_window B "$B_DIR" 1
 
 # ---------- 7) дождаться окончания swap ----------
@@ -353,7 +358,7 @@ PY
   echo "  interrupts per CPU (delta during window):"
   interrupts_delta_per_cpu "$A_DIR/interrupts.before" "$A_DIR/interrupts.after" "$IFACE"
   echo ""
-  echo "----- WINDOW B (xdpflowd XDP_DROP) — mpstat Average -----"
+  echo "----- WINDOW B (xdpflowd XDP_${XDP_ACTION^^}) — mpstat Average -----"
   summarize_mpstat "$B_DIR/mpstat.txt"
   echo ""
   echo "  interrupts per CPU (delta during window):"
@@ -384,7 +389,7 @@ PY
   }
   echo "A (baseline, ipt_NETFLOW):"
   sysfs_window_rate "$A_DIR" "$DURATION_WINDOW"
-  echo "B (xdpflowd XDP_DROP):"
+  echo "B (xdpflowd XDP_${XDP_ACTION^^}):"
   sysfs_window_rate "$B_DIR" "$DURATION_WINDOW"
   echo ""
   echo "Full data in: $WORKDIR"
