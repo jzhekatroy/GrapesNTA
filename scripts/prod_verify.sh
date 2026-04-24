@@ -2,7 +2,7 @@
 # prod_verify.sh — сверяет текущее состояние с эталонным slepkом (prod_snapshot.sh).
 #
 # Что проверяем (всё сопоставимо между "до" и "после" теста):
-#   1) iptables rules — полный diff без счётчиков (счётчики не совпадут)
+#   1) iptables rules — diff после нормализации (счётчики в save и # timestamps убраны)
 #   2) ip6tables rules — то же
 #   3) net.netflow.* sysctl — совпадение
 #   4) модуль ipt_NETFLOW загружен
@@ -46,28 +46,43 @@ bad()  { echo "  [FAIL] $*"; FAIL=$((FAIL+1)); }
 
 hdr()  { echo ""; echo "=== $* ==="; }
 
+# iptables-save "rules" file still includes [pkt:byte] on :CHAIN policy lines and
+# per-rule " -c pkts bytes"; timestamps in # comment lines also drift. Compare
+# normalized view so we only fail on real rule changes.
+normalize_ipt_save() {
+  sed -E '/^#/d; s/\[[0-9]+:[0-9]+\]/[0:0]/g; s/ -c [0-9]+ [0-9]+$//' "$1"
+}
+
 # ---------- 1) iptables rules ----------
-hdr "iptables rules (diff vs snapshot)"
+hdr "iptables rules (diff vs snapshot, counters normalized)"
 NOW_IPT=$(mktemp)
+NBASE_IPT=$(mktemp)
+NNOW_IPT=$(mktemp)
 iptables-save > "$NOW_IPT" 2>/dev/null
-if diff -u "$SNAP/10_iptables_save_rules.txt" "$NOW_IPT" > /tmp/ipt_diff.$$.txt 2>&1; then
-  ok "iptables rules identical to baseline"
+normalize_ipt_save "$SNAP/10_iptables_save_rules.txt" > "$NBASE_IPT"
+normalize_ipt_save "$NOW_IPT" > "$NNOW_IPT"
+if diff -u "$NBASE_IPT" "$NNOW_IPT" > /tmp/ipt_diff.$$.txt 2>&1; then
+  ok "iptables rules identical to baseline (structure)"
 else
   bad "iptables rules differ — see /tmp/ipt_diff.$$.txt"
   head -n 40 /tmp/ipt_diff.$$.txt | sed 's/^/    /'
 fi
-rm -f "$NOW_IPT"
+rm -f "$NOW_IPT" "$NBASE_IPT" "$NNOW_IPT"
 
-hdr "ip6tables rules (diff vs snapshot)"
+hdr "ip6tables rules (diff vs snapshot, counters normalized)"
 NOW_IP6=$(mktemp)
+NBASE_IP6=$(mktemp)
+NNOW_IP6=$(mktemp)
 ip6tables-save > "$NOW_IP6" 2>/dev/null
-if diff -u "$SNAP/10_ip6tables_save_rules.txt" "$NOW_IP6" > /tmp/ip6_diff.$$.txt 2>&1; then
-  ok "ip6tables rules identical to baseline"
+normalize_ipt_save "$SNAP/10_ip6tables_save_rules.txt" > "$NBASE_IP6"
+normalize_ipt_save "$NOW_IP6" > "$NNOW_IP6"
+if diff -u "$NBASE_IP6" "$NNOW_IP6" > /tmp/ip6_diff.$$.txt 2>&1; then
+  ok "ip6tables rules identical to baseline (structure)"
 else
   bad "ip6tables rules differ — see /tmp/ip6_diff.$$.txt"
   head -n 40 /tmp/ip6_diff.$$.txt | sed 's/^/    /'
 fi
-rm -f "$NOW_IP6"
+rm -f "$NOW_IP6" "$NBASE_IP6" "$NNOW_IP6"
 
 # ---------- 2) NETFLOW rule специфично ----------
 hdr "ipt_NETFLOW rule presence"
