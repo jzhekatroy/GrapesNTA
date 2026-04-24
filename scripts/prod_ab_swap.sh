@@ -29,6 +29,14 @@
 #   sudo ./scripts/prod_ab_swap.sh [duration_sec] [iface] [nf_dsts]
 # По умолчанию: 600 сек (10 минут), enp5s0d1, 127.0.0.1:9996,127.0.0.1:9999.
 #
+# XDP action:
+#   XDP_ACTION=pass (default) — аккаунтить и пускать пакет дальше в kernel stack
+#                                (безопасно, для A/B теста точности).
+#   XDP_ACTION=drop           — аккаунтить и дропать. ТОЛЬКО на SPAN/mirror
+#                                интерфейсе (enp5s0d1). Реальная экономия CPU.
+#
+#   sudo XDP_ACTION=drop ./scripts/prod_ab_swap.sh 600 enp5s0d1
+#
 # Пример "репетиции" (ничего не меняет, печатает план):
 #   sudo ./scripts/prod_ab_swap.sh --dry-run
 
@@ -43,6 +51,24 @@ fi
 DURATION="${1:-600}"
 IFACE="${2:-enp5s0d1}"
 NF_DSTS="${3:-127.0.0.1:9996,127.0.0.1:9999}"
+
+# XDP action for accounted IP packets: pass (safe, default) | drop (SPAN/mirror only).
+# drop — реальная экономия CPU, но пакеты не дойдут до kernel stack.
+XDP_ACTION="${XDP_ACTION:-pass}"
+case "$XDP_ACTION" in
+  pass|drop) ;;
+  *) echo "ERROR: XDP_ACTION must be 'pass' or 'drop' (got: $XDP_ACTION)" >&2; exit 1;;
+esac
+
+# Safety: если $IFACE выглядит как обычный роутинг-интерфейс (есть IP/маршруты),
+# не даём запустить drop. Исключение — каноничный mirror enp5s0d1.
+if [[ "$XDP_ACTION" == "drop" && "$IFACE" != "enp5s0d1" ]]; then
+  if ip -4 addr show dev "$IFACE" 2>/dev/null | grep -q 'inet '; then
+    echo "ERROR: $IFACE has IPv4 address — refusing XDP_ACTION=drop on non-SPAN interface" >&2
+    echo "       drop only supported on enp5s0d1 or pass-through addressless interfaces" >&2
+    exit 1
+  fi
+fi
 
 # Hard cap — нельзя запустить на сутки случайно
 MAX_DURATION=3600
@@ -158,7 +184,7 @@ if (( DRY_RUN )); then
   echo "== DRY RUN =="
   echo "Would execute:"
   echo "  iptables -t $RULE_TABLE -D PREROUTING $RULE_SPEC"
-  echo "  (run xdpflowd -iface $IFACE -nf-dst $NF_DSTS for $DURATION s)"
+  echo "  (run xdpflowd -iface $IFACE -xdp-action $XDP_ACTION -nf-dst $NF_DSTS for $DURATION s)"
   echo "  iptables -t $RULE_TABLE -I PREROUTING $RULE_SPEC     # restore"
   echo "  (и любой выход/обрыв всё равно вызовет restore через trap)"
   exit 0
@@ -266,10 +292,14 @@ SWAP_DONE=1
 echo "[$(date +%T)] rule removed. ipt_NETFLOW no longer seeing packets."
 
 # ---------- запускаем xdpflowd на реальные destination'ы ----------
-echo "[$(date +%T)] starting xdpflowd -> $NF_DSTS"
+echo "[$(date +%T)] starting xdpflowd -> $NF_DSTS (xdp-action=$XDP_ACTION)"
+if [[ "$XDP_ACTION" == "drop" ]]; then
+  echo "[$(date +%T)] WARNING: XDP_DROP — пакеты не дойдут до kernel stack на $IFACE"
+fi
 ./bin/xdpflowd \
   -iface "$IFACE" \
   -mode native \
+  -xdp-action "$XDP_ACTION" \
   -bpf ./bpf/xdp_flow.o \
   -nf-dst "$NF_DSTS" \
   -nf-active 1800s \
