@@ -300,12 +300,19 @@ cleanup() {
   echo ""
   echo "[$(date +%T)] cleanup (exit=$rc)"
   if [ -n "$XDP_PID" ] && kill -0 "$XDP_PID" 2>/dev/null; then
+    # Grace: give xdpflowd up to 20s to flush the final NFv9 templates +
+    # record + NDJSON snapshot for a ~2-3M entry flows map on shutdown.
+    # (On prod with XDP_ACTION=drop we measured ~5-10s for flushAll on
+    # a 2.5M-flow map; 5s was too tight and led to SIGKILL.)
     kill -TERM "$XDP_PID" 2>/dev/null || true
-    for _ in 1 2 3 4 5; do
+    for _ in $(seq 1 20); do
       kill -0 "$XDP_PID" 2>/dev/null || break
       sleep 1
     done
-    kill -KILL "$XDP_PID" 2>/dev/null || true
+    if kill -0 "$XDP_PID" 2>/dev/null; then
+      echo "[$(date +%T)] WARN: xdpflowd didn't exit in 20s on SIGTERM — sending SIGKILL"
+      kill -KILL "$XDP_PID" 2>/dev/null || true
+    fi
   fi
   restore_rule
   # verify только если мы реально заходили в swap
