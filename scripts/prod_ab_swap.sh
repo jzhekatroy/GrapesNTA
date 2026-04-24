@@ -60,6 +60,18 @@ case "$XDP_ACTION" in
   *) echo "ERROR: XDP_ACTION must be 'pass' or 'drop' (got: $XDP_ACTION)" >&2; exit 1;;
 esac
 
+# XDP load mode: native (fast, runs inside mlx4_en driver) |
+#                generic (slower, runs after netif_receive_skb in the kernel).
+# On mlx4_en + kernel 5.10 the native XDP_DROP path appears broken
+# (HW fifo drops skyrocket). Generic mode bypasses mlx4_en XDP code
+# entirely — useful as a diagnostic to confirm whether the bottleneck
+# is inside the driver or deeper in the kernel RX path.
+XDP_MODE="${XDP_MODE:-native}"
+case "$XDP_MODE" in
+  native|generic) ;;
+  *) echo "ERROR: XDP_MODE must be 'native' or 'generic' (got: $XDP_MODE)" >&2; exit 1;;
+esac
+
 # Safety: если $IFACE выглядит как обычный роутинг-интерфейс (есть IP/маршруты),
 # не даём запустить drop. Исключение — каноничный mirror enp5s0d1.
 if [[ "$XDP_ACTION" == "drop" && "$IFACE" != "enp5s0d1" ]]; then
@@ -367,14 +379,14 @@ fi
 # было видно, с какими флагами реально стартовали.
 {
   echo "=== xdpflowd launch at $(date -Is) ==="
-  echo "cmdline: $XDP_STDBUF ./bin/xdpflowd -iface $IFACE -mode native -xdp-action $XDP_ACTION -bpf ./bpf/xdp_flow.o -nf-dst '$NF_DSTS' -nf-active 1800s -nf-idle 15s -nf-template-interval 60s -interval 5s -json-out '$JSON_OUT' -json-interval 10s"
+  echo "cmdline: $XDP_STDBUF ./bin/xdpflowd -iface $IFACE -mode $XDP_MODE -xdp-action $XDP_ACTION -bpf ./bpf/xdp_flow.o -nf-dst '$NF_DSTS' -nf-active 1800s -nf-idle 15s -nf-template-interval 60s -interval 5s -json-out '$JSON_OUT' -json-interval 10s"
   echo "WORKDIR: $WORKDIR"
   echo ""
 } > "$LOG_XDP"
 
 $XDP_STDBUF ./bin/xdpflowd \
   -iface "$IFACE" \
-  -mode native \
+  -mode "$XDP_MODE" \
   -xdp-action "$XDP_ACTION" \
   -bpf ./bpf/xdp_flow.o \
   -nf-dst "$NF_DSTS" \
