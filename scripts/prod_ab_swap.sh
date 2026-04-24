@@ -348,7 +348,24 @@ echo "[$(date +%T)] starting xdpflowd -> $NF_DSTS (xdp-action=$XDP_ACTION)"
 if [[ "$XDP_ACTION" == "drop" ]]; then
   echo "[$(date +%T)] WARNING: XDP_DROP — пакеты не дойдут до kernel stack на $IFACE"
 fi
-./bin/xdpflowd \
+
+# stdbuf: line-buffered stdout/stderr, иначе stats-строки могут ждать в 4KB-буфере
+# и не попадать в лог при коротких прогонах.
+XDP_STDBUF=""
+if command -v stdbuf >/dev/null 2>&1; then
+  XDP_STDBUF="stdbuf -oL -eL"
+fi
+
+# Продублируем точную командную строку в начало лога, чтобы при разборе
+# было видно, с какими флагами реально стартовали.
+{
+  echo "=== xdpflowd launch at $(date -Is) ==="
+  echo "cmdline: $XDP_STDBUF ./bin/xdpflowd -iface $IFACE -mode native -xdp-action $XDP_ACTION -bpf ./bpf/xdp_flow.o -nf-dst '$NF_DSTS' -nf-active 1800s -nf-idle 15s -nf-template-interval 60s -interval 5s -json-out '$JSON_OUT' -json-interval 10s"
+  echo "WORKDIR: $WORKDIR"
+  echo ""
+} > "$LOG_XDP"
+
+$XDP_STDBUF ./bin/xdpflowd \
   -iface "$IFACE" \
   -mode native \
   -xdp-action "$XDP_ACTION" \
@@ -357,10 +374,10 @@ fi
   -nf-active 1800s \
   -nf-idle 15s \
   -nf-template-interval 60s \
-  -interval 10s \
+  -interval 5s \
   -json-out "$JSON_OUT" \
-  -json-interval 30s \
-  > "$LOG_XDP" 2>&1 &
+  -json-interval 10s \
+  >> "$LOG_XDP" 2>&1 &
 XDP_PID=$!
 
 # ждём, пока xdpflowd реально прицепит XDP
@@ -389,7 +406,20 @@ for i in $(seq 1 15); do
   fi
   sleep 1
 done
-echo "[$(date +%T)] xdpflowd up (pid=$XDP_PID). log: $LOG_XDP"
+echo "[$(date +%T)] xdpflowd up (pid=$XDP_PID). log: $LOG_XDP  ndjson: $JSON_OUT"
+
+# sanity: через 15 сек NDJSON должен существовать хотя бы с 1 строкой (-json-interval 10s)
+(
+  sleep 15
+  if kill -0 "$XDP_PID" 2>/dev/null; then
+    if [[ ! -s "$JSON_OUT" ]]; then
+      echo "[$(date +%T)] WARN: $JSON_OUT пустой через 15с — проверь, что бинарь собран с -json-out" | tee -a "$LOG_XDP"
+    else
+      lines=$(wc -l < "$JSON_OUT" 2>/dev/null || echo 0)
+      echo "[$(date +%T)] ndjson check ok: $lines lines in $JSON_OUT" | tee -a "$LOG_XDP"
+    fi
+  fi
+) &
 
 # ---------- watchdog + main wait ----------
 # каждые 10 сек проверяем:
