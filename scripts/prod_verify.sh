@@ -107,10 +107,17 @@ rm -f "$NOW_SYSCTL"
 
 # ---------- 4) module loaded ----------
 hdr "ipt_NETFLOW module"
-if lsmod | grep -qiE "^ipt_netflow"; then
+# Three independent checks — some environments have lsmod output whitespace
+# quirks or /proc/modules variants. Pass if ANY of them sees the module:
+#   (a) /proc/modules — authoritative kernel interface, no formatting issues
+#   (b) /sys/module/ipt_NETFLOW — present while module is loaded
+#   (c) lsmod grep  — last-resort
+if grep -qE '^ipt_NETFLOW[[:space:]]' /proc/modules 2>/dev/null \
+   || [ -d /sys/module/ipt_NETFLOW ] \
+   || lsmod 2>/dev/null | awk '{print $1}' | grep -qxE 'ipt_NETFLOW|ipt_netflow'; then
   ok "ipt_NETFLOW loaded"
 else
-  bad "ipt_NETFLOW NOT loaded!"
+  bad "ipt_NETFLOW NOT loaded (checked /proc/modules, /sys/module, lsmod)"
 fi
 
 # ---------- 5) listening ports ----------
@@ -179,10 +186,31 @@ fi
 hdr "ipt_NETFLOW throughput sanity"
 NOW_ST=$(mktemp)
 cat /proc/net/stat/ipt_netflow > "$NOW_ST" 2>/dev/null
+
+# Extract the authoritative "packets seen" counter. ipt_NETFLOW prints
+# several formats depending on version and "promisc" options — parse all
+# of them and pick the first match:
+#   - modern header:  "Flows: active <n> ..., pkt_total <N>"
+#   - human summary:  "Promisc hack is enabled (observed <N> packets, discarded ...)"
+#   - hashed table:   column-aligned stats line starting with a number
+extract_pkts() {
+  local f=$1
+  # 1) explicit "pkt_total <N>" label (most versions)
+  local v
+  v=$(grep -oE 'pkt_total[[:space:]]+[0-9]+' "$f" | head -1 | awk '{print $2}')
+  if [[ "$v" =~ ^[0-9]+$ ]]; then echo "$v"; return; fi
+  # 2) "observed N packets" in the Promisc hack line
+  v=$(grep -oE 'observed[[:space:]]+[0-9]+[[:space:]]+packets' "$f" | head -1 | awk '{print $2}')
+  if [[ "$v" =~ ^[0-9]+$ ]]; then echo "$v"; return; fi
+  # 3) fallback: first purely numeric token on the first data line
+  v=$(awk 'NR==2{for(i=1;i<=NF;i++) if($i ~ /^[0-9]+$/) {print $i; exit}}' "$f")
+  if [[ "$v" =~ ^[0-9]+$ ]]; then echo "$v"; return; fi
+  echo ""
+}
+
 if [ -s "$SNAP/20_proc_stat_netflow.txt" ] && [ -s "$NOW_ST" ]; then
-  # первая строка заголовок, вторая — agregate. Сравним pkt_total (первая колонка на строке 2).
-  BASE_PKTS=$(awk 'NR==2{print $1}' "$SNAP/20_proc_stat_netflow.txt")
-  NOW_PKTS=$(awk 'NR==2{print $1}'  "$NOW_ST")
+  BASE_PKTS=$(extract_pkts "$SNAP/20_proc_stat_netflow.txt")
+  NOW_PKTS=$(extract_pkts "$NOW_ST")
   if [[ "$BASE_PKTS" =~ ^[0-9]+$ ]] && [[ "$NOW_PKTS" =~ ^[0-9]+$ ]]; then
     if (( NOW_PKTS > BASE_PKTS )); then
       DELTA=$(( NOW_PKTS - BASE_PKTS ))
