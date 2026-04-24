@@ -7,9 +7,10 @@ import (
 
 // Stats is updated from the XDP/AF_XDP receive path (one writer goroutine; atomics for reads).
 type Stats struct {
-	packets, bytes                 atomic.Uint64
-	ipv4, ipv6, other, tooShort    atomic.Uint64
-	pollIters                      atomic.Uint64
+	packets, bytes              atomic.Uint64
+	ipv4, ipv6, other, tooShort atomic.Uint64
+	parseErr, nonIP, mapFull    atomic.Uint64
+	pollIters                   atomic.Uint64
 }
 
 func (s *Stats) AddPoll() {
@@ -41,6 +42,9 @@ type WireGroundTruth struct {
 	IPv6           uint64 `json:"ipv6"`
 	Other          uint64 `json:"other"`
 	TooShort       uint64 `json:"too_short"`
+	ParseErrors    uint64 `json:"parse_errors,omitempty"`
+	NonIP          uint64 `json:"non_ip_pass,omitempty"`
+	MapFull        uint64 `json:"map_full,omitempty"`
 	PollIterations uint64 `json:"poll_iterations"`
 }
 
@@ -53,6 +57,9 @@ func (s *Stats) snapshot() WireGroundTruth {
 		IPv6:           s.ipv6.Load(),
 		Other:          s.other.Load(),
 		TooShort:       s.tooShort.Load(),
+		ParseErrors:    s.parseErr.Load(),
+		NonIP:          s.nonIP.Load(),
+		MapFull:        s.mapFull.Load(),
 		PollIterations: s.pollIters.Load(),
 	}
 }

@@ -9,25 +9,40 @@ import (
 type Config struct {
 	Interface  string
 	QueueID    int
-	MaxQueues  int  // xsk map / qidconf array size, >= QueueID+1
-	PollMs     int  // xsk.Poll timeout; -1 = block
+	MaxQueues  int // xsk map / qidconf array size, >= QueueID+1
+	PollMs     int // xsk.Poll timeout; -1 = block
 	StatsEvery time.Duration
 
 	UMEMFrames int
 	FrameSize  int
 	// UseSKBMode forces generic XDP (good for some VMs / when native XDP fails).
 	UseSKBMode bool
+
+	// NetFlow v9 (optional). Empty NFDst = wire counters only, no userspace flow map.
+	NFDst              string
+	NFActive           time.Duration
+	NFIdle             time.Duration
+	NFTemplateInterval time.Duration
+	NFScan             time.Duration
+	NFSourceID         uint32
+	FlowMapMax         int
 }
 
 // DefaultConfig returns production-ish defaults for single-queue capture.
 func DefaultConfig() Config {
 	return Config{
-		QueueID:    0,
-		MaxQueues:  64,
-		PollMs:     250,
-		StatsEvery: 2 * time.Second,
-		UMEMFrames: 4096,
-		FrameSize:  2048,
+		QueueID:            0,
+		MaxQueues:          64,
+		PollMs:             250,
+		StatsEvery:         2 * time.Second,
+		UMEMFrames:         4096,
+		FrameSize:          2048,
+		NFActive:           120 * time.Second,
+		NFIdle:             15 * time.Second,
+		NFTemplateInterval: 60 * time.Second,
+		NFScan:             1 * time.Second,
+		NFSourceID:         1,
+		FlowMapMax:         1_000_000,
 	}
 }
 
@@ -62,6 +77,24 @@ func (c *Config) merged() Config {
 	}
 	if out.FrameSize < 64 {
 		out.FrameSize = d.FrameSize
+	}
+	if out.NFActive <= 0 {
+		out.NFActive = d.NFActive
+	}
+	if out.NFIdle <= 0 {
+		out.NFIdle = d.NFIdle
+	}
+	if out.NFTemplateInterval <= 0 {
+		out.NFTemplateInterval = d.NFTemplateInterval
+	}
+	if out.NFScan <= 0 {
+		out.NFScan = d.NFScan
+	}
+	if out.NFSourceID == 0 {
+		out.NFSourceID = d.NFSourceID
+	}
+	if out.FlowMapMax <= 0 {
+		out.FlowMapMax = d.FlowMapMax
 	}
 	return out
 }

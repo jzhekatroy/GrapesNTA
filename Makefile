@@ -26,9 +26,13 @@ BPF_CFLAGS := -O2 -g -Wall -target bpf -I/usr/include/x86_64-linux-gnu \
 BPF_O := bpf/xdp_flow.o
 AFXDP_BPF_O := bpf/afxdp_redirect.o
 
-.PHONY: all bpf afxdp-bpf build build-afxdp clean run tidy
+.PHONY: all bpf afxdp-bpf build build-afxdp clean run tidy ensure-mod
 
 all: build
+
+# Sync go.sum with go.mod (fixes "missing go.sum entry" on fresh/incomplete checkouts).
+ensure-mod: go.mod
+	$(GO) mod tidy
 
 tidy:
 	$(GO) mod tidy
@@ -45,13 +49,13 @@ bpf: $(BPF_O)
 
 afxdp-bpf: $(AFXDP_BPF_O)
 
-build: $(BPF_O)
+build: ensure-mod $(BPF_O)
 	@mkdir -p bin
 	@echo "Using Go: $(GO)" && $(GO) version
 	$(GO) build -o bin/xdpflowd ./cmd/xdpflowd
 
 # AF_XDP daemon: uses embedded xsk eBPF (planktonzp/xdp); optional separate bpf/afxdp_redirect.o is not required.
-build-afxdp:
+build-afxdp: ensure-mod
 	@mkdir -p bin
 	@echo "Using Go: $(GO)" && $(GO) version
 	$(GO) build -o bin/afxdpflowd ./cmd/afxdpflowd

@@ -5,17 +5,20 @@ package afxdp
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"net"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/cilium/ebpf/rlimit"
 	"github.com/planktonzp/xdp"
 	"golang.org/x/sys/unix"
+	"xdpflowd/internal/netv9"
 )
 
-// Run attaches the stock libbpf-style XDP redirect program, opens one AF_XDP
-// socket on (iface, queue), and counts every L2 frame for wire_ground_truth JSON.
+// Run attaches XDP redirect + AF_XDP socket, counts L2 frames, and optionally
+// aggregates flows in userspace and exports NetFlow v9 (same templates as xdpflowd).
 func Run(ctx context.Context, c Config) error {
 	cfg := c.merged()
 	if err := cfg.validate(); err != nil {
@@ -30,6 +33,8 @@ func Run(ctx context.Context, c Config) error {
 		return fmt.Errorf("afxdp: interface %q: %w", cfg.Interface, err)
 	}
 	ifIndex := iface.Index
+	log := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	log.Info("afxdpflowd started", "iface", cfg.Interface, "queue", cfg.QueueID, "ifindex", ifIndex, "skb", cfg.UseSKBMode)
 
 	if cfg.UseSKBMode {
 		xdp.DefaultXdpFlags = unix.XDP_FLAGS_SKB_MODE
@@ -77,6 +82,29 @@ func Run(ctx context.Context, c Config) error {
 	}()
 
 	var st Stats
+	var exp *netv9.Exporter
+	var agg *FlowAgg
+	if s := strings.TrimSpace(cfg.NFDst); s != "" {
+		dests := splitCSV(s)
+		ne, nerr := netv9.NewExporter(log, dests, cfg.NFSourceID, cfg.NFActive, cfg.NFIdle, cfg.NFTemplateInterval)
+		if nerr != nil {
+			return fmt.Errorf("afxdp: netflow: %w", nerr)
+		}
+		exp = ne
+		defer exp.Close()
+		exp.SendTemplate()
+		agg = NewFlowAgg(cfg.FlowMapMax, uint32(ifIndex), uint32(cfg.QueueID), &st)
+		log.Info("afxdpflowd netflow v9 export enabled",
+			"dsts", dests,
+			"active_timeout", cfg.NFActive,
+			"idle_timeout", cfg.NFIdle,
+			"template_interval", cfg.NFTemplateInterval,
+			"scan_interval", cfg.NFScan,
+			"source_id", cfg.NFSourceID,
+			"ifindex", ifIndex,
+		)
+	}
+
 	pollTo := cfg.PollMs
 	tick := time.NewTicker(cfg.StatsEvery)
 	defer tick.Stop()
@@ -85,7 +113,29 @@ func Run(ctx context.Context, c Config) error {
 			_, _ = fmt.Fprintf(os.Stderr, "%s\n", b)
 		}
 	}
-	defer emitStats()
+	defer func() {
+		if exp != nil && agg != nil {
+			_ = agg.FlushAll(exp)
+			exp.LogMetrics()
+		}
+		emitStats()
+	}()
+
+	// NetFlow scan (idle/active) — same cadence as xdpflowd -nf-scan.
+	if exp != nil && agg != nil {
+		go func() {
+			scanT := time.NewTicker(cfg.NFScan)
+			defer scanT.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-scanT.C:
+					_ = agg.ScanAndExport(exp)
+				}
+			}
+		}()
+	}
 
 	for {
 		select {
@@ -93,6 +143,10 @@ func Run(ctx context.Context, c Config) error {
 			return nil
 		case <-tick.C:
 			emitStats()
+			if exp != nil && agg != nil {
+				log.Info("stats", "flows_in_map", agg.FlowsInMap())
+				exp.LogMetrics()
+			}
 		default:
 		}
 
@@ -124,7 +178,22 @@ func Run(ctx context.Context, c Config) error {
 			if d.Len > 0 && int(d.Len) <= len(buf) {
 				buf = buf[:d.Len]
 			}
-			st.addFrame(len(buf), classifyL2(buf))
+			if agg != nil {
+				agg.OnFrame(buf)
+			} else {
+				st.addFrame(len(buf), classifyL2(buf))
+			}
 		}
 	}
+}
+
+func splitCSV(s string) []string {
+	var out []string
+	for _, f := range strings.Split(s, ",") {
+		f = strings.TrimSpace(f)
+		if f != "" {
+			out = append(out, f)
+		}
+	}
+	return out
 }
