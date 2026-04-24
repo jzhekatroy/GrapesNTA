@@ -235,7 +235,7 @@ collect_window A "$A_DIR" 0
 echo ""
 echo "===== Starting prod_ab_swap (XDP_ACTION=$XDP_ACTION, ${DURATION_DROP}s) ====="
 (
-  XDP_ACTION="$XDP_ACTION" "$REPO_ROOT/scripts/prod_ab_swap.sh" \
+  XDP_ACTION="$XDP_ACTION" XDP_MODE="$XDP_MODE" "$REPO_ROOT/scripts/prod_ab_swap.sh" \
     "$DURATION_DROP" "$IFACE" \
     > "$WORKDIR/prod_ab_swap.log" 2>&1
 ) &
