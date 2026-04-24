@@ -30,6 +30,18 @@
 #define ETH_P_8021AD 0x88A8
 #endif
 
+/*
+ * xdp_final_action — XDP return value for *successfully accounted* IP packets.
+ * Userspace can rewrite this const via RewriteConstants before loading:
+ *   XDP_PASS (2) — let packet continue through kernel stack (default, safe)
+ *   XDP_DROP (1) — drop after accounting, saves kernel RX path CPU.
+ *                  ONLY SAFE on SPAN/mirror interfaces where the packet
+ *                  is not needed downstream.
+ * Non-IP traffic (ARP, LLDP, etc.) and packets that failed parsing always
+ * return XDP_PASS regardless of this setting.
+ */
+const volatile __u32 xdp_final_action = XDP_PASS;
+
 struct flow_key {
 	__u8  src_addr[16];
 	__u8  dst_addr[16];
@@ -380,7 +392,7 @@ int xdp_flow_prog(struct xdp_md *ctx)
 				bump_stat(2);
 			}
 		}
-		return XDP_PASS;
+		return xdp_final_action;
 	}
 
 	if (h_proto == bpf_htons(ETH_P_IPV6)) {
@@ -468,7 +480,7 @@ int xdp_flow_prog(struct xdp_md *ctx)
 				bump_stat(2);
 			}
 		}
-		return XDP_PASS;
+		return xdp_final_action;
 	}
 
 	/* Not IPv4 and not IPv6 (ARP, LLDP, STP, 802.1AD with non-IP inner, etc.). */

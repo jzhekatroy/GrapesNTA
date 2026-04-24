@@ -17,11 +17,36 @@ type Objects struct {
 	Stats       *ebpf.Map
 }
 
-// LoadObjects loads an eBPF collection from a compiled ELF path (e.g. bpf/xdp_flow.o).
+// Options controls the BPF collection load. Zero-value is safe and equivalent
+// to previous behavior (XDP_PASS for accounted packets).
+type Options struct {
+	// XDPFinalAction overrides the `xdp_final_action` const in the BPF program.
+	// Valid values: 2 = XDP_PASS (safe, default), 1 = XDP_DROP (SPAN/mirror only).
+	// 0 means "leave as compiled-in default".
+	XDPFinalAction uint32
+}
+
+// LoadObjects loads an eBPF collection from a compiled ELF path (e.g. bpf/xdp_flow.o)
+// with default options.
 func LoadObjects(bpfObjPath string) (*Objects, error) {
+	return LoadObjectsWithOptions(bpfObjPath, Options{})
+}
+
+// LoadObjectsWithOptions loads the ELF and, when opts contains non-zero overrides,
+// rewrites the corresponding `const volatile` globals before instantiating the
+// collection.
+func LoadObjectsWithOptions(bpfObjPath string, opts Options) (*Objects, error) {
 	spec, err := ebpf.LoadCollectionSpec(bpfObjPath)
 	if err != nil {
 		return nil, fmt.Errorf("load spec %q: %w", bpfObjPath, err)
+	}
+
+	if opts.XDPFinalAction != 0 {
+		if err := spec.RewriteConstants(map[string]interface{}{
+			"xdp_final_action": opts.XDPFinalAction,
+		}); err != nil {
+			return nil, fmt.Errorf("rewrite xdp_final_action=%d: %w", opts.XDPFinalAction, err)
+		}
 	}
 
 	coll, err := ebpf.NewCollectionWithOptions(spec, ebpf.CollectionOptions{

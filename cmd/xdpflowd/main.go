@@ -295,6 +295,7 @@ func main() {
 	nfTemplateInterval := flag.Duration("nf-template-interval", 60*time.Second, "NetFlow template re-send interval")
 	nfScan := flag.Duration("nf-scan", 1*time.Second, "how often to walk the flows map for NetFlow export")
 	nfSourceID := flag.Int("nf-source-id", 1, "NetFlow v9 source_id field (exporter observation domain)")
+	xdpAction := flag.String("xdp-action", "pass", "XDP return value for accounted IP packets: pass|drop. DROP only on SPAN/mirror interfaces — it stops the kernel stack after accounting and saves CPU.")
 	flag.Parse()
 
 	log := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
@@ -310,7 +311,21 @@ func main() {
 		os.Exit(1)
 	}
 
-	objs, err := loader.LoadObjects(*bpfObj)
+	// XDP_PASS=2, XDP_DROP=1 (values from uapi/linux/bpf.h).
+	var xdpFinalAction uint32
+	switch strings.ToLower(*xdpAction) {
+	case "pass":
+		xdpFinalAction = 2
+	case "drop":
+		xdpFinalAction = 1
+	default:
+		log.Error("unknown xdp-action", "value", *xdpAction, "allowed", "pass|drop")
+		os.Exit(1)
+	}
+
+	objs, err := loader.LoadObjectsWithOptions(*bpfObj, loader.Options{
+		XDPFinalAction: xdpFinalAction,
+	})
 	if err != nil {
 		log.Error("load eBPF objects", "err", err)
 		os.Exit(1)
@@ -341,7 +356,10 @@ func main() {
 	}
 	defer lnk.Close()
 
-	log.Info("xdpflowd started", "iface", *iface, "mode", *mode, "ifindex", ifi.Index)
+	log.Info("xdpflowd started", "iface", *iface, "mode", *mode, "ifindex", ifi.Index, "xdp_action", *xdpAction)
+	if *xdpAction == "drop" {
+		log.Warn("XDP_DROP mode: accounted IP packets WILL NOT reach the kernel stack — only safe on SPAN/mirror interfaces")
+	}
 
 	jInt := *jsonInterval
 	if jInt == 0 {

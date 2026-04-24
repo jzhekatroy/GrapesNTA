@@ -40,6 +40,22 @@ sudo ./bin/xdpflowd -iface ens18 -mode native -bpf ./bpf/xdp_flow.o
 | `-nf-template-interval` | Re-send NFv9 template (default `60s`) |
 | `-nf-scan` | How often to walk the map for export (default `1s`) |
 | `-nf-source-id` | NFv9 `source_id` (observation domain, default `1`) |
+| `-xdp-action` | XDP return for accounted IP packets: `pass` (default, safe) or `drop`. **Use `drop` only on SPAN/mirror interfaces** — drops the packet from the kernel stack after accounting, saving ~30% softirq CPU on a 2.5-3 Mpps flow. Non-IP (ARP, LLDP) always passes. |
+
+### XDP_DROP on SPAN/mirror
+
+For monitoring-only ports where kernel doesn't need to process packets further,
+add `-xdp-action drop` to eliminate the `skb_alloc` + `netfilter` + `routing`
+cost per packet. This is where the real Phase 3 CPU win lives (as opposed to
+`XDP_PASS`, which adds BPF cost on top of the existing kernel path).
+
+```bash
+sudo ./bin/xdpflowd -iface enp5s0d1 -mode native -xdp-action drop \
+     -nf-dst 127.0.0.1:9996 -nf-active 60s -nf-idle 15s
+```
+
+**DO NOT use `-xdp-action drop` on a regular routing interface** — packets will
+be silently dropped and forwarding will break.
 
 ### NetFlow v9 export
 
