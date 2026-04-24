@@ -100,6 +100,16 @@ collect_window() {
 
   cp /proc/interrupts "$dir/interrupts.before"
 
+  # NIC drop-rate: снимаем ДО и ПОСЛЕ, в конце получаем дельту за окно.
+  # sysfs counter не сбрасывается между выборками (в отличие от ethtool после
+  # XDP attach), поэтому дельта точно отражает "потери за это окно".
+  cat /sys/class/net/"$IFACE"/statistics/rx_fifo_errors \
+    > "$dir/rx_fifo_errors.before" 2>/dev/null || echo 0 > "$dir/rx_fifo_errors.before"
+  cat /sys/class/net/"$IFACE"/statistics/rx_packets \
+    > "$dir/rx_packets.before" 2>/dev/null || echo 0 > "$dir/rx_packets.before"
+  cat /sys/class/net/"$IFACE"/statistics/rx_bytes \
+    > "$dir/rx_bytes.before" 2>/dev/null || echo 0 > "$dir/rx_bytes.before"
+
   # mpstat — фон, записывает в файл
   mpstat -P ALL 5 "$((dur / 5))" > "$dir/mpstat.txt" 2>&1 &
   MPSTAT_PID=$!
@@ -142,6 +152,14 @@ collect_window() {
   wait "$MPSTAT_PID" || true
 
   cp /proc/interrupts "$dir/interrupts.after"
+
+  # delta-snapshot NIC
+  cat /sys/class/net/"$IFACE"/statistics/rx_fifo_errors \
+    > "$dir/rx_fifo_errors.after" 2>/dev/null || echo 0 > "$dir/rx_fifo_errors.after"
+  cat /sys/class/net/"$IFACE"/statistics/rx_packets \
+    > "$dir/rx_packets.after" 2>/dev/null || echo 0 > "$dir/rx_packets.after"
+  cat /sys/class/net/"$IFACE"/statistics/rx_bytes \
+    > "$dir/rx_bytes.after" 2>/dev/null || echo 0 > "$dir/rx_bytes.after"
 
   # сохранить NIC counters
   ip -s link show "$IFACE" > "$dir/ip_s_link.txt" 2>&1 || true
@@ -252,22 +270,34 @@ echo "===== BUILDING SUMMARY ====="
 
 summarize_mpstat() {
   local f=$1
-  # "Average:  all  user nice sys iowait irq soft steal guest gnice idle"
+  # mpstat columns (after "Average:" and CPU-id):
+  #   $3=%usr $4=%nice $5=%sys $6=%iowait $7=%irq $8=%soft $9=%steal
+  #   $10=%guest $11=%gnice $12=%idle ($NF on modern sysstat)
   awk '
-    /^Average:/ && $2=="all" { printf "  all: usr=%s sys=%s soft=%s idle=%s\n", $4, $6, $9, $NF; next }
+    /^Average:/ && $2=="all" {
+      printf "  all: usr=%s sys=%s soft=%s idle=%s\n", $3, $5, $8, $NF; next
+    }
     /^Average:/ && $2 ~ /^[0-9]+$/ {
-      softirq=$9
-      if (softirq+0 > 10) printf "  CPU %s: softirq=%s%% idle=%s%%\n", $2, softirq, $NF
+      soft=$8
+      if (soft+0 > 5) printf "  CPU %s: softirq=%s%% idle=%s%%\n", $2, soft, $NF
     }
   ' "$f"
 }
 
 interrupts_delta_per_cpu() {
   local before=$1 after=$2 iface=$3
-  # вычислить delta per CPU для строк, где имя содержит iface
-  python3 - "$before" "$after" "$iface" <<'PY' 2>/dev/null || return 0
+
+  # Определяем, по какому "маркеру" искать IRQ в /proc/interrupts:
+  # у mlx4 имя IRQ выглядит "mlx4-25@0000:05:00.0" — там PCI-id, а не iface.
+  # Поэтому ищем одновременно iface И pci, берём объединение совпадений.
+  local pci=""
+  if [[ -L "/sys/class/net/${iface}/device" ]]; then
+    pci=$(basename "$(readlink -f /sys/class/net/"$iface"/device)")
+  fi
+
+  python3 - "$before" "$after" "$iface" "$pci" <<'PY' 2>/dev/null || return 0
 import sys, re
-before, after, iface = sys.argv[1], sys.argv[2], sys.argv[3]
+before, after, iface, pci = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
 def parse(f):
     out = {}
     with open(f) as fh:
@@ -284,7 +314,11 @@ def parse(f):
                 else:
                     name = ' '.join(parts[i:])
                     break
-            if iface in name:
+            # match by iface name or PCI id anywhere in the IRQ description
+            matched = False
+            if iface and iface in name: matched = True
+            if pci and pci in name: matched = True
+            if matched:
                 out[irq] = counts
     return out
 a = parse(before); b = parse(after)
@@ -332,12 +366,26 @@ PY
     echo "  (no profile data)"
   fi
   echo ""
-  echo "----- NIC counters delta -----"
-  echo "A (ethtool -S drops/fifo):"
-  grep -E 'drop|fifo|discard|missed' "$A_DIR/ethtool_S.txt" 2>/dev/null | head -20 || true
-  echo ""
-  echo "B (ethtool -S drops/fifo):"
-  grep -E 'drop|fifo|discard|missed' "$B_DIR/ethtool_S.txt" 2>/dev/null | head -20 || true
+  echo "----- NIC rate per window (from sysfs deltas) -----"
+  sysfs_window_rate() {
+    local dir=$1 dur=$2
+    local pb=$(cat "$dir/rx_packets.before" 2>/dev/null || echo 0)
+    local pa=$(cat "$dir/rx_packets.after"  2>/dev/null || echo 0)
+    local bb=$(cat "$dir/rx_bytes.before"   2>/dev/null || echo 0)
+    local ba=$(cat "$dir/rx_bytes.after"    2>/dev/null || echo 0)
+    local fb=$(cat "$dir/rx_fifo_errors.before" 2>/dev/null || echo 0)
+    local fa=$(cat "$dir/rx_fifo_errors.after"  2>/dev/null || echo 0)
+    local dp=$((pa - pb)); local db=$((ba - bb)); local df=$((fa - fb))
+    local pps=$(( dp / dur ))
+    local bps=$(( db * 8 / dur ))   # bits/sec
+    local fps=$(( df / dur ))
+    printf "  rx: %'d pps  %'d bits/sec  |  fifo_drops: %'d total  %'d drops/sec\n" \
+      "$pps" "$bps" "$df" "$fps"
+  }
+  echo "A (baseline, ipt_NETFLOW):"
+  sysfs_window_rate "$A_DIR" "$DURATION_WINDOW"
+  echo "B (xdpflowd XDP_DROP):"
+  sysfs_window_rate "$B_DIR" "$DURATION_WINDOW"
   echo ""
   echo "Full data in: $WORKDIR"
   echo "  A: $A_DIR"
