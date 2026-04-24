@@ -87,8 +87,13 @@ struct {
 	__type(value, struct flow_value);
 } flows SEC(".maps");
 
+/* PERCPU_ARRAY: each CPU gets its own slot, so bumping counters on the
+ * XDP fast path avoids cross-core cache-line bouncing (LOCK XADD on a
+ * shared line is the single biggest hot spot when 24 cores hit the same
+ * array on every packet). Userspace sums across CPUs at read time.
+ */
 struct {
-	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
 	__uint(max_entries, 4);
 	__type(key, __u32);
 	__type(value, __u64);
@@ -122,9 +127,12 @@ struct pkt_info {
 
 static __always_inline void bump_stat(__u32 idx)
 {
+	/* PERCPU_ARRAY: the pointer we get back is this CPU's slot — no other
+	 * CPU ever touches it during XDP processing, so a plain increment is
+	 * safe and ~order of magnitude cheaper than LOCK XADD. */
 	__u64 *c = bpf_map_lookup_elem(&stats, &idx);
 	if (c)
-		__sync_fetch_and_add(c, 1);
+		(*c)++;
 }
 
 static __always_inline void ipv4_addrs_to_key(struct flow_key *key, __be32 saddr, __be32 daddr)

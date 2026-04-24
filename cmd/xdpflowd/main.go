@@ -3,7 +3,6 @@ package main
 
 import (
 	"context"
-	"encoding/binary"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -16,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/link"
 	"github.com/cilium/ebpf/rlimit"
 	"xdpflowd/internal/loader"
@@ -92,19 +92,34 @@ type jsonFlow struct {
 	IPFragCount uint32 `json:"ip_frag_count"`
 }
 
+// readStat sums the per-CPU values of stats[idx]. The BPF map is a
+// PERCPU_ARRAY, so the kernel keeps one counter per CPU to avoid
+// cross-core cache-line contention on the XDP fast path; userspace
+// reconstructs the logical total by summing across all CPUs.
 func readStat(objs *loader.Objects, idx uint32) uint64 {
-	var buf [8]byte
-	if err := objs.Stats.Lookup(idx, buf[:]); err != nil {
+	// Pre-sizing the slice to PossibleCPU() avoids any reliance on the
+	// library's internal auto-resize behaviour on Lookup.
+	perCPU := make([]uint64, ebpf.MustPossibleCPU())
+	if err := objs.Stats.Lookup(idx, perCPU); err != nil {
 		return 0
 	}
-	return binary.LittleEndian.Uint64(buf[:])
+	var total uint64
+	for _, v := range perCPU {
+		total += v
+	}
+	return total
 }
 
 func zeroStats(objs *loader.Objects) {
-	var z uint64
+	// PERCPU_ARRAY updates must carry exactly PossibleCPU() values —
+	// the kernel keeps one slot per *possible* CPU (from
+	// /sys/devices/system/cpu/possible), which on hyper-threaded hosts
+	// and VMs can differ from runtime.NumCPU().
+	nCPU := ebpf.MustPossibleCPU()
+	perCPU := make([]uint64, nCPU)
 	var k uint32
 	for k = 0; k < 4; k++ {
-		_ = objs.Stats.Update(k, z, 0)
+		_ = objs.Stats.Update(k, perCPU, 0)
 	}
 }
 
