@@ -18,4 +18,26 @@
 //
 //  - Tag on main: baseline before AF_XDP (e.g. v0.2.0-baseline).
 //  - Debug on VM (functional); load / fifo / CPU tests on the real server.
+//
+// # Repository layout (this effort)
+//
+//  cmd/
+//    xdpflowd/          — current production path: eBPF map + userspace read (unchanged on main)
+//    afxdpflowd/        — new entrypoint: UMEM, xsk rings, workers; reuses netflow export
+//  internal/
+//    afxdp/             — config, xsk/UMEM glue (Go); optional cgo to libxdp or raw syscalls
+//    loader/            — existing BPF loader; afxdp may add second Program for xsks map
+//    netv9/             — (phase 2) move NetFlow v9 encoder from cmd/xdpflowd/netflow.go
+//  bpf/
+//    xdp_flow.c         — existing flow map program (v0.2.0-baseline)
+//    afxdp_redirect.c  — tiny XDP: bpf_redirect to AF_XDP socket map (per queue)
+//  bin/
+//    xdpflowd           — make build
+//    afxdpflowd         — make build-afxdp
+//
+// # Why cmd/afxdpflowd instead of one binary
+//
+//  - Smaller change risk: xdpflowd stays the known-good eBPF+map path.
+//  - afxdpflowd can link cgo / static libs without touching the map daemon.
+//  - Ops can run either binary per host until cutover.
 package afxdp

@@ -24,8 +24,9 @@ BPF_CFLAGS := -O2 -g -Wall -target bpf -I/usr/include/x86_64-linux-gnu \
               -DFLOWS_MAP_SIZE=$(FLOWS_MAP_SIZE)
 
 BPF_O := bpf/xdp_flow.o
+AFXDP_BPF_O := bpf/afxdp_redirect.o
 
-.PHONY: all bpf build clean run tidy
+.PHONY: all bpf afxdp-bpf build build-afxdp clean run tidy
 
 all: build
 
@@ -36,17 +37,29 @@ $(BPF_O): bpf/xdp_flow.c
 	@mkdir -p bpf
 	$(CLANG) $(BPF_CFLAGS) -c bpf/xdp_flow.c -o $(BPF_O)
 
+$(AFXDP_BPF_O): bpf/afxdp_redirect.c
+	@mkdir -p bpf
+	$(CLANG) $(BPF_CFLAGS) -c bpf/afxdp_redirect.c -o $(AFXDP_BPF_O)
+
 bpf: $(BPF_O)
+
+afxdp-bpf: $(AFXDP_BPF_O)
 
 build: $(BPF_O)
 	@mkdir -p bin
 	@echo "Using Go: $(GO)" && $(GO) version
 	$(GO) build -o bin/xdpflowd ./cmd/xdpflowd
 
+# AF_XDP daemon (WIP on branch feature/afxdp). Builds stub binary + redirect BPF object.
+build-afxdp: $(AFXDP_BPF_O)
+	@mkdir -p bin
+	@echo "Using Go: $(GO)" && $(GO) version
+	$(GO) build -o bin/afxdpflowd ./cmd/afxdpflowd
+
 run: build
 	sudo ./bin/xdpflowd -iface ens18 -mode native -bpf $(BPF_O)
 
 clean:
-	rm -f bin/xdpflowd $(BPF_O)
+	rm -f bin/xdpflowd bin/afxdpflowd $(BPF_O) $(AFXDP_BPF_O)
 
 .DEFAULT_GOAL := build
