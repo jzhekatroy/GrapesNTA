@@ -35,6 +35,58 @@ user:  develop
 version: 24.11.1
 ```
 
+## Экспортёры (наблюдение 2026-04-23)
+
+В проде **два** источника NFv9 попадают в `flows_raw`:
+
+| `sampler_address` (hex) | IPv4 | baseline (16:00-16:01) | примечание |
+| ----------------------- | ----- | ---------------------- | ---------- |
+| `AC130001...`           | `172.19.0.1` | **~820 000 rows/10s = ~82k flows/sec**, ~14 GiB/10s (~11 Gbit/s) | Docker-bridge gateway, **основной** экспортёр, ≈ 94% объёма |
+| `AC120001...`           | `172.18.0.1` | ~56 000 rows/10s = ~5.6k flows/sec, ~1.5 GiB/10s | Другой docker-bridge, **вторичный**, ≈ 6% объёма |
+
+`sampler_address` тут **не** `127.0.0.1` — потому что goflow2 слушает внутри контейнера, а UDP-пакеты приходят через `docker-proxy` и видны как пришедшие с bridge-gateway.
+
+> **TODO:** выяснить, что за сеть `172.19.0.0/16` и почему **оттуда** идёт основной поток (возможно удалённый экспортёр с другого сервера, пробрасывается через публичный IP + DNAT → docker network; или второй `ipt_NETFLOW` из другого контейнера).
+
+### Запрос для проверки экспортёров
+
+```sql
+SELECT
+  hex(sampler_address) AS exporter_hex,
+  toStartOfInterval(time_received_ns, toIntervalMinute(10)) AS bucket,
+  count() AS rows,
+  formatReadableSize(sum(bytes)) AS bytes_hr
+FROM default.flows_raw
+WHERE time_received_ns > now64(9) - toIntervalHour(6)
+GROUP BY exporter_hex, bucket
+ORDER BY bucket DESC, rows DESC
+LIMIT 100;
+```
+
+### Аномалия 2026-04-23 16:11:30 — частичный отказ AC130001
+
+Зафиксирован **резкий спад** потока:
+
+| окно (UTC+3) | AC130001 (rows/10s) | AC120001 (rows/10s) | состояние |
+| ------------ | ------------------- | ------------------- | --------- |
+| 16:00:00-16:01:00 | ~820 000 | ~56 000 | **NORMAL** |
+| 16:11:30 (момент) | резкое падение | без изменений | начало сбоя |
+| 16:25:00-16:27:50 | **0** | ~53 000 | **BROKEN** (AC130001 не декодируется) |
+| 16:28:00-16:29:50 | всплеск ~1.2M/10s | ~55 000 | после `docker restart kcg-goflow2-1` — временно ожил |
+| 16:33:00+ | **0** снова | ~55 000 | опять сломан |
+
+**Признаки:**
+- `goflow2` лог забит `level=WARN msg="template error"` с первого же коннекта;
+- перезапуск контейнера даёт ~2-минутный burst (пока NFv9-шаблоны от AC130001 свежие), затем снова деградация;
+- `softly reset` через `sysctl -w net.netflow.destination=...` на **локальном** `ipt_NETFLOW` (127.0.0.1) ситуацию с AC130001 не исправляет → локальный `ipt_NETFLOW` и AC130001 — это **разные** источники.
+
+**Гипотезы:**
+1. Удалённый экспортёр (сервер B) шлёт NFv9 с экзотическими/enterprise-template fields, которые этот goflow2 не умеет декодировать → `template error`.
+2. Изменение на удалённом экспортёре в 16:11:30 (обновление, смена шаблонов, перезагрузка).
+3. Buffer/queue внутри goflow2 переполняется (`too many receiver messages, muting`) и дропает именно «тяжёлого» отправителя.
+
+**Важно для Phase 3:** наш `xdpflowd` шлёт только стандартные IANA-поля, поэтому `template error` у goflow2 быть не должно. Если после запуска `xdpflowd` в CH появятся записи с `sampler_address` = наш адрес и без дыр — это **подтверждает**, что проблема именно в несовместимости шаблонов, а не в сети / Kafka / CH.
+
 ## Таблицы
 
 ### `default.flows_raw` (MergeTree) — **целевая**
@@ -168,20 +220,27 @@ LIMIT 10;
 Ожидаем то же распределение, что и в `nfdump`:
 - TCP ≈ 72%, UDP ≈ 24%, GRE/ESP/ICMP ≈ 4%.
 
-### 4. sampler_address — sanity (должен быть 127.0.0.1)
+### 4. sampler_address — sanity
 
 ```sql
 SELECT
-  IPv6NumToString(sampler_address) AS sampler,
-  count()
+  hex(sampler_address) AS sampler_hex,
+  count() AS rows,
+  formatReadableSize(sum(bytes)) AS bytes_hr
 FROM default.flows_raw
-WHERE time_received_ns > now64(9) - INTERVAL 5 MINUTE
-GROUP BY sampler
-ORDER BY count() DESC;
+WHERE time_received_ns > now64(9) - toIntervalMinute(5)
+GROUP BY sampler_hex
+ORDER BY rows DESC;
 ```
 
-Если до замены там `::ffff:127.0.0.1` (или `::1`) — после xdpflowd должно быть
-то же значение.
+До замены ожидаем оба экспортёра (`AC130001...` и `AC120001...`, см. раздел
+«Экспортёры»). После Phase 3 в дополнение к ним должна появиться запись с
+адресом, с которого шлёт наш `xdpflowd` (обычно `127.0.0.1` →
+`00000000000000000000FFFF7F000001` или gateway соответствующего docker-bridge).
+
+> Внимание: **не** использовать `IPv6NumToString(sampler_address)` напрямую —
+> в CH 24.11 даёт ошибку. Либо `hex()`, либо `IPv6NumToString(toIPv6(sampler_address))`
+> (но без агрегатов внутри агрегатов).
 
 ### 5. Дыра или завал (per-10-sec buckets)
 
@@ -228,3 +287,9 @@ ORDER BY t;
 - [ ] `SHOW CREATE TABLE default.flows_raw_view` — увидеть как MV мапит поля.
 - [ ] Проверить `src_as`/`dst_as` в реальных данных (есть ли сигнал).
 - [ ] Запустить 3-минутный Phase 3 drop-run и сверить с запросами выше.
+- [ ] Выяснить, кто прячется за `sampler_address` = `172.19.0.1` (удалённый
+      сервер? другой контейнер?). Проверить на хосте:
+      `sudo docker network ls` и `sudo docker network inspect <net>`,
+      `sudo ss -ulnp` / `sudo tcpdump -ni any udp port 9999 -c 20`.
+- [ ] Отдельно: расследовать `template error` от AC130001 в goflow2 — что за
+      NFv9 template он шлёт, может ли новая версия goflow2 его распарсить.
