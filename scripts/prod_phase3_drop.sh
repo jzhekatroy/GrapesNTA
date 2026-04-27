@@ -26,7 +26,7 @@
 #   CH_PASS=... — опционально: снять ClickHouse rows/packets/bytes
 #       за последние CH_LOOKBACK_MIN минут до swap и после swap (default 2).
 #       По умолчанию БД захардкожена под текущий прод: default.flows @ 95.215.1.30:6124.
-#       Настройки: CH_HOST, CH_PORT, CH_USER, CH_TIME_COL, CH_PACKETS_COL, CH_BYTES_COL.
+#       Настройки: CH_HOST, CH_PORT, CH_USER, CH_TIME_EXPR, CH_PACKETS_COL, CH_BYTES_COL.
 
 set -euo pipefail
 
@@ -49,9 +49,10 @@ CH_USER="${CH_USER:-develop}"
 CH_PASS="${CH_PASS:-}"
 # Prod defaults (можно переопределить env'ами при необходимости)
 CH_TABLE="${CH_TABLE:-default.flows}"
-CH_TIME_COL="${CH_TIME_COL:-TimeReceived}"
-CH_PACKETS_COL="${CH_PACKETS_COL:-Packets}"
-CH_BYTES_COL="${CH_BYTES_COL:-Bytes}"
+# default.flows на проде хранит время в ns epoch; приводим к DateTime64 для группировки по минутам.
+CH_TIME_EXPR="${CH_TIME_EXPR:-fromUnixTimestamp64Nano(time_received_ns)}"
+CH_PACKETS_COL="${CH_PACKETS_COL:-packets}"
+CH_BYTES_COL="${CH_BYTES_COL:-bytes}"
 CH_LOOKBACK_MIN="${CH_LOOKBACK_MIN:-2}"
 
 if [[ $EUID -ne 0 ]]; then
@@ -208,17 +209,17 @@ collect_clickhouse_window() {
     echo "label=$label"
     echo "captured_at=$(date -Is)"
     echo "host=$CH_HOST port=$CH_PORT table=$CH_TABLE"
-    echo "time_col=$CH_TIME_COL packets_col=$CH_PACKETS_COL bytes_col=$CH_BYTES_COL lookback_min=$CH_LOOKBACK_MIN"
+    echo "time_expr=$CH_TIME_EXPR packets_col=$CH_PACKETS_COL bytes_col=$CH_BYTES_COL lookback_min=$CH_LOOKBACK_MIN"
     echo ""
     echo "-- per-minute rows/packets/bytes --"
     clickhouse-client --host "$CH_HOST" --port "$CH_PORT" -u "$CH_USER" --password "$CH_PASS" --format PrettyCompact -q "
       SELECT
-        toStartOfMinute(${CH_TIME_COL}) AS minute,
+        toStartOfMinute(${CH_TIME_EXPR}) AS minute,
         count() AS rows,
         sum(${CH_PACKETS_COL}) AS packets,
         sum(${CH_BYTES_COL}) AS bytes
       FROM ${CH_TABLE}
-      WHERE ${CH_TIME_COL} >= now() - INTERVAL ${CH_LOOKBACK_MIN} MINUTE
+      WHERE ${CH_TIME_EXPR} >= now() - INTERVAL ${CH_LOOKBACK_MIN} MINUTE
       GROUP BY minute
       ORDER BY minute
     "
@@ -229,10 +230,10 @@ collect_clickhouse_window() {
         count() AS rows,
         sum(${CH_PACKETS_COL}) AS packets,
         sum(${CH_BYTES_COL}) AS bytes,
-        min(${CH_TIME_COL}) AS min_ts,
-        max(${CH_TIME_COL}) AS max_ts
+        min(${CH_TIME_EXPR}) AS min_ts,
+        max(${CH_TIME_EXPR}) AS max_ts
       FROM ${CH_TABLE}
-      WHERE ${CH_TIME_COL} >= now() - INTERVAL ${CH_LOOKBACK_MIN} MINUTE
+      WHERE ${CH_TIME_EXPR} >= now() - INTERVAL ${CH_LOOKBACK_MIN} MINUTE
     "
   } > "$out" 2>&1 || {
     echo "[CLICKHOUSE $label] query failed, see $out"
@@ -472,7 +473,7 @@ PY
     echo "After/during switch: $WORKDIR/clickhouse_after_switch.txt"
     sed -n '1,80p' "$WORKDIR/clickhouse_after_switch.txt" 2>/dev/null || true
   else
-    echo "  skipped (set CH_PASS and CH_TABLE=db.table; optional CH_TIME_COL/CH_PACKETS_COL/CH_BYTES_COL)"
+    echo "  skipped (set CH_PASS; optional CH_TABLE/CH_TIME_EXPR/CH_PACKETS_COL/CH_BYTES_COL)"
   fi
   echo ""
   echo "Full data in: $WORKDIR"
