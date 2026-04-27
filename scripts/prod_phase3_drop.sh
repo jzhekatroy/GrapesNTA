@@ -25,7 +25,7 @@
 #   XDP_MODE=native|generic — default native
 #   CH_PASS=... — опционально: снять ClickHouse rows/packets/bytes
 #       за последние CH_LOOKBACK_MIN минут до swap и после swap (default 2).
-#       По умолчанию БД захардкожена под текущий прод: default.flows @ 95.215.1.30:6124.
+#       По умолчанию БД захардкожена под текущий прод: default.flows_raw @ 95.215.1.30:6124.
 #       Настройки: CH_HOST, CH_PORT, CH_USER, CH_TIME_EXPR, CH_PACKETS_COL, CH_BYTES_COL.
 
 set -euo pipefail
@@ -48,9 +48,10 @@ CH_PORT="${CH_PORT:-6124}"
 CH_USER="${CH_USER:-develop}"
 CH_PASS="${CH_PASS:-}"
 # Prod defaults (можно переопределить env'ами при необходимости)
-CH_TABLE="${CH_TABLE:-default.flows}"
-# default.flows на проде хранит время в ns epoch; приводим к DateTime64 для группировки по минутам.
-CH_TIME_EXPR="${CH_TIME_EXPR:-fromUnixTimestamp64Nano(time_received_ns)}"
+CH_TABLE="${CH_TABLE:-default.flows_raw}"
+# default.flows — Kafka engine, читать надо materialized storage default.flows_raw.
+# time_received_ns там уже DateTime64(9), без epoch-конвертации.
+CH_TIME_EXPR="${CH_TIME_EXPR:-time_received_ns}"
 CH_PACKETS_COL="${CH_PACKETS_COL:-packets}"
 CH_BYTES_COL="${CH_BYTES_COL:-bytes}"
 CH_LOOKBACK_MIN="${CH_LOOKBACK_MIN:-2}"
