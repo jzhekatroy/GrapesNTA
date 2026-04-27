@@ -23,8 +23,9 @@
 #   AUTO_IRQ=1 — раскинуть IRQ без интерактивного вопроса
 #   CPU_LIST="4,5,6,7,8,9,10,11" — список CPU для IRQ spread
 #   XDP_MODE=native|generic — default native
-#   CH_PASS=... CH_TABLE=db.table — опционально: снять ClickHouse rows/packets/bytes
+#   CH_PASS=... — опционально: снять ClickHouse rows/packets/bytes
 #       за последние CH_LOOKBACK_MIN минут до swap и после swap (default 2).
+#       По умолчанию БД захардкожена под текущий прод: default.flows @ 95.215.1.30:6124.
 #       Настройки: CH_HOST, CH_PORT, CH_USER, CH_TIME_COL, CH_PACKETS_COL, CH_BYTES_COL.
 
 set -euo pipefail
@@ -46,7 +47,8 @@ CH_HOST="${CH_HOST:-95.215.1.30}"
 CH_PORT="${CH_PORT:-6124}"
 CH_USER="${CH_USER:-develop}"
 CH_PASS="${CH_PASS:-}"
-CH_TABLE="${CH_TABLE:-}"
+# Prod defaults (можно переопределить env'ами при необходимости)
+CH_TABLE="${CH_TABLE:-default.flows}"
 CH_TIME_COL="${CH_TIME_COL:-TimeReceived}"
 CH_PACKETS_COL="${CH_PACKETS_COL:-Packets}"
 CH_BYTES_COL="${CH_BYTES_COL:-Bytes}"
