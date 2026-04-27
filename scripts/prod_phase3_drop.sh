@@ -23,6 +23,9 @@
 #   AUTO_IRQ=1 — раскинуть IRQ без интерактивного вопроса
 #   CPU_LIST="4,5,6,7,8,9,10,11" — список CPU для IRQ spread
 #   XDP_MODE=native|generic — default native
+#   CH_PASS=... CH_TABLE=db.table — опционально: снять ClickHouse rows/packets/bytes
+#       за последние CH_LOOKBACK_MIN минут до swap и после swap (default 2).
+#       Настройки: CH_HOST, CH_PORT, CH_USER, CH_TIME_COL, CH_PACKETS_COL, CH_BYTES_COL.
 
 set -euo pipefail
 
@@ -38,6 +41,16 @@ XDP_MODE="${XDP_MODE:-native}"
 # "BPF program is slow" vs "XDP infrastructure adds mlx4 overhead").
 XDP_ACTION="${XDP_ACTION:-drop}"
 case "$XDP_ACTION" in pass|drop) ;; *) echo "ERROR: XDP_ACTION must be pass|drop"; exit 1;; esac
+
+CH_HOST="${CH_HOST:-95.215.1.30}"
+CH_PORT="${CH_PORT:-6124}"
+CH_USER="${CH_USER:-develop}"
+CH_PASS="${CH_PASS:-}"
+CH_TABLE="${CH_TABLE:-}"
+CH_TIME_COL="${CH_TIME_COL:-TimeReceived}"
+CH_PACKETS_COL="${CH_PACKETS_COL:-Packets}"
+CH_BYTES_COL="${CH_BYTES_COL:-Bytes}"
+CH_LOOKBACK_MIN="${CH_LOOKBACK_MIN:-2}"
 
 if [[ $EUID -ne 0 ]]; then
   echo "ERROR: run as root" >&2
@@ -74,10 +87,17 @@ done
 # Опциональные — просто уменьшают детализацию отчёта
 HAVE_BPFTOOL=0
 HAVE_PERF=0
+HAVE_CH=0
 command -v bpftool >/dev/null && HAVE_BPFTOOL=1 || \
   echo "NOTE: bpftool not installed — cycles/packet metric will be skipped (try: apt install bpftool or linux-perf)"
 command -v perf >/dev/null && HAVE_PERF=1 || \
   echo "NOTE: perf not installed — top kernel functions will be skipped (try: apt install linux-perf)"
+if command -v clickhouse-client >/dev/null 2>&1 && [[ -n "$CH_PASS" && -n "$CH_TABLE" ]]; then
+  HAVE_CH=1
+  echo "ClickHouse check enabled: ${CH_TABLE} @ ${CH_HOST}:${CH_PORT}, lookback=${CH_LOOKBACK_MIN}m"
+else
+  echo "NOTE: ClickHouse check disabled — set CH_PASS and CH_TABLE=db.table to compare DB rows before/after swap"
+fi
 
 if ! ip link show "$IFACE" >/dev/null 2>&1; then
   echo "ERROR: interface $IFACE not found"; exit 1
@@ -173,6 +193,52 @@ collect_window() {
   echo "[WINDOW $name] done."
 }
 
+collect_clickhouse_window() {
+  local label=$1
+  local out=$2
+  if (( HAVE_CH != 1 )); then
+    return 0
+  fi
+
+  echo ""
+  echo "[CLICKHOUSE $label] last ${CH_LOOKBACK_MIN} minute(s) from ${CH_TABLE}..."
+  {
+    echo "label=$label"
+    echo "captured_at=$(date -Is)"
+    echo "host=$CH_HOST port=$CH_PORT table=$CH_TABLE"
+    echo "time_col=$CH_TIME_COL packets_col=$CH_PACKETS_COL bytes_col=$CH_BYTES_COL lookback_min=$CH_LOOKBACK_MIN"
+    echo ""
+    echo "-- per-minute rows/packets/bytes --"
+    clickhouse-client --host "$CH_HOST" --port "$CH_PORT" -u "$CH_USER" --password "$CH_PASS" --format PrettyCompact -q "
+      SELECT
+        toStartOfMinute(${CH_TIME_COL}) AS minute,
+        count() AS rows,
+        sum(${CH_PACKETS_COL}) AS packets,
+        sum(${CH_BYTES_COL}) AS bytes
+      FROM ${CH_TABLE}
+      WHERE ${CH_TIME_COL} >= now() - INTERVAL ${CH_LOOKBACK_MIN} MINUTE
+      GROUP BY minute
+      ORDER BY minute
+    "
+    echo ""
+    echo "-- totals --"
+    clickhouse-client --host "$CH_HOST" --port "$CH_PORT" -u "$CH_USER" --password "$CH_PASS" --format PrettyCompact -q "
+      SELECT
+        count() AS rows,
+        sum(${CH_PACKETS_COL}) AS packets,
+        sum(${CH_BYTES_COL}) AS bytes,
+        min(${CH_TIME_COL}) AS min_ts,
+        max(${CH_TIME_COL}) AS max_ts
+      FROM ${CH_TABLE}
+      WHERE ${CH_TIME_COL} >= now() - INTERVAL ${CH_LOOKBACK_MIN} MINUTE
+    "
+  } > "$out" 2>&1 || {
+    echo "[CLICKHOUSE $label] query failed, see $out"
+    return 0
+  }
+  sed -n '1,40p' "$out"
+}
+
 # ---------- 1) Snapshot ----------
 if [[ -x "$REPO_ROOT/scripts/prod_snapshot.sh" ]]; then
   "$REPO_ROOT/scripts/prod_snapshot.sh" "$IFACE" > "$WORKDIR/snapshot.log" 2>&1 || true
@@ -231,6 +297,8 @@ echo ""
 echo "===== WINDOW A: baseline (no xdpflowd), after IRQ tune ====="
 collect_window A "$A_DIR" 0
 
+collect_clickhouse_window "BEFORE_SWITCH_${CH_LOOKBACK_MIN}MIN" "$WORKDIR/clickhouse_before_switch.txt"
+
 # ---------- 5) Запуск prod_ab_swap с заданным XDP_ACTION в фоне ----------
 echo ""
 echo "===== Starting prod_ab_swap (XDP_ACTION=$XDP_ACTION, ${DURATION_DROP}s) ====="
@@ -268,6 +336,8 @@ collect_window B "$B_DIR" 1
 echo ""
 echo "Waiting for prod_ab_swap to finish..."
 wait "$SWAP_PID" || true
+
+collect_clickhouse_window "AFTER_SWITCH_${CH_LOOKBACK_MIN}MIN" "$WORKDIR/clickhouse_after_switch.txt"
 
 # ---------- 8) сравнительный отчёт ----------
 echo ""
@@ -391,6 +461,17 @@ PY
   sysfs_window_rate "$A_DIR" "$DURATION_WINDOW"
   echo "B (xdpflowd XDP_${XDP_ACTION^^}):"
   sysfs_window_rate "$B_DIR" "$DURATION_WINDOW"
+  echo ""
+  echo "----- ClickHouse rows/packets/bytes (${CH_LOOKBACK_MIN}min before vs after) -----"
+  if (( HAVE_CH == 1 )); then
+    echo "Before switch: $WORKDIR/clickhouse_before_switch.txt"
+    sed -n '1,80p' "$WORKDIR/clickhouse_before_switch.txt" 2>/dev/null || true
+    echo ""
+    echo "After/during switch: $WORKDIR/clickhouse_after_switch.txt"
+    sed -n '1,80p' "$WORKDIR/clickhouse_after_switch.txt" 2>/dev/null || true
+  else
+    echo "  skipped (set CH_PASS and CH_TABLE=db.table; optional CH_TIME_COL/CH_PACKETS_COL/CH_BYTES_COL)"
+  fi
   echo ""
   echo "Full data in: $WORKDIR"
   echo "  A: $A_DIR"
