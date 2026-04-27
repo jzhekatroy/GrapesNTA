@@ -53,6 +53,16 @@ if (( DURATION > MAX_DURATION )); then
   exit 1
 fi
 
+# См. prod_ab_swap.sh: длинные паузы в логе при живом демоне
+WATCHDOG_WARMUP_SEC="${WATCHDOG_WARMUP_SEC:-60}"
+WATCHDOG_STALL_SEC="${WATCHDOG_STALL_SEC:-120}"
+WATCHDOG_STRICT="${WATCHDOG_STRICT:-1}"
+if ! [[ "$WATCHDOG_STALL_SEC" =~ ^[0-9]+$ ]] || (( WATCHDOG_STALL_SEC < 30 )); then
+  echo "ERROR: WATCHDOG_STALL_SEC must be integer >= 30" >&2
+  exit 1
+fi
+WATCHDOG_STALL_INTERVALS=$(( (WATCHDOG_STALL_SEC + 9) / 10 ))
+
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
@@ -321,6 +331,7 @@ extract_stats_tp() {
 }
 
 echo "[$(date +%T)] running ${DURATION}s (watchdog: wire / total_packets / records / packets_out). Ctrl+C restores rule."
+echo "[$(date +%T)] Watchdog: warmup=${WATCHDOG_WARMUP_SEC}s stall_max=${WATCHDOG_STALL_SEC}s (${WATCHDOG_STALL_INTERVALS}×10s) strict=${WATCHDOG_STRICT}"
 last_wire=0
 last_nf=0
 last_rec=0
@@ -362,9 +373,15 @@ while (( remaining > 0 )); do
   last_rec=$cur_rec
   last_tp=$cur_tp
 
-  if (( stall_count >= 3 )) && (( DURATION - remaining > 60 )); then
-    echo "[$(date +%T)] WATCHDOG: no progress 30s (wire=$cur_wire tp=$cur_tp rec=$cur_rec nf_out=$cur_nf)"
-    exit 1
+  if (( stall_count >= WATCHDOG_STALL_INTERVALS )) && (( DURATION - remaining > WATCHDOG_WARMUP_SEC )); then
+    echo "[$(date +%T)] WATCHDOG: no progress ${WATCHDOG_STALL_SEC}s (wire=$cur_wire tp=$cur_tp rec=$cur_rec nf_out=$cur_nf)" \
+      | tee -a "$LOG_AFX"
+    if [[ "$WATCHDOG_STRICT" == "1" ]]; then
+      echo "                 Emergency restore (WATCHDOG_STRICT=1)."
+      exit 1
+    fi
+    echo "                 WARN only (WATCHDOG_STRICT=0) — continuing."
+    stall_count=0
   fi
 
   tail_line=$(tail -n 1 "$LOG_AFX" 2>/dev/null | tr -d '\n' | cut -c -160)

@@ -13,8 +13,9 @@
 #   6) Запускает xdpflowd с NFv9 на РЕАЛЬНЫЕ destination'ы ipt_NETFLOW
 #      (по умолчанию 127.0.0.1:9996,127.0.0.1:9999). goflow2/nfcapd/ClickHouse
 #      начинают получать данные ОТ xdpflowd вместо ipt_NETFLOW.
-#   7) Watchdog: каждые 10 сек проверяет, что xdpflowd жив И реально шлёт пакеты.
-#      Если застрял -> немедленно kill + restore.
+#   7) Watchdog: каждые 10 с — процесс жив; рост total_packets/flows/records/packets_out в логе.
+#      Долгий «тишина» в логе при живом демоне: см. WATCHDOG_STALL_SEC (default 120s).
+#      WATCHDOG_STRICT=0 — только предупреждение, без emergency exit.
 #   8) Через $DURATION секунд корректно останавливает xdpflowd.
 #   9) Trap возвращает правило iptables. Проверяет, что вернулось.
 #
@@ -88,6 +89,20 @@ if (( DURATION > MAX_DURATION )); then
   echo "ERROR: duration=$DURATION > $MAX_DURATION (hard cap)" >&2
   exit 1
 fi
+
+# Watchdog (env): крупные карты flow / редкие строки в логе могут давать 30+ с без роста метрик
+# при живом xdpflowd — слишком короткое окно = ложный emergency restore.
+#   WATCHDOG_WARMUP_SEC  — с начала сессии не считать «застой» (default 60)
+#   WATCHDOG_STALL_SEC  — подряд без роста ни одного из tp/fm/rec/out (default 120)
+#   WATCHDOG_STRICT=0  — при «застое» только WARN, не exit (процесс всё ещё убивается по DURATION/Ctrl+C)
+WATCHDOG_WARMUP_SEC="${WATCHDOG_WARMUP_SEC:-60}"
+WATCHDOG_STALL_SEC="${WATCHDOG_STALL_SEC:-120}"
+WATCHDOG_STRICT="${WATCHDOG_STRICT:-1}"
+if ! [[ "$WATCHDOG_STALL_SEC" =~ ^[0-9]+$ ]] || (( WATCHDOG_STALL_SEC < 30 )); then
+  echo "ERROR: WATCHDOG_STALL_SEC must be integer >= 30" >&2
+  exit 1
+fi
+WATCHDOG_STALL_INTERVALS=$(( (WATCHDOG_STALL_SEC + 9) / 10 ))
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
@@ -447,6 +462,7 @@ echo "[$(date +%T)] xdpflowd up (pid=$XDP_PID). log: $LOG_XDP  ndjson: $JSON_OUT
 # Раньше смотрели только packets_out: при долгом nf-active первые минуты он может
 # не расти, хотя total_packets и карта flow уже растут — ложный emergency restore.
 echo "[$(date +%T)] running for ${DURATION}s. Ctrl+C to abort early (rule will be restored)."
+echo "[$(date +%T)] Watchdog: warmup=${WATCHDOG_WARMUP_SEC}s stall_max=${WATCHDOG_STALL_SEC}s (${WATCHDOG_STALL_INTERVALS}×10s) strict=${WATCHDOG_STRICT}"
 
 xdp_stats_int() {
   # последняя строка msg=stats: total_packets, flows_in_map
@@ -505,11 +521,16 @@ while (( remaining > 0 )); do
   last_rec=$cur_rec
   last_po=$cur_po
 
-  # 30 сек без роста ни одного из индикаторов после 1 минуты — ненормально
-  if (( stall_count >= 3 )) && (( DURATION - remaining > 60 )); then
-    echo "[$(date +%T)] WATCHDOG: no progress 30s (total_packets=$cur_tp flows=$cur_fm records=$cur_rec packets_out=$cur_po)."
-    echo "                 Emergency restore."
-    exit 1
+  # Долго нет роста ни одного из индикаторов после warmup — мёртвый экспорт или зависание
+  if (( stall_count >= WATCHDOG_STALL_INTERVALS )) && (( DURATION - remaining > WATCHDOG_WARMUP_SEC )); then
+    echo "[$(date +%T)] WATCHDOG: no progress ${WATCHDOG_STALL_SEC}s (total_packets=$cur_tp flows=$cur_fm records=$cur_rec packets_out=$cur_po)" \
+      | tee -a "$LOG_XDP"
+    if [[ "$WATCHDOG_STRICT" == "1" ]]; then
+      echo "                 Emergency restore (WATCHDOG_STRICT=1)."
+      exit 1
+    fi
+    echo "                 WARN only (WATCHDOG_STRICT=0) — continuing."
+    stall_count=0
   fi
 
   xdp_tail=$(tail -n 1 "$LOG_XDP" 2>/dev/null | tr -d '\n' | cut -c -180)
