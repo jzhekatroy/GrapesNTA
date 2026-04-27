@@ -104,6 +104,18 @@ if ! [[ "$WATCHDOG_STALL_SEC" =~ ^[0-9]+$ ]] || (( WATCHDOG_STALL_SEC < 30 )); t
 fi
 WATCHDOG_STALL_INTERVALS=$(( (WATCHDOG_STALL_SEC + 9) / 10 ))
 
+# NetFlow exporter timing (env): shorter active timeout helps short A/B tests
+# verify ClickHouse continuity; larger shutdown grace lets final flush finish
+# on multi-million flow maps instead of SIGKILL.
+XDP_NF_ACTIVE="${XDP_NF_ACTIVE:-1800s}"
+XDP_NF_IDLE="${XDP_NF_IDLE:-15s}"
+XDP_NF_TEMPLATE_INTERVAL="${XDP_NF_TEMPLATE_INTERVAL:-60s}"
+XDP_SHUTDOWN_GRACE="${XDP_SHUTDOWN_GRACE:-20}"
+if ! [[ "$XDP_SHUTDOWN_GRACE" =~ ^[0-9]+$ ]] || (( XDP_SHUTDOWN_GRACE < 20 )); then
+  echo "ERROR: XDP_SHUTDOWN_GRACE must be integer >= 20" >&2
+  exit 1
+fi
+
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
@@ -327,17 +339,17 @@ cleanup() {
   echo ""
   echo "[$(date +%T)] cleanup (exit=$rc)"
   if [ -n "$XDP_PID" ] && kill -0 "$XDP_PID" 2>/dev/null; then
-    # Grace: give xdpflowd up to 20s to flush the final NFv9 templates +
+    # Grace: give xdpflowd time to flush the final NFv9 templates +
     # record + NDJSON snapshot for a ~2-3M entry flows map on shutdown.
     # (On prod with XDP_ACTION=drop we measured ~5-10s for flushAll on
     # a 2.5M-flow map; 5s was too tight and led to SIGKILL.)
     kill -TERM "$XDP_PID" 2>/dev/null || true
-    for _ in $(seq 1 20); do
+    for _ in $(seq 1 "$XDP_SHUTDOWN_GRACE"); do
       kill -0 "$XDP_PID" 2>/dev/null || break
       sleep 1
     done
     if kill -0 "$XDP_PID" 2>/dev/null; then
-      echo "[$(date +%T)] WARN: xdpflowd didn't exit in 20s on SIGTERM — sending SIGKILL"
+      echo "[$(date +%T)] WARN: xdpflowd didn't exit in ${XDP_SHUTDOWN_GRACE}s on SIGTERM — sending SIGKILL"
       kill -KILL "$XDP_PID" 2>/dev/null || true
     fi
   fi
@@ -394,7 +406,8 @@ fi
 # было видно, с какими флагами реально стартовали.
 {
   echo "=== xdpflowd launch at $(date -Is) ==="
-  echo "cmdline: $XDP_STDBUF ./bin/xdpflowd -iface $IFACE -mode $XDP_MODE -xdp-action $XDP_ACTION -bpf ./bpf/xdp_flow.o -nf-dst '$NF_DSTS' -nf-active 1800s -nf-idle 15s -nf-template-interval 60s -interval 5s -json-out '$JSON_OUT' -json-interval 10s"
+  echo "cmdline: $XDP_STDBUF ./bin/xdpflowd -iface $IFACE -mode $XDP_MODE -xdp-action $XDP_ACTION -bpf ./bpf/xdp_flow.o -nf-dst '$NF_DSTS' -nf-active $XDP_NF_ACTIVE -nf-idle $XDP_NF_IDLE -nf-template-interval $XDP_NF_TEMPLATE_INTERVAL -interval 5s -json-out '$JSON_OUT' -json-interval 10s"
+  echo "shutdown_grace: ${XDP_SHUTDOWN_GRACE}s"
   echo "WORKDIR: $WORKDIR"
   echo ""
 } > "$LOG_XDP"
@@ -405,9 +418,9 @@ $XDP_STDBUF ./bin/xdpflowd \
   -xdp-action "$XDP_ACTION" \
   -bpf ./bpf/xdp_flow.o \
   -nf-dst "$NF_DSTS" \
-  -nf-active 1800s \
-  -nf-idle 15s \
-  -nf-template-interval 60s \
+  -nf-active "$XDP_NF_ACTIVE" \
+  -nf-idle "$XDP_NF_IDLE" \
+  -nf-template-interval "$XDP_NF_TEMPLATE_INTERVAL" \
   -interval 5s \
   -json-out "$JSON_OUT" \
   -json-interval 10s \
