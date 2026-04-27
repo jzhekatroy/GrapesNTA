@@ -116,6 +116,17 @@ if ! [[ "$XDP_SHUTDOWN_GRACE" =~ ^[0-9]+$ ]] || (( XDP_SHUTDOWN_GRACE < 20 )); t
   exit 1
 fi
 
+# mlx4 native XDP may need memory compaction before attach, but it must never
+# run after the ipt_NETFLOW rule is removed: compact_memory can stall on hosts
+# under pressure. Keep it bounded and allow smoke tests to skip it.
+SKIP_MEMORY_PREP="${SKIP_MEMORY_PREP:-0}"
+MEMORY_PREP_TIMEOUT="${MEMORY_PREP_TIMEOUT:-10}"
+case "$SKIP_MEMORY_PREP" in 0|1) ;; *) echo "ERROR: SKIP_MEMORY_PREP must be 0 or 1" >&2; exit 1;; esac
+if ! [[ "$MEMORY_PREP_TIMEOUT" =~ ^[0-9]+$ ]] || (( MEMORY_PREP_TIMEOUT < 1 )); then
+  echo "ERROR: MEMORY_PREP_TIMEOUT must be integer >= 1" >&2
+  exit 1
+fi
+
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
@@ -362,32 +373,42 @@ cleanup() {
 # SIGHUP — обрыв SSH. Обязательно ловим.
 trap cleanup EXIT INT TERM HUP
 
-# ---------- СНИМАЕМ ПРАВИЛО ----------
-echo "[$(date +%T)] removing iptables NETFLOW rule..."
-iptables -t "$RULE_TABLE" -D PREROUTING $RULE_SPEC
-SWAP_DONE=1
-echo "[$(date +%T)] rule removed. ipt_NETFLOW no longer seeing packets."
-
 # ---------- подготовка памяти для mlx4 native XDP ----------
 # mlx4 при attach выделяет contiguous XDP TX rings; на нагруженном проде
 # buddy-allocator часто фрагментирован так, что крупные заказы (order>=3)
 # падают с ENOMEM. Лечится drop_caches + compact_memory. Делается ДО attach,
-# потому что после падения xdpflowd мы уже потеряли окно (пересобрать его
-# стоит дорого — 3с link flap).
+# и обязательно ДО удаления ipt_NETFLOW, иначе stall в compact_memory оставит
+# интерфейс без старого экспортёра.
 prepare_memory() {
-  local node0_big node1_big
-  echo "[$(date +%T)] memory prep: drop_caches + compact_memory"
-  sync
-  echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || true
-  echo 1 > /proc/sys/vm/compact_memory 2>/dev/null || true
-  # короткая пауза, даём kcompactd доработать
-  sleep 2
+  if [[ "$SKIP_MEMORY_PREP" == "1" ]]; then
+    echo "[$(date +%T)] memory prep skipped (SKIP_MEMORY_PREP=1)"
+    return 0
+  fi
+
+  echo "[$(date +%T)] memory prep: drop_caches + compact_memory (timeout ${MEMORY_PREP_TIMEOUT}s)"
+  if command -v timeout >/dev/null 2>&1; then
+    timeout "${MEMORY_PREP_TIMEOUT}s" bash -c '
+      sync
+      echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || true
+      echo 1 > /proc/sys/vm/compact_memory 2>/dev/null || true
+      sleep 2
+    ' || echo "[$(date +%T)] WARN: memory prep timed out or failed; continuing before swap"
+  else
+    echo "[$(date +%T)] WARN: timeout(1) not found; skipping compact_memory for safety"
+  fi
+
   # краткий отчёт: сколько больших страниц (2048kB / 4096kB) у каждой ноды
   if [[ -r /proc/buddyinfo ]]; then
     awk 'NR<=4 {print "  buddyinfo:",$0}' /proc/buddyinfo
   fi
 }
 prepare_memory
+
+# ---------- СНИМАЕМ ПРАВИЛО ----------
+echo "[$(date +%T)] removing iptables NETFLOW rule..."
+iptables -t "$RULE_TABLE" -D PREROUTING $RULE_SPEC
+SWAP_DONE=1
+echo "[$(date +%T)] rule removed. ipt_NETFLOW no longer seeing packets."
 
 # ---------- запускаем xdpflowd на реальные destination'ы ----------
 echo "[$(date +%T)] starting xdpflowd -> $NF_DSTS (xdp-action=$XDP_ACTION)"
