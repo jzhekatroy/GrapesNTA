@@ -441,12 +441,33 @@ echo "[$(date +%T)] xdpflowd up (pid=$XDP_PID). log: $LOG_XDP  ndjson: $JSON_OUT
 ) &
 
 # ---------- watchdog + main wait ----------
-# каждые 10 сек проверяем:
-#   - процесс жив
-#   - в логе ротируется packets_out (т.е. NFv9 реально уходит)
-# если застрял 30+ сек без прогресса -> аварийный выход (trap восстановит).
+# каждые 10 сек: процесс жив; «живость» = рост любого из
+#   total_packets / flows_in_map (msg=stats) — пакеты реально идут в XDP/карту
+#   records / packets_out (msg=netflow) — экспорт NFv9 пошёл
+# Раньше смотрели только packets_out: при долгом nf-active первые минуты он может
+# не расти, хотя total_packets и карта flow уже растут — ложный emergency restore.
 echo "[$(date +%T)] running for ${DURATION}s. Ctrl+C to abort early (rule will be restored)."
-last_packets=0
+
+xdp_stats_int() {
+  # последняя строка msg=stats: total_packets, flows_in_map
+  local key=$1
+  local line
+  line=$(grep 'msg=stats' "$LOG_XDP" 2>/dev/null | tail -1) || { echo 0; return; }
+  echo "$line" | grep -oE "${key}=[0-9]+" 2>/dev/null | head -1 | cut -d= -f2 || echo 0
+}
+
+xdp_netflow_int() {
+  # последняя строка netflow: records, packets_out
+  local key=$1
+  local line
+  line=$(grep 'msg=netflow' "$LOG_XDP" 2>/dev/null | tail -1) || { echo 0; return; }
+  echo "$line" | grep -oE "${key}=[0-9]+" 2>/dev/null | head -1 | cut -d= -f2 || echo 0
+}
+
+last_tp=0
+last_fm=0
+last_rec=0
+last_po=0
 stall_count=0
 remaining=$DURATION
 while (( remaining > 0 )); do
@@ -459,24 +480,40 @@ while (( remaining > 0 )); do
     exit 1
   fi
 
-  cur_packets=$(grep -oE 'packets_out=[0-9]+' "$LOG_XDP" 2>/dev/null | tail -1 | cut -d= -f2)
-  cur_packets=${cur_packets:-0}
-  # первые 15 сек нормально иметь 0 — ждём шаблоны и таймауты
-  if (( cur_packets > last_packets )); then
+  cur_tp=$(xdp_stats_int total_packets)
+  cur_fm=$(xdp_stats_int flows_in_map)
+  cur_rec=$(xdp_netflow_int records)
+  cur_po=$(xdp_netflow_int packets_out)
+  cur_tp=${cur_tp:-0}
+  cur_fm=${cur_fm:-0}
+  cur_rec=${cur_rec:-0}
+  cur_po=${cur_po:-0}
+
+  progressed=0
+  (( cur_tp > last_tp )) && progressed=1
+  (( cur_fm > last_fm )) && progressed=1
+  (( cur_rec > last_rec )) && progressed=1
+  (( cur_po > last_po )) && progressed=1
+
+  if (( progressed )); then
     stall_count=0
-    last_packets=$cur_packets
   else
     stall_count=$(( stall_count + 1 ))
   fi
-  # 30 сек без новых NFv9-пакетов после первой минуты — ненормально
+  last_tp=$cur_tp
+  last_fm=$cur_fm
+  last_rec=$cur_rec
+  last_po=$cur_po
+
+  # 30 сек без роста ни одного из индикаторов после 1 минуты — ненормально
   if (( stall_count >= 3 )) && (( DURATION - remaining > 60 )); then
-    echo "[$(date +%T)] WATCHDOG: no NFv9 traffic for 30s (packets_out stuck at $cur_packets)."
+    echo "[$(date +%T)] WATCHDOG: no progress 30s (total_packets=$cur_tp flows=$cur_fm records=$cur_rec packets_out=$cur_po)."
     echo "                 Emergency restore."
     exit 1
   fi
 
   xdp_tail=$(tail -n 1 "$LOG_XDP" 2>/dev/null | tr -d '\n' | cut -c -180)
-  echo "[$(date +%T)] +$((DURATION-remaining))s/${DURATION}s  pkts=$cur_packets  $xdp_tail"
+  echo "[$(date +%T)] +$((DURATION-remaining))s/${DURATION}s  tp=$cur_tp fm=$cur_fm rec=$cur_rec out=$cur_po  $xdp_tail"
 done
 
 echo "[$(date +%T)] planned duration reached. Stopping cleanly."

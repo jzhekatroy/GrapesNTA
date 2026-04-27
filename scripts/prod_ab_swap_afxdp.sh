@@ -300,17 +300,31 @@ for i in $(seq 1 20); do
 done
 echo "[$(date +%T)] afxdpflowd up pid=$AFX_PID log=$LOG_AFX"
 
-# --- watchdog: wire "packets" OR netflow packets_out must advance ---
+# --- watchdog: wire packets, NF packets_out, records, total_packets (если есть) ---
 extract_wire_pkts() {
   grep 'wire_ground_truth' "$LOG_AFX" 2>/dev/null | tail -1 | grep -oE '"packets":[0-9]+' | head -1 | cut -d: -f2 || echo 0
 }
 extract_nf_pkts_out() {
-  grep -oE 'packets_out=[0-9]+' "$LOG_AFX" 2>/dev/null | tail -1 | cut -d= -f2 || echo 0
+  local line
+  line=$(grep 'msg=netflow' "$LOG_AFX" 2>/dev/null | tail -1) || { echo 0; return; }
+  echo "$line" | grep -oE 'packets_out=[0-9]+' 2>/dev/null | head -1 | cut -d= -f2 || echo 0
+}
+extract_nf_records() {
+  local line
+  line=$(grep 'msg=netflow' "$LOG_AFX" 2>/dev/null | tail -1) || { echo 0; return; }
+  echo "$line" | grep -oE 'records=[0-9]+' 2>/dev/null | head -1 | cut -d= -f2 || echo 0
+}
+extract_stats_tp() {
+  local line
+  line=$(grep 'msg=stats' "$LOG_AFX" 2>/dev/null | tail -1) || { echo 0; return; }
+  echo "$line" | grep -oE 'total_packets=[0-9]+' 2>/dev/null | head -1 | cut -d= -f2 || echo 0
 }
 
-echo "[$(date +%T)] running ${DURATION}s (watchdog: wire packets or packets_out). Ctrl+C restores rule."
+echo "[$(date +%T)] running ${DURATION}s (watchdog: wire / total_packets / records / packets_out). Ctrl+C restores rule."
 last_wire=0
 last_nf=0
+last_rec=0
+last_tp=0
 stall_count=0
 remaining=$DURATION
 while (( remaining > 0 )); do
@@ -325,28 +339,36 @@ while (( remaining > 0 )); do
 
   cur_wire=$(extract_wire_pkts)
   cur_nf=$(extract_nf_pkts_out)
+  cur_rec=$(extract_nf_records)
+  cur_tp=$(extract_stats_tp)
   cur_wire=${cur_wire:-0}
   cur_nf=${cur_nf:-0}
+  cur_rec=${cur_rec:-0}
+  cur_tp=${cur_tp:-0}
 
   progressed=0
   (( cur_wire > last_wire )) && progressed=1
   (( cur_nf > last_nf )) && progressed=1
+  (( cur_rec > last_rec )) && progressed=1
+  (( cur_tp > last_tp )) && progressed=1
 
   if (( progressed )); then
     stall_count=0
-    last_wire=$cur_wire
-    last_nf=$cur_nf
   else
     stall_count=$(( stall_count + 1 ))
   fi
+  last_wire=$cur_wire
+  last_nf=$cur_nf
+  last_rec=$cur_rec
+  last_tp=$cur_tp
 
   if (( stall_count >= 3 )) && (( DURATION - remaining > 60 )); then
-    echo "[$(date +%T)] WATCHDOG: no traffic growth for 30s (wire=$cur_wire nf_out=$cur_nf)"
+    echo "[$(date +%T)] WATCHDOG: no progress 30s (wire=$cur_wire tp=$cur_tp rec=$cur_rec nf_out=$cur_nf)"
     exit 1
   fi
 
   tail_line=$(tail -n 1 "$LOG_AFX" 2>/dev/null | tr -d '\n' | cut -c -160)
-  echo "[$(date +%T)] +$((DURATION-remaining))s/${DURATION}s wire=$cur_wire nf_out=$cur_nf  $tail_line"
+  echo "[$(date +%T)] +$((DURATION-remaining))s/${DURATION}s wire=$cur_wire tp=$cur_tp rec=$cur_rec nf_out=$cur_nf  $tail_line"
 done
 
 echo "[$(date +%T)] planned duration reached — EXIT triggers trap (stop afxdpflowd, restore rule, prod_verify)."
