@@ -148,9 +148,9 @@ func etherType(ipVersion uint8) uint32 {
 	return 0x0800
 }
 
-func (s *clickhouseSink) insertBatch(ctx context.Context, flows []flowKV, receivedAt time.Time) {
+func (s *clickhouseSink) insertBatch(ctx context.Context, flows []flowKV, receivedAt time.Time) bool {
 	if len(flows) == 0 {
-		return
+		return true
 	}
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
@@ -180,7 +180,7 @@ func (s *clickhouseSink) insertBatch(ctx context.Context, flows []flowKV, receiv
 	if err != nil {
 		s.insertErrs.Add(1)
 		s.log.Warn("clickhouse prepare batch", "err", err)
-		return
+		return false
 	}
 
 	var zeroAddr [16]byte
@@ -209,16 +209,17 @@ func (s *clickhouseSink) insertBatch(ctx context.Context, flows []flowKV, receiv
 		if err != nil {
 			s.insertErrs.Add(1)
 			s.log.Warn("clickhouse batch append", "err", err)
-			return
+			return false
 		}
 	}
 	if err := batch.Send(); err != nil {
 		s.insertErrs.Add(1)
 		s.log.Warn("clickhouse batch send", "err", err)
-		return
+		return false
 	}
 	s.batchesOK.Add(1)
 	s.recordsWritten.Add(uint64(len(flows)))
+	return true
 }
 
 func (s *clickhouseSink) run() {
@@ -232,8 +233,9 @@ func (s *clickhouseSink) run() {
 			return
 		}
 		receivedAt := time.Now().UTC()
-		s.insertBatch(s.ctx, batch, receivedAt)
-		batch = batch[:0]
+		if s.insertBatch(context.Background(), batch, receivedAt) {
+			batch = batch[:0]
+		}
 	}
 	finalFlush := func() {
 		if len(batch) == 0 {
@@ -242,8 +244,9 @@ func (s *clickhouseSink) run() {
 		receivedAt := time.Now().UTC()
 		// Close() cancels s.ctx to stop the goroutine. Use a fresh parent
 		// context for the final drain so shutdown rows can still be inserted.
-		s.insertBatch(context.Background(), batch, receivedAt)
-		batch = batch[:0]
+		if s.insertBatch(context.Background(), batch, receivedAt) {
+			batch = batch[:0]
+		}
 	}
 	drainAndFinalFlush := func() {
 		for {

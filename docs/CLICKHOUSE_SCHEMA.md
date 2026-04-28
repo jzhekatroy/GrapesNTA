@@ -16,7 +16,7 @@ NIC (enp5s0d1, SPAN)
   ↓                       ↓
 nfcapd                  docker-proxy → goflow2 (в контейнере)
   ↓                       ↓
-локальные .nfcapd       Kafka (topic: ???)
+локальные .nfcapd       Kafka (topic: flows)
                           ↓
                         ClickHouse  → Kafka-engine table `default.flows`
                           ↓ MaterializedView `default.flows_raw_view`
@@ -24,7 +24,71 @@ nfcapd                  docker-proxy → goflow2 (в контейнере)
                         `default.flows_raw` (MergeTree, 30B+ rows, ~700 GiB)
 ```
 
-> TODO: уточнить имя Kafka-топика и формат (`SELECT create_table_query FROM system.tables WHERE name='flows'`).
+## Фактическая схема на `sel` (2026-04-28)
+
+Процессы и порты:
+
+```text
+/usr/bin/nfcapd -D -P /run/nfcapd.default.pid -B 4194304 -4 -t 600 -T 1 -y -S 7 -w /storage/nfdump -p 9996
+/usr/bin/nfcapd -D -P /run/nfcapd.mx204.pid    -B 4194304 -4 -t 600      -y -S 7 -w /storage/mx204  -p 2055
+./goflow2 -transport.kafka.brokers=kafka:9092 -transport=kafka -transport.kafka.topic=flows -format=bin -listen=netflow://:9999?count=4
+```
+
+Слушатели:
+
+```text
+UDP 9996 -> nfcapd default -> /storage/nfdump
+UDP 2055 -> nfcapd mx204    -> /storage/mx204
+UDP 9999 -> docker-proxy    -> kcg-goflow2-1
+```
+
+Контейнер `kcg-goflow2-1`:
+
+```text
+image: netsampler/goflow2
+version label: v2.2.3-1-g0a76385
+network: kcg_default
+ports: 0.0.0.0:9999->9999/udp
+extra host: kafka:95.215.1.30
+compose file: /home/pinadmin/goflow2/compose/kcg/docker-compose.yml
+```
+
+Итоговая подтвержденная цепочка записи в БД:
+
+```text
+ipt_NETFLOW / xdpflowd NFv9 UDP
+  -> 127.0.0.1:9999
+  -> docker-proxy
+  -> goflow2
+  -> Kafka kafka:9092 topic=flows format=Protobuf schema=flow.proto:FlowMessage
+  -> ClickHouse Kafka table default.flows
+  -> MaterializedView default.flows_raw_view
+  -> MergeTree table default.flows_raw
+```
+
+В текущей схеме Kafka является durable/decoupling buffer между `goflow2` и
+ClickHouse. Если заменить цепочку `goflow2 -> Kafka -> ClickHouse` на прямую
+запись из `xdpflowd`, эту роль должен взять на себя локальный durable spool.
+
+Локальные архивы `nfcapd`:
+
+```text
+/storage/nfdump  5.3T
+/storage/mx204    71G
+```
+
+Диски на `sel` на момент проверки:
+
+```text
+/dev/mapper/sel--vg-root  109G   39G   65G  38% /
+data/storage              5.4T  5.3T   40G 100% /storage
+```
+
+Практический вывод: spool нельзя планировать на `/storage` без очистки/retention,
+он уже фактически заполнен архивом `nfcapd`. Для короткого аварийного буфера
+можно использовать `/var/lib/xdpflowd/ch-spool` на root FS с жестким лимитом
+примерно 20-40G. Для полноценной замены Kafka как долгого буфера нужен отдельный
+диск/volume под spool.
 
 ## Соединение к CH
 
@@ -121,6 +185,87 @@ LIMIT 100;
 
 Поля совпадают с `flows_raw` 1:1, кроме колонок `date` и `time_inserted_ns`
 (их MV добавляет сам).
+
+Фактический DDL на `sel`:
+
+```sql
+CREATE TABLE default.flows
+(
+    `time_received_ns` UInt64,
+    `time_flow_start_ns` UInt64,
+    `sequence_num` UInt32,
+    `sampling_rate` UInt64,
+    `sampler_address` FixedString(16),
+    `src_addr` FixedString(16),
+    `dst_addr` FixedString(16),
+    `src_as` UInt32,
+    `dst_as` UInt32,
+    `etype` UInt32,
+    `proto` UInt32,
+    `src_port` UInt32,
+    `dst_port` UInt32,
+    `bytes` UInt64,
+    `packets` UInt64
+)
+ENGINE = Kafka
+SETTINGS
+    kafka_broker_list = 'kafka:9092',
+    kafka_num_consumers = 1,
+    kafka_topic_list = 'flows',
+    kafka_group_name = 'clickhouse',
+    kafka_format = 'Protobuf',
+    kafka_schema = 'flow.proto:FlowMessage';
+```
+
+### `default.flows_raw_view` (MaterializedView)
+
+Фактический DDL на `sel`:
+
+```sql
+CREATE MATERIALIZED VIEW default.flows_raw_view TO default.flows_raw
+(
+    `date` Date,
+    `time_inserted_ns` DateTime,
+    `time_received_ns` DateTime64(9),
+    `time_flow_start_ns` DateTime64(9),
+    `sequence_num` UInt32,
+    `sampling_rate` UInt64,
+    `sampler_address` FixedString(16),
+    `src_addr` FixedString(16),
+    `dst_addr` FixedString(16),
+    `src_as` UInt32,
+    `dst_as` UInt32,
+    `etype` UInt32,
+    `proto` UInt32,
+    `src_port` UInt32,
+    `dst_port` UInt32,
+    `bytes` UInt64,
+    `packets` UInt64
+)
+AS SELECT
+    toDate(time_received_ns) AS date,
+    now() AS time_inserted_ns,
+    toDateTime64(time_received_ns / 1000000000, 9) AS time_received_ns,
+    toDateTime64(time_flow_start_ns / 1000000000, 9) AS time_flow_start_ns,
+    sequence_num,
+    sampling_rate,
+    sampler_address,
+    src_addr,
+    dst_addr,
+    src_as,
+    dst_as,
+    etype,
+    proto,
+    src_port,
+    dst_port,
+    bytes,
+    packets
+FROM default.flows;
+```
+
+Прямая запись из `xdpflowd` в `default.flows_raw` должна повторять результат
+этой MV: `date = toDate(time_received_ns)`, `time_inserted_ns = now()/время
+insert`, `time_received_ns` и `time_flow_start_ns` уже в `DateTime64(9)`.
 
 ### `default.ddos_raw` + `default.ddos_raw_view` + `default.ddos`
 
@@ -281,10 +426,47 @@ ORDER BY t;
 | `sampler_address` стал другим | п.4 | проверить, что `xdpflowd` шлёт с `127.0.0.1`, а не внешнего IP |
 | Падает xdpflowd | watchdog в `prod_ab_swap.sh` | правило ipt_NETFLOW восстанавливается автоматически |
 
-## TODO (собрать в следующем шаге)
+## Вывод для полной замены текущей схемы
 
-- [ ] `SHOW CREATE TABLE default.flows` — узнать топик Kafka и формат.
-- [ ] `SHOW CREATE TABLE default.flows_raw_view` — увидеть как MV мапит поля.
+Сейчас надежность БД-пути держится не только на `goflow2`, но и на Kafka:
+
+```text
+goflow2 -> Kafka topic flows -> ClickHouse Kafka table -> MV -> flows_raw
+```
+
+Если целевая архитектура убирает `goflow2` и Kafka из hot path, простой direct
+insert из памяти `xdpflowd` в ClickHouse будет менее надежен, чем текущая схема:
+при потере связи с ClickHouse данные могут остаться только в памяти или быть
+потеряны при переполнении очереди.
+
+Целевая надежная схема для замены:
+
+```text
+xdpflowd
+  -> local durable spool (append-only segments, bounded disk usage)
+  -> ClickHouse writer with retry/backoff
+  -> default.flows_raw
+```
+
+Семантика:
+
+- flow считается сохраненным после записи batch в локальный spool;
+- spool ack/delete выполняется только после успешного ClickHouse insert;
+- при недоступности ClickHouse batch остается на диске и досылается после
+  восстановления связи;
+- при рестарте `xdpflowd` replay продолжается с unacked сегментов;
+- при заполнении spool в production-режиме нужно аварийно останавливаться и
+  алертить, а не молча терять данные;
+- гарантия реалистично `at-least-once`: потерь нет, но при crash после insert и
+  до ack возможны редкие дубли. Для `exactly-once` потребуется отдельный
+  dedup-key или изменение схемы/таблицы.
+
+`nfcapd` можно оставить как независимый raw-архив на первом этапе, но не стоит
+строить основной replay в ClickHouse из `.nfcapd`: это отдельный конвертер
+NetFlow -> `flows_raw`, тогда как spool может хранить уже production-shaped rows.
+
+## TODO
+
 - [ ] Проверить `src_as`/`dst_as` в реальных данных (есть ли сигнал).
 - [ ] Запустить 3-минутный Phase 3 drop-run и сверить с запросами выше.
 - [ ] Выяснить, кто прячется за `sampler_address` = `172.19.0.1` (удалённый
@@ -293,3 +475,5 @@ ORDER BY t;
       `sudo ss -ulnp` / `sudo tcpdump -ni any udp port 9999 -c 20`.
 - [ ] Отдельно: расследовать `template error` от AC130001 в goflow2 — что за
       NFv9 template он шлёт, может ли новая версия goflow2 его распарсить.
+- [ ] Спроектировать durable spool для direct ClickHouse: путь, лимит диска,
+      формат сегментов, ack/replay, метрики и поведение при full disk.
