@@ -231,8 +231,8 @@ collect_clickhouse_window() {
         count() AS rows,
         sum(${CH_PACKETS_COL}) AS packets,
         sum(${CH_BYTES_COL}) AS bytes,
-        min(${CH_TIME_EXPR}) AS min_ts,
-        max(${CH_TIME_EXPR}) AS max_ts
+        toString(min(${CH_TIME_EXPR})) AS min_ts,
+        toString(max(${CH_TIME_EXPR})) AS max_ts
       FROM ${CH_TABLE}
       WHERE ${CH_TIME_EXPR} >= now() - INTERVAL ${CH_LOOKBACK_MIN} MINUTE
     "
@@ -306,6 +306,8 @@ collect_clickhouse_window "BEFORE_SWITCH_${CH_LOOKBACK_MIN}MIN" "$WORKDIR/clickh
 # ---------- 5) Запуск prod_ab_swap с заданным XDP_ACTION в фоне ----------
 echo ""
 echo "===== Starting prod_ab_swap (XDP_ACTION=$XDP_ACTION, ${DURATION_DROP}s) ====="
+cat /sys/class/net/"$IFACE"/statistics/rx_fifo_errors \
+  > "$WORKDIR/rx_fifo_errors.full_before" 2>/dev/null || echo 0 > "$WORKDIR/rx_fifo_errors.full_before"
 (
   XDP_ACTION="$XDP_ACTION" XDP_MODE="$XDP_MODE" "$REPO_ROOT/scripts/prod_ab_swap.sh" \
     "$DURATION_DROP" "$IFACE" \
@@ -340,6 +342,18 @@ collect_window B "$B_DIR" 1
 echo ""
 echo "Waiting for prod_ab_swap to finish..."
 wait "$SWAP_PID" || true
+cat /sys/class/net/"$IFACE"/statistics/rx_fifo_errors \
+  > "$WORKDIR/rx_fifo_errors.full_after" 2>/dev/null || echo 0 > "$WORKDIR/rx_fifo_errors.full_after"
+
+echo ""
+echo "===== POST-TEST fifo_drops check (3x10s) ====="
+for i in 1 2 3; do
+  before=$(cat /sys/class/net/"$IFACE"/statistics/rx_fifo_errors 2>/dev/null || echo 0)
+  sleep 10
+  after=$(cat /sys/class/net/"$IFACE"/statistics/rx_fifo_errors 2>/dev/null || echo 0)
+  delta=$((after - before))
+  echo "$(date +%T) post-test fifo/10s = $delta" | tee -a "$WORKDIR/rx_fifo_errors.post_test.txt"
+done
 
 collect_clickhouse_window "AFTER_SWITCH_${CH_LOOKBACK_MIN}MIN" "$WORKDIR/clickhouse_after_switch.txt"
 
@@ -465,6 +479,25 @@ PY
   sysfs_window_rate "$A_DIR" "$DURATION_WINDOW"
   echo "B (xdpflowd XDP_${XDP_ACTION^^}):"
   sysfs_window_rate "$B_DIR" "$DURATION_WINDOW"
+  echo ""
+  echo "----- NIC fifo_errors lifecycle -----"
+  fifo_delta_rate() {
+    local before_file=$1 after_file=$2 dur=$3 label=$4
+    local before=$(cat "$before_file" 2>/dev/null || echo 0)
+    local after=$(cat "$after_file" 2>/dev/null || echo 0)
+    local delta=$((after - before))
+    local rate=$(( delta / dur ))
+    printf "  %-28s delta=%'d  rate=%'d drops/sec\n" "$label" "$delta" "$rate"
+  }
+  fifo_delta_rate "$A_DIR/rx_fifo_errors.before" "$A_DIR/rx_fifo_errors.after" "$DURATION_WINDOW" "baseline window"
+  fifo_delta_rate "$B_DIR/rx_fifo_errors.before" "$B_DIR/rx_fifo_errors.after" "$DURATION_WINDOW" "XDP window"
+  fifo_delta_rate "$WORKDIR/rx_fifo_errors.full_before" "$WORKDIR/rx_fifo_errors.full_after" "$DURATION_DROP" "full swap duration"
+  if [[ -s "$WORKDIR/rx_fifo_errors.post_test.txt" ]]; then
+    echo "  post-test windows:"
+    sed 's/^/    /' "$WORKDIR/rx_fifo_errors.post_test.txt"
+  else
+    echo "  post-test windows: (not collected)"
+  fi
   echo ""
   echo "----- ClickHouse rows/packets/bytes (${CH_LOOKBACK_MIN}min before vs after) -----"
   if (( HAVE_CH == 1 )); then
