@@ -287,15 +287,29 @@ func (s *clickhouseSink) Enqueue(flows []flowKV) {
 }
 
 func (s *clickhouseSink) Close() {
+	s.log.Info("clickhouse closing",
+		"records_queued", s.recordsQueued.Load(),
+		"records_written", s.recordsWritten.Load(),
+		"insert_errs", s.insertErrs.Load(),
+		"queue_drops", s.queueDrops.Load(),
+	)
 	s.cancel()
 	s.wg.Wait()
 	if s.conn != nil {
 		_ = s.conn.Close()
 	}
+	s.log.Info("clickhouse closed",
+		"records_queued", s.recordsQueued.Load(),
+		"records_written", s.recordsWritten.Load(),
+		"batches_ok", s.batchesOK.Load(),
+		"insert_errs", s.insertErrs.Load(),
+		"queue_drops", s.queueDrops.Load(),
+	)
 }
 
 func (s *clickhouseSink) LogMetrics() {
 	s.log.Info("clickhouse",
+		"records_queued", s.recordsQueued.Load(),
 		"records_written", s.recordsWritten.Load(),
 		"batches_ok", s.batchesOK.Load(),
 		"insert_errs", s.insertErrs.Load(),

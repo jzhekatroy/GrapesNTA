@@ -440,8 +440,8 @@ func main() {
 			os.Exit(1)
 		}
 		defer func(s *clickhouseSink) {
-			s.LogMetrics()
 			s.Close()
+			s.LogMetrics()
 		}(chSink)
 	}
 
@@ -510,12 +510,14 @@ func main() {
 			if nfExp != nil {
 				// Final scan: force-export whatever is still in the map so we
 				// don't lose trailing flows when shutting down for A/B swap.
-				_, _ = nfExp.flushAll(objs, chFlowCb)
+				exported, deleted := nfExp.flushAll(objs, chFlowCb)
+				log.Info("final flush", "exported", exported, "deleted", deleted, "clickhouse_enabled", chSink != nil)
 				nfExp.logMetrics()
 			} else if chSink != nil {
 				flows := selectAllFlows(objs)
 				chSink.Enqueue(flows)
-				deleteFlowKeys(objs, flows)
+				deleted := deleteFlowKeys(objs, flows)
+				log.Info("final flush", "exported", len(flows), "deleted", deleted, "clickhouse_enabled", true)
 			}
 			log.Info("shutdown")
 			return

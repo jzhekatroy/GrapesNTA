@@ -51,7 +51,7 @@ fi
 
 DURATION="${1:-600}"
 IFACE="${2:-enp5s0d1}"
-NF_DSTS="${3:-127.0.0.1:9996,127.0.0.1:9999}"
+NF_DSTS="${NF_DSTS:-${3:-127.0.0.1:9996,127.0.0.1:9999}}"
 
 # XDP action for accounted IP packets: pass (safe, default) | drop (SPAN/mirror only).
 # drop — реальная экономия CPU, но пакеты не дойдут до kernel stack.

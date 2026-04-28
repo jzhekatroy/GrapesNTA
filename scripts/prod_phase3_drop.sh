@@ -51,6 +51,12 @@ case "$XDP_ACTION" in pass|drop) ;; *) echo "ERROR: XDP_ACTION must be pass|drop
 # flow-tracking program. Empty string = let prod_ab_swap.sh use its default.
 XDP_BPF_OBJ="${XDP_BPF_OBJ:-}"
 
+# NetFlow destinations for xdpflowd. Default preserves the current production
+# fanout: local nfcapd plus goflow2. For direct-ClickHouse CPU tests, set
+# NF_DSTS=127.0.0.1:9996 to keep local capture while removing goflow2 from
+# the hot path.
+NF_DSTS="${NF_DSTS:-127.0.0.1:9996,127.0.0.1:9999}"
+
 # Optional local credentials file. Keep it out of git (see .gitignore).
 # Default lookup order:
 #   1) CH_ENV_FILE=/path/to/file
@@ -342,6 +348,7 @@ cat /sys/class/net/"$IFACE"/statistics/rx_fifo_errors \
   XDP_ACTION="$XDP_ACTION" \
   XDP_MODE="$XDP_MODE" \
   XDP_BPF_OBJ="$XDP_BPF_OBJ" \
+  NF_DSTS="$NF_DSTS" \
   XDP_CH_DSN="${XDP_CH_DSN:-}" \
   XDP_CH_TABLE="${XDP_CH_TABLE:-}" \
   XDP_CH_BATCH_SIZE="${XDP_CH_BATCH_SIZE:-500}" \
