@@ -311,6 +311,12 @@ func main() {
 	nfScan := flag.Duration("nf-scan", 1*time.Second, "how often to walk the flows map for NetFlow export")
 	nfSourceID := flag.Int("nf-source-id", 1, "NetFlow v9 source_id field (exporter observation domain)")
 	xdpAction := flag.String("xdp-action", "pass", "XDP return value for accounted IP packets: pass|drop. DROP only on SPAN/mirror interfaces — it stops the kernel stack after accounting and saves CPU.")
+
+	chDSN := flag.String("ch-dsn", "", "optional ClickHouse DSN: clickhouse://user:pass@host:9000/database (native protocol)")
+	chTable := flag.String("ch-table", "", "MergeTree table for direct INSERT (e.g. default.flows_raw_xdp_direct); see docs/CLICKHOUSE_FLOWS_RAW.md")
+	chBatchSize := flag.Int("ch-batch-size", 500, "ClickHouse INSERT batch size")
+	chFlushInterval := flag.Duration("ch-flush-interval", time.Second, "ClickHouse flush interval")
+	chQueueSize := flag.Int("ch-queue-size", 64, "bounded queue for ClickHouse rows (drops on overflow)")
 	flag.Parse()
 
 	log := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
@@ -406,6 +412,46 @@ func main() {
 		nfExp.sendTemplate()
 	}
 
+	var exportClock ExportClock
+	needExportClock := nfExp != nil || strings.TrimSpace(*chDSN) != ""
+	if needExportClock {
+		if nfExp != nil {
+			exportClock = nfExp.exportClock()
+		} else {
+			up, err := readSystemUptimeNs()
+			if err != nil {
+				log.Error("clickhouse clock /proc/uptime", "err", err)
+				os.Exit(1)
+			}
+			exportClock = ExportClock{
+				ExporterStart: time.Now(),
+				BpfStartNs:    up,
+			}
+		}
+	}
+
+	var chSink *clickhouseSink
+	if strings.TrimSpace(*chDSN) != "" {
+		var err error
+		chSink, err = newClickhouseSink(log, strings.TrimSpace(*chDSN), strings.TrimSpace(*chTable),
+			exportClock, uint32(*nfSourceID), *chBatchSize, *chFlushInterval, *chQueueSize)
+		if err != nil {
+			log.Error("clickhouse sink init", "err", err)
+			os.Exit(1)
+		}
+		defer func(s *clickhouseSink) {
+			s.LogMetrics()
+			s.Close()
+		}(chSink)
+	}
+
+	var chFlowCb func([]flowKV)
+	if chSink != nil {
+		chFlowCb = func(flows []flowKV) {
+			chSink.Enqueue(flows)
+		}
+	}
+
 	if *once {
 		time.Sleep(*interval)
 		if *jsonOut != "" {
@@ -429,10 +475,10 @@ func main() {
 		defer jsonTicker.Stop()
 	}
 
-	var nfTicker *time.Ticker
-	if nfExp != nil {
-		nfTicker = time.NewTicker(*nfScan)
-		defer nfTicker.Stop()
+	var exportTicker *time.Ticker
+	if nfExp != nil || chSink != nil {
+		exportTicker = time.NewTicker(*nfScan)
+		defer exportTicker.Stop()
 	}
 
 	// flushFinal writes a last NDJSON snapshot right before exiting — this closes
@@ -449,12 +495,12 @@ func main() {
 	}
 
 	// Build channels that may be nil-safe in select (nil channel blocks forever).
-	var jsonC, nfC <-chan time.Time
+	var jsonC, exportC <-chan time.Time
 	if jsonTicker != nil {
 		jsonC = jsonTicker.C
 	}
-	if nfTicker != nil {
-		nfC = nfTicker.C
+	if exportTicker != nil {
+		exportC = exportTicker.C
 	}
 
 	for {
@@ -464,8 +510,12 @@ func main() {
 			if nfExp != nil {
 				// Final scan: force-export whatever is still in the map so we
 				// don't lose trailing flows when shutting down for A/B swap.
-				_, _ = nfExp.flushAll(objs)
+				_, _ = nfExp.flushAll(objs, chFlowCb)
 				nfExp.logMetrics()
+			} else if chSink != nil {
+				flows := selectAllFlows(objs)
+				chSink.Enqueue(flows)
+				deleteFlowKeys(objs, flows)
 			}
 			log.Info("shutdown")
 			return
@@ -479,8 +529,19 @@ func main() {
 			if err := writeJSONLine(*jsonOut, snap); err != nil {
 				log.Error("json-out", "err", err)
 			}
-		case <-nfC:
-			nfExp.scanAndExport(objs)
+		case <-exportC:
+			if nfExp != nil {
+				_, _ = nfExp.scanAndExport(objs, chFlowCb)
+			} else if chSink != nil {
+				nowMonoNs, err := readSystemUptimeNs()
+				if err != nil {
+					log.Error("read uptime", "err", err)
+					break
+				}
+				flows := selectExpiredFlows(objs, *nfIdle, *nfActive, nowMonoNs)
+				chSink.Enqueue(flows)
+				deleteFlowKeys(objs, flows)
+			}
 		}
 	}
 }

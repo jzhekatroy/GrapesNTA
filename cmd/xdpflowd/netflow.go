@@ -377,41 +377,26 @@ func (e *nfExporter) flushBuckets(v4 [][]byte, v6 [][]byte) {
 
 // scanAndExport walks the BPF flows map and exports any flow whose activity
 // crosses an idle/active boundary. Returns counts of flows exported and deleted.
-func (e *nfExporter) scanAndExport(objs *loader.Objects) (exported, deleted int) {
+// If onFlows is non-nil it receives the same slice of flows before UDP encode
+// (for optional ClickHouse direct ingest).
+func (e *nfExporter) scanAndExport(objs *loader.Objects, onFlows func([]flowKV)) (exported, deleted int) {
 	nowMonoNs, _ := readSystemUptimeNs() // cheap, a few hundred ns
 
-	var k FlowKey
-	var v FlowValue
-	iter := objs.Flows.Iterate()
+	flows := selectExpiredFlows(objs, e.idleTimeout, e.activeTimeout, nowMonoNs)
+	if onFlows != nil {
+		onFlows(flows)
+	}
 
 	var recV4, recV6 [][]byte
-	var toDelete []FlowKey
-
-	for iter.Next(&k, &v) {
-		// Guard against the pathological case where /proc/uptime was read a
-		// moment before a packet advanced v.LastSeenNs/v.FirstSeenNs: the
-		// subtraction would wrap as uint64 and spuriously export the flow.
-		var idle, lifetime uint64
-		if nowMonoNs > v.LastSeenNs {
-			idle = nowMonoNs - v.LastSeenNs
-		}
-		if nowMonoNs > v.FirstSeenNs {
-			lifetime = nowMonoNs - v.FirstSeenNs
-		}
-		exportIt := idle >= uint64(e.idleTimeout) || lifetime >= uint64(e.activeTimeout)
-		if !exportIt {
-			continue
-		}
-		if k.IPVersion == 4 {
-			rec := e.encodeRecordV4(make([]byte, 0, e.recV4Size), k, v)
+	for _, fv := range flows {
+		if fv.k.IPVersion == 4 {
+			rec := e.encodeRecordV4(make([]byte, 0, e.recV4Size), fv.k, fv.v)
 			recV4 = append(recV4, rec)
-		} else if k.IPVersion == 6 {
-			rec := e.encodeRecordV6(make([]byte, 0, e.recV6Size), k, v)
+		} else if fv.k.IPVersion == 6 {
+			rec := e.encodeRecordV6(make([]byte, 0, e.recV6Size), fv.k, fv.v)
 			recV6 = append(recV6, rec)
 		}
-		toDelete = append(toDelete, k)
 	}
-	_ = iter.Err()
 
 	// Send template if interval elapsed (or very first run).
 	last := e.lastTemplateSent.Load()
@@ -421,42 +406,33 @@ func (e *nfExporter) scanAndExport(objs *loader.Objects) (exported, deleted int)
 
 	e.flushBuckets(recV4, recV6)
 
-	// Remove exported flows from the map so next packet starts a fresh flow.
-	for i := range toDelete {
-		_ = objs.Flows.Delete(&toDelete[i])
-		deleted++
-	}
-	exported = len(recV4) + len(recV6)
+	deleted = deleteFlowKeys(objs, flows)
+	exported = len(flows)
 	return
 }
 
 // flushAll exports every flow currently in the map regardless of timeout.
 // Intended for graceful shutdown and for test harnesses to ensure nothing
 // is left behind.
-func (e *nfExporter) flushAll(objs *loader.Objects) (exported, deleted int) {
-	var k FlowKey
-	var v FlowValue
-	iter := objs.Flows.Iterate()
-	var recV4, recV6 [][]byte
-	var toDelete []FlowKey
-	for iter.Next(&k, &v) {
-		if k.IPVersion == 4 {
-			recV4 = append(recV4, e.encodeRecordV4(make([]byte, 0, e.recV4Size), k, v))
-		} else if k.IPVersion == 6 {
-			recV6 = append(recV6, e.encodeRecordV6(make([]byte, 0, e.recV6Size), k, v))
-		}
-		toDelete = append(toDelete, k)
+func (e *nfExporter) flushAll(objs *loader.Objects, onFlows func([]flowKV)) (exported, deleted int) {
+	flows := selectAllFlows(objs)
+	if onFlows != nil {
+		onFlows(flows)
 	}
-	_ = iter.Err()
+	var recV4, recV6 [][]byte
+	for _, fv := range flows {
+		if fv.k.IPVersion == 4 {
+			recV4 = append(recV4, e.encodeRecordV4(make([]byte, 0, e.recV4Size), fv.k, fv.v))
+		} else if fv.k.IPVersion == 6 {
+			recV6 = append(recV6, e.encodeRecordV6(make([]byte, 0, e.recV6Size), fv.k, fv.v))
+		}
+	}
 	// Always send a fresh template right before a forced flush so the collector
 	// can decode records even if it just started.
 	e.sendTemplate()
 	e.flushBuckets(recV4, recV6)
-	for i := range toDelete {
-		_ = objs.Flows.Delete(&toDelete[i])
-		deleted++
-	}
-	exported = len(recV4) + len(recV6)
+	deleted = deleteFlowKeys(objs, flows)
+	exported = len(flows)
 	return
 }
 
@@ -473,5 +449,13 @@ func (e *nfExporter) logMetrics() {
 func (e *nfExporter) Close() {
 	for _, c := range e.dests {
 		_ = c.Close()
+	}
+}
+
+// exportClock exposes monotonic→wall mapping shared with other exporters (e.g. ClickHouse).
+func (e *nfExporter) exportClock() ExportClock {
+	return ExportClock{
+		ExporterStart: e.exporterStart,
+		BpfStartNs:    e.bpfStartNs,
 	}
 }

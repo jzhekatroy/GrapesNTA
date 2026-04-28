@@ -1,3 +1,6 @@
 /bin/
 /bpf/*.o
 *.ndjson
+.env
+.env.*
+.clickhouse.env

@@ -27,6 +27,8 @@
 #       за последние CH_LOOKBACK_MIN минут до swap и после swap (default 2).
 #       По умолчанию БД захардкожена под текущий прод: default.flows_raw @ 95.215.1.30:6124.
 #       Настройки: CH_HOST, CH_PORT, CH_USER, CH_TIME_EXPR, CH_PACKETS_COL, CH_BYTES_COL.
+#   Прямой INSERT из xdpflowd в staging (опционально): задайте оба XDP_CH_DSN и XDP_CH_TABLE
+#       (см. docs/CLICKHOUSE_FLOWS_RAW.md). Передаются в prod_ab_swap.sh как есть.
 
 set -euo pipefail
 
@@ -48,6 +50,28 @@ case "$XDP_ACTION" in pass|drop) ;; *) echo "ERROR: XDP_ACTION must be pass|drop
 # isolate mlx4_en native XDP path overhead from the cost of the real
 # flow-tracking program. Empty string = let prod_ab_swap.sh use its default.
 XDP_BPF_OBJ="${XDP_BPF_OBJ:-}"
+
+# Optional local credentials file. Keep it out of git (see .gitignore).
+# Default lookup order:
+#   1) CH_ENV_FILE=/path/to/file
+#   2) ./.clickhouse.env in the repo checkout
+#   3) /root/.grapesnta-clickhouse.env
+CH_ENV_FILE="${CH_ENV_FILE:-}"
+if [[ -z "$CH_ENV_FILE" ]]; then
+  if [[ -f ./.clickhouse.env ]]; then
+    CH_ENV_FILE="./.clickhouse.env"
+  elif [[ -f /root/.grapesnta-clickhouse.env ]]; then
+    CH_ENV_FILE="/root/.grapesnta-clickhouse.env"
+  fi
+fi
+if [[ -n "$CH_ENV_FILE" ]]; then
+  if [[ ! -r "$CH_ENV_FILE" ]]; then
+    echo "ERROR: CH_ENV_FILE=$CH_ENV_FILE is not readable" >&2
+    exit 1
+  fi
+  # shellcheck disable=SC1090
+  source "$CH_ENV_FILE"
+fi
 
 CH_HOST="${CH_HOST:-95.215.1.30}"
 CH_PORT="${CH_PORT:-6124}"
@@ -318,6 +342,11 @@ cat /sys/class/net/"$IFACE"/statistics/rx_fifo_errors \
   XDP_ACTION="$XDP_ACTION" \
   XDP_MODE="$XDP_MODE" \
   XDP_BPF_OBJ="$XDP_BPF_OBJ" \
+  XDP_CH_DSN="${XDP_CH_DSN:-}" \
+  XDP_CH_TABLE="${XDP_CH_TABLE:-}" \
+  XDP_CH_BATCH_SIZE="${XDP_CH_BATCH_SIZE:-500}" \
+  XDP_CH_FLUSH_INTERVAL="${XDP_CH_FLUSH_INTERVAL:-1s}" \
+  XDP_CH_QUEUE_SIZE="${XDP_CH_QUEUE_SIZE:-64}" \
     "$REPO_ROOT/scripts/prod_ab_swap.sh" \
     "$DURATION_DROP" "$IFACE" \
     > "$WORKDIR/prod_ab_swap.log" 2>&1

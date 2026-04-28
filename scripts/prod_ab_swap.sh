@@ -128,6 +128,63 @@ if ! [[ "$XDP_SHUTDOWN_GRACE" =~ ^[0-9]+$ ]] || (( XDP_SHUTDOWN_GRACE < 20 )); t
   exit 1
 fi
 
+# Optional local credentials file. Keep it out of git (see .gitignore).
+# Default lookup order:
+#   1) CH_ENV_FILE=/path/to/file
+#   2) ./.clickhouse.env in the repo checkout
+#   3) /root/.grapesnta-clickhouse.env
+CH_ENV_FILE="${CH_ENV_FILE:-}"
+if [[ -z "$CH_ENV_FILE" ]]; then
+  if [[ -f ./.clickhouse.env ]]; then
+    CH_ENV_FILE="./.clickhouse.env"
+  elif [[ -f /root/.grapesnta-clickhouse.env ]]; then
+    CH_ENV_FILE="/root/.grapesnta-clickhouse.env"
+  fi
+fi
+if [[ -n "$CH_ENV_FILE" ]]; then
+  if [[ ! -r "$CH_ENV_FILE" ]]; then
+    echo "ERROR: CH_ENV_FILE=$CH_ENV_FILE is not readable" >&2
+    exit 1
+  fi
+  # shellcheck disable=SC1090
+  source "$CH_ENV_FILE"
+fi
+
+# Optional direct ClickHouse INSERT from xdpflowd (disabled by default).
+# Requires both XDP_CH_DSN and XDP_CH_TABLE; staging DDL: docs/CLICKHOUSE_FLOWS_RAW.md
+CH_HOST="${CH_HOST:-95.215.1.30}"
+CH_PORT="${CH_PORT:-6124}"
+CH_USER="${CH_USER:-develop}"
+CH_PASS="${CH_PASS:-}"
+XDP_CH_DSN="${XDP_CH_DSN:-}"
+XDP_CH_TABLE="${XDP_CH_TABLE:-}"
+XDP_CH_BATCH_SIZE="${XDP_CH_BATCH_SIZE:-500}"
+XDP_CH_FLUSH_INTERVAL="${XDP_CH_FLUSH_INTERVAL:-1s}"
+XDP_CH_QUEUE_SIZE="${XDP_CH_QUEUE_SIZE:-64}"
+CH_EXTRA_ARGS=()
+if [[ -z "$XDP_CH_DSN" && -n "$XDP_CH_TABLE" && -n "$CH_PASS" ]]; then
+  if command -v python3 >/dev/null 2>&1; then
+    CH_PASS_URL="$(CH_PASS="$CH_PASS" python3 -c 'import os, urllib.parse; print(urllib.parse.quote(os.environ["CH_PASS"], safe=""))')"
+    XDP_CH_DSN="clickhouse://${CH_USER}:${CH_PASS_URL}@${CH_HOST}:${CH_PORT}/default"
+  else
+    echo "ERROR: python3 is required to URL-encode CH_PASS into XDP_CH_DSN; set XDP_CH_DSN explicitly" >&2
+    exit 1
+  fi
+fi
+if [[ -n "$XDP_CH_DSN" || -n "$XDP_CH_TABLE" ]]; then
+  if [[ -z "$XDP_CH_DSN" || -z "$XDP_CH_TABLE" ]]; then
+    echo "ERROR: set both XDP_CH_DSN and XDP_CH_TABLE for ClickHouse direct ingest, or set CH_PASS plus XDP_CH_TABLE" >&2
+    exit 1
+  fi
+  CH_EXTRA_ARGS=(
+    -ch-dsn "$XDP_CH_DSN"
+    -ch-table "$XDP_CH_TABLE"
+    -ch-batch-size "$XDP_CH_BATCH_SIZE"
+    -ch-flush-interval "$XDP_CH_FLUSH_INTERVAL"
+    -ch-queue-size "$XDP_CH_QUEUE_SIZE"
+  )
+fi
+
 # mlx4 native XDP may need memory compaction before attach, but it must never
 # run after the ipt_NETFLOW rule is removed: compact_memory can stall on hosts
 # under pressure. Keep it bounded and allow smoke tests to skip it.
@@ -439,7 +496,7 @@ fi
 # было видно, с какими флагами реально стартовали.
 {
   echo "=== xdpflowd launch at $(date -Is) ==="
-  echo "cmdline: $XDP_STDBUF ./bin/xdpflowd -iface $IFACE -mode $XDP_MODE -xdp-action $XDP_ACTION -bpf $XDP_BPF_OBJ -nf-dst '$NF_DSTS' -nf-active $XDP_NF_ACTIVE -nf-idle $XDP_NF_IDLE -nf-template-interval $XDP_NF_TEMPLATE_INTERVAL -interval 5s -json-out '$JSON_OUT' -json-interval 10s"
+  echo "cmdline: $XDP_STDBUF ./bin/xdpflowd -iface $IFACE -mode $XDP_MODE -xdp-action $XDP_ACTION -bpf $XDP_BPF_OBJ -nf-dst '$NF_DSTS' -nf-active $XDP_NF_ACTIVE -nf-idle $XDP_NF_IDLE -nf-template-interval $XDP_NF_TEMPLATE_INTERVAL -interval 5s -json-out '$JSON_OUT' -json-interval 10s ${CH_EXTRA_ARGS[*]}"
   echo "shutdown_grace: ${XDP_SHUTDOWN_GRACE}s"
   echo "WORKDIR: $WORKDIR"
   echo ""
@@ -457,6 +514,7 @@ $XDP_STDBUF ./bin/xdpflowd \
   -interval 5s \
   -json-out "$JSON_OUT" \
   -json-interval 10s \
+  "${CH_EXTRA_ARGS[@]}" \
   >> "$LOG_XDP" 2>&1 &
 XDP_PID=$!
 
