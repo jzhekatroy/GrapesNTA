@@ -245,27 +245,39 @@ func (s *clickhouseSink) run() {
 		s.insertBatch(context.Background(), batch, receivedAt)
 		batch = batch[:0]
 	}
+	drainAndFinalFlush := func() {
+		for {
+			select {
+			case flows := <-s.ch:
+				batch = append(batch, flows...)
+				s.recordsQueued.Add(uint64(len(flows)))
+			default:
+				finalFlush()
+				return
+			}
+		}
+	}
 
 	for {
 		select {
 		case <-s.ctx.Done():
-			for {
-				select {
-				case flows := <-s.ch:
-					batch = append(batch, flows...)
-					s.recordsQueued.Add(uint64(len(flows)))
-				default:
-					finalFlush()
-					return
-				}
-			}
+			drainAndFinalFlush()
+			return
 		case flows := <-s.ch:
 			batch = append(batch, flows...)
 			s.recordsQueued.Add(uint64(len(flows)))
+			if s.ctx.Err() != nil {
+				drainAndFinalFlush()
+				return
+			}
 			if len(batch) >= s.batchSize {
 				flush()
 			}
 		case <-ticker.C:
+			if s.ctx.Err() != nil {
+				drainAndFinalFlush()
+				return
+			}
 			flush()
 		}
 	}
