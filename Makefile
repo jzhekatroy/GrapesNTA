@@ -26,8 +26,9 @@ BPF_CFLAGS := -O2 -g -Wall -target bpf -I/usr/include/x86_64-linux-gnu \
 BPF_O := bpf/xdp_flow.o
 AFXDP_BPF_O := bpf/afxdp_redirect.o
 LIGHT_BPF_O := bpf/xdp_light.o
+FAST_BPF_O := bpf/xdp_flow_fast.o
 
-.PHONY: all bpf afxdp-bpf bpf-light build build-afxdp clean run tidy ensure-mod
+.PHONY: all bpf afxdp-bpf bpf-light bpf-fast bpf-variants build build-afxdp clean run tidy ensure-mod
 
 all: build
 
@@ -54,11 +55,19 @@ $(LIGHT_BPF_O): bpf/xdp_light.c
 	@mkdir -p bpf
 	$(CLANG) $(BPF_CFLAGS) -c bpf/xdp_light.c -o $(LIGHT_BPF_O)
 
+$(FAST_BPF_O): bpf/xdp_flow_fast.c
+	@mkdir -p bpf
+	$(CLANG) $(BPF_CFLAGS) -c bpf/xdp_flow_fast.c -o $(FAST_BPF_O)
+
 bpf: $(BPF_O)
 
 afxdp-bpf: $(AFXDP_BPF_O)
 
 bpf-light: $(LIGHT_BPF_O)
+
+bpf-fast: $(FAST_BPF_O)
+
+bpf-variants: $(BPF_O) $(FAST_BPF_O) $(LIGHT_BPF_O)
 
 build: ensure-mod $(BPF_O)
 	@mkdir -p bin
@@ -75,6 +84,6 @@ run: build
 	sudo ./bin/xdpflowd -iface ens18 -mode native -bpf $(BPF_O)
 
 clean:
-	rm -f bin/xdpflowd bin/afxdpflowd $(BPF_O) $(AFXDP_BPF_O) $(LIGHT_BPF_O)
+	rm -f bin/xdpflowd bin/afxdpflowd $(BPF_O) $(AFXDP_BPF_O) $(LIGHT_BPF_O) $(FAST_BPF_O)
 
 .DEFAULT_GOAL := build
