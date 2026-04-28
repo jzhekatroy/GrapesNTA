@@ -73,6 +73,18 @@ case "$XDP_MODE" in
   *) echo "ERROR: XDP_MODE must be 'native' or 'generic' (got: $XDP_MODE)" >&2; exit 1;;
 esac
 
+# BPF object to load. Default = full flow-tracking program. Override to
+# bpf/xdp_light.o to attach the diagnostic "do nothing but bump a counter"
+# program — useful for isolating mlx4_en driver/kernel XDP path overhead
+# from the cost of bpf/xdp_flow.c. The file must contain a program named
+# `xdp_flow_prog` and maps `flows`/`stats` (the loader looks them up by
+# name); see bpf/xdp_light.c for a compatible minimal example.
+XDP_BPF_OBJ="${XDP_BPF_OBJ:-./bpf/xdp_flow.o}"
+if [[ ! -f "$XDP_BPF_OBJ" ]]; then
+  echo "ERROR: XDP_BPF_OBJ=$XDP_BPF_OBJ does not exist (run 'make bpf' or 'make bpf-light')" >&2
+  exit 1
+fi
+
 # Safety: если $IFACE выглядит как обычный роутинг-интерфейс (есть IP/маршруты),
 # не даём запустить drop. Исключение — каноничный mirror enp5s0d1.
 if [[ "$XDP_ACTION" == "drop" && "$IFACE" != "enp5s0d1" ]]; then
@@ -427,7 +439,7 @@ fi
 # было видно, с какими флагами реально стартовали.
 {
   echo "=== xdpflowd launch at $(date -Is) ==="
-  echo "cmdline: $XDP_STDBUF ./bin/xdpflowd -iface $IFACE -mode $XDP_MODE -xdp-action $XDP_ACTION -bpf ./bpf/xdp_flow.o -nf-dst '$NF_DSTS' -nf-active $XDP_NF_ACTIVE -nf-idle $XDP_NF_IDLE -nf-template-interval $XDP_NF_TEMPLATE_INTERVAL -interval 5s -json-out '$JSON_OUT' -json-interval 10s"
+  echo "cmdline: $XDP_STDBUF ./bin/xdpflowd -iface $IFACE -mode $XDP_MODE -xdp-action $XDP_ACTION -bpf $XDP_BPF_OBJ -nf-dst '$NF_DSTS' -nf-active $XDP_NF_ACTIVE -nf-idle $XDP_NF_IDLE -nf-template-interval $XDP_NF_TEMPLATE_INTERVAL -interval 5s -json-out '$JSON_OUT' -json-interval 10s"
   echo "shutdown_grace: ${XDP_SHUTDOWN_GRACE}s"
   echo "WORKDIR: $WORKDIR"
   echo ""
@@ -437,7 +449,7 @@ $XDP_STDBUF ./bin/xdpflowd \
   -iface "$IFACE" \
   -mode "$XDP_MODE" \
   -xdp-action "$XDP_ACTION" \
-  -bpf ./bpf/xdp_flow.o \
+  -bpf "$XDP_BPF_OBJ" \
   -nf-dst "$NF_DSTS" \
   -nf-active "$XDP_NF_ACTIVE" \
   -nf-idle "$XDP_NF_IDLE" \

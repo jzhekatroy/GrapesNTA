@@ -25,8 +25,9 @@ BPF_CFLAGS := -O2 -g -Wall -target bpf -I/usr/include/x86_64-linux-gnu \
 
 BPF_O := bpf/xdp_flow.o
 AFXDP_BPF_O := bpf/afxdp_redirect.o
+LIGHT_BPF_O := bpf/xdp_light.o
 
-.PHONY: all bpf afxdp-bpf build build-afxdp clean run tidy ensure-mod
+.PHONY: all bpf afxdp-bpf bpf-light build build-afxdp clean run tidy ensure-mod
 
 all: build
 
@@ -45,9 +46,19 @@ $(AFXDP_BPF_O): bpf/afxdp_redirect.c
 	@mkdir -p bpf
 	$(CLANG) $(BPF_CFLAGS) -c bpf/afxdp_redirect.c -o $(AFXDP_BPF_O)
 
+# Diagnostic "light" XDP program: only bumps stats[0] and returns
+# xdp_final_action. Used to isolate driver/kernel XDP overhead from the cost
+# of the real flow-tracking program. Loadable by the same xdpflowd binary
+# via `-bpf bpf/xdp_light.o`.
+$(LIGHT_BPF_O): bpf/xdp_light.c
+	@mkdir -p bpf
+	$(CLANG) $(BPF_CFLAGS) -c bpf/xdp_light.c -o $(LIGHT_BPF_O)
+
 bpf: $(BPF_O)
 
 afxdp-bpf: $(AFXDP_BPF_O)
+
+bpf-light: $(LIGHT_BPF_O)
 
 build: ensure-mod $(BPF_O)
 	@mkdir -p bin
@@ -64,6 +75,6 @@ run: build
 	sudo ./bin/xdpflowd -iface ens18 -mode native -bpf $(BPF_O)
 
 clean:
-	rm -f bin/xdpflowd bin/afxdpflowd $(BPF_O) $(AFXDP_BPF_O)
+	rm -f bin/xdpflowd bin/afxdpflowd $(BPF_O) $(AFXDP_BPF_O) $(LIGHT_BPF_O)
 
 .DEFAULT_GOAL := build

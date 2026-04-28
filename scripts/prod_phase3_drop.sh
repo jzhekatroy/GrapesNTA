@@ -43,6 +43,12 @@ XDP_MODE="${XDP_MODE:-native}"
 XDP_ACTION="${XDP_ACTION:-drop}"
 case "$XDP_ACTION" in pass|drop) ;; *) echo "ERROR: XDP_ACTION must be pass|drop"; exit 1;; esac
 
+# BPF object passed through to prod_ab_swap.sh. Override to bpf/xdp_light.o
+# to attach the diagnostic minimal program (counter only, no parsing) and
+# isolate mlx4_en native XDP path overhead from the cost of the real
+# flow-tracking program. Empty string = let prod_ab_swap.sh use its default.
+XDP_BPF_OBJ="${XDP_BPF_OBJ:-}"
+
 CH_HOST="${CH_HOST:-95.215.1.30}"
 CH_PORT="${CH_PORT:-6124}"
 CH_USER="${CH_USER:-develop}"
@@ -79,7 +85,7 @@ exec > >(tee -a "$LOG") 2>&1
 
 echo "======================================================================"
 echo "Phase 3 ${XDP_ACTION^^} test — $TS"
-echo "iface=$IFACE  xdp-mode=$XDP_MODE  xdp-action=$XDP_ACTION  duration=${DURATION_DROP}s"
+echo "iface=$IFACE  xdp-mode=$XDP_MODE  xdp-action=$XDP_ACTION  duration=${DURATION_DROP}s  bpf=${XDP_BPF_OBJ:-default}"
 echo "workdir=$WORKDIR"
 echo "======================================================================"
 
@@ -309,7 +315,10 @@ echo "===== Starting prod_ab_swap (XDP_ACTION=$XDP_ACTION, ${DURATION_DROP}s) ==
 cat /sys/class/net/"$IFACE"/statistics/rx_fifo_errors \
   > "$WORKDIR/rx_fifo_errors.full_before" 2>/dev/null || echo 0 > "$WORKDIR/rx_fifo_errors.full_before"
 (
-  XDP_ACTION="$XDP_ACTION" XDP_MODE="$XDP_MODE" "$REPO_ROOT/scripts/prod_ab_swap.sh" \
+  XDP_ACTION="$XDP_ACTION" \
+  XDP_MODE="$XDP_MODE" \
+  XDP_BPF_OBJ="$XDP_BPF_OBJ" \
+    "$REPO_ROOT/scripts/prod_ab_swap.sh" \
     "$DURATION_DROP" "$IFACE" \
     > "$WORKDIR/prod_ab_swap.log" 2>&1
 ) &
