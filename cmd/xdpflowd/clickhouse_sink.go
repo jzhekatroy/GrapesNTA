@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"net"
 	"net/url"
 	"strings"
 	"sync"
@@ -136,13 +135,17 @@ func newClickhouseSink(
 	return s, nil
 }
 
-func flowIPs(k FlowKey) (src, dst net.IP) {
-	if k.IPVersion == 4 {
-		s := net.IPv4(k.SrcAddr[0], k.SrcAddr[1], k.SrcAddr[2], k.SrcAddr[3])
-		d := net.IPv4(k.DstAddr[0], k.DstAddr[1], k.DstAddr[2], k.DstAddr[3])
-		return s.To16(), d.To16()
+func fixed16(addr [16]byte) []byte {
+	out := make([]byte, 16)
+	copy(out, addr[:])
+	return out
+}
+
+func etherType(ipVersion uint8) uint32 {
+	if ipVersion == 6 {
+		return 0x86DD
 	}
-	return net.IP(append([]byte(nil), k.SrcAddr[:]...)), net.IP(append([]byte(nil), k.DstAddr[:]...))
+	return 0x0800
 }
 
 func (s *clickhouseSink) insertBatch(ctx context.Context, flows []flowKV, receivedAt time.Time) {
@@ -153,32 +156,23 @@ func (s *clickhouseSink) insertBatch(ctx context.Context, flows []flowKV, receiv
 	defer cancel()
 
 	const stmt = `INSERT INTO %s (
+    date,
+    time_inserted_ns,
     time_received_ns,
-    flow_first_seen_ns,
-    flow_last_seen_ns,
-    src_ip,
-    dst_ip,
+    time_flow_start_ns,
+    sequence_num,
+    sampling_rate,
+    sampler_address,
+    src_addr,
+    dst_addr,
+    src_as,
+    dst_as,
+    etype,
+    proto,
     src_port,
     dst_port,
-    protocol,
-    ip_version,
-    packets,
     bytes,
-    tcp_flags,
-    vlan_id,
-    ingress_ifindex,
-    rx_queue,
-    src_tos,
-    ttl_min,
-    ttl_max,
-    pkt_len_min,
-    pkt_len_max,
-    ip_frag_count,
-    tcp_syn_count,
-    tcp_rst_count,
-    tcp_fin_count,
-    exporter_source_id,
-    ingest_kind
+    packets
 )`
 
 	q := fmt.Sprintf(stmt, s.table)
@@ -189,37 +183,28 @@ func (s *clickhouseSink) insertBatch(ctx context.Context, flows []flowKV, receiv
 		return
 	}
 
+	var zeroAddr [16]byte
+	zeroFixed := fixed16(zeroAddr)
 	for _, fv := range flows {
-		srcIP, dstIP := flowIPs(fv.k)
 		firstWall := s.clock.monoNsToWall(fv.v.FirstSeenNs)
-		lastWall := s.clock.monoNsToWall(fv.v.LastSeenNs)
 		err := batch.Append(
 			receivedAt,
+			receivedAt,
+			receivedAt,
 			firstWall,
-			lastWall,
-			srcIP,
-			dstIP,
-			keyPortHost(fv.k.SrcPort),
-			keyPortHost(fv.k.DstPort),
-			fv.k.Proto,
-			fv.k.IPVersion,
-			fv.v.Packets,
+			uint32(0),
+			uint64(1),
+			zeroFixed,
+			fixed16(fv.k.SrcAddr),
+			fixed16(fv.k.DstAddr),
+			uint32(0),
+			uint32(0),
+			etherType(fv.k.IPVersion),
+			uint32(fv.k.Proto),
+			uint32(keyPortHost(fv.k.SrcPort)),
+			uint32(keyPortHost(fv.k.DstPort)),
 			fv.v.Bytes,
-			fv.v.TCPFlagsOR,
-			fv.k.VLANID,
-			fv.v.IngressIf,
-			fv.v.RxQueue,
-			fv.v.Tos,
-			fv.v.TTLMin,
-			fv.v.TTLMax,
-			fv.v.PktLenMin,
-			fv.v.PktLenMax,
-			fv.v.IPFragCount,
-			fv.v.TCPSynCount,
-			fv.v.TCPRstCount,
-			fv.v.TCPFinCount,
-			s.sourceID,
-			"xdpflowd_direct",
+			fv.v.Packets,
 		)
 		if err != nil {
 			s.insertErrs.Add(1)

@@ -90,7 +90,7 @@ SETTINGS index_granularity = 8192;
 | `time_inserted_ns` | Wall time at ClickHouse insert (`now64(9)` equivalent from `xdpflowd`) |
 | `time_received_ns` | Wall time when `xdpflowd` exports the row |
 | `time_flow_start_ns` | `ExporterStart + (FirstSeenNs - BpfStartNs)` |
-| `sequence_num` | exporter sequence number, or `0` for direct staging until needed |
+| `sequence_num` | `0` for direct staging until a downstream consumer requires exporter sequence semantics |
 | `sampling_rate` | `1` (no sampling in current XDP path) |
 | `sampler_address` | 16-byte exporter/source address; use zero bytes until real exporter IP is required |
 | `src_addr` / `dst_addr` | 16 raw bytes from `FlowKey`; IPv4 stored in the first 4 bytes with the rest zeroed to match current BPF key layout |
@@ -99,9 +99,6 @@ SETTINGS index_granularity = 8192;
 | `proto` | `FlowKey.Proto` |
 | `src_port` / `dst_port` | Host-endian ports from BPF key (`keyPortHost`) |
 | `bytes` / `packets` | `FlowValue.Bytes` / `FlowValue.Packets` |
-
-Note: the first prototype ClickHouse sink used a richer staging schema (`src_ip IPv6`, TTL, TCP flags, queue, etc.).
-Before the production A/B test, direct insert should be changed to the real `flows_raw` shape above so staging and production are comparable column-for-column.
 
 ## A/B vs legacy NetFlow→ClickHouse path
 
@@ -124,3 +121,23 @@ Before the production A/B test, direct insert should be changed to the real `flo
 3. Compare **legacy DB path** (`default.flows_raw` from collector) vs **staging** (`default.flows_raw_xdp_direct`) using `sum(packets)` / `sum(bytes)` over the same wall-clock windows (`time_received_ns`).
 4. Exact equality is not expected (flow timeouts differ slightly, bounded CH queue may drop under overload); large systematic gaps need investigation.
 5. After validation, either point direct insert at `default.flows_raw` or keep a direct table and wire downstream reads/materialized views to it. Keep the NetFlow port used for local capture unchanged.
+
+## Rollback / safety
+
+Direct ClickHouse insert is disabled by default. The original path remains:
+
+```text
+xdpflowd -nf-dst 127.0.0.1:9996,127.0.0.1:9999
+```
+
+Operational rollback:
+
+1. Remove or comment `XDP_CH_TABLE` / `XDP_CH_DSN` in `/root/.grapesnta-clickhouse.env`.
+2. Restart the test or daemon. `xdpflowd` will continue exporting NetFlow only.
+3. If staging data should be removed:
+
+   ```sql
+   DROP TABLE IF EXISTS default.flows_raw_xdp_direct;
+   ```
+
+This does not touch `default.flows_raw` or the local NetFlow capture port.
