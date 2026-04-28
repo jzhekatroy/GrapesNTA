@@ -11,9 +11,11 @@
 #   sudo XDP_MODE=generic XDP_ACTION=drop ./scripts/prod_compare_bpf_variants.sh 300 enp5s0d1
 #
 # Optional:
-#   VARIANTS="full fast"     # skip light when checking ClickHouse completeness
-#   MAP_SIZE=12000000        # build-time FLOWS_MAP_SIZE
-#   SKIP_BUILD=1             # use already-built objects/binary
+#   VARIANTS="full fast"            # skip light when checking ClickHouse completeness
+#   VARIANTS="full fast full fast"  # repeat A/B cycles; logs become full_1, fast_1, ...
+#   MAP_SIZE=12000000               # build-time FLOWS_MAP_SIZE
+#   SKIP_BUILD=1                    # use already-built objects/binary
+#   WAIT_BETWEEN=30                 # seconds between runs
 
 set -euo pipefail
 
@@ -22,6 +24,11 @@ IFACE="${2:-enp5s0d1}"
 VARIANTS="${VARIANTS:-full fast light}"
 MAP_SIZE="${MAP_SIZE:-12000000}"
 SKIP_BUILD="${SKIP_BUILD:-0}"
+WAIT_BETWEEN="${WAIT_BETWEEN:-30}"
+if ! [[ "$WAIT_BETWEEN" =~ ^[0-9]+$ ]]; then
+  echo "ERROR: WAIT_BETWEEN must be an integer number of seconds" >&2
+  exit 1
+fi
 
 XDP_MODE="${XDP_MODE:-generic}"
 XDP_ACTION="${XDP_ACTION:-drop}"
@@ -62,6 +69,7 @@ echo "======================================================================"
 echo "BPF variant compare — $TS"
 echo "iface=$IFACE duration=${DURATION}s xdp-mode=$XDP_MODE xdp-action=$XDP_ACTION map_size=$MAP_SIZE"
 echo "variants: $VARIANTS"
+echo "wait_between=${WAIT_BETWEEN}s"
 echo "out_dir=$OUT_DIR"
 echo "======================================================================"
 
@@ -75,10 +83,17 @@ fi
 {
   echo "BPF variant compare — $(date -Is)"
   echo "iface=$IFACE duration=${DURATION}s xdp-mode=$XDP_MODE xdp-action=$XDP_ACTION map_size=$MAP_SIZE"
+  echo "variants=$VARIANTS"
+  echo "wait_between=${WAIT_BETWEEN}s"
   echo ""
 } > "$SUMMARY"
 
+declare -A variant_counts=()
+run_no=0
 for v in $VARIANTS; do
+  run_no=$((run_no + 1))
+  variant_counts["$v"]=$(( ${variant_counts["$v"]:-0} + 1 ))
+  label="${v}_${variant_counts["$v"]}"
   obj="$(variant_obj "$v")"
   if [[ ! -f "$obj" ]]; then
     echo "ERROR: $obj does not exist; build failed or SKIP_BUILD=1 was wrong" >&2
@@ -87,10 +102,10 @@ for v in $VARIANTS; do
 
   echo ""
   echo "======================================================================"
-  echo "RUN variant=$v obj=$obj note=$(variant_note "$v")"
+  echo "RUN #$run_no label=$label variant=$v obj=$obj note=$(variant_note "$v")"
   echo "======================================================================"
 
-  run_log="$OUT_DIR/${v}.run.log"
+  run_log="$OUT_DIR/${label}.run.log"
   # Preserve caller-provided CH_* / XDP_NF_* / WATCHDOG_* env; only override the BPF object.
   XDP_MODE="$XDP_MODE" \
   XDP_ACTION="$XDP_ACTION" \
@@ -100,7 +115,8 @@ for v in $VARIANTS; do
 
   workdir="$(awk -F= '/^workdir=/{print $2; exit}' "$run_log" || true)"
   {
-    echo "----- $v ($obj) -----"
+    echo "----- $label ($obj) -----"
+    echo "variant: $v"
     echo "note: $(variant_note "$v")"
     echo "run_log: $run_log"
     if [[ -n "$workdir" && -f "$workdir/SUMMARY.txt" ]]; then
@@ -109,9 +125,6 @@ for v in $VARIANTS; do
         /----- WINDOW A/ {show=1}
         /Full data in:/ {show=0}
         show {print}
-        /----- NIC rate per window/ {nic=1}
-        nic && /A \(baseline/ {print}
-        nic && /B \(xdpflowd/ {print}
         /----- NIC fifo_errors lifecycle/ {fifo=1; print; next}
         fifo && /^  / {print; next}
         fifo && /^$/ {fifo=0}
@@ -123,8 +136,8 @@ for v in $VARIANTS; do
   } >> "$SUMMARY"
 
   echo ""
-  echo "variant=$v finished. Waiting 30s before next run..."
-  sleep 30
+  echo "label=$label variant=$v finished. Waiting ${WAIT_BETWEEN}s before next run..."
+  sleep "$WAIT_BETWEEN"
 done
 
 echo ""
