@@ -134,6 +134,7 @@ gob-encoded `FlowRow` batches (not `nfdump`); replay recovers after ClickHouse o
 | `-ch-spool-dir` | Root directory (`segments/`, `meta/consumer.json`). Use a dedicated fast disk, **not** the terabyte `nfdump` volume. |
 | `-ch-spool-segment-size` | Rotate `.seg` files after this many bytes (default 256MiB). |
 | `-ch-spool-max-bytes` | Reject appends when total segment bytes exceed limit (`0` = unlimited). |
+| `-ch-spool-frame-max-records` | Split large scan batches into bounded frames / INSERTs (default 50k rows). |
 | `-ch-spool-fsync-interval` | Best-effort `fsync` cadence (`0` = fsync every append). |
 | `-ch-spool-shutdown-drain` | Bounded wait for spool backlog to reach ClickHouse on shutdown (`0` = leave backlog for replay). |
 | `-ch-writers` | Parallel inserters draining spool (default 4). |

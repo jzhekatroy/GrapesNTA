@@ -325,6 +325,7 @@ func main() {
 	chSpoolDir := flag.String("ch-spool-dir", "", "directory for durable spool segments (use fast local disk, not the nfdump archive volume)")
 	chSpoolSegSize := flag.Int64("ch-spool-segment-size", int64(256*1024*1024), "rotate spool segment files after this many bytes")
 	chSpoolMaxBytes := flag.Int64("ch-spool-max-bytes", 0, "reject appends when total spool segments exceed this (0=unlimited)")
+	chSpoolFrameMaxRecords := flag.Int("ch-spool-frame-max-records", 50_000, "maximum FlowRow records per durable spool frame / ClickHouse insert")
 	chSpoolFsync := flag.Duration("ch-spool-fsync-interval", time.Second, "best-effort fsync interval for spool (0=fsync every append)")
 	chSpoolShutdownDrain := flag.Duration("ch-spool-shutdown-drain", 0, "wait up to this duration for spool backlog to reach ClickHouse before shutdown (0=leave backlog for replay)")
 	chWriters := flag.Int("ch-writers", 4, "parallel ClickHouse INSERT workers when spool mode is on")
@@ -489,6 +490,7 @@ func main() {
 				strings.TrimSpace(*chSpoolDir),
 				*chSpoolSegSize,
 				*chSpoolMaxBytes,
+				*chSpoolFrameMaxRecords,
 				*chSpoolFsync,
 				*chSpoolShutdownDrain,
 				spoolMode,

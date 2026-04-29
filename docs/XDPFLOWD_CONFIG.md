@@ -60,6 +60,7 @@ ch_spool_mode: required
 ch_spool_dir: /var/lib/xdpflowd/ch-spool
 ch_spool_segment_size: 268435456   # 256 MiB
 ch_spool_max_bytes: 107374182400   # 100 GiB
+ch_spool_frame_max_records: 50000  # bounds one replay/INSERT frame
 ch_spool_fsync_interval: 1s
 ch_spool_shutdown_drain: 60s       # bounded wait for final flush delivery
 ch_writers: 4
@@ -78,6 +79,7 @@ ch_writers: 4
 | `ch_spool_mode` | `off`, `on`, or `required`. Use `required` for production replacement. |
 | `ch_spool_dir` | Durable segment directory (`segments/`, `meta/consumer.json`). |
 | `ch_spool_max_bytes` | Backpressure cap. In `required`, exceeding it fails daemon so wrapper can roll back. |
+| `ch_spool_frame_max_records` | Maximum rows per spool frame / ClickHouse insert. Keeps huge scans replayable on high-load hosts. |
 | `ch_spool_shutdown_drain` | Optional bounded wait for backlog delivery on SIGTERM. Use `60s` for integrity tests; use `0s` when fast rollback is more important. |
 | `ch_writers` | Parallel ClickHouse insert workers reading from spool. |
 

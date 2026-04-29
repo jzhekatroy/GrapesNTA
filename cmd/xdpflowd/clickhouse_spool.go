@@ -47,6 +47,7 @@ type spoolWriter struct {
 	metaDir       string
 	maxSegBytes   int64
 	maxTotalBytes int64
+	maxFrameRows  int
 	fsyncEvery    time.Duration
 	requiredMode  bool
 
@@ -61,9 +62,12 @@ type spoolWriter struct {
 	writerTipOff atomic.Int64
 }
 
-func openSpoolWriter(log *slog.Logger, dir string, maxSegBytes, maxTotalBytes int64, fsyncEvery time.Duration, required bool) (*spoolWriter, error) {
+func openSpoolWriter(log *slog.Logger, dir string, maxSegBytes, maxTotalBytes int64, maxFrameRows int, fsyncEvery time.Duration, required bool) (*spoolWriter, error) {
 	if dir == "" {
 		return nil, errors.New("spool dir empty")
+	}
+	if maxFrameRows < 1 {
+		maxFrameRows = 50_000
 	}
 	dir = filepath.Clean(dir)
 	segDir := filepath.Join(dir, "segments")
@@ -90,6 +94,7 @@ func openSpoolWriter(log *slog.Logger, dir string, maxSegBytes, maxTotalBytes in
 		metaDir:       metaDir,
 		maxSegBytes:   maxSegBytes,
 		maxTotalBytes: maxTotalBytes,
+		maxFrameRows:  maxFrameRows,
 		fsyncEvery:    fsyncEvery,
 		requiredMode:  required,
 		segID:         nextID,
@@ -222,12 +227,33 @@ func parseFrameHeader(b []byte) (seq uint64, payloadLen uint32, crc uint32, ok b
 	return seq, payloadLen, crc, true
 }
 
-// AppendBatch writes one durable frame. Returns checkpoint covering the whole file after write (consumer must read up to here).
+// AppendBatch writes one or more durable frames. Large scan batches are split so
+// ClickHouse workers can replay/ack incrementally under high-cardinality traffic.
 func (w *spoolWriter) AppendBatch(rows []FlowRow) (consumerCheckpoint, error) {
 	var cp consumerCheckpoint
 	if len(rows) == 0 {
 		return cp, nil
 	}
+	chunkSize := w.maxFrameRows
+	if chunkSize < 1 {
+		chunkSize = 50_000
+	}
+	for start := 0; start < len(rows); start += chunkSize {
+		end := start + chunkSize
+		if end > len(rows) {
+			end = len(rows)
+		}
+		next, err := w.appendFrame(rows[start:end])
+		if err != nil {
+			return cp, err
+		}
+		cp = next
+	}
+	return cp, nil
+}
+
+func (w *spoolWriter) appendFrame(rows []FlowRow) (consumerCheckpoint, error) {
+	var cp consumerCheckpoint
 	payload, err := encodeFramePayload(rows)
 	if err != nil {
 		return cp, err
@@ -456,6 +482,7 @@ func newSpoolClickhousePipeline(
 	spoolDir string,
 	maxSegBytes int64,
 	maxTotalBytes int64,
+	maxFrameRows int,
 	fsyncEvery time.Duration,
 	drainOnClose time.Duration,
 	mode chSpoolMode,
@@ -484,7 +511,7 @@ func newSpoolClickhousePipeline(
 		_ = conn.Close()
 		return nil, fmt.Errorf("spool load checkpoint: %w", err)
 	}
-	wr, err := openSpoolWriter(log, spoolDir, maxSegBytes, maxTotalBytes, fsyncEvery, mode == chSpoolRequired)
+	wr, err := openSpoolWriter(log, spoolDir, maxSegBytes, maxTotalBytes, maxFrameRows, fsyncEvery, mode == chSpoolRequired)
 	if err != nil {
 		_ = conn.Close()
 		return nil, err
@@ -509,6 +536,7 @@ func newSpoolClickhousePipeline(
 		"checkpoint", cp,
 		"writers", nWorkers,
 		"mode", mode.String(),
+		"frame_max_records", maxFrameRows,
 		"shutdown_drain", drainOnClose,
 	)
 	return p, nil
