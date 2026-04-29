@@ -52,6 +52,8 @@ const volatile __u32 xdp_final_action = XDP_PASS;
 struct flow_key {
 	__u8  src_addr[16];
 	__u8  dst_addr[16];
+	__u8  src_mac[6];
+	__u8  dst_mac[6];
 	__u16 src_port;
 	__u16 dst_port;
 	__u16 vlan_id;

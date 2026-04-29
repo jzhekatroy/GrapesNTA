@@ -21,10 +21,12 @@ import (
 	"xdpflowd/internal/loader"
 )
 
-// FlowKey must match struct flow_key in bpf/xdp_flow.c (packed, 40 bytes).
+// FlowKey must match struct flow_key in bpf/xdp_flow.c (packed, 52 bytes).
 type FlowKey struct {
 	SrcAddr   [16]byte
 	DstAddr   [16]byte
+	SrcMAC    [6]byte
+	DstMAC    [6]byte
 	SrcPort   uint16
 	DstPort   uint16
 	VLANID    uint16

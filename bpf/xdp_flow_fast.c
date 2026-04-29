@@ -49,6 +49,8 @@ const volatile __u32 xdp_final_action = XDP_PASS;
 struct flow_key {
 	__u8  src_addr[16];
 	__u8  dst_addr[16];
+	__u8  src_mac[6];
+	__u8  dst_mac[6];
 	__u16 src_port;
 	__u16 dst_port;
 	__u16 vlan_id;
@@ -289,6 +291,8 @@ int xdp_flow_prog(struct xdp_md *ctx)
 		__u8 tcp_flags = 0;
 
 		ipv4_addrs_to_key(&key, ip->saddr, ip->daddr);
+		__builtin_memcpy(key.src_mac, eth->h_source, 6);
+		__builtin_memcpy(key.dst_mac, eth->h_dest, 6);
 		key.vlan_id = vlan_id;
 		key.ip_version = 4;
 
@@ -319,6 +323,8 @@ int xdp_flow_prog(struct xdp_md *ctx)
 
 		__builtin_memcpy(key.src_addr, &ip6->saddr, 16);
 		__builtin_memcpy(key.dst_addr, &ip6->daddr, 16);
+		__builtin_memcpy(key.src_mac, eth->h_source, 6);
+		__builtin_memcpy(key.dst_mac, eth->h_dest, 6);
 		key.vlan_id = vlan_id;
 		key.ip_version = 6;
 

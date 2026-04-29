@@ -54,6 +54,7 @@ const (
 	fINPUT_SNMP          = 10
 	fL4_DST_PORT         = 11
 	fIPV4_DST_ADDR       = 12
+	fIPV4_NEXT_HOP       = 15
 	fLAST_SWITCHED       = 21
 	fFIRST_SWITCHED      = 22
 	fIPV6_SRC_ADDR       = 27
@@ -62,8 +63,13 @@ const (
 	fMAX_TTL             = 53
 	fMIN_PKT_LNGTH       = 54
 	fMAX_PKT_LNGTH       = 55
+	fIN_SRC_MAC          = 56
+	fOUT_DST_MAC         = 57
 	fSRC_VLAN            = 58
+	fDST_VLAN            = 59
 	fIP_PROTOCOL_VERSION = 60
+	fIN_DST_MAC          = 80
+	fOUT_SRC_MAC         = 81
 )
 
 // Field list for IPv4 template (order = wire order of data record).
@@ -86,8 +92,14 @@ var fieldsV4 = []struct {
 	{fMAX_TTL, 1},
 	{fMIN_PKT_LNGTH, 2},
 	{fMAX_PKT_LNGTH, 2},
+	{fIPV4_NEXT_HOP, 4},
+	{fIN_SRC_MAC, 6},
+	{fOUT_DST_MAC, 6},
 	{fSRC_VLAN, 2},
+	{fDST_VLAN, 2},
 	{fIP_PROTOCOL_VERSION, 1},
+	{fIN_DST_MAC, 6},
+	{fOUT_SRC_MAC, 6},
 }
 
 var fieldsV6 = []struct {
@@ -109,8 +121,13 @@ var fieldsV6 = []struct {
 	{fMAX_TTL, 1},
 	{fMIN_PKT_LNGTH, 2},
 	{fMAX_PKT_LNGTH, 2},
+	{fIN_SRC_MAC, 6},
+	{fOUT_DST_MAC, 6},
 	{fSRC_VLAN, 2},
+	{fDST_VLAN, 2},
 	{fIP_PROTOCOL_VERSION, 1},
+	{fIN_DST_MAC, 6},
+	{fOUT_SRC_MAC, 6},
 }
 
 func recordSize(fields []struct{ typ, length uint16 }) int {
@@ -281,8 +298,14 @@ func (e *nfExporter) encodeRecordV4(buf []byte, k FlowKey, v FlowValue) []byte {
 	buf = append(buf, v.TTLMin, v.TTLMax)
 	buf = binary.BigEndian.AppendUint16(buf, v.PktLenMin)
 	buf = binary.BigEndian.AppendUint16(buf, v.PktLenMax)
+	buf = binary.BigEndian.AppendUint32(buf, 0) // IPv4 next hop unknown on mirror/XDP path.
+	buf = append(buf, k.SrcMAC[:]...)
+	buf = append(buf, 0, 0, 0, 0, 0, 0) // out dst mac unknown.
 	buf = binary.BigEndian.AppendUint16(buf, k.VLANID)
+	buf = binary.BigEndian.AppendUint16(buf, 0) // dst vlan unknown.
 	buf = append(buf, 4)
+	buf = append(buf, k.DstMAC[:]...)
+	buf = append(buf, 0, 0, 0, 0, 0, 0) // out src mac unknown.
 	return buf
 }
 
@@ -302,8 +325,13 @@ func (e *nfExporter) encodeRecordV6(buf []byte, k FlowKey, v FlowValue) []byte {
 	buf = append(buf, v.TTLMin, v.TTLMax)
 	buf = binary.BigEndian.AppendUint16(buf, v.PktLenMin)
 	buf = binary.BigEndian.AppendUint16(buf, v.PktLenMax)
+	buf = append(buf, k.SrcMAC[:]...)
+	buf = append(buf, 0, 0, 0, 0, 0, 0) // out dst mac unknown.
 	buf = binary.BigEndian.AppendUint16(buf, k.VLANID)
+	buf = binary.BigEndian.AppendUint16(buf, 0) // dst vlan unknown.
 	buf = append(buf, 6)
+	buf = append(buf, k.DstMAC[:]...)
+	buf = append(buf, 0, 0, 0, 0, 0, 0) // out src mac unknown.
 	return buf
 }
 
