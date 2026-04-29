@@ -430,11 +430,12 @@ type spoolClickhousePipeline struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
-	writer   *spoolWriter
-	conn     chdriver.Conn
-	table    string
-	mode     chSpoolMode
-	nWorkers int
+	writer       *spoolWriter
+	conn         chdriver.Conn
+	table        string
+	mode         chSpoolMode
+	nWorkers     int
+	drainOnClose time.Duration
 
 	checkpointMu sync.Mutex
 	// persisted consumer offset (acked prefix)
@@ -456,6 +457,7 @@ func newSpoolClickhousePipeline(
 	maxSegBytes int64,
 	maxTotalBytes int64,
 	fsyncEvery time.Duration,
+	drainOnClose time.Duration,
 	mode chSpoolMode,
 	nWorkers int,
 ) (*spoolClickhousePipeline, error) {
@@ -489,15 +491,16 @@ func newSpoolClickhousePipeline(
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	p := &spoolClickhousePipeline{
-		log:      log,
-		ctx:      ctx,
-		cancel:   cancel,
-		writer:   wr,
-		conn:     conn,
-		table:    table,
-		mode:     mode,
-		nWorkers: nWorkers,
-		acked:    cp,
+		log:          log,
+		ctx:          ctx,
+		cancel:       cancel,
+		writer:       wr,
+		conn:         conn,
+		table:        table,
+		mode:         mode,
+		nWorkers:     nWorkers,
+		drainOnClose: drainOnClose,
+		acked:        cp,
 	}
 	p.wg.Add(1)
 	go p.runPipeline()
@@ -506,6 +509,7 @@ func newSpoolClickhousePipeline(
 		"checkpoint", cp,
 		"writers", nWorkers,
 		"mode", mode.String(),
+		"shutdown_drain", drainOnClose,
 	)
 	return p, nil
 }
@@ -741,11 +745,44 @@ func (p *spoolClickhousePipeline) Close() {
 	if err := p.writer.Close(); err != nil {
 		p.log.Warn("spool writer close", "err", err)
 	}
+	if p.drainOnClose > 0 {
+		deadline := time.Now().Add(p.drainOnClose)
+		ticker := time.NewTicker(200 * time.Millisecond)
+		for {
+			if p.isCaughtUp() {
+				p.log.Info("clickhouse spool shutdown drain complete",
+					"records_spooled", p.recordsSpooled.Load(),
+					"records_acked", p.recordsAcked.Load(),
+				)
+				ticker.Stop()
+				break
+			}
+			if time.Now().After(deadline) {
+				p.log.Warn("clickhouse spool shutdown drain timeout",
+					"records_spooled", p.recordsSpooled.Load(),
+					"records_acked", p.recordsAcked.Load(),
+					"timeout", p.drainOnClose,
+				)
+				ticker.Stop()
+				break
+			}
+			<-ticker.C
+		}
+	}
 	p.cancel()
 	p.wg.Wait()
 	if p.conn != nil {
 		_ = p.conn.Close()
 	}
+}
+
+func (p *spoolClickhousePipeline) isCaughtUp() bool {
+	tipSeg := p.writer.writerTipSeg.Load()
+	tipOff := p.writer.writerTipOff.Load()
+	p.checkpointMu.Lock()
+	cp := p.acked
+	p.checkpointMu.Unlock()
+	return cp.Segment > tipSeg || (cp.Segment == tipSeg && cp.Offset >= tipOff)
 }
 
 func (p *spoolClickhousePipeline) LogMetrics() {

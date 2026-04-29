@@ -135,6 +135,7 @@ gob-encoded `FlowRow` batches (not `nfdump`); replay recovers after ClickHouse o
 | `-ch-spool-segment-size` | Rotate `.seg` files after this many bytes (default 256MiB). |
 | `-ch-spool-max-bytes` | Reject appends when total segment bytes exceed limit (`0` = unlimited). |
 | `-ch-spool-fsync-interval` | Best-effort `fsync` cadence (`0` = fsync every append). |
+| `-ch-spool-shutdown-drain` | Bounded wait for spool backlog to reach ClickHouse on shutdown (`0` = leave backlog for replay). |
 | `-ch-writers` | Parallel inserters draining spool (default 4). |
 | `-ch-sampler-addr` | IPv4/IPv6 for `sampler_address` (16-byte FixedString; IPv4 in first 4 octets). |
 

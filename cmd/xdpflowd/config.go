@@ -42,6 +42,7 @@ type xdpflowdConfig struct {
 	CHSpoolSegmentSize   *int64  `yaml:"ch_spool_segment_size"`
 	CHSpoolMaxBytes      *int64  `yaml:"ch_spool_max_bytes"`
 	CHSpoolFsyncInterval *string `yaml:"ch_spool_fsync_interval"`
+	CHSpoolShutdownDrain *string `yaml:"ch_spool_shutdown_drain"`
 	CHWriters            *int    `yaml:"ch_writers"`
 }
 
@@ -128,6 +129,7 @@ func applyXDPFlowdConfig(fs *flag.FlagSet, cfg *xdpflowdConfig) error {
 		func() error { return setInt64("ch-spool-segment-size", cfg.CHSpoolSegmentSize) },
 		func() error { return setInt64("ch-spool-max-bytes", cfg.CHSpoolMaxBytes) },
 		func() error { return setString("ch-spool-fsync-interval", cfg.CHSpoolFsyncInterval) },
+		func() error { return setString("ch-spool-shutdown-drain", cfg.CHSpoolShutdownDrain) },
 		func() error { return setInt("ch-writers", cfg.CHWriters) },
 	} {
 		if err := apply(); err != nil {

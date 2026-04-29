@@ -326,6 +326,7 @@ func main() {
 	chSpoolSegSize := flag.Int64("ch-spool-segment-size", int64(256*1024*1024), "rotate spool segment files after this many bytes")
 	chSpoolMaxBytes := flag.Int64("ch-spool-max-bytes", 0, "reject appends when total spool segments exceed this (0=unlimited)")
 	chSpoolFsync := flag.Duration("ch-spool-fsync-interval", time.Second, "best-effort fsync interval for spool (0=fsync every append)")
+	chSpoolShutdownDrain := flag.Duration("ch-spool-shutdown-drain", 0, "wait up to this duration for spool backlog to reach ClickHouse before shutdown (0=leave backlog for replay)")
 	chWriters := flag.Int("ch-writers", 4, "parallel ClickHouse INSERT workers when spool mode is on")
 	flag.Parse()
 
@@ -489,6 +490,7 @@ func main() {
 				*chSpoolSegSize,
 				*chSpoolMaxBytes,
 				*chSpoolFsync,
+				*chSpoolShutdownDrain,
 				spoolMode,
 				*chWriters,
 			)
