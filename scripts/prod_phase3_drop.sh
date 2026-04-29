@@ -32,6 +32,8 @@
 #   XDP_HEAVY_SERVER=1 — preset для очень больших карт flow (см. prod_ab_swap.sh).
 #   Durable spool: XDP_CH_SPOOL_DIR и опционально XDP_CH_SPOOL_MODE / XDP_CH_WRITERS
 #       (см. docs/CLICKHOUSE_FLOWS_RAW.md и docs/FLOW_STORAGE_CONTRACTS.md).
+#   XDP_STOP_GOFLOW2=1 — на время swap остановить контейнеры goflow2, чтобы они
+#       не влияли на CPU. Список: XDP_GOFLOW2_CONTAINERS="kcg-goflow2-1".
 
 set -euo pipefail
 
@@ -59,6 +61,9 @@ XDP_BPF_OBJ="${XDP_BPF_OBJ:-}"
 # NF_DSTS=127.0.0.1:9996 to keep local capture while removing goflow2 from
 # the hot path.
 NF_DSTS="${NF_DSTS:-127.0.0.1:9996,127.0.0.1:9999}"
+XDP_STOP_GOFLOW2="${XDP_STOP_GOFLOW2:-0}"
+XDP_GOFLOW2_CONTAINERS="${XDP_GOFLOW2_CONTAINERS:-kcg-goflow2-1}"
+case "$XDP_STOP_GOFLOW2" in 0|1) ;; *) echo "ERROR: XDP_STOP_GOFLOW2 must be 0 or 1" >&2; exit 1;; esac
 
 # Optional local credentials file. Keep it out of git (see .gitignore).
 # Default lookup order:
@@ -334,6 +339,7 @@ echo "== IRQ state BEFORE =="
 
 # ---------- 3) IRQ spread? ----------
 IRQ_SPREAD_APPLIED=0
+GOFLOW2_STOPPED=()
 if [[ "$SKIP_IRQ_TUNE" != "1" ]]; then
   if [[ "$AUTO_IRQ" == "1" ]]; then
     ans=y
@@ -360,6 +366,18 @@ cleanup() {
   local rc=$?
   echo ""
   echo "== CLEANUP (rc=$rc) =="
+  if (( ${#GOFLOW2_STOPPED[@]} > 0 )); then
+    echo "== START goflow2 containers =="
+    for c in "${GOFLOW2_STOPPED[@]}"; do
+      echo "starting $c ..."
+      docker start "$c" >/dev/null || echo "WARN: failed to start $c" >&2
+      if [[ "$(docker inspect -f '{{.State.Running}}' "$c" 2>/dev/null || echo false)" == "true" ]]; then
+        echo "$c running"
+      else
+        echo "WARN: $c is not running after start" >&2
+      fi
+    done | tee "$WORKDIR/goflow2_restart.log"
+  fi
   if (( IRQ_SPREAD_APPLIED == 1 )); then
     "$REPO_ROOT/scripts/prod_tune_irq.sh" restore "$IFACE" \
       | tee "$WORKDIR/irq_restore.log" || true
@@ -381,6 +399,30 @@ echo "===== WINDOW A: baseline (no xdpflowd), after IRQ tune ====="
 collect_window A "$A_DIR" 0
 
 collect_clickhouse_window "BEFORE_SWITCH_${CH_LOOKBACK_MIN}MIN" "$WORKDIR/clickhouse_before_switch.txt"
+
+# ---------- Optional: stop goflow2 during replacement window ----------
+if [[ "$XDP_STOP_GOFLOW2" == "1" ]]; then
+  if ! command -v docker >/dev/null 2>&1; then
+    echo "ERROR: XDP_STOP_GOFLOW2=1 but docker is not available" >&2
+    exit 1
+  fi
+  echo ""
+  echo "===== Stopping goflow2 containers for XDP test ====="
+  for c in $XDP_GOFLOW2_CONTAINERS; do
+    if ! docker inspect "$c" >/dev/null 2>&1; then
+      echo "WARN: container $c not found"
+      continue
+    fi
+    if [[ "$(docker inspect -f '{{.State.Running}}' "$c")" == "true" ]]; then
+      GOFLOW2_STOPPED+=("$c")
+      docker stop "$c" | tee -a "$WORKDIR/goflow2_stop.log"
+    else
+      echo "container $c already stopped" | tee -a "$WORKDIR/goflow2_stop.log"
+    fi
+  done
+  docker ps --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}' \
+    | grep -E 'goflow|NAME' | tee "$WORKDIR/goflow2_after_stop.txt" || true
+fi
 
 # ---------- 5) Запуск prod_ab_swap с заданным XDP_ACTION в фоне ----------
 echo ""
