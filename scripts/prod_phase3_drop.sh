@@ -86,6 +86,7 @@ PRE_CH_PORT_SET="${CH_PORT+x}"; PRE_CH_PORT="${CH_PORT:-}"
 PRE_CH_USER_SET="${CH_USER+x}"; PRE_CH_USER="${CH_USER:-}"
 PRE_CH_PASS_SET="${CH_PASS+x}"; PRE_CH_PASS="${CH_PASS:-}"
 PRE_CH_TABLE_SET="${CH_TABLE+x}"; PRE_CH_TABLE="${CH_TABLE:-}"
+PRE_CH_LOOKBACK_MIN_SET="${CH_LOOKBACK_MIN+x}"; PRE_CH_LOOKBACK_MIN="${CH_LOOKBACK_MIN:-}"
 PRE_XDP_CH_DSN_SET="${XDP_CH_DSN+x}"; PRE_XDP_CH_DSN="${XDP_CH_DSN:-}"
 PRE_XDP_CH_TABLE_SET="${XDP_CH_TABLE+x}"; PRE_XDP_CH_TABLE="${XDP_CH_TABLE:-}"
 PRE_XDP_CH_BATCH_SIZE_SET="${XDP_CH_BATCH_SIZE+x}"; PRE_XDP_CH_BATCH_SIZE="${XDP_CH_BATCH_SIZE:-}"
@@ -115,6 +116,7 @@ fi
 [[ -n "$PRE_CH_USER_SET" ]] && CH_USER="$PRE_CH_USER"
 [[ -n "$PRE_CH_PASS_SET" ]] && CH_PASS="$PRE_CH_PASS"
 [[ -n "$PRE_CH_TABLE_SET" ]] && CH_TABLE="$PRE_CH_TABLE"
+[[ -n "$PRE_CH_LOOKBACK_MIN_SET" ]] && CH_LOOKBACK_MIN="$PRE_CH_LOOKBACK_MIN"
 [[ -n "$PRE_XDP_CH_DSN_SET" ]] && XDP_CH_DSN="$PRE_XDP_CH_DSN"
 [[ -n "$PRE_XDP_CH_TABLE_SET" ]] && XDP_CH_TABLE="$PRE_XDP_CH_TABLE"
 [[ -n "$PRE_XDP_CH_BATCH_SIZE_SET" ]] && XDP_CH_BATCH_SIZE="$PRE_XDP_CH_BATCH_SIZE"
@@ -343,6 +345,7 @@ echo "== IRQ state BEFORE =="
 # ---------- 3) IRQ spread? ----------
 IRQ_SPREAD_APPLIED=0
 GOFLOW2_STOPPED=()
+VERIFY_BASELINE_DIR=""
 if [[ "$SKIP_IRQ_TUNE" != "1" ]]; then
   if [[ "$AUTO_IRQ" == "1" ]]; then
     ans=y
@@ -380,6 +383,14 @@ cleanup() {
         echo "WARN: $c is not running after start" >&2
       fi
     done | tee "$WORKDIR/goflow2_restart.log"
+  fi
+  if [[ -n "$VERIFY_BASELINE_DIR" && -d "$VERIFY_BASELINE_DIR" ]]; then
+    echo "== FINAL VERIFY after outer cleanup =="
+    if "$REPO_ROOT/scripts/prod_verify.sh" "$VERIFY_BASELINE_DIR" "$IFACE"; then
+      echo "FINAL VERIFY: state matches baseline."
+    else
+      echo "WARN: final verify differs from baseline $VERIFY_BASELINE_DIR" >&2
+    fi
   fi
   if (( IRQ_SPREAD_APPLIED == 1 )); then
     "$REPO_ROOT/scripts/prod_tune_irq.sh" restore "$IFACE" \
@@ -454,6 +465,7 @@ cat /sys/class/net/"$IFACE"/statistics/rx_fifo_errors \
   XDP_TOP="$XDP_TOP" \
   XDP_JSON_OUT_ENABLE="$XDP_JSON_OUT_ENABLE" \
   XDP_JSON_INTERVAL="$XDP_JSON_INTERVAL" \
+  XDP_VERIFY_AFTER="$([[ "$XDP_STOP_GOFLOW2" == "1" ]] && echo 0 || echo 1)" \
     "$REPO_ROOT/scripts/prod_ab_swap.sh" \
     "$DURATION_DROP" "$IFACE" \
     > "$WORKDIR/prod_ab_swap.log" 2>&1
@@ -487,6 +499,9 @@ collect_window B "$B_DIR" 1
 echo ""
 echo "Waiting for prod_ab_swap to finish..."
 wait "$SWAP_PID" || true
+if [[ -L /root/xdpflowd_baseline_latest ]]; then
+  VERIFY_BASELINE_DIR="$(readlink -f /root/xdpflowd_baseline_latest 2>/dev/null || true)"
+fi
 cat /sys/class/net/"$IFACE"/statistics/rx_fifo_errors \
   > "$WORKDIR/rx_fifo_errors.full_after" 2>/dev/null || echo 0 > "$WORKDIR/rx_fifo_errors.full_after"
 

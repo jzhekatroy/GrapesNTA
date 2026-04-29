@@ -119,6 +119,8 @@ fi
 WATCHDOG_WARMUP_SEC="${WATCHDOG_WARMUP_SEC:-60}"
 WATCHDOG_STALL_SEC="${WATCHDOG_STALL_SEC:-120}"
 WATCHDOG_STRICT="${WATCHDOG_STRICT:-1}"
+XDP_VERIFY_AFTER="${XDP_VERIFY_AFTER:-1}"
+case "$XDP_VERIFY_AFTER" in 0|1) ;; *) echo "ERROR: XDP_VERIFY_AFTER must be 0 or 1" >&2; exit 1;; esac
 if ! [[ "$WATCHDOG_STALL_SEC" =~ ^[0-9]+$ ]] || (( WATCHDOG_STALL_SEC < 30 )); then
   echo "ERROR: WATCHDOG_STALL_SEC must be integer >= 30" >&2
   exit 1
@@ -541,8 +543,10 @@ cleanup() {
   fi
   restore_rule
   # verify только если мы реально заходили в swap
-  if [ -n "${BASELINE_DIR:-}" ] && [ -d "$BASELINE_DIR" ]; then
+  if [[ "$XDP_VERIFY_AFTER" == "1" && -n "${BASELINE_DIR:-}" && -d "$BASELINE_DIR" ]]; then
     run_verify || true
+  elif [[ "$XDP_VERIFY_AFTER" != "1" ]]; then
+    echo "[$(date +%T)] VERIFY: skipped by XDP_VERIFY_AFTER=0"
   fi
 }
 # SIGHUP — обрыв SSH. Обязательно ловим.

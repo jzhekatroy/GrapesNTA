@@ -157,6 +157,80 @@ For long-running production mode, prefer low-observability overhead:
 - omit `-json-out`, or set `XDP_JSON_OUT_ENABLE=0` in wrappers, to avoid periodic full-map JSON snapshots.
 - use `bpf/xdp_flow_fast.o` (`make bpf-fast`) when enriched packet-level fields are not needed; it preserves the userspace ABI and NetFlow/ClickHouse shape while doing less per-packet work.
 
+### Best observed `netflow` profile
+
+On the heavily loaded `netflow` host with `mlx4_en`, the best observed production-replacement profile was:
+
+- `XDP_MODE=generic`
+- `XDP_ACTION=drop`
+- `XDP_BPF_OBJ=./bpf/xdp_flow.o`
+- `NF_DSTS=127.0.0.1:9996`
+- `XDP_STOP_GOFLOW2=1`
+- `XDP_GOFLOW2_CONTAINERS=kcg-goflow2-1`
+- `XDP_CH_SPOOL_MODE=required`
+- `XDP_CH_SPOOL_DIR=/var/lib/xdpflowd/ch-spool`
+- `XDP_CH_SPOOL_FRAME_MAX_RECORDS=50000`
+- `XDP_CH_WRITERS=8`
+- IRQ spread enabled when prompted by `prod_phase3_drop.sh`
+
+For an honest replacement test, stop only the production `goflow2` container (`kcg-goflow2-1`) during the XDP window. Otherwise the old `goflow2 -> DB` path keeps consuming CPU and can write overlapping ClickHouse data while `xdpflowd` is being evaluated. Leave replay/test containers such as `replay-goflow2-1` alone unless explicitly testing them.
+
+Observed result for the best run: ClickHouse spool drained fully (`records_spooled == records_acked`, no insert errors), CPU softirq dropped materially, and `rx_fifo_errors` stayed close to the already-present baseline. Later runs showed much higher baseline and XDP `rx_fifo_errors` after repeated XDP attach/detach and `mlx4_en` link/IRQ events (`Link Down/Up`, `No irq handler for vector`), so those later loss numbers should be treated as NIC/driver state dependent rather than a ClickHouse spool regression.
+
+### Best current kernel 6.x profile
+
+For the less loaded kernel 6.x host (`sel`), use the same conservative production-replacement profile for validation and long-run tests:
+
+- `XDP_MODE=generic`
+- `XDP_ACTION=drop`
+- `XDP_BPF_OBJ=./bpf/xdp_flow.o`
+- `NF_DSTS=127.0.0.1:9996`
+- `XDP_STOP_GOFLOW2=1`
+- `XDP_GOFLOW2_CONTAINERS=kcg-goflow2-1`
+- `XDP_CH_TABLE=default.flows_raw`
+- `XDP_CH_SPOOL_MODE=required`
+- `XDP_CH_SPOOL_DIR=/var/lib/xdpflowd/ch-spool`
+- `XDP_CH_SPOOL_MAX_BYTES=214748364800`
+- `XDP_CH_SPOOL_FRAME_MAX_RECORDS=50000`
+- `XDP_CH_SPOOL_SHUTDOWN_DRAIN=120s` for 5-minute validation, longer for long-run drains
+- `XDP_CH_SAMPLER_ADDR=127.0.0.1`
+- `XDP_CH_WRITERS=8`
+- `WATCHDOG_STALL_SEC=300`
+- `XDP_TOP=0`
+- `XDP_JSON_OUT_ENABLE=0`
+- IRQ spread enabled when prompted by `prod_phase3_drop.sh`
+
+This profile intentionally uses the full `xdp_flow.o` BPF object instead of the fast variant until the kernel 6.x host has a clean 5-minute validation and a 1-hour run with stable `rx_fifo_errors`, local `nfcapd` output, and complete ClickHouse spool acknowledgements.
+
+#### Kernel 6.12 baseline note (`sel`)
+
+After upgrading `sel` to Debian backports kernel `6.12.74+deb12-amd64`, the host showed baseline RX drops before any XDP test:
+
+- driver: `mlx4_en`
+- firmware: `2.42.5000`
+- interface: `enp5s0d1`
+- XDP attached: no
+- `rx_pps`: ~164k
+- `rx_gbps`: ~1
+- `rx_fifo_errors`: ~31k/sec
+- `rx_dropped`: ~31k/sec
+- `rx_errors`: 0
+- CPU baseline: mostly idle (`~92%` all-CPU idle, `~4%` softirq)
+- dmesg after boot: no XDP errors and no repeated `mlx4_en` link flaps in the sampled window
+
+This means the kernel 6.12 host already drops packets in the NIC/RX path before `xdpflowd` is started. Do not treat a replacement test on this state as an `xdpflowd` result until baseline is understood. First investigate IRQ distribution, RX rings, coalescing, flow-control, and NAPI/sysctl settings with:
+
+```bash
+ethtool -g enp5s0d1
+ethtool -c enp5s0d1
+ethtool -a enp5s0d1
+ethtool -l enp5s0d1
+sysctl net.core.netdev_budget net.core.netdev_budget_usecs net.core.netdev_max_backlog
+ethtool -S enp5s0d1 | egrep 'rx[0-9]+_(packets|bytes|dropped|xdp_drop)|rx_fifo_errors|rx_dropped|rx_pause|rx_pause_duration|rx_pause_transition'
+```
+
+Then test IRQ spread alone, without XDP, and only proceed to the 5-minute XDP replacement test if baseline `rx_fifo_errors` is acceptable or clearly understood.
+
 ## Rollback / safety
 
 Direct ClickHouse insert is disabled by default. The original path remains:

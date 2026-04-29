@@ -382,7 +382,7 @@ func saveCheckpoint(dir string, cp consumerCheckpoint) error {
 	return os.Rename(tmp, consumerPath(dir))
 }
 
-func cleanupAckedSegments(log *slog.Logger, segDir string, cp consumerCheckpoint) {
+func cleanupAckedSegments(log *slog.Logger, segDir string, cp consumerCheckpoint, includeCurrent bool) {
 	ents, err := os.ReadDir(segDir)
 	if err != nil {
 		log.Warn("spool cleanup read dir", "err", err)
@@ -393,12 +393,27 @@ func cleanupAckedSegments(log *slog.Logger, segDir string, cp consumerCheckpoint
 			continue
 		}
 		id, err := strconv.ParseUint(strings.TrimSuffix(e.Name(), ".seg"), 10, 64)
-		if err != nil || id >= cp.Segment {
+		if err != nil {
 			continue
 		}
 		path := filepath.Join(segDir, e.Name())
+		if id > cp.Segment || (id == cp.Segment && !includeCurrent) {
+			continue
+		}
+		if id == cp.Segment {
+			fi, err := e.Info()
+			if err != nil {
+				log.Warn("spool cleanup stat segment", "segment", id, "err", err)
+				continue
+			}
+			if cp.Offset < fi.Size() {
+				continue
+			}
+		}
 		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 			log.Warn("spool cleanup remove segment", "segment", id, "err", err)
+		} else {
+			log.Info("spool cleanup removed acked segment", "segment", id)
 		}
 	}
 }
@@ -748,7 +763,7 @@ func (p *spoolClickhousePipeline) runAcker(completions <-chan spoolCompletion) {
 			p.acked = ack
 			p.checkpointMu.Unlock()
 			if ack.Segment > lastCleanupSegment {
-				cleanupAckedSegments(p.log, p.writer.segDir, ack)
+				cleanupAckedSegments(p.log, p.writer.segDir, ack, false)
 				lastCleanupSegment = ack.Segment
 			}
 			delete(pending, next)
@@ -799,6 +814,21 @@ func (p *spoolClickhousePipeline) Close() {
 	}
 	p.cancel()
 	p.wg.Wait()
+	p.checkpointMu.Lock()
+	finalAck := p.acked
+	p.checkpointMu.Unlock()
+	cleanupAckedSegments(p.log, p.writer.segDir, finalAck, true)
+	p.log.Info("clickhouse spool pipeline closed",
+		"records_spooled", p.recordsSpooled.Load(),
+		"records_acked", p.recordsAcked.Load(),
+		"batches_ok", p.batchesOK.Load(),
+		"insert_errs", p.insertErrs.Load(),
+		"retries", p.retries.Load(),
+		"checkpoint", finalAck,
+		"writer_tip_segment", p.writer.writerTipSeg.Load(),
+		"writer_tip_offset", p.writer.writerTipOff.Load(),
+		"caught_up", p.isCaughtUp(),
+	)
 	if p.conn != nil {
 		_ = p.conn.Close()
 	}
