@@ -55,6 +55,9 @@ case "$XDP_ACTION" in pass|drop) ;; *) echo "ERROR: XDP_ACTION must be pass|drop
 # isolate mlx4_en native XDP path overhead from the cost of the real
 # flow-tracking program. Empty string = let prod_ab_swap.sh use its default.
 XDP_BPF_OBJ="${XDP_BPF_OBJ:-}"
+XDP_TOP="${XDP_TOP:-0}"
+XDP_JSON_OUT_ENABLE="${XDP_JSON_OUT_ENABLE:-1}"
+XDP_JSON_INTERVAL="${XDP_JSON_INTERVAL:-10s}"
 
 # NetFlow destinations for xdpflowd. Default preserves the current production
 # fanout: local nfcapd plus goflow2. For direct-ClickHouse CPU tests, set
@@ -448,6 +451,9 @@ cat /sys/class/net/"$IFACE"/statistics/rx_fifo_errors \
   XDP_CH_SPOOL_FSYNC_INTERVAL="${XDP_CH_SPOOL_FSYNC_INTERVAL:-1s}" \
   XDP_CH_SPOOL_SHUTDOWN_DRAIN="${XDP_CH_SPOOL_SHUTDOWN_DRAIN:-0s}" \
   XDP_CH_WRITERS="${XDP_CH_WRITERS:-4}" \
+  XDP_TOP="$XDP_TOP" \
+  XDP_JSON_OUT_ENABLE="$XDP_JSON_OUT_ENABLE" \
+  XDP_JSON_INTERVAL="$XDP_JSON_INTERVAL" \
     "$REPO_ROOT/scripts/prod_ab_swap.sh" \
     "$DURATION_DROP" "$IFACE" \
     > "$WORKDIR/prod_ab_swap.log" 2>&1

@@ -151,6 +151,12 @@ so flows leave the BPF map more often and shutdown final flush stays bounded.
 `prod_ab_swap.sh` / `prod_phase3_drop.sh` support `XDP_HEAVY_SERVER=1` with the same idea
 (longer default `XDP_SHUTDOWN_GRACE` on heavy hosts).
 
+For long-running production mode, prefer low-observability overhead:
+
+- `-top 0` disables the expensive full-map top-flow sort; the wrapper default is `XDP_TOP=0`.
+- omit `-json-out`, or set `XDP_JSON_OUT_ENABLE=0` in wrappers, to avoid periodic full-map JSON snapshots.
+- use `bpf/xdp_flow_fast.o` (`make bpf-fast`) when enriched packet-level fields are not needed; it preserves the userspace ABI and NetFlow/ClickHouse shape while doing less per-packet work.
+
 ## Rollback / safety
 
 Direct ClickHouse insert is disabled by default. The original path remains:

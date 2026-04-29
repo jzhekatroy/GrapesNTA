@@ -249,6 +249,15 @@ func tcpFlagsStr(f uint8) string {
 }
 
 func dumpTop(log *slog.Logger, objs *loader.Objects, topN int) {
+	if topN <= 0 {
+		log.Info("stats",
+			"total_packets", readStat(objs, 0),
+			"parse_errors", readStat(objs, 1),
+			"map_full", readStat(objs, 2),
+			"non_ip_pass", readStat(objs, 3),
+		)
+		return
+	}
 	type row struct {
 		k FlowKey
 		v FlowValue

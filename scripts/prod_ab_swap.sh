@@ -150,6 +150,14 @@ if ! [[ "$XDP_SHUTDOWN_GRACE" =~ ^[0-9]+$ ]] || (( XDP_SHUTDOWN_GRACE < 20 )); t
   echo "ERROR: XDP_SHUTDOWN_GRACE must be integer >= 20" >&2
   exit 1
 fi
+XDP_TOP="${XDP_TOP:-0}"
+if ! [[ "$XDP_TOP" =~ ^[0-9]+$ ]]; then
+  echo "ERROR: XDP_TOP must be a non-negative integer" >&2
+  exit 1
+fi
+XDP_JSON_OUT_ENABLE="${XDP_JSON_OUT_ENABLE:-1}"
+XDP_JSON_INTERVAL="${XDP_JSON_INTERVAL:-10s}"
+case "$XDP_JSON_OUT_ENABLE" in 0|1) ;; *) echo "ERROR: XDP_JSON_OUT_ENABLE must be 0 or 1" >&2; exit 1;; esac
 
 # Optional local credentials file. Keep it out of git (see .gitignore).
 # Default lookup order:
@@ -297,6 +305,12 @@ IPT_BACKUP="/root/iptables-save-before-$TS.txt"
 LOG_XDP="$WORKDIR/xdpflowd.log"
 JSON_OUT="$WORKDIR/xdpflowd.ndjson"
 STATE_FILE="$WORKDIR/state.env"     # сюда пишем всё, что нужно для восстановления
+JSON_ARGS=()
+JSON_LABEL="disabled"
+if [[ "$XDP_JSON_OUT_ENABLE" == "1" ]]; then
+  JSON_ARGS=( -json-out "$JSON_OUT" -json-interval "$XDP_JSON_INTERVAL" )
+  JSON_LABEL="$JSON_OUT"
+fi
 
 mkdir -p "$WORKDIR"
 
@@ -588,7 +602,7 @@ fi
 # было видно, с какими флагами реально стартовали.
 {
   echo "=== xdpflowd launch at $(date -Is) ==="
-  echo "cmdline: $XDP_STDBUF ./bin/xdpflowd ${XDP_CONFIG_ARGS[*]} -iface $IFACE -mode $XDP_MODE -xdp-action $XDP_ACTION -bpf $XDP_BPF_OBJ -nf-dst '$NF_DSTS' -nf-active $XDP_NF_ACTIVE -nf-idle $XDP_NF_IDLE -nf-template-interval $XDP_NF_TEMPLATE_INTERVAL -nf-scan $XDP_NF_SCAN -interval 5s -json-out '$JSON_OUT' -json-interval 10s ${CH_EXTRA_ARGS[*]}"
+  echo "cmdline: $XDP_STDBUF ./bin/xdpflowd ${XDP_CONFIG_ARGS[*]} -iface $IFACE -mode $XDP_MODE -xdp-action $XDP_ACTION -bpf $XDP_BPF_OBJ -nf-dst '$NF_DSTS' -nf-active $XDP_NF_ACTIVE -nf-idle $XDP_NF_IDLE -nf-template-interval $XDP_NF_TEMPLATE_INTERVAL -nf-scan $XDP_NF_SCAN -top $XDP_TOP -interval 5s ${JSON_ARGS[*]} ${CH_EXTRA_ARGS[*]}"
   echo "shutdown_grace: ${XDP_SHUTDOWN_GRACE}s"
   echo "WORKDIR: $WORKDIR"
   echo ""
@@ -605,9 +619,9 @@ $XDP_STDBUF ./bin/xdpflowd \
   -nf-idle "$XDP_NF_IDLE" \
   -nf-template-interval "$XDP_NF_TEMPLATE_INTERVAL" \
   -nf-scan "$XDP_NF_SCAN" \
+  -top "$XDP_TOP" \
   -interval 5s \
-  -json-out "$JSON_OUT" \
-  -json-interval 10s \
+  "${JSON_ARGS[@]}" \
   "${CH_EXTRA_ARGS[@]}" \
   >> "$LOG_XDP" 2>&1 &
 XDP_PID=$!
@@ -649,20 +663,22 @@ for i in $(seq 1 15); do
   fi
   sleep 1
 done
-echo "[$(date +%T)] xdpflowd up (pid=$XDP_PID). log: $LOG_XDP  ndjson: $JSON_OUT"
+echo "[$(date +%T)] xdpflowd up (pid=$XDP_PID). log: $LOG_XDP  ndjson: $JSON_LABEL"
 
 # sanity: через 15 сек NDJSON должен существовать хотя бы с 1 строкой (-json-interval 10s)
-(
-  sleep 15
-  if kill -0 "$XDP_PID" 2>/dev/null; then
-    if [[ ! -s "$JSON_OUT" ]]; then
-      echo "[$(date +%T)] WARN: $JSON_OUT пустой через 15с — проверь, что бинарь собран с -json-out" | tee -a "$LOG_XDP"
-    else
-      lines=$(wc -l < "$JSON_OUT" 2>/dev/null || echo 0)
-      echo "[$(date +%T)] ndjson check ok: $lines lines in $JSON_OUT" | tee -a "$LOG_XDP"
+if [[ "$XDP_JSON_OUT_ENABLE" == "1" ]]; then
+  (
+    sleep 15
+    if kill -0 "$XDP_PID" 2>/dev/null; then
+      if [[ ! -s "$JSON_OUT" ]]; then
+        echo "[$(date +%T)] WARN: $JSON_OUT пустой через 15с — проверь, что бинарь собран с -json-out" | tee -a "$LOG_XDP"
+      else
+        lines=$(wc -l < "$JSON_OUT" 2>/dev/null || echo 0)
+        echo "[$(date +%T)] ndjson check ok: $lines lines in $JSON_OUT" | tee -a "$LOG_XDP"
+      fi
     fi
-  fi
-) &
+  ) &
+fi
 
 # ---------- watchdog + main wait ----------
 # каждые 10 сек: процесс жив; «живость» = рост любого из
