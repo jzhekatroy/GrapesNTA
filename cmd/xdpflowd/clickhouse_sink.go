@@ -15,20 +15,18 @@ import (
 	chdriver "github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 )
 
-// clickhouseSink batches flow rows and INSERTs into ClickHouse asynchronously.
-// If the bounded queue is full, Enqueue drops rows and increments queueDrops — flows
+// clickhouseSink batches FlowRow and INSERTs into ClickHouse asynchronously.
+// If the bounded queue is full, EnqueueRows drops rows and increments queueDrops — flows
 // may already be deleted from the BPF map by the NetFlow path; document this as CH-only loss.
 type clickhouseSink struct {
-	log      *slog.Logger
-	conn     chdriver.Conn
-	table    string // "database.table"
-	clock    ExportClock
-	sourceID uint32
+	log   *slog.Logger
+	conn  chdriver.Conn
+	table string // "database.table"
 
 	batchSize     int
 	flushInterval time.Duration
 
-	ch chan []flowKV
+	ch chan []FlowRow
 
 	recordsQueued  atomic.Uint64
 	recordsWritten atomic.Uint64
@@ -84,8 +82,6 @@ func parseClickHouseDSN(dsn string) (*clickhouse.Options, error) {
 func newClickhouseSink(
 	log *slog.Logger,
 	dsn, table string,
-	clock ExportClock,
-	sourceID uint32,
 	batchSize int,
 	flushInterval time.Duration,
 	queueSize int,
@@ -115,11 +111,9 @@ func newClickhouseSink(
 		log:           log,
 		conn:          conn,
 		table:         table,
-		clock:         clock,
-		sourceID:      sourceID,
 		batchSize:     batchSize,
 		flushInterval: flushInterval,
-		ch:            make(chan []flowKV, queueSize),
+		ch:            make(chan []FlowRow, queueSize),
 		ctx:           ctx,
 		cancel:        cancel,
 	}
@@ -130,7 +124,6 @@ func newClickhouseSink(
 		"batch_size", batchSize,
 		"flush_interval", flushInterval,
 		"queue_size", queueSize,
-		"exporter_source_id", sourceID,
 	)
 	return s, nil
 }
@@ -148,8 +141,9 @@ func etherType(ipVersion uint8) uint32 {
 	return 0x0800
 }
 
-func (s *clickhouseSink) insertBatch(ctx context.Context, flows []flowKV, receivedAt time.Time) bool {
-	if len(flows) == 0 {
+// insertBatchRows executes a single INSERT. insertErrs is incremented on failure.
+func insertBatchRows(ctx context.Context, log *slog.Logger, conn chdriver.Conn, table string, rows []FlowRow, insertErrs *atomic.Uint64) bool {
+	if len(rows) == 0 {
 		return true
 	}
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
@@ -175,56 +169,63 @@ func (s *clickhouseSink) insertBatch(ctx context.Context, flows []flowKV, receiv
     packets
 )`
 
-	q := fmt.Sprintf(stmt, s.table)
-	batch, err := s.conn.PrepareBatch(ctx, q)
+	q := fmt.Sprintf(stmt, table)
+	batch, err := conn.PrepareBatch(ctx, q)
 	if err != nil {
-		s.insertErrs.Add(1)
-		s.log.Warn("clickhouse prepare batch", "err", err)
+		insertErrs.Add(1)
+		log.Warn("clickhouse prepare batch", "err", err)
 		return false
 	}
 
-	var zeroAddr [16]byte
-	zeroFixed := fixed16(zeroAddr)
-	for _, fv := range flows {
-		firstWall := s.clock.monoNsToWall(fv.v.FirstSeenNs)
+	for _, r := range rows {
 		err := batch.Append(
-			receivedAt,
-			receivedAt,
-			receivedAt,
-			firstWall,
-			uint32(0),
-			uint64(1),
-			zeroFixed,
-			fixed16(fv.k.SrcAddr),
-			fixed16(fv.k.DstAddr),
-			uint32(0),
-			uint32(0),
-			etherType(fv.k.IPVersion),
-			uint32(fv.k.Proto),
-			uint32(keyPortHost(fv.k.SrcPort)),
-			uint32(keyPortHost(fv.k.DstPort)),
-			fv.v.Bytes,
-			fv.v.Packets,
+			r.Date,
+			r.TimeInsertedNs,
+			r.TimeReceivedNs,
+			r.TimeFlowStartNs,
+			r.SequenceNum,
+			r.SamplingRate,
+			fixed16(r.SamplerAddress),
+			fixed16(r.SrcAddr),
+			fixed16(r.DstAddr),
+			r.SrcAS,
+			r.DstAS,
+			r.Etype,
+			r.Proto,
+			r.SrcPort,
+			r.DstPort,
+			r.Bytes,
+			r.Packets,
 		)
 		if err != nil {
-			s.insertErrs.Add(1)
-			s.log.Warn("clickhouse batch append", "err", err)
+			insertErrs.Add(1)
+			log.Warn("clickhouse batch append", "err", err)
 			return false
 		}
 	}
 	if err := batch.Send(); err != nil {
-		s.insertErrs.Add(1)
-		s.log.Warn("clickhouse batch send", "err", err)
+		insertErrs.Add(1)
+		log.Warn("clickhouse batch send", "err", err)
 		return false
 	}
-	s.batchesOK.Add(1)
-	s.recordsWritten.Add(uint64(len(flows)))
 	return true
+}
+
+func (s *clickhouseSink) insertBatch(ctx context.Context, rows []FlowRow) bool {
+	if len(rows) == 0 {
+		return true
+	}
+	if insertBatchRows(ctx, s.log, s.conn, s.table, rows, &s.insertErrs) {
+		s.batchesOK.Add(1)
+		s.recordsWritten.Add(uint64(len(rows)))
+		return true
+	}
+	return false
 }
 
 func (s *clickhouseSink) run() {
 	defer s.wg.Done()
-	batch := make([]flowKV, 0, s.batchSize)
+	batch := make([]FlowRow, 0, s.batchSize)
 	ticker := time.NewTicker(s.flushInterval)
 	defer ticker.Stop()
 
@@ -232,8 +233,7 @@ func (s *clickhouseSink) run() {
 		if len(batch) == 0 {
 			return
 		}
-		receivedAt := time.Now().UTC()
-		if s.insertBatch(context.Background(), batch, receivedAt) {
+		if s.insertBatch(context.Background(), batch) {
 			batch = batch[:0]
 		}
 	}
@@ -241,10 +241,7 @@ func (s *clickhouseSink) run() {
 		if len(batch) == 0 {
 			return
 		}
-		receivedAt := time.Now().UTC()
-		// Close() cancels s.ctx to stop the goroutine. Use a fresh parent
-		// context for the final drain so shutdown rows can still be inserted.
-		if s.insertBatch(context.Background(), batch, receivedAt) {
+		if s.insertBatch(context.Background(), batch) {
 			batch = batch[:0]
 		}
 	}
@@ -286,18 +283,18 @@ func (s *clickhouseSink) run() {
 	}
 }
 
-// Enqueue copies flows into the sink queue (non-blocking). On overflow, increments queueDrops.
-func (s *clickhouseSink) Enqueue(flows []flowKV) {
-	if s == nil || len(flows) == 0 {
+// EnqueueRows copies rows into the sink queue (non-blocking). On overflow, increments queueDrops.
+func (s *clickhouseSink) EnqueueRows(rows []FlowRow) {
+	if s == nil || len(rows) == 0 {
 		return
 	}
-	cp := make([]flowKV, len(flows))
-	copy(cp, flows)
+	cp := make([]FlowRow, len(rows))
+	copy(cp, rows)
 	select {
 	case s.ch <- cp:
 	default:
 		s.queueDrops.Add(uint64(len(cp)))
-		s.log.Warn("clickhouse queue full, dropping batch", "flows", len(cp))
+		s.log.Warn("clickhouse queue full, dropping batch", "rows", len(cp))
 	}
 }
 

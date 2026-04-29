@@ -72,6 +72,15 @@ case "$XDP_MODE" in
   native|generic) ;;
   *) echo "ERROR: XDP_MODE must be 'native' or 'generic' (got: $XDP_MODE)" >&2; exit 1;;
 esac
+XDP_CONFIG_FILE="${XDP_CONFIG_FILE:-}"
+XDP_CONFIG_ARGS=()
+if [[ -n "$XDP_CONFIG_FILE" ]]; then
+  if [[ ! -r "$XDP_CONFIG_FILE" ]]; then
+    echo "ERROR: XDP_CONFIG_FILE=$XDP_CONFIG_FILE is not readable" >&2
+    exit 1
+  fi
+  XDP_CONFIG_ARGS=( -config "$XDP_CONFIG_FILE" )
+fi
 
 # BPF object to load. Default = full flow-tracking program. Override to
 # bpf/xdp_light.o to attach the diagnostic "do nothing but bump a counter"
@@ -119,10 +128,24 @@ WATCHDOG_STALL_INTERVALS=$(( (WATCHDOG_STALL_SEC + 9) / 10 ))
 # NetFlow exporter timing (env): shorter active timeout helps short A/B tests
 # verify ClickHouse continuity; larger shutdown grace lets final flush finish
 # on multi-million flow maps instead of SIGKILL.
-XDP_NF_ACTIVE="${XDP_NF_ACTIVE:-1800s}"
-XDP_NF_IDLE="${XDP_NF_IDLE:-15s}"
-XDP_NF_TEMPLATE_INTERVAL="${XDP_NF_TEMPLATE_INTERVAL:-60s}"
-XDP_SHUTDOWN_GRACE="${XDP_SHUTDOWN_GRACE:-20}"
+# XDP_HEAVY_SERVER=1 — preset for very large flow maps (netflow-class hosts):
+#   shorter active/idle, faster map scan, longer shutdown grace. Override any
+#   value by exporting XDP_NF_* / XDP_SHUTDOWN_GRACE explicitly before the script.
+XDP_HEAVY_SERVER="${XDP_HEAVY_SERVER:-0}"
+case "$XDP_HEAVY_SERVER" in 0|1) ;; *) echo "ERROR: XDP_HEAVY_SERVER must be 0 or 1" >&2; exit 1;; esac
+if [[ "$XDP_HEAVY_SERVER" == "1" ]]; then
+  XDP_NF_ACTIVE="${XDP_NF_ACTIVE:-60s}"
+  XDP_NF_IDLE="${XDP_NF_IDLE:-10s}"
+  XDP_NF_TEMPLATE_INTERVAL="${XDP_NF_TEMPLATE_INTERVAL:-60s}"
+  XDP_NF_SCAN="${XDP_NF_SCAN:-500ms}"
+  XDP_SHUTDOWN_GRACE="${XDP_SHUTDOWN_GRACE:-300}"
+else
+  XDP_NF_ACTIVE="${XDP_NF_ACTIVE:-1800s}"
+  XDP_NF_IDLE="${XDP_NF_IDLE:-15s}"
+  XDP_NF_TEMPLATE_INTERVAL="${XDP_NF_TEMPLATE_INTERVAL:-60s}"
+  XDP_NF_SCAN="${XDP_NF_SCAN:-1s}"
+  XDP_SHUTDOWN_GRACE="${XDP_SHUTDOWN_GRACE:-20}"
+fi
 if ! [[ "$XDP_SHUTDOWN_GRACE" =~ ^[0-9]+$ ]] || (( XDP_SHUTDOWN_GRACE < 20 )); then
   echo "ERROR: XDP_SHUTDOWN_GRACE must be integer >= 20" >&2
   exit 1
@@ -161,6 +184,17 @@ XDP_CH_TABLE="${XDP_CH_TABLE:-}"
 XDP_CH_BATCH_SIZE="${XDP_CH_BATCH_SIZE:-500}"
 XDP_CH_FLUSH_INTERVAL="${XDP_CH_FLUSH_INTERVAL:-1s}"
 XDP_CH_QUEUE_SIZE="${XDP_CH_QUEUE_SIZE:-64}"
+XDP_CH_SAMPLER_ADDR="${XDP_CH_SAMPLER_ADDR:-}"
+XDP_CH_SPOOL_MODE="${XDP_CH_SPOOL_MODE:-}"
+XDP_CH_SPOOL_DIR="${XDP_CH_SPOOL_DIR:-}"
+XDP_CH_SPOOL_SEGMENT_SIZE="${XDP_CH_SPOOL_SEGMENT_SIZE:-268435456}"
+XDP_CH_SPOOL_MAX_BYTES="${XDP_CH_SPOOL_MAX_BYTES:-0}"
+XDP_CH_SPOOL_FSYNC_INTERVAL="${XDP_CH_SPOOL_FSYNC_INTERVAL:-1s}"
+XDP_CH_WRITERS="${XDP_CH_WRITERS:-4}"
+case "${XDP_CH_SPOOL_MODE:-off}" in
+  off|on|required) ;;
+  *) echo "ERROR: XDP_CH_SPOOL_MODE must be off|on|required (got: $XDP_CH_SPOOL_MODE)" >&2; exit 1;;
+esac
 CH_EXTRA_ARGS=()
 if [[ -z "$XDP_CH_DSN" && -n "$XDP_CH_TABLE" && -n "$CH_PASS" ]]; then
   if command -v python3 >/dev/null 2>&1; then
@@ -183,6 +217,22 @@ if [[ -n "$XDP_CH_DSN" || -n "$XDP_CH_TABLE" ]]; then
     -ch-flush-interval "$XDP_CH_FLUSH_INTERVAL"
     -ch-queue-size "$XDP_CH_QUEUE_SIZE"
   )
+  if [[ -n "$XDP_CH_SAMPLER_ADDR" ]]; then
+    CH_EXTRA_ARGS+=( -ch-sampler-addr "$XDP_CH_SAMPLER_ADDR" )
+  fi
+  if [[ -n "$XDP_CH_SPOOL_DIR" ]]; then
+    CH_EXTRA_ARGS+=(
+      -ch-spool-mode "${XDP_CH_SPOOL_MODE:-on}"
+      -ch-spool-dir "$XDP_CH_SPOOL_DIR"
+      -ch-spool-segment-size "$XDP_CH_SPOOL_SEGMENT_SIZE"
+      -ch-spool-max-bytes "$XDP_CH_SPOOL_MAX_BYTES"
+      -ch-spool-fsync-interval "$XDP_CH_SPOOL_FSYNC_INTERVAL"
+      -ch-writers "$XDP_CH_WRITERS"
+    )
+  elif [[ "${XDP_CH_SPOOL_MODE:-off}" != "off" ]]; then
+    echo "ERROR: XDP_CH_SPOOL_MODE=$XDP_CH_SPOOL_MODE requires XDP_CH_SPOOL_DIR" >&2
+    exit 1
+  fi
 fi
 
 # mlx4 native XDP may need memory compaction before attach, but it must never
@@ -496,13 +546,14 @@ fi
 # было видно, с какими флагами реально стартовали.
 {
   echo "=== xdpflowd launch at $(date -Is) ==="
-  echo "cmdline: $XDP_STDBUF ./bin/xdpflowd -iface $IFACE -mode $XDP_MODE -xdp-action $XDP_ACTION -bpf $XDP_BPF_OBJ -nf-dst '$NF_DSTS' -nf-active $XDP_NF_ACTIVE -nf-idle $XDP_NF_IDLE -nf-template-interval $XDP_NF_TEMPLATE_INTERVAL -interval 5s -json-out '$JSON_OUT' -json-interval 10s ${CH_EXTRA_ARGS[*]}"
+  echo "cmdline: $XDP_STDBUF ./bin/xdpflowd ${XDP_CONFIG_ARGS[*]} -iface $IFACE -mode $XDP_MODE -xdp-action $XDP_ACTION -bpf $XDP_BPF_OBJ -nf-dst '$NF_DSTS' -nf-active $XDP_NF_ACTIVE -nf-idle $XDP_NF_IDLE -nf-template-interval $XDP_NF_TEMPLATE_INTERVAL -nf-scan $XDP_NF_SCAN -interval 5s -json-out '$JSON_OUT' -json-interval 10s ${CH_EXTRA_ARGS[*]}"
   echo "shutdown_grace: ${XDP_SHUTDOWN_GRACE}s"
   echo "WORKDIR: $WORKDIR"
   echo ""
 } > "$LOG_XDP"
 
 $XDP_STDBUF ./bin/xdpflowd \
+  "${XDP_CONFIG_ARGS[@]}" \
   -iface "$IFACE" \
   -mode "$XDP_MODE" \
   -xdp-action "$XDP_ACTION" \
@@ -511,6 +562,7 @@ $XDP_STDBUF ./bin/xdpflowd \
   -nf-active "$XDP_NF_ACTIVE" \
   -nf-idle "$XDP_NF_IDLE" \
   -nf-template-interval "$XDP_NF_TEMPLATE_INTERVAL" \
+  -nf-scan "$XDP_NF_SCAN" \
   -interval 5s \
   -json-out "$JSON_OUT" \
   -json-interval 10s \

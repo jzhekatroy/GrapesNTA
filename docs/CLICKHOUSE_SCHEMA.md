@@ -4,6 +4,10 @@
 `xdpflowd`, чтобы downstream (goflow2 → Kafka → ClickHouse) продолжил работать
 как с `ipt_NETFLOW`. Используется при планировании **Phase 3 (XDP_DROP)**.
 
+Зафиксированные **контракты** (локальный `nfdump`-архив, `default.flows_raw`, проверки `xdpflowd`): см. [`FLOW_STORAGE_CONTRACTS.md`](FLOW_STORAGE_CONTRACTS.md).
+
+Планируемое **обогащение** (AS/geo и т.д.) без изменения базовой таблицы: [`CLICKHOUSE_ENRICHMENT.md`](CLICKHOUSE_ENRICHMENT.md).
+
 ## Общая топология
 
 ```
@@ -464,6 +468,99 @@ xdpflowd
 `nfcapd` можно оставить как независимый raw-архив на первом этапе, но не стоит
 строить основной replay в ClickHouse из `.nfcapd`: это отдельный конвертер
 NetFlow -> `flows_raw`, тогда как spool может хранить уже production-shaped rows.
+
+## Результаты direct ClickHouse тестов (2026-04-28)
+
+### `sel`: direct write готов для нормального режима
+
+На менее нагруженном `sel` direct insert был проверен сначала на staging-таблице
+`default.flows_raw_xdp_direct`, затем на production-таблице `default.flows_raw`.
+
+Условия production-table теста:
+
+```text
+XDP_MODE=generic
+XDP_ACTION=drop
+NF_DSTS=127.0.0.1:9996
+XDP_CH_TABLE=default.flows_raw
+XDP_CH_BATCH_SIZE=1000
+XDP_CH_FLUSH_INTERVAL=1s
+XDP_CH_QUEUE_SIZE=256
+```
+
+Итог:
+
+```text
+records_queued=4120951
+records_written=4120951
+insert_errs=0
+queue_drops=0
+softirq: 1.33 -> 0.31
+```
+
+Вывод: на `sel` временная подмена участка `goflow2/Kafka -> ClickHouse` на
+`xdpflowd -> ClickHouse default.flows_raw` работает clean при живой БД. Локальная
+запись в `nfcapd` сохраняется через `127.0.0.1:9996`.
+
+### `netflow`: CPU win есть, текущий direct writer не выдерживает объем
+
+На более нагруженном `netflow` тесты подтвердили сильную разгрузку CPU, но
+показали, что текущая архитектура direct ClickHouse sink не подходит для
+постоянной работы на этом сервере.
+
+Нагрузка в окнах тестов:
+
+```text
+rx: примерно 3.9-4.0 Mpps
+traffic: примерно 20-21 Gbit/s
+flows_in_map: до 10-12M active flows
+rx_fifo_errors: сотни тысяч drops/sec уже в baseline
+```
+
+CPU-эффект:
+
+```text
+softirq: 52-55% -> 18-20%
+idle:    40-43% -> 65-68%
+```
+
+Проблемы текущей реализации:
+
+- при `batch_size=1000` ClickHouse insert упирался в `context deadline exceeded`;
+- при `batch_size=50000` insert timeout ушел, но export loop все равно делал
+  редкие крупные выгрузки, а shutdown не успевал завершить final flush;
+- `xdpflowd` был убит по `XDP_SHUTDOWN_GRACE` после `SIGTERM`;
+- текущая модель `active_timeout=1800s` копит миллионы active flows и делает
+  слишком большой final flush на остановке;
+- single ClickHouse writer и in-memory queue не заменяют надежность Kafka на
+  таком объеме.
+
+Вывод: на `netflow` `xdpflowd XDP_DROP` дает большой CPU-профит, но прямой
+синхронный ClickHouse writer нельзя включать как production replacement до
+переработки архитектуры.
+
+### План архитектурной переработки
+
+Для `netflow` следующий дизайн должен заменить текущую модель:
+
+```text
+BPF map
+  -> frequent scanner/export (short active timeout)
+  -> durable local spool/WAL
+  -> N parallel ClickHouse writers
+  -> default.flows_raw
+```
+
+Основные требования:
+
+- не блокировать scanner/export loop на ClickHouse insert;
+- удалять flows из BPF map после durable записи в spool, а не после успешного CH;
+- использовать короткий active timeout на heavy server (`30-60s`, не `1800s`);
+- писать крупными батчами и несколькими writer workers;
+- иметь метрики `spool_pending`, `queue_depth`, `insert_latency`,
+  `records_spooled`, `records_acked`, `retries`, `insert_errs`;
+- при заполнении spool в production-режиме аварийно останавливаться и алертить,
+  а не молча терять данные.
 
 ## TODO
 

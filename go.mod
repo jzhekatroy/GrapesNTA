@@ -7,6 +7,7 @@ require (
 	github.com/cilium/ebpf v0.16.0
 	github.com/planktonzp/xdp v0.0.9
 	golang.org/x/sys v0.29.0
+	gopkg.in/yaml.v3 v3.0.1
 )
 
 require (
@@ -26,5 +27,4 @@ require (
 	go.opentelemetry.io/otel v1.26.0 // indirect
 	go.opentelemetry.io/otel/trace v1.26.0 // indirect
 	golang.org/x/exp v0.0.0-20230224173230-c95f2b4c22f2 // indirect
-	gopkg.in/yaml.v3 v3.0.1 // indirect
 )

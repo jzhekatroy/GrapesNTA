@@ -92,7 +92,7 @@ SETTINGS index_granularity = 8192;
 | `time_flow_start_ns` | `ExporterStart + (FirstSeenNs - BpfStartNs)` |
 | `sequence_num` | `0` for direct staging until a downstream consumer requires exporter sequence semantics |
 | `sampling_rate` | `1` (no sampling in current XDP path) |
-| `sampler_address` | 16-byte exporter/source address; use zero bytes until real exporter IP is required |
+| `sampler_address` | 16-byte exporter/source address; set via `-ch-sampler-addr` / `XDP_CH_SAMPLER_ADDR` or zero until configured |
 | `src_addr` / `dst_addr` | 16 raw bytes from `FlowKey`; IPv4 stored in the first 4 bytes with the rest zeroed to match current BPF key layout |
 | `src_as` / `dst_as` | `0` (not enriched by `xdpflowd`) |
 | `etype` | `0x0800` for IPv4, `0x86DD` for IPv6 |
@@ -121,6 +121,33 @@ SETTINGS index_granularity = 8192;
 3. Compare **legacy DB path** (`default.flows_raw` from collector) vs **staging** (`default.flows_raw_xdp_direct`) using `sum(packets)` / `sum(bytes)` over the same wall-clock windows (`time_received_ns`).
 4. Exact equality is not expected (flow timeouts differ slightly, bounded CH queue may drop under overload); large systematic gaps need investigation.
 5. After validation, either point direct insert at `default.flows_raw` or keep a direct table and wire downstream reads/materialized views to it. Keep the NetFlow port used for local capture unchanged.
+
+## Durable spool + parallel ClickHouse writers
+
+For high-throughput hosts, enable append-only disk spool + parallel `INSERT` workers
+so the BPF scan loop is not blocked on database latency. Spool stores **internal**
+gob-encoded `FlowRow` batches (not `nfdump`); replay recovers after ClickHouse outages.
+
+| Flag | Purpose |
+|------|---------|
+| `-ch-spool-mode` | `off` (default) — direct bounded queue; `on` — spool best-effort; `required` — `os.Exit(1)` if append fails. |
+| `-ch-spool-dir` | Root directory (`segments/`, `meta/consumer.json`). Use a dedicated fast disk, **not** the terabyte `nfdump` volume. |
+| `-ch-spool-segment-size` | Rotate `.seg` files after this many bytes (default 256MiB). |
+| `-ch-spool-max-bytes` | Reject appends when total segment bytes exceed limit (`0` = unlimited). |
+| `-ch-spool-fsync-interval` | Best-effort `fsync` cadence (`0` = fsync every append). |
+| `-ch-writers` | Parallel inserters draining spool (default 4). |
+| `-ch-sampler-addr` | IPv4/IPv6 for `sampler_address` (16-byte FixedString; IPv4 in first 4 octets). |
+
+`prod_ab_swap.sh` wires env:`XDP_CH_SPOOL_*`, `XDP_CH_WRITERS`, `XDP_CH_SAMPLER_ADDR`.
+
+**Contract**: spool is a **delivery queue**, not the user archive; local truth stays `nfcapd`/`nfdump`. See [`FLOW_STORAGE_CONTRACTS.md`](FLOW_STORAGE_CONTRACTS.md).
+
+## Heavy export / large flow maps
+
+`-heavy-export` shortens `-nf-active` (60s), `-nf-idle` (10s), and `-nf-scan` (500ms)
+so flows leave the BPF map more often and shutdown final flush stays bounded.
+`prod_ab_swap.sh` / `prod_phase3_drop.sh` support `XDP_HEAVY_SERVER=1` with the same idea
+(longer default `XDP_SHUTDOWN_GRACE` on heavy hosts).
 
 ## Rollback / safety
 

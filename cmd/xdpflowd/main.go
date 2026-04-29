@@ -34,22 +34,22 @@ type FlowKey struct {
 
 // FlowValue must match struct flow_value in bpf/xdp_flow.c (packed, 64 bytes).
 type FlowValue struct {
-	Packets       uint64
-	Bytes         uint64
-	FirstSeenNs   uint64
-	LastSeenNs    uint64
-	IngressIf     uint32
-	RxQueue       uint32
-	TCPSynCount   uint32
-	TCPRstCount   uint32
-	TCPFinCount   uint32
-	TCPFlagsOR    uint8
-	Tos           uint8
-	TTLMin        uint8
-	TTLMax        uint8
-	PktLenMin     uint16
-	PktLenMax     uint16
-	IPFragCount   uint32
+	Packets     uint64
+	Bytes       uint64
+	FirstSeenNs uint64
+	LastSeenNs  uint64
+	IngressIf   uint32
+	RxQueue     uint32
+	TCPSynCount uint32
+	TCPRstCount uint32
+	TCPFinCount uint32
+	TCPFlagsOR  uint8
+	Tos         uint8
+	TTLMin      uint8
+	TTLMax      uint8
+	PktLenMin   uint16
+	PktLenMax   uint16
+	IPFragCount uint32
 }
 
 type jsonSnapshot struct {
@@ -61,9 +61,9 @@ type jsonSnapshot struct {
 		NonIPPass    uint64 `json:"non_ip_pass"`
 	} `json:"stats"`
 	Aggregate struct {
-		FlowsInMap      int    `json:"flows_in_map"`
-		SumFlowPackets  uint64 `json:"sum_flow_packets"`
-		SumFlowBytes    uint64 `json:"sum_flow_bytes"`
+		FlowsInMap     int    `json:"flows_in_map"`
+		SumFlowPackets uint64 `json:"sum_flow_packets"`
+		SumFlowBytes   uint64 `json:"sum_flow_bytes"`
 	} `json:"aggregate"`
 	Flows []jsonFlow `json:"flows,omitempty"`
 }
@@ -293,6 +293,7 @@ func dumpTop(log *slog.Logger, objs *loader.Objects, topN int) {
 }
 
 func main() {
+	configPath := flag.String("config", "", "optional YAML config file; CLI flags override file values")
 	bpfObj := flag.String("bpf", "bpf/xdp_flow.o", "path to compiled BPF ELF (clang -target bpf)")
 	iface := flag.String("iface", "ens18", "interface to attach XDP to")
 	mode := flag.String("mode", "native", "XDP mode: native|generic")
@@ -312,12 +313,39 @@ func main() {
 	nfSourceID := flag.Int("nf-source-id", 1, "NetFlow v9 source_id field (exporter observation domain)")
 	xdpAction := flag.String("xdp-action", "pass", "XDP return value for accounted IP packets: pass|drop. DROP only on SPAN/mirror interfaces — it stops the kernel stack after accounting and saves CPU.")
 
+	heavyExport := flag.Bool("heavy-export", false, "preset for very high flow churn: sets -nf-active=60s -nf-idle=10s -nf-scan=500ms (overrides those flags)")
+
 	chDSN := flag.String("ch-dsn", "", "optional ClickHouse DSN: clickhouse://user:pass@host:9000/database (native protocol)")
 	chTable := flag.String("ch-table", "", "MergeTree table for direct INSERT (e.g. default.flows_raw_xdp_direct); see docs/CLICKHOUSE_FLOWS_RAW.md")
 	chBatchSize := flag.Int("ch-batch-size", 500, "ClickHouse INSERT batch size")
 	chFlushInterval := flag.Duration("ch-flush-interval", time.Second, "ClickHouse flush interval")
-	chQueueSize := flag.Int("ch-queue-size", 64, "bounded queue for ClickHouse rows (drops on overflow)")
+	chQueueSize := flag.Int("ch-queue-size", 64, "bounded queue for ClickHouse rows (drops on overflow; direct mode only)")
+	chSamplerAddr := flag.String("ch-sampler-addr", "", "IPv4/IPv6 for sampler_address column (empty = all zero bytes)")
+	chSpoolModeFlag := flag.String("ch-spool-mode", "off", "durable ClickHouse queue: off|on|required (requires -ch-spool-dir)")
+	chSpoolDir := flag.String("ch-spool-dir", "", "directory for durable spool segments (use fast local disk, not the nfdump archive volume)")
+	chSpoolSegSize := flag.Int64("ch-spool-segment-size", int64(256*1024*1024), "rotate spool segment files after this many bytes")
+	chSpoolMaxBytes := flag.Int64("ch-spool-max-bytes", 0, "reject appends when total spool segments exceed this (0=unlimited)")
+	chSpoolFsync := flag.Duration("ch-spool-fsync-interval", time.Second, "best-effort fsync interval for spool (0=fsync every append)")
+	chWriters := flag.Int("ch-writers", 4, "parallel ClickHouse INSERT workers when spool mode is on")
 	flag.Parse()
+
+	if strings.TrimSpace(*configPath) != "" {
+		cfg, err := loadXDPFlowdConfig(strings.TrimSpace(*configPath))
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "config load: %v\n", err)
+			os.Exit(1)
+		}
+		if err := applyXDPFlowdConfig(flag.CommandLine, cfg); err != nil {
+			fmt.Fprintf(os.Stderr, "config apply: %v\n", err)
+			os.Exit(1)
+		}
+	}
+
+	if *heavyExport {
+		*nfActive = 60 * time.Second
+		*nfIdle = 10 * time.Second
+		*nfScan = 500 * time.Millisecond
+	}
 
 	log := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
@@ -430,25 +458,76 @@ func main() {
 		}
 	}
 
-	var chSink *clickhouseSink
-	if strings.TrimSpace(*chDSN) != "" {
-		var err error
-		chSink, err = newClickhouseSink(log, strings.TrimSpace(*chDSN), strings.TrimSpace(*chTable),
-			exportClock, uint32(*nfSourceID), *chBatchSize, *chFlushInterval, *chQueueSize)
-		if err != nil {
-			log.Error("clickhouse sink init", "err", err)
+	spoolMode, err := parseChSpoolMode(*chSpoolModeFlag)
+	if err != nil {
+		log.Error("clickhouse spool", "err", err)
+		os.Exit(1)
+	}
+	if spoolMode != chSpoolOff {
+		if strings.TrimSpace(*chDSN) == "" || strings.TrimSpace(*chTable) == "" {
+			log.Error("ch-spool-mode requires both -ch-dsn and -ch-table")
 			os.Exit(1)
 		}
-		defer func(s *clickhouseSink) {
-			s.Close()
-			s.LogMetrics()
-		}(chSink)
+		if strings.TrimSpace(*chSpoolDir) == "" {
+			log.Error("ch-spool-mode requires -ch-spool-dir")
+			os.Exit(1)
+		}
 	}
 
-	var chFlowCb func([]flowKV)
-	if chSink != nil {
-		chFlowCb = func(flows []flowKV) {
-			chSink.Enqueue(flows)
+	var chDel *clickhouseDelivery
+	if strings.TrimSpace(*chDSN) != "" {
+		sampler, err := parseSamplerAddress(*chSamplerAddr)
+		if err != nil {
+			log.Error("ch-sampler-addr", "err", err)
+			os.Exit(1)
+		}
+		mapper := newFlowRowMapper(exportClock, sampler, 0)
+		if spoolMode != chSpoolOff {
+			sp, err := newSpoolClickhousePipeline(log,
+				strings.TrimSpace(*chDSN), strings.TrimSpace(*chTable),
+				strings.TrimSpace(*chSpoolDir),
+				*chSpoolSegSize,
+				*chSpoolMaxBytes,
+				*chSpoolFsync,
+				spoolMode,
+				*chWriters,
+			)
+			if err != nil {
+				log.Error("clickhouse spool pipeline", "err", err)
+				os.Exit(1)
+			}
+			chDel = &clickhouseDelivery{
+				log:    log,
+				mapper: mapper,
+				mode:   spoolMode,
+				spool:  sp,
+				direct: nil,
+			}
+		} else {
+			sink, err := newClickhouseSink(log, strings.TrimSpace(*chDSN), strings.TrimSpace(*chTable),
+				*chBatchSize, *chFlushInterval, *chQueueSize)
+			if err != nil {
+				log.Error("clickhouse sink init", "err", err)
+				os.Exit(1)
+			}
+			chDel = &clickhouseDelivery{
+				log:    log,
+				mapper: mapper,
+				mode:   chSpoolOff,
+				spool:  nil,
+				direct: sink,
+			}
+		}
+		defer func(d *clickhouseDelivery) {
+			d.Close()
+			d.LogMetrics()
+		}(chDel)
+	}
+
+	var chFlowCb func([]flowKV, time.Time)
+	if chDel != nil {
+		chFlowCb = func(flows []flowKV, t time.Time) {
+			chDel.enqueue(flows, t)
 		}
 	}
 
@@ -476,7 +555,7 @@ func main() {
 	}
 
 	var exportTicker *time.Ticker
-	if nfExp != nil || chSink != nil {
+	if nfExp != nil || chDel != nil {
 		exportTicker = time.NewTicker(*nfScan)
 		defer exportTicker.Stop()
 	}
@@ -511,11 +590,11 @@ func main() {
 				// Final scan: force-export whatever is still in the map so we
 				// don't lose trailing flows when shutting down for A/B swap.
 				exported, deleted := nfExp.flushAll(objs, chFlowCb)
-				log.Info("final flush", "exported", exported, "deleted", deleted, "clickhouse_enabled", chSink != nil)
+				log.Info("final flush", "exported", exported, "deleted", deleted, "clickhouse_enabled", chDel != nil)
 				nfExp.logMetrics()
-			} else if chSink != nil {
+			} else if chDel != nil {
 				flows := selectAllFlows(objs)
-				chSink.Enqueue(flows)
+				chDel.enqueue(flows, time.Now().UTC())
 				deleted := deleteFlowKeys(objs, flows)
 				log.Info("final flush", "exported", len(flows), "deleted", deleted, "clickhouse_enabled", true)
 			}
@@ -534,14 +613,14 @@ func main() {
 		case <-exportC:
 			if nfExp != nil {
 				_, _ = nfExp.scanAndExport(objs, chFlowCb)
-			} else if chSink != nil {
+			} else if chDel != nil {
 				nowMonoNs, err := readSystemUptimeNs()
 				if err != nil {
 					log.Error("read uptime", "err", err)
 					break
 				}
 				flows := selectExpiredFlows(objs, *nfIdle, *nfActive, nowMonoNs)
-				chSink.Enqueue(flows)
+				chDel.enqueue(flows, time.Now().UTC())
 				deleteFlowKeys(objs, flows)
 			}
 		}

@@ -378,13 +378,13 @@ func (e *nfExporter) flushBuckets(v4 [][]byte, v6 [][]byte) {
 // scanAndExport walks the BPF flows map and exports any flow whose activity
 // crosses an idle/active boundary. Returns counts of flows exported and deleted.
 // If onFlows is non-nil it receives the same slice of flows before UDP encode
-// (for optional ClickHouse direct ingest).
-func (e *nfExporter) scanAndExport(objs *loader.Objects, onFlows func([]flowKV)) (exported, deleted int) {
+// (for optional ClickHouse direct ingest). receivedAt is wall UTC for the export batch.
+func (e *nfExporter) scanAndExport(objs *loader.Objects, onFlows func([]flowKV, time.Time)) (exported, deleted int) {
 	nowMonoNs, _ := readSystemUptimeNs() // cheap, a few hundred ns
 
 	flows := selectExpiredFlows(objs, e.idleTimeout, e.activeTimeout, nowMonoNs)
 	if onFlows != nil {
-		onFlows(flows)
+		onFlows(flows, time.Now().UTC())
 	}
 
 	var recV4, recV6 [][]byte
@@ -414,10 +414,10 @@ func (e *nfExporter) scanAndExport(objs *loader.Objects, onFlows func([]flowKV))
 // flushAll exports every flow currently in the map regardless of timeout.
 // Intended for graceful shutdown and for test harnesses to ensure nothing
 // is left behind.
-func (e *nfExporter) flushAll(objs *loader.Objects, onFlows func([]flowKV)) (exported, deleted int) {
+func (e *nfExporter) flushAll(objs *loader.Objects, onFlows func([]flowKV, time.Time)) (exported, deleted int) {
 	flows := selectAllFlows(objs)
 	if onFlows != nil {
-		onFlows(flows)
+		onFlows(flows, time.Now().UTC())
 	}
 	var recV4, recV6 [][]byte
 	for _, fv := range flows {

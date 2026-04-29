@@ -29,6 +29,9 @@
 #       Настройки: CH_HOST, CH_PORT, CH_USER, CH_TIME_EXPR, CH_PACKETS_COL, CH_BYTES_COL.
 #   Прямой INSERT из xdpflowd в staging (опционально): задайте оба XDP_CH_DSN и XDP_CH_TABLE
 #       (см. docs/CLICKHOUSE_FLOWS_RAW.md). Передаются в prod_ab_swap.sh как есть.
+#   XDP_HEAVY_SERVER=1 — preset для очень больших карт flow (см. prod_ab_swap.sh).
+#   Durable spool: XDP_CH_SPOOL_DIR и опционально XDP_CH_SPOOL_MODE / XDP_CH_WRITERS
+#       (см. docs/CLICKHOUSE_FLOWS_RAW.md и docs/FLOW_STORAGE_CONTRACTS.md).
 
 set -euo pipefail
 
