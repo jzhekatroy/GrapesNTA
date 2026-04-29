@@ -104,8 +104,13 @@ if [[ "$XDP_ACTION" == "drop" && "$IFACE" != "enp5s0d1" ]]; then
   fi
 fi
 
-# Hard cap — нельзя запустить на сутки случайно
-MAX_DURATION=3600
+# Hard cap — нельзя запустить на сутки случайно. Override only for explicit
+# long validation runs, e.g. XDP_MAX_DURATION=7200 for a 2h test.
+MAX_DURATION="${XDP_MAX_DURATION:-3600}"
+if ! [[ "$MAX_DURATION" =~ ^[0-9]+$ ]] || (( MAX_DURATION < 60 )); then
+  echo "ERROR: XDP_MAX_DURATION must be integer >= 60" >&2
+  exit 1
+fi
 if (( DURATION > MAX_DURATION )); then
   echo "ERROR: duration=$DURATION > $MAX_DURATION (hard cap)" >&2
   exit 1
@@ -522,6 +527,16 @@ run_verify() {
   fi
 }
 
+emit_final_xdp_log() {
+  if [[ ! -s "$LOG_XDP" ]]; then
+    return 0
+  fi
+  echo ""
+  echo "[$(date +%T)] final xdpflowd delivery/shutdown log lines:"
+  grep -E 'clickhouse spool shutdown drain complete|clickhouse spool pipeline closed|records_spooled|records_acked|insert_errs|retries|caught_up|spool cleanup removed|shutdown|ERROR|WARN' \
+    "$LOG_XDP" | tail -80 || true
+}
+
 cleanup() {
   local rc=$?
   echo ""
@@ -541,6 +556,7 @@ cleanup() {
       kill -KILL "$XDP_PID" 2>/dev/null || true
     fi
   fi
+  emit_final_xdp_log
   restore_rule
   # verify только если мы реально заходили в swap
   if [[ "$XDP_VERIFY_AFTER" == "1" && -n "${BASELINE_DIR:-}" && -d "$BASELINE_DIR" ]]; then
