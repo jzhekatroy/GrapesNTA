@@ -194,15 +194,19 @@ For the less loaded kernel 6.x host (`sel`), use the same conservative productio
 - `XDP_CH_SPOOL_DIR=/var/lib/xdpflowd/ch-spool`
 - `XDP_CH_SPOOL_MAX_BYTES=214748364800`
 - `XDP_CH_SPOOL_FRAME_MAX_RECORDS=50000`
-- `XDP_CH_SPOOL_SHUTDOWN_DRAIN=120s` for 5-minute validation, longer for long-run drains
+- `XDP_HEAVY_EXPORT=0`
+- `XDP_NF_ACTIVE=60s`
+- `XDP_NF_IDLE=10s`
+- `XDP_NF_SCAN=1s`
+- `XDP_CH_SPOOL_SHUTDOWN_DRAIN=300s` for permanent mode
 - `XDP_CH_SAMPLER_ADDR=127.0.0.1`
 - `XDP_CH_WRITERS=8`
 - `WATCHDOG_STALL_SEC=300`
 - `XDP_TOP=0`
 - `XDP_JSON_OUT_ENABLE=0`
-- IRQ spread enabled when prompted by `prod_phase3_drop.sh`
+- no manual IRQ spread for the current `sel` baseline
 
-This profile intentionally uses the full `xdp_flow.o` BPF object instead of the fast variant until the kernel 6.x host has a clean 5-minute validation and a 1-hour run with stable `rx_fifo_errors`, local `nfcapd` output, and complete ClickHouse spool acknowledgements.
+This profile intentionally uses the full `xdp_flow.o` BPF object instead of the fast variant. The initial `500ms` scan was safe but used more CPU; the confirmed permanent `sel` profile uses `1s` scan with stable `rx_fifo_errors=0/sec`, lower softirq than legacy, local `nfcapd` output, and direct ClickHouse spool.
 
 #### Kernel 6.12 baseline note (`sel`)
 

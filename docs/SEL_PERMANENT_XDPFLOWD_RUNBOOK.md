@@ -4,6 +4,7 @@
 
 См. также:
 
+- Универсальный запуск: [`PERMANENT_XDPFLOWD_RUNBOOK.md`](PERMANENT_XDPFLOWD_RUNBOOK.md)
 - NIC / kernel 6.12 baseline: [`KERNEL_6_12_BASELINE.md`](KERNEL_6_12_BASELINE.md)
 - ClickHouse / spool: [`CLICKHOUSE_FLOWS_RAW.md`](CLICKHOUSE_FLOWS_RAW.md)
 
@@ -12,6 +13,7 @@
 - `XDP_MODE=generic` (на `sel` + `mlx4_en` + kernel 6.12 native XDP нестабилен)
 - `XDP_ACTION=drop` (только зеркальный интерфейс; обычно `enp5s0d1`)
 - `NF_DSTS=127.0.0.1:9996` — локальный `nfcapd` без изменений
+- `XDP_HEAVY_EXPORT=0`, `XDP_NF_ACTIVE=60s`, `XDP_NF_IDLE=10s`, `XDP_NF_SCAN=1s`
 - Прямой INSERT в ClickHouse с **durable spool** (`XDP_CH_SPOOL_MODE=required`)
 - Контейнер `goflow2` (**`kcg-goflow2-1`**) останавливается, чтобы не жечь CPU и не дублировать запись в БД
 
@@ -19,16 +21,18 @@
 
 | Файл | Назначение |
 |------|------------|
-| [`deploy/sel/xdpflowd.env.example`](deploy/sel/xdpflowd.env.example) | Шаблон `/etc/xdpflowd/sel.env` |
-| [`deploy/sel/xdpflowd-exec.sh`](deploy/sel/xdpflowd-exec.sh) | Обёртка: читает env и запускает `xdpflowd` (вызывается из systemd) |
-| [`deploy/sel/xdpflowd.service`](deploy/sel/xdpflowd.service) | Шаблон unit-файла (пути `/opt/GrapesNTA` подменяются при установке) |
-| [`scripts/prod_enable_xdpflowd_sel.sh`](scripts/prod_enable_xdpflowd_sel.sh) | Включить постоянный режим |
-| [`scripts/prod_rollback_legacy_sel.sh`](scripts/prod_rollback_legacy_sel.sh) | Быстрый откат на legacy |
+| [`deploy/sel/xdpflowd.env.example`](../deploy/sel/xdpflowd.env.example) | Шаблон `/etc/xdpflowd/sel.env` |
+| [`deploy/sel/xdpflowd-exec.sh`](../deploy/sel/xdpflowd-exec.sh) | Обёртка: читает env и запускает `xdpflowd` (вызывается из systemd) |
+| [`deploy/sel/xdpflowd.service`](../deploy/sel/xdpflowd.service) | Шаблон unit-файла (пути `/opt/GrapesNTA` подменяются при установке) |
+| [`scripts/prod_enable_xdpflowd.sh`](../scripts/prod_enable_xdpflowd.sh) | Универсальное включение постоянного режима |
+| [`scripts/prod_rollback_legacy.sh`](../scripts/prod_rollback_legacy.sh) | Универсальный откат на legacy |
+| [`scripts/prod_enable_xdpflowd_sel.sh`](../scripts/prod_enable_xdpflowd_sel.sh) | Sel-wrapper с путями `/etc/xdpflowd/sel.env` и `/root/xdpflowd_sel_permanent_state.env` |
+| [`scripts/prod_rollback_legacy_sel.sh`](../scripts/prod_rollback_legacy_sel.sh) | Sel-wrapper для быстрого отката |
 
 После включения:
 
 - state + iptables backup: `/root/xdpflowd_sel_permanent_state.env`
-- полный дамп iptables: `/root/iptables-save-before-sel-permanent-<TS>.txt`
+- полный дамп iptables: `/root/iptables-save-before-xdpflowd-sel-permanent-<TS>.txt`
 
 ## Перед включением
 
@@ -128,9 +132,10 @@ sudo /opt/GrapesNTA/scripts/prod_rollback_legacy_sel.sh
 
 Если state потерян, см. аварийный restore:
 
-[`scripts/prod_restore.sh`](scripts/prod_restore.sh) с `--full-restore` на файл `/root/iptables-save-before-sel-permanent-*.txt`.
+[`scripts/prod_restore.sh`](../scripts/prod_restore.sh) с `--full-restore` на файл `/root/iptables-save-before-xdpflowd-sel-permanent-*.txt`.
 
 ## Примечания
 
 - `TimeoutStopSec=600` в unit рассчитан на финальный flush большой flow map + drain spool; при ещё более тяжёлых хостах может понадобиться увеличить.
 - Для изменения флагов правьте `/etc/xdpflowd/sel.env`, затем `sudo systemctl restart xdpflowd`.
+- На `sel` проверенный постоянный профиль: `XDP_HEAVY_EXPORT=0`, `XDP_NF_ACTIVE=60s`, `XDP_NF_IDLE=10s`, `XDP_NF_SCAN=1s`; он дал `rx_fifo_errors=0/sec` и снизил CPU относительно `500ms` scan.

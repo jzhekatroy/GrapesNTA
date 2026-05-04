@@ -1,0 +1,29 @@
+[Unit]
+Description=GrapesNTA xdpflowd (NetFlow v9 + optional ClickHouse)
+Documentation=file:/opt/GrapesNTA/docs/PERMANENT_XDPFLOWD_RUNBOOK.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Environment is loaded by xdpflowd-exec.sh from /etc/xdpflowd/xdpflowd.env.
+Environment=XDPFLOWD_ENV_FILE=/etc/xdpflowd/xdpflowd.env
+ExecStart=/opt/GrapesNTA/deploy/systemd/xdpflowd-exec.sh
+
+# SIGTERM triggers graceful shutdown; spool drain + large flow map flush can take minutes.
+KillSignal=SIGTERM
+TimeoutStopSec=600
+SendSIGKILL=yes
+
+Restart=on-failure
+RestartSec=5
+
+# BPF maps / memlock
+LimitMEMLOCK=infinity
+LimitNOFILE=1048576
+
+# Hardened-ish defaults (still needs root for XDP)
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

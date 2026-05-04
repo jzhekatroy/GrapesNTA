@@ -138,4 +138,4 @@ production-replacement path.
 
 ## Persistent production mode (`systemd`)
 
-To run `xdpflowd` permanently on `sel` with rollback to `ipt_NETFLOW` + `goflow2`, see [`SEL_PERMANENT_XDPFLOWD_RUNBOOK.md`](SEL_PERMANENT_XDPFLOWD_RUNBOOK.md).
+To run `xdpflowd` permanently with rollback to `ipt_NETFLOW` + `goflow2`, see [`PERMANENT_XDPFLOWD_RUNBOOK.md`](PERMANENT_XDPFLOWD_RUNBOOK.md). The `sel` host-specific notes and the confirmed `1s` scan profile are in [`SEL_PERMANENT_XDPFLOWD_RUNBOOK.md`](SEL_PERMANENT_XDPFLOWD_RUNBOOK.md).
