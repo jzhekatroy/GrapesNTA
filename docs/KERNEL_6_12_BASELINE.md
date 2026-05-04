@@ -135,3 +135,7 @@ For `sel` on kernel `6.12.74+deb12-amd64`:
 The native issue is not fully root-caused, but the practical decision for the
 next 60-minute validation is to stop testing native and validate the generic
 production-replacement path.
+
+## Persistent production mode (`systemd`)
+
+To run `xdpflowd` permanently on `sel` with rollback to `ipt_NETFLOW` + `goflow2`, see [`SEL_PERMANENT_XDPFLOWD_RUNBOOK.md`](SEL_PERMANENT_XDPFLOWD_RUNBOOK.md).

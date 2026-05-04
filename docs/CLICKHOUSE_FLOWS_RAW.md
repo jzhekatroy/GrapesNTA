@@ -49,6 +49,8 @@ ipt_NETFLOW / xdpflowd
   -> ClickHouse default.flows_raw
 ```
 
+Постоянный режим `xdpflowd` на `sel` под **systemd** (direct INSERT + spool, rollback на `ipt_NETFLOW`): см. [`SEL_PERMANENT_XDPFLOWD_RUNBOOK.md`](SEL_PERMANENT_XDPFLOWD_RUNBOOK.md).
+
 ## Recommended staging table for direct inserts
 
 For the first direct-ingest test, create a staging table with the **same shape** as `default.flows_raw`.
