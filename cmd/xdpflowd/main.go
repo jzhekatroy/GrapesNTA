@@ -339,6 +339,7 @@ func main() {
 	chSpoolFrameMaxRecords := flag.Int("ch-spool-frame-max-records", 50_000, "maximum FlowRow records per durable spool frame / ClickHouse insert")
 	chSpoolFsync := flag.Duration("ch-spool-fsync-interval", time.Second, "best-effort fsync interval for spool (0=fsync every append)")
 	chSpoolShutdownDrain := flag.Duration("ch-spool-shutdown-drain", 0, "wait up to this duration for spool backlog to reach ClickHouse before shutdown (0=leave backlog for replay)")
+	chSpoolStallThreshold := flag.Duration("ch-spool-stall-threshold", 60*time.Second, "force resync past suspect frame if drainer makes no progress for this long while data is available (also bounds shutdown drain when set)")
 	chWriters := flag.Int("ch-writers", 4, "parallel ClickHouse INSERT workers when spool mode is on")
 	flag.Parse()
 
@@ -504,6 +505,7 @@ func main() {
 				*chSpoolFrameMaxRecords,
 				*chSpoolFsync,
 				*chSpoolShutdownDrain,
+				*chSpoolStallThreshold,
 				spoolMode,
 				*chWriters,
 			)
@@ -619,6 +621,9 @@ func main() {
 			dumpTop(log, objs, *topN)
 			if nfExp != nil {
 				nfExp.logMetrics()
+			}
+			if chDel != nil {
+				chDel.LogMetrics()
 			}
 		case <-jsonC:
 			snap := buildSnapshot(objs, *jsonFlows)

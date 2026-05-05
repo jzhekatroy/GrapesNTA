@@ -102,6 +102,7 @@ CH_ARGS+=(
   -ch-spool-frame-max-records "${XDP_CH_SPOOL_FRAME_MAX_RECORDS:-50000}"
   -ch-spool-fsync-interval "${XDP_CH_SPOOL_FSYNC_INTERVAL:-1s}"
   -ch-spool-shutdown-drain "${XDP_CH_SPOOL_SHUTDOWN_DRAIN:-0s}"
+  -ch-spool-stall-threshold "${XDP_CH_SPOOL_STALL_THRESHOLD:-60s}"
   -ch-writers "${XDP_CH_WRITERS:-4}"
 )
 

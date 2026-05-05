@@ -464,6 +464,90 @@ func readNextFrame(segDir string, cp consumerCheckpoint) (next consumerCheckpoin
 	return next, rows, nil
 }
 
+// resyncToNextMagic scans forward from cp.Offset+1 looking for the next valid
+// frame header magic in the current segment, capped at the writer's tip to
+// avoid racing partial appends. On miss inside a closed/older segment it rolls
+// to the next segment. Returns the new checkpoint, bytes skipped relative to
+// cp.Offset, whether a magic was found inside the same segment, and any IO
+// error. When the corrupt region is in the writer's *current* segment and no
+// magic is found yet, the caller must wait for more data and try again.
+func resyncToNextMagic(segDir string, cp consumerCheckpoint, tipSeg uint64, tipOff int64) (next consumerCheckpoint, scanned int64, found bool, err error) {
+	path := filepath.Join(segDir, fmt.Sprintf("%016d.seg", cp.Segment))
+	f, err := os.Open(path)
+	if err != nil {
+		return cp, 0, false, err
+	}
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil {
+		return cp, 0, false, err
+	}
+	ceiling := fi.Size()
+	if cp.Segment == tipSeg && tipOff < ceiling {
+		ceiling = tipOff
+	}
+	startOff := cp.Offset + 1
+	if startOff < 0 {
+		startOff = 0
+	}
+	if startOff >= ceiling {
+		if cp.Segment < tipSeg {
+			return consumerCheckpoint{Segment: cp.Segment + 1, Offset: 0}, fi.Size() - cp.Offset, false, nil
+		}
+		return cp, 0, false, nil
+	}
+	if _, err := f.Seek(startOff, io.SeekStart); err != nil {
+		return cp, 0, false, err
+	}
+	const winSize = 64 * 1024
+	buf := make([]byte, winSize+3)
+	overlap := 0
+	pos := startOff
+	for pos < ceiling {
+		toRead := int64(winSize)
+		if pos+toRead > ceiling {
+			toRead = ceiling - pos
+		}
+		if toRead <= 0 {
+			break
+		}
+		n, rerr := f.Read(buf[overlap : overlap+int(toRead)])
+		if n <= 0 {
+			if rerr != nil && !errors.Is(rerr, io.EOF) {
+				return cp, 0, false, rerr
+			}
+			break
+		}
+		total := overlap + n
+		for i := 0; i+4 <= total; i++ {
+			if binary.BigEndian.Uint32(buf[i:i+4]) != spoolFrameMagicBE {
+				continue
+			}
+			// Verify version when we have enough bytes; otherwise accept the
+			// magic position and let the next readNextFrame call validate.
+			if i+8 <= total && binary.BigEndian.Uint32(buf[i+4:i+8]) != spoolFrameVersion {
+				continue
+			}
+			fileOff := pos - int64(overlap) + int64(i)
+			if fileOff < startOff {
+				continue
+			}
+			return consumerCheckpoint{Segment: cp.Segment, Offset: fileOff}, fileOff - cp.Offset, true, nil
+		}
+		if total >= 3 {
+			copy(buf[0:3], buf[total-3:total])
+			overlap = 3
+		} else {
+			overlap = total
+		}
+		pos += int64(n)
+	}
+	if cp.Segment < tipSeg {
+		return consumerCheckpoint{Segment: cp.Segment + 1, Offset: 0}, fi.Size() - cp.Offset, false, nil
+	}
+	return cp, 0, false, nil
+}
+
 // --- Delivery pipeline: spool + parallel ClickHouse writers with ordered acks ---
 
 type spoolClickhousePipeline struct {
@@ -488,6 +572,15 @@ type spoolClickhousePipeline struct {
 	retries        atomic.Uint64
 	batchesOK      atomic.Uint64
 
+	// Drainer corruption-recovery counters and progress probe.
+	corruptionFramesSkipped atomic.Uint64
+	corruptionBytesSkipped  atomic.Uint64
+	lastDrainerProgress     atomic.Int64 // unix nanoseconds; 0 = never
+
+	// stallThreshold triggers forced resync when drainer makes no progress
+	// despite having unread spooled data; also bounds shutdown drain wait.
+	stallThreshold time.Duration
+
 	wg sync.WaitGroup
 }
 
@@ -500,6 +593,7 @@ func newSpoolClickhousePipeline(
 	maxFrameRows int,
 	fsyncEvery time.Duration,
 	drainOnClose time.Duration,
+	stallThreshold time.Duration,
 	mode chSpoolMode,
 	nWorkers int,
 ) (*spoolClickhousePipeline, error) {
@@ -533,17 +627,19 @@ func newSpoolClickhousePipeline(
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	p := &spoolClickhousePipeline{
-		log:          log,
-		ctx:          ctx,
-		cancel:       cancel,
-		writer:       wr,
-		conn:         conn,
-		table:        table,
-		mode:         mode,
-		nWorkers:     nWorkers,
-		drainOnClose: drainOnClose,
-		acked:        cp,
+		log:            log,
+		ctx:            ctx,
+		cancel:         cancel,
+		writer:         wr,
+		conn:           conn,
+		table:          table,
+		mode:           mode,
+		nWorkers:       nWorkers,
+		drainOnClose:   drainOnClose,
+		stallThreshold: stallThreshold,
+		acked:          cp,
 	}
+	p.lastDrainerProgress.Store(time.Now().UnixNano())
 	p.wg.Add(1)
 	go p.runPipeline()
 	log.Info("clickhouse spool pipeline started",
@@ -553,6 +649,7 @@ func newSpoolClickhousePipeline(
 		"mode", mode.String(),
 		"frame_max_records", maxFrameRows,
 		"shutdown_drain", drainOnClose,
+		"stall_threshold", stallThreshold,
 	)
 	return p, nil
 }
@@ -636,6 +733,13 @@ func (p *spoolClickhousePipeline) runPipeline() {
 }
 
 // drainerLoop reads frames from disk ahead of the durable ack watermark (at-least-once).
+//
+// Corruption handling: any error other than EOF / ErrNotExist is treated as a
+// suspect frame. The drainer scans forward for the next valid magic (PFLX +
+// version 1), advances the read head past the bad bytes, and continues. This
+// keeps a single torn write or stale segment from blocking the entire spool.
+// Stall watchdog forces the same resync if no progress is made for
+// stallThreshold despite available data.
 func (p *spoolClickhousePipeline) drainerLoop(jobs chan<- spoolJob) {
 	readHead, err := loadCheckpoint(p.writer.dir)
 	if err != nil {
@@ -645,6 +749,64 @@ func (p *spoolClickhousePipeline) drainerLoop(jobs chan<- spoolJob) {
 	jobSeq := uint64(0)
 	ticker := time.NewTicker(25 * time.Millisecond)
 	defer ticker.Stop()
+
+	p.lastDrainerProgress.Store(time.Now().UnixNano())
+
+	// Sticky warn rate-limiter to prevent log storms when a single bad byte
+	// is hit ~40 times per second by the 25ms scan ticker.
+	var lastWarnAt time.Time
+	var suppressed uint64
+	warnRateLimited := func(msg string, args ...any) {
+		now := time.Now()
+		if now.Sub(lastWarnAt) < 5*time.Second {
+			suppressed++
+			return
+		}
+		if suppressed > 0 {
+			args = append(args, "suppressed_since_last", suppressed)
+			suppressed = 0
+		}
+		p.log.Warn(msg, args...)
+		lastWarnAt = now
+	}
+
+	tryResync := func(reason string, cause error) (advanced bool) {
+		tipSeg := p.writer.writerTipSeg.Load()
+		tipOff := p.writer.writerTipOff.Load()
+		next, skipped, found, rerr := resyncToNextMagic(p.writer.segDir, readHead, tipSeg, tipOff)
+		// Always cool down the watchdog: the writer needs time to extend the
+		// segment, and we don't want a 25ms hot loop re-scanning the same range.
+		defer p.lastDrainerProgress.Store(time.Now().UnixNano())
+		if rerr != nil {
+			warnRateLimited("spool resync failed", "err", rerr, "reason", reason, "at", readHead)
+			return false
+		}
+		// Cannot advance: still in writer's tail with no later magic — wait.
+		if !found && next.Segment == readHead.Segment && next.Offset == readHead.Offset {
+			warnRateLimited("spool stalled at suspect frame; awaiting more data",
+				"at", readHead, "reason", reason, "cause", cause)
+			return false
+		}
+		p.corruptionFramesSkipped.Add(1)
+		if skipped > 0 {
+			p.corruptionBytesSkipped.Add(uint64(skipped))
+		}
+		p.log.Error("spool corruption skipped",
+			"reason", reason,
+			"cause", cause,
+			"from", readHead,
+			"to", next,
+			"skipped_bytes", skipped,
+			"found_magic_in_segment", found,
+		)
+		readHead = next
+		// Persist the resync point immediately so a process restart does not
+		// re-scan the same corrupt bytes.
+		if err := saveCheckpoint(p.writer.dir, readHead); err != nil {
+			p.log.Warn("spool save checkpoint after resync", "err", err)
+		}
+		return true
+	}
 
 	for {
 		if p.ctx.Err() != nil {
@@ -658,6 +820,8 @@ func (p *spoolClickhousePipeline) drainerLoop(jobs chan<- spoolJob) {
 		hasData := readHead.Segment < tipSeg || (readHead.Segment == tipSeg && readHead.Offset < tipOff)
 
 		if !hasData {
+			// Idle, not stuck — keep watchdog quiet.
+			p.lastDrainerProgress.Store(time.Now().UnixNano())
 			select {
 			case <-ticker.C:
 			case <-p.ctx.Done():
@@ -666,11 +830,26 @@ func (p *spoolClickhousePipeline) drainerLoop(jobs chan<- spoolJob) {
 			continue
 		}
 
+		// Stall watchdog: force resync if nothing has advanced for too long.
+		if p.stallThreshold > 0 {
+			ageNs := time.Now().UnixNano() - p.lastDrainerProgress.Load()
+			if time.Duration(ageNs) > p.stallThreshold {
+				if !tryResync("stall_watchdog", fmt.Errorf("no drainer progress for %s", time.Duration(ageNs))) {
+					select {
+					case <-ticker.C:
+					case <-p.ctx.Done():
+					}
+					continue
+				}
+			}
+		}
+
 		nextCP, rows, err := readNextFrame(p.writer.segDir, readHead)
 		if err != nil {
 			if errors.Is(err, io.EOF) {
 				if readHead.Segment < tipSeg {
 					readHead = consumerCheckpoint{Segment: readHead.Segment + 1, Offset: 0}
+					p.lastDrainerProgress.Store(time.Now().UnixNano())
 					continue
 				}
 				select {
@@ -682,12 +861,17 @@ func (p *spoolClickhousePipeline) drainerLoop(jobs chan<- spoolJob) {
 			if errors.Is(err, os.ErrNotExist) {
 				readHead.Segment++
 				readHead.Offset = 0
+				p.lastDrainerProgress.Store(time.Now().UnixNano())
 				continue
 			}
-			p.log.Warn("spool read frame", "err", err, "at", readHead)
-			select {
-			case <-ticker.C:
-			case <-p.ctx.Done():
+			// Any other error (bad header, oversized payload, CRC mismatch,
+			// gob decode error) → treat as suspect and scan past it.
+			warnRateLimited("spool read frame error", "err", err, "at", readHead)
+			if !tryResync("read_frame_error", err) {
+				select {
+				case <-ticker.C:
+				case <-p.ctx.Done():
+				}
 			}
 			continue
 		}
@@ -697,6 +881,7 @@ func (p *spoolClickhousePipeline) drainerLoop(jobs chan<- spoolJob) {
 		select {
 		case jobs <- spoolJob{seq: j, rows: rows, ack: nextCP}:
 			readHead = nextCP
+			p.lastDrainerProgress.Store(time.Now().UnixNano())
 		case <-p.ctx.Done():
 			// try non-blocking send to avoid losing this frame if workers still up
 			select {
@@ -789,7 +974,15 @@ func (p *spoolClickhousePipeline) Close() {
 		p.log.Warn("spool writer close", "err", err)
 	}
 	if p.drainOnClose > 0 {
+		// Bound the wait by both an absolute deadline and a no-progress
+		// watchdog so a permanently-stuck drainer cannot block systemctl stop.
 		deadline := time.Now().Add(p.drainOnClose)
+		stallThr := p.stallThreshold
+		if stallThr <= 0 || stallThr > p.drainOnClose {
+			stallThr = 30 * time.Second
+		}
+		lastAcked := p.recordsAcked.Load()
+		lastChange := time.Now()
 		ticker := time.NewTicker(200 * time.Millisecond)
 		for {
 			if p.isCaughtUp() {
@@ -805,6 +998,20 @@ func (p *spoolClickhousePipeline) Close() {
 					"records_spooled", p.recordsSpooled.Load(),
 					"records_acked", p.recordsAcked.Load(),
 					"timeout", p.drainOnClose,
+				)
+				ticker.Stop()
+				break
+			}
+			cur := p.recordsAcked.Load()
+			if cur != lastAcked {
+				lastAcked = cur
+				lastChange = time.Now()
+			} else if time.Since(lastChange) > stallThr {
+				p.log.Warn("clickhouse spool shutdown drain aborted (no progress)",
+					"records_spooled", p.recordsSpooled.Load(),
+					"records_acked", p.recordsAcked.Load(),
+					"stall_threshold", stallThr,
+					"backlog_for_replay", true,
 				)
 				ticker.Stop()
 				break
@@ -844,12 +1051,32 @@ func (p *spoolClickhousePipeline) isCaughtUp() bool {
 }
 
 func (p *spoolClickhousePipeline) LogMetrics() {
+	tipSeg := p.writer.writerTipSeg.Load()
+	tipOff := p.writer.writerTipOff.Load()
+	p.checkpointMu.Lock()
+	cp := p.acked
+	p.checkpointMu.Unlock()
+	lagSegs := int64(tipSeg) - int64(cp.Segment)
+	if lagSegs < 0 {
+		lagSegs = 0
+	}
+	progressNs := p.lastDrainerProgress.Load()
+	progressAge := time.Duration(0)
+	if progressNs > 0 {
+		progressAge = time.Since(time.Unix(0, progressNs))
+	}
 	p.log.Info("clickhouse spool pipeline",
 		"records_spooled", p.recordsSpooled.Load(),
 		"records_acked", p.recordsAcked.Load(),
 		"batches_ok", p.batchesOK.Load(),
 		"insert_errs", p.insertErrs.Load(),
 		"retries", p.retries.Load(),
+		"corruption_frames_skipped", p.corruptionFramesSkipped.Load(),
+		"corruption_bytes_skipped", p.corruptionBytesSkipped.Load(),
+		"writer_tip", consumerCheckpoint{Segment: tipSeg, Offset: tipOff},
+		"acked", cp,
+		"lag_segments", lagSegs,
+		"drainer_progress_age", progressAge.Truncate(time.Second),
 	)
 }
 

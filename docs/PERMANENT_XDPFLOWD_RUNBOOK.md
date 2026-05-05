@@ -138,3 +138,29 @@ sudo ./scripts/prod_rollback_legacy_sel.sh
 ```
 
 Откат останавливает `xdpflowd`, снимает XDP best-effort, возвращает `ipt_NETFLOW` правило из state и запускает `goflow2`. Spool не удаляется.
+
+## Spool: устойчивость к повреждениям
+
+Durable spool (`/var/lib/xdpflowd/ch-spool`) рассчитан на сценарий, когда ClickHouse временно недоступен или хост перезагрузился; данные приходят в `ClickHouse` после восстановления связи (at-least-once).
+
+Авто-восстановление при повреждении одного фрейма:
+
+- Drainer на любую ошибку чтения (`bad frame header`, `crc mismatch`, `excessive payload len`, `gob decode`) сканирует сегмент вперёд до следующего валидного `PFLX`-magic и продолжает с него. Лог содержит `spool corruption skipped` с `from`, `to`, `skipped_bytes`.
+- Watchdog `XDP_CH_SPOOL_STALL_THRESHOLD` (default `60s`) форсирует тот же resync, если консумер ничего не двигал, хотя данные есть. Параметр также ограничивает ожидание `Close()` при остановке сервиса, чтобы `systemctl stop` не висел.
+- Метрики в `journalctl -u xdpflowd`: `corruption_frames_skipped`, `corruption_bytes_skipped`, `lag_segments`, `drainer_progress_age`. Печатаются каждые `XDP_INTERVAL` (по умолчанию 5s).
+
+Если сервис всё-таки оказался застрявшим (например, бинарь старее версии с авто-resync), руками:
+
+```bash
+# Dry-run: скрипт сам остановит сервис, скажет какой будет новый чекпоинт.
+sudo ./scripts/prod_repair_spool.sh
+
+# Применить и поднять сервис.
+sudo ./scripts/prod_repair_spool.sh --apply
+
+# Кастомный путь к spool / имя сервиса:
+sudo SPOOL_DIR=/var/lib/xdpflowd/ch-spool SERVICE=xdpflowd \
+  ./scripts/prod_repair_spool.sh --apply
+```
+
+Скрипт делает резервные копии `consumer.json` и подозрительного сегмента (`*.suspect.<ts>`) — их можно потом отдать на forensics или удалить.
