@@ -15,14 +15,14 @@ import (
 func ipv4UDPDNSBPF() ([]bpf.RawInstruction, error) {
 	return bpf.Assemble([]bpf.Instruction{
 		bpf.LoadAbsolute{Off: 12, Size: 2},
-		bpf.JumpIf{Cond: bpf.JumpEqual, Val: 0x0800, SkipTrue: 0, SkipFalse: 8},
+		bpf.JumpIf{Cond: bpf.JumpEqual, Val: 0x0800, SkipTrue: 0, SkipFalse: 7},
 		bpf.LoadAbsolute{Off: 23, Size: 1},
-		bpf.JumpIf{Cond: bpf.JumpEqual, Val: 17, SkipTrue: 0, SkipFalse: 6},
+		bpf.JumpIf{Cond: bpf.JumpEqual, Val: 17, SkipTrue: 0, SkipFalse: 5},
 		bpf.LoadMemShift{Off: 14},
 		bpf.LoadIndirect{Off: 14, Size: 2},
-		bpf.JumpIf{Cond: bpf.JumpEqual, Val: 53, SkipTrue: 4, SkipFalse: 0},
+		bpf.JumpIf{Cond: bpf.JumpEqual, Val: 53, SkipTrue: 3, SkipFalse: 0},
 		bpf.LoadIndirect{Off: 16, Size: 2},
-		bpf.JumpIf{Cond: bpf.JumpEqual, Val: 53, SkipTrue: 2, SkipFalse: 0},
+		bpf.JumpIf{Cond: bpf.JumpEqual, Val: 53, SkipTrue: 1, SkipFalse: 0},
 		bpf.RetConstant{Val: 0},
 		bpf.RetConstant{Val: 0xffff},
 	})
