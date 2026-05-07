@@ -46,6 +46,14 @@ func openCapture(ifname string) (int, error) {
 		unix.Close(fd)
 		return -1, fmt.Errorf("bind %s: %w", ifname, err)
 	}
+	mreq := &unix.PacketMreq{
+		Ifindex: int32(ifi.Index),
+		Type:    unix.PACKET_MR_PROMISC,
+	}
+	if err := unix.SetsockoptPacketMreq(fd, unix.SOL_PACKET, unix.PACKET_ADD_MEMBERSHIP, mreq); err != nil {
+		unix.Close(fd)
+		return -1, fmt.Errorf("enable promisc %s: %w", ifname, err)
+	}
 	_ = unix.SetsockoptInt(fd, unix.SOL_SOCKET, unix.SO_RCVBUF, 16<<20)
 
 	raw, err := ipv4UDPDNSBPF()
