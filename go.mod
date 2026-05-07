@@ -6,6 +6,7 @@ require (
 	github.com/ClickHouse/clickhouse-go/v2 v2.30.1
 	github.com/cilium/ebpf v0.16.0
 	github.com/planktonzp/xdp v0.0.9
+	golang.org/x/net v0.34.0
 	golang.org/x/sys v0.29.0
 	gopkg.in/yaml.v3 v3.0.1
 )

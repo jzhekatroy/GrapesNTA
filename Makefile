@@ -28,7 +28,7 @@ AFXDP_BPF_O := bpf/afxdp_redirect.o
 LIGHT_BPF_O := bpf/xdp_light.o
 FAST_BPF_O := bpf/xdp_flow_fast.o
 
-.PHONY: all bpf afxdp-bpf bpf-light bpf-fast bpf-variants build build-afxdp clean run tidy ensure-mod
+.PHONY: all bpf afxdp-bpf bpf-light bpf-fast bpf-variants build build-afxdp build-dns clean run tidy ensure-mod
 
 all: build
 
@@ -80,10 +80,15 @@ build-afxdp: ensure-mod
 	@echo "Using Go: $(GO)" && $(GO) version
 	$(GO) build -o bin/afxdpflowd ./cmd/afxdpflowd
 
+build-dns: ensure-mod
+	@mkdir -p bin
+	@echo "Using Go: $(GO)" && $(GO) version
+	$(GO) build -o bin/dnsflowd ./cmd/dnsflowd
+
 run: build
 	sudo ./bin/xdpflowd -iface ens18 -mode native -bpf $(BPF_O)
 
 clean:
-	rm -f bin/xdpflowd bin/afxdpflowd $(BPF_O) $(AFXDP_BPF_O) $(LIGHT_BPF_O) $(FAST_BPF_O)
+	rm -f bin/xdpflowd bin/dnsflowd bin/afxdpflowd $(BPF_O) $(AFXDP_BPF_O) $(LIGHT_BPF_O) $(FAST_BPF_O)
 
 .DEFAULT_GOAL := build

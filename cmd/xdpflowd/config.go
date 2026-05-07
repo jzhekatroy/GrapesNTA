@@ -16,6 +16,7 @@ type xdpflowdConfig struct {
 	Iface            *string `yaml:"iface"`
 	Mode             *string `yaml:"mode"`
 	XDPAction        *string `yaml:"xdp_action"`
+	DNSPassthrough   *bool   `yaml:"dns_passthrough"`
 	Top              *int    `yaml:"top"`
 	Interval         *string `yaml:"interval"`
 	JSONOut          *string `yaml:"json_out"`
@@ -106,6 +107,7 @@ func applyXDPFlowdConfig(fs *flag.FlagSet, cfg *xdpflowdConfig) error {
 		func() error { return setString("iface", cfg.Iface) },
 		func() error { return setString("mode", cfg.Mode) },
 		func() error { return setString("xdp-action", cfg.XDPAction) },
+		func() error { return setBool("dns-passthrough", cfg.DNSPassthrough) },
 		func() error { return setInt("top", cfg.Top) },
 		func() error { return setString("interval", cfg.Interval) },
 		func() error { return setString("json-out", cfg.JSONOut) },

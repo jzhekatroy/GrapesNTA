@@ -24,6 +24,10 @@ type Options struct {
 	// Valid values: 2 = XDP_PASS (safe, default), 1 = XDP_DROP (SPAN/mirror only).
 	// 0 means "leave as compiled-in default".
 	XDPFinalAction uint32
+	// DNSPassthrough forces XDP_PASS for UDP with src or dst port 53. Required
+	// when running dnsflowd (AF_PACKET) on the same SPAN interface as -xdp-action=drop.
+	// 0 = compiled default (off), 1 = enable.
+	DNSPassthrough uint32
 }
 
 // LoadObjects loads an eBPF collection from a compiled ELF path (e.g. bpf/xdp_flow.o)
@@ -41,11 +45,16 @@ func LoadObjectsWithOptions(bpfObjPath string, opts Options) (*Objects, error) {
 		return nil, fmt.Errorf("load spec %q: %w", bpfObjPath, err)
 	}
 
+	constants := make(map[string]interface{})
 	if opts.XDPFinalAction != 0 {
-		if err := spec.RewriteConstants(map[string]interface{}{
-			"xdp_final_action": opts.XDPFinalAction,
-		}); err != nil {
-			return nil, fmt.Errorf("rewrite xdp_final_action=%d: %w", opts.XDPFinalAction, err)
+		constants["xdp_final_action"] = opts.XDPFinalAction
+	}
+	if opts.DNSPassthrough != 0 {
+		constants["dns_passthrough"] = opts.DNSPassthrough
+	}
+	if len(constants) > 0 {
+		if err := spec.RewriteConstants(constants); err != nil {
+			return nil, fmt.Errorf("rewrite bpf constants: %w", err)
 		}
 	}
 

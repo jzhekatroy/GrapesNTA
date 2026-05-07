@@ -1,0 +1,22 @@
+[Unit]
+Description=GrapesNTA dnsflowd (DNS mirror → ClickHouse)
+Documentation=file:///opt/GrapesNTA/docs/DNSFLOWD_MVP_PLAN.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/opt/GrapesNTA/deploy/sel/dnsflowd-exec.sh
+
+KillSignal=SIGTERM
+TimeoutStopSec=60
+SendSIGKILL=yes
+
+Restart=on-failure
+RestartSec=5
+
+LimitNOFILE=1048576
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

@@ -323,6 +323,7 @@ func main() {
 	nfScan := flag.Duration("nf-scan", 1*time.Second, "how often to walk the flows map for NetFlow export")
 	nfSourceID := flag.Int("nf-source-id", 1, "NetFlow v9 source_id field (exporter observation domain)")
 	xdpAction := flag.String("xdp-action", "pass", "XDP return value for accounted IP packets: pass|drop. DROP only on SPAN/mirror interfaces — it stops the kernel stack after accounting and saves CPU.")
+	dnsPassthrough := flag.Bool("dns-passthrough", false, "force XDP_PASS for UDP src/dst port 53 even when -xdp-action=drop (SPAN only), so co-located dnsflowd can capture DNS via AF_PACKET; default off")
 
 	heavyExport := flag.Bool("heavy-export", false, "preset for very high flow churn: sets -nf-active=60s -nf-idle=10s -nf-scan=500ms (overrides those flags)")
 
@@ -386,9 +387,11 @@ func main() {
 		os.Exit(1)
 	}
 
-	objs, err := loader.LoadObjectsWithOptions(*bpfObj, loader.Options{
-		XDPFinalAction: xdpFinalAction,
-	})
+	loaderOpts := loader.Options{XDPFinalAction: xdpFinalAction}
+	if *dnsPassthrough {
+		loaderOpts.DNSPassthrough = 1
+	}
+	objs, err := loader.LoadObjectsWithOptions(*bpfObj, loaderOpts)
 	if err != nil {
 		log.Error("load eBPF objects", "err", err)
 		os.Exit(1)
@@ -419,7 +422,7 @@ func main() {
 	}
 	defer lnk.Close()
 
-	log.Info("xdpflowd started", "iface", *iface, "mode", *mode, "ifindex", ifi.Index, "xdp_action", *xdpAction)
+	log.Info("xdpflowd started", "iface", *iface, "mode", *mode, "ifindex", ifi.Index, "xdp_action", *xdpAction, "dns_passthrough", *dnsPassthrough)
 	if *xdpAction == "drop" {
 		log.Warn("XDP_DROP mode: accounted IP packets WILL NOT reach the kernel stack — only safe on SPAN/mirror interfaces")
 	}

@@ -111,6 +111,11 @@ if [[ "$XDP_HEAVY_EXPORT" == "1" ]]; then
   HEAVY_ARGS=( -heavy-export )
 fi
 
+DNS_PASSTHROUGH_ARGS=()
+if [[ "${XDP_DNS_PASSTHROUGH:-0}" == "1" ]]; then
+  DNS_PASSTHROUGH_ARGS=( -dns-passthrough )
+fi
+
 STDBUF=()
 if command -v stdbuf >/dev/null 2>&1; then
   STDBUF=( stdbuf -oL -eL )
@@ -124,6 +129,7 @@ exec "${STDBUF[@]}" "$BIN" \
   -bpf "$XDP_BPF_OBJ" \
   -nf-dst "$NF_DSTS" \
   "${HEAVY_ARGS[@]}" \
+  "${DNS_PASSTHROUGH_ARGS[@]}" \
   -nf-active "$XDP_NF_ACTIVE" \
   -nf-idle "$XDP_NF_IDLE" \
   -nf-template-interval "$XDP_NF_TEMPLATE_INTERVAL" \

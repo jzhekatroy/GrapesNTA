@@ -42,6 +42,17 @@
  */
 const volatile __u32 xdp_final_action = XDP_PASS;
 
+/*
+ * dns_passthrough — when set to 1, UDP packets with src_port=53 or dst_port=53
+ * always return XDP_PASS regardless of xdp_final_action. Counters are still
+ * updated before the return, so DNS flows still appear in the BPF flow map.
+ *
+ * Default 0 keeps existing behaviour bit-for-bit. Userspace flips this via
+ * RewriteConstants only when dnsflowd (AF_PACKET) should see DNS on the same
+ * interface (XDP_DROP packets never reach the kernel stack / AF_PACKET).
+ */
+const volatile __u32 dns_passthrough = 0;
+
 struct flow_key {
 	__u8  src_addr[16];
 	__u8  dst_addr[16];
@@ -150,6 +161,20 @@ static __always_inline int is_ipv4_fragment(const struct iphdr *ip)
 	__be16 frag_off = ip->frag_off;
 
 	if ((frag_off & bpf_htons(0x2000)) || (frag_off & bpf_htons(0x1FFF)))
+		return 1;
+	return 0;
+}
+
+/* Force XDP_PASS for UDP/53 when dns_passthrough is enabled. key->src_port and
+ * key->dst_port are in network byte order (same as bpf_htons(53)).
+ */
+static __always_inline int dns_must_pass(const struct flow_key *key)
+{
+	if (!dns_passthrough)
+		return 0;
+	if (key->proto != IPPROTO_UDP)
+		return 0;
+	if (key->src_port == bpf_htons(53) || key->dst_port == bpf_htons(53))
 		return 1;
 	return 0;
 }
@@ -404,6 +429,8 @@ int xdp_flow_prog(struct xdp_md *ctx)
 				bump_stat(2);
 			}
 		}
+		if (dns_must_pass(&key))
+			return XDP_PASS;
 		return xdp_final_action;
 	}
 
@@ -494,6 +521,8 @@ int xdp_flow_prog(struct xdp_md *ctx)
 				bump_stat(2);
 			}
 		}
+		if (dns_must_pass(&key))
+			return XDP_PASS;
 		return xdp_final_action;
 	}
 
