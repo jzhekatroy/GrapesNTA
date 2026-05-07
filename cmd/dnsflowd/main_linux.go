@@ -104,6 +104,9 @@ func main() {
 			if !ok || len(payload) == 0 {
 				continue
 			}
+			if sport != 53 && dport != 53 {
+				continue
+			}
 
 			row, err := parseDNS(payload, srcIP, dstIP, sport, dport, sampler, time.Now())
 			if err != nil {
