@@ -30,6 +30,10 @@ if [[ ! -x "$BIN" ]]; then
   echo "ERROR: dnsflowd binary not executable: $BIN" >&2
   exit 1
 fi
+
+if ! ip link set "$IFACE" promisc on; then
+  echo "WARN: failed to set $IFACE promisc on (capture may miss frames)" >&2
+fi
 if [[ -z "${DNS_CH_DSN:-}" || -z "${DNS_CH_TABLE:-}" ]]; then
   echo "ERROR: DNS_CH_DSN and DNS_CH_TABLE must be set in $ENV_FILE" >&2
   exit 1
