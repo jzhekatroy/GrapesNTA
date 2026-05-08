@@ -4,7 +4,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"flag"
 	"log/slog"
 	"os"
@@ -14,11 +13,11 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/google/gopacket/afpacket"
+	"github.com/google/gopacket/pcap"
 )
 
 func main() {
-	iface := flag.String("iface", "eth0", "mirror interface for packet capture (TPACKET_V3)")
+	iface := flag.String("iface", "eth0", "mirror interface for packet capture (libpcap)")
 	chDSN := flag.String("ch-dsn", "", `ClickHouse DSN, e.g. clickhouse://user:pass@host:9000/default`)
 	chTable := flag.String("ch-table", "default.dns_log", "MergeTree table for DNS INSERT")
 	chBatchSize := flag.Int("ch-batch-size", 500, "ClickHouse INSERT batch size")
@@ -41,7 +40,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	handle, err := openRingCapture(*iface)
+	handle, err := openPacketCapture(*iface)
 	if err != nil {
 		log.Error("open capture", "iface", *iface, "err", err)
 		os.Exit(1)
@@ -73,7 +72,7 @@ func main() {
 				return
 			case <-tick.C:
 				sink.LogMetrics()
-				_, v3, stErr := handle.SocketStats()
+				stats, stErr := handle.Stats()
 				ll := log.Info
 				if stErr != nil {
 					ll = log.Warn
@@ -82,10 +81,10 @@ func main() {
 					"frames_read", framesRead.Load(),
 					"dns_rows", dnsRows.Load(),
 					"parse_errs", parseErrs.Load(),
-					"kernel_tp_packets", v3.Packets(),
-					"kernel_tp_drops", v3.Drops(),
-					"kernel_tp_freeze_q", v3.QueueFreezes(),
-					"socket_stats_err", stErr,
+					"pcap_received", stats.packetsReceived,
+					"pcap_dropped", stats.packetsDropped,
+					"pcap_if_dropped", stats.packetsIfDropped,
+					"pcap_stats_err", stErr,
 				)
 			}
 		}
@@ -96,9 +95,9 @@ func main() {
 	go func() {
 		defer wg.Done()
 		for {
-			data, ci, err := handle.ZeroCopyReadPacketData()
+			data, ci, err := handle.ReadPacketData()
 			if err != nil {
-				if errors.Is(err, afpacket.ErrTimeout) {
+				if err == pcap.NextErrorTimeoutExpired {
 					if ctx.Err() != nil {
 						return
 					}
@@ -126,9 +125,7 @@ func main() {
 				continue
 			}
 
-			// Zero-copy slice is invalid after the next Read; copy DNS payload for the parser.
-			payloadCopy := append([]byte(nil), payload...)
-			row, err := parseDNS(payloadCopy, srcIP, dstIP, sport, dport, sampler, ts.UTC())
+			row, err := parseDNS(payload, srcIP, dstIP, sport, dport, sampler, ts.UTC())
 			if err != nil {
 				parseErrs.Add(1)
 				continue
@@ -138,14 +135,13 @@ func main() {
 		}
 	}()
 
-	log.Info("dnsflowd started", "iface", *iface, "ch_table", *chTable, "capture", "TPACKET_V3")
+	log.Info("dnsflowd started", "iface", *iface, "ch_table", *chTable, "capture", "libpcap")
 
 	<-ctx.Done()
 	log.Info("dnsflowd shutting down")
 	tick.Stop()
 	metricsWG.Wait()
-	// Wait for capture to leave ZeroCopyReadPacketData() before munmap'ing the ring.
-	// Capture exits within OptPollTimeout (~250ms) via ErrTimeout + ctx.Err() check.
+	// Capture exits within the pcap timeout (~250ms) via timeout + ctx.Err() check.
 	wg.Wait()
 	handle.Close()
 }
