@@ -95,6 +95,9 @@ func main() {
 	go func() {
 		defer wg.Done()
 		for {
+			if ctx.Err() != nil {
+				return
+			}
 			data, ci, err := handle.ReadPacketData()
 			if err != nil {
 				if err == pcap.NextErrorTimeoutExpired {
