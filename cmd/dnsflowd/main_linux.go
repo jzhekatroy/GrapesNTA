@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"encoding/hex"
 	"flag"
 	"log/slog"
 	"os"
@@ -171,6 +172,19 @@ func main() {
 
 			row, err := parseDNS(payload, srcIP, dstIP, sport, dport, sampler, ts.UTC())
 			if err != nil {
+				if parseErrs.Load() < 5 {
+					dump := payload
+					if len(dump) > 256 {
+						dump = dump[:256]
+					}
+					log.Warn("dnsflowd parse error",
+						"err", err,
+						"payload_len", len(payload),
+						"sport", sport,
+						"dport", dport,
+						"hex", hex.EncodeToString(dump),
+					)
+				}
 				parseErrs.Add(1)
 				continue
 			}

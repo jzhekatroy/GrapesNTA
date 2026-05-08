@@ -65,14 +65,26 @@ func u8(b bool) uint8 {
 	return 0
 }
 
-func parseDNS(payload []byte, srcIP, dstIP [16]byte, sport, dport uint16, sampler [16]byte, now time.Time) (DNSRow, error) {
+// maxAnswerRRs caps DNS answer-section parsing to keep parseDNS responsive on
+// malformed or oversized payloads (a single UDP DNS response with hundreds of
+// RRs is already pathological).
+const maxAnswerRRs = 256
+
+func parseDNS(payload []byte, srcIP, dstIP [16]byte, sport, dport uint16, sampler [16]byte, now time.Time) (row DNSRow, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			row = DNSRow{}
+			err = fmt.Errorf("panic in parseDNS: %v (payload_len=%d)", r, len(payload))
+		}
+	}()
+
 	var p dnsmessage.Parser
 	h, err := p.Start(payload)
 	if err != nil {
 		return DNSRow{}, err
 	}
 
-	row := DNSRow{
+	row = DNSRow{
 		Ts:                 now.UTC(),
 		SamplerAddress:     sampler,
 		Transport:          "udp",
@@ -117,44 +129,47 @@ func parseDNS(payload []byte, srcIP, dstIP [16]byte, sport, dport uint16, sample
 	}
 
 	answerRRs := 0
-	for {
-		ah, err := p.AnswerHeader()
-		if err == dnsmessage.ErrSectionDone {
-			break
+answers:
+	for i := 0; i < maxAnswerRRs; i++ {
+		ah, ahErr := p.AnswerHeader()
+		if ahErr == dnsmessage.ErrSectionDone {
+			break answers
 		}
-		if err != nil {
-			break
+		if ahErr != nil {
+			break answers
 		}
 		answerRRs++
 
 		switch ah.Type {
 		case dnsmessage.TypeA:
-			ar, err := p.AResource()
-			if err != nil {
-				break
+			ar, rerr := p.AResource()
+			if rerr != nil {
+				break answers
 			}
 			var v [16]byte
 			copy(v[:4], ar.A[:])
 			row.AnswersA = append(row.AnswersA, v)
 			row.AnswerTTLs = append(row.AnswerTTLs, ah.TTL)
 		case dnsmessage.TypeAAAA:
-			ar, err := p.AAAAResource()
-			if err != nil {
-				break
+			ar, rerr := p.AAAAResource()
+			if rerr != nil {
+				break answers
 			}
 			var v [16]byte
 			copy(v[:], ar.AAAA[:])
 			row.AnswersAAAA = append(row.AnswersAAAA, v)
 			row.AnswerTTLs = append(row.AnswerTTLs, ah.TTL)
 		case dnsmessage.TypeCNAME:
-			cr, err := p.CNAMEResource()
-			if err != nil {
-				break
+			cr, rerr := p.CNAMEResource()
+			if rerr != nil {
+				break answers
 			}
 			row.AnswersCNAME = append(row.AnswersCNAME, strings.ToLower(cr.CNAME.String()))
 			row.AnswerTTLs = append(row.AnswerTTLs, ah.TTL)
 		default:
-			_ = p.SkipAnswer()
+			if serr := p.SkipAnswer(); serr != nil {
+				break answers
+			}
 		}
 	}
 
