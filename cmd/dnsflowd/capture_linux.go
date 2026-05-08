@@ -46,6 +46,9 @@ func openPacketCapture(ifname string) (*packetCapture, error) {
 	if err := inactive.SetBufferSize(bufferSize); err != nil {
 		return nil, fmt.Errorf("pcap set buffer size: %w", err)
 	}
+	if err := inactive.SetImmediateMode(true); err != nil {
+		return nil, fmt.Errorf("pcap set immediate mode: %w", err)
+	}
 	h, err := inactive.Activate()
 	if err != nil {
 		return nil, fmt.Errorf("pcap activate %q: %w", ifname, err)
