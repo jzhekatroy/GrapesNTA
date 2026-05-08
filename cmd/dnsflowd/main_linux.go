@@ -57,7 +57,8 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
-	var framesRead, dnsRows, parseErrs atomic.Uint64
+	var framesRead, emptyFrames, nonIPv4UDP, nonDNS, dnsRows, parseErrs, readTimeouts atomic.Uint64
+	var lastFrameLen, lastCaptureLen, lastWireLen, lastPayloadLen, lastPacketUnix atomic.Uint64
 
 	tick := time.NewTicker(*interval)
 	defer tick.Stop()
@@ -66,6 +67,7 @@ func main() {
 	metricsWG.Add(1)
 	go func() {
 		defer metricsWG.Done()
+		var prevFramesRead, prevDNSRows, prevPcapReceived, prevPcapDropped, prevPcapIfDropped uint64
 		for {
 			select {
 			case <-ctx.Done():
@@ -73,19 +75,54 @@ func main() {
 			case <-tick.C:
 				sink.LogMetrics()
 				stats, stErr := handle.Stats()
+				pcapReceived := uint64(stats.packetsReceived)
+				pcapDropped := uint64(stats.packetsDropped)
+				pcapIfDropped := uint64(stats.packetsIfDropped)
+				curFramesRead := framesRead.Load()
+				curDNSRows := dnsRows.Load()
 				ll := log.Info
 				if stErr != nil {
 					ll = log.Warn
 				}
 				ll("dnsflowd capture", "iface", *iface,
-					"frames_read", framesRead.Load(),
-					"dns_rows", dnsRows.Load(),
+					"frames_read", curFramesRead,
+					"frames_delta", curFramesRead-prevFramesRead,
+					"dns_rows", curDNSRows,
+					"dns_rows_delta", curDNSRows-prevDNSRows,
+					"empty_frames", emptyFrames.Load(),
+					"non_ipv4_udp", nonIPv4UDP.Load(),
+					"non_dns", nonDNS.Load(),
 					"parse_errs", parseErrs.Load(),
-					"pcap_received", stats.packetsReceived,
-					"pcap_dropped", stats.packetsDropped,
-					"pcap_if_dropped", stats.packetsIfDropped,
+					"read_timeouts", readTimeouts.Load(),
+					"last_frame_len", lastFrameLen.Load(),
+					"last_capture_len", lastCaptureLen.Load(),
+					"last_wire_len", lastWireLen.Load(),
+					"last_payload_len", lastPayloadLen.Load(),
+					"last_packet_unix", lastPacketUnix.Load(),
+					"pcap_received", pcapReceived,
+					"pcap_received_delta", pcapReceived-prevPcapReceived,
+					"pcap_dropped", pcapDropped,
+					"pcap_dropped_delta", pcapDropped-prevPcapDropped,
+					"pcap_if_dropped", pcapIfDropped,
+					"pcap_if_dropped_delta", pcapIfDropped-prevPcapIfDropped,
 					"pcap_stats_err", stErr,
 				)
+				if stErr == nil && pcapReceived > prevPcapReceived && curFramesRead == prevFramesRead {
+					log.Warn("dnsflowd capture stall",
+						"iface", *iface,
+						"pcap_received_delta", pcapReceived-prevPcapReceived,
+						"pcap_dropped_delta", pcapDropped-prevPcapDropped,
+						"pcap_if_dropped_delta", pcapIfDropped-prevPcapIfDropped,
+						"frames_read", curFramesRead,
+						"read_timeouts", readTimeouts.Load(),
+						"hint", "libpcap sees packets but ReadPacketData is not delivering frames",
+					)
+				}
+				prevFramesRead = curFramesRead
+				prevDNSRows = curDNSRows
+				prevPcapReceived = pcapReceived
+				prevPcapDropped = pcapDropped
+				prevPcapIfDropped = pcapIfDropped
 			}
 		}
 	}()
@@ -101,6 +138,7 @@ func main() {
 			data, ci, err := handle.ReadPacketData()
 			if err != nil {
 				if err == pcap.NextErrorTimeoutExpired {
+					readTimeouts.Add(1)
 					if ctx.Err() != nil {
 						return
 					}
@@ -114,19 +152,30 @@ func main() {
 				return
 			}
 			framesRead.Add(1)
+			if len(data) == 0 {
+				emptyFrames.Add(1)
+				continue
+			}
+			lastFrameLen.Store(uint64(len(data)))
+			lastCaptureLen.Store(uint64(ci.CaptureLength))
+			lastWireLen.Store(uint64(ci.Length))
 
 			ts := ci.Timestamp
 			if ts.IsZero() {
 				ts = time.Now()
 			}
+			lastPacketUnix.Store(uint64(ts.Unix()))
 
 			srcIP, dstIP, sport, dport, payload, ok := parseIPv4UDPPayload(data)
 			if !ok || len(payload) == 0 {
+				nonIPv4UDP.Add(1)
 				continue
 			}
 			if sport != 53 && dport != 53 {
+				nonDNS.Add(1)
 				continue
 			}
+			lastPayloadLen.Store(uint64(len(payload)))
 
 			row, err := parseDNS(payload, srcIP, dstIP, sport, dport, sampler, ts.UTC())
 			if err != nil {
@@ -134,11 +183,29 @@ func main() {
 				continue
 			}
 			dnsRows.Add(1)
+			if dnsRows.Load() <= 10 {
+				log.Info("dnsflowd dns sample",
+					"ts", row.Ts,
+					"query_name", row.QueryName,
+					"qtype", row.QType,
+					"is_response", row.IsResponse,
+					"client_port", row.ClientPort,
+					"server_port", row.ServerPort,
+					"answer_count", row.AnswerCount,
+					"payload_len", len(payload),
+				)
+			}
 			sink.EnqueueRows([]DNSRow{row})
 		}
 	}()
 
-	log.Info("dnsflowd started", "iface", *iface, "ch_table", *chTable, "capture", "libpcap")
+	log.Info("dnsflowd started",
+		"iface", *iface,
+		"ch_table", *chTable,
+		"capture", "libpcap",
+		"datalink", handle.LinkType().String(),
+		"datalink_name", handle.LinkTypeName(),
+	)
 
 	<-ctx.Done()
 	log.Info("dnsflowd shutting down")

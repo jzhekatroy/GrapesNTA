@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/google/gopacket"
+	"github.com/google/gopacket/layers"
 	"github.com/google/gopacket/pcap"
 )
 
@@ -58,6 +59,14 @@ func openPacketCapture(ifname string) (*packetCapture, error) {
 
 func (c *packetCapture) ReadPacketData() ([]byte, gopacket.CaptureInfo, error) {
 	return c.handle.ReadPacketData()
+}
+
+func (c *packetCapture) LinkType() layers.LinkType {
+	return c.handle.LinkType()
+}
+
+func (c *packetCapture) LinkTypeName() string {
+	return pcap.DatalinkValToName(int(c.handle.LinkType()))
 }
 
 func (c *packetCapture) Stats() (packetCaptureStats, error) {
