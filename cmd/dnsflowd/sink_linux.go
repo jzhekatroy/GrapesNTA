@@ -31,6 +31,10 @@ type dnsClickhouseSink struct {
 	insertErrs     atomic.Uint64
 	queueDrops     atomic.Uint64
 
+	dropLogMu     sync.Mutex
+	lastDropLog   time.Time
+	dropsSinceLog atomic.Uint64
+
 	ctx    context.Context
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
@@ -302,8 +306,30 @@ func (s *dnsClickhouseSink) EnqueueRows(rows []DNSRow) {
 	case s.ch <- cp:
 	default:
 		s.queueDrops.Add(uint64(len(cp)))
-		s.log.Warn("dnsflowd clickhouse queue full, dropping batch", "rows", len(cp))
+		s.dropsSinceLog.Add(uint64(len(cp)))
+		s.maybeLogDrops()
 	}
+}
+
+func (s *dnsClickhouseSink) maybeLogDrops() {
+	if !s.dropLogMu.TryLock() {
+		return
+	}
+	defer s.dropLogMu.Unlock()
+	now := time.Now()
+	if now.Sub(s.lastDropLog) < time.Second {
+		return
+	}
+	s.lastDropLog = now
+	dropped := s.dropsSinceLog.Swap(0)
+	if dropped == 0 {
+		return
+	}
+	s.log.Warn("dnsflowd clickhouse queue full",
+		"dropped_rows_last_second", dropped,
+		"queue_drops_total", s.queueDrops.Load(),
+		"records_written_total", s.recordsWritten.Load(),
+	)
 }
 
 func (s *dnsClickhouseSink) Close() {

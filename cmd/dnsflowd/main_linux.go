@@ -23,7 +23,9 @@ func main() {
 	chTable := flag.String("ch-table", "default.dns_log", "MergeTree table for DNS INSERT")
 	chBatchSize := flag.Int("ch-batch-size", 500, "ClickHouse INSERT batch size")
 	chFlush := flag.Duration("ch-flush-interval", time.Second, "ClickHouse flush interval")
-	chQueue := flag.Int("ch-queue-size", 64, "bounded queue depth (drops on overflow)")
+	chQueue := flag.Int("ch-queue-size", 4096, "bounded queue depth (drops on overflow)")
+	captureBatch := flag.Int("capture-batch-size", 100, "capture-side row batch before send")
+	captureFlush := flag.Duration("capture-flush-interval", 50*time.Millisecond, "capture-side max delay before send")
 	chSampler := flag.String("ch-sampler-addr", "127.0.0.1", "sampler_address column (IPv4 / IPv6)")
 	interval := flag.Duration("interval", 5*time.Second, "metrics log interval")
 	flag.Parse()
@@ -120,9 +122,27 @@ func main() {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
+		batchCap := *captureBatch
+		if batchCap < 1 {
+			batchCap = 1
+		}
+		pending := make([]DNSRow, 0, batchCap)
+		var pendingSince time.Time
+		flushPending := func() {
+			if len(pending) == 0 {
+				return
+			}
+			sink.EnqueueRows(pending)
+			pending = pending[:0]
+			pendingSince = time.Time{}
+		}
+		defer flushPending()
 		for {
 			if ctx.Err() != nil {
 				return
+			}
+			if len(pending) > 0 && time.Since(pendingSince) >= *captureFlush {
+				flushPending()
 			}
 			readAttempts.Add(1)
 			lastReadAttemptUnix.Store(uint64(time.Now().Unix()))
@@ -201,7 +221,13 @@ func main() {
 					"payload_len", len(payload),
 				)
 			}
-			sink.EnqueueRows([]DNSRow{row})
+			if len(pending) == 0 {
+				pendingSince = time.Now()
+			}
+			pending = append(pending, row)
+			if len(pending) >= batchCap {
+				flushPending()
+			}
 		}
 	}()
 
