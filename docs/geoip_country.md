@@ -257,11 +257,75 @@ SELECT dictGetString('default.geo_country_dict', 'cc', tuple(toIPv4('8.8.8.8')))
 SELECT dictGetString('default.geo_country_dict', 'cc', tuple(toIPv4('77.88.8.8')));
 ```
 
+## Top Countries By Traffic
+
+Top destination countries for IPv4 traffic during the last hour:
+
+```sql
+SELECT
+    if(country = '', '??', country) AS country,
+    sum(bytes) AS bytes_total,
+    formatReadableSize(bytes_total) AS traffic,
+    count() AS flows
+FROM
+(
+    SELECT
+        dictGetString(
+            'default.geo_country_dict',
+            'cc',
+            tuple(toIPv4(reinterpretAsUInt32(reverse(substring(dst_addr, 1, 4)))))
+        ) AS country,
+        bytes
+    FROM default.flows_raw
+    WHERE time_received_ns >= now() - INTERVAL 1 HOUR
+      AND etype = 0x0800
+)
+GROUP BY country
+ORDER BY bytes_total DESC
+LIMIT 20;
+```
+
+Top source countries for IPv4 traffic during the last hour:
+
+```sql
+SELECT
+    if(country = '', '??', country) AS country,
+    sum(bytes) AS bytes_total,
+    formatReadableSize(bytes_total) AS traffic,
+    count() AS flows
+FROM
+(
+    SELECT
+        dictGetString(
+            'default.geo_country_dict',
+            'cc',
+            tuple(toIPv4(reinterpretAsUInt32(reverse(substring(src_addr, 1, 4)))))
+        ) AS country,
+        bytes
+    FROM default.flows_raw
+    WHERE time_received_ns >= now() - INTERVAL 1 HOUR
+      AND etype = 0x0800
+)
+GROUP BY country
+ORDER BY bytes_total DESC
+LIMIT 20;
+```
+
+`??` means the prefix was not found in `geo_country_dict`.
+
 Reload dictionary manually after a manual table change:
 
 ```sql
 SYSTEM RELOAD DICTIONARY default.geo_country_dict;
 ```
+
+## Troubleshooting
+
+- `Authentication failed` when running `clickhouse-client --multiquery < deploy/clickhouse/geo_country.sql` usually means the command used the wrong endpoint or credentials. Source `/etc/geoloaderd/geoloaderd.env` and pass `--host`, `--port`, `--user`, `--password`, and `--database` explicitly.
+- Use the plain ClickHouse password in `GEOLOADERD_CH_PASSWORD` and `GEOLOADERD_DICT_SOURCE_PASSWORD`. Do not URL-encode characters; for example use `@`, not `%40`.
+- If `dictGetString(...)` returns `ALL_CONNECTION_TRIES_FAILED`, the dictionary source endpoint is not reachable from the ClickHouse server. Set `GEOLOADERD_DICT_SOURCE_HOST` / `GEOLOADERD_DICT_SOURCE_PORT` to the ClickHouse-internal endpoint, commonly `127.0.0.1:9000`.
+- If `dictGetString(...)` returns `AUTHENTICATION_FAILED`, the dictionary source credentials are wrong for the internal endpoint. They may differ from the remote loader credentials.
+- If the loader prints `validation ok` and then fails on `SYSTEM RELOAD DICTIONARY`, table loading succeeded but dictionary creation/reload needs fixing. Re-run with `--skip-download` after correcting the dictionary source settings.
 
 ## Example `dictGetString` usage
 
