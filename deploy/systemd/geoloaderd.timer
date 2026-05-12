@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily RIR country prefix refresh (geoloaderd)
+
+[Timer]
+Unit=geoloaderd.service
+OnCalendar=daily
+RandomizedDelaySec=1h
+Persistent=true
+
+[Install]
+WantedBy=timers.target

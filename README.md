@@ -15,6 +15,8 @@ make clean && make
 # BPF object: ./bpf/xdp_flow.o
 ```
 
+**RIR country → ClickHouse:** optional Python script [scripts/load_rir_geo.py](scripts/load_rir_geo.py) loads delegated statistics into `geo_prefix_country` and `geo_country_dict` via `clickhouse-client`. See [docs/geoip_country.md](docs/geoip_country.md).
+
 Run (root):
 
 ```bash

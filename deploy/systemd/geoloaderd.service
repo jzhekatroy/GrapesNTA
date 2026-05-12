@@ -1,0 +1,14 @@
+[Unit]
+Description=GrapesNTA geoloaderd — Python RIR loader to ClickHouse geo_country_dict
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/geoloaderd/geoloaderd.env
+ExecStart=/usr/bin/python3 /opt/GrapesNTA/scripts/load_rir_geo.py
+
+TimeoutStartSec=3600
+
+[Install]
+WantedBy=multi-user.target
