@@ -1,5 +1,7 @@
 -- Country-only IP prefixes from RIR delegated-extended statistics.
--- Apply once, then run scripts/load_rir_geo.py (see docs/geoip_country.md) for daily refresh.
+-- Apply once for tables, then run scripts/load_rir_geo.py for daily refresh.
+-- The loader creates/updates geo_country_dict because its SOURCE credentials
+-- can differ from the client credentials used to load data.
 
 CREATE TABLE IF NOT EXISTS default.geo_prefix_country_staging
 (
@@ -31,17 +33,7 @@ ENGINE = MergeTree
 ORDER BY (family, prefix)
 SETTINGS index_granularity = 8192;
 
--- Longest-prefix match lookup. Key column must be CIDR strings (e.g. 192.0.2.0/24, 2001:db8::/32).
--- After loading data into geo_prefix_country, run: SYSTEM RELOAD DICTIONARY default.geo_country_dict;
-CREATE DICTIONARY IF NOT EXISTS default.geo_country_dict
-(
-    prefix      String,
-    cc          String,
-    rir         String,
-    source      String,
-    snapshot_ts DateTime
-)
-PRIMARY KEY prefix
-SOURCE(CLICKHOUSE(TABLE 'geo_prefix_country'))
-LAYOUT(IP_TRIE)
-LIFETIME(0);
+-- geo_country_dict is created by scripts/load_rir_geo.py using
+-- GEOLOADERD_DICT_SOURCE_* so dictionary reads can use the ClickHouse server's
+-- internal address (for example 127.0.0.1:9000) while the loader uses an
+-- external address (for example 95.215.1.30:6124).

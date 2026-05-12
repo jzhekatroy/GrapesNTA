@@ -197,6 +197,7 @@ def ch_run_query(
     query: str,
     *,
     stdin: Optional[BinaryIO] = None,
+    display_query: Optional[str] = None,
 ) -> None:
     proc = subprocess.run(
         list(base) + ["--query", query],
@@ -206,9 +207,10 @@ def ch_run_query(
     if proc.returncode != 0:
         err = proc.stderr.decode("utf-8", errors="replace").strip()
         # Never echo full argv (may contain password on some setups).
+        shown_query = display_query if display_query is not None else query
         msg = (
             f"clickhouse-client failed (exit {proc.returncode})\n"
-            f"query: {query[:500]}{'...' if len(query) > 500 else ''}\n"
+            f"query: {shown_query[:500]}{'...' if len(shown_query) > 500 else ''}\n"
             f"stderr: {err}"
         )
         raise RuntimeError(msg)
@@ -235,6 +237,43 @@ def ch_swap_tables(base: Sequence[str], table: str, staging: str) -> None:
         f"{tmp} TO {staging}"
     )
     ch_run_query(base, q2)
+
+
+def sql_string(value: str) -> str:
+    return "'" + value.replace("\\", "\\\\").replace("'", "\\'") + "'"
+
+
+def build_dictionary_query(args: argparse.Namespace, password: str) -> str:
+    return f"""
+CREATE OR REPLACE DICTIONARY {args.dictionary}
+(
+    prefix String,
+    cc String,
+    rir String,
+    source String,
+    snapshot_ts DateTime
+)
+PRIMARY KEY prefix
+SOURCE(CLICKHOUSE(
+    HOST {sql_string(args.dictionary_source_host)}
+    PORT {args.dictionary_source_port}
+    USER {sql_string(args.dictionary_source_user)}
+    PASSWORD {sql_string(password)}
+    DB {sql_string(args.dictionary_source_database)}
+    TABLE {sql_string(args.dictionary_source_table)}
+    CONNECT_TIMEOUT {args.dictionary_source_connect_timeout}
+    SEND_RECEIVE_TIMEOUT {args.dictionary_source_receive_timeout}
+))
+LAYOUT(IP_TRIE)
+LIFETIME(0)
+"""
+
+
+def ch_create_or_replace_dictionary(base: Sequence[str], args: argparse.Namespace) -> None:
+    password = args.dictionary_source_password or ""
+    query = build_dictionary_query(args, password)
+    redacted_query = build_dictionary_query(args, "***")
+    ch_run_query(base, query, display_query=redacted_query)
 
 
 @dataclass
@@ -317,6 +356,50 @@ def main() -> int:
         default=env("GEOLOADERD_CH_DICT", "default.geo_country_dict"),
     )
     p.add_argument(
+        "--dictionary-source-host",
+        default=env("GEOLOADERD_DICT_SOURCE_HOST", env("GEOLOADERD_CH_HOST", "localhost")),
+        help="Host used by ClickHouse itself to read geo_prefix_country for the dictionary",
+    )
+    _dict_port_s = env("GEOLOADERD_DICT_SOURCE_PORT", env("GEOLOADERD_CH_PORT"))
+    _dict_default_port = int(_dict_port_s) if _dict_port_s and _dict_port_s.isdigit() else _default_port
+    p.add_argument(
+        "--dictionary-source-port",
+        type=int,
+        default=_dict_default_port,
+        help="Port used by ClickHouse itself to read geo_prefix_country for the dictionary",
+    )
+    p.add_argument(
+        "--dictionary-source-user",
+        default=env("GEOLOADERD_DICT_SOURCE_USER", env("GEOLOADERD_CH_USER", "default")),
+    )
+    p.add_argument(
+        "--dictionary-source-password",
+        default=env("GEOLOADERD_DICT_SOURCE_PASSWORD", env("GEOLOADERD_CH_PASSWORD")),
+    )
+    p.add_argument(
+        "--dictionary-source-database",
+        default=env("GEOLOADERD_DICT_SOURCE_DATABASE", env("GEOLOADERD_CH_DATABASE", "default")),
+    )
+    p.add_argument(
+        "--dictionary-source-table",
+        default=env("GEOLOADERD_DICT_SOURCE_TABLE", "geo_prefix_country"),
+    )
+    p.add_argument(
+        "--dictionary-source-connect-timeout",
+        type=int,
+        default=int(env("GEOLOADERD_DICT_SOURCE_CONNECT_TIMEOUT", "10") or 10),
+    )
+    p.add_argument(
+        "--dictionary-source-receive-timeout",
+        type=int,
+        default=int(env("GEOLOADERD_DICT_SOURCE_RECEIVE_TIMEOUT", "30") or 30),
+    )
+    p.add_argument(
+        "--skip-dictionary-create",
+        action="store_true",
+        help="Only reload an already-created dictionary",
+    )
+    p.add_argument(
         "--cache-dir",
         default=env("GEOLOADERD_CACHE_DIR", "/var/lib/geoloaderd/cache"),
     )
@@ -367,6 +450,9 @@ def main() -> int:
             ch_run_query(base, insert_q, stdin=tsv_bin)
 
         ch_swap_tables(base, args.table, stg)
+
+        if not args.skip_dictionary_create:
+            ch_create_or_replace_dictionary(base, args)
 
         ch_run_query(base, f"SYSTEM RELOAD DICTIONARY {args.dictionary}")
 

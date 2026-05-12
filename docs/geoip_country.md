@@ -8,8 +8,8 @@ This adds **country-only** IP lookup using public RIR `delegated-*-extended-late
 
 | Path | Purpose |
 |------|---------|
-| [deploy/clickhouse/geo_country.sql](deploy/clickhouse/geo_country.sql) | Tables + `default.geo_country_dict` DDL |
-| [scripts/load_rir_geo.py](scripts/load_rir_geo.py) | Downloads RIR files, parses prefixes, loads staging, swaps tables, reloads dictionary (Python stdlib + `clickhouse-client`) |
+| [deploy/clickhouse/geo_country.sql](deploy/clickhouse/geo_country.sql) | `geo_prefix_country` + staging table DDL |
+| [scripts/load_rir_geo.py](scripts/load_rir_geo.py) | Downloads RIR files, parses prefixes, loads staging, swaps tables, creates/updates `geo_country_dict`, reloads dictionary |
 | [deploy/systemd/geoloaderd.*](deploy/systemd/) | `systemd` oneshot + daily timer |
 
 ## One-time ClickHouse setup
@@ -19,6 +19,10 @@ On the ClickHouse server (or via client):
 ```bash
 clickhouse-client --multiquery < deploy/clickhouse/geo_country.sql
 ```
+
+This creates the tables only. The loader creates/updates `default.geo_country_dict`
+because dictionary source credentials often differ from the credentials used by
+the remote loader.
 
 Confirm:
 
@@ -56,6 +60,12 @@ Environment variables (optional; same names as used by systemd):
 | `GEOLOADERD_CH_TABLE` | Live prefix table (default `default.geo_prefix_country`) |
 | `GEOLOADERD_CH_STAGING` | Staging table |
 | `GEOLOADERD_CH_DICT` | Dictionary to reload |
+| `GEOLOADERD_DICT_SOURCE_HOST` | Host used by the ClickHouse server itself to read `geo_prefix_country` |
+| `GEOLOADERD_DICT_SOURCE_PORT` | Port used by the ClickHouse server itself |
+| `GEOLOADERD_DICT_SOURCE_USER` | User used by dictionary source reads |
+| `GEOLOADERD_DICT_SOURCE_PASSWORD` | Password used by dictionary source reads |
+| `GEOLOADERD_DICT_SOURCE_DATABASE` | Source database |
+| `GEOLOADERD_DICT_SOURCE_TABLE` | Source table name without database (`geo_prefix_country`) |
 
 CLI flags (see `python3 scripts/load_rir_geo.py --help`):
 
@@ -70,6 +80,13 @@ CLI flags (see `python3 scripts/load_rir_geo.py --help`):
 | `--table` | `default.geo_prefix_country` | Live table |
 | `--staging-table` | `default.geo_prefix_country_staging` | Staging |
 | `--dictionary` | `default.geo_country_dict` | Dictionary |
+| `--dictionary-source-host` | `GEOLOADERD_DICT_SOURCE_HOST` or `--host` | Dictionary source host, from ClickHouse server perspective |
+| `--dictionary-source-port` | `GEOLOADERD_DICT_SOURCE_PORT` or `--port` | Dictionary source port |
+| `--dictionary-source-user` | `GEOLOADERD_DICT_SOURCE_USER` or `--user` | Dictionary source user |
+| `--dictionary-source-password` | env / empty | Dictionary source password |
+| `--dictionary-source-database` | `default` | Dictionary source database |
+| `--dictionary-source-table` | `geo_prefix_country` | Dictionary source table |
+| `--skip-dictionary-create` | off | Reload an already-created dictionary without recreating it |
 | `--cache-dir` | `/var/lib/geoloaderd/cache` | Cache directory |
 | `--skip-download` | off | Use existing cache only |
 | `--keep-tsv` | off | Keep temporary TSV on disk |
@@ -80,6 +97,38 @@ CLI flags (see `python3 scripts/load_rir_geo.py --help`):
 The loader **refuses** to proceed if validation fails (e.g. no rows, too few countries, or no `RU` prefixes when using the full default RIR sources).
 
 Table swap uses `EXCHANGE TABLES` when supported; otherwise it falls back to a three-step `RENAME TABLE` sequence. Errors from `clickhouse-client` print the failing query text **without** echoing the password.
+
+## How the dictionary connection works
+
+There are two separate ClickHouse connections:
+
+```text
+loader host -> GEOLOADERD_CH_HOST:GEOLOADERD_CH_PORT -> INSERT / EXCHANGE / CREATE DICTIONARY
+ClickHouse server -> GEOLOADERD_DICT_SOURCE_HOST:GEOLOADERD_DICT_SOURCE_PORT -> read geo_prefix_country for IP_TRIE
+```
+
+If the loader connects through an external address or proxy, for example
+`95.215.1.30:6124`, do **not** blindly reuse that address for the dictionary
+source. During `dictGetString(...)`, the ClickHouse server opens the dictionary
+source connection itself. In many deployments the correct source is the
+ClickHouse server's internal endpoint, for example:
+
+```bash
+GEOLOADERD_CH_HOST=95.215.1.30
+GEOLOADERD_CH_PORT=6124
+GEOLOADERD_CH_USER=develop
+GEOLOADERD_CH_PASSWORD=plain-password-not-url-encoded
+
+GEOLOADERD_DICT_SOURCE_HOST=127.0.0.1
+GEOLOADERD_DICT_SOURCE_PORT=9000
+GEOLOADERD_DICT_SOURCE_USER=develop
+GEOLOADERD_DICT_SOURCE_PASSWORD=plain-password-not-url-encoded
+```
+
+If `dictGetString(...)` returns `ALL_CONNECTION_TRIES_FAILED`, the dictionary
+source host/port is not reachable from the ClickHouse server. If it returns
+`AUTHENTICATION_FAILED`, the dictionary source user/password is wrong for that
+internal endpoint.
 
 ## systemd deployment
 
@@ -107,6 +156,91 @@ The service runs:
 `ExecStart=/usr/bin/python3 /opt/GrapesNTA/scripts/load_rir_geo.py`
 
 with environment from `/etc/geoloaderd/geoloaderd.env`.
+
+## Full deployment runbook
+
+1. Fetch the branch:
+
+   ```bash
+   cd /root/GrapesNTA
+   git fetch origin
+   git checkout feature/dnsflowd-mvp
+   git pull --ff-only
+   ```
+
+2. Create `/etc/geoloaderd/geoloaderd.env`:
+
+   ```bash
+   sudo install -d /etc/geoloaderd
+   sudo install -m 0600 deploy/systemd/geoloaderd.env.example /etc/geoloaderd/geoloaderd.env
+   sudo editor /etc/geoloaderd/geoloaderd.env
+   ```
+
+   Use the externally reachable ClickHouse endpoint for `GEOLOADERD_CH_*`.
+   Use the endpoint reachable from the ClickHouse server itself for
+   `GEOLOADERD_DICT_SOURCE_*`.
+
+3. Create tables:
+
+   ```bash
+   set -a
+   source /etc/geoloaderd/geoloaderd.env
+   set +a
+
+   clickhouse-client \
+     --host "$GEOLOADERD_CH_HOST" \
+     --port "$GEOLOADERD_CH_PORT" \
+     --user "$GEOLOADERD_CH_USER" \
+     --password "$GEOLOADERD_CH_PASSWORD" \
+     --database "$GEOLOADERD_CH_DATABASE" \
+     --multiquery < deploy/clickhouse/geo_country.sql
+   ```
+
+4. Load data and create/reload dictionary:
+
+   ```bash
+   sudo mkdir -p /var/lib/geoloaderd/cache
+
+   set -a
+   source /etc/geoloaderd/geoloaderd.env
+   set +a
+
+   sudo -E /usr/bin/python3 scripts/load_rir_geo.py
+   ```
+
+5. Validate:
+
+   ```bash
+   clickhouse-client \
+     --host "$GEOLOADERD_CH_HOST" \
+     --port "$GEOLOADERD_CH_PORT" \
+     --user "$GEOLOADERD_CH_USER" \
+     --password "$GEOLOADERD_CH_PASSWORD" \
+     --database "$GEOLOADERD_CH_DATABASE" \
+     --query "SELECT count(), uniqExact(cc) FROM default.geo_prefix_country"
+
+   clickhouse-client \
+     --host "$GEOLOADERD_CH_HOST" \
+     --port "$GEOLOADERD_CH_PORT" \
+     --user "$GEOLOADERD_CH_USER" \
+     --password "$GEOLOADERD_CH_PASSWORD" \
+     --database "$GEOLOADERD_CH_DATABASE" \
+     --query "SELECT dictGetString('default.geo_country_dict', 'cc', tuple(toIPv4('8.8.8.8')))"
+   ```
+
+   `8.8.8.8` should normally return `US`.
+
+6. Enable daily refresh:
+
+   ```bash
+   sudo ln -sfn /root/GrapesNTA /opt/GrapesNTA
+   sudo install -m 0644 deploy/systemd/geoloaderd.service /etc/systemd/system/geoloaderd.service
+   sudo install -m 0644 deploy/systemd/geoloaderd.timer /etc/systemd/system/geoloaderd.timer
+   sudo systemctl daemon-reload
+   sudo systemctl enable --now geoloaderd.timer
+   sudo systemctl start geoloaderd.service
+   journalctl -u geoloaderd.service -f
+   ```
 
 ## Validation queries
 
