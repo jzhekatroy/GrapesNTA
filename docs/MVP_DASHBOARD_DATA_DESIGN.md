@@ -60,6 +60,13 @@ BMP/BGP-таблицы нужны для маршрутизации:
 - prefix -> origin ASN;
 - next-hop/upstream.
 
+DDL: `deploy/clickhouse/bmp.sql`.
+
+Сервис: `cmd/bmpgrapes` (BMP TCP listener -> ClickHouse). Подробнее в
+`docs/BMPGRAPES_MVP.md`. В MVP заполняются `bmp_peers`,
+`bmp_route_events` (append-only) и агрегат `bgp_updates_1m` через MV. Поддержка
+текущего RIB (`bmp_routes_current`) — следующий шаг после MVP.
+
 ## Required dictionaries
 
 ### `local_networks`

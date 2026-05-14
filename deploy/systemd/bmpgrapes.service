@@ -1,0 +1,22 @@
+[Unit]
+Description=GrapesNTA bmpgrapes (BMP collector -> ClickHouse)
+Documentation=file:///opt/GrapesNTA/docs/BMPGRAPES_MVP.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/opt/GrapesNTA/deploy/systemd/bmpgrapes-exec.sh
+
+KillSignal=SIGTERM
+TimeoutStopSec=60
+SendSIGKILL=yes
+
+Restart=on-failure
+RestartSec=5
+
+LimitNOFILE=1048576
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

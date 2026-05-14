@@ -17,6 +17,8 @@ make clean && make
 
 **RIR country → ClickHouse:** optional Python script [scripts/load_rir_geo.py](scripts/load_rir_geo.py) loads delegated statistics into `geo_prefix_country` and `geo_country_dict` via `clickhouse-client`. See [docs/geoip_country.md](docs/geoip_country.md).
 
+**BMP collector:** standalone pure-Go service [`cmd/bmpgrapes`](cmd/bmpgrapes) accepts BMP TCP sessions from routers and writes `default.bmp_peers` / `default.bmp_route_events` / `default.bgp_updates_1m`. Build with `make build-bmp`, see [docs/BMPGRAPES_MVP.md](docs/BMPGRAPES_MVP.md) and [deploy/clickhouse/bmp.sql](deploy/clickhouse/bmp.sql).
+
 Run (root):
 
 ```bash
