@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 """
-Load RIR delegated-extended statistics into ClickHouse (country-only prefixes).
+Load RIR delegated-extended statistics into ClickHouse.
+
+The loader refreshes:
+  - geo_prefix_country: country-only IP prefixes for IP_TRIE lookup.
+  - asn_registry: ASN allocation country/RIR/status metadata for BGP reports.
 
 Requires: Python 3.7+ (stdlib only) and clickhouse-client on PATH.
 """
@@ -88,6 +92,15 @@ def prefix_status_ok(status: str) -> bool:
     if not s:
         return True
     if s in ("allocated", "assigned", "available", "legacy"):
+        return True
+    return "allocated" in s or "assigned" in s
+
+
+def asn_status_ok(status: str) -> bool:
+    s = status.strip().lower()
+    if not s:
+        return True
+    if s in ("allocated", "assigned", "legacy"):
         return True
     return "allocated" in s or "assigned" in s
 
@@ -181,6 +194,68 @@ def parse_delegated_lines(
                 )
 
 
+def parse_delegated_asn_lines(
+    path: str,
+    rir_hint: str,
+    snapshot: str,
+    source_tag: str = "rir_delegated",
+) -> Iterator[Tuple[int, str, str, str, str, str, str]]:
+    """Yield TabSeparated ASN rows (7 columns).
+
+    RIR delegated ASN records use:
+      registry|cc|asn|start|value|date|status
+
+    where start is the first ASN and value is the count in the allocation.
+    ClickHouse reports join by exact origin_asn, so ranges are expanded into one
+    row per ASN. The global ASN table is small enough for this to be practical.
+    """
+    with open(path, "r", encoding="utf-8", errors="replace") as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            rec = line.split("|")
+            if len(rec) < 6:
+                continue
+            registry, cc, rec_type, start, val_str, date_str = rec[:6]
+            status = rec[6] if len(rec) > 6 else ""
+
+            if rec_type != "asn":
+                continue
+            if cc == "*" or not is_alpha2(cc):
+                continue
+            if status.strip().lower() == "summary":
+                continue
+            if not asn_status_ok(status):
+                continue
+
+            try:
+                first = int(start, 10)
+                count = int(val_str, 10)
+            except ValueError:
+                continue
+            if first <= 0 or count <= 0:
+                continue
+            last = first + count - 1
+            if last > 2**32 - 1:
+                continue
+
+            rir = registry.strip().lower() or rir_hint.lower()
+            alloc = parse_alloc_date(date_str)
+            cc_u = cc.upper()
+
+            for asn in range(first, last + 1):
+                yield (
+                    asn,
+                    cc_u,
+                    rir,
+                    status,
+                    alloc,
+                    source_tag,
+                    snapshot,
+                )
+
+
 def clickhouse_base_args(args: argparse.Namespace) -> List[str]:
     cmd = [args.clickhouse_client]
     cmd += ["--host", args.host]
@@ -230,7 +305,7 @@ def ch_swap_tables(base: Sequence[str], table: str, staging: str) -> None:
             "like default.geo_prefix_country"
         )
     db = table.split(".", 1)[0]
-    tmp = f"{db}._geo_country_swap_{os.getpid()}"
+    tmp = f"{db}._rir_loader_swap_{os.getpid()}"
     q2 = (
         f"RENAME TABLE {table} TO {tmp}, "
         f"{staging} TO {table}, "
@@ -283,18 +358,23 @@ class RunStats:
     ru: int = 0
 
 
-def write_tsv_and_stats(
+def write_tsvs_and_stats(
     cache_dir: str,
     sources: Sequence[Tuple[str, str]],
     snapshot: str,
     skip_download: bool,
     http_timeout: float,
-    tsv_path: str,
-) -> RunStats:
+    prefix_tsv_path: str,
+    asn_tsv_path: str,
+) -> Tuple[RunStats, RunStats]:
     os.makedirs(cache_dir, mode=0o755, exist_ok=True)
-    stats = RunStats()
-    with open(tsv_path, "w", encoding="utf-8", newline="") as out:
-        w = csv.writer(out, delimiter="\t", lineterminator="\n")
+    prefix_stats = RunStats()
+    asn_stats = RunStats()
+    with open(prefix_tsv_path, "w", encoding="utf-8", newline="") as prefix_out, open(
+        asn_tsv_path, "w", encoding="utf-8", newline=""
+    ) as asn_out:
+        prefix_w = csv.writer(prefix_out, delimiter="\t", lineterminator="\n")
+        asn_w = csv.writer(asn_out, delimiter="\t", lineterminator="\n")
         for rir, url in sources:
             path = cache_path(cache_dir, rir)
             if not skip_download:
@@ -303,25 +383,31 @@ def write_tsv_and_stats(
             elif not os.path.isfile(path):
                 raise FileNotFoundError(f"cache missing (use download): {path}")
             for row in parse_delegated_lines(path, rir, snapshot):
-                w.writerow(row)
-                stats.rows += 1
-                stats.countries.add(row[2])
+                prefix_w.writerow(row)
+                prefix_stats.rows += 1
+                prefix_stats.countries.add(row[2])
                 if row[2] == "RU":
-                    stats.ru += 1
-    return stats
+                    prefix_stats.ru += 1
+            for row in parse_delegated_asn_lines(path, rir, snapshot):
+                asn_w.writerow(row)
+                asn_stats.rows += 1
+                asn_stats.countries.add(row[1])
+                if row[1] == "RU":
+                    asn_stats.ru += 1
+    return prefix_stats, asn_stats
 
 
-def validate_stats(stats: RunStats, min_countries: int, require_ru: bool) -> None:
+def validate_stats(stats: RunStats, min_countries: int, require_ru: bool, label: str) -> None:
     if stats.rows == 0:
-        raise RuntimeError("validation failed: no prefix rows parsed")
+        raise RuntimeError(f"validation failed: no {label} rows parsed")
     if require_ru and stats.ru == 0:
         raise RuntimeError(
-            "validation failed: no RU prefixes (unexpected for full RIR data); "
+            f"validation failed: no RU {label} rows (unexpected for full RIR data); "
             "use --no-ru-check if intentional"
         )
     if len(stats.countries) < min_countries:
         raise RuntimeError(
-            f"validation failed: only {len(stats.countries)} distinct countries "
+            f"validation failed: only {len(stats.countries)} distinct countries in {label} "
             f"(want >= {min_countries})"
         )
 
@@ -350,6 +436,14 @@ def main() -> int:
     p.add_argument(
         "--staging-table",
         default=env("GEOLOADERD_CH_STAGING", "default.geo_prefix_country_staging"),
+    )
+    p.add_argument(
+        "--asn-table",
+        default=env("GEOLOADERD_CH_ASN_TABLE", "default.asn_registry"),
+    )
+    p.add_argument(
+        "--asn-staging-table",
+        default=env("GEOLOADERD_CH_ASN_STAGING", "default.asn_registry_staging"),
     )
     p.add_argument(
         "--dictionary",
@@ -417,24 +511,37 @@ def main() -> int:
     snapshot = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
     tmp_tsv = None
+    tmp_asn_tsv = None
     try:
         fd, tmp_tsv = tempfile.mkstemp(prefix="rir_geo_", suffix=".tsv", text=True)
         os.close(fd)
-        stats = write_tsv_and_stats(
+        fd, tmp_asn_tsv = tempfile.mkstemp(prefix="rir_asn_", suffix=".tsv", text=True)
+        os.close(fd)
+        prefix_stats, asn_stats = write_tsvs_and_stats(
             args.cache_dir,
             DEFAULT_SOURCES,
             snapshot,
             args.skip_download,
             args.http_timeout,
             tmp_tsv,
+            tmp_asn_tsv,
         )
         validate_stats(
-            stats,
+            prefix_stats,
             args.min_countries,
             require_ru=not args.no_ru_check,
+            label="prefix",
+        )
+        validate_stats(
+            asn_stats,
+            args.min_countries,
+            require_ru=not args.no_ru_check,
+            label="ASN",
         )
         print(
-            f"validation ok: rows={stats.rows} countries={len(stats.countries)} ru={stats.ru}",
+            "validation ok: "
+            f"prefix_rows={prefix_stats.rows} prefix_countries={len(prefix_stats.countries)} prefix_ru={prefix_stats.ru} "
+            f"asn_rows={asn_stats.rows} asn_countries={len(asn_stats.countries)} asn_ru={asn_stats.ru}",
             file=sys.stderr,
         )
 
@@ -451,6 +558,14 @@ def main() -> int:
 
         ch_swap_tables(base, args.table, stg)
 
+        asn_stg = args.asn_staging_table
+        ch_run_query(base, f"TRUNCATE TABLE IF EXISTS {asn_stg}")
+        asn_insert_q = f"INSERT INTO {asn_stg} FORMAT TabSeparated"
+        with open(tmp_asn_tsv, "rb") as asn_tsv_bin:
+            ch_run_query(base, asn_insert_q, stdin=asn_tsv_bin)
+
+        ch_swap_tables(base, args.asn_table, asn_stg)
+
         if not args.skip_dictionary_create:
             ch_create_or_replace_dictionary(base, args)
 
@@ -462,6 +577,11 @@ def main() -> int:
         if tmp_tsv and os.path.isfile(tmp_tsv) and not args.keep_tsv:
             try:
                 os.remove(tmp_tsv)
+            except OSError:
+                pass
+        if tmp_asn_tsv and os.path.isfile(tmp_asn_tsv) and not args.keep_tsv:
+            try:
+                os.remove(tmp_asn_tsv)
             except OSError:
                 pass
 

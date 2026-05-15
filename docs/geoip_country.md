@@ -1,15 +1,23 @@
 # Country geolocation from RIR delegated data
 
-This adds **country-only** IP lookup using public RIR `delegated-*-extended-latest` statistics. It does **not** provide city accuracy. Data is loaded into ClickHouse and exposed as an `IP_TRIE` dictionary for `dictGet*` in queries.
+This adds **country-only** IP lookup and **ASN allocation metadata** using public
+RIR `delegated-*-extended-latest` statistics. It does **not** provide city
+accuracy and RIR delegated files do **not** include human-readable ASN
+organization names.
 
-**Country is resolved at query time** via `dictGet*` (or pre-aggregated tables you build yourself). It is **not** written into `flows_raw`.
+IP country is resolved at query time via `dictGet*` (or pre-aggregated tables
+you build yourself). It is **not** written into `flows_raw`.
+
+ASN allocation metadata is loaded into `default.asn_registry` and can be joined
+with BGP `origin_asn`. Optional names live in `default.asn_names`, so daily RIR
+refreshes do not overwrite manual or separately loaded organization names.
 
 ## Components
 
 | Path | Purpose |
 |------|---------|
-| [deploy/clickhouse/geo_country.sql](deploy/clickhouse/geo_country.sql) | `geo_prefix_country` + staging table DDL |
-| [scripts/load_rir_geo.py](scripts/load_rir_geo.py) | Downloads RIR files, parses prefixes, loads staging, swaps tables, creates/updates `geo_country_dict`, reloads dictionary |
+| [deploy/clickhouse/geo_country.sql](deploy/clickhouse/geo_country.sql) | `geo_prefix_country`, `asn_registry`, `asn_names` + staging table DDL |
+| [scripts/load_rir_geo.py](scripts/load_rir_geo.py) | Downloads RIR files, parses prefixes and ASN allocations, loads staging, swaps tables, creates/updates `geo_country_dict`, reloads dictionary |
 | [deploy/systemd/geoloaderd.*](deploy/systemd/) | `systemd` oneshot + daily timer |
 
 ## One-time ClickHouse setup
@@ -22,12 +30,14 @@ clickhouse-client --multiquery < deploy/clickhouse/geo_country.sql
 
 This creates the tables only. The loader creates/updates `default.geo_country_dict`
 because dictionary source credentials often differ from the credentials used by
-the remote loader.
+the remote loader. ASN names are kept in `default.asn_names`; RIR refresh only
+updates allocation metadata in `default.asn_registry`.
 
 Confirm:
 
 ```sql
 SHOW TABLES FROM default LIKE 'geo_prefix_country%';
+SHOW TABLES FROM default LIKE 'asn_%';
 ```
 
 ## Dependencies
@@ -59,6 +69,8 @@ Environment variables (optional; same names as used by systemd):
 | `GEOLOADERD_CACHE_DIR` | RIR file cache |
 | `GEOLOADERD_CH_TABLE` | Live prefix table (default `default.geo_prefix_country`) |
 | `GEOLOADERD_CH_STAGING` | Staging table |
+| `GEOLOADERD_CH_ASN_TABLE` | Live ASN allocation table (default `default.asn_registry`) |
+| `GEOLOADERD_CH_ASN_STAGING` | ASN staging table |
 | `GEOLOADERD_CH_DICT` | Dictionary to reload |
 | `GEOLOADERD_DICT_SOURCE_HOST` | Host used by the ClickHouse server itself to read `geo_prefix_country` |
 | `GEOLOADERD_DICT_SOURCE_PORT` | Port used by the ClickHouse server itself |
@@ -79,6 +91,8 @@ CLI flags (see `python3 scripts/load_rir_geo.py --help`):
 | `--database` | `default` | Database |
 | `--table` | `default.geo_prefix_country` | Live table |
 | `--staging-table` | `default.geo_prefix_country_staging` | Staging |
+| `--asn-table` | `default.asn_registry` | Live ASN allocation table |
+| `--asn-staging-table` | `default.asn_registry_staging` | ASN staging |
 | `--dictionary` | `default.geo_country_dict` | Dictionary |
 | `--dictionary-source-host` | `GEOLOADERD_DICT_SOURCE_HOST` or `--host` | Dictionary source host, from ClickHouse server perspective |
 | `--dictionary-source-port` | `GEOLOADERD_DICT_SOURCE_PORT` or `--port` | Dictionary source port |
@@ -225,6 +239,14 @@ with environment from `/etc/geoloaderd/geoloaderd.env`.
      --user "$GEOLOADERD_CH_USER" \
      --password "$GEOLOADERD_CH_PASSWORD" \
      --database "$GEOLOADERD_CH_DATABASE" \
+     --query "SELECT count(), uniqExact(cc), min(asn), max(asn) FROM default.asn_registry"
+
+   clickhouse-client \
+     --host "$GEOLOADERD_CH_HOST" \
+     --port "$GEOLOADERD_CH_PORT" \
+     --user "$GEOLOADERD_CH_USER" \
+     --password "$GEOLOADERD_CH_PASSWORD" \
+     --database "$GEOLOADERD_CH_DATABASE" \
      --query "SELECT dictGetString('default.geo_country_dict', 'cc', tuple(toIPv4('8.8.8.8')))"
    ```
 
@@ -246,6 +268,7 @@ with environment from `/etc/geoloaderd/geoloaderd.env`.
 
 ```sql
 SELECT count(), uniqExact(cc) FROM default.geo_prefix_country;
+SELECT count(), uniqExact(cc), min(asn), max(asn) FROM default.asn_registry;
 
 SELECT cc, count()
 FROM default.geo_prefix_country
@@ -255,6 +278,44 @@ LIMIT 20;
 
 SELECT dictGetString('default.geo_country_dict', 'cc', tuple(toIPv4('8.8.8.8')));
 SELECT dictGetString('default.geo_country_dict', 'cc', tuple(toIPv4('77.88.8.8')));
+```
+
+## ASN Registry For BGP
+
+RIR delegated files include ASN allocation country/RIR/status, but not company
+names. The loader refreshes:
+
+- `default.asn_registry` - authoritative daily allocation data from RIR FTP;
+- `default.asn_names` - optional editable/enrichment table with human-readable names;
+- `default.asn_registry_enriched` - view that joins both and falls back to `AS<asn>`
+  when no name is known.
+
+Manual name example:
+
+```sql
+INSERT INTO default.asn_names (asn, name, source)
+VALUES
+    (16509, 'Amazon.com, Inc.', 'manual'),
+    (13335, 'Cloudflare, Inc.', 'manual'),
+    (15169, 'Google LLC', 'manual');
+```
+
+Top origin ASN for BMP with country/RIR/name:
+
+```sql
+SELECT
+    r.origin_asn,
+    any(a.name) AS as_name,
+    any(a.cc) AS country,
+    any(a.rir) AS rir,
+    count() AS routes
+FROM default.bmp_route_events AS r
+LEFT JOIN default.asn_registry_enriched AS a ON r.origin_asn = a.asn
+WHERE r.ts >= now() - INTERVAL 30 MINUTE
+  AND r.event_type = 'announce'
+GROUP BY r.origin_asn
+ORDER BY routes DESC
+LIMIT 20;
 ```
 
 ## Top Countries By Traffic
