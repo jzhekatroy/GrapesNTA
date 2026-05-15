@@ -75,7 +75,7 @@ def sql_string(value: str) -> str:
 
 def build_dictionary_query(args: argparse.Namespace, password: str) -> str:
     return f"""
-CREATE OR REPLACE DICTIONARY {args.dictionary}
+CREATE DICTIONARY {args.dictionary}
 (
     prefix String,
     name String,
@@ -102,6 +102,7 @@ def ch_create_or_replace_dictionary(base: Sequence[str], args: argparse.Namespac
     password = args.dictionary_source_password or ""
     query = build_dictionary_query(args, password)
     redacted = build_dictionary_query(args, "***")
+    ch_run_query(base, f"DROP DICTIONARY IF EXISTS {args.dictionary}")
     ch_run_query(base, query, display_query=redacted)
 
 
