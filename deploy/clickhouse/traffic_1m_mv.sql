@@ -28,7 +28,12 @@ SELECT
 FROM default.flows_raw
 GROUP BY minute
 
--- Future variant once default.local_networks_dict is available on the CH host:
+-- Future variant once default.local_networks_dict is available on the CH host.
+-- Notes:
+--   * IPv6 cast uses CAST(addr AS IPv6) (ClickHouse 24.x): the legacy
+--     reinterpretAsIPv6 was removed in 24.x and the function is not available
+--     on the production server.
+--   * dictHas takes an IPv4/IPv6-typed key for IP_TRIE dictionaries.
 --
 -- CREATE MATERIALIZED VIEW IF NOT EXISTS default.traffic_1m_mv
 -- TO default.traffic_1m
@@ -57,12 +62,12 @@ GROUP BY minute
 --             toStartOfMinute(time_received_ns) AS minute,
 --             multiIf(
 --                 etype = 0x0800, dictHas('default.local_networks_dict', tuple(toIPv4(reinterpretAsUInt32(reverse(substring(src_addr, 1, 4)))))),
---                 etype = 0x86DD, dictHas('default.local_networks_dict', tuple(reinterpretAsIPv6(src_addr))),
+--                 etype = 0x86DD, dictHas('default.local_networks_dict', tuple(CAST(src_addr AS IPv6))),
 --                 0
 --             ) AS src_is_local,
 --             multiIf(
 --                 etype = 0x0800, dictHas('default.local_networks_dict', tuple(toIPv4(reinterpretAsUInt32(reverse(substring(dst_addr, 1, 4)))))),
---                 etype = 0x86DD, dictHas('default.local_networks_dict', tuple(reinterpretAsIPv6(dst_addr))),
+--                 etype = 0x86DD, dictHas('default.local_networks_dict', tuple(CAST(dst_addr AS IPv6))),
 --                 0
 --             ) AS dst_is_local,
 --             bytes,

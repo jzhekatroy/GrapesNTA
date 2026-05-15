@@ -181,12 +181,21 @@ family   prefixes
 
 The dashboard uses this query as the source for `Traffic In/Out, bps`. It
 runs on the **raw** `flows_raw` table for short windows (default 1 hour) and
-computes direction by matching both endpoints against
-`default.local_networks_enabled`.
+computes direction with a hybrid approach:
+
+- **IPv4** flows use `dictGetUInt32('default.bgp_origin_asn_dict', 'origin_asn', ip)`.
+  An IPv4 is local when its BGP origin ASN equals our `local_asn` (AS34665).
+  This is O(1) per row and reuses the already-loaded BGP dictionary.
+- **IPv6** flows use `arrayExists` against the small IPv6 prefix list from
+  `default.local_networks_enabled` (9 prefixes for AS34665, IPv6 traffic is
+  usually a small fraction of total volume).
+
+This avoids the OOM we hit when matching all flows against 75 IPv4 prefixes
+with `isIPAddressInRange` on every row.
 
 ```sql
 WITH
-    (SELECT groupArray(prefix) FROM default.local_networks_enabled WHERE family = 4) AS local_v4,
+    34665 AS local_asn,
     (SELECT groupArray(prefix) FROM default.local_networks_enabled WHERE family = 6) AS local_v6
 SELECT
     minute,
@@ -207,40 +216,22 @@ FROM
         packets,
         multiIf(
             etype = 0x0800,
-                arrayExists(
-                    p -> isIPAddressInRange(
-                        IPv4NumToString(toIPv4(reinterpretAsUInt32(reverse(substring(src_addr, 1, 4))))),
-                        p
-                    ),
-                    local_v4
-                ),
+                dictGetUInt32(
+                    'default.bgp_origin_asn_dict', 'origin_asn',
+                    tuple(toIPv4(reinterpretAsUInt32(reverse(substring(src_addr, 1, 4)))))
+                ) = local_asn,
             etype = 0x86DD,
-                arrayExists(
-                    p -> isIPAddressInRange(
-                        IPv6NumToString(reinterpretAsIPv6(src_addr)),
-                        p
-                    ),
-                    local_v6
-                ),
+                arrayExists(p -> isIPAddressInRange(IPv6NumToString(src_addr), p), local_v6),
             0
         ) AS src_is_local,
         multiIf(
             etype = 0x0800,
-                arrayExists(
-                    p -> isIPAddressInRange(
-                        IPv4NumToString(toIPv4(reinterpretAsUInt32(reverse(substring(dst_addr, 1, 4))))),
-                        p
-                    ),
-                    local_v4
-                ),
+                dictGetUInt32(
+                    'default.bgp_origin_asn_dict', 'origin_asn',
+                    tuple(toIPv4(reinterpretAsUInt32(reverse(substring(dst_addr, 1, 4)))))
+                ) = local_asn,
             etype = 0x86DD,
-                arrayExists(
-                    p -> isIPAddressInRange(
-                        IPv6NumToString(reinterpretAsIPv6(dst_addr)),
-                        p
-                    ),
-                    local_v6
-                ),
+                arrayExists(p -> isIPAddressInRange(IPv6NumToString(dst_addr), p), local_v6),
             0
         ) AS dst_is_local
     FROM default.flows_raw
@@ -256,18 +247,25 @@ SETTINGS
 
 Notes:
 
-- The two `WITH (SELECT ...) AS name` scalar subqueries each evaluate to a
-  single array of prefixes (75 IPv4 and 9 IPv6 for AS34665) and are computed
-  once per query, not per row. Avoid the `WITH name AS (SELECT ...)` CTE
-  form here — the proxy in front of the production ClickHouse rejects it
-  with a parser error.
-- For the empty-`local_networks` case all four checks evaluate to 0, so every
-  row ends up as `'transit'`. The UI rule below converts that into
-  outbound/total until real local prefixes are loaded.
+- `WITH (SELECT ...) AS name` is a scalar-subquery CTE and is computed once
+  per query. Avoid the `WITH name AS (SELECT ...)` CTE form here — the
+  proxy in front of the production ClickHouse rejects it with a parser
+  error.
+- `dictGetUInt32` returns 0 when an IP has no BGP origin in the dictionary
+  (unrouted / IXP prefixes, RFC1918, link-local). Those flows then end up
+  as `'transit'`, which is the desired MVP behaviour.
+- For multiple local ASNs replace `= local_asn` with
+  `IN (34665, ...other ASNs...)` or wire it from an `local_asns` array.
+- For IPv4 prefixes that are NOT covered by our BGP origin (e.g. private
+  RFC1918 addresses you want to count as local), add them to
+  `default.local_networks` for IPv4 too and switch the IPv4 branch to a
+  `dictHas` lookup once `default.local_networks_dict` is installed.
 - For longer windows (24 h, 7 d) prefer one of:
   - the same query with a larger `WHERE time_received_ns >= now() - INTERVAL 1 DAY`
     and a coarser bucket, e.g. `toStartOfFiveMinute`;
-  - a future direction-aware `traffic_1m_mv` once the dictionary is available.
+  - a future direction-aware `traffic_1m_mv` (template in
+    `deploy/clickhouse/traffic_1m_mv.sql`) once the dictionary is available
+    on the CH host.
 
 ## UI Rule
 
