@@ -286,14 +286,23 @@ DROP TABLE IF EXISTS {args.enabled_view}
 CREATE VIEW {args.enabled_view} AS
 SELECT
     prefix,
-    argMax(name, updated_at) AS name,
-    argMax(source, updated_at) AS source,
-    max(updated_at) AS updated_at
-FROM {args.table}
-GROUP BY
-    family,
-    prefix
-HAVING argMax(enabled, updated_at) = 1
+    name,
+    source,
+    updated_at_latest AS updated_at
+FROM
+(
+    SELECT
+        prefix,
+        argMax(name, updated_at) AS name,
+        argMax(source, updated_at) AS source,
+        argMax(enabled, updated_at) AS enabled_latest,
+        max(updated_at) AS updated_at_latest
+    FROM {args.table}
+    GROUP BY
+        family,
+        prefix
+)
+WHERE enabled_latest = 1
 """)
 
     raw_networks = fetch_origin_prefixes(base, args)

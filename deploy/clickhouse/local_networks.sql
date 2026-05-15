@@ -29,11 +29,20 @@ DROP TABLE IF EXISTS default.local_networks_enabled;
 CREATE VIEW default.local_networks_enabled AS
 SELECT
     prefix,
-    argMax(name, updated_at) AS name,
-    argMax(source, updated_at) AS source,
-    max(updated_at) AS updated_at
-FROM default.local_networks
-GROUP BY
-    family,
-    prefix
-HAVING argMax(enabled, updated_at) = 1;
+    name,
+    source,
+    updated_at_latest AS updated_at
+FROM
+(
+    SELECT
+        prefix,
+        argMax(name, updated_at) AS name,
+        argMax(source, updated_at) AS source,
+        argMax(enabled, updated_at) AS enabled_latest,
+        max(updated_at) AS updated_at_latest
+    FROM default.local_networks
+    GROUP BY
+        family,
+        prefix
+)
+WHERE enabled_latest = 1;
