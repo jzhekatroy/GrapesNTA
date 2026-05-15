@@ -1,0 +1,11 @@
+[Unit]
+Description=Periodic BGP origin ASN dictionary refresh
+
+[Timer]
+Unit=bgp-origin-refresh.service
+OnBootSec=2min
+OnUnitActiveSec=5min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

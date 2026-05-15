@@ -1,0 +1,14 @@
+[Unit]
+Description=GrapesNTA BGP origin ASN dictionary refresh
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/bgp-origin-refresh/bgp-origin-refresh.env
+ExecStart=/usr/bin/python3 /opt/GrapesNTA/scripts/rebuild_bgp_origin_asn.py
+
+TimeoutStartSec=1800
+
+[Install]
+WantedBy=multi-user.target
