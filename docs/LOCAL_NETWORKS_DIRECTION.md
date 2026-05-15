@@ -49,7 +49,7 @@ So the current MVP is **dictionary-less**:
 The XML template `deploy/clickhouse/local_networks_dict.xml` is kept in the
 repo. As soon as someone with shell access to the ClickHouse host installs it
 into `/etc/clickhouse-server/dictionaries.d/`, the `traffic_1m_mv` template
-at the bottom of `deploy/clickhouse/traffic_1m.sql` can be applied and the
+at the bottom of `deploy/clickhouse/traffic_1m_mv.sql` can be applied and the
 on-the-fly logic switched off.
 
 ## Current Local ASN
@@ -326,6 +326,6 @@ FORMAT PrettyCompactMonoBlock
 ```
 
 Then redeploy `traffic_1m_mv` using the commented template at the bottom of
-`deploy/clickhouse/traffic_1m.sql`, set `LOCALNETWORKS_WITH_DICTIONARY=1` in
-the loader environment file and the API can switch from the on-the-fly query
-above to a plain aggregate on `traffic_1m`.
+`deploy/clickhouse/traffic_1m_mv.sql`, set `LOCALNETWORKS_WITH_DICTIONARY=1`
+in the loader environment file and the API can switch from the on-the-fly
+query above to a plain aggregate on `traffic_1m`.

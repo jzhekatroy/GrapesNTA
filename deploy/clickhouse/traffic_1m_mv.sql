@@ -1,34 +1,20 @@
--- Minute-level traffic aggregate for dashboard charts.
+-- Minute-level traffic aggregate materialized view.
 --
 -- This deployment does not use default.local_networks_dict because the remote
--- ClickHouse rejects dictionary DDL through the SQL proxy. The materialized
--- view therefore writes direction='unknown' for every minute. Real
--- in / out / internal / transit classification is computed on the fly in
--- API queries that JOIN flows_raw with default.local_networks_enabled. See
+-- ClickHouse rejects dictionary DDL through the SQL proxy. The MV therefore
+-- writes direction='unknown' for every minute. Real in / out / internal /
+-- transit classification is computed on the fly in API queries that JOIN
+-- flows_raw with default.local_networks_enabled. See
 -- docs/LOCAL_NETWORKS_DIRECTION.md for ready-to-use SQL.
 --
 -- Apply after:
 --   1. default.flows_raw exists;
---   2. deploy/clickhouse/local_networks.sql was applied (table + view).
+--   2. deploy/clickhouse/traffic_1m_table.sql was applied;
+--   3. deploy/clickhouse/local_networks.sql was applied (table + view).
 --
--- When dictHas becomes available again (XML dictionary installed on the CH
--- host), this view can be redeployed to populate direction directly from
--- default.local_networks_dict for both IPv4 and IPv6 flows. The template for
--- that variant lives at the bottom of this file as a comment.
-
-CREATE TABLE IF NOT EXISTS default.traffic_1m
-(
-    minute      DateTime('UTC') CODEC(Delta, ZSTD(1)),
-    direction   LowCardinality(String), -- in / out / internal / transit / unknown
-    bytes       UInt64,
-    packets     UInt64,
-    flows_count UInt64
-)
-ENGINE = SummingMergeTree
-PARTITION BY toYYYYMMDD(minute)
-ORDER BY (minute, direction)
-TTL minute + INTERVAL 365 DAY
-SETTINGS index_granularity = 8192;
+-- Compatible with old clickhouse-client (18.x) without --multiquery: pipe
+-- the file or pass it via --query "$(cat ...)". Drop the existing MV first
+-- with DROP TABLE IF EXISTS default.traffic_1m_mv.
 
 CREATE MATERIALIZED VIEW IF NOT EXISTS default.traffic_1m_mv
 TO default.traffic_1m
@@ -40,7 +26,7 @@ SELECT
     sum(packets)                      AS packets,
     count()                           AS flows_count
 FROM default.flows_raw
-GROUP BY minute;
+GROUP BY minute
 
 -- Future variant once default.local_networks_dict is available on the CH host:
 --
@@ -84,4 +70,4 @@ GROUP BY minute;
 --         FROM default.flows_raw
 --     )
 -- )
--- GROUP BY minute, direction;
+-- GROUP BY minute, direction

@@ -145,9 +145,14 @@ udp/53   -> DNS   -> dns
 заполняет только `direction = 'unknown'` (см. раздел про `local_networks`).
 Когда появится `local_networks_dict`, MV можно переключить на полноценный
 `in/out/internal/transit` — шаблон лежит в конце
-`deploy/clickhouse/traffic_1m.sql`.
+`deploy/clickhouse/traffic_1m_mv.sql`.
 
-DDL: `deploy/clickhouse/traffic_1m.sql`.
+DDL:
+- `deploy/clickhouse/traffic_1m_table.sql` — таблица `traffic_1m`
+  (`SummingMergeTree`, `CODEC(Delta, ZSTD(1))`, TTL 365 дней). Применяется один
+  раз при первом деплое.
+- `deploy/clickhouse/traffic_1m_mv.sql` — materialized view `traffic_1m_mv`.
+  Передеплоивается при изменении direction-логики.
 
 В MVP `traffic_1m` хранит суммы за минуту:
 
