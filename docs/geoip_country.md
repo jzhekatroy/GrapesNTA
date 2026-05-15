@@ -300,6 +300,74 @@ VALUES
     (15169, 'Google LLC', 'manual');
 ```
 
+### Automated ASN Names Loader (Team Cymru)
+
+For bulk population there is `scripts/load_asn_names.py`. It reads the distinct
+ASN list from `default.asn_registry`, queries Team Cymru bulk whois
+(`whois.cymru.com:43`, public, no auth) in chunks and inserts the parsed names
+into `default.asn_names` with `source = 'team_cymru'`. Manual rows
+(`source = 'manual'`) stay authoritative if their `updated_at` is more recent —
+`asn_registry_enriched` picks the latest name per ASN via `argMax(name, updated_at)`.
+
+Layout:
+
+| File | Purpose |
+|---|---|
+| [scripts/load_asn_names.py](../scripts/load_asn_names.py) | The loader (Python stdlib only) |
+| [deploy/systemd/asn-names-loader.service](../deploy/systemd/asn-names-loader.service) | One-shot unit |
+| [deploy/systemd/asn-names-loader.timer](../deploy/systemd/asn-names-loader.timer) | Weekly run, random 2h jitter |
+| [deploy/systemd/asn-names-loader.env.example](../deploy/systemd/asn-names-loader.env.example) | Env template |
+
+Install:
+
+```bash
+sudo mkdir -p /etc/asn-names-loader
+sudo cp /opt/GrapesNTA/deploy/systemd/asn-names-loader.env.example \
+    /etc/asn-names-loader/asn-names-loader.env
+sudo chmod 0600 /etc/asn-names-loader/asn-names-loader.env
+
+sudo install -m 0644 /opt/GrapesNTA/deploy/systemd/asn-names-loader.service \
+    /etc/systemd/system/asn-names-loader.service
+sudo install -m 0644 /opt/GrapesNTA/deploy/systemd/asn-names-loader.timer \
+    /etc/systemd/system/asn-names-loader.timer
+sudo systemctl daemon-reload
+sudo systemctl enable --now asn-names-loader.timer
+```
+
+The service unit also reads `/etc/geoloaderd/geoloaderd.env`, so when
+`ASNNAMES_CH_*` are not set the loader inherits the same ClickHouse endpoint
+that `geoloaderd` uses.
+
+Manual one-off run (smoke test on the first 200 ASN):
+
+```bash
+ASNNAMES_PROGRESS=1 ASNNAMES_MIN_ROWS=10 \
+sudo -E python3 /opt/GrapesNTA/scripts/load_asn_names.py --max-asns 200
+```
+
+Verify:
+
+```bash
+clickhouse-client --query "
+SELECT count(), uniqExact(asn) FROM default.asn_names FINAL;
+
+SELECT asn, name, source, updated_at
+FROM default.asn_names FINAL
+ORDER BY updated_at DESC
+LIMIT 10;
+
+SELECT asn, name, cc, rir
+FROM default.asn_registry_enriched
+WHERE asn IN (13335, 15169, 16509, 13238)
+ORDER BY asn;
+"
+```
+
+Team Cymru's bulk endpoint is rate-limited but generous; `ASNNAMES_CHUNK_SIZE=5000`
+per TCP session is a safe default. If a chunk fails the loader aborts before
+inserting, so `default.asn_names` is never partially overwritten — the previous
+snapshot stays in place until the next successful run.
+
 Top origin ASN for BMP with country/RIR/name:
 
 ```sql
