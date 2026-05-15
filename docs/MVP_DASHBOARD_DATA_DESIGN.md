@@ -83,11 +83,20 @@ src external, dst external  -> transit/unknown
 DDL и рабочий процесс: `deploy/clickhouse/local_networks.sql` и
 `docs/LOCAL_NETWORKS_DIRECTION.md`.
 
-Для текущего MVP локальная сеть может автоматически заполняться из BGP origin
-ASN через `scripts/load_local_networks_from_asn.py`. В текущей тестовой
+Для текущего MVP локальная сеть автоматически заполняется из BGP origin ASN
+через `scripts/load_local_networks_from_asn.py`. В текущей тестовой
 конфигурации `195.2.241.1` резолвится в `AS34665 PINDC-AS`, поэтому loader
 берет активные префиксы из `bgp_prefix_origin_current WHERE origin_asn = 34665`,
-схлопывает more-specific префиксы и обновляет `local_networks_dict` (`IP_TRIE`).
+схлопывает more-specific префиксы и пишет их в `default.local_networks` /
+`default.local_networks_enabled`.
+
+`IP_TRIE` dictionary `default.local_networks_dict` намеренно НЕ создается:
+удалённый ClickHouse 24.11 за SQL-прокси отвергает любую dictionary DDL, а
+доступа к хосту CH у нас нет, чтобы положить XML в
+`/etc/clickhouse-server/dictionaries.d/`. Поэтому `traffic_1m_mv` пишет
+`direction = 'unknown'`, а реальное `in/out/internal/transit` считается
+на лету в API-запросах по `flows_raw` + `local_networks_enabled` (см.
+`docs/LOCAL_NETWORKS_DIRECTION.md`, раздел "Direction On The Fly: SQL Recipe").
 
 ### `geo_prefix_country`
 
@@ -128,12 +137,15 @@ udp/53   -> DNS   -> dns
 
 Общий график нагрузки:
 
-- `in/out bps`;
-- `in/out pps`;
-- flows/s;
-- internal/transit/unknown.
+- total `bps`;
+- total `pps`;
+- flows/s.
 
-Одна строка = один временной бакет и направление.
+Одна строка = одна минута + `direction`. В текущем MVP `traffic_1m_mv`
+заполняет только `direction = 'unknown'` (см. раздел про `local_networks`).
+Когда появится `local_networks_dict`, MV можно переключить на полноценный
+`in/out/internal/transit` — шаблон лежит в конце
+`deploy/clickhouse/traffic_1m.sql`.
 
 DDL: `deploy/clickhouse/traffic_1m.sql`.
 
@@ -163,6 +175,12 @@ pps = packets / bucket_seconds
 То есть физически в MVP достаточно `traffic_1m`. Если месячные/годовые графики
 станут тяжелыми, добавляем физические rollup-таблицы `traffic_1h` и
 `traffic_1d`.
+
+Для графика `Traffic In/Out, bps` источник данных в MVP — не `traffic_1m`, а
+запрос по `flows_raw` + `local_networks_enabled` за выбранное окно
+(см. `docs/LOCAL_NETWORKS_DIRECTION.md`). `traffic_1m` остаётся источником
+total bps/pps/flows; после установки dictionary он же станет источником
+честного in/out по всей истории.
 
 ### `traffic_country_1m`
 

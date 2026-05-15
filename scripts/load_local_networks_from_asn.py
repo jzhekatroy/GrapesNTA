@@ -6,8 +6,13 @@ The loader:
   - reads active prefixes from bgp_prefix_origin_current for one origin ASN;
   - collapses overlapping/more-specific prefixes into a minimal list;
   - writes them to default.local_networks as enabled config rows;
-  - disables no-longer-present rows from the same source;
-  - creates/replaces and reloads default.local_networks_dict (IP_TRIE).
+  - disables no-longer-present rows from the same source.
+
+Dictionary management (default.local_networks_dict) is optional and disabled
+by default because most deployments reach ClickHouse through a proxy that
+rejects dictionary DDL. Use --with-dictionary to enable the legacy DDL path.
+Direction classification in API queries is therefore done on the fly using
+default.local_networks_enabled (see docs/LOCAL_NETWORKS_DIRECTION.md).
 
 Requires: Python 3.7+ (stdlib only) and clickhouse-client on PATH.
 """
@@ -30,6 +35,13 @@ def env(name: str, default: Optional[str] = None) -> Optional[str]:
     if value is None or value == "":
         return default
     return value
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return default
+    return raw.strip().lower() in ("1", "true", "yes", "y", "on")
 
 
 def clickhouse_base_args(args: argparse.Namespace) -> List[str]:
@@ -249,7 +261,22 @@ def main() -> int:
         type=int,
         default=int(env("LOCALNETWORKS_DICT_SOURCE_RECEIVE_TIMEOUT", "30") or 30),
     )
-    parser.add_argument("--skip-dictionary-create", action="store_true")
+    parser.add_argument(
+        "--with-dictionary",
+        action="store_true",
+        default=_env_bool("LOCALNETWORKS_WITH_DICTIONARY", False),
+        help=(
+            "Try to (re)create default.local_networks_dict via DDL and run "
+            "SYSTEM RELOAD DICTIONARY. Off by default: most ClickHouse proxies "
+            "reject dictionary DDL, and direction is now computed on the fly "
+            "from default.local_networks_enabled."
+        ),
+    )
+    parser.add_argument(
+        "--skip-dictionary-create",
+        action="store_true",
+        help="Deprecated: kept for backward compatibility. Ignored.",
+    )
     parser.add_argument("--keep-tsv", action="store_true")
     args = parser.parse_args()
 
@@ -288,6 +315,7 @@ DROP TABLE IF EXISTS {args.enabled_view}
     ch_run_query(base, f"""
 CREATE VIEW {args.enabled_view} AS
 SELECT
+    family,
     prefix,
     name,
     source,
@@ -295,6 +323,7 @@ SELECT
 FROM
 (
     SELECT
+        family,
         prefix,
         argMax(name, updated_at) AS name,
         argMax(source, updated_at) AS source,
@@ -342,22 +371,36 @@ FORMAT TabSeparated
         with open(tmp_path, "rb") as tsv:
             ch_run_query(base, insert_q, stdin=tsv)
 
-        if not args.skip_dictionary_create:
-            # Some ClickHouse deployments expose only data DDL via their proxy
-            # and pre-create dictionaries via XML config files. Treat a CREATE
-            # DICTIONARY failure as a soft warning so that SYSTEM RELOAD
-            # DICTIONARY can still refresh an externally-created dictionary.
+        if args.with_dictionary:
+            # Legacy path: try DDL and SYSTEM RELOAD. Both calls are soft
+            # because most proxied ClickHouse endpoints reject dictionary DDL
+            # and a SYSTEM RELOAD on a non-existent dictionary would also fail.
             try:
                 ch_create_or_replace_dictionary(base, args)
             except RuntimeError as exc:
                 print(
                     "warning: CREATE DICTIONARY rejected by ClickHouse; "
-                    "assuming the dictionary was created externally (XML config "
-                    "or one-off SQL via a different endpoint).\n"
+                    "assuming the dictionary was created externally (XML "
+                    "config on the CH host).\n"
                     f"details: {exc}",
                     file=sys.stderr,
                 )
-        ch_run_query(base, f"SYSTEM RELOAD DICTIONARY {args.dictionary}")
+            try:
+                ch_run_query(base, f"SYSTEM RELOAD DICTIONARY {args.dictionary}")
+            except RuntimeError as exc:
+                print(
+                    "warning: SYSTEM RELOAD DICTIONARY failed; the dictionary "
+                    "may not exist on this ClickHouse instance.\n"
+                    f"details: {exc}",
+                    file=sys.stderr,
+                )
+        else:
+            print(
+                "skipping dictionary management (use --with-dictionary or "
+                "LOCALNETWORKS_WITH_DICTIONARY=1 to enable). Direction is "
+                "computed on the fly from default.local_networks_enabled.",
+                file=sys.stderr,
+            )
 
         print("load_local_networks_from_asn: done", file=sys.stderr)
         return 0

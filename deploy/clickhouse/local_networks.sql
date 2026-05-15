@@ -3,8 +3,12 @@
 -- Apply once, then populate default.local_networks either manually (MoonShine)
 -- or via scripts/load_local_networks_from_asn.py.
 --
--- The IP_TRIE dictionary is created by scripts/load_local_networks_from_asn.py
--- because its SOURCE credentials are deployment-specific.
+-- This deployment runs without default.local_networks_dict because the remote
+-- ClickHouse 24.11 instance rejects dictionary DDL through the SQL proxy and
+-- the proxy host does not expose /etc/clickhouse-server. Direction is computed
+-- on the fly in API queries using default.local_networks_enabled. The XML
+-- template for the dictionary is kept in deploy/clickhouse/local_networks_dict.xml
+-- for future use once an XML config can be installed on the ClickHouse host.
 
 CREATE TABLE IF NOT EXISTS default.local_networks
 (
@@ -28,6 +32,7 @@ DROP TABLE IF EXISTS default.local_networks_enabled;
 
 CREATE VIEW default.local_networks_enabled AS
 SELECT
+    family,
     prefix,
     name,
     source,
@@ -35,6 +40,7 @@ SELECT
 FROM
 (
     SELECT
+        family,
         prefix,
         argMax(name, updated_at) AS name,
         argMax(source, updated_at) AS source,
