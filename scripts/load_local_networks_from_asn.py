@@ -343,7 +343,20 @@ FORMAT TabSeparated
             ch_run_query(base, insert_q, stdin=tsv)
 
         if not args.skip_dictionary_create:
-            ch_create_or_replace_dictionary(base, args)
+            # Some ClickHouse deployments expose only data DDL via their proxy
+            # and pre-create dictionaries via XML config files. Treat a CREATE
+            # DICTIONARY failure as a soft warning so that SYSTEM RELOAD
+            # DICTIONARY can still refresh an externally-created dictionary.
+            try:
+                ch_create_or_replace_dictionary(base, args)
+            except RuntimeError as exc:
+                print(
+                    "warning: CREATE DICTIONARY rejected by ClickHouse; "
+                    "assuming the dictionary was created externally (XML config "
+                    "or one-off SQL via a different endpoint).\n"
+                    f"details: {exc}",
+                    file=sys.stderr,
+                )
         ch_run_query(base, f"SYSTEM RELOAD DICTIONARY {args.dictionary}")
 
         print("load_local_networks_from_asn: done", file=sys.stderr)
