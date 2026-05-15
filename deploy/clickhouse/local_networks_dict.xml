@@ -1,0 +1,59 @@
+<!--
+    Install as /etc/clickhouse-server/dictionaries.d/local_networks_dict.xml on
+    the ClickHouse host. Some deployments expose only data DDL through a
+    front-proxy (chproxy) and reject CREATE DICTIONARY at the SQL layer; in
+    that case dictionaries must be declared via XML, matching how
+    bgp_origin_asn_dict and geo_country_dict are already configured on this
+    deployment.
+
+    Customize the password to match the develop (or equivalent) user used by
+    the other GrapesNTA dictionaries. The file should be readable by the
+    ClickHouse server user; chmod 0640 root:clickhouse is a safe default.
+
+    After installing the file, force ClickHouse to load the dictionary:
+      clickhouse-client --query "SYSTEM RELOAD DICTIONARY default.local_networks_dict"
+-->
+<clickhouse>
+    <dictionary>
+        <name>local_networks_dict</name>
+        <source>
+            <clickhouse>
+                <host>127.0.0.1</host>
+                <port>9000</port>
+                <user>develop</user>
+                <password>REPLACE_WITH_DEVELOP_PASSWORD</password>
+                <db>default</db>
+                <table>local_networks_enabled</table>
+                <connect_timeout>10</connect_timeout>
+                <send_receive_timeout>30</send_receive_timeout>
+            </clickhouse>
+        </source>
+        <layout>
+            <ip_trie/>
+        </layout>
+        <structure>
+            <key>
+                <attribute>
+                    <name>prefix</name>
+                    <type>String</type>
+                </attribute>
+            </key>
+            <attribute>
+                <name>name</name>
+                <type>String</type>
+                <null_value></null_value>
+            </attribute>
+            <attribute>
+                <name>source</name>
+                <type>String</type>
+                <null_value></null_value>
+            </attribute>
+            <attribute>
+                <name>updated_at</name>
+                <type>DateTime</type>
+                <null_value>1970-01-01 00:00:00</null_value>
+            </attribute>
+        </structure>
+        <lifetime>0</lifetime>
+    </dictionary>
+</clickhouse>

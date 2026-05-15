@@ -117,6 +117,50 @@ prefixes: raw=404 collapsed=84 disable_old=0 rows_to_insert=84
 load_local_networks_from_asn: done
 ```
 
+## Dictionary Creation
+
+On deployments where ClickHouse is reached through a SQL proxy (for example
+chproxy at `95.215.1.30:6124`), `CREATE DICTIONARY` is typically rejected at
+the SQL layer and existing dictionaries (`bgp_origin_asn_dict`,
+`geo_country_dict`) are declared via XML. Check:
+
+```bash
+clickhouse-client --host 95.215.1.30 --port 6124 --user develop --password 'PASSWORD' --query "
+SELECT name, source, config_path
+FROM system.dictionaries
+WHERE database = 'default'
+FORMAT PrettyCompactMonoBlock
+"
+```
+
+If `config_path` points to `/etc/clickhouse-server/dictionaries.d/*.xml`,
+install `local_networks_dict` the same way:
+
+```bash
+sudo install -m 0640 -o root -g clickhouse \
+  /root/GrapesNTA/deploy/clickhouse/local_networks_dict.xml \
+  /etc/clickhouse-server/dictionaries.d/local_networks_dict.xml
+
+# replace the placeholder password to match the develop user used by the other
+# GrapesNTA dictionaries
+sudo editor /etc/clickhouse-server/dictionaries.d/local_networks_dict.xml
+
+clickhouse-client --host 95.215.1.30 --port 6124 --user develop --password 'PASSWORD' --query "
+SYSTEM RELOAD DICTIONARY default.local_networks_dict
+"
+
+clickhouse-client --host 95.215.1.30 --port 6124 --user develop --password 'PASSWORD' --query "
+SELECT name, status, source, last_exception
+FROM system.dictionaries
+WHERE name = 'local_networks_dict'
+FORMAT PrettyCompactMonoBlock
+"
+```
+
+`scripts/load_local_networks_from_asn.py` treats `CREATE DICTIONARY` failures
+as warnings and always falls back to `SYSTEM RELOAD DICTIONARY`. After the
+XML config is in place, subsequent loader runs only refresh data.
+
 ## Dictionary Check
 
 ```bash
