@@ -48,6 +48,37 @@ ORDER BY (ts, peer_addr, prefix)
 TTL toDateTime(ts) + INTERVAL 180 DAY
 SETTINGS index_granularity = 8192;
 
+-- Per-minute aggregate of announces/withdraws per (router, peer).
+--
+-- IMPORTANT: this table is intentionally NOT fed by a Materialized View on the
+-- bmp_route_events insert path. Initial full RIB dumps from a router (hundreds
+-- of thousands of NLRI in a few seconds) made the per-insert MV blow past
+-- ClickHouse memory limits, which in turn caused bmpgrapes to drop rows.
+--
+-- For the MVP, dashboards can either:
+--   1) query bmp_route_events directly with GROUP BY toStartOfMinute(ts)
+--      (cheap enough for short windows), OR
+--   2) populate this aggregate periodically via a scheduled INSERT SELECT,
+--      e.g. once a minute over the last completed minute (small batch, no
+--      pressure on the hot path).
+--
+-- Example periodic backfill (idempotent within the chosen partition window):
+--
+--   INSERT INTO default.bgp_updates_1m
+--   SELECT
+--       toStartOfMinute(ts) AS minute,
+--       router_addr,
+--       peer_addr,
+--       countIf(event_type = 'announce') AS announces,
+--       countIf(event_type = 'withdraw') AS withdraws
+--   FROM default.bmp_route_events
+--   WHERE ts >= toStartOfMinute(now() - INTERVAL 2 MINUTE)
+--     AND ts <  toStartOfMinute(now())
+--   GROUP BY minute, router_addr, peer_addr;
+--
+-- If an old environment already has default.bgp_updates_1m_mv, drop it:
+--   DROP TABLE IF EXISTS default.bgp_updates_1m_mv;
+
 CREATE TABLE IF NOT EXISTS default.bgp_updates_1m
 (
     minute       DateTime('UTC') CODEC(Delta, ZSTD(1)),
@@ -61,15 +92,3 @@ PARTITION BY toYYYYMMDD(minute)
 ORDER BY (minute, router_addr, peer_addr)
 TTL minute + INTERVAL 365 DAY
 SETTINGS index_granularity = 8192;
-
-CREATE MATERIALIZED VIEW IF NOT EXISTS default.bgp_updates_1m_mv
-TO default.bgp_updates_1m
-AS
-SELECT
-    toStartOfMinute(ts) AS minute,
-    router_addr,
-    peer_addr,
-    countIf(event_type = 'announce') AS announces,
-    countIf(event_type = 'withdraw') AS withdraws
-FROM default.bmp_route_events
-GROUP BY minute, router_addr, peer_addr;

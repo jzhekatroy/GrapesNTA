@@ -39,6 +39,7 @@ exec "${STDBUF[@]}" "$BIN" \
   -ch-batch-size "${BMP_CH_BATCH_SIZE:-1000}" \
   -ch-flush-interval "${BMP_CH_FLUSH_INTERVAL:-1s}" \
   -ch-queue-size "${BMP_CH_QUEUE_SIZE:-4096}" \
+  -ch-queue-mode "${BMP_CH_QUEUE_MODE:-block}" \
   -allow-routers "${BMP_ALLOW_ROUTERS:-}" \
   -max-message-bytes "${BMP_MAX_MESSAGE_BYTES:-65535}" \
   -interval "${BMP_INTERVAL:-10s}" \

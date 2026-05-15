@@ -40,8 +40,16 @@ Router --BMP TCP--> bmpgrapes --INSERT--> ClickHouse bmp_*
 DDL: [`deploy/clickhouse/bmp.sql`](../deploy/clickhouse/bmp.sql).
 
 - `default.bmp_peers` - события peer up / peer down.
-- `default.bmp_route_events` - append-only лог announce/withdraw.
-- `default.bgp_updates_1m` - SummingMergeTree, минутная агрегация updates/withdrawals по роутеру и пиру. Наполняется MV `bgp_updates_1m_mv`.
+- `default.bmp_route_events` - append-only лог announce/withdraw (источник правды).
+- `default.bgp_updates_1m` - SummingMergeTree, минутная агрегация updates/withdrawals по роутеру и пиру. **Не имеет Materialized View** — наполняется периодическим `INSERT … SELECT` (или дашборд читает напрямую из `bmp_route_events`).
+
+> Почему без MV. Первичный RIB-dump от роутера — это десятки/сотни тысяч NLRI за несколько секунд. Если на горячий путь повесить MV `bgp_updates_1m_mv`, ClickHouse начинает падать в `memory limit exceeded` на стороне MV, а `bmpgrapes` из-за этого теряет строки. DDL и пример периодической агрегации — в [`deploy/clickhouse/bmp.sql`](../deploy/clickhouse/bmp.sql).
+>
+> Если на старой инсталляции MV уже создан, удалите его:
+>
+> ```sql
+> DROP TABLE IF EXISTS default.bgp_updates_1m_mv;
+> ```
 
 Применить:
 
@@ -79,7 +87,8 @@ sudo ./bin/bmpgrapes \
 | `-ch-peers-table` | `default.bmp_peers` | таблица peer-событий |
 | `-ch-batch-size` | `1000` | размер пакетной вставки |
 | `-ch-flush-interval` | `1s` | периодический flush |
-| `-ch-queue-size` | `4096` | глубина очереди, drop-on-overflow |
+| `-ch-queue-size` | `4096` | глубина внутренней очереди до ClickHouse |
+| `-ch-queue-mode` | `block` | поведение при переполнении: `block` (по умолчанию, TCP back-pressure роутеру, без потерь) или `drop` (legacy, дропает пакеты) |
 | `-allow-routers` | пусто | optional whitelist IP роутеров |
 | `-max-message-bytes` | `65535` | потолок BMP-сообщения |
 | `-interval` | `10s` | период логирования метрик |
@@ -176,8 +185,55 @@ set routing-options bmp station grapesnta route-monitoring pre-policy
 ```sql
 SELECT state, count() FROM default.bmp_peers WHERE ts >= now() - INTERVAL 10 MINUTE GROUP BY state;
 SELECT event_type, count() FROM default.bmp_route_events WHERE ts >= now() - INTERVAL 10 MINUTE GROUP BY event_type;
-SELECT minute, sum(announces), sum(withdraws) FROM default.bgp_updates_1m WHERE minute >= now() - INTERVAL 30 MINUTE GROUP BY minute ORDER BY minute DESC;
+
+-- Минутный график без MV: читаем напрямую из bmp_route_events
+SELECT
+    toStartOfMinute(ts) AS minute,
+    countIf(event_type = 'announce') AS announces,
+    countIf(event_type = 'withdraw') AS withdraws
+FROM default.bmp_route_events
+WHERE ts >= now() - INTERVAL 30 MINUTE
+GROUP BY minute
+ORDER BY minute DESC;
+
+-- bgp_updates_1m остается пустым до тех пор, пока не запущен периодический
+-- INSERT … SELECT (см. пример в deploy/clickhouse/bmp.sql).
 ```
+
+## Backpressure и очередь к ClickHouse
+
+`bmpgrapes` принимает BMP-сообщения по TCP и складывает их в ограниченную очередь,
+из которой воркер делает батч-INSERT в ClickHouse. При временной деградации ClickHouse
+(GC паузы, тяжелые мердж/MV в соседних таблицах, нехватка памяти и т.п.) очередь начинает
+заполняться. Поведение при заполнении определяется флагом `-ch-queue-mode`:
+
+- `block` (значение по умолчанию). Когда очередь полна, `EnqueueEvents` / `EnqueuePeers`
+  блокируется до появления места. Чтение из BMP TCP-сокета также приостанавливается,
+  TCP-receive буфер заполняется, и роутер автоматически замедляет отправку. Так
+  данные не теряются: либо они уйдут в ClickHouse, либо роутер сам поставит сессию
+  на паузу. В логах при этом периодически появляется:
+
+  ```text
+  WARN bmpgrapes clickhouse queue saturated (applying back-pressure)
+       blocked_rows_last_window=... queue_blocks_total=...
+  ```
+
+  Это нормально на старте, во время первичного RIB-dump.
+
+- `drop` (legacy). Когда очередь полна, батч отбрасывается, в `queue_drops_total`
+  растет счетчик, в логах появляется:
+
+  ```text
+  WARN bmpgrapes clickhouse queue full (drop mode)
+       dropped_rows_last_second=... queue_drops_total=...
+  ```
+
+  Использовать только если вам важнее, чтобы BMP-сессия с роутером не приостанавливалась,
+  и при этом терпимо терять часть записей о маршрутах.
+
+Размер очереди (`-ch-queue-size`) и размер батча (`-ch-batch-size`) можно поднять,
+если ClickHouse в норме обрабатывает поток, но не успевает за пиками. Для типового
+RIB-dump 1–2 миллиона префиксов: `-ch-queue-size 16384`, `-ch-batch-size 4000` работает.
 
 ## Метрики
 
@@ -193,7 +249,9 @@ bgp_parse_errs
 events_queued / events_written
 peers_queued / peers_written
 insert_errs
-queue_drops
+queue_drops    # копится только в режиме -ch-queue-mode=drop
+queue_blocks   # копится только в режиме -ch-queue-mode=block (метрика back-pressure)
+queue_mode     # текущий режим очереди
 ```
 
 ## Безопасность

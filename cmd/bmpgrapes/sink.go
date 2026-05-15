@@ -15,26 +15,60 @@ import (
 	chdriver "github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 )
 
+// queueMode controls overflow behaviour of the bounded queues feeding
+// ClickHouse. "block" propagates back-pressure to BMP TCP reads (no data loss,
+// router slows down). "drop" silently discards rows when the queue is full.
+type queueMode int
+
+const (
+	queueModeBlock queueMode = iota
+	queueModeDrop
+)
+
+func parseQueueMode(s string) (queueMode, error) {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "", "block":
+		return queueModeBlock, nil
+	case "drop":
+		return queueModeDrop, nil
+	default:
+		return queueModeBlock, fmt.Errorf("unknown queue mode %q (want block | drop)", s)
+	}
+}
+
+func (m queueMode) String() string {
+	if m == queueModeDrop {
+		return "drop"
+	}
+	return "block"
+}
+
 type clickhouseSink struct {
-	log              *slog.Logger
-	conn             chdriver.Conn
-	eventsTable      string
-	peersTable       string
-	batchSize        int
-	flushInterval    time.Duration
-	eventsCh         chan []RouteEventRow
-	peersCh          chan []PeerRow
+	log           *slog.Logger
+	conn          chdriver.Conn
+	eventsTable   string
+	peersTable    string
+	batchSize     int
+	flushInterval time.Duration
+	mode          queueMode
+	eventsCh      chan []RouteEventRow
+	peersCh       chan []PeerRow
 
-	eventsQueued atomic.Uint64
+	eventsQueued  atomic.Uint64
 	eventsWritten atomic.Uint64
-	peersQueued  atomic.Uint64
-	peersWritten atomic.Uint64
-	insertErrs   atomic.Uint64
-	queueDrops   atomic.Uint64
+	peersQueued   atomic.Uint64
+	peersWritten  atomic.Uint64
+	insertErrs    atomic.Uint64
+	queueDrops    atomic.Uint64
+	queueBlocks   atomic.Uint64
 
-	dropLogMu sync.Mutex
-	lastDropLog time.Time
+	dropLogMu     sync.Mutex
+	lastDropLog   time.Time
 	dropsSinceLog atomic.Uint64
+
+	blockLogMu     sync.Mutex
+	lastBlockLog   time.Time
+	blocksSinceLog atomic.Uint64
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -92,6 +126,7 @@ func newClickhouseSink(
 	batchSize int,
 	flushInterval time.Duration,
 	queueSize int,
+	mode queueMode,
 ) (*clickhouseSink, error) {
 	if eventsTable == "" || peersTable == "" {
 		return nil, errors.New("events and peers tables are required")
@@ -121,6 +156,7 @@ func newClickhouseSink(
 		peersTable:    peersTable,
 		batchSize:     batchSize,
 		flushInterval: flushInterval,
+		mode:          mode,
 		eventsCh:      make(chan []RouteEventRow, queueSize),
 		peersCh:       make(chan []PeerRow, queueSize),
 		ctx:           ctx,
@@ -135,6 +171,7 @@ func newClickhouseSink(
 		"batch_size", batchSize,
 		"flush_interval", flushInterval,
 		"queue_size", queueSize,
+		"queue_mode", mode.String(),
 	)
 	return s, nil
 }
@@ -317,12 +354,36 @@ func (s *clickhouseSink) runPeers() {
 	}
 }
 
-func (s *clickhouseSink) EnqueueEvents(rows []RouteEventRow) {
+// EnqueueEvents publishes a batch of route events to the sink queue.
+//
+// In "block" mode (default) the call blocks until there is capacity in the
+// queue, the caller's ctx is cancelled, or the sink itself is shutting down.
+// This is what propagates TCP back-pressure to the BMP router and avoids
+// data loss when ClickHouse temporarily slows down. In "drop" mode the call
+// never blocks: if the queue is full, the rows are counted as drops and
+// discarded.
+func (s *clickhouseSink) EnqueueEvents(ctx context.Context, rows []RouteEventRow) {
 	if s == nil || len(rows) == 0 {
 		return
 	}
 	cp := make([]RouteEventRow, len(rows))
 	copy(cp, rows)
+	if s.mode == queueModeBlock {
+		select {
+		case s.eventsCh <- cp:
+			return
+		default:
+		}
+		s.queueBlocks.Add(uint64(len(cp)))
+		s.blocksSinceLog.Add(uint64(len(cp)))
+		s.maybeLogBlocks()
+		select {
+		case s.eventsCh <- cp:
+		case <-ctx.Done():
+		case <-s.ctx.Done():
+		}
+		return
+	}
 	select {
 	case s.eventsCh <- cp:
 	default:
@@ -332,12 +393,28 @@ func (s *clickhouseSink) EnqueueEvents(rows []RouteEventRow) {
 	}
 }
 
-func (s *clickhouseSink) EnqueuePeers(rows []PeerRow) {
+func (s *clickhouseSink) EnqueuePeers(ctx context.Context, rows []PeerRow) {
 	if s == nil || len(rows) == 0 {
 		return
 	}
 	cp := make([]PeerRow, len(rows))
 	copy(cp, rows)
+	if s.mode == queueModeBlock {
+		select {
+		case s.peersCh <- cp:
+			return
+		default:
+		}
+		s.queueBlocks.Add(uint64(len(cp)))
+		s.blocksSinceLog.Add(uint64(len(cp)))
+		s.maybeLogBlocks()
+		select {
+		case s.peersCh <- cp:
+		case <-ctx.Done():
+		case <-s.ctx.Done():
+		}
+		return
+	}
 	select {
 	case s.peersCh <- cp:
 	default:
@@ -361,9 +438,31 @@ func (s *clickhouseSink) maybeLogDrops() {
 	if dropped == 0 {
 		return
 	}
-	s.log.Warn("bmpgrapes clickhouse queue full",
+	s.log.Warn("bmpgrapes clickhouse queue full (drop mode)",
 		"dropped_rows_last_second", dropped,
 		"queue_drops_total", s.queueDrops.Load(),
+		"events_written_total", s.eventsWritten.Load(),
+		"peers_written_total", s.peersWritten.Load(),
+	)
+}
+
+func (s *clickhouseSink) maybeLogBlocks() {
+	if !s.blockLogMu.TryLock() {
+		return
+	}
+	defer s.blockLogMu.Unlock()
+	now := time.Now()
+	if now.Sub(s.lastBlockLog) < 5*time.Second {
+		return
+	}
+	s.lastBlockLog = now
+	blocked := s.blocksSinceLog.Swap(0)
+	if blocked == 0 {
+		return
+	}
+	s.log.Warn("bmpgrapes clickhouse queue saturated (applying back-pressure)",
+		"blocked_rows_last_window", blocked,
+		"queue_blocks_total", s.queueBlocks.Load(),
 		"events_written_total", s.eventsWritten.Load(),
 		"peers_written_total", s.peersWritten.Load(),
 	)
@@ -377,6 +476,7 @@ func (s *clickhouseSink) Close() {
 		"peers_written", s.peersWritten.Load(),
 		"insert_errs", s.insertErrs.Load(),
 		"queue_drops", s.queueDrops.Load(),
+		"queue_blocks", s.queueBlocks.Load(),
 	)
 	s.cancel()
 	s.wg.Wait()
@@ -394,5 +494,7 @@ func (s *clickhouseSink) LogMetrics() {
 		"peers_written", s.peersWritten.Load(),
 		"insert_errs", s.insertErrs.Load(),
 		"queue_drops", s.queueDrops.Load(),
+		"queue_blocks", s.queueBlocks.Load(),
+		"queue_mode", s.mode.String(),
 	)
 }

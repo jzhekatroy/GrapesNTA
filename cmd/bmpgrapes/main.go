@@ -30,7 +30,8 @@ func main() {
 	peersTable := flag.String("ch-peers-table", "default.bmp_peers", "ClickHouse table for peer events")
 	batchSize := flag.Int("ch-batch-size", 1000, "ClickHouse INSERT batch size")
 	flushInt := flag.Duration("ch-flush-interval", time.Second, "ClickHouse flush interval")
-	queueSize := flag.Int("ch-queue-size", 4096, "bounded queue depth (drops on overflow)")
+	queueSize := flag.Int("ch-queue-size", 4096, "bounded queue depth")
+	queueModeStr := flag.String("ch-queue-mode", "block", "queue overflow behaviour: block (default, propagates TCP back-pressure to router; no data loss) | drop (legacy, discards batches when queue is full)")
 	allowlistFlag := flag.String("allow-routers", "", "optional comma-separated list of allowed router IPs (empty = allow all)")
 	maxMsgSize := flag.Int("max-message-bytes", 65535, "maximum BMP message size accepted (RFC 7854 caps at 4 GiB; routers stay under 64 KiB)")
 	metricsInterval := flag.Duration("interval", 10*time.Second, "metrics log interval")
@@ -46,7 +47,13 @@ func main() {
 		os.Exit(1)
 	}
 
-	sink, err := newClickhouseSink(log, *chDSN, *eventsTable, *peersTable, *batchSize, *flushInt, *queueSize)
+	qmode, err := parseQueueMode(*queueModeStr)
+	if err != nil {
+		log.Error("invalid -ch-queue-mode", "err", err)
+		os.Exit(1)
+	}
+
+	sink, err := newClickhouseSink(log, *chDSN, *eventsTable, *peersTable, *batchSize, *flushInt, *queueSize, qmode)
 	if err != nil {
 		log.Error("clickhouse", "err", err)
 		os.Exit(1)
@@ -326,7 +333,7 @@ func handleSession(
 				continue
 			}
 			row := peerRowFromUp(now, routerAddr, ph, pu)
-			sink.EnqueuePeers([]PeerRow{row})
+			sink.EnqueuePeers(ctx, []PeerRow{row})
 			log.Info("bmpgrapes peer up",
 				"peer", peerAddressNetIP(ph.PeerAddress, ph.IsIPv6()),
 				"peer_asn", ph.PeerAS,
@@ -352,7 +359,7 @@ func handleSession(
 				reason = peerDownReason(rest[0])
 			}
 			row := peerRowFromDown(now, routerAddr, ph, reason)
-			sink.EnqueuePeers([]PeerRow{row})
+			sink.EnqueuePeers(ctx, []PeerRow{row})
 			log.Info("bmpgrapes peer down",
 				"peer", peerAddressNetIP(ph.PeerAddress, ph.IsIPv6()),
 				"peer_asn", ph.PeerAS,
@@ -407,7 +414,7 @@ func handleSession(
 			}
 			sessionAnnounces.Add(ann)
 			sessionWithdraws.Add(wdr)
-			sink.EnqueueEvents(rows)
+			sink.EnqueueEvents(ctx, rows)
 			if sessionUpdSamples.Load() < updateSampleN {
 				sessionUpdSamples.Add(1)
 				first := rows[0]
