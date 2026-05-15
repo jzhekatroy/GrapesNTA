@@ -22,7 +22,11 @@ SETTINGS index_granularity = 8192;
 -- Keep the dictionary source free from FINAL. ReplacingMergeTree deduplication is
 -- resolved here by argMax over updated_at, so disabled rows immediately remove a
 -- prefix from the effective dictionary after SYSTEM RELOAD DICTIONARY.
-CREATE OR REPLACE VIEW default.local_networks_enabled AS
+-- ClickHouse 24.11 does not support CREATE OR REPLACE VIEW, so use an explicit
+-- DROP + CREATE sequence for idempotent deploys.
+DROP TABLE IF EXISTS default.local_networks_enabled;
+
+CREATE VIEW default.local_networks_enabled AS
 SELECT
     prefix,
     argMax(name, updated_at) AS name,

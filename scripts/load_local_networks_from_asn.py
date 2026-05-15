@@ -280,7 +280,10 @@ ORDER BY (family, prefix)
 SETTINGS index_granularity = 8192
 """)
     ch_run_query(base, f"""
-CREATE OR REPLACE VIEW {args.enabled_view} AS
+DROP TABLE IF EXISTS {args.enabled_view}
+""")
+    ch_run_query(base, f"""
+CREATE VIEW {args.enabled_view} AS
 SELECT
     prefix,
     argMax(name, updated_at) AS name,
