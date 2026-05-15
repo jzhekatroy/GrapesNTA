@@ -102,7 +102,9 @@ def ch_create_or_replace_dictionary(base: Sequence[str], args: argparse.Namespac
     password = args.dictionary_source_password or ""
     query = build_dictionary_query(args, password)
     redacted = build_dictionary_query(args, "***")
-    ch_run_query(base, f"DROP DICTIONARY IF EXISTS {args.dictionary}")
+    # Target ClickHouse 24.11 accepts CREATE DICTIONARY but rejects
+    # DROP DICTIONARY; dictionaries can be dropped through DROP TABLE.
+    ch_run_query(base, f"DROP TABLE IF EXISTS {args.dictionary}")
     ch_run_query(base, query, display_query=redacted)
 
 
