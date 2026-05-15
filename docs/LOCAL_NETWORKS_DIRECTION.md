@@ -186,28 +186,8 @@ computes direction by matching both endpoints against
 
 ```sql
 WITH
-    local_v4 AS
-    (
-        SELECT prefix
-        FROM default.local_networks_enabled
-        WHERE family = 4
-    ),
-    local_v6 AS
-    (
-        SELECT prefix
-        FROM default.local_networks_enabled
-        WHERE family = 6
-    ),
-    local_v4_list AS
-    (
-        SELECT groupArray(prefix) AS prefixes
-        FROM local_v4
-    ),
-    local_v6_list AS
-    (
-        SELECT groupArray(prefix) AS prefixes
-        FROM local_v6
-    )
+    (SELECT groupArray(prefix) FROM default.local_networks_enabled WHERE family = 4) AS local_v4,
+    (SELECT groupArray(prefix) FROM default.local_networks_enabled WHERE family = 6) AS local_v6
 SELECT
     minute,
     multiIf(
@@ -232,7 +212,7 @@ FROM
                         IPv4NumToString(toIPv4(reinterpretAsUInt32(reverse(substring(src_addr, 1, 4))))),
                         p
                     ),
-                    (SELECT prefixes FROM local_v4_list)
+                    local_v4
                 ),
             etype = 0x86DD,
                 arrayExists(
@@ -240,7 +220,7 @@ FROM
                         IPv6NumToString(reinterpretAsIPv6(src_addr)),
                         p
                     ),
-                    (SELECT prefixes FROM local_v6_list)
+                    local_v6
                 ),
             0
         ) AS src_is_local,
@@ -251,7 +231,7 @@ FROM
                         IPv4NumToString(toIPv4(reinterpretAsUInt32(reverse(substring(dst_addr, 1, 4))))),
                         p
                     ),
-                    (SELECT prefixes FROM local_v4_list)
+                    local_v4
                 ),
             etype = 0x86DD,
                 arrayExists(
@@ -259,7 +239,7 @@ FROM
                         IPv6NumToString(reinterpretAsIPv6(dst_addr)),
                         p
                     ),
-                    (SELECT prefixes FROM local_v6_list)
+                    local_v6
                 ),
             0
         ) AS dst_is_local
@@ -276,9 +256,11 @@ SETTINGS
 
 Notes:
 
-- `(SELECT prefixes FROM local_v4_list)` materializes the 75-element IPv4
-  array once per query, so per-row work is bounded by the array size and not
-  by a correlated subquery.
+- The two `WITH (SELECT ...) AS name` scalar subqueries each evaluate to a
+  single array of prefixes (75 IPv4 and 9 IPv6 for AS34665) and are computed
+  once per query, not per row. Avoid the `WITH name AS (SELECT ...)` CTE
+  form here — the proxy in front of the production ClickHouse rejects it
+  with a parser error.
 - For the empty-`local_networks` case all four checks evaluate to 0, so every
   row ends up as `'transit'`. The UI rule below converts that into
   outbound/total until real local prefixes are loaded.
