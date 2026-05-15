@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily local_networks refresh from BGP origin ASN
+
+[Timer]
+Unit=local-networks-loader.service
+OnCalendar=daily
+RandomizedDelaySec=1h
+Persistent=true
+
+[Install]
+WantedBy=timers.target

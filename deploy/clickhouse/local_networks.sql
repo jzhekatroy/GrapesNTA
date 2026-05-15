@@ -1,0 +1,35 @@
+-- Local network prefixes used to classify traffic direction.
+--
+-- Apply once, then populate default.local_networks either manually (MoonShine)
+-- or via scripts/load_local_networks_from_asn.py.
+--
+-- The IP_TRIE dictionary is created by scripts/load_local_networks_from_asn.py
+-- because its SOURCE credentials are deployment-specific.
+
+CREATE TABLE IF NOT EXISTS default.local_networks
+(
+    prefix     String,
+    family     UInt8,
+    name       String,
+    source     LowCardinality(String),
+    enabled    UInt8,
+    updated_at DateTime DEFAULT now()
+)
+ENGINE = ReplacingMergeTree(updated_at)
+ORDER BY (family, prefix)
+SETTINGS index_granularity = 8192;
+
+-- Keep the dictionary source free from FINAL. ReplacingMergeTree deduplication is
+-- resolved here by argMax over updated_at, so disabled rows immediately remove a
+-- prefix from the effective dictionary after SYSTEM RELOAD DICTIONARY.
+CREATE OR REPLACE VIEW default.local_networks_enabled AS
+SELECT
+    prefix,
+    argMax(name, updated_at) AS name,
+    argMax(source, updated_at) AS source,
+    max(updated_at) AS updated_at
+FROM default.local_networks
+GROUP BY
+    family,
+    prefix
+HAVING argMax(enabled, updated_at) = 1;

@@ -107,40 +107,59 @@ SELECT dictGetUInt32(
 
 ## Top Destination ASN By Traffic
 
-IPv4 destination traffic:
+IPv4 destination traffic. Aggregate to top ASN first, then join names; joining
+`asn_registry_enriched` before aggregation applies the JOIN to every raw flow
+and can be killed by ClickHouse OvercommitTracker during `JoiningTransform`.
 
 ```sql
-SELECT
-    asn,
-    any(a.name) AS as_name,
-    any(a.cc) AS country,
-    any(a.rir) AS rir,
-    formatReadableSize(sum(bytes)) AS traffic,
-    sum(bytes) AS bytes_total,
-    sum(packets) AS packets_total,
-    count() AS flows
-FROM
+WITH topn AS
 (
     SELECT
-        dictGetUInt32(
-            'default.bgp_origin_asn_dict',
-            'origin_asn',
-            tuple(toIPv4(reinterpretAsUInt32(reverse(substring(dst_addr, 1, 4)))))
-        ) AS asn,
-        bytes,
-        packets
-    FROM default.flows_raw
-    WHERE time_received_ns >= now() - INTERVAL 1 HOUR
-      AND etype = 0x0800
-) AS f
-LEFT JOIN default.asn_registry_enriched AS a ON f.asn = a.asn
-WHERE asn != 0
-GROUP BY asn
-ORDER BY bytes_total DESC
-LIMIT 20;
+        asn,
+        sum(bytes)   AS bytes_total,
+        sum(packets) AS packets_total,
+        count()      AS flows
+    FROM
+    (
+        SELECT
+            dictGetUInt32(
+                'default.bgp_origin_asn_dict',
+                'origin_asn',
+                tuple(toIPv4(reinterpretAsUInt32(reverse(substring(dst_addr, 1, 4)))))
+            ) AS asn,
+            bytes,
+            packets
+        FROM default.flows_raw
+        WHERE time_received_ns >= now() - INTERVAL 15 MINUTE
+          AND etype = 0x0800
+    )
+    WHERE asn != 0
+    GROUP BY asn
+    ORDER BY bytes_total DESC
+    LIMIT 20
+)
+SELECT
+    t.asn,
+    e.name AS as_name,
+    e.cc   AS country,
+    e.rir  AS rir,
+    formatReadableSize(t.bytes_total) AS traffic,
+    t.bytes_total,
+    t.packets_total,
+    t.flows
+FROM topn AS t
+LEFT JOIN default.asn_registry_enriched AS e ON e.asn = t.asn
+ORDER BY t.bytes_total DESC
+SETTINGS
+    max_memory_usage = 4000000000,
+    max_bytes_before_external_group_by = 2000000000,
+    max_threads = 4,
+    join_algorithm = 'parallel_hash';
 ```
 
-For source ASN, replace `dst_addr` with `src_addr`.
+For source ASN, replace `dst_addr` with `src_addr`. For longer windows, prefer
+a minute aggregate table (for example `traffic_asn_1m`) instead of repeatedly
+scanning `flows_raw`.
 
 ## systemd
 

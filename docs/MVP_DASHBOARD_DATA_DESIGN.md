@@ -80,6 +80,15 @@ src local, dst local        -> internal
 src external, dst external  -> transit/unknown
 ```
 
+DDL и рабочий процесс: `deploy/clickhouse/local_networks.sql` и
+`docs/LOCAL_NETWORKS_DIRECTION.md`.
+
+Для текущего MVP локальная сеть может автоматически заполняться из BGP origin
+ASN через `scripts/load_local_networks_from_asn.py`. В текущей тестовой
+конфигурации `195.2.241.1` резолвится в `AS34665 PINDC-AS`, поэтому loader
+берет активные префиксы из `bgp_prefix_origin_current WHERE origin_asn = 34665`,
+схлопывает more-specific префиксы и обновляет `local_networks_dict` (`IP_TRIE`).
+
 ### `geo_prefix_country`
 
 Справочник IP-префикс -> страна. Используется для heatmap и top countries.
@@ -314,12 +323,12 @@ Top domains и DNS-аналитика:
 - DNS;
 - BMP/BGP.
 
-Но честное разделение `in/out` недоступно. Для агрегатов направление должно
-попадать в `unknown`, либо UI должен скрывать/помечать графики `in/out` как
-неполные.
+Но честное разделение `in/out` недоступно. Для MVP UI можно считать
+`unknown`/`transit` как исходящий/total трафик, чтобы первый график не был
+пустым до настройки локальных сетей.
 
 ```text
-local_networks is empty -> direction = unknown
+local_networks is empty -> direction = unknown/transit -> UI shows as out/total
 ```
 
 ### If `local_networks` changes
