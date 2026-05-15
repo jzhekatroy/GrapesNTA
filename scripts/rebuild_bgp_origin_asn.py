@@ -134,25 +134,34 @@ INSERT INTO {args.staging_table}
 SELECT
     if(
         family = 4,
-        concat(IPv4NumToString(reinterpretAsUInt32(reverse(substring(prefix, 1, 4)))), '/', toString(prefix_len)),
-        concat(IPv6NumToString(prefix), '/', toString(prefix_len))
+        concat(IPv4NumToString(reinterpretAsUInt32(reverse(substring(prefix_bin, 1, 4)))), '/', toString(prefix_len)),
+        concat(IPv6NumToString(prefix_bin), '/', toString(prefix_len))
     ) AS prefix,
     family,
-    argMax(origin_asn, ts) AS origin_asn,
-    argMax(peer_asn, ts) AS peer_asn,
+    last_origin_asn AS origin_asn,
+    last_peer_asn AS peer_asn,
     toUInt32(1) AS active_paths,
-    max(ts) AS last_ts,
+    last_ts,
     'bmp_route_events' AS source,
     now() AS snapshot_ts
-FROM {args.route_events_table}
-WHERE ts >= now() - INTERVAL {args.lookback_days} DAY
-GROUP BY
-    family,
-    prefix,
-    prefix_len
-HAVING
-    argMax(event_type, ts) = 'announce'
-    AND argMax(origin_asn, ts) != 0
+FROM
+(
+    SELECT
+        family,
+        prefix AS prefix_bin,
+        prefix_len,
+        argMax(event_type, ts) AS last_event,
+        argMax(origin_asn, ts) AS last_origin_asn,
+        argMax(peer_asn, ts) AS last_peer_asn,
+        max(ts) AS last_ts
+    FROM {args.route_events_table}
+    WHERE ts >= now() - INTERVAL {args.lookback_days} DAY
+    GROUP BY
+        family,
+        prefix,
+        prefix_len
+)
+WHERE last_event = 'announce' AND last_origin_asn != 0
 SETTINGS max_bytes_before_external_group_by = 1073741824
 """
 
