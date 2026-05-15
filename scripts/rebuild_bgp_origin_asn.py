@@ -122,13 +122,13 @@ def ch_create_or_replace_dictionary(base: Sequence[str], args: argparse.Namespac
     ch_run_query(base, query, display_query=redacted_query)
 
 
-def build_rebuild_query(args: argparse.Namespace) -> str:
-    # MVP aggregation: latest event per prefix.
+def build_rebuild_query(args: argparse.Namespace, family: int) -> str:
+    # MVP aggregation: latest event per prefix, one IP family at a time.
     #
-    # The previous peer-aware two-stage aggregation is more correct for multiple
-    # independent BMP peers, but it can be very memory-heavy during initial RIB
-    # dumps. Current deployment has one BMP peer, so grouping directly by prefix
-    # is the safer operational default.
+    # Splitting IPv4 and IPv6 halves the aggregation cardinality per query and
+    # keeps memory predictable on the shared ClickHouse. External group-by spill
+    # is enabled and max_memory_usage is capped to stay below the server-wide
+    # overcommit tracker limit.
     return f"""
 INSERT INTO {args.staging_table}
 SELECT
@@ -156,13 +156,18 @@ FROM
         max(ts) AS last_ts
     FROM {args.route_events_table}
     WHERE ts >= now() - INTERVAL {args.lookback_days} DAY
+      AND family = {family}
     GROUP BY
         family,
         prefix,
         prefix_len
 )
 WHERE last_event = 'announce' AND last_origin_asn != 0
-SETTINGS max_bytes_before_external_group_by = 1073741824
+SETTINGS
+    max_memory_usage = {args.max_memory_usage},
+    max_bytes_before_external_group_by = {args.max_bytes_before_external_group_by},
+    max_threads = {args.max_threads},
+    group_by_two_level_threshold_bytes = 50000000
 """
 
 
@@ -202,8 +207,26 @@ def main() -> int:
     p.add_argument(
         "--lookback-days",
         type=int,
-        default=int(env("BGPORIGIN_LOOKBACK_DAYS", "7") or 7),
+        default=int(env("BGPORIGIN_LOOKBACK_DAYS", "1") or 1),
         help="Route event lookback window used to infer current active prefixes",
+    )
+    p.add_argument(
+        "--max-memory-usage",
+        type=int,
+        default=int(env("BGPORIGIN_MAX_MEMORY_USAGE", str(4 * 1024 * 1024 * 1024)) or 4 * 1024 * 1024 * 1024),
+        help="Per-query max_memory_usage (bytes). Stay well below ClickHouse server total limit.",
+    )
+    p.add_argument(
+        "--max-bytes-before-external-group-by",
+        type=int,
+        default=int(env("BGPORIGIN_MAX_BYTES_BEFORE_EXTERNAL_GROUP_BY", str(1024 * 1024 * 1024)) or 1024 * 1024 * 1024),
+        help="Aggregation spill threshold (bytes). Should be lower than --max-memory-usage.",
+    )
+    p.add_argument(
+        "--max-threads",
+        type=int,
+        default=int(env("BGPORIGIN_MAX_THREADS", "2") or 2),
+        help="Per-query thread limit. Lower values reduce memory pressure.",
     )
     p.add_argument(
         "--dictionary-source-host",
@@ -259,7 +282,8 @@ def main() -> int:
     base = clickhouse_base_args(args)
 
     ch_run_query(base, f"TRUNCATE TABLE IF EXISTS {args.staging_table}")
-    ch_run_query(base, build_rebuild_query(args))
+    for family in (4, 6):
+        ch_run_query(base, build_rebuild_query(args, family))
 
     rows = ch_run_query(base, f"SELECT count() FROM {args.staging_table}").strip()
     if rows == "" or rows == "0":
