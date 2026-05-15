@@ -370,9 +370,20 @@ ORDER BY asn;
 ```
 
 Team Cymru's bulk endpoint is rate-limited but generous; `ASNNAMES_CHUNK_SIZE=5000`
-per TCP session is a safe default. If a chunk fails the loader aborts before
-inserting, so `default.asn_names` is never partially overwritten — the previous
-snapshot stays in place until the next successful run.
+per TCP session is a safe default.
+
+INSERTs into `default.asn_names` are split into `ASNNAMES_INSERT_BATCH_SIZE`
+(default 10 000) row batches with per-batch retries on transient ClickHouse
+errors — most importantly `MEMORY_LIMIT_EXCEEDED` (Code 241). This is the same
+class of failure that historically caused `bmpgrapes` drops during full RIB
+dumps: when the server is briefly overcommitted by another workload the
+OvercommitTracker may stop any query, including ours. With batched retries the
+loader waits for memory to free up and resumes from the failed batch instead
+of aborting the whole run.
+
+Each batch is also issued with explicit `SETTINGS max_memory_usage`,
+`max_insert_threads = 1`, `max_threads = 2` to make its own working set
+predictable and small.
 
 Top origin ASN for BMP with country/RIR/name:
 

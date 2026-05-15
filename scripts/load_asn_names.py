@@ -23,6 +23,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import time
 from datetime import datetime, timezone
 from typing import BinaryIO, Iterator, List, Optional, Sequence, Tuple
 
@@ -75,6 +76,124 @@ def ch_run_query(
     if capture:
         return proc.stdout.decode("utf-8", errors="replace")
     return None
+
+
+def _is_retryable_error(stderr: str) -> bool:
+    """True for transient ClickHouse errors that we should back off and retry.
+
+    Code 241 is MEMORY_LIMIT_EXCEEDED — typical when the server is briefly
+    overcommitted by other workloads (RIB dumps from bmpgrapes, periodic
+    rebuilds, etc.). Code 252 is TOO_MANY_PARTS, similarly transient.
+    """
+    if not stderr:
+        return False
+    return (
+        "Code: 241" in stderr
+        or "MEMORY_LIMIT_EXCEEDED" in stderr
+        or "Code: 252" in stderr
+        or "TOO_MANY_PARTS" in stderr
+        or "Code: 49" in stderr  # LOGICAL_ERROR sometimes wraps transient races
+    )
+
+
+def ch_run_query_retry(
+    base: Sequence[str],
+    query: str,
+    *,
+    input_bytes: Optional[bytes] = None,
+    attempts: int = 5,
+    delay: float = 30.0,
+    label: str = "query",
+    display_query: Optional[str] = None,
+) -> None:
+    """Run a query with retries on transient memory/overcommit errors.
+
+    input_bytes is preferred over stdin file handles because retries become
+    trivial: we keep the bytes in memory and resend on each attempt.
+    """
+    last_stderr = ""
+    last_rc = 0
+    for attempt in range(1, attempts + 1):
+        proc = subprocess.run(
+            list(base) + ["--query", query],
+            input=input_bytes,
+            capture_output=True,
+        )
+        if proc.returncode == 0:
+            return
+        last_rc = proc.returncode
+        last_stderr = proc.stderr.decode("utf-8", errors="replace").strip()
+        if attempt < attempts and _is_retryable_error(last_stderr):
+            wait = delay * attempt  # linear backoff is fine for slow memory recovery
+            head = last_stderr.splitlines()[0] if last_stderr else ""
+            print(
+                f"{label}: retryable error attempt {attempt}/{attempts}, "
+                f"sleeping {wait:.0f}s ({head[:160]})",
+                file=sys.stderr,
+                flush=True,
+            )
+            time.sleep(wait)
+            continue
+        break
+    shown_query = display_query if display_query is not None else query
+    raise RuntimeError(
+        f"clickhouse-client failed (exit {last_rc}) after {attempts} attempts\n"
+        f"label: {label}\n"
+        f"query: {shown_query[:500]}{'...' if len(shown_query) > 500 else ''}\n"
+        f"stderr: {last_stderr}"
+    )
+
+
+def insert_tsv_in_batches(
+    base: Sequence[str],
+    target_table: str,
+    tsv_path: str,
+    *,
+    batch_size: int,
+    attempts: int,
+    delay: float,
+    progress: bool = False,
+) -> int:
+    """INSERT a TSV file into ClickHouse in fixed-row batches with retries.
+
+    Splitting keeps each attempt's working set small so that an overcommitted
+    server can usually accept it on the next try. SETTINGS on the INSERT cap
+    the per-query memory budget and limit insert-thread fan-out.
+    """
+    insert_q = (
+        f"INSERT INTO {target_table} (asn, name, org_id, source, updated_at) "
+        f"SETTINGS max_memory_usage = 1073741824, "
+        f"max_insert_threads = 1, "
+        f"max_threads = 2 "
+        f"FORMAT TabSeparated"
+    )
+    with open(tsv_path, "rb") as src:
+        data = src.read()
+    lines = data.splitlines(keepends=True)
+    total = len(lines)
+    if total == 0:
+        raise RuntimeError("nothing to insert: empty TSV")
+    inserted = 0
+    n_batches = (total + batch_size - 1) // batch_size
+    for bi, i in enumerate(range(0, total, batch_size), start=1):
+        chunk = b"".join(lines[i : i + batch_size])
+        if progress:
+            print(
+                f"insert batch {bi}/{n_batches} rows={min(batch_size, total - i)} "
+                f"bytes={len(chunk)} ...",
+                file=sys.stderr,
+                flush=True,
+            )
+        ch_run_query_retry(
+            base,
+            insert_q,
+            input_bytes=chunk,
+            attempts=attempts,
+            delay=delay,
+            label=f"INSERT batch {bi}/{n_batches}",
+        )
+        inserted += min(batch_size, total - i)
+    return inserted
 
 
 def fetch_asn_list(base: Sequence[str], args: argparse.Namespace) -> List[int]:
@@ -294,6 +413,30 @@ def main() -> int:
         default=int(env("ASNNAMES_MAX_ASNS", "0") or 0),
         help="If > 0, only resolve the first N ASN from the source list (debug)",
     )
+    p.add_argument(
+        "--insert-batch-size",
+        type=int,
+        default=int(env("ASNNAMES_INSERT_BATCH_SIZE", "10000") or 10000),
+        help="Rows per INSERT batch (smaller = friendlier to a memory-pressured server)",
+    )
+    p.add_argument(
+        "--retry-attempts",
+        type=int,
+        default=int(env("ASNNAMES_RETRY_ATTEMPTS", "6") or 6),
+        help="Attempts per INSERT batch on transient errors (memory/overcommit)",
+    )
+    p.add_argument(
+        "--retry-delay",
+        type=float,
+        default=float(env("ASNNAMES_RETRY_DELAY", "30") or 30),
+        help="Seconds to wait between retries (multiplied by attempt number)",
+    )
+    p.add_argument(
+        "--skip-optimize",
+        action="store_true",
+        default=bool(env("ASNNAMES_SKIP_OPTIMIZE")),
+        help="Do not run OPTIMIZE TABLE FINAL after insert",
+    )
     p.add_argument("--keep-tsv", action="store_true")
     p.add_argument("--progress", action="store_true", default=bool(env("ASNNAMES_PROGRESS")))
     args = p.parse_args()
@@ -325,20 +468,32 @@ def main() -> int:
                 f"too few rows parsed ({rows} < {args.min_rows}); Cymru likely unreachable or empty reply"
             )
 
-        insert_q = (
-            f"INSERT INTO {args.target_table} (asn, name, org_id, source, updated_at) "
-            f"FORMAT TabSeparated"
+        inserted = insert_tsv_in_batches(
+            base,
+            args.target_table,
+            tmp_tsv,
+            batch_size=args.insert_batch_size,
+            attempts=args.retry_attempts,
+            delay=args.retry_delay,
+            progress=args.progress,
         )
-        with open(tmp_tsv, "rb") as fbin:
-            ch_run_query(base, insert_q, stdin=fbin)
+        print(f"inserted rows: {inserted}", file=sys.stderr)
 
         # ReplacingMergeTree deduplicates lazily during merges; nudge it so that
         # asn_registry_enriched returns fresh names without waiting for a merge.
-        try:
-            ch_run_query(base, f"OPTIMIZE TABLE {args.target_table} FINAL")
-        except RuntimeError as e:
-            # OPTIMIZE is best-effort: failure should not fail the loader.
-            print(f"OPTIMIZE warning: {e}", file=sys.stderr)
+        # On a memory-pressured server this is best-effort: if it fails we keep
+        # the inserted rows and let background merges catch up.
+        if not args.skip_optimize:
+            try:
+                ch_run_query_retry(
+                    base,
+                    f"OPTIMIZE TABLE {args.target_table} FINAL",
+                    attempts=args.retry_attempts,
+                    delay=args.retry_delay,
+                    label="OPTIMIZE FINAL",
+                )
+            except RuntimeError as e:
+                print(f"OPTIMIZE warning: {e}", file=sys.stderr)
 
         print("load_asn_names: done", file=sys.stderr)
         return 0
