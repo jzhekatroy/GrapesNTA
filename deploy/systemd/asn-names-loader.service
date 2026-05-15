@@ -5,7 +5,12 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
+# Loaded first: asn-names-loader.env wins for any ASNNAMES_CH_* it defines.
 EnvironmentFile=-/etc/asn-names-loader/asn-names-loader.env
+# Loaded second: when asn-names-loader.env keeps the ASNNAMES_CH_* block
+# commented out, the loader transparently inherits the ClickHouse endpoint and
+# credentials from geoloaderd.env (resolved as a coherent tuple, never mixed).
+EnvironmentFile=-/etc/geoloaderd/geoloaderd.env
 ExecStart=/usr/bin/python3 /opt/GrapesNTA/scripts/load_asn_names.py
 
 TimeoutStartSec=3600

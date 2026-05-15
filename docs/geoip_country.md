@@ -334,13 +334,15 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now asn-names-loader.timer
 ```
 
-By default the env example leaves all `ASNNAMES_CH_*` connection variables
-commented out and the script falls back to the built-in `localhost:9000`
-defaults — that is normally what you want on the ClickHouse host itself. If
-you need different credentials (for example because the local `default` user
-has a password), uncomment **all five** `ASNNAMES_CH_*` variables in
-`/etc/asn-names-loader/asn-names-loader.env` and set them together: mixing
-some from this file and some from `geoloaderd.env` is a footgun.
+The systemd unit loads `/etc/asn-names-loader/asn-names-loader.env` first and
+then `/etc/geoloaderd/geoloaderd.env`. By default the example keeps all
+`ASNNAMES_CH_*` variables commented out — the loader then inherits the full
+`{host, port, user, password, database}` tuple from `GEOLOADERD_CH_*`, so on a
+host where `geoloaderd` is already configured you do not need to repeat the
+ClickHouse credentials. If you want the ASN loader to talk to a different
+ClickHouse, uncomment **all five** `ASNNAMES_CH_*` lines together — partial
+overrides are rejected at resolution time to avoid silent auth failures
+(USER from one source mixed with PASSWORD from another).
 
 Manual one-off run (smoke test on the first 200 ASN):
 
