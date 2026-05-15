@@ -188,11 +188,40 @@ pps = packets / bucket_seconds
 станут тяжелыми, добавляем физические rollup-таблицы `traffic_1h` и
 `traffic_1d`.
 
-Для графика `Traffic In/Out, bps` источник данных в MVP — не `traffic_1m`, а
-запрос по `flows_raw` + `local_asns_enabled` + `local_networks_enabled` за
-выбранное окно (см. `docs/LARAVEL_MOONSHINE_TRAFFIC_IN_OUT.md`). `traffic_1m`
-остаётся источником total bps/pps/flows; после установки dictionary он же
-станет источником честного in/out по всей истории.
+Для графика `Traffic In/Out, bps` источник данных в MVP — не `traffic_1m` и
+не raw `flows_raw`, а `traffic_asn_pair_1m` (см.
+`docs/LARAVEL_MOONSHINE_TRAFFIC_IN_OUT.md`). `traffic_1m` остаётся источником
+total bps/pps/flows; после установки prefix dictionary он же может стать
+источником честного prefix-based in/out.
+
+### `traffic_asn_pair_1m`
+
+MVP-агрегат для быстрого `Traffic In/Out, bps` без сканирования `flows_raw`.
+DDL: `deploy/clickhouse/traffic_asn_pair_1m.sql`.
+
+Поля:
+
+- minute;
+- src_asn;
+- dst_asn;
+- bytes;
+- packets;
+- flows_count.
+
+Направление не пишется в таблицу. Laravel считает его при чтении по
+`local_asns_enabled`:
+
+```text
+src_asn local, dst_asn external -> out
+src_asn external, dst_asn local -> in
+src_asn local, dst_asn local    -> internal
+otherwise                       -> transit
+```
+
+Это позволяет менять список local/customer ASN без пересчёта истории. Ограничение
+MVP: агрегат покрывает IPv4 ASN-based сценарий. Для операторов без AS нужен
+prefix-based direction через ClickHouse `local_networks_dict` или classifier в
+collector-е.
 
 ### `traffic_country_1m`
 

@@ -42,10 +42,10 @@ So the current MVP is **dictionary-less**:
   loaded by `scripts/load_local_networks_from_asn.py`.
 - `default.traffic_1m_mv` writes `direction = 'unknown'` and is therefore
   immune to the dictionary problem.
-- `in / out / internal / transit` is computed in API queries. IPv4 direction
-  uses `default.bgp_origin_asn_dict` plus `default.local_asns_enabled`; IPv6
-  direction uses the small IPv6 prefix list from `default.local_networks_enabled`.
-  Short windows (1 h default) make this affordable.
+- `in / out / internal / transit` is computed in API queries from
+  `default.traffic_asn_pair_1m` for the current ASN-based MVP. The aggregate
+  stores `src_asn/dst_asn`, while direction is derived at read time from
+  `default.local_asns_enabled`.
 
 The XML template `deploy/clickhouse/local_networks_dict.xml` is kept in the
 repo. As soon as someone with shell access to the ClickHouse host installs it
@@ -202,9 +202,15 @@ FORMAT PrettyCompactMonoBlock
 
 ## Direction On The Fly: SQL Recipe
 
-The dashboard uses this query as the source for `Traffic In/Out, bps`. It
-runs on the **raw** `flows_raw` table for short windows (default 1 hour) and
-computes direction with a hybrid approach:
+The dashboard must not use this raw-flow query in production. It is useful only
+for diagnostics and short manual checks. A 15-minute raw query can already hit
+memory limits on the production flow volume.
+
+For the Laravel dashboard, use
+[`docs/LARAVEL_MOONSHINE_TRAFFIC_IN_OUT.md`](LARAVEL_MOONSHINE_TRAFFIC_IN_OUT.md)
+and read from `default.traffic_asn_pair_1m`.
+
+The raw diagnostic query computes direction with a hybrid approach:
 
 - **IPv4** flows use `dictGetUInt32('default.bgp_origin_asn_dict', 'origin_asn', ip)`.
   An IPv4 is local when its BGP origin ASN is present in
@@ -296,11 +302,53 @@ Notes:
   `default.local_networks` for IPv4 too and switch the IPv4 branch to a
   `dictHas` lookup once `default.local_networks_dict` is installed.
 - For longer windows (24 h, 7 d) prefer one of:
-  - the same query with a larger `WHERE time_received_ns >= now() - INTERVAL 1 DAY`
-    and a coarser bucket, e.g. `toStartOfFiveMinute`;
+  - the ASN-pair aggregate `default.traffic_asn_pair_1m` (current MVP path);
   - a future direction-aware `traffic_1m_mv` (template in
     `deploy/clickhouse/traffic_1m_mv.sql`) once the dictionary is available
     on the CH host.
+
+## ASN Pair Aggregate
+
+DDL:
+
+```text
+deploy/clickhouse/traffic_asn_pair_1m.sql
+```
+
+Apply:
+
+```bash
+clickhouse-client --host 95.215.1.30 --port 6124 --user develop --password 'PASSWORD' \
+  --multiquery < deploy/clickhouse/traffic_asn_pair_1m.sql
+```
+
+Objects:
+
+```text
+default.traffic_asn_pair_1m
+default.traffic_asn_pair_1m_mv
+```
+
+Schema:
+
+```text
+minute, src_asn, dst_asn, bytes, packets, flows_count
+```
+
+This table is intentionally not direction-specific. Direction is derived while
+reading:
+
+```text
+src_asn local, dst_asn external -> out
+src_asn external, dst_asn local -> in
+src_asn local, dst_asn local    -> internal
+otherwise                       -> transit
+```
+
+This lets operators change `local_asns_enabled` without rebuilding history.
+The trade-off is that this MVP aggregate only covers IPv4 ASN-based direction.
+Operators without ASNs need prefix-based classification through
+`local_networks_dict` or collector-side prefix matching.
 
 ## UI Rule
 

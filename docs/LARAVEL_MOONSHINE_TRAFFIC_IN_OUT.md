@@ -1,75 +1,137 @@
 # Laravel + MoonShine: Traffic In/Out bps
 
-This is the implementation contract for the first traffic dashboard chart.
+Инструкция для разработчика Laravel + MoonShine. Цель — построить график
+`Traffic In/Out, bps` без тяжелого чтения `default.flows_raw` при каждом
+открытии страницы.
 
-## Goal
+## Ключевая идея
 
-Build a `Traffic In/Out, bps` time-series chart with:
+API должен читать агрегат:
 
-- default time range: last 1 hour;
-- selectable scale/bucket: `1m`, `5m`, `15m`, `1h`;
-- series: `in_bps`, `out_bps`, and optional `transit_bps`;
-- fallback rule: if no local ASNs are configured, show all traffic as
-  `out_bps`/total so the chart is not empty.
+```text
+default.traffic_asn_pair_1m
+```
 
-## ClickHouse Config Tables
+а не `default.flows_raw`.
 
-Apply:
+Агрегат содержит трафик по парам origin ASN:
+
+```text
+minute
+src_asn
+dst_asn
+bytes
+packets
+flows_count
+```
+
+Direction (`in/out/internal/transit`) считается уже в API-запросе по списку
+локальных ASN из:
+
+```text
+default.local_asns_enabled
+```
+
+Почему так: если завтра оператор добавит `AS50509 TRANSROUTE` или другой
+customer/downstream ASN в список локальных, старую историю не надо
+пересчитывать. Мы просто иначе классифицируем те же `src_asn/dst_asn` пары.
+
+## Что применить в ClickHouse
 
 ```bash
 clickhouse-client --host 95.215.1.30 --port 6124 --user develop --password "$CH_PASS" \
   --multiquery < deploy/clickhouse/local_networks.sql
+
+clickhouse-client --host 95.215.1.30 --port 6124 --user develop --password "$CH_PASS" \
+  --multiquery < deploy/clickhouse/traffic_asn_pair_1m.sql
 ```
 
-Important objects:
+`traffic_asn_pair_1m.sql` создает:
 
 ```text
-default.local_asns
-default.local_asns_enabled
-default.local_networks
-default.local_networks_enabled
+default.traffic_asn_pair_1m
+default.traffic_asn_pair_1m_mv
+```
+
+MV будет заполнять агрегат только для IPv4 (`etype = 0x0800`), используя уже
+рабочий dictionary:
+
+```text
 default.bgp_origin_asn_dict
-default.flows_raw
 ```
 
-`local_asns_enabled` is the primary direction config for IPv4. The loader adds
-`AS34665 PINDC-AS` automatically. MoonShine should allow operators to enable
-additional customer/downstream ASNs such as `AS50509 TRANSROUTE` if they should
-count as local rather than transit.
+## Проверка агрегата
 
-## MoonShine Admin
-
-Create a resource for `default.local_asns`:
-
-```text
-asn        UInt32
-name       String
-source     String
-enabled    UInt8 / bool
-updated_at DateTime
+```bash
+clickhouse-client --host 95.215.1.30 --port 6124 --user develop --password "$CH_PASS" --query "
+SELECT
+    minute,
+    src_asn,
+    dst_asn,
+    formatReadableSize(sum(bytes)) AS traffic,
+    sum(bytes) AS bytes_total,
+    sum(flows_count) AS flows
+FROM default.traffic_asn_pair_1m
+WHERE minute >= now() - INTERVAL 10 MINUTE
+GROUP BY
+    minute,
+    src_asn,
+    dst_asn
+ORDER BY minute DESC, bytes_total DESC
+LIMIT 20
+FORMAT PrettyCompactMonoBlock
+"
 ```
 
-Recommended UI:
+## Backfill истории
 
-- list columns: `asn`, `name`, `source`, `enabled`, `updated_at`;
-- filters: `enabled`, `source`, text search by `asn`/`name`;
-- actions: enable/disable ASN;
-- do not delete rows for normal changes; insert a newer row with
-  `enabled = 0` or `enabled = 1` because the table uses
-  `ReplacingMergeTree(updated_at)`.
+MV считает только новые flow после создания MV. Чтобы заполнить последние 15
+минут истории:
 
-When an ASN is added or disabled, the dashboard query sees it immediately
-through `default.local_asns_enabled`.
+```bash
+clickhouse-client --host 95.215.1.30 --port 6124 --user develop --password "$CH_PASS" --query "
+INSERT INTO default.traffic_asn_pair_1m
+SELECT
+    toStartOfMinute(time_received_ns) AS minute,
+    dictGetUInt32(
+        'default.bgp_origin_asn_dict',
+        'origin_asn',
+        tuple(toIPv4(reinterpretAsUInt32(reverse(substring(src_addr, 1, 4)))))
+    ) AS src_asn,
+    dictGetUInt32(
+        'default.bgp_origin_asn_dict',
+        'origin_asn',
+        tuple(toIPv4(reinterpretAsUInt32(reverse(substring(dst_addr, 1, 4)))))
+    ) AS dst_asn,
+    sum(bytes) AS bytes,
+    sum(packets) AS packets,
+    count() AS flows_count
+FROM default.flows_raw
+WHERE etype = 0x0800
+  AND time_received_ns >= now() - INTERVAL 15 MINUTE
+GROUP BY
+    minute,
+    src_asn,
+    dst_asn
+SETTINGS
+    max_memory_usage = 4000000000,
+    max_bytes_before_external_group_by = 2000000000,
+    max_threads = 4
+"
+```
+
+Для больших периодов делать backfill маленькими окнами, например по 15 минут
+или 1 часу.
 
 ## API Endpoint
 
-Suggested route:
+Сделать endpoint:
 
 ```text
 GET /api/traffic/in-out
 ```
 
-Query parameters:
+Параметры:
 
 ```text
 from   ISO-8601 UTC timestamp, optional, default now - 1 hour
@@ -77,7 +139,7 @@ to     ISO-8601 UTC timestamp, optional, default now
 scale  one of: 1m, 5m, 15m, 1h; optional, default 1m
 ```
 
-Map `scale` to bucket seconds in Laravel after validation:
+Маппинг `scale`:
 
 ```php
 $bucketSeconds = match ($scale) {
@@ -85,29 +147,31 @@ $bucketSeconds = match ($scale) {
     '5m' => 300,
     '15m' => 900,
     '1h' => 3600,
+    default => throw ValidationException::withMessages([
+        'scale' => 'Invalid scale',
+    ]),
 };
 ```
 
-Only interpolate `$bucketSeconds` after this whitelist. Bind or safely format
-`from`/`to` as UTC timestamps.
+`scale` обязательно валидировать whitelist-ом. В SQL подставлять только
+проверенное число `$bucketSeconds`.
 
-## ClickHouse Query
+## SQL Для API
 
-This query returns one row per bucket. It computes direction on the fly:
+Подставить:
 
-- IPv4: origin ASN from `bgp_origin_asn_dict`; local when ASN is in
-  `local_asns_enabled`;
-- IPv6: prefix match against the small IPv6 list in `local_networks_enabled`;
-- empty `local_asns_enabled`: every flow becomes `out`.
+```text
+{bucket_seconds}  60 / 300 / 900 / 3600
+{from_utc}        UTC timestamp
+{to_utc}          UTC timestamp
+```
 
-Replace `{bucket_seconds}`, `{from_utc}`, and `{to_utc}` from validated API
-parameters.
+Запрос:
 
 ```sql
 WITH
     (SELECT groupArray(asn) FROM default.local_asns_enabled) AS local_asns,
     length(local_asns) AS local_asns_count,
-    (SELECT groupArray(prefix) FROM default.local_networks_enabled WHERE family = 6) AS local_v6,
     {bucket_seconds} AS bucket_seconds
 SELECT
     bucket AS ts,
@@ -119,74 +183,39 @@ SELECT
     sumIf(packets, direction = 'in')       / bucket_seconds AS in_pps,
     sumIf(packets, direction = 'out')      / bucket_seconds AS out_pps,
     sumIf(packets, direction = 'transit')  / bucket_seconds AS transit_pps,
-    sum(flows) AS flows
+    sum(flows_count) AS flows
 FROM
 (
     SELECT
-        toDateTime(intDiv(toUInt32(time_received_ns), bucket_seconds) * bucket_seconds, 'UTC') AS bucket,
+        toDateTime(intDiv(toUInt32(minute), bucket_seconds) * bucket_seconds, 'UTC') AS bucket,
         bytes,
         packets,
-        1 AS flows,
+        flows_count,
         multiIf(
             local_asns_count = 0, 'out',
-            src_is_local AND dst_is_local, 'internal',
-            src_is_local AND NOT dst_is_local, 'out',
-            NOT src_is_local AND dst_is_local, 'in',
+            has(local_asns, src_asn) AND has(local_asns, dst_asn), 'internal',
+            has(local_asns, src_asn) AND NOT has(local_asns, dst_asn), 'out',
+            NOT has(local_asns, src_asn) AND has(local_asns, dst_asn), 'in',
             'transit'
         ) AS direction
-    FROM
-    (
-        SELECT
-            time_received_ns,
-            bytes,
-            packets,
-            multiIf(
-                etype = 0x0800,
-                    has(
-                        local_asns,
-                        dictGetUInt32(
-                            'default.bgp_origin_asn_dict', 'origin_asn',
-                            tuple(toIPv4(reinterpretAsUInt32(reverse(substring(src_addr, 1, 4)))))
-                        )
-                    ),
-                etype = 0x86DD,
-                    arrayExists(p -> isIPAddressInRange(IPv6NumToString(src_addr), p), local_v6),
-                0
-            ) AS src_is_local,
-            multiIf(
-                etype = 0x0800,
-                    has(
-                        local_asns,
-                        dictGetUInt32(
-                            'default.bgp_origin_asn_dict', 'origin_asn',
-                            tuple(toIPv4(reinterpretAsUInt32(reverse(substring(dst_addr, 1, 4)))))
-                        )
-                    ),
-                etype = 0x86DD,
-                    arrayExists(p -> isIPAddressInRange(IPv6NumToString(dst_addr), p), local_v6),
-                0
-            ) AS dst_is_local
-        FROM default.flows_raw
-        WHERE time_received_ns >= toDateTime64('{from_utc}', 9, 'UTC')
-          AND time_received_ns <  toDateTime64('{to_utc}', 9, 'UTC')
-    )
+    FROM default.traffic_asn_pair_1m
+    WHERE minute >= toDateTime('{from_utc}', 'UTC')
+      AND minute <  toDateTime('{to_utc}', 'UTC')
 )
 GROUP BY bucket
 ORDER BY bucket
 SETTINGS
-    max_memory_usage = 4000000000,
-    max_bytes_before_external_group_by = 2000000000,
+    max_memory_usage = 1000000000,
     max_threads = 4
 ```
 
-For the current deployment, use short windows first (`1h` default). A 15-minute
-manual test over raw flows worked after switching IPv4 matching to
-`bgp_origin_asn_dict`; the prefix-array-only approach OOMed and must not be
-used for IPv4.
+Важно: `traffic_asn_pair_1m` — `SummingMergeTree`, поэтому в запросе всегда
+нужны `sum(bytes)`, `sum(packets)`, `sum(flows_count)`. Не читать строки как
+уже финальные значения без агрегации.
 
-## Response Shape
+## Ответ API
 
-Return JSON like:
+Вернуть JSON:
 
 ```json
 {
@@ -210,53 +239,52 @@ Return JSON like:
 }
 ```
 
-In the chart:
+В Laravel заполнить отсутствующие bucket-ы нулями, чтобы линия на графике не
+рвалась.
 
-- render `in_bps` and `out_bps` by default;
-- render `transit_bps` as a third optional line/toggle because current data
-  shows large real transit traffic through `AS50509 TRANSROUTE`;
-- show `total_bps` in tooltip or a small stat card;
-- fill missing buckets in Laravel with zeros before returning JSON.
+## UI
 
-## Validation Queries
+На первом экране:
 
-Configured local ASNs:
+- рисовать `in_bps`;
+- рисовать `out_bps`;
+- `transit_bps` вернуть в API сразу и сделать отдельным toggle;
+- `total_bps` показывать в tooltip или summary card.
 
-```sql
-SELECT asn, name, source
-FROM default.local_asns_enabled
-ORDER BY asn;
+У нас в текущих данных `transit` большой, потому что много трафика идет через
+`AS50509 TRANSROUTE`. Не надо молча складывать `transit` в `out`, если
+`local_asns_enabled` уже настроен.
+
+## MoonShine Admin
+
+Позже можно сделать resource для:
+
+```text
+default.local_asns
 ```
 
-Top ASN pairs, useful to decide whether an ASN should be local or transit:
+Поля:
 
-```sql
-SELECT
-    t.src_asn,
-    src.name AS src_name,
-    t.dst_asn,
-    dst.name AS dst_name,
-    formatReadableSize(t.bytes_total) AS traffic,
-    t.bytes_total,
-    t.flows
-FROM
-(
-    SELECT
-        dictGetUInt32('default.bgp_origin_asn_dict', 'origin_asn',
-            tuple(toIPv4(reinterpretAsUInt32(reverse(substring(src_addr, 1, 4)))))) AS src_asn,
-        dictGetUInt32('default.bgp_origin_asn_dict', 'origin_asn',
-            tuple(toIPv4(reinterpretAsUInt32(reverse(substring(dst_addr, 1, 4)))))) AS dst_asn,
-        sum(bytes) AS bytes_total,
-        count() AS flows
-    FROM default.flows_raw
-    WHERE time_received_ns >= now() - INTERVAL 5 MINUTE
-      AND etype = 0x0800
-    GROUP BY src_asn, dst_asn
-    ORDER BY bytes_total DESC
-    LIMIT 30
-) AS t
-LEFT JOIN default.asn_registry_enriched AS src ON src.asn = t.src_asn
-LEFT JOIN default.asn_registry_enriched AS dst ON dst.asn = t.dst_asn
-ORDER BY t.bytes_total DESC
-SETTINGS max_memory_usage = 4000000000, max_threads = 4;
+```text
+asn        UInt32
+name       String
+source     String
+enabled    UInt8 / bool
+updated_at DateTime
 ```
+
+Если оператор включает дополнительный local/customer ASN, график сразу
+переклассифицирует историю на чтении, потому что агрегат хранит ASN-пары, а не
+готовый direction.
+
+## Ограничение MVP
+
+`traffic_asn_pair_1m` покрывает IPv4-сценарий для операторов, у которых есть
+ASN или customer/downstream ASN. Для операторов без AS нужен prefix-based
+direction:
+
+- либо ClickHouse `local_networks_dict` (`IP_TRIE`);
+- либо prefix trie в collector-е до записи в ClickHouse.
+
+Без одного из этих механизмов нельзя быстро и универсально считать direction
+по произвольным локальным сетям на больших объемах.
