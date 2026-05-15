@@ -42,9 +42,10 @@ So the current MVP is **dictionary-less**:
   loaded by `scripts/load_local_networks_from_asn.py`.
 - `default.traffic_1m_mv` writes `direction = 'unknown'` and is therefore
   immune to the dictionary problem.
-- `in / out / internal / transit` is computed in API queries by
-  JOIN-ing `flows_raw` with `default.local_networks_enabled` and using
-  `isIPAddressInRange`. Short windows (1 h default) make this affordable.
+- `in / out / internal / transit` is computed in API queries. IPv4 direction
+  uses `default.bgp_origin_asn_dict` plus `default.local_asns_enabled`; IPv6
+  direction uses the small IPv6 prefix list from `default.local_networks_enabled`.
+  Short windows (1 h default) make this affordable.
 
 The XML template `deploy/clickhouse/local_networks_dict.xml` is kept in the
 repo. As soon as someone with shell access to the ClickHouse host installs it
@@ -82,6 +83,11 @@ DDL: [`deploy/clickhouse/local_networks.sql`](../deploy/clickhouse/local_network
   (`ReplacingMergeTree(updated_at)`).
 - `default.local_networks_enabled` - deduplicated view of currently enabled
   prefixes, exposing `family, prefix, name, source, updated_at`.
+- `default.local_asns` - editable list of ASNs considered local for dashboard
+  direction. The loader inserts the source ASN automatically, and MoonShine can
+  enable additional downstream/customer ASNs.
+- `default.local_asns_enabled` - deduplicated view of currently enabled local
+  ASNs, exposing `asn, name, source, updated_at`.
 
 The table is intentionally editable. MoonShine can later manage it directly:
 
@@ -96,11 +102,18 @@ Examples:
 2a07:a300::/29   6   PINDC-AS AS34665   bgp_origin_as34665   1
 ```
 
+```text
+34665   PINDC-AS AS34665   bgp_origin_as34665   1
+50509   TRANSROUTE         manual_customer_asn   1
+44068   ARBITAL-AS         manual_customer_asn   1
+```
+
 ## Loader From ASN
 
 The loader reads active BGP prefixes for one ASN, collapses them using
 Python's `ipaddress.collapse_addresses()`, writes them into `local_networks`,
-and disables old rows from the same source that disappeared.
+disables old rows from the same source that disappeared, and writes the same
+ASN into `local_asns` as enabled.
 
 Dictionary creation and `SYSTEM RELOAD DICTIONARY` are **off by default**.
 They can be enabled with `--with-dictionary` (or `LOCALNETWORKS_WITH_DICTIONARY=1`)
@@ -151,9 +164,10 @@ Expected log on the first run:
 
 ```text
 prefixes: raw=404 collapsed=84 disable_old=0 rows_to_insert=84
+local_asn: AS34665 enabled in default.local_asns
 skipping dictionary management (use --with-dictionary or
 LOCALNETWORKS_WITH_DICTIONARY=1 to enable). Direction is computed on the fly
-from default.local_networks_enabled.
+from local_asns_enabled and local_networks_enabled.
 load_local_networks_from_asn: done
 ```
 
@@ -177,6 +191,15 @@ family   prefixes
 6        9
 ```
 
+```bash
+clickhouse-client --host 95.215.1.30 --port 6124 --user develop --password 'PASSWORD' --query "
+SELECT asn, name, source
+FROM default.local_asns_enabled
+ORDER BY asn
+FORMAT PrettyCompactMonoBlock
+"
+```
+
 ## Direction On The Fly: SQL Recipe
 
 The dashboard uses this query as the source for `Traffic In/Out, bps`. It
@@ -184,8 +207,9 @@ runs on the **raw** `flows_raw` table for short windows (default 1 hour) and
 computes direction with a hybrid approach:
 
 - **IPv4** flows use `dictGetUInt32('default.bgp_origin_asn_dict', 'origin_asn', ip)`.
-  An IPv4 is local when its BGP origin ASN equals our `local_asn` (AS34665).
-  This is O(1) per row and reuses the already-loaded BGP dictionary.
+  An IPv4 is local when its BGP origin ASN is present in
+  `default.local_asns_enabled`. This is O(1) per row and reuses the
+  already-loaded BGP dictionary.
 - **IPv6** flows use `arrayExists` against the small IPv6 prefix list from
   `default.local_networks_enabled` (9 prefixes for AS34665, IPv6 traffic is
   usually a small fraction of total volume).
@@ -195,11 +219,13 @@ with `isIPAddressInRange` on every row.
 
 ```sql
 WITH
-    34665 AS local_asn,
+    (SELECT groupArray(asn) FROM default.local_asns_enabled) AS local_asns,
+    length(local_asns) AS local_asns_count,
     (SELECT groupArray(prefix) FROM default.local_networks_enabled WHERE family = 6) AS local_v6
 SELECT
     minute,
     multiIf(
+        local_asns_count = 0, 'out',
         src_is_local AND dst_is_local, 'internal',
         src_is_local AND NOT dst_is_local, 'out',
         NOT src_is_local AND dst_is_local, 'in',
@@ -216,20 +242,26 @@ FROM
         packets,
         multiIf(
             etype = 0x0800,
-                dictGetUInt32(
-                    'default.bgp_origin_asn_dict', 'origin_asn',
-                    tuple(toIPv4(reinterpretAsUInt32(reverse(substring(src_addr, 1, 4)))))
-                ) = local_asn,
+                has(
+                    local_asns,
+                    dictGetUInt32(
+                        'default.bgp_origin_asn_dict', 'origin_asn',
+                        tuple(toIPv4(reinterpretAsUInt32(reverse(substring(src_addr, 1, 4)))))
+                    )
+                ),
             etype = 0x86DD,
                 arrayExists(p -> isIPAddressInRange(IPv6NumToString(src_addr), p), local_v6),
             0
         ) AS src_is_local,
         multiIf(
             etype = 0x0800,
-                dictGetUInt32(
-                    'default.bgp_origin_asn_dict', 'origin_asn',
-                    tuple(toIPv4(reinterpretAsUInt32(reverse(substring(dst_addr, 1, 4)))))
-                ) = local_asn,
+                has(
+                    local_asns,
+                    dictGetUInt32(
+                        'default.bgp_origin_asn_dict', 'origin_asn',
+                        tuple(toIPv4(reinterpretAsUInt32(reverse(substring(dst_addr, 1, 4)))))
+                    )
+                ),
             etype = 0x86DD,
                 arrayExists(p -> isIPAddressInRange(IPv6NumToString(dst_addr), p), local_v6),
             0
@@ -251,11 +283,14 @@ Notes:
   per query. Avoid the `WITH name AS (SELECT ...)` CTE form here — the
   proxy in front of the production ClickHouse rejects it with a parser
   error.
+- `local_asns` comes from `default.local_asns_enabled`, so adding customer or
+  downstream ASNs in MoonShine changes dashboard direction without code
+  changes.
+- When `local_asns_enabled` is empty, `local_asns_count = 0` forces every row
+  to `out`, preserving the MVP fallback rule.
 - `dictGetUInt32` returns 0 when an IP has no BGP origin in the dictionary
   (unrouted / IXP prefixes, RFC1918, link-local). Those flows then end up
   as `'transit'`, which is the desired MVP behaviour.
-- For multiple local ASNs replace `= local_asn` with
-  `IN (34665, ...other ASNs...)` or wire it from an `local_asns` array.
 - For IPv4 prefixes that are NOT covered by our BGP origin (e.g. private
   RFC1918 addresses you want to count as local), add them to
   `default.local_networks` for IPv4 too and switch the IPv4 branch to a
@@ -273,12 +308,15 @@ For the first `Traffic In/Out, bps` dashboard:
 
 ```text
 in_bps  = bps where direction = 'in'
-out_bps = bps where direction IN ('out', 'transit', 'unknown')
+out_bps = bps where direction = 'out'
+transit_bps = bps where direction = 'transit'   # optional third line
 ```
 
-This preserves the MVP rule: when local networks are not configured or do not
-match a flow, traffic is shown as outbound/total rather than disappearing
-from the chart.
+If `local_asns_enabled` is empty, the API should return all traffic as
+`out_bps`/total to preserve the MVP rule: an unconfigured dashboard should not
+look empty. Once at least one local ASN is configured, `transit` should be kept
+separate instead of silently folding it into `out`, because real data showed a
+large amount of true transit/customer traffic through `AS50509 TRANSROUTE`.
 
 ## Future: Switch Back To dictHas
 

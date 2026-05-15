@@ -6,7 +6,8 @@ The loader:
   - reads active prefixes from bgp_prefix_origin_current for one origin ASN;
   - collapses overlapping/more-specific prefixes into a minimal list;
   - writes them to default.local_networks as enabled config rows;
-  - disables no-longer-present rows from the same source.
+  - disables no-longer-present rows from the same source;
+  - writes the loaded ASN to default.local_asns as an enabled local ASN.
 
 Dictionary management (default.local_networks_dict) is optional and disabled
 by default because most deployments reach ClickHouse through a proxy that
@@ -224,6 +225,14 @@ def main() -> int:
         default=env("LOCALNETWORKS_ENABLED_VIEW", "default.local_networks_enabled"),
     )
     parser.add_argument(
+        "--asns-table",
+        default=env("LOCALNETWORKS_ASNS_TABLE", "default.local_asns"),
+    )
+    parser.add_argument(
+        "--asns-enabled-view",
+        default=env("LOCALNETWORKS_ASNS_ENABLED_VIEW", "default.local_asns_enabled"),
+    )
+    parser.add_argument(
         "--dictionary",
         default=env("LOCALNETWORKS_DICT", "default.local_networks_dict"),
     )
@@ -310,6 +319,19 @@ ORDER BY (family, prefix)
 SETTINGS index_granularity = 8192
 """)
     ch_run_query(base, f"""
+CREATE TABLE IF NOT EXISTS {args.asns_table}
+(
+    asn        UInt32,
+    name       String,
+    source     LowCardinality(String),
+    enabled    UInt8,
+    updated_at DateTime DEFAULT now()
+)
+ENGINE = ReplacingMergeTree(updated_at)
+ORDER BY asn
+SETTINGS index_granularity = 8192
+""")
+    ch_run_query(base, f"""
 DROP TABLE IF EXISTS {args.enabled_view}
 """)
     ch_run_query(base, f"""
@@ -333,6 +355,29 @@ FROM
     GROUP BY
         family,
         prefix
+)
+WHERE enabled_latest = 1
+""")
+    ch_run_query(base, f"""
+DROP TABLE IF EXISTS {args.asns_enabled_view}
+""")
+    ch_run_query(base, f"""
+CREATE VIEW {args.asns_enabled_view} AS
+SELECT
+    asn,
+    name,
+    source,
+    updated_at_latest AS updated_at
+FROM
+(
+    SELECT
+        asn,
+        argMax(name, updated_at) AS name,
+        argMax(source, updated_at) AS source,
+        argMax(enabled, updated_at) AS enabled_latest,
+        max(updated_at) AS updated_at_latest
+    FROM {args.asns_table}
+    GROUP BY asn
 )
 WHERE enabled_latest = 1
 """)
@@ -371,6 +416,13 @@ FORMAT TabSeparated
         with open(tmp_path, "rb") as tsv:
             ch_run_query(base, insert_q, stdin=tsv)
 
+        ch_run_query(base, f"""
+INSERT INTO {args.asns_table}
+(asn, name, source, enabled, updated_at)
+VALUES ({args.asn}, {sql_string(args.name)}, {sql_string(args.source)}, 1, {sql_string(updated_at)})
+""")
+        print(f"local_asn: AS{args.asn} enabled in {args.asns_table}", file=sys.stderr)
+
         if args.with_dictionary:
             # Legacy path: try DDL and SYSTEM RELOAD. Both calls are soft
             # because most proxied ClickHouse endpoints reject dictionary DDL
@@ -398,7 +450,8 @@ FORMAT TabSeparated
             print(
                 "skipping dictionary management (use --with-dictionary or "
                 "LOCALNETWORKS_WITH_DICTIONARY=1 to enable). Direction is "
-                "computed on the fly from default.local_networks_enabled.",
+                "computed on the fly from local_asns_enabled and "
+                "local_networks_enabled.",
                 file=sys.stderr,
             )
 

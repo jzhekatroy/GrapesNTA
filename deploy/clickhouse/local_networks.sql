@@ -2,13 +2,16 @@
 --
 -- Apply once, then populate default.local_networks either manually (MoonShine)
 -- or via scripts/load_local_networks_from_asn.py.
+-- default.local_asns stores the ASNs that should be treated as "ours" for
+-- fast direction classification through default.bgp_origin_asn_dict.
 --
 -- This deployment runs without default.local_networks_dict because the remote
 -- ClickHouse 24.11 instance rejects dictionary DDL through the SQL proxy and
 -- the proxy host does not expose /etc/clickhouse-server. Direction is computed
--- on the fly in API queries using default.local_networks_enabled. The XML
--- template for the dictionary is kept in deploy/clickhouse/local_networks_dict.xml
--- for future use once an XML config can be installed on the ClickHouse host.
+-- on the fly in API queries using default.local_asns_enabled for IPv4 and
+-- default.local_networks_enabled for IPv6. The XML template for the dictionary
+-- is kept in deploy/clickhouse/local_networks_dict.xml for future use once an
+-- XML config can be installed on the ClickHouse host.
 
 CREATE TABLE IF NOT EXISTS default.local_networks
 (
@@ -21,6 +24,18 @@ CREATE TABLE IF NOT EXISTS default.local_networks
 )
 ENGINE = ReplacingMergeTree(updated_at)
 ORDER BY (family, prefix)
+SETTINGS index_granularity = 8192;
+
+CREATE TABLE IF NOT EXISTS default.local_asns
+(
+    asn        UInt32,
+    name       String,
+    source     LowCardinality(String),
+    enabled    UInt8,
+    updated_at DateTime DEFAULT now()
+)
+ENGINE = ReplacingMergeTree(updated_at)
+ORDER BY asn
 SETTINGS index_granularity = 8192;
 
 -- Keep the dictionary source free from FINAL. ReplacingMergeTree deduplication is
@@ -50,5 +65,26 @@ FROM
     GROUP BY
         family,
         prefix
+)
+WHERE enabled_latest = 1;
+
+DROP TABLE IF EXISTS default.local_asns_enabled;
+
+CREATE VIEW default.local_asns_enabled AS
+SELECT
+    asn,
+    name,
+    source,
+    updated_at_latest AS updated_at
+FROM
+(
+    SELECT
+        asn,
+        argMax(name, updated_at) AS name,
+        argMax(source, updated_at) AS source,
+        argMax(enabled, updated_at) AS enabled_latest,
+        max(updated_at) AS updated_at_latest
+    FROM default.local_asns
+    GROUP BY asn
 )
 WHERE enabled_latest = 1;

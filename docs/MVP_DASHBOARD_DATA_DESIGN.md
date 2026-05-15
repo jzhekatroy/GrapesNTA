@@ -94,9 +94,16 @@ DDL и рабочий процесс: `deploy/clickhouse/local_networks.sql` и
 удалённый ClickHouse 24.11 за SQL-прокси отвергает любую dictionary DDL, а
 доступа к хосту CH у нас нет, чтобы положить XML в
 `/etc/clickhouse-server/dictionaries.d/`. Поэтому `traffic_1m_mv` пишет
-`direction = 'unknown'`, а реальное `in/out/internal/transit` считается
-на лету в API-запросах по `flows_raw` + `local_networks_enabled` (см.
-`docs/LOCAL_NETWORKS_DIRECTION.md`, раздел "Direction On The Fly: SQL Recipe").
+`direction = 'unknown'`, а реальное `in/out/internal/transit` считается на
+лету в API-запросах. IPv4 использует `bgp_origin_asn_dict` +
+`local_asns_enabled`, IPv6 использует `local_networks_enabled` (см.
+`docs/LOCAL_NETWORKS_DIRECTION.md`, раздел "Direction On The Fly: SQL Recipe",
+и `docs/LARAVEL_MOONSHINE_TRAFFIC_IN_OUT.md` для Laravel-контракта).
+
+`default.local_asns` — отдельный редактируемый справочник ASN, которые нужно
+считать локальными. Loader автоматически добавляет `AS34665`; через MoonShine
+можно включить downstream/customer ASN (например `AS50509 TRANSROUTE`), если
+их трафик должен попадать в `in/out`, а не в `transit`.
 
 ### `geo_prefix_country`
 
@@ -182,10 +189,10 @@ pps = packets / bucket_seconds
 `traffic_1d`.
 
 Для графика `Traffic In/Out, bps` источник данных в MVP — не `traffic_1m`, а
-запрос по `flows_raw` + `local_networks_enabled` за выбранное окно
-(см. `docs/LOCAL_NETWORKS_DIRECTION.md`). `traffic_1m` остаётся источником
-total bps/pps/flows; после установки dictionary он же станет источником
-честного in/out по всей истории.
+запрос по `flows_raw` + `local_asns_enabled` + `local_networks_enabled` за
+выбранное окно (см. `docs/LARAVEL_MOONSHINE_TRAFFIC_IN_OUT.md`). `traffic_1m`
+остаётся источником total bps/pps/flows; после установки dictionary он же
+станет источником честного in/out по всей истории.
 
 ### `traffic_country_1m`
 
