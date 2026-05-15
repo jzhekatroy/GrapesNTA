@@ -334,9 +334,13 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now asn-names-loader.timer
 ```
 
-The service unit also reads `/etc/geoloaderd/geoloaderd.env`, so when
-`ASNNAMES_CH_*` are not set the loader inherits the same ClickHouse endpoint
-that `geoloaderd` uses.
+By default the env example leaves all `ASNNAMES_CH_*` connection variables
+commented out and the script falls back to the built-in `localhost:9000`
+defaults — that is normally what you want on the ClickHouse host itself. If
+you need different credentials (for example because the local `default` user
+has a password), uncomment **all five** `ASNNAMES_CH_*` variables in
+`/etc/asn-names-loader/asn-names-loader.env` and set them together: mixing
+some from this file and some from `geoloaderd.env` is a footgun.
 
 Manual one-off run (smoke test on the first 200 ASN):
 

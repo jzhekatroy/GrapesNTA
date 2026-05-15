@@ -187,23 +187,65 @@ def write_tsv(
     return rows
 
 
+def _resolve_connection_defaults() -> dict:
+    """Resolve ClickHouse connection defaults as a single coherent tuple.
+
+    A connection is {host, port, user, password, database}. Mixing fields across
+    env-prefixes is a footgun (e.g. ASNNAMES_CH_USER=default with the
+    GEOLOADERD_CH_PASSWORD of another user). So we pick exactly one prefix:
+      * If ANY ASNNAMES_CH_* is defined, use the ASNNAMES_CH_* set as-is (empty
+        means empty — never silently fall back to geoloaderd).
+      * Otherwise fall back to GEOLOADERD_CH_* (compat with shared env files).
+      * Otherwise built-in defaults (localhost:9000, user=default, empty pw).
+    """
+    prefixes = ("ASNNAMES_CH_", "GEOLOADERD_CH_")
+    chosen = None
+    for pref in prefixes:
+        if any(f"{pref}{k}" in os.environ for k in ("HOST", "PORT", "USER", "PASSWORD", "DATABASE")):
+            chosen = pref
+            break
+    if chosen is None:
+        return {
+            "host": "localhost",
+            "port": 9000,
+            "user": "default",
+            "password": None,
+            "database": "default",
+        }
+    host = os.environ.get(f"{chosen}HOST", "").strip() or "localhost"
+    port_s = os.environ.get(f"{chosen}PORT", "").strip()
+    port = int(port_s) if port_s.isdigit() else 9000
+    user = os.environ.get(f"{chosen}USER", "").strip() or "default"
+    # Empty string is a valid (=empty) password; convert to None so we omit
+    # --password from the clickhouse-client invocation.
+    pw_raw = os.environ.get(f"{chosen}PASSWORD")
+    password = pw_raw if pw_raw not in (None, "") else None
+    database = os.environ.get(f"{chosen}DATABASE", "").strip() or "default"
+    return {
+        "host": host,
+        "port": port,
+        "user": user,
+        "password": password,
+        "database": database,
+    }
+
+
 def main() -> int:
     p = argparse.ArgumentParser(description="Load ASN names from Team Cymru into ClickHouse.")
-    _port_s = env("ASNNAMES_CH_PORT", env("GEOLOADERD_CH_PORT"))
-    _default_port = int(_port_s) if _port_s and _port_s.isdigit() else 9000
+    conn = _resolve_connection_defaults()
     p.add_argument(
         "--clickhouse-client",
         default=env("ASNNAMES_CLICKHOUSE_CLIENT", env("GEOLOADERD_CLICKHOUSE_CLIENT", "/usr/bin/clickhouse-client")),
     )
-    p.add_argument("--host", default=env("ASNNAMES_CH_HOST", env("GEOLOADERD_CH_HOST", "localhost")))
-    p.add_argument("--port", type=int, default=_default_port)
-    p.add_argument("--user", default=env("ASNNAMES_CH_USER", env("GEOLOADERD_CH_USER", "default")))
+    p.add_argument("--host", default=conn["host"])
+    p.add_argument("--port", type=int, default=conn["port"])
+    p.add_argument("--user", default=conn["user"])
     p.add_argument(
         "--password",
-        default=env("ASNNAMES_CH_PASSWORD", env("GEOLOADERD_CH_PASSWORD")),
+        default=conn["password"],
         help="If omitted, empty password (or set env ASNNAMES_CH_PASSWORD)",
     )
-    p.add_argument("--database", default=env("ASNNAMES_CH_DATABASE", env("GEOLOADERD_CH_DATABASE", "default")))
+    p.add_argument("--database", default=conn["database"])
 
     p.add_argument(
         "--source-table",

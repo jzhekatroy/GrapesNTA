@@ -6,7 +6,6 @@ Wants=network-online.target
 [Service]
 Type=oneshot
 EnvironmentFile=-/etc/asn-names-loader/asn-names-loader.env
-EnvironmentFile=-/etc/geoloaderd/geoloaderd.env
 ExecStart=/usr/bin/python3 /opt/GrapesNTA/scripts/load_asn_names.py
 
 TimeoutStartSec=3600
