@@ -136,10 +136,10 @@ SELECT
         concat(IPv6NumToString(prefix_bin), '/', toString(prefix_len))
     ) AS prefix,
     family,
-    argMax(origin_asn, last_ts) AS origin_asn,
-    argMax(peer_asn, last_ts) AS peer_asn,
+    argMax(origin_asn, path_last_ts) AS origin_asn,
+    argMax(peer_asn, path_last_ts) AS peer_asn,
     toUInt32(count()) AS active_paths,
-    max(last_ts) AS last_ts,
+    max(path_last_ts) AS last_ts,
     'bmp_route_events' AS source,
     now() AS snapshot_ts
 FROM
@@ -153,7 +153,7 @@ FROM
         argMax(event_type, ts) AS last_event,
         argMax(origin_asn, ts) AS origin_asn,
         argMax(peer_asn, ts) AS peer_asn,
-        max(ts) AS last_ts
+        max(ts) AS path_last_ts
     FROM {args.route_events_table}
     WHERE ts >= now() - INTERVAL {args.lookback_days} DAY
     GROUP BY
