@@ -67,9 +67,9 @@ func flowRowsFromKV(flows []flowKV, m flowRowMapper, receivedAt time.Time) []Flo
 
 func flowRowFromKV(fv flowKV, m flowRowMapper, receivedAt time.Time) FlowRow {
 	firstWall := m.clock.monoNsToWall(fv.v.FirstSeenNs)
-	srcClass := endpointClass{Kind: "unknown"}
-	dstClass := endpointClass{Kind: "unknown"}
-	direction := "unknown"
+	var srcClass endpointClass
+	var dstClass endpointClass
+	var direction string
 	srcVLAN := fv.k.VLANID
 	var dstVLAN uint16
 	if m.classifier != nil {

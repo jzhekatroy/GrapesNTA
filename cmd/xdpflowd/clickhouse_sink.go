@@ -146,6 +146,85 @@ func insertBatchRows(ctx context.Context, log *slog.Logger, conn chdriver.Conn, 
 	if len(rows) == 0 {
 		return true
 	}
+	if !rowsHaveEnrichment(rows) {
+		return insertCompactBatchRows(ctx, log, conn, table, rows, insertErrs)
+	}
+	return insertEnrichedBatchRows(ctx, log, conn, table, rows, insertErrs)
+}
+
+func insertCompactBatchRows(ctx context.Context, log *slog.Logger, conn chdriver.Conn, table string, rows []FlowRow, insertErrs *atomic.Uint64) bool {
+	if len(rows) == 0 {
+		return true
+	}
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
+	const stmt = `INSERT INTO %s (
+    date,
+    time_inserted_ns,
+    time_received_ns,
+    time_flow_start_ns,
+    sequence_num,
+    sampling_rate,
+    sampler_address,
+    src_addr,
+    dst_addr,
+    src_as,
+    dst_as,
+    etype,
+    proto,
+    src_port,
+    dst_port,
+    bytes,
+    packets
+)`
+
+	q := fmt.Sprintf(stmt, table)
+	batch, err := conn.PrepareBatch(ctx, q)
+	if err != nil {
+		insertErrs.Add(1)
+		log.Warn("clickhouse prepare batch", "err", err)
+		return false
+	}
+
+	for _, r := range rows {
+		err := batch.Append(
+			r.Date,
+			r.TimeInsertedNs,
+			r.TimeReceivedNs,
+			r.TimeFlowStartNs,
+			r.SequenceNum,
+			r.SamplingRate,
+			fixed16(r.SamplerAddress),
+			fixed16(r.SrcAddr),
+			fixed16(r.DstAddr),
+			r.SrcAS,
+			r.DstAS,
+			r.Etype,
+			r.Proto,
+			r.SrcPort,
+			r.DstPort,
+			r.Bytes,
+			r.Packets,
+		)
+		if err != nil {
+			insertErrs.Add(1)
+			log.Warn("clickhouse batch append", "err", err)
+			return false
+		}
+	}
+	if err := batch.Send(); err != nil {
+		insertErrs.Add(1)
+		log.Warn("clickhouse batch send", "err", err)
+		return false
+	}
+	return true
+}
+
+func insertEnrichedBatchRows(ctx context.Context, log *slog.Logger, conn chdriver.Conn, table string, rows []FlowRow, insertErrs *atomic.Uint64) bool {
+	if len(rows) == 0 {
+		return true
+	}
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
@@ -232,6 +311,19 @@ func insertBatchRows(ctx context.Context, log *slog.Logger, conn chdriver.Conn, 
 		return false
 	}
 	return true
+}
+
+func rowsHaveEnrichment(rows []FlowRow) bool {
+	for _, r := range rows {
+		if r.SrcASN != 0 || r.DstASN != 0 ||
+			r.Direction != "" || r.SrcKind != "" || r.DstKind != "" ||
+			r.SrcLabel != "" || r.DstLabel != "" ||
+			r.SrcOperator != "" || r.DstOperator != "" ||
+			r.SrcVLAN != 0 || r.DstVLAN != 0 {
+			return true
+		}
+	}
+	return false
 }
 
 func flowRowInsertDefaults(r FlowRow) FlowRow {
