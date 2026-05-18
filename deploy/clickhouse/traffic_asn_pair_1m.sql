@@ -1,7 +1,13 @@
--- Minute-level IPv4 traffic aggregate by source/destination origin ASN.
+-- DEPRECATED: minute-level IPv4 traffic aggregate by source/destination ASN.
 --
--- This is the MVP source for the Laravel/MoonShine Traffic In/Out chart.
--- It avoids scanning default.flows_raw on every dashboard request:
+-- Kept for backward compatibility with the first MVP dashboard query. The
+-- current path is:
+--
+--   xdpflowd classifier -> flows_raw.direction/src_asn/dst_asn
+--      -> traffic_direction_1m / traffic_uplink_1m / traffic_customer_1m
+--
+-- This older aggregate avoided scanning default.flows_raw on every dashboard
+-- request:
 --
 --   flows_raw -> bgp_origin_asn_dict -> traffic_asn_pair_1m
 --

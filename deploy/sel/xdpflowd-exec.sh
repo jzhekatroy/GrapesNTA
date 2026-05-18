@@ -80,6 +80,16 @@ CH_ARGS=(
 if [[ -n "${XDP_CH_SAMPLER_ADDR:-}" ]]; then
   CH_ARGS+=( -ch-sampler-addr "$XDP_CH_SAMPLER_ADDR" )
 fi
+if [[ "${XDP_CLASSIFIER:-0}" == "1" ]]; then
+  CH_ARGS+=(
+    -classifier
+    -classifier-refresh "${XDP_CLASSIFIER_REFRESH:-60s}"
+    -classifier-bgp-table "${XDP_CLASSIFIER_BGP_TABLE:-default.bgp_prefix_origin_current}"
+    -classifier-local-networks-view "${XDP_CLASSIFIER_LOCAL_NETWORKS_VIEW:-default.local_networks_enabled}"
+    -classifier-local-asns-view "${XDP_CLASSIFIER_LOCAL_ASNS_VIEW:-default.local_asns_enabled}"
+    -classifier-vlan-view "${XDP_CLASSIFIER_VLAN_VIEW:-default.vlan_map_enabled}"
+  )
+fi
 
 case "${XDP_CH_SPOOL_MODE:-off}" in
   off)

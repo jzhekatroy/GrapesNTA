@@ -19,7 +19,7 @@ src external, dst external  -> transit
 Without local prefixes, the UI can still show total traffic, but honest
 In/Out requires `local_networks`.
 
-## Architecture Decision: No Dictionary
+## Current Architecture: Collector Classifier
 
 Earlier drafts of this design assumed an `IP_TRIE` dictionary
 `default.local_networks_dict` plugged into `traffic_1m_mv` via `dictHas`.
@@ -36,22 +36,29 @@ The deployment turned out to make that impossible without server-side help:
 - We don't have shell access to the ClickHouse host, so we can't drop an
   XML config into `/etc/clickhouse-server/dictionaries.d/` ourselves.
 
-So the current MVP is **dictionary-less**:
+So the current MVP is **dictionary-less** and **collector-classified**:
 
 - `default.local_networks` and `default.local_networks_enabled` are still
   loaded by `scripts/load_local_networks_from_asn.py`.
-- `default.traffic_1m_mv` writes `direction = 'unknown'` and is therefore
-  immune to the dictionary problem.
-- `in / out / internal / transit` is computed in API queries from
-  `default.traffic_asn_pair_1m` for the current ASN-based MVP. The aggregate
-  stores `src_asn/dst_asn`, while direction is derived at read time from
-  `default.local_asns_enabled`.
+- `default.local_asns` and `default.vlan_map` add ASN/VLAN-based local
+  classification.
+- `xdpflowd` reads BGP/local/VLAN data into memory and writes `src_asn`,
+  `dst_asn`, `direction`, labels and operators directly into `flows_raw`.
+- `traffic_1m_mv`, `traffic_direction_1m_mv`, `traffic_uplink_1m_mv` and
+  `traffic_customer_1m_mv` only aggregate precomputed fields.
+
+Priority:
+
+```text
+VLAN > local ASN > local prefix
+```
+
+If no local ASN, local prefix or customer VLAN is configured, `xdpflowd` uses
+the MVP fallback and writes `direction = 'out'`.
 
 The XML template `deploy/clickhouse/local_networks_dict.xml` is kept in the
-repo. As soon as someone with shell access to the ClickHouse host installs it
-into `/etc/clickhouse-server/dictionaries.d/`, the `traffic_1m_mv` template
-at the bottom of `deploy/clickhouse/traffic_1m_mv.sql` can be applied and the
-on-the-fly logic switched off.
+repo for future server-side experiments, but dashboard direction must not rely
+on raw-table dictionary lookups.
 
 ## Current Local ASN
 
@@ -200,7 +207,7 @@ FORMAT PrettyCompactMonoBlock
 "
 ```
 
-## Direction On The Fly: SQL Recipe
+## Deprecated: Direction On The Fly SQL Recipe
 
 The dashboard must not use this raw-flow query in production. It is useful only
 for diagnostics and short manual checks. A 15-minute raw query can already hit
@@ -208,7 +215,7 @@ memory limits on the production flow volume.
 
 For the Laravel dashboard, use
 [`docs/LARAVEL_MOONSHINE_TRAFFIC_IN_OUT.md`](LARAVEL_MOONSHINE_TRAFFIC_IN_OUT.md)
-and read from `default.traffic_asn_pair_1m`.
+and read from `default.traffic_direction_1m`.
 
 The raw diagnostic query computes direction with a hybrid approach:
 
@@ -301,13 +308,10 @@ Notes:
   RFC1918 addresses you want to count as local), add them to
   `default.local_networks` for IPv4 too and switch the IPv4 branch to a
   `dictHas` lookup once `default.local_networks_dict` is installed.
-- For longer windows (24 h, 7 d) prefer one of:
-  - the ASN-pair aggregate `default.traffic_asn_pair_1m` (current MVP path);
-  - a future direction-aware `traffic_1m_mv` (template in
-    `deploy/clickhouse/traffic_1m_mv.sql`) once the dictionary is available
-    on the CH host.
+- For dashboards, prefer `default.traffic_direction_1m` and related
+  collector-built aggregates.
 
-## ASN Pair Aggregate
+## Deprecated: ASN Pair Aggregate
 
 DDL:
 

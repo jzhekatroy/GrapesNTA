@@ -96,7 +96,13 @@ SETTINGS index_granularity = 8192;
 | `sampling_rate` | `1` (no sampling in current XDP path) |
 | `sampler_address` | 16-byte exporter/source address; set via `-ch-sampler-addr` / `XDP_CH_SAMPLER_ADDR` or zero until configured |
 | `src_addr` / `dst_addr` | 16 raw bytes from `FlowKey`; IPv4 stored in the first 4 bytes with the rest zeroed to match current BPF key layout |
-| `src_as` / `dst_as` | `0` (not enriched by `xdpflowd`) |
+| `src_as` / `dst_as` | Legacy ASN columns. With classifier enabled they mirror `src_asn` / `dst_asn`; otherwise `0`. |
+| `src_asn` / `dst_asn` | Origin ASN from BGP trie loaded from `bgp_prefix_origin_current`. Requires `deploy/clickhouse/flows_raw_extensions.sql`. |
+| `direction` | `in`, `out`, `internal`, `transit`, `unknown`; computed in `xdpflowd` when `XDP_CLASSIFIER=1`. |
+| `src_kind` / `dst_kind` | Classification kind (`local`, `customer`, `uplink`, `ix`, `remote`, etc.). |
+| `src_label` / `dst_label` | VLAN/uplink/operator label when known. |
+| `src_operator` / `dst_operator` | Stable operator id from `local_operators`. |
+| `src_vlan` / `dst_vlan` | Current XDP path writes the outer VLAN to `src_vlan`; `dst_vlan` is `0` until an exporter supplies a separate destination VLAN. |
 | `etype` | `0x0800` for IPv4, `0x86DD` for IPv6 |
 | `proto` | `FlowKey.Proto` |
 | `src_port` / `dst_port` | Host-endian ports from BPF key (`keyPortHost`) |

@@ -179,16 +179,18 @@ def write_rows_tsv(
     disabled_rows: Sequence[Tuple[str, int]],
     name: str,
     source: str,
+    operator_id: str,
+    kind: str,
     updated_at: str,
 ) -> int:
     count = 0
     with open(path, "w", encoding="utf-8", newline="") as f:
         writer = csv.writer(f, delimiter="\t", lineterminator="\n")
         for prefix, family in disabled_rows:
-            writer.writerow([prefix, family, name, source, 0, updated_at])
+            writer.writerow([prefix, family, operator_id, kind, name, source, 0, updated_at])
             count += 1
         for network in enabled_networks:
-            writer.writerow([str(network), network.version, name, source, 1, updated_at])
+            writer.writerow([str(network), network.version, operator_id, kind, name, source, 1, updated_at])
             count += 1
     return count
 
@@ -209,6 +211,8 @@ def main() -> int:
 
     parser.add_argument("--asn", type=int, default=int(env("LOCALNETWORKS_ASN", "0") or 0))
     parser.add_argument("--name", default=env("LOCALNETWORKS_NAME", ""))
+    parser.add_argument("--operator-id", default=env("LOCALNETWORKS_OPERATOR_ID", ""))
+    parser.add_argument("--kind", default=env("LOCALNETWORKS_KIND", "customer"))
     parser.add_argument("--source", default=env("LOCALNETWORKS_SOURCE", "bgp_origin_local_asn"))
     parser.add_argument(
         "--families",
@@ -297,6 +301,7 @@ def main() -> int:
     args.families = ",".join(families)
     if not args.name:
         args.name = f"AS{args.asn}"
+    args.kind = (args.kind or "customer").strip().lower()
 
     if not os.path.isfile(args.clickhouse_client):
         raise FileNotFoundError(f"clickhouse-client not found: {args.clickhouse_client}")
@@ -307,29 +312,41 @@ def main() -> int:
     ch_run_query(base, f"""
 CREATE TABLE IF NOT EXISTS {args.table}
 (
-    prefix     String,
-    family     UInt8,
-    name       String,
-    source     LowCardinality(String),
-    enabled    UInt8,
-    updated_at DateTime DEFAULT now()
+    prefix      String,
+    family      UInt8,
+    operator_id LowCardinality(String) DEFAULT '',
+    kind        LowCardinality(String) DEFAULT 'customer',
+    name        String,
+    source      LowCardinality(String),
+    enabled     UInt8,
+    updated_at  DateTime DEFAULT now()
 )
 ENGINE = ReplacingMergeTree(updated_at)
 ORDER BY (family, prefix)
 SETTINGS index_granularity = 8192
 """)
     ch_run_query(base, f"""
+ALTER TABLE {args.table}
+ADD COLUMN IF NOT EXISTS operator_id LowCardinality(String) DEFAULT '' AFTER family,
+ADD COLUMN IF NOT EXISTS kind LowCardinality(String) DEFAULT 'customer' AFTER operator_id
+""")
+    ch_run_query(base, f"""
 CREATE TABLE IF NOT EXISTS {args.asns_table}
 (
-    asn        UInt32,
-    name       String,
-    source     LowCardinality(String),
-    enabled    UInt8,
-    updated_at DateTime DEFAULT now()
+    asn         UInt32,
+    operator_id LowCardinality(String) DEFAULT '',
+    name        String,
+    source      LowCardinality(String),
+    enabled     UInt8,
+    updated_at  DateTime DEFAULT now()
 )
 ENGINE = ReplacingMergeTree(updated_at)
 ORDER BY asn
 SETTINGS index_granularity = 8192
+""")
+    ch_run_query(base, f"""
+ALTER TABLE {args.asns_table}
+ADD COLUMN IF NOT EXISTS operator_id LowCardinality(String) DEFAULT '' AFTER asn
 """)
     ch_run_query(base, f"""
 DROP TABLE IF EXISTS {args.enabled_view}
@@ -339,6 +356,8 @@ CREATE VIEW {args.enabled_view} AS
 SELECT
     family,
     prefix,
+    operator_id,
+    kind,
     name,
     source,
     updated_at_latest AS updated_at
@@ -347,6 +366,8 @@ FROM
     SELECT
         family,
         prefix,
+        argMax(operator_id, updated_at) AS operator_id,
+        argMax(kind, updated_at) AS kind,
         argMax(name, updated_at) AS name,
         argMax(source, updated_at) AS source,
         argMax(enabled, updated_at) AS enabled_latest,
@@ -365,6 +386,7 @@ DROP TABLE IF EXISTS {args.asns_enabled_view}
 CREATE VIEW {args.asns_enabled_view} AS
 SELECT
     asn,
+    operator_id,
     name,
     source,
     updated_at_latest AS updated_at
@@ -372,6 +394,7 @@ FROM
 (
     SELECT
         asn,
+        argMax(operator_id, updated_at) AS operator_id,
         argMax(name, updated_at) AS name,
         argMax(source, updated_at) AS source,
         argMax(enabled, updated_at) AS enabled_latest,
@@ -400,6 +423,8 @@ WHERE enabled_latest = 1
             disabled_rows=disabled,
             name=args.name,
             source=args.source,
+            operator_id=args.operator_id,
+            kind=args.kind,
             updated_at=updated_at,
         )
         print(
@@ -410,7 +435,7 @@ WHERE enabled_latest = 1
 
         insert_q = f"""
 INSERT INTO {args.table}
-(prefix, family, name, source, enabled, updated_at)
+(prefix, family, operator_id, kind, name, source, enabled, updated_at)
 FORMAT TabSeparated
 """
         with open(tmp_path, "rb") as tsv:
@@ -418,8 +443,8 @@ FORMAT TabSeparated
 
         ch_run_query(base, f"""
 INSERT INTO {args.asns_table}
-(asn, name, source, enabled, updated_at)
-VALUES ({args.asn}, {sql_string(args.name)}, {sql_string(args.source)}, 1, {sql_string(updated_at)})
+(asn, operator_id, name, source, enabled, updated_at)
+VALUES ({args.asn}, {sql_string(args.operator_id)}, {sql_string(args.name)}, {sql_string(args.source)}, 1, {sql_string(updated_at)})
 """)
         print(f"local_asn: AS{args.asn} enabled in {args.asns_table}", file=sys.stderr)
 

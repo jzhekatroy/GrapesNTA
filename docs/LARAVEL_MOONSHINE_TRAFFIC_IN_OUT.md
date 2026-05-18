@@ -9,32 +9,30 @@
 API должен читать агрегат:
 
 ```text
-default.traffic_asn_pair_1m
+default.traffic_direction_1m
 ```
 
 а не `default.flows_raw`.
 
-Агрегат содержит трафик по парам origin ASN:
+Агрегат содержит уже классифицированный трафик:
 
 ```text
 minute
-src_asn
-dst_asn
+direction
 bytes
 packets
 flows_count
 ```
 
-Direction (`in/out/internal/transit`) считается уже в API-запросе по списку
-локальных ASN из:
+Direction (`in/out/internal/transit`) считает `xdpflowd` до записи в
+ClickHouse по правилу:
 
 ```text
-default.local_asns_enabled
+VLAN > local ASN > local prefix
 ```
 
-Почему так: если завтра оператор добавит `AS50509 TRANSROUTE` или другой
-customer/downstream ASN в список локальных, старую историю не надо
-пересчитывать. Мы просто иначе классифицируем те же `src_asn/dst_asn` пары.
+Laravel не должен делать `dictGet`, `arrayExists` или пересчитывать direction
+при чтении графика.
 
 ## Что применить в ClickHouse
 
@@ -43,22 +41,26 @@ clickhouse-client --host 95.215.1.30 --port 6124 --user develop --password "$CH_
   --multiquery < deploy/clickhouse/local_networks.sql
 
 clickhouse-client --host 95.215.1.30 --port 6124 --user develop --password "$CH_PASS" \
-  --multiquery < deploy/clickhouse/traffic_asn_pair_1m.sql
+  --multiquery < deploy/clickhouse/local_asns.sql
+
+clickhouse-client --host 95.215.1.30 --port 6124 --user develop --password "$CH_PASS" \
+  --multiquery < deploy/clickhouse/vlan_map.sql
+
+clickhouse-client --host 95.215.1.30 --port 6124 --user develop --password "$CH_PASS" \
+  --multiquery < deploy/clickhouse/flows_raw_extensions.sql
+
+clickhouse-client --host 95.215.1.30 --port 6124 --user develop --password "$CH_PASS" \
+  --multiquery < deploy/clickhouse/traffic_direction_1m.sql
 ```
 
-`traffic_asn_pair_1m.sql` создает:
+`traffic_direction_1m.sql` создает:
 
 ```text
-default.traffic_asn_pair_1m
-default.traffic_asn_pair_1m_mv
+default.traffic_direction_1m
+default.traffic_direction_1m_mv
 ```
 
-MV будет заполнять агрегат только для IPv4 (`etype = 0x0800`), используя уже
-рабочий dictionary:
-
-```text
-default.bgp_origin_asn_dict
-```
+MV делает только легкий `GROUP BY minute, direction`.
 
 ## Проверка агрегата
 
@@ -66,17 +68,15 @@ default.bgp_origin_asn_dict
 clickhouse-client --host 95.215.1.30 --port 6124 --user develop --password "$CH_PASS" --query "
 SELECT
     minute,
-    src_asn,
-    dst_asn,
+    direction,
     formatReadableSize(sum(bytes)) AS traffic,
     sum(bytes) AS bytes_total,
     sum(flows_count) AS flows
-FROM default.traffic_asn_pair_1m
+FROM default.traffic_direction_1m
 WHERE minute >= now() - INTERVAL 10 MINUTE
 GROUP BY
     minute,
-    src_asn,
-    dst_asn
+    direction
 ORDER BY minute DESC, bytes_total DESC
 LIMIT 20
 FORMAT PrettyCompactMonoBlock
@@ -85,43 +85,21 @@ FORMAT PrettyCompactMonoBlock
 
 ## Backfill истории
 
-MV считает только новые flow после создания MV. Чтобы заполнить последние 15
-минут истории:
+MV считает только новые flow после создания MV. Чтобы заполнить историю из уже
+обогащенных строк `flows_raw`, использовать скрипт:
 
 ```bash
-clickhouse-client --host 95.215.1.30 --port 6124 --user develop --password "$CH_PASS" --query "
-INSERT INTO default.traffic_asn_pair_1m
-SELECT
-    toStartOfMinute(time_received_ns) AS minute,
-    dictGetUInt32(
-        'default.bgp_origin_asn_dict',
-        'origin_asn',
-        tuple(toIPv4(reinterpretAsUInt32(reverse(substring(src_addr, 1, 4)))))
-    ) AS src_asn,
-    dictGetUInt32(
-        'default.bgp_origin_asn_dict',
-        'origin_asn',
-        tuple(toIPv4(reinterpretAsUInt32(reverse(substring(dst_addr, 1, 4)))))
-    ) AS dst_asn,
-    sum(bytes) AS bytes,
-    sum(packets) AS packets,
-    count() AS flows_count
-FROM default.flows_raw
-WHERE etype = 0x0800
-  AND time_received_ns >= now() - INTERVAL 15 MINUTE
-GROUP BY
-    minute,
-    src_asn,
-    dst_asn
-SETTINGS
-    max_memory_usage = 4000000000,
-    max_bytes_before_external_group_by = 2000000000,
-    max_threads = 4
-"
+python3 scripts/backfill_traffic_direction.py \
+  --host 95.215.1.30 \
+  --port 6124 \
+  --user develop \
+  --password "$CH_PASS" \
+  --from "2026-05-18 10:00:00" \
+  --to   "2026-05-18 11:00:00" \
+  --chunk-minutes 15
 ```
 
-Для больших периодов делать backfill маленькими окнами, например по 15 минут
-или 1 часу.
+Старые строки без classifier-полей попадут как `direction='unknown'`.
 
 ## API Endpoint
 
@@ -169,10 +147,7 @@ $bucketSeconds = match ($scale) {
 Запрос:
 
 ```sql
-WITH
-    (SELECT groupArray(asn) FROM default.local_asns_enabled) AS local_asns,
-    length(local_asns) AS local_asns_count,
-    {bucket_seconds} AS bucket_seconds
+WITH {bucket_seconds} AS bucket_seconds
 SELECT
     bucket AS ts,
     sumIf(bytes, direction = 'in')       * 8 / bucket_seconds AS in_bps,
@@ -191,14 +166,8 @@ FROM
         bytes,
         packets,
         flows_count,
-        multiIf(
-            local_asns_count = 0, 'out',
-            has(local_asns, src_asn) AND has(local_asns, dst_asn), 'internal',
-            has(local_asns, src_asn) AND NOT has(local_asns, dst_asn), 'out',
-            NOT has(local_asns, src_asn) AND has(local_asns, dst_asn), 'in',
-            'transit'
-        ) AS direction
-    FROM default.traffic_asn_pair_1m
+        direction
+    FROM default.traffic_direction_1m
     WHERE minute >= toDateTime('{from_utc}', 'UTC')
       AND minute <  toDateTime('{to_utc}', 'UTC')
 )
@@ -209,7 +178,7 @@ SETTINGS
     max_threads = 4
 ```
 
-Важно: `traffic_asn_pair_1m` — `SummingMergeTree`, поэтому в запросе всегда
+Важно: `traffic_direction_1m` — `SummingMergeTree`, поэтому в запросе всегда
 нужны `sum(bytes)`, `sum(packets)`, `sum(flows_count)`. Не читать строки как
 уже финальные значения без агрегации.
 
@@ -246,45 +215,37 @@ SETTINGS
 
 На первом экране:
 
-- рисовать `in_bps`;
-- рисовать `out_bps`;
-- `transit_bps` вернуть в API сразу и сделать отдельным toggle;
-- `total_bps` показывать в tooltip или summary card.
+- по умолчанию рисовать `total_bps`;
+- `in_bps`, `out_bps`, `transit_bps`, `internal_bps` сделать toggle-сериями;
+- `flows` показывать в tooltip или summary card.
 
-У нас в текущих данных `transit` большой, потому что много трафика идет через
-`AS50509 TRANSROUTE`. Не надо молча складывать `transit` в `out`, если
-`local_asns_enabled` уже настроен.
+Не складывать `transit` в `out`, если classifier уже включен.
 
 ## MoonShine Admin
 
-Позже можно сделать resource для:
+Нужны resources для:
 
 ```text
+default.local_operators
+default.local_networks
 default.local_asns
+default.vlan_map
 ```
 
 Поля:
 
 ```text
-asn        UInt32
-name       String
-source     String
-enabled    UInt8 / bool
-updated_at DateTime
+local_operators: operator_id, name, source, enabled
+local_networks:  prefix, family, operator_id, kind, name, source, enabled
+local_asns:      asn, operator_id, name, source, enabled
+vlan_map:        vlan_id, kind, label, operator_id, source, enabled
 ```
 
-Если оператор включает дополнительный local/customer ASN, график сразу
-переклассифицирует историю на чтении, потому что агрегат хранит ASN-пары, а не
-готовый direction.
+Изменения справочников влияют на новые flow после следующего refresh
+`xdpflowd`. Историю пересчитывать отдельным backfill, если нужно.
 
 ## Ограничение MVP
 
-`traffic_asn_pair_1m` покрывает IPv4-сценарий для операторов, у которых есть
-ASN или customer/downstream ASN. Для операторов без AS нужен prefix-based
-direction:
-
-- либо ClickHouse `local_networks_dict` (`IP_TRIE`);
-- либо prefix trie в collector-е до записи в ClickHouse.
-
-Без одного из этих механизмов нельзя быстро и универсально считать direction
-по произвольным локальным сетям на больших объемах.
+`traffic_asn_pair_1m` оставлен только как deprecated fallback. Новые экраны
+строить по `traffic_direction_1m`, `traffic_uplink_1m`,
+`traffic_customer_1m`.

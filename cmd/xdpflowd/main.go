@@ -342,6 +342,12 @@ func main() {
 	chSpoolShutdownDrain := flag.Duration("ch-spool-shutdown-drain", 0, "wait up to this duration for spool backlog to reach ClickHouse before shutdown (0=leave backlog for replay)")
 	chSpoolStallThreshold := flag.Duration("ch-spool-stall-threshold", 60*time.Second, "force resync past suspect frame if drainer makes no progress for this long while data is available (also bounds shutdown drain when set)")
 	chWriters := flag.Int("ch-writers", 4, "parallel ClickHouse INSERT workers when spool mode is on")
+	classifierEnabled := flag.Bool("classifier", false, "enable collector-side traffic classification (VLAN > local ASN > local prefix)")
+	classifierRefresh := flag.Duration("classifier-refresh", time.Minute, "refresh interval for classifier dictionaries")
+	classifierBGPTable := flag.String("classifier-bgp-table", "default.bgp_prefix_origin_current", "ClickHouse source table/view for prefix -> origin ASN")
+	classifierLocalNetworksView := flag.String("classifier-local-networks-view", "default.local_networks_enabled", "ClickHouse view for enabled local prefixes")
+	classifierLocalASNsView := flag.String("classifier-local-asns-view", "default.local_asns_enabled", "ClickHouse view for enabled local ASNs")
+	classifierVLANView := flag.String("classifier-vlan-view", "default.vlan_map_enabled", "ClickHouse view for enabled VLAN classification")
 	flag.Parse()
 
 	if strings.TrimSpace(*configPath) != "" {
@@ -498,7 +504,25 @@ func main() {
 			log.Error("ch-sampler-addr", "err", err)
 			os.Exit(1)
 		}
-		mapper := newFlowRowMapper(exportClock, sampler, 0)
+		classifier, err := newTrafficClassifier(ctx, log, classifierConfig{
+			Enabled: *classifierEnabled,
+			DSN:     strings.TrimSpace(*chDSN),
+			Refresh: *classifierRefresh,
+			Tables: classifierTables{
+				BGPOrigins:    strings.TrimSpace(*classifierBGPTable),
+				LocalNetworks: strings.TrimSpace(*classifierLocalNetworksView),
+				LocalASNs:     strings.TrimSpace(*classifierLocalASNsView),
+				VLANMap:       strings.TrimSpace(*classifierVLANView),
+			},
+		})
+		if err != nil {
+			log.Error("traffic classifier init", "err", err)
+			os.Exit(1)
+		}
+		if classifier != nil {
+			defer classifier.Close()
+		}
+		mapper := newFlowRowMapper(exportClock, sampler, 0, classifier)
 		if spoolMode != chSpoolOff {
 			sp, err := newSpoolClickhousePipeline(log,
 				strings.TrimSpace(*chDSN), strings.TrimSpace(*chTable),

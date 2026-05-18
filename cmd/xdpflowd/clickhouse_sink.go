@@ -161,6 +161,17 @@ func insertBatchRows(ctx context.Context, log *slog.Logger, conn chdriver.Conn, 
     dst_addr,
     src_as,
     dst_as,
+    src_asn,
+    dst_asn,
+    direction,
+    src_kind,
+    dst_kind,
+    src_label,
+    dst_label,
+    src_operator,
+    dst_operator,
+    src_vlan,
+    dst_vlan,
     etype,
     proto,
     src_port,
@@ -178,6 +189,7 @@ func insertBatchRows(ctx context.Context, log *slog.Logger, conn chdriver.Conn, 
 	}
 
 	for _, r := range rows {
+		r = flowRowInsertDefaults(r)
 		err := batch.Append(
 			r.Date,
 			r.TimeInsertedNs,
@@ -190,6 +202,17 @@ func insertBatchRows(ctx context.Context, log *slog.Logger, conn chdriver.Conn, 
 			fixed16(r.DstAddr),
 			r.SrcAS,
 			r.DstAS,
+			r.SrcASN,
+			r.DstASN,
+			r.Direction,
+			r.SrcKind,
+			r.DstKind,
+			r.SrcLabel,
+			r.DstLabel,
+			r.SrcOperator,
+			r.DstOperator,
+			r.SrcVLAN,
+			r.DstVLAN,
 			r.Etype,
 			r.Proto,
 			r.SrcPort,
@@ -209,6 +232,25 @@ func insertBatchRows(ctx context.Context, log *slog.Logger, conn chdriver.Conn, 
 		return false
 	}
 	return true
+}
+
+func flowRowInsertDefaults(r FlowRow) FlowRow {
+	if r.Direction == "" {
+		r.Direction = "unknown"
+	}
+	if r.SrcKind == "" {
+		r.SrcKind = "unknown"
+	}
+	if r.DstKind == "" {
+		r.DstKind = "unknown"
+	}
+	if r.SrcASN == 0 && r.SrcAS != 0 {
+		r.SrcASN = r.SrcAS
+	}
+	if r.DstASN == 0 && r.DstAS != 0 {
+		r.DstASN = r.DstAS
+	}
+	return r
 }
 
 func (s *clickhouseSink) insertBatch(ctx context.Context, rows []FlowRow) bool {

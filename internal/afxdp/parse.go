@@ -69,7 +69,9 @@ func ParseIPFrame(frame []byte) (k netv9.FlowKey, meta PktMeta, ok, parseErr boo
 			return k, meta, false, true
 		}
 		tci := binary.BigEndian.Uint16(frame[off : off+2])
-		vlanID = tci & 0x0FFF
+		if vlanID == 0 {
+			vlanID = tci & 0x0FFF
+		}
 		et = binary.BigEndian.Uint16(frame[off+2 : off+4])
 		off += 4
 	}

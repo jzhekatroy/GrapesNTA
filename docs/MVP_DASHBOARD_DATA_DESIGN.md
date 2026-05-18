@@ -91,19 +91,19 @@ DDL и рабочий процесс: `deploy/clickhouse/local_networks.sql` и
 `default.local_networks_enabled`.
 
 `IP_TRIE` dictionary `default.local_networks_dict` намеренно НЕ создается:
-удалённый ClickHouse 24.11 за SQL-прокси отвергает любую dictionary DDL, а
-доступа к хосту CH у нас нет, чтобы положить XML в
-`/etc/clickhouse-server/dictionaries.d/`. Поэтому `traffic_1m_mv` пишет
-`direction = 'unknown'`, а реальное `in/out/internal/transit` считается на
-лету в API-запросах. IPv4 использует `bgp_origin_asn_dict` +
-`local_asns_enabled`, IPv6 использует `local_networks_enabled` (см.
-`docs/LOCAL_NETWORKS_DIRECTION.md`, раздел "Direction On The Fly: SQL Recipe",
-и `docs/LARAVEL_MOONSHINE_TRAFFIC_IN_OUT.md` для Laravel-контракта).
+удалённый ClickHouse 24.11 за SQL-прокси отвергает dictionary DDL. Поэтому
+классификация перенесена в `xdpflowd`: collector держит BGP/local/VLAN
+справочники в памяти и пишет `src_asn`, `dst_asn`, `direction`,
+`src_label`/`dst_label`, `src_operator`/`dst_operator` прямо в `flows_raw`.
+Laravel читает агрегаты, а не классифицирует raw-строки.
 
 `default.local_asns` — отдельный редактируемый справочник ASN, которые нужно
-считать локальными. Loader автоматически добавляет `AS34665`; через MoonShine
-можно включить downstream/customer ASN (например `AS50509 TRANSROUTE`), если
-их трафик должен попадать в `in/out`, а не в `transit`.
+считать локальными. Private ASN не считаются локальными автоматически: их нужно
+добавлять явно.
+
+`default.vlan_map` — редактируемый справочник VLAN. В MVP используется только
+outer VLAN tag, `vlan_id` глобальный. `customer/internal/mgmt/local` считаются
+локальной стороной, `uplink/ix/peering` — внешней.
 
 ### `geo_prefix_country`
 
@@ -148,11 +148,8 @@ udp/53   -> DNS   -> dns
 - total `pps`;
 - flows/s.
 
-Одна строка = одна минута + `direction`. В текущем MVP `traffic_1m_mv`
-заполняет только `direction = 'unknown'` (см. раздел про `local_networks`).
-Когда появится `local_networks_dict`, MV можно переключить на полноценный
-`in/out/internal/transit` — шаблон лежит в конце
-`deploy/clickhouse/traffic_1m_mv.sql`.
+Одна строка = одна минута + `direction`. `traffic_1m_mv` берет готовый
+`direction` из `flows_raw`; никакой классификации в ClickHouse здесь нет.
 
 DDL:
 - `deploy/clickhouse/traffic_1m_table.sql` — таблица `traffic_1m`
@@ -188,16 +185,37 @@ pps = packets / bucket_seconds
 станут тяжелыми, добавляем физические rollup-таблицы `traffic_1h` и
 `traffic_1d`.
 
-Для графика `Traffic In/Out, bps` источник данных в MVP — не `traffic_1m` и
-не raw `flows_raw`, а `traffic_asn_pair_1m` (см.
-`docs/LARAVEL_MOONSHINE_TRAFFIC_IN_OUT.md`). `traffic_1m` остаётся источником
-total bps/pps/flows; после установки prefix dictionary он же может стать
-источником честного prefix-based in/out.
+Для графика `Traffic In/Out, bps` источник данных — `traffic_direction_1m`.
+`traffic_1m` остаётся источником total bps/pps/flows.
 
-### `traffic_asn_pair_1m`
+### `traffic_direction_1m`
 
-MVP-агрегат для быстрого `Traffic In/Out, bps` без сканирования `flows_raw`.
-DDL: `deploy/clickhouse/traffic_asn_pair_1m.sql`.
+Основной агрегат для `Traffic In/Out, bps`. DDL:
+`deploy/clickhouse/traffic_direction_1m.sql`.
+
+Поля:
+
+- minute;
+- direction;
+- bytes;
+- packets;
+- flows_count.
+
+### `traffic_uplink_1m`
+
+Разрез по uplink/IX label (`Transroute.spb`, `Piterix.msk`, ...). DDL:
+`deploy/clickhouse/traffic_uplink_1m.sql`.
+
+### `traffic_customer_1m`
+
+Разрез по `operator_id` (`pin`, `arbital`, `iconet`, ...). DDL:
+`deploy/clickhouse/traffic_customer_1m.sql`.
+
+### `traffic_asn_pair_1m` (deprecated)
+
+Старый MVP-агрегат для ASN-only In/Out без сканирования `flows_raw`.
+Оставлен для обратной совместимости. Новый API должен использовать
+`traffic_direction_1m`. DDL: `deploy/clickhouse/traffic_asn_pair_1m.sql`.
 
 Поля:
 
@@ -218,10 +236,8 @@ src_asn local, dst_asn local    -> internal
 otherwise                       -> transit
 ```
 
-Это позволяет менять список local/customer ASN без пересчёта истории. Ограничение
-MVP: агрегат покрывает IPv4 ASN-based сценарий. Для операторов без AS нужен
-prefix-based direction через ClickHouse `local_networks_dict` или classifier в
-collector-е.
+Ограничение: агрегат покрывает только IPv4 ASN-based сценарий и не учитывает
+VLAN/префиксы операторов без AS. Новые разработки на него не опираются.
 
 ### `traffic_country_1m`
 

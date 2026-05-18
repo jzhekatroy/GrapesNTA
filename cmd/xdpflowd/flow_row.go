@@ -21,6 +21,17 @@ type FlowRow struct {
 	DstAddr          [16]byte
 	SrcAS            uint32
 	DstAS            uint32
+	SrcASN           uint32
+	DstASN           uint32
+	Direction        string
+	SrcKind          string
+	DstKind          string
+	SrcLabel         string
+	DstLabel         string
+	SrcOperator      string
+	DstOperator      string
+	SrcVLAN          uint16
+	DstVLAN          uint16
 	Etype            uint32
 	Proto            uint32
 	SrcPort          uint32
@@ -33,10 +44,11 @@ type flowRowMapper struct {
 	clock          ExportClock
 	samplerAddress [16]byte
 	sequence       uint32
+	classifier     *trafficClassifier
 }
 
-func newFlowRowMapper(clock ExportClock, sampler [16]byte, seqBase uint32) flowRowMapper {
-	return flowRowMapper{clock: clock, samplerAddress: sampler, sequence: seqBase}
+func newFlowRowMapper(clock ExportClock, sampler [16]byte, seqBase uint32, classifier *trafficClassifier) flowRowMapper {
+	return flowRowMapper{clock: clock, samplerAddress: sampler, sequence: seqBase, classifier: classifier}
 }
 
 // flowRowsFromKV converts BPF map entries to ClickHouse / spool rows using one shared
@@ -55,6 +67,14 @@ func flowRowsFromKV(flows []flowKV, m flowRowMapper, receivedAt time.Time) []Flo
 
 func flowRowFromKV(fv flowKV, m flowRowMapper, receivedAt time.Time) FlowRow {
 	firstWall := m.clock.monoNsToWall(fv.v.FirstSeenNs)
+	srcClass := endpointClass{Kind: "unknown"}
+	dstClass := endpointClass{Kind: "unknown"}
+	direction := "unknown"
+	srcVLAN := fv.k.VLANID
+	var dstVLAN uint16
+	if m.classifier != nil {
+		srcClass, dstClass, direction = m.classifier.classifyPair(fv.k.SrcAddr, fv.k.DstAddr, fv.k.IPVersion, srcVLAN, dstVLAN)
+	}
 	return FlowRow{
 		Date:            receivedAt,
 		TimeInsertedNs:  receivedAt,
@@ -65,8 +85,19 @@ func flowRowFromKV(fv flowKV, m flowRowMapper, receivedAt time.Time) FlowRow {
 		SamplerAddress:  m.samplerAddress,
 		SrcAddr:         fv.k.SrcAddr,
 		DstAddr:         fv.k.DstAddr,
-		SrcAS:           0,
-		DstAS:           0,
+		SrcAS:           srcClass.ASN,
+		DstAS:           dstClass.ASN,
+		SrcASN:          srcClass.ASN,
+		DstASN:          dstClass.ASN,
+		Direction:       direction,
+		SrcKind:         srcClass.Kind,
+		DstKind:         dstClass.Kind,
+		SrcLabel:        srcClass.Label,
+		DstLabel:        dstClass.Label,
+		SrcOperator:     srcClass.OperatorID,
+		DstOperator:     dstClass.OperatorID,
+		SrcVLAN:         srcVLAN,
+		DstVLAN:         dstVLAN,
 		Etype:           etherType(fv.k.IPVersion),
 		Proto:           uint32(fv.k.Proto),
 		SrcPort:         uint32(keyPortHost(fv.k.SrcPort)),

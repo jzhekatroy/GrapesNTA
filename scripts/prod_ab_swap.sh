@@ -246,6 +246,12 @@ XDP_CH_SPOOL_FRAME_MAX_RECORDS="${XDP_CH_SPOOL_FRAME_MAX_RECORDS:-50000}"
 XDP_CH_SPOOL_FSYNC_INTERVAL="${XDP_CH_SPOOL_FSYNC_INTERVAL:-1s}"
 XDP_CH_SPOOL_SHUTDOWN_DRAIN="${XDP_CH_SPOOL_SHUTDOWN_DRAIN:-0s}"
 XDP_CH_WRITERS="${XDP_CH_WRITERS:-4}"
+XDP_CLASSIFIER="${XDP_CLASSIFIER:-0}"
+XDP_CLASSIFIER_REFRESH="${XDP_CLASSIFIER_REFRESH:-60s}"
+XDP_CLASSIFIER_BGP_TABLE="${XDP_CLASSIFIER_BGP_TABLE:-default.bgp_prefix_origin_current}"
+XDP_CLASSIFIER_LOCAL_NETWORKS_VIEW="${XDP_CLASSIFIER_LOCAL_NETWORKS_VIEW:-default.local_networks_enabled}"
+XDP_CLASSIFIER_LOCAL_ASNS_VIEW="${XDP_CLASSIFIER_LOCAL_ASNS_VIEW:-default.local_asns_enabled}"
+XDP_CLASSIFIER_VLAN_VIEW="${XDP_CLASSIFIER_VLAN_VIEW:-default.vlan_map_enabled}"
 case "${XDP_CH_SPOOL_MODE:-off}" in
   off|on|required) ;;
   *) echo "ERROR: XDP_CH_SPOOL_MODE must be off|on|required (got: $XDP_CH_SPOOL_MODE)" >&2; exit 1;;
@@ -274,6 +280,16 @@ if [[ -n "$XDP_CH_DSN" || -n "$XDP_CH_TABLE" ]]; then
   )
   if [[ -n "$XDP_CH_SAMPLER_ADDR" ]]; then
     CH_EXTRA_ARGS+=( -ch-sampler-addr "$XDP_CH_SAMPLER_ADDR" )
+  fi
+  if [[ "$XDP_CLASSIFIER" == "1" ]]; then
+    CH_EXTRA_ARGS+=(
+      -classifier
+      -classifier-refresh "$XDP_CLASSIFIER_REFRESH"
+      -classifier-bgp-table "$XDP_CLASSIFIER_BGP_TABLE"
+      -classifier-local-networks-view "$XDP_CLASSIFIER_LOCAL_NETWORKS_VIEW"
+      -classifier-local-asns-view "$XDP_CLASSIFIER_LOCAL_ASNS_VIEW"
+      -classifier-vlan-view "$XDP_CLASSIFIER_VLAN_VIEW"
+    )
   fi
   if [[ -n "$XDP_CH_SPOOL_DIR" ]]; then
     CH_EXTRA_ARGS+=(
