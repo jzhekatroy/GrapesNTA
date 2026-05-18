@@ -30,6 +30,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"golang.org/x/sys/unix"
 	"xdpflowd/internal/loader"
 )
 
@@ -164,7 +165,16 @@ type nfExporter struct {
 	sendErrs   uint64
 }
 
+// readSystemUptimeNs returns a monotonic-ish nanosecond timestamp that shares
+// a time domain with bpf_ktime_get_ns() (CLOCK_MONOTONIC since system boot).
+// Prefers unix.ClockGettime — it resolves through the vDSO on Linux, so the
+// call cost is a few nanoseconds and triggers no syscall, no allocations and
+// no /proc I/O. Falls back to /proc/uptime if the syscall is unavailable.
 func readSystemUptimeNs() (uint64, error) {
+	var ts unix.Timespec
+	if err := unix.ClockGettime(unix.CLOCK_MONOTONIC, &ts); err == nil {
+		return uint64(ts.Sec)*1_000_000_000 + uint64(ts.Nsec), nil
+	}
 	b, err := os.ReadFile("/proc/uptime")
 	if err != nil {
 		return 0, err

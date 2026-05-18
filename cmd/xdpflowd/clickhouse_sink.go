@@ -128,12 +128,6 @@ func newClickhouseSink(
 	return s, nil
 }
 
-func fixed16(addr [16]byte) []byte {
-	out := make([]byte, 16)
-	copy(out, addr[:])
-	return out
-}
-
 func etherType(ipVersion uint8) uint32 {
 	if ipVersion == 6 {
 		return 0x86DD
@@ -187,7 +181,13 @@ func insertCompactBatchRows(ctx context.Context, log *slog.Logger, conn chdriver
 		return false
 	}
 
-	for _, r := range rows {
+	// Iterate by index + pointer to avoid per-row copies of the ~200B FlowRow
+	// struct and to let r.*Addr[:] reference the existing backing array (no
+	// per-row 16-byte heap allocation as in the previous fixed16 helper).
+	// The driver consumes the staged values during batch.Send() below, so
+	// these slices outlive their use.
+	for i := range rows {
+		r := &rows[i]
 		err := batch.Append(
 			r.Date,
 			r.TimeInsertedNs,
@@ -195,9 +195,9 @@ func insertCompactBatchRows(ctx context.Context, log *slog.Logger, conn chdriver
 			r.TimeFlowStartNs,
 			r.SequenceNum,
 			r.SamplingRate,
-			fixed16(r.SamplerAddress),
-			fixed16(r.SrcAddr),
-			fixed16(r.DstAddr),
+			r.SamplerAddress[:],
+			r.SrcAddr[:],
+			r.DstAddr[:],
 			r.SrcAS,
 			r.DstAS,
 			r.Etype,
@@ -267,8 +267,9 @@ func insertEnrichedBatchRows(ctx context.Context, log *slog.Logger, conn chdrive
 		return false
 	}
 
-	for _, r := range rows {
-		r = flowRowInsertDefaults(r)
+	for i := range rows {
+		r := &rows[i]
+		flowRowApplyInsertDefaults(r)
 		err := batch.Append(
 			r.Date,
 			r.TimeInsertedNs,
@@ -276,9 +277,9 @@ func insertEnrichedBatchRows(ctx context.Context, log *slog.Logger, conn chdrive
 			r.TimeFlowStartNs,
 			r.SequenceNum,
 			r.SamplingRate,
-			fixed16(r.SamplerAddress),
-			fixed16(r.SrcAddr),
-			fixed16(r.DstAddr),
+			r.SamplerAddress[:],
+			r.SrcAddr[:],
+			r.DstAddr[:],
 			r.SrcAS,
 			r.DstAS,
 			r.SrcASN,
@@ -314,7 +315,8 @@ func insertEnrichedBatchRows(ctx context.Context, log *slog.Logger, conn chdrive
 }
 
 func rowsHaveEnrichment(rows []FlowRow) bool {
-	for _, r := range rows {
+	for i := range rows {
+		r := &rows[i]
 		if r.SrcASN != 0 || r.DstASN != 0 ||
 			r.Direction != "" || r.SrcKind != "" || r.DstKind != "" ||
 			r.SrcLabel != "" || r.DstLabel != "" ||
@@ -326,7 +328,10 @@ func rowsHaveEnrichment(rows []FlowRow) bool {
 	return false
 }
 
-func flowRowInsertDefaults(r FlowRow) FlowRow {
+// flowRowApplyInsertDefaults fills enrichment columns in-place. Operating on a
+// pointer avoids copying the ~200-byte FlowRow struct once per row in the hot
+// INSERT loop.
+func flowRowApplyInsertDefaults(r *FlowRow) {
 	if r.Direction == "" {
 		r.Direction = "unknown"
 	}
@@ -342,7 +347,6 @@ func flowRowInsertDefaults(r FlowRow) FlowRow {
 	if r.DstASN == 0 && r.DstAS != 0 {
 		r.DstASN = r.DstAS
 	}
-	return r
 }
 
 func (s *clickhouseSink) insertBatch(ctx context.Context, rows []FlowRow) bool {

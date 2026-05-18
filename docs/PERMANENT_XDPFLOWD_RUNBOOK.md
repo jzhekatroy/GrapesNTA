@@ -148,6 +148,7 @@ Durable spool (`/var/lib/xdpflowd/ch-spool`) рассчитан на сцена�
 - Drainer на любую ошибку чтения (`bad frame header`, `crc mismatch`, `excessive payload len`, `gob decode`) сканирует сегмент вперёд до следующего валидного `PFLX`-magic и продолжает с него. Лог содержит `spool corruption skipped` с `from`, `to`, `skipped_bytes`.
 - Watchdog `XDP_CH_SPOOL_STALL_THRESHOLD` (default `60s`) форсирует тот же resync, если консумер ничего не двигал, хотя данные есть. Параметр также ограничивает ожидание `Close()` при остановке сервиса, чтобы `systemctl stop` не висел.
 - Метрики в `journalctl -u xdpflowd`: `corruption_frames_skipped`, `corruption_bytes_skipped`, `lag_segments`, `drainer_progress_age`. Печатаются каждые `XDP_INTERVAL` (по умолчанию 5s).
+- Печать `top-N` потоков (полный обход BPF flow-карты + сортировка) вынесена на отдельный таймер `XDP_TOP_INTERVAL` (по умолчанию `60s`). На короткий `XDP_INTERVAL` остаётся только дешёвый PERCPU-stats (без обхода карты). Если top-N вообще не нужен, поставьте `XDP_TOP_INTERVAL=0` или `XDP_TOP=0` — это ощутимо снижает CPU на высококардинальных хостах (десятки–сотни тысяч активных потоков).
 
 Если сервис всё-таки оказался застрявшим (например, бинарь старее версии с авто-resync), руками:
 

@@ -250,43 +250,116 @@ func tcpFlagsStr(f uint8) string {
 	return s
 }
 
-func dumpTop(log *slog.Logger, objs *loader.Objects, topN int) {
-	if topN <= 0 {
-		log.Info("stats",
-			"total_packets", readStat(objs, 0),
-			"parse_errors", readStat(objs, 1),
-			"map_full", readStat(objs, 2),
-			"non_ip_pass", readStat(objs, 3),
-		)
-		return
-	}
-	type row struct {
-		k FlowKey
-		v FlowValue
-	}
-	var rows []row
-	var k FlowKey
-	var v FlowValue
-	iter := objs.Flows.Iterate()
-	for iter.Next(&k, &v) {
-		rows = append(rows, row{k, v})
-	}
-	_ = iter.Err()
-	sort.Slice(rows, func(i, j int) bool {
-		return rows[i].v.Bytes > rows[j].v.Bytes
-	})
-	if topN > len(rows) {
-		topN = len(rows)
-	}
+// logStats prints the cheap PERCPU-array counters with no BPF map iteration.
+// Cost is independent of the number of flows in the map — safe to call frequently.
+func logStats(log *slog.Logger, objs *loader.Objects) {
 	log.Info("stats",
-		"flows_in_map", len(rows),
 		"total_packets", readStat(objs, 0),
 		"parse_errors", readStat(objs, 1),
 		"map_full", readStat(objs, 2),
 		"non_ip_pass", readStat(objs, 3),
 	)
-	for i := 0; i < topN; i++ {
-		r := rows[i]
+}
+
+// topRow is the heap element for dumpTop's bounded top-K selection.
+type topRow struct {
+	k FlowKey
+	v FlowValue
+}
+
+// minHeapTopK keeps the K largest flows (by bytes) in O(N·logK) and O(K) memory,
+// avoiding the previous behaviour of allocating a slice of every map entry and
+// sorting it. Heap invariant: rows[0] is the SMALLEST currently retained, so the
+// next candidate is admitted only if it beats the running minimum.
+type minHeapTopK struct {
+	rows []topRow
+	cap  int
+}
+
+func newMinHeapTopK(capacity int) *minHeapTopK {
+	if capacity < 1 {
+		capacity = 1
+	}
+	return &minHeapTopK{rows: make([]topRow, 0, capacity), cap: capacity}
+}
+
+func (h *minHeapTopK) push(k FlowKey, v FlowValue) {
+	if len(h.rows) < h.cap {
+		h.rows = append(h.rows, topRow{k, v})
+		h.siftUp(len(h.rows) - 1)
+		return
+	}
+	if v.Bytes <= h.rows[0].v.Bytes {
+		return
+	}
+	h.rows[0] = topRow{k, v}
+	h.siftDown(0)
+}
+
+func (h *minHeapTopK) siftUp(i int) {
+	for i > 0 {
+		p := (i - 1) / 2
+		if h.rows[p].v.Bytes <= h.rows[i].v.Bytes {
+			break
+		}
+		h.rows[p], h.rows[i] = h.rows[i], h.rows[p]
+		i = p
+	}
+}
+
+func (h *minHeapTopK) siftDown(i int) {
+	n := len(h.rows)
+	for {
+		l := 2*i + 1
+		r := 2*i + 2
+		smallest := i
+		if l < n && h.rows[l].v.Bytes < h.rows[smallest].v.Bytes {
+			smallest = l
+		}
+		if r < n && h.rows[r].v.Bytes < h.rows[smallest].v.Bytes {
+			smallest = r
+		}
+		if smallest == i {
+			break
+		}
+		h.rows[smallest], h.rows[i] = h.rows[i], h.rows[smallest]
+		i = smallest
+	}
+}
+
+// sortedDesc returns the retained rows sorted by bytes descending.
+func (h *minHeapTopK) sortedDesc() []topRow {
+	out := h.rows
+	sort.Slice(out, func(i, j int) bool { return out[i].v.Bytes > out[j].v.Bytes })
+	return out
+}
+
+// dumpTop walks the BPF flow map to compute aggregate counters and the top-N
+// flows by bytes. Cost is O(flows_in_map); only the K largest are retained so
+// peak memory stays at O(topN) rather than O(flows).
+func dumpTop(log *slog.Logger, objs *loader.Objects, topN int) {
+	if topN <= 0 {
+		logStats(log, objs)
+		return
+	}
+	heap := newMinHeapTopK(topN)
+	var k FlowKey
+	var v FlowValue
+	iter := objs.Flows.Iterate()
+	flowsInMap := 0
+	for iter.Next(&k, &v) {
+		flowsInMap++
+		heap.push(k, v)
+	}
+	_ = iter.Err()
+	log.Info("stats",
+		"flows_in_map", flowsInMap,
+		"total_packets", readStat(objs, 0),
+		"parse_errors", readStat(objs, 1),
+		"map_full", readStat(objs, 2),
+		"non_ip_pass", readStat(objs, 3),
+	)
+	for _, r := range heap.sortedDesc() {
 		sp := keyPortHost(r.k.SrcPort)
 		dp := keyPortHost(r.k.DstPort)
 		fmt.Printf("  %-6s vlan=%-4d %42s:%-5d -> %-42s:%-5d  pkts=%-8d bytes=%-10d if=%d q=%d syn=%d rst=%d fin=%d ttl=%d-%d plen=%d-%d frags=%d flags=%s\n",
@@ -310,6 +383,7 @@ func main() {
 	mode := flag.String("mode", "native", "XDP mode: native|generic")
 	topN := flag.Int("top", 15, "show top N flows by bytes (log mode)")
 	interval := flag.Duration("interval", 5*time.Second, "stats / JSON dump interval")
+	topInterval := flag.Duration("top-interval", 60*time.Second, "interval for the expensive top-N flow dump (full BPF map walk). Cheap PERCPU stats still print on -interval. Set 0 to disable the dump and only print cheap stats.")
 	jsonOut := flag.String("json-out", "", "append NDJSON snapshots to this file")
 	jsonInterval := flag.Duration("json-interval", 0, "JSON dump interval (defaults to -interval)")
 	jsonFlows := flag.Bool("json-include-flows", false, "include per-flow array in JSON (large)")
@@ -604,6 +678,15 @@ func main() {
 		defer exportTicker.Stop()
 	}
 
+	// The expensive top-N dump walks the full BPF flow map. Decouple it from
+	// `interval` so high-cardinality hosts can keep cheap stats printing on the
+	// short interval without paying for a full map walk + heap each time.
+	var topTicker *time.Ticker
+	if *topInterval > 0 && *topN > 0 {
+		topTicker = time.NewTicker(*topInterval)
+		defer topTicker.Stop()
+	}
+
 	// flushFinal writes a last NDJSON snapshot right before exiting — this closes
 	// the timing gap with external counters (e.g. /sys/class/net/*/statistics/*)
 	// so the accuracy test can compare deltas taken at the same instant.
@@ -618,12 +701,15 @@ func main() {
 	}
 
 	// Build channels that may be nil-safe in select (nil channel blocks forever).
-	var jsonC, exportC <-chan time.Time
+	var jsonC, exportC, topC <-chan time.Time
 	if jsonTicker != nil {
 		jsonC = jsonTicker.C
 	}
 	if exportTicker != nil {
 		exportC = exportTicker.C
+	}
+	if topTicker != nil {
+		topC = topTicker.C
 	}
 
 	for {
@@ -645,13 +731,15 @@ func main() {
 			log.Info("shutdown")
 			return
 		case <-ticker.C:
-			dumpTop(log, objs, *topN)
+			logStats(log, objs)
 			if nfExp != nil {
 				nfExp.logMetrics()
 			}
 			if chDel != nil {
 				chDel.LogMetrics()
 			}
+		case <-topC:
+			dumpTop(log, objs, *topN)
 		case <-jsonC:
 			snap := buildSnapshot(objs, *jsonFlows)
 			if err := writeJSONLine(*jsonOut, snap); err != nil {

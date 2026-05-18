@@ -32,6 +32,7 @@ XDP_ACTION="${XDP_ACTION:-drop}"
 NF_DSTS="${NF_DSTS:-127.0.0.1:9996}"
 XDP_TOP="${XDP_TOP:-0}"
 XDP_INTERVAL="${XDP_INTERVAL:-5s}"
+XDP_TOP_INTERVAL="${XDP_TOP_INTERVAL:-60s}"
 XDP_JSON_OUT_ENABLE="${XDP_JSON_OUT_ENABLE:-0}"
 XDP_JSON_INTERVAL="${XDP_JSON_INTERVAL:-10s}"
 XDP_HEAVY_EXPORT="${XDP_HEAVY_EXPORT:-0}"
@@ -145,6 +146,7 @@ exec "${STDBUF[@]}" "$BIN" \
   -nf-template-interval "$XDP_NF_TEMPLATE_INTERVAL" \
   -nf-scan "$XDP_NF_SCAN" \
   -top "$XDP_TOP" \
+  -top-interval "$XDP_TOP_INTERVAL" \
   -interval "$XDP_INTERVAL" \
   "${JSON_ARGS[@]}" \
   "${CH_ARGS[@]}"

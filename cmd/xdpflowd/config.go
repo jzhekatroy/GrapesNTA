@@ -18,6 +18,7 @@ type xdpflowdConfig struct {
 	XDPAction        *string `yaml:"xdp_action"`
 	DNSPassthrough   *bool   `yaml:"dns_passthrough"`
 	Top              *int    `yaml:"top"`
+	TopInterval      *string `yaml:"top_interval"`
 	Interval         *string `yaml:"interval"`
 	JSONOut          *string `yaml:"json_out"`
 	JSONInterval     *string `yaml:"json_interval"`
@@ -116,6 +117,7 @@ func applyXDPFlowdConfig(fs *flag.FlagSet, cfg *xdpflowdConfig) error {
 		func() error { return setString("xdp-action", cfg.XDPAction) },
 		func() error { return setBool("dns-passthrough", cfg.DNSPassthrough) },
 		func() error { return setInt("top", cfg.Top) },
+		func() error { return setString("top-interval", cfg.TopInterval) },
 		func() error { return setString("interval", cfg.Interval) },
 		func() error { return setString("json-out", cfg.JSONOut) },
 		func() error { return setString("json-interval", cfg.JSONInterval) },
