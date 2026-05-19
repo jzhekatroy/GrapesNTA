@@ -107,10 +107,25 @@ struct {
  */
 struct {
 	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
-	__uint(max_entries, 4);
+	__uint(max_entries, 16);
 	__type(key, __u32);
 	__type(value, __u64);
 } stats SEC(".maps");
+
+#define STAT_TOTAL_PACKETS          0
+#define STAT_PARSE_ERRORS           1
+#define STAT_MAP_FULL               2
+#define STAT_NON_IP_PASS            3
+#define STAT_ACCOUNTED_PACKETS      4
+#define STAT_L4_PARSE_FAIL          5
+#define STAT_IPV4_FRAGMENTS         6
+#define STAT_IPV4_NONFIRST_FRAGS    7
+#define STAT_IPV6_PACKETS           8
+#define STAT_IPV6_L4_PARSE_FAIL     9
+#define STAT_VLAN_TAG_SEEN          10
+#define STAT_IPV4_PACKETS           11
+#define STAT_IPV6_FRAGMENTS         12
+#define STAT_UNSUPPORTED_L4         13
 
 /* Small per-packet accumulator for TCP parsing. Passed by pointer to keep
  * helper function argument count ≤ 5 — older clang (11 on Debian 11) may
@@ -165,6 +180,13 @@ static __always_inline int is_ipv4_fragment(const struct iphdr *ip)
 	return 0;
 }
 
+static __always_inline int is_ipv4_nonfirst_fragment(const struct iphdr *ip)
+{
+	if (ip->frag_off & bpf_htons(0x1FFF))
+		return 1;
+	return 0;
+}
+
 /* Force XDP_PASS for UDP/53 when dns_passthrough is enabled. key->src_port and
  * key->dst_port are in network byte order (same as bpf_htons(53)).
  */
@@ -208,7 +230,7 @@ static __always_inline int parse_l4_tcpudp_icmp(struct flow_key *key,
 		struct tcphdr *tcp = l4;
 
 		if ((void *)(tcp + 1) > data_end) {
-			bump_stat(1);
+			bump_stat(STAT_PARSE_ERRORS);
 			return -1;
 		}
 		key->src_port = tcp->source;
@@ -235,7 +257,7 @@ static __always_inline int parse_l4_tcpudp_icmp(struct flow_key *key,
 		struct udphdr *udp = l4;
 
 		if ((void *)(udp + 1) > data_end) {
-			bump_stat(1);
+			bump_stat(STAT_PARSE_ERRORS);
 			return -1;
 		}
 		key->src_port = udp->source;
@@ -244,12 +266,13 @@ static __always_inline int parse_l4_tcpudp_icmp(struct flow_key *key,
 		__u8 *icmp = l4;
 
 		if (icmp + 2 > (__u8 *)data_end) {
-			bump_stat(1);
+			bump_stat(STAT_PARSE_ERRORS);
 			return -1;
 		}
 		key->src_port = bpf_htons((__u16)icmp[0] << 8 | icmp[1]);
 		key->dst_port = 0;
 	} else {
+		bump_stat(STAT_UNSUPPORTED_L4);
 		key->src_port = 0;
 		key->dst_port = 0;
 	}
@@ -326,12 +349,12 @@ int xdp_flow_prog(struct xdp_md *ctx)
 	void *data_end = (void *)(long)ctx->data_end;
 	__u32 pkt_len = (__u32)((unsigned long)data_end - (unsigned long)data);
 
-	bump_stat(0);
+	bump_stat(STAT_TOTAL_PACKETS);
 
 	struct ethhdr *eth = data;
 
 	if ((void *)(eth + 1) > data_end) {
-		bump_stat(1);
+		bump_stat(STAT_PARSE_ERRORS);
 		return XDP_PASS;
 	}
 
@@ -346,10 +369,11 @@ int xdp_flow_prog(struct xdp_md *ctx)
 		} *vh = nh;
 
 		if ((void *)(vh + 1) > data_end) {
-			bump_stat(1);
+			bump_stat(STAT_PARSE_ERRORS);
 			return XDP_PASS;
 		}
 		vlan_id = bpf_ntohs(vh->tci) & 0x0FFF;
+		bump_stat(STAT_VLAN_TAG_SEEN);
 		h_proto = vh->encap_proto;
 		nh = (void *)(vh + 1);
 	}
@@ -358,21 +382,22 @@ int xdp_flow_prog(struct xdp_md *ctx)
 		struct iphdr *ip = nh;
 
 		if ((void *)(ip + 1) > data_end) {
-			bump_stat(1);
+			bump_stat(STAT_PARSE_ERRORS);
 			return XDP_PASS;
 		}
+		bump_stat(STAT_IPV4_PACKETS);
 
 		__u32 ihl = ip->ihl * 4;
 
 		if (ihl < sizeof(*ip)) {
-			bump_stat(1);
+			bump_stat(STAT_PARSE_ERRORS);
 			return XDP_PASS;
 		}
 
 		void *l4 = (void *)ip + ihl;
 
 		if (l4 > data_end) {
-			bump_stat(1);
+			bump_stat(STAT_PARSE_ERRORS);
 			return XDP_PASS;
 		}
 
@@ -386,8 +411,16 @@ int xdp_flow_prog(struct xdp_md *ctx)
 
 		struct pkt_info pi = {};
 
-		if (parse_l4_tcpudp_icmp(&key, &pi.acc, l4, data_end, ip->protocol) < 0)
+		if (is_ipv4_fragment(ip)) {
+			bump_stat(STAT_IPV4_FRAGMENTS);
+			if (is_ipv4_nonfirst_fragment(ip))
+				bump_stat(STAT_IPV4_NONFIRST_FRAGS);
+		}
+
+		if (parse_l4_tcpudp_icmp(&key, &pi.acc, l4, data_end, ip->protocol) < 0) {
+			bump_stat(STAT_L4_PARSE_FAIL);
 			return XDP_PASS;
+		}
 
 		pi.now = bpf_ktime_get_ns();
 		pi.pkt_len = pkt_len;
@@ -399,6 +432,7 @@ int xdp_flow_prog(struct xdp_md *ctx)
 
 		if (val) {
 			flow_update_common(val, &pi);
+			bump_stat(STAT_ACCOUNTED_PACKETS);
 		} else {
 			struct flow_value nv = {};
 
@@ -423,10 +457,14 @@ int xdp_flow_prog(struct xdp_md *ctx)
 
 			if (err == -17) {
 				val = bpf_map_lookup_elem(&flows, &key);
-				if (val)
+				if (val) {
 					flow_update_common(val, &pi);
+					bump_stat(STAT_ACCOUNTED_PACKETS);
+				}
 			} else if (err < 0) {
-				bump_stat(2);
+				bump_stat(STAT_MAP_FULL);
+			} else {
+				bump_stat(STAT_ACCOUNTED_PACKETS);
 			}
 		}
 		if (dns_must_pass(&key))
@@ -438,9 +476,10 @@ int xdp_flow_prog(struct xdp_md *ctx)
 		struct ipv6hdr *ip6 = nh;
 
 		if ((void *)(ip6 + 1) > data_end) {
-			bump_stat(1);
+			bump_stat(STAT_PARSE_ERRORS);
 			return XDP_PASS;
 		}
+		bump_stat(STAT_IPV6_PACKETS);
 
 		struct flow_key key = {};
 
@@ -457,13 +496,15 @@ int xdp_flow_prog(struct xdp_md *ctx)
 		int saw_frag = 0;
 
 		if (skip_ipv6_exthdrs(&l4, &nxt, data_end, &saw_frag) < 0) {
-			bump_stat(1);
+			bump_stat(STAT_PARSE_ERRORS);
 			return XDP_PASS;
 		}
 		if (l4 > data_end) {
-			bump_stat(1);
+			bump_stat(STAT_PARSE_ERRORS);
 			return XDP_PASS;
 		}
+		if (saw_frag)
+			bump_stat(STAT_IPV6_FRAGMENTS);
 
 		struct pkt_info pi = {};
 
@@ -471,13 +512,14 @@ int xdp_flow_prog(struct xdp_md *ctx)
 			struct icmp6hdr *ic = l4;
 
 			if ((void *)(ic + 1) > data_end) {
-				bump_stat(1);
+				bump_stat(STAT_PARSE_ERRORS);
 				return XDP_PASS;
 			}
 			key.proto = IPPROTO_ICMPV6;
 			key.src_port = bpf_htons((__u16)ic->icmp6_type << 8 | ic->icmp6_code);
 			key.dst_port = 0;
 		} else if (parse_l4_tcpudp_icmp(&key, &pi.acc, l4, data_end, nxt) < 0) {
+			bump_stat(STAT_IPV6_L4_PARSE_FAIL);
 			return XDP_PASS;
 		}
 
@@ -491,6 +533,7 @@ int xdp_flow_prog(struct xdp_md *ctx)
 
 		if (val) {
 			flow_update_common(val, &pi);
+			bump_stat(STAT_ACCOUNTED_PACKETS);
 		} else {
 			struct flow_value nv = {};
 
@@ -515,10 +558,14 @@ int xdp_flow_prog(struct xdp_md *ctx)
 
 			if (err == -17) {
 				val = bpf_map_lookup_elem(&flows, &key);
-				if (val)
+				if (val) {
 					flow_update_common(val, &pi);
+					bump_stat(STAT_ACCOUNTED_PACKETS);
+				}
 			} else if (err < 0) {
-				bump_stat(2);
+				bump_stat(STAT_MAP_FULL);
+			} else {
+				bump_stat(STAT_ACCOUNTED_PACKETS);
 			}
 		}
 		if (dns_must_pass(&key))
@@ -527,7 +574,7 @@ int xdp_flow_prog(struct xdp_md *ctx)
 	}
 
 	/* Not IPv4 and not IPv6 (ARP, LLDP, STP, 802.1AD with non-IP inner, etc.). */
-	bump_stat(3);
+	bump_stat(STAT_NON_IP_PASS);
 	return XDP_PASS;
 }
 

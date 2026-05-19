@@ -258,6 +258,16 @@ func logStats(log *slog.Logger, objs *loader.Objects) {
 		"parse_errors", readStat(objs, 1),
 		"map_full", readStat(objs, 2),
 		"non_ip_pass", readStat(objs, 3),
+		"accounted_packets", readStat(objs, 4),
+		"l4_parse_fail", readStat(objs, 5),
+		"ipv4_fragments", readStat(objs, 6),
+		"ipv4_nonfirst_frags", readStat(objs, 7),
+		"ipv6_packets", readStat(objs, 8),
+		"ipv6_l4_parse_fail", readStat(objs, 9),
+		"vlan_tag_seen", readStat(objs, 10),
+		"ipv4_packets", readStat(objs, 11),
+		"ipv6_fragments", readStat(objs, 12),
+		"unsupported_l4", readStat(objs, 13),
 	)
 }
 
@@ -358,6 +368,16 @@ func dumpTop(log *slog.Logger, objs *loader.Objects, topN int) {
 		"parse_errors", readStat(objs, 1),
 		"map_full", readStat(objs, 2),
 		"non_ip_pass", readStat(objs, 3),
+		"accounted_packets", readStat(objs, 4),
+		"l4_parse_fail", readStat(objs, 5),
+		"ipv4_fragments", readStat(objs, 6),
+		"ipv4_nonfirst_frags", readStat(objs, 7),
+		"ipv6_packets", readStat(objs, 8),
+		"ipv6_l4_parse_fail", readStat(objs, 9),
+		"vlan_tag_seen", readStat(objs, 10),
+		"ipv4_packets", readStat(objs, 11),
+		"ipv6_fragments", readStat(objs, 12),
+		"unsupported_l4", readStat(objs, 13),
 	)
 	for _, r := range heap.sortedDesc() {
 		sp := keyPortHost(r.k.SrcPort)
