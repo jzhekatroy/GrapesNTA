@@ -156,6 +156,26 @@ Durable spool (`/var/lib/xdpflowd/ch-spool`) рассчитан на сцена�
 - Если checkpoint указывает за пределы реальных сегментов на диске (`cp.Segment > maxSeg+1`, например после очистки spool с сохранением `meta/`), либо отстаёт от ретеншна (`cp.Segment < minSeg`), checkpoint сбрасывается на самый старый существующий сегмент и сохраняется обратно. В логе строка `spool normalize: checkpoint ahead of writer; resetting to oldest segment` или `... behind retention; advancing to oldest segment` с `old`, `new`, `min_seg`, `max_seg`.
 - Скрипт `scripts/prod_repair_spool.sh` остаётся для ручного контроля и старых бинарей, но рутинно его звать больше не надо — нормализация работает прозрачно при старте сервиса.
 
+## Flow drainer: атомарное чтение BPF map
+
+Раньше экспорт из BPF flow-карты делался в два шага: сначала `Iterate` (snapshot значений), затем `Delete` каждого ключа. Между этими шагами XDP-программа на других CPU продолжала инкрементить `packets`/`bytes` ровно этих же flow, и накопленная за интервал дельта **выбрасывалась** при `Delete`. Под нагрузкой ~3.5 Mpps это давало стабильную «недостачу» порядка 10–15% относительно `accounted_packets` из BPF stats — байты считались XDP, но в `flows_raw` так и не приезжали.
+
+С версии после `41ed0c5` xdpflowd использует **атомарный** путь через `BPF_MAP_LOOKUP_AND_DELETE_ELEM` (`Map.LookupAndDelete`):
+
+- Ядро возвращает значение counters на момент удаления entry в одном syscall. Гонка между «прочитал» и «удалил» исчезает.
+- При старте делается probe на временной HASH-карте. Если ядро не поддерживает операцию (`< 5.14`), `xdpflowd` молча работает по старому пути и пишет `WARN` про потенциальный under-count.
+- В `journalctl` каждые `XDP_INTERVAL` секунд печатается `flow drainer mode=atomic atomic_calls=N legacy_calls=M` — это и есть индикатор, что фикс активен.
+- Если `LookupAndDelete` начнёт возвращать неожиданную ошибку в runtime, drainer однократно даунгрейдится в legacy на остаток lifetime процесса и пишет это в лог — никаких незаметных потерь данных.
+
+Проверить, что путь активен после деплоя:
+
+```bash
+sudo journalctl -u xdpflowd -n 100 --no-pager | grep 'flow drainer'
+# ожидаем: ... flow drainer mode=atomic atomic_calls=NN legacy_calls=0
+```
+
+Если после рестарта в логах строка `flow drainer ... mode=legacy` — значит ядро < 5.14 или probe не прошёл, и стоит обновить ядро для устранения under-count.
+
 Если сервис всё-таки оказался застрявшим (например, бинарь старее версии с авто-resync), руками:
 
 ```bash

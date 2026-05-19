@@ -417,10 +417,21 @@ func (e *nfExporter) flushBuckets(v4 [][]byte, v6 [][]byte) {
 // crosses an idle/active boundary. Returns counts of flows exported and deleted.
 // If onFlows is non-nil it receives the same slice of flows before UDP encode
 // (for optional ClickHouse direct ingest). receivedAt is wall UTC for the export batch.
-func (e *nfExporter) scanAndExport(objs *loader.Objects, onFlows func([]flowKV, time.Time)) (exported, deleted int) {
+//
+// When drainer is non-nil and its atomic mode is active, the BPF map entries
+// are removed in the same LookupAndDelete that captures their final counters
+// — so counters added by XDP between iteration and delete are NOT lost. On
+// legacy kernels the function follows the classic snapshot+delete contract.
+func (e *nfExporter) scanAndExport(objs *loader.Objects, drainer *FlowDrainer, onFlows func([]flowKV, time.Time)) (exported, deleted int) {
 	nowMonoNs, _ := readSystemUptimeNs() // cheap, a few hundred ns
 
-	flows := selectExpiredFlows(objs, e.idleTimeout, e.activeTimeout, nowMonoNs)
+	var flows []flowKV
+	var atomicDrained bool
+	if drainer != nil {
+		flows, atomicDrained = drainer.Expired(objs, e.idleTimeout, e.activeTimeout, nowMonoNs)
+	} else {
+		flows = selectExpiredFlows(objs, e.idleTimeout, e.activeTimeout, nowMonoNs)
+	}
 	if onFlows != nil {
 		onFlows(flows, time.Now().UTC())
 	}
@@ -444,7 +455,11 @@ func (e *nfExporter) scanAndExport(objs *loader.Objects, onFlows func([]flowKV, 
 
 	e.flushBuckets(recV4, recV6)
 
-	deleted = deleteFlowKeys(objs, flows)
+	if atomicDrained {
+		deleted = len(flows)
+	} else {
+		deleted = deleteFlowKeys(objs, flows)
+	}
 	exported = len(flows)
 	return
 }
@@ -452,8 +467,14 @@ func (e *nfExporter) scanAndExport(objs *loader.Objects, onFlows func([]flowKV, 
 // flushAll exports every flow currently in the map regardless of timeout.
 // Intended for graceful shutdown and for test harnesses to ensure nothing
 // is left behind.
-func (e *nfExporter) flushAll(objs *loader.Objects, onFlows func([]flowKV, time.Time)) (exported, deleted int) {
-	flows := selectAllFlows(objs)
+func (e *nfExporter) flushAll(objs *loader.Objects, drainer *FlowDrainer, onFlows func([]flowKV, time.Time)) (exported, deleted int) {
+	var flows []flowKV
+	var atomicDrained bool
+	if drainer != nil {
+		flows, atomicDrained = drainer.All(objs)
+	} else {
+		flows = selectAllFlows(objs)
+	}
 	if onFlows != nil {
 		onFlows(flows, time.Now().UTC())
 	}
@@ -469,7 +490,11 @@ func (e *nfExporter) flushAll(objs *loader.Objects, onFlows func([]flowKV, time.
 	// can decode records even if it just started.
 	e.sendTemplate()
 	e.flushBuckets(recV4, recV6)
-	deleted = deleteFlowKeys(objs, flows)
+	if atomicDrained {
+		deleted = len(flows)
+	} else {
+		deleted = deleteFlowKeys(objs, flows)
+	}
 	exported = len(flows)
 	return
 }

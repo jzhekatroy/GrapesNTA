@@ -535,6 +535,11 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
+	// Choose flow drainer once: atomic LookupAndDelete when supported,
+	// snapshot+delete otherwise. Shared by NetFlow and ClickHouse paths so
+	// behaviour and metrics are uniform.
+	drainer := NewFlowDrainer(log)
+
 	var nfExp *nfExporter
 	if *nfDsts != "" {
 		dests := splitCSV(*nfDsts)
@@ -739,14 +744,19 @@ func main() {
 			if nfExp != nil {
 				// Final scan: force-export whatever is still in the map so we
 				// don't lose trailing flows when shutting down for A/B swap.
-				exported, deleted := nfExp.flushAll(objs, chFlowCb)
+				exported, deleted := nfExp.flushAll(objs, drainer, chFlowCb)
 				log.Info("final flush", "exported", exported, "deleted", deleted, "clickhouse_enabled", chDel != nil)
 				nfExp.logMetrics()
 			} else if chDel != nil {
-				flows := selectAllFlows(objs)
+				flows, atomicDrained := drainer.All(objs)
 				chDel.enqueue(flows, time.Now().UTC())
-				deleted := deleteFlowKeys(objs, flows)
-				log.Info("final flush", "exported", len(flows), "deleted", deleted, "clickhouse_enabled", true)
+				deleted := 0
+				if !atomicDrained {
+					deleted = deleteFlowKeys(objs, flows)
+				} else {
+					deleted = len(flows)
+				}
+				log.Info("final flush", "exported", len(flows), "deleted", deleted, "atomic_drain", atomicDrained, "clickhouse_enabled", true)
 			}
 			log.Info("shutdown")
 			return
@@ -758,6 +768,14 @@ func main() {
 			if chDel != nil {
 				chDel.LogMetrics()
 			}
+			if drainer != nil {
+				atomicCalls, legacyCalls := drainer.Counters()
+				log.Info("flow drainer",
+					"mode", flowDrainerModeName(drainer.Mode()),
+					"atomic_calls", atomicCalls,
+					"legacy_calls", legacyCalls,
+				)
+			}
 		case <-topC:
 			dumpTop(log, objs, *topN)
 		case <-jsonC:
@@ -767,16 +785,18 @@ func main() {
 			}
 		case <-exportC:
 			if nfExp != nil {
-				_, _ = nfExp.scanAndExport(objs, chFlowCb)
+				_, _ = nfExp.scanAndExport(objs, drainer, chFlowCb)
 			} else if chDel != nil {
 				nowMonoNs, err := readSystemUptimeNs()
 				if err != nil {
 					log.Error("read uptime", "err", err)
 					break
 				}
-				flows := selectExpiredFlows(objs, *nfIdle, *nfActive, nowMonoNs)
+				flows, atomicDrained := drainer.Expired(objs, *nfIdle, *nfActive, nowMonoNs)
 				chDel.enqueue(flows, time.Now().UTC())
-				deleteFlowKeys(objs, flows)
+				if !atomicDrained {
+					deleteFlowKeys(objs, flows)
+				}
 			}
 		}
 	}
