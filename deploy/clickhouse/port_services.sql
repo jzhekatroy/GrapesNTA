@@ -57,6 +57,8 @@ VALUES
     ('tcp', 3306, 'mysql', 'MySQL', 'database', 'MySQL database'),
     ('tcp', 3389, 'rdp', 'RDP', 'remote_access', 'Remote Desktop Protocol'),
     ('tcp', 5432, 'postgresql', 'PostgreSQL', 'database', 'PostgreSQL database'),
+    ('udp', 5060, 'sip', 'SIP', 'voip', 'Session Initiation Protocol'),
+    ('tcp', 5060, 'sip', 'SIP', 'voip', 'Session Initiation Protocol over TCP'),
     ('tcp', 5672, 'amqp', 'AMQP', 'messaging', 'Advanced Message Queuing Protocol'),
     ('tcp', 5900, 'vnc', 'VNC', 'remote_access', 'Virtual Network Computing'),
     ('tcp', 6379, 'redis', 'Redis', 'database', 'Redis'),

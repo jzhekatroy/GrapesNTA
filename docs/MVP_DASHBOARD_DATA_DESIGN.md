@@ -121,6 +121,8 @@ tcp/80   -> HTTP  -> web
 tcp/443  -> HTTPS -> web
 udp/443  -> QUIC  -> web
 udp/53   -> DNS   -> dns
+udp/5060 -> SIP   -> voip
+tcp/5060 -> SIP   -> voip
 ```
 
 Справочник нужен, чтобы строить отчеты не только по номеру порта, но и по
@@ -132,6 +134,7 @@ udp/53   -> DNS   -> dns
 - database;
 - remote_access;
 - vpn;
+- voip;
 - messaging.
 
 В MVP master-copy можно держать прямо в ClickHouse. Если нужны права, аудит и
@@ -185,12 +188,31 @@ pps = packets / bucket_seconds
 станут тяжелыми, добавляем физические rollup-таблицы `traffic_1h` и
 `traffic_1d`.
 
-Для графика `Traffic In/Out, bps` источник данных — `traffic_direction_1m`.
-`traffic_1m` остаётся источником total bps/pps/flows.
+Для графика `Traffic In/Out, bps` источник данных — `traffic_chart_1m`
+(pivot, одна строка на минуту). `traffic_direction_1m` остаётся
+нормализованным агрегатом и fallback для debug. `traffic_1m` — legacy total
+график.
+
+### `traffic_chart_1m`
+
+Основной агрегат для dashboard chart API. DDL:
+`deploy/clickhouse/traffic_chart_1m.sql`.
+
+Поля (на минуту):
+
+- `total_bytes`, `in_bytes`, `out_bytes`, `transit_bytes`, `internal_bytes`,
+  `unknown_bytes`;
+- те же группы для `packets` и `flows`;
+- `bps` / `pps` / `flows_per_sec` считаются в API: `sum(in_bytes) * 8 /
+  bucket_seconds`.
+
+Backfill: `deploy/clickhouse/backfill_traffic_chart_1m.sql` из
+`traffic_direction_1m`. Validate:
+`deploy/clickhouse/traffic_chart_1m_validate.sql`.
 
 ### `traffic_direction_1m`
 
-Основной агрегат для `Traffic In/Out, bps`. DDL:
+Нормализованный агрегат по `direction` (одна строка = minute + direction). DDL:
 `deploy/clickhouse/traffic_direction_1m.sql`.
 
 Поля:

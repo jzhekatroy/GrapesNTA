@@ -36,6 +36,7 @@ clickhouse-client ... --multiquery < deploy/clickhouse/local_asns.sql
 clickhouse-client ... --multiquery < deploy/clickhouse/vlan_map.sql
 clickhouse-client ... --multiquery < deploy/clickhouse/flows_raw_extensions.sql
 clickhouse-client ... --multiquery < deploy/clickhouse/traffic_direction_1m.sql
+clickhouse-client ... --multiquery < deploy/clickhouse/traffic_chart_1m.sql
 clickhouse-client ... --multiquery < deploy/clickhouse/traffic_uplink_1m.sql
 clickhouse-client ... --multiquery < deploy/clickhouse/traffic_customer_1m.sql
 ```

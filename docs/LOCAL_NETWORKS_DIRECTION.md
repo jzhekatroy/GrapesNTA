@@ -215,7 +215,8 @@ memory limits on the production flow volume.
 
 For the Laravel dashboard, use
 [`docs/LARAVEL_MOONSHINE_TRAFFIC_IN_OUT.md`](LARAVEL_MOONSHINE_TRAFFIC_IN_OUT.md)
-and read from `default.traffic_direction_1m`.
+and read chart series from `default.traffic_chart_1m` (fallback:
+`default.traffic_direction_1m`).
 
 The raw diagnostic query computes direction with a hybrid approach:
 
