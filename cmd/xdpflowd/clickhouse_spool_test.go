@@ -5,11 +5,26 @@ import (
 	"encoding/binary"
 	"fmt"
 	"hash/crc32"
+	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
+
+func quietTestLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelError}))
+}
+
+func writeSegFile(t *testing.T, segDir string, id uint64) {
+	t.Helper()
+	path := filepath.Join(segDir, fmt.Sprintf("%016d.seg", id))
+	if err := os.WriteFile(path, []byte{}, 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
 
 func TestEncodeDecodeFlowRows(t *testing.T) {
 	now := time.Date(2026, 4, 28, 12, 0, 0, 123456789, time.UTC)
@@ -230,5 +245,193 @@ func TestResyncRespectsTipCeiling(t *testing.T) {
 	got := binary.BigEndian.Uint32(seg.Bytes()[expected : expected+4])
 	if got != spoolFrameMagicBE {
 		t.Fatalf("test setup wrong: got magic %#x want %#x", got, spoolFrameMagicBE)
+	}
+}
+
+// TestLoadCheckpointCorruptJSONRecovers verifies that a partially-written or
+// hand-edited consumer.json does not crash-loop the pipeline. The bad file
+// must be quarantined and the loader must return a safe default. Regression
+// for the 2026-05-19 outage where `{"segment":,"offset":0}` left xdpflowd
+// restarting every few seconds and never resuming inserts.
+func TestLoadCheckpointCorruptJSONRecovers(t *testing.T) {
+	dir := t.TempDir()
+	metaDir := filepath.Join(dir, "meta")
+	if err := os.MkdirAll(metaDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(metaDir, "consumer.json"), []byte(`{"segment":,"offset":0}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cp, err := loadCheckpoint(quietTestLogger(), dir)
+	if err != nil {
+		t.Fatalf("loadCheckpoint must not return error for corrupt JSON, got %v", err)
+	}
+	if cp != (consumerCheckpoint{Segment: 1, Offset: 0}) {
+		t.Fatalf("expected default checkpoint, got %v", cp)
+	}
+
+	// Original must have been quarantined.
+	ents, err := os.ReadDir(metaDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, e := range ents {
+		if strings.HasPrefix(e.Name(), "consumer.json.corrupt.") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected quarantine file consumer.json.corrupt.* in %s, entries=%v", metaDir, ents)
+	}
+}
+
+// TestLoadCheckpointMissingReturnsDefault confirms first-start behavior is
+// unchanged: no file → fresh-start checkpoint, no error.
+func TestLoadCheckpointMissingReturnsDefault(t *testing.T) {
+	dir := t.TempDir()
+	cp, err := loadCheckpoint(quietTestLogger(), dir)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cp != (consumerCheckpoint{Segment: 1, Offset: 0}) {
+		t.Fatalf("expected default checkpoint, got %v", cp)
+	}
+}
+
+// TestNormalizeCheckpointAheadOfWriter covers the spool-cleanup regression:
+// consumer.json points to a segment far beyond what the writer ever wrote,
+// usually because the spool dir was wiped while keeping meta/. Without
+// normalization the drainer waits forever AND cleanupAckedSegments would
+// delete every real segment on the first ack.
+func TestNormalizeCheckpointAheadOfWriter(t *testing.T) {
+	dir := t.TempDir()
+	segDir := filepath.Join(dir, "segments")
+	if err := os.MkdirAll(segDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeSegFile(t, segDir, 3)
+	writeSegFile(t, segDir, 4)
+	writeSegFile(t, segDir, 5)
+
+	cp := consumerCheckpoint{Segment: 4000, Offset: 43929469}
+	fixed, changed := normalizeCheckpoint(quietTestLogger(), segDir, cp)
+	if !changed {
+		t.Fatalf("expected correction, got changed=false")
+	}
+	if fixed != (consumerCheckpoint{Segment: 3, Offset: 0}) {
+		t.Fatalf("expected reset to minSeg=3 off=0, got %v", fixed)
+	}
+}
+
+// TestNormalizeCheckpointBehindRetention covers the retention case: segments
+// older than the consumer checkpoint were deleted by an external cleanup,
+// the drainer must skip forward instead of looping on os.ErrNotExist.
+func TestNormalizeCheckpointBehindRetention(t *testing.T) {
+	dir := t.TempDir()
+	segDir := filepath.Join(dir, "segments")
+	if err := os.MkdirAll(segDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeSegFile(t, segDir, 100)
+	writeSegFile(t, segDir, 101)
+
+	cp := consumerCheckpoint{Segment: 50, Offset: 1234}
+	fixed, changed := normalizeCheckpoint(quietTestLogger(), segDir, cp)
+	if !changed {
+		t.Fatalf("expected correction, got changed=false")
+	}
+	if fixed != (consumerCheckpoint{Segment: 100, Offset: 0}) {
+		t.Fatalf("expected reset to minSeg=100 off=0, got %v", fixed)
+	}
+}
+
+// TestNormalizeCheckpointWithinRange verifies that legitimate checkpoints —
+// including the one pointing at the writer's tip+1 (just rotated) — are
+// left untouched.
+func TestNormalizeCheckpointWithinRange(t *testing.T) {
+	dir := t.TempDir()
+	segDir := filepath.Join(dir, "segments")
+	if err := os.MkdirAll(segDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeSegFile(t, segDir, 10)
+	writeSegFile(t, segDir, 11)
+	writeSegFile(t, segDir, 12)
+
+	cases := []consumerCheckpoint{
+		{Segment: 10, Offset: 0},
+		{Segment: 11, Offset: 4096},
+		{Segment: 12, Offset: 999_999},
+		{Segment: 13, Offset: 0}, // tip+1 (writer just rotated)
+	}
+	for _, cp := range cases {
+		fixed, changed := normalizeCheckpoint(quietTestLogger(), segDir, cp)
+		if changed {
+			t.Fatalf("expected no correction for %v, got fixed=%v changed=true", cp, fixed)
+		}
+		if fixed != cp {
+			t.Fatalf("expected fixed=%v, got %v", cp, fixed)
+		}
+	}
+}
+
+// TestNormalizeCheckpointNoSegmentsLeavesAsIs ensures we do not touch the
+// checkpoint when the writer hasn't created any segments yet (fresh spool):
+// the drainer will simply wait for the first .seg to appear.
+func TestNormalizeCheckpointNoSegmentsLeavesAsIs(t *testing.T) {
+	dir := t.TempDir()
+	segDir := filepath.Join(dir, "segments")
+	if err := os.MkdirAll(segDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cp := consumerCheckpoint{Segment: 1, Offset: 0}
+	fixed, changed := normalizeCheckpoint(quietTestLogger(), segDir, cp)
+	if changed {
+		t.Fatalf("expected no correction with empty segment dir, got changed=true fixed=%v", fixed)
+	}
+	if fixed != cp {
+		t.Fatalf("expected unchanged, got %v", fixed)
+	}
+}
+
+// TestLoadAndNormalizeCheckpointPersists verifies that when normalization
+// rewrites the checkpoint, the corrected value is also persisted to disk so
+// any subsequent reader (drainer, after-restart pipeline) sees it.
+func TestLoadAndNormalizeCheckpointPersists(t *testing.T) {
+	dir := t.TempDir()
+	metaDir := filepath.Join(dir, "meta")
+	segDir := filepath.Join(dir, "segments")
+	if err := os.MkdirAll(metaDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(segDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeSegFile(t, segDir, 7)
+	writeSegFile(t, segDir, 8)
+
+	if err := os.WriteFile(filepath.Join(metaDir, "consumer.json"),
+		[]byte(`{"segment":4000,"offset":43929469}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cp, err := loadAndNormalizeCheckpoint(quietTestLogger(), dir)
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if cp != (consumerCheckpoint{Segment: 7, Offset: 0}) {
+		t.Fatalf("expected normalized cp, got %v", cp)
+	}
+
+	// Re-load: must be the corrected value, not the original ahead-of-writer one.
+	cp2, err := loadCheckpoint(quietTestLogger(), dir)
+	if err != nil {
+		t.Fatalf("re-load failed: %v", err)
+	}
+	if cp2 != cp {
+		t.Fatalf("expected persisted normalized cp=%v, got %v", cp, cp2)
 	}
 }

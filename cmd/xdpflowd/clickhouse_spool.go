@@ -352,22 +352,145 @@ func consumerPath(dir string) string {
 	return filepath.Join(dir, "meta", "consumer.json")
 }
 
-func loadCheckpoint(dir string) (consumerCheckpoint, error) {
-	var cp consumerCheckpoint
-	b, err := os.ReadFile(consumerPath(dir))
+// defaultCheckpoint returns the safe initial checkpoint used when no consumer
+// state is present or after recovery from a corrupt one.
+func defaultCheckpoint() consumerCheckpoint {
+	return consumerCheckpoint{Segment: 1, Offset: 0}
+}
+
+// loadCheckpoint reads consumer state from disk. When the file is missing it
+// returns the default fresh-start checkpoint. When the file is present but
+// unparseable (e.g. truncated, hand-edited, partially written) the bad file is
+// quarantined as consumer.json.corrupt.<unix_ns> and the default checkpoint is
+// returned — preventing a crash-loop where the pipeline cannot even start.
+func loadCheckpoint(log *slog.Logger, dir string) (consumerCheckpoint, error) {
+	path := consumerPath(dir)
+	b, err := os.ReadFile(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return consumerCheckpoint{Segment: 1, Offset: 0}, nil
+			return defaultCheckpoint(), nil
 		}
-		return cp, err
+		return consumerCheckpoint{}, err
 	}
+	var cp consumerCheckpoint
 	if err := json.Unmarshal(b, &cp); err != nil {
-		return cp, err
+		quarantine := fmt.Sprintf("%s.corrupt.%d", path, time.Now().UnixNano())
+		if rerr := os.Rename(path, quarantine); rerr != nil {
+			if log != nil {
+				log.Error("spool checkpoint corrupt; quarantine rename failed; resetting in place",
+					"err", err, "rename_err", rerr, "quarantine", quarantine)
+			}
+		} else if log != nil {
+			log.Error("spool checkpoint corrupt; quarantined and reset to defaults",
+				"err", err, "quarantine", quarantine)
+		}
+		return defaultCheckpoint(), nil
 	}
 	if cp.Segment == 0 {
 		cp.Segment = 1
 	}
 	return cp, nil
+}
+
+// scanSegmentRange returns the min/max segment id present on disk and a flag
+// indicating whether any segment files were found. Non-numeric or non-.seg
+// entries are ignored, matching scanMaxSegmentID semantics.
+func scanSegmentRange(segDir string) (minID, maxID uint64, hasSegs bool, err error) {
+	ents, err := os.ReadDir(segDir)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return 0, 0, false, nil
+		}
+		return 0, 0, false, err
+	}
+	for _, e := range ents {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		if !strings.HasSuffix(name, ".seg") {
+			continue
+		}
+		id, perr := strconv.ParseUint(strings.TrimSuffix(name, ".seg"), 10, 64)
+		if perr != nil {
+			continue
+		}
+		if !hasSegs || id < minID {
+			minID = id
+		}
+		if !hasSegs || id > maxID {
+			maxID = id
+		}
+		hasSegs = true
+	}
+	return minID, maxID, hasSegs, nil
+}
+
+// normalizeCheckpoint adjusts cp so it falls within the segment range that
+// actually exists on disk. Two failure modes are handled:
+//
+//   - "ahead of writer": cp.Segment > maxID+1 (e.g. left over from a previous
+//     spool epoch that was cleaned up). The drainer would otherwise wait
+//     forever for segments that will never arrive, while cleanupAckedSegments
+//     would delete every real segment on first successful ack. Reset to the
+//     oldest segment on disk so we replay all retained data.
+//   - "behind retention": cp.Segment < minID (segments aged out). Advance to
+//     the oldest segment that still exists.
+//
+// If no segments exist on disk the checkpoint is left as-is (the writer will
+// create segment N=cp.Segment or a fresh one, and the drainer will follow).
+//
+// Returns the (possibly unchanged) checkpoint and a bool indicating whether a
+// correction was applied.
+func normalizeCheckpoint(log *slog.Logger, segDir string, cp consumerCheckpoint) (consumerCheckpoint, bool) {
+	minID, maxID, hasSegs, err := scanSegmentRange(segDir)
+	if err != nil {
+		if log != nil {
+			log.Warn("spool normalize: scan segments failed; leaving checkpoint as-is", "err", err)
+		}
+		return cp, false
+	}
+	if !hasSegs {
+		return cp, false
+	}
+	// upper bound: the writer either appends to maxID or rotates to maxID+1
+	// next, so cp.Segment may legitimately equal maxID+1 (offset must be 0
+	// there). Anything beyond that is impossible without disk loss.
+	upper := maxID + 1
+	if cp.Segment > upper {
+		fixed := consumerCheckpoint{Segment: minID, Offset: 0}
+		if log != nil {
+			log.Warn("spool normalize: checkpoint ahead of writer; resetting to oldest segment",
+				"old", cp, "new", fixed, "min_seg", minID, "max_seg", maxID)
+		}
+		return fixed, true
+	}
+	if cp.Segment < minID {
+		fixed := consumerCheckpoint{Segment: minID, Offset: 0}
+		if log != nil {
+			log.Warn("spool normalize: checkpoint behind retention; advancing to oldest segment",
+				"old", cp, "new", fixed, "min_seg", minID, "max_seg", maxID)
+		}
+		return fixed, true
+	}
+	return cp, false
+}
+
+// loadAndNormalizeCheckpoint combines on-disk recovery, segment-range
+// normalization, and a write-back of the corrected value so subsequent
+// readers (drainer, acker, restarts) see the sanitized checkpoint.
+func loadAndNormalizeCheckpoint(log *slog.Logger, dir string) (consumerCheckpoint, error) {
+	cp, err := loadCheckpoint(log, dir)
+	if err != nil {
+		return cp, err
+	}
+	fixed, changed := normalizeCheckpoint(log, filepath.Join(dir, "segments"), cp)
+	if changed {
+		if serr := saveCheckpoint(dir, fixed); serr != nil && log != nil {
+			log.Warn("spool normalize: persist corrected checkpoint failed", "err", serr)
+		}
+	}
+	return fixed, nil
 }
 
 func saveCheckpoint(dir string, cp consumerCheckpoint) error {
@@ -615,15 +738,20 @@ func newSpoolClickhousePipeline(
 	if err != nil {
 		return nil, fmt.Errorf("clickhouse open: %w", err)
 	}
-	cp, err := loadCheckpoint(spoolDir)
-	if err != nil {
-		_ = conn.Close()
-		return nil, fmt.Errorf("spool load checkpoint: %w", err)
-	}
 	wr, err := openSpoolWriter(log, spoolDir, maxSegBytes, maxTotalBytes, maxFrameRows, fsyncEvery, mode == chSpoolRequired)
 	if err != nil {
 		_ = conn.Close()
 		return nil, err
+	}
+	// Normalize AFTER the writer has scanned/created segments so the
+	// reset target reflects real on-disk state. Quarantines a corrupt
+	// consumer.json and rewinds checkpoints that point outside the
+	// existing segment range (typical after spool cleanup).
+	cp, err := loadAndNormalizeCheckpoint(log, spoolDir)
+	if err != nil {
+		_ = wr.Close()
+		_ = conn.Close()
+		return nil, fmt.Errorf("spool load checkpoint: %w", err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	p := &spoolClickhousePipeline{
@@ -685,7 +813,7 @@ type spoolJob struct {
 func (p *spoolClickhousePipeline) runPipeline() {
 	defer p.wg.Done()
 
-	cp, err := loadCheckpoint(p.writer.dir)
+	cp, err := loadAndNormalizeCheckpoint(p.log, p.writer.dir)
 	if err != nil {
 		p.log.Error("spool load checkpoint", "err", err)
 		return
@@ -741,7 +869,7 @@ func (p *spoolClickhousePipeline) runPipeline() {
 // Stall watchdog forces the same resync if no progress is made for
 // stallThreshold despite available data.
 func (p *spoolClickhousePipeline) drainerLoop(jobs chan<- spoolJob) {
-	readHead, err := loadCheckpoint(p.writer.dir)
+	readHead, err := loadAndNormalizeCheckpoint(p.log, p.writer.dir)
 	if err != nil {
 		p.log.Error("spool drainer load checkpoint", "err", err)
 		return

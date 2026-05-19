@@ -150,6 +150,12 @@ Durable spool (`/var/lib/xdpflowd/ch-spool`) рассчитан на сцена�
 - Метрики в `journalctl -u xdpflowd`: `corruption_frames_skipped`, `corruption_bytes_skipped`, `lag_segments`, `drainer_progress_age`. Печатаются каждые `XDP_INTERVAL` (по умолчанию 5s).
 - Печать `top-N` потоков (полный обход BPF flow-карты + сортировка) вынесена на отдельный таймер `XDP_TOP_INTERVAL` (по умолчанию `60s`). На короткий `XDP_INTERVAL` остаётся только дешёвый PERCPU-stats (без обхода карты). Если top-N вообще не нужен, поставьте `XDP_TOP_INTERVAL=0` или `XDP_TOP=0` — это ощутимо снижает CPU на высококардинальных хостах (десятки–сотни тысяч активных потоков).
 
+Авто-восстановление checkpoint при старте:
+
+- При запуске pipeline `meta/consumer.json` проходит две проверки. Если файл невалидный JSON (например, после ручной правки или прерванной записи), он автоматически переименовывается в `consumer.json.corrupt.<unix_ns>`, а pipeline стартует с дефолта (`seg=1 off=0`). В логах появляется `spool checkpoint corrupt; quarantined and reset to defaults`. Это закрывает старый crash-loop сценарий.
+- Если checkpoint указывает за пределы реальных сегментов на диске (`cp.Segment > maxSeg+1`, например после очистки spool с сохранением `meta/`), либо отстаёт от ретеншна (`cp.Segment < minSeg`), checkpoint сбрасывается на самый старый существующий сегмент и сохраняется обратно. В логе строка `spool normalize: checkpoint ahead of writer; resetting to oldest segment` или `... behind retention; advancing to oldest segment` с `old`, `new`, `min_seg`, `max_seg`.
+- Скрипт `scripts/prod_repair_spool.sh` остаётся для ручного контроля и старых бинарей, но рутинно его звать больше не надо — нормализация работает прозрачно при старте сервиса.
+
 Если сервис всё-таки оказался застрявшим (например, бинарь старее версии с авто-resync), руками:
 
 ```bash
