@@ -25,6 +25,8 @@ type DNSRow struct {
 	AnswersA           [][16]byte
 	AnswersAAAA        [][16]byte
 	AnswersCNAME       []string
+	AnswersATTLs       []uint32
+	AnswersAAAATTLs    []uint32
 	AnswerTTLs         []uint32
 	AnswerCount        uint16
 	RawSize            uint16

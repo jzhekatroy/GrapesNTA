@@ -48,6 +48,7 @@ exec "${STDBUF[@]}" "$BIN" \
   -iface "$IFACE" \
   -ch-dsn "$DNS_CH_DSN" \
   -ch-table "$DNS_CH_TABLE" \
+  -ch-answers-table "${DNS_CH_ANSWERS_TABLE:-default.dns_answers}" \
   -ch-batch-size "${DNS_CH_BATCH_SIZE:-500}" \
   -ch-flush-interval "${DNS_CH_FLUSH_INTERVAL:-1s}" \
   -ch-queue-size "${DNS_CH_QUEUE_SIZE:-64}" \

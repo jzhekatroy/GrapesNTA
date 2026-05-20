@@ -149,6 +149,7 @@ answers:
 			var v [16]byte
 			copy(v[:4], ar.A[:])
 			row.AnswersA = append(row.AnswersA, v)
+			row.AnswersATTLs = append(row.AnswersATTLs, ah.TTL)
 			row.AnswerTTLs = append(row.AnswerTTLs, ah.TTL)
 		case dnsmessage.TypeAAAA:
 			ar, rerr := p.AAAAResource()
@@ -158,6 +159,7 @@ answers:
 			var v [16]byte
 			copy(v[:], ar.AAAA[:])
 			row.AnswersAAAA = append(row.AnswersAAAA, v)
+			row.AnswersAAAATTLs = append(row.AnswersAAAATTLs, ah.TTL)
 			row.AnswerTTLs = append(row.AnswerTTLs, ah.TTL)
 		case dnsmessage.TypeCNAME:
 			cr, rerr := p.CNAMEResource()

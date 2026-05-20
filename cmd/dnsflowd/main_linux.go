@@ -20,7 +20,8 @@ import (
 func main() {
 	iface := flag.String("iface", "eth0", "mirror interface for packet capture (libpcap)")
 	chDSN := flag.String("ch-dsn", "", `ClickHouse DSN, e.g. clickhouse://user:pass@host:9000/default`)
-	chTable := flag.String("ch-table", "default.dns_log", "MergeTree table for DNS INSERT")
+	chTable := flag.String("ch-table", "default.dns_log", "MergeTree table for raw DNS log INSERT")
+	chAnswersTable := flag.String("ch-answers-table", "default.dns_answers", "MergeTree table for flattened DNS answers (empty disables)")
 	chBatchSize := flag.Int("ch-batch-size", 500, "ClickHouse INSERT batch size")
 	chFlush := flag.Duration("ch-flush-interval", time.Second, "ClickHouse flush interval")
 	chQueue := flag.Int("ch-queue-size", 4096, "bounded queue depth (drops on overflow)")
@@ -49,7 +50,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	sink, err := newDNSClickhouseSink(log, *chDSN, *chTable, *chBatchSize, *chFlush, *chQueue)
+	sink, err := newDNSClickhouseSink(log, *chDSN, *chTable, *chAnswersTable, *chBatchSize, *chFlush, *chQueue)
 	if err != nil {
 		log.Error("clickhouse", "err", err)
 		handle.Close()
@@ -234,6 +235,7 @@ func main() {
 	log.Info("dnsflowd started",
 		"iface", *iface,
 		"ch_table", *chTable,
+		"ch_answers_table", *chAnswersTable,
 		"capture", "libpcap",
 		"datalink", handle.LinkType().String(),
 		"datalink_name", handle.LinkTypeName(),

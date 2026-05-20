@@ -21,15 +21,18 @@ type dnsClickhouseSink struct {
 	log           *slog.Logger
 	conn          chdriver.Conn
 	table         string
+	answersTable  string
 	batchSize     int
 	flushInterval time.Duration
 	ch            chan []DNSRow
 
-	recordsQueued  atomic.Uint64
-	recordsWritten atomic.Uint64
-	batchesOK      atomic.Uint64
-	insertErrs     atomic.Uint64
-	queueDrops     atomic.Uint64
+	recordsQueued     atomic.Uint64
+	recordsWritten    atomic.Uint64
+	answersWritten    atomic.Uint64
+	batchesOK         atomic.Uint64
+	insertErrs        atomic.Uint64
+	answersInsertErrs atomic.Uint64
+	queueDrops        atomic.Uint64
 
 	dropLogMu     sync.Mutex
 	lastDropLog   time.Time
@@ -97,9 +100,20 @@ func fixed16Slice(rows [][16]byte) [][]byte {
 	return out
 }
 
+func validateClickHouseTable(conn chdriver.Conn, table string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	rows, err := conn.Query(ctx, fmt.Sprintf("SELECT 1 FROM %s LIMIT 0", table))
+	if err != nil {
+		return fmt.Errorf("validate ClickHouse table %s: %w", table, err)
+	}
+	rows.Close()
+	return nil
+}
+
 func newDNSClickhouseSink(
 	log *slog.Logger,
-	dsn, table string,
+	dsn, table, answersTable string,
 	batchSize int,
 	flushInterval time.Duration,
 	queueSize int,
@@ -107,6 +121,7 @@ func newDNSClickhouseSink(
 	if table == "" {
 		return nil, errors.New("ClickHouse table (-ch-table) is required when -ch-dsn is set")
 	}
+	answersTable = strings.TrimSpace(answersTable)
 	opts, err := parseClickHouseDSN(dsn)
 	if err != nil {
 		return nil, err
@@ -114,6 +129,16 @@ func newDNSClickhouseSink(
 	conn, err := clickhouse.Open(opts)
 	if err != nil {
 		return nil, fmt.Errorf("clickhouse open: %w", err)
+	}
+	if err := validateClickHouseTable(conn, table); err != nil {
+		_ = conn.Close()
+		return nil, err
+	}
+	if answersTable != "" {
+		if err := validateClickHouseTable(conn, answersTable); err != nil {
+			_ = conn.Close()
+			return nil, err
+		}
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	if batchSize < 1 {
@@ -129,6 +154,7 @@ func newDNSClickhouseSink(
 		log:           log,
 		conn:          conn,
 		table:         table,
+		answersTable:  answersTable,
 		batchSize:     batchSize,
 		flushInterval: flushInterval,
 		ch:            make(chan []DNSRow, queueSize),
@@ -139,6 +165,7 @@ func newDNSClickhouseSink(
 	go s.run()
 	log.Info("dnsflowd clickhouse sink enabled",
 		"table", table,
+		"answers_table", answersTable,
 		"batch_size", batchSize,
 		"flush_interval", flushInterval,
 		"queue_size", queueSize,
@@ -224,16 +251,99 @@ func insertDNSBatch(ctx context.Context, log *slog.Logger, conn chdriver.Conn, t
 	return true
 }
 
+func insertDNSAnswersBatch(ctx context.Context, log *slog.Logger, conn chdriver.Conn, table string, rows []DNSAnswerRow, insertErrs *atomic.Uint64) bool {
+	if len(rows) == 0 {
+		return true
+	}
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
+	const stmt = `INSERT INTO %s (
+    ts,
+    sampler_address,
+    client_ip,
+    server_ip,
+    client_port,
+    server_port,
+    query_name,
+    qtype,
+    qclass,
+    answer_type,
+    answer_ip,
+    ttl,
+    rcode,
+    txid,
+    transport
+)`
+	q := fmt.Sprintf(stmt, table)
+	batch, err := conn.PrepareBatch(ctx, q)
+	if err != nil {
+		insertErrs.Add(1)
+		log.Warn("dnsflowd clickhouse prepare answers batch", "err", err)
+		return false
+	}
+
+	for _, r := range rows {
+		err := batch.Append(
+			r.Ts,
+			fixed16Row(r.SamplerAddress),
+			fixed16Row(r.ClientIP),
+			fixed16Row(r.ServerIP),
+			r.ClientPort,
+			r.ServerPort,
+			r.QueryName,
+			r.QType,
+			r.QClass,
+			r.AnswerType,
+			fixed16Row(r.AnswerIP),
+			r.TTL,
+			r.RCode,
+			r.TXID,
+			r.Transport,
+		)
+		if err != nil {
+			insertErrs.Add(1)
+			log.Warn("dnsflowd clickhouse answers batch append", "err", err)
+			return false
+		}
+	}
+	if err := batch.Send(); err != nil {
+		insertErrs.Add(1)
+		log.Warn("dnsflowd clickhouse answers batch send", "err", err)
+		return false
+	}
+	return true
+}
+
 func (s *dnsClickhouseSink) insertBatch(ctx context.Context, rows []DNSRow) bool {
 	if len(rows) == 0 {
 		return true
 	}
-	if insertDNSBatch(ctx, s.log, s.conn, s.table, rows, &s.insertErrs) {
-		s.batchesOK.Add(1)
-		s.recordsWritten.Add(uint64(len(rows)))
+	if !insertDNSBatch(ctx, s.log, s.conn, s.table, rows, &s.insertErrs) {
+		return false
+	}
+	s.batchesOK.Add(1)
+	s.recordsWritten.Add(uint64(len(rows)))
+
+	if s.answersTable == "" {
 		return true
 	}
-	return false
+	answers := make([]DNSAnswerRow, 0, len(rows))
+	for _, r := range rows {
+		answers = append(answers, dnsAnswersFromRow(r)...)
+	}
+	if len(answers) == 0 {
+		return true
+	}
+	if insertDNSAnswersBatch(ctx, s.log, s.conn, s.answersTable, answers, &s.answersInsertErrs) {
+		s.answersWritten.Add(uint64(len(answers)))
+		return true
+	}
+	s.log.Warn("dnsflowd clickhouse answers insert failed after dns_log ok",
+		"dns_log_rows", len(rows),
+		"answers_rows", len(answers),
+	)
+	return true
 }
 
 func (s *dnsClickhouseSink) run() {
@@ -336,7 +446,9 @@ func (s *dnsClickhouseSink) Close() {
 	s.log.Info("dnsflowd clickhouse closing",
 		"records_queued", s.recordsQueued.Load(),
 		"records_written", s.recordsWritten.Load(),
+		"answers_written", s.answersWritten.Load(),
 		"insert_errs", s.insertErrs.Load(),
+		"answers_insert_errs", s.answersInsertErrs.Load(),
 		"queue_drops", s.queueDrops.Load(),
 	)
 	s.cancel()
@@ -347,8 +459,10 @@ func (s *dnsClickhouseSink) Close() {
 	s.log.Info("dnsflowd clickhouse closed",
 		"records_queued", s.recordsQueued.Load(),
 		"records_written", s.recordsWritten.Load(),
+		"answers_written", s.answersWritten.Load(),
 		"batches_ok", s.batchesOK.Load(),
 		"insert_errs", s.insertErrs.Load(),
+		"answers_insert_errs", s.answersInsertErrs.Load(),
 		"queue_drops", s.queueDrops.Load(),
 	)
 }
@@ -357,8 +471,10 @@ func (s *dnsClickhouseSink) LogMetrics() {
 	s.log.Info("dnsflowd clickhouse",
 		"records_queued", s.recordsQueued.Load(),
 		"records_written", s.recordsWritten.Load(),
+		"answers_written", s.answersWritten.Load(),
 		"batches_ok", s.batchesOK.Load(),
 		"insert_errs", s.insertErrs.Load(),
+		"answers_insert_errs", s.answersInsertErrs.Load(),
 		"queue_drops", s.queueDrops.Load(),
 	)
 }
