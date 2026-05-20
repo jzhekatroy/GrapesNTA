@@ -40,21 +40,30 @@ So the current MVP is **dictionary-less** and **collector-classified**:
 
 - `default.local_networks` and `default.local_networks_enabled` are still
   loaded by `scripts/load_local_networks_from_asn.py`.
-- `default.local_asns` and `default.vlan_map` add ASN/VLAN-based local
-  classification.
+- `default.local_asns` and `default.local_networks` define IP/ASN endpoint
+  ownership (`local`, `customer`, `remote`).
+- `default.vlan_map` defines VLAN attachment context (`customer`, `uplink`,
+  `core`, ... plus `internal`/`external` boundary). VLAN no longer decides IP
+  ownership directly.
 - `xdpflowd` reads BGP/local/VLAN data into memory and writes `src_asn`,
-  `dst_asn`, `direction`, labels and operators directly into `flows_raw`.
+  `dst_asn`, attachment fields, endpoint fields, `direction`, labels and
+  operators directly into `flows_raw`.
 - `traffic_1m_mv`, `traffic_direction_1m_mv`, `traffic_uplink_1m_mv` and
   `traffic_customer_1m_mv` only aggregate precomputed fields.
 
-Priority:
+Direction now comes from endpoint scope:
 
 ```text
-VLAN > local ASN > local prefix
+local/customer -> remote          = out
+remote -> local/customer          = in
+local/customer -> local/customer  = internal
+remote -> remote                  = transit
 ```
 
-If no local ASN, local prefix or customer VLAN is configured, `xdpflowd` uses
-the MVP fallback and writes `direction = 'out'`.
+Endpoint scope is decided by `local ASN > local prefix > fallback remote`.
+VLAN fills only `src_attachment_*` / `dst_attachment_*`. If no local ASN or
+local prefix is configured, `xdpflowd` uses the MVP fallback and writes
+`direction = 'out'`.
 
 The XML template `deploy/clickhouse/local_networks_dict.xml` is kept in the
 repo for future server-side experiments, but dashboard direction must not rely

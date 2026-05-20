@@ -436,7 +436,7 @@ func main() {
 	chSpoolShutdownDrain := flag.Duration("ch-spool-shutdown-drain", 0, "wait up to this duration for spool backlog to reach ClickHouse before shutdown (0=leave backlog for replay)")
 	chSpoolStallThreshold := flag.Duration("ch-spool-stall-threshold", 60*time.Second, "force resync past suspect frame if drainer makes no progress for this long while data is available (also bounds shutdown drain when set)")
 	chWriters := flag.Int("ch-writers", 4, "parallel ClickHouse INSERT workers when spool mode is on")
-	classifierEnabled := flag.Bool("classifier", false, "enable collector-side traffic classification (VLAN > local ASN > local prefix)")
+	classifierEnabled := flag.Bool("classifier", false, "enable collector-side traffic classification (VLAN attachment + ASN/prefix endpoint ownership)")
 	classifierRefresh := flag.Duration("classifier-refresh", time.Minute, "refresh interval for classifier dictionaries")
 	classifierBGPTable := flag.String("classifier-bgp-table", "default.bgp_prefix_origin_current", "ClickHouse source table/view for prefix -> origin ASN")
 	classifierLocalNetworksView := flag.String("classifier-local-networks-view", "default.local_networks_enabled", "ClickHouse view for enabled local prefixes")

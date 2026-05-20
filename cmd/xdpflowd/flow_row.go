@@ -30,6 +30,22 @@ type FlowRow struct {
 	DstLabel         string
 	SrcOperator      string
 	DstOperator      string
+	SrcAttachmentKind     string
+	DstAttachmentKind     string
+	SrcAttachmentBoundary string
+	DstAttachmentBoundary string
+	SrcAttachmentLabel    string
+	DstAttachmentLabel    string
+	SrcAttachmentOperator string
+	DstAttachmentOperator string
+	SrcEndpointScope      string
+	DstEndpointScope      string
+	SrcEndpointSource     string
+	DstEndpointSource     string
+	SrcNetworkName        string
+	DstNetworkName        string
+	SrcNetworkRole        string
+	DstNetworkRole        string
 	SrcVLAN          uint16
 	DstVLAN          uint16
 	Etype            uint32
@@ -90,12 +106,31 @@ func flowRowFromKV(fv flowKV, m flowRowMapper, receivedAt time.Time) FlowRow {
 		SrcASN:          srcClass.ASN,
 		DstASN:          dstClass.ASN,
 		Direction:       direction,
-		SrcKind:         srcClass.Kind,
-		DstKind:         dstClass.Kind,
+		// Backward-compatible physical columns now carry endpoint meaning.
+		// New UI/API code should prefer src_endpoint_scope/source and
+		// src_attachment_* fields below.
+		SrcKind:         srcClass.Scope,
+		DstKind:         dstClass.Scope,
 		SrcLabel:        srcClass.Label,
 		DstLabel:        dstClass.Label,
 		SrcOperator:     srcClass.OperatorID,
 		DstOperator:     dstClass.OperatorID,
+		SrcAttachmentKind:     srcClass.Attachment.Kind,
+		DstAttachmentKind:     dstClass.Attachment.Kind,
+		SrcAttachmentBoundary: srcClass.Attachment.Boundary,
+		DstAttachmentBoundary: dstClass.Attachment.Boundary,
+		SrcAttachmentLabel:    srcClass.Attachment.Label,
+		DstAttachmentLabel:    dstClass.Attachment.Label,
+		SrcAttachmentOperator: srcClass.Attachment.OperatorID,
+		DstAttachmentOperator: dstClass.Attachment.OperatorID,
+		SrcEndpointScope:      srcClass.Scope,
+		DstEndpointScope:      dstClass.Scope,
+		SrcEndpointSource:     srcClass.Source,
+		DstEndpointSource:     dstClass.Source,
+		SrcNetworkName:        srcClass.NetworkName,
+		DstNetworkName:        dstClass.NetworkName,
+		SrcNetworkRole:        srcClass.NetworkRole,
+		DstNetworkRole:        dstClass.NetworkRole,
 		SrcVLAN:         srcVLAN,
 		DstVLAN:         dstVLAN,
 		Etype:           etherType(fv.k.IPVersion),

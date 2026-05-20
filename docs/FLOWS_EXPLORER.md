@@ -78,6 +78,22 @@ SELECT
     f.dst_label,
     f.src_operator,
     f.dst_operator,
+    f.src_attachment_kind,
+    f.dst_attachment_kind,
+    f.src_attachment_boundary,
+    f.dst_attachment_boundary,
+    f.src_attachment_label,
+    f.dst_attachment_label,
+    f.src_attachment_operator,
+    f.dst_attachment_operator,
+    f.src_endpoint_scope,
+    f.dst_endpoint_scope,
+    f.src_endpoint_source,
+    f.dst_endpoint_source,
+    f.src_network_name,
+    f.dst_network_name,
+    f.src_network_role,
+    f.dst_network_role,
 
     f.src_asn,
     f.dst_asn,
@@ -190,6 +206,22 @@ SELECT
     f.dst_label,
     f.src_operator,
     f.dst_operator,
+    f.src_attachment_kind,
+    f.dst_attachment_kind,
+    f.src_attachment_boundary,
+    f.dst_attachment_boundary,
+    f.src_attachment_label,
+    f.dst_attachment_label,
+    f.src_attachment_operator,
+    f.dst_attachment_operator,
+    f.src_endpoint_scope,
+    f.dst_endpoint_scope,
+    f.src_endpoint_source,
+    f.dst_endpoint_source,
+    f.src_network_name,
+    f.dst_network_name,
+    f.src_network_role,
+    f.dst_network_role,
 
     f.src_asn,
     f.dst_asn,
@@ -337,17 +369,81 @@ clickhouse-client --multiquery < deploy/clickhouse/port_services.sql
 
 | Поле | Что значит | Как формируется |
 |------|------------|-----------------|
-| `direction` | Направление относительно нашей сети: `in`, `out`, `internal`, `transit`, `unknown`. | Считает `xdpflowd` до записи в ClickHouse по приоритету `VLAN > local ASN > local prefix`. |
-| `src_kind` | Тип источника: например `customer`, `local`, `uplink`, `ix`, `remote`, `unknown`. | Результат classifier-а для `src_ip` + `src_vlan`. |
-| `dst_kind` | Тип назначения. | Результат classifier-а для `dst_ip` + `dst_vlan`. |
-| `src_label` | Читаемое имя локального/клиентского источника, если источник распознан. | Из `local_networks_enabled`, `local_asns_enabled` или `vlan_map_enabled`. |
-| `dst_label` | Читаемое имя локального/клиентского назначения, если назначение распознано. | Аналогично `src_label`, но для destination. |
-| `src_operator` | Стабильный `operator_id` источника (`pin`, `iconet`, и т.п.). | Из локальных справочников classifier-а. |
-| `dst_operator` | Стабильный `operator_id` назначения. | Из локальных справочников classifier-а. |
+| `direction` | Направление flow относительно нашей сети: `in`, `out`, `internal`, `transit`, `unknown`. | Считает `xdpflowd` до записи в ClickHouse только по `src_endpoint_scope` + `dst_endpoint_scope`. VLAN напрямую не меняет direction. |
+| `src_attachment_kind` | Тип подключения, через которое увидели source сторону: `customer`, `uplink`, `core`, `internal`, `mgmt`, `ix`, `peering`, `unknown`. | Из `default.vlan_map_enabled` по `src_vlan`. Это описание VLAN/линка, а не владельца IP. |
+| `dst_attachment_kind` | Тип подключения для destination стороны. | Из `default.vlan_map_enabled` по `dst_vlan`. Сейчас `dst_vlan` обычно `0`, поэтому чаще будет `unknown`. |
+| `src_attachment_boundary` | Граница подключения: `internal`, `external`, `unknown`. | Из VLAN map. `customer/core/internal/mgmt` обычно `internal`; `uplink/ix/peering/transit` обычно `external`. |
+| `dst_attachment_boundary` | Граница destination-подключения. | Аналогично source. |
+| `src_attachment_label` | Человекочитаемое имя VLAN/подключения. | Из `vlan_map_enabled.label`, например `Iconnet VLAN 210` или `RETN uplink`. |
+| `dst_attachment_label` | Имя destination VLAN/подключения. | Аналогично source. |
+| `src_attachment_operator` | Стабильный `operator_id` VLAN/подключения. | Из `vlan_map_enabled.operator_id`. |
+| `dst_attachment_operator` | `operator_id` destination VLAN/подключения. | Аналогично source. |
+| `src_endpoint_scope` | Чей source IP относительно нас: `local`, `customer`, `remote`, `unknown`. | По IP/ASN: сначала local ASN, потом local prefix, иначе fallback remote. |
+| `dst_endpoint_scope` | Чей destination IP относительно нас. | Аналогично source. |
+| `src_endpoint_source` | Почему выбран `src_endpoint_scope`: `asn`, `prefix`, `fallback`, `unknown`. | `asn` если ASN есть в `local_asns_enabled`; `prefix` если IP попал в `local_networks_enabled`; `fallback` если локального совпадения нет. |
+| `dst_endpoint_source` | Почему выбран `dst_endpoint_scope`. | Аналогично source. |
+| `src_network_name` | Имя локального/customer prefix, если source IP попал в prefix-справочник. | Из `local_networks_enabled.name`; иначе пусто. |
+| `dst_network_name` | Имя prefix для destination. | Аналогично source. |
+| `src_network_role` | Роль prefix: `local`, `customer`, `internal`, `mgmt` или другое значение из справочника. | Из `local_networks_enabled.kind`; иначе пусто. |
+| `dst_network_role` | Роль destination prefix. | Аналогично source. |
+| `src_kind` / `dst_kind` | Совместимые физические колонки. | Новые записи заполняют их значением `src_endpoint_scope` / `dst_endpoint_scope`. Для UI лучше использовать явные endpoint/attachment поля. |
+| `src_label` / `dst_label` | Совместимые физические колонки. | Новые записи заполняют их network/asn label. Для VLAN label используйте `src_attachment_label` / `dst_attachment_label`. |
+| `src_operator` / `dst_operator` | Совместимые физические колонки. | Новые записи заполняют их endpoint operator. Для VLAN operator используйте `src_attachment_operator` / `dst_attachment_operator`. |
 
-Если `direction='unknown'`, то `kind/label/operator/asn` часто будут пустыми
-или `0`. В UI `unknown` скрывается по умолчанию, но может включаться отдельным
-фильтром для диагностики.
+Классификация теперь разделена на две понятные части.
+
+**Attachment = где увидели пакет**
+
+VLAN отвечает только на вопрос "через какое подключение/линк мы увидели
+пакет?". Он не говорит, чей IP. Пример: `src_vlan=444` может означать
+`src_attachment_kind='uplink'`, `src_attachment_boundary='external'`.
+
+**Endpoint = чей IP**
+
+IP/ASN отвечает на вопрос "этот адрес наш, клиентский или внешний?". Правила:
+
+| Приоритет | Проверка | Endpoint result |
+|-----------|----------|-----------------|
+| 1 | Origin ASN IP-адреса есть в `default.local_asns_enabled`. | `endpoint_scope='local'`, `endpoint_source='asn'`. |
+| 2 | IP попадает в `default.local_networks_enabled`. | `endpoint_scope='customer'` для role `customer`; `endpoint_scope='local'` для role `local/internal/mgmt`; `endpoint_source='prefix'`. |
+| 3 | Локального совпадения нет. | `endpoint_scope='remote'`, `endpoint_source='fallback'`. |
+| 4 | Classifier не готов или IP version невалидный. | `endpoint_scope='unknown'`, `endpoint_source='unknown'`, `direction='unknown'`. |
+
+**Direction = куда идёт трафик**
+
+| Source endpoint | Destination endpoint | `direction` |
+|-----------------|----------------------|-------------|
+| `local` или `customer` | `remote` | `out` |
+| `remote` | `local` или `customer` | `in` |
+| `local` или `customer` | `local` или `customer` | `internal` |
+| `remote` | `remote` | `transit` |
+| `unknown` с любой стороны | `unknown` |
+
+Если local ASN/prefix справочники пустые, classifier оставляет fallback
+`direction='out'`, чтобы новые инсталляции не теряли график до наполнения
+справочников.
+
+**Пример**
+
+```text
+src_vlan = 444
+src_ip   = 8.8.8.8
+dst_ip   = 195.2.240.10
+
+src_attachment_kind     = uplink
+src_attachment_boundary = external
+src_attachment_label    = RETN uplink
+
+src_endpoint_scope      = remote
+src_endpoint_source     = fallback
+dst_endpoint_scope      = customer
+dst_endpoint_source     = prefix
+dst_network_name        = PINDC customer block
+
+direction = in
+```
+
+Читается как: "входящий трафик от внешнего IP через uplink в клиентскую сеть".
 
 ### ASN And Registry
 
@@ -419,8 +515,14 @@ API добавляет в `WHERE` только whitelisted-фильтры:
 - `src_asn`, `dst_asn`, `any_asn`;
 - `src_ip_country`, `dst_ip_country`, `any_ip_country`;
 - `src_vlan`, `dst_vlan`;
-- `src_operator`, `dst_operator`, `operator_id`;
-- `src_kind`, `dst_kind`;
+- attachment: `src_attachment_kind`, `dst_attachment_kind`,
+  `src_attachment_boundary`, `dst_attachment_boundary`,
+  `src_attachment_operator`, `dst_attachment_operator`;
+- endpoint: `src_endpoint_scope`, `dst_endpoint_scope`,
+  `src_endpoint_source`, `dst_endpoint_source`, `src_network_role`,
+  `dst_network_role`;
+- compatibility: `src_operator`, `dst_operator`, `operator_id`,
+  `src_kind`, `dst_kind`;
 - `min_bytes`, `min_packets`;
 - `service_code`, `service_category`.
 

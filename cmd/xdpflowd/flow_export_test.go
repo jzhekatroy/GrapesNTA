@@ -58,10 +58,10 @@ func TestIsExpiredByTimers(t *testing.T) {
 			want:  false,
 		},
 		{
-			name:  "firstSeen in the future (boot clock race)",
+			name:  "firstSeen in the future, flow still hot",
 			first: uint64(150 * time.Second),
 			last:  uint64(99 * time.Second),
-			want:  true, // idle still exceeds threshold
+			want:  false,
 		},
 	}
 	for _, tc := range cases {

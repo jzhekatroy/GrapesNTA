@@ -53,21 +53,33 @@ type asnClass struct {
 }
 
 type vlanClass struct {
-	Kind       string
-	Label      string
-	OperatorID string
+	AttachmentKind     string
+	AttachmentBoundary string
+	Label              string
+	OperatorID         string
 }
 
 type prefixClass struct {
 	ASN        uint32
-	Kind       string
+	Role       string
 	OperatorID string
 	Name       string
 }
 
 type endpointClass struct {
-	ASN        uint32
+	ASN           uint32
+	Scope         string
+	Source        string
+	NetworkName   string
+	NetworkRole   string
+	Label         string
+	OperatorID    string
+	Attachment    attachmentClass
+}
+
+type attachmentClass struct {
 	Kind       string
+	Boundary   string
 	Label      string
 	OperatorID string
 }
@@ -177,18 +189,18 @@ func (tc *trafficClassifier) refreshOnce(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	vlanRows, customerVLANs, err := tc.loadVLANMap(ctx, st)
+	vlanRows, internalVLANs, err := tc.loadVLANMap(ctx, st)
 	if err != nil {
 		return err
 	}
-	st.hasLocalConfig = localPrefixRows > 0 || localASNRows > 0 || customerVLANs > 0
+	st.hasLocalConfig = localPrefixRows > 0 || localASNRows > 0
 	tc.state.Store(st)
 	tc.log.Info("traffic classifier refreshed",
 		"bgp_prefixes", bgpRows,
 		"local_prefixes", localPrefixRows,
 		"local_asns", localASNRows,
 		"vlans", vlanRows,
-		"customer_vlans", customerVLANs,
+		"internal_vlans", internalVLANs,
 		"has_local_config", st.hasLocalConfig,
 		"elapsed", time.Since(start),
 	)
@@ -239,8 +251,8 @@ func (tc *trafficClassifier) loadLocalNetworks(ctx context.Context, st *classifi
 		if err != nil || !p.IsValid() {
 			continue
 		}
-		kind = normalizeKind(kind, "customer")
-		pc := prefixClass{Kind: kind, OperatorID: operatorID, Name: name}
+		role := normalizeKind(kind, "customer")
+		pc := prefixClass{Role: role, OperatorID: operatorID, Name: name}
 		if family == 4 || p.Addr().Is4() {
 			st.local4.Insert(p.Masked(), pc)
 		} else {
@@ -274,24 +286,30 @@ func (tc *trafficClassifier) loadLocalASNs(ctx context.Context, st *classifierSt
 }
 
 func (tc *trafficClassifier) loadVLANMap(ctx context.Context, st *classifierState) (rowsCount int, customerCount int, err error) {
-	rows, err := tc.conn.Query(ctx, "SELECT vlan_id, kind, label, operator_id FROM "+tc.cfg.Tables.VLANMap)
+	rows, err := tc.conn.Query(ctx, "SELECT vlan_id, attachment_kind, boundary, label, operator_id FROM "+tc.cfg.Tables.VLANMap)
 	if err != nil {
 		return 0, 0, fmt.Errorf("load VLAN map: %w", err)
 	}
 	defer rows.Close()
 	for rows.Next() {
 		var vlan uint16
-		var kind, label, operatorID string
-		if err := rows.Scan(&vlan, &kind, &label, &operatorID); err != nil {
+		var kind, boundary, label, operatorID string
+		if err := rows.Scan(&vlan, &kind, &boundary, &label, &operatorID); err != nil {
 			return rowsCount, customerCount, err
 		}
 		if vlan == 0 {
 			continue
 		}
 		kind = normalizeKind(kind, "unknown")
-		st.vlans[vlan] = vlanClass{Kind: kind, Label: label, OperatorID: operatorID}
+		boundary = normalizeBoundary(boundary, kind)
+		st.vlans[vlan] = vlanClass{
+			AttachmentKind:     kind,
+			AttachmentBoundary: boundary,
+			Label:              label,
+			OperatorID:         operatorID,
+		}
 		rowsCount++
-		if isLocalKind(kind) {
+		if boundary == "internal" {
 			customerCount++
 		}
 	}
@@ -300,16 +318,16 @@ func (tc *trafficClassifier) loadVLANMap(ctx context.Context, st *classifierStat
 
 func (tc *trafficClassifier) classifyPair(src, dst [16]byte, ipVersion uint8, srcVLAN, dstVLAN uint16) (endpointClass, endpointClass, string) {
 	if tc == nil {
-		return endpointClass{Kind: "unknown"}, endpointClass{Kind: "unknown"}, "unknown"
+		return endpointClass{Scope: "unknown", Source: "unknown"}, endpointClass{Scope: "unknown", Source: "unknown"}, "unknown"
 	}
 	st := tc.state.Load()
 	if st == nil {
-		return endpointClass{Kind: "unknown"}, endpointClass{Kind: "unknown"}, "unknown"
+		return endpointClass{Scope: "unknown", Source: "unknown"}, endpointClass{Scope: "unknown", Source: "unknown"}, "unknown"
 	}
 	srcAddr, okSrc := addrFromFlow(src, ipVersion)
 	dstAddr, okDst := addrFromFlow(dst, ipVersion)
 	if !okSrc || !okDst {
-		return endpointClass{Kind: "unknown"}, endpointClass{Kind: "unknown"}, "unknown"
+		return endpointClass{Scope: "unknown", Source: "unknown"}, endpointClass{Scope: "unknown", Source: "unknown"}, "unknown"
 	}
 	srcClass := st.classify(srcAddr, srcVLAN)
 	dstClass := st.classify(dstAddr, dstVLAN)
@@ -318,26 +336,56 @@ func (tc *trafficClassifier) classifyPair(src, dst [16]byte, ipVersion uint8, sr
 
 func (st *classifierState) classify(addr netip.Addr, vlan uint16) endpointClass {
 	asn := st.lookupASN(addr)
+	att := st.lookupAttachment(vlan)
 	if vlan != 0 {
-		if v, ok := st.vlans[vlan]; ok {
-			return endpointClass{
-				ASN:        asn,
-				Kind:       v.Kind,
-				Label:      v.Label,
-				OperatorID: v.OperatorID,
-			}
-		}
+		att = st.lookupAttachment(vlan)
 	}
 	if asn != 0 {
 		if a, ok := st.localASNs[asn]; ok {
-			return endpointClass{ASN: asn, Kind: "local", Label: a.Name, OperatorID: a.OperatorID}
+			return endpointClass{
+				ASN:        asn,
+				Scope:      "local",
+				Source:     "asn",
+				Label:      a.Name,
+				OperatorID: a.OperatorID,
+				Attachment: att,
+			}
 		}
 	}
 	if p, ok := st.lookupLocalPrefix(addr); ok {
-		label := p.Name
-		return endpointClass{ASN: asn, Kind: normalizeKind(p.Kind, "customer"), Label: label, OperatorID: p.OperatorID}
+		role := normalizeKind(p.Role, "customer")
+		return endpointClass{
+			ASN:         asn,
+			Scope:       endpointScopeFromNetworkRole(role),
+			Source:      "prefix",
+			NetworkName: p.Name,
+			NetworkRole: role,
+			Label:       p.Name,
+			OperatorID:  p.OperatorID,
+			Attachment:  att,
+		}
 	}
-	return endpointClass{ASN: asn, Kind: "remote"}
+	return endpointClass{
+		ASN:        asn,
+		Scope:      "remote",
+		Source:     "fallback",
+		Attachment: att,
+	}
+}
+
+func (st *classifierState) lookupAttachment(vlan uint16) attachmentClass {
+	if vlan == 0 {
+		return attachmentClass{Kind: "unknown", Boundary: "unknown"}
+	}
+	if v, ok := st.vlans[vlan]; ok {
+		return attachmentClass{
+			Kind:       v.AttachmentKind,
+			Boundary:   v.AttachmentBoundary,
+			Label:      v.Label,
+			OperatorID: v.OperatorID,
+		}
+	}
+	return attachmentClass{Kind: "unknown", Boundary: "unknown"}
 }
 
 func (st *classifierState) lookupASN(addr netip.Addr) uint32 {
@@ -364,8 +412,11 @@ func deriveDirection(hasLocalConfig bool, src, dst endpointClass) string {
 	if !hasLocalConfig {
 		return "out"
 	}
-	srcLocal := isLocalKind(src.Kind)
-	dstLocal := isLocalKind(dst.Kind)
+	if src.Scope == "unknown" || dst.Scope == "unknown" {
+		return "unknown"
+	}
+	srcLocal := isLocalEndpointScope(src.Scope)
+	dstLocal := isLocalEndpointScope(dst.Scope)
 	switch {
 	case srcLocal && dstLocal:
 		return "internal"
@@ -386,9 +437,51 @@ func normalizeKind(kind, fallback string) string {
 	return kind
 }
 
-func isLocalKind(kind string) bool {
+func normalizeBoundary(boundary, attachmentKind string) string {
+	boundary = strings.ToLower(strings.TrimSpace(boundary))
+	switch boundary {
+	case "internal", "external", "unknown":
+		return boundary
+	case "":
+		// derive a safe default from attachment kind for older rows where only
+		// `kind` existed in vlan_map.
+	default:
+		return "unknown"
+	}
+	if isLocalAttachmentKind(attachmentKind) {
+		return "internal"
+	}
+	switch normalizeKind(attachmentKind, "unknown") {
+	case "uplink", "ix", "peering", "transit", "pni", "ppni":
+		return "external"
+	default:
+		return "unknown"
+	}
+}
+
+func isLocalAttachmentKind(kind string) bool {
 	switch normalizeKind(kind, "unknown") {
 	case "local", "customer", "internal", "mgmt":
+		return true
+	default:
+		return false
+	}
+}
+
+func endpointScopeFromNetworkRole(role string) string {
+	switch normalizeKind(role, "customer") {
+	case "customer":
+		return "customer"
+	case "local", "internal", "mgmt":
+		return "local"
+	default:
+		return "customer"
+	}
+}
+
+func isLocalEndpointScope(scope string) bool {
+	switch normalizeKind(scope, "unknown") {
+	case "local", "customer":
 		return true
 	default:
 		return false

@@ -98,10 +98,15 @@ SETTINGS index_granularity = 8192;
 | `src_addr` / `dst_addr` | 16 raw bytes from `FlowKey`; IPv4 stored in the first 4 bytes with the rest zeroed to match current BPF key layout |
 | `src_as` / `dst_as` | Legacy ASN columns. With classifier enabled they mirror `src_asn` / `dst_asn`; otherwise `0`. |
 | `src_asn` / `dst_asn` | Origin ASN from BGP trie loaded from `bgp_prefix_origin_current`. Requires `deploy/clickhouse/flows_raw_extensions.sql`. |
-| `direction` | `in`, `out`, `internal`, `transit`, `unknown`; computed in `xdpflowd` when `XDP_CLASSIFIER=1`. |
-| `src_kind` / `dst_kind` | Classification kind (`local`, `customer`, `uplink`, `ix`, `remote`, etc.). |
-| `src_label` / `dst_label` | VLAN/uplink/operator label when known. |
-| `src_operator` / `dst_operator` | Stable operator id from `local_operators`. |
+| `direction` | `in`, `out`, `internal`, `transit`, `unknown`; computed in `xdpflowd` from endpoint scope (`local/customer/remote`), not directly from VLAN. |
+| `src_attachment_*` / `dst_attachment_*` | VLAN/link context: kind, boundary, label, operator. This answers "where was the packet seen?". |
+| `src_endpoint_scope` / `dst_endpoint_scope` | IP ownership relative to us: `local`, `customer`, `remote`, `unknown`. This answers "whose IP is it?". |
+| `src_endpoint_source` / `dst_endpoint_source` | Decision source for endpoint scope: `asn`, `prefix`, `fallback`, `unknown`. |
+| `src_network_name` / `dst_network_name` | Prefix name when IP matched `local_networks_enabled`. |
+| `src_network_role` / `dst_network_role` | Prefix role when IP matched `local_networks_enabled` (`customer`, `local`, `internal`, `mgmt`, ...). |
+| `src_kind` / `dst_kind` | Compatibility columns; new rows mirror `src_endpoint_scope` / `dst_endpoint_scope`. |
+| `src_label` / `dst_label` | Compatibility endpoint label (ASN name or prefix name). VLAN label is in `src_attachment_label` / `dst_attachment_label`. |
+| `src_operator` / `dst_operator` | Compatibility endpoint operator id. VLAN operator is in `src_attachment_operator` / `dst_attachment_operator`. |
 | `src_vlan` / `dst_vlan` | Current XDP path writes the outer VLAN to `src_vlan`; `dst_vlan` is `0` until an exporter supplies a separate destination VLAN. |
 | `etype` | `0x0800` for IPv4, `0x86DD` for IPv6 |
 | `proto` | `FlowKey.Proto` |

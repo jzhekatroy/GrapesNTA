@@ -1,4 +1,4 @@
-# xdpflowd classifier: VLAN + ASN + Prefix
+# xdpflowd classifier: Attachment + Endpoint
 
 `xdpflowd` can enrich every ClickHouse flow row before insert. The goal is to
 avoid heavy dashboard queries over `flows_raw`.
@@ -8,15 +8,18 @@ avoid heavy dashboard queries over `flows_raw`.
 The classifier refreshes these ClickHouse views/tables into memory:
 
 - `default.bgp_prefix_origin_current`: BGP prefix -> origin ASN.
-- `default.vlan_map_enabled`: outer VLAN -> kind/label/operator.
-- `default.local_asns_enabled`: ASNs treated as local/customer.
-- `default.local_networks_enabled`: prefixes treated as local/customer.
+- `default.vlan_map_enabled`: outer VLAN -> attachment kind/boundary/label/operator.
+- `default.local_asns_enabled`: ASNs treated as local endpoint ownership.
+- `default.local_networks_enabled`: prefixes treated as local/customer endpoint ownership.
 
-Priority:
+The classifier deliberately separates two concepts:
 
 ```text
-VLAN > local ASN > local prefix
+VLAN attachment: where the packet was seen
+Endpoint scope:  who owns the IP address
 ```
+
+Direction is derived from endpoint scope, not directly from VLAN.
 
 MVP decisions:
 
@@ -24,6 +27,9 @@ MVP decisions:
 - Only the outer VLAN tag is used.
 - Private ASNs are not local by default. Add them explicitly to `local_asns`.
 - `transit` is one category for external -> external.
+- `src_kind` / `dst_kind` are kept as physical columns but new rows fill them
+  with endpoint scope (`local`, `customer`, `remote`, `unknown`). Use the
+  explicit `src_endpoint_*` and `src_attachment_*` columns in new UI/API code.
 
 ## Required DDL
 
@@ -90,33 +96,90 @@ CLI equivalent:
 - `src_as` / `dst_as`: kept for legacy compatibility.
 - `src_asn` / `dst_asn`: origin ASN from BGP trie.
 - `direction`: `in`, `out`, `internal`, `transit`, `unknown`.
-- `src_kind` / `dst_kind`: `local`, `customer`, `uplink`, `ix`, `remote`, etc.
-- `src_label` / `dst_label`: uplink/customer label when known.
-- `src_operator` / `dst_operator`: stable operator id.
+- `src_attachment_kind` / `dst_attachment_kind`: VLAN/link type, e.g.
+  `customer`, `uplink`, `core`, `internal`, `mgmt`, `ix`, `peering`, `unknown`.
+- `src_attachment_boundary` / `dst_attachment_boundary`: `internal`,
+  `external`, `unknown`.
+- `src_attachment_label` / `dst_attachment_label`: VLAN/link label.
+- `src_attachment_operator` / `dst_attachment_operator`: stable operator id for
+  the VLAN/link.
+- `src_endpoint_scope` / `dst_endpoint_scope`: IP ownership relative to us:
+  `local`, `customer`, `remote`, `unknown`.
+- `src_endpoint_source` / `dst_endpoint_source`: why scope was chosen:
+  `asn`, `prefix`, `fallback`, `unknown`.
+- `src_network_name` / `dst_network_name`: local prefix name when matched.
+- `src_network_role` / `dst_network_role`: local prefix role when matched.
+- `src_kind` / `dst_kind`: compatibility columns, now filled with endpoint scope.
+- `src_label` / `dst_label`: compatibility endpoint label.
+- `src_operator` / `dst_operator`: compatibility endpoint operator id.
 - `src_vlan` / `dst_vlan`: current XDP path writes outer VLAN to `src_vlan`;
   `dst_vlan` stays `0` until an exporter supplies separate destination VLAN.
 
 ## Direction Rules
 
+The classifier has three stages.
+
+### Stage 1: attachment classification from VLAN
+
+For each side (`src` and `dst`) `xdpflowd` first maps VLAN to attachment
+metadata. This describes the link/context where the packet was observed. It
+does **not** decide IP ownership.
+
+| VLAN map column | Flow columns | Meaning |
+|-----------------|--------------|---------|
+| `attachment_kind` | `src_attachment_kind` / `dst_attachment_kind` | Link type: `customer`, `uplink`, `core`, `internal`, `mgmt`, `ix`, `peering`, `unknown`. |
+| `boundary` | `src_attachment_boundary` / `dst_attachment_boundary` | Link boundary: `internal`, `external`, `unknown`. |
+| `label` | `src_attachment_label` / `dst_attachment_label` | Human-readable link name. |
+| `operator_id` | `src_attachment_operator` / `dst_attachment_operator` | Stable operator/customer/provider id for the link. |
+
+Examples:
+
+```text
+VLAN 210 -> attachment_kind=customer, boundary=internal, label=Iconnet VLAN
+VLAN 444 -> attachment_kind=uplink,   boundary=external, label=RETN uplink
+VLAN 667 -> attachment_kind=core,     boundary=internal, label=Core VLAN
+```
+
+### Stage 2: endpoint classification from IP/ASN/prefix
+
+For source and destination independently, `xdpflowd` decides who owns the IP
+address relative to us.
+
+| Priority | Check | Output |
+|----------|-------|--------|
+| 1 | Origin ASN exists in `default.local_asns_enabled`. | `endpoint_scope='local'`, `endpoint_source='asn'`, label/operator from local ASNs. |
+| 2 | IP address matches `default.local_networks_enabled`. | `endpoint_scope='customer'` for role `customer`; `endpoint_scope='local'` for roles `local/internal/mgmt`; `endpoint_source='prefix'`, network name/role from local prefixes. |
+| 3 | No local match. | `endpoint_scope='remote'`, `endpoint_source='fallback'`. |
+| 4 | Classifier disabled/not loaded or invalid IP version. | `endpoint_scope='unknown'`, `endpoint_source='unknown'`. |
+
+Origin ASN is still written for every endpoint when BGP lookup succeeds. ASN
+enrichment (`asn_registry_enriched`, country, RIR, AS name) remains separate
+from endpoint scope.
+
+### Stage 3: direction from endpoint scope
+
 ```text
 no local config                          -> out
-src local  && dst local                  -> internal
-src local  && dst remote                 -> out
-src remote && dst local                  -> in
-src remote && dst remote                 -> transit
+src local/customer && dst local/customer -> internal
+src local/customer && dst remote         -> out
+src remote         && dst local/customer -> in
+src remote         && dst remote         -> transit
+src unknown or dst unknown               -> unknown
 ```
 
-Local kinds:
+Examples:
 
-```text
-local, customer, internal, mgmt
-```
+| Flow facts | Attachment result | Endpoint result | Direction |
+|------------|-------------------|-----------------|-----------|
+| `src_vlan=444`, `src_ip=8.8.8.8`, `dst_ip` in customer prefix. | `src_attachment_kind=uplink`, `boundary=external`. | `src_endpoint_scope=remote`, `dst_endpoint_scope=customer`. | `in` |
+| `src_ip` in local ASN, `dst_ip=8.8.8.8`. | VLAN may be unknown. | `src_endpoint_scope=local`, `dst_endpoint_scope=remote`. | `out` |
+| Both IPs are in local/customer prefixes. | Any attachment. | `src_endpoint_scope=customer`, `dst_endpoint_scope=local/customer`. | `internal` |
+| Neither IP matches local ASN/prefix. | Any attachment. | `src_endpoint_scope=remote`, `dst_endpoint_scope=remote`. | `transit` |
 
-Remote kinds:
-
-```text
-remote, uplink, ix, peering, unknown
-```
+Operational note: currently the XDP path writes the outer VLAN tag to
+`src_vlan`. `dst_vlan` usually stays `0` unless a future exporter supplies a
+separate destination/egress VLAN. Therefore destination attachment is often
+`unknown`, while destination endpoint classification still works by ASN/prefix.
 
 ## Checks
 

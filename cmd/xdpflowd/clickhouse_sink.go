@@ -249,6 +249,22 @@ func insertEnrichedBatchRows(ctx context.Context, log *slog.Logger, conn chdrive
     dst_label,
     src_operator,
     dst_operator,
+    src_attachment_kind,
+    dst_attachment_kind,
+    src_attachment_boundary,
+    dst_attachment_boundary,
+    src_attachment_label,
+    dst_attachment_label,
+    src_attachment_operator,
+    dst_attachment_operator,
+    src_endpoint_scope,
+    dst_endpoint_scope,
+    src_endpoint_source,
+    dst_endpoint_source,
+    src_network_name,
+    dst_network_name,
+    src_network_role,
+    dst_network_role,
     src_vlan,
     dst_vlan,
     etype,
@@ -291,6 +307,22 @@ func insertEnrichedBatchRows(ctx context.Context, log *slog.Logger, conn chdrive
 			r.DstLabel,
 			r.SrcOperator,
 			r.DstOperator,
+			r.SrcAttachmentKind,
+			r.DstAttachmentKind,
+			r.SrcAttachmentBoundary,
+			r.DstAttachmentBoundary,
+			r.SrcAttachmentLabel,
+			r.DstAttachmentLabel,
+			r.SrcAttachmentOperator,
+			r.DstAttachmentOperator,
+			r.SrcEndpointScope,
+			r.DstEndpointScope,
+			r.SrcEndpointSource,
+			r.DstEndpointSource,
+			r.SrcNetworkName,
+			r.DstNetworkName,
+			r.SrcNetworkRole,
+			r.DstNetworkRole,
 			r.SrcVLAN,
 			r.DstVLAN,
 			r.Etype,
@@ -321,6 +353,10 @@ func rowsHaveEnrichment(rows []FlowRow) bool {
 			r.Direction != "" || r.SrcKind != "" || r.DstKind != "" ||
 			r.SrcLabel != "" || r.DstLabel != "" ||
 			r.SrcOperator != "" || r.DstOperator != "" ||
+			r.SrcAttachmentKind != "" || r.DstAttachmentKind != "" ||
+			r.SrcEndpointScope != "" || r.DstEndpointScope != "" ||
+			r.SrcEndpointSource != "" || r.DstEndpointSource != "" ||
+			r.SrcNetworkName != "" || r.DstNetworkName != "" ||
 			r.SrcVLAN != 0 || r.DstVLAN != 0 {
 			return true
 		}
@@ -340,6 +376,36 @@ func flowRowApplyInsertDefaults(r *FlowRow) {
 	}
 	if r.DstKind == "" {
 		r.DstKind = "unknown"
+	}
+	if r.SrcEndpointScope == "" {
+		r.SrcEndpointScope = r.SrcKind
+	}
+	if r.DstEndpointScope == "" {
+		r.DstEndpointScope = r.DstKind
+	}
+	if r.SrcEndpointScope == "" {
+		r.SrcEndpointScope = "unknown"
+	}
+	if r.DstEndpointScope == "" {
+		r.DstEndpointScope = "unknown"
+	}
+	if r.SrcEndpointSource == "" {
+		r.SrcEndpointSource = "unknown"
+	}
+	if r.DstEndpointSource == "" {
+		r.DstEndpointSource = "unknown"
+	}
+	if r.SrcAttachmentKind == "" {
+		r.SrcAttachmentKind = "unknown"
+	}
+	if r.DstAttachmentKind == "" {
+		r.DstAttachmentKind = "unknown"
+	}
+	if r.SrcAttachmentBoundary == "" {
+		r.SrcAttachmentBoundary = "unknown"
+	}
+	if r.DstAttachmentBoundary == "" {
+		r.DstAttachmentBoundary = "unknown"
 	}
 	if r.SrcASN == 0 && r.SrcAS != 0 {
 		r.SrcASN = r.SrcAS

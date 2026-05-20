@@ -20,11 +20,17 @@ default.traffic_chart_1m
 fallback/debug. Не использовать его как основной источник графика.
 
 Direction (`in/out/internal/transit`) считает `xdpflowd` до записи в
-ClickHouse по правилу:
+ClickHouse по endpoint ownership:
 
 ```text
-VLAN > local ASN > local prefix
+local/customer -> remote          = out
+remote -> local/customer          = in
+local/customer -> local/customer  = internal
+remote -> remote                  = transit
 ```
+
+VLAN теперь является attachment/context (`src_attachment_*`) и напрямую не
+перетирает direction.
 
 Laravel не должен делать `dictGet`, `arrayExists` или пересчитывать direction
 при чтении графика.
