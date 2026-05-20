@@ -440,11 +440,13 @@ func normalizeKind(kind, fallback string) string {
 func normalizeBoundary(boundary, attachmentKind string) string {
 	boundary = strings.ToLower(strings.TrimSpace(boundary))
 	switch boundary {
-	case "internal", "external", "unknown":
+	case "internal", "external":
 		return boundary
-	case "":
-		// derive a safe default from attachment kind for older rows where only
-		// `kind` existed in vlan_map.
+	case "", "unknown":
+		// derive a safe default from attachment kind for rows where boundary is
+		// not filled yet. Existing vlan_map rows get DEFAULT 'unknown', so
+		// treating unknown as explicit would hide obvious uplink/ix -> external
+		// and customer/core -> internal mappings.
 	default:
 		return "unknown"
 	}

@@ -36,7 +36,7 @@ SELECT
     vlan_id,
     attachment_kind,
     multiIf(
-        boundary_raw IN ('internal', 'external', 'unknown'), boundary_raw,
+        boundary_raw IN ('internal', 'external'), boundary_raw,
         attachment_kind IN ('local', 'customer', 'internal', 'mgmt', 'core'), 'internal',
         attachment_kind IN ('uplink', 'ix', 'peering', 'transit', 'pni', 'ppni'), 'external',
         'unknown'
