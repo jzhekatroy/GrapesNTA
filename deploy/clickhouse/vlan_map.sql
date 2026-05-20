@@ -35,7 +35,12 @@ CREATE VIEW default.vlan_map_enabled AS
 SELECT
     vlan_id,
     attachment_kind,
-    boundary,
+    multiIf(
+        boundary_raw IN ('internal', 'external', 'unknown'), boundary_raw,
+        attachment_kind IN ('local', 'customer', 'internal', 'mgmt', 'core'), 'internal',
+        attachment_kind IN ('uplink', 'ix', 'peering', 'transit', 'pni', 'ppni'), 'external',
+        'unknown'
+    ) AS boundary,
     label,
     operator_id,
     source,
@@ -46,12 +51,6 @@ FROM
         vlan_id,
         if(argMax(attachment_kind, updated_at) != '', argMax(attachment_kind, updated_at), argMax(kind, updated_at)) AS attachment_kind,
         argMax(boundary, updated_at) AS boundary_raw,
-        multiIf(
-            boundary_raw IN ('internal', 'external', 'unknown'), boundary_raw,
-            attachment_kind IN ('local', 'customer', 'internal', 'mgmt', 'core'), 'internal',
-            attachment_kind IN ('uplink', 'ix', 'peering', 'transit', 'pni', 'ppni'), 'external',
-            'unknown'
-        ) AS boundary,
         argMax(label, updated_at) AS label,
         argMax(operator_id, updated_at) AS operator_id,
         argMax(source, updated_at) AS source,
