@@ -29,6 +29,8 @@ func main() {
 	captureFlush := flag.Duration("capture-flush-interval", 50*time.Millisecond, "capture-side max delay before send")
 	chSampler := flag.String("ch-sampler-addr", "127.0.0.1", "sampler_address column (IPv4 / IPv6)")
 	interval := flag.Duration("interval", 5*time.Second, "metrics log interval")
+	healthInterval := flag.Duration("health-interval", time.Minute, "emit ERROR health log at most this often when DNS rows are dropped or writes lag")
+	healthLagThreshold := flag.Uint64("health-lag-threshold", 100000, "ERROR when records_queued - records_written exceeds this many DNS rows")
 	flag.Parse()
 
 	log := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
@@ -36,6 +38,9 @@ func main() {
 	if *chDSN == "" {
 		log.Error("missing -ch-dsn")
 		os.Exit(1)
+	}
+	if *healthInterval <= 0 {
+		*healthInterval = time.Minute
 	}
 
 	sampler, err := parseSamplerAddress(*chSampler)
@@ -67,12 +72,15 @@ func main() {
 
 	tick := time.NewTicker(*interval)
 	defer tick.Stop()
+	healthTick := time.NewTicker(*healthInterval)
+	defer healthTick.Stop()
 
 	var metricsWG sync.WaitGroup
 	metricsWG.Add(1)
 	go func() {
 		defer metricsWG.Done()
 		var prevFramesRead, prevDNSRows uint64
+		var prevQueueDrops, prevInsertErrs, prevAnswersInsertErrs uint64
 		for {
 			select {
 			case <-ctx.Done():
@@ -115,6 +123,38 @@ func main() {
 				}
 				prevFramesRead = curFramesRead
 				prevDNSRows = curDNSRows
+			case <-healthTick.C:
+				curQueueDrops := sink.queueDrops.Load()
+				curInsertErrs := sink.insertErrs.Load()
+				curAnswersInsertErrs := sink.answersInsertErrs.Load()
+				recordsQueued := sink.recordsQueued.Load()
+				recordsWritten := sink.recordsWritten.Load()
+				writerLagRows := uint64(0)
+				if recordsQueued > recordsWritten {
+					writerLagRows = recordsQueued - recordsWritten
+				}
+				queueDropsDelta := curQueueDrops - prevQueueDrops
+				insertErrsDelta := curInsertErrs - prevInsertErrs
+				answersInsertErrsDelta := curAnswersInsertErrs - prevAnswersInsertErrs
+				if queueDropsDelta > 0 || insertErrsDelta > 0 || answersInsertErrsDelta > 0 || writerLagRows > *healthLagThreshold {
+					log.Error("dnsflowd health degraded",
+						"queue_drops_delta", queueDropsDelta,
+						"queue_drops_total", curQueueDrops,
+						"insert_errs_delta", insertErrsDelta,
+						"insert_errs_total", curInsertErrs,
+						"answers_insert_errs_delta", answersInsertErrsDelta,
+						"answers_insert_errs_total", curAnswersInsertErrs,
+						"writer_lag_rows", writerLagRows,
+						"health_lag_threshold", *healthLagThreshold,
+						"records_queued", recordsQueued,
+						"records_written", recordsWritten,
+						"answers_written", sink.answersWritten.Load(),
+						"queue_depth_batches", len(sink.ch),
+					)
+				}
+				prevQueueDrops = curQueueDrops
+				prevInsertErrs = curInsertErrs
+				prevAnswersInsertErrs = curAnswersInsertErrs
 			}
 		}
 	}()
@@ -237,6 +277,8 @@ func main() {
 		"ch_table", *chTable,
 		"ch_answers_table", *chAnswersTable,
 		"capture", "libpcap",
+		"health_interval", *healthInterval,
+		"health_lag_threshold", *healthLagThreshold,
 		"datalink", handle.LinkType().String(),
 		"datalink_name", handle.LinkTypeName(),
 	)

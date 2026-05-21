@@ -54,4 +54,6 @@ exec "${STDBUF[@]}" "$BIN" \
   -ch-flush-interval "${DNS_CH_FLUSH_INTERVAL:-1s}" \
   -ch-queue-size "${DNS_CH_QUEUE_SIZE:-64}" \
   -ch-sampler-addr "${DNS_CH_SAMPLER_ADDR:-127.0.0.1}" \
-  -interval "${DNS_INTERVAL:-5s}"
+  -interval "${DNS_INTERVAL:-5s}" \
+  -health-interval "${DNS_HEALTH_INTERVAL:-1m}" \
+  -health-lag-threshold "${DNS_HEALTH_LAG_THRESHOLD:-100000}"
