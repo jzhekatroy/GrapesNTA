@@ -1179,8 +1179,30 @@ func (p *spoolClickhousePipeline) isCaughtUp() bool {
 }
 
 func (p *spoolClickhousePipeline) LogMetrics() {
+	s := p.HealthSnapshot()
+	p.log.Info("clickhouse spool pipeline",
+		"records_spooled", s.RecordsSpooled,
+		"records_acked", s.RecordsAcked,
+		"batches_ok", p.batchesOK.Load(),
+		"insert_errs", s.InsertErrs,
+		"retries", p.retries.Load(),
+		"corruption_frames_skipped", p.corruptionFramesSkipped.Load(),
+		"corruption_bytes_skipped", p.corruptionBytesSkipped.Load(),
+		"writer_tip", consumerCheckpoint{Segment: p.writer.writerTipSeg.Load(), Offset: p.writer.writerTipOff.Load()},
+		"acked", p.currentAckedCheckpoint(),
+		"lag_segments", s.LagSegments,
+		"drainer_progress_age", s.DrainerProgressAge.Truncate(time.Second),
+	)
+}
+
+func (p *spoolClickhousePipeline) currentAckedCheckpoint() consumerCheckpoint {
+	p.checkpointMu.Lock()
+	defer p.checkpointMu.Unlock()
+	return p.acked
+}
+
+func (p *spoolClickhousePipeline) HealthSnapshot() clickhouseHealthSnapshot {
 	tipSeg := p.writer.writerTipSeg.Load()
-	tipOff := p.writer.writerTipOff.Load()
 	p.checkpointMu.Lock()
 	cp := p.acked
 	p.checkpointMu.Unlock()
@@ -1193,19 +1215,13 @@ func (p *spoolClickhousePipeline) LogMetrics() {
 	if progressNs > 0 {
 		progressAge = time.Since(time.Unix(0, progressNs))
 	}
-	p.log.Info("clickhouse spool pipeline",
-		"records_spooled", p.recordsSpooled.Load(),
-		"records_acked", p.recordsAcked.Load(),
-		"batches_ok", p.batchesOK.Load(),
-		"insert_errs", p.insertErrs.Load(),
-		"retries", p.retries.Load(),
-		"corruption_frames_skipped", p.corruptionFramesSkipped.Load(),
-		"corruption_bytes_skipped", p.corruptionBytesSkipped.Load(),
-		"writer_tip", consumerCheckpoint{Segment: tipSeg, Offset: tipOff},
-		"acked", cp,
-		"lag_segments", lagSegs,
-		"drainer_progress_age", progressAge.Truncate(time.Second),
-	)
+	return clickhouseHealthSnapshot{
+		RecordsSpooled:     p.recordsSpooled.Load(),
+		RecordsAcked:       p.recordsAcked.Load(),
+		InsertErrs:         p.insertErrs.Load(),
+		LagSegments:        lagSegs,
+		DrainerProgressAge: progressAge,
+	}
 }
 
 func parseChSpoolMode(s string) (chSpoolMode, error) {

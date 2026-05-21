@@ -509,6 +509,13 @@ func (e *nfExporter) logMetrics() {
 	)
 }
 
+func (e *nfExporter) sendErrors() uint64 {
+	if e == nil {
+		return 0
+	}
+	return atomic.LoadUint64(&e.sendErrs)
+}
+
 func (e *nfExporter) Close() {
 	for _, c := range e.dests {
 		_ = c.Close()

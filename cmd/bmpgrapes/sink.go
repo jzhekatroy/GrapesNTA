@@ -75,6 +75,20 @@ type clickhouseSink struct {
 	wg     sync.WaitGroup
 }
 
+type clickhouseHealthSnapshot struct {
+	EventsQueued  uint64
+	EventsWritten uint64
+	PeersQueued   uint64
+	PeersWritten  uint64
+	InsertErrs    uint64
+	QueueDrops    uint64
+	QueueBlocks   uint64
+	EventsLagRows uint64
+	PeersLagRows  uint64
+	EventsQueue   int
+	PeersQueue    int
+}
+
 func parseDSN(dsn string) (*clickhouse.Options, error) {
 	dsn = strings.TrimSpace(dsn)
 	if dsn == "" {
@@ -497,4 +511,35 @@ func (s *clickhouseSink) LogMetrics() {
 		"queue_blocks", s.queueBlocks.Load(),
 		"queue_mode", s.mode.String(),
 	)
+}
+
+func (s *clickhouseSink) HealthSnapshot() clickhouseHealthSnapshot {
+	if s == nil {
+		return clickhouseHealthSnapshot{}
+	}
+	eventsQueued := s.eventsQueued.Load()
+	eventsWritten := s.eventsWritten.Load()
+	peersQueued := s.peersQueued.Load()
+	peersWritten := s.peersWritten.Load()
+	eventsLag := uint64(0)
+	if eventsQueued > eventsWritten {
+		eventsLag = eventsQueued - eventsWritten
+	}
+	peersLag := uint64(0)
+	if peersQueued > peersWritten {
+		peersLag = peersQueued - peersWritten
+	}
+	return clickhouseHealthSnapshot{
+		EventsQueued:  eventsQueued,
+		EventsWritten: eventsWritten,
+		PeersQueued:   peersQueued,
+		PeersWritten:  peersWritten,
+		InsertErrs:    s.insertErrs.Load(),
+		QueueDrops:    s.queueDrops.Load(),
+		QueueBlocks:   s.queueBlocks.Load(),
+		EventsLagRows: eventsLag,
+		PeersLagRows:  peersLag,
+		EventsQueue:   len(s.eventsCh),
+		PeersQueue:    len(s.peersCh),
+	}
 }

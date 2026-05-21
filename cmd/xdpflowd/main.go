@@ -436,6 +436,10 @@ func main() {
 	chSpoolShutdownDrain := flag.Duration("ch-spool-shutdown-drain", 0, "wait up to this duration for spool backlog to reach ClickHouse before shutdown (0=leave backlog for replay)")
 	chSpoolStallThreshold := flag.Duration("ch-spool-stall-threshold", 60*time.Second, "force resync past suspect frame if drainer makes no progress for this long while data is available (also bounds shutdown drain when set)")
 	chWriters := flag.Int("ch-writers", 4, "parallel ClickHouse INSERT workers when spool mode is on")
+	healthInterval := flag.Duration("health-interval", time.Minute, "emit ERROR health log at most this often when flow export/write path is degraded")
+	healthSpoolLagSegments := flag.Int64("health-spool-lag-segments", 10, "ERROR when ClickHouse spool lag exceeds this many segments")
+	healthWriterLagRows := flag.Uint64("health-writer-lag-rows", 100000, "ERROR when direct ClickHouse queued-written lag exceeds this many rows")
+	healthDrainerAge := flag.Duration("health-drainer-age", 2*time.Minute, "ERROR when spool drainer has made no progress for this long while lagging")
 	classifierEnabled := flag.Bool("classifier", false, "enable collector-side traffic classification (VLAN attachment + ASN/prefix endpoint ownership)")
 	classifierRefresh := flag.Duration("classifier-refresh", time.Minute, "refresh interval for classifier dictionaries")
 	classifierBGPTable := flag.String("classifier-bgp-table", "default.bgp_prefix_origin_current", "ClickHouse source table/view for prefix -> origin ASN")
@@ -460,6 +464,9 @@ func main() {
 		*nfActive = 60 * time.Second
 		*nfIdle = 10 * time.Second
 		*nfScan = 500 * time.Millisecond
+	}
+	if *healthInterval <= 0 {
+		*healthInterval = time.Minute
 	}
 
 	log := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
@@ -690,6 +697,8 @@ func main() {
 
 	ticker := time.NewTicker(*interval)
 	defer ticker.Stop()
+	healthTicker := time.NewTicker(*healthInterval)
+	defer healthTicker.Stop()
 
 	var jsonTicker *time.Ticker
 	if *jsonOut != "" {
@@ -726,7 +735,7 @@ func main() {
 	}
 
 	// Build channels that may be nil-safe in select (nil channel blocks forever).
-	var jsonC, exportC, topC <-chan time.Time
+	var jsonC, exportC, topC, healthC <-chan time.Time
 	if jsonTicker != nil {
 		jsonC = jsonTicker.C
 	}
@@ -736,6 +745,11 @@ func main() {
 	if topTicker != nil {
 		topC = topTicker.C
 	}
+	if !*once {
+		healthC = healthTicker.C
+	}
+
+	var prevMapFull, prevInsertErrs, prevQueueDrops, prevNFSendErrs uint64
 
 	for {
 		select {
@@ -776,6 +790,61 @@ func main() {
 					"legacy_calls", legacyCalls,
 				)
 			}
+		case <-healthC:
+			mapFull := readStat(objs, 2)
+			mapFullDelta := mapFull - prevMapFull
+			insertErrsDelta := uint64(0)
+			queueDropsDelta := uint64(0)
+			writerLagRows := uint64(0)
+			lagSegments := int64(0)
+			drainerAge := time.Duration(0)
+			chMode := ""
+			if chDel != nil {
+				ch := chDel.HealthSnapshot()
+				chMode = ch.Mode
+				insertErrsDelta = ch.InsertErrs - prevInsertErrs
+				queueDropsDelta = ch.QueueDrops - prevQueueDrops
+				lagSegments = ch.LagSegments
+				drainerAge = ch.DrainerProgressAge
+				if ch.RecordsQueued > ch.RecordsWritten {
+					writerLagRows = ch.RecordsQueued - ch.RecordsWritten
+				}
+				if ch.RecordsSpooled > ch.RecordsAcked {
+					writerLagRows = ch.RecordsSpooled - ch.RecordsAcked
+				}
+				prevInsertErrs = ch.InsertErrs
+				prevQueueDrops = ch.QueueDrops
+			}
+			nfSendErrs := uint64(0)
+			if nfExp != nil {
+				nfSendErrs = nfExp.sendErrors()
+			}
+			nfSendErrsDelta := nfSendErrs - prevNFSendErrs
+			if mapFullDelta > 0 ||
+				insertErrsDelta > 0 ||
+				queueDropsDelta > 0 ||
+				nfSendErrsDelta > 0 ||
+				lagSegments > *healthSpoolLagSegments ||
+				writerLagRows > *healthWriterLagRows ||
+				(lagSegments > 0 && drainerAge > *healthDrainerAge) {
+				log.Error("xdpflowd health degraded",
+					"map_full_delta", mapFullDelta,
+					"map_full_total", mapFull,
+					"clickhouse_mode", chMode,
+					"insert_errs_delta", insertErrsDelta,
+					"queue_drops_delta", queueDropsDelta,
+					"writer_lag_rows", writerLagRows,
+					"writer_lag_threshold", *healthWriterLagRows,
+					"lag_segments", lagSegments,
+					"lag_segments_threshold", *healthSpoolLagSegments,
+					"drainer_progress_age", drainerAge.Truncate(time.Second),
+					"drainer_age_threshold", *healthDrainerAge,
+					"netflow_send_errs_delta", nfSendErrsDelta,
+					"netflow_send_errs_total", nfSendErrs,
+				)
+			}
+			prevMapFull = mapFull
+			prevNFSendErrs = nfSendErrs
 		case <-topC:
 			dumpTop(log, objs, *topN)
 		case <-jsonC:

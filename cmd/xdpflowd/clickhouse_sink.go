@@ -532,3 +532,17 @@ func (s *clickhouseSink) LogMetrics() {
 		"queue_drops", s.queueDrops.Load(),
 	)
 }
+
+func (s *clickhouseSink) HealthSnapshot() clickhouseHealthSnapshot {
+	if s == nil {
+		return clickhouseHealthSnapshot{}
+	}
+	queued := s.recordsQueued.Load()
+	written := s.recordsWritten.Load()
+	return clickhouseHealthSnapshot{
+		RecordsQueued:  queued,
+		RecordsWritten: written,
+		InsertErrs:     s.insertErrs.Load(),
+		QueueDrops:     s.queueDrops.Load(),
+	}
+}

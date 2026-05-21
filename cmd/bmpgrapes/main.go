@@ -35,10 +35,18 @@ func main() {
 	allowlistFlag := flag.String("allow-routers", "", "optional comma-separated list of allowed router IPs (empty = allow all)")
 	maxMsgSize := flag.Int("max-message-bytes", 65535, "maximum BMP message size accepted (RFC 7854 caps at 4 GiB; routers stay under 64 KiB)")
 	metricsInterval := flag.Duration("interval", 10*time.Second, "metrics log interval")
+	healthInterval := flag.Duration("health-interval", time.Minute, "emit ERROR health log at most this often when BMP ingest/write path is degraded")
+	healthWriterLag := flag.Uint64("health-writer-lag-rows", 100000, "ERROR when queued-written ClickHouse lag exceeds this many rows")
+	healthQueueBlocks := flag.Uint64("health-queue-blocks", 100000, "ERROR when block-mode queue back-pressure affects more than this many rows per health interval")
+	healthBGPParseErrPct := flag.Float64("health-bgp-parse-error-pct", 5, "ERROR when BGP parse errors exceed this percent of parsed BMP messages in a health interval")
+	healthRequirePeer := flag.Bool("health-require-active-peer", false, "ERROR when no BMP sessions are open")
 	logLevel := flag.String("log-level", "info", "log level: debug | info | warn | error")
 	logFormat := flag.String("log-format", "text", "log format: text | json")
 	updateSampleN := flag.Uint64("log-update-samples", 10, "how many BGP UPDATEs per session to log at Info level for visibility")
 	flag.Parse()
+	if *healthInterval <= 0 {
+		*healthInterval = time.Minute
+	}
 
 	log := newLogger(*logLevel, *logFormat)
 
@@ -91,11 +99,14 @@ func main() {
 
 	tick := time.NewTicker(*metricsInterval)
 	defer tick.Stop()
+	healthTick := time.NewTicker(*healthInterval)
+	defer healthTick.Stop()
 
 	var metricsWG sync.WaitGroup
 	metricsWG.Add(1)
 	go func() {
 		defer metricsWG.Done()
+		var prevInsertErrs, prevQueueDrops, prevQueueBlocks, prevMessagesParsed, prevBGPParseErrs uint64
 		for {
 			select {
 			case <-ctx.Done():
@@ -110,6 +121,52 @@ func main() {
 					"messages_rejected", messagesRejected.Load(),
 					"bgp_parse_errs", bgpParseErrs.Load(),
 				)
+			case <-healthTick.C:
+				ch := sink.HealthSnapshot()
+				curMessagesParsed := messagesParsed.Load()
+				curBGPParseErrs := bgpParseErrs.Load()
+				insertErrsDelta := ch.InsertErrs - prevInsertErrs
+				queueDropsDelta := ch.QueueDrops - prevQueueDrops
+				queueBlocksDelta := ch.QueueBlocks - prevQueueBlocks
+				messagesDelta := curMessagesParsed - prevMessagesParsed
+				bgpParseErrsDelta := curBGPParseErrs - prevBGPParseErrs
+				parseErrPct := float64(0)
+				if messagesDelta > 0 {
+					parseErrPct = (float64(bgpParseErrsDelta) / float64(messagesDelta)) * 100
+				}
+				if insertErrsDelta > 0 ||
+					queueDropsDelta > 0 ||
+					queueBlocksDelta > *healthQueueBlocks ||
+					ch.EventsLagRows > *healthWriterLag ||
+					ch.PeersLagRows > *healthWriterLag ||
+					(messagesDelta > 0 && parseErrPct > *healthBGPParseErrPct) ||
+					(*healthRequirePeer && sessionsOpen.Load() == 0) {
+					log.Error("bmpgrapes health degraded",
+						"insert_errs_delta", insertErrsDelta,
+						"insert_errs_total", ch.InsertErrs,
+						"queue_drops_delta", queueDropsDelta,
+						"queue_drops_total", ch.QueueDrops,
+						"queue_blocks_delta", queueBlocksDelta,
+						"queue_blocks_total", ch.QueueBlocks,
+						"queue_blocks_threshold", *healthQueueBlocks,
+						"events_lag_rows", ch.EventsLagRows,
+						"peers_lag_rows", ch.PeersLagRows,
+						"writer_lag_threshold", *healthWriterLag,
+						"events_queue_batches", ch.EventsQueue,
+						"peers_queue_batches", ch.PeersQueue,
+						"messages_delta", messagesDelta,
+						"bgp_parse_errs_delta", bgpParseErrsDelta,
+						"bgp_parse_error_pct", parseErrPct,
+						"bgp_parse_error_pct_threshold", *healthBGPParseErrPct,
+						"sessions_open", sessionsOpen.Load(),
+						"health_require_active_peer", *healthRequirePeer,
+					)
+				}
+				prevInsertErrs = ch.InsertErrs
+				prevQueueDrops = ch.QueueDrops
+				prevQueueBlocks = ch.QueueBlocks
+				prevMessagesParsed = curMessagesParsed
+				prevBGPParseErrs = curBGPParseErrs
 			}
 		}
 	}()

@@ -43,6 +43,11 @@ exec "${STDBUF[@]}" "$BIN" \
   -allow-routers "${BMP_ALLOW_ROUTERS:-}" \
   -max-message-bytes "${BMP_MAX_MESSAGE_BYTES:-65535}" \
   -interval "${BMP_INTERVAL:-10s}" \
+  -health-interval "${BMP_HEALTH_INTERVAL:-1m}" \
+  -health-writer-lag-rows "${BMP_HEALTH_WRITER_LAG_ROWS:-100000}" \
+  -health-queue-blocks "${BMP_HEALTH_QUEUE_BLOCKS:-100000}" \
+  -health-bgp-parse-error-pct "${BMP_HEALTH_BGP_PARSE_ERROR_PCT:-5}" \
+  -health-require-active-peer="${BMP_HEALTH_REQUIRE_ACTIVE_PEER:-false}" \
   -log-level "${BMP_LOG_LEVEL:-info}" \
   -log-format "${BMP_LOG_FORMAT:-text}" \
   -log-update-samples "${BMP_LOG_UPDATE_SAMPLES:-10}"

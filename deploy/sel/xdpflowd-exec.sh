@@ -148,5 +148,9 @@ exec "${STDBUF[@]}" "$BIN" \
   -top "$XDP_TOP" \
   -top-interval "$XDP_TOP_INTERVAL" \
   -interval "$XDP_INTERVAL" \
+  -health-interval "${XDP_HEALTH_INTERVAL:-1m}" \
+  -health-spool-lag-segments "${XDP_HEALTH_SPOOL_LAG_SEGMENTS:-10}" \
+  -health-writer-lag-rows "${XDP_HEALTH_WRITER_LAG_ROWS:-100000}" \
+  -health-drainer-age "${XDP_HEALTH_DRAINER_AGE:-2m}" \
   "${JSON_ARGS[@]}" \
   "${CH_ARGS[@]}"

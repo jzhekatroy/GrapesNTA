@@ -16,6 +16,18 @@ type clickhouseDelivery struct {
 	direct *clickhouseSink
 }
 
+type clickhouseHealthSnapshot struct {
+	RecordsQueued      uint64
+	RecordsWritten     uint64
+	RecordsSpooled     uint64
+	RecordsAcked       uint64
+	InsertErrs         uint64
+	QueueDrops         uint64
+	LagSegments        int64
+	DrainerProgressAge time.Duration
+	Mode               string
+}
+
 func (d *clickhouseDelivery) enqueue(flows []flowKV, receivedAt time.Time) {
 	if d == nil || len(flows) == 0 {
 		return
@@ -61,4 +73,21 @@ func (d *clickhouseDelivery) LogMetrics() {
 	if d.direct != nil {
 		d.direct.LogMetrics()
 	}
+}
+
+func (d *clickhouseDelivery) HealthSnapshot() clickhouseHealthSnapshot {
+	if d == nil {
+		return clickhouseHealthSnapshot{}
+	}
+	if d.spool != nil {
+		s := d.spool.HealthSnapshot()
+		s.Mode = "spool"
+		return s
+	}
+	if d.direct != nil {
+		s := d.direct.HealthSnapshot()
+		s.Mode = "direct"
+		return s
+	}
+	return clickhouseHealthSnapshot{}
 }
