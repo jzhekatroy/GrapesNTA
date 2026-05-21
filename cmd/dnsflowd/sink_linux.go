@@ -29,6 +29,12 @@ type clickhouseSinkConfig struct {
 	AnswersQueueSize int
 	AnswersWriters   int
 	FlushInterval    time.Duration
+
+	RawAutoShedOnAnswersLag bool
+	AnswersLagShedThreshold uint64
+	AnswersLagRecoverThreshold uint64
+	RawShedRecoverCooldown   time.Duration
+	AnswersDedupTTL          time.Duration
 }
 
 type dnsClickhouseSink struct {
@@ -74,6 +80,9 @@ type dnsClickhouseSink struct {
 	answersDropLogMu     sync.Mutex
 	lastAnswersDropLog   time.Time
 	answersDropsSinceLog atomic.Uint64
+
+	rawShed   *rawShedController
+	answersDedup *answersDeduper
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -233,8 +242,17 @@ func newDNSClickhouseSink(log *slog.Logger, dsn string, cfg clickhouseSinkConfig
 		answersBatchSize: cfg.AnswersBatchSize,
 		answersWriters:   cfg.AnswersWriters,
 		flushInterval:    cfg.FlushInterval,
-		ctx:              ctx,
-		cancel:           cancel,
+		rawShed: newRawShedController(
+			log,
+			cfg.RawAutoShedOnAnswersLag,
+			cfg.RawEnabled,
+			cfg.AnswersLagShedThreshold,
+			cfg.AnswersLagRecoverThreshold,
+			cfg.RawShedRecoverCooldown,
+		),
+		answersDedup: newAnswersDeduper(cfg.AnswersDedupTTL),
+		ctx:          ctx,
+		cancel:       cancel,
 	}
 	if cfg.RawEnabled {
 		s.rawCh = make(chan []DNSRow, cfg.RawQueueSize)
@@ -272,6 +290,12 @@ func newDNSClickhouseSink(log *slog.Logger, dsn string, cfg clickhouseSinkConfig
 		"raw_batch_size", cfg.RawBatchSize,
 		"raw_queue_size", cfg.RawQueueSize,
 		"raw_writers", cfg.RawWriters,
+		"raw_policy", s.rawShed.RawPolicyLabel(),
+		"raw_auto_shed_on_answers_lag", cfg.RawAutoShedOnAnswersLag,
+		"answers_lag_shed_threshold", cfg.AnswersLagShedThreshold,
+		"answers_lag_recover_threshold", cfg.AnswersLagRecoverThreshold,
+		"raw_shed_recover_cooldown", cfg.RawShedRecoverCooldown,
+		"answers_dedup_ttl", cfg.AnswersDedupTTL,
 		"answers_enabled", cfg.AnswersEnabled,
 		"answers_table", cfg.AnswersTable,
 		"answers_batch_size", cfg.AnswersBatchSize,
@@ -280,6 +304,15 @@ func newDNSClickhouseSink(log *slog.Logger, dsn string, cfg clickhouseSinkConfig
 		"flush_interval", cfg.FlushInterval,
 	)
 	return s, nil
+}
+
+func (s *dnsClickhouseSink) UpdateLagPolicy() {
+	if s == nil {
+		return
+	}
+	if s.rawShed != nil {
+		s.rawShed.Update(s.AnswersWriterLag(), s.AnswersQueueDepth())
+	}
 }
 
 func insertDNSBatch(ctx context.Context, log *slog.Logger, conn chdriver.Conn, table string, rows []DNSRow, rawInsertErrs, legacyInsertErrs *atomic.Uint64) bool {
@@ -592,8 +625,14 @@ func (s *dnsClickhouseSink) EnqueueRows(rows []DNSRow) {
 	if s == nil || len(rows) == 0 {
 		return
 	}
+	s.UpdateLagPolicy()
+
 	if s.rawEnabled {
-		s.enqueueRaw(rows)
+		if s.rawShed == nil || s.rawShed.ShouldEnqueueRaw() {
+			s.enqueueRaw(rows)
+		} else {
+			s.rawShed.RecordShed(uint64(len(rows)))
+		}
 	}
 	if s.answersEnabled {
 		answers := make([]DNSAnswerRow, 0)
@@ -601,7 +640,12 @@ func (s *dnsClickhouseSink) EnqueueRows(rows []DNSRow) {
 			answers = append(answers, dnsAnswersFromRow(row)...)
 		}
 		if len(answers) > 0 {
-			s.enqueueAnswers(answers)
+			if s.answersDedup != nil {
+				answers = s.answersDedup.Filter(answers)
+			}
+			if len(answers) > 0 {
+				s.enqueueAnswers(answers)
+			}
 		}
 	}
 }
@@ -707,8 +751,20 @@ func (s *dnsClickhouseSink) Close() {
 }
 
 func (s *dnsClickhouseSink) LogMetrics() {
-	s.log.Info("dnsflowd clickhouse",
+	s.UpdateLagPolicy()
+	rawPolicy := "best_effort"
+	var rawShedActive bool
+	var rawShedTotal uint64
+	if s.rawShed != nil {
+		rawPolicy = s.rawShed.RawPolicyLabel()
+		rawShedActive = s.rawShed.ShedActive()
+		rawShedTotal = s.rawShed.ShedTotal()
+	}
+	args := []any{
 		"raw_enabled", s.rawEnabled,
+		"raw_policy", rawPolicy,
+		"raw_shed_active", rawShedActive,
+		"raw_shed_due_answers_lag_total", rawShedTotal,
 		"raw_queued", s.rawQueued.Load(),
 		"raw_written", s.rawWritten.Load(),
 		"raw_queue_drops", s.rawQueueDrops.Load(),
@@ -717,6 +773,7 @@ func (s *dnsClickhouseSink) LogMetrics() {
 		"answers_enabled", s.answersEnabled,
 		"answers_queued", s.answersQueued.Load(),
 		"answers_written", s.answersWritten.Load(),
+		"answers_writer_lag_rows", s.AnswersWriterLag(),
 		"answers_queue_drops", s.answersQueueDrops.Load(),
 		"answers_queue_depth_batches", s.AnswersQueueDepth(),
 		"answers_insert_errs", s.answersInsertErrs.Load(),
@@ -725,5 +782,12 @@ func (s *dnsClickhouseSink) LogMetrics() {
 		"batches_ok", s.batchesOK.Load(),
 		"insert_errs", s.insertErrs.Load(),
 		"queue_drops", s.queueDrops.Load(),
-	)
+	}
+	if s.answersDedup != nil {
+		args = append(args,
+			"answers_dedup_suppressed", s.answersDedup.Suppressed(),
+			"answers_dedup_emitted", s.answersDedup.Emitted(),
+		)
+	}
+	s.log.Info("dnsflowd clickhouse", args...)
 }

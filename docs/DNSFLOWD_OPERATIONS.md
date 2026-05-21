@@ -3,6 +3,12 @@
 Документ описывает эксплуатацию `dnsflowd`: настройку, проверку полноты записи
 DNS и алерты по деградации.
 
+For the current split-sink architecture and metric interpretation, see
+[`DNSFLOWD_CURRENT_ARCHITECTURE.md`](DNSFLOWD_CURRENT_ARCHITECTURE.md).
+
+ClickHouse capacity and freshness queries:
+[`DNSFLOWD_CH_RUNBOOK.md`](DNSFLOWD_CH_RUNBOOK.md).
+
 ## Tables
 
 `dnsflowd` пишет в две таблицы ClickHouse:
@@ -43,7 +49,16 @@ DNS_CAPTURE_FLUSH_INTERVAL=100ms
 DNS_CH_FLUSH_INTERVAL=1s
 DNS_HEALTH_INTERVAL=1m
 DNS_HEALTH_LAG_THRESHOLD=100000
+DNS_CH_RAW_AUTO_SHED_ON_ANSWERS_LAG=1
+DNS_CH_ANSWERS_LAG_SHED_THRESHOLD=100000
+DNS_CH_ANSWERS_LAG_RECOVER_THRESHOLD=50000
+DNS_CH_RAW_SHED_RECOVER_COOLDOWN=2m
+DNS_CH_ANSWERS_DEDUP_TTL=60s
 ```
+
+Автоматический raw shed включён по умолчанию: при высоком `answers_writer_lag_rows`
+`dnsflowd` сам перестаёт писать `dns_log`, чтобы не убить свежесть `dns_answers`.
+Смотреть `raw_shed_active` и `raw_policy` в логах.
 
 UI-first режим при сильной перегрузке (отключить raw, усилить answers writers):
 

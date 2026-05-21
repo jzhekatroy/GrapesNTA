@@ -73,6 +73,9 @@ Alert fields (split sinks):
 - `raw_insert_errs_delta` / `insert_errs_delta`: `dns_log` INSERT failures.
 - `answers_writer_lag_rows`: answers queue backlog (primary lag signal).
 - `raw_writer_lag_rows`: raw queue backlog.
+- `raw_shed_active`, `raw_shed_due_answers_lag_total`, `raw_policy`: automatic raw
+  pause to protect `dns_answers` (best-effort raw).
+- `answers_dedup_suppressed`, `answers_dedup_emitted`: in-process dedup volume.
 - `answers_queue_depth_batches`, `raw_queue_depth_batches`: per-queue depth.
 - Legacy: `queue_drops_delta`, `writer_lag_rows` (answers-focused aggregate).
 

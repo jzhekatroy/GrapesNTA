@@ -39,6 +39,11 @@ func main() {
 	interval := flag.Duration("interval", 5*time.Second, "metrics log interval")
 	healthInterval := flag.Duration("health-interval", time.Minute, "emit ERROR health log at most this often when DNS rows are dropped or writes lag")
 	healthLagThreshold := flag.Uint64("health-lag-threshold", 100000, "ERROR when answers_queued - answers_written exceeds this many DNS answer rows")
+	chRawAutoShed := flag.Bool("ch-raw-auto-shed-on-answers-lag", true, "pause raw dns_log enqueue when answers writer lag is high")
+	chAnswersLagShed := flag.Uint64("ch-answers-lag-shed-threshold", 100000, "start raw shed when answers_writer_lag_rows exceeds this")
+	chAnswersLagRecover := flag.Uint64("ch-answers-lag-recover-threshold", 50000, "resume raw after answers lag stays below this")
+	chRawShedRecoverCooldown := flag.Duration("ch-raw-shed-recover-cooldown", 2*time.Minute, "how long answers lag must stay low before raw resumes")
+	chAnswersDedupTTL := flag.Duration("ch-answers-dedup-ttl", 60*time.Second, "suppress duplicate dns_answers within this window (0 disables)")
 	flag.Parse()
 
 	log := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
@@ -85,17 +90,22 @@ func main() {
 	}
 
 	sink, err := newDNSClickhouseSink(log, *chDSN, clickhouseSinkConfig{
-		RawEnabled:       *chRawEnabled,
-		RawTable:         *chTable,
-		RawBatchSize:     rawBatch,
-		RawQueueSize:     rawQueue,
-		RawWriters:       *chRawWriters,
-		AnswersEnabled:   *chAnswersEnabled,
-		AnswersTable:     *chAnswersTable,
-		AnswersBatchSize: answersBatch,
-		AnswersQueueSize: answersQueue,
-		AnswersWriters:   *chAnswersWriters,
-		FlushInterval:    *chFlush,
+		RawEnabled:                 *chRawEnabled,
+		RawTable:                   *chTable,
+		RawBatchSize:               rawBatch,
+		RawQueueSize:               rawQueue,
+		RawWriters:                 *chRawWriters,
+		AnswersEnabled:             *chAnswersEnabled,
+		AnswersTable:               *chAnswersTable,
+		AnswersBatchSize:           answersBatch,
+		AnswersQueueSize:           answersQueue,
+		AnswersWriters:             *chAnswersWriters,
+		FlushInterval:              *chFlush,
+		RawAutoShedOnAnswersLag:    *chRawAutoShed,
+		AnswersLagShedThreshold:    *chAnswersLagShed,
+		AnswersLagRecoverThreshold: *chAnswersLagRecover,
+		RawShedRecoverCooldown:     *chRawShedRecoverCooldown,
+		AnswersDedupTTL:            *chAnswersDedupTTL,
 	})
 	if err != nil {
 		log.Error("clickhouse", "err", err)
@@ -184,6 +194,9 @@ func main() {
 					answersWriterLag > *healthLagThreshold
 				if degraded {
 					log.Error("dnsflowd health degraded",
+						"raw_policy", sink.rawShed.RawPolicyLabel(),
+						"raw_shed_active", sink.rawShed.ShedActive(),
+						"raw_shed_due_answers_lag_total", sink.rawShed.ShedTotal(),
 						"raw_queue_drops_delta", rawQueueDropsDelta,
 						"raw_queue_drops_total", curRawQueueDrops,
 						"answers_queue_drops_delta", answersQueueDropsDelta,
@@ -345,6 +358,11 @@ func main() {
 		"capture", "libpcap",
 		"health_interval", *healthInterval,
 		"health_lag_threshold", *healthLagThreshold,
+		"ch_raw_auto_shed_on_answers_lag", *chRawAutoShed,
+		"ch_answers_lag_shed_threshold", *chAnswersLagShed,
+		"ch_answers_lag_recover_threshold", *chAnswersLagRecover,
+		"ch_raw_shed_recover_cooldown", *chRawShedRecoverCooldown,
+		"ch_answers_dedup_ttl", *chAnswersDedupTTL,
 		"datalink", handle.LinkType().String(),
 		"datalink_name", handle.LinkTypeName(),
 	)

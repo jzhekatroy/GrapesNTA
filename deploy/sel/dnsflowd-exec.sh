@@ -72,4 +72,9 @@ exec "${STDBUF[@]}" "$BIN" \
   -ch-sampler-addr "${DNS_CH_SAMPLER_ADDR:-127.0.0.1}" \
   -interval "${DNS_INTERVAL:-5s}" \
   -health-interval "${DNS_HEALTH_INTERVAL:-1m}" \
-  -health-lag-threshold "${DNS_HEALTH_LAG_THRESHOLD:-100000}"
+  -health-lag-threshold "${DNS_HEALTH_LAG_THRESHOLD:-100000}" \
+  -ch-raw-auto-shed-on-answers-lag "$(bool_flag "${DNS_CH_RAW_AUTO_SHED_ON_ANSWERS_LAG:-1}")" \
+  -ch-answers-lag-shed-threshold "${DNS_CH_ANSWERS_LAG_SHED_THRESHOLD:-100000}" \
+  -ch-answers-lag-recover-threshold "${DNS_CH_ANSWERS_LAG_RECOVER_THRESHOLD:-50000}" \
+  -ch-raw-shed-recover-cooldown "${DNS_CH_RAW_SHED_RECOVER_COOLDOWN:-2m}" \
+  -ch-answers-dedup-ttl "${DNS_CH_ANSWERS_DEDUP_TTL:-60s}"
