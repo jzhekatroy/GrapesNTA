@@ -19,15 +19,38 @@ CH_HOST=95.215.1.30 CH_PORT=6124 CH_USER=develop CH_PASSWORD='...' \
 
 ## Recommended Runtime Settings
 
-На высоком DNS-потоке маленькая in-memory queue приводит к `queue full` и потере
-строк. Для production на `netflow` используем:
+`dnsflowd` пишет в ClickHouse через **два независимых sink**:
+
+- `dns_log` (raw audit);
+- `dns_answers` (плоские A/AAAA для Flow Explorer).
+
+При перегрузке одна общая очередь забивается старым backlog, и UI перестаёт
+видеть свежий DNS. Split sink держит `dns_answers` отдельно от `dns_log`.
+
+Production defaults на `netflow`:
 
 ```bash
-DNS_CH_BATCH_SIZE=5000
-DNS_CH_QUEUE_SIZE=262144
+DNS_CH_RAW_ENABLED=1
+DNS_CH_ANSWERS_ENABLED=1
+DNS_CH_RAW_BATCH_SIZE=20000
+DNS_CH_ANSWERS_BATCH_SIZE=20000
+DNS_CH_RAW_QUEUE_SIZE=65536
+DNS_CH_ANSWERS_QUEUE_SIZE=262144
+DNS_CH_RAW_WRITERS=1
+DNS_CH_ANSWERS_WRITERS=2
+DNS_CAPTURE_BATCH_SIZE=1000
+DNS_CAPTURE_FLUSH_INTERVAL=100ms
 DNS_CH_FLUSH_INTERVAL=1s
 DNS_HEALTH_INTERVAL=1m
 DNS_HEALTH_LAG_THRESHOLD=100000
+```
+
+UI-first режим при сильной перегрузке (отключить raw, усилить answers writers):
+
+```bash
+DNS_CH_RAW_ENABLED=0
+DNS_CH_ANSWERS_ENABLED=1
+DNS_CH_ANSWERS_WRITERS=4
 ```
 
 После изменения `/etc/dnsflowd/dnsflowd.env`:
@@ -40,7 +63,8 @@ sudo journalctl -u dnsflowd -n 30 --no-pager | grep 'sink enabled'
 Ожидаемо:
 
 ```text
-batch_size=5000 flush_interval=1s queue_size=262144
+raw_enabled=true raw_batch_size=20000 raw_queue_size=65536 raw_writers=1
+answers_enabled=true answers_batch_size=20000 answers_queue_size=262144 answers_writers=2
 ```
 
 ## Health Log
@@ -53,10 +77,16 @@ level=ERROR msg="dnsflowd health degraded"
 
 Условия:
 
-- `queue_drops_delta > 0` - строки DNS были потеряны из-за переполнения очереди;
-- `insert_errs_delta > 0` - ошибки записи `dns_log`;
-- `answers_insert_errs_delta > 0` - ошибки записи `dns_answers`;
-- `writer_lag_rows > DNS_HEALTH_LAG_THRESHOLD` - writer отстаёт от очереди.
+- `answers_queue_drops_delta > 0` — критично: Flow Explorer теряет свежий DNS;
+- `raw_queue_drops_delta > 0` — деградация raw audit (`dns_log`);
+- `answers_insert_errs_delta > 0` — ошибки записи `dns_answers`;
+- `raw_insert_errs_delta > 0` / `insert_errs_delta > 0` — ошибки `dns_log`;
+- `answers_writer_lag_rows > DNS_HEALTH_LAG_THRESHOLD` — answers writer отстаёт.
+
+Legacy поля в том же логе:
+
+- `queue_drops_delta` = `raw_queue_drops_delta + answers_queue_drops_delta`;
+- `writer_lag_rows` = `answers_writer_lag_rows`.
 
 Проверка:
 
@@ -67,11 +97,30 @@ sudo journalctl -u dnsflowd --since "10 minutes ago" --no-pager \
 
 Интерпретация:
 
-- `queue_drops_delta > 0` = loss, DNS rows уже потеряны;
-- `writer_lag_rows > 0` без drops = есть задержка, но очередь пока буферизует;
-- `insert_errs_delta > 0` = проблема ClickHouse/сети/схемы.
+- `answers_queue_drops_delta > 0` = UI DNS enrichment incomplete;
+- `raw_queue_drops_delta > 0` = raw audit loss, answers may still be OK;
+- `answers_writer_lag_rows > 0` без drops = задержка, очередь ещё буферизует;
+- `answers_insert_errs_delta > 0` = проблема ClickHouse/сети/схемы для `dns_answers`.
 
 ## Manual Freshness Check
+
+Для UI важнее `dns_answers`:
+
+```bash
+clickhouse-client --host 95.215.1.30 --port 6124 --user develop --password '...' --query "
+SELECT
+    toString(now('UTC')) AS now_utc,
+    toString(max(ts)) AS max_ts,
+    dateDiff('second', max(ts), now('UTC')) AS lag_sec,
+    count() AS rows
+FROM default.dns_answers
+FORMAT PrettyCompact
+"
+```
+
+Success: `lag_sec < 60-120` under normal load.
+
+Raw audit (`dns_log`):
 
 ```bash
 clickhouse-client --host 95.215.1.30 --port 6124 --user develop --password '...' --query "
@@ -85,8 +134,8 @@ FORMAT PrettyCompact
 "
 ```
 
-If `rows_1m = 0` while DNS traffic exists, `dnsflowd` is stale or writing to the
-wrong ClickHouse target.
+If `dns_answers.lag_sec` is large while DNS traffic exists, `dnsflowd` is behind or
+dropping answers (`answers queue full` in journal).
 
 ## Packet Capture Comparison
 

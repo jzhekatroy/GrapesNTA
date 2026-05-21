@@ -65,13 +65,16 @@ du -sh /var/lib/xdpflowd/ch-spool 2>/dev/null || true
 level=ERROR msg="dnsflowd health degraded"
 ```
 
-Alert fields:
+Alert fields (split sinks):
 
-- `queue_drops_delta`: rows were dropped before ClickHouse. This means DNS visibility is incomplete.
-- `insert_errs_delta`: writes to `dns_log` failed.
-- `answers_insert_errs_delta`: writes to `dns_answers` failed; raw DNS may exist, but flow DNS enrichment will be incomplete.
-- `writer_lag_rows`: queued DNS rows not yet written.
-- `queue_depth_batches`: current queue depth in batches.
+- `answers_queue_drops_delta`: **critical** — `dns_answers` rows dropped; Flow Explorer DNS names will be missing/stale.
+- `raw_queue_drops_delta`: raw `dns_log` loss (audit/debug); answers may still be OK.
+- `answers_insert_errs_delta`: `dns_answers` INSERT failures.
+- `raw_insert_errs_delta` / `insert_errs_delta`: `dns_log` INSERT failures.
+- `answers_writer_lag_rows`: answers queue backlog (primary lag signal).
+- `raw_writer_lag_rows`: raw queue backlog.
+- `answers_queue_depth_batches`, `raw_queue_depth_batches`: per-queue depth.
+- Legacy: `queue_drops_delta`, `writer_lag_rows` (answers-focused aggregate).
 
 Default env thresholds:
 
@@ -83,14 +86,30 @@ DNS_HEALTH_LAG_THRESHOLD=100000
 Recommended production capacity:
 
 ```env
-DNS_CH_BATCH_SIZE=5000
-DNS_CH_QUEUE_SIZE=262144
+DNS_CH_RAW_ENABLED=1
+DNS_CH_ANSWERS_ENABLED=1
+DNS_CH_RAW_BATCH_SIZE=20000
+DNS_CH_ANSWERS_BATCH_SIZE=20000
+DNS_CH_RAW_QUEUE_SIZE=65536
+DNS_CH_ANSWERS_QUEUE_SIZE=262144
+DNS_CH_RAW_WRITERS=1
+DNS_CH_ANSWERS_WRITERS=2
+DNS_CAPTURE_BATCH_SIZE=1000
+DNS_CAPTURE_FLUSH_INTERVAL=100ms
+```
+
+UI-first overload:
+
+```env
+DNS_CH_RAW_ENABLED=0
+DNS_CH_ANSWERS_ENABLED=1
+DNS_CH_ANSWERS_WRITERS=4
 ```
 
 First checks:
 
 ```bash
-sudo journalctl -u dnsflowd --since "10 minutes ago" --no-pager | grep -E 'health degraded|dnsflowd clickhouse|queue full|insert_errs'
+sudo journalctl -u dnsflowd --since "10 minutes ago" --no-pager | grep -E 'health degraded|dnsflowd clickhouse|answers queue full|raw queue full|insert_errs'
 sudo systemctl status dnsflowd --no-pager
 ```
 
@@ -140,7 +159,8 @@ sudo systemctl status bmpgrapes --no-pager
 Initial policy for log-based alerting:
 
 - Page immediately on any `level=ERROR msg="xdpflowd health degraded"` where `map_full_delta`, `queue_drops_delta`, or `insert_errs_delta` is non-zero.
-- Page immediately on any `level=ERROR msg="dnsflowd health degraded"` where `queue_drops_delta`, `insert_errs_delta`, or `answers_insert_errs_delta` is non-zero.
+- Page immediately on any `level=ERROR msg="dnsflowd health degraded"` where `answers_queue_drops_delta`, `answers_insert_errs_delta`, or `answers_writer_lag_rows` exceeds threshold.
+- Warn on `raw_queue_drops_delta` or `raw_insert_errs_delta` (audit loss, UI may still work).
 - Page on `bmpgrapes health degraded` if `insert_errs_delta` or `queue_drops_delta` is non-zero.
 - Create warning alerts for sustained lag/back-pressure over 5-10 minutes: `writer_lag_rows`, `lag_segments`, `drainer_progress_age`, `queue_blocks_delta`.
 

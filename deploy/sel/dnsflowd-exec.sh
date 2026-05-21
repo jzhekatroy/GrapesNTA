@@ -39,6 +39,13 @@ if [[ -z "${DNS_CH_DSN:-}" || -z "${DNS_CH_TABLE:-}" ]]; then
   exit 1
 fi
 
+bool_flag() {
+  case "${1:-1}" in
+    0|false|False|FALSE|no|NO) echo false ;;
+    *) echo true ;;
+  esac
+}
+
 STDBUF=()
 if command -v stdbuf >/dev/null 2>&1; then
   STDBUF=( stdbuf -oL -eL )
@@ -49,9 +56,19 @@ exec "${STDBUF[@]}" "$BIN" \
   -ch-dsn "$DNS_CH_DSN" \
   -ch-table "$DNS_CH_TABLE" \
   -ch-answers-table "${DNS_CH_ANSWERS_TABLE:-default.dns_answers}" \
+  -ch-raw-enabled "$(bool_flag "${DNS_CH_RAW_ENABLED:-1}")" \
+  -ch-answers-enabled "$(bool_flag "${DNS_CH_ANSWERS_ENABLED:-1}")" \
   -ch-batch-size "${DNS_CH_BATCH_SIZE:-500}" \
+  -ch-raw-batch-size "${DNS_CH_RAW_BATCH_SIZE:-0}" \
+  -ch-answers-batch-size "${DNS_CH_ANSWERS_BATCH_SIZE:-0}" \
   -ch-flush-interval "${DNS_CH_FLUSH_INTERVAL:-1s}" \
-  -ch-queue-size "${DNS_CH_QUEUE_SIZE:-64}" \
+  -ch-queue-size "${DNS_CH_QUEUE_SIZE:-65536}" \
+  -ch-raw-queue-size "${DNS_CH_RAW_QUEUE_SIZE:-${DNS_CH_QUEUE_SIZE:-65536}}" \
+  -ch-answers-queue-size "${DNS_CH_ANSWERS_QUEUE_SIZE:-262144}" \
+  -ch-raw-writers "${DNS_CH_RAW_WRITERS:-1}" \
+  -ch-answers-writers "${DNS_CH_ANSWERS_WRITERS:-2}" \
+  -capture-batch-size "${DNS_CAPTURE_BATCH_SIZE:-1000}" \
+  -capture-flush-interval "${DNS_CAPTURE_FLUSH_INTERVAL:-100ms}" \
   -ch-sampler-addr "${DNS_CH_SAMPLER_ADDR:-127.0.0.1}" \
   -interval "${DNS_INTERVAL:-5s}" \
   -health-interval "${DNS_HEALTH_INTERVAL:-1m}" \

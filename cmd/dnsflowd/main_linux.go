@@ -21,16 +21,24 @@ func main() {
 	iface := flag.String("iface", "eth0", "mirror interface for packet capture (libpcap)")
 	chDSN := flag.String("ch-dsn", "", `ClickHouse DSN, e.g. clickhouse://user:pass@host:9000/default`)
 	chTable := flag.String("ch-table", "default.dns_log", "MergeTree table for raw DNS log INSERT")
-	chAnswersTable := flag.String("ch-answers-table", "default.dns_answers", "MergeTree table for flattened DNS answers (empty disables)")
-	chBatchSize := flag.Int("ch-batch-size", 500, "ClickHouse INSERT batch size")
+	chAnswersTable := flag.String("ch-answers-table", "default.dns_answers", "MergeTree table for flattened DNS answers")
+	chRawEnabled := flag.Bool("ch-raw-enabled", true, "write raw DNS rows to dns_log")
+	chAnswersEnabled := flag.Bool("ch-answers-enabled", true, "write flattened DNS answers for flow enrichment")
+	chBatchSize := flag.Int("ch-batch-size", 500, "legacy ClickHouse INSERT batch size (fallback for raw/answers batch)")
+	chRawBatchSize := flag.Int("ch-raw-batch-size", 0, "raw dns_log batch size (0 uses -ch-batch-size)")
+	chAnswersBatchSize := flag.Int("ch-answers-batch-size", 0, "dns_answers batch size (0 uses -ch-batch-size)")
 	chFlush := flag.Duration("ch-flush-interval", time.Second, "ClickHouse flush interval")
-	chQueue := flag.Int("ch-queue-size", 4096, "bounded queue depth (drops on overflow)")
+	chQueue := flag.Int("ch-queue-size", 65536, "legacy bounded queue depth (fallback for raw queue when -ch-raw-queue-size is 0)")
+	chRawQueueSize := flag.Int("ch-raw-queue-size", 0, "bounded raw dns_log queue depth in batches (0 uses -ch-queue-size)")
+	chAnswersQueueSize := flag.Int("ch-answers-queue-size", 262144, "bounded dns_answers queue depth in batches")
+	chRawWriters := flag.Int("ch-raw-writers", 1, "parallel ClickHouse writers for dns_log")
+	chAnswersWriters := flag.Int("ch-answers-writers", 2, "parallel ClickHouse writers for dns_answers")
 	captureBatch := flag.Int("capture-batch-size", 100, "capture-side row batch before send")
 	captureFlush := flag.Duration("capture-flush-interval", 50*time.Millisecond, "capture-side max delay before send")
 	chSampler := flag.String("ch-sampler-addr", "127.0.0.1", "sampler_address column (IPv4 / IPv6)")
 	interval := flag.Duration("interval", 5*time.Second, "metrics log interval")
 	healthInterval := flag.Duration("health-interval", time.Minute, "emit ERROR health log at most this often when DNS rows are dropped or writes lag")
-	healthLagThreshold := flag.Uint64("health-lag-threshold", 100000, "ERROR when records_queued - records_written exceeds this many DNS rows")
+	healthLagThreshold := flag.Uint64("health-lag-threshold", 100000, "ERROR when answers_queued - answers_written exceeds this many DNS answer rows")
 	flag.Parse()
 
 	log := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
@@ -55,7 +63,40 @@ func main() {
 		os.Exit(1)
 	}
 
-	sink, err := newDNSClickhouseSink(log, *chDSN, *chTable, *chAnswersTable, *chBatchSize, *chFlush, *chQueue)
+	rawBatch := *chRawBatchSize
+	if rawBatch < 1 {
+		rawBatch = *chBatchSize
+	}
+	answersBatch := *chAnswersBatchSize
+	if answersBatch < 1 {
+		answersBatch = *chBatchSize
+	}
+	rawQueue := *chRawQueueSize
+	if rawQueue < 1 {
+		if *chQueue > 0 {
+			rawQueue = *chQueue
+		} else {
+			rawQueue = 65536
+		}
+	}
+	answersQueue := *chAnswersQueueSize
+	if answersQueue < 1 {
+		answersQueue = 262144
+	}
+
+	sink, err := newDNSClickhouseSink(log, *chDSN, clickhouseSinkConfig{
+		RawEnabled:       *chRawEnabled,
+		RawTable:         *chTable,
+		RawBatchSize:     rawBatch,
+		RawQueueSize:     rawQueue,
+		RawWriters:       *chRawWriters,
+		AnswersEnabled:   *chAnswersEnabled,
+		AnswersTable:     *chAnswersTable,
+		AnswersBatchSize: answersBatch,
+		AnswersQueueSize: answersQueue,
+		AnswersWriters:   *chAnswersWriters,
+		FlushInterval:    *chFlush,
+	})
 	if err != nil {
 		log.Error("clickhouse", "err", err)
 		handle.Close()
@@ -80,7 +121,7 @@ func main() {
 	go func() {
 		defer metricsWG.Done()
 		var prevFramesRead, prevDNSRows uint64
-		var prevQueueDrops, prevInsertErrs, prevAnswersInsertErrs uint64
+		var prevRawQueueDrops, prevAnswersQueueDrops, prevRawInsertErrs, prevAnswersInsertErrs uint64
 		for {
 			select {
 			case <-ctx.Done():
@@ -124,36 +165,51 @@ func main() {
 				prevFramesRead = curFramesRead
 				prevDNSRows = curDNSRows
 			case <-healthTick.C:
-				curQueueDrops := sink.queueDrops.Load()
-				curInsertErrs := sink.insertErrs.Load()
+				curRawQueueDrops := sink.RawQueueDrops()
+				curAnswersQueueDrops := sink.AnswersQueueDrops()
+				curRawInsertErrs := sink.rawInsertErrs.Load()
 				curAnswersInsertErrs := sink.answersInsertErrs.Load()
-				recordsQueued := sink.recordsQueued.Load()
-				recordsWritten := sink.recordsWritten.Load()
-				writerLagRows := uint64(0)
-				if recordsQueued > recordsWritten {
-					writerLagRows = recordsQueued - recordsWritten
-				}
-				queueDropsDelta := curQueueDrops - prevQueueDrops
-				insertErrsDelta := curInsertErrs - prevInsertErrs
+				curQueueDrops := sink.queueDrops.Load()
+				rawWriterLag := sink.RawWriterLag()
+				answersWriterLag := sink.AnswersWriterLag()
+				rawQueueDropsDelta := curRawQueueDrops - prevRawQueueDrops
+				answersQueueDropsDelta := curAnswersQueueDrops - prevAnswersQueueDrops
+				rawInsertErrsDelta := curRawInsertErrs - prevRawInsertErrs
 				answersInsertErrsDelta := curAnswersInsertErrs - prevAnswersInsertErrs
-				if queueDropsDelta > 0 || insertErrsDelta > 0 || answersInsertErrsDelta > 0 || writerLagRows > *healthLagThreshold {
+				queueDropsDelta := rawQueueDropsDelta + answersQueueDropsDelta
+				degraded := answersQueueDropsDelta > 0 ||
+					rawQueueDropsDelta > 0 ||
+					rawInsertErrsDelta > 0 ||
+					answersInsertErrsDelta > 0 ||
+					answersWriterLag > *healthLagThreshold
+				if degraded {
 					log.Error("dnsflowd health degraded",
+						"raw_queue_drops_delta", rawQueueDropsDelta,
+						"raw_queue_drops_total", curRawQueueDrops,
+						"answers_queue_drops_delta", answersQueueDropsDelta,
+						"answers_queue_drops_total", curAnswersQueueDrops,
 						"queue_drops_delta", queueDropsDelta,
 						"queue_drops_total", curQueueDrops,
-						"insert_errs_delta", insertErrsDelta,
-						"insert_errs_total", curInsertErrs,
+						"raw_insert_errs_delta", rawInsertErrsDelta,
+						"raw_insert_errs_total", curRawInsertErrs,
 						"answers_insert_errs_delta", answersInsertErrsDelta,
 						"answers_insert_errs_total", curAnswersInsertErrs,
-						"writer_lag_rows", writerLagRows,
+						"insert_errs_delta", rawInsertErrsDelta,
+						"insert_errs_total", sink.insertErrs.Load(),
+						"raw_writer_lag_rows", rawWriterLag,
+						"answers_writer_lag_rows", answersWriterLag,
+						"writer_lag_rows", answersWriterLag,
 						"health_lag_threshold", *healthLagThreshold,
-						"records_queued", recordsQueued,
-						"records_written", recordsWritten,
+						"records_queued", sink.recordsQueued.Load(),
+						"records_written", sink.recordsWritten.Load(),
 						"answers_written", sink.answersWritten.Load(),
-						"queue_depth_batches", len(sink.ch),
+						"raw_queue_depth_batches", sink.RawQueueDepth(),
+						"answers_queue_depth_batches", sink.AnswersQueueDepth(),
 					)
 				}
-				prevQueueDrops = curQueueDrops
-				prevInsertErrs = curInsertErrs
+				prevRawQueueDrops = curRawQueueDrops
+				prevAnswersQueueDrops = curAnswersQueueDrops
+				prevRawInsertErrs = curRawInsertErrs
 				prevAnswersInsertErrs = curAnswersInsertErrs
 			}
 		}
@@ -274,8 +330,18 @@ func main() {
 
 	log.Info("dnsflowd started",
 		"iface", *iface,
+		"ch_raw_enabled", *chRawEnabled,
 		"ch_table", *chTable,
+		"ch_answers_enabled", *chAnswersEnabled,
 		"ch_answers_table", *chAnswersTable,
+		"ch_raw_batch_size", rawBatch,
+		"ch_answers_batch_size", answersBatch,
+		"ch_raw_queue_size", rawQueue,
+		"ch_answers_queue_size", answersQueue,
+		"ch_raw_writers", *chRawWriters,
+		"ch_answers_writers", *chAnswersWriters,
+		"capture_batch_size", *captureBatch,
+		"capture_flush_interval", *captureFlush,
 		"capture", "libpcap",
 		"health_interval", *healthInterval,
 		"health_lag_threshold", *healthLagThreshold,
