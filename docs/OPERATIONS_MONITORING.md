@@ -157,6 +157,56 @@ sudo journalctl -u bmpgrapes --since "10 minutes ago" --no-pager | grep -E 'heal
 sudo systemctl status bmpgrapes --no-pager
 ```
 
+## bgp-origin-refresh
+
+`bgp-origin-refresh.service` is a `oneshot` systemd job that rebuilds the
+current `prefix -> origin ASN` lookup from `default.bmp_route_events`.
+`bgp-origin-refresh.timer` should run it every 5 minutes.
+
+This service does not talk to routers and does not read from `bmpgrapes`
+directly. It reads ClickHouse event history and atomically swaps
+`default.bgp_prefix_origin_current` when the rebuilt snapshot passes validation.
+
+Expected success log:
+
+```text
+rebuild_bgp_origin_asn: starting ...
+rebuild_bgp_origin_asn: source_window events=... announces=... withdraws=...
+rebuild_bgp_origin_asn: current_table rows=...
+rebuild_bgp_origin_asn: staging rows=... origin_asns=...
+rebuild_bgp_origin_asn: swapped target_table=default.bgp_prefix_origin_current rows=...
+rebuild_bgp_origin_asn: done rows=...
+```
+
+Failure conditions:
+
+- authentication or ClickHouse connectivity errors;
+- memory/query failures during the rebuild;
+- empty staging table;
+- `BGPORIGIN_MIN_PREFIXES` guard failure;
+- `BGPORIGIN_MAX_PREFIX_DROP_PCT` guard failure.
+
+First checks:
+
+```bash
+sudo systemctl status bgp-origin-refresh.timer --no-pager
+sudo systemctl status bgp-origin-refresh.service --no-pager
+sudo systemctl list-timers | grep bgp
+sudo journalctl -u bgp-origin-refresh.service --since "1 hour ago" --no-pager
+```
+
+Freshness query:
+
+```sql
+SELECT
+    count() AS prefixes,
+    uniqExact(origin_asn) AS origin_asns,
+    toString(max(snapshot_ts)) AS snapshot_ts,
+    toString(min(last_ts)) AS oldest_event_used,
+    toString(max(last_ts)) AS newest_event_used
+FROM default.bgp_prefix_origin_current;
+```
+
 ## Alerting Policy
 
 Initial policy for log-based alerting:
@@ -165,6 +215,7 @@ Initial policy for log-based alerting:
 - Page immediately on any `level=ERROR msg="dnsflowd health degraded"` where `answers_queue_drops_delta`, `answers_insert_errs_delta`, or `answers_writer_lag_rows` exceeds threshold.
 - Warn on `raw_queue_drops_delta` or `raw_insert_errs_delta` (audit loss, UI may still work).
 - Page on `bmpgrapes health degraded` if `insert_errs_delta` or `queue_drops_delta` is non-zero.
+- Page if `bgp-origin-refresh.service` fails, the timer is missing/inactive, or `bgp_prefix_origin_current.snapshot_ts` is stale.
 - Create warning alerts for sustained lag/back-pressure over 5-10 minutes: `writer_lag_rows`, `lag_segments`, `drainer_progress_age`, `queue_blocks_delta`.
 
 ## Future UI Status

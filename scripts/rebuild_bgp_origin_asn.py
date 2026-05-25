@@ -17,7 +17,7 @@ import argparse
 import os
 import subprocess
 import sys
-from typing import BinaryIO, List, Optional, Sequence
+from typing import BinaryIO, List, Optional, Sequence, Tuple
 
 
 def env(s: str, default: Optional[str] = None) -> Optional[str]:
@@ -60,6 +60,28 @@ def ch_run_query(
         )
         raise RuntimeError(msg)
     return proc.stdout.decode("utf-8", errors="replace")
+
+
+def ch_run_scalar(base: Sequence[str], query: str) -> str:
+    return ch_run_query(base, query + " FORMAT TabSeparated").strip()
+
+
+def ch_run_int(base: Sequence[str], query: str) -> int:
+    out = ch_run_scalar(base, query)
+    if out == "":
+        return 0
+    return int(out.splitlines()[0].split("\t")[0])
+
+
+def ch_run_tsv_row(base: Sequence[str], query: str) -> Tuple[str, ...]:
+    out = ch_run_scalar(base, query)
+    if out == "":
+        return tuple()
+    return tuple(out.splitlines()[0].split("\t"))
+
+
+def log_info(message: str) -> None:
+    print(f"rebuild_bgp_origin_asn: {message}", file=sys.stderr)
 
 
 def ch_swap_tables(base: Sequence[str], table: str, staging: str) -> None:
@@ -211,6 +233,18 @@ def main() -> int:
         help="Route event lookback window used to infer current active prefixes",
     )
     p.add_argument(
+        "--min-prefixes",
+        type=int,
+        default=int(env("BGPORIGIN_MIN_PREFIXES", "0") or 0),
+        help="Fail before swap if staging has fewer rows than this count",
+    )
+    p.add_argument(
+        "--max-prefix-drop-pct",
+        type=float,
+        default=float(env("BGPORIGIN_MAX_PREFIX_DROP_PCT", "50") or 50),
+        help="Fail before swap if staging row count drops by more than this percent versus the current table",
+    )
+    p.add_argument(
         "--max-memory-usage",
         type=int,
         default=int(env("BGPORIGIN_MAX_MEMORY_USAGE", str(4 * 1024 * 1024 * 1024)) or 4 * 1024 * 1024 * 1024),
@@ -276,26 +310,97 @@ def main() -> int:
 
     if args.lookback_days < 1:
         raise RuntimeError("--lookback-days must be >= 1")
+    if args.min_prefixes < 0:
+        raise RuntimeError("--min-prefixes must be >= 0")
+    if args.max_prefix_drop_pct < 0 or args.max_prefix_drop_pct > 100:
+        raise RuntimeError("--max-prefix-drop-pct must be between 0 and 100")
     if not os.path.isfile(args.clickhouse_client):
         raise FileNotFoundError(f"clickhouse-client not found: {args.clickhouse_client}")
 
     base = clickhouse_base_args(args)
 
+    log_info(
+        "starting "
+        f"route_events_table={args.route_events_table} "
+        f"target_table={args.table} "
+        f"lookback_days={args.lookback_days} "
+        f"min_prefixes={args.min_prefixes} "
+        f"max_prefix_drop_pct={args.max_prefix_drop_pct:g}"
+    )
+
+    source = ch_run_tsv_row(
+        base,
+        f"""
+SELECT
+    count(),
+    countIf(event_type = 'announce'),
+    countIf(event_type = 'withdraw'),
+    toString(min(ts)),
+    toString(max(ts))
+FROM {args.route_events_table}
+WHERE ts >= now() - INTERVAL {args.lookback_days} DAY
+""",
+    )
+    if len(source) == 5:
+        log_info(
+            "source_window "
+            f"events={source[0]} announces={source[1]} withdraws={source[2]} "
+            f"first_ts={source[3]} last_ts={source[4]}"
+        )
+
+    existing_rows = ch_run_int(base, f"SELECT count() FROM {args.table}")
+    log_info(f"current_table rows={existing_rows}")
+
     ch_run_query(base, f"TRUNCATE TABLE IF EXISTS {args.staging_table}")
     for family in (4, 6):
+        log_info(f"rebuilding family={family}")
         ch_run_query(base, build_rebuild_query(args, family))
 
-    rows = ch_run_query(base, f"SELECT count() FROM {args.staging_table}").strip()
-    if rows == "" or rows == "0":
+    rows = ch_run_int(base, f"SELECT count() FROM {args.staging_table}")
+    staging = ch_run_tsv_row(
+        base,
+        f"""
+SELECT
+    count(),
+    uniqExact(origin_asn),
+    toString(min(last_ts)),
+    toString(max(last_ts)),
+    toString(max(snapshot_ts))
+FROM {args.staging_table}
+""",
+    )
+    if len(staging) == 5:
+        log_info(
+            "staging "
+            f"rows={staging[0]} origin_asns={staging[1]} "
+            f"oldest_event={staging[2]} newest_event={staging[3]} "
+            f"snapshot_ts={staging[4]}"
+        )
+
+    if rows == 0:
         raise RuntimeError("validation failed: bgp_prefix_origin_current staging is empty")
+    if args.min_prefixes > 0 and rows < args.min_prefixes:
+        raise RuntimeError(
+            "validation failed: staging row count below minimum "
+            f"rows={rows} min_prefixes={args.min_prefixes}"
+        )
+    if existing_rows > 0 and rows < existing_rows:
+        drop_pct = (existing_rows - rows) * 100.0 / existing_rows
+        if drop_pct > args.max_prefix_drop_pct:
+            raise RuntimeError(
+                "validation failed: staging row count dropped too much "
+                f"current_rows={existing_rows} staging_rows={rows} "
+                f"drop_pct={drop_pct:.2f} max_prefix_drop_pct={args.max_prefix_drop_pct:g}"
+            )
 
     ch_swap_tables(base, args.table, args.staging_table)
+    log_info(f"swapped target_table={args.table} rows={rows}")
 
     if not args.skip_dictionary_create:
         ch_create_or_replace_dictionary(base, args)
 
     ch_run_query(base, f"SYSTEM RELOAD DICTIONARY {args.dictionary}")
-    print(f"rebuild_bgp_origin_asn: done rows={rows}", file=sys.stderr)
+    log_info(f"done rows={rows}")
     return 0
 
 
