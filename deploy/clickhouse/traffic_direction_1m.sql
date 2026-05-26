@@ -16,7 +16,9 @@ PARTITION BY toYYYYMMDD(minute)
 ORDER BY (minute, direction)
 SETTINGS index_granularity = 8192;
 
-CREATE MATERIALIZED VIEW IF NOT EXISTS default.traffic_direction_1m_mv
+DROP TABLE IF EXISTS default.traffic_direction_1m_mv;
+
+CREATE MATERIALIZED VIEW default.traffic_direction_1m_mv
 TO default.traffic_direction_1m
 AS
 SELECT

@@ -1,0 +1,29 @@
+-- Apply new Network Analytics schema after cleanup_old_classification.sql.
+--
+-- Order:
+--   1. cleanup_old_classification.sql
+--   2. flows_raw_extensions.sql
+--   3. net_entities.sql
+--   4. net_l3_prefixes.sql
+--   5. net_l2_vlans.sql
+--   6. traffic_direction_1m.sql
+--   7. traffic_role_1m.sql
+--   8. traffic_entity_1m.sql
+--   9. traffic_vlan_1m.sql
+--  10. traffic_dashboard_1m.sql
+--  11. net_reports.sql
+--
+-- Example:
+--   for f in deploy/clickhouse/cleanup_old_classification.sql \
+--            deploy/clickhouse/flows_raw_extensions.sql \
+--            deploy/clickhouse/net_entities.sql \
+--            deploy/clickhouse/net_l3_prefixes.sql \
+--            deploy/clickhouse/net_l2_vlans.sql \
+--            deploy/clickhouse/traffic_direction_1m.sql \
+--            deploy/clickhouse/traffic_role_1m.sql \
+--            deploy/clickhouse/traffic_entity_1m.sql \
+--            deploy/clickhouse/traffic_vlan_1m.sql \
+--            deploy/clickhouse/traffic_dashboard_1m.sql \
+--            deploy/clickhouse/net_reports.sql; do
+--     clickhouse-client --host HOST --user USER --password PASS --multiquery < "$f"
+--   done

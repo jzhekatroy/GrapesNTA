@@ -30,4 +30,8 @@ ADD COLUMN IF NOT EXISTS dst_network_name String DEFAULT '',
 ADD COLUMN IF NOT EXISTS src_network_role LowCardinality(String) DEFAULT '',
 ADD COLUMN IF NOT EXISTS dst_network_role LowCardinality(String) DEFAULT '',
 ADD COLUMN IF NOT EXISTS src_vlan UInt16 DEFAULT 0,
-ADD COLUMN IF NOT EXISTS dst_vlan UInt16 DEFAULT 0;
+ADD COLUMN IF NOT EXISTS dst_vlan UInt16 DEFAULT 0,
+ADD COLUMN IF NOT EXISTS src_role LowCardinality(String) DEFAULT '',
+ADD COLUMN IF NOT EXISTS dst_role LowCardinality(String) DEFAULT '',
+ADD COLUMN IF NOT EXISTS src_entity LowCardinality(String) DEFAULT '',
+ADD COLUMN IF NOT EXISTS dst_entity LowCardinality(String) DEFAULT '';

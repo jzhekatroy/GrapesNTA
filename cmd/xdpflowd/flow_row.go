@@ -46,6 +46,10 @@ type FlowRow struct {
 	DstNetworkName        string
 	SrcNetworkRole        string
 	DstNetworkRole        string
+	SrcRole               string
+	DstRole               string
+	SrcEntity             string
+	DstEntity             string
 	SrcVLAN          uint16
 	DstVLAN          uint16
 	Etype            uint32
@@ -131,6 +135,10 @@ func flowRowFromKV(fv flowKV, m flowRowMapper, receivedAt time.Time) FlowRow {
 		DstNetworkName:        dstClass.NetworkName,
 		SrcNetworkRole:        srcClass.NetworkRole,
 		DstNetworkRole:        dstClass.NetworkRole,
+		SrcRole:               srcClass.Role,
+		DstRole:               dstClass.Role,
+		SrcEntity:             srcClass.Entity,
+		DstEntity:             dstClass.Entity,
 		SrcVLAN:         srcVLAN,
 		DstVLAN:         dstVLAN,
 		Etype:           etherType(fv.k.IPVersion),

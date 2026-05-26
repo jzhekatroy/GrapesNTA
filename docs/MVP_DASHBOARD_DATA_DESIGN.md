@@ -1,5 +1,11 @@
 # MVP dashboard data design
 
+> **Deprecated sections:** `local_networks`, `local_asns`, `local_operators`,
+> `vlan_map`, `traffic_chart_1m`, `traffic_customer_1m`, `traffic_uplink_1m`,
+> `traffic_1m`, `traffic_asn_pair_1m` were replaced by the Network Analytics
+> model. See [NET_ANALYTICS_MODEL.md](NET_ANALYTICS_MODEL.md) and
+> [NET_ANALYTICS_OPERATIONS.md](NET_ANALYTICS_OPERATIONS.md).
+
 Рабочая схема данных для Laravel + MoonShine поверх ClickHouse. Цель MVP -
 быстро рисовать графики/таблицы по traffic, countries, DNS и BMP/BGP без
 тяжелых запросов по raw-таблицам на каждый открытый экран.

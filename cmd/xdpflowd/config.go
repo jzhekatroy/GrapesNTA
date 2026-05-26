@@ -48,12 +48,11 @@ type xdpflowdConfig struct {
 	CHSpoolShutdownDrain *string `yaml:"ch_spool_shutdown_drain"`
 	CHWriters            *int    `yaml:"ch_writers"`
 
-	Classifier                  *bool   `yaml:"classifier"`
-	ClassifierRefresh           *string `yaml:"classifier_refresh"`
-	ClassifierBGPTable          *string `yaml:"classifier_bgp_table"`
-	ClassifierLocalNetworksView *string `yaml:"classifier_local_networks_view"`
-	ClassifierLocalASNsView     *string `yaml:"classifier_local_asns_view"`
-	ClassifierVLANView          *string `yaml:"classifier_vlan_view"`
+	Classifier             *bool   `yaml:"classifier"`
+	ClassifierRefresh      *string `yaml:"classifier_refresh"`
+	ClassifierBGPTable     *string `yaml:"classifier_bgp_table"`
+	ClassifierL3PrefixesView *string `yaml:"classifier_l3_prefixes_view"`
+	ClassifierL2VLANsView  *string `yaml:"classifier_l2_vlans_view"`
 }
 
 func loadXDPFlowdConfig(path string) (*xdpflowdConfig, error) {
@@ -147,9 +146,8 @@ func applyXDPFlowdConfig(fs *flag.FlagSet, cfg *xdpflowdConfig) error {
 		func() error { return setBool("classifier", cfg.Classifier) },
 		func() error { return setString("classifier-refresh", cfg.ClassifierRefresh) },
 		func() error { return setString("classifier-bgp-table", cfg.ClassifierBGPTable) },
-		func() error { return setString("classifier-local-networks-view", cfg.ClassifierLocalNetworksView) },
-		func() error { return setString("classifier-local-asns-view", cfg.ClassifierLocalASNsView) },
-		func() error { return setString("classifier-vlan-view", cfg.ClassifierVLANView) },
+		func() error { return setString("classifier-l3-prefixes-view", cfg.ClassifierL3PrefixesView) },
+		func() error { return setString("classifier-l2-vlans-view", cfg.ClassifierL2VLANsView) },
 	} {
 		if err := apply(); err != nil {
 			return err

@@ -440,12 +440,11 @@ func main() {
 	healthSpoolLagSegments := flag.Int64("health-spool-lag-segments", 10, "ERROR when ClickHouse spool lag exceeds this many segments")
 	healthWriterLagRows := flag.Uint64("health-writer-lag-rows", 100000, "ERROR when direct ClickHouse queued-written lag exceeds this many rows")
 	healthDrainerAge := flag.Duration("health-drainer-age", 2*time.Minute, "ERROR when spool drainer has made no progress for this long while lagging")
-	classifierEnabled := flag.Bool("classifier", false, "enable collector-side traffic classification (VLAN attachment + ASN/prefix endpoint ownership)")
+	classifierEnabled := flag.Bool("classifier", false, "enable collector-side traffic classification (L3 roles + L2 VLAN attachment)")
 	classifierRefresh := flag.Duration("classifier-refresh", time.Minute, "refresh interval for classifier dictionaries")
 	classifierBGPTable := flag.String("classifier-bgp-table", "default.bgp_prefix_origin_current", "ClickHouse source table/view for prefix -> origin ASN")
-	classifierLocalNetworksView := flag.String("classifier-local-networks-view", "default.local_networks_enabled", "ClickHouse view for enabled local prefixes")
-	classifierLocalASNsView := flag.String("classifier-local-asns-view", "default.local_asns_enabled", "ClickHouse view for enabled local ASNs")
-	classifierVLANView := flag.String("classifier-vlan-view", "default.vlan_map_enabled", "ClickHouse view for enabled VLAN classification")
+	classifierL3PrefixesView := flag.String("classifier-l3-prefixes-view", "default.net_l3_prefixes_enabled", "ClickHouse view for enabled L3 prefixes")
+	classifierL2VLANsView := flag.String("classifier-l2-vlans-view", "default.net_l2_vlans_enabled", "ClickHouse view for enabled L2 VLAN map")
 	flag.Parse()
 
 	if strings.TrimSpace(*configPath) != "" {
@@ -615,10 +614,9 @@ func main() {
 			DSN:     strings.TrimSpace(*chDSN),
 			Refresh: *classifierRefresh,
 			Tables: classifierTables{
-				BGPOrigins:    strings.TrimSpace(*classifierBGPTable),
-				LocalNetworks: strings.TrimSpace(*classifierLocalNetworksView),
-				LocalASNs:     strings.TrimSpace(*classifierLocalASNsView),
-				VLANMap:       strings.TrimSpace(*classifierVLANView),
+				BGPOrigins:   strings.TrimSpace(*classifierBGPTable),
+				L3Prefixes:   strings.TrimSpace(*classifierL3PrefixesView),
+				L2VLANs:      strings.TrimSpace(*classifierL2VLANsView),
 			},
 		})
 		if err != nil {

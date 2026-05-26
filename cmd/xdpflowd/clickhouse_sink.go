@@ -265,6 +265,10 @@ func insertEnrichedBatchRows(ctx context.Context, log *slog.Logger, conn chdrive
     dst_network_name,
     src_network_role,
     dst_network_role,
+    src_role,
+    dst_role,
+    src_entity,
+    dst_entity,
     src_vlan,
     dst_vlan,
     etype,
@@ -323,6 +327,10 @@ func insertEnrichedBatchRows(ctx context.Context, log *slog.Logger, conn chdrive
 			r.DstNetworkName,
 			r.SrcNetworkRole,
 			r.DstNetworkRole,
+			r.SrcRole,
+			r.DstRole,
+			r.SrcEntity,
+			r.DstEntity,
 			r.SrcVLAN,
 			r.DstVLAN,
 			r.Etype,
@@ -357,6 +365,8 @@ func rowsHaveEnrichment(rows []FlowRow) bool {
 			r.SrcEndpointScope != "" || r.DstEndpointScope != "" ||
 			r.SrcEndpointSource != "" || r.DstEndpointSource != "" ||
 			r.SrcNetworkName != "" || r.DstNetworkName != "" ||
+			r.SrcRole != "" || r.DstRole != "" ||
+			r.SrcEntity != "" || r.DstEntity != "" ||
 			r.SrcVLAN != 0 || r.DstVLAN != 0 {
 			return true
 		}

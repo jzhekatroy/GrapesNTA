@@ -14,10 +14,9 @@ import (
 )
 
 type classifierTables struct {
-	BGPOrigins    string
-	LocalNetworks string
-	LocalASNs     string
-	VLANMap       string
+	BGPOrigins  string
+	L3Prefixes  string
+	L2VLANs     string
 }
 
 type classifierConfig struct {
@@ -36,40 +35,37 @@ type trafficClassifier struct {
 }
 
 type classifierState struct {
-	bgp4   *ipTrie
-	bgp6   *ipTrie
-	local4 *ipTrie
-	local6 *ipTrie
+	bgp4 *ipTrie
+	bgp6 *ipTrie
+	l3v4 *ipTrie
+	l3v6 *ipTrie
 
-	localASNs map[uint32]asnClass
-	vlans     map[uint16]vlanClass
+	vlans map[uint16]vlanClass
 
 	hasLocalConfig bool
 }
 
-type asnClass struct {
-	OperatorID string
-	Name       string
-}
-
 type vlanClass struct {
-	AttachmentKind     string
-	AttachmentBoundary string
-	Label              string
-	OperatorID         string
+	EntityID       string
+	AttachmentType string
+	Boundary       string
+	DisplayName    string
 }
 
 type prefixClass struct {
-	ASN        uint32
-	Role       string
-	OperatorID string
-	Name       string
+	ASN         uint32
+	Role        string
+	EntityID    string
+	DisplayName string
 }
 
 type endpointClass struct {
 	ASN           uint32
-	Scope         string
+	Role          string
+	Entity        string
+	DisplayName   string
 	Source        string
+	Scope         string
 	NetworkName   string
 	NetworkRole   string
 	Label         string
@@ -119,9 +115,8 @@ func newTrafficClassifier(ctx context.Context, log *slog.Logger, cfg classifierC
 	log.Info("traffic classifier enabled",
 		"refresh", cfg.Refresh,
 		"bgp_table", cfg.Tables.BGPOrigins,
-		"local_networks", cfg.Tables.LocalNetworks,
-		"local_asns", cfg.Tables.LocalASNs,
-		"vlan_map", cfg.Tables.VLANMap,
+		"l3_prefixes", cfg.Tables.L3Prefixes,
+		"l2_vlans", cfg.Tables.L2VLANs,
 	)
 	return tc, nil
 }
@@ -130,14 +125,11 @@ func (t classifierTables) withDefaults() classifierTables {
 	if strings.TrimSpace(t.BGPOrigins) == "" {
 		t.BGPOrigins = "default.bgp_prefix_origin_current"
 	}
-	if strings.TrimSpace(t.LocalNetworks) == "" {
-		t.LocalNetworks = "default.local_networks_enabled"
+	if strings.TrimSpace(t.L3Prefixes) == "" {
+		t.L3Prefixes = "default.net_l3_prefixes_enabled"
 	}
-	if strings.TrimSpace(t.LocalASNs) == "" {
-		t.LocalASNs = "default.local_asns_enabled"
-	}
-	if strings.TrimSpace(t.VLANMap) == "" {
-		t.VLANMap = "default.vlan_map_enabled"
+	if strings.TrimSpace(t.L2VLANs) == "" {
+		t.L2VLANs = "default.net_l2_vlans_enabled"
 	}
 	return t
 }
@@ -170,35 +162,29 @@ func (tc *trafficClassifier) run(ctx context.Context) {
 func (tc *trafficClassifier) refreshOnce(ctx context.Context) error {
 	start := time.Now()
 	st := &classifierState{
-		bgp4:      newIPTrie(),
-		bgp6:      newIPTrie(),
-		local4:    newIPTrie(),
-		local6:    newIPTrie(),
-		localASNs: make(map[uint32]asnClass),
-		vlans:     make(map[uint16]vlanClass),
+		bgp4:   newIPTrie(),
+		bgp6:   newIPTrie(),
+		l3v4:   newIPTrie(),
+		l3v6:   newIPTrie(),
+		vlans:  make(map[uint16]vlanClass),
 	}
 	bgpRows, err := tc.loadBGP(ctx, st)
 	if err != nil {
 		return err
 	}
-	localPrefixRows, err := tc.loadLocalNetworks(ctx, st)
+	l3Rows, err := tc.loadL3Prefixes(ctx, st)
 	if err != nil {
 		return err
 	}
-	localASNRows, err := tc.loadLocalASNs(ctx, st)
+	vlanRows, internalVLANs, err := tc.loadL2VLANs(ctx, st)
 	if err != nil {
 		return err
 	}
-	vlanRows, internalVLANs, err := tc.loadVLANMap(ctx, st)
-	if err != nil {
-		return err
-	}
-	st.hasLocalConfig = localPrefixRows > 0 || localASNRows > 0
+	st.hasLocalConfig = l3Rows > 0
 	tc.state.Store(st)
 	tc.log.Info("traffic classifier refreshed",
 		"bgp_prefixes", bgpRows,
-		"local_prefixes", localPrefixRows,
-		"local_asns", localASNRows,
+		"l3_prefixes", l3Rows,
 		"vlans", vlanRows,
 		"internal_vlans", internalVLANs,
 		"has_local_config", st.hasLocalConfig,
@@ -234,86 +220,64 @@ func (tc *trafficClassifier) loadBGP(ctx context.Context, st *classifierState) (
 	return n, rows.Err()
 }
 
-func (tc *trafficClassifier) loadLocalNetworks(ctx context.Context, st *classifierState) (int, error) {
-	rows, err := tc.conn.Query(ctx, "SELECT prefix, family, operator_id, kind, name FROM "+tc.cfg.Tables.LocalNetworks)
+func (tc *trafficClassifier) loadL3Prefixes(ctx context.Context, st *classifierState) (int, error) {
+	rows, err := tc.conn.Query(ctx, "SELECT prefix, family, entity_id, role, display_name FROM "+tc.cfg.Tables.L3Prefixes)
 	if err != nil {
-		return 0, fmt.Errorf("load local networks: %w", err)
+		return 0, fmt.Errorf("load L3 prefixes: %w", err)
 	}
 	defer rows.Close()
 	n := 0
 	for rows.Next() {
-		var prefix, operatorID, kind, name string
+		var prefix, entityID, role, displayName string
 		var family uint8
-		if err := rows.Scan(&prefix, &family, &operatorID, &kind, &name); err != nil {
+		if err := rows.Scan(&prefix, &family, &entityID, &role, &displayName); err != nil {
 			return n, err
 		}
 		p, err := netip.ParsePrefix(strings.TrimSpace(prefix))
 		if err != nil || !p.IsValid() {
 			continue
 		}
-		role := normalizeKind(kind, "customer")
-		pc := prefixClass{Role: role, OperatorID: operatorID, Name: name}
+		role = normalizeRole(role)
+		pc := prefixClass{Role: role, EntityID: entityID, DisplayName: displayName}
 		if family == 4 || p.Addr().Is4() {
-			st.local4.Insert(p.Masked(), pc)
+			st.l3v4.Insert(p.Masked(), pc)
 		} else {
-			st.local6.Insert(p.Masked(), pc)
+			st.l3v6.Insert(p.Masked(), pc)
 		}
 		n++
 	}
 	return n, rows.Err()
 }
 
-func (tc *trafficClassifier) loadLocalASNs(ctx context.Context, st *classifierState) (int, error) {
-	rows, err := tc.conn.Query(ctx, "SELECT asn, operator_id, name FROM "+tc.cfg.Tables.LocalASNs)
+func (tc *trafficClassifier) loadL2VLANs(ctx context.Context, st *classifierState) (rowsCount int, internalCount int, err error) {
+	rows, err := tc.conn.Query(ctx, "SELECT vlan_id, entity_id, attachment_type, boundary, display_name FROM "+tc.cfg.Tables.L2VLANs)
 	if err != nil {
-		return 0, fmt.Errorf("load local ASNs: %w", err)
-	}
-	defer rows.Close()
-	n := 0
-	for rows.Next() {
-		var asn uint32
-		var operatorID, name string
-		if err := rows.Scan(&asn, &operatorID, &name); err != nil {
-			return n, err
-		}
-		if asn == 0 {
-			continue
-		}
-		st.localASNs[asn] = asnClass{OperatorID: operatorID, Name: name}
-		n++
-	}
-	return n, rows.Err()
-}
-
-func (tc *trafficClassifier) loadVLANMap(ctx context.Context, st *classifierState) (rowsCount int, customerCount int, err error) {
-	rows, err := tc.conn.Query(ctx, "SELECT vlan_id, attachment_kind, boundary, label, operator_id FROM "+tc.cfg.Tables.VLANMap)
-	if err != nil {
-		return 0, 0, fmt.Errorf("load VLAN map: %w", err)
+		return 0, 0, fmt.Errorf("load L2 VLANs: %w", err)
 	}
 	defer rows.Close()
 	for rows.Next() {
 		var vlan uint16
-		var kind, boundary, label, operatorID string
-		if err := rows.Scan(&vlan, &kind, &boundary, &label, &operatorID); err != nil {
-			return rowsCount, customerCount, err
+		var entityID, attachmentType, boundary, displayName string
+		if err := rows.Scan(&vlan, &entityID, &attachmentType, &boundary, &displayName); err != nil {
+			return rowsCount, internalCount, err
 		}
 		if vlan == 0 {
 			continue
 		}
-		kind = normalizeKind(kind, "unknown")
-		boundary = normalizeBoundary(boundary, kind)
+		attachmentType = normalizeAttachmentType(attachmentType)
+		boundary = normalizeBoundary(boundary, attachmentType)
 		st.vlans[vlan] = vlanClass{
-			AttachmentKind:     kind,
-			AttachmentBoundary: boundary,
-			Label:              label,
-			OperatorID:         operatorID,
+			EntityID:       entityID,
+			AttachmentType: attachmentType,
+			Boundary:       boundary,
+			DisplayName:    displayName,
 		}
 		rowsCount++
 		if boundary == "internal" {
-			customerCount++
+			internalCount++
 		}
 	}
-	return rowsCount, customerCount, rows.Err()
+	return rowsCount, internalCount, rows.Err()
 }
 
 func (tc *trafficClassifier) classifyPair(src, dst [16]byte, ipVersion uint8, srcVLAN, dstVLAN uint16) (endpointClass, endpointClass, string) {
@@ -337,39 +301,31 @@ func (tc *trafficClassifier) classifyPair(src, dst [16]byte, ipVersion uint8, sr
 func (st *classifierState) classify(addr netip.Addr, vlan uint16) endpointClass {
 	asn := st.lookupASN(addr)
 	att := st.lookupAttachment(vlan)
-	if vlan != 0 {
-		att = st.lookupAttachment(vlan)
-	}
-	if asn != 0 {
-		if a, ok := st.localASNs[asn]; ok {
-			return endpointClass{
-				ASN:        asn,
-				Scope:      "local",
-				Source:     "asn",
-				Label:      a.Name,
-				OperatorID: a.OperatorID,
-				Attachment: att,
-			}
-		}
-	}
-	if p, ok := st.lookupLocalPrefix(addr); ok {
-		role := normalizeKind(p.Role, "customer")
+	if p, ok := st.lookupL3Prefix(addr); ok {
+		role := normalizeRole(p.Role)
+		scope := scopeFromRole(role)
 		return endpointClass{
 			ASN:         asn,
-			Scope:       endpointScopeFromNetworkRole(role),
+			Role:        role,
+			Entity:      p.EntityID,
+			DisplayName: p.DisplayName,
 			Source:      "prefix",
-			NetworkName: p.Name,
+			Scope:       scope,
+			NetworkName: p.DisplayName,
 			NetworkRole: role,
-			Label:       p.Name,
-			OperatorID:  p.OperatorID,
+			Label:       p.DisplayName,
+			OperatorID:  p.EntityID,
 			Attachment:  att,
 		}
 	}
 	return endpointClass{
-		ASN:        asn,
-		Scope:      "remote",
-		Source:     "fallback",
-		Attachment: att,
+		ASN:         asn,
+		Role:        "remote",
+		Entity:      "",
+		Source:      "fallback",
+		Scope:       "remote",
+		NetworkRole: "remote",
+		Attachment:  att,
 	}
 }
 
@@ -379,10 +335,10 @@ func (st *classifierState) lookupAttachment(vlan uint16) attachmentClass {
 	}
 	if v, ok := st.vlans[vlan]; ok {
 		return attachmentClass{
-			Kind:       v.AttachmentKind,
-			Boundary:   v.AttachmentBoundary,
-			Label:      v.Label,
-			OperatorID: v.OperatorID,
+			Kind:       v.AttachmentType,
+			Boundary:   v.Boundary,
+			Label:      v.DisplayName,
+			OperatorID: v.EntityID,
 		}
 	}
 	return attachmentClass{Kind: "unknown", Boundary: "unknown"}
@@ -401,22 +357,19 @@ func (st *classifierState) lookupASN(addr netip.Addr) uint32 {
 	return 0
 }
 
-func (st *classifierState) lookupLocalPrefix(addr netip.Addr) (prefixClass, bool) {
+func (st *classifierState) lookupL3Prefix(addr netip.Addr) (prefixClass, bool) {
 	if addr.Is4() {
-		return st.local4.Lookup(addr)
+		return st.l3v4.Lookup(addr)
 	}
-	return st.local6.Lookup(addr)
+	return st.l3v6.Lookup(addr)
 }
 
 func deriveDirection(hasLocalConfig bool, src, dst endpointClass) string {
 	if !hasLocalConfig {
-		return "out"
-	}
-	if src.Scope == "unknown" || dst.Scope == "unknown" {
 		return "unknown"
 	}
-	srcLocal := isLocalEndpointScope(src.Scope)
-	dstLocal := isLocalEndpointScope(dst.Scope)
+	srcLocal := isLocalOrCustomerRole(src.Role)
+	dstLocal := isLocalOrCustomerRole(dst.Role)
 	switch {
 	case srcLocal && dstLocal:
 		return "internal"
@@ -429,61 +382,57 @@ func deriveDirection(hasLocalConfig bool, src, dst endpointClass) string {
 	}
 }
 
-func normalizeKind(kind, fallback string) string {
+func normalizeRole(role string) string {
+	role = strings.ToLower(strings.TrimSpace(role))
+	switch role {
+	case "provider_public", "internal", "customer_allocated", "customer_transit", "remote":
+		return role
+	default:
+		if role == "" {
+			return "remote"
+		}
+		return role
+	}
+}
+
+func normalizeAttachmentType(kind string) string {
 	kind = strings.ToLower(strings.TrimSpace(kind))
 	if kind == "" {
-		return fallback
+		return "unknown"
 	}
 	return kind
 }
 
-func normalizeBoundary(boundary, attachmentKind string) string {
+func normalizeBoundary(boundary, attachmentType string) string {
 	boundary = strings.ToLower(strings.TrimSpace(boundary))
 	switch boundary {
 	case "internal", "external":
 		return boundary
-	case "", "unknown":
-		// derive a safe default from attachment kind for rows where boundary is
-		// not filled yet. Existing vlan_map rows get DEFAULT 'unknown', so
-		// treating unknown as explicit would hide obvious uplink/ix -> external
-		// and customer/core -> internal mappings.
-	default:
-		return "unknown"
 	}
-	if isLocalAttachmentKind(attachmentKind) {
+	switch normalizeAttachmentType(attachmentType) {
+	case "customer", "internal", "core":
 		return "internal"
-	}
-	switch normalizeKind(attachmentKind, "unknown") {
-	case "uplink", "ix", "peering", "transit", "pni", "ppni":
+	case "uplink", "ix", "peering":
 		return "external"
 	default:
 		return "unknown"
 	}
 }
 
-func isLocalAttachmentKind(kind string) bool {
-	switch normalizeKind(kind, "unknown") {
-	case "local", "customer", "internal", "mgmt":
-		return true
-	default:
-		return false
-	}
-}
-
-func endpointScopeFromNetworkRole(role string) string {
-	switch normalizeKind(role, "customer") {
-	case "customer":
-		return "customer"
-	case "local", "internal", "mgmt":
+func scopeFromRole(role string) string {
+	switch normalizeRole(role) {
+	case "provider_public", "internal":
 		return "local"
-	default:
+	case "customer_allocated", "customer_transit":
 		return "customer"
+	default:
+		return "remote"
 	}
 }
 
-func isLocalEndpointScope(scope string) bool {
-	switch normalizeKind(scope, "unknown") {
-	case "local", "customer":
+func isLocalOrCustomerRole(role string) bool {
+	switch normalizeRole(role) {
+	case "provider_public", "internal", "customer_allocated", "customer_transit":
 		return true
 	default:
 		return false

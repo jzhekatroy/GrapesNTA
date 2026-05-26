@@ -86,9 +86,8 @@ if [[ "${XDP_CLASSIFIER:-0}" == "1" ]]; then
     -classifier
     -classifier-refresh "${XDP_CLASSIFIER_REFRESH:-60s}"
     -classifier-bgp-table "${XDP_CLASSIFIER_BGP_TABLE:-default.bgp_prefix_origin_current}"
-    -classifier-local-networks-view "${XDP_CLASSIFIER_LOCAL_NETWORKS_VIEW:-default.local_networks_enabled}"
-    -classifier-local-asns-view "${XDP_CLASSIFIER_LOCAL_ASNS_VIEW:-default.local_asns_enabled}"
-    -classifier-vlan-view "${XDP_CLASSIFIER_VLAN_VIEW:-default.vlan_map_enabled}"
+    -classifier-l3-prefixes-view "${XDP_CLASSIFIER_L3_PREFIXES_VIEW:-default.net_l3_prefixes_enabled}"
+    -classifier-l2-vlans-view "${XDP_CLASSIFIER_L2_VLANS_VIEW:-default.net_l2_vlans_enabled}"
   )
 fi
 

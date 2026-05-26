@@ -207,6 +207,52 @@ SELECT
 FROM default.bgp_prefix_origin_current;
 ```
 
+## Network Analytics
+
+Classifier and aggregate freshness checks for the new L3/L2 model.
+Full runbook: [NET_ANALYTICS_OPERATIONS.md](NET_ANALYTICS_OPERATIONS.md).
+
+Classifier refresh (xdpflowd journal):
+
+```bash
+sudo journalctl -u xdpflowd --since "5 minutes ago" --no-pager | grep 'traffic classifier'
+```
+
+Expected every ~60s when `XDP_CLASSIFIER=1`:
+
+```text
+traffic classifier refreshed bgp_prefixes=... l3_prefixes=... vlans=... has_local_config=true
+```
+
+Alert if:
+
+- `traffic classifier refresh failed` repeats for >5 minutes
+- `has_local_config=false` while production prefixes are configured
+- `l3_prefixes=0` after seeding `net_l3_prefixes`
+
+Aggregate freshness:
+
+```sql
+SELECT
+    (SELECT max(minute) FROM default.traffic_dashboard_1m) AS dashboard_1m_latest,
+    (SELECT max(minute) FROM default.traffic_direction_1m) AS direction_1m_latest,
+    dateDiff('minute', dashboard_1m_latest, now()) AS dashboard_lag_minutes;
+```
+
+Alert if `dashboard_lag_minutes > 5` while xdpflowd is healthy.
+
+Role/entity coverage spot check:
+
+```sql
+SELECT
+    countIf(src_role != '' OR dst_role != '') AS enriched_rows,
+    count() AS total_rows
+FROM default.flows_raw
+WHERE time_received_ns >= now() - INTERVAL 5 MINUTE;
+```
+
+If classifier is enabled but `enriched_rows = 0`, check L3 prefix coverage.
+
 ## Alerting Policy
 
 Initial policy for log-based alerting:
