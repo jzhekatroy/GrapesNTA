@@ -152,47 +152,51 @@ GROUP BY direction;
 
 Totals should match within normal MV lag (1–2 minutes).
 
-## Step 7. Configure Next.js API
+## Step 7. UI (Laravel + MoonShine)
 
-Add to app environment:
+MoonShine app lives in a separate repository. Configure ClickHouse
+access in MoonShine `.env` and add resources/dashboards for:
 
-```env
-CLICKHOUSE_URL=http://HOST:8123
-CLICKHOUSE_USER=USER
-CLICKHOUSE_PASSWORD=PASS
-CLICKHOUSE_DATABASE=default
-```
+- `net_entities`
+- `net_l3_prefixes`
+- `net_l2_vlans`
+- `traffic_dashboard_1m` (pivot)
+- `traffic_entity_1m`, `traffic_role_1m`, `traffic_vlan_1m`
+- `net_reports`
 
-Smoke test (SUPER_ADMIN token):
+CRUD inserts new rows into ReplacingMergeTree base tables with
+`updated_at = now()`; disable via `enabled = 0`. Read from the
+`*_enabled` views.
+
+Smoke test from CLI (no UI required):
 
 ```bash
-curl -H "Authorization: Bearer $TOKEN" \
-  "https://APP/api/network/dashboard?from=2026-05-25T00:00:00Z&to=2026-05-25T01:00:00Z"
+clickhouse-client --host HOST --user USER --password PASS \
+  --query "SELECT direction, sum(bytes) FROM default.traffic_dashboard_1m
+           WHERE minute >= now() - INTERVAL 5 MINUTE
+           GROUP BY direction"
 ```
 
 ## Step 8. Async Reports
 
-Create report:
+Reports are stored in `default.net_reports`. Queue, run, and read
+results from the MoonShine app or via direct INSERT/SELECT:
 
-```bash
-curl -X POST -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
-  -d '{"type":"top_bytes","from":"2026-05-01T00:00:00Z","to":"2026-05-25T00:00:00Z","filters":{"dimension":"entity","limit":20}}' \
-  https://APP/api/network/reports
+```sql
+INSERT INTO default.net_reports
+(id, type, filters_json, period_from, period_to, status, created_by, updated_at)
+VALUES (generateUUIDv4(), 'top_bytes', '{"dimension":"entity","limit":20}',
+        toDateTime('2026-05-01 00:00:00'),
+        toDateTime('2026-05-25 00:00:00'),
+        'queued', 'admin', now());
+
+SELECT id, status, toString(updated_at) FROM default.net_reports
+ORDER BY updated_at DESC LIMIT 10;
 ```
 
-Process queue (cron or manual):
-
-```bash
-curl -X POST -H "Authorization: Bearer $TOKEN" \
-  https://APP/api/network/reports/tick
-```
-
-Fetch result:
-
-```bash
-curl -H "Authorization: Bearer $TOKEN" \
-  https://APP/api/network/reports/REPORT_ID/result
-```
+A worker (Laravel scheduler or systemd timer) picks `status='queued'`,
+runs the underlying query, writes `result_json`, sets
+`status='completed'`/`'failed'`, and updates `updated_at`.
 
 ## Rollback
 

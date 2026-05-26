@@ -91,37 +91,24 @@ Types:
 - `top_bytes` — top entities/roles/VLANs by bytes
 - `direction_summary` — bytes by direction
 
-## API Endpoints
+## UI / API
 
-All endpoints require `SUPER_ADMIN` bearer token.
+UI is built on Laravel + MoonShine in a separate repository. MoonShine
+resources operate directly on ClickHouse tables and views described
+above:
 
-| Method | Path | Purpose |
-|--------|------|---------|
-| GET/POST | `/api/network/entities` | list/create entities |
-| GET/POST | `/api/network/l3-prefixes` | list/create prefixes |
-| PUT/DELETE | `/api/network/l3-prefixes/:id` | update/disable prefix |
-| GET/POST | `/api/network/l2-vlans` | list/create VLANs |
-| PUT/DELETE | `/api/network/l2-vlans/:id` | update/disable VLAN |
-| GET | `/api/network/dashboard` | summary totals |
-| GET | `/api/network/timeseries` | chart series |
-| GET | `/api/network/top` | top-N by dimension |
-| POST/GET | `/api/network/reports` | async reports |
-| GET | `/api/network/reports/:id` | report status |
-| GET | `/api/network/reports/:id/result` | report result |
-| POST | `/api/network/reports/tick` | process queued reports |
+- `net_entities` + `net_entities_enabled` — entity registry resource.
+- `net_l3_prefixes` + `net_l3_prefixes_enabled` — L3 prefix resource.
+- `net_l2_vlans` + `net_l2_vlans_enabled` — L2 VLAN resource.
+- `traffic_dashboard_1m` / `traffic_dashboard_1h` — pivoted dashboard.
+- `traffic_direction_1m`, `traffic_role_1m`, `traffic_entity_1m`,
+  `traffic_vlan_1m` — drill-down series.
+- `net_reports` — async report queue.
 
-Prefix id format for API: `encodeURIComponent(prefix + ':' + family)`.
+Writes go through INSERTs into the base `ReplacingMergeTree` tables
+with `updated_at = now()`; soft-delete is `enabled = 0`.
 
 ## Environment
-
-Next.js API:
-
-```env
-CLICKHOUSE_URL=http://clickhouse-host:8123
-CLICKHOUSE_USER=default
-CLICKHOUSE_PASSWORD=secret
-CLICKHOUSE_DATABASE=default
-```
 
 xdpflowd:
 
@@ -130,3 +117,6 @@ XDP_CLASSIFIER=1
 XDP_CLASSIFIER_L3_PREFIXES_VIEW=default.net_l3_prefixes_enabled
 XDP_CLASSIFIER_L2_VLANS_VIEW=default.net_l2_vlans_enabled
 ```
+
+ClickHouse credentials for MoonShine/Laravel are configured in the
+MoonShine app's `.env`.
