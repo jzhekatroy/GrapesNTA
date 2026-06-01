@@ -63,8 +63,8 @@ exec "${STDBUF[@]}" "$BIN" \
   -ch-dsn "$DNS_CH_DSN" \
   -ch-table "$DNS_CH_TABLE" \
   -ch-answers-table "${DNS_CH_ANSWERS_TABLE:-default.dns_answers}" \
-  -ch-raw-enabled "$(bool_flag "${DNS_CH_RAW_ENABLED:-1}")" \
-  -ch-answers-enabled "$(bool_flag "${DNS_CH_ANSWERS_ENABLED:-1}")" \
+  -ch-raw-enabled="$(bool_flag "${DNS_CH_RAW_ENABLED:-1}")" \
+  -ch-answers-enabled="$(bool_flag "${DNS_CH_ANSWERS_ENABLED:-1}")" \
   -ch-batch-size "${DNS_CH_BATCH_SIZE:-500}" \
   -ch-raw-batch-size "${DNS_CH_RAW_BATCH_SIZE:-0}" \
   -ch-answers-batch-size "${DNS_CH_ANSWERS_BATCH_SIZE:-0}" \
@@ -81,7 +81,7 @@ exec "${STDBUF[@]}" "$BIN" \
   -interval "${DNS_INTERVAL:-5s}" \
   -health-interval "${DNS_HEALTH_INTERVAL:-1m}" \
   -health-lag-threshold "${DNS_HEALTH_LAG_THRESHOLD:-100000}" \
-  -ch-raw-auto-shed-on-answers-lag "$(bool_flag "${DNS_CH_RAW_AUTO_SHED_ON_ANSWERS_LAG:-1}")" \
+  -ch-raw-auto-shed-on-answers-lag="$(bool_flag "${DNS_CH_RAW_AUTO_SHED_ON_ANSWERS_LAG:-1}")" \
   -ch-answers-lag-shed-threshold "${DNS_CH_ANSWERS_LAG_SHED_THRESHOLD:-100000}" \
   -ch-answers-lag-recover-threshold "${DNS_CH_ANSWERS_LAG_RECOVER_THRESHOLD:-50000}" \
   -ch-raw-shed-recover-cooldown "${DNS_CH_RAW_SHED_RECOVER_COOLDOWN:-2m}" \
