@@ -78,7 +78,7 @@ SELECT
     service_name,
     category,
     description,
-    updated_at
+    updated_at_latest AS updated_at
 FROM
 (
     SELECT
@@ -89,7 +89,7 @@ FROM
         argMax(category, updated_at) AS category,
         argMax(description, updated_at) AS description,
         argMax(is_enabled, updated_at) AS enabled_latest,
-        max(updated_at) AS updated_at
+        max(updated_at) AS updated_at_latest
     FROM default.port_services
     GROUP BY
         transport,
