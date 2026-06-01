@@ -91,8 +91,20 @@ Existing enrichment columns remain populated for compatibility:
 | `traffic_role_1m` | by source + L3 role |
 | `traffic_entity_1m` | by source + entity |
 | `traffic_vlan_1m` | by source + VLAN attachment |
+| `traffic_protocol_1m` | by source + IP protocol number + direction |
+| `traffic_service_1m` | by source + service inferred from transport + port |
 | `traffic_dashboard_1m` | pivot dashboard (minute, source) |
 | `traffic_dashboard_1h` | pivot dashboard (hour, source) |
+
+`traffic_protocol_1m.proto` keeps the raw IP protocol number from
+`flows_raw.proto`. UI/API code should map common values such as `6=TCP`,
+`17=UDP`, `1=ICMP`, `58=ICMPv6`, `47=GRE`, `50=ESP`, and show unknown or rare
+values as `IP-<number>`.
+
+`traffic_service_1m` is a separate application/service aggregate based on
+`port_services`. It answers a different UI question than `traffic_protocol_1m`:
+`traffic_protocol_1m` shows TCP/UDP/GRE/ESP, while `traffic_service_1m` shows
+HTTPS/NTP/DNS/SSH and service categories.
 
 ## Async Reports
 
@@ -116,7 +128,8 @@ above:
 - `net_l2_vlans` + `net_l2_vlans_enabled` — L2 VLAN resource.
 - `traffic_dashboard_1m` / `traffic_dashboard_1h` — pivoted dashboard.
 - `traffic_direction_1m`, `traffic_role_1m`, `traffic_entity_1m`,
-  `traffic_vlan_1m` — drill-down series.
+  `traffic_vlan_1m`, `traffic_protocol_1m`, `traffic_service_1m` —
+  drill-down series.
 - `net_reports` — async report queue.
 
 Writes go through INSERTs into the base `ReplacingMergeTree` tables

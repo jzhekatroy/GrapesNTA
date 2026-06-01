@@ -1,4 +1,4 @@
--- Editable service dictionary and service-level traffic aggregates.
+-- Editable service dictionary.
 --
 -- Apply after default.flows_raw exists. The port_services table is intentionally
 -- small and human-editable from Laravel/MoonShine; seed rows below are just a
@@ -68,50 +68,31 @@ VALUES
     ('tcp', 9200, 'elasticsearch', 'Elasticsearch', 'search', 'Elasticsearch HTTP API'),
     ('tcp', 27017, 'mongodb', 'MongoDB', 'database', 'MongoDB database');
 
-CREATE TABLE IF NOT EXISTS default.traffic_service_1m
-(
-    minute        DateTime('UTC'),
-    direction     LowCardinality(String), -- in / out / internal / transit / unknown
-    transport     LowCardinality(String), -- tcp / udp / icmp / other
-    service_port  UInt16,
-    service_code  LowCardinality(String),
-    service_name  String,
-    category      LowCardinality(String),
-    bytes         UInt64,
-    packets       UInt64,
-    flows_count   UInt64
-)
-ENGINE = SummingMergeTree
-PARTITION BY toYYYYMMDD(minute)
-ORDER BY (minute, direction, transport, category, service_code, service_port)
-TTL minute + INTERVAL 365 DAY
-SETTINGS index_granularity = 8192;
+DROP VIEW IF EXISTS default.port_services_enabled;
 
--- Template MV for service aggregates.
---
--- This needs the final direction expression from local_networks and should be
--- enabled after the local network dictionary is defined. Keep it here as the
--- contract for the aggregate table.
---
--- CREATE MATERIALIZED VIEW default.traffic_service_1m_mv
--- TO default.traffic_service_1m
--- AS
--- SELECT
---     toStartOfMinute(time_received_ns) AS minute,
---     direction_expr AS direction,
---     multiIf(proto = 6, 'tcp', proto = 17, 'udp', proto = 1, 'icmp', 'other') AS transport,
---     if(direction = 'in', toUInt16(src_port), toUInt16(dst_port)) AS service_port,
---     ifNull(ps.service_code, 'unknown') AS service_code,
---     ifNull(ps.service_name, 'Unknown') AS service_name,
---     ifNull(ps.category, 'unknown') AS category,
---     sum(bytes) AS bytes,
---     sum(packets) AS packets,
---     count() AS flows_count
--- FROM default.flows_raw AS f
--- LEFT JOIN default.port_services AS ps
---     ON ps.transport = transport
---    AND ps.port = service_port
---    AND ps.is_enabled = 1
--- GROUP BY
---     minute, direction, transport, service_port,
---     service_code, service_name, category;
+CREATE VIEW default.port_services_enabled AS
+SELECT
+    transport,
+    port,
+    service_code,
+    service_name,
+    category,
+    description,
+    updated_at
+FROM
+(
+    SELECT
+        transport,
+        port,
+        argMax(service_code, updated_at) AS service_code,
+        argMax(service_name, updated_at) AS service_name,
+        argMax(category, updated_at) AS category,
+        argMax(description, updated_at) AS description,
+        argMax(is_enabled, updated_at) AS enabled_latest,
+        max(updated_at) AS updated_at
+    FROM default.port_services
+    GROUP BY
+        transport,
+        port
+)
+WHERE enabled_latest = 1;

@@ -11,8 +11,11 @@
 --   7. traffic_role_1m.sql
 --   8. traffic_entity_1m.sql
 --   9. traffic_vlan_1m.sql
---  10. traffic_dashboard_1m.sql
---  11. net_reports.sql
+--  10. port_services.sql
+--  11. traffic_protocol_1m.sql
+--  12. traffic_service_1m.sql
+--  13. traffic_dashboard_1m.sql
+--  14. net_reports.sql
 --
 -- Example:
 --   for f in deploy/clickhouse/cleanup_old_classification.sql \
@@ -24,6 +27,9 @@
 --            deploy/clickhouse/traffic_role_1m.sql \
 --            deploy/clickhouse/traffic_entity_1m.sql \
 --            deploy/clickhouse/traffic_vlan_1m.sql \
+--            deploy/clickhouse/port_services.sql \
+--            deploy/clickhouse/traffic_protocol_1m.sql \
+--            deploy/clickhouse/traffic_service_1m.sql \
 --            deploy/clickhouse/traffic_dashboard_1m.sql \
 --            deploy/clickhouse/net_reports.sql; do
 --     clickhouse-client --host HOST --user USER --password PASS --multiquery < "$f"

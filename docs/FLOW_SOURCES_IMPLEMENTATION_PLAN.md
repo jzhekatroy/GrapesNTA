@@ -274,6 +274,8 @@ traffic_direction_1m.sql
 traffic_role_1m.sql
 traffic_entity_1m.sql
 traffic_vlan_1m.sql
+traffic_protocol_1m.sql
+traffic_service_1m.sql
 future flow_summary_1m / rollups
 ```
 
@@ -290,6 +292,8 @@ minute, source_id, direction
 minute, source_id, src_role, dst_role
 minute, source_id, src_entity, dst_entity
 minute, source_id, src_vlan, dst_vlan
+minute, source_id, proto, direction
+minute, source_id, service_code, service_port, direction
 ```
 
 Acceptance:
@@ -387,7 +391,7 @@ Recommended implementation order:
 5. Update dnsflowd to write source_id.
 6. Deploy/restart dnsflowd and verify dns tables.
 7. Rebuild traffic_dashboard_1m / 1h with source_id.
-8. Update direction/role/entity/vlan aggregates with source_id.
+8. Update direction/role/entity/vlan/protocol/service aggregates with source_id.
 9. Update UI/API queries to filter by source_id/include_in_total.
 10. Document operations checks.
 ```
@@ -412,6 +416,9 @@ for f in deploy/clickhouse/net_flow_sources.sql \
          deploy/clickhouse/traffic_role_1m.sql \
          deploy/clickhouse/traffic_entity_1m.sql \
          deploy/clickhouse/traffic_vlan_1m.sql \
+         deploy/clickhouse/port_services.sql \
+         deploy/clickhouse/traffic_protocol_1m.sql \
+         deploy/clickhouse/traffic_service_1m.sql \
          deploy/clickhouse/traffic_dashboard_1m.sql; do
   clickhouse-client --multiquery < "$f"
 done
