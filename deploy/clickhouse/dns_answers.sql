@@ -4,6 +4,7 @@
 CREATE TABLE IF NOT EXISTS default.dns_answers
 (
     ts                  DateTime64(6, 'UTC') CODEC(Delta, ZSTD(1)),
+    source_id           LowCardinality(String) DEFAULT 'dns-default',
     sampler_address     FixedString(16),
 
     client_ip           FixedString(16),

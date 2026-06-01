@@ -1,10 +1,11 @@
 -- Pivot minute aggregate for dashboard traffic charts (bps / pps / flows/s).
 --
--- One row per minute with pre-split direction columns.
+-- One row per minute per source_id with pre-split direction columns.
 
 CREATE TABLE IF NOT EXISTS default.traffic_dashboard_1m
 (
     minute           DateTime('UTC'),
+    source_id        LowCardinality(String),
 
     total_bytes      UInt64,
     in_bytes         UInt64,
@@ -29,7 +30,7 @@ CREATE TABLE IF NOT EXISTS default.traffic_dashboard_1m
 )
 ENGINE = SummingMergeTree
 PARTITION BY toYYYYMMDD(minute)
-ORDER BY minute
+ORDER BY (minute, source_id)
 SETTINGS index_granularity = 8192;
 
 DROP TABLE IF EXISTS default.traffic_dashboard_1m_mv;
@@ -39,6 +40,7 @@ TO default.traffic_dashboard_1m
 AS
 SELECT
     toStartOfMinute(time_received_ns) AS minute,
+    source_id,
 
     sum(bytes) AS total_bytes,
     sumIf(bytes, direction = 'in') AS in_bytes,
@@ -61,13 +63,16 @@ SELECT
     countIf(direction = 'internal') AS internal_flows,
     countIf(direction = 'unknown') AS unknown_flows
 FROM default.flows_raw
-GROUP BY minute;
+GROUP BY
+    minute,
+    source_id;
 
 -- Hourly rollup for long dashboard windows.
 
 CREATE TABLE IF NOT EXISTS default.traffic_dashboard_1h
 (
     hour             DateTime('UTC'),
+    source_id        LowCardinality(String),
 
     total_bytes      UInt64,
     in_bytes         UInt64,
@@ -92,7 +97,7 @@ CREATE TABLE IF NOT EXISTS default.traffic_dashboard_1h
 )
 ENGINE = SummingMergeTree
 PARTITION BY toYYYYMM(hour)
-ORDER BY hour
+ORDER BY (hour, source_id)
 SETTINGS index_granularity = 8192;
 
 DROP TABLE IF EXISTS default.traffic_dashboard_1h_mv;
@@ -102,6 +107,7 @@ TO default.traffic_dashboard_1h
 AS
 SELECT
     toStartOfHour(time_received_ns) AS hour,
+    source_id,
 
     sum(bytes) AS total_bytes,
     sumIf(bytes, direction = 'in') AS in_bytes,
@@ -124,4 +130,6 @@ SELECT
     countIf(direction = 'internal') AS internal_flows,
     countIf(direction = 'unknown') AS unknown_flows
 FROM default.flows_raw
-GROUP BY hour;
+GROUP BY
+    hour,
+    source_id;

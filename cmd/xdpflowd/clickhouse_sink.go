@@ -170,7 +170,8 @@ func insertCompactBatchRows(ctx context.Context, log *slog.Logger, conn chdriver
     src_port,
     dst_port,
     bytes,
-    packets
+    packets,
+    source_id
 )`
 
 	q := fmt.Sprintf(stmt, table)
@@ -206,6 +207,7 @@ func insertCompactBatchRows(ctx context.Context, log *slog.Logger, conn chdriver
 			r.DstPort,
 			r.Bytes,
 			r.Packets,
+			r.SourceID,
 		)
 		if err != nil {
 			insertErrs.Add(1)
@@ -276,7 +278,8 @@ func insertEnrichedBatchRows(ctx context.Context, log *slog.Logger, conn chdrive
     src_port,
     dst_port,
     bytes,
-    packets
+    packets,
+    source_id
 )`
 
 	q := fmt.Sprintf(stmt, table)
@@ -339,6 +342,7 @@ func insertEnrichedBatchRows(ctx context.Context, log *slog.Logger, conn chdrive
 			r.DstPort,
 			r.Bytes,
 			r.Packets,
+			r.SourceID,
 		)
 		if err != nil {
 			insertErrs.Add(1)
@@ -378,6 +382,9 @@ func rowsHaveEnrichment(rows []FlowRow) bool {
 // pointer avoids copying the ~200-byte FlowRow struct once per row in the hot
 // INSERT loop.
 func flowRowApplyInsertDefaults(r *FlowRow) {
+	if r.SourceID == "" {
+		r.SourceID = "xdp-default"
+	}
 	if r.Direction == "" {
 		r.Direction = "unknown"
 	}

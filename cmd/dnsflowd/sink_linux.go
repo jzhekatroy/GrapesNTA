@@ -324,6 +324,7 @@ func insertDNSBatch(ctx context.Context, log *slog.Logger, conn chdriver.Conn, t
 
 	const stmt = `INSERT INTO %s (
     ts,
+    source_id,
     sampler_address,
     client_ip,
     server_ip,
@@ -358,6 +359,7 @@ func insertDNSBatch(ctx context.Context, log *slog.Logger, conn chdriver.Conn, t
 	for _, r := range rows {
 		err := batch.Append(
 			r.Ts,
+			r.SourceID,
 			fixed16Row(r.SamplerAddress),
 			fixed16Row(r.ClientIP),
 			fixed16Row(r.ServerIP),
@@ -405,6 +407,7 @@ func insertDNSAnswersBatch(ctx context.Context, log *slog.Logger, conn chdriver.
 
 	const stmt = `INSERT INTO %s (
     ts,
+    source_id,
     sampler_address,
     client_ip,
     server_ip,
@@ -431,6 +434,7 @@ func insertDNSAnswersBatch(ctx context.Context, log *slog.Logger, conn chdriver.
 	for _, r := range rows {
 		err := batch.Append(
 			r.Ts,
+			r.SourceID,
 			fixed16Row(r.SamplerAddress),
 			fixed16Row(r.ClientIP),
 			fixed16Row(r.ServerIP),

@@ -2,7 +2,9 @@
 
 ## Production table (`default.flows_raw`)
 
-This is the actual production DDL observed on `sel` via `SHOW CREATE TABLE default.flows_raw`:
+This is the actual production DDL observed on `sel` via `SHOW CREATE TABLE default.flows_raw`
+(before enrichment/source columns; `deploy/clickhouse/flows_raw_extensions.sql` adds the
+classifier columns and `source_id`):
 
 ```sql
 CREATE TABLE default.flows_raw
@@ -75,7 +77,8 @@ CREATE TABLE IF NOT EXISTS default.flows_raw_xdp_direct
     `src_port` UInt32,
     `dst_port` UInt32,
     `bytes` UInt64,
-    `packets` UInt64
+    `packets` UInt64,
+    `source_id` LowCardinality(String) DEFAULT 'xdp-default'
 )
 ENGINE = MergeTree
 PARTITION BY date
@@ -83,6 +86,10 @@ ORDER BY time_received_ns
 TTL date + toIntervalDay(5)
 SETTINGS index_granularity = 8192;
 ```
+
+`source_id` identifies the observation point (see `deploy/clickhouse/net_flow_sources.sql`).
+`xdpflowd` always writes it (default `xdp-default`), so any direct-insert target
+table must include this column.
 
 ## Field mapping (BPF → `flows_raw` shape)
 
@@ -112,6 +119,7 @@ SETTINGS index_granularity = 8192;
 | `proto` | `FlowKey.Proto` |
 | `src_port` / `dst_port` | Host-endian ports from BPF key (`keyPortHost`) |
 | `bytes` / `packets` | `FlowValue.Bytes` / `FlowValue.Packets` |
+| `source_id` | Logical observation point from `-source-id` / `XDPFLOWD_SOURCE_ID` (default `xdp-default`). |
 
 ## A/B vs legacy NetFlow→ClickHouse path
 

@@ -17,6 +17,7 @@ type FlowRow struct {
 	SequenceNum      uint32
 	SamplingRate     uint64
 	SamplerAddress   [16]byte
+	SourceID         string
 	SrcAddr          [16]byte
 	DstAddr          [16]byte
 	SrcAS            uint32
@@ -64,11 +65,12 @@ type flowRowMapper struct {
 	clock          ExportClock
 	samplerAddress [16]byte
 	sequence       uint32
+	sourceID       string
 	classifier     *trafficClassifier
 }
 
-func newFlowRowMapper(clock ExportClock, sampler [16]byte, seqBase uint32, classifier *trafficClassifier) flowRowMapper {
-	return flowRowMapper{clock: clock, samplerAddress: sampler, sequence: seqBase, classifier: classifier}
+func newFlowRowMapper(clock ExportClock, sampler [16]byte, seqBase uint32, sourceID string, classifier *trafficClassifier) flowRowMapper {
+	return flowRowMapper{clock: clock, samplerAddress: sampler, sequence: seqBase, sourceID: sourceID, classifier: classifier}
 }
 
 // flowRowsFromKV converts BPF map entries to ClickHouse / spool rows using one shared
@@ -103,6 +105,7 @@ func flowRowFromKV(fv flowKV, m flowRowMapper, receivedAt time.Time) FlowRow {
 		SequenceNum:     m.sequence,
 		SamplingRate:    1,
 		SamplerAddress:  m.samplerAddress,
+		SourceID:        m.sourceID,
 		SrcAddr:         fv.k.SrcAddr,
 		DstAddr:         fv.k.DstAddr,
 		SrcAS:           srcClass.ASN,

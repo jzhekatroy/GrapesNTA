@@ -81,6 +81,7 @@ CH_ARGS=(
 if [[ -n "${XDP_CH_SAMPLER_ADDR:-}" ]]; then
   CH_ARGS+=( -ch-sampler-addr "$XDP_CH_SAMPLER_ADDR" )
 fi
+CH_ARGS+=( -source-id "${XDPFLOWD_SOURCE_ID:-xdp-default}" )
 if [[ "${XDP_CLASSIFIER:-0}" == "1" ]]; then
   CH_ARGS+=(
     -classifier

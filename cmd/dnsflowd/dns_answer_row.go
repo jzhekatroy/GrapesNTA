@@ -7,6 +7,7 @@ import "time"
 // DNSAnswerRow matches INSERT columns for default.dns_answers (see deploy/clickhouse/dns_answers.sql).
 type DNSAnswerRow struct {
 	Ts             time.Time
+	SourceID       string
 	SamplerAddress [16]byte
 	ClientIP       [16]byte
 	ServerIP       [16]byte
@@ -36,6 +37,7 @@ func dnsAnswersFromRow(row DNSRow) []DNSAnswerRow {
 	out := make([]DNSAnswerRow, 0, n)
 	base := DNSAnswerRow{
 		Ts:             row.Ts,
+		SourceID:       row.SourceID,
 		SamplerAddress: row.SamplerAddress,
 		ClientIP:       row.ClientIP,
 		ServerIP:       row.ServerIP,

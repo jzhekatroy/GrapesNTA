@@ -6,6 +6,7 @@
 CREATE TABLE IF NOT EXISTS default.traffic_direction_1m
 (
     minute      DateTime('UTC'),
+    source_id   LowCardinality(String),
     direction   LowCardinality(String),
     bytes       UInt64,
     packets     UInt64,
@@ -13,7 +14,7 @@ CREATE TABLE IF NOT EXISTS default.traffic_direction_1m
 )
 ENGINE = SummingMergeTree
 PARTITION BY toYYYYMMDD(minute)
-ORDER BY (minute, direction)
+ORDER BY (minute, source_id, direction)
 SETTINGS index_granularity = 8192;
 
 DROP TABLE IF EXISTS default.traffic_direction_1m_mv;
@@ -23,6 +24,7 @@ TO default.traffic_direction_1m
 AS
 SELECT
     toStartOfMinute(time_received_ns) AS minute,
+    source_id,
     direction,
     sum(bytes) AS bytes,
     sum(packets) AS packets,
@@ -30,4 +32,5 @@ SELECT
 FROM default.flows_raw
 GROUP BY
     minute,
+    source_id,
     direction;

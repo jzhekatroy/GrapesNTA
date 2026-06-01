@@ -5,6 +5,7 @@
 CREATE TABLE IF NOT EXISTS default.traffic_vlan_1m
 (
     minute           DateTime('UTC'),
+    source_id        LowCardinality(String),
     direction        LowCardinality(String),
     attachment_type  LowCardinality(String),
     vlan_id          UInt16,
@@ -14,7 +15,7 @@ CREATE TABLE IF NOT EXISTS default.traffic_vlan_1m
 )
 ENGINE = SummingMergeTree
 PARTITION BY toYYYYMMDD(minute)
-ORDER BY (minute, direction, attachment_type, vlan_id)
+ORDER BY (minute, source_id, direction, attachment_type, vlan_id)
 SETTINGS index_granularity = 8192;
 
 DROP TABLE IF EXISTS default.traffic_vlan_1m_mv;
@@ -24,6 +25,7 @@ TO default.traffic_vlan_1m
 AS
 SELECT
     toStartOfMinute(time_received_ns) AS minute,
+    source_id,
     direction,
     multiIf(
         direction = 'out', src_attachment_kind,
@@ -50,6 +52,7 @@ WHERE direction IN ('in', 'out', 'internal', 'transit')
   )
 GROUP BY
     minute,
+    source_id,
     direction,
     attachment_type,
     vlan_id;

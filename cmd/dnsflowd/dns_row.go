@@ -7,6 +7,7 @@ import "time"
 // DNSRow matches INSERT columns for default.dns_log (see deploy/clickhouse/dns_log.sql).
 type DNSRow struct {
 	Ts                 time.Time
+	SourceID           string
 	SamplerAddress     [16]byte
 	ClientIP           [16]byte
 	ServerIP           [16]byte

@@ -16,6 +16,19 @@ Table: `default.net_entities`
 
 View: `default.net_entities_enabled`
 
+## Flow Sources
+
+Table: `default.net_flow_sources`
+
+- `source_id` — logical traffic observation point (`xdp-core-mirror-1`)
+- `source_type` — `xdp`, `dns`, `netflow`, `ipfix`, `sflow`, `manual`
+- `include_in_total` — whether dashboard totals include this source
+- `enabled` — soft delete via ReplacingMergeTree
+
+View: `default.net_flow_sources_enabled`
+
+Raw tables carry only `source_id`. Metadata lives in `net_flow_sources`.
+
 ## L3 Prefixes
 
 Table: `default.net_l3_prefixes`
@@ -62,6 +75,7 @@ New columns written by classifier:
 
 - `src_role`, `dst_role`
 - `src_entity`, `dst_entity`
+- `source_id` — logical observation point (see `net_flow_sources`)
 
 Existing enrichment columns remain populated for compatibility:
 
@@ -73,12 +87,12 @@ Existing enrichment columns remain populated for compatibility:
 
 | Table | Purpose |
 |-------|---------|
-| `traffic_direction_1m` | bytes/packets/flows by direction |
-| `traffic_role_1m` | by L3 role |
-| `traffic_entity_1m` | by entity |
-| `traffic_vlan_1m` | by VLAN attachment |
-| `traffic_dashboard_1m` | pivot dashboard (minute) |
-| `traffic_dashboard_1h` | pivot dashboard (hour) |
+| `traffic_direction_1m` | bytes/packets/flows by source + direction |
+| `traffic_role_1m` | by source + L3 role |
+| `traffic_entity_1m` | by source + entity |
+| `traffic_vlan_1m` | by source + VLAN attachment |
+| `traffic_dashboard_1m` | pivot dashboard (minute, source) |
+| `traffic_dashboard_1h` | pivot dashboard (hour, source) |
 
 ## Async Reports
 

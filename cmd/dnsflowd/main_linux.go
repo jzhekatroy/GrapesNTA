@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -19,6 +20,7 @@ import (
 
 func main() {
 	iface := flag.String("iface", "eth0", "mirror interface for packet capture (libpcap)")
+	sourceID := flag.String("source-id", "dns-default", "logical DNS observation point id written to dns_log/dns_answers.source_id")
 	chDSN := flag.String("ch-dsn", "", `ClickHouse DSN, e.g. clickhouse://user:pass@host:9000/default`)
 	chTable := flag.String("ch-table", "default.dns_log", "MergeTree table for raw DNS log INSERT")
 	chAnswersTable := flag.String("ch-answers-table", "default.dns_answers", "MergeTree table for flattened DNS answers")
@@ -52,6 +54,11 @@ func main() {
 		log.Error("missing -ch-dsn")
 		os.Exit(1)
 	}
+	if strings.TrimSpace(*sourceID) == "" {
+		log.Error("source-id must not be empty")
+		os.Exit(1)
+	}
+	*sourceID = strings.TrimSpace(*sourceID)
 	if *healthInterval <= 0 {
 		*healthInterval = time.Minute
 	}
@@ -318,6 +325,7 @@ func main() {
 				parseErrs.Add(1)
 				continue
 			}
+			row.SourceID = *sourceID
 			dnsRows.Add(1)
 			if dnsRows.Load() <= 10 {
 				log.Info("dnsflowd dns sample",
@@ -343,6 +351,7 @@ func main() {
 
 	log.Info("dnsflowd started",
 		"iface", *iface,
+		"source_id", *sourceID,
 		"ch_raw_enabled", *chRawEnabled,
 		"ch_table", *chTable,
 		"ch_answers_enabled", *chAnswersEnabled,

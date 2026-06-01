@@ -445,6 +445,7 @@ func main() {
 	classifierBGPTable := flag.String("classifier-bgp-table", "default.bgp_prefix_origin_current", "ClickHouse source table/view for prefix -> origin ASN")
 	classifierL3PrefixesView := flag.String("classifier-l3-prefixes-view", "default.net_l3_prefixes_enabled", "ClickHouse view for enabled L3 prefixes")
 	classifierL2VLANsView := flag.String("classifier-l2-vlans-view", "default.net_l2_vlans_enabled", "ClickHouse view for enabled L2 VLAN map")
+	sourceID := flag.String("source-id", "xdp-default", "logical flow observation point id written to flows_raw.source_id")
 	flag.Parse()
 
 	if strings.TrimSpace(*configPath) != "" {
@@ -603,6 +604,12 @@ func main() {
 	}
 
 	var chDel *clickhouseDelivery
+	if strings.TrimSpace(*sourceID) == "" {
+		log.Error("source-id must not be empty")
+		os.Exit(1)
+	}
+	*sourceID = strings.TrimSpace(*sourceID)
+
 	if strings.TrimSpace(*chDSN) != "" {
 		sampler, err := parseSamplerAddress(*chSamplerAddr)
 		if err != nil {
@@ -626,7 +633,8 @@ func main() {
 		if classifier != nil {
 			defer classifier.Close()
 		}
-		mapper := newFlowRowMapper(exportClock, sampler, 0, classifier)
+		mapper := newFlowRowMapper(exportClock, sampler, 0, *sourceID, classifier)
+		log.Info("flow source configured", "source_id", *sourceID)
 		if spoolMode != chSpoolOff {
 			sp, err := newSpoolClickhousePipeline(log,
 				strings.TrimSpace(*chDSN), strings.TrimSpace(*chTable),

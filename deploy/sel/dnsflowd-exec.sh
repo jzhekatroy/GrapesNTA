@@ -70,6 +70,7 @@ exec "${STDBUF[@]}" "$BIN" \
   -capture-batch-size "${DNS_CAPTURE_BATCH_SIZE:-1000}" \
   -capture-flush-interval "${DNS_CAPTURE_FLUSH_INTERVAL:-100ms}" \
   -ch-sampler-addr "${DNS_CH_SAMPLER_ADDR:-127.0.0.1}" \
+  -source-id "${DNSFLOWD_SOURCE_ID:-dns-default}" \
   -interval "${DNS_INTERVAL:-5s}" \
   -health-interval "${DNS_HEALTH_INTERVAL:-1m}" \
   -health-lag-threshold "${DNS_HEALTH_LAG_THRESHOLD:-100000}" \

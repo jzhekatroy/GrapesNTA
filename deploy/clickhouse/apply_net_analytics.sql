@@ -3,6 +3,7 @@
 -- Order:
 --   1. cleanup_old_classification.sql
 --   2. flows_raw_extensions.sql
+--   2b. net_flow_sources.sql + flows_raw_source_id.sql (when enabling source tracking)
 --   3. net_entities.sql
 --   4. net_l3_prefixes.sql
 --   5. net_l2_vlans.sql
