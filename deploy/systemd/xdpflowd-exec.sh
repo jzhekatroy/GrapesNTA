@@ -81,7 +81,12 @@ CH_ARGS=(
 if [[ -n "${XDP_CH_SAMPLER_ADDR:-}" ]]; then
   CH_ARGS+=( -ch-sampler-addr "$XDP_CH_SAMPLER_ADDR" )
 fi
-CH_ARGS+=( -source-id "${XDPFLOWD_SOURCE_ID:-xdp-default}" )
+SOURCE_ID="${XDPFLOWD_SOURCE_ID:-xdp-default}"
+if [[ -z "$SOURCE_ID" ]]; then
+  echo "ERROR: XDPFLOWD_SOURCE_ID must not be empty (set it in $ENV_FILE)" >&2
+  exit 1
+fi
+CH_ARGS+=( -source-id "$SOURCE_ID" )
 if [[ "${XDP_CLASSIFIER:-0}" == "1" ]]; then
   CH_ARGS+=(
     -classifier
@@ -131,6 +136,8 @@ STDBUF=()
 if command -v stdbuf >/dev/null 2>&1; then
   STDBUF=( stdbuf -oL -eL )
 fi
+
+echo "INFO: starting xdpflowd env_file=$ENV_FILE bin=$BIN iface=$IFACE source_id=$SOURCE_ID" >&2
 
 exec "${STDBUF[@]}" "$BIN" \
   "${CONFIG_ARGS[@]}" \

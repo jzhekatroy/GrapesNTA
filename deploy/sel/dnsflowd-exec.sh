@@ -38,6 +38,11 @@ if [[ -z "${DNS_CH_DSN:-}" || -z "${DNS_CH_TABLE:-}" ]]; then
   echo "ERROR: DNS_CH_DSN and DNS_CH_TABLE must be set in $ENV_FILE" >&2
   exit 1
 fi
+SOURCE_ID="${DNSFLOWD_SOURCE_ID:-dns-default}"
+if [[ -z "$SOURCE_ID" ]]; then
+  echo "ERROR: DNSFLOWD_SOURCE_ID must not be empty (set it in $ENV_FILE)" >&2
+  exit 1
+fi
 
 bool_flag() {
   case "${1:-1}" in
@@ -50,6 +55,8 @@ STDBUF=()
 if command -v stdbuf >/dev/null 2>&1; then
   STDBUF=( stdbuf -oL -eL )
 fi
+
+echo "INFO: starting dnsflowd env_file=$ENV_FILE bin=$BIN iface=$IFACE source_id=$SOURCE_ID" >&2
 
 exec "${STDBUF[@]}" "$BIN" \
   -iface "$IFACE" \
@@ -70,7 +77,7 @@ exec "${STDBUF[@]}" "$BIN" \
   -capture-batch-size "${DNS_CAPTURE_BATCH_SIZE:-1000}" \
   -capture-flush-interval "${DNS_CAPTURE_FLUSH_INTERVAL:-100ms}" \
   -ch-sampler-addr "${DNS_CH_SAMPLER_ADDR:-127.0.0.1}" \
-  -source-id "${DNSFLOWD_SOURCE_ID:-dns-default}" \
+  -source-id "$SOURCE_ID" \
   -interval "${DNS_INTERVAL:-5s}" \
   -health-interval "${DNS_HEALTH_INTERVAL:-1m}" \
   -health-lag-threshold "${DNS_HEALTH_LAG_THRESHOLD:-100000}" \
