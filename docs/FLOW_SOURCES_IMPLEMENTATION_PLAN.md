@@ -403,7 +403,7 @@ Stop after each step and verify before continuing.
 - Do not implement NetFlow/IPFIX/sFlow ingestion yet.
 - Do not build deduplication between sources yet.
 - Do not add `collector_id` directly to raw flow rows.
-- Do not add a daily aggregate until dashboard periods exceed one day.
+- Daily dashboard aggregate is useful once dashboard periods exceed one day.
 
 ## Server Apply (implemented)
 
@@ -419,7 +419,8 @@ for f in deploy/clickhouse/net_flow_sources.sql \
          deploy/clickhouse/port_services.sql \
          deploy/clickhouse/traffic_protocol_1m.sql \
          deploy/clickhouse/traffic_service_1m.sql \
-         deploy/clickhouse/traffic_dashboard_1m.sql; do
+         deploy/clickhouse/traffic_dashboard_1m.sql \
+         deploy/clickhouse/traffic_dashboard_1d.sql; do
   clickhouse-client --multiquery < "$f"
 done
 

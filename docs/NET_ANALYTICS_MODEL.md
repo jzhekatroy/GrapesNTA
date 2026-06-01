@@ -95,6 +95,7 @@ Existing enrichment columns remain populated for compatibility:
 | `traffic_service_1m` | by source + service inferred from transport + port |
 | `traffic_dashboard_1m` | pivot dashboard (minute, source) |
 | `traffic_dashboard_1h` | pivot dashboard (hour, source) |
+| `traffic_dashboard_1d` | pivot dashboard daily totals for month+ windows |
 
 `traffic_protocol_1m.proto` keeps the raw IP protocol number from
 `flows_raw.proto`. UI/API code should map common values such as `6=TCP`,
@@ -105,6 +106,10 @@ values as `IP-<number>`.
 `port_services`. It answers a different UI question than `traffic_protocol_1m`:
 `traffic_protocol_1m` shows TCP/UDP/GRE/ESP, while `traffic_service_1m` shows
 HTTPS/NTP/DNS/SSH and service categories.
+
+`traffic_dashboard_1d` stores daily totals only. Use it for long-window total
+traffic and average speed. Query `traffic_dashboard_1h` (or `1m` for exact
+minute-level peaks) when the UI needs a meaningful `max_gbps` value.
 
 ## Async Reports
 
@@ -126,7 +131,8 @@ above:
 - `net_entities` + `net_entities_enabled` — entity registry resource.
 - `net_l3_prefixes` + `net_l3_prefixes_enabled` — L3 prefix resource.
 - `net_l2_vlans` + `net_l2_vlans_enabled` — L2 VLAN resource.
-- `traffic_dashboard_1m` / `traffic_dashboard_1h` — pivoted dashboard.
+- `traffic_dashboard_1m` / `traffic_dashboard_1h` / `traffic_dashboard_1d` —
+  pivoted dashboard.
 - `traffic_direction_1m`, `traffic_role_1m`, `traffic_entity_1m`,
   `traffic_vlan_1m`, `traffic_protocol_1m`, `traffic_service_1m` —
   drill-down series.
