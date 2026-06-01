@@ -22,7 +22,7 @@ func TestRawShedActivatesAndRecovers(t *testing.T) {
 	}
 
 	c.Update(40, 0)
-	if c.ShedActive() {
+	if !c.ShedActive() {
 		t.Fatal("expected shed still active before cooldown")
 	}
 

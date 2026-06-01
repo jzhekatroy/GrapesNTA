@@ -51,25 +51,32 @@ func (d *answersDeduper) Filter(rows []DNSAnswerRow) []DNSAnswerRow {
 		return rows
 	}
 	out := make([]DNSAnswerRow, 0, len(rows))
-	now := time.Now()
-	cutoff := now.Add(-d.ttl)
+	pruneBase := time.Time{}
 
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
 	for _, r := range rows {
+		rowTime := r.Ts
+		if rowTime.IsZero() {
+			rowTime = time.Now()
+		}
+		if rowTime.After(pruneBase) {
+			pruneBase = rowTime
+		}
+		cutoff := rowTime.Add(-d.ttl)
 		key := answerDedupKeyFromRow(r)
 		if last, ok := d.lastEmit[key]; ok && !last.Before(cutoff) {
 			d.suppressed.Add(1)
 			continue
 		}
-		d.lastEmit[key] = r.Ts
+		d.lastEmit[key] = rowTime
 		out = append(out, r)
 		d.emitted.Add(1)
 	}
 
 	if len(d.lastEmit) > 500000 {
-		d.pruneLocked(cutoff)
+		d.pruneLocked(pruneBase.Add(-d.ttl))
 	}
 	return out
 }
