@@ -29,9 +29,8 @@ func TestAnswersDeduperSuppressesWithinTTL(t *testing.T) {
 func TestAnswersDeduperAllowsAfterTTL(t *testing.T) {
 	d := newAnswersDeduper(30 * time.Second)
 	row := sampleResponseRow()
-	answer := dnsAnswersFromRow(row)[0]
-
 	row.Ts = time.Date(2026, 5, 21, 10, 0, 0, 0, time.UTC)
+	answer := dnsAnswersFromRow(row)[0]
 	if len(d.Filter([]DNSAnswerRow{answer})) != 1 {
 		t.Fatal("expected first emit")
 	}
