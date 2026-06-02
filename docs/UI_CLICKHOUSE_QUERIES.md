@@ -51,6 +51,7 @@ all enabled sources where `include_in_total = 1`.
 | Time series chart | over 7d | `traffic_dashboard_1h` or `traffic_dashboard_1d` |
 | IP protocol donut | current dashboard window | `traffic_protocol_1m` |
 | Service/application donut | current dashboard window | `traffic_service_1m` |
+| Country heatmap / top countries | current dashboard window | `traffic_country_1m` |
 
 `traffic_dashboard_1d` stores daily totals. It is correct for total traffic and
 average speed across long windows. It is not a precise peak-speed source:
@@ -668,6 +669,205 @@ Interpretation:
 - `transport + port + port_side` is the drill-down key, for example
   `tcp / 54321 / dst`.
 
+## Country Heatmap
+
+Source table: `default.traffic_country_1m`.
+
+Parameters (set in API code, not from raw user SQL):
+
+```text
+ts_from, ts_to           explicit UTC DateTime bounds
+country_basis            ip (default) | asn
+map_side                 remote (default) | src | dst
+directions               in,out,transit by default; add internal only when selected
+```
+
+Semantics:
+
+- `country_basis = 'ip'` — prefix country from `geo_country_dict` (default map).
+- `country_basis = 'asn'` — ASN allocation country from `asn_registry_enriched`.
+- `map_side = 'remote'` — peer country: `in` uses `src`, `out` uses `dst`,
+  `transit` uses `src`; `internal` has no remote peer unless the UI includes it
+  explicitly (then use `src` or `dst` mode instead).
+- `map_side = 'src'` / `dst'` — always source or destination country side.
+
+Color intensity: `traffic_gb` or `percent`. Tooltip: `avg_gbps`, `packets`,
+`flows`.
+
+Example: last 24 hours, IP country, remote peers, inbound+outbound+transit.
+
+Replace `country_basis`, `map_side`, and the `direction IN (...)` list in API
+code.
+
+```sql
+WITH
+    now() AS ts_to,
+    ts_to - INTERVAL 24 HOUR AS ts_from,
+    'ip' AS country_basis,
+    'remote' AS map_side,
+    dateDiff('second', ts_from, ts_to) AS window_seconds
+SELECT
+    country_code,
+    round(sum(bytes) / 1000 / 1000 / 1000, 3) AS traffic_gb,
+    round(100 * sum(bytes) / sum(sum(bytes)) OVER (), 2) AS percent,
+    round((sum(bytes) * 8 / window_seconds) / 1e9, 3) AS avg_gbps,
+    round(sum(packets) / window_seconds, 0) AS avg_pps,
+    sum(packets) AS packets,
+    sum(flows_count) AS flows
+FROM default.traffic_country_1m AS c
+INNER JOIN default.net_flow_sources_enabled AS s ON c.source_id = s.source_id
+WHERE
+    s.include_in_total = 1
+    AND c.minute >= ts_from
+    AND c.minute < ts_to
+    AND c.country_basis = country_basis
+    AND c.direction IN ('in', 'out', 'transit')
+    AND (
+        (map_side = 'src' AND c.country_side = 'src')
+        OR (map_side = 'dst' AND c.country_side = 'dst')
+        OR (
+            map_side = 'remote'
+            AND (
+                (c.direction = 'in' AND c.country_side = 'src')
+                OR (c.direction = 'out' AND c.country_side = 'dst')
+                OR (c.direction = 'transit' AND c.country_side = 'src')
+                OR (c.direction = 'internal' AND c.country_side = 'src')
+            )
+        )
+    )
+GROUP BY country_code
+ORDER BY traffic_gb DESC;
+```
+
+ASN-country mode: set `country_basis = 'asn'` and keep the same `map_side`
+logic. Label the UI control as registry/allocation country, not IP geolocation.
+
+Always use `src` or `dst` map side when the user selects `internal` traffic and
+needs both endpoints visible on the map.
+
+## Country Aggregate Server Rollout
+
+Prerequisites on the server:
+
+1. Geo tables and dictionary are loaded (`geo_country.sql` + geoloaderd).
+2. Flow source tracking is applied (`net_flow_sources.sql`,
+   `flows_raw_source_id.sql`).
+
+Apply aggregate (new servers or after `git pull`):
+
+```bash
+cd /opt/GrapesNTA   # or /root/GrapesNTA
+git pull
+
+clickhouse-client --url "$XDP_CH_DSN" --multiquery < deploy/clickhouse/geo_country.sql
+clickhouse-client --url "$XDP_CH_DSN" --multiquery < deploy/clickhouse/traffic_country_1m.sql
+```
+
+Validate dictionary:
+
+```sql
+SELECT dictGetString('default.geo_country_dict', 'cc', tuple(toIPv4('8.8.8.8')));
+```
+
+Validate recent aggregate rows:
+
+```sql
+SELECT
+    country_basis,
+    country_side,
+    country_code,
+    sum(bytes) AS bytes
+FROM default.traffic_country_1m
+WHERE minute >= now() - INTERVAL 10 MINUTE
+GROUP BY country_basis, country_side, country_code
+ORDER BY bytes DESC
+LIMIT 20;
+```
+
+Backfill one hour (stop `xdpflowd` only if MV + live ingest double-count is a
+concern; otherwise run while collector is active and dedupe by time window):
+
+```bash
+sudo systemctl stop xdpflowd
+
+clickhouse-client --url "$XDP_CH_DSN" --query "
+INSERT INTO default.traffic_country_1m
+SELECT
+    minute,
+    source_id,
+    country_basis,
+    country_side,
+    direction,
+    if(length(trimBoth(country_raw)) = 0, '??', trimBoth(country_raw)) AS country_code,
+    sum(bytes) AS bytes,
+    sum(packets) AS packets,
+    count() AS flows_count
+FROM
+(
+    SELECT
+        toStartOfMinute(f.time_received_ns) AS minute,
+        f.source_id,
+        f.direction,
+        f.bytes,
+        f.packets,
+        row.1 AS country_basis,
+        row.2 AS country_side,
+        row.3 AS country_raw
+    FROM default.flows_raw AS f
+    LEFT JOIN default.asn_registry_enriched AS src_as ON src_as.asn = f.src_asn
+    LEFT JOIN default.asn_registry_enriched AS dst_as ON dst_as.asn = f.dst_asn
+    ARRAY JOIN arrayZip(
+        ['ip', 'ip', 'asn', 'asn'],
+        ['src', 'dst', 'src', 'dst'],
+        [
+            if(
+                f.etype = 2048,
+                dictGetString(
+                    'default.geo_country_dict',
+                    'cc',
+                    tuple(toIPv4(reinterpretAsUInt32(reverse(substring(f.src_addr, 1, 4)))))
+                ),
+                dictGetString(
+                    'default.geo_country_dict',
+                    'cc',
+                    tuple(toIPv6(IPv6NumToString(f.src_addr)))
+                )
+            ),
+            if(
+                f.etype = 2048,
+                dictGetString(
+                    'default.geo_country_dict',
+                    'cc',
+                    tuple(toIPv4(reinterpretAsUInt32(reverse(substring(f.dst_addr, 1, 4)))))
+                ),
+                dictGetString(
+                    'default.geo_country_dict',
+                    'cc',
+                    tuple(toIPv6(IPv6NumToString(f.dst_addr)))
+                )
+            ),
+            if(f.src_asn = 0, '', toString(src_as.cc)),
+            if(f.dst_asn = 0, '', toString(dst_as.cc))
+        ]
+    ) AS row
+    WHERE f.time_received_ns >= now() - INTERVAL 1 HOUR
+      AND f.time_received_ns < now()
+) AS expanded
+GROUP BY
+    minute,
+    source_id,
+    country_basis,
+    country_side,
+    direction,
+    country_code
+"
+
+sudo systemctl start xdpflowd
+```
+
+Cross-check top countries against `flows_raw` for the same hour (IP, remote,
+in+out+transit) before running a longer backfill.
+
 ## Source Selector
 
 Use this for UI source filters:
@@ -708,5 +908,19 @@ SELECT
 FROM default.traffic_service_1m
 WHERE minute >= now() - INTERVAL 10 MINUTE
 GROUP BY source_id
+ORDER BY traffic_gb DESC;
+```
+
+Recent country aggregate activity:
+
+```sql
+SELECT
+    source_id,
+    country_basis,
+    count() AS rows,
+    round(sum(bytes) / 1000 / 1000 / 1000, 3) AS traffic_gb
+FROM default.traffic_country_1m
+WHERE minute >= now() - INTERVAL 10 MINUTE
+GROUP BY source_id, country_basis
 ORDER BY traffic_gb DESC;
 ```

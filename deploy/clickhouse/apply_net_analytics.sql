@@ -4,6 +4,7 @@
 --   1. cleanup_old_classification.sql
 --   2. flows_raw_extensions.sql
 --   2b. net_flow_sources.sql + flows_raw_source_id.sql (when enabling source tracking)
+--   2c. geo_country.sql + geoloaderd (geo_country_dict, asn_registry_enriched)
 --   3. net_entities.sql
 --   4. net_l3_prefixes.sql
 --   5. net_l2_vlans.sql
@@ -15,9 +16,10 @@
 --  11. traffic_protocol_1m.sql
 --  12. traffic_service_1m.sql
 --  13. traffic_unknown_port_1m.sql
---  14. traffic_dashboard_1m.sql
---  15. traffic_dashboard_1d.sql
---  16. net_reports.sql
+--  14. traffic_country_1m.sql
+--  15. traffic_dashboard_1m.sql
+--  16. traffic_dashboard_1d.sql
+--  17. net_reports.sql
 --
 -- Example:
 --   for f in deploy/clickhouse/cleanup_old_classification.sql \
@@ -32,7 +34,9 @@
 --            deploy/clickhouse/port_services.sql \
 --            deploy/clickhouse/traffic_protocol_1m.sql \
 --            deploy/clickhouse/traffic_service_1m.sql \
+--            deploy/clickhouse/geo_country.sql \
 --            deploy/clickhouse/traffic_unknown_port_1m.sql \
+--            deploy/clickhouse/traffic_country_1m.sql \
 --            deploy/clickhouse/traffic_dashboard_1m.sql \
 --            deploy/clickhouse/traffic_dashboard_1d.sql \
 --            deploy/clickhouse/net_reports.sql; do

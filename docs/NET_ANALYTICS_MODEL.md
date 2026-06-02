@@ -94,6 +94,7 @@ Existing enrichment columns remain populated for compatibility:
 | `traffic_protocol_1m` | by source + IP protocol number + direction |
 | `traffic_service_1m` | by source + service inferred from transport + port |
 | `traffic_unknown_port_1m` | by source + unknown service port for `other` drill-down |
+| `traffic_country_1m` | by source + country basis/side + direction for heatmaps |
 | `traffic_dashboard_1m` | pivot dashboard (minute, source) |
 | `traffic_dashboard_1h` | pivot dashboard (hour, source) |
 | `traffic_dashboard_1d` | pivot dashboard daily totals for month+ windows |
@@ -111,6 +112,12 @@ HTTPS/NTP/DNS/SSH and service categories.
 `traffic_unknown_port_1m` stores only flows where neither source nor destination
 port matched `port_services`. The UI uses it for the "Other" service slice
 drill-down to TOP ports without scanning `flows_raw`.
+
+`traffic_country_1m` stores minute buckets with four country dimensions per flow
+minute aggregate input: IP-country and ASN-country, each on `src` and `dst`
+sides. The UI maps rows to a single country per flow using `remote` (default),
+`src`, or `dst` map modes. Use `country_basis = 'ip'` for geographic prefix
+country (default heatmap) and `country_basis = 'asn'` for ASN registry country.
 
 `traffic_dashboard_1d` stores daily totals only. Use it for long-window total
 traffic and average speed. Query `traffic_dashboard_1h` (or `1m` for exact
@@ -141,7 +148,7 @@ above. Query templates for dashboard widgets live in
   pivoted dashboard.
 - `traffic_direction_1m`, `traffic_role_1m`, `traffic_entity_1m`,
   `traffic_vlan_1m`, `traffic_protocol_1m`, `traffic_service_1m`,
-  `traffic_unknown_port_1m` — drill-down series.
+  `traffic_unknown_port_1m`, `traffic_country_1m` — drill-down series.
 - `net_reports` — async report queue.
 
 Writes go through INSERTs into the base `ReplacingMergeTree` tables

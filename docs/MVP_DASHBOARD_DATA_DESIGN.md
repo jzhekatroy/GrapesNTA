@@ -269,14 +269,23 @@ VLAN/префиксы операторов без AS. Новые разрабо�
 
 ### `traffic_country_1m`
 
-Тепловая карта стран и top countries:
+Тепловая карта стран и top countries. DDL:
+`deploy/clickhouse/traffic_country_1m.sql`.
+
+Поля:
 
 - minute;
-- country_code;
+- source_id;
+- country_basis (`ip` / `asn`);
+- country_side (`src` / `dst`);
 - direction;
+- country_code (`RU`, `US`, `??` при пустом lookup);
 - bytes;
 - packets;
 - flows_count.
+
+UI выбирает basis (`ip` по умолчанию, `asn` — страна регистрации ASN) и
+режим карты: `remote` (in→src, out→dst, transit→src), `src`, `dst`.
 
 Используется для карты за час/сутки/неделю и графика выбранной страны.
 
