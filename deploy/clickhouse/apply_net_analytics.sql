@@ -14,9 +14,10 @@
 --  10. port_services.sql
 --  11. traffic_protocol_1m.sql
 --  12. traffic_service_1m.sql
---  13. traffic_dashboard_1m.sql
---  14. traffic_dashboard_1d.sql
---  15. net_reports.sql
+--  13. traffic_unknown_port_1m.sql
+--  14. traffic_dashboard_1m.sql
+--  15. traffic_dashboard_1d.sql
+--  16. net_reports.sql
 --
 -- Example:
 --   for f in deploy/clickhouse/cleanup_old_classification.sql \
@@ -31,6 +32,7 @@
 --            deploy/clickhouse/port_services.sql \
 --            deploy/clickhouse/traffic_protocol_1m.sql \
 --            deploy/clickhouse/traffic_service_1m.sql \
+--            deploy/clickhouse/traffic_unknown_port_1m.sql \
 --            deploy/clickhouse/traffic_dashboard_1m.sql \
 --            deploy/clickhouse/traffic_dashboard_1d.sql \
 --            deploy/clickhouse/net_reports.sql; do

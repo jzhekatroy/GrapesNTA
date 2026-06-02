@@ -93,6 +93,7 @@ Existing enrichment columns remain populated for compatibility:
 | `traffic_vlan_1m` | by source + VLAN attachment |
 | `traffic_protocol_1m` | by source + IP protocol number + direction |
 | `traffic_service_1m` | by source + service inferred from transport + port |
+| `traffic_unknown_port_1m` | by source + unknown service port for `other` drill-down |
 | `traffic_dashboard_1m` | pivot dashboard (minute, source) |
 | `traffic_dashboard_1h` | pivot dashboard (hour, source) |
 | `traffic_dashboard_1d` | pivot dashboard daily totals for month+ windows |
@@ -106,6 +107,10 @@ values as `IP-<number>`.
 `port_services`. It answers a different UI question than `traffic_protocol_1m`:
 `traffic_protocol_1m` shows TCP/UDP/GRE/ESP, while `traffic_service_1m` shows
 HTTPS/NTP/DNS/SSH and service categories.
+
+`traffic_unknown_port_1m` stores only flows where neither source nor destination
+port matched `port_services`. The UI uses it for the "Other" service slice
+drill-down to TOP ports without scanning `flows_raw`.
 
 `traffic_dashboard_1d` stores daily totals only. Use it for long-window total
 traffic and average speed. Query `traffic_dashboard_1h` (or `1m` for exact
@@ -126,7 +131,8 @@ Types:
 
 UI is built on Laravel + MoonShine in a separate repository. MoonShine
 resources operate directly on ClickHouse tables and views described
-above:
+above. Query templates for dashboard widgets live in
+`docs/UI_CLICKHOUSE_QUERIES.md`.
 
 - `net_entities` + `net_entities_enabled` — entity registry resource.
 - `net_l3_prefixes` + `net_l3_prefixes_enabled` — L3 prefix resource.
@@ -134,8 +140,8 @@ above:
 - `traffic_dashboard_1m` / `traffic_dashboard_1h` / `traffic_dashboard_1d` —
   pivoted dashboard.
 - `traffic_direction_1m`, `traffic_role_1m`, `traffic_entity_1m`,
-  `traffic_vlan_1m`, `traffic_protocol_1m`, `traffic_service_1m` —
-  drill-down series.
+  `traffic_vlan_1m`, `traffic_protocol_1m`, `traffic_service_1m`,
+  `traffic_unknown_port_1m` — drill-down series.
 - `net_reports` — async report queue.
 
 Writes go through INSERTs into the base `ReplacingMergeTree` tables

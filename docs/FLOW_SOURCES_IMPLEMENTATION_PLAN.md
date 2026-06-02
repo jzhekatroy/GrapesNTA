@@ -276,6 +276,7 @@ traffic_entity_1m.sql
 traffic_vlan_1m.sql
 traffic_protocol_1m.sql
 traffic_service_1m.sql
+traffic_unknown_port_1m.sql
 future flow_summary_1m / rollups
 ```
 
@@ -419,6 +420,7 @@ for f in deploy/clickhouse/net_flow_sources.sql \
          deploy/clickhouse/port_services.sql \
          deploy/clickhouse/traffic_protocol_1m.sql \
          deploy/clickhouse/traffic_service_1m.sql \
+         deploy/clickhouse/traffic_unknown_port_1m.sql \
          deploy/clickhouse/traffic_dashboard_1m.sql \
          deploy/clickhouse/traffic_dashboard_1d.sql; do
   clickhouse-client --multiquery < "$f"
