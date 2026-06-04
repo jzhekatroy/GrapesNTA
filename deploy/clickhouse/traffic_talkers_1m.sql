@@ -49,6 +49,7 @@ ORDER BY (
     endpoint_scope,
     endpoint_network_role
 )
+TTL minute + INTERVAL 2 DAY
 SETTINGS index_granularity = 8192;
 
 CREATE MATERIALIZED VIEW default.traffic_talker_1m_mv
@@ -200,6 +201,7 @@ ORDER BY (
     src_ip_country,
     dst_ip_country
 )
+TTL minute + INTERVAL 2 DAY
 SETTINGS index_granularity = 8192;
 
 CREATE MATERIALIZED VIEW default.traffic_pair_1m_mv

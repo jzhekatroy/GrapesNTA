@@ -279,6 +279,7 @@ traffic_service_1m.sql
 traffic_unknown_port_1m.sql
 traffic_country_1m.sql
 traffic_talkers_1m.sql
+traffic_talkers_1h.sql
 future flow_summary_1m / rollups
 ```
 
@@ -299,6 +300,8 @@ minute, source_id, proto, direction
 minute, source_id, service_code, service_port, direction
 minute, source_id, endpoint_side, direction, endpoint_ip
 minute, source_id, direction, src_ip, dst_ip
+hour, source_id, endpoint_side, direction, endpoint_ip
+hour, source_id, direction, src_ip, dst_ip
 ```
 
 Acceptance:
@@ -428,6 +431,7 @@ for f in deploy/clickhouse/net_flow_sources.sql \
          deploy/clickhouse/traffic_unknown_port_1m.sql \
          deploy/clickhouse/traffic_country_1m.sql \
          deploy/clickhouse/traffic_talkers_1m.sql \
+         deploy/clickhouse/traffic_talkers_1h.sql \
          deploy/clickhouse/traffic_dashboard_1m.sql \
          deploy/clickhouse/traffic_dashboard_1d.sql; do
   clickhouse-client --multiquery < "$f"

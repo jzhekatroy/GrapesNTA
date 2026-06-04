@@ -289,14 +289,19 @@ UI выбирает basis (`ip` по умолчанию, `asn` — страна 
 
 Используется для карты за час/сутки/неделю и графика выбранной страны.
 
-### `traffic_talker_1m` / `traffic_pair_1m`
+### `traffic_talker_1m` / `traffic_pair_1m` / `traffic_talker_1h` / `traffic_pair_1h`
 
-Таблица top talkers. DDL: `deploy/clickhouse/traffic_talkers_1m.sql`.
+Таблицы top talkers. DDL:
+
+- `deploy/clickhouse/traffic_talkers_1m.sql`;
+- `deploy/clickhouse/traffic_talkers_1h.sql`.
 
 `traffic_talker_1m` хранит endpoints по сторонам:
 
 - `endpoint_side = src` — вкладка «Источники»;
 - `endpoint_side = dst` — вкладка «Назначения».
+
+`traffic_talker_1h` — часовой rollup для тех же вкладок.
 
 Поля:
 
@@ -317,7 +322,12 @@ UI выбирает basis (`ip` по умолчанию, `asn` — страна 
 - flows_count.
 
 `traffic_pair_1m` хранит пары `src_ip -> dst_ip` с ASN/country атрибутами обеих
-сторон для вкладки «Пары».
+сторон для вкладки «Пары». `traffic_pair_1h` — часовой rollup для длинных окон.
+
+Хранение:
+
+- `traffic_talker_1m` / `traffic_pair_1m` — TTL 2 дня, короткие окна;
+- `traffic_talker_1h` / `traffic_pair_1h` — TTL 90 дней, 3h/6h/12h/24h+ окна.
 
 Верхний фильтр направления выбирает реальные `direction` rows. Значение UI
 «Всего» не хранится как `direction = total`; UI/API суммирует реальные
