@@ -1,0 +1,23 @@
+[Unit]
+Description=GrapesNTA flowcollectord (sFlow v5 / NetFlow UDP collector)
+Documentation=file:/opt/GrapesNTA/docs/SFLOW_RECEIVER_PLAN.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=-/etc/flowcollectord/flowcollectord.env
+ExecStart=/opt/GrapesNTA/bin/flowcollectord
+
+KillSignal=SIGTERM
+TimeoutStopSec=600
+SendSIGKILL=yes
+
+Restart=on-failure
+RestartSec=5
+
+LimitNOFILE=1048576
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

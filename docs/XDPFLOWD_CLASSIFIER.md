@@ -135,6 +135,116 @@ WHERE minute >= now() - INTERVAL 5 MINUTE
 GROUP BY direction;
 ```
 
+Direction matrix check on production data:
+
+```sql
+SELECT
+    s.src_role,
+    d.dst_role,
+    multiIf(
+        s.src_role IN ('provider_public', 'internal', 'customer_allocated', 'customer_transit')
+            AND d.dst_role IN ('provider_public', 'internal', 'customer_allocated', 'customer_transit'),
+            'internal',
+        s.src_role IN ('provider_public', 'internal', 'customer_allocated', 'customer_transit')
+            AND d.dst_role = 'remote',
+            'out',
+        s.src_role = 'remote'
+            AND d.dst_role IN ('provider_public', 'internal', 'customer_allocated', 'customer_transit'),
+            'in',
+        'transit'
+    ) AS expected_direction,
+    if(isNull(a.flows), 'no traffic', a.observed_direction) AS observed_direction,
+    ifNull(a.direction_variants, 0) AS direction_variants,
+    ifNull(a.flows, 0) AS flows,
+    ifNull(a.gbps_5m, 0) AS gbps_5m,
+    if(
+        isNull(a.flows),
+        'not seen',
+        if(observed_direction = expected_direction AND direction_variants = 1, 'ok', 'bad')
+    ) AS status
+FROM
+(
+    SELECT arrayJoin([
+        'remote',
+        'provider_public',
+        'internal',
+        'customer_allocated',
+        'customer_transit'
+    ]) AS src_role
+) AS s
+CROSS JOIN
+(
+    SELECT arrayJoin([
+        'remote',
+        'provider_public',
+        'internal',
+        'customer_allocated',
+        'customer_transit'
+    ]) AS dst_role
+) AS d
+LEFT JOIN
+(
+    SELECT
+        src_role,
+        dst_role,
+        any(direction) AS observed_direction,
+        countDistinct(direction) AS direction_variants,
+        count() AS flows,
+        round(sum(bytes) * 8 / 300 / 1000000000, 3) AS gbps_5m
+    FROM default.flows_raw
+    WHERE time_received_ns >= now() - INTERVAL 5 MINUTE
+    GROUP BY
+        src_role,
+        dst_role
+) AS a
+ON s.src_role = a.src_role
+AND d.dst_role = a.dst_role
+ORDER BY
+    s.src_role,
+    d.dst_role;
+```
+
+Expected result:
+
+```text
+status = ok       direction matches the classifier rules
+status = not seen this role pair had no traffic in the selected window
+status = bad      direction mismatch or several directions for one role pair
+```
+
+Short mismatch-only check:
+
+```sql
+WITH
+    src_role IN ('provider_public', 'internal', 'customer_allocated', 'customer_transit') AS src_known,
+    dst_role IN ('provider_public', 'internal', 'customer_allocated', 'customer_transit') AS dst_known,
+    multiIf(
+        src_known AND dst_known, 'internal',
+        src_known AND NOT dst_known, 'out',
+        NOT src_known AND dst_known, 'in',
+        'transit'
+    ) AS expected_direction
+SELECT
+    src_role,
+    dst_role,
+    direction,
+    expected_direction,
+    count() AS flows,
+    round(sum(bytes) * 8 / 300 / 1000000000, 3) AS gbps_5m
+FROM default.flows_raw
+WHERE time_received_ns >= now() - INTERVAL 5 MINUTE
+GROUP BY
+    src_role,
+    dst_role,
+    direction,
+    expected_direction
+HAVING direction != expected_direction
+ORDER BY gbps_5m DESC;
+```
+
+Expected result is `0 rows`. This proves that every role pair observed in the
+selected production window was mapped to the expected direction.
+
 ## Failure Modes
 
 | Symptom | Cause | Fix |

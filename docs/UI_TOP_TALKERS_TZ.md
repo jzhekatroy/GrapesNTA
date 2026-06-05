@@ -154,31 +154,46 @@ AND t.source_id IN ('xdp-default')
 
 ## 6. Формат строки в UI
 
-В основной таблице показываем только короткий набор:
+В основной таблице показываем только короткий набор. Таблица должна быть
+быстрой для чтения: подробности не выводим в строку, а показываем только после
+клика/раскрытия записи.
 
 ```text
-IP / DNS | ASN | GEO | Объём данных
+IP | ASN | GEO | Объём
 ```
 
-Не показываем в основной строке PPS, flow count, scope и прочее — это уходит в раскрытие строки.
+Не показываем в основной строке PPS, flow count, scope, source_id, direction,
+network role и прочее — это уходит в раскрытие строки.
 
 ### Источники / Назначения
 
 | Колонка UI | Поле |
 |------------|------|
-| IP / DNS | `endpoint_label` если не пустой, иначе `endpoint_ip`; IP можно второй строкой |
-| ASN | `endpoint_as_name`, ниже `AS endpoint_asn` |
+| IP | `endpoint_ip`; если `endpoint_label` не пустой, показать его рядом/второй строкой |
+| ASN | `endpoint_as_name`; ниже или рядом `AS endpoint_asn` |
 | GEO | `endpoint_ip_country` |
-| Объём данных | `traffic_gb` / `traffic_tb` |
+| Объём | `traffic_gb` или `traffic_tb` |
 
 ### Пары
 
+Для вкладки **Пары** в основной таблице нужно показать source и destination.
+То есть в одной строке пользователь должен видеть обе стороны пары:
+
+```text
+Source:      src_ip | src_asn/src_as_name | src_ip_country
+Destination: dst_ip | dst_asn/dst_as_name | dst_ip_country
+Volume:      traffic_gb / traffic_tb
+```
+
 | Колонка UI | Поле |
 |------------|------|
-| IP / DNS | `src_ip -> dst_ip` |
-| ASN | `src_as_name -> dst_as_name`, ниже `AS src_asn -> AS dst_asn` |
-| GEO | `src_ip_country -> dst_ip_country` |
-| Объём данных | `traffic_gb` / `traffic_tb` |
+| IP источника | `src_ip`; если `src_label` не пустой, показать рядом/второй строкой |
+| ASN источника | `src_as_name`; ниже или рядом `AS src_asn` |
+| GEO источника | `src_ip_country` |
+| IP получателя | `dst_ip`; если `dst_label` не пустой, показать рядом/второй строкой |
+| ASN получателя | `dst_as_name`; ниже или рядом `AS dst_asn` |
+| GEO получателя | `dst_ip_country` |
+| Объём | `traffic_gb` или `traffic_tb` |
 
 Progress bar считать на фронте:
 
@@ -192,7 +207,8 @@ bar_width = traffic_gb / traffic_gb первой строки
 
 ## 6.1. Раскрытие строки
 
-При клике на строку показываем все поля, которые уже вернул запрос.
+При клике на строку раскрываем подробности и показываем все поля, которые уже
+вернул запрос. Дополнительный запрос для раскрытия строки не нужен.
 
 ### Источники / Назначения
 
@@ -207,10 +223,13 @@ Scope: endpoint_scope
 Network name: endpoint_network_name
 Network role: endpoint_network_role
 Traffic: traffic_gb
+Traffic bytes: total_bytes
 Average speed: avg_gbps
 Average PPS: avg_pps
 Flows: flow_count
-Direction: выбранный фильтр
+Source IDs: source_ids
+Directions in row: directions
+Direction filter: выбранный фильтр
 Side: endpoint_side
 Period: ts_from - ts_to
 ```
@@ -233,12 +252,20 @@ Destination ASN GEO: dst_as_country
 Destination scope: dst_scope
 
 Traffic: traffic_gb
+Traffic bytes: total_bytes
 Average speed: avg_gbps
 Average PPS: avg_pps
 Flows: flow_count
-Direction: выбранный фильтр
+Source IDs: source_ids
+Directions in row: directions
+Direction filter: выбранный фильтр
 Period: ts_from - ts_to
 ```
+
+Важно: в `traffic_pair_1m` / `traffic_pair_1h` нет полей
+`src_network_name`, `dst_network_name`, `src_network_role`, `dst_network_role`.
+Если для цели нужен network name, брать его из вкладки/запроса
+`traffic_talker_*` с `endpoint_side = 'dst'`.
 
 ---
 
@@ -273,6 +300,9 @@ SELECT
     endpoint_scope,
     endpoint_network_name,
     endpoint_network_role,
+    source_ids,
+    directions,
+    total_bytes,
     traffic_gb,
     avg_gbps,
     avg_pps,
@@ -281,14 +311,16 @@ FROM
 (
     SELECT
         t.endpoint_ip,
-        t.endpoint_label,
-        t.endpoint_asn,
-        t.endpoint_as_name,
-        t.endpoint_ip_country,
-        t.endpoint_as_country,
-        t.endpoint_scope,
-        t.endpoint_network_name,
-        t.endpoint_network_role,
+        any(t.endpoint_label) AS endpoint_label,
+        any(t.endpoint_asn) AS endpoint_asn,
+        any(t.endpoint_as_name) AS endpoint_as_name,
+        any(t.endpoint_ip_country) AS endpoint_ip_country,
+        any(t.endpoint_as_country) AS endpoint_as_country,
+        any(t.endpoint_scope) AS endpoint_scope,
+        any(t.endpoint_network_name) AS endpoint_network_name,
+        any(t.endpoint_network_role) AS endpoint_network_role,
+        groupUniqArray(t.source_id) AS source_ids,
+        groupUniqArray(t.direction) AS directions,
         sum(t.bytes) AS total_bytes,
         round(sum(t.bytes) / 1000 / 1000 / 1000, 3) AS traffic_gb,
         round((sum(t.bytes) * 8 / window_seconds) / 1e9, 3) AS avg_gbps,
@@ -303,15 +335,7 @@ FROM
         AND t.direction IN ('out')
         AND t.endpoint_side = 'src'
     GROUP BY
-        t.endpoint_ip,
-        t.endpoint_label,
-        t.endpoint_asn,
-        t.endpoint_as_name,
-        t.endpoint_ip_country,
-        t.endpoint_as_country,
-        t.endpoint_scope,
-        t.endpoint_network_name,
-        t.endpoint_network_role
+        t.endpoint_ip
 ) AS agg
 ORDER BY traffic_gb DESC
 LIMIT 20;
@@ -357,6 +381,9 @@ SELECT
     endpoint_scope,
     endpoint_network_name,
     endpoint_network_role,
+    source_ids,
+    directions,
+    total_bytes,
     traffic_gb,
     avg_gbps,
     avg_pps,
@@ -365,14 +392,16 @@ FROM
 (
     SELECT
         t.endpoint_ip,
-        t.endpoint_label,
-        t.endpoint_asn,
-        t.endpoint_as_name,
-        t.endpoint_ip_country,
-        t.endpoint_as_country,
-        t.endpoint_scope,
-        t.endpoint_network_name,
-        t.endpoint_network_role,
+        any(t.endpoint_label) AS endpoint_label,
+        any(t.endpoint_asn) AS endpoint_asn,
+        any(t.endpoint_as_name) AS endpoint_as_name,
+        any(t.endpoint_ip_country) AS endpoint_ip_country,
+        any(t.endpoint_as_country) AS endpoint_as_country,
+        any(t.endpoint_scope) AS endpoint_scope,
+        any(t.endpoint_network_name) AS endpoint_network_name,
+        any(t.endpoint_network_role) AS endpoint_network_role,
+        groupUniqArray(t.source_id) AS source_ids,
+        groupUniqArray(t.direction) AS directions,
         sum(t.bytes) AS total_bytes,
         round(sum(t.bytes) / 1000 / 1000 / 1000, 3) AS traffic_gb,
         round((sum(t.bytes) * 8 / window_seconds) / 1e9, 3) AS avg_gbps,
@@ -387,15 +416,7 @@ FROM
         AND t.direction IN ('out')
         AND t.endpoint_side = 'dst'
     GROUP BY
-        t.endpoint_ip,
-        t.endpoint_label,
-        t.endpoint_asn,
-        t.endpoint_as_name,
-        t.endpoint_ip_country,
-        t.endpoint_as_country,
-        t.endpoint_scope,
-        t.endpoint_network_name,
-        t.endpoint_network_role
+        t.endpoint_ip
 ) AS agg
 ORDER BY traffic_gb DESC
 LIMIT 20;
@@ -440,6 +461,9 @@ SELECT
     dst_scope,
     src_label,
     dst_label,
+    source_ids,
+    directions,
+    total_bytes,
     traffic_gb,
     avg_gbps,
     avg_pps,
@@ -449,18 +473,20 @@ FROM
     SELECT
         p.src_ip,
         p.dst_ip,
-        p.src_asn,
-        p.dst_asn,
-        p.src_as_name,
-        p.dst_as_name,
-        p.src_ip_country,
-        p.dst_ip_country,
-        p.src_as_country,
-        p.dst_as_country,
-        p.src_scope,
-        p.dst_scope,
-        p.src_label,
-        p.dst_label,
+        any(p.src_asn) AS src_asn,
+        any(p.dst_asn) AS dst_asn,
+        any(p.src_as_name) AS src_as_name,
+        any(p.dst_as_name) AS dst_as_name,
+        any(p.src_ip_country) AS src_ip_country,
+        any(p.dst_ip_country) AS dst_ip_country,
+        any(p.src_as_country) AS src_as_country,
+        any(p.dst_as_country) AS dst_as_country,
+        any(p.src_scope) AS src_scope,
+        any(p.dst_scope) AS dst_scope,
+        any(p.src_label) AS src_label,
+        any(p.dst_label) AS dst_label,
+        groupUniqArray(p.source_id) AS source_ids,
+        groupUniqArray(p.direction) AS directions,
         sum(p.bytes) AS total_bytes,
         round(sum(p.bytes) / 1000 / 1000 / 1000, 3) AS traffic_gb,
         round((sum(p.bytes) * 8 / window_seconds) / 1e9, 3) AS avg_gbps,
@@ -475,19 +501,7 @@ FROM
         AND p.direction IN ('out')
     GROUP BY
         p.src_ip,
-        p.dst_ip,
-        p.src_asn,
-        p.dst_asn,
-        p.src_as_name,
-        p.dst_as_name,
-        p.src_ip_country,
-        p.dst_ip_country,
-        p.src_as_country,
-        p.dst_as_country,
-        p.src_scope,
-        p.dst_scope,
-        p.src_label,
-        p.dst_label
+        p.dst_ip
 ) AS agg
 ORDER BY traffic_gb DESC
 LIMIT 20;
@@ -583,10 +597,10 @@ default.traffic_pair_1m или default.traffic_pair_1h
 Основная строка:
 
 ```text
-endpoint_label или endpoint_ip
+endpoint_ip
 ```
 
-Если `endpoint_label` пустой, показывать `endpoint_ip`.
+Если `endpoint_label` не пустой, показать его рядом или второй строкой как DNS/label.
 
 Вторая строка:
 
@@ -609,7 +623,7 @@ endpoint_ip_country
 
 ### Пары
 
-Основная строка:
+Основная строка должна содержать обе стороны:
 
 ```text
 src_ip -> dst_ip
@@ -618,7 +632,7 @@ src_ip -> dst_ip
 Вторая строка:
 
 ```text
-src_as_name -> dst_as_name
+src_as_name (AS src_asn) -> dst_as_name (AS dst_asn)
 ```
 
 GEO:
@@ -673,6 +687,6 @@ traffic_gb / traffic_gb первой строки
 - [ ] `??` отображается как «Неизвестно».
 - [ ] Если label пустой, показывается IP.
 - [ ] Для пар показываются обе стороны: source и destination.
-- [ ] Основная строка показывает только `IP / DNS`, `ASN`, `GEO`, `Объём данных`.
+- [ ] Основная строка показывает только `IP`, `ASN`, `GEO`, `Объём`.
 - [ ] Подробные поля показываются только в раскрытии строки.
 

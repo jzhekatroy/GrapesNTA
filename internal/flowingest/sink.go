@@ -1,4 +1,4 @@
-package main
+package flowingest
 
 import (
 	"context"
@@ -15,10 +15,10 @@ import (
 	chdriver "github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 )
 
-// clickhouseSink batches FlowRow and INSERTs into ClickHouse asynchronously.
+// Sink batches FlowRow and INSERTs into ClickHouse asynchronously.
 // If the bounded queue is full, EnqueueRows drops rows and increments queueDrops — flows
 // may already be deleted from the BPF map by the NetFlow path; document this as CH-only loss.
-type clickhouseSink struct {
+type Sink struct {
 	log   *slog.Logger
 	conn  chdriver.Conn
 	table string // "database.table"
@@ -39,7 +39,7 @@ type clickhouseSink struct {
 	wg     sync.WaitGroup
 }
 
-func parseClickHouseDSN(dsn string) (*clickhouse.Options, error) {
+func ParseClickHouseDSN(dsn string) (*clickhouse.Options, error) {
 	dsn = strings.TrimSpace(dsn)
 	if dsn == "" {
 		return nil, errors.New("empty DSN")
@@ -79,17 +79,17 @@ func parseClickHouseDSN(dsn string) (*clickhouse.Options, error) {
 	return opts, nil
 }
 
-func newClickhouseSink(
+func NewSink(
 	log *slog.Logger,
 	dsn, table string,
 	batchSize int,
 	flushInterval time.Duration,
 	queueSize int,
-) (*clickhouseSink, error) {
+) (*Sink, error) {
 	if table == "" {
 		return nil, errors.New("ClickHouse table (-ch-table) is required when -ch-dsn is set")
 	}
-	opts, err := parseClickHouseDSN(dsn)
+	opts, err := ParseClickHouseDSN(dsn)
 	if err != nil {
 		return nil, err
 	}
@@ -107,7 +107,7 @@ func newClickhouseSink(
 	if queueSize < 1 {
 		queueSize = 64
 	}
-	s := &clickhouseSink{
+	s := &Sink{
 		log:           log,
 		conn:          conn,
 		table:         table,
@@ -128,7 +128,7 @@ func newClickhouseSink(
 	return s, nil
 }
 
-func etherType(ipVersion uint8) uint32 {
+func EtherType(ipVersion uint8) uint32 {
 	if ipVersion == 6 {
 		return 0x86DD
 	}
@@ -136,11 +136,11 @@ func etherType(ipVersion uint8) uint32 {
 }
 
 // insertBatchRows executes a single INSERT. insertErrs is incremented on failure.
-func insertBatchRows(ctx context.Context, log *slog.Logger, conn chdriver.Conn, table string, rows []FlowRow, insertErrs *atomic.Uint64) bool {
+func InsertBatchRows(ctx context.Context, log *slog.Logger, conn chdriver.Conn, table string, rows []FlowRow, insertErrs *atomic.Uint64) bool {
 	if len(rows) == 0 {
 		return true
 	}
-	if !rowsHaveEnrichment(rows) {
+	if !RowsHaveEnrichment(rows) {
 		return insertCompactBatchRows(ctx, log, conn, table, rows, insertErrs)
 	}
 	return insertEnrichedBatchRows(ctx, log, conn, table, rows, insertErrs)
@@ -292,7 +292,7 @@ func insertEnrichedBatchRows(ctx context.Context, log *slog.Logger, conn chdrive
 
 	for i := range rows {
 		r := &rows[i]
-		flowRowApplyInsertDefaults(r)
+		ApplyInsertDefaults(r)
 		err := batch.Append(
 			r.Date,
 			r.TimeInsertedNs,
@@ -358,7 +358,7 @@ func insertEnrichedBatchRows(ctx context.Context, log *slog.Logger, conn chdrive
 	return true
 }
 
-func rowsHaveEnrichment(rows []FlowRow) bool {
+func RowsHaveEnrichment(rows []FlowRow) bool {
 	for i := range rows {
 		r := &rows[i]
 		if r.SrcASN != 0 || r.DstASN != 0 ||
@@ -381,7 +381,7 @@ func rowsHaveEnrichment(rows []FlowRow) bool {
 // flowRowApplyInsertDefaults fills enrichment columns in-place. Operating on a
 // pointer avoids copying the ~200-byte FlowRow struct once per row in the hot
 // INSERT loop.
-func flowRowApplyInsertDefaults(r *FlowRow) {
+func ApplyInsertDefaults(r *FlowRow) {
 	if r.SourceID == "" {
 		r.SourceID = "xdp-default"
 	}
@@ -432,11 +432,11 @@ func flowRowApplyInsertDefaults(r *FlowRow) {
 	}
 }
 
-func (s *clickhouseSink) insertBatch(ctx context.Context, rows []FlowRow) bool {
+func (s *Sink) insertBatch(ctx context.Context, rows []FlowRow) bool {
 	if len(rows) == 0 {
 		return true
 	}
-	if insertBatchRows(ctx, s.log, s.conn, s.table, rows, &s.insertErrs) {
+	if InsertBatchRows(ctx, s.log, s.conn, s.table, rows, &s.insertErrs) {
 		s.batchesOK.Add(1)
 		s.recordsWritten.Add(uint64(len(rows)))
 		return true
@@ -444,7 +444,7 @@ func (s *clickhouseSink) insertBatch(ctx context.Context, rows []FlowRow) bool {
 	return false
 }
 
-func (s *clickhouseSink) run() {
+func (s *Sink) run() {
 	defer s.wg.Done()
 	batch := make([]FlowRow, 0, s.batchSize)
 	ticker := time.NewTicker(s.flushInterval)
@@ -505,7 +505,7 @@ func (s *clickhouseSink) run() {
 }
 
 // EnqueueRows copies rows into the sink queue (non-blocking). On overflow, increments queueDrops.
-func (s *clickhouseSink) EnqueueRows(rows []FlowRow) {
+func (s *Sink) EnqueueRows(rows []FlowRow) {
 	if s == nil || len(rows) == 0 {
 		return
 	}
@@ -519,7 +519,7 @@ func (s *clickhouseSink) EnqueueRows(rows []FlowRow) {
 	}
 }
 
-func (s *clickhouseSink) Close() {
+func (s *Sink) Close() {
 	s.log.Info("clickhouse closing",
 		"records_queued", s.recordsQueued.Load(),
 		"records_written", s.recordsWritten.Load(),
@@ -540,7 +540,7 @@ func (s *clickhouseSink) Close() {
 	)
 }
 
-func (s *clickhouseSink) LogMetrics() {
+func (s *Sink) LogMetrics() {
 	s.log.Info("clickhouse",
 		"records_queued", s.recordsQueued.Load(),
 		"records_written", s.recordsWritten.Load(),
@@ -550,13 +550,13 @@ func (s *clickhouseSink) LogMetrics() {
 	)
 }
 
-func (s *clickhouseSink) HealthSnapshot() clickhouseHealthSnapshot {
+func (s *Sink) HealthSnapshot() HealthSnapshot {
 	if s == nil {
-		return clickhouseHealthSnapshot{}
+		return HealthSnapshot{}
 	}
 	queued := s.recordsQueued.Load()
 	written := s.recordsWritten.Load()
-	return clickhouseHealthSnapshot{
+	return HealthSnapshot{
 		RecordsQueued:  queued,
 		RecordsWritten: written,
 		InsertErrs:     s.insertErrs.Load(),

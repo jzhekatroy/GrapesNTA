@@ -1,4 +1,4 @@
-package main
+package flowingest
 
 import (
 	"bytes"
@@ -673,7 +673,7 @@ func resyncToNextMagic(segDir string, cp consumerCheckpoint, tipSeg uint64, tipO
 
 // --- Delivery pipeline: spool + parallel ClickHouse writers with ordered acks ---
 
-type spoolClickhousePipeline struct {
+type SpoolPipeline struct {
 	log    *slog.Logger
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -681,7 +681,7 @@ type spoolClickhousePipeline struct {
 	writer       *spoolWriter
 	conn         chdriver.Conn
 	table        string
-	mode         chSpoolMode
+	mode         SpoolMode
 	nWorkers     int
 	drainOnClose time.Duration
 
@@ -707,7 +707,7 @@ type spoolClickhousePipeline struct {
 	wg sync.WaitGroup
 }
 
-func newSpoolClickhousePipeline(
+func NewSpoolPipeline(
 	log *slog.Logger,
 	dsn, table string,
 	spoolDir string,
@@ -717,13 +717,13 @@ func newSpoolClickhousePipeline(
 	fsyncEvery time.Duration,
 	drainOnClose time.Duration,
 	stallThreshold time.Duration,
-	mode chSpoolMode,
+	mode SpoolMode,
 	nWorkers int,
-) (*spoolClickhousePipeline, error) {
+) (*SpoolPipeline, error) {
 	if nWorkers < 1 {
 		nWorkers = 1
 	}
-	opts, err := parseClickHouseDSN(dsn)
+	opts, err := ParseClickHouseDSN(dsn)
 	if err != nil {
 		return nil, err
 	}
@@ -738,7 +738,7 @@ func newSpoolClickhousePipeline(
 	if err != nil {
 		return nil, fmt.Errorf("clickhouse open: %w", err)
 	}
-	wr, err := openSpoolWriter(log, spoolDir, maxSegBytes, maxTotalBytes, maxFrameRows, fsyncEvery, mode == chSpoolRequired)
+	wr, err := openSpoolWriter(log, spoolDir, maxSegBytes, maxTotalBytes, maxFrameRows, fsyncEvery, mode == SpoolRequired)
 	if err != nil {
 		_ = conn.Close()
 		return nil, err
@@ -754,7 +754,7 @@ func newSpoolClickhousePipeline(
 		return nil, fmt.Errorf("spool load checkpoint: %w", err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	p := &spoolClickhousePipeline{
+	p := &SpoolPipeline{
 		log:            log,
 		ctx:            ctx,
 		cancel:         cancel,
@@ -782,15 +782,15 @@ func newSpoolClickhousePipeline(
 	return p, nil
 }
 
-type chSpoolMode int
+type SpoolMode int
 
-func (m chSpoolMode) String() string {
+func (m SpoolMode) String() string {
 	switch m {
-	case chSpoolOff:
+	case SpoolOff:
 		return "off"
-	case chSpoolOn:
+	case SpoolOn:
 		return "on"
-	case chSpoolRequired:
+	case SpoolRequired:
 		return "required"
 	default:
 		return "unknown"
@@ -798,9 +798,9 @@ func (m chSpoolMode) String() string {
 }
 
 const (
-	chSpoolOff chSpoolMode = iota
-	chSpoolOn
-	chSpoolRequired
+	SpoolOff SpoolMode = iota
+	SpoolOn
+	SpoolRequired
 )
 
 type spoolJob struct {
@@ -810,7 +810,7 @@ type spoolJob struct {
 }
 
 // runPipeline owns worker pool, acknowledger, and spool drainer lifecycle.
-func (p *spoolClickhousePipeline) runPipeline() {
+func (p *SpoolPipeline) runPipeline() {
 	defer p.wg.Done()
 
 	cp, err := loadAndNormalizeCheckpoint(p.log, p.writer.dir)
@@ -868,7 +868,7 @@ func (p *spoolClickhousePipeline) runPipeline() {
 // keeps a single torn write or stale segment from blocking the entire spool.
 // Stall watchdog forces the same resync if no progress is made for
 // stallThreshold despite available data.
-func (p *spoolClickhousePipeline) drainerLoop(jobs chan<- spoolJob) {
+func (p *SpoolPipeline) drainerLoop(jobs chan<- spoolJob) {
 	readHead, err := loadAndNormalizeCheckpoint(p.log, p.writer.dir)
 	if err != nil {
 		p.log.Error("spool drainer load checkpoint", "err", err)
@@ -1030,7 +1030,7 @@ type spoolCompletion struct {
 	ok  bool
 }
 
-func (p *spoolClickhousePipeline) insertWithRetry(rows []FlowRow) bool {
+func (p *SpoolPipeline) insertWithRetry(rows []FlowRow) bool {
 	backoff := 500 * time.Millisecond
 	for {
 		select {
@@ -1038,7 +1038,7 @@ func (p *spoolClickhousePipeline) insertWithRetry(rows []FlowRow) bool {
 			return false
 		default:
 		}
-		if insertBatchRows(p.ctx, p.log, p.conn, p.table, rows, &p.insertErrs) {
+		if InsertBatchRows(p.ctx, p.log, p.conn, p.table, rows, &p.insertErrs) {
 			return true
 		}
 		p.retries.Add(1)
@@ -1053,7 +1053,7 @@ func (p *spoolClickhousePipeline) insertWithRetry(rows []FlowRow) bool {
 	}
 }
 
-func (p *spoolClickhousePipeline) runAcker(completions <-chan spoolCompletion) {
+func (p *SpoolPipeline) runAcker(completions <-chan spoolCompletion) {
 	next := uint64(0)
 	lastCleanupSegment := uint64(0)
 	pending := make(map[uint64]consumerCheckpoint)
@@ -1086,7 +1086,7 @@ func (p *spoolClickhousePipeline) runAcker(completions <-chan spoolCompletion) {
 }
 
 // Append enqueues one batch to disk; drainer will pick up asynchronously.
-func (p *spoolClickhousePipeline) Append(rows []FlowRow) error {
+func (p *SpoolPipeline) Append(rows []FlowRow) error {
 	cp, err := p.writer.AppendBatch(rows)
 	if err != nil {
 		return err
@@ -1096,7 +1096,7 @@ func (p *spoolClickhousePipeline) Append(rows []FlowRow) error {
 	return nil
 }
 
-func (p *spoolClickhousePipeline) Close() {
+func (p *SpoolPipeline) Close() {
 	// Finalize writer tip first so drainer can converge on shutdown.
 	if err := p.writer.Close(); err != nil {
 		p.log.Warn("spool writer close", "err", err)
@@ -1169,7 +1169,7 @@ func (p *spoolClickhousePipeline) Close() {
 	}
 }
 
-func (p *spoolClickhousePipeline) isCaughtUp() bool {
+func (p *SpoolPipeline) isCaughtUp() bool {
 	tipSeg := p.writer.writerTipSeg.Load()
 	tipOff := p.writer.writerTipOff.Load()
 	p.checkpointMu.Lock()
@@ -1178,7 +1178,7 @@ func (p *spoolClickhousePipeline) isCaughtUp() bool {
 	return cp.Segment > tipSeg || (cp.Segment == tipSeg && cp.Offset >= tipOff)
 }
 
-func (p *spoolClickhousePipeline) LogMetrics() {
+func (p *SpoolPipeline) LogMetrics() {
 	s := p.HealthSnapshot()
 	p.log.Info("clickhouse spool pipeline",
 		"records_spooled", s.RecordsSpooled,
@@ -1195,13 +1195,13 @@ func (p *spoolClickhousePipeline) LogMetrics() {
 	)
 }
 
-func (p *spoolClickhousePipeline) currentAckedCheckpoint() consumerCheckpoint {
+func (p *SpoolPipeline) currentAckedCheckpoint() consumerCheckpoint {
 	p.checkpointMu.Lock()
 	defer p.checkpointMu.Unlock()
 	return p.acked
 }
 
-func (p *spoolClickhousePipeline) HealthSnapshot() clickhouseHealthSnapshot {
+func (p *SpoolPipeline) HealthSnapshot() HealthSnapshot {
 	tipSeg := p.writer.writerTipSeg.Load()
 	p.checkpointMu.Lock()
 	cp := p.acked
@@ -1215,7 +1215,7 @@ func (p *spoolClickhousePipeline) HealthSnapshot() clickhouseHealthSnapshot {
 	if progressNs > 0 {
 		progressAge = time.Since(time.Unix(0, progressNs))
 	}
-	return clickhouseHealthSnapshot{
+	return HealthSnapshot{
 		RecordsSpooled:     p.recordsSpooled.Load(),
 		RecordsAcked:       p.recordsAcked.Load(),
 		InsertErrs:         p.insertErrs.Load(),
@@ -1224,15 +1224,15 @@ func (p *spoolClickhousePipeline) HealthSnapshot() clickhouseHealthSnapshot {
 	}
 }
 
-func parseChSpoolMode(s string) (chSpoolMode, error) {
+func ParseSpoolMode(s string) (SpoolMode, error) {
 	switch strings.ToLower(strings.TrimSpace(s)) {
 	case "off", "":
-		return chSpoolOff, nil
+		return SpoolOff, nil
 	case "on":
-		return chSpoolOn, nil
+		return SpoolOn, nil
 	case "required":
-		return chSpoolRequired, nil
+		return SpoolRequired, nil
 	default:
-		return chSpoolOff, fmt.Errorf("unknown -ch-spool-mode %q (off|on|required)", s)
+		return SpoolOff, fmt.Errorf("unknown -ch-spool-mode %q (off|on|required)", s)
 	}
 }

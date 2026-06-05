@@ -1,4 +1,4 @@
-package main
+package flowingest
 
 import (
 	"context"
@@ -13,23 +13,23 @@ import (
 	chdriver "github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 )
 
-type classifierTables struct {
+type ClassifierTables struct {
 	BGPOrigins  string
 	L3Prefixes  string
 	L2VLANs     string
 }
 
-type classifierConfig struct {
+type ClassifierConfig struct {
 	Enabled bool
 	DSN     string
 	Refresh time.Duration
-	Tables  classifierTables
+	Tables  ClassifierTables
 }
 
-type trafficClassifier struct {
+type TrafficClassifier struct {
 	log    *slog.Logger
 	conn   chdriver.Conn
-	cfg    classifierConfig
+	cfg    ClassifierConfig
 	cancel context.CancelFunc
 	state  atomic.Pointer[classifierState]
 }
@@ -59,7 +59,7 @@ type prefixClass struct {
 	DisplayName string
 }
 
-type endpointClass struct {
+type EndpointClass struct {
 	ASN           uint32
 	Role          string
 	Entity        string
@@ -80,7 +80,7 @@ type attachmentClass struct {
 	OperatorID string
 }
 
-func newTrafficClassifier(ctx context.Context, log *slog.Logger, cfg classifierConfig) (*trafficClassifier, error) {
+func NewTrafficClassifier(ctx context.Context, log *slog.Logger, cfg ClassifierConfig) (*TrafficClassifier, error) {
 	if !cfg.Enabled {
 		return nil, nil
 	}
@@ -91,7 +91,7 @@ func newTrafficClassifier(ctx context.Context, log *slog.Logger, cfg classifierC
 		cfg.Refresh = time.Minute
 	}
 	cfg.Tables = cfg.Tables.withDefaults()
-	opts, err := parseClickHouseDSN(cfg.DSN)
+	opts, err := ParseClickHouseDSN(cfg.DSN)
 	if err != nil {
 		return nil, err
 	}
@@ -100,7 +100,7 @@ func newTrafficClassifier(ctx context.Context, log *slog.Logger, cfg classifierC
 		return nil, fmt.Errorf("classifier clickhouse open: %w", err)
 	}
 	cctx, cancel := context.WithCancel(ctx)
-	tc := &trafficClassifier{
+	tc := &TrafficClassifier{
 		log:    log,
 		conn:   conn,
 		cfg:    cfg,
@@ -121,7 +121,7 @@ func newTrafficClassifier(ctx context.Context, log *slog.Logger, cfg classifierC
 	return tc, nil
 }
 
-func (t classifierTables) withDefaults() classifierTables {
+func (t ClassifierTables) withDefaults() ClassifierTables {
 	if strings.TrimSpace(t.BGPOrigins) == "" {
 		t.BGPOrigins = "default.bgp_prefix_origin_current"
 	}
@@ -134,7 +134,7 @@ func (t classifierTables) withDefaults() classifierTables {
 	return t
 }
 
-func (tc *trafficClassifier) Close() {
+func (tc *TrafficClassifier) Close() {
 	if tc == nil {
 		return
 	}
@@ -144,7 +144,7 @@ func (tc *trafficClassifier) Close() {
 	}
 }
 
-func (tc *trafficClassifier) run(ctx context.Context) {
+func (tc *TrafficClassifier) run(ctx context.Context) {
 	ticker := time.NewTicker(tc.cfg.Refresh)
 	defer ticker.Stop()
 	for {
@@ -159,7 +159,7 @@ func (tc *trafficClassifier) run(ctx context.Context) {
 	}
 }
 
-func (tc *trafficClassifier) refreshOnce(ctx context.Context) error {
+func (tc *TrafficClassifier) refreshOnce(ctx context.Context) error {
 	start := time.Now()
 	st := &classifierState{
 		bgp4:   newIPTrie(),
@@ -193,7 +193,7 @@ func (tc *trafficClassifier) refreshOnce(ctx context.Context) error {
 	return nil
 }
 
-func (tc *trafficClassifier) loadBGP(ctx context.Context, st *classifierState) (int, error) {
+func (tc *TrafficClassifier) loadBGP(ctx context.Context, st *classifierState) (int, error) {
 	rows, err := tc.conn.Query(ctx, "SELECT prefix, origin_asn FROM "+tc.cfg.Tables.BGPOrigins)
 	if err != nil {
 		return 0, fmt.Errorf("load BGP origins: %w", err)
@@ -220,7 +220,7 @@ func (tc *trafficClassifier) loadBGP(ctx context.Context, st *classifierState) (
 	return n, rows.Err()
 }
 
-func (tc *trafficClassifier) loadL3Prefixes(ctx context.Context, st *classifierState) (int, error) {
+func (tc *TrafficClassifier) loadL3Prefixes(ctx context.Context, st *classifierState) (int, error) {
 	rows, err := tc.conn.Query(ctx, "SELECT prefix, family, entity_id, role, display_name FROM "+tc.cfg.Tables.L3Prefixes)
 	if err != nil {
 		return 0, fmt.Errorf("load L3 prefixes: %w", err)
@@ -249,7 +249,7 @@ func (tc *trafficClassifier) loadL3Prefixes(ctx context.Context, st *classifierS
 	return n, rows.Err()
 }
 
-func (tc *trafficClassifier) loadL2VLANs(ctx context.Context, st *classifierState) (rowsCount int, internalCount int, err error) {
+func (tc *TrafficClassifier) loadL2VLANs(ctx context.Context, st *classifierState) (rowsCount int, internalCount int, err error) {
 	rows, err := tc.conn.Query(ctx, "SELECT vlan_id, entity_id, attachment_type, boundary, display_name FROM "+tc.cfg.Tables.L2VLANs)
 	if err != nil {
 		return 0, 0, fmt.Errorf("load L2 VLANs: %w", err)
@@ -280,31 +280,31 @@ func (tc *trafficClassifier) loadL2VLANs(ctx context.Context, st *classifierStat
 	return rowsCount, internalCount, rows.Err()
 }
 
-func (tc *trafficClassifier) classifyPair(src, dst [16]byte, ipVersion uint8, srcVLAN, dstVLAN uint16) (endpointClass, endpointClass, string) {
+func (tc *TrafficClassifier) ClassifyPair(src, dst [16]byte, ipVersion uint8, srcVLAN, dstVLAN uint16) (EndpointClass, EndpointClass, string) {
 	if tc == nil {
-		return endpointClass{Scope: "unknown", Source: "unknown"}, endpointClass{Scope: "unknown", Source: "unknown"}, "unknown"
+		return EndpointClass{Scope: "unknown", Source: "unknown"}, EndpointClass{Scope: "unknown", Source: "unknown"}, "unknown"
 	}
 	st := tc.state.Load()
 	if st == nil {
-		return endpointClass{Scope: "unknown", Source: "unknown"}, endpointClass{Scope: "unknown", Source: "unknown"}, "unknown"
+		return EndpointClass{Scope: "unknown", Source: "unknown"}, EndpointClass{Scope: "unknown", Source: "unknown"}, "unknown"
 	}
 	srcAddr, okSrc := addrFromFlow(src, ipVersion)
 	dstAddr, okDst := addrFromFlow(dst, ipVersion)
 	if !okSrc || !okDst {
-		return endpointClass{Scope: "unknown", Source: "unknown"}, endpointClass{Scope: "unknown", Source: "unknown"}, "unknown"
+		return EndpointClass{Scope: "unknown", Source: "unknown"}, EndpointClass{Scope: "unknown", Source: "unknown"}, "unknown"
 	}
 	srcClass := st.classify(srcAddr, srcVLAN)
 	dstClass := st.classify(dstAddr, dstVLAN)
-	return srcClass, dstClass, deriveDirection(st.hasLocalConfig, srcClass, dstClass)
+	return srcClass, dstClass, DeriveDirection(st.hasLocalConfig, srcClass, dstClass)
 }
 
-func (st *classifierState) classify(addr netip.Addr, vlan uint16) endpointClass {
+func (st *classifierState) classify(addr netip.Addr, vlan uint16) EndpointClass {
 	asn := st.lookupASN(addr)
 	att := st.lookupAttachment(vlan)
 	if p, ok := st.lookupL3Prefix(addr); ok {
 		role := normalizeRole(p.Role)
 		scope := scopeFromRole(role)
-		return endpointClass{
+		return EndpointClass{
 			ASN:         asn,
 			Role:        role,
 			Entity:      p.EntityID,
@@ -318,7 +318,7 @@ func (st *classifierState) classify(addr netip.Addr, vlan uint16) endpointClass 
 			Attachment:  att,
 		}
 	}
-	return endpointClass{
+	return EndpointClass{
 		ASN:         asn,
 		Role:        "remote",
 		Entity:      "",
@@ -364,7 +364,7 @@ func (st *classifierState) lookupL3Prefix(addr netip.Addr) (prefixClass, bool) {
 	return st.l3v6.Lookup(addr)
 }
 
-func deriveDirection(hasLocalConfig bool, src, dst endpointClass) string {
+func DeriveDirection(hasLocalConfig bool, src, dst EndpointClass) string {
 	if !hasLocalConfig {
 		return "unknown"
 	}

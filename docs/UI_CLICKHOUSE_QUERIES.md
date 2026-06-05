@@ -699,45 +699,52 @@ Example: last 24 hours, IP country, remote peers, inbound+outbound+transit.
 Replace `country_basis`, `map_side`, and the `direction IN (...)` list in API
 code.
 
+IP-country, 24 hours, `remote` map side. UI field names in the outer SELECT.
+
 ```sql
 WITH
     now() AS ts_to,
     ts_to - INTERVAL 24 HOUR AS ts_from,
-    'ip' AS country_basis,
-    'remote' AS map_side,
     dateDiff('second', ts_from, ts_to) AS window_seconds
 SELECT
-    country_code,
-    round(sum(bytes) / 1000 / 1000 / 1000, 3) AS traffic_gb,
-    round(100 * sum(bytes) / sum(sum(bytes)) OVER (), 2) AS percent,
-    round((sum(bytes) * 8 / window_seconds) / 1e9, 3) AS avg_gbps,
-    round(sum(packets) / window_seconds, 0) AS avg_pps,
-    sum(packets) AS packets,
-    sum(flows_count) AS flows
-FROM default.traffic_country_1m AS c
-INNER JOIN default.net_flow_sources_enabled AS s ON c.source_id = s.source_id
-WHERE
-    s.include_in_total = 1
-    AND c.minute >= ts_from
-    AND c.minute < ts_to
-    AND c.country_basis = country_basis
-    AND c.direction IN ('in', 'out', 'transit')
-    AND (
-        (map_side = 'src' AND c.country_side = 'src')
-        OR (map_side = 'dst' AND c.country_side = 'dst')
-        OR (
-            map_side = 'remote'
-            AND (
-                (c.direction = 'in' AND c.country_side = 'src')
-                OR (c.direction = 'out' AND c.country_side = 'dst')
-                OR (c.direction = 'transit' AND c.country_side = 'src')
-                OR (c.direction = 'internal' AND c.country_side = 'src')
-            )
+    agg.country_code,
+    agg.country_basis,
+    agg.map_side,
+    agg.traffic_gb,
+    round(100 * agg.traffic_gb / sum(agg.traffic_gb) OVER (), 2) AS share_percent,
+    round((agg.total_bytes * 8 / window_seconds) / 1e9, 3) AS avg_gbps,
+    round(agg.packet_count / window_seconds, 0) AS avg_pps,
+    agg.packet_count,
+    agg.flow_count
+FROM
+(
+    SELECT
+        c.country_code,
+        'ip' AS country_basis,
+        'remote' AS map_side,
+        sum(c.bytes) AS total_bytes,
+        round(sum(c.bytes) / 1000 / 1000 / 1000, 3) AS traffic_gb,
+        sum(c.packets) AS packet_count,
+        sum(c.flows_count) AS flow_count
+    FROM default.traffic_country_1m AS c
+    INNER JOIN default.net_flow_sources_enabled AS s ON c.source_id = s.source_id
+    WHERE
+        s.include_in_total = 1
+        AND c.minute >= ts_from
+        AND c.minute < ts_to
+        AND c.country_basis = 'ip'
+        AND c.direction IN ('in', 'out', 'transit')
+        AND (
+            (c.direction = 'in' AND c.country_side = 'src')
+            OR (c.direction = 'out' AND c.country_side = 'dst')
+            OR (c.direction = 'transit' AND c.country_side = 'src')
         )
-    )
-GROUP BY country_code
+    GROUP BY c.country_code
+) AS agg
 ORDER BY traffic_gb DESC;
 ```
+
+ASN-country: same query, use `'asn'` for `country_basis` in the inner WHERE and SELECT literal.
 
 ASN-country mode: set `country_basis = 'asn'` and keep the same `map_side`
 logic. Label the UI control as registry/allocation country, not IP geolocation.

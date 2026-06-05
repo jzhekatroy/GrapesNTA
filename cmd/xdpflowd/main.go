@@ -18,6 +18,7 @@ import (
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/link"
 	"github.com/cilium/ebpf/rlimit"
+	"xdpflowd/internal/flowingest"
 	"xdpflowd/internal/loader"
 )
 
@@ -587,12 +588,12 @@ func main() {
 		}
 	}
 
-	spoolMode, err := parseChSpoolMode(*chSpoolModeFlag)
+	spoolMode, err := flowingest.ParseSpoolMode(*chSpoolModeFlag)
 	if err != nil {
 		log.Error("clickhouse spool", "err", err)
 		os.Exit(1)
 	}
-	if spoolMode != chSpoolOff {
+	if spoolMode != flowingest.SpoolOff {
 		if strings.TrimSpace(*chDSN) == "" || strings.TrimSpace(*chTable) == "" {
 			log.Error("ch-spool-mode requires both -ch-dsn and -ch-table")
 			os.Exit(1)
@@ -611,19 +612,19 @@ func main() {
 	*sourceID = strings.TrimSpace(*sourceID)
 
 	if strings.TrimSpace(*chDSN) != "" {
-		sampler, err := parseSamplerAddress(*chSamplerAddr)
+		sampler, err := flowingest.ParseSamplerAddress(*chSamplerAddr)
 		if err != nil {
 			log.Error("ch-sampler-addr", "err", err)
 			os.Exit(1)
 		}
-		classifier, err := newTrafficClassifier(ctx, log, classifierConfig{
+		classifier, err := flowingest.NewTrafficClassifier(ctx, log, flowingest.ClassifierConfig{
 			Enabled: *classifierEnabled,
 			DSN:     strings.TrimSpace(*chDSN),
 			Refresh: *classifierRefresh,
-			Tables: classifierTables{
-				BGPOrigins:   strings.TrimSpace(*classifierBGPTable),
-				L3Prefixes:   strings.TrimSpace(*classifierL3PrefixesView),
-				L2VLANs:      strings.TrimSpace(*classifierL2VLANsView),
+			Tables: flowingest.ClassifierTables{
+				BGPOrigins: strings.TrimSpace(*classifierBGPTable),
+				L3Prefixes: strings.TrimSpace(*classifierL3PrefixesView),
+				L2VLANs:    strings.TrimSpace(*classifierL2VLANsView),
 			},
 		})
 		if err != nil {
@@ -635,44 +636,29 @@ func main() {
 		}
 		mapper := newFlowRowMapper(exportClock, sampler, 0, *sourceID, classifier)
 		log.Info("flow source configured", "source_id", *sourceID)
-		if spoolMode != chSpoolOff {
-			sp, err := newSpoolClickhousePipeline(log,
-				strings.TrimSpace(*chDSN), strings.TrimSpace(*chTable),
-				strings.TrimSpace(*chSpoolDir),
-				*chSpoolSegSize,
-				*chSpoolMaxBytes,
-				*chSpoolFrameMaxRecords,
-				*chSpoolFsync,
-				*chSpoolShutdownDrain,
-				*chSpoolStallThreshold,
-				spoolMode,
-				*chWriters,
-			)
-			if err != nil {
-				log.Error("clickhouse spool pipeline", "err", err)
-				os.Exit(1)
-			}
-			chDel = &clickhouseDelivery{
-				log:    log,
-				mapper: mapper,
-				mode:   spoolMode,
-				spool:  sp,
-				direct: nil,
-			}
-		} else {
-			sink, err := newClickhouseSink(log, strings.TrimSpace(*chDSN), strings.TrimSpace(*chTable),
-				*chBatchSize, *chFlushInterval, *chQueueSize)
-			if err != nil {
-				log.Error("clickhouse sink init", "err", err)
-				os.Exit(1)
-			}
-			chDel = &clickhouseDelivery{
-				log:    log,
-				mapper: mapper,
-				mode:   chSpoolOff,
-				spool:  nil,
-				direct: sink,
-			}
+		inner, err := flowingest.NewDelivery(log, flowingest.DeliveryConfig{
+			DSN:                 strings.TrimSpace(*chDSN),
+			Table:               strings.TrimSpace(*chTable),
+			BatchSize:           *chBatchSize,
+			FlushInterval:       *chFlushInterval,
+			QueueSize:           *chQueueSize,
+			SpoolMode:           spoolMode,
+			SpoolDir:            strings.TrimSpace(*chSpoolDir),
+			SpoolSegSize:        *chSpoolSegSize,
+			SpoolMaxBytes:       *chSpoolMaxBytes,
+			SpoolFrameMaxRows:   *chSpoolFrameMaxRecords,
+			SpoolFsyncEvery:     *chSpoolFsync,
+			SpoolShutdownDrain:  *chSpoolShutdownDrain,
+			SpoolStallThreshold: *chSpoolStallThreshold,
+			SpoolWriters:        *chWriters,
+		})
+		if err != nil {
+			log.Error("clickhouse delivery init", "err", err)
+			os.Exit(1)
+		}
+		chDel = &clickhouseDelivery{
+			mapper: mapper,
+			inner:  inner,
 		}
 		defer func(d *clickhouseDelivery) {
 			d.Close()
