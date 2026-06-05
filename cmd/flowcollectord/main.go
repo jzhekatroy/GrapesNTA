@@ -79,7 +79,7 @@ func main() {
 		delivery.LogMetrics()
 	}()
 
-	listener := newSflowListener(log, cfg.SFlowListen, cfg.SFlowSourceID, cfg.UDPReadBuffer, delivery, classifier)
+	listener := newSflowListener(log, cfg.SFlowListen, cfg.SFlowSourceID, cfg.UDPReadBuffer, cfg.CHBatchSize, cfg.CHFlushInterval, delivery, classifier)
 
 	errCh := make(chan error, 1)
 	go func() {

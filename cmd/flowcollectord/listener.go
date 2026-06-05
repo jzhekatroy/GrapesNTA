@@ -15,6 +15,8 @@ type sflowListener struct {
 	addr       string
 	sourceID   string
 	readBuf    int
+	batchSize  int
+	flushEvery time.Duration
 	delivery   *flowingest.Delivery
 	classifier *flowingest.TrafficClassifier
 	seq        atomic.Uint32
@@ -25,14 +27,24 @@ func newSflowListener(
 	log *slog.Logger,
 	addr, sourceID string,
 	readBuf int,
+	batchSize int,
+	flushEvery time.Duration,
 	delivery *flowingest.Delivery,
 	classifier *flowingest.TrafficClassifier,
 ) *sflowListener {
+	if batchSize < 1 {
+		batchSize = 1
+	}
+	if flushEvery <= 0 {
+		flushEvery = time.Second
+	}
 	return &sflowListener{
 		log:        log,
 		addr:       addr,
 		sourceID:   sourceID,
 		readBuf:    readBuf,
+		batchSize:  batchSize,
+		flushEvery: flushEvery,
 		delivery:   delivery,
 		classifier: classifier,
 	}
@@ -47,17 +59,38 @@ func (l *sflowListener) Run(ctx context.Context) error {
 	l.log.Info("sflow listener started", "addr", l.addr, "source_id", l.sourceID)
 
 	buf := make([]byte, l.readBuf)
+	pending := make([]flowingest.FlowRow, 0, l.batchSize)
+	nextFlush := time.Now().Add(l.flushEvery)
+	flush := func() {
+		if len(pending) == 0 || l.delivery == nil {
+			pending = pending[:0]
+			nextFlush = time.Now().Add(l.flushEvery)
+			return
+		}
+		l.delivery.EnqueueRows(pending)
+		pending = make([]flowingest.FlowRow, 0, l.batchSize)
+		nextFlush = time.Now().Add(l.flushEvery)
+	}
 	for {
 		if ctx.Err() != nil {
+			flush()
 			return ctx.Err()
 		}
-		_ = pc.SetReadDeadline(time.Now().Add(time.Second))
+		deadline := time.Now().Add(time.Second)
+		if nextFlush.Before(deadline) {
+			deadline = nextFlush
+		}
+		_ = pc.SetReadDeadline(deadline)
 		n, _, err := pc.ReadFrom(buf)
 		if err != nil {
 			if ne, ok := err.(net.Error); ok && ne.Timeout() {
+				if time.Now().After(nextFlush) || time.Now().Equal(nextFlush) {
+					flush()
+				}
 				continue
 			}
 			if ctx.Err() != nil {
+				flush()
 				return ctx.Err()
 			}
 			l.log.Warn("sflow read", "err", err)
@@ -67,8 +100,11 @@ func (l *sflowListener) Run(ctx context.Context) error {
 		seq := l.seq.Load()
 		rows := parseSFlowV5(buf[:n], receivedAt, l.sourceID, l.classifier, &seq, &l.metrics)
 		l.seq.Store(seq)
-		if len(rows) > 0 && l.delivery != nil {
-			l.delivery.EnqueueRows(rows)
+		if len(rows) > 0 {
+			pending = append(pending, rows...)
+			if len(pending) >= l.batchSize || time.Now().After(nextFlush) || time.Now().Equal(nextFlush) {
+				flush()
+			}
 		}
 	}
 }

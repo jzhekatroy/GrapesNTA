@@ -48,7 +48,7 @@ func loadConfig() config {
 
 	chDSN := flag.String("ch-dsn", envString("FC_CH_DSN", ""), "ClickHouse DSN")
 	chTable := flag.String("ch-table", envString("FC_CH_TABLE", "default.flows_raw"), "target flows_raw table")
-	chBatchSize := flag.Int("ch-batch-size", envInt("FC_CH_BATCH_SIZE", 500), "ClickHouse batch size")
+	chBatchSize := flag.Int("ch-batch-size", envInt("FC_CH_BATCH_SIZE", 5000), "ClickHouse batch size")
 	chFlush := flag.Duration("ch-flush-interval", envDuration("FC_CH_FLUSH_INTERVAL", time.Second), "ClickHouse flush interval")
 	chQueue := flag.Int("ch-queue-size", envInt("FC_CH_QUEUE_SIZE", 64), "ClickHouse queue depth")
 	chSpoolModeFlag := flag.String("ch-spool-mode", envString("FC_CH_SPOOL_MODE", "required"), "spool mode: off|on|required")
