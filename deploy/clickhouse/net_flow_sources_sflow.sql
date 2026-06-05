@@ -10,6 +10,13 @@
 INSERT INTO default.net_flow_sources
     (source_id, display_name, source_type, collector_id, location,
      description, include_in_total, enabled, updated_at)
-VALUES
-    ('sflow-default', 'Default sFlow v5', 'sflow', '', '',
-     'sFlow v5 receiver (flowcollectord)', 1, 1, now());
+SELECT
+    'sflow-default',
+    'Default sFlow v5',
+    'sflow',
+    '',
+    '',
+    'sFlow v5 receiver (flowcollectord)',
+    1,
+    1,
+    now();

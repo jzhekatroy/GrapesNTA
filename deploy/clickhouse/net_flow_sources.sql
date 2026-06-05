@@ -19,7 +19,7 @@ ENGINE = ReplacingMergeTree(updated_at)
 ORDER BY source_id
 SETTINGS index_granularity = 8192;
 
-DROP VIEW IF EXISTS default.net_flow_sources_enabled;
+DROP TABLE IF EXISTS default.net_flow_sources_enabled;
 
 CREATE VIEW default.net_flow_sources_enabled AS
 SELECT
@@ -51,6 +51,22 @@ WHERE enabled_latest = 1;
 -- Seed defaults (safe to re-run; ReplacingMergeTree keeps latest row per source_id).
 INSERT INTO default.net_flow_sources
     (source_id, display_name, source_type, collector_id, location, description, include_in_total, enabled)
-VALUES
-    ('xdp-default', 'Default XDP mirror', 'xdp', '', '', 'Initial xdpflowd source', 1, 1),
-    ('dns-default', 'Default DNS mirror', 'dns', '', '', 'Initial dnsflowd source', 0, 1);
+SELECT
+    'xdp-default',
+    'Default XDP mirror',
+    'xdp',
+    '',
+    '',
+    'Initial xdpflowd source',
+    1,
+    1
+UNION ALL
+SELECT
+    'dns-default',
+    'Default DNS mirror',
+    'dns',
+    '',
+    '',
+    'Initial dnsflowd source',
+    0,
+    1;
