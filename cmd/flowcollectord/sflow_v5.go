@@ -18,6 +18,9 @@ const (
 	sflowSampleCounterExp = 4
 	sflowFlowRawHeader   = 1
 	sflowHeaderEthernet  = 1
+
+	maxSFlowSamples = 4096
+	maxSFlowRecords = 4096
 )
 
 type sflowMetrics struct {
@@ -93,7 +96,14 @@ func parseSFlowV5(
 	numSamples := binary.BigEndian.Uint32(b[off : off+4])
 	off += 4
 
-	rows := make([]flowingest.FlowRow, 0, numSamples)
+	if numSamples > maxSFlowSamples {
+		if m != nil {
+			m.parseErrors++
+		}
+		return nil
+	}
+
+	rows := make([]flowingest.FlowRow, 0, boundedCap(numSamples, maxSFlowSamples))
 	for i := uint32(0); i < numSamples; i++ {
 		if len(b) < off+8 {
 			if m != nil {
@@ -115,11 +125,16 @@ func parseSFlowV5(
 
 		format := sampleType & 0xFFF
 		switch format {
-		case sflowSampleFlow, sflowSampleFlowExp:
+		case sflowSampleFlow:
 			if m != nil {
 				m.flowSamples++
 			}
-			rows = append(rows, parseFlowSample(sampleBody, receivedAt, sourceID, sampler, classifier, seq, m)...)
+			rows = append(rows, parseFlowSample(sampleBody, false, receivedAt, sourceID, sampler, classifier, seq, m)...)
+		case sflowSampleFlowExp:
+			if m != nil {
+				m.flowSamples++
+			}
+			rows = append(rows, parseFlowSample(sampleBody, true, receivedAt, sourceID, sampler, classifier, seq, m)...)
 		case sflowSampleCounter, sflowSampleCounterExp:
 			if m != nil {
 				m.counterSkipped++
@@ -135,6 +150,7 @@ func parseSFlowV5(
 
 func parseFlowSample(
 	b []byte,
+	expanded bool,
 	receivedAt time.Time,
 	sourceID string,
 	sampler [16]byte,
@@ -142,22 +158,47 @@ func parseFlowSample(
 	seq *uint32,
 	m *sflowMetrics,
 ) []flowingest.FlowRow {
-	if len(b) < 32 {
+	minLen := 32
+	if expanded {
+		minLen = 44
+	}
+	if len(b) < minLen {
 		if m != nil {
 			m.parseErrors++
 		}
 		return nil
 	}
-	// sequence_number, source_id
-	samplingRate := uint64(binary.BigEndian.Uint32(b[8:12]))
+
+	var samplingRate uint64
+	var numRecords uint32
+	var off int
+	if expanded {
+		// expanded flow sample:
+		// sequence_number, source_id_type, source_id_index, sampling_rate,
+		// sample_pool, drops, input_format, input_value, output_format,
+		// output_value, records_count
+		samplingRate = uint64(binary.BigEndian.Uint32(b[12:16]))
+		numRecords = binary.BigEndian.Uint32(b[40:44])
+		off = 44
+	} else {
+		// flow sample:
+		// sequence_number, source_id, sampling_rate, sample_pool, drops,
+		// input, output, records_count
+		samplingRate = uint64(binary.BigEndian.Uint32(b[8:12]))
+		numRecords = binary.BigEndian.Uint32(b[28:32])
+		off = 32
+	}
 	if samplingRate == 0 {
 		samplingRate = 1
 	}
-	// sample_pool, drops, input, output
-	numRecords := binary.BigEndian.Uint32(b[28:32])
-	off := 32
+	if numRecords > maxSFlowRecords {
+		if m != nil {
+			m.parseErrors++
+		}
+		return nil
+	}
 
-	rows := make([]flowingest.FlowRow, 0, numRecords)
+	rows := make([]flowingest.FlowRow, 0, boundedCap(numRecords, maxSFlowRecords))
 	for i := uint32(0); i < numRecords; i++ {
 		if len(b) < off+8 {
 			if m != nil {
@@ -194,6 +235,13 @@ func parseFlowSample(
 		rows = append(rows, row)
 	}
 	return rows
+}
+
+func boundedCap(n uint32, max int) int {
+	if n > uint32(max) {
+		return max
+	}
+	return int(n)
 }
 
 func flowRowFromRawHeader(

@@ -63,6 +63,45 @@ func buildTestSFlowDatagram(t *testing.T, frame []byte, samplingRate uint32) []b
 	return dgram
 }
 
+func buildTestExpandedSFlowDatagram(t *testing.T, frame []byte, samplingRate uint32) []byte {
+	t.Helper()
+	rawRecord := make([]byte, 16+len(frame))
+	binary.BigEndian.PutUint32(rawRecord[0:4], sflowHeaderEthernet)
+	binary.BigEndian.PutUint32(rawRecord[4:8], uint32(len(frame)))
+	binary.BigEndian.PutUint32(rawRecord[8:12], 0)
+	binary.BigEndian.PutUint32(rawRecord[12:16], uint32(len(frame)))
+	copy(rawRecord[16:], frame)
+	pad := (4 - (len(rawRecord) % 4)) % 4
+	if pad > 0 {
+		rawRecord = append(rawRecord, make([]byte, pad)...)
+	}
+
+	flowSample := make([]byte, 44+8+len(rawRecord))
+	binary.BigEndian.PutUint32(flowSample[12:16], samplingRate)
+	binary.BigEndian.PutUint32(flowSample[40:44], 1)
+	binary.BigEndian.PutUint32(flowSample[44:48], sflowFlowRawHeader)
+	binary.BigEndian.PutUint32(flowSample[48:52], uint32(len(rawRecord)))
+	copy(flowSample[52:], rawRecord)
+
+	dgram := make([]byte, 0, 64+len(flowSample))
+	putU32 := func(v uint32) {
+		var buf [4]byte
+		binary.BigEndian.PutUint32(buf[:], v)
+		dgram = append(dgram, buf[:]...)
+	}
+	putU32(sflowVersion)
+	putU32(sflowAgentIPv4)
+	dgram = append(dgram, net.ParseIP("192.0.2.1").To4()...)
+	putU32(0)
+	putU32(100)
+	putU32(1000)
+	putU32(1)
+	putU32(sflowSampleFlowExp)
+	putU32(uint32(len(flowSample)))
+	dgram = append(dgram, flowSample...)
+	return dgram
+}
+
 func TestParseSFlowV5PreScale(t *testing.T) {
 	frame := buildTestIPv4UDPDatagram()
 	dgram := buildTestSFlowDatagram(t, frame, 2000)
@@ -92,6 +131,32 @@ func TestParseSFlowV5PreScale(t *testing.T) {
 	}
 	if r.Proto != 17 {
 		t.Fatalf("proto=%d", r.Proto)
+	}
+}
+
+func TestParseSFlowV5ExpandedPreScale(t *testing.T) {
+	frame := buildTestIPv4UDPDatagram()
+	dgram := buildTestExpandedSFlowDatagram(t, frame, 4000)
+	var seq uint32
+	var m sflowMetrics
+	now := time.Date(2026, 6, 5, 12, 0, 0, 0, time.UTC)
+	rows := parseSFlowV5(dgram, now, "sflow-default", nil, &seq, &m)
+	if len(rows) != 1 {
+		t.Fatalf("rows=%d want 1 metrics=%+v", len(rows), m)
+	}
+	r := rows[0]
+	if r.SamplingRate != 4000 {
+		t.Fatalf("sampling_rate=%d", r.SamplingRate)
+	}
+	if r.Packets != 4000 {
+		t.Fatalf("packets=%d", r.Packets)
+	}
+	wantBytes := uint64(len(frame)) * 4000
+	if r.Bytes != wantBytes {
+		t.Fatalf("bytes=%d want %d", r.Bytes, wantBytes)
+	}
+	if r.SrcPort != 12345 || r.DstPort != 53 {
+		t.Fatalf("ports=%d->%d", r.SrcPort, r.DstPort)
 	}
 }
 
