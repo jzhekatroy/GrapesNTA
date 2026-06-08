@@ -1,15 +1,5 @@
 # ТЗ: настройки Grapes NTA в UI
 
-Документ для junior UI/backend developer. Описывает, какие настройки выносим в
-веб-интерфейс (Laravel + MoonShine поверх ClickHouse), как они хранятся и какими
-запросами читаются/пишутся.
-
-UI работает напрямую с таблицами и view в ClickHouse (база `default`).
-Все справочники — это `ReplacingMergeTree` с полями `enabled` и `updated_at`:
-
-- запись/обновление = `INSERT` новой строки с `updated_at = now()`;
-- «удаление» = `INSERT` строки с `enabled = 0` (soft delete);
-- актуальное состояние читаем из `*_enabled` view.
 
 ---
 
@@ -53,94 +43,70 @@ flows_raw.source_id           -> net_flow_sources.source_id
 Важно: в `flows_raw` и агрегатах хранится только `source_id`. Локация и коллектор
 не пишутся в каждую строку — они подтягиваются через справочники по `source_id`.
 
-### 1.2. Новая таблица: локации
+> Таблицы каталога создаёт deploy-скрипт из git, а не UI. Тебе (UI) не нужно
+> выполнять `CREATE TABLE` — таблицы и `*_enabled` view уже существуют. Ты только
+> читаешь из view и пишешь `INSERT` новых версий строк. См. раздел 6.
 
-Создать `default.net_locations`:
+### 1.2. Локации (`net_locations`)
+
+Создаётся скриптом. UI работает с view `net_locations_enabled`. Поля формы:
+
+| Поле | Тип контрола | Назначение |
+|------|--------------|------------|
+| `location_id` | text (immutable после создания) | ID локации, напр. `msk-m9`, `spb-ix` |
+| `display_name` | text | Название, напр. «Москва, ММТС-9» |
+| `city` | text | Город (опц.) |
+| `country` | text | Код страны (опц.) |
+| `comment` | textarea | Заметка |
+| `enabled` | toggle | Soft delete |
+
+Запись новой версии:
 
 ```sql
-CREATE TABLE IF NOT EXISTS default.net_locations
-(
-    location_id  String,                       -- 'msk-m9', 'spb-ix'
-    display_name String,                        -- 'Москва, ММТС-9'
-    city         String DEFAULT '',
-    country      LowCardinality(String) DEFAULT '',
-    comment      String DEFAULT '',
-    enabled      UInt8 DEFAULT 1,
-    updated_at   DateTime('UTC') DEFAULT now()
-)
-ENGINE = ReplacingMergeTree(updated_at)
-ORDER BY location_id
-SETTINGS index_granularity = 8192;
-
-DROP VIEW IF EXISTS default.net_locations_enabled;
-
-CREATE VIEW default.net_locations_enabled AS
-SELECT
-    location_id,
-    display_name,
-    city,
-    country,
-    comment,
-    updated_at_latest AS updated_at
-FROM
-(
-    SELECT
-        location_id,
-        argMax(display_name, updated_at) AS display_name,
-        argMax(city, updated_at) AS city,
-        argMax(country, updated_at) AS country,
-        argMax(comment, updated_at) AS comment,
-        argMax(enabled, updated_at) AS enabled_latest,
-        max(updated_at) AS updated_at_latest
-    FROM default.net_locations
-    GROUP BY location_id
-)
-WHERE enabled_latest = 1;
+INSERT INTO default.net_locations
+    (location_id, display_name, city, country, comment, enabled, updated_at)
+VALUES
+    ({location_id:String}, {display_name:String}, {city:String},
+     {country:String}, {comment:String}, 1, now());
 ```
 
-### 1.3. Новая таблица: коллекторы
+Чтение списка: `SELECT * FROM default.net_locations_enabled ORDER BY display_name;`
 
-Создать `default.net_collectors`:
+### 1.3. Коллекторы (`net_collectors`)
+
+Создаётся скриптом. UI работает с view `net_collectors_enabled`. Поля формы:
+
+| Поле | Тип контрола | Назначение |
+|------|--------------|------------|
+| `collector_id` | text (immutable после создания) | ID коллектора, напр. `col-msk-1` |
+| `location_id` | select из `net_locations_enabled` | К какой локации относится |
+| `display_name` | text | Название, напр. «XDP mirror M9 #1» |
+| `hostname` | text | Имя хоста (справочно) |
+| `comment` | textarea | Заметка |
+| `enabled` | toggle | Soft delete |
+
+Запись новой версии:
 
 ```sql
-CREATE TABLE IF NOT EXISTS default.net_collectors
-(
-    collector_id String,                        -- 'col-msk-1'
-    location_id  String DEFAULT '',             -- -> net_locations.location_id
-    display_name String,                        -- 'XDP mirror M9 #1'
-    hostname     String DEFAULT '',             -- 'netflow' (только справочно)
-    comment      String DEFAULT '',
-    enabled      UInt8 DEFAULT 1,
-    updated_at   DateTime('UTC') DEFAULT now()
-)
-ENGINE = ReplacingMergeTree(updated_at)
-ORDER BY collector_id
-SETTINGS index_granularity = 8192;
+INSERT INTO default.net_collectors
+    (collector_id, location_id, display_name, hostname, comment, enabled, updated_at)
+VALUES
+    ({collector_id:String}, {location_id:String}, {display_name:String},
+     {hostname:String}, {comment:String}, 1, now());
+```
 
-DROP VIEW IF EXISTS default.net_collectors_enabled;
+Чтение списка с локацией:
 
-CREATE VIEW default.net_collectors_enabled AS
+```sql
 SELECT
-    collector_id,
-    location_id,
-    display_name,
-    hostname,
-    comment,
-    updated_at_latest AS updated_at
-FROM
-(
-    SELECT
-        collector_id,
-        argMax(location_id, updated_at) AS location_id,
-        argMax(display_name, updated_at) AS display_name,
-        argMax(hostname, updated_at) AS hostname,
-        argMax(comment, updated_at) AS comment,
-        argMax(enabled, updated_at) AS enabled_latest,
-        max(updated_at) AS updated_at_latest
-    FROM default.net_collectors
-    GROUP BY collector_id
-)
-WHERE enabled_latest = 1;
+    c.collector_id,
+    c.display_name AS collector_name,
+    c.hostname,
+    l.location_id,
+    l.display_name AS location_name
+FROM default.net_collectors_enabled AS c
+LEFT JOIN default.net_locations_enabled AS l ON c.location_id = l.location_id
+ORDER BY location_name, collector_name;
 ```
 
 ### 1.4. Источники трафика (существует)
@@ -262,29 +228,111 @@ remote               внешний (по умолчанию)
 
 ## 3. Статус коллекторов (только чтение)
 
-Отдельный экран «Коллекторы / Состояние». Редактирование запрещено.
+Отдельный экран «Коллекторы / Состояние». Редактирование запрещено — это
+оперативная картина «кто реально шлёт данные», а не каталог.
 
-Последний flow по источнику (живость источника):
+### 3.1. Что показываем по строке
+
+Группировка: **Локация → Коллектор → Источник (`source_id`)**. Сворачиваемое
+дерево; на верхних уровнях агрегируем метрики дочерних источников.
+
+| Поле | Откуда | Назначение |
+|------|--------|------------|
+| Имя | каталог (`net_*`) | человекочитаемое название; если нет — `source_id` как есть |
+| Протокол | `net_flow_sources.source_type` или `flows_raw` | xdp / sflow / netflow / ipfix / dns |
+| Состояние | расчёт по `age` + health | online / lagging / stale / disabled / **unknown** |
+| flow/min | `flows_raw` | темп строк |
+| bytes/min, pkts/min | `flows_raw` | реальный объём (для sFlow — уже отскейленный) |
+| last_seen / age | `flows_raw` | сколько секунд назад был последний flow |
+| Источников активно | `flows_raw` vs каталог | сколько `source_id` живы под коллектором |
+| sampling_rate | `flows_raw` (sFlow/NetFlow) | напоминание, что объём оценочный |
+| Лаг доставки / drops | health демона | «льёт, но не успевает писать в ClickHouse» |
+
+### 3.2. Модель состояния
+
+| Состояние | Условие | Цвет |
+|-----------|---------|------|
+| `online`   | `age <= 60s` | 🟢 |
+| `lagging`  | `60s < age <= 300s` ИЛИ есть spool/writer lag | 🟡 |
+| `stale`    | `age > 300s`, но коллектор `enabled=1` в каталоге | 🔴 |
+| `disabled` | в каталоге `enabled=0` | ⚪ |
+| `unknown`  | `source_id` есть в `flows_raw`, но НЕТ в каталоге | ⚠ |
+
+Пороги (60 / 300 с) — параметр UI, не хранится в БД.
+
+### 3.3. Незнакомые / ненастроенные коллекторы
+
+Источник истины «кто шлёт» — это `flows_raw.source_id`, а не каталог. Поэтому
+статус строится `LEFT JOIN` от живых `source_id` к каталогу:
+
+- `source_id` есть в каталоге → показываем имя/локацию/коллектор;
+- `source_id` есть только в `flows_raw` → строка `⚠ unknown`, без имени, с CTA
+  «Зарегистрировать» (создать запись в `net_flow_sources`).
+
+Скрывать незнакомые НЕЛЬЗЯ: это либо забытая привязка `*_SOURCE_ID` в env, либо
+посторонний экспортёр — и то, и другое оператор должен видеть.
+
+### 3.4. Где задаётся имя (env vs БД)
+
+| Что | Где хранится | Кто меняет | Требует рестарт демона |
+|-----|--------------|------------|------------------------|
+| Привязка `source_id` к демону | env на хосте (`*_SOURCE_ID`) | админ | да |
+| `display_name`, `collector_id`, `location_id` | ClickHouse каталог (`net_*`) | оператор в UI | нет |
+
+В текстовом env остаётся только техническая привязка `source_id`. Имя, локация и
+группировка по коллекторам редактируются в UI и подтягиваются по `source_id` —
+переименование не требует доступа к серверу.
+
+### 3.5. Запрос статуса (живые источники + каталог)
 
 ```sql
+WITH live AS
+(
+    SELECT
+        source_id,
+        max(time_received_ns)                       AS last_seen,
+        now() - max(time_received_ns)               AS age_seconds,
+        count()                                      AS flows_5m,
+        sum(bytes)                                   AS bytes_5m,
+        sum(packets)                                 AS pkts_5m,
+        anyLast(sampling_rate)                       AS sampling_rate
+    FROM default.flows_raw
+    WHERE time_received_ns >= now() - INTERVAL 5 MINUTE
+    GROUP BY source_id
+)
 SELECT
-    source_id,
-    max(time_received_ns) AS last_seen,
-    now() - max(time_received_ns) AS age_seconds
-FROM default.flows_raw
-WHERE time_received_ns >= now() - INTERVAL 1 HOUR
-GROUP BY source_id
-ORDER BY last_seen DESC;
+    l.display_name                                   AS location_name,
+    c.display_name                                   AS collector_name,
+    s.display_name                                   AS source_name,
+    live.source_id,
+    coalesce(s.source_type, '')                      AS protocol,
+    live.last_seen,
+    live.age_seconds,
+    round(live.flows_5m / 5)                         AS flows_per_min,
+    round(live.bytes_5m / 300)                       AS bytes_per_sec,
+    round(live.pkts_5m  / 300)                        AS pkts_per_sec,
+    live.sampling_rate,
+    multiIf(
+        s.source_id = '',                'unknown',   -- нет в каталоге
+        live.age_seconds <= 60,          'online',
+        live.age_seconds <= 300,         'lagging',
+                                         'stale')      AS state
+FROM live
+LEFT JOIN default.net_flow_sources_enabled AS s ON live.source_id = s.source_id
+LEFT JOIN default.net_collectors_enabled   AS c ON s.collector_id = c.collector_id
+LEFT JOIN default.net_locations_enabled    AS l ON c.location_id  = l.location_id
+ORDER BY location_name, collector_name, source_name;
 ```
 
-Дополнительно можно показывать (источник — health демонов и `system`-таблицы):
+Здесь `bytes`/`packets`/`sampling_rate` — поля `flows_raw` (для sFlow `bytes`
+уже домножен на `sampling_rate` при приёме). Если каких-то колонок в схеме нет,
+убрать соответствующие строки.
+
+Дополнительно можно показывать (health демонов и `system`-таблицы):
 
 - writer lag / queue drops / spool lag демонов (пороги `*_HEALTH_*` в env);
 - активные BMP-пиры (`default.bmp_peers`);
-- объём за последний час по источнику (для сверки «молчит/льёт».
-
-UI помечает источник как «нет данных», если `age_seconds` больше порога
-(например, 300 секунд).
+- объём за последний час по источнику (для сверки «молчит/льёт»).
 
 ---
 
@@ -329,32 +377,41 @@ ALTER TABLE default.traffic_talker_1h MODIFY TTL hour + INTERVAL 90 DAY;
 
 ---
 
-## 6. Порядок применения новых таблиц
+## 6. Откуда берутся таблицы (НЕ задача UI)
 
-На сервере (тот же ClickHouse, где `flows_raw`):
+UI/джун **не создаёт таблицы руками**. Схему каталога раскатывает deploy-скрипт
+из git — он идемпотентный (`CREATE TABLE IF NOT EXISTS`), запускается devops при
+развёртывании:
 
 ```bash
-clickhouse-client --host 95.215.1.30 --port 6124 --user develop --password '***' \
-  --database default --multiquery < deploy/clickhouse/net_locations.sql
-
-clickhouse-client --host 95.215.1.30 --port 6124 --user develop --password '***' \
-  --database default --multiquery < deploy/clickhouse/net_collectors.sql
+CH_HOST=95.215.1.30 CH_PORT=6124 CH_USER=develop CH_PASSWORD='***' \
+  ./deploy/clickhouse/apply_catalog_tables.sh
 ```
 
-Затем заполнить минимум одну локацию и один коллектор, привязать существующие
-источники (`xdp-default`, `dns-default`) к коллектору через `collector_id`.
+Скрипт применяет в правильном порядке `net_locations.sql` и `net_collectors.sql`
+(локации первыми — коллекторы ссылаются на `location_id`) и выводит список
+созданных таблиц/view. Источники трафика (`net_flow_sources`) раскатываются своим
+шагом — см. `deploy/clickhouse/apply_flow_sources.sql`.
+
+К моменту работы UI таблицы и `*_enabled` view уже существуют. Дальше оператор в
+UI заполняет минимум одну локацию и один коллектор и привязывает существующие
+источники (`xdp-default`, `dns-default`, `sflow-default`) к коллектору через
+`collector_id` — обычными `INSERT` из разделов 1.2–1.4.
 
 ---
 
 ## 7. Чеклист
 
-- [ ] Созданы `net_locations` + `net_locations_enabled`.
-- [ ] Созданы `net_collectors` + `net_collectors_enabled`.
+- [ ] (devops) Таблицы каталога раскатаны `apply_catalog_tables.sh` — UI их НЕ создаёт.
+- [ ] UI читает `net_locations_enabled` / `net_collectors_enabled`, не базовые таблицы.
 - [ ] В UI «Источники трафика» поле `collector_id` — select из `net_collectors_enabled`.
 - [ ] Дерево «Локация → Коллектор → Источник» строится одним JOIN-запросом.
 - [ ] `source_id` в UI совпадает с env демона; UI не меняет привязку демона.
 - [ ] CRUD всех справочников — через INSERT новой версии + soft delete `enabled = 0`.
 - [ ] Списки читаются из `*_enabled` view, не из базовых таблиц.
 - [ ] Фильтры дашборда не пишутся в БД, только в состояние UI.
-- [ ] Статус коллекторов — только чтение.
+- [ ] Статус коллекторов — только чтение, строится `LEFT JOIN` от живых `source_id`.
+- [ ] Незнакомые `source_id` показываются как `⚠ unknown` с CTA «Зарегистрировать», не скрываются.
+- [ ] Состояние считается по `age` (online/lagging/stale/disabled/unknown), пороги — в UI.
+- [ ] Имя/локация/коллектор редактируются в UI; в env только привязка `source_id`.
 - [ ] TTL и env-параметры недоступны обычному пользователю.

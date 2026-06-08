@@ -137,9 +137,11 @@ answer_ip -> query_name
 
 ## 5. Нужны ли агрегаты
 
-Для MVP агрегаты **не нужны**.
+Агрегаты **нужны для длинных периодов**. Raw `default.dns_log` очень быстрый на
+коротких окнах, но на `7d` тяжёлые виджеты (`Top domains`, `Top clients`, KPI,
+activity chart) читают слишком много строк и уходят в timeout.
 
-Проверка на production data:
+Проверка на production data для коротких окон:
 
 ```text
 dns_log: 16.7 млрд строк за 30 дней
@@ -150,13 +152,33 @@ Top domains за 30 минут:     ~0.17s
 Top clients за 30 минут:     ~0.39s
 ```
 
-Значит UI можно строить напрямую по `default.dns_log`.
+Значит UI можно строить напрямую по `default.dns_log` только для коротких
+периодов:
 
-Агрегаты добавить позже, если:
+| Период | Таблица для activity/KPI | Таблица для Top domains | Таблица для Top clients |
+|--------|---------------------------|--------------------------|--------------------------|
+| `30m`, `1h`, `3h`, `6h` | `default.dns_log` | `default.dns_log` | `default.dns_log` |
+| `12h`, `24h`, `7d` | `default.dns_activity_5m` | `default.dns_domains_1h` | `default.dns_clients_1h` |
 
-- запросы за 24h/7d станут медленнее 1-2 секунд;
-- появится много пользователей с автообновлением;
-- появятся тяжёлые отчёты по неделям/месяцам.
+`Last DNS queries` всегда читает raw `default.dns_log`, но только короткое окно
+(`30m` по умолчанию) или точный фильтр (`client_ip` / `domain_search`). Для
+`7d` нельзя запускать «последние события» без уточняющего фильтра.
+
+DDL агрегатов лежит в git:
+
+- `deploy/clickhouse/dns_activity_5m.sql`;
+- `deploy/clickhouse/dns_domains_1h.sql`;
+- `deploy/clickhouse/dns_clients_1h.sql`.
+
+Создание таблиц и materialized views выполняет стартовый скрипт:
+
+```bash
+./deploy/clickhouse/apply_dns_tables.sh
+```
+
+Важно: materialized views начнут заполнять агрегаты только для новых строк после
+создания MV. Для уже накопленной истории нужен отдельный backfill за нужный
+период, запускать вне пика нагрузки. UI не делает backfill.
 
 ---
 
@@ -165,7 +187,7 @@ Top clients за 30 минут:     ~0.39s
 UI передаёт:
 
 ```text
-period: 30m | 1h | 3h | 6h | 12h | 24h
+period: 30m | 1h | 3h | 6h | 12h | 24h | 7d
 source_ids: optional array
 qtype: optional string
 rcode: optional number
@@ -183,9 +205,12 @@ limit: default 50
 6h  -> INTERVAL 6 HOUR
 12h -> INTERVAL 12 HOUR
 24h -> INTERVAL 24 HOUR
+7d  -> INTERVAL 7 DAY
 ```
 
-Для первого MVP достаточно `30m` и `6h`.
+Для `12h`, `24h`, `7d` API обязан переключать тяжёлые виджеты на агрегаты из
+раздела 5. Не давать UI напрямую менять имя таблицы — выбор таблицы делает
+backend по whitelist периода.
 
 ---
 
@@ -312,6 +337,34 @@ ORDER BY bucket
 FORMAT JSON
 ```
 
+### 12 часов / 24 часа / 7 дней, bucket = 5 minutes, из агрегата
+
+Для длинных периодов НЕ читать `default.dns_log`.
+
+```sql
+SELECT
+    bucket,
+    sum(queries) AS queries,
+    sum(responses) AS responses,
+    sum(nxdomain) AS nxdomain,
+    sum(servfail) AS servfail,
+    round(queries / 300, 2) AS qps,
+    round(responses / 300, 2) AS responses_per_sec,
+    round(nxdomain / 300, 2) AS nxdomain_per_sec,
+    round(servfail / 300, 2) AS servfail_per_sec
+FROM default.dns_activity_5m
+WHERE bucket >= now() - INTERVAL 7 DAY
+  AND source_id IN
+  (
+      SELECT source_id
+      FROM default.net_flow_sources_enabled
+      WHERE source_type = 'dns'
+  )
+GROUP BY bucket
+ORDER BY bucket
+FORMAT JSON
+```
+
 UI:
 
 - X-axis: `bucket`;
@@ -362,6 +415,47 @@ FORMAT JSON
 30m -> 1800
 1h  -> 3600
 6h  -> 21600
+12h -> 43200
+24h -> 86400
+7d  -> 604800
+```
+
+Для `12h`, `24h`, `7d` KPI считать из `default.dns_activity_5m`:
+
+```sql
+WITH
+    604800 AS window_seconds
+SELECT
+    round(sum(queries) / window_seconds, 2) AS qps,
+    round(sum(responses) / window_seconds, 2) AS responses_per_sec,
+    round(sum(nxdomain) * 100.0 / nullIf(sum(responses), 0), 2) AS nxdomain_percent,
+    round(sum(servfail) * 100.0 / nullIf(sum(responses), 0), 2) AS servfail_percent
+FROM default.dns_activity_5m
+WHERE bucket >= now() - INTERVAL 7 DAY
+  AND source_id IN
+  (
+      SELECT source_id
+      FROM default.net_flow_sources_enabled
+      WHERE source_type = 'dns'
+  )
+FORMAT JSON
+```
+
+`Unique clients` и `Unique domains` для длинного периода считать отдельными
+лёгкими запросами по hourly-агрегатам:
+
+```sql
+SELECT uniqExact(client_ip) AS unique_clients
+FROM default.dns_clients_1h
+WHERE hour >= now() - INTERVAL 7 DAY
+FORMAT JSON
+```
+
+```sql
+SELECT uniqExact(query_name) AS unique_domains
+FROM default.dns_domains_1h
+WHERE hour >= now() - INTERVAL 7 DAY
+FORMAT JSON
 ```
 
 ---
@@ -408,6 +502,33 @@ UI rules:
 - если `error_percent > 20`, подсветить строку;
 - `query_name` показывать полностью в tooltip;
 - длинные домены в таблице обрезать через ellipsis.
+
+Для `12h`, `24h`, `7d` использовать агрегат:
+
+```sql
+SELECT
+    query_name,
+    qtype,
+    sum(queries) AS queries,
+    sum(responses) AS responses,
+    sum(nxdomain) AS nxdomain,
+    sum(servfail) AS servfail,
+    round((nxdomain + servfail) * 100.0 / nullIf(responses, 0), 2) AS error_percent
+FROM default.dns_domains_1h
+WHERE hour >= now() - INTERVAL 7 DAY
+  AND source_id IN
+  (
+      SELECT source_id
+      FROM default.net_flow_sources_enabled
+      WHERE source_type = 'dns'
+  )
+GROUP BY
+    query_name,
+    qtype
+ORDER BY queries DESC
+LIMIT 50
+FORMAT JSON
+```
 
 ---
 
@@ -456,11 +577,48 @@ UI rules:
 - рядом можно добавить кнопку «искать в Top Talkers»;
 - если `unique_domains` очень большое, это может быть скан/бот/DGA.
 
+Для `12h`, `24h`, `7d` использовать агрегат:
+
+```sql
+SELECT
+    if(
+        length(client_ip) = 16
+        AND substring(client_ip, 5) = unhex('000000000000000000000000'),
+        toString(toIPv4(reinterpretAsUInt32(reverse(substring(client_ip, 1, 4))))),
+        IPv6NumToString(client_ip)
+    ) AS client,
+    sum(queries) AS queries,
+    uniqCombinedMerge(unique_domains_state) AS unique_domains,
+    sum(nxdomain) AS nxdomain,
+    sum(servfail) AS servfail,
+    round((nxdomain + servfail) * 100.0 / nullIf(sum(responses), 0), 2) AS error_percent
+FROM default.dns_clients_1h
+WHERE hour >= now() - INTERVAL 7 DAY
+  AND source_id IN
+  (
+      SELECT source_id
+      FROM default.net_flow_sources_enabled
+      WHERE source_type = 'dns'
+  )
+GROUP BY client
+ORDER BY queries DESC
+LIMIT 50
+FORMAT JSON
+```
+
 ---
 
 ## 13. Виджет 5: Last DNS queries
 
 Показывает последние DNS-события.
+
+Важно для производительности: этот виджет всегда читает raw `default.dns_log`.
+При выбранном периоде `12h`, `24h`, `7d` НЕ расширять окно автоматически на весь
+период. Использовать:
+
+- последние `30m` по умолчанию;
+- или выбранный длинный период только если задан точный `client_ip` или
+  `domain_search`.
 
 Колонки:
 
@@ -472,40 +630,44 @@ Time | Client | Server | Query | QTYPE | RCODE | Answers
 
 ```sql
 SELECT
-    toString(ts) AS ts,
-    source_id,
+    toString(d.ts) AS event_time,
+    d.source_id,
     if(
-        length(client_ip) = 16
-        AND substring(client_ip, 5) = unhex('000000000000000000000000'),
-        toString(toIPv4(reinterpretAsUInt32(reverse(substring(client_ip, 1, 4))))),
-        IPv6NumToString(client_ip)
+        length(d.client_ip) = 16
+        AND substring(d.client_ip, 5) = unhex('000000000000000000000000'),
+        toString(toIPv4(reinterpretAsUInt32(reverse(substring(d.client_ip, 1, 4))))),
+        IPv6NumToString(d.client_ip)
     ) AS client,
     if(
-        length(server_ip) = 16
-        AND substring(server_ip, 5) = unhex('000000000000000000000000'),
-        toString(toIPv4(reinterpretAsUInt32(reverse(substring(server_ip, 1, 4))))),
-        IPv6NumToString(server_ip)
+        length(d.server_ip) = 16
+        AND substring(d.server_ip, 5) = unhex('000000000000000000000000'),
+        toString(toIPv4(reinterpretAsUInt32(reverse(substring(d.server_ip, 1, 4))))),
+        IPv6NumToString(d.server_ip)
     ) AS server,
-    if(is_response = 1, 'response', 'query') AS event_type,
-    query_name,
-    qtype,
-    rcode,
-    answers_cname,
-    arrayMap(x -> toString(toIPv4(reinterpretAsUInt32(reverse(substring(x, 1, 4)))))), answers_a) AS answers_a,
-    arrayMap(x -> IPv6NumToString(x), answers_aaaa) AS answers_aaaa,
-    raw_size
-FROM default.dns_log
-WHERE ts >= now() - INTERVAL 30 MINUTE
-  AND source_id IN
+    if(d.is_response = 1, 'response', 'query') AS event_type,
+    d.query_name,
+    d.qtype,
+    d.rcode,
+    d.answers_cname,
+    arrayMap(x -> toString(toIPv4(reinterpretAsUInt32(reverse(substring(x, 1, 4)))))), d.answers_a) AS answers_a,
+    arrayMap(x -> IPv6NumToString(x), d.answers_aaaa) AS answers_aaaa,
+    d.raw_size
+FROM default.dns_log AS d
+WHERE d.ts >= now() - INTERVAL 30 MINUTE
+  AND d.source_id IN
   (
       SELECT source_id
       FROM default.net_flow_sources_enabled
       WHERE source_type = 'dns'
   )
-ORDER BY ts DESC
+ORDER BY d.ts DESC
 LIMIT 100
 FORMAT JSON
 ```
+
+Важно: не делать `toString(ts) AS ts`. В ClickHouse алиасы могут
+подставляться в `WHERE`, и тогда условие `ts >= now() - INTERVAL ...`
+превратится в сравнение `String` с `DateTime`.
 
 UI rules:
 

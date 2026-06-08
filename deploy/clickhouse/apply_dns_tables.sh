@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Apply dns_log + dns_answers DDL on ClickHouse.
+# Apply DNS raw tables + UI rollups on ClickHouse.
 #
 # Usage:
 #   ./deploy/clickhouse/apply_dns_tables.sh
@@ -37,6 +37,9 @@ run_sql() {
 echo "Applying DNS tables to ${CH_HOST}:${CH_PORT}/${DNS_TABLE_DATABASE}"
 run_sql "$ROOT/deploy/clickhouse/dns_log.sql"
 run_sql "$ROOT/deploy/clickhouse/dns_answers.sql"
+run_sql "$ROOT/deploy/clickhouse/dns_activity_5m.sql"
+run_sql "$ROOT/deploy/clickhouse/dns_domains_1h.sql"
+run_sql "$ROOT/deploy/clickhouse/dns_clients_1h.sql"
 
 echo "OK"
 clickhouse-client "${args[@]}" --query "
@@ -46,7 +49,12 @@ SELECT
     formatReadableQuantity(total_rows) AS rows
 FROM system.tables
 WHERE database = '${DNS_TABLE_DATABASE}'
-  AND name IN ('dns_log', 'dns_answers')
+  AND name IN (
+    'dns_log',
+    'dns_answers',
+    'dns_activity_5m',
+    'dns_domains_1h',
+    'dns_clients_1h')
 ORDER BY name
 FORMAT PrettyCompact
 "
