@@ -217,7 +217,7 @@ For the less loaded kernel 6.x host (`sel`), use the same conservative productio
 - `XDP_NF_ACTIVE=60s`
 - `XDP_NF_IDLE=10s`
 - `XDP_NF_SCAN=1s`
-- `XDP_CH_SPOOL_SHUTDOWN_DRAIN=300s` for permanent mode
+- `XDP_CH_SPOOL_SHUTDOWN_DRAIN=30s` for permanent mode (fast stop; spool replays leftover backlog on next start). Use `300s` only for planned A/B swaps that must flush before stopping.
 - `XDP_CH_SAMPLER_ADDR=127.0.0.1`
 - `XDP_CH_WRITERS=8`
 - `WATCHDOG_STALL_SEC=300`

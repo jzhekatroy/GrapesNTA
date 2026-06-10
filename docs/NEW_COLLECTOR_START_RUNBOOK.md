@@ -439,7 +439,9 @@ XDP_CH_SPOOL_MODE=required
 XDP_CH_SPOOL_DIR=/var/lib/xdpflowd/ch-spool
 XDP_CH_SPOOL_MAX_BYTES=214748364800
 XDP_CH_SPOOL_FRAME_MAX_RECORDS=50000
-XDP_CH_SPOOL_SHUTDOWN_DRAIN=300s
+# Keep `systemctl stop` fast; spool is durable and replays leftover backlog on
+# next start. Use 300s only for planned A/B swaps that must flush before stop.
+XDP_CH_SPOOL_SHUTDOWN_DRAIN=30s
 XDP_CH_WRITERS=8
 
 XDP_TOP=0
