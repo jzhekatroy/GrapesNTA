@@ -774,12 +774,15 @@ func main() {
 				nfExp.logMetrics()
 			} else if chDel != nil {
 				if batchDrain {
-					flows, err := drainer.FullBatchDrain(objs)
+					receivedAt := time.Now().UTC()
+					n, err := drainer.StreamFullBatchDrain(objs, func(chunk []flowKV) error {
+						chDel.enqueue(chunk, receivedAt)
+						return nil
+					})
 					if err != nil {
-						log.Error("final batch full-drain", "err", err, "drained", len(flows))
+						log.Error("final batch full-drain", "err", err, "drained", n)
 					}
-					chDel.enqueue(flows, time.Now().UTC())
-					log.Info("final flush", "exported", len(flows), "deleted", len(flows), "drain_mode", "batch", "clickhouse_enabled", true)
+					log.Info("final flush", "exported", n, "deleted", n, "drain_mode", "batch", "clickhouse_enabled", true)
 				} else {
 					flows, atomicDrained := drainer.All(objs)
 					chDel.enqueue(flows, time.Now().UTC())
@@ -905,11 +908,14 @@ func main() {
 				_, _ = nfExp.scanAndExport(objs, drainer, chFlowCb)
 			} else if chDel != nil {
 				if batchDrain {
-					flows, err := drainer.FullBatchDrain(objs)
+					receivedAt := time.Now().UTC()
+					n, err := drainer.StreamFullBatchDrain(objs, func(chunk []flowKV) error {
+						chDel.enqueue(chunk, receivedAt)
+						return nil
+					})
 					if err != nil {
-						log.Error("batch full-drain", "err", err, "drained", len(flows))
+						log.Error("batch full-drain", "err", err, "drained", n)
 					}
-					chDel.enqueue(flows, time.Now().UTC())
 					break
 				}
 				nowMonoNs, err := readSystemUptimeNs()

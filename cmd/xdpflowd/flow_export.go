@@ -159,36 +159,48 @@ func drainExpiredFlows(objs *loader.Objects, idleTimeout, activeTimeout time.Dur
 // above any realistic bucket and keeps the per-call buffers small (~1 MB).
 const flowBatchChunk = 4096
 
-// batchDrainAllFlows atomically pulls AND deletes every flow in the map using
-// BPF_MAP_LOOKUP_AND_DELETE_BATCH. On a multi-million-entry map this replaces
-// the O(N) per-key Iterate()+LookupAndDelete (tens of millions of syscalls per
-// scan, which cannot complete inside a 1 s tick) with ~N/flowBatchChunk batch
-// syscalls — fast enough to drain the whole table every few seconds so it never
-// overflows. Counters are captured at the kernel-side delete, so it is as
-// correct under load as the per-key atomic path.
+// streamBatchDrainAllFlows atomically pulls AND deletes every flow in the map
+// using BPF_MAP_LOOKUP_AND_DELETE_BATCH. On a multi-million-entry map this
+// replaces the O(N) per-key Iterate()+LookupAndDelete (tens of millions of
+// syscalls per scan, which cannot complete inside a 1 s tick) with
+// ~N/flowBatchChunk batch syscalls — fast enough to drain the whole table every
+// few seconds so it never overflows. Counters are captured at the kernel-side
+// delete, so it is as correct under load as the per-key atomic path.
+//
+// IMPORTANT: this function streams chunks to the caller. Do not accumulate the
+// whole map into one []flowKV: at 5-12M flows that transient Go heap can push
+// the collector into swap. The callback must consume/copy the chunk before
+// returning because the backing batch buffers are reused on the next iteration.
 //
 // Semantics note: this drains EVERYTHING, so the export interval that calls it
 // becomes the effective active timeout (there is no idle/active distinction).
 // That is the intended trade-off for high-throughput collection.
-func batchDrainAllFlows(objs *loader.Objects) ([]flowKV, error) {
+func streamBatchDrainAllFlows(objs *loader.Objects, onChunk func([]flowKV) error) (int, error) {
 	var cursor ebpf.MapBatchCursor
 	keys := make([]FlowKey, flowBatchChunk)
 	vals := make([]FlowValue, flowBatchChunk)
-	out := make([]flowKV, 0, flowBatchChunk)
+	total := 0
 	for {
 		n, err := objs.Flows.BatchLookupAndDelete(&cursor, keys, vals, nil)
+		chunk := make([]flowKV, 0, n)
 		for i := 0; i < n; i++ {
 			if !isExportableKey(keys[i]) {
 				continue
 			}
-			out = append(out, flowKV{k: keys[i], v: vals[i]})
+			chunk = append(chunk, flowKV{k: keys[i], v: vals[i]})
+		}
+		if len(chunk) > 0 {
+			if cbErr := onChunk(chunk); cbErr != nil {
+				return total, cbErr
+			}
+			total += len(chunk)
 		}
 		if errors.Is(err, ebpf.ErrKeyNotExist) {
 			// Reached the end of the map — all remaining results returned.
-			return out, nil
+			return total, nil
 		}
 		if err != nil {
-			return out, err
+			return total, err
 		}
 	}
 }
@@ -349,16 +361,16 @@ func (d *FlowDrainer) BatchEnabled() bool {
 	return d != nil && d.batchMode && d.batchSupported
 }
 
-// FullBatchDrain pulls and deletes the entire flow map with batch ops. The
-// returned flows are already removed from the map (no follow-up delete). On a
-// batch error it returns whatever it managed to drain plus the error; the
-// caller should still export those rows and log the failure.
-func (d *FlowDrainer) FullBatchDrain(objs *loader.Objects) ([]flowKV, error) {
-	out, err := batchDrainAllFlows(objs)
+// StreamFullBatchDrain pulls and deletes the entire flow map with batch ops,
+// invoking onChunk for each small chunk. Entries are already removed from the
+// map (no follow-up delete). This is the production batch path: it keeps memory
+// bounded by flowBatchChunk instead of by the whole map cardinality.
+func (d *FlowDrainer) StreamFullBatchDrain(objs *loader.Objects, onChunk func([]flowKV) error) (int, error) {
+	n, err := streamBatchDrainAllFlows(objs, onChunk)
 	if d != nil {
 		d.batchCount++
 	}
-	return out, err
+	return n, err
 }
 
 // Mode reports the active drainer mode (mostly for tests / log lines).

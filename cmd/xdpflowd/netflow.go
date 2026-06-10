@@ -425,16 +425,27 @@ func (e *nfExporter) flushBuckets(v4 [][]byte, v6 [][]byte) {
 func (e *nfExporter) scanAndExport(objs *loader.Objects, drainer *FlowDrainer, onFlows func([]flowKV, time.Time)) (exported, deleted int) {
 	nowMonoNs, _ := readSystemUptimeNs() // cheap, a few hundred ns
 
+	if drainer != nil && drainer.BatchEnabled() {
+		receivedAt := time.Now().UTC()
+		if last := e.lastTemplateSent.Load(); last == 0 || time.Since(time.Unix(0, last)) >= e.templateInterval {
+			e.sendTemplate()
+		}
+		n, err := drainer.StreamFullBatchDrain(objs, func(chunk []flowKV) error {
+			if onFlows != nil {
+				onFlows(chunk, receivedAt)
+			}
+			e.exportFlowChunk(chunk)
+			return nil
+		})
+		if err != nil && e.log != nil {
+			e.log.Error("batch full-drain", "err", err, "drained", n)
+		}
+		return n, n
+	}
+
 	var flows []flowKV
 	var atomicDrained bool
 	switch {
-	case drainer != nil && drainer.BatchEnabled():
-		var err error
-		flows, err = drainer.FullBatchDrain(objs)
-		if err != nil && e.log != nil {
-			e.log.Error("batch full-drain", "err", err, "drained", len(flows))
-		}
-		atomicDrained = true
 	case drainer != nil:
 		flows, atomicDrained = drainer.Expired(objs, e.idleTimeout, e.activeTimeout, nowMonoNs)
 	default:
@@ -472,20 +483,43 @@ func (e *nfExporter) scanAndExport(objs *loader.Objects, drainer *FlowDrainer, o
 	return
 }
 
+func (e *nfExporter) exportFlowChunk(flows []flowKV) {
+	var recV4, recV6 [][]byte
+	for _, fv := range flows {
+		if fv.k.IPVersion == 4 {
+			rec := e.encodeRecordV4(make([]byte, 0, e.recV4Size), fv.k, fv.v)
+			recV4 = append(recV4, rec)
+		} else if fv.k.IPVersion == 6 {
+			rec := e.encodeRecordV6(make([]byte, 0, e.recV6Size), fv.k, fv.v)
+			recV6 = append(recV6, rec)
+		}
+	}
+	e.flushBuckets(recV4, recV6)
+}
+
 // flushAll exports every flow currently in the map regardless of timeout.
 // Intended for graceful shutdown and for test harnesses to ensure nothing
 // is left behind.
 func (e *nfExporter) flushAll(objs *loader.Objects, drainer *FlowDrainer, onFlows func([]flowKV, time.Time)) (exported, deleted int) {
+	if drainer != nil && drainer.BatchEnabled() {
+		receivedAt := time.Now().UTC()
+		e.sendTemplate()
+		n, err := drainer.StreamFullBatchDrain(objs, func(chunk []flowKV) error {
+			if onFlows != nil {
+				onFlows(chunk, receivedAt)
+			}
+			e.exportFlowChunk(chunk)
+			return nil
+		})
+		if err != nil && e.log != nil {
+			e.log.Error("final batch full-drain", "err", err, "drained", n)
+		}
+		return n, n
+	}
+
 	var flows []flowKV
 	var atomicDrained bool
 	switch {
-	case drainer != nil && drainer.BatchEnabled():
-		var err error
-		flows, err = drainer.FullBatchDrain(objs)
-		if err != nil && e.log != nil {
-			e.log.Error("final batch full-drain", "err", err, "drained", len(flows))
-		}
-		atomicDrained = true
 	case drainer != nil:
 		flows, atomicDrained = drainer.All(objs)
 	default:
