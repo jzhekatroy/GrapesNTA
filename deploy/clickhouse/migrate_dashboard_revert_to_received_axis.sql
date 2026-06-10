@@ -1,46 +1,18 @@
--- Pivot minute aggregate for dashboard traffic charts (bps / pps / flows/s).
+-- Revert: restore dashboard traffic rollups to the time_received_ns axis.
 --
--- One row per minute per source_id with pre-split direction columns.
+-- The flow-start axis (migrate_dashboard_flow_start_axis.sql) did not smooth the
+-- graph: under batch full-drain, elephant flows are re-created with a fresh
+-- first_seen at every drain tick, so their bytes still clump, and bucketing by
+-- flow start sags the live edge (recent flows not yet exported). We revert to
+-- the export-time axis here; the proper smoothing is a rate-spread rollup over
+-- [time_flow_start_ns, time_flow_end_ns] (built separately).
 --
--- Time axis: buckets by time_received_ns (collector export time). NOTE: a
--- first_seen-based axis was tried to smooth the batch-export sawtooth but did
--- not help — under batch full-drain, long ("elephant") flows are re-created with
--- a fresh first_seen at each drain tick, so their bytes still clump, while
--- bucketing by flow start also sags the live edge (recent flows are not yet
--- exported). The real fix is spreading each flow's bytes across
--- [time_flow_start_ns, time_flow_end_ns] (rate distribution); see
--- migrate_dashboard_flow_start_axis.sql history and the rate-spread rollup.
-
-CREATE TABLE IF NOT EXISTS default.traffic_dashboard_1m
-(
-    minute           DateTime('UTC'),
-    source_id        LowCardinality(String),
-
-    total_bytes      UInt64,
-    in_bytes         UInt64,
-    out_bytes        UInt64,
-    transit_bytes    UInt64,
-    internal_bytes   UInt64,
-    unknown_bytes    UInt64,
-
-    total_packets    UInt64,
-    in_packets       UInt64,
-    out_packets      UInt64,
-    transit_packets  UInt64,
-    internal_packets UInt64,
-    unknown_packets  UInt64,
-
-    total_flows      UInt64,
-    in_flows         UInt64,
-    out_flows        UInt64,
-    transit_flows    UInt64,
-    internal_flows   UInt64,
-    unknown_flows    UInt64
-)
-ENGINE = SummingMergeTree
-PARTITION BY toYYYYMMDD(minute)
-ORDER BY (minute, source_id)
-SETTINGS index_granularity = 8192;
+-- Safe on an existing database: recreates only the materialized views; target
+-- tables and history are untouched.
+--
+-- Apply:
+--   clickhouse-client --host <h> --port <p> --user <u> --password <pw> \
+--     --multiquery < deploy/clickhouse/migrate_dashboard_revert_to_received_axis.sql
 
 DROP TABLE IF EXISTS default.traffic_dashboard_1m_mv;
 
@@ -75,39 +47,6 @@ FROM default.flows_raw
 GROUP BY
     minute,
     source_id;
-
--- Hourly rollup for long dashboard windows.
-
-CREATE TABLE IF NOT EXISTS default.traffic_dashboard_1h
-(
-    hour             DateTime('UTC'),
-    source_id        LowCardinality(String),
-
-    total_bytes      UInt64,
-    in_bytes         UInt64,
-    out_bytes        UInt64,
-    transit_bytes    UInt64,
-    internal_bytes   UInt64,
-    unknown_bytes    UInt64,
-
-    total_packets    UInt64,
-    in_packets       UInt64,
-    out_packets      UInt64,
-    transit_packets  UInt64,
-    internal_packets UInt64,
-    unknown_packets  UInt64,
-
-    total_flows      UInt64,
-    in_flows         UInt64,
-    out_flows        UInt64,
-    transit_flows    UInt64,
-    internal_flows   UInt64,
-    unknown_flows    UInt64
-)
-ENGINE = SummingMergeTree
-PARTITION BY toYYYYMM(hour)
-ORDER BY (hour, source_id)
-SETTINGS index_granularity = 8192;
 
 DROP TABLE IF EXISTS default.traffic_dashboard_1h_mv;
 
