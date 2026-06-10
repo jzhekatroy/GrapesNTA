@@ -32,6 +32,8 @@ type xdpflowdConfig struct {
 	NFScan             *string `yaml:"nf_scan"`
 	NFSourceID         *int    `yaml:"nf_source_id"`
 	HeavyExport        *bool   `yaml:"heavy_export"`
+	DrainMode          *string `yaml:"drain_mode"`
+	DrainInterval      *string `yaml:"drain_interval"`
 
 	CHDSN                *string `yaml:"ch_dsn"`
 	CHTable              *string `yaml:"ch_table"`
@@ -129,6 +131,8 @@ func applyXDPFlowdConfig(fs *flag.FlagSet, cfg *xdpflowdConfig) error {
 		func() error { return setString("nf-scan", cfg.NFScan) },
 		func() error { return setInt("nf-source-id", cfg.NFSourceID) },
 		func() error { return setBool("heavy-export", cfg.HeavyExport) },
+		func() error { return setString("drain-mode", cfg.DrainMode) },
+		func() error { return setString("drain-interval", cfg.DrainInterval) },
 		func() error { return setString("ch-dsn", cfg.CHDSN) },
 		func() error { return setString("ch-table", cfg.CHTable) },
 		func() error { return setInt("ch-batch-size", cfg.CHBatchSize) },

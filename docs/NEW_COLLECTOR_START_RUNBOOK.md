@@ -963,3 +963,75 @@ native подтверждён как рабочий и **более выгодн
 системы относительно generic, без потерь на железе. Для `m61` это дефолт.
 Опционально `ethtool -G $IF rx 8192` убирает остаточные ~21 pps PHY-микробёрстов.
 
+---
+
+## 17. Снижение потерь flow на высоких скоростях (map_full)
+
+### Симптом
+
+`journalctl -u xdpflowd` показывает растущий `map_full_total` (например 1.6 млрд) и
+`map_full_delta > 0` с `xdpflowd health degraded`. В ClickHouse при этом виден
+недосчёт трафика. Особенно проявляется после включения классификатора
+(`XDP_CLASSIFIER=1`) и под флудом со спуфленными source-IP.
+
+### Причина
+
+1. **Тип карты.** Раньше `flows` был `BPF_MAP_TYPE_HASH`: при заполнении вставка
+   нового flow падает (`bump_stat(STAT_MAP_FULL)`) и его байты **вообще не
+   учитываются**. Это прямой источник потерь.
+2. **Скорость дренажа.** Экспорт-тик каждую секунду обходил **всю** карту
+   итератором (`Iterate()` = per-key `GET_NEXT_KEY`+`LOOKUP`) и потом per-key
+   `LookupAndDelete`. На 12M записей это десятки млн syscall за цикл — не
+   укладывается в 1 с, карта переполняется быстрее, чем дренируется.
+
+### Фикс (в коде, начиная с этой ревизии)
+
+1. **LRU-карта.** `flows` теперь `BPF_MAP_TYPE_LRU_HASH`. При заполнении
+   вытесняется самый старый (idle) flow, а **новый всегда заводится** →
+   `map_full` стремится к 0 by construction. Горячий путь трогает активные flow
+   на каждом пакете (`lookup_elem`), обновляя LRU-recency, поэтому жертвами
+   вытеснения становятся только устаревшие записи, которые дренаж и так заберёт.
+2. **Batch-дренаж.** Новый режим `XDP_DRAIN_MODE=batch`: вся карта снимается
+   одним `BPF_MAP_LOOKUP_AND_DELETE_BATCH` (≈N/4096 syscall вместо десятков млн).
+   Дренаж укладывается в интервал, карта не переполняется. Интервал дренажа
+   (`XDP_DRAIN_INTERVAL`, по умолчанию = `XDP_NF_ACTIVE`) становится фактическим
+   active timeout: каждый flow экспортируется раз в интервал.
+
+### Что выставить на m61
+
+В `/etc/xdpflowd/xdpflowd.env`:
+
+```bash
+XDP_DRAIN_MODE=batch
+XDP_DRAIN_INTERVAL=10s   # = active timeout; 10-15s разумно
+```
+
+Пересборка с LRU и увеличенной картой (RAM ≥ 64 GB → 24M безопасно):
+
+```bash
+cd /opt/GrapesNTA
+git pull
+free -g                              # убедиться в запасе RAM
+make clean
+make bpf FLOWS_MAP_SIZE=24000000     # 24M LRU ≈ 4-5 GB
+make build
+systemctl restart xdpflowd
+```
+
+### Проверка после рестарта
+
+```bash
+journalctl -u xdpflowd -n 50 --no-pager | grep -E 'flow drainer|batch full-drain|map_full|health'
+```
+
+Ожидаем:
+- `flow drainer: batch full-drain enabled ...` в логах старта;
+- `flow drainer ... batch_enabled=true batch_calls=N` (N растёт);
+- `map_full_delta=0`, нет `health degraded`;
+- тождество учёта держится: `total_packets == accounted + parse_errors + map_full + non_ip_pass`.
+
+### Откат
+
+`XDP_DRAIN_MODE=timer` + рестарт возвращает прежнее поведение. LRU-карта
+безопасна и в timer-режиме (просто перестаёт ронять новые flow при переполнении).
+

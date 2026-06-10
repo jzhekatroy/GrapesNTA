@@ -417,6 +417,8 @@ func main() {
 	nfTemplateInterval := flag.Duration("nf-template-interval", 60*time.Second, "NetFlow template re-send interval")
 	nfScan := flag.Duration("nf-scan", 1*time.Second, "how often to walk the flows map for NetFlow export")
 	nfSourceID := flag.Int("nf-source-id", 1, "NetFlow v9 source_id field (exporter observation domain)")
+	drainMode := flag.String("drain-mode", "timer", "flow drain strategy for the ClickHouse path: timer (idle/active per-key, low row volume) | batch (whole-map BPF_MAP_LOOKUP_AND_DELETE_BATCH each -drain-interval; far faster, prevents map overflow at high pps)")
+	drainInterval := flag.Duration("drain-interval", 0, "batch drain period (drain-mode=batch only); 0 = use -nf-active. This becomes the effective active timeout.")
 	xdpAction := flag.String("xdp-action", "pass", "XDP return value for accounted IP packets: pass|drop. DROP only on SPAN/mirror interfaces — it stops the kernel stack after accounting and saves CPU.")
 	dnsPassthrough := flag.Bool("dns-passthrough", false, "force XDP_PASS for UDP src/dst port 53 even when -xdp-action=drop (SPAN only), so co-located dnsflowd can capture DNS via AF_PACKET; default off")
 
@@ -546,7 +548,7 @@ func main() {
 	// Choose flow drainer once: atomic LookupAndDelete when supported,
 	// snapshot+delete otherwise. Shared by NetFlow and ClickHouse paths so
 	// behaviour and metrics are uniform.
-	drainer := NewFlowDrainer(log)
+	drainer := NewFlowDrainer(log, strings.EqualFold(strings.TrimSpace(*drainMode), "batch"))
 
 	var nfExp *nfExporter
 	if *nfDsts != "" {
@@ -698,9 +700,24 @@ func main() {
 		defer jsonTicker.Stop()
 	}
 
+	// In batch full-drain mode the whole map is drained each tick, so the tick
+	// interval IS the active timeout — use -drain-interval (default -nf-active),
+	// not the 1 s -nf-scan. The per-key timer path keeps the fine-grained
+	// -nf-scan cadence. Applies to both the NetFlow (scanAndExport) and the
+	// ClickHouse-only export paths.
+	exportEvery := *nfScan
+	batchDrain := drainer.BatchEnabled()
+	if batchDrain {
+		exportEvery = *drainInterval
+		if exportEvery <= 0 {
+			exportEvery = *nfActive
+		}
+		log.Info("flow export: batch full-drain", "drain_interval", exportEvery)
+	}
+
 	var exportTicker *time.Ticker
 	if nfExp != nil || chDel != nil {
-		exportTicker = time.NewTicker(*nfScan)
+		exportTicker = time.NewTicker(exportEvery)
 		defer exportTicker.Stop()
 	}
 
@@ -754,15 +771,24 @@ func main() {
 				log.Info("final flush", "exported", exported, "deleted", deleted, "clickhouse_enabled", chDel != nil)
 				nfExp.logMetrics()
 			} else if chDel != nil {
-				flows, atomicDrained := drainer.All(objs)
-				chDel.enqueue(flows, time.Now().UTC())
-				deleted := 0
-				if !atomicDrained {
-					deleted = deleteFlowKeys(objs, flows)
+				if batchDrain {
+					flows, err := drainer.FullBatchDrain(objs)
+					if err != nil {
+						log.Error("final batch full-drain", "err", err, "drained", len(flows))
+					}
+					chDel.enqueue(flows, time.Now().UTC())
+					log.Info("final flush", "exported", len(flows), "deleted", len(flows), "drain_mode", "batch", "clickhouse_enabled", true)
 				} else {
-					deleted = len(flows)
+					flows, atomicDrained := drainer.All(objs)
+					chDel.enqueue(flows, time.Now().UTC())
+					deleted := 0
+					if !atomicDrained {
+						deleted = deleteFlowKeys(objs, flows)
+					} else {
+						deleted = len(flows)
+					}
+					log.Info("final flush", "exported", len(flows), "deleted", deleted, "atomic_drain", atomicDrained, "clickhouse_enabled", true)
 				}
-				log.Info("final flush", "exported", len(flows), "deleted", deleted, "atomic_drain", atomicDrained, "clickhouse_enabled", true)
 			}
 			log.Info("shutdown")
 			return
@@ -778,6 +804,8 @@ func main() {
 				atomicCalls, legacyCalls := drainer.Counters()
 				log.Info("flow drainer",
 					"mode", flowDrainerModeName(drainer.Mode()),
+					"batch_enabled", drainer.BatchEnabled(),
+					"batch_calls", drainer.BatchCalls(),
 					"atomic_calls", atomicCalls,
 					"legacy_calls", legacyCalls,
 				)
@@ -848,6 +876,14 @@ func main() {
 			if nfExp != nil {
 				_, _ = nfExp.scanAndExport(objs, drainer, chFlowCb)
 			} else if chDel != nil {
+				if batchDrain {
+					flows, err := drainer.FullBatchDrain(objs)
+					if err != nil {
+						log.Error("batch full-drain", "err", err, "drained", len(flows))
+					}
+					chDel.enqueue(flows, time.Now().UTC())
+					break
+				}
 				nowMonoNs, err := readSystemUptimeNs()
 				if err != nil {
 					log.Error("read uptime", "err", err)

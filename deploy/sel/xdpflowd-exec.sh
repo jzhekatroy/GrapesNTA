@@ -41,6 +41,10 @@ XDP_NF_ACTIVE="${XDP_NF_ACTIVE:-1800s}"
 XDP_NF_IDLE="${XDP_NF_IDLE:-15s}"
 XDP_NF_TEMPLATE_INTERVAL="${XDP_NF_TEMPLATE_INTERVAL:-60s}"
 XDP_NF_SCAN="${XDP_NF_SCAN:-1s}"
+# Flow drain strategy: timer | batch (whole-map BPF batch drain every
+# XDP_DRAIN_INTERVAL; prevents map_full at high pps, interval = active timeout).
+XDP_DRAIN_MODE="${XDP_DRAIN_MODE:-timer}"
+XDP_DRAIN_INTERVAL="${XDP_DRAIN_INTERVAL:-0s}"
 
 if [[ ! -x "$BIN" ]]; then
   echo "ERROR: xdpflowd binary not executable: $BIN" >&2
@@ -152,6 +156,8 @@ exec "${STDBUF[@]}" "$BIN" \
   -nf-idle "$XDP_NF_IDLE" \
   -nf-template-interval "$XDP_NF_TEMPLATE_INTERVAL" \
   -nf-scan "$XDP_NF_SCAN" \
+  -drain-mode "$XDP_DRAIN_MODE" \
+  -drain-interval "$XDP_DRAIN_INTERVAL" \
   -top "$XDP_TOP" \
   -top-interval "$XDP_TOP_INTERVAL" \
   -interval "$XDP_INTERVAL" \

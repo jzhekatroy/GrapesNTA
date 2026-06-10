@@ -3,10 +3,11 @@
  * xdp_flow.c — XDP flow aggregation (recommended field set).
  *
  * Parses Ethernet (802.1Q optional), IPv4 / IPv6, TCP / UDP / ICMP / ICMPv6.
- * HASH map flows + ARRAY stats:
+ * LRU_HASH map flows + ARRAY stats:
  *   stats[0] = total_packets (every packet seen by XDP)
  *   stats[1] = parse_errors  (truncated L2/L3/L4 headers)
- *   stats[2] = map_full      (flows HASH table full, insert failed)
+ *   stats[2] = map_full      (flows insert failed even after LRU eviction; ~0 in
+ *                             healthy operation, non-zero == severe overload)
  *   stats[3] = non_ip_pass   (XDP_PASS for non-IPv4/IPv6 traffic: ARP, LLDP, etc.)
  *
  * Identity check (userspace should verify):
@@ -84,17 +85,34 @@ struct flow_value {
 	__u32 ip_frag_count;
 };
 
-/* Max entries for the flow HASH. Production traffic on a 40 Gbit/s mirror
+/* Max entries for the flow table. Production traffic on a 40 Gbit/s mirror
  * can peak at >2 million concurrent flows (ipt_NETFLOW maxflows=2M hit its
  * ceiling on one of the audited servers). We default to 4M here — ~400 MB
  * RAM per map — and allow a compile-time override via -DFLOWS_MAP_SIZE=N.
+ *
+ * LRU vs plain HASH: with BPF_MAP_TYPE_HASH a full map makes
+ * bpf_map_update_elem(BPF_NOEXIST) fail, so a brand-new flow is DROPPED and its
+ * bytes never reach flows_raw (this is the STAT_MAP_FULL loss path). Under a
+ * high-cardinality flood (e.g. spoofed/randomized source IPs) the table fills
+ * faster than userspace can drain it and we silently under-count.
+ *
+ * BPF_MAP_TYPE_LRU_HASH instead evicts the least-recently-used entry to make
+ * room, so a new flow ALWAYS gets inserted — the only thing lost is the
+ * counters of an old entry that userspace had not drained yet. Combined with a
+ * fast drain (batch lookup-and-delete) that loss tends to zero. The hot path
+ * touches each active flow with bpf_map_lookup_elem on every packet, which
+ * refreshes LRU recency, so genuinely-active flows are never the eviction
+ * victims — only stale/idle ones the drainer is about to collect anyway.
+ *
+ * map_full is kept as a tripwire: with LRU it should stay ~0; a non-zero delta
+ * means the kernel could not even evict fast enough (severe overload).
  */
 #ifndef FLOWS_MAP_SIZE
 #define FLOWS_MAP_SIZE 4000000
 #endif
 
 struct {
-	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(type, BPF_MAP_TYPE_LRU_HASH);
 	__uint(max_entries, FLOWS_MAP_SIZE);
 	__type(key, struct flow_key);
 	__type(value, struct flow_value);

@@ -427,9 +427,17 @@ func (e *nfExporter) scanAndExport(objs *loader.Objects, drainer *FlowDrainer, o
 
 	var flows []flowKV
 	var atomicDrained bool
-	if drainer != nil {
+	switch {
+	case drainer != nil && drainer.BatchEnabled():
+		var err error
+		flows, err = drainer.FullBatchDrain(objs)
+		if err != nil && e.log != nil {
+			e.log.Error("batch full-drain", "err", err, "drained", len(flows))
+		}
+		atomicDrained = true
+	case drainer != nil:
 		flows, atomicDrained = drainer.Expired(objs, e.idleTimeout, e.activeTimeout, nowMonoNs)
-	} else {
+	default:
 		flows = selectExpiredFlows(objs, e.idleTimeout, e.activeTimeout, nowMonoNs)
 	}
 	if onFlows != nil {
@@ -470,9 +478,17 @@ func (e *nfExporter) scanAndExport(objs *loader.Objects, drainer *FlowDrainer, o
 func (e *nfExporter) flushAll(objs *loader.Objects, drainer *FlowDrainer, onFlows func([]flowKV, time.Time)) (exported, deleted int) {
 	var flows []flowKV
 	var atomicDrained bool
-	if drainer != nil {
+	switch {
+	case drainer != nil && drainer.BatchEnabled():
+		var err error
+		flows, err = drainer.FullBatchDrain(objs)
+		if err != nil && e.log != nil {
+			e.log.Error("final batch full-drain", "err", err, "drained", len(flows))
+		}
+		atomicDrained = true
+	case drainer != nil:
 		flows, atomicDrained = drainer.All(objs)
-	} else {
+	default:
 		flows = selectAllFlows(objs)
 	}
 	if onFlows != nil {

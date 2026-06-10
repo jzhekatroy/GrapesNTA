@@ -153,6 +153,79 @@ func drainExpiredFlows(objs *loader.Objects, idleTimeout, activeTimeout time.Dur
 	return out, nil
 }
 
+// flowBatchChunk is how many flows we pull per BPF_MAP_LOOKUP_AND_DELETE_BATCH
+// syscall. Larger = fewer syscalls per drain; must be >= the map's bucket size
+// or the kernel returns ENOSPC ("batch size too small"). 4096 is comfortably
+// above any realistic bucket and keeps the per-call buffers small (~1 MB).
+const flowBatchChunk = 4096
+
+// batchDrainAllFlows atomically pulls AND deletes every flow in the map using
+// BPF_MAP_LOOKUP_AND_DELETE_BATCH. On a multi-million-entry map this replaces
+// the O(N) per-key Iterate()+LookupAndDelete (tens of millions of syscalls per
+// scan, which cannot complete inside a 1 s tick) with ~N/flowBatchChunk batch
+// syscalls — fast enough to drain the whole table every few seconds so it never
+// overflows. Counters are captured at the kernel-side delete, so it is as
+// correct under load as the per-key atomic path.
+//
+// Semantics note: this drains EVERYTHING, so the export interval that calls it
+// becomes the effective active timeout (there is no idle/active distinction).
+// That is the intended trade-off for high-throughput collection.
+func batchDrainAllFlows(objs *loader.Objects) ([]flowKV, error) {
+	var cursor ebpf.MapBatchCursor
+	keys := make([]FlowKey, flowBatchChunk)
+	vals := make([]FlowValue, flowBatchChunk)
+	out := make([]flowKV, 0, flowBatchChunk)
+	for {
+		n, err := objs.Flows.BatchLookupAndDelete(&cursor, keys, vals, nil)
+		for i := 0; i < n; i++ {
+			if !isExportableKey(keys[i]) {
+				continue
+			}
+			out = append(out, flowKV{k: keys[i], v: vals[i]})
+		}
+		if errors.Is(err, ebpf.ErrKeyNotExist) {
+			// Reached the end of the map — all remaining results returned.
+			return out, nil
+		}
+		if err != nil {
+			return out, err
+		}
+	}
+}
+
+// probeBatchDrainSupport returns true when BPF_MAP_LOOKUP_AND_DELETE_BATCH works
+// (kernel >= 5.6 for hash maps). Probed on a throw-away map so the production
+// flows map is never touched.
+func probeBatchDrainSupport(log *slog.Logger) bool {
+	spec := &ebpf.MapSpec{
+		Type:       ebpf.Hash,
+		KeySize:    4,
+		ValueSize:  4,
+		MaxEntries: 16,
+	}
+	tmp, err := ebpf.NewMap(spec)
+	if err != nil {
+		if log != nil {
+			log.Warn("batch drain probe: cannot create temporary HASH map; assuming unsupported", "err", err)
+		}
+		return false
+	}
+	defer tmp.Close()
+	var k, v uint32 = 1, 1
+	_ = tmp.Put(&k, &v)
+	var cursor ebpf.MapBatchCursor
+	keys := make([]uint32, 4)
+	vals := make([]uint32, 4)
+	_, err = tmp.BatchLookupAndDelete(&cursor, keys, vals, nil)
+	if err == nil || errors.Is(err, ebpf.ErrKeyNotExist) {
+		return true
+	}
+	if log != nil {
+		log.Warn("BPF_MAP_LOOKUP_AND_DELETE_BATCH not supported on this kernel; batch drain mode unavailable", "err", err)
+	}
+	return false
+}
+
 // drainAllFlows is the final-flush variant of drainExpiredFlows: it pulls
 // every flow currently in the BPF map atomically. Used at shutdown so we
 // don't lose trailing counters that no longer satisfy idle/active thresholds.
@@ -236,12 +309,18 @@ const (
 type FlowDrainer struct {
 	log              *slog.Logger
 	mode             flowDrainerMode
+	batchMode        bool   // operator requested batch full-drain (-drain-mode=batch)
+	batchSupported   bool   // kernel supports BPF_MAP_LOOKUP_AND_DELETE_BATCH
 	atomicCount      uint64 // bumped per call that used LookupAndDelete
 	legacyCount      uint64 // bumped per call that fell back to Iterate+Delete
+	batchCount       uint64 // bumped per call that used the batch full-drain
 	demotedAtRuntime bool   // set when atomic was probed-supported but errored later
 }
 
-func NewFlowDrainer(log *slog.Logger) *FlowDrainer {
+// NewFlowDrainer picks the per-key drain mode (atomic vs legacy) and, when
+// batchFull is requested and the kernel supports batch ops, enables the fast
+// whole-map batch drain used by the high-throughput export path.
+func NewFlowDrainer(log *slog.Logger, batchFull bool) *FlowDrainer {
 	d := &FlowDrainer{log: log}
 	if probeAtomicFlowDrainSupport(log) {
 		d.mode = flowDrainAtomic
@@ -251,7 +330,35 @@ func NewFlowDrainer(log *slog.Logger) *FlowDrainer {
 	} else {
 		d.mode = flowDrainLegacy
 	}
+	if batchFull {
+		if probeBatchDrainSupport(log) {
+			d.batchMode = true
+			d.batchSupported = true
+			if log != nil {
+				log.Info("flow drainer: batch full-drain enabled (BPF_MAP_LOOKUP_AND_DELETE_BATCH); export interval is the effective active timeout")
+			}
+		} else if log != nil {
+			log.Warn("flow drainer: batch full-drain requested but unsupported on this kernel; falling back to timer drain")
+		}
+	}
 	return d
+}
+
+// BatchEnabled reports whether the fast whole-map batch drain is active.
+func (d *FlowDrainer) BatchEnabled() bool {
+	return d != nil && d.batchMode && d.batchSupported
+}
+
+// FullBatchDrain pulls and deletes the entire flow map with batch ops. The
+// returned flows are already removed from the map (no follow-up delete). On a
+// batch error it returns whatever it managed to drain plus the error; the
+// caller should still export those rows and log the failure.
+func (d *FlowDrainer) FullBatchDrain(objs *loader.Objects) ([]flowKV, error) {
+	out, err := batchDrainAllFlows(objs)
+	if d != nil {
+		d.batchCount++
+	}
+	return out, err
 }
 
 // Mode reports the active drainer mode (mostly for tests / log lines).
@@ -276,6 +383,14 @@ func (d *FlowDrainer) Counters() (uint64, uint64) {
 		return 0, 0
 	}
 	return d.atomicCount, d.legacyCount
+}
+
+// BatchCalls returns how many whole-map batch drains have run.
+func (d *FlowDrainer) BatchCalls() uint64 {
+	if d == nil {
+		return 0
+	}
+	return d.batchCount
 }
 
 func (d *FlowDrainer) demoteToLegacy(err error) {
