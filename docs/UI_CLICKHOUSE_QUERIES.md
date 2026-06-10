@@ -58,6 +58,41 @@ average speed across long windows. It is not a precise peak-speed source:
 day-level rows would turn peak into "average of the busiest day". For month
 views, calculate peak from `traffic_dashboard_1h`.
 
+## Time axis and live-edge guard
+
+The `traffic_dashboard_*` rollups bucket by the flow's real start time
+(`time_flow_start_ns`), not the collector export time. This is what makes the
+chart smooth: the collector exports flows in batches, so many flows share one
+export timestamp and bucketing by export time produces a sawtooth.
+
+Consequence the UI MUST handle: a flow reaches ClickHouse only ~10-15 seconds
+after its start (collector drain interval + spool). So the most recent bucket is
+**incomplete** for that long and would make the right edge of the chart dip.
+
+Rule for every dashboard query (KPI and chart): anchor the window end at
+`now() - INTERVAL 30 SECOND`, not `now()`. 30s safely covers the export+spool
+lag. Concretely, replace:
+
+```sql
+now() AS raw_ts_to
+```
+
+with:
+
+```sql
+now() - INTERVAL 30 SECOND AS raw_ts_to
+```
+
+Everything else (rounding to complete 5-minute / hourly buckets) stays the same.
+This is a query-only change — no schema or table changes.
+
+Scope: the guard is required for the KPI summary and the time-series chart, which
+read `traffic_dashboard_*` (flow-start axis). The donut / country-heatmap queries
+read `traffic_protocol_1m` / `traffic_service_1m` / `traffic_country_1m`, which
+still bucket by export time and aggregate the whole window into shares, so the
+live-edge effect is negligible there — applying the 30s guard is optional and
+harmless, but not required.
+
 ## KPI Summary Up To 7d
 
 Use complete 5-minute buckets from `traffic_dashboard_1m`. UI speed values must
@@ -78,7 +113,7 @@ Returns:
 
 ```sql
 WITH
-    now() AS raw_ts_to,
+    now() - INTERVAL 30 SECOND AS raw_ts_to,  -- live-edge guard: flow_start axis lags ~10-15s
     raw_ts_to - INTERVAL 1 HOUR AS raw_ts_from,
     toStartOfInterval(raw_ts_from + INTERVAL 5 MINUTE - INTERVAL 1 SECOND, INTERVAL 5 MINUTE) AS ts_from,
     toStartOfInterval(raw_ts_to, INTERVAL 5 MINUTE) AS ts_to,
@@ -353,7 +388,7 @@ Example: 5-minute chart for last 1 hour, all directions.
 
 ```sql
 WITH
-    now() AS raw_ts_to,
+    now() - INTERVAL 30 SECOND AS raw_ts_to,  -- live-edge guard: flow_start axis lags ~10-15s
     raw_ts_to - INTERVAL 1 HOUR AS raw_ts_from,
     toStartOfInterval(raw_ts_from + INTERVAL 5 MINUTE - INTERVAL 1 SECOND, INTERVAL 5 MINUTE) AS ts_from,
     toStartOfInterval(raw_ts_to, INTERVAL 5 MINUTE) AS ts_to,

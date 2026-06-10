@@ -14,6 +14,11 @@
 -- That older range keeps its previous shape; only data ingested after the
 -- migration is smoothed. To re-smooth history, repopulate the target tables
 -- from flows_raw with toStartOf*(time_flow_start_ns) over the desired range.
+--
+-- LIVE-EDGE: flows reach ClickHouse ~10-15s after their first_seen (drain
+-- interval + spool), so the newest ~1 bucket is incomplete until then. UI
+-- queries MUST anchor the window at now() - 30s (see UI_CLICKHOUSE_QUERIES.md
+-- "Time axis and live-edge guard"), otherwise the right edge of the chart sags.
 
 DROP TABLE IF EXISTS default.traffic_dashboard_1m_mv;
 

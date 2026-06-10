@@ -2,14 +2,19 @@
 --
 -- One row per minute per source_id with pre-split direction columns.
 --
--- Time axis: buckets by time_received_ns (collector export time). NOTE: a
--- first_seen-based axis was tried to smooth the batch-export sawtooth but did
--- not help — under batch full-drain, long ("elephant") flows are re-created with
--- a fresh first_seen at each drain tick, so their bytes still clump, while
--- bucketing by flow start also sags the live edge (recent flows are not yet
--- exported). The real fix is spreading each flow's bytes across
--- [time_flow_start_ns, time_flow_end_ns] (rate distribution); see
--- migrate_dashboard_flow_start_axis.sql history and the rate-spread rollup.
+-- Time axis: buckets by time_flow_start_ns (the flow's real first_seen), NOT
+-- time_received_ns (the collector export time). xdpflowd exports flows in
+-- batches (batch full-drain every drain interval), so many flows share one
+-- export timestamp — bucketing by export time produces a "sawtooth" graph (a
+-- spike each drain tick). Per-second measurement on flows_raw confirms that, by
+-- flow start, real traffic is smooth (~steady GiB/s), so this axis reflects when
+-- traffic actually happened. Ops/freshness keeps using time_received_ns.
+--
+-- LIVE-EDGE CAVEAT: a flow bucketed at its first_seen reaches ClickHouse only
+-- after it is exported (~drain interval + spool, ≈10-15s). So the most recent
+-- ~1 bucket is incomplete until that lag passes. UI queries MUST exclude the
+-- not-yet-complete tail (anchor the window at now() - 30s); see
+-- docs/UI_CLICKHOUSE_QUERIES.md "Time axis and live-edge guard".
 
 CREATE TABLE IF NOT EXISTS default.traffic_dashboard_1m
 (
@@ -48,7 +53,7 @@ CREATE MATERIALIZED VIEW default.traffic_dashboard_1m_mv
 TO default.traffic_dashboard_1m
 AS
 SELECT
-    toStartOfMinute(time_received_ns) AS minute,
+    toStartOfMinute(time_flow_start_ns) AS minute,
     source_id,
 
     sum(bytes) AS total_bytes,
@@ -115,7 +120,7 @@ CREATE MATERIALIZED VIEW default.traffic_dashboard_1h_mv
 TO default.traffic_dashboard_1h
 AS
 SELECT
-    toStartOfHour(time_received_ns) AS hour,
+    toStartOfHour(time_flow_start_ns) AS hour,
     source_id,
 
     sum(bytes) AS total_bytes,
