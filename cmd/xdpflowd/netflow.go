@@ -422,7 +422,7 @@ func (e *nfExporter) flushBuckets(v4 [][]byte, v6 [][]byte) {
 // are removed in the same LookupAndDelete that captures their final counters
 // — so counters added by XDP between iteration and delete are NOT lost. On
 // legacy kernels the function follows the classic snapshot+delete contract.
-func (e *nfExporter) scanAndExport(objs *loader.Objects, drainer *FlowDrainer, onFlows func([]flowKV, time.Time)) (exported, deleted int) {
+func (e *nfExporter) scanAndExport(objs *loader.Objects, drainer *FlowDrainer, onFlows func([]flowKV, time.Time), agg *flowAggregator) (exported, deleted int) {
 	nowMonoNs, _ := readSystemUptimeNs() // cheap, a few hundred ns
 
 	if drainer != nil && drainer.BatchEnabled() {
@@ -431,6 +431,13 @@ func (e *nfExporter) scanAndExport(objs *loader.Objects, drainer *FlowDrainer, o
 			e.sendTemplate()
 		}
 		n, err := drainer.StreamFullBatchDrain(objs, func(chunk []flowKV) error {
+			// With aggregation, fold the slice into the cache and emit only
+			// completed flows below. Without it, export each slice directly
+			// (legacy batch behaviour).
+			if agg != nil {
+				agg.Merge(chunk)
+				return nil
+			}
 			if onFlows != nil {
 				onFlows(chunk, receivedAt)
 			}
@@ -439,6 +446,14 @@ func (e *nfExporter) scanAndExport(objs *loader.Objects, drainer *FlowDrainer, o
 		})
 		if err != nil && e.log != nil {
 			e.log.Error("batch full-drain", "err", err, "drained", n)
+		}
+		if agg != nil {
+			if ready := agg.Collect(nowMonoNs); len(ready) > 0 {
+				if onFlows != nil {
+					onFlows(ready, receivedAt)
+				}
+				e.exportFlowChunk(ready)
+			}
 		}
 		return n, n
 	}
@@ -500,11 +515,15 @@ func (e *nfExporter) exportFlowChunk(flows []flowKV) {
 // flushAll exports every flow currently in the map regardless of timeout.
 // Intended for graceful shutdown and for test harnesses to ensure nothing
 // is left behind.
-func (e *nfExporter) flushAll(objs *loader.Objects, drainer *FlowDrainer, onFlows func([]flowKV, time.Time)) (exported, deleted int) {
+func (e *nfExporter) flushAll(objs *loader.Objects, drainer *FlowDrainer, onFlows func([]flowKV, time.Time), agg *flowAggregator) (exported, deleted int) {
 	if drainer != nil && drainer.BatchEnabled() {
 		receivedAt := time.Now().UTC()
 		e.sendTemplate()
 		n, err := drainer.StreamFullBatchDrain(objs, func(chunk []flowKV) error {
+			if agg != nil {
+				agg.Merge(chunk)
+				return nil
+			}
 			if onFlows != nil {
 				onFlows(chunk, receivedAt)
 			}
@@ -513,6 +532,16 @@ func (e *nfExporter) flushAll(objs *loader.Objects, drainer *FlowDrainer, onFlow
 		})
 		if err != nil && e.log != nil {
 			e.log.Error("final batch full-drain", "err", err, "drained", n)
+		}
+		// Shutdown: nothing should be left behind, so drain the whole cache
+		// regardless of idle/active timeouts.
+		if agg != nil {
+			if ready := agg.DrainAll(); len(ready) > 0 {
+				if onFlows != nil {
+					onFlows(ready, receivedAt)
+				}
+				e.exportFlowChunk(ready)
+			}
 		}
 		return n, n
 	}

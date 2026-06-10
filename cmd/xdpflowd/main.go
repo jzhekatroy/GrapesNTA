@@ -418,7 +418,11 @@ func main() {
 	nfScan := flag.Duration("nf-scan", 1*time.Second, "how often to walk the flows map for NetFlow export")
 	nfSourceID := flag.Int("nf-source-id", 1, "NetFlow v9 source_id field (exporter observation domain)")
 	drainMode := flag.String("drain-mode", "timer", "flow drain strategy for the ClickHouse path: timer (idle/active per-key, low row volume) | batch (whole-map BPF_MAP_LOOKUP_AND_DELETE_BATCH each -drain-interval; far faster, prevents map overflow at high pps)")
-	drainInterval := flag.Duration("drain-interval", 0, "batch drain period (drain-mode=batch only); 0 = use -nf-active. This becomes the effective active timeout.")
+	drainInterval := flag.Duration("drain-interval", 0, "batch drain period (drain-mode=batch only); 0 = use -nf-active. With -agg-enable this is just the BPF pull cadence (keep small, e.g. 5s); otherwise it is the effective active timeout.")
+	aggEnable := flag.Bool("agg-enable", false, "userspace flow aggregation (drain-mode=batch): fold frequent BPF drain slices into one row per flow per active window so ClickHouse/NetFlow get ~1 row per real flow instead of one per drain tick")
+	aggIdle := flag.Duration("agg-idle", 15*time.Second, "aggregation idle timeout: emit a cached flow once it has had no new packets for this long")
+	aggActive := flag.Duration("agg-active", 60*time.Second, "aggregation active timeout: force-emit a cached flow once it has been alive this long (caps export latency)")
+	aggMaxEntries := flag.Int("agg-max-entries", 2_000_000, "max cached flows before the oldest are force-emitted to bound memory (sustained eviction => enable sampling)")
 	xdpAction := flag.String("xdp-action", "pass", "XDP return value for accounted IP packets: pass|drop. DROP only on SPAN/mirror interfaces — it stops the kernel stack after accounting and saves CPU.")
 	dnsPassthrough := flag.Bool("dns-passthrough", false, "force XDP_PASS for UDP src/dst port 53 even when -xdp-action=drop (SPAN only), so co-located dnsflowd can capture DNS via AF_PACKET; default off")
 
@@ -716,6 +720,22 @@ func main() {
 		log.Info("flow export: batch full-drain", "drain_interval", exportEvery)
 	}
 
+	// Userspace flow aggregation: between the frequent BPF drain and the
+	// expensive export, fold drain slices back into one entry per flow and emit
+	// only on idle/active timeout. Collapses the batch-mode row amplification
+	// (one row per flow per drain tick) back to ~one row per real flow. Only
+	// meaningful in batch mode with an export sink.
+	var agg *flowAggregator
+	if batchDrain && *aggEnable && (nfExp != nil || chDel != nil) {
+		agg = newFlowAggregator(*aggIdle, *aggActive, *aggMaxEntries)
+		log.Info("flow aggregation enabled",
+			"idle", *aggIdle,
+			"active", *aggActive,
+			"max_entries", *aggMaxEntries,
+			"drain_interval", exportEvery,
+		)
+	}
+
 	var exportTicker *time.Ticker
 	if nfExp != nil || chDel != nil {
 		exportTicker = time.NewTicker(exportEvery)
@@ -769,18 +789,27 @@ func main() {
 			if nfExp != nil {
 				// Final scan: force-export whatever is still in the map so we
 				// don't lose trailing flows when shutting down for A/B swap.
-				exported, deleted := nfExp.flushAll(objs, drainer, chFlowCb)
+				exported, deleted := nfExp.flushAll(objs, drainer, chFlowCb, agg)
 				log.Info("final flush", "exported", exported, "deleted", deleted, "clickhouse_enabled", chDel != nil)
 				nfExp.logMetrics()
 			} else if chDel != nil {
 				if batchDrain {
 					receivedAt := time.Now().UTC()
 					n, err := drainer.StreamFullBatchDrain(objs, func(chunk []flowKV) error {
-						chDel.enqueue(chunk, receivedAt)
+						if agg != nil {
+							agg.Merge(chunk)
+						} else {
+							chDel.enqueue(chunk, receivedAt)
+						}
 						return nil
 					})
 					if err != nil {
 						log.Error("final batch full-drain", "err", err, "drained", n)
+					}
+					if agg != nil {
+						if ready := agg.DrainAll(); len(ready) > 0 {
+							chDel.enqueue(ready, receivedAt)
+						}
 					}
 					log.Info("final flush", "exported", n, "deleted", n, "drain_mode", "batch", "clickhouse_enabled", true)
 				} else {
@@ -813,6 +842,15 @@ func main() {
 					"batch_calls", drainer.BatchCalls(),
 					"atomic_calls", atomicCalls,
 					"legacy_calls", legacyCalls,
+				)
+			}
+			if agg != nil {
+				m := agg.Metrics()
+				log.Info("flow aggregator",
+					"cached", m.Entries,
+					"merged_in", m.MergedIn,
+					"exported_out", m.ExportedOut,
+					"forced_evicted", m.ForcedEvicted,
 				)
 			}
 		case <-healthC:
@@ -905,16 +943,26 @@ func main() {
 			}
 		case <-exportC:
 			if nfExp != nil {
-				_, _ = nfExp.scanAndExport(objs, drainer, chFlowCb)
+				_, _ = nfExp.scanAndExport(objs, drainer, chFlowCb, agg)
 			} else if chDel != nil {
 				if batchDrain {
 					receivedAt := time.Now().UTC()
 					n, err := drainer.StreamFullBatchDrain(objs, func(chunk []flowKV) error {
-						chDel.enqueue(chunk, receivedAt)
+						if agg != nil {
+							agg.Merge(chunk)
+						} else {
+							chDel.enqueue(chunk, receivedAt)
+						}
 						return nil
 					})
 					if err != nil {
 						log.Error("batch full-drain", "err", err, "drained", n)
+					}
+					if agg != nil {
+						nowMonoNs, _ := readSystemUptimeNs()
+						if ready := agg.Collect(nowMonoNs); len(ready) > 0 {
+							chDel.enqueue(ready, receivedAt)
+						}
 					}
 					break
 				}

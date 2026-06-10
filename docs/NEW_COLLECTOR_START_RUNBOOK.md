@@ -1037,3 +1037,76 @@ journalctl -u xdpflowd -n 50 --no-pager | grep -E 'flow drainer|batch full-drain
 `XDP_DRAIN_MODE=timer` + рестарт возвращает прежнее поведение. LRU-карта
 безопасна и в timer-режиме (просто перестаёт ронять новые flow при переполнении).
 
+## 18. Перегрузка ClickHouse / рост спула (userspace-агрегация)
+
+### Симптом
+
+`map_full=0` (потерь flow нет), но в логах `xdpflowd health degraded` с быстро
+растущими `writer_lag_rows` и `lag_segments`; спул-сегменты копятся на диске,
+`records_spooled` >> `records_acked`. ClickHouse не успевает принимать вставки —
+не из-за обрывов (`insert_errs=0`), а из-за **объёма строк**.
+
+### Причина
+
+В batch-режиме карта снимается каждые `XDP_DRAIN_INTERVAL`, но снятие ≠ конец
+flow: долгоживущее соединение всплывает в каждом дренаже заново. Если каждый
+срез писать в ClickHouse, один реальный flow превращается в N строк
+(N ≈ `XDP_DRAIN_INTERVAL`-срезов за время жизни). При больших pps это
+переполняет вставки и забивает спул/диск.
+
+### Решение: агрегирующий кэш в userspace
+
+`XDP_AGG_ENABLE=1` включает кэш между частым дренажем BPF и экспортом. Срезы
+складываются по ключу flow (5-tuple + VLAN + MAC), суммируются bytes/packets,
+держатся min(first_seen)/max(last_seen). Flow отдаётся в ClickHouse **и** NetFlow
+только по таймауту: idle (`XDP_AGG_IDLE`, нет новых пакетов) или active
+(`XDP_AGG_ACTIVE`, прожил дольше лимита). Итог — ~1 строка на реальный flow за
+окно `XDP_AGG_ACTIVE` вместо одной на каждый дренаж.
+
+Снижение объёма строк ≈ `XDP_AGG_ACTIVE` / `XDP_DRAIN_INTERVAL`.
+
+### Что выставить на m61
+
+В `/etc/xdpflowd/xdpflowd.env`:
+
+```bash
+XDP_DRAIN_MODE=batch
+XDP_DRAIN_INTERVAL=5s     # с агрегацией это только период съёма карты (держать малым)
+XDP_AGG_ENABLE=1
+XDP_AGG_ACTIVE=60s        # ~12x меньше строк, чем «сырой» batch на 5s
+XDP_AGG_IDLE=15s
+XDP_AGG_MAX_ENTRIES=2000000   # потолок памяти кэша (~150-200 Б/запись)
+```
+
+Перезапуск (пересборка не нужна, если бинарь уже с поддержкой агрегации):
+
+```bash
+cd /opt/GrapesNTA && git pull && make build
+systemctl restart xdpflowd
+```
+
+### Проверка после рестарта
+
+```bash
+journalctl -u xdpflowd -n 80 --no-pager | grep -E 'flow aggregation enabled|flow aggregator|spool pipeline|health'
+```
+
+Ожидаем:
+- `flow aggregation enabled idle=15s active=1m0s ...` в логах старта;
+- строка `flow aggregator cached=… merged_in=… exported_out=… forced_evicted=0` —
+  `exported_out` должен быть в разы меньше `merged_in` (это и есть сжатие);
+- `records_spooled` и `records_acked` сходятся, `lag_segments` падает к 0,
+  `health degraded` исчезает.
+
+### Память и DDoS
+
+`forced_evicted` стабильно > 0 означает, что реальная кардинальность flow
+превышает `XDP_AGG_MAX_ENTRIES` — поднимите лимит (если есть RAM) или включите
+сэмплинг (следующая фаза). Trade-off агрегации: flow попадает в БД с задержкой
+до `XDP_AGG_ACTIVE` — приемлемо, когда несколько минут отставания дашбордов ок.
+
+### Откат
+
+`XDP_AGG_ENABLE=0` + рестарт — мгновенно возвращает «сырой» batch (одна строка
+на дренаж). Сам batch-режим при этом продолжает работать.
+

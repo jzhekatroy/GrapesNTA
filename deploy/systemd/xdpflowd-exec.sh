@@ -48,6 +48,16 @@ XDP_NF_SCAN="${XDP_NF_SCAN:-1s}"
 XDP_DRAIN_MODE="${XDP_DRAIN_MODE:-timer}"
 XDP_DRAIN_INTERVAL="${XDP_DRAIN_INTERVAL:-0s}"
 
+# Userspace flow aggregation (drain-mode=batch only). Folds the frequent BPF
+# drain slices into one row per flow per active window, so ClickHouse/NetFlow
+# get ~1 row per real flow instead of one per drain tick. With it ON, keep
+# XDP_DRAIN_INTERVAL small (e.g. 5s) and set XDP_AGG_ACTIVE high (e.g. 60s):
+# the row-volume reduction factor ≈ XDP_AGG_ACTIVE / XDP_DRAIN_INTERVAL.
+XDP_AGG_ENABLE="${XDP_AGG_ENABLE:-0}"
+XDP_AGG_IDLE="${XDP_AGG_IDLE:-15s}"
+XDP_AGG_ACTIVE="${XDP_AGG_ACTIVE:-60s}"
+XDP_AGG_MAX_ENTRIES="${XDP_AGG_MAX_ENTRIES:-2000000}"
+
 if [[ ! -x "$BIN" ]]; then
   echo "ERROR: xdpflowd binary not executable: $BIN" >&2
   exit 1
@@ -133,6 +143,16 @@ if [[ "$XDP_HEAVY_EXPORT" == "1" ]]; then
   HEAVY_ARGS=( -heavy-export )
 fi
 
+AGG_ARGS=()
+if [[ "$XDP_AGG_ENABLE" == "1" ]]; then
+  AGG_ARGS=(
+    -agg-enable
+    -agg-idle "$XDP_AGG_IDLE"
+    -agg-active "$XDP_AGG_ACTIVE"
+    -agg-max-entries "$XDP_AGG_MAX_ENTRIES"
+  )
+fi
+
 DNS_PASSTHROUGH_ARGS=()
 if [[ "${XDP_DNS_PASSTHROUGH:-0}" == "1" ]]; then
   DNS_PASSTHROUGH_ARGS=( -dns-passthrough )
@@ -160,6 +180,7 @@ exec "${STDBUF[@]}" "$BIN" \
   -nf-scan "$XDP_NF_SCAN" \
   -drain-mode "$XDP_DRAIN_MODE" \
   -drain-interval "$XDP_DRAIN_INTERVAL" \
+  "${AGG_ARGS[@]}" \
   -top "$XDP_TOP" \
   -top-interval "$XDP_TOP_INTERVAL" \
   -interval "$XDP_INTERVAL" \

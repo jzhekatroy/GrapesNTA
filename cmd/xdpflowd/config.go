@@ -50,6 +50,11 @@ type xdpflowdConfig struct {
 	CHSpoolShutdownDrain *string `yaml:"ch_spool_shutdown_drain"`
 	CHWriters            *int    `yaml:"ch_writers"`
 
+	AggEnable     *bool   `yaml:"agg_enable"`
+	AggIdle       *string `yaml:"agg_idle"`
+	AggActive     *string `yaml:"agg_active"`
+	AggMaxEntries *int    `yaml:"agg_max_entries"`
+
 	Classifier             *bool   `yaml:"classifier"`
 	ClassifierRefresh      *string `yaml:"classifier_refresh"`
 	ClassifierBGPTable     *string `yaml:"classifier_bgp_table"`
@@ -147,6 +152,10 @@ func applyXDPFlowdConfig(fs *flag.FlagSet, cfg *xdpflowdConfig) error {
 		func() error { return setString("ch-spool-fsync-interval", cfg.CHSpoolFsyncInterval) },
 		func() error { return setString("ch-spool-shutdown-drain", cfg.CHSpoolShutdownDrain) },
 		func() error { return setInt("ch-writers", cfg.CHWriters) },
+		func() error { return setBool("agg-enable", cfg.AggEnable) },
+		func() error { return setString("agg-idle", cfg.AggIdle) },
+		func() error { return setString("agg-active", cfg.AggActive) },
+		func() error { return setInt("agg-max-entries", cfg.AggMaxEntries) },
 		func() error { return setBool("classifier", cfg.Classifier) },
 		func() error { return setString("classifier-refresh", cfg.ClassifierRefresh) },
 		func() error { return setString("classifier-bgp-table", cfg.ClassifierBGPTable) },
