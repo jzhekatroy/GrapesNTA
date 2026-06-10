@@ -184,7 +184,7 @@ ORDER BY location_name, collector_name, source_name;
 | Объекты сети | `net_entities` / `net_entities_enabled` | `entity_id`, `display_name`, `enabled` |
 | IP-префиксы | `net_l3_prefixes` / `net_l3_prefixes_enabled` | `prefix`, `family`, `entity_id`, `role`, `enabled` |
 | VLAN/подключения | `net_l2_vlans` / `net_l2_vlans_enabled` | `vlan_id`, `entity_id`, `attachment_type`, `boundary`, `enabled` |
-| Сервисы/порты | `port_services` | `transport`, `port`, `service_code`, `service_name`, `category`, `is_enabled` |
+| Сервисы/порты | `port_services` | отдельное ТЗ: `docs/UI_PORT_SERVICES_TZ.md` |
 | Локальные сети | `local_networks` / `local_networks_enabled` | просмотр + `enabled` |
 | Локальные ASN | `local_asns` / `local_asns_enabled` | просмотр + `enabled` |
 

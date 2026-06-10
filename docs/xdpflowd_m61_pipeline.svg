@@ -1,0 +1,163 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1500" height="980" viewBox="0 0 1500 980">
+  <defs>
+    <style>
+      .bg { fill: #f8fafc; }
+      .box { fill: #ffffff; stroke: #334155; stroke-width: 2; rx: 14; }
+      .box-blue { fill: #e0f2fe; stroke: #0369a1; stroke-width: 2; rx: 14; }
+      .box-green { fill: #dcfce7; stroke: #15803d; stroke-width: 2; rx: 14; }
+      .box-yellow { fill: #fef9c3; stroke: #a16207; stroke-width: 2; rx: 14; }
+      .box-purple { fill: #f3e8ff; stroke: #7e22ce; stroke-width: 2; rx: 14; }
+      .box-red { fill: #fee2e2; stroke: #b91c1c; stroke-width: 2; rx: 14; }
+      .title { font: 700 28px Arial, sans-serif; fill: #0f172a; }
+      .h { font: 700 18px Arial, sans-serif; fill: #0f172a; }
+      .t { font: 14px Arial, sans-serif; fill: #1e293b; }
+      .small { font: 12px Arial, sans-serif; fill: #475569; }
+      .mono { font: 13px "Menlo", "Consolas", monospace; fill: #0f172a; }
+      .arrow { stroke: #0f172a; stroke-width: 2.5; fill: none; marker-end: url(#arrow); }
+      .arrow-blue { stroke: #0369a1; stroke-width: 2.5; fill: none; marker-end: url(#arrow-blue); }
+      .arrow-green { stroke: #15803d; stroke-width: 2.5; fill: none; marker-end: url(#arrow-green); }
+      .arrow-dashed { stroke: #64748b; stroke-width: 2.5; fill: none; stroke-dasharray: 8 7; marker-end: url(#arrow-gray); }
+      .lane { fill: #eef2ff; stroke: #c7d2fe; stroke-width: 1.5; rx: 18; }
+    </style>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L0,6 L9,3 z" fill="#0f172a"/>
+    </marker>
+    <marker id="arrow-blue" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L0,6 L9,3 z" fill="#0369a1"/>
+    </marker>
+    <marker id="arrow-green" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L0,6 L9,3 z" fill="#15803d"/>
+    </marker>
+    <marker id="arrow-gray" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L0,6 L9,3 z" fill="#64748b"/>
+    </marker>
+  </defs>
+
+  <rect class="bg" x="0" y="0" width="1500" height="980"/>
+
+  <text class="title" x="50" y="50">m61: ?CBL B@0D8:0 >B mirror NIC 4> ClickHouse</text>
+  <text class="small" x="50" y="78">ens1np0 / Mellanox ConnectX-4 / mlx5_core / native XDP / XDP_ACTION=drop / FLOWS_MAP_SIZE=12M / XDP_CH_WRITERS=12</text>
+
+  <!-- Physical traffic -->
+  <rect class="box-blue" x="50" y="120" width="250" height="120"/>
+  <text class="h" x="75" y="152">Mirror traffic</text>
+  <text class="t" x="75" y="178">SPAN / mirror port</text>
+  <text class="mono" x="75" y="204">~2.8 Mpps / ~18 Gbps</text>
+  <text class="small" x="75" y="226">traffic is copied to collector</text>
+
+  <rect class="box-blue" x="370" y="110" width="300" height="145"/>
+  <text class="h" x="395" y="143">NIC: ens1np0</text>
+  <text class="t" x="395" y="170">Mellanox ConnectX-4</text>
+  <text class="mono" x="395" y="196">driver: mlx5_core</text>
+  <text class="mono" x="395" y="220">56 RX queues</text>
+  <text class="small" x="395" y="242">hardware RSS spreads packets to queues</text>
+
+  <path class="arrow-blue" d="M300 180 L365 180"/>
+
+  <!-- RX queues -->
+  <rect class="lane" x="740" y="95" width="320" height="190"/>
+  <text class="h" x="765" y="130">RX queues on NIC</text>
+  <text class="small" x="765" y="153">example: rx0 ... rx55</text>
+  <rect class="box" x="765" y="175" width="120" height="38"/>
+  <text class="mono" x="785" y="199">rx0</text>
+  <rect class="box" x="900" y="175" width="120" height="38"/>
+  <text class="mono" x="920" y="199">rx1</text>
+  <rect class="box" x="765" y="225" width="120" height="38"/>
+  <text class="mono" x="785" y="249">...</text>
+  <rect class="box" x="900" y="225" width="120" height="38"/>
+  <text class="mono" x="920" y="249">rx55</text>
+  <path class="arrow-blue" d="M670 182 L735 182"/>
+
+  <!-- CPU/XDP -->
+  <rect class="box-green" x="1140" y="105" width="300" height="165"/>
+  <text class="h" x="1165" y="138">CPU softirq / NAPI</text>
+  <text class="t" x="1165" y="165">each RX queue is processed</text>
+  <text class="t" x="1165" y="188">by a CPU context</text>
+  <text class="mono" x="1165" y="215">native XDP program</text>
+  <text class="small" x="1165" y="240">packets hit XDP before skb allocation</text>
+  <path class="arrow-green" d="M1060 190 L1135 190"/>
+
+  <!-- XDP decisions -->
+  <rect class="box-green" x="1000" y="350" width="340" height="150"/>
+  <text class="h" x="1025" y="383">XDP flow accounting</text>
+  <text class="t" x="1025" y="410">parse L2/L3/L4 headers</text>
+  <text class="t" x="1025" y="433">calculate flow key</text>
+  <text class="t" x="1025" y="456">increment packets / bytes</text>
+  <text class="mono" x="1025" y="482">XDP_DROP for most packets</text>
+  <path class="arrow-green" d="M1285 270 C1285 315 1220 325 1180 345"/>
+
+  <rect class="box-yellow" x="620" y="355" width="300" height="150"/>
+  <text class="h" x="645" y="388">BPF flow map</text>
+  <text class="mono" x="645" y="415">FLOWS_MAP_SIZE=12M</text>
+  <text class="t" x="645" y="442">key: 5-tuple + direction</text>
+  <text class="t" x="645" y="465">value: packets, bytes, last_seen</text>
+  <text class="small" x="645" y="490">shared between XDP and userspace</text>
+  <path class="arrow-green" d="M1000 430 L925 430"/>
+
+  <!-- DNS passthrough -->
+  <rect class="box-purple" x="1040" y="570" width="320" height="130"/>
+  <text class="h" x="1065" y="603">DNS passthrough</text>
+  <text class="mono" x="1065" y="630">XDP_DNS_PASSTHROUGH=1</text>
+  <text class="t" x="1065" y="654">UDP/53 is passed to kernel</text>
+  <text class="t" x="1065" y="678">so dnsflowd can capture it</text>
+  <path class="arrow-dashed" d="M1165 500 L1165 565"/>
+
+  <rect class="box-purple" x="1040" y="760" width="320" height="120"/>
+  <text class="h" x="1065" y="793">dnsflowd</text>
+  <text class="t" x="1065" y="820">AF_PACKET / libpcap</text>
+  <text class="t" x="1065" y="844">parses DNS queries/responses</text>
+  <text class="mono" x="1065" y="868">writes dns_log</text>
+  <path class="arrow-dashed" d="M1200 700 L1200 755"/>
+
+  <!-- Userspace xdpflowd -->
+  <rect class="box" x="225" y="350" width="320" height="155"/>
+  <text class="h" x="250" y="383">xdpflowd userspace</text>
+  <text class="t" x="250" y="410">periodically drains BPF map</text>
+  <text class="t" x="250" y="433">normalizes FlowRow</text>
+  <text class="t" x="250" y="456">adds source_id, timestamps</text>
+  <text class="mono" x="250" y="482">source_id=netflow</text>
+  <path class="arrow" d="M620 430 L550 430"/>
+
+  <!-- Spool -->
+  <rect class="box-yellow" x="225" y="585" width="320" height="145"/>
+  <text class="h" x="250" y="618">durable spool</text>
+  <text class="mono" x="250" y="645">XDP_CH_SPOOL_MODE=required</text>
+  <text class="t" x="250" y="672">append segment files on disk</text>
+  <text class="t" x="250" y="695">acks move only after CH insert</text>
+  <text class="small" x="250" y="718">protects from ClickHouse/network outages</text>
+  <path class="arrow" d="M385 505 L385 580"/>
+
+  <!-- Writers -->
+  <rect class="box" x="620" y="585" width="320" height="145"/>
+  <text class="h" x="645" y="618">ClickHouse writers</text>
+  <text class="mono" x="645" y="645">XDP_CH_WRITERS=12</text>
+  <text class="t" x="645" y="672">parallel batch inserts</text>
+  <text class="t" x="645" y="695">records_spooled == records_acked</text>
+  <text class="small" x="645" y="718">lag_segments=0, insert_errs=0</text>
+  <path class="arrow" d="M545 655 L615 655"/>
+
+  <!-- ClickHouse -->
+  <rect class="box-red" x="620" y="785" width="360" height="130"/>
+  <text class="h" x="645" y="818">ClickHouse</text>
+  <text class="mono" x="645" y="845">default.flows_raw</text>
+  <text class="t" x="645" y="870">raw flow records</text>
+  <text class="t" x="645" y="894">materialized views build rollups</text>
+  <path class="arrow" d="M780 730 L780 780"/>
+
+  <rect class="box-red" x="1120" y="900" width="240" height="55"/>
+  <text class="mono" x="1145" y="934">default.dns_log</text>
+  <path class="arrow-dashed" d="M1200 880 L1200 895"/>
+
+  <!-- Notes -->
+  <rect class="box" x="50" y="805" width="470" height="110"/>
+  <text class="h" x="75" y="838">Important counters in native XDP</text>
+  <text class="t" x="75" y="865">Do not trust standard rx_packets/rx_bytes for XDP_DROP traffic.</text>
+  <text class="t" x="75" y="888">Use per-queue rxN_xdp_drop, xdpflowd total_packets, and ClickHouse rows.</text>
+
+  <rect class="box-green" x="50" y="585" width="120" height="145"/>
+  <text class="h" x="72" y="620">Health</text>
+  <text class="mono" x="72" y="648">map_full=0</text>
+  <text class="mono" x="72" y="672">oob=0</text>
+  <text class="mono" x="72" y="696">lag=0</text>
+  <text class="small" x="72" y="719">native OK</text>
+</svg>

@@ -3,6 +3,10 @@
 -- This complements traffic_protocol_1m:
 --   traffic_protocol_1m = raw IP protocol numbers (TCP/UDP/GRE/ESP/...)
 --   traffic_service_1m  = known services from port_services (HTTPS/NTP/DNS/...)
+--
+-- Port ranges are supported through default.port_services_expanded_enabled:
+-- UI stores one rule as port_from/port_to, while this MV joins by exact port
+-- to keep ingestion cheap.
 
 DROP TABLE IF EXISTS default.traffic_service_1m_mv;
 DROP TABLE IF EXISTS default.traffic_service_1m;
@@ -62,10 +66,10 @@ SELECT
     sum(f.packets) AS packets,
     count() AS flows_count
 FROM default.flows_raw AS f
-LEFT JOIN default.port_services_enabled AS dst_svc
+LEFT JOIN default.port_services_expanded_enabled AS dst_svc
     ON dst_svc.transport = transport
    AND dst_svc.port = toUInt16(f.dst_port)
-LEFT JOIN default.port_services_enabled AS src_svc
+LEFT JOIN default.port_services_expanded_enabled AS src_svc
     ON src_svc.transport = transport
    AND src_svc.port = toUInt16(f.src_port)
 GROUP BY

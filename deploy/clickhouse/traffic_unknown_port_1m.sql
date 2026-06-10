@@ -3,6 +3,9 @@
 -- Rows are emitted only when neither dst nor src port matches port_services.
 -- This makes UI drill-down "Other -> TOP 20 ports" cheap without scanning
 -- flows_raw.
+--
+-- Port ranges are supported through default.port_services_expanded_enabled:
+-- UI stores one rule as port_from/port_to, while this MV joins by exact port.
 
 DROP TABLE IF EXISTS default.traffic_unknown_port_1m_mv;
 DROP TABLE IF EXISTS default.traffic_unknown_port_1m;
@@ -47,7 +50,7 @@ SELECT
     sum(f.packets) AS packets,
     count() AS flows_count
 FROM default.flows_raw AS f
-LEFT JOIN default.port_services_enabled AS dst_svc
+LEFT JOIN default.port_services_expanded_enabled AS dst_svc
     ON dst_svc.transport = multiIf(
         f.proto = 6, 'tcp',
         f.proto = 17, 'udp',
@@ -57,7 +60,7 @@ LEFT JOIN default.port_services_enabled AS dst_svc
         'other'
     )
    AND dst_svc.port = toUInt16(f.dst_port)
-LEFT JOIN default.port_services_enabled AS src_svc
+LEFT JOIN default.port_services_expanded_enabled AS src_svc
     ON src_svc.transport = multiIf(
         f.proto = 6, 'tcp',
         f.proto = 17, 'udp',

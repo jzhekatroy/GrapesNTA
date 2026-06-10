@@ -13,6 +13,9 @@
 --   8. traffic_entity_1m.sql
 --   9. traffic_vlan_1m.sql
 --  10. port_services.sql
+--      Existing DBs with the old single-port schema must run
+--      migrate_port_services_ranges.sh and then
+--      migrate_port_service_rollups_ranges.sql instead of dropping rollup tables.
 --  11. traffic_protocol_1m.sql
 --  12. traffic_service_1m.sql
 --  13. traffic_unknown_port_1m.sql

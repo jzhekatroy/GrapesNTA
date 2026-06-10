@@ -253,14 +253,12 @@ FROM
     FROM default.flows_raw AS f
     LEFT JOIN default.asn_registry_enriched AS src_as ON src_as.asn = f.src_asn
     LEFT JOIN default.asn_registry_enriched AS dst_as ON dst_as.asn = f.dst_asn
-    LEFT JOIN default.port_services AS src_svc
+    LEFT JOIN default.port_services_expanded_enabled AS src_svc
         ON src_svc.transport = toLowCardinality(multiIf(f.proto = 6, 'tcp', f.proto = 17, 'udp', f.proto = 1, 'icmp', ''))
        AND src_svc.port = f.src_port
-       AND src_svc.is_enabled = 1
-    LEFT JOIN default.port_services AS dst_svc
+    LEFT JOIN default.port_services_expanded_enabled AS dst_svc
         ON dst_svc.transport = toLowCardinality(multiIf(f.proto = 6, 'tcp', f.proto = 17, 'udp', f.proto = 1, 'icmp', ''))
        AND dst_svc.port = f.dst_port
-       AND dst_svc.is_enabled = 1
     WHERE f.time_received_ns >= from_ts
       AND f.time_received_ns < to_ts
       AND f.direction IN ('in', 'out', 'internal', 'transit')
@@ -441,7 +439,7 @@ LEFT JOIN default.asn_registry_enriched AS src_as
 LEFT JOIN default.asn_registry_enriched AS dst_as
     ON dst_as.asn = f.dst_asn
 
-LEFT JOIN default.port_services AS src_svc
+LEFT JOIN default.port_services_expanded_enabled AS src_svc
     ON src_svc.transport = toLowCardinality(multiIf(
         f.proto = 6, 'tcp',
         f.proto = 17, 'udp',
@@ -449,9 +447,8 @@ LEFT JOIN default.port_services AS src_svc
         ''
     ))
    AND src_svc.port = f.src_port
-   AND src_svc.is_enabled = 1
 
-LEFT JOIN default.port_services AS dst_svc
+LEFT JOIN default.port_services_expanded_enabled AS dst_svc
     ON dst_svc.transport = toLowCardinality(multiIf(
         f.proto = 6, 'tcp',
         f.proto = 17, 'udp',
@@ -459,7 +456,6 @@ LEFT JOIN default.port_services AS dst_svc
         ''
     ))
    AND dst_svc.port = f.dst_port
-   AND dst_svc.is_enabled = 1
 
 WHERE f.time_received_ns >= now('UTC') - INTERVAL 10 MINUTE
   AND f.time_received_ns < now('UTC')
@@ -709,14 +705,15 @@ direction = in
 
 ### Port Services
 
-Сервис определяется через `default.port_services` по паре
+Сервис определяется через `default.port_services_expanded_enabled` по паре
 `protocol + port`. Справочник редактируемый; базово есть `SSH`, `DNS`, `HTTP`,
-`HTTPS`, `QUIC`, `SIP` и другие распространённые сервисы.
+`HTTPS`, `QUIC`, `SIP` и другие распространённые сервисы. Диапазоны из
+`default.port_services` разворачиваются в expanded view.
 
 | Поле | Что значит | Как формируется |
 |------|------------|-----------------|
-| `src_service_code` | Код сервиса на source port, например `https`, `ssh`, `sip`. | `LEFT JOIN port_services` по `protocol + src_port`. |
-| `dst_service_code` | Код сервиса на destination port. | `LEFT JOIN port_services` по `protocol + dst_port`. |
+| `src_service_code` | Код сервиса на source port, например `https`, `ssh`, `sip`. | `LEFT JOIN port_services_expanded_enabled` по `protocol + src_port`. |
+| `dst_service_code` | Код сервиса на destination port. | `LEFT JOIN port_services_expanded_enabled` по `protocol + dst_port`. |
 | `src_service_name` | Читаемое имя source-сервиса, например `HTTPS`. | Из `port_services.service_name`. |
 | `dst_service_name` | Читаемое имя destination-сервиса. | Из `port_services.service_name`. |
 | `src_service_category` | Категория source-сервиса: `web`, `dns`, `voip`, `remote_access`, и т.п. | Из `port_services.category`. |
