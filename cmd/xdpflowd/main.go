@@ -443,6 +443,7 @@ func main() {
 	healthSpoolLagSegments := flag.Int64("health-spool-lag-segments", 10, "ERROR when ClickHouse spool lag exceeds this many segments")
 	healthWriterLagRows := flag.Uint64("health-writer-lag-rows", 100000, "ERROR when direct ClickHouse queued-written lag exceeds this many rows")
 	healthDrainerAge := flag.Duration("health-drainer-age", 2*time.Minute, "ERROR when spool drainer has made no progress for this long while lagging")
+	healthLossRatio := flag.Float64("health-loss-ratio", 0.0001, "emit a dedicated ERROR 'xdpflowd flow loss' when dropped/total packets in the health interval exceeds this fraction (0.0001 = 0.01%); set 0 to log on any non-zero loss")
 	classifierEnabled := flag.Bool("classifier", false, "enable collector-side traffic classification (L3 roles + L2 VLAN attachment)")
 	classifierRefresh := flag.Duration("classifier-refresh", time.Minute, "refresh interval for classifier dictionaries")
 	classifierBGPTable := flag.String("classifier-bgp-table", "default.bgp_prefix_origin_current", "ClickHouse source table/view for prefix -> origin ASN")
@@ -759,6 +760,7 @@ func main() {
 	}
 
 	var prevMapFull, prevInsertErrs, prevQueueDrops, prevNFSendErrs uint64
+	var prevTotalPackets uint64
 
 	for {
 		select {
@@ -813,6 +815,32 @@ func main() {
 		case <-healthC:
 			mapFull := readStat(objs, 2)
 			mapFullDelta := mapFull - prevMapFull
+
+			// Dedicated, easy-to-grep flow-loss line. map_full is the canonical
+			// packet-loss tripwire: a packet whose flow could not be created (or,
+			// with the LRU map, could not even be inserted after eviction) is
+			// never accounted and never reaches ClickHouse. With LRU this should
+			// stay 0; any sustained non-zero delta is real data loss.
+			totalPackets := readStat(objs, 0)
+			totalDelta := totalPackets - prevTotalPackets
+			if mapFullDelta > 0 {
+				lossRatio := 0.0
+				if totalDelta > 0 {
+					lossRatio = float64(mapFullDelta) / float64(totalDelta)
+				}
+				if lossRatio >= *healthLossRatio {
+					log.Error("xdpflowd flow loss",
+						"lost_packets", mapFullDelta,
+						"total_packets_interval", totalDelta,
+						"loss_ratio", lossRatio,
+						"loss_ratio_threshold", *healthLossRatio,
+						"map_full_total", mapFull,
+						"hint", "raise FLOWS_MAP_SIZE or shorten XDP_DRAIN_INTERVAL",
+					)
+				}
+			}
+			prevTotalPackets = totalPackets
+
 			insertErrsDelta := uint64(0)
 			queueDropsDelta := uint64(0)
 			writerLagRows := uint64(0)

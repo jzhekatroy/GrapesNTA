@@ -24,7 +24,31 @@ sudo journalctl -u bmpgrapes --since "10 minutes ago" --no-pager | grep 'bmpgrap
 
 ## xdpflowd
 
-`xdpflowd` writes one `ERROR` line:
+`xdpflowd` writes two `ERROR` lines.
+
+### Flow loss (dedicated, easy to grep)
+
+```text
+level=ERROR msg="xdpflowd flow loss"
+```
+
+Emitted when packets are dropped at the BPF flow map (a flow could not be
+created / inserted, so its bytes never reach `flows_raw`). With the LRU flow map
+this should stay silent; any occurrence is real, unrecoverable data loss.
+
+```bash
+sudo journalctl -u xdpflowd --since "10 minutes ago" --no-pager | grep 'xdpflowd flow loss'
+```
+
+Fields:
+
+- `lost_packets`: dropped packets in the interval (`map_full` delta).
+- `total_packets_interval`: total packets seen by XDP in the interval.
+- `loss_ratio`: `lost_packets / total_packets_interval`.
+- `loss_ratio_threshold`: the configured `XDP_HEALTH_LOSS_RATIO` (default 0.0001 = 0.01%); set 0 to log on any non-zero loss.
+- `hint`: remediation (raise `FLOWS_MAP_SIZE` or shorten `XDP_DRAIN_INTERVAL`).
+
+### Health degraded (aggregate)
 
 ```text
 level=ERROR msg="xdpflowd health degraded"
