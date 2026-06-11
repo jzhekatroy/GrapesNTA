@@ -409,6 +409,7 @@ func main() {
 	jsonInterval := flag.Duration("json-interval", 0, "JSON dump interval (defaults to -interval)")
 	jsonFlows := flag.Bool("json-include-flows", false, "include per-flow array in JSON (large)")
 	once := flag.Bool("once", false, "attach, wait one -interval, write one JSON line if -json-out set, print top once, then exit")
+	finalFlushFlows := flag.Bool("final-flush", true, "force-export all remaining flows on graceful shutdown; set false for fast operational restarts (trailing in-map flows are discarded)")
 
 	// NetFlow v9 export flags
 	nfDsts := flag.String("nf-dst", "", "NetFlow v9 destinations, comma-separated host:port (e.g. 127.0.0.1:2055,127.0.0.1:9999)")
@@ -786,6 +787,14 @@ func main() {
 		select {
 		case <-ctx.Done():
 			flushFinal()
+			if !*finalFlushFlows {
+				log.Info("final flow flush skipped", "reason", "final_flush_disabled")
+				if nfExp != nil {
+					nfExp.logMetrics()
+				}
+				log.Info("shutdown")
+				return
+			}
 			if nfExp != nil {
 				// Final scan: force-export whatever is still in the map so we
 				// don't lose trailing flows when shutting down for A/B swap.

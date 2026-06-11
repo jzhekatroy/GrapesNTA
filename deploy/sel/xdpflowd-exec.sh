@@ -45,6 +45,7 @@ XDP_NF_SCAN="${XDP_NF_SCAN:-1s}"
 # XDP_DRAIN_INTERVAL; prevents map_full at high pps, interval = active timeout).
 XDP_DRAIN_MODE="${XDP_DRAIN_MODE:-timer}"
 XDP_DRAIN_INTERVAL="${XDP_DRAIN_INTERVAL:-0s}"
+XDP_FINAL_FLUSH="${XDP_FINAL_FLUSH:-0}"
 
 # Userspace flow aggregation is retained for controlled batch-mode experiments
 # only. Production baseline is XDP_DRAIN_MODE=timer; do not enable batch+agg as
@@ -176,6 +177,7 @@ exec "${STDBUF[@]}" "$BIN" \
   -nf-scan "$XDP_NF_SCAN" \
   -drain-mode "$XDP_DRAIN_MODE" \
   -drain-interval "$XDP_DRAIN_INTERVAL" \
+  -final-flush "$XDP_FINAL_FLUSH" \
   "${AGG_ARGS[@]}" \
   -top "$XDP_TOP" \
   -top-interval "$XDP_TOP_INTERVAL" \

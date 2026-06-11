@@ -24,6 +24,7 @@ type xdpflowdConfig struct {
 	JSONInterval     *string `yaml:"json_interval"`
 	JSONIncludeFlows *bool   `yaml:"json_include_flows"`
 	Once             *bool   `yaml:"once"`
+	FinalFlush       *bool   `yaml:"final_flush"`
 
 	NFDst              *string `yaml:"nf_dst"`
 	NFActive           *string `yaml:"nf_active"`
@@ -129,6 +130,7 @@ func applyXDPFlowdConfig(fs *flag.FlagSet, cfg *xdpflowdConfig) error {
 		func() error { return setString("json-interval", cfg.JSONInterval) },
 		func() error { return setBool("json-include-flows", cfg.JSONIncludeFlows) },
 		func() error { return setBool("once", cfg.Once) },
+		func() error { return setBool("final-flush", cfg.FinalFlush) },
 		func() error { return setString("nf-dst", cfg.NFDst) },
 		func() error { return setString("nf-active", cfg.NFActive) },
 		func() error { return setString("nf-idle", cfg.NFIdle) },

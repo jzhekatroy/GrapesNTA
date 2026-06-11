@@ -1010,7 +1010,13 @@ native подтверждён как рабочий и **более выгодн
 XDP_DRAIN_MODE=timer
 XDP_AGG_ENABLE=0
 XDP_CH_SPOOL_SHUTDOWN_DRAIN=0s   # быстрые рестарты: backlog остаётся в spool
+XDP_FINAL_FLUSH=0                 # быстрые рестарты: не сканировать всю BPF map на stop
 ```
+
+`XDP_FINAL_FLUSH=0` означает, что при `systemctl restart` активные flow, которые
+ещё не дошли до idle/active timeout, не будут принудительно выгружены перед
+выходом. Это осознанный operational trade-off ради быстрого рестарта. Для
+планового полного drain можно временно поставить `XDP_FINAL_FLUSH=1`.
 
 Пересборка с увеличенной картой (пример для RAM ≥ 64 GB):
 
