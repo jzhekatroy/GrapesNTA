@@ -278,205 +278,143 @@ func drainAllFlows(objs *loader.Objects) ([]flowKV, error) {
 }
 
 func streamExpiredFlowsAtomic(objs *loader.Objects, idleTimeout, activeTimeout time.Duration, nowMonoNs uint64, onChunk func([]flowKV) error) (int, error) {
-	var k FlowKey
-	var v FlowValue
-	iter := objs.Flows.Iterate()
-	keys := make([]FlowKey, 0, flowStreamChunk)
+	var cursor ebpf.MapBatchCursor
+	keys := make([]FlowKey, flowStreamChunk)
+	vals := make([]FlowValue, flowStreamChunk)
 	total := 0
 
-	flush := func() error {
-		if len(keys) == 0 {
-			return nil
-		}
-		out := make([]flowKV, 0, len(keys))
-		for i := range keys {
+	for {
+		n, err := objs.Flows.BatchLookup(&cursor, keys, vals, nil)
+		out := make([]flowKV, 0, n)
+		for i := 0; i < n; i++ {
+			if !isExpiredByTimers(vals[i], nowMonoNs, idleTimeout, activeTimeout) {
+				continue
+			}
+			if !isExportableKey(keys[i]) {
+				continue
+			}
 			var fresh FlowValue
 			if err := objs.Flows.LookupAndDelete(&keys[i], &fresh); err != nil {
 				if errors.Is(err, ebpf.ErrKeyNotExist) {
 					continue
 				}
-				if len(out) > 0 {
-					if cbErr := onChunk(out); cbErr != nil {
-						return cbErr
-					}
-					total += len(out)
-				}
-				keys = keys[:0]
-				return err
+				return total, err
 			}
 			out = append(out, flowKV{k: keys[i], v: fresh})
 		}
 		if len(out) > 0 {
 			if err := onChunk(out); err != nil {
-				return err
+				return total, err
 			}
 			total += len(out)
 		}
-		keys = keys[:0]
-		return nil
-	}
-
-	for iter.Next(&k, &v) {
-		if !isExpiredByTimers(v, nowMonoNs, idleTimeout, activeTimeout) {
-			continue
+		if errors.Is(err, ebpf.ErrKeyNotExist) {
+			return total, nil
 		}
-		if !isExportableKey(k) {
-			continue
+		if err != nil {
+			return total, err
 		}
-		if len(keys) >= flowStreamChunk {
-			if err := flush(); err != nil {
-				return total, err
-			}
-		}
-		keys = append(keys, k)
 	}
-	if err := iter.Err(); err != nil {
-		return total, err
-	}
-	if err := flush(); err != nil {
-		return total, err
-	}
-	return total, nil
 }
 
 func streamExpiredFlowsLegacy(objs *loader.Objects, idleTimeout, activeTimeout time.Duration, nowMonoNs uint64, onChunk func([]flowKV) error) (exported, deleted int, err error) {
-	var k FlowKey
-	var v FlowValue
-	iter := objs.Flows.Iterate()
-	chunk := make([]flowKV, 0, flowStreamChunk)
+	var cursor ebpf.MapBatchCursor
+	keys := make([]FlowKey, flowStreamChunk)
+	vals := make([]FlowValue, flowStreamChunk)
 
-	flush := func() error {
-		if len(chunk) == 0 {
-			return nil
+	for {
+		n, batchErr := objs.Flows.BatchLookup(&cursor, keys, vals, nil)
+		chunk := make([]flowKV, 0, n)
+		for i := 0; i < n; i++ {
+			if !isExpiredByTimers(vals[i], nowMonoNs, idleTimeout, activeTimeout) {
+				continue
+			}
+			if !isExportableKey(keys[i]) {
+				continue
+			}
+			chunk = append(chunk, flowKV{k: keys[i], v: vals[i]})
 		}
-		if err := onChunk(chunk); err != nil {
-			return err
-		}
-		exported += len(chunk)
-		deleted += deleteFlowKeys(objs, chunk)
-		chunk = chunk[:0]
-		return nil
-	}
-
-	for iter.Next(&k, &v) {
-		if !isExpiredByTimers(v, nowMonoNs, idleTimeout, activeTimeout) {
-			continue
-		}
-		if !isExportableKey(k) {
-			continue
-		}
-		if len(chunk) >= flowStreamChunk {
-			if err := flush(); err != nil {
+		if len(chunk) > 0 {
+			if err := onChunk(chunk); err != nil {
 				return exported, deleted, err
 			}
+			exported += len(chunk)
+			deleted += deleteFlowKeys(objs, chunk)
 		}
-		chunk = append(chunk, flowKV{k: k, v: v})
+		if errors.Is(batchErr, ebpf.ErrKeyNotExist) {
+			return exported, deleted, nil
+		}
+		if batchErr != nil {
+			return exported, deleted, batchErr
+		}
 	}
-	if err := iter.Err(); err != nil {
-		return exported, deleted, err
-	}
-	if err := flush(); err != nil {
-		return exported, deleted, err
-	}
-	return exported, deleted, nil
 }
 
 func streamAllFlowsAtomic(objs *loader.Objects, onChunk func([]flowKV) error) (int, error) {
-	var k FlowKey
-	var v FlowValue
-	iter := objs.Flows.Iterate()
-	keys := make([]FlowKey, 0, flowStreamChunk)
+	var cursor ebpf.MapBatchCursor
+	keys := make([]FlowKey, flowStreamChunk)
+	vals := make([]FlowValue, flowStreamChunk)
 	total := 0
 
-	flush := func() error {
-		if len(keys) == 0 {
-			return nil
-		}
-		out := make([]flowKV, 0, len(keys))
-		for i := range keys {
+	for {
+		n, err := objs.Flows.BatchLookup(&cursor, keys, vals, nil)
+		out := make([]flowKV, 0, n)
+		for i := 0; i < n; i++ {
+			if !isExportableKey(keys[i]) {
+				continue
+			}
 			var fresh FlowValue
 			if err := objs.Flows.LookupAndDelete(&keys[i], &fresh); err != nil {
 				if errors.Is(err, ebpf.ErrKeyNotExist) {
 					continue
 				}
-				if len(out) > 0 {
-					if cbErr := onChunk(out); cbErr != nil {
-						return cbErr
-					}
-					total += len(out)
-				}
-				keys = keys[:0]
-				return err
+				return total, err
 			}
 			out = append(out, flowKV{k: keys[i], v: fresh})
 		}
 		if len(out) > 0 {
 			if err := onChunk(out); err != nil {
-				return err
+				return total, err
 			}
 			total += len(out)
 		}
-		keys = keys[:0]
-		return nil
-	}
-
-	for iter.Next(&k, &v) {
-		if !isExportableKey(k) {
-			continue
+		if errors.Is(err, ebpf.ErrKeyNotExist) {
+			return total, nil
 		}
-		if len(keys) >= flowStreamChunk {
-			if err := flush(); err != nil {
-				return total, err
-			}
+		if err != nil {
+			return total, err
 		}
-		keys = append(keys, k)
 	}
-	if err := iter.Err(); err != nil {
-		return total, err
-	}
-	if err := flush(); err != nil {
-		return total, err
-	}
-	return total, nil
 }
 
 func streamAllFlowsLegacy(objs *loader.Objects, onChunk func([]flowKV) error) (exported, deleted int, err error) {
-	var k FlowKey
-	var v FlowValue
-	iter := objs.Flows.Iterate()
-	chunk := make([]flowKV, 0, flowStreamChunk)
+	var cursor ebpf.MapBatchCursor
+	keys := make([]FlowKey, flowStreamChunk)
+	vals := make([]FlowValue, flowStreamChunk)
 
-	flush := func() error {
-		if len(chunk) == 0 {
-			return nil
+	for {
+		n, batchErr := objs.Flows.BatchLookup(&cursor, keys, vals, nil)
+		chunk := make([]flowKV, 0, n)
+		for i := 0; i < n; i++ {
+			if !isExportableKey(keys[i]) {
+				continue
+			}
+			chunk = append(chunk, flowKV{k: keys[i], v: vals[i]})
 		}
-		if err := onChunk(chunk); err != nil {
-			return err
-		}
-		exported += len(chunk)
-		deleted += deleteFlowKeys(objs, chunk)
-		chunk = chunk[:0]
-		return nil
-	}
-
-	for iter.Next(&k, &v) {
-		if !isExportableKey(k) {
-			continue
-		}
-		if len(chunk) >= flowStreamChunk {
-			if err := flush(); err != nil {
+		if len(chunk) > 0 {
+			if err := onChunk(chunk); err != nil {
 				return exported, deleted, err
 			}
+			exported += len(chunk)
+			deleted += deleteFlowKeys(objs, chunk)
 		}
-		chunk = append(chunk, flowKV{k: k, v: v})
+		if errors.Is(batchErr, ebpf.ErrKeyNotExist) {
+			return exported, deleted, nil
+		}
+		if batchErr != nil {
+			return exported, deleted, batchErr
+		}
 	}
-	if err := iter.Err(); err != nil {
-		return exported, deleted, err
-	}
-	if err := flush(); err != nil {
-		return exported, deleted, err
-	}
-	return exported, deleted, nil
 }
 
 // probeAtomicFlowDrainSupport returns true when BPF_MAP_LOOKUP_AND_DELETE_ELEM
