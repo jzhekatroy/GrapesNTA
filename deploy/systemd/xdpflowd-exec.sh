@@ -179,7 +179,7 @@ exec "${STDBUF[@]}" "$BIN" \
   -nf-scan "$XDP_NF_SCAN" \
   -drain-mode "$XDP_DRAIN_MODE" \
   -drain-interval "$XDP_DRAIN_INTERVAL" \
-  -final-flush "$XDP_FINAL_FLUSH" \
+  -final-flush="$XDP_FINAL_FLUSH" \
   "${AGG_ARGS[@]}" \
   -top "$XDP_TOP" \
   -top-interval "$XDP_TOP_INTERVAL" \
