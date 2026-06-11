@@ -159,6 +159,13 @@ func drainExpiredFlows(objs *loader.Objects, idleTimeout, activeTimeout time.Dur
 // above any realistic bucket and keeps the per-call buffers small (~1 MB).
 const flowBatchChunk = 4096
 
+// flowStreamChunk bounds userspace memory for timer/atomic drain paths. The old
+// implementation first collected every expired key and every exported flow into
+// one large slice; on high-cardinality mirrors that transient heap reached tens
+// of GB. Streaming keeps the timer semantics (idle/active expiry) while handing
+// bounded chunks to the export sinks.
+const flowStreamChunk = 16384
+
 // streamBatchDrainAllFlows atomically pulls AND deletes every flow in the map
 // using BPF_MAP_LOOKUP_AND_DELETE_BATCH. On a multi-million-entry map this
 // replaces the O(N) per-key Iterate()+LookupAndDelete (tens of millions of
@@ -268,6 +275,208 @@ func drainAllFlows(objs *loader.Objects) ([]flowKV, error) {
 		out = append(out, flowKV{k: keys[i], v: fresh})
 	}
 	return out, nil
+}
+
+func streamExpiredFlowsAtomic(objs *loader.Objects, idleTimeout, activeTimeout time.Duration, nowMonoNs uint64, onChunk func([]flowKV) error) (int, error) {
+	var k FlowKey
+	var v FlowValue
+	iter := objs.Flows.Iterate()
+	keys := make([]FlowKey, 0, flowStreamChunk)
+	total := 0
+
+	flush := func() error {
+		if len(keys) == 0 {
+			return nil
+		}
+		out := make([]flowKV, 0, len(keys))
+		for i := range keys {
+			var fresh FlowValue
+			if err := objs.Flows.LookupAndDelete(&keys[i], &fresh); err != nil {
+				if errors.Is(err, ebpf.ErrKeyNotExist) {
+					continue
+				}
+				if len(out) > 0 {
+					if cbErr := onChunk(out); cbErr != nil {
+						return cbErr
+					}
+					total += len(out)
+				}
+				keys = keys[:0]
+				return err
+			}
+			out = append(out, flowKV{k: keys[i], v: fresh})
+		}
+		if len(out) > 0 {
+			if err := onChunk(out); err != nil {
+				return err
+			}
+			total += len(out)
+		}
+		keys = keys[:0]
+		return nil
+	}
+
+	for iter.Next(&k, &v) {
+		if !isExpiredByTimers(v, nowMonoNs, idleTimeout, activeTimeout) {
+			continue
+		}
+		if !isExportableKey(k) {
+			continue
+		}
+		if len(keys) >= flowStreamChunk {
+			if err := flush(); err != nil {
+				return total, err
+			}
+		}
+		keys = append(keys, k)
+	}
+	if err := iter.Err(); err != nil {
+		return total, err
+	}
+	if err := flush(); err != nil {
+		return total, err
+	}
+	return total, nil
+}
+
+func streamExpiredFlowsLegacy(objs *loader.Objects, idleTimeout, activeTimeout time.Duration, nowMonoNs uint64, onChunk func([]flowKV) error) (exported, deleted int, err error) {
+	var k FlowKey
+	var v FlowValue
+	iter := objs.Flows.Iterate()
+	chunk := make([]flowKV, 0, flowStreamChunk)
+
+	flush := func() error {
+		if len(chunk) == 0 {
+			return nil
+		}
+		if err := onChunk(chunk); err != nil {
+			return err
+		}
+		exported += len(chunk)
+		deleted += deleteFlowKeys(objs, chunk)
+		chunk = chunk[:0]
+		return nil
+	}
+
+	for iter.Next(&k, &v) {
+		if !isExpiredByTimers(v, nowMonoNs, idleTimeout, activeTimeout) {
+			continue
+		}
+		if !isExportableKey(k) {
+			continue
+		}
+		if len(chunk) >= flowStreamChunk {
+			if err := flush(); err != nil {
+				return exported, deleted, err
+			}
+		}
+		chunk = append(chunk, flowKV{k: k, v: v})
+	}
+	if err := iter.Err(); err != nil {
+		return exported, deleted, err
+	}
+	if err := flush(); err != nil {
+		return exported, deleted, err
+	}
+	return exported, deleted, nil
+}
+
+func streamAllFlowsAtomic(objs *loader.Objects, onChunk func([]flowKV) error) (int, error) {
+	var k FlowKey
+	var v FlowValue
+	iter := objs.Flows.Iterate()
+	keys := make([]FlowKey, 0, flowStreamChunk)
+	total := 0
+
+	flush := func() error {
+		if len(keys) == 0 {
+			return nil
+		}
+		out := make([]flowKV, 0, len(keys))
+		for i := range keys {
+			var fresh FlowValue
+			if err := objs.Flows.LookupAndDelete(&keys[i], &fresh); err != nil {
+				if errors.Is(err, ebpf.ErrKeyNotExist) {
+					continue
+				}
+				if len(out) > 0 {
+					if cbErr := onChunk(out); cbErr != nil {
+						return cbErr
+					}
+					total += len(out)
+				}
+				keys = keys[:0]
+				return err
+			}
+			out = append(out, flowKV{k: keys[i], v: fresh})
+		}
+		if len(out) > 0 {
+			if err := onChunk(out); err != nil {
+				return err
+			}
+			total += len(out)
+		}
+		keys = keys[:0]
+		return nil
+	}
+
+	for iter.Next(&k, &v) {
+		if !isExportableKey(k) {
+			continue
+		}
+		if len(keys) >= flowStreamChunk {
+			if err := flush(); err != nil {
+				return total, err
+			}
+		}
+		keys = append(keys, k)
+	}
+	if err := iter.Err(); err != nil {
+		return total, err
+	}
+	if err := flush(); err != nil {
+		return total, err
+	}
+	return total, nil
+}
+
+func streamAllFlowsLegacy(objs *loader.Objects, onChunk func([]flowKV) error) (exported, deleted int, err error) {
+	var k FlowKey
+	var v FlowValue
+	iter := objs.Flows.Iterate()
+	chunk := make([]flowKV, 0, flowStreamChunk)
+
+	flush := func() error {
+		if len(chunk) == 0 {
+			return nil
+		}
+		if err := onChunk(chunk); err != nil {
+			return err
+		}
+		exported += len(chunk)
+		deleted += deleteFlowKeys(objs, chunk)
+		chunk = chunk[:0]
+		return nil
+	}
+
+	for iter.Next(&k, &v) {
+		if !isExportableKey(k) {
+			continue
+		}
+		if len(chunk) >= flowStreamChunk {
+			if err := flush(); err != nil {
+				return exported, deleted, err
+			}
+		}
+		chunk = append(chunk, flowKV{k: k, v: v})
+	}
+	if err := iter.Err(); err != nil {
+		return exported, deleted, err
+	}
+	if err := flush(); err != nil {
+		return exported, deleted, err
+	}
+	return exported, deleted, nil
 }
 
 // probeAtomicFlowDrainSupport returns true when BPF_MAP_LOOKUP_AND_DELETE_ELEM
@@ -443,6 +652,29 @@ func (d *FlowDrainer) Expired(objs *loader.Objects, idleTimeout, activeTimeout t
 	return out, true
 }
 
+// StreamExpired is the memory-bounded variant of Expired. It preserves the
+// timer/atomic semantics (only idle/active-expired flows leave the map) but
+// exports bounded chunks instead of building one large []flowKV.
+func (d *FlowDrainer) StreamExpired(objs *loader.Objects, idleTimeout, activeTimeout time.Duration, nowMonoNs uint64, onChunk func([]flowKV) error) (exported, deleted int, atomicDrained bool, err error) {
+	if onChunk == nil {
+		onChunk = func([]flowKV) error { return nil }
+	}
+	if d == nil || d.mode == flowDrainLegacy {
+		if d != nil {
+			d.legacyCount++
+		}
+		exported, deleted, err = streamExpiredFlowsLegacy(objs, idleTimeout, activeTimeout, nowMonoNs, onChunk)
+		return exported, deleted, false, err
+	}
+	n, err := streamExpiredFlowsAtomic(objs, idleTimeout, activeTimeout, nowMonoNs, onChunk)
+	if err != nil {
+		d.demoteToLegacy(err)
+		return n, n, true, err
+	}
+	d.atomicCount++
+	return n, n, true, nil
+}
+
 // All is the final-flush variant: pulls every IPv4/IPv6 flow currently in the
 // map. Same contract as Expired regarding atomic vs legacy delete.
 func (d *FlowDrainer) All(objs *loader.Objects) ([]flowKV, bool) {
@@ -460,4 +692,26 @@ func (d *FlowDrainer) All(objs *loader.Objects) ([]flowKV, bool) {
 	}
 	d.atomicCount++
 	return out, true
+}
+
+// StreamAll is the memory-bounded final-flush variant. It is intended for
+// shutdown and should not be used as the steady-state export mode.
+func (d *FlowDrainer) StreamAll(objs *loader.Objects, onChunk func([]flowKV) error) (exported, deleted int, atomicDrained bool, err error) {
+	if onChunk == nil {
+		onChunk = func([]flowKV) error { return nil }
+	}
+	if d == nil || d.mode == flowDrainLegacy {
+		if d != nil {
+			d.legacyCount++
+		}
+		exported, deleted, err = streamAllFlowsLegacy(objs, onChunk)
+		return exported, deleted, false, err
+	}
+	n, err := streamAllFlowsAtomic(objs, onChunk)
+	if err != nil {
+		d.demoteToLegacy(err)
+		return n, n, true, err
+	}
+	d.atomicCount++
+	return n, n, true, nil
 }

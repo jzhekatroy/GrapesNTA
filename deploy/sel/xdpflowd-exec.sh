@@ -46,9 +46,9 @@ XDP_NF_SCAN="${XDP_NF_SCAN:-1s}"
 XDP_DRAIN_MODE="${XDP_DRAIN_MODE:-timer}"
 XDP_DRAIN_INTERVAL="${XDP_DRAIN_INTERVAL:-0s}"
 
-# Userspace flow aggregation (drain-mode=batch only): one row per flow per
-# active window instead of one per drain tick. Keep XDP_DRAIN_INTERVAL small
-# (e.g. 5s) and XDP_AGG_ACTIVE high (e.g. 60s); reduction ≈ active/interval.
+# Userspace flow aggregation is retained for controlled batch-mode experiments
+# only. Production baseline is XDP_DRAIN_MODE=timer; do not enable batch+agg as
+# the first response to map_full.
 XDP_AGG_ENABLE="${XDP_AGG_ENABLE:-0}"
 XDP_AGG_IDLE="${XDP_AGG_IDLE:-15s}"
 XDP_AGG_ACTIVE="${XDP_AGG_ACTIVE:-60s}"

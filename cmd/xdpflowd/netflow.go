@@ -458,42 +458,34 @@ func (e *nfExporter) scanAndExport(objs *loader.Objects, drainer *FlowDrainer, o
 		return n, n
 	}
 
-	var flows []flowKV
-	var atomicDrained bool
-	switch {
-	case drainer != nil:
-		flows, atomicDrained = drainer.Expired(objs, e.idleTimeout, e.activeTimeout, nowMonoNs)
-	default:
-		flows = selectExpiredFlows(objs, e.idleTimeout, e.activeTimeout, nowMonoNs)
-	}
-	if onFlows != nil {
-		onFlows(flows, time.Now().UTC())
-	}
-
-	var recV4, recV6 [][]byte
-	for _, fv := range flows {
-		if fv.k.IPVersion == 4 {
-			rec := e.encodeRecordV4(make([]byte, 0, e.recV4Size), fv.k, fv.v)
-			recV4 = append(recV4, rec)
-		} else if fv.k.IPVersion == 6 {
-			rec := e.encodeRecordV6(make([]byte, 0, e.recV6Size), fv.k, fv.v)
-			recV6 = append(recV6, rec)
-		}
-	}
-
 	// Send template if interval elapsed (or very first run).
 	last := e.lastTemplateSent.Load()
 	if last == 0 || time.Since(time.Unix(0, last)) >= e.templateInterval {
 		e.sendTemplate()
 	}
 
-	e.flushBuckets(recV4, recV6)
-
-	if atomicDrained {
-		deleted = len(flows)
-	} else {
-		deleted = deleteFlowKeys(objs, flows)
+	receivedAt := time.Now().UTC()
+	if drainer != nil {
+		var err error
+		exported, deleted, _, err = drainer.StreamExpired(objs, e.idleTimeout, e.activeTimeout, nowMonoNs, func(chunk []flowKV) error {
+			if onFlows != nil {
+				onFlows(chunk, receivedAt)
+			}
+			e.exportFlowChunk(chunk)
+			return nil
+		})
+		if err != nil && e.log != nil {
+			e.log.Error("timer drain", "err", err, "exported", exported, "deleted", deleted)
+		}
+		return
 	}
+
+	flows := selectExpiredFlows(objs, e.idleTimeout, e.activeTimeout, nowMonoNs)
+	if onFlows != nil {
+		onFlows(flows, receivedAt)
+	}
+	e.exportFlowChunk(flows)
+	deleted = deleteFlowKeys(objs, flows)
 	exported = len(flows)
 	return
 }
@@ -546,34 +538,32 @@ func (e *nfExporter) flushAll(objs *loader.Objects, drainer *FlowDrainer, onFlow
 		return n, n
 	}
 
-	var flows []flowKV
-	var atomicDrained bool
-	switch {
-	case drainer != nil:
-		flows, atomicDrained = drainer.All(objs)
-	default:
-		flows = selectAllFlows(objs)
-	}
-	if onFlows != nil {
-		onFlows(flows, time.Now().UTC())
-	}
-	var recV4, recV6 [][]byte
-	for _, fv := range flows {
-		if fv.k.IPVersion == 4 {
-			recV4 = append(recV4, e.encodeRecordV4(make([]byte, 0, e.recV4Size), fv.k, fv.v))
-		} else if fv.k.IPVersion == 6 {
-			recV6 = append(recV6, e.encodeRecordV6(make([]byte, 0, e.recV6Size), fv.k, fv.v))
-		}
-	}
 	// Always send a fresh template right before a forced flush so the collector
 	// can decode records even if it just started.
 	e.sendTemplate()
-	e.flushBuckets(recV4, recV6)
-	if atomicDrained {
-		deleted = len(flows)
-	} else {
-		deleted = deleteFlowKeys(objs, flows)
+
+	receivedAt := time.Now().UTC()
+	if drainer != nil {
+		var err error
+		exported, deleted, _, err = drainer.StreamAll(objs, func(chunk []flowKV) error {
+			if onFlows != nil {
+				onFlows(chunk, receivedAt)
+			}
+			e.exportFlowChunk(chunk)
+			return nil
+		})
+		if err != nil && e.log != nil {
+			e.log.Error("final timer drain", "err", err, "exported", exported, "deleted", deleted)
+		}
+		return
 	}
+
+	flows := selectAllFlows(objs)
+	if onFlows != nil {
+		onFlows(flows, receivedAt)
+	}
+	e.exportFlowChunk(flows)
+	deleted = deleteFlowKeys(objs, flows)
 	exported = len(flows)
 	return
 }

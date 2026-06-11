@@ -813,15 +813,15 @@ func main() {
 					}
 					log.Info("final flush", "exported", n, "deleted", n, "drain_mode", "batch", "clickhouse_enabled", true)
 				} else {
-					flows, atomicDrained := drainer.All(objs)
-					chDel.enqueue(flows, time.Now().UTC())
-					deleted := 0
-					if !atomicDrained {
-						deleted = deleteFlowKeys(objs, flows)
-					} else {
-						deleted = len(flows)
+					receivedAt := time.Now().UTC()
+					exported, deleted, atomicDrained, err := drainer.StreamAll(objs, func(chunk []flowKV) error {
+						chDel.enqueue(chunk, receivedAt)
+						return nil
+					})
+					if err != nil {
+						log.Error("final timer drain", "err", err, "exported", exported, "deleted", deleted)
 					}
-					log.Info("final flush", "exported", len(flows), "deleted", deleted, "atomic_drain", atomicDrained, "clickhouse_enabled", true)
+					log.Info("final flush", "exported", exported, "deleted", deleted, "atomic_drain", atomicDrained, "clickhouse_enabled", true)
 				}
 			}
 			log.Info("shutdown")
@@ -971,10 +971,13 @@ func main() {
 					log.Error("read uptime", "err", err)
 					break
 				}
-				flows, atomicDrained := drainer.Expired(objs, *nfIdle, *nfActive, nowMonoNs)
-				chDel.enqueue(flows, time.Now().UTC())
-				if !atomicDrained {
-					deleteFlowKeys(objs, flows)
+				receivedAt := time.Now().UTC()
+				exported, deleted, _, err := drainer.StreamExpired(objs, *nfIdle, *nfActive, nowMonoNs, func(chunk []flowKV) error {
+					chDel.enqueue(chunk, receivedAt)
+					return nil
+				})
+				if err != nil {
+					log.Error("timer drain", "err", err, "exported", exported, "deleted", deleted)
 				}
 			}
 		}

@@ -986,36 +986,40 @@ native подтверждён как рабочий и **более выгодн
    `LookupAndDelete`. На 12M записей это десятки млн syscall за цикл — не
    укладывается в 1 с, карта переполняется быстрее, чем дренируется.
 
-### Фикс (в коде, начиная с этой ревизии)
+### Фикс (актуальный безопасный baseline)
 
-1. **LRU-карта.** `flows` теперь `BPF_MAP_TYPE_LRU_HASH`. При заполнении
-   вытесняется самый старый (idle) flow, а **новый всегда заводится** →
-   `map_full` стремится к 0 by construction. Горячий путь трогает активные flow
-   на каждом пакете (`lookup_elem`), обновляя LRU-recency, поэтому жертвами
-   вытеснения становятся только устаревшие записи, которые дренаж и так заберёт.
-2. **Batch-дренаж.** Новый режим `XDP_DRAIN_MODE=batch`: вся карта снимается
-   одним `BPF_MAP_LOOKUP_AND_DELETE_BATCH` (≈N/4096 syscall вместо десятков млн).
-   Дренаж укладывается в интервал, карта не переполняется. Интервал дренажа
-   (`XDP_DRAIN_INTERVAL`, по умолчанию = `XDP_NF_ACTIVE`) становится фактическим
-   active timeout: каждый flow экспортируется раз в интервал.
+1. **Timer/atomic остаётся production baseline.** Flow экспортируется по
+   `idle/active` timeout, как в исходной NetFlow-семантике.
+2. **Streaming timer drain.** Expired-flow export теперь отдаёт данные чанками
+   (`flowStreamChunk`), а не собирает все expired flow в один огромный `[]flowKV`.
+   Это сохраняет старую семантику, но убирает десятки GB transient heap на
+   высококардинальных зеркалах.
+3. **LRU/размер карты — отдельный рычаг.** Если `map_full_delta` остаётся
+   ненулевым, сначала увеличивайте `FLOWS_MAP_SIZE` и снижайте стоимость
+   timer-drain, а не включайте постоянный full-drain.
+
+`XDP_DRAIN_MODE=batch` оставлен только как ручной/экспериментальный режим. Не
+делайте его production default: постоянный full-drain меняет семантику flow и
+может резко увеличить поток строк в ClickHouse.
 
 ### Что выставить на m61
 
 В `/etc/xdpflowd/xdpflowd.env`:
 
 ```bash
-XDP_DRAIN_MODE=batch
-XDP_DRAIN_INTERVAL=10s   # = active timeout; 10-15s разумно
+XDP_DRAIN_MODE=timer
+XDP_AGG_ENABLE=0
+XDP_CH_SPOOL_SHUTDOWN_DRAIN=0s   # быстрые рестарты: backlog остаётся в spool
 ```
 
-Пересборка с LRU и увеличенной картой (RAM ≥ 64 GB → 24M безопасно):
+Пересборка с увеличенной картой (пример для RAM ≥ 64 GB):
 
 ```bash
 cd /opt/GrapesNTA
 git pull
 free -g                              # убедиться в запасе RAM
 make clean
-make bpf FLOWS_MAP_SIZE=24000000     # 24M LRU ≈ 4-5 GB
+make bpf FLOWS_MAP_SIZE=24000000     # 24M ≈ 4-5 GB
 make build
 systemctl restart xdpflowd
 ```
@@ -1023,21 +1027,26 @@ systemctl restart xdpflowd
 ### Проверка после рестарта
 
 ```bash
-journalctl -u xdpflowd -n 50 --no-pager | grep -E 'flow drainer|batch full-drain|map_full|health'
+journalctl -u xdpflowd -n 80 --no-pager | grep -E 'stats|netflow records|spool pipeline|health|flow drainer|map_full'
 ```
 
 Ожидаем:
-- `flow drainer: batch full-drain enabled ...` в логах старта;
-- `flow drainer ... batch_enabled=true batch_calls=N` (N растёт);
-- `map_full_delta=0`, нет `health degraded`;
+- `flow drainer: using atomic LookupAndDelete ...`;
+- нет `batch full-drain` и нет `flow aggregation enabled`;
+- `lag_segments` около 0-1, `insert_errs_delta=0`;
+- `map_full_delta=0` или снижается после увеличения карты;
 - тождество учёта держится: `total_packets == accounted + parse_errors + map_full + non_ip_pass`.
 
 ### Откат
 
-`XDP_DRAIN_MODE=timer` + рестарт возвращает прежнее поведение. LRU-карта
-безопасна и в timer-режиме (просто перестаёт ронять новые flow при переполнении).
+Если экспериментальный `batch` был включён, верните:
 
-## 18. Перегрузка ClickHouse / рост спула (userspace-агрегация)
+```bash
+XDP_DRAIN_MODE=timer
+XDP_AGG_ENABLE=0
+```
+
+## 18. Перегрузка ClickHouse / рост спула
 
 ### Симптом
 
@@ -1048,65 +1057,59 @@ journalctl -u xdpflowd -n 50 --no-pager | grep -E 'flow drainer|batch full-drain
 
 ### Причина
 
-В batch-режиме карта снимается каждые `XDP_DRAIN_INTERVAL`, но снятие ≠ конец
-flow: долгоживущее соединение всплывает в каждом дренаже заново. Если каждый
-срез писать в ClickHouse, один реальный flow превращается в N строк
-(N ≈ `XDP_DRAIN_INTERVAL`-срезов за время жизни). При больших pps это
-переполняет вставки и забивает спул/диск.
+На горячем ingest-пути ClickHouse синхронно считает materialized views. При
+большом flow rate это даёт высокий fan-out: один `INSERT flows_raw` заставляет
+перечитывать/агрегировать десятки миллионов строк во view.
 
-### Решение: агрегирующий кэш в userspace
-
-`XDP_AGG_ENABLE=1` включает кэш между частым дренажем BPF и экспортом. Срезы
-складываются по ключу flow (5-tuple + VLAN + MAC), суммируются bytes/packets,
-держатся min(first_seen)/max(last_seen). Flow отдаётся в ClickHouse **и** NetFlow
-только по таймауту: idle (`XDP_AGG_IDLE`, нет новых пакетов) или active
-(`XDP_AGG_ACTIVE`, прожил дольше лимита). Итог — ~1 строка на реальный flow за
-окно `XDP_AGG_ACTIVE` вместо одной на каждый дренаж.
-
-Снижение объёма строк ≈ `XDP_AGG_ACTIVE` / `XDP_DRAIN_INTERVAL`.
-
-### Что выставить на m61
-
-В `/etc/xdpflowd/xdpflowd.env`:
+### Диагностика
 
 ```bash
-XDP_DRAIN_MODE=batch
-XDP_DRAIN_INTERVAL=5s     # с агрегацией это только период съёма карты (держать малым)
-XDP_AGG_ENABLE=1
-XDP_AGG_ACTIVE=60s        # ~12x меньше строк, чем «сырой» batch на 5s
-XDP_AGG_IDLE=15s
-XDP_AGG_MAX_ENTRIES=2000000   # потолок памяти кэша (~150-200 Б/запись)
+clickhouse-client ... -q "
+SELECT
+    view_name,
+    count() AS inserts,
+    sum(read_rows) AS read_rows,
+    sum(written_rows) AS written_rows,
+    round(avg(view_duration_ms)) AS avg_ms,
+    round(sum(view_duration_ms)) AS total_ms
+FROM system.query_views_log
+WHERE event_time >= now() - INTERVAL 10 MINUTE
+GROUP BY view_name
+ORDER BY total_ms DESC"
 ```
 
-Перезапуск (пересборка не нужна, если бинарь уже с поддержкой агрегации):
+Если сверху `traffic_pair_*` / `traffic_talker_*`, их нельзя держать тяжёлыми
+синхронными MV на production ingest.
+
+### Быстрое восстановление
+
+Временно отцепить тяжёлые MV (данные в `flows_raw` сохраняются; агрегаты можно
+досчитать позже):
 
 ```bash
-cd /opt/GrapesNTA && git pull && make build
-systemctl restart xdpflowd
+clickhouse-client ... --multiquery <<'SQL'
+DETACH TABLE default.traffic_talker_1m_mv;
+DETACH TABLE default.traffic_pair_1m_mv;
+DETACH TABLE default.traffic_pair_1h_mv;
+DETACH TABLE default.traffic_talker_1h_mv;
+SQL
 ```
 
-### Проверка после рестарта
+Проверка:
 
 ```bash
-journalctl -u xdpflowd -n 80 --no-pager | grep -E 'flow aggregation enabled|flow aggregator|spool pipeline|health'
+clickhouse-client ... -q "
+SELECT count() inserts, round(avg(query_duration_ms)) avg_ms,
+       round(quantile(0.95)(query_duration_ms)) p95_ms
+FROM system.query_log
+WHERE event_time >= now() - INTERVAL 3 MINUTE
+  AND type='QueryFinish' AND query_kind='Insert'
+  AND query ILIKE '%flows_raw%'"
 ```
 
-Ожидаем:
-- `flow aggregation enabled idle=15s active=1m0s ...` в логах старта;
-- строка `flow aggregator cached=… merged_in=… exported_out=… forced_evicted=0` —
-  `exported_out` должен быть в разы меньше `merged_in` (это и есть сжатие);
-- `records_spooled` и `records_acked` сходятся, `lag_segments` падает к 0,
-  `health degraded` исчезает.
+### Постоянное решение
 
-### Память и DDoS
-
-`forced_evicted` стабильно > 0 означает, что реальная кардинальность flow
-превышает `XDP_AGG_MAX_ENTRIES` — поднимите лимит (если есть RAM) или включите
-сэмплинг (следующая фаза). Trade-off агрегации: flow попадает в БД с задержкой
-до `XDP_AGG_ACTIVE` — приемлемо, когда несколько минут отставания дашбордов ок.
-
-### Откат
-
-`XDP_AGG_ENABLE=0` + рестарт — мгновенно возвращает «сырой» batch (одна строка
-на дренаж). Сам batch-режим при этом продолжает работать.
+Перевести `pair/talker` и другие тяжёлые агрегаты на async job / refreshable MV
+с лагом 1-5 минут. Raw ingest должен быть быстрым и не должен синхронно считать
+все аналитические представления.
 
