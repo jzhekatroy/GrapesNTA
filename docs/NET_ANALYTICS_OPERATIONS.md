@@ -203,8 +203,8 @@ Lightweight dashboard timer should **not** include heavy talker/pair jobs. Use t
 separate top talkers timer:
 
 ```bash
-sudo cp deploy/systemd/traffic-talkers-rollups.{service,timer,env.example} /etc/systemd/system/
-sudo cp deploy/systemd/traffic-talkers-rollups.env.example /etc/grapesnta/traffic-talkers-rollups.env
+sudo cp deploy/systemd/traffic-talkers-rollups.{service,timer} /etc/systemd/system/
+sudo install -m 0600 deploy/systemd/traffic-talkers-rollups.env.example /etc/grapesnta/traffic-talkers-rollups.env
 sudo systemctl daemon-reload
 sudo systemctl enable --now traffic-talkers-rollups.timer
 ```

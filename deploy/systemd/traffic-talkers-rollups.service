@@ -5,8 +5,8 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
-EnvironmentFile=-/etc/grapesnta/traffic-talkers-rollups.env
 EnvironmentFile=-/etc/grapesnta/traffic-rollups.env
+EnvironmentFile=-/etc/grapesnta/traffic-talkers-rollups.env
 ExecStart=/usr/bin/python3 /opt/GrapesNTA/scripts/traffic_rollup_async.py --jobs traffic_talker_1m,traffic_talker_1h,traffic_pair_1m,traffic_pair_1h
 StandardOutput=journal
 StandardError=journal
