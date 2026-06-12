@@ -6,11 +6,14 @@
 -- IP country uses default.geo_country_dict (prefix allocation country).
 -- ASN country uses default.asn_registry_enriched.cc (registry country).
 -- Empty or missing lookups are stored as ??.
+--
+-- Production ingest: NO sync Materialized View. Table is filled by async rollup
+-- job traffic_country_1m (scripts/traffic_rollup_async.py). SELECT body:
+-- scripts/traffic_rollup_jobs.py
 
 DROP TABLE IF EXISTS default.traffic_country_1m_mv;
-DROP TABLE IF EXISTS default.traffic_country_1m;
 
-CREATE TABLE default.traffic_country_1m
+CREATE TABLE IF NOT EXISTS default.traffic_country_1m
 (
     minute        DateTime('UTC'),
     source_id     LowCardinality(String),
@@ -26,73 +29,3 @@ ENGINE = SummingMergeTree
 PARTITION BY toYYYYMMDD(minute)
 ORDER BY (minute, source_id, country_basis, country_side, direction, country_code)
 SETTINGS index_granularity = 8192;
-
-CREATE MATERIALIZED VIEW default.traffic_country_1m_mv
-TO default.traffic_country_1m
-AS
-SELECT
-    minute,
-    source_id,
-    country_basis,
-    country_side,
-    direction,
-    if(length(trimBoth(country_raw)) = 0, '??', trimBoth(country_raw)) AS country_code,
-    sum(bytes) AS bytes,
-    sum(packets) AS packets,
-    count() AS flows_count
-FROM
-(
-    SELECT
-        toStartOfMinute(f.time_received_ns) AS minute,
-        f.source_id,
-        f.direction,
-        f.bytes,
-        f.packets,
-        row.1 AS country_basis,
-        row.2 AS country_side,
-        row.3 AS country_raw
-    FROM default.flows_raw AS f
-    LEFT JOIN default.asn_registry_enriched AS src_as ON src_as.asn = f.src_asn
-    LEFT JOIN default.asn_registry_enriched AS dst_as ON dst_as.asn = f.dst_asn
-    ARRAY JOIN arrayZip(
-        ['ip', 'ip', 'asn', 'asn'],
-        ['src', 'dst', 'src', 'dst'],
-        [
-            if(
-                f.etype = 2048,
-                dictGetString(
-                    'default.geo_country_dict',
-                    'cc',
-                    tuple(toIPv4(reinterpretAsUInt32(reverse(substring(f.src_addr, 1, 4)))))
-                ),
-                dictGetString(
-                    'default.geo_country_dict',
-                    'cc',
-                    tuple(toIPv6(IPv6NumToString(f.src_addr)))
-                )
-            ),
-            if(
-                f.etype = 2048,
-                dictGetString(
-                    'default.geo_country_dict',
-                    'cc',
-                    tuple(toIPv4(reinterpretAsUInt32(reverse(substring(f.dst_addr, 1, 4)))))
-                ),
-                dictGetString(
-                    'default.geo_country_dict',
-                    'cc',
-                    tuple(toIPv6(IPv6NumToString(f.dst_addr)))
-                )
-            ),
-            if(f.src_asn = 0, '', toString(src_as.cc)),
-            if(f.dst_asn = 0, '', toString(dst_as.cc))
-        ]
-    ) AS row
-) AS expanded
-GROUP BY
-    minute,
-    source_id,
-    country_basis,
-    country_side,
-    direction,
-    country_code;

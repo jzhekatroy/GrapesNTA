@@ -58,7 +58,12 @@ clickhouse-client ... --multiquery < deploy/clickhouse/traffic_role_1m.sql
 clickhouse-client ... --multiquery < deploy/clickhouse/traffic_entity_1m.sql
 clickhouse-client ... --multiquery < deploy/clickhouse/traffic_vlan_1m.sql
 clickhouse-client ... --multiquery < deploy/clickhouse/traffic_dashboard_1m.sql
+clickhouse-client ... --multiquery < deploy/clickhouse/traffic_rollup_state.sql
+clickhouse-client ... --multiquery < deploy/clickhouse/detach_traffic_mvs.sql
 ```
+
+`traffic_*.sql` create aggregate tables only (no sync MV). Enable async rollups on
+the collector: [`CLICKHOUSE_DB_SETUP_RUNBOOK.md`](CLICKHOUSE_DB_SETUP_RUNBOOK.md) §7.
 
 ## Runtime Config
 

@@ -25,6 +25,13 @@
 --  17. traffic_dashboard_1m.sql
 --  18. traffic_dashboard_1d.sql
 --  19. net_reports.sql
+--  20. traffic_rollup_state.sql
+--  21. detach_traffic_mvs.sql   (idempotent; no sync MV on ingest)
+--  22. systemd traffic-rollups.timer on collector (after spool catch-up)
+--
+-- traffic_*.sql create aggregate TABLES only (no CREATE MATERIALIZED VIEW).
+-- Rollups are filled by scripts/traffic_rollup_async.py — see
+-- docs/CLICKHOUSE_DB_SETUP_RUNBOOK.md §7.
 --
 -- Example:
 --   for f in deploy/clickhouse/cleanup_old_classification.sql \
@@ -46,6 +53,8 @@
 --            deploy/clickhouse/traffic_talkers_1h.sql \
 --            deploy/clickhouse/traffic_dashboard_1m.sql \
 --            deploy/clickhouse/traffic_dashboard_1d.sql \
---            deploy/clickhouse/net_reports.sql; do
+--            deploy/clickhouse/net_reports.sql \
+--            deploy/clickhouse/traffic_rollup_state.sql \
+--            deploy/clickhouse/detach_traffic_mvs.sql; do
 --     clickhouse-client --host HOST --user USER --password PASS --multiquery < "$f"
 --   done

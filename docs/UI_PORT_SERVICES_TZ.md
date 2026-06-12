@@ -223,15 +223,14 @@ VALUES
 
 ## 6. Как изменения применяются к отчётам
 
-Справочник используется в materialized view `default.traffic_service_1m_mv`.
-Для производительности MV не должна делать join по условию
-`port BETWEEN port_from AND port_to` на каждом flow.
+Справочник используется в async rollup job `traffic_service_1m`
+(`scripts/traffic_rollup_jobs.py`). Для производительности rollup не должен
+делать join по условию `port BETWEEN port_from AND port_to` на каждом flow.
 
 - `default.port_services_enabled` — показывает правила для UI;
 - `default.port_services_expanded_enabled` — техническое view/table для
   агрегации, где диапазоны развёрнуты в отдельные порты;
-- `traffic_service_1m_mv` делает быстрый join по равенству
-  `transport + port`.
+- job `traffic_service_1m` делает быстрый join по равенству `transport + port`.
 
 Пример:
 
@@ -402,7 +401,13 @@ FORMAT JSON;
 clickhouse-client --multiquery < deploy/clickhouse/port_services.sql
 clickhouse-client --multiquery < deploy/clickhouse/traffic_service_1m.sql
 clickhouse-client --multiquery < deploy/clickhouse/traffic_unknown_port_1m.sql
+clickhouse-client --multiquery < deploy/clickhouse/traffic_rollup_state.sql
+clickhouse-client --multiquery < deploy/clickhouse/detach_traffic_mvs.sql
 ```
+
+Данные в `traffic_service_1m` / `traffic_unknown_port_1m` появятся после запуска
+async rollups на коллекторе (`traffic-rollups.timer`). См.
+[`CLICKHOUSE_DB_SETUP_RUNBOOK.md`](CLICKHOUSE_DB_SETUP_RUNBOOK.md) §7.
 
 Для уже существующей БД, где `port_services` была создана со старым полем
 `port`, сначала выполнить миграцию:
@@ -416,13 +421,15 @@ CH_HOST=95.215.1.30 CH_PORT=6124 CH_USER=develop CH_PASSWORD='...' \
 все одиночные порты в формат `port_from = port_to` и создаст views
 `port_services_enabled` / `port_services_expanded_enabled`.
 
-После миграции нужно пересоздать materialized views:
+После миграции убедиться, что sync MV не attached, и пересобрать агрегаты через
+async rollups:
 
 ```bash
 clickhouse-client --multiquery < deploy/clickhouse/migrate_port_service_rollups_ranges.sql
+clickhouse-client --multiquery < deploy/clickhouse/detach_traffic_mvs.sql
 ```
 
-Этот migration SQL сохраняет уже накопленные таблицы `traffic_service_1m` и
-`traffic_unknown_port_1m`, пересоздаёт только materialized views. Исторические
-строки останутся классифицированы по старым правилам; для истории нужен
-отдельный backfill.
+`migrate_port_service_rollups_ranges.sql` deprecated: только DROP legacy MV.
+SELECT-тела для service rollups — в `scripts/traffic_rollup_jobs.py`. Исторические
+строки в `traffic_service_1m` / `traffic_unknown_port_1m` останутся по старым
+правилам; для истории нужен async backfill с `--delete-before-insert`.

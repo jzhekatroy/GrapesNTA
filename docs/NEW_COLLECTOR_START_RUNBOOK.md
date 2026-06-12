@@ -1089,17 +1089,21 @@ ORDER BY total_ms DESC"
 
 ### Быстрое восстановление
 
-Временно отцепить тяжёлые MV (данные в `flows_raw` сохраняются; агрегаты можно
-досчитать позже):
+Отцепить **все** `traffic_*` sync MV (данные в `flows_raw` сохраняются):
 
 ```bash
-clickhouse-client ... --multiquery <<'SQL'
-DETACH TABLE default.traffic_talker_1m_mv;
-DETACH TABLE default.traffic_pair_1m_mv;
-DETACH TABLE default.traffic_pair_1h_mv;
-DETACH TABLE default.traffic_talker_1h_mv;
-SQL
+clickhouse-client ... --multiquery < deploy/clickhouse/detach_traffic_mvs.sql
 ```
+
+Проверка:
+
+```bash
+clickhouse-client ... -q "
+SELECT name FROM system.tables
+WHERE database='default' AND engine='MaterializedView' AND name LIKE 'traffic_%'"
+```
+
+Должно быть пусто.
 
 Проверка:
 
@@ -1113,9 +1117,26 @@ WHERE event_time >= now() - INTERVAL 3 MINUTE
   AND query ILIKE '%flows_raw%'"
 ```
 
-### Постоянное решение
+### Постоянное решение (production на m61)
 
-Перевести `pair/talker` и другие тяжёлые агрегаты на async job / refreshable MV
-с лагом 1-5 минут. Raw ingest должен быть быстрым и не должен синхронно считать
-все аналитические представления.
+Все `traffic_*` агрегаты считаются **асинхронно** на коллекторе:
+
+- `scripts/traffic_rollup_async.py` + `scripts/traffic_rollup_jobs.py` (15 jobs)
+- `deploy/clickhouse/traffic_rollup_state.sql` — watermark
+- `deploy/clickhouse/detach_traffic_mvs.sql` — отцепить legacy sync MV
+- `deploy/systemd/traffic-rollups.timer` — каждую минуту, 1 bucket/job
+
+Hot path = только `INSERT flows_raw`. Ожидаемый лаг UI-агрегатов: **5–10 минут**.
+
+Полная процедура: [`CLICKHOUSE_DB_SETUP_RUNBOOK.md`](CLICKHOUSE_DB_SETUP_RUNBOOK.md) §7.
+
+```bash
+# после lag_segments ~ 0
+ch --multiquery < deploy/clickhouse/traffic_rollup_state.sql
+ch --multiquery < deploy/clickhouse/detach_traffic_mvs.sql
+sudo cp deploy/systemd/traffic-rollups.env.example /etc/grapesnta/traffic-rollups.env
+sudo cp deploy/systemd/traffic-rollups.{service,timer} /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now traffic-rollups.timer
+```
 

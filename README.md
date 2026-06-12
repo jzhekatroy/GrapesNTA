@@ -17,6 +17,8 @@ make clean && make
 
 **RIR country → ClickHouse:** optional Python script [scripts/load_rir_geo.py](scripts/load_rir_geo.py) loads delegated statistics into `geo_prefix_country` and `geo_country_dict` via `clickhouse-client`. See [docs/geoip_country.md](docs/geoip_country.md).
 
+**Traffic rollups → ClickHouse:** aggregate tables `traffic_*` are filled asynchronously by [scripts/traffic_rollup_async.py](scripts/traffic_rollup_async.py) (not sync MV on ingest). Deploy: [deploy/clickhouse/traffic_rollup_state.sql](deploy/clickhouse/traffic_rollup_state.sql), [deploy/clickhouse/detach_traffic_mvs.sql](deploy/clickhouse/detach_traffic_mvs.sql), [deploy/systemd/traffic-rollups.timer](deploy/systemd/traffic-rollups.timer). Runbook: [docs/CLICKHOUSE_DB_SETUP_RUNBOOK.md](docs/CLICKHOUSE_DB_SETUP_RUNBOOK.md) §7.
+
 **BMP collector:** standalone pure-Go service [`cmd/bmpgrapes`](cmd/bmpgrapes) accepts BMP TCP sessions from routers and writes `default.bmp_peers` / `default.bmp_route_events` / `default.bgp_updates_1m`. Build with `make build-bmp`, see [docs/BMPGRAPES_MVP.md](docs/BMPGRAPES_MVP.md) and [deploy/clickhouse/bmp.sql](deploy/clickhouse/bmp.sql).
 
 Run (root):

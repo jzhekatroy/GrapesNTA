@@ -38,6 +38,9 @@ Expected: old `local_*`, `vlan_map*`, legacy traffic tables are gone.
 
 ## Step 3. Apply New DDL
 
+`traffic_*.sql` create aggregate **tables only** (no sync materialized views).
+Rollups are filled by `scripts/traffic_rollup_async.py` on the collector.
+
 ```bash
 for f in \
   deploy/clickhouse/flows_raw_extensions.sql \
@@ -48,8 +51,14 @@ for f in \
   deploy/clickhouse/traffic_role_1m.sql \
   deploy/clickhouse/traffic_entity_1m.sql \
   deploy/clickhouse/traffic_vlan_1m.sql \
+  deploy/clickhouse/traffic_protocol_1m.sql \
   deploy/clickhouse/traffic_dashboard_1m.sql \
-  deploy/clickhouse/net_reports.sql
+  deploy/clickhouse/traffic_dashboard_1d.sql \
+  deploy/clickhouse/traffic_talkers_1m.sql \
+  deploy/clickhouse/traffic_talkers_1h.sql \
+  deploy/clickhouse/net_reports.sql \
+  deploy/clickhouse/traffic_rollup_state.sql \
+  deploy/clickhouse/detach_traffic_mvs.sql
 do
   clickhouse-client --host HOST --user USER --password PASS --multiquery < "$f"
 done
@@ -126,19 +135,49 @@ ORDER BY time_received_ns DESC
 LIMIT 20;
 ```
 
-## Step 6. Verify Aggregates
+## Step 6. Enable Async Rollups
 
-Wait 2–3 minutes after classifier is enabled, then:
+**Only after** `xdpflowd` spool is caught up (`lag_segments ~ 0`).
+
+```bash
+sudo mkdir -p /etc/grapesnta /var/log/grapesnta
+sudo cp deploy/systemd/traffic-rollups.env.example /etc/grapesnta/traffic-rollups.env
+# edit TRAFFIC_ROLLUP_CH_HOST, TRAFFIC_ROLLUP_CH_PASSWORD, etc.
+
+sudo cp deploy/systemd/traffic-rollups.{service,timer} /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now traffic-rollups.timer
+```
+
+Dry-run first:
+
+```bash
+python3 scripts/traffic_rollup_async.py \
+  --host HOST --port PORT --user USER --password PASS \
+  --dry-run --verbose
+```
+
+See [`CLICKHOUSE_DB_SETUP_RUNBOOK.md`](CLICKHOUSE_DB_SETUP_RUNBOOK.md) §7 for
+backfill skip, throttle, and monitoring.
+
+## Step 7. Verify Aggregates
+
+Wait 5–10 minutes after rollups timer is active (safety lag 5 min + timer), then:
 
 ```sql
 SELECT direction, sum(bytes) AS bytes
 FROM default.traffic_direction_1m
-WHERE minute >= now() - INTERVAL 5 MINUTE
+WHERE minute >= now() - INTERVAL 10 MINUTE
 GROUP BY direction
 ORDER BY direction;
 
 SELECT max(minute) AS latest_minute
 FROM default.traffic_dashboard_1m;
+
+SELECT job, last_bucket, status
+FROM default.traffic_rollup_state FINAL
+WHERE job IN ('traffic_dashboard_1m', 'traffic_direction_1m')
+ORDER BY job;
 ```
 
 Cross-check:
@@ -146,13 +185,13 @@ Cross-check:
 ```sql
 SELECT direction, sum(bytes) AS bytes
 FROM default.flows_raw
-WHERE time_received_ns >= now() - INTERVAL 5 MINUTE
+WHERE time_received_ns >= now() - INTERVAL 10 MINUTE
 GROUP BY direction;
 ```
 
-Totals should match within normal MV lag (1–2 minutes).
+Totals should match within async rollup lag (~5–10 minutes).
 
-## Step 7. UI (Laravel + MoonShine)
+## Step 8. UI (Laravel + MoonShine)
 
 MoonShine app lives in a separate repository. Configure ClickHouse
 access in MoonShine `.env` and add resources/dashboards for:
@@ -177,7 +216,7 @@ clickhouse-client --host HOST --user USER --password PASS \
            GROUP BY direction"
 ```
 
-## Step 8. Async Reports
+## Step 9. Async Reports
 
 Reports are stored in `default.net_reports`. Queue, run, and read
 results from the MoonShine app or via direct INSERT/SELECT:
@@ -211,7 +250,10 @@ sudo systemctl restart xdpflowd
 
 ## Monitoring Checklist
 
-- `xdpflowd`: `traffic classifier refreshed` every ~60s
-- `traffic_dashboard_1m`: `max(minute)` within 2 minutes of now
+- `xdpflowd`: `traffic classifier refreshed` every ~60s; `lag_segments` ≈ 0
+- `traffic-rollups.service`: `run complete` every minute, no `failed`
+- `traffic_rollup_state FINAL`: `last_bucket` advances for 1m jobs
+- `traffic_dashboard_1m`: `max(minute)` within ~10 minutes of now
+- No attached `traffic_*` MV in `system.tables`
 - `bgp_prefix_origin_current`: refreshed by `bgp-origin-refresh` timer
 - API `/api/network/dashboard`: response < 1s for 1-hour window

@@ -85,6 +85,12 @@ Existing enrichment columns remain populated for compatibility:
 
 ## Aggregates
 
+Production ingest does **not** use sync materialized views on `flows_raw`.
+Aggregate tables are filled asynchronously on the collector by
+`scripts/traffic_rollup_async.py` (systemd `traffic-rollups.timer`), with
+progress tracked in `default.traffic_rollup_state`. Expected UI lag: 5–10 minutes.
+See [`CLICKHOUSE_DB_SETUP_RUNBOOK.md`](CLICKHOUSE_DB_SETUP_RUNBOOK.md) §7.
+
 | Table | Purpose |
 |-------|---------|
 | `traffic_direction_1m` | bytes/packets/flows by source + direction |

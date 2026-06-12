@@ -12,11 +12,13 @@ Typical usage on collector m61:
     --user develop --password '***' \\
     --log-file /var/log/grapesnta/traffic_rollups.log
 
-Before first run, create state table:
+Before first run:
 
   clickhouse-client ... --multiquery < deploy/clickhouse/traffic_rollup_state.sql
+  clickhouse-client ... --multiquery < deploy/clickhouse/detach_traffic_mvs.sql
 
 Keep all traffic_*_mv detached while this script is the rollup source.
+Deploy timer: deploy/systemd/traffic-rollups.timer (see CLICKHOUSE_DB_SETUP_RUNBOOK.md §7).
 """
 
 from __future__ import annotations

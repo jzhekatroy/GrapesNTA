@@ -8,8 +8,9 @@
 
 - [`CLICKHOUSE_SCHEMA.md`](CLICKHOUSE_SCHEMA.md) — общая топология Kafka/goflow2/flows_raw
 - [`geoip_country.md`](geoip_country.md) — RIR geo loader и dictionary
-- [`NEW_COLLECTOR_START_RUNBOOK.md`](NEW_COLLECTOR_START_RUNBOOK.md) — разделы 15–18 (classifier, MV, spool)
+- [`NEW_COLLECTOR_START_RUNBOOK.md`](NEW_COLLECTOR_START_RUNBOOK.md) — cutover, classifier, spool (§18)
 - [`UI_CLICKHOUSE_QUERIES.md`](UI_CLICKHOUSE_QUERIES.md) — запросы UI
+- [`NET_ANALYTICS_OPERATIONS.md`](NET_ANALYTICS_OPERATIONS.md) — L3/L2 classifier deploy
 
 ---
 
@@ -45,18 +46,26 @@
 ```text
 mirror NIC
   → xdpflowd (direct INSERT + ch-spool)
-  → ClickHouse default.flows_raw
-  → лёгкие MV (dashboard/protocol/direction) — синхронно
-  → тяжёлые MV (talker/pair/country/service/…) — НЕ на hot path
+  → ClickHouse default.flows_raw          ← hot path: только INSERT, без sync MV
 
 dnsflowd → default.dns_log
 bmpgrapes → default.bmp_*
 classifier читает net_l3_prefixes / net_l2_vlans / bgp_prefix_origin_current
+
+collector m61:
+  traffic-rollups.timer (каждую минуту)
+    → scripts/traffic_rollup_async.py
+    → INSERT в traffic_* (1m/1h/1d)
+    → watermark в default.traffic_rollup_state
+
 UI читает traffic_*_1m, net_flow_sources_enabled, system.dictionaries
 ```
 
 На `m61` запись идёт **напрямую** из `xdpflowd` (без Kafka/goflow2). Схема
-`flows_raw` и аналитические MV должны существовать до cutover.
+`flows_raw` и **таблицы** `traffic_*` должны существовать до cutover.
+**Sync materialized views на `flows_raw` не используются** — они блокируют ingest.
+
+Ожидаемый лаг агрегатов: **5–10 минут** (safety lag 5 min + timer 1 min).
 
 ---
 
@@ -156,9 +165,13 @@ done
 
 `flows_raw` сама по себе уже должна существовать (создана ранее на prod).
 `flows_raw_extensions.sql` добавляет колонки classifier (`direction`, roles,
-`vlan_id`, `source_id`, …) — без неё MV не соберутся.
+`vlan_id`, `source_id`, …) — без неё rollup jobs не соберутся.
 
-### 5.2. Минутные агрегаты (traffic_*)
+### 5.2. Таблицы traffic_* (без sync MV)
+
+Скрипты `traffic_*.sql` создают **только таблицы** `traffic_*`. Они **не**
+создают `CREATE MATERIALIZED VIEW` — SELECT-тела живут в
+`scripts/traffic_rollup_jobs.py`.
 
 ```bash
 for f in \
@@ -179,6 +192,9 @@ do
   echo "=== $f ==="
   ch --multiquery < "$REPO/deploy/clickhouse/$f"
 done
+
+ch --multiquery < "$REPO/deploy/clickhouse/traffic_rollup_state.sql"
+ch --multiquery < "$REPO/deploy/clickhouse/detach_traffic_mvs.sql"
 ```
 
 Полный порядок также описан в комментариях
@@ -198,7 +214,18 @@ WHERE database = 'default'
 ORDER BY name;
 ```
 
-UI без этих объектов падает с `Unknown table expression identifier`.
+Ожидаемо: таблицы `traffic_*` есть, **ни одной** attached `traffic_*_mv`:
+
+```sql
+SELECT name, engine
+FROM system.tables
+WHERE database = 'default'
+  AND engine = 'MaterializedView'
+  AND name LIKE 'traffic_%';
+-- пусто
+```
+
+UI без таблиц `traffic_*` падает с `Unknown table expression identifier`.
 
 ---
 
@@ -256,64 +283,158 @@ SELECT dictGet('default.geo_country_dict', 'country_code', toIPv6('8.8.8.8'));
 
 ---
 
-## 7. Materialized Views: что включать на ingest
+## 7. Async traffic rollups (production)
 
-### 7.1. Безопасный набор (оставлять ATTACHed)
+### 7.1. Почему не sync MV
 
-Синхронно на `INSERT flows_raw` держим только лёгкие MV:
+**Подтверждено на m61 (2026-06-11..12):** любые sync MV на `INSERT flows_raw`
+дают fan-out: `lag_segments` 28+, `writer_lag_rows` 20M+, ClickHouse 100% CPU.
+Даже «лёгкие» `traffic_dashboard_1m_mv` читают миллиарды строк на insert.
 
-- `traffic_dashboard_1m_mv`, `traffic_dashboard_1h_mv`, `traffic_dashboard_1d_mv`
-- `traffic_protocol_1m_mv`
-- `traffic_direction_1m_mv`
+**Решение:** hot path = только `flows_raw` INSERT. Все `traffic_*` агрегаты
+считаются **асинхронно** на коллекторе через `traffic_rollup_async.py`.
 
-После detach тяжёлых MV ingest стабилизировался: `lag_segments` падает,
-`raw_5m` свежий, `lag_s` в секундах.
+| Компонент | Путь |
+|-----------|------|
+| Runner | `scripts/traffic_rollup_async.py` |
+| Job SQL | `scripts/traffic_rollup_jobs.py` (15 jobs) |
+| State | `deploy/clickhouse/traffic_rollup_state.sql` |
+| Detach legacy MV | `deploy/clickhouse/detach_traffic_mvs.sql` |
+| systemd | `deploy/systemd/traffic-rollups.{service,timer,env.example}` |
 
-### 7.2. Тяжёлые MV — DETACH на production ingest
+Jobs (порядок выполнения): `traffic_dashboard_1m`, `traffic_protocol_1m`,
+`traffic_direction_1m`, `traffic_role_1m`, `traffic_entity_1m`,
+`traffic_vlan_1m`, `traffic_country_1m`, `traffic_service_1m`,
+`traffic_unknown_port_1m`, `traffic_talker_1m`, `traffic_pair_1m`,
+`traffic_dashboard_1h`, `traffic_talker_1h`, `traffic_pair_1h`,
+`traffic_dashboard_1d`.
 
-**Подтверждено экспериментом (2026-06-11):** включение `traffic_talker_*` /
-`traffic_pair_*` сразу даёт рост `lag_segments` (до 28+), `writer_lag_rows`
-(20M+), `xdpflowd health degraded`. ClickHouse не успевает синхронно считать
-fan-out на каждый insert.
+### 7.2. Установка на коллекторе (m61)
 
-Отцепить:
+**Предусловие:** `lag_segments ~ 0`, `flows_raw lag_s < 120`.
 
-```sql
-DETACH TABLE default.traffic_talker_1m_mv;
-DETACH TABLE default.traffic_pair_1m_mv;
-DETACH TABLE default.traffic_talker_1h_mv;
-DETACH TABLE default.traffic_pair_1h_mv;
-DETACH TABLE default.traffic_unknown_port_1m_mv;
-DETACH TABLE default.traffic_country_1m_mv;
-DETACH TABLE default.traffic_service_1m_mv;
-DETACH TABLE default.traffic_role_1m_mv;
-DETACH TABLE default.traffic_entity_1m_mv;
-DETACH TABLE default.traffic_vlan_1m_mv;
+```bash
+sudo mkdir -p /etc/grapesnta /var/log/grapesnta
+
+ch --multiquery < deploy/clickhouse/traffic_rollup_state.sql
+ch --multiquery < deploy/clickhouse/detach_traffic_mvs.sql
+
+sudo cp deploy/systemd/traffic-rollups.env.example /etc/grapesnta/traffic-rollups.env
+# TRAFFIC_ROLLUP_CH_PASSWORD=...
+# TRAFFIC_ROLLUP_MAX_BUCKETS_PER_JOB=1
+
+sudo cp deploy/systemd/traffic-rollups.{service,timer} /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now traffic-rollups.timer
 ```
 
-Данные в `flows_raw` при DETACH **не теряются**. Агрегаты можно досчитать
-позже async job / refreshable MV / отдельным ETL.
+Проверка:
 
-Диагностика узкого места:
+```bash
+systemctl list-timers traffic-rollups.timer --no-pager
+journalctl -u traffic-rollups.service -n 30 --no-pager
+```
+
+Ожидаемо за запуск: `run complete ok=10..14`, `elapsed_s` < 30, без `failed`.
+
+### 7.3. Режим «только с текущего момента» (без backfill)
+
+Если исторический backlog не нужен, сдвинуть watermark всех jobs на последнюю
+безопасную минуту:
+
+```sql
+INSERT INTO default.traffic_rollup_state
+(job, last_bucket, status, last_error, rows_written, duration_ms, updated_at)
+SELECT job, last_bucket, 'skipped_backfill', '', 0, 0, now()
+FROM
+(
+    SELECT arrayJoin([
+        'traffic_dashboard_1m','traffic_protocol_1m','traffic_direction_1m',
+        'traffic_role_1m','traffic_entity_1m','traffic_vlan_1m',
+        'traffic_country_1m','traffic_service_1m','traffic_unknown_port_1m',
+        'traffic_talker_1m','traffic_pair_1m'
+    ]) AS job,
+    toStartOfMinute(now('UTC') - INTERVAL 5 MINUTE) - INTERVAL 1 MINUTE AS last_bucket
+
+    UNION ALL
+
+    SELECT arrayJoin([
+        'traffic_dashboard_1h','traffic_talker_1h','traffic_pair_1h'
+    ]) AS job,
+    toStartOfHour(now('UTC') - INTERVAL 5 MINUTE) - INTERVAL 1 HOUR AS last_bucket
+
+    UNION ALL
+
+    SELECT 'traffic_dashboard_1d' AS job,
+    toStartOfDay(now('UTC') - INTERVAL 5 MINUTE) - INTERVAL 1 DAY AS last_bucket
+);
+```
+
+Следующие запуски обрабатывают только новые закрытые бакеты.
+
+### 7.4. Ручной запуск и throttle
+
+```bash
+python3 /opt/GrapesNTA/scripts/traffic_rollup_async.py \
+  --host 95.215.1.30 --port 6124 \
+  --user develop --password '***' \
+  --jobs traffic_dashboard_1m,traffic_protocol_1m,traffic_direction_1m \
+  --max-buckets-per-job 1 \
+  --log-file /var/log/grapesnta/traffic_rollups.log --verbose
+```
+
+Для backfill (осторожно — грузит CH):
+
+```bash
+python3 scripts/traffic_rollup_async.py ... \
+  --max-buckets-per-job 5 \
+  --sleep-between-buckets 5
+```
+
+### 7.5. Мониторинг rollups
+
+Watermark:
+
+```sql
+SELECT job, last_bucket, status, updated_at
+FROM default.traffic_rollup_state FINAL
+ORDER BY job
+FORMAT PrettyCompact;
+```
+
+Свежесть агрегатов:
+
+```sql
+SELECT
+    'traffic_dashboard_1m' AS tbl, max(minute) AS last_bucket FROM default.traffic_dashboard_1m
+UNION ALL
+SELECT 'traffic_protocol_1m', max(minute) FROM default.traffic_protocol_1m
+UNION ALL
+SELECT 'traffic_direction_1m', max(minute) FROM default.traffic_direction_1m;
+```
+
+Диагностика sync MV (должно быть пусто / нулевой total_ms):
 
 ```sql
 SELECT
     view_name,
     count() AS inserts,
-    sum(read_rows) AS read_rows,
-    sum(written_rows) AS written_rows,
-    round(avg(view_duration_ms)) AS avg_ms,
     round(sum(view_duration_ms)) AS total_ms
 FROM system.query_views_log
 WHERE event_time >= now() - INTERVAL 10 MINUTE
+  AND view_name LIKE 'traffic_%'
 GROUP BY view_name
 ORDER BY total_ms DESC;
 ```
 
-### 7.3. Постоянное решение (TODO для архитектуры)
+### 7.6. Известные проблемы
 
-Перевести `talker/pair/country/service/role/entity/vlan` на асинхронный
-пересчёт с лагом 1–5 минут. Hot path = только `flows_raw` + 3–5 лёгких MV.
+- **`clickhouse-client not found` на m61:** бинарник не в `/usr/bin/` — скрипт
+  ищет через `PATH`; или задать `TRAFFIC_ROLLUP_CLICKHOUSE_CLIENT`.
+- **`traffic_vlan_1m` застревал на старом бакете:** баг парсера state (пустой
+  `last_error` в последней строке TSV) — исправлен в `013454f`.
+- **Прерывание `systemctl stop` во время run:** watermark сохраняется после
+  каждого бакета; job догонит на следующем тике.
 
 ---
 
@@ -366,10 +487,19 @@ FROM default.flows_raw;
 ### 9.3. Агрегаты для UI
 
 ```sql
-SELECT max(bucket) AS last_bucket, sum(bytes) AS bytes_5m
+SELECT max(minute) AS last_minute, sum(bytes) AS bytes_5m
 FROM default.traffic_protocol_1m
-WHERE bucket >= now() - INTERVAL 5 MINUTE;
+WHERE minute >= now() - INTERVAL 10 MINUTE;
 ```
+
+```sql
+SELECT job, last_bucket, status
+FROM default.traffic_rollup_state FINAL
+WHERE job IN ('traffic_dashboard_1m', 'traffic_protocol_1m', 'traffic_direction_1m');
+```
+
+`last_minute` и `last_bucket` должны отставать от `now()` не более чем на
+~5–10 минут (safety lag + timer).
 
 ---
 
@@ -432,8 +562,10 @@ WHERE time_received_ns >= now64(9) - INTERVAL 5 MINUTE
 - [ ] Persistent volume для ClickHouse настроен (или осознанно принят риск)
 - [ ] `flows_raw` + extensions + `net_flow_sources` + classifier tables
 - [ ] `dns_log`, `bmp_*` (если используются)
-- [ ] `traffic_dashboard_*`, `traffic_protocol_1m`, `traffic_direction_1m` — ATTACHed
-- [ ] Тяжёлые MV — DETACHed на ingest
+- [ ] Таблицы `traffic_*` созданы (`deploy/clickhouse/traffic_*.sql`)
+- [ ] **Нет** attached `traffic_*` MV (`detach_traffic_mvs.sql`)
+- [ ] `traffic_rollup_state` создана, `traffic-rollups.timer` active
+- [ ] `traffic_rollup_state FINAL`: `last_bucket` двигается каждую минуту
 - [ ] `geo_country_dict` — `LOADED`, тест `dictGet` работает
 - [ ] Users: `collector_write`, `ui_read`, `ui_admin` + grants
 - [ ] `xdpflowd`: `lag_segments` ≈ 0, `map_full=0`, `raw_5m` > 0
@@ -446,11 +578,13 @@ WHERE time_received_ns >= now64(9) - INTERVAL 5 MINUTE
 ```bash
 watch -n 30 "
 ch -q \"SELECT now(), max(time_received_ns), dateDiff('second', max(time_received_ns), now64(9)) lag_s, countIf(time_received_ns >= now64(9) - INTERVAL 5 MINUTE) raw_5m FROM default.flows_raw\" 2>/dev/null
+ch -q \"SELECT job, last_bucket FROM default.traffic_rollup_state FINAL WHERE job IN ('traffic_dashboard_1m','traffic_protocol_1m') ORDER BY job\" 2>/dev/null
 journalctl -u xdpflowd --since '2 minutes ago' --no-pager 2>/dev/null | grep -E 'health degraded|lag_segments' | tail -3
+journalctl -u traffic-rollups.service --since '3 minutes ago' --no-pager 2>/dev/null | grep -E 'run complete|failed' | tail -2
 "
 ```
 
 ---
 
-*Последнее обновление: 2026-06-11 — восстановление после потери Docker volume,
-подтверждение bottleneck на sync MV talker/pair.*
+*Последнее обновление: 2026-06-12 — async rollups в production, sync MV убраны
+из deploy SQL, hot path = flows_raw + traffic-rollups.timer.*

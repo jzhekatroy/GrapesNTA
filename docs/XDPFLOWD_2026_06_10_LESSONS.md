@@ -69,10 +69,11 @@
 
 Вывод: первым делом разгружать ClickHouse, а не менять коллектор:
 
-- `traffic_talker_*` и `traffic_pair_*` нельзя держать тяжёлым синхронным
-  fan-out на горячем ingest-пути при текущей нагрузке;
-- их нужно переводить на асинхронный пересчёт из `flows_raw`;
-- online на insert оставить только самые лёгкие и необходимые агрегаты.
+- **любые** sync MV на `INSERT flows_raw` дают fan-out (включая `traffic_dashboard_1m_mv`);
+- на production ingest sync MV **не используются** — все `traffic_*` через async rollups;
+- реализация: `scripts/traffic_rollup_async.py`, `traffic-rollups.timer` на m61.
+
+См. [`CLICKHOUSE_DB_SETUP_RUNBOOK.md`](CLICKHOUSE_DB_SETUP_RUNBOOK.md) §7.
 
 ## Быстрый checklist перед экспериментами
 

@@ -15,6 +15,10 @@
 -- ~1 bucket is incomplete until that lag passes. UI queries MUST exclude the
 -- not-yet-complete tail (anchor the window at now() - 30s); see
 -- docs/UI_CLICKHOUSE_QUERIES.md "Time axis and live-edge guard".
+--
+-- Production ingest: NO sync Materialized Views. Tables are filled by async
+-- rollups traffic_dashboard_1m / traffic_dashboard_1h (scripts/traffic_rollup_async.py).
+-- SELECT bodies: scripts/traffic_rollup_jobs.py
 
 CREATE TABLE IF NOT EXISTS default.traffic_dashboard_1m
 (
@@ -48,38 +52,6 @@ ORDER BY (minute, source_id)
 SETTINGS index_granularity = 8192;
 
 DROP TABLE IF EXISTS default.traffic_dashboard_1m_mv;
-
-CREATE MATERIALIZED VIEW default.traffic_dashboard_1m_mv
-TO default.traffic_dashboard_1m
-AS
-SELECT
-    toStartOfMinute(time_flow_start_ns) AS minute,
-    source_id,
-
-    sum(bytes) AS total_bytes,
-    sumIf(bytes, direction = 'in') AS in_bytes,
-    sumIf(bytes, direction = 'out') AS out_bytes,
-    sumIf(bytes, direction = 'transit') AS transit_bytes,
-    sumIf(bytes, direction = 'internal') AS internal_bytes,
-    sumIf(bytes, direction = 'unknown') AS unknown_bytes,
-
-    sum(packets) AS total_packets,
-    sumIf(packets, direction = 'in') AS in_packets,
-    sumIf(packets, direction = 'out') AS out_packets,
-    sumIf(packets, direction = 'transit') AS transit_packets,
-    sumIf(packets, direction = 'internal') AS internal_packets,
-    sumIf(packets, direction = 'unknown') AS unknown_packets,
-
-    count() AS total_flows,
-    countIf(direction = 'in') AS in_flows,
-    countIf(direction = 'out') AS out_flows,
-    countIf(direction = 'transit') AS transit_flows,
-    countIf(direction = 'internal') AS internal_flows,
-    countIf(direction = 'unknown') AS unknown_flows
-FROM default.flows_raw
-GROUP BY
-    minute,
-    source_id;
 
 -- Hourly rollup for long dashboard windows.
 
@@ -115,35 +87,3 @@ ORDER BY (hour, source_id)
 SETTINGS index_granularity = 8192;
 
 DROP TABLE IF EXISTS default.traffic_dashboard_1h_mv;
-
-CREATE MATERIALIZED VIEW default.traffic_dashboard_1h_mv
-TO default.traffic_dashboard_1h
-AS
-SELECT
-    toStartOfHour(time_flow_start_ns) AS hour,
-    source_id,
-
-    sum(bytes) AS total_bytes,
-    sumIf(bytes, direction = 'in') AS in_bytes,
-    sumIf(bytes, direction = 'out') AS out_bytes,
-    sumIf(bytes, direction = 'transit') AS transit_bytes,
-    sumIf(bytes, direction = 'internal') AS internal_bytes,
-    sumIf(bytes, direction = 'unknown') AS unknown_bytes,
-
-    sum(packets) AS total_packets,
-    sumIf(packets, direction = 'in') AS in_packets,
-    sumIf(packets, direction = 'out') AS out_packets,
-    sumIf(packets, direction = 'transit') AS transit_packets,
-    sumIf(packets, direction = 'internal') AS internal_packets,
-    sumIf(packets, direction = 'unknown') AS unknown_packets,
-
-    count() AS total_flows,
-    countIf(direction = 'in') AS in_flows,
-    countIf(direction = 'out') AS out_flows,
-    countIf(direction = 'transit') AS transit_flows,
-    countIf(direction = 'internal') AS internal_flows,
-    countIf(direction = 'unknown') AS unknown_flows
-FROM default.flows_raw
-GROUP BY
-    hour,
-    source_id;
