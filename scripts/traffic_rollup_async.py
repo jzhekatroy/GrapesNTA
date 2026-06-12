@@ -24,6 +24,7 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -43,6 +44,15 @@ def env(name: str, default: Optional[str] = None) -> Optional[str]:
     if value is None or value == "":
         return default
     return value
+
+
+def resolve_clickhouse_client(path: str) -> str:
+    if os.path.isfile(path):
+        return path
+    found = shutil.which("clickhouse-client")
+    if found:
+        return found
+    return path
 
 
 def utc_now() -> datetime:
@@ -455,6 +465,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
+    args.clickhouse_client = resolve_clickhouse_client(args.clickhouse_client)
     log_file = None if args.no_log_file else args.log_file
     logger = setup_logging(log_file, args.verbose)
 
