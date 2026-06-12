@@ -414,6 +414,12 @@ def parse_args() -> argparse.Namespace:
         default=int(env("TRAFFIC_ROLLUP_MAX_BUCKETS_PER_JOB", "1") or "1"),
     )
     parser.add_argument(
+        "--sleep-between-buckets",
+        type=float,
+        default=float(env("TRAFFIC_ROLLUP_SLEEP_BETWEEN_BUCKETS", "0") or "0"),
+        help="seconds to sleep after each written bucket to reduce ClickHouse pressure",
+    )
+    parser.add_argument(
         "--safety-lag-minutes",
         type=int,
         default=int(env("TRAFFIC_ROLLUP_SAFETY_LAG_MINUTES", "5") or "5"),
@@ -523,9 +529,10 @@ def main() -> int:
     states = load_states(ch)
     until = safe_until(args)
     logger.info(
-        "run start jobs=%s max_buckets_per_job=%s safe_until=%s dry_run=%s",
+        "run start jobs=%s max_buckets_per_job=%s sleep_between_buckets=%s safe_until=%s dry_run=%s",
         ",".join(job.job_id for job in jobs),
         args.max_buckets_per_job,
+        args.sleep_between_buckets,
         fmt_dt(until),
         args.dry_run,
     )
@@ -585,6 +592,8 @@ def main() -> int:
                 )
                 ok_count += 1
                 processed += 1
+                if args.sleep_between_buckets > 0:
+                    time.sleep(args.sleep_between_buckets)
             except Exception as exc:
                 msg = str(exc)
                 logger.error(
