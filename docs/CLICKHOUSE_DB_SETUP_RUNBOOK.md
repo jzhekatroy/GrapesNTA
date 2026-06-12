@@ -447,6 +447,41 @@ ORDER BY job
 FORMAT PrettyCompact;
 ```
 
+Data quality health-check (read-only):
+
+```bash
+cd /opt/GrapesNTA
+set -a
+source /etc/grapesnta/traffic-rollups.env
+source /etc/grapesnta/traffic-talkers-rollups.env 2>/dev/null || true
+set +a
+
+python3 scripts/check_traffic_data_quality.py \
+  --source-id netflow \
+  --local-asn 34665 \
+  --max-rollup-lag-minutes 45
+```
+
+Exit codes:
+
+- `0` - all checks OK.
+- `1` - WARN only. Typical WARN is remote ASN coverage: `remote_asn_zero_gb`
+  when BGP/BMP is partial.
+- `2` - FAIL. Investigate before trusting the dashboard.
+
+Important FAIL examples:
+
+- fresh `netflow` rows have `direction = unknown`;
+- local/customer endpoints have ASN `0`;
+- rollup lag is above threshold;
+- table has empty IP fields;
+- raw `flows_raw` and `traffic_direction_1m` diverge.
+
+Expected WARN examples:
+
+- `xdp-default` is present in aggregate tables but `include_in_total = 0`;
+- remote endpoints have ASN `0` while BGP coverage is partial.
+
 Свежесть агрегатов:
 
 ```sql

@@ -245,6 +245,31 @@ LIMIT 10;
 
 Wait 5–10 minutes after rollups timer is active (safety lag 5 min + timer), then:
 
+Run the read-only data quality health-check:
+
+```bash
+cd /opt/GrapesNTA
+set -a
+source /etc/grapesnta/traffic-rollups.env
+source /etc/grapesnta/traffic-talkers-rollups.env 2>/dev/null || true
+set +a
+
+python3 scripts/check_traffic_data_quality.py \
+  --source-id netflow \
+  --local-asn 34665 \
+  --max-rollup-lag-minutes 45
+```
+
+Interpretation:
+
+- `OK` - the checked invariant is healthy.
+- `WARN` - usable but incomplete. Remote ASN `0` is expected when BGP/BMP
+  coverage is partial; excluded `xdp-default` rows can remain in aggregate
+  tables but must not be included in UI totals.
+- `FAIL` - fix before trusting the dashboard. Examples: unknown direction in
+  fresh `netflow`, local ASN `0`, excessive lag, empty IP fields, raw/aggregate
+  mismatch.
+
 ```sql
 SELECT direction, sum(bytes) AS bytes
 FROM default.traffic_direction_1m
