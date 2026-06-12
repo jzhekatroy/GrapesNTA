@@ -56,11 +56,12 @@ type xdpflowdConfig struct {
 	AggActive     *string `yaml:"agg_active"`
 	AggMaxEntries *int    `yaml:"agg_max_entries"`
 
-	Classifier             *bool   `yaml:"classifier"`
-	ClassifierRefresh      *string `yaml:"classifier_refresh"`
-	ClassifierBGPTable     *string `yaml:"classifier_bgp_table"`
+	Classifier               *bool   `yaml:"classifier"`
+	ClassifierRefresh        *string `yaml:"classifier_refresh"`
+	ClassifierBGPTable       *string `yaml:"classifier_bgp_table"`
+	ClassifierIPASNTable     *string `yaml:"classifier_ip_asn_table"`
 	ClassifierL3PrefixesView *string `yaml:"classifier_l3_prefixes_view"`
-	ClassifierL2VLANsView  *string `yaml:"classifier_l2_vlans_view"`
+	ClassifierL2VLANsView    *string `yaml:"classifier_l2_vlans_view"`
 }
 
 func loadXDPFlowdConfig(path string) (*xdpflowdConfig, error) {
@@ -161,6 +162,7 @@ func applyXDPFlowdConfig(fs *flag.FlagSet, cfg *xdpflowdConfig) error {
 		func() error { return setBool("classifier", cfg.Classifier) },
 		func() error { return setString("classifier-refresh", cfg.ClassifierRefresh) },
 		func() error { return setString("classifier-bgp-table", cfg.ClassifierBGPTable) },
+		func() error { return setString("classifier-ip-asn-table", cfg.ClassifierIPASNTable) },
 		func() error { return setString("classifier-l3-prefixes-view", cfg.ClassifierL3PrefixesView) },
 		func() error { return setString("classifier-l2-vlans-view", cfg.ClassifierL2VLANsView) },
 	} {

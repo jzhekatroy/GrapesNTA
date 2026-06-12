@@ -14,9 +14,10 @@ import (
 )
 
 type ClassifierTables struct {
-	BGPOrigins  string
-	L3Prefixes  string
-	L2VLANs     string
+	BGPOrigins    string
+	IPASNPrefixes string
+	L3Prefixes    string
+	L2VLANs       string
 }
 
 type ClassifierConfig struct {
@@ -37,6 +38,8 @@ type TrafficClassifier struct {
 type classifierState struct {
 	bgp4 *ipTrie
 	bgp6 *ipTrie
+	asn4 *ipTrie
+	asn6 *ipTrie
 	l3v4 *ipTrie
 	l3v6 *ipTrie
 
@@ -115,6 +118,7 @@ func NewTrafficClassifier(ctx context.Context, log *slog.Logger, cfg ClassifierC
 	log.Info("traffic classifier enabled",
 		"refresh", cfg.Refresh,
 		"bgp_table", cfg.Tables.BGPOrigins,
+		"ip_asn_table", cfg.Tables.IPASNPrefixes,
 		"l3_prefixes", cfg.Tables.L3Prefixes,
 		"l2_vlans", cfg.Tables.L2VLANs,
 	)
@@ -124,6 +128,9 @@ func NewTrafficClassifier(ctx context.Context, log *slog.Logger, cfg ClassifierC
 func (t ClassifierTables) withDefaults() ClassifierTables {
 	if strings.TrimSpace(t.BGPOrigins) == "" {
 		t.BGPOrigins = "default.bgp_prefix_origin_current"
+	}
+	if strings.TrimSpace(t.IPASNPrefixes) == "" {
+		t.IPASNPrefixes = "default.ip_asn_prefixes_current"
 	}
 	if strings.TrimSpace(t.L3Prefixes) == "" {
 		t.L3Prefixes = "default.net_l3_prefixes_enabled"
@@ -164,11 +171,17 @@ func (tc *TrafficClassifier) refreshOnce(ctx context.Context) error {
 	st := &classifierState{
 		bgp4:   newIPTrie(),
 		bgp6:   newIPTrie(),
+		asn4:   newIPTrie(),
+		asn6:   newIPTrie(),
 		l3v4:   newIPTrie(),
 		l3v6:   newIPTrie(),
 		vlans:  make(map[uint16]vlanClass),
 	}
 	bgpRows, err := tc.loadBGP(ctx, st)
+	if err != nil {
+		return err
+	}
+	ipASNRows, err := tc.loadIPASNPrefixes(ctx, st)
 	if err != nil {
 		return err
 	}
@@ -184,6 +197,7 @@ func (tc *TrafficClassifier) refreshOnce(ctx context.Context) error {
 	tc.state.Store(st)
 	tc.log.Info("traffic classifier refreshed",
 		"bgp_prefixes", bgpRows,
+		"ip_asn_prefixes", ipASNRows,
 		"l3_prefixes", l3Rows,
 		"vlans", vlanRows,
 		"internal_vlans", internalVLANs,
@@ -214,6 +228,33 @@ func (tc *TrafficClassifier) loadBGP(ctx context.Context, st *classifierState) (
 			st.bgp4.Insert(p.Masked(), prefixClass{ASN: asn})
 		} else {
 			st.bgp6.Insert(p.Masked(), prefixClass{ASN: asn})
+		}
+		n++
+	}
+	return n, rows.Err()
+}
+
+func (tc *TrafficClassifier) loadIPASNPrefixes(ctx context.Context, st *classifierState) (int, error) {
+	rows, err := tc.conn.Query(ctx, "SELECT prefix, origin_asn FROM "+tc.cfg.Tables.IPASNPrefixes)
+	if err != nil {
+		return 0, fmt.Errorf("load IP ASN prefixes: %w", err)
+	}
+	defer rows.Close()
+	n := 0
+	for rows.Next() {
+		var prefix string
+		var asn uint32
+		if err := rows.Scan(&prefix, &asn); err != nil {
+			return n, err
+		}
+		p, err := netip.ParsePrefix(strings.TrimSpace(prefix))
+		if err != nil || !p.IsValid() || asn == 0 {
+			continue
+		}
+		if p.Addr().Is4() {
+			st.asn4.Insert(p.Masked(), prefixClass{ASN: asn})
+		} else {
+			st.asn6.Insert(p.Masked(), prefixClass{ASN: asn})
 		}
 		n++
 	}
@@ -353,9 +394,15 @@ func (st *classifierState) lookupASN(addr netip.Addr) uint32 {
 		if p, ok := st.bgp4.Lookup(addr); ok {
 			return p.ASN
 		}
+		if p, ok := st.asn4.Lookup(addr); ok {
+			return p.ASN
+		}
 		return 0
 	}
 	if p, ok := st.bgp6.Lookup(addr); ok {
+		return p.ASN
+	}
+	if p, ok := st.asn6.Lookup(addr); ok {
 		return p.ASN
 	}
 	return 0

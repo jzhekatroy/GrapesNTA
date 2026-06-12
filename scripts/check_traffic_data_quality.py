@@ -352,6 +352,8 @@ ORDER BY gb DESC
             add(results, "WARN", name, f"as_country_unknown_for_known_asn_gb={as_cc_unknown_s} gb={gb_s} (asn_registry cc gap)")
         elif float(ip_cc_unknown_s) > args.max_ip_country_unknown_gb:
             add(results, "WARN", name, f"ip_country_unknown_gb={ip_cc_unknown_s} gb={gb_s} (geo dict / private IPs)")
+        elif float(remote_zero_s) > args.max_remote_asn_zero_gb:
+            add(results, "FAIL", name, f"remote_asn_zero_gb={remote_zero_s} gb={gb_s} (fallback IP->ASN coverage)")
         elif float(remote_zero_s) > 0:
             add(results, "WARN", name, f"remote_asn_zero_gb={remote_zero_s} gb={gb_s} (BGP coverage)")
         else:
@@ -418,6 +420,13 @@ ORDER BY gb DESC
             add(results, "WARN", name, f"as_country_unknown_for_known_asn_gb={as_cc_unknown_s} gb={gb_s} (asn_registry cc gap)")
         elif float(ip_cc_unknown_s) > args.max_ip_country_unknown_gb:
             add(results, "WARN", name, f"ip_country_unknown_gb={ip_cc_unknown_s} gb={gb_s} (geo dict / private IPs)")
+        elif float(src_remote_zero_s) > args.max_remote_asn_zero_gb or float(dst_remote_zero_s) > args.max_remote_asn_zero_gb:
+            add(
+                results,
+                "FAIL",
+                name,
+                f"remote_asn_zero_gb src={src_remote_zero_s} dst={dst_remote_zero_s} gb={gb_s} (fallback IP->ASN coverage)",
+            )
         elif float(src_remote_zero_s) > 0 or float(dst_remote_zero_s) > 0:
             add(
                 results,
@@ -544,6 +553,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--max-unknown-direction-gb", type=float, default=0.1, help="max GB in rollups with empty/unknown direction")
     p.add_argument("--max-unknown-scope-gb", type=float, default=0.1, help="max GB in talker/pair with empty/unknown scope")
     p.add_argument("--max-local-asn-zero-gb", type=float, default=0.1)
+    p.add_argument("--max-remote-asn-zero-gb", type=float, default=10.0, help="FAIL above this GB of remote traffic with ASN=0")
     p.add_argument("--max-ip-country-unknown-gb", type=float, default=5.0, help="WARN above this GB of '??' IP country (private/bogon expected small)")
     p.add_argument("--max-as-country-unknown-gb", type=float, default=5.0, help="WARN above this GB of '??' AS country where ASN is known")
     p.add_argument("--max-country-unknown-pct", type=float, default=5.0, help="WARN above this %% of bytes with '??' IP country in traffic_country_1m")

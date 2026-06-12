@@ -245,6 +245,28 @@ LIMIT 10;
 
 Wait 5–10 minutes after rollups timer is active (safety lag 5 min + timer), then:
 
+If remote ASN coverage is poor, apply and refresh the fallback IP→ASN table
+before restarting `xdpflowd`:
+
+```bash
+clickhouse-client --host HOST --user USER --password PASS --multiquery \
+  < deploy/clickhouse/ip_asn_prefixes.sql
+
+sudo mkdir -p /etc/iptoasn-loader
+sudo cp deploy/systemd/iptoasn-loader.env.example /etc/iptoasn-loader/iptoasn-loader.env
+sudo chmod 0600 /etc/iptoasn-loader/iptoasn-loader.env
+# edit /etc/iptoasn-loader/iptoasn-loader.env or inherit GEOLOADERD_CH_*.
+
+sudo cp deploy/systemd/iptoasn-loader.{service,timer} /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl start iptoasn-loader.service
+sudo systemctl enable --now iptoasn-loader.timer
+
+sudo grep -q '^XDP_CLASSIFIER_IP_ASN_TABLE=' /etc/xdpflowd/xdpflowd.env || \
+  echo 'XDP_CLASSIFIER_IP_ASN_TABLE=default.ip_asn_prefixes_current' | sudo tee -a /etc/xdpflowd/xdpflowd.env
+sudo systemctl restart xdpflowd
+```
+
 Run the read-only data quality health-check:
 
 ```bash
@@ -264,7 +286,9 @@ Interpretation:
 
 - `OK` - the checked invariant is healthy.
 - `WARN` - usable but incomplete:
-  - `remote_asn_zero_gb` - expected when BGP/BMP coverage is partial.
+  - Small `remote_asn_zero_gb` - expected when BGP/BMP/fallback IP→ASN
+    coverage is partial. Large amounts are `FAIL` by default; refresh
+    `default.ip_asn_prefixes_current` with `scripts/load_iptoasn_prefixes.py`.
   - `as_country_unknown_for_known_asn_gb` - ASN is known but `asn_registry_enriched.cc`
     has no country; fill the registry to clear it.
   - `ip_country_unknown_gb` / `country_rollup.unknown_country` - `??` IP country;
@@ -274,7 +298,8 @@ Interpretation:
   - `direction_rollup.unknown_direction` or `*_quality.* unknown_direction` -
     classifier did not set a direction.
   - `*_quality.* unknown_scope` - classifier did not set endpoint scope.
-  - `local_asn_zero_gb`, empty IP fields, excessive lag, raw/aggregate mismatch.
+  - `local_asn_zero_gb`, large `remote_asn_zero_gb`, empty IP fields,
+    excessive lag, raw/aggregate mismatch.
   - `sources.<table>.<source_id> excluded source present` - a source with
     `include_in_total=0` is polluting the rollups (e.g. a second collector or a
     stale `source_id` label). Stop its writer and purge those rows. This is a
@@ -282,7 +307,8 @@ Interpretation:
     if you intentionally keep an excluded source.
 
 Useful thresholds (defaults shown): `--max-unknown-direction-gb 0.1`,
-`--max-unknown-scope-gb 0.1`, `--max-ip-country-unknown-gb 5.0`,
+`--max-unknown-scope-gb 0.1`, `--max-remote-asn-zero-gb 10.0`,
+`--max-ip-country-unknown-gb 5.0`,
 `--max-as-country-unknown-gb 5.0`, `--max-country-unknown-pct 5.0`.
 
 ```sql

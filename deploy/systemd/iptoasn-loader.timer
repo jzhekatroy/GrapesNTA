@@ -1,0 +1,10 @@
+[Unit]
+Description=Run GrapesNTA IP-to-ASN fallback prefix loader daily
+
+[Timer]
+OnCalendar=*-*-* 04:20:00
+Persistent=true
+Unit=iptoasn-loader.service
+
+[Install]
+WantedBy=timers.target

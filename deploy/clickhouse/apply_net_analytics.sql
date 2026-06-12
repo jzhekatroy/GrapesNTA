@@ -5,6 +5,7 @@
 --   2. flows_raw_extensions.sql
 --   2b. net_flow_sources.sql + flows_raw_source_id.sql (when enabling source tracking)
 --   2c. geo_country.sql + geoloaderd (geo_country_dict, asn_registry_enriched)
+--   2d. ip_asn_prefixes.sql + iptoasn-loader (remote ASN fallback)
 --   3. net_entities.sql
 --   4. net_l3_prefixes.sql
 --   4b. migrate_net_l3_prefixes_origin_asn.sql (existing DBs without origin_asn)
@@ -37,6 +38,7 @@
 -- Example:
 --   for f in deploy/clickhouse/cleanup_old_classification.sql \
 --            deploy/clickhouse/flows_raw_extensions.sql \
+--            deploy/clickhouse/ip_asn_prefixes.sql \
 --            deploy/clickhouse/net_entities.sql \
 --            deploy/clickhouse/net_l3_prefixes.sql \
 --            deploy/clickhouse/net_l2_vlans.sql \

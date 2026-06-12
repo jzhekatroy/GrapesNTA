@@ -1,0 +1,17 @@
+[Unit]
+Description=GrapesNTA IP-to-ASN fallback prefix loader
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+Environment=REPO_ROOT=/opt/GrapesNTA
+EnvironmentFile=-/etc/geoloaderd/geoloaderd.env
+EnvironmentFile=-/etc/iptoasn-loader/iptoasn-loader.env
+ExecStart=/usr/bin/python3 ${REPO_ROOT}/scripts/load_iptoasn_prefixes.py
+StandardOutput=journal
+StandardError=journal
+TimeoutStartSec=3600
+
+[Install]
+WantedBy=multi-user.target

@@ -114,6 +114,57 @@ func TestClassifyRemoteUsesBGP(t *testing.T) {
 	}
 }
 
+func TestClassifyRemoteUsesIPASNFallback(t *testing.T) {
+	st := &classifierState{
+		bgp4: newIPTrie(),
+		asn4: newIPTrie(),
+		l3v4: newIPTrie(),
+	}
+	st.asn4.Insert(netip.MustParsePrefix("8.8.8.0/24"), prefixClass{ASN: 15169})
+
+	got := st.classify(netip.MustParseAddr("8.8.8.8"), 0)
+	if got.ASN != 15169 {
+		t.Fatalf("classify().ASN = %d, want 15169", got.ASN)
+	}
+	if got.Role != "remote" {
+		t.Fatalf("classify().Role = %q, want remote", got.Role)
+	}
+}
+
+func TestClassifyBGPOverridesIPASNFallback(t *testing.T) {
+	st := &classifierState{
+		bgp4: newIPTrie(),
+		asn4: newIPTrie(),
+		l3v4: newIPTrie(),
+	}
+	st.asn4.Insert(netip.MustParsePrefix("8.8.8.0/24"), prefixClass{ASN: 64512})
+	st.bgp4.Insert(netip.MustParsePrefix("8.8.8.0/24"), prefixClass{ASN: 15169})
+
+	got := st.classify(netip.MustParseAddr("8.8.8.8"), 0)
+	if got.ASN != 15169 {
+		t.Fatalf("classify().ASN = %d, want BGP ASN 15169")
+	}
+}
+
+func TestClassifyLocalOriginASNOverridesIPASNFallback(t *testing.T) {
+	st := &classifierState{
+		asn4: newIPTrie(),
+		l3v4: newIPTrie(),
+	}
+	st.asn4.Insert(netip.MustParsePrefix("188.143.128.0/17"), prefixClass{ASN: 64512})
+	st.l3v4.Insert(netip.MustParsePrefix("188.143.128.0/17"), prefixClass{
+		ASN:         34665,
+		Role:        "provider_public",
+		EntityID:    "isp:pin",
+		DisplayName: "gb",
+	})
+
+	got := st.classify(netip.MustParseAddr("188.143.128.236"), 0)
+	if got.ASN != 34665 {
+		t.Fatalf("classify().ASN = %d, want local origin ASN 34665")
+	}
+}
+
 func TestClassifyPairOutboundUsesLocalOriginASN(t *testing.T) {
 	st := &classifierState{
 		l3v4:           newIPTrie(),
