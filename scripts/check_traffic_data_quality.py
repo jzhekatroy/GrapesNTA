@@ -2,8 +2,17 @@
 """
 Traffic data quality checks for GrapesNTA ClickHouse rollups.
 
-The script is intentionally read-only. It checks freshness, source filtering,
-classifier output, local ASN enrichment, and key aggregate fields.
+The script is intentionally read-only. It checks:
+  - rollup freshness and rollup_state lag/errors;
+  - source filtering (every source must be registered; sources with
+    include_in_total=0 polluting the rollups FAIL unless allowed);
+  - classifier output in raw and rollups: no unknown direction, no unknown
+    scope, local ASN enrichment present;
+  - country resolution: flags '??' IP country (geo dict) and '??' AS country
+    where the ASN is known (registry cc gap);
+  - raw vs aggregate consistency by direction.
+
+Exit codes: 0 = OK, 1 = WARN only, 2 = FAIL.
 
 Typical usage on a collector:
 
@@ -240,7 +249,7 @@ FROM default.{table}
             add(results, "OK", f"freshness.{table}", f"lag_min={lag} rows={rows_count}")
 
 
-def check_sources(ch: ClickHouse, results: List[CheckResult]) -> None:
+def check_sources(ch: ClickHouse, args: argparse.Namespace, results: List[CheckResult]) -> None:
     rows = ch.query_tsv(
         """
 SELECT
@@ -276,13 +285,20 @@ FROM
 ORDER BY table_name, gb DESC
 """
     )
+    excluded_status = "WARN" if args.allow_excluded_sources else "FAIL"
     for table_name, source_id, include_in_total, rows_s, gb_s in rows:
         if include_in_total == "NULL":
             add(results, "FAIL", f"sources.{table_name}.{source_id}", f"missing from net_flow_sources_enabled rows={rows_s} gb={gb_s}")
         elif include_in_total == "1":
             add(results, "OK", f"sources.{table_name}.{source_id}", f"include_in_total=1 rows={rows_s} gb={gb_s}")
         else:
-            add(results, "WARN", f"sources.{table_name}.{source_id}", f"excluded source present rows={rows_s} gb={gb_s}")
+            add(
+                results,
+                excluded_status,
+                f"sources.{table_name}.{source_id}",
+                f"excluded source present (include_in_total=0) rows={rows_s} gb={gb_s}; "
+                f"stop its writer and purge, or pass --allow-excluded-sources",
+            )
 
 
 def check_talker_quality(ch: ClickHouse, args: argparse.Namespace, results: List[CheckResult]) -> None:
@@ -297,6 +313,8 @@ SELECT
     countIf(endpoint_ip = '') AS empty_ip,
     round(sumIf(bytes, endpoint_scope IN ('local', 'customer') AND endpoint_asn = 0) / 1e9, 1) AS local_asn_zero_gb,
     round(sumIf(bytes, endpoint_scope = 'remote' AND endpoint_asn = 0) / 1e9, 1) AS remote_asn_zero_gb,
+    round(sumIf(bytes, endpoint_ip_country = '??') / 1e9, 1) AS ip_country_unknown_gb,
+    round(sumIf(bytes, endpoint_as_country = '??' AND endpoint_asn != 0) / 1e9, 1) AS as_country_unknown_known_asn_gb,
     round(sum(bytes) / 1e9, 1) AS gb
 FROM default.traffic_talker_1m
 WHERE source_id={sql_string(args.source_id)}
@@ -309,12 +327,31 @@ ORDER BY gb DESC
     if not rows:
         add(results, "FAIL", "talker_quality", "no rows in quality window")
         return
-    for side, direction, scope, rows_s, empty_ip_s, local_zero_s, remote_zero_s, gb_s in rows:
+    for (
+        side,
+        direction,
+        scope,
+        rows_s,
+        empty_ip_s,
+        local_zero_s,
+        remote_zero_s,
+        ip_cc_unknown_s,
+        as_cc_unknown_s,
+        gb_s,
+    ) in rows:
         name = f"talker_quality.{direction}.{side}.{scope}"
-        if int(empty_ip_s) > 0:
+        if direction in ("", "unknown", "unclassified") and float(gb_s) > args.max_unknown_direction_gb:
+            add(results, "FAIL", name, f"unknown_direction gb={gb_s} rows={rows_s}")
+        elif scope in ("", "unknown") and float(gb_s) > args.max_unknown_scope_gb:
+            add(results, "FAIL", name, f"unknown_scope gb={gb_s} rows={rows_s}")
+        elif int(empty_ip_s) > 0:
             add(results, "FAIL", name, f"empty_ip_rows={empty_ip_s} rows={rows_s}")
         elif float(local_zero_s) > args.max_local_asn_zero_gb:
             add(results, "FAIL", name, f"local_asn_zero_gb={local_zero_s} gb={gb_s}")
+        elif float(as_cc_unknown_s) > args.max_as_country_unknown_gb:
+            add(results, "WARN", name, f"as_country_unknown_for_known_asn_gb={as_cc_unknown_s} gb={gb_s} (asn_registry cc gap)")
+        elif float(ip_cc_unknown_s) > args.max_ip_country_unknown_gb:
+            add(results, "WARN", name, f"ip_country_unknown_gb={ip_cc_unknown_s} gb={gb_s} (geo dict / private IPs)")
         elif float(remote_zero_s) > 0:
             add(results, "WARN", name, f"remote_asn_zero_gb={remote_zero_s} gb={gb_s} (BGP coverage)")
         else:
@@ -335,6 +372,8 @@ SELECT
     round(sumIf(bytes, dst_scope IN ('local', 'customer') AND dst_asn = 0) / 1e9, 1) AS dst_local_asn_zero_gb,
     round(sumIf(bytes, src_scope = 'remote' AND src_asn = 0) / 1e9, 1) AS src_remote_asn_zero_gb,
     round(sumIf(bytes, dst_scope = 'remote' AND dst_asn = 0) / 1e9, 1) AS dst_remote_asn_zero_gb,
+    round(sumIf(bytes, src_ip_country = '??' OR dst_ip_country = '??') / 1e9, 1) AS ip_country_unknown_gb,
+    round(sumIf(bytes, (src_as_country = '??' AND src_asn != 0) OR (dst_as_country = '??' AND dst_asn != 0)) / 1e9, 1) AS as_country_unknown_known_asn_gb,
     round(sum(bytes) / 1e9, 1) AS gb
 FROM default.traffic_pair_1m
 WHERE source_id={sql_string(args.source_id)}
@@ -347,9 +386,26 @@ ORDER BY gb DESC
     if not rows:
         add(results, "FAIL", "pair_quality", "no rows in quality window")
         return
-    for direction, src_scope, dst_scope, rows_s, empty_ip_s, src_local_zero_s, dst_local_zero_s, src_remote_zero_s, dst_remote_zero_s, gb_s in rows:
+    for (
+        direction,
+        src_scope,
+        dst_scope,
+        rows_s,
+        empty_ip_s,
+        src_local_zero_s,
+        dst_local_zero_s,
+        src_remote_zero_s,
+        dst_remote_zero_s,
+        ip_cc_unknown_s,
+        as_cc_unknown_s,
+        gb_s,
+    ) in rows:
         name = f"pair_quality.{direction}.{src_scope}_to_{dst_scope}"
-        if int(empty_ip_s) > 0:
+        if direction in ("", "unknown", "unclassified") and float(gb_s) > args.max_unknown_direction_gb:
+            add(results, "FAIL", name, f"unknown_direction gb={gb_s} rows={rows_s}")
+        elif (src_scope in ("", "unknown") or dst_scope in ("", "unknown")) and float(gb_s) > args.max_unknown_scope_gb:
+            add(results, "FAIL", name, f"unknown_scope gb={gb_s} rows={rows_s}")
+        elif int(empty_ip_s) > 0:
             add(results, "FAIL", name, f"empty_ip_rows={empty_ip_s} rows={rows_s}")
         elif float(src_local_zero_s) > args.max_local_asn_zero_gb or float(dst_local_zero_s) > args.max_local_asn_zero_gb:
             add(
@@ -358,6 +414,10 @@ ORDER BY gb DESC
                 name,
                 f"src_local_asn_zero_gb={src_local_zero_s} dst_local_asn_zero_gb={dst_local_zero_s} gb={gb_s}",
             )
+        elif float(as_cc_unknown_s) > args.max_as_country_unknown_gb:
+            add(results, "WARN", name, f"as_country_unknown_for_known_asn_gb={as_cc_unknown_s} gb={gb_s} (asn_registry cc gap)")
+        elif float(ip_cc_unknown_s) > args.max_ip_country_unknown_gb:
+            add(results, "WARN", name, f"ip_country_unknown_gb={ip_cc_unknown_s} gb={gb_s} (geo dict / private IPs)")
         elif float(src_remote_zero_s) > 0 or float(dst_remote_zero_s) > 0:
             add(
                 results,
@@ -367,6 +427,57 @@ ORDER BY gb DESC
             )
         else:
             add(results, "OK", name, f"gb={gb_s} rows={rows_s}")
+
+
+def check_direction_rollup(ch: ClickHouse, args: argparse.Namespace, results: List[CheckResult]) -> None:
+    row = one_row(
+        ch,
+        f"""
+WITH (SELECT max(minute) FROM default.traffic_direction_1m WHERE source_id = {sql_string(args.source_id)}) AS ts_to
+SELECT
+    round(sum(bytes) / 1e9, 1) AS total_gb,
+    round(sumIf(bytes, direction IN ('', 'unknown', 'unclassified')) / 1e9, 1) AS unknown_gb
+FROM default.traffic_direction_1m
+WHERE source_id = {sql_string(args.source_id)}
+  AND minute >= ts_to - INTERVAL {args.quality_window_minutes} MINUTE
+  AND minute <= ts_to
+""",
+    )
+    if not row or row[0] == "":
+        add(results, "FAIL", "direction_rollup", "no rows in quality window")
+        return
+    total_gb, unknown_gb = row
+    if float(unknown_gb) > args.max_unknown_direction_gb:
+        add(results, "FAIL", "direction_rollup.unknown_direction", f"unknown_gb={unknown_gb} total_gb={total_gb}")
+    else:
+        add(results, "OK", "direction_rollup.unknown_direction", f"unknown_gb={unknown_gb} total_gb={total_gb}")
+
+
+def check_country_rollup(ch: ClickHouse, args: argparse.Namespace, results: List[CheckResult]) -> None:
+    row = one_row(
+        ch,
+        f"""
+WITH (SELECT max(minute) FROM default.traffic_country_1m WHERE source_id = {sql_string(args.source_id)}) AS ts_to
+SELECT
+    round(sum(bytes) / 1e9, 1) AS total_gb,
+    round(sumIf(bytes, country_code = '??') / 1e9, 1) AS unknown_gb,
+    round(100 * sumIf(bytes, country_code = '??') / nullIf(sum(bytes), 0), 1) AS unknown_pct
+FROM default.traffic_country_1m
+WHERE source_id = {sql_string(args.source_id)}
+  AND country_basis = 'ip'
+  AND minute >= ts_to - INTERVAL {args.quality_window_minutes} MINUTE
+  AND minute <= ts_to
+""",
+    )
+    if not row or row[0] == "":
+        add(results, "WARN", "country_rollup", "no rows in quality window or no country_code column")
+        return
+    total_gb, unknown_gb, unknown_pct = row
+    pct = float(unknown_pct) if unknown_pct not in ("", "\\N") else 0.0
+    if pct > args.max_country_unknown_pct:
+        add(results, "WARN", "country_rollup.unknown_country", f"unknown_gb={unknown_gb} ({unknown_pct}%) total_gb={total_gb}")
+    else:
+        add(results, "OK", "country_rollup.unknown_country", f"unknown_gb={unknown_gb} ({unknown_pct}%) total_gb={total_gb}")
 
 
 def check_raw_vs_direction_agg(ch: ClickHouse, args: argparse.Namespace, results: List[CheckResult]) -> None:
@@ -429,9 +540,19 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--quality-window-minutes", type=int, default=10)
     p.add_argument("--compare-window-minutes", type=int, default=10)
     p.add_argument("--max-rollup-lag-minutes", type=int, default=25)
-    p.add_argument("--max-unknown-gb", type=float, default=0.1)
+    p.add_argument("--max-unknown-gb", type=float, default=0.1, help="max GB of raw flows with unknown direction")
+    p.add_argument("--max-unknown-direction-gb", type=float, default=0.1, help="max GB in rollups with empty/unknown direction")
+    p.add_argument("--max-unknown-scope-gb", type=float, default=0.1, help="max GB in talker/pair with empty/unknown scope")
     p.add_argument("--max-local-asn-zero-gb", type=float, default=0.1)
+    p.add_argument("--max-ip-country-unknown-gb", type=float, default=5.0, help="WARN above this GB of '??' IP country (private/bogon expected small)")
+    p.add_argument("--max-as-country-unknown-gb", type=float, default=5.0, help="WARN above this GB of '??' AS country where ASN is known")
+    p.add_argument("--max-country-unknown-pct", type=float, default=5.0, help="WARN above this %% of bytes with '??' IP country in traffic_country_1m")
     p.add_argument("--max-raw-agg-diff-gb", type=float, default=1.0)
+    p.add_argument(
+        "--allow-excluded-sources",
+        action="store_true",
+        help="downgrade 'excluded source present (include_in_total=0)' from FAIL to WARN",
+    )
     p.add_argument("--warn-only", action="store_true", help="exit 0 when WARN exists but no FAIL")
     return p.parse_args()
 
@@ -453,7 +574,9 @@ def main() -> int:
         ("rollup_state", lambda: check_rollup_state(ch, args, results)),
         ("raw_classifier", lambda: check_raw_classifier(ch, args, results)),
         ("table_freshness", lambda: check_table_freshness(ch, args, results)),
-        ("sources", lambda: check_sources(ch, results)),
+        ("sources", lambda: check_sources(ch, args, results)),
+        ("direction_rollup", lambda: check_direction_rollup(ch, args, results)),
+        ("country_rollup", lambda: check_country_rollup(ch, args, results)),
         ("talker_quality", lambda: check_talker_quality(ch, args, results)),
         ("pair_quality", lambda: check_pair_quality(ch, args, results)),
         ("raw_vs_direction_agg", lambda: check_raw_vs_direction_agg(ch, args, results)),

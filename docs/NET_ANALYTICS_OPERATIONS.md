@@ -263,12 +263,27 @@ python3 scripts/check_traffic_data_quality.py \
 Interpretation:
 
 - `OK` - the checked invariant is healthy.
-- `WARN` - usable but incomplete. Remote ASN `0` is expected when BGP/BMP
-  coverage is partial; excluded `xdp-default` rows can remain in aggregate
-  tables but must not be included in UI totals.
-- `FAIL` - fix before trusting the dashboard. Examples: unknown direction in
-  fresh `netflow`, local ASN `0`, excessive lag, empty IP fields, raw/aggregate
-  mismatch.
+- `WARN` - usable but incomplete:
+  - `remote_asn_zero_gb` - expected when BGP/BMP coverage is partial.
+  - `as_country_unknown_for_known_asn_gb` - ASN is known but `asn_registry_enriched.cc`
+    has no country; fill the registry to clear it.
+  - `ip_country_unknown_gb` / `country_rollup.unknown_country` - `??` IP country;
+    small amounts are normal (private/bogon ranges), large amounts mean the geo
+    dict is stale or missing.
+- `FAIL` - fix before trusting the dashboard. Examples:
+  - `direction_rollup.unknown_direction` or `*_quality.* unknown_direction` -
+    classifier did not set a direction.
+  - `*_quality.* unknown_scope` - classifier did not set endpoint scope.
+  - `local_asn_zero_gb`, empty IP fields, excessive lag, raw/aggregate mismatch.
+  - `sources.<table>.<source_id> excluded source present` - a source with
+    `include_in_total=0` is polluting the rollups (e.g. a second collector or a
+    stale `source_id` label). Stop its writer and purge those rows. This is a
+    `FAIL` by default; pass `--allow-excluded-sources` to downgrade to `WARN`
+    if you intentionally keep an excluded source.
+
+Useful thresholds (defaults shown): `--max-unknown-direction-gb 0.1`,
+`--max-unknown-scope-gb 0.1`, `--max-ip-country-unknown-gb 5.0`,
+`--max-as-country-unknown-gb 5.0`, `--max-country-unknown-pct 5.0`.
 
 ```sql
 SELECT direction, sum(bytes) AS bytes
