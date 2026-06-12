@@ -107,10 +107,12 @@ if [[ "${XDP_CLASSIFIER:-0}" == "1" ]]; then
     -classifier
     -classifier-refresh "${XDP_CLASSIFIER_REFRESH:-60s}"
     -classifier-bgp-table "${XDP_CLASSIFIER_BGP_TABLE:-default.bgp_prefix_origin_current}"
-    -classifier-ip-asn-table "${XDP_CLASSIFIER_IP_ASN_TABLE:-default.ip_asn_prefixes_current}"
     -classifier-l3-prefixes-view "${XDP_CLASSIFIER_L3_PREFIXES_VIEW:-default.net_l3_prefixes_enabled}"
     -classifier-l2-vlans-view "${XDP_CLASSIFIER_L2_VLANS_VIEW:-default.net_l2_vlans_enabled}"
   )
+  if [[ -n "${XDP_CLASSIFIER_IP_ASN_TABLE:-}" ]]; then
+    CH_ARGS+=( -classifier-ip-asn-table "$XDP_CLASSIFIER_IP_ASN_TABLE" )
+  fi
 fi
 
 case "${XDP_CH_SPOOL_MODE:-off}" in

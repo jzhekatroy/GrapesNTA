@@ -129,9 +129,6 @@ func (t ClassifierTables) withDefaults() ClassifierTables {
 	if strings.TrimSpace(t.BGPOrigins) == "" {
 		t.BGPOrigins = "default.bgp_prefix_origin_current"
 	}
-	if strings.TrimSpace(t.IPASNPrefixes) == "" {
-		t.IPASNPrefixes = "default.ip_asn_prefixes_current"
-	}
 	if strings.TrimSpace(t.L3Prefixes) == "" {
 		t.L3Prefixes = "default.net_l3_prefixes_enabled"
 	}
@@ -235,6 +232,9 @@ func (tc *TrafficClassifier) loadBGP(ctx context.Context, st *classifierState) (
 }
 
 func (tc *TrafficClassifier) loadIPASNPrefixes(ctx context.Context, st *classifierState) (int, error) {
+	if strings.TrimSpace(tc.cfg.Tables.IPASNPrefixes) == "" {
+		return 0, nil
+	}
 	rows, err := tc.conn.Query(ctx, "SELECT prefix, origin_asn FROM "+tc.cfg.Tables.IPASNPrefixes)
 	if err != nil {
 		return 0, fmt.Errorf("load IP ASN prefixes: %w", err)

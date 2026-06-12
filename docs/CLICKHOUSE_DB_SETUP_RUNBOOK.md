@@ -527,6 +527,8 @@ ORDER BY total_ms DESC;
 - `net_l3_prefixes` — локальные/клиентские префиксы
 - `net_l2_vlans` — VLAN → entity
 - `bgp_prefix_origin_current` — BGP origin (если есть bmpgrapes)
+- `ip_asn_prefixes_current` — optional public IP→ASN fallback when BMP/BGP is
+  not full-view
 - `net_flow_sources` — registry source_id (`netflow`, `dns-netflow`, …)
 
 Проверка classifier на коллекторе:
@@ -537,6 +539,8 @@ journalctl -u xdpflowd -n 50 --no-pager | grep -i classifier
 ```
 
 Ожидаем: `traffic classifier enabled`, `has_local_config=true`.
+Если включён fallback, в логе также должен быть ненулевой
+`ip_asn_prefixes=...`.
 
 ---
 
@@ -634,6 +638,33 @@ WHERE time_received_ns >= now64(9) - INTERVAL 5 MINUTE
 
 **Фикс:** `XDP_FINAL_FLUSH=0` и `XDP_CH_SPOOL_SHUTDOWN_DRAIN=0s` для operational
 рестартов (см. [`NEW_COLLECTOR_START_RUNBOOK.md`](NEW_COLLECTOR_START_RUNBOOK.md) §17).
+
+### 10.5. UI показывает `unknown` / `??` из-за старого source_id
+
+**Симптом:** в `traffic_pair_1m` / `traffic_talker_1m` видны строки с
+`source_id = 'xdp-default'`, `direction = 'unknown'`, scope `unknown`, ASN `0`.
+
+**Причина:** `xdpflowd` раньше стартовал с дефолтным `source_id=xdp-default`, а
+после изменения `/etc/xdpflowd/xdpflowd.env` на `XDPFLOWD_SOURCE_ID=netflow`
+старый процесс мог продолжать писать старую метку до рестарта. Это не второй
+коллектор, а тот же collector с другим label.
+
+**Фикс:**
+
+```bash
+grep '^XDPFLOWD_SOURCE_ID=' /etc/xdpflowd/xdpflowd.env
+sudo systemctl restart xdpflowd
+
+clickhouse-client ... --query "
+SELECT source_id, max(time_received_ns), count()
+FROM default.flows_raw
+WHERE time_received_ns >= now64(9) - INTERVAL 5 MINUTE
+GROUP BY source_id"
+```
+
+Ожидаем только production source (`netflow`). После этого старые `xdp-default`
+строки можно удалить из `traffic_*` таблиц фоновой мутацией, а UI должен всегда
+фильтровать `net_flow_sources_enabled.include_in_total = 1`.
 
 ---
 

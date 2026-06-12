@@ -13,6 +13,7 @@ See also:
 The classifier refreshes these ClickHouse views into memory:
 
 - `default.bgp_prefix_origin_current` — BGP prefix -> origin ASN
+- optional `default.ip_asn_prefixes_current` — public IP prefix -> ASN fallback
 - `default.net_l3_prefixes_enabled` — L3 prefix roles and entities
 - `default.net_l2_vlans_enabled` — VLAN attachment context
 
@@ -20,13 +21,23 @@ The classifier refreshes these ClickHouse views into memory:
 L3 role/entity: who owns the IP address
 L3 origin_asn:  operator ASN for local/customer prefixes (authoritative when set)
 BGP origin ASN: external IP -> ASN from bmp_route_events rebuild
+IP->ASN fallback: remote ASN when BMP/BGP is not full-view
 L2 attachment:  where the packet was seen (VLAN)
 Direction:      derived from L3 roles
 ```
 
-For matched L3 prefixes, `origin_asn` from `net_l3_prefixes_enabled` wins over
-BGP when non-zero. This covers provider-owned space that BMP does not export as
-received routes. Remote IPs still rely on `bgp_prefix_origin_current`.
+ASN lookup order:
+
+1. `net_l3_prefixes_enabled.origin_asn` for matched local/customer prefixes
+   when non-zero.
+2. `bgp_prefix_origin_current` from BMP/BGP.
+3. Optional `ip_asn_prefixes_current` fallback, loaded from public IP→ASN
+   snapshots.
+4. `0` when no source has a match.
+
+This keeps operator-owned space authoritative while still filling remote ASN
+when BMP does not provide a full view. If the fallback is not configured,
+remote IPs rely only on `bgp_prefix_origin_current`.
 
 ## L3 Roles
 
@@ -56,6 +67,7 @@ Apply after cleanup of legacy tables:
 ```bash
 clickhouse-client ... --multiquery < deploy/clickhouse/cleanup_old_classification.sql
 clickhouse-client ... --multiquery < deploy/clickhouse/flows_raw_extensions.sql
+clickhouse-client ... --multiquery < deploy/clickhouse/ip_asn_prefixes.sql   # optional remote ASN fallback
 clickhouse-client ... --multiquery < deploy/clickhouse/net_entities.sql
 clickhouse-client ... --multiquery < deploy/clickhouse/net_l3_prefixes.sql
 clickhouse-client ... --multiquery < deploy/clickhouse/net_l2_vlans.sql
@@ -79,6 +91,8 @@ In `/etc/xdpflowd/xdpflowd.env`:
 XDP_CLASSIFIER=1
 XDP_CLASSIFIER_REFRESH=60s
 XDP_CLASSIFIER_BGP_TABLE=default.bgp_prefix_origin_current
+# Optional; set only after loading deploy/clickhouse/ip_asn_prefixes.sql.
+XDP_CLASSIFIER_IP_ASN_TABLE=default.ip_asn_prefixes_current
 XDP_CLASSIFIER_L3_PREFIXES_VIEW=default.net_l3_prefixes_enabled
 XDP_CLASSIFIER_L2_VLANS_VIEW=default.net_l2_vlans_enabled
 ```
@@ -92,6 +106,7 @@ CLI equivalent:
   -ch-table default.flows_raw \
   -classifier \
   -classifier-refresh 60s \
+  -classifier-ip-asn-table default.ip_asn_prefixes_current \
   -classifier-l3-prefixes-view default.net_l3_prefixes_enabled \
   -classifier-l2-vlans-view default.net_l2_vlans_enabled
 ```
@@ -116,7 +131,7 @@ Compatibility columns still populated:
 Classifier refresh log:
 
 ```text
-traffic classifier refreshed bgp_prefixes=N l3_prefixes=M vlans=K has_local_config=true
+traffic classifier refreshed bgp_prefixes=N ip_asn_prefixes=P l3_prefixes=M vlans=K has_local_config=true
 ```
 
 Recent enriched rows:

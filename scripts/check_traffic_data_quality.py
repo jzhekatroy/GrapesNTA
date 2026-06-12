@@ -348,12 +348,12 @@ ORDER BY gb DESC
             add(results, "FAIL", name, f"empty_ip_rows={empty_ip_s} rows={rows_s}")
         elif float(local_zero_s) > args.max_local_asn_zero_gb:
             add(results, "FAIL", name, f"local_asn_zero_gb={local_zero_s} gb={gb_s}")
+        elif float(remote_zero_s) > args.max_remote_asn_zero_gb:
+            add(results, "FAIL", name, f"remote_asn_zero_gb={remote_zero_s} gb={gb_s} (fallback IP->ASN coverage)")
         elif float(as_cc_unknown_s) > args.max_as_country_unknown_gb:
             add(results, "WARN", name, f"as_country_unknown_for_known_asn_gb={as_cc_unknown_s} gb={gb_s} (asn_registry cc gap)")
         elif float(ip_cc_unknown_s) > args.max_ip_country_unknown_gb:
             add(results, "WARN", name, f"ip_country_unknown_gb={ip_cc_unknown_s} gb={gb_s} (geo dict / private IPs)")
-        elif float(remote_zero_s) > args.max_remote_asn_zero_gb:
-            add(results, "FAIL", name, f"remote_asn_zero_gb={remote_zero_s} gb={gb_s} (fallback IP->ASN coverage)")
         elif float(remote_zero_s) > 0:
             add(results, "WARN", name, f"remote_asn_zero_gb={remote_zero_s} gb={gb_s} (BGP coverage)")
         else:
@@ -416,10 +416,6 @@ ORDER BY gb DESC
                 name,
                 f"src_local_asn_zero_gb={src_local_zero_s} dst_local_asn_zero_gb={dst_local_zero_s} gb={gb_s}",
             )
-        elif float(as_cc_unknown_s) > args.max_as_country_unknown_gb:
-            add(results, "WARN", name, f"as_country_unknown_for_known_asn_gb={as_cc_unknown_s} gb={gb_s} (asn_registry cc gap)")
-        elif float(ip_cc_unknown_s) > args.max_ip_country_unknown_gb:
-            add(results, "WARN", name, f"ip_country_unknown_gb={ip_cc_unknown_s} gb={gb_s} (geo dict / private IPs)")
         elif float(src_remote_zero_s) > args.max_remote_asn_zero_gb or float(dst_remote_zero_s) > args.max_remote_asn_zero_gb:
             add(
                 results,
@@ -427,6 +423,10 @@ ORDER BY gb DESC
                 name,
                 f"remote_asn_zero_gb src={src_remote_zero_s} dst={dst_remote_zero_s} gb={gb_s} (fallback IP->ASN coverage)",
             )
+        elif float(as_cc_unknown_s) > args.max_as_country_unknown_gb:
+            add(results, "WARN", name, f"as_country_unknown_for_known_asn_gb={as_cc_unknown_s} gb={gb_s} (asn_registry cc gap)")
+        elif float(ip_cc_unknown_s) > args.max_ip_country_unknown_gb:
+            add(results, "WARN", name, f"ip_country_unknown_gb={ip_cc_unknown_s} gb={gb_s} (geo dict / private IPs)")
         elif float(src_remote_zero_s) > 0 or float(dst_remote_zero_s) > 0:
             add(
                 results,

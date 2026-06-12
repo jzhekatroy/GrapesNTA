@@ -115,7 +115,7 @@ sudo journalctl -u xdpflowd -n 50 --no-pager | rg 'traffic classifier'
 Expected log:
 
 ```text
-traffic classifier refreshed bgp_prefixes=... l3_prefixes=... vlans=...
+traffic classifier refreshed bgp_prefixes=... ip_asn_prefixes=... l3_prefixes=... vlans=...
 ```
 
 Verify new fields:
@@ -245,8 +245,8 @@ LIMIT 10;
 
 Wait 5–10 minutes after rollups timer is active (safety lag 5 min + timer), then:
 
-If remote ASN coverage is poor, apply and refresh the fallback IP→ASN table
-before restarting `xdpflowd`:
+If remote ASN coverage is poor, apply and refresh the optional fallback IP→ASN
+table before restarting `xdpflowd`:
 
 ```bash
 clickhouse-client --host HOST --user USER --password PASS --multiquery \
@@ -262,10 +262,19 @@ sudo systemctl daemon-reload
 sudo systemctl start iptoasn-loader.service
 sudo systemctl enable --now iptoasn-loader.timer
 
+clickhouse-client --host HOST --user USER --password PASS --query "
+SELECT count() AS prefixes, uniq(origin_asn) AS asns, max(snapshot_ts) AS snapshot
+FROM default.ip_asn_prefixes_current
+FORMAT PrettyCompact"
+
 sudo grep -q '^XDP_CLASSIFIER_IP_ASN_TABLE=' /etc/xdpflowd/xdpflowd.env || \
   echo 'XDP_CLASSIFIER_IP_ASN_TABLE=default.ip_asn_prefixes_current' | sudo tee -a /etc/xdpflowd/xdpflowd.env
 sudo systemctl restart xdpflowd
 ```
+
+Do not set `XDP_CLASSIFIER_IP_ASN_TABLE` before the table is created and loaded.
+Without this env var the classifier keeps the older behavior: L3 origin ASN,
+then BMP/BGP, then ASN `0`.
 
 Run the read-only data quality health-check:
 
@@ -405,6 +414,7 @@ sudo systemctl restart xdpflowd
 - `traffic_talker_1m`: `max(minute)` within ~10 minutes of now
 - No attached `traffic_*` MV in `system.tables`
 - `bgp_prefix_origin_current`: refreshed by `bgp-origin-refresh` timer
+- `ip_asn_prefixes_current`: loaded when remote ASN coverage needs fallback
 - `net_l3_prefixes.origin_asn`: set for provider/customer prefixes used in top talkers
 - Outbound `flows_raw.src_asn` non-zero on new rows after L3 ASN seed
 - API `/api/network/dashboard`: response < 1s for 1-hour window

@@ -452,7 +452,7 @@ func main() {
 	classifierEnabled := flag.Bool("classifier", false, "enable collector-side traffic classification (L3 roles + L2 VLAN attachment)")
 	classifierRefresh := flag.Duration("classifier-refresh", time.Minute, "refresh interval for classifier dictionaries")
 	classifierBGPTable := flag.String("classifier-bgp-table", "default.bgp_prefix_origin_current", "ClickHouse source table/view for prefix -> origin ASN")
-	classifierIPASNTable := flag.String("classifier-ip-asn-table", "default.ip_asn_prefixes_current", "ClickHouse source table/view for fallback IP prefix -> ASN")
+	classifierIPASNTable := flag.String("classifier-ip-asn-table", "", "optional ClickHouse source table/view for fallback IP prefix -> ASN")
 	classifierL3PrefixesView := flag.String("classifier-l3-prefixes-view", "default.net_l3_prefixes_enabled", "ClickHouse view for enabled L3 prefixes")
 	classifierL2VLANsView := flag.String("classifier-l2-vlans-view", "default.net_l2_vlans_enabled", "ClickHouse view for enabled L2 VLAN map")
 	sourceID := flag.String("source-id", "xdp-default", "logical flow observation point id written to flows_raw.source_id")
