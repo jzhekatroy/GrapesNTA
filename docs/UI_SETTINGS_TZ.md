@@ -182,7 +182,7 @@ ORDER BY location_name, collector_name, source_name;
 | Раздел UI | Таблица / view | Ключевые поля |
 |-----------|----------------|---------------|
 | Объекты сети | `net_entities` / `net_entities_enabled` | `entity_id`, `display_name`, `enabled` |
-| IP-префиксы | `net_l3_prefixes` / `net_l3_prefixes_enabled` | `prefix`, `family`, `entity_id`, `role`, `enabled` |
+| IP-префиксы | `net_l3_prefixes` / `net_l3_prefixes_enabled` | `prefix`, `family`, `entity_id`, `role`, `origin_asn`, `enabled` |
 | VLAN/подключения | `net_l2_vlans` / `net_l2_vlans_enabled` | `vlan_id`, `entity_id`, `attachment_type`, `boundary`, `enabled` |
 | Сервисы/порты | `port_services` | отдельное ТЗ: `docs/UI_PORT_SERVICES_TZ.md` |
 | Локальные сети | `local_networks` / `local_networks_enabled` | просмотр + `enabled` |

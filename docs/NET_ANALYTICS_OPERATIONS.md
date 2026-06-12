@@ -83,9 +83,9 @@ VALUES
 ('provider:core', 'Provider Core', 'test seed', 1, 'manual', now());
 
 INSERT INTO default.net_l3_prefixes
-(prefix, family, entity_id, role, display_name, comment, enabled, source, updated_at)
+(prefix, family, entity_id, role, origin_asn, display_name, comment, enabled, source, updated_at)
 VALUES
-('10.0.0.0/8', 4, 'provider:core', 'internal', 'Provider RFC1918', 'test seed', 1, 'manual', now());
+('10.0.0.0/8', 4, 'provider:core', 'internal', 0, 'Provider RFC1918', 'test seed', 1, 'manual', now());
 
 INSERT INTO default.net_l2_vlans
 (vlan_id, entity_id, attachment_type, boundary, display_name, comment, enabled, source, updated_at)
@@ -135,6 +135,45 @@ ORDER BY time_received_ns DESC
 LIMIT 20;
 ```
 
+## Step 5b. L3 origin ASN (local prefixes)
+
+Existing deployments need the `origin_asn` column on `net_l3_prefixes`:
+
+```bash
+clickhouse-client --host HOST --user USER --password PASS \
+  --multiquery < deploy/clickhouse/migrate_net_l3_prefixes_origin_asn.sql
+```
+
+Set operator ASN on provider/customer prefixes that BMP does not export:
+
+```sql
+INSERT INTO default.net_l3_prefixes
+(prefix, family, entity_id, role, origin_asn, display_name, comment, enabled, source, updated_at)
+VALUES
+('188.143.128.0/17', 4, 'isp:pin', 'provider_public', 34665, 'gb', '', 1, 'manual', now());
+```
+
+Replace `34665` with your real ASN. Rebuild `xdpflowd` and restart, or wait for
+classifier refresh (`XDP_CLASSIFIER_REFRESH`).
+
+Verify local outbound ASN on new rows only (old `flows_raw` rows stay `0`):
+
+```sql
+SELECT
+    src_asn,
+    src_role,
+    count() AS flows,
+    round(sum(bytes)/1e9, 1) AS gb
+FROM default.flows_raw
+WHERE time_received_ns >= now64(9) - INTERVAL 5 MINUTE
+  AND source_id = 'netflow'
+  AND direction = 'out'
+GROUP BY src_asn, src_role
+ORDER BY gb DESC;
+```
+
+Expected: `src_role = provider_public`, `src_asn = <your ASN>`.
+
 ## Step 6. Enable Async Rollups
 
 **Only after** `xdpflowd` spool is caught up (`lag_segments ~ 0`).
@@ -159,6 +198,48 @@ python3 scripts/traffic_rollup_async.py \
 
 See [`CLICKHOUSE_DB_SETUP_RUNBOOK.md`](CLICKHOUSE_DB_SETUP_RUNBOOK.md) §7 for
 backfill skip, throttle, and monitoring.
+
+Lightweight dashboard timer should **not** include heavy talker/pair jobs. Use the
+separate top talkers timer:
+
+```bash
+sudo cp deploy/systemd/traffic-talkers-rollups.{service,timer,env.example} /etc/systemd/system/
+sudo cp deploy/systemd/traffic-talkers-rollups.env.example /etc/grapesnta/traffic-talkers-rollups.env
+sudo systemctl daemon-reload
+sudo systemctl enable --now traffic-talkers-rollups.timer
+```
+
+Catch-up once after deploy:
+
+```bash
+python3 scripts/traffic_rollup_async.py \
+  --jobs traffic_talker_1m,traffic_talker_1h,traffic_pair_1m,traffic_pair_1h \
+  --max-buckets-per-job 30
+```
+
+Verify top talkers lag and outbound source ASN:
+
+```sql
+SELECT
+    max(minute) AS last_minute,
+    dateDiff('minute', max(minute), now()) AS lag_min
+FROM default.traffic_talker_1m;
+
+SELECT
+    endpoint_ip,
+    endpoint_asn,
+    endpoint_scope,
+    round(sum(bytes)/1e9, 2) AS gb
+FROM default.traffic_talker_1m AS t
+INNER JOIN default.net_flow_sources_enabled AS s ON t.source_id = s.source_id
+WHERE s.include_in_total = 1
+  AND t.minute >= now() - INTERVAL 1 HOUR
+  AND t.direction = 'out'
+  AND t.endpoint_side = 'src'
+GROUP BY endpoint_ip, endpoint_asn, endpoint_scope
+ORDER BY gb DESC
+LIMIT 10;
+```
 
 ## Step 7. Verify Aggregates
 
@@ -252,8 +333,12 @@ sudo systemctl restart xdpflowd
 
 - `xdpflowd`: `traffic classifier refreshed` every ~60s; `lag_segments` ≈ 0
 - `traffic-rollups.service`: `run complete` every minute, no `failed`
+- `traffic-talkers-rollups.service`: `run complete` every 5 minutes, no `failed`
 - `traffic_rollup_state FINAL`: `last_bucket` advances for 1m jobs
 - `traffic_dashboard_1m`: `max(minute)` within ~10 minutes of now
+- `traffic_talker_1m`: `max(minute)` within ~10 minutes of now
 - No attached `traffic_*` MV in `system.tables`
 - `bgp_prefix_origin_current`: refreshed by `bgp-origin-refresh` timer
+- `net_l3_prefixes.origin_asn`: set for provider/customer prefixes used in top talkers
+- Outbound `flows_raw.src_asn` non-zero on new rows after L3 ASN seed
 - API `/api/network/dashboard`: response < 1s for 1-hour window

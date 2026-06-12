@@ -335,7 +335,52 @@ systemctl list-timers traffic-rollups.timer --no-pager
 journalctl -u traffic-rollups.service -n 30 --no-pager
 ```
 
-Ожидаемо за запуск: `run complete ok=10..14`, `elapsed_s` < 30, без `failed`.
+Ожидаемо за запуск: `run complete ok=9` (lightweight jobs only), `elapsed_s` < 30,
+без `failed`. Не включайте `traffic_talker_*` / `traffic_pair_*` в основной timer —
+они тяжёлые.
+
+### 7.2b. Top talkers / pairs (отдельный timer)
+
+Виджет «Топ-говорящие» читает `traffic_talker_1m` / `traffic_talker_1h`. Эти jobs
+обслуживаются отдельным systemd timer (каждые 5 минут):
+
+```bash
+sudo cp deploy/systemd/traffic-talkers-rollups.{service,timer} /etc/systemd/system/
+sudo cp deploy/systemd/traffic-talkers-rollups.env.example /etc/grapesnta/traffic-talkers-rollups.env
+# TRAFFIC_ROLLUP_CLICKHOUSE_CLIENT=/usr/local/bin/clickhouse-client
+sudo systemctl daemon-reload
+sudo systemctl enable --now traffic-talkers-rollups.timer
+```
+
+Проверка lag:
+
+```sql
+SELECT max(minute), dateDiff('minute', max(minute), now()) AS lag_min
+FROM default.traffic_talker_1m;
+```
+
+`lag_min` должен быть < 10 при активном timer.
+
+### 7.2c. L3 origin ASN для локальных префиксов
+
+ASN ваших `provider_public` / customer префиксов задаётся в `net_l3_prefixes`,
+не через fake BMP events. Миграция:
+
+```bash
+ch --multiquery < deploy/clickhouse/migrate_net_l3_prefixes_origin_asn.sql
+```
+
+Пример seed (замените ASN):
+
+```sql
+INSERT INTO default.net_l3_prefixes
+(prefix, family, entity_id, role, origin_asn, display_name, enabled, source, updated_at)
+VALUES
+('188.143.128.0/17', 4, 'isp:pin', 'provider_public', 34665, 'gb', 1, 'manual', now());
+```
+
+После deploy/restart `xdpflowd` новые `flows_raw` строки получают `src_asn` /
+`dst_asn` для matched L3 prefixes. Старые строки не пересчитываются.
 
 ### 7.3. Режим «только с текущего момента» (без backfill)
 

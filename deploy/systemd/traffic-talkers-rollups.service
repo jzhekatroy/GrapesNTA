@@ -1,0 +1,16 @@
+[Unit]
+Description=GrapesNTA async top talkers / pair rollups to ClickHouse
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/grapesnta/traffic-talkers-rollups.env
+EnvironmentFile=-/etc/grapesnta/traffic-rollups.env
+ExecStart=/usr/bin/python3 /opt/GrapesNTA/scripts/traffic_rollup_async.py --jobs traffic_talker_1m,traffic_talker_1h,traffic_pair_1m,traffic_pair_1h
+StandardOutput=journal
+StandardError=journal
+TimeoutStartSec=3600
+
+[Install]
+WantedBy=multi-user.target

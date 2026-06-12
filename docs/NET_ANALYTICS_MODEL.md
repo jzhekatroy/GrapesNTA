@@ -42,7 +42,17 @@ Roles:
 | `customer_allocated` | Prefix allocated to a customer |
 | `customer_transit` | Customer-owned prefix announced through provider |
 
+| Field | Meaning |
+|-------|---------|
+| `origin_asn` | Operator-declared origin ASN for this prefix. Used by `xdpflowd` when BMP does not export locally originated routes. `0` = fall back to BGP lookup. |
+
 View: `default.net_l3_prefixes_enabled`
+
+ASN resolution order for a matched L3 prefix:
+
+1. `origin_asn` from `net_l3_prefixes` when non-zero
+2. otherwise BGP origin ASN from `bgp_prefix_origin_current`
+3. otherwise `0`
 
 ## L2 VLANs
 

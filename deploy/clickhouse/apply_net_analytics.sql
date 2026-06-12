@@ -7,6 +7,7 @@
 --   2c. geo_country.sql + geoloaderd (geo_country_dict, asn_registry_enriched)
 --   3. net_entities.sql
 --   4. net_l3_prefixes.sql
+--   4b. migrate_net_l3_prefixes_origin_asn.sql (existing DBs without origin_asn)
 --   5. net_l2_vlans.sql
 --   6. traffic_direction_1m.sql
 --   7. traffic_role_1m.sql

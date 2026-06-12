@@ -221,7 +221,7 @@ func (tc *TrafficClassifier) loadBGP(ctx context.Context, st *classifierState) (
 }
 
 func (tc *TrafficClassifier) loadL3Prefixes(ctx context.Context, st *classifierState) (int, error) {
-	rows, err := tc.conn.Query(ctx, "SELECT prefix, family, entity_id, role, display_name FROM "+tc.cfg.Tables.L3Prefixes)
+	rows, err := tc.conn.Query(ctx, "SELECT prefix, family, entity_id, role, display_name, origin_asn FROM "+tc.cfg.Tables.L3Prefixes)
 	if err != nil {
 		return 0, fmt.Errorf("load L3 prefixes: %w", err)
 	}
@@ -230,7 +230,8 @@ func (tc *TrafficClassifier) loadL3Prefixes(ctx context.Context, st *classifierS
 	for rows.Next() {
 		var prefix, entityID, role, displayName string
 		var family uint8
-		if err := rows.Scan(&prefix, &family, &entityID, &role, &displayName); err != nil {
+		var originASN uint32
+		if err := rows.Scan(&prefix, &family, &entityID, &role, &displayName, &originASN); err != nil {
 			return n, err
 		}
 		p, err := netip.ParsePrefix(strings.TrimSpace(prefix))
@@ -238,7 +239,7 @@ func (tc *TrafficClassifier) loadL3Prefixes(ctx context.Context, st *classifierS
 			continue
 		}
 		role = normalizeRole(role)
-		pc := prefixClass{Role: role, EntityID: entityID, DisplayName: displayName}
+		pc := prefixClass{ASN: originASN, Role: role, EntityID: entityID, DisplayName: displayName}
 		if family == 4 || p.Addr().Is4() {
 			st.l3v4.Insert(p.Masked(), pc)
 		} else {
@@ -302,6 +303,9 @@ func (st *classifierState) classify(addr netip.Addr, vlan uint16) EndpointClass 
 	asn := st.lookupASN(addr)
 	att := st.lookupAttachment(vlan)
 	if p, ok := st.lookupL3Prefix(addr); ok {
+		if p.ASN != 0 {
+			asn = p.ASN
+		}
 		role := normalizeRole(p.Role)
 		scope := scopeFromRole(role)
 		return EndpointClass{

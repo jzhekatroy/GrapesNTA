@@ -18,9 +18,15 @@ The classifier refreshes these ClickHouse views into memory:
 
 ```text
 L3 role/entity: who owns the IP address
+L3 origin_asn:  operator ASN for local/customer prefixes (authoritative when set)
+BGP origin ASN: external IP -> ASN from bmp_route_events rebuild
 L2 attachment:  where the packet was seen (VLAN)
 Direction:      derived from L3 roles
 ```
+
+For matched L3 prefixes, `origin_asn` from `net_l3_prefixes_enabled` wins over
+BGP when non-zero. This covers provider-owned space that BMP does not export as
+received routes. Remote IPs still rely on `bgp_prefix_origin_current`.
 
 ## L3 Roles
 

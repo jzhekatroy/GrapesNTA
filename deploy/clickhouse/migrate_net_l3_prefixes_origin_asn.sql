@@ -1,24 +1,11 @@
--- L3 prefix classification: provider_public | internal | customer_allocated | customer_transit.
+-- Add origin_asn to net_l3_prefixes for operator-owned ASN on local/customer prefixes.
+-- Safe to re-run on existing deployments.
 --
--- Apply after net_entities.sql:
---   clickhouse-client ... --multiquery < deploy/clickhouse/net_l3_prefixes.sql
+-- Apply:
+--   clickhouse-client ... --multiquery < deploy/clickhouse/migrate_net_l3_prefixes_origin_asn.sql
 
-CREATE TABLE IF NOT EXISTS default.net_l3_prefixes
-(
-    prefix       String,
-    family       UInt8,
-    entity_id    LowCardinality(String) DEFAULT '',
-    role         LowCardinality(String) DEFAULT 'remote',
-    origin_asn   UInt32 DEFAULT 0,
-    display_name String DEFAULT '',
-    comment      String DEFAULT '',
-    enabled      UInt8,
-    source       LowCardinality(String) DEFAULT 'manual',
-    updated_at   DateTime DEFAULT now()
-)
-ENGINE = ReplacingMergeTree(updated_at)
-ORDER BY (family, prefix)
-SETTINGS index_granularity = 8192;
+ALTER TABLE default.net_l3_prefixes
+ADD COLUMN IF NOT EXISTS origin_asn UInt32 DEFAULT 0;
 
 DROP VIEW IF EXISTS default.net_l3_prefixes_enabled;
 
