@@ -130,7 +130,10 @@ class ClickHouseClient:
                 f"query: {shown[:800]}{'...' if len(shown) > 800 else ''}\n"
                 f"stderr: {err}"
             )
-        return (proc.stdout or "").strip()
+        # Preserve trailing tabs in TabSeparated output. Some state rows have an
+        # empty last_error column; stripping all whitespace would drop that final
+        # field on the last row and make the state parser skip it.
+        return (proc.stdout or "").rstrip("\n")
 
     def execute(self, sql: str, *, display: Optional[str] = None) -> None:
         self.query(sql, display=display)
@@ -187,9 +190,10 @@ def load_states(ch: ClickHouseClient) -> Dict[str, JobState]:
         return out
     for line in rows.splitlines():
         parts = line.split("\t")
-        if len(parts) < 4:
+        if len(parts) < 3:
             continue
-        job, bucket_raw, status, last_error = parts[0], parts[1], parts[2], parts[3]
+        job, bucket_raw, status = parts[0], parts[1], parts[2]
+        last_error = parts[3] if len(parts) > 3 else ""
         bucket = None
         if bucket_raw and bucket_raw != "1970-01-01 00:00:00":
             bucket = datetime.strptime(bucket_raw, "%Y-%m-%d %H:%M:%S").replace(
