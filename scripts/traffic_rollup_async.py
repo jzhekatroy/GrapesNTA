@@ -280,11 +280,10 @@ def safe_until_for_job(job: RollupJob, args: argparse.Namespace) -> datetime:
     )
 
 
-def build_time_filter(job: RollupJob, start: datetime, end: datetime) -> str:
+def _column_time_range(col: str, start: datetime, end: datetime) -> str:
     start_s = fmt_dt(start)
     end_s = fmt_dt(end)
-    col = job.time_filter_column or job.time_column
-    if col in ("time_received_ns", "time_flow_start_ns"):
+    if col.split(".")[-1] in ("time_received_ns", "time_flow_start_ns"):
         return (
             f"{col} >= toDateTime64('{start_s}', 9, 'UTC') "
             f"AND {col} < toDateTime64('{end_s}', 9, 'UTC')"
@@ -293,6 +292,23 @@ def build_time_filter(job: RollupJob, start: datetime, end: datetime) -> str:
         f"{col} >= toDateTime('{start_s}', 'UTC') "
         f"AND {col} < toDateTime('{end_s}', 'UTC')"
     )
+
+
+def build_time_filter(job: RollupJob, start: datetime, end: datetime) -> str:
+    primary = _column_time_range(job.time_filter_column or job.time_column, start, end)
+    guard_minutes = job.received_guard_minutes
+    if guard_minutes:
+        # flows_raw is ordered by time_received_ns, so a flow-start filter alone
+        # forces a wide scan. Add a guard on the indexed received column widened
+        # by guard_minutes. received_ns >= flow_start_ns and trails it by at most
+        # one active timeout, so the widened window cannot drop matching flows.
+        guard = _column_time_range(
+            "time_received_ns",
+            start - timedelta(minutes=guard_minutes),
+            end + timedelta(minutes=guard_minutes),
+        )
+        return f"({primary}) AND ({guard})"
+    return primary
 
 
 def dependency_ready(

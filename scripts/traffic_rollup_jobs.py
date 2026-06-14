@@ -18,6 +18,15 @@ class RollupJob:
     select_sql: str
     pre_delete_sql: Optional[str] = None
     time_filter_column: Optional[str] = None
+    # When set, restrict the scan with an extra guard on the indexed
+    # time_received_ns column widened by this many minutes on each side.
+    # Used by flow-start-bucketed jobs (time_column=time_flow_start_ns) so the
+    # query still groups by flow start but only reads the relevant slice of
+    # flows_raw (which is ordered by time_received_ns). The guard must exceed
+    # the collector active timeout (-nf-active, default 120s) so no long flow
+    # is dropped: received_ns is always >= flow_start_ns and at most one active
+    # timeout later.
+    received_guard_minutes: Optional[int] = None
 
 
 def _minute_filter(col: str, start_expr: str, end_expr: str) -> str:
@@ -70,6 +79,7 @@ WHERE {time_filter}
 GROUP BY minute, source_id
 """,
         pre_delete_sql="ALTER TABLE default.traffic_dashboard_1m DELETE WHERE minute = {bucket_dt} SETTINGS mutations_sync = 1",
+        received_guard_minutes=15,
     ),
     RollupJob(
         job_id="traffic_protocol_1m",
@@ -673,6 +683,7 @@ WHERE {time_filter}
 GROUP BY hour, source_id
 """,
         pre_delete_sql="ALTER TABLE default.traffic_dashboard_1h DELETE WHERE hour = {bucket_dt} SETTINGS mutations_sync = 1",
+        received_guard_minutes=15,
     ),
     RollupJob(
         job_id="traffic_talker_1h",
