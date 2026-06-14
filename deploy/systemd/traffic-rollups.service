@@ -6,7 +6,11 @@ Wants=network-online.target
 [Service]
 Type=oneshot
 EnvironmentFile=-/etc/grapesnta/traffic-rollups.env
-ExecStart=/usr/bin/python3 /opt/GrapesNTA/scripts/traffic_rollup_async.py
+# Explicit job list: every rollup EXCEPT the talker/pair jobs, which run in
+# traffic-talkers-rollups.service. Keep these two lists complete and disjoint:
+# a job missing from both timers never advances (its table goes stale), a job
+# listed in both races itself. dashboard_1h/_1d MUST stay here.
+ExecStart=/usr/bin/python3 /opt/GrapesNTA/scripts/traffic_rollup_async.py --jobs traffic_dashboard_1m,traffic_protocol_1m,traffic_direction_1m,traffic_role_1m,traffic_entity_1m,traffic_vlan_1m,traffic_country_1m,traffic_service_1m,traffic_unknown_port_1m,traffic_dashboard_1h,traffic_dashboard_1d
 StandardOutput=journal
 StandardError=journal
 TimeoutStartSec=3600
