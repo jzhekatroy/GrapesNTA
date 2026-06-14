@@ -14,7 +14,11 @@ The script is intentionally read-only. It checks:
 
 Exit codes: 0 = OK, 1 = WARN only, 2 = FAIL.
 
-Typical usage on a collector:
+Typical usage on a collector (env is auto-loaded from /etc/grapesnta/traffic-rollups.env):
+
+  python3 scripts/check_traffic_data_quality.py
+
+Or with explicit env:
 
   set -a
   source /etc/grapesnta/traffic-rollups.env
@@ -32,12 +36,99 @@ import sys
 from dataclasses import dataclass
 from typing import List, Optional, Sequence, Tuple
 
+DEFAULT_ENV_FILES = (
+    "/etc/grapesnta/traffic-rollups.env",
+    "/etc/grapesnta/traffic-talkers-rollups.env",
+)
+
+MINUTE_ROLLUP_JOBS = {
+    "traffic_dashboard_1m",
+    "traffic_protocol_1m",
+    "traffic_direction_1m",
+    "traffic_role_1m",
+    "traffic_entity_1m",
+    "traffic_vlan_1m",
+    "traffic_country_1m",
+    "traffic_service_1m",
+    "traffic_unknown_port_1m",
+    "traffic_talker_1m",
+    "traffic_pair_1m",
+}
+
+HOURLY_ROLLUP_JOBS = {
+    "traffic_dashboard_1h",
+    "traffic_talker_1h",
+    "traffic_pair_1h",
+}
+
+DAILY_ROLLUP_JOBS = {
+    "traffic_dashboard_1d",
+}
+
 
 def env(name: str, default: Optional[str] = None) -> Optional[str]:
     value = os.environ.get(name)
     if value is None or value == "":
         return default
     return value
+
+
+def load_env_file(path: str, *, override: bool = False) -> bool:
+    """Load KEY=VALUE pairs from a systemd-style env file into os.environ."""
+    if not os.path.isfile(path):
+        return False
+    with open(path, encoding="utf-8") as handle:
+        for raw in handle:
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
+            if line.startswith("export "):
+                line = line[len("export ") :].strip()
+            if "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            key = key.strip()
+            value = value.strip()
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+                value = value[1:-1]
+            if not key:
+                continue
+            if override or env(key) is None:
+                os.environ[key] = value
+    return True
+
+
+def bootstrap_env(explicit_files: Sequence[str]) -> List[str]:
+    """Load rollup env files unless TRAFFIC_ROLLUP_CH_HOST is already set."""
+    loaded: List[str] = []
+    if env("TRAFFIC_ROLLUP_CH_HOST"):
+        return loaded
+    paths = list(explicit_files) if explicit_files else list(DEFAULT_ENV_FILES)
+    for path in paths:
+        if load_env_file(path):
+            loaded.append(path)
+    return loaded
+
+
+def rollup_job_kind(job: str) -> str:
+    if job in MINUTE_ROLLUP_JOBS or job.endswith("_1m"):
+        return "1m"
+    if job in HOURLY_ROLLUP_JOBS or job.endswith("_1h"):
+        return "1h"
+    if job in DAILY_ROLLUP_JOBS or job.endswith("_1d"):
+        return "1d"
+    return "other"
+
+
+def max_lag_for_job(job: str, args: argparse.Namespace) -> int:
+    kind = rollup_job_kind(job)
+    if kind == "1m":
+        return args.max_rollup_lag_minutes
+    if kind == "1h":
+        return args.max_hourly_lag_minutes
+    if kind == "1d":
+        return args.max_daily_lag_minutes
+    return args.max_rollup_lag_minutes
 
 
 def resolve_clickhouse_client(path: str) -> str:
@@ -108,6 +199,87 @@ def add(results: List[CheckResult], status: str, name: str, detail: str) -> None
     results.append(CheckResult(status=status, name=name, detail=detail))
 
 
+def check_lag_summary(ch: ClickHouse, args: argparse.Namespace, results: List[CheckResult]) -> None:
+    """Human-friendly lag view: state cursor + table max bucket side by side."""
+    state_rows = ch.query_tsv(
+        """
+SELECT
+    job,
+    toString(last_bucket) AS last_bucket,
+    dateDiff('minute', last_bucket, now()) AS lag_min,
+    status,
+    left(last_error, 120) AS err
+FROM default.traffic_rollup_state FINAL
+WHERE job LIKE 'traffic_%'
+ORDER BY job
+"""
+    )
+    if not state_rows:
+        add(results, "FAIL", "lag.summary", "traffic_rollup_state is empty")
+        return
+
+    table_lag_sql = """
+SELECT 'dashboard_1m' AS t, toString(max(minute)) AS mx, dateDiff('minute', max(minute), now()) AS lag
+FROM default.traffic_dashboard_1m
+UNION ALL SELECT 'talker_1m', toString(max(minute)), dateDiff('minute', max(minute), now())
+FROM default.traffic_talker_1m WHERE source_id = {source_id}
+UNION ALL SELECT 'pair_1m', toString(max(minute)), dateDiff('minute', max(minute), now())
+FROM default.traffic_pair_1m WHERE source_id = {source_id}
+UNION ALL SELECT 'dashboard_1h', toString(max(hour)), dateDiff('minute', max(hour), now())
+FROM default.traffic_dashboard_1h
+UNION ALL SELECT 'talker_1h', toString(max(hour)), dateDiff('minute', max(hour), now())
+FROM default.traffic_talker_1h WHERE source_id = {source_id}
+UNION ALL SELECT 'pair_1h', toString(max(hour)), dateDiff('minute', max(hour), now())
+FROM default.traffic_pair_1h WHERE source_id = {source_id}
+UNION ALL SELECT 'dashboard_1d', toString(max(day)), dateDiff('minute', max(day), now())
+FROM default.traffic_dashboard_1d
+""".format(source_id=sql_string(args.source_id))
+    table_rows = {t: (mx, int(lag)) for t, mx, lag in ch.query_tsv(table_lag_sql)}
+
+    for job, last_bucket, lag_s, status, err in state_rows:
+        lag = int(lag_s)
+        kind = rollup_job_kind(job)
+        max_lag = max_lag_for_job(job, args)
+        table_key = job.replace("traffic_", "")
+        table_mx, table_lag = table_rows.get(table_key, ("", -1))
+        table_bit = (
+            f" table_max={table_mx} table_lag_min={table_lag}"
+            if table_mx
+            else ""
+        )
+        if err:
+            add(results, "FAIL", f"lag.{kind}.{job}", f"lag_min={lag} last_bucket={last_bucket} err={err}{table_bit}")
+            continue
+        if lag > max_lag:
+            add(
+                results,
+                "FAIL",
+                f"lag.{kind}.{job}",
+                f"lag_min={lag} > max={max_lag} last_bucket={last_bucket} status={status}{table_bit}",
+            )
+        elif kind == "1h":
+            add(
+                results,
+                "OK",
+                f"lag.{kind}.{job}",
+                f"lag_min={lag} last_bucket={last_bucket} (hourly; waits for closed hour){table_bit}",
+            )
+        elif kind == "1d":
+            add(
+                results,
+                "OK",
+                f"lag.{kind}.{job}",
+                f"lag_min={lag} last_bucket={last_bucket} (daily; waits for closed day){table_bit}",
+            )
+        else:
+            add(
+                results,
+                "OK",
+                f"lag.{kind}.{job}",
+                f"lag_min={lag} last_bucket={last_bucket} status={status}{table_bit}",
+            )
+
+
 def check_rollup_state(ch: ClickHouse, args: argparse.Namespace, results: List[CheckResult]) -> None:
     rows = ch.query_tsv(
         """
@@ -125,33 +297,18 @@ ORDER BY job
         add(results, "FAIL", "rollup_state", "default.traffic_rollup_state FINAL is empty")
         return
 
-    expected_1m = {
-        "traffic_dashboard_1m",
-        "traffic_protocol_1m",
-        "traffic_direction_1m",
-        "traffic_role_1m",
-        "traffic_entity_1m",
-        "traffic_vlan_1m",
-        "traffic_country_1m",
-        "traffic_service_1m",
-        "traffic_unknown_port_1m",
-        "traffic_talker_1m",
-        "traffic_pair_1m",
-    }
-    allowed_skipped = {
-        "traffic_dashboard_1h",
-        "traffic_dashboard_1d",
-        "traffic_pair_1h",
-    }
+    expected_1m = MINUTE_ROLLUP_JOBS
+    allowed_skipped = HOURLY_ROLLUP_JOBS | DAILY_ROLLUP_JOBS
     seen = set()
     for job, last_bucket, lag_s, status, err in rows:
         seen.add(job)
         lag = int(lag_s)
+        max_lag = max_lag_for_job(job, args)
         if err:
             add(results, "FAIL", f"rollup_state.{job}", f"last_error={err}")
             continue
         if job in expected_1m:
-            if lag > args.max_rollup_lag_minutes:
+            if lag > max_lag:
                 add(results, "FAIL", f"rollup_state.{job}", f"lag_min={lag} last_bucket={last_bucket} status={status}")
             elif status not in ("ok", "skipped_backfill"):
                 add(results, "WARN", f"rollup_state.{job}", f"lag_min={lag} status={status}")
@@ -160,7 +317,10 @@ ORDER BY job
         elif job in allowed_skipped and status == "skipped_backfill":
             add(results, "OK", f"rollup_state.{job}", f"intentionally skipped; last_bucket={last_bucket}")
         elif status == "ok":
-            add(results, "OK", f"rollup_state.{job}", f"lag_min={lag}")
+            if lag > max_lag:
+                add(results, "FAIL", f"rollup_state.{job}", f"lag_min={lag} last_bucket={last_bucket}")
+            else:
+                add(results, "OK", f"rollup_state.{job}", f"lag_min={lag}")
         else:
             add(results, "WARN", f"rollup_state.{job}", f"lag_min={lag} status={status}")
 
@@ -536,6 +696,13 @@ ORDER BY direction
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Check GrapesNTA traffic data quality in ClickHouse")
+    p.add_argument(
+        "--env-file",
+        action="append",
+        default=[],
+        metavar="PATH",
+        help="env file to load when TRAFFIC_ROLLUP_CH_* are unset (default: /etc/grapesnta/traffic-rollups.env)",
+    )
     default_client = env("TRAFFIC_ROLLUP_CLICKHOUSE_CLIENT", "/usr/bin/clickhouse-client")
     p.add_argument("--clickhouse-client", default=resolve_clickhouse_client(default_client))
     p.add_argument("--host", default=env("TRAFFIC_ROLLUP_CH_HOST", "localhost"))
@@ -548,7 +715,19 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--raw-window-minutes", type=int, default=5)
     p.add_argument("--quality-window-minutes", type=int, default=10)
     p.add_argument("--compare-window-minutes", type=int, default=10)
-    p.add_argument("--max-rollup-lag-minutes", type=int, default=25)
+    p.add_argument("--max-rollup-lag-minutes", type=int, default=25, help="FAIL if *_1m rollup lag exceeds this")
+    p.add_argument(
+        "--max-hourly-lag-minutes",
+        type=int,
+        default=180,
+        help="FAIL if *_1h rollup lag exceeds this (closed hour + safety; ~120 is normal)",
+    )
+    p.add_argument(
+        "--max-daily-lag-minutes",
+        type=int,
+        default=1500,
+        help="FAIL if *_1d rollup lag exceeds this (closed day + safety)",
+    )
     p.add_argument("--max-unknown-gb", type=float, default=0.1, help="max GB of raw flows with unknown direction")
     p.add_argument("--max-unknown-direction-gb", type=float, default=0.1, help="max GB in rollups with empty/unknown direction")
     p.add_argument("--max-unknown-scope-gb", type=float, default=0.1, help="max GB in talker/pair with empty/unknown scope")
@@ -569,18 +748,33 @@ def parse_args() -> argparse.Namespace:
 
 def print_results(results: Sequence[CheckResult]) -> None:
     order = {"FAIL": 0, "WARN": 1, "OK": 2}
-    for result in sorted(results, key=lambda r: (order.get(r.status, 9), r.name)):
+
+    def sort_key(r: CheckResult) -> Tuple[int, int, str]:
+        section = 0 if r.name.startswith("lag.") else 1
+        return (section, order.get(r.status, 9), r.name)
+
+    for result in sorted(results, key=sort_key):
         print(f"{result.status}\t{result.name}\t{result.detail}")
 
 
 def main() -> int:
+    pre = argparse.ArgumentParser(add_help=False)
+    pre.add_argument("--env-file", action="append", default=[])
+    pre_args, _ = pre.parse_known_args()
+    loaded_env = bootstrap_env(pre_args.env_file)
+
     args = parse_args()
+    if loaded_env:
+        print(f"INFO\tconfig\tenv={' '.join(loaded_env)} host={args.host} port={args.port} user={args.user}")
+    else:
+        print(f"INFO\tconfig\thost={args.host} port={args.port} user={args.user} database={args.database}")
     if args.local_asn:
         print(f"INFO\tconfig\tlocal_asn={args.local_asn} source_id={args.source_id}")
     ch = ClickHouse(args)
     results: List[CheckResult] = []
 
     checks = [
+        ("lag_summary", lambda: check_lag_summary(ch, args, results)),
         ("rollup_state", lambda: check_rollup_state(ch, args, results)),
         ("raw_classifier", lambda: check_raw_classifier(ch, args, results)),
         ("table_freshness", lambda: check_table_freshness(ch, args, results)),
