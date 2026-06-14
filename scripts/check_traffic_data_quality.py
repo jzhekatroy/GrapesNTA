@@ -199,6 +199,22 @@ def add(results: List[CheckResult], status: str, name: str, detail: str) -> None
     results.append(CheckResult(status=status, name=name, detail=detail))
 
 
+def is_meaningful_bucket(ts: str) -> bool:
+    """ClickHouse max() on empty tables returns epoch; treat as no data."""
+    if not ts:
+        return False
+    return not ts.startswith("1970-")
+
+
+def format_table_lag_bit(table_key: str, table_rows: dict) -> str:
+    if table_key not in table_rows:
+        return ""
+    table_mx, table_lag = table_rows[table_key]
+    if is_meaningful_bucket(table_mx):
+        return f" table_max={table_mx} table_lag_min={table_lag}"
+    return " table=empty"
+
+
 def check_lag_summary(ch: ClickHouse, args: argparse.Namespace, results: List[CheckResult]) -> None:
     """Human-friendly lag view: state cursor + table max bucket side by side."""
     state_rows = ch.query_tsv(
@@ -241,12 +257,8 @@ FROM default.traffic_dashboard_1d
         kind = rollup_job_kind(job)
         max_lag = max_lag_for_job(job, args)
         table_key = job.replace("traffic_", "")
-        table_mx, table_lag = table_rows.get(table_key, ("", -1))
-        table_bit = (
-            f" table_max={table_mx} table_lag_min={table_lag}"
-            if table_mx
-            else ""
-        )
+        table_bit = format_table_lag_bit(table_key, table_rows)
+        table_empty = table_key in table_rows and "table=empty" in table_bit
         if err:
             add(results, "FAIL", f"lag.{kind}.{job}", f"lag_min={lag} last_bucket={last_bucket} err={err}{table_bit}")
             continue
@@ -256,6 +268,13 @@ FROM default.traffic_dashboard_1d
                 "FAIL",
                 f"lag.{kind}.{job}",
                 f"lag_min={lag} > max={max_lag} last_bucket={last_bucket} status={status}{table_bit}",
+            )
+        elif table_empty and kind == "1d":
+            add(
+                results,
+                "WARN",
+                f"lag.{kind}.{job}",
+                f"lag_min={lag} last_bucket={last_bucket} state ok but table has no rows{table_bit}",
             )
         elif kind == "1h":
             add(
