@@ -652,38 +652,41 @@ GROUP BY
         job_id="traffic_dashboard_1h",
         dest_table="default.traffic_dashboard_1h",
         bucket_kind="hour",
-        time_column="time_flow_start_ns",
-        source_table="default.flows_raw",
+        time_column="minute",
+        source_table="default.traffic_dashboard_1m",
         priority=200,
         depends_on=("traffic_dashboard_1m",),
+        # Roll up from the already-computed minute table instead of re-scanning
+        # flows_raw. dashboard_1m is the only job that reads flows_raw on the
+        # flow-start axis; the hourly view is just a sum of its 60 minute rows,
+        # which keeps the flow-start semantics and is effectively free.
         select_sql="""
 SELECT
-    toStartOfHour(time_flow_start_ns) AS hour,
+    toStartOfHour(minute) AS hour,
     source_id,
-    sum(bytes) AS total_bytes,
-    sumIf(bytes, direction = 'in') AS in_bytes,
-    sumIf(bytes, direction = 'out') AS out_bytes,
-    sumIf(bytes, direction = 'transit') AS transit_bytes,
-    sumIf(bytes, direction = 'internal') AS internal_bytes,
-    sumIf(bytes, direction = 'unknown') AS unknown_bytes,
-    sum(packets) AS total_packets,
-    sumIf(packets, direction = 'in') AS in_packets,
-    sumIf(packets, direction = 'out') AS out_packets,
-    sumIf(packets, direction = 'transit') AS transit_packets,
-    sumIf(packets, direction = 'internal') AS internal_packets,
-    sumIf(packets, direction = 'unknown') AS unknown_packets,
-    count() AS total_flows,
-    countIf(direction = 'in') AS in_flows,
-    countIf(direction = 'out') AS out_flows,
-    countIf(direction = 'transit') AS transit_flows,
-    countIf(direction = 'internal') AS internal_flows,
-    countIf(direction = 'unknown') AS unknown_flows
-FROM default.flows_raw
+    sum(total_bytes) AS total_bytes,
+    sum(in_bytes) AS in_bytes,
+    sum(out_bytes) AS out_bytes,
+    sum(transit_bytes) AS transit_bytes,
+    sum(internal_bytes) AS internal_bytes,
+    sum(unknown_bytes) AS unknown_bytes,
+    sum(total_packets) AS total_packets,
+    sum(in_packets) AS in_packets,
+    sum(out_packets) AS out_packets,
+    sum(transit_packets) AS transit_packets,
+    sum(internal_packets) AS internal_packets,
+    sum(unknown_packets) AS unknown_packets,
+    sum(total_flows) AS total_flows,
+    sum(in_flows) AS in_flows,
+    sum(out_flows) AS out_flows,
+    sum(transit_flows) AS transit_flows,
+    sum(internal_flows) AS internal_flows,
+    sum(unknown_flows) AS unknown_flows
+FROM default.traffic_dashboard_1m
 WHERE {time_filter}
 GROUP BY hour, source_id
 """,
         pre_delete_sql="ALTER TABLE default.traffic_dashboard_1h DELETE WHERE hour = {bucket_dt} SETTINGS mutations_sync = 1",
-        received_guard_minutes=15,
     ),
     RollupJob(
         job_id="traffic_talker_1h",
@@ -787,33 +790,38 @@ GROUP BY
         job_id="traffic_dashboard_1d",
         dest_table="default.traffic_dashboard_1d",
         bucket_kind="day",
-        time_column="time_received_ns",
-        source_table="default.flows_raw",
+        time_column="minute",
+        source_table="default.traffic_dashboard_1m",
         priority=300,
         depends_on=("traffic_dashboard_1m",),
+        # Roll up from the minute table (1440 rows/day) instead of re-scanning a
+        # full day of flows_raw (~1.7B rows). depends_on stays the minute job so
+        # the day is only built once all its minutes are done. This also aligns
+        # the daily axis with 1m/1h (flow-start); for daily totals the only
+        # difference vs the old received axis is flows that cross midnight.
         select_sql="""
 SELECT
-    toStartOfDay(time_received_ns) AS day,
+    toStartOfDay(minute) AS day,
     source_id,
-    sum(bytes) AS total_bytes,
-    sumIf(bytes, direction = 'in') AS in_bytes,
-    sumIf(bytes, direction = 'out') AS out_bytes,
-    sumIf(bytes, direction = 'transit') AS transit_bytes,
-    sumIf(bytes, direction = 'internal') AS internal_bytes,
-    sumIf(bytes, direction = 'unknown') AS unknown_bytes,
-    sum(packets) AS total_packets,
-    sumIf(packets, direction = 'in') AS in_packets,
-    sumIf(packets, direction = 'out') AS out_packets,
-    sumIf(packets, direction = 'transit') AS transit_packets,
-    sumIf(packets, direction = 'internal') AS internal_packets,
-    sumIf(packets, direction = 'unknown') AS unknown_packets,
-    count() AS total_flows,
-    countIf(direction = 'in') AS in_flows,
-    countIf(direction = 'out') AS out_flows,
-    countIf(direction = 'transit') AS transit_flows,
-    countIf(direction = 'internal') AS internal_flows,
-    countIf(direction = 'unknown') AS unknown_flows
-FROM default.flows_raw
+    sum(total_bytes) AS total_bytes,
+    sum(in_bytes) AS in_bytes,
+    sum(out_bytes) AS out_bytes,
+    sum(transit_bytes) AS transit_bytes,
+    sum(internal_bytes) AS internal_bytes,
+    sum(unknown_bytes) AS unknown_bytes,
+    sum(total_packets) AS total_packets,
+    sum(in_packets) AS in_packets,
+    sum(out_packets) AS out_packets,
+    sum(transit_packets) AS transit_packets,
+    sum(internal_packets) AS internal_packets,
+    sum(unknown_packets) AS unknown_packets,
+    sum(total_flows) AS total_flows,
+    sum(in_flows) AS in_flows,
+    sum(out_flows) AS out_flows,
+    sum(transit_flows) AS transit_flows,
+    sum(internal_flows) AS internal_flows,
+    sum(unknown_flows) AS unknown_flows
+FROM default.traffic_dashboard_1m
 WHERE {time_filter}
 GROUP BY day, source_id
 """,
