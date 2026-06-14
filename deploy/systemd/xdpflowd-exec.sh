@@ -66,6 +66,25 @@ if [[ ! -f "$XDP_BPF_OBJ" ]]; then
   exit 1
 fi
 
+# mlx5 (and many NICs) strip 802.1Q before XDP when rx-vlan-offload is on.
+# tcpdump on the same iface still sees tags; xdpflowd would record src_vlan=0.
+prepare_mirror_nic() {
+  if [[ "${XDP_MIRROR_RXVLAN_OFF:-1}" != "1" ]]; then
+    return 0
+  fi
+  if ! command -v ethtool >/dev/null 2>&1; then
+    echo "WARN: ethtool missing; cannot disable rx-vlan-offload on $IFACE" >&2
+    return 0
+  fi
+  if ! ethtool -k "$IFACE" 2>/dev/null | grep -q 'rx-vlan-offload: on'; then
+    return 0
+  fi
+  echo "INFO: disabling rx-vlan-offload on mirror iface $IFACE (keep 802.1Q for XDP)" >&2
+  ethtool -K "$IFACE" rxvlan off txvlan off 2>/dev/null || true
+  ethtool -K "$IFACE" rx-vlan-filter off 2>/dev/null || true
+}
+prepare_mirror_nic
+
 if [[ -z "${XDP_CH_DSN:-}" || -z "${XDP_CH_TABLE:-}" ]]; then
   echo "ERROR: XDP_CH_DSN and XDP_CH_TABLE must be set in $ENV_FILE" >&2
   exit 1

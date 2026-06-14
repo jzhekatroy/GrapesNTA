@@ -169,6 +169,43 @@ rx-frames: 128
 pause RX/TX: on/on
 ```
 
+### VLAN на mirror-порту
+
+SPAN отдаёт tagged кадры (`802.1Q`), но при `rx-vlan-offload: on` mlx5 снимает
+тег **до XDP** — в `flows_raw.src_vlan` будет `0`, хотя `tcpdump` видит VLAN.
+
+Проверка:
+
+```bash
+IF=ens1np0
+sudo timeout 5 tcpdump -i $IF -nn -e -c 10 'vlan'
+ethtool -k $IF | grep -i vlan
+```
+
+Исправление (делает `deploy/systemd/xdpflowd-exec.sh` при `XDP_MIRROR_RXVLAN_OFF=1`):
+
+```bash
+sudo ethtool -K $IF rxvlan off txvlan off
+sudo ethtool -K $IF rx-vlan-filter off
+sudo systemctl restart xdpflowd
+```
+
+Проверка после фикса:
+
+```bash
+journalctl -u xdpflowd -n 30 | grep vlan_tag_seen
+$CH --query "
+SELECT src_vlan, count() c, round(sum(bytes)/1e9, 2) gb
+FROM flows_raw
+WHERE source_id='netflow'
+  AND time_received_ns >= now64(9) - INTERVAL 2 MINUTE
+  AND src_vlan != 0
+GROUP BY src_vlan ORDER BY gb DESC LIMIT 10
+FORMAT PrettyCompact"
+```
+
+Для подписей VLAN в UI заполнить `net_l2_vlans` (vlan 210 → customer, 444 → uplink и т.д.).
+
 Не менять `rx 8192`, coalescing и pause до подачи трафика, если нет проблемы.
 На старом `sel` такой tuning понадобился из-за `rx_fifo_errors`, но это была
 другая карта/драйвер (`mlx4_en`) и другой профиль.
