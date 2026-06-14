@@ -205,10 +205,10 @@ def check_lag_summary(ch: ClickHouse, args: argparse.Namespace, results: List[Ch
         """
 SELECT
     job,
-    toString(last_bucket) AS last_bucket,
     dateDiff('minute', last_bucket, now()) AS lag_min,
     status,
-    left(last_error, 120) AS err
+    left(last_error, 120) AS err,
+    toString(last_bucket) AS last_bucket_s
 FROM default.traffic_rollup_state FINAL
 WHERE job LIKE 'traffic_%'
 ORDER BY job
@@ -236,7 +236,7 @@ FROM default.traffic_dashboard_1d
 """.format(source_id=sql_string(args.source_id))
     table_rows = {t: (mx, int(lag)) for t, mx, lag in ch.query_tsv(table_lag_sql)}
 
-    for job, last_bucket, lag_s, status, err in state_rows:
+    for job, lag_s, status, err, last_bucket in state_rows:
         lag = int(lag_s)
         kind = rollup_job_kind(job)
         max_lag = max_lag_for_job(job, args)
