@@ -11,14 +11,20 @@ The script is intentionally read-only. It checks:
   - country resolution: flags '??' IP country (geo dict) and '??' AS country
     where the ASN is known (registry cc gap);
   - raw vs aggregate consistency by direction;
-  - pipeline throughput: rates on collector/xdpflowd/flows_raw/rollups and
-    percent deviation between stages (optional live window via --coverage-window-sec).
+  - pipeline throughput: live rates on the local collector (xdpflowd or
+    flowcollectord) vs ClickHouse flows_raw and rollup stages;
+  - sFlow-specific sanity: bytes/packets ≈ frame length, sampling_rate bounds,
+    parse-error ratio, optional volume vs --expected-max-gbps.
 
 Exit codes: 0 = OK, 1 = WARN only, 2 = FAIL.
 
-Typical usage on a collector (env is auto-loaded from /etc/grapesnta/traffic-rollups.env):
+Typical usage (env auto-loaded from /etc/grapesnta/traffic-rollups.env):
 
+  # XDP mirror collector (m61): auto-detects xdpflowd + XDPFLOWD_SOURCE_ID
   python3 scripts/check_traffic_data_quality.py
+
+  # sFlow collector (netflow-test): auto-detects flowcollectord + sflow-default
+  python3 scripts/check_traffic_data_quality.py --collector sflow --expected-max-gbps 15
 
 Or with explicit env:
 
@@ -34,8 +40,10 @@ import argparse
 import os
 import re
 import shutil
+import struct
 import subprocess
 import sys
+import tempfile
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -177,6 +185,32 @@ class CheckResult:
     detail: str
 
 
+@dataclass
+class SFlowCaptureSummary:
+    datagrams: int = 0
+    flow_samples: int = 0
+    counter_samples: int = 0
+    raw_records: int = 0
+    parsed_records: int = 0
+    parse_errors: int = 0
+    sampled_frame_bytes: int = 0
+    extrapolated_packets: int = 0
+    extrapolated_bytes: int = 0
+    min_sampling_rate: int = 0
+    max_sampling_rate: int = 0
+
+    def add_record(self, frame_length: int, sampling_rate: int) -> None:
+        rate = sampling_rate if sampling_rate > 0 else 1
+        self.parsed_records += 1
+        self.sampled_frame_bytes += frame_length
+        self.extrapolated_packets += rate
+        self.extrapolated_bytes += frame_length * rate
+        if self.min_sampling_rate == 0 or rate < self.min_sampling_rate:
+            self.min_sampling_rate = rate
+        if rate > self.max_sampling_rate:
+            self.max_sampling_rate = rate
+
+
 class ClickHouse:
     def __init__(self, args: argparse.Namespace) -> None:
         self.base = self._base_cmd(args)
@@ -290,6 +324,356 @@ def resolve_mirror_iface(args: argparse.Namespace) -> str:
     return "ens1np0"
 
 
+def resolve_sflow_iface(args: argparse.Namespace) -> str:
+    if args.sflow_iface:
+        return args.sflow_iface
+    return args.sflow_iface_default
+
+
+def systemctl_is_active(unit: str) -> bool:
+    proc = subprocess.run(
+        ["systemctl", "is-active", "--quiet", unit],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return proc.returncode == 0
+
+
+def detect_collector_mode(args: argparse.Namespace) -> str:
+    if args.collector != "auto":
+        return args.collector
+    has_xdp = systemctl_is_active(args.xdp_unit)
+    has_sflow = systemctl_is_active(args.flow_unit)
+    if has_sflow and not has_xdp:
+        return "sflow"
+    if has_xdp and not has_sflow:
+        return "xdp"
+    if has_sflow and has_xdp:
+        return "both"
+    return "xdp"
+
+
+def resolve_source_id(args: argparse.Namespace, mode: str) -> str:
+    if args.source_id:
+        return args.source_id
+    if mode in ("sflow", "both"):
+        value = load_env_value(args.flow_env_file, "FC_SFLOW_SOURCE_ID")
+        if value:
+            return value
+    value = load_env_value(args.xdp_env_file, "XDPFLOWD_SOURCE_ID")
+    if value:
+        return value
+    if mode == "sflow":
+        return "sflow-default"
+    return "netflow"
+
+
+def parse_journal_kv_line(line: str, keys: Sequence[str]) -> Dict[str, int]:
+    out: Dict[str, int] = {}
+    for key in keys:
+        match = re.search(rf"{key}=(\d+)", line)
+        if match:
+            out[key] = int(match.group(1))
+    return out
+
+
+def read_flowcollectord_stats(unit: str) -> Dict[str, int]:
+    proc = subprocess.run(
+        ["journalctl", "-u", unit, "--since", "2 minutes ago", "--no-pager", "-o", "cat"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if proc.returncode != 0:
+        return {}
+    out: Dict[str, int] = {}
+    for line in reversed((proc.stdout or "").splitlines()):
+        if "msg=sflow " in line and "datagrams=" in line:
+            out.update(
+                parse_journal_kv_line(
+                    line,
+                    (
+                        "datagrams",
+                        "flow_samples",
+                        "records_parsed",
+                        "counter_skipped",
+                        "parse_errors",
+                        "unknown_samples",
+                    ),
+                )
+            )
+        if "clickhouse spool pipeline" in line and "records_acked=" in line:
+            out.update(
+                parse_journal_kv_line(
+                    line,
+                    ("records_spooled", "records_acked", "insert_errs", "batches_ok"),
+                )
+            )
+        if out.get("records_parsed") and out.get("records_acked"):
+            return out
+    return out
+
+
+def be_u32(buf: bytes, offset: int) -> int:
+    return struct.unpack_from(">I", buf, offset)[0]
+
+
+def be_u16(buf: bytes, offset: int) -> int:
+    return struct.unpack_from(">H", buf, offset)[0]
+
+
+def parse_sampled_ethernet_header(buf: bytes) -> bool:
+    if len(buf) < 14:
+        return False
+    off = 12
+    etype = be_u16(buf, off)
+    off += 2
+    while etype in (0x8100, 0x88A8):
+        if len(buf) < off + 4:
+            return False
+        off += 2
+        etype = be_u16(buf, off)
+        off += 2
+    if etype == 0x0800:
+        if len(buf) < off + 20:
+            return False
+        ihl = (buf[off] & 0x0F) * 4
+        return ihl >= 20 and len(buf) >= off + ihl
+    if etype == 0x86DD:
+        return len(buf) >= off + 40
+    return False
+
+
+def parse_sflow_payload(payload: bytes, summary: SFlowCaptureSummary) -> None:
+    summary.datagrams += 1
+    if len(payload) < 28:
+        summary.parse_errors += 1
+        return
+    if be_u32(payload, 0) != 5:
+        summary.parse_errors += 1
+        return
+
+    agent_type = be_u32(payload, 4)
+    off = 8
+    if agent_type == 1:
+        if len(payload) < off + 4:
+            summary.parse_errors += 1
+            return
+        off += 4
+    elif agent_type == 2:
+        if len(payload) < off + 16:
+            summary.parse_errors += 1
+            return
+        off += 16
+    else:
+        summary.parse_errors += 1
+        return
+
+    if len(payload) < off + 16:
+        summary.parse_errors += 1
+        return
+    off += 12  # sub_agent_id, datagram_sequence, uptime
+    samples = be_u32(payload, off)
+    off += 4
+    if samples > 4096:
+        summary.parse_errors += 1
+        return
+
+    for _ in range(samples):
+        if len(payload) < off + 8:
+            summary.parse_errors += 1
+            return
+        sample_type = be_u32(payload, off)
+        sample_len = be_u32(payload, off + 4)
+        off += 8
+        if len(payload) < off + sample_len:
+            summary.parse_errors += 1
+            return
+        sample = payload[off : off + sample_len]
+        off += sample_len
+
+        sample_format = sample_type & 0xFFF
+        if sample_format in (1, 3):
+            summary.flow_samples += 1
+            parse_sflow_flow_sample(sample, sample_format == 3, summary)
+        elif sample_format in (2, 4):
+            summary.counter_samples += 1
+
+
+def parse_sflow_flow_sample(sample: bytes, expanded: bool, summary: SFlowCaptureSummary) -> None:
+    min_len = 44 if expanded else 32
+    if len(sample) < min_len:
+        summary.parse_errors += 1
+        return
+    if expanded:
+        sampling_rate = be_u32(sample, 12)
+        records = be_u32(sample, 40)
+        off = 44
+    else:
+        sampling_rate = be_u32(sample, 8)
+        records = be_u32(sample, 28)
+        off = 32
+    if sampling_rate == 0:
+        sampling_rate = 1
+    if records > 4096:
+        summary.parse_errors += 1
+        return
+
+    for _ in range(records):
+        if len(sample) < off + 8:
+            summary.parse_errors += 1
+            return
+        record_type = be_u32(sample, off)
+        record_len = be_u32(sample, off + 4)
+        off += 8
+        if len(sample) < off + record_len:
+            summary.parse_errors += 1
+            return
+        record = sample[off : off + record_len]
+        off += record_len
+        if record_type & 0xFFF != 1:
+            continue
+        summary.raw_records += 1
+        parse_sflow_raw_header_record(record, sampling_rate, summary)
+
+
+def parse_sflow_raw_header_record(record: bytes, sampling_rate: int, summary: SFlowCaptureSummary) -> None:
+    if len(record) < 16:
+        summary.parse_errors += 1
+        return
+    header_protocol = be_u32(record, 0)
+    if header_protocol != 1:  # sampled_header_protocol=ethernet
+        summary.parse_errors += 1
+        return
+    frame_length = be_u32(record, 4)
+    header_length = be_u32(record, 12)
+    if header_length == 0 or len(record) < 16 + header_length:
+        summary.parse_errors += 1
+        return
+    if not parse_sampled_ethernet_header(record[16 : 16 + header_length]):
+        summary.parse_errors += 1
+        return
+    summary.add_record(frame_length, sampling_rate)
+
+
+def iter_pcap_packets(path: str) -> Tuple[int, List[bytes]]:
+    data = Path(path).read_bytes()
+    if len(data) < 24:
+        return 0, []
+    magic = data[:4]
+    if magic in (b"\xd4\xc3\xb2\xa1", b"\x4d\x3c\xb2\xa1"):
+        endian = "<"
+    elif magic in (b"\xa1\xb2\xc3\xd4", b"\xa1\xb2\x3c\x4d"):
+        endian = ">"
+    else:
+        raise ValueError("unsupported capture format (expected classic pcap from tcpdump -w)")
+    linktype = struct.unpack_from(endian + "I", data, 20)[0]
+    off = 24
+    packets: List[bytes] = []
+    while len(data) >= off + 16:
+        _sec, _usec, incl_len, _orig_len = struct.unpack_from(endian + "IIII", data, off)
+        off += 16
+        if incl_len < 0 or len(data) < off + incl_len:
+            break
+        packets.append(data[off : off + incl_len])
+        off += incl_len
+    return linktype, packets
+
+
+def udp_payload_from_packet(packet: bytes, linktype: int, udp_port: int) -> Optional[bytes]:
+    off = 0
+    if linktype == 1:  # LINKTYPE_ETHERNET
+        if len(packet) < 14:
+            return None
+        off = 12
+        etype = be_u16(packet, off)
+        off += 2
+        while etype in (0x8100, 0x88A8):
+            if len(packet) < off + 4:
+                return None
+            off += 2
+            etype = be_u16(packet, off)
+            off += 2
+        if etype != 0x0800:
+            return None
+    elif linktype == 276:  # LINKTYPE_LINUX_SLL2
+        if len(packet) < 20:
+            return None
+        if be_u16(packet, 0) != 0x0800:
+            return None
+        off = 20
+    elif linktype == 113:  # LINKTYPE_LINUX_SLL
+        if len(packet) < 16:
+            return None
+        if be_u16(packet, 14) != 0x0800:
+            return None
+        off = 16
+    else:
+        return None
+
+    if len(packet) < off + 20:
+        return None
+    ihl = (packet[off] & 0x0F) * 4
+    if ihl < 20 or len(packet) < off + ihl:
+        return None
+    proto = packet[off + 9]
+    if proto != 17:
+        return None
+    total_len = be_u16(packet, off + 2)
+    ip_end = min(len(packet), off + total_len) if total_len > 0 else len(packet)
+    udp_off = off + ihl
+    if ip_end < udp_off + 8:
+        return None
+    src_port = be_u16(packet, udp_off)
+    dst_port = be_u16(packet, udp_off + 2)
+    if src_port != udp_port and dst_port != udp_port:
+        return None
+    udp_len = be_u16(packet, udp_off + 4)
+    payload_end = min(ip_end, udp_off + udp_len) if udp_len >= 8 else ip_end
+    return packet[udp_off + 8 : payload_end]
+
+
+def capture_sflow_pcap(args: argparse.Namespace) -> Tuple[str, str, str]:
+    capture_file = tempfile.NamedTemporaryFile(prefix="grapesnta_sflow_", suffix=".pcap", delete=False)
+    capture_file.close()
+    cmd = [
+        args.tcpdump,
+        "-i",
+        resolve_sflow_iface(args),
+        "-s",
+        "0",
+        "-U",
+        "-w",
+        capture_file.name,
+        f"udp port {args.sflow_port}",
+    ]
+    proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+    time.sleep(args.sflow_capture_warmup_sec)
+    t0 = utc_now_sql()
+    time.sleep(args.sflow_capture_sec)
+    t1 = utc_now_sql()
+    proc.terminate()
+    try:
+        _stdout, stderr = proc.communicate(timeout=5)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        _stdout, stderr = proc.communicate(timeout=5)
+    if proc.returncode not in (0, -15, 143):
+        raise RuntimeError(f"tcpdump failed rc={proc.returncode}: {(stderr or '').strip()}")
+    return capture_file.name, t0, t1
+
+
+def summarize_sflow_pcap(path: str, udp_port: int) -> SFlowCaptureSummary:
+    linktype, packets = iter_pcap_packets(path)
+    summary = SFlowCaptureSummary()
+    for packet in packets:
+        payload = udp_payload_from_packet(packet, linktype, udp_port)
+        if payload:
+            parse_sflow_payload(payload, summary)
+    return summary
+
+
 def read_sysfs_rx(iface: str) -> Tuple[int, int]:
     base = f"/sys/class/net/{iface}/statistics"
     return read_int_file(f"{base}/rx_packets"), read_int_file(f"{base}/rx_bytes")
@@ -367,13 +751,28 @@ def query_ch_window_totals(
 SELECT sum(packets), sum(bytes)
 FROM default.flows_raw
 WHERE source_id = {sql_string(args.source_id)}
-  AND time_received_ns >= toDateTime64({sql_string(t0)}, 9, 'UTC')
-  AND time_received_ns <  toDateTime64({sql_string(t1)}, 9, 'UTC')
+  AND time_received_ns >= toDateTime({sql_string(t0)}, 'UTC')
+  AND time_received_ns <  toDateTime({sql_string(t1)}, 'UTC')
 """,
     )
     if not row:
         return 0, 0
     return int(float(row[0] or 0)), int(float(row[1] or 0))
+
+
+def query_ch_window_rowcount(
+    ch: ClickHouse, args: argparse.Namespace, t0: str, t1: str
+) -> int:
+    return one_int(
+        ch,
+        f"""
+SELECT count()
+FROM default.flows_raw
+WHERE source_id = {sql_string(args.source_id)}
+  AND time_received_ns >= toDateTime({sql_string(t0)}, 'UTC')
+  AND time_received_ns <  toDateTime({sql_string(t1)}, 'UTC')
+""",
+    )
 
 
 def query_stage_rates(
@@ -459,6 +858,14 @@ ORDER BY bytes DESC
 
 
 def check_pipeline_coverage(ch: ClickHouse, args: argparse.Namespace, results: List[CheckResult]) -> None:
+    mode = detect_collector_mode(args)
+    if mode in ("xdp", "both"):
+        check_xdp_pipeline_coverage(ch, args, results)
+    if mode in ("sflow", "both"):
+        check_sflow_pipeline_coverage(ch, args, results)
+
+
+def check_xdp_pipeline_coverage(ch: ClickHouse, args: argparse.Namespace, results: List[CheckResult]) -> None:
     window_sec = args.coverage_window_sec
     if window_sec <= 0:
         return
@@ -621,6 +1028,404 @@ def check_pipeline_coverage(ch: ClickHouse, args: argparse.Namespace, results: L
                 "WARN",
                 "coverage.wire",
                 f"no ethtool xdp_* counters and sysfs delta=0 on {iface}; use xdp_vs_ch ratios only",
+            )
+
+
+def check_sflow_pipeline_coverage(ch: ClickHouse, args: argparse.Namespace, results: List[CheckResult]) -> None:
+    window_sec = args.coverage_window_sec
+    if window_sec <= 0:
+        return
+
+    iface = resolve_sflow_iface(args)
+    print(
+        f"INFO\tcoverage\tmeasuring sFlow pipeline for {window_sec}s "
+        f"iface={iface} source_id={args.source_id} unit={args.flow_unit}"
+    )
+
+    fc0 = read_flowcollectord_stats(args.flow_unit)
+    sysfs0 = read_sysfs_rx(iface)
+    t0 = utc_now_sql()
+
+    time.sleep(window_sec)
+
+    fc1 = read_flowcollectord_stats(args.flow_unit)
+    sysfs1 = read_sysfs_rx(iface)
+    t1 = utc_now_sql()
+
+    if not fc0 or not fc1:
+        add(
+            results,
+            "WARN",
+            "coverage.flowcollectord",
+            f"cannot read sflow/spool metrics from journalctl -u {args.flow_unit}; run as root on sFlow host",
+        )
+        return
+
+    d_datagrams = fc1.get("datagrams", 0) - fc0.get("datagrams", 0)
+    d_samples = fc1.get("flow_samples", 0) - fc0.get("flow_samples", 0)
+    d_parsed = fc1.get("records_parsed", 0) - fc0.get("records_parsed", 0)
+    d_parse_err = fc1.get("parse_errors", 0) - fc0.get("parse_errors", 0)
+    d_acked = fc1.get("records_acked", 0) - fc0.get("records_acked", 0)
+    d_insert_err = fc1.get("insert_errs", 0) - fc0.get("insert_errs", 0)
+
+    add(
+        results,
+        "OK" if d_datagrams > 0 else "FAIL",
+        "coverage.flowcollectord.datagrams",
+        f"window_sec={window_sec} datagrams={d_datagrams} flow_samples={d_samples} "
+        f"records_parsed={d_parsed} parse_errors_delta={d_parse_err}",
+    )
+    add(
+        results,
+        "OK" if d_acked > 0 else "FAIL",
+        "coverage.flowcollectord.acked",
+        f"window_sec={window_sec} records_acked={d_acked} insert_errs_delta={d_insert_err}",
+    )
+
+    if d_samples > 0:
+        parse_pct = 100.0 * d_parse_err / d_samples
+        status = "OK"
+        if parse_pct > args.max_sflow_parse_error_pct:
+            status = "WARN"
+        add(
+            results,
+            status,
+            "coverage.flowcollectord.parse_error_rate",
+            f"parse_errors/samples={parse_pct:.1f}% threshold={args.max_sflow_parse_error_pct}% "
+            f"(non-fatal: counter samples / non-Ethernet headers)",
+        )
+
+    ch_rows = query_ch_window_rowcount(ch, args, t0, t1)
+    ch_pkts, ch_bytes = query_ch_window_totals(ch, args, t0, t1)
+    add(
+        results,
+        "OK" if ch_bytes > 0 else "FAIL",
+        "coverage.clickhouse.flows_raw",
+        f"window_sec={window_sec} rows={ch_rows} packets={ch_pkts} bytes={ch_bytes} "
+        f"{format_rate(ch_pkts, ch_bytes, window_sec)}",
+    )
+
+    if d_parsed > 0:
+        row_ratio = pct_ratio(ch_rows, d_parsed)
+        row_dev = pct_deviation(row_ratio)
+        status = "OK"
+        if row_ratio is not None and abs(row_dev or 0) > args.max_coverage_deviation_pct:
+            status = "WARN"
+        add(
+            results,
+            status,
+            "coverage.ratio.ch_rows_vs_parsed",
+            f"ch_rows={ch_rows} parsed_delta={d_parsed} ratio={format_ratio_pct(row_ratio)} "
+            f"deviation={format_deviation_pct(row_dev)} threshold=±{args.max_coverage_deviation_pct}%",
+        )
+
+    if d_acked > 0:
+        ack_ratio = pct_ratio(ch_rows, d_acked)
+        ack_dev = pct_deviation(ack_ratio)
+        status = "OK"
+        if ack_ratio is not None and abs(ack_dev or 0) > args.max_coverage_deviation_pct:
+            status = "WARN"
+        add(
+            results,
+            status,
+            "coverage.ratio.ch_rows_vs_acked",
+            f"ch_rows={ch_rows} acked_delta={d_acked} ratio={format_ratio_pct(ack_ratio)} "
+            f"deviation={format_deviation_pct(ack_dev)} threshold=±{args.max_coverage_deviation_pct}%",
+        )
+
+    d_sysfs_pkts = sysfs1[0] - sysfs0[0]
+    d_sysfs_bytes = sysfs1[1] - sysfs0[1]
+    if d_sysfs_bytes > 0:
+        add(
+            results,
+            "OK",
+            "coverage.wire.sysfs",
+            f"window_sec={window_sec} iface={iface} rx_bytes={d_sysfs_bytes} "
+            f"{format_rate(d_sysfs_pkts, d_sysfs_bytes, window_sec)} "
+            f"(all traffic on NIC, not sFlow-only)",
+        )
+        if ch_bytes > 0:
+            byte_ratio = pct_ratio(ch_bytes, d_sysfs_bytes)
+            add(
+                results,
+                "OK",
+                "coverage.ratio.ch_bytes_vs_nic_rx",
+                f"ch_bytes={ch_bytes} nic_rx_bytes={d_sysfs_bytes} ratio={format_ratio_pct(byte_ratio)} "
+                f"(sFlow extrapolates sampled frames; expect >>100% if many agents)",
+            )
+
+
+def check_sflow_capture_vs_db(ch: ClickHouse, args: argparse.Namespace, results: List[CheckResult]) -> None:
+    if not is_sflow_source(args.source_id) or args.sflow_capture_sec <= 0:
+        return
+    mode = detect_collector_mode(args)
+    if mode not in ("sflow", "both"):
+        return
+    if not shutil.which(args.tcpdump) and not os.path.isfile(args.tcpdump):
+        add(results, "WARN", "sflow_capture", f"tcpdump not found: {args.tcpdump}")
+        return
+
+    print(
+        f"INFO\tsflow_capture\tcapturing {args.sflow_capture_sec}s on "
+        f"iface={resolve_sflow_iface(args)} udp/{args.sflow_port}"
+    )
+    pcap_path = ""
+    try:
+        pcap_path, t0, t1 = capture_sflow_pcap(args)
+        summary = summarize_sflow_pcap(pcap_path, args.sflow_port)
+    except Exception as exc:  # noqa: BLE001 - health check should report and continue.
+        add(results, "WARN", "sflow_capture", str(exc))
+        return
+    finally:
+        if pcap_path and not args.keep_sflow_capture:
+            try:
+                os.unlink(pcap_path)
+            except OSError:
+                pass
+
+    if summary.datagrams == 0:
+        add(results, "FAIL", "sflow_capture.datagrams", "captured 0 sFlow datagrams")
+        return
+
+    add(
+        results,
+        "OK" if summary.parsed_records > 0 else "FAIL",
+        "sflow_capture.parsed",
+        f"datagrams={summary.datagrams} flow_samples={summary.flow_samples} "
+        f"counter_samples={summary.counter_samples} raw_records={summary.raw_records} "
+        f"parsed_records={summary.parsed_records} parse_errors={summary.parse_errors}",
+    )
+    add(
+        results,
+        "OK",
+        "sflow_capture.scaled_total",
+        f"window_sec={args.sflow_capture_sec} packets={summary.extrapolated_packets} "
+        f"bytes={summary.extrapolated_bytes} sampled_frame_bytes={summary.sampled_frame_bytes} "
+        f"{format_rate(summary.extrapolated_packets, summary.extrapolated_bytes, args.sflow_capture_sec)} "
+        f"sampling_rate_min={summary.min_sampling_rate} sampling_rate_max={summary.max_sampling_rate}",
+    )
+
+    if args.sflow_db_settle_sec > 0:
+        time.sleep(args.sflow_db_settle_sec)
+    ch_rows = query_ch_window_rowcount(ch, args, t0, t1)
+    ch_packets, ch_bytes = query_ch_window_totals(ch, args, t0, t1)
+
+    row_ratio = pct_ratio(ch_rows, summary.parsed_records)
+    pkt_ratio = pct_ratio(ch_packets, summary.extrapolated_packets)
+    byte_ratio = pct_ratio(ch_bytes, summary.extrapolated_bytes)
+    row_dev = pct_deviation(row_ratio)
+    pkt_dev = pct_deviation(pkt_ratio)
+    byte_dev = pct_deviation(byte_ratio)
+
+    status = "OK"
+    max_dev = max(abs(row_dev or 0), abs(pkt_dev or 0), abs(byte_dev or 0))
+    if max_dev > args.max_sflow_capture_db_deviation_pct:
+        status = "FAIL"
+    add(
+        results,
+        status,
+        "sflow_capture.db_compare",
+        f"window=[{t0},{t1}) capture_rows={summary.parsed_records} ch_rows={ch_rows} "
+        f"rows_ratio={format_ratio_pct(row_ratio)} capture_packets={summary.extrapolated_packets} "
+        f"ch_packets={ch_packets} packets_ratio={format_ratio_pct(pkt_ratio)} "
+        f"capture_bytes={summary.extrapolated_bytes} ch_bytes={ch_bytes} "
+        f"bytes_ratio={format_ratio_pct(byte_ratio)} threshold=±{args.max_sflow_capture_db_deviation_pct}%",
+    )
+
+    avg_frame = (
+        summary.extrapolated_bytes / summary.extrapolated_packets
+        if summary.extrapolated_packets > 0
+        else 0
+    )
+    if avg_frame > args.max_sflow_frame_bytes:
+        add(
+            results,
+            "FAIL",
+            "sflow_capture.avg_frame",
+            f"bytes/packets={avg_frame:.0f} > {args.max_sflow_frame_bytes}",
+        )
+    else:
+        add(
+            results,
+            "OK",
+            "sflow_capture.avg_frame",
+            f"bytes/packets={avg_frame:.0f} (derived directly from captured sFlow records)",
+        )
+
+
+def is_sflow_source(source_id: str) -> bool:
+    return source_id == "sflow-default" or source_id.startswith("sflow-") or source_id.endswith("-sflow")
+
+
+def check_sflow_sampling_sanity(ch: ClickHouse, args: argparse.Namespace, results: List[CheckResult]) -> None:
+    if not is_sflow_source(args.source_id):
+        return
+
+    row = one_row(
+        ch,
+        f"""
+SELECT
+    round(sum(bytes) / nullIf(sum(packets), 0), 0) AS avg_bytes_per_packet,
+    round(sum(bytes) / 1e12, 3) AS tb,
+    sum(packets) AS total_packets,
+    max(sampling_rate) AS max_sampling_rate,
+    round(quantile(0.5)(sampling_rate), 0) AS p50_sampling_rate
+FROM default.flows_raw
+WHERE source_id = {sql_string(args.source_id)}
+  AND time_received_ns >= now() - INTERVAL {args.quality_window_minutes} MINUTE
+""",
+    )
+    if not row or row[0] == "":
+        add(results, "FAIL", "sflow_sampling", f"no {args.source_id} rows in last {args.quality_window_minutes}m")
+        return
+
+    avg_bpp, tb, total_pkts, max_rate, p50_rate = row
+    avg_bpp_f = float(avg_bpp or 0)
+    tb_f = float(tb or 0)
+    max_rate_i = int(float(max_rate or 0))
+    p50_rate_i = int(float(p50_rate or 0))
+    pkts_sum = int(float(total_pkts or 0))
+
+    window_sec = args.quality_window_minutes * 60
+    bytes_sum = int(avg_bpp_f * pkts_sum) if pkts_sum > 0 else 0
+    row_bytes = one_row(
+        ch,
+        f"""
+SELECT sum(bytes)
+FROM default.flows_raw
+WHERE source_id = {sql_string(args.source_id)}
+  AND time_received_ns >= now() - INTERVAL {args.quality_window_minutes} MINUTE
+""",
+    )
+    if row_bytes and row_bytes[0]:
+        bytes_sum = int(float(row_bytes[0]))
+
+    add(
+        results,
+        "OK",
+        "sflow_sampling.volume",
+        f"window={args.quality_window_minutes}m tb={tb_f} "
+        f"{format_rate(pkts_sum, bytes_sum, window_sec)} rows_implied_frame={avg_bpp_f}B",
+    )
+
+    if avg_bpp_f <= 0:
+        add(results, "FAIL", "sflow_sampling.avg_frame", "bytes/packets=0")
+    elif avg_bpp_f > args.max_sflow_frame_bytes:
+        add(
+            results,
+            "FAIL",
+            "sflow_sampling.avg_frame",
+            f"bytes/packets={avg_bpp_f:.0f} > {args.max_sflow_frame_bytes} "
+            f"(expected Ethernet frame size; pre-scale may be wrong)",
+        )
+    elif avg_bpp_f > args.warn_sflow_frame_bytes:
+        add(
+            results,
+            "WARN",
+            "sflow_sampling.avg_frame",
+            f"bytes/packets={avg_bpp_f:.0f} warn_above={args.warn_sflow_frame_bytes}",
+        )
+    else:
+        add(
+            results,
+            "OK",
+            "sflow_sampling.avg_frame",
+            f"bytes/packets={avg_bpp_f:.0f} (≈ mean frame length after sampling_rate pre-scale)",
+        )
+
+    if max_rate_i > args.max_sflow_sampling_rate:
+        add(
+            results,
+            "FAIL",
+            "sflow_sampling.max_rate",
+            f"max_sampling_rate={max_rate_i} > {args.max_sflow_sampling_rate}",
+        )
+    else:
+        add(
+            results,
+            "OK",
+            "sflow_sampling.max_rate",
+            f"max_sampling_rate={max_rate_i} p50_sampling_rate={p50_rate_i}",
+        )
+
+
+def check_sflow_volume_summary(ch: ClickHouse, args: argparse.Namespace, results: List[CheckResult]) -> None:
+    if not is_sflow_source(args.source_id):
+        return
+
+    minutes = int(args.volume_window_hours * 60)
+    row = one_row(
+        ch,
+        f"""
+SELECT
+    round(sum(bytes) / 1e12, 3) AS tb,
+    round(sum(bytes) * 8 / 1e9 / {minutes * 60}, 2) AS avg_gbps,
+    count() AS rows
+FROM default.flows_raw
+WHERE source_id = {sql_string(args.source_id)}
+  AND time_received_ns >= now() - INTERVAL {minutes} MINUTE
+""",
+    )
+    if not row or row[0] == "":
+        add(results, "FAIL", "sflow_volume", f"no rows in last {args.volume_window_hours}h")
+        return
+
+    tb, avg_gbps, rows = row
+    tb_f = float(tb or 0)
+    gbps_f = float(avg_gbps or 0)
+    detail = f"window={args.volume_window_hours}h tb={tb_f} avg_gbps={gbps_f} rows={rows}"
+    if args.expected_max_gbps > 0 and gbps_f > args.expected_max_gbps * (1 + args.max_volume_overshoot_pct / 100):
+        add(
+            results,
+            "FAIL",
+            "sflow_volume.rate",
+            f"{detail} exceeds expected_max_gbps={args.expected_max_gbps} "
+            f"by >{args.max_volume_overshoot_pct}%",
+        )
+    else:
+        status = "OK"
+        if args.expected_max_gbps > 0:
+            detail += f" expected_max_gbps={args.expected_max_gbps}"
+        add(results, status, "sflow_volume.rate", detail)
+
+
+def check_cross_source_rate(ch: ClickHouse, args: argparse.Namespace, results: List[CheckResult]) -> None:
+    if not args.compare_source_id:
+        return
+    minutes = args.compare_window_minutes
+    row = one_row(
+        ch,
+        f"""
+SELECT
+    round(sumIf(bytes, source_id = {sql_string(args.source_id)}) / 1e9, 1) AS primary_gb,
+    round(sumIf(bytes, source_id = {sql_string(args.compare_source_id)}) / 1e9, 1) AS compare_gb
+FROM default.flows_raw
+WHERE source_id IN ({sql_string(args.source_id)}, {sql_string(args.compare_source_id)})
+  AND time_received_ns >= now() - INTERVAL {minutes} MINUTE
+""",
+    )
+    if not row or row[0] == "":
+        add(results, "WARN", "cross_source", "no overlapping window rows")
+        return
+    primary_gb = float(row[0] or 0)
+    compare_gb = float(row[1] or 0)
+    ratio = pct_ratio(primary_gb, compare_gb)
+    add(
+        results,
+        "OK",
+        "cross_source.bytes",
+        f"window={minutes}m {args.source_id}_gb={primary_gb} {args.compare_source_id}_gb={compare_gb} "
+        f"ratio={format_ratio_pct(ratio)}",
+    )
+    if compare_gb > 0 and ratio is not None:
+        if ratio > 100 * args.max_cross_source_ratio or ratio < 100 / args.max_cross_source_ratio:
+            add(
+                results,
+                "WARN",
+                "cross_source.ratio",
+                f"{args.source_id} vs {args.compare_source_id} ratio={format_ratio_pct(ratio)} "
+                f"outside 1/{args.max_cross_source_ratio}..{args.max_cross_source_ratio}x "
+                f"(overlap or scaling mismatch if same traffic)",
             )
 
 
@@ -1162,8 +1967,7 @@ FROM
 
     SELECT 'agg' AS src, direction, sum(bytes) / 1e9 AS gb
     FROM default.traffic_direction_1m AS d
-    INNER JOIN default.net_flow_sources_enabled AS s ON d.source_id = s.source_id
-    WHERE s.include_in_total = 1
+    WHERE d.source_id = {sql_string(args.source_id)}
       AND d.minute >= ts_from
       AND d.minute < ts_to
     GROUP BY direction
@@ -1199,7 +2003,13 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--user", default=env("TRAFFIC_ROLLUP_CH_USER", "default"))
     p.add_argument("--password", default=env("TRAFFIC_ROLLUP_CH_PASSWORD"))
     p.add_argument("--database", default=env("TRAFFIC_ROLLUP_CH_DATABASE", "default"))
-    p.add_argument("--source-id", default="netflow", help="production flow source_id to validate")
+    p.add_argument("--source-id", default="", help="flow source_id (default: auto from collector env)")
+    p.add_argument(
+        "--collector",
+        choices=("auto", "xdp", "sflow", "both"),
+        default="auto",
+        help="local collector type for live coverage (auto=systemd detect)",
+    )
     p.add_argument("--local-asn", type=int, default=0, help="expected local ASN; informational for operators")
     p.add_argument("--raw-window-minutes", type=int, default=5)
     p.add_argument("--quality-window-minutes", type=int, default=10)
@@ -1240,6 +2050,106 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--iface", default="", help="mirror NIC for wire counters (default: XDPFLOWD_IFACE from env)")
     p.add_argument("--xdp-unit", default="xdpflowd", help="systemd unit for xdpflowd stats")
     p.add_argument("--xdp-env-file", default="/etc/xdpflowd/xdpflowd.env", help="env file with XDPFLOWD_IFACE")
+    p.add_argument("--flow-unit", default="flowcollectord", help="systemd unit for flowcollectord stats")
+    p.add_argument(
+        "--flow-env-file",
+        default="/etc/flowcollectord/flowcollectord.env",
+        help="env file with FC_SFLOW_SOURCE_ID",
+    )
+    p.add_argument(
+        "--sflow-iface",
+        default="",
+        help="NIC receiving sFlow UDP (for optional sysfs rx reference)",
+    )
+    p.add_argument(
+        "--sflow-iface-default",
+        default="ens18",
+        help="default sFlow NIC when --sflow-iface unset",
+    )
+    p.add_argument(
+        "--compare-source-id",
+        default="",
+        help="optional second source_id to compare byte volume (overlap check)",
+    )
+    p.add_argument(
+        "--max-cross-source-ratio",
+        type=float,
+        default=3.0,
+        help="WARN if primary/compare byte ratio outside 1/N..N",
+    )
+    p.add_argument(
+        "--expected-max-gbps",
+        type=float,
+        default=0.0,
+        help="FAIL if sFlow avg gbps in volume window exceeds this (0=disable)",
+    )
+    p.add_argument(
+        "--volume-window-hours",
+        type=float,
+        default=1.0,
+        help="window for sflow_volume.rate summary",
+    )
+    p.add_argument(
+        "--max-volume-overshoot-pct",
+        type=float,
+        default=20.0,
+        help="allowed overshoot above --expected-max-gbps before FAIL",
+    )
+    p.add_argument(
+        "--max-sflow-frame-bytes",
+        type=int,
+        default=65535,
+        help="FAIL if mean bytes/packets exceeds this (bad pre-scale)",
+    )
+    p.add_argument(
+        "--warn-sflow-frame-bytes",
+        type=int,
+        default=16384,
+        help="WARN if mean bytes/packets exceeds this",
+    )
+    p.add_argument(
+        "--max-sflow-sampling-rate",
+        type=int,
+        default=1_000_000,
+        help="FAIL if max sampling_rate in window exceeds this",
+    )
+    p.add_argument(
+        "--max-sflow-parse-error-pct",
+        type=float,
+        default=60.0,
+        help="WARN if flowcollectord parse_errors/samples exceeds this in live window",
+    )
+    p.add_argument("--tcpdump", default="tcpdump", help="tcpdump binary for live sFlow pcap verification")
+    p.add_argument("--sflow-port", type=int, default=6343, help="sFlow UDP port to capture")
+    p.add_argument(
+        "--sflow-capture-sec",
+        type=int,
+        default=15,
+        help="capture live sFlow datagrams for independent parser-vs-DB check (0=disable)",
+    )
+    p.add_argument(
+        "--sflow-capture-warmup-sec",
+        type=float,
+        default=0.5,
+        help="seconds to let tcpdump attach before starting DB comparison window",
+    )
+    p.add_argument(
+        "--sflow-db-settle-sec",
+        type=float,
+        default=3.0,
+        help="seconds to wait after capture before querying ClickHouse",
+    )
+    p.add_argument(
+        "--max-sflow-capture-db-deviation-pct",
+        type=float,
+        default=5.0,
+        help="FAIL if pcap parser and flows_raw differ more than this in the capture window",
+    )
+    p.add_argument(
+        "--keep-sflow-capture",
+        action="store_true",
+        help="keep temporary pcap file after sFlow capture parser check",
+    )
     p.add_argument(
         "--max-coverage-deviation-pct",
         type=float,
@@ -1296,12 +2206,18 @@ def main() -> int:
     loaded_env = bootstrap_env(pre_args.env_file)
 
     args = parse_args()
+    collector_mode = detect_collector_mode(args)
+    args.source_id = resolve_source_id(args, collector_mode)
     if loaded_env:
         print(f"INFO\tconfig\tenv={' '.join(loaded_env)} host={args.host} port={args.port} user={args.user}")
     else:
         print(f"INFO\tconfig\thost={args.host} port={args.port} user={args.user} database={args.database}")
+    print(
+        f"INFO\tconfig\tcollector={collector_mode} source_id={args.source_id} "
+        f"xdp_unit={args.xdp_unit} flow_unit={args.flow_unit}"
+    )
     if args.local_asn:
-        print(f"INFO\tconfig\tlocal_asn={args.local_asn} source_id={args.source_id}")
+        print(f"INFO\tconfig\tlocal_asn={args.local_asn}")
     ch = ClickHouse(args)
     results: List[CheckResult] = []
 
@@ -1322,6 +2238,10 @@ def main() -> int:
         ("talker_quality", lambda: check_talker_quality(ch, args, results)),
         ("pair_quality", lambda: check_pair_quality(ch, args, results)),
         ("raw_vs_direction_agg", lambda: check_raw_vs_direction_agg(ch, args, results)),
+        ("sflow_capture", lambda: check_sflow_capture_vs_db(ch, args, results)),
+        ("sflow_sampling", lambda: check_sflow_sampling_sanity(ch, args, results)),
+        ("sflow_volume", lambda: check_sflow_volume_summary(ch, args, results)),
+        ("cross_source", lambda: check_cross_source_rate(ch, args, results)),
     ])
     for name, fn in checks:
         try:
