@@ -49,6 +49,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
+from urllib.parse import unquote, urlparse
 
 # Roles that must have origin_asn; system private prefixes (internal) may legitimately have asn=0.
 LOCAL_ORIGIN_ROLES = ("provider_public", "customer_allocated", "customer_transit")
@@ -73,6 +74,7 @@ PRIVATE_IP_EXCLUDE_DST_SQL = PRIVATE_IP_EXCLUDE_SRC_SQL.replace("src_ip", "dst_i
 DEFAULT_ENV_FILES = (
     "/etc/grapesnta/traffic-rollups.env",
     "/etc/grapesnta/traffic-talkers-rollups.env",
+    "/etc/flowcollectord/flowcollectord.env",
 )
 
 MINUTE_ROLLUP_JOBS = {
@@ -142,6 +144,30 @@ def bootstrap_env(explicit_files: Sequence[str]) -> List[str]:
         if load_env_file(path):
             loaded.append(path)
     return loaded
+
+
+def apply_clickhouse_dsn_defaults(args: argparse.Namespace) -> bool:
+    """Use collector DSN when rollup env vars are absent on a collector-only host."""
+    dsn = env("FC_CH_DSN") or env("XDP_CH_DSN") or env("DNS_CH_DSN") or env("BMP_CH_DSN")
+    if not dsn:
+        return False
+    parsed = urlparse(dsn)
+    if parsed.scheme not in ("clickhouse", "clickhouses") or not parsed.hostname:
+        return False
+
+    if args.host == "localhost" and env("TRAFFIC_ROLLUP_CH_HOST") is None:
+        args.host = parsed.hostname
+    if args.port == 9000 and env("TRAFFIC_ROLLUP_CH_PORT") is None:
+        args.port = parsed.port or (9440 if parsed.scheme == "clickhouses" else 9000)
+    if args.user == "default" and env("TRAFFIC_ROLLUP_CH_USER") is None and parsed.username:
+        args.user = unquote(parsed.username)
+    if (args.password is None or args.password == "") and env("TRAFFIC_ROLLUP_CH_PASSWORD") is None and parsed.password:
+        args.password = unquote(parsed.password)
+    if args.database == "default" and env("TRAFFIC_ROLLUP_CH_DATABASE") is None:
+        database = parsed.path.lstrip("/")
+        if database:
+            args.database = database
+    return True
 
 
 def rollup_job_kind(job: str) -> str:
@@ -2206,12 +2232,15 @@ def main() -> int:
     loaded_env = bootstrap_env(pre_args.env_file)
 
     args = parse_args()
+    used_collector_dsn = apply_clickhouse_dsn_defaults(args)
     collector_mode = detect_collector_mode(args)
     args.source_id = resolve_source_id(args, collector_mode)
     if loaded_env:
         print(f"INFO\tconfig\tenv={' '.join(loaded_env)} host={args.host} port={args.port} user={args.user}")
     else:
         print(f"INFO\tconfig\thost={args.host} port={args.port} user={args.user} database={args.database}")
+    if used_collector_dsn:
+        print("INFO\tconfig\tclickhouse_dsn=collector_env")
     print(
         f"INFO\tconfig\tcollector={collector_mode} source_id={args.source_id} "
         f"xdp_unit={args.xdp_unit} flow_unit={args.flow_unit}"
