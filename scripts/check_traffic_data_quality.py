@@ -36,6 +36,26 @@ import sys
 from dataclasses import dataclass
 from typing import List, Optional, Sequence, Tuple
 
+# Roles that must have origin_asn; system private prefixes (internal) may legitimately have asn=0.
+LOCAL_ORIGIN_ROLES = ("provider_public", "customer_allocated", "customer_transit")
+LOCAL_ORIGIN_ROLES_SQL = ", ".join(f"'{role}'" for role in LOCAL_ORIGIN_ROLES)
+
+# traffic_pair_1m has no network_role; exclude RFC1918/CGNAT/link-local/loopback by-CIDR instead.
+PRIVATE_IP_EXCLUDE_SRC_SQL = """
+NOT (
+    isIPAddressInRange(src_ip, '10.0.0.0/8') OR
+    isIPAddressInRange(src_ip, '172.16.0.0/12') OR
+    isIPAddressInRange(src_ip, '192.168.0.0/16') OR
+    isIPAddressInRange(src_ip, '100.64.0.0/10') OR
+    isIPAddressInRange(src_ip, '127.0.0.0/8') OR
+    isIPAddressInRange(src_ip, '169.254.0.0/16') OR
+    isIPAddressInRange(src_ip, 'fc00::/7') OR
+    isIPAddressInRange(src_ip, 'fe80::/10') OR
+    isIPAddressInRange(src_ip, '::1/128')
+)
+""".strip()
+PRIVATE_IP_EXCLUDE_DST_SQL = PRIVATE_IP_EXCLUDE_SRC_SQL.replace("src_ip", "dst_ip")
+
 DEFAULT_ENV_FILES = (
     "/etc/grapesnta/traffic-rollups.env",
     "/etc/grapesnta/traffic-talkers-rollups.env",
@@ -357,8 +377,8 @@ SELECT
     round(sum(bytes) / 1e9, 1) AS gb,
     countIf(direction IN ('', 'unknown', 'unclassified')) AS unknown_flows,
     round(sumIf(bytes, direction IN ('', 'unknown', 'unclassified')) / 1e9, 1) AS unknown_gb,
-    round(sumIf(bytes, direction = 'out' AND src_role IN ('provider_public', 'internal', 'customer_allocated', 'customer_transit') AND src_asn = 0) / 1e9, 1) AS out_local_src_asn_zero_gb,
-    round(sumIf(bytes, direction = 'in' AND dst_role IN ('provider_public', 'internal', 'customer_allocated', 'customer_transit') AND dst_asn = 0) / 1e9, 1) AS in_local_dst_asn_zero_gb
+    round(sumIf(bytes, direction = 'out' AND src_role IN ({LOCAL_ORIGIN_ROLES_SQL}) AND src_asn = 0) / 1e9, 1) AS out_local_src_asn_zero_gb,
+    round(sumIf(bytes, direction = 'in' AND dst_role IN ({LOCAL_ORIGIN_ROLES_SQL}) AND dst_asn = 0) / 1e9, 1) AS in_local_dst_asn_zero_gb
 FROM default.flows_raw
 WHERE source_id = {sql_string(args.source_id)}
   AND time_received_ns >= now64(9) - INTERVAL {args.raw_window_minutes} MINUTE
@@ -490,7 +510,7 @@ SELECT
     endpoint_scope,
     count() AS rows,
     countIf(endpoint_ip = '') AS empty_ip,
-    round(sumIf(bytes, endpoint_scope IN ('local', 'customer') AND endpoint_asn = 0) / 1e9, 1) AS local_asn_zero_gb,
+    round(sumIf(bytes, endpoint_scope IN ('local', 'customer') AND endpoint_network_role IN ({LOCAL_ORIGIN_ROLES_SQL}) AND endpoint_asn = 0) / 1e9, 1) AS local_asn_zero_gb,
     round(sumIf(bytes, endpoint_scope = 'remote' AND endpoint_asn = 0) / 1e9, 1) AS remote_asn_zero_gb,
     round(sumIf(bytes, endpoint_ip_country = '??') / 1e9, 1) AS ip_country_unknown_gb,
     round(sumIf(bytes, endpoint_as_country = '??' AND endpoint_asn != 0) / 1e9, 1) AS as_country_unknown_known_asn_gb,
@@ -549,8 +569,8 @@ SELECT
     dst_scope,
     count() AS rows,
     countIf(src_ip = '' OR dst_ip = '') AS empty_ip_rows,
-    round(sumIf(bytes, src_scope IN ('local', 'customer') AND src_asn = 0) / 1e9, 1) AS src_local_asn_zero_gb,
-    round(sumIf(bytes, dst_scope IN ('local', 'customer') AND dst_asn = 0) / 1e9, 1) AS dst_local_asn_zero_gb,
+    round(sumIf(bytes, src_scope IN ('local', 'customer') AND src_asn = 0 AND {PRIVATE_IP_EXCLUDE_SRC_SQL}) / 1e9, 1) AS src_local_asn_zero_gb,
+    round(sumIf(bytes, dst_scope IN ('local', 'customer') AND dst_asn = 0 AND {PRIVATE_IP_EXCLUDE_DST_SQL}) / 1e9, 1) AS dst_local_asn_zero_gb,
     round(sumIf(bytes, src_scope = 'remote' AND src_asn = 0) / 1e9, 1) AS src_remote_asn_zero_gb,
     round(sumIf(bytes, dst_scope = 'remote' AND dst_asn = 0) / 1e9, 1) AS dst_remote_asn_zero_gb,
     round(sumIf(bytes, src_ip_country = '??' OR dst_ip_country = '??') / 1e9, 1) AS ip_country_unknown_gb,
