@@ -441,6 +441,26 @@ def read_flowcollectord_stats(unit: str) -> Dict[str, int]:
     return out
 
 
+def read_udp_snmp() -> Dict[str, int]:
+    """Read aggregate UDP counters from /proc/net/snmp."""
+    try:
+        lines = Path("/proc/net/snmp").read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return {}
+    header: Optional[List[str]] = None
+    for line in lines:
+        if not line.startswith("Udp:"):
+            continue
+        fields = line.split()
+        if header is None:
+            header = fields[1:]
+            continue
+        values = fields[1:]
+        if header and len(header) == len(values):
+            return {k: int(v) for k, v in zip(header, values)}
+    return {}
+
+
 def be_u32(buf: bytes, offset: int) -> int:
     return struct.unpack_from(">I", buf, offset)[0]
 
@@ -1196,6 +1216,8 @@ def check_sflow_capture_vs_db(ch: ClickHouse, args: argparse.Namespace, results:
         f"iface={resolve_sflow_iface(args)} udp/{args.sflow_port}"
     )
     pcap_path = ""
+    fc0 = read_flowcollectord_stats(args.flow_unit)
+    udp0 = read_udp_snmp()
     try:
         pcap_path, t0, t1 = capture_sflow_pcap(args)
         summary = summarize_sflow_pcap(pcap_path, args.sflow_port)
@@ -1233,8 +1255,41 @@ def check_sflow_capture_vs_db(ch: ClickHouse, args: argparse.Namespace, results:
 
     if args.sflow_db_settle_sec > 0:
         time.sleep(args.sflow_db_settle_sec)
+    fc1 = read_flowcollectord_stats(args.flow_unit)
+    udp1 = read_udp_snmp()
     ch_rows = query_ch_window_rowcount(ch, args, t0, t1)
     ch_packets, ch_bytes = query_ch_window_totals(ch, args, t0, t1)
+
+    if fc0 and fc1:
+        fc_datagrams = fc1.get("datagrams", 0) - fc0.get("datagrams", 0)
+        fc_parsed = fc1.get("records_parsed", 0) - fc0.get("records_parsed", 0)
+        fc_acked = fc1.get("records_acked", 0) - fc0.get("records_acked", 0)
+        dgram_ratio = pct_ratio(fc_datagrams, summary.datagrams)
+        parsed_ratio = pct_ratio(fc_parsed, summary.parsed_records)
+        status = "OK"
+        if parsed_ratio is not None and abs((pct_deviation(parsed_ratio) or 0)) > args.max_sflow_capture_db_deviation_pct:
+            status = "WARN"
+        add(
+            results,
+            status,
+            "sflow_capture.flowcollectord_compare",
+            f"capture_datagrams={summary.datagrams} collector_datagrams_delta={fc_datagrams} "
+            f"datagrams_ratio={format_ratio_pct(dgram_ratio)} capture_rows={summary.parsed_records} "
+            f"collector_parsed_delta={fc_parsed} parsed_ratio={format_ratio_pct(parsed_ratio)} "
+            f"collector_acked_delta={fc_acked}",
+        )
+
+    if udp0 and udp1:
+        in_err = udp1.get("InErrors", 0) - udp0.get("InErrors", 0)
+        rcvbuf_err = udp1.get("RcvbufErrors", 0) - udp0.get("RcvbufErrors", 0)
+        in_datagrams = udp1.get("InDatagrams", 0) - udp0.get("InDatagrams", 0)
+        status = "OK" if in_err == 0 and rcvbuf_err == 0 else "FAIL"
+        add(
+            results,
+            status,
+            "sflow_capture.udp_kernel",
+            f"InDatagrams_delta={in_datagrams} InErrors_delta={in_err} RcvbufErrors_delta={rcvbuf_err}",
+        )
 
     row_ratio = pct_ratio(ch_rows, summary.parsed_records)
     pkt_ratio = pct_ratio(ch_packets, summary.extrapolated_packets)
