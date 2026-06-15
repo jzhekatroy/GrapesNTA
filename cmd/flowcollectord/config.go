@@ -67,7 +67,7 @@ func loadConfig() config {
 	classifierL3 := flag.String("classifier-l3-prefixes-view", envString("FC_CLASSIFIER_L3_PREFIXES_VIEW", "default.net_l3_prefixes_enabled"), "L3 prefixes view")
 	classifierL2 := flag.String("classifier-l2-vlans-view", envString("FC_CLASSIFIER_L2_VLANS_VIEW", "default.net_l2_vlans_enabled"), "L2 VLANs view")
 
-	udpReadBuffer := flag.Int("udp-read-buffer", envInt("FC_UDP_READ_BUFFER", 65535), "UDP read buffer size")
+	udpReadBuffer := flag.Int("udp-read-buffer", envInt("FC_UDP_READ_BUFFER", 64*1024*1024), "UDP socket read buffer bytes (also bounds datagram read buffer)")
 	interval := flag.Duration("interval", envDuration("FC_INTERVAL", 5*time.Second), "metrics log interval")
 	healthInterval := flag.Duration("health-interval", envDuration("FC_HEALTH_INTERVAL", time.Minute), "health log interval")
 

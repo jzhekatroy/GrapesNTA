@@ -51,14 +51,32 @@ func newSflowListener(
 }
 
 func (l *sflowListener) Run(ctx context.Context) error {
-	pc, err := net.ListenPacket("udp", l.addr)
+	udpAddr, err := net.ResolveUDPAddr("udp", l.addr)
+	if err != nil {
+		return err
+	}
+	pc, err := net.ListenUDP("udp", udpAddr)
 	if err != nil {
 		return err
 	}
 	defer pc.Close()
-	l.log.Info("sflow listener started", "addr", l.addr, "source_id", l.sourceID)
+	if l.readBuf > 0 {
+		if err := pc.SetReadBuffer(l.readBuf); err != nil {
+			l.log.Warn("sflow set udp read buffer", "requested_bytes", l.readBuf, "err", err)
+		}
+	}
+	datagramBufSize := l.readBuf
+	if datagramBufSize < 65535 {
+		datagramBufSize = 65535
+	}
+	l.log.Info("sflow listener started",
+		"addr", l.addr,
+		"source_id", l.sourceID,
+		"udp_read_buffer_bytes", l.readBuf,
+		"datagram_buffer_bytes", datagramBufSize,
+	)
 
-	buf := make([]byte, l.readBuf)
+	buf := make([]byte, datagramBufSize)
 	pending := make([]flowingest.FlowRow, 0, l.batchSize)
 	nextFlush := time.Now().Add(l.flushEvery)
 	flush := func() {
