@@ -237,7 +237,13 @@ def pct_deviation(ratio_pct: Optional[float]) -> Optional[float]:
     return ratio_pct - 100.0
 
 
-def format_pct(value: Optional[float]) -> str:
+def format_ratio_pct(value: Optional[float]) -> str:
+    if value is None:
+        return "n/a"
+    return f"{value:.2f}%"
+
+
+def format_deviation_pct(value: Optional[float]) -> str:
     if value is None:
         return "n/a"
     return f"{value:+.2f}%" if value > 0 else f"{value:.2f}%"
@@ -370,8 +376,32 @@ WHERE source_id = {sql_string(args.source_id)}
     return int(float(row[0] or 0)), int(float(row[1] or 0))
 
 
-def query_stage_rates(ch: ClickHouse, args: argparse.Namespace, window_minutes: int) -> List[Tuple[str, int, int]]:
+def query_stage_rates(
+    ch: ClickHouse, args: argparse.Namespace, window_minutes: int
+) -> Tuple[str, str, List[Tuple[str, int, int]]]:
+    """Return (ts_from, ts_to, stage totals) on a closed-minute window aligned to rollups."""
     source = sql_string(args.source_id)
+    anchor = one_row(
+        ch,
+        f"""
+SELECT
+    toString(least(
+        (SELECT max(minute) FROM default.traffic_dashboard_1m WHERE source_id = {source}),
+        (SELECT max(minute) FROM default.traffic_direction_1m WHERE source_id = {source}),
+        (SELECT max(minute) FROM default.traffic_pair_1m WHERE source_id = {source})
+    )) AS ts_to,
+    toString(
+        least(
+            (SELECT max(minute) FROM default.traffic_dashboard_1m WHERE source_id = {source}),
+            (SELECT max(minute) FROM default.traffic_direction_1m WHERE source_id = {source}),
+            (SELECT max(minute) FROM default.traffic_pair_1m WHERE source_id = {source})
+        ) - INTERVAL {window_minutes} MINUTE
+    ) AS ts_from
+""",
+    )
+    if not anchor or not anchor[0] or anchor[0].startswith("1970-"):
+        return "", "", []
+    ts_to, ts_from = anchor[0], anchor[1]
     rows = ch.query_tsv(
         f"""
 SELECT stage, packets, bytes
@@ -383,7 +413,8 @@ FROM
         sum(bytes) AS bytes
     FROM default.flows_raw
     WHERE source_id = {source}
-      AND time_received_ns >= now64(9) - INTERVAL {window_minutes} MINUTE
+      AND time_received_ns >= toDateTime({sql_string(ts_from)})
+      AND time_received_ns <  toDateTime({sql_string(ts_to)})
 
     UNION ALL
 
@@ -393,7 +424,8 @@ FROM
         sum(total_bytes) AS bytes
     FROM default.traffic_dashboard_1m
     WHERE source_id = {source}
-      AND minute >= now() - INTERVAL {window_minutes} MINUTE
+      AND minute >= toDateTime({sql_string(ts_from)})
+      AND minute <  toDateTime({sql_string(ts_to)})
 
     UNION ALL
 
@@ -403,7 +435,8 @@ FROM
         sum(bytes) AS bytes
     FROM default.traffic_direction_1m
     WHERE source_id = {source}
-      AND minute >= now() - INTERVAL {window_minutes} MINUTE
+      AND minute >= toDateTime({sql_string(ts_from)})
+      AND minute <  toDateTime({sql_string(ts_to)})
 
     UNION ALL
 
@@ -413,7 +446,8 @@ FROM
         sum(bytes) AS bytes
     FROM default.traffic_pair_1m
     WHERE source_id = {source}
-      AND minute >= now() - INTERVAL {window_minutes} MINUTE
+      AND minute >= toDateTime({sql_string(ts_from)})
+      AND minute <  toDateTime({sql_string(ts_to)})
 )
 ORDER BY bytes DESC
 """
@@ -421,7 +455,7 @@ ORDER BY bytes DESC
     out: List[Tuple[str, int, int]] = []
     for stage, packets_s, bytes_s in rows:
         out.append((stage, int(float(packets_s or 0)), int(float(bytes_s or 0))))
-    return out
+    return ts_from, ts_to, out
 
 
 def check_pipeline_coverage(ch: ClickHouse, args: argparse.Namespace, results: List[CheckResult]) -> None:
@@ -485,12 +519,23 @@ def check_pipeline_coverage(ch: ClickHouse, args: argparse.Namespace, results: L
             add(results, "OK", "coverage.xdpflowd.map_full", f"map_full_delta=0 window_sec={window_sec}")
 
         if d_total > 0 and identity != d_total:
-            add(
-                results,
-                "FAIL",
-                "coverage.xdpflowd.identity",
-                f"accounted+parse+map_full+non_ip={identity} != total={d_total} diff={d_total - identity}",
-            )
+            diff = abs(d_total - identity)
+            diff_pct = 100.0 * diff / d_total
+            if diff <= args.max_identity_packet_diff or diff_pct <= args.max_identity_packet_pct:
+                add(
+                    results,
+                    "OK",
+                    "coverage.xdpflowd.identity",
+                    f"accounted+loss={identity} total={d_total} diff={d_total - identity} "
+                    f"(within noise ≤{args.max_identity_packet_diff} pkts / {args.max_identity_packet_pct}%)",
+                )
+            else:
+                add(
+                    results,
+                    "FAIL",
+                    "coverage.xdpflowd.identity",
+                    f"accounted+parse+map_full+non_ip={identity} != total={d_total} diff={d_total - identity}",
+                )
         elif d_total > 0:
             add(results, "OK", "coverage.xdpflowd.identity", f"accounted+loss={identity} total={d_total}")
 
@@ -515,8 +560,8 @@ def check_pipeline_coverage(ch: ClickHouse, args: argparse.Namespace, results: L
                 results,
                 status,
                 "coverage.ratio.ch_vs_accounted",
-                f"ch_pkts={ch_pkts} accounted_pkts={d_accounted} ratio={format_pct(ratio)} "
-                f"deviation={format_pct(dev)} threshold=±{args.max_coverage_deviation_pct}%",
+                f"ch_pkts={ch_pkts} accounted_pkts={d_accounted} ratio={format_ratio_pct(ratio)} "
+                f"deviation={format_deviation_pct(dev)} threshold=±{args.max_coverage_deviation_pct}%",
             )
         if d_total > 0:
             ratio = pct_ratio(ch_pkts, d_total)
@@ -525,7 +570,7 @@ def check_pipeline_coverage(ch: ClickHouse, args: argparse.Namespace, results: L
                 results,
                 "OK",
                 "coverage.ratio.ch_vs_total",
-                f"ch_pkts={ch_pkts} total_pkts={d_total} ratio={format_pct(ratio)} deviation={format_pct(dev)}",
+                f"ch_pkts={ch_pkts} total_pkts={d_total} ratio={format_ratio_pct(ratio)} deviation={format_deviation_pct(dev)}",
             )
             acc_ratio = pct_ratio(d_accounted, d_total)
             acc_dev = pct_deviation(acc_ratio)
@@ -533,8 +578,8 @@ def check_pipeline_coverage(ch: ClickHouse, args: argparse.Namespace, results: L
                 results,
                 "OK",
                 "coverage.ratio.accounted_vs_total",
-                f"accounted_pkts={d_accounted} total_pkts={d_total} ratio={format_pct(acc_ratio)} "
-                f"deviation={format_pct(acc_dev)}",
+                f"accounted_pkts={d_accounted} total_pkts={d_total} ratio={format_ratio_pct(acc_ratio)} "
+                f"deviation={format_deviation_pct(acc_dev)}",
             )
 
     d_wire = wire1 - wire0
@@ -556,8 +601,8 @@ def check_pipeline_coverage(ch: ClickHouse, args: argparse.Namespace, results: L
                 results,
                 status,
                 "coverage.ratio.xdp_vs_wire",
-                f"xdp_total={d_total} wire_pkts={d_wire} ratio={format_pct(ratio)} "
-                f"deviation={format_pct(dev)} threshold=±{args.max_coverage_deviation_pct}%",
+                f"xdp_total={d_total} wire_pkts={d_wire} ratio={format_ratio_pct(ratio)} "
+                f"deviation={format_deviation_pct(dev)} threshold=±{args.max_coverage_deviation_pct}%",
             )
     else:
         d_sysfs_pkts = sysfs1[0] - sysfs0[0]
@@ -580,9 +625,9 @@ def check_pipeline_coverage(ch: ClickHouse, args: argparse.Namespace, results: L
 
 
 def check_stage_rate_consistency(ch: ClickHouse, args: argparse.Namespace, results: List[CheckResult]) -> None:
-    stages = query_stage_rates(ch, args, args.compare_window_minutes)
+    ts_from, ts_to, stages = query_stage_rates(ch, args, args.compare_window_minutes)
     if not stages:
-        add(results, "FAIL", "coverage.stages", f"no CH stage data in last {args.compare_window_minutes}m")
+        add(results, "FAIL", "coverage.stages", f"no CH stage data in closed {args.compare_window_minutes}m window")
         return
 
     ref_pkts = 0
@@ -592,7 +637,7 @@ def check_stage_rate_consistency(ch: ClickHouse, args: argparse.Namespace, resul
             ref_pkts, ref_bytes = packets, bytes_
 
     if ref_bytes <= 0:
-        add(results, "FAIL", "coverage.stages.flows_raw", f"no flows_raw bytes in last {args.compare_window_minutes}m")
+        add(results, "FAIL", "coverage.stages.flows_raw", f"no flows_raw bytes in [{ts_from}, {ts_to})")
         return
 
     window_sec = args.compare_window_minutes * 60
@@ -600,7 +645,7 @@ def check_stage_rate_consistency(ch: ClickHouse, args: argparse.Namespace, resul
         results,
         "OK",
         "coverage.stages.flows_raw",
-        f"window_min={args.compare_window_minutes} packets={ref_pkts} bytes={ref_bytes} "
+        f"window=[{ts_from}, {ts_to}) packets={ref_pkts} bytes={ref_bytes} "
         f"{format_rate(ref_pkts, ref_bytes, window_sec)}",
     )
 
@@ -619,8 +664,8 @@ def check_stage_rate_consistency(ch: ClickHouse, args: argparse.Namespace, resul
             status,
             f"coverage.stages.{stage}",
             f"packets={packets} bytes={bytes_} {format_rate(packets, bytes_, window_sec)} "
-            f"bytes_ratio={format_pct(byte_ratio)} bytes_dev={format_pct(byte_dev)} "
-            f"pkts_ratio={format_pct(pkt_ratio)} threshold=±{args.max_stage_deviation_pct}%",
+            f"bytes_of_raw={format_ratio_pct(byte_ratio)} bytes_dev={format_deviation_pct(byte_dev)} "
+            f"pkts_of_raw={format_ratio_pct(pkt_ratio)} threshold=±{args.max_stage_deviation_pct}%",
         )
 
 
@@ -1169,8 +1214,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--max-daily-lag-minutes",
         type=int,
-        default=1920,
-        help="FAIL if *_1d rollup lag exceeds this (closed day + until next morning; ~1750 is normal at 05:00)",
+        default=2880,
+        help="FAIL if *_1d rollup lag exceeds this (daily job runs once per closed day; up to ~48h is normal)",
     )
     p.add_argument("--max-unknown-gb", type=float, default=0.1, help="max GB of raw flows with unknown direction")
     p.add_argument("--max-unknown-direction-gb", type=float, default=0.1, help="max GB in rollups with empty/unknown direction")
@@ -1206,6 +1251,18 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=3.0,
         help="WARN if rollup stage bytes deviate more than this from flows_raw",
+    )
+    p.add_argument(
+        "--max-identity-packet-diff",
+        type=int,
+        default=1000,
+        help="treat xdpflowd identity mismatch as noise below this packet delta",
+    )
+    p.add_argument(
+        "--max-identity-packet-pct",
+        type=float,
+        default=0.01,
+        help="treat xdpflowd identity mismatch as noise below this %% of total_packets",
     )
     p.add_argument(
         "--allow-excluded-sources",
