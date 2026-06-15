@@ -684,6 +684,7 @@ type SpoolPipeline struct {
 	mode         SpoolMode
 	nWorkers     int
 	drainOnClose time.Duration
+	allowedSourceID string
 
 	checkpointMu sync.Mutex
 	// persisted consumer offset (acked prefix)
@@ -694,6 +695,7 @@ type SpoolPipeline struct {
 	insertErrs     atomic.Uint64
 	retries        atomic.Uint64
 	batchesOK      atomic.Uint64
+	sourceRowsSkipped atomic.Uint64
 
 	// Drainer corruption-recovery counters and progress probe.
 	corruptionFramesSkipped atomic.Uint64
@@ -719,6 +721,7 @@ func NewSpoolPipeline(
 	stallThreshold time.Duration,
 	mode SpoolMode,
 	nWorkers int,
+	allowedSourceID string,
 ) (*SpoolPipeline, error) {
 	if nWorkers < 1 {
 		nWorkers = 1
@@ -764,6 +767,7 @@ func NewSpoolPipeline(
 		mode:           mode,
 		nWorkers:       nWorkers,
 		drainOnClose:   drainOnClose,
+		allowedSourceID: strings.TrimSpace(allowedSourceID),
 		stallThreshold: stallThreshold,
 		acked:          cp,
 	}
@@ -778,6 +782,7 @@ func NewSpoolPipeline(
 		"frame_max_records", maxFrameRows,
 		"shutdown_drain", drainOnClose,
 		"stall_threshold", stallThreshold,
+		"allowed_source_id", p.allowedSourceID,
 	)
 	return p, nil
 }
@@ -1031,6 +1036,10 @@ type spoolCompletion struct {
 }
 
 func (p *SpoolPipeline) insertWithRetry(rows []FlowRow) bool {
+	rows = p.filterAllowedSourceRows(rows)
+	if len(rows) == 0 {
+		return true
+	}
 	backoff := 500 * time.Millisecond
 	for {
 		select {
@@ -1051,6 +1060,34 @@ func (p *SpoolPipeline) insertWithRetry(rows []FlowRow) bool {
 			backoff *= 2
 		}
 	}
+}
+
+func (p *SpoolPipeline) filterAllowedSourceRows(rows []FlowRow) []FlowRow {
+	if p.allowedSourceID == "" || len(rows) == 0 {
+		return rows
+	}
+	var out []FlowRow
+	skipped := 0
+	for i := range rows {
+		if rows[i].SourceID == p.allowedSourceID {
+			out = append(out, rows[i])
+			continue
+		}
+		skipped++
+	}
+	if skipped > 0 {
+		p.sourceRowsSkipped.Add(uint64(skipped))
+		p.log.Warn(
+			"clickhouse spool skipped rows with stale source_id",
+			"allowed_source_id", p.allowedSourceID,
+			"skipped", skipped,
+			"frame_rows", len(rows),
+		)
+	}
+	if out == nil {
+		return nil
+	}
+	return out
 }
 
 func (p *SpoolPipeline) runAcker(completions <-chan spoolCompletion) {
@@ -1186,6 +1223,7 @@ func (p *SpoolPipeline) LogMetrics() {
 		"batches_ok", p.batchesOK.Load(),
 		"insert_errs", s.InsertErrs,
 		"retries", p.retries.Load(),
+		"source_rows_skipped", p.sourceRowsSkipped.Load(),
 		"corruption_frames_skipped", p.corruptionFramesSkipped.Load(),
 		"corruption_bytes_skipped", p.corruptionBytesSkipped.Load(),
 		"writer_tip", consumerCheckpoint{Segment: p.writer.writerTipSeg.Load(), Offset: p.writer.writerTipOff.Load()},

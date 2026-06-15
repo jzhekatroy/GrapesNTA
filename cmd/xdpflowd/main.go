@@ -661,6 +661,7 @@ func main() {
 			SpoolShutdownDrain:  *chSpoolShutdownDrain,
 			SpoolStallThreshold: *chSpoolStallThreshold,
 			SpoolWriters:        *chWriters,
+			AllowedSourceID:     *sourceID,
 		})
 		if err != nil {
 			log.Error("clickhouse delivery init", "err", err)

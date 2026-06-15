@@ -37,6 +37,7 @@ type DeliveryConfig struct {
 	SpoolShutdownDrain time.Duration
 	SpoolStallThreshold time.Duration
 	SpoolWriters     int
+	AllowedSourceID  string
 }
 
 // Delivery accepts ready FlowRow batches for ClickHouse ingest.
@@ -67,6 +68,7 @@ func NewDelivery(log *slog.Logger, cfg DeliveryConfig) (*Delivery, error) {
 			cfg.SpoolStallThreshold,
 			cfg.SpoolMode,
 			cfg.SpoolWriters,
+			cfg.AllowedSourceID,
 		)
 		if err != nil {
 			return nil, err
