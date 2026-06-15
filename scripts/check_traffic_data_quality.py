@@ -10,7 +10,9 @@ The script is intentionally read-only. It checks:
     scope, local ASN enrichment present;
   - country resolution: flags '??' IP country (geo dict) and '??' AS country
     where the ASN is known (registry cc gap);
-  - raw vs aggregate consistency by direction.
+  - raw vs aggregate consistency by direction;
+  - pipeline throughput: rates on collector/xdpflowd/flows_raw/rollups and
+    percent deviation between stages (optional live window via --coverage-window-sec).
 
 Exit codes: 0 = OK, 1 = WARN only, 2 = FAIL.
 
@@ -30,11 +32,15 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import shutil
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
-from typing import List, Optional, Sequence, Tuple
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Dict, List, Optional, Sequence, Tuple
 
 # Roles that must have origin_asn; system private prefixes (internal) may legitimately have asn=0.
 LOCAL_ORIGIN_ROLES = ("provider_public", "customer_allocated", "customer_transit")
@@ -217,6 +223,405 @@ def one_row(ch: ClickHouse, sql: str) -> Tuple[str, ...]:
 
 def add(results: List[CheckResult], status: str, name: str, detail: str) -> None:
     results.append(CheckResult(status=status, name=name, detail=detail))
+
+
+def pct_ratio(numerator: float, denominator: float) -> Optional[float]:
+    if denominator <= 0:
+        return None
+    return 100.0 * numerator / denominator
+
+
+def pct_deviation(ratio_pct: Optional[float]) -> Optional[float]:
+    if ratio_pct is None:
+        return None
+    return ratio_pct - 100.0
+
+
+def format_pct(value: Optional[float]) -> str:
+    if value is None:
+        return "n/a"
+    return f"{value:+.2f}%" if value > 0 else f"{value:.2f}%"
+
+
+def format_rate(packets: int, bytes_: int, window_sec: int) -> str:
+    if window_sec <= 0:
+        return "pps=0 gbps=0"
+    pps = packets / window_sec
+    gbps = (bytes_ * 8) / window_sec / 1e9
+    return f"pps={pps:,.0f} gbps={gbps:.2f}"
+
+
+def read_int_file(path: str) -> int:
+    try:
+        return int(Path(path).read_text().strip())
+    except OSError:
+        return 0
+
+
+def load_env_value(path: str, key: str) -> Optional[str]:
+    if not os.path.isfile(path):
+        return None
+    prefix = key + "="
+    with open(path, encoding="utf-8") as handle:
+        for raw in handle:
+            line = raw.strip()
+            if not line or line.startswith("#") or not line.startswith(prefix):
+                continue
+            value = line[len(prefix) :].strip()
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+                value = value[1:-1]
+            return value
+    return None
+
+
+def resolve_mirror_iface(args: argparse.Namespace) -> str:
+    if args.iface:
+        return args.iface
+    for path in (args.xdp_env_file, "/etc/xdpflowd/xdpflowd.env"):
+        value = load_env_value(path, "XDPFLOWD_IFACE")
+        if value:
+            return value
+    return "ens1np0"
+
+
+def read_sysfs_rx(iface: str) -> Tuple[int, int]:
+    base = f"/sys/class/net/{iface}/statistics"
+    return read_int_file(f"{base}/rx_packets"), read_int_file(f"{base}/rx_bytes")
+
+
+def read_nic_wire_pkts(iface: str) -> int:
+    proc = subprocess.run(
+        ["ethtool", "-S", iface],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if proc.returncode != 0:
+        return 0
+    total = 0
+    for line in (proc.stdout or "").splitlines():
+        m = re.match(r"^\s*rx(\d+)_xdp_drop:\s*(\d+)", line)
+        if m:
+            total += int(m.group(2))
+            continue
+        m = re.match(r"^\s*rx(\d+)_xdp_packets:\s*(\d+)", line)
+        if m:
+            total += int(m.group(2))
+    if total > 0:
+        return total
+    for line in (proc.stdout or "").splitlines():
+        m = re.match(r"^\s*rx_xdp_drop:\s*(\d+)", line)
+        if m:
+            return int(m.group(1))
+    return 0
+
+
+def parse_xdp_stats_line(line: str) -> Dict[str, int]:
+    keys = (
+        "total_packets",
+        "parse_errors",
+        "map_full",
+        "non_ip_pass",
+        "accounted_packets",
+        "vlan_tag_seen",
+    )
+    out: Dict[str, int] = {}
+    for key in keys:
+        m = re.search(rf"{key}=(\d+)", line)
+        if m:
+            out[key] = int(m.group(1))
+    return out
+
+
+def read_xdp_stats(unit: str) -> Dict[str, int]:
+    proc = subprocess.run(
+        ["journalctl", "-u", unit, "--since", "2 minutes ago", "--no-pager", "-o", "cat"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if proc.returncode != 0:
+        return {}
+    for line in reversed((proc.stdout or "").splitlines()):
+        if "msg=stats" in line and "total_packets=" in line:
+            return parse_xdp_stats_line(line)
+    return {}
+
+
+def utc_now_sql() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def query_ch_window_totals(
+    ch: ClickHouse, args: argparse.Namespace, t0: str, t1: str
+) -> Tuple[int, int]:
+    row = one_row(
+        ch,
+        f"""
+SELECT sum(packets), sum(bytes)
+FROM default.flows_raw
+WHERE source_id = {sql_string(args.source_id)}
+  AND time_received_ns >= toDateTime64({sql_string(t0)}, 9, 'UTC')
+  AND time_received_ns <  toDateTime64({sql_string(t1)}, 9, 'UTC')
+""",
+    )
+    if not row:
+        return 0, 0
+    return int(float(row[0] or 0)), int(float(row[1] or 0))
+
+
+def query_stage_rates(ch: ClickHouse, args: argparse.Namespace, window_minutes: int) -> List[Tuple[str, int, int]]:
+    source = sql_string(args.source_id)
+    rows = ch.query_tsv(
+        f"""
+SELECT stage, packets, bytes
+FROM
+(
+    SELECT
+        'flows_raw' AS stage,
+        sum(packets) AS packets,
+        sum(bytes) AS bytes
+    FROM default.flows_raw
+    WHERE source_id = {source}
+      AND time_received_ns >= now64(9) - INTERVAL {window_minutes} MINUTE
+
+    UNION ALL
+
+    SELECT
+        'dashboard_1m' AS stage,
+        sum(total_packets) AS packets,
+        sum(total_bytes) AS bytes
+    FROM default.traffic_dashboard_1m
+    WHERE source_id = {source}
+      AND minute >= now() - INTERVAL {window_minutes} MINUTE
+
+    UNION ALL
+
+    SELECT
+        'direction_1m' AS stage,
+        sum(packets) AS packets,
+        sum(bytes) AS bytes
+    FROM default.traffic_direction_1m
+    WHERE source_id = {source}
+      AND minute >= now() - INTERVAL {window_minutes} MINUTE
+
+    UNION ALL
+
+    SELECT
+        'pair_1m' AS stage,
+        sum(packets) AS packets,
+        sum(bytes) AS bytes
+    FROM default.traffic_pair_1m
+    WHERE source_id = {source}
+      AND minute >= now() - INTERVAL {window_minutes} MINUTE
+)
+ORDER BY bytes DESC
+"""
+    )
+    out: List[Tuple[str, int, int]] = []
+    for stage, packets_s, bytes_s in rows:
+        out.append((stage, int(float(packets_s or 0)), int(float(bytes_s or 0))))
+    return out
+
+
+def check_pipeline_coverage(ch: ClickHouse, args: argparse.Namespace, results: List[CheckResult]) -> None:
+    window_sec = args.coverage_window_sec
+    if window_sec <= 0:
+        return
+
+    iface = resolve_mirror_iface(args)
+    print(
+        f"INFO\tcoverage\tmeasuring pipeline for {window_sec}s on iface={iface} "
+        f"source_id={args.source_id}"
+    )
+
+    xdp0 = read_xdp_stats(args.xdp_unit)
+    wire0 = read_nic_wire_pkts(iface)
+    sysfs0 = read_sysfs_rx(iface)
+    t0 = utc_now_sql()
+
+    time.sleep(window_sec)
+
+    xdp1 = read_xdp_stats(args.xdp_unit)
+    wire1 = read_nic_wire_pkts(iface)
+    sysfs1 = read_sysfs_rx(iface)
+    t1 = utc_now_sql()
+
+    if not xdp0 or not xdp1:
+        add(
+            results,
+            "WARN",
+            "coverage.xdpflowd",
+            f"cannot read msg=stats from journalctl -u {args.xdp_unit}; run as root on collector host",
+        )
+    else:
+        d_total = xdp1.get("total_packets", 0) - xdp0.get("total_packets", 0)
+        d_accounted = xdp1.get("accounted_packets", 0) - xdp0.get("accounted_packets", 0)
+        d_parse = xdp1.get("parse_errors", 0) - xdp0.get("parse_errors", 0)
+        d_map_full = xdp1.get("map_full", 0) - xdp0.get("map_full", 0)
+        d_non_ip = xdp1.get("non_ip_pass", 0) - xdp0.get("non_ip_pass", 0)
+        identity = d_accounted + d_parse + d_map_full + d_non_ip
+
+        add(
+            results,
+            "OK",
+            "coverage.xdpflowd.total",
+            f"window_sec={window_sec} packets={d_total} {format_rate(d_total, 0, window_sec)}",
+        )
+        add(
+            results,
+            "OK",
+            "coverage.xdpflowd.accounted",
+            f"window_sec={window_sec} packets={d_accounted} {format_rate(d_accounted, 0, window_sec)}",
+        )
+        if d_map_full > 0:
+            add(
+                results,
+                "FAIL",
+                "coverage.xdpflowd.map_full",
+                f"map_full_delta={d_map_full} over {window_sec}s — packets lost before export",
+            )
+        else:
+            add(results, "OK", "coverage.xdpflowd.map_full", f"map_full_delta=0 window_sec={window_sec}")
+
+        if d_total > 0 and identity != d_total:
+            add(
+                results,
+                "FAIL",
+                "coverage.xdpflowd.identity",
+                f"accounted+parse+map_full+non_ip={identity} != total={d_total} diff={d_total - identity}",
+            )
+        elif d_total > 0:
+            add(results, "OK", "coverage.xdpflowd.identity", f"accounted+loss={identity} total={d_total}")
+
+    ch_pkts, ch_bytes = query_ch_window_totals(ch, args, t0, t1)
+    add(
+        results,
+        "OK" if ch_pkts > 0 else "FAIL",
+        "coverage.clickhouse.flows_raw",
+        f"window_sec={window_sec} packets={ch_pkts} bytes={ch_bytes} {format_rate(ch_pkts, ch_bytes, window_sec)}",
+    )
+
+    if xdp0 and xdp1:
+        d_total = xdp1.get("total_packets", 0) - xdp0.get("total_packets", 0)
+        d_accounted = xdp1.get("accounted_packets", 0) - xdp0.get("accounted_packets", 0)
+        if d_accounted > 0:
+            ratio = pct_ratio(ch_pkts, d_accounted)
+            dev = pct_deviation(ratio)
+            status = "OK"
+            if ratio is not None and abs(dev or 0) > args.max_coverage_deviation_pct:
+                status = "WARN"
+            add(
+                results,
+                status,
+                "coverage.ratio.ch_vs_accounted",
+                f"ch_pkts={ch_pkts} accounted_pkts={d_accounted} ratio={format_pct(ratio)} "
+                f"deviation={format_pct(dev)} threshold=±{args.max_coverage_deviation_pct}%",
+            )
+        if d_total > 0:
+            ratio = pct_ratio(ch_pkts, d_total)
+            dev = pct_deviation(ratio)
+            add(
+                results,
+                "OK",
+                "coverage.ratio.ch_vs_total",
+                f"ch_pkts={ch_pkts} total_pkts={d_total} ratio={format_pct(ratio)} deviation={format_pct(dev)}",
+            )
+            acc_ratio = pct_ratio(d_accounted, d_total)
+            acc_dev = pct_deviation(acc_ratio)
+            add(
+                results,
+                "OK",
+                "coverage.ratio.accounted_vs_total",
+                f"accounted_pkts={d_accounted} total_pkts={d_total} ratio={format_pct(acc_ratio)} "
+                f"deviation={format_pct(acc_dev)}",
+            )
+
+    d_wire = wire1 - wire0
+    if d_wire > 0:
+        add(
+            results,
+            "OK",
+            "coverage.wire.ethtool",
+            f"window_sec={window_sec} packets={d_wire} source=ethtool_xdp counters",
+        )
+        if xdp0 and xdp1:
+            d_total = xdp1.get("total_packets", 0) - xdp0.get("total_packets", 0)
+            ratio = pct_ratio(d_total, d_wire)
+            dev = pct_deviation(ratio)
+            status = "OK"
+            if ratio is not None and abs(dev or 0) > args.max_coverage_deviation_pct:
+                status = "WARN"
+            add(
+                results,
+                status,
+                "coverage.ratio.xdp_vs_wire",
+                f"xdp_total={d_total} wire_pkts={d_wire} ratio={format_pct(ratio)} "
+                f"deviation={format_pct(dev)} threshold=±{args.max_coverage_deviation_pct}%",
+            )
+    else:
+        d_sysfs_pkts = sysfs1[0] - sysfs0[0]
+        d_sysfs_bytes = sysfs1[1] - sysfs0[1]
+        if d_sysfs_pkts > 0:
+            add(
+                results,
+                "WARN",
+                "coverage.wire.sysfs",
+                f"window_sec={window_sec} rx_packets={d_sysfs_pkts} {format_rate(d_sysfs_pkts, d_sysfs_bytes, window_sec)} "
+                f"(sysfs may undercount while XDP is attached)",
+            )
+        else:
+            add(
+                results,
+                "WARN",
+                "coverage.wire",
+                f"no ethtool xdp_* counters and sysfs delta=0 on {iface}; use xdp_vs_ch ratios only",
+            )
+
+
+def check_stage_rate_consistency(ch: ClickHouse, args: argparse.Namespace, results: List[CheckResult]) -> None:
+    stages = query_stage_rates(ch, args, args.compare_window_minutes)
+    if not stages:
+        add(results, "FAIL", "coverage.stages", f"no CH stage data in last {args.compare_window_minutes}m")
+        return
+
+    ref_pkts = 0
+    ref_bytes = 0
+    for stage, packets, bytes_ in stages:
+        if stage == "flows_raw":
+            ref_pkts, ref_bytes = packets, bytes_
+
+    if ref_bytes <= 0:
+        add(results, "FAIL", "coverage.stages.flows_raw", f"no flows_raw bytes in last {args.compare_window_minutes}m")
+        return
+
+    window_sec = args.compare_window_minutes * 60
+    add(
+        results,
+        "OK",
+        "coverage.stages.flows_raw",
+        f"window_min={args.compare_window_minutes} packets={ref_pkts} bytes={ref_bytes} "
+        f"{format_rate(ref_pkts, ref_bytes, window_sec)}",
+    )
+
+    for stage, packets, bytes_ in stages:
+        if stage == "flows_raw":
+            continue
+        pkt_ratio = pct_ratio(packets, ref_pkts)
+        byte_ratio = pct_ratio(bytes_, ref_bytes)
+        pkt_dev = pct_deviation(pkt_ratio)
+        byte_dev = pct_deviation(byte_ratio)
+        status = "OK"
+        if byte_ratio is not None and abs(byte_dev or 0) > args.max_stage_deviation_pct:
+            status = "WARN"
+        add(
+            results,
+            status,
+            f"coverage.stages.{stage}",
+            f"packets={packets} bytes={bytes_} {format_rate(packets, bytes_, window_sec)} "
+            f"bytes_ratio={format_pct(byte_ratio)} bytes_dev={format_pct(byte_dev)} "
+            f"pkts_ratio={format_pct(pkt_ratio)} threshold=±{args.max_stage_deviation_pct}%",
+        )
 
 
 def is_meaningful_bucket(ts: str) -> bool:
@@ -777,6 +1182,32 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--max-country-unknown-pct", type=float, default=5.0, help="WARN above this %% of bytes with '??' IP country in traffic_country_1m")
     p.add_argument("--max-raw-agg-diff-gb", type=float, default=1.0)
     p.add_argument(
+        "--coverage-window-sec",
+        type=int,
+        default=60,
+        help="live pipeline measurement window: xdpflowd vs flows_raw (0=skip sleep measurement)",
+    )
+    p.add_argument(
+        "--skip-coverage",
+        action="store_true",
+        help="skip live pipeline measurement and stage rate checks",
+    )
+    p.add_argument("--iface", default="", help="mirror NIC for wire counters (default: XDPFLOWD_IFACE from env)")
+    p.add_argument("--xdp-unit", default="xdpflowd", help="systemd unit for xdpflowd stats")
+    p.add_argument("--xdp-env-file", default="/etc/xdpflowd/xdpflowd.env", help="env file with XDPFLOWD_IFACE")
+    p.add_argument(
+        "--max-coverage-deviation-pct",
+        type=float,
+        default=5.0,
+        help="WARN if CH/accounted or xdp/wire ratio deviates more than this from 100%%",
+    )
+    p.add_argument(
+        "--max-stage-deviation-pct",
+        type=float,
+        default=3.0,
+        help="WARN if rollup stage bytes deviate more than this from flows_raw",
+    )
+    p.add_argument(
         "--allow-excluded-sources",
         action="store_true",
         help="downgrade 'excluded source present (include_in_total=0)' from FAIL to WARN",
@@ -789,7 +1220,12 @@ def print_results(results: Sequence[CheckResult]) -> None:
     order = {"FAIL": 0, "WARN": 1, "OK": 2}
 
     def sort_key(r: CheckResult) -> Tuple[int, int, str]:
-        section = 0 if r.name.startswith("lag.") else 1
+        if r.name.startswith("lag."):
+            section = 0
+        elif r.name.startswith("coverage."):
+            section = 1
+        else:
+            section = 2
         return (section, order.get(r.status, 9), r.name)
 
     for result in sorted(results, key=sort_key):
@@ -814,6 +1250,12 @@ def main() -> int:
 
     checks = [
         ("lag_summary", lambda: check_lag_summary(ch, args, results)),
+    ]
+    if not args.skip_coverage:
+        checks.append(("stage_rate_consistency", lambda: check_stage_rate_consistency(ch, args, results)))
+        if args.coverage_window_sec > 0:
+            checks.append(("pipeline_coverage", lambda: check_pipeline_coverage(ch, args, results)))
+    checks.extend([
         ("rollup_state", lambda: check_rollup_state(ch, args, results)),
         ("raw_classifier", lambda: check_raw_classifier(ch, args, results)),
         ("table_freshness", lambda: check_table_freshness(ch, args, results)),
@@ -823,7 +1265,7 @@ def main() -> int:
         ("talker_quality", lambda: check_talker_quality(ch, args, results)),
         ("pair_quality", lambda: check_pair_quality(ch, args, results)),
         ("raw_vs_direction_agg", lambda: check_raw_vs_direction_agg(ch, args, results)),
-    ]
+    ])
     for name, fn in checks:
         try:
             fn()
