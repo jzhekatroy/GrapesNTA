@@ -94,9 +94,18 @@ CH_ARGS=(
 if [[ -n "${XDP_CH_SAMPLER_ADDR:-}" ]]; then
   CH_ARGS+=( -ch-sampler-addr "$XDP_CH_SAMPLER_ADDR" )
 fi
-SOURCE_ID="${XDPFLOWD_SOURCE_ID:-xdp-default}"
+# No implicit fallback: the historical default 'xdp-default' is unclassified and
+# pollutes the traffic rollups (direction/scope unknown, ASN 0). A production
+# collector must declare a registered source_id (e.g. netflow) in $ENV_FILE.
+SOURCE_ID="${XDPFLOWD_SOURCE_ID:-}"
 if [[ -z "$SOURCE_ID" ]]; then
-  echo "ERROR: XDPFLOWD_SOURCE_ID must not be empty (set it in $ENV_FILE)" >&2
+  echo "ERROR: XDPFLOWD_SOURCE_ID must be set in $ENV_FILE (no implicit 'xdp-default')." >&2
+  echo "       Use a source_id registered in net_flow_sources, e.g. netflow." >&2
+  exit 1
+fi
+if [[ "$SOURCE_ID" == "xdp-default" && "${XDPFLOWD_ALLOW_LEGACY_SOURCE:-0}" != "1" ]]; then
+  echo "ERROR: XDPFLOWD_SOURCE_ID='xdp-default' is the legacy unclassified source that pollutes rollups." >&2
+  echo "       Set a real source_id (e.g. netflow); for a deliberate test set XDPFLOWD_ALLOW_LEGACY_SOURCE=1." >&2
   exit 1
 fi
 CH_ARGS+=( -source-id "$SOURCE_ID" )
