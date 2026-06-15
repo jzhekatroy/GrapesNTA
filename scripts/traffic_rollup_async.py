@@ -294,6 +294,18 @@ def _column_time_range(col: str, start: datetime, end: datetime) -> str:
     )
 
 
+def _source_id_ref(job: RollupJob) -> str:
+    """source_id column for the job, matching the table alias used in its SELECT.
+
+    Jobs that read flows_raw as `... AS f` set time_filter_column='f.time_received_ns';
+    we reuse that prefix so the source gate references f.source_id, not source_id.
+    """
+    col = job.time_filter_column or job.time_column
+    if "." in col:
+        return f"{col.split('.')[0]}.source_id"
+    return "source_id"
+
+
 def build_time_filter(job: RollupJob, start: datetime, end: datetime) -> str:
     primary = _column_time_range(job.time_filter_column or job.time_column, start, end)
     guard_minutes = job.received_guard_minutes
@@ -307,8 +319,19 @@ def build_time_filter(job: RollupJob, start: datetime, end: datetime) -> str:
             start - timedelta(minutes=guard_minutes),
             end + timedelta(minutes=guard_minutes),
         )
-        return f"({primary}) AND ({guard})"
-    return primary
+        base = f"({primary}) AND ({guard})"
+    else:
+        base = primary
+    if job.source_table == "default.flows_raw":
+        # Self-protection: only aggregate sources registered and enabled in the
+        # catalog. A retired/legacy source (e.g. xdp-default) set enabled=0 then
+        # disappears from rollups automatically, without manual cleanup. Jobs that
+        # read derived tables (traffic_*_1m) inherit the gate from upstream.
+        base = (
+            f"{base} AND {_source_id_ref(job)} IN "
+            "(SELECT source_id FROM default.net_flow_sources_enabled)"
+        )
+    return base
 
 
 def dependency_ready(
