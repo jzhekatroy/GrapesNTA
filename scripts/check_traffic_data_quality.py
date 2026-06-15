@@ -744,8 +744,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--max-daily-lag-minutes",
         type=int,
-        default=1500,
-        help="FAIL if *_1d rollup lag exceeds this (closed day + safety)",
+        default=1920,
+        help="FAIL if *_1d rollup lag exceeds this (closed day + until next morning; ~1750 is normal at 05:00)",
     )
     p.add_argument("--max-unknown-gb", type=float, default=0.1, help="max GB of raw flows with unknown direction")
     p.add_argument("--max-unknown-direction-gb", type=float, default=0.1, help="max GB in rollups with empty/unknown direction")
