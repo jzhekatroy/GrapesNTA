@@ -203,7 +203,7 @@ func TestParseSFlowSkipsCounterSample(t *testing.T) {
 	if len(rows) != 0 {
 		t.Fatalf("rows=%d want 0", len(rows))
 	}
-	if m.counterSkipped != 1 {
-		t.Fatalf("counterSkipped=%d", m.counterSkipped)
+	if got := m.counterSkipped.Load(); got != 1 {
+		t.Fatalf("counterSkipped=%d", got)
 	}
 }
