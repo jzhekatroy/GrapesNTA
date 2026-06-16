@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"net"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -15,6 +16,8 @@ type sflowListener struct {
 	addr       string
 	sourceID   string
 	readBuf    int
+	workers    int
+	queueSize  int
 	batchSize  int
 	flushEvery time.Duration
 	delivery   *flowingest.Delivery
@@ -27,6 +30,8 @@ func newSflowListener(
 	log *slog.Logger,
 	addr, sourceID string,
 	readBuf int,
+	workers int,
+	queueSize int,
 	batchSize int,
 	flushEvery time.Duration,
 	delivery *flowingest.Delivery,
@@ -38,16 +43,29 @@ func newSflowListener(
 	if flushEvery <= 0 {
 		flushEvery = time.Second
 	}
+	if workers < 1 {
+		workers = 1
+	}
+	if queueSize < 1 {
+		queueSize = 1
+	}
 	return &sflowListener{
 		log:        log,
 		addr:       addr,
 		sourceID:   sourceID,
 		readBuf:    readBuf,
+		workers:    workers,
+		queueSize:  queueSize,
 		batchSize:  batchSize,
 		flushEvery: flushEvery,
 		delivery:   delivery,
 		classifier: classifier,
 	}
+}
+
+type sflowDatagram struct {
+	b          []byte
+	receivedAt time.Time
 }
 
 func (l *sflowListener) Run(ctx context.Context) error {
@@ -74,9 +92,53 @@ func (l *sflowListener) Run(ctx context.Context) error {
 		"source_id", l.sourceID,
 		"udp_read_buffer_bytes", l.readBuf,
 		"datagram_buffer_bytes", datagramBufSize,
+		"udp_workers", l.workers,
+		"udp_queue_size", l.queueSize,
 	)
 
+	datagrams := make(chan sflowDatagram, l.queueSize)
+	var wg sync.WaitGroup
+	for i := 0; i < l.workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			l.runWorker(ctx, datagrams)
+		}()
+	}
+	defer func() {
+		close(datagrams)
+		wg.Wait()
+	}()
+
 	buf := make([]byte, datagramBufSize)
+	for {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		_ = pc.SetReadDeadline(time.Now().Add(time.Second))
+		n, _, err := pc.ReadFromUDP(buf)
+		if err != nil {
+			if ne, ok := err.(net.Error); ok && ne.Timeout() {
+				continue
+			}
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			l.log.Warn("sflow read", "err", err)
+			continue
+		}
+		cp := make([]byte, n)
+		copy(cp, buf[:n])
+		d := sflowDatagram{b: cp, receivedAt: time.Now().UTC()}
+		select {
+		case datagrams <- d:
+		default:
+			l.metrics.udpQueueDrops.Add(1)
+		}
+	}
+}
+
+func (l *sflowListener) runWorker(ctx context.Context, datagrams <-chan sflowDatagram) {
 	pending := make([]flowingest.FlowRow, 0, l.batchSize)
 	nextFlush := time.Now().Add(l.flushEvery)
 	flush := func() {
@@ -89,39 +151,31 @@ func (l *sflowListener) Run(ctx context.Context) error {
 		pending = make([]flowingest.FlowRow, 0, l.batchSize)
 		nextFlush = time.Now().Add(l.flushEvery)
 	}
+	ticker := time.NewTicker(l.flushEvery)
+	defer ticker.Stop()
 	for {
-		if ctx.Err() != nil {
+		select {
+		case <-ctx.Done():
 			flush()
-			return ctx.Err()
-		}
-		deadline := time.Now().Add(time.Second)
-		if nextFlush.Before(deadline) {
-			deadline = nextFlush
-		}
-		_ = pc.SetReadDeadline(deadline)
-		n, _, err := pc.ReadFrom(buf)
-		if err != nil {
-			if ne, ok := err.(net.Error); ok && ne.Timeout() {
-				if time.Now().After(nextFlush) || time.Now().Equal(nextFlush) {
+			return
+		case <-ticker.C:
+			if time.Now().After(nextFlush) || time.Now().Equal(nextFlush) {
+				flush()
+			}
+		case d, ok := <-datagrams:
+			if !ok {
+				flush()
+				return
+			}
+			rows := parseSFlowV5(d.b, d.receivedAt, l.sourceID, l.classifier, nil, &l.metrics)
+			for i := range rows {
+				rows[i].SequenceNum = l.seq.Add(1)
+			}
+			if len(rows) > 0 {
+				pending = append(pending, rows...)
+				if len(pending) >= l.batchSize || time.Now().After(nextFlush) || time.Now().Equal(nextFlush) {
 					flush()
 				}
-				continue
-			}
-			if ctx.Err() != nil {
-				flush()
-				return ctx.Err()
-			}
-			l.log.Warn("sflow read", "err", err)
-			continue
-		}
-		receivedAt := time.Now().UTC()
-		seq := l.seq.Load()
-		rows := parseSFlowV5(buf[:n], receivedAt, l.sourceID, l.classifier, &seq, &l.metrics)
-		l.seq.Store(seq)
-		if len(rows) > 0 {
-			pending = append(pending, rows...)
-			if len(pending) >= l.batchSize || time.Now().After(nextFlush) || time.Now().Equal(nextFlush) {
-				flush()
 			}
 		}
 	}
@@ -132,11 +186,12 @@ func (l *sflowListener) LogMetrics() {
 		return
 	}
 	l.log.Info("sflow",
-		"datagrams", l.metrics.datagrams,
-		"flow_samples", l.metrics.flowSamples,
-		"records_parsed", l.metrics.recordsParsed,
-		"counter_skipped", l.metrics.counterSkipped,
-		"parse_errors", l.metrics.parseErrors,
-		"unknown_samples", l.metrics.unknownSamples,
+		"datagrams", l.metrics.datagrams.Load(),
+		"flow_samples", l.metrics.flowSamples.Load(),
+		"records_parsed", l.metrics.recordsParsed.Load(),
+		"counter_skipped", l.metrics.counterSkipped.Load(),
+		"parse_errors", l.metrics.parseErrors.Load(),
+		"unknown_samples", l.metrics.unknownSamples.Load(),
+		"udp_queue_drops", l.metrics.udpQueueDrops.Load(),
 	)
 }

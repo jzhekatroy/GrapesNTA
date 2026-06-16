@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/binary"
 	"net"
+	"sync/atomic"
 	"time"
 
 	"xdpflowd/internal/flowingest"
@@ -24,12 +25,13 @@ const (
 )
 
 type sflowMetrics struct {
-	datagrams       uint64
-	flowSamples     uint64
-	counterSkipped  uint64
-	recordsParsed   uint64
-	parseErrors     uint64
-	unknownSamples  uint64
+	datagrams       atomic.Uint64
+	flowSamples     atomic.Uint64
+	counterSkipped  atomic.Uint64
+	recordsParsed   atomic.Uint64
+	parseErrors     atomic.Uint64
+	unknownSamples  atomic.Uint64
+	udpQueueDrops   atomic.Uint64
 }
 
 func parseSFlowV5(
@@ -41,17 +43,17 @@ func parseSFlowV5(
 	m *sflowMetrics,
 ) []flowingest.FlowRow {
 	if m != nil {
-		m.datagrams++
+		m.datagrams.Add(1)
 	}
 	if len(b) < 28 {
 		if m != nil {
-			m.parseErrors++
+			m.parseErrors.Add(1)
 		}
 		return nil
 	}
 	if binary.BigEndian.Uint32(b[0:4]) != sflowVersion {
 		if m != nil {
-			m.parseErrors++
+			m.parseErrors.Add(1)
 		}
 		return nil
 	}
@@ -63,7 +65,7 @@ func parseSFlowV5(
 	case sflowAgentIPv4:
 		if len(b) < off+4 {
 			if m != nil {
-				m.parseErrors++
+				m.parseErrors.Add(1)
 			}
 			return nil
 		}
@@ -72,7 +74,7 @@ func parseSFlowV5(
 	case sflowAgentIPv6:
 		if len(b) < off+16 {
 			if m != nil {
-				m.parseErrors++
+				m.parseErrors.Add(1)
 			}
 			return nil
 		}
@@ -80,14 +82,14 @@ func parseSFlowV5(
 		off += 16
 	default:
 		if m != nil {
-			m.parseErrors++
+			m.parseErrors.Add(1)
 		}
 		return nil
 	}
 
 	if len(b) < off+12 {
 		if m != nil {
-			m.parseErrors++
+			m.parseErrors.Add(1)
 		}
 		return nil
 	}
@@ -98,7 +100,7 @@ func parseSFlowV5(
 
 	if numSamples > maxSFlowSamples {
 		if m != nil {
-			m.parseErrors++
+			m.parseErrors.Add(1)
 		}
 		return nil
 	}
@@ -107,7 +109,7 @@ func parseSFlowV5(
 	for i := uint32(0); i < numSamples; i++ {
 		if len(b) < off+8 {
 			if m != nil {
-				m.parseErrors++
+				m.parseErrors.Add(1)
 			}
 			break
 		}
@@ -116,7 +118,7 @@ func parseSFlowV5(
 		off += 8
 		if sampleLen < 0 || len(b) < off+sampleLen {
 			if m != nil {
-				m.parseErrors++
+				m.parseErrors.Add(1)
 			}
 			break
 		}
@@ -127,21 +129,21 @@ func parseSFlowV5(
 		switch format {
 		case sflowSampleFlow:
 			if m != nil {
-				m.flowSamples++
+				m.flowSamples.Add(1)
 			}
 			rows = append(rows, parseFlowSample(sampleBody, false, receivedAt, sourceID, sampler, classifier, seq, m)...)
 		case sflowSampleFlowExp:
 			if m != nil {
-				m.flowSamples++
+				m.flowSamples.Add(1)
 			}
 			rows = append(rows, parseFlowSample(sampleBody, true, receivedAt, sourceID, sampler, classifier, seq, m)...)
 		case sflowSampleCounter, sflowSampleCounterExp:
 			if m != nil {
-				m.counterSkipped++
+				m.counterSkipped.Add(1)
 			}
 		default:
 			if m != nil {
-				m.unknownSamples++
+				m.unknownSamples.Add(1)
 			}
 		}
 	}
@@ -164,7 +166,7 @@ func parseFlowSample(
 	}
 	if len(b) < minLen {
 		if m != nil {
-			m.parseErrors++
+			m.parseErrors.Add(1)
 		}
 		return nil
 	}
@@ -193,7 +195,7 @@ func parseFlowSample(
 	}
 	if numRecords > maxSFlowRecords {
 		if m != nil {
-			m.parseErrors++
+			m.parseErrors.Add(1)
 		}
 		return nil
 	}
@@ -202,7 +204,7 @@ func parseFlowSample(
 	for i := uint32(0); i < numRecords; i++ {
 		if len(b) < off+8 {
 			if m != nil {
-				m.parseErrors++
+				m.parseErrors.Add(1)
 			}
 			break
 		}
@@ -211,7 +213,7 @@ func parseFlowSample(
 		off += 8
 		if recordLen < 0 || len(b) < off+recordLen {
 			if m != nil {
-				m.parseErrors++
+				m.parseErrors.Add(1)
 			}
 			break
 		}
@@ -225,12 +227,12 @@ func parseFlowSample(
 		row, ok := flowRowFromRawHeader(recordBody, receivedAt, sourceID, sampler, samplingRate, classifier, seq)
 		if !ok {
 			if m != nil {
-				m.parseErrors++
+				m.parseErrors.Add(1)
 			}
 			continue
 		}
 		if m != nil {
-			m.recordsParsed++
+			m.recordsParsed.Add(1)
 		}
 		rows = append(rows, row)
 	}
