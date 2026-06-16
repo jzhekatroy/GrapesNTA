@@ -85,6 +85,29 @@ def ch_run(
         raise RuntimeError(f"clickhouse-client failed: {err}\nquery: {query[:800]}")
 
 
+def swap_tables(base: Sequence[str], staging_table: str, current_table: str) -> None:
+    """Swap staging/current, supporting old ClickHouse without EXCHANGE TABLES."""
+    try:
+        ch_run(base, f"EXCHANGE TABLES {staging_table} AND {current_table}")
+        return
+    except RuntimeError as exc:
+        print(f"EXCHANGE TABLES failed, falling back to RENAME TABLE: {exc}", file=sys.stderr)
+
+    if "." in current_table:
+        db, table = current_table.rsplit(".", 1)
+        tmp_table = f"{db}.{table}_swap_old"
+    else:
+        tmp_table = f"{current_table}_swap_old"
+
+    ch_run(base, f"DROP TABLE IF EXISTS {tmp_table}")
+    ch_run(
+        base,
+        f"RENAME TABLE {current_table} TO {tmp_table}, "
+        f"{staging_table} TO {current_table}, "
+        f"{tmp_table} TO {staging_table}",
+    )
+
+
 def download(url: str, path: str, timeout: float) -> int:
     tmp = path + ".tmp"
     try:
@@ -196,7 +219,7 @@ def main() -> int:
             "FORMAT TabSeparated"
         )
         ch_run(base, insert_query, input_path=tsv_path)
-        ch_run(base, f"EXCHANGE TABLES {args.staging_table} AND {args.current_table}")
+        swap_tables(base, args.staging_table, args.current_table)
         ch_run(base, f"TRUNCATE TABLE {args.staging_table}")
 
     print(f"loaded {rows} prefixes into {args.current_table}")
