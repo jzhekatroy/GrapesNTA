@@ -70,7 +70,7 @@ func loadConfig() config {
 	classifierL3 := flag.String("classifier-l3-prefixes-view", envString("FC_CLASSIFIER_L3_PREFIXES_VIEW", "default.net_l3_prefixes_enabled"), "L3 prefixes view")
 	classifierL2 := flag.String("classifier-l2-vlans-view", envString("FC_CLASSIFIER_L2_VLANS_VIEW", "default.net_l2_vlans_enabled"), "L2 VLANs view")
 
-	udpReadBuffer := flag.Int("udp-read-buffer", envInt("FC_UDP_READ_BUFFER", 64*1024*1024), "UDP socket read buffer bytes (also bounds datagram read buffer)")
+	udpReadBuffer := flag.Int("udp-read-buffer", envInt("FC_UDP_READ_BUFFER", 64*1024*1024), "kernel UDP socket receive buffer bytes (SO_RCVBUF, per reader)")
 	udpReaders := flag.Int("udp-readers", envInt("FC_UDP_READERS", 1), "parallel sFlow UDP sockets using SO_REUSEPORT")
 	udpWorkers := flag.Int("udp-workers", envInt("FC_UDP_WORKERS", 8), "sFlow parser worker count")
 	udpQueueSize := flag.Int("udp-queue-size", envInt("FC_UDP_QUEUE_SIZE", 65536), "sFlow datagram queue depth")

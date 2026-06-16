@@ -76,11 +76,13 @@ type sflowDatagram struct {
 	receivedAt time.Time
 }
 
+// maxUDPDatagramSize bounds the per-read userspace buffer. A single UDP
+// datagram never exceeds 65535 bytes, so the read buffer is fixed regardless
+// of the (much larger) kernel SO_RCVBUF set via FC_UDP_READ_BUFFER.
+const maxUDPDatagramSize = 65535
+
 func (l *sflowListener) Run(ctx context.Context) error {
-	datagramBufSize := l.readBuf
-	if datagramBufSize < 65535 {
-		datagramBufSize = 65535
-	}
+	datagramBufSize := maxUDPDatagramSize
 
 	readers := make([]*net.UDPConn, 0, l.readers)
 	for i := 0; i < l.readers; i++ {
@@ -98,11 +100,6 @@ func (l *sflowListener) Run(ctx context.Context) error {
 		}
 		readers = append(readers, pc)
 	}
-	defer func() {
-		for _, r := range readers {
-			_ = r.Close()
-		}
-	}()
 
 	l.log.Info("sflow listener started",
 		"addr", l.addr,
