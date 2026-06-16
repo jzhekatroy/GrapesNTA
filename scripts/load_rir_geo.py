@@ -366,6 +366,29 @@ def ch_create_or_replace_dictionary(base: Sequence[str], args: argparse.Namespac
     ch_run_query(base, query, display_query=redacted_query)
 
 
+def ch_reload_dictionary(base: Sequence[str], dictionary: str) -> None:
+    """Reload dictionary; tolerate old clients that only parse the plural form."""
+    candidates = [f"SYSTEM RELOAD DICTIONARY {dictionary}"]
+    if "." in dictionary:
+        candidates.append(f"SYSTEM RELOAD DICTIONARY {dictionary.split('.', 1)[1]}")
+    candidates.append("SYSTEM RELOAD DICTIONARIES")
+    last_exc: Optional[RuntimeError] = None
+    for query in candidates:
+        try:
+            ch_run_query(base, query)
+            return
+        except RuntimeError as exc:
+            last_exc = exc
+            continue
+    # Data is already swapped in place; a stale dictionary cache is the only gap.
+    print(
+        f"dictionary reload skipped (client lacks reload syntax?): {last_exc}\n"
+        f"Data is loaded into the geo tables; reload {dictionary} from a newer "
+        f"client/server when possible (SYSTEM RELOAD DICTIONARY {dictionary}).",
+        file=sys.stderr,
+    )
+
+
 @dataclass
 class RunStats:
     rows: int = 0
@@ -594,7 +617,7 @@ def main() -> int:
                     file=sys.stderr,
                 )
 
-        ch_run_query(base, f"SYSTEM RELOAD DICTIONARY {args.dictionary}")
+        ch_reload_dictionary(base, args.dictionary)
 
         print("load_rir_geo: done", file=sys.stderr)
         return 0
