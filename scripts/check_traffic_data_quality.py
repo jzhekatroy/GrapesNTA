@@ -8,7 +8,9 @@ The script is intentionally read-only. It checks:
     include_in_total=0 polluting the rollups FAIL unless allowed);
   - classifier output in raw and rollups: no unknown direction, no unknown
     scope, local ASN enrichment present;
-  - country resolution: flags '??' IP country (geo dict) and '??' AS country
+  - special-use IP blocks (private/multicast/reserved) via
+    default.net_special_ip_prefixes_enabled;
+  - country resolution: flags unexplained '??' IP country (geo dict) and '??' AS country
     where the ASN is known (registry cc gap);
   - raw vs aggregate consistency by direction;
   - pipeline throughput: live rates on the local collector (xdpflowd or
@@ -55,35 +57,33 @@ from urllib.parse import unquote, urlparse
 LOCAL_ORIGIN_ROLES = ("provider_public", "customer_allocated", "customer_transit")
 LOCAL_ORIGIN_ROLES_SQL = ", ".join(f"'{role}'" for role in LOCAL_ORIGIN_ROLES)
 
-# traffic_pair_1m has no network_role; exclude RFC1918/CGNAT/link-local/loopback by-CIDR instead.
-PRIVATE_IP_EXCLUDE_SRC_SQL = """
-NOT (
-    isIPAddressInRange(src_ip, '10.0.0.0/8') OR
-    isIPAddressInRange(src_ip, '172.16.0.0/12') OR
-    isIPAddressInRange(src_ip, '192.168.0.0/16') OR
-    isIPAddressInRange(src_ip, '100.64.0.0/10') OR
-    isIPAddressInRange(src_ip, '127.0.0.0/8') OR
-    isIPAddressInRange(src_ip, '169.254.0.0/16') OR
-    isIPAddressInRange(src_ip, 'fc00::/7') OR
-    isIPAddressInRange(src_ip, 'fe80::/10') OR
-    isIPAddressInRange(src_ip, '::1/128')
-)
-""".strip()
-PRIVATE_IP_EXCLUDE_DST_SQL = PRIVATE_IP_EXCLUDE_SRC_SQL.replace("src_ip", "dst_ip")
+SPECIAL_IP_PREFIXES_VIEW = "default.net_special_ip_prefixes_enabled"
+
+
+def special_prefix_match_sql(
+    col: str,
+    *,
+    asn_expected: Optional[int] = None,
+    country_expected: Optional[int] = None,
+) -> str:
+    """True when col falls into an enabled special-use prefix row."""
+    conds = [f"isIPAddressInRange({col}, sp.prefix)"]
+    if asn_expected is not None:
+        conds.append(f"sp.asn_expected = {int(asn_expected)}")
+    if country_expected is not None:
+        conds.append(f"sp.country_expected = {int(country_expected)}")
+    where = " AND ".join(conds)
+    return f"EXISTS (SELECT 1 FROM {SPECIAL_IP_PREFIXES_VIEW} AS sp WHERE {where})"
 
 
 def no_asn_expected_sql(col: str) -> str:
-    """Ranges that legitimately have no origin ASN (multicast / reserved / broadcast).
+    """Prefixes where origin ASN=0 is expected (multicast, private, reserved, ...)."""
+    return special_prefix_match_sql(col, asn_expected=0)
 
-    IPTV/streaming multicast (224.0.0.0/4) and reserved space (240.0.0.0/4,
-    including 255.255.255.255 broadcast) plus IPv6 multicast (ff00::/8) are never
-    advertised in BGP or iptoasn, so dst/src ASN=0 there is expected, not a gap.
-    """
-    return (
-        f"(isIPAddressInRange({col}, '224.0.0.0/4') OR "
-        f"isIPAddressInRange({col}, '240.0.0.0/4') OR "
-        f"isIPAddressInRange({col}, 'ff00::/8'))"
-    )
+
+def no_country_expected_sql(col: str) -> str:
+    """Prefixes where geo country '??' is expected."""
+    return special_prefix_match_sql(col, country_expected=0)
 
 DEFAULT_ENV_FILES = (
     "/etc/grapesnta/traffic-rollups.env",
@@ -1940,10 +1940,11 @@ SELECT
     endpoint_scope,
     count() AS rows,
     countIf(endpoint_ip = '') AS empty_ip,
-    round(sumIf(bytes, endpoint_scope IN ('local', 'customer') AND endpoint_network_role IN ({LOCAL_ORIGIN_ROLES_SQL}) AND endpoint_asn = 0) / 1e9, 1) AS local_asn_zero_gb,
+    round(sumIf(bytes, endpoint_scope IN ('local', 'customer') AND endpoint_network_role IN ({LOCAL_ORIGIN_ROLES_SQL}) AND endpoint_asn = 0 AND NOT {no_asn_expected_sql('endpoint_ip')}) / 1e9, 1) AS local_asn_zero_gb,
     round(sumIf(bytes, endpoint_scope = 'remote' AND endpoint_asn = 0 AND NOT {no_asn_expected_sql('endpoint_ip')}) / 1e9, 1) AS remote_asn_zero_gb,
     round(sumIf(bytes, endpoint_scope = 'remote' AND endpoint_asn = 0 AND {no_asn_expected_sql('endpoint_ip')}) / 1e9, 1) AS remote_no_asn_expected_gb,
-    round(sumIf(bytes, endpoint_ip_country = '??') / 1e9, 1) AS ip_country_unknown_gb,
+    round(sumIf(bytes, endpoint_ip_country = '??' AND NOT {no_country_expected_sql('endpoint_ip')}) / 1e9, 1) AS ip_country_unknown_gb,
+    round(sumIf(bytes, endpoint_ip_country = '??' AND {no_country_expected_sql('endpoint_ip')}) / 1e9, 1) AS ip_country_no_country_expected_gb,
     round(sumIf(bytes, endpoint_as_country = '??' AND endpoint_asn != 0) / 1e9, 1) AS as_country_unknown_known_asn_gb,
     round(sum(bytes) / 1e9, 1) AS gb
 FROM default.traffic_talker_1m
@@ -1967,13 +1968,19 @@ ORDER BY gb DESC
         remote_zero_s,
         remote_no_asn_expected_s,
         ip_cc_unknown_s,
+        ip_no_country_expected_s,
         as_cc_unknown_s,
         gb_s,
     ) in rows:
         name = f"talker_quality.{direction}.{side}.{scope}"
         no_asn_note = (
-            f" (+{remote_no_asn_expected_s} gb multicast/reserved, no ASN expected)"
+            f" (+{remote_no_asn_expected_s} gb special-use, no ASN expected)"
             if float(remote_no_asn_expected_s) > 0
+            else ""
+        )
+        no_country_note = (
+            f" (+{ip_no_country_expected_s} gb special-use, no country expected)"
+            if float(ip_no_country_expected_s) > 0
             else ""
         )
         remote_zero_pct = (float(remote_zero_s) / float(gb_s) * 100.0) if float(gb_s) > 0 else 0.0
@@ -1990,11 +1997,11 @@ ORDER BY gb DESC
         elif float(as_cc_unknown_s) > args.max_as_country_unknown_gb:
             add(results, "WARN", name, f"as_country_unknown_for_known_asn_gb={as_cc_unknown_s} gb={gb_s} (asn_registry cc gap)")
         elif float(ip_cc_unknown_s) > args.max_ip_country_unknown_gb:
-            add(results, "WARN", name, f"ip_country_unknown_gb={ip_cc_unknown_s} gb={gb_s} (geo dict / private IPs)")
+            add(results, "WARN", name, f"ip_country_unknown_gb={ip_cc_unknown_s} gb={gb_s} (geo dict gap){no_country_note}")
         elif float(remote_zero_s) > 0:
             add(results, "WARN", name, f"remote_asn_zero_gb={remote_zero_s} ({remote_zero_pct:.2f}%) gb={gb_s} (BGP coverage){no_asn_note}")
         else:
-            add(results, "OK", name, f"gb={gb_s} rows={rows_s}{no_asn_note}")
+            add(results, "OK", name, f"gb={gb_s} rows={rows_s}{no_asn_note}{no_country_note}")
 
 
 def check_pair_quality(ch: ClickHouse, args: argparse.Namespace, results: List[CheckResult]) -> None:
@@ -2007,12 +2014,13 @@ SELECT
     dst_scope,
     count() AS rows,
     countIf(src_ip = '' OR dst_ip = '') AS empty_ip_rows,
-    round(sumIf(bytes, src_scope IN ('local', 'customer') AND src_asn = 0 AND {PRIVATE_IP_EXCLUDE_SRC_SQL}) / 1e9, 1) AS src_local_asn_zero_gb,
-    round(sumIf(bytes, dst_scope IN ('local', 'customer') AND dst_asn = 0 AND {PRIVATE_IP_EXCLUDE_DST_SQL}) / 1e9, 1) AS dst_local_asn_zero_gb,
+    round(sumIf(bytes, src_scope IN ('local', 'customer') AND src_asn = 0 AND NOT {no_asn_expected_sql('src_ip')}) / 1e9, 1) AS src_local_asn_zero_gb,
+    round(sumIf(bytes, dst_scope IN ('local', 'customer') AND dst_asn = 0 AND NOT {no_asn_expected_sql('dst_ip')}) / 1e9, 1) AS dst_local_asn_zero_gb,
     round(sumIf(bytes, src_scope = 'remote' AND src_asn = 0 AND NOT {no_asn_expected_sql('src_ip')}) / 1e9, 1) AS src_remote_asn_zero_gb,
     round(sumIf(bytes, dst_scope = 'remote' AND dst_asn = 0 AND NOT {no_asn_expected_sql('dst_ip')}) / 1e9, 1) AS dst_remote_asn_zero_gb,
     round(sumIf(bytes, (src_scope = 'remote' AND src_asn = 0 AND {no_asn_expected_sql('src_ip')}) OR (dst_scope = 'remote' AND dst_asn = 0 AND {no_asn_expected_sql('dst_ip')})) / 1e9, 1) AS remote_no_asn_expected_gb,
-    round(sumIf(bytes, src_ip_country = '??' OR dst_ip_country = '??') / 1e9, 1) AS ip_country_unknown_gb,
+    round(sumIf(bytes, (src_ip_country = '??' AND NOT {no_country_expected_sql('src_ip')}) OR (dst_ip_country = '??' AND NOT {no_country_expected_sql('dst_ip')})) / 1e9, 1) AS ip_country_unknown_gb,
+    round(sumIf(bytes, (src_ip_country = '??' AND {no_country_expected_sql('src_ip')}) OR (dst_ip_country = '??' AND {no_country_expected_sql('dst_ip')})) / 1e9, 1) AS ip_country_no_country_expected_gb,
     round(sumIf(bytes, (src_as_country = '??' AND src_asn != 0) OR (dst_as_country = '??' AND dst_asn != 0)) / 1e9, 1) AS as_country_unknown_known_asn_gb,
     round(sum(bytes) / 1e9, 1) AS gb
 FROM default.traffic_pair_1m
@@ -2038,13 +2046,19 @@ ORDER BY gb DESC
         dst_remote_zero_s,
         remote_no_asn_expected_s,
         ip_cc_unknown_s,
+        ip_no_country_expected_s,
         as_cc_unknown_s,
         gb_s,
     ) in rows:
         name = f"pair_quality.{direction}.{src_scope}_to_{dst_scope}"
         no_asn_note = (
-            f" (+{remote_no_asn_expected_s} gb multicast/reserved, no ASN expected)"
+            f" (+{remote_no_asn_expected_s} gb special-use, no ASN expected)"
             if float(remote_no_asn_expected_s) > 0
+            else ""
+        )
+        no_country_note = (
+            f" (+{ip_no_country_expected_s} gb special-use, no country expected)"
+            if float(ip_no_country_expected_s) > 0
             else ""
         )
         gb_total = float(gb_s)
@@ -2073,7 +2087,7 @@ ORDER BY gb DESC
         elif float(as_cc_unknown_s) > args.max_as_country_unknown_gb:
             add(results, "WARN", name, f"as_country_unknown_for_known_asn_gb={as_cc_unknown_s} gb={gb_s} (asn_registry cc gap)")
         elif float(ip_cc_unknown_s) > args.max_ip_country_unknown_gb:
-            add(results, "WARN", name, f"ip_country_unknown_gb={ip_cc_unknown_s} gb={gb_s} (geo dict / private IPs)")
+            add(results, "WARN", name, f"ip_country_unknown_gb={ip_cc_unknown_s} gb={gb_s} (geo dict gap){no_country_note}")
         elif float(src_remote_zero_s) > 0 or float(dst_remote_zero_s) > 0:
             add(
                 results,
@@ -2082,7 +2096,7 @@ ORDER BY gb DESC
                 f"remote_asn_zero_gb src={src_remote_zero_s} ({src_remote_zero_pct:.2f}%) dst={dst_remote_zero_s} ({dst_remote_zero_pct:.2f}%) gb={gb_s} (BGP coverage){no_asn_note}",
             )
         else:
-            add(results, "OK", name, f"gb={gb_s} rows={rows_s}{no_asn_note}")
+            add(results, "OK", name, f"gb={gb_s} rows={rows_s}{no_asn_note}{no_country_note}")
 
 
 def check_direction_rollup(ch: ClickHouse, args: argparse.Namespace, results: List[CheckResult]) -> None:
@@ -2110,7 +2124,7 @@ WHERE source_id = {sql_string(args.source_id)}
 
 
 def check_country_rollup(ch: ClickHouse, args: argparse.Namespace, results: List[CheckResult]) -> None:
-    row = one_row(
+    rollup_row = one_row(
         ch,
         f"""
 WITH (SELECT max(minute) FROM default.traffic_country_1m WHERE source_id = {sql_string(args.source_id)}) AS ts_to
@@ -2125,15 +2139,98 @@ WHERE source_id = {sql_string(args.source_id)}
   AND minute <= ts_to
 """,
     )
-    if not row or row[0] == "":
+    if not rollup_row or rollup_row[0] == "":
         add(results, "WARN", "country_rollup", "no rows in quality window or no country_code column")
         return
-    total_gb, unknown_gb, unknown_pct = row
+    total_gb, unknown_gb, unknown_pct = rollup_row
+
+    talker_row = one_row(
+        ch,
+        f"""
+WITH (SELECT max(minute) FROM default.traffic_talker_1m WHERE source_id = {sql_string(args.source_id)}) AS ts_to
+SELECT
+    round(sumIf(bytes, endpoint_ip_country = '??' AND NOT {no_country_expected_sql('endpoint_ip')}) / 1e9, 1) AS unexplained_unknown_gb,
+    round(sumIf(bytes, endpoint_ip_country = '??' AND {no_country_expected_sql('endpoint_ip')}) / 1e9, 1) AS explained_unknown_gb,
+    round(100 * sumIf(bytes, endpoint_ip_country = '??' AND NOT {no_country_expected_sql('endpoint_ip')}) / nullIf(sum(bytes), 0), 1) AS unexplained_pct
+FROM default.traffic_talker_1m
+WHERE source_id = {sql_string(args.source_id)}
+  AND minute >= ts_to - INTERVAL {args.quality_window_minutes} MINUTE
+  AND minute <= ts_to
+""",
+    )
+    if talker_row and talker_row[0] != "":
+        unexplained_gb, explained_gb, unexplained_pct = talker_row
+        pct = float(unexplained_pct) if unexplained_pct not in ("", "\\N") else 0.0
+        detail = (
+            f"rollup_unknown_gb={unknown_gb} ({unknown_pct}%) total_gb={total_gb}; "
+            f"unexplained_gb={unexplained_gb} ({unexplained_pct}%) "
+            f"explained_special_use_gb={explained_gb}"
+        )
+        if pct > args.max_country_unknown_pct:
+            add(results, "WARN", "country_rollup.unknown_country", detail)
+        else:
+            add(results, "OK", "country_rollup.unknown_country", detail)
+        return
+
     pct = float(unknown_pct) if unknown_pct not in ("", "\\N") else 0.0
     if pct > args.max_country_unknown_pct:
         add(results, "WARN", "country_rollup.unknown_country", f"unknown_gb={unknown_gb} ({unknown_pct}%) total_gb={total_gb}")
     else:
         add(results, "OK", "country_rollup.unknown_country", f"unknown_gb={unknown_gb} ({unknown_pct}%) total_gb={total_gb}")
+
+
+def check_special_prefixes_catalog(ch: ClickHouse, args: argparse.Namespace, results: List[CheckResult]) -> None:
+    row = one_row(
+        ch,
+        f"""
+SELECT
+    count() AS prefixes,
+    uniq(kind) AS kinds,
+    countIf(asn_expected = 0) AS no_asn_prefixes,
+    countIf(country_expected = 0) AS no_country_prefixes
+FROM {SPECIAL_IP_PREFIXES_VIEW}
+""",
+    )
+    if not row or row[0] in ("", "0"):
+        add(
+            results,
+            "FAIL",
+            "special_prefixes.catalog",
+            f"missing or empty view {SPECIAL_IP_PREFIXES_VIEW}; apply deploy/clickhouse/net_special_ip_prefixes.sql",
+        )
+        return
+    prefixes, kinds, no_asn, no_country = row
+    add(
+        results,
+        "OK",
+        "special_prefixes.catalog",
+        f"prefixes={prefixes} kinds={kinds} no_asn={no_asn} no_country={no_country}",
+    )
+
+
+def check_special_traffic_summary(ch: ClickHouse, args: argparse.Namespace, results: List[CheckResult]) -> None:
+    rows = ch.query_tsv(
+        f"""
+WITH (SELECT max(minute) FROM default.traffic_talker_1m WHERE source_id = {sql_string(args.source_id)}) AS ts_to
+SELECT
+    sp.kind,
+    round(sum(t.bytes) / 1e9, 1) AS gb,
+    count() AS agg_rows
+FROM default.traffic_talker_1m AS t
+INNER JOIN {SPECIAL_IP_PREFIXES_VIEW} AS sp
+    ON isIPAddressInRange(t.endpoint_ip, sp.prefix)
+WHERE t.source_id = {sql_string(args.source_id)}
+  AND t.minute >= ts_to - INTERVAL {args.quality_window_minutes} MINUTE
+  AND t.minute <= ts_to
+GROUP BY sp.kind
+ORDER BY gb DESC
+""",
+    )
+    if not rows:
+        add(results, "OK", "special_prefixes.traffic", "no special-use traffic in quality window")
+        return
+    for kind, gb_s, agg_rows_s in rows:
+        add(results, "OK", f"special_prefixes.traffic.{kind}", f"gb={gb_s} agg_rows={agg_rows_s}")
 
 
 def check_raw_vs_direction_agg(ch: ClickHouse, args: argparse.Namespace, results: List[CheckResult]) -> None:
@@ -2431,6 +2528,8 @@ def main() -> int:
         ("table_freshness", lambda: check_table_freshness(ch, args, results)),
         ("sources", lambda: check_sources(ch, args, results)),
         ("direction_rollup", lambda: check_direction_rollup(ch, args, results)),
+        ("special_prefixes_catalog", lambda: check_special_prefixes_catalog(ch, args, results)),
+        ("special_traffic_summary", lambda: check_special_traffic_summary(ch, args, results)),
         ("country_rollup", lambda: check_country_rollup(ch, args, results)),
         ("talker_quality", lambda: check_talker_quality(ch, args, results)),
         ("pair_quality", lambda: check_pair_quality(ch, args, results)),

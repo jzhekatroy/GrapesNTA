@@ -8,6 +8,7 @@
 --   2d. ip_asn_prefixes.sql + iptoasn-loader (remote ASN fallback)
 --   3. net_entities.sql
 --   4. net_l3_prefixes.sql
+--   4a. net_special_ip_prefixes.sql (special-use blocks for quality checks)
 --   4b. migrate_net_l3_prefixes_origin_asn.sql (existing DBs without origin_asn)
 --   5. net_l2_vlans.sql
 --   6. traffic_direction_1m.sql
@@ -41,6 +42,7 @@
 --            deploy/clickhouse/ip_asn_prefixes.sql \
 --            deploy/clickhouse/net_entities.sql \
 --            deploy/clickhouse/net_l3_prefixes.sql \
+--            deploy/clickhouse/net_special_ip_prefixes.sql \
 --            deploy/clickhouse/net_l2_vlans.sql \
 --            deploy/clickhouse/traffic_direction_1m.sql \
 --            deploy/clickhouse/traffic_role_1m.sql \

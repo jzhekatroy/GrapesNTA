@@ -54,6 +54,27 @@ ASN resolution order for a matched L3 prefix:
 2. otherwise BGP origin ASN from `bgp_prefix_origin_current`
 3. otherwise `0`
 
+## Special-use IP Prefixes
+
+Table: `default.net_special_ip_prefixes`
+
+View: `default.net_special_ip_prefixes_enabled`
+
+Unlike `net_l3_prefixes`, this catalog does **not** drive direction or scope.
+It records blocks where missing ASN or country is expected: private, link-local,
+loopback, multicast, reserved, documentation, benchmark.
+
+| Field | Meaning |
+|-------|---------|
+| `kind` | `private`, `link_local`, `loopback`, `unspecified`, `multicast`, `reserved`, `documentation`, `benchmark` |
+| `asn_expected` | `1` = origin ASN lookup expected; `0` = ASN=0 is OK |
+| `country_expected` | `1` = geo country expected; `0` = `??` is OK |
+| `publicly_routable` | `0` = special-use; `1` = normal global unicast |
+
+Used by `scripts/check_traffic_data_quality.py` to exclude false positives in
+`remote_asn_zero` and `unknown_country` checks. Operators can override seeded
+rows by inserting a newer `(family, prefix)` with `enabled=0` or custom flags.
+
 ## L2 VLANs
 
 Table: `default.net_l2_vlans`

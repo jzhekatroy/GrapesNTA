@@ -151,6 +151,7 @@ for f in \
   flows_raw_source_id.sql \
   net_entities.sql \
   net_l3_prefixes.sql \
+  net_special_ip_prefixes.sql \
   net_l2_vlans.sql \
   geo_country.sql \
   bmp.sql \

@@ -46,6 +46,7 @@ for f in \
   deploy/clickhouse/flows_raw_extensions.sql \
   deploy/clickhouse/net_entities.sql \
   deploy/clickhouse/net_l3_prefixes.sql \
+  deploy/clickhouse/net_special_ip_prefixes.sql \
   deploy/clickhouse/net_l2_vlans.sql \
   deploy/clickhouse/traffic_direction_1m.sql \
   deploy/clickhouse/traffic_role_1m.sql \
@@ -276,6 +277,43 @@ Do not set `XDP_CLASSIFIER_IP_ASN_TABLE` before the table is created and loaded.
 Without this env var the classifier keeps the older behavior: L3 origin ASN,
 then BMP/BGP, then ASN `0`.
 
+## Step 8. Special-use IP Prefix Catalog
+
+Apply the read-only catalog used by `scripts/check_traffic_data_quality.py`
+to explain traffic where ASN or country is legitimately missing (private,
+multicast, reserved, documentation, benchmark). This table does **not** drive
+direction classification — keep those blocks out of `net_l3_prefixes`.
+
+```bash
+clickhouse-client --host HOST --user USER --password PASS \
+  --multiquery < deploy/clickhouse/net_special_ip_prefixes.sql
+
+clickhouse-client --host HOST --user USER --password PASS --query "
+SELECT kind, count() AS prefixes
+FROM default.net_special_ip_prefixes_enabled
+GROUP BY kind
+ORDER BY kind
+FORMAT PrettyCompact"
+```
+
+Operator overrides (disable a seeded block or add an operator-specific range):
+
+```sql
+-- Disable IPv4 multicast from quality exclusions (re-enable strict ASN checks)
+INSERT INTO default.net_special_ip_prefixes
+    (prefix, family, kind, asn_expected, country_expected, publicly_routable, display_name, comment, enabled, source, updated_at)
+VALUES
+    ('224.0.0.0/4', 4, 'multicast', 0, 0, 0, 'IPv4 multicast 224/4', 'Disabled by operator', 0, 'manual', now());
+
+-- Ignore an internal IPTV/service range in quality checks
+INSERT INTO default.net_special_ip_prefixes
+    (prefix, family, kind, asn_expected, country_expected, publicly_routable, display_name, comment, enabled, source, updated_at)
+VALUES
+    ('233.166.0.0/16', 4, 'multicast', 0, 0, 0, 'Operator IPTV GLOP', 'No public ASN/geo expected', 1, 'manual', now());
+```
+
+ReplacingMergeTree keeps the newest `(family, prefix)` row by `updated_at`.
+
 Run the read-only data quality health-check:
 
 ```bash
@@ -295,14 +333,16 @@ Interpretation:
 
 - `OK` - the checked invariant is healthy.
 - `WARN` - usable but incomplete:
-  - Small `remote_asn_zero_gb` - expected when BGP/BMP/fallback IP→ASN
-    coverage is partial. Large amounts are `FAIL` by default; refresh
-    `default.ip_asn_prefixes_current` with `scripts/load_iptoasn_prefixes.py`.
+  - `remote_asn_zero_gb` - expected for special-use blocks listed in
+    `default.net_special_ip_prefixes_enabled` (multicast, private, reserved).
+    The health-check excludes those ranges and reports them under
+    `special_prefixes.traffic.*`. Residual WARN means partial BGP/IP→ASN coverage.
   - `as_country_unknown_for_known_asn_gb` - ASN is known but `asn_registry_enriched.cc`
     has no country; fill the registry to clear it.
-  - `ip_country_unknown_gb` / `country_rollup.unknown_country` - `??` IP country;
-    small amounts are normal (private/bogon ranges), large amounts mean the geo
-    dict is stale or missing.
+  - `ip_country_unknown_gb` / `country_rollup.unknown_country` - unexplained `??`
+    IP country after excluding special-use prefixes. Small residual amounts are
+    normal; large amounts mean the geo dict is stale or missing. The rollup line
+    also shows `explained_special_use_gb` for multicast/private traffic.
 - `FAIL` - fix before trusting the dashboard. Examples:
   - `direction_rollup.unknown_direction` or `*_quality.* unknown_direction` -
     classifier did not set a direction.
@@ -415,6 +455,7 @@ sudo systemctl restart xdpflowd
 - No attached `traffic_*` MV in `system.tables`
 - `bgp_prefix_origin_current`: refreshed by `bgp-origin-refresh` timer
 - `ip_asn_prefixes_current`: loaded when remote ASN coverage needs fallback
+- `net_special_ip_prefixes_enabled`: seeded special-use blocks for quality checks
 - `net_l3_prefixes.origin_asn`: set for provider/customer prefixes used in top talkers
 - Outbound `flows_raw.src_asn` non-zero on new rows after L3 ASN seed
 - API `/api/network/dashboard`: response < 1s for 1-hour window
