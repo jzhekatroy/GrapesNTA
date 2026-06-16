@@ -71,6 +71,20 @@ NOT (
 """.strip()
 PRIVATE_IP_EXCLUDE_DST_SQL = PRIVATE_IP_EXCLUDE_SRC_SQL.replace("src_ip", "dst_ip")
 
+
+def no_asn_expected_sql(col: str) -> str:
+    """Ranges that legitimately have no origin ASN (multicast / reserved / broadcast).
+
+    IPTV/streaming multicast (224.0.0.0/4) and reserved space (240.0.0.0/4,
+    including 255.255.255.255 broadcast) plus IPv6 multicast (ff00::/8) are never
+    advertised in BGP or iptoasn, so dst/src ASN=0 there is expected, not a gap.
+    """
+    return (
+        f"(isIPAddressInRange({col}, '224.0.0.0/4') OR "
+        f"isIPAddressInRange({col}, '240.0.0.0/4') OR "
+        f"isIPAddressInRange({col}, 'ff00::/8'))"
+    )
+
 DEFAULT_ENV_FILES = (
     "/etc/grapesnta/traffic-rollups.env",
     "/etc/grapesnta/traffic-talkers-rollups.env",
@@ -1927,7 +1941,8 @@ SELECT
     count() AS rows,
     countIf(endpoint_ip = '') AS empty_ip,
     round(sumIf(bytes, endpoint_scope IN ('local', 'customer') AND endpoint_network_role IN ({LOCAL_ORIGIN_ROLES_SQL}) AND endpoint_asn = 0) / 1e9, 1) AS local_asn_zero_gb,
-    round(sumIf(bytes, endpoint_scope = 'remote' AND endpoint_asn = 0) / 1e9, 1) AS remote_asn_zero_gb,
+    round(sumIf(bytes, endpoint_scope = 'remote' AND endpoint_asn = 0 AND NOT {no_asn_expected_sql('endpoint_ip')}) / 1e9, 1) AS remote_asn_zero_gb,
+    round(sumIf(bytes, endpoint_scope = 'remote' AND endpoint_asn = 0 AND {no_asn_expected_sql('endpoint_ip')}) / 1e9, 1) AS remote_no_asn_expected_gb,
     round(sumIf(bytes, endpoint_ip_country = '??') / 1e9, 1) AS ip_country_unknown_gb,
     round(sumIf(bytes, endpoint_as_country = '??' AND endpoint_asn != 0) / 1e9, 1) AS as_country_unknown_known_asn_gb,
     round(sum(bytes) / 1e9, 1) AS gb
@@ -1950,11 +1965,17 @@ ORDER BY gb DESC
         empty_ip_s,
         local_zero_s,
         remote_zero_s,
+        remote_no_asn_expected_s,
         ip_cc_unknown_s,
         as_cc_unknown_s,
         gb_s,
     ) in rows:
         name = f"talker_quality.{direction}.{side}.{scope}"
+        no_asn_note = (
+            f" (+{remote_no_asn_expected_s} gb multicast/reserved, no ASN expected)"
+            if float(remote_no_asn_expected_s) > 0
+            else ""
+        )
         if direction in ("", "unknown", "unclassified") and float(gb_s) > args.max_unknown_direction_gb:
             add(results, "FAIL", name, f"unknown_direction gb={gb_s} rows={rows_s}")
         elif scope in ("", "unknown") and float(gb_s) > args.max_unknown_scope_gb:
@@ -1970,9 +1991,9 @@ ORDER BY gb DESC
         elif float(ip_cc_unknown_s) > args.max_ip_country_unknown_gb:
             add(results, "WARN", name, f"ip_country_unknown_gb={ip_cc_unknown_s} gb={gb_s} (geo dict / private IPs)")
         elif float(remote_zero_s) > 0:
-            add(results, "WARN", name, f"remote_asn_zero_gb={remote_zero_s} gb={gb_s} (BGP coverage)")
+            add(results, "WARN", name, f"remote_asn_zero_gb={remote_zero_s} gb={gb_s} (BGP coverage){no_asn_note}")
         else:
-            add(results, "OK", name, f"gb={gb_s} rows={rows_s}")
+            add(results, "OK", name, f"gb={gb_s} rows={rows_s}{no_asn_note}")
 
 
 def check_pair_quality(ch: ClickHouse, args: argparse.Namespace, results: List[CheckResult]) -> None:
@@ -1987,8 +2008,9 @@ SELECT
     countIf(src_ip = '' OR dst_ip = '') AS empty_ip_rows,
     round(sumIf(bytes, src_scope IN ('local', 'customer') AND src_asn = 0 AND {PRIVATE_IP_EXCLUDE_SRC_SQL}) / 1e9, 1) AS src_local_asn_zero_gb,
     round(sumIf(bytes, dst_scope IN ('local', 'customer') AND dst_asn = 0 AND {PRIVATE_IP_EXCLUDE_DST_SQL}) / 1e9, 1) AS dst_local_asn_zero_gb,
-    round(sumIf(bytes, src_scope = 'remote' AND src_asn = 0) / 1e9, 1) AS src_remote_asn_zero_gb,
-    round(sumIf(bytes, dst_scope = 'remote' AND dst_asn = 0) / 1e9, 1) AS dst_remote_asn_zero_gb,
+    round(sumIf(bytes, src_scope = 'remote' AND src_asn = 0 AND NOT {no_asn_expected_sql('src_ip')}) / 1e9, 1) AS src_remote_asn_zero_gb,
+    round(sumIf(bytes, dst_scope = 'remote' AND dst_asn = 0 AND NOT {no_asn_expected_sql('dst_ip')}) / 1e9, 1) AS dst_remote_asn_zero_gb,
+    round(sumIf(bytes, (src_scope = 'remote' AND src_asn = 0 AND {no_asn_expected_sql('src_ip')}) OR (dst_scope = 'remote' AND dst_asn = 0 AND {no_asn_expected_sql('dst_ip')})) / 1e9, 1) AS remote_no_asn_expected_gb,
     round(sumIf(bytes, src_ip_country = '??' OR dst_ip_country = '??') / 1e9, 1) AS ip_country_unknown_gb,
     round(sumIf(bytes, (src_as_country = '??' AND src_asn != 0) OR (dst_as_country = '??' AND dst_asn != 0)) / 1e9, 1) AS as_country_unknown_known_asn_gb,
     round(sum(bytes) / 1e9, 1) AS gb
@@ -2013,11 +2035,17 @@ ORDER BY gb DESC
         dst_local_zero_s,
         src_remote_zero_s,
         dst_remote_zero_s,
+        remote_no_asn_expected_s,
         ip_cc_unknown_s,
         as_cc_unknown_s,
         gb_s,
     ) in rows:
         name = f"pair_quality.{direction}.{src_scope}_to_{dst_scope}"
+        no_asn_note = (
+            f" (+{remote_no_asn_expected_s} gb multicast/reserved, no ASN expected)"
+            if float(remote_no_asn_expected_s) > 0
+            else ""
+        )
         if direction in ("", "unknown", "unclassified") and float(gb_s) > args.max_unknown_direction_gb:
             add(results, "FAIL", name, f"unknown_direction gb={gb_s} rows={rows_s}")
         elif (src_scope in ("", "unknown") or dst_scope in ("", "unknown")) and float(gb_s) > args.max_unknown_scope_gb:
@@ -2047,10 +2075,10 @@ ORDER BY gb DESC
                 results,
                 "WARN",
                 name,
-                f"remote_asn_zero_gb src={src_remote_zero_s} dst={dst_remote_zero_s} gb={gb_s} (BGP coverage)",
+                f"remote_asn_zero_gb src={src_remote_zero_s} dst={dst_remote_zero_s} gb={gb_s} (BGP coverage){no_asn_note}",
             )
         else:
-            add(results, "OK", name, f"gb={gb_s} rows={rows_s}")
+            add(results, "OK", name, f"gb={gb_s} rows={rows_s}{no_asn_note}")
 
 
 def check_direction_rollup(ch: ClickHouse, args: argparse.Namespace, results: List[CheckResult]) -> None:
