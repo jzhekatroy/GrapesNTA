@@ -1976,6 +1976,7 @@ ORDER BY gb DESC
             if float(remote_no_asn_expected_s) > 0
             else ""
         )
+        remote_zero_pct = (float(remote_zero_s) / float(gb_s) * 100.0) if float(gb_s) > 0 else 0.0
         if direction in ("", "unknown", "unclassified") and float(gb_s) > args.max_unknown_direction_gb:
             add(results, "FAIL", name, f"unknown_direction gb={gb_s} rows={rows_s}")
         elif scope in ("", "unknown") and float(gb_s) > args.max_unknown_scope_gb:
@@ -1984,14 +1985,14 @@ ORDER BY gb DESC
             add(results, "FAIL", name, f"empty_ip_rows={empty_ip_s} rows={rows_s}")
         elif float(local_zero_s) > args.max_local_asn_zero_gb:
             add(results, "FAIL", name, f"local_asn_zero_gb={local_zero_s} gb={gb_s}")
-        elif float(remote_zero_s) > args.max_remote_asn_zero_gb:
-            add(results, "FAIL", name, f"remote_asn_zero_gb={remote_zero_s} gb={gb_s} (fallback IP->ASN coverage)")
+        elif float(remote_zero_s) > args.max_remote_asn_zero_gb and remote_zero_pct > args.max_remote_asn_zero_pct:
+            add(results, "FAIL", name, f"remote_asn_zero_gb={remote_zero_s} ({remote_zero_pct:.2f}%) gb={gb_s} (fallback IP->ASN coverage)")
         elif float(as_cc_unknown_s) > args.max_as_country_unknown_gb:
             add(results, "WARN", name, f"as_country_unknown_for_known_asn_gb={as_cc_unknown_s} gb={gb_s} (asn_registry cc gap)")
         elif float(ip_cc_unknown_s) > args.max_ip_country_unknown_gb:
             add(results, "WARN", name, f"ip_country_unknown_gb={ip_cc_unknown_s} gb={gb_s} (geo dict / private IPs)")
         elif float(remote_zero_s) > 0:
-            add(results, "WARN", name, f"remote_asn_zero_gb={remote_zero_s} gb={gb_s} (BGP coverage){no_asn_note}")
+            add(results, "WARN", name, f"remote_asn_zero_gb={remote_zero_s} ({remote_zero_pct:.2f}%) gb={gb_s} (BGP coverage){no_asn_note}")
         else:
             add(results, "OK", name, f"gb={gb_s} rows={rows_s}{no_asn_note}")
 
@@ -2046,6 +2047,9 @@ ORDER BY gb DESC
             if float(remote_no_asn_expected_s) > 0
             else ""
         )
+        gb_total = float(gb_s)
+        src_remote_zero_pct = (float(src_remote_zero_s) / gb_total * 100.0) if gb_total > 0 else 0.0
+        dst_remote_zero_pct = (float(dst_remote_zero_s) / gb_total * 100.0) if gb_total > 0 else 0.0
         if direction in ("", "unknown", "unclassified") and float(gb_s) > args.max_unknown_direction_gb:
             add(results, "FAIL", name, f"unknown_direction gb={gb_s} rows={rows_s}")
         elif (src_scope in ("", "unknown") or dst_scope in ("", "unknown")) and float(gb_s) > args.max_unknown_scope_gb:
@@ -2059,12 +2063,12 @@ ORDER BY gb DESC
                 name,
                 f"src_local_asn_zero_gb={src_local_zero_s} dst_local_asn_zero_gb={dst_local_zero_s} gb={gb_s}",
             )
-        elif float(src_remote_zero_s) > args.max_remote_asn_zero_gb or float(dst_remote_zero_s) > args.max_remote_asn_zero_gb:
+        elif (float(src_remote_zero_s) > args.max_remote_asn_zero_gb and src_remote_zero_pct > args.max_remote_asn_zero_pct) or (float(dst_remote_zero_s) > args.max_remote_asn_zero_gb and dst_remote_zero_pct > args.max_remote_asn_zero_pct):
             add(
                 results,
                 "FAIL",
                 name,
-                f"remote_asn_zero_gb src={src_remote_zero_s} dst={dst_remote_zero_s} gb={gb_s} (fallback IP->ASN coverage)",
+                f"remote_asn_zero_gb src={src_remote_zero_s} ({src_remote_zero_pct:.2f}%) dst={dst_remote_zero_s} ({dst_remote_zero_pct:.2f}%) gb={gb_s} (fallback IP->ASN coverage)",
             )
         elif float(as_cc_unknown_s) > args.max_as_country_unknown_gb:
             add(results, "WARN", name, f"as_country_unknown_for_known_asn_gb={as_cc_unknown_s} gb={gb_s} (asn_registry cc gap)")
@@ -2075,7 +2079,7 @@ ORDER BY gb DESC
                 results,
                 "WARN",
                 name,
-                f"remote_asn_zero_gb src={src_remote_zero_s} dst={dst_remote_zero_s} gb={gb_s} (BGP coverage){no_asn_note}",
+                f"remote_asn_zero_gb src={src_remote_zero_s} ({src_remote_zero_pct:.2f}%) dst={dst_remote_zero_s} ({dst_remote_zero_pct:.2f}%) gb={gb_s} (BGP coverage){no_asn_note}",
             )
         else:
             add(results, "OK", name, f"gb={gb_s} rows={rows_s}{no_asn_note}")
@@ -2220,7 +2224,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--max-unknown-direction-gb", type=float, default=0.1, help="max GB in rollups with empty/unknown direction")
     p.add_argument("--max-unknown-scope-gb", type=float, default=0.1, help="max GB in talker/pair with empty/unknown scope")
     p.add_argument("--max-local-asn-zero-gb", type=float, default=0.1)
-    p.add_argument("--max-remote-asn-zero-gb", type=float, default=10.0, help="FAIL above this GB of remote traffic with ASN=0")
+    p.add_argument("--max-remote-asn-zero-gb", type=float, default=10.0, help="FAIL above this GB of remote traffic with ASN=0 (must also exceed --max-remote-asn-zero-pct)")
+    p.add_argument("--max-remote-asn-zero-pct", type=float, default=1.0, help="FAIL only if remote ASN=0 exceeds both --max-remote-asn-zero-gb and this %% of group total (BGP/iptoasn never has 100%% coverage)")
     p.add_argument("--max-ip-country-unknown-gb", type=float, default=5.0, help="WARN above this GB of '??' IP country (private/bogon expected small)")
     p.add_argument("--max-as-country-unknown-gb", type=float, default=5.0, help="WARN above this GB of '??' AS country where ASN is known")
     p.add_argument("--max-country-unknown-pct", type=float, default=5.0, help="WARN above this %% of bytes with '??' IP country in traffic_country_1m")
