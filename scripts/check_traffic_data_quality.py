@@ -462,6 +462,49 @@ def read_udp_snmp() -> Dict[str, int]:
     return {}
 
 
+def read_udp_socket_stats(port: int, unit: str = "") -> Dict[str, int]:
+    """Read per-socket UDP queue drops for listeners on port (ss skmem d= field)."""
+    if not shutil.which("ss"):
+        return {}
+    proc = subprocess.run(
+        ["ss", "-uanpm"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if proc.returncode != 0:
+        return {}
+
+    out = {"sockets": 0, "drops": 0, "recv_q": 0}
+    lines = (proc.stdout or "").splitlines()
+    port_pat = re.compile(rf"(?<!\d):{port}(?:\s|$)")
+    unit_needle = unit.strip()
+    idx = 0
+    while idx < len(lines):
+        line = lines[idx]
+        if "UNCONN" not in line or not port_pat.search(line):
+            idx += 1
+            continue
+        if unit_needle and unit_needle not in line:
+            idx += 1
+            continue
+
+        out["sockets"] += 1
+        parts = line.split()
+        if len(parts) >= 2:
+            try:
+                out["recv_q"] += int(parts[1])
+            except ValueError:
+                pass
+        if idx + 1 < len(lines) and "skmem:" in lines[idx + 1]:
+            match = re.search(r",d(\d+)", lines[idx + 1])
+            if match:
+                out["drops"] += int(match.group(1))
+            idx += 1
+        idx += 1
+    return out
+
+
 def be_u32(buf: bytes, offset: int) -> int:
     return struct.unpack_from(">I", buf, offset)[0]
 
@@ -1220,6 +1263,7 @@ def check_sflow_capture_vs_db(ch: ClickHouse, args: argparse.Namespace, results:
     pcap_path = ""
     fc0 = read_flowcollectord_stats(args.flow_unit)
     udp0 = read_udp_snmp()
+    sock0 = read_udp_socket_stats(args.sflow_port, args.flow_unit)
     try:
         pcap_path, t0, t1 = capture_sflow_pcap(args)
         summary = summarize_sflow_pcap(pcap_path, args.sflow_port)
@@ -1259,6 +1303,7 @@ def check_sflow_capture_vs_db(ch: ClickHouse, args: argparse.Namespace, results:
         time.sleep(args.sflow_db_settle_sec)
     fc1 = read_flowcollectord_stats(args.flow_unit)
     udp1 = read_udp_snmp()
+    sock1 = read_udp_socket_stats(args.sflow_port, args.flow_unit)
     ch_rows = query_ch_window_rowcount(ch, args, t0, t1)
     ch_packets, ch_bytes = query_ch_window_totals(ch, args, t0, t1)
 
@@ -1281,16 +1326,49 @@ def check_sflow_capture_vs_db(ch: ClickHouse, args: argparse.Namespace, results:
             f"collector_acked_delta={fc_acked}",
         )
 
+    socket_drops_delta = 0
+    socket_count = 0
+    if sock0 or sock1:
+        socket_drops_delta = sock1.get("drops", 0) - sock0.get("drops", 0)
+        socket_count = max(sock0.get("sockets", 0), sock1.get("sockets", 0))
+        recv_q = sock1.get("recv_q", 0)
+        if socket_count == 0:
+            add(
+                results,
+                "WARN",
+                "sflow_capture.udp_socket",
+                f"port={args.sflow_port} unit={args.flow_unit}: no UDP listeners found via ss",
+            )
+        else:
+            add(
+                results,
+                "OK" if socket_drops_delta == 0 else "FAIL",
+                "sflow_capture.udp_socket",
+                f"port={args.sflow_port} sockets={socket_count} recv_q={recv_q} "
+                f"drops_delta={socket_drops_delta}",
+            )
+
     if udp0 and udp1:
         in_err = udp1.get("InErrors", 0) - udp0.get("InErrors", 0)
         rcvbuf_err = udp1.get("RcvbufErrors", 0) - udp0.get("RcvbufErrors", 0)
         in_datagrams = udp1.get("InDatagrams", 0) - udp0.get("InDatagrams", 0)
-        status = "OK" if in_err == 0 and rcvbuf_err == 0 else "FAIL"
+        # /proc/net/snmp UDP counters are host-wide, not per sFlow socket. Do not
+        # FAIL when the collector socket itself shows no drops.
+        if in_err == 0 and rcvbuf_err == 0:
+            snmp_status = "OK"
+        elif socket_count > 0 and socket_drops_delta == 0:
+            snmp_status = "OK"
+        else:
+            snmp_status = "WARN"
+        suffix = ""
+        if snmp_status == "OK" and (in_err > 0 or rcvbuf_err > 0):
+            suffix = " (host-wide; sFlow socket drops=0)"
         add(
             results,
-            status,
+            snmp_status,
             "sflow_capture.udp_kernel",
-            f"InDatagrams_delta={in_datagrams} InErrors_delta={in_err} RcvbufErrors_delta={rcvbuf_err}",
+            f"InDatagrams_delta={in_datagrams} InErrors_delta={in_err} "
+            f"RcvbufErrors_delta={rcvbuf_err}{suffix}",
         )
 
     row_ratio = pct_ratio(ch_rows, summary.parsed_records)
