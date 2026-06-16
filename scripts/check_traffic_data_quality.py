@@ -2222,11 +2222,16 @@ SELECT
     round(sum(t.bytes) / 1e9, 1) AS gb,
     count() AS agg_rows
 FROM default.traffic_talker_1m AS t
-INNER JOIN {SPECIAL_IP_PREFIXES_VIEW} AS sp
-    ON isIPAddressInRange(t.endpoint_ip, sp.prefix)
+CROSS JOIN
+(
+    SELECT kind, groupArray(prefix) AS prefixes
+    FROM {SPECIAL_IP_PREFIXES_VIEW}
+    GROUP BY kind
+) AS sp
 WHERE t.source_id = {sql_string(args.source_id)}
   AND t.minute >= ts_to - INTERVAL {args.quality_window_minutes} MINUTE
   AND t.minute <= ts_to
+  AND arrayExists(p -> isIPAddressInRange(t.endpoint_ip, p), sp.prefixes)
 GROUP BY sp.kind
 ORDER BY gb DESC
 """,
