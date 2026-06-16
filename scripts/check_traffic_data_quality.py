@@ -426,6 +426,7 @@ def read_flowcollectord_stats(unit: str) -> Dict[str, int]:
                         "counter_skipped",
                         "parse_errors",
                         "unknown_samples",
+                        "udp_queue_drops",
                     ),
                 )
             )
@@ -1111,6 +1112,7 @@ def check_sflow_pipeline_coverage(ch: ClickHouse, args: argparse.Namespace, resu
     d_samples = fc1.get("flow_samples", 0) - fc0.get("flow_samples", 0)
     d_parsed = fc1.get("records_parsed", 0) - fc0.get("records_parsed", 0)
     d_parse_err = fc1.get("parse_errors", 0) - fc0.get("parse_errors", 0)
+    d_queue_drops = fc1.get("udp_queue_drops", 0) - fc0.get("udp_queue_drops", 0)
     d_acked = fc1.get("records_acked", 0) - fc0.get("records_acked", 0)
     d_insert_err = fc1.get("insert_errs", 0) - fc0.get("insert_errs", 0)
 
@@ -1119,7 +1121,7 @@ def check_sflow_pipeline_coverage(ch: ClickHouse, args: argparse.Namespace, resu
         "OK" if d_datagrams > 0 else "FAIL",
         "coverage.flowcollectord.datagrams",
         f"window_sec={window_sec} datagrams={d_datagrams} flow_samples={d_samples} "
-        f"records_parsed={d_parsed} parse_errors_delta={d_parse_err}",
+        f"records_parsed={d_parsed} parse_errors_delta={d_parse_err} udp_queue_drops_delta={d_queue_drops}",
     )
     add(
         results,
