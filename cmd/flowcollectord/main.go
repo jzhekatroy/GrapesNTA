@@ -41,9 +41,10 @@ func main() {
 		DSN:     cfg.CHDSN,
 		Refresh: cfg.ClassifierRefresh,
 		Tables: flowingest.ClassifierTables{
-			BGPOrigins: cfg.ClassifierBGPTable,
-			L3Prefixes: cfg.ClassifierL3PrefixesView,
-			L2VLANs:    cfg.ClassifierL2VLANsView,
+			BGPOrigins:    cfg.ClassifierBGPTable,
+			IPASNPrefixes: cfg.ClassifierIPASNTable,
+			L3Prefixes:    cfg.ClassifierL3PrefixesView,
+			L2VLANs:       cfg.ClassifierL2VLANsView,
 		},
 	})
 	if err != nil {
