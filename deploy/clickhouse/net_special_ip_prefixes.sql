@@ -28,7 +28,8 @@ ENGINE = ReplacingMergeTree(updated_at)
 ORDER BY (family, prefix)
 SETTINGS index_granularity = 8192;
 
-DROP VIEW IF EXISTS default.net_special_ip_prefixes_enabled;
+-- Older ClickHouse versions drop ordinary views via DROP TABLE, not DROP VIEW.
+DROP TABLE IF EXISTS default.net_special_ip_prefixes_enabled;
 
 CREATE VIEW default.net_special_ip_prefixes_enabled AS
 SELECT

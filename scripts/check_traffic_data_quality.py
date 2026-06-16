@@ -67,13 +67,18 @@ def special_prefix_match_sql(
     country_expected: Optional[int] = None,
 ) -> str:
     """True when col falls into an enabled special-use prefix row."""
-    conds = [f"isIPAddressInRange({col}, sp.prefix)"]
+    conds = []
     if asn_expected is not None:
-        conds.append(f"sp.asn_expected = {int(asn_expected)}")
+        conds.append(f"asn_expected = {int(asn_expected)}")
     if country_expected is not None:
-        conds.append(f"sp.country_expected = {int(country_expected)}")
-    where = " AND ".join(conds)
-    return f"EXISTS (SELECT 1 FROM {SPECIAL_IP_PREFIXES_VIEW} AS sp WHERE {where})"
+        conds.append(f"country_expected = {int(country_expected)}")
+    where = ("WHERE " + " AND ".join(conds)) if conds else ""
+    # Keep this as a scalar subquery instead of a correlated EXISTS for broader
+    # ClickHouse compatibility; the catalog is intentionally tiny.
+    return (
+        f"arrayExists(p -> isIPAddressInRange({col}, p), "
+        f"(SELECT groupArray(prefix) FROM {SPECIAL_IP_PREFIXES_VIEW} {where}))"
+    )
 
 
 def no_asn_expected_sql(col: str) -> str:
