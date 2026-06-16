@@ -195,12 +195,7 @@ def main() -> int:
             "(prefix, family, origin_asn, cc, as_name, source, snapshot_ts) "
             "FORMAT TabSeparated"
         )
-        ch_run(
-            base,
-            insert_query,
-            input_path=tsv_path,
-            extra_args=["--max_insert_threads=1", "--max_threads=2"],
-        )
+        ch_run(base, insert_query, input_path=tsv_path)
         ch_run(base, f"EXCHANGE TABLES {args.staging_table} AND {args.current_table}")
         ch_run(base, f"TRUNCATE TABLE {args.staging_table}")
 
