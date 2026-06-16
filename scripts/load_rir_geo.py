@@ -299,19 +299,25 @@ def ch_swap_tables(base: Sequence[str], table: str, staging: str) -> None:
     except RuntimeError:
         pass
     # Fallback: atomic triple RENAME (same database).
-    if "." not in table or "." not in staging:
-        raise RuntimeError(
-            "EXCHANGE TABLES failed; for RENAME fallback use qualified names "
-            "like default.geo_prefix_country"
+    if "." in table and "." in staging:
+        db = table.split(".", 1)[0]
+        tmp = f"{db}._rir_loader_swap_{os.getpid()}"
+        q2 = (
+            f"RENAME TABLE {table} TO {tmp}, "
+            f"{staging} TO {table}, "
+            f"{tmp} TO {staging}"
         )
-    db = table.split(".", 1)[0]
-    tmp = f"{db}._rir_loader_swap_{os.getpid()}"
-    q2 = (
-        f"RENAME TABLE {table} TO {tmp}, "
-        f"{staging} TO {table}, "
-        f"{tmp} TO {staging}"
-    )
-    ch_run_query(base, q2)
+        try:
+            ch_run_query(base, q2)
+            return
+        except RuntimeError:
+            # RENAME is blocked when a dictionary depends on the target table.
+            pass
+    # Last resort: in-place replace. Works even when a dependent dictionary
+    # forbids RENAME and when the (old) client cannot issue dictionary DDL.
+    # Brief window where the table holds no rows; acceptable for fallback dicts.
+    ch_run_query(base, f"TRUNCATE TABLE {table}")
+    ch_run_query(base, f"INSERT INTO {table} SELECT * FROM {staging}")
 
 
 def sql_string(value: str) -> str:
@@ -358,24 +364,6 @@ def ch_create_or_replace_dictionary(base: Sequence[str], args: argparse.Namespac
     query = build_dictionary_query(args, password, or_replace=False)
     redacted_query = build_dictionary_query(args, "***", or_replace=False)
     ch_run_query(base, query, display_query=redacted_query)
-
-
-def ch_drop_dictionary(base: Sequence[str], dictionary: str) -> None:
-    """Drop dictionary, supporting ClickHouse builds that expose it as TABLE."""
-    for query in (
-        f"DROP DICTIONARY IF EXISTS {dictionary}",
-        f"DETACH DICTIONARY IF EXISTS {dictionary}",
-        f"DROP DICTIONARY {dictionary}",
-        f"DETACH DICTIONARY {dictionary}",
-        f"DROP TABLE IF EXISTS {dictionary}",
-        f"DETACH TABLE IF EXISTS {dictionary}",
-    ):
-        try:
-            ch_run_query(base, query)
-            return
-        except RuntimeError:
-            continue
-    ch_run_query(base, f"DROP TABLE IF EXISTS {dictionary}")
 
 
 @dataclass
@@ -583,11 +571,8 @@ def main() -> int:
         with open(tmp_tsv, "rb") as tsv_bin:
             ch_run_query(base, insert_q, stdin=tsv_bin)
 
-        # Old ClickHouse builds may lack EXCHANGE TABLES and require RENAME
-        # fallback. Dictionaries depending on the target table block RENAME, so
-        # drop and recreate the dictionary around the prefix table swap.
-        if not args.skip_dictionary_create:
-            ch_drop_dictionary(base, args.dictionary)
+        # ch_swap_tables falls back to in-place replace when a dependent
+        # dictionary blocks RENAME, so the dictionary does not need dropping.
         ch_swap_tables(base, args.table, stg)
 
         asn_stg = args.asn_staging_table
@@ -599,7 +584,15 @@ def main() -> int:
         ch_swap_tables(base, args.asn_table, asn_stg)
 
         if not args.skip_dictionary_create:
-            ch_create_or_replace_dictionary(base, args)
+            try:
+                ch_create_or_replace_dictionary(base, args)
+            except RuntimeError as exc:
+                # Old clickhouse-client builds cannot parse dictionary DDL. If the
+                # dictionary already exists, an in-place data reload below is enough.
+                print(
+                    f"dictionary create/replace skipped (client lacks dictionary DDL?): {exc}",
+                    file=sys.stderr,
+                )
 
         ch_run_query(base, f"SYSTEM RELOAD DICTIONARY {args.dictionary}")
 
