@@ -60,13 +60,19 @@ def clickhouse_base_args(args: argparse.Namespace) -> List[str]:
     return cmd
 
 
-def ch_run(base: Sequence[str], query: str, *, input_path: Optional[str] = None) -> None:
+def ch_run(
+    base: Sequence[str],
+    query: str,
+    *,
+    input_path: Optional[str] = None,
+    extra_args: Optional[Sequence[str]] = None,
+) -> None:
     stdin = None
     try:
         if input_path:
             stdin = open(input_path, "rb")
         proc = subprocess.run(
-            list(base) + ["--query", query],
+            list(base) + list(extra_args or []) + ["--query", query],
             stdin=stdin,
             capture_output=True,
             text=True,
@@ -187,10 +193,14 @@ def main() -> int:
         insert_query = (
             f"INSERT INTO {args.staging_table} "
             "(prefix, family, origin_asn, cc, as_name, source, snapshot_ts) "
-            "SETTINGS max_insert_threads=1, max_threads=2 "
             "FORMAT TabSeparated"
         )
-        ch_run(base, insert_query, input_path=tsv_path)
+        ch_run(
+            base,
+            insert_query,
+            input_path=tsv_path,
+            extra_args=["--max_insert_threads=1", "--max_threads=2"],
+        )
         ch_run(base, f"EXCHANGE TABLES {args.staging_table} AND {args.current_table}")
         ch_run(base, f"TRUNCATE TABLE {args.staging_table}")
 
