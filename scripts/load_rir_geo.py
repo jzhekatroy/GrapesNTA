@@ -318,9 +318,10 @@ def sql_string(value: str) -> str:
     return "'" + value.replace("\\", "\\\\").replace("'", "\\'") + "'"
 
 
-def build_dictionary_query(args: argparse.Namespace, password: str) -> str:
+def build_dictionary_query(args: argparse.Namespace, password: str, *, or_replace: bool = True) -> str:
+    verb = "CREATE OR REPLACE DICTIONARY" if or_replace else "CREATE DICTIONARY"
     return f"""
-CREATE OR REPLACE DICTIONARY {args.dictionary}
+{verb} {args.dictionary}
 (
     prefix String,
     cc String,
@@ -348,6 +349,14 @@ def ch_create_or_replace_dictionary(base: Sequence[str], args: argparse.Namespac
     password = args.dictionary_source_password or ""
     query = build_dictionary_query(args, password)
     redacted_query = build_dictionary_query(args, "***")
+    try:
+        ch_run_query(base, query, display_query=redacted_query)
+        return
+    except RuntimeError:
+        # Older ClickHouse versions may not support CREATE OR REPLACE DICTIONARY.
+        pass
+    query = build_dictionary_query(args, password, or_replace=False)
+    redacted_query = build_dictionary_query(args, "***", or_replace=False)
     ch_run_query(base, query, display_query=redacted_query)
 
 
@@ -355,7 +364,11 @@ def ch_drop_dictionary(base: Sequence[str], dictionary: str) -> None:
     """Drop dictionary, supporting ClickHouse builds that expose it as TABLE."""
     for query in (
         f"DROP DICTIONARY IF EXISTS {dictionary}",
+        f"DETACH DICTIONARY IF EXISTS {dictionary}",
+        f"DROP DICTIONARY {dictionary}",
+        f"DETACH DICTIONARY {dictionary}",
         f"DROP TABLE IF EXISTS {dictionary}",
+        f"DETACH TABLE IF EXISTS {dictionary}",
     ):
         try:
             ch_run_query(base, query)
