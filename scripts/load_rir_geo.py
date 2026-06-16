@@ -556,6 +556,11 @@ def main() -> int:
         with open(tmp_tsv, "rb") as tsv_bin:
             ch_run_query(base, insert_q, stdin=tsv_bin)
 
+        # Old ClickHouse builds may lack EXCHANGE TABLES and require RENAME
+        # fallback. Dictionaries depending on the target table block RENAME, so
+        # drop and recreate the dictionary around the prefix table swap.
+        if not args.skip_dictionary_create:
+            ch_run_query(base, f"DROP DICTIONARY IF EXISTS {args.dictionary}")
         ch_swap_tables(base, args.table, stg)
 
         asn_stg = args.asn_staging_table
