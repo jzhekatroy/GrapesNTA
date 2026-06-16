@@ -37,6 +37,7 @@ type config struct {
 	ClassifierL2VLANsView string
 
 	UDPReadBuffer int
+	UDPReaders    int
 	UDPWorkers    int
 	UDPQueueSize  int
 	Interval      time.Duration
@@ -70,6 +71,7 @@ func loadConfig() config {
 	classifierL2 := flag.String("classifier-l2-vlans-view", envString("FC_CLASSIFIER_L2_VLANS_VIEW", "default.net_l2_vlans_enabled"), "L2 VLANs view")
 
 	udpReadBuffer := flag.Int("udp-read-buffer", envInt("FC_UDP_READ_BUFFER", 64*1024*1024), "UDP socket read buffer bytes (also bounds datagram read buffer)")
+	udpReaders := flag.Int("udp-readers", envInt("FC_UDP_READERS", 1), "parallel sFlow UDP sockets using SO_REUSEPORT")
 	udpWorkers := flag.Int("udp-workers", envInt("FC_UDP_WORKERS", 8), "sFlow parser worker count")
 	udpQueueSize := flag.Int("udp-queue-size", envInt("FC_UDP_QUEUE_SIZE", 65536), "sFlow datagram queue depth")
 	interval := flag.Duration("interval", envDuration("FC_INTERVAL", 5*time.Second), "metrics log interval")
@@ -106,6 +108,7 @@ func loadConfig() config {
 		ClassifierL3PrefixesView: strings.TrimSpace(*classifierL3),
 		ClassifierL2VLANsView: strings.TrimSpace(*classifierL2),
 		UDPReadBuffer: *udpReadBuffer,
+		UDPReaders: *udpReaders,
 		UDPWorkers: *udpWorkers,
 		UDPQueueSize: *udpQueueSize,
 		Interval: *interval,

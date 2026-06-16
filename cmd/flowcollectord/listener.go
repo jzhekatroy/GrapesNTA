@@ -6,8 +6,10 @@ import (
 	"net"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
+	"golang.org/x/sys/unix"
 	"xdpflowd/internal/flowingest"
 )
 
@@ -16,6 +18,7 @@ type sflowListener struct {
 	addr       string
 	sourceID   string
 	readBuf    int
+	readers    int
 	workers    int
 	queueSize  int
 	batchSize  int
@@ -30,6 +33,7 @@ func newSflowListener(
 	log *slog.Logger,
 	addr, sourceID string,
 	readBuf int,
+	readers int,
 	workers int,
 	queueSize int,
 	batchSize int,
@@ -43,6 +47,9 @@ func newSflowListener(
 	if flushEvery <= 0 {
 		flushEvery = time.Second
 	}
+	if readers < 1 {
+		readers = 1
+	}
 	if workers < 1 {
 		workers = 1
 	}
@@ -54,6 +61,7 @@ func newSflowListener(
 		addr:       addr,
 		sourceID:   sourceID,
 		readBuf:    readBuf,
+		readers:    readers,
 		workers:    workers,
 		queueSize:  queueSize,
 		batchSize:  batchSize,
@@ -69,51 +77,119 @@ type sflowDatagram struct {
 }
 
 func (l *sflowListener) Run(ctx context.Context) error {
-	udpAddr, err := net.ResolveUDPAddr("udp", l.addr)
-	if err != nil {
-		return err
-	}
-	pc, err := net.ListenUDP("udp", udpAddr)
-	if err != nil {
-		return err
-	}
-	defer pc.Close()
-	if l.readBuf > 0 {
-		if err := pc.SetReadBuffer(l.readBuf); err != nil {
-			l.log.Warn("sflow set udp read buffer", "requested_bytes", l.readBuf, "err", err)
-		}
-	}
 	datagramBufSize := l.readBuf
 	if datagramBufSize < 65535 {
 		datagramBufSize = 65535
 	}
+
+	readers := make([]*net.UDPConn, 0, l.readers)
+	for i := 0; i < l.readers; i++ {
+		pc, err := listenUDPReusePort(ctx, l.addr)
+		if err != nil {
+			for _, r := range readers {
+				_ = r.Close()
+			}
+			return err
+		}
+		if l.readBuf > 0 {
+			if err := pc.SetReadBuffer(l.readBuf); err != nil {
+				l.log.Warn("sflow set udp read buffer", "reader", i, "requested_bytes", l.readBuf, "err", err)
+			}
+		}
+		readers = append(readers, pc)
+	}
+	defer func() {
+		for _, r := range readers {
+			_ = r.Close()
+		}
+	}()
+
 	l.log.Info("sflow listener started",
 		"addr", l.addr,
 		"source_id", l.sourceID,
 		"udp_read_buffer_bytes", l.readBuf,
 		"datagram_buffer_bytes", datagramBufSize,
+		"udp_readers", l.readers,
 		"udp_workers", l.workers,
 		"udp_queue_size", l.queueSize,
 	)
 
 	datagrams := make(chan sflowDatagram, l.queueSize)
-	var wg sync.WaitGroup
+	var workerWG sync.WaitGroup
 	for i := 0; i < l.workers; i++ {
-		wg.Add(1)
+		workerWG.Add(1)
 		go func() {
-			defer wg.Done()
+			defer workerWG.Done()
 			l.runWorker(ctx, datagrams)
 		}()
 	}
+
+	errCh := make(chan error, 1)
+	var readerWG sync.WaitGroup
+	for i, pc := range readers {
+		readerWG.Add(1)
+		go func(id int, conn *net.UDPConn) {
+			defer readerWG.Done()
+			if err := l.runReader(ctx, id, conn, datagramBufSize, datagrams); err != nil {
+				select {
+				case errCh <- err:
+				default:
+				}
+			}
+		}(i, pc)
+	}
 	defer func() {
+		for _, r := range readers {
+			_ = r.Close()
+		}
+		readerWG.Wait()
 		close(datagrams)
-		wg.Wait()
+		workerWG.Wait()
 	}()
 
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case err := <-errCh:
+		return err
+	}
+}
+
+func listenUDPReusePort(ctx context.Context, addr string) (*net.UDPConn, error) {
+	var lc net.ListenConfig
+	lc.Control = func(network, address string, c syscall.RawConn) error {
+		var sockErr error
+		if err := c.Control(func(fd uintptr) {
+			if err := unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_REUSEADDR, 1); err != nil {
+				sockErr = err
+				return
+			}
+			if err := unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_REUSEPORT, 1); err != nil {
+				sockErr = err
+				return
+			}
+		}); err != nil {
+			return err
+		}
+		return sockErr
+	}
+	pc, err := lc.ListenPacket(ctx, "udp", addr)
+	if err != nil {
+		return nil, err
+	}
+	udpConn, ok := pc.(*net.UDPConn)
+	if !ok {
+		_ = pc.Close()
+		return nil, net.InvalidAddrError("expected UDPConn")
+	}
+	return udpConn, nil
+}
+
+func (l *sflowListener) runReader(ctx context.Context, id int, pc *net.UDPConn, datagramBufSize int, datagrams chan<- sflowDatagram) error {
 	buf := make([]byte, datagramBufSize)
 	for {
 		if ctx.Err() != nil {
-			return ctx.Err()
+			return nil
 		}
 		_ = pc.SetReadDeadline(time.Now().Add(time.Second))
 		n, _, err := pc.ReadFromUDP(buf)
@@ -122,10 +198,10 @@ func (l *sflowListener) Run(ctx context.Context) error {
 				continue
 			}
 			if ctx.Err() != nil {
-				return ctx.Err()
+				return nil
 			}
-			l.log.Warn("sflow read", "err", err)
-			continue
+			l.log.Warn("sflow read", "reader", id, "err", err)
+			return err
 		}
 		cp := make([]byte, n)
 		copy(cp, buf[:n])
