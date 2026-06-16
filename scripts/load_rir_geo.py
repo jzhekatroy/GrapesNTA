@@ -351,6 +351,20 @@ def ch_create_or_replace_dictionary(base: Sequence[str], args: argparse.Namespac
     ch_run_query(base, query, display_query=redacted_query)
 
 
+def ch_drop_dictionary(base: Sequence[str], dictionary: str) -> None:
+    """Drop dictionary, supporting ClickHouse builds that expose it as TABLE."""
+    for query in (
+        f"DROP DICTIONARY IF EXISTS {dictionary}",
+        f"DROP TABLE IF EXISTS {dictionary}",
+    ):
+        try:
+            ch_run_query(base, query)
+            return
+        except RuntimeError:
+            continue
+    ch_run_query(base, f"DROP TABLE IF EXISTS {dictionary}")
+
+
 @dataclass
 class RunStats:
     rows: int = 0
@@ -560,7 +574,7 @@ def main() -> int:
         # fallback. Dictionaries depending on the target table block RENAME, so
         # drop and recreate the dictionary around the prefix table swap.
         if not args.skip_dictionary_create:
-            ch_run_query(base, f"DROP DICTIONARY IF EXISTS {args.dictionary}")
+            ch_drop_dictionary(base, args.dictionary)
         ch_swap_tables(base, args.table, stg)
 
         asn_stg = args.asn_staging_table
