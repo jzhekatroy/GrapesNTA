@@ -53,11 +53,11 @@ FROM (
     SELECT
         'flows_xdp_sel_stale' AS alert,
         source_id,
-        dateDiff('second', max(time_flow_start_ns), now64(9)) AS age_sec,
+        dateDiff('second', max(time_received_ns), now64(9)) AS age_sec,
         count() AS rows_${WINDOW_MIN}m
     FROM default.flows_raw
     WHERE source_id = 'xdp-sel'
-      AND time_flow_start_ns >= now64(9) - INTERVAL ${WINDOW_MIN} MINUTE
+      AND time_received_ns >= now64(9) - INTERVAL ${WINDOW_MIN} MINUTE
     GROUP BY source_id
     HAVING age_sec > 120 OR rows_${WINDOW_MIN}m = 0
 
@@ -66,11 +66,11 @@ FROM (
     SELECT
         'flows_netflow_stale' AS alert,
         source_id,
-        dateDiff('second', max(time_flow_start_ns), now64(9)) AS age_sec,
+        dateDiff('second', max(time_received_ns), now64(9)) AS age_sec,
         count() AS rows_${WINDOW_MIN}m
     FROM default.flows_raw
     WHERE source_id = 'netflow'
-      AND time_flow_start_ns >= now64(9) - INTERVAL ${WINDOW_MIN} MINUTE
+      AND time_received_ns >= now64(9) - INTERVAL ${WINDOW_MIN} MINUTE
     GROUP BY source_id
     HAVING age_sec > 120 OR rows_${WINDOW_MIN}m = 0
 
@@ -107,14 +107,14 @@ SELECT
     source_id,
     count() AS rows,
     round(sum(bytes) / 1024 / 1024, 2) AS sum_mb,
-    round(sum(bytes) / dateDiff('second', min(time_flow_start_ns), max(time_flow_start_ns)) / 1024 / 1024, 3) AS mb_per_sec,
-    round(count() / dateDiff('second', min(time_flow_start_ns), max(time_flow_start_ns)) * 60, 0) AS flows_per_min,
-    round(sum(bytes) / dateDiff('second', min(time_flow_start_ns), max(time_flow_start_ns)) * 86400 / 1024 / 1024 / 1024, 1) AS gb_per_day_est,
+    round(sum(bytes) / greatest(dateDiff('second', min(time_received_ns), max(time_received_ns)), 1) / 1024 / 1024, 3) AS mb_per_sec,
+    round(count() / greatest(dateDiff('second', min(time_received_ns), max(time_received_ns)), 1) * 60, 0) AS flows_per_min,
+    round(sum(bytes) / greatest(dateDiff('second', min(time_received_ns), max(time_received_ns)), 1) * 86400 / 1024 / 1024 / 1024, 1) AS gb_per_day_est,
     dateDiff('second', max(time_flow_start_ns), now64(9)) AS flow_age_sec,
     dateDiff('second', max(time_received_ns), now64(9)) AS recv_age_sec,
     quantile(0.95)(dateDiff('second', time_flow_start_ns, time_received_ns)) AS p95_lag_sec
 FROM default.flows_raw
-WHERE time_flow_start_ns >= now64(9) - INTERVAL ${WINDOW_MIN} MINUTE
+WHERE time_received_ns >= now64(9) - INTERVAL ${WINDOW_MIN} MINUTE
   AND source_id IN ('xdp-sel', 'netflow', 'xdp-default')
 GROUP BY source_id
 ORDER BY source_id
@@ -146,9 +146,9 @@ SELECT
     source_id,
     IPv6NumToString(sampler_address) AS sampler,
     count() AS rows,
-    max(time_flow_start_ns) AS max_flow
+    max(time_received_ns) AS max_received
 FROM default.flows_raw
-WHERE time_flow_start_ns >= now64(9) - INTERVAL 24 HOUR
+WHERE time_received_ns >= now64(9) - INTERVAL 24 HOUR
   AND source_id IN ('xdp-sel', 'netflow', 'xdp-default')
 GROUP BY source_id, sampler
 ORDER BY rows DESC
