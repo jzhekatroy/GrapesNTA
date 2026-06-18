@@ -29,9 +29,13 @@ fi
 # shellcheck disable=SC1090
 source "$STATE_FILE"
 : "${IFACE:?state missing IFACE}"
-: "${RULE_TABLE:?state missing RULE_TABLE}"
-: "${RULE_SPEC:?state missing RULE_SPEC}"
 : "${IPT_BACKUP_FULL:?state missing IPT_BACKUP_FULL}"
+
+HAD_NETFLOW_RULE="${HAD_NETFLOW_RULE:-1}"
+if [[ "$HAD_NETFLOW_RULE" == "1" ]]; then
+  : "${RULE_TABLE:?state missing RULE_TABLE}"
+  : "${RULE_SPEC:?state missing RULE_SPEC}"
+fi
 
 GOFLOW_CONTAINERS="${XDP_GOFLOW2_CONTAINERS:-kcg-goflow2-1}"
 
@@ -49,15 +53,19 @@ fi
 echo "[$(date +%T)] attempting 'ip link set dev $IFACE xdp off' (ignore errors) ..."
 ip link set dev "$IFACE" xdp off 2>/dev/null || true
 
-if iptables -t "$RULE_TABLE" -C PREROUTING $RULE_SPEC 2>/dev/null; then
-  echo "[$(date +%T)] ipt_NETFLOW rule already present — skip insert"
-else
-  echo "[$(date +%T)] re-inserting ipt_NETFLOW: iptables -t $RULE_TABLE -I PREROUTING 1 $RULE_SPEC"
-  if ! iptables -t "$RULE_TABLE" -I PREROUTING 1 $RULE_SPEC; then
-    echo "ERROR: targeted restore failed. Try full restore:" >&2
-    echo "  iptables-restore < $IPT_BACKUP_FULL" >&2
-    exit 1
+if [[ "$HAD_NETFLOW_RULE" == "1" ]]; then
+  if iptables -t "$RULE_TABLE" -C PREROUTING $RULE_SPEC 2>/dev/null; then
+    echo "[$(date +%T)] ipt_NETFLOW rule already present — skip insert"
+  else
+    echo "[$(date +%T)] re-inserting ipt_NETFLOW: iptables -t $RULE_TABLE -I PREROUTING 1 $RULE_SPEC"
+    if ! iptables -t "$RULE_TABLE" -I PREROUTING 1 $RULE_SPEC; then
+      echo "ERROR: targeted restore failed. Try full restore:" >&2
+      echo "  iptables-restore < $IPT_BACKUP_FULL" >&2
+      exit 1
+    fi
   fi
+else
+  echo "[$(date +%T)] skip ipt_NETFLOW restore (no rule was removed at enable time)"
 fi
 
 if command -v docker >/dev/null 2>&1; then

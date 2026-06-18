@@ -134,13 +134,20 @@ for t in raw mangle nat; do
 done
 
 if [[ -z "$RULE_TABLE" || -z "$RULE_SPEC" ]]; then
-  echo "ERROR: no PREROUTING -j NETFLOW rule for -i $IFACE in raw/mangle/nat" >&2
-  exit 1
+  if [[ "${XDP_ALLOW_NO_NETFLOW_RULE:-0}" == "1" ]]; then
+    echo "[$(date +%T)] NOTE: no PREROUTING -j NETFLOW rule for -i $IFACE — continuing (XDP_ALLOW_NO_NETFLOW_RULE=1)"
+  else
+    echo "ERROR: no PREROUTING -j NETFLOW rule for -i $IFACE in raw/mangle/nat" >&2
+    echo "       If legacy path was goflow2-only, re-run with XDP_ALLOW_NO_NETFLOW_RULE=1" >&2
+    exit 1
+  fi
 fi
 
-if ! iptables -t "$RULE_TABLE" -C PREROUTING $RULE_SPEC 2>/dev/null; then
-  echo "ERROR: iptables -C does not confirm rule exists" >&2
-  exit 1
+if [[ -n "$RULE_TABLE" && -n "$RULE_SPEC" ]]; then
+  if ! iptables -t "$RULE_TABLE" -C PREROUTING $RULE_SPEC 2>/dev/null; then
+    echo "ERROR: iptables -C does not confirm rule exists" >&2
+    exit 1
+  fi
 fi
 
 TS="$(date +%Y%m%d_%H%M%S)"
@@ -184,6 +191,7 @@ trap rollback_on_error EXIT
   printf 'ENV_INSTALL=%q\n' "$ENV_INSTALL"
   printf 'SYSTEMD_UNIT_NAME=%q\n' "$SYSTEMD_UNIT_NAME"
   printf 'XDP_GOFLOW2_CONTAINERS=%q\n' "$XDP_GOFLOW2_CONTAINERS"
+  printf 'HAD_NETFLOW_RULE=%q\n' "$([[ -n "$RULE_TABLE" ]] && echo 1 || echo 0)"
 } > "$STATE_FILE"
 chmod 0600 "$STATE_FILE" || true
 echo "[$(date +%T)] rollback state: $STATE_FILE"
@@ -209,10 +217,14 @@ install -m 0644 "$TMP_UNIT" "/etc/systemd/system/$SYSTEMD_UNIT_NAME"
 rm -f "$TMP_UNIT"
 chmod 0755 "$EXEC_WRAPPER" || true
 
-echo "[$(date +%T)] removing iptables NETFLOW rule (table=$RULE_TABLE)..."
-iptables -t "$RULE_TABLE" -D PREROUTING $RULE_SPEC
-SWAP_DONE=1
-echo "[$(date +%T)] ipt_NETFLOW removed."
+if [[ -n "$RULE_TABLE" && -n "$RULE_SPEC" ]]; then
+  echo "[$(date +%T)] removing iptables NETFLOW rule (table=$RULE_TABLE)..."
+  iptables -t "$RULE_TABLE" -D PREROUTING $RULE_SPEC
+  SWAP_DONE=1
+  echo "[$(date +%T)] ipt_NETFLOW removed."
+else
+  echo "[$(date +%T)] skip ipt_NETFLOW removal (no matching rule)"
+fi
 
 if command -v docker >/dev/null 2>&1; then
   for c in $XDP_GOFLOW2_CONTAINERS; do
