@@ -103,22 +103,20 @@ echo "rx_prio0_discards ${dis_pps}/s"
 echo "sum(rxN_xdp_drop) ${xdp_pps}/s"
 
 if [[ "$phy_pps" -gt 0 ]]; then
-  drop_pct="$(awk -v d="$dis_pps" -v p="$phy_pps" 'BEGIN { printf "%.4f", (d/p)*100 }')"
-  echo "prio0 drop ratio: ${drop_pct}%"
-  if awk -v r="$drop_pct" 'BEGIN { exit !(r > 1.0) }'; then
-    bad "rx_prio0_discards > 1% of phy (mirror/VLAN issue?)"
-  else
-    ok "PHY drop ratio acceptable (<1%)"
-  fi
+  drop_pct="$(awk -v d="$dis_pps" -v p="$phy_pps" 'BEGIN { printf "%.2f", (d/p)*100 }')"
+  echo "prio0/phy ratio: ${drop_pct}% (informational on mlx5; see docs/SEL_CONNECTX4_CAPTURE_LIMITS.md)"
+  ok "PHY counters sampled"
 else
   warn "no rx_packets_phy growth — mirror quiet or wrong IFACE?"
 fi
 
 if [[ "$XDP_MODE" == "native" && "${XDP_ACTION:-drop}" == "drop" ]]; then
   if [[ "$xdp_pps" -gt 1000 ]]; then
-    ok "native XDP drop counters growing (${xdp_pps}/s)"
+    ok "XDP drop counters growing (${xdp_pps}/s)"
+  elif [[ "$phy_pps" -gt 10000 ]]; then
+    bad "PHY traffic high but rxN_xdp_drop too low (${xdp_pps}/s)"
   else
-    bad "native rxN_xdp_drop too low (${xdp_pps}/s) — XDP may not be seeing traffic"
+    warn "could not confirm XDP traffic (quiet mirror?)"
   fi
 fi
 

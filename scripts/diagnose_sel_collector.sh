@@ -26,6 +26,39 @@ ok() { echo "OK   $*"; }
 bad() { echo "FAIL $*"; fail=1; }
 maybe() { echo "WARN $*"; warn=1; }
 
+# clickhouse://user:pass@host:port/db → host port user pass database (stdout, 5 lines)
+parse_clickhouse_dsn() {
+  local dsn="$1"
+  python3 - "$dsn" <<'PY'
+import sys, urllib.parse
+raw = sys.argv[1].strip()
+if not raw:
+    raise SystemExit(1)
+u = urllib.parse.urlparse(raw)
+if u.scheme not in ("clickhouse", "clickhouses"):
+    raise SystemExit(1)
+host = u.hostname or ""
+port = u.port or 9000
+user = urllib.parse.unquote(u.username or "")
+password = urllib.parse.unquote(u.password or "")
+db = (u.path or "/default").lstrip("/") or "default"
+print(host)
+print(port)
+print(user)
+print(password)
+print(db)
+PY
+}
+
+ch_client_query() {
+  local host="$1" port="$2" user="$3" pass="$4" db="$5" sql="$6"
+  if [[ -n "$pass" ]]; then
+    clickhouse-client --host "$host" --port "$port" --user "$user" --password "$pass" --database "$db" --query "$sql"
+  else
+    clickhouse-client --host "$host" --port "$port" --user "$user" --database "$db" --query "$sql"
+  fi
+}
+
 [[ "${EUID:-}" -eq 0 ]] || { echo "Run as root on sel." >&2; exit 1; }
 
 short="$(hostname -s 2>/dev/null || hostname | cut -d. -f1)"
@@ -153,22 +186,17 @@ echo "rx_prio0_discards ${dis_pps}/s"
 echo "sum(rxN_xdp_drop) ${xdp_pps}/s"
 
 if [[ "$phy_pps" -gt 0 ]]; then
-  drop_pct="$(awk -v d="$dis_pps" -v p="$phy_pps" 'BEGIN { printf "%.4f", (d/p)*100 }')"
-  echo "prio0 drop ratio: ${drop_pct}%"
-  if awk -v r="$drop_pct" 'BEGIN { exit !(r > 1.0) }'; then
-    bad "rx_prio0_discards > 1% of phy"
-  else
-    ok "PHY drop ratio acceptable"
-  fi
-else
-  maybe "no rx_packets_phy growth — mirror quiet or wrong IFACE?"
+  drop_pct="$(awk -v d="$dis_pps" -v p="$phy_pps" 'BEGIN { printf "%.2f", (d/p)*100 }')"
+  echo "prio0/phy ratio: ${drop_pct}% (informational on mlx5; see docs/SEL_CONNECTX4_CAPTURE_LIMITS.md)"
 fi
 
 if [[ "${XDP_MODE:-native}" == "native" && "${XDP_ACTION:-drop}" == "drop" ]]; then
   if [[ "$xdp_pps" -gt 1000 ]]; then
-    ok "native XDP drop counters growing (${xdp_pps}/s)"
+    ok "XDP drop counters growing (${xdp_pps}/s) — traffic reaches xdpflowd"
+  elif [[ "$phy_pps" -gt 10000 ]]; then
+    bad "PHY traffic high but rxN_xdp_drop low (${xdp_pps}/s) — XDP may not be attached"
   else
-    bad "native rxN_xdp_drop too low (${xdp_pps}/s) — XDP may not see traffic"
+    maybe "low mirror rate or quiet period"
   fi
 fi
 
@@ -224,52 +252,83 @@ fi
 
 echo ""
 echo "=== 8. ClickHouse ingest probe (optional) ==="
-if command -v clickhouse-client >/dev/null 2>&1 && [[ -n "${XDP_CH_DSN:-}" ]]; then
-  CH_HOST="${CH_HOST:-95.215.1.30}"
-  CH_PORT="${CH_PORT:-6124}"
-  CH_USER="${CH_USER:-develop}"
-  CH_PASS="${CH_PASS:-}"
-
-  flow_rows="$(clickhouse-client --host "$CH_HOST" --port "$CH_PORT" --user "$CH_USER" ${CH_PASS:+--password "$CH_PASS"} --query "
-    SELECT count()
-    FROM default.flows_raw
-    WHERE source_id = '$EXPECTED_SOURCE_ID'
-      AND time_flow_start_ns >= now64(9) - INTERVAL ${WINDOW_SEC} SECOND
-  " 2>/dev/null || echo "")"
-
-  dns_rows="$(clickhouse-client --host "$CH_HOST" --port "$CH_PORT" --user "$CH_USER" ${CH_PASS:+--password "$CH_PASS"} --query "
-    SELECT count()
-    FROM default.dns_log
-    WHERE source_id = '$EXPECTED_DNS_SOURCE_ID'
-      AND ts >= now64(6) - INTERVAL ${WINDOW_SEC} SECOND
-  " 2>/dev/null || echo "")"
-
-  if [[ -n "$flow_rows" && "$flow_rows" -gt 0 ]]; then
-    ok "flows_raw $EXPECTED_SOURCE_ID last ${WINDOW_SEC}s: $flow_rows rows"
-  else
-    bad "flows_raw $EXPECTED_SOURCE_ID: 0 rows in last ${WINDOW_SEC}s (or CH query failed)"
-    echo "     Fix: confirm XDPFLOWD_SOURCE_ID, restart xdpflowd, check XDP_CH_DSN"
-    echo "     Remote check: ./scripts/monitor_sel_collector_ch.sh"
-  fi
-
-  if [[ -n "$dns_rows" && "$dns_rows" -gt 0 ]]; then
-    ok "dns_log $EXPECTED_DNS_SOURCE_ID last ${WINDOW_SEC}s: $dns_rows rows"
-  else
-    bad "dns_log $EXPECTED_DNS_SOURCE_ID: 0 rows in last ${WINDOW_SEC}s"
-  fi
-
-  wrong="$(clickhouse-client --host "$CH_HOST" --port "$CH_PORT" --user "$CH_USER" ${CH_PASS:+--password "$CH_PASS"} --query "
-    SELECT count()
-    FROM default.flows_raw
-    WHERE source_id IN ('xdp-default', 'netflow')
-      AND IPv6NumToString(sampler_address) LIKE '5fd7:1a%'
-      AND time_flow_start_ns >= now64(9) - INTERVAL ${WINDOW_SEC} SECOND
-  " 2>/dev/null || echo "")"
-  if [[ -n "$wrong" && "$wrong" -gt 0 ]]; then
-    maybe "legacy source_id (xdp-default/netflow) still writing with sel sampler ($wrong rows) — wrong binary or env"
-  fi
+if ! command -v clickhouse-client >/dev/null 2>&1; then
+  maybe "skip CH probe (clickhouse-client not installed; run scripts/monitor_sel_collector_ch.sh remotely)"
+elif [[ -z "${XDP_CH_DSN:-}" ]]; then
+  maybe "skip CH probe (XDP_CH_DSN empty)"
+elif ! command -v python3 >/dev/null 2>&1; then
+  maybe "skip CH probe (python3 needed to parse XDP_CH_DSN; set CH_HOST/CH_USER/CH_PASS manually)"
 else
-  maybe "skip CH probe (install clickhouse-client or set CH_USER/CH_PASS; or run monitor_sel_collector_ch.sh from workstation)"
+  mapfile -t _ch < <(parse_clickhouse_dsn "$XDP_CH_DSN" || true)
+  if [[ "${#_ch[@]}" -ne 5 ]]; then
+    bad "could not parse XDP_CH_DSN"
+  else
+    CH_HOST="${CH_HOST:-${_ch[0]}}"
+    CH_PORT="${CH_PORT:-${_ch[1]}}"
+    CH_USER="${CH_USER:-${_ch[2]}}"
+    CH_PASS="${CH_PASS:-${_ch[3]}}"
+    CH_DB="${CH_DB:-${_ch[4]}}"
+
+    ch_err=""
+    flow_rows="$(ch_client_query "$CH_HOST" "$CH_PORT" "$CH_USER" "$CH_PASS" "$CH_DB" "
+      SELECT count()
+      FROM ${CH_DB}.flows_raw
+      WHERE source_id = '${EXPECTED_SOURCE_ID}'
+        AND time_received_ns >= now64(9) - INTERVAL ${WINDOW_SEC} SECOND
+    " 2>&1)" || ch_err="$flow_rows"
+
+    if [[ -n "$ch_err" ]]; then
+      bad "ClickHouse flows query failed: $ch_err"
+    elif [[ "$flow_rows" =~ ^[0-9]+$ && "$flow_rows" -gt 0 ]]; then
+      ok "flows_raw $EXPECTED_SOURCE_ID last ${WINDOW_SEC}s (by time_received_ns): $flow_rows rows"
+    else
+      flow_by_sampler="$(ch_client_query "$CH_HOST" "$CH_PORT" "$CH_USER" "$CH_PASS" "$CH_DB" "
+        SELECT source_id, count() AS c
+        FROM ${CH_DB}.flows_raw
+        WHERE IPv4NumToString(toIPv4(reinterpretAsUInt32(reverse(substring(sampler_address, 1, 4))))) = '${EXPECTED_SAMPLER}'
+          AND time_received_ns >= now64(9) - INTERVAL ${WINDOW_SEC} SECOND
+        GROUP BY source_id
+        ORDER BY c DESC
+        LIMIT 5
+        FORMAT TabSeparated
+      " 2>/dev/null || true)"
+      if [[ -n "$flow_by_sampler" ]]; then
+        bad "flows_raw $EXPECTED_SOURCE_ID: 0 rows, but sampler ${EXPECTED_SAMPLER} writes: $flow_by_sampler"
+        echo "     Fix: restart xdpflowd after setting XDPFLOWD_SOURCE_ID=$EXPECTED_SOURCE_ID"
+      else
+        bad "flows_raw $EXPECTED_SOURCE_ID: 0 rows in last ${WINDOW_SEC}s (journal may still be spooling — check lag)"
+      fi
+    fi
+
+    dns_dsn="${DNS_CH_DSN:-$XDP_CH_DSN}"
+    mapfile -t _dns_ch < <(parse_clickhouse_dsn "$dns_dsn" || true)
+    if [[ "${#_dns_ch[@]}" -eq 5 ]]; then
+      DNS_CH_HOST="${DNS_CH_HOST:-${_dns_ch[0]}}"
+      DNS_CH_PORT="${DNS_CH_PORT:-${_dns_ch[1]}}"
+      DNS_CH_USER="${DNS_CH_USER:-${_dns_ch[2]}}"
+      DNS_CH_PASS="${DNS_CH_PASS:-${_dns_ch[3]}}"
+      DNS_CH_DB="${DNS_CH_DB:-${_dns_ch[4]}}"
+    else
+      DNS_CH_HOST="$CH_HOST"; DNS_CH_PORT="$CH_PORT"
+      DNS_CH_USER="$CH_USER"; DNS_CH_PASS="$CH_PASS"; DNS_CH_DB="$CH_DB"
+    fi
+
+    dns_err=""
+    dns_rows="$(ch_client_query "$DNS_CH_HOST" "$DNS_CH_PORT" "$DNS_CH_USER" "$DNS_CH_PASS" "$DNS_CH_DB" "
+      SELECT count()
+      FROM ${DNS_CH_DB}.dns_log
+      WHERE source_id = '${EXPECTED_DNS_SOURCE_ID}'
+        AND ts >= now64(6) - INTERVAL ${WINDOW_SEC} SECOND
+    " 2>&1)" || dns_err="$dns_rows"
+
+    if [[ -n "$dns_err" ]]; then
+      bad "ClickHouse dns query failed: $dns_err"
+    elif [[ "$dns_rows" =~ ^[0-9]+$ && "$dns_rows" -gt 0 ]]; then
+      ok "dns_log $EXPECTED_DNS_SOURCE_ID last ${WINDOW_SEC}s: $dns_rows rows"
+    else
+      bad "dns_log $EXPECTED_DNS_SOURCE_ID: 0 rows in last ${WINDOW_SEC}s"
+    fi
+  fi
 fi
 
 echo ""
