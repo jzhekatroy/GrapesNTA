@@ -111,12 +111,17 @@ echo ""
 echo "=== 5. NIC counters (${WINDOW_SEC}s) ==="
 read_counters() {
   ethtool -S "$IFACE" 2>/dev/null | awk -F': ' '
-    /rx_packets_phy|rx_discards_phy|rx_prio0_discards/ {gsub(/^[ \t]+/,"",$1); print $1"="$2}'
-  local sum
-  sum="$(ethtool -S "$IFACE" 2>/dev/null | awk '
-    /^[[:space:]]*rx[0-9]+_xdp_drop:/ { gsub(/:/, "", $2); sum += $2 }
-    END { print sum + 0 }')"
-  echo "rxN_xdp_drop_sum=$sum"
+    /rx_packets_phy|rx_discards_phy|rx_prio0_discards/ {
+      gsub(/^[ \t]+/, "", $1)
+      gsub(/^[ \t]+|[ \t]+$/, "", $2)
+      printf "%s=%.0f\n", $1, $2 + 0
+    }'
+  ethtool -S "$IFACE" 2>/dev/null | awk '
+    /^[[:space:]]*rx[0-9]+_xdp_drop:/ {
+      gsub(/:/, "", $2)
+      sum += $2 + 0
+    }
+    END { printf "rxN_xdp_drop_sum=%.0f\n", sum + 0 }'
 }
 
 t0="$(read_counters)"
@@ -130,12 +135,18 @@ dis1="$(echo "$t1" | awk -F= '/rx_prio0_discards/{print $2}')"
 xdp0="$(echo "$t0" | awk -F= '/rxN_xdp_drop_sum/{print $2}')"
 xdp1="$(echo "$t1" | awk -F= '/rxN_xdp_drop_sum/{print $2}')"
 
-phy_d=$((phy1 - phy0))
-dis_d=$((dis1 - dis0))
-xdp_d=$((xdp1 - xdp0))
-phy_pps=$((phy_d / WINDOW_SEC))
-dis_pps=$((dis_d / WINDOW_SEC))
-xdp_pps=$((xdp_d / WINDOW_SEC))
+read -r phy_pps dis_pps xdp_pps <<EOF
+$(awk -v phy0="${phy0:-0}" -v phy1="${phy1:-0}" \
+      -v dis0="${dis0:-0}" -v dis1="${dis1:-0}" \
+      -v xdp0="${xdp0:-0}" -v xdp1="${xdp1:-0}" \
+      -v w="$WINDOW_SEC" 'BEGIN {
+  phy_d = phy1 - phy0; if (phy_d < 0) phy_d = 0
+  dis_d = dis1 - dis0; if (dis_d < 0) dis_d = 0
+  xdp_d = xdp1 - xdp0; if (xdp_d < 0) xdp_d = 0
+  if (w <= 0) w = 1
+  printf "%.0f %.0f %.0f", phy_d / w, dis_d / w, xdp_d / w
+}')
+EOF
 
 echo "rx_packets_phy    ${phy_pps}/s"
 echo "rx_prio0_discards ${dis_pps}/s"
