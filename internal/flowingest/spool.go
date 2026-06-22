@@ -692,6 +692,10 @@ type SpoolPipeline struct {
 
 	recordsSpooled atomic.Uint64
 	recordsAcked   atomic.Uint64
+	flowPacketsSpooled atomic.Uint64
+	flowBytesSpooled   atomic.Uint64
+	flowPacketsAcked   atomic.Uint64
+	flowBytesAcked     atomic.Uint64
 	insertErrs     atomic.Uint64
 	retries        atomic.Uint64
 	batchesOK      atomic.Uint64
@@ -838,7 +842,10 @@ func (p *SpoolPipeline) runPipeline() {
 			for job := range jobs {
 				ok := p.insertWithRetry(job.rows)
 				if ok {
+					packets, bytes := SumFlowRows(job.rows)
 					p.recordsAcked.Add(uint64(len(job.rows)))
+					p.flowPacketsAcked.Add(packets)
+					p.flowBytesAcked.Add(bytes)
 					p.batchesOK.Add(1)
 				}
 				completions <- spoolCompletion{seq: job.seq, ack: job.ack, ok: ok}
@@ -1128,7 +1135,10 @@ func (p *SpoolPipeline) Append(rows []FlowRow) error {
 	if err != nil {
 		return err
 	}
+	packets, bytes := SumFlowRows(rows)
 	p.recordsSpooled.Add(uint64(len(rows)))
+	p.flowPacketsSpooled.Add(packets)
+	p.flowBytesSpooled.Add(bytes)
 	_ = cp
 	return nil
 }
@@ -1256,6 +1266,10 @@ func (p *SpoolPipeline) HealthSnapshot() HealthSnapshot {
 	return HealthSnapshot{
 		RecordsSpooled:     p.recordsSpooled.Load(),
 		RecordsAcked:       p.recordsAcked.Load(),
+		FlowPacketsSpooled: p.flowPacketsSpooled.Load(),
+		FlowBytesSpooled:   p.flowBytesSpooled.Load(),
+		FlowPacketsAcked:   p.flowPacketsAcked.Load(),
+		FlowBytesAcked:     p.flowBytesAcked.Load(),
 		InsertErrs:         p.insertErrs.Load(),
 		LagSegments:        lagSegs,
 		DrainerProgressAge: progressAge,

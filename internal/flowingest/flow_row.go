@@ -61,6 +61,16 @@ type FlowRow struct {
 	Packets          uint64
 }
 
+// SumFlowRows returns cumulative packet/byte counters for already materialized
+// flow rows. These are the comparable units for ClickHouse completeness checks.
+func SumFlowRows(rows []FlowRow) (packets, bytes uint64) {
+	for i := range rows {
+		packets += rows[i].Packets
+		bytes += rows[i].Bytes
+	}
+	return packets, bytes
+}
+
 // ApplyEndpointClasses copies classifier output into enrichment columns.
 func ApplyEndpointClasses(r *FlowRow, src, dst EndpointClass, direction string) {
 	r.SrcAS = src.ASN

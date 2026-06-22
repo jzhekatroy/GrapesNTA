@@ -59,6 +59,7 @@ type jsonSnapshot struct {
 	TsUnixNs int64 `json:"ts_unix_ns"`
 	Stats    struct {
 		TotalPackets uint64 `json:"total_packets"`
+		TotalBytes   uint64 `json:"total_bytes"`
 		ParseErrors  uint64 `json:"parse_errors"`
 		MapFull      uint64 `json:"map_full"`
 		NonIPPass    uint64 `json:"non_ip_pass"`
@@ -121,7 +122,7 @@ func zeroStats(objs *loader.Objects) {
 	nCPU := ebpf.MustPossibleCPU()
 	perCPU := make([]uint64, nCPU)
 	var k uint32
-	for k = 0; k < 4; k++ {
+	for k = 0; k < 16; k++ {
 		_ = objs.Stats.Update(k, perCPU, 0)
 	}
 }
@@ -130,6 +131,7 @@ func buildSnapshot(objs *loader.Objects, includeFlows bool) jsonSnapshot {
 	var snap jsonSnapshot
 	snap.TsUnixNs = time.Now().UnixNano()
 	snap.Stats.TotalPackets = readStat(objs, 0)
+	snap.Stats.TotalBytes = readStat(objs, 14)
 	snap.Stats.ParseErrors = readStat(objs, 1)
 	snap.Stats.MapFull = readStat(objs, 2)
 	snap.Stats.NonIPPass = readStat(objs, 3)
@@ -256,6 +258,7 @@ func tcpFlagsStr(f uint8) string {
 func logStats(log *slog.Logger, objs *loader.Objects) {
 	log.Info("stats",
 		"total_packets", readStat(objs, 0),
+		"total_bytes", readStat(objs, 14),
 		"parse_errors", readStat(objs, 1),
 		"map_full", readStat(objs, 2),
 		"non_ip_pass", readStat(objs, 3),
@@ -976,6 +979,7 @@ func main() {
 				_ = healthReporter.Write(ctx, flowingest.HealthWriteInput{
 					XDP: flowingest.XDPMetrics{
 						TotalPackets: totalPackets,
+						TotalBytes:   readStat(objs, 14),
 						MapFull:      mapFull,
 						ParseErrors:  readStat(objs, 1),
 						NonIPPass:    readStat(objs, 3),

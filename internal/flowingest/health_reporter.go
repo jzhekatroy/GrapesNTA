@@ -25,6 +25,7 @@ type ReceiverMetrics struct {
 // XDPMetrics holds BPF PERCPU stats counters.
 type XDPMetrics struct {
 	TotalPackets uint64
+	TotalBytes   uint64
 	MapFull      uint64
 	ParseErrors  uint64
 	NonIPPass    uint64
@@ -184,6 +185,7 @@ func (r *HealthReporter) Write(ctx context.Context, in HealthWriteInput) error {
     hostname,
     iface,
     xdp_total_packets,
+    xdp_total_bytes,
     xdp_map_full,
     xdp_parse_errors,
     xdp_non_ip_pass,
@@ -198,6 +200,14 @@ func (r *HealthReporter) Write(ctx context.Context, in HealthWriteInput) error {
     records_written,
     records_spooled,
     records_acked,
+    flow_packets_queued,
+    flow_bytes_queued,
+    flow_packets_written,
+    flow_bytes_written,
+    flow_packets_spooled,
+    flow_bytes_spooled,
+    flow_packets_acked,
+    flow_bytes_acked,
     insert_errs,
     ch_queue_drops,
     lag_segments,
@@ -220,6 +230,7 @@ func (r *HealthReporter) Write(ctx context.Context, in HealthWriteInput) error {
 		r.hostname,
 		r.iface,
 		in.XDP.TotalPackets,
+		in.XDP.TotalBytes,
 		in.XDP.MapFull,
 		in.XDP.ParseErrors,
 		in.XDP.NonIPPass,
@@ -234,6 +245,14 @@ func (r *HealthReporter) Write(ctx context.Context, in HealthWriteInput) error {
 		in.CH.RecordsWritten,
 		in.CH.RecordsSpooled,
 		in.CH.RecordsAcked,
+		in.CH.FlowPacketsQueued,
+		in.CH.FlowBytesQueued,
+		in.CH.FlowPacketsWritten,
+		in.CH.FlowBytesWritten,
+		in.CH.FlowPacketsSpooled,
+		in.CH.FlowBytesSpooled,
+		in.CH.FlowPacketsAcked,
+		in.CH.FlowBytesAcked,
 		in.CH.InsertErrs,
 		in.CH.QueueDrops,
 		in.CH.LagSegments,
@@ -253,9 +272,12 @@ func (r *HealthReporter) Write(ctx context.Context, in HealthWriteInput) error {
 		"source_id", r.sourceID,
 		"status", status,
 		"xdp_total_packets", in.XDP.TotalPackets,
+		"xdp_total_bytes", in.XDP.TotalBytes,
 		"xdp_map_full", in.XDP.MapFull,
 		"records_written", in.CH.RecordsWritten,
 		"records_acked", in.CH.RecordsAcked,
+		"flow_packets_acked", in.CH.FlowPacketsAcked,
+		"flow_bytes_acked", in.CH.FlowBytesAcked,
 		"insert_errs", in.CH.InsertErrs,
 		"ch_queue_drops", in.CH.QueueDrops,
 	)

@@ -30,6 +30,10 @@ type Sink struct {
 
 	recordsQueued  atomic.Uint64
 	recordsWritten atomic.Uint64
+	flowPacketsQueued  atomic.Uint64
+	flowBytesQueued    atomic.Uint64
+	flowPacketsWritten atomic.Uint64
+	flowBytesWritten   atomic.Uint64
 	batchesOK      atomic.Uint64
 	insertErrs     atomic.Uint64
 	queueDrops     atomic.Uint64
@@ -437,8 +441,11 @@ func (s *Sink) insertBatch(ctx context.Context, rows []FlowRow) bool {
 		return true
 	}
 	if InsertBatchRows(ctx, s.log, s.conn, s.table, rows, &s.insertErrs) {
+		packets, bytes := SumFlowRows(rows)
 		s.batchesOK.Add(1)
 		s.recordsWritten.Add(uint64(len(rows)))
+		s.flowPacketsWritten.Add(packets)
+		s.flowBytesWritten.Add(bytes)
 		return true
 	}
 	return false
@@ -470,8 +477,11 @@ func (s *Sink) run() {
 		for {
 			select {
 			case flows := <-s.ch:
+				packets, bytes := SumFlowRows(flows)
 				batch = append(batch, flows...)
 				s.recordsQueued.Add(uint64(len(flows)))
+				s.flowPacketsQueued.Add(packets)
+				s.flowBytesQueued.Add(bytes)
 			default:
 				finalFlush()
 				return
@@ -485,8 +495,11 @@ func (s *Sink) run() {
 			drainAndFinalFlush()
 			return
 		case flows := <-s.ch:
+			packets, bytes := SumFlowRows(flows)
 			batch = append(batch, flows...)
 			s.recordsQueued.Add(uint64(len(flows)))
+			s.flowPacketsQueued.Add(packets)
+			s.flowBytesQueued.Add(bytes)
 			if s.ctx.Err() != nil {
 				drainAndFinalFlush()
 				return
@@ -557,9 +570,13 @@ func (s *Sink) HealthSnapshot() HealthSnapshot {
 	queued := s.recordsQueued.Load()
 	written := s.recordsWritten.Load()
 	return HealthSnapshot{
-		RecordsQueued:  queued,
-		RecordsWritten: written,
-		InsertErrs:     s.insertErrs.Load(),
-		QueueDrops:     s.queueDrops.Load(),
+		RecordsQueued:      queued,
+		RecordsWritten:     written,
+		FlowPacketsQueued:  s.flowPacketsQueued.Load(),
+		FlowBytesQueued:    s.flowBytesQueued.Load(),
+		FlowPacketsWritten: s.flowPacketsWritten.Load(),
+		FlowBytesWritten:   s.flowBytesWritten.Load(),
+		InsertErrs:         s.insertErrs.Load(),
+		QueueDrops:         s.queueDrops.Load(),
 	}
 }

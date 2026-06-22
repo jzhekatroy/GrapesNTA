@@ -5,6 +5,7 @@
  * Parses Ethernet (802.1Q optional), IPv4 / IPv6, TCP / UDP / ICMP / ICMPv6.
  * LRU_HASH map flows + ARRAY stats:
  *   stats[0] = total_packets (every packet seen by XDP)
+ *   stats[14] = total_bytes  (packet bytes seen by XDP)
  *   stats[1] = parse_errors  (truncated L2/L3/L4 headers)
  *   stats[2] = map_full      (flows insert failed even after LRU eviction; ~0 in
  *                             healthy operation, non-zero == severe overload)
@@ -144,6 +145,7 @@ struct {
 #define STAT_IPV4_PACKETS           11
 #define STAT_IPV6_FRAGMENTS         12
 #define STAT_UNSUPPORTED_L4         13
+#define STAT_TOTAL_BYTES            14
 
 /* Small per-packet accumulator for TCP parsing. Passed by pointer to keep
  * helper function argument count ≤ 5 — older clang (11 on Debian 11) may
@@ -179,6 +181,13 @@ static __always_inline void bump_stat(__u32 idx)
 	__u64 *c = bpf_map_lookup_elem(&stats, &idx);
 	if (c)
 		(*c)++;
+}
+
+static __always_inline void add_stat(__u32 idx, __u64 value)
+{
+	__u64 *c = bpf_map_lookup_elem(&stats, &idx);
+	if (c)
+		(*c) += value;
 }
 
 static __always_inline void ipv4_addrs_to_key(struct flow_key *key, __be32 saddr, __be32 daddr)
@@ -368,6 +377,7 @@ int xdp_flow_prog(struct xdp_md *ctx)
 	__u32 pkt_len = (__u32)((unsigned long)data_end - (unsigned long)data);
 
 	bump_stat(STAT_TOTAL_PACKETS);
+	add_stat(STAT_TOTAL_BYTES, pkt_len);
 
 	struct ethhdr *eth = data;
 

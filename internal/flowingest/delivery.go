@@ -14,6 +14,14 @@ type HealthSnapshot struct {
 	RecordsWritten     uint64
 	RecordsSpooled     uint64
 	RecordsAcked       uint64
+	FlowPacketsQueued  uint64
+	FlowBytesQueued    uint64
+	FlowPacketsWritten uint64
+	FlowBytesWritten   uint64
+	FlowPacketsSpooled uint64
+	FlowBytesSpooled   uint64
+	FlowPacketsAcked   uint64
+	FlowBytesAcked     uint64
 	InsertErrs         uint64
 	QueueDrops         uint64
 	LagSegments        int64
