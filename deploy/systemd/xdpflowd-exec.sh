@@ -167,6 +167,12 @@ CH_ARGS+=(
   -ch-spool-stall-threshold "${XDP_CH_SPOOL_STALL_THRESHOLD:-60s}"
   -ch-writers "${XDP_CH_WRITERS:-4}"
 )
+if [[ -n "${XDP_CH_HEALTH_TABLE:-}" ]]; then
+  CH_ARGS+=( -ch-health-table "$XDP_CH_HEALTH_TABLE" )
+fi
+if [[ -n "${XDP_COLLECTOR_ID:-}" ]]; then
+  CH_ARGS+=( -collector-id "$XDP_COLLECTOR_ID" )
+fi
 
 HEAVY_ARGS=()
 if [[ "$XDP_HEAVY_EXPORT" == "1" ]]; then

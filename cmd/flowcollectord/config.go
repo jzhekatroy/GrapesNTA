@@ -43,6 +43,8 @@ type config struct {
 	UDPQueueSize  int
 	Interval      time.Duration
 	HealthInterval time.Duration
+	CHHealthTable string
+	CollectorID   string
 }
 
 func loadConfig() config {
@@ -78,6 +80,8 @@ func loadConfig() config {
 	udpQueueSize := flag.Int("udp-queue-size", envInt("FC_UDP_QUEUE_SIZE", 65536), "sFlow datagram queue depth")
 	interval := flag.Duration("interval", envDuration("FC_INTERVAL", 5*time.Second), "metrics log interval")
 	healthInterval := flag.Duration("health-interval", envDuration("FC_HEALTH_INTERVAL", time.Minute), "health log interval")
+	chHealthTable := flag.String("ch-health-table", envString("FC_CH_HEALTH_TABLE", flowingest.DefaultHealthTable), "ClickHouse table for health snapshots (empty = disabled)")
+	collectorID := flag.String("collector-id", envString("FC_COLLECTOR_ID", ""), "collector_id for health snapshots")
 
 	flag.Parse()
 
@@ -116,6 +120,8 @@ func loadConfig() config {
 		UDPQueueSize: *udpQueueSize,
 		Interval: *interval,
 		HealthInterval: *healthInterval,
+		CHHealthTable: strings.TrimSpace(*chHealthTable),
+		CollectorID: strings.TrimSpace(*collectorID),
 	}
 }
 

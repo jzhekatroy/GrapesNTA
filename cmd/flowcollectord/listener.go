@@ -268,3 +268,15 @@ func (l *sflowListener) LogMetrics() {
 		"udp_queue_drops", l.metrics.udpQueueDrops.Load(),
 	)
 }
+
+func (l *sflowListener) receiverMetrics() flowingest.ReceiverMetrics {
+	if l == nil {
+		return flowingest.ReceiverMetrics{}
+	}
+	return flowingest.ReceiverMetrics{
+		Datagrams:     l.metrics.datagrams.Load(),
+		RecordsParsed: l.metrics.recordsParsed.Load(),
+		ParseErrors:   l.metrics.parseErrors.Load(),
+		UDPQueueDrops: l.metrics.udpQueueDrops.Load(),
+	}
+}

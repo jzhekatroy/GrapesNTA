@@ -80,6 +80,25 @@ func main() {
 		delivery.LogMetrics()
 	}()
 
+	var healthReporter *flowingest.HealthReporter
+	if cfg.CHHealthTable != "" {
+		hr, err := flowingest.NewHealthReporter(log, flowingest.HealthReporterConfig{
+			DSN:         cfg.CHDSN,
+			Table:       cfg.CHHealthTable,
+			CollectorID: cfg.CollectorID,
+			SourceID:    cfg.SFlowSourceID,
+			Daemon:      "flowcollectord",
+		})
+		if err != nil {
+			log.Error("health reporter init", "err", err)
+			os.Exit(1)
+		}
+		healthReporter = hr
+		if healthReporter != nil {
+			defer healthReporter.Close()
+		}
+	}
+
 	listener := newSflowListener(log, cfg.SFlowListen, cfg.SFlowSourceID, cfg.UDPReadBuffer, cfg.UDPReaders, cfg.UDPWorkers, cfg.UDPQueueSize, cfg.CHBatchSize, cfg.CHFlushInterval, delivery, classifier)
 
 	errCh := make(chan error, 1)
@@ -91,6 +110,8 @@ func main() {
 	defer ticker.Stop()
 	healthTicker := time.NewTicker(cfg.HealthInterval)
 	defer healthTicker.Stop()
+
+	var prevInsertErrs, prevQueueDrops, prevUDPDrops uint64
 
 	for {
 		select {
@@ -108,15 +129,35 @@ func main() {
 			delivery.LogMetrics()
 		case <-healthTicker.C:
 			h := delivery.HealthSnapshot()
-			if h.InsertErrs > 0 || h.QueueDrops > 0 || h.LagSegments > 10 {
+			insertErrsDelta := h.InsertErrs - prevInsertErrs
+			queueDropsDelta := h.QueueDrops - prevQueueDrops
+			rx := listener.receiverMetrics()
+			udpDropsDelta := rx.UDPQueueDrops - prevUDPDrops
+			if h.InsertErrs > 0 || h.QueueDrops > 0 || h.LagSegments > 10 || udpDropsDelta > 0 {
 				log.Error("health",
 					"mode", h.Mode,
 					"insert_errs", h.InsertErrs,
 					"queue_drops", h.QueueDrops,
 					"lag_segments", h.LagSegments,
 					"writer_lag_rows", h.RecordsSpooled-h.RecordsAcked,
+					"udp_queue_drops", rx.UDPQueueDrops,
 				)
 			}
+			if healthReporter != nil {
+				_ = healthReporter.Write(ctx, flowingest.HealthWriteInput{
+					Receiver:               rx,
+					CH:                     h,
+					InsertErrsDelta:        insertErrsDelta,
+					QueueDropsDelta:        queueDropsDelta,
+					UDPQueueDropsDelta:     udpDropsDelta,
+					LagSegmentsThreshold:   10,
+					WriterLagRowsThreshold: 100000,
+					DrainerAgeThreshold:    2 * time.Minute,
+				})
+			}
+			prevInsertErrs = h.InsertErrs
+			prevQueueDrops = h.QueueDrops
+			prevUDPDrops = rx.UDPQueueDrops
 		}
 	}
 }

@@ -456,6 +456,8 @@ func main() {
 	classifierL3PrefixesView := flag.String("classifier-l3-prefixes-view", "default.net_l3_prefixes_enabled", "ClickHouse view for enabled L3 prefixes")
 	classifierL2VLANsView := flag.String("classifier-l2-vlans-view", "default.net_l2_vlans_enabled", "ClickHouse view for enabled L2 VLAN map")
 	sourceID := flag.String("source-id", "xdp-default", "logical flow observation point id written to flows_raw.source_id")
+	chHealthTable := flag.String("ch-health-table", flowingest.DefaultHealthTable, "ClickHouse table for periodic health snapshots (empty = disabled)")
+	collectorID := flag.String("collector-id", "", "collector_id for health snapshots (see net_collectors)")
 	flag.Parse()
 
 	if strings.TrimSpace(*configPath) != "" {
@@ -675,6 +677,26 @@ func main() {
 			d.Close()
 			d.LogMetrics()
 		}(chDel)
+	}
+
+	var healthReporter *flowingest.HealthReporter
+	if strings.TrimSpace(*chDSN) != "" && strings.TrimSpace(*chHealthTable) != "" {
+		hr, err := flowingest.NewHealthReporter(log, flowingest.HealthReporterConfig{
+			DSN:         strings.TrimSpace(*chDSN),
+			Table:       strings.TrimSpace(*chHealthTable),
+			CollectorID: strings.TrimSpace(*collectorID),
+			SourceID:    *sourceID,
+			Daemon:      "xdpflowd",
+			Iface:       *iface,
+		})
+		if err != nil {
+			log.Error("health reporter init", "err", err)
+			os.Exit(1)
+		}
+		healthReporter = hr
+		if healthReporter != nil {
+			defer healthReporter.Close()
+		}
 	}
 
 	var chFlowCb func([]flowKV, time.Time)
@@ -946,6 +968,27 @@ func main() {
 			}
 			prevMapFull = mapFull
 			prevNFSendErrs = nfSendErrs
+			if healthReporter != nil {
+				chSnap := flowingest.HealthSnapshot{}
+				if chDel != nil {
+					chSnap = chDel.HealthSnapshot()
+				}
+				_ = healthReporter.Write(ctx, flowingest.HealthWriteInput{
+					XDP: flowingest.XDPMetrics{
+						TotalPackets: totalPackets,
+						MapFull:      mapFull,
+						ParseErrors:  readStat(objs, 1),
+						NonIPPass:    readStat(objs, 3),
+					},
+					CH:                     chSnap,
+					MapFullDelta:           mapFullDelta,
+					InsertErrsDelta:        insertErrsDelta,
+					QueueDropsDelta:        queueDropsDelta,
+					LagSegmentsThreshold:   *healthSpoolLagSegments,
+					WriterLagRowsThreshold: *healthWriterLagRows,
+					DrainerAgeThreshold:    *healthDrainerAge,
+				})
+			}
 		case <-topC:
 			dumpTop(log, objs, *topN)
 		case <-jsonC:
