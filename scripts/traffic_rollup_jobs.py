@@ -56,24 +56,24 @@ JOBS: List[RollupJob] = [
 SELECT
     toStartOfMinute(time_flow_start_ns) AS minute,
     source_id,
-    sum(bytes) AS total_bytes,
-    sumIf(bytes, direction = 'in') AS in_bytes,
-    sumIf(bytes, direction = 'out') AS out_bytes,
-    sumIf(bytes, direction = 'transit') AS transit_bytes,
-    sumIf(bytes, direction = 'internal') AS internal_bytes,
-    sumIf(bytes, direction = 'unknown') AS unknown_bytes,
-    sum(packets) AS total_packets,
-    sumIf(packets, direction = 'in') AS in_packets,
-    sumIf(packets, direction = 'out') AS out_packets,
-    sumIf(packets, direction = 'transit') AS transit_packets,
-    sumIf(packets, direction = 'internal') AS internal_packets,
-    sumIf(packets, direction = 'unknown') AS unknown_packets,
-    count() AS total_flows,
-    countIf(direction = 'in') AS in_flows,
-    countIf(direction = 'out') AS out_flows,
-    countIf(direction = 'transit') AS transit_flows,
-    countIf(direction = 'internal') AS internal_flows,
-    countIf(direction = 'unknown') AS unknown_flows
+    sum(bytes * coalesce(sampling_rate, 1)) AS total_bytes,
+    sumIf(bytes * coalesce(sampling_rate, 1), direction = 'in') AS in_bytes,
+    sumIf(bytes * coalesce(sampling_rate, 1), direction = 'out') AS out_bytes,
+    sumIf(bytes * coalesce(sampling_rate, 1), direction = 'transit') AS transit_bytes,
+    sumIf(bytes * coalesce(sampling_rate, 1), direction = 'internal') AS internal_bytes,
+    sumIf(bytes * coalesce(sampling_rate, 1), direction = 'unknown') AS unknown_bytes,
+    sum(packets * coalesce(sampling_rate, 1)) AS total_packets,
+    sumIf(packets * coalesce(sampling_rate, 1), direction = 'in') AS in_packets,
+    sumIf(packets * coalesce(sampling_rate, 1), direction = 'out') AS out_packets,
+    sumIf(packets * coalesce(sampling_rate, 1), direction = 'transit') AS transit_packets,
+    sumIf(packets * coalesce(sampling_rate, 1), direction = 'internal') AS internal_packets,
+    sumIf(packets * coalesce(sampling_rate, 1), direction = 'unknown') AS unknown_packets,
+    sum(coalesce(sampling_rate, 1)) AS total_flows,
+    sumIf(coalesce(sampling_rate, 1), direction = 'in') AS in_flows,
+    sumIf(coalesce(sampling_rate, 1), direction = 'out') AS out_flows,
+    sumIf(coalesce(sampling_rate, 1), direction = 'transit') AS transit_flows,
+    sumIf(coalesce(sampling_rate, 1), direction = 'internal') AS internal_flows,
+    sumIf(coalesce(sampling_rate, 1), direction = 'unknown') AS unknown_flows
 FROM default.flows_raw
 WHERE {time_filter}
 GROUP BY minute, source_id
@@ -95,9 +95,9 @@ SELECT
     source_id,
     proto,
     direction,
-    sum(bytes) AS bytes,
-    sum(packets) AS packets,
-    count() AS flows_count
+    sum(bytes * coalesce(sampling_rate, 1)) AS bytes,
+    sum(packets * coalesce(sampling_rate, 1)) AS packets,
+    sum(coalesce(sampling_rate, 1)) AS flows_count
 FROM default.flows_raw
 WHERE {time_filter}
 GROUP BY minute, source_id, proto, direction
@@ -117,9 +117,9 @@ SELECT
     toStartOfMinute(time_received_ns) AS minute,
     source_id,
     direction,
-    sum(bytes) AS bytes,
-    sum(packets) AS packets,
-    count() AS flows_count
+    sum(bytes * coalesce(sampling_rate, 1)) AS bytes,
+    sum(packets * coalesce(sampling_rate, 1)) AS packets,
+    sum(coalesce(sampling_rate, 1)) AS flows_count
 FROM default.flows_raw
 WHERE {time_filter}
 GROUP BY minute, source_id, direction
@@ -145,9 +145,9 @@ SELECT
         src_role != '', src_role,
         dst_role
     ) AS role,
-    sum(bytes) AS bytes,
-    sum(packets) AS packets,
-    count() AS flows_count
+    sum(bytes * coalesce(sampling_rate, 1)) AS bytes,
+    sum(packets * coalesce(sampling_rate, 1)) AS packets,
+    sum(coalesce(sampling_rate, 1)) AS flows_count
 FROM default.flows_raw
 WHERE {time_filter}
   AND direction IN ('in', 'out', 'internal', 'transit', 'unknown')
@@ -175,9 +175,9 @@ SELECT
         src_entity != '', src_entity,
         dst_entity
     ) AS entity_id,
-    sum(bytes) AS bytes,
-    sum(packets) AS packets,
-    count() AS flows_count
+    sum(bytes * coalesce(sampling_rate, 1)) AS bytes,
+    sum(packets * coalesce(sampling_rate, 1)) AS packets,
+    sum(coalesce(sampling_rate, 1)) AS flows_count
 FROM default.flows_raw
 WHERE {time_filter}
   AND direction IN ('in', 'out', 'internal')
@@ -211,9 +211,9 @@ SELECT
         src_vlan != 0, src_vlan,
         dst_vlan
     ) AS vlan_id,
-    sum(bytes) AS bytes,
-    sum(packets) AS packets,
-    count() AS flows_count
+    sum(bytes * coalesce(sampling_rate, 1)) AS bytes,
+    sum(packets * coalesce(sampling_rate, 1)) AS packets,
+    sum(coalesce(sampling_rate, 1)) AS flows_count
 FROM default.flows_raw
 WHERE {time_filter}
   AND direction IN ('in', 'out', 'internal', 'transit')
@@ -245,15 +245,16 @@ SELECT
     if(length(trimBoth(country_raw)) = 0, '??', trimBoth(country_raw)) AS country_code,
     sum(bytes) AS bytes,
     sum(packets) AS packets,
-    count() AS flows_count
+    sum(flow_weight) AS flows_count
 FROM
 (
     SELECT
         toStartOfMinute(f.time_received_ns) AS minute,
         f.source_id,
         f.direction,
-        f.bytes,
-        f.packets,
+        f.bytes * coalesce(f.sampling_rate, 1) AS bytes,
+        f.packets * coalesce(f.sampling_rate, 1) AS packets,
+        coalesce(f.sampling_rate, 1) AS flow_weight,
         row.1 AS country_basis,
         row.2 AS country_side,
         row.3 AS country_raw
@@ -343,9 +344,9 @@ SELECT
     service_code,
     service_name,
     category,
-    sum(f.bytes) AS bytes,
-    sum(f.packets) AS packets,
-    count() AS flows_count
+    sum(f.bytes * coalesce(f.sampling_rate, 1)) AS bytes,
+    sum(f.packets * coalesce(f.sampling_rate, 1)) AS packets,
+    sum(coalesce(f.sampling_rate, 1)) AS flows_count
 FROM default.flows_raw AS f
 LEFT JOIN default.port_services_expanded_enabled AS dst_svc
     ON dst_svc.transport = transport
@@ -393,9 +394,9 @@ SELECT
     ) AS transport,
     multiIf(f.dst_port > 0, 'dst', f.src_port > 0, 'src', 'unknown') AS port_side,
     multiIf(f.dst_port > 0, toUInt16(f.dst_port), f.src_port > 0, toUInt16(f.src_port), toUInt16(0)) AS port,
-    sum(f.bytes) AS bytes,
-    sum(f.packets) AS packets,
-    count() AS flows_count
+    sum(f.bytes * coalesce(f.sampling_rate, 1)) AS bytes,
+    sum(f.packets * coalesce(f.sampling_rate, 1)) AS packets,
+    sum(coalesce(f.sampling_rate, 1)) AS flows_count
 FROM default.flows_raw AS f
 LEFT JOIN default.port_services_expanded_enabled AS dst_svc
     ON dst_svc.transport = multiIf(
@@ -457,15 +458,16 @@ SELECT
     endpoint_network_role,
     sum(bytes) AS bytes,
     sum(packets) AS packets,
-    count() AS flows_count
+    sum(flow_weight) AS flows_count
 FROM
 (
     SELECT
         toStartOfMinute(f.time_received_ns) AS minute,
         f.source_id,
         f.direction,
-        f.bytes,
-        f.packets,
+        f.bytes * coalesce(f.sampling_rate, 1) AS bytes,
+        f.packets * coalesce(f.sampling_rate, 1) AS packets,
+        coalesce(f.sampling_rate, 1) AS flow_weight,
         tupleElement(row, 1) AS endpoint_side,
         tupleElement(row, 2) AS endpoint_ip,
         tupleElement(row, 3) AS endpoint_asn,
@@ -619,9 +621,9 @@ SELECT
     f.dst_endpoint_scope AS dst_scope,
     f.src_label,
     f.dst_label,
-    sum(f.bytes) AS bytes,
-    sum(f.packets) AS packets,
-    count() AS flows_count
+    sum(f.bytes * coalesce(f.sampling_rate, 1)) AS bytes,
+    sum(f.packets * coalesce(f.sampling_rate, 1)) AS packets,
+    sum(coalesce(f.sampling_rate, 1)) AS flows_count
 FROM default.flows_raw AS f
 LEFT JOIN default.asn_registry_enriched AS src_as ON src_as.asn = f.src_asn
 LEFT JOIN default.asn_registry_enriched AS dst_as ON dst_as.asn = f.dst_asn
