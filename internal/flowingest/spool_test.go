@@ -63,10 +63,10 @@ func TestEncodeDecodeFlowRows(t *testing.T) {
 	if len(got) != 1 || got[0].Bytes != rows[0].Bytes || got[0].Proto != rows[0].Proto {
 		t.Fatalf("decode mismatch: %+v", got)
 	}
-	frame := buildFrame(7, b)
-	seq, pl, crc, ok := parseFrameHeader(frame[:spoolFrameHeaderLen])
-	if !ok || seq != 7 || int(pl) != len(b) {
-		t.Fatalf("header mismatch seq=%d pl=%d ok=%v", seq, pl, ok)
+	frame := buildFrame(7, spoolFrameVersionGob, b)
+	seq, version, pl, crc, ok := parseFrameHeader(frame[:spoolFrameHeaderLen])
+	if !ok || seq != 7 || version != spoolFrameVersionGob || int(pl) != len(b) {
+		t.Fatalf("header mismatch seq=%d version=%d pl=%d ok=%v", seq, version, pl, ok)
 	}
 	payload := frame[spoolFrameHeaderLen:]
 	if crc32.ChecksumIEEE(payload) != crc {
@@ -93,8 +93,8 @@ func TestResyncToNextMagic(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	frame1 := buildFrame(1, payload)
-	frame2 := buildFrame(2, payload)
+	frame1 := buildFrame(1, spoolFrameVersionGob, payload)
+	frame2 := buildFrame(2, spoolFrameVersionGob, payload)
 	garbage := bytes.Repeat([]byte{0xAB, 0xCD}, 64) // 128 bytes, no PFLX magic
 
 	var seg bytes.Buffer
@@ -209,7 +209,7 @@ func TestResyncRespectsTipCeiling(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	good := buildFrame(11, payload)
+	good := buildFrame(11, spoolFrameVersionGob, payload)
 
 	var seg bytes.Buffer
 	seg.Write(bytes.Repeat([]byte{0x00}, 50))

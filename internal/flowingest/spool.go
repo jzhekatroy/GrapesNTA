@@ -25,10 +25,22 @@ import (
 )
 
 const (
-	spoolFrameVersion   = uint32(1)
-	spoolFrameMagicBE   = uint32(0x50464c58) // 'PFLX' big-endian on wire
-	spoolFrameHeaderLen = 24
+	// spoolFrameVersionGob is the legacy gob-encoded payload. Still decoded on
+	// read so segments written before the binary-codec rollout drain cleanly.
+	spoolFrameVersionGob = uint32(1)
+	// spoolFrameVersionBinary is the current writer format: a hand-rolled binary
+	// codec that avoids gob's per-call reflection/allocation churn (the dominant
+	// GC pressure source in the collector hot path).
+	spoolFrameVersionBinary = uint32(2)
+	spoolFrameMagicBE       = uint32(0x50464c58) // 'PFLX' big-endian on wire
+	spoolFrameHeaderLen     = 24
 )
+
+// spoolFrameVersionSupported reports whether v is a payload version this build
+// can decode. Kept in one place so the reader and the resync scanner agree.
+func spoolFrameVersionSupported(v uint32) bool {
+	return v == spoolFrameVersionGob || v == spoolFrameVersionBinary
+}
 
 type consumerCheckpoint struct {
 	Segment uint64 `json:"segment"`
@@ -197,10 +209,10 @@ func decodeFramePayload(b []byte) ([]FlowRow, error) {
 	return rows, nil
 }
 
-func buildFrame(seq uint64, payload []byte) []byte {
+func buildFrame(seq uint64, version uint32, payload []byte) []byte {
 	var h [spoolFrameHeaderLen]byte
 	binary.BigEndian.PutUint32(h[0:4], spoolFrameMagicBE)
-	binary.BigEndian.PutUint32(h[4:8], spoolFrameVersion)
+	binary.BigEndian.PutUint32(h[4:8], version)
 	binary.BigEndian.PutUint64(h[8:16], seq)
 	binary.BigEndian.PutUint32(h[16:20], uint32(len(payload)))
 	crc := crc32.ChecksumIEEE(payload)
@@ -211,20 +223,35 @@ func buildFrame(seq uint64, payload []byte) []byte {
 	return out
 }
 
-func parseFrameHeader(b []byte) (seq uint64, payloadLen uint32, crc uint32, ok bool) {
+func parseFrameHeader(b []byte) (seq uint64, version uint32, payloadLen uint32, crc uint32, ok bool) {
 	if len(b) < spoolFrameHeaderLen {
-		return 0, 0, 0, false
+		return 0, 0, 0, 0, false
 	}
 	if binary.BigEndian.Uint32(b[0:4]) != spoolFrameMagicBE {
-		return 0, 0, 0, false
+		return 0, 0, 0, 0, false
 	}
-	if binary.BigEndian.Uint32(b[4:8]) != spoolFrameVersion {
-		return 0, 0, 0, false
+	version = binary.BigEndian.Uint32(b[4:8])
+	if !spoolFrameVersionSupported(version) {
+		return 0, 0, 0, 0, false
 	}
 	seq = binary.BigEndian.Uint64(b[8:16])
 	payloadLen = binary.BigEndian.Uint32(b[16:20])
 	crc = binary.BigEndian.Uint32(b[20:24])
-	return seq, payloadLen, crc, true
+	return seq, version, payloadLen, crc, true
+}
+
+// decodeFramePayloadVersioned dispatches payload decoding by frame version so a
+// spool that contains both legacy gob frames and new binary frames (during a
+// rolling restart) drains without interruption.
+func decodeFramePayloadVersioned(version uint32, b []byte) ([]FlowRow, error) {
+	switch version {
+	case spoolFrameVersionGob:
+		return decodeFramePayload(b)
+	case spoolFrameVersionBinary:
+		return decodeFlowRowsBinary(b)
+	default:
+		return nil, fmt.Errorf("unsupported spool frame version %d", version)
+	}
 }
 
 // AppendBatch writes one or more durable frames. Large scan batches are split so
@@ -254,12 +281,12 @@ func (w *spoolWriter) AppendBatch(rows []FlowRow) (consumerCheckpoint, error) {
 
 func (w *spoolWriter) appendFrame(rows []FlowRow) (consumerCheckpoint, error) {
 	var cp consumerCheckpoint
-	payload, err := encodeFramePayload(rows)
+	payload, err := encodeFlowRowsBinary(rows)
 	if err != nil {
 		return cp, err
 	}
 	seq := w.frameSeq.Add(1)
-	frame := buildFrame(seq, payload)
+	frame := buildFrame(seq, spoolFrameVersionBinary, payload)
 
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -561,7 +588,7 @@ func readNextFrame(segDir string, cp consumerCheckpoint) (next consumerCheckpoin
 		}
 		return cp, nil, err
 	}
-	seq, payLen, wantCRC, ok := parseFrameHeader(hdr)
+	seq, version, payLen, wantCRC, ok := parseFrameHeader(hdr)
 	if !ok {
 		return cp, nil, fmt.Errorf("bad frame header at %s off=%d", path, cp.Offset)
 	}
@@ -575,7 +602,7 @@ func readNextFrame(segDir string, cp consumerCheckpoint) (next consumerCheckpoin
 	if crc32.ChecksumIEEE(payload) != wantCRC {
 		return cp, nil, fmt.Errorf("crc mismatch at %s seg=%d off=%d seq=%d", path, cp.Segment, cp.Offset, seq)
 	}
-	rows, err = decodeFramePayload(payload)
+	rows, err = decodeFramePayloadVersioned(version, payload)
 	if err != nil {
 		return cp, nil, err
 	}
@@ -648,7 +675,7 @@ func resyncToNextMagic(segDir string, cp consumerCheckpoint, tipSeg uint64, tipO
 			}
 			// Verify version when we have enough bytes; otherwise accept the
 			// magic position and let the next readNextFrame call validate.
-			if i+8 <= total && binary.BigEndian.Uint32(buf[i+4:i+8]) != spoolFrameVersion {
+			if i+8 <= total && !spoolFrameVersionSupported(binary.BigEndian.Uint32(buf[i+4:i+8])) {
 				continue
 			}
 			fileOff := pos - int64(overlap) + int64(i)
