@@ -142,7 +142,7 @@ func TestClassifyBGPOverridesIPASNFallback(t *testing.T) {
 
 	got := st.classify(netip.MustParseAddr("8.8.8.8"), 0)
 	if got.ASN != 15169 {
-		t.Fatalf("classify().ASN = %d, want BGP ASN 15169")
+		t.Fatalf("classify().ASN = %d, want BGP ASN 15169", got.ASN)
 	}
 }
 
@@ -161,7 +161,7 @@ func TestClassifyLocalOriginASNOverridesIPASNFallback(t *testing.T) {
 
 	got := st.classify(netip.MustParseAddr("188.143.128.236"), 0)
 	if got.ASN != 34665 {
-		t.Fatalf("classify().ASN = %d, want local origin ASN 34665")
+		t.Fatalf("classify().ASN = %d, want local origin ASN 34665", got.ASN)
 	}
 }
 
