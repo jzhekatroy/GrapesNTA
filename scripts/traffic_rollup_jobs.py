@@ -449,12 +449,12 @@ SELECT
     direction,
     endpoint_ip,
     endpoint_asn,
-    endpoint_as_name,
+    any(endpoint_as_name) AS endpoint_as_name,
     endpoint_ip_country,
     endpoint_as_country,
     endpoint_scope,
-    endpoint_label,
-    endpoint_network_name,
+    any(endpoint_label) AS endpoint_label,
+    any(endpoint_network_name) AS endpoint_network_name,
     endpoint_network_role,
     sum(bytes) AS bytes,
     sum(packets) AS packets,
@@ -546,12 +546,9 @@ GROUP BY
     direction,
     endpoint_ip,
     endpoint_asn,
-    endpoint_as_name,
     endpoint_ip_country,
     endpoint_as_country,
     endpoint_scope,
-    endpoint_label,
-    endpoint_network_name,
     endpoint_network_role
 """,
         pre_delete_sql="ALTER TABLE default.traffic_talker_1m DELETE WHERE minute = {bucket_dt} SETTINGS mutations_sync = 1",
@@ -611,16 +608,16 @@ SELECT
     dst_ip,
     f.src_asn,
     f.dst_asn,
-    multiIf(f.src_asn = 0, '', src_as.asn != 0 AND src_as.name != '', src_as.name, concat('AS', toString(f.src_asn))) AS src_as_name,
-    multiIf(f.dst_asn = 0, '', dst_as.asn != 0 AND dst_as.name != '', dst_as.name, concat('AS', toString(f.dst_asn))) AS dst_as_name,
+    any(multiIf(f.src_asn = 0, '', src_as.asn != 0 AND src_as.name != '', src_as.name, concat('AS', toString(f.src_asn)))) AS src_as_name,
+    any(multiIf(f.dst_asn = 0, '', dst_as.asn != 0 AND dst_as.name != '', dst_as.name, concat('AS', toString(f.dst_asn)))) AS dst_as_name,
     if(length(trimBoth(src_ip_country_raw)) = 0, '??', trimBoth(src_ip_country_raw)) AS src_ip_country,
     if(length(trimBoth(dst_ip_country_raw)) = 0, '??', trimBoth(dst_ip_country_raw)) AS dst_ip_country,
-    if(f.src_asn = 0 OR src_as.asn = 0, '??', trimBoth(toString(src_as.cc))) AS src_as_country,
-    if(f.dst_asn = 0 OR dst_as.asn = 0, '??', trimBoth(toString(dst_as.cc))) AS dst_as_country,
-    f.src_endpoint_scope AS src_scope,
-    f.dst_endpoint_scope AS dst_scope,
-    f.src_label,
-    f.dst_label,
+    any(if(f.src_asn = 0 OR src_as.asn = 0, '??', trimBoth(toString(src_as.cc)))) AS src_as_country,
+    any(if(f.dst_asn = 0 OR dst_as.asn = 0, '??', trimBoth(toString(dst_as.cc)))) AS dst_as_country,
+    any(f.src_endpoint_scope) AS src_scope,
+    any(f.dst_endpoint_scope) AS dst_scope,
+    any(f.src_label) AS src_label,
+    any(f.dst_label) AS dst_label,
     sum(f.bytes * coalesce(f.sampling_rate, 1)) AS bytes,
     sum(f.packets * coalesce(f.sampling_rate, 1)) AS packets,
     sum(coalesce(f.sampling_rate, 1)) AS flows_count
@@ -636,16 +633,8 @@ GROUP BY
     dst_ip,
     f.src_asn,
     f.dst_asn,
-    src_as_name,
-    dst_as_name,
     src_ip_country,
-    dst_ip_country,
-    src_as_country,
-    dst_as_country,
-    src_scope,
-    dst_scope,
-    f.src_label,
-    f.dst_label
+    dst_ip_country
 """,
         pre_delete_sql="ALTER TABLE default.traffic_pair_1m DELETE WHERE minute = {bucket_dt} SETTINGS mutations_sync = 1",
         time_filter_column="f.time_received_ns",
@@ -698,6 +687,13 @@ GROUP BY hour, source_id
         source_table="default.traffic_talker_1m",
         priority=210,
         depends_on=("traffic_talker_1m",),
+        # GROUP BY only the destination ORDER BY key columns; the remaining
+        # descriptive columns (as_name / label / network_name) are not part of
+        # the SummingMergeTree key, so the engine keeps an arbitrary value on
+        # collapse anyway. Grouping by them would only bloat the aggregation
+        # hash table (long Strings in the key) for no change in stored data.
+        # any() is consistent with SummingMergeTree's arbitrary-pick semantics.
+        # external group by is a safety net for unusually large hours.
         select_sql="""
 SELECT
     toStartOfHour(minute) AS hour,
@@ -706,12 +702,12 @@ SELECT
     direction,
     endpoint_ip,
     endpoint_asn,
-    endpoint_as_name,
+    any(endpoint_as_name) AS endpoint_as_name,
     endpoint_ip_country,
     endpoint_as_country,
     endpoint_scope,
-    endpoint_label,
-    endpoint_network_name,
+    any(endpoint_label) AS endpoint_label,
+    any(endpoint_network_name) AS endpoint_network_name,
     endpoint_network_role,
     sum(bytes) AS bytes,
     sum(packets) AS packets,
@@ -725,13 +721,11 @@ GROUP BY
     direction,
     endpoint_ip,
     endpoint_asn,
-    endpoint_as_name,
     endpoint_ip_country,
     endpoint_as_country,
     endpoint_scope,
-    endpoint_label,
-    endpoint_network_name,
     endpoint_network_role
+SETTINGS max_bytes_before_external_group_by = 8000000000, max_threads = 6
 """,
         pre_delete_sql="ALTER TABLE default.traffic_talker_1h DELETE WHERE hour = {bucket_dt} SETTINGS mutations_sync = 1",
     ),
@@ -743,6 +737,14 @@ GROUP BY
         source_table="default.traffic_pair_1m",
         priority=220,
         depends_on=("traffic_pair_1m",),
+        # GROUP BY only the destination ORDER BY key columns. The descriptive
+        # columns (as_name / as_country / scope / label) are not part of the
+        # SummingMergeTree key, so the engine keeps an arbitrary value on
+        # collapse regardless. Grouping by them (4 long Strings in the key) is
+        # what blew the aggregation hash table past the memory limit for a full
+        # hour of pairs. any() matches SummingMergeTree's arbitrary-pick
+        # semantics and yields identical stored rows. external group by is a
+        # safety net for unusually large hours.
         select_sql="""
 SELECT
     toStartOfHour(minute) AS hour,
@@ -752,16 +754,16 @@ SELECT
     dst_ip,
     src_asn,
     dst_asn,
-    src_as_name,
-    dst_as_name,
+    any(src_as_name) AS src_as_name,
+    any(dst_as_name) AS dst_as_name,
     src_ip_country,
     dst_ip_country,
-    src_as_country,
-    dst_as_country,
-    src_scope,
-    dst_scope,
-    src_label,
-    dst_label,
+    any(src_as_country) AS src_as_country,
+    any(dst_as_country) AS dst_as_country,
+    any(src_scope) AS src_scope,
+    any(dst_scope) AS dst_scope,
+    any(src_label) AS src_label,
+    any(dst_label) AS dst_label,
     sum(bytes) AS bytes,
     sum(packets) AS packets,
     sum(flows_count) AS flows_count
@@ -775,16 +777,9 @@ GROUP BY
     dst_ip,
     src_asn,
     dst_asn,
-    src_as_name,
-    dst_as_name,
     src_ip_country,
-    dst_ip_country,
-    src_as_country,
-    dst_as_country,
-    src_scope,
-    dst_scope,
-    src_label,
-    dst_label
+    dst_ip_country
+SETTINGS max_bytes_before_external_group_by = 8000000000, max_threads = 6
 """,
         pre_delete_sql="ALTER TABLE default.traffic_pair_1h DELETE WHERE hour = {bucket_dt} SETTINGS mutations_sync = 1",
     ),
