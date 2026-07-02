@@ -1,6 +1,7 @@
 package flowingest
 
 import (
+	"encoding/binary"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -65,7 +66,80 @@ func sampleFullRow() FlowRow {
 		DstPort:               65000,
 		Bytes:                 9876543210,
 		Packets:               123456,
+		SrcMAC:                [6]byte{0x02, 0x42, 0xac, 0x11, 0x00, 0x02},
+		DstMAC:                [6]byte{0xde, 0xad, 0xbe, 0xef, 0x00, 0x01},
 	}
+}
+
+// encodeFlowRowsBinaryNoMAC replicates the legacy frame-version-2 wire layout
+// (no trailing SrcMAC/DstMAC). Test-only: it lets us assert that version-2
+// frames written before the MAC rollout still decode after the codec learned to
+// append MAC. Kept in lockstep with encodeFlowRowsBinary minus the MAC writes.
+func encodeFlowRowsBinaryNoMAC(rows []FlowRow) []byte {
+	var buf []byte
+	var vtmp [binary.MaxVarintLen64]byte
+	putUvarint := func(x uint64) {
+		n := binary.PutUvarint(vtmp[:], x)
+		buf = append(buf, vtmp[:n]...)
+	}
+	putI64 := func(v int64) {
+		var b [8]byte
+		binary.LittleEndian.PutUint64(b[:], uint64(v))
+		buf = append(buf, b[:]...)
+	}
+	putTime := func(t time.Time) {
+		if t.IsZero() {
+			putI64(spoolZeroTimeSentinel)
+			return
+		}
+		putI64(t.UnixNano())
+	}
+	putStr := func(s string) {
+		putUvarint(uint64(len(s)))
+		buf = append(buf, s...)
+	}
+	putUvarint(uint64(len(rows)))
+	for i := range rows {
+		r := &rows[i]
+		putTime(r.Date)
+		putTime(r.TimeInsertedNs)
+		putTime(r.TimeReceivedNs)
+		putTime(r.TimeFlowStartNs)
+		putUvarint(uint64(r.SequenceNum))
+		putUvarint(r.SamplingRate)
+		buf = append(buf, r.SamplerAddress[:]...)
+		putStr(r.SourceID)
+		buf = append(buf, r.SrcAddr[:]...)
+		buf = append(buf, r.DstAddr[:]...)
+		putUvarint(uint64(r.SrcAS))
+		putUvarint(uint64(r.DstAS))
+		putUvarint(uint64(r.SrcASN))
+		putUvarint(uint64(r.DstASN))
+		for _, s := range []string{
+			r.Direction, r.SrcKind, r.DstKind, r.SrcLabel, r.DstLabel,
+			r.SrcOperator, r.DstOperator,
+			r.SrcAttachmentKind, r.DstAttachmentKind,
+			r.SrcAttachmentBoundary, r.DstAttachmentBoundary,
+			r.SrcAttachmentLabel, r.DstAttachmentLabel,
+			r.SrcAttachmentOperator, r.DstAttachmentOperator,
+			r.SrcEndpointScope, r.DstEndpointScope,
+			r.SrcEndpointSource, r.DstEndpointSource,
+			r.SrcNetworkName, r.DstNetworkName,
+			r.SrcNetworkRole, r.DstNetworkRole,
+			r.SrcRole, r.DstRole, r.SrcEntity, r.DstEntity,
+		} {
+			putStr(s)
+		}
+		putUvarint(uint64(r.SrcVLAN))
+		putUvarint(uint64(r.DstVLAN))
+		putUvarint(uint64(r.Etype))
+		putUvarint(uint64(r.Proto))
+		putUvarint(uint64(r.SrcPort))
+		putUvarint(uint64(r.DstPort))
+		putUvarint(r.Bytes)
+		putUvarint(r.Packets)
+	}
+	return buf
 }
 
 func flowRowsEqual(t *testing.T, want, got FlowRow) {
@@ -129,10 +203,33 @@ func TestBinaryCodecTruncated(t *testing.T) {
 	}
 }
 
-// TestSpoolMixedVersionSegment writes a legacy gob frame (v1) and a binary
-// frame (v2) into one segment and verifies readNextFrame decodes both. This is
-// the rolling-restart path: old on-disk frames must still drain after the
-// writer switches to the binary codec.
+// TestBinaryCodecV2FrameDecodesWithoutMAC verifies that a legacy version-2
+// payload (no trailing MAC) decodes through the version dispatch with zero MAC
+// fields — the rolling-restart guarantee for frames written before MAC support.
+func TestBinaryCodecV2FrameDecodesWithoutMAC(t *testing.T) {
+	src := sampleFullRow()
+	// MAC set on the source row must NOT appear after a v2 decode: v2 frames
+	// never carried MAC, so the decoded rows are MAC-zero regardless.
+	wantNoMAC := src
+	wantNoMAC.SrcMAC = [6]byte{}
+	wantNoMAC.DstMAC = [6]byte{}
+
+	payload := encodeFlowRowsBinaryNoMAC([]FlowRow{src})
+	got, err := decodeFramePayloadVersioned(spoolFrameVersionBinary, payload)
+	if err != nil {
+		t.Fatalf("decode v2 payload: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("v2 row count: want 1 got %d", len(got))
+	}
+	flowRowsEqual(t, wantNoMAC, got[0])
+}
+
+// TestSpoolMixedVersionSegment writes a legacy gob frame (v1), a legacy binary
+// frame without MAC (v2), and a current binary frame with MAC (v3) into one
+// segment and verifies readNextFrame decodes all three. This is the
+// rolling-restart path: old on-disk frames must still drain after the writer
+// switches to the MAC-bearing codec.
 func TestSpoolMixedVersionSegment(t *testing.T) {
 	dir := t.TempDir()
 	segDir := filepath.Join(dir, "segments")
@@ -140,25 +237,29 @@ func TestSpoolMixedVersionSegment(t *testing.T) {
 		t.Fatal(err)
 	}
 	rowGob := FlowRow{SourceID: "legacy", Bytes: 111, Packets: 11, Proto: 6, DstPort: 443}
-	rowBin := sampleFullRow()
+	rowV2 := FlowRow{SourceID: "binary-v2", Bytes: 222, Packets: 22, Proto: 17, DstPort: 53}
+	rowV3 := sampleFullRow()
 
 	gobPayload, err := encodeFramePayload([]FlowRow{rowGob})
 	if err != nil {
 		t.Fatal(err)
 	}
-	binPayload, err := encodeFlowRowsBinary([]FlowRow{rowBin})
+	v2Payload := encodeFlowRowsBinaryNoMAC([]FlowRow{rowV2})
+	v3Payload, err := encodeFlowRowsBinary([]FlowRow{rowV3})
 	if err != nil {
 		t.Fatal(err)
 	}
 	frameGob := buildFrame(1, spoolFrameVersionGob, gobPayload)
-	frameBin := buildFrame(2, spoolFrameVersionBinary, binPayload)
+	frameV2 := buildFrame(2, spoolFrameVersionBinary, v2Payload)
+	frameV3 := buildFrame(3, spoolFrameVersionBinaryMAC, v3Payload)
 
 	segPath := filepath.Join(segDir, fmt.Sprintf("%016d.seg", uint64(1)))
 	f, err := os.Create(segPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.Write(append(frameGob, frameBin...)); err != nil {
+	all := append(append(append([]byte{}, frameGob...), frameV2...), frameV3...)
+	if _, err := f.Write(all); err != nil {
 		t.Fatal(err)
 	}
 	_ = f.Close()
@@ -172,12 +273,23 @@ func TestSpoolMixedVersionSegment(t *testing.T) {
 		t.Fatalf("gob frame decode mismatch: %+v", rows)
 	}
 
-	_, rows2, err := readNextFrame(segDir, next)
+	next2, rowsV2, err := readNextFrame(segDir, next)
 	if err != nil {
-		t.Fatalf("read binary frame: %v", err)
+		t.Fatalf("read v2 binary frame: %v", err)
 	}
-	if len(rows2) != 1 {
-		t.Fatalf("binary frame row count: %d", len(rows2))
+	if len(rowsV2) != 1 || rowsV2[0].SourceID != "binary-v2" || rowsV2[0].Bytes != 222 {
+		t.Fatalf("v2 frame decode mismatch: %+v", rowsV2)
 	}
-	flowRowsEqual(t, rowBin, rows2[0])
+	if rowsV2[0].SrcMAC != ([6]byte{}) || rowsV2[0].DstMAC != ([6]byte{}) {
+		t.Fatalf("v2 frame must decode with zero MAC: %+v", rowsV2[0])
+	}
+
+	_, rowsV3, err := readNextFrame(segDir, next2)
+	if err != nil {
+		t.Fatalf("read v3 binary frame: %v", err)
+	}
+	if len(rowsV3) != 1 {
+		t.Fatalf("v3 frame row count: %d", len(rowsV3))
+	}
+	flowRowsEqual(t, rowV3, rowsV3[0])
 }

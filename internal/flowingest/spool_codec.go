@@ -16,7 +16,7 @@ import (
 // (its raw UnixNano is outside the invertible range).
 const spoolZeroTimeSentinel = math.MinInt64
 
-// Binary spool codec (frame version 2).
+// Binary spool codec (frame versions 2 and 3).
 //
 // Rationale: the previous payload encoding used encoding/gob, whose per-call
 // reflection and internal buffer/type-descriptor allocations were the dominant
@@ -54,11 +54,16 @@ const spoolZeroTimeSentinel = math.MinInt64
 //	  uvarint  SrcVLAN, DstVLAN
 //	  uvarint  Etype, Proto, SrcPort, DstPort
 //	  uvarint  Bytes, Packets
+//	  [6]byte  SrcMAC, DstMAC       -- frame version 3 only
 //
 // A "string" is uvarint length followed by raw UTF-8 bytes.
 //
-// Backward compatibility: frame version 1 (gob) is still decoded on read; only
-// new frames are written with this codec. See spool.go version dispatch.
+// Versioning: the MAC pair is appended at the tail of each row so a version-2
+// record is an exact prefix of a version-3 record. decodeFlowRowsBinaryVersion
+// reads the MAC only when hasMAC is set (frame version 3), so legacy version-2
+// frames still on disk during a rolling restart decode unchanged (MAC stays
+// zero). Frame version 1 (gob) is decoded via decodeFramePayload. New frames are
+// always written as version 3. See spool.go version dispatch.
 
 // spoolMaxFrameRows caps decode-side allocation from a single (possibly torn or
 // hostile) frame. The writer chunks at maxFrameRows (default 50k); this bound is
@@ -147,6 +152,8 @@ func encodeFlowRowsBinary(rows []FlowRow) ([]byte, error) {
 		putUvarint(uint64(r.DstPort))
 		putUvarint(r.Bytes)
 		putUvarint(r.Packets)
+		buf.Write(r.SrcMAC[:])
+		buf.Write(r.DstMAC[:])
 	}
 
 	// Copy out of the pooled buffer: the caller (buildFrame) needs a stable
@@ -203,6 +210,16 @@ func (c *binCursor) addr16() ([16]byte, error) {
 	return a, nil
 }
 
+func (c *binCursor) mac6() ([6]byte, error) {
+	var m [6]byte
+	if c.pos+6 > len(c.b) {
+		return m, errSpoolTruncated
+	}
+	copy(m[:], c.b[c.pos:c.pos+6])
+	c.pos += 6
+	return m, nil
+}
+
 func (c *binCursor) str() (string, error) {
 	n, err := c.uvarint()
 	if err != nil {
@@ -216,7 +233,17 @@ func (c *binCursor) str() (string, error) {
 	return s, nil
 }
 
+// decodeFlowRowsBinary decodes a current-format (version 3, MAC-bearing) binary
+// payload. It is the symmetric counterpart of encodeFlowRowsBinary and is used
+// by round-trip callers and tests.
 func decodeFlowRowsBinary(b []byte) ([]FlowRow, error) {
+	return decodeFlowRowsBinaryVersion(b, true)
+}
+
+// decodeFlowRowsBinaryVersion decodes a binary payload. When hasMAC is false the
+// trailing SrcMAC/DstMAC pair is absent (legacy frame version 2) and the MAC
+// fields are left zero. When true (frame version 3) the pair is read per row.
+func decodeFlowRowsBinaryVersion(b []byte, hasMAC bool) ([]FlowRow, error) {
 	c := binCursor{b: b}
 	count, err := c.uvarint()
 	if err != nil {
@@ -326,6 +353,14 @@ func decodeFlowRowsBinary(b []byte) ([]FlowRow, error) {
 		}
 		if r.Packets, err = c.uvarint(); err != nil {
 			return nil, err
+		}
+		if hasMAC {
+			if r.SrcMAC, err = c.mac6(); err != nil {
+				return nil, err
+			}
+			if r.DstMAC, err = c.mac6(); err != nil {
+				return nil, err
+			}
 		}
 	}
 	if c.pos != len(b) {

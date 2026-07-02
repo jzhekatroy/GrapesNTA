@@ -3,6 +3,7 @@
 -- Order:
 --   1. cleanup_old_classification.sql
 --   2. flows_raw_extensions.sql
+--   2a. flows_raw_mac.sql (L2 MAC columns; apply before MAC-writing binaries)
 --   2b. net_flow_sources.sql + flows_raw_source_id.sql (when enabling source tracking)
 --   2c. geo_country.sql + geoloaderd (geo_country_dict, asn_registry_enriched)
 --   2d. ip_asn_prefixes.sql + iptoasn-loader (remote ASN fallback)

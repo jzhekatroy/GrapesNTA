@@ -132,6 +132,10 @@ func TestParseSFlowV5PreScale(t *testing.T) {
 	if r.Proto != 17 {
 		t.Fatalf("proto=%d", r.Proto)
 	}
+	if r.SrcMAC != ([6]byte{0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff}) ||
+		r.DstMAC != ([6]byte{0x00, 0x11, 0x22, 0x33, 0x44, 0x55}) {
+		t.Fatalf("mac src=%x dst=%x", r.SrcMAC, r.DstMAC)
+	}
 }
 
 func TestParseSFlowV5ExpandedPreScale(t *testing.T) {
@@ -176,6 +180,10 @@ func TestParseEthernetHeaderVLAN(t *testing.T) {
 	}
 	if pkt.vlan != 100 {
 		t.Fatalf("vlan=%d", pkt.vlan)
+	}
+	if pkt.dstMAC != ([6]byte{0x00, 0x11, 0x22, 0x33, 0x44, 0x55}) ||
+		pkt.srcMAC != ([6]byte{0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff}) {
+		t.Fatalf("mac src=%x dst=%x", pkt.srcMAC, pkt.dstMAC)
 	}
 }
 

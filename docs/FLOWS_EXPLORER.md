@@ -590,6 +590,30 @@ actual delta.
 Практически для UI сейчас полезно показывать `src_vlan` как `VLAN`. `dst_vlan`
 показывать только если значение больше `0`.
 
+### MAC (L2)
+
+| Поле | Что значит | Как формируется |
+|------|------------|-----------------|
+| `src_mac` | MAC источника кадра в точке съёма. | `xdpflowd` читает из Ethernet-заголовка на mirror-интерфейсе; `flowcollectord` — из sampled frame sFlow. Хранится в `flows_raw.src_mac` как `FixedString(6)`. |
+| `dst_mac` | MAC назначения кадра в точке съёма. | Аналогично, `flows_raw.dst_mac` `FixedString(6)`. |
+
+MAC хранится сырыми 6 байтами. Для показа форматируйте на запросе, например:
+
+```sql
+lower(concat(
+  substring(hex(f.src_mac), 1, 2), ':', substring(hex(f.src_mac), 3, 2), ':',
+  substring(hex(f.src_mac), 5, 2), ':', substring(hex(f.src_mac), 7, 2), ':',
+  substring(hex(f.src_mac), 9, 2), ':', substring(hex(f.src_mac), 11, 2)
+)) AS src_mac_str
+```
+
+Замечания:
+- MAC — это адреса в точке съёма (порт коммутатора/роутера/mirror), не обязательно
+  «абонентские». Для sFlow это MAC из sampled frame на sampling-интерфейсе.
+- Нулевой MAC (`000000000000`) означает, что producer его не видел (например, BMP,
+  либо старые строки до включения колонок).
+- MAC **не участвует** в rollup-агрегатах — только в `flows_raw`/Flow Explorer.
+
 ### Counters
 
 | Поле | Что значит | Как формируется |

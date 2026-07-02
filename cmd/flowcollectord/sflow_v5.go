@@ -298,6 +298,8 @@ func flowRowFromRawHeader(
 		DstPort:         pkt.dstPort,
 		Bytes:           uint64(frameLength) * samplingRate,
 		Packets:         samplingRate,
+		SrcMAC:          pkt.srcMAC,
+		DstMAC:          pkt.dstMAC,
 	}
 	if classifier != nil {
 		srcClass, dstClass, direction := classifier.ClassifyPair(

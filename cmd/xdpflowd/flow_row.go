@@ -54,6 +54,8 @@ func flowRowFromKV(fv flowKV, m flowRowMapper, receivedAt time.Time) flowingest.
 		DstPort:         uint32(keyPortHost(fv.k.DstPort)),
 		Bytes:           fv.v.Bytes,
 		Packets:         fv.v.Packets,
+		SrcMAC:          fv.k.SrcMAC,
+		DstMAC:          fv.k.DstMAC,
 	}
 	if m.classifier != nil {
 		srcClass, dstClass, direction := m.classifier.ClassifyPair(

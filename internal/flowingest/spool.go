@@ -28,18 +28,23 @@ const (
 	// spoolFrameVersionGob is the legacy gob-encoded payload. Still decoded on
 	// read so segments written before the binary-codec rollout drain cleanly.
 	spoolFrameVersionGob = uint32(1)
-	// spoolFrameVersionBinary is the current writer format: a hand-rolled binary
-	// codec that avoids gob's per-call reflection/allocation churn (the dominant
-	// GC pressure source in the collector hot path).
+	// spoolFrameVersionBinary is the hand-rolled binary codec without MAC
+	// fields. No longer written, still decoded so frames written before the MAC
+	// rollout drain cleanly during a rolling restart.
 	spoolFrameVersionBinary = uint32(2)
-	spoolFrameMagicBE       = uint32(0x50464c58) // 'PFLX' big-endian on wire
-	spoolFrameHeaderLen     = 24
+	// spoolFrameVersionBinaryMAC is the current writer format: the same binary
+	// codec with SrcMAC/DstMAC appended per row (see spool_codec.go).
+	spoolFrameVersionBinaryMAC = uint32(3)
+	spoolFrameMagicBE          = uint32(0x50464c58) // 'PFLX' big-endian on wire
+	spoolFrameHeaderLen        = 24
 )
 
 // spoolFrameVersionSupported reports whether v is a payload version this build
 // can decode. Kept in one place so the reader and the resync scanner agree.
 func spoolFrameVersionSupported(v uint32) bool {
-	return v == spoolFrameVersionGob || v == spoolFrameVersionBinary
+	return v == spoolFrameVersionGob ||
+		v == spoolFrameVersionBinary ||
+		v == spoolFrameVersionBinaryMAC
 }
 
 type consumerCheckpoint struct {
@@ -248,7 +253,9 @@ func decodeFramePayloadVersioned(version uint32, b []byte) ([]FlowRow, error) {
 	case spoolFrameVersionGob:
 		return decodeFramePayload(b)
 	case spoolFrameVersionBinary:
-		return decodeFlowRowsBinary(b)
+		return decodeFlowRowsBinaryVersion(b, false)
+	case spoolFrameVersionBinaryMAC:
+		return decodeFlowRowsBinaryVersion(b, true)
 	default:
 		return nil, fmt.Errorf("unsupported spool frame version %d", version)
 	}
@@ -286,7 +293,7 @@ func (w *spoolWriter) appendFrame(rows []FlowRow) (consumerCheckpoint, error) {
 		return cp, err
 	}
 	seq := w.frameSeq.Add(1)
-	frame := buildFrame(seq, spoolFrameVersionBinary, payload)
+	frame := buildFrame(seq, spoolFrameVersionBinaryMAC, payload)
 
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -903,7 +910,7 @@ func (p *SpoolPipeline) runPipeline() {
 //
 // Corruption handling: any error other than EOF / ErrNotExist is treated as a
 // suspect frame. The drainer scans forward for the next valid magic (PFLX +
-// version 1), advances the read head past the bad bytes, and continues. This
+// a supported version), advances the read head past the bad bytes, and continues. This
 // keeps a single torn write or stale segment from blocking the entire spool.
 // Stall watchdog forces the same resync if no progress is made for
 // stallThreshold despite available data.

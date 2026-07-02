@@ -59,6 +59,13 @@ type FlowRow struct {
 	DstPort          uint32
 	Bytes            uint64
 	Packets          uint64
+	// Layer-2 source/destination MAC as seen at the capture point (XDP mirror
+	// interface or sFlow sampled frame). Zero when the producer cannot observe
+	// L2 (e.g. BMP). Stored in flows_raw as FixedString(6); not part of any
+	// rollup GROUP BY. Kept last so the spool binary codec can append them for
+	// frame version 3 while older version-2 frames (no MAC) stay decodable.
+	SrcMAC [6]byte
+	DstMAC [6]byte
 }
 
 // SumFlowRows returns cumulative packet/byte counters for already materialized

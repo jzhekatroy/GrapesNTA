@@ -14,6 +14,8 @@ const (
 type parsedPacket struct {
 	srcIP     [16]byte
 	dstIP     [16]byte
+	srcMAC    [6]byte
+	dstMAC    [6]byte
 	ipVersion uint8
 	etype     uint32
 	proto     uint32
@@ -27,6 +29,9 @@ func parseEthernetHeader(b []byte) (parsedPacket, bool) {
 	if len(b) < 14 {
 		return out, false
 	}
+	// Ethernet II: destination MAC (0:6), source MAC (6:12), then EtherType.
+	copy(out.dstMAC[:], b[0:6])
+	copy(out.srcMAC[:], b[6:12])
 	off := 12
 	etype := binary.BigEndian.Uint16(b[off : off+2])
 	off += 2

@@ -175,7 +175,9 @@ func insertCompactBatchRows(ctx context.Context, log *slog.Logger, conn chdriver
     dst_port,
     bytes,
     packets,
-    source_id
+    source_id,
+    src_mac,
+    dst_mac
 )`
 
 	q := fmt.Sprintf(stmt, table)
@@ -212,6 +214,8 @@ func insertCompactBatchRows(ctx context.Context, log *slog.Logger, conn chdriver
 			r.Bytes,
 			r.Packets,
 			r.SourceID,
+			r.SrcMAC[:],
+			r.DstMAC[:],
 		)
 		if err != nil {
 			insertErrs.Add(1)
@@ -283,7 +287,9 @@ func insertEnrichedBatchRows(ctx context.Context, log *slog.Logger, conn chdrive
     dst_port,
     bytes,
     packets,
-    source_id
+    source_id,
+    src_mac,
+    dst_mac
 )`
 
 	q := fmt.Sprintf(stmt, table)
@@ -347,6 +353,8 @@ func insertEnrichedBatchRows(ctx context.Context, log *slog.Logger, conn chdrive
 			r.Bytes,
 			r.Packets,
 			r.SourceID,
+			r.SrcMAC[:],
+			r.DstMAC[:],
 		)
 		if err != nil {
 			insertErrs.Add(1)
