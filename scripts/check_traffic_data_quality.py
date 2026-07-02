@@ -2287,6 +2287,123 @@ ORDER BY direction
             add(results, "OK", f"raw_vs_direction_agg.{direction}", f"raw_gb={raw_gb_s} agg_gb={agg_gb_s} diff_gb={diff_gb_s}")
 
 
+def check_raw_vs_hourly_agg(ch: ClickHouse, args: argparse.Namespace, results: List[CheckResult]) -> None:
+    """Reconcile hourly rollups against flows_raw for one settled closed hour.
+
+    Hourly tables are SummingMergeTree fed by INSERT..SELECT; a bucket that is
+    reprocessed without a preceding delete is summed twice, silently inflating
+    every metric. A single fresh aggregation from flows_raw for the same closed
+    hour is the ground truth: rollup totals for one endpoint_side (talker) or the
+    whole source (dashboard/pair) must equal the raw totals within a few percent.
+    This is the invariant that makes over-counting (historically ~6-9x) loud
+    instead of silent.
+
+    Axes differ per rollup: talker/pair bucket by time_received_ns, dashboard by
+    time_flow_start_ns, so each is compared against the matching raw axis.
+    """
+    source = sql_string(args.source_id)
+    anchor = one_row(
+        ch,
+        f"""
+SELECT toString(least(
+    (SELECT max(hour) FROM default.traffic_talker_1h WHERE source_id = {source}),
+    (SELECT max(hour) FROM default.traffic_pair_1h WHERE source_id = {source}),
+    (SELECT max(hour) FROM default.traffic_dashboard_1h WHERE source_id = {source})
+)) AS hour
+""",
+    )
+    if not anchor or not is_meaningful_bucket(anchor[0]):
+        add(results, "WARN", "raw_vs_hourly_agg", "no rolled hourly bucket yet for source")
+        return
+    hour = anchor[0]
+    hour_sql = f"toDateTime({sql_string(hour)}, 'UTC')"
+
+    def raw_totals(axis: str) -> Tuple[float, float]:
+        row = one_row(
+            ch,
+            f"""
+SELECT
+    sum(coalesce(sampling_rate, 1)) AS flows,
+    sum(bytes * coalesce(sampling_rate, 1)) AS bytes
+FROM default.flows_raw
+WHERE source_id = {source}
+  AND {axis} >= {hour_sql}
+  AND {axis} <  {hour_sql} + INTERVAL 1 HOUR
+""",
+        )
+        if not row or row[0] == "":
+            return 0.0, 0.0
+        return float(row[0] or 0), float(row[1] or 0)
+
+    # (name, table, extra_where, flows_col, bytes_col, raw_axis)
+    targets = [
+        (
+            "talker_1h",
+            "default.traffic_talker_1h",
+            "AND endpoint_side = 'src'",
+            "flows_count",
+            "bytes",
+            "time_received_ns",
+        ),
+        (
+            "pair_1h",
+            "default.traffic_pair_1h",
+            "",
+            "flows_count",
+            "bytes",
+            "time_received_ns",
+        ),
+        (
+            "dashboard_1h",
+            "default.traffic_dashboard_1h",
+            "",
+            "total_flows",
+            "total_bytes",
+            "time_flow_start_ns",
+        ),
+    ]
+
+    for name, table, extra_where, flows_col, bytes_col, axis in targets:
+        raw_flows, raw_bytes = raw_totals(axis)
+        agg = one_row(
+            ch,
+            f"""
+SELECT sum({flows_col}) AS flows, sum({bytes_col}) AS bytes
+FROM {table}
+WHERE source_id = {source}
+  AND hour = {hour_sql}
+  {extra_where}
+""",
+        )
+        agg_flows = float(agg[0] or 0) if agg and agg[0] != "" else 0.0
+        agg_bytes = float(agg[1] or 0) if agg and len(agg) > 1 and agg[1] != "" else 0.0
+
+        if raw_flows <= 0 and raw_bytes <= 0:
+            add(
+                results,
+                "WARN",
+                f"raw_vs_hourly_agg.{name}",
+                f"hour={hour} no flows_raw rows on {axis} axis (TTL/backfill gap?)",
+            )
+            continue
+
+        flow_ratio = pct_ratio(agg_flows, raw_flows)
+        byte_ratio = pct_ratio(agg_bytes, raw_bytes)
+        flow_dev = pct_deviation(flow_ratio)
+        byte_dev = pct_deviation(byte_ratio)
+        worst_dev = max(abs(flow_dev or 0), abs(byte_dev or 0))
+        detail = (
+            f"hour={hour} raw_flows={raw_flows:.0f} agg_flows={agg_flows:.0f} "
+            f"flows_ratio={format_ratio_pct(flow_ratio)} raw_bytes={raw_bytes:.0f} "
+            f"agg_bytes={agg_bytes:.0f} bytes_ratio={format_ratio_pct(byte_ratio)} "
+            f"threshold=±{args.max_hourly_agg_deviation_pct}%"
+        )
+        if worst_dev > args.max_hourly_agg_deviation_pct:
+            add(results, "FAIL", f"raw_vs_hourly_agg.{name}", detail)
+        else:
+            add(results, "OK", f"raw_vs_hourly_agg.{name}", detail)
+
+
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Check GrapesNTA traffic data quality in ClickHouse")
     p.add_argument(
@@ -2337,6 +2454,14 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--max-as-country-unknown-gb", type=float, default=5.0, help="WARN above this GB of '??' AS country where ASN is known")
     p.add_argument("--max-country-unknown-pct", type=float, default=5.0, help="WARN above this %% of bytes with '??' IP country in traffic_country_1m")
     p.add_argument("--max-raw-agg-diff-gb", type=float, default=1.0)
+    p.add_argument(
+        "--max-hourly-agg-deviation-pct",
+        type=float,
+        default=5.0,
+        help="FAIL if an hourly rollup (talker/pair/dashboard) deviates more than this "
+        "from a fresh flows_raw aggregation of the same closed hour (catches "
+        "SummingMergeTree double-counting / bucket reprocessing inflation)",
+    )
     p.add_argument(
         "--coverage-window-sec",
         type=int,
@@ -2544,6 +2669,7 @@ def main() -> int:
         ("talker_quality", lambda: check_talker_quality(ch, args, results)),
         ("pair_quality", lambda: check_pair_quality(ch, args, results)),
         ("raw_vs_direction_agg", lambda: check_raw_vs_direction_agg(ch, args, results)),
+        ("raw_vs_hourly_agg", lambda: check_raw_vs_hourly_agg(ch, args, results)),
         ("sflow_capture", lambda: check_sflow_capture_vs_db(ch, args, results)),
         ("sflow_sampling", lambda: check_sflow_sampling_sanity(ch, args, results)),
         ("sflow_volume", lambda: check_sflow_volume_summary(ch, args, results)),

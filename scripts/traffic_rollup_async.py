@@ -385,10 +385,42 @@ def run_bucket(
     bucket_end = add_bucket(bucket_start, job.bucket_kind)
     time_filter = build_time_filter(job, bucket_start, bucket_end)
     bucket_dt = f"toDateTime('{fmt_dt(bucket_start)}', 'UTC')"
+    bucket_col = bucket_column(job)
 
-    if args.delete_before_insert and job.pre_delete_sql:
+    # Idempotent write: a rollup bucket must never be summed twice into the
+    # SummingMergeTree target. The target only ADDS rows, so any reprocessing of
+    # a bucket that already has rows silently inflates every metric (this is what
+    # caused the historical ~6-9x over-count). Guarantee exactly-once per bucket:
+    #
+    #   * steady-state forward run  -> bucket is brand new, the probe below hits
+    #     no primary-key granule and returns instantly, so no delete happens
+    #     (mutations stay off the hot path);
+    #   * reprocessing (manual backfill, state re-bootstrap, or a crash between
+    #     INSERT and state commit) -> the bucket already has rows, so we delete
+    #     them before re-inserting.
+    #
+    # --delete-before-insert forces the delete unconditionally (explicit rebuild)
+    # and skips the probe. bucket_col is the first ORDER BY column of every target
+    # table, so both the probe and the DELETE predicate are primary-key scoped.
+    needs_delete = bool(args.delete_before_insert)
+    delete_reason = "flag"
+    if not needs_delete and job.pre_delete_sql:
+        existing = ch.query(
+            f"SELECT 1 FROM {job.dest_table} WHERE {bucket_col} = {bucket_dt} LIMIT 1",
+            display=f"idempotency probe for {job.job_id}",
+        )
+        if existing.strip() != "":
+            needs_delete = True
+            delete_reason = "bucket_exists"
+
+    if needs_delete and job.pre_delete_sql:
         delete_sql = job.pre_delete_sql.format(bucket_dt=bucket_dt)
-        logger.info("job=%s action=delete bucket=%s", job.job_id, fmt_dt(bucket_start))
+        logger.info(
+            "job=%s action=delete bucket=%s reason=%s",
+            job.job_id,
+            fmt_dt(bucket_start),
+            delete_reason,
+        )
         ch.execute(delete_sql, display=f"delete bucket for {job.job_id}")
 
     select_sql = job.select_sql.format(time_filter=time_filter)
@@ -490,7 +522,12 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         default=(env("TRAFFIC_ROLLUP_DELETE_BEFORE_INSERT", "0") or "0").lower()
         in ("1", "true", "yes", "on"),
-        help="delete target bucket before insert (slower, idempotent rebuild)",
+        help=(
+            "force delete of the target bucket before every insert, skipping the "
+            "auto idempotency probe. Writes are already exactly-once by default "
+            "(a bucket that already has rows is deleted before re-insert); use "
+            "this only for an unconditional rebuild"
+        ),
     )
     parser.add_argument(
         "--preflight-count",
