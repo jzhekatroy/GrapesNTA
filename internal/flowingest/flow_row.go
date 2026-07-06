@@ -66,6 +66,18 @@ type FlowRow struct {
 	// frame version 3 while older version-2 frames (no MAC) stay decodable.
 	SrcMAC [6]byte
 	DstMAC [6]byte
+
+	// sFlow switch/router metadata and L3/L4 attributes. Populated by
+	// flowcollectord from the flow-sample header (InIf/OutIf = SNMP ifIndex of
+	// the physical switch ports) and the inner packet (TCPFlags/IPTTL/IPTos).
+	// Zero for producers that cannot observe them (XDP mirror, BMP). Appended
+	// after the MAC pair by spool frame version 4; version-2/3 frames decode
+	// with these left zero. Not part of any rollup GROUP BY.
+	InIf     uint32
+	OutIf    uint32
+	TCPFlags uint8
+	IPTTL    uint8
+	IPTos    uint8
 }
 
 // SumFlowRows returns cumulative packet/byte counters for already materialized

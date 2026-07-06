@@ -18,6 +18,7 @@ const (
 	sflowSampleFlowExp   = 3
 	sflowSampleCounterExp = 4
 	sflowFlowRawHeader   = 1
+	sflowFlowExtSwitch   = 1001
 	sflowHeaderEthernet  = 1
 
 	maxSFlowSamples = 4096
@@ -173,6 +174,7 @@ func parseFlowSample(
 
 	var samplingRate uint64
 	var numRecords uint32
+	var inIf, outIf uint32
 	var off int
 	if expanded {
 		// expanded flow sample:
@@ -180,6 +182,10 @@ func parseFlowSample(
 		// sample_pool, drops, input_format, input_value, output_format,
 		// output_value, records_count
 		samplingRate = uint64(binary.BigEndian.Uint32(b[12:16]))
+		// input/output interface each encoded as (format u32, value u32); the
+		// value is the SNMP ifIndex of the physical switch port.
+		inIf = binary.BigEndian.Uint32(b[28:32])
+		outIf = binary.BigEndian.Uint32(b[36:40])
 		numRecords = binary.BigEndian.Uint32(b[40:44])
 		off = 44
 	} else {
@@ -187,6 +193,8 @@ func parseFlowSample(
 		// sequence_number, source_id, sampling_rate, sample_pool, drops,
 		// input, output, records_count
 		samplingRate = uint64(binary.BigEndian.Uint32(b[8:12]))
+		inIf = binary.BigEndian.Uint32(b[20:24])
+		outIf = binary.BigEndian.Uint32(b[24:28])
 		numRecords = binary.BigEndian.Uint32(b[28:32])
 		off = 32
 	}
@@ -199,6 +207,12 @@ func parseFlowSample(
 		}
 		return nil
 	}
+
+	// Extended-switch VLANs (incoming/outgoing 802.1Q) if the sample carries an
+	// ext-switch record. It precedes the raw-header record in every observed
+	// exporter, so a single forward pass captures it before the packet row is
+	// built. Falls back to the inner 802.1Q tag when absent (see below).
+	var extInVLAN, extOutVLAN uint16
 
 	rows := make([]flowingest.FlowRow, 0, boundedCap(numRecords, maxSFlowRecords))
 	for i := uint32(0); i < numRecords; i++ {
@@ -220,23 +234,41 @@ func parseFlowSample(
 		recordBody := b[off : off+recordLen]
 		off += recordLen
 
-		format := recordType & 0xFFF
-		if format != sflowFlowRawHeader {
-			continue
-		}
-		row, ok := flowRowFromRawHeader(recordBody, receivedAt, sourceID, sampler, samplingRate, classifier, seq)
-		if !ok {
-			if m != nil {
-				m.parseErrors.Add(1)
+		switch recordType & 0xFFF {
+		case sflowFlowExtSwitch:
+			if in, out, ok := parseExtSwitch(recordBody); ok {
+				extInVLAN, extOutVLAN = in, out
 			}
 			continue
+		case sflowFlowRawHeader:
+			row, ok := flowRowFromRawHeader(recordBody, receivedAt, sourceID, sampler, samplingRate, inIf, outIf, extInVLAN, extOutVLAN, classifier, seq)
+			if !ok {
+				if m != nil {
+					m.parseErrors.Add(1)
+				}
+				continue
+			}
+			if m != nil {
+				m.recordsParsed.Add(1)
+			}
+			rows = append(rows, row)
+		default:
+			continue
 		}
-		if m != nil {
-			m.recordsParsed.Add(1)
-		}
-		rows = append(rows, row)
 	}
 	return rows
+}
+
+// parseExtSwitch decodes an sFlow extended-switch flow record: incoming VLAN,
+// incoming priority, outgoing VLAN, outgoing priority (each u32). Returns the
+// two VLAN ids (low 12 bits) and false if the record is truncated.
+func parseExtSwitch(b []byte) (inVLAN, outVLAN uint16, ok bool) {
+	if len(b) < 16 {
+		return 0, 0, false
+	}
+	inVLAN = uint16(binary.BigEndian.Uint32(b[0:4]) & 0x0FFF)
+	outVLAN = uint16(binary.BigEndian.Uint32(b[8:12]) & 0x0FFF)
+	return inVLAN, outVLAN, true
 }
 
 func boundedCap(n uint32, max int) int {
@@ -252,6 +284,8 @@ func flowRowFromRawHeader(
 	sourceID string,
 	sampler [16]byte,
 	samplingRate uint64,
+	inIf, outIf uint32,
+	extInVLAN, extOutVLAN uint16,
 	classifier *flowingest.TrafficClassifier,
 	seq *uint32,
 ) (flowingest.FlowRow, bool) {
@@ -280,6 +314,13 @@ func flowRowFromRawHeader(
 		rowSeq = *seq
 	}
 
+	// Prefer the switch-reported ingress VLAN (ext-switch record); fall back to
+	// the inner 802.1Q tag when the exporter omits ext-switch.
+	srcVLAN := extInVLAN
+	if srcVLAN == 0 {
+		srcVLAN = pkt.vlan
+	}
+
 	row := flowingest.FlowRow{
 		Date:            receivedAt,
 		TimeInsertedNs:  receivedAt,
@@ -291,7 +332,8 @@ func flowRowFromRawHeader(
 		SourceID:        sourceID,
 		SrcAddr:         pkt.srcIP,
 		DstAddr:         pkt.dstIP,
-		SrcVLAN:         pkt.vlan,
+		SrcVLAN:         srcVLAN,
+		DstVLAN:         extOutVLAN,
 		Etype:           pkt.etype,
 		Proto:           pkt.proto,
 		SrcPort:         pkt.srcPort,
@@ -300,10 +342,15 @@ func flowRowFromRawHeader(
 		Packets:         samplingRate,
 		SrcMAC:          pkt.srcMAC,
 		DstMAC:          pkt.dstMAC,
+		InIf:            inIf,
+		OutIf:           outIf,
+		TCPFlags:        pkt.tcpFlags,
+		IPTTL:           pkt.ttl,
+		IPTos:           pkt.tos,
 	}
 	if classifier != nil {
 		srcClass, dstClass, direction := classifier.ClassifyPair(
-			pkt.srcIP, pkt.dstIP, pkt.ipVersion, pkt.vlan, 0,
+			pkt.srcIP, pkt.dstIP, pkt.ipVersion, srcVLAN, 0,
 		)
 		flowingest.ApplyEndpointClasses(&row, srcClass, dstClass, direction)
 	}

@@ -22,6 +22,9 @@ type parsedPacket struct {
 	srcPort   uint32
 	dstPort   uint32
 	vlan      uint16
+	ttl       uint8 // IPv4 TTL / IPv6 hop limit
+	tos       uint8 // IPv4 DSCP+ECN / IPv6 traffic class
+	tcpFlags  uint8 // TCP flags byte (FIN..CWR); zero for non-TCP
 }
 
 func parseEthernetHeader(b []byte) (parsedPacket, bool) {
@@ -69,6 +72,8 @@ func parseIPv4Header(b []byte, out parsedPacket) (parsedPacket, bool) {
 		return out, false
 	}
 	out.ipVersion = 4
+	out.tos = b[1]
+	out.ttl = b[8]
 	out.proto = uint32(b[9])
 	copy(out.srcIP[:4], b[12:16])
 	copy(out.dstIP[:4], b[16:20])
@@ -80,7 +85,10 @@ func parseIPv6Header(b []byte, out parsedPacket) (parsedPacket, bool) {
 		return out, false
 	}
 	out.ipVersion = 6
+	// Traffic class spans the low nibble of byte 0 and high nibble of byte 1.
+	out.tos = uint8((binary.BigEndian.Uint16(b[0:2]) >> 4) & 0xFF)
 	next := b[6]
+	out.ttl = b[7] // hop limit
 	copy(out.srcIP[:], b[8:24])
 	copy(out.dstIP[:], b[24:40])
 	off := 40
@@ -109,7 +117,16 @@ func parseIPv6Header(b []byte, out parsedPacket) (parsedPacket, bool) {
 
 func parseL4Ports(b []byte, out parsedPacket) (parsedPacket, bool) {
 	switch out.proto {
-	case 6, 17: // TCP, UDP
+	case 6: // TCP
+		if len(b) < 4 {
+			return out, true
+		}
+		out.srcPort = uint32(binary.BigEndian.Uint16(b[0:2]))
+		out.dstPort = uint32(binary.BigEndian.Uint16(b[2:4]))
+		if len(b) >= 14 {
+			out.tcpFlags = b[13] // flags byte: FIN,SYN,RST,PSH,ACK,URG,ECE,CWR
+		}
+	case 17: // UDP
 		if len(b) < 4 {
 			return out, true
 		}
