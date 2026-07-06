@@ -17,6 +17,7 @@ import argparse
 import os
 import subprocess
 import sys
+import time
 from typing import BinaryIO, List, Optional, Sequence, Tuple
 
 
@@ -84,6 +85,46 @@ def log_info(message: str) -> None:
     print(f"rebuild_bgp_origin_asn: {message}", file=sys.stderr)
 
 
+def split_table_name(table: str, default_db: str = "default") -> Tuple[str, str]:
+    if "." in table:
+        return tuple(table.split(".", 1))  # type: ignore[return-value]
+    return default_db, table
+
+
+def ch_wait_mutations(
+    base: Sequence[str],
+    table: str,
+    *,
+    timeout_s: int = 900,
+    poll_s: float = 2.0,
+) -> None:
+    db, name = split_table_name(table)
+    deadline = time.monotonic() + timeout_s
+    while True:
+        pending = ch_run_int(
+            base,
+            "SELECT count() FROM system.mutations "
+            f"WHERE database = {sql_string(db)} "
+            f"AND table = {sql_string(name)} "
+            "AND is_done = 0",
+        )
+        if pending == 0:
+            return
+        if time.monotonic() >= deadline:
+            failures = ch_run_scalar(
+                base,
+                "SELECT any(latest_fail_reason) FROM system.mutations "
+                f"WHERE database = {sql_string(db)} "
+                f"AND table = {sql_string(name)} "
+                "AND is_done = 0",
+            )
+            raise RuntimeError(
+                f"timed out waiting for mutations on {table}: "
+                f"pending={pending} latest_fail_reason={failures}"
+            )
+        time.sleep(poll_s)
+
+
 def ch_swap_tables(
     base: Sequence[str],
     table: str,
@@ -97,7 +138,23 @@ def ch_swap_tables(
         ch_run_query(base, q)
         return
     except RuntimeError as exc:
-        log_info(f"EXCHANGE TABLES failed, falling back to RENAME: {exc}")
+        log_info(f"EXCHANGE TABLES failed, falling back to in-place refresh: {exc}")
+    # Keep the current table name intact for ClickHouse dictionaries that depend
+    # on it. This is not atomic like EXCHANGE, but avoids Code 630 on endpoints
+    # where EXCHANGE is unavailable and dictionary DROP is restricted.
+    try:
+        ch_run_query(base, f"ALTER TABLE {table} DELETE WHERE 1")
+        ch_wait_mutations(base, table)
+        ch_run_query(
+            base,
+            f"INSERT INTO {table} "
+            f"SELECT * FROM {staging} "
+            "WHERE prefix NOT IN ('0.0.0.0/0', '::/0')",
+        )
+        ch_run_query(base, f"TRUNCATE TABLE {staging}")
+        return
+    except RuntimeError as exc:
+        log_info(f"in-place refresh failed, falling back to RENAME: {exc}")
     if "." not in table or "." not in staging:
         raise RuntimeError(
             "EXCHANGE TABLES failed; for RENAME fallback use qualified names "
