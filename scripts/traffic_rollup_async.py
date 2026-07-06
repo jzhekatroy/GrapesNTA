@@ -95,6 +95,17 @@ def bucket_column(job: RollupJob) -> str:
     raise ValueError(job.bucket_kind)
 
 
+def sql_string(value: str) -> str:
+    return "'" + value.replace("\\", "\\\\").replace("'", "\\'") + "'"
+
+
+def split_table_name(table: str, default_db: str = "default") -> Tuple[str, str]:
+    if "." in table:
+        db, name = table.split(".", 1)
+        return db, name
+    return default_db, table
+
+
 @dataclass
 class JobState:
     last_bucket: Optional[datetime]
@@ -375,6 +386,43 @@ def count_source_rows(
         return None
 
 
+def wait_table_mutations(
+    ch: ClickHouseClient,
+    logger: logging.Logger,
+    table: str,
+    *,
+    timeout_s: int = 900,
+    poll_s: float = 2.0,
+) -> None:
+    db, name = split_table_name(table)
+    deadline = time.monotonic() + timeout_s
+    while True:
+        pending_raw = ch.query(
+            "SELECT count() FROM system.mutations "
+            f"WHERE database = {sql_string(db)} "
+            f"AND table = {sql_string(name)} "
+            "AND is_done = 0",
+            display=f"wait mutations for {table}",
+        )
+        pending = int(pending_raw or "0")
+        if pending == 0:
+            return
+        if time.monotonic() >= deadline:
+            reason = ch.query(
+                "SELECT any(latest_fail_reason) FROM system.mutations "
+                f"WHERE database = {sql_string(db)} "
+                f"AND table = {sql_string(name)} "
+                "AND is_done = 0",
+                display=f"mutation failure reason for {table}",
+            )
+            raise RuntimeError(
+                f"timed out waiting for mutations on {table}: "
+                f"pending={pending} latest_fail_reason={reason}"
+            )
+        logger.info("table=%s action=wait_mutations pending=%s", table, pending)
+        time.sleep(poll_s)
+
+
 def run_bucket(
     ch: ClickHouseClient,
     logger: logging.Logger,
@@ -422,6 +470,7 @@ def run_bucket(
             delete_reason,
         )
         ch.execute(delete_sql, display=f"delete bucket for {job.job_id}")
+        wait_table_mutations(ch, logger, job.dest_table)
 
     select_sql = job.select_sql.format(time_filter=time_filter)
     insert_sql = f"INSERT INTO {job.dest_table}\n{select_sql}"
