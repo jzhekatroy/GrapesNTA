@@ -12,10 +12,14 @@
 --
 -- Apply BEFORE deploying the binary that writes these columns.
 --
+-- NOTE: the sFlow ClickHouse is an older build that does NOT support
+-- "ADD COLUMN IF NOT EXISTS", so plain ADD COLUMN is used. Running this twice
+-- errors with "column already exists" (harmless): apply once.
+--
 --   clickhouse-client ... --multiquery < deploy/clickhouse/flows_raw_sflow_meta.sql
 
-ALTER TABLE default.flows_raw ADD COLUMN IF NOT EXISTS in_if UInt32 DEFAULT 0;
-ALTER TABLE default.flows_raw ADD COLUMN IF NOT EXISTS out_if UInt32 DEFAULT 0;
-ALTER TABLE default.flows_raw ADD COLUMN IF NOT EXISTS tcp_flags UInt8 DEFAULT 0;
-ALTER TABLE default.flows_raw ADD COLUMN IF NOT EXISTS ip_ttl UInt8 DEFAULT 0;
-ALTER TABLE default.flows_raw ADD COLUMN IF NOT EXISTS ip_tos UInt8 DEFAULT 0;
+ALTER TABLE default.flows_raw ADD COLUMN in_if UInt32 DEFAULT 0;
+ALTER TABLE default.flows_raw ADD COLUMN out_if UInt32 DEFAULT 0;
+ALTER TABLE default.flows_raw ADD COLUMN tcp_flags UInt8 DEFAULT 0;
+ALTER TABLE default.flows_raw ADD COLUMN ip_ttl UInt8 DEFAULT 0;
+ALTER TABLE default.flows_raw ADD COLUMN ip_tos UInt8 DEFAULT 0;
