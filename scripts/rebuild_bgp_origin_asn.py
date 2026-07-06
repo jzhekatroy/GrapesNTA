@@ -84,18 +84,41 @@ def log_info(message: str) -> None:
     print(f"rebuild_bgp_origin_asn: {message}", file=sys.stderr)
 
 
-def ch_swap_tables(base: Sequence[str], table: str, staging: str) -> None:
+def ch_swap_tables(
+    base: Sequence[str],
+    table: str,
+    staging: str,
+    dictionary: Optional[str] = None,
+) -> None:
+    # EXCHANGE TABLES is atomic and keeps both table names, so a dictionary whose
+    # SOURCE references `table` stays valid. This is the primary swap path.
     q = f"EXCHANGE TABLES {table} AND {staging}"
     try:
         ch_run_query(base, q)
         return
-    except RuntimeError:
-        pass
+    except RuntimeError as exc:
+        log_info(f"EXCHANGE TABLES failed, falling back to in-place refresh: {exc}")
+    # Keep the current table name intact for ClickHouse dictionaries that depend
+    # on it. This is not atomic like EXCHANGE, but avoids Code 630 on endpoints
+    # where EXCHANGE is unavailable and dictionary DROP is restricted.
+    try:
+        ch_run_query(base, f"TRUNCATE TABLE {table}")
+        ch_run_query(base, f"INSERT INTO {table} SELECT * FROM {staging}")
+        ch_run_query(base, f"TRUNCATE TABLE {staging}")
+        return
+    except RuntimeError as exc:
+        log_info(f"in-place refresh failed, falling back to RENAME: {exc}")
     if "." not in table or "." not in staging:
         raise RuntimeError(
             "EXCHANGE TABLES failed; for RENAME fallback use qualified names "
             "like default.bgp_prefix_origin_current"
         )
+    # RENAME fallback drops the current table name, which a dependent dictionary
+    # blocks (Code 630). Best-effort drop the dictionary first; the caller
+    # recreates it right after the swap. Ignore drop failures (e.g. restricted
+    # endpoints that reject DROP DICTIONARY) so the fallback can still proceed.
+    if dictionary:
+        ch_drop_dictionary(base, dictionary)
     db = table.split(".", 1)[0]
     tmp = f"{db}._bgp_origin_swap_{os.getpid()}"
     q2 = (
@@ -104,6 +127,23 @@ def ch_swap_tables(base: Sequence[str], table: str, staging: str) -> None:
         f"{tmp} TO {staging}"
     )
     ch_run_query(base, q2)
+
+
+def ch_drop_dictionary(base: Sequence[str], dictionary: str) -> None:
+    try:
+        ch_run_query(base, f"DROP DICTIONARY IF EXISTS {dictionary}")
+        return
+    except RuntimeError as exc1:
+        try:
+            # Some ClickHouse endpoints expose dictionaries as Dictionary-engine
+            # tables and reject DROP DICTIONARY in their SQL parser.
+            ch_run_query(base, f"DROP TABLE IF EXISTS {dictionary}")
+            return
+        except RuntimeError as exc2:
+            log_info(
+                f"drop dictionary {dictionary} failed (ignored): "
+                f"drop_dictionary={exc1}; drop_table={exc2}"
+            )
 
 
 def sql_string(value: str) -> str:
@@ -179,6 +219,7 @@ FROM
     FROM {args.route_events_table}
     WHERE ts >= now() - INTERVAL {args.lookback_days} DAY
       AND family = {family}
+      AND prefix_len > 0
     GROUP BY
         family,
         prefix,
@@ -393,7 +434,8 @@ FROM {args.staging_table}
                 f"drop_pct={drop_pct:.2f} max_prefix_drop_pct={args.max_prefix_drop_pct:g}"
             )
 
-    ch_swap_tables(base, args.table, args.staging_table)
+    swap_dictionary = None if args.skip_dictionary_create else args.dictionary
+    ch_swap_tables(base, args.table, args.staging_table, swap_dictionary)
     log_info(f"swapped target_table={args.table} rows={rows}")
 
     if not args.skip_dictionary_create:

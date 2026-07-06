@@ -221,6 +221,11 @@ func (tc *TrafficClassifier) loadBGP(ctx context.Context, st *classifierState) (
 		if err != nil || !p.IsValid() || asn == 0 {
 			continue
 		}
+		if p.Bits() == 0 {
+			// A default route is not an origin route; using it would classify all
+			// unmatched remote IPs as the default route's transit ASN.
+			continue
+		}
 		if p.Addr().Is4() {
 			st.bgp4.Insert(p.Masked(), prefixClass{ASN: asn})
 		} else {
