@@ -263,8 +263,10 @@ func (d *Decoder) flowSample(idx uint32, b []byte, expanded bool) {
 		samplingRate = c.u32()
 		samplePool = c.u32()
 		drops = c.u32()
-		c.skip(8) // input format+value
-		c.skip(8) // output format+value
+		c.skip(4)       // input interface format
+		inIf = c.u32()  // input interface value (SNMP ifIndex of ingress port)
+		c.skip(4)       // output interface format
+		outIf = c.u32() // output interface value (SNMP ifIndex of egress port)
 		numRecords = c.u32()
 	} else {
 		c.skip(4) // source_id
