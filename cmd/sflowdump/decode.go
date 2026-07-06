@@ -154,17 +154,26 @@ func newSummary() *Summary {
 type Decoder struct {
 	w           io.Writer
 	sum         *Summary
-	printBudget int // remaining datagrams to print in full
+	printBudget int  // remaining datagrams to print in full (tree mode)
+	flat        bool // one compact line per sampled packet instead of the tree
+
+	// per-datagram / per-sample context, used for the flat line.
+	curExporter string // UDP src ip:port of the sFlow packet (the switch/relay)
+	curAgent    string // sFlow agent address (the switch)
+	curRate     uint32
+	curInIf     uint32
+	curOutIf    uint32
+	curExtVLAN  uint16 // VLAN from the ext-switch record (fallback if 802.1Q absent)
 }
 
-func NewDecoder(w io.Writer, sum *Summary, printBudget int) *Decoder {
-	return &Decoder{w: w, sum: sum, printBudget: printBudget}
+func NewDecoder(w io.Writer, sum *Summary, printBudget int, flat bool) *Decoder {
+	return &Decoder{w: w, sum: sum, printBudget: printBudget, flat: flat}
 }
 
 func (d *Decoder) printing() bool { return d.printBudget > 0 }
 
 func (d *Decoder) pf(indent int, format string, args ...any) {
-	if !d.printing() {
+	if d.flat || !d.printing() {
 		return
 	}
 	for i := 0; i < indent; i++ {
@@ -206,6 +215,8 @@ func (d *Decoder) Datagram(b []byte, src string, receivedAt time.Time) {
 
 	agentStr := agent.String()
 	d.sum.Agents[agentStr]++
+	d.curExporter = src
+	d.curAgent = agentStr
 
 	d.pf(0, "── datagram from %s  agent=%s sub_agent=%d seq=%d uptime=%s samples=%d bytes=%d",
 		src, agentStr, subAgent, seq, uptimeStr(uptime), numSamples, len(b))
@@ -269,6 +280,10 @@ func (d *Decoder) flowSample(idx uint32, b []byte, expanded bool) {
 		return
 	}
 	d.sum.SamplingRate[samplingRate]++
+	d.curRate = uint32(samplingRate)
+	d.curInIf = inIf
+	d.curOutIf = outIf
+	d.curExtVLAN = 0
 	d.pf(1, "sample %d: FLOW%s seq=%d rate=1/%d pool=%d drops=%d in_if=%d out_if=%d records=%d",
 		idx, expTag(expanded), seq, samplingRate, samplePool, drops, inIf, outIf, numRecords)
 
@@ -327,131 +342,266 @@ func (d *Decoder) rawHeaderRecord(idx uint32, b []byte) {
 	header := c.bytes(int(headerLen))
 	d.pf(2, "record %d: RAW-HEADER proto=%s frame_len=%d stripped=%d header_len=%d%s",
 		idx, headerProtoName(headerProto), frameLen, stripped, headerLen, truncNote(headerLen, frameLen))
-	if headerProto == 1 && header != nil { // ETHERNET-ISO88023
-		d.decodeEthernet(header)
-	}
-}
-
-// decodeEthernet parses L2/L3/L4 from the (possibly truncated) sampled header
-// and prints the security-relevant fields (TTL, TCP flags, ports, frag).
-func (d *Decoder) decodeEthernet(b []byte) {
-	c := &cursor{b: b}
-	dstMAC := c.bytes(6)
-	srcMAC := c.bytes(6)
-	etype := uint32(be16(c.bytes(2)))
-	var vlan uint16
-	for etype == ethTypeVLAN || etype == ethTypeQinQ {
-		tci := be16(c.bytes(2))
-		if vlan == 0 {
-			vlan = tci & 0x0FFF
-			d.sum.VLANs[vlan]++
-		}
-		etype = uint32(be16(c.bytes(2)))
-	}
-	if c.err != nil {
-		d.pf(3, "L2: truncated")
+	if headerProto != 1 || header == nil { // only ETHERNET-ISO88023 decoded
 		return
 	}
-	d.sum.EtherTypes[etype]++
-	vlanStr := ""
-	if vlan != 0 {
-		vlanStr = fmt.Sprintf(" vlan=%d", vlan)
-	}
-	d.pf(3, "L2: %s -> %s etype=0x%04x%s", macStr(srcMAC), macStr(dstMAC), etype, vlanStr)
-
-	switch etype {
-	case ethTypeIPv4:
-		d.decodeIPv4(c.b[c.pos:])
-	case ethTypeIPv6:
-		d.decodeIPv6(c.b[c.pos:])
-	case ethTypeARP:
-		d.pf(3, "L3: ARP")
-	default:
-		d.pf(3, "L3: etype 0x%04x (not IP)", etype)
+	p := parsePacket(header)
+	d.updateSummaryPkt(p)
+	if d.flat {
+		d.flatLine(frameLen, p)
+	} else {
+		d.treePrintPkt(p)
 	}
 }
 
-func (d *Decoder) decodeIPv4(b []byte) {
+// packetInfo holds the L2/L3/L4 fields parsed from a (possibly truncated)
+// sampled ethernet header. Missing fields stay zero-valued.
+type packetInfo struct {
+	haveL2    bool
+	srcMAC    [6]byte
+	dstMAC    [6]byte
+	etype     uint32
+	vlan      uint16
+	ipVer     uint8
+	srcIP     net.IP
+	dstIP     net.IP
+	proto     uint32
+	ttl       uint8
+	tos       uint8
+	totalLen  uint16
+	fragOff   uint16
+	moreFrag  bool
+	dontFrag  bool
+	haveL4    bool
+	srcPort   uint16
+	dstPort   uint16
+	tcpFlags  byte
+	haveFlags bool
+	l4Note    string
+}
+
+func (p *packetInfo) isARP() bool { return p.etype == ethTypeARP }
+
+// parsePacket best-effort decodes L2→L4 from a sampled ethernet header.
+func parsePacket(b []byte) packetInfo {
+	var p packetInfo
+	c := &cursor{b: b}
+	dm := c.bytes(6)
+	sm := c.bytes(6)
+	et := uint32(be16(c.bytes(2)))
+	if c.err != nil {
+		return p
+	}
+	copy(p.dstMAC[:], dm)
+	copy(p.srcMAC[:], sm)
+	p.haveL2 = true
+	for et == ethTypeVLAN || et == ethTypeQinQ {
+		tci := be16(c.bytes(2))
+		if p.vlan == 0 {
+			p.vlan = tci & 0x0FFF
+		}
+		et = uint32(be16(c.bytes(2)))
+	}
+	if c.err != nil {
+		return p
+	}
+	p.etype = et
+	switch et {
+	case ethTypeIPv4:
+		parseIPv4Into(&p, c.b[c.pos:])
+	case ethTypeIPv6:
+		parseIPv6Into(&p, c.b[c.pos:])
+	}
+	return p
+}
+
+func parseIPv4Into(p *packetInfo, b []byte) {
 	if len(b) < 20 {
-		d.pf(3, "L3: IPv4 truncated (%d bytes)", len(b))
 		return
 	}
 	ihl := int(b[0]&0x0F) * 4
-	tos := b[1]
-	totalLen := be16(b[2:4])
-	flagsFrag := be16(b[6:8])
-	dontFrag := flagsFrag&0x4000 != 0
-	moreFrag := flagsFrag&0x2000 != 0
-	fragOff := flagsFrag & 0x1FFF
-	ttl := b[8]
-	proto := uint32(b[9])
-	src := net.IP(b[12:16])
-	dst := net.IP(b[16:20])
-	d.sum.L3Protos[proto]++
-	fragNote := ""
-	if moreFrag || fragOff != 0 {
-		fragNote = fmt.Sprintf(" FRAG(off=%d more=%v df=%v)", fragOff, moreFrag, dontFrag)
-	}
-	d.pf(3, "L3: IPv4 %s -> %s proto=%s ttl=%d tos=0x%02x total_len=%d%s",
-		src, dst, protoName(proto), ttl, tos, totalLen, fragNote)
+	p.ipVer = 4
+	p.tos = b[1]
+	p.totalLen = be16(b[2:4])
+	ff := be16(b[6:8])
+	p.dontFrag = ff&0x4000 != 0
+	p.moreFrag = ff&0x2000 != 0
+	p.fragOff = ff & 0x1FFF
+	p.ttl = b[8]
+	p.proto = uint32(b[9])
+	p.srcIP = net.IP(b[12:16])
+	p.dstIP = net.IP(b[16:20])
 	if ihl < 20 || len(b) < ihl {
 		return
 	}
-	d.decodeL4(proto, b[ihl:])
+	parseL4Into(p, b[ihl:])
 }
 
-func (d *Decoder) decodeIPv6(b []byte) {
+func parseIPv6Into(p *packetInfo, b []byte) {
 	if len(b) < 40 {
-		d.pf(3, "L3: IPv6 truncated (%d bytes)", len(b))
 		return
 	}
-	tclass := (be16(b[0:2]) >> 4) & 0xFF
-	payloadLen := be16(b[4:6])
+	p.ipVer = 6
+	p.tos = uint8((be16(b[0:2]) >> 4) & 0xFF)
+	p.totalLen = be16(b[4:6])
 	next := b[6]
-	hop := b[7]
-	src := net.IP(b[8:24])
-	dst := net.IP(b[24:40])
-	d.sum.L3Protos[uint32(next)]++
-	d.pf(3, "L3: IPv6 %s -> %s next=%s hop_limit=%d tclass=0x%02x payload_len=%d",
-		src, dst, protoName(uint32(next)), hop, tclass, payloadLen)
-	d.decodeL4(uint32(next), b[40:])
+	p.ttl = b[7] // hop limit
+	p.srcIP = net.IP(b[8:24])
+	p.dstIP = net.IP(b[24:40])
+	off := 40
+	for {
+		switch next {
+		case 6, 17, 58: // TCP, UDP, ICMPv6
+			p.proto = uint32(next)
+			parseL4Into(p, b[off:])
+			return
+		case 0, 43, 44, 60: // extension headers
+			if len(b) < off+2 {
+				p.proto = uint32(next)
+				return
+			}
+			nn := b[off]
+			hl := int(b[off+1])*8 + 8
+			if hl < 8 || len(b) < off+hl {
+				p.proto = uint32(next)
+				return
+			}
+			next = nn
+			off += hl
+		default:
+			p.proto = uint32(next)
+			return
+		}
+	}
 }
 
-func (d *Decoder) decodeL4(proto uint32, b []byte) {
-	switch proto {
+func parseL4Into(p *packetInfo, b []byte) {
+	switch p.proto {
 	case 6: // TCP
-		if len(b) < 14 {
-			d.pf(4, "L4: TCP truncated (%d bytes)", len(b))
+		if len(b) < 4 {
 			return
 		}
-		sp := be16(b[0:2])
-		dp := be16(b[2:4])
-		flags := b[13]
-		d.sum.TopSrcPorts[sp]++
-		d.sum.TopDstPorts[dp]++
-		d.pf(4, "L4: TCP %d -> %d flags=%s", sp, dp, tcpFlags(flags))
+		p.srcPort = be16(b[0:2])
+		p.dstPort = be16(b[2:4])
+		p.haveL4 = true
+		if len(b) >= 14 {
+			p.tcpFlags = b[13]
+			p.haveFlags = true
+		}
 	case 17: // UDP
 		if len(b) < 4 {
-			d.pf(4, "L4: UDP truncated (%d bytes)", len(b))
 			return
 		}
-		sp := be16(b[0:2])
-		dp := be16(b[2:4])
-		d.sum.TopSrcPorts[sp]++
-		d.sum.TopDstPorts[dp]++
-		d.pf(4, "L4: UDP %d -> %d", sp, dp)
+		p.srcPort = be16(b[0:2])
+		p.dstPort = be16(b[2:4])
+		p.haveL4 = true
 	case 1: // ICMP
-		if len(b) < 2 {
-			d.pf(4, "L4: ICMP truncated")
-			return
+		if len(b) >= 2 {
+			p.l4Note = fmt.Sprintf("icmp type=%d code=%d", b[0], b[1])
 		}
-		d.pf(4, "L4: ICMP type=%d code=%d", b[0], b[1])
 	case 58: // ICMPv6
-		if len(b) < 2 {
-			d.pf(4, "L4: ICMPv6 truncated")
-			return
+		if len(b) >= 2 {
+			p.l4Note = fmt.Sprintf("icmp6 type=%d code=%d", b[0], b[1])
 		}
-		d.pf(4, "L4: ICMPv6 type=%d code=%d", b[0], b[1])
+	}
+}
+
+func (d *Decoder) updateSummaryPkt(p packetInfo) {
+	if !p.haveL2 {
+		return
+	}
+	d.sum.EtherTypes[p.etype]++
+	if p.vlan != 0 {
+		d.sum.VLANs[p.vlan]++
+	}
+	if p.ipVer != 0 {
+		d.sum.L3Protos[p.proto]++
+	}
+	if p.haveL4 {
+		d.sum.TopSrcPorts[p.srcPort]++
+		d.sum.TopDstPorts[p.dstPort]++
+	}
+}
+
+func (d *Decoder) treePrintPkt(p packetInfo) {
+	if !p.haveL2 {
+		d.pf(3, "L2: truncated")
+		return
+	}
+	vlanStr := ""
+	if p.vlan != 0 {
+		vlanStr = fmt.Sprintf(" vlan=%d", p.vlan)
+	}
+	d.pf(3, "L2: %s -> %s etype=0x%04x%s", macStr(p.srcMAC[:]), macStr(p.dstMAC[:]), p.etype, vlanStr)
+	switch p.etype {
+	case ethTypeARP:
+		d.pf(3, "L3: ARP")
+		return
+	case ethTypeIPv4, ethTypeIPv6:
+	default:
+		d.pf(3, "L3: etype 0x%04x (not IP)", p.etype)
+		return
+	}
+	if p.ipVer == 0 {
+		d.pf(3, "L3: IP header truncated")
+		return
+	}
+	fragNote := ""
+	if p.moreFrag || p.fragOff != 0 {
+		fragNote = fmt.Sprintf(" FRAG(off=%d more=%v df=%v)", p.fragOff, p.moreFrag, p.dontFrag)
+	}
+	if p.ipVer == 4 {
+		d.pf(3, "L3: IPv4 %s -> %s proto=%s ttl=%d tos=0x%02x total_len=%d%s",
+			p.srcIP, p.dstIP, protoName(p.proto), p.ttl, p.tos, p.totalLen, fragNote)
+	} else {
+		d.pf(3, "L3: IPv6 %s -> %s next=%s hop_limit=%d tclass=0x%02x%s",
+			p.srcIP, p.dstIP, protoName(p.proto), p.ttl, p.tos, fragNote)
+	}
+	switch {
+	case p.haveFlags:
+		d.pf(4, "L4: TCP %d -> %d flags=%s", p.srcPort, p.dstPort, tcpFlags(p.tcpFlags))
+	case p.haveL4:
+		d.pf(4, "L4: %s %d -> %d", protoName(p.proto), p.srcPort, p.dstPort)
+	case p.l4Note != "":
+		d.pf(4, "L4: %s", p.l4Note)
+	}
+}
+
+// flatLine prints one line per sampled packet: switch (agent) address, exporter
+// UDP endpoint, in/out interface, VLAN, sampling rate, frame size, inner
+// IP:port endpoints and MACs — the "packet contents" view.
+func (d *Decoder) flatLine(frameLen uint32, p packetInfo) {
+	vlan := p.vlan
+	if vlan == 0 {
+		vlan = d.curExtVLAN
+	}
+	base := fmt.Sprintf("sw=%-14s exp=%-21s in=%d out=%d vlan=%d rate=1/%d frame=%dB",
+		d.curAgent, d.curExporter, d.curInIf, d.curOutIf, vlan, d.curRate, frameLen)
+	macs := fmt.Sprintf("mac %s -> %s", macStr(p.srcMAC[:]), macStr(p.dstMAC[:]))
+	switch {
+	case !p.haveL2:
+		fmt.Fprintf(d.w, "%s  <l2 truncated>\n", base)
+	case p.isARP():
+		fmt.Fprintf(d.w, "%s  ARP  %s\n", base, macs)
+	case p.ipVer == 0:
+		fmt.Fprintf(d.w, "%s  etype=0x%04x  %s\n", base, p.etype, macs)
+	default:
+		src := p.srcIP.String()
+		dst := p.dstIP.String()
+		if p.haveL4 {
+			src = fmt.Sprintf("%s:%d", p.srcIP, p.srcPort)
+			dst = fmt.Sprintf("%s:%d", p.dstIP, p.dstPort)
+		}
+		flags := ""
+		if p.haveFlags {
+			flags = " " + tcpFlags(p.tcpFlags)
+		}
+		note := ""
+		if p.l4Note != "" {
+			note = " " + p.l4Note
+		}
+		fmt.Fprintf(d.w, "%s  %-6s %s -> %s%s%s  ttl=%d  %s\n",
+			base, protoName(p.proto), src, dst, flags, note, p.ttl, macs)
 	}
 }
 
@@ -468,6 +618,7 @@ func (d *Decoder) extSwitchRecord(idx uint32, b []byte) {
 	if uint16(srcVlan) != 0 {
 		d.sum.VLANs[uint16(srcVlan)]++
 	}
+	d.curExtVLAN = uint16(srcVlan)
 	d.pf(2, "record %d: EXT-SWITCH src_vlan=%d src_pri=%d dst_vlan=%d dst_pri=%d",
 		idx, srcVlan, srcPri, dstVlan, dstPri)
 }

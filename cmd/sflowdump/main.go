@@ -30,11 +30,12 @@ func main() {
 	listen := flag.String("listen", "0.0.0.0:6343", "UDP listen address for live capture")
 	pcapPath := flag.String("pcap", "", "read datagrams from a .pcap file instead of listening (UDP payloads only)")
 	count := flag.Int("count", 200, "stop after this many datagrams (live mode; 0 = run until Ctrl-C)")
-	printN := flag.Int("print", 20, "print full decode for the first N datagrams (rest only feed the summary)")
+	printN := flag.Int("print", 20, "tree mode: print full decode for the first N datagrams (rest only feed the summary)")
+	flat := flag.Bool("flat", false, "print one compact line per sampled packet (switch/exporter/vlan/rate/MAC/IP:port) instead of the tree")
 	flag.Parse()
 
 	sum := newSummary()
-	dec := NewDecoder(os.Stdout, sum, *printN)
+	dec := NewDecoder(os.Stdout, sum, *printN, *flat)
 
 	if *pcapPath != "" {
 		if err := runPcap(*pcapPath, dec); err != nil {
