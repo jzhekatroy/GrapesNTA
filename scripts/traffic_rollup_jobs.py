@@ -78,7 +78,7 @@ FROM default.flows_raw
 WHERE {time_filter}
 GROUP BY minute, source_id
 """,
-        pre_delete_sql="ALTER TABLE default.traffic_dashboard_1m DELETE WHERE minute = {bucket_dt} SETTINGS mutations_sync = 1",
+        pre_delete_sql="ALTER TABLE default.traffic_dashboard_1m DELETE WHERE minute = {bucket_dt}",
         received_guard_minutes=15,
     ),
     RollupJob(
@@ -102,7 +102,7 @@ FROM default.flows_raw
 WHERE {time_filter}
 GROUP BY minute, source_id, proto, direction
 """,
-        pre_delete_sql="ALTER TABLE default.traffic_protocol_1m DELETE WHERE minute = {bucket_dt} SETTINGS mutations_sync = 1",
+        pre_delete_sql="ALTER TABLE default.traffic_protocol_1m DELETE WHERE minute = {bucket_dt}",
     ),
     RollupJob(
         job_id="traffic_direction_1m",
@@ -124,7 +124,7 @@ FROM default.flows_raw
 WHERE {time_filter}
 GROUP BY minute, source_id, direction
 """,
-        pre_delete_sql="ALTER TABLE default.traffic_direction_1m DELETE WHERE minute = {bucket_dt} SETTINGS mutations_sync = 1",
+        pre_delete_sql="ALTER TABLE default.traffic_direction_1m DELETE WHERE minute = {bucket_dt}",
     ),
     RollupJob(
         job_id="traffic_role_1m",
@@ -154,7 +154,7 @@ WHERE {time_filter}
   AND (src_role != '' OR dst_role != '')
 GROUP BY minute, source_id, direction, role
 """,
-        pre_delete_sql="ALTER TABLE default.traffic_role_1m DELETE WHERE minute = {bucket_dt} SETTINGS mutations_sync = 1",
+        pre_delete_sql="ALTER TABLE default.traffic_role_1m DELETE WHERE minute = {bucket_dt}",
     ),
     RollupJob(
         job_id="traffic_entity_1m",
@@ -184,7 +184,7 @@ WHERE {time_filter}
   AND (src_entity != '' OR dst_entity != '')
 GROUP BY minute, source_id, direction, entity_id
 """,
-        pre_delete_sql="ALTER TABLE default.traffic_entity_1m DELETE WHERE minute = {bucket_dt} SETTINGS mutations_sync = 1",
+        pre_delete_sql="ALTER TABLE default.traffic_entity_1m DELETE WHERE minute = {bucket_dt}",
     ),
     RollupJob(
         job_id="traffic_vlan_1m",
@@ -225,7 +225,7 @@ WHERE {time_filter}
   )
 GROUP BY minute, source_id, direction, attachment_type, vlan_id
 """,
-        pre_delete_sql="ALTER TABLE default.traffic_vlan_1m DELETE WHERE minute = {bucket_dt} SETTINGS mutations_sync = 1",
+        pre_delete_sql="ALTER TABLE default.traffic_vlan_1m DELETE WHERE minute = {bucket_dt}",
     ),
     RollupJob(
         job_id="traffic_country_1m",
@@ -305,7 +305,7 @@ GROUP BY
     direction,
     country_code
 """,
-        pre_delete_sql="ALTER TABLE default.traffic_country_1m DELETE WHERE minute = {bucket_dt} SETTINGS mutations_sync = 1",
+        pre_delete_sql="ALTER TABLE default.traffic_country_1m DELETE WHERE minute = {bucket_dt}",
         time_filter_column="f.time_received_ns",
     ),
     RollupJob(
@@ -367,7 +367,7 @@ GROUP BY
     service_name,
     category
 """,
-        pre_delete_sql="ALTER TABLE default.traffic_service_1m DELETE WHERE minute = {bucket_dt} SETTINGS mutations_sync = 1",
+        pre_delete_sql="ALTER TABLE default.traffic_service_1m DELETE WHERE minute = {bucket_dt}",
         time_filter_column="f.time_received_ns",
     ),
     RollupJob(
@@ -430,7 +430,7 @@ GROUP BY
     port_side,
     port
 """,
-        pre_delete_sql="ALTER TABLE default.traffic_unknown_port_1m DELETE WHERE minute = {bucket_dt} SETTINGS mutations_sync = 1",
+        pre_delete_sql="ALTER TABLE default.traffic_unknown_port_1m DELETE WHERE minute = {bucket_dt}",
         time_filter_column="f.time_received_ns",
     ),
     RollupJob(
@@ -551,7 +551,7 @@ GROUP BY
     endpoint_scope,
     endpoint_network_role
 """,
-        pre_delete_sql="ALTER TABLE default.traffic_talker_1m DELETE WHERE minute = {bucket_dt} SETTINGS mutations_sync = 1",
+        pre_delete_sql="ALTER TABLE default.traffic_talker_1m DELETE WHERE minute = {bucket_dt}",
         time_filter_column="f.time_received_ns",
     ),
     RollupJob(
@@ -636,7 +636,7 @@ GROUP BY
     src_ip_country,
     dst_ip_country
 """,
-        pre_delete_sql="ALTER TABLE default.traffic_pair_1m DELETE WHERE minute = {bucket_dt} SETTINGS mutations_sync = 1",
+        pre_delete_sql="ALTER TABLE default.traffic_pair_1m DELETE WHERE minute = {bucket_dt}",
         time_filter_column="f.time_received_ns",
     ),
     RollupJob(
@@ -677,7 +677,7 @@ FROM default.traffic_dashboard_1m
 WHERE {time_filter}
 GROUP BY hour, source_id
 """,
-        pre_delete_sql="ALTER TABLE default.traffic_dashboard_1h DELETE WHERE hour = {bucket_dt} SETTINGS mutations_sync = 1",
+        pre_delete_sql="ALTER TABLE default.traffic_dashboard_1h DELETE WHERE hour = {bucket_dt}",
     ),
     RollupJob(
         job_id="traffic_talker_1h",
@@ -727,7 +727,7 @@ GROUP BY
     endpoint_network_role
 SETTINGS max_bytes_before_external_group_by = 8000000000, max_threads = 6
 """,
-        pre_delete_sql="ALTER TABLE default.traffic_talker_1h DELETE WHERE hour = {bucket_dt} SETTINGS mutations_sync = 1",
+        pre_delete_sql="ALTER TABLE default.traffic_talker_1h DELETE WHERE hour = {bucket_dt}",
     ),
     RollupJob(
         job_id="traffic_pair_1h",
@@ -781,7 +781,7 @@ GROUP BY
     dst_ip_country
 SETTINGS max_bytes_before_external_group_by = 8000000000, max_threads = 6
 """,
-        pre_delete_sql="ALTER TABLE default.traffic_pair_1h DELETE WHERE hour = {bucket_dt} SETTINGS mutations_sync = 1",
+        pre_delete_sql="ALTER TABLE default.traffic_pair_1h DELETE WHERE hour = {bucket_dt}",
     ),
     RollupJob(
         job_id="traffic_dashboard_1d",
@@ -822,7 +822,7 @@ FROM default.traffic_dashboard_1m
 WHERE {time_filter}
 GROUP BY day, source_id
 """,
-        pre_delete_sql="ALTER TABLE default.traffic_dashboard_1d DELETE WHERE day = {bucket_dt} SETTINGS mutations_sync = 1",
+        pre_delete_sql="ALTER TABLE default.traffic_dashboard_1d DELETE WHERE day = {bucket_dt}",
     ),
 ]
 
