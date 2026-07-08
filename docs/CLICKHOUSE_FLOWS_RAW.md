@@ -2,9 +2,11 @@
 
 ## Production table (`default.flows_raw`)
 
-This is the actual production DDL observed on `sel` via `SHOW CREATE TABLE default.flows_raw`
-(before enrichment/source columns; `deploy/clickhouse/flows_raw_extensions.sql` adds the
-classifier columns and `source_id`):
+This is the current recommended base shape after storage tuning. Production also
+applies `deploy/clickhouse/flows_raw_extensions.sql` and
+`deploy/clickhouse/migrate_flows_raw_storage_tuning.sql`; writers use
+`src_asn` / `dst_asn` rather than the removed duplicate `src_as` / `dst_as`
+columns.
 
 ```sql
 CREATE TABLE default.flows_raw
@@ -18,8 +20,6 @@ CREATE TABLE default.flows_raw
     `sampler_address` FixedString(16),
     `src_addr` FixedString(16),
     `dst_addr` FixedString(16),
-    `src_as` UInt32,
-    `dst_as` UInt32,
     `etype` UInt32,
     `proto` UInt32,
     `src_port` UInt32,
@@ -70,8 +70,8 @@ CREATE TABLE IF NOT EXISTS default.flows_raw_xdp_direct
     `sampler_address` FixedString(16),
     `src_addr` FixedString(16),
     `dst_addr` FixedString(16),
-    `src_as` UInt32,
-    `dst_as` UInt32,
+    `src_asn` UInt32 DEFAULT 0 CODEC(T64, ZSTD(1)),
+    `dst_asn` UInt32 DEFAULT 0 CODEC(T64, ZSTD(1)),
     `etype` UInt32,
     `proto` UInt32,
     `src_port` UInt32,
@@ -103,7 +103,6 @@ table must include this column.
 | `sampling_rate` | `1` (no sampling in current XDP path) |
 | `sampler_address` | 16-byte exporter/source address; set via `-ch-sampler-addr` / `XDP_CH_SAMPLER_ADDR` or zero until configured |
 | `src_addr` / `dst_addr` | 16 raw bytes from `FlowKey`; IPv4 stored in the first 4 bytes with the rest zeroed to match current BPF key layout |
-| `src_as` / `dst_as` | Legacy ASN columns. With classifier enabled they mirror `src_asn` / `dst_asn`; otherwise `0`. |
 | `src_asn` / `dst_asn` | Origin ASN from BGP trie loaded from `bgp_prefix_origin_current`. Requires `deploy/clickhouse/flows_raw_extensions.sql`. |
 | `direction` | `in`, `out`, `internal`, `transit`, `unknown`; computed in `xdpflowd` from endpoint scope (`local/customer/remote`), not directly from VLAN. |
 | `src_attachment_*` / `dst_attachment_*` | VLAN/link context: kind, boundary, label, operator. This answers "where was the packet seen?". |

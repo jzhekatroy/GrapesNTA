@@ -4,8 +4,8 @@
 -- DEFAULT values and remain readable.
 
 ALTER TABLE default.flows_raw
-ADD COLUMN IF NOT EXISTS src_asn UInt32 DEFAULT 0,
-ADD COLUMN IF NOT EXISTS dst_asn UInt32 DEFAULT 0,
+ADD COLUMN IF NOT EXISTS src_asn UInt32 DEFAULT 0 CODEC(T64, ZSTD(1)),
+ADD COLUMN IF NOT EXISTS dst_asn UInt32 DEFAULT 0 CODEC(T64, ZSTD(1)),
 ADD COLUMN IF NOT EXISTS direction LowCardinality(String) DEFAULT 'unknown',
 ADD COLUMN IF NOT EXISTS src_kind LowCardinality(String) DEFAULT 'unknown',
 ADD COLUMN IF NOT EXISTS dst_kind LowCardinality(String) DEFAULT 'unknown',
@@ -29,8 +29,8 @@ ADD COLUMN IF NOT EXISTS src_network_name String DEFAULT '',
 ADD COLUMN IF NOT EXISTS dst_network_name String DEFAULT '',
 ADD COLUMN IF NOT EXISTS src_network_role LowCardinality(String) DEFAULT '',
 ADD COLUMN IF NOT EXISTS dst_network_role LowCardinality(String) DEFAULT '',
-ADD COLUMN IF NOT EXISTS src_vlan UInt16 DEFAULT 0,
-ADD COLUMN IF NOT EXISTS dst_vlan UInt16 DEFAULT 0,
+ADD COLUMN IF NOT EXISTS src_vlan UInt16 DEFAULT 0 CODEC(T64, ZSTD(1)),
+ADD COLUMN IF NOT EXISTS dst_vlan UInt16 DEFAULT 0 CODEC(T64, ZSTD(1)),
 ADD COLUMN IF NOT EXISTS src_role LowCardinality(String) DEFAULT '',
 ADD COLUMN IF NOT EXISTS dst_role LowCardinality(String) DEFAULT '',
 ADD COLUMN IF NOT EXISTS src_entity LowCardinality(String) DEFAULT '',
