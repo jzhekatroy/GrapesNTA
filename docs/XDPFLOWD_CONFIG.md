@@ -37,12 +37,12 @@ interval: 5s
 
 # NetFlow v9 local archive contract
 nf_dst: "127.0.0.1:9996"
-nf_active: 60s
-nf_idle: 10s
+nf_active: 120s
+nf_idle: 30s
 nf_template_interval: 60s
-nf_scan: 500ms
+nf_scan: 1s
 nf_source_id: 1
-heavy_export: true
+heavy_export: false
 
 # ClickHouse production contract
 # Prefer injecting credentials via env / wrapper rather than committing DSNs.
@@ -72,7 +72,7 @@ ch_writers: 4
 |-----|---------|
 | `bpf`, `iface`, `mode`, `xdp_action` | BPF object and XDP attach behavior. `drop` only on SPAN/mirror interfaces. |
 | `nf_dst` | NetFlow v9 destinations. Keep `127.0.0.1:9996` for local `nfcapd/nfdump`. |
-| `nf_active`, `nf_idle`, `nf_scan` | Flow export cadence. Heavy servers should use short active/idle and frequent scan. |
+| `nf_active`, `nf_idle`, `nf_scan` | Flow export cadence. Production `timer` mode should keep active timeout long enough to avoid row amplification in `flows_raw`; current high-load default is `120s/30s/1s`. |
 | `heavy_export` | Shortcut for `60s/10s/500ms`; explicit CLI flags still override config before runtime preset rules. |
 | `ch_dsn`, `ch_table` | ClickHouse native protocol DSN and target table (`default.flows_raw`). |
 | `ch_sampler_addr` | Exporter identity stored in `sampler_address`. |

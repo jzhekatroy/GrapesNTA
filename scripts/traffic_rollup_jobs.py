@@ -79,7 +79,7 @@ WHERE {time_filter}
 GROUP BY minute, source_id
 """,
         pre_delete_sql="ALTER TABLE default.traffic_dashboard_1m DELETE WHERE minute = {bucket_dt}",
-        received_guard_minutes=15,
+        received_guard_minutes=5,
     ),
     RollupJob(
         job_id="traffic_protocol_1m",

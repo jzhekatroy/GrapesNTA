@@ -483,10 +483,12 @@ XDP_CH_WRITERS=8
 
 XDP_TOP=0
 XDP_JSON_OUT_ENABLE=0
-XDP_NF_ACTIVE=60s
-XDP_NF_IDLE=10s
+XDP_NF_ACTIVE=120s
+XDP_NF_IDLE=30s
 XDP_NF_SCAN=1s
 ```
+
+`XDP_NF_ACTIVE=120s` — рабочий дефолт для production `timer`-режима на high-load mirror. Короткое значение вроде `15s` сильно размножает строки: долгоживущий flow переэкспортируется каждые 15 секунд, что увеличивает `flows_raw` ingest, число parts и ClickHouse merge I/O. На `m61` переход `15s -> 120s` снизил поток строк примерно с `~100k rows/s` до `~33k rows/s` (`~3x`).
 
 DSN должен использовать ClickHouse native endpoint. Пароль с особыми символами
 лучше URL-encode.

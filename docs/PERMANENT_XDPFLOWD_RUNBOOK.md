@@ -56,8 +56,8 @@ XDP_BPF_OBJ=${REPO_ROOT}/bpf/xdp_flow.o
 NF_DSTS=127.0.0.1:9996
 
 XDP_HEAVY_EXPORT=0
-XDP_NF_ACTIVE=60s
-XDP_NF_IDLE=10s
+XDP_NF_ACTIVE=120s
+XDP_NF_IDLE=30s
 XDP_NF_TEMPLATE_INTERVAL=60s
 XDP_NF_SCAN=1s
 
@@ -72,6 +72,8 @@ XDP_CH_WRITERS=8
 XDP_TOP=0
 XDP_JSON_OUT_ENABLE=0
 ```
+
+`XDP_NF_ACTIVE=120s` — текущий production default для `XDP_DRAIN_MODE=timer`: он совпадает с дефолтом бинаря и снижает поток строк в `flows_raw` по сравнению с короткими окнами. На `m61` переход с `15s` на `120s` уменьшил ingest примерно с `~100k rows/s` до `~33k rows/s`, то есть около `3x`, и тем самым снизил давление на ClickHouse merges/I/O. Не ставьте `15s` как постоянный профиль для high-load зеркала: долгоживущие flow будут переэкспортироваться слишком часто.
 
 На `sel` профиль показал `rx_fifo_errors=0/sec`, `softirq` ниже legacy и CPU заметно ниже, чем у варианта `XDP_HEAVY_EXPORT=1` с `500ms` scan.
 

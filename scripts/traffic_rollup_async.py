@@ -443,9 +443,10 @@ def run_bucket(
     #   * steady-state forward run  -> bucket is brand new, the probe below hits
     #     no primary-key granule and returns instantly, so no delete happens
     #     (mutations stay off the hot path);
-    #   * reprocessing (manual backfill, state re-bootstrap, or a crash between
-    #     INSERT and state commit) -> the bucket already has rows, so we delete
-    #     them before re-inserting.
+    #   * reprocessing after a successful INSERT but before state commit -> the
+    #     bucket already has rows, so we advance state without re-inserting.
+    #     ClickHouse INSERT is atomic; rewriting existing buckets belongs to an
+    #     explicit rebuild, not the live forward path.
     #
     # --delete-before-insert forces the delete unconditionally (explicit rebuild)
     # and skips the probe. bucket_col is the first ORDER BY column of every target
@@ -458,8 +459,12 @@ def run_bucket(
             display=f"idempotency probe for {job.job_id}",
         )
         if existing.strip() != "":
-            needs_delete = True
-            delete_reason = "bucket_exists"
+            logger.info(
+                "job=%s action=skip_existing bucket=%s",
+                job.job_id,
+                fmt_dt(bucket_start),
+            )
+            return True, 0, "bucket_exists"
 
     if needs_delete and job.pre_delete_sql:
         delete_sql = job.pre_delete_sql.format(bucket_dt=bucket_dt)
