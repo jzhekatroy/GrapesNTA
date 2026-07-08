@@ -167,8 +167,8 @@ func insertCompactBatchRows(ctx context.Context, log *slog.Logger, conn chdriver
     sampler_address,
     src_addr,
     dst_addr,
-    src_as,
-    dst_as,
+    src_asn,
+    dst_asn,
     etype,
     proto,
     src_port,
@@ -200,6 +200,7 @@ func insertCompactBatchRows(ctx context.Context, log *slog.Logger, conn chdriver
 	// these slices outlive their use.
 	for i := range rows {
 		r := &rows[i]
+		ApplyInsertDefaults(r)
 		err := batch.Append(
 			r.Date,
 			r.TimeInsertedNs,
@@ -210,8 +211,8 @@ func insertCompactBatchRows(ctx context.Context, log *slog.Logger, conn chdriver
 			r.SamplerAddress[:],
 			r.SrcAddr[:],
 			r.DstAddr[:],
-			r.SrcAS,
-			r.DstAS,
+			r.SrcASN,
+			r.DstASN,
 			r.Etype,
 			r.Proto,
 			r.SrcPort,
@@ -258,8 +259,6 @@ func insertEnrichedBatchRows(ctx context.Context, log *slog.Logger, conn chdrive
     sampler_address,
     src_addr,
     dst_addr,
-    src_as,
-    dst_as,
     src_asn,
     dst_asn,
     direction,
@@ -328,8 +327,6 @@ func insertEnrichedBatchRows(ctx context.Context, log *slog.Logger, conn chdrive
 			r.SamplerAddress[:],
 			r.SrcAddr[:],
 			r.DstAddr[:],
-			r.SrcAS,
-			r.DstAS,
 			r.SrcASN,
 			r.DstASN,
 			r.Direction,
