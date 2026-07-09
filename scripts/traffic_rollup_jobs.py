@@ -48,13 +48,17 @@ JOBS: List[RollupJob] = [
         job_id="traffic_dashboard_1m",
         dest_table="default.traffic_dashboard_1m",
         bucket_kind="minute",
-        time_column="time_flow_start_ns",
+        # Bucket by export/receive time so UI volume/bps matches what the
+        # collector actually delivered in that minute. Flow-start bucketing
+        # pushed long active-timeout flows outside the selected UI window and
+        # made charts depend on XDP_NF_ACTIVE.
+        time_column="time_received_ns",
         source_table="default.flows_raw",
         priority=10,
         depends_on=(),
         select_sql="""
 SELECT
-    toStartOfMinute(time_flow_start_ns) AS minute,
+    toStartOfMinute(time_received_ns) AS minute,
     source_id,
     sum(bytes) AS total_bytes,
     sumIf(bytes, direction = 'in') AS in_bytes,
@@ -79,7 +83,6 @@ WHERE {time_filter}
 GROUP BY minute, source_id
 """,
         pre_delete_sql="ALTER TABLE default.traffic_dashboard_1m DELETE WHERE minute = {bucket_dt}",
-        received_guard_minutes=5,
     ),
     RollupJob(
         job_id="traffic_protocol_1m",

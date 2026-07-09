@@ -2,18 +2,15 @@
 --
 -- One row per minute per source_id with pre-split direction columns.
 --
--- Time axis: buckets by time_flow_start_ns (the flow's real first_seen), NOT
--- time_received_ns (the collector export time). xdpflowd exports flows in
--- batches (batch full-drain every drain interval), so many flows share one
--- export timestamp — bucketing by export time produces a "sawtooth" graph (a
--- spike each drain tick). Per-second measurement on flows_raw confirms that, by
--- flow start, real traffic is smooth (~steady GiB/s), so this axis reflects when
--- traffic actually happened. Ops/freshness keeps using time_received_ns.
+-- Time axis: buckets by time_received_ns (collector export / ClickHouse receive
+-- time), same as the other minute traffic_* rollups. This makes UI volume/bps
+-- match bytes actually delivered in that minute and keeps charts independent of
+-- XDP_NF_ACTIVE. Bucketing by time_flow_start_ns previously pushed long active
+-- flows outside the selected UI window (~2-3% at NF_ACTIVE=120s).
 --
--- LIVE-EDGE CAVEAT: a flow bucketed at its first_seen reaches ClickHouse only
--- after it is exported (~drain interval + spool, ≈10-15s). So the most recent
--- ~1 bucket is incomplete until that lag passes. UI queries MUST exclude the
--- not-yet-complete tail (anchor the window at now() - 30s); see
+-- LIVE-EDGE CAVEAT: the newest minute is incomplete until the collector flush
+-- and rollup safety lag pass. UI queries should exclude the not-yet-complete
+-- tail (anchor the window at now() - safety lag); see
 -- docs/UI_CLICKHOUSE_QUERIES.md "Time axis and live-edge guard".
 --
 -- Production ingest: NO sync Materialized Views. Tables are filled by async
