@@ -132,10 +132,10 @@ See [`CLICKHOUSE_DB_SETUP_RUNBOOK.md`](CLICKHOUSE_DB_SETUP_RUNBOOK.md) §7.
 | `traffic_service_1m` | by source + service inferred from transport + port |
 | `traffic_unknown_port_1m` | by source + unknown service port for `other` drill-down |
 | `traffic_country_1m` | by source + country basis/side + direction for heatmaps |
-| `traffic_talker_1m` | by source + endpoint side (`src`/`dst`) + endpoint for top talkers |
-| `traffic_pair_1m` | by source + `src_ip -> dst_ip` pair for top talker pairs |
-| `traffic_talker_1h` | hourly rollup of `traffic_talker_1m` for multi-hour top talkers |
-| `traffic_pair_1h` | hourly rollup of `traffic_pair_1m` for multi-hour top pairs |
+| `traffic_asn_1m` | by source + endpoint side (`src`/`dst`) + ASN for top talkers |
+| `traffic_asn_pair_1m` | by source + `src_asn -> dst_asn` pair for top ASN pairs |
+| `traffic_asn_1h` | hourly rollup of `traffic_asn_1m` for multi-hour top talkers |
+| `traffic_asn_pair_1h` | hourly rollup of `traffic_asn_pair_1m` for multi-hour top pairs |
 | `traffic_dashboard_1m` | pivot dashboard (minute, source) |
 | `traffic_dashboard_1h` | pivot dashboard (hour, source) |
 | `traffic_dashboard_1d` | pivot dashboard daily totals for month+ windows |
@@ -160,20 +160,19 @@ sides. The UI maps rows to a single country per flow using `remote` (default),
 `src`, or `dst` map modes. Use `country_basis = 'ip'` for geographic prefix
 country (default heatmap) and `country_basis = 'asn'` for ASN registry country.
 
-`traffic_talker_1m` stores source and destination endpoints as separate rows for
+`traffic_asn_1m` stores source and destination ASNs as separate rows for
 top-talker tables. `endpoint_side = 'src'` powers "Sources", while
-`endpoint_side = 'dst'` powers "Destinations". Rows include endpoint IP, ASN
-name/number, IP country, ASN country, scope, label, network name/role, bytes,
-packets, and flow count. Minute top-talker aggregates have TTL 2 days and are
-intended for near-real-time / up-to-1h UI windows.
+`endpoint_side = 'dst'` powers "Destinations". Rows include ASN number/name,
+ASN country, bytes, packets, and flow count (no per-IP fields). Minute ASN
+aggregates have TTL 2 days and are intended for near-real-time / up-to-1h UI
+windows.
 
-`traffic_pair_1m` stores `src_ip -> dst_ip` pairs with both endpoint ASN/country
-attributes. It powers the "Pairs" tab without scanning `flows_raw`. Pair
-cardinality is high, so minute pairs also have TTL 2 days.
+`traffic_asn_pair_1m` stores `src_asn -> dst_asn` pairs with ASN name/country
+attributes. It powers the "Pairs" tab without scanning `flows_raw`. Cardinality
+is much lower than the retired IP pairs.
 
-`traffic_talker_1h` and `traffic_pair_1h` roll up the minute top-talker tables
-to hour buckets and keep 90 days. UI should use them for 3h/6h/12h/24h windows
-and longer pair views.
+`traffic_asn_1h` and `traffic_asn_pair_1h` roll up the minute ASN tables to hour
+buckets and keep 90 days. UI should use them for 3h/6h/12h/24h windows.
 
 `traffic_dashboard_1d` stores daily totals only. Use it for long-window total
 traffic and average speed. Query `traffic_dashboard_1h` (or `1m` for exact
@@ -204,8 +203,8 @@ above. Query templates for dashboard widgets live in
   pivoted dashboard.
 - `traffic_direction_1m`, `traffic_role_1m`, `traffic_entity_1m`,
   `traffic_vlan_1m`, `traffic_protocol_1m`, `traffic_service_1m`,
-  `traffic_unknown_port_1m`, `traffic_country_1m`, `traffic_talker_1m`,
-  `traffic_pair_1m`, `traffic_talker_1h`, `traffic_pair_1h` — drill-down series.
+  `traffic_unknown_port_1m`, `traffic_country_1m`, `traffic_asn_1m`,
+  `traffic_asn_pair_1m`, `traffic_asn_1h`, `traffic_asn_pair_1h` — drill-down series.
 - `net_reports` — async report queue.
 
 Writes go through INSERTs into the base `ReplacingMergeTree` tables

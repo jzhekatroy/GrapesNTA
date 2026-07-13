@@ -18,6 +18,11 @@ DETACH TABLE IF EXISTS default.traffic_vlan_1m_mv;
 DETACH TABLE IF EXISTS default.traffic_country_1m_mv;
 DETACH TABLE IF EXISTS default.traffic_service_1m_mv;
 DETACH TABLE IF EXISTS default.traffic_unknown_port_1m_mv;
+DETACH TABLE IF EXISTS default.traffic_asn_1m_mv;
+DETACH TABLE IF EXISTS default.traffic_asn_pair_1m_mv;
+DETACH TABLE IF EXISTS default.traffic_asn_1h_mv;
+DETACH TABLE IF EXISTS default.traffic_asn_pair_1h_mv;
+-- Legacy IP talker MVs (if still attached from older deploys):
 DETACH TABLE IF EXISTS default.traffic_talker_1m_mv;
 DETACH TABLE IF EXISTS default.traffic_pair_1m_mv;
 DETACH TABLE IF EXISTS default.traffic_talker_1h_mv;

@@ -186,13 +186,16 @@ for f in \
   traffic_service_1m.sql \
   traffic_unknown_port_1m.sql \
   traffic_country_1m.sql \
-  traffic_talkers_1m.sql \
-  traffic_talkers_1h.sql \
+  traffic_asn_1m.sql \
+  traffic_asn_1h.sql \
   net_reports.sql
 do
   echo "=== $f ==="
   ch --multiquery < "$REPO/deploy/clickhouse/$f"
 done
+
+# Optional migration off legacy IP talker/pair tables:
+# ch --multiquery < "$REPO/deploy/clickhouse/drop_traffic_talkers_ip.sql"
 
 ch --multiquery < "$REPO/deploy/clickhouse/traffic_rollup_state.sql"
 ch --multiquery < "$REPO/deploy/clickhouse/detach_traffic_mvs.sql"
@@ -306,8 +309,8 @@ SELECT dictGet('default.geo_country_dict', 'country_code', toIPv6('8.8.8.8'));
 Jobs (порядок выполнения): `traffic_dashboard_1m`, `traffic_protocol_1m`,
 `traffic_direction_1m`, `traffic_role_1m`, `traffic_entity_1m`,
 `traffic_vlan_1m`, `traffic_country_1m`, `traffic_service_1m`,
-`traffic_unknown_port_1m`, `traffic_talker_1m`, `traffic_pair_1m`,
-`traffic_dashboard_1h`, `traffic_talker_1h`, `traffic_pair_1h`,
+`traffic_unknown_port_1m`, `traffic_asn_1m`, `traffic_asn_pair_1m`,
+`traffic_dashboard_1h`, `traffic_asn_1h`, `traffic_asn_pair_1h`,
 `traffic_dashboard_1d`.
 
 ### 7.2. Установка на коллекторе (m61)
@@ -337,13 +340,17 @@ journalctl -u traffic-rollups.service -n 30 --no-pager
 ```
 
 Ожидаемо за запуск: `run complete ok=9` (lightweight jobs only), `elapsed_s` < 30,
-без `failed`. Не включайте `traffic_talker_*` / `traffic_pair_*` в основной timer —
-они тяжёлые.
+без `failed`. Не включайте `traffic_asn_*` / `traffic_asn_pair_*` в основной timer —
+они в отдельном talkers timer.
 
-### 7.2b. Top talkers / pairs (отдельный timer)
+### 7.2b. Top ASN talkers / pairs (отдельный timer)
 
-Виджет «Топ-говорящие» читает `traffic_talker_1m` / `traffic_talker_1h`. Эти jobs
-обслуживаются отдельным systemd timer (каждые 5 минут):
+Агрегаты top talkers — **по ASN**, не по IP: `traffic_asn_1m` / `traffic_asn_1h`
+и пары `traffic_asn_pair_1m` / `traffic_asn_pair_1h`. Legacy IP-таблицы
+`traffic_talker_*` / `traffic_pair_*` удалены (`drop_traffic_talkers_ip.sql`).
+UI NTAdmin пока может ещё ссылаться на старые имена — отдельная задача.
+
+Эти jobs обслуживаются отдельным systemd timer (каждые 5 минут):
 
 ```bash
 sudo cp deploy/systemd/traffic-talkers-rollups.{service,timer} /etc/systemd/system/
@@ -357,7 +364,7 @@ sudo systemctl enable --now traffic-talkers-rollups.timer
 
 ```sql
 SELECT max(minute), dateDiff('minute', max(minute), now()) AS lag_min
-FROM default.traffic_talker_1m;
+FROM default.traffic_asn_1m;
 ```
 
 `lag_min` должен быть < 10 при активном timer.
@@ -398,14 +405,14 @@ FROM
         'traffic_dashboard_1m','traffic_protocol_1m','traffic_direction_1m',
         'traffic_role_1m','traffic_entity_1m','traffic_vlan_1m',
         'traffic_country_1m','traffic_service_1m','traffic_unknown_port_1m',
-        'traffic_talker_1m','traffic_pair_1m'
+        'traffic_asn_1m','traffic_asn_pair_1m'
     ]) AS job,
     toStartOfMinute(now('UTC') - INTERVAL 5 MINUTE) - INTERVAL 1 MINUTE AS last_bucket
 
     UNION ALL
 
     SELECT arrayJoin([
-        'traffic_dashboard_1h','traffic_talker_1h','traffic_pair_1h'
+        'traffic_dashboard_1h','traffic_asn_1h','traffic_asn_pair_1h'
     ]) AS job,
     toStartOfHour(now('UTC') - INTERVAL 5 MINUTE) - INTERVAL 1 HOUR AS last_bucket
 
@@ -642,8 +649,8 @@ WHERE time_received_ns >= now64(9) - INTERVAL 5 MINUTE
 
 ### 10.5. UI показывает `unknown` / `??` из-за старого source_id
 
-**Симптом:** в `traffic_pair_1m` / `traffic_talker_1m` видны строки с
-`source_id = 'xdp-default'`, `direction = 'unknown'`, scope `unknown`, ASN `0`.
+**Симптом:** в `traffic_asn_pair_1m` / `traffic_asn_1m` видны строки с
+`source_id = 'xdp-default'`, `direction = 'unknown'`, ASN `0`.
 
 **Причина:** `xdpflowd` раньше стартовал с дефолтным `source_id=xdp-default`, а
 после изменения `/etc/xdpflowd/xdpflowd.env` на `XDPFLOWD_SOURCE_ID=netflow`

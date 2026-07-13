@@ -106,14 +106,14 @@ MINUTE_ROLLUP_JOBS = {
     "traffic_country_1m",
     "traffic_service_1m",
     "traffic_unknown_port_1m",
-    "traffic_talker_1m",
-    "traffic_pair_1m",
+    "traffic_asn_1m",
+    "traffic_asn_pair_1m",
 }
 
 HOURLY_ROLLUP_JOBS = {
     "traffic_dashboard_1h",
-    "traffic_talker_1h",
-    "traffic_pair_1h",
+    "traffic_asn_1h",
+    "traffic_asn_pair_1h",
 }
 
 DAILY_ROLLUP_JOBS = {
@@ -896,13 +896,13 @@ SELECT
     toString(least(
         (SELECT max(minute) FROM default.traffic_dashboard_1m WHERE source_id = {source}),
         (SELECT max(minute) FROM default.traffic_direction_1m WHERE source_id = {source}),
-        (SELECT max(minute) FROM default.traffic_pair_1m WHERE source_id = {source})
+        (SELECT max(minute) FROM default.traffic_asn_pair_1m WHERE source_id = {source})
     )) AS ts_to,
     toString(
         least(
             (SELECT max(minute) FROM default.traffic_dashboard_1m WHERE source_id = {source}),
             (SELECT max(minute) FROM default.traffic_direction_1m WHERE source_id = {source}),
-            (SELECT max(minute) FROM default.traffic_pair_1m WHERE source_id = {source})
+            (SELECT max(minute) FROM default.traffic_asn_pair_1m WHERE source_id = {source})
         ) - INTERVAL {window_minutes} MINUTE
     ) AS ts_from
 """,
@@ -952,7 +952,7 @@ FROM
         'pair_1m' AS stage,
         sum(packets) AS packets,
         sum(bytes) AS bytes
-    FROM default.traffic_pair_1m
+    FROM default.traffic_asn_pair_1m
     WHERE source_id = {source}
       AND minute >= toDateTime({sql_string(ts_from)})
       AND minute <  toDateTime({sql_string(ts_to)})
@@ -1692,16 +1692,16 @@ ORDER BY job
     table_lag_sql = """
 SELECT 'dashboard_1m' AS t, toString(max(minute)) AS mx, dateDiff('minute', max(minute), now()) AS lag
 FROM default.traffic_dashboard_1m
-UNION ALL SELECT 'talker_1m', toString(max(minute)), dateDiff('minute', max(minute), now())
-FROM default.traffic_talker_1m WHERE source_id = {source_id}
-UNION ALL SELECT 'pair_1m', toString(max(minute)), dateDiff('minute', max(minute), now())
-FROM default.traffic_pair_1m WHERE source_id = {source_id}
+UNION ALL SELECT 'asn_1m', toString(max(minute)), dateDiff('minute', max(minute), now())
+FROM default.traffic_asn_1m WHERE source_id = {source_id}
+UNION ALL SELECT 'asn_pair_1m', toString(max(minute)), dateDiff('minute', max(minute), now())
+FROM default.traffic_asn_pair_1m WHERE source_id = {source_id}
 UNION ALL SELECT 'dashboard_1h', toString(max(hour)), dateDiff('minute', max(hour), now())
 FROM default.traffic_dashboard_1h
-UNION ALL SELECT 'talker_1h', toString(max(hour)), dateDiff('minute', max(hour), now())
-FROM default.traffic_talker_1h WHERE source_id = {source_id}
-UNION ALL SELECT 'pair_1h', toString(max(hour)), dateDiff('minute', max(hour), now())
-FROM default.traffic_pair_1h WHERE source_id = {source_id}
+UNION ALL SELECT 'asn_1h', toString(max(hour)), dateDiff('minute', max(hour), now())
+FROM default.traffic_asn_1h WHERE source_id = {source_id}
+UNION ALL SELECT 'asn_pair_1h', toString(max(hour)), dateDiff('minute', max(hour), now())
+FROM default.traffic_asn_pair_1h WHERE source_id = {source_id}
 UNION ALL SELECT 'dashboard_1d', toString(max(day)), dateDiff('minute', max(day), now())
 FROM default.traffic_dashboard_1d
 """.format(source_id=sql_string(args.source_id))
@@ -1851,8 +1851,8 @@ def check_table_freshness(ch: ClickHouse, args: argparse.Namespace, results: Lis
         "traffic_protocol_1m",
         "traffic_service_1m",
         "traffic_unknown_port_1m",
-        "traffic_talker_1m",
-        "traffic_pair_1m",
+        "traffic_asn_1m",
+        "traffic_asn_pair_1m",
     ]
     for table in tables:
         row = one_row(
@@ -1894,16 +1894,16 @@ SELECT
     gb
 FROM
 (
-    SELECT 'traffic_talker_1m' AS table_name, t.source_id, s.include_in_total, count() AS rows, round(sum(t.bytes)/1e9, 1) AS gb
-    FROM default.traffic_talker_1m AS t
+    SELECT 'traffic_asn_1m' AS table_name, t.source_id, s.include_in_total, count() AS rows, round(sum(t.bytes)/1e9, 1) AS gb
+    FROM default.traffic_asn_1m AS t
     LEFT JOIN default.net_flow_sources_enabled AS s ON t.source_id = s.source_id
     WHERE t.minute >= now() - INTERVAL 30 MINUTE
     GROUP BY t.source_id, s.include_in_total
 
     UNION ALL
 
-    SELECT 'traffic_pair_1m', p.source_id, s.include_in_total, count(), round(sum(p.bytes)/1e9, 1)
-    FROM default.traffic_pair_1m AS p
+    SELECT 'traffic_asn_pair_1m', p.source_id, s.include_in_total, count(), round(sum(p.bytes)/1e9, 1)
+    FROM default.traffic_asn_pair_1m AS p
     LEFT JOIN default.net_flow_sources_enabled AS s ON p.source_id = s.source_id
     WHERE p.minute >= now() - INTERVAL 30 MINUTE
     GROUP BY p.source_id, s.include_in_total
@@ -1938,170 +1938,89 @@ ORDER BY table_name, gb DESC
 def check_talker_quality(ch: ClickHouse, args: argparse.Namespace, results: List[CheckResult]) -> None:
     rows = ch.query_tsv(
         f"""
-WITH (SELECT max(minute) FROM default.traffic_talker_1m WHERE source_id={sql_string(args.source_id)}) AS ts_to
+WITH (SELECT max(minute) FROM default.traffic_asn_1m WHERE source_id={sql_string(args.source_id)}) AS ts_to
 SELECT
     endpoint_side,
     direction,
-    endpoint_scope,
     count() AS rows,
-    countIf(endpoint_ip = '') AS empty_ip,
-    round(sumIf(bytes, endpoint_scope IN ('local', 'customer') AND endpoint_network_role IN ({LOCAL_ORIGIN_ROLES_SQL}) AND endpoint_asn = 0 AND NOT {no_asn_expected_sql('endpoint_ip')}) / 1e9, 1) AS local_asn_zero_gb,
-    round(sumIf(bytes, endpoint_scope = 'remote' AND endpoint_asn = 0 AND NOT {no_asn_expected_sql('endpoint_ip')}) / 1e9, 1) AS remote_asn_zero_gb,
-    round(sumIf(bytes, endpoint_scope = 'remote' AND endpoint_asn = 0 AND {no_asn_expected_sql('endpoint_ip')}) / 1e9, 1) AS remote_no_asn_expected_gb,
-    round(sumIf(bytes, endpoint_ip_country = '??' AND NOT {no_country_expected_sql('endpoint_ip')}) / 1e9, 1) AS ip_country_unknown_gb,
-    round(sumIf(bytes, endpoint_ip_country = '??' AND {no_country_expected_sql('endpoint_ip')}) / 1e9, 1) AS ip_country_no_country_expected_gb,
+    round(sumIf(bytes, endpoint_asn = 0) / 1e9, 1) AS asn_zero_gb,
     round(sumIf(bytes, endpoint_as_country = '??' AND endpoint_asn != 0) / 1e9, 1) AS as_country_unknown_known_asn_gb,
     round(sum(bytes) / 1e9, 1) AS gb
-FROM default.traffic_talker_1m
+FROM default.traffic_asn_1m
 WHERE source_id={sql_string(args.source_id)}
   AND minute >= ts_to - INTERVAL {args.quality_window_minutes} MINUTE
   AND minute <= ts_to
-GROUP BY endpoint_side, direction, endpoint_scope
+GROUP BY endpoint_side, direction
 ORDER BY gb DESC
 """
     )
     if not rows:
         add(results, "FAIL", "talker_quality", "no rows in quality window")
         return
-    for (
-        side,
-        direction,
-        scope,
-        rows_s,
-        empty_ip_s,
-        local_zero_s,
-        remote_zero_s,
-        remote_no_asn_expected_s,
-        ip_cc_unknown_s,
-        ip_no_country_expected_s,
-        as_cc_unknown_s,
-        gb_s,
-    ) in rows:
-        name = f"talker_quality.{direction}.{side}.{scope}"
-        no_asn_note = (
-            f" (+{remote_no_asn_expected_s} gb special-use, no ASN expected)"
-            if float(remote_no_asn_expected_s) > 0
-            else ""
-        )
-        no_country_note = (
-            f" (+{ip_no_country_expected_s} gb special-use, no country expected)"
-            if float(ip_no_country_expected_s) > 0
-            else ""
-        )
-        remote_zero_pct = (float(remote_zero_s) / float(gb_s) * 100.0) if float(gb_s) > 0 else 0.0
+    for side, direction, rows_s, asn_zero_s, as_cc_unknown_s, gb_s in rows:
+        name = f"talker_quality.{direction}.{side}"
+        asn_zero_pct = (float(asn_zero_s) / float(gb_s) * 100.0) if float(gb_s) > 0 else 0.0
         if direction in ("", "unknown", "unclassified") and float(gb_s) > args.max_unknown_direction_gb:
             add(results, "FAIL", name, f"unknown_direction gb={gb_s} rows={rows_s}")
-        elif scope in ("", "unknown") and float(gb_s) > args.max_unknown_scope_gb:
-            add(results, "FAIL", name, f"unknown_scope gb={gb_s} rows={rows_s}")
-        elif int(empty_ip_s) > 0:
-            add(results, "FAIL", name, f"empty_ip_rows={empty_ip_s} rows={rows_s}")
-        elif float(local_zero_s) > args.max_local_asn_zero_gb:
-            add(results, "FAIL", name, f"local_asn_zero_gb={local_zero_s} gb={gb_s}")
-        elif float(remote_zero_s) > args.max_remote_asn_zero_gb and remote_zero_pct > args.max_remote_asn_zero_pct:
-            add(results, "FAIL", name, f"remote_asn_zero_gb={remote_zero_s} ({remote_zero_pct:.2f}%) gb={gb_s} (fallback IP->ASN coverage)")
+        elif float(asn_zero_s) > args.max_remote_asn_zero_gb and asn_zero_pct > args.max_remote_asn_zero_pct:
+            add(results, "FAIL", name, f"asn_zero_gb={asn_zero_s} ({asn_zero_pct:.2f}%) gb={gb_s}")
         elif float(as_cc_unknown_s) > args.max_as_country_unknown_gb:
-            add(results, "WARN", name, f"as_country_unknown_for_known_asn_gb={as_cc_unknown_s} gb={gb_s} (asn_registry cc gap)")
-        elif float(ip_cc_unknown_s) > args.max_ip_country_unknown_gb:
-            add(results, "WARN", name, f"ip_country_unknown_gb={ip_cc_unknown_s} gb={gb_s} (geo dict gap){no_country_note}")
-        elif float(remote_zero_s) > 0:
-            add(results, "WARN", name, f"remote_asn_zero_gb={remote_zero_s} ({remote_zero_pct:.2f}%) gb={gb_s} (BGP coverage){no_asn_note}")
+            add(results, "WARN", name, f"as_country_unknown_for_known_asn_gb={as_cc_unknown_s} gb={gb_s}")
+        elif float(asn_zero_s) > 0:
+            add(results, "WARN", name, f"asn_zero_gb={asn_zero_s} ({asn_zero_pct:.2f}%) gb={gb_s}")
         else:
-            add(results, "OK", name, f"gb={gb_s} rows={rows_s}{no_asn_note}{no_country_note}")
+            add(results, "OK", name, f"gb={gb_s} rows={rows_s}")
 
 
 def check_pair_quality(ch: ClickHouse, args: argparse.Namespace, results: List[CheckResult]) -> None:
     rows = ch.query_tsv(
         f"""
-WITH (SELECT max(minute) FROM default.traffic_pair_1m WHERE source_id={sql_string(args.source_id)}) AS ts_to
+WITH (SELECT max(minute) FROM default.traffic_asn_pair_1m WHERE source_id={sql_string(args.source_id)}) AS ts_to
 SELECT
     direction,
-    src_scope,
-    dst_scope,
     count() AS rows,
-    countIf(src_ip = '' OR dst_ip = '') AS empty_ip_rows,
-    round(sumIf(bytes, src_scope IN ('local', 'customer') AND src_asn = 0 AND NOT {no_asn_expected_sql('src_ip')}) / 1e9, 1) AS src_local_asn_zero_gb,
-    round(sumIf(bytes, dst_scope IN ('local', 'customer') AND dst_asn = 0 AND NOT {no_asn_expected_sql('dst_ip')}) / 1e9, 1) AS dst_local_asn_zero_gb,
-    round(sumIf(bytes, src_scope = 'remote' AND src_asn = 0 AND NOT {no_asn_expected_sql('src_ip')}) / 1e9, 1) AS src_remote_asn_zero_gb,
-    round(sumIf(bytes, dst_scope = 'remote' AND dst_asn = 0 AND NOT {no_asn_expected_sql('dst_ip')}) / 1e9, 1) AS dst_remote_asn_zero_gb,
-    round(sumIf(bytes, (src_scope = 'remote' AND src_asn = 0 AND {no_asn_expected_sql('src_ip')}) OR (dst_scope = 'remote' AND dst_asn = 0 AND {no_asn_expected_sql('dst_ip')})) / 1e9, 1) AS remote_no_asn_expected_gb,
-    round(sumIf(bytes, (src_ip_country = '??' AND NOT {no_country_expected_sql('src_ip')}) OR (dst_ip_country = '??' AND NOT {no_country_expected_sql('dst_ip')})) / 1e9, 1) AS ip_country_unknown_gb,
-    round(sumIf(bytes, (src_ip_country = '??' AND {no_country_expected_sql('src_ip')}) OR (dst_ip_country = '??' AND {no_country_expected_sql('dst_ip')})) / 1e9, 1) AS ip_country_no_country_expected_gb,
+    round(sumIf(bytes, src_asn = 0) / 1e9, 1) AS src_asn_zero_gb,
+    round(sumIf(bytes, dst_asn = 0) / 1e9, 1) AS dst_asn_zero_gb,
     round(sumIf(bytes, (src_as_country = '??' AND src_asn != 0) OR (dst_as_country = '??' AND dst_asn != 0)) / 1e9, 1) AS as_country_unknown_known_asn_gb,
     round(sum(bytes) / 1e9, 1) AS gb
-FROM default.traffic_pair_1m
+FROM default.traffic_asn_pair_1m
 WHERE source_id={sql_string(args.source_id)}
   AND minute >= ts_to - INTERVAL {args.quality_window_minutes} MINUTE
   AND minute <= ts_to
-GROUP BY direction, src_scope, dst_scope
+GROUP BY direction
 ORDER BY gb DESC
 """
     )
     if not rows:
         add(results, "FAIL", "pair_quality", "no rows in quality window")
         return
-    for (
-        direction,
-        src_scope,
-        dst_scope,
-        rows_s,
-        empty_ip_s,
-        src_local_zero_s,
-        dst_local_zero_s,
-        src_remote_zero_s,
-        dst_remote_zero_s,
-        remote_no_asn_expected_s,
-        ip_cc_unknown_s,
-        ip_no_country_expected_s,
-        as_cc_unknown_s,
-        gb_s,
-    ) in rows:
-        name = f"pair_quality.{direction}.{src_scope}_to_{dst_scope}"
-        no_asn_note = (
-            f" (+{remote_no_asn_expected_s} gb special-use, no ASN expected)"
-            if float(remote_no_asn_expected_s) > 0
-            else ""
-        )
-        no_country_note = (
-            f" (+{ip_no_country_expected_s} gb special-use, no country expected)"
-            if float(ip_no_country_expected_s) > 0
-            else ""
-        )
+    for direction, rows_s, src_zero_s, dst_zero_s, as_cc_unknown_s, gb_s in rows:
+        name = f"pair_quality.{direction}"
         gb_total = float(gb_s)
-        src_remote_zero_pct = (float(src_remote_zero_s) / gb_total * 100.0) if gb_total > 0 else 0.0
-        dst_remote_zero_pct = (float(dst_remote_zero_s) / gb_total * 100.0) if gb_total > 0 else 0.0
+        src_pct = (float(src_zero_s) / gb_total * 100.0) if gb_total > 0 else 0.0
+        dst_pct = (float(dst_zero_s) / gb_total * 100.0) if gb_total > 0 else 0.0
         if direction in ("", "unknown", "unclassified") and float(gb_s) > args.max_unknown_direction_gb:
             add(results, "FAIL", name, f"unknown_direction gb={gb_s} rows={rows_s}")
-        elif (src_scope in ("", "unknown") or dst_scope in ("", "unknown")) and float(gb_s) > args.max_unknown_scope_gb:
-            add(results, "FAIL", name, f"unknown_scope gb={gb_s} rows={rows_s}")
-        elif int(empty_ip_s) > 0:
-            add(results, "FAIL", name, f"empty_ip_rows={empty_ip_s} rows={rows_s}")
-        elif float(src_local_zero_s) > args.max_local_asn_zero_gb or float(dst_local_zero_s) > args.max_local_asn_zero_gb:
+        elif (float(src_zero_s) > args.max_remote_asn_zero_gb and src_pct > args.max_remote_asn_zero_pct) or (
+            float(dst_zero_s) > args.max_remote_asn_zero_gb and dst_pct > args.max_remote_asn_zero_pct
+        ):
             add(
                 results,
                 "FAIL",
                 name,
-                f"src_local_asn_zero_gb={src_local_zero_s} dst_local_asn_zero_gb={dst_local_zero_s} gb={gb_s}",
-            )
-        elif (float(src_remote_zero_s) > args.max_remote_asn_zero_gb and src_remote_zero_pct > args.max_remote_asn_zero_pct) or (float(dst_remote_zero_s) > args.max_remote_asn_zero_gb and dst_remote_zero_pct > args.max_remote_asn_zero_pct):
-            add(
-                results,
-                "FAIL",
-                name,
-                f"remote_asn_zero_gb src={src_remote_zero_s} ({src_remote_zero_pct:.2f}%) dst={dst_remote_zero_s} ({dst_remote_zero_pct:.2f}%) gb={gb_s} (fallback IP->ASN coverage)",
+                f"asn_zero_gb src={src_zero_s} ({src_pct:.2f}%) dst={dst_zero_s} ({dst_pct:.2f}%) gb={gb_s}",
             )
         elif float(as_cc_unknown_s) > args.max_as_country_unknown_gb:
-            add(results, "WARN", name, f"as_country_unknown_for_known_asn_gb={as_cc_unknown_s} gb={gb_s} (asn_registry cc gap)")
-        elif float(ip_cc_unknown_s) > args.max_ip_country_unknown_gb:
-            add(results, "WARN", name, f"ip_country_unknown_gb={ip_cc_unknown_s} gb={gb_s} (geo dict gap){no_country_note}")
-        elif float(src_remote_zero_s) > 0 or float(dst_remote_zero_s) > 0:
+            add(results, "WARN", name, f"as_country_unknown_for_known_asn_gb={as_cc_unknown_s} gb={gb_s}")
+        elif float(src_zero_s) > 0 or float(dst_zero_s) > 0:
             add(
                 results,
                 "WARN",
                 name,
-                f"remote_asn_zero_gb src={src_remote_zero_s} ({src_remote_zero_pct:.2f}%) dst={dst_remote_zero_s} ({dst_remote_zero_pct:.2f}%) gb={gb_s} (BGP coverage){no_asn_note}",
+                f"asn_zero_gb src={src_zero_s} ({src_pct:.2f}%) dst={dst_zero_s} ({dst_pct:.2f}%) gb={gb_s}",
             )
         else:
-            add(results, "OK", name, f"gb={gb_s} rows={rows_s}{no_asn_note}{no_country_note}")
+            add(results, "OK", name, f"gb={gb_s} rows={rows_s}")
 
 
 def check_direction_rollup(ch: ClickHouse, args: argparse.Namespace, results: List[CheckResult]) -> None:
@@ -2152,24 +2071,24 @@ WHERE source_id = {sql_string(args.source_id)}
     talker_row = one_row(
         ch,
         f"""
-WITH (SELECT max(minute) FROM default.traffic_talker_1m WHERE source_id = {sql_string(args.source_id)}) AS ts_to
+WITH (SELECT max(minute) FROM default.traffic_asn_1m WHERE source_id = {sql_string(args.source_id)}) AS ts_to
 SELECT
-    round(sumIf(bytes, endpoint_ip_country = '??' AND NOT {no_country_expected_sql('endpoint_ip')}) / 1e9, 1) AS unexplained_unknown_gb,
-    round(sumIf(bytes, endpoint_ip_country = '??' AND {no_country_expected_sql('endpoint_ip')}) / 1e9, 1) AS explained_unknown_gb,
-    round(100 * sumIf(bytes, endpoint_ip_country = '??' AND NOT {no_country_expected_sql('endpoint_ip')}) / nullIf(sum(bytes), 0), 1) AS unexplained_pct
-FROM default.traffic_talker_1m
+    round(sumIf(bytes, endpoint_as_country = '??' AND endpoint_asn != 0) / 1e9, 1) AS unexplained_unknown_gb,
+    round(sumIf(bytes, endpoint_asn = 0) / 1e9, 1) AS asn_zero_gb,
+    round(100 * sumIf(bytes, endpoint_as_country = '??' AND endpoint_asn != 0) / nullIf(sum(bytes), 0), 1) AS unexplained_pct
+FROM default.traffic_asn_1m
 WHERE source_id = {sql_string(args.source_id)}
   AND minute >= ts_to - INTERVAL {args.quality_window_minutes} MINUTE
   AND minute <= ts_to
 """,
     )
     if talker_row and talker_row[0] != "":
-        unexplained_gb, explained_gb, unexplained_pct = talker_row
+        unexplained_gb, asn_zero_gb, unexplained_pct = talker_row
         pct = float(unexplained_pct) if unexplained_pct not in ("", "\\N") else 0.0
         detail = (
             f"rollup_unknown_gb={unknown_gb} ({unknown_pct}%) total_gb={total_gb}; "
-            f"unexplained_gb={unexplained_gb} ({unexplained_pct}%) "
-            f"explained_special_use_gb={explained_gb}"
+            f"asn_cc_unknown_known_asn_gb={unexplained_gb} ({unexplained_pct}%) "
+            f"asn_zero_gb={asn_zero_gb}"
         )
         if pct > args.max_country_unknown_pct:
             add(results, "WARN", "country_rollup.unknown_country", detail)
@@ -2214,24 +2133,46 @@ FROM {SPECIAL_IP_PREFIXES_VIEW}
 
 
 def check_special_traffic_summary(ch: ClickHouse, args: argparse.Namespace, results: List[CheckResult]) -> None:
+    # ASN aggregates no longer store endpoint_ip; special-use traffic is checked
+    # against flows_raw for the same quality window.
     rows = ch.query_tsv(
         f"""
-WITH (SELECT max(minute) FROM default.traffic_talker_1m WHERE source_id = {sql_string(args.source_id)}) AS ts_to
+WITH
+    (SELECT max(time_received_ns) FROM default.flows_raw WHERE source_id = {sql_string(args.source_id)}) AS ts_to
 SELECT
     sp.kind,
-    round(sum(t.bytes) / 1e9, 1) AS gb,
-    count() AS agg_rows
-FROM default.traffic_talker_1m AS t
+    round(sum(f.bytes) / 1e9, 1) AS gb,
+    count() AS flow_rows
+FROM default.flows_raw AS f
 CROSS JOIN
 (
     SELECT kind, groupArray(prefix) AS prefixes
     FROM {SPECIAL_IP_PREFIXES_VIEW}
     GROUP BY kind
 ) AS sp
-WHERE t.source_id = {sql_string(args.source_id)}
-  AND t.minute >= ts_to - INTERVAL {args.quality_window_minutes} MINUTE
-  AND t.minute <= ts_to
-  AND arrayExists(p -> isIPAddressInRange(t.endpoint_ip, p), sp.prefixes)
+WHERE f.source_id = {sql_string(args.source_id)}
+  AND f.time_received_ns >= ts_to - INTERVAL {args.quality_window_minutes} MINUTE
+  AND f.time_received_ns <= ts_to
+  AND (
+    arrayExists(
+        p -> isIPAddressInRange(
+            if(f.etype = 2048,
+               toString(toIPv4(reinterpretAsUInt32(reverse(substring(f.src_addr, 1, 4))))),
+               IPv6NumToString(f.src_addr)),
+            p
+        ),
+        sp.prefixes
+    )
+    OR arrayExists(
+        p -> isIPAddressInRange(
+            if(f.etype = 2048,
+               toString(toIPv4(reinterpretAsUInt32(reverse(substring(f.dst_addr, 1, 4))))),
+               IPv6NumToString(f.dst_addr)),
+            p
+        ),
+        sp.prefixes
+    )
+  )
 GROUP BY sp.kind
 ORDER BY gb DESC
 """,
@@ -2240,7 +2181,7 @@ ORDER BY gb DESC
         add(results, "OK", "special_prefixes.traffic", "no special-use traffic in quality window")
         return
     for kind, gb_s, agg_rows_s in rows:
-        add(results, "OK", f"special_prefixes.traffic.{kind}", f"gb={gb_s} agg_rows={agg_rows_s}")
+        add(results, "OK", f"special_prefixes.traffic.{kind}", f"gb={gb_s} flow_rows={agg_rows_s}")
 
 
 def check_raw_vs_direction_agg(ch: ClickHouse, args: argparse.Namespace, results: List[CheckResult]) -> None:
@@ -2306,8 +2247,8 @@ def check_raw_vs_hourly_agg(ch: ClickHouse, args: argparse.Namespace, results: L
         ch,
         f"""
 SELECT toString(least(
-    (SELECT max(hour) FROM default.traffic_talker_1h WHERE source_id = {source}),
-    (SELECT max(hour) FROM default.traffic_pair_1h WHERE source_id = {source}),
+    (SELECT max(hour) FROM default.traffic_asn_1h WHERE source_id = {source}),
+    (SELECT max(hour) FROM default.traffic_asn_pair_1h WHERE source_id = {source}),
     (SELECT max(hour) FROM default.traffic_dashboard_1h WHERE source_id = {source})
 )) AS hour
 """,
@@ -2338,16 +2279,16 @@ WHERE source_id = {source}
     # (name, table, extra_where, flows_col, bytes_col, raw_axis)
     targets = [
         (
-            "talker_1h",
-            "default.traffic_talker_1h",
+            "asn_1h",
+            "default.traffic_asn_1h",
             "AND endpoint_side = 'src'",
             "flows_count",
             "bytes",
             "time_received_ns",
         ),
         (
-            "pair_1h",
-            "default.traffic_pair_1h",
+            "asn_pair_1h",
+            "default.traffic_asn_pair_1h",
             "",
             "flows_count",
             "bytes",

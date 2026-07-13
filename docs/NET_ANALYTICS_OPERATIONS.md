@@ -55,8 +55,8 @@ for f in \
   deploy/clickhouse/traffic_protocol_1m.sql \
   deploy/clickhouse/traffic_dashboard_1m.sql \
   deploy/clickhouse/traffic_dashboard_1d.sql \
-  deploy/clickhouse/traffic_talkers_1m.sql \
-  deploy/clickhouse/traffic_talkers_1h.sql \
+  deploy/clickhouse/traffic_asn_1m.sql \
+  deploy/clickhouse/traffic_asn_1h.sql \
   deploy/clickhouse/net_reports.sql \
   deploy/clickhouse/traffic_rollup_state.sql \
   deploy/clickhouse/detach_traffic_mvs.sql
@@ -214,7 +214,7 @@ Catch-up once after deploy:
 
 ```bash
 python3 scripts/traffic_rollup_async.py \
-  --jobs traffic_talker_1m,traffic_talker_1h,traffic_pair_1m,traffic_pair_1h \
+  --jobs traffic_asn_1m,traffic_asn_1h,traffic_asn_pair_1m,traffic_asn_pair_1h \
   --max-buckets-per-job 30
 ```
 
@@ -224,20 +224,19 @@ Verify top talkers lag and outbound source ASN:
 SELECT
     max(minute) AS last_minute,
     dateDiff('minute', max(minute), now()) AS lag_min
-FROM default.traffic_talker_1m;
+FROM default.traffic_asn_1m;
 
 SELECT
-    endpoint_ip,
     endpoint_asn,
-    endpoint_scope,
+    any(endpoint_as_name) AS endpoint_as_name,
     round(sum(bytes)/1e9, 2) AS gb
-FROM default.traffic_talker_1m AS t
+FROM default.traffic_asn_1m AS t
 INNER JOIN default.net_flow_sources_enabled AS s ON t.source_id = s.source_id
 WHERE s.include_in_total = 1
   AND t.minute >= now() - INTERVAL 1 HOUR
   AND t.direction = 'out'
   AND t.endpoint_side = 'src'
-GROUP BY endpoint_ip, endpoint_asn, endpoint_scope
+GROUP BY endpoint_asn
 ORDER BY gb DESC
 LIMIT 10;
 ```
@@ -451,7 +450,7 @@ sudo systemctl restart xdpflowd
 - `traffic-talkers-rollups.service`: `run complete` every 5 minutes, no `failed`
 - `traffic_rollup_state FINAL`: `last_bucket` advances for 1m jobs
 - `traffic_dashboard_1m`: `max(minute)` within ~10 minutes of now
-- `traffic_talker_1m`: `max(minute)` within ~10 minutes of now
+- `traffic_asn_1m`: `max(minute)` within ~10 minutes of now
 - No attached `traffic_*` MV in `system.tables`
 - `bgp_prefix_origin_current`: refreshed by `bgp-origin-refresh` timer
 - `ip_asn_prefixes_current`: loaded when remote ASN coverage needs fallback
