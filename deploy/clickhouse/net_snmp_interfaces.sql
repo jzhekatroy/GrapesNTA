@@ -55,22 +55,6 @@ FROM
     GROUP BY settings_id
 );
 
--- Seed only an empty installation. Re-applying DDL must not overwrite an
--- operator-provided community or polling intervals.
-INSERT INTO default.net_snmp_settings
-    (settings_id, community, port, timeout_ms, retries,
-     discover_lookback_hours, refresh_interval_sec, full_walk_interval_sec,
-     enabled)
-SELECT
-    'global', '', 161, 2000, 1, 24, 1800, 21600, 1
-FROM system.one
-WHERE NOT EXISTS
-(
-    SELECT 1
-    FROM default.net_snmp_settings
-    WHERE settings_id = 'global'
-);
-
 CREATE TABLE IF NOT EXISTS default.net_snmp_agents
 (
     switch_ip            String,
@@ -207,3 +191,19 @@ SOURCE(CLICKHOUSE(
 ))
 LIFETIME(MIN 60 MAX 120)
 LAYOUT(COMPLEX_KEY_HASHED());
+
+-- Seed only an empty installation. Re-applying DDL must not overwrite an
+-- operator-provided community or polling intervals.
+INSERT INTO default.net_snmp_settings
+    (settings_id, community, port, timeout_ms, retries,
+     discover_lookback_hours, refresh_interval_sec, full_walk_interval_sec,
+     enabled)
+SELECT
+    'global', '', 161, 2000, 1, 24, 1800, 21600, 1
+FROM system.one
+WHERE
+(
+    SELECT count()
+    FROM default.net_snmp_settings
+    WHERE settings_id = 'global'
+) = 0;
