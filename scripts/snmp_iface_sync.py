@@ -40,11 +40,20 @@ def fmt_dt(value: datetime) -> str:
 
 
 def parse_dt(value: str) -> datetime:
-    if not value or value.startswith("1970-01-01"):
+    text = str(value or "").strip()
+    if (
+        not text
+        or text.startswith("1970-01-01")
+        or text.startswith("0000-00-00")
+        or text.startswith("0001-01-01")
+    ):
         return EPOCH
-    return datetime.strptime(value[:19], "%Y-%m-%d %H:%M:%S").replace(
-        tzinfo=timezone.utc
-    )
+    try:
+        return datetime.strptime(text[:19], "%Y-%m-%d %H:%M:%S").replace(
+            tzinfo=timezone.utc
+        )
+    except ValueError:
+        return EPOCH
 
 
 def resolve_binary(configured: str, fallback: str) -> str:
