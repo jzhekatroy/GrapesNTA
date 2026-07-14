@@ -76,11 +76,12 @@ clickhouse-client --host HOST --port 6124 --user USER --password \
 ```
 
 The script decodes the two sFlow interface format bits and only accepts format
-zero (SNMP ifIndex). New agents are polled in the discovery tick. Existing
-agents use `refresh_interval_sec` (default 30 minutes); a full `ifName` walk
-runs on `full_walk_interval_sec` (default 6 hours). The `is_new` flag remains
-set after polling and is cleared only when an operator acknowledges the device
-in NTAdmin.
+zero (SNMP ifIndex). Newly discovered agents appear in inventory with
+`snmp_enabled=0` unless `auto_enable_new_agents=1`. Only enabled agents are
+polled. Existing enabled agents use `refresh_interval_sec` (default 30 minutes);
+a full `ifName` walk runs on `full_walk_interval_sec` (default 6 hours). The
+`is_new` flag remains set after polling and is cleared only when an operator
+acknowledges the device in NTAdmin.
 
 ## systemd
 

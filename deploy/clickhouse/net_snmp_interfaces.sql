@@ -17,11 +17,15 @@ CREATE TABLE IF NOT EXISTS default.net_snmp_settings
     refresh_interval_sec    UInt32 DEFAULT 1800,
     full_walk_interval_sec  UInt32 DEFAULT 21600,
     enabled                 UInt8 DEFAULT 1,
+    auto_enable_new_agents  UInt8 DEFAULT 0,
     updated_at              DateTime('UTC') DEFAULT now()
 )
 ENGINE = ReplacingMergeTree(updated_at)
 ORDER BY settings_id
 SETTINGS index_granularity = 8192;
+
+ALTER TABLE default.net_snmp_settings
+    ADD COLUMN IF NOT EXISTS auto_enable_new_agents UInt8 DEFAULT 0;
 
 -- Older ClickHouse versions drop ordinary views via DROP TABLE, not DROP VIEW.
 DROP TABLE IF EXISTS default.net_snmp_settings_current;
@@ -37,6 +41,7 @@ SELECT
     refresh_interval_sec,
     full_walk_interval_sec,
     enabled,
+    auto_enable_new_agents,
     updated_at_latest AS updated_at
 FROM
 (
@@ -50,6 +55,7 @@ FROM
         argMax(refresh_interval_sec, updated_at) AS refresh_interval_sec,
         argMax(full_walk_interval_sec, updated_at) AS full_walk_interval_sec,
         argMax(enabled, updated_at) AS enabled,
+        argMax(auto_enable_new_agents, updated_at) AS auto_enable_new_agents,
         max(updated_at) AS updated_at_latest
     FROM default.net_snmp_settings
     GROUP BY settings_id
@@ -60,7 +66,7 @@ CREATE TABLE IF NOT EXISTS default.net_snmp_agents
     switch_ip            String,
     display_name         String DEFAULT '',
     source_ids           Array(String) DEFAULT [],
-    snmp_enabled         UInt8 DEFAULT 1,
+    snmp_enabled         UInt8 DEFAULT 0,
     community_override   String DEFAULT '',
     port_override        UInt16 DEFAULT 0,
     timeout_ms_override  UInt32 DEFAULT 0,
@@ -170,9 +176,9 @@ FROM
 INSERT INTO default.net_snmp_settings
     (settings_id, community, port, timeout_ms, retries,
      discover_lookback_hours, refresh_interval_sec, full_walk_interval_sec,
-     enabled)
+     enabled, auto_enable_new_agents)
 SELECT
-    'global', '', 161, 2000, 1, 24, 1800, 21600, 1
+    'global', '', 161, 2000, 1, 24, 1800, 21600, 1, 0
 FROM system.one
 WHERE
 (
