@@ -23,7 +23,8 @@ ENGINE = ReplacingMergeTree(updated_at)
 ORDER BY settings_id
 SETTINGS index_granularity = 8192;
 
-DROP VIEW IF EXISTS default.net_snmp_settings_current;
+-- Older ClickHouse versions drop ordinary views via DROP TABLE, not DROP VIEW.
+DROP TABLE IF EXISTS default.net_snmp_settings_current;
 
 CREATE VIEW default.net_snmp_settings_current AS
 SELECT
@@ -78,7 +79,7 @@ ENGINE = ReplacingMergeTree(updated_at)
 ORDER BY switch_ip
 SETTINGS index_granularity = 8192;
 
-DROP VIEW IF EXISTS default.net_snmp_agents_current;
+DROP TABLE IF EXISTS default.net_snmp_agents_current;
 
 CREATE VIEW default.net_snmp_agents_current AS
 SELECT
@@ -116,7 +117,7 @@ ENGINE = ReplacingMergeTree(updated_at)
 ORDER BY (switch_ip, if_index)
 SETTINGS index_granularity = 8192;
 
-DROP VIEW IF EXISTS default.net_interfaces_current;
+DROP TABLE IF EXISTS default.net_interfaces_current;
 
 CREATE VIEW default.net_interfaces_current AS
 SELECT
