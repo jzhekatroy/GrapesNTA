@@ -24,8 +24,10 @@ ENGINE = ReplacingMergeTree(updated_at)
 ORDER BY settings_id
 SETTINGS index_granularity = 8192;
 
-ALTER TABLE default.net_snmp_settings
-    ADD COLUMN IF NOT EXISTS auto_enable_new_agents UInt8 DEFAULT 0;
+-- If upgrading an existing install that predates auto_enable_new_agents, run once:
+--   ALTER TABLE default.net_snmp_settings
+--       ADD COLUMN auto_enable_new_agents UInt8 DEFAULT 0;
+-- Then re-apply this file so the settings view is recreated.
 
 -- Older ClickHouse versions drop ordinary views via DROP TABLE, not DROP VIEW.
 DROP TABLE IF EXISTS default.net_snmp_settings_current;
