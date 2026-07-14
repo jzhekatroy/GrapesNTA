@@ -91,40 +91,55 @@ DROP TABLE IF EXISTS default.net_snmp_agents_current;
 CREATE VIEW default.net_snmp_agents_current AS
 SELECT
     switch_ip,
-    display_name,
-    source_ids,
-    snmp_enabled,
-    community_override,
-    port_override,
-    timeout_ms_override,
-    retries_override,
+    tuple_state.1 AS display_name,
+    tuple_state.2 AS source_ids,
+    tuple_state.3 AS snmp_enabled,
+    tuple_state.4 AS community_override,
+    tuple_state.5 AS port_override,
+    tuple_state.6 AS timeout_ms_override,
+    tuple_state.7 AS retries_override,
     first_seen_at,
-    last_seen_at,
-    last_poll_at,
-    last_full_walk_at,
-    last_poll_status,
-    last_poll_error,
-    is_new,
-    updated_at_latest AS updated_at
+    tuple_state.8 AS last_seen_at,
+    tuple_state.9 AS last_poll_at,
+    tuple_state.10 AS last_full_walk_at,
+    tuple_state.11 AS last_poll_status,
+    tuple_state.12 AS last_poll_error,
+    tuple_state.13 AS is_new,
+    tuple_state.14 AS updated_at
 FROM
 (
     SELECT
         switch_ip,
-        argMax(display_name, updated_at) AS display_name,
-        argMax(source_ids, updated_at) AS source_ids,
-        argMax(snmp_enabled, updated_at) AS snmp_enabled,
-        argMax(community_override, updated_at) AS community_override,
-        argMax(port_override, updated_at) AS port_override,
-        argMax(timeout_ms_override, updated_at) AS timeout_ms_override,
-        argMax(retries_override, updated_at) AS retries_override,
         min(first_seen_at) AS first_seen_at,
-        argMax(last_seen_at, updated_at) AS last_seen_at,
-        argMax(last_poll_at, updated_at) AS last_poll_at,
-        argMax(last_full_walk_at, updated_at) AS last_full_walk_at,
-        argMax(last_poll_status, updated_at) AS last_poll_status,
-        argMax(last_poll_error, updated_at) AS last_poll_error,
-        argMax(is_new, updated_at) AS is_new,
-        max(updated_at) AS updated_at_latest
+        -- Single-row pick: avoid per-column argMax ties when discover()+poll
+        -- share the same updated_at second (UI showed never while poll was ok).
+        argMax(
+            tuple(
+                display_name,
+                source_ids,
+                snmp_enabled,
+                community_override,
+                port_override,
+                timeout_ms_override,
+                retries_override,
+                last_seen_at,
+                last_poll_at,
+                last_full_walk_at,
+                last_poll_status,
+                last_poll_error,
+                is_new,
+                updated_at
+            ),
+            (
+                updated_at,
+                multiIf(
+                    last_poll_status = 'ok', 3,
+                    last_poll_status IN ('timeout', 'auth_error', 'error', 'config_error'), 2,
+                    last_poll_status = 'queued', 1,
+                    0
+                )
+            )
+        ) AS tuple_state
     FROM default.net_snmp_agents
     GROUP BY switch_ip
 );

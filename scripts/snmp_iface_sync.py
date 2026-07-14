@@ -717,6 +717,7 @@ def main() -> int:
                 or now - agent.last_full_walk_at
                 >= timedelta(seconds=settings.full_walk_seconds)
             )
+            walked = False
             try:
                 count, walked = poll_agent(
                     ch,
@@ -731,8 +732,7 @@ def main() -> int:
                 )
                 agent.last_poll_status = "ok"
                 agent.last_poll_error = ""
-                if walked:
-                    agent.last_full_walk_at = now
+                agent.is_new = 0
                 logger.info(
                     "switch_ip=%s status=ok interfaces=%s full_walk=%s",
                     agent.switch_ip,
@@ -751,8 +751,18 @@ def main() -> int:
                     agent.last_poll_status,
                     agent.last_poll_error,
                 )
-            agent.last_poll_at = now
-            ch.insert_json("default.net_snmp_agents", [agent_row(agent, now)])
+            # Fresh timestamp so this row wins over discover(), which wrote the
+            # pre-poll agent state with the run-start `now` (same second → UI
+            # could show "never" / «Ожидает опроса» via argMax tie).
+            polled_at = utc_now()
+            if polled_at <= now:
+                polled_at = now + timedelta(seconds=1)
+            agent.last_poll_at = polled_at
+            if walked:
+                agent.last_full_walk_at = polled_at
+            ch.insert_json(
+                "default.net_snmp_agents", [agent_row(agent, polled_at)]
+            )
         logger.info("poll complete due=%s attempted=%s failed=%s", len(due), min(len(due), args.max_agents), failures)
         # Per-agent failures are expected operational states (timeout/auth/etc.)
         # and are persisted for the UI. Keep the timer healthy so other agents
