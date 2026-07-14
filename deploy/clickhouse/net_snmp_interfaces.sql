@@ -63,6 +63,7 @@ INSERT INTO default.net_snmp_settings
      enabled)
 SELECT
     'global', '', 161, 2000, 1, 24, 1800, 21600, 1
+FROM system.one
 WHERE NOT EXISTS
 (
     SELECT 1
