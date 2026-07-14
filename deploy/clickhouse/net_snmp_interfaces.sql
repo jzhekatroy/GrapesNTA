@@ -165,7 +165,8 @@ FROM
         if_index
 );
 
-DROP DICTIONARY IF EXISTS default.net_interfaces_dict;
+-- Older ClickHouse versions accept DROP TABLE for dictionaries.
+DROP TABLE IF EXISTS default.net_interfaces_dict;
 
 -- The dictionary reads from this ClickHouse server over its local native port.
 -- If the local `default` user is disabled, create this dictionary with an
