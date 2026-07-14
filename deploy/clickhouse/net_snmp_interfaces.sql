@@ -165,34 +165,6 @@ FROM
         if_index
 );
 
--- Older ClickHouse versions accept DROP TABLE for dictionaries.
-DROP TABLE IF EXISTS default.net_interfaces_dict;
-
--- The dictionary reads from this ClickHouse server over its local native port.
--- If the local `default` user is disabled, create this dictionary with an
--- explicitly configured read-only dictionary user instead.
-CREATE DICTIONARY default.net_interfaces_dict
-(
-    switch_ip          String,
-    if_index           UInt32,
-    if_name            String DEFAULT '',
-    if_alias           String DEFAULT '',
-    if_descr           String DEFAULT '',
-    if_high_speed_mbps UInt32 DEFAULT 0,
-    if_speed_bps       UInt64 DEFAULT 0
-)
-PRIMARY KEY switch_ip, if_index
-SOURCE(CLICKHOUSE(
-    HOST '127.0.0.1'
-    PORT 9000
-    USER 'default'
-    PASSWORD ''
-    DB 'default'
-    TABLE 'net_interfaces_current'
-))
-LIFETIME(MIN 60 MAX 120)
-LAYOUT(COMPLEX_KEY_HASHED());
-
 -- Seed only an empty installation. Re-applying DDL must not overwrite an
 -- operator-provided community or polling intervals.
 INSERT INTO default.net_snmp_settings
@@ -208,3 +180,7 @@ WHERE
     FROM default.net_snmp_settings
     WHERE settings_id = 'global'
 ) = 0;
+
+-- Dictionary DDL is in net_snmp_interfaces_dict.sql and must be applied over
+-- the local native ClickHouse interface (dictionaries are rejected by some
+-- external HTTP proxies on :6124).

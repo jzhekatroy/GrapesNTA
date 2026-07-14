@@ -12,6 +12,11 @@ then apply the schema:
 ```bash
 clickhouse-client --host HOST --port 6124 --user USER --password \
   --multiquery < deploy/clickhouse/net_snmp_interfaces.sql
+
+# Dictionary must be created over the local native interface.
+# External HTTP proxies on :6124 often reject CREATE DICTIONARY.
+docker exec -i ch clickhouse-client --multiquery \
+  < deploy/clickhouse/net_snmp_interfaces_dict.sql
 ```
 
 The DDL safely seeds one global settings row with an empty community. It does
