@@ -1,0 +1,15 @@
+[Unit]
+Description=GrapesNTA sFlow SNMP interface synchronization
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/grapesnta/snmp-iface-sync.env
+ExecStart=/usr/bin/python3 /opt/GrapesNTA/scripts/snmp_iface_sync.py
+StandardOutput=journal
+StandardError=journal
+TimeoutStartSec=10min
+
+[Install]
+WantedBy=multi-user.target
