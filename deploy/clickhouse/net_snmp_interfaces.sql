@@ -29,17 +29,31 @@ DROP TABLE IF EXISTS default.net_snmp_settings_current;
 CREATE VIEW default.net_snmp_settings_current AS
 SELECT
     settings_id,
-    argMax(community, updated_at) AS community,
-    argMax(port, updated_at) AS port,
-    argMax(timeout_ms, updated_at) AS timeout_ms,
-    argMax(retries, updated_at) AS retries,
-    argMax(discover_lookback_hours, updated_at) AS discover_lookback_hours,
-    argMax(refresh_interval_sec, updated_at) AS refresh_interval_sec,
-    argMax(full_walk_interval_sec, updated_at) AS full_walk_interval_sec,
-    argMax(enabled, updated_at) AS enabled,
-    max(updated_at) AS updated_at
-FROM default.net_snmp_settings
-GROUP BY settings_id;
+    community,
+    port,
+    timeout_ms,
+    retries,
+    discover_lookback_hours,
+    refresh_interval_sec,
+    full_walk_interval_sec,
+    enabled,
+    updated_at_latest AS updated_at
+FROM
+(
+    SELECT
+        settings_id,
+        argMax(community, updated_at) AS community,
+        argMax(port, updated_at) AS port,
+        argMax(timeout_ms, updated_at) AS timeout_ms,
+        argMax(retries, updated_at) AS retries,
+        argMax(discover_lookback_hours, updated_at) AS discover_lookback_hours,
+        argMax(refresh_interval_sec, updated_at) AS refresh_interval_sec,
+        argMax(full_walk_interval_sec, updated_at) AS full_walk_interval_sec,
+        argMax(enabled, updated_at) AS enabled,
+        max(updated_at) AS updated_at_latest
+    FROM default.net_snmp_settings
+    GROUP BY settings_id
+);
 
 -- Seed only an empty installation. Re-applying DDL must not overwrite an
 -- operator-provided community or polling intervals.
@@ -84,23 +98,43 @@ DROP TABLE IF EXISTS default.net_snmp_agents_current;
 CREATE VIEW default.net_snmp_agents_current AS
 SELECT
     switch_ip,
-    argMax(display_name, updated_at) AS display_name,
-    argMax(source_ids, updated_at) AS source_ids,
-    argMax(snmp_enabled, updated_at) AS snmp_enabled,
-    argMax(community_override, updated_at) AS community_override,
-    argMax(port_override, updated_at) AS port_override,
-    argMax(timeout_ms_override, updated_at) AS timeout_ms_override,
-    argMax(retries_override, updated_at) AS retries_override,
-    min(first_seen_at) AS first_seen_at,
-    argMax(last_seen_at, updated_at) AS last_seen_at,
-    argMax(last_poll_at, updated_at) AS last_poll_at,
-    argMax(last_full_walk_at, updated_at) AS last_full_walk_at,
-    argMax(last_poll_status, updated_at) AS last_poll_status,
-    argMax(last_poll_error, updated_at) AS last_poll_error,
-    argMax(is_new, updated_at) AS is_new,
-    max(updated_at) AS updated_at
-FROM default.net_snmp_agents
-GROUP BY switch_ip;
+    display_name,
+    source_ids,
+    snmp_enabled,
+    community_override,
+    port_override,
+    timeout_ms_override,
+    retries_override,
+    first_seen_at,
+    last_seen_at,
+    last_poll_at,
+    last_full_walk_at,
+    last_poll_status,
+    last_poll_error,
+    is_new,
+    updated_at_latest AS updated_at
+FROM
+(
+    SELECT
+        switch_ip,
+        argMax(display_name, updated_at) AS display_name,
+        argMax(source_ids, updated_at) AS source_ids,
+        argMax(snmp_enabled, updated_at) AS snmp_enabled,
+        argMax(community_override, updated_at) AS community_override,
+        argMax(port_override, updated_at) AS port_override,
+        argMax(timeout_ms_override, updated_at) AS timeout_ms_override,
+        argMax(retries_override, updated_at) AS retries_override,
+        min(first_seen_at) AS first_seen_at,
+        argMax(last_seen_at, updated_at) AS last_seen_at,
+        argMax(last_poll_at, updated_at) AS last_poll_at,
+        argMax(last_full_walk_at, updated_at) AS last_full_walk_at,
+        argMax(last_poll_status, updated_at) AS last_poll_status,
+        argMax(last_poll_error, updated_at) AS last_poll_error,
+        argMax(is_new, updated_at) AS is_new,
+        max(updated_at) AS updated_at_latest
+    FROM default.net_snmp_agents
+    GROUP BY switch_ip
+);
 
 CREATE TABLE IF NOT EXISTS default.net_interfaces
 (
@@ -123,16 +157,28 @@ CREATE VIEW default.net_interfaces_current AS
 SELECT
     switch_ip,
     if_index,
-    argMax(if_name, updated_at) AS if_name,
-    argMax(if_alias, updated_at) AS if_alias,
-    argMax(if_descr, updated_at) AS if_descr,
-    argMax(if_high_speed_mbps, updated_at) AS if_high_speed_mbps,
-    argMax(if_speed_bps, updated_at) AS if_speed_bps,
-    max(updated_at) AS updated_at
-FROM default.net_interfaces
-GROUP BY
-    switch_ip,
-    if_index;
+    if_name,
+    if_alias,
+    if_descr,
+    if_high_speed_mbps,
+    if_speed_bps,
+    updated_at_latest AS updated_at
+FROM
+(
+    SELECT
+        switch_ip,
+        if_index,
+        argMax(if_name, updated_at) AS if_name,
+        argMax(if_alias, updated_at) AS if_alias,
+        argMax(if_descr, updated_at) AS if_descr,
+        argMax(if_high_speed_mbps, updated_at) AS if_high_speed_mbps,
+        argMax(if_speed_bps, updated_at) AS if_speed_bps,
+        max(updated_at) AS updated_at_latest
+    FROM default.net_interfaces
+    GROUP BY
+        switch_ip,
+        if_index
+);
 
 DROP DICTIONARY IF EXISTS default.net_interfaces_dict;
 
