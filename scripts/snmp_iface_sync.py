@@ -112,6 +112,7 @@ class Settings:
     refresh_seconds: int
     full_walk_seconds: int
     enabled: bool
+    auto_enable_new_agents: bool
 
 
 @dataclass
@@ -197,7 +198,8 @@ def load_settings(ch: ClickHouseClient) -> Settings:
     rows = ch.json_rows(
         """
         SELECT community, port, timeout_ms, retries, discover_lookback_hours,
-               refresh_interval_sec, full_walk_interval_sec, enabled
+               refresh_interval_sec, full_walk_interval_sec, enabled,
+               auto_enable_new_agents
         FROM default.net_snmp_settings_current
         WHERE settings_id = 'global'
         LIMIT 1
@@ -218,6 +220,7 @@ def load_settings(ch: ClickHouseClient) -> Settings:
         refresh_seconds=int(row["refresh_interval_sec"]),
         full_walk_seconds=int(row["full_walk_interval_sec"]),
         enabled=bool(row["enabled"]),
+        auto_enable_new_agents=bool(int(row.get("auto_enable_new_agents") or 0)),
     )
 
 
@@ -282,6 +285,7 @@ def discover(
     agents: Dict[str, Agent],
     lookback_hours: int,
     now: datetime,
+    auto_enable_new_agents: bool = False,
 ) -> Dict[str, Set[int]]:
     rows = ch.json_rows(
         f"""
@@ -322,7 +326,7 @@ def discover(
                 switch_ip=switch_ip,
                 display_name="",
                 source_ids=source_ids,
-                snmp_enabled=1,
+                snmp_enabled=1 if auto_enable_new_agents else 0,
                 community_override="",
                 port_override=0,
                 timeout_ms_override=0,
@@ -566,7 +570,13 @@ def main() -> int:
         settings = load_settings(ch)
         agents = load_agents(ch)
         now = utc_now()
-        live_indices = discover(ch, agents, settings.lookback_hours, now)
+        live_indices = discover(
+            ch,
+            agents,
+            settings.lookback_hours,
+            now,
+            settings.auto_enable_new_agents,
+        )
         logger.info(
             "discovery complete agents_seen=%s agents_known=%s",
             len(live_indices),
