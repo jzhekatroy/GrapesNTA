@@ -392,31 +392,67 @@ def snmp_base(
     ]
 
 
+def snmp_attempt_budget_sec(agent: Agent, settings: Settings) -> float:
+    timeout_ms = agent.timeout_ms_override or settings.timeout_ms
+    retries = agent.retries_override if agent.retries_override else settings.retries
+    return max(timeout_ms, 100) / 1000.0 * (max(retries, 0) + 1)
+
+
 def run_snmp_get(
     binary: str,
     agent: Agent,
     settings: Settings,
     community: str,
     oids: Sequence[str],
+    *,
+    phase: str,
 ) -> List[str]:
-    proc = subprocess.run(
-        snmp_base(binary, agent, settings, community) + ["-Oqv"] + list(oids),
-        capture_output=True,
-        text=True,
-        check=False,
-        timeout=max(
-            10,
-            ((agent.timeout_ms_override or settings.timeout_ms) / 1000 + 1) * 3,
-        ),
+    logger = logging.getLogger("snmp_iface_sync")
+    budget = snmp_attempt_budget_sec(agent, settings)
+    # Large multi-var GETs need headroom beyond a single PDU timeout.
+    proc_timeout = max(15.0, budget * 3.0, budget * max(len(oids), 1) * 0.35)
+    logger.info(
+        "switch_ip=%s phase=%s action=snmpget oids=%s proc_timeout=%.1fs",
+        agent.switch_ip,
+        phase,
+        len(oids),
+        proc_timeout,
     )
+    try:
+        proc = subprocess.run(
+            snmp_base(binary, agent, settings, community) + ["-Oqv"] + list(oids),
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=proc_timeout,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise SnmpError(
+            "timeout",
+            f"[{phase}] subprocess timeout after {proc_timeout:.1f}s "
+            f"(oids={len(oids)})",
+        ) from exc
     if proc.returncode:
         message = redact_secret(
             (proc.stderr or proc.stdout or "SNMP request failed").strip(), community
         )
-        raise SnmpError(classify_snmp_error(message), message[:1000])
+        raise SnmpError(
+            classify_snmp_error(message),
+            f"[{phase}] {message[:900]}",
+        )
     values = [clean_snmp_value(line) for line in proc.stdout.splitlines()]
     if len(values) != len(oids):
-        raise SnmpError("error", "SNMP response did not match requested OID count")
+        raise SnmpError(
+            "error",
+            f"[{phase}] SNMP response did not match requested OID count "
+            f"(got={len(values)} want={len(oids)})",
+        )
+    logger.info(
+        "switch_ip=%s phase=%s action=snmpget status=ok oids=%s",
+        agent.switch_ip,
+        phase,
+        len(oids),
+    )
     return values
 
 
@@ -426,27 +462,50 @@ def walk_if_names(
     settings: Settings,
     community: str,
 ) -> Dict[int, str]:
-    proc = subprocess.run(
-        snmp_base(binary, agent, settings, community) + ["-On", IF_NAME],
-        capture_output=True,
-        text=True,
-        check=False,
-        timeout=max(
-            30,
-            ((agent.timeout_ms_override or settings.timeout_ms) / 1000 + 1) * 20,
-        ),
+    logger = logging.getLogger("snmp_iface_sync")
+    phase = "ifName_walk"
+    budget = snmp_attempt_budget_sec(agent, settings)
+    proc_timeout = max(60.0, budget * 40.0)
+    logger.info(
+        "switch_ip=%s phase=%s action=snmpwalk oid=%s proc_timeout=%.1fs",
+        agent.switch_ip,
+        phase,
+        IF_NAME,
+        proc_timeout,
     )
+    try:
+        proc = subprocess.run(
+            snmp_base(binary, agent, settings, community) + ["-On", IF_NAME],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=proc_timeout,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise SnmpError(
+            "timeout",
+            f"[{phase}] subprocess timeout after {proc_timeout:.1f}s",
+        ) from exc
     if proc.returncode:
         message = redact_secret(
             (proc.stderr or proc.stdout or "SNMP walk failed").strip(), community
         )
-        raise SnmpError(classify_snmp_error(message), message[:1000])
+        raise SnmpError(
+            classify_snmp_error(message),
+            f"[{phase}] {message[:900]}",
+        )
     result: Dict[int, str] = {}
     pattern = re.compile(r"^\.(?:\d+\.)+(\d+)\s+=\s+(?:\S+:\s+)?(.*)$")
     for line in proc.stdout.splitlines():
         match = pattern.match(line.strip())
         if match:
             result[int(match.group(1))] = clean_snmp_value(match.group(2))
+    logger.info(
+        "switch_ip=%s phase=%s action=snmpwalk status=ok interfaces=%s",
+        agent.switch_ip,
+        phase,
+        len(result),
+    )
     return result
 
 
@@ -472,20 +531,61 @@ def poll_agent(
     max_interfaces: int,
     now: datetime,
 ) -> Tuple[int, bool]:
+    logger = logging.getLogger("snmp_iface_sync")
     community = agent.community_override or settings.community
     if not community:
         raise SnmpError("config_error", "SNMP community is not configured")
 
+    timeout_ms = agent.timeout_ms_override or settings.timeout_ms
+    retries = agent.retries_override if agent.retries_override else settings.retries
+    logger.info(
+        "switch_ip=%s phase=start snmp_timeout_ms=%s snmp_retries=%s "
+        "full_walk_due=%s live_ifindexes=%s",
+        agent.switch_ip,
+        timeout_ms,
+        retries,
+        int(full_walk_due),
+        len(live_indices),
+    )
+
     agent.display_name = run_snmp_get(
-        snmpget, agent, settings, community, [SYS_NAME]
+        snmpget, agent, settings, community, [SYS_NAME], phase="sysName"
     )[0]
+    logger.info(
+        "switch_ip=%s phase=sysName status=ok sysName=%s",
+        agent.switch_ip,
+        agent.display_name,
+    )
+
     walked_names: Dict[int, str] = {}
     if full_walk_due:
         walked_names = walk_if_names(snmpwalk, agent, settings, community)
+    else:
+        logger.info(
+            "switch_ip=%s phase=ifName_walk action=skip reason=not_due",
+            agent.switch_ip,
+        )
 
     indices = sorted(set(live_indices).union(walked_names))[:max_interfaces]
+    logger.info(
+        "switch_ip=%s phase=if_details action=start indexes=%s "
+        "from_walk=%s from_flows=%s",
+        agent.switch_ip,
+        len(indices),
+        len(walked_names),
+        len(live_indices),
+    )
+    if not indices:
+        logger.info(
+            "switch_ip=%s phase=if_details action=skip reason=no_indexes",
+            agent.switch_ip,
+        )
+        return 0, full_walk_due
+
+    # Smaller multi-var GETs: many switches drop/timeout large PDUs.
     interface_rows: List[Dict[str, Any]] = []
-    for batch in chunks(indices, 25):
+    batches = list(chunks(indices, 5))
+    for batch_no, batch in enumerate(batches, start=1):
         oids = [
             oid
             for index in batch
@@ -497,7 +597,13 @@ def poll_agent(
                 f"{IF_SPEED}.{index}",
             ]
         ]
-        values = run_snmp_get(snmpget, agent, settings, community, oids)
+        phase = (
+            f"if_details batch={batch_no}/{len(batches)} "
+            f"ifIndex={batch[0]}-{batch[-1]} oids={len(oids)}"
+        )
+        values = run_snmp_get(
+            snmpget, agent, settings, community, oids, phase=phase
+        )
         for position, index in enumerate(batch):
             offset = position * 5
             if_values = values[offset : offset + 5]
@@ -518,6 +624,11 @@ def poll_agent(
                 }
             )
     ch.insert_json("default.net_interfaces", interface_rows)
+    logger.info(
+        "switch_ip=%s phase=persist interfaces=%s",
+        agent.switch_ip,
+        len(interface_rows),
+    )
     return len(interface_rows), full_walk_due
 
 
