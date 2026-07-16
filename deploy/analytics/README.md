@@ -1,25 +1,17 @@
-# Observations analytics worker (у ClickHouse)
+# Observations analytics worker
 
-Код воркера: [NTAdmin](https://github.com/mavotronik/NTAdmin) (`server/analytics.js`).  
-Этот каталог — только деплой на хосте с доступом к ClickHouse.
+Самодостаточный воркер **внутри GrapesNTA** (не нужен clone `mavotronik/NTAdmin`).
 
-## Почему не `docker compose` с git URL
+Пишет:
+- `observation_rollups_5m` (live catch-up)
+- due report snapshots
+- ensure `observations` / `observation_runs` в ClickHouse
 
-`mavotronik/NTAdmin` — приватный. Анонимный `git clone` в BuildKit падает с
-`could not read Username for 'https://github.com'`. Собираем из **локального** `/opt/NTAdmin`.
+Исходники: `deploy/analytics/server/*` (снимок логики из NTAdmin). UI по-прежнему в NTAdmin и читает те же таблицы CH.
 
-## Быстрый старт (Docker)
+## Деплой на netflow-test / CH-хост
 
 ```bash
-# 1) NTAdmin на диск (SSH deploy key / gh auth)
-sudo mkdir -p /opt
-sudo git clone git@github.com:mavotronik/NTAdmin.git /opt/NTAdmin
-cd /opt/NTAdmin && sudo git pull && sudo git checkout main
-
-sudo mkdir -p /opt/NTAdmin/server/data
-sudo chown -R 1001:1001 /opt/NTAdmin/server/data
-
-# 2) GrapesNTA deploy package
 cd /opt/GrapesNTA
 git fetch origin
 git checkout feature/observations-analytics
@@ -27,30 +19,30 @@ git pull
 
 cd deploy/analytics
 cp env.example .env
-# вписать пароли CLICKHOUSE_* (как у UI)
+# заполнить CLICKHOUSE_* (HTTP URL, write user)
 
-# 3) build + run
-NTADMIN_SRC=/opt/NTAdmin docker compose up -d --build
+mkdir -p data
+chown -R 1001:1001 data   # uid контейнера
+
+docker compose up -d --build
 docker logs -f grapes-analytics
 ```
 
 Ожидай: `analytics started`, затем `analytics tick`.
 
-## DDL
-
-`clickhouse-client` на `localhost:9000` часто **не** тот CH. Для HTTP-прокси:
+## Без Docker (systemd)
 
 ```bash
-# native, если доступен с хоста (пример порта native proxy):
-clickhouse-client --host 95.215.1.30 --port 6124 \
-  --user ui_admin --password '***' \
-  --multiquery < /opt/GrapesNTA/deploy/clickhouse/observations_store.sql
+cd /opt/GrapesNTA/deploy/analytics
+npm ci --omit=dev
+cp env.example .env   # заполнить
+
+# unit: deploy/systemd/grapes-analytics.service
+# поправь WorkingDirectory=/opt/GrapesNTA/deploy/analytics
+sudo systemctl enable --now grapes-analytics
 ```
 
-Или пропусти: worker/UI сами делают `CREATE TABLE IF NOT EXISTS`.
+## Важно
 
-Worker ходит в CH по **HTTP** (`CLICKHOUSE_URL=http://…:6123`), не через native 9000.
-
-## systemd (без Docker)
-
-См. `deploy/systemd/grapes-analytics.service` — нужен Node + `npm ci` в `/opt/NTAdmin`.
+- На одном CH не запускай два воркера сразу (Mac + сервер) — будут гонки по cursor.
+- После переноса на сервер останови локальный: `pkill -f 'server/analytics.js'`.

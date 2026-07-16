@@ -1,18 +1,15 @@
-# Observations analytics worker next to ClickHouse.
-# Build from a local NTAdmin checkout (NTAdmin is private — anonymous git clone fails).
+# Observations analytics worker — code is in this directory (no NTAdmin clone).
 #
-#   sudo git clone git@github.com:mavotronik/NTAdmin.git /opt/NTAdmin
-#   cd /opt/NTAdmin && sudo git pull && sudo git checkout main
 #   cd /opt/GrapesNTA/deploy/analytics
 #   cp env.example .env && $EDITOR .env
-#   NTADMIN_SRC=/opt/NTAdmin docker compose up -d --build
-#
+#   docker compose up -d --build
+#   docker logs -f grapes-analytics
 
 services:
   grapes-analytics:
     build:
-      context: ${NTADMIN_SRC:-/opt/NTAdmin}
-      dockerfile: Dockerfile.analytics
+      context: .
+      dockerfile: Dockerfile
     image: grapes-analytics:latest
     container_name: grapes-analytics
     env_file:
@@ -20,8 +17,7 @@ services:
         required: true
     restart: always
     volumes:
-      # Artifacts / worker diagnostics only (definitions live in ClickHouse).
-      - ${NTADMIN_DATA_DIR:-/opt/NTAdmin/server/data}:/app/server/data
+      - ${ANALYTICS_DATA_DIR:-./data}:/app/server/data
     environment:
       GRAPES_ANALYTICS_WORKER: "1"
       ANALYTICS_REPORT_CHECK_SEC: "${ANALYTICS_REPORT_CHECK_SEC:-3600}"

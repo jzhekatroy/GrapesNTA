@@ -1,0 +1,14 @@
+{
+  "name": "grapes-observations-analytics",
+  "version": "1.0.0",
+  "private": true,
+  "description": "GrapesNTA observations analytics worker (rollup + reports)",
+  "scripts": {
+    "start": "node server/analytics.js loop",
+    "once": "node server/analytics.js once"
+  },
+  "dependencies": {
+    "@clickhouse/client": "^1.11.2",
+    "dotenv": "^16.5.0"
+  }
+}
