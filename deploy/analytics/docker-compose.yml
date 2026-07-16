@@ -1,16 +1,17 @@
 # Observations analytics worker next to ClickHouse.
-# Code/image from NTAdmin; this compose lives in GrapesNTA for CH-host deploys.
+# Build from a local NTAdmin checkout (NTAdmin is private — anonymous git clone fails).
 #
+#   sudo git clone git@github.com:mavotronik/NTAdmin.git /opt/NTAdmin
+#   cd /opt/NTAdmin && sudo git pull && sudo git checkout main
 #   cd /opt/GrapesNTA/deploy/analytics
-#   cp env.example .env   # fill secrets
-#   docker compose up -d --build
+#   cp env.example .env && $EDITOR .env
+#   NTADMIN_SRC=/opt/NTAdmin docker compose up -d --build
 #
-# Requires Docker BuildKit + access to github.com/mavotronik/NTAdmin
 
 services:
   grapes-analytics:
     build:
-      context: https://github.com/mavotronik/NTAdmin.git#main
+      context: ${NTADMIN_SRC:-/opt/NTAdmin}
       dockerfile: Dockerfile.analytics
     image: grapes-analytics:latest
     container_name: grapes-analytics
