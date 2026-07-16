@@ -8,7 +8,7 @@ const {
   explorerSchema,
 } = require('./explorer');
 const { protocolChartColor } = require('./protocol-colors');
-const { getDiagnosticsPayload } = require('./analytics-diagnostics');
+const { getMergedDiagnosticsPayload } = require('./analytics-diagnostics');
 const {
   ensureObservationsStore,
   loadAllObservations,
@@ -991,8 +991,8 @@ function observationsConfig() {
 }
 
 async function getObservationAnalyticsDiagnostics() {
-  // Always return file-backed worker/query diagnostics first — never block UI on CH.
-  const diag = getDiagnosticsPayload();
+  // Local file if co-located; otherwise shared ClickHouse heartbeat from remote worker.
+  const diag = await getMergedDiagnosticsPayload();
   const all = await loadAllObservations();
   const items = all.filter((o) => o.materialize?.enabled);
   const ids = items.map((o) => o.id);
