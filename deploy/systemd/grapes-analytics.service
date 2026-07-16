@@ -1,0 +1,19 @@
+[Unit]
+Description=Grapes NTA observations analytics worker (rollup + reports)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/NTAdmin
+EnvironmentFile=-/etc/grapesnta/grapes-analytics.env
+EnvironmentFile=-/opt/NTAdmin/.env
+Environment=GRAPES_ANALYTICS_WORKER=1
+ExecStart=/usr/bin/node server/analytics.js loop
+Restart=always
+RestartSec=10
+User=nta
+Group=nta
+
+[Install]
+WantedBy=multi-user.target

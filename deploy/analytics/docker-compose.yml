@@ -1,0 +1,28 @@
+# Observations analytics worker next to ClickHouse.
+# Code/image from NTAdmin; this compose lives in GrapesNTA for CH-host deploys.
+#
+#   cd /opt/GrapesNTA/deploy/analytics
+#   cp env.example .env   # fill secrets
+#   docker compose up -d --build
+#
+# Requires Docker BuildKit + access to github.com/mavotronik/NTAdmin
+
+services:
+  grapes-analytics:
+    build:
+      context: https://github.com/mavotronik/NTAdmin.git#main
+      dockerfile: Dockerfile.analytics
+    image: grapes-analytics:latest
+    container_name: grapes-analytics
+    env_file:
+      - path: .env
+        required: true
+    restart: always
+    volumes:
+      # Artifacts / worker diagnostics only (definitions live in ClickHouse).
+      - ${NTADMIN_DATA_DIR:-/opt/NTAdmin/server/data}:/app/server/data
+    environment:
+      GRAPES_ANALYTICS_WORKER: "1"
+      ANALYTICS_REPORT_CHECK_SEC: "${ANALYTICS_REPORT_CHECK_SEC:-3600}"
+      OBSERVATION_ROLLUP_CONCURRENCY: "${OBSERVATION_ROLLUP_CONCURRENCY:-1}"
+      OBSERVATION_ROLLUP_SHOT_MINUTES: "${OBSERVATION_ROLLUP_SHOT_MINUTES:-15}"
