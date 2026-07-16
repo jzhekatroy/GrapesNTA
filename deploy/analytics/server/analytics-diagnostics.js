@@ -6,6 +6,8 @@ const path = require('path');
 
 const STORE_FILE = path.join(__dirname, 'data', 'analytics-diagnostics.json');
 const MAX_QUERIES = Math.min(Math.max(Number(process.env.ANALYTICS_DIAG_MAX_QUERIES) || 80, 20), 200);
+const MAX_CH_QUERIES = Math.min(MAX_QUERIES, Math.max(Number(process.env.ANALYTICS_DIAG_CH_QUERIES) || 40, 10));
+const MAX_CH_SQL_CHARS = Math.min(Math.max(Number(process.env.ANALYTICS_DIAG_CH_SQL_CHARS) || 4000, 500), 20000);
 const STALE_SEC = Math.max(90, Number(process.env.ANALYTICS_WORKER_STALE_SEC) || 120);
 const WORKER_ID = String(process.env.ANALYTICS_WORKER_ID || 'default');
 const HEARTBEAT_TABLE = 'analytics_worker_status';
@@ -105,6 +107,54 @@ async function ensureHeartbeatTable() {
   return ensureHeartbeatPromise;
 }
 
+function slimQueryForClickHouse(entry) {
+  if (!entry || typeof entry !== 'object') return null;
+  const sql = String(entry.sql || '');
+  return {
+    id: entry.id,
+    at: entry.at,
+    name: entry.name,
+    kind: entry.kind,
+    sql: sql.length > MAX_CH_SQL_CHARS ? `${sql.slice(0, MAX_CH_SQL_CHARS)}…` : sql,
+    params: entry.params && typeof entry.params === 'object' ? entry.params : {},
+    rows: Number(entry.rows) || 0,
+    elapsedMs: Number(entry.elapsedMs) || 0,
+    error: entry.error ? String(entry.error) : null,
+  };
+}
+
+function buildHeartbeatPayload(state) {
+  const queries = (Array.isArray(state.queries) ? state.queries : [])
+    .slice(0, MAX_CH_QUERIES)
+    .map(slimQueryForClickHouse)
+    .filter(Boolean);
+  return {
+    v: 2,
+    lastTick: state.lastTick || null,
+    queries,
+  };
+}
+
+function parseHeartbeatPayload(raw) {
+  let payload = null;
+  try {
+    payload = raw ? JSON.parse(raw) : null;
+  } catch {
+    return { lastTick: null, queries: [] };
+  }
+  if (!payload || typeof payload !== 'object') {
+    return { lastTick: null, queries: [] };
+  }
+  // v2: { v, lastTick, queries }; legacy: lastTick object itself
+  if (payload.v === 2 || payload.lastTick !== undefined || Array.isArray(payload.queries)) {
+    return {
+      lastTick: payload.lastTick || null,
+      queries: Array.isArray(payload.queries) ? payload.queries : [],
+    };
+  }
+  return { lastTick: payload, queries: [] };
+}
+
 function publishHeartbeatToClickHouse(state) {
   // Fire-and-forget — never block the worker loop on diagnostics.
   setImmediate(() => {
@@ -123,7 +173,7 @@ function publishHeartbeatToClickHouse(state) {
           last_tick_ms: w.lastTickMs != null ? Number(w.lastTickMs) : null,
           last_error: String(w.lastError || ''),
           started_at: w.startedAt ? clickhouseDateTime(w.startedAt) : null,
-          payload_json: JSON.stringify(state.lastTick || {}),
+          payload_json: JSON.stringify(buildHeartbeatPayload(state)),
           updated_at: clickhouseDateTime(),
         }], { name: 'analytics/heartbeat' });
       } catch {
@@ -259,12 +309,7 @@ async function loadWorkerStatusFromClickHouse() {
     `, { id: WORKER_ID }, { name: 'analytics/heartbeat-read' });
     const row = rows[0];
     if (!row) return null;
-    let lastTick = null;
-    try {
-      lastTick = row.payload_json ? JSON.parse(row.payload_json) : null;
-    } catch {
-      lastTick = null;
-    }
+    const { lastTick, queries } = parseHeartbeatPayload(row.payload_json);
     const state = {
       worker: {
         pid: Number(row.pid) || null,
@@ -278,12 +323,12 @@ async function loadWorkerStatusFromClickHouse() {
         source: 'clickhouse',
       },
       lastTick,
-      queries: [],
+      queries,
     };
     return {
       worker: decorateWorker(state),
       lastTick,
-      queries: [],
+      queries,
       storePath: `clickhouse:${HEARTBEAT_TABLE}`,
       updatedAt: new Date().toISOString(),
     };
@@ -292,21 +337,37 @@ async function loadWorkerStatusFromClickHouse() {
   }
 }
 
-/** Prefer fresh local file; otherwise use shared CH heartbeat (remote worker). */
+function purgeStaleLocalDiagnosticsFile() {
+  try {
+    if (!fs.existsSync(STORE_FILE)) return;
+    const state = readState();
+    if (workerAlive(state).alive) return;
+    fs.unlinkSync(STORE_FILE);
+  } catch {
+    // ignore — best-effort cleanup of Mac leftover after remote worker took over
+  }
+}
+
+/** Prefer co-located live worker; otherwise shared ClickHouse heartbeat. */
 async function getMergedDiagnosticsPayload() {
   const local = getDiagnosticsPayload();
   if (local.worker?.alive) return local;
   const remote = await loadWorkerStatusFromClickHouse();
-  if (!remote) return local;
-  if (!remote.worker?.lastHeartbeatAt) return local;
+  if (!remote?.worker?.lastHeartbeatAt) return local;
   const localAge = local.worker?.heartbeatAgeSec;
   const remoteAge = remote.worker?.heartbeatAgeSec;
-  if (remote.worker.alive) return { ...local, ...remote, queries: local.queries };
-  if (local.worker?.lastHeartbeatAt == null) return { ...local, ...remote, queries: local.queries };
-  if (remoteAge != null && (localAge == null || remoteAge < localAge)) {
-    return { ...local, ...remote, queries: local.queries };
-  }
-  return local;
+  const remoteFresher = remoteAge != null && (localAge == null || remoteAge <= localAge);
+  const useRemote = remote.worker.alive
+    || remoteFresher
+    || local.worker?.lastHeartbeatAt == null;
+  if (!useRemote) return local;
+  purgeStaleLocalDiagnosticsFile();
+  return {
+    ...remote,
+    // Never mix in stale Mac query history when CH is the authority.
+    queries: Array.isArray(remote.queries) ? remote.queries : [],
+    lastTick: remote.lastTick || null,
+  };
 }
 
 module.exports = {
