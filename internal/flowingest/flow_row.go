@@ -67,12 +67,13 @@ type FlowRow struct {
 	SrcMAC [6]byte
 	DstMAC [6]byte
 
-	// sFlow switch/router metadata and L3/L4 attributes. Populated by
-	// flowcollectord from the flow-sample header (InIf/OutIf = SNMP ifIndex of
-	// the physical switch ports) and the inner packet (TCPFlags/IPTTL/IPTos).
-	// Zero for producers that cannot observe them (XDP mirror, BMP). Appended
-	// after the MAC pair by spool frame version 4; version-2/3 frames decode
-	// with these left zero. Not part of any rollup GROUP BY.
+	// Switch/router metadata and L3/L4 attributes. flowcollectord sets InIf/OutIf
+	// from the sFlow flow-sample header (SNMP ifIndex) and TCPFlags/IPTTL/IPTos
+	// from the sampled packet. xdpflowd sets TCPFlags/IPTTL/IPTos from BPF
+	// aggregation on the mirror path (InIf/OutIf stay zero). Zero for producers
+	// that cannot observe L3/L4 (e.g. BMP). Appended after the MAC pair by spool
+	// frame version 4; version-2/3 frames decode with these left zero. Not part of
+	// any rollup GROUP BY.
 	InIf     uint32
 	OutIf    uint32
 	TCPFlags uint8
