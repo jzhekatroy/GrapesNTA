@@ -6,8 +6,12 @@ const { query, executeCommand, parseDataDatetimeSql } = require('./clickhouse');
 const {
   explorerTimeseries,
   explorerSchema,
+  parseExplorerAsnNumber,
+  asnExplorerDisplayLabel,
+  lookupAsnDisplayNames,
 } = require('./explorer');
 const { protocolChartColor } = require('./protocol-colors');
+const { tcpFlagsMaskToLabel } = require('./tcp-flags');
 const { getMergedDiagnosticsPayload } = require('./analytics-diagnostics');
 const {
   ensureObservationsStore,
@@ -99,28 +103,45 @@ function normalizeWidgets(widgets) {
   }));
 }
 
-function classifyScope(filters) {
-  const list = normalizeFilters(filters);
-  if (!list.length) {
-    return {
-      tier: 'native',
-      materializeRequired: false,
-      reason: 'Нет фильтров — общий трафик (native агрегаты)',
-    };
+function collectWidgetGroupFields(widgets = []) {
+  // Do not apply normalizeWidgets defaults here — empty widgets means "no groupBy".
+  if (!Array.isArray(widgets) || !widgets.length) return [];
+  const fields = [];
+  for (const w of widgets) {
+    for (const g of w.groupBy || []) {
+      const field = String(g || '').trim();
+      if (field) fields.push(field);
+    }
   }
-  const unknown = list.filter((f) => !NATIVE_FILTER_FIELDS.has(f.field));
-  if (!unknown.length) {
+  return fields;
+}
+
+/**
+ * Live observation always uses personal rollup when there is any filter or groupBy.
+ * (Earlier "native" shortcut skipped rollup for proto/collector/asn/… and broke
+ * charts that group by non-aggregate dims like tcp_flags.)
+ * Empty filters + empty groupBy → total traffic from traffic_* (no materialize).
+ */
+function classifyScope(filters, widgets = []) {
+  const list = normalizeFilters(filters);
+  const groupFields = collectWidgetGroupFields(widgets);
+  const fields = [...new Set([
+    ...list.map((f) => f.field),
+    ...groupFields,
+  ])];
+
+  if (!fields.length) {
     return {
       tier: 'native',
       materializeRequired: false,
-      reason: 'Фильтры покрываются существующими traffic_* агрегатами',
+      reason: 'Нет фильтров и группировок — общий трафик (native агрегаты)',
     };
   }
   return {
     tier: 'materialize_required',
     materializeRequired: true,
-    reason: `Для live нужен rollup. Поля вне native: ${[...new Set(unknown.map((f) => f.field))].join(', ')}`,
-    fields: [...new Set(unknown.map((f) => f.field))],
+    reason: `Для live нужен rollup по фильтрам/группировке: ${fields.join(', ')}`,
+    fields,
   };
 }
 
@@ -128,7 +149,7 @@ function countActiveMaterialize(items, exceptId = null) {
   return items.filter((o) => o.id !== exceptId
     && o.live?.enabled
     && o.materialize?.enabled
-    && classifyScope(o.filters).materializeRequired).length;
+    && classifyScope(o.filters, o.widgets).materializeRequired).length;
 }
 
 function materializeWarning(activeCount) {
@@ -139,7 +160,8 @@ function materializeWarning(activeCount) {
 
 function normalizeObservation(raw = {}, { userId, existing = null } = {}) {
   const filters = normalizeFilters(raw.filters != null ? raw.filters : existing?.filters);
-  const scope = classifyScope(filters);
+  const widgets = normalizeWidgets(raw.widgets != null ? raw.widgets : existing?.widgets);
+  const scope = classifyScope(filters, widgets);
   const lookback = LOOKBACKS.has(raw.lookback) ? raw.lookback : (existing?.lookback || '1h');
   let refreshSec = Number(raw.live?.refreshSec ?? existing?.live?.refreshSec ?? MIN_REFRESH_SEC);
   if (!Number.isFinite(refreshSec) || refreshSec < MIN_REFRESH_SEC) refreshSec = MIN_REFRESH_SEC;
@@ -148,11 +170,10 @@ function normalizeObservation(raw = {}, { userId, existing = null } = {}) {
     refreshSec = MIN_REFRESH_SEC;
   }
 
+  const liveEnabled = Boolean(raw.live?.enabled ?? existing?.live?.enabled ?? false);
   let materializeEnabled = Boolean(raw.materialize?.enabled ?? existing?.materialize?.enabled);
-  if (scope.materializeRequired && raw.live?.enabled !== false && (raw.live?.enabled || existing?.live?.enabled)) {
-    // enabling live on non-native implies materialize
-    if (raw.live?.enabled) materializeEnabled = true;
-  }
+  // Live + non-native filter/groupBy always needs personal rollup.
+  if (scope.materializeRequired && liveEnabled) materializeEnabled = true;
   if (!scope.materializeRequired) materializeEnabled = false;
 
   // Worker cadence follows live.refreshSec (same setting as UI), floor 5 minutes.
@@ -169,15 +190,19 @@ function normalizeObservation(raw = {}, { userId, existing = null } = {}) {
     isShared: Boolean(raw.isShared ?? existing?.isShared),
     filters,
     lookback,
-    widgets: normalizeWidgets(raw.widgets != null ? raw.widgets : existing?.widgets),
+    widgets,
     live: {
-      enabled: Boolean(raw.live?.enabled ?? existing?.live?.enabled ?? false),
+      enabled: liveEnabled,
       refreshSec,
     },
     materialize: {
       enabled: materializeEnabled,
       intervalSec,
-      status: existing?.materialize?.status || (materializeEnabled ? 'queued' : 'idle'),
+      status: materializeEnabled
+        ? (existing?.materialize?.status && existing.materialize.status !== 'idle'
+          ? existing.materialize.status
+          : 'queued')
+        : 'idle',
       lagSeconds: existing?.materialize?.lagSeconds ?? null,
       lastCatchupAt: existing?.materialize?.lastCatchupAt ?? null,
       cursorMinute: existing?.materialize?.cursorMinute ?? null,
@@ -198,7 +223,7 @@ function normalizeObservation(raw = {}, { userId, existing = null } = {}) {
 }
 
 async function withMeta(item, allItems = null) {
-  const scope = classifyScope(item.filters);
+  const scope = classifyScope(item.filters, item.widgets);
   const all = allItems || await loadAllObservations();
   const active = countActiveMaterialize(all);
   return {
@@ -277,7 +302,7 @@ async function queueMaterialize(id, userId) {
   const existing = items.find((row) => row.id === id);
   if (!existing) return null;
   if (existing.ownerId !== userId) return null;
-  const scope = classifyScope(existing.filters);
+  const scope = classifyScope(existing.filters, existing.widgets);
   if (!scope.materializeRequired) {
     const err = new Error('Для этого scope materialize не нужен (native агрегаты).');
     err.status = 400;
@@ -376,6 +401,64 @@ function dimLabel(dim0, dim1) {
   return String(dim0 || '—');
 }
 
+function asnGroupIndexes(groupBy = []) {
+  return groupBy
+    .map((g, i) => (g === 'src_asn' || g === 'dst_asn' ? i : -1))
+    .filter((i) => i >= 0);
+}
+
+/** Enrich ASN group labels with registry names (rollup stores raw AS123…). */
+async function enrichAsnLabelsInRows(rows, groupBy = []) {
+  const indexes = asnGroupIndexes(groupBy);
+  if (!indexes.length || !rows?.length) return rows || [];
+
+  const asnNums = new Set();
+  for (const row of rows) {
+    for (const idx of indexes) {
+      const n = parseExplorerAsnNumber(row.rawValues?.[idx] ?? row.values?.[idx]);
+      if (n != null) asnNums.add(n);
+    }
+  }
+  const nameMap = await lookupAsnDisplayNames([...asnNums]);
+  return rows.map((row) => {
+    const rawValues = Array.isArray(row.rawValues)
+      ? [...row.rawValues]
+      : [...(row.values || [])];
+    const values = Array.isArray(row.values) ? [...row.values] : [...rawValues];
+    for (const idx of indexes) {
+      const asn = parseExplorerAsnNumber(rawValues[idx] ?? values[idx]);
+      if (asn == null) continue;
+      values[idx] = asnExplorerDisplayLabel(asn, nameMap.get(asn) || '');
+    }
+    return { ...row, values, rawValues };
+  });
+}
+
+function tcpFlagsGroupIndexes(groupBy = []) {
+  return groupBy
+    .map((g, i) => (g === 'tcp_flags' ? i : -1))
+    .filter((i) => i >= 0);
+}
+
+/** Rollup stores tcp_flags as raw UInt8; show FIN/SYN/ACK labels in UI. */
+function enrichTcpFlagsLabelsInRows(rows, groupBy = []) {
+  const indexes = tcpFlagsGroupIndexes(groupBy);
+  if (!indexes.length || !rows?.length) return rows || [];
+  return rows.map((row) => {
+    const rawValues = Array.isArray(row.rawValues)
+      ? [...row.rawValues]
+      : [...(row.values || [])];
+    const values = Array.isArray(row.values) ? [...row.values] : [...rawValues];
+    for (const idx of indexes) {
+      const raw = rawValues[idx] ?? values[idx];
+      if (raw === '' || raw == null) continue;
+      if (!/^\d+$/.test(String(raw).trim())) continue;
+      values[idx] = tcpFlagsMaskToLabel(Number(raw));
+    }
+    return { ...row, values, rawValues };
+  });
+}
+
 async function readRollupTimeseries(observationId, window) {
   try {
     // Totals only — rows with empty dims. Do not sum grouped dims (would double-count).
@@ -414,7 +497,7 @@ async function readRollupTimeseries(observationId, window) {
   }
 }
 
-async function readRollupTop(observationId, window, { limit = 15 } = {}) {
+async function readRollupTop(observationId, window, { limit = 15, groupBy = [] } = {}) {
   try {
     const windowSeconds = Math.max(
       60,
@@ -445,12 +528,12 @@ async function readRollupTop(observationId, window, { limit = 15 } = {}) {
     const totalBytes = rows.reduce((s, r) => s + (Number(r.bytes) || 0), 0) || 1;
     const mapped = rows.map((r, i) => {
       const bytes = Number(r.bytes) || 0;
-      const values = r.dim1 ? [r.dim0, r.dim1] : [r.dim0];
+      const values = r.dim1 ? [String(r.dim0), String(r.dim1)] : [String(r.dim0)];
       return {
         id: `rollup-${dimKey(r.dim0, r.dim1)}`,
         key: dimKey(r.dim0, r.dim1),
         values,
-        rawValues: values,
+        rawValues: [...values],
         metric: Math.round((bytes * 8) / windowSeconds),
         avgBps: Math.round((bytes * 8) / windowSeconds),
         pct: Math.round((bytes * 10000) / totalBytes) / 100,
@@ -460,14 +543,15 @@ async function readRollupTop(observationId, window, { limit = 15 } = {}) {
         color: protocolChartColor(i),
       };
     });
-    return { rows: mapped };
+    const withAsn = await enrichAsnLabelsInRows(mapped, groupBy);
+    return { rows: enrichTcpFlagsLabelsInRows(withAsn, groupBy) };
   } catch (err) {
     return { rows: [], error: err.message };
   }
 }
 
-async function readRollupGroupedTimeseries(observationId, window, { seriesLimit = 8 } = {}) {
-  const top = await readRollupTop(observationId, window, { limit: seriesLimit });
+async function readRollupGroupedTimeseries(observationId, window, { seriesLimit = 8, groupBy = [] } = {}) {
+  const top = await readRollupTop(observationId, window, { limit: seriesLimit, groupBy });
   if (!top.rows.length) {
     return {
       points: [],
@@ -574,7 +658,7 @@ async function previewObservation(id, userId, body = {}) {
             continue;
           }
           const seriesLimit = observationSeriesLimit(obs, w);
-          const data = await readRollupGroupedTimeseries(obs.id, window, { seriesLimit });
+          const data = await readRollupGroupedTimeseries(obs.id, window, { seriesLimit, groupBy });
           widgets.push({
             id: w.id,
             type: w.type,
@@ -669,7 +753,7 @@ async function previewObservation(id, userId, body = {}) {
           });
           continue;
         }
-        const data = await readRollupTop(obs.id, window, { limit: w.limit || 15 });
+        const data = await readRollupTop(obs.id, window, { limit: w.limit || 15, groupBy });
         widgets.push({
           id: w.id,
           type: w.type,
@@ -884,7 +968,7 @@ function escapeHtml(s) {
 async function listMaterializeJobs() {
   const all = await loadAllObservations();
   return all
-    .filter((o) => o.materialize?.enabled && classifyScope(o.filters).materializeRequired)
+    .filter((o) => o.materialize?.enabled && classifyScope(o.filters, o.widgets).materializeRequired)
     .map((o) => {
       const ts = (o.widgets || []).find((w) => w.type === 'timeseries_bps');
       const top = (o.widgets || []).find((w) => w.type === 'top_table' && w.groupBy?.length);
@@ -1034,7 +1118,7 @@ async function getObservationAnalyticsDiagnostics() {
       name: o.name,
       createdAt: o.createdAt,
       materialize: o.materialize,
-      scope: classifyScope(o.filters),
+      scope: classifyScope(o.filters, o.widgets),
       rollup: {
         maxMinute: st?.max_minute || null,
         rowCount: null,

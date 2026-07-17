@@ -2365,18 +2365,6 @@ function countryHeatmap({
   };
 }
 
-/** Read-only ad-hoc SQL (SELECT only). */
-function validateReadQuery(sql) {
-  const trimmed = sql.trim().replace(/;+\s*$/, '');
-  if (!/^select\b/i.test(trimmed)) {
-    throw new Error('Разрешены только SELECT-запросы');
-  }
-  if (/\b(insert|update|delete|drop|alter|truncate|create|attach|detach|kill|system)\b/i.test(trimmed)) {
-    throw new Error('Запрос содержит запрещённые операции');
-  }
-  return trimmed;
-}
-
 /** Enabled collectors for dashboard filter dropdown. */
 function dashboardCollectors() {
   const collectorsView = collectorsViewRef();
@@ -2430,7 +2418,6 @@ module.exports = {
   resolveTalkersGranularity,
   normalizeTopTalkersGroup,
   recentFlows,
-  validateReadQuery,
   resolveTrafficWindow,
   flowIpExpr,
   flowSamplerIpExpr,

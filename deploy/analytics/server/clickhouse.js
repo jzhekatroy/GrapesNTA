@@ -71,6 +71,7 @@ const config = {
   snmpAgentsTable: env('CLICKHOUSE_SNMP_AGENTS_TABLE', 'net_snmp_agents'),
   netInterfacesCurrent: env('CLICKHOUSE_NET_INTERFACES_CURRENT', 'net_interfaces_current'),
   netInterfacesDict: env('CLICKHOUSE_NET_INTERFACES_DICT', 'default.net_interfaces_dict'),
+  geoCountryDict: env('CLICKHOUSE_GEO_COUNTRY_DICT', 'default.geo_country_dict'),
   locationsView: env('CLICKHOUSE_LOCATIONS_VIEW', 'net_locations_enabled'),
   locationsTable: env('CLICKHOUSE_LOCATIONS_TABLE', 'net_locations'),
   dnsLogTable: env('CLICKHOUSE_DNS_LOG_TABLE', 'dns_log'),
@@ -109,8 +110,6 @@ const config = {
     proto: env('CH_COL_PROTO', 'Proto'),
     srcAsn: env('CH_COL_SRC_ASN', 'SrcAS'),
     dstAsn: env('CH_COL_DST_ASN', 'DstAS'),
-    srcCountry: envOpt('CH_COL_SRC_COUNTRY', null),
-    dstCountry: envOpt('CH_COL_DST_COUNTRY', null),
   },
   flowColumns: {
     sourceId: envOpt('CH_COL_SOURCE_ID', 'source_id'),
@@ -133,6 +132,7 @@ const config = {
     samplerAddress: envOpt('CH_COL_SAMPLER_ADDRESS', 'sampler_address'),
     inIf: envOpt('CH_COL_IN_IF', 'in_if'),
     outIf: envOpt('CH_COL_OUT_IF', 'out_if'),
+    tcpFlags: envOpt('CH_COL_TCP_FLAGS', 'tcp_flags'),
   },
   /** MAC column storage: fixedstring (FixedString(6)) or uint64 (Akvorado SrcMAC/DstMAC). */
   macStorage: (() => {
@@ -572,6 +572,7 @@ function getConfig() {
     snmpAgentsTable: config.snmpAgentsTable,
     netInterfacesCurrent: config.netInterfacesCurrent,
     netInterfacesDict: config.netInterfacesDict,
+    geoCountryDict: config.geoCountryDict,
     collectorHealthSnapshotsTable: config.collectorHealthSnapshotsTable,
     locationsTable: config.locationsTable,
     locationsView: config.locationsView,
@@ -657,5 +658,6 @@ module.exports = {
   col,
   colOpt,
   getConfig,
+  escapeSqlString,
   parseDataDatetimeSql,
 };

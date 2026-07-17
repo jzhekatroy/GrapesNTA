@@ -6,6 +6,7 @@
  * Usage:
  *   node server/observations-rollup.js once
  *   node server/observations-rollup.js loop
+ *   node server/observations-rollup.js rebuild <observationId> [fromIso]
  *
  * Writes:
  *   - total 5m rows (dim0='', dim1='')
@@ -14,6 +15,7 @@
  *
  * Starts from observation createdAt (no historical backfill before start).
  * Each shot advances at most MAX_SHOT_MINUTES forward from the cursor.
+ * Inserts are idempotent: the target window is deleted (mutations_sync=1) before insert.
  */
 
 require('dotenv').config({ path: require('path').join(__dirname, '..', '.env') });
@@ -76,13 +78,34 @@ async function ensureTable() {
   return ensureTablePromise;
 }
 
-/** Align down to closed 5-minute bucket start (UTC wall via Date). */
+/** Align down to closed 5-minute bucket start (UTC epoch, not process local TZ). */
 function floorToBucket(d) {
-  const x = new Date(d);
-  x.setSeconds(0, 0);
-  const m = x.getMinutes();
-  x.setMinutes(m - (m % 5));
-  return x;
+  const ms = d instanceof Date ? d.getTime() : new Date(d).getTime();
+  if (!Number.isFinite(ms)) return new Date(NaN);
+  return new Date(Math.floor(ms / BUCKET_MS) * BUCKET_MS);
+}
+
+function toChUtc(d) {
+  return (d instanceof Date ? d : new Date(d)).toISOString();
+}
+
+/**
+ * Remove existing rollup rows for [from, to) so SummingMergeTree cannot double-count
+ * on overlapping catch-up / rebuild. Waits for the mutation to finish.
+ */
+async function deleteRollupWindow(observationId, from, to) {
+  if (!(from instanceof Date) || !(to instanceof Date) || !(from < to)) return;
+  await executeCommand(`
+    ALTER TABLE default.${ROLLUP_TABLE}
+    DELETE WHERE observation_id = {id:String}
+      AND minute >= parseDateTimeBestEffort({from:String}, 'UTC')
+      AND minute < parseDateTimeBestEffort({to:String}, 'UTC')
+    SETTINGS mutations_sync = 1
+  `, {
+    id: observationId,
+    from: toChUtc(from),
+    to: toChUtc(to),
+  }, { name: `observations/rollup-delete-${observationId}` });
 }
 
 function earliestLiveFrom(safeTo) {
@@ -209,6 +232,8 @@ async function catchupOne(job) {
     const grouped = await catchupGrouped(job, window, seriesLimit);
     values.push(...grouped.values);
 
+    // Always clear the window first — SummingMergeTree sums duplicates on re-insert.
+    await deleteRollupWindow(job.id, from, to);
     if (values.length) {
       await insertRows(ROLLUP_TABLE, values, { name: `observations/rollup-insert-${job.id}` });
     }
@@ -324,15 +349,79 @@ async function runOnce() {
   return results;
 }
 
+async function rebuildObservation(observationId, fromIso) {
+  await ensureObservationsStore();
+  await ensureTable();
+  const jobs = await listMaterializeJobs();
+  const job = jobs.find((j) => j.id === observationId);
+  if (!job) {
+    throw new Error(`Нет live-материализации для ${observationId}`);
+  }
+
+  let safeTo = floorToBucket(new Date());
+  safeTo = new Date(safeTo.getTime() - BUCKET_MS);
+
+  let from = fromIso
+    ? floorToBucket(new Date(fromIso))
+    : earliestLiveFrom(safeTo);
+  if (!(from instanceof Date) || !Number.isFinite(from.getTime())) {
+    throw new Error(`Некорректный from: ${fromIso}`);
+  }
+  if (from < earliestLiveFrom(safeTo)) from = earliestLiveFrom(safeTo);
+  if (from >= safeTo) {
+    throw new Error('Нечего пересчитывать: from >= safeTo');
+  }
+
+  console.log(new Date().toISOString(), 'rebuild delete+cursor', {
+    id: observationId,
+    from: toChUtc(from),
+    to: toChUtc(safeTo),
+  });
+  await deleteRollupWindow(observationId, from, safeTo);
+  await patchMaterializeStatus(observationId, {
+    status: 'queued',
+    cursorMinute: from.toISOString(),
+    lastError: null,
+  });
+
+  const shots = [];
+  for (let i = 0; i < 200; i += 1) {
+    const result = await catchupOne({
+      ...job,
+      ...(await listMaterializeJobs()).find((j) => j.id === observationId),
+    });
+    shots.push(result);
+    console.log(new Date().toISOString(), 'rebuild shot', JSON.stringify(result));
+    if (result?.skipped || result?.error) break;
+    if (result?.to && new Date(result.to) >= safeTo) break;
+  }
+  return shots;
+}
+
 module.exports = {
   runOnce,
   recoverStuckRunning,
   ensureTable,
+  deleteRollupWindow,
+  rebuildObservation,
+  floorToBucket,
 };
 
 async function main() {
   const mode = process.argv[2] || 'once';
-  const recovered = recoverStuckRunning();
+  if (mode === 'rebuild') {
+    const id = process.argv[3];
+    const fromIso = process.argv[4] || null;
+    if (!id) {
+      console.error('Usage: node server/observations-rollup.js rebuild <observationId> [fromIso]');
+      process.exit(1);
+    }
+    const shots = await rebuildObservation(id, fromIso);
+    console.log(JSON.stringify(shots, null, 2));
+    return;
+  }
+
+  const recovered = await recoverStuckRunning();
   if (recovered) {
     console.log(new Date().toISOString(), 'recovered stuck running jobs:', recovered);
   }
