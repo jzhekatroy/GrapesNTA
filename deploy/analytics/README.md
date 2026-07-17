@@ -9,23 +9,27 @@
 
 Исходники: `deploy/analytics/server/*` (снимок логики из NTAdmin). UI по-прежнему в NTAdmin и читает те же таблицы CH.
 
+После правок observations/explorer в NTAdmin — копировать сюда `server/*.js` (включая `tcp-flags.js`) и пушить эту ветку; на `netflow-test` поднимается **этот** каталог, не clone NTAdmin.
+
+Live observation с любым фильтром или groupBy включает personal rollup (`materialize`).
+
 ## Деплой на netflow-test / CH-хост
 
 ```bash
 cd /opt/GrapesNTA
 git fetch origin
 git checkout feature/observations-analytics
-git pull
+git pull origin feature/observations-analytics
 
 cd deploy/analytics
-cp env.example .env
-# заполнить CLICKHOUSE_* (HTTP URL, write user)
+# .env уже есть — не затирать пароли
+# cp -n env.example .env
 
 mkdir -p data
 chown -R 1001:1001 data   # uid контейнера
 
 docker compose up -d --build
-docker logs -f grapes-analytics
+docker logs --tail 50 -f grapes-analytics
 ```
 
 Ожидай: `analytics started`, затем `analytics tick`.
