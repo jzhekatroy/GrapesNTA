@@ -172,7 +172,7 @@ function normalizeObservation(raw = {}, { userId, existing = null } = {}) {
 
   const liveEnabled = Boolean(raw.live?.enabled ?? existing?.live?.enabled ?? false);
   let materializeEnabled = Boolean(raw.materialize?.enabled ?? existing?.materialize?.enabled);
-  // Live + non-native filter/groupBy always needs personal rollup.
+  // Live + filter/groupBy always needs personal rollup — never allow UI save to turn it off.
   if (scope.materializeRequired && liveEnabled) materializeEnabled = true;
   if (!scope.materializeRequired) materializeEnabled = false;
 
@@ -180,6 +180,27 @@ function normalizeObservation(raw = {}, { userId, existing = null } = {}) {
   let intervalSec = Number(raw.materialize?.intervalSec ?? existing?.materialize?.intervalSec ?? refreshSec);
   if (!Number.isFinite(intervalSec) || intervalSec < MIN_REFRESH_SEC) intervalSec = refreshSec;
   intervalSec = Math.max(MIN_REFRESH_SEC, intervalSec, refreshSec);
+
+  const createdAt = existing?.createdAt || raw.createdAt || new Date().toISOString();
+  const wasEnabled = Boolean(existing?.materialize?.enabled);
+  let cursorMinute = existing?.materialize?.cursorMinute ?? raw.materialize?.cursorMinute ?? null;
+  let matStatus = existing?.materialize?.status || (materializeEnabled ? 'queued' : 'idle');
+  if (materializeEnabled && !wasEnabled) {
+    // Fresh live: start at creation time, do not backfill older windows.
+    matStatus = 'queued';
+    cursorMinute = createdAt;
+  } else if (cursorMinute) {
+    const cursorMs = new Date(cursorMinute).getTime();
+    const createdMs = new Date(createdAt).getTime();
+    if (!Number.isFinite(cursorMs) || (Number.isFinite(createdMs) && cursorMs < createdMs)) {
+      cursorMinute = createdAt;
+    }
+  }
+  if (!materializeEnabled) {
+    matStatus = 'idle';
+  } else if (matStatus === 'idle') {
+    matStatus = 'queued';
+  }
 
   return {
     id: existing?.id || raw.id || newId('obs'),
@@ -198,14 +219,10 @@ function normalizeObservation(raw = {}, { userId, existing = null } = {}) {
     materialize: {
       enabled: materializeEnabled,
       intervalSec,
-      status: materializeEnabled
-        ? (existing?.materialize?.status && existing.materialize.status !== 'idle'
-          ? existing.materialize.status
-          : 'queued')
-        : 'idle',
+      status: matStatus,
       lagSeconds: existing?.materialize?.lagSeconds ?? null,
       lastCatchupAt: existing?.materialize?.lastCatchupAt ?? null,
-      cursorMinute: existing?.materialize?.cursorMinute ?? null,
+      cursorMinute,
     },
     report: {
       enabled: Boolean(raw.report?.enabled ?? existing?.report?.enabled ?? false),
@@ -217,7 +234,7 @@ function normalizeObservation(raw = {}, { userId, existing = null } = {}) {
       formats: Array.isArray(raw.report?.formats) ? raw.report.formats : (existing?.report?.formats || ['html', 'csv']),
       emailTo: Array.isArray(raw.report?.emailTo) ? raw.report.emailTo : (existing?.report?.emailTo || []),
     },
-    createdAt: existing?.createdAt || new Date().toISOString(),
+    createdAt,
     updatedAt: new Date().toISOString(),
   };
 }
@@ -279,7 +296,7 @@ async function updateObservation(id, userId, payload = {}) {
   }
   if (next.materialize.enabled && !existing.materialize?.enabled) {
     next.materialize.status = 'queued';
-    next.materialize.cursorMinute = null;
+    next.materialize.cursorMinute = existing.createdAt || next.createdAt;
   }
   await upsertObservation(next);
   return withMeta(next, items.map((row) => (row.id === id ? next : row)));
@@ -324,11 +341,15 @@ async function queueMaterialize(id, userId) {
       enabled: true,
       intervalSec: refreshSec,
       status: 'queued',
-      cursorMinute: null,
+      // Live from creation — do not null cursor (null used to fall back to 24h backfill).
+      cursorMinute: existing.materialize?.cursorMinute || existing.createdAt || new Date().toISOString(),
     },
     live: { ...(existing.live || {}), enabled: true, refreshSec },
     updatedAt: new Date().toISOString(),
   };
+  if (!existing.materialize?.enabled) {
+    next.materialize.cursorMinute = existing.createdAt || new Date().toISOString();
+  }
   await upsertObservation(next);
   return withMeta(next, items.map((row) => (row.id === id ? next : row)));
 }

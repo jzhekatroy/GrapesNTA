@@ -112,18 +112,33 @@ function earliestLiveFrom(safeTo) {
   return floorToBucket(new Date(safeTo.getTime() - MAX_CATCHUP_BEHIND_MS));
 }
 
+function jobStartedBucket(job) {
+  if (job?.startedAt) {
+    const started = floorToBucket(job.startedAt);
+    if (started instanceof Date && Number.isFinite(started.getTime())) return started;
+  }
+  return null;
+}
+
+/**
+ * Live catch-up starts at observation createdAt (startedAt).
+ * Never backfill before creation — a new observation must not show multi-hour lag.
+ * cursorMinute is the exclusive end of the last successful window.
+ */
 function resolveCatchupFrom(job, safeTo) {
   const earliest = earliestLiveFrom(safeTo);
+  const started = jobStartedBucket(job);
   let from;
   if (job.cursorMinute) {
-    // cursor is exclusive end of last successful window
     from = floorToBucket(job.cursorMinute);
-  } else if (job.startedAt) {
-    from = floorToBucket(job.startedAt);
+  } else if (started) {
+    from = started;
   } else {
     from = earliest;
   }
-  // Skip ancient history: charts show lookback windows (≤7d), not full life of observation.
+  // Never before observation creation (fixes epoch/stale cursors → 19h "lag").
+  if (started && from < started) from = started;
+  // Hard cap for very old observations (charts only need recent lookbacks).
   if (from < earliest) from = earliest;
   return from;
 }
@@ -361,12 +376,14 @@ async function rebuildObservation(observationId, fromIso) {
   let safeTo = floorToBucket(new Date());
   safeTo = new Date(safeTo.getTime() - BUCKET_MS);
 
+  const started = jobStartedBucket(job) || earliestLiveFrom(safeTo);
   let from = fromIso
     ? floorToBucket(new Date(fromIso))
-    : earliestLiveFrom(safeTo);
+    : started;
   if (!(from instanceof Date) || !Number.isFinite(from.getTime())) {
     throw new Error(`Некорректный from: ${fromIso}`);
   }
+  if (from < started) from = started;
   if (from < earliestLiveFrom(safeTo)) from = earliestLiveFrom(safeTo);
   if (from >= safeTo) {
     throw new Error('Нечего пересчитывать: from >= safeTo');
