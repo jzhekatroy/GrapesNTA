@@ -3,7 +3,9 @@ Description=Run GrapesNTA async traffic rollups every minute
 
 [Timer]
 OnBootSec=5min
-OnUnitActiveSec=1min
+# Fire 1 minute AFTER the previous oneshot finishes (not after it starts).
+# OnUnitActiveSec caused near-continuous runs while catch-up took ~1 minute.
+OnUnitInactiveSec=1min
 AccuracySec=30s
 Persistent=true
 

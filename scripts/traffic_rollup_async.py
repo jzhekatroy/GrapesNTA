@@ -250,13 +250,19 @@ def check_attached_mvs(ch: ClickHouseClient) -> int:
 def raw_lag_seconds(ch: ClickHouseClient) -> int:
     value = ch.query(
         "SELECT dateDiff('second', max(time_received_ns), now64(9)) "
-        "FROM default.flows_raw",
+        "FROM default.flows_raw "
+        "WHERE date >= today() - 1",
         display="flows_raw lag seconds",
     )
     return int(value or "0")
 
 
-def bootstrap_bucket(ch: ClickHouseClient, job: RollupJob, days: int) -> datetime:
+def bootstrap_bucket(
+    ch: ClickHouseClient,
+    job: RollupJob,
+    days: int,
+    safety_lag_minutes: int,
+) -> datetime:
     col = job.time_column
     table = job.source_table
     if job.bucket_kind == "minute":
@@ -265,16 +271,122 @@ def bootstrap_bucket(ch: ClickHouseClient, job: RollupJob, days: int) -> datetim
         expr = f"toStartOfHour({col})"
     else:
         expr = f"toStartOfDay({col})"
-    sql = (
-        f"SELECT ifNull(min({expr}), toDateTime('1970-01-01 00:00:00', 'UTC')) "
-        f"FROM {table}"
-    )
+    # Bound by retention window — full-history min() on flows_raw is too expensive
+    # on high-EPS stands and was burning ClickHouse CPU every rollup tick.
+    lookback = max(int(days), 1)
+    if table == "default.flows_raw":
+        sql = (
+            f"SELECT ifNull(min({expr}), toDateTime('1970-01-01 00:00:00', 'UTC')) "
+            f"FROM {table} "
+            f"WHERE date >= today() - {lookback}"
+        )
+    else:
+        sql = (
+            f"SELECT ifNull(min({expr}), toDateTime('1970-01-01 00:00:00', 'UTC')) "
+            f"FROM {table}"
+        )
     raw = ch.query(sql, display=f"bootstrap min bucket for {job.job_id}")
     if raw == "1970-01-01 00:00:00":
-        return truncate_bucket(utc_now() - timedelta(days=days), job.bucket_kind)
+        # Fresh stand: do not backfill empty bootstrap_days of silent buckets.
+        return truncate_bucket(
+            utc_now() - timedelta(minutes=safety_lag_minutes),
+            job.bucket_kind,
+        )
     dt = datetime.strptime(raw, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
     floor = truncate_bucket(utc_now() - timedelta(days=days), job.bucket_kind)
     return dt if dt > floor else floor
+
+
+def flows_raw_enabled_min_bucket(
+    ch: ClickHouseClient,
+    job: RollupJob,
+    *,
+    lookback_days: int = 7,
+    cache: Optional[Dict[str, Optional[datetime]]] = None,
+) -> Optional[datetime]:
+    """Earliest bucket in flows_raw for enabled catalog sources (bounded + cached)."""
+    if job.source_table != "default.flows_raw":
+        return None
+    cache_key = f"{job.bucket_kind}:{lookback_days}"
+    if cache is not None and cache_key in cache:
+        return cache[cache_key]
+    # time_filter_column may be aliased (f.time_received_ns); this query has no alias.
+    col = (job.time_filter_column or job.time_column).split(".")[-1]
+    if job.bucket_kind == "minute":
+        expr = f"toStartOfMinute({col})"
+    elif job.bucket_kind == "hour":
+        expr = f"toStartOfHour({col})"
+    else:
+        expr = f"toStartOfDay({col})"
+    lookback = max(int(lookback_days), 1)
+    raw = ch.query(
+        f"SELECT ifNull(min({expr}), toDateTime('1970-01-01 00:00:00', 'UTC')) "
+        "FROM default.flows_raw "
+        f"WHERE date >= today() - {lookback} "
+        "AND source_id IN (SELECT source_id FROM default.net_flow_sources_enabled)",
+        display=f"enabled flows_raw min bucket for {job.job_id}",
+    )
+    if raw == "1970-01-01 00:00:00":
+        result = None
+    else:
+        result = datetime.strptime(raw, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+    if cache is not None:
+        cache[cache_key] = result
+    return result
+
+
+def subtract_bucket(dt: datetime, kind: str) -> datetime:
+    if kind == "minute":
+        return dt - timedelta(minutes=1)
+    if kind == "hour":
+        return dt - timedelta(hours=1)
+    if kind == "day":
+        return dt - timedelta(days=1)
+    raise ValueError(f"unknown bucket kind: {kind}")
+
+
+def skip_forward_stale_bucket(
+    ch: ClickHouseClient,
+    logger: logging.Logger,
+    job: RollupJob,
+    bucket_start: datetime,
+    states: Dict[str, JobState],
+    *,
+    bootstrap_days: int,
+    raw_min_cache: Optional[Dict[str, Optional[datetime]]] = None,
+) -> datetime:
+    """Jump rollup state forward when it trails real flows_raw data."""
+    if job.source_table != "default.flows_raw":
+        return bucket_start
+    # Steady-state / near-realtime cursor: never pay for a global min() scan.
+    # skip_forward only matters when state is stuck far behind the first real data.
+    if bucket_start >= utc_now() - timedelta(days=2):
+        return bucket_start
+
+    data_min = flows_raw_enabled_min_bucket(
+        ch,
+        job,
+        lookback_days=max(int(bootstrap_days), 7),
+        cache=raw_min_cache,
+    )
+    if data_min is None or bucket_start >= data_min:
+        return bucket_start
+
+    prev_bucket = truncate_bucket(subtract_bucket(data_min, job.bucket_kind), job.bucket_kind)
+    logger.info(
+        "job=%s action=skip_forward stale_bucket=%s data_min=%s new_last_bucket=%s",
+        job.job_id,
+        fmt_dt(bucket_start),
+        fmt_dt(data_min),
+        fmt_dt(prev_bucket),
+    )
+    save_state(ch, job.job_id, prev_bucket, "skip_forward", "", 0, 0)
+    states[job.job_id] = JobState(
+        last_bucket=prev_bucket,
+        status="skip_forward",
+        last_error="",
+    )
+    return data_min
 
 
 def safe_until(args: argparse.Namespace) -> datetime:
@@ -504,9 +616,10 @@ def next_bucket(
     state: Optional[JobState],
     ch: ClickHouseClient,
     bootstrap_days: int,
+    safety_lag_minutes: int,
 ) -> datetime:
     if state is None or state.last_bucket is None:
-        start = bootstrap_bucket(ch, job, bootstrap_days)
+        start = bootstrap_bucket(ch, job, bootstrap_days, safety_lag_minutes)
         return truncate_bucket(start, job.bucket_kind)
     return truncate_bucket(add_bucket(state.last_bucket, job.bucket_kind), job.bucket_kind)
 
@@ -659,6 +772,7 @@ def main() -> int:
 
     states = load_states(ch)
     until = safe_until(args)
+    raw_min_cache: Dict[str, Optional[datetime]] = {}
     logger.info(
         "run start jobs=%s max_buckets_per_job=%s sleep_between_buckets=%s safe_until=%s dry_run=%s",
         ",".join(job.job_id for job in jobs),
@@ -673,7 +787,22 @@ def main() -> int:
         job_until = safe_until_for_job(job, args)
         while processed < args.max_buckets_per_job:
             state = states.get(job.job_id)
-            bucket_start = next_bucket(job, state, ch, args.bootstrap_days)
+            bucket_start = next_bucket(
+                job,
+                state,
+                ch,
+                args.bootstrap_days,
+                args.safety_lag_minutes,
+            )
+            bucket_start = skip_forward_stale_bucket(
+                ch,
+                logger,
+                job,
+                bucket_start,
+                states,
+                bootstrap_days=args.bootstrap_days,
+                raw_min_cache=raw_min_cache,
+            )
             bucket_end = add_bucket(bucket_start, job.bucket_kind)
 
             if bucket_start >= job_until:
