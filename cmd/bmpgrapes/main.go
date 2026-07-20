@@ -33,6 +33,7 @@ func main() {
 	queueSize := flag.Int("ch-queue-size", 4096, "bounded queue depth")
 	queueModeStr := flag.String("ch-queue-mode", "block", "queue overflow behaviour: block (default, propagates TCP back-pressure to router; no data loss) | drop (legacy, discards batches when queue is full)")
 	allowlistFlag := flag.String("allow-routers", "", "optional comma-separated list of allowed router IPs (empty = allow all)")
+	routerAddrMapFlag := flag.String("router-addr-map", "", "optional TCP-source→canonical router IP map: src=canonical,src2=canonical2 (rewrites router_addr in ClickHouse; allowlist still uses TCP source)")
 	maxMsgSize := flag.Int("max-message-bytes", 65535, "maximum BMP message size accepted (RFC 7854 caps at 4 GiB; routers stay under 64 KiB)")
 	metricsInterval := flag.Duration("interval", 10*time.Second, "metrics log interval")
 	healthInterval := flag.Duration("health-interval", time.Minute, "emit ERROR health log at most this often when BMP ingest/write path is degraded")
@@ -71,6 +72,14 @@ func main() {
 	allow := parseAllowlist(*allowlistFlag)
 	if len(allow) > 0 {
 		log.Info("bmpgrapes router allowlist active", "routers", *allowlistFlag)
+	}
+	routerAddrMap, err := parseRouterAddrMap(*routerAddrMapFlag)
+	if err != nil {
+		log.Error("invalid -router-addr-map", "err", err)
+		os.Exit(1)
+	}
+	if len(routerAddrMap) > 0 {
+		log.Info("bmpgrapes router address map active", "entries", len(routerAddrMap), "map", *routerAddrMapFlag)
 	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -203,7 +212,7 @@ func main() {
 					sessionsOpen.Add(-1)
 					sessionsClosed.Add(1)
 				}()
-				handleSession(ctx, log, c, sink, *maxMsgSize, *updateSampleN, &messagesParsed, &bgpParseErrs)
+				handleSession(ctx, log, c, sink, routerAddrMap, *maxMsgSize, *updateSampleN, &messagesParsed, &bgpParseErrs)
 			}(conn)
 		}
 	}()
@@ -303,17 +312,22 @@ func handleSession(
 	log *slog.Logger,
 	conn net.Conn,
 	sink *clickhouseSink,
+	routerAddrMap map[string]net.IP,
 	maxMsgSize int,
 	updateSampleN uint64,
 	messagesParsed *atomic.Uint64,
 	bgpParseErrs *atomic.Uint64,
 ) {
 	remote := conn.RemoteAddr().(*net.TCPAddr)
-	routerIP := remote.IP
-	var routerAddr [16]byte
-	copy(routerAddr[:], routerIP.To16())
-	log = log.With("router", routerIP.String())
-	log.Info("bmpgrapes session opened")
+	remoteIP := remote.IP
+	routerIP := resolveRouterAddr(remoteIP, routerAddrMap)
+	routerAddr := routerAddrBytes(routerIP)
+	log = log.With("remote", remoteIP.String(), "router", routerIP.String())
+	if ipMapKey(remoteIP) != ipMapKey(routerIP) {
+		log.Info("bmpgrapes session opened", "router_addr_mapped", true)
+	} else {
+		log.Info("bmpgrapes session opened")
+	}
 	defer log.Info("bmpgrapes session closed")
 
 	var (

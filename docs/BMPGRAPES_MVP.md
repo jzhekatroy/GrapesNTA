@@ -89,7 +89,8 @@ sudo ./bin/bmpgrapes \
 | `-ch-flush-interval` | `1s` | периодический flush |
 | `-ch-queue-size` | `4096` | глубина внутренней очереди до ClickHouse |
 | `-ch-queue-mode` | `block` | поведение при переполнении: `block` (по умолчанию, TCP back-pressure роутеру, без потерь) или `drop` (legacy, дропает пакеты) |
-| `-allow-routers` | пусто | optional whitelist IP роутеров |
+| `-allow-routers` | пусто | optional whitelist IP роутеров (по TCP source) |
+| `-router-addr-map` | пусто | TCP-source→canonical `router_addr` в CH: `src=canonical,...` (когда BMP приходит с NAT/public IP, а sFlow/identity — loopback/internal) |
 | `-max-message-bytes` | `65535` | потолок BMP-сообщения |
 | `-interval` | `10s` | период логирования метрик |
 | `-log-level` | `info` | `debug` / `info` / `warn` / `error` |

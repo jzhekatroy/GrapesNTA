@@ -41,6 +41,7 @@ exec "${STDBUF[@]}" "$BIN" \
   -ch-queue-size "${BMP_CH_QUEUE_SIZE:-4096}" \
   -ch-queue-mode "${BMP_CH_QUEUE_MODE:-block}" \
   -allow-routers "${BMP_ALLOW_ROUTERS:-}" \
+  -router-addr-map "${BMP_ROUTER_ADDR_MAP:-}" \
   -max-message-bytes "${BMP_MAX_MESSAGE_BYTES:-65535}" \
   -interval "${BMP_INTERVAL:-10s}" \
   -health-interval "${BMP_HEALTH_INTERVAL:-1m}" \
