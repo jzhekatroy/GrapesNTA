@@ -4,7 +4,7 @@ Description=Run GrapesNTA top talkers / pair rollups every 5 minutes
 [Timer]
 Unit=traffic-talkers-rollups.service
 OnBootSec=7min
-OnUnitActiveSec=5min
+OnUnitInactiveSec=5min
 AccuracySec=30s
 Persistent=true
 
