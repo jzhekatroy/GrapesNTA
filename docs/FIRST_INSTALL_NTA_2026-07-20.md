@@ -17,7 +17,7 @@ Git: GrapesNTA `main` → `/opt/GrapesNTA`
 | Слой | Что | Как |
 |------|-----|-----|
 | Host / systemd | `flowcollectord`, `bmpgrapes` | бинарники из GrapesNTA |
-| Host / systemd timers | traffic rollups, talkers rollups, `geoloaderd` | Python-скрипты из GrapesNTA |
+| Host / systemd timers | traffic rollups, **ASN** talkers/pairs, `geoloaderd`, **`bgp-origin-refresh`** | Python-скрипты из GrapesNTA |
 | Docker | ClickHouse | `grapes-clickhouse` |
 | Docker | observations analytics worker | `grapes-analytics` (host network) |
 | Docker | UI NTAdmin | `grapes-nta` (host network, порт **3000**) |
@@ -30,8 +30,14 @@ XDP/`dnsflowd` на этом стенде **не ставили** (опцион�
 Firewall: `INPUT` policy **DROP**, SSH только из ipset `ssh`
 (`/etc/iptables/rules.v4`, `netfilter-persistent`).  
 UI `:3000` открыт **тем же ipset** `ssh` (2026-07-20).  
-sFlow `:6343/udp` и BMP `:5000/tcp` — **ACCEPT** (иначе трафик не доходит; 2026-07-20).  
+sFlow `:6343/udp` — **ACCEPT**.  
+BMP TCP — порт **как на роутерах** (на nta: **`10179`**, не дефолт `5000`);
+лучше allowlist IP пиров BMP, не `0.0.0.0/0`.  
 CH `:8123`/`:9000` снаружи по-прежнему закрыты.
+
+> **Критично для ASN в flows:** одного `bmpgrapes` мало. Нужен timer
+> `bgp-origin-refresh` → таблица `bgp_prefix_origin_current` → classifier
+> читает префиксы. Без этого peers online, а `src_asn`/`dst_asn` = 0.
 
 ---
 
@@ -133,10 +139,13 @@ curl -u 'default:…' 'http://127.0.0.1:8123/ping'
      - spool: `/var/lib/flowcollectord/ch-spool`
    - `/etc/systemd/system/bmpgrapes.service`
    - `/etc/bmpgrapes/bmpgrapes.env`
-     - BMP listen `0.0.0.0:5000`
+     - `BMP_LISTEN` — **тот же порт, что шлют роутеры**
+       (example в репо: `0.0.0.0:5000`; на nta: `0.0.0.0:10179`)
      - events → `bmp_route_events`, peers → `bmp_peers`
 
-4. `systemctl enable --now flowcollectord bmpgrapes`.
+4. Firewall: ACCEPT BMP TCP на выбранный порт **с IP пиров** (на nta:
+   `.248`/`.250`/… → `:10179`).
+5. `systemctl enable --now flowcollectord bmpgrapes`.
 
 ### Грабли этапа B
 
@@ -144,12 +153,17 @@ curl -u 'default:…' 'http://127.0.0.1:8123/ping'
 **до** enable unit’ов. Бинарники уже были собраны — добивали отдельным
 finish-скриптом (копирование unit’ов, env, `daemon-reload`, start).
 
+**Порт BMP не совпал с роутерами** (слушали `:5000`, пиры слали на
+`:10179`) — peers offline, RIB пустой. Фикс: `BMP_LISTEN=0.0.0.0:10179` +
+правило firewall + `systemctl restart bmpgrapes`.
+
 Проверка:
 
 ```bash
 systemctl is-active flowcollectord bmpgrapes
 ss -ulnp | grep 6343
-ss -tlnp | grep 5000
+ss -tlnp | grep -E '5000|10179'   # тот порт, что в BMP_LISTEN
+clickhouse-client -q "SELECT router_ip, peer_ip, is_up FROM bmp_peers ORDER BY router_ip"
 ```
 
 ---
@@ -177,10 +191,13 @@ docker logs -f grapes-analytics
 
 Нужен host-скриптам rollup/geo, которые вызывают CLI, а не HTTP.
 
-### C3. Traffic rollups + talkers (systemd timers)
+### C3. Traffic rollups + ASN talkers/pairs (systemd timers)
 
 - env: `/etc/grapesnta/traffic-rollups.env`, `traffic-talkers-rollups.env`
 - units из `deploy/systemd/traffic-*.{service,timer}`
+- **talkers job = ASN-only:** `traffic_asn_1m,traffic_asn_1h,traffic_asn_pair_1m,traffic_asn_pair_1h`
+  (UI читает `traffic_asn_*` / `traffic_asn_pair_*`; тяжёлые IP
+  `traffic_talker_*` / `traffic_pair_*` на nta не крутим и таблицы DROP’нули)
 - `systemctl enable --now traffic-rollups.timer traffic-talkers-rollups.timer`
 
 ### C4. RIR geo / ASN (`geoloaderd`)
@@ -189,6 +206,34 @@ docker logs -f grapes-analytics
 - cache: `/var/lib/geoloaderd/cache`
 - `systemctl enable --now geoloaderd.timer`
 - первый прогон: `systemctl start geoloaderd.service` (минуты, качает RIPE/APNIC/…)
+
+### C5. BGP origin → classifier (`bgp-origin-refresh`) — **обязательно при BMP**
+
+Без этого шага BMP peers могут быть online, а enrichment ASN в flows = 0.
+
+```bash
+sudo mkdir -p /etc/bgp-origin-refresh
+sudo install -m 0600 /opt/GrapesNTA/deploy/systemd/bgp-origin-refresh.env.example \
+  /etc/bgp-origin-refresh/bgp-origin-refresh.env
+# выставить CH host/user/password (как у rollups / collector_write или ui_admin)
+sudo install -m 0644 /opt/GrapesNTA/deploy/systemd/bgp-origin-refresh.service \
+  /opt/GrapesNTA/deploy/systemd/bgp-origin-refresh.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now bgp-origin-refresh.timer
+sudo systemctl start bgp-origin-refresh.service   # первый rebuild
+```
+
+Подробности: `docs/BGP_ORIGIN_ASN_TRAFFIC.md`, мониторинг —
+`docs/OPERATIONS_MONITORING.md` § bgp-origin-refresh.
+
+Проверка после первого успешного rebuild (когда RIB уже пришёл):
+
+```bash
+systemctl is-active bgp-origin-refresh.timer
+clickhouse-client -q "SELECT count(), max(snapshot_ts) FROM bgp_prefix_origin_current"
+# ожидание: count >> 0 (на nta ~1.3M), snapshot свежий
+# classifier: FC metrics / лог — bgp_prefixes > 0; доля src_asn!=0 растёт
+```
 
 ---
 
@@ -200,10 +245,12 @@ docker logs -f grapes-analytics
 |----------|---------|------|
 | Нет `asn_registry_staging` | `geoloaderd` падает после download RIR | в git: `deploy/schema/40_enrichment/08_asn_registry_staging.sql` |
 | Нет `asn_registry_enriched` | `traffic_country_1m` rollup error | в git: `deploy/schema/40_enrichment/09_asn_registry_enriched.sql` |
-| Нет `traffic_talker_*` / `traffic_pair_*` | talkers timer error UNKNOWN_TABLE | в git: `deploy/schema/60_traffic/17–20_*.sql` |
+| Talkers на IP-таблицах | огромный CH / лаг talkers; UI ждёт ASN | jobs → `traffic_asn_*` / `traffic_asn_pair_*`; IP talker/pair DDL deprecated |
 | Пустой `flows_raw` | rollups skip / exit 1 из‑за raw lag | в unit добавить `--ignore-raw-lag` к `traffic_rollup_async.py`; для свежего стенда допустимо поднять `TRAFFIC_ROLLUP_MAX_RAW_LAG_SECONDS` |
 | Rollups state отстаёт от raw | `traffic_dashboard_1m = 0`, state на старых датах | `traffic_rollup_async.py`: empty bootstrap от `now()-safety_lag`, skip-forward к min(raw); разово: `scripts/nta-unblock-rollups.sh` |
 | Geo без ASN | `geo_prefix_country` > 0, `asn_registry` = 0 | после staging — повторный `systemctl start geoloaderd` |
+| BMP online, ASN в flows = 0 | `bgp_prefix_origin_current` пусто / `bgp_prefixes=0` | **поставить** `bgp-origin-refresh.timer` (этап C5); не путать с «нужен ещё loader» |
+| BMP peers offline | listen на `:5000`, роутеры → другой порт | выровнять `BMP_LISTEN` + firewall (этап B) |
 
 Результат после фикса (этот стенд):
 
@@ -225,7 +272,7 @@ Rollups на пустом raw могут отработать частично (
 |---------|---------|------------|
 | `direction = transit` при пустом L3 | нет «своих» сетей → оба конца `remote` | ожидаемо; для in/out завести L3 в UI → «Собственные сети» |
 | `direction = unknown` | классификатор выключен / нераспарсенный endpoint | проверить `FC_CLASSIFIER=1` и парсинг sFlow |
-| ASN = 0 | нет BMP peers + нет `ip_asn_prefixes` + нет `origin_asn` в L3 | BMP на `:5000` и/или loader IP→ASN; свои сети — через L3 |
+| ASN = 0 | нет peers **или** пустой `bgp_prefix_origin_current` (нет timer) | BMP listen/firewall → peers up → **C5** `bgp-origin-refresh`; L3 `origin_asn` — только свои сети |
 | В UI «нет VLAN», а в raw VLAN есть | раньше `traffic_vlan_1m` и VLAN API **исключали** `direction=unknown` | фикс в `traffic_rollup_jobs.py` + `VLAN_FLOW_DIRECTIONS` (включает `unknown`) |
 | Пустой `net_l2_vlans` | нет каталога подписей VLAN | UI Settings → VLAN (опционально; без него VLAN id всё равно в raw/rollup) |
 
@@ -251,11 +298,13 @@ clickhouse-client -q "SELECT count(), max(minute) FROM traffic_vlan_1m"
 1. **Каталог источников** — rollups и UI JOIN фильтруют `net_flow_sources_enabled`
    (`include_in_total = 1`). Источник `sflow-default` нужно завести в UI Settings
    **до** появления полезных агрегатов (на nta заведён вручную).
-2. **Дыры схемы** — `asn_registry_enriched`, `traffic_talker_*`, `traffic_pair_*`
-   должны быть в `deploy/schema` (см. MANIFEST 08–09, 17–20).
+2. **Дыры схемы** — `asn_registry_enriched` и ASN-таблицы talkers/pairs
+   (`traffic_asn_*`, `traffic_asn_pair_*`) в `deploy/schema`.
 3. **Bootstrap rollups** — при пустом raw старый код стартовал с `now()-7d` и
    молотил пустые минуты; новый `traffic_rollup_async.py` стартует от
    `now()-safety_lag` и делает skip-forward к `min(flows_raw)` для enabled sources.
+4. **BGP origin** — если BMP уже льёт, а ASN в UI нулевые: проверить C5
+   (`bgp_prefix_origin_current`), не только peers.
 
 Разовая разблокировка на хосте:
 
@@ -318,7 +367,7 @@ curl -sS http://127.0.0.1:3000/api/health
 | 8123 / 9000 | ClickHouse (HTTP / native) |
 | 3000 | UI grapes-nta |
 | 6343/udp | sFlow → flowcollectord |
-| 5000/tcp | BMP → bmpgrapes |
+| **10179**/tcp | BMP → bmpgrapes (**nta**; сверять с роутерами; не слепо `:5000`) |
 
 ---
 
@@ -331,18 +380,33 @@ docker ps --format 'table {{.Names}}\t{{.Status}}'
 # grapes-clickhouse, grapes-analytics, grapes-nta
 
 systemctl is-active flowcollectord bmpgrapes
-systemctl is-active traffic-rollups.timer traffic-talkers-rollups.timer geoloaderd.timer
+systemctl is-active traffic-rollups.timer traffic-talkers-rollups.timer \
+  geoloaderd.timer bgp-origin-refresh.timer
 
 clickhouse-client -q "SELECT count() FROM system.tables WHERE database='default'"
 clickhouse-client -q "SELECT count() FROM geo_prefix_country"
 clickhouse-client -q "SELECT count() FROM asn_registry"
 clickhouse-client -q "SELECT count() FROM flows_raw"
+clickhouse-client -q "SELECT countIf(is_up=1) FROM bmp_peers"
+clickhouse-client -q "SELECT count(), max(snapshot_ts) FROM bgp_prefix_origin_current"
 
 curl -sS http://127.0.0.1:3000/api/health | head -c 200; echo
 ```
 
 Ожидание до подачи трафика: `flows_raw = 0`. После направления sFlow на
-`:6343` — рост `flows_raw`, затем заполнение traffic rollups.
+`:6343` — рост `flows_raw`, затем заполнение traffic rollups.  
+После BMP + первого `bgp-origin-refresh`: `bgp_prefix_origin_current` > 0,
+в свежих flows появляется ненулевой ASN.
+
+### Чеклист «BMP + ASN enrichment» (не пропускать)
+
+- [ ] `BMP_LISTEN` = порт на роутерах; firewall allowlist пиров
+- [ ] `bmpgrapes` active; `bmp_peers` с `is_up=1`; растут `bmp_route_events`
+- [ ] `bgp-origin-refresh.timer` **enabled + active** (unit из `deploy/systemd/`)
+- [ ] Первый `systemctl start bgp-origin-refresh.service` успешен (journal без fail)
+- [ ] `bgp_prefix_origin_current` count ≫ 0, `snapshot_ts` свежий
+- [ ] Classifier: `bgp_prefixes` > 0; доля `src_asn!=0 OR dst_asn!=0` в свежем raw растёт
+- [ ] Talkers timer крутит **ASN** jobs, не IP `traffic_talker_*`
 
 ---
 
@@ -351,11 +415,15 @@ curl -sS http://127.0.0.1:3000/api/health | head -c 200; echo
 - [x] Добавить `asn_registry_staging` + `asn_registry_enriched` + talker/pair в `deploy/schema`
 - [x] Rollups: empty bootstrap + skip-forward в `traffic_rollup_async.py`
 - [x] UI `:3000` — ACCEPT из ipset `ssh` (persist в `/etc/iptables/rules.v4`)
+- [x] BMP listen/firewall выровнять с роутерами (`:10179` на nta)
+- [x] Обязательный `bgp-origin-refresh.timer` (иначе ASN в flows = 0)
+- [x] Talkers/pairs: ASN-only jobs; IP talker/pair таблицы сняты с прода
 - [ ] CH `:8123`/`:9000` снаружи не открывать (сейчас DROP)
 - [ ] Сменить пароль UI `admin`
+- [ ] Дожать BMP с роутеров `.251` / `.252` (router-side)
+- [ ] Опционально: после стабильного RIB поднять `BGPORIGIN_MIN_PREFIXES`
 - [ ] Опционально: loaders `ip_asn_prefixes` / `asn_names`
 - [ ] Опционально: единый образ `grapes-worker` вместо analytics docker + host timers
-- [ ] Подать реальный sFlow/BMP на стенд
 - [ ] При необходимости: SNMP / XDP / dnsflowd по профилю площадки
 
 ---
@@ -372,6 +440,10 @@ nta-finish-collectors.sh   # добивка systemd collectors
 nta-install-worker.sh      # analytics + rollups + geoloaderd
 nta-fix-worker.sh         # staging DDL + --ignore-raw-lag + rerun
 nta-install-ui.sh          # grapes-nta из tarball
+# на следующих стендах сразу включать:
+#   bgp-origin-refresh.timer  (после bmpgrapes)
+#   BMP_LISTEN = порт роутеров + firewall allowlist
+#   traffic-talkers → ASN jobs
 ```
 
 На сервере артефакты лежали в `/tmp/` и логировались через `tee` в том же
@@ -383,10 +455,12 @@ nta-install-ui.sh          # grapes-nta из tarball
 
 1. SSH survey → Docker  
 2. ClickHouse compose + секьюрные пароли + apply schema (70)  
-3. Collectors build/install → active `:6343` / `:5000`  
+3. Collectors build/install → active `:6343` / BMP (сначала `:5000`, потом `:10179`)  
 4. Analytics docker + rollup/geo timers  
 5. Fix staging + `--ignore-raw-lag` → geo/ASN загружены  
 6. UI docker → `:3000`, admin seeded, health ok  
+7. BMP peers online → поставили `bgp-origin-refresh` → origin RIB → ASN в flows  
+8. Talkers переведены на ASN-only; IP talker/pair сняты  
 
-Итог: стенд готов принимать sFlow/BMP и отдавать UI; аналитика справочников
-(geo/ASN) заполнена; сырой трафик появится после источника.
+Итог: стенд принимает sFlow/BMP, отдаёт UI, geo/RIR и BGP-origin enrichment
+рабочие; talkers/pairs — ASN-агрегаты.
