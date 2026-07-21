@@ -32,7 +32,8 @@ RUN apt-get update \
   && chmod +x /usr/local/bin/supercronic \
   && rm -rf /var/lib/apt/lists/*
 
-RUN addgroup -g 1001 -S app && adduser -u 1001 -S -G app app
+RUN groupadd --gid 1001 app \
+  && useradd --uid 1001 --gid app --shell /bin/sh --create-home app
 
 COPY --from=deps /app/analytics/node_modules /app/analytics/node_modules
 COPY deploy/analytics/package.json /app/analytics/
