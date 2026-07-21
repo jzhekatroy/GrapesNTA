@@ -19,9 +19,10 @@ git pull
 cd deploy/worker
 cp -n env.example .env
 # fill CLICKHOUSE_* and TRAFFIC_ROLLUP_* passwords
+# reuse existing observation data: WORKER_DATA_DIR=/opt/grapes/analytics/data
 
-mkdir -p data logs
-chown -R 1001:1001 data   # same uid as old grapes-analytics
+mkdir -p logs
+# if fresh install: mkdir -p data && chown -R 1001:1001 data
 
 docker compose up -d --build
 docker logs --tail 80 -f grapes-worker
