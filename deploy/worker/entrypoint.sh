@@ -8,7 +8,7 @@ if [ -f /app/.env ]; then
   set +a
 fi
 
-mkdir -p /app/analytics/server/data/observation_runs /var/log/grapesnta
+mkdir -p /app/analytics/server/data/observation_runs /var/log/grapesnta 2>/dev/null || true
 
 echo "grapes-worker: starting rollups supercronic"
 supercronic /etc/grapesnta/rollups.crontab &
