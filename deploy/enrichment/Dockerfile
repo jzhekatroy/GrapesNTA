@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 # grapes-enrichment: geo/RIR, bgp-origin, asn-names (external sources).
 
-FROM python:3.12-bookworm-slim
+FROM python:3.12-slim
 
 WORKDIR /app
 
