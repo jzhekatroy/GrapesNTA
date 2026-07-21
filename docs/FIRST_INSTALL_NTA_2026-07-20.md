@@ -1,6 +1,6 @@
 # Установка первого стенда GrapesNTA + UI (сервер `nta`)
 
-Дата: **2026-07-20**  
+Дата: **2026-07-20** (cutover worker/enrichment Docker: **2026-07-21**)  
 Хост: **nta** · `5.188.236.212`  
 ОС: Debian (Docker CE)  
 Git: GrapesNTA `main` → `/opt/GrapesNTA`  
@@ -12,15 +12,19 @@ Git: GrapesNTA `main` → `/opt/GrapesNTA`
 
 ---
 
-## 1. Целевая архитектура (согласовано)
+## 1. Целевая архитектура (как на nta сейчас)
 
 | Слой | Что | Как |
 |------|-----|-----|
 | Host / systemd | `flowcollectord`, `bmpgrapes` | бинарники из GrapesNTA |
-| Host / systemd timers | traffic rollups, **ASN** talkers/pairs, `geoloaderd`, **`bgp-origin-refresh`** | Python-скрипты из GrapesNTA |
 | Docker | ClickHouse | `grapes-clickhouse` |
-| Docker | observations analytics worker | `grapes-analytics` (host network) |
+| Docker | observations + traffic/ASN rollups | **`grapes-worker`** (`deploy/worker`, host network) |
+| Docker | geo/RIR, bgp-origin, asn-names | **`grapes-enrichment`** (`deploy/enrichment`, host network) |
 | Docker | UI NTAdmin | `grapes-nta` (host network, порт **3000**) |
+
+**Снято с хоста после cutover (2026-07-21):** контейнер `grapes-analytics` и
+systemd timers `traffic-rollups`, `traffic-talkers-rollups`, `geoloaderd`,
+`bgp-origin-refresh`, `asn-names-loader`. Не включать их параллельно с Docker.
 
 Схема ClickHouse — **универсальная** (flows / DNS / BMP / traffic / observations / RBAC).
 Профиль площадки выбирает демоны, не форму БД.
@@ -35,9 +39,40 @@ BMP TCP — порт **как на роутерах** (на nta: **`10179`**, н
 лучше allowlist IP пиров BMP, не `0.0.0.0/0`.  
 CH `:8123`/`:9000` снаружи по-прежнему закрыты.
 
-> **Критично для ASN в flows:** одного `bmpgrapes` мало. Нужен timer
-> `bgp-origin-refresh` → таблица `bgp_prefix_origin_current` → classifier
-> читает префиксы. Без этого peers online, а `src_asn`/`dst_asn` = 0.
+> **Критично для ASN в flows:** одного `bmpgrapes` мало. Нужен job
+> `bgp-origin` в `grapes-enrichment` → таблица `bgp_prefix_origin_current` →
+> classifier читает префиксы. Без этого peers online, а `src_asn`/`dst_asn` = 0.
+
+### Конфигурация и доступы к ClickHouse
+
+Секреты **не** запекаются в образы. Каждый compose читает свой `.env`
+(`env_file`). Все Docker-сервисы с `network_mode: host` ходят в CH на
+`127.0.0.1` (`:8123` HTTP, native `:9000` с хоста).
+
+| Сервис | Файл env на nta | Как ходит в CH |
+|--------|-----------------|----------------|
+| UI `grapes-nta` | `/opt/grapes/ui/.env` | HTTP `CLICKHOUSE_URL` / `CLICKHOUSE_*` (`ui_read` / `ui_admin`) |
+| Worker `grapes-worker` | `/opt/GrapesNTA/deploy/worker/.env` | Node: `CLICKHOUSE_URL` `:8123`; Python rollups: `TRAFFIC_ROLLUP_CH_*` через HTTP-shim `clickhouse-client` → `:8123` |
+| Enrichment `grapes-enrichment` | `/opt/GrapesNTA/deploy/enrichment/.env` | `GEOLOADERD_CH_*`, `BGPORIGIN_CH_*`, asn-names (часто наследует geoloaderd); тот же HTTP-shim |
+| ClickHouse | `/opt/grapes/clickhouse/` (compose + users) | сам CH; users/`default`/`ui_*`/`collector_write` |
+
+Шаблоны без секретов: `deploy/worker/env.example`, `deploy/enrichment/env.example`.
+
+На nta `.env` worker/enrichment **собраны** из старых host-файлов
+(`/etc/grapesnta/traffic-rollups.env`, `/etc/geoloaderd/…`,
+`/etc/bgp-origin-refresh/…`) + UI/analytics env. Host-файлы можно оставить
+как бэкап, но timers должны быть disabled.
+
+**Важно при сборке `.env`:** не мержить `env.example` *перед* host-файлами
+через «первый ключ побеждает» — в example пустые `*_PASSWORD=`, они
+перебьют реальные. Правильно: host/UI секреты первыми, либо явно
+перезаписать пароли после merge. Enrichment для `SYSTEM RELOAD DICTIONARY`
+обычно нужен user с правами admin/`default` (не только `ui_admin`).
+
+**Почему HTTP-shim:** native `clickhouse-client` на CPU nta даёт SIGILL.
+В образах worker/enrichment `/usr/local/bin/clickhouse-client` →
+`clickhouse-client-http.sh` (HTTP `:8123`). Cron-обёртки принудительно
+выставляют `*_CLICKHOUSE_CLIENT=/usr/local/bin/clickhouse-client`.
 
 ---
 
@@ -168,72 +203,95 @@ clickhouse-client -q "SELECT router_ip, peer_ip, is_up FROM bmp_peers ORDER BY r
 
 ---
 
-## 7. Этап C — worker (analytics + rollups + geo)
+## 7. Этап C — worker + enrichment (Docker)
 
-### C1. Observations analytics (Docker)
+Актуальный путь на новых стендах и на nta после cutover. Подробности:
+`deploy/worker/README.md`, `deploy/enrichment/README.md`.
 
-`/opt/grapes/worker/docker-compose.yml` — образ из
-`/opt/GrapesNTA/deploy/analytics`, `network_mode: host`, data → `./data`.
+### C1. `grapes-worker` (observations + traffic/ASN rollups)
 
-`.env` указывает на локальный CH (`ui_admin` / `ui_read`), маппинг колонок
-`flows_raw` (`time_received_ns`, `src_addr`, …).
+Каталог: `/opt/GrapesNTA/deploy/worker`.
+
+- Node loop: observations / scheduled reports → heartbeat в
+  `analytics_worker_status`
+- supercronic: traffic dashboard/direction/… **каждую 1m**; ASN talkers/pairs
+  **каждые 5m** (`traffic_asn_*` / `traffic_asn_pair_*`, не IP talker/pair)
+- data volume: на nta `/opt/grapes/analytics/data` (uid **1001**)
+- env: `deploy/worker/.env` (шаблон `env.example`)
 
 ```bash
-cd /opt/grapes/worker && docker compose up -d --build
-docker logs -f grapes-analytics
+cd /opt/GrapesNTA && git pull
+cd deploy/worker
+cp -n env.example .env   # заполнить CLICKHOUSE_* / TRAFFIC_ROLLUP_* пароли
+mkdir -p logs
+# cutover: WORKER_DATA_DIR=/opt/grapes/analytics/data
+chown -R 1001:1001 "${WORKER_DATA_DIR:-./data}" logs
+docker compose up -d --build
+docker logs -f grapes-worker
 ```
 
-### C2. Wrapper `clickhouse-client`
+### C2. `grapes-enrichment` (geo / bgp-origin / asn-names)
+
+Каталог: `/opt/GrapesNTA/deploy/enrichment`.
+
+| Job | Интервал | Скрипт |
+|-----|----------|--------|
+| bgp-origin | ~5 min | `rebuild_bgp_origin_asn.py` |
+| geoloaderd (RIR) | ~1 day | `load_rir_geo.py` |
+| asn-names | ~7 days | `load_asn_names.py` |
+
+Планировщик: **`scheduler.py`** (не systemd, не supercronic — на nta
+supercronic падал с `Failed to fork exec`).  
+ClickHouse: HTTP-shim (см. §1).
+
+```bash
+cd /opt/GrapesNTA/deploy/enrichment
+cp -n env.example .env   # GEOLOADERD_CH_*, BGPORIGIN_CH_* пароли
+mkdir -p logs
+docker compose up -d --build
+docker logs -f grapes-enrichment
+# разовый bgp-origin:
+docker exec grapes-enrichment /app/bin/cron-bgp-origin.sh
+```
+
+Кэш RIR: volume `geoloaderd-cache` → `/var/lib/geoloaderd/cache` в контейнере.
+
+### C3. Host wrapper `clickhouse-client` (для ручных проверок с хоста)
 
 ```bash
 # /usr/local/bin/clickhouse-client → docker exec -i grapes-clickhouse clickhouse-client "$@"
 ```
 
-Нужен host-скриптам rollup/geo, которые вызывают CLI, а не HTTP.
+Внутри worker/enrichment свой shim на HTTP `:8123` (native CLI в контейнере
+на nta не использовать).
 
-### C3. Traffic rollups + ASN talkers/pairs (systemd timers)
+### C4. Cutover с systemd (как сделали на nta)
 
-- env: `/etc/grapesnta/traffic-rollups.env`, `traffic-talkers-rollups.env`
-- units из `deploy/systemd/traffic-*.{service,timer}`
-- **talkers job = ASN-only:** `traffic_asn_1m,traffic_asn_1h,traffic_asn_pair_1m,traffic_asn_pair_1h`
-  (UI читает `traffic_asn_*` / `traffic_asn_pair_*`; тяжёлые IP
-  `traffic_talker_*` / `traffic_pair_*` на nta не крутим и таблицы DROP’нули)
-- `systemctl enable --now traffic-rollups.timer traffic-talkers-rollups.timer`
+1. Поднять `grapes-worker` и `grapes-enrichment`, убедиться в логах/smoke.
+2. `docker stop grapes-analytics && docker rm grapes-analytics` (если был).
+3. `systemctl disable --now traffic-rollups.timer traffic-talkers-rollups.timer \
+     geoloaderd.timer bgp-origin-refresh.timer asn-names-loader.timer`
 
-### C4. RIR geo / ASN (`geoloaderd`)
+Не гонять host timers и Docker-джобы одновременно на один CH.
 
-- env: `/etc/geoloaderd/geoloaderd.env`
-- cache: `/var/lib/geoloaderd/cache`
-- `systemctl enable --now geoloaderd.timer`
-- первый прогон: `systemctl start geoloaderd.service` (минуты, качает RIPE/APNIC/…)
+### C5. BGP origin — обязательно при BMP
 
-### C5. BGP origin → classifier (`bgp-origin-refresh`) — **обязательно при BMP**
+Без job `bgp-origin` peers могут быть online, а ASN в flows = 0.
 
-Без этого шага BMP peers могут быть online, а enrichment ASN в flows = 0.
+Проверка после успешного rebuild (RIB уже пришёл):
 
 ```bash
-sudo mkdir -p /etc/bgp-origin-refresh
-sudo install -m 0600 /opt/GrapesNTA/deploy/systemd/bgp-origin-refresh.env.example \
-  /etc/bgp-origin-refresh/bgp-origin-refresh.env
-# выставить CH host/user/password (как у rollups / collector_write или ui_admin)
-sudo install -m 0644 /opt/GrapesNTA/deploy/systemd/bgp-origin-refresh.service \
-  /opt/GrapesNTA/deploy/systemd/bgp-origin-refresh.timer /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now bgp-origin-refresh.timer
-sudo systemctl start bgp-origin-refresh.service   # первый rebuild
-```
-
-Подробности: `docs/BGP_ORIGIN_ASN_TRAFFIC.md`, мониторинг —
-`docs/OPERATIONS_MONITORING.md` § bgp-origin-refresh.
-
-Проверка после первого успешного rebuild (когда RIB уже пришёл):
-
-```bash
-systemctl is-active bgp-origin-refresh.timer
+docker logs grapes-enrichment --tail 50 | grep bgp-origin
 clickhouse-client -q "SELECT count(), max(snapshot_ts) FROM bgp_prefix_origin_current"
 # ожидание: count >> 0 (на nta ~1.3M), snapshot свежий
-# classifier: FC metrics / лог — bgp_prefixes > 0; доля src_asn!=0 растёт
+# classifier: bgp_prefixes > 0; доля src_asn!=0 растёт
 ```
+
+Подробности: `docs/BGP_ORIGIN_ASN_TRAFFIC.md`.
+
+> **Legacy (до cutover):** этап C был `grapes-analytics` + host timers
+> (`/etc/grapesnta/…`, `/etc/geoloaderd/…`, `/etc/bgp-origin-refresh/…`).
+> Units в `deploy/systemd/` оставлены для rollback / старых площадок.
 
 ---
 
@@ -248,8 +306,10 @@ clickhouse-client -q "SELECT count(), max(snapshot_ts) FROM bgp_prefix_origin_cu
 | Talkers на IP-таблицах | огромный CH / лаг talkers; UI ждёт ASN | jobs → `traffic_asn_*` / `traffic_asn_pair_*`; IP talker/pair DDL deprecated |
 | Пустой `flows_raw` | rollups skip / exit 1 из‑за raw lag | в unit добавить `--ignore-raw-lag` к `traffic_rollup_async.py`; для свежего стенда допустимо поднять `TRAFFIC_ROLLUP_MAX_RAW_LAG_SECONDS` |
 | Rollups state отстаёт от raw | `traffic_dashboard_1m = 0`, state на старых датах | `traffic_rollup_async.py`: empty bootstrap от `now()-safety_lag`, skip-forward к min(raw); разово: `scripts/nta-unblock-rollups.sh` |
-| Geo без ASN | `geo_prefix_country` > 0, `asn_registry` = 0 | после staging — повторный `systemctl start geoloaderd` |
-| BMP online, ASN в flows = 0 | `bgp_prefix_origin_current` пусто / `bgp_prefixes=0` | **поставить** `bgp-origin-refresh.timer` (этап C5); не путать с «нужен ещё loader» |
+| Geo без ASN | `geo_prefix_country` > 0, `asn_registry` = 0 | после staging — повторный `docker exec grapes-enrichment /app/bin/cron-geoloaderd.sh` |
+| BMP online, ASN в flows = 0 | `bgp_prefix_origin_current` пусто / `bgp_prefixes=0` | **проверить** `grapes-enrichment` / `cron-bgp-origin.sh` (этап C5); не путать с «нужен ещё loader» |
+| Native clickhouse-client SIGILL | rollups/bgp падают на CLI | HTTP-shim в образе; не ставить bare `CLICKHOUSE_CLIENT=clickhouse-client` без PATH |
+| supercronic fork fail (enrichment) | enrichment не стартует jobs | использовать `scheduler.py` (уже в образе) |
 | BMP peers offline | listen на `:5000`, роутеры → другой порт | выровнять `BMP_LISTEN` + firewall (этап B) |
 
 Результат после фикса (этот стенд):
@@ -303,8 +363,8 @@ clickhouse-client -q "SELECT count(), max(minute) FROM traffic_vlan_1m"
 3. **Bootstrap rollups** — при пустом raw старый код стартовал с `now()-7d` и
    молотил пустые минуты; новый `traffic_rollup_async.py` стартует от
    `now()-safety_lag` и делает skip-forward к `min(flows_raw)` для enabled sources.
-4. **BGP origin** — если BMP уже льёт, а ASN в UI нулевые: проверить C5
-   (`bgp_prefix_origin_current`), не только peers.
+4. **BGP origin** — если BMP уже льёт, а ASN в UI нулевые: проверить
+   `grapes-enrichment` / `bgp_prefix_origin_current`, не только peers.
 
 Разовая разблокировка на хосте:
 
@@ -377,11 +437,12 @@ curl -sS http://127.0.0.1:3000/api/health
 tmux attach -t grapes   # опционально
 
 docker ps --format 'table {{.Names}}\t{{.Status}}'
-# grapes-clickhouse, grapes-analytics, grapes-nta
+# grapes-clickhouse, grapes-worker, grapes-enrichment, grapes-nta
 
 systemctl is-active flowcollectord bmpgrapes
-systemctl is-active traffic-rollups.timer traffic-talkers-rollups.timer \
-  geoloaderd.timer bgp-origin-refresh.timer
+# host rollup/enrichment timers должны быть disabled:
+systemctl is-enabled traffic-rollups.timer traffic-talkers-rollups.timer \
+  geoloaderd.timer bgp-origin-refresh.timer asn-names-loader.timer 2>&1 || true
 
 clickhouse-client -q "SELECT count() FROM system.tables WHERE database='default'"
 clickhouse-client -q "SELECT count() FROM geo_prefix_country"
@@ -389,24 +450,26 @@ clickhouse-client -q "SELECT count() FROM asn_registry"
 clickhouse-client -q "SELECT count() FROM flows_raw"
 clickhouse-client -q "SELECT countIf(is_up=1) FROM bmp_peers"
 clickhouse-client -q "SELECT count(), max(snapshot_ts) FROM bgp_prefix_origin_current"
+clickhouse-client -q "SELECT worker_id, last_heartbeat_at FROM analytics_worker_status ORDER BY last_heartbeat_at DESC LIMIT 3"
+clickhouse-client -q "SELECT count(), max(minute) FROM traffic_dashboard_1m WHERE minute >= now()-INTERVAL 2 HOUR"
 
 curl -sS http://127.0.0.1:3000/api/health | head -c 200; echo
 ```
 
 Ожидание до подачи трафика: `flows_raw = 0`. После направления sFlow на
 `:6343` — рост `flows_raw`, затем заполнение traffic rollups.  
-После BMP + первого `bgp-origin-refresh`: `bgp_prefix_origin_current` > 0,
-в свежих flows появляется ненулевой ASN.
+После BMP + первого успешного `bgp-origin` в enrichment:
+`bgp_prefix_origin_current` > 0, в свежих flows появляется ненулевой ASN.
 
 ### Чеклист «BMP + ASN enrichment» (не пропускать)
 
 - [ ] `BMP_LISTEN` = порт на роутерах; firewall allowlist пиров
 - [ ] `bmpgrapes` active; `bmp_peers` с `is_up=1`; растут `bmp_route_events`
-- [ ] `bgp-origin-refresh.timer` **enabled + active** (unit из `deploy/systemd/`)
-- [ ] Первый `systemctl start bgp-origin-refresh.service` успешен (journal без fail)
+- [ ] `grapes-enrichment` Up; в логах `bgp-origin: exit=0`
 - [ ] `bgp_prefix_origin_current` count ≫ 0, `snapshot_ts` свежий
 - [ ] Classifier: `bgp_prefixes` > 0; доля `src_asn!=0 OR dst_asn!=0` в свежем raw растёт
-- [ ] Talkers timer крутит **ASN** jobs, не IP `traffic_talker_*`
+- [ ] `grapes-worker` крутит **ASN** talkers jobs, не IP `traffic_talker_*`
+- [ ] Host enrichment/rollup timers **disabled** (нет двойного прогона)
 
 ---
 
@@ -416,14 +479,15 @@ curl -sS http://127.0.0.1:3000/api/health | head -c 200; echo
 - [x] Rollups: empty bootstrap + skip-forward в `traffic_rollup_async.py`
 - [x] UI `:3000` — ACCEPT из ipset `ssh` (persist в `/etc/iptables/rules.v4`)
 - [x] BMP listen/firewall выровнять с роутерами (`:10179` на nta)
-- [x] Обязательный `bgp-origin-refresh.timer` (иначе ASN в flows = 0)
+- [x] Обязательный bgp-origin (иначе ASN в flows = 0) — теперь в `grapes-enrichment`
 - [x] Talkers/pairs: ASN-only jobs; IP talker/pair таблицы сняты с прода
+- [x] Cutover: `grapes-worker` + `grapes-enrichment` вместо analytics + host timers
+- [x] HTTP clickhouse-client shim (SIGILL native CLI на nta)
 - [ ] CH `:8123`/`:9000` снаружи не открывать (сейчас DROP)
 - [ ] Сменить пароль UI `admin`
 - [ ] Дожать BMP с роутеров `.251` / `.252` (router-side)
 - [ ] Опционально: после стабильного RIB поднять `BGPORIGIN_MIN_PREFIXES`
-- [ ] Опционально: loaders `ip_asn_prefixes` / `asn_names`
-- [ ] Опционально: единый образ `grapes-worker` вместо analytics docker + host timers
+- [ ] Опционально: loader `ip_asn_prefixes` (asn-names уже в enrichment)
 - [ ] При необходимости: SNMP / XDP / dnsflowd по профилю площадки
 
 ---
@@ -437,13 +501,13 @@ curl -sS http://127.0.0.1:3000/api/health | head -c 200; echo
 nta-bootstrap.sh           # Docker + CH + schema
 nta-install-collectors.sh  # Go build + collectors (частично упал)
 nta-finish-collectors.sh   # добивка systemd collectors
-nta-install-worker.sh      # analytics + rollups + geoloaderd
+nta-install-worker.sh      # legacy: analytics + host rollups/geo
 nta-fix-worker.sh         # staging DDL + --ignore-raw-lag + rerun
 nta-install-ui.sh          # grapes-nta из tarball
-# на следующих стендах сразу включать:
-#   bgp-origin-refresh.timer  (после bmpgrapes)
+# на следующих стендах сразу:
+#   deploy/worker + deploy/enrichment (Docker), не host timers
 #   BMP_LISTEN = порт роутеров + firewall allowlist
-#   traffic-talkers → ASN jobs
+#   traffic talkers → ASN jobs (уже в worker crontab)
 ```
 
 На сервере артефакты лежали в `/tmp/` и логировались через `tee` в том же
@@ -456,11 +520,13 @@ nta-install-ui.sh          # grapes-nta из tarball
 1. SSH survey → Docker  
 2. ClickHouse compose + секьюрные пароли + apply schema (70)  
 3. Collectors build/install → active `:6343` / BMP (сначала `:5000`, потом `:10179`)  
-4. Analytics docker + rollup/geo timers  
+4. Analytics docker + rollup/geo timers (legacy этап)  
 5. Fix staging + `--ignore-raw-lag` → geo/ASN загружены  
 6. UI docker → `:3000`, admin seeded, health ok  
-7. BMP peers online → поставили `bgp-origin-refresh` → origin RIB → ASN в flows  
+7. BMP peers online → `bgp-origin-refresh` → origin RIB → ASN в flows  
 8. Talkers переведены на ASN-only; IP talker/pair сняты  
+9. **2026-07-21:** cutover на `grapes-worker` + `grapes-enrichment`; host timers
+   disabled; HTTP-shim вместо native clickhouse-client; enrichment scheduler на Python  
 
-Итог: стенд принимает sFlow/BMP, отдаёт UI, geo/RIR и BGP-origin enrichment
-рабочие; talkers/pairs — ASN-агрегаты.
+Итог: стенд принимает sFlow/BMP, отдаёт UI; периодические jobs и enrichment —
+в Docker; collectors — на host systemd.
