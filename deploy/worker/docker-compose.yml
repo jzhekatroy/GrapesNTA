@@ -1,0 +1,22 @@
+# grapes-worker: observations + traffic/ASN rollups.
+#
+#   cd /opt/grapes/worker
+#   cp env.example .env && $EDITOR .env
+#   docker compose up -d --build
+#   docker logs -f grapes-worker
+
+services:
+  grapes-worker:
+    build:
+      context: ../..
+      dockerfile: deploy/worker/Dockerfile
+    image: grapes-worker:latest
+    container_name: grapes-worker
+    env_file:
+      - path: .env
+        required: true
+    restart: always
+    network_mode: host
+    volumes:
+      - ${WORKER_DATA_DIR:-./data}:/app/analytics/server/data
+      - ${WORKER_LOG_DIR:-./logs}:/var/log/grapesnta

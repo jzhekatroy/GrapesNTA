@@ -1,0 +1,46 @@
+# grapes-worker
+
+Docker service for **periodic CH aggregates** (minute-scale):
+
+- Observations rollup + scheduled reports (Node, long-running)
+- Traffic dashboard/direction/… rollups (Python, every minute)
+- ASN talkers/pairs rollups (Python, every 5 minutes)
+
+Replaces host `grapes-analytics` + `traffic-rollups.timer` + `traffic-talkers-rollups.timer`.
+
+Enrichment (geo/bgp/asn-names) lives in [`../enrichment/`](../enrichment/).
+
+## Deploy
+
+```bash
+cd /opt/GrapesNTA
+git pull
+
+cd deploy/worker
+cp -n env.example .env
+# fill CLICKHOUSE_* and TRAFFIC_ROLLUP_* passwords
+
+mkdir -p data logs
+chown -R 1001:1001 data   # same uid as old grapes-analytics
+
+docker compose up -d --build
+docker logs --tail 80 -f grapes-worker
+```
+
+Expect: `grapes-worker: starting observations loop`, then `analytics started` / `analytics tick`.
+
+## Cutover from host timers
+
+1. Start `grapes-worker` and verify rollups + observations.
+2. `docker stop grapes-analytics` (or remove container).
+3. `systemctl disable --now traffic-rollups.timer traffic-talkers-rollups.timer`
+
+Do **not** run two observation workers or two rollup timers against the same CH.
+
+## Rollback
+
+```bash
+docker compose down
+systemctl enable --now traffic-rollups.timer traffic-talkers-rollups.timer
+cd /opt/grapes/worker/../analytics && docker compose up -d
+```

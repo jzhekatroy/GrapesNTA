@@ -1,0 +1,8 @@
+# Daily RIR geo + asn_registry (geoloaderd.timer). Holds enrichment-heavy lock.
+0 3 * * * flock -n /tmp/enrichment-heavy.lock /app/bin/cron-geoloaderd.sh
+
+# BGP origin rebuild every 5 minutes; skip while RIR job holds enrichment-heavy lock.
+*/5 * * * * flock -n /tmp/bgp-origin.lock sh -c 'flock -n /tmp/enrichment-heavy.lock /app/bin/cron-bgp-origin.sh'
+
+# Weekly ASN names from Team Cymru (asn-names-loader.timer).
+0 4 * * 0 flock -n /tmp/asn-names.lock /app/bin/cron-asn-names.sh

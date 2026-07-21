@@ -1,0 +1,25 @@
+# grapes-enrichment: geo/RIR, bgp-origin, asn-names.
+#
+#   cd /opt/grapes/enrichment
+#   cp env.example .env && $EDITOR .env
+#   docker compose up -d --build
+#   docker logs -f grapes-enrichment
+
+services:
+  grapes-enrichment:
+    build:
+      context: ../..
+      dockerfile: deploy/enrichment/Dockerfile
+    image: grapes-enrichment:latest
+    container_name: grapes-enrichment
+    env_file:
+      - path: .env
+        required: true
+    restart: always
+    network_mode: host
+    volumes:
+      - ${ENRICHMENT_CACHE_DIR:-geoloaderd-cache}:/var/lib/geoloaderd/cache
+      - ${ENRICHMENT_LOG_DIR:-./logs}:/var/log/grapesnta
+
+volumes:
+  geoloaderd-cache:

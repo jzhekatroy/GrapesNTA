@@ -1,0 +1,5 @@
+# Dashboard / direction rollups — every minute (matches traffic-rollups.timer).
+* * * * * flock -n /tmp/traffic-rollups.lock /app/bin/cron-traffic-rollups.sh
+
+# ASN talkers / pairs — every 5 minutes (matches traffic-talkers-rollups.timer).
+*/5 * * * * flock -n /tmp/traffic-talkers.lock /app/bin/cron-traffic-talkers.sh
