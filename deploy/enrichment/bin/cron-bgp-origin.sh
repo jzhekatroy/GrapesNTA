@@ -8,7 +8,7 @@ if [ -f /app/.env ]; then
   set +a
 fi
 
-export BGPORIGIN_CLICKHOUSE_CLIENT="${BGPORIGIN_CLICKHOUSE_CLIENT:-/usr/local/bin/clickhouse-client}"
+export BGPORIGIN_CLICKHOUSE_CLIENT=/usr/local/bin/clickhouse-client
 export CLICKHOUSE_HTTP_HOST="${BGPORIGIN_CH_HOST:-127.0.0.1}"
 export CLICKHOUSE_HTTP_PORT="${CLICKHOUSE_HTTP_PORT:-8123}"
 export CLICKHOUSE_HTTP_USER="${BGPORIGIN_CH_USER:-default}"

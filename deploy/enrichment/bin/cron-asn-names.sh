@@ -8,7 +8,7 @@ if [ -f /app/.env ]; then
   set +a
 fi
 
-export ASNNAMES_CLICKHOUSE_CLIENT="${ASNNAMES_CLICKHOUSE_CLIENT:-/usr/local/bin/clickhouse-client}"
+export ASNNAMES_CLICKHOUSE_CLIENT=/usr/local/bin/clickhouse-client
 export CLICKHOUSE_HTTP_HOST="${GEOLOADERD_CH_HOST:-${ASNNAMES_CH_HOST:-127.0.0.1}}"
 export CLICKHOUSE_HTTP_PORT="${CLICKHOUSE_HTTP_PORT:-8123}"
 export CLICKHOUSE_HTTP_USER="${GEOLOADERD_CH_USER:-${ASNNAMES_CH_USER:-default}}"

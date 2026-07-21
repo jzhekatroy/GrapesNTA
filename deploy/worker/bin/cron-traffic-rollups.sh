@@ -8,7 +8,7 @@ if [ -f /app/.env ]; then
   set +a
 fi
 
-export TRAFFIC_ROLLUP_CLICKHOUSE_CLIENT="${TRAFFIC_ROLLUP_CLICKHOUSE_CLIENT:-/usr/local/bin/clickhouse-client}"
+export TRAFFIC_ROLLUP_CLICKHOUSE_CLIENT=/usr/local/bin/clickhouse-client
 export CLICKHOUSE_HTTP_HOST="${TRAFFIC_ROLLUP_CH_HOST:-127.0.0.1}"
 export CLICKHOUSE_HTTP_PORT="${CLICKHOUSE_HTTP_PORT:-8123}"
 export CLICKHOUSE_HTTP_USER="${TRAFFIC_ROLLUP_CH_USER:-default}"
