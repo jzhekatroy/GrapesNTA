@@ -17,10 +17,9 @@ RUN apt-get update \
 COPY scripts/load_rir_geo.py scripts/rebuild_bgp_origin_asn.py scripts/load_asn_names.py /app/scripts/
 COPY deploy/enrichment/bin /app/bin
 COPY deploy/enrichment/scheduler.py /app/scheduler.py
-COPY deploy/enrichment/bin/clickhouse-client-http.sh /app/bin/clickhouse-client-http.sh
 COPY deploy/enrichment/entrypoint.sh /app/entrypoint.sh
 
-RUN chmod +x /app/entrypoint.sh /app/bin/*.sh /app/scheduler.py \
+RUN chmod +x /app/entrypoint.sh /app/bin/*.sh /app/bin/report_job_status.py /app/scheduler.py \
   && ln -sf /app/bin/clickhouse-client-http.sh /usr/local/bin/clickhouse-client \
   && mkdir -p /var/lib/geoloaderd/cache /var/log/grapesnta
 

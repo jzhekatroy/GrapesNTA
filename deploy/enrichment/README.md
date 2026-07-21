@@ -10,6 +10,10 @@ Scheduler: Python `scheduler.py` inside the container (not systemd, not supercro
 ClickHouse access: HTTP shim (`clickhouse-client-http.sh`) on `:8123` — native
 client packages often SIGILL on older CPUs.
 
+Job status (for UI Diagnostics → grapes-enrichment) is written to
+`enrichment_job_status` by `bin/run_job.sh` / `bin/report_job_status.py`
+(status, exit_code, duration, message, log_tail).
+
 Replaces host `geoloaderd.timer`, `bgp-origin-refresh.timer`, `asn-names-loader.timer`.
 
 Fast rollups + observations live in [`../worker/`](../worker/).

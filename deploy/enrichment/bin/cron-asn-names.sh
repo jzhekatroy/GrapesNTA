@@ -14,4 +14,4 @@ export CLICKHOUSE_HTTP_PORT="${CLICKHOUSE_HTTP_PORT:-8123}"
 export CLICKHOUSE_HTTP_USER="${GEOLOADERD_CH_USER:-${ASNNAMES_CH_USER:-default}}"
 export CLICKHOUSE_HTTP_PASSWORD="${GEOLOADERD_CH_PASSWORD:-${ASNNAMES_CH_PASSWORD:-}}"
 
-exec python3 /app/scripts/load_asn_names.py
+exec /app/bin/run_job.sh asn-names python3 /app/scripts/load_asn_names.py

@@ -34,6 +34,7 @@ def run_locked(name: str, script: str, lock_path: str) -> None:
             except BlockingIOError:
                 log(f"{name}: skip (geoloaderd heavy lock held)")
                 heavy.close()
+                _report_skipped(name, "geoloaderd heavy lock held")
                 return
             heavy.close()
         except OSError as e:
@@ -45,6 +46,7 @@ def run_locked(name: str, script: str, lock_path: str) -> None:
     except BlockingIOError:
         log(f"{name}: skip (already running)")
         lockf.close()
+        _report_skipped(name, "already running")
         return
 
     log(f"{name}: start {script}")
@@ -54,6 +56,27 @@ def run_locked(name: str, script: str, lock_path: str) -> None:
     finally:
         fcntl.flock(lockf.fileno(), fcntl.LOCK_UN)
         lockf.close()
+
+
+def _report_skipped(name: str, reason: str) -> None:
+    try:
+        subprocess.run(
+            [
+                "python3",
+                "/app/bin/report_job_status.py",
+                "--job",
+                name,
+                "--status",
+                "skipped",
+                "--exit-code",
+                "0",
+                "--message",
+                reason,
+            ],
+            check=False,
+        )
+    except OSError as e:
+        log(f"{name}: skip-status report failed: {e}")
 
 
 def main() -> int:
