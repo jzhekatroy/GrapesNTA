@@ -216,7 +216,7 @@ SELECT
     sum(coalesce(sampling_rate, 1)) AS flows_count
 FROM default.flows_raw
 WHERE {time_filter}
-  AND direction IN ('in', 'out', 'internal', 'transit')
+  AND direction IN ('in', 'out', 'internal', 'transit', 'unknown')
   AND (
       src_attachment_kind != 'unknown'
       OR dst_attachment_kind != 'unknown'
@@ -433,9 +433,11 @@ GROUP BY
         pre_delete_sql="ALTER TABLE default.traffic_unknown_port_1m DELETE WHERE minute = {bucket_dt}",
         time_filter_column="f.time_received_ns",
     ),
+    # Top Talkers / Pairs: ASN-only (UI reads traffic_asn_*). IP-keyed
+    # traffic_talker_* / traffic_pair_* are deprecated and no longer rolled up.
     RollupJob(
-        job_id="traffic_talker_1m",
-        dest_table="default.traffic_talker_1m",
+        job_id="traffic_asn_1m",
+        dest_table="default.traffic_asn_1m",
         bucket_kind="minute",
         time_column="time_received_ns",
         source_table="default.flows_raw",
@@ -447,15 +449,9 @@ SELECT
     source_id,
     endpoint_side,
     direction,
-    endpoint_ip,
     endpoint_asn,
     any(endpoint_as_name) AS endpoint_as_name,
-    endpoint_ip_country,
-    endpoint_as_country,
-    endpoint_scope,
-    any(endpoint_label) AS endpoint_label,
-    any(endpoint_network_name) AS endpoint_network_name,
-    endpoint_network_role,
+    any(endpoint_as_country) AS endpoint_as_country,
     sum(bytes) AS bytes,
     sum(packets) AS packets,
     sum(flow_weight) AS flows_count
@@ -469,73 +465,23 @@ FROM
         f.packets AS packets,
         coalesce(f.sampling_rate, 1) AS flow_weight,
         tupleElement(row, 1) AS endpoint_side,
-        tupleElement(row, 2) AS endpoint_ip,
-        tupleElement(row, 3) AS endpoint_asn,
-        tupleElement(row, 4) AS endpoint_as_name,
-        if(length(trimBoth(tupleElement(row, 5))) = 0, '??', trimBoth(tupleElement(row, 5))) AS endpoint_ip_country,
-        if(length(trimBoth(tupleElement(row, 6))) = 0, '??', trimBoth(tupleElement(row, 6))) AS endpoint_as_country,
-        tupleElement(row, 7) AS endpoint_scope,
-        tupleElement(row, 8) AS endpoint_label,
-        tupleElement(row, 9) AS endpoint_network_name,
-        tupleElement(row, 10) AS endpoint_network_role
+        tupleElement(row, 2) AS endpoint_asn,
+        tupleElement(row, 3) AS endpoint_as_name,
+        if(length(trimBoth(tupleElement(row, 4))) = 0, '??', trimBoth(tupleElement(row, 4))) AS endpoint_as_country
     FROM default.flows_raw AS f
     LEFT JOIN default.asn_registry_enriched AS src_as ON src_as.asn = f.src_asn
     LEFT JOIN default.asn_registry_enriched AS dst_as ON dst_as.asn = f.dst_asn
     ARRAY JOIN arrayZip(
         ['src', 'dst'],
-        [
-            if(
-                f.etype = 2048,
-                toString(toIPv4(reinterpretAsUInt32(reverse(substring(f.src_addr, 1, 4))))),
-                IPv6NumToString(f.src_addr)
-            ),
-            if(
-                f.etype = 2048,
-                toString(toIPv4(reinterpretAsUInt32(reverse(substring(f.dst_addr, 1, 4))))),
-                IPv6NumToString(f.dst_addr)
-            )
-        ],
         [f.src_asn, f.dst_asn],
         [
             multiIf(f.src_asn = 0, '', src_as.asn != 0 AND src_as.name != '', src_as.name, concat('AS', toString(f.src_asn))),
             multiIf(f.dst_asn = 0, '', dst_as.asn != 0 AND dst_as.name != '', dst_as.name, concat('AS', toString(f.dst_asn)))
         ],
         [
-            if(
-                f.etype = 2048,
-                dictGetString(
-                    'default.geo_country_dict',
-                    'cc',
-                    tuple(toIPv4(reinterpretAsUInt32(reverse(substring(f.src_addr, 1, 4)))))
-                ),
-                dictGetString(
-                    'default.geo_country_dict',
-                    'cc',
-                    tuple(toIPv6(IPv6NumToString(f.src_addr)))
-                )
-            ),
-            if(
-                f.etype = 2048,
-                dictGetString(
-                    'default.geo_country_dict',
-                    'cc',
-                    tuple(toIPv4(reinterpretAsUInt32(reverse(substring(f.dst_addr, 1, 4)))))
-                ),
-                dictGetString(
-                    'default.geo_country_dict',
-                    'cc',
-                    tuple(toIPv6(IPv6NumToString(f.dst_addr)))
-                )
-            )
-        ],
-        [
             if(f.src_asn = 0 OR src_as.asn = 0, '', toString(src_as.cc)),
             if(f.dst_asn = 0 OR dst_as.asn = 0, '', toString(dst_as.cc))
-        ],
-        [f.src_endpoint_scope, f.dst_endpoint_scope],
-        [f.src_label, f.dst_label],
-        [f.src_network_name, f.dst_network_name],
-        [f.src_network_role, f.dst_network_role]
+        ]
     ) AS row
     WHERE {time_filter}
 ) AS expanded
@@ -544,80 +490,30 @@ GROUP BY
     source_id,
     endpoint_side,
     direction,
-    endpoint_ip,
-    endpoint_asn,
-    endpoint_ip_country,
-    endpoint_as_country,
-    endpoint_scope,
-    endpoint_network_role
+    endpoint_asn
 """,
-        pre_delete_sql="ALTER TABLE default.traffic_talker_1m DELETE WHERE minute = {bucket_dt}",
+        pre_delete_sql="ALTER TABLE default.traffic_asn_1m DELETE WHERE minute = {bucket_dt}",
         time_filter_column="f.time_received_ns",
     ),
     RollupJob(
-        job_id="traffic_pair_1m",
-        dest_table="default.traffic_pair_1m",
+        job_id="traffic_asn_pair_1m",
+        dest_table="default.traffic_asn_pair_1m",
         bucket_kind="minute",
         time_column="time_received_ns",
         source_table="default.flows_raw",
         priority=110,
         depends_on=(),
         select_sql="""
-WITH
-    if(
-        f.etype = 2048,
-        toString(toIPv4(reinterpretAsUInt32(reverse(substring(f.src_addr, 1, 4))))),
-        IPv6NumToString(f.src_addr)
-    ) AS src_ip,
-    if(
-        f.etype = 2048,
-        toString(toIPv4(reinterpretAsUInt32(reverse(substring(f.dst_addr, 1, 4))))),
-        IPv6NumToString(f.dst_addr)
-    ) AS dst_ip,
-    if(
-        f.etype = 2048,
-        dictGetString(
-            'default.geo_country_dict',
-            'cc',
-            tuple(toIPv4(reinterpretAsUInt32(reverse(substring(f.src_addr, 1, 4)))))
-        ),
-        dictGetString(
-            'default.geo_country_dict',
-            'cc',
-            tuple(toIPv6(IPv6NumToString(f.src_addr)))
-        )
-    ) AS src_ip_country_raw,
-    if(
-        f.etype = 2048,
-        dictGetString(
-            'default.geo_country_dict',
-            'cc',
-            tuple(toIPv4(reinterpretAsUInt32(reverse(substring(f.dst_addr, 1, 4)))))
-        ),
-        dictGetString(
-            'default.geo_country_dict',
-            'cc',
-            tuple(toIPv6(IPv6NumToString(f.dst_addr)))
-        )
-    ) AS dst_ip_country_raw
 SELECT
     toStartOfMinute(f.time_received_ns) AS minute,
     f.source_id,
     f.direction,
-    src_ip,
-    dst_ip,
     f.src_asn,
     f.dst_asn,
     any(multiIf(f.src_asn = 0, '', src_as.asn != 0 AND src_as.name != '', src_as.name, concat('AS', toString(f.src_asn)))) AS src_as_name,
     any(multiIf(f.dst_asn = 0, '', dst_as.asn != 0 AND dst_as.name != '', dst_as.name, concat('AS', toString(f.dst_asn)))) AS dst_as_name,
-    if(length(trimBoth(src_ip_country_raw)) = 0, '??', trimBoth(src_ip_country_raw)) AS src_ip_country,
-    if(length(trimBoth(dst_ip_country_raw)) = 0, '??', trimBoth(dst_ip_country_raw)) AS dst_ip_country,
     any(if(f.src_asn = 0 OR src_as.asn = 0, '??', trimBoth(toString(src_as.cc)))) AS src_as_country,
     any(if(f.dst_asn = 0 OR dst_as.asn = 0, '??', trimBoth(toString(dst_as.cc)))) AS dst_as_country,
-    any(f.src_endpoint_scope) AS src_scope,
-    any(f.dst_endpoint_scope) AS dst_scope,
-    any(f.src_label) AS src_label,
-    any(f.dst_label) AS dst_label,
     sum(f.bytes) AS bytes,
     sum(f.packets) AS packets,
     sum(coalesce(f.sampling_rate, 1)) AS flows_count
@@ -629,14 +525,10 @@ GROUP BY
     minute,
     f.source_id,
     f.direction,
-    src_ip,
-    dst_ip,
     f.src_asn,
-    f.dst_asn,
-    src_ip_country,
-    dst_ip_country
+    f.dst_asn
 """,
-        pre_delete_sql="ALTER TABLE default.traffic_pair_1m DELETE WHERE minute = {bucket_dt}",
+        pre_delete_sql="ALTER TABLE default.traffic_asn_pair_1m DELETE WHERE minute = {bucket_dt}",
         time_filter_column="f.time_received_ns",
     ),
     RollupJob(
@@ -680,108 +572,68 @@ GROUP BY hour, source_id
         pre_delete_sql="ALTER TABLE default.traffic_dashboard_1h DELETE WHERE hour = {bucket_dt}",
     ),
     RollupJob(
-        job_id="traffic_talker_1h",
-        dest_table="default.traffic_talker_1h",
+        job_id="traffic_asn_1h",
+        dest_table="default.traffic_asn_1h",
         bucket_kind="hour",
         time_column="minute",
-        source_table="default.traffic_talker_1m",
+        source_table="default.traffic_asn_1m",
         priority=210,
-        depends_on=("traffic_talker_1m",),
-        # GROUP BY only the destination ORDER BY key columns; the remaining
-        # descriptive columns (as_name / label / network_name) are not part of
-        # the SummingMergeTree key, so the engine keeps an arbitrary value on
-        # collapse anyway. Grouping by them would only bloat the aggregation
-        # hash table (long Strings in the key) for no change in stored data.
-        # any() is consistent with SummingMergeTree's arbitrary-pick semantics.
-        # external group by is a safety net for unusually large hours.
+        depends_on=("traffic_asn_1m",),
         select_sql="""
 SELECT
     toStartOfHour(minute) AS hour,
     source_id,
     endpoint_side,
     direction,
-    endpoint_ip,
     endpoint_asn,
     any(endpoint_as_name) AS endpoint_as_name,
-    endpoint_ip_country,
-    endpoint_as_country,
-    endpoint_scope,
-    any(endpoint_label) AS endpoint_label,
-    any(endpoint_network_name) AS endpoint_network_name,
-    endpoint_network_role,
+    any(endpoint_as_country) AS endpoint_as_country,
     sum(bytes) AS bytes,
     sum(packets) AS packets,
     sum(flows_count) AS flows_count
-FROM default.traffic_talker_1m
+FROM default.traffic_asn_1m
 WHERE {time_filter}
 GROUP BY
     hour,
     source_id,
     endpoint_side,
     direction,
-    endpoint_ip,
-    endpoint_asn,
-    endpoint_ip_country,
-    endpoint_as_country,
-    endpoint_scope,
-    endpoint_network_role
-SETTINGS max_bytes_before_external_group_by = 8000000000, max_threads = 6
+    endpoint_asn
 """,
-        pre_delete_sql="ALTER TABLE default.traffic_talker_1h DELETE WHERE hour = {bucket_dt}",
+        pre_delete_sql="ALTER TABLE default.traffic_asn_1h DELETE WHERE hour = {bucket_dt}",
     ),
     RollupJob(
-        job_id="traffic_pair_1h",
-        dest_table="default.traffic_pair_1h",
+        job_id="traffic_asn_pair_1h",
+        dest_table="default.traffic_asn_pair_1h",
         bucket_kind="hour",
         time_column="minute",
-        source_table="default.traffic_pair_1m",
+        source_table="default.traffic_asn_pair_1m",
         priority=220,
-        depends_on=("traffic_pair_1m",),
-        # GROUP BY only the destination ORDER BY key columns. The descriptive
-        # columns (as_name / as_country / scope / label) are not part of the
-        # SummingMergeTree key, so the engine keeps an arbitrary value on
-        # collapse regardless. Grouping by them (4 long Strings in the key) is
-        # what blew the aggregation hash table past the memory limit for a full
-        # hour of pairs. any() matches SummingMergeTree's arbitrary-pick
-        # semantics and yields identical stored rows. external group by is a
-        # safety net for unusually large hours.
+        depends_on=("traffic_asn_pair_1m",),
         select_sql="""
 SELECT
     toStartOfHour(minute) AS hour,
     source_id,
     direction,
-    src_ip,
-    dst_ip,
     src_asn,
     dst_asn,
     any(src_as_name) AS src_as_name,
     any(dst_as_name) AS dst_as_name,
-    src_ip_country,
-    dst_ip_country,
     any(src_as_country) AS src_as_country,
     any(dst_as_country) AS dst_as_country,
-    any(src_scope) AS src_scope,
-    any(dst_scope) AS dst_scope,
-    any(src_label) AS src_label,
-    any(dst_label) AS dst_label,
     sum(bytes) AS bytes,
     sum(packets) AS packets,
     sum(flows_count) AS flows_count
-FROM default.traffic_pair_1m
+FROM default.traffic_asn_pair_1m
 WHERE {time_filter}
 GROUP BY
     hour,
     source_id,
     direction,
-    src_ip,
-    dst_ip,
     src_asn,
-    dst_asn,
-    src_ip_country,
-    dst_ip_country
-SETTINGS max_bytes_before_external_group_by = 8000000000, max_threads = 6
+    dst_asn
 """,
-        pre_delete_sql="ALTER TABLE default.traffic_pair_1h DELETE WHERE hour = {bucket_dt}",
+        pre_delete_sql="ALTER TABLE default.traffic_asn_pair_1h DELETE WHERE hour = {bucket_dt}",
     ),
     RollupJob(
         job_id="traffic_dashboard_1d",

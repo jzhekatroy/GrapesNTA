@@ -7,10 +7,10 @@ Wants=network-online.target
 Type=oneshot
 EnvironmentFile=-/etc/grapesnta/traffic-rollups.env
 EnvironmentFile=-/etc/grapesnta/traffic-talkers-rollups.env
-# Explicit job list: the heavy talker/pair rollups only. Must stay complete and
-# disjoint from traffic-rollups.service. pair_1h MUST stay here, otherwise the
-# 3h/6h/12h/24h "Pairs" tab goes stale because nothing advances it.
-ExecStart=/usr/bin/python3 /opt/GrapesNTA/scripts/traffic_rollup_async.py --jobs traffic_talker_1m,traffic_talker_1h,traffic_pair_1m,traffic_pair_1h
+# ASN-only Top Talkers / Pairs (UI reads traffic_asn_* / traffic_asn_pair_*).
+# Disjoint from traffic-rollups.service. asn_pair_1h MUST stay here so the
+# longer Pairs ranges stay fresh.
+ExecStart=/usr/bin/python3 /opt/GrapesNTA/scripts/traffic_rollup_async.py --jobs traffic_asn_1m,traffic_asn_1h,traffic_asn_pair_1m,traffic_asn_pair_1h
 StandardOutput=journal
 StandardError=journal
 TimeoutStartSec=3600

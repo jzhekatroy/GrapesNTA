@@ -174,9 +174,9 @@ func TestParseEthernetHeaderVLAN(t *testing.T) {
 	tagged = append(tagged, vlanHdr[:]...)
 	tagged = append(tagged, frame[12:]...)
 
-	pkt, ok := parseEthernetHeader(tagged)
-	if !ok {
-		t.Fatal("parse failed")
+	pkt, kind := parseEthernetHeader(tagged)
+	if kind != ethParseOK {
+		t.Fatalf("parse kind=%d", kind)
 	}
 	if pkt.vlan != 100 {
 		t.Fatalf("vlan=%d", pkt.vlan)
@@ -184,6 +184,43 @@ func TestParseEthernetHeaderVLAN(t *testing.T) {
 	if pkt.dstMAC != ([6]byte{0x00, 0x11, 0x22, 0x33, 0x44, 0x55}) ||
 		pkt.srcMAC != ([6]byte{0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff}) {
 		t.Fatalf("mac src=%x dst=%x", pkt.srcMAC, pkt.dstMAC)
+	}
+}
+
+func TestParseEthernetHeaderARPIsNonIP(t *testing.T) {
+	// dst/src MAC + ARP ethertype + minimal payload
+	frame := make([]byte, 42)
+	copy(frame[0:6], []byte{0xff, 0xff, 0xff, 0xff, 0xff, 0xff})
+	copy(frame[6:12], []byte{0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff})
+	binary.BigEndian.PutUint16(frame[12:14], 0x0806)
+	pkt, kind := parseEthernetHeader(frame)
+	if kind != ethParseNonIP {
+		t.Fatalf("kind=%d want non_ip", kind)
+	}
+	if pkt.etype != 0x0806 {
+		t.Fatalf("etype=%#x", pkt.etype)
+	}
+}
+
+func TestParseSFlowCountsARPAsNonIPNotError(t *testing.T) {
+	arp := make([]byte, 42)
+	copy(arp[0:6], []byte{0xff, 0xff, 0xff, 0xff, 0xff, 0xff})
+	copy(arp[6:12], []byte{0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff})
+	binary.BigEndian.PutUint16(arp[12:14], 0x0806)
+	dgram := buildTestSFlowDatagram(t, arp, 1000)
+	var m sflowMetrics
+	rows := parseSFlowV5(dgram, time.Now().UTC(), "sflow-default", nil, nil, &m)
+	if len(rows) != 0 {
+		t.Fatalf("rows=%d want 0", len(rows))
+	}
+	if m.nonIPSkipped.Load() != 1 {
+		t.Fatalf("nonIPSkipped=%d", m.nonIPSkipped.Load())
+	}
+	if m.parseErrors.Load() != 0 {
+		t.Fatalf("parseErrors=%d want 0", m.parseErrors.Load())
+	}
+	if m.recordsParsed.Load() != 0 {
+		t.Fatalf("recordsParsed=%d want 0", m.recordsParsed.Load())
 	}
 }
 

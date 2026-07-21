@@ -39,7 +39,7 @@ func TestDeriveDirection(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := DeriveDirection(true, tc.src, tc.dst)
+			got := DeriveDirection(tc.src, tc.dst)
 			if got != tc.want {
 				t.Fatalf("DeriveDirection() = %q, want %q", got, tc.want)
 			}
@@ -47,10 +47,14 @@ func TestDeriveDirection(t *testing.T) {
 	}
 }
 
-func TestDeriveDirectionNoConfig(t *testing.T) {
-	got := DeriveDirection(false, EndpointClass{Role: "internal"}, EndpointClass{Role: "remote"})
-	if got != "unknown" {
-		t.Fatalf("DeriveDirection() = %q, want unknown", got)
+func TestDeriveDirectionEmptyCatalogIsTransit(t *testing.T) {
+	// Empty L3 catalog → classify() yields remote/remote → transit.
+	got := DeriveDirection(
+		EndpointClass{Role: "remote"},
+		EndpointClass{Role: "remote"},
+	)
+	if got != "transit" {
+		t.Fatalf("DeriveDirection() = %q, want transit", got)
 	}
 }
 
@@ -182,7 +186,7 @@ func TestClassifyPairOutboundUsesLocalOriginASN(t *testing.T) {
 
 	src := st.classify(netip.MustParseAddr("188.143.128.236"), 0)
 	dst := st.classify(netip.MustParseAddr("142.250.74.46"), 0)
-	direction := DeriveDirection(st.hasLocalConfig, src, dst)
+	direction := DeriveDirection(src, dst)
 	if direction != "out" {
 		t.Fatalf("direction = %q, want out", direction)
 	}

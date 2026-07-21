@@ -58,7 +58,9 @@ remote IPs rely only on `bgp_prefix_origin_current`.
 | local-or-customer | local-or-customer | `internal` |
 | remote | remote | `transit` |
 
-If no L3 prefixes are configured, direction is `unknown`.
+If no L3 prefixes are configured, every address falls back to role `remote`,
+so direction is **`transit`** (not `unknown`). `unknown` means the classifier
+could not classify the endpoints (disabled / unparseable), not “catalog empty”.
 
 ## Required DDL
 

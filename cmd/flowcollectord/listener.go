@@ -262,6 +262,7 @@ func (l *sflowListener) LogMetrics() {
 		"datagrams", l.metrics.datagrams.Load(),
 		"flow_samples", l.metrics.flowSamples.Load(),
 		"records_parsed", l.metrics.recordsParsed.Load(),
+		"non_ip_skipped", l.metrics.nonIPSkipped.Load(),
 		"counter_skipped", l.metrics.counterSkipped.Load(),
 		"parse_errors", l.metrics.parseErrors.Load(),
 		"unknown_samples", l.metrics.unknownSamples.Load(),

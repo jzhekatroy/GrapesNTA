@@ -342,7 +342,7 @@ func (tc *TrafficClassifier) ClassifyPair(src, dst [16]byte, ipVersion uint8, sr
 	}
 	srcClass := st.classify(srcAddr, srcVLAN)
 	dstClass := st.classify(dstAddr, dstVLAN)
-	return srcClass, dstClass, DeriveDirection(st.hasLocalConfig, srcClass, dstClass)
+	return srcClass, dstClass, DeriveDirection(srcClass, dstClass)
 }
 
 func (st *classifierState) classify(addr netip.Addr, vlan uint16) EndpointClass {
@@ -420,10 +420,11 @@ func (st *classifierState) lookupL3Prefix(addr netip.Addr) (prefixClass, bool) {
 	return st.l3v6.Lookup(addr)
 }
 
-func DeriveDirection(hasLocalConfig bool, src, dst EndpointClass) string {
-	if !hasLocalConfig {
-		return "unknown"
-	}
+// DeriveDirection maps endpoint roles to traffic direction.
+// Unmatched addresses are role=remote, so with an empty L3 catalog both sides
+// are remote → transit (not "unknown"). "unknown" is reserved for classifier
+// off / unparseable endpoints, not for "networks not labeled yet".
+func DeriveDirection(src, dst EndpointClass) string {
 	srcLocal := isLocalOrCustomerRole(src.Role)
 	dstLocal := isLocalOrCustomerRole(dst.Role)
 	switch {

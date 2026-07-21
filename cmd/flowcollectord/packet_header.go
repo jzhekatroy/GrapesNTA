@@ -27,10 +27,19 @@ type parsedPacket struct {
 	tcpFlags  uint8 // TCP flags byte (FIN..CWR); zero for non-TCP
 }
 
-func parseEthernetHeader(b []byte) (parsedPacket, bool) {
+// ethParseKind distinguishes IP flows from expected L2 non-IP (ARP, etc.).
+type ethParseKind uint8
+
+const (
+	ethParseOK ethParseKind = iota
+	ethParseNonIP
+	ethParseError
+)
+
+func parseEthernetHeader(b []byte) (parsedPacket, ethParseKind) {
 	var out parsedPacket
 	if len(b) < 14 {
-		return out, false
+		return out, ethParseError
 	}
 	// Ethernet II: destination MAC (0:6), source MAC (6:12), then EtherType.
 	copy(out.dstMAC[:], b[0:6])
@@ -41,7 +50,7 @@ func parseEthernetHeader(b []byte) (parsedPacket, bool) {
 
 	for etype == ethTypeVLAN || etype == ethTypeQinQ {
 		if len(b) < off+4 {
-			return out, false
+			return out, ethParseError
 		}
 		tci := binary.BigEndian.Uint16(b[off : off+2])
 		if out.vlan == 0 {
@@ -55,11 +64,20 @@ func parseEthernetHeader(b []byte) (parsedPacket, bool) {
 	out.etype = uint32(etype)
 	switch etype {
 	case ethTypeIPv4:
-		return parseIPv4Header(b[off:], out)
+		pkt, ok := parseIPv4Header(b[off:], out)
+		if !ok {
+			return pkt, ethParseError
+		}
+		return pkt, ethParseOK
 	case ethTypeIPv6:
-		return parseIPv6Header(b[off:], out)
+		pkt, ok := parseIPv6Header(b[off:], out)
+		if !ok {
+			return pkt, ethParseError
+		}
+		return pkt, ethParseOK
 	default:
-		return out, false
+		// ARP and other L2: expected on switch sFlow, not a parse failure.
+		return out, ethParseNonIP
 	}
 }
 

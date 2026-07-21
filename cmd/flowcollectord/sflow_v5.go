@@ -30,6 +30,7 @@ type sflowMetrics struct {
 	flowSamples     atomic.Uint64
 	counterSkipped  atomic.Uint64
 	recordsParsed   atomic.Uint64
+	nonIPSkipped    atomic.Uint64
 	parseErrors     atomic.Uint64
 	unknownSamples  atomic.Uint64
 	udpQueueDrops   atomic.Uint64
@@ -241,17 +242,22 @@ func parseFlowSample(
 			}
 			continue
 		case sflowFlowRawHeader:
-			row, ok := flowRowFromRawHeader(recordBody, receivedAt, sourceID, sampler, samplingRate, inIf, outIf, extInVLAN, extOutVLAN, classifier, seq)
-			if !ok {
+			row, kind := flowRowFromRawHeader(recordBody, receivedAt, sourceID, sampler, samplingRate, inIf, outIf, extInVLAN, extOutVLAN, classifier, seq)
+			switch kind {
+			case ethParseOK:
+				if m != nil {
+					m.recordsParsed.Add(1)
+				}
+				rows = append(rows, row)
+			case ethParseNonIP:
+				if m != nil {
+					m.nonIPSkipped.Add(1)
+				}
+			default:
 				if m != nil {
 					m.parseErrors.Add(1)
 				}
-				continue
 			}
-			if m != nil {
-				m.recordsParsed.Add(1)
-			}
-			rows = append(rows, row)
 		default:
 			continue
 		}
@@ -288,24 +294,24 @@ func flowRowFromRawHeader(
 	extInVLAN, extOutVLAN uint16,
 	classifier *flowingest.TrafficClassifier,
 	seq *uint32,
-) (flowingest.FlowRow, bool) {
+) (flowingest.FlowRow, ethParseKind) {
 	if len(b) < 16 {
-		return flowingest.FlowRow{}, false
+		return flowingest.FlowRow{}, ethParseError
 	}
 	headerProtocol := binary.BigEndian.Uint32(b[0:4])
 	if headerProtocol != sflowHeaderEthernet {
-		return flowingest.FlowRow{}, false
+		return flowingest.FlowRow{}, ethParseError
 	}
 	frameLength := binary.BigEndian.Uint32(b[4:8])
 	// stripped := binary.BigEndian.Uint32(b[8:12])
 	headerLength := binary.BigEndian.Uint32(b[12:16])
 	if headerLength == 0 || len(b) < 16+int(headerLength) {
-		return flowingest.FlowRow{}, false
+		return flowingest.FlowRow{}, ethParseError
 	}
 	headerBytes := b[16 : 16+headerLength]
-	pkt, ok := parseEthernetHeader(headerBytes)
-	if !ok {
-		return flowingest.FlowRow{}, false
+	pkt, kind := parseEthernetHeader(headerBytes)
+	if kind != ethParseOK {
+		return flowingest.FlowRow{}, kind
 	}
 
 	var rowSeq uint32
@@ -354,7 +360,7 @@ func flowRowFromRawHeader(
 		)
 		flowingest.ApplyEndpointClasses(&row, srcClass, dstClass, direction)
 	}
-	return row, true
+	return row, ethParseOK
 }
 
 func agentAddressFromIP(ip net.IP) ([16]byte, bool) {

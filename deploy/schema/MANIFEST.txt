@@ -20,6 +20,8 @@
 40_enrichment/05_ip_asn_prefixes_staging.sql
 40_enrichment/06_asn_names.sql
 40_enrichment/07_asn_registry.sql
+40_enrichment/08_asn_registry_staging.sql
+40_enrichment/09_asn_registry_enriched.sql
 50_net/01_net_locations.sql
 50_net/02_net_collectors.sql
 50_net/03_net_entities.sql
