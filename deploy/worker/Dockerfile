@@ -18,19 +18,12 @@ RUN apt-get update \
     python3 \
     ca-certificates \
     curl \
-    gnupg \
-    apt-transport-https \
     util-linux \
-  && curl -fsSL 'https://packages.clickhouse.com/rpm/lts/repodata/repomd.xml.key' \
-    | gpg --dearmor -o /usr/share/keyrings/clickhouse-keyring.gpg \
-  && echo "deb [signed-by=/usr/share/keyrings/clickhouse-keyring.gpg] https://packages.clickhouse.com/deb stable main" \
-    > /etc/apt/sources.list.d/clickhouse.list \
-  && apt-get update \
-  && apt-get install -y --no-install-recommends clickhouse-client \
   && curl -fsSL -o /usr/local/bin/supercronic \
     https://github.com/aptible/supercronic/releases/download/v0.2.33/supercronic-linux-amd64 \
   && chmod +x /usr/local/bin/supercronic \
   && rm -rf /var/lib/apt/lists/*
+# Native clickhouse-client deb often SIGILL on older CPUs; use HTTP shim instead.
 
 RUN groupadd --gid 1001 app \
   && useradd --uid 1001 --gid app --shell /bin/sh --create-home app
@@ -44,6 +37,7 @@ COPY deploy/worker/rollups.crontab /etc/grapesnta/rollups.crontab
 COPY deploy/worker/entrypoint.sh /app/entrypoint.sh
 
 RUN chmod +x /app/entrypoint.sh /app/bin/*.sh \
+  && ln -sf /app/bin/clickhouse-client-http.sh /usr/local/bin/clickhouse-client \
   && mkdir -p /app/analytics/server/data/observation_runs /var/log/grapesnta \
   && chown -R app:app /app/analytics/server/data /var/log/grapesnta
 

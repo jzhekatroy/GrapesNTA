@@ -6,6 +6,10 @@ Docker service for **slow / external enrichment** (hours–days):
 - `bgp-origin-refresh` — BMP events → `bgp_prefix_origin_current` (every 5 min)
 - `asn-names-loader` — Team Cymru → `asn_names` (weekly)
 
+Scheduler: Python `scheduler.py` inside the container (not systemd, not supercronic).
+ClickHouse access: HTTP shim (`clickhouse-client-http.sh`) on `:8123` — native
+client packages often SIGILL on older CPUs.
+
 Replaces host `geoloaderd.timer`, `bgp-origin-refresh.timer`, `asn-names-loader.timer`.
 
 Fast rollups + observations live in [`../worker/`](../worker/).

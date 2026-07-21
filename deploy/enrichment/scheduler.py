@@ -1,0 +1,87 @@
+#!/usr/bin/env python3
+"""Minimal job scheduler for grapes-enrichment (replaces supercronic)."""
+
+from __future__ import annotations
+
+import fcntl
+import os
+import subprocess
+import sys
+import time
+from datetime import datetime, timezone
+
+JOBS = [
+    # (name, script, interval_sec, lock_path)
+    ("bgp-origin", "/app/bin/cron-bgp-origin.sh", 300, "/tmp/bgp-origin.lock"),
+    ("geoloaderd", "/app/bin/cron-geoloaderd.sh", 86400, "/tmp/enrichment-heavy.lock"),
+    ("asn-names", "/app/bin/cron-asn-names.sh", 604800, "/tmp/asn-names.lock"),
+]
+
+
+def log(msg: str) -> None:
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    print(f"{ts} {msg}", flush=True)
+
+
+def run_locked(name: str, script: str, lock_path: str) -> None:
+    # Skip bgp while heavy RIR lock is held.
+    if name == "bgp-origin":
+        try:
+            heavy = open("/tmp/enrichment-heavy.lock", "a+", encoding="utf-8")
+            try:
+                fcntl.flock(heavy.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                fcntl.flock(heavy.fileno(), fcntl.LOCK_UN)
+            except BlockingIOError:
+                log(f"{name}: skip (geoloaderd heavy lock held)")
+                heavy.close()
+                return
+            heavy.close()
+        except OSError as e:
+            log(f"{name}: heavy-lock check failed: {e}")
+
+    lockf = open(lock_path, "a+", encoding="utf-8")
+    try:
+        fcntl.flock(lockf.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        log(f"{name}: skip (already running)")
+        lockf.close()
+        return
+
+    log(f"{name}: start {script}")
+    try:
+        proc = subprocess.run([script], check=False)
+        log(f"{name}: exit={proc.returncode}")
+    finally:
+        fcntl.flock(lockf.fileno(), fcntl.LOCK_UN)
+        lockf.close()
+
+
+def main() -> int:
+    if os.path.isfile("/app/.env"):
+        # Best-effort load for interactive debugging; docker env_file already injects vars.
+        with open("/app/.env", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                k, v = line.split("=", 1)
+                os.environ.setdefault(k, v)
+
+    last_run = {name: 0.0 for name, *_ in JOBS}
+    # Run bgp-origin soon after start; delay heavy jobs a bit.
+    last_run["bgp-origin"] = time.time() - 240
+    last_run["geoloaderd"] = time.time()  # wait ~1 day unless forced
+    last_run["asn-names"] = time.time()
+
+    log("grapes-enrichment scheduler started")
+    while True:
+        now = time.time()
+        for name, script, interval, lock_path in JOBS:
+            if now - last_run[name] >= interval:
+                last_run[name] = now
+                run_locked(name, script, lock_path)
+        time.sleep(30)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
