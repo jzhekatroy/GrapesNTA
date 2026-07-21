@@ -15,6 +15,7 @@ JOBS = [
     ("bgp-origin", "/app/bin/cron-bgp-origin.sh", 300, "/tmp/bgp-origin.lock"),
     ("geoloaderd", "/app/bin/cron-geoloaderd.sh", 86400, "/tmp/enrichment-heavy.lock"),
     ("asn-names", "/app/bin/cron-asn-names.sh", 604800, "/tmp/asn-names.lock"),
+    ("snmp-iface-sync", "/app/bin/cron-snmp-iface-sync.sh", 60, "/tmp/snmp-iface-sync.lock"),
 ]
 
 
@@ -95,6 +96,7 @@ def main() -> int:
     last_run["bgp-origin"] = time.time() - 240
     last_run["geoloaderd"] = time.time()  # wait ~1 day unless forced
     last_run["asn-names"] = time.time()
+    last_run["snmp-iface-sync"] = 0.0  # run on first tick
 
     log("grapes-enrichment scheduler started")
     while True:
