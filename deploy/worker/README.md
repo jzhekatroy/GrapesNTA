@@ -18,6 +18,8 @@ On the server (preferred):
 cd /opt/GrapesNTA
 ./deploy/deploy.sh worker          # git pull + rebuild grapes-worker
 ./deploy/deploy.sh                 # worker + enrichment
+./deploy/deploy.sh ui              # NTAdmin → grapes-nta
+./deploy/deploy.sh full            # worker + enrichment + ui
 ./deploy/deploy.sh logs worker     # follow logs
 ```
 
