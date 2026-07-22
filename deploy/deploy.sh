@@ -5,46 +5,42 @@
 #   /opt/GrapesNTA                   ← this repo (git pull)
 #   /opt/GrapesNTA/deploy/worker     ← grapes-worker compose + .env
 #   /opt/GrapesNTA/deploy/enrichment ← grapes-enrichment compose + .env
-#   /opt/grapes/ui                   ← grapes-nta compose + .env
-#   /opt/grapes/ui/app               ← NTAdmin build context (sources)
-#   /opt/NTAdmin                     ← optional git mirror of NTAdmin (auto-cloned)
+#   /opt/GrapesNTA/deploy/ui         ← grapes-nta compose + vendored NTAdmin app/
+#   /opt/grapes/ui/.env              ← legacy secrets (copied once into deploy/ui/.env)
+#   /opt/grapes/ui/data              ← UI data volume (default UI_DATA_DIR)
 #
 # Usage (as root on the server):
 #   cd /opt/GrapesNTA
 #   ./deploy/deploy.sh              # pull + rebuild worker + enrichment
 #   ./deploy/deploy.sh worker       # only grapes-worker
 #   ./deploy/deploy.sh enrichment   # only grapes-enrichment
-#   ./deploy/deploy.sh ui           # pull NTAdmin + rebuild grapes-nta
+#   ./deploy/deploy.sh ui           # pull + rebuild grapes-nta (from this repo)
 #   ./deploy/deploy.sh full         # worker + enrichment + ui
-#   ./deploy/deploy.sh pull         # only git pull (GrapesNTA; + NTAdmin if present)
-#   ./deploy/deploy.sh status       # containers + repo heads
+#   ./deploy/deploy.sh pull         # only git pull
+#   ./deploy/deploy.sh status       # containers + repo head
 #   ./deploy/deploy.sh logs [svc]   # follow logs (worker|enrichment|ui|all)
-#   ./deploy/deploy.sh --no-pull ui # rebuild UI without git pull
+#   ./deploy/deploy.sh --no-pull ui # rebuild without git pull
 #
 # Optional env:
-#   UI_DIR=/opt/grapes/ui
-#   UI_APP_DIR=/opt/grapes/ui/app
-#   UI_MIRROR=/opt/NTAdmin
-#   UI_GIT_URL=https://github.com/mavotronik/NTAdmin.git
-#   UI_TARBALL=/path/ntadmin.tgz   # bootstrap mirror without GitHub auth
+#   UI_DATA_DIR=/opt/grapes/ui/data
+#   UI_LEGACY_ENV=/opt/grapes/ui/.env
 #
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WORKER_DIR="${REPO_ROOT}/deploy/worker"
 ENRICH_DIR="${REPO_ROOT}/deploy/enrichment"
-
-UI_DIR="${UI_DIR:-/opt/grapes/ui}"
-UI_APP_DIR="${UI_APP_DIR:-${UI_DIR}/app}"
-UI_MIRROR="${UI_MIRROR:-/opt/NTAdmin}"
-UI_GIT_URL="${UI_GIT_URL:-https://github.com/mavotronik/NTAdmin.git}"
+UI_DIR="${REPO_ROOT}/deploy/ui"
+UI_APP_DIR="${UI_DIR}/app"
+UI_DATA_DIR="${UI_DATA_DIR:-/opt/grapes/ui/data}"
+UI_LEGACY_ENV="${UI_LEGACY_ENV:-/opt/grapes/ui/.env}"
 
 DO_PULL=1
 TARGET=""
 LOG_TARGET=""
 
 usage() {
-  sed -n '2,32p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'
   exit "${1:-0}"
 }
 
@@ -65,88 +61,20 @@ need_compose_dir() {
   docker compose version >/dev/null 2>&1 || die "docker compose plugin required"
 }
 
-git_pull_dir() {
-  local dir="$1" label="$2"
-  [[ -d "${dir}/.git" ]] || die "${label}: ${dir} is not a git checkout"
-  local before after branch
-  before="$(git -C "${dir}" rev-parse --short HEAD)"
-  branch="$(git -C "${dir}" rev-parse --abbrev-ref HEAD)"
-  log "git pull ${label} origin ${branch} (was ${before})"
-  git -C "${dir}" pull --ff-only origin "${branch}"
-  after="$(git -C "${dir}" rev-parse --short HEAD)"
-  if [[ "${before}" == "${after}" ]]; then
-    log "${label}: already up to date (${after})"
-  else
-    log "${label}: updated ${before} → ${after}"
-    git -C "${dir}" --no-pager log --oneline "${before}..${after}" || true
-  fi
-}
-
 git_pull() {
-  git_pull_dir "${REPO_ROOT}" GrapesNTA
-}
-
-# Sync NTAdmin sources into the UI build context.
-# Prefer a git checkout inside UI_APP_DIR; otherwise keep a mirror at UI_MIRROR
-# and rsync into app/ (preserves the historical tarball layout).
-ui_pull() {
-  command -v git >/dev/null || die "git not found"
-  if [[ -d "${UI_APP_DIR}/.git" ]]; then
-    git_pull_dir "${UI_APP_DIR}" NTAdmin
-    return 0
-  fi
-
-  if [[ -d "${UI_MIRROR}/.git" ]]; then
-    local branch
-    branch="$(git -C "${UI_MIRROR}" rev-parse --abbrev-ref HEAD)"
-    log "git pull NTAdmin mirror origin ${branch}"
-    if ! GIT_TERMINAL_PROMPT=0 git -C "${UI_MIRROR}" pull --ff-only origin "${branch}"; then
-      die "git pull failed for ${UI_MIRROR} (check GitHub credentials). Use --no-pull ui to rebuild from current sources."
-    fi
-    log "NTAdmin mirror: $(git -C "${UI_MIRROR}" rev-parse --short HEAD)"
-  elif [[ -f "${UI_MIRROR}/package.json" ]]; then
-    log "NTAdmin mirror has no git — using existing tree at ${UI_MIRROR}"
-  elif [[ -n "${UI_TARBALL:-}" ]]; then
-    [[ -f "${UI_TARBALL}" ]] || die "UI_TARBALL not found: ${UI_TARBALL}"
-    log "bootstrapping NTAdmin mirror from tarball ${UI_TARBALL} → ${UI_MIRROR}"
-    mkdir -p "${UI_MIRROR}"
-    tar -xzf "${UI_TARBALL}" -C "${UI_MIRROR}"
-    [[ -f "${UI_MIRROR}/package.json" ]] || die "tarball did not contain package.json at ${UI_MIRROR}"
+  cd "${REPO_ROOT}"
+  [[ -d .git ]] || die "${REPO_ROOT} is not a git checkout"
+  local before after branch
+  before="$(git rev-parse --short HEAD)"
+  branch="$(git rev-parse --abbrev-ref HEAD)"
+  log "git pull origin ${branch} (was ${before})"
+  git pull --ff-only origin "${branch}"
+  after="$(git rev-parse --short HEAD)"
+  if [[ "${before}" == "${after}" ]]; then
+    log "already up to date (${after})"
   else
-    log "NTAdmin mirror missing — cloning ${UI_GIT_URL} → ${UI_MIRROR}"
-    mkdir -p "$(dirname "${UI_MIRROR}")"
-    # Never hang on interactive username/password (private repo without creds).
-    if ! GIT_TERMINAL_PROMPT=0 git -c credential.helper= \
-        clone --branch main "${UI_GIT_URL}" "${UI_MIRROR}"; then
-      rm -rf "${UI_MIRROR}"
-      die "cannot clone private NTAdmin (no GitHub credentials on server).
-Options:
-  1) Create read-only PAT and:
-       git clone https://<TOKEN>@github.com/mavotronik/NTAdmin.git ${UI_MIRROR}
-  2) Or upload a tarball and:
-       UI_TARBALL=/path/ntadmin.tgz $0 ui
-  3) Or sync sources into ${UI_APP_DIR} yourself and:
-       $0 --no-pull ui"
-    fi
-  fi
-
-  [[ -d "${UI_APP_DIR}" ]] || die "missing UI app dir ${UI_APP_DIR}"
-  command -v rsync >/dev/null || die "rsync required to sync ${UI_MIRROR} → ${UI_APP_DIR}"
-  log "rsync ${UI_MIRROR}/ → ${UI_APP_DIR}/"
-  rsync -a --delete \
-    --exclude '.git/' \
-    --exclude 'node_modules/' \
-    --exclude 'server/data/' \
-    --exclude '.tmp/' \
-    --exclude '.env' \
-    --exclude '.env.*' \
-    "${UI_MIRROR}/" "${UI_APP_DIR}/"
-  if [[ -d "${UI_MIRROR}/.git" ]]; then
-    printf '  ui_app synced from %s (%s)\n' \
-      "${UI_MIRROR}" \
-      "$(git -C "${UI_MIRROR}" rev-parse --short HEAD)"
-  else
-    printf '  ui_app synced from %s (no git)\n' "${UI_MIRROR}"
+    log "updated ${before} → ${after}"
+    git --no-pager log --oneline "${before}..${after}" || true
   fi
 }
 
@@ -161,21 +89,51 @@ compose_up() {
   log "${name} is up"
 }
 
+ensure_ui_env() {
+  if [[ -f "${UI_DIR}/.env" ]]; then
+    return 0
+  fi
+  if [[ -f "${UI_LEGACY_ENV}" ]]; then
+    log "bootstrap ${UI_DIR}/.env from ${UI_LEGACY_ENV}"
+    cp "${UI_LEGACY_ENV}" "${UI_DIR}/.env"
+    chmod 600 "${UI_DIR}/.env"
+    return 0
+  fi
+  if [[ -f "${UI_DIR}/env.example" ]]; then
+    die "missing ${UI_DIR}/.env — copy from env.example (or from ${UI_LEGACY_ENV}) and fill secrets"
+  fi
+  die "missing ${UI_DIR}/.env"
+}
+
 ui_up() {
+  [[ -f "${UI_APP_DIR}/Dockerfile" ]] || die "missing vendored UI app at ${UI_APP_DIR} (run scripts/sync-ui-from-ntadmin.sh on a dev machine and push)"
+  [[ -f "${UI_APP_DIR}/package.json" ]] || die "missing ${UI_APP_DIR}/package.json"
+  ensure_ui_env
+  mkdir -p "${UI_DATA_DIR}"
+  # uid 1001 = app user inside grapes-nta image
+  if [[ -d "${UI_DATA_DIR}" ]]; then
+    chown -R 1001:1001 "${UI_DATA_DIR}" 2>/dev/null || true
+  fi
   need_compose_dir "${UI_DIR}" grapes-nta
-  [[ -f "${UI_APP_DIR}/Dockerfile" || -f "${UI_DIR}/Dockerfile" ]] \
-    || die "missing Dockerfile under ${UI_APP_DIR} or ${UI_DIR}"
-  log "rebuild grapes-nta in ${UI_DIR}"
+  log "rebuild grapes-nta in ${UI_DIR} (data=${UI_DATA_DIR})"
+  if [[ -f "${UI_DIR}/SOURCE.txt" ]]; then
+    log "UI source: $(tr '\n' ' ' <"${UI_DIR}/SOURCE.txt")"
+  fi
   (
     cd "${UI_DIR}"
-    docker compose up -d --build --remove-orphans
+    UI_DATA_DIR="${UI_DATA_DIR}" docker compose up -d --build --remove-orphans
   )
   log "grapes-nta is up"
-  if curl -fsS --max-time 5 "http://127.0.0.1:3000/api/health" >/tmp/grapes-nta-health.json 2>/dev/null; then
-    log "health: $(tr -d '\n' </tmp/grapes-nta-health.json | head -c 200)"
-  else
-    log "health check not ready yet — try: curl -sS http://127.0.0.1:3000/api/health"
-  fi
+  # brief wait for health
+  local i
+  for i in 1 2 3 4 5 6; do
+    if curl -fsS --max-time 3 "http://127.0.0.1:3000/api/health" >/tmp/grapes-nta-health.json 2>/dev/null; then
+      log "health: $(tr -d '\n' </tmp/grapes-nta-health.json | head -c 220)"
+      return 0
+    fi
+    sleep 2
+  done
+  log "health check not ready yet — try: curl -sS http://127.0.0.1:3000/api/health"
 }
 
 show_repo_line() {
@@ -203,17 +161,18 @@ show_status() {
   echo
   log "repos"
   show_repo_line "${REPO_ROOT}" GrapesNTA
-  show_repo_line "${UI_APP_DIR}" "UI app"
-  show_repo_line "${UI_MIRROR}" "UI mirror"
+  if [[ -f "${UI_DIR}/SOURCE.txt" ]]; then
+    printf '  UI vendored: %s\n' "$(tr '\n' ' ' <"${UI_DIR}/SOURCE.txt")"
+  fi
   echo
   log "recent worker logs"
-  docker logs --tail 12 grapes-worker 2>&1 || true
+  docker logs --tail 10 grapes-worker 2>&1 || true
   echo
   log "recent enrichment logs"
-  docker logs --tail 12 grapes-enrichment 2>&1 || true
+  docker logs --tail 10 grapes-enrichment 2>&1 || true
   echo
   log "recent ui logs"
-  docker logs --tail 12 grapes-nta 2>&1 || true
+  docker logs --tail 10 grapes-nta 2>&1 || true
 }
 
 follow_logs() {
@@ -278,33 +237,15 @@ case "${TARGET}" in
   pull)
     need_root
     git_pull
-    if [[ -d "${UI_APP_DIR}/.git" || -d "${UI_MIRROR}/.git" ]]; then
-      ui_pull
-    else
-      log "skip UI pull (no ${UI_APP_DIR}/.git and no ${UI_MIRROR}/.git yet)"
-    fi
     exit 0
     ;;
   worker|enrichment|ui|all|full)
     need_root
-    case "${TARGET}" in
-      worker|enrichment|all|full)
-        if [[ "${DO_PULL}" -eq 1 ]]; then
-          git_pull
-        else
-          log "skip GrapesNTA git pull (--no-pull)"
-        fi
-        ;;
-    esac
-    case "${TARGET}" in
-      ui|full)
-        if [[ "${DO_PULL}" -eq 1 ]]; then
-          ui_pull
-        else
-          log "skip UI git pull (--no-pull)"
-        fi
-        ;;
-    esac
+    if [[ "${DO_PULL}" -eq 1 ]]; then
+      git_pull
+    else
+      log "skip git pull (--no-pull)"
+    fi
     case "${TARGET}" in
       worker)      compose_up "${WORKER_DIR}" grapes-worker ;;
       enrichment)  compose_up "${ENRICH_DIR}" grapes-enrichment ;;

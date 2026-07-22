@@ -1,0 +1,11 @@
+node_modules/
+.DS_Store
+__MACOSX/
+_extracted_*
+src/
+.env
+.vscode/
+server/data/
+__pycache__/
+*.pyc
+bounds-service/data/

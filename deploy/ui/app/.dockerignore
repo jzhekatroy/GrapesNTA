@@ -1,0 +1,15 @@
+node_modules
+npm-debug.log*
+.env
+.env.*
+!.env.example
+.git
+.gitignore
+.DS_Store
+__MACOSX
+_extracted_*
+*.md
+!README.md
+Grapes NTA.html
+.cursor
+.vscode

@@ -4,3 +4,7 @@
 .env
 .env.*
 .clickhouse.env
+
+# UI runtime secrets (bootstrapped on server)
+deploy/ui/.env
+deploy/ui/data/

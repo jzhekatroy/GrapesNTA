@@ -1,0 +1,1838 @@
+/* HTTP-клиент к API бэкенда (ClickHouse). При недоступности API — пустые данные и ошибка загрузки. */
+
+const ApiClient = (() => {
+  const LOAD_FAILED = 'Не удалось загрузить';
+  let status = { connected: false, checkedAt: 0 };
+
+  function apiCustomPeriodParams(customPeriod) {
+    if (!customPeriod?.from || !customPeriod?.to) return null;
+    if (typeof displayDatetimeLocalToData === 'function') {
+      const displayTz = typeof getDisplayTimezone === 'function' ? getDisplayTimezone() : undefined;
+      return {
+        from: displayDatetimeLocalToData(customPeriod.from, displayTz),
+        to: displayDatetimeLocalToData(customPeriod.to, displayTz),
+      };
+    }
+    return { from: customPeriod.from, to: customPeriod.to };
+  }
+
+  function appendCustomPeriodParams(params, timeRange, customPeriod) {
+    if (timeRange === 'custom' && customPeriod?.from && customPeriod?.to) {
+      const apiPeriod = apiCustomPeriodParams(customPeriod);
+      params.set('range', 'custom');
+      params.set('from', apiPeriod.from);
+      params.set('to', apiPeriod.to);
+      return true;
+    }
+    params.set('range', timeRange || '24h');
+    return false;
+  }
+
+  async function checkHealth(force = false) {
+    const now = Date.now();
+    if (!force && now - status.checkedAt < 10000) return status;
+    try {
+      const res = await fetch('/api/health', { cache: 'no-store', credentials: 'same-origin' });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const body = await res.json();
+      status = {
+        connected: !!body.clickhouse?.connected,
+        version: body.clickhouse?.version,
+        database: body.clickhouse?.database,
+        table: body.clickhouse?.table,
+        error: body.clickhouse?.error,
+        checkedAt: now,
+      };
+    } catch (err) {
+      status = { connected: false, error: err.message, checkedAt: now };
+    }
+    return status;
+  }
+
+  async function loadDashboardCollectors() {
+    try {
+      const body = await getJson('/api/dashboard/collectors', { widget: 'dashboard/collectors' });
+      const payload = body.data;
+      if (Array.isArray(payload)) {
+        return { collectors: payload, locations: [] };
+      }
+      return {
+        collectors: Array.isArray(payload?.collectors) ? payload.collectors : [],
+        locations: Array.isArray(payload?.locations) ? payload.locations : [],
+      };
+    } catch (err) {
+      console.warn('[ApiClient] collectors failed:', err.message);
+      return { collectors: [], locations: [] };
+    }
+  }
+
+  async function getJson(path, { widget } = {}) {
+    const name = widget || path;
+    const finish = DashboardLog?.fetchStart?.(name) ?? ((extra) => ({ loadMs: 0, ...extra }));
+    try {
+      const res = await fetch(path, { cache: 'no-store', credentials: 'same-origin' });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.error || `HTTP ${res.status}`);
+      }
+      const body = await res.json();
+      const metrics = finish({
+        serverMs: body.meta?.elapsedMs,
+        rows: body.meta?.rows,
+        source: 'clickhouse',
+      });
+      return {
+        ...body,
+        loadMs: metrics.loadMs,
+        serverMs: body.meta?.elapsedMs ?? null,
+      };
+    } catch (err) {
+      const metrics = finish({ source: 'error', error: err.message });
+      err.loadMs = metrics.loadMs;
+      throw err;
+    }
+  }
+
+  async function requestJson(path, { method = 'GET', body } = {}) {
+    const res = await fetch(path, {
+      method,
+      headers: body === undefined ? undefined : { 'Content-Type': 'application/json' },
+      cache: 'no-store',
+      credentials: 'same-origin',
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+    const payload = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(payload.error || `HTTP ${res.status}`);
+    return payload;
+  }
+
+  async function login({ username, password }) {
+    return requestJson('/api/auth/login', {
+      method: 'POST',
+      body: { username, password },
+    });
+  }
+
+  async function logout() {
+    return requestJson('/api/auth/logout', { method: 'POST' });
+  }
+
+  async function loadCurrentUser() {
+    const body = await requestJson('/api/auth/me');
+    return body.user;
+  }
+
+  async function loadUsers() {
+    const body = await requestJson('/api/users');
+    return body.data || [];
+  }
+
+  async function createUser(payload) {
+    const body = await requestJson('/api/users', {
+      method: 'POST',
+      body: payload,
+    });
+    return body.data;
+  }
+
+  async function updateUser(id, payload) {
+    const body = await requestJson(`/api/users/${encodeURIComponent(id)}`, {
+      method: 'PUT',
+      body: payload,
+    });
+    return body.data;
+  }
+
+  async function deleteUser(id) {
+    return requestJson(`/api/users/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+    });
+  }
+
+  async function changeUserPassword(id, payload) {
+    const body = await requestJson(`/api/users/${encodeURIComponent(id)}/password`, {
+      method: 'POST',
+      body: payload,
+    });
+    return body.data;
+  }
+
+  async function loadRbacResources() {
+    const body = await requestJson('/api/rbac/resources');
+    return body.data || [];
+  }
+
+  async function loadRoles() {
+    const body = await requestJson('/api/rbac/roles');
+    return body.data || [];
+  }
+
+  async function loadRole(id) {
+    const body = await requestJson(`/api/rbac/roles/${encodeURIComponent(id)}`);
+    return body.data;
+  }
+
+  async function createRole(payload) {
+    const body = await requestJson('/api/rbac/roles', { method: 'POST', body: payload });
+    return body.data;
+  }
+
+  async function updateRole(id, payload) {
+    const body = await requestJson(`/api/rbac/roles/${encodeURIComponent(id)}`, {
+      method: 'PUT',
+      body: payload,
+    });
+    return body.data;
+  }
+
+  async function deleteRole(id) {
+    return requestJson(`/api/rbac/roles/${encodeURIComponent(id)}`, { method: 'DELETE' });
+  }
+
+  async function loadUserPermissions(id) {
+    const body = await requestJson(`/api/rbac/users/${encodeURIComponent(id)}/permissions`);
+    return body.data || {};
+  }
+
+  async function saveUserPermissions(id, overrides) {
+    const body = await requestJson(`/api/rbac/users/${encodeURIComponent(id)}/permissions`, {
+      method: 'PUT',
+      body: { overrides },
+    });
+    return body.data;
+  }
+
+  async function updateUserRole(id, roleId) {
+    const body = await requestJson(`/api/rbac/users/${encodeURIComponent(id)}/role`, {
+      method: 'PUT',
+      body: { roleId },
+    });
+    return body.data;
+  }
+
+  function appendCollectorFilter(params, collectorFilter) {
+    const items = Array.isArray(collectorFilter)
+      ? collectorFilter.map((v) => String(v).trim()).filter(Boolean)
+      : (collectorFilter ? [String(collectorFilter).trim()] : []);
+    if (items.length) params.set('collector_id', items.join(','));
+  }
+
+  function hasCollectorInFilters(filters) {
+    return (filters || []).some((f) => String(f?.field || f?.dim || '').trim() === 'collector');
+  }
+
+  function appendCollectorFilterBody(body, collectorFilter) {
+    if (hasCollectorInFilters(body.filters)) return;
+    const items = Array.isArray(collectorFilter)
+      ? collectorFilter.map((v) => String(v).trim()).filter(Boolean)
+      : (collectorFilter ? [String(collectorFilter).trim()] : []);
+    if (items.length) body.collectorId = items.join(',');
+  }
+
+  function trafficStatsQuery({ timeRange = '24h', customPeriod, direction, collectorFilter } = {}) {
+    const params = new URLSearchParams();
+    appendCustomPeriodParams(params, timeRange, customPeriod);
+    if (direction) params.set('direction', direction);
+    appendCollectorFilter(params, collectorFilter);
+    return params.toString();
+  }
+
+  const CHART_DIRECTION_TO_SQL = {
+    total: 'total',
+    incoming: 'in',
+    outgoing: 'out',
+    transit: 'transit',
+    internal: 'internal',
+    unclassified: 'unknown',
+  };
+
+  function resolveChartSqlDirections(directions) {
+    const flowIds = Object.keys(CHART_DIRECTION_TO_SQL);
+    const enabled = flowIds.filter((id) => directions?.[id]);
+    if (!enabled.length) return [];
+    if (enabled.length === flowIds.length) {
+      return ['total', 'in', 'out', 'transit', 'internal', 'unknown'];
+    }
+    return enabled.map((id) => CHART_DIRECTION_TO_SQL[id]);
+  }
+
+  const PROTOCOL_DIRECTION_MAP = {
+    incoming: 'in',
+    outgoing: 'out',
+    transit: 'transit',
+    internal: 'internal',
+    unclassified: 'unknown',
+  };
+
+  function resolveProtocolSqlDirections(directions) {
+    const flowIds = Object.keys(PROTOCOL_DIRECTION_MAP);
+    const enabled = flowIds.filter((id) => directions?.[id]);
+    if (!enabled.length || enabled.length === flowIds.length) {
+      return ['in', 'out', 'transit', 'internal', 'unknown'];
+    }
+    return enabled.map((id) => PROTOCOL_DIRECTION_MAP[id]);
+  }
+
+  function protocolQuery({ timeRange = '24h', customPeriod, directions, collectorFilter } = {}) {
+    const params = new URLSearchParams();
+    appendCustomPeriodParams(params, timeRange, customPeriod);
+    params.set('directions', resolveProtocolSqlDirections(directions).join(','));
+    appendCollectorFilter(params, collectorFilter);
+    return params.toString();
+  }
+
+  function chartTrafficQuery({ timeRange = '1h', customPeriod, directions, collectorFilter } = {}) {
+    const params = new URLSearchParams();
+    appendCustomPeriodParams(params, timeRange, customPeriod);
+    params.set('directions', resolveChartSqlDirections(directions).join(','));
+    appendCollectorFilter(params, collectorFilter);
+    return params.toString();
+  }
+
+  async function fetchDashboard(path, widget) {
+    try {
+      const body = await getJson(path, { widget });
+      return {
+        ok: true,
+        data: body.data,
+        meta: body.meta,
+        loadMs: body.loadMs,
+        serverMs: body.serverMs,
+      };
+    } catch (err) {
+      return {
+        ok: false,
+        loadMs: err.loadMs ?? null,
+        serverMs: null,
+        error: err,
+      };
+    }
+  }
+
+  async function dashboardTraffic({ timeRange = '1h', customPeriod, directions, collectorFilter } = {}) {
+    const qs = chartTrafficQuery({ timeRange, customPeriod, directions, collectorFilter });
+    const body = await getJson(`/api/dashboard/traffic?${qs}`, { widget: 'dashboard/traffic' });
+    return body.data;
+  }
+
+  async function dashboardTrafficStats({ timeRange = '24h', customPeriod, collectorFilter } = {}) {
+    const qs = trafficStatsQuery({ timeRange, customPeriod, collectorFilter });
+    const body = await getJson(`/api/dashboard/traffic-stats?${qs}`, { widget: 'dashboard/traffic-stats' });
+    return body.data;
+  }
+
+  async function dashboardProtocols({ timeRange = '24h', customPeriod, directions, collectorFilter } = {}) {
+    const qs = protocolQuery({ timeRange, customPeriod, directions, collectorFilter });
+    const body = await getJson(`/api/dashboard/protocols?${qs}`, { widget: 'dashboard/protocols' });
+    return body.data;
+  }
+
+  async function dashboardServices({ timeRange = '24h', customPeriod, directions, collectorFilter } = {}) {
+    const qs = protocolQuery({ timeRange, customPeriod, directions, collectorFilter });
+    const body = await getJson(`/api/dashboard/services?${qs}`, { widget: 'dashboard/services' });
+    return body.data;
+  }
+
+  async function loadProtocolTrend({ timeRange = '24h', customPeriod, directions, collectorFilter } = {}) {
+    const qs = protocolQuery({ timeRange, customPeriod, directions, collectorFilter });
+    return fetchDashboard(`/api/dashboard/protocols/timeseries?${qs}`, 'dashboard/protocols/timeseries');
+  }
+
+  async function loadServiceTrend({ timeRange = '24h', customPeriod, directions, collectorFilter } = {}) {
+    const qs = protocolQuery({ timeRange, customPeriod, directions, collectorFilter });
+    return fetchDashboard(`/api/dashboard/services/timeseries?${qs}`, 'dashboard/services/timeseries');
+  }
+
+  function vlanQuery({ timeRange, customPeriod, directions, collectorFilter, attachmentType, limit } = {}) {
+    const qs = protocolQuery({ timeRange, customPeriod, directions, collectorFilter });
+    const params = new URLSearchParams(qs);
+    if (attachmentType && attachmentType !== 'all') params.set('attachment_type', attachmentType);
+    if (limit) params.set('limit', String(limit));
+    return params.toString();
+  }
+
+  async function dashboardVlans({ timeRange = '24h', customPeriod, directions, collectorFilter, attachmentType } = {}) {
+    const qs = vlanQuery({ timeRange, customPeriod, directions, collectorFilter, attachmentType });
+    const body = await getJson(`/api/dashboard/vlans?${qs}`, { widget: 'dashboard/vlans' });
+    return body.data;
+  }
+
+  async function loadVlanTrend({ timeRange = '24h', customPeriod, directions, collectorFilter, attachmentType } = {}) {
+    const qs = vlanQuery({ timeRange, customPeriod, directions, collectorFilter, attachmentType });
+    return fetchDashboard(`/api/dashboard/vlans/timeseries?${qs}`, 'dashboard/vlans/timeseries');
+  }
+
+  async function loadVlanTop({ timeRange = '24h', customPeriod, directions, collectorFilter, attachmentType, limit = 50 } = {}) {
+    const qs = vlanQuery({ timeRange, customPeriod, directions, collectorFilter, attachmentType, limit });
+    return fetchDashboard(`/api/vlan/top?${qs}`, 'vlan/top');
+  }
+
+  async function dashboardOtherPorts({ timeRange = '24h', customPeriod, directions, collectorFilter } = {}) {
+    const qs = protocolQuery({ timeRange, customPeriod, directions, collectorFilter });
+    const body = await getJson(`/api/dashboard/other-ports?${qs}`, { widget: 'dashboard/other-ports' });
+    return body.data;
+  }
+
+  async function loadExplorerSchema() {
+    const body = await getJson('/api/explorer/schema', { widget: 'explorer/schema' });
+    return body.data;
+  }
+
+  async function searchExplorerEntities({ type, q = '', limit = 20, switchIp = '' } = {}) {
+    const params = new URLSearchParams();
+    params.set('type', type);
+    if (q) params.set('q', q);
+    if (limit) params.set('limit', String(limit));
+    if (switchIp) params.set('switch_ip', String(switchIp));
+    const body = await getJson(`/api/explorer/entities?${params}`, { widget: 'explorer/entities' });
+    return body.data || [];
+  }
+
+  async function loadExplorerQuery({
+    metric = 'bps',
+    groupBy = [],
+    filters = [],
+    limit = 10,
+    offset = 0,
+    timeRange = '1h',
+    customPeriod,
+    granularity = 'auto',
+    includeSummary = true,
+    includeTimeseries = true,
+    includeBreakdowns = true,
+    collectorFilter,
+  } = {}) {
+    const finish = DashboardLog?.widgetStart?.('explorer/query') ?? ((extra) => ({ loadMs: 0, ...extra }));
+    const body = {
+      metric,
+      groupBy,
+      filters,
+      limit,
+      offset,
+      range: timeRange,
+      granularity,
+      includeSummary,
+      includeTimeseries,
+      includeBreakdowns,
+    };
+    appendCollectorFilterBody(body, collectorFilter);
+    if (timeRange === 'custom' && customPeriod?.from && customPeriod?.to) {
+      const apiPeriod = apiCustomPeriodParams(customPeriod);
+      body.range = 'custom';
+      body.from = apiPeriod.from;
+      body.to = apiPeriod.to;
+    }
+    try {
+      const res = await requestJson('/api/explorer/query', { method: 'POST', body });
+      const metrics = finish({
+        source: 'clickhouse',
+        rows: res.meta?.rows,
+        serverMs: res.meta?.elapsedMs,
+      });
+      return {
+        source: 'clickhouse',
+        rows: Array.isArray(res.data?.rows) ? res.data.rows : [],
+        summary: res.data?.summary || null,
+        timeseries: Array.isArray(res.data?.timeseries) ? res.data.timeseries : [],
+        resultSeries: res.data?.resultSeries || null,
+        breakdowns: res.data?.breakdowns || {},
+        meta: res.meta || null,
+        loadMs: metrics.loadMs,
+        serverMs: res.meta?.elapsedMs ?? null,
+      };
+    } catch (err) {
+      const metrics = finish({ source: 'error', error: err.message });
+      return {
+        source: 'error',
+        rows: [],
+        summary: null,
+        timeseries: [],
+        resultSeries: null,
+        breakdowns: {},
+        error: err.message || LOAD_FAILED,
+        meta: null,
+        loadMs: metrics.loadMs,
+        serverMs: null,
+      };
+    }
+  }
+
+  async function loadExplorerFlows({
+    metric = 'bps',
+    groupBy = [],
+    filters = [],
+    limit = 10,
+    timeRange = '1h',
+    customPeriod,
+    collectorFilter,
+  } = {}) {
+    const finish = DashboardLog?.widgetStart?.('explorer/flows') ?? ((extra) => ({ loadMs: 0, ...extra }));
+    const body = { metric, groupBy, filters, limit, range: timeRange };
+    appendCollectorFilterBody(body, collectorFilter);
+    if (timeRange === 'custom' && customPeriod?.from && customPeriod?.to) {
+      const apiPeriod = apiCustomPeriodParams(customPeriod);
+      body.range = 'custom';
+      body.from = apiPeriod.from;
+      body.to = apiPeriod.to;
+    }
+    try {
+      const res = await requestJson('/api/explorer/flows', { method: 'POST', body });
+      const metrics = finish({
+        source: 'clickhouse',
+        rows: res.meta?.rows,
+        serverMs: res.meta?.elapsedMs,
+      });
+      return {
+        source: 'clickhouse',
+        rows: Array.isArray(res.data) ? res.data : [],
+        meta: res.meta || null,
+        loadMs: metrics.loadMs,
+        serverMs: res.meta?.elapsedMs ?? null,
+      };
+    } catch (err) {
+      const metrics = finish({ source: 'error', error: err.message });
+      return { source: 'error', rows: [], error: err.message || LOAD_FAILED, meta: null, loadMs: metrics.loadMs, serverMs: null };
+    }
+  }
+
+  async function exportExplorerCsv(queryBody = {}) {
+    const body = { ...queryBody };
+    appendCollectorFilterBody(body, body.collectorFilter);
+    delete body.collectorFilter;
+    if (body.timeRange === 'custom' && body.customPeriod?.from && body.customPeriod?.to) {
+      const apiPeriod = apiCustomPeriodParams(body.customPeriod);
+      body.range = 'custom';
+      body.from = apiPeriod.from;
+      body.to = apiPeriod.to;
+    } else if (body.timeRange) {
+      body.range = body.timeRange;
+    }
+    const res = await fetch('/api/explorer/export', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'same-origin',
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) {
+      const errBody = await res.json().catch(() => ({}));
+      throw new Error(errBody.error || `HTTP ${res.status}`);
+    }
+    return res.blob();
+  }
+
+  async function loadExplorerSavedFilters() {
+    const body = await getJson('/api/explorer/saved-filters', { widget: 'explorer/saved-filters' });
+    return body.data || [];
+  }
+
+  async function saveExplorerFilter(payload) {
+    return requestJson('/api/explorer/saved-filters', { method: 'POST', body: payload });
+  }
+
+  async function deleteExplorerFilter(id) {
+    return requestJson(`/api/explorer/saved-filters/${encodeURIComponent(id)}`, { method: 'DELETE' });
+  }
+
+  async function updateExplorerFilter(id, payload) {
+    return requestJson(`/api/explorer/saved-filters/${encodeURIComponent(id)}`, { method: 'PUT', body: payload });
+  }
+
+  async function loadObservationsConfig() {
+    const body = await getJson('/api/observations/config', { widget: 'observations/config' });
+    return body.data;
+  }
+
+  async function loadObservations() {
+    const body = await getJson('/api/observations', { widget: 'observations/list' });
+    return body.data || [];
+  }
+
+  async function loadObservationAnalyticsDiagnostics() {
+    const body = await getJson('/api/observations/analytics/diagnostics', {
+      widget: 'observations/analytics-diagnostics',
+    });
+    return body.data || body;
+  }
+
+  async function loadWorkerDiagnostics() {
+    const body = await getJson('/api/diagnostics/worker', {
+      widget: 'diagnostics/worker',
+    });
+    return body.data || body;
+  }
+
+  async function scanWorkerGaps(opts = {}) {
+    const q = new URLSearchParams();
+    if (opts && opts.from && opts.to) {
+      q.set('from', opts.from);
+      q.set('to', opts.to);
+    } else {
+      q.set('days', String((opts && opts.days) || 3));
+    }
+    const body = await getJson(`/api/diagnostics/worker/gaps?${q}`, {
+      widget: 'diagnostics/worker-gaps',
+    });
+    return body.data || body;
+  }
+
+  async function loadWorkerBackfillQueue() {
+    const body = await getJson('/api/diagnostics/worker/backfill', {
+      widget: 'diagnostics/worker-backfill',
+    });
+    return body.data || body;
+  }
+
+  async function enqueueWorkerBackfill(payload) {
+    const body = await requestJson('/api/diagnostics/worker/backfill', {
+      method: 'POST',
+      body: payload,
+    });
+    return body.data || body;
+  }
+
+  async function cancelWorkerBackfill() {
+    const body = await requestJson('/api/diagnostics/worker/backfill/cancel', {
+      method: 'POST',
+      body: {},
+    });
+    return body.data || body;
+  }
+
+  async function loadEnrichmentDiagnostics() {
+    const body = await getJson('/api/diagnostics/enrichment', {
+      widget: 'diagnostics/enrichment',
+    });
+    return body.data || body;
+  }
+
+  async function loadSnmpDiagnostics() {
+    const body = await getJson('/api/diagnostics/snmp', {
+      widget: 'diagnostics/snmp',
+    });
+    return body.data || body;
+  }
+
+  async function loadObservation(id) {
+    const body = await getJson(`/api/observations/${encodeURIComponent(id)}`, { widget: 'observations/get' });
+    return body.data;
+  }
+
+  async function createObservation(payload) {
+    return requestJson('/api/observations', { method: 'POST', body: payload });
+  }
+
+  async function updateObservation(id, payload) {
+    return requestJson(`/api/observations/${encodeURIComponent(id)}`, { method: 'PUT', body: payload });
+  }
+
+  async function deleteObservation(id) {
+    return requestJson(`/api/observations/${encodeURIComponent(id)}`, { method: 'DELETE' });
+  }
+
+  async function materializeObservation(id) {
+    return requestJson(`/api/observations/${encodeURIComponent(id)}/materialize`, { method: 'POST', body: {} });
+  }
+
+  async function previewObservation(id, payload = {}) {
+    return requestJson(`/api/observations/${encodeURIComponent(id)}/preview`, { method: 'POST', body: payload });
+  }
+
+  async function runObservationReport(id) {
+    return requestJson(`/api/observations/${encodeURIComponent(id)}/run`, { method: 'POST', body: {} });
+  }
+
+  async function loadObservationRuns(id) {
+    const body = await getJson(`/api/observations/${encodeURIComponent(id)}/runs`, { widget: 'observations/runs' });
+    return body.data || [];
+  }
+
+  function observationRunArtifactUrl(observationId, runId, file = 'report.html') {
+    const q = new URLSearchParams({ file: String(file || 'report.html') });
+    return `/api/observations/${encodeURIComponent(observationId)}/runs/${encodeURIComponent(runId)}/artifact?${q}`;
+  }
+
+  function countryQuery({ timeRange = '24h', customPeriod, directions, basis = 'ip', mapSide = 'remote', sourceIds, collectorFilter } = {}) {
+    const params = new URLSearchParams();
+    appendCustomPeriodParams(params, timeRange, customPeriod);
+    params.set('directions', resolveProtocolSqlDirections(directions).join(','));
+    params.set('basis', basis || 'ip');
+    params.set('map_side', mapSide || 'remote');
+    if (sourceIds?.length) params.set('source_ids', sourceIds.join(','));
+    appendCollectorFilter(params, collectorFilter);
+    return params.toString();
+  }
+
+  async function dashboardCountries({ timeRange = '24h', customPeriod, directions, basis = 'ip', mapSide = 'remote', sourceIds, collectorFilter } = {}) {
+    const qs = countryQuery({ timeRange, customPeriod, directions, basis, mapSide, sourceIds, collectorFilter });
+    const body = await getJson(`/api/dashboard/countries?${qs}`, { widget: 'dashboard/countries' });
+    return body.data;
+  }
+
+  async function loadCountries({ timeRange = '24h', customPeriod, directions, basis = 'ip', mapSide = 'remote', sourceIds, collectorFilter } = {}) {
+    const finish = DashboardLog?.widgetStart?.('countries') ?? ((extra) => ({ loadMs: 0, ...extra }));
+    const health = await checkHealth();
+    if (!health.connected) {
+      const metrics = finish({ source: 'error', rows: 0 });
+      return { source: 'error', rows: [], error: LOAD_FAILED, loadMs: metrics.loadMs, serverMs: null };
+    }
+    const qs = countryQuery({ timeRange, customPeriod, directions, basis, mapSide, sourceIds, collectorFilter });
+    const result = await fetchDashboard(`/api/dashboard/countries?${qs}`, 'dashboard/countries');
+    if (!result.ok) {
+      console.warn('[ApiClient] countries failed:', result.error?.message);
+      const metrics = finish({ source: 'error', error: result.error?.message, rows: 0 });
+      return { source: 'error', rows: [], error: LOAD_FAILED, loadMs: metrics.loadMs, serverMs: null };
+    }
+    const rows = Array.isArray(result.data) ? result.data : [];
+    const metrics = finish({ source: 'clickhouse', rows: rows.length });
+    return { source: 'clickhouse', rows, loadMs: metrics.loadMs, serverMs: result.serverMs };
+  }
+
+  function talkersQuery({ timeRange = '1h', customPeriod, directions, group = 'src', limit = 7, offset = 0, sourceIds, collectorFilter } = {}) {
+    const params = new URLSearchParams();
+    appendCustomPeriodParams(params, timeRange, customPeriod);
+    params.set('directions', resolveProtocolSqlDirections(directions).join(','));
+    params.set('group', group || 'src');
+    params.set('limit', String(limit));
+    if (offset > 0) params.set('offset', String(offset));
+    if (sourceIds?.length) params.set('source_ids', sourceIds.join(','));
+    appendCollectorFilter(params, collectorFilter);
+    return params.toString();
+  }
+
+  async function dashboardTopTalkers({ timeRange = '1h', customPeriod, directions, group = 'src', limit = 7, sourceIds, collectorFilter } = {}) {
+    const qs = talkersQuery({ timeRange, customPeriod, directions, group, limit, sourceIds, collectorFilter });
+    const body = await getJson(`/api/dashboard/top-talkers?${qs}`, { widget: 'dashboard/top-talkers' });
+    return body.data;
+  }
+
+  function dnsQuery({
+    timeRange = '24h',
+    customPeriod,
+    sourceIds,
+    collectorFilter,
+    qtype,
+    rcode,
+    domainSearch,
+    clientIp,
+    limit,
+  } = {}) {
+    const params = new URLSearchParams();
+    appendCustomPeriodParams(params, timeRange, customPeriod);
+    if (sourceIds?.length) params.set('source_ids', sourceIds.join(','));
+    appendCollectorFilter(params, collectorFilter);
+    if (qtype) params.set('qtype', qtype);
+    if (rcode !== undefined && rcode !== null && rcode !== '') params.set('rcode', String(rcode));
+    if (domainSearch) params.set('domain_search', domainSearch);
+    if (clientIp) params.set('client_ip', clientIp);
+    if (limit != null) params.set('limit', String(limit));
+    return params.toString();
+  }
+
+  async function fetchDns(path, widget) {
+    try {
+      const body = await getJson(path, { widget });
+      return {
+        ok: true,
+        data: body.data,
+        meta: body.meta,
+        loadMs: body.loadMs,
+        serverMs: body.serverMs,
+      };
+    } catch (err) {
+      return {
+        ok: false,
+        loadMs: err.loadMs ?? null,
+        serverMs: null,
+        error: err,
+      };
+    }
+  }
+
+  async function loadDnsWidget(path, widget, filters) {
+    const health = await checkHealth();
+    if (!health.connected) {
+      return { source: 'error', data: null, rows: [], error: LOAD_FAILED, loadMs: null, serverMs: null };
+    }
+    const qs = dnsQuery(filters);
+    const result = await fetchDns(`${path}?${qs}`, widget);
+    if (!result.ok) {
+      return {
+        source: 'error',
+        data: null,
+        rows: [],
+        error: LOAD_FAILED,
+        loadMs: result.loadMs,
+        serverMs: null,
+      };
+    }
+    const data = result.data;
+    const rows = Array.isArray(data) ? data : (data ? [data] : []);
+    return {
+      source: 'clickhouse',
+      data,
+      rows,
+      meta: result.meta,
+      loadMs: result.loadMs,
+      serverMs: result.serverMs,
+    };
+  }
+
+  async function loadDnsSources() {
+    const health = await checkHealth();
+    if (!health.connected) {
+      return { source: 'error', rows: [], error: LOAD_FAILED };
+    }
+    const result = await fetchDns('/api/dns/sources', 'dns/sources');
+    if (!result.ok) return { source: 'error', rows: [], error: LOAD_FAILED };
+    return { source: 'clickhouse', rows: Array.isArray(result.data) ? result.data : [] };
+  }
+
+  async function loadDnsActivity(filters) {
+    return loadDnsWidget('/api/dns/activity', 'dns/activity', filters);
+  }
+
+  async function loadDnsTopDomains(filters) {
+    return loadDnsWidget('/api/dns/top-domains', 'dns/top-domains', filters);
+  }
+
+  async function loadDnsTopClients(filters) {
+    return loadDnsWidget('/api/dns/top-clients', 'dns/top-clients', filters);
+  }
+
+  async function loadDnsRecent(filters) {
+    return loadDnsWidget('/api/dns/recent', 'dns/recent', filters);
+  }
+
+  async function loadDnsQtypes(filters) {
+    return loadDnsWidget('/api/dns/qtypes', 'dns/qtypes', filters);
+  }
+
+  async function loadMonitoringParameters() {
+    const health = await checkHealth();
+    if (!health.connected) {
+      return {
+        source: 'error',
+        rows: [],
+        meta: { totalDeviations24h: 0 },
+        error: LOAD_FAILED,
+        loadMs: null,
+        serverMs: null,
+      };
+    }
+    try {
+      const body = await getJson('/api/monitoring/parameters', { widget: 'monitoring/parameters' });
+      const rows = Array.isArray(body.data) ? body.data : [];
+      return {
+        source: 'clickhouse',
+        rows,
+        meta: body.meta || null,
+        loadMs: body.loadMs ?? null,
+        serverMs: body.serverMs ?? null,
+      };
+    } catch (err) {
+      console.warn('[ApiClient] monitoring/parameters failed:', err.message);
+      return {
+        source: 'error',
+        rows: [],
+        meta: { totalDeviations24h: 0 },
+        error: LOAD_FAILED,
+        loadMs: err.loadMs ?? null,
+        serverMs: null,
+      };
+    }
+  }
+
+  async function loadMonitoringDeviations({ limit = 10 } = {}) {
+    const health = await checkHealth();
+    if (!health.connected) {
+      return { source: 'error', rows: [], error: LOAD_FAILED, loadMs: null, serverMs: null };
+    }
+    try {
+      const params = new URLSearchParams({ limit: String(limit) });
+      const body = await getJson(`/api/monitoring/deviations?${params}`, { widget: 'monitoring/deviations' });
+      const rows = Array.isArray(body.data) ? body.data : [];
+      return {
+        source: 'clickhouse',
+        rows,
+        meta: body.meta || null,
+        loadMs: body.loadMs ?? null,
+        serverMs: body.serverMs ?? null,
+      };
+    } catch (err) {
+      console.warn('[ApiClient] monitoring/deviations failed:', err.message);
+      return {
+        source: 'error',
+        rows: [],
+        error: LOAD_FAILED,
+        loadMs: err.loadMs ?? null,
+        serverMs: null,
+      };
+    }
+  }
+
+  async function loadMonitoringBounds(parameter) {
+    const health = await checkHealth();
+    if (!health.connected) {
+      return { source: 'error', data: null, error: LOAD_FAILED, loadMs: null, serverMs: null };
+    }
+    try {
+      const params = new URLSearchParams({ parameter: String(parameter || '') });
+      const body = await getJson(`/api/monitoring/bounds?${params}`, { widget: 'monitoring/bounds' });
+      return {
+        source: 'clickhouse',
+        data: body.data || null,
+        meta: body.meta || null,
+        loadMs: body.loadMs ?? null,
+        serverMs: body.serverMs ?? null,
+      };
+    } catch (err) {
+      return {
+        source: 'error',
+        data: null,
+        error: err.message || LOAD_FAILED,
+        loadMs: err.loadMs ?? null,
+        serverMs: null,
+      };
+    }
+  }
+
+  async function saveMonitoringBounds(parameter, { ciLow, ciHigh, ciMinimum }) {
+    const health = await checkHealth();
+    if (!health.connected) {
+      return { source: 'error', data: null, error: LOAD_FAILED, loadMs: null, serverMs: null };
+    }
+    try {
+      const body = await requestJson('/api/monitoring/bounds', {
+        method: 'PUT',
+        body: {
+          parameter: String(parameter || ''),
+          ciLow,
+          ciHigh,
+          ciMinimum,
+        },
+      });
+      return {
+        source: 'clickhouse',
+        data: body.data || null,
+        meta: body.meta || null,
+        loadMs: body.loadMs ?? null,
+        serverMs: body.serverMs ?? null,
+      };
+    } catch (err) {
+      return {
+        source: 'error',
+        data: null,
+        error: err.message || LOAD_FAILED,
+        loadMs: err.loadMs ?? null,
+        serverMs: null,
+      };
+    }
+  }
+
+  async function loadMonitoringSeries({ parameter, from, to }) {
+    const health = await checkHealth();
+    if (!health.connected) {
+      return { source: 'error', rows: [], error: LOAD_FAILED, loadMs: null, serverMs: null };
+    }
+    const displayTz = typeof getDisplayTimezone === 'function' ? getDisplayTimezone() : undefined;
+    const apiFrom = typeof displayDatetimeLocalToData === 'function'
+      ? displayDatetimeLocalToData(from, displayTz)
+      : from;
+    const apiTo = typeof displayDatetimeLocalToData === 'function'
+      ? displayDatetimeLocalToData(to, displayTz)
+      : to;
+    const params = new URLSearchParams({
+      parameter: String(parameter || ''),
+      from: apiFrom,
+      to: apiTo,
+    });
+    try {
+      const body = await getJson(`/api/monitoring/series?${params}`, { widget: 'monitoring/series' });
+      const rows = Array.isArray(body.data) ? body.data : [];
+      return {
+        source: 'clickhouse',
+        rows,
+        meta: body.meta || null,
+        loadMs: body.loadMs ?? null,
+        serverMs: body.serverMs ?? null,
+      };
+    } catch (err) {
+      console.warn('[ApiClient] monitoring/series failed:', err.message);
+      return {
+        source: 'error',
+        rows: [],
+        error: err.message || LOAD_FAILED,
+        loadMs: err.loadMs ?? null,
+        serverMs: null,
+      };
+    }
+  }
+
+  async function loadTopTalkers({ timeRange = '1h', customPeriod, directions, group = 'src', limit = 7, offset = 0, sourceIds, collectorFilter } = {}) {
+    const finish = DashboardLog?.widgetStart?.('top-talkers') ?? ((extra) => ({ loadMs: 0, ...extra }));
+    const health = await checkHealth();
+    if (!health.connected) {
+      const metrics = finish({ source: 'error', rows: 0 });
+      return {
+        source: 'error',
+        rows: [],
+        meta: null,
+        hasMore: false,
+        error: LOAD_FAILED,
+        loadMs: metrics.loadMs,
+        serverMs: null,
+      };
+    }
+    const qs = talkersQuery({ timeRange, customPeriod, directions, group, limit, offset, sourceIds, collectorFilter });
+    const result = await fetchDashboard(`/api/dashboard/top-talkers?${qs}`, 'dashboard/top-talkers');
+    if (!result.ok) {
+      console.warn('[ApiClient] top-talkers failed:', result.error?.message);
+      const metrics = finish({ source: 'error', error: result.error?.message, rows: 0 });
+      return {
+        source: 'error',
+        rows: [],
+        meta: null,
+        hasMore: false,
+        error: result.error?.message,
+        loadMs: metrics.loadMs,
+        serverMs: null,
+      };
+    }
+    const rows = Array.isArray(result.data) ? result.data : [];
+    const metrics = finish({ source: 'clickhouse', rows: rows.length });
+    return {
+      source: 'clickhouse',
+      rows,
+      meta: result.meta || null,
+      hasMore: result.meta?.hasMore ?? rows.length >= limit,
+      loadMs: metrics.loadMs,
+      serverMs: result.serverMs,
+    };
+  }
+
+  function recentFlowsQuery({ directions, limit = 20, collectorFilter } = {}) {
+    const params = new URLSearchParams({ limit: String(limit) });
+    params.set('directions', resolveProtocolSqlDirections(directions).join(','));
+    appendCollectorFilter(params, collectorFilter);
+    return params.toString();
+  }
+
+  async function dashboardRecentFlows({ limit = 20, directions } = {}) {
+    const qs = recentFlowsQuery({ directions, limit });
+    const body = await getJson(`/api/dashboard/recent-flows?${qs}`, { widget: 'dashboard/recent-flows' });
+    return body.data;
+  }
+
+  async function loadRecentFlows({ directions, limit = 20, collectorFilter } = {}) {
+    const finish = DashboardLog?.widgetStart?.('recent-flows') ?? ((extra) => ({ loadMs: 0, ...extra }));
+    const health = await checkHealth();
+    if (!health.connected) {
+      const metrics = finish({ source: 'error' });
+      return { source: 'error', rows: [], error: LOAD_FAILED, loadMs: metrics.loadMs, serverMs: null };
+    }
+    const qs = recentFlowsQuery({ directions, limit, collectorFilter });
+    const result = await fetchDashboard(`/api/dashboard/recent-flows?${qs}`, 'dashboard/recent-flows');
+    if (!result.ok) {
+      const metrics = finish({ source: 'error', error: result.error?.message });
+      return { source: 'error', rows: [], error: LOAD_FAILED, loadMs: metrics.loadMs, serverMs: null };
+    }
+    const metrics = finish({ source: 'clickhouse', rows: (result.data || []).length });
+    return {
+      source: 'clickhouse',
+      rows: Array.isArray(result.data) ? result.data : [],
+      loadMs: metrics.loadMs,
+      serverMs: result.serverMs,
+    };
+  }
+
+  async function loadL3Prefixes() {
+    const health = await checkHealth();
+    if (!health.connected) {
+      return { source: 'error', rows: [], error: LOAD_FAILED };
+    }
+    const result = await fetchDashboard('/api/refs/l3-prefixes', 'refs/l3-prefixes');
+    if (!result.ok) {
+      return { source: 'error', rows: [], error: LOAD_FAILED };
+    }
+    return {
+      source: 'clickhouse',
+      rows: Array.isArray(result.data) ? result.data : [],
+      loadMs: result.loadMs,
+      serverMs: result.serverMs,
+    };
+  }
+
+  async function loadNetEntities() {
+    const health = await checkHealth();
+    if (!health.connected) {
+      return { source: 'error', rows: [], error: LOAD_FAILED };
+    }
+    const result = await fetchDashboard('/api/refs/entities', 'refs/entities');
+    if (!result.ok) {
+      return { source: 'error', rows: [], error: LOAD_FAILED };
+    }
+    return {
+      source: 'clickhouse',
+      rows: Array.isArray(result.data) ? result.data : [],
+      loadMs: result.loadMs,
+      serverMs: result.serverMs,
+    };
+  }
+
+  async function saveL3Prefix(payload) {
+    const res = await fetch('/api/refs/l3-prefixes', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      cache: 'no-store',
+      credentials: 'same-origin',
+      body: JSON.stringify(payload),
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
+    return body;
+  }
+
+  async function toggleL3Prefix({ prefix, family, enabled }) {
+    const res = await fetch('/api/refs/l3-prefixes/toggle', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      cache: 'no-store',
+      credentials: 'same-origin',
+      body: JSON.stringify({ prefix, family, enabled }),
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
+    return body;
+  }
+
+  async function deleteL3Prefix({ prefix, family }) {
+    const res = await fetch('/api/refs/l3-prefixes', {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      cache: 'no-store',
+      credentials: 'same-origin',
+      body: JSON.stringify({ prefix, family }),
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
+    return body;
+  }
+
+  async function loadNetEntitiesAdmin() {
+    const health = await checkHealth();
+    if (!health.connected) {
+      return { source: 'error', rows: [], error: LOAD_FAILED };
+    }
+    const result = await fetchDashboard('/api/refs/net-entities', 'refs/net-entities');
+    if (!result.ok) {
+      return { source: 'error', rows: [], error: LOAD_FAILED };
+    }
+    return {
+      source: 'clickhouse',
+      rows: Array.isArray(result.data) ? result.data : [],
+      loadMs: result.loadMs,
+      serverMs: result.serverMs,
+    };
+  }
+
+  async function saveNetEntity(payload) {
+    const res = await fetch('/api/refs/net-entities', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      cache: 'no-store',
+      credentials: 'same-origin',
+      body: JSON.stringify(payload),
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
+    return body;
+  }
+
+  async function loadPortServices({ search, transport, category } = {}) {
+    const health = await checkHealth();
+    if (!health.connected) {
+      return { source: 'error', rows: [], error: LOAD_FAILED };
+    }
+    const params = new URLSearchParams();
+    if (search) params.set('search', search);
+    if (transport) params.set('transport', transport);
+    if (category) params.set('category', category);
+    const qs = params.toString();
+    const path = `/api/refs/port-services${qs ? `?${qs}` : ''}`;
+    const result = await fetchDashboard(path, 'refs/port-services');
+    if (!result.ok) {
+      return { source: 'error', rows: [], error: LOAD_FAILED };
+    }
+    return {
+      source: 'clickhouse',
+      rows: Array.isArray(result.data) ? result.data : [],
+      loadMs: result.loadMs,
+      serverMs: result.serverMs,
+    };
+  }
+
+  async function savePortService(payload) {
+    const res = await fetch('/api/refs/port-services', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      cache: 'no-store',
+      credentials: 'same-origin',
+      body: JSON.stringify(payload),
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
+    return body;
+  }
+
+  async function disablePortService(payload) {
+    const res = await fetch('/api/refs/port-services/disable', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      cache: 'no-store',
+      credentials: 'same-origin',
+      body: JSON.stringify(payload),
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
+    return body;
+  }
+
+  async function previewPortServiceDefaults() {
+    const res = await fetch('/api/refs/port-services/seed-defaults', {
+      method: 'GET',
+      cache: 'no-store',
+      credentials: 'same-origin',
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
+    return body;
+  }
+
+  async function seedPortServiceDefaults() {
+    const res = await fetch('/api/refs/port-services/seed-defaults', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      cache: 'no-store',
+      credentials: 'same-origin',
+      body: '{}',
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
+    return body;
+  }
+
+  async function loadRefVlans() {
+    const health = await checkHealth();
+    if (!health.connected) {
+      return { source: 'error', rows: [], error: LOAD_FAILED };
+    }
+    const result = await fetchDashboard('/api/refs/vlans', 'refs/vlans');
+    if (!result.ok) {
+      return { source: 'error', rows: [], error: LOAD_FAILED };
+    }
+    return {
+      source: 'clickhouse',
+      rows: Array.isArray(result.data) ? result.data : [],
+      loadMs: result.loadMs,
+      serverMs: result.serverMs,
+    };
+  }
+
+  async function loadRefVlansSeen({ hours = 24, limit = 200 } = {}) {
+    const params = new URLSearchParams();
+    if (hours) params.set('hours', String(hours));
+    if (limit) params.set('limit', String(limit));
+    const result = await fetchDashboard(`/api/refs/vlans/seen?${params.toString()}`, 'refs/vlans-seen');
+    if (!result.ok) return { source: 'error', rows: [], error: LOAD_FAILED };
+    return { source: 'clickhouse', rows: Array.isArray(result.data) ? result.data : [] };
+  }
+
+  async function saveRefVlan(payload) {
+    const res = await fetch('/api/refs/vlans', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      cache: 'no-store',
+      credentials: 'same-origin',
+      body: JSON.stringify(payload),
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
+    return body;
+  }
+
+  async function setRefVlanEnabled(payload) {
+    const res = await fetch('/api/refs/vlans/enabled', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      cache: 'no-store',
+      credentials: 'same-origin',
+      body: JSON.stringify(payload),
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
+    return body;
+  }
+
+  async function deleteRefVlan(payload) {
+    const res = await fetch('/api/refs/vlans/delete', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      cache: 'no-store',
+      credentials: 'same-origin',
+      body: JSON.stringify(payload),
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
+    return body;
+  }
+
+  async function loadLocations() {
+    const health = await checkHealth();
+    if (!health.connected) {
+      return { source: 'error', rows: [], error: LOAD_FAILED };
+    }
+    const result = await fetchDashboard('/api/refs/locations', 'refs/locations');
+    if (!result.ok) {
+      return { source: 'error', rows: [], error: LOAD_FAILED };
+    }
+    return {
+      source: 'clickhouse',
+      rows: Array.isArray(result.data) ? result.data : [],
+      loadMs: result.loadMs,
+      serverMs: result.serverMs,
+    };
+  }
+
+  async function saveLocation(payload) {
+    const res = await fetch('/api/refs/locations', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      cache: 'no-store',
+      credentials: 'same-origin',
+      body: JSON.stringify(payload),
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
+    return body;
+  }
+
+  async function loadCollectorsAdmin() {
+    const health = await checkHealth();
+    if (!health.connected) {
+      return { source: 'error', rows: [], error: LOAD_FAILED };
+    }
+    const result = await fetchDashboard('/api/refs/collectors', 'refs/collectors');
+    if (!result.ok) {
+      return { source: 'error', rows: [], error: LOAD_FAILED };
+    }
+    return {
+      source: 'clickhouse',
+      rows: Array.isArray(result.data) ? result.data : [],
+      loadMs: result.loadMs,
+      serverMs: result.serverMs,
+    };
+  }
+
+  async function saveCollector(payload) {
+    const res = await fetch('/api/refs/collectors', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      cache: 'no-store',
+      credentials: 'same-origin',
+      body: JSON.stringify(payload),
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
+    return body;
+  }
+
+  async function deleteCollector(payload) {
+    return requestJson('/api/refs/collectors/delete', {
+      method: 'POST',
+      body: payload,
+    });
+  }
+
+  async function loadFlowSources() {
+    const health = await checkHealth();
+    if (!health.connected) {
+      return { source: 'error', rows: [], error: LOAD_FAILED };
+    }
+    const result = await fetchDashboard('/api/refs/flow-sources', 'refs/flow-sources');
+    if (!result.ok) {
+      return { source: 'error', rows: [], error: LOAD_FAILED };
+    }
+    return {
+      source: 'clickhouse',
+      rows: Array.isArray(result.data) ? result.data : [],
+      loadMs: result.loadMs,
+      serverMs: result.serverMs,
+    };
+  }
+
+  async function bindFlowSource(payload) {
+    return requestJson('/api/refs/flow-sources/bind', {
+      method: 'POST',
+      body: payload,
+    });
+  }
+
+  async function registerFlowSource(payload) {
+    return requestJson('/api/refs/flow-sources', {
+      method: 'POST',
+      body: payload,
+    });
+  }
+
+  async function deleteFlowSource(payload) {
+    return requestJson('/api/refs/flow-sources/delete', {
+      method: 'POST',
+      body: payload,
+    });
+  }
+
+  async function loadSnmpSettings() {
+    try {
+      const body = await getJson('/api/refs/snmp-settings', { widget: 'refs/snmp-settings' });
+      return { source: 'clickhouse', data: body.data || null, meta: body.meta || null };
+    } catch (err) {
+      return { source: 'error', data: null, error: err.message || LOAD_FAILED };
+    }
+  }
+
+  async function saveSnmpSettings(payload) {
+    return requestJson('/api/refs/snmp-settings', { method: 'POST', body: payload });
+  }
+
+  async function loadSnmpAgents() {
+    try {
+      const body = await getJson('/api/refs/snmp-agents', { widget: 'refs/snmp-agents' });
+      return {
+        source: 'clickhouse',
+        rows: Array.isArray(body.data) ? body.data : [],
+        meta: body.meta || null,
+      };
+    } catch (err) {
+      return { source: 'error', rows: [], error: err.message || LOAD_FAILED };
+    }
+  }
+
+  async function saveSnmpAgent(payload) {
+    return requestJson('/api/refs/snmp-agents', { method: 'POST', body: payload });
+  }
+
+  async function loadSnmpInterfaces(switchIp) {
+    try {
+      const body = await getJson(
+        `/api/refs/snmp-agents/${encodeURIComponent(switchIp)}/interfaces`,
+        { widget: 'refs/snmp-agent-interfaces' },
+      );
+      return { source: 'clickhouse', rows: Array.isArray(body.data) ? body.data : [] };
+    } catch (err) {
+      return { source: 'error', rows: [], error: err.message || LOAD_FAILED };
+    }
+  }
+
+  async function requestSnmpProbe(switchIp) {
+    return requestJson(`/api/refs/snmp-agents/${encodeURIComponent(switchIp)}/probe`, {
+      method: 'POST',
+    });
+  }
+
+  async function requestSnmpProbeAll() {
+    return requestJson('/api/refs/snmp-agents/probe-all', {
+      method: 'POST',
+    });
+  }
+
+  async function loadCollectorOptions() {
+    const health = await checkHealth();
+    if (!health.connected) {
+      return { source: 'error', rows: [], error: LOAD_FAILED };
+    }
+    const result = await fetchDashboard('/api/refs/collectors/options', 'refs/collectors-options');
+    if (!result.ok) {
+      return { source: 'error', rows: [], error: LOAD_FAILED };
+    }
+    return {
+      source: 'clickhouse',
+      rows: Array.isArray(result.data) ? result.data : [],
+      loadMs: result.loadMs,
+      serverMs: result.serverMs,
+    };
+  }
+
+  async function loadDiscoveredSources() {
+    const health = await checkHealth();
+    if (!health.connected) {
+      return { source: 'error', rows: [], error: LOAD_FAILED, meta: null };
+    }
+    const result = await fetchDashboard('/api/collectors/discovered', 'collectors/discovered');
+    if (!result.ok) {
+      return { source: 'error', rows: [], error: LOAD_FAILED, meta: null };
+    }
+    return {
+      source: 'clickhouse',
+      rows: Array.isArray(result.data) ? result.data : [],
+      meta: result.meta || null,
+      loadMs: result.loadMs,
+      serverMs: result.serverMs,
+    };
+  }
+
+  async function loadCollectorOverview() {
+    const health = await checkHealth();
+    if (!health.connected) {
+      return { source: 'error', data: null, error: LOAD_FAILED, meta: null };
+    }
+    const result = await fetchDashboard('/api/collectors/overview', 'collectors/overview');
+    if (!result.ok) {
+      return { source: 'error', data: null, error: LOAD_FAILED, meta: null };
+    }
+    return {
+      source: 'clickhouse',
+      data: result.data || null,
+      meta: result.meta || null,
+      loadMs: result.loadMs,
+      serverMs: result.serverMs,
+    };
+  }
+
+  async function loadTtl() {
+    const body = await requestJson('/api/admin/ttl');
+    return body.data || [];
+  }
+
+  async function updateTtl(id, days) {
+    const body = await requestJson(`/api/admin/ttl/${encodeURIComponent(id)}`, {
+      method: 'PUT',
+      body: { days },
+    });
+    return body;
+  }
+
+  async function loadCollectorStatus() {
+    const health = await checkHealth();
+    if (!health.connected) {
+      return { source: 'error', rows: [], error: LOAD_FAILED, meta: null };
+    }
+    const result = await fetchDashboard('/api/collectors/status', 'collectors/status');
+    if (!result.ok) {
+      return { source: 'error', rows: [], error: LOAD_FAILED, meta: null };
+    }
+    return {
+      source: 'clickhouse',
+      rows: Array.isArray(result.data) ? result.data : [],
+      meta: result.meta || null,
+      loadMs: result.loadMs,
+      serverMs: result.serverMs,
+    };
+  }
+
+  async function loadCollectorCompleteness() {
+    const health = await checkHealth();
+    if (!health.connected) {
+      return { source: 'error', rows: [], error: LOAD_FAILED, meta: null };
+    }
+    const result = await fetchDashboard('/api/collectors/completeness', 'collectors/completeness');
+    if (!result.ok) {
+      return { source: 'error', rows: [], error: LOAD_FAILED, meta: null };
+    }
+    return {
+      source: 'clickhouse',
+      rows: Array.isArray(result.data) ? result.data : [],
+      meta: result.meta || null,
+      loadMs: result.loadMs,
+      serverMs: result.serverMs,
+    };
+  }
+
+  function bmpQueryString(params = {}) {
+    const q = new URLSearchParams();
+    for (const [k, v] of Object.entries(params)) {
+      if (v != null && v !== '') q.set(k, String(v));
+    }
+    const s = q.toString();
+    return s ? `?${s}` : '';
+  }
+
+  async function loadBmpSummary() {
+    return requestJson('/api/bmp/summary');
+  }
+
+  async function loadBmpPeers(params = {}) {
+    return requestJson(`/api/bmp/peers${bmpQueryString(params)}`);
+  }
+
+  async function loadBmpRouters() {
+    return requestJson('/api/bmp/routers');
+  }
+
+  async function loadBmpRoutes(params = {}) {
+    return requestJson(`/api/bmp/routes${bmpQueryString(params)}`);
+  }
+
+  async function loadBmpEvents(params = {}) {
+    return requestJson(`/api/bmp/events${bmpQueryString(params)}`);
+  }
+
+  async function loadBmpCounts(params = {}) {
+    return requestJson(`/api/bmp/counts${bmpQueryString(params)}`);
+  }
+
+  async function loadBmpChurn(params = {}) {
+    return requestJson(`/api/bmp/churn${bmpQueryString(params)}`);
+  }
+
+  async function loadBmpFlap(params = {}) {
+    return requestJson(`/api/bmp/flap${bmpQueryString(params)}`);
+  }
+
+  async function settledValue(result, fallback) {
+    return result.status === 'fulfilled' ? result.value : fallback;
+  }
+
+  function enrichChartSeries(series) {
+    if (!series?.points?.length || !series?.lines?.length) return null;
+    const points = series.points.map((pt) => {
+      const next = { ...pt };
+      for (const ln of series.lines) {
+        const f = `${ln.key}_pps`;
+        if (next[f] == null && ln.key === 'total' && next.pps != null) {
+          next[f] = Number(next.pps) || 0;
+        }
+      }
+      return next;
+    });
+    const hasPps = points.some((pt) => series.lines.some((ln) => pt[`${ln.key}_pps`] != null));
+    return hasPps ? { points, lines: series.lines } : null;
+  }
+
+  const emptyDashboardPayload = () => ({
+    series: { points: [], lines: [] },
+    protocols: [],
+    services: [],
+  });
+
+  /** Статистика по направлениям — отдельно от остального dashboard. */
+  async function loadTrafficStats({ timeRange = '24h', customPeriod, collectorFilter } = {}) {
+    const finish = DashboardLog?.widgetStart?.('traffic-stats') ?? ((extra) => ({ loadMs: 0, ...extra }));
+    const health = await checkHealth();
+    if (!health.connected) {
+      const metrics = finish({ source: 'error' });
+      return { source: 'error', trafficStats: null, error: LOAD_FAILED, loadMs: metrics.loadMs, serverMs: null };
+    }
+    const qs = trafficStatsQuery({ timeRange, customPeriod, collectorFilter });
+    const result = await fetchDashboard(`/api/dashboard/traffic-stats?${qs}`, 'dashboard/traffic-stats');
+    if (!result.ok) {
+      console.warn('[ApiClient] traffic stats failed:', result.error?.message);
+      const metrics = finish({ source: 'error', error: result.error?.message });
+      return { source: 'error', trafficStats: null, error: LOAD_FAILED, loadMs: metrics.loadMs, serverMs: null };
+    }
+    const metrics = finish({ source: 'clickhouse' });
+    return {
+      source: 'clickhouse',
+      trafficStats: result.data || null,
+      loadMs: metrics.loadMs,
+      serverMs: result.serverMs,
+    };
+  }
+
+  /** Загрузить данные dashboard из ClickHouse. Ошибка одного блока не сбрасывает остальные. */
+  async function loadDashboardData({ timeRange = '24h', customPeriod, directions, collectorFilter } = {}) {
+    const finishBatch = DashboardLog?.batchStart?.('main') ?? ((extra) => ({ loadMs: 0, ...extra }));
+    const health = await checkHealth();
+    if (!health.connected) {
+      finishBatch({ source: 'error', widgets: 0 });
+      return { source: 'error', error: LOAD_FAILED, ...emptyDashboardPayload(), loadTimings: {} };
+    }
+
+    const qsTraffic = chartTrafficQuery({ timeRange, customPeriod, directions, collectorFilter });
+    const qsProtocols = protocolQuery({ timeRange, customPeriod, directions, collectorFilter });
+    const qsServices = protocolQuery({ timeRange, customPeriod, directions, collectorFilter });
+
+    const [seriesR, protocolsR, servicesR] = await Promise.all([
+      fetchDashboard(`/api/dashboard/traffic?${qsTraffic}`, 'dashboard/traffic'),
+      fetchDashboard(`/api/dashboard/protocols?${qsProtocols}`, 'dashboard/protocols'),
+      fetchDashboard(`/api/dashboard/services?${qsServices}`, 'dashboard/services'),
+    ]);
+
+    const loadTimings = {
+      series: seriesR.loadMs,
+      protocols: protocolsR.loadMs,
+      services: servicesR.loadMs,
+    };
+    const loadServerMs = {
+      series: seriesR.serverMs,
+      protocols: protocolsR.serverMs,
+      services: servicesR.serverMs,
+    };
+
+    const okCount = [seriesR, protocolsR, servicesR].filter((r) => r.ok).length;
+    const hasAny = okCount > 0;
+
+    if (!hasAny) {
+      const err = seriesR.error || protocolsR.error || servicesR.error;
+      console.warn('[ApiClient] ClickHouse fetch failed:', err?.message || err);
+      finishBatch({ source: 'error', widgets: 0, error: err?.message || String(err) });
+      return { source: 'error', error: LOAD_FAILED, ...emptyDashboardPayload(), loadTimings, loadServerMs };
+    }
+
+    const chartSeries = seriesR.ok
+      ? (enrichChartSeries(seriesR.data) || { points: [], lines: [] })
+      : { points: [], lines: [] };
+    finishBatch({
+      source: hasAny ? 'clickhouse' : 'error',
+      widgets: okCount,
+    });
+    return {
+      source: hasAny ? 'clickhouse' : 'error',
+      series: chartSeries,
+      protocols: protocolsR.ok ? (protocolsR.data || []) : [],
+      services: servicesR.ok ? (servicesR.data || []) : [],
+      failedWidgets: {
+        series: !seriesR.ok,
+        protocols: !protocolsR.ok,
+        services: !servicesR.ok,
+      },
+      loadTimings,
+      loadServerMs,
+    };
+  }
+
+  return {
+    LOAD_FAILED,
+    login,
+    logout,
+    loadCurrentUser,
+    loadUsers,
+    createUser,
+    updateUser,
+    deleteUser,
+    changeUserPassword,
+    loadRbacResources,
+    loadRoles,
+    loadRole,
+    createRole,
+    updateRole,
+    deleteRole,
+    loadUserPermissions,
+    saveUserPermissions,
+    updateUserRole,
+    checkHealth,
+    loadDashboardCollectors,
+    loadDashboardData,
+    loadTrafficStats,
+    resolveChartSqlDirections,
+    resolveProtocolSqlDirections,
+    dashboardTraffic,
+    dashboardTrafficStats,
+    dashboardProtocols,
+    dashboardServices,
+    loadProtocolTrend,
+    loadServiceTrend,
+    dashboardVlans,
+    loadVlanTrend,
+    loadVlanTop,
+    loadExplorerSchema,
+    searchExplorerEntities,
+    loadExplorerQuery,
+    loadExplorerFlows,
+    exportExplorerCsv,
+    loadExplorerSavedFilters,
+    saveExplorerFilter,
+    deleteExplorerFilter,
+    updateExplorerFilter,
+    loadObservationsConfig,
+    loadObservations,
+    loadObservationAnalyticsDiagnostics,
+    loadWorkerDiagnostics,
+    scanWorkerGaps,
+    loadWorkerBackfillQueue,
+    enqueueWorkerBackfill,
+    cancelWorkerBackfill,
+    loadEnrichmentDiagnostics,
+    loadSnmpDiagnostics,
+    loadObservation,
+    createObservation,
+    updateObservation,
+    deleteObservation,
+    materializeObservation,
+    previewObservation,
+    runObservationReport,
+    loadObservationRuns,
+    observationRunArtifactUrl,
+    dashboardOtherPorts,
+    dashboardCountries,
+    loadCountries,
+    dashboardTopTalkers,
+    loadTopTalkers,
+    talkersQuery,
+    dashboardRecentFlows,
+    recentFlowsQuery,
+    loadRecentFlows,
+    dnsQuery,
+    loadDnsSources,
+    loadDnsActivity,
+    loadDnsTopDomains,
+    loadDnsTopClients,
+    loadDnsRecent,
+    loadDnsQtypes,
+    loadMonitoringParameters,
+    loadMonitoringSeries,
+    loadMonitoringDeviations,
+    loadMonitoringBounds,
+    saveMonitoringBounds,
+    loadL3Prefixes,
+    loadNetEntities,
+    loadNetEntitiesAdmin,
+    saveL3Prefix,
+    toggleL3Prefix,
+    deleteL3Prefix,
+    saveNetEntity,
+    loadPortServices,
+    savePortService,
+    disablePortService,
+    previewPortServiceDefaults,
+    seedPortServiceDefaults,
+    loadRefVlans,
+    loadRefVlansSeen,
+    saveRefVlan,
+    setRefVlanEnabled,
+    deleteRefVlan,
+    loadLocations,
+    saveLocation,
+    loadCollectorsAdmin,
+    saveCollector,
+    deleteCollector,
+    loadFlowSources,
+    bindFlowSource,
+    registerFlowSource,
+    deleteFlowSource,
+    loadSnmpSettings,
+    saveSnmpSettings,
+    loadSnmpAgents,
+    saveSnmpAgent,
+    loadSnmpInterfaces,
+    requestSnmpProbe,
+    requestSnmpProbeAll,
+    loadCollectorOptions,
+    loadDiscoveredSources,
+    loadCollectorOverview,
+    loadCollectorStatus,
+    loadCollectorCompleteness,
+    loadBmpSummary,
+    loadBmpPeers,
+    loadBmpRouters,
+    loadBmpRoutes,
+    loadBmpEvents,
+    loadBmpCounts,
+    loadBmpChurn,
+    loadBmpFlap,
+    loadTtl,
+    updateTtl,
+    getStatus: () => ({ ...status }),
+  };
+})();
+
+Object.assign(window, { ApiClient });

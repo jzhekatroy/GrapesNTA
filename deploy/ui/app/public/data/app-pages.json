@@ -1,0 +1,21 @@
+[
+  { "id": "dashboard", "title": "Обзор", "section": "Обзор" },
+  { "id": "monitoring", "title": "Мониторинг", "section": "Обзор" },
+  { "id": "dns", "title": "DNS-запросы", "section": "Обзор" },
+  { "id": "explorer", "title": "Explorer Flows", "section": "Анализ трафика" },
+  { "id": "observations", "title": "Наблюдения", "section": "Анализ трафика" },
+  { "id": "top", "title": "Топ-говорящие", "section": "Анализ трафика" },
+  { "id": "collectors", "title": "Коллекторы", "section": "Оборудование" },
+  { "id": "snmp", "title": "SNMP", "section": "Оборудование" },
+  { "id": "bmp", "title": "BMP / BGP", "section": "Оборудование" },
+  { "id": "databases", "title": "Внешние базы данных", "section": "Оборудование" },
+  { "id": "routers", "title": "Роутеры и экспортёры", "section": "Справочники" },
+  { "id": "entities", "title": "Владельцы L3", "section": "Справочники" },
+  { "id": "cidr", "title": "Собственные сети (CIDR)", "section": "Справочники" },
+  { "id": "port-services", "title": "Сервисы / порты", "section": "Справочники" },
+  { "id": "vlan", "title": "VLAN", "section": "Справочники" },
+  { "id": "other", "title": "Другие справочники", "section": "Справочники" },
+  { "id": "users", "title": "Пользователи и права", "section": "Администрирование" },
+  { "id": "diagnostics", "title": "Диагностика", "section": "Администрирование" },
+  { "id": "ttl", "title": "Управление TTL", "section": "Администрирование" }
+]

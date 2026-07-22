@@ -1,0 +1,18 @@
+
+    /* Loading skeleton, visible until React mounts */
+    .boot { position: fixed; inset: 0; display: grid; place-items: center; background: var(--bg-canvas); z-index: 9999; }
+    .boot__panel { display: flex; flex-direction: column; gap: 10px; min-width: min(92vw, 420px); padding: 14px 18px; background: var(--bg-surface); border-radius: 16px; border: 1px solid var(--bd-soft); box-shadow: 0 12px 40px rgba(0, 0, 0, 0.18); }
+    .boot__head { display: flex; align-items: center; gap: 12px; color: var(--fg-secondary); font: var(--pv-text-body-2); }
+    .boot__dot { flex: 0 0 auto; width: 6px; height: 6px; border-radius: 999px; background: var(--accent); animation: pulse 1.4s infinite; }
+    .boot__meta { display: none; align-items: baseline; justify-content: space-between; gap: 12px; font: var(--pv-text-body-3); color: var(--fg-muted); }
+    .boot__log { display: none; max-height: 132px; overflow: auto; padding: 8px 10px; border-radius: 10px; background: var(--bg-canvas); border: 1px solid var(--bd-soft); }
+    .boot.is-verbose .boot__meta { display: flex; }
+    .boot.is-verbose .boot__log { display: block; }
+    .boot.is-error .boot__meta { display: flex; }
+    .boot__status { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: var(--fg-secondary); word-break: break-word; }
+    .boot__elapsed { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: var(--fg-muted); white-space: nowrap; }
+    .boot__log-line { font: 11px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: var(--fg-muted); }
+    .boot__log-line.is-error { color: var(--st-danger); }
+    .boot.is-error .boot__dot { background: var(--st-danger); animation: none; }
+    .boot.is-error .boot__head { color: var(--st-danger); }
+  

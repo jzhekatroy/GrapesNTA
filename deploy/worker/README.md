@@ -18,10 +18,13 @@ On the server (preferred):
 cd /opt/GrapesNTA
 ./deploy/deploy.sh worker          # git pull + rebuild grapes-worker
 ./deploy/deploy.sh                 # worker + enrichment
-./deploy/deploy.sh ui              # NTAdmin → grapes-nta
+./deploy/deploy.sh ui              # grapes-nta (vendored deploy/ui/app)
 ./deploy/deploy.sh full            # worker + enrichment + ui
 ./deploy/deploy.sh logs worker     # follow logs
 ```
+
+UI sources live in `deploy/ui/app` (synced from private NTAdmin via
+`scripts/sync-ui-from-ntadmin.sh` on a dev machine).
 
 First install / manual:
 
