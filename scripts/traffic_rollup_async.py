@@ -1092,7 +1092,25 @@ def run_range_backfill(
             bucket_end = add_bucket(bucket_start, job.bucket_kind)
             ready, reason = dependency_ready(job, bucket_start, bucket_end, states)
             if not ready:
-                # Hourly/daily may wait on 1m — re-check later.
+                # An hour/day bucket whose period has not closed yet (e.g. today's
+                # 1d bucket during a mid-day gap fill) can NEVER satisfy its 1m
+                # dependency until the period ends. Blocking on it would stall the
+                # whole queue (and the observation rewind that runs after) for
+                # hours. The live rollup builds such buckets when the period
+                # closes, so skip them here instead of deferring forever.
+                safe_point = utc_now() - timedelta(minutes=args.safety_lag_minutes)
+                if bucket_end > safe_point:
+                    logger.info(
+                        "job=%s action=skip reason=period_open bucket=%s "
+                        "bucket_end=%s > safe=%s (live rollup will build it)",
+                        job.job_id,
+                        fmt_dt(bucket_start),
+                        fmt_dt(bucket_end),
+                        fmt_dt(safe_point),
+                    )
+                    continue
+                # Period is closed but the dependency is still catching up —
+                # transient, re-check on the next tick.
                 logger.warning(
                     "job=%s action=defer reason=dependency bucket=%s detail=%s",
                     job.job_id,

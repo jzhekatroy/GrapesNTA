@@ -27,6 +27,17 @@ Fast rollups + observations live in [`../worker/`](../worker/).
 
 ## Deploy
 
+On the server (preferred):
+
+```bash
+cd /opt/GrapesNTA
+./deploy/deploy.sh enrichment      # git pull + rebuild grapes-enrichment
+./deploy/deploy.sh                 # worker + enrichment
+./deploy/deploy.sh logs enrichment
+```
+
+First install / manual:
+
 ```bash
 cd /opt/GrapesNTA
 git pull

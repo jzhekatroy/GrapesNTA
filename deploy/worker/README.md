@@ -12,6 +12,17 @@ Enrichment (geo/bgp/asn-names) lives in [`../enrichment/`](../enrichment/).
 
 ## Deploy
 
+On the server (preferred):
+
+```bash
+cd /opt/GrapesNTA
+./deploy/deploy.sh worker          # git pull + rebuild grapes-worker
+./deploy/deploy.sh                 # worker + enrichment
+./deploy/deploy.sh logs worker     # follow logs
+```
+
+First install / manual:
+
 ```bash
 cd /opt/GrapesNTA
 git pull
