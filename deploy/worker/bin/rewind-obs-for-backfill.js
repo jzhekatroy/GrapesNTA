@@ -16,18 +16,21 @@
 
 const path = require('path');
 
-// Worker image layout: /app/bin + /app/analytics/server
-process.chdir(path.join(__dirname, '..', 'analytics'));
+// Worker image layout: /app/bin (this file) + /app/analytics/server (modules).
+// require() resolves relative to this file's dir, not cwd, so point at analytics
+// explicitly. chdir too so any relative dotenv/data paths in modules still work.
+const ANALYTICS_DIR = path.join(__dirname, '..', 'analytics');
+process.chdir(ANALYTICS_DIR);
 
 const {
   listMaterializeJobs,
   ensureObservationsStore,
-} = require('./server/observations');
+} = require(path.join(ANALYTICS_DIR, 'server', 'observations'));
 const {
   materializeWindow,
   floorToBucket,
   ensureTable,
-} = require('./server/observations-rollup');
+} = require(path.join(ANALYTICS_DIR, 'server', 'observations-rollup'));
 
 async function main() {
   const fromIso = process.argv[2];
