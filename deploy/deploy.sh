@@ -26,6 +26,7 @@
 #   UI_APP_DIR=/opt/grapes/ui/app
 #   UI_MIRROR=/opt/NTAdmin
 #   UI_GIT_URL=https://github.com/mavotronik/NTAdmin.git
+#   UI_TARBALL=/path/ntadmin.tgz   # bootstrap mirror without GitHub auth
 #
 set -euo pipefail
 
@@ -95,14 +96,38 @@ ui_pull() {
     return 0
   fi
 
-  if [[ ! -d "${UI_MIRROR}/.git" ]]; then
+  if [[ -d "${UI_MIRROR}/.git" ]]; then
+    local branch
+    branch="$(git -C "${UI_MIRROR}" rev-parse --abbrev-ref HEAD)"
+    log "git pull NTAdmin mirror origin ${branch}"
+    if ! GIT_TERMINAL_PROMPT=0 git -C "${UI_MIRROR}" pull --ff-only origin "${branch}"; then
+      die "git pull failed for ${UI_MIRROR} (check GitHub credentials). Use --no-pull ui to rebuild from current sources."
+    fi
+    log "NTAdmin mirror: $(git -C "${UI_MIRROR}" rev-parse --short HEAD)"
+  elif [[ -f "${UI_MIRROR}/package.json" ]]; then
+    log "NTAdmin mirror has no git — using existing tree at ${UI_MIRROR}"
+  elif [[ -n "${UI_TARBALL:-}" ]]; then
+    [[ -f "${UI_TARBALL}" ]] || die "UI_TARBALL not found: ${UI_TARBALL}"
+    log "bootstrapping NTAdmin mirror from tarball ${UI_TARBALL} → ${UI_MIRROR}"
+    mkdir -p "${UI_MIRROR}"
+    tar -xzf "${UI_TARBALL}" -C "${UI_MIRROR}"
+    [[ -f "${UI_MIRROR}/package.json" ]] || die "tarball did not contain package.json at ${UI_MIRROR}"
+  else
     log "NTAdmin mirror missing — cloning ${UI_GIT_URL} → ${UI_MIRROR}"
     mkdir -p "$(dirname "${UI_MIRROR}")"
-    if ! git clone --branch main "${UI_GIT_URL}" "${UI_MIRROR}"; then
-      die "failed to clone NTAdmin. Set UI_GIT_URL or clone manually to ${UI_MIRROR} (private repo needs credentials)"
+    # Never hang on interactive username/password (private repo without creds).
+    if ! GIT_TERMINAL_PROMPT=0 git -c credential.helper= \
+        clone --branch main "${UI_GIT_URL}" "${UI_MIRROR}"; then
+      rm -rf "${UI_MIRROR}"
+      die "cannot clone private NTAdmin (no GitHub credentials on server).
+Options:
+  1) Create read-only PAT and:
+       git clone https://<TOKEN>@github.com/mavotronik/NTAdmin.git ${UI_MIRROR}
+  2) Or upload a tarball and:
+       UI_TARBALL=/path/ntadmin.tgz $0 ui
+  3) Or sync sources into ${UI_APP_DIR} yourself and:
+       $0 --no-pull ui"
     fi
-  else
-    git_pull_dir "${UI_MIRROR}" "NTAdmin mirror"
   fi
 
   [[ -d "${UI_APP_DIR}" ]] || die "missing UI app dir ${UI_APP_DIR}"
@@ -120,6 +145,8 @@ ui_pull() {
     printf '  ui_app synced from %s (%s)\n' \
       "${UI_MIRROR}" \
       "$(git -C "${UI_MIRROR}" rev-parse --short HEAD)"
+  else
+    printf '  ui_app synced from %s (no git)\n' "${UI_MIRROR}"
   fi
 }
 
