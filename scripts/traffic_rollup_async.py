@@ -257,6 +257,68 @@ def raw_lag_seconds(ch: ClickHouseClient) -> int:
     return int(value or "0")
 
 
+@dataclass
+class SpoolSource:
+    source_id: str
+    lag_segments: int
+    age_seconds: int
+
+
+def spool_backlog_sources(
+    ch: ClickHouseClient,
+    logger: logging.Logger,
+    *,
+    max_lag_segments: int,
+    snapshot_max_age_sec: int,
+) -> Optional[List[SpoolSource]]:
+    """Enabled sources whose collector spool is still draining a backlog.
+
+    Returns the list of sources with a *fresh* health snapshot that reports
+    lag_segments above the allowed threshold. An empty list means "drained"
+    (safe to advance). None means the signal is unavailable (missing table /
+    query error) — callers must fail open and not hold the cursor forever.
+
+    Rationale: during spool catch-up after a ClickHouse outage the collector
+    re-inserts backlog rows with their *original* time_received_ns while also
+    ingesting live traffic, so raw_lag_seconds() (now - max(time_received_ns))
+    stays ~0 and cannot detect the incomplete window. collector_health_snapshots
+    .lag_segments falls monotonically to 0 exactly when the spool is drained, so
+    it is the correct completeness gate.
+    """
+    try:
+        rows = ch.query(
+            "SELECT source_id, "
+            "argMax(lag_segments, ts) AS lag, "
+            "dateDiff('second', max(ts), now64(3)) AS age "
+            "FROM default.collector_health_snapshots "
+            "WHERE ts >= now() - INTERVAL 30 MINUTE "
+            "AND source_id IN (SELECT source_id FROM default.net_flow_sources_enabled) "
+            "GROUP BY source_id",
+            display="spool backlog state",
+        )
+    except RuntimeError as exc:
+        logger.warning("spool gate: signal unavailable, failing open: %s", exc)
+        return None
+
+    draining: List[SpoolSource] = []
+    for line in rows.splitlines():
+        parts = line.split("\t")
+        if len(parts) < 3:
+            continue
+        try:
+            lag = int(parts[1] or "0")
+            age = int(parts[2] or "0")
+        except ValueError:
+            continue
+        # A stale snapshot cannot confirm a backlog; skip it (fail open) so a
+        # silent/stopped collector never deadlocks the rollup.
+        if age > snapshot_max_age_sec:
+            continue
+        if lag > max_lag_segments:
+            draining.append(SpoolSource(source_id=parts[0], lag_segments=lag, age_seconds=age))
+    return draining
+
+
 def bootstrap_bucket(
     ch: ClickHouseClient,
     job: RollupJob,
@@ -675,6 +737,39 @@ def parse_args() -> argparse.Namespace:
         help="run even if flows_raw lag is high (use only after spool catch-up)",
     )
     parser.add_argument(
+        "--require-spool-drained",
+        dest="require_spool_drained",
+        action="store_true",
+        default=(env("TRAFFIC_ROLLUP_REQUIRE_SPOOL_DRAINED", "1") or "1").lower()
+        in ("1", "true", "yes", "on"),
+        help=(
+            "hold the rollup cursor while any enabled collector's spool is still "
+            "draining a backlog (collector_health_snapshots.lag_segments). Prevents "
+            "gaps after a ClickHouse outage; on by default"
+        ),
+    )
+    parser.add_argument(
+        "--no-require-spool-drained",
+        dest="require_spool_drained",
+        action="store_false",
+        help="disable the spool-drain gate",
+    )
+    parser.add_argument(
+        "--spool-max-lag-segments",
+        type=int,
+        default=int(env("TRAFFIC_ROLLUP_SPOOL_MAX_LAG_SEGMENTS", "0") or "0"),
+        help="allowed collector spool backlog (segments) before holding the cursor",
+    )
+    parser.add_argument(
+        "--spool-snapshot-max-age-sec",
+        type=int,
+        default=int(env("TRAFFIC_ROLLUP_SPOOL_SNAPSHOT_MAX_AGE_SEC", "180") or "180"),
+        help=(
+            "ignore collector_health_snapshots older than this (a stale snapshot "
+            "cannot confirm a backlog, so the gate fails open to avoid deadlock)"
+        ),
+    )
+    parser.add_argument(
         "--bootstrap-days",
         type=int,
         default=int(env("TRAFFIC_ROLLUP_BOOTSTRAP_DAYS", "7") or "7"),
@@ -769,6 +864,25 @@ def main() -> int:
             )
             return 0
         logger.info("precheck ok: flows_raw lag_s=%s", lag_s)
+
+    if args.require_spool_drained and not args.dry_run:
+        draining = spool_backlog_sources(
+            ch,
+            logger,
+            max_lag_segments=args.spool_max_lag_segments,
+            snapshot_max_age_sec=args.spool_snapshot_max_age_sec,
+        )
+        if draining:
+            detail = ",".join(
+                f"{s.source_id}:lag={s.lag_segments}(age={s.age_seconds}s)" for s in draining
+            )
+            logger.warning(
+                "action=hold reason=spool_draining sources=%s "
+                "(flows_raw incomplete for recent buckets; holding cursor until drained)",
+                detail,
+            )
+            return 0
+        logger.info("precheck ok: collector spool drained")
 
     states = load_states(ch)
     until = safe_until(args)
