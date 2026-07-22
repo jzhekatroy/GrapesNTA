@@ -988,11 +988,12 @@ def run_range_backfill(
     resume_minute: Optional[datetime] = None,
     wall_sec: int = 180,
     on_progress=None,
+    cancel_check=None,
 ) -> Tuple[str, Optional[datetime], int, int, Optional[str]]:
     """
     Process [range_from, range_to) for jobs (priority order).
     Returns (next_job_id or '', next_minute or None, ok_count, fail_count, error).
-    Empty next_job means finished.
+    Empty next_job means finished. next_job '__cancelled__' means operator abort.
     """
     # Force idempotent rewrite of existing buckets in the hole.
     args.delete_before_insert = True
@@ -1000,6 +1001,7 @@ def run_range_backfill(
     started = time.monotonic()
     ok_count = 0
     fail_count = 0
+    since_cancel_check = 0
     skipping = bool(resume_job)
 
     for job in jobs:
@@ -1014,6 +1016,18 @@ def run_range_backfill(
             bucket_list = iter_range_buckets(job, range_from, range_to)
 
         for bucket_start in bucket_list:
+            since_cancel_check += 1
+            if cancel_check and since_cancel_check >= 25:
+                since_cancel_check = 0
+                if cancel_check():
+                    logger.info(
+                        "queue cancelled by operator job=%s bucket=%s ok=%s",
+                        job.job_id,
+                        fmt_dt(bucket_start),
+                        ok_count,
+                    )
+                    return "__cancelled__", bucket_start, ok_count, fail_count, None
+
             if time.monotonic() - started >= wall_sec:
                 logger.info(
                     "queue wall budget reached job=%s bucket=%s ok=%s",
@@ -1128,6 +1142,17 @@ def process_queue(args: argparse.Namespace, logger: logging.Logger) -> int:
         return 0
 
     request_id = req["request_id"]
+
+    def is_cancelled() -> bool:
+        try:
+            cur = ch.query(
+                f"SELECT status FROM {BACKFILL_QUEUE_TABLE} FINAL "
+                f"WHERE request_id = {sql_string(request_id)}",
+                display="check queue cancel",
+            ).strip()
+        except RuntimeError:
+            return False
+        return cur == "cancelled"
     jobs_selected = req["jobs"] or list(DEFAULT_BACKFILL_JOBS)
     known = {j.job_id for j in sorted_jobs()}
     jobs_selected = [j for j in jobs_selected if j in known]
@@ -1197,7 +1222,13 @@ def process_queue(args: argparse.Namespace, logger: logging.Logger) -> int:
         resume_minute=req["progress_minute"],
         wall_sec=max(30, int(args.queue_wall_sec)),
         on_progress=on_progress,
+        cancel_check=is_cancelled,
     )
+
+    if next_job == "__cancelled__":
+        # Leave status='cancelled' as set by operator; do not overwrite.
+        logger.info("queue cancelled id=%s ok=%s", request_id, ok_count)
+        return 0
 
     if err:
         save_queue_row(
