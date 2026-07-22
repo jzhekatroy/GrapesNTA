@@ -25,6 +25,27 @@ IF_HIGH_SPEED = ".1.3.6.1.2.1.31.1.1.1.15"
 IF_SPEED = ".1.3.6.1.2.1.2.2.1.5"
 EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
 
+# Statuses that mean the last poll failed. These agents should be retried sooner
+# than the full refresh interval (a healthy 'ok' agent waits refresh_seconds).
+FAILURE_STATUSES = frozenset({"timeout", "auth_error", "error", "config_error"})
+
+
+def agent_poll_due(
+    agent: "Agent",
+    now: datetime,
+    refresh_seconds: int,
+    retry_seconds: int,
+) -> bool:
+    """Never polled / manually queued → due now. Failed last poll → retry after
+    retry_seconds (short). Otherwise wait the full refresh_seconds."""
+    if agent.last_poll_at == EPOCH:
+        return True
+    if agent.last_poll_status in FAILURE_STATUSES:
+        interval = min(max(retry_seconds, 0), refresh_seconds)
+    else:
+        interval = refresh_seconds
+    return now - agent.last_poll_at >= timedelta(seconds=interval)
+
 
 def env(name: str, default: Optional[str] = None) -> Optional[str]:
     value = os.environ.get(name)
@@ -690,6 +711,16 @@ def parse_args() -> argparse.Namespace:
         default=int(env("SNMP_SYNC_MAX_AGENTS", "25") or "25"),
     )
     parser.add_argument(
+        "--retry-seconds",
+        type=int,
+        default=int(env("SNMP_SYNC_RETRY_SECONDS", "300") or "300"),
+        help=(
+            "re-poll agents whose last poll failed (timeout/auth/error) after this "
+            "many seconds, instead of waiting the full refresh interval; capped at "
+            "refresh_interval_sec"
+        ),
+    )
+    parser.add_argument(
         "--max-interfaces",
         type=int,
         default=int(env("SNMP_SYNC_MAX_INTERFACES", "4096") or "4096"),
@@ -738,10 +769,11 @@ def main() -> int:
             agent
             for agent in agents.values()
             if agent.snmp_enabled
-            and (
-                agent.last_poll_at == EPOCH
-                or now - agent.last_poll_at
-                >= timedelta(seconds=settings.refresh_seconds)
+            and agent_poll_due(
+                agent,
+                now,
+                settings.refresh_seconds,
+                args.retry_seconds,
             )
         ]
         due.sort(key=lambda item: (item.last_poll_at, item.switch_ip))
