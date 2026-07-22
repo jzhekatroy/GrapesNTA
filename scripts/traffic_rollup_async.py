@@ -637,6 +637,10 @@ def run_bucket(
 
     if needs_delete and job.pre_delete_sql:
         delete_sql = job.pre_delete_sql.format(bucket_dt=bucket_dt)
+        # Make the DELETE synchronous so we don't depend on reading
+        # system.mutations afterwards (the worker's ui_admin user may lack
+        # SELECT on system.mutations, which otherwise fails the wait step).
+        delete_sql = f"{delete_sql} SETTINGS mutations_sync = 1"
         logger.info(
             "job=%s action=delete bucket=%s reason=%s",
             job.job_id,
@@ -644,7 +648,16 @@ def run_bucket(
             delete_reason,
         )
         ch.execute(delete_sql, display=f"delete bucket for {job.job_id}")
-        wait_table_mutations(ch, logger, job.dest_table)
+        # mutations_sync=1 already waited for completion; poll only as a
+        # best-effort and never fail the bucket if system.mutations is denied.
+        try:
+            wait_table_mutations(ch, logger, job.dest_table)
+        except RuntimeError as exc:
+            logger.warning(
+                "job=%s action=wait_mutations_skipped detail=%s",
+                job.job_id,
+                str(exc).splitlines()[0][:200],
+            )
 
     select_sql = job.select_sql.format(time_filter=time_filter)
     insert_sql = f"INSERT INTO {job.dest_table}\n{select_sql}"
