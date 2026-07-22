@@ -49,6 +49,38 @@ const REWIND_EVERY_MS = Math.max(
   Number(process.env.OBSERVATION_ROLLUP_REWIND_SEC) || 600,
 ) * 1000;
 
+/**
+ * Same completeness gate as traffic_rollup_async.py: during spool catch-up after a
+ * CH outage, flows_raw is incomplete while raw lag looks fine. Hold the live cursor
+ * until collector_health_snapshots.lag_segments falls to the allowed threshold.
+ */
+function envFlag(name, fallback = '1') {
+  const raw = process.env[name];
+  const v = String(raw == null || raw === '' ? fallback : raw).toLowerCase();
+  return v === '1' || v === 'true' || v === 'yes' || v === 'on';
+}
+
+const REQUIRE_SPOOL_DRAINED = envFlag(
+  'OBSERVATION_ROLLUP_REQUIRE_SPOOL_DRAINED',
+  process.env.TRAFFIC_ROLLUP_REQUIRE_SPOOL_DRAINED ?? '1',
+);
+const SPOOL_MAX_LAG_SEGMENTS = Math.max(
+  0,
+  Number(
+    process.env.OBSERVATION_ROLLUP_SPOOL_MAX_LAG_SEGMENTS
+      ?? process.env.TRAFFIC_ROLLUP_SPOOL_MAX_LAG_SEGMENTS
+      ?? 0,
+  ) || 0,
+);
+const SPOOL_SNAPSHOT_MAX_AGE_SEC = Math.max(
+  30,
+  Number(
+    process.env.OBSERVATION_ROLLUP_SPOOL_SNAPSHOT_MAX_AGE_SEC
+      ?? process.env.TRAFFIC_ROLLUP_SPOOL_SNAPSHOT_MAX_AGE_SEC
+      ?? 180,
+  ) || 180,
+);
+
 let ensureTablePromise = null;
 let lastRewindAtMs = 0;
 
@@ -110,6 +142,42 @@ async function deleteRollupWindow(observationId, from, to) {
 
 function earliestLiveFrom(safeTo) {
   return floorToBucket(new Date(safeTo.getTime() - MAX_CATCHUP_BEHIND_MS));
+}
+
+/**
+ * @returns {Promise<{ available: boolean, draining: Array<{ sourceId: string, lag: number, age: number }> }>}
+ * available=false → signal missing/error (fail open for the hold gate; fail closed on empty shots).
+ */
+async function getSpoolDrainState() {
+  try {
+    const { rows } = await query(`
+      SELECT
+        source_id AS source_id,
+        argMax(lag_segments, ts) AS lag,
+        dateDiff('second', max(ts), now64(3)) AS age
+      FROM default.collector_health_snapshots
+      WHERE ts >= now() - INTERVAL 30 MINUTE
+        AND source_id IN (SELECT source_id FROM default.net_flow_sources_enabled)
+      GROUP BY source_id
+    `, {}, { name: 'observations/spool-drain-state' });
+    const draining = [];
+    for (const r of rows || []) {
+      const lag = Number(r.lag) || 0;
+      const age = Number(r.age) || 0;
+      if (age > SPOOL_SNAPSHOT_MAX_AGE_SEC) continue;
+      if (lag > SPOOL_MAX_LAG_SEGMENTS) {
+        draining.push({
+          sourceId: String(r.source_id || ''),
+          lag,
+          age,
+        });
+      }
+    }
+    return { available: true, draining };
+  } catch (err) {
+    console.warn(new Date().toISOString(), 'spool gate: signal unavailable, failing open:', err.message);
+    return { available: false, draining: [] };
+  }
 }
 
 function jobStartedBucket(job) {
@@ -183,8 +251,10 @@ async function catchupGrouped(job, window, seriesLimit) {
   return { groupedPoints: values.length, values };
 }
 
-async function catchupOne(job) {
+async function catchupOne(job, opts = {}) {
   const intervalSec = Math.max(MIN_REFRESH_SEC, Number(job.intervalSec) || MIN_REFRESH_SEC);
+  const spoolConfirmedDrained = opts.spoolConfirmedDrained === true;
+  const spoolSignalAvailable = opts.spoolSignalAvailable !== false;
 
   // Exclusive end of latest closed 5m bucket, minus one more bucket for late flows.
   // e.g. now 12:07 → floor 12:05 → safeTo 12:00 (materialize through […, 12:00)).
@@ -246,6 +316,28 @@ async function catchupOne(job) {
     const seriesLimit = Math.min(Math.max(Number(job.seriesLimit) || 20, 8), 50);
     const grouped = await catchupGrouped(job, window, seriesLimit);
     values.push(...grouped.values);
+
+    // Empty shot while spool completeness is unconfirmed → do NOT advance cursor.
+    // (During a confirmed drain we never reach here: runOnce holds the whole tick.)
+    // Once spool is confirmed drained, empty means the filter truly matched nothing.
+    if (!values.length && REQUIRE_SPOOL_DRAINED && !spoolConfirmedDrained) {
+      const why = spoolSignalAvailable
+        ? 'empty shot while spool not confirmed drained — holding cursor'
+        : 'empty shot — spool signal unavailable, holding cursor';
+      await patchMaterializeStatus(job.id, {
+        status: 'lagging',
+        lagSeconds: Math.max(0, Math.floor((Date.now() - from.getTime()) / 1000)),
+        lastCatchupAt: new Date().toISOString(),
+        lastError: why,
+      });
+      return {
+        id: job.id,
+        skipped: true,
+        reason: 'empty_unconfirmed',
+        from,
+        to,
+      };
+    }
 
     // Always clear the window first — SummingMergeTree sums duplicates on re-insert.
     await deleteRollupWindow(job.id, from, to);
@@ -411,6 +503,30 @@ async function runOnce() {
   await ensureTable();
   // Force rewind on cold start; later ticks throttle to REWIND_EVERY_MS.
   await rewindCursorsIfAhead({ force: !lastRewindAtMs });
+
+  const spool = REQUIRE_SPOOL_DRAINED
+    ? await getSpoolDrainState()
+    : { available: true, draining: [] };
+  const spoolConfirmedDrained = !REQUIRE_SPOOL_DRAINED
+    || (spool.available && spool.draining.length === 0);
+  if (REQUIRE_SPOOL_DRAINED && spool.available && spool.draining.length) {
+    const summary = spool.draining
+      .slice(0, 8)
+      .map((s) => `${s.sourceId}:lag=${s.lag}`)
+      .join(',');
+    console.log(
+      new Date().toISOString(),
+      'rollup hold reason=spool_draining',
+      `sources=${spool.draining.length}`,
+      summary,
+    );
+    return [{
+      skipped: true,
+      reason: 'spool_draining',
+      sources: spool.draining.length,
+    }];
+  }
+
   const jobs = (await listMaterializeJobs())
     .filter((j) => (
       j.status === 'queued'
@@ -427,13 +543,17 @@ async function runOnce() {
       return String(a.cursorMinute || '').localeCompare(String(b.cursorMinute || ''));
     });
 
+  const catchupOpts = {
+    spoolConfirmedDrained,
+    spoolSignalAvailable: spool.available,
+  };
   const results = [];
   const limit = Math.max(1, CONCURRENCY);
   for (let i = 0; i < jobs.length; i += limit) {
     const batch = jobs.slice(i, i + limit);
     for (const job of batch) {
       try {
-        results.push(await catchupOne(job));
+        results.push(await catchupOne(job, catchupOpts));
       } catch (err) {
         results.push({ id: job.id, error: err.message });
       }
@@ -484,7 +604,7 @@ async function rebuildObservation(observationId, fromIso) {
     const result = await catchupOne({
       ...job,
       ...(await listMaterializeJobs()).find((j) => j.id === observationId),
-    });
+    }, { spoolConfirmedDrained: true, spoolSignalAvailable: true });
     shots.push(result);
     console.log(new Date().toISOString(), 'rebuild shot', JSON.stringify(result));
     if (result?.skipped || result?.error) break;
