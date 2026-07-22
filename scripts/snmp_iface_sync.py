@@ -677,7 +677,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--port", type=int, default=int(env("SNMP_SYNC_CH_PORT", "6124") or "6124")
     )
-    parser.add_argument("--user", default=env("SNMP_SYNC_CH_USER", "develop"))
+    parser.add_argument("--user", default=env("SNMP_SYNC_CH_USER", "default"))
     parser.add_argument("--password", default=env("SNMP_SYNC_CH_PASSWORD"))
     parser.add_argument("--database", default=env("SNMP_SYNC_CH_DATABASE", "default"))
     parser.add_argument("--snmpget", default=env("SNMP_SYNC_SNMPGET", "/usr/bin/snmpget"))
