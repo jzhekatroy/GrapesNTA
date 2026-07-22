@@ -15,7 +15,9 @@ JOBS = [
     ("bgp-origin", "/app/bin/cron-bgp-origin.sh", 300, "/tmp/bgp-origin.lock"),
     ("geoloaderd", "/app/bin/cron-geoloaderd.sh", 86400, "/tmp/enrichment-heavy.lock"),
     ("asn-names", "/app/bin/cron-asn-names.sh", 604800, "/tmp/asn-names.lock"),
-    ("snmp-iface-sync", "/app/bin/cron-snmp-iface-sync.sh", 60, "/tmp/snmp-iface-sync.lock"),
+    # 5 min: discover is a flows_raw scan; SNMP poll itself is gated by
+    # refresh_interval_sec (default 1800) inside snmp_iface_sync.py.
+    ("snmp-iface-sync", "/app/bin/cron-snmp-iface-sync.sh", 300, "/tmp/snmp-iface-sync.lock"),
 ]
 
 

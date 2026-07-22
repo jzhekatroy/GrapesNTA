@@ -280,13 +280,45 @@ def agent_row(agent: Agent, now: datetime) -> Dict[str, Any]:
     }
 
 
+def resolve_discover_lookback_hours(configured_hours: int) -> int:
+    """
+    Cap the CH scan window for routine discover ticks.
+
+    Agents/interfaces already live in net_snmp_*; a short recent window is
+    enough to refresh last_seen and pick up new ifIndexes. Full multi-day
+    scans of flows_raw every minute burn CH CPU (billions of rows).
+    Override with SNMP_DISCOVER_LOOKBACK_HOURS_MAX (default 1).
+    """
+    configured = max(1, int(configured_hours or 1))
+    try:
+        cap = int(env("SNMP_DISCOVER_LOOKBACK_HOURS_MAX", "1") or "1")
+    except ValueError:
+        cap = 1
+    cap = max(1, cap)
+    return min(configured, cap)
+
+
 def discover(
     ch: ClickHouseClient,
     agents: Dict[str, Agent],
     lookback_hours: int,
     now: datetime,
     auto_enable_new_agents: bool = False,
+    *,
+    cap_lookback: bool = True,
 ) -> Dict[str, Set[int]]:
+    if cap_lookback:
+        lookback_hours = resolve_discover_lookback_hours(lookback_hours)
+    else:
+        lookback_hours = max(1, int(lookback_hours or 1))
+    # date prune hits PARTITION BY date; time_received_ns hits ORDER BY primary key.
+    date_days = max(1, (lookback_hours + 23) // 24)
+    logger = logging.getLogger("snmp_iface_sync")
+    logger.info(
+        "discovery scan lookback_hours=%s date_days=%s",
+        lookback_hours,
+        date_days,
+    )
     rows = ch.json_rows(
         f"""
         SELECT
@@ -296,7 +328,8 @@ def discover(
             groupUniqArray(out_if) AS out_values,
             max(toDateTime(time_received_ns, 'UTC')) AS last_seen_at
         FROM default.flows_raw
-        PREWHERE time_received_ns >= now64(9) - INTERVAL {lookback_hours:d} HOUR
+        PREWHERE date >= today() - {date_days:d}
+          AND time_received_ns >= now64(9) - INTERVAL {lookback_hours:d} HOUR
         WHERE sampler_address != unhex('00000000000000000000000000000000')
           AND (in_if != 0 OR out_if != 0)
         GROUP BY sampler_hex
@@ -687,6 +720,8 @@ def main() -> int:
             settings.lookback_hours,
             now,
             settings.auto_enable_new_agents,
+            # Routine ticks stay cheap; --discover-only keeps the configured window.
+            cap_lookback=not args.discover_only,
         )
         logger.info(
             "discovery complete agents_seen=%s agents_known=%s",
