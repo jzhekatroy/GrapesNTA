@@ -1032,6 +1032,39 @@ def run_range_backfill(
         else:
             bucket_list = iter_range_buckets(job, range_from, range_to)
 
+        # One range DELETE per job instead of a per-minute mutation. Each
+        # ALTER ... DELETE rewrites the whole daily partition, so 206 per-minute
+        # deletes = 206 full-partition rewrites (~41s each on high-cardinality
+        # tables like traffic_asn_pair_1m). Collapse to a single range mutation
+        # over the remaining window; run_bucket's per-bucket probe then finds the
+        # window empty and skips its own DELETE. Self-skips on resume ticks and
+        # on already-complete jobs because the probe returns no rows.
+        if not args.dry_run and job.pre_delete_sql and bucket_list:
+            col = bucket_column(job)
+            lo_dt = f"toDateTime('{fmt_dt(bucket_list[0])}', 'UTC')"
+            hi_dt = f"toDateTime('{fmt_dt(range_to)}', 'UTC')"
+            try:
+                has_rows = ch.query(
+                    f"SELECT 1 FROM {job.dest_table} "
+                    f"WHERE {col} >= {lo_dt} AND {col} < {hi_dt} LIMIT 1",
+                    display=f"range idempotency probe for {job.job_id}",
+                ).strip()
+            except RuntimeError:
+                has_rows = "1"  # probe failed → delete to stay idempotent
+            if has_rows:
+                logger.info(
+                    "job=%s action=range_delete from=%s to=%s",
+                    job.job_id,
+                    fmt_dt(bucket_list[0]),
+                    fmt_dt(range_to),
+                )
+                ch.execute(
+                    f"ALTER TABLE {job.dest_table} DELETE "
+                    f"WHERE {col} >= {lo_dt} AND {col} < {hi_dt} "
+                    f"SETTINGS mutations_sync = 1",
+                    display=f"range delete for {job.job_id}",
+                )
+
         for bucket_start in bucket_list:
             since_cancel_check += 1
             if cancel_check and since_cancel_check >= 25:
