@@ -2,9 +2,14 @@
 'use strict';
 
 /**
- * Rewind materialize cursors for all enabled observation jobs so the worker
- * catch-up loop re-fills [from, to). Deletes existing rollup rows in that window
- * (idempotent SummingMergeTree rewrite on catch-up).
+ * Backfill observations STRICTLY inside [from, to).
+ *
+ * Unlike the old behaviour (rewind cursorMinute → live loop re-materializes
+ * forward to now, capped at 24h), this rewrites only the requested window and
+ * never touches the live cursor/status. That means:
+ *   - no 24h catch-up storm on flows_raw,
+ *   - other observations' live materialization is not disturbed,
+ *   - the operator-selected gap is filled idempotently (delete window + insert).
  *
  * Usage: node rewind-obs-for-backfill.js <fromIso> <toIso>
  */
@@ -16,11 +21,10 @@ process.chdir(path.join(__dirname, '..', 'analytics'));
 
 const {
   listMaterializeJobs,
-  patchMaterializeStatus,
   ensureObservationsStore,
 } = require('./server/observations');
 const {
-  deleteRollupWindow,
+  materializeWindow,
   floorToBucket,
   ensureTable,
 } = require('./server/observations-rollup');
@@ -33,8 +37,8 @@ async function main() {
     process.exit(2);
   }
 
-  let from = floorToBucket(new Date(fromIso));
-  let to = floorToBucket(new Date(toIso));
+  const from = floorToBucket(new Date(fromIso));
+  const to = floorToBucket(new Date(toIso));
   if (!(from < to)) {
     console.error('from must be before to');
     process.exit(2);
@@ -47,28 +51,21 @@ async function main() {
 
   for (const job of jobs) {
     if (!job?.id) continue;
-    const started = job.startedAt ? floorToBucket(job.startedAt) : null;
-    let jobFrom = from;
-    if (started && jobFrom < started) jobFrom = started;
-    if (!(jobFrom < to)) {
-      results.push({ id: job.id, skipped: true, reason: 'before_created' });
-      continue;
+    try {
+      const res = await materializeWindow(job, from, to);
+      results.push(res);
+    } catch (err) {
+      results.push({ id: job.id, error: err && err.message ? err.message : String(err) });
     }
-    await deleteRollupWindow(job.id, jobFrom, to);
-    await patchMaterializeStatus(job.id, {
-      status: 'queued',
-      cursorMinute: jobFrom.toISOString(),
-      lastError: null,
-    });
-    results.push({
-      id: job.id,
-      name: job.name,
-      from: jobFrom.toISOString(),
-      to: to.toISOString(),
-    });
   }
 
-  console.log(JSON.stringify({ rewound: results.length, results }, null, 2));
+  const filled = results.filter((r) => !r.skipped && !r.error).length;
+  console.log(JSON.stringify({
+    window: { from: from.toISOString(), to: to.toISOString() },
+    jobs: results.length,
+    filled,
+    results,
+  }, null, 2));
 }
 
 main().catch((err) => {

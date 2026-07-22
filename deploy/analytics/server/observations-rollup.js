@@ -279,6 +279,84 @@ async function catchupOne(job) {
   }
 }
 
+/**
+ * Backfill-only: rematerialize a single observation strictly inside [from, to)
+ * WITHOUT moving the live cursor and WITHOUT the MAX_CATCHUP_BEHIND_MS 24h cap.
+ * The live loop keeps owning cursorMinute/status — we only rewrite the closed
+ * historical window the operator asked for. Chunked by MAX_SHOT_MINUTES so a
+ * multi-hour gap doesn't hit flows_raw in one shot.
+ */
+async function materializeWindow(job, fromIn, toIn) {
+  let from = floorToBucket(fromIn);
+  const to = floorToBucket(toIn);
+  if (!(from instanceof Date) || !Number.isFinite(from.getTime())
+      || !(to instanceof Date) || !Number.isFinite(to.getTime())) {
+    return { id: job.id, points: 0, skipped: true, reason: 'bad_range' };
+  }
+  const started = jobStartedBucket(job);
+  if (started && from < started) from = started;
+  if (!(from < to)) {
+    return { id: job.id, points: 0, skipped: true, reason: 'before_created' };
+  }
+
+  const maxSpanMs = MAX_SHOT_MINUTES * 60 * 1000;
+  const seriesLimit = Math.min(Math.max(Number(job.seriesLimit) || 20, 8), 50);
+  let totalPointsAll = 0;
+  let groupedPointsAll = 0;
+  let cursor = from;
+
+  while (cursor < to) {
+    let chunkTo = new Date(Math.min(cursor.getTime() + maxSpanMs, to.getTime()));
+    if (chunkTo <= cursor) chunkTo = new Date(cursor.getTime() + BUCKET_MS);
+    if (chunkTo > to) chunkTo = to;
+
+    const window = {
+      range: 'custom',
+      from: cursor.toISOString(),
+      to: chunkTo.toISOString(),
+      filters: job.filters,
+      granularity: GRANULARITY,
+    };
+
+    const totalBundle = await explorerTimeseries(window);
+    const { rows: totalRaw } = await query(totalBundle.sql, totalBundle.params, {
+      name: `observations/backfill-total-${job.id}`,
+    });
+    const totalPoints = await totalBundle.map(totalRaw);
+    const values = totalPoints.map((p) => ({
+      observation_id: job.id,
+      minute: p.bucket,
+      dim0: '',
+      dim1: '',
+      bytes: Number(p.bytes) || 0,
+      packets: Number(p.packets) || 0,
+      flows: Number(p.flows) || 0,
+    }));
+
+    const grouped = await catchupGrouped(job, window, seriesLimit);
+    values.push(...grouped.values);
+
+    // Idempotent rewrite: clear the chunk window then re-insert.
+    await deleteRollupWindow(job.id, cursor, chunkTo);
+    if (values.length) {
+      await insertRows(ROLLUP_TABLE, values, { name: `observations/backfill-insert-${job.id}` });
+    }
+
+    totalPointsAll += totalPoints.length;
+    groupedPointsAll += grouped.groupedPoints;
+    cursor = chunkTo;
+  }
+
+  return {
+    id: job.id,
+    name: job.name,
+    points: totalPointsAll,
+    groupedPoints: groupedPointsAll,
+    from: from.toISOString(),
+    to: to.toISOString(),
+  };
+}
+
 async function recoverStuckRunning() {
   const jobs = (await listMaterializeJobs()).filter((j) => j.status === 'running');
   for (const job of jobs) {
@@ -421,6 +499,7 @@ module.exports = {
   ensureTable,
   deleteRollupWindow,
   rebuildObservation,
+  materializeWindow,
   floorToBucket,
 };
 
