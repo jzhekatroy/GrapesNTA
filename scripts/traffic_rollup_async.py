@@ -805,19 +805,462 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="log planned buckets without writing to ClickHouse",
     )
+    parser.add_argument(
+        "--range-from",
+        default="",
+        help="UTC 'YYYY-MM-DD HH:MM:SS' — process this closed range (with --range-to)",
+    )
+    parser.add_argument(
+        "--range-to",
+        default="",
+        help="UTC exclusive end of range backfill",
+    )
+    parser.add_argument(
+        "--process-queue",
+        action="store_true",
+        help="claim and process one pending row from traffic_rollup_backfill_queue",
+    )
+    parser.add_argument(
+        "--queue-wall-sec",
+        type=int,
+        default=int(env("TRAFFIC_ROLLUP_QUEUE_WALL_SEC", "180") or "180"),
+        help="max wall seconds to spend on a queue request per cron tick",
+    )
     return parser.parse_args()
 
 
-def main() -> int:
-    args = parse_args()
-    args.clickhouse_client = resolve_clickhouse_client(args.clickhouse_client)
-    log_file = None if args.no_log_file else args.log_file
-    logger = setup_logging(log_file, args.verbose)
+DEFAULT_BACKFILL_JOBS = [
+    "traffic_dashboard_1m",
+    "traffic_protocol_1m",
+    "traffic_direction_1m",
+    "traffic_role_1m",
+    "traffic_entity_1m",
+    "traffic_vlan_1m",
+    "traffic_country_1m",
+    "traffic_service_1m",
+    "traffic_unknown_port_1m",
+    "traffic_asn_1m",
+    "traffic_asn_pair_1m",
+    "traffic_dashboard_1h",
+    "traffic_asn_1h",
+    "traffic_asn_pair_1h",
+    "traffic_dashboard_1d",
+]
 
-    if not os.path.isfile(args.clickhouse_client):
-        logger.error("clickhouse-client not found: %s", args.clickhouse_client)
-        return 2
+BACKFILL_QUEUE_TABLE = "default.traffic_rollup_backfill_queue"
 
+
+def parse_utc_dt(raw: str) -> datetime:
+    text = (raw or "").strip().replace("T", " ").rstrip("Z")
+    if not text:
+        raise ValueError("empty datetime")
+    if "." in text:
+        text = text.split(".", 1)[0]
+    return datetime.strptime(text, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+
+
+def ensure_backfill_queue(ch: ClickHouseClient, logger: logging.Logger) -> None:
+    ch.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS {BACKFILL_QUEUE_TABLE}
+        (
+            request_id String,
+            created_at DateTime64(3, 'UTC') DEFAULT now64(3),
+            from_minute DateTime('UTC'),
+            to_minute DateTime('UTC'),
+            jobs Array(String) DEFAULT [],
+            include_observations UInt8 DEFAULT 1,
+            status LowCardinality(String) DEFAULT 'pending',
+            error String DEFAULT '',
+            progress_job String DEFAULT '',
+            progress_minute DateTime('UTC') DEFAULT toDateTime(0, 'UTC'),
+            updated_at DateTime64(3, 'UTC') DEFAULT now64(3)
+        )
+        ENGINE = ReplacingMergeTree(updated_at)
+        ORDER BY request_id
+        TTL toDateTime(created_at) + toIntervalDay(30)
+        SETTINGS index_granularity = 8192
+        """,
+        display="ensure backfill queue table",
+    )
+    logger.debug("backfill queue table present")
+
+
+def save_queue_row(
+    ch: ClickHouseClient,
+    *,
+    request_id: str,
+    created_at: str,
+    from_minute: datetime,
+    to_minute: datetime,
+    jobs: Sequence[str],
+    include_observations: int,
+    status: str,
+    error: str = "",
+    progress_job: str = "",
+    progress_minute: Optional[datetime] = None,
+) -> None:
+    jobs_sql = "[" + ",".join(sql_string(j) for j in jobs) + "]"
+    prog = progress_minute or datetime(1970, 1, 1, tzinfo=timezone.utc)
+    err = (error or "").replace("\\", "\\\\").replace("'", "\\'")
+    ch.execute(
+        f"INSERT INTO {BACKFILL_QUEUE_TABLE} "
+        "(request_id, created_at, from_minute, to_minute, jobs, include_observations, "
+        "status, error, progress_job, progress_minute, updated_at) VALUES "
+        f"({sql_string(request_id)}, parseDateTime64BestEffort({sql_string(created_at)}, 3, 'UTC'), "
+        f"toDateTime('{fmt_dt(from_minute)}', 'UTC'), toDateTime('{fmt_dt(to_minute)}', 'UTC'), "
+        f"{jobs_sql}, {int(include_observations)}, {sql_string(status)}, {sql_string(err)}, "
+        f"{sql_string(progress_job)}, toDateTime('{fmt_dt(prog)}', 'UTC'), now64(3))",
+        display=f"save queue {request_id} status={status}",
+    )
+
+
+def claim_queue_request(ch: ClickHouseClient, logger: logging.Logger) -> Optional[dict]:
+    """Return one pending/running request (FINAL), or None."""
+    rows = ch.query(
+        f"""
+        SELECT
+          request_id,
+          toString(created_at) AS created_at,
+          from_minute,
+          to_minute,
+          arrayStringConcat(jobs, ',') AS jobs_csv,
+          include_observations,
+          status,
+          progress_job,
+          progress_minute
+        FROM {BACKFILL_QUEUE_TABLE} FINAL
+        WHERE status IN ('pending', 'running')
+        ORDER BY
+          if(status = 'running', 0, 1),
+          created_at ASC
+        LIMIT 1
+        """,
+        display="claim backfill queue request",
+    )
+    if not rows.strip():
+        return None
+    parts = rows.split("\t")
+    if len(parts) < 9:
+        logger.warning("malformed queue row: %s", rows[:200])
+        return None
+    jobs_csv = parts[4].strip()
+    jobs = [j for j in jobs_csv.split(",") if j] if jobs_csv else list(DEFAULT_BACKFILL_JOBS)
+    prog_raw = parts[8].strip()
+    prog = None
+    if prog_raw and prog_raw != "1970-01-01 00:00:00":
+        prog = parse_utc_dt(prog_raw)
+    return {
+        "request_id": parts[0],
+        "created_at": parts[1],
+        "from_minute": parse_utc_dt(parts[2]),
+        "to_minute": parse_utc_dt(parts[3]),
+        "jobs": jobs,
+        "include_observations": int(parts[5] or "0"),
+        "status": parts[6],
+        "progress_job": parts[7] or "",
+        "progress_minute": prog,
+    }
+
+
+def iter_range_buckets(job: RollupJob, start: datetime, end: datetime) -> List[datetime]:
+    """Closed buckets of job.bucket_kind that overlap [start, end)."""
+    if end <= start:
+        return []
+    cur = truncate_bucket(start, job.bucket_kind)
+    # If start is mid-bucket, still include that bucket (truncate already floored).
+    out: List[datetime] = []
+    while cur < end:
+        out.append(cur)
+        cur = add_bucket(cur, job.bucket_kind)
+    return out
+
+
+def run_range_backfill(
+    ch: ClickHouseClient,
+    logger: logging.Logger,
+    jobs: Sequence[RollupJob],
+    args: argparse.Namespace,
+    *,
+    range_from: datetime,
+    range_to: datetime,
+    resume_job: str = "",
+    resume_minute: Optional[datetime] = None,
+    wall_sec: int = 180,
+    on_progress=None,
+) -> Tuple[str, Optional[datetime], int, int, Optional[str]]:
+    """
+    Process [range_from, range_to) for jobs (priority order).
+    Returns (next_job_id or '', next_minute or None, ok_count, fail_count, error).
+    Empty next_job means finished.
+    """
+    # Force idempotent rewrite of existing buckets in the hole.
+    args.delete_before_insert = True
+    states = load_states(ch)
+    started = time.monotonic()
+    ok_count = 0
+    fail_count = 0
+    skipping = bool(resume_job)
+
+    for job in jobs:
+        if skipping:
+            if job.job_id != resume_job:
+                continue
+            skipping = False
+            bucket_list = iter_range_buckets(job, range_from, range_to)
+            if resume_minute is not None:
+                bucket_list = [b for b in bucket_list if b >= resume_minute]
+        else:
+            bucket_list = iter_range_buckets(job, range_from, range_to)
+
+        for bucket_start in bucket_list:
+            if time.monotonic() - started >= wall_sec:
+                logger.info(
+                    "queue wall budget reached job=%s bucket=%s ok=%s",
+                    job.job_id,
+                    fmt_dt(bucket_start),
+                    ok_count,
+                )
+                if on_progress:
+                    on_progress(job.job_id, bucket_start)
+                return job.job_id, bucket_start, ok_count, fail_count, None
+
+            bucket_end = add_bucket(bucket_start, job.bucket_kind)
+            ready, reason = dependency_ready(job, bucket_start, bucket_end, states)
+            if not ready:
+                # Hourly/daily may wait on 1m — re-check later.
+                logger.warning(
+                    "job=%s action=defer reason=dependency bucket=%s detail=%s",
+                    job.job_id,
+                    fmt_dt(bucket_start),
+                    reason,
+                )
+                if on_progress:
+                    on_progress(job.job_id, bucket_start)
+                return job.job_id, bucket_start, ok_count, fail_count, None
+
+            if args.dry_run:
+                logger.info(
+                    "job=%s action=dry_run_range bucket=%s",
+                    job.job_id,
+                    fmt_dt(bucket_start),
+                )
+                ok_count += 1
+                continue
+
+            try:
+                _, duration_ms, _ = run_bucket(ch, logger, job, bucket_start, args)
+                state = states.get(job.job_id)
+                # Advance live cursor only forward — never rewind it for a hole fill.
+                if state is None or state.last_bucket is None or bucket_start > state.last_bucket:
+                    save_state(ch, job.job_id, bucket_start, "ok", "", 0, duration_ms)
+                    states[job.job_id] = JobState(
+                        last_bucket=bucket_start, status="ok", last_error=""
+                    )
+                ok_count += 1
+                if args.sleep_between_buckets > 0:
+                    time.sleep(args.sleep_between_buckets)
+            except Exception as exc:
+                msg = str(exc)
+                logger.error(
+                    "job=%s bucket=%s status=error err=%s",
+                    job.job_id,
+                    fmt_dt(bucket_start),
+                    msg,
+                )
+                fail_count += 1
+                return job.job_id, bucket_start, ok_count, fail_count, msg
+
+    return "", None, ok_count, fail_count, None
+
+
+def rewind_observations(
+    logger: logging.Logger,
+    from_minute: datetime,
+    to_minute: datetime,
+) -> None:
+    script = "/app/bin/rewind-obs-for-backfill.js"
+    if not os.path.isfile(script):
+        logger.warning("observation rewind script missing: %s", script)
+        return
+    cmd = [
+        "node",
+        script,
+        from_minute.strftime("%Y-%m-%dT%H:%M:%S.000Z"),
+        to_minute.strftime("%Y-%m-%dT%H:%M:%S.000Z"),
+    ]
+    logger.info("rewinding observation cursors: %s", " ".join(cmd))
+    proc = subprocess.run(cmd, capture_output=True, text=True, cwd="/app/analytics")
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"observation rewind failed (exit {proc.returncode}): "
+            f"{(proc.stderr or proc.stdout or '').strip()}"
+        )
+    if proc.stdout:
+        logger.info("observation rewind: %s", proc.stdout.strip()[:500])
+
+
+def process_queue(args: argparse.Namespace, logger: logging.Logger) -> int:
+    ch = ClickHouseClient(args)
+    ensure_state_table(ch, logger)
+    ensure_backfill_queue(ch, logger)
+
+    if args.require_spool_drained and not args.dry_run:
+        draining = spool_backlog_sources(
+            ch,
+            logger,
+            max_lag_segments=args.spool_max_lag_segments,
+            snapshot_max_age_sec=args.spool_snapshot_max_age_sec,
+        )
+        if draining:
+            detail = ",".join(
+                f"{s.source_id}:lag={s.lag_segments}(age={s.age_seconds}s)" for s in draining
+            )
+            logger.warning(
+                "action=hold reason=spool_draining queue_paused sources=%s",
+                detail,
+            )
+            return 0
+
+    req = claim_queue_request(ch, logger)
+    if not req:
+        logger.info("backfill queue empty")
+        return 0
+
+    request_id = req["request_id"]
+    jobs_selected = req["jobs"] or list(DEFAULT_BACKFILL_JOBS)
+    known = {j.job_id for j in sorted_jobs()}
+    jobs_selected = [j for j in jobs_selected if j in known]
+    jobs = sorted_jobs(jobs_selected)
+    if not jobs:
+        save_queue_row(
+            ch,
+            request_id=request_id,
+            created_at=req["created_at"],
+            from_minute=req["from_minute"],
+            to_minute=req["to_minute"],
+            jobs=req["jobs"],
+            include_observations=req["include_observations"],
+            status="error",
+            error="no valid jobs",
+        )
+        return 1
+
+    if req["status"] == "pending":
+        save_queue_row(
+            ch,
+            request_id=request_id,
+            created_at=req["created_at"],
+            from_minute=req["from_minute"],
+            to_minute=req["to_minute"],
+            jobs=jobs_selected,
+            include_observations=req["include_observations"],
+            status="running",
+            progress_job=jobs[0].job_id,
+            progress_minute=truncate_bucket(req["from_minute"], jobs[0].bucket_kind),
+        )
+        req["progress_job"] = jobs[0].job_id
+        req["progress_minute"] = truncate_bucket(req["from_minute"], jobs[0].bucket_kind)
+
+    logger.info(
+        "queue claim id=%s from=%s to=%s jobs=%s resume=%s@%s",
+        request_id,
+        fmt_dt(req["from_minute"]),
+        fmt_dt(req["to_minute"]),
+        ",".join(jobs_selected),
+        req["progress_job"] or "-",
+        fmt_dt(req["progress_minute"]) if req["progress_minute"] else "-",
+    )
+
+    def on_progress(job_id: str, minute: datetime) -> None:
+        save_queue_row(
+            ch,
+            request_id=request_id,
+            created_at=req["created_at"],
+            from_minute=req["from_minute"],
+            to_minute=req["to_minute"],
+            jobs=jobs_selected,
+            include_observations=req["include_observations"],
+            status="running",
+            progress_job=job_id,
+            progress_minute=minute,
+        )
+
+    next_job, next_min, ok_count, fail_count, err = run_range_backfill(
+        ch,
+        logger,
+        jobs,
+        args,
+        range_from=req["from_minute"],
+        range_to=req["to_minute"],
+        resume_job=req["progress_job"] or "",
+        resume_minute=req["progress_minute"],
+        wall_sec=max(30, int(args.queue_wall_sec)),
+        on_progress=on_progress,
+    )
+
+    if err:
+        save_queue_row(
+            ch,
+            request_id=request_id,
+            created_at=req["created_at"],
+            from_minute=req["from_minute"],
+            to_minute=req["to_minute"],
+            jobs=jobs_selected,
+            include_observations=req["include_observations"],
+            status="error",
+            error=err[:2000],
+            progress_job=next_job or "",
+            progress_minute=next_min,
+        )
+        return 1
+
+    if next_job:
+        on_progress(next_job, next_min or req["from_minute"])
+        logger.info(
+            "queue progress id=%s ok=%s next=%s@%s",
+            request_id,
+            ok_count,
+            next_job,
+            fmt_dt(next_min) if next_min else "-",
+        )
+        return 0
+
+    # Traffic range done — optionally rewind observation cursors once.
+    if req["include_observations"]:
+        try:
+            rewind_observations(logger, req["from_minute"], req["to_minute"])
+        except Exception as exc:
+            save_queue_row(
+                ch,
+                request_id=request_id,
+                created_at=req["created_at"],
+                from_minute=req["from_minute"],
+                to_minute=req["to_minute"],
+                jobs=jobs_selected,
+                include_observations=req["include_observations"],
+                status="error",
+                error=f"traffic ok; observation rewind failed: {exc}"[:2000],
+            )
+            return 1
+
+    save_queue_row(
+        ch,
+        request_id=request_id,
+        created_at=req["created_at"],
+        from_minute=req["from_minute"],
+        to_minute=req["to_minute"],
+        jobs=jobs_selected,
+        include_observations=req["include_observations"],
+        status="done",
+        progress_job="",
+        progress_minute=None,
+    )
+    logger.info("queue done id=%s ok_buckets=%s", request_id, ok_count)
+    return 0
+
+
+def run_live(args: argparse.Namespace, logger: logging.Logger) -> int:
     selected = [item.strip() for item in args.jobs.split(",") if item.strip()] or None
     if selected:
         known = {job.job_id for job in sorted_jobs()}
@@ -829,6 +1272,45 @@ def main() -> int:
     if not jobs:
         logger.error("no jobs selected")
         return 2
+
+    if args.range_from or args.range_to:
+        if not args.range_from or not args.range_to:
+            logger.error("both --range-from and --range-to are required")
+            return 2
+        range_from = parse_utc_dt(args.range_from)
+        range_to = parse_utc_dt(args.range_to)
+        if range_to <= range_from:
+            logger.error("range-to must be after range-from")
+            return 2
+        ch = ClickHouseClient(args)
+        ensure_state_table(ch, logger)
+        if args.require_spool_drained and not args.dry_run:
+            draining = spool_backlog_sources(
+                ch,
+                logger,
+                max_lag_segments=args.spool_max_lag_segments,
+                snapshot_max_age_sec=args.spool_snapshot_max_age_sec,
+            )
+            if draining:
+                logger.warning("range backfill held: spool still draining")
+                return 0
+        next_job, _, ok_count, fail_count, err = run_range_backfill(
+            ch,
+            logger,
+            jobs,
+            args,
+            range_from=range_from,
+            range_to=range_to,
+            wall_sec=max(60, int(args.queue_wall_sec) * 10),
+        )
+        if err:
+            logger.error("range backfill error: %s", err)
+            return 1
+        if next_job:
+            logger.warning("range backfill incomplete (wall); resume via queue")
+            return 1
+        logger.info("range backfill complete ok=%s failed=%s", ok_count, fail_count)
+        return 1 if fail_count else 0
 
     ch = ClickHouseClient(args)
     started = time.monotonic()
@@ -1001,6 +1483,21 @@ def main() -> int:
         elapsed,
     )
     return 1 if fail_count else 0
+
+
+def main() -> int:
+    args = parse_args()
+    args.clickhouse_client = resolve_clickhouse_client(args.clickhouse_client)
+    log_file = None if args.no_log_file else args.log_file
+    logger = setup_logging(log_file, args.verbose)
+
+    if not os.path.isfile(args.clickhouse_client):
+        logger.error("clickhouse-client not found: %s", args.clickhouse_client)
+        return 2
+
+    if args.process_queue:
+        return process_queue(args, logger)
+    return run_live(args, logger)
 
 
 if __name__ == "__main__":

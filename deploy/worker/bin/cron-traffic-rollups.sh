@@ -14,5 +14,10 @@ export CLICKHOUSE_HTTP_PORT="${CLICKHOUSE_HTTP_PORT:-8123}"
 export CLICKHOUSE_HTTP_USER="${TRAFFIC_ROLLUP_CH_USER:-default}"
 export CLICKHOUSE_HTTP_PASSWORD="${TRAFFIC_ROLLUP_CH_PASSWORD:-}"
 
+# 1) Drain any diagnostics backfill request (gap fill) before live catch-up.
+#    flock is held by supercronic for the whole script, so queue + live do not overlap.
+python3 /app/scripts/traffic_rollup_async.py --process-queue || true
+
+# 2) Steady-state live rollups.
 exec python3 /app/scripts/traffic_rollup_async.py \
   --jobs traffic_dashboard_1m,traffic_protocol_1m,traffic_direction_1m,traffic_role_1m,traffic_entity_1m,traffic_vlan_1m,traffic_country_1m,traffic_service_1m,traffic_unknown_port_1m,traffic_dashboard_1h,traffic_dashboard_1d
