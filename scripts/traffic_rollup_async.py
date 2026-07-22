@@ -1008,8 +1008,12 @@ def run_range_backfill(
     Returns (next_job_id or '', next_minute or None, ok_count, fail_count, error).
     Empty next_job means finished. next_job '__cancelled__' means operator abort.
     """
-    # Force idempotent rewrite of existing buckets in the hole.
-    args.delete_before_insert = True
+    # Idempotency is handled per-bucket by run_bucket's probe: it deletes only
+    # when the target bucket already has rows, then inserts. Do NOT force
+    # delete_before_insert here — most backfill buckets are empty holes, and a
+    # forced DELETE would fire one synchronous mutation per (bucket, job) even
+    # for empty buckets, which is slow and hammers ClickHouse.
+    args.delete_before_insert = False
     states = load_states(ch)
     started = time.monotonic()
     ok_count = 0
