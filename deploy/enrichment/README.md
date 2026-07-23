@@ -51,6 +51,23 @@ docker compose up -d --build
 docker logs --tail 80 -f grapes-enrichment
 ```
 
+### Remote ClickHouse (collector host ≠ CH host)
+
+Set client endpoints to the mirror (`*_CH_HOST=…`, `CLICKHOUSE_HTTP_PORT=6123`,
+native `*_CH_PORT=6124`). Leave dictionary SOURCE on the **CH server loopback**:
+
+```bash
+BGPORIGIN_DICT_SOURCE_HOST=127.0.0.1
+BGPORIGIN_DICT_SOURCE_PORT=9000
+GEOLOADERD_DICT_SOURCE_HOST=127.0.0.1
+GEOLOADERD_DICT_SOURCE_PORT=9000
+```
+
+`SYSTEM RELOAD DICTIONARY` runs inside ClickHouse and must open a native socket
+to itself. Pointing `*_DICT_SOURCE_*` at the public mirror IP causes
+`ALL_CONNECTION_TRIES_FAILED` / HTTP 500. Cron wrappers auto-rewrite that
+mistake, but keep `.env` correct.
+
 First bgp-origin run may take minutes after BMP peers are online. Raise `BGPORIGIN_MIN_PREFIXES` after full RIB is stable.
 
 ## Cutover from host timers

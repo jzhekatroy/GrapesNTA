@@ -350,18 +350,20 @@ def main() -> int:
         default=int(env("BGPORIGIN_MAX_THREADS", "2") or 2),
         help="Per-query thread limit. Lower values reduce memory pressure.",
     )
+    # Dictionary SOURCE is opened by the ClickHouse server (loopback native),
+    # not by this client. Never inherit BGPORIGIN_CH_HOST (often a remote mirror).
     p.add_argument(
         "--dictionary-source-host",
-        default=env("BGPORIGIN_DICT_SOURCE_HOST", env("BGPORIGIN_CH_HOST", "localhost")),
-        help="Host used by ClickHouse itself to read bgp_prefix_origin_current for the dictionary",
+        default=env("BGPORIGIN_DICT_SOURCE_HOST", "127.0.0.1"),
+        help="Host used by ClickHouse itself to read bgp_prefix_origin_current (server loopback)",
     )
-    _dict_port_s = env("BGPORIGIN_DICT_SOURCE_PORT", env("BGPORIGIN_CH_PORT"))
-    _dict_default_port = int(_dict_port_s) if _dict_port_s and _dict_port_s.isdigit() else _default_port
+    _dict_port_s = env("BGPORIGIN_DICT_SOURCE_PORT", "9000")
+    _dict_default_port = int(_dict_port_s) if _dict_port_s and _dict_port_s.isdigit() else 9000
     p.add_argument(
         "--dictionary-source-port",
         type=int,
         default=_dict_default_port,
-        help="Port used by ClickHouse itself to read bgp_prefix_origin_current for the dictionary",
+        help="Native port used by ClickHouse itself for dictionary SOURCE (usually 9000)",
     )
     p.add_argument(
         "--dictionary-source-user",

@@ -15,4 +15,8 @@ export CLICKHOUSE_HTTP_PORT="${CLICKHOUSE_HTTP_PORT:-8123}"
 export CLICKHOUSE_HTTP_USER="${GEOLOADERD_CH_USER:-default}"
 export CLICKHOUSE_HTTP_PASSWORD="${GEOLOADERD_CH_PASSWORD:-}"
 
+# shellcheck disable=SC1091
+. /app/bin/fix_dict_source.sh
+fix_dict_source GEOLOADERD
+
 exec /app/bin/run_job.sh geoloaderd python3 /app/scripts/load_rir_geo.py

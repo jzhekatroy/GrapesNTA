@@ -487,18 +487,20 @@ def main() -> int:
         "--dictionary",
         default=env("GEOLOADERD_CH_DICT", "default.geo_country_dict"),
     )
+    # Dictionary SOURCE is opened by the ClickHouse server (loopback native),
+    # not by this client. Never inherit GEOLOADERD_CH_HOST (often a remote mirror).
     p.add_argument(
         "--dictionary-source-host",
-        default=env("GEOLOADERD_DICT_SOURCE_HOST", env("GEOLOADERD_CH_HOST", "localhost")),
-        help="Host used by ClickHouse itself to read geo_prefix_country for the dictionary",
+        default=env("GEOLOADERD_DICT_SOURCE_HOST", "127.0.0.1"),
+        help="Host used by ClickHouse itself to read geo_prefix_country (server loopback)",
     )
-    _dict_port_s = env("GEOLOADERD_DICT_SOURCE_PORT", env("GEOLOADERD_CH_PORT"))
-    _dict_default_port = int(_dict_port_s) if _dict_port_s and _dict_port_s.isdigit() else _default_port
+    _dict_port_s = env("GEOLOADERD_DICT_SOURCE_PORT", "9000")
+    _dict_default_port = int(_dict_port_s) if _dict_port_s and _dict_port_s.isdigit() else 9000
     p.add_argument(
         "--dictionary-source-port",
         type=int,
         default=_dict_default_port,
-        help="Port used by ClickHouse itself to read geo_prefix_country for the dictionary",
+        help="Native port used by ClickHouse itself for dictionary SOURCE (usually 9000)",
     )
     p.add_argument(
         "--dictionary-source-user",
