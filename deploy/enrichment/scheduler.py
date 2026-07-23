@@ -82,6 +82,63 @@ def _report_skipped(name: str, reason: str) -> None:
         log(f"{name}: skip-status report failed: {e}")
 
 
+def _ensure_reporter_http_env() -> None:
+    """report_job_status.py reads CLICKHOUSE_HTTP_*; map from job client envs."""
+    host = (
+        os.environ.get("CLICKHOUSE_HTTP_HOST")
+        or os.environ.get("GEOLOADERD_CH_HOST")
+        or os.environ.get("BGPORIGIN_CH_HOST")
+        or "127.0.0.1"
+    )
+    user = (
+        os.environ.get("CLICKHOUSE_HTTP_USER")
+        or os.environ.get("GEOLOADERD_CH_USER")
+        or os.environ.get("BGPORIGIN_CH_USER")
+        or "default"
+    )
+    password = (
+        os.environ.get("CLICKHOUSE_HTTP_PASSWORD")
+        or os.environ.get("GEOLOADERD_CH_PASSWORD")
+        or os.environ.get("BGPORIGIN_CH_PASSWORD")
+        or ""
+    )
+    os.environ.setdefault("CLICKHOUSE_HTTP_HOST", host)
+    os.environ.setdefault("CLICKHOUSE_HTTP_PORT", os.environ.get("CLICKHOUSE_HTTP_PORT", "8123"))
+    os.environ.setdefault("CLICKHOUSE_HTTP_USER", user)
+    os.environ.setdefault("CLICKHOUSE_HTTP_PASSWORD", password)
+
+
+def _seed_deferred_job_status() -> None:
+    """Heavy jobs wait a full interval after start; seed status so Diagnostics
+    does not show neverRan until the first real run (day/week)."""
+    _ensure_reporter_http_env()
+    for name, _script, interval, _lock in JOBS:
+        if name not in ("geoloaderd", "asn-names"):
+            continue
+        try:
+            rc = subprocess.run(
+                [
+                    "python3",
+                    "/app/bin/report_job_status.py",
+                    "--job",
+                    name,
+                    "--status",
+                    "idle",
+                    "--exit-code",
+                    "0",
+                    "--message",
+                    f"awaiting first scheduled run (interval={interval}s)",
+                ],
+                check=False,
+            ).returncode
+            if rc == 0:
+                log(f"{name}: seeded idle status (deferred first run)")
+            else:
+                log(f"{name}: seed status failed exit={rc}")
+        except OSError as e:
+            log(f"{name}: seed status failed: {e}")
+
+
 def main() -> int:
     if os.path.isfile("/app/.env"):
         # Best-effort load for interactive debugging; docker env_file already injects vars.
@@ -101,6 +158,7 @@ def main() -> int:
     last_run["snmp-iface-sync"] = 0.0  # run on first tick
 
     log("grapes-enrichment scheduler started")
+    _seed_deferred_job_status()
     while True:
         now = time.time()
         for name, script, interval, lock_path in JOBS:
