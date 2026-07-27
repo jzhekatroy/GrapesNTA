@@ -24,6 +24,7 @@ const {
   resolveTrafficWindow,
   flowIpExpr,
   flowSamplerIpExpr,
+  sflowIfIndexExpr,
   flowMacExpr,
   protoLabelSql,
   flowTransportSql,
@@ -537,10 +538,6 @@ function explorerDimensions() {
     // optional for other consumers, but Explorer runs as ui_read and must not
     // depend on dictGet grants / dictionary SOURCE credentials.
     const ifacesRef = netInterfacesCurrentRef();
-    const sflowIfIndexExpr = (ifColRef) => {
-      const rawExpr = `toUInt32OrZero(toString(${ifColRef}))`;
-      return `if(${rawExpr} > 0 AND bitShiftRight(${rawExpr}, 30) = 0, bitAnd(${rawExpr}, 1073741823), toUInt32(0))`;
-    };
     if (inIfCol) {
       dims.in_if_name = {
         label: 'Входной: имя / alias',

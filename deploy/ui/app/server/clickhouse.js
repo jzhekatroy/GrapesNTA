@@ -71,6 +71,14 @@ const config = {
   snmpAgentsTable: env('CLICKHOUSE_SNMP_AGENTS_TABLE', 'net_snmp_agents'),
   netInterfacesCurrent: env('CLICKHOUSE_NET_INTERFACES_CURRENT', 'net_interfaces_current'),
   netInterfacesDict: env('CLICKHOUSE_NET_INTERFACES_DICT', 'default.net_interfaces_dict'),
+  directionSettingsTable: env('CLICKHOUSE_DIRECTION_SETTINGS_TABLE', 'net_direction_settings'),
+  directionSettingsView: env('CLICKHOUSE_DIRECTION_SETTINGS_VIEW', 'net_direction_settings_current'),
+  interfaceRoleRulesTable: env('CLICKHOUSE_INTERFACE_ROLE_RULES_TABLE', 'net_interface_role_rules'),
+  interfaceRoleRulesView: env('CLICKHOUSE_INTERFACE_ROLE_RULES_VIEW', 'net_interface_role_rules_current'),
+  interfaceRolesTable: env('CLICKHOUSE_INTERFACE_ROLES_TABLE', 'net_interface_roles'),
+  interfaceRolesView: env('CLICKHOUSE_INTERFACE_ROLES_VIEW', 'net_interface_roles_current'),
+  interfaceRolesEffectiveTable: env('CLICKHOUSE_INTERFACE_ROLES_EFFECTIVE_TABLE', 'net_interface_roles_effective'),
+  interfaceRolesEffectiveView: env('CLICKHOUSE_INTERFACE_ROLES_EFFECTIVE_VIEW', 'net_interface_roles_effective_current'),
   geoCountryDict: env('CLICKHOUSE_GEO_COUNTRY_DICT', 'default.geo_country_dict'),
   locationsView: env('CLICKHOUSE_LOCATIONS_VIEW', 'net_locations_enabled'),
   locationsTable: env('CLICKHOUSE_LOCATIONS_TABLE', 'net_locations'),
@@ -272,6 +280,38 @@ function snmpAgentsCurrentRef() {
 
 function netInterfacesCurrentRef() {
   return `${qIdent(config.database)}.${qIdent(config.netInterfacesCurrent)}`;
+}
+
+function directionSettingsTableRef() {
+  return `${qIdent(config.database)}.${qIdent(config.directionSettingsTable)}`;
+}
+
+function directionSettingsViewRef() {
+  return `${qIdent(config.database)}.${qIdent(config.directionSettingsView)}`;
+}
+
+function interfaceRoleRulesTableRef() {
+  return `${qIdent(config.database)}.${qIdent(config.interfaceRoleRulesTable)}`;
+}
+
+function interfaceRoleRulesViewRef() {
+  return `${qIdent(config.database)}.${qIdent(config.interfaceRoleRulesView)}`;
+}
+
+function interfaceRolesTableRef() {
+  return `${qIdent(config.database)}.${qIdent(config.interfaceRolesTable)}`;
+}
+
+function interfaceRolesViewRef() {
+  return `${qIdent(config.database)}.${qIdent(config.interfaceRolesView)}`;
+}
+
+function interfaceRolesEffectiveTableRef() {
+  return `${qIdent(config.database)}.${qIdent(config.interfaceRolesEffectiveTable)}`;
+}
+
+function interfaceRolesEffectiveViewRef() {
+  return `${qIdent(config.database)}.${qIdent(config.interfaceRolesEffectiveView)}`;
 }
 
 function netInterfacesDictRef() {
@@ -656,6 +696,14 @@ module.exports = {
   snmpAgentsCurrentRef,
   netInterfacesCurrentRef,
   netInterfacesDictRef,
+  directionSettingsTableRef,
+  directionSettingsViewRef,
+  interfaceRoleRulesTableRef,
+  interfaceRoleRulesViewRef,
+  interfaceRolesTableRef,
+  interfaceRolesViewRef,
+  interfaceRolesEffectiveTableRef,
+  interfaceRolesEffectiveViewRef,
   locationsViewRef,
   locationsTableRef,
   collectorHealthViewRef,

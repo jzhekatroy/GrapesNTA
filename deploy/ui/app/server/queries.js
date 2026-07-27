@@ -1597,6 +1597,16 @@ function flowSamplerIpExpr(samplerCol) {
       )`;
 }
 
+/**
+ * sFlow interface field -> plain ifIndex.
+ * Only format 0 (two high bits = 0) carries a single ifIndex in the low 30 bits;
+ * other formats (discard reason / multiple interfaces) decode to 0.
+ */
+function sflowIfIndexExpr(ifColRef) {
+  const rawExpr = `toUInt32OrZero(toString(${ifColRef}))`;
+  return `if(${rawExpr} > 0 AND bitShiftRight(${rawExpr}, 30) = 0, bitAnd(${rawExpr}, 1073741823), toUInt32(0))`;
+}
+
 function flowMacExpr(macCol) {
   if (config.macStorage === 'uint64') {
     return `MACNumToString(${macCol})`;
@@ -2443,6 +2453,7 @@ module.exports = {
   resolveTrafficWindow,
   flowIpExpr,
   flowSamplerIpExpr,
+  sflowIfIndexExpr,
   flowMacExpr,
   protoLabelSql,
   flowTransportSql,

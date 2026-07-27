@@ -48,6 +48,14 @@
 50_net/24_net_snmp_settings_current.sql
 50_net/25_net_snmp_agents_current.sql
 50_net/26_net_snmp_settings_seed.sql
+50_net/27_net_direction_settings.sql
+50_net/28_net_direction_settings_current.sql
+50_net/29_net_interface_role_rules.sql
+50_net/30_net_interface_role_rules_current.sql
+50_net/31_net_interface_roles.sql
+50_net/32_net_interface_roles_current.sql
+50_net/33_net_interface_roles_effective.sql
+50_net/34_net_interface_roles_effective_current.sql
 60_traffic/01_traffic_rollup_state.sql
 60_traffic/02_traffic_dashboard_1m.sql
 60_traffic/03_traffic_dashboard_1h.sql

@@ -111,6 +111,24 @@ const {
   requestSnmpProbeAll,
 } = require('./net-snmp');
 const {
+  getDirectionSettings,
+  saveDirectionSettings,
+  listInterfaceRoleRules,
+  saveInterfaceRoleRule,
+  deleteInterfaceRoleRule,
+  previewInterfaceRoleRule,
+  listInterfaceRoles,
+  saveInterfaceRole,
+  deleteInterfaceRole,
+  materializeEffectiveRoles,
+  getInterfaceRoleSummary,
+} = require('./net-interface-roles');
+const {
+  getInterfaceFieldCoverage,
+  compareDirectionModels,
+  listInterfacesByTraffic,
+} = require('./direction-audit');
+const {
   listPortServices,
   savePortService,
   disablePortService,
@@ -1665,6 +1683,144 @@ app.post('/api/refs/snmp-agents/:ip/probe', async (req, res) => {
   try {
     const meta = await requestSnmpProbe(req.params.ip);
     res.status(202).json({ ok: true, accepted: true, meta });
+  } catch (err) {
+    sendApiError(res, err);
+  }
+});
+
+app.get('/api/refs/direction-settings', async (_req, res) => {
+  try {
+    res.json({ data: await getDirectionSettings() });
+  } catch (err) {
+    sendApiError(res, err);
+  }
+});
+
+app.post('/api/refs/direction-settings', async (req, res) => {
+  try {
+    const meta = await saveDirectionSettings(req.body || {}, { updatedBy: req.user?.id || '' });
+    res.json({ ok: true, meta });
+  } catch (err) {
+    sendApiError(res, err);
+  }
+});
+
+app.get('/api/refs/interface-role-rules', async (_req, res) => {
+  try {
+    res.json(await runNamed(() => listInterfaceRoleRules(), { name: 'refs/interface-role-rules' }));
+  } catch (err) {
+    sendApiError(res, err);
+  }
+});
+
+app.post('/api/refs/interface-role-rules', async (req, res) => {
+  try {
+    const meta = await saveInterfaceRoleRule(req.body || {});
+    res.json({ ok: true, meta });
+  } catch (err) {
+    sendApiError(res, err);
+  }
+});
+
+app.post('/api/refs/interface-role-rules/delete', async (req, res) => {
+  try {
+    const meta = await deleteInterfaceRoleRule(req.body || {});
+    res.json({ ok: true, meta });
+  } catch (err) {
+    sendApiError(res, err);
+  }
+});
+
+app.post('/api/refs/interface-role-rules/preview', async (req, res) => {
+  try {
+    res.json(await runNamed(
+      () => previewInterfaceRoleRule(req.body || {}),
+      { name: 'refs/interface-role-rule-preview' },
+    ));
+  } catch (err) {
+    sendApiError(res, err);
+  }
+});
+
+app.get('/api/refs/interface-roles/summary', async (_req, res) => {
+  try {
+    res.json(await runNamed(() => getInterfaceRoleSummary(), { name: 'refs/interface-roles-summary' }));
+  } catch (err) {
+    sendApiError(res, err);
+  }
+});
+
+app.get('/api/refs/interface-roles/:ip', async (req, res) => {
+  try {
+    res.json(await runNamed(
+      () => listInterfaceRoles(req.params.ip),
+      { name: 'refs/interface-roles' },
+    ));
+  } catch (err) {
+    sendApiError(res, err);
+  }
+});
+
+app.post('/api/refs/interface-roles', async (req, res) => {
+  try {
+    const meta = await saveInterfaceRole(req.body || {}, { updatedBy: req.user?.id || '' });
+    res.json({ ok: true, meta });
+  } catch (err) {
+    sendApiError(res, err);
+  }
+});
+
+app.post('/api/refs/interface-roles/delete', async (req, res) => {
+  try {
+    const meta = await deleteInterfaceRole(req.body || {}, { updatedBy: req.user?.id || '' });
+    res.json({ ok: true, meta });
+  } catch (err) {
+    sendApiError(res, err);
+  }
+});
+
+app.post('/api/refs/interface-roles/rebuild', async (_req, res) => {
+  try {
+    const meta = await materializeEffectiveRoles();
+    res.json({ ok: true, meta });
+  } catch (err) {
+    sendApiError(res, err);
+  }
+});
+
+app.get('/api/diagnostics/direction/coverage', async (req, res) => {
+  try {
+    res.json(await runNamed(
+      () => getInterfaceFieldCoverage({ hours: req.query.hours }),
+      { name: 'diagnostics/direction-coverage' },
+    ));
+  } catch (err) {
+    sendApiError(res, err);
+  }
+});
+
+app.get('/api/diagnostics/direction/compare', async (req, res) => {
+  try {
+    res.json(await runNamed(
+      () => compareDirectionModels({ hours: req.query.hours, oneSided: req.query.one_sided }),
+      { name: 'diagnostics/direction-compare' },
+    ));
+  } catch (err) {
+    sendApiError(res, err);
+  }
+});
+
+app.get('/api/diagnostics/direction/interfaces', async (req, res) => {
+  try {
+    res.json(await runNamed(
+      () => listInterfacesByTraffic({
+        hours: req.query.hours,
+        limit: req.query.limit,
+        onlyUnmarked: req.query.only_unmarked === '1' || req.query.onlyUnmarked === '1',
+        asnThreshold: req.query.asn_threshold,
+      }),
+      { name: 'diagnostics/direction-interfaces' },
+    ));
   } catch (err) {
     sendApiError(res, err);
   }
