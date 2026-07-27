@@ -1,4 +1,4 @@
 synced_from=https://github.com/mavotronik/NTAdmin.git
-synced_commit=c976b0115875cf05762c7cb153a58d6411d4bb84
-synced_at=2026-07-27T12:15:45Z
+synced_commit=3dbc3c0954cf72f69027695d2f4bc851d0b3edfc
+synced_at=2026-07-27T15:11:35Z
 synced_src=/Users/evgenijtroanov/NTAdmin

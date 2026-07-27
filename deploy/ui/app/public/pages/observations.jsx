@@ -160,6 +160,13 @@ function formatDataThrough(item) {
   }
 }
 
+function reportPeriodLabel(item) {
+  const tz = item.report?.schedule?.timezone || 'Europe/Moscow';
+  return item.report?.period === 'last_24h'
+    ? `последние 24 часа (${tz})`
+    : `вчера, календарные сутки (${tz})`;
+}
+
 function rollupStatusLabel(item) {
   const through = formatDataThrough(item);
   const throughPart = through ? `данные по ${through}` : null;
@@ -416,7 +423,6 @@ function ObservationLiveTile({
   canWrite,
   onSettings,
   onDelete,
-  onDuplicate,
   onCancel,
   onRunReport,
   onLookbackChange,
@@ -687,9 +693,6 @@ function ObservationLiveTile({
             {expanded ? 'Свернуть' : `Топ · ${topLabel}`}
           </button>
           {canWrite && <button type="button" className="btn" onClick={onSettings}>Настройки</button>}
-          {canWrite && onDuplicate && (
-            <button type="button" className="btn" onClick={onDuplicate}>Дублировать</button>
-          )}
           {canWrite && item.materialize?.status === 'running' && onCancel && (
             <button type="button" className="btn" onClick={onCancel}>Отменить</button>
           )}
@@ -792,22 +795,8 @@ function ObservationLiveTile({
 
           {expandedTab === 'top' && (
             <>
-              <div className="row" style={{ justifyContent: 'space-between', marginBottom: 8, flexWrap: 'wrap', gap: 8, alignItems: 'center' }}>
-                <div style={{ font: 'var(--pv-text-body-2-bold)' }}>
-                  Разбивка: топ по {topLabel} (бит/с за {periodLabel})
-                </div>
-                <div className="row" style={{ gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
-                  {canWrite && (
-                    <button
-                      type="button"
-                      className="btn"
-                      onClick={() => onRunReport?.()?.then?.(() => setUpdatedAt(new Date()))
-                        || Promise.resolve().then(() => { onRunReport?.(); setUpdatedAt(new Date()); })}
-                    >
-                      Сформировать отчёт
-                    </button>
-                  )}
-                </div>
+              <div style={{ font: 'var(--pv-text-body-2-bold)', marginBottom: 8 }}>
+                Разбивка: топ по {topLabel} (бит/с за {periodLabel})
               </div>
               {Array.isArray(topWidget?.rows) && topWidget.rows.length > 0 ? (
                 <table style={{ width: '100%', borderCollapse: 'collapse', font: 'var(--pv-text-body-3)' }}>
@@ -862,6 +851,9 @@ function ObservationLiveTile({
                   </button>
                 )}
               </div>
+              <div style={{ color: 'var(--fg-secondary)', font: 'var(--pv-text-body-3)' }}>
+                {`Отчёт за: ${reportPeriodLabel(item)} — период берётся из настроек отчёта, а не из time range плитки.`}
+              </div>
               {runsError && <div style={{ color: 'crimson', font: 'var(--pv-text-body-3)' }}>{runsError}</div>}
               {!runs.length && !runsError && (
                 <div style={{ color: 'var(--fg-secondary)', font: 'var(--pv-text-body-3)' }}>Пока нет запусков</div>
@@ -888,15 +880,19 @@ function ObservationLiveTile({
                           {run.emailError ? ` (${run.emailError})` : ''}
                         </td>
                         <td style={{ padding: 4 }}>
-                          <a href={ApiClient.observationRunArtifactUrl(item.id, run.id, 'report.html')} target="_blank" rel="noreferrer">HTML</a>
-                          {(run.tables || []).slice(0, 3).map((t) => (
-                            <span key={t.file}>
-                              {' · '}
-                              <a href={ApiClient.observationRunArtifactUrl(item.id, run.id, t.file)} target="_blank" rel="noreferrer">
-                                {t.file}
-                              </a>
-                            </span>
-                          ))}
+                          <a href={ApiClient.observationRunArtifactUrl(item.id, run.id, 'report.html')} target="_blank" rel="noreferrer">сводка</a>
+                          {(run.tables || []).map((t) => {
+                            const label = t.label
+                              || (t.type === 'timeseries_bps' ? 'График' : t.type === 'top_table' ? 'Топ' : t.file);
+                            return (
+                              <span key={t.file}>
+                                {' · '}
+                                <a href={ApiClient.observationRunArtifactUrl(item.id, run.id, t.file)} target="_blank" rel="noreferrer">
+                                  {label}
+                                </a>
+                              </span>
+                            );
+                          })}
                         </td>
                       </tr>
                     ))}
@@ -1813,10 +1809,6 @@ function PageObservations({ onNavigate }) {
                   canWrite={canWriteObservations}
                   onSettings={() => openSettings(item)}
                   onDelete={() => removeItem(item.id)}
-                  onDuplicate={() => ApiClient.duplicateObservation(item.id)
-                    .then(() => reload())
-                    .then(() => pushToast?.({ kind: 'success', title: 'Создана копия' }))
-                    .catch((e) => setError(e.message))}
                   onCancel={() => ApiClient.cancelObservationMaterialize(item.id)
                     .then(() => reload())
                     .then(() => pushToast?.({ kind: 'success', title: 'Подготовка отменена' }))

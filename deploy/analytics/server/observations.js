@@ -28,6 +28,7 @@ const {
   normalizeSchedule,
   reportWindowForPeriod,
   isScheduleDue,
+  DEFAULT_TIMEZONE,
 } = require('./observation-schedule');
 const { getSmtpSettings, sendSmtpMail } = require('./smtp-settings');
 
@@ -55,6 +56,9 @@ const BACKFILL_HOURS = Math.max(0, Number(process.env.OBSERVATION_BACKFILL_HOURS
 const STUCK_SEC = Math.max(60, Number(process.env.OBSERVATION_ROLLUP_STUCK_SEC) || 900);
 const MAX_FAIL_COUNT = 10;
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+/** Absolute origin for report links; relative links still work in the browser. */
+const REPORT_BASE_URL = String(process.env.OBSERVATION_REPORT_BASE_URL || '').replace(/\/+$/, '');
+const REPORT_HTML_TOP_ROWS = 50;
 
 const NATIVE_FILTER_FIELDS = new Set([
   'direction', 'collector', 'vlan', 'vlan_attachment',
@@ -255,12 +259,10 @@ function isObservationOwner(item, userId) {
 }
 
 function materializeWarning(activeCount) {
-  const quota = MATERIALIZE_LIMIT_ENABLED
-    ? `Активных: ${activeCount}/${MAX_MATERIALIZE}. `
-    : `Активных: ${activeCount}. `;
-  return `Частые/сложные материализации нагружают ClickHouse. ${quota}`
-    + `Шаг наблюдения ≥ ${MIN_REFRESH_SEC}s (запас на late flows). TTL rollup ~${DEFAULT_TTL_HINT_DAYS}д. `
-    + `Персональные данные пишутся в общую таблицу ${ROLLUP_TABLE} (бакет ${ROLLUP_BUCKET_SEC}s, не отдельный MV на каждый id).`;
+  if (MATERIALIZE_LIMIT_ENABLED) {
+    return `Подготовка данных: ${activeCount}/${MAX_MATERIALIZE}`;
+  }
+  return null;
 }
 
 function normalizeObservation(raw = {}, { userId, existing = null } = {}) {
@@ -363,7 +365,8 @@ async function withMeta(item, allItems = null) {
   const active = countActiveMaterialize(all);
   const warnings = [];
   if (scope.materializeRequired && item.live?.enabled) {
-    warnings.push(materializeWarning(active));
+    const mw = materializeWarning(active);
+    if (mw) warnings.push(mw);
   }
   if (item.materialize?.lastError) {
     warnings.push(`Ошибка подготовки данных: ${item.materialize.lastError}`);
@@ -1004,58 +1007,472 @@ function csvEscape(v) {
   return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
 }
 
-/** Build timeseries CSV rows; grouped points store bps under series keys, not p.bps. */
-function timeseriesReportCsv(previewWidget) {
+function fmtBitsRu(bps) {
+  const n = Number(bps);
+  if (!Number.isFinite(n)) return '—';
+  const units = ['бит/с', 'Кбит/с', 'Мбит/с', 'Гбит/с', 'Тбит/с', 'Пбит/с'];
+  let v = Math.abs(n);
+  let i = 0;
+  while (v >= 1000 && i < units.length - 1) {
+    v /= 1000;
+    i += 1;
+  }
+  const digits = v < 10 ? 2 : v < 100 ? 1 : 0;
+  return `${n < 0 ? '-' : ''}${v.toFixed(digits)} ${units[i]}`;
+}
+
+function fmtBytesRu(bytes) {
+  const n = Number(bytes);
+  if (!Number.isFinite(n)) return '—';
+  const units = ['Б', 'КБ', 'МБ', 'ГБ', 'ТБ', 'ПБ'];
+  let v = Math.abs(n);
+  let i = 0;
+  while (v >= 1024 && i < units.length - 1) {
+    v /= 1024;
+    i += 1;
+  }
+  return `${n < 0 ? '-' : ''}${v.toFixed(v < 10 ? 1 : 0)} ${units[i]}`;
+}
+
+function fmtCountRu(value) {
+  const n = Number(value);
+  return Number.isFinite(n) ? n.toLocaleString('ru-RU') : '—';
+}
+
+function fmtPctRu(value) {
+  const n = Number(value);
+  return Number.isFinite(n) ? `${n.toFixed(2)}%` : '—';
+}
+
+/** ClickHouse returns naive UTC stamps ("2026-07-26 00:05:00"). */
+function parseUtcStamp(value) {
+  if (value instanceof Date) return value;
+  const s = String(value ?? '').trim();
+  if (!s) return null;
+  const base = s.includes('T') ? s : s.replace(' ', 'T');
+  const iso = /([Zz]|[+-]\d{2}:?\d{2})$/.test(base) ? base : `${base}Z`;
+  const d = new Date(iso);
+  return Number.isFinite(d.getTime()) ? d : null;
+}
+
+function zonedParts(value, timeZone) {
+  const d = parseUtcStamp(value);
+  if (!d) return null;
+  try {
+    const fmt = new Intl.DateTimeFormat('en-CA', {
+      timeZone,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      hourCycle: 'h23',
+    });
+    return Object.fromEntries(fmt.formatToParts(d).map((p) => [p.type, p.value]));
+  } catch {
+    return null;
+  }
+}
+
+function zonedDateTime(value, timeZone, sep = ' ') {
+  const p = zonedParts(value, timeZone);
+  if (!p) return String(value ?? '');
+  return `${p.year}-${p.month}-${p.day}${sep}${p.hour}:${p.minute}`;
+}
+
+function zonedDate(value, timeZone) {
+  const p = zonedParts(value, timeZone);
+  return p ? `${p.year}-${p.month}-${p.day}` : '';
+}
+
+function zonedClock(value, timeZone) {
+  const p = zonedParts(value, timeZone);
+  return p ? `${p.hour}:${p.minute}` : '';
+}
+
+let explorerLabelCache = null;
+function explorerFieldLabel(id) {
+  if (!explorerLabelCache) {
+    explorerLabelCache = new Map();
+    try {
+      const schema = explorerSchema();
+      for (const d of schema.dimensions || []) explorerLabelCache.set(d.id, d.label);
+      for (const f of schema.filterFields || []) {
+        if (!explorerLabelCache.has(f.id)) explorerLabelCache.set(f.id, f.label);
+      }
+    } catch {
+      // labels are cosmetic — fall back to raw ids
+    }
+  }
+  return explorerLabelCache.get(String(id)) || String(id);
+}
+
+const FILTER_OP_LABELS = {
+  '=': '=',
+  '==': '=',
+  '!=': '≠',
+  in: 'из списка',
+  not_in: 'кроме',
+  cidr: 'в подсети',
+  contains: 'содержит',
+  not_contains: 'не содержит',
+};
+
+function describeFilters(filters) {
+  const list = normalizeFilters(filters);
+  if (!list.length) return 'без фильтров (весь трафик)';
+  return list.map((f) => {
+    const value = Array.isArray(f.value) ? f.value.join(', ') : String(f.value ?? '');
+    return `${explorerFieldLabel(f.field)} ${FILTER_OP_LABELS[f.op] || f.op} ${value || '—'}`;
+  }).join(' · ');
+}
+
+function describeGroupBy(widgets = []) {
+  const fields = [...new Set(collectWidgetGroupFields(widgets))];
+  if (!fields.length) return 'без группировки';
+  return fields.map(explorerFieldLabel).join(' + ');
+}
+
+/** Deep link back into Explorer with the same filters and report window. */
+function explorerLinkForReport(obs, window, timeZone) {
+  const params = new URLSearchParams();
+  params.set('metric', 'bps');
+  const groupBy = [...new Set(collectWidgetGroupFields(obs.widgets))];
+  if (groupBy.length) params.set('groupBy', groupBy.join(','));
+  const filters = normalizeFilters(obs.filters).map((f) => ({
+    id: f.id,
+    field: f.field,
+    op: f.op,
+    value: f.value,
+    logic: f.logic,
+  }));
+  if (filters.length) params.set('filters', encodeURIComponent(JSON.stringify(filters)));
+  params.set('range', 'custom');
+  params.set('from', zonedDateTime(window.from, timeZone, 'T'));
+  params.set('to', zonedDateTime(window.to, timeZone, 'T'));
+  return `${REPORT_BASE_URL}/#explorer?${params.toString()}`;
+}
+
+/** Grouped points store bps under series keys; total points use p.bps. */
+function timeseriesReportData(previewWidget) {
   const points = previewWidget?.series || previewWidget?.points || [];
   const seriesLines = Array.isArray(previewWidget?.lines) ? previewWidget.lines : [];
   const grouped = previewWidget?.mode === 'grouped' && seriesLines.length > 0;
-
-  if (grouped) {
-    const headers = ['t', ...seriesLines.map((ln) => ln.label || ln.key || 'series')];
-    const lines = [headers.map(csvEscape).join(',')];
-    for (const p of points) {
-      lines.push([
-        p.t || p.bucket,
-        ...seriesLines.map((ln) => (p[ln.key] != null ? p[ln.key] : '')),
-      ].map(csvEscape).join(','));
-    }
-    return { lines, points, seriesLines, grouped: true, headers };
-  }
-
-  const headers = ['t', 'bps', 'bytes', 'packets', 'flows'];
-  const lines = [headers.map(csvEscape).join(',')];
-  for (const p of points) {
-    lines.push([p.t || p.bucket, p.bps, p.bytes, p.packets, p.flows].map(csvEscape).join(','));
-  }
-  return { lines, points, seriesLines: [], grouped: false, headers };
+  return { points, seriesLines, grouped };
 }
 
-function timeseriesReportHtml(previewWidget, fileName, rowCount) {
-  const { points, seriesLines, grouped, headers } = timeseriesReportCsv(previewWidget);
-  if (!points.length) {
-    return `<h2>${escapeHtml(previewWidget?.id || 'timeseries')}</h2>`
-      + `<p>Нет точек за окно. CSV: ${escapeHtml(fileName)}</p>`;
+function timeseriesReportCsv(previewWidget, timeZone) {
+  const { points, seriesLines, grouped } = timeseriesReportData(previewWidget);
+  const timeHeader = `Время (${timeZone})`;
+  const headers = grouped
+    ? [timeHeader, ...seriesLines.map((ln) => `${ln.label || ln.key} (бит/с)`)]
+    : [timeHeader, 'Средняя бит/с', 'Объём (байты)', 'Пакеты', 'Потоки'];
+
+  const lines = [headers.map(csvEscape).join(',')];
+  for (const p of points) {
+    const stamp = zonedDateTime(p.t || p.bucket, timeZone);
+    const cells = grouped
+      ? [stamp, ...seriesLines.map((ln) => (p[ln.key] != null ? p[ln.key] : ''))]
+      : [stamp, p.bps, p.bytes, p.packets, p.flows];
+    lines.push(cells.map(csvEscape).join(','));
   }
-  const head = headers.map((h) => `<th>${escapeHtml(h)}</th>`).join('');
-  const sample = points.slice(0, 50);
-  const body = sample.map((p) => {
-    if (grouped) {
-      const cells = [
-        p.t || p.bucket,
-        ...seriesLines.map((ln) => (p[ln.key] != null ? p[ln.key] : '')),
-      ];
-      return `<tr>${cells.map((v) => `<td>${escapeHtml(v)}</td>`).join('')}</tr>`;
-    }
-    return `<tr>${[
-      p.t || p.bucket, p.bps, p.bytes, p.packets, p.flows,
-    ].map((v) => `<td>${escapeHtml(v)}</td>`).join('')}</tr>`;
+  return { lines, points, seriesLines, grouped };
+}
+
+function topReportCsv(previewWidget, groupBy) {
+  const rows = Array.isArray(previewWidget?.rows) ? previewWidget.rows : [];
+  const headers = [
+    ...groupBy.map(explorerFieldLabel),
+    'Средняя бит/с',
+    'Доля %',
+    'Объём (байты)',
+    'Пакеты',
+    'Потоки',
+  ];
+  const lines = [headers.map(csvEscape).join(',')];
+  for (const row of rows) {
+    lines.push([
+      ...(row.values || []),
+      row.metric,
+      row.pct,
+      row.bytes,
+      row.packets,
+      row.flows,
+    ].map(csvEscape).join(','));
+  }
+  return { lines, rows };
+}
+
+/** Inline SVG chart — same shape as the tile chart, readable without JS. */
+function reportChartSvg(previewWidget, timeZone) {
+  const { points, seriesLines, grouped } = timeseriesReportData(previewWidget);
+  if (!points.length) return '';
+
+  const series = grouped
+    ? seriesLines.map((ln) => ({
+      label: ln.label || ln.key,
+      color: ln.color || '#2f6feb',
+      values: points.map((p) => Number(p[ln.key]) || 0),
+    }))
+    : [{
+      label: 'Суммарно',
+      color: '#2f6feb',
+      values: points.map((p) => Number(p.bps) || 0),
+    }];
+
+  const width = 920;
+  const height = 280;
+  const padL = 86;
+  const padR = 18;
+  const padT = 16;
+  const padB = 36;
+  const plotW = width - padL - padR;
+  const plotH = height - padT - padB;
+
+  let maxY = 0;
+  for (const s of series) {
+    for (const v of s.values) if (v > maxY) maxY = v;
+  }
+  if (maxY <= 0) maxY = 1;
+
+  const xAt = (i) => (points.length === 1
+    ? padL + plotW / 2
+    : padL + (i * plotW) / (points.length - 1));
+  const yAt = (v) => padT + plotH - (Math.max(0, v) / maxY) * plotH;
+
+  const gridSteps = 4;
+  let grid = '';
+  for (let i = 0; i <= gridSteps; i += 1) {
+    const value = (maxY * i) / gridSteps;
+    const y = yAt(value);
+    grid += `<line x1="${padL}" y1="${y.toFixed(1)}" x2="${padL + plotW}" y2="${y.toFixed(1)}" stroke="#e6e6e6" stroke-width="1"/>`;
+    grid += `<text x="${padL - 8}" y="${(y + 4).toFixed(1)}" text-anchor="end" font-size="11" fill="#666">${escapeHtml(fmtBitsRu(value))}</text>`;
+  }
+
+  const tickCount = Math.min(6, points.length);
+  let ticks = '';
+  for (let i = 0; i < tickCount; i += 1) {
+    const idx = tickCount === 1
+      ? 0
+      : Math.round((i * (points.length - 1)) / (tickCount - 1));
+    const p = points[idx];
+    const x = xAt(idx);
+    ticks += `<text x="${x.toFixed(1)}" y="${height - 12}" text-anchor="middle" font-size="11" fill="#666">${escapeHtml(zonedClock(p.t || p.bucket, timeZone))}</text>`;
+  }
+
+  const paths = series.map((s) => {
+    const d = s.values
+      .map((v, i) => `${i === 0 ? 'M' : 'L'}${xAt(i).toFixed(1)},${yAt(v).toFixed(1)}`)
+      .join(' ');
+    return `<path d="${d}" fill="none" stroke="${escapeHtml(s.color)}" stroke-width="1.8" stroke-linejoin="round"/>`;
   }).join('');
-  const note = points.length > 50
-    ? `<p>Показаны первые 50 из ${rowCount} точек. Полные данные: ${escapeHtml(fileName)}</p>`
-    : `<p>CSV: ${escapeHtml(fileName)}</p>`;
-  return `<h2>${escapeHtml(previewWidget?.id || 'timeseries')}</h2>`
-    + `<p>${grouped ? 'График (bps по сериям)' : 'График (total bps)'}</p>`
+
+  const legend = series.map((s) => (
+    `<span class="legend-item"><span class="legend-dot" style="background:${escapeHtml(s.color)}"></span>${escapeHtml(s.label)}</span>`
+  )).join('');
+
+  const firstLabel = zonedDateTime(points[0].t || points[0].bucket, timeZone);
+  const lastLabel = zonedDateTime(points[points.length - 1].t || points[points.length - 1].bucket, timeZone);
+
+  return `<svg viewBox="0 0 ${width} ${height}" width="100%" height="${height}" xmlns="http://www.w3.org/2000/svg" role="img">
+<rect x="${padL}" y="${padT}" width="${plotW}" height="${plotH}" fill="#fafafa" stroke="#e6e6e6"/>
+${grid}${paths}${ticks}
+</svg>
+<div class="legend">${legend}</div>
+<p class="muted">Ось времени: ${escapeHtml(firstLabel)} — ${escapeHtml(lastLabel)} (${escapeHtml(timeZone)})</p>`;
+}
+
+/** Period totals come from rollup total rows (dim0=''), so they are not top-N capped. */
+function summarizeTotalPoints(points, windowSeconds) {
+  if (!points?.length) return null;
+  let bytes = 0;
+  let packets = 0;
+  let flows = 0;
+  let peakBps = 0;
+  let peakAt = null;
+  for (const p of points) {
+    bytes += Number(p.bytes) || 0;
+    packets += Number(p.packets) || 0;
+    flows += Number(p.flows) || 0;
+    const bps = Number(p.bps) || 0;
+    if (bps > peakBps) {
+      peakBps = bps;
+      peakAt = p.t || p.bucket;
+    }
+  }
+  return {
+    bytes,
+    packets,
+    flows,
+    peakBps,
+    peakAt,
+    avgBps: windowSeconds > 0 ? Math.round((bytes * 8) / windowSeconds) : 0,
+    estimated: false,
+  };
+}
+
+function summarizeGroupedPoints(previewWidget, windowSeconds) {
+  const { points, seriesLines, grouped } = timeseriesReportData(previewWidget);
+  if (!points.length) return null;
+  let peakBps = 0;
+  let peakAt = null;
+  let sumBps = 0;
+  for (const p of points) {
+    const bps = grouped
+      ? seriesLines.reduce((sum, ln) => sum + (Number(p[ln.key]) || 0), 0)
+      : (Number(p.bps) || 0);
+    sumBps += bps;
+    if (bps > peakBps) {
+      peakBps = bps;
+      peakAt = p.t || p.bucket;
+    }
+  }
+  const avgBps = Math.round(sumBps / points.length);
+  return {
+    bytes: Math.round((avgBps * windowSeconds) / 8),
+    packets: null,
+    flows: null,
+    peakBps,
+    peakAt,
+    avgBps,
+    estimated: true,
+  };
+}
+
+function reportKpiHtml(totals, timeZone) {
+  if (!totals) return '';
+  const cards = [
+    { label: 'Объём за период', value: fmtBytesRu(totals.bytes) },
+    { label: 'Средняя скорость', value: fmtBitsRu(totals.avgBps) },
+    {
+      label: 'Пик',
+      value: fmtBitsRu(totals.peakBps),
+      sub: totals.peakAt ? zonedDateTime(totals.peakAt, timeZone) : '',
+    },
+    {
+      label: 'Потоки / пакеты',
+      value: totals.flows != null ? fmtCountRu(totals.flows) : '—',
+      sub: totals.packets != null ? `${fmtCountRu(totals.packets)} пакетов` : '',
+    },
+  ];
+  const items = cards.map((c) => (
+    `<div class="kpi"><div class="kpi-label">${escapeHtml(c.label)}</div>`
+    + `<div class="kpi-value">${escapeHtml(c.value)}</div>`
+    + (c.sub ? `<div class="kpi-sub">${escapeHtml(c.sub)}</div>` : '')
+    + '</div>'
+  )).join('');
+  const note = totals.estimated
+    ? '<p class="muted">Итоги оценены по топ-сериям графика — точные суммы появятся, когда rollup соберёт итоговые строки.</p>'
+    : '';
+  return `<div class="kpis">${items}</div>${note}`;
+}
+
+function topTableHtml(previewWidget, groupBy, fileName, limit) {
+  const rows = Array.isArray(previewWidget?.rows) ? previewWidget.rows : [];
+  const title = `Топ · ${groupBy.map(explorerFieldLabel).join(' + ') || 'без группировки'}`;
+  if (!rows.length) {
+    const reason = previewWidget?.error || previewWidget?.warning || 'нет данных за период';
+    return `<h2>${escapeHtml(title)}</h2><p class="muted">${escapeHtml(reason)}</p>`;
+  }
+  const head = [
+    ...groupBy.map(explorerFieldLabel),
+    'Средняя бит/с',
+    'Доля',
+    'Объём',
+    'Пакеты',
+    'Потоки',
+  ].map((h) => `<th>${escapeHtml(h)}</th>`).join('');
+  const shown = rows.slice(0, limit);
+  const body = shown.map((r) => {
+    const cells = [
+      ...(r.values || []).map((v) => escapeHtml(v)),
+      escapeHtml(fmtBitsRu(r.metric)),
+      escapeHtml(fmtPctRu(r.pct)),
+      escapeHtml(fmtBytesRu(r.bytes)),
+      escapeHtml(fmtCountRu(r.packets)),
+      escapeHtml(fmtCountRu(r.flows)),
+    ];
+    return `<tr>${cells.map((c) => `<td>${c}</td>`).join('')}</tr>`;
+  }).join('');
+  const note = rows.length > shown.length
+    ? `<p class="muted">Показаны ${shown.length} из ${rows.length} строк. Полные данные: ${escapeHtml(fileName)}</p>`
+    : `<p class="muted">Полные данные: ${escapeHtml(fileName)}</p>`;
+  return `<h2>${escapeHtml(title)}</h2>`
     + `<table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>${note}`;
+}
+
+function buildReportHtml({
+  obs,
+  window,
+  preview,
+  previewError = null,
+  tables = [],
+  totals = null,
+  timeZone = DEFAULT_TIMEZONE,
+  generatedAt = new Date().toISOString(),
+}) {
+  const widgets = preview?.widgets || [];
+  const chartTable = tables.find((t) => t.type === 'timeseries_bps');
+  const chartPreview = chartTable
+    ? widgets.find((pw) => pw.id === chartTable.widgetId)
+    : widgets.find((pw) => pw.type === 'timeseries_bps');
+
+  const chartSection = chartPreview
+    ? (reportChartSvg(chartPreview, timeZone)
+      || `<p class="muted">${escapeHtml(chartPreview.warning || chartPreview.error || 'Нет точек за период')}</p>`)
+    : '';
+
+  const topSections = tables
+    .filter((t) => t.type === 'top_table')
+    .map((t) => {
+      const w = (obs.widgets || []).find((x) => x.id === t.widgetId);
+      const groupBy = w?.groupBy?.length ? w.groupBy : ['src_asn'];
+      return topTableHtml(
+        widgets.find((pw) => pw.id === t.widgetId),
+        groupBy,
+        t.file,
+        REPORT_HTML_TOP_ROWS,
+      );
+    })
+    .join('\n');
+
+  const periodLabel = window.label || `${window.from} — ${window.to}`;
+  const filesLine = tables.map((t) => t.file).join(' · ');
+  const explorerLink = explorerLinkForReport(obs, window, timeZone);
+
+  return `<!doctype html><html lang="ru"><head><meta charset="utf-8"><title>${escapeHtml(obs.name)}</title>
+<style>
+body{font-family:system-ui,-apple-system,'Segoe UI',sans-serif;margin:24px;color:#111;max-width:1000px}
+h1{margin:0 0 4px;font-size:22px}
+h2{margin:28px 0 8px;font-size:16px}
+.sub{margin:2px 0;color:#444;font-size:13px}
+.muted{color:#666;font-size:12px;margin:6px 0}
+.kpis{display:flex;flex-wrap:wrap;gap:12px;margin:18px 0}
+.kpi{flex:1 1 180px;border:1px solid #e6e6e6;border-radius:8px;padding:10px 12px;background:#fafafa}
+.kpi-label{color:#666;font-size:12px}
+.kpi-value{font-size:19px;font-weight:600;margin-top:2px}
+.kpi-sub{color:#666;font-size:12px;margin-top:2px}
+.legend{display:flex;flex-wrap:wrap;gap:10px;margin:8px 0;font-size:12px;color:#333}
+.legend-item{display:inline-flex;align-items:center;gap:5px}
+.legend-dot{display:inline-block;width:10px;height:10px;border-radius:2px}
+table{border-collapse:collapse;width:100%;margin:10px 0}
+td,th{border:1px solid #ddd;padding:6px 8px;font-size:13px}
+th{background:#f5f5f5;text-align:left}
+td:nth-child(n+2){text-align:right;font-variant-numeric:tabular-nums}
+a{color:#1a56c4}
+</style>
+</head><body>
+<h1>${escapeHtml(obs.name)}</h1>
+<p class="sub">Период: ${escapeHtml(periodLabel)}</p>
+<p class="sub">Фильтры: ${escapeHtml(describeFilters(obs.filters))}</p>
+<p class="sub">Группировка: ${escapeHtml(describeGroupBy(obs.widgets))}</p>
+${previewError ? `<p style="color:#a00">Ошибка выборки: ${escapeHtml(previewError)}</p>` : ''}
+${reportKpiHtml(totals, timeZone)}
+${chartSection ? `<h2>График</h2>${chartSection}${chartTable ? `<p class="muted">Полные данные: ${escapeHtml(chartTable.file)}</p>` : ''}` : ''}
+${topSections}
+<p class="sub" style="margin-top:22px"><a href="${escapeHtml(explorerLink)}">Открыть в разборе трафика</a></p>
+<p class="muted">Файлы: ${escapeHtml(filesLine)}. Окно UTC: ${escapeHtml(window.from)} — ${escapeHtml(window.to)}. Сформировано ${escapeHtml(zonedDateTime(generatedAt, timeZone))} (${escapeHtml(timeZone)}).</p>
+</body></html>`;
 }
 
 async function runObservationReport(id, userId) {
@@ -1068,6 +1485,13 @@ async function runObservationReport(id, userId) {
 
   const window = reportWindow(obs);
   const period = window.period;
+  const timeZone = obs.report?.schedule?.timezone || DEFAULT_TIMEZONE;
+  const windowSeconds = Math.max(
+    60,
+    Math.round((Date.parse(window.to) - Date.parse(window.from)) / 1000) || 3600,
+  );
+  const dayStamp = zonedDate(window.from, timeZone) || 'period';
+
   let preview;
   let previewError = null;
   try {
@@ -1077,58 +1501,59 @@ async function runObservationReport(id, userId) {
     preview = { widgets: [] };
   }
   const tables = [];
+  const usedNames = new Set(['report.html', 'manifest.json']);
+  const uniqueName = (base) => {
+    let name = `${base}.csv`;
+    let i = 2;
+    while (usedNames.has(name)) {
+      name = `${base}-${i}.csv`;
+      i += 1;
+    }
+    usedNames.add(name);
+    return name;
+  };
 
   for (const w of obs.widgets.filter((x) => x.type === 'timeseries_bps')) {
     const previewWidget = preview.widgets.find((pw) => pw.id === w.id) || { id: w.id, type: w.type };
-    const csv = timeseriesReportCsv(previewWidget);
-    const csvPath = path.join(dir, `${w.id}.csv`);
-    fs.writeFileSync(csvPath, `${csv.lines.join('\n')}\n`);
+    const csv = timeseriesReportCsv(previewWidget, timeZone);
+    const fileName = uniqueName(`chart-${dayStamp}`);
+    fs.writeFileSync(path.join(dir, fileName), `\uFEFF${csv.lines.join('\n')}\n`);
     tables.push({
       widgetId: w.id,
       type: w.type,
-      file: path.basename(csvPath),
+      label: 'График',
+      file: fileName,
       rows: csv.points.length,
     });
   }
 
   for (const w of obs.widgets.filter((x) => x.type === 'top_table')) {
     const groupBy = w.groupBy?.length ? w.groupBy : ['src_asn'];
-    const mapped = preview.widgets.find((pw) => pw.id === w.id)?.rows || [];
-    const csvPath = path.join(dir, `${w.id}.csv`);
-    const headers = [...groupBy, 'metric', 'pct', 'bytes', 'packets', 'flows'];
-    const lines = [headers.join(',')];
-    for (const row of mapped) {
-      lines.push([
-        ...(row.values || []),
-        row.metric,
-        row.pct,
-        row.bytes,
-        row.packets,
-        row.flows,
-      ].map(csvEscape).join(','));
-    }
-    fs.writeFileSync(csvPath, `${lines.join('\n')}\n`);
-    tables.push({ widgetId: w.id, type: w.type, file: path.basename(csvPath), rows: mapped.length });
+    const previewWidget = preview.widgets.find((pw) => pw.id === w.id);
+    const csv = topReportCsv(previewWidget, groupBy);
+    const slug = groupBy.join('-').replace(/[^a-zA-Z0-9_-]/g, '') || 'top';
+    const fileName = uniqueName(`top-${slug}-${dayStamp}`);
+    fs.writeFileSync(path.join(dir, fileName), `\uFEFF${csv.lines.join('\n')}\n`);
+    tables.push({
+      widgetId: w.id,
+      type: w.type,
+      label: `Топ · ${groupBy.map(explorerFieldLabel).join(' + ')}`,
+      file: fileName,
+      rows: csv.rows.length,
+    });
   }
 
-  const htmlTables = tables.map((t) => {
-    const previewWidget = preview.widgets.find((pw) => pw.id === t.widgetId);
-    if (previewWidget?.type === 'timeseries_bps' || t.type === 'timeseries_bps') {
-      return timeseriesReportHtml(previewWidget || { id: t.widgetId, type: t.type }, t.file, t.rows);
-    }
-    if (previewWidget?.type === 'top_table' && Array.isArray(previewWidget.rows)) {
-      const gb = previewWidget.groupBy || [];
-      const head = [...gb, 'metric'].map((h) => `<th>${escapeHtml(h)}</th>`).join('');
-      const body = previewWidget.rows.slice(0, 50).map((r) => (
-        `<tr>${(r.values || []).map((v) => `<td>${escapeHtml(v)}</td>`).join('')}<td>${escapeHtml(r.metric)}</td></tr>`
-      )).join('');
-      return `<h2>${escapeHtml(t.widgetId)}</h2><table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table><p>CSV: ${escapeHtml(t.file)}</p>`;
-    }
-    if (previewWidget?.error) {
-      return `<h2>${escapeHtml(t.widgetId)}</h2><p style="color:#a00">Ошибка: ${escapeHtml(previewWidget.error)}</p>`;
-    }
-    return `<h2>${escapeHtml(t.widgetId)}</h2><p>Строк: ${t.rows}. Файл: ${escapeHtml(t.file)}</p>`;
-  }).join('\n');
+  const chartWidgetId = obs.widgets.find((w) => w.type === 'timeseries_bps')?.id;
+  const chartPreview = chartWidgetId
+    ? preview.widgets.find((pw) => pw.id === chartWidgetId)
+    : null;
+
+  let totals = null;
+  if (obs.materialize?.enabled) {
+    const totalSeries = await readRollupTimeseries(obs.id, window);
+    totals = summarizeTotalPoints(totalSeries.points, windowSeconds);
+  }
+  if (!totals) totals = summarizeGroupedPoints(chartPreview, windowSeconds);
 
   const widgetErrors = (preview.widgets || []).filter((w) => w.status === 'error' || w.error);
   const status = previewError || widgetErrors.length
@@ -1136,17 +1561,16 @@ async function runObservationReport(id, userId) {
     : 'ok';
 
   const periodLabel = window.label || `${window.from} — ${window.to}`;
-  const html = `<!doctype html><html lang="ru"><head><meta charset="utf-8"><title>${escapeHtml(obs.name)}</title>
-<style>body{font-family:system-ui,sans-serif;margin:24px;color:#111}table{border-collapse:collapse;width:100%;margin:16px 0}td,th{border:1px solid #ddd;padding:6px 8px;font-size:13px}th{background:#f5f5f5;text-align:left}</style>
-</head><body>
-<h1>${escapeHtml(obs.name)}</h1>
-<p>Период (${escapeHtml(period)}): ${escapeHtml(periodLabel)}</p>
-<p>Окно UTC: ${escapeHtml(window.from)} — ${escapeHtml(window.to)}</p>
-<p>Фильтры: ${escapeHtml(JSON.stringify(obs.filters))}</p>
-${previewError ? `<p style="color:#a00">Preview error: ${escapeHtml(previewError)}</p>` : ''}
-${htmlTables}
-<p style="color:#666">Сформировано ${escapeHtml(startedAt)}.</p>
-</body></html>`;
+  const html = buildReportHtml({
+    obs,
+    window,
+    preview,
+    previewError,
+    tables,
+    totals,
+    timeZone,
+    generatedAt: startedAt,
+  });
   const htmlPath = path.join(dir, 'report.html');
   fs.writeFileSync(htmlPath, html);
 
@@ -1492,6 +1916,13 @@ module.exports = {
   patchMaterializeStatus,
   observationsConfig,
   getObservationAnalyticsDiagnostics,
+  timeseriesReportCsv,
+  topReportCsv,
+  reportChartSvg,
+  buildReportHtml,
+  summarizeTotalPoints,
+  summarizeGroupedPoints,
+  describeFilters,
   MAX_MATERIALIZE,
   MIN_INTERVAL_SEC,
   MIN_REFRESH_SEC,
