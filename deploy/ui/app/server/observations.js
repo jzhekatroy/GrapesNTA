@@ -1004,6 +1004,60 @@ function csvEscape(v) {
   return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
 }
 
+/** Build timeseries CSV rows; grouped points store bps under series keys, not p.bps. */
+function timeseriesReportCsv(previewWidget) {
+  const points = previewWidget?.series || previewWidget?.points || [];
+  const seriesLines = Array.isArray(previewWidget?.lines) ? previewWidget.lines : [];
+  const grouped = previewWidget?.mode === 'grouped' && seriesLines.length > 0;
+
+  if (grouped) {
+    const headers = ['t', ...seriesLines.map((ln) => ln.label || ln.key || 'series')];
+    const lines = [headers.map(csvEscape).join(',')];
+    for (const p of points) {
+      lines.push([
+        p.t || p.bucket,
+        ...seriesLines.map((ln) => (p[ln.key] != null ? p[ln.key] : '')),
+      ].map(csvEscape).join(','));
+    }
+    return { lines, points, seriesLines, grouped: true, headers };
+  }
+
+  const headers = ['t', 'bps', 'bytes', 'packets', 'flows'];
+  const lines = [headers.map(csvEscape).join(',')];
+  for (const p of points) {
+    lines.push([p.t || p.bucket, p.bps, p.bytes, p.packets, p.flows].map(csvEscape).join(','));
+  }
+  return { lines, points, seriesLines: [], grouped: false, headers };
+}
+
+function timeseriesReportHtml(previewWidget, fileName, rowCount) {
+  const { points, seriesLines, grouped, headers } = timeseriesReportCsv(previewWidget);
+  if (!points.length) {
+    return `<h2>${escapeHtml(previewWidget?.id || 'timeseries')}</h2>`
+      + `<p>Нет точек за окно. CSV: ${escapeHtml(fileName)}</p>`;
+  }
+  const head = headers.map((h) => `<th>${escapeHtml(h)}</th>`).join('');
+  const sample = points.slice(0, 50);
+  const body = sample.map((p) => {
+    if (grouped) {
+      const cells = [
+        p.t || p.bucket,
+        ...seriesLines.map((ln) => (p[ln.key] != null ? p[ln.key] : '')),
+      ];
+      return `<tr>${cells.map((v) => `<td>${escapeHtml(v)}</td>`).join('')}</tr>`;
+    }
+    return `<tr>${[
+      p.t || p.bucket, p.bps, p.bytes, p.packets, p.flows,
+    ].map((v) => `<td>${escapeHtml(v)}</td>`).join('')}</tr>`;
+  }).join('');
+  const note = points.length > 50
+    ? `<p>Показаны первые 50 из ${rowCount} точек. Полные данные: ${escapeHtml(fileName)}</p>`
+    : `<p>CSV: ${escapeHtml(fileName)}</p>`;
+  return `<h2>${escapeHtml(previewWidget?.id || 'timeseries')}</h2>`
+    + `<p>${grouped ? 'График (bps по сериям)' : 'График (total bps)'}</p>`
+    + `<table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>${note}`;
+}
+
 async function runObservationReport(id, userId) {
   const obs = await getObservation(id, userId);
   if (!obs) return null;
@@ -1025,14 +1079,16 @@ async function runObservationReport(id, userId) {
   const tables = [];
 
   for (const w of obs.widgets.filter((x) => x.type === 'timeseries_bps')) {
-    const series = preview.widgets.find((pw) => pw.id === w.id)?.series || [];
+    const previewWidget = preview.widgets.find((pw) => pw.id === w.id) || { id: w.id, type: w.type };
+    const csv = timeseriesReportCsv(previewWidget);
     const csvPath = path.join(dir, `${w.id}.csv`);
-    const lines = ['t,bps,bytes,packets,flows'];
-    for (const p of series) {
-      lines.push([p.t, p.bps, p.bytes, p.packets, p.flows].map(csvEscape).join(','));
-    }
-    fs.writeFileSync(csvPath, `${lines.join('\n')}\n`);
-    tables.push({ widgetId: w.id, type: w.type, file: path.basename(csvPath), rows: series.length });
+    fs.writeFileSync(csvPath, `${csv.lines.join('\n')}\n`);
+    tables.push({
+      widgetId: w.id,
+      type: w.type,
+      file: path.basename(csvPath),
+      rows: csv.points.length,
+    });
   }
 
   for (const w of obs.widgets.filter((x) => x.type === 'top_table')) {
@@ -1057,6 +1113,9 @@ async function runObservationReport(id, userId) {
 
   const htmlTables = tables.map((t) => {
     const previewWidget = preview.widgets.find((pw) => pw.id === t.widgetId);
+    if (previewWidget?.type === 'timeseries_bps' || t.type === 'timeseries_bps') {
+      return timeseriesReportHtml(previewWidget || { id: t.widgetId, type: t.type }, t.file, t.rows);
+    }
     if (previewWidget?.type === 'top_table' && Array.isArray(previewWidget.rows)) {
       const gb = previewWidget.groupBy || [];
       const head = [...gb, 'metric'].map((h) => `<th>${escapeHtml(h)}</th>`).join('');
