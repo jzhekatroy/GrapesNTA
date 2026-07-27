@@ -73,7 +73,10 @@ const ApiClient = (() => {
       const res = await fetch(path, { cache: 'no-store', credentials: 'same-origin' });
       if (!res.ok) {
         const body = await res.json().catch(() => ({}));
-        throw new Error(body.error || `HTTP ${res.status}`);
+        const err = new Error(body.error || `HTTP ${res.status}`);
+        err.status = res.status;
+        err.body = body;
+        throw err;
       }
       const body = await res.json();
       const metrics = finish({
@@ -102,7 +105,14 @@ const ApiClient = (() => {
       body: body === undefined ? undefined : JSON.stringify(body),
     });
     const payload = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(payload.error || `HTTP ${res.status}`);
+    if (!res.ok) {
+      const err = new Error(payload.error || `HTTP ${res.status}`);
+      err.status = res.status;
+      err.occupants = payload.occupants;
+      err.quotas = payload.quotas;
+      err.body = payload;
+      throw err;
+    }
     return payload;
   }
 
@@ -499,7 +509,11 @@ const ApiClient = (() => {
     const body = { ...queryBody };
     appendCollectorFilterBody(body, body.collectorFilter);
     delete body.collectorFilter;
-    if (body.timeRange === 'custom' && body.customPeriod?.from && body.customPeriod?.to) {
+    if (body.from && body.to) {
+      body.range = 'custom';
+      delete body.timeRange;
+      delete body.customPeriod;
+    } else if (body.timeRange === 'custom' && body.customPeriod?.from && body.customPeriod?.to) {
       const apiPeriod = apiCustomPeriodParams(body.customPeriod);
       body.range = 'custom';
       body.from = apiPeriod.from;
@@ -507,6 +521,7 @@ const ApiClient = (() => {
     } else if (body.timeRange) {
       body.range = body.timeRange;
     }
+    delete body.customPeriod;
     const res = await fetch('/api/explorer/export', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -612,6 +627,13 @@ const ApiClient = (() => {
     return body.data || body;
   }
 
+  async function loadBoundsDiagnostics() {
+    const body = await getJson('/api/diagnostics/bounds', {
+      widget: 'diagnostics/bounds',
+    });
+    return body.data || body;
+  }
+
   async function loadObservation(id) {
     const body = await getJson(`/api/observations/${encodeURIComponent(id)}`, { widget: 'observations/get' });
     return body.data;
@@ -646,9 +668,30 @@ const ApiClient = (() => {
     return body.data || [];
   }
 
+  async function duplicateObservation(id) {
+    return requestJson(`/api/observations/${encodeURIComponent(id)}/duplicate`, { method: 'POST', body: {} });
+  }
+
+  async function cancelObservationMaterialize(id) {
+    return requestJson(`/api/observations/${encodeURIComponent(id)}/cancel`, { method: 'POST', body: {} });
+  }
+
   function observationRunArtifactUrl(observationId, runId, file = 'report.html') {
     const q = new URLSearchParams({ file: String(file || 'report.html') });
     return `/api/observations/${encodeURIComponent(observationId)}/runs/${encodeURIComponent(runId)}/artifact?${q}`;
+  }
+
+  async function loadSmtpSettings() {
+    const body = await getJson('/api/settings/smtp', { widget: 'settings/smtp' });
+    return body.data;
+  }
+
+  async function saveSmtpSettings(payload) {
+    return requestJson('/api/settings/smtp', { method: 'PUT', body: payload });
+  }
+
+  async function testSmtpSettings(to) {
+    return requestJson('/api/settings/smtp/test', { method: 'POST', body: { to } });
   }
 
   function countryQuery({ timeRange = '24h', customPeriod, directions, basis = 'ip', mapSide = 'remote', sourceIds, collectorFilter } = {}) {
@@ -1511,6 +1554,134 @@ const ApiClient = (() => {
     return body;
   }
 
+  async function loadDirectionSettings() {
+    try {
+      const body = await requestJson('/api/refs/direction-settings');
+      return { source: 'clickhouse', data: body.data || null };
+    } catch (err) {
+      return { source: 'error', data: null, error: err.message || LOAD_FAILED };
+    }
+  }
+
+  async function saveDirectionSettings(payload) {
+    return requestJson('/api/refs/direction-settings', { method: 'POST', body: payload });
+  }
+
+  async function loadInterfaceRoleRules() {
+    try {
+      const body = await getJson('/api/refs/interface-role-rules', { widget: 'refs/interface-role-rules' });
+      return {
+        source: 'clickhouse',
+        rows: Array.isArray(body.data) ? body.data : [],
+        meta: body.meta || null,
+      };
+    } catch (err) {
+      return { source: 'error', rows: [], error: err.message || LOAD_FAILED };
+    }
+  }
+
+  async function saveInterfaceRoleRule(payload) {
+    return requestJson('/api/refs/interface-role-rules', { method: 'POST', body: payload });
+  }
+
+  async function deleteInterfaceRoleRule(payload) {
+    return requestJson('/api/refs/interface-role-rules/delete', { method: 'POST', body: payload });
+  }
+
+  async function previewInterfaceRoleRule(payload) {
+    try {
+      const body = await requestJson('/api/refs/interface-role-rules/preview', { method: 'POST', body: payload });
+      return { source: 'clickhouse', data: body.data || { total: 0, interfaces: [] }, meta: body.meta || null };
+    } catch (err) {
+      return { source: 'error', data: null, error: err.message || LOAD_FAILED };
+    }
+  }
+
+  async function loadInterfaceRoleSummary() {
+    try {
+      const body = await getJson('/api/refs/interface-roles/summary', { widget: 'refs/interface-roles-summary' });
+      return { source: 'clickhouse', data: body.data || null, meta: body.meta || null };
+    } catch (err) {
+      return { source: 'error', data: null, error: err.message || LOAD_FAILED };
+    }
+  }
+
+  async function loadInterfaceRolesForSwitch(switchIp) {
+    try {
+      const body = await getJson(
+        `/api/refs/interface-roles/${encodeURIComponent(switchIp)}`,
+        { widget: 'refs/interface-roles' },
+      );
+      return { source: 'clickhouse', rows: Array.isArray(body.data) ? body.data : [], meta: body.meta || null };
+    } catch (err) {
+      return { source: 'error', rows: [], error: err.message || LOAD_FAILED };
+    }
+  }
+
+  async function saveInterfaceRole(payload) {
+    return requestJson('/api/refs/interface-roles', { method: 'POST', body: payload });
+  }
+
+  async function deleteInterfaceRole(payload) {
+    return requestJson('/api/refs/interface-roles/delete', { method: 'POST', body: payload });
+  }
+
+  async function rebuildInterfaceRoles() {
+    return requestJson('/api/refs/interface-roles/rebuild', { method: 'POST' });
+  }
+
+  function directionInterfacesQuery(params = {}) {
+    const q = new URLSearchParams();
+    if (params.hours != null) q.set('hours', String(params.hours));
+    if (params.limit != null) q.set('limit', String(params.limit));
+    if (params.onlyUnmarked) q.set('only_unmarked', '1');
+    if (params.asnThreshold != null) q.set('asn_threshold', String(params.asnThreshold));
+    if (params.switchIp) q.set('switch_ip', params.switchIp);
+    const s = q.toString();
+    return s ? `?${s}` : '';
+  }
+
+  async function loadDirectionCoverage(hours = 1) {
+    try {
+      const body = await getJson(
+        `/api/diagnostics/direction/coverage?hours=${encodeURIComponent(hours)}`,
+        { widget: 'diagnostics/direction-coverage' },
+      );
+      return { source: 'clickhouse', data: body.data || null, meta: body.meta || null };
+    } catch (err) {
+      return { source: 'error', data: null, error: err.message || LOAD_FAILED };
+    }
+  }
+
+  async function loadDirectionCompare({ hours = 1, oneSided } = {}) {
+    try {
+      const q = new URLSearchParams({ hours: String(hours) });
+      if (oneSided) q.set('one_sided', oneSided);
+      const body = await getJson(
+        `/api/diagnostics/direction/compare?${q.toString()}`,
+        { widget: 'diagnostics/direction-compare' },
+      );
+      return { source: 'clickhouse', data: body.data || null, meta: body.meta || null };
+    } catch (err) {
+      return { source: 'error', data: null, error: err.message || LOAD_FAILED };
+    }
+  }
+
+  async function loadDirectionInterfaces(params = {}) {
+    try {
+      const body = await getJson(
+        `/api/diagnostics/direction/interfaces${directionInterfacesQuery(params)}`,
+        { widget: 'diagnostics/direction-interfaces' },
+      );
+      const payload = body.data;
+      const rows = Array.isArray(payload) ? payload : (payload?.rows || []);
+      const stats = Array.isArray(payload) ? null : (payload?.stats || null);
+      return { source: 'clickhouse', rows, stats, meta: body.meta || null };
+    } catch (err) {
+      return { source: 'error', rows: [], stats: null, error: err.message || LOAD_FAILED };
+    }
+  }
+
   async function loadCollectorStatus() {
     const health = await checkHealth();
     if (!health.connected) {
@@ -1753,6 +1924,7 @@ const ApiClient = (() => {
     cancelWorkerBackfill,
     loadEnrichmentDiagnostics,
     loadSnmpDiagnostics,
+    loadBoundsDiagnostics,
     loadObservation,
     createObservation,
     updateObservation,
@@ -1761,7 +1933,12 @@ const ApiClient = (() => {
     previewObservation,
     runObservationReport,
     loadObservationRuns,
+    duplicateObservation,
+    cancelObservationMaterialize,
     observationRunArtifactUrl,
+    loadSmtpSettings,
+    saveSmtpSettings,
+    testSmtpSettings,
     dashboardOtherPorts,
     dashboardCountries,
     loadCountries,
@@ -1831,6 +2008,20 @@ const ApiClient = (() => {
     loadBmpFlap,
     loadTtl,
     updateTtl,
+    loadDirectionSettings,
+    saveDirectionSettings,
+    loadInterfaceRoleRules,
+    saveInterfaceRoleRule,
+    deleteInterfaceRoleRule,
+    previewInterfaceRoleRule,
+    loadInterfaceRoleSummary,
+    loadInterfaceRolesForSwitch,
+    saveInterfaceRole,
+    deleteInterfaceRole,
+    rebuildInterfaceRoles,
+    loadDirectionCoverage,
+    loadDirectionCompare,
+    loadDirectionInterfaces,
     getStatus: () => ({ ...status }),
   };
 })();

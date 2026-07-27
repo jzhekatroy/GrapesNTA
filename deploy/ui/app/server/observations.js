@@ -24,10 +24,25 @@ const {
   insertRun,
   lastSuccessfulRunAt: storeLastSuccessfulRunAt,
 } = require('./observations-store');
+const {
+  normalizeSchedule,
+  reportWindowForPeriod,
+  isScheduleDue,
+} = require('./observation-schedule');
+const { getSmtpSettings, sendSmtpMail } = require('./smtp-settings');
 
 const ARTIFACTS_DIR = path.join(__dirname, 'data', 'observation_runs');
 
-const MAX_MATERIALIZE = Math.max(1, Number(process.env.OBSERVATION_MAX_MATERIALIZE) || 15);
+/** 0 / unset = no hard limit. Positive OBSERVATION_MAX_MATERIALIZE re-enables a cap. */
+const MAX_MATERIALIZE = (() => {
+  if (process.env.OBSERVATION_MAX_MATERIALIZE == null || process.env.OBSERVATION_MAX_MATERIALIZE === '') {
+    return 0;
+  }
+  const n = Number(process.env.OBSERVATION_MAX_MATERIALIZE);
+  if (!Number.isFinite(n) || n <= 0) return 0;
+  return Math.floor(n);
+})();
+const MATERIALIZE_LIMIT_ENABLED = MAX_MATERIALIZE > 0;
 /** Worker loop tick (catch-up when lagging). Per-observation cadence is ≥ MIN_REFRESH_SEC. */
 const MIN_INTERVAL_SEC = 60;
 /** Min live refresh / materialize cadence — wait for late flows. */
@@ -36,6 +51,10 @@ const MIN_REFRESH_SEC = 300;
 const ROLLUP_TABLE = 'observation_rollups_5m';
 const ROLLUP_BUCKET_SEC = 300;
 const DEFAULT_TTL_HINT_DAYS = 14;
+const BACKFILL_HOURS = Math.max(0, Number(process.env.OBSERVATION_BACKFILL_HOURS) || 24);
+const STUCK_SEC = Math.max(60, Number(process.env.OBSERVATION_ROLLUP_STUCK_SEC) || 900);
+const MAX_FAIL_COUNT = 10;
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 const NATIVE_FILTER_FIELDS = new Set([
   'direction', 'collector', 'vlan', 'vlan_attachment',
@@ -145,15 +164,101 @@ function classifyScope(filters, widgets = []) {
   };
 }
 
-function countActiveMaterialize(items, exceptId = null) {
-  return items.filter((o) => o.id !== exceptId
+function isActiveMaterialize(o, exceptId = null) {
+  return o.id !== exceptId
     && o.live?.enabled
     && o.materialize?.enabled
-    && classifyScope(o.filters, o.widgets).materializeRequired).length;
+    && classifyScope(o.filters, o.widgets).materializeRequired;
+}
+
+function countActiveMaterialize(items, exceptId = null) {
+  return items.filter((o) => isActiveMaterialize(o, exceptId)).length;
+}
+
+function materializeOccupants(items, exceptId = null) {
+  return items
+    .filter((o) => isActiveMaterialize(o, exceptId))
+    .map((o) => ({ id: o.id, name: o.name || o.id }));
+}
+
+function quotaError(items, exceptId = null) {
+  const occupants = materializeOccupants(items, exceptId);
+  const err = new Error(
+    `Достигнут лимит материализаций (${MAX_MATERIALIZE}). Отключите другое live-наблюдение.`,
+  );
+  err.status = 400;
+  err.occupants = occupants;
+  err.quotas = { maxMaterialize: MAX_MATERIALIZE, activeMaterialize: occupants.length };
+  return err;
+}
+
+function normalizeEmailTo(list) {
+  if (!Array.isArray(list)) return [];
+  const out = [];
+  for (const item of list) {
+    const s = String(item || '').trim();
+    if (!s) continue;
+    if (!EMAIL_RE.test(s)) {
+      const err = new Error(`Некорректный email: ${s}`);
+      err.status = 400;
+      throw err;
+    }
+    out.push(s);
+    if (out.length > 10) {
+      const err = new Error('Не больше 10 адресов в emailTo');
+      err.status = 400;
+      throw err;
+    }
+  }
+  return out;
+}
+
+function normalizeLayout(raw, existing) {
+  const src = raw?.layout != null ? raw.layout : existing?.layout;
+  if (!src || typeof src !== 'object') {
+    return { order: 0, width: 1 };
+  }
+  const order = Number(src.order);
+  const width = Number(src.width) === 2 ? 2 : 1;
+  return {
+    order: Number.isFinite(order) ? order : 0,
+    width,
+  };
+}
+
+function initBackfillFields(createdAt, existingMat = {}) {
+  if (existingMat.backfillDone && existingMat.backfillFrom) {
+    return {
+      backfillFrom: existingMat.backfillFrom,
+      backfillCursor: existingMat.backfillCursor || existingMat.backfillFrom,
+      backfillDone: true,
+    };
+  }
+  const createdMs = new Date(createdAt).getTime();
+  const fromMs = Number.isFinite(createdMs)
+    ? createdMs - BACKFILL_HOURS * 3600 * 1000
+    : Date.now() - BACKFILL_HOURS * 3600 * 1000;
+  const backfillFrom = new Date(Math.max(0, fromMs)).toISOString();
+  return {
+    backfillFrom,
+    backfillCursor: existingMat.backfillCursor || backfillFrom,
+    backfillDone: Boolean(existingMat.backfillDone),
+  };
+}
+
+function isObservationOwner(item, userId) {
+  if (!item) return false;
+  const owner = String(item.ownerId || '').trim();
+  const uid = String(userId || '').trim();
+  if (!owner) return true;
+  return owner === uid;
 }
 
 function materializeWarning(activeCount) {
-  return `Частые/сложные материализации нагружают ClickHouse. Активных: ${activeCount}/${MAX_MATERIALIZE}. `
+  const quota = MATERIALIZE_LIMIT_ENABLED
+    ? `Активных: ${activeCount}/${MAX_MATERIALIZE}. `
+    : `Активных: ${activeCount}. `;
+  return `Частые/сложные материализации нагружают ClickHouse. ${quota}`
     + `Шаг наблюдения ≥ ${MIN_REFRESH_SEC}s (запас на late flows). TTL rollup ~${DEFAULT_TTL_HINT_DAYS}д. `
     + `Персональные данные пишутся в общую таблицу ${ROLLUP_TABLE} (бакет ${ROLLUP_BUCKET_SEC}s, не отдельный MV на каждый id).`;
 }
@@ -185,22 +290,27 @@ function normalizeObservation(raw = {}, { userId, existing = null } = {}) {
   const wasEnabled = Boolean(existing?.materialize?.enabled);
   let cursorMinute = existing?.materialize?.cursorMinute ?? raw.materialize?.cursorMinute ?? null;
   let matStatus = existing?.materialize?.status || (materializeEnabled ? 'queued' : 'idle');
+  let backfill = {
+    backfillFrom: existing?.materialize?.backfillFrom ?? null,
+    backfillCursor: existing?.materialize?.backfillCursor ?? null,
+    backfillDone: Boolean(existing?.materialize?.backfillDone),
+  };
   if (materializeEnabled && !wasEnabled) {
-    // Fresh live: start at creation time, do not backfill older windows.
+    // Fresh live: catch up from creation time first; history via separate backfill cursor.
     matStatus = 'queued';
     cursorMinute = createdAt;
-  } else if (cursorMinute) {
-    const cursorMs = new Date(cursorMinute).getTime();
-    const createdMs = new Date(createdAt).getTime();
-    if (!Number.isFinite(cursorMs) || (Number.isFinite(createdMs) && cursorMs < createdMs)) {
-      cursorMinute = createdAt;
-    }
+    backfill = initBackfillFields(createdAt, {});
+  } else if (materializeEnabled && !backfill.backfillFrom) {
+    backfill = initBackfillFields(createdAt, existing?.materialize || {});
   }
   if (!materializeEnabled) {
     matStatus = 'idle';
   } else if (matStatus === 'idle') {
     matStatus = 'queued';
   }
+
+  const reportRaw = raw.report != null ? raw.report : (existing?.report || {});
+  const schedule = normalizeSchedule(reportRaw, existing?.report || {});
 
   return {
     id: existing?.id || raw.id || newId('obs'),
@@ -212,6 +322,7 @@ function normalizeObservation(raw = {}, { userId, existing = null } = {}) {
     filters,
     lookback,
     widgets,
+    layout: normalizeLayout(raw, existing),
     live: {
       enabled: liveEnabled,
       refreshSec,
@@ -222,17 +333,24 @@ function normalizeObservation(raw = {}, { userId, existing = null } = {}) {
       status: matStatus,
       lagSeconds: existing?.materialize?.lagSeconds ?? null,
       lastCatchupAt: existing?.materialize?.lastCatchupAt ?? null,
+      lastError: existing?.materialize?.lastError ?? null,
       cursorMinute,
+      failCount: Number(existing?.materialize?.failCount) || 0,
+      nextAttemptAt: existing?.materialize?.nextAttemptAt ?? null,
+      cancelRequested: Boolean(existing?.materialize?.cancelRequested),
+      runningStartedAt: existing?.materialize?.runningStartedAt ?? null,
+      dataThrough: existing?.materialize?.dataThrough ?? null,
+      ...backfill,
     },
     report: {
-      enabled: Boolean(raw.report?.enabled ?? existing?.report?.enabled ?? false),
-      period: ['yesterday', 'last_24h'].includes(raw.report?.period)
-        ? raw.report.period
+      enabled: Boolean(reportRaw.enabled ?? false),
+      period: ['yesterday', 'last_24h'].includes(reportRaw.period)
+        ? reportRaw.period
         : (existing?.report?.period || 'yesterday'),
-      cron: String(raw.report?.cron ?? existing?.report?.cron ?? '0 8 * * *'),
-      timezone: String(raw.report?.timezone ?? existing?.report?.timezone ?? 'Europe/Moscow'),
-      formats: Array.isArray(raw.report?.formats) ? raw.report.formats : (existing?.report?.formats || ['html', 'csv']),
-      emailTo: Array.isArray(raw.report?.emailTo) ? raw.report.emailTo : (existing?.report?.emailTo || []),
+      schedule,
+      emailTo: normalizeEmailTo(
+        Array.isArray(reportRaw.emailTo) ? reportRaw.emailTo : (existing?.report?.emailTo || []),
+      ),
     },
     createdAt,
     updatedAt: new Date().toISOString(),
@@ -243,40 +361,63 @@ async function withMeta(item, allItems = null) {
   const scope = classifyScope(item.filters, item.widgets);
   const all = allItems || await loadAllObservations();
   const active = countActiveMaterialize(all);
+  const warnings = [];
+  if (scope.materializeRequired && item.live?.enabled) {
+    warnings.push(materializeWarning(active));
+  }
+  if (item.materialize?.lastError) {
+    warnings.push(`Ошибка подготовки данных: ${item.materialize.lastError}`);
+  }
+  const report = {
+    ...(item.report || {}),
+    schedule: (item.report && item.report.schedule && item.report.schedule.kind)
+      ? item.report.schedule
+      : normalizeSchedule(item.report || {}, item.report || {}),
+  };
+  // Drop legacy dead fields from API responses.
+  delete report.cron;
+  delete report.formats;
+  delete report.timezone;
+
   return {
     ...item,
+    report,
     scope,
     quotas: {
-      maxMaterialize: MAX_MATERIALIZE,
+      maxMaterialize: MATERIALIZE_LIMIT_ENABLED ? MAX_MATERIALIZE : null,
       activeMaterialize: active,
       minIntervalSec: MIN_INTERVAL_SEC,
+      occupants: materializeOccupants(all),
     },
-    warnings: scope.materializeRequired && item.live?.enabled
-      ? [materializeWarning(active)]
-      : [],
+    warnings,
+    backfillProgress: backfillProgress(item.materialize),
   };
 }
 
 async function listObservations(userId) {
   const all = await loadAllObservations();
-  const visible = all.filter((item) => item.isShared || item.ownerId === userId);
+  const visible = all.filter((item) => item.isShared
+    || !String(item.ownerId || '').trim()
+    || isObservationOwner(item, userId));
   return Promise.all(visible.map((item) => withMeta(item, all)));
 }
 
 async function getObservation(id, userId) {
   const item = await loadObservationById(id);
   if (!item) return null;
-  if (!item.isShared && item.ownerId !== userId) return null;
+  if (!item.isShared
+    && String(item.ownerId || '').trim()
+    && !isObservationOwner(item, userId)) return null;
   return withMeta(item);
 }
 
 async function createObservation(userId, payload = {}) {
   const items = await loadAllObservations();
   const item = normalizeObservation(payload, { userId });
-  if (item.materialize.enabled && countActiveMaterialize(items) >= MAX_MATERIALIZE) {
-    const err = new Error(`Достигнут лимит материализаций (${MAX_MATERIALIZE}). Отключите другое live-наблюдение.`);
-    err.status = 400;
-    throw err;
+  if (MATERIALIZE_LIMIT_ENABLED
+    && item.materialize.enabled
+    && countActiveMaterialize(items) >= MAX_MATERIALIZE) {
+    throw quotaError(items);
   }
   if (item.materialize.enabled) item.materialize.status = 'queued';
   await upsertObservation(item);
@@ -287,24 +428,87 @@ async function updateObservation(id, userId, payload = {}) {
   const items = await loadAllObservations();
   const existing = items.find((row) => row.id === id);
   if (!existing) return null;
-  if (existing.ownerId !== userId) return null;
+  if (!isObservationOwner(existing, userId)) return null;
   const next = normalizeObservation(payload, { userId, existing });
-  if (next.materialize.enabled && countActiveMaterialize(items, id) >= MAX_MATERIALIZE) {
-    const err = new Error(`Достигнут лимит материализаций (${MAX_MATERIALIZE}).`);
-    err.status = 400;
-    throw err;
+  if (MATERIALIZE_LIMIT_ENABLED
+    && next.materialize.enabled
+    && countActiveMaterialize(items, id) >= MAX_MATERIALIZE) {
+    throw quotaError(items, id);
   }
   if (next.materialize.enabled && !existing.materialize?.enabled) {
     next.materialize.status = 'queued';
     next.materialize.cursorMinute = existing.createdAt || next.createdAt;
+    Object.assign(next.materialize, initBackfillFields(existing.createdAt || next.createdAt, {}));
+    next.materialize.failCount = 0;
+    next.materialize.nextAttemptAt = null;
+    next.materialize.cancelRequested = false;
+  }
+  await upsertObservation(next);
+  return withMeta(next, items.map((row) => (row.id === id ? next : row)));
+}
+
+async function duplicateObservation(id, userId) {
+  const existing = await getObservation(id, userId);
+  if (!existing) return null;
+  if (!isObservationOwner(existing, userId) && !existing.isShared) return null;
+  const copy = normalizeObservation({
+    ...existing,
+    id: undefined,
+    name: `${existing.name} (копия)`,
+    isShared: false,
+    live: { ...(existing.live || {}), enabled: false },
+    materialize: {
+      ...(existing.materialize || {}),
+      enabled: false,
+      status: 'idle',
+      cursorMinute: null,
+      cancelRequested: false,
+      failCount: 0,
+      nextAttemptAt: null,
+      runningStartedAt: null,
+      lastError: null,
+      backfillDone: false,
+      backfillFrom: null,
+      backfillCursor: null,
+    },
+    report: {
+      ...(existing.report || {}),
+      enabled: false,
+    },
+    createdAt: undefined,
+    updatedAt: undefined,
+  }, { userId });
+  await upsertObservation(copy);
+  return withMeta(copy);
+}
+
+async function cancelMaterialize(id, userId) {
+  const items = await loadAllObservations();
+  const existing = items.find((row) => row.id === id);
+  if (!existing) return null;
+  if (!isObservationOwner(existing, userId)) return null;
+  const next = {
+    ...existing,
+    materialize: {
+      ...(existing.materialize || {}),
+      cancelRequested: true,
+    },
+    updatedAt: new Date().toISOString(),
+  };
+  // If not currently running, stop immediately.
+  if (existing.materialize?.status !== 'running') {
+    next.materialize.status = 'idle';
+    next.materialize.cancelRequested = false;
+    next.materialize.enabled = false;
+    next.live = { ...(existing.live || {}), enabled: false };
   }
   await upsertObservation(next);
   return withMeta(next, items.map((row) => (row.id === id ? next : row)));
 }
 
 async function deleteObservation(id, userId) {
-  const item = await loadObservationById(id);
-  if (!item || item.ownerId !== userId) return false;
+  const item = await getObservation(id, userId);
+  if (!item || !isObservationOwner(item, userId)) return false;
   await softDeleteObservation(item);
   // best-effort rollup cleanup (needs write privileges)
   executeCommand(`
@@ -318,17 +522,17 @@ async function queueMaterialize(id, userId) {
   const items = await loadAllObservations();
   const existing = items.find((row) => row.id === id);
   if (!existing) return null;
-  if (existing.ownerId !== userId) return null;
+  if (!isObservationOwner(existing, userId)) return null;
   const scope = classifyScope(existing.filters, existing.widgets);
   if (!scope.materializeRequired) {
     const err = new Error('Для этого scope materialize не нужен (native агрегаты).');
     err.status = 400;
     throw err;
   }
-  if (countActiveMaterialize(items, id) >= MAX_MATERIALIZE && !existing.materialize?.enabled) {
-    const err = new Error(`Достигнут лимит материализаций (${MAX_MATERIALIZE}).`);
-    err.status = 400;
-    throw err;
+  if (MATERIALIZE_LIMIT_ENABLED
+    && countActiveMaterialize(items, id) >= MAX_MATERIALIZE
+    && !existing.materialize?.enabled) {
+    throw quotaError(items, id);
   }
   const refreshSec = Math.max(
     MIN_REFRESH_SEC,
@@ -380,22 +584,8 @@ function resolvePreviewWindow(obs, body = {}) {
 }
 
 function reportWindow(obs, now = new Date()) {
-  const period = obs.report?.period || 'yesterday';
-  if (period === 'last_24h') {
-    return {
-      range: 'custom',
-      from: new Date(now.getTime() - 86400 * 1000).toISOString(),
-      to: now.toISOString(),
-      period,
-    };
-  }
-  const y = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
-  return {
-    range: 'custom',
-    from: new Date(y.getTime() - 86400 * 1000).toISOString(),
-    to: y.toISOString(),
-    period: 'yesterday',
-  };
+  const schedule = obs.report?.schedule || normalizeSchedule(obs.report || {}, obs.report || {});
+  return reportWindowForPeriod(obs.report?.period || 'yesterday', schedule, now);
 }
 
 function observationChartGroupBy(obs, timeseriesWidget) {
@@ -886,19 +1076,53 @@ async function runObservationReport(id, userId) {
     ? (tables.some((t) => t.rows > 0) ? 'partial' : 'error')
     : 'ok';
 
+  const periodLabel = window.label || `${window.from} — ${window.to}`;
   const html = `<!doctype html><html lang="ru"><head><meta charset="utf-8"><title>${escapeHtml(obs.name)}</title>
 <style>body{font-family:system-ui,sans-serif;margin:24px;color:#111}table{border-collapse:collapse;width:100%;margin:16px 0}td,th{border:1px solid #ddd;padding:6px 8px;font-size:13px}th{background:#f5f5f5;text-align:left}</style>
 </head><body>
 <h1>${escapeHtml(obs.name)}</h1>
-<p>Период (${escapeHtml(period)}): ${escapeHtml(window.from)} — ${escapeHtml(window.to)}</p>
+<p>Период (${escapeHtml(period)}): ${escapeHtml(periodLabel)}</p>
+<p>Окно UTC: ${escapeHtml(window.from)} — ${escapeHtml(window.to)}</p>
 <p>Фильтры: ${escapeHtml(JSON.stringify(obs.filters))}</p>
 ${previewError ? `<p style="color:#a00">Preview error: ${escapeHtml(previewError)}</p>` : ''}
 ${htmlTables}
-<p style="color:#666">Email-отправка будет добавлена позже. Сформировано ${escapeHtml(startedAt)}.</p>
+<p style="color:#666">Сформировано ${escapeHtml(startedAt)}.</p>
 </body></html>`;
-  fs.writeFileSync(path.join(dir, 'report.html'), html);
+  const htmlPath = path.join(dir, 'report.html');
+  fs.writeFileSync(htmlPath, html);
 
   const finishedAt = new Date().toISOString();
+  let emailStatus = 'skipped';
+  let emailTo = '';
+  let emailError = '';
+  const recipients = Array.isArray(obs.report?.emailTo) ? obs.report.emailTo : [];
+  if (recipients.length && (status === 'ok' || status === 'partial')) {
+    try {
+      const smtp = await getSmtpSettings();
+      if (!smtp.enabled) {
+        emailStatus = 'skipped';
+        emailError = 'SMTP не настроен';
+      } else {
+        const attachments = tables.map((t) => ({
+          filename: t.file,
+          path: path.join(dir, t.file),
+        }));
+        await sendSmtpMail({
+          to: recipients,
+          subject: `GrapesNTA: ${obs.name} — ${periodLabel}`,
+          html,
+          attachments,
+        });
+        emailStatus = 'sent';
+        emailTo = recipients.join(', ');
+      }
+    } catch (err) {
+      emailStatus = 'error';
+      emailTo = recipients.join(', ');
+      emailError = err.message || String(err);
+    }
+  }
+
   const run = {
     id: runId,
     observationId: id,
@@ -911,6 +1135,9 @@ ${htmlTables}
     tables,
     previewWidgetCount: preview?.widgets?.length || 0,
     error: previewError || (widgetErrors[0]?.error || null),
+    emailStatus,
+    emailTo,
+    emailError,
   };
   await insertRun(run);
   fs.writeFileSync(path.join(dir, 'manifest.json'), JSON.stringify(run, null, 2));
@@ -934,7 +1161,14 @@ async function getRunArtifact(observationId, runId, userId, fileName) {
     err.status = 400;
     throw err;
   }
-  if (!fs.existsSync(full)) return null;
+  if (!fs.existsSync(full)) {
+    const err = new Error(
+      'Артефакт недоступен: UI и analytics не делят каталог данных (server/data)',
+    );
+    err.status = 404;
+    err.code = 'artifact_missing';
+    throw err;
+  }
   return { path: full, fileName: safe, contentType: safe.endsWith('.html') ? 'text/html; charset=utf-8' : 'text/csv; charset=utf-8' };
 }
 
@@ -942,32 +1176,34 @@ async function listReportJobs() {
   const all = await loadAllObservations();
   return all
     .filter((o) => o.report?.enabled)
-    .map((o) => ({
-      id: o.id,
-      ownerId: o.ownerId,
-      name: o.name,
-      cron: o.report.cron || '0 8 * * *',
-      timezone: o.report.timezone || 'Europe/Moscow',
-      period: o.report.period || 'yesterday',
-    }));
+    .map((o) => {
+      const schedule = o.report?.schedule || normalizeSchedule(o.report || {}, o.report || {});
+      return {
+        id: o.id,
+        ownerId: o.ownerId,
+        name: o.name,
+        schedule,
+        period: o.report.period || 'yesterday',
+      };
+    });
 }
 
 async function lastSuccessfulRunAt(observationId) {
   return storeLastSuccessfulRunAt(observationId);
 }
 
-/** MVP: due if no successful run in the last 20h (daily timer expected). */
-async function isReportDue(observationId, now = Date.now()) {
-  const last = await lastSuccessfulRunAt(observationId);
-  if (!last) return true;
-  return (now - Date.parse(last)) >= 20 * 3600 * 1000;
+async function isReportDue(job, now = new Date()) {
+  const last = await lastSuccessfulRunAt(job.id);
+  const schedule = job.schedule || normalizeSchedule({}, {});
+  return isScheduleDue(schedule, last, now, { graceHours: 6 });
 }
 
 async function runDueObservationReports() {
   const jobs = await listReportJobs();
   const results = [];
+  const now = new Date();
   for (const job of jobs) {
-    if (!(await isReportDue(job.id))) continue;
+    if (!(await isReportDue(job, now))) continue;
     try {
       const run = await runObservationReport(job.id, job.ownerId);
       results.push({ id: job.id, name: job.name, ok: true, runId: run?.id });
@@ -994,18 +1230,25 @@ async function listMaterializeJobs() {
       const ts = (o.widgets || []).find((w) => w.type === 'timeseries_bps');
       const top = (o.widgets || []).find((w) => w.type === 'top_table' && w.groupBy?.length);
       const groupBy = observationChartGroupBy(o, ts).slice(0, 2);
+      const mat = o.materialize || {};
       return {
         id: o.id,
         name: o.name,
-        status: o.materialize.status,
+        status: mat.status,
         intervalSec: Math.max(
           MIN_REFRESH_SEC,
-          Number(o.live?.refreshSec) || Number(o.materialize.intervalSec) || MIN_REFRESH_SEC,
+          Number(o.live?.refreshSec) || Number(mat.intervalSec) || MIN_REFRESH_SEC,
         ),
-        cursorMinute: o.materialize.cursorMinute,
-        lastCatchupAt: o.materialize.lastCatchupAt || null,
-        // Rollup starts at observation creation — no historical backfill before that.
+        cursorMinute: mat.cursorMinute,
+        lastCatchupAt: mat.lastCatchupAt || null,
         startedAt: o.createdAt || o.updatedAt || null,
+        failCount: Number(mat.failCount) || 0,
+        nextAttemptAt: mat.nextAttemptAt || null,
+        cancelRequested: Boolean(mat.cancelRequested),
+        runningStartedAt: mat.runningStartedAt || null,
+        backfillFrom: mat.backfillFrom || null,
+        backfillCursor: mat.backfillCursor || null,
+        backfillDone: Boolean(mat.backfillDone),
         filters: o.filters,
         groupBy,
         seriesLimit: Math.min(
@@ -1084,8 +1327,10 @@ function observationPresets() {
 
 function observationsConfig() {
   return {
-    maxMaterialize: MAX_MATERIALIZE,
+    maxMaterialize: MATERIALIZE_LIMIT_ENABLED ? MAX_MATERIALIZE : null,
     minIntervalSec: MIN_INTERVAL_SEC,
+    backfillHours: BACKFILL_HOURS,
+    stuckSec: STUCK_SEC,
     lookbacks: [...LOOKBACKS],
     refreshSecs: [...REFRESH_SECS],
     widgetTypes: [...WIDGET_TYPES],
@@ -1093,6 +1338,23 @@ function observationsConfig() {
     presets: observationPresets(),
     schema: explorerSchema(),
   };
+}
+
+function backfillProgress(mat) {
+  if (!mat?.enabled || !mat.backfillFrom || mat.backfillDone) {
+    return mat?.backfillDone ? { done: true, hoursDone: BACKFILL_HOURS, hoursTotal: BACKFILL_HOURS } : null;
+  }
+  const fromMs = Date.parse(mat.backfillFrom);
+  const cursorMs = Date.parse(mat.backfillCursor || mat.backfillFrom);
+  const createdBound = Date.parse(mat.cursorMinute || '') || Date.now();
+  // Live cursor starts at createdAt; backfill fills [backfillFrom, createdAt).
+  const totalMs = Math.max(1, (Number.isFinite(createdBound) ? createdBound : Date.now()) - fromMs);
+  // Approximation: progress by how far backfillCursor advanced from backfillFrom toward createdAt
+  // When backfill runs, backfillCursor moves forward from backfillFrom.
+  const doneMs = Math.max(0, (Number.isFinite(cursorMs) ? cursorMs : fromMs) - fromMs);
+  const hoursTotal = Math.max(1, Math.round(totalMs / 3600000));
+  const hoursDone = Math.min(hoursTotal, Math.round(doneMs / 3600000));
+  return { done: false, hoursDone, hoursTotal };
 }
 
 async function getObservationAnalyticsDiagnostics() {
@@ -1158,6 +1420,8 @@ module.exports = {
   createObservation,
   updateObservation,
   deleteObservation,
+  duplicateObservation,
+  cancelMaterialize,
   queueMaterialize,
   previewObservation,
   runObservationReport,
@@ -1175,4 +1439,7 @@ module.exports = {
   ROLLUP_TABLE,
   ROLLUP_BUCKET_SEC,
   ARTIFACTS_DIR,
+  BACKFILL_HOURS,
+  STUCK_SEC,
+  MAX_FAIL_COUNT,
 };

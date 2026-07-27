@@ -74,10 +74,12 @@
 60_traffic/16_traffic_vlan_1m.sql
 60_traffic/21_traffic_rollup_backfill_queue.sql
 70_observations/01_observations.sql
-70_observations/02_observation_rollups_1m.sql
 70_observations/03_observation_rollups_5m.sql
 70_observations/04_observation_runs.sql
 70_observations/05_analytics_worker_status.sql
+70_observations/06_observation_runs_email.sql
+70_observations/07_app_smtp_settings.sql
+70_observations/08_app_smtp_settings_current.sql
 80_rbac/01_roles.sql
 80_rbac/02_users.sql
 80_rbac/03_role_permissions.sql

@@ -7,12 +7,14 @@
     "setup": "node scripts/setup-project.js",
     "dev": "node server/index.js",
     "dev:static": "npx serve public -p 3000",
-    "start": "npm run dev"
+    "start": "npm run dev",
+    "test": "node --test server/*.test.js"
   },
   "dependencies": {
     "@clickhouse/client": "^1.11.2",
     "bcryptjs": "^3.0.3",
     "dotenv": "^16.5.0",
-    "express": "^4.21.2"
+    "express": "^4.21.2",
+    "nodemailer": "^6.10.1"
   }
 }

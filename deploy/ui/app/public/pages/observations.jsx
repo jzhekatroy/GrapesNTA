@@ -12,6 +12,33 @@ const LOOKBACK_LABELS = {
 
 const LOOKBACK_OPTIONS = Object.keys(LOOKBACK_LABELS);
 
+const OBSERVATION_LOOKBACK_MS = {
+  '15m': 15 * 60 * 1000,
+  '1h': 3600 * 1000,
+  '6h': 6 * 3600 * 1000,
+  '24h': 86400 * 1000,
+  '7d': 7 * 86400 * 1000,
+};
+
+function observationChartPeriodBounds({ customRange, lookback, window, displayTimezone }) {
+  const tz = displayTimezone || (typeof getDisplayTimezone === 'function' ? getDisplayTimezone() : undefined);
+  const range = window?.from && window?.to
+    ? window
+    : customRange?.from && customRange?.to
+      ? customRange
+      : null;
+  if (range?.from && range?.to) {
+    const startMs = wallPartsToMs(parseBucketWallParts(String(range.from).replace('T', ' ')), tz);
+    const endMs = wallPartsToMs(parseBucketWallParts(String(range.to).replace('T', ' ')), tz);
+    if (startMs != null && endMs != null && endMs > startMs) {
+      return { periodStartMs: startMs, periodEndMs: endMs };
+    }
+  }
+  const ms = OBSERVATION_LOOKBACK_MS[lookback] || OBSERVATION_LOOKBACK_MS['1h'];
+  const endMs = Date.now();
+  return { periodStartMs: endMs - ms, periodEndMs: endMs };
+}
+
 const MIN_REFRESH_SEC = 300;
 
 const REFRESH_LABELS = {
@@ -115,15 +142,55 @@ function formatFilterSummary(filters, filterFields) {
   }).join(' · ') + (filters.length > 3 ? ' …' : '');
 }
 
+function formatDataThrough(item) {
+  const iso = item.materialize?.dataThrough || item.materialize?.cursorMinute;
+  if (!iso) return null;
+  try {
+    const d = new Date(iso);
+    if (!Number.isFinite(d.getTime())) return null;
+    return d.toLocaleString('ru-RU', {
+      timeZone: typeof getDisplayTimezone === 'function' ? getDisplayTimezone() : undefined,
+      day: '2-digit',
+      month: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+    });
+  } catch {
+    return null;
+  }
+}
+
 function rollupStatusLabel(item) {
-  if (!item.scope?.materializeRequired) return null;
-  if (!item.materialize?.enabled) return 'нужна подготовка';
+  const through = formatDataThrough(item);
+  const throughPart = through ? `данные по ${through}` : null;
+  if (!item.scope?.materializeRequired) return throughPart;
+  if (!item.materialize?.enabled) {
+    return throughPart ? `${throughPart} · нужна подготовка` : 'нужна подготовка';
+  }
   const st = item.materialize.status;
-  if (st === 'ok') return null;
-  if (st === 'lagging') return `отставание ${item.materialize.lagSeconds || '?'}с`;
-  if (st === 'queued' || st === 'running') return 'готовим данные…';
-  if (st === 'error') return 'ошибка подготовки';
-  return st;
+  const bf = item.backfillProgress;
+  const bfPart = bf && !bf.done ? `история: ${bf.hoursDone} из ${bf.hoursTotal} ч` : null;
+  const parts = [throughPart];
+  if (st === 'lagging') parts.push(`отставание ${item.materialize.lagSeconds || '?'}с`);
+  else if (st === 'queued' || st === 'running') parts.push('готовим данные…');
+  else if (st === 'error') parts.push(item.materialize.lastError ? `ошибка: ${item.materialize.lastError}` : 'ошибка подготовки');
+  if (bfPart) parts.push(bfPart);
+  return parts.filter(Boolean).join(' · ') || null;
+}
+
+function downloadTextFile(filename, text, mime = 'text/csv;charset=utf-8') {
+  const blob = new Blob([text], { type: mime });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+function csvEscapeCell(v) {
+  const s = String(v ?? '');
+  return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
 }
 
 function tileRefreshSec(item) {
@@ -189,6 +256,8 @@ function ObservationChart({
   onRangeSelect,
   displayTimezone,
   bucketSeconds = 300,
+  periodStartMs,
+  periodEndMs,
 }) {
   if (!points?.length) {
     return (
@@ -225,6 +294,8 @@ function ObservationChart({
         onRangeSelect={onRangeSelect}
         bucketSeconds={bucketSeconds}
         displayTimezone={displayTimezone}
+        periodStartMs={periodStartMs}
+        periodEndMs={periodEndMs}
         tipUnitLabel="бит/с"
       />
     );
@@ -247,6 +318,8 @@ function ObservationChart({
         onRangeSelect={onRangeSelect}
         bucketSeconds={bucketSeconds}
         displayTimezone={displayTimezone}
+        periodStartMs={periodStartMs}
+        periodEndMs={periodEndMs}
       />
     );
   }
@@ -343,10 +416,14 @@ function ObservationLiveTile({
   canWrite,
   onSettings,
   onDelete,
+  onDuplicate,
+  onCancel,
   onRunReport,
   onLookbackChange,
 }) {
   const [preview, setPreview] = useState(null);
+  const [comparePreview, setComparePreview] = useState(null);
+  const [compareOn, setCompareOn] = useState(false);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -354,6 +431,9 @@ function ObservationLiveTile({
   const [lookback, setLookback] = useState(item.lookback || '1h');
   const [customRange, setCustomRange] = useState(null);
   const [zoomStack, setZoomStack] = useState([]);
+  const [runs, setRuns] = useState([]);
+  const [runsError, setRunsError] = useState('');
+  const [expandedTab, setExpandedTab] = useState('top'); // top | reports
   const customRangeRef = useRef(null);
   const displayTimezone = typeof getDisplayTimezone === 'function' ? getDisplayTimezone() : undefined;
 
@@ -372,6 +452,16 @@ function ObservationLiveTile({
       ? { from: customRange.from, to: customRange.to }
       : { lookback: lookback || '1h' }
   ), [customRange?.from, customRange?.to, lookback]);
+
+  const chartPeriodBounds = useMemo(
+    () => observationChartPeriodBounds({
+      window: preview?.window,
+      customRange,
+      lookback,
+      displayTimezone,
+    }),
+    [preview?.window?.from, preview?.window?.to, customRange?.from, customRange?.to, lookback, displayTimezone],
+  );
 
   useEffect(() => {
     let cancelled = false;
@@ -403,12 +493,88 @@ function ObservationLiveTile({
     };
   }, [item.id, previewPayload, item.live?.enabled, item.live?.refreshSec]);
 
+  useEffect(() => {
+    if (!expanded) return undefined;
+    let cancelled = false;
+    ApiClient.loadObservationRuns(item.id)
+      .then((rows) => {
+        if (!cancelled) {
+          setRuns(Array.isArray(rows) ? rows.slice(0, 20) : []);
+          setRunsError('');
+        }
+      })
+      .catch((e) => {
+        if (!cancelled) setRunsError(e.message || 'Не удалось загрузить отчёты');
+      });
+    return () => { cancelled = true; };
+  }, [expanded, item.id, updatedAt]);
+
+  useEffect(() => {
+    if (!compareOn) {
+      setComparePreview(null);
+      return undefined;
+    }
+    let cancelled = false;
+    const ms = OBSERVATION_LOOKBACK_MS[lookback] || OBSERVATION_LOOKBACK_MS['1h'];
+    const shift = lookback === '7d' || lookback === '24h' ? 7 * 86400 * 1000 : ms;
+    let from;
+    let to;
+    if (customRange?.from && customRange?.to) {
+      const a = Date.parse(customRange.from);
+      const b = Date.parse(customRange.to);
+      if (Number.isFinite(a) && Number.isFinite(b)) {
+        from = new Date(a - shift).toISOString();
+        to = new Date(b - shift).toISOString();
+      }
+    } else {
+      to = new Date(Date.now() - shift).toISOString();
+      from = new Date(Date.now() - shift - ms).toISOString();
+    }
+    if (!from || !to) return undefined;
+    ApiClient.previewObservation(item.id, { from, to })
+      .then((body) => {
+        if (!cancelled) setComparePreview(body.data || body);
+      })
+      .catch(() => {
+        if (!cancelled) setComparePreview(null);
+      });
+    return () => { cancelled = true; };
+  }, [compareOn, item.id, lookback, customRange?.from, customRange?.to]);
+
   const changeLookback = (next) => {
     if (!next || next === lookback) return;
     setCustomRange(null);
     setZoomStack([]);
     setLookback(next);
     if (typeof onLookbackChange === 'function') onLookbackChange(item.id, next);
+  };
+
+  const exportCsv = () => {
+    const chartW = (preview?.widgets || []).find((w) => w.type === 'timeseries_bps');
+    const topW = (preview?.widgets || []).find((w) => w.type === 'top_table');
+    const pts = chartW?.points || chartW?.series || [];
+    const linesLocal = chartW?.lines || [];
+    const mode = chartW?.mode === 'grouped' ? 'grouped' : 'total';
+    const headers = mode === 'grouped' && linesLocal.length
+      ? ['t', ...linesLocal.map((ln) => ln.key || ln.label || 'series')]
+      : ['t', 'bps'];
+    const rows = pts.map((p) => {
+      if (mode === 'grouped' && linesLocal.length) {
+        return [p.t, ...linesLocal.map((ln) => p[ln.key] ?? '')].map(csvEscapeCell).join(',');
+      }
+      return [p.t, p.bps].map(csvEscapeCell).join(',');
+    });
+    let text = `${headers.join(',')}\n${rows.join('\n')}\n`;
+    if (Array.isArray(topW?.rows) && topW.rows.length) {
+      text += '\n# top\n';
+      const gh = [...(topW.groupBy || []), 'metric', 'pct'];
+      text += `${gh.join(',')}\n`;
+      for (const r of topW.rows) {
+        text += [...(r.values || []), r.metric, r.pct].map(csvEscapeCell).join(',');
+        text += '\n';
+      }
+    }
+    downloadTextFile(`${item.name || item.id}.csv`, text);
   };
 
   const handleChartRangeSelect = (range) => {
@@ -431,8 +597,26 @@ function ObservationLiveTile({
   const chartWidget = (preview?.widgets || []).find((w) => w.type === 'timeseries_bps');
   const topWidget = (preview?.widgets || []).find((w) => w.type === 'top_table');
   const chartMode = chartWidget?.mode === 'grouped' ? 'grouped' : 'total';
-  const points = chartWidget?.points || chartWidget?.series || [];
-  const lines = chartWidget?.lines || [];
+  const basePoints = chartWidget?.points || chartWidget?.series || [];
+  const baseLines = chartWidget?.lines || [];
+  const compareWidget = (comparePreview?.widgets || []).find((w) => w.type === 'timeseries_bps');
+  const compareSeries = compareWidget?.points || compareWidget?.series || [];
+  const points = useMemo(() => {
+    if (!compareOn || !compareSeries.length || !basePoints.length) return basePoints;
+    const byIdx = compareSeries;
+    return basePoints.map((p, i) => {
+      const prev = byIdx[i] || byIdx[byIdx.length - 1] || {};
+      return { ...p, bps_prev: Number(prev.bps) || 0 };
+    });
+  }, [basePoints, compareSeries, compareOn]);
+  const lines = useMemo(() => {
+    if (!compareOn || chartMode === 'grouped') return baseLines;
+    if (!basePoints.length) return baseLines;
+    return [
+      { key: 'bps', label: 'сейчас', color: 'var(--accent, #3b82f6)' },
+      { key: 'bps_prev', label: 'прошлый период', color: 'var(--fg-muted, #888)' },
+    ];
+  }, [baseLines, compareOn, chartMode, basePoints.length]);
   const lastBps = (() => {
     if (!points.length) return null;
     const last = points[points.length - 1];
@@ -447,12 +631,13 @@ function ObservationLiveTile({
   const chartH = expanded ? 320 : 200;
   const periodLabel = observationPeriodLabel(lookback, customRange);
   const canResetZoom = Boolean(customRange || zoomStack.length);
+  const tileWidth = Number(item.layout?.width) === 2 ? 2 : 1;
 
   return (
     <Card
       pad="sm"
       style={{
-        gridColumn: expanded ? '1 / -1' : 'auto',
+        gridColumn: expanded || tileWidth === 2 ? '1 / -1' : 'auto',
         display: 'flex',
         flexDirection: 'column',
         gap: 10,
@@ -461,11 +646,24 @@ function ObservationLiveTile({
     >
       <div className="row" style={{ justifyContent: 'space-between', gap: 8, alignItems: 'flex-start', flexWrap: 'wrap' }}>
         <div style={{ flex: 1, minWidth: 160 }}>
-          <div style={{ font: 'var(--pv-text-body-2-bold)' }}>{item.name}</div>
+          <div style={{ font: 'var(--pv-text-body-2-bold)' }}>
+            {item.name}
+            {item.isShared ? (
+              <span style={{ marginLeft: 8, font: 'var(--pv-text-body-3)', color: 'var(--fg-muted)' }}>общее</span>
+            ) : null}
+          </div>
+          {item.description ? (
+            <div style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-secondary)', marginTop: 2 }}>
+              {item.description}
+            </div>
+          ) : null}
           <div style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-secondary)', marginTop: 2 }}>
             {formatFilterSummary(item.filters, filterFields)}
           </div>
-          <div style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-muted)', marginTop: 2 }}>
+          <div
+            style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-muted)', marginTop: 2 }}
+            title="Нормальная задержка ~10 минут: бакет 5 минут + запас на late flows"
+          >
             график: топ по {topLabel}
             {' · '}
             таблица: топ {topLabel}
@@ -489,6 +687,12 @@ function ObservationLiveTile({
             {expanded ? 'Свернуть' : `Топ · ${topLabel}`}
           </button>
           {canWrite && <button type="button" className="btn" onClick={onSettings}>Настройки</button>}
+          {canWrite && onDuplicate && (
+            <button type="button" className="btn" onClick={onDuplicate}>Дублировать</button>
+          )}
+          {canWrite && item.materialize?.status === 'running' && onCancel && (
+            <button type="button" className="btn" onClick={onCancel}>Отменить</button>
+          )}
           {canWrite && (
             <button type="button" className="btn" onClick={onDelete}>Удалить</button>
           )}
@@ -498,6 +702,9 @@ function ObservationLiveTile({
       {error && (
         <div style={{ color: 'crimson', font: 'var(--pv-text-body-3)' }}>{error}</div>
       )}
+      {(item.warnings || []).map((w) => (
+        <div key={w} style={{ color: 'var(--fg-warning, #b78103)', font: 'var(--pv-text-body-3)' }}>{w}</div>
+      ))}
       {chartWidget?.warning && (
         <div style={{ color: 'var(--fg-warning, #b78103)', font: 'var(--pv-text-body-3)' }}>
           {chartWidget.warning}
@@ -527,6 +734,11 @@ function ObservationLiveTile({
               <span>Сброс zoom</span>
             </button>
           )}
+          <label className="row" style={{ gap: 4, alignItems: 'center', font: 'var(--pv-text-body-3)' }}>
+            <input type="checkbox" checked={compareOn} onChange={(e) => setCompareOn(e.target.checked)} />
+            сравнить
+          </label>
+          <button type="button" className="btn" onClick={exportCsv} disabled={!points.length}>CSV</button>
           <LookbackPicker
             value={lookback}
             options={lookbackOptions}
@@ -539,11 +751,13 @@ function ObservationLiveTile({
         <ObservationChart
           points={points}
           lines={lines}
-          mode={chartMode}
+          mode={compareOn && chartMode !== 'grouped' ? 'grouped' : chartMode}
           height={chartH}
           onRangeSelect={points.length > 1 ? handleChartRangeSelect : undefined}
           displayTimezone={displayTimezone}
           bucketSeconds={300}
+          periodStartMs={chartPeriodBounds.periodStartMs}
+          periodEndMs={chartPeriodBounds.periodEndMs}
         />
       </div>
       {!!points.length && (
@@ -560,69 +774,136 @@ function ObservationLiveTile({
               ? `${lines.length} серий · ${points.length} точек · ${periodLabel}${customRange ? ' · zoom' : ''}`
               : `${points.length} точек · ${periodLabel}${customRange ? ' · zoom' : ''}`}
           {updatedAt ? ` · ${updatedAt.toLocaleTimeString('ru-RU')}` : ''}
+          {compareOn ? ' · + прошлый период' : ''}
         </span>
         <span>бит/с</span>
       </div>
 
       {expanded && (
         <div style={{ marginTop: 4, borderTop: '1px solid var(--bd-soft)', paddingTop: 12 }}>
-          <div className="row" style={{ justifyContent: 'space-between', marginBottom: 8, flexWrap: 'wrap', gap: 8, alignItems: 'center' }}>
-            <div style={{ font: 'var(--pv-text-body-2-bold)' }}>
-              Разбивка: топ по {topLabel} (бит/с за {periodLabel})
-            </div>
-            <div className="row" style={{ gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
-              {canResetZoom && (
-                <button
-                  type="button"
-                  className="time-pill time-pill--reset"
-                  title="Вернуть предыдущий период"
-                  onClick={resetTileZoom}
-                >
-                  <Icon name="zoom" size={14} />
-                  <span>Сброс zoom</span>
-                </button>
-              )}
-              <LookbackPicker
-                value={lookback}
-                options={lookbackOptions}
-                onChange={changeLookback}
-              />
-            </div>
-            {canWrite && item.report?.enabled && (
-              <button type="button" className="btn" onClick={onRunReport}>Сформировать отчёт</button>
-            )}
+          <div className="seg" style={{ width: 'fit-content', marginBottom: 10 }}>
+            <button type="button" className={expandedTab === 'top' ? 'is-active' : ''} onClick={() => setExpandedTab('top')}>
+              Топ
+            </button>
+            <button type="button" className={expandedTab === 'reports' ? 'is-active' : ''} onClick={() => setExpandedTab('reports')}>
+              Отчёты
+            </button>
           </div>
-          {Array.isArray(topWidget?.rows) && topWidget.rows.length > 0 ? (
-            <table style={{ width: '100%', borderCollapse: 'collapse', font: 'var(--pv-text-body-3)' }}>
-              <thead>
-                <tr>
-                  {(topWidget.groupBy || []).map((g) => (
-                    <th key={g} style={{ textAlign: 'left', padding: 4 }}>
-                      {groupOptions.find((o) => o.id === g)?.label || g}
-                    </th>
-                  ))}
-                  <th style={{ textAlign: 'right', padding: 4 }}>бит/с</th>
-                  <th style={{ textAlign: 'right', padding: 4 }}>%</th>
-                </tr>
-              </thead>
-              <tbody>
-                {topWidget.rows.slice(0, expanded ? 25 : 10).map((r) => (
-                  <tr key={r.id || r.key}>
-                    {(r.values || []).map((v, i) => (
-                      <td key={i} style={{ padding: 4 }} className="mono">{v}</td>
+
+          {expandedTab === 'top' && (
+            <>
+              <div className="row" style={{ justifyContent: 'space-between', marginBottom: 8, flexWrap: 'wrap', gap: 8, alignItems: 'center' }}>
+                <div style={{ font: 'var(--pv-text-body-2-bold)' }}>
+                  Разбивка: топ по {topLabel} (бит/с за {periodLabel})
+                </div>
+                <div className="row" style={{ gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+                  {canWrite && (
+                    <button
+                      type="button"
+                      className="btn"
+                      onClick={() => onRunReport?.()?.then?.(() => setUpdatedAt(new Date()))
+                        || Promise.resolve().then(() => { onRunReport?.(); setUpdatedAt(new Date()); })}
+                    >
+                      Сформировать отчёт
+                    </button>
+                  )}
+                </div>
+              </div>
+              {Array.isArray(topWidget?.rows) && topWidget.rows.length > 0 ? (
+                <table style={{ width: '100%', borderCollapse: 'collapse', font: 'var(--pv-text-body-3)' }}>
+                  <thead>
+                    <tr>
+                      {(topWidget.groupBy || []).map((g) => (
+                        <th key={g} style={{ textAlign: 'left', padding: 4 }}>
+                          {groupOptions.find((o) => o.id === g)?.label || g}
+                        </th>
+                      ))}
+                      <th style={{ textAlign: 'right', padding: 4 }}>бит/с</th>
+                      <th style={{ textAlign: 'right', padding: 4 }}>%</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {topWidget.rows.slice(0, 25).map((r) => (
+                      <tr key={r.id || r.key}>
+                        {(r.values || []).map((v, i) => (
+                          <td key={i} style={{ padding: 4 }} className="mono">{v}</td>
+                        ))}
+                        <td style={{ padding: 4, textAlign: 'right' }} className="mono">{formatBps(r.metric)}</td>
+                        <td style={{ padding: 4, textAlign: 'right' }} className="mono">
+                          {r.pct != null && Number.isFinite(Number(r.pct))
+                            ? `${Number(r.pct).toFixed(1)}%`
+                            : '—'}
+                        </td>
+                      </tr>
                     ))}
-                    <td style={{ padding: 4, textAlign: 'right' }} className="mono">{formatBps(r.metric)}</td>
-                    <td style={{ padding: 4, textAlign: 'right' }} className="mono">
-                      {r.pct != null && Number.isFinite(Number(r.pct))
-                        ? `${Number(r.pct).toFixed(1)}%`
-                        : '—'}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          ) : (
-            <div style={{ color: 'var(--fg-secondary)', font: 'var(--pv-text-body-3)' }}>Нет строк топа</div>
+                  </tbody>
+                </table>
+              ) : (
+                <div style={{ color: 'var(--fg-secondary)', font: 'var(--pv-text-body-3)' }}>Нет строк топа</div>
+              )}
+            </>
+          )}
+
+          {expandedTab === 'reports' && (
+            <div className="col" style={{ gap: 8 }}>
+              <div className="row" style={{ justifyContent: 'space-between', gap: 8, flexWrap: 'wrap' }}>
+                <div style={{ font: 'var(--pv-text-body-2-bold)' }}>История запусков</div>
+                {canWrite && (
+                  <button
+                    type="button"
+                    className="btn"
+                    onClick={() => {
+                      Promise.resolve(onRunReport?.())
+                        .then(() => setUpdatedAt(new Date()))
+                        .catch((e) => setRunsError(e.message));
+                    }}
+                  >
+                    Сформировать отчёт
+                  </button>
+                )}
+              </div>
+              {runsError && <div style={{ color: 'crimson', font: 'var(--pv-text-body-3)' }}>{runsError}</div>}
+              {!runs.length && !runsError && (
+                <div style={{ color: 'var(--fg-secondary)', font: 'var(--pv-text-body-3)' }}>Пока нет запусков</div>
+              )}
+              {!!runs.length && (
+                <table style={{ width: '100%', borderCollapse: 'collapse', font: 'var(--pv-text-body-3)' }}>
+                  <thead>
+                    <tr>
+                      <th style={{ textAlign: 'left', padding: 4 }}>Когда</th>
+                      <th style={{ textAlign: 'left', padding: 4 }}>Период</th>
+                      <th style={{ textAlign: 'left', padding: 4 }}>Статус</th>
+                      <th style={{ textAlign: 'left', padding: 4 }}>Письмо</th>
+                      <th style={{ textAlign: 'left', padding: 4 }}>Файлы</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {runs.map((run) => (
+                      <tr key={run.id}>
+                        <td style={{ padding: 4 }}>{fmtDiagTime(run.finishedAt || run.startedAt)}</td>
+                        <td style={{ padding: 4 }}>{run.period || '—'}</td>
+                        <td style={{ padding: 4 }}>{run.status || '—'}</td>
+                        <td style={{ padding: 4 }}>
+                          {run.emailStatus || '—'}
+                          {run.emailError ? ` (${run.emailError})` : ''}
+                        </td>
+                        <td style={{ padding: 4 }}>
+                          <a href={ApiClient.observationRunArtifactUrl(item.id, run.id, 'report.html')} target="_blank" rel="noreferrer">HTML</a>
+                          {(run.tables || []).slice(0, 3).map((t) => (
+                            <span key={t.file}>
+                              {' · '}
+                              <a href={ApiClient.observationRunArtifactUrl(item.id, run.id, t.file)} target="_blank" rel="noreferrer">
+                                {t.file}
+                              </a>
+                            </span>
+                          ))}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </div>
           )}
         </div>
       )}
@@ -861,12 +1142,146 @@ function ObservationDiagnosticsPanel() {
           </tbody>
         </table>
       </Card>
+
+      <ObservationSmtpPanel />
     </div>
   );
 }
 
+function ObservationSmtpPanel() {
+  const [smtp, setSmtp] = useState(null);
+  const [error, setError] = useState('');
+  const [forbidden, setForbidden] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [testTo, setTestTo] = useState('');
+
+  useEffect(() => {
+    ApiClient.loadSmtpSettings()
+      .then((data) => {
+        setSmtp(data);
+        setForbidden(false);
+        setError('');
+      })
+      .catch((e) => {
+        if (e.status === 403) setForbidden(true);
+        setError(e.message);
+      });
+  }, []);
+
+  if (forbidden) {
+    return (
+      <Card title="SMTP (отчёты)">
+        <div style={{ color: 'var(--fg-secondary)', font: 'var(--pv-text-body-3)' }}>
+          Настройки почты доступны только администратору.
+        </div>
+      </Card>
+    );
+  }
+
+  if (!smtp) {
+    return (
+      <Card title="SMTP (отчёты)">
+        <div style={{ color: 'var(--fg-secondary)' }}>{error || 'загрузка…'}</div>
+      </Card>
+    );
+  }
+
+  const save = async () => {
+    setBusy(true);
+    setError('');
+    try {
+      const res = await ApiClient.saveSmtpSettings(smtp);
+      setSmtp(res.data || smtp);
+      pushToast?.({ kind: 'success', title: 'SMTP сохранён' });
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const test = async () => {
+    setBusy(true);
+    setError('');
+    try {
+      await ApiClient.testSmtpSettings(testTo);
+      pushToast?.({ kind: 'success', title: 'Тестовое письмо отправлено' });
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Card title="SMTP (отчёты по наблюдениям)">
+      <div className="col" style={{ gap: 10, font: 'var(--pv-text-body-3)' }}>
+        {error && <div style={{ color: 'crimson' }}>{error}</div>}
+        <label className="row" style={{ gap: 8, alignItems: 'center' }}>
+          <input
+            type="checkbox"
+            checked={!!smtp.enabled}
+            onChange={(e) => setSmtp({ ...smtp, enabled: e.target.checked })}
+          />
+          Включить отправку
+        </label>
+        <div className="row" style={{ gap: 12, flexWrap: 'wrap' }}>
+          <label className="col" style={{ gap: 4, minWidth: 180 }}>
+            <span>Host</span>
+            <input className="input" value={smtp.host || ''} onChange={(e) => setSmtp({ ...smtp, host: e.target.value })} />
+          </label>
+          <label className="col" style={{ gap: 4, minWidth: 90 }}>
+            <span>Port</span>
+            <input className="input" type="number" value={smtp.port || 587} onChange={(e) => setSmtp({ ...smtp, port: Number(e.target.value) })} />
+          </label>
+          <label className="row" style={{ gap: 6, alignItems: 'center', marginTop: 18 }}>
+            <input type="checkbox" checked={!!smtp.secure} onChange={(e) => setSmtp({ ...smtp, secure: e.target.checked })} />
+            TLS (465)
+          </label>
+        </div>
+        <div className="row" style={{ gap: 12, flexWrap: 'wrap' }}>
+          <label className="col" style={{ gap: 4, minWidth: 160 }}>
+            <span>Username</span>
+            <input className="input" value={smtp.username || ''} onChange={(e) => setSmtp({ ...smtp, username: e.target.value })} />
+          </label>
+          <label className="col" style={{ gap: 4, minWidth: 160 }}>
+            <span>Password {smtp.passwordSet ? '(задан)' : ''}</span>
+            <input
+              className="input"
+              type="password"
+              placeholder={smtp.passwordSet ? 'оставьте пустым, чтобы не менять' : ''}
+              value={smtp.password || ''}
+              onChange={(e) => setSmtp({ ...smtp, password: e.target.value })}
+            />
+          </label>
+          <label className="col" style={{ gap: 4, minWidth: 180 }}>
+            <span>From email</span>
+            <input className="input" value={smtp.fromEmail || ''} onChange={(e) => setSmtp({ ...smtp, fromEmail: e.target.value })} />
+          </label>
+          <label className="col" style={{ gap: 4, minWidth: 140 }}>
+            <span>From name</span>
+            <input className="input" value={smtp.fromName || ''} onChange={(e) => setSmtp({ ...smtp, fromName: e.target.value })} />
+          </label>
+        </div>
+        <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
+          <button type="button" className="btn btn--primary" disabled={busy} onClick={save}>Сохранить SMTP</button>
+          <input
+            className="input"
+            style={{ width: 220 }}
+            placeholder="email для теста"
+            value={testTo}
+            onChange={(e) => setTestTo(e.target.value)}
+          />
+          <button type="button" className="btn" disabled={busy || !testTo} onClick={test}>Проверить отправку</button>
+        </div>
+      </div>
+    </Card>
+  );
+}
+
 function PageObservations({ onNavigate }) {
-  const canWrite = AuthAccess.canWritePage('observations') || AuthAccess.canWritePage('explorer');
+  const canWriteObservations = AuthAccess.canWritePage('observations');
+  const canWrite = canWriteObservations || AuthAccess.canWritePage('explorer');
   const [config, setConfig] = useState(null);
   const [items, setItems] = useState([]);
   const [expandedId, setExpandedId] = useState(null);
@@ -929,24 +1344,44 @@ function PageObservations({ onNavigate }) {
     setSettingsItemId(item.id);
     setSettings({
       name: item.name,
+      description: item.description || '',
+      folder: item.folder || 'Мои наблюдения',
+      isShared: Boolean(item.isShared),
       lookback: item.lookback,
       widgets: item.widgets,
+      layout: item.layout || { order: 0, width: 1 },
       live: { ...(item.live || { enabled: true, refreshSec: MIN_REFRESH_SEC }) },
-      report: { ...(item.report || { enabled: false, period: 'yesterday' }) },
+      report: {
+        enabled: Boolean(item.report?.enabled),
+        period: item.report?.period || 'yesterday',
+        emailTo: Array.isArray(item.report?.emailTo) ? item.report.emailTo : [],
+        schedule: {
+          kind: 'daily',
+          time: '08:00',
+          timezone: 'Europe/Moscow',
+          weekday: 1,
+          day: 1,
+          ...(item.report?.schedule || {}),
+        },
+      },
       filters: item.filters,
     });
     setError('');
   };
 
   const saveSettings = async () => {
-    if (!canWrite || !settingsItemId || !settings) return;
+    if (!canWriteObservations || !settingsItemId || !settings) return;
     setBusy(true);
     setError('');
     try {
       await ApiClient.updateObservation(settingsItemId, {
         name: settings.name,
+        description: settings.description,
+        folder: settings.folder,
+        isShared: settings.isShared,
         lookback: settings.lookback,
         widgets: withTopGroup(settings.widgets, topGroupFromWidgets(settings.widgets)),
+        layout: settings.layout,
         live: settings.live,
         report: settings.report,
         filters: settings.filters,
@@ -955,20 +1390,31 @@ function PageObservations({ onNavigate }) {
       setSettingsItemId(null);
       setSettings(null);
     } catch (e) {
-      setError(e.message);
+      const occupants = e.occupants || e.body?.occupants;
+      if (occupants?.length) {
+        setError(`${e.message} Занято: ${occupants.map((o) => o.name).join(', ')}`);
+      } else {
+        setError(e.message);
+      }
     } finally {
       setBusy(false);
     }
   };
 
   const removeItem = async (id) => {
-    if (!canWrite || !window.confirm('Удалить наблюдение?')) return;
-    await ApiClient.deleteObservation(id);
-    await reload();
-    if (expandedId === id) setExpandedId(null);
-    if (settingsItemId === id) {
-      setSettingsItemId(null);
-      setSettings(null);
+    if (!canWriteObservations || !window.confirm('Удалить наблюдение?')) return;
+    setError('');
+    try {
+      await ApiClient.deleteObservation(id);
+      setItems((prev) => prev.filter((row) => row.id !== id));
+      if (expandedId === id) setExpandedId(null);
+      if (settingsItemId === id) {
+        setSettingsItemId(null);
+        setSettings(null);
+      }
+      await reload();
+    } catch (e) {
+      setError(e.message || 'Не удалось удалить наблюдение');
     }
   };
 
@@ -978,7 +1424,7 @@ function PageObservations({ onNavigate }) {
       current = prev.find((row) => row.id === id) || null;
       return prev.map((row) => (row.id === id ? { ...row, lookback } : row));
     });
-    if (!canWrite || !current) return;
+    if (!canWriteObservations || !current) return;
     try {
       // Keep live/materialize — period switch must not disable rollup.
       await ApiClient.updateObservation(id, {
@@ -1030,14 +1476,30 @@ function PageObservations({ onNavigate }) {
                   lookback: settings.lookback || settingsItem.lookback || null,
                 })}
               >
-                Изменить фильтры в Explorer
+                Изменить фильтры в разборе трафика
               </button>
             )}
             <label className="col" style={{ gap: 4 }}>
               <span>Название</span>
               <input className="input" value={settings.name} onChange={(e) => setSettings({ ...settings, name: e.target.value })} />
             </label>
+            <label className="col" style={{ gap: 4 }}>
+              <span>Описание</span>
+              <input
+                className="input"
+                value={settings.description || ''}
+                onChange={(e) => setSettings({ ...settings, description: e.target.value })}
+              />
+            </label>
             <div className="row" style={{ gap: 16, flexWrap: 'wrap' }}>
+              <label className="col" style={{ gap: 4, minWidth: 160 }}>
+                <span>Папка</span>
+                <input
+                  className="input"
+                  value={settings.folder || 'Мои наблюдения'}
+                  onChange={(e) => setSettings({ ...settings, folder: e.target.value })}
+                />
+              </label>
               <label className="col" style={{ gap: 4, minWidth: 160 }}>
                 <span>Окно графика</span>
                 <select className="input" value={settings.lookback} onChange={(e) => setSettings({ ...settings, lookback: e.target.value })}>
@@ -1056,7 +1518,29 @@ function PageObservations({ onNavigate }) {
                   {groupOptions.map((g) => <option key={g.id} value={g.id}>{g.label}</option>)}
                 </select>
               </label>
+              <label className="col" style={{ gap: 4, minWidth: 140 }}>
+                <span>Ширина плитки</span>
+                <select
+                  className="input"
+                  value={Number(settings.layout?.width) === 2 ? 2 : 1}
+                  onChange={(e) => setSettings({
+                    ...settings,
+                    layout: { ...(settings.layout || {}), width: Number(e.target.value), order: settings.layout?.order || 0 },
+                  })}
+                >
+                  <option value={1}>1 колонка</option>
+                  <option value={2}>на всю ширину</option>
+                </select>
+              </label>
             </div>
+            <label className="row" style={{ gap: 8, alignItems: 'center' }}>
+              <input
+                type="checkbox"
+                checked={!!settings.isShared}
+                onChange={(e) => setSettings({ ...settings, isShared: e.target.checked })}
+              />
+              Доступно всем
+            </label>
             <label className="row" style={{ gap: 8, alignItems: 'center' }}>
               <input
                 type="checkbox"
@@ -1102,26 +1586,127 @@ function PageObservations({ onNavigate }) {
                   report: { ...settings.report, enabled: e.target.checked },
                 })}
               />
-              Ежедневный отчёт
+              Отчёт по расписанию
             </label>
             {settings.report.enabled && (
-              <label className="row" style={{ gap: 8, alignItems: 'center', marginLeft: 24 }}>
-                за период
-                <select
-                  className="input"
-                  style={{ width: 160 }}
-                  value={settings.report.period || 'yesterday'}
-                  onChange={(e) => setSettings({
-                    ...settings,
-                    report: { ...settings.report, period: e.target.value },
-                  })}
-                >
-                  <option value="yesterday">вчера</option>
-                  <option value="last_24h">последние 24 часа</option>
-                </select>
-              </label>
+              <div className="col" style={{ gap: 8, marginLeft: 24 }}>
+                <label className="row" style={{ gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+                  за период
+                  <select
+                    className="input"
+                    style={{ width: 160 }}
+                    value={settings.report.period || 'yesterday'}
+                    onChange={(e) => setSettings({
+                      ...settings,
+                      report: { ...settings.report, period: e.target.value },
+                    })}
+                  >
+                    <option value="yesterday">вчера</option>
+                    <option value="last_24h">последние 24 часа</option>
+                  </select>
+                </label>
+                <label className="row" style={{ gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+                  расписание
+                  <select
+                    className="input"
+                    style={{ width: 140 }}
+                    value={settings.report.schedule?.kind || 'daily'}
+                    onChange={(e) => setSettings({
+                      ...settings,
+                      report: {
+                        ...settings.report,
+                        schedule: { ...(settings.report.schedule || {}), kind: e.target.value },
+                      },
+                    })}
+                  >
+                    <option value="daily">ежедневно</option>
+                    <option value="weekly">еженедельно</option>
+                    <option value="monthly">ежемесячно</option>
+                  </select>
+                  в
+                  <input
+                    className="input"
+                    style={{ width: 90 }}
+                    value={settings.report.schedule?.time || '08:00'}
+                    onChange={(e) => setSettings({
+                      ...settings,
+                      report: {
+                        ...settings.report,
+                        schedule: { ...(settings.report.schedule || {}), time: e.target.value },
+                      },
+                    })}
+                  />
+                  <input
+                    className="input"
+                    style={{ width: 160 }}
+                    value={settings.report.schedule?.timezone || 'Europe/Moscow'}
+                    onChange={(e) => setSettings({
+                      ...settings,
+                      report: {
+                        ...settings.report,
+                        schedule: { ...(settings.report.schedule || {}), timezone: e.target.value },
+                      },
+                    })}
+                  />
+                </label>
+                {(settings.report.schedule?.kind || 'daily') === 'weekly' && (
+                  <label className="row" style={{ gap: 8, alignItems: 'center' }}>
+                    день недели (1=пн)
+                    <input
+                      className="input"
+                      style={{ width: 70 }}
+                      type="number"
+                      min={1}
+                      max={7}
+                      value={settings.report.schedule?.weekday || 1}
+                      onChange={(e) => setSettings({
+                        ...settings,
+                        report: {
+                          ...settings.report,
+                          schedule: { ...(settings.report.schedule || {}), weekday: Number(e.target.value) },
+                        },
+                      })}
+                    />
+                  </label>
+                )}
+                {(settings.report.schedule?.kind || 'daily') === 'monthly' && (
+                  <label className="row" style={{ gap: 8, alignItems: 'center' }}>
+                    число месяца
+                    <input
+                      className="input"
+                      style={{ width: 70 }}
+                      type="number"
+                      min={1}
+                      max={28}
+                      value={settings.report.schedule?.day || 1}
+                      onChange={(e) => setSettings({
+                        ...settings,
+                        report: {
+                          ...settings.report,
+                          schedule: { ...(settings.report.schedule || {}), day: Number(e.target.value) },
+                        },
+                      })}
+                    />
+                  </label>
+                )}
+                <label className="col" style={{ gap: 4 }}>
+                  <span>Email (через запятую, до 10)</span>
+                  <input
+                    className="input"
+                    value={(settings.report.emailTo || []).join(', ')}
+                    onChange={(e) => setSettings({
+                      ...settings,
+                      report: {
+                        ...settings.report,
+                        emailTo: e.target.value.split(',').map((s) => s.trim()).filter(Boolean),
+                      },
+                    })}
+                    placeholder="ops@example.com"
+                  />
+                </label>
+              </div>
             )}
-            <button type="button" className="btn btn--primary" disabled={busy || !canWrite} onClick={saveSettings}>
+            <button type="button" className="btn btn--primary" disabled={busy || !canWriteObservations} onClick={saveSettings}>
               Сохранить
             </button>
           </div>
@@ -1179,36 +1764,73 @@ function PageObservations({ onNavigate }) {
         </div>
       )}
 
+      {items.length > 0 && (
+        <div style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-secondary)' }}>
+          {items[0]?.quotas?.maxMaterialize
+            ? `Подготовка данных: занято ${items[0]?.quotas?.activeMaterialize ?? 0} из ${items[0].quotas.maxMaterialize}`
+            : `Подготовка данных: активно ${items[0]?.quotas?.activeMaterialize ?? 0}`}
+        </div>
+      )}
+
       {!items.length && (
         <Card>
           <div style={{ color: 'var(--fg-secondary)' }}>
-            Пока пусто. Нажмите «+ Новое» — соберите фильтр в Explorer и «Добавить в наблюдения».
+            Пока пусто. Нажмите «+ Новое» — соберите фильтр в разборе трафика и «Добавить в наблюдения».
           </div>
         </Card>
       )}
 
-      {items.length > 0 && (
-        <div className="observations-board">
-          {items.map((item) => (
-            <ObservationLiveTile
-              key={item.id}
-              item={item}
-              filterFields={filterFields}
-              groupOptions={groupOptions}
-              lookbackOptions={config?.lookbacks || LOOKBACK_OPTIONS}
-              expanded={expandedId === item.id}
-              onToggleExpand={() => setExpandedId((cur) => (cur === item.id ? null : item.id))}
-              canWrite={canWrite}
-              onSettings={() => openSettings(item)}
-              onDelete={() => removeItem(item.id)}
-              onLookbackChange={changeTileLookback}
-              onRunReport={() => ApiClient.runObservationReport(item.id)
-                .then(() => pushToast?.({ kind: 'success', title: 'Отчёт сформирован' }))
-                .catch((e) => setError(e.message))}
-            />
-          ))}
-        </div>
-      )}
+      {items.length > 0 && (() => {
+        const sorted = [...items].sort((a, b) => {
+          const ao = Number(a.layout?.order) || 0;
+          const bo = Number(b.layout?.order) || 0;
+          if (ao !== bo) return ao - bo;
+          return String(a.name || '').localeCompare(String(b.name || ''), 'ru');
+        });
+        const folders = [];
+        const byFolder = new Map();
+        for (const item of sorted) {
+          const folder = item.folder || 'Мои наблюдения';
+          if (!byFolder.has(folder)) {
+            byFolder.set(folder, []);
+            folders.push(folder);
+          }
+          byFolder.get(folder).push(item);
+        }
+        return folders.map((folder) => (
+          <div key={folder} className="col" style={{ gap: 10 }}>
+            <div style={{ font: 'var(--pv-text-body-2-bold)' }}>{folder}</div>
+            <div className="observations-board">
+              {byFolder.get(folder).map((item) => (
+                <ObservationLiveTile
+                  key={item.id}
+                  item={item}
+                  filterFields={filterFields}
+                  groupOptions={groupOptions}
+                  lookbackOptions={config?.lookbacks || LOOKBACK_OPTIONS}
+                  expanded={expandedId === item.id}
+                  onToggleExpand={() => setExpandedId((cur) => (cur === item.id ? null : item.id))}
+                  canWrite={canWriteObservations}
+                  onSettings={() => openSettings(item)}
+                  onDelete={() => removeItem(item.id)}
+                  onDuplicate={() => ApiClient.duplicateObservation(item.id)
+                    .then(() => reload())
+                    .then(() => pushToast?.({ kind: 'success', title: 'Создана копия' }))
+                    .catch((e) => setError(e.message))}
+                  onCancel={() => ApiClient.cancelObservationMaterialize(item.id)
+                    .then(() => reload())
+                    .then(() => pushToast?.({ kind: 'success', title: 'Подготовка отменена' }))
+                    .catch((e) => setError(e.message))}
+                  onLookbackChange={changeTileLookback}
+                  onRunReport={() => ApiClient.runObservationReport(item.id)
+                    .then(() => pushToast?.({ kind: 'success', title: 'Отчёт сформирован' }))
+                    .catch((e) => setError(e.message))}
+                />
+              ))}
+            </div>
+          </div>
+        ));
+      })()}
 
         </>
       )}

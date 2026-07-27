@@ -13,7 +13,8 @@
  *   - top-N groupBy series (dim0/dim1) for live charts — worker hits flows_raw,
  *     live UI reads only rollup.
  *
- * Starts from observation createdAt (no historical backfill before start).
+ * Live catch-up starts at observation createdAt; optional history backfill runs
+ * at lower priority after live is caught up.
  * Each shot advances at most MAX_SHOT_MINUTES forward from the cursor.
  * Inserts are idempotent: the target window is deleted (mutations_sync=1) before insert.
  */
@@ -29,25 +30,36 @@ const {
   MIN_REFRESH_SEC,
   ROLLUP_TABLE,
   ROLLUP_BUCKET_SEC,
+  STUCK_SEC,
+  MAX_FAIL_COUNT,
 } = require('./observations');
+const {
+  loadObservationById,
+  upsertObservation,
+} = require('./observations-store');
 const {
   explorerTimeseries,
   explorerGroupedTimeseries,
 } = require('./explorer');
 
 const CONCURRENCY = Math.max(1, Number(process.env.OBSERVATION_ROLLUP_CONCURRENCY) || 1);
-const MAX_SHOT_MINUTES = Math.max(15, Number(process.env.OBSERVATION_ROLLUP_SHOT_MINUTES) || 60);
-/** Don't backfill older than this — live charts only need recent lookbacks. */
+const MAX_SHOT_MINUTES = Math.max(15, Number(process.env.OBSERVATION_ROLLUP_SHOT_MINUTES) || 15);
+/** Cap how far live catch-up may lag behind wall clock. */
 const MAX_CATCHUP_BEHIND_MS = Math.max(
   1,
   Number(process.env.OBSERVATION_ROLLUP_MAX_BEHIND_HOURS) || 24,
-) * 3600 * 1000; // default 24h — enough for lookbacks, skips multi-day backfill
+) * 3600 * 1000;
 const BUCKET_MS = ROLLUP_BUCKET_SEC * 1000;
 const GRANULARITY = '5m';
 const REWIND_EVERY_MS = Math.max(
   60_000,
   Number(process.env.OBSERVATION_ROLLUP_REWIND_SEC) || 600,
 ) * 1000;
+
+function backoffMinutes(failCount) {
+  const steps = [1, 5, 15, 60];
+  return steps[Math.min(steps.length - 1, Math.max(0, failCount - 1))];
+}
 
 let ensureTablePromise = null;
 let lastRewindAtMs = 0;
@@ -183,8 +195,157 @@ async function catchupGrouped(job, window, seriesLimit) {
   return { groupedPoints: values.length, values };
 }
 
+async function honorCancel(job) {
+  if (!job.cancelRequested) return false;
+  const item = await loadObservationById(job.id);
+  if (!item) return true;
+  item.materialize = {
+    ...(item.materialize || {}),
+    status: 'idle',
+    enabled: false,
+    cancelRequested: false,
+    runningStartedAt: null,
+    lastError: 'отменено пользователем',
+  };
+  item.live = { ...(item.live || {}), enabled: false };
+  item.updatedAt = new Date().toISOString();
+  await upsertObservation(item);
+  return true;
+}
+
+async function applyFail(job, message) {
+  const failCount = (Number(job.failCount) || 0) + 1;
+  const waitMin = backoffMinutes(failCount);
+  const nextAttemptAt = new Date(Date.now() + waitMin * 60 * 1000).toISOString();
+  if (failCount >= MAX_FAIL_COUNT) {
+    const item = await loadObservationById(job.id);
+    if (item) {
+      item.materialize = {
+        ...(item.materialize || {}),
+        enabled: false,
+        status: 'error',
+        failCount,
+        nextAttemptAt: null,
+        runningStartedAt: null,
+        lastError: `остановлено после ${MAX_FAIL_COUNT} ошибок: ${message}`,
+        cancelRequested: false,
+      };
+      item.live = { ...(item.live || {}), enabled: false };
+      item.updatedAt = new Date().toISOString();
+      await upsertObservation(item);
+    }
+    return { id: job.id, error: message, stopped: true, failCount };
+  }
+  await patchMaterializeStatus(job.id, {
+    status: 'error',
+    lastError: message,
+    failCount,
+    nextAttemptAt,
+    runningStartedAt: null,
+    lastCatchupAt: new Date().toISOString(),
+  });
+  return { id: job.id, error: message, failCount, nextAttemptAt };
+}
+
+async function materializeWindow(job, from, to) {
+  const window = {
+    range: 'custom',
+    from: from.toISOString(),
+    to: to.toISOString(),
+    filters: job.filters,
+    granularity: GRANULARITY,
+  };
+
+  const totalBundle = await explorerTimeseries(window);
+  const { rows: totalRaw } = await query(totalBundle.sql, totalBundle.params, {
+    name: `observations/rollup-total-${job.id}`,
+  });
+  const totalPoints = await totalBundle.map(totalRaw);
+
+  const values = totalPoints.map((p) => ({
+    observation_id: job.id,
+    minute: p.bucket,
+    dim0: '',
+    dim1: '',
+    bytes: Number(p.bytes) || 0,
+    packets: Number(p.packets) || 0,
+    flows: Number(p.flows) || 0,
+  }));
+
+  const seriesLimit = Math.min(Math.max(Number(job.seriesLimit) || 20, 8), 50);
+  const grouped = await catchupGrouped(job, window, seriesLimit);
+  values.push(...grouped.values);
+
+  await deleteRollupWindow(job.id, from, to);
+  if (values.length) {
+    await insertRows(ROLLUP_TABLE, values, { name: `observations/rollup-insert-${job.id}` });
+  }
+  return { totalPoints, groupedPoints: grouped.groupedPoints };
+}
+
+async function catchupBackfill(job, liveStart) {
+  if (job.backfillDone || !job.backfillFrom) {
+    return { id: job.id, skipped: true, reason: 'backfill_done' };
+  }
+  let from = floorToBucket(job.backfillCursor || job.backfillFrom);
+  const end = floorToBucket(liveStart);
+  if (!(from instanceof Date) || !Number.isFinite(from.getTime()) || from >= end) {
+    await patchMaterializeStatus(job.id, {
+      backfillDone: true,
+      backfillCursor: end.toISOString(),
+    });
+    return { id: job.id, skipped: true, reason: 'backfill_done' };
+  }
+  let to = floorToBucket(new Date(from.getTime() + MAX_SHOT_MINUTES * 60 * 1000));
+  if (to <= from) to = new Date(from.getTime() + BUCKET_MS);
+  if (to > end) to = end;
+
+  await patchMaterializeStatus(job.id, {
+    status: 'running',
+    runningStartedAt: new Date().toISOString(),
+  });
+  if (await honorCancel(job)) return { id: job.id, cancelled: true };
+
+  try {
+    const { totalPoints, groupedPoints } = await materializeWindow(job, from, to);
+    const done = to >= end;
+    await patchMaterializeStatus(job.id, {
+      status: 'ok',
+      lagSeconds: 0,
+      backfillCursor: to.toISOString(),
+      backfillDone: done,
+      runningStartedAt: null,
+      failCount: 0,
+      nextAttemptAt: null,
+      lastError: null,
+      lastCatchupAt: new Date().toISOString(),
+    });
+    return {
+      id: job.id,
+      phase: 'backfill',
+      points: totalPoints.length,
+      groupedPoints,
+      from,
+      to,
+      backfillDone: done,
+    };
+  } catch (err) {
+    await applyFail(job, err.message);
+    throw err;
+  }
+}
+
 async function catchupOne(job) {
   const intervalSec = Math.max(MIN_REFRESH_SEC, Number(job.intervalSec) || MIN_REFRESH_SEC);
+
+  if (await honorCancel(job)) return { id: job.id, cancelled: true };
+
+  if (job.nextAttemptAt) {
+    const nextMs = Date.parse(job.nextAttemptAt);
+    if (Number.isFinite(nextMs) && nextMs > Date.now()) {
+      return { id: job.id, skipped: true, reason: 'backoff' };
+    }
+  }
 
   // Exclusive end of latest closed 5m bucket, minus one more bucket for late flows.
   // e.g. now 12:07 → floor 12:05 → safeTo 12:00 (materialize through […, 12:00)).
@@ -193,7 +354,11 @@ async function catchupOne(job) {
 
   let from = resolveCatchupFrom(job, safeTo);
   if (from >= safeTo) {
-    // Fully caught up — throttle next CH pass by live.refreshSec (≥5m).
+    // Live caught up — optionally fill history at lower priority.
+    if (!job.backfillDone && job.backfillFrom) {
+      const liveStart = jobStartedBucket(job) || floorToBucket(job.startedAt || new Date());
+      return catchupBackfill(job, liveStart);
+    }
     if (job.lastCatchupAt) {
       const ageSec = (Date.now() - new Date(job.lastCatchupAt).getTime()) / 1000;
       if (Number.isFinite(ageSec) && ageSec < intervalSec) {
@@ -205,6 +370,8 @@ async function catchupOne(job) {
       lagSeconds: 0,
       lastCatchupAt: new Date().toISOString(),
       cursorMinute: job.cursorMinute || safeTo.toISOString(),
+      dataThrough: new Date(safeTo.getTime() - BUCKET_MS).toISOString(),
+      runningStartedAt: null,
     });
     return { id: job.id, skipped: true };
   }
@@ -217,77 +384,60 @@ async function catchupOne(job) {
     if (to > safeTo) to = safeTo;
   }
 
-  await patchMaterializeStatus(job.id, { status: 'running' });
+  await patchMaterializeStatus(job.id, {
+    status: 'running',
+    runningStartedAt: new Date().toISOString(),
+  });
+  if (await honorCancel(job)) return { id: job.id, cancelled: true };
+
   try {
-    const window = {
-      range: 'custom',
-      from: from.toISOString(),
-      to: to.toISOString(),
-      filters: job.filters,
-      granularity: GRANULARITY,
-    };
-
-    const totalBundle = await explorerTimeseries(window);
-    const { rows: totalRaw } = await query(totalBundle.sql, totalBundle.params, {
-      name: `observations/rollup-total-${job.id}`,
-    });
-    const totalPoints = await totalBundle.map(totalRaw);
-
-    const values = totalPoints.map((p) => ({
-      observation_id: job.id,
-      minute: p.bucket,
-      dim0: '',
-      dim1: '',
-      bytes: Number(p.bytes) || 0,
-      packets: Number(p.packets) || 0,
-      flows: Number(p.flows) || 0,
-    }));
-
-    const seriesLimit = Math.min(Math.max(Number(job.seriesLimit) || 20, 8), 50);
-    const grouped = await catchupGrouped(job, window, seriesLimit);
-    values.push(...grouped.values);
-
-    // Always clear the window first — SummingMergeTree sums duplicates on re-insert.
-    await deleteRollupWindow(job.id, from, to);
-    if (values.length) {
-      await insertRows(ROLLUP_TABLE, values, { name: `observations/rollup-insert-${job.id}` });
-    }
-
+    const { totalPoints, groupedPoints } = await materializeWindow(job, from, to);
     const lagSeconds = Math.max(0, Math.floor((Date.now() - to.getTime()) / 1000));
     await patchMaterializeStatus(job.id, {
       status: lagSeconds > intervalSec * 3 ? 'lagging' : 'ok',
       lagSeconds,
       lastCatchupAt: new Date().toISOString(),
       cursorMinute: to.toISOString(),
+      dataThrough: new Date(to.getTime() - BUCKET_MS).toISOString(),
       lastError: null,
+      failCount: 0,
+      nextAttemptAt: null,
+      runningStartedAt: null,
     });
     return {
       id: job.id,
+      phase: 'live',
       points: totalPoints.length,
-      groupedPoints: grouped.groupedPoints,
+      groupedPoints,
       from,
       to,
       bucketSec: ROLLUP_BUCKET_SEC,
     };
   } catch (err) {
-    await patchMaterializeStatus(job.id, {
-      status: 'error',
-      lastError: err.message,
-      lastCatchupAt: new Date().toISOString(),
-    });
+    await applyFail(job, err.message);
     throw err;
   }
 }
 
 async function recoverStuckRunning() {
-  const jobs = (await listMaterializeJobs()).filter((j) => j.status === 'running');
+  const jobs = await listMaterializeJobs();
+  let recovered = 0;
   for (const job of jobs) {
+    if (job.status !== 'running') continue;
+    const startedMs = Date.parse(job.runningStartedAt || '');
+    const stuckByAge = Number.isFinite(startedMs)
+      && (Date.now() - startedMs) > STUCK_SEC * 1000;
+    // Always clear on worker start; also clear by watchdog age.
     await patchMaterializeStatus(job.id, {
-      status: 'queued',
-      lastError: 'воркер перезапущен — продолжаем с cursor/start',
+      status: stuckByAge ? 'error' : 'queued',
+      lastError: stuckByAge
+        ? `превышено время выполнения (${STUCK_SEC}с)`
+        : 'воркер перезапущен — продолжаем с cursor/start',
+      runningStartedAt: null,
     });
+    recovered += 1;
   }
-  return jobs.length;
+  return recovered;
 }
 
 function chUtcToIso(value) {
@@ -328,11 +478,24 @@ async function rewindCursorsIfAhead({ force = false } = {}) {
   return { skipped: false };
 }
 
+function needsLiveCatchup(job, safeTo) {
+  try {
+    const from = resolveCatchupFrom(job, safeTo);
+    return from < safeTo;
+  } catch {
+    return true;
+  }
+}
+
 async function runOnce() {
   await ensureObservationsStore();
   await ensureTable();
   // Force rewind on cold start; later ticks throttle to REWIND_EVERY_MS.
   await rewindCursorsIfAhead({ force: !lastRewindAtMs });
+
+  let safeTo = floorToBucket(new Date());
+  safeTo = new Date(safeTo.getTime() - BUCKET_MS);
+
   const jobs = (await listMaterializeJobs())
     .filter((j) => (
       j.status === 'queued'
@@ -343,6 +506,10 @@ async function runOnce() {
       || j.status === 'idle'
     ))
     .sort((a, b) => {
+      // Live catch-up before history backfill.
+      const aLive = needsLiveCatchup(a, safeTo) ? 0 : 1;
+      const bLive = needsLiveCatchup(b, safeTo) ? 0 : 1;
+      if (aLive !== bLive) return aLive - bLive;
       const rank = (s) => ({ queued: 0, error: 1, lagging: 2, running: 3, idle: 4, ok: 5 }[s] ?? 9);
       const dr = rank(a.status) - rank(b.status);
       if (dr !== 0) return dr;

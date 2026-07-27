@@ -46,6 +46,8 @@ const {
   createObservation,
   updateObservation,
   deleteObservation,
+  duplicateObservation,
+  cancelMaterialize,
   queueMaterialize,
   previewObservation,
   runObservationReport,
@@ -54,6 +56,12 @@ const {
   observationsConfig,
   getObservationAnalyticsDiagnostics,
 } = require('./observations');
+const {
+  ensureSmtpSettingsTables,
+  getSmtpSettings,
+  saveSmtpSettings,
+  sendTestMail,
+} = require('./smtp-settings');
 const { getWorkerDiagnostics } = require('./diagnostics-worker');
 const {
   scanGaps,
@@ -63,6 +71,7 @@ const {
 } = require('./diagnostics-worker-gaps');
 const { getEnrichmentDiagnostics } = require('./diagnostics-enrichment');
 const { getSnmpDiagnostics } = require('./diagnostics-snmp');
+const { getBoundsDiagnostics } = require('./diagnostics-bounds');
 const {
   dnsSources,
   dnsActivityChart,
@@ -781,12 +790,13 @@ app.post('/api/explorer/query', async (req, res) => {
     const body = req.body || {};
     const started = Date.now();
     const bundle = await explorerQuery(body);
+    const queryBody = bundle.queryBody || body;
     const flowsResult = bundle.flowsSpec
       ? await runNamed(() => Promise.resolve(bundle.flowsSpec), { name: 'explorer/flows' })
       : null;
     const resultSeriesResult = flowsResult?.data?.length
       ? await runNamed(
-        () => explorerResultSeries(body, flowsResult.data),
+        () => explorerResultSeries(queryBody, flowsResult.data),
         { name: 'explorer/result-series' },
       )
       : null;
@@ -912,7 +922,51 @@ app.post('/api/observations', async (req, res) => {
     const data = await createObservation(req.user.id, req.body || {});
     res.json({ ok: true, data });
   } catch (err) {
-    res.status(err.status || 400).json({ error: err.message });
+    res.status(err.status || 400).json({
+      error: err.message,
+      occupants: err.occupants || undefined,
+      quotas: err.quotas || undefined,
+    });
+  }
+});
+
+app.get('/api/settings/smtp', async (req, res) => {
+  try {
+    if (String(req.user?.roleId || '') !== 'Administrator') {
+      res.status(403).json({ error: 'Только администратор' });
+      return;
+    }
+    await ensureSmtpSettingsTables();
+    res.json({ data: await getSmtpSettings() });
+  } catch (err) {
+    res.status(err.statusCode || 500).json({ error: err.message });
+  }
+});
+
+app.put('/api/settings/smtp', async (req, res) => {
+  try {
+    if (String(req.user?.roleId || '') !== 'Administrator') {
+      res.status(403).json({ error: 'Только администратор' });
+      return;
+    }
+    await saveSmtpSettings(req.body || {});
+    res.json({ ok: true, data: await getSmtpSettings() });
+  } catch (err) {
+    res.status(err.statusCode || 400).json({ error: err.message });
+  }
+});
+
+app.post('/api/settings/smtp/test', async (req, res) => {
+  try {
+    if (String(req.user?.roleId || '') !== 'Administrator') {
+      res.status(403).json({ error: 'Только администратор' });
+      return;
+    }
+    const to = String(req.body?.to || req.user?.email || req.user?.username || '').trim();
+    await sendTestMail(to);
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(err.statusCode || 502).json({ error: err.message });
   }
 });
 
@@ -998,6 +1052,15 @@ app.get('/api/diagnostics/snmp', async (_req, res) => {
   }
 });
 
+app.get('/api/diagnostics/bounds', async (_req, res) => {
+  try {
+    const data = await getBoundsDiagnostics();
+    res.json({ data });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.get('/api/observations/:id', async (req, res) => {
   try {
     const data = await getObservation(req.params.id, req.user.id);
@@ -1020,7 +1083,11 @@ app.put('/api/observations/:id', async (req, res) => {
     }
     res.json({ ok: true, data });
   } catch (err) {
-    res.status(err.status || 400).json({ error: err.message });
+    res.status(err.status || 400).json({
+      error: err.message,
+      occupants: err.occupants || undefined,
+      quotas: err.quotas || undefined,
+    });
   }
 });
 
@@ -1037,6 +1104,32 @@ app.delete('/api/observations/:id', async (req, res) => {
   }
 });
 
+app.post('/api/observations/:id/duplicate', async (req, res) => {
+  try {
+    const data = await duplicateObservation(req.params.id, req.user.id);
+    if (!data) {
+      res.status(404).json({ error: 'Наблюдение не найдено' });
+      return;
+    }
+    res.json({ ok: true, data });
+  } catch (err) {
+    res.status(err.status || 400).json({ error: err.message });
+  }
+});
+
+app.post('/api/observations/:id/cancel', async (req, res) => {
+  try {
+    const data = await cancelMaterialize(req.params.id, req.user.id);
+    if (!data) {
+      res.status(404).json({ error: 'Наблюдение не найдено' });
+      return;
+    }
+    res.json({ ok: true, data });
+  } catch (err) {
+    res.status(err.status || 400).json({ error: err.message });
+  }
+});
+
 app.post('/api/observations/:id/materialize', async (req, res) => {
   try {
     const data = await queueMaterialize(req.params.id, req.user.id);
@@ -1046,7 +1139,11 @@ app.post('/api/observations/:id/materialize', async (req, res) => {
     }
     res.json({ ok: true, data });
   } catch (err) {
-    res.status(err.status || 400).json({ error: err.message });
+    res.status(err.status || 400).json({
+      error: err.message,
+      occupants: err.occupants || undefined,
+      quotas: err.quotas || undefined,
+    });
   }
 });
 
@@ -1818,6 +1915,7 @@ app.get('/api/diagnostics/direction/interfaces', async (req, res) => {
         limit: req.query.limit,
         onlyUnmarked: req.query.only_unmarked === '1' || req.query.onlyUnmarked === '1',
         asnThreshold: req.query.asn_threshold,
+        switchIp: req.query.switch_ip || req.query.switchIp,
       }),
       { name: 'diagnostics/direction-interfaces' },
     ));

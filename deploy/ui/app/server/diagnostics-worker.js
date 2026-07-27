@@ -361,7 +361,7 @@ function buildProblems({ worker, jobs, trafficRows, trafficError }) {
   }
 
   const activeMat = jobs.filter((j) => j.workerWillPick).length;
-  if (activeMat > MAX_MATERIALIZE) {
+  if (MAX_MATERIALIZE > 0 && activeMat > MAX_MATERIALIZE) {
     problems.push(problem(
       'warning',
       'obs_quota',
