@@ -81,6 +81,10 @@ function PageDashboard({ onNavigate, directions, timeRange, customPeriod, collec
   const [otherPortsOpen, setOtherPortsOpen] = useState(false);
   const periodLabel = timeRangeLabel(timeRange, customPeriod);
   const chartLongRange = isLongChartRange(timeRange, customPeriod);
+  const chartPeriodBounds = useMemo(
+    () => computeChartPeriodBounds(timeRange, customPeriod),
+    [timeRange, customPeriod?.from, customPeriod?.to],
+  );
   const directionsKey = TRAFFIC_DIRECTIONS.map((d) => (directions?.[d.id] ? '1' : '0')).join('');
   const collectorFilterKey = (collectorFilter || []).join('|');
   const chartLinesKey = (data.series?.lines || []).map((ln) => ln.key).join(',');
@@ -316,6 +320,8 @@ function PageDashboard({ onNavigate, directions, timeRange, customPeriod, collec
               onRangeSelect={onChartRangeSelect}
               bucketSeconds={300}
               displayTimezone={displayTimezone}
+              periodStartMs={chartPeriodBounds.startMs}
+              periodEndMs={chartPeriodBounds.endMs}
             />
           )}
         </Card>
@@ -352,6 +358,8 @@ function PageDashboard({ onNavigate, directions, timeRange, customPeriod, collec
               chartLongRange={chartLongRange}
               displayTimezone={displayTimezone}
               onRangeSelect={distributionMode === 'trend' ? onChartRangeSelect : undefined}
+              periodStartMs={chartPeriodBounds.startMs}
+              periodEndMs={chartPeriodBounds.endMs}
               failed={source === 'error' || failedWidgets.protocols}
               trendFailed={protocolTrend.source === 'error'}
               loadMs={distributionMode === 'trend' ? protocolTrend.loadMs : loadTimings.protocols}
@@ -370,6 +378,8 @@ function PageDashboard({ onNavigate, directions, timeRange, customPeriod, collec
               displayTimezone={displayTimezone}
               onOtherClick={() => setOtherPortsOpen(true)}
               onRangeSelect={distributionMode === 'trend' ? onChartRangeSelect : undefined}
+              periodStartMs={chartPeriodBounds.startMs}
+              periodEndMs={chartPeriodBounds.endMs}
               failed={source === 'error' || failedWidgets.services}
               trendFailed={serviceTrend.source === 'error'}
               loadMs={distributionMode === 'trend' ? serviceTrend.loadMs : loadTimings.services}
@@ -1123,6 +1133,8 @@ function DistributionPane({
   onOtherClick,
   onRangeSelect,
   bucketSeconds = 300,
+  periodStartMs,
+  periodEndMs,
   failed,
   trendFailed,
   loadMs,
@@ -1169,6 +1181,8 @@ function DistributionPane({
         bucketSeconds={bucketSeconds}
         displayTimezone={displayTimezone}
         onRangeSelect={onRangeSelect}
+        periodStartMs={periodStartMs}
+        periodEndMs={periodEndMs}
       />
     );
   }
@@ -1231,6 +1245,11 @@ function VlanDistributionCard({
     return () => { cancelled = true; };
   }, [mode, timeRange, customPeriod?.from, customPeriod?.to, directionsKey, collectorFilterKey]);
 
+  const chartPeriodBounds = useMemo(
+    () => computeChartPeriodBounds(timeRange, customPeriod),
+    [timeRange, customPeriod?.from, customPeriod?.to],
+  );
+
   return (
     <Card pad="sm">
       <div className="distribution-card__head">
@@ -1257,6 +1276,8 @@ function VlanDistributionCard({
           chartLongRange={chartLongRange}
           displayTimezone={displayTimezone}
           onRangeSelect={mode === 'trend' ? onChartRangeSelect : undefined}
+          periodStartMs={chartPeriodBounds.startMs}
+          periodEndMs={chartPeriodBounds.endMs}
           failed={share.source === 'error'}
           trendFailed={trend.source === 'error'}
           loadMs={mode === 'trend' ? trend.loadMs : share.loadMs}

@@ -25,6 +25,7 @@ const VLAN_SAVE_DESC = 'Изменения справочника применя
 
 function PageVlan({ timeRange = '24h', customPeriod, directions, collectorFilter } = {}) {
   const canWrite = AuthAccess.canWritePage('vlan');
+  const [tab, setTab] = useState('traffic');
   const [trafficRows, setTrafficRows] = useState([]);
   const [namedRows, setNamedRows] = useState([]);
   const [seenRows, setSeenRows] = useState([]);
@@ -135,7 +136,89 @@ function PageVlan({ timeRange = '24h', customPeriod, directions, collectorFilter
     }
   };
 
-  const cols = [
+  const trafficCols = [
+    {
+      key: 'vlanId',
+      title: 'VLAN',
+      width: 90,
+      sortAccessor: (r) => r.vlanId,
+      render: (r) => <span className="mono" style={{ font: 'var(--pv-text-body-2-bold)' }}>{r.vlanId}</span>,
+    },
+    {
+      key: 'displayName',
+      title: 'Название',
+      width: 200,
+      sortAccessor: (r) => r.displayName || '',
+      render: (r) => (
+        r.displayName
+          ? <span style={{ font: 'var(--pv-text-body-2-bold)' }}>{r.displayName}</span>
+          : <span style={{ color: 'var(--fg-tertiary)' }}>без имени</span>
+      ),
+    },
+    {
+      key: 'pct',
+      title: 'Доля',
+      width: 80,
+      sortAccessor: (r) => r.pct,
+      render: (r) => <span className="num mono">{(Number(r.pct) || 0).toFixed(2)}%</span>,
+    },
+    {
+      key: 'bytes',
+      title: 'Объём',
+      width: 110,
+      sortAccessor: (r) => r.bytes,
+      render: (r) => <span className="num mono">{fmtBytes(r.bytes)}</span>,
+    },
+    {
+      key: 'avgBps',
+      title: 'Средняя бит/с',
+      width: 120,
+      sortAccessor: (r) => r.avgBps,
+      render: (r) => <span className="num mono">{fmtBits(r.avgBps)}</span>,
+    },
+    {
+      key: 'flows',
+      title: 'Потоки',
+      width: 100,
+      sortAccessor: (r) => r.flows,
+      render: (r) => <span className="num mono">{fmtNum(r.flows)}</span>,
+    },
+  ];
+
+  const catalogRows = useMemo(() => {
+    const byId = new Map();
+    for (const n of namedRows) {
+      byId.set(n.vlanId, { ...n, id: n.vlanId, named: true });
+    }
+    for (const s of seenRows) {
+      if (!byId.has(s.vlanId)) {
+        byId.set(s.vlanId, {
+          vlanId: s.vlanId,
+          displayName: '',
+          attachmentType: 'unknown',
+          boundary: 'unknown',
+          entityId: '',
+          comment: '',
+          bytes: s.bytes,
+          named: false,
+          id: s.vlanId,
+        });
+      }
+    }
+    return [...byId.values()];
+  }, [namedRows, seenRows]);
+
+  const filteredCatalog = useMemo(() => {
+    if (!search) return catalogRows;
+    const s = search.toLowerCase();
+    return catalogRows.filter((r) => (
+      String(r.vlanId).includes(s)
+      || (r.displayName || '').toLowerCase().includes(s)
+      || (VLAN_ATTACHMENT_LABELS[r.attachmentType] || '').toLowerCase().includes(s)
+    ));
+  }, [catalogRows, search]);
+
+  const catalogCols = [
     {
       key: 'vlanId',
       title: 'VLAN',
@@ -171,32 +254,10 @@ function PageVlan({ timeRange = '24h', customPeriod, directions, collectorFilter
       ),
     },
     {
-      key: 'pct',
-      title: 'Доля',
-      width: 80,
-      sortAccessor: (r) => r.pct,
-      render: (r) => <span className="num mono">{(Number(r.pct) || 0).toFixed(2)}%</span>,
-    },
-    {
-      key: 'bytes',
-      title: 'Объём',
-      width: 110,
-      sortAccessor: (r) => r.bytes,
-      render: (r) => <span className="num mono">{fmtBytes(r.bytes)}</span>,
-    },
-    {
-      key: 'avgBps',
-      title: 'Средняя бит/с',
+      key: 'boundary',
+      title: 'Граница',
       width: 120,
-      sortAccessor: (r) => r.avgBps,
-      render: (r) => <span className="num mono">{fmtBits(r.avgBps)}</span>,
-    },
-    {
-      key: 'flows',
-      title: 'Потоки',
-      width: 100,
-      sortAccessor: (r) => r.flows,
-      render: (r) => <span className="num mono">{fmtNum(r.flows)}</span>,
+      render: (r) => <span className="tag">{VLAN_BOUNDARY_LABELS[r.boundary] || r.boundary || '—'}</span>,
     },
   ];
 
@@ -205,15 +266,22 @@ function PageVlan({ timeRange = '24h', customPeriod, directions, collectorFilter
       <div className="page-head">
         <div>
           <h1>VLAN</h1>
-          <p>Трафик по VLAN из агрегатов NetFlow/IPFIX и справочник имён. Период, направления и коллекторы берутся из фильтров в шапке.</p>
+          <p>Трафик по VLAN и справочник имён. Период, направления и коллекторы берутся из фильтров в шапке.</p>
         </div>
         <div className="row" style={{ gap: 8 }}>
           <Button kind="ghost" icon="refresh" onClick={reload} disabled={loading}>Обновить</Button>
-          <Button kind="primary" icon="plus" onClick={() => setShowAdd(true)} disabled={!canWrite}>Назвать VLAN</Button>
+          {tab === 'catalog' && (
+            <Button kind="primary" icon="plus" onClick={() => setShowAdd(true)} disabled={!canWrite}>Назвать VLAN</Button>
+          )}
         </div>
       </div>
 
-      {seenRows.length > 0 && (
+      <div className="row" style={{ gap: 8, marginBottom: 16 }}>
+        <Button kind={tab === 'traffic' ? 'primary' : 'ghost'} onClick={() => setTab('traffic')}>Трафик</Button>
+        <Button kind={tab === 'catalog' ? 'primary' : 'ghost'} onClick={() => setTab('catalog')}>Каталог</Button>
+      </div>
+
+      {tab === 'catalog' && seenRows.length > 0 && (
         <Card pad="sm" style={{ marginBottom: 12 }}>
           <div style={{ font: 'var(--pv-text-body-2-bold)', marginBottom: 6 }}>
             Замечены в трафике без имени (24 ч): {seenRows.length}
@@ -240,20 +308,31 @@ function PageVlan({ timeRange = '24h', customPeriod, directions, collectorFilter
         </Card>
       ) : loadError ? (
         <Empty icon="db" title="Не удалось загрузить" desc={loadError} action={<Button kind="primary" icon="refresh" onClick={reload}>Повторить</Button>} />
-      ) : (
+      ) : tab === 'traffic' ? (
         <DataTable
           rows={filtered}
-          columns={cols}
+          columns={trafficCols}
           rowKey="id"
           pageSize={20}
           initialSort={{ key: 'bytes', dir: 'desc' }}
-          onRowClick={canWrite ? (r) => setEditing({ ...r, isNew: false }) : undefined}
           emptyTitle="Нет данных по VLAN"
           emptyDesc="За выбранный период VLAN-трафик не найден."
           toolbar={{ search, onSearch: setSearch }}
+        />
+      ) : (
+        <DataTable
+          rows={filteredCatalog}
+          columns={catalogCols}
+          rowKey="id"
+          pageSize={20}
+          initialSort={{ key: 'vlanId', dir: 'asc' }}
+          onRowClick={canWrite ? (r) => setEditing({ ...r, isNew: !r.named }) : undefined}
+          emptyTitle="Каталог пуст"
+          emptyDesc="Добавьте имя VLAN или дождитесь появления VLAN в трафике."
+          toolbar={{ search, onSearch: setSearch }}
           rowActions={canWrite ? (r) => (
             <div className="row" style={{ gap: 4, justifyContent: 'flex-end' }}>
-              <button className="icon-btn tt" data-tt="Редактировать" onClick={(e) => { e.stopPropagation(); setEditing({ ...r, isNew: false }); }}>
+              <button className="icon-btn tt" data-tt="Редактировать" onClick={(e) => { e.stopPropagation(); setEditing({ ...r, isNew: !r.named }); }}>
                 <Icon name="edit" size={15} />
               </button>
               {r.named && (

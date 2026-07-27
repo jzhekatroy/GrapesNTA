@@ -214,7 +214,7 @@ function PageTop({ onNavigate, timeRange, customPeriod, directions, collectorFil
         <div className="row page-head__actions">
           <Button kind="ghost" icon="copy" onClick={copyShareLink}>Поделиться</Button>
           <Button kind="ghost" icon="export" onClick={exportCsv} disabled={!filtered.length || source === 'loading'}>Экспорт</Button>
-          <Button kind="primary" icon="explorer" onClick={() => onNavigate('explorer')}>Открыть в Explorer</Button>
+          <Button kind="primary" icon="explorer" onClick={() => onNavigate('explorer')}>Открыть в разборе трафика</Button>
         </div>
       </div>
 

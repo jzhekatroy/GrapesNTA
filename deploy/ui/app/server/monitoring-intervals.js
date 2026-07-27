@@ -14,7 +14,7 @@ const DEFAULT_SOURCE_ID = 'netflow';
 const PARAMETERS = {
   broadband_total: {
     id: 'broadband_total',
-    label: 'суммарный трафик ШПД',
+    label: 'Суммарный трафик ШПД',
     unit: 'Гбит/мин',
     featureName: 'total_bytes',
     boundsConfigKey: 'intervals',
@@ -31,7 +31,7 @@ const PARAMETERS = {
     label: 'Входящий трафик ШПД из-за рубежа',
     unit: 'Гбит/мин',
     featureName: 'country_F',
-    boundsConfigKey: 'intervals_country_ru',
+    boundsConfigKey: 'intervals_country_F',
   },
 };
 

@@ -5,9 +5,12 @@ const THEME_TRANSITION_MS = 350;
 function App() {
   const [registryReady, setRegistryReady] = useState(false);
   const [validIds, setValidIds] = useState(new Set(['dashboard']));
+  const [hiddenPageIds, setHiddenPageIds] = useState(new Set());
   const [pageTitles, setPageTitlesState] = useState({});
-  const initial = (location.hash || '#dashboard').slice(1);
-  const [page, setPage] = useState(initial);
+  const initialRaw = (location.hash || '#dashboard').slice(1);
+  const initialQ = initialRaw.indexOf('?');
+  const initialPageId = initialQ >= 0 ? initialRaw.slice(0, initialQ) : initialRaw;
+  const [page, setPage] = useState(initialPageId === 'collector-status' ? 'collectors' : initialPageId);
   const [collapsed, setCollapsed] = useState(false);
   const [theme, setTheme] = useState(() => localStorage.getItem('grapes-theme') || 'dark');
   const [timeRange, setTimeRange] = useState('24h');
@@ -31,12 +34,17 @@ function App() {
         if (cancelled) return;
         const titles = AppPages.titlesMap(pages);
         const ids = AppPages.validIds(pages);
+        const hidden = AppPages.hiddenIds(pages);
         if (typeof setPageTitles === 'function') setPageTitles(titles);
         setPageTitlesState(titles);
         setValidIds(ids);
+        setHiddenPageIds(hidden);
         setRegistryReady(true);
         const { pageId, params } = parseAppHash();
-        const hashId = ids.has(pageId) ? pageId : 'dashboard';
+        const hashId = AppPages.resolvePageId(pageId, ids);
+        if (pageId === 'collector-status') {
+          location.replace(`${location.pathname}${location.search}#collectors`);
+        }
         setPage(hashId);
         if (hashId === 'top' && params.toString()) {
           const global = applyTopTalkersUrlGlobals(params);
@@ -143,7 +151,12 @@ function App() {
     if (!registryReady) return;
     const onHash = () => {
       const { pageId, params } = parseAppHash();
-      if (validIds.has(pageId)) setPage(pageId);
+      const resolved = AppPages.resolvePageId(pageId, validIds);
+      if (pageId === 'collector-status') {
+        location.replace(`${location.pathname}${location.search}#collectors`);
+        return;
+      }
+      setPage(resolved);
       if (pageId === 'top' && params.toString()) {
         const global = applyTopTalkersUrlGlobals(params);
         if (global.timeRange) setTimeRange(global.timeRange);
@@ -253,15 +266,19 @@ function App() {
       case 'vlan':       pageEl = <PageVlan key={refreshKey} timeRange={timeRange} customPeriod={customPeriod} directions={directions} collectorFilter={collectorFilter} />; break;
       case 'dns':        pageEl = <PageDnsQueries key={`${refreshKey}-${displayTimezone}-${(collectorFilter || []).join(',')}`} onNavigate={navigate} timeRange={timeRange} customPeriod={customPeriod} collectorFilter={collectorFilter} displayTimezone={displayTimezone} onChartRangeSelect={applyChartRangeZoom} />; break;
       case 'collectors': pageEl = <PageCollectors key={refreshKey} />; break;
-      case 'snmp':       pageEl = <PageSnmp key={`${refreshKey}-${displayTimezone}`} displayTimezone={displayTimezone} />; break;
+      case 'snmp': pageEl = (
+        <PageSnmp
+          key={`${refreshKey}-${displayTimezone}`}
+          displayTimezone={displayTimezone}
+          canOpenInterfaceRoles={canAccessPage('interface-roles')}
+        />
+      ); break;
       case 'bmp':        pageEl = <PageBmp key={refreshKey} />; break;
-      case 'collector-status': pageEl = <PageCollectorStatus key={refreshKey} onNavigate={navigate} />; break;
-      case 'databases':  pageEl = <PageDatabases key={refreshKey} />; break;
+      case 'interface-roles': pageEl = <PageInterfaceRoles key={refreshKey} onNavigate={navigate} />; break;
       case 'routers':    pageEl = <PageRouters key={refreshKey} />; break;
       case 'entities':   pageEl = <PageEntities key={refreshKey} />; break;
       case 'cidr':       pageEl = <PageCIDR key={refreshKey} />; break;
       case 'port-services': pageEl = <PagePortServices key={refreshKey} />; break;
-      case 'other':      pageEl = <PageOtherRefs key={refreshKey} onNavigate={navigate} />; break;
       case 'users':      pageEl = <PageUsers key={refreshKey} currentUser={auth.user} onAuthRefresh={reloadCurrentUser} />; break;
       case 'ttl':        pageEl = <PageTTL key={refreshKey} />; break;
       default:           pageEl = <PageComingSoon key={refreshKey} pageId={page} onNavigate={navigate} />;
@@ -296,6 +313,7 @@ function App() {
         collectorFilter={collectorFilter}
         onCollectorFilterChange={setCollectorFilter}
         pageTitles={pageTitles}
+        hiddenPageIds={hiddenPageIds}
         displayTimezone={displayTimezone}
         timezonePref={timezonePref}
         onTimezonePrefChange={handleTimezonePrefChange}

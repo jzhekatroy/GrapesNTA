@@ -22,6 +22,7 @@ const { protocolChartColor } = require('./protocol-colors');
 const { getVlanNameMap, vlanLabel } = require('./net-l2-vlans');
 const {
   resolveTrafficWindow,
+  probeTrafficWindowBounds,
   flowIpExpr,
   flowSamplerIpExpr,
   sflowIfIndexExpr,
@@ -728,8 +729,79 @@ function explorerSchema() {
   };
 }
 
-function normalizeExplorerLimit(limit) {
-  return Math.min(Math.max(Number(limit) || 10, 1), EXPLORER_MAX_LIMIT);
+function normalizeExplorerLimit(limit, { maxLimit = EXPLORER_MAX_LIMIT } = {}) {
+  return Math.min(Math.max(Number(limit) || 10, 1), maxLimit);
+}
+
+function explorerAggPctColumn(metricKey) {
+  switch (metricKey) {
+    case 'pps': return 'packets';
+    case 'fps':
+    case 'flows': return 'flows';
+    default: return 'bytes';
+  }
+}
+
+async function createExplorerWindowAnchor() {
+  const tz = escapeSqlString(config.dataTimezone || 'UTC');
+  const { rows } = await query(
+    `SELECT formatDateTime(now() - INTERVAL 30 SECOND, '%F %T', '${tz}') AS anchor`,
+    {},
+    { name: 'explorer/window-anchor' },
+  );
+  return rows[0]?.anchor || null;
+}
+
+async function ensureExplorerWindowSnapshot(body = {}) {
+  const q = normalizeExplorerQuery(body);
+  const next = { ...body };
+  if (q.range === 'custom') {
+    next.windowFrom = q.from;
+    next.windowTo = q.to;
+    next.windowSecondsActual = Math.max(1, Math.floor(customRangeDurationMs(q.from, q.to) / 1000));
+    return next;
+  }
+  if (!next.windowAnchor) {
+    next.windowAnchor = await createExplorerWindowAnchor();
+  }
+  if (!next.windowFrom || !next.windowTo) {
+    const bounds = await probeTrafficWindowBounds({
+      range: q.range,
+      from: q.from,
+      to: q.to,
+      anchor: next.windowAnchor,
+    }, query);
+    next.windowFrom = bounds.windowFrom;
+    next.windowTo = bounds.windowTo;
+    next.windowSecondsActual = bounds.windowSeconds;
+  }
+  return next;
+}
+
+function explorerResolveTrafficWindow(body = {}, q = null) {
+  const queryNorm = q || normalizeExplorerQuery(body);
+  return resolveTrafficWindow({
+    range: queryNorm.range,
+    from: queryNorm.from,
+    to: queryNorm.to,
+    anchor: body.windowAnchor,
+  });
+}
+
+function explorerResolvedWindowSeconds(body = {}, q = null) {
+  if (body.windowSecondsActual) return body.windowSecondsActual;
+  const queryNorm = q || normalizeExplorerQuery(body);
+  return explorerWindowSeconds({ range: queryNorm.range, from: queryNorm.from, to: queryNorm.to });
+}
+
+function buildExplorerWindowMeta(body = {}, q = null) {
+  const queryNorm = q || normalizeExplorerQuery(body);
+  return {
+    windowAnchor: body.windowAnchor || null,
+    windowFrom: body.windowFrom || (queryNorm.range === 'custom' ? queryNorm.from : null),
+    windowTo: body.windowTo || (queryNorm.range === 'custom' ? queryNorm.to : null),
+    resolvedRange: queryNorm.range,
+  };
 }
 
 function normalizeExplorerGroupBy(groupBy, dims) {
@@ -1167,7 +1239,7 @@ function collectExplorerJoins(groupBy, dims, filterJoins = []) {
   return [...joins].join('\n      ');
 }
 
-function normalizeExplorerQuery(body = {}) {
+function normalizeExplorerQuery(body = {}, options = {}) {
   const range = body.range || body.timeRange || '1h';
   const from = body.from;
   const to = body.to;
@@ -1188,7 +1260,7 @@ function normalizeExplorerQuery(body = {}) {
     metric: normalizeExplorerMetric(body.metric),
     groupBy: body.groupBy,
     filters: normalizeFilterList(body.filters),
-    limit: normalizeExplorerLimit(body.limit),
+    limit: normalizeExplorerLimit(body.limit, options),
     offset: Math.min(Math.max(Number(body.offset) || 0, 0), 10000),
     range,
     from,
@@ -1198,6 +1270,7 @@ function normalizeExplorerQuery(body = {}) {
     includeTimeseries: body.includeTimeseries !== false,
     includeBreakdowns: body.includeBreakdowns !== false,
     collectorId,
+    windowAnchor: body.windowAnchor || undefined,
   };
 }
 
@@ -1316,8 +1389,8 @@ function mapExplorerFlowRows(groups, rows, windowSeconds, vlanGroupIndexes, asnG
   })();
 }
 
-async function explorerFlows(body = {}) {
-  const q = normalizeExplorerQuery(body);
+async function explorerFlows(body = {}, options = {}) {
+  const q = normalizeExplorerQuery(body, options);
   const dims = explorerDimensions();
   const groups = normalizeExplorerGroupBy(q.groupBy, dims);
   if (!groups.length) throw new Error('Выберите хотя бы одну группировку');
@@ -1326,10 +1399,11 @@ async function explorerFlows(body = {}) {
   const scaled = explorerScaledFlowExprs('f');
   const metricSpecs = buildExplorerMetricSpecs(scaled);
   const metricSpec = metricSpecs[metricKey];
+  const pctCol = explorerAggPctColumn(metricKey);
   const pctExpr = `round(${metricSpec.pctBase} * 100 / nullIf(sum(${metricSpec.pctBase}) OVER (), 0), 2)`;
-  const windowSpec = resolveTrafficWindow({ range: q.range, from: q.from, to: q.to });
+  const windowSpec = explorerResolveTrafficWindow(body, q);
   const gran = resolveExplorerGranularity(q);
-  const windowSeconds = explorerWindowSeconds({ range: q.range, from: q.from, to: q.to });
+  const windowSeconds = explorerResolvedWindowSeconds(body, q);
   const params = { ...windowSpec.params, limit: q.limit, offset: q.offset };
   const { filterSql, joins: filterJoins } = await buildExplorerFilterClauses(q.filters, dims, params);
   const t = col('time');
@@ -1360,6 +1434,7 @@ async function explorerFlows(body = {}) {
     windowSeconds,
     trafficSampled: scaled.sampled,
     twoPhase: !!plan.useTwoPhase,
+    ...buildExplorerWindowMeta(body, q),
   };
 
   if (!plan.useTwoPhase) {
@@ -1508,6 +1583,7 @@ async function explorerFlows(body = {}) {
   }
   meta.candidatePrefetch = useCandidatePrefetch;
   meta.candidateLookbackHours = useCandidatePrefetch ? candidateLookbackHours : null;
+  meta.pctScope = useCandidatePrefetch ? 'candidate_subset' : 'full_filtered';
   const heavyTimeoutMs = explorerHeavyRequestTimeoutMs(windowSeconds, useCandidatePrefetch);
   const heavySettings = {
     ...EXPLORER_CH_SETTINGS,
@@ -1528,7 +1604,7 @@ async function explorerFlows(body = {}) {
       SELECT
         ${labelSelectParts.join(',\n        ')},
         ${metricFromSum()} AS metric_value,
-        round(sum(a.bytes) * 100 / nullIf(sum(sum(a.bytes)) OVER (), 0), 2) AS pct,
+        round(sum(a.${pctCol}) * 100 / nullIf(sum(sum(a.${pctCol})) OVER (), 0), 2) AS pct,
         sum(a.bytes) AS bytes,
         round(sum(a.bytes) * 8 / window_seconds, 0) AS avg_bps,
         sum(a.packets) AS packets,
@@ -1543,20 +1619,27 @@ async function explorerFlows(body = {}) {
     `
     : `
       WITH
-        ${withHead}
+        ${withHead},
+        inner_agg AS (
+          ${innerAggSql}
+        ),
+        grouped_total AS (
+          SELECT sum(${pctCol}) AS total FROM inner_agg
+        )
       SELECT
         ${labelSelectParts.join(',\n        ')},
         ${metricFromAgg('a')} AS metric_value,
-        round(a.bytes * 100 / nullIf(sum(a.bytes) OVER (), 0), 2) AS pct,
+        round(a.${pctCol} * 100 / nullIf(gt.total, 0), 2) AS pct,
         a.bytes AS bytes,
         round(a.bytes * 8 / window_seconds, 0) AS avg_bps,
         a.packets AS packets,
         a.flows AS flows
       FROM (
-        ${innerAggSql}
+        SELECT * FROM inner_agg
         ORDER BY bytes DESC
         LIMIT {limit:UInt32} OFFSET {offset:UInt32}
       ) AS a
+      CROSS JOIN grouped_total AS gt
       ${uniqueLabelJoins.join('\n      ')}
       ORDER BY bytes DESC
     `;
@@ -1577,7 +1660,7 @@ async function explorerSummary(body = {}) {
   const q = normalizeExplorerQuery(body);
   const dims = explorerDimensions();
   const scaled = explorerScaledFlowExprs('f');
-  const windowSpec = resolveTrafficWindow({ range: q.range, from: q.from, to: q.to });
+  const windowSpec = explorerResolveTrafficWindow(body, q);
   const params = { ...windowSpec.params };
   const { filterSql, joins: filterJoins } = await buildExplorerFilterClauses(q.filters, dims, params);
   const joinSql = collectExplorerJoins([], dims, filterJoins);
@@ -1656,7 +1739,7 @@ async function explorerResultSeries(body = {}, flowRows = []) {
   const metricKey = q.metric;
   const scaled = explorerScaledFlowExprs('f');
   const gran = resolveExplorerGranularity(q);
-  const windowSpec = resolveTrafficWindow({ range: q.range, from: q.from, to: q.to });
+  const windowSpec = explorerResolveTrafficWindow(body, q);
   const params = { ...windowSpec.params };
   const idxRef = { i: 0 };
   const { filterSql, joins: filterJoins } = await buildExplorerFilterClauses(q.filters, dims, params);
@@ -1778,11 +1861,9 @@ async function explorerGroupedTimeseries(body = {}) {
 
   const metricKey = q.metric;
   const scaled = explorerScaledFlowExprs('f');
+  const windowSpec = explorerResolveTrafficWindow(body, q);
   const gran = resolveExplorerGranularity(q);
-  const windowSpec = resolveTrafficWindow({
-    range: q.range, from: q.from, to: q.to, bucketSeconds: gran.seconds,
-  });
-  const windowSeconds = explorerWindowSeconds({ range: q.range, from: q.from, to: q.to });
+  const windowSeconds = explorerResolvedWindowSeconds(body, q);
   const params = { ...windowSpec.params, limit: q.limit };
   const { filterSql, joins: filterJoins } = await buildExplorerFilterClauses(q.filters, dims, params);
   const t = col('time');
@@ -1997,7 +2078,7 @@ async function explorerTimeseries(body = {}) {
   const dims = explorerDimensions();
   const scaled = explorerScaledFlowExprs('f');
   const gran = resolveExplorerGranularity(q);
-  const windowSpec = resolveTrafficWindow({ range: q.range, from: q.from, to: q.to });
+  const windowSpec = explorerResolveTrafficWindow(body, q);
   const params = { ...windowSpec.params };
   const { filterSql, joins: filterJoins } = await buildExplorerFilterClauses(q.filters, dims, params);
   const joinSql = collectExplorerJoins([], dims, filterJoins);
@@ -2058,7 +2139,7 @@ async function explorerBreakdown(body = {}, dimension = 'proto', limit = 5) {
   const dim = dims[dimension];
   if (!dim || dim.virtual) throw new Error(`Недоступное измерение: ${dimension}`);
   const scaled = explorerScaledFlowExprs('f');
-  const windowSpec = resolveTrafficWindow({ range: q.range, from: q.from, to: q.to });
+  const windowSpec = explorerResolveTrafficWindow(body, q);
   const params = { ...windowSpec.params, limit: Math.min(Math.max(Number(limit) || 5, 1), 20) };
   const { filterSql, joins: filterJoins } = await buildExplorerFilterClauses(q.filters, dims, params);
   const joinSql = collectExplorerJoins([dimension], dims, filterJoins);
@@ -2101,23 +2182,24 @@ async function explorerBreakdown(body = {}, dimension = 'proto', limit = 5) {
 }
 
 async function explorerQuery(body = {}) {
-  const q = normalizeExplorerQuery(body);
+  const queryBody = await ensureExplorerWindowSnapshot(body);
+  const q = normalizeExplorerQuery(queryBody);
   const dims = explorerDimensions();
   const groups = normalizeExplorerGroupBy(q.groupBy, dims);
-  const flowsSpec = groups.length ? await explorerFlows(body) : null;
+  const flowsSpec = groups.length ? await explorerFlows(queryBody) : null;
   let summarySpec = null;
   let timeseriesSpec = null;
   const breakdownSpecs = [];
 
-  if (q.includeSummary) summarySpec = await explorerSummary(body);
-  if (q.includeTimeseries) timeseriesSpec = await explorerTimeseries(body);
+  if (q.includeSummary) summarySpec = await explorerSummary(queryBody);
+  if (q.includeTimeseries) timeseriesSpec = await explorerTimeseries(queryBody);
   if (q.includeBreakdowns) {
     for (const dim of []) {
-      if (explorerDimensions()[dim]) breakdownSpecs.push({ dim, spec: await explorerBreakdown(body, dim, 5) });
+      if (explorerDimensions()[dim]) breakdownSpecs.push({ dim, spec: await explorerBreakdown(queryBody, dim, 5) });
     }
   }
 
-  return { flowsSpec, summarySpec, timeseriesSpec, breakdownSpecs, q };
+  return { flowsSpec, summarySpec, timeseriesSpec, breakdownSpecs, q, queryBody };
 }
 
 function normalizeExplorerSwitchIpFilter(raw) {
@@ -2455,14 +2537,28 @@ function rowsToCsv(rows, groupBy, metricLabel) {
 }
 
 async function explorerExportCsv(body = {}) {
+  const hasPinnedWindow = body.from && body.to;
+  const snapshotBody = hasPinnedWindow
+    ? { ...body, range: 'custom', timeRange: undefined }
+    : (body.windowAnchor || body.windowFrom)
+      ? body
+      : await ensureExplorerWindowSnapshot(body);
   const exportBody = {
-    ...body,
+    ...snapshotBody,
     limit: EXPLORER_MAX_EXPORT_ROWS,
     offset: 0,
   };
-  const spec = await explorerFlows(exportBody);
-  const { rows } = await query(spec.sql, spec.params || {}, { name: 'explorer/export' });
-  const windowSeconds = spec.meta?.windowSeconds || explorerWindowSeconds({ range: exportBody.range, from: exportBody.from, to: exportBody.to });
+  const spec = await explorerFlows(exportBody, { maxLimit: EXPLORER_MAX_EXPORT_ROWS });
+  const { rows } = await query(spec.sql, spec.params || {}, {
+    name: 'explorer/export',
+    clickhouse_settings: spec.clickhouse_settings,
+    requestTimeoutMs: spec.requestTimeoutMs,
+  });
+  const windowSeconds = spec.meta?.windowSeconds || explorerWindowSeconds({
+    range: exportBody.range,
+    from: exportBody.from,
+    to: exportBody.to,
+  });
   const mapped = (await spec.map(rows)).map((row) => enrichExplorerFlowRow(row, windowSeconds));
   const metricLabel = spec.meta?.metricLabel || 'metric';
   return rowsToCsv(mapped, spec.meta?.groupBy || [], metricLabel);
@@ -2489,4 +2585,6 @@ module.exports = {
   asnExplorerDisplayLabel,
   lookupAsnDisplayNames,
   EXPLORER_MAX_LIMIT,
+  EXPLORER_MAX_EXPORT_ROWS,
+  explorerAggPctColumn,
 };

@@ -71,6 +71,14 @@ const config = {
   snmpAgentsTable: env('CLICKHOUSE_SNMP_AGENTS_TABLE', 'net_snmp_agents'),
   netInterfacesCurrent: env('CLICKHOUSE_NET_INTERFACES_CURRENT', 'net_interfaces_current'),
   netInterfacesDict: env('CLICKHOUSE_NET_INTERFACES_DICT', 'default.net_interfaces_dict'),
+  directionSettingsTable: env('CLICKHOUSE_DIRECTION_SETTINGS_TABLE', 'net_direction_settings'),
+  directionSettingsView: env('CLICKHOUSE_DIRECTION_SETTINGS_VIEW', 'net_direction_settings_current'),
+  interfaceRoleRulesTable: env('CLICKHOUSE_INTERFACE_ROLE_RULES_TABLE', 'net_interface_role_rules'),
+  interfaceRoleRulesView: env('CLICKHOUSE_INTERFACE_ROLE_RULES_VIEW', 'net_interface_role_rules_current'),
+  interfaceRolesTable: env('CLICKHOUSE_INTERFACE_ROLES_TABLE', 'net_interface_roles'),
+  interfaceRolesView: env('CLICKHOUSE_INTERFACE_ROLES_VIEW', 'net_interface_roles_current'),
+  interfaceRolesEffectiveTable: env('CLICKHOUSE_INTERFACE_ROLES_EFFECTIVE_TABLE', 'net_interface_roles_effective'),
+  interfaceRolesEffectiveView: env('CLICKHOUSE_INTERFACE_ROLES_EFFECTIVE_VIEW', 'net_interface_roles_effective_current'),
   geoCountryDict: env('CLICKHOUSE_GEO_COUNTRY_DICT', 'default.geo_country_dict'),
   locationsView: env('CLICKHOUSE_LOCATIONS_VIEW', 'net_locations_enabled'),
   locationsTable: env('CLICKHOUSE_LOCATIONS_TABLE', 'net_locations'),
@@ -96,9 +104,19 @@ const config = {
   userPermissionsTable: env('CLICKHOUSE_USER_PERMISSIONS_TABLE', 'user_permissions'),
   collectorHealthView: envOpt('CLICKHOUSE_COLLECTOR_HEALTH_VIEW', null),
   collectorHealthSnapshotsTable: env('CLICKHOUSE_COLLECTOR_HEALTH_SNAPSHOTS_TABLE', 'collector_health_snapshots'),
+  intervalsControlTable: env('CLICKHOUSE_INTERVALS_CONTROL_TABLE', 'intervals_control'),
+  intervalsTable: env('CLICKHOUSE_INTERVALS_TABLE', 'intervals'),
+  intervalsCountryRuTable: env('CLICKHOUSE_INTERVALS_COUNTRY_RU_TABLE', 'intervals_country_ru'),
   requestTimeoutMs: envInt('CLICKHOUSE_REQUEST_TIMEOUT_MS', 30000),
   logSql: envBool('CLICKHOUSE_LOG_SQL', process.env.NODE_ENV !== 'production'),
   dataTimezone: env('CLICKHOUSE_TIMEZONE', 'UTC'),
+  monitoringColumns: {
+    dt: env('CH_COL_INTERVALS_DT', 'dt'),
+    value: env('CH_COL_INTERVALS_VALUE', 'value'),
+    parameter: env('CH_COL_INTERVALS_PARAMETER', 'parameter'),
+    featureName: env('CH_COL_INTERVALS_FEATURE', 'feature_name'),
+    outsideCi: env('CH_COL_INTERVALS_OUTSIDE_CI', 'outside_ci'),
+  },
   columns: {
     time: env('CH_COL_TIME', 'TimeReceived'),
     bytes: env('CH_COL_BYTES', 'Bytes'),
@@ -264,6 +282,38 @@ function netInterfacesCurrentRef() {
   return `${qIdent(config.database)}.${qIdent(config.netInterfacesCurrent)}`;
 }
 
+function directionSettingsTableRef() {
+  return `${qIdent(config.database)}.${qIdent(config.directionSettingsTable)}`;
+}
+
+function directionSettingsViewRef() {
+  return `${qIdent(config.database)}.${qIdent(config.directionSettingsView)}`;
+}
+
+function interfaceRoleRulesTableRef() {
+  return `${qIdent(config.database)}.${qIdent(config.interfaceRoleRulesTable)}`;
+}
+
+function interfaceRoleRulesViewRef() {
+  return `${qIdent(config.database)}.${qIdent(config.interfaceRoleRulesView)}`;
+}
+
+function interfaceRolesTableRef() {
+  return `${qIdent(config.database)}.${qIdent(config.interfaceRolesTable)}`;
+}
+
+function interfaceRolesViewRef() {
+  return `${qIdent(config.database)}.${qIdent(config.interfaceRolesView)}`;
+}
+
+function interfaceRolesEffectiveTableRef() {
+  return `${qIdent(config.database)}.${qIdent(config.interfaceRolesEffectiveTable)}`;
+}
+
+function interfaceRolesEffectiveViewRef() {
+  return `${qIdent(config.database)}.${qIdent(config.interfaceRolesEffectiveView)}`;
+}
+
 function netInterfacesDictRef() {
   return String(config.netInterfacesDict)
     .split('.')
@@ -282,6 +332,23 @@ function collectorHealthViewRef() {
 
 function collectorHealthSnapshotsTableRef() {
   return `${qIdent(config.database)}.${qIdent(config.collectorHealthSnapshotsTable)}`;
+}
+
+function intervalsControlTableRef() {
+  return `${qIdent(config.database)}.${qIdent(config.intervalsControlTable)}`;
+}
+
+function intervalsTableRef() {
+  return `${qIdent(config.database)}.${qIdent(config.intervalsTable)}`;
+}
+
+function intervalsCountryRuTableRef() {
+  return `${qIdent(config.database)}.${qIdent(config.intervalsCountryRuTable)}`;
+}
+
+function monitoringCol(key) {
+  const name = config.monitoringColumns[key];
+  return name ? qIdent(name) : null;
 }
 
 function healthCol(key) {
@@ -629,10 +696,22 @@ module.exports = {
   snmpAgentsCurrentRef,
   netInterfacesCurrentRef,
   netInterfacesDictRef,
+  directionSettingsTableRef,
+  directionSettingsViewRef,
+  interfaceRoleRulesTableRef,
+  interfaceRoleRulesViewRef,
+  interfaceRolesTableRef,
+  interfaceRolesViewRef,
+  interfaceRolesEffectiveTableRef,
+  interfaceRolesEffectiveViewRef,
   locationsViewRef,
   locationsTableRef,
   collectorHealthViewRef,
   collectorHealthSnapshotsTableRef,
+  intervalsControlTableRef,
+  intervalsTableRef,
+  intervalsCountryRuTableRef,
+  monitoringCol,
   healthCol,
   dnsLogTableRef,
   dnsAnswersTableRef,

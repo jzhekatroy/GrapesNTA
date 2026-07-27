@@ -101,6 +101,154 @@ function buildChartPolylineSegments(points, xAt, yAt, getValue) {
   return segments;
 }
 
+function chartSeriesPps(pt, key) {
+  const v = pt[chartPpsField(key)];
+  if (v != null && v !== '') return chartSeriesNumber(v);
+  if (key === 'total' && pt.pps != null) return chartSeriesNumber(pt.pps);
+  return null;
+}
+
+function collectChartValueKeys(lines, extraKeys = []) {
+  const keys = new Set(extraKeys);
+  for (const ln of lines || []) {
+    if (ln?.key) {
+      keys.add(ln.key);
+      keys.add(chartPpsField(ln.key));
+    }
+  }
+  return [...keys];
+}
+
+function makeChartGapPlaceholder(bucketMs, valueKeys) {
+  const bucket = msToBucketString(bucketMs);
+  const pt = { bucket, bucketMs, t: null, _gap: true };
+  for (const key of valueKeys) pt[key] = null;
+  return pt;
+}
+
+function fillChartTimeGaps(points, { bucketSeconds, startMs, endMs, valueKeys = [] } = {}) {
+  if (!Array.isArray(points) || !points.length || !bucketSeconds) return points || [];
+
+  const step = bucketSeconds * 1000;
+  const sorted = [...points]
+    .map((pt) => ({ pt, ms: resolvePointEpochMs(pt) }))
+    .filter(({ ms }) => ms != null)
+    .sort((a, b) => a.ms - b.ms);
+
+  if (!sorted.length) return points;
+
+  const anchorMs = sorted[0].ms;
+  const byMs = new Map();
+  for (const { pt, ms } of sorted) {
+    const snapped = anchorMs + Math.round((ms - anchorMs) / step) * step;
+    if (!byMs.has(snapped)) byMs.set(snapped, pt);
+  }
+
+  if (startMs != null && endMs != null && endMs > startMs) {
+    const result = [];
+    const delta = Math.ceil((startMs - anchorMs) / step);
+    let ms = anchorMs + delta * step;
+    while (ms <= endMs) {
+      result.push(byMs.get(ms) || makeChartGapPlaceholder(ms, valueKeys));
+      ms += step;
+    }
+    return result.length ? result : points;
+  }
+
+  const result = [];
+  for (let i = 0; i < sorted.length; i += 1) {
+    const { pt, ms } = sorted[i];
+    result.push(pt);
+    if (i >= sorted.length - 1) continue;
+    const nextMs = sorted[i + 1].ms;
+    let fillMs = ms + step;
+    while (fillMs < nextMs) {
+      result.push(makeChartGapPlaceholder(fillMs, valueKeys));
+      fillMs += step;
+    }
+  }
+  return result;
+}
+
+function buildChartTimeScale(data, padL, padR, w) {
+  const n = data.length;
+  const plotW = w - padL - padR;
+  const startMs = resolvePointEpochMs(data[0]);
+  const endMs = resolvePointEpochMs(data[n - 1]);
+  const span = startMs != null && endMs != null ? endMs - startMs : 0;
+
+  const xAtIndex = (i) => {
+    if (n <= 1) return padL + plotW / 2;
+    if (span <= 0) return padL + (i / (n - 1)) * plotW;
+    const ms = resolvePointEpochMs(data[i]);
+    if (ms == null) return padL;
+    return padL + ((ms - startMs) / span) * plotW;
+  };
+
+  const indexFromClientX = (clientX, wrapRef) => {
+    const el = wrapRef?.current;
+    if (!el || !data.length) return null;
+    const rect = el.getBoundingClientRect();
+    if (!rect.width) return null;
+    const vx = ((clientX - rect.left) / rect.width) * w;
+    if (vx < padL || vx > w - padR) return null;
+    if (n <= 1) return 0;
+    if (span <= 0) {
+      return Math.max(0, Math.min(n - 1, Math.round(((vx - padL) / plotW) * (n - 1))));
+    }
+    const targetMs = startMs + ((vx - padL) / plotW) * span;
+    let bestIdx = 0;
+    let bestDist = Infinity;
+    for (let i = 0; i < n; i += 1) {
+      const ms = resolvePointEpochMs(data[i]);
+      if (ms == null) continue;
+      const dist = Math.abs(ms - targetMs);
+      if (dist < bestDist) {
+        bestDist = dist;
+        bestIdx = i;
+      }
+    }
+    return bestIdx;
+  };
+
+  const selectionBandPct = (startIdx, endIdx) => {
+    const lo = Math.min(startIdx, endIdx);
+    const hi = Math.max(startIdx, endIdx);
+    const xLo = xAtIndex(lo);
+    const xHi = xAtIndex(hi);
+    return {
+      left: ((xLo - padL) / plotW) * 100,
+      width: Math.max(((xHi - xLo) / plotW) * 100, 0),
+    };
+  };
+
+  return { xAtIndex, indexFromClientX, selectionBandPct, startMs, endMs, n, plotW };
+}
+
+function buildChartAreaPathSegments(points, xAt, yAt, yZero, getValue) {
+  const segments = [];
+  let current = [];
+  points.forEach((pt, i) => {
+    const value = getValue(pt);
+    if (value == null) {
+      if (current.length) {
+        segments.push(current);
+        current = [];
+      }
+      return;
+    }
+    current.push({ i, value });
+  });
+  if (current.length) segments.push(current);
+
+  return segments.map((seg) => {
+    const first = seg[0];
+    const last = seg[seg.length - 1];
+    const top = seg.map(({ i, value }) => `${xAt(i)},${yAt(value)}`).join(' L ');
+    return `M ${xAt(first.i)},${yZero} L ${top} L ${xAt(last.i)},${yZero} Z`;
+  });
+}
+
 const CHART_TIP_LINE_ORDER = ['total', 'incoming', 'outgoing', 'transit', 'internal', 'unclassified'];
 
 function sortLinesForTip(lines) {
@@ -118,6 +266,7 @@ function clearChartHoverIndex(setHoverIdx, blocked) {
 }
 
 const CHART_PERIOD_MINUTES = {
+  '15m': 15,
   '30m': 30,
   '1h': 60,
   '3h': 180,
@@ -496,6 +645,8 @@ function DualChart({
   onRangeSelect,
   bucketSeconds = 300,
   displayTimezone,
+  periodStartMs,
+  periodEndMs,
   valueFormatter = fmtBits,
   axisFormatter = fmtCompact,
   ppsFormatter = fmtNum,
@@ -511,10 +662,22 @@ function DualChart({
   const [selection, setSelection] = useState(null);
 
   const isPps = mode === 'pps';
-  const data = points;
   const activeLines = isPps ? [] : lines;
   const ppsSeries = ppsLines != null ? ppsLines : lines;
   const activePpsLines = isPps ? ppsSeries : [];
+  const valueKeys = useMemo(
+    () => collectChartValueKeys(lines, ['pps']),
+    [lines.map((ln) => ln.key).join(',')],
+  );
+  const data = useMemo(
+    () => fillChartTimeGaps(points, {
+      bucketSeconds,
+      startMs: periodStartMs,
+      endMs: periodEndMs,
+      valueKeys,
+    }),
+    [points, bucketSeconds, periodStartMs, periodEndMs, valueKeys.join(',')],
+  );
 
   const w = 800;
   const yAxisTitlePad = yAxisLabel || yAxisUnit ? 28 : 0;
@@ -525,13 +688,15 @@ function DualChart({
   const h = height;
   const bwValues = chartSeriesValues(data, activeLines);
   const ppsValues = activePpsLines.length
-    ? data.flatMap((pt) => activePpsLines.map((ln) => getPointPps(pt, ln.key)))
+    ? data.flatMap((pt) => activePpsLines
+      .map((ln) => chartSeriesPps(pt, ln.key))
+      .filter((v) => v != null))
     : [];
   const max1 = bwValues.length ? Math.max(...bwValues) * 1.15 || 1 : 1;
   const max2 = ppsValues.length ? Math.max(...ppsValues) * 1.15 || 1 : 1;
   const n = Math.max(data.length, 1);
-  const xb = n > 1 ? (w - padL - padR) / (n - 1) : w - padL - padR;
-  const x = (i) => padL + i * xb;
+  const timeScale = data.length > 1 ? buildChartTimeScale(data, padL, padR, w) : null;
+  const x = timeScale ? (i) => timeScale.xAtIndex(i) : () => padL;
   const y1 = (v) => padT + (1 - v / max1) * (h - padT - padB);
   const y2 = (v) => padT + (1 - v / max2) * (h - padT - padB);
   const yScale = isPps ? y2 : y1;
@@ -540,20 +705,19 @@ function DualChart({
   const yTicks = 4;
   const selectable = typeof onRangeSelect === 'function' && data.length > 1;
   const tz = displayTimezone || getDisplayTimezone();
-  const startMs = data.length ? resolvePointEpochMs(data[0]) : null;
-  const endMs = data.length ? resolvePointEpochMs(data[data.length - 1]) : null;
+  const startMs = timeScale?.startMs ?? (data.length ? resolvePointEpochMs(data[0]) : null);
+  const endMs = timeScale?.endMs ?? (data.length ? resolvePointEpochMs(data[data.length - 1]) : null);
   const longRange = startMs != null && endMs != null && (endMs - startMs) > 24 * 3600000;
 
   const indexFromClientX = (clientX) => {
+    if (timeScale) return timeScale.indexFromClientX(clientX, wrapRef);
     const el = wrapRef.current;
     if (!el || !data.length) return null;
     const rect = el.getBoundingClientRect();
     if (!rect.width) return null;
     const vx = ((clientX - rect.left) / rect.width) * w;
     if (vx < padL || vx > w - padR) return null;
-    return n > 1
-      ? Math.max(0, Math.min(n - 1, Math.round((vx - padL) / xb)))
-      : 0;
+    return 0;
   };
 
   const hoverPoint = !selection && hoverIdx != null ? data[hoverIdx] : null;
@@ -625,11 +789,8 @@ function DualChart({
     clearChartHoverIndex(setHoverIdx, dragRef.current);
   };
 
-  const selectionBand = selection && n > 0
-    ? {
-        left: (Math.min(selection.start, selection.end) / Math.max(n - 1, 1)) * 100,
-        width: (Math.abs(selection.end - selection.start) / Math.max(n - 1, 1)) * 100,
-      }
+  const selectionBand = selection && timeScale
+    ? timeScale.selectionBandPct(selection.start, selection.end)
     : null;
   const chartPadLeftPct = (padL / w) * 100;
   const chartPadRightPct = (padR / w) * 100;
@@ -650,44 +811,26 @@ function DualChart({
     <div
       ref={wrapRef}
       className={`dual-chart dual-chart--fluid${selectable ? ' dual-chart--selectable' : ''}${selection ? ' dual-chart--dragging' : ''}`}
-      style={fluidChartStyle(height)}
+      style={{
+        ...fluidChartStyle(height),
+        ...(yAxisLabel || yAxisUnit ? {
+          '--dual-chart-y-title-w': `${(yAxisTitlePad / w) * 100}%`,
+          '--dual-chart-pad-t': `${(padT / h) * 100}%`,
+          '--dual-chart-pad-b': `${(padB / h) * 100}%`,
+        } : {}),
+      }}
       onMouseMove={onChartMouseMove}
       onMouseLeave={onChartMouseLeave}
       onMouseDown={onChartMouseDown}
     >
+      {(yAxisLabel || yAxisUnit) && (
+        <div className="dual-chart__y-axis-title" aria-hidden="true">
+          <div className="dual-chart__y-axis-title-inner">
+            {[yAxisLabel, yAxisUnit].filter(Boolean).join('\n')}
+          </div>
+        </div>
+      )}
       <svg viewBox={`0 0 ${w} ${h}`} preserveAspectRatio="none" overflow="visible" className="dual-chart__svg">
-        {(yAxisLabel || yAxisUnit) && (
-          <g
-            className="dual-chart__y-axis-title"
-            transform={`translate(${Math.max(12, yAxisTitlePad - 6)}, ${padT + (h - padT - padB) / 2}) rotate(-90)`}
-          >
-            {yAxisLabel && (
-              <text
-                x={0}
-                y={0}
-                textAnchor="middle"
-                fontSize="10"
-                fill="var(--fg-secondary)"
-                fontFamily="Mulish"
-              >
-                {yAxisLabel}
-              </text>
-            )}
-            {yAxisUnit && (
-              <text
-                x={0}
-                y={0}
-                dy={yAxisLabel ? '1.25em' : 0}
-                textAnchor="middle"
-                fontSize="10"
-                fill="var(--fg-muted)"
-                fontFamily="Mulish"
-              >
-                {yAxisUnit}
-              </text>
-            )}
-          </g>
-        )}
         {Array.from({length: yTicks + 1}, (_, i) => {
           const vLeft = (maxScale / yTicks) * i;
           const yy = yScale(vLeft);
@@ -720,12 +863,17 @@ function DualChart({
           ));
         })}
         {activePpsLines.map((ln) => {
-          const pts = data.map((pt, i) => `${x(i)},${y2(getPointPps(pt, ln.key))}`).join(' ');
+          const segments = buildChartPolylineSegments(
+            data,
+            x,
+            y2,
+            (pt) => chartSeriesPps(pt, ln.key),
+          );
           const isTotal = ln.key === 'total';
-          return (
+          return segments.map((pts, segmentIdx) => (
             <polyline
-              key={`pps-${ln.key}`}
-              points={pts}
+              key={`pps-${ln.key}-${segmentIdx}`}
+              points={pts.join(' ')}
               fill="none"
               stroke={ln.color}
               strokeWidth={isTotal ? 2.5 : 2}
@@ -733,7 +881,7 @@ function DualChart({
               strokeLinecap="round"
               opacity={isTotal ? 1 : 0.9}
             />
-          );
+          ));
         })}
         {hoverPoint && (
           <g pointerEvents="none">
@@ -761,17 +909,21 @@ function DualChart({
               />
               );
             })}
-            {activePpsLines.map((ln) => (
+            {activePpsLines.map((ln) => {
+              const v = chartSeriesPps(hoverPoint, ln.key);
+              if (v == null) return null;
+              return (
               <circle
                 key={`pps-${ln.key}`}
                 cx={x(hoverIdx)}
-                cy={y2(getPointPps(hoverPoint, ln.key))}
+                cy={y2(v)}
                 r={4}
                 fill={ln.color}
                 stroke="#14131F"
                 strokeWidth="1.5"
               />
-            ))}
+              );
+            })}
           </g>
         )}
         {data.map((pt, i) => i % tEvery === 0 && (
@@ -806,7 +958,7 @@ function DualChart({
             <div key={`pps-${ln.key}`} className="dual-chart__tip-row">
               <span className="dual-chart__tip-swatch" style={{ background: ln.color }} />
               <span className="dual-chart__tip-label">{ln.label}, п/с</span>
-              <span className="dual-chart__tip-val mono">{ppsFormatter(getPointPps(hoverPoint, ln.key))}</span>
+              <span className="dual-chart__tip-val mono">{ppsFormatter(chartSeriesPps(hoverPoint, ln.key))}</span>
             </div>
           ))}
         </div>
@@ -823,6 +975,8 @@ function CategoryTrendChart({
   bucketSeconds = 300,
   displayTimezone,
   onRangeSelect,
+  periodStartMs,
+  periodEndMs,
 }) {
   const wrapRef = useRef(null);
   const dragRef = useRef(null);
@@ -831,6 +985,19 @@ function CategoryTrendChart({
   const [hidden, setHidden] = useState(() => new Set());
 
   const visibleLines = lines.filter((ln) => !hidden.has(ln.key));
+  const valueKeys = useMemo(
+    () => collectChartValueKeys(lines),
+    [lines.map((ln) => ln.key).join(',')],
+  );
+  const chartPoints = useMemo(
+    () => fillChartTimeGaps(points, {
+      bucketSeconds,
+      startMs: periodStartMs,
+      endMs: periodEndMs,
+      valueKeys,
+    }),
+    [points, bucketSeconds, periodStartMs, periodEndMs, valueKeys.join(',')],
+  );
   const w = 800;
   const padL = 48;
   const padR = 8;
@@ -838,34 +1005,29 @@ function CategoryTrendChart({
   const padB = 24;
   const h = height;
   const values = visibleLines.length
-    ? points.flatMap((pt) => visibleLines.map((ln) => pt[ln.key] || 0))
+    ? chartPoints.flatMap((pt) => visibleLines
+      .map((ln) => chartSeriesNumber(pt[ln.key]))
+      .filter((v) => v != null))
     : [];
   const max = values.length ? Math.max(...values) * 1.15 || 1 : 1;
-  const n = Math.max(points.length, 1);
-  const xb = n > 1 ? (w - padL - padR) / (n - 1) : w - padL - padR;
-  const x = (i) => padL + i * xb;
+  const n = Math.max(chartPoints.length, 1);
+  const timeScale = chartPoints.length > 1 ? buildChartTimeScale(chartPoints, padL, padR, w) : null;
+  const x = timeScale ? (i) => timeScale.xAtIndex(i) : () => padL;
   const y = (v) => padT + (1 - v / max) * (h - padT - padB);
   const tEvery = Math.max(1, Math.floor(n / 6));
   const yTicks = 3;
   const tz = displayTimezone || getDisplayTimezone();
-  const selectable = typeof onRangeSelect === 'function' && points.length > 1;
-  const startMs = points.length ? resolvePointEpochMs(points[0]) : null;
-  const endMs = points.length ? resolvePointEpochMs(points[points.length - 1]) : null;
+  const selectable = typeof onRangeSelect === 'function' && chartPoints.length > 1;
+  const startMs = timeScale?.startMs ?? (chartPoints.length ? resolvePointEpochMs(chartPoints[0]) : null);
+  const endMs = timeScale?.endMs ?? (chartPoints.length ? resolvePointEpochMs(chartPoints[chartPoints.length - 1]) : null);
   const longRange = startMs != null && endMs != null && (endMs - startMs) > 24 * 3600000;
 
   const indexFromClientX = (clientX) => {
-    const el = wrapRef.current;
-    if (!el || !points.length) return null;
-    const rect = el.getBoundingClientRect();
-    if (!rect.width) return null;
-    const vx = ((clientX - rect.left) / rect.width) * w;
-    if (vx < padL || vx > w - padR) return null;
-    return n > 1
-      ? Math.max(0, Math.min(n - 1, Math.round((vx - padL) / xb)))
-      : 0;
+    if (timeScale) return timeScale.indexFromClientX(clientX, wrapRef);
+    return null;
   };
 
-  const hoverPoint = !selection && hoverIdx != null ? points[hoverIdx] : null;
+  const hoverPoint = !selection && hoverIdx != null ? chartPoints[hoverIdx] : null;
   const tipPct = hoverIdx != null && n > 0 ? (x(hoverIdx) / w) * 100 : 50;
   const tipAlign = tipPct > 72 ? 'end' : tipPct < 20 ? 'start' : 'center';
   const tipStyle = {
@@ -895,7 +1057,7 @@ function CategoryTrendChart({
     setSelection(null);
     const movedPx = Math.abs(drag.lastX - drag.startX);
     if (movedPx < 4) return;
-    const range = chartRangeFromPointSelection(points, drag.startIdx, endIdx, bucketSeconds, tz);
+    const range = chartRangeFromPointSelection(chartPoints, drag.startIdx, endIdx, bucketSeconds, tz);
     if (range) onRangeSelect(range);
   };
 
@@ -934,11 +1096,8 @@ function CategoryTrendChart({
     clearChartHoverIndex(setHoverIdx, dragRef.current);
   };
 
-  const selectionBand = selection && n > 0
-    ? {
-        left: (Math.min(selection.start, selection.end) / Math.max(n - 1, 1)) * 100,
-        width: (Math.abs(selection.end - selection.start) / Math.max(n - 1, 1)) * 100,
-      }
+  const selectionBand = selection && timeScale
+    ? timeScale.selectionBandPct(selection.start, selection.end)
     : null;
   const chartPadLeftPct = (padL / w) * 100;
   const chartPadRightPct = (padR / w) * 100;
@@ -983,18 +1142,23 @@ function CategoryTrendChart({
             );
           })}
           {visibleLines.map((ln) => {
-            const pts = points.map((pt, i) => `${x(i)},${y(pt[ln.key] || 0)}`).join(' ');
-            return (
+            const segments = buildChartPolylineSegments(
+              chartPoints,
+              x,
+              y,
+              (pt) => chartSeriesNumber(pt[ln.key]),
+            );
+            return segments.map((pts, segmentIdx) => (
               <polyline
-                key={ln.key}
-                points={pts}
+                key={`${ln.key}-${segmentIdx}`}
+                points={pts.join(' ')}
                 fill="none"
                 stroke={ln.color}
                 strokeWidth="1.75"
                 strokeLinejoin="round"
                 strokeLinecap="round"
               />
-            );
+            ));
           })}
           {hoverPoint && (
             <g pointerEvents="none">
@@ -1007,20 +1171,24 @@ function CategoryTrendChart({
                 strokeWidth="1"
                 strokeDasharray="4 3"
               />
-              {visibleLines.map((ln) => (
+              {visibleLines.map((ln) => {
+                const v = chartSeriesNumber(hoverPoint[ln.key]);
+                if (v == null) return null;
+                return (
                 <circle
                   key={ln.key}
                   cx={x(hoverIdx)}
-                  cy={y(hoverPoint[ln.key] || 0)}
+                  cy={y(v)}
                   r="3.5"
                   fill={ln.color}
                   stroke="#14131F"
                   strokeWidth="1.5"
                 />
-              ))}
+                );
+              })}
             </g>
           )}
-          {points.map((pt, i) => i % tEvery === 0 && (
+          {chartPoints.map((pt, i) => i % tEvery === 0 && (
             <text key={i} x={x(i)} y={h - 4} textAnchor="middle" fontSize="9" fill="var(--fg-muted)" fontFamily="Mulish">
               {resolvePointEpochMs(pt) != null ? formatPointTimeLabel(pt, longRange, tz) : pt.t}
             </text>
@@ -1046,7 +1214,7 @@ function CategoryTrendChart({
               <div key={ln.key} className="dual-chart__tip-row">
                 <span className="dual-chart__tip-swatch" style={{ background: ln.color }} />
                 <span className="dual-chart__tip-label">{ln.label}</span>
-                <span className="dual-chart__tip-val mono">{fmtBits(hoverPoint[ln.key] || 0)}</span>
+                <span className="dual-chart__tip-val mono">{fmtBits(chartSeriesNumber(hoverPoint[ln.key]))}</span>
               </div>
             ))}
           </div>
@@ -1090,6 +1258,8 @@ function TimeSeriesSparkChart({
   className = '',
   onRangeSelect,
   bucketSeconds = 300,
+  periodStartMs,
+  periodEndMs,
 }) {
   const wrapRef = useRef(null);
   const dragRef = useRef(null);
@@ -1098,10 +1268,18 @@ function TimeSeriesSparkChart({
   const gradId = useMemo(() => `ts${Math.random().toString(36).slice(2, 8)}`, []);
   const fmtValue = formatValue || fmtBits;
 
-  const data = (points || []).map((pt) => ({
-    ...pt,
-    v: Number(pt[valueKey] ?? pt.bps) || 0,
-  }));
+  const data = useMemo(() => {
+    const densified = fillChartTimeGaps(points || [], {
+      bucketSeconds,
+      startMs: periodStartMs,
+      endMs: periodEndMs,
+      valueKeys: [valueKey, 'bps', 'v'],
+    });
+    return densified.map((pt) => ({
+      ...pt,
+      v: chartSeriesNumber(pt[valueKey] ?? pt.bps),
+    }));
+  }, [points, bucketSeconds, periodStartMs, periodEndMs, valueKey]);
   if (!data.length) return null;
 
   const w = 800;
@@ -1110,29 +1288,24 @@ function TimeSeriesSparkChart({
   const padT = 16;
   const padB = 32;
   const h = height;
-  const max = Math.max(...data.map((d) => d.v), 0) * 1.12 || 1;
+  const valueList = data.map((d) => d.v).filter((v) => v != null);
+  const max = valueList.length ? Math.max(...valueList) * 1.12 || 1 : 1;
   const n = data.length;
-  const xb = n > 1 ? (w - padL - padR) / (n - 1) : w - padL - padR;
-  const x = (i) => padL + i * xb;
+  const timeScale = data.length > 1 ? buildChartTimeScale(data, padL, padR, w) : null;
+  const x = timeScale ? (i) => timeScale.xAtIndex(i) : () => padL;
   const y = (v) => padT + (1 - v / max) * (h - padT - padB);
+  const yZero = y(0);
   const yTicks = 4;
   const tEvery = Math.max(1, Math.floor(n / 8));
   const tz = displayTimezone || getDisplayTimezone();
-  const startMs = resolvePointEpochMs(data[0]);
-  const endMs = resolvePointEpochMs(data[n - 1]);
+  const startMs = timeScale?.startMs ?? resolvePointEpochMs(data[0]);
+  const endMs = timeScale?.endMs ?? resolvePointEpochMs(data[n - 1]);
   const longRange = startMs != null && endMs != null && (endMs - startMs) > 24 * 3600000;
   const selectable = typeof onRangeSelect === 'function' && data.length > 1;
 
   const indexFromClientX = (clientX) => {
-    const el = wrapRef.current;
-    if (!el || !data.length) return null;
-    const rect = el.getBoundingClientRect();
-    if (!rect.width) return null;
-    const vx = ((clientX - rect.left) / rect.width) * w;
-    if (vx < padL || vx > w - padR) return null;
-    return n > 1
-      ? Math.max(0, Math.min(n - 1, Math.round((vx - padL) / xb)))
-      : 0;
+    if (timeScale) return timeScale.indexFromClientX(clientX, wrapRef);
+    return null;
   };
 
   const onChartMouseMove = (e) => {
@@ -1196,11 +1369,8 @@ function TimeSeriesSparkChart({
     clearChartHoverIndex(setHoverIdx, dragRef.current);
   };
 
-  const selectionBand = selection && n > 0
-    ? {
-        left: (Math.min(selection.start, selection.end) / Math.max(n - 1, 1)) * 100,
-        width: (Math.abs(selection.end - selection.start) / Math.max(n - 1, 1)) * 100,
-      }
+  const selectionBand = selection && timeScale
+    ? timeScale.selectionBandPct(selection.start, selection.end)
     : null;
   const chartPadLeftPct = (padL / w) * 100;
   const chartPadRightPct = (padR / w) * 100;
@@ -1214,10 +1384,8 @@ function TimeSeriesSparkChart({
     transform: tipAlign === 'end' ? 'translateX(calc(-100% - 8px))' : tipAlign === 'start' ? 'translateX(8px)' : 'translateX(-50%)',
   };
 
-  const linePts = data.map((d, i) => `${x(i)},${y(d.v)}`).join(' ');
-  const areaPath = n > 1
-    ? `M ${x(0)},${y(0)} L ${data.map((d, i) => `${x(i)},${y(d.v)}`).join(' L ')} L ${x(n - 1)},${y(0)} Z`
-    : `M ${x(0)},${y(data[0].v)} L ${x(0)},${y(0)} Z`;
+  const lineSegments = buildChartPolylineSegments(data, x, y, (pt) => pt.v);
+  const areaSegments = buildChartAreaPathSegments(data, x, y, yZero, (pt) => pt.v);
 
   return (
     <div
@@ -1247,8 +1415,20 @@ function TimeSeriesSparkChart({
             </g>
           );
         })}
-        <path d={areaPath} fill={`url(#${gradId})`} />
-        <polyline points={linePts} fill="none" stroke={color} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+        {areaSegments.map((pathD, idx) => (
+          <path key={`area-${idx}`} d={pathD} fill={`url(#${gradId})`} />
+        ))}
+        {lineSegments.map((pts, segmentIdx) => (
+          <polyline
+            key={`line-${segmentIdx}`}
+            points={pts.join(' ')}
+            fill="none"
+            stroke={color}
+            strokeWidth="2"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+        ))}
         {hoverPoint && (
           <g pointerEvents="none">
             <line
@@ -1260,6 +1440,7 @@ function TimeSeriesSparkChart({
               strokeWidth="1"
               strokeDasharray="4 3"
             />
+            {hoverPoint.v != null && (
             <circle
               cx={x(hoverIdx)}
               cy={y(hoverPoint.v)}
@@ -1268,6 +1449,7 @@ function TimeSeriesSparkChart({
               stroke="#14131F"
               strokeWidth="1.5"
             />
+            )}
           </g>
         )}
         {data.map((pt, i) => i % tEvery === 0 && (
@@ -2567,6 +2749,7 @@ function fmtAgo(d) {
 Object.assign(window, {
   AreaChart, DualChart, CategoryTrendChart, TimeSeriesSparkChart, Sparkline, Donut, filterNonZeroDonutSegments, filterNonZeroDonutWithOtherLast, donutCenterTraffic, donutCenterTrafficGb, BarList, WorldHeat, CountryChoropleth, CountryRankList, Sankey,
   computeChartPeriodBounds, chartRangeFromPointSelection, parseChartBucketMs,
+  fillChartTimeGaps, buildChartTimeScale,
   formatChartPointTimeLabel, formatPointTimeLabel, formatBucketLabel, formatTipPointTime, formatTipBucketDuration, normalizeBucketString, isLongChartRange,
   msToDatetimeLocalValue, msToBucketString, bucketToDatetimeLocalInput, resolvePointEpochMs,
   getDataTimezone, setDataTimezone, DATA_TIMEZONE, detectBrowserTimezone, loadTimezonePreference, saveTimezonePreference,

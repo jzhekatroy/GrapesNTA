@@ -30,6 +30,36 @@ function defaultMonitoringPeriod(displayTimezone) {
   };
 }
 
+function yesterdayMonitoringPeriod(displayTimezone) {
+  const tz = displayTimezone || getDisplayTimezone();
+  const todayParts = intlPartsMs(Date.now(), tz);
+  const todayWall = {
+    y: Number(pickIntlPart(todayParts, 'year')),
+    mo: Number(pickIntlPart(todayParts, 'month')),
+    d: Number(pickIntlPart(todayParts, 'day')),
+  };
+  const todayStartMs = wallPartsToMs({ ...todayWall, h: 0, mi: 0, s: 0 }, tz);
+  if (!Number.isFinite(todayStartMs)) {
+    return defaultMonitoringPeriod(displayTimezone);
+  }
+  const todayNoonMs = wallPartsToMs({ ...todayWall, h: 12, mi: 0, s: 0 }, tz);
+  const yesterdayParts = intlPartsMs(
+    Number.isFinite(todayNoonMs) ? todayNoonMs - 86400000 : todayStartMs - 12 * 3600000,
+    tz,
+  );
+  const yesterdayWall = {
+    y: Number(pickIntlPart(yesterdayParts, 'year')),
+    mo: Number(pickIntlPart(yesterdayParts, 'month')),
+    d: Number(pickIntlPart(yesterdayParts, 'day')),
+  };
+  const fromMs = wallPartsToMs({ ...yesterdayWall, h: 0, mi: 0, s: 0 }, tz);
+  const safeFromMs = Number.isFinite(fromMs) ? fromMs : todayStartMs - 86400000;
+  return {
+    from: msToDatetimeLocalValue(safeFromMs, tz),
+    to: msToDatetimeLocalValue(todayStartMs, tz),
+  };
+}
+
 function fmtGbitMin(value) {
   if (value == null || Number.isNaN(Number(value))) return '—';
   const v = Number(value);
@@ -318,6 +348,14 @@ function PageMonitoring({ displayTimezone }) {
     setPeriodZoomStack([]);
   };
 
+  const resetYesterdayPeriod = () => {
+    const next = yesterdayMonitoringPeriod(displayTimezone);
+    setPeriodDraft(next);
+    setPeriod(next);
+    setPeriodError('');
+    setPeriodZoomStack([]);
+  };
+
   return (
     <div className="main__container monitoring-page">
       <div className="page-head">
@@ -331,7 +369,7 @@ function PageMonitoring({ displayTimezone }) {
       </div>
 
       <div className="monitoring-page__layout">
-        <Card className="monitoring-page__params" title="Показатели">
+        <Card className="monitoring-page__params" title="Показатели и аномалии">
           {parametersSource === 'loading' ? (
             <div className="skeleton monitoring-page__params-skeleton" />
           ) : parametersSource === 'error' ? (
@@ -352,7 +390,6 @@ function PageMonitoring({ displayTimezone }) {
                   >
                     <div className="monitoring-param-list__main">
                       <div className="monitoring-param-list__label">{item.label}</div>
-                      <div className="monitoring-param-list__unit">{item.unit}</div>
                     </div>
                     <Badge tone={deviationTone} title="Отклонения за последние 24 часа">
                       {item.deviations24h}
@@ -400,6 +437,7 @@ function PageMonitoring({ displayTimezone }) {
               </div>
               <div className="row monitoring-page__period-actions">
                 <Button kind="primary" onClick={applyPeriod}>Применить</Button>
+                <Button kind="ghost" onClick={resetYesterdayPeriod}>Вчера</Button>
                 <Button kind="ghost" onClick={resetPeriod}>Сегодня</Button>
                 {periodZoomStack.length > 0 && (
                   <button
@@ -498,12 +536,6 @@ function PageMonitoring({ displayTimezone }) {
                 <div className="monitoring-page__bounds-error">{boundsError}</div>
               ) : (
                 <div className="monitoring-page__bounds-fields">
-                  {bounds?.sharedSection && (
-                    <div className="monitoring-page__bounds-note">
-                      <Icon name="info" size={12} />
-                      Границы для трафика в РФ и зарубежного трафика общие (секция intervals_country_ru).
-                    </div>
-                  )}
                   <div className="field">
                     <label htmlFor="monitoring-ci-low">Нижняя граница (ci_low)</label>
                     <input
@@ -549,6 +581,7 @@ function PageMonitoring({ displayTimezone }) {
                   )}
                   {boundsSaveError && <div className="form-error">{boundsSaveError}</div>}
                   <div className="monitoring-page__bounds-meta">
+                    {bounds?.configKey ? `${bounds.configKey} · ` : ''}
                     config.yaml
                     {bounds?.mode ? ` · ${bounds.mode}` : ''}
                     {bounds?.host ? ` · ${bounds.host}` : ''}

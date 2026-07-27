@@ -219,15 +219,6 @@ const COLLECTORS = [
   { id: 'c8', name: 'ros-collector-01', ip: '10.5.10.11', port: 9995, proto: 'NetFlow v9', status: 'warning', version: '2.13.9', ingest: 38110,  cpu: 58, mem: 76, disk: 71, last: Date.now() - 18000, region: 'Ростов-на-Дону' },
 ];
 
-const DATABASES = [
-  { id: 'd1', name: 'clickhouse-prod',    type: 'ClickHouse', host: 'ch01.dc-msk1:9000', status: 'healthy', version: '24.3.5',    retention: '90 дн', size: 14.2e12, sync: Date.now() - 12000, role: 'Основная' },
-  { id: 'd2', name: 'clickhouse-replica', type: 'ClickHouse', host: 'ch02.dc-msk1:9000', status: 'healthy', version: '24.3.5',    retention: '90 дн', size: 14.1e12, sync: Date.now() - 18000, role: 'Реплика' },
-  { id: 'd3', name: 'clickhouse-cold',    type: 'ClickHouse', host: 'ch03.dc-spb1:9000', status: 'warning', version: '24.1.2',    retention: '365 дн', size: 41.8e12, sync: Date.now() - 240e3, role: 'Архив' },
-  { id: 'd4', name: 'pg-meta',            type: 'PostgreSQL', host: 'pg01.dc-msk1:5432', status: 'healthy', version: '16.2',      retention: 'Бессрочно', size: 188e9, sync: Date.now() - 4000,  role: 'Метаданные' },
-  { id: 'd5', name: 'pg-rbac',            type: 'PostgreSQL', host: 'pg02.dc-msk1:5432', status: 'healthy', version: '16.2',      retention: 'Бессрочно', size: 12e9,  sync: Date.now() - 3000,  role: 'RBAC' },
-  { id: 'd6', name: 'redis-cache',        type: 'Redis',      host: 'redis.dc-msk1:6379',status: 'healthy', version: '7.2.4',     retention: '24 ч',      size: 4.1e9, sync: Date.now() - 1500,  role: 'Кэш' },
-  { id: 'd7', name: 'kafka-flows',        type: 'Kafka',      host: 'kafka01-03:9092',   status: 'critical', version: '3.7.0',    retention: '7 дн',       size: 920e9, sync: Date.now() - 5 * 60 * 1000, role: 'Очередь' },
-];
 
 const ROUTERS = [
   { id: 'r1', name: 'bb-msk-01',  ip: '10.0.0.1',  model: 'Juniper MX204',       snmp: 'healthy', flow: 'healthy', flows24: 412e6, ifaces: 24, last: Date.now() - 3000, location: 'Москва, M9' },
@@ -272,21 +263,19 @@ const PERMISSION_MATRIX = [
   { id: 'top',        label: 'Топ ASN' },
   { id: 'collectors', label: 'Коллекторы' },
   { id: 'snmp',       label: 'SNMP' },
-  { id: 'databases',  label: 'Внешние базы данных' },
   { id: 'routers',    label: 'Роутеры и экспортёры' },
   { id: 'cidr',       label: 'Собственные сети (CIDR)' },
-  { id: 'refs',       label: 'Другие справочники' },
   { id: 'users',      label: 'Пользователи и права' },
 ];
 
 const ROLE_DEFAULTS = {
   'Администратор':  () => 'admin',
   'NOC-инженер':    (m) => m.id === 'users' ? 'view' : 'write',
-  'Аналитик':       (m) => ['dashboard','explorer','top','cidr'].includes(m.id) ? 'write' : ['routers','collectors','databases','refs'].includes(m.id) ? 'view' : 'none',
+  'Аналитик':       (m) => ['dashboard','explorer','top','cidr'].includes(m.id) ? 'write' : ['routers','collectors'].includes(m.id) ? 'view' : 'none',
   'Только чтение':  (m) => m.id === 'users' ? 'none' : 'view',
 };
 
 Object.assign(window, {
   seriesTraffic, seriesTrafficForRange, TRAFFIC_DIRECTION_STATS, PROTOCOLS, SERVICES, OTHER_PORTS_TOP, COUNTRIES_TOP, RECENT_FLOWS,
-  COLLECTORS, DATABASES, ROUTERS, CIDR_TREE, USERS, PERMISSION_MATRIX, ROLE_DEFAULTS,
+  COLLECTORS, ROUTERS, CIDR_TREE, USERS, PERMISSION_MATRIX, ROLE_DEFAULTS,
 });

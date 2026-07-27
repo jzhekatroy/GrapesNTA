@@ -39,6 +39,13 @@ function safeJsonParse(raw, fallback) {
 }
 
 function rowToObservation(row) {
+  const live = safeJsonParse(row.live_json, {});
+  const layout = live.layout && typeof live.layout === 'object'
+    ? live.layout
+    : { order: 0, width: 1 };
+  const liveClean = { ...live };
+  delete liveClean.layout;
+  // Migrate legacy report.cron/timezone → schedule is done in normalizeObservation on write.
   return {
     id: String(row.id ?? ''),
     name: String(row.name ?? ''),
@@ -49,7 +56,8 @@ function rowToObservation(row) {
     filters: safeJsonParse(row.filters_json, []),
     lookback: String(row.lookback || '1h'),
     widgets: safeJsonParse(row.widgets_json, []),
-    live: safeJsonParse(row.live_json, {}),
+    layout,
+    live: liveClean,
     materialize: safeJsonParse(row.materialize_json, {}),
     report: safeJsonParse(row.report_json, {}),
     createdAt: toIso(row.created_at) || new Date().toISOString(),
@@ -68,7 +76,7 @@ function observationToRow(item, { deleted = 0 } = {}) {
     lookback: String(item.lookback || '1h'),
     filters_json: JSON.stringify(item.filters || []),
     widgets_json: JSON.stringify(item.widgets || []),
-    live_json: JSON.stringify(item.live || {}),
+    live_json: JSON.stringify({ ...(item.live || {}), layout: item.layout || { order: 0, width: 1 } }),
     materialize_json: JSON.stringify(item.materialize || {}),
     report_json: JSON.stringify(item.report || {}),
     deleted: deleted ? 1 : 0,
@@ -94,6 +102,9 @@ function rowToRun(row) {
     tables: payload.tables || [],
     previewWidgetCount: payload.previewWidgetCount ?? 0,
     error: String(row.error || '') || null,
+    emailStatus: String(row.email_status || payload.emailStatus || ''),
+    emailTo: String(row.email_to || payload.emailTo || ''),
+    emailError: String(row.email_error || payload.emailError || ''),
   };
 }
 
@@ -103,6 +114,9 @@ function runToRow(run, { deleted = 0 } = {}) {
     previewWidgetCount: run.previewWidgetCount ?? 0,
     artifactPath: run.artifactPath || '',
     window: run.window || {},
+    emailStatus: run.emailStatus || '',
+    emailTo: run.emailTo || '',
+    emailError: run.emailError || '',
   };
   return {
     id: String(run.id),
@@ -116,6 +130,9 @@ function runToRow(run, { deleted = 0 } = {}) {
     artifact_path: String(run.artifactPath || ''),
     payload_json: JSON.stringify(payload),
     error: String(run.error || ''),
+    email_status: String(run.emailStatus || ''),
+    email_to: String(run.emailTo || ''),
+    email_error: String(run.emailError || ''),
     deleted: deleted ? 1 : 0,
     updated_at: clickhouseDateTime(run.finishedAt || run.startedAt || new Date()),
   };
@@ -171,12 +188,22 @@ async function ensureObservationsStore() {
           artifact_path String DEFAULT '',
           payload_json String DEFAULT '{}',
           error String DEFAULT '',
+          email_status String DEFAULT '',
+          email_to String DEFAULT '',
+          email_error String DEFAULT '',
           deleted UInt8 DEFAULT 0,
           updated_at DateTime64(3) DEFAULT now64(3)
         )
         ENGINE = ReplacingMergeTree(updated_at)
         ORDER BY (observation_id, id)
       `, {}, { name: 'observations/ensure-runs' });
+
+      await executeCommand(`
+        ALTER TABLE ${config.database}.${RUNS_TABLE}
+          ADD COLUMN IF NOT EXISTS email_status String DEFAULT '',
+          ADD COLUMN IF NOT EXISTS email_to String DEFAULT '',
+          ADD COLUMN IF NOT EXISTS email_error String DEFAULT ''
+      `, {}, { name: 'observations/ensure-runs-email' }).catch(() => {});
 
       await migrateFromJsonIfEmpty();
     })().catch((err) => {

@@ -14,12 +14,6 @@ function PageComingSoon({ pageId, onNavigate }) {
       icon: 'top',
       preview: 'top',
     },
-    other: {
-      title: 'Другие справочники',
-      desc: 'Приложения, репутационные списки, тенанты и ASN.',
-      icon: 'refs',
-      preview: 'refs',
-    },
   };
   const m = map[pageId] || map.explorer;
   return (

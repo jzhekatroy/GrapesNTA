@@ -23,6 +23,7 @@ const {
   asnNamesTableRef,
   ipAsnPrefixesTableRef,
   asnRegistryEnrichedTableRef,
+  escapeSqlString,
   parseDataDatetimeSql,
 } = require('./clickhouse');
 const { protocolChartColor } = require('./protocol-colors');
@@ -250,6 +251,11 @@ function closedChartBucketSql(bucketColumn, bucketSeconds, boundaryExpr = 'ts_to
 
 function shiftedNowSql() {
   return 'now() - INTERVAL 30 SECOND';
+}
+
+function anchoredNowSql(anchor) {
+  if (anchor) return parseDataDatetimeSql('anchor');
+  return shiftedNowSql();
 }
 
 function normalizeChartDirections(directions) {
@@ -1596,6 +1602,16 @@ function flowSamplerIpExpr(samplerCol) {
       )`;
 }
 
+/**
+ * sFlow interface field -> plain ifIndex.
+ * Only format 0 (two high bits = 0) carries a single ifIndex in the low 30 bits;
+ * other formats (discard reason / multiple interfaces) decode to 0.
+ */
+function sflowIfIndexExpr(ifColRef) {
+  const rawExpr = `toUInt32OrZero(toString(${ifColRef}))`;
+  return `if(${rawExpr} > 0 AND bitShiftRight(${rawExpr}, 30) = 0, bitAnd(${rawExpr}, 1073741823), toUInt32(0))`;
+}
+
 function flowMacExpr(macCol) {
   if (config.macStorage === 'uint64') {
     return `MACNumToString(${macCol})`;
@@ -1684,6 +1700,18 @@ function cleanCountryCode(value) {
   return s === '??' ? '' : s;
 }
 
+/** ISO country from geo IP dictionary (same logic as explorer). */
+function geoCountryExpr(ipExpr, etypeExpr = null) {
+  const dict = escapeSqlString(config.geoCountryDict);
+  const lookup = (keyExpr) => `dictGetString('${dict}', 'cc', tuple(${keyExpr}))`;
+  const ipv4Expr = `toIPv4(reinterpretAsUInt32(reverse(substring(${ipExpr}, 1, 4))))`;
+  const isIpv4 = etypeExpr
+    ? `${etypeExpr} = 2048`
+    : `length(${ipExpr}) = 16 AND substring(${ipExpr}, 5) = unhex('000000000000000000000000')`;
+  const country = `upper(if(${isIpv4}, ${lookup(ipv4Expr)}, ${lookup(ipExpr)}))`;
+  return `nullIf(nullIf(${country}, ''), '??')`;
+}
+
 const RECENT_FLOWS_LOOKBACK_MINUTES = 10;
 
 function protoLabelSql(expr) {
@@ -1721,7 +1749,7 @@ function explorerWindowSeconds({ range = '24h', from, to } = {}) {
   return secondsByRange[range] || 3600;
 }
 
-/** Recent enriched flow records: ASN present, AS names from registry, small indexed time window. */
+/** Recent flow records from flows_raw (ASN joins optional; zero ASN still shown). */
 function recentFlows(limit = 20, directions, collectorId) {
   const collectorScope = parseCollectorScopes(collectorId);
   const t = col('time');
@@ -1736,6 +1764,8 @@ function recentFlows(limit = 20, directions, collectorId) {
   const dstAsn = col('dstAsn');
   const directionCol = flowCol('direction');
   const sourceIdCol = flowCol('sourceId');
+  const etypeCol = flowCol('etype');
+  const etypeExpr = etypeCol ? `f.${etypeCol}` : null;
   const dirs = normalizeProtocolDirections(directions);
   const dirsSql = protocolDirectionsInSql(dirs);
   const psView = portServicesExpandedViewRef();
@@ -1761,15 +1791,18 @@ function recentFlows(limit = 20, directions, collectorId) {
           FROM ${sourcesTableRef()}
           WHERE ${sourceScope}
         )`;
+  const anchorWhere = [];
+  if (directionCol) anchorWhere.push(`f.${directionCol} IN (${dirsSql})`);
+  if (sourceIdCol) {
+    anchorWhere.push(`f.${sourceIdCol} IN (SELECT source_id FROM enabled_sources)`);
+  }
+  const anchorWhereSql = anchorWhere.length ? `WHERE ${anchorWhere.join(' AND ')}` : '';
   const latestCtes = `${enabledSourcesCte},
         latest_anchor AS (
           SELECT max(f.${t}) AS ts_to
           FROM ${flowsRawTableRef()} AS f
           PREWHERE f.date >= today() - 1
-          WHERE
-            (f.${srcAsn} > 0 OR f.${dstAsn} > 0)
-            ${directionCol ? `AND f.${directionCol} IN (${dirsSql})` : ''}
-            ${sourceIdCol ? `AND f.${sourceIdCol} IN (SELECT source_id FROM enabled_sources)` : ''}
+          ${anchorWhereSql}
         ),
         (SELECT ts_to FROM latest_anchor) - INTERVAL ${RECENT_FLOWS_LOOKBACK_MINUTES} MINUTE AS ts_floor,
         (SELECT ts_to FROM latest_anchor) AS ts_to`;
@@ -1786,6 +1819,8 @@ function recentFlows(limit = 20, directions, collectorId) {
     `f.${proto} AS proto`,
     `f.${srcAsn} AS src_asn`,
     `f.${dstAsn} AS dst_asn`,
+    `${geoCountryExpr(`f.${srcIp}`, etypeExpr)} AS src_geo_country`,
+    `${geoCountryExpr(`f.${dstIp}`, etypeExpr)} AS dst_geo_country`,
     flowColSelect('srcLabel', 'src_label', 'f'),
     flowColSelect('dstLabel', 'dst_label', 'f'),
     flowColSelect('srcEndpointScope', 'src_endpoint_scope', 'f'),
@@ -1810,6 +1845,8 @@ function recentFlows(limit = 20, directions, collectorId) {
     'f.proto',
     'f.src_asn',
     'f.dst_asn',
+    'f.src_geo_country',
+    'f.dst_geo_country',
     ...(flowCol('srcLabel') ? ['f.src_label'] : []),
     ...(flowCol('dstLabel') ? ['f.dst_label'] : []),
     ...(flowCol('srcEndpointScope') ? ['f.src_endpoint_scope'] : []),
@@ -1834,7 +1871,7 @@ function recentFlows(limit = 20, directions, collectorId) {
     'f.date >= toDate(ts_floor) - 1',
     `f.${t} >= ts_floor`,
   ];
-  const whereClauses = [`(f.${srcAsn} > 0 OR f.${dstAsn} > 0)`];
+  const whereClauses = [];
   if (directionCol) whereClauses.push(`f.${directionCol} IN (${dirsSql})`);
   if (sourceIdCol) {
     whereClauses.push(`f.${sourceIdCol} IN (
@@ -1906,8 +1943,8 @@ function recentFlows(limit = 20, directions, collectorId) {
           dstAsn: Number(r.dst_asn) || 0,
           srcAsName: String(r.src_as_name || '').trim(),
           dstAsName: String(r.dst_as_name || '').trim(),
-          srcCountry: cleanCountryCode(r.src_as_country),
-          dstCountry: cleanCountryCode(r.dst_as_country),
+          srcCountry: cleanCountryCode(r.src_geo_country) || cleanCountryCode(r.src_as_country),
+          dstCountry: cleanCountryCode(r.dst_geo_country) || cleanCountryCode(r.dst_as_country),
           srcVlan: Number(r.src_vlan) || 0,
           dstVlan: Number(r.dst_vlan) || 0,
           vlanId: Number(r.vlan_id) || 0,
@@ -1955,13 +1992,15 @@ function customRangeDurationMs(from, to) {
   return end - start;
 }
 
-function resolveTrafficWindow({ range = '24h', from, to, bucketSeconds } = {}) {
+function resolveTrafficWindow({ range = '24h', from, to, bucketSeconds, anchor } = {}) {
   const minuteAlignCte = `
     ${parseDataDatetimeSql('to')} AS raw_ts_to,
     ${parseDataDatetimeSql('from')} AS raw_ts_from,
     toStartOfMinute(raw_ts_from) AS ts_from,
     toStartOfMinute(raw_ts_to) AS ts_to,`;
   const useMinuteAlign = Number(bucketSeconds) > 0 && Number(bucketSeconds) <= 60;
+  const nowExpr = anchoredNowSql(anchor);
+  const anchorParams = anchor ? { anchor } : {};
 
   if (range === 'custom') {
     if (!from || !to) throw new Error('Для своего периода нужны параметры from и to');
@@ -2001,9 +2040,9 @@ function resolveTrafficWindow({ range = '24h', from, to, bucketSeconds } = {}) {
     return {
       mode: 'daily',
       cteHead: `
-    toStartOfHour(${shiftedNowSql()}) AS ts_to,
+    toStartOfHour(${nowExpr}) AS ts_to,
     ts_to - ${EXTENDED_RANGE_INTERVALS[range]} AS ts_from,`,
-      params: {},
+      params: { ...anchorParams },
     };
   }
 
@@ -2011,9 +2050,9 @@ function resolveTrafficWindow({ range = '24h', from, to, bucketSeconds } = {}) {
     return {
       mode: 'hybrid',
       cteHead: `
-    toStartOfMinute(${shiftedNowSql()}) AS ts_to,
+    toStartOfMinute(${nowExpr}) AS ts_to,
     ts_to - ${MEDIUM_RANGE_INTERVALS[range]} AS ts_from,`,
-      params: {},
+      params: { ...anchorParams },
     };
   }
 
@@ -2022,10 +2061,31 @@ function resolveTrafficWindow({ range = '24h', from, to, bucketSeconds } = {}) {
   return {
     mode: 'minute',
     cteHead: `
-    ${shiftedNowSql()} AS raw_ts_to,
+    ${nowExpr} AS raw_ts_to,
     raw_ts_to - ${interval} AS raw_ts_from,
     ${FIVE_MINUTE_ALIGN_CTE}`,
-    params: {},
+    params: { ...anchorParams },
+  };
+}
+
+async function probeTrafficWindowBounds({ range = '24h', from, to, anchor, bucketSeconds } = {}, queryFn) {
+  const runQuery = queryFn || require('./clickhouse').query;
+  const windowSpec = resolveTrafficWindow({ range, from, to, anchor, bucketSeconds });
+  const tz = escapeSqlString(config.dataTimezone || 'UTC');
+  const { rows } = await runQuery(`
+    WITH
+      ${windowSpec.cteHead}
+      dateDiff('second', ts_from, ts_to) AS _window_seconds
+    SELECT
+      formatDateTime(ts_from, '%F %T', '${tz}') AS window_from,
+      formatDateTime(ts_to, '%F %T', '${tz}') AS window_to,
+      _window_seconds AS window_seconds
+  `, windowSpec.params, { name: 'explorer/window-bounds' });
+  const row = rows[0] || {};
+  return {
+    windowFrom: row.window_from || null,
+    windowTo: row.window_to || null,
+    windowSeconds: Math.max(1, Number(row.window_seconds) || 1),
   };
 }
 
@@ -2419,8 +2479,11 @@ module.exports = {
   normalizeTopTalkersGroup,
   recentFlows,
   resolveTrafficWindow,
+  probeTrafficWindowBounds,
+  anchoredNowSql,
   flowIpExpr,
   flowSamplerIpExpr,
+  sflowIfIndexExpr,
   flowMacExpr,
   protoLabelSql,
   flowTransportSql,

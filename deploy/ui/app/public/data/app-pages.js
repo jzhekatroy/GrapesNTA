@@ -11,6 +11,18 @@ const AppPages = (() => {
     return pages;
   }
 
+  function isHidden(page) {
+    return !!page?.hidden;
+  }
+
+  function visiblePages(list) {
+    return (list || []).filter((p) => !isHidden(p));
+  }
+
+  function hiddenIds(list) {
+    return new Set((list || []).filter(isHidden).map((p) => p.id));
+  }
+
   function titlesMap(list) {
     return Object.fromEntries(list.map((p) => [p.id, { title: p.title, section: p.section }]));
   }
@@ -19,7 +31,20 @@ const AppPages = (() => {
     return new Set(list.map((p) => p.id));
   }
 
-  return { load, titlesMap, validIds };
+  function resolvePageId(pageId, validIdSet) {
+    if (pageId === 'collector-status') return 'collectors';
+    return validIdSet.has(pageId) ? pageId : 'dashboard';
+  }
+
+  return {
+    load,
+    isHidden,
+    visiblePages,
+    hiddenIds,
+    titlesMap,
+    validIds,
+    resolvePageId,
+  };
 })();
 
 Object.assign(window, { AppPages });

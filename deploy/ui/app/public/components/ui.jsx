@@ -93,13 +93,14 @@ function StatusIndicator({ status, label }) {
 }
 
 /* =================== Checkbox =================== */
-function Checkbox({ checked, indeterminate, onChange }) {
+function Checkbox({ checked, indeterminate, disabled, onChange }) {
   return (
     <span
       role="checkbox"
       aria-checked={checked}
-      className={`checkbox ${checked ? 'is-checked' : ''} ${indeterminate ? 'is-indet' : ''}`}
-      onClick={(e) => { e.stopPropagation(); onChange && onChange(!checked); }}
+      aria-disabled={disabled || undefined}
+      className={`checkbox ${checked ? 'is-checked' : ''} ${indeterminate ? 'is-indet' : ''} ${disabled ? 'is-disabled' : ''}`}
+      onClick={(e) => { e.stopPropagation(); if (!disabled && onChange) onChange(!checked); }}
     >
       {checked && !indeterminate && <Icon name="check" size={12} stroke={3} />}
       {indeterminate && <Icon name="menu" size={10} stroke={3} />}
@@ -346,9 +347,13 @@ function DataTable({
               {visibleCols.map((c) => {
                 const isSorted = sort?.key === c.key;
                 return (
-                  <th key={c.key} style={{width: c.width, textAlign: c.align || 'left'}} className={isSorted ? 'is-sorted' : ''}
-                      onClick={c.sortable !== false ? () => toggleSort(c.key) : null}
-                      data-sort={c.sortable === false ? 'none' : 'yes'}>
+                  <th
+                    key={c.key}
+                    style={{width: c.width, textAlign: c.align || 'left'}}
+                    className={[isSorted ? 'is-sorted' : '', c.headerClassName].filter(Boolean).join(' ') || undefined}
+                    onClick={c.sortable !== false ? () => toggleSort(c.key) : null}
+                    data-sort={c.sortable === false ? 'none' : 'yes'}
+                  >
                     <span style={{display: 'inline-flex', alignItems: 'center', gap: 4, cursor: c.sortable === false ? 'default' : 'pointer'}}>
                       {c.title}
                       {c.sortable !== false && (
@@ -389,7 +394,11 @@ function DataTable({
                     </td>
                   )}
                   {visibleCols.map((c) => (
-                    <td key={c.key} className={(c.num ? 'num' : '')} style={{textAlign: c.align || 'left'}}>
+                    <td
+                      key={c.key}
+                      className={[c.num ? 'num' : '', c.cellClassName].filter(Boolean).join(' ') || undefined}
+                      style={{textAlign: c.align || 'left'}}
+                    >
                       {c.render ? c.render(row) : row[c.key]}
                     </td>
                   ))}

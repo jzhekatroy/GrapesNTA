@@ -29,7 +29,7 @@ function fmtCatalogUpdatedAt(value, displayTimezone = getDisplayTimezone()) {
   });
 }
 
-function PageSnmp({ displayTimezone }) {
+function PageSnmp({ displayTimezone, canOpenInterfaceRoles }) {
   const canWrite = AuthAccess.canWritePage('snmp') || AuthAccess.canWritePage('collectors');
   const [refreshKey, setRefreshKey] = useState(0);
   const [probingAll, setProbingAll] = useState(false);
@@ -89,7 +89,7 @@ function PageSnmp({ displayTimezone }) {
           </Button>
         </div>
       </div>
-      <SnmpSwitchesPage refreshKey={refreshKey} onReload={reload} displayTimezone={tz} />
+      <SnmpSwitchesPage refreshKey={refreshKey} onReload={reload} displayTimezone={tz} canOpenInterfaceRoles={canOpenInterfaceRoles} />
     </div>
   );
 }
@@ -234,13 +234,17 @@ function SnmpAgentStatus({ agent }) {
   );
 }
 
-function SnmpAgentModal({ open, agent, canWrite, onClose, onSaved }) {
+function SnmpAgentModal({ open, agent, canWrite, onClose, onSaved, canOpenInterfaceRoles }) {
   const [form, setForm] = useState(null);
   const [interfaces, setInterfaces] = useState([]);
+  const [roleByIndex, setRoleByIndex] = useState({});
+  const [showUnmarkedOnly, setShowUnmarkedOnly] = useState(false);
   const [interfacesError, setInterfacesError] = useState('');
   const [saving, setSaving] = useState(false);
   const [probing, setProbing] = useState(false);
   const [error, setError] = useState('');
+
+  const showInterfaceRolesLink = !!canOpenInterfaceRoles;
 
   useEffect(() => {
     if (!open || !agent) return undefined;
@@ -255,15 +259,42 @@ function SnmpAgentModal({ open, agent, canWrite, onClose, onSaved }) {
       retriesOverride: agent.retriesOverride ?? '',
     });
     setInterfaces([]);
+    setRoleByIndex({});
+    setShowUnmarkedOnly(false);
     setInterfacesError('');
     setError('');
-    ApiClient.loadSnmpInterfaces(agent.switchIp).then((res) => {
+    Promise.all([
+      ApiClient.loadSnmpInterfaces(agent.switchIp),
+      ApiClient.loadInterfaceRolesForSwitch(agent.switchIp),
+    ]).then(([ifRes, rolesRes]) => {
       if (cancelled) return;
-      if (res.source === 'error') setInterfacesError(res.error || ApiClient.LOAD_FAILED);
-      else setInterfaces(res.rows || []);
+      if (ifRes.source === 'error') setInterfacesError(ifRes.error || ApiClient.LOAD_FAILED);
+      else setInterfaces(ifRes.rows || []);
+      const map = {};
+      if (rolesRes.source !== 'error') {
+        for (const row of rolesRes.rows || []) {
+          map[row.ifIndex] = row;
+        }
+      }
+      setRoleByIndex(map);
     });
     return () => { cancelled = true; };
   }, [open, agent]);
+
+  const interfaceRows = useMemo(() => {
+    const rows = interfaces.map((row) => {
+      const role = roleByIndex[row.ifIndex] || {};
+      return {
+        ...row,
+        id: row.ifIndex,
+        boundary: role.boundary || 'unknown',
+        connectivity: role.connectivity || '',
+        boundarySource: role.boundarySource || 'default',
+      };
+    });
+    if (!showUnmarkedOnly) return rows;
+    return rows.filter((r) => r.boundary === 'unknown');
+  }, [interfaces, roleByIndex, showUnmarkedOnly]);
 
   if (!open || !agent || !form) return null;
   const set = (key, value) => setForm((prev) => ({ ...prev, [key]: value }));
@@ -301,10 +332,26 @@ function SnmpAgentModal({ open, agent, canWrite, onClose, onSaved }) {
   };
   const interfaceCols = [
     { key: 'ifIndex', title: 'ifIndex', width: 80, render: (r) => <span className="mono">{r.ifIndex}</span> },
-    { key: 'ifName', title: 'Имя', width: 160, render: (r) => <span className="mono">{r.ifName || '—'}</span> },
-    { key: 'ifAlias', title: 'Alias', width: 180, render: (r) => r.ifAlias || '—' },
-    { key: 'ifDescr', title: 'Описание', width: 220, render: (r) => r.ifDescr || '—' },
-    { key: 'ifSpeedBps', title: 'Скорость', width: 120, render: (r) => (r.ifSpeedBps ? fmtBits(r.ifSpeedBps) : '—') },
+    { key: 'ifName', title: 'Имя', width: 140, render: (r) => <span className="mono">{r.ifName || '—'}</span> },
+    { key: 'ifAlias', title: 'Alias', width: 140, render: (r) => r.ifAlias || '—' },
+    { key: 'ifDescr', title: 'Описание', width: 160, render: (r) => r.ifDescr || '—' },
+    { key: 'ifSpeedBps', title: 'Скорость', width: 100, render: (r) => (r.ifSpeedBps ? fmtBits(r.ifSpeedBps) : '—') },
+    {
+      key: 'boundary',
+      title: 'Сторона',
+      width: 110,
+      render: (r) => (
+        <Badge tone={r.boundary === 'unknown' ? 'neutral' : irBoundaryBadgeTone(r.boundary)}>
+          {irBoundaryLabel(r.boundary)}
+        </Badge>
+      ),
+    },
+    {
+      key: 'connectivity',
+      title: 'Тип стыка',
+      width: 110,
+      render: (r) => (r.connectivity ? <Badge tone="info">{irConnectivityLabel(r.connectivity)}</Badge> : '—'),
+    },
   ];
 
   return (
@@ -371,6 +418,24 @@ function SnmpAgentModal({ open, agent, canWrite, onClose, onSaved }) {
         </div>
       </div>
       <div style={{ font: 'var(--pv-text-body-2-bold)', marginBottom: 8 }}>Интерфейсы</div>
+      {showInterfaceRolesLink && (
+        <div className="row" style={{ justifyContent: 'space-between', marginBottom: 8, flexWrap: 'wrap', gap: 8 }}>
+          <label className="row" style={{ gap: 6, font: 'var(--pv-text-body-3)' }}>
+            <input type="checkbox" checked={showUnmarkedOnly} onChange={(e) => setShowUnmarkedOnly(e.target.checked)} />
+            Показать неразмеченные
+          </label>
+          <Button
+            kind="ghost"
+            size="sm"
+            onClick={() => {
+              onClose();
+              location.hash = `interface-roles?switch=${encodeURIComponent(agent.switchIp)}`;
+            }}
+          >
+            Разметить
+          </Button>
+        </div>
+      )}
       {agent.hasCachedInterfaces && agent.lastPollStatus && agent.lastPollStatus !== 'ok' && (
         <div style={{ marginBottom: 8, color: 'var(--fg-secondary)', font: 'var(--pv-text-body-3)' }}>
           Показан последний успешный каталог
@@ -382,7 +447,7 @@ function SnmpAgentModal({ open, agent, canWrite, onClose, onSaved }) {
         <div style={{ color: 'var(--st-critical)', font: 'var(--pv-text-body-3)' }}>{interfacesError}</div>
       ) : (
         <DataTable
-          rows={interfaces.map((row) => ({ ...row, id: row.ifIndex }))}
+          rows={interfaceRows}
           columns={interfaceCols}
           rowKey="id"
           pageSize={10}
@@ -394,7 +459,7 @@ function SnmpAgentModal({ open, agent, canWrite, onClose, onSaved }) {
   );
 }
 
-function SnmpSwitchesPage({ refreshKey, onReload, displayTimezone }) {
+function SnmpSwitchesPage({ refreshKey, onReload, displayTimezone, canOpenInterfaceRoles }) {
   const canWrite = AuthAccess.canWritePage('snmp') || AuthAccess.canWritePage('collectors');
   const [settings, setSettings] = useState(null);
   const [rows, setRows] = useState([]);
@@ -532,6 +597,7 @@ function SnmpSwitchesPage({ refreshKey, onReload, displayTimezone }) {
         agent={editing}
         canWrite={canWrite}
         onClose={() => setEditing(null)}
+        canOpenInterfaceRoles={canOpenInterfaceRoles}
         onSaved={() => {
           setEditing(null);
           onReload();

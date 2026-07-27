@@ -86,7 +86,7 @@ function PageTTL() {
     <div className="main__container">
       <div className="page-head">
         <div>
-          <h1>Управление TTL</h1>
+          <h1>Сроки хранения</h1>
           <p>Сроки хранения таблиц ClickHouse. Изменения применяются через ALTER TABLE … MODIFY TTL.</p>
         </div>
         <div className="row" style={{ gap: 8 }}>

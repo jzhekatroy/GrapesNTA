@@ -253,6 +253,11 @@ function shiftedNowSql() {
   return 'now() - INTERVAL 30 SECOND';
 }
 
+function anchoredNowSql(anchor) {
+  if (anchor) return parseDataDatetimeSql('anchor');
+  return shiftedNowSql();
+}
+
 function normalizeChartDirections(directions) {
   if (directions === undefined) {
     return [...CHART_SQL_DIRECTIONS];
@@ -1987,13 +1992,15 @@ function customRangeDurationMs(from, to) {
   return end - start;
 }
 
-function resolveTrafficWindow({ range = '24h', from, to, bucketSeconds } = {}) {
+function resolveTrafficWindow({ range = '24h', from, to, bucketSeconds, anchor } = {}) {
   const minuteAlignCte = `
     ${parseDataDatetimeSql('to')} AS raw_ts_to,
     ${parseDataDatetimeSql('from')} AS raw_ts_from,
     toStartOfMinute(raw_ts_from) AS ts_from,
     toStartOfMinute(raw_ts_to) AS ts_to,`;
   const useMinuteAlign = Number(bucketSeconds) > 0 && Number(bucketSeconds) <= 60;
+  const nowExpr = anchoredNowSql(anchor);
+  const anchorParams = anchor ? { anchor } : {};
 
   if (range === 'custom') {
     if (!from || !to) throw new Error('Для своего периода нужны параметры from и to');
@@ -2033,9 +2040,9 @@ function resolveTrafficWindow({ range = '24h', from, to, bucketSeconds } = {}) {
     return {
       mode: 'daily',
       cteHead: `
-    toStartOfHour(${shiftedNowSql()}) AS ts_to,
+    toStartOfHour(${nowExpr}) AS ts_to,
     ts_to - ${EXTENDED_RANGE_INTERVALS[range]} AS ts_from,`,
-      params: {},
+      params: { ...anchorParams },
     };
   }
 
@@ -2043,9 +2050,9 @@ function resolveTrafficWindow({ range = '24h', from, to, bucketSeconds } = {}) {
     return {
       mode: 'hybrid',
       cteHead: `
-    toStartOfMinute(${shiftedNowSql()}) AS ts_to,
+    toStartOfMinute(${nowExpr}) AS ts_to,
     ts_to - ${MEDIUM_RANGE_INTERVALS[range]} AS ts_from,`,
-      params: {},
+      params: { ...anchorParams },
     };
   }
 
@@ -2054,10 +2061,31 @@ function resolveTrafficWindow({ range = '24h', from, to, bucketSeconds } = {}) {
   return {
     mode: 'minute',
     cteHead: `
-    ${shiftedNowSql()} AS raw_ts_to,
+    ${nowExpr} AS raw_ts_to,
     raw_ts_to - ${interval} AS raw_ts_from,
     ${FIVE_MINUTE_ALIGN_CTE}`,
-    params: {},
+    params: { ...anchorParams },
+  };
+}
+
+async function probeTrafficWindowBounds({ range = '24h', from, to, anchor, bucketSeconds } = {}, queryFn) {
+  const runQuery = queryFn || require('./clickhouse').query;
+  const windowSpec = resolveTrafficWindow({ range, from, to, anchor, bucketSeconds });
+  const tz = escapeSqlString(config.dataTimezone || 'UTC');
+  const { rows } = await runQuery(`
+    WITH
+      ${windowSpec.cteHead}
+      dateDiff('second', ts_from, ts_to) AS _window_seconds
+    SELECT
+      formatDateTime(ts_from, '%F %T', '${tz}') AS window_from,
+      formatDateTime(ts_to, '%F %T', '${tz}') AS window_to,
+      _window_seconds AS window_seconds
+  `, windowSpec.params, { name: 'explorer/window-bounds' });
+  const row = rows[0] || {};
+  return {
+    windowFrom: row.window_from || null,
+    windowTo: row.window_to || null,
+    windowSeconds: Math.max(1, Number(row.window_seconds) || 1),
   };
 }
 
@@ -2451,6 +2479,8 @@ module.exports = {
   normalizeTopTalkersGroup,
   recentFlows,
   resolveTrafficWindow,
+  probeTrafficWindowBounds,
+  anchoredNowSql,
   flowIpExpr,
   flowSamplerIpExpr,
   sflowIfIndexExpr,

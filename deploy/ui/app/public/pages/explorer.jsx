@@ -1777,12 +1777,12 @@ function buildExplorerResultColumns({
   const actionsCol = {
     key: 'actions',
     title: 'Действия',
-    width: 360,
     sortAccessor: () => '',
+    headerClassName: 'explorer-col-actions',
+    cellClassName: 'explorer-col-actions',
     render: (r) => (
       <ExplorerRowActions
         row={r}
-        compact
         onFocus={onFocusRow}
         onExclude={onExcludeRow}
         onDynamics={onDynamicsRow}
@@ -2518,13 +2518,21 @@ function PageExplorer({ onNavigate, displayTimezone }) {
     if (!hasAppliedQuery || !activeQuery) return;
     setExporting(true);
     try {
-      const blob = await ApiClient.exportExplorerCsv({
+      const exportPayload = {
         metric: activeQuery.metric,
         groupBy: activeQuery.groupBy,
         filters: (activeQuery.filters || []).map(normalizeExplorerFilter),
-        timeRange: activeQuery.timeRange,
-        customPeriod: activeQuery.customPeriod,
-      });
+      };
+      if (meta?.windowFrom && meta?.windowTo) {
+        exportPayload.from = meta.windowFrom;
+        exportPayload.to = meta.windowTo;
+        exportPayload.range = 'custom';
+      } else {
+        exportPayload.timeRange = activeQuery.timeRange;
+        exportPayload.customPeriod = activeQuery.customPeriod;
+        if (meta?.windowAnchor) exportPayload.windowAnchor = meta.windowAnchor;
+      }
+      const blob = await ApiClient.exportExplorerCsv(exportPayload);
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
@@ -2533,7 +2541,16 @@ function PageExplorer({ onNavigate, displayTimezone }) {
       a.click();
       a.remove();
       URL.revokeObjectURL(url);
-      pushToast({ kind: 'success', title: 'CSV экспортирован', desc: 'Все столбцы, до 10 000 строк.' });
+      const periodHint = meta?.windowFrom && meta?.windowTo
+        ? `Период таблицы: ${meta.windowFrom} — ${meta.windowTo}.`
+        : 'Обновите запрос для точного совпадения периода.';
+      pushToast({
+        kind: 'success',
+        title: 'CSV экспортирован',
+        desc: meta?.windowFrom && meta?.windowTo
+          ? `Все столбцы, до 10 000 строк. ${periodHint}`
+          : 'Все столбцы, до 10 000 строк.',
+      });
     } catch (err) {
       pushToast({ kind: 'error', title: 'Экспорт не удался', desc: err.message });
     } finally {
@@ -2720,7 +2737,7 @@ function PageExplorer({ onNavigate, displayTimezone }) {
     <div className="main__container" style={{ maxWidth: 1820, padding: 0 }}>
       <div className="page-head" style={{ padding: '0 4px' }}>
         <div>
-          <h1>Explorer Flows</h1>
+          <h1>Разбор трафика</h1>
           <p>Historical flow explorer: фильтры по времени, направлению, коллекторам, сущностям, протоколам, VLAN, ASN, L3 и сервисам.</p>
         </div>
         <div className="row" style={{ gap: 8 }}>
@@ -2855,14 +2872,6 @@ function PageExplorer({ onNavigate, displayTimezone }) {
           </Card>
         ) : (
           <>
-            <ExplorerInvestigationContext
-              snapshot={appliedSnapshot}
-              dimensionById={dimensionById}
-              metricLabel={appliedMetricLabel}
-              filterFields={schema?.filterFields || []}
-              vis={vis}
-            />
-
             {appliedGroupBy.length === 0 && (
               source === 'loading' || isRefreshingData ? (
                 <Card title="Базовые значения" pad="sm">
@@ -3085,78 +3094,9 @@ function PageExplorer({ onNavigate, displayTimezone }) {
   );
 }
 
-function formatExplorerFilterSummary(f, filterFields) {
-  const meta = filterFields?.find((ff) => ff.id === f.field) || filterFieldMeta(null, f.field);
-  const fieldLabel = meta?.label || f.field;
-  const opLabel = explorerOpLabel(f.op);
-  const valueLabel = f.label && String(f.label) !== String(f.value)
-    ? `${f.label} (${f.value})`
-    : f.value;
-  if (f.field === 'direction') {
-    const dirs = directionFilterToMap(f.value);
-    return `${fieldLabel} ${opLabel} ${explorerDirectionSummaryLabel(dirs)}`;
-  }
-  if (f.field === 'collector') {
-    const scopes = collectorFilterToArray(f.value);
-    return `${fieldLabel} ${opLabel} ${scopes.length ? scopes.join(', ') : 'Все коллекторы'}`;
-  }
-  if (f.field === 'tcp_flags') {
-    return `${fieldLabel} ${opLabel} ${tcpFlagsSummaryLabel(f.value)}`;
-  }
-  return `${fieldLabel} ${opLabel} ${valueLabel}`;
-}
-
-function buildExplorerInvestigationLines({
-  snapshot,
-  dimensionById,
-  metricLabel,
-  filterFields,
-}) {
-  if (!snapshot) return [];
-  const lines = [];
-  const migrated = migrateExplorerSnapshot(snapshot);
-  lines.push(`Период: ${timeRangeLabel(migrated.timeRange, migrated.customPeriod)}`);
-  const grouping = (migrated.groupBy || []).map((g) => dimensionById[g]?.label || g).join(' → ');
-  lines.push(`Группировка: ${grouping || 'без группировки'}`);
-  lines.push(`Метрика: ${metricLabel}`);
-  if (migrated.filters?.length) {
-    const filterLabels = migrated.filters.slice(0, 6).map((f) => formatExplorerFilterSummary(f, filterFields));
-    const suffix = migrated.filters.length > 6 ? ` (+${migrated.filters.length - 6})` : '';
-    lines.push(`Фильтры: ${filterLabels.join('; ')}${suffix}`);
-  }
-  return lines;
-}
-
 function ExplorerRefreshingData() {
   return (
     <div className="explorer-refreshing-data">Обновление данных</div>
-  );
-}
-
-function ExplorerInvestigationContext({
-  snapshot,
-  dimensionById,
-  metricLabel,
-  filterFields,
-  vis,
-}) {
-  const lines = buildExplorerInvestigationLines({ snapshot, dimensionById, metricLabel, filterFields });
-  const visMeta = VIS_TYPES.find((v) => v.id === vis);
-  if (!lines.length) return null;
-  return (
-    <Card pad="sm" className="explorer-investigation-context">
-      <div style={{ font: 'var(--pv-text-body-3-bold)', color: 'var(--fg-secondary)', marginBottom: 8 }}>
-        Контекст расследования
-      </div>
-      <div style={{ font: 'var(--pv-text-body-2)', color: 'var(--fg-primary)', marginBottom: 8 }}>
-        {lines.join(' · ')}
-      </div>
-      {visMeta && (
-        <div style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-muted)' }}>
-          Режим «{visMeta.label}»: {visMeta.hint}
-        </div>
-      )}
-    </Card>
   );
 }
 
@@ -3225,36 +3165,46 @@ function ExplorerVisualLimitControl({
   );
 }
 
+function ExplorerActionLabel({ full, short }) {
+  return (
+    <>
+      <span className="explorer-row-actions__label explorer-row-actions__label--full">{full}</span>
+      <span className="explorer-row-actions__label explorer-row-actions__label--short">{short}</span>
+    </>
+  );
+}
+
 function ExplorerRowActions({
   row,
-  compact = false,
   onFocus,
   onExclude,
   onDynamics,
   selectedDynamicsSeriesIds,
   onToggleDynamicsSeries,
 }) {
-  const btnStyle = compact
-    ? { padding: '2px 6px', fontSize: 10 }
-    : { padding: '4px 8px', fontSize: 11 };
   const onChart = selectedDynamicsSeriesIds?.has(row.id);
   const hasDynamicsToggle = typeof onToggleDynamicsSeries === 'function';
   return (
     <div className="explorer-row-actions row" onClick={(e) => e.stopPropagation()}>
-      <button type="button" className="badge" style={btnStyle} title="Добавить значения строки в фильтр" onClick={() => onFocus?.(row)}>В фильтр</button>
-      <button type="button" className="badge" style={btnStyle} title="Исключить значения строки из выборки" onClick={() => onExclude?.(row)}>Исключить</button>
+      <button type="button" className="badge explorer-row-actions__btn" title="Добавить значения строки в фильтр" onClick={() => onFocus?.(row)}>
+        <ExplorerActionLabel full="В фильтр" short="Фильтр" />
+      </button>
+      <button type="button" className="badge explorer-row-actions__btn" title="Исключить значения строки из выборки" onClick={() => onExclude?.(row)}>
+        <ExplorerActionLabel full="Исключить" short="Искл." />
+      </button>
       {hasDynamicsToggle ? (
         <button
           type="button"
-          className={`badge${onChart ? ' badge--info' : ''}`}
-          style={btnStyle}
+          className={`badge explorer-row-actions__btn${onChart ? ' badge--info' : ''}`}
           title={onChart ? 'Скрыть серию с графика динамики' : 'Показать серию на графике динамики'}
           onClick={() => onToggleDynamicsSeries(row.id)}
         >
-          {onChart ? 'Скрыть с графика' : 'На график'}
+          <ExplorerActionLabel full={onChart ? 'Скрыть с графика' : 'На график'} short={onChart ? 'Скрыть' : 'График'} />
         </button>
       ) : (
-        <button type="button" className="badge" style={btnStyle} title="Показать динамику для этой строки" onClick={() => onDynamics?.(row)}>На график</button>
+        <button type="button" className="badge explorer-row-actions__btn" title="Показать динамику для этой строки" onClick={() => onDynamics?.(row)}>
+          <ExplorerActionLabel full="На график" short="График" />
+        </button>
       )}
     </div>
   );
@@ -4551,7 +4501,6 @@ function ContributionBarsExplorer({
             </div>
             <ExplorerRowActions
               row={row}
-              compact
               onFocus={onFocus}
               onExclude={onExclude}
               onDynamics={onDynamics}

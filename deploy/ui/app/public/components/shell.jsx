@@ -8,44 +8,42 @@ const NAV = [
     items: [
       { id: 'dashboard', label: 'Обзор', icon: 'dashboard' },
       { id: 'monitoring', label: 'Мониторинг', icon: 'clock' },
-      { id: 'dns',       label: 'DNS-запросы',    icon: 'globe' },
+      { id: 'observations', label: 'Наблюдения', icon: 'query' },
     ],
   },
   {
     section: 'Анализ трафика',
     items: [
-      { id: 'explorer',   label: 'Explorer Flows', icon: 'explorer' },
-      { id: 'observations', label: 'Наблюдения',   icon: 'query' },
-      { id: 'top',        label: 'Топ ASN',  icon: 'top' },
+      { id: 'explorer', label: 'Разбор трафика', icon: 'explorer' },
+      { id: 'top', label: 'Топ ASN', icon: 'top' },
+      { id: 'vlan', label: 'VLAN', icon: 'layers' },
+      { id: 'dns', label: 'DNS-запросы', icon: 'globe' },
     ],
   },
   {
-    section: 'Оборудование',
+    section: 'Сбор данных',
     group: {
-      id: 'hw',
-      label: 'Инфраструктура',
+      id: 'data',
+      label: 'Сбор данных',
       icon: 'collectors',
       children: [
         { id: 'collectors', label: 'Коллекторы' },
         { id: 'snmp', label: 'SNMP' },
         { id: 'bmp', label: 'BMP / BGP' },
-        { id: 'databases',  label: 'Внешние базы данных' },
       ],
     },
   },
   {
-    section: 'Справочники',
+    section: 'Модель сети',
     group: {
-      id: 'refs',
-      label: 'Справочники',
+      id: 'netmodel',
+      label: 'Модель сети',
       icon: 'refs',
       children: [
-        { id: 'routers',  label: 'Роутеры и экспортёры' },
+        { id: 'cidr', label: 'Собственные сети (CIDR)' },
         { id: 'entities', label: 'Владельцы L3' },
-        { id: 'cidr',     label: 'Собственные сети (CIDR)' },
-        { id: 'port-services', label: 'Сервисы / порты' },
-        { id: 'vlan',     label: 'VLAN' },
-        { id: 'other',   label: 'Другие справочники' },
+        { id: 'interface-roles', label: 'Порты оборудования' },
+        { id: 'port-services', label: 'Сервисы и порты приложений' },
       ],
     },
   },
@@ -54,7 +52,7 @@ const NAV = [
     items: [
       { id: 'users', label: 'Пользователи и права', icon: 'users' },
       { id: 'diagnostics', label: 'Диагностика', icon: 'query' },
-      // { id: 'ttl', label: 'Управление TTL', icon: 'clock' },
+      { id: 'ttl', label: 'Сроки хранения', icon: 'clock' },
     ],
   },
 ];
@@ -66,16 +64,14 @@ const PAGES_WITHOUT_HEADER_FILTERS = new Set([
   'diagnostics',
   'users',
   'collectors',
-  'collector-status',
   'snmp',
   'bmp',
-  'databases',
-  'routers',
   'entities',
   'cidr',
+  'interface-roles',
   'port-services',
   'vlan',
-  'other',
+  'ttl',
 ]);
 
 function hasNavPermission(effectivePermissions, pageId) {
@@ -109,14 +105,17 @@ function Sidebar({ current, onNavigate, collapsed, effectivePermissions }) {
     visibleNav.forEach(s => {
       if (s.group) o[s.group.id] = s.group.children.some(c => c.id === current);
     });
-    if (!o.hw && (current === 'collectors' || current === 'snmp' || current === 'bmp' || current === 'collector-status' || current === 'databases')) o.hw = true;
-    if (!o.refs && (current === 'routers' || current === 'entities' || current === 'cidr' || current === 'port-services' || current === 'other')) o.refs = true;
-    o.hw = o.hw ?? true; o.refs = o.refs ?? true;
+    if (!o.data && (current === 'collectors' || current === 'snmp' || current === 'bmp')) o.data = true;
+    if (!o.netmodel && (current === 'entities' || current === 'cidr' || current === 'port-services' || current === 'interface-roles' || current === 'routers')) o.netmodel = true;
+    o.data = o.data ?? true;
+    o.netmodel = o.netmodel ?? true;
     return o;
   });
   useEffect(() => {
-    if (current === 'collectors' || current === 'snmp' || current === 'bmp' || current === 'collector-status' || current === 'databases') setOpenGroups((s) => ({ ...s, hw: true }));
-    if (current === 'routers' || current === 'entities' || current === 'cidr' || current === 'port-services' || current === 'other') setOpenGroups((s) => ({ ...s, refs: true }));
+    if (current === 'collectors' || current === 'snmp' || current === 'bmp') setOpenGroups((s) => ({ ...s, data: true }));
+    if (current === 'entities' || current === 'cidr' || current === 'port-services' || current === 'interface-roles' || current === 'routers') {
+      setOpenGroups((s) => ({ ...s, netmodel: true }));
+    }
   }, [current]);
 
   const toggle = (gid) => setOpenGroups((s) => ({ ...s, [gid]: !s[gid] }));
@@ -213,7 +212,7 @@ function formatUserDateTime(value) {
   return date.toLocaleString('ru-RU', { dateStyle: 'short', timeStyle: 'short' });
 }
 
-function UserAccountMenu({ currentUser, pageTitles }) {
+function UserAccountMenu({ currentUser, pageTitles, hiddenPageIds }) {
   const [open, setOpen] = useState(false);
   const rootRef = useRef(null);
   const titles = pageTitles || PAGE_TITLES || {};
@@ -225,9 +224,10 @@ function UserAccountMenu({ currentUser, pageTitles }) {
 
   const allowedPages = useMemo(() => {
     const perms = currentUser?.effectivePermissions;
+    const hidden = hiddenPageIds || new Set();
     if (!perms) return [];
     return Object.entries(perms)
-      .filter(([, allowed]) => allowed)
+      .filter(([id, allowed]) => allowed && !hidden.has(id))
       .map(([id]) => ({
         id,
         title: titles[id]?.title || id,
@@ -237,7 +237,7 @@ function UserAccountMenu({ currentUser, pageTitles }) {
         a.section.localeCompare(b.section, 'ru')
         || a.title.localeCompare(b.title, 'ru')
       ));
-  }, [currentUser, pageTitles]);
+  }, [currentUser, pageTitles, hiddenPageIds]);
 
   return (
     <div className="user-menu" ref={rootRef}>
@@ -284,7 +284,7 @@ function UserAccountMenu({ currentUser, pageTitles }) {
   );
 }
 
-function Header({ current, onNavigate, onToggleSidebar, currentUser, onLogout, onRefresh, theme, onToggleTheme, timeRange, onTimeRangeChange, customPeriod, onCustomPeriodChange, chartZoomDepth, onChartZoomReset, directions, onDirectionsChange, collectorFilter, onCollectorFilterChange, pageTitles, displayTimezone, timezonePref, onTimezonePrefChange, monitoringDeviationsTotal, monitoringDeviationsError }) {
+function Header({ current, onNavigate, onToggleSidebar, currentUser, onLogout, onRefresh, theme, onToggleTheme, timeRange, onTimeRangeChange, customPeriod, onCustomPeriodChange, chartZoomDepth, onChartZoomReset, directions, onDirectionsChange, collectorFilter, onCollectorFilterChange, pageTitles, hiddenPageIds, displayTimezone, timezonePref, onTimezonePrefChange, monitoringDeviationsTotal, monitoringDeviationsError }) {
   const titles = pageTitles || PAGE_TITLES || {};
   const meta = titles[current] || titles.dashboard || { title: current, section: '' };
   const hidePageFilters = PAGES_WITHOUT_HEADER_FILTERS.has(current);
@@ -345,7 +345,7 @@ function Header({ current, onNavigate, onToggleSidebar, currentUser, onLogout, o
         </button>
         <button
           type="button"
-          className="icon-btn tt"
+          className={`icon-btn tt header-bell-btn${monitoringDeviationsTotal > 0 ? ' header-bell-btn--has-badge' : ''}`}
           data-tt={monitoringDeviationsError || 'Мониторинг отклонений'}
           title={monitoringDeviationsError || 'Мониторинг отклонений'}
           onClick={() => onNavigate('monitoring')}
@@ -359,7 +359,7 @@ function Header({ current, onNavigate, onToggleSidebar, currentUser, onLogout, o
           <Icon name={theme === 'dark' ? 'sun' : 'moon'} size={18} />
         </button>
         <span className="hr-v" />
-        <UserAccountMenu currentUser={currentUser} pageTitles={pageTitles} />
+        <UserAccountMenu currentUser={currentUser} pageTitles={pageTitles} hiddenPageIds={hiddenPageIds} />
         <button className="icon-btn tt" data-tt="Выйти" onClick={onLogout}>
           <Icon name="logOut" size={18} />
         </button>

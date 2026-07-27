@@ -44,6 +44,11 @@ function PageUsers({ currentUser, onAuthRefresh }) {
 
   useEffect(() => { loadAll(); }, []);
 
+  const visibleResources = useMemo(
+    () => resources.filter((p) => !p.hidden),
+    [resources],
+  );
+
   const roleMap = useMemo(() => Object.fromEntries(roles.map((r) => [r.id, r])), [roles]);
 
   const filtered = useMemo(() => rows.filter((u) => {
@@ -160,7 +165,7 @@ function PageUsers({ currentUser, onAuthRefresh }) {
           <SumCard label="Всего пользователей" value={rows.length} icon="users" />
           <SumCard label="Ролей" value={roles.length} icon="key" />
           <SumCard label="Требуют смену пароля" value={rows.filter(u => u.forcePasswordChange).length} icon="clock" tone="warning" />
-          <SumCard label="Страниц в реестре" value={resources.length} icon="check" tone="success" />
+          <SumCard label="Страниц в реестре" value={visibleResources.length} icon="check" tone="success" />
         </div>
       )}
 
@@ -229,7 +234,7 @@ function PageUsers({ currentUser, onAuthRefresh }) {
       <UserDrawer
         user={drawerUser}
         roles={roles}
-        resources={resources}
+        resources={visibleResources}
         onClose={() => setDrawerUser(null)}
         onSaved={async () => {
           await loadAll();
@@ -238,7 +243,7 @@ function PageUsers({ currentUser, onAuthRefresh }) {
       />
       <RoleDrawer
         role={drawerRole}
-        resources={resources}
+        resources={visibleResources}
         onClose={() => setDrawerRole(null)}
         onSaved={loadAll}
         onDeleted={() => { setDrawerRole(null); loadAll(); }}

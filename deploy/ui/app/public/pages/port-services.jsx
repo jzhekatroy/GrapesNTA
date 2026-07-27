@@ -233,7 +233,7 @@ function PagePortServices() {
     <div className="main__container">
       <div className="page-head">
         <div>
-          <h1>Сервисы / порты</h1>
+          <h1>Сервисы и порты приложений</h1>
           <p>Соответствия портов и диапазонов сервисам для классификации трафика в отчётах.</p>
         </div>
         <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>

@@ -24,10 +24,11 @@ const {
   runDueObservationReports,
   MIN_INTERVAL_SEC,
 } = require('./observations');
+const { ensureSmtpSettingsTables } = require('./smtp-settings');
 
 const REPORT_CHECK_SEC = Math.max(
-  300,
-  Number(process.env.ANALYTICS_REPORT_CHECK_SEC) || 3600,
+  60,
+  Number(process.env.ANALYTICS_REPORT_CHECK_SEC) || 60,
 );
 
 let lastReportCheckMs = 0;
@@ -46,6 +47,9 @@ async function tick() {
   const started = Date.now();
   markHeartbeat();
   await ensureObservationsStore();
+  await ensureSmtpSettingsTables().catch((err) => {
+    console.warn(new Date().toISOString(), 'smtp ensure failed', err.message);
+  });
   const recovered = await recoverStuckRunning();
   if (recovered) {
     console.log(new Date().toISOString(), 'analytics recovered stuck jobs:', recovered);

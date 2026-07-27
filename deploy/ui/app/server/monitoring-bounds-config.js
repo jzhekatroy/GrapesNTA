@@ -56,7 +56,8 @@ async function boundsServiceFetch(path, { method = 'GET', body } = {}) {
 
 function parseBoundsConfig(apiData) {
   const intervals = apiData?.intervals || {};
-  const country = apiData?.intervals_country_ru || {};
+  const countryRu = apiData?.intervals_country_ru || {};
+  const countryForeign = apiData?.intervals_country_F || {};
 
   return {
     broadband_total: {
@@ -66,16 +67,16 @@ function parseBoundsConfig(apiData) {
       source: 'intervals',
     },
     broadband_in_ru: {
-      ciLow: Number(country.ci_low),
-      ciHigh: Number(country.ci_high),
-      ciMinimum: Number(country.ci_minimum),
+      ciLow: Number(countryRu.ci_low),
+      ciHigh: Number(countryRu.ci_high),
+      ciMinimum: Number(countryRu.ci_minimum),
       source: 'intervals_country_ru',
     },
     broadband_in_foreign: {
-      ciLow: Number(country.ci_low),
-      ciHigh: Number(country.ci_high),
-      ciMinimum: Number(country.ci_minimum),
-      source: 'intervals_country_ru',
+      ciLow: Number(countryForeign.ci_low),
+      ciHigh: Number(countryForeign.ci_high),
+      ciMinimum: Number(countryForeign.ci_minimum),
+      source: 'intervals_country_F',
     },
   };
 }
@@ -132,7 +133,6 @@ async function getMonitoringBounds(parameterId) {
     ciHigh: bounds.ciHigh,
     ciMinimum: bounds.ciMinimum,
     source: bounds.source,
-    sharedSection: param.boundsConfigKey === 'intervals_country_ru',
     mode: configData.mode,
     host: configData.host || null,
     configPath: configData.configPath,
@@ -168,6 +168,9 @@ async function saveMonitoringBounds(parameterId, { ciLow, ciHigh, ciMinimum }) {
 
 module.exports = {
   boundsServiceUrl,
+  boundsServiceToken,
+  boundsServiceFetch,
+  parseBoundsConfig,
   loadBoundsConfig,
   invalidateBoundsCache,
   getMonitoringBounds,
