@@ -256,6 +256,7 @@ function DataTable({
   pageSize = 10,
   dense,
   footerNote,
+  pinnedRows,        // rows rendered after the page, outside sorting and paging
 }) {
   const [sort, setSort] = useState(initialSort || null);
   const [page, setPage] = useState(1);
@@ -406,6 +407,21 @@ function DataTable({
                 </tr>
               );
             })}
+            {(pinnedRows || []).map((row) => (
+              <tr key={`pinned-${row[rowKey]}`} className={['is-pinned', getRowClassName?.(row)].filter(Boolean).join(' ')}>
+                {selectable && <td />}
+                {visibleCols.map((c) => (
+                  <td
+                    key={c.key}
+                    className={[c.num ? 'num' : '', c.cellClassName].filter(Boolean).join(' ') || undefined}
+                    style={{ textAlign: c.align || 'left' }}
+                  >
+                    {c.render ? c.render(row) : row[c.key]}
+                  </td>
+                ))}
+                {rowActions && <td className="actions" />}
+              </tr>
+            ))}
           </tbody>
         </table>
       </div>

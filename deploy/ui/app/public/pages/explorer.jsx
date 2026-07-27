@@ -204,6 +204,59 @@ const EMPTY_EXPLORER_SUMMARY = {
   topProtocols: [],
 };
 
+const EXPLORER_OTHERS_ID = 'row-others';
+const EXPLORER_OTHERS_LABEL = 'Прочие';
+const EXPLORER_OTHERS_COLOR = '#9aa0a6';
+
+/** uniq metrics are not additive, so a remainder cannot be derived from them. */
+const EXPLORER_OTHERS_METRIC = {
+  bps: (t, ws) => (ws > 0 ? Math.round((t.bytes * 8) / ws) : 0),
+  volume: (t) => t.bytes,
+  pps: (t, ws) => (ws > 0 ? Math.round(t.packets / ws) : 0),
+  fps: (t, ws) => (ws > 0 ? Math.round((t.flows / ws) * 100) / 100 : 0),
+  flows: (t) => t.flows,
+};
+
+/**
+ * Everything outside the displayed rows, derived from the unsliced summary so the
+ * shown shares add up to 100%.
+ */
+function buildExplorerOthersRow({ shownRows, summary, meta, metric, groupBy }) {
+  if (!groupBy?.length || !shownRows?.length) return null;
+  if (meta?.pctScope && meta.pctScope !== 'full_filtered') return null;
+  const metricFn = EXPLORER_OTHERS_METRIC[metric];
+  if (!metricFn) return null;
+
+  const totalBytes = Number(summary?.totalBytes) || 0;
+  if (totalBytes <= 0) return null;
+  const rest = {
+    bytes: totalBytes - shownRows.reduce((s, r) => s + (Number(r.bytes) || 0), 0),
+    packets: (Number(summary?.totalPackets) || 0) - shownRows.reduce((s, r) => s + (Number(r.packets) || 0), 0),
+    flows: (Number(summary?.totalFlows) || 0) - shownRows.reduce((s, r) => s + (Number(r.flows) || 0), 0),
+  };
+  if (rest.bytes <= 0 || rest.bytes / totalBytes < 0.0001) return null;
+  rest.packets = Math.max(0, rest.packets);
+  rest.flows = Math.max(0, rest.flows);
+
+  const windowSeconds = Number(meta?.windowSeconds) || 0;
+  const values = groupBy.map((_, i) => (i === 0 ? EXPLORER_OTHERS_LABEL : ''));
+  return {
+    id: EXPLORER_OTHERS_ID,
+    isOthers: true,
+    values,
+    rawValues: [...values],
+    metric: metricFn(rest, windowSeconds),
+    pct: Math.round((rest.bytes * 10000) / totalBytes) / 100,
+    bytes: rest.bytes,
+    packets: rest.packets,
+    flows: rest.flows,
+    avgBps: windowSeconds > 0 ? Math.round((rest.bytes * 8) / windowSeconds) : 0,
+    pps: windowSeconds > 0 ? Math.round(rest.packets / windowSeconds) : 0,
+    fps: windowSeconds > 0 ? Math.round((rest.flows / windowSeconds) * 100) / 100 : 0,
+    color: EXPLORER_OTHERS_COLOR,
+  };
+}
+
 const EXPLORER_RESULT_METRIC_COLUMNS = [
   {
     key: 'bytes',
@@ -1724,6 +1777,20 @@ function buildExplorerResultColumns({
         if (!hasValue) {
           return <span style={{ color: 'var(--fg-secondary)' }}>—</span>;
         }
+        if (r.isOthers) {
+          return colIdx === 0
+            ? (
+              <span
+                className="row"
+                style={{ display: 'flex', alignItems: 'center', gap: 8, color: 'var(--fg-secondary)' }}
+                title="Весь трафик за вычетом показанных строк"
+              >
+                <span style={{ width: 10, height: 10, borderRadius: 3, background: r.color, flexShrink: 0 }} />
+                <span style={{ font: 'var(--pv-text-body-2-bold)' }}>{r.values[valueIdx]}</span>
+              </span>
+            )
+            : <span style={{ color: 'var(--fg-secondary)' }}>—</span>;
+        }
         const filterVal = explorerRowFilterValue(r, dimId, valueIdx, dimensionById);
         const monoClass = dimId.endsWith('ip') || dimId.endsWith('_mac') ? 'mono' : '';
         const isTcpFlags = dimId === 'tcp_flags';
@@ -1780,7 +1847,7 @@ function buildExplorerResultColumns({
     sortAccessor: () => '',
     headerClassName: 'explorer-col-actions',
     cellClassName: 'explorer-col-actions',
-    render: (r) => (
+    render: (r) => (r.isOthers ? null : (
       <ExplorerRowActions
         row={r}
         onFocus={onFocusRow}
@@ -1789,7 +1856,7 @@ function buildExplorerResultColumns({
         selectedDynamicsSeriesIds={selectedDynamicsSeriesIds}
         onToggleDynamicsSeries={onToggleDynamicsSeries}
       />
-    ),
+    )),
   };
 
   const baseCols = [...groupCols, metricCol, pctCol, actionsCol];
@@ -2728,6 +2795,16 @@ function PageExplorer({ onNavigate, displayTimezone }) {
     () => sliceExplorerVisualRows(results, visualLimit),
     [results, visualLimit],
   );
+  const othersEligible = appliedGroupBy.length > 0
+    && Boolean(EXPLORER_OTHERS_METRIC[appliedMetric])
+    && (!meta?.pctScope || meta.pctScope === 'full_filtered');
+  const othersRow = useMemo(() => buildExplorerOthersRow({
+    shownRows: visibleResults,
+    summary,
+    meta,
+    metric: appliedMetric,
+    groupBy: appliedGroupBy,
+  }), [visibleResults, summary, meta, appliedMetric, appliedGroupBy]);
   const activeVisMeta = VIS_TYPES.find((v) => v.id === vis) || VIS_TYPES[0];
 
   const idleState = !hasAppliedQuery && source !== 'loading';
@@ -2995,6 +3072,7 @@ function PageExplorer({ onNavigate, displayTimezone }) {
                             onClearFocus={clearDynamicsFocus}
                             onRangeSelect={applyExplorerChartRangeZoom}
                             bucketSeconds={explorerGranularityBucketSeconds(meta?.granularity)}
+                            totalPoints={othersEligible ? timeseries : null}
                           />
                         </div>
                         <DataTable
@@ -3012,6 +3090,7 @@ function PageExplorer({ onNavigate, displayTimezone }) {
                             });
                           }}
                           getRowClassName={(row) => (dynamicsSeriesIds.has(row.id) ? 'is-dynamics-active' : '')}
+                          pinnedRows={othersRow ? [othersRow] : null}
                           pageSize={Math.max(resolveExplorerVisualCount(visualLimit, results.length), 1)}
                           initialSort={{ key: appliedDefaultSortKey, dir: 'desc' }}
                           emptyTitle={source === 'loading' ? 'Выполняем запрос…' : 'Нет данных'}
@@ -3051,7 +3130,7 @@ function PageExplorer({ onNavigate, displayTimezone }) {
                 >
                   {analysisBody || (
                     <ContributionBarsExplorer
-                      results={visibleResults}
+                      results={othersRow ? [...visibleResults, othersRow] : visibleResults}
                       metric={appliedMetric}
                       metricLabel={appliedMetricLabel}
                       onFocus={focusRow}
@@ -4499,12 +4578,14 @@ function ContributionBarsExplorer({
             <div className="explorer-bars__track">
               <div className="explorer-bars__fill" style={{ width: `${widthPct}%`, background: row.color }} />
             </div>
-            <ExplorerRowActions
-              row={row}
-              onFocus={onFocus}
-              onExclude={onExclude}
-              onDynamics={onDynamics}
-            />
+            {!row.isOthers && (
+              <ExplorerRowActions
+                row={row}
+                onFocus={onFocus}
+                onExclude={onExclude}
+                onDynamics={onDynamics}
+              />
+            )}
           </div>
         );
       })}
@@ -4579,6 +4660,7 @@ function DynamicsChartExplorer({
   onClearFocus,
   onRangeSelect,
   bucketSeconds = 300,
+  totalPoints = null,
 }) {
   const [chartKey, setChartKey] = useState(0);
   useEffect(() => {
@@ -4607,6 +4689,27 @@ function DynamicsChartExplorer({
       const current = Number(pointsByBucket.get(bucket)[rowId]) || 0;
       pointsByBucket.get(bucket)[rowId] = current + (Number(pt.value) || 0);
     }
+  }
+
+  // Everything not on the chart, taken from the unsliced totals of the same query.
+  let hasOthers = false;
+  if (Array.isArray(totalPoints) && totalPoints.length && chartRowIds.length) {
+    for (const pt of totalPoints) {
+      const bucket = normalizeBucketString(pt.bucket);
+      const total = Number(pt.value) || 0;
+      if (!total) continue;
+      const target = pointsByBucket.get(bucket);
+      if (!target) continue;
+      const shown = chartRowIds.reduce((s, id) => s + (Number(target[id]) || 0), 0);
+      const rest = total - shown;
+      if (rest > 0 && rest / total >= 0.0001) {
+        target[EXPLORER_OTHERS_ID] = rest;
+        hasOthers = true;
+      }
+    }
+  }
+  if (hasOthers) {
+    lines.push({ key: EXPLORER_OTHERS_ID, label: EXPLORER_OTHERS_LABEL, color: EXPLORER_OTHERS_COLOR });
   }
 
   const points = [...pointsByBucket.values()]

@@ -59,6 +59,10 @@ const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 /** Absolute origin for report links; relative links still work in the browser. */
 const REPORT_BASE_URL = String(process.env.OBSERVATION_REPORT_BASE_URL || '').replace(/\/+$/, '');
 const REPORT_HTML_TOP_ROWS = 50;
+/** Everything outside the stored top-N is folded into one bucket. */
+const OTHER_KEY = '__other__';
+const OTHER_LABEL = 'Прочие';
+const OTHER_COLOR = '#9aa0a6';
 
 const NATIVE_FILTER_FIELDS = new Set([
   'direction', 'collector', 'vlan', 'vlan_attachment',
@@ -711,6 +715,62 @@ async function readRollupTimeseries(observationId, window) {
   }
 }
 
+/** Rollup stores dim0='' rows with the unsliced total, so "other" is exact, not guessed. */
+async function readRollupPeriodTotals(observationId, window) {
+  try {
+    const { rows } = await query(`
+      SELECT
+        sum(bytes) AS bytes,
+        sum(packets) AS packets,
+        sum(flows) AS flows
+      FROM default.${ROLLUP_TABLE}
+      WHERE observation_id = {id:String}
+        AND minute >= ${parseDataDatetimeSql('from')}
+        AND minute < ${parseDataDatetimeSql('to')}
+        AND dim0 = ''
+        AND dim1 = ''
+    `, {
+      id: observationId,
+      from: window.from,
+      to: window.to,
+    }, { name: 'observations/rollup-period-totals' });
+    const row = rows?.[0];
+    const bytes = Number(row?.bytes) || 0;
+    if (!bytes) return null;
+    return {
+      bytes,
+      packets: Number(row?.packets) || 0,
+      flows: Number(row?.flows) || 0,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/** Rows beyond the stored top-N collapse into one "Прочие" row (total minus shown). */
+function appendOtherRow(rows, totals, windowSeconds) {
+  if (!totals?.bytes || !rows.length) return rows;
+  const shownBytes = rows.reduce((s, r) => s + (Number(r.bytes) || 0), 0);
+  const restBytes = totals.bytes - shownBytes;
+  if (restBytes <= 0 || restBytes / totals.bytes < 0.0001) return rows;
+  const groupCount = rows[0].values?.length || 1;
+  const values = Array.from({ length: groupCount }, (_, i) => (i === 0 ? OTHER_LABEL : ''));
+  return [...rows, {
+    id: 'rollup-other',
+    key: OTHER_KEY,
+    isOther: true,
+    values,
+    rawValues: [...values],
+    metric: Math.round((restBytes * 8) / windowSeconds),
+    avgBps: Math.round((restBytes * 8) / windowSeconds),
+    pct: Math.round((restBytes * 10000) / totals.bytes) / 100,
+    bytes: restBytes,
+    packets: Math.max(0, totals.packets - rows.reduce((s, r) => s + (Number(r.packets) || 0), 0)),
+    flows: Math.max(0, totals.flows - rows.reduce((s, r) => s + (Number(r.flows) || 0), 0)),
+    color: OTHER_COLOR,
+  }];
+}
+
 async function readRollupTop(observationId, window, { limit = 15, groupBy = [] } = {}) {
   try {
     const windowSeconds = Math.max(
@@ -739,7 +799,10 @@ async function readRollupTop(observationId, window, { limit = 15, groupBy = [] }
       limit: Math.min(Math.max(Number(limit) || 15, 1), 50),
     }, { name: 'observations/rollup-top' });
 
-    const totalBytes = rows.reduce((s, r) => s + (Number(r.bytes) || 0), 0) || 1;
+    const totals = await readRollupPeriodTotals(observationId, window);
+    const shownBytes = rows.reduce((s, r) => s + (Number(r.bytes) || 0), 0);
+    // Share is against the whole filtered traffic, not just the rows we display.
+    const pctBase = totals?.bytes || shownBytes || 1;
     const mapped = rows.map((r, i) => {
       const bytes = Number(r.bytes) || 0;
       const values = r.dim1 ? [String(r.dim0), String(r.dim1)] : [String(r.dim0)];
@@ -750,7 +813,7 @@ async function readRollupTop(observationId, window, { limit = 15, groupBy = [] }
         rawValues: [...values],
         metric: Math.round((bytes * 8) / windowSeconds),
         avgBps: Math.round((bytes * 8) / windowSeconds),
-        pct: Math.round((bytes * 10000) / totalBytes) / 100,
+        pct: Math.round((bytes * 10000) / pctBase) / 100,
         bytes,
         packets: Number(r.packets) || 0,
         flows: Number(r.flows) || 0,
@@ -758,7 +821,7 @@ async function readRollupTop(observationId, window, { limit = 15, groupBy = [] }
       };
     });
     const withAsn = await enrichAsnLabelsInRows(mapped, groupBy);
-    return { rows: enrichTcpFlagsLabelsInRows(withAsn, groupBy) };
+    return { rows: enrichTcpFlagsLabelsInRows(withAsn, groupBy), totals, windowSeconds };
   } catch (err) {
     return { rows: [], error: err.message };
   }
@@ -778,6 +841,7 @@ async function readRollupGroupedTimeseries(observationId, window, { seriesLimit 
   const keys = top.rows.map((r) => r.key);
 
   try {
+    const totalSeries = await readRollupTimeseries(observationId, window);
     const { rows } = await query(`
       SELECT
         minute,
@@ -814,14 +878,44 @@ async function readRollupGroupedTimeseries(observationId, window, { seriesLimit 
       bucketMap.get(minute)[key] = Math.round((bytes * 8) / ROLLUP_BUCKET_SEC);
     }
 
+    const totalByBucket = new Map();
+    for (const p of totalSeries.points || []) {
+      totalByBucket.set(p.t, Number(p.bps) || 0);
+      if (!bucketMap.has(p.t)) bucketMap.set(p.t, { t: p.t, bucket: p.t });
+    }
+
+    let otherSeen = false;
+    for (const point of bucketMap.values()) {
+      const total = totalByBucket.get(point.bucket);
+      if (!total) continue;
+      const shown = keys.reduce((s, key) => s + (Number(point[key]) || 0), 0);
+      const rest = total - shown;
+      // Grouped and total rows come from the same rollup rows, so tiny drift is rounding only.
+      if (rest > 0 && rest / total >= 0.0001) {
+        point[OTHER_KEY] = Math.round(rest);
+        otherSeen = true;
+      }
+    }
+
     const points = [...bucketMap.values()].sort((a, b) => String(a.bucket).localeCompare(String(b.bucket)));
     const lines = top.rows.map((row) => ({
       key: row.key,
       label: dimLabel(row.values[0], row.values[1]),
       color: row.color,
     }));
+    if (otherSeen) {
+      lines.push({ key: OTHER_KEY, label: OTHER_LABEL, color: OTHER_COLOR, isOther: true });
+    }
 
-    return { points, lines, rows: top.rows, error: null };
+    const topRows = appendOtherRow(top.rows, top.totals, top.windowSeconds || ROLLUP_BUCKET_SEC);
+    return {
+      points,
+      lines,
+      rows: topRows,
+      totals: top.totals || null,
+      windowSeconds: top.windowSeconds || ROLLUP_BUCKET_SEC,
+      error: null,
+    };
   } catch (err) {
     return { points: [], lines: [], rows: top.rows, error: err.message };
   }
@@ -888,7 +982,12 @@ async function previewObservation(id, userId, body = {}) {
             error: data.error || undefined,
           });
           if (!cachedTop) {
-            cachedTop = { rows: data.rows, groupBy };
+            cachedTop = {
+              rows: data.rows,
+              groupBy,
+              totals: data.totals || null,
+              windowSeconds: data.windowSeconds || ROLLUP_BUCKET_SEC,
+            };
           }
           continue;
         }
@@ -944,12 +1043,13 @@ async function previewObservation(id, userId, body = {}) {
           && cachedTop.groupBy.join('|') === groupBy.join('|')
           && Array.isArray(cachedTop.rows)
         ) {
+          const shown = cachedTop.rows.filter((r) => !r.isOther).slice(0, w.limit || 15);
           widgets.push({
             id: w.id,
             type: w.type,
             source: useRollup ? ROLLUP_TABLE : 'none',
             status: 'ok',
-            rows: cachedTop.rows.slice(0, w.limit || 15),
+            rows: appendOtherRow(shown, cachedTop.totals, cachedTop.windowSeconds || ROLLUP_BUCKET_SEC),
             groupBy,
             warning: cachedTop.rows.length ? null : (useRollup ? rollupEmptyWarning(obs) : null),
           });
@@ -973,7 +1073,7 @@ async function previewObservation(id, userId, body = {}) {
           type: w.type,
           source: ROLLUP_TABLE,
           status: data.rows.length ? 'ok' : (obs.materialize.status || 'queued'),
-          rows: data.rows,
+          rows: appendOtherRow(data.rows, data.totals, data.windowSeconds || ROLLUP_BUCKET_SEC),
           groupBy,
           warning: data.rows.length ? null : rollupEmptyWarning(obs),
           error: data.error || undefined,
@@ -1161,20 +1261,29 @@ function timeseriesReportData(previewWidget) {
   return { points, seriesLines, grouped };
 }
 
-function timeseriesReportCsv(previewWidget, timeZone) {
+/**
+ * Grouped charts are written long (one row per bucket+series) so the file matches
+ * the top table shape and survives a changing series set.
+ */
+function timeseriesReportCsv(previewWidget, timeZone, groupBy = []) {
   const { points, seriesLines, grouped } = timeseriesReportData(previewWidget);
   const timeHeader = `Время (${timeZone})`;
+  const dimHeader = groupBy.length ? groupBy.map(explorerFieldLabel).join(' / ') : 'Серия';
   const headers = grouped
-    ? [timeHeader, ...seriesLines.map((ln) => `${ln.label || ln.key} (бит/с)`)]
+    ? [timeHeader, dimHeader, 'Средняя бит/с']
     : [timeHeader, 'Средняя бит/с', 'Объём (байты)', 'Пакеты', 'Потоки'];
 
   const lines = [headers.map(csvEscape).join(',')];
   for (const p of points) {
     const stamp = zonedDateTime(p.t || p.bucket, timeZone);
-    const cells = grouped
-      ? [stamp, ...seriesLines.map((ln) => (p[ln.key] != null ? p[ln.key] : ''))]
-      : [stamp, p.bps, p.bytes, p.packets, p.flows];
-    lines.push(cells.map(csvEscape).join(','));
+    if (!grouped) {
+      lines.push([stamp, p.bps, p.bytes, p.packets, p.flows].map(csvEscape).join(','));
+      continue;
+    }
+    for (const ln of seriesLines) {
+      if (p[ln.key] == null) continue;
+      lines.push([stamp, ln.label || ln.key, p[ln.key]].map(csvEscape).join(','));
+    }
   }
   return { lines, points, seriesLines, grouped };
 }
@@ -1382,7 +1491,9 @@ function topTableHtml(previewWidget, groupBy, fileName, limit) {
     'Пакеты',
     'Потоки',
   ].map((h) => `<th>${escapeHtml(h)}</th>`).join('');
-  const shown = rows.slice(0, limit);
+  const otherRow = rows.find((r) => r.isOther);
+  const shown = rows.filter((r) => !r.isOther).slice(0, limit);
+  if (otherRow) shown.push(otherRow);
   const body = shown.map((r) => {
     const cells = [
       ...(r.values || []).map((v) => escapeHtml(v)),
@@ -1392,7 +1503,7 @@ function topTableHtml(previewWidget, groupBy, fileName, limit) {
       escapeHtml(fmtCountRu(r.packets)),
       escapeHtml(fmtCountRu(r.flows)),
     ];
-    return `<tr>${cells.map((c) => `<td>${c}</td>`).join('')}</tr>`;
+    return `<tr${r.isOther ? ' class="other-row"' : ''}>${cells.map((c) => `<td>${c}</td>`).join('')}</tr>`;
   }).join('');
   const note = rows.length > shown.length
     ? `<p class="muted">Показаны ${shown.length} из ${rows.length} строк. Полные данные: ${escapeHtml(fileName)}</p>`
@@ -1459,6 +1570,7 @@ table{border-collapse:collapse;width:100%;margin:10px 0}
 td,th{border:1px solid #ddd;padding:6px 8px;font-size:13px}
 th{background:#f5f5f5;text-align:left}
 td:nth-child(n+2){text-align:right;font-variant-numeric:tabular-nums}
+.other-row td{background:#f7f7f7;color:#444;font-style:italic}
 a{color:#1a56c4}
 </style>
 </head><body>
@@ -1515,7 +1627,7 @@ async function runObservationReport(id, userId) {
 
   for (const w of obs.widgets.filter((x) => x.type === 'timeseries_bps')) {
     const previewWidget = preview.widgets.find((pw) => pw.id === w.id) || { id: w.id, type: w.type };
-    const csv = timeseriesReportCsv(previewWidget, timeZone);
+    const csv = timeseriesReportCsv(previewWidget, timeZone, observationChartGroupBy(obs, w));
     const fileName = uniqueName(`chart-${dayStamp}`);
     fs.writeFileSync(path.join(dir, fileName), `\uFEFF${csv.lines.join('\n')}\n`);
     tables.push({
@@ -1523,7 +1635,7 @@ async function runObservationReport(id, userId) {
       type: w.type,
       label: 'График',
       file: fileName,
-      rows: csv.points.length,
+      rows: Math.max(0, csv.lines.length - 1),
     });
   }
 

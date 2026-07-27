@@ -3240,6 +3240,8 @@ input, button, select, textarea { font-family: inherit; color: inherit; }
 .table tbody tr { transition: background var(--pv-dur-fast); }
 .table tbody tr:hover { background: var(--surf-1); }
 .table tbody tr.is-selected { background: var(--row-selected); }
+.table tbody tr.is-pinned { background: var(--surf-1); color: var(--fg-secondary); }
+.table tbody tr.is-pinned td { border-top: 1px solid var(--bd-default); }
 .table tbody tr:last-child td { border-bottom: 0; }
 .table td.num { font-variant-numeric: tabular-nums; }
 .table td.actions { width: 1%; white-space: nowrap; }

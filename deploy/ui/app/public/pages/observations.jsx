@@ -561,15 +561,19 @@ function ObservationLiveTile({
     const pts = chartW?.points || chartW?.series || [];
     const linesLocal = chartW?.lines || [];
     const mode = chartW?.mode === 'grouped' ? 'grouped' : 'total';
-    const headers = mode === 'grouped' && linesLocal.length
-      ? ['t', ...linesLocal.map((ln) => ln.key || ln.label || 'series')]
-      : ['t', 'bps'];
-    const rows = pts.map((p) => {
-      if (mode === 'grouped' && linesLocal.length) {
-        return [p.t, ...linesLocal.map((ln) => p[ln.key] ?? '')].map(csvEscapeCell).join(',');
+    const grouped = mode === 'grouped' && linesLocal.length > 0;
+    const headers = grouped ? ['t', 'series', 'bps'] : ['t', 'bps'];
+    const rows = [];
+    for (const p of pts) {
+      if (!grouped) {
+        rows.push([p.t, p.bps].map(csvEscapeCell).join(','));
+        continue;
       }
-      return [p.t, p.bps].map(csvEscapeCell).join(',');
-    });
+      for (const ln of linesLocal) {
+        if (p[ln.key] == null) continue;
+        rows.push([p.t, ln.label || ln.key, p[ln.key]].map(csvEscapeCell).join(','));
+      }
+    }
     let text = `${headers.join(',')}\n${rows.join('\n')}\n`;
     if (Array.isArray(topW?.rows) && topW.rows.length) {
       text += '\n# top\n';
@@ -602,6 +606,13 @@ function ObservationLiveTile({
 
   const chartWidget = (preview?.widgets || []).find((w) => w.type === 'timeseries_bps');
   const topWidget = (preview?.widgets || []).find((w) => w.type === 'top_table');
+  // "Прочие" is the remainder of the whole traffic, so it must survive the display cut.
+  const topRowsWithOther = useMemo(() => {
+    const all = Array.isArray(topWidget?.rows) ? topWidget.rows : [];
+    const other = all.find((r) => r.isOther);
+    const shown = all.filter((r) => !r.isOther).slice(0, 25);
+    return other ? [...shown, other] : shown;
+  }, [topWidget]);
   const chartMode = chartWidget?.mode === 'grouped' ? 'grouped' : 'total';
   const basePoints = chartWidget?.points || chartWidget?.series || [];
   const baseLines = chartWidget?.lines || [];
@@ -812,8 +823,8 @@ function ObservationLiveTile({
                     </tr>
                   </thead>
                   <tbody>
-                    {topWidget.rows.slice(0, 25).map((r) => (
-                      <tr key={r.id || r.key}>
+                    {topRowsWithOther.map((r) => (
+                      <tr key={r.id || r.key} style={r.isOther ? { color: 'var(--fg-secondary)' } : undefined}>
                         {(r.values || []).map((v, i) => (
                           <td key={i} style={{ padding: 4 }} className="mono">{v}</td>
                         ))}
