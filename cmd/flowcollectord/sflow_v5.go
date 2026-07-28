@@ -377,7 +377,7 @@ func flowRowFromRawHeader(
 	}
 	if classifier != nil {
 		srcClass, dstClass, direction := classifier.ClassifyPair(
-			pkt.srcIP, pkt.dstIP, pkt.ipVersion, srcVLAN, 0,
+			pkt.srcIP, pkt.dstIP, pkt.ipVersion, srcVLAN, extOutVLAN,
 		)
 		if d, ok := classifier.PortDirection(sampler, inIf, outIf); ok {
 			direction = d

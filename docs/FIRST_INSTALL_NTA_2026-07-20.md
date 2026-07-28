@@ -333,7 +333,7 @@ Rollups на пустом raw могут отработать частично (
 | `direction = transit` при пустом L3 | нет «своих» сетей → оба конца `remote` | ожидаемо; для in/out завести L3 в UI → «Собственные сети» |
 | `direction = unknown` | классификатор выключен / нераспарсенный endpoint | проверить `FC_CLASSIFIER=1` и парсинг sFlow |
 | ASN = 0 | нет peers **или** пустой `bgp_prefix_origin_current` (нет timer) | BMP listen/firewall → peers up → **C5** `bgp-origin-refresh`; L3 `origin_asn` — только свои сети |
-| В UI «нет VLAN», а в raw VLAN есть | раньше `traffic_vlan_1m` и VLAN API **исключали** `direction=unknown` | фикс в `traffic_rollup_jobs.py` + `VLAN_FLOW_DIRECTIONS` (включает `unknown`) |
+| В UI «нет VLAN», а в raw VLAN есть | VLAN API молча выкидывал `direction=unknown` из фильтра, хотя роллап его пишет | `VLAN_FLOW_DIRECTIONS` должен включать `unknown` (как у протоколов); роллап — fallback `src_vlan`/`dst_vlan` |
 | Пустой `net_l2_vlans` | нет каталога подписей VLAN | UI Settings → VLAN (опционально; без него VLAN id всё равно в raw/rollup) |
 
 Проверка raw:

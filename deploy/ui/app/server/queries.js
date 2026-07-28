@@ -998,7 +998,10 @@ function serviceDistributionTimeseries({ range = '24h', from, to, directions, co
   };
 }
 
-const VLAN_FLOW_DIRECTIONS = ['in', 'out', 'transit', 'internal'];
+// Keep in sync with PROTOCOL_FLOW_DIRECTIONS: when most traffic is still
+// unclassified (empty L3 catalog or unfinished port marking), dropping
+// `unknown` makes the VLAN widgets look empty even though traffic_vlan_1m is full.
+const VLAN_FLOW_DIRECTIONS = ['in', 'out', 'transit', 'internal', 'unknown'];
 const VLAN_FLOW_DIRECTION_SET = new Set(VLAN_FLOW_DIRECTIONS);
 const VLAN_ATTACHMENT_SET = new Set([
   'unknown', 'customer', 'uplink', 'core', 'peering', 'ix', 'internal', 'transit', 'management',

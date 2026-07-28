@@ -200,14 +200,16 @@ SELECT
     source_id,
     direction,
     multiIf(
-        direction = 'out', src_attachment_kind,
-        direction = 'in', dst_attachment_kind,
+        direction = 'out' AND src_attachment_kind != 'unknown', src_attachment_kind,
+        direction = 'in' AND dst_attachment_kind != 'unknown', dst_attachment_kind,
         src_attachment_kind != 'unknown', src_attachment_kind,
         dst_attachment_kind
     ) AS attachment_type,
+    -- Prefer the side implied by direction, but fall back to the other VLAN
+    -- when sFlow/XDP only populated one of src_vlan/dst_vlan.
     multiIf(
-        direction = 'out', src_vlan,
-        direction = 'in', dst_vlan,
+        direction = 'out' AND src_vlan != 0, src_vlan,
+        direction = 'in' AND dst_vlan != 0, dst_vlan,
         src_vlan != 0, src_vlan,
         dst_vlan
     ) AS vlan_id,
