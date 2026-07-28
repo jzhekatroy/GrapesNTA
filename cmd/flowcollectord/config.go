@@ -36,6 +36,8 @@ type config struct {
 	ClassifierIPASNTable string
 	ClassifierL3PrefixesView string
 	ClassifierL2VLANsView string
+	ClassifierDirectionSettingsView string
+	ClassifierInterfaceRolesView string
 
 	UDPReadBuffer int
 	UDPReaders    int
@@ -73,6 +75,8 @@ func loadConfig() config {
 	classifierIPASN := flag.String("classifier-ip-asn-table", envString("FC_CLASSIFIER_IP_ASN_TABLE", ""), "optional fallback IP prefix -> ASN table (e.g. default.ip_asn_prefixes_current)")
 	classifierL3 := flag.String("classifier-l3-prefixes-view", envString("FC_CLASSIFIER_L3_PREFIXES_VIEW", "default.net_l3_prefixes_enabled"), "L3 prefixes view")
 	classifierL2 := flag.String("classifier-l2-vlans-view", envString("FC_CLASSIFIER_L2_VLANS_VIEW", "default.net_l2_vlans_enabled"), "L2 VLANs view")
+	classifierDirectionSettings := flag.String("classifier-direction-settings-view", envString("FC_CLASSIFIER_DIRECTION_SETTINGS_VIEW", "default.net_direction_settings_current"), "direction mode settings view (empty = always derive direction from prefixes)")
+	classifierInterfaceRoles := flag.String("classifier-interface-roles-view", envString("FC_CLASSIFIER_INTERFACE_ROLES_VIEW", "default.net_interface_roles_effective_current"), "effective port sides view for direction mode ports (empty = disabled)")
 
 	udpReadBuffer := flag.Int("udp-read-buffer", envInt("FC_UDP_READ_BUFFER", 64*1024*1024), "kernel UDP socket receive buffer bytes (SO_RCVBUF, per reader)")
 	udpReaders := flag.Int("udp-readers", envInt("FC_UDP_READERS", 1), "parallel sFlow UDP sockets using SO_REUSEPORT")
@@ -114,6 +118,8 @@ func loadConfig() config {
 		ClassifierIPASNTable: strings.TrimSpace(*classifierIPASN),
 		ClassifierL3PrefixesView: strings.TrimSpace(*classifierL3),
 		ClassifierL2VLANsView: strings.TrimSpace(*classifierL2),
+		ClassifierDirectionSettingsView: strings.TrimSpace(*classifierDirectionSettings),
+		ClassifierInterfaceRolesView: strings.TrimSpace(*classifierInterfaceRoles),
 		UDPReadBuffer: *udpReadBuffer,
 		UDPReaders: *udpReaders,
 		UDPWorkers: *udpWorkers,

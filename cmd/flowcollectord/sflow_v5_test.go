@@ -26,6 +26,11 @@ func buildTestIPv4UDPDatagram() []byte {
 
 func buildTestSFlowDatagram(t *testing.T, frame []byte, samplingRate uint32) []byte {
 	t.Helper()
+	return buildTestSFlowDatagramWithIfaces(t, frame, samplingRate, 0, 0)
+}
+
+func buildTestSFlowDatagramWithIfaces(t *testing.T, frame []byte, samplingRate, input, output uint32) []byte {
+	t.Helper()
 	rawRecord := make([]byte, 16+len(frame))
 	binary.BigEndian.PutUint32(rawRecord[0:4], sflowHeaderEthernet)
 	binary.BigEndian.PutUint32(rawRecord[4:8], uint32(len(frame)))
@@ -39,6 +44,8 @@ func buildTestSFlowDatagram(t *testing.T, frame []byte, samplingRate uint32) []b
 
 	flowSample := make([]byte, 32+8+len(rawRecord))
 	binary.BigEndian.PutUint32(flowSample[8:12], samplingRate)
+	binary.BigEndian.PutUint32(flowSample[20:24], input)
+	binary.BigEndian.PutUint32(flowSample[24:28], output)
 	binary.BigEndian.PutUint32(flowSample[28:32], 1)
 	binary.BigEndian.PutUint32(flowSample[32:36], sflowFlowRawHeader)
 	binary.BigEndian.PutUint32(flowSample[36:40], uint32(len(rawRecord)))
@@ -65,6 +72,15 @@ func buildTestSFlowDatagram(t *testing.T, frame []byte, samplingRate uint32) []b
 
 func buildTestExpandedSFlowDatagram(t *testing.T, frame []byte, samplingRate uint32) []byte {
 	t.Helper()
+	return buildTestExpandedSFlowDatagramWithIfaces(t, frame, samplingRate, 0, 0, 0, 0)
+}
+
+func buildTestExpandedSFlowDatagramWithIfaces(
+	t *testing.T,
+	frame []byte,
+	samplingRate, inputFormat, inputValue, outputFormat, outputValue uint32,
+) []byte {
+	t.Helper()
 	rawRecord := make([]byte, 16+len(frame))
 	binary.BigEndian.PutUint32(rawRecord[0:4], sflowHeaderEthernet)
 	binary.BigEndian.PutUint32(rawRecord[4:8], uint32(len(frame)))
@@ -78,6 +94,10 @@ func buildTestExpandedSFlowDatagram(t *testing.T, frame []byte, samplingRate uin
 
 	flowSample := make([]byte, 44+8+len(rawRecord))
 	binary.BigEndian.PutUint32(flowSample[12:16], samplingRate)
+	binary.BigEndian.PutUint32(flowSample[24:28], inputFormat)
+	binary.BigEndian.PutUint32(flowSample[28:32], inputValue)
+	binary.BigEndian.PutUint32(flowSample[32:36], outputFormat)
+	binary.BigEndian.PutUint32(flowSample[36:40], outputValue)
 	binary.BigEndian.PutUint32(flowSample[40:44], 1)
 	binary.BigEndian.PutUint32(flowSample[44:48], sflowFlowRawHeader)
 	binary.BigEndian.PutUint32(flowSample[48:52], uint32(len(rawRecord)))
@@ -250,5 +270,70 @@ func TestParseSFlowSkipsCounterSample(t *testing.T) {
 	}
 	if got := m.counterSkipped.Load(); got != 1 {
 		t.Fatalf("counterSkipped=%d", got)
+	}
+}
+
+func TestSFlowIfIndexDecoding(t *testing.T) {
+	cases := []struct {
+		name   string
+		format uint32
+		value  uint32
+		want   uint32
+	}{
+		{name: "plain ifIndex", format: 0, value: 3013, want: 3013},
+		{name: "zero stays zero", format: 0, value: 0, want: 0},
+		{name: "wildcard means unknown", format: 0, value: sflowIfIndexWildcard, want: 0},
+		{name: "packet discarded format", format: 1, value: 3013, want: 0},
+		{name: "multiple destinations format", format: 2, value: 4, want: 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := sflowIfIndex(tc.format, tc.value); got != tc.want {
+				t.Fatalf("sflowIfIndex(%d, %d) = %d, want %d", tc.format, tc.value, got, tc.want)
+			}
+			packed := tc.format<<30 | tc.value&sflowIfIndexWildcard
+			if got := sflowIfIndexPacked(packed); got != tc.want {
+				t.Fatalf("sflowIfIndexPacked(%#x) = %d, want %d", packed, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestParseSFlowV5KeepsSNMPIfIndex(t *testing.T) {
+	frame := buildTestIPv4UDPDatagram()
+	var seq uint32
+	var m sflowMetrics
+	now := time.Date(2026, 6, 5, 12, 0, 0, 0, time.UTC)
+
+	// Non-expanded sample: the format lives in the two high bits.
+	dgram := buildTestSFlowDatagramWithIfaces(t, frame, 1000, 3013, 1<<30|7)
+	rows := parseSFlowV5(dgram, now, "sflow-default", nil, &seq, &m)
+	if len(rows) != 1 {
+		t.Fatalf("rows=%d want 1 metrics=%+v", len(rows), m)
+	}
+	if rows[0].InIf != 3013 {
+		t.Fatalf("in_if=%d want 3013", rows[0].InIf)
+	}
+	if rows[0].OutIf != 0 {
+		t.Fatalf("out_if=%d want 0 for a non-ifIndex format", rows[0].OutIf)
+	}
+
+	// Expanded sample: format and value are separate fields.
+	dgram = buildTestExpandedSFlowDatagramWithIfaces(t, frame, 1000, 0, 3013, 0, 3025)
+	rows = parseSFlowV5(dgram, now, "sflow-default", nil, &seq, &m)
+	if len(rows) != 1 {
+		t.Fatalf("expanded rows=%d want 1 metrics=%+v", len(rows), m)
+	}
+	if rows[0].InIf != 3013 || rows[0].OutIf != 3025 {
+		t.Fatalf("expanded ifaces=%d->%d want 3013->3025", rows[0].InIf, rows[0].OutIf)
+	}
+
+	dgram = buildTestExpandedSFlowDatagramWithIfaces(t, frame, 1000, 0, 3013, 1, 3025)
+	rows = parseSFlowV5(dgram, now, "sflow-default", nil, &seq, &m)
+	if len(rows) != 1 {
+		t.Fatalf("expanded rows=%d want 1 metrics=%+v", len(rows), m)
+	}
+	if rows[0].OutIf != 0 {
+		t.Fatalf("expanded out_if=%d want 0 for a non-ifIndex format", rows[0].OutIf)
 	}
 }

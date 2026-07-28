@@ -137,6 +137,8 @@ if [[ "${XDP_CLASSIFIER:-0}" == "1" ]]; then
     -classifier-bgp-table "${XDP_CLASSIFIER_BGP_TABLE:-default.bgp_prefix_origin_current}"
     -classifier-l3-prefixes-view "${XDP_CLASSIFIER_L3_PREFIXES_VIEW:-default.net_l3_prefixes_enabled}"
     -classifier-l2-vlans-view "${XDP_CLASSIFIER_L2_VLANS_VIEW:-default.net_l2_vlans_enabled}"
+    -classifier-direction-settings-view "${XDP_CLASSIFIER_DIRECTION_SETTINGS_VIEW:-default.net_direction_settings_current}"
+    -classifier-interface-roles-view "${XDP_CLASSIFIER_INTERFACE_ROLES_VIEW:-default.net_interface_roles_effective_current}"
   )
   if [[ -n "${XDP_CLASSIFIER_IP_ASN_TABLE:-}" ]]; then
     CH_ARGS+=( -classifier-ip-asn-table "$XDP_CLASSIFIER_IP_ASN_TABLE" )

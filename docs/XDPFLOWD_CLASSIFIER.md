@@ -62,6 +62,13 @@ If no L3 prefixes are configured, every address falls back to role `remote`,
 so direction is **`transit`** (not `unknown`). `unknown` means the classifier
 could not classify the endpoints (disabled / unparseable), not “catalog empty”.
 
+The table above applies while `net_direction_settings_current.direction_mode` is
+`prefixes`. In mode `ports` the direction comes from the manually marked sides of
+the ingress and egress ports instead, and every other enrichment column is still
+filled from prefixes. The mirror path carries no ifIndex, so `xdpflowd` writes
+`unknown` in that mode; see
+[PORT_BOUNDARY_DIRECTION.md](PORT_BOUNDARY_DIRECTION.md).
+
 ## Required DDL
 
 Apply after cleanup of legacy tables:

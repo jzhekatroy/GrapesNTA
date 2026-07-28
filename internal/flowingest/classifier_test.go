@@ -197,3 +197,125 @@ func TestClassifyPairOutboundUsesLocalOriginASN(t *testing.T) {
 		t.Fatalf("dst.ASN = %d, want 15169", dst.ASN)
 	}
 }
+
+func portModeClassifier(t *testing.T, sampler [16]byte) *TrafficClassifier {
+	t.Helper()
+	tc := &TrafficClassifier{}
+	tc.state.Store(&classifierState{
+		directionMode: DirectionModePorts,
+		portSides: map[portKey]uint8{
+			{sampler: sampler, ifIndex: 10}: portSideInternal,
+			{sampler: sampler, ifIndex: 20}: portSideExternal,
+		},
+	})
+	return tc
+}
+
+func TestPortDirectionPairs(t *testing.T) {
+	sampler, err := ParseSamplerAddress("172.18.19.110")
+	if err != nil {
+		t.Fatalf("ParseSamplerAddress: %v", err)
+	}
+	other, err := ParseSamplerAddress("172.18.19.111")
+	if err != nil {
+		t.Fatalf("ParseSamplerAddress: %v", err)
+	}
+	cases := []struct {
+		name    string
+		sampler [16]byte
+		inIf    uint32
+		outIf   uint32
+		want    string
+	}{
+		{name: "external to internal is in", sampler: sampler, inIf: 20, outIf: 10, want: "in"},
+		{name: "internal to external is out", sampler: sampler, inIf: 10, outIf: 20, want: "out"},
+		{name: "internal to internal", sampler: sampler, inIf: 10, outIf: 10, want: "internal"},
+		{name: "external to external is transit", sampler: sampler, inIf: 20, outIf: 20, want: "transit"},
+		{name: "unmarked port is unknown", sampler: sampler, inIf: 10, outIf: 99, want: "unknown"},
+		{name: "missing ifindex is unknown", sampler: sampler, inIf: 0, outIf: 10, want: "unknown"},
+		{name: "another switch is unknown", sampler: other, inIf: 20, outIf: 10, want: "unknown"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := portModeClassifier(t, sampler)
+			got, ok := c.PortDirection(tc.sampler, tc.inIf, tc.outIf)
+			if !ok {
+				t.Fatal("PortDirection() reported prefix mode, want port mode")
+			}
+			if got != tc.want {
+				t.Fatalf("PortDirection() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestPortDirectionCounters(t *testing.T) {
+	sampler, err := ParseSamplerAddress("172.18.19.110")
+	if err != nil {
+		t.Fatalf("ParseSamplerAddress: %v", err)
+	}
+	c := portModeClassifier(t, sampler)
+	c.PortDirection(sampler, 20, 10)
+	c.PortDirection(sampler, 10, 99)
+	c.PortDirection(sampler, 0, 0)
+	if got := c.portsClassified.Load(); got != 1 {
+		t.Fatalf("portsClassified = %d, want 1", got)
+	}
+	if got := c.portsUnmarked.Load(); got != 1 {
+		t.Fatalf("portsUnmarked = %d, want 1", got)
+	}
+	if got := c.portsNoIfIndex.Load(); got != 1 {
+		t.Fatalf("portsNoIfIndex = %d, want 1", got)
+	}
+}
+
+func TestPortDirectionIgnoredInPrefixMode(t *testing.T) {
+	sampler, err := ParseSamplerAddress("172.18.19.110")
+	if err != nil {
+		t.Fatalf("ParseSamplerAddress: %v", err)
+	}
+	tc := &TrafficClassifier{}
+	tc.state.Store(&classifierState{
+		directionMode: DirectionModePrefixes,
+		portSides: map[portKey]uint8{
+			{sampler: sampler, ifIndex: 10}: portSideInternal,
+			{sampler: sampler, ifIndex: 20}: portSideExternal,
+		},
+	})
+	if _, ok := tc.PortDirection(sampler, 20, 10); ok {
+		t.Fatal("PortDirection() applied port sides in prefix mode")
+	}
+	if got := tc.DirectionMode(); got != DirectionModePrefixes {
+		t.Fatalf("DirectionMode() = %q, want %q", got, DirectionModePrefixes)
+	}
+}
+
+func TestDirectionModeDefaultsToPrefixes(t *testing.T) {
+	var nilClassifier *TrafficClassifier
+	if got := nilClassifier.DirectionMode(); got != DirectionModePrefixes {
+		t.Fatalf("nil DirectionMode() = %q, want %q", got, DirectionModePrefixes)
+	}
+	if _, ok := nilClassifier.PortDirection([16]byte{}, 10, 20); ok {
+		t.Fatal("nil PortDirection() must not claim port mode")
+	}
+	empty := &TrafficClassifier{}
+	if got := empty.DirectionMode(); got != DirectionModePrefixes {
+		t.Fatalf("unloaded DirectionMode() = %q, want %q", got, DirectionModePrefixes)
+	}
+	if _, ok := empty.PortDirection([16]byte{}, 10, 20); ok {
+		t.Fatal("unloaded PortDirection() must not claim port mode")
+	}
+}
+
+func TestPortSideKeyMatchesSFlowSamplerEncoding(t *testing.T) {
+	// The catalog stores switch_ip as text while flows carry a 16-byte sampler
+	// address with IPv4 in the first four bytes. Both must produce one key.
+	sampler, err := ParseSamplerAddress("172.18.19.110")
+	if err != nil {
+		t.Fatalf("ParseSamplerAddress: %v", err)
+	}
+	want := [16]byte{172, 18, 19, 110}
+	if sampler != want {
+		t.Fatalf("sampler = %v, want %v", sampler, want)
+	}
+}

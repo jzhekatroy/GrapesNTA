@@ -18,6 +18,34 @@ type ClassifierTables struct {
 	IPASNPrefixes string
 	L3Prefixes    string
 	L2VLANs       string
+
+	// DirectionSettings and InterfaceRoles drive port-based direction. Empty
+	// values disable the feature: the classifier then always derives direction
+	// from prefixes, which keeps installations without the interface-roles DDL
+	// working.
+	DirectionSettings string
+	InterfaceRoles    string
+}
+
+// Direction modes stored in net_direction_settings.direction_mode.
+const (
+	DirectionModePrefixes = "prefixes"
+	DirectionModePorts    = "ports"
+
+	// directionSettingsID is the single settings row written by NTAdmin.
+	directionSettingsID = "global"
+)
+
+// Port sides as marked by the operator. Ports missing from the map have no
+// known side, which always yields an unknown direction.
+const (
+	portSideInternal uint8 = 1
+	portSideExternal uint8 = 2
+)
+
+type portKey struct {
+	sampler [16]byte
+	ifIndex uint32
 }
 
 type ClassifierConfig struct {
@@ -33,6 +61,10 @@ type TrafficClassifier struct {
 	cfg    ClassifierConfig
 	cancel context.CancelFunc
 	state  atomic.Pointer[classifierState]
+
+	portsClassified atomic.Uint64
+	portsNoIfIndex  atomic.Uint64
+	portsUnmarked   atomic.Uint64
 }
 
 type classifierState struct {
@@ -44,6 +76,9 @@ type classifierState struct {
 	l3v6 *ipTrie
 
 	vlans map[uint16]vlanClass
+
+	directionMode string
+	portSides     map[portKey]uint8
 
 	hasLocalConfig bool
 }
@@ -166,13 +201,15 @@ func (tc *TrafficClassifier) run(ctx context.Context) {
 func (tc *TrafficClassifier) refreshOnce(ctx context.Context) error {
 	start := time.Now()
 	st := &classifierState{
-		bgp4:   newIPTrie(),
-		bgp6:   newIPTrie(),
-		asn4:   newIPTrie(),
-		asn6:   newIPTrie(),
-		l3v4:   newIPTrie(),
-		l3v6:   newIPTrie(),
-		vlans:  make(map[uint16]vlanClass),
+		bgp4:          newIPTrie(),
+		bgp6:          newIPTrie(),
+		asn4:          newIPTrie(),
+		asn6:          newIPTrie(),
+		l3v4:          newIPTrie(),
+		l3v6:          newIPTrie(),
+		vlans:         make(map[uint16]vlanClass),
+		directionMode: DirectionModePrefixes,
+		portSides:     make(map[portKey]uint8),
 	}
 	bgpRows, err := tc.loadBGP(ctx, st)
 	if err != nil {
@@ -190,6 +227,12 @@ func (tc *TrafficClassifier) refreshOnce(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	// Port-based direction is loaded last and never fails the refresh: an
+	// installation may simply lack the interface-roles tables. A ClickHouse
+	// outage is already caught by the loaders above, which keep the previous
+	// state in place.
+	tc.loadDirectionMode(ctx, st)
+	portSwitches := tc.loadPortSides(ctx, st)
 	st.hasLocalConfig = l3Rows > 0
 	tc.state.Store(st)
 	tc.log.Info("traffic classifier refreshed",
@@ -199,9 +242,103 @@ func (tc *TrafficClassifier) refreshOnce(ctx context.Context) error {
 		"vlans", vlanRows,
 		"internal_vlans", internalVLANs,
 		"has_local_config", st.hasLocalConfig,
+		"direction_mode", st.directionMode,
+		"port_sides", len(st.portSides),
+		"port_switches", portSwitches,
+		"direction_ports_classified", tc.portsClassified.Load(),
+		"direction_ports_no_ifindex", tc.portsNoIfIndex.Load(),
+		"direction_ports_unmarked", tc.portsUnmarked.Load(),
 		"elapsed", time.Since(start),
 	)
+	if st.directionMode == DirectionModePorts && len(st.portSides) == 0 {
+		tc.log.Warn("direction mode is ports but no port sides are marked: every flow will be unclassified",
+			"interface_roles_table", tc.cfg.Tables.InterfaceRoles,
+		)
+	}
 	return nil
+}
+
+// loadDirectionMode reads the single settings row. Any problem leaves the
+// prefix mode in place: switching direction models must be an explicit,
+// readable decision, never a side effect of a missing table.
+func (tc *TrafficClassifier) loadDirectionMode(ctx context.Context, st *classifierState) {
+	table := strings.TrimSpace(tc.cfg.Tables.DirectionSettings)
+	if table == "" {
+		return
+	}
+	rows, err := tc.conn.Query(ctx,
+		"SELECT direction_mode FROM "+table+" WHERE settings_id = '"+directionSettingsID+"' LIMIT 1")
+	if err != nil {
+		tc.log.Warn("load direction settings", "table", table, "err", err)
+		return
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var mode string
+		if err := rows.Scan(&mode); err != nil {
+			tc.log.Warn("scan direction settings", "table", table, "err", err)
+			return
+		}
+		if strings.ToLower(strings.TrimSpace(mode)) == DirectionModePorts {
+			st.directionMode = DirectionModePorts
+		}
+	}
+	if err := rows.Err(); err != nil {
+		tc.log.Warn("read direction settings", "table", table, "err", err)
+	}
+}
+
+// loadPortSides fills the manual port marking map and returns the number of
+// distinct switches it covers.
+func (tc *TrafficClassifier) loadPortSides(ctx context.Context, st *classifierState) int {
+	table := strings.TrimSpace(tc.cfg.Tables.InterfaceRoles)
+	if table == "" {
+		return 0
+	}
+	rows, err := tc.conn.Query(ctx,
+		"SELECT switch_ip, if_index, boundary FROM "+table+" WHERE boundary IN ('internal', 'external')")
+	if err != nil {
+		tc.log.Warn("load interface roles", "table", table, "err", err)
+		return 0
+	}
+	defer rows.Close()
+	switches := make(map[[16]byte]struct{})
+	skipped := 0
+	for rows.Next() {
+		var switchIP, boundary string
+		var ifIndex uint32
+		if err := rows.Scan(&switchIP, &ifIndex, &boundary); err != nil {
+			tc.log.Warn("scan interface roles", "table", table, "err", err)
+			return len(switches)
+		}
+		// switch_ip in the catalog is the sampler address of the exporter, so
+		// the same encoding as FlowRow.SamplerAddress makes the hot path a
+		// plain map lookup.
+		sampler, err := ParseSamplerAddress(switchIP)
+		if err != nil || sampler == ([16]byte{}) || ifIndex == 0 {
+			skipped++
+			continue
+		}
+		var side uint8
+		switch strings.ToLower(strings.TrimSpace(boundary)) {
+		case "internal":
+			side = portSideInternal
+		case "external":
+			side = portSideExternal
+		default:
+			skipped++
+			continue
+		}
+		st.portSides[portKey{sampler: sampler, ifIndex: ifIndex}] = side
+		switches[sampler] = struct{}{}
+	}
+	if err := rows.Err(); err != nil {
+		tc.log.Warn("read interface roles", "table", table, "err", err)
+	}
+	if skipped > 0 {
+		tc.log.Warn("interface roles rows skipped", "table", table, "rows", skipped)
+	}
+	return len(switches)
 }
 
 func (tc *TrafficClassifier) loadBGP(ctx context.Context, st *classifierState) (int, error) {
@@ -343,6 +480,55 @@ func (tc *TrafficClassifier) ClassifyPair(src, dst [16]byte, ipVersion uint8, sr
 	srcClass := st.classify(srcAddr, srcVLAN)
 	dstClass := st.classify(dstAddr, dstVLAN)
 	return srcClass, dstClass, DeriveDirection(srcClass, dstClass)
+}
+
+// DirectionMode reports the active direction model.
+func (tc *TrafficClassifier) DirectionMode() string {
+	if tc == nil {
+		return DirectionModePrefixes
+	}
+	st := tc.state.Load()
+	if st == nil || st.directionMode == "" {
+		return DirectionModePrefixes
+	}
+	return st.directionMode
+}
+
+// PortDirection derives direction from the manually marked sides of the
+// ingress and egress ports. The second result is false in prefix mode, which
+// tells the caller to keep the prefix-derived direction.
+//
+// The model is strict: if either side is unknown - the port is unmarked or the
+// flow carries no ifIndex - the direction is unknown rather than guessed.
+func (tc *TrafficClassifier) PortDirection(sampler [16]byte, inIf, outIf uint32) (string, bool) {
+	if tc == nil {
+		return "", false
+	}
+	st := tc.state.Load()
+	if st == nil || st.directionMode != DirectionModePorts {
+		return "", false
+	}
+	if inIf == 0 || outIf == 0 {
+		tc.portsNoIfIndex.Add(1)
+		return "unknown", true
+	}
+	inSide := st.portSides[portKey{sampler: sampler, ifIndex: inIf}]
+	outSide := st.portSides[portKey{sampler: sampler, ifIndex: outIf}]
+	if inSide == 0 || outSide == 0 {
+		tc.portsUnmarked.Add(1)
+		return "unknown", true
+	}
+	tc.portsClassified.Add(1)
+	switch {
+	case inSide == portSideExternal && outSide == portSideInternal:
+		return "in", true
+	case inSide == portSideInternal && outSide == portSideExternal:
+		return "out", true
+	case inSide == portSideInternal && outSide == portSideInternal:
+		return "internal", true
+	default:
+		return "transit", true
+	}
 }
 
 func (st *classifierState) classify(addr netip.Addr, vlan uint16) EndpointClass {

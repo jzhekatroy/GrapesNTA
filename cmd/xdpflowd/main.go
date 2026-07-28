@@ -458,6 +458,8 @@ func main() {
 	classifierIPASNTable := flag.String("classifier-ip-asn-table", "", "optional ClickHouse source table/view for fallback IP prefix -> ASN")
 	classifierL3PrefixesView := flag.String("classifier-l3-prefixes-view", "default.net_l3_prefixes_enabled", "ClickHouse view for enabled L3 prefixes")
 	classifierL2VLANsView := flag.String("classifier-l2-vlans-view", "default.net_l2_vlans_enabled", "ClickHouse view for enabled L2 VLAN map")
+	classifierDirectionSettingsView := flag.String("classifier-direction-settings-view", "default.net_direction_settings_current", "ClickHouse view with the direction mode setting (empty = always derive direction from prefixes)")
+	classifierInterfaceRolesView := flag.String("classifier-interface-roles-view", "default.net_interface_roles_effective_current", "ClickHouse view with effective port sides (empty = disabled); the mirror path has no ifIndex, so direction mode ports yields unknown here")
 	sourceID := flag.String("source-id", "xdp-default", "logical flow observation point id written to flows_raw.source_id")
 	chHealthTable := flag.String("ch-health-table", flowingest.DefaultHealthTable, "ClickHouse table for periodic health snapshots (empty = disabled)")
 	collectorID := flag.String("collector-id", "", "collector_id for health snapshots (see net_collectors)")
@@ -636,10 +638,12 @@ func main() {
 			DSN:     strings.TrimSpace(*chDSN),
 			Refresh: *classifierRefresh,
 			Tables: flowingest.ClassifierTables{
-				BGPOrigins:    strings.TrimSpace(*classifierBGPTable),
-				IPASNPrefixes: strings.TrimSpace(*classifierIPASNTable),
-				L3Prefixes:    strings.TrimSpace(*classifierL3PrefixesView),
-				L2VLANs:       strings.TrimSpace(*classifierL2VLANsView),
+				BGPOrigins:        strings.TrimSpace(*classifierBGPTable),
+				IPASNPrefixes:     strings.TrimSpace(*classifierIPASNTable),
+				L3Prefixes:        strings.TrimSpace(*classifierL3PrefixesView),
+				L2VLANs:           strings.TrimSpace(*classifierL2VLANsView),
+				DirectionSettings: strings.TrimSpace(*classifierDirectionSettingsView),
+				InterfaceRoles:    strings.TrimSpace(*classifierInterfaceRolesView),
 			},
 		})
 		if err != nil {

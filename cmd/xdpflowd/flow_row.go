@@ -64,6 +64,11 @@ func flowRowFromKV(fv flowKV, m flowRowMapper, receivedAt time.Time) flowingest.
 		srcClass, dstClass, direction := m.classifier.ClassifyPair(
 			fv.k.SrcAddr, fv.k.DstAddr, fv.k.IPVersion, srcVLAN, dstVLAN,
 		)
+		// The mirror path carries no ifIndex, so port mode always resolves to
+		// unknown here instead of mixing two direction models in one column.
+		if d, ok := m.classifier.PortDirection(m.samplerAddress, row.InIf, row.OutIf); ok {
+			direction = d
+		}
 		flowingest.ApplyEndpointClasses(&row, srcClass, dstClass, direction)
 	}
 	return row

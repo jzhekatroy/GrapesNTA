@@ -23,6 +23,8 @@ const (
 
 	maxSFlowSamples = 4096
 	maxSFlowRecords = 4096
+
+	sflowIfIndexWildcard = 0x3FFFFFFF
 )
 
 type sflowMetrics struct {
@@ -185,8 +187,8 @@ func parseFlowSample(
 		samplingRate = uint64(binary.BigEndian.Uint32(b[12:16]))
 		// input/output interface each encoded as (format u32, value u32); the
 		// value is the SNMP ifIndex of the physical switch port.
-		inIf = binary.BigEndian.Uint32(b[28:32])
-		outIf = binary.BigEndian.Uint32(b[36:40])
+		inIf = sflowIfIndex(binary.BigEndian.Uint32(b[24:28]), binary.BigEndian.Uint32(b[28:32]))
+		outIf = sflowIfIndex(binary.BigEndian.Uint32(b[32:36]), binary.BigEndian.Uint32(b[36:40]))
 		numRecords = binary.BigEndian.Uint32(b[40:44])
 		off = 44
 	} else {
@@ -194,8 +196,8 @@ func parseFlowSample(
 		// sequence_number, source_id, sampling_rate, sample_pool, drops,
 		// input, output, records_count
 		samplingRate = uint64(binary.BigEndian.Uint32(b[8:12]))
-		inIf = binary.BigEndian.Uint32(b[20:24])
-		outIf = binary.BigEndian.Uint32(b[24:28])
+		inIf = sflowIfIndexPacked(binary.BigEndian.Uint32(b[20:24]))
+		outIf = sflowIfIndexPacked(binary.BigEndian.Uint32(b[24:28]))
 		numRecords = binary.BigEndian.Uint32(b[28:32])
 		off = 32
 	}
@@ -275,6 +277,25 @@ func parseExtSwitch(b []byte) (inVLAN, outVLAN uint16, ok bool) {
 	inVLAN = uint16(binary.BigEndian.Uint32(b[0:4]) & 0x0FFF)
 	outVLAN = uint16(binary.BigEndian.Uint32(b[8:12]) & 0x0FFF)
 	return inVLAN, outVLAN, true
+}
+
+// sflowIfIndex returns the plain SNMP ifIndex for an sFlow interface field.
+// Only format zero carries an ifIndex; other formats describe dropped or
+// multiple-destination samples. The all-ones value is the RFC 3176 wildcard for
+// "unknown or more than one interface". Both cases become zero so that every
+// consumer of flows_raw.in_if/out_if - the port marking lookup here and
+// snmp_iface_sync.py - sees the same interface numbers as SNMP does.
+func sflowIfIndex(format, value uint32) uint32 {
+	if format != 0 || value == 0 || value == sflowIfIndexWildcard {
+		return 0
+	}
+	return value
+}
+
+// sflowIfIndexPacked decodes the non-expanded form, where the two high bits
+// hold the format and the low 30 bits the value.
+func sflowIfIndexPacked(raw uint32) uint32 {
+	return sflowIfIndex(raw>>30, raw&sflowIfIndexWildcard)
 }
 
 func boundedCap(n uint32, max int) int {
@@ -358,6 +379,9 @@ func flowRowFromRawHeader(
 		srcClass, dstClass, direction := classifier.ClassifyPair(
 			pkt.srcIP, pkt.dstIP, pkt.ipVersion, srcVLAN, 0,
 		)
+		if d, ok := classifier.PortDirection(sampler, inIf, outIf); ok {
+			direction = d
+		}
 		flowingest.ApplyEndpointClasses(&row, srcClass, dstClass, direction)
 	}
 	return row, ethParseOK
