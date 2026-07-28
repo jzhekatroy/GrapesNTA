@@ -5,6 +5,7 @@ const {
   insertRows,
   executeCommand,
   netInterfacesCurrentRef,
+  snmpAgentsCurrentRef,
   directionSettingsViewRef,
   interfaceRoleRulesViewRef,
   interfaceRolesViewRef,
@@ -146,18 +147,11 @@ async function saveDirectionSettings(body = {}, { updatedBy = '' } = {}) {
     .trim().toLowerCase();
   if (!DIRECTION_MODES.includes(mode)) throw apiError('Неизвестный режим определения направления');
 
-  const policy = String(body?.oneSided ?? body?.one_sided ?? current.oneSided)
-    .trim().toLowerCase();
-  if (!ONE_SIDED_POLICIES.includes(policy)) throw apiError('Неизвестная политика для неизвестной стороны');
-
   const record = {
     settings_id: 'global',
     direction_mode: mode,
-    default_boundary: normalizeBoundary(
-      body?.defaultBoundary ?? body?.default_boundary ?? current.defaultBoundary,
-      current.defaultBoundary,
-    ),
-    one_sided: policy,
+    default_boundary: 'unknown',
+    one_sided: 'strict',
     updated_by: String(updatedBy || '').slice(0, 128),
   };
   const { elapsedMs } = await insertRows(config.directionSettingsTable, [record], {
@@ -250,19 +244,18 @@ function ruleValueSql(rules, ifAlias, field, { returnRuleId = false } = {}) {
  * Итоговые выражения: ручной override важнее правил, затем значение
  * по умолчанию из настроек.
  */
-function effectiveSqlParts(rules, settings, { ifAlias = 'i', overrideAlias = 'o' } = {}) {
+function effectiveSqlParts(rules, _settings, { ifAlias = 'i', overrideAlias = 'o' } = {}) {
   const ruleBoundary = ruleValueSql(rules, ifAlias, 'boundary');
   const ruleBoundaryId = ruleValueSql(rules, ifAlias, 'boundary', { returnRuleId: true });
   const ruleConnectivity = ruleValueSql(rules, ifAlias, 'connectivity');
   const ruleConnectivityId = ruleValueSql(rules, ifAlias, 'connectivity', { returnRuleId: true });
   const manualBoundary = `${overrideAlias}.boundary`;
   const manualConnectivity = `${overrideAlias}.connectivity`;
-  const fallback = chStringLiteral(settings.defaultBoundary);
 
   return {
     boundary: `multiIf(${manualBoundary} != '', ${manualBoundary},
       ${ruleBoundary} != '', ${ruleBoundary},
-      ${fallback})`,
+      '')`,
     boundarySource: `multiIf(${manualBoundary} != '', 'manual',
       ${ruleBoundary} != '', 'rule',
       'default')`,
@@ -275,25 +268,15 @@ function effectiveSqlParts(rules, settings, { ifAlias = 'i', overrideAlias = 'o'
   };
 }
 
-/**
- * Направление из сторон входного и выходного портов.
- * oneSided = 'infer' позволяет классифицировать по одной известной стороне —
- * это нужно, когда sFlow отдаёт out_if в формате «несколько интерфейсов».
- */
-function portDirectionSql(inBoundaryExpr, outBoundaryExpr, { oneSided = 'strict' } = {}) {
+/** Направление из сторон входного и выходного портов (строгий режим). */
+function portDirectionSql(inBoundaryExpr, outBoundaryExpr) {
   const pairBranches = [
     `${inBoundaryExpr} = 'external' AND ${outBoundaryExpr} = 'internal', 'in'`,
     `${inBoundaryExpr} = 'internal' AND ${outBoundaryExpr} = 'external', 'out'`,
     `${inBoundaryExpr} = 'internal' AND ${outBoundaryExpr} = 'internal', 'internal'`,
     `${inBoundaryExpr} = 'external' AND ${outBoundaryExpr} = 'external', 'transit'`,
   ];
-  const inferBranches = oneSided === 'infer' ? [
-    `${inBoundaryExpr} = 'external', 'in'`,
-    `${inBoundaryExpr} = 'internal', 'out'`,
-    `${outBoundaryExpr} = 'external', 'out'`,
-    `${outBoundaryExpr} = 'internal', 'in'`,
-  ] : [];
-  return `multiIf(${[...pairBranches, ...inferBranches].join(', ')}, 'unknown')`;
+  return `multiIf(${pairBranches.join(', ')}, 'unknown')`;
 }
 
 function listInterfaceRoleRules() {
@@ -551,13 +534,13 @@ async function saveInterfaceRole(body = {}, { updatedBy = '' } = {}) {
     const { switchIp, ifIndex } = parseInterfaceKey(entry);
     const boundary = normalizeBoundary(entry?.boundary ?? body?.boundary, '');
     const connectivity = normalizeConnectivity(entry?.connectivity ?? body?.connectivity);
-    if ((boundary === '' || boundary === 'unknown') && !connectivity) {
-      throw apiError('Укажите сторону сети или тип стыка');
+    if (boundary !== 'internal' && boundary !== 'external') {
+      throw apiError('Укажите сторону сети');
     }
     return {
       switch_ip: switchIp,
       if_index: ifIndex,
-      boundary: boundary === 'unknown' ? '' : boundary,
+      boundary,
       connectivity,
       comment: String(entry?.comment ?? body?.comment ?? '').trim(),
       updated_by: author,
@@ -629,7 +612,40 @@ async function materializeEffectiveRoles() {
     {},
     { name: 'refs/interface-roles-materialize' },
   );
-  return { elapsedMs, rules: rules.length, defaultBoundary: settings.defaultBoundary };
+  return { elapsedMs, rules: rules.length, defaultBoundary: 'unknown' };
+}
+
+/** Список коммутаторов со счётчиками разметки (экран A MVP). */
+function listInterfaceRoleSwitches() {
+  return {
+    sql: `
+      SELECT
+        i.switch_ip AS switch_ip,
+        any(a.display_name) AS display_name,
+        count() AS ports,
+        countIf(i.if_alias != '') AS ports_with_alias,
+        countIf(e.boundary IN ('internal', 'external')) AS marked,
+        countIf(e.boundary NOT IN ('internal', 'external')) AS unmarked
+      FROM ${netInterfacesCurrentRef()} AS i
+      LEFT JOIN ${interfaceRolesEffectiveViewRef()} AS e
+        ON e.switch_ip = i.switch_ip AND e.if_index = i.if_index
+      LEFT JOIN ${snmpAgentsCurrentRef()} AS a
+        ON a.switch_ip = i.switch_ip
+      GROUP BY i.switch_ip
+      ORDER BY unmarked DESC, i.switch_ip
+    `,
+    params: {},
+    map(rows) {
+      return rows.map((r) => ({
+        switchIp: String(r.switch_ip ?? ''),
+        displayName: String(r.display_name ?? ''),
+        ports: Number(r.ports) || 0,
+        portsWithAlias: Number(r.ports_with_alias) || 0,
+        marked: Number(r.marked) || 0,
+        unmarked: Number(r.unmarked) || 0,
+      }));
+    },
+  };
 }
 
 /** Сводка разметки: сколько портов по сторонам и откуда значение. */
@@ -702,6 +718,7 @@ module.exports = {
   deleteInterfaceRoleRule,
   previewInterfaceRoleRule,
   listInterfaceRoles,
+  listInterfaceRoleSwitches,
   saveInterfaceRole,
   deleteInterfaceRole,
   materializeEffectiveRoles,

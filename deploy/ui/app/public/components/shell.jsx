@@ -16,7 +16,6 @@ const NAV = [
     items: [
       { id: 'explorer', label: 'Разбор трафика', icon: 'explorer' },
       { id: 'top', label: 'Топ ASN', icon: 'top' },
-      { id: 'vlan', label: 'VLAN', icon: 'layers' },
       { id: 'dns', label: 'DNS-запросы', icon: 'globe' },
     ],
   },
@@ -41,6 +40,7 @@ const NAV = [
       icon: 'refs',
       children: [
         { id: 'cidr', label: 'Собственные сети (CIDR)' },
+        { id: 'vlan', label: 'VLAN' },
         { id: 'entities', label: 'Владельцы L3' },
         { id: 'interface-roles', label: 'Порты оборудования' },
         { id: 'port-services', label: 'Сервисы и порты приложений' },
@@ -51,6 +51,7 @@ const NAV = [
     section: 'Администрирование',
     items: [
       { id: 'users', label: 'Пользователи и права', icon: 'users' },
+      { id: 'smtp', label: 'Почта (SMTP)', icon: 'globe' },
       { id: 'diagnostics', label: 'Диагностика', icon: 'query' },
       { id: 'ttl', label: 'Сроки хранения', icon: 'clock' },
     ],
@@ -71,12 +72,15 @@ const PAGES_WITHOUT_HEADER_FILTERS = new Set([
   'interface-roles',
   'port-services',
   'vlan',
+  'smtp',
   'ttl',
 ]);
 
 function hasNavPermission(effectivePermissions, pageId) {
   if (!effectivePermissions) return true;
   if (pageId === 'snmp') return !!(effectivePermissions.snmp || effectivePermissions.collectors);
+  // SMTP API и доступ завязаны на diagnostics (только администратор).
+  if (pageId === 'smtp') return !!effectivePermissions.diagnostics;
   return !!effectivePermissions[pageId];
 }
 
@@ -106,14 +110,14 @@ function Sidebar({ current, onNavigate, collapsed, effectivePermissions }) {
       if (s.group) o[s.group.id] = s.group.children.some(c => c.id === current);
     });
     if (!o.data && (current === 'collectors' || current === 'snmp' || current === 'bmp')) o.data = true;
-    if (!o.netmodel && (current === 'entities' || current === 'cidr' || current === 'port-services' || current === 'interface-roles' || current === 'routers')) o.netmodel = true;
+    if (!o.netmodel && (current === 'entities' || current === 'cidr' || current === 'vlan' || current === 'port-services' || current === 'interface-roles' || current === 'routers')) o.netmodel = true;
     o.data = o.data ?? true;
     o.netmodel = o.netmodel ?? true;
     return o;
   });
   useEffect(() => {
     if (current === 'collectors' || current === 'snmp' || current === 'bmp') setOpenGroups((s) => ({ ...s, data: true }));
-    if (current === 'entities' || current === 'cidr' || current === 'port-services' || current === 'interface-roles' || current === 'routers') {
+    if (current === 'entities' || current === 'cidr' || current === 'vlan' || current === 'port-services' || current === 'interface-roles' || current === 'routers') {
       setOpenGroups((s) => ({ ...s, netmodel: true }));
     }
   }, [current]);

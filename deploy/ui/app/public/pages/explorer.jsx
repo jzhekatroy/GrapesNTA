@@ -39,6 +39,12 @@ const EXPLORER_ON_DEMAND_FETCH_LIMITS = [50, 100];
 const EXPLORER_DYNAMICS_MAX_SERIES = 5;
 const EXPLORER_VIS_DEFAULT = 'data';
 
+const EXPLORER_TEXT_DISPLAY_MODES = [
+  { id: 'end', label: 'С конца' },
+  { id: 'middle', label: 'Середина' },
+  { id: 'expand', label: 'Раскрытие' },
+];
+
 const VIS_TYPES = [
   { id: 'contribution', label: 'Вклад', icon: 'pieChart', hint: 'Кто даёт основной объём' },
   { id: 'data', label: 'Данные', icon: 'menu', hint: 'График динамики и детальная таблица' },
@@ -335,7 +341,11 @@ function buildExplorerMetricColumnDefs(meta) {
     title: col.title,
     align: 'right',
     width: col.width,
+    minWidth: 80,
+    maxWidth: 360,
     num: true,
+    headerClassName: 'explorer-col-metric-extra',
+    cellClassName: 'explorer-col-metric-extra',
     sortAccessor: (r) => (col.sortAccessor.length > 1 ? col.sortAccessor(r, meta) : col.sortAccessor(r)),
     render: (r) => (
       <span className="mono">{col.render.length > 1 ? col.render(r, meta) : col.render(r)}</span>
@@ -1741,6 +1751,112 @@ function FilterValueInput({ fieldId, meta, value, label, onChange, onClear, swit
   );
 }
 
+function ExplorerTextDisplaySwitch({ value, onChange }) {
+  return (
+    <div
+      className="seg seg--compact explorer-text-display-switch"
+      role="group"
+      aria-label="Отображение длинного текста"
+    >
+      {EXPLORER_TEXT_DISPLAY_MODES.map((mode) => (
+        <button
+          key={mode.id}
+          type="button"
+          className={value === mode.id ? 'is-active' : ''}
+          onClick={() => onChange(mode.id)}
+          title={mode.label}
+        >
+          {mode.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function ExplorerGroupCell({
+  displayValue,
+  textDisplayMode,
+  monoClass,
+  filterTitle,
+  onAddFilter,
+  showColorSwatch,
+  color,
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const measureRef = React.useRef(null);
+  const [overflows, setOverflows] = useState(false);
+  const text = displayValue == null || displayValue === '' ? '—' : String(displayValue);
+
+  useEffect(() => {
+    setExpanded(false);
+  }, [text, textDisplayMode]);
+
+  useEffect(() => {
+    if (textDisplayMode !== 'expand' || expanded) {
+      if (expanded) setOverflows(true);
+      return undefined;
+    }
+    const el = measureRef.current;
+    if (!el) return undefined;
+    const check = () => {
+      const target = el.querySelector?.('.overflow-text__value') || el;
+      setOverflows(target.scrollWidth > target.clientWidth + 1);
+    };
+    check();
+    if (typeof ResizeObserver === 'undefined') return undefined;
+    const ro = new ResizeObserver(check);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [text, textDisplayMode, expanded]);
+
+  const overflowMode = textDisplayMode === 'expand'
+    ? (expanded ? 'expand-open' : 'end')
+    : textDisplayMode;
+  const showExpandToggle = textDisplayMode === 'expand' && (overflows || expanded);
+
+  return (
+    <div className="explorer-dim-cell">
+      {showColorSwatch && (
+        <span className="explorer-dim-cell__swatch" style={{ background: color }} aria-hidden="true" />
+      )}
+      <div className="explorer-dim-cell__main">
+        <button
+          type="button"
+          className="explorer-dim-cell__filter"
+          onClick={(e) => {
+            e.stopPropagation();
+            onAddFilter();
+          }}
+          title={filterTitle}
+        >
+          <OverflowText
+            ref={measureRef}
+            value={text}
+            mode={overflowMode}
+            className={monoClass}
+            expanded={expanded}
+          />
+        </button>
+        {showExpandToggle && (
+          <button
+            type="button"
+            className="explorer-dim-cell__expand"
+            aria-expanded={expanded}
+            aria-label={expanded ? 'Свернуть значение' : 'Показать полностью'}
+            title={expanded ? 'Свернуть' : 'Показать полностью'}
+            onClick={(e) => {
+              e.stopPropagation();
+              setExpanded((v) => !v);
+            }}
+          >
+            <Icon name={expanded ? 'chevU' : 'chevD'} size={12} />
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function buildExplorerResultColumns({
   groupBy,
   dimensions,
@@ -1750,6 +1866,7 @@ function buildExplorerResultColumns({
   meta,
   showAllGroups,
   showAllMetrics,
+  textDisplayMode,
   onAddFilter,
   onFocusRow,
   onExcludeRow,
@@ -1768,6 +1885,11 @@ function buildExplorerResultColumns({
     return {
       key: `dim-${dimId}`,
       title: dimensionById[dimId]?.label || dimId,
+      width: 240,
+      minWidth: 100,
+      maxWidth: 600,
+      headerClassName: 'explorer-col-dim',
+      cellClassName: 'explorer-col-dim',
       sortAccessor: (r) => {
         if (!hasValue) return '';
         if (isAsn) return explorerAsnSortKey(r, valueIdx);
@@ -1798,24 +1920,17 @@ function buildExplorerResultColumns({
           ? ` · raw ${r.rawValues[valueIdx]}`
           : '';
         const showColorSwatch = dimId !== 'dst_ip' && (colIdx === 0 || selectedDynamicsSeriesIds?.has(r.id));
+        const displayValue = isAsn ? explorerAsnDisplayValue(r, valueIdx) : r.values[valueIdx];
         return (
-          <button
-            type="button"
-            className="row"
-            style={{ all: 'unset', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 8 }}
-            onClick={(e) => {
-              e.stopPropagation();
-              onAddFilter(dimId, filterVal.value, filterVal.label);
-            }}
-            title={`Добавить в фильтры${rawTooltip}`}
-          >
-            {showColorSwatch && (
-              <span style={{ width: 10, height: 10, borderRadius: 3, background: r.color, flexShrink: 0 }} />
-            )}
-            <span className={monoClass} style={{ font: 'var(--pv-text-body-2-bold)' }}>
-              {isAsn ? explorerAsnDisplayValue(r, valueIdx) : r.values[valueIdx]}
-            </span>
-          </button>
+          <ExplorerGroupCell
+            displayValue={displayValue}
+            textDisplayMode={textDisplayMode}
+            monoClass={monoClass}
+            filterTitle={`Добавить в фильтры${rawTooltip}`}
+            onAddFilter={() => onAddFilter(dimId, filterVal.value, filterVal.label)}
+            showColorSwatch={showColorSwatch}
+            color={r.color}
+          />
         );
       },
     };
@@ -1826,7 +1941,11 @@ function buildExplorerResultColumns({
     title: metricLabel,
     align: 'right',
     width: 140,
+    minWidth: 90,
+    maxWidth: 360,
     num: true,
+    headerClassName: 'explorer-col-metric',
+    cellClassName: 'explorer-col-metric',
     sortAccessor: (r) => r.metric,
     render: (r) => <span className="mono" style={{ font: 'var(--pv-text-body-2-bold)' }}>{formatMetric(r.metric, metric)}</span>,
   };
@@ -1836,7 +1955,11 @@ function buildExplorerResultColumns({
     title: `Доля · ${metricLabel}`,
     align: 'right',
     width: 90,
+    minWidth: 72,
+    maxWidth: 240,
     num: true,
+    headerClassName: 'explorer-col-pct',
+    cellClassName: 'explorer-col-pct',
     sortAccessor: (r) => r.pct,
     render: (r) => <span className="mono">{r.pct.toFixed(2)}%</span>,
   };
@@ -1844,6 +1967,8 @@ function buildExplorerResultColumns({
   const actionsCol = {
     key: 'actions',
     title: 'Действия',
+    width: 220,
+    resizable: false,
     sortAccessor: () => '',
     headerClassName: 'explorer-col-actions',
     cellClassName: 'explorer-col-actions',
@@ -1859,9 +1984,9 @@ function buildExplorerResultColumns({
     )),
   };
 
-  const baseCols = [...groupCols, metricCol, pctCol, actionsCol];
-  if (!showAllMetrics) return baseCols;
-  return [...baseCols, ...buildExplorerMetricColumnDefs(meta)];
+  const baseCols = [...groupCols, metricCol, pctCol];
+  if (!showAllMetrics) return [...baseCols, actionsCol];
+  return [...baseCols, ...buildExplorerMetricColumnDefs(meta), actionsCol];
 }
 
 function PageExplorer({ onNavigate, displayTimezone }) {
@@ -1941,6 +2066,7 @@ function PageExplorer({ onNavigate, displayTimezone }) {
   const [exporting, setExporting] = useState(false);
   const [showAllResultColumns, setShowAllResultColumns] = useState(true);
   const [showAllGroupColumns, setShowAllGroupColumns] = useState(false);
+  const [textDisplayMode, setTextDisplayMode] = useState('end');
   const [visualLimit, setVisualLimit] = useState(EXPLORER_DEFAULT_VISUAL_LIMIT);
   const [dynamicsSeriesIds, setDynamicsSeriesIds] = useState(() => new Set());
   const [dynamicsFocusRowId, setDynamicsFocusRowId] = useState(null);
@@ -2457,7 +2583,7 @@ function PageExplorer({ onNavigate, displayTimezone }) {
     setShowObservationSave(true);
   };
 
-  const saveAsObservation = async ({ name, lookback, liveEnabled, refreshSec, reportEnabled, reportPeriod, topGroup }) => {
+  const saveAsObservation = async ({ name, lookback, materializeEnabled, reportEnabled, reportPeriod, topGroup }) => {
     const nextFilters = (filters || []).map((f, i) => ({
       id: f.id || `f-${i}`,
       field: f.field,
@@ -2512,7 +2638,7 @@ function PageExplorer({ onNavigate, displayTimezone }) {
               type: 'timeseries_bps',
               metric: metric || 'bps',
               groupBy: chartGroup,
-              seriesLimit: 8,
+              seriesLimit: 10,
               limit: null,
             },
             {
@@ -2520,11 +2646,10 @@ function PageExplorer({ onNavigate, displayTimezone }) {
               type: 'top_table',
               metric: metric || 'bps',
               groupBy: chartGroup,
-              limit: 15,
+              limit: 100,
             },
           ],
-          live: { enabled: !!liveEnabled, refreshSec: Math.max(300, Number(refreshSec) || 300) },
-          materialize: { enabled: false, intervalSec: Math.max(300, Number(refreshSec) || 300) },
+          materialize: { enabled: materializeEnabled !== false },
           report: {
             enabled: !!reportEnabled,
             period: reportPeriod || 'yesterday',
@@ -2783,13 +2908,14 @@ function PageExplorer({ onNavigate, displayTimezone }) {
     meta,
     showAllGroups: showAllGroupColumns,
     showAllMetrics: showAllResultColumns,
+    textDisplayMode,
     onAddFilter: addFilterFromCell,
     onFocusRow: focusRow,
     onExcludeRow: excludeRow,
     onDynamicsRow: showRowDynamics,
     selectedDynamicsSeriesIds: dynamicsSeriesIds,
     onToggleDynamicsSeries: toggleDynamicsSeries,
-  }), [appliedGroupBy, dimensions, dimensionById, appliedMetricLabel, appliedMetric, meta, showAllGroupColumns, showAllResultColumns, addFilterFromCell, focusRow, excludeRow, showRowDynamics, dynamicsSeriesIds, toggleDynamicsSeries]);
+  }), [appliedGroupBy, dimensions, dimensionById, appliedMetricLabel, appliedMetric, meta, showAllGroupColumns, showAllResultColumns, textDisplayMode, addFilterFromCell, focusRow, excludeRow, showRowDynamics, dynamicsSeriesIds, toggleDynamicsSeries]);
 
   const visibleResults = useMemo(
     () => sliceExplorerVisualRows(results, visualLimit),
@@ -3044,6 +3170,10 @@ function PageExplorer({ onNavigate, displayTimezone }) {
                             {showAllGroupColumns ? 'Скрыть группировки' : 'Все группировки'}
                           </Button>
                         )}
+                        <ExplorerTextDisplaySwitch
+                          value={textDisplayMode}
+                          onChange={setTextDisplayMode}
+                        />
                         <Button
                           kind={showAllResultColumns ? 'primary' : 'ghost'}
                           size="sm"
@@ -3078,6 +3208,7 @@ function PageExplorer({ onNavigate, displayTimezone }) {
                         <DataTable
                           rows={visibleResults}
                           rowKey="id"
+                          resizableColumns
                           selectable
                           selected={selected}
                           onSelectChange={setSelected}
@@ -4806,8 +4937,7 @@ function SaveObservationModal({
     || 'src_asn';
   const [name, setName] = useState('');
   const [lookback, setLookback] = useState(defaultLookback);
-  const [liveEnabled, setLiveEnabled] = useState(true);
-  const [refreshSec, setRefreshSec] = useState(300);
+  const [materializeEnabled, setMaterializeEnabled] = useState(true);
   const [reportEnabled, setReportEnabled] = useState(false);
   const [reportPeriod, setReportPeriod] = useState('yesterday');
   const [topGroup, setTopGroup] = useState(defaultTop);
@@ -4832,8 +4962,7 @@ function SaveObservationModal({
       await onSave({
         name,
         lookback,
-        liveEnabled,
-        refreshSec,
+        materializeEnabled,
         reportEnabled,
         reportPeriod,
         topGroup,
@@ -4892,18 +5021,16 @@ function SaveObservationModal({
           </div>
         </div>
         <label className="row" style={{ gap: 8, alignItems: 'center' }}>
-          <input type="checkbox" checked={liveEnabled} onChange={(e) => setLiveEnabled(e.target.checked)} />
-          Обновлять автоматически
+          <input
+            type="checkbox"
+            checked={materializeEnabled}
+            onChange={(e) => setMaterializeEnabled(e.target.checked)}
+          />
+          Подготовка данных (rollup раз в 5 минут)
         </label>
-        {liveEnabled && (
-          <label className="row" style={{ gap: 8, alignItems: 'center', marginLeft: 24 }}>
-            каждые
-            <select className="input" style={{ width: 120 }} value={refreshSec} onChange={(e) => setRefreshSec(Number(e.target.value))}>
-              <option value={300}>5 мин</option>
-              <option value={900}>15 мин</option>
-            </select>
-          </label>
-        )}
+        <div style={{ marginLeft: 24, color: 'var(--fg-muted)', font: 'var(--pv-text-body-3)' }}>
+          Без неё плитка будет пустой: график и топ по группировке считаются из подготовленных данных.
+        </div>
         <label className="row" style={{ gap: 8, alignItems: 'center' }}>
           <input type="checkbox" checked={reportEnabled} onChange={(e) => setReportEnabled(e.target.checked)} />
           Ежедневный отчёт

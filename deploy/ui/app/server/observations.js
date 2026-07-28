@@ -31,8 +31,16 @@ const {
   DEFAULT_TIMEZONE,
 } = require('./observation-schedule');
 const { getSmtpSettings, sendSmtpMail } = require('./smtp-settings');
+const { renderChartPng } = require('./report-chart-png');
 
 const ARTIFACTS_DIR = path.join(__dirname, 'data', 'observation_runs');
+const CHART_IMAGE_FILE = 'chart.png';
+const CHART_IMAGE_CID = 'observation-chart';
+
+/** Строк в таблице топа (просмотр и top-*.csv отчёта); «Прочие» добавляется сверх. */
+const TOP_ROWS_LIMIT = 100;
+/** Линий на графике — больше не читается; остаток уходит в «Прочие». */
+const CHART_SERIES_LIMIT = 10;
 
 /** 0 / unset = no hard limit. Positive OBSERVATION_MAX_MATERIALIZE re-enables a cap. */
 const MAX_MATERIALIZE = (() => {
@@ -58,7 +66,7 @@ const MAX_FAIL_COUNT = 10;
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 /** Absolute origin for report links; relative links still work in the browser. */
 const REPORT_BASE_URL = String(process.env.OBSERVATION_REPORT_BASE_URL || '').replace(/\/+$/, '');
-const REPORT_HTML_TOP_ROWS = 50;
+const REPORT_HTML_TOP_ROWS = 100;
 /** Everything outside the stored top-N is folded into one bucket. */
 const OTHER_KEY = '__other__';
 const OTHER_LABEL = 'Прочие';
@@ -117,7 +125,7 @@ function normalizeWidgets(widgets) {
   if (!Array.isArray(widgets) || !widgets.length) {
     return [
       { id: 'w-ts', type: 'timeseries_bps', metric: 'bps', groupBy: [], limit: null },
-      { id: 'w-asn', type: 'top_table', metric: 'bps', groupBy: ['src_asn'], limit: 15 },
+      { id: 'w-asn', type: 'top_table', metric: 'bps', groupBy: ['src_asn'], limit: TOP_ROWS_LIMIT },
     ];
   }
   return widgets.map((w, i) => ({
@@ -125,8 +133,9 @@ function normalizeWidgets(widgets) {
     type: WIDGET_TYPES.has(w.type) ? w.type : 'top_table',
     metric: w.metric || 'bps',
     groupBy: Array.isArray(w.groupBy) ? w.groupBy.map(String) : [],
-    limit: w.limit != null ? Number(w.limit) : 15,
-    seriesLimit: w.seriesLimit != null ? Number(w.seriesLimit) : undefined,
+    // Лимиты не настраиваются пользователем — держим единые значения.
+    limit: w.type === 'timeseries_bps' ? null : TOP_ROWS_LIMIT,
+    seriesLimit: w.type === 'timeseries_bps' ? CHART_SERIES_LIMIT : undefined,
   }));
 }
 
@@ -174,7 +183,6 @@ function classifyScope(filters, widgets = []) {
 
 function isActiveMaterialize(o, exceptId = null) {
   return o.id !== exceptId
-    && o.live?.enabled
     && o.materialize?.enabled
     && classifyScope(o.filters, o.widgets).materializeRequired;
 }
@@ -221,16 +229,13 @@ function normalizeEmailTo(list) {
   return out;
 }
 
+/** Ширина плитки не настраивается — всегда одна колонка (раскрытие даёт полную ширину). */
 function normalizeLayout(raw, existing) {
   const src = raw?.layout != null ? raw.layout : existing?.layout;
-  if (!src || typeof src !== 'object') {
-    return { order: 0, width: 1 };
-  }
-  const order = Number(src.order);
-  const width = Number(src.width) === 2 ? 2 : 1;
+  const order = Number(src && typeof src === 'object' ? src.order : 0);
   return {
     order: Number.isFinite(order) ? order : 0,
-    width,
+    width: 1,
   };
 }
 
@@ -274,17 +279,12 @@ function normalizeObservation(raw = {}, { userId, existing = null } = {}) {
   const widgets = normalizeWidgets(raw.widgets != null ? raw.widgets : existing?.widgets);
   const scope = classifyScope(filters, widgets);
   const lookback = LOOKBACKS.has(raw.lookback) ? raw.lookback : (existing?.lookback || '1h');
-  let refreshSec = Number(raw.live?.refreshSec ?? existing?.live?.refreshSec ?? MIN_REFRESH_SEC);
-  if (!Number.isFinite(refreshSec) || refreshSec < MIN_REFRESH_SEC) refreshSec = MIN_REFRESH_SEC;
-  if (!REFRESH_SECS.has(refreshSec)) {
-    // clamp legacy 15/30/60 → 5m
-    refreshSec = MIN_REFRESH_SEC;
-  }
+  // Live не настраивается: доска всегда обновляется раз в 5 минут (запас на late flows).
+  const refreshSec = MIN_REFRESH_SEC;
+  const liveEnabled = true;
 
-  const liveEnabled = Boolean(raw.live?.enabled ?? existing?.live?.enabled ?? false);
+  // Подготовка данных (rollup) — отдельное решение: она и создаёт нагрузку на ClickHouse.
   let materializeEnabled = Boolean(raw.materialize?.enabled ?? existing?.materialize?.enabled);
-  // Live + filter/groupBy always needs personal rollup — never allow UI save to turn it off.
-  if (scope.materializeRequired && liveEnabled) materializeEnabled = true;
   if (!scope.materializeRequired) materializeEnabled = false;
 
   // Worker cadence follows live.refreshSec (same setting as UI), floor 5 minutes.
@@ -324,7 +324,8 @@ function normalizeObservation(raw = {}, { userId, existing = null } = {}) {
     description: String(raw.description ?? existing?.description ?? '').trim(),
     folder: String(raw.folder ?? existing?.folder ?? 'Мои наблюдения').trim() || 'Мои наблюдения',
     ownerId: existing?.ownerId || userId || 'anonymous',
-    isShared: Boolean(raw.isShared ?? existing?.isShared),
+    // Наблюдения всегда видны всем; редактировать по-прежнему может владелец.
+    isShared: true,
     filters,
     lookback,
     widgets,
@@ -368,7 +369,7 @@ async function withMeta(item, allItems = null) {
   const all = allItems || await loadAllObservations();
   const active = countActiveMaterialize(all);
   const warnings = [];
-  if (scope.materializeRequired && item.live?.enabled) {
+  if (scope.materializeRequired && item.materialize?.enabled) {
     const mw = materializeWarning(active);
     if (mw) warnings.push(mw);
   }
@@ -462,8 +463,6 @@ async function duplicateObservation(id, userId) {
     ...existing,
     id: undefined,
     name: `${existing.name} (копия)`,
-    isShared: false,
-    live: { ...(existing.live || {}), enabled: false },
     materialize: {
       ...(existing.materialize || {}),
       enabled: false,
@@ -507,7 +506,6 @@ async function cancelMaterialize(id, userId) {
     next.materialize.status = 'idle';
     next.materialize.cancelRequested = false;
     next.materialize.enabled = false;
-    next.live = { ...(existing.live || {}), enabled: false };
   }
   await upsertObservation(next);
   return withMeta(next, items.map((row) => (row.id === id ? next : row)));
@@ -601,13 +599,13 @@ function observationChartGroupBy(obs, timeseriesWidget) {
   return top ? top.groupBy.map(String) : [];
 }
 
-function observationSeriesLimit(obs, timeseriesWidget) {
-  const fromTs = Number(timeseriesWidget?.seriesLimit);
-  if (Number.isFinite(fromTs) && fromTs > 0) return Math.min(Math.max(fromTs, 1), 12);
-  const top = (obs.widgets || []).find((w) => w.type === 'top_table');
-  const fromTop = Number(top?.limit);
-  if (Number.isFinite(fromTop) && fromTop > 0) return Math.min(Math.max(fromTop, 1), 12);
-  return 8;
+/**
+ * Лимиты фиксированы и не берутся из сохранённого наблюдения: 100 линий на графике
+ * нечитаемы, а остаток всё равно виден как «Прочие». Иначе старые наблюдения
+ * остались бы со своими 8/15 без миграции.
+ */
+function observationSeriesLimit() {
+  return CHART_SERIES_LIMIT;
 }
 
 function dimKey(dim0, dim1) {
@@ -771,7 +769,7 @@ function appendOtherRow(rows, totals, windowSeconds) {
   }];
 }
 
-async function readRollupTop(observationId, window, { limit = 15, groupBy = [] } = {}) {
+async function readRollupTop(observationId, window, { limit = TOP_ROWS_LIMIT, groupBy = [] } = {}) {
   try {
     const windowSeconds = Math.max(
       60,
@@ -796,7 +794,7 @@ async function readRollupTop(observationId, window, { limit = 15, groupBy = [] }
       id: observationId,
       from: window.from,
       to: window.to,
-      limit: Math.min(Math.max(Number(limit) || 15, 1), 50),
+      limit: Math.min(Math.max(Number(limit) || TOP_ROWS_LIMIT, 1), TOP_ROWS_LIMIT),
     }, { name: 'observations/rollup-top' });
 
     const totals = await readRollupPeriodTotals(observationId, window);
@@ -985,6 +983,7 @@ async function previewObservation(id, userId, body = {}) {
             cachedTop = {
               rows: data.rows,
               groupBy,
+              requested: seriesLimit,
               totals: data.totals || null,
               windowSeconds: data.windowSeconds || ROLLUP_BUCKET_SEC,
             };
@@ -1038,12 +1037,20 @@ async function previewObservation(id, userId, body = {}) {
 
       if (w.type === 'top_table') {
         const groupBy = w.groupBy?.length ? w.groupBy : ['src_asn'];
+        const wantRows = TOP_ROWS_LIMIT;
+        const cachedRows = Array.isArray(cachedTop?.rows)
+          ? cachedTop.rows.filter((r) => !r.isOther)
+          : null;
+        // График берёт меньше серий, чем нужно таблице — переиспользуем только
+        // когда его выборка уже покрывает нужное число строк (или данные исчерпаны).
+        const cacheCovers = cachedRows
+          && (cachedRows.length >= wantRows || cachedRows.length < (cachedTop.requested || 0));
         if (
           cachedTop
           && cachedTop.groupBy.join('|') === groupBy.join('|')
-          && Array.isArray(cachedTop.rows)
+          && cacheCovers
         ) {
-          const shown = cachedTop.rows.filter((r) => !r.isOther).slice(0, w.limit || 15);
+          const shown = cachedRows.slice(0, wantRows);
           widgets.push({
             id: w.id,
             type: w.type,
@@ -1067,7 +1074,7 @@ async function previewObservation(id, userId, body = {}) {
           });
           continue;
         }
-        const data = await readRollupTop(obs.id, window, { limit: w.limit || 15, groupBy });
+        const data = await readRollupTop(obs.id, window, { limit: wantRows, groupBy });
         widgets.push({
           id: w.id,
           type: w.type,
@@ -1391,6 +1398,78 @@ ${grid}${paths}${ticks}
 <p class="muted">Ось времени: ${escapeHtml(firstLabel)} — ${escapeHtml(lastLabel)} (${escapeHtml(timeZone)})</p>`;
 }
 
+/** Тот же график растром: почта вырезает inline SVG, картинку показывает. */
+function reportChartImage(previewWidget, timeZone) {
+  const { points, seriesLines, grouped } = timeseriesReportData(previewWidget);
+  if (!points.length) return null;
+
+  const series = grouped
+    ? seriesLines.map((ln) => ({
+      label: ln.label || ln.key,
+      color: ln.color || '#2f6feb',
+      values: points.map((p) => Number(p[ln.key]) || 0),
+    }))
+    : [{
+      label: 'Суммарно',
+      color: '#2f6feb',
+      values: points.map((p) => Number(p.bps) || 0),
+    }];
+
+  let maxY = 0;
+  for (const s of series) {
+    for (const v of s.values) if (v > maxY) maxY = v;
+  }
+  if (maxY <= 0) maxY = 1;
+
+  const gridSteps = 4;
+  const yTicks = [];
+  for (let i = 0; i <= gridSteps; i += 1) {
+    yTicks.push({ ratio: i / gridSteps, text: i === 0 ? '0' : fmtBitsRu((maxY * i) / gridSteps) });
+  }
+
+  const tickCount = Math.min(6, points.length);
+  const xTicks = [];
+  for (let i = 0; i < tickCount; i += 1) {
+    const idx = tickCount === 1
+      ? 0
+      : Math.round((i * (points.length - 1)) / (tickCount - 1));
+    xTicks.push({
+      ratio: points.length === 1 ? 0.5 : idx / (points.length - 1),
+      text: zonedClock(points[idx].t || points[idx].bucket, timeZone),
+    });
+  }
+
+  const png = renderChartPng({
+    series: series.map((s) => ({ color: s.color, values: s.values.map((v) => v / maxY) })),
+    yTicks,
+    xTicks,
+  });
+
+  return {
+    ...png,
+    series,
+    firstLabel: zonedDateTime(points[0].t || points[0].bucket, timeZone),
+    lastLabel: zonedDateTime(points[points.length - 1].t || points[points.length - 1].bucket, timeZone),
+  };
+}
+
+function chartLegendHtml(series = []) {
+  if (!series.length) return '';
+  const items = series.map((s) => (
+    `<span class="legend-item"><span class="legend-dot" style="background:${escapeHtml(s.color || '#2f6feb')}"></span>${escapeHtml(s.label || '')}</span>`
+  )).join('');
+  return `<div class="legend">${items}</div>`;
+}
+
+function chartImageHtml(chart, src, timeZone) {
+  if (!chart) return '';
+  return `<img src="${escapeHtml(src)}" width="${chart.width}" height="${chart.height}" alt="График трафика за период"`
+    + ` style="display:block;width:100%;max-width:${chart.width}px;height:auto;border:1px solid #e6e6e6;border-radius:6px"/>`
+    + chartLegendHtml(chart.series)
+    + `<p class="muted">Ось времени: ${escapeHtml(chart.firstLabel)} — ${escapeHtml(chart.lastLabel)}`
+    + ` (${escapeHtml(timeZone)})</p>`;
+}
+
 /** Period totals come from rollup total rows (dim0=''), so they are not top-N capped. */
 function summarizeTotalPoints(points, windowSeconds) {
   if (!points?.length) return null;
@@ -1521,6 +1600,8 @@ function buildReportHtml({
   totals = null,
   timeZone = DEFAULT_TIMEZONE,
   generatedAt = new Date().toISOString(),
+  chart = null,
+  chartSrc = CHART_IMAGE_FILE,
 }) {
   const widgets = preview?.widgets || [];
   const chartTable = tables.find((t) => t.type === 'timeseries_bps');
@@ -1528,10 +1609,12 @@ function buildReportHtml({
     ? widgets.find((pw) => pw.id === chartTable.widgetId)
     : widgets.find((pw) => pw.type === 'timeseries_bps');
 
-  const chartSection = chartPreview
-    ? (reportChartSvg(chartPreview, timeZone)
-      || `<p class="muted">${escapeHtml(chartPreview.warning || chartPreview.error || 'Нет точек за период')}</p>`)
-    : '';
+  let chartSection = '';
+  if (chart) {
+    chartSection = chartImageHtml(chart, chartSrc, timeZone);
+  } else if (chartPreview) {
+    chartSection = `<p class="muted">${escapeHtml(chartPreview.warning || chartPreview.error || 'Нет точек за период')}</p>`;
+  }
 
   const topSections = tables
     .filter((t) => t.type === 'top_table')
@@ -1613,7 +1696,7 @@ async function runObservationReport(id, userId) {
     preview = { widgets: [] };
   }
   const tables = [];
-  const usedNames = new Set(['report.html', 'manifest.json']);
+  const usedNames = new Set(['report.html', 'manifest.json', CHART_IMAGE_FILE]);
   const uniqueName = (base) => {
     let name = `${base}.csv`;
     let i = 2;
@@ -1673,7 +1756,10 @@ async function runObservationReport(id, userId) {
     : 'ok';
 
   const periodLabel = window.label || `${window.from} — ${window.to}`;
-  const html = buildReportHtml({
+  const chart = chartPreview ? reportChartImage(chartPreview, timeZone) : null;
+  if (chart) fs.writeFileSync(path.join(dir, CHART_IMAGE_FILE), chart.buffer);
+
+  const reportHtmlArgs = {
     obs,
     window,
     preview,
@@ -1682,6 +1768,12 @@ async function runObservationReport(id, userId) {
     totals,
     timeZone,
     generatedAt: startedAt,
+    chart,
+  };
+  // Артефакт отдаётся через ?file=…, относительная ссылка не разрешится — вставляем data URI.
+  const html = buildReportHtml({
+    ...reportHtmlArgs,
+    chartSrc: chart ? `data:image/png;base64,${chart.buffer.toString('base64')}` : CHART_IMAGE_FILE,
   });
   const htmlPath = path.join(dir, 'report.html');
   fs.writeFileSync(htmlPath, html);
@@ -1702,10 +1794,19 @@ async function runObservationReport(id, userId) {
           filename: t.file,
           path: path.join(dir, t.file),
         }));
+        // Inline PNG вместо SVG: почтовые клиенты вырезают <svg> из письма.
+        if (chart) {
+          attachments.push({
+            filename: CHART_IMAGE_FILE,
+            path: path.join(dir, CHART_IMAGE_FILE),
+            cid: CHART_IMAGE_CID,
+            contentType: 'image/png',
+          });
+        }
         await sendSmtpMail({
           to: recipients,
           subject: `GrapesNTA: ${obs.name} — ${periodLabel}`,
-          html,
+          html: buildReportHtml({ ...reportHtmlArgs, chartSrc: `cid:${CHART_IMAGE_CID}` }),
           attachments,
         });
         emailStatus = 'sent';
@@ -1764,7 +1865,12 @@ async function getRunArtifact(observationId, runId, userId, fileName) {
     err.code = 'artifact_missing';
     throw err;
   }
-  return { path: full, fileName: safe, contentType: safe.endsWith('.html') ? 'text/html; charset=utf-8' : 'text/csv; charset=utf-8' };
+  const contentType = safe.endsWith('.html')
+    ? 'text/html; charset=utf-8'
+    : safe.endsWith('.png')
+      ? 'image/png'
+      : 'text/csv; charset=utf-8';
+  return { path: full, fileName: safe, contentType };
 }
 
 async function listReportJobs() {
@@ -1874,7 +1980,7 @@ function observationPresets() {
       filters: [{ field: 'vlan', op: '=', value: '100' }],
       widgets: [
         { type: 'timeseries_bps', metric: 'bps', groupBy: [] },
-        { type: 'top_table', metric: 'bps', groupBy: ['src_asn'], limit: 15 },
+        { type: 'top_table', metric: 'bps', groupBy: ['src_asn'], limit: TOP_ROWS_LIMIT },
       ],
       lookback: '1h',
     },
@@ -1884,7 +1990,7 @@ function observationPresets() {
       filters: [{ field: 'own_network', op: '=', value: '' }],
       widgets: [
         { type: 'timeseries_bps', metric: 'bps', groupBy: [] },
-        { type: 'top_table', metric: 'bps', groupBy: ['src_asn'], limit: 15 },
+        { type: 'top_table', metric: 'bps', groupBy: ['src_asn'], limit: TOP_ROWS_LIMIT },
       ],
       lookback: '1h',
       materialize: { enabled: true, intervalSec: 300 },
@@ -1896,7 +2002,7 @@ function observationPresets() {
       filters: [{ field: 'src_ip', op: '=', value: '' }],
       widgets: [
         { type: 'timeseries_bps', metric: 'bps', groupBy: [] },
-        { type: 'top_table', metric: 'bps', groupBy: ['dst_asn'], limit: 20 },
+        { type: 'top_table', metric: 'bps', groupBy: ['dst_asn'], limit: TOP_ROWS_LIMIT },
       ],
       lookback: '24h',
       materialize: { enabled: true, intervalSec: 300 },
@@ -1911,7 +2017,7 @@ function observationPresets() {
       ],
       widgets: [
         { type: 'timeseries_bps', metric: 'bps', groupBy: [] },
-        { type: 'top_table', metric: 'bps', groupBy: ['src_asn'], limit: 15 },
+        { type: 'top_table', metric: 'bps', groupBy: ['src_asn'], limit: TOP_ROWS_LIMIT },
       ],
       lookback: '1h',
       materialize: { enabled: true, intervalSec: 300 },
@@ -2031,6 +2137,7 @@ module.exports = {
   timeseriesReportCsv,
   topReportCsv,
   reportChartSvg,
+  reportChartImage,
   buildReportHtml,
   summarizeTotalPoints,
   summarizeGroupedPoints,

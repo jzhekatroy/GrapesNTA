@@ -237,6 +237,7 @@ function App() {
     const perms = auth.user?.effectivePermissions;
     if (!perms) return true;
     if (pageId === 'snmp') return !!(perms.snmp || perms.collectors);
+    if (pageId === 'smtp') return !!perms.diagnostics;
     return !!perms[pageId];
   }, [auth.user]);
 
@@ -263,7 +264,8 @@ function App() {
       case 'observations': pageEl = <PageObservations key={refreshKey} onNavigate={navigate} />; break;
       case 'diagnostics': pageEl = <PageDiagnostics key={refreshKey} />; break;
       case 'top':        pageEl = <PageTop key={`${refreshKey}-${displayTimezone}`} onNavigate={navigate} timeRange={timeRange} customPeriod={customPeriod} directions={directions} collectorFilter={collectorFilter} displayTimezone={displayTimezone} />; break;
-      case 'vlan':       pageEl = <PageVlan key={refreshKey} timeRange={timeRange} customPeriod={customPeriod} directions={directions} collectorFilter={collectorFilter} />; break;
+      case 'vlan':       pageEl = <PageVlan key={refreshKey} />; break;
+      case 'smtp':       pageEl = <PageSmtp key={refreshKey} />; break;
       case 'dns':        pageEl = <PageDnsQueries key={`${refreshKey}-${displayTimezone}-${(collectorFilter || []).join(',')}`} onNavigate={navigate} timeRange={timeRange} customPeriod={customPeriod} collectorFilter={collectorFilter} displayTimezone={displayTimezone} onChartRangeSelect={applyChartRangeZoom} />; break;
       case 'collectors': pageEl = <PageCollectors key={refreshKey} />; break;
       case 'snmp': pageEl = (

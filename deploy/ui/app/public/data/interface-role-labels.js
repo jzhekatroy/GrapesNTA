@@ -1,7 +1,7 @@
 /* Подписи для разметки портов оборудования (§2.11 ТЗ). */
 
 const IR_BOUNDARY_LABELS = {
-  unknown: 'Не задана',
+  unknown: 'Не размечено',
   internal: 'Наша сторона',
   external: 'Внешняя',
 };
@@ -48,6 +48,12 @@ const IR_MATCH_FIELD_LABELS = {
   name: 'Имя порта',
 };
 
+const IR_SWITCH_STATUS_LABELS = {
+  not_started: 'Не начато',
+  partial: 'Частично',
+  done: 'Готово',
+};
+
 function irBoundaryLabel(value) {
   return IR_BOUNDARY_LABELS[String(value || 'unknown')] || IR_BOUNDARY_LABELS.unknown;
 }
@@ -86,6 +92,7 @@ Object.assign(window, {
   IR_DIRECTION_MODE_LABELS,
   IR_ONE_SIDED_LABELS,
   IR_MATCH_FIELD_LABELS,
+  IR_SWITCH_STATUS_LABELS,
   irBoundaryLabel,
   irConnectivityLabel,
   irSourceLabel,

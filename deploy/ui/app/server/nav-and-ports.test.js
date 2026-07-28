@@ -2,12 +2,18 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { getResourceForPath } = require('./rbac/api-map');
 const { parseLookbackHours, DEFAULT_LOOKBACK_HOURS, MAX_LOOKBACK_HOURS } = require('./direction-audit');
+const {
+  portDirectionSql,
+  listInterfaceRoleSwitches,
+  saveInterfaceRole,
+} = require('./net-interface-roles');
 
 test('api-map maps interface-roles refs endpoints', () => {
   assert.equal(getResourceForPath('/api/refs/direction-settings'), 'interface-roles');
   assert.equal(getResourceForPath('/api/refs/interface-role-rules'), 'interface-roles');
   assert.equal(getResourceForPath('/api/refs/interface-role-rules/preview', 'POST'), 'interface-roles');
   assert.equal(getResourceForPath('/api/refs/interface-roles/summary'), 'interface-roles');
+  assert.equal(getResourceForPath('/api/refs/interface-roles/switches'), 'interface-roles');
   assert.equal(getResourceForPath('/api/refs/interface-roles/172.18.1.1'), 'interface-roles');
 });
 
@@ -24,6 +30,43 @@ test('parseLookbackHours clamps invalid values', () => {
   assert.equal(parseLookbackHours(-3), DEFAULT_LOOKBACK_HOURS);
   assert.equal(parseLookbackHours(3), 3);
   assert.equal(parseLookbackHours(999), MAX_LOOKBACK_HOURS);
+});
+
+test('portDirectionSql uses strict pair branches only', () => {
+  const sql = portDirectionSql('in_b', 'out_b');
+  assert.match(sql, /in_b = 'external' AND out_b = 'internal', 'in'/);
+  assert.match(sql, /in_b = 'internal' AND out_b = 'external', 'out'/);
+  assert.match(sql, /'unknown'\)$/);
+  assert.doesNotMatch(sql, /infer/i);
+});
+
+test('listInterfaceRoleSwitches map returns camelCase rows', async () => {
+  const spec = listInterfaceRoleSwitches();
+  assert.match(spec.sql, /net_interfaces_current/);
+  assert.match(spec.sql, /ORDER BY unmarked DESC/);
+  const mapped = await spec.map([{
+    switch_ip: '10.0.0.1',
+    display_name: 'core-sw1',
+    ports: 48,
+    ports_with_alias: 12,
+    marked: 10,
+    unmarked: 38,
+  }]);
+  assert.deepEqual(mapped[0], {
+    switchIp: '10.0.0.1',
+    displayName: 'core-sw1',
+    ports: 48,
+    portsWithAlias: 12,
+    marked: 10,
+    unmarked: 38,
+  });
+});
+
+test('saveInterfaceRole rejects missing boundary', async () => {
+  await assert.rejects(
+    () => saveInterfaceRole({ switchIp: '10.0.0.1', ifIndex: 1, boundary: 'unknown' }),
+    (err) => err.message === 'Укажите сторону сети',
+  );
 });
 
 test('resolvePageId redirects collector-status and unknown pages', () => {

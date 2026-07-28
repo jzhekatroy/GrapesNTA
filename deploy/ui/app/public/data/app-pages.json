@@ -4,7 +4,6 @@
   { "id": "observations", "title": "Наблюдения", "section": "Обзор" },
   { "id": "explorer", "title": "Разбор трафика", "section": "Анализ трафика" },
   { "id": "top", "title": "Топ ASN", "section": "Анализ трафика" },
-  { "id": "vlan", "title": "VLAN", "section": "Анализ трафика" },
   { "id": "dns", "title": "DNS-запросы", "section": "Анализ трафика" },
   { "id": "collectors", "title": "Коллекторы", "section": "Сбор данных" },
   { "id": "snmp", "title": "SNMP", "section": "Сбор данных" },
@@ -12,11 +11,13 @@
   { "id": "routers", "title": "Роутеры и экспортёры", "section": "Модель сети", "hidden": true },
   { "id": "entities", "title": "Владельцы L3", "section": "Модель сети" },
   { "id": "cidr", "title": "Собственные сети (CIDR)", "section": "Модель сети" },
+  { "id": "vlan", "title": "VLAN", "section": "Модель сети" },
   { "id": "interface-roles", "title": "Порты оборудования", "section": "Модель сети" },
   { "id": "port-services", "title": "Сервисы и порты приложений", "section": "Модель сети" },
   { "id": "databases", "title": "Внешние базы данных", "section": "Модель сети", "hidden": true },
   { "id": "other", "title": "Другие справочники", "section": "Модель сети", "hidden": true },
   { "id": "users", "title": "Пользователи и права", "section": "Администрирование" },
+  { "id": "smtp", "title": "Почта (SMTP)", "section": "Администрирование" },
   { "id": "diagnostics", "title": "Диагностика", "section": "Администрирование" },
   { "id": "ttl", "title": "Сроки хранения", "section": "Администрирование" }
 ]

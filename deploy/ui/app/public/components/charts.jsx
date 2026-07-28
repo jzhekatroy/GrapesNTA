@@ -126,7 +126,7 @@ function makeChartGapPlaceholder(bucketMs, valueKeys) {
   return pt;
 }
 
-function fillChartTimeGaps(points, { bucketSeconds, startMs, endMs, valueKeys = [] } = {}) {
+function fillChartTimeGaps(points, { bucketSeconds, startMs, endMs, valueKeys = [], skipLeadingGaps = false } = {}) {
   if (!Array.isArray(points) || !points.length || !bucketSeconds) return points || [];
 
   const step = bucketSeconds * 1000;
@@ -146,8 +146,14 @@ function fillChartTimeGaps(points, { bucketSeconds, startMs, endMs, valueKeys = 
 
   if (startMs != null && endMs != null && endMs > startMs) {
     const result = [];
-    const delta = Math.ceil((startMs - anchorMs) / step);
-    let ms = anchorMs + delta * step;
+    let ms;
+    if (skipLeadingGaps && anchorMs > startMs) {
+      // Rollup starts after window open — no leading gap placeholders.
+      ms = anchorMs;
+    } else {
+      const delta = Math.ceil((startMs - anchorMs) / step);
+      ms = anchorMs + delta * step;
+    }
     while (ms <= endMs) {
       result.push(byMs.get(ms) || makeChartGapPlaceholder(ms, valueKeys));
       ms += step;
@@ -635,6 +641,64 @@ function chartRangeFromPointSelection(points, startIdx, endIdx, bucketSeconds = 
   return { from, to };
 }
 
+function chartTipClassName({ rich = false, translucent = false, opaque = false, toggle = false, extra = '' } = {}) {
+  return [
+    'dual-chart__tip',
+    rich && 'dual-chart__tip--rich',
+    translucent && 'dual-chart__tip--translucent',
+    opaque && 'dual-chart__tip--opaque',
+    toggle && 'dual-chart__tip--toggle',
+    extra,
+  ].filter(Boolean).join(' ');
+}
+
+function ChartHoverTip({
+  style,
+  rich = false,
+  extra = '',
+  translucentToggle = false,
+  children,
+}) {
+  const [translucent, setTranslucent] = useState(false);
+  const isTranslucent = translucentToggle && translucent;
+  const surfaceStyle = translucentToggle
+    ? (isTranslucent
+      ? {
+          backgroundColor: 'var(--chart-tip-translucent-bg)',
+          borderColor: 'var(--chart-tip-translucent-border)',
+          backdropFilter: 'none',
+          WebkitBackdropFilter: 'none',
+        }
+      : {
+          backgroundColor: 'var(--bg-surface-3)',
+          borderColor: 'var(--bd-strong)',
+          backdropFilter: 'none',
+          WebkitBackdropFilter: 'none',
+        })
+    : null;
+  return (
+    <div
+      className={chartTipClassName({
+        rich,
+        extra,
+        translucent: isTranslucent,
+        opaque: translucentToggle && !translucent,
+        toggle: translucentToggle,
+      })}
+      style={surfaceStyle ? { ...style, ...surfaceStyle } : style}
+      onClick={translucentToggle ? (e) => { e.stopPropagation(); setTranslucent((v) => !v); } : undefined}
+      onMouseDown={translucentToggle ? (e) => e.stopPropagation() : undefined}
+    >
+      {children}
+      {translucentToggle && (
+        <div className="dual-chart__tip-hint">
+          {isTranslucent ? 'Клик — отключить прозрачность' : 'Клик — включить прозрачность'}
+        </div>
+      )}
+    </div>
+  );
+}
+
 /* Traffic chart: bandwidth (bw) or packets/s (pps) by direction */
 function DualChart({
   points = [],
@@ -647,12 +711,14 @@ function DualChart({
   displayTimezone,
   periodStartMs,
   periodEndMs,
+  skipLeadingGaps = false,
   valueFormatter = fmtBits,
   axisFormatter = fmtCompact,
   ppsFormatter = fmtNum,
   tipUnitLabel,
   tipBucketLabel,
   tipTimeFormatter,
+  tipTranslucent = false,
   yAxisLabel,
   yAxisUnit,
 }) {
@@ -675,8 +741,9 @@ function DualChart({
       startMs: periodStartMs,
       endMs: periodEndMs,
       valueKeys,
+      skipLeadingGaps,
     }),
-    [points, bucketSeconds, periodStartMs, periodEndMs, valueKeys.join(',')],
+    [points, bucketSeconds, periodStartMs, periodEndMs, valueKeys.join(','), skipLeadingGaps],
   );
 
   const w = 800;
@@ -942,7 +1009,11 @@ function DualChart({
         />
       )}
       {hoverPoint && (
-        <div className={`dual-chart__tip${tipMeta ? ' dual-chart__tip--rich' : ''}`} style={tipStyle}>
+        <ChartHoverTip
+          style={tipStyle}
+          rich={!!tipMeta}
+          translucentToggle={tipTranslucent}
+        >
           <div className="dual-chart__tip-time">{tipTimeLabel}</div>
           {tipMeta && <div className="dual-chart__tip-meta">{tipMeta}</div>}
           {sortLinesForTip(activeLines).map((ln) => (
@@ -961,7 +1032,7 @@ function DualChart({
               <span className="dual-chart__tip-val mono">{ppsFormatter(chartSeriesPps(hoverPoint, ln.key))}</span>
             </div>
           ))}
-        </div>
+        </ChartHoverTip>
       )}
     </div>
   );
@@ -977,6 +1048,7 @@ function CategoryTrendChart({
   onRangeSelect,
   periodStartMs,
   periodEndMs,
+  tipTranslucent = false,
 }) {
   const wrapRef = useRef(null);
   const dragRef = useRef(null);
@@ -1204,7 +1276,11 @@ function CategoryTrendChart({
           />
         )}
         {hoverPoint && (
-          <div className="dual-chart__tip category-trend__tip" style={tipStyle}>
+          <ChartHoverTip
+            style={tipStyle}
+            extra="category-trend__tip"
+            translucentToggle={tipTranslucent}
+          >
             <div className="dual-chart__tip-time">
               {resolvePointEpochMs(hoverPoint) != null
                 ? formatTipPointTime(hoverPoint, tz)
@@ -1217,7 +1293,7 @@ function CategoryTrendChart({
                 <span className="dual-chart__tip-val mono">{fmtBits(chartSeriesNumber(hoverPoint[ln.key]))}</span>
               </div>
             ))}
-          </div>
+          </ChartHoverTip>
         )}
       </div>
       <div className="category-trend__legend">
@@ -1260,6 +1336,8 @@ function TimeSeriesSparkChart({
   bucketSeconds = 300,
   periodStartMs,
   periodEndMs,
+  skipLeadingGaps = false,
+  tipTranslucent = false,
 }) {
   const wrapRef = useRef(null);
   const dragRef = useRef(null);
@@ -1274,12 +1352,13 @@ function TimeSeriesSparkChart({
       startMs: periodStartMs,
       endMs: periodEndMs,
       valueKeys: [valueKey, 'bps', 'v'],
+      skipLeadingGaps,
     });
     return densified.map((pt) => ({
       ...pt,
       v: chartSeriesNumber(pt[valueKey] ?? pt.bps),
     }));
-  }, [points, bucketSeconds, periodStartMs, periodEndMs, valueKey]);
+  }, [points, bucketSeconds, periodStartMs, periodEndMs, valueKey, skipLeadingGaps]);
   if (!data.length) return null;
 
   const w = 800;
@@ -1468,7 +1547,7 @@ function TimeSeriesSparkChart({
         />
       )}
       {hoverPoint && (
-        <div className="dual-chart__tip" style={tipStyle}>
+        <ChartHoverTip style={tipStyle} translucentToggle={tipTranslucent}>
           <div className="dual-chart__tip-time">{formatPointTimeLabel(hoverPoint, longRange, tz)}</div>
           <div className="dual-chart__tip-row">
             <span className="dual-chart__tip-swatch" style={{ background: color }} />
@@ -1482,7 +1561,7 @@ function TimeSeriesSparkChart({
               <span className="dual-chart__tip-val mono">{fmtBytes(hoverPoint.bytes)}</span>
             </div>
           )}
-        </div>
+        </ChartHoverTip>
       )}
     </div>
   );

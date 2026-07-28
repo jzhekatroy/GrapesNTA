@@ -127,6 +127,7 @@ const {
   deleteInterfaceRoleRule,
   previewInterfaceRoleRule,
   listInterfaceRoles,
+  listInterfaceRoleSwitches,
   saveInterfaceRole,
   deleteInterfaceRole,
   materializeEffectiveRoles,
@@ -1847,6 +1848,14 @@ app.get('/api/refs/interface-roles/summary', async (_req, res) => {
   }
 });
 
+app.get('/api/refs/interface-roles/switches', async (_req, res) => {
+  try {
+    res.json(await runNamed(() => listInterfaceRoleSwitches(), { name: 'refs/interface-roles-switches' }));
+  } catch (err) {
+    sendApiError(res, err);
+  }
+});
+
 app.get('/api/refs/interface-roles/:ip', async (req, res) => {
   try {
     res.json(await runNamed(
@@ -1899,7 +1908,7 @@ app.get('/api/diagnostics/direction/coverage', async (req, res) => {
 app.get('/api/diagnostics/direction/compare', async (req, res) => {
   try {
     res.json(await runNamed(
-      () => compareDirectionModels({ hours: req.query.hours, oneSided: req.query.one_sided }),
+      () => compareDirectionModels({ hours: req.query.hours }),
       { name: 'diagnostics/direction-compare' },
     ));
   } catch (err) {

@@ -288,7 +288,6 @@ function SnmpAgentModal({ open, agent, canWrite, onClose, onSaved, canOpenInterf
         ...row,
         id: row.ifIndex,
         boundary: role.boundary || 'unknown',
-        connectivity: role.connectivity || '',
         boundarySource: role.boundarySource || 'default',
       };
     });
@@ -345,12 +344,6 @@ function SnmpAgentModal({ open, agent, canWrite, onClose, onSaved, canOpenInterf
           {irBoundaryLabel(r.boundary)}
         </Badge>
       ),
-    },
-    {
-      key: 'connectivity',
-      title: 'Тип стыка',
-      width: 110,
-      render: (r) => (r.connectivity ? <Badge tone="info">{irConnectivityLabel(r.connectivity)}</Badge> : '—'),
     },
   ];
 

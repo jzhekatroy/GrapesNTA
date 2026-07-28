@@ -12,6 +12,9 @@ const LOOKBACK_LABELS = {
 
 const LOOKBACK_OPTIONS = Object.keys(LOOKBACK_LABELS);
 
+/** Строк топа в плитке; «Прочие» показывается сверх этого числа. */
+const TOP_ROWS_VIEW_LIMIT = 100;
+
 const OBSERVATION_LOOKBACK_MS = {
   '15m': 15 * 60 * 1000,
   '1h': 3600 * 1000,
@@ -48,6 +51,117 @@ const REFRESH_LABELS = {
   300: '5 мин',
   900: '15 мин',
 };
+
+/** Fallback, если браузер не умеет Intl.supportedValuesOf('timeZone'). */
+const TIMEZONE_FALLBACK = [
+  'UTC',
+  'Europe/Kaliningrad', 'Europe/Moscow', 'Europe/Samara', 'Asia/Yekaterinburg',
+  'Asia/Omsk', 'Asia/Novosibirsk', 'Asia/Krasnoyarsk', 'Asia/Irkutsk',
+  'Asia/Yakutsk', 'Asia/Vladivostok', 'Asia/Magadan', 'Asia/Kamchatka',
+  'Europe/Minsk', 'Europe/Kyiv', 'Asia/Almaty', 'Asia/Tashkent',
+  'Asia/Tbilisi', 'Asia/Yerevan', 'Asia/Baku',
+  'Europe/London', 'Europe/Berlin', 'Europe/Belgrade', 'Europe/Istanbul',
+  'Asia/Dubai', 'Asia/Shanghai', 'Asia/Tokyo',
+  'America/New_York', 'America/Chicago', 'America/Los_Angeles',
+];
+
+function timezoneOptions() {
+  try {
+    if (typeof Intl.supportedValuesOf === 'function') {
+      const list = Intl.supportedValuesOf('timeZone');
+      if (Array.isArray(list) && list.length) return list;
+    }
+  } catch {
+    /* fall through */
+  }
+  return TIMEZONE_FALLBACK;
+}
+
+function timezoneOffsetLabel(tz) {
+  try {
+    const parts = new Intl.DateTimeFormat('ru-RU', { timeZone: tz, timeZoneName: 'shortOffset' })
+      .formatToParts(new Date());
+    const name = parts.find((p) => p.type === 'timeZoneName')?.value;
+    return name ? ` · ${name}` : '';
+  } catch {
+    return '';
+  }
+}
+
+function TimezonePicker({ value, onChange }) {
+  const options = useMemo(timezoneOptions, []);
+  const [text, setText] = useState(value || '');
+  const [open, setOpen] = useState(false);
+
+  useEffect(() => { setText(value || ''); }, [value]);
+
+  const query = text.trim().toLowerCase();
+  const matches = useMemo(() => {
+    const exact = query && options.some((tz) => tz.toLowerCase() === query);
+    const list = query && !exact ? options.filter((tz) => tz.toLowerCase().includes(query)) : options;
+    return list.slice(0, 60);
+  }, [options, query]);
+
+  const commit = (tz) => {
+    onChange(tz);
+    setText(tz);
+    setOpen(false);
+  };
+
+  return (
+    <div style={{ position: 'relative', width: 220 }}>
+      <input
+        className="input"
+        style={{ width: '100%' }}
+        placeholder="Europe/Moscow"
+        value={text}
+        onChange={(e) => { setText(e.target.value); setOpen(true); }}
+        onFocus={() => setOpen(true)}
+        onBlur={() => {
+          setOpen(false);
+          const next = text.trim();
+          if (options.includes(next)) onChange(next);
+          else setText(value || '');
+        }}
+      />
+      {open && matches.length > 0 && (
+        <div
+          style={{
+            position: 'absolute',
+            zIndex: 40,
+            top: 'calc(100% + 2px)',
+            left: 0,
+            right: 0,
+            maxHeight: 240,
+            overflowY: 'auto',
+            background: 'var(--surf-0, #fff)',
+            border: '1px solid var(--bd-soft, #ddd)',
+            borderRadius: 6,
+            boxShadow: '0 8px 20px rgba(0,0,0,.14)',
+          }}
+        >
+          {matches.map((tz) => (
+            <div
+              key={tz}
+              role="option"
+              aria-selected={tz === value}
+              style={{
+                padding: '5px 8px',
+                cursor: 'pointer',
+                font: 'var(--pv-text-body-3)',
+                background: tz === value ? 'var(--surf-2, #eef2ff)' : 'transparent',
+              }}
+              onMouseDown={(e) => { e.preventDefault(); commit(tz); }}
+            >
+              {tz}
+              <span style={{ color: 'var(--fg-muted)' }}>{timezoneOffsetLabel(tz)}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
 
 const TOP_GROUP_OPTIONS = [
   { id: 'src_asn', label: 'Source ASN' },
@@ -172,7 +286,8 @@ function rollupStatusLabel(item) {
   const throughPart = through ? `данные по ${through}` : null;
   if (!item.scope?.materializeRequired) return throughPart;
   if (!item.materialize?.enabled) {
-    return throughPart ? `${throughPart} · нужна подготовка` : 'нужна подготовка';
+    const hint = 'подготовка выключена — включите в настройках';
+    return throughPart ? `${throughPart} · ${hint}` : hint;
   }
   const st = item.materialize.status;
   const bf = item.backfillProgress;
@@ -200,11 +315,9 @@ function csvEscapeCell(v) {
   return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
 }
 
-function tileRefreshSec(item) {
-  const want = item.live?.enabled
-    ? Number(item.live.refreshSec) || MIN_REFRESH_SEC
-    : MIN_REFRESH_SEC;
-  return Math.max(MIN_REFRESH_SEC, want);
+/** Live не настраивается: плитка и воркер всегда идут шагом 5 минут. */
+function tileRefreshSec() {
+  return MIN_REFRESH_SEC;
 }
 
 function startComposeInExplorer(onNavigate, {
@@ -265,6 +378,8 @@ function ObservationChart({
   bucketSeconds = 300,
   periodStartMs,
   periodEndMs,
+  skipLeadingGaps = false,
+  tipTranslucent = true,
 }) {
   if (!points?.length) {
     return (
@@ -303,6 +418,8 @@ function ObservationChart({
         displayTimezone={displayTimezone}
         periodStartMs={periodStartMs}
         periodEndMs={periodEndMs}
+        skipLeadingGaps={skipLeadingGaps}
+        tipTranslucent={tipTranslucent}
         tipUnitLabel="бит/с"
       />
     );
@@ -327,6 +444,8 @@ function ObservationChart({
         displayTimezone={displayTimezone}
         periodStartMs={periodStartMs}
         periodEndMs={periodEndMs}
+        skipLeadingGaps={skipLeadingGaps}
+        tipTranslucent={tipTranslucent}
       />
     );
   }
@@ -428,8 +547,6 @@ function ObservationLiveTile({
   onLookbackChange,
 }) {
   const [preview, setPreview] = useState(null);
-  const [comparePreview, setComparePreview] = useState(null);
-  const [compareOn, setCompareOn] = useState(false);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -492,12 +609,12 @@ function ObservationLiveTile({
         });
     };
     tick({ initial: true });
-    const timer = setInterval(() => tick({ initial: false }), tileRefreshSec(item) * 1000);
+    const timer = setInterval(() => tick({ initial: false }), tileRefreshSec() * 1000);
     return () => {
       cancelled = true;
       clearInterval(timer);
     };
-  }, [item.id, previewPayload, item.live?.enabled, item.live?.refreshSec]);
+  }, [item.id, previewPayload]);
 
   useEffect(() => {
     if (!expanded) return undefined;
@@ -514,38 +631,6 @@ function ObservationLiveTile({
       });
     return () => { cancelled = true; };
   }, [expanded, item.id, updatedAt]);
-
-  useEffect(() => {
-    if (!compareOn) {
-      setComparePreview(null);
-      return undefined;
-    }
-    let cancelled = false;
-    const ms = OBSERVATION_LOOKBACK_MS[lookback] || OBSERVATION_LOOKBACK_MS['1h'];
-    const shift = lookback === '7d' || lookback === '24h' ? 7 * 86400 * 1000 : ms;
-    let from;
-    let to;
-    if (customRange?.from && customRange?.to) {
-      const a = Date.parse(customRange.from);
-      const b = Date.parse(customRange.to);
-      if (Number.isFinite(a) && Number.isFinite(b)) {
-        from = new Date(a - shift).toISOString();
-        to = new Date(b - shift).toISOString();
-      }
-    } else {
-      to = new Date(Date.now() - shift).toISOString();
-      from = new Date(Date.now() - shift - ms).toISOString();
-    }
-    if (!from || !to) return undefined;
-    ApiClient.previewObservation(item.id, { from, to })
-      .then((body) => {
-        if (!cancelled) setComparePreview(body.data || body);
-      })
-      .catch(() => {
-        if (!cancelled) setComparePreview(null);
-      });
-    return () => { cancelled = true; };
-  }, [compareOn, item.id, lookback, customRange?.from, customRange?.to]);
 
   const changeLookback = (next) => {
     if (!next || next === lookback) return;
@@ -610,30 +695,12 @@ function ObservationLiveTile({
   const topRowsWithOther = useMemo(() => {
     const all = Array.isArray(topWidget?.rows) ? topWidget.rows : [];
     const other = all.find((r) => r.isOther);
-    const shown = all.filter((r) => !r.isOther).slice(0, 25);
+    const shown = all.filter((r) => !r.isOther).slice(0, TOP_ROWS_VIEW_LIMIT);
     return other ? [...shown, other] : shown;
   }, [topWidget]);
   const chartMode = chartWidget?.mode === 'grouped' ? 'grouped' : 'total';
-  const basePoints = chartWidget?.points || chartWidget?.series || [];
-  const baseLines = chartWidget?.lines || [];
-  const compareWidget = (comparePreview?.widgets || []).find((w) => w.type === 'timeseries_bps');
-  const compareSeries = compareWidget?.points || compareWidget?.series || [];
-  const points = useMemo(() => {
-    if (!compareOn || !compareSeries.length || !basePoints.length) return basePoints;
-    const byIdx = compareSeries;
-    return basePoints.map((p, i) => {
-      const prev = byIdx[i] || byIdx[byIdx.length - 1] || {};
-      return { ...p, bps_prev: Number(prev.bps) || 0 };
-    });
-  }, [basePoints, compareSeries, compareOn]);
-  const lines = useMemo(() => {
-    if (!compareOn || chartMode === 'grouped') return baseLines;
-    if (!basePoints.length) return baseLines;
-    return [
-      { key: 'bps', label: 'сейчас', color: 'var(--accent, #3b82f6)' },
-      { key: 'bps_prev', label: 'прошлый период', color: 'var(--fg-muted, #888)' },
-    ];
-  }, [baseLines, compareOn, chartMode, basePoints.length]);
+  const points = chartWidget?.points || chartWidget?.series || [];
+  const lines = chartWidget?.lines || [];
   const lastBps = (() => {
     if (!points.length) return null;
     const last = points[points.length - 1];
@@ -648,13 +715,12 @@ function ObservationLiveTile({
   const chartH = expanded ? 320 : 200;
   const periodLabel = observationPeriodLabel(lookback, customRange);
   const canResetZoom = Boolean(customRange || zoomStack.length);
-  const tileWidth = Number(item.layout?.width) === 2 ? 2 : 1;
 
   return (
     <Card
       pad="sm"
       style={{
-        gridColumn: expanded || tileWidth === 2 ? '1 / -1' : 'auto',
+        gridColumn: expanded ? '1 / -1' : 'auto',
         display: 'flex',
         flexDirection: 'column',
         gap: 10,
@@ -663,12 +729,7 @@ function ObservationLiveTile({
     >
       <div className="row" style={{ justifyContent: 'space-between', gap: 8, alignItems: 'flex-start', flexWrap: 'wrap' }}>
         <div style={{ flex: 1, minWidth: 160 }}>
-          <div style={{ font: 'var(--pv-text-body-2-bold)' }}>
-            {item.name}
-            {item.isShared ? (
-              <span style={{ marginLeft: 8, font: 'var(--pv-text-body-3)', color: 'var(--fg-muted)' }}>общее</span>
-            ) : null}
-          </div>
+          <div style={{ font: 'var(--pv-text-body-2-bold)' }}>{item.name}</div>
           {item.description ? (
             <div style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-secondary)', marginTop: 2 }}>
               {item.description}
@@ -684,9 +745,7 @@ function ObservationLiveTile({
             график: топ по {topLabel}
             {' · '}
             таблица: топ {topLabel}
-            {item.live?.enabled
-              ? ` · обновл. ${REFRESH_LABELS[tileRefreshSec(item)] || `${tileRefreshSec(item)}с`}`
-              : ` · обновл. ${REFRESH_LABELS[MIN_REFRESH_SEC]}`}
+            {` · обновл. ${REFRESH_LABELS[MIN_REFRESH_SEC]}`}
             {rollup ? ` · ${rollup}` : ''}
           </div>
         </div>
@@ -748,10 +807,6 @@ function ObservationLiveTile({
               <span>Сброс zoom</span>
             </button>
           )}
-          <label className="row" style={{ gap: 4, alignItems: 'center', font: 'var(--pv-text-body-3)' }}>
-            <input type="checkbox" checked={compareOn} onChange={(e) => setCompareOn(e.target.checked)} />
-            сравнить
-          </label>
           <button type="button" className="btn" onClick={exportCsv} disabled={!points.length}>CSV</button>
           <LookbackPicker
             value={lookback}
@@ -765,13 +820,14 @@ function ObservationLiveTile({
         <ObservationChart
           points={points}
           lines={lines}
-          mode={compareOn && chartMode !== 'grouped' ? 'grouped' : chartMode}
+          mode={chartMode}
           height={chartH}
           onRangeSelect={points.length > 1 ? handleChartRangeSelect : undefined}
           displayTimezone={displayTimezone}
           bucketSeconds={300}
           periodStartMs={chartPeriodBounds.periodStartMs}
           periodEndMs={chartPeriodBounds.periodEndMs}
+          skipLeadingGaps
         />
       </div>
       {!!points.length && (
@@ -788,7 +844,6 @@ function ObservationLiveTile({
               ? `${lines.length} серий · ${points.length} точек · ${periodLabel}${customRange ? ' · zoom' : ''}`
               : `${points.length} точек · ${periodLabel}${customRange ? ' · zoom' : ''}`}
           {updatedAt ? ` · ${updatedAt.toLocaleTimeString('ru-RU')}` : ''}
-          {compareOn ? ' · + прошлый период' : ''}
         </span>
         <span>бит/с</span>
       </div>
@@ -1150,139 +1205,7 @@ function ObservationDiagnosticsPanel() {
         </table>
       </Card>
 
-      <ObservationSmtpPanel />
     </div>
-  );
-}
-
-function ObservationSmtpPanel() {
-  const [smtp, setSmtp] = useState(null);
-  const [error, setError] = useState('');
-  const [forbidden, setForbidden] = useState(false);
-  const [busy, setBusy] = useState(false);
-  const [testTo, setTestTo] = useState('');
-
-  useEffect(() => {
-    ApiClient.loadSmtpSettings()
-      .then((data) => {
-        setSmtp(data);
-        setForbidden(false);
-        setError('');
-      })
-      .catch((e) => {
-        if (e.status === 403) setForbidden(true);
-        setError(e.message);
-      });
-  }, []);
-
-  if (forbidden) {
-    return (
-      <Card title="SMTP (отчёты)">
-        <div style={{ color: 'var(--fg-secondary)', font: 'var(--pv-text-body-3)' }}>
-          Настройки почты доступны только администратору.
-        </div>
-      </Card>
-    );
-  }
-
-  if (!smtp) {
-    return (
-      <Card title="SMTP (отчёты)">
-        <div style={{ color: 'var(--fg-secondary)' }}>{error || 'загрузка…'}</div>
-      </Card>
-    );
-  }
-
-  const save = async () => {
-    setBusy(true);
-    setError('');
-    try {
-      const res = await ApiClient.saveSmtpSettings(smtp);
-      setSmtp(res.data || smtp);
-      pushToast?.({ kind: 'success', title: 'SMTP сохранён' });
-    } catch (e) {
-      setError(e.message);
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const test = async () => {
-    setBusy(true);
-    setError('');
-    try {
-      await ApiClient.testSmtpSettings(testTo);
-      pushToast?.({ kind: 'success', title: 'Тестовое письмо отправлено' });
-    } catch (e) {
-      setError(e.message);
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  return (
-    <Card title="SMTP (отчёты по наблюдениям)">
-      <div className="col" style={{ gap: 10, font: 'var(--pv-text-body-3)' }}>
-        {error && <div style={{ color: 'crimson' }}>{error}</div>}
-        <label className="row" style={{ gap: 8, alignItems: 'center' }}>
-          <input
-            type="checkbox"
-            checked={!!smtp.enabled}
-            onChange={(e) => setSmtp({ ...smtp, enabled: e.target.checked })}
-          />
-          Включить отправку
-        </label>
-        <div className="row" style={{ gap: 12, flexWrap: 'wrap' }}>
-          <label className="col" style={{ gap: 4, minWidth: 180 }}>
-            <span>Host</span>
-            <input className="input" value={smtp.host || ''} onChange={(e) => setSmtp({ ...smtp, host: e.target.value })} />
-          </label>
-          <label className="col" style={{ gap: 4, minWidth: 90 }}>
-            <span>Port</span>
-            <input className="input" type="number" value={smtp.port || 587} onChange={(e) => setSmtp({ ...smtp, port: Number(e.target.value) })} />
-          </label>
-          <label className="row" style={{ gap: 6, alignItems: 'center', marginTop: 18 }}>
-            <input type="checkbox" checked={!!smtp.secure} onChange={(e) => setSmtp({ ...smtp, secure: e.target.checked })} />
-            TLS (465)
-          </label>
-        </div>
-        <div className="row" style={{ gap: 12, flexWrap: 'wrap' }}>
-          <label className="col" style={{ gap: 4, minWidth: 160 }}>
-            <span>Username</span>
-            <input className="input" value={smtp.username || ''} onChange={(e) => setSmtp({ ...smtp, username: e.target.value })} />
-          </label>
-          <label className="col" style={{ gap: 4, minWidth: 160 }}>
-            <span>Password {smtp.passwordSet ? '(задан)' : ''}</span>
-            <input
-              className="input"
-              type="password"
-              placeholder={smtp.passwordSet ? 'оставьте пустым, чтобы не менять' : ''}
-              value={smtp.password || ''}
-              onChange={(e) => setSmtp({ ...smtp, password: e.target.value })}
-            />
-          </label>
-          <label className="col" style={{ gap: 4, minWidth: 180 }}>
-            <span>From email</span>
-            <input className="input" value={smtp.fromEmail || ''} onChange={(e) => setSmtp({ ...smtp, fromEmail: e.target.value })} />
-          </label>
-          <label className="col" style={{ gap: 4, minWidth: 140 }}>
-            <span>From name</span>
-            <input className="input" value={smtp.fromName || ''} onChange={(e) => setSmtp({ ...smtp, fromName: e.target.value })} />
-          </label>
-        </div>
-        <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
-          <button type="button" className="btn btn--primary" disabled={busy} onClick={save}>Сохранить SMTP</button>
-          <input
-            className="input"
-            style={{ width: 220 }}
-            placeholder="email для теста"
-            value={testTo}
-            onChange={(e) => setTestTo(e.target.value)}
-          />
-          <button type="button" className="btn" disabled={busy || !testTo} onClick={test}>Проверить отправку</button>
-        </div>
-      </div>
-    </Card>
   );
 }
 
@@ -1353,11 +1276,10 @@ function PageObservations({ onNavigate }) {
       name: item.name,
       description: item.description || '',
       folder: item.folder || 'Мои наблюдения',
-      isShared: Boolean(item.isShared),
       lookback: item.lookback,
       widgets: item.widgets,
-      layout: item.layout || { order: 0, width: 1 },
-      live: { ...(item.live || { enabled: true, refreshSec: MIN_REFRESH_SEC }) },
+      layout: { ...(item.layout || { order: 0 }), width: 1 },
+      materialize: { enabled: Boolean(item.materialize?.enabled) },
       report: {
         enabled: Boolean(item.report?.enabled),
         period: item.report?.period || 'yesterday',
@@ -1385,11 +1307,10 @@ function PageObservations({ onNavigate }) {
         name: settings.name,
         description: settings.description,
         folder: settings.folder,
-        isShared: settings.isShared,
         lookback: settings.lookback,
         widgets: withTopGroup(settings.widgets, topGroupFromWidgets(settings.widgets)),
         layout: settings.layout,
-        live: settings.live,
+        materialize: settings.materialize,
         report: settings.report,
         filters: settings.filters,
       });
@@ -1433,17 +1354,11 @@ function PageObservations({ onNavigate }) {
     });
     if (!canWriteObservations || !current) return;
     try {
-      // Keep live/materialize — period switch must not disable rollup.
+      // Смена периода не должна выключать подготовку данных.
       await ApiClient.updateObservation(id, {
         ...current,
         lookback,
-        live: { ...(current.live || {}), enabled: current.live?.enabled !== false },
-        materialize: {
-          ...(current.materialize || {}),
-          enabled: current.live?.enabled !== false
-            ? true
-            : Boolean(current.materialize?.enabled),
-        },
+        materialize: { ...(current.materialize || {}), enabled: Boolean(current.materialize?.enabled) },
       });
     } catch (e) {
       setError(e.message);
@@ -1525,65 +1440,21 @@ function PageObservations({ onNavigate }) {
                   {groupOptions.map((g) => <option key={g.id} value={g.id}>{g.label}</option>)}
                 </select>
               </label>
-              <label className="col" style={{ gap: 4, minWidth: 140 }}>
-                <span>Ширина плитки</span>
-                <select
-                  className="input"
-                  value={Number(settings.layout?.width) === 2 ? 2 : 1}
-                  onChange={(e) => setSettings({
-                    ...settings,
-                    layout: { ...(settings.layout || {}), width: Number(e.target.value), order: settings.layout?.order || 0 },
-                  })}
-                >
-                  <option value={1}>1 колонка</option>
-                  <option value={2}>на всю ширину</option>
-                </select>
-              </label>
             </div>
             <label className="row" style={{ gap: 8, alignItems: 'center' }}>
               <input
                 type="checkbox"
-                checked={!!settings.isShared}
-                onChange={(e) => setSettings({ ...settings, isShared: e.target.checked })}
-              />
-              Доступно всем
-            </label>
-            <label className="row" style={{ gap: 8, alignItems: 'center' }}>
-              <input
-                type="checkbox"
-                checked={!!settings.live.enabled}
+                checked={!!settings.materialize?.enabled}
                 onChange={(e) => setSettings({
                   ...settings,
-                  live: {
-                    ...settings.live,
-                    enabled: e.target.checked,
-                    refreshSec: Math.max(MIN_REFRESH_SEC, settings.live.refreshSec || MIN_REFRESH_SEC),
-                  },
+                  materialize: { ...(settings.materialize || {}), enabled: e.target.checked },
                 })}
               />
-              Live на доске
+              Подготовка данных (rollup раз в 5 минут)
             </label>
-            {settings.live.enabled && (
-              <label className="row" style={{ gap: 8, alignItems: 'center', marginLeft: 24 }}>
-                каждые
-                <select
-                  className="input"
-                  style={{ width: 120 }}
-                  value={Math.max(MIN_REFRESH_SEC, Number(settings.live.refreshSec) || MIN_REFRESH_SEC)}
-                  onChange={(e) => setSettings({
-                    ...settings,
-                    live: { ...settings.live, refreshSec: Number(e.target.value) },
-                  })}
-                >
-                  {(config?.refreshSecs || [300, 900]).map((v) => (
-                    <option key={v} value={v}>{REFRESH_LABELS[v] || `${v}с`}</option>
-                  ))}
-                </select>
-                <span style={{ color: 'var(--fg-muted)', font: 'var(--pv-text-body-3)' }}>
-                  (и UI, и воркер; запас 5 мин на late flows)
-                </span>
-              </label>
-            )}
+            <div style={{ marginLeft: 24, color: 'var(--fg-muted)', font: 'var(--pv-text-body-3)' }}>
+              Без неё график и таблица топа по группировке пустые. Каждая подготовка — постоянная нагрузка на ClickHouse.
+            </div>
             <label className="row" style={{ gap: 8, alignItems: 'center' }}>
               <input
                 type="checkbox"
@@ -1643,15 +1514,13 @@ function PageObservations({ onNavigate }) {
                       },
                     })}
                   />
-                  <input
-                    className="input"
-                    style={{ width: 160 }}
+                  <TimezonePicker
                     value={settings.report.schedule?.timezone || 'Europe/Moscow'}
-                    onChange={(e) => setSettings({
+                    onChange={(tz) => setSettings({
                       ...settings,
                       report: {
                         ...settings.report,
-                        schedule: { ...(settings.report.schedule || {}), timezone: e.target.value },
+                        schedule: { ...(settings.report.schedule || {}), timezone: tz },
                       },
                     })}
                   />
@@ -1729,7 +1598,7 @@ function PageObservations({ onNavigate }) {
           <h1 style={{ margin: 0, font: 'var(--pv-text-headline)' }}>Наблюдения</h1>
           <div style={{ color: 'var(--fg-secondary)', font: 'var(--pv-text-body-3)', marginTop: 4 }}>
             {pageTab === 'board'
-              ? 'Live-доска: обновление по настройке наблюдения (минимум раз в 5 минут).'
+              ? 'Live-доска: обновление раз в 5 минут (бакет 5 минут + запас на late flows).'
               : 'Диагностика воркера analytics — обновление раз в 5 минут.'}
           </div>
         </div>

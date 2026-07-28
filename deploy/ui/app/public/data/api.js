@@ -1606,6 +1606,19 @@ const ApiClient = (() => {
     }
   }
 
+  async function loadInterfaceRoleSwitches() {
+    try {
+      const body = await getJson('/api/refs/interface-roles/switches', { widget: 'refs/interface-roles-switches' });
+      return {
+        source: 'clickhouse',
+        rows: Array.isArray(body.data) ? body.data : [],
+        meta: body.meta || null,
+      };
+    } catch (err) {
+      return { source: 'error', rows: [], error: err.message || LOAD_FAILED };
+    }
+  }
+
   async function loadInterfaceRolesForSwitch(switchIp) {
     try {
       const body = await getJson(
@@ -2015,6 +2028,7 @@ const ApiClient = (() => {
     deleteInterfaceRoleRule,
     previewInterfaceRoleRule,
     loadInterfaceRoleSummary,
+    loadInterfaceRoleSwitches,
     loadInterfaceRolesForSwitch,
     saveInterfaceRole,
     deleteInterfaceRole,

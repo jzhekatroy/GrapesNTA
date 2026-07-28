@@ -6,7 +6,7 @@ const {
   interfaceRolesEffectiveViewRef,
 } = require('./clickhouse');
 const { flowSamplerIpExpr, sflowIfIndexExpr } = require('./queries');
-const { fetchDirectionSettings, portDirectionSql } = require('./net-interface-roles');
+const { portDirectionSql } = require('./net-interface-roles');
 
 const DEFAULT_LOOKBACK_HOURS = 1;
 const MAX_LOOKBACK_HOURS = 24;
@@ -119,19 +119,17 @@ function boundaryJoinSql(c) {
  * Матрица «направление по портам» × «текущее direction из flows_raw».
  * Показывает, совпали бы модели при переключении определения направления.
  */
-async function compareDirectionModels({ hours, oneSided } = {}) {
+async function compareDirectionModels({ hours } = {}) {
   const c = requireFlowColumns();
   if (!c.directionCol) throw apiError('В flows_raw не настроена колонка direction', 501);
   const lookbackHours = parseLookbackHours(hours);
-  const settings = await fetchDirectionSettings();
-  const policy = oneSided === 'strict' || oneSided === 'infer' ? oneSided : settings.oneSided;
   const inBoundary = `if(side_in.boundary = '', 'unknown', side_in.boundary)`;
   const outBoundary = `if(side_out.boundary = '', 'unknown', side_out.boundary)`;
 
   return {
     sql: `
       SELECT
-        ${portDirectionSql('in_boundary', 'out_boundary', { oneSided: policy })} AS port_direction,
+        ${portDirectionSql('in_boundary', 'out_boundary')} AS port_direction,
         ch_direction,
         sum(bytes) AS bytes,
         sum(flows) AS flows
@@ -150,7 +148,7 @@ async function compareDirectionModels({ hours, oneSided } = {}) {
       ORDER BY bytes DESC
     `,
     params: { hours: lookbackHours },
-    meta: { oneSided: policy, defaultBoundary: settings.defaultBoundary },
+    meta: { oneSided: 'strict' },
     map(rows) {
       const cells = rows.map((r) => ({
         portDirection: String(r.port_direction ?? 'unknown'),
@@ -168,7 +166,7 @@ async function compareDirectionModels({ hours, oneSided } = {}) {
       const pct = (part) => (totalBytes ? Math.round((part * 10000) / totalBytes) / 100 : 0);
       return {
         lookbackHours,
-        oneSided: policy,
+        oneSided: 'strict',
         totalBytes,
         agreeBytes,
         agreePercent: pct(agreeBytes),

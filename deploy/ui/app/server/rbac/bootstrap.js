@@ -17,7 +17,7 @@ const STANDARD_ROLES = [
   { id: 'ReadOnly', name: 'ReadOnly', displayName: 'Только чтение' },
 ];
 
-const ADMIN_ONLY_RESOURCES = new Set(['ttl', 'diagnostics']);
+const ADMIN_ONLY_RESOURCES = new Set(['ttl', 'diagnostics', 'smtp']);
 
 function clickhouseDateTime(date = new Date()) {
   return date.toISOString().replace('T', ' ').replace('Z', '');

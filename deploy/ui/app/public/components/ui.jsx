@@ -238,10 +238,88 @@ function Empty({ icon = 'info', title, desc, action }) {
   );
 }
 
+/* =================== OverflowText =================== */
+function splitTextMiddle(text) {
+  const s = String(text ?? '');
+  if (s.length <= 12) return { start: s, end: '' };
+  const mid = Math.ceil(s.length / 2);
+  return { start: s.slice(0, mid), end: s.slice(mid) };
+}
+
+const OverflowText = React.forwardRef(function OverflowText({
+  value,
+  mode = 'end',
+  className = '',
+  title,
+  expanded = false,
+}, ref) {
+  const text = value == null || value === '' ? '—' : String(value);
+  const localRef = useRef(null);
+  const setRef = useCallback((node) => {
+    localRef.current = node;
+    if (typeof ref === 'function') ref(node);
+    else if (ref) ref.current = node;
+  }, [ref]);
+  const [overflows, setOverflows] = useState(false);
+
+  const measureOverflow = useCallback(() => {
+    const el = localRef.current;
+    if (!el) return;
+    if (mode === 'expand-open') {
+      setOverflows(true);
+      return;
+    }
+    const target = el.querySelector?.('.overflow-text__value') || el;
+    setOverflows(target.scrollWidth > target.clientWidth + 1);
+  }, [mode]);
+
+  useEffect(() => {
+    measureOverflow();
+    const el = localRef.current;
+    if (!el || typeof ResizeObserver === 'undefined') return undefined;
+    const ro = new ResizeObserver(measureOverflow);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [measureOverflow, text, mode, expanded]);
+
+  const tooltip = title ?? (overflows && mode !== 'expand-open' ? text : undefined);
+  const rootClass = [
+    'overflow-text',
+    `overflow-text--${mode}`,
+    expanded && mode === 'expand-open' ? 'is-expanded' : '',
+    className,
+  ].filter(Boolean).join(' ');
+
+  if (mode === 'middle') {
+    const { start, end } = splitTextMiddle(text);
+    return (
+      <span ref={setRef} className={rootClass} title={tooltip}>
+        <span className="overflow-text__start">{start}</span>
+        {end ? <span className="overflow-text__end">{end}</span> : null}
+      </span>
+    );
+  }
+
+  if (mode === 'expand-open') {
+    return (
+      <span ref={setRef} className={rootClass} title={tooltip}>
+        <span className="overflow-text__value overflow-text__value--wrap">{text}</span>
+      </span>
+    );
+  }
+
+  return (
+    <span ref={setRef} className={rootClass} title={tooltip}>
+      <span className="overflow-text__value overflow-text__value--clip">{text}</span>
+    </span>
+  );
+});
+
 /* =================== DataTable =================== */
 function DataTable({
   rows,
   columns,           // [{ key, title, render?, sortable?, align?, width?, num? }]
+  resizableColumns = false,
   selectable,
   selected,
   onSelectChange,
@@ -262,13 +340,29 @@ function DataTable({
   const [page, setPage] = useState(1);
   const [colVis, setColVis] = useState(() => Object.fromEntries(columns.map(c => [c.key, true])));
   const [colMenu, setColMenu] = useState(false);
+  const [colWidths, setColWidths] = useState(() => Object.fromEntries(
+    columns.map((c) => [c.key, Number(c.width) || 160]),
+  ));
+  const resizeRef = useRef(null);
   const colKeysSig = columns.map((c) => c.key).join('\0');
 
   useEffect(() => {
     setColVis((prev) => Object.fromEntries(
       columns.map((c) => [c.key, prev[c.key] !== undefined ? prev[c.key] : true]),
     ));
+    setColWidths((prev) => Object.fromEntries(
+      columns.map((c) => [c.key, prev[c.key] ?? (Number(c.width) || 160)]),
+    ));
   }, [colKeysSig]);
+
+  useEffect(() => () => {
+    const drag = resizeRef.current;
+    if (!drag) return;
+    window.removeEventListener('mousemove', drag.onMove);
+    window.removeEventListener('mouseup', drag.onUp);
+    document.body.style.cursor = '';
+    document.body.style.userSelect = '';
+  }, []);
 
   const sorted = useMemo(() => {
     if (!sort) return rows;
@@ -303,6 +397,47 @@ function DataTable({
   };
 
   const visibleCols = columns.filter((c) => colVis[c.key]);
+  const columnWidth = (c) => colWidths[c.key] ?? (Number(c.width) || 160);
+  const resetColumnWidth = (e, c) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setColWidths((prev) => ({ ...prev, [c.key]: Number(c.width) || 160 }));
+  };
+  const startColumnResize = (e, c) => {
+    if (!resizableColumns || c.resizable === false || e.button !== 0) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const startX = e.clientX;
+    const table = e.currentTarget.closest('table');
+    const measuredWidths = { ...colWidths };
+    table?.querySelectorAll('th[data-col-key]').forEach((th) => {
+      measuredWidths[th.dataset.colKey] = Math.round(th.getBoundingClientRect().width);
+    });
+    const startWidth = measuredWidths[c.key] || columnWidth(c);
+    setColWidths(measuredWidths);
+    const minWidth = Number(c.minWidth) || 72;
+    const maxWidth = Number(c.maxWidth) || 800;
+    const onMove = (ev) => {
+      const next = Math.max(minWidth, Math.min(maxWidth, startWidth + ev.clientX - startX));
+      setColWidths({ ...measuredWidths, [c.key]: Math.round(next) });
+    };
+    const onUp = () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+      resizeRef.current = null;
+    };
+    resizeRef.current = { onMove, onUp };
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+  };
+  const resizableTableWidth = resizableColumns
+    ? visibleCols.reduce((sum, c) => sum + columnWidth(c), selectable ? 36 : 0)
+      + (rowActions ? 120 : 0)
+    : null;
 
   return (
     <div>
@@ -339,7 +474,17 @@ function DataTable({
         </div>
       )}
       <div className="table-wrap">
-        <table className="table">
+        <table
+          className={`table${resizableColumns ? ' table--resizable' : ''}`}
+          style={resizableColumns ? { width: resizableTableWidth, minWidth: '100%' } : undefined}
+        >
+          {resizableColumns && (
+            <colgroup>
+              {selectable && <col style={{ width: 36 }} />}
+              {visibleCols.map((c) => <col key={c.key} style={{ width: columnWidth(c) }} />)}
+              {rowActions && <col style={{ width: 120 }} />}
+            </colgroup>
+          )}
           <thead>
             <tr>
               {selectable && (
@@ -350,10 +495,11 @@ function DataTable({
                 return (
                   <th
                     key={c.key}
-                    style={{width: c.width, textAlign: c.align || 'left'}}
+                    style={{width: resizableColumns ? columnWidth(c) : c.width, textAlign: c.align || 'left'}}
                     className={[isSorted ? 'is-sorted' : '', c.headerClassName].filter(Boolean).join(' ') || undefined}
                     onClick={c.sortable !== false ? () => toggleSort(c.key) : null}
                     data-sort={c.sortable === false ? 'none' : 'yes'}
+                    data-col-key={c.key}
                   >
                     <span style={{display: 'inline-flex', alignItems: 'center', gap: 4, cursor: c.sortable === false ? 'default' : 'pointer'}}>
                       {c.title}
@@ -365,6 +511,18 @@ function DataTable({
                         </span>
                       )}
                     </span>
+                    {resizableColumns && c.resizable !== false && (
+                      <span
+                        className="col-resize"
+                        role="separator"
+                        aria-orientation="vertical"
+                        aria-label={`Изменить ширину столбца «${c.title}»`}
+                        title="Перетащите для изменения ширины · двойной клик — сброс"
+                        onMouseDown={(e) => startColumnResize(e, c)}
+                        onClick={(e) => e.stopPropagation()}
+                        onDoubleClick={(e) => resetColumnWidth(e, c)}
+                      />
+                    )}
                   </th>
                 );
               })}
@@ -498,6 +656,6 @@ async function copyTextToClipboard(text) {
 
 Object.assign(window, {
   Card, Button, Badge, Tag, StatusIndicator, Checkbox, MiniBar, Modal, SidePanel,
-  ToastStack, pushToast, Empty, DataTable, Pagination, pluralRu, WidgetLoadBadge,
+  ToastStack, pushToast, Empty, OverflowText, splitTextMiddle, DataTable, Pagination, pluralRu, WidgetLoadBadge,
   copyTextToClipboard,
 });
