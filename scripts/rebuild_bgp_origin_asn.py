@@ -231,8 +231,40 @@ def ch_create_or_replace_dictionary(base: Sequence[str], args: argparse.Namespac
     ch_run_query(base, query, display_query=redacted_query)
 
 
+def build_peer_down_clause(args: argparse.Namespace) -> str:
+    """Exclude routes learned from peers whose last BMP event was Peer Down.
+
+    Such a peer stopped feeding updates, so its last announces are stale and
+    must not keep a prefix alive in the lookup.
+    """
+    if args.skip_peer_down_filter:
+        return ""
+    return f"""
+          AND (router_addr, peer_addr) NOT IN (
+              SELECT router_addr, peer_addr
+              FROM (
+                  SELECT
+                      router_addr,
+                      peer_addr,
+                      argMax(state, ts) AS last_state
+                  FROM {args.peers_table}
+                  GROUP BY router_addr, peer_addr
+              )
+              WHERE last_state = 'down'
+          )"""
+
+
 def build_rebuild_query(args: argparse.Namespace, family: int) -> str:
-    # MVP aggregation: latest event per prefix, one IP family at a time.
+    # Two-stage aggregation, one IP family at a time.
+    #
+    # Stage 1 resolves the latest event per (router, peer, prefix). Collapsing
+    # straight to the prefix would let a single peer's withdraw hide a prefix
+    # that a dozen other peers still announce — internet churn produces such
+    # withdraws constantly, so the lookup silently lost ~28k live prefixes.
+    #
+    # Stage 2 keeps a prefix when at least one peer still announces it, and
+    # takes origin ASN from the freshest such announce. active_paths now
+    # carries the real number of announcing peers.
     #
     # Splitting IPv4 and IPv6 halves the aggregation cardinality per query and
     # keeps memory predictable on the shared ClickHouse. External group-by spill
@@ -247,9 +279,9 @@ SELECT
         concat(IPv6NumToString(prefix_bin), '/', toString(prefix_len))
     ) AS prefix,
     family,
-    last_origin_asn AS origin_asn,
-    last_peer_asn AS peer_asn,
-    toUInt32(1) AS active_paths,
+    origin_asn,
+    peer_asn,
+    active_paths,
     last_ts,
     'bmp_route_events' AS source,
     now() AS snapshot_ts
@@ -257,22 +289,49 @@ FROM
 (
     SELECT
         family,
-        prefix AS prefix_bin,
+        prefix_bin,
         prefix_len,
-        argMax(event_type, ts) AS last_event,
-        argMax(origin_asn, ts) AS last_origin_asn,
-        argMax(peer_asn, ts) AS last_peer_asn,
-        max(ts) AS last_ts
-    FROM {args.route_events_table}
-    WHERE ts >= now() - INTERVAL {args.lookback_days} DAY
-      AND family = {family}
-      AND prefix_len > 0
+        toUInt32(countIf(peer_last_event = 'announce')) AS active_paths,
+        argMaxIf(
+            peer_last_origin_asn,
+            peer_last_ts,
+            peer_last_event = 'announce' AND peer_last_origin_asn != 0
+        ) AS origin_asn,
+        argMaxIf(
+            peer_last_peer_asn,
+            peer_last_ts,
+            peer_last_event = 'announce' AND peer_last_origin_asn != 0
+        ) AS peer_asn,
+        maxIf(peer_last_ts, peer_last_event = 'announce') AS last_ts
+    FROM
+    (
+        SELECT
+            family,
+            prefix AS prefix_bin,
+            prefix_len,
+            router_addr,
+            peer_addr,
+            argMax(event_type, ts) AS peer_last_event,
+            argMax(origin_asn, ts) AS peer_last_origin_asn,
+            argMax(peer_asn, ts) AS peer_last_peer_asn,
+            max(ts) AS peer_last_ts
+        FROM {args.route_events_table}
+        WHERE ts >= now() - INTERVAL {args.lookback_days} DAY
+          AND family = {family}
+          AND prefix_len > 0{build_peer_down_clause(args)}
+        GROUP BY
+            family,
+            prefix,
+            prefix_len,
+            router_addr,
+            peer_addr
+    )
     GROUP BY
         family,
-        prefix,
+        prefix_bin,
         prefix_len
 )
-WHERE last_event = 'announce' AND last_origin_asn != 0
+WHERE active_paths > 0 AND origin_asn != 0
 SETTINGS
     max_memory_usage = {args.max_memory_usage},
     max_bytes_before_external_group_by = {args.max_bytes_before_external_group_by},
@@ -301,6 +360,18 @@ def main() -> int:
     p.add_argument(
         "--route-events-table",
         default=env("BGPORIGIN_ROUTE_EVENTS_TABLE", "default.bmp_route_events"),
+    )
+    p.add_argument(
+        "--peers-table",
+        default=env("BGPORIGIN_PEERS_TABLE", "default.bmp_peers"),
+        help="BMP peer state table used to skip routes from peers that are down",
+    )
+    p.add_argument(
+        "--skip-peer-down-filter",
+        action="store_true",
+        default=env("BGPORIGIN_PEER_DOWN_FILTER", "1") == "0",
+        help="Keep routes from peers whose last BMP event was Peer Down "
+        "(env BGPORIGIN_PEER_DOWN_FILTER=0)",
     )
     p.add_argument(
         "--table",
@@ -415,8 +486,26 @@ def main() -> int:
         f"target_table={args.table} "
         f"lookback_days={args.lookback_days} "
         f"min_prefixes={args.min_prefixes} "
-        f"max_prefix_drop_pct={args.max_prefix_drop_pct:g}"
+        f"max_prefix_drop_pct={args.max_prefix_drop_pct:g} "
+        f"peer_down_filter={'off' if args.skip_peer_down_filter else 'on'}"
     )
+
+    if not args.skip_peer_down_filter:
+        peers = ch_run_tsv_row(
+            base,
+            f"""
+SELECT
+    countIf(last_state = 'up'),
+    countIf(last_state = 'down')
+FROM (
+    SELECT argMax(state, ts) AS last_state
+    FROM {args.peers_table}
+    GROUP BY router_addr, peer_addr
+)
+""",
+        )
+        if len(peers) == 2:
+            log_info(f"peer_state up={peers[0]} down={peers[1]} (down peers skipped)")
 
     source = ch_run_tsv_row(
         base,
