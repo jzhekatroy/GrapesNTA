@@ -1,0 +1,5 @@
+# SSH mode для bounds-service: config читается по BOUNDS_CONFIG_PATH на удалённом сервере,
+# локальный bind-mount не нужен.
+services:
+  bounds-service:
+    volumes: []

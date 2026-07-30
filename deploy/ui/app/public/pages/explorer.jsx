@@ -37,6 +37,7 @@ const EXPLORER_DEFAULT_VISUAL_LIMIT = 5;
 const EXPLORER_DEFAULT_FETCH_LIMIT = 25;
 const EXPLORER_ON_DEMAND_FETCH_LIMITS = [50, 100];
 const EXPLORER_DYNAMICS_MAX_SERIES = 5;
+const EXPLORER_CHART_HEIGHT = 196;
 const EXPLORER_VIS_DEFAULT = 'data';
 
 const EXPLORER_TEXT_DISPLAY_MODES = [
@@ -139,6 +140,7 @@ function explorerAsnDisplayValue(row, valueIdx, fallback) {
   const val = fallback ?? row.values?.[valueIdx];
   if (val && String(val).includes('(') && /AS\d+/i.test(String(val))) return val;
   const asn = meta?.asn ?? parseExplorerAsnNumber(row.rawValues?.[valueIdx] ?? val);
+  if (asn === 0) return 'AS0';
   if (asn) return `AS${asn}`;
   return val ?? '—';
 }
@@ -194,7 +196,7 @@ function explorerRowFilterValue(row, dimId, valueIdx, dimensionById) {
 function explorerAsnSortKey(row, valueIdx) {
   const meta = row.asnMeta?.[valueIdx];
   if (meta?.asName) return meta.asName.toLowerCase();
-  if (meta?.asn) return meta.asn;
+  if (meta?.asn != null) return meta.asn;
   return row.rawValues?.[valueIdx] ?? row.values[valueIdx] ?? '';
 }
 
@@ -4762,7 +4764,7 @@ function ExplorerTotalChart({
         <DualChart
           points={chartPoints}
           lines={[{ key: 'value', label: metricLabel || metric, color: '#7381f4' }]}
-          height={280}
+          height={EXPLORER_CHART_HEIGHT}
           mode="bw"
           onRangeSelect={onRangeSelect}
           bucketSeconds={bucketSeconds}
@@ -4874,7 +4876,7 @@ function DynamicsChartExplorer({
               key={chartKey}
               points={chartPoints}
               lines={lines}
-              height={280}
+              height={EXPLORER_CHART_HEIGHT}
               mode="bw"
               onRangeSelect={onRangeSelect}
               bucketSeconds={bucketSeconds}

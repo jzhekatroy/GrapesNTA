@@ -134,3 +134,12 @@ test('listInterfacesByTraffic map returns rows and stats shape', async () => {
   assert.equal(mappedRows.stats.unmarkedPortsWithTraffic, 1);
   assert.equal(mappedRows.rows[0].switchIp, '10.0.0.1');
 });
+
+test('normalizeVlanDirections keeps unknown like protocol charts', () => {
+  const { normalizeVlanDirections } = require('./queries');
+  assert.deepEqual(
+    normalizeVlanDirections(['in', 'out', 'transit', 'internal', 'unknown']),
+    ['in', 'out', 'transit', 'internal', 'unknown'],
+  );
+  assert.ok(normalizeVlanDirections(undefined).includes('unknown'));
+});

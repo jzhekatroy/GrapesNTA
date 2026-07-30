@@ -37,17 +37,12 @@ function switchStatusTone(status) {
   return 'neutral';
 }
 
-function filterSwitchPorts(rows, { aliasQ, nameQ, boundaryFilter, onlyWithAlias }) {
+function filterSwitchPorts(rows, { aliasQ, nameQ }) {
   const alias = aliasQ.trim().toLowerCase();
   const name = nameQ.trim().toLowerCase();
   return rows.filter((r) => {
-    if (onlyWithAlias && !r.ifAlias) return false;
     if (alias && !String(r.ifAlias || '').toLowerCase().includes(alias)) return false;
     if (name && !String(r.ifName || '').toLowerCase().includes(name)) return false;
-    const b = r.boundary || 'unknown';
-    if (boundaryFilter === 'unmarked' && b !== 'unknown') return false;
-    if (boundaryFilter === 'internal' && b !== 'internal') return false;
-    if (boundaryFilter === 'external' && b !== 'external') return false;
     return true;
   });
 }
@@ -192,8 +187,6 @@ function SwitchPortsScreen({
 }) {
   const [aliasQ, setAliasQ] = useState('');
   const [nameQ, setNameQ] = useState('');
-  const [boundaryFilter, setBoundaryFilter] = useState('all');
-  const [onlyWithAlias, setOnlyWithAlias] = useState(true);
   const [selected, setSelected] = useState(() => new Set());
   const [saving, setSaving] = useState(false);
 
@@ -203,9 +196,7 @@ function SwitchPortsScreen({
   const filteredPorts = useMemo(() => filterSwitchPorts(ports, {
     aliasQ: debAlias,
     nameQ: debName,
-    boundaryFilter,
-    onlyWithAlias,
-  }), [ports, debAlias, debName, boundaryFilter, onlyWithAlias]);
+  }), [ports, debAlias, debName]);
 
   const summary = useMemo(() => {
     const marked = ports.filter((p) => p.boundary === 'internal' || p.boundary === 'external').length;
@@ -214,7 +205,7 @@ function SwitchPortsScreen({
 
   useEffect(() => {
     setSelected(new Set());
-  }, [switchIp, debAlias, debName, boundaryFilter, onlyWithAlias]);
+  }, [switchIp, debAlias, debName]);
 
   const selectAllFiltered = () => {
     setSelected(new Set(filteredPorts.map((r) => r.ifIndex)));
@@ -304,27 +295,37 @@ function SwitchPortsScreen({
         );
       },
     },
-    {
-      key: 'source',
-      title: 'Источник',
-      width: 100,
-      render: (r) => (
-        <span style={{ color: 'var(--fg-secondary)', font: 'var(--pv-text-body-3)' }}>
-          {r.boundarySource === 'manual' ? irSourceLabel('manual') : '—'}
-        </span>
-      ),
-    },
   ];
 
-  const bulkBar = canWrite && (
-    <div className="ir-bulk-bar row" style={{ gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
-      <Button kind="ghost" size="sm" disabled={saving || !filteredPorts.length} onClick={selectAllFiltered}>
-        Выбрать все отфильтрованные ({filteredPorts.length})
-      </Button>
-      <Button kind="ghost" size="sm" disabled={saving || !selected.size} onClick={() => bulkApply('internal')}>Наша</Button>
-      <Button kind="ghost" size="sm" disabled={saving || !selected.size} onClick={() => bulkApply('external')}>Внешняя</Button>
-      <Button kind="ghost" size="sm" disabled={saving || !selected.size} onClick={bulkClear}>Снять разметку</Button>
-    </div>
+  const bulkPanel = canWrite && (
+    selected.size > 0 ? (
+      <div className="ir-bulk-panel">
+        <div className="ir-bulk-panel__head">
+          <span className="ir-bulk-panel__title">Массовое изменение</span>
+          <span className="ir-bulk-panel__count">
+            Выбрано: <b>{selected.size}</b> {selected.size === 1 ? 'порт' : selected.size < 5 ? 'порта' : 'портов'}
+          </span>
+        </div>
+        <div className="ir-bulk-panel__actions row">
+          <Button kind="primary" size="sm" disabled={saving} onClick={() => bulkApply('internal')}>Наша сторона</Button>
+          <Button kind="primary" size="sm" disabled={saving} onClick={() => bulkApply('external')}>Внешняя сторона</Button>
+          <Button kind="ghost" size="sm" disabled={saving} onClick={bulkClear}>Снять разметку</Button>
+          <Button kind="ghost" size="sm" disabled={saving} onClick={() => setSelected(new Set())}>Сбросить выбор</Button>
+          {selected.size < filteredPorts.length && (
+            <Button kind="ghost" size="sm" disabled={saving || !filteredPorts.length} onClick={selectAllFiltered}>
+              Добавить все отфильтрованные ({filteredPorts.length})
+            </Button>
+          )}
+        </div>
+      </div>
+    ) : (
+      <div className="ir-bulk-hint">
+        <p>Отметьте порты галочками слева в таблице, чтобы изменить сторону сразу у нескольких.</p>
+        <Button kind="ghost" size="sm" disabled={saving || !filteredPorts.length} onClick={selectAllFiltered}>
+          Выбрать все отфильтрованные ({filteredPorts.length})
+        </Button>
+      </div>
+    )
   );
 
   return (
@@ -352,20 +353,9 @@ function SwitchPortsScreen({
             <label>Имя содержит</label>
             <input className="input" value={nameQ} onChange={(e) => setNameQ(e.target.value)} placeholder="Ethernet…" />
           </div>
-          <div className="field" style={{ margin: 0 }}>
-            <label>Сторона</label>
-            <select className="input" value={boundaryFilter} onChange={(e) => setBoundaryFilter(e.target.value)}>
-              <option value="all">Все</option>
-              <option value="unmarked">Не размечено</option>
-              <option value="internal">Наша</option>
-              <option value="external">Внешняя</option>
-            </select>
-          </div>
-          <label className="row" style={{ gap: 6, font: 'var(--pv-text-body-3)', alignSelf: 'flex-end', minHeight: 36 }}>
-            <input type="checkbox" checked={onlyWithAlias} onChange={(e) => setOnlyWithAlias(e.target.checked)} />
-            Только с алиасом
-          </label>
         </div>
+
+        {bulkPanel}
 
         {loading ? (
           <div style={{ padding: 24, textAlign: 'center', color: 'var(--fg-secondary)' }}>Загрузка…</div>
@@ -380,7 +370,6 @@ function SwitchPortsScreen({
             selectable={canWrite}
             selected={selected}
             onSelectChange={setSelected}
-            toolbar={bulkBar ? { left: bulkBar } : undefined}
           />
         )}
       </Card>
@@ -494,19 +483,16 @@ function PageInterfaceRoles() {
       )}
 
       {switchIp && (
-        <>
-          <DirectionModeCard settings={settings} canWrite={canWrite} onSaved={afterMutation} />
-          <SwitchPortsScreen
-            switchIp={switchIp}
-            displayName={displayName}
-            ports={ports}
-            loading={loading}
-            loadError={loadError}
-            canWrite={canWrite}
-            onBack={goToList}
-            onReload={reload}
-          />
-        </>
+        <SwitchPortsScreen
+          switchIp={switchIp}
+          displayName={displayName}
+          ports={ports}
+          loading={loading}
+          loadError={loadError}
+          canWrite={canWrite}
+          onBack={goToList}
+          onReload={reload}
+        />
       )}
     </div>
   );

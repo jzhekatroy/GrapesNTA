@@ -117,8 +117,8 @@ const EXPLORER_DIRECTION_OPTIONS = [
 const EXPLORER_FIELD_HINTS = {
   src_port: 'Порт 1–65535',
   dst_port: 'Порт 1–65535',
-  src_asn: 'Номер ASN — напр. 12389',
-  dst_asn: 'Номер ASN — напр. 12389',
+  src_asn: 'Номер ASN — напр. 12389 или AS0',
+  dst_asn: 'Номер ASN — напр. 12389 или AS0',
   src_country: 'Код ISO-2 — напр. RU',
   dst_country: 'Код ISO-2 — напр. RU',
   source_id: 'ID экспортёра / source_id',
@@ -205,6 +205,24 @@ function parseExplorerAsnNumber(value) {
   return null;
 }
 
+const EXPLORER_AS0_ENTITY = {
+  id: '0',
+  label: 'AS0',
+  sublabel: 'AS0',
+  value: 0,
+};
+
+function explorerAsnSqlLabel(expr) {
+  return `multiIf(${expr} = 0, 'AS0', ${expr} > 0, concat('AS', toString(${expr})), '—')`;
+}
+
+function matchesExplorerAs0Search(search) {
+  const s = String(search || '').trim().toLowerCase();
+  if (!s) return true;
+  if (s === '0' || s === 'as0') return true;
+  return 'as0'.includes(s);
+}
+
 function isPseudoAsnName(name) {
   return /^AS?\d+$/i.test(String(name || '').trim());
 }
@@ -223,7 +241,8 @@ function asnTableNameExpr(tableAlias = '') {
 
 function asnExplorerDisplayLabel(asn, asName) {
   const n = Number(asn);
-  if (!Number.isFinite(n) || n <= 0) return '—';
+  if (!Number.isFinite(n) || n < 0) return '—';
+  if (n === 0) return 'AS0';
   const name = String(asName || '').trim();
   if (name && !isPseudoAsnName(name)) return `${name} (AS${n})`;
   return `AS${n}`;
@@ -468,17 +487,17 @@ function explorerDimensions() {
     },
     src_asn: {
       label: 'Source ASN', group: 'AS / GEO', kind: 'asn',
-      expr: `if(f.${t.srcAsn} > 0, concat('AS', toString(f.${t.srcAsn})), '—')`,
+      expr: explorerAsnSqlLabel(`f.${t.srcAsn}`),
       filterType: 'asn', filterExpr: `f.${t.srcAsn}`, side: 'src',
       groupKeyExpr: `f.${t.srcAsn}`,
-      labelFromKey: (k) => `if(${k} > 0, concat('AS', toString(${k})), '—')`,
+      labelFromKey: (k) => explorerAsnSqlLabel(k),
     },
     dst_asn: {
       label: 'Destination ASN', group: 'AS / GEO', kind: 'asn',
-      expr: `if(f.${t.dstAsn} > 0, concat('AS', toString(f.${t.dstAsn})), '—')`,
+      expr: explorerAsnSqlLabel(`f.${t.dstAsn}`),
       filterType: 'asn', filterExpr: `f.${t.dstAsn}`, side: 'dst',
       groupKeyExpr: `f.${t.dstAsn}`,
-      labelFromKey: (k) => `if(${k} > 0, concat('AS', toString(${k})), '—')`,
+      labelFromKey: (k) => explorerAsnSqlLabel(k),
     },
     src_country: {
       label: 'Source country', group: 'AS / GEO', kind: 'string',
@@ -2242,12 +2261,15 @@ async function searchExplorerEntities({ type, q = '', limit = 20, switchIp = '' 
       ORDER BY priority, asn
       LIMIT {limit:UInt32}
     `, params, { name: 'explorer/entities-asn' });
-    return dedupeExplorerAsnEntities(rows).slice(0, lim).map((r) => ({
+    const mapped = dedupeExplorerAsnEntities(rows).map((r) => ({
       id: String(r.asn),
       label: `${r.name || `AS${r.asn}`}`,
       sublabel: `AS${r.asn}`,
       value: Number(r.asn),
     }));
+    if (!matchesExplorerAs0Search(search)) return mapped.slice(0, lim);
+    const withoutAs0 = mapped.filter((r) => Number(r.value) !== 0);
+    return [EXPLORER_AS0_ENTITY, ...withoutAs0].slice(0, lim);
   }
 
   if (type === 'vlan') {
