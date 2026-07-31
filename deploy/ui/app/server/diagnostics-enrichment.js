@@ -1,7 +1,7 @@
 'use strict';
 
 /**
- * Diagnostics for grapes-enrichment jobs (geo/RIR, bgp-origin, asn-names).
+ * Diagnostics for grapes-enrichment jobs (geo/RIR, bgp-origin, asn-names, iptoasn).
  * Status comes from enrichment_job_status + live table counts.
  */
 
@@ -26,6 +26,12 @@ const JOBS = [
     label: 'asn-names',
     intervalSec: 604800,
     tables: ['asn_names'],
+  },
+  {
+    id: 'iptoasn',
+    label: 'iptoasn (IP→ASN fallback)',
+    intervalSec: 86400,
+    tables: ['ip_asn_prefixes_current'],
   },
   // snmp-iface-sync has its own Diagnostics tab (see diagnostics-snmp.js).
 ];
@@ -110,6 +116,7 @@ async function loadTableMetrics() {
     { table: 'asn_registry', timeCol: 'snapshot_ts' },
     { table: 'bgp_prefix_origin_current', timeCol: 'snapshot_ts' },
     { table: 'asn_names', timeCol: 'updated_at' },
+    { table: 'ip_asn_prefixes_current', timeCol: 'snapshot_ts' },
   ];
   const out = {};
   await Promise.all(specs.map(async (s) => {
@@ -197,7 +204,9 @@ function buildProblems(jobs) {
     }
     if (j.status === 'running' && j.startedAt) {
       const runAge = ageSecFrom(j.startedAt);
-      const maxRun = j.id === 'geoloaderd' ? 3 * 3600 : (j.id === 'asn-names' ? 2 * 3600 : 30 * 60);
+      const maxRun = j.id === 'geoloaderd' ? 3 * 3600
+        : (j.id === 'asn-names' ? 2 * 3600
+          : (j.id === 'iptoasn' ? 3600 : 30 * 60));
       if (runAge != null && runAge > maxRun) {
         problems.push(problem(
           'warning',
@@ -250,7 +259,7 @@ async function getEnrichmentDiagnostics() {
   return {
     service: 'grapes-enrichment',
     serviceLabel: 'grapes-enrichment',
-    description: 'geo/RIR FTP, bgp-origin rebuild, asn-names (Team Cymru). SNMP — отдельная вкладка.',
+    description: 'geo/RIR FTP, bgp-origin rebuild, asn-names (Team Cymru), iptoasn (IP→ASN fallback). SNMP — отдельная вкладка.',
     updatedAt: new Date().toISOString(),
     problems,
     summary: {

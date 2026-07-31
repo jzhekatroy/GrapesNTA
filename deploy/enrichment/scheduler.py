@@ -15,6 +15,8 @@ JOBS = [
     ("bgp-origin", "/app/bin/cron-bgp-origin.sh", 300, "/tmp/bgp-origin.lock"),
     ("geoloaderd", "/app/bin/cron-geoloaderd.sh", 86400, "/tmp/enrichment-heavy.lock"),
     ("asn-names", "/app/bin/cron-asn-names.sh", 604800, "/tmp/asn-names.lock"),
+    # Shares the heavy lock with geoloaderd: both download large external files.
+    ("iptoasn", "/app/bin/cron-iptoasn.sh", 86400, "/tmp/enrichment-heavy.lock"),
     # 5 min: discover is a flows_raw scan; SNMP poll itself is gated by
     # refresh_interval_sec (default 1800) inside snmp_iface_sync.py.
     ("snmp-iface-sync", "/app/bin/cron-snmp-iface-sync.sh", 300, "/tmp/snmp-iface-sync.lock"),
@@ -113,7 +115,7 @@ def _seed_deferred_job_status() -> None:
     does not show neverRan until the first real run (day/week)."""
     _ensure_reporter_http_env()
     for name, _script, interval, _lock in JOBS:
-        if name not in ("geoloaderd", "asn-names"):
+        if name not in ("geoloaderd", "asn-names", "iptoasn"):
             continue
         try:
             rc = subprocess.run(
@@ -155,6 +157,7 @@ def main() -> int:
     last_run["bgp-origin"] = time.time() - 240
     last_run["geoloaderd"] = time.time()  # wait ~1 day unless forced
     last_run["asn-names"] = time.time()
+    last_run["iptoasn"] = time.time()
     last_run["snmp-iface-sync"] = 0.0  # run on first tick
 
     log("grapes-enrichment scheduler started")
