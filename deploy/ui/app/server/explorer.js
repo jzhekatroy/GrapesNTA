@@ -44,6 +44,19 @@ const {
   tcpFlagsNamesToMask,
   parseTcpFlagNames,
 } = require('./tcp-flags');
+const {
+  normalizeExplorerThresholds,
+  explorerThresholdsNeedPeak,
+  explorerThresholdsActive,
+  explorerThresholdWarning,
+  explorerThresholdSchemaExtras,
+  wrapSqlWithThresholdFilter,
+  thresholdExtraSelectColumns,
+  thresholdPeakExtraSelectColumns,
+  peakBucketMetricExprs,
+  peakWindowSeconds,
+  normalizePeakWindow,
+} = require('./explorer-thresholds');
 
 const EXPLORER_MAX_LIMIT = 100;
 const EXPLORER_MAX_EXPORT_ROWS = 10000;
@@ -745,6 +758,7 @@ function explorerSchema() {
     maxExportRows: EXPLORER_MAX_EXPORT_ROWS,
     dimensionGroups: DIMENSION_GROUPS,
     granularities: ['auto', '1m', '5m', '1h', '1d'],
+    ...explorerThresholdSchemaExtras(),
   };
 }
 
@@ -1275,16 +1289,19 @@ function normalizeExplorerQuery(body = {}, options = {}) {
       collectorId = v || undefined;
     }
   }
+  const granKey = body.granularity || 'auto';
+  const defaultPeakWindow = granKey === '1m' ? '1m' : granKey === '1h' || granKey === '1d' ? '1h' : '5m';
   return {
     metric: normalizeExplorerMetric(body.metric),
     groupBy: body.groupBy,
     filters: normalizeFilterList(body.filters),
+    thresholds: normalizeExplorerThresholds(body.thresholds, { defaultPeakWindow }),
     limit: normalizeExplorerLimit(body.limit, options),
     offset: Math.min(Math.max(Number(body.offset) || 0, 0), 10000),
     range,
     from,
     to,
-    granularity: body.granularity || 'auto',
+    granularity: granKey,
     includeSummary: body.includeSummary !== false,
     includeTimeseries: body.includeTimeseries !== false,
     includeBreakdowns: body.includeBreakdowns !== false,
@@ -1408,6 +1425,247 @@ function mapExplorerFlowRows(groups, rows, windowSeconds, vlanGroupIndexes, asnG
   })();
 }
 
+function buildExplorerFlowsReturn({
+  innerSql,
+  params,
+  meta,
+  map,
+  clickhouse_settings,
+  requestTimeoutMs,
+  thresholds,
+  groups,
+  orderBy = 'metric_value DESC',
+}) {
+  let sql = innerSql;
+  let finalParams = { ...params };
+  if (explorerThresholdsActive(thresholds)) {
+    const wrapped = wrapSqlWithThresholdFilter({ innerSql, thresholds, orderBy });
+    sql = wrapped.sql;
+    finalParams = { ...finalParams, ...wrapped.thresholdParams };
+    meta.thresholds = thresholds;
+    meta.thresholdWarning = explorerThresholdWarning({
+      thresholds,
+      groupBy: groups,
+      windowSeconds: meta.windowSeconds,
+    });
+  } else {
+    sql = `${innerSql}\n      ORDER BY ${orderBy}\n      LIMIT {limit:UInt32} OFFSET {offset:UInt32}`;
+    meta.thresholds = [];
+    meta.thresholdWarning = null;
+  }
+
+  const origMap = map;
+  return {
+    sql,
+    params: finalParams,
+    clickhouse_settings,
+    requestTimeoutMs,
+    meta,
+    async map(rows) {
+      if (explorerThresholdsActive(thresholds) && rows.length) {
+        meta.rowsBeforeThreshold = Number(rows[0].rows_before_threshold) || 0;
+        meta.rowsHidden = Number(rows[0].rows_hidden) || 0;
+      } else if (explorerThresholdsActive(thresholds)) {
+        meta.rowsBeforeThreshold = 0;
+        meta.rowsHidden = 0;
+      }
+      const cleaned = rows.map((row) => {
+        const { rows_before_threshold, rows_hidden, ...rest } = row;
+        return rest;
+      });
+      return origMap(cleaned);
+    },
+  };
+}
+
+function explorerFlowsThresholdExtras(scaled, withPeak = false) {
+  const avgExtras = thresholdExtraSelectColumns(scaled);
+  if (!withPeak) return avgExtras;
+  return `${avgExtras},\n        ${thresholdPeakExtraSelectColumns()}`;
+}
+
+async function explorerFlowsPeakPath({
+  body, q, groups, dims, scaled, metricKey, metricSpec, pctCol,
+  windowSpec, windowSeconds, params, filterJoins, whereClauses, t,
+  vlanGroupIndexes, asnGroupIndexes, tcpGroupIndexes, thresholds, meta, plan,
+}) {
+  const peakWindowKey = thresholds.find((thr) => thr.aggregate === 'peak')?.peakWindow || '5m';
+  const peakSec = peakWindowSeconds(peakWindowKey);
+  const bucketExpr = `toStartOfInterval(f.${t}, INTERVAL ${peakSec} SECOND)`;
+
+  if (!plan.useTwoPhase) {
+    const joinSql = collectExplorerJoins(groups, dims, filterJoins);
+    const groupSelect = groups.map((g, i) => `${dims[g].expr} AS g${i}`);
+    const groupAliases = groups.map((_, i) => `g${i}`);
+    const pctBase = metricSpec.pctBase;
+    const innerSql = `
+      WITH
+        ${windowSpec.cteHead}
+        dateDiff('second', ts_from, ts_to) AS window_seconds,
+        grouped_total AS (
+          SELECT sum(${pctCol === 'bytes' ? 'bytes' : pctCol}) AS total FROM (
+            SELECT
+              ${groupSelect.join(',\n              ')},
+              sum(${scaled.bytes}) AS bytes,
+              sum(${scaled.packets}) AS packets,
+              sum(${scaled.flowWeight}) AS flows
+            FROM ${flowsRawTableRef()} AS f
+            ${joinSql}
+            PREWHERE f.date >= toDate(ts_from) - 1
+              AND f.date <= toDate(ts_to)
+            WHERE ${whereClauses.join('\n              AND ')}
+            GROUP BY ${groupAliases.join(', ')}
+          )
+        )
+      SELECT
+        ${groupAliases.map((g) => `b.${g}`).join(',\n        ')},
+        ${metricKey === 'volume' ? 'b.bytes' : metricKey === 'pps' ? 'round(b.packets / window_seconds, 0)' : metricKey === 'fps' ? 'round(b.flows / window_seconds, 2)' : metricKey === 'flows' ? 'b.flows' : 'round(b.bytes * 8 / window_seconds, 0)'} AS metric_value,
+        round(b.${pctCol === 'bytes' ? 'bytes' : pctCol} * 100 / nullIf(gt.total, 0), 2) AS pct,
+        b.bytes AS bytes,
+        round(b.bytes * 8 / window_seconds, 0) AS avg_bps,
+        b.packets AS packets,
+        b.flows AS flows,
+        round(b.packets / window_seconds, 0) AS avg_pps,
+        round(b.flows / window_seconds, 2) AS avg_fps,
+        round(b.bytes / nullIf(b.packets, 0), 2) AS avg_packet_size,
+        round(b.bytes / nullIf(b.flows, 0), 2) AS avg_flow_size,
+        b.peak_bps AS peak_bps,
+        b.peak_bytes AS peak_bytes,
+        b.peak_pps AS peak_pps,
+        b.peak_fps AS peak_fps,
+        b.peak_flows AS peak_flows
+      FROM (
+        SELECT
+          ${groupAliases.join(',\n          ')},
+          sum(bucket_bytes) AS bytes,
+          sum(bucket_packets) AS packets,
+          sum(bucket_flows) AS flows,
+          max(bucket_bps) AS peak_bps,
+          max(bucket_bytes) AS peak_bytes,
+          max(bucket_pps) AS peak_pps,
+          max(bucket_fps) AS peak_fps,
+          max(bucket_flows) AS peak_flows
+        FROM (
+          SELECT
+            ${groupSelect.join(',\n            ')},
+            ${bucketExpr} AS bucket,
+            ${peakBucketMetricExprs(scaled, peakSec)}
+          FROM ${flowsRawTableRef()} AS f
+          ${joinSql}
+          PREWHERE f.date >= toDate(ts_from) - 1
+            AND f.date <= toDate(ts_to)
+          WHERE ${whereClauses.join('\n            AND ')}
+          GROUP BY ${[...groupAliases, 'bucket'].join(', ')}
+        )
+        GROUP BY ${groupAliases.join(', ')}
+      ) AS b
+      CROSS JOIN grouped_total AS gt
+    `;
+
+    return buildExplorerFlowsReturn({
+      innerSql,
+      params,
+      meta,
+      thresholds,
+      groups,
+      clickhouse_settings: EXPLORER_CH_SETTINGS,
+      async map(rows) {
+        return mapExplorerFlowRows(groups, rows, windowSeconds, vlanGroupIndexes, asnGroupIndexes, tcpGroupIndexes);
+      },
+    });
+  }
+
+  // Two-phase peak: bucket on raw keys, then label join (no candidate prefetch).
+  const innerJoinSql = [...filterJoins].join('\n      ');
+  const allKeys = [...plan.keys, ...plan.helpers];
+  const keySelect = allKeys.map((k) => `${k.keyExpr} AS ${k.keyAlias}`).join(',\n          ');
+  const keyGroupBy = allKeys.map((k) => k.keyAlias).join(', ');
+  const labelJoins = [];
+  const labelSelectParts = plan.keys.map((k) => {
+    if (k.dim.labelJoin) {
+      labelJoins.push(k.dim.labelJoin.joinSql(`a.${plan.samplerAlias}`, `a.${k.keyAlias}`));
+      return `${k.dim.labelJoin.labelExpr} AS g${k.groupIdx}`;
+    }
+    if (typeof k.dim.labelFromKey === 'function') {
+      return `${k.dim.labelFromKey(`a.${k.keyAlias}`)} AS g${k.groupIdx}`;
+    }
+    return `toString(a.${k.keyAlias}) AS g${k.groupIdx}`;
+  });
+  const groupAliases = groups.map((_, i) => `g${i}`);
+  const uniqueLabelJoins = [...new Set(labelJoins)];
+
+  const innerSql = `
+    WITH
+      ${windowSpec.cteHead}
+      dateDiff('second', ts_from, ts_to) AS window_seconds,
+      inner_agg AS (
+        SELECT
+          ${keyGroupBy},
+          sum(bucket_bytes) AS bytes,
+          sum(bucket_packets) AS packets,
+          sum(bucket_flows) AS flows,
+          max(bucket_bps) AS peak_bps,
+          max(bucket_bytes) AS peak_bytes,
+          max(bucket_pps) AS peak_pps,
+          max(bucket_fps) AS peak_fps,
+          max(bucket_flows) AS peak_flows
+        FROM (
+          SELECT
+            ${keySelect},
+            ${bucketExpr} AS bucket,
+            ${peakBucketMetricExprs(scaled, peakSec)}
+          FROM ${flowsRawTableRef()} AS f
+          ${innerJoinSql}
+          PREWHERE f.date >= toDate(ts_from) - 1
+            AND f.date <= toDate(ts_to)
+          WHERE ${whereClauses.join('\n            AND ')}
+          GROUP BY ${keyGroupBy}, bucket
+        )
+        GROUP BY ${keyGroupBy}
+      ),
+      grouped_total AS (
+        SELECT sum(${pctCol}) AS total FROM inner_agg
+      )
+    SELECT
+      ${labelSelectParts.join(',\n      ')},
+      round(a.bytes * 8 / window_seconds, 0) AS metric_value,
+      round(a.${pctCol} * 100 / nullIf(gt.total, 0), 2) AS pct,
+      a.bytes AS bytes,
+      round(a.bytes * 8 / window_seconds, 0) AS avg_bps,
+      a.packets AS packets,
+      a.flows AS flows,
+      round(a.packets / window_seconds, 0) AS avg_pps,
+      round(a.flows / window_seconds, 2) AS avg_fps,
+      round(a.bytes / nullIf(a.packets, 0), 2) AS avg_packet_size,
+      round(a.bytes / nullIf(a.flows, 0), 2) AS avg_flow_size,
+      a.peak_bps AS peak_bps,
+      a.peak_bytes AS peak_bytes,
+      a.peak_pps AS peak_pps,
+      a.peak_fps AS peak_fps,
+      a.peak_flows AS peak_flows
+    FROM inner_agg AS a
+    CROSS JOIN grouped_total AS gt
+    ${uniqueLabelJoins.join('\n    ')}
+  `;
+
+  const heavyTimeoutMs = explorerHeavyRequestTimeoutMs(windowSeconds, false);
+  return buildExplorerFlowsReturn({
+    innerSql,
+    params,
+    meta,
+    thresholds,
+    groups,
+    clickhouse_settings: {
+      ...EXPLORER_CH_SETTINGS,
+      max_execution_time: String(explorerHeavyMaxExecutionSec(heavyTimeoutMs)),
+    },
+    requestTimeoutMs: heavyTimeoutMs,
+    async map(rows) {
+      return mapExplorerFlowRows(groups, rows, windowSeconds, vlanGroupIndexes, asnGroupIndexes, tcpGroupIndexes);
+    },
+  });
+}
+
 async function explorerFlows(body = {}, options = {}) {
   const q = normalizeExplorerQuery(body, options);
   const dims = explorerDimensions();
@@ -1418,6 +1676,7 @@ async function explorerFlows(body = {}, options = {}) {
   const scaled = explorerScaledFlowExprs('f');
   const metricSpecs = buildExplorerMetricSpecs(scaled);
   const metricSpec = metricSpecs[metricKey];
+  const thresholds = q.thresholds || [];
   const pctCol = explorerAggPctColumn(metricKey);
   const pctExpr = `round(${metricSpec.pctBase} * 100 / nullIf(sum(${metricSpec.pctBase}) OVER (), 0), 2)`;
   const windowSpec = explorerResolveTrafficWindow(body, q);
@@ -1438,6 +1697,39 @@ async function explorerFlows(body = {}, options = {}) {
   const plan = metricKey === 'uniq_src'
     ? { useTwoPhase: false }
     : buildExplorerGroupPlan(groups, dims);
+
+  if (explorerThresholdsNeedPeak(thresholds)) {
+    return explorerFlowsPeakPath({
+      body, q, groups, dims, scaled, metricKey, metricSpec, pctCol,
+      windowSpec, windowSeconds, params: scopedParams, filterJoins, whereClauses, t,
+      vlanGroupIndexes, asnGroupIndexes, tcpGroupIndexes, thresholds,
+      meta: {
+        metric: metricKey,
+        metricLabel: metricSpec.label,
+        groupBy: groupRows,
+        range: q.range,
+        from: q.from,
+        to: q.to,
+        limit: q.limit,
+        offset: q.offset,
+        dataTable: 'flows_raw',
+        granularity: gran.key,
+        windowSeconds,
+        trafficSampled: scaled.sampled,
+        twoPhase: !!plan.useTwoPhase,
+        peakMode: true,
+        ...buildExplorerWindowMeta(body, q),
+      },
+      plan,
+    });
+  }
+
+  const thresholdExtras = explorerThresholdsActive(thresholds)
+    ? `,\n        ${explorerFlowsThresholdExtras(scaled, false)}`
+    : '';
+  const uniqSrcExtra = explorerThresholdsActive(thresholds) && metricKey === 'uniq_src'
+    ? `,\n        uniqCombined(f.${col('srcIp')}) AS uniq_src_count`
+    : '';
 
   const meta = {
     metric: metricKey,
@@ -1460,8 +1752,7 @@ async function explorerFlows(body = {}, options = {}) {
     const joinSql = collectExplorerJoins(groups, dims, filterJoins);
     const groupSelect = groups.map((g, i) => `${dims[g].expr} AS g${i}`);
     const groupAliases = groups.map((_, i) => `g${i}`);
-    return {
-      sql: `
+    const innerSql = `
       WITH
         ${windowSpec.cteHead}
         dateDiff('second', ts_from, ts_to) AS window_seconds
@@ -1472,23 +1763,25 @@ async function explorerFlows(body = {}, options = {}) {
         sum(${scaled.bytes}) AS bytes,
         round(sum(${scaled.bytes}) * 8 / window_seconds, 0) AS avg_bps,
         sum(${scaled.packets}) AS packets,
-        sum(${scaled.flowWeight}) AS flows
+        sum(${scaled.flowWeight}) AS flows${thresholdExtras}${uniqSrcExtra}
       FROM ${flowsRawTableRef()} AS f
       ${joinSql}
       PREWHERE f.date >= toDate(ts_from) - 1
         AND f.date <= toDate(ts_to)
       WHERE ${whereClauses.join('\n        AND ')}
       GROUP BY ${groupAliases.join(', ')}
-      ORDER BY metric_value DESC
-      LIMIT {limit:UInt32} OFFSET {offset:UInt32}
-    `,
+    `;
+    return buildExplorerFlowsReturn({
+      innerSql,
       params: scopedParams,
-      clickhouse_settings: EXPLORER_CH_SETTINGS,
       meta,
+      thresholds,
+      groups,
+      clickhouse_settings: EXPLORER_CH_SETTINGS,
       async map(rows) {
         return mapExplorerFlowRows(groups, rows, windowSeconds, vlanGroupIndexes, asnGroupIndexes, tcpGroupIndexes);
       },
-    };
+    });
   }
 
   const innerJoinSql = [...filterJoins].join('\n      ');
@@ -1534,7 +1827,8 @@ async function explorerFlows(body = {}, options = {}) {
   const srcKey = plan.keys.find((k) => k.dimId === 'src_ip');
   const dstKey = plan.keys.find((k) => k.dimId === 'dst_ip');
   const hasIfKeys = plan.keys.some((k) => k.dimId === 'in_if_name' || k.dimId === 'out_if_name');
-  const useCandidatePrefetch = Boolean(!plan.mayCollapse
+  const useCandidatePrefetch = Boolean(!explorerThresholdsActive(thresholds)
+    && !plan.mayCollapse
     && srcKey
     && dstKey
     && (hasIfKeys || groups.length >= 4)
@@ -1615,7 +1909,22 @@ async function explorerFlows(body = {}, options = {}) {
     : `${windowSpec.cteHead}
         dateDiff('second', ts_from, ts_to) AS window_seconds`;
 
-  const sql = plan.mayCollapse
+  const twoPhaseThresholdExtras = explorerThresholdsActive(thresholds)
+    ? `,
+        round(sum(a.packets) / window_seconds, 0) AS avg_pps,
+        round(sum(a.flows) / window_seconds, 2) AS avg_fps,
+        round(sum(a.bytes) / nullIf(sum(a.packets), 0), 2) AS avg_packet_size,
+        round(sum(a.bytes) / nullIf(sum(a.flows), 0), 2) AS avg_flow_size`
+    : '';
+  const twoPhaseThresholdExtrasPlain = explorerThresholdsActive(thresholds)
+    ? `,
+        round(a.packets / window_seconds, 0) AS avg_pps,
+        round(a.flows / window_seconds, 2) AS avg_fps,
+        round(a.bytes / nullIf(a.packets, 0), 2) AS avg_packet_size,
+        round(a.bytes / nullIf(a.flows, 0), 2) AS avg_flow_size`
+    : '';
+
+  const innerSql = plan.mayCollapse
     ? `
       WITH
         ${windowSpec.cteHead}
@@ -1627,14 +1936,12 @@ async function explorerFlows(body = {}, options = {}) {
         sum(a.bytes) AS bytes,
         round(sum(a.bytes) * 8 / window_seconds, 0) AS avg_bps,
         sum(a.packets) AS packets,
-        sum(a.flows) AS flows
+        sum(a.flows) AS flows${twoPhaseThresholdExtras}
       FROM (
         ${plainInnerAgg}
       ) AS a
       ${uniqueLabelJoins.join('\n      ')}
       GROUP BY ${groupAliases.join(', ')}
-      ORDER BY metric_value DESC
-      LIMIT {limit:UInt32} OFFSET {offset:UInt32}
     `
     : `
       WITH
@@ -1652,27 +1959,26 @@ async function explorerFlows(body = {}, options = {}) {
         a.bytes AS bytes,
         round(a.bytes * 8 / window_seconds, 0) AS avg_bps,
         a.packets AS packets,
-        a.flows AS flows
-      FROM (
-        SELECT * FROM inner_agg
-        ORDER BY bytes DESC
-        LIMIT {limit:UInt32} OFFSET {offset:UInt32}
-      ) AS a
+        a.flows AS flows${twoPhaseThresholdExtrasPlain}
+      FROM inner_agg AS a
       CROSS JOIN grouped_total AS gt
       ${uniqueLabelJoins.join('\n      ')}
-      ORDER BY bytes DESC
     `;
 
-  return {
-    sql,
+  const orderBy = plan.mayCollapse ? 'metric_value DESC' : 'bytes DESC';
+  return buildExplorerFlowsReturn({
+    innerSql,
     params: scopedParams,
+    meta,
+    thresholds,
+    groups,
     clickhouse_settings: heavySettings,
     requestTimeoutMs: heavyTimeoutMs,
-    meta,
+    orderBy,
     async map(rows) {
       return mapExplorerFlowRows(groups, rows, windowSeconds, vlanGroupIndexes, asnGroupIndexes, tcpGroupIndexes);
     },
-  };
+  });
 }
 
 async function explorerSummary(body = {}) {
@@ -2586,6 +2892,25 @@ async function explorerExportCsv(body = {}) {
   return rowsToCsv(mapped, spec.meta?.groupBy || [], metricLabel);
 }
 
+function summaryFromExplorerFlowRows(rows, windowSeconds = 3600) {
+  const list = Array.isArray(rows) ? rows : [];
+  const totalBytes = list.reduce((s, r) => s + (Number(r.bytes) || 0), 0);
+  const totalPackets = list.reduce((s, r) => s + (Number(r.packets) || 0), 0);
+  const totalFlows = list.reduce((s, r) => s + (Number(r.flows) || 0), 0);
+  const ws = Math.max(1, Number(windowSeconds) || 3600);
+  return {
+    totalBytes,
+    totalPackets,
+    totalFlows,
+    avgBps: ws > 0 ? Math.round(totalBytes * 8 / ws) : 0,
+    uniqSrc: null,
+    uniqDst: null,
+    inBytes: null,
+    outBytes: null,
+    topProtocols: [],
+  };
+}
+
 module.exports = {
   explorerSchema,
   explorerFlows,
@@ -2609,4 +2934,6 @@ module.exports = {
   EXPLORER_MAX_LIMIT,
   EXPLORER_MAX_EXPORT_ROWS,
   explorerAggPctColumn,
+  summaryFromExplorerFlowRows,
+  buildSummaryFromFlowRows: summaryFromExplorerFlowRows,
 };

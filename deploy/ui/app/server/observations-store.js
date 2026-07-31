@@ -3,6 +3,10 @@
 const fs = require('fs');
 const path = require('path');
 const { query, executeCommand, insertRows, config } = require('./clickhouse');
+const {
+  parseObservationFiltersEnvelope,
+  serializeObservationFiltersEnvelope,
+} = require('./explorer-thresholds');
 
 const OBSERVATIONS_TABLE = 'observations';
 const RUNS_TABLE = 'observation_runs';
@@ -45,6 +49,7 @@ function rowToObservation(row) {
     : { order: 0, width: 1 };
   const liveClean = { ...live };
   delete liveClean.layout;
+  const envelope = parseObservationFiltersEnvelope(safeJsonParse(row.filters_json, []));
   // Migrate legacy report.cron/timezone → schedule is done in normalizeObservation on write.
   return {
     id: String(row.id ?? ''),
@@ -53,7 +58,8 @@ function rowToObservation(row) {
     folder: String(row.folder ?? ''),
     ownerId: String(row.owner_id ?? ''),
     isShared: Number(row.is_shared) === 1,
-    filters: safeJsonParse(row.filters_json, []),
+    filters: envelope.filters,
+    thresholds: envelope.thresholds,
     lookback: String(row.lookback || '1h'),
     widgets: safeJsonParse(row.widgets_json, []),
     layout,
@@ -74,7 +80,7 @@ function observationToRow(item, { deleted = 0 } = {}) {
     description: String(item.description || ''),
     folder: String(item.folder || ''),
     lookback: String(item.lookback || '1h'),
-    filters_json: JSON.stringify(item.filters || []),
+    filters_json: JSON.stringify(serializeObservationFiltersEnvelope(item.filters, item.thresholds)),
     widgets_json: JSON.stringify(item.widgets || []),
     live_json: JSON.stringify({ ...(item.live || {}), layout: item.layout || { order: 0, width: 1 } }),
     materialize_json: JSON.stringify(item.materialize || {}),

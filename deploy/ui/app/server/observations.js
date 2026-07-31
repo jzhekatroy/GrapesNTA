@@ -6,10 +6,18 @@ const { query, executeCommand, parseDataDatetimeSql } = require('./clickhouse');
 const {
   explorerTimeseries,
   explorerSchema,
+  explorerFlows,
+  explorerResultSeries,
   parseExplorerAsnNumber,
   asnExplorerDisplayLabel,
   lookupAsnDisplayNames,
+  buildSummaryFromFlowRows: summaryFromExplorerFlowRows,
 } = require('./explorer');
+const {
+  normalizeExplorerThresholds,
+  explorerThresholdsActive,
+  describeThresholds,
+} = require('./explorer-thresholds');
 const { protocolChartColor } = require('./protocol-colors');
 const { tcpFlagsMaskToLabel } = require('./tcp-flags');
 const { getMergedDiagnosticsPayload } = require('./analytics-diagnostics');
@@ -276,6 +284,9 @@ function materializeWarning(activeCount) {
 
 function normalizeObservation(raw = {}, { userId, existing = null } = {}) {
   const filters = normalizeFilters(raw.filters != null ? raw.filters : existing?.filters);
+  const thresholds = normalizeExplorerThresholds(
+    raw.thresholds != null ? raw.thresholds : (existing?.thresholds || []),
+  );
   const widgets = normalizeWidgets(raw.widgets != null ? raw.widgets : existing?.widgets);
   const scope = classifyScope(filters, widgets);
   const lookback = LOOKBACKS.has(raw.lookback) ? raw.lookback : (existing?.lookback || '1h');
@@ -327,6 +338,7 @@ function normalizeObservation(raw = {}, { userId, existing = null } = {}) {
     // Наблюдения всегда видны всем; редактировать по-прежнему может владелец.
     isShared: true,
     filters,
+    thresholds,
     lookback,
     widgets,
     layout: normalizeLayout(raw, existing),
@@ -919,6 +931,224 @@ async function readRollupGroupedTimeseries(observationId, window, { seriesLimit 
   }
 }
 
+async function runExplorerSpec(spec) {
+  const { rows } = await query(spec.sql, spec.params || {}, {
+    name: 'observations/explorer-threshold',
+    clickhouse_settings: spec.clickhouse_settings,
+    requestTimeoutMs: spec.requestTimeoutMs,
+  });
+  return { data: await spec.map(rows), meta: spec.meta || {} };
+}
+
+function mapFlowRowsToObservationRows(flowRows, groupBy = []) {
+  return (flowRows || []).map((r, i) => {
+    const values = r.values || [];
+    const rawValues = r.rawValues || values;
+    const key = groupBy.length > 1
+      ? dimKey(rawValues[0], rawValues[1])
+      : dimKey(rawValues[0], '');
+    return {
+      id: r.id,
+      key,
+      values,
+      rawValues,
+      metric: r.avgBps ?? r.metric,
+      avgBps: r.avgBps ?? r.metric,
+      pct: r.pct,
+      bytes: r.bytes,
+      packets: r.packets,
+      flows: r.flows,
+      color: r.color || protocolChartColor(i),
+    };
+  });
+}
+
+async function fetchThresholdTopRows(obs, window, { groupBy, limit, metric = 'bps' }) {
+  const body = {
+    range: 'custom',
+    from: window.from,
+    to: window.to,
+    filters: obs.filters,
+    thresholds: obs.thresholds,
+    metric,
+    groupBy,
+    limit,
+    includeSummary: false,
+    includeTimeseries: false,
+  };
+  const spec = await explorerFlows(body);
+  const result = await runExplorerSpec(spec);
+  const windowSeconds = result.meta?.windowSeconds || Math.max(
+    60,
+    Math.round((Date.parse(window.to) - Date.parse(window.from)) / 1000) || 3600,
+  );
+  const summary = summaryFromExplorerFlowRows(result.data, windowSeconds);
+  return {
+    rows: mapFlowRowsToObservationRows(result.data, groupBy),
+    totals: summary ? { bytes: summary.bytes, packets: summary.packets, flows: summary.flows } : null,
+    windowSeconds,
+    meta: result.meta,
+  };
+}
+
+async function fetchThresholdGroupedTimeseries(obs, window, { groupBy, seriesLimit }) {
+  const top = await fetchThresholdTopRows(obs, window, { groupBy, limit: seriesLimit });
+  if (!top.rows.length) {
+    return {
+      points: [],
+      lines: [],
+      rows: [],
+      totals: top.totals,
+      windowSeconds: top.windowSeconds,
+      warning: top.meta?.thresholdWarning || null,
+    };
+  }
+
+  const body = {
+    range: 'custom',
+    from: window.from,
+    to: window.to,
+    filters: obs.filters,
+    thresholds: obs.thresholds,
+    metric: 'bps',
+    groupBy,
+    granularity: '5m',
+  };
+  const seriesSpec = await explorerResultSeries(body, top.rows);
+  const seriesResult = await runExplorerSpec(seriesSpec);
+  const seriesByRow = seriesResult.data?.seriesByRow || {};
+  const bucketMap = new Map();
+  for (const row of top.rows) {
+    const series = seriesByRow[row.id] || [];
+    for (const pt of series) {
+      const bucket = pt.bucket;
+      if (!bucketMap.has(bucket)) bucketMap.set(bucket, { t: bucket, bucket });
+      bucketMap.get(bucket)[row.key] = Number(pt.bps ?? pt.value) || 0;
+    }
+  }
+  const points = [...bucketMap.values()].sort((a, b) => String(a.bucket).localeCompare(String(b.bucket)));
+  const lines = top.rows.map((row) => ({
+    key: row.key,
+    label: dimLabel(row.values[0], row.values[1]),
+    color: row.color,
+  }));
+  return {
+    points,
+    lines,
+    rows: top.rows,
+    totals: top.totals,
+    windowSeconds: top.windowSeconds,
+    warning: top.meta?.thresholdWarning || null,
+  };
+}
+
+async function previewObservationWithThresholds(obs, window) {
+  const widgets = [];
+  let cachedTop = null;
+
+  for (const w of obs.widgets) {
+    try {
+      if (w.type === 'timeseries_bps') {
+        const groupBy = observationChartGroupBy(obs, w);
+        if (groupBy.length) {
+          const seriesLimit = observationSeriesLimit(obs, w);
+          const data = await fetchThresholdGroupedTimeseries(obs, window, { groupBy, seriesLimit });
+          widgets.push({
+            id: w.id,
+            type: w.type,
+            mode: 'grouped',
+            groupBy,
+            source: 'flows_raw',
+            status: data.points.length || data.rows.length ? 'ok' : 'ok',
+            series: data.points,
+            points: data.points,
+            lines: data.lines,
+            rows: data.rows,
+            warning: data.warning,
+          });
+          if (!cachedTop) {
+            cachedTop = {
+              rows: data.rows,
+              groupBy,
+              requested: seriesLimit,
+              totals: data.totals,
+              windowSeconds: data.windowSeconds,
+            };
+          }
+          continue;
+        }
+
+        const bundle = await explorerTimeseries({
+          ...window,
+          metric: 'bps',
+          filters: obs.filters,
+          thresholds: obs.thresholds,
+          granularity: '5m',
+        });
+        const { rows } = await query(bundle.sql, bundle.params, { name: 'observations/threshold-ts' });
+        const series = await bundle.map(rows);
+        widgets.push({
+          id: w.id,
+          type: w.type,
+          mode: 'total',
+          source: 'flows_raw',
+          status: 'ok',
+          series,
+          warning: null,
+        });
+        continue;
+      }
+
+      if (w.type === 'top_table') {
+        const groupBy = w.groupBy?.length ? w.groupBy : ['src_asn'];
+        const wantRows = TOP_ROWS_LIMIT;
+        const cachedRows = Array.isArray(cachedTop?.rows)
+          ? cachedTop.rows.filter((r) => !r.isOther)
+          : null;
+        const cacheCovers = cachedTop
+          && cachedTop.groupBy.join('|') === groupBy.join('|')
+          && cachedRows
+          && (cachedRows.length >= wantRows || cachedRows.length < (cachedTop.requested || 0));
+        if (cacheCovers) {
+          widgets.push({
+            id: w.id,
+            type: w.type,
+            source: 'flows_raw',
+            status: 'ok',
+            rows: cachedRows.slice(0, wantRows),
+            groupBy,
+            warning: null,
+          });
+          continue;
+        }
+        const data = await fetchThresholdTopRows(obs, window, { groupBy, limit: wantRows });
+        widgets.push({
+          id: w.id,
+          type: w.type,
+          source: 'flows_raw',
+          status: 'ok',
+          rows: data.rows.slice(0, wantRows),
+          groupBy,
+          warning: data.meta?.thresholdWarning || null,
+        });
+      }
+    } catch (err) {
+      widgets.push({
+        id: w.id,
+        type: w.type,
+        status: 'error',
+        error: err.message,
+      });
+    }
+  }
+
+  return {
+    observation: obs,
+    window,
+    widgets,
+  };
+}
+
 function rollupEmptyWarning(obs) {
   const st = obs.materialize?.status || 'queued';
   if (st === 'error') {
@@ -938,6 +1168,9 @@ async function previewObservation(id, userId, body = {}) {
   const obs = await getObservation(id, userId);
   if (!obs) return null;
   const window = resolvePreviewWindow(obs, body);
+  if (explorerThresholdsActive(obs.thresholds)) {
+    return previewObservationWithThresholds(obs, window);
+  }
   const widgets = [];
   let cachedTop = null;
   const useRollup = Boolean(obs.materialize?.enabled);
@@ -1234,6 +1467,13 @@ function describeFilters(filters) {
   }).join(' · ');
 }
 
+function describeObservationScope(obs) {
+  const filterDesc = describeFilters(obs.filters);
+  const thrDesc = describeThresholds(obs.thresholds);
+  if (thrDesc) return `${filterDesc}; пороги: ${thrDesc}`;
+  return filterDesc;
+}
+
 function describeGroupBy(widgets = []) {
   const fields = [...new Set(collectWidgetGroupFields(widgets))];
   if (!fields.length) return 'без группировки';
@@ -1254,6 +1494,9 @@ function explorerLinkForReport(obs, window, timeZone) {
     logic: f.logic,
   }));
   if (filters.length) params.set('filters', encodeURIComponent(JSON.stringify(filters)));
+  if (obs.thresholds?.length) {
+    params.set('thresholds', encodeURIComponent(JSON.stringify(obs.thresholds)));
+  }
   params.set('range', 'custom');
   params.set('from', zonedDateTime(window.from, timeZone, 'T'));
   params.set('to', zonedDateTime(window.to, timeZone, 'T'));
@@ -1659,7 +1902,7 @@ a{color:#1a56c4}
 </head><body>
 <h1>${escapeHtml(obs.name)}</h1>
 <p class="sub">Период: ${escapeHtml(periodLabel)}</p>
-<p class="sub">Фильтры: ${escapeHtml(describeFilters(obs.filters))}</p>
+<p class="sub">Фильтры: ${escapeHtml(describeObservationScope(obs))}</p>
 <p class="sub">Группировка: ${escapeHtml(describeGroupBy(obs.widgets))}</p>
 ${previewError ? `<p style="color:#a00">Ошибка выборки: ${escapeHtml(previewError)}</p>` : ''}
 ${reportKpiHtml(totals, timeZone)}

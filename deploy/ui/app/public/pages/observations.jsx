@@ -256,6 +256,16 @@ function formatFilterSummary(filters, filterFields) {
   }).join(' · ') + (filters.length > 3 ? ' …' : '');
 }
 
+function formatObservationScopeSummary(item, filterFields) {
+  const parts = [];
+  parts.push(item.filters?.length ? formatFilterSummary(item.filters, filterFields) : 'без фильтров');
+  if (item.thresholds?.length && window.ExplorerThresholds?.formatThresholdChipLabel) {
+    const thr = item.thresholds.slice(0, 2).map((t) => window.ExplorerThresholds.formatThresholdChipLabel(t)).join(' · ');
+    parts.push(`пороги: ${thr}${item.thresholds.length > 2 ? ' …' : ''}`);
+  }
+  return parts.join(' · ');
+}
+
 function formatDataThrough(item) {
   const iso = item.materialize?.dataThrough || item.materialize?.cursorMinute;
   if (!iso) return null;
@@ -324,6 +334,7 @@ function startComposeInExplorer(onNavigate, {
   editId = null,
   name = '',
   filters = null,
+  thresholds = null,
   groupBy = null,
   lookback = null,
 } = {}) {
@@ -333,6 +344,7 @@ function startComposeInExplorer(onNavigate, {
       editId: editId || null,
       name: name || '',
       filters: Array.isArray(filters) ? filters : null,
+      thresholds: Array.isArray(thresholds) ? thresholds : null,
       groupBy: Array.isArray(groupBy) ? groupBy : null,
       lookback: lookback || null,
       startedAt: Date.now(),
@@ -736,7 +748,7 @@ function ObservationLiveTile({
             </div>
           ) : null}
           <div style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-secondary)', marginTop: 2 }}>
-            {formatFilterSummary(item.filters, filterFields)}
+            {formatObservationScopeSummary(item, filterFields)}
           </div>
           <div
             style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-muted)', marginTop: 2 }}
@@ -1294,6 +1306,7 @@ function PageObservations({ onNavigate }) {
         },
       },
       filters: item.filters,
+      thresholds: item.thresholds || [],
     });
     setError('');
   };
@@ -1313,6 +1326,7 @@ function PageObservations({ onNavigate }) {
         materialize: settings.materialize,
         report: settings.report,
         filters: settings.filters,
+        thresholds: settings.thresholds || [],
       });
       await reload();
       setSettingsItemId(null);
@@ -1383,7 +1397,7 @@ function PageObservations({ onNavigate }) {
         <Card title={settingsItem.name}>
           <div className="col" style={{ gap: 12 }}>
             <div style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-secondary)' }}>
-              Фильтры: {formatFilterSummary(settings.filters, filterFields)}
+              Фильтры: {formatObservationScopeSummary(settings, filterFields)}
             </div>
             {canWrite && (
               <button
@@ -1394,6 +1408,7 @@ function PageObservations({ onNavigate }) {
                   editId: settingsItem.id,
                   name: settingsItem.name || settings.name,
                   filters: settings.filters || settingsItem.filters || [],
+                  thresholds: settings.thresholds || settingsItem.thresholds || [],
                   groupBy: settingsTop ? [settingsTop] : null,
                   lookback: settings.lookback || settingsItem.lookback || null,
                 })}

@@ -830,6 +830,95 @@ input, button, select, textarea { font-family: inherit; color: inherit; }
   padding-left: 2px;
 }
 
+.explorer-threshold-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.explorer-threshold-row__main {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+
+.explorer-threshold-row__agg {
+  flex: 0 0 auto;
+}
+
+.explorer-threshold-row__metric {
+  min-width: 180px;
+  flex: 1 1 180px;
+}
+
+.explorer-threshold-row__op {
+  min-width: 150px;
+  flex: 0 0 150px;
+}
+
+.explorer-threshold-row__value {
+  width: 88px;
+  flex: 0 0 88px;
+}
+
+.explorer-threshold-row__unit,
+.explorer-threshold-row__peak {
+  min-width: 92px;
+  flex: 0 0 92px;
+}
+
+.explorer-threshold-warning {
+  font: var(--pv-text-body-3);
+  color: var(--st-warning);
+  padding: 8px 10px;
+  border: 1px solid color-mix(in srgb, var(--st-warning) 35%, transparent);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--st-warning) 8%, transparent);
+}
+
+.explorer-threshold-feedback {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 16px 0;
+}
+
+.explorer-threshold-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.explorer-threshold-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px 4px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--bd-soft);
+  background: var(--surf-1);
+  color: var(--fg-secondary);
+  font: var(--pv-text-body-3);
+  cursor: pointer;
+}
+
+.explorer-threshold-chip:hover {
+  border-color: var(--bd-strong);
+  color: var(--fg-primary);
+}
+
+.explorer-threshold-empty {
+  padding: 48px 16px;
+  text-align: center;
+  color: var(--fg-secondary);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  align-items: center;
+}
+
 .explorer-filter-value-wrap {
   display: flex;
   flex-direction: column;
@@ -2279,9 +2368,6 @@ input, button, select, textarea { font-family: inherit; color: inherit; }
   overflow: visible;
   vertical-align: middle;
 }
-.explorer-text-display-switch {
-  flex-shrink: 0;
-}
 .explorer-dim-cell {
   display: flex;
   align-items: flex-start;
@@ -2314,23 +2400,6 @@ input, button, select, textarea { font-family: inherit; color: inherit; }
 }
 .explorer-dim-cell__filter:hover {
   color: var(--accent, #7E92F8);
-}
-.explorer-dim-cell__expand {
-  all: unset;
-  cursor: pointer;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  flex: 0 0 auto;
-  width: 20px;
-  height: 20px;
-  margin-top: 1px;
-  border-radius: 4px;
-  color: var(--fg-muted);
-}
-.explorer-dim-cell__expand:hover {
-  color: var(--fg-primary);
-  background: var(--surf-2);
 }
 .overflow-text {
   display: block;

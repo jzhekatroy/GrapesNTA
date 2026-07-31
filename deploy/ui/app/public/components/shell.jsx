@@ -1427,6 +1427,11 @@ function parseExplorerPageParams(params) {
   if (filtersRaw) {
     try { filters = JSON.parse(decodeURIComponent(filtersRaw)); } catch { filters = []; }
   }
+  let thresholds = [];
+  const thresholdsRaw = params.get('thresholds');
+  if (thresholdsRaw) {
+    try { thresholds = JSON.parse(decodeURIComponent(thresholdsRaw)); } catch { thresholds = []; }
+  }
   const EXPLORER_VIS_IDS = new Set([
     'contribution', 'dynamics', 'data',
     'lines', 'donut', 'sankey', 'table', 'bars', 'relations',
@@ -1447,6 +1452,7 @@ function parseExplorerPageParams(params) {
     metric: metric || 'bps',
     groupBy: groupBy.length ? groupBy : ['src_ip', 'dst_ip'],
     filters: Array.isArray(filters) ? filters : [],
+    thresholds: Array.isArray(thresholds) ? thresholds : [],
     limit: Number.isFinite(limit) && limit > 0 ? limit : 25,
     vis: normalizedVis,
   };
@@ -1467,6 +1473,7 @@ function buildExplorerShareUrl({
   metric,
   groupBy,
   filters,
+  thresholds,
   limit,
   vis,
   timeRange,
@@ -1478,6 +1485,7 @@ function buildExplorerShareUrl({
   if (limit) params.set('limit', String(limit));
   if (vis) params.set('vis', vis);
   if (filters?.length) params.set('filters', encodeURIComponent(JSON.stringify(filters)));
+  if (thresholds?.length) params.set('thresholds', encodeURIComponent(JSON.stringify(thresholds)));
   params.set('range', timeRange || '1h');
   if (timeRange === 'custom' && customPeriod?.from && customPeriod?.to) {
     params.set('from', customPeriod.from);

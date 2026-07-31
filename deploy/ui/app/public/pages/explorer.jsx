@@ -40,12 +40,6 @@ const EXPLORER_DYNAMICS_MAX_SERIES = 5;
 const EXPLORER_CHART_HEIGHT = 196;
 const EXPLORER_VIS_DEFAULT = 'data';
 
-const EXPLORER_TEXT_DISPLAY_MODES = [
-  { id: 'end', label: 'С конца' },
-  { id: 'middle', label: 'Середина' },
-  { id: 'expand', label: 'Раскрытие' },
-];
-
 const VIS_TYPES = [
   { id: 'contribution', label: 'Вклад', icon: 'pieChart', hint: 'Кто даёт основной объём' },
   { id: 'data', label: 'Данные', icon: 'menu', hint: 'График динамики и детальная таблица' },
@@ -588,10 +582,12 @@ function buildExplorerQueryKey(snapshot) {
   const migrated = migrateExplorerSnapshot(snapshot);
   if (!migrated) return '';
   const fetchLimit = resolveExplorerFetchLimit(migrated.fetchLimit ?? migrated.limit);
+  const { validThresholds } = resolveExplorerThresholdPayload(migrated.thresholds, { thresholdMetrics: explorerThresholdApi().EXPLORER_THRESHOLD_DEFAULT_METRICS });
   return JSON.stringify({
     metric: migrated.metric || 'bps',
     groupBy: migrated.groupBy || [],
     filters: (migrated.filters || []).map(normalizeExplorerFilter),
+    thresholds: validThresholds,
     timeRange: migrated.timeRange || '1h',
     customPeriod: migrated.timeRange === 'custom' ? migrated.customPeriod : null,
     fetchLimit,
@@ -732,9 +728,17 @@ function migrateExplorerSnapshot(snapshot) {
   }
   filters = [...legacyFilters, ...filters];
   const { directions, collectorFilter, systemFiltersEnabled, ...rest } = snapshot;
+  let thresholds = [];
+  if (Array.isArray(snapshot.thresholds) && snapshot.thresholds.length) {
+    const api = explorerThresholdApi();
+    thresholds = snapshot.thresholds[0] != null && typeof snapshot.thresholds[0].value === 'number'
+      ? snapshot.thresholds.map((t) => api.thresholdDraftFromApi?.(t) || t)
+      : cloneExplorerThresholdsList(snapshot.thresholds);
+  }
   return {
     ...rest,
     filters: filters.map(normalizeExplorerFilter),
+    thresholds,
   };
 }
 
@@ -758,14 +762,29 @@ const EXPLORER_QUICK_FILTERS = [
   { field: 'dst_port', label: 'HTTPS dst/443', val: '443' },
 ];
 
+function explorerThresholdApi() {
+  return window.ExplorerThresholds || {};
+}
+
+function cloneExplorerThresholdsList(rows) {
+  return explorerThresholdApi().cloneExplorerThresholds?.(rows) || [];
+}
+
+function resolveExplorerThresholdPayload(draftRows, schema) {
+  const api = explorerThresholdApi();
+  const schemaMetrics = api.thresholdMetricsFromSchema?.(schema) || [];
+  return api.validateExplorerThresholdDrafts?.(draftRows, schemaMetrics) || { validThresholds: [], inactiveIds: new Set() };
+}
+
 function buildExplorerQuerySnapshot({
-  timeRange, customPeriod, filters, metric, groupBy, limit, vis,
+  timeRange, customPeriod, filters, thresholds, metric, groupBy, limit, vis,
   fetchLimit, visualLimit, dynamicsSeriesIds,
 }) {
   return {
     timeRange,
     customPeriod: timeRange === 'custom' ? { ...(customPeriod || {}) } : null,
     filters: filters.map(normalizeExplorerFilter),
+    thresholds: cloneExplorerThresholdsList(thresholds || []),
     metric,
     groupBy: [...groupBy],
     limit,
@@ -782,6 +801,7 @@ function buildSnapshotFromUrl(urlState, urlGlobals) {
     timeRange: urlGlobals.timeRange || '1h',
     customPeriod: urlGlobals.customPeriod || defaultCustomPeriod(),
     filters: urlState.filters || [],
+    thresholds: urlState.thresholds || [],
     metric: urlState.metric || 'bps',
     groupBy: urlState.groupBy || ['src_ip', 'dst_ip'],
     limit: urlState.limit || EXPLORER_DEFAULT_FETCH_LIMIT,
@@ -839,6 +859,7 @@ function applyExplorerQuerySnapshot(snapshot, setters) {
     setters.setCustomPeriod(migrated.customPeriod);
   }
   if (migrated.filters) setters.setFilters(cloneExplorerFilters(migrated.filters));
+  if (migrated.thresholds && setters.setThresholds) setters.setThresholds(cloneExplorerThresholdsList(migrated.thresholds));
   if (migrated.metric) setters.setMetric(migrated.metric);
   if (Array.isArray(migrated.groupBy)) setters.setGroupBy(migrated.groupBy);
   if (migrated.limit) setters.setLimit(migrated.limit);
@@ -1753,68 +1774,15 @@ function FilterValueInput({ fieldId, meta, value, label, onChange, onClear, swit
   );
 }
 
-function ExplorerTextDisplaySwitch({ value, onChange }) {
-  return (
-    <div
-      className="seg seg--compact explorer-text-display-switch"
-      role="group"
-      aria-label="Отображение длинного текста"
-    >
-      {EXPLORER_TEXT_DISPLAY_MODES.map((mode) => (
-        <button
-          key={mode.id}
-          type="button"
-          className={value === mode.id ? 'is-active' : ''}
-          onClick={() => onChange(mode.id)}
-          title={mode.label}
-        >
-          {mode.label}
-        </button>
-      ))}
-    </div>
-  );
-}
-
 function ExplorerGroupCell({
   displayValue,
-  textDisplayMode,
   monoClass,
   filterTitle,
   onAddFilter,
   showColorSwatch,
   color,
 }) {
-  const [expanded, setExpanded] = useState(false);
-  const measureRef = React.useRef(null);
-  const [overflows, setOverflows] = useState(false);
   const text = displayValue == null || displayValue === '' ? '—' : String(displayValue);
-
-  useEffect(() => {
-    setExpanded(false);
-  }, [text, textDisplayMode]);
-
-  useEffect(() => {
-    if (textDisplayMode !== 'expand' || expanded) {
-      if (expanded) setOverflows(true);
-      return undefined;
-    }
-    const el = measureRef.current;
-    if (!el) return undefined;
-    const check = () => {
-      const target = el.querySelector?.('.overflow-text__value') || el;
-      setOverflows(target.scrollWidth > target.clientWidth + 1);
-    };
-    check();
-    if (typeof ResizeObserver === 'undefined') return undefined;
-    const ro = new ResizeObserver(check);
-    ro.observe(el);
-    return () => ro.disconnect();
-  }, [text, textDisplayMode, expanded]);
-
-  const overflowMode = textDisplayMode === 'expand'
-    ? (expanded ? 'expand-open' : 'end')
-    : textDisplayMode;
-  const showExpandToggle = textDisplayMode === 'expand' && (overflows || expanded);
 
   return (
     <div className="explorer-dim-cell">
@@ -1832,28 +1800,11 @@ function ExplorerGroupCell({
           title={filterTitle}
         >
           <OverflowText
-            ref={measureRef}
             value={text}
-            mode={overflowMode}
+            mode="end"
             className={monoClass}
-            expanded={expanded}
           />
         </button>
-        {showExpandToggle && (
-          <button
-            type="button"
-            className="explorer-dim-cell__expand"
-            aria-expanded={expanded}
-            aria-label={expanded ? 'Свернуть значение' : 'Показать полностью'}
-            title={expanded ? 'Свернуть' : 'Показать полностью'}
-            onClick={(e) => {
-              e.stopPropagation();
-              setExpanded((v) => !v);
-            }}
-          >
-            <Icon name={expanded ? 'chevU' : 'chevD'} size={12} />
-          </button>
-        )}
       </div>
     </div>
   );
@@ -1868,7 +1819,6 @@ function buildExplorerResultColumns({
   meta,
   showAllGroups,
   showAllMetrics,
-  textDisplayMode,
   onAddFilter,
   onFocusRow,
   onExcludeRow,
@@ -1926,7 +1876,6 @@ function buildExplorerResultColumns({
         return (
           <ExplorerGroupCell
             displayValue={displayValue}
-            textDisplayMode={textDisplayMode}
             monoClass={monoClass}
             filterTitle={`Добавить в фильтры${rawTooltip}`}
             onAddFilter={() => onAddFilter(dimId, filterVal.value, filterVal.label)}
@@ -2020,6 +1969,9 @@ function PageExplorer({ onNavigate, displayTimezone }) {
     ? observationCompose.groupBy
     : null;
   const composeLookback = observationCompose?.lookback || null;
+  const composeThresholds = Array.isArray(observationCompose?.thresholds)
+    ? observationCompose.thresholds
+    : null;
   const [metric, setMetric] = useState(urlState?.metric || 'bps');
   const [groupBy, setGroupBy] = useState(
     composeGroupBy
@@ -2033,6 +1985,13 @@ function PageExplorer({ onNavigate, displayTimezone }) {
     const last = loadLastAppliedExplorerQuery();
     if (last) return cloneExplorerFilters(migrateExplorerSnapshot(last).filters);
     return cloneExplorerFilters(migrateExplorerUrlGlobals(urlGlobals, []));
+  });
+  const [thresholds, setThresholds] = useState(() => {
+    if (composeThresholds) return cloneExplorerThresholdsList(composeThresholds);
+    if (urlState?.thresholds?.length) return cloneExplorerThresholdsList(urlState.thresholds);
+    const last = loadLastAppliedExplorerQuery();
+    if (last?.thresholds?.length) return cloneExplorerThresholdsList(migrateExplorerSnapshot(last).thresholds);
+    return [];
   });
   const [limit, setLimit] = useState(urlState?.limit || EXPLORER_DEFAULT_FETCH_LIMIT);
   const [fetchLimit, setFetchLimit] = useState(EXPLORER_DEFAULT_FETCH_LIMIT);
@@ -2068,7 +2027,6 @@ function PageExplorer({ onNavigate, displayTimezone }) {
   const [exporting, setExporting] = useState(false);
   const [showAllResultColumns, setShowAllResultColumns] = useState(true);
   const [showAllGroupColumns, setShowAllGroupColumns] = useState(false);
-  const [textDisplayMode, setTextDisplayMode] = useState('end');
   const [visualLimit, setVisualLimit] = useState(EXPLORER_DEFAULT_VISUAL_LIMIT);
   const [dynamicsSeriesIds, setDynamicsSeriesIds] = useState(() => new Set());
   const [dynamicsFocusRowId, setDynamicsFocusRowId] = useState(null);
@@ -2088,7 +2046,7 @@ function PageExplorer({ onNavigate, displayTimezone }) {
   const dimensionById = useMemo(() => Object.fromEntries(dimensions.map((d) => [d.id, d])), [dimensions]);
 
   const querySetters = useMemo(() => ({
-    setTimeRange, setCustomPeriod, setFilters, setMetric, setGroupBy, setLimit, setVis,
+    setTimeRange, setCustomPeriod, setFilters, setThresholds, setMetric, setGroupBy, setLimit, setVis,
   }), []);
 
   const draftRestoreOpts = useMemo(() => ({ filterMode, setFilterText }), [filterMode]);
@@ -2256,13 +2214,16 @@ function PageExplorer({ onNavigate, displayTimezone }) {
       timeRange: qTimeRange,
       customPeriod: qCustomPeriod,
       filters: qFilters,
+      thresholds: qThresholds,
       metric: qMetric,
       groupBy: qGroupBy,
     } = migrated;
+    const { validThresholds } = resolveExplorerThresholdPayload(qThresholds, schema);
     ApiClient.loadExplorerQuery({
       metric: qMetric,
       groupBy: qGroupBy,
       filters: (qFilters || []).map(normalizeExplorerFilter),
+      thresholds: validThresholds,
       limit: fetchLimit,
       timeRange: qTimeRange,
       customPeriod: qCustomPeriod,
@@ -2279,6 +2240,7 @@ function PageExplorer({ onNavigate, displayTimezone }) {
           timeRange: qTimeRange,
           customPeriod: qCustomPeriod,
           filters: qFilters,
+          thresholds: qThresholds,
           metric: qMetric,
           groupBy: qGroupBy,
           limit: fetchLimit,
@@ -2418,7 +2380,7 @@ function PageExplorer({ onNavigate, displayTimezone }) {
 
   const runQuery = () => {
     let snapshot = buildExplorerQuerySnapshot({
-      timeRange, customPeriod, filters, metric, groupBy, limit, vis,
+      timeRange, customPeriod, filters, thresholds, metric, groupBy, limit, vis,
     });
     let activeFilters = filters;
     if (filterMode === 'text') {
@@ -2450,7 +2412,7 @@ function PageExplorer({ onNavigate, displayTimezone }) {
       setFilterRowErrors({});
     }
 
-    snapshot = { ...snapshot, filters: validFilters };
+    snapshot = { ...snapshot, filters: validFilters, thresholds: cloneExplorerThresholdsList(thresholds) };
 
     const periodErr = validateExplorerCustomPeriod(
       snapshot.timeRange === 'custom' ? snapshot.customPeriod : {},
@@ -2544,7 +2506,7 @@ function PageExplorer({ onNavigate, displayTimezone }) {
 
   const saveCurrentQuery = async ({ name, description, folder, isShared, id }) => {
     const queryPayload = buildExplorerQuerySnapshot({
-      timeRange, customPeriod, filters, metric, groupBy, limit, vis,
+      timeRange, customPeriod, filters, thresholds, metric, groupBy, limit, vis,
     });
     try {
       if (id) {
@@ -2578,8 +2540,9 @@ function PageExplorer({ onNavigate, displayTimezone }) {
   };
 
   const openSaveAsObservation = () => {
-    if (!filters?.length) {
-      pushToast({ kind: 'error', title: 'Нужен фильтр', desc: 'Добавьте хотя бы одно условие, затем «Добавить в наблюдения».' });
+    const { validThresholds } = resolveExplorerThresholdPayload(thresholds, schema);
+    if (!filters?.length && !validThresholds.length) {
+      pushToast({ kind: 'error', title: 'Нужен фильтр или порог', desc: 'Добавьте хотя бы одно условие или порог, затем «Добавить в наблюдения».' });
       return;
     }
     setShowObservationSave(true);
@@ -2594,6 +2557,7 @@ function PageExplorer({ onNavigate, displayTimezone }) {
       label: f.label ?? null,
       logic: f.logic || 'and',
     })).filter((f) => f.field);
+    const { validThresholds } = resolveExplorerThresholdPayload(thresholds, schema);
 
     try {
       let id = observationCompose?.editId || null;
@@ -2606,6 +2570,7 @@ function PageExplorer({ onNavigate, displayTimezone }) {
           ...existing,
           name: (name || '').trim() || existing.name,
           filters: nextFilters,
+          thresholds: validThresholds,
           widgets: [
             {
               id: 'w-ts',
@@ -2634,6 +2599,7 @@ function PageExplorer({ onNavigate, displayTimezone }) {
           description: '',
           lookback: lookback || '1h',
           filters: nextFilters,
+          thresholds: validThresholds,
           widgets: [
             {
               id: 'w-ts',
@@ -2691,10 +2657,12 @@ function PageExplorer({ onNavigate, displayTimezone }) {
   };
 
   const copyShareLink = async () => {
+    const { validThresholds } = resolveExplorerThresholdPayload(thresholds, schema);
     const url = buildExplorerShareUrl({
       metric,
       groupBy,
       filters: filters.map(normalizeExplorerFilter),
+      thresholds: validThresholds,
       limit,
       vis,
       timeRange,
@@ -2716,6 +2684,7 @@ function PageExplorer({ onNavigate, displayTimezone }) {
         metric: activeQuery.metric,
         groupBy: activeQuery.groupBy,
         filters: (activeQuery.filters || []).map(normalizeExplorerFilter),
+        thresholds: resolveExplorerThresholdPayload(activeQuery.thresholds, schema).validThresholds,
       };
       if (meta?.windowFrom && meta?.windowTo) {
         exportPayload.from = meta.windowFrom;
@@ -2910,14 +2879,13 @@ function PageExplorer({ onNavigate, displayTimezone }) {
     meta,
     showAllGroups: showAllGroupColumns,
     showAllMetrics: showAllResultColumns,
-    textDisplayMode,
     onAddFilter: addFilterFromCell,
     onFocusRow: focusRow,
     onExcludeRow: excludeRow,
     onDynamicsRow: showRowDynamics,
     selectedDynamicsSeriesIds: dynamicsSeriesIds,
     onToggleDynamicsSeries: toggleDynamicsSeries,
-  }), [appliedGroupBy, dimensions, dimensionById, appliedMetricLabel, appliedMetric, meta, showAllGroupColumns, showAllResultColumns, textDisplayMode, addFilterFromCell, focusRow, excludeRow, showRowDynamics, dynamicsSeriesIds, toggleDynamicsSeries]);
+  }), [appliedGroupBy, dimensions, dimensionById, appliedMetricLabel, appliedMetric, meta, showAllGroupColumns, showAllResultColumns, addFilterFromCell, focusRow, excludeRow, showRowDynamics, dynamicsSeriesIds, toggleDynamicsSeries]);
 
   const visibleResults = useMemo(
     () => sliceExplorerVisualRows(results, visualLimit),
@@ -2925,7 +2893,67 @@ function PageExplorer({ onNavigate, displayTimezone }) {
   );
   const othersEligible = appliedGroupBy.length > 0
     && Boolean(EXPLORER_OTHERS_METRIC[appliedMetric])
-    && (!meta?.pctScope || meta.pctScope === 'full_filtered');
+    && (!meta?.pctScope || meta.pctScope === 'full_filtered')
+    && !(meta?.rowsHidden > 0);
+  const appliedThresholds = activeQuery?.thresholds || [];
+  const displayThresholds = useMemo(() => {
+    if (meta?.thresholds?.length) return meta.thresholds;
+    return resolveExplorerThresholdPayload(appliedThresholds, schema).validThresholds;
+  }, [meta?.thresholds, appliedThresholds, schema]);
+  const thresholdEmptyState = hasAppliedQuery
+    && source !== 'loading'
+    && !isRefreshingData
+    && results.length === 0
+    && (meta?.rowsHidden > 0 || (meta?.thresholds?.length > 0) || appliedThresholds.length > 0);
+  const clearAllThresholds = () => {
+    setThresholds([]);
+    if (!hasAppliedQuery || !appliedSnapshot) return;
+    setAppliedSnapshot({
+      ...migrateExplorerSnapshot(appliedSnapshot),
+      thresholds: [],
+    });
+    setQueryVersion((v) => v + 1);
+  };
+  const removeAppliedThreshold = (index) => {
+    const next = cloneExplorerThresholdsList(appliedThresholds).filter((_, i) => i !== index);
+    setThresholds(next);
+    if (!hasAppliedQuery || !appliedSnapshot) return;
+    setAppliedSnapshot({
+      ...migrateExplorerSnapshot(appliedSnapshot),
+      thresholds: next,
+    });
+    setQueryVersion((v) => v + 1);
+  };
+  const clientThresholdWarning = explorerThresholdApi().shouldShowThresholdPeakWarning?.({
+    thresholds: resolveExplorerThresholdPayload(thresholds, schema).validThresholds,
+    groupBy,
+    timeRange,
+    customPeriod,
+  });
+  const thresholdWarningText = meta?.thresholdWarning || clientThresholdWarning || null;
+  const thresholdFeedback = (displayThresholds.length > 0 || thresholdWarningText || (meta?.rowsHidden > 0)) ? (
+    <div className="explorer-threshold-feedback">
+      {thresholdWarningText && (
+        <div className="explorer-threshold-warning" role="status">{thresholdWarningText}</div>
+      )}
+      {displayThresholds.length > 0 && (
+        <div className="explorer-threshold-chips">
+          {displayThresholds.map((t, i) => (
+            <button
+              key={`${t.metric}-${i}-${t.value}`}
+              type="button"
+              className="explorer-threshold-chip"
+              onClick={() => removeAppliedThreshold(i)}
+              title="Снять порог"
+            >
+              <span>{explorerThresholdApi().formatThresholdChipLabel?.(t, schema?.thresholdMetrics) || t.metric}</span>
+              <Icon name="x" size={10} stroke={2.5} />
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  ) : null;
   const othersRow = useMemo(() => buildExplorerOthersRow({
     shownRows: visibleResults,
     summary,
@@ -3066,6 +3094,9 @@ function PageExplorer({ onNavigate, displayTimezone }) {
               setShowSave(true);
             }}
             onDeleteSaved={deleteSavedFilter}
+            thresholds={thresholds}
+            setThresholds={setThresholds}
+            thresholdPeakWarning={clientThresholdWarning}
           />
         )}
 
@@ -3135,6 +3166,11 @@ function PageExplorer({ onNavigate, displayTimezone }) {
                 <div style={{ padding: 40, textAlign: 'center', color: 'var(--fg-secondary)' }}>Выполняем запрос…</div>
               ) : source === 'error' && !results.length ? (
                 <div style={{ padding: 40, textAlign: 'center', color: 'var(--st-critical)' }}>{error || ApiClient.LOAD_FAILED}</div>
+              ) : thresholdEmptyState ? (
+                <div className="explorer-threshold-empty">
+                  <p>Нет строк, проходящих порог</p>
+                  <Button kind="ghost" size="sm" onClick={clearAllThresholds}>Снять пороги</Button>
+                </div>
               ) : results.length === 0 ? (
                 <div style={{ padding: 40, textAlign: 'center', color: 'var(--fg-secondary)' }}>
                   Нет данных для выбранных фильтров. Ослабьте фильтры или расширьте период.
@@ -3172,10 +3208,6 @@ function PageExplorer({ onNavigate, displayTimezone }) {
                             {showAllGroupColumns ? 'Скрыть группировки' : 'Все группировки'}
                           </Button>
                         )}
-                        <ExplorerTextDisplaySwitch
-                          value={textDisplayMode}
-                          onChange={setTextDisplayMode}
-                        />
                         <Button
                           kind={showAllResultColumns ? 'primary' : 'ghost'}
                           size="sm"
@@ -3188,6 +3220,7 @@ function PageExplorer({ onNavigate, displayTimezone }) {
                       </div>
                     )}
                   >
+                    {thresholdFeedback}
                     {analysisBody || (
                       <div className="explorer-results-layout">
                         <div className="explorer-results-chart">
@@ -3232,6 +3265,7 @@ function PageExplorer({ onNavigate, displayTimezone }) {
                               <span>
                                 Показано {visibleResults.length} из {results.length} загруженных · {meta?.granularity || 'raw'}
                                 {meta?.trafficSampled ? ' · с учётом sampling' : ''}
+                                {meta?.rowsHidden > 0 ? ` · Скрыто порогами: ${meta.rowsHidden}` : ''}
                               </span>
                               <span>
                                 Запрос выполнен за <b style={{ color: 'var(--fg-primary)' }}>{serverMs ?? '—'} мс</b>
@@ -3261,6 +3295,7 @@ function PageExplorer({ onNavigate, displayTimezone }) {
                   serverMs={serverMs}
                   tools={analysisToolbar}
                 >
+                  {thresholdFeedback}
                   {analysisBody || (
                     <ContributionBarsExplorer
                       results={othersRow ? [...visibleResults, othersRow] : visibleResults}
@@ -4371,6 +4406,80 @@ function ExplorerFilterTemplatesMenu({
   );
 }
 
+function ExplorerThresholdRow({
+  row, schema, onChange, onRemove,
+}) {
+  const api = explorerThresholdApi();
+  const metrics = api.thresholdMetricsFromSchema?.(schema) || api.EXPLORER_THRESHOLD_DEFAULT_METRICS || [];
+  const metricMeta = metrics.find((m) => m.id === row.metric) || metrics[0];
+  const units = api.thresholdUnitsForMetric?.(row.metric) || ['count'];
+  const unitLabels = api.UNIT_LABELS?.[row.metric] || {};
+  const rangeOp = row.op === 'between' || row.op === 'outside';
+  const showPeak = metricMeta?.peakSupported;
+  const showPeakWindow = showPeak && row.aggregate === 'peak';
+
+  return (
+    <div className="explorer-threshold-row">
+      <div className="explorer-threshold-row__main">
+        {showPeak && (
+          <div className="seg explorer-threshold-row__agg">
+            <button type="button" className={row.aggregate === 'avg' ? 'active' : ''} onClick={() => onChange({ aggregate: 'avg' })}>средняя</button>
+            <button type="button" className={row.aggregate === 'peak' ? 'active' : ''} onClick={() => onChange({ aggregate: 'peak' })}>пик</button>
+          </div>
+        )}
+        <select className="input explorer-threshold-row__metric" value={row.metric} onChange={(e) => onChange({ metric: e.target.value, unit: api.defaultThresholdUnit?.(e.target.value, metrics) })}>
+          {metrics.map((m) => <option key={m.id} value={m.id}>{m.label}</option>)}
+        </select>
+        <select className="input explorer-threshold-row__op" value={row.op} onChange={(e) => onChange({ op: e.target.value })}>
+          {(api.EXPLORER_THRESHOLD_OPS || []).map((o) => <option key={o.id} value={o.id}>{o.label}</option>)}
+        </select>
+        <input className="input explorer-threshold-row__value mono" type="text" inputMode="decimal" value={row.value} placeholder="0" onChange={(e) => onChange({ value: e.target.value })} />
+        {rangeOp && (
+          <input className="input explorer-threshold-row__value mono" type="text" inputMode="decimal" value={row.value2} placeholder="0" onChange={(e) => onChange({ value2: e.target.value })} />
+        )}
+        {row.metric !== 'pct' && (
+          <select className="input explorer-threshold-row__unit" value={row.unit} onChange={(e) => onChange({ unit: e.target.value })}>
+            {units.map((u) => <option key={u} value={u}>{unitLabels[u] || u}</option>)}
+          </select>
+        )}
+        {showPeakWindow && (
+          <select className="input explorer-threshold-row__peak" value={row.peakWindow || '5m'} onChange={(e) => onChange({ peakWindow: e.target.value })}>
+            {(api.EXPLORER_THRESHOLD_PEAK_WINDOWS || []).map((w) => <option key={w.id} value={w.id}>{w.label}</option>)}
+          </select>
+        )}
+        <button type="button" className="icon-btn explorer-filter-row__remove" onClick={onRemove} title="Удалить порог">
+          <Icon name="x" size={10} stroke={2.5} />
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function ExplorerThresholdEditor({ schema, thresholds, setThresholds, peakWarning }) {
+  const updateThreshold = (id, patch) => {
+    setThresholds(thresholds.map((t) => (t.id === id ? { ...t, ...patch } : t)));
+  };
+
+  if (!peakWarning && !thresholds.length) return null;
+
+  return (
+    <div className="explorer-threshold-editor">
+      {peakWarning && (
+        <div className="explorer-threshold-warning" role="status">{peakWarning}</div>
+      )}
+      {thresholds.map((row) => (
+        <ExplorerThresholdRow
+          key={row.id}
+          row={row}
+          schema={schema}
+          onChange={(patch) => updateThreshold(row.id, patch)}
+          onRemove={() => setThresholds(thresholds.filter((t) => t.id !== row.id))}
+        />
+      ))}
+    </div>
+  );
+}
+
 function ExplorerSystemFilterRow({ title, mandatory, onRemove, children }) {
   return (
     <div className="col" style={{ padding: '8px 10px', background: 'var(--surf-1)', border: '1px solid var(--bd-soft)', borderRadius: 10, gap: 6 }}>
@@ -4421,6 +4530,9 @@ function ExplorerFilters({
   onSaveAsObservation,
   onEditSaved,
   onDeleteSaved,
+  thresholds = [],
+  setThresholds,
+  thresholdPeakWarning,
 }) {
   const panelRef = React.useRef(null);
   const filterFields = (schema?.filterFields || []).filter((f) => f.id !== 'direction' && f.id !== 'collector');
@@ -4437,6 +4549,21 @@ function ExplorerFilters({
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [onRun]);
   const updateFilter = (id, patch) => setFilters(filters.map((f) => (f.id === id ? { ...f, ...patch } : f)));
+  const addThreshold = () => {
+    setThresholds([
+      ...thresholds,
+      {
+        id: Date.now() + Math.random(),
+        metric: 'bps',
+        aggregate: 'avg',
+        peakWindow: '5m',
+        op: 'gt',
+        value: '',
+        value2: '',
+        unit: 'mbps',
+      },
+    ]);
+  };
   const addFilter = (filter = {}) => {
     setFilters([...filters, { id: Date.now() + Math.random(), field: 'src_ip', op: '=', value: '', logic: 'and', ...filter }]);
   };
@@ -4605,6 +4732,13 @@ function ExplorerFilters({
             );
           })}
 
+          <ExplorerThresholdEditor
+            schema={schema}
+            thresholds={thresholds}
+            setThresholds={setThresholds}
+            peakWarning={thresholdPeakWarning}
+          />
+
           <div className="row" style={{ gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
             <ExplorerAddFilterMenu
               schema={schema}
@@ -4614,6 +4748,7 @@ function ExplorerFilters({
                 addFilter({ field: fieldId, op: nextOps[0], value: '' });
               }}
             />
+            <Button kind="ghost" size="sm" icon="plus" onClick={addThreshold}>Порог</Button>
             <ExplorerFilterTemplatesMenu
               lastApplied={lastApplied}
               savedQueries={savedQueries}

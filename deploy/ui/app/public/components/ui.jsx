@@ -319,7 +319,7 @@ const OverflowText = React.forwardRef(function OverflowText({
 function DataTable({
   rows,
   columns,           // [{ key, title, render?, sortable?, align?, width?, num? }]
-  resizableColumns = false,
+  resizableColumns = true,
   selectable,
   selected,
   onSelectChange,

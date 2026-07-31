@@ -38,6 +38,7 @@ const {
   deleteSavedExplorerFilter,
   explorerExportCsv,
   explorerResultSeries,
+  summaryFromExplorerFlowRows,
 } = require('./explorer');
 const {
   ensureObservationsStore,
@@ -811,10 +812,18 @@ app.post('/api/explorer/query', async (req, res) => {
     for (const item of bundle.breakdownSpecs) {
       breakdownResults[item.dim] = (await runNamed(() => Promise.resolve(item.spec), { name: `explorer/breakdown/${item.dim}` })).data;
     }
+    const flowRows = flowsResult?.data || [];
+    const hasThresholds = Array.isArray(flowsResult?.meta?.thresholds) && flowsResult.meta.thresholds.length > 0;
+    let summaryData = summaryResult?.data || null;
+    if (hasThresholds && bundle.flowsSpec && flowRows.length) {
+      summaryData = summaryFromExplorerFlowRows(flowRows, flowsResult.meta?.windowSeconds);
+    } else if (hasThresholds && bundle.flowsSpec && !flowRows.length) {
+      summaryData = summaryFromExplorerFlowRows([], flowsResult?.meta?.windowSeconds);
+    }
     res.json({
       data: {
-        rows: flowsResult?.data || [],
-        summary: summaryResult?.data || null,
+        rows: flowRows,
+        summary: summaryData,
         timeseries: timeseriesResult?.data || null,
         resultSeries: resultSeriesResult?.data || null,
         breakdowns: breakdownResults,

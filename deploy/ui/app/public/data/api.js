@@ -402,6 +402,7 @@ const ApiClient = (() => {
     metric = 'bps',
     groupBy = [],
     filters = [],
+    thresholds = [],
     limit = 10,
     offset = 0,
     timeRange = '1h',
@@ -417,6 +418,7 @@ const ApiClient = (() => {
       metric,
       groupBy,
       filters,
+      thresholds: Array.isArray(thresholds) ? thresholds : [],
       limit,
       offset,
       range: timeRange,
@@ -471,13 +473,14 @@ const ApiClient = (() => {
     metric = 'bps',
     groupBy = [],
     filters = [],
+    thresholds = [],
     limit = 10,
     timeRange = '1h',
     customPeriod,
     collectorFilter,
   } = {}) {
     const finish = DashboardLog?.widgetStart?.('explorer/flows') ?? ((extra) => ({ loadMs: 0, ...extra }));
-    const body = { metric, groupBy, filters, limit, range: timeRange };
+    const body = { metric, groupBy, filters, thresholds: Array.isArray(thresholds) ? thresholds : [], limit, range: timeRange };
     appendCollectorFilterBody(body, collectorFilter);
     if (timeRange === 'custom' && customPeriod?.from && customPeriod?.to) {
       const apiPeriod = apiCustomPeriodParams(customPeriod);
