@@ -709,13 +709,26 @@ func main() {
 
 	var healthReporter *flowingest.HealthReporter
 	if strings.TrimSpace(*chDSN) != "" && strings.TrimSpace(*chHealthTable) != "" {
+		// The daemon is the only place that knows which legs are actually
+		// wired: an undeclared leg must read as absent, not as total loss.
+		stages := []string{flowingest.StageCollector, flowingest.StageClickHouse}
+		if strings.TrimSpace(*iface) != "" {
+			stages = append([]string{flowingest.StageInterface}, stages...)
+		}
+		var sinkPorts []uint16
+		if dsts := nfExp.destinations(); len(dsts) > 0 {
+			stages = append(stages, flowingest.StageNetFlow)
+			sinkPorts = flowingest.LocalSinkPorts(dsts)
+		}
 		hr, err := flowingest.NewHealthReporter(log, flowingest.HealthReporterConfig{
-			DSN:         strings.TrimSpace(*chDSN),
-			Table:       strings.TrimSpace(*chHealthTable),
-			CollectorID: strings.TrimSpace(*collectorID),
-			SourceID:    *sourceID,
-			Daemon:      "xdpflowd",
-			Iface:       *iface,
+			DSN:            strings.TrimSpace(*chDSN),
+			Table:          strings.TrimSpace(*chHealthTable),
+			CollectorID:    strings.TrimSpace(*collectorID),
+			SourceID:       *sourceID,
+			Daemon:         "xdpflowd",
+			Iface:          *iface,
+			Stages:         stages,
+			LocalSinkPorts: sinkPorts,
 		})
 		if err != nil {
 			log.Error("health reporter init", "err", err)
@@ -834,6 +847,7 @@ func main() {
 	}
 
 	var prevMapFull, prevInsertErrs, prevQueueDrops, prevNFSendErrs uint64
+	var prevCorruptionFrames uint64
 	var prevTotalPackets uint64
 
 	for {
@@ -1001,6 +1015,8 @@ func main() {
 				if chDel != nil {
 					chSnap = chDel.HealthSnapshot()
 				}
+				corruptionDelta := chSnap.CorruptionFrames - prevCorruptionFrames
+				prevCorruptionFrames = chSnap.CorruptionFrames
 				_ = healthReporter.Write(ctx, flowingest.HealthWriteInput{
 					XDP: flowingest.XDPMetrics{
 						TotalPackets: totalPackets,
@@ -1011,9 +1027,12 @@ func main() {
 					},
 					CH:                     chSnap,
 					Exclusions:             exclFilter.Stats(),
+					NetFlow:                nfExp.metrics(),
 					MapFullDelta:           mapFullDelta,
 					InsertErrsDelta:        insertErrsDelta,
 					QueueDropsDelta:        queueDropsDelta,
+					NFSendErrsDelta:        nfSendErrsDelta,
+					SpoolCorruptionDelta:   corruptionDelta,
 					LagSegmentsThreshold:   *healthSpoolLagSegments,
 					WriterLagRowsThreshold: *healthWriterLagRows,
 					DrainerAgeThreshold:    *healthDrainerAge,

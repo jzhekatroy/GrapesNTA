@@ -1315,6 +1315,8 @@ func (p *SpoolPipeline) HealthSnapshot() HealthSnapshot {
 		InsertErrs:         p.insertErrs.Load(),
 		LagSegments:        lagSegs,
 		DrainerProgressAge: progressAge,
+		CorruptionFrames:   p.corruptionFramesSkipped.Load(),
+		CorruptionBytes:    p.corruptionBytesSkipped.Load(),
 	}
 }
 

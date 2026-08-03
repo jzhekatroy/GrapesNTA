@@ -26,7 +26,12 @@ type HealthSnapshot struct {
 	QueueDrops         uint64
 	LagSegments        int64
 	DrainerProgressAge time.Duration
-	Mode               string
+	// Frames the drainer could not decode and skipped. Silent data loss that
+	// no other counter reflects: the rows never reach ClickHouse, yet nothing
+	// reports an insert error.
+	CorruptionFrames uint64
+	CorruptionBytes  uint64
+	Mode             string
 }
 
 // DeliveryConfig wires direct sink or durable spool pipeline.

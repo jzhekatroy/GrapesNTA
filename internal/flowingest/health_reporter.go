@@ -31,6 +31,28 @@ type XDPMetrics struct {
 	NonIPPass    uint64
 }
 
+// NetFlowMetrics is the last thing the collector can vouch for on the export
+// leg: UDP acknowledges nothing, so "handed to the kernel without error" is the
+// end of our responsibility.
+type NetFlowMetrics struct {
+	RecordsOut uint64
+	PacketsOut uint64
+	BytesOut   uint64
+	SendErrs   uint64
+	Dsts       string
+}
+
+// Pipeline stage names a daemon declares. An undeclared stage is absent from
+// the chain, not broken — without this a collector without a NetFlow leg reads
+// as total loss on that leg.
+const (
+	StageInterface  = "interface"
+	StageCollector  = "collector"
+	StageReceiver   = "receiver"
+	StageClickHouse = "clickhouse"
+	StageNetFlow    = "netflow"
+)
+
 // HealthReporterConfig configures periodic INSERT into collector_health_snapshots.
 type HealthReporterConfig struct {
 	DSN         string
@@ -39,6 +61,11 @@ type HealthReporterConfig struct {
 	SourceID    string
 	Daemon      string
 	Iface       string
+	// Stages the daemon actually runs; see the Stage* constants.
+	Stages []string
+	// UDP ports of export sinks living on this host, whose kernel drop
+	// counters we can read. Remote sinks are left out on purpose.
+	LocalSinkPorts []uint16
 }
 
 // HealthReporter writes cumulative health snapshots to ClickHouse.
@@ -51,6 +78,8 @@ type HealthReporter struct {
 	daemon      string
 	iface       string
 	hostname    string
+	stages      []string
+	sinkPorts   []uint16
 }
 
 func NewHealthReporter(log *slog.Logger, cfg HealthReporterConfig) (*HealthReporter, error) {
@@ -88,12 +117,16 @@ func NewHealthReporter(log *slog.Logger, cfg HealthReporterConfig) (*HealthRepor
 		daemon:      daemon,
 		iface:       strings.TrimSpace(cfg.Iface),
 		hostname:    host,
+		stages:      append([]string(nil), cfg.Stages...),
+		sinkPorts:   append([]uint16(nil), cfg.LocalSinkPorts...),
 	}
 	log.Info("health reporter enabled",
 		"table", table,
 		"collector_id", r.collectorID,
 		"source_id", sourceID,
 		"daemon", daemon,
+		"stages", strings.Join(r.stages, ","),
+		"local_sink_ports", r.sinkPorts,
 	)
 	return r, nil
 }
@@ -113,10 +146,14 @@ type HealthWriteInput struct {
 	// Without it the XDP-vs-ClickHouse completeness ratio reads intentional
 	// drops as ingest loss.
 	Exclusions             ExclusionStats
+	NetFlow                NetFlowMetrics
 	MapFullDelta           uint64
 	InsertErrsDelta        uint64
 	QueueDropsDelta        uint64
 	UDPQueueDropsDelta     uint64
+	NFSendErrsDelta        uint64
+	SpoolCorruptionDelta   uint64
+	NICRxDropDelta         uint64
 	LagSegmentsThreshold   int64
 	WriterLagRowsThreshold uint64
 	DrainerAgeThreshold    time.Duration
@@ -149,6 +186,17 @@ func classifyHealthStatus(in HealthWriteInput) (string, []string) {
 	if in.UDPQueueDropsDelta > 0 {
 		add("critical", "udp_queue_drops")
 	}
+	// Both are silent data loss: the export socket refused datagrams, or the
+	// spool drainer skipped a frame it could not decode.
+	if in.NFSendErrsDelta > 0 {
+		add("critical", "netflow_send_errors")
+	}
+	if in.SpoolCorruptionDelta > 0 {
+		add("critical", "spool_corruption")
+	}
+	if in.NICRxDropDelta > 0 {
+		add("warning", "nic_rx_drops")
+	}
 	writerLag := uint64(0)
 	if in.CH.RecordsQueued > in.CH.RecordsWritten {
 		writerLag = in.CH.RecordsQueued - in.CH.RecordsWritten
@@ -175,7 +223,8 @@ func (r *HealthReporter) Write(ctx context.Context, in HealthWriteInput) error {
 	if r == nil {
 		return nil
 	}
-	nicRxPkts, nicRxBytes := ReadNICStats(r.iface)
+	nic := ReadNICStats(r.iface)
+	sinkDrops, sinkObserved := ReadUDPSocketDrops(r.sinkPorts)
 	status, reasons := classifyHealthStatus(in)
 
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
@@ -195,6 +244,10 @@ func (r *HealthReporter) Write(ctx context.Context, in HealthWriteInput) error {
     xdp_non_ip_pass,
     nic_rx_packets,
     nic_rx_bytes,
+    nic_rx_dropped,
+    nic_rx_errors,
+    nic_rx_missed,
+    nic_rx_fifo_errors,
     datagrams,
     records_parsed,
     receiver_parse_errors,
@@ -216,10 +269,20 @@ func (r *HealthReporter) Write(ctx context.Context, in HealthWriteInput) error {
     ch_queue_drops,
     lag_segments,
     drainer_progress_age_sec,
+    spool_corruption_frames,
+    spool_corruption_bytes,
     flow_rows_excluded,
     flow_packets_excluded,
     flow_bytes_excluded,
     exclusion_rules,
+    nf_records_out,
+    nf_packets_out,
+    nf_bytes_out,
+    nf_send_errs,
+    nf_dsts,
+    nf_socket_drops,
+    nf_socket_observed,
+    pipeline_stages,
     status,
     status_reasons
 )`
@@ -242,8 +305,12 @@ func (r *HealthReporter) Write(ctx context.Context, in HealthWriteInput) error {
 		in.XDP.MapFull,
 		in.XDP.ParseErrors,
 		in.XDP.NonIPPass,
-		nicRxPkts,
-		nicRxBytes,
+		nic.RxPackets,
+		nic.RxBytes,
+		nic.RxDropped,
+		nic.RxErrors,
+		nic.RxMissed,
+		nic.RxFifo,
 		in.Receiver.Datagrams,
 		in.Receiver.RecordsParsed,
 		in.Receiver.ParseErrors,
@@ -265,10 +332,20 @@ func (r *HealthReporter) Write(ctx context.Context, in HealthWriteInput) error {
 		in.CH.QueueDrops,
 		in.CH.LagSegments,
 		in.CH.DrainerProgressAge.Seconds(),
+		in.CH.CorruptionFrames,
+		in.CH.CorruptionBytes,
 		in.Exclusions.Rows,
 		in.Exclusions.Packets,
 		in.Exclusions.Bytes,
 		uint32(in.Exclusions.Rules),
+		in.NetFlow.RecordsOut,
+		in.NetFlow.PacketsOut,
+		in.NetFlow.BytesOut,
+		in.NetFlow.SendErrs,
+		in.NetFlow.Dsts,
+		sinkDrops,
+		boolToUInt8(sinkObserved),
+		r.stages,
 		status,
 		reasons,
 	)
@@ -295,6 +372,20 @@ func (r *HealthReporter) Write(ctx context.Context, in HealthWriteInput) error {
 		"flow_rows_excluded", in.Exclusions.Rows,
 		"flow_packets_excluded", in.Exclusions.Packets,
 		"exclusion_rules", in.Exclusions.Rules,
+		"nic_rx_dropped", nic.RxDropped,
+		"nic_rx_fifo_errors", nic.RxFifo,
+		"nf_packets_out", in.NetFlow.PacketsOut,
+		"nf_send_errs", in.NetFlow.SendErrs,
+		"nf_socket_drops", sinkDrops,
+		"nf_socket_observed", sinkObserved,
+		"spool_corruption_frames", in.CH.CorruptionFrames,
 	)
 	return nil
+}
+
+func boolToUInt8(b bool) uint8 {
+	if b {
+		return 1
+	}
+	return 0
 }

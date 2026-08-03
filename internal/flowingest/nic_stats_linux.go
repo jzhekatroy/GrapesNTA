@@ -21,11 +21,20 @@ func readSysfsCounter(path string) uint64 {
 }
 
 // ReadNICStats reads cumulative rx counters from /sys/class/net/<iface>/statistics.
-func ReadNICStats(iface string) (rxPackets, rxBytes uint64) {
+func ReadNICStats(iface string) NICStats {
 	iface = strings.TrimSpace(iface)
 	if iface == "" {
-		return 0, 0
+		return NICStats{}
 	}
 	base := "/sys/class/net/" + iface + "/statistics/"
-	return readSysfsCounter(base + "rx_packets"), readSysfsCounter(base + "rx_bytes")
+	return NICStats{
+		RxPackets: readSysfsCounter(base + "rx_packets"),
+		RxBytes:   readSysfsCounter(base + "rx_bytes"),
+		RxDropped: readSysfsCounter(base + "rx_dropped"),
+		RxErrors:  readSysfsCounter(base + "rx_errors"),
+		// Driver-specific: absent on some NICs, which readSysfsCounter reports
+		// as 0 — indistinguishable from "no drops", but harmless as a signal.
+		RxMissed: readSysfsCounter(base + "rx_missed_errors"),
+		RxFifo:   readSysfsCounter(base + "rx_fifo_errors"),
+	}
 }

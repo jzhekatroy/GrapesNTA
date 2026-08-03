@@ -31,6 +31,7 @@ import (
 	"time"
 
 	"golang.org/x/sys/unix"
+	"xdpflowd/internal/flowingest"
 	"xdpflowd/internal/loader"
 )
 
@@ -583,6 +584,28 @@ func (e *nfExporter) sendErrors() uint64 {
 		return 0
 	}
 	return atomic.LoadUint64(&e.sendErrs)
+}
+
+// metrics reports the export leg for the health snapshot. UDP acknowledges
+// nothing, so these counters are the last point the collector can vouch for.
+func (e *nfExporter) metrics() flowingest.NetFlowMetrics {
+	if e == nil {
+		return flowingest.NetFlowMetrics{}
+	}
+	return flowingest.NetFlowMetrics{
+		RecordsOut: atomic.LoadUint64(&e.recordsOut),
+		PacketsOut: atomic.LoadUint64(&e.packetsOut),
+		BytesOut:   atomic.LoadUint64(&e.bytesOut),
+		SendErrs:   atomic.LoadUint64(&e.sendErrs),
+		Dsts:       strings.Join(e.destStrs, ","),
+	}
+}
+
+func (e *nfExporter) destinations() []string {
+	if e == nil {
+		return nil
+	}
+	return append([]string(nil), e.destStrs...)
 }
 
 func (e *nfExporter) Close() {

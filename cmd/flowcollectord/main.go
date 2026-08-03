@@ -104,6 +104,11 @@ func main() {
 			CollectorID: cfg.CollectorID,
 			SourceID:    cfg.SFlowSourceID,
 			Daemon:      "flowcollectord",
+			// No mirror interface and no NetFlow export leg: sFlow arrives
+			// over UDP and only goes to ClickHouse. Declaring the shorter
+			// chain keeps the missing legs off the screen instead of reading
+			// them as loss.
+			Stages: []string{flowingest.StageReceiver, flowingest.StageClickHouse},
 		})
 		if err != nil {
 			log.Error("health reporter init", "err", err)
@@ -127,7 +132,7 @@ func main() {
 	healthTicker := time.NewTicker(cfg.HealthInterval)
 	defer healthTicker.Stop()
 
-	var prevInsertErrs, prevQueueDrops, prevUDPDrops uint64
+	var prevInsertErrs, prevQueueDrops, prevUDPDrops, prevCorruptionFrames uint64
 
 	for {
 		select {
@@ -167,6 +172,7 @@ func main() {
 					InsertErrsDelta:        insertErrsDelta,
 					QueueDropsDelta:        queueDropsDelta,
 					UDPQueueDropsDelta:     udpDropsDelta,
+					SpoolCorruptionDelta:   h.CorruptionFrames - prevCorruptionFrames,
 					LagSegmentsThreshold:   10,
 					WriterLagRowsThreshold: 100000,
 					DrainerAgeThreshold:    2 * time.Minute,
@@ -175,6 +181,7 @@ func main() {
 			prevInsertErrs = h.InsertErrs
 			prevQueueDrops = h.QueueDrops
 			prevUDPDrops = rx.UDPQueueDrops
+			prevCorruptionFrames = h.CorruptionFrames
 		}
 	}
 }
