@@ -273,7 +273,7 @@ const EXPLORER_RESULT_METRIC_COLUMNS = [
   },
   {
     key: 'fps',
-    title: 'Потоки/с',
+    title: 'Потоки/сек',
     width: 120,
     sortAccessor: (r) => r.fps,
     render: (r) => formatMetric(r.fps, 'fps'),
@@ -5049,7 +5049,7 @@ function formatMetric(v, metric) {
   if (metric === 'bps') return fmtBits(v);
   if (metric === 'volume') return fmtBytes(v);
   if (metric === 'pps') return `${fmtNum(v)} п/с`;
-  if (metric === 'fps') return `${fmtNum(v)} ф/с`;
+  if (metric === 'fps') return `${fmtNum(v)} потоки/сек`;
   return fmtNum(v);
 }
 
