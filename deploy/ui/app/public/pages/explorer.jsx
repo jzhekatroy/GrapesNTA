@@ -273,7 +273,7 @@ const EXPLORER_RESULT_METRIC_COLUMNS = [
   },
   {
     key: 'fps',
-    title: 'Потоки/сек',
+    title: 'Потоков/сек',
     width: 120,
     sortAccessor: (r) => r.fps,
     render: (r) => formatMetric(r.fps, 'fps'),
@@ -327,8 +327,8 @@ function buildExplorerMetricColumnDefs(meta) {
     title: col.title,
     align: 'right',
     width: col.width,
-    minWidth: 80,
-    maxWidth: 360,
+    minWidth: 64,
+    maxWidth: 220,
     num: true,
     headerClassName: 'explorer-col-metric-extra',
     cellClassName: 'explorer-col-metric-extra',
@@ -337,6 +337,72 @@ function buildExplorerMetricColumnDefs(meta) {
       <span className="mono">{col.render.length > 1 ? col.render(r, meta) : col.render(r)}</span>
     ),
   }));
+}
+
+const EXPLORER_TABLE_CELL_PAD = 28;
+const EXPLORER_TABLE_MONO_CHAR = 7.4;
+const EXPLORER_TABLE_TEXT_CHAR = 8.2;
+const EXPLORER_TABLE_DIM_EXTRA = 36;
+
+function measureExplorerTableText(text, { mono = false, pad = EXPLORER_TABLE_CELL_PAD } = {}) {
+  const sample = String(text ?? '');
+  const charW = mono ? EXPLORER_TABLE_MONO_CHAR : EXPLORER_TABLE_TEXT_CHAR;
+  return Math.ceil(sample.length * charW) + pad;
+}
+
+function fitExplorerTableColumnWidths(columns, rows, pinnedRows, { meta, metric, groupBy }) {
+  const sampleRows = [...(rows || []), ...(pinnedRows || [])];
+  if (!columns.length) return null;
+
+  const widths = {};
+  columns.forEach((col) => {
+    const minW = Number(col.minWidth) || 72;
+    const maxW = Number(col.maxWidth) || 800;
+
+    if (col.key === 'actions') {
+      widths[col.key] = Number(col.width) || 248;
+      return;
+    }
+
+    let contentW = measureExplorerTableText(col.title);
+
+    if (col.key.startsWith('dim-')) {
+      const dimId = col.key.slice(4);
+      const valueIdx = groupBy.indexOf(dimId);
+      const isAsn = dimId.endsWith('asn');
+      const mono = dimId.endsWith('ip') || dimId.endsWith('_mac');
+      sampleRows.forEach((row) => {
+        if (row.isOthers && valueIdx !== 0) return;
+        let text = '—';
+        if (row.isOthers) text = EXPLORER_OTHERS_LABEL;
+        else if (valueIdx >= 0) text = isAsn ? explorerAsnDisplayValue(row, valueIdx) : row.values[valueIdx];
+        contentW = Math.max(contentW, measureExplorerTableText(text, { mono }) + EXPLORER_TABLE_DIM_EXTRA);
+      });
+    } else if (col.key === 'metric') {
+      sampleRows.forEach((row) => {
+        contentW = Math.max(contentW, measureExplorerTableText(formatMetric(row.metric, metric), { mono: true }));
+      });
+    } else if (col.key === 'pct') {
+      contentW = Math.max(contentW, measureExplorerTableText(col.title, { mono: true }));
+      sampleRows.forEach((row) => {
+        contentW = Math.max(contentW, measureExplorerTableText(`${Number(row.pct || 0).toFixed(2)}%`, { mono: true }));
+      });
+    } else {
+      const metricColDef = EXPLORER_RESULT_METRIC_COLUMNS.find((c) => c.key === col.key);
+      if (metricColDef) {
+        sampleRows.forEach((row) => {
+          const rendered = metricColDef.render.length > 1
+            ? metricColDef.render(row, meta)
+            : metricColDef.render(row);
+          contentW = Math.max(contentW, measureExplorerTableText(rendered, { mono: true }));
+        });
+      }
+    }
+
+    widths[col.key] = Math.max(minW, Math.min(maxW, contentW));
+  });
+
+  return widths;
 }
 
 function isBuiltinExplorerPreset(query) {
@@ -1870,9 +1936,9 @@ function buildExplorerResultColumns({
     return {
       key: `dim-${dimId}`,
       title: dimensionById[dimId]?.label || dimId,
-      width: 240,
-      minWidth: 100,
-      maxWidth: 600,
+      width: 160,
+      minWidth: 72,
+      maxWidth: 520,
       headerClassName: 'explorer-col-dim',
       cellClassName: 'explorer-col-dim',
       sortAccessor: (r) => {
@@ -1924,9 +1990,9 @@ function buildExplorerResultColumns({
     key: 'metric',
     title: metricLabel,
     align: 'right',
-    width: 140,
-    minWidth: 90,
-    maxWidth: 360,
+    width: 112,
+    minWidth: 72,
+    maxWidth: 220,
     num: true,
     headerClassName: 'explorer-col-metric',
     cellClassName: 'explorer-col-metric',
@@ -1938,9 +2004,9 @@ function buildExplorerResultColumns({
     key: 'pct',
     title: `Доля · ${metricLabel}`,
     align: 'right',
-    width: 90,
+    width: 88,
     minWidth: 72,
-    maxWidth: 240,
+    maxWidth: 200,
     num: true,
     headerClassName: 'explorer-col-pct',
     cellClassName: 'explorer-col-pct',
@@ -2895,6 +2961,14 @@ function PageExplorer({ onNavigate, displayTimezone }) {
     onToggleOthersOnChart: toggleOthersOnChart,
   }), [appliedGroupBy, dimensions, dimensionById, appliedMetricLabel, appliedMetric, meta, showAllResultColumns, addFilterFromCell, focusRow, excludeRow, toggleDynamicsSeries, dynamicsSeriesIds, showOthersOnChart]);
 
+  const fitExplorerResultColumns = useCallback((columns, tableRows, pinnedRows) => (
+    fitExplorerTableColumnWidths(columns, tableRows, pinnedRows, {
+      meta,
+      metric: appliedMetric,
+      groupBy: appliedGroupBy,
+    })
+  ), [meta, appliedMetric, appliedGroupBy]);
+
   const visibleResults = useMemo(
     () => sliceExplorerVisualRows(results, visualLimit),
     [results, visualLimit],
@@ -3220,6 +3294,7 @@ function PageExplorer({ onNavigate, displayTimezone }) {
                             </>
                           )}
                           columns={resultTableColumns}
+                          fitColumnWidths={fitExplorerResultColumns}
                         />
                       </div>
                     )}
@@ -4905,7 +4980,8 @@ function ExplorerTotalChart({
           bucketSeconds={bucketSeconds}
           displayTimezone={displayTimezone}
           valueFormatter={(value) => formatMetric(value, metric)}
-          axisFormatter={(value) => formatMetric(value, metric)}
+          axisFormatter={(value) => formatMetricAxis(value, metric)}
+          yAxisUnit={metricAxisUnit(metric)}
         />
       </div>
       <div style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-muted)' }}>
@@ -5014,7 +5090,8 @@ function DynamicsChartExplorer({
               bucketSeconds={bucketSeconds}
               displayTimezone={displayTimezone}
               valueFormatter={(v) => formatMetric(v, metric)}
-              axisFormatter={(v) => formatMetric(v, metric)}
+              axisFormatter={(v) => formatMetricAxis(v, metric)}
+              yAxisUnit={metricAxisUnit(metric)}
             />
           </div>
           <div style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-muted)', marginTop: -4 }}>
@@ -5049,8 +5126,29 @@ function formatMetric(v, metric) {
   if (metric === 'bps') return fmtBits(v);
   if (metric === 'volume') return fmtBytes(v);
   if (metric === 'pps') return `${fmtNum(v)} п/с`;
-  if (metric === 'fps') return `${fmtNum(v)} потоки/сек`;
+  if (metric === 'fps') return `${fmtNum(v)} потоков/сек`;
   return fmtNum(v);
+}
+
+function formatMetricAxis(v, metric) {
+  if (metric === 'bps' && typeof fmtBitsAxis === 'function') return fmtBitsAxis(v);
+  const n = Number(v);
+  if (!Number.isFinite(n)) return '0';
+  if (metric === 'pps' || metric === 'fps') {
+    if (n >= 1e6) return `${(n / 1e6).toFixed(n >= 10e6 ? 0 : 1)}M`;
+    if (n >= 1e3) return `${(n / 1e3).toFixed(n >= 10e3 ? 0 : 1)}k`;
+    return n < 10 && !Number.isInteger(n) ? n.toFixed(1) : String(Math.round(n));
+  }
+  if (typeof fmtCompact === 'function') return fmtCompact(n);
+  return String(Math.round(n));
+}
+
+function metricAxisUnit(metric) {
+  if (metric === 'bps') return 'бит/с';
+  if (metric === 'volume') return 'байт';
+  if (metric === 'pps') return 'п/с';
+  if (metric === 'fps') return 'потоков/сек';
+  return '';
 }
 
 function SaveObservationModal({

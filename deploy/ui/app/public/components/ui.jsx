@@ -334,6 +334,7 @@ function DataTable({
   pageSize = 10,
   dense,
   footerNote,
+  fitColumnWidths,
   pinnedRows,        // rows rendered after the page, outside sorting and paging
 }) {
   const [sort, setSort] = useState(initialSort || null);
@@ -345,6 +346,11 @@ function DataTable({
   ));
   const resizeRef = useRef(null);
   const colKeysSig = columns.map((c) => c.key).join('\0');
+  const rowFitSig = useMemo(() => {
+    const all = [...(rows || []), ...(pinnedRows || [])];
+    if (!all.length) return '0';
+    return `${all.length}\0${all.map((r) => r[rowKey]).join('\0')}`;
+  }, [rows, pinnedRows, rowKey]);
 
   useEffect(() => {
     setColVis((prev) => Object.fromEntries(
@@ -354,6 +360,20 @@ function DataTable({
       columns.map((c) => [c.key, prev[c.key] ?? (Number(c.width) || 160)]),
     ));
   }, [colKeysSig]);
+
+  useEffect(() => {
+    if (typeof fitColumnWidths !== 'function') return undefined;
+    const fitted = fitColumnWidths(columns, rows, pinnedRows);
+    if (!fitted) return undefined;
+    setColWidths((prev) => {
+      const next = { ...prev };
+      columns.forEach((c) => {
+        if (fitted[c.key] != null) next[c.key] = fitted[c.key];
+      });
+      return next;
+    });
+    return undefined;
+  }, [colKeysSig, rowFitSig, fitColumnWidths, columns, rows, pinnedRows]);
 
   useEffect(() => () => {
     const drag = resizeRef.current;

@@ -2454,7 +2454,6 @@ input, button, select, textarea { font-family: inherit; color: inherit; }
 }
 .card--explorer-results .table {
   width: max-content;
-  min-width: 100%;
 }
 .card--explorer-results .table th,
 .card--explorer-results .table td {
@@ -2791,6 +2790,7 @@ input, button, select, textarea { font-family: inherit; color: inherit; }
 .explorer-dynamics-chart .dual-chart {
   width: 100%;
   max-width: 100%;
+  padding-left: 2px;
 }
 
 .explorer-dynamics-chart .dual-chart__svg {
