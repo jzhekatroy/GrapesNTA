@@ -36,7 +36,6 @@ const DEFAULT_EXPLORER_PRESETS = [
 const EXPLORER_DEFAULT_VISUAL_LIMIT = 5;
 const EXPLORER_DEFAULT_FETCH_LIMIT = 25;
 const EXPLORER_ON_DEMAND_FETCH_LIMITS = [50, 100];
-const EXPLORER_DYNAMICS_MAX_SERIES = 5;
 const EXPLORER_CHART_HEIGHT = 196;
 const EXPLORER_VIS_DEFAULT = 'data';
 
@@ -74,18 +73,9 @@ function sliceExplorerVisualRows(rows, visualLimit) {
 }
 
 function defaultDynamicsSeriesIds(rows, visualLimit) {
-  return new Set(
-    sliceExplorerVisualRows(rows, visualLimit)
-      .slice(0, EXPLORER_DYNAMICS_MAX_SERIES)
-      .map((r) => r.id),
-  );
+  return new Set(sliceExplorerVisualRows(rows, visualLimit).map((r) => r.id));
 }
 
-
-function pruneDynamicsSeriesIds(seriesIds, results) {
-  const resultIdSet = new Set(results.map((r) => r.id));
-  return new Set([...seriesIds].filter((id) => resultIdSet.has(id)));
-}
 
 function resolveExplorerFetchLimit(queryLimit) {
   const n = Number(queryLimit);
@@ -1862,18 +1852,16 @@ function buildExplorerResultColumns({
   metricLabel,
   metric,
   meta,
-  showAllGroups,
   showAllMetrics,
   onAddFilter,
   onFocusRow,
   onExcludeRow,
-  onDynamicsRow,
-  selectedDynamicsSeriesIds,
+  chartSeriesIds,
   onToggleDynamicsSeries,
+  showOthersOnChart = false,
+  onToggleOthersOnChart,
 }) {
-  const visibleDimensionIds = showAllGroups
-    ? dimensions.map((d) => d.id)
-    : groupBy;
+  const visibleDimensionIds = groupBy;
 
   const groupCols = visibleDimensionIds.map((dimId, colIdx) => {
     const valueIdx = groupBy.indexOf(dimId);
@@ -1916,7 +1904,7 @@ function buildExplorerResultColumns({
         const rawTooltip = isTcpFlags && r.rawValues?.[valueIdx] != null
           ? ` · raw ${r.rawValues[valueIdx]}`
           : '';
-        const showColorSwatch = dimId !== 'dst_ip' && (colIdx === 0 || selectedDynamicsSeriesIds?.has(r.id));
+        const showColorSwatch = dimId !== 'dst_ip' && (colIdx === 0 || chartSeriesIds?.has(r.id));
         const displayValue = isAsn ? explorerAsnDisplayValue(r, valueIdx) : r.values[valueIdx];
         return (
           <ExplorerGroupCell
@@ -1963,18 +1951,24 @@ function buildExplorerResultColumns({
   const actionsCol = {
     key: 'actions',
     title: 'Действия',
-    width: 220,
+    width: 248,
     resizable: false,
     sortAccessor: () => '',
     headerClassName: 'explorer-col-actions',
     cellClassName: 'explorer-col-actions',
-    render: (r) => (r.isOthers ? null : (
+    render: (r) => (r.isOthers ? (
+      <div className="explorer-row-actions row" onClick={(e) => e.stopPropagation()}>
+        <ExplorerChartToggleButton
+          onChart={showOthersOnChart}
+          onClick={onToggleOthersOnChart}
+        />
+      </div>
+    ) : (
       <ExplorerRowActions
         row={r}
         onFocus={onFocusRow}
         onExclude={onExcludeRow}
-        onDynamics={onDynamicsRow}
-        selectedDynamicsSeriesIds={selectedDynamicsSeriesIds}
+        chartSeriesIds={chartSeriesIds}
         onToggleDynamicsSeries={onToggleDynamicsSeries}
       />
     )),
@@ -2054,7 +2048,6 @@ function PageExplorer({ onNavigate, displayTimezone }) {
   const [showObservationSave, setShowObservationSave] = useState(false);
   const [editingSaved, setEditingSaved] = useState(null);
   const canWriteObservation = AuthAccess.canWritePage('observations') || canWrite;
-  const [selected, setSelected] = useState(new Set());
   const [hasAppliedQuery, setHasAppliedQuery] = useState(false);
   const [appliedSnapshot, setAppliedSnapshot] = useState(null);
   const [queryVersion, setQueryVersion] = useState(0);
@@ -2071,14 +2064,14 @@ function PageExplorer({ onNavigate, displayTimezone }) {
   const [lastApplied, setLastApplied] = useState(() => loadLastAppliedExplorerQuery());
   const [exporting, setExporting] = useState(false);
   const [showAllResultColumns, setShowAllResultColumns] = useState(true);
-  const [showAllGroupColumns, setShowAllGroupColumns] = useState(false);
   const [visualLimit, setVisualLimit] = useState(EXPLORER_DEFAULT_VISUAL_LIMIT);
   const [dynamicsSeriesIds, setDynamicsSeriesIds] = useState(() => new Set());
-  const [dynamicsFocusRowId, setDynamicsFocusRowId] = useState(null);
+  const [showOthersOnChart, setShowOthersOnChart] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [periodZoomStack, setPeriodZoomStack] = useState([]);
   const periodRef = React.useRef({ timeRange, customPeriod });
   const dynamicsQueryVersionRef = React.useRef(queryVersion);
+  const dynamicsVisualLimitRef = React.useRef(visualLimit);
   const skipDynamicsDefaultRef = React.useRef(false);
   const mountRestoreDoneRef = React.useRef(false);
 
@@ -2342,45 +2335,34 @@ function PageExplorer({ onNavigate, displayTimezone }) {
   );
 
   useEffect(() => {
-    setDynamicsFocusRowId(null);
-  }, [queryVersion]);
-
-  useEffect(() => {
     if (!hasAppliedQuery || !results.length) {
-      if (!results.length) {
-        setDynamicsSeriesIds(new Set());
-        setDynamicsFocusRowId(null);
-      }
+      if (!results.length) setDynamicsSeriesIds(new Set());
       return;
     }
 
     const queryChanged = dynamicsQueryVersionRef.current !== queryVersion;
-    if (queryChanged) dynamicsQueryVersionRef.current = queryVersion;
+    const limitChanged = dynamicsVisualLimitRef.current !== visualLimit;
 
-    if (dynamicsFocusRowId) {
-      if (results.some((r) => r.id === dynamicsFocusRowId)) {
-        setDynamicsSeriesIds(new Set([dynamicsFocusRowId]));
-      } else {
-        setDynamicsFocusRowId(null);
-        setDynamicsSeriesIds(defaultDynamicsSeriesIds(results, visualLimit));
-      }
+    if (queryChanged) {
+      dynamicsQueryVersionRef.current = queryVersion;
+      dynamicsVisualLimitRef.current = visualLimit;
+      setDynamicsSeriesIds(defaultDynamicsSeriesIds(results, visualLimit));
       return;
     }
 
-    if (queryChanged) {
+    if (limitChanged) {
+      dynamicsVisualLimitRef.current = visualLimit;
       setDynamicsSeriesIds(defaultDynamicsSeriesIds(results, visualLimit));
       return;
     }
 
     setDynamicsSeriesIds((prev) => {
-      const pruned = pruneDynamicsSeriesIds(prev, results);
-      if (prev.size === 0) {
-        return defaultDynamicsSeriesIds(results, visualLimit);
-      }
-      if (pruned.size > 0) return pruned;
-      return defaultDynamicsSeriesIds(results, visualLimit);
+      const resultIds = new Set(results.map((r) => r.id));
+      const pruned = new Set([...prev].filter((id) => resultIds.has(id)));
+      if (pruned.size === 0) return defaultDynamicsSeriesIds(results, visualLimit);
+      return pruned;
     });
-  }, [queryVersion, visualLimit, rows, hasAppliedQuery, dynamicsFocusRowId, results]);
+  }, [queryVersion, visualLimit, rows, hasAppliedQuery, results]);
 
   const dynamicsSeriesKey = [...dynamicsSeriesIds].sort().join('|');
   useEffect(() => {
@@ -2484,7 +2466,7 @@ function PageExplorer({ onNavigate, displayTimezone }) {
     }
     skipDynamicsDefaultRef.current = false;
     setDynamicsSeriesIds(new Set());
-    setDynamicsFocusRowId(null);
+    setShowOthersOnChart(false);
     setAppliedSnapshot(buildExplorerQuerySnapshot({
       ...snapshot,
       limit: resolveExplorerFetchLimit(snapshot.limit ?? limit),
@@ -2523,10 +2505,9 @@ function PageExplorer({ onNavigate, displayTimezone }) {
     setVis(normalizeExplorerVis(snapshot.vis));
     setVisualLimit(EXPLORER_DEFAULT_VISUAL_LIMIT);
     setLimit(EXPLORER_DEFAULT_VISUAL_LIMIT);
-    setSelected(new Set());
     skipDynamicsDefaultRef.current = false;
     setDynamicsSeriesIds(new Set());
-    setDynamicsFocusRowId(null);
+    setShowOthersOnChart(false);
     setAppliedSnapshot(snapshot);
     setHasAppliedQuery(true);
     setQueryVersion((v) => v + 1);
@@ -2546,10 +2527,9 @@ function PageExplorer({ onNavigate, displayTimezone }) {
     setVis(normalizeExplorerVis(lastApplied.vis));
     setVisualLimit(lastApplied.visualLimit ?? EXPLORER_DEFAULT_VISUAL_LIMIT);
     setLimit(lastApplied.visualLimit ?? EXPLORER_DEFAULT_VISUAL_LIMIT);
-    setSelected(new Set());
     skipDynamicsDefaultRef.current = false;
     setDynamicsSeriesIds(new Set());
-    setDynamicsFocusRowId(null);
+    setShowOthersOnChart(false);
     setAppliedSnapshot(lastApplied);
     setHasAppliedQuery(true);
     setQueryVersion((v) => v + 1);
@@ -2849,36 +2829,12 @@ function PageExplorer({ onNavigate, displayTimezone }) {
     applyFiltersAndRun(nextFilters, 'Строка исключена', 'Значения строки добавлены как исключение.');
   };
 
-  const showRowDynamics = (row) => {
-    setVis('data');
-    setDynamicsFocusRowId(row.id);
-    setDynamicsSeriesIds(new Set([row.id]));
-  };
-
-  const clearDynamicsFocus = () => {
-    setDynamicsFocusRowId(null);
-    setDynamicsSeriesIds(defaultDynamicsSeriesIds(results, visualLimit));
-  };
-
   const toggleDynamicsSeries = (rowId) => {
-    if (dynamicsFocusRowId) {
-      if (dynamicsFocusRowId === rowId) clearDynamicsFocus();
-      return;
-    }
+    setVis('data');
     setDynamicsSeriesIds((prev) => {
       const next = new Set(prev);
       if (next.has(rowId)) next.delete(rowId);
-      else {
-        if (next.size >= EXPLORER_DYNAMICS_MAX_SERIES) {
-          pushToast({
-            kind: 'warning',
-            title: 'Лимит серий',
-            desc: `Можно сравнить не более ${EXPLORER_DYNAMICS_MAX_SERIES} серий.`,
-          });
-          return prev;
-        }
-        next.add(rowId);
-      }
+      else next.add(rowId);
       return next;
     });
   };
@@ -2920,12 +2876,7 @@ function PageExplorer({ onNavigate, displayTimezone }) {
     setLimit(shown);
   };
 
-  const drillDownSelected = () => {
-    const row = results.find((r) => selected.has(r.id));
-    if (!row) return;
-    focusRow(row);
-    setSelected(new Set());
-  };
+  const toggleOthersOnChart = () => setShowOthersOnChart((v) => !v);
 
   const resultTableColumns = useMemo(() => buildExplorerResultColumns({
     groupBy: appliedGroupBy,
@@ -2934,24 +2885,28 @@ function PageExplorer({ onNavigate, displayTimezone }) {
     metricLabel: appliedMetricLabel,
     metric: appliedMetric,
     meta,
-    showAllGroups: showAllGroupColumns,
     showAllMetrics: showAllResultColumns,
     onAddFilter: addFilterFromCell,
     onFocusRow: focusRow,
     onExcludeRow: excludeRow,
-    onDynamicsRow: showRowDynamics,
-    selectedDynamicsSeriesIds: dynamicsSeriesIds,
+    chartSeriesIds: dynamicsSeriesIds,
     onToggleDynamicsSeries: toggleDynamicsSeries,
-  }), [appliedGroupBy, dimensions, dimensionById, appliedMetricLabel, appliedMetric, meta, showAllGroupColumns, showAllResultColumns, addFilterFromCell, focusRow, excludeRow, showRowDynamics, dynamicsSeriesIds, toggleDynamicsSeries]);
+    showOthersOnChart,
+    onToggleOthersOnChart: toggleOthersOnChart,
+  }), [appliedGroupBy, dimensions, dimensionById, appliedMetricLabel, appliedMetric, meta, showAllResultColumns, addFilterFromCell, focusRow, excludeRow, toggleDynamicsSeries, dynamicsSeriesIds, showOthersOnChart]);
 
   const visibleResults = useMemo(
     () => sliceExplorerVisualRows(results, visualLimit),
     [results, visualLimit],
   );
-  const othersEligible = appliedGroupBy.length > 0
-    && Boolean(EXPLORER_OTHERS_METRIC[appliedMetric])
-    && (!meta?.pctScope || meta.pctScope === 'full_filtered')
-    && !(meta?.rowsHidden > 0);
+  const othersRow = useMemo(() => buildExplorerOthersRow({
+    shownRows: visibleResults,
+    summary,
+    meta,
+    metric: appliedMetric,
+    groupBy: appliedGroupBy,
+  }), [visibleResults, summary, meta, appliedMetric, appliedGroupBy]);
+  const othersChartAvailable = Boolean(othersRow);
   const appliedThresholds = activeQuery?.thresholds || [];
   const thresholdEmptyState = hasAppliedQuery
     && source !== 'loading'
@@ -2973,13 +2928,6 @@ function PageExplorer({ onNavigate, displayTimezone }) {
     timeRange,
     customPeriod,
   });
-  const othersRow = useMemo(() => buildExplorerOthersRow({
-    shownRows: visibleResults,
-    summary,
-    meta,
-    metric: appliedMetric,
-    groupBy: appliedGroupBy,
-  }), [visibleResults, summary, meta, appliedMetric, appliedGroupBy]);
   const activeVisMeta = VIS_TYPES.find((v) => v.id === vis) || VIS_TYPES[0];
 
   const idleState = !hasAppliedQuery && source !== 'loading';
@@ -3165,18 +3113,35 @@ function PageExplorer({ onNavigate, displayTimezone }) {
 
             {appliedGroupBy.length > 0 && (() => {
               const analysisToolbar = (
-                <div className="row" style={{ gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-                  <ExplorerAnalysisTabs value={vis} onChange={setVis} compact />
-                  <ExplorerVisualLimitControl
-                    total={results.length}
-                    fetchLimit={fetchLimit}
-                    value={visualLimit}
-                    loadingMore={refreshing}
-                    onChange={applyDisplayLimit}
-                    onRequestFetchLimit={requestFetchLimit}
-                  />
-                  <Button kind="ghost" size="sm" icon="refresh" onClick={runQuery} />
-                </div>
+                <>
+                  <div className="explorer-results-tools__cluster">
+                    <ExplorerAnalysisTabs value={vis} onChange={setVis} compact />
+                    <div className="explorer-results-tools__limit-block">
+                      <ExplorerVisualLimitControl
+                        total={results.length}
+                        fetchLimit={fetchLimit}
+                        value={visualLimit}
+                        loadingMore={refreshing}
+                        onChange={applyDisplayLimit}
+                        onRequestFetchLimit={requestFetchLimit}
+                      />
+                    </div>
+                    <Button kind="ghost" size="sm" icon="refresh" onClick={runQuery} />
+                  </div>
+                  <div className="explorer-results-tools__actions">
+                    <Button
+                      kind={showAllResultColumns ? 'primary' : 'ghost'}
+                      size="sm"
+                      icon="sliders"
+                      onClick={() => setShowAllResultColumns((v) => !v)}
+                    >
+                      {showAllResultColumns ? 'Скрыть поля' : 'Все поля'}
+                    </Button>
+                    {vis === 'data' && (
+                      <Button kind="ghost" size="sm" icon="download" onClick={exportCsv} disabled={!hasAppliedQuery || !results.length || exporting}>CSV</Button>
+                    )}
+                  </div>
+                </>
               );
 
               const analysisBody = isRefreshingData ? (
@@ -3201,41 +3166,13 @@ function PageExplorer({ onNavigate, displayTimezone }) {
                   <Card
                     className="card--explorer-results"
                     title="Результаты"
-                    subtitle="График динамики и таблица: управляйте сериями через «На график» / «Скрыть с графика», строки — для drill-down"
+                    subtitle="График динамики и таблица: серии по селектору «Показать», отдельные строки — «Показать» / «Скрыть с графика»"
                     loadMs={loadMs}
                     serverMs={serverMs}
                     pad="0"
                     tools={(
                       <div className="explorer-results-tools">
                         {analysisToolbar}
-                        {selected.size > 0 && (
-                          <>
-                            <span style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-secondary)', whiteSpace: 'nowrap' }}>
-                              Выбрано: <b style={{ color: 'var(--fg-primary)' }}>{selected.size}</b>
-                            </span>
-                            <Button kind="ghost" size="sm" icon="filter" onClick={drillDownSelected}>Drill-down</Button>
-                            <Button kind="ghost" size="sm" icon="x" onClick={() => setSelected(new Set())}>Сброс</Button>
-                          </>
-                        )}
-                        {dimensions.length > 1 && (
-                          <Button
-                            kind={showAllGroupColumns ? 'primary' : 'ghost'}
-                            size="sm"
-                            icon="layers"
-                            onClick={() => setShowAllGroupColumns((v) => !v)}
-                          >
-                            {showAllGroupColumns ? 'Скрыть группировки' : 'Все группировки'}
-                          </Button>
-                        )}
-                        <Button
-                          kind={showAllResultColumns ? 'primary' : 'ghost'}
-                          size="sm"
-                          icon="sliders"
-                          onClick={() => setShowAllResultColumns((v) => !v)}
-                        >
-                          {showAllResultColumns ? 'Скрыть поля' : 'Все поля'}
-                        </Button>
-                        <Button kind="ghost" size="sm" icon="download" onClick={exportCsv} disabled={!hasAppliedQuery || !results.length || exporting}>CSV</Button>
                       </div>
                     )}
                   >
@@ -3251,29 +3188,20 @@ function PageExplorer({ onNavigate, displayTimezone }) {
                             displayTimezone={displayTimezone}
                             chartLongRange={isLongChartRange(appliedTimeRange, appliedCustomPeriod)}
                             selectedSeriesIds={dynamicsSeriesIds}
-                            focusRowId={dynamicsFocusRowId}
-                            onClearFocus={clearDynamicsFocus}
                             onRangeSelect={applyExplorerChartRangeZoom}
                             bucketSeconds={explorerGranularityBucketSeconds(meta?.granularity)}
-                            totalPoints={othersEligible ? timeseries : null}
+                            totalPoints={othersChartAvailable ? timeseries : null}
+                            showOthers={showOthersOnChart}
                           />
                         </div>
                         <DataTable
                           rows={visibleResults}
                           rowKey="id"
                           resizableColumns
-                          selectable
-                          selected={selected}
-                          onSelectChange={setSelected}
-                          onRowClick={(row) => {
-                            setSelected((prev) => {
-                              const next = new Set(prev);
-                              if (next.has(row.id)) next.delete(row.id);
-                              else next.add(row.id);
-                              return next;
-                            });
+                          getRowClassName={(row) => {
+                            if (row.isOthers) return showOthersOnChart ? 'is-dynamics-active' : '';
+                            return dynamicsSeriesIds.has(row.id) ? 'is-dynamics-active' : '';
                           }}
-                          getRowClassName={(row) => (dynamicsSeriesIds.has(row.id) ? 'is-dynamics-active' : '')}
                           pinnedRows={othersRow ? [othersRow] : null}
                           pageSize={Math.max(resolveExplorerVisualCount(visualLimit, results.length), 1)}
                           initialSort={{ key: appliedDefaultSortKey, dir: 'desc' }}
@@ -3311,7 +3239,11 @@ function PageExplorer({ onNavigate, displayTimezone }) {
                   subtitle={`${timeRangeLabel(appliedTimeRange, appliedCustomPeriod)} · ${meta?.dataTable || 'flows_raw'}${source === 'error' ? ` · ${error || ApiClient.LOAD_FAILED}` : ''}`}
                   loadMs={loadMs}
                   serverMs={serverMs}
-                  tools={analysisToolbar}
+                  tools={(
+                    <div className="explorer-results-tools">
+                      {analysisToolbar}
+                    </div>
+                  )}
                 >
                   {analysisBody || (
                     <ContributionBarsExplorer
@@ -3320,7 +3252,10 @@ function PageExplorer({ onNavigate, displayTimezone }) {
                       metricLabel={appliedMetricLabel}
                       onFocus={focusRow}
                       onExclude={excludeRow}
-                      onDynamics={showRowDynamics}
+                      onToggleDynamicsSeries={toggleDynamicsSeries}
+                      chartSeriesIds={dynamicsSeriesIds}
+                      showOthersOnChart={showOthersOnChart}
+                      onToggleOthersOnChart={toggleOthersOnChart}
                     />
                   )}
                 </Card>
@@ -3379,53 +3314,69 @@ function ExplorerVisualLimitControl({
   if (!canExpandInstant && fetchLimit < 50) return null;
 
   return (
-    <div className="explorer-visual-limit row">
-      <span className="explorer-visual-limit__summary">
-        Загружено {total} · показано {shown}
-      </span>
-      <div className="seg explorer-visual-limit__seg">
-        {instantOptions.map((opt) => (
-          <button
-            key={String(opt)}
-            type="button"
-            className={isExplorerDisplayLimitActive(opt, value, fetchLimit) ? 'is-active' : ''}
-            disabled={loadingMore}
-            onClick={() => onChange(opt)}
-          >
-            {opt}
-          </button>
-        ))}
-        {EXPLORER_ON_DEMAND_FETCH_LIMITS.map((opt) => {
-          const loaded = fetchLimit >= opt;
-          const active = loaded && isExplorerDisplayLimitActive(opt, value, fetchLimit);
-          return (
+    <div className="explorer-visual-limit">
+      <div className="explorer-visual-limit__main row">
+        <span className="explorer-visual-limit__summary">
+          Загружено {total} · показано {shown}
+        </span>
+        <div className="seg explorer-visual-limit__seg">
+          {instantOptions.map((opt) => (
             <button
               key={String(opt)}
               type="button"
-              className={active ? 'is-active' : ''}
+              className={isExplorerDisplayLimitActive(opt, value, fetchLimit) ? 'is-active' : ''}
               disabled={loadingMore}
-              title={loaded ? `Показать top ${opt}` : `Загрузить top ${opt}`}
-              onClick={() => {
-                if (loaded) onChange(opt);
-                else onRequestFetchLimit?.(opt);
-              }}
+              onClick={() => onChange(opt)}
             >
-              {loaded ? opt : `+${opt}`}
+              {opt}
             </button>
-          );
-        })}
-        {fetchLimit > EXPLORER_DEFAULT_VISUAL_LIMIT && (
-          <button
-            type="button"
-            className={value === 'all' ? 'is-active' : ''}
-            disabled={loadingMore}
-            onClick={() => onChange('all')}
-          >
-            Все
-          </button>
-        )}
+          ))}
+          {EXPLORER_ON_DEMAND_FETCH_LIMITS.map((opt) => {
+            const loaded = fetchLimit >= opt;
+            const active = loaded && isExplorerDisplayLimitActive(opt, value, fetchLimit);
+            return (
+              <button
+                key={String(opt)}
+                type="button"
+                className={active ? 'is-active' : ''}
+                disabled={loadingMore}
+                title={loaded ? `Показать top ${opt}` : `Загрузить top ${opt}`}
+                onClick={() => {
+                  if (loaded) onChange(opt);
+                  else onRequestFetchLimit?.(opt);
+                }}
+              >
+                {loaded ? opt : `+${opt}`}
+              </button>
+            );
+          })}
+          {fetchLimit > EXPLORER_DEFAULT_VISUAL_LIMIT && (
+            <button
+              type="button"
+              className={value === 'all' ? 'is-active' : ''}
+              disabled={loadingMore}
+              onClick={() => onChange('all')}
+            >
+              Все
+            </button>
+          )}
+        </div>
       </div>
     </div>
+  );
+}
+
+function ExplorerChartToggleButton({ onChart, onClick, disabled = false }) {
+  return (
+    <button
+      type="button"
+      className={`badge explorer-row-actions__btn${onChart ? ' badge--info' : ''}`}
+      title={onChart ? 'Скрыть серию с графика динамики' : 'Показать серию на графике динамики'}
+      disabled={disabled}
+      onClick={onClick}
+    >
+      <ExplorerActionLabel full={onChart ? 'Скрыть с графика' : 'Показать'} short={onChart ? 'Скрыть' : 'Показать'} />
+    </button>
   );
 }
 
@@ -3442,12 +3393,10 @@ function ExplorerRowActions({
   row,
   onFocus,
   onExclude,
-  onDynamics,
-  selectedDynamicsSeriesIds,
+  chartSeriesIds,
   onToggleDynamicsSeries,
 }) {
-  const onChart = selectedDynamicsSeriesIds?.has(row.id);
-  const hasDynamicsToggle = typeof onToggleDynamicsSeries === 'function';
+  const onChart = chartSeriesIds?.has(row.id);
   return (
     <div className="explorer-row-actions row" onClick={(e) => e.stopPropagation()}>
       <button type="button" className="badge explorer-row-actions__btn" title="Добавить значения строки в фильтр" onClick={() => onFocus?.(row)}>
@@ -3456,20 +3405,14 @@ function ExplorerRowActions({
       <button type="button" className="badge explorer-row-actions__btn" title="Исключить значения строки из выборки" onClick={() => onExclude?.(row)}>
         <ExplorerActionLabel full="Исключить" short="Искл." />
       </button>
-      {hasDynamicsToggle ? (
-        <button
-          type="button"
-          className={`badge explorer-row-actions__btn${onChart ? ' badge--info' : ''}`}
-          title={onChart ? 'Скрыть серию с графика динамики' : 'Показать серию на графике динамики'}
-          onClick={() => onToggleDynamicsSeries(row.id)}
-        >
-          <ExplorerActionLabel full={onChart ? 'Скрыть с графика' : 'На график'} short={onChart ? 'Скрыть' : 'График'} />
-        </button>
-      ) : (
-        <button type="button" className="badge explorer-row-actions__btn" title="Показать динамику для этой строки" onClick={() => onDynamics?.(row)}>
-          <ExplorerActionLabel full="На график" short="График" />
-        </button>
-      )}
+      <button
+        type="button"
+        className={`badge explorer-row-actions__btn${onChart ? ' badge--info' : ''}`}
+        title={onChart ? 'Скрыть серию с графика динамики' : 'Показать серию на графике динамики'}
+        onClick={() => onToggleDynamicsSeries?.(row.id)}
+      >
+        <ExplorerActionLabel full={onChart ? 'Скрыть с графика' : 'Показать'} short={onChart ? 'Скрыть' : 'Показать'} />
+      </button>
     </div>
   );
 }
@@ -4861,7 +4804,10 @@ function ContributionBarsExplorer({
   metricLabel,
   onFocus,
   onExclude,
-  onDynamics,
+  chartSeriesIds,
+  onToggleDynamicsSeries,
+  showOthersOnChart = false,
+  onToggleOthersOnChart,
 }) {
   if (!results.length) {
     return (
@@ -4891,13 +4837,21 @@ function ContributionBarsExplorer({
             <div className="explorer-bars__track">
               <div className="explorer-bars__fill" style={{ width: `${widthPct}%`, background: row.color }} />
             </div>
-            {!row.isOthers && (
+            {!row.isOthers ? (
               <ExplorerRowActions
                 row={row}
                 onFocus={onFocus}
                 onExclude={onExclude}
-                onDynamics={onDynamics}
+                chartSeriesIds={chartSeriesIds}
+                onToggleDynamicsSeries={onToggleDynamicsSeries}
               />
+            ) : (
+              <div className="explorer-row-actions row">
+                <ExplorerChartToggleButton
+                  onChart={showOthersOnChart}
+                  onClick={onToggleOthersOnChart}
+                />
+              </div>
             )}
           </div>
         );
@@ -4946,6 +4900,7 @@ function ExplorerTotalChart({
           lines={[{ key: 'value', label: metricLabel || metric, color: '#7381f4' }]}
           height={EXPLORER_CHART_HEIGHT}
           mode="bw"
+          gapAsZero
           onRangeSelect={onRangeSelect}
           bucketSeconds={bucketSeconds}
           displayTimezone={displayTimezone}
@@ -4969,21 +4924,20 @@ function DynamicsChartExplorer({
   displayTimezone,
   chartLongRange,
   selectedSeriesIds,
-  focusRowId = null,
-  onClearFocus,
   onRangeSelect,
   bucketSeconds = 300,
   totalPoints = null,
+  showOthers = false,
 }) {
   const [chartKey, setChartKey] = useState(0);
+  const selectedSeriesKey = [...selectedSeriesIds].sort().join('|');
   useEffect(() => {
     if (active) setChartKey((k) => k + 1);
-  }, [active, focusRowId]);
+  }, [active, selectedSeriesKey, showOthers]);
   const seriesByRow = resultSeries?.seriesByRow || {};
   const resultIdSet = new Set(results.map((r) => r.id));
   const selectedIds = [...selectedSeriesIds].filter((id) => resultIdSet.has(id));
   const chartRowIds = selectedIds;
-  const focusedRow = focusRowId ? results.find((r) => r.id === focusRowId) : null;
 
   const lines = results.filter((r) => chartRowIds.includes(r.id)).map((row) => ({
     key: row.id,
@@ -5021,7 +4975,7 @@ function DynamicsChartExplorer({
       }
     }
   }
-  if (hasOthers) {
+  if (showOthers && hasOthers) {
     lines.push({ key: EXPLORER_OTHERS_ID, label: EXPLORER_OTHERS_LABEL, color: EXPLORER_OTHERS_COLOR });
   }
 
@@ -5029,6 +4983,10 @@ function DynamicsChartExplorer({
     .sort((a, b) => (resolvePointEpochMs(a) || 0) - (resolvePointEpochMs(b) || 0))
     .map((pt) => {
       const next = { ...pt };
+      for (const rowId of chartRowIds) {
+        if (next[rowId] == null) next[rowId] = 0;
+      }
+      if (showOthers && hasOthers && next[EXPLORER_OTHERS_ID] == null) next[EXPLORER_OTHERS_ID] = 0;
       next.t = formatPointTimeLabel(next, chartLongRange, displayTimezone);
       if (next.bucketMs != null) next.bucketMs = Number(next.bucketMs);
       return next;
@@ -5038,17 +4996,10 @@ function DynamicsChartExplorer({
   return (
     <div className="explorer-lines col" style={{ gap: 12 }}>
       <div style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-muted)' }}>
-        {focusRowId && focusedRow
-          ? `Динамика: ${explorerRowLabel(focusedRow)}.`
-          : selectedIds.length
-            ? `На графике ${selectedIds.length} серий по интервалам времени. Управляйте сериями в таблице «Результаты».`
-            : 'Выберите строки в таблице «Результаты», чтобы посмотреть динамику по каждой серии.'}
+        {selectedIds.length
+          ? `На графике ${selectedIds.length} серий. Управляйте сериями кнопками «Показать» / «Скрыть с графика» в таблице.`
+          : 'Нет серий на графике. Включите строки кнопкой «Показать» в таблице «Результаты».'}
       </div>
-      {focusRowId && onClearFocus && (
-        <div>
-          <Button kind="ghost" size="sm" onClick={onClearFocus}>Показать top-N серий</Button>
-        </div>
-      )}
       {chartPoints.length > 1 && lines.length ? (
         <>
           <div className="explorer-time-chart explorer-dynamics-chart">
@@ -5058,6 +5009,7 @@ function DynamicsChartExplorer({
               lines={lines}
               height={EXPLORER_CHART_HEIGHT}
               mode="bw"
+              gapAsZero
               onRangeSelect={onRangeSelect}
               bucketSeconds={bucketSeconds}
               displayTimezone={displayTimezone}

@@ -119,14 +119,14 @@ function collectChartValueKeys(lines, extraKeys = []) {
   return [...keys];
 }
 
-function makeChartGapPlaceholder(bucketMs, valueKeys) {
+function makeChartGapPlaceholder(bucketMs, valueKeys, gapValue = null) {
   const bucket = msToBucketString(bucketMs);
   const pt = { bucket, bucketMs, t: null, _gap: true };
-  for (const key of valueKeys) pt[key] = null;
+  for (const key of valueKeys) pt[key] = gapValue;
   return pt;
 }
 
-function fillChartTimeGaps(points, { bucketSeconds, startMs, endMs, valueKeys = [], skipLeadingGaps = false } = {}) {
+function fillChartTimeGaps(points, { bucketSeconds, startMs, endMs, valueKeys = [], skipLeadingGaps = false, gapValue = null } = {}) {
   if (!Array.isArray(points) || !points.length || !bucketSeconds) return points || [];
 
   const step = bucketSeconds * 1000;
@@ -155,7 +155,7 @@ function fillChartTimeGaps(points, { bucketSeconds, startMs, endMs, valueKeys = 
       ms = anchorMs + delta * step;
     }
     while (ms <= endMs) {
-      result.push(byMs.get(ms) || makeChartGapPlaceholder(ms, valueKeys));
+      result.push(byMs.get(ms) || makeChartGapPlaceholder(ms, valueKeys, gapValue));
       ms += step;
     }
     return result.length ? result : points;
@@ -169,7 +169,7 @@ function fillChartTimeGaps(points, { bucketSeconds, startMs, endMs, valueKeys = 
     const nextMs = sorted[i + 1].ms;
     let fillMs = ms + step;
     while (fillMs < nextMs) {
-      result.push(makeChartGapPlaceholder(fillMs, valueKeys));
+      result.push(makeChartGapPlaceholder(fillMs, valueKeys, gapValue));
       fillMs += step;
     }
   }
@@ -712,6 +712,7 @@ function DualChart({
   periodStartMs,
   periodEndMs,
   skipLeadingGaps = false,
+  gapAsZero = false,
   valueFormatter = fmtBits,
   axisFormatter = fmtCompact,
   ppsFormatter = fmtNum,
@@ -735,6 +736,7 @@ function DualChart({
     () => collectChartValueKeys(lines, ['pps']),
     [lines.map((ln) => ln.key).join(',')],
   );
+  const gapValue = gapAsZero ? 0 : null;
   const data = useMemo(
     () => fillChartTimeGaps(points, {
       bucketSeconds,
@@ -742,9 +744,18 @@ function DualChart({
       endMs: periodEndMs,
       valueKeys,
       skipLeadingGaps,
+      gapValue,
     }),
-    [points, bucketSeconds, periodStartMs, periodEndMs, valueKeys.join(','), skipLeadingGaps],
+    [points, bucketSeconds, periodStartMs, periodEndMs, valueKeys.join(','), skipLeadingGaps, gapValue],
   );
+  const seriesBwValue = (pt, key) => {
+    const v = chartSeriesNumber(pt[key]);
+    return gapAsZero ? (v ?? 0) : v;
+  };
+  const seriesPpsValue = (pt, key) => {
+    const v = chartSeriesPps(pt, key);
+    return gapAsZero ? (v ?? 0) : v;
+  };
 
   const w = 800;
   const yAxisTitlePad = yAxisLabel || yAxisUnit ? 28 : 0;
@@ -913,7 +924,7 @@ function DualChart({
             data,
             x,
             y1,
-            (pt) => chartSeriesNumber(pt[ln.key]),
+            (pt) => seriesBwValue(pt, ln.key),
           );
           const isTotal = ln.key === 'total';
           return segments.map((pts, segmentIdx) => (
@@ -934,7 +945,7 @@ function DualChart({
             data,
             x,
             y2,
-            (pt) => chartSeriesPps(pt, ln.key),
+            (pt) => seriesPpsValue(pt, ln.key),
           );
           const isTotal = ln.key === 'total';
           return segments.map((pts, segmentIdx) => (
@@ -962,8 +973,8 @@ function DualChart({
               strokeDasharray="4 3"
             />
             {activeLines.map((ln) => {
-              const v = chartSeriesNumber(hoverPoint[ln.key]);
-              if (v == null) return null;
+              const v = seriesBwValue(hoverPoint, ln.key);
+              if (!gapAsZero && v == null) return null;
               return (
               <circle
                 key={ln.key}
@@ -977,8 +988,8 @@ function DualChart({
               );
             })}
             {activePpsLines.map((ln) => {
-              const v = chartSeriesPps(hoverPoint, ln.key);
-              if (v == null) return null;
+              const v = seriesPpsValue(hoverPoint, ln.key);
+              if (!gapAsZero && v == null) return null;
               return (
               <circle
                 key={`pps-${ln.key}`}
@@ -1021,7 +1032,7 @@ function DualChart({
               <span className="dual-chart__tip-swatch" style={{ background: ln.color }} />
               <span className="dual-chart__tip-label">{ln.label}</span>
               <span className="dual-chart__tip-val mono">
-                {valueFormatter(chartSeriesNumber(hoverPoint[ln.key]))}
+                {valueFormatter(seriesBwValue(hoverPoint, ln.key))}
               </span>
             </div>
           ))}
@@ -1029,7 +1040,7 @@ function DualChart({
             <div key={`pps-${ln.key}`} className="dual-chart__tip-row">
               <span className="dual-chart__tip-swatch" style={{ background: ln.color }} />
               <span className="dual-chart__tip-label">{ln.label}, п/с</span>
-              <span className="dual-chart__tip-val mono">{ppsFormatter(chartSeriesPps(hoverPoint, ln.key))}</span>
+              <span className="dual-chart__tip-val mono">{ppsFormatter(seriesPpsValue(hoverPoint, ln.key))}</span>
             </div>
           ))}
         </ChartHoverTip>

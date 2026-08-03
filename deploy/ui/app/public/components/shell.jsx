@@ -356,6 +356,7 @@ function Header({ current, onNavigate, onToggleSidebar, currentUser, onLogout, o
         <button className="icon-btn tt" data-tt="Обновить" title="Обновить" onClick={onRefresh}>
           <Icon name="refresh" size={18} />
         </button>
+        {/*
         <button
           type="button"
           className={`icon-btn tt header-bell-btn${monitoringDeviationsTotal > 0 ? ' header-bell-btn--has-badge' : ''}`}
@@ -368,6 +369,7 @@ function Header({ current, onNavigate, onToggleSidebar, currentUser, onLogout, o
             <span className="header-bell-badge">{monitoringDeviationsTotal}</span>
           )}
         </button>
+        */}
         <button className="icon-btn tt" data-tt={theme === 'dark' ? 'Светлая тема' : 'Тёмная тема'} onClick={onToggleTheme}>
           <Icon name={theme === 'dark' ? 'sun' : 'moon'} size={18} />
         </button>
