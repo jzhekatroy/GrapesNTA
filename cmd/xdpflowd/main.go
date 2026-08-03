@@ -468,6 +468,8 @@ func main() {
 	collectorID := flag.String("collector-id", "", "collector_id for health snapshots (see net_collectors)")
 	phyPktCounters := flag.String("phy-packet-counters", "", "comma-separated ethtool counter names for packets received on the wire, tried in order (empty = built-in list); see `ethtool -S <iface>`")
 	phyDiscardCounters := flag.String("phy-discard-counters", "", "comma-separated ethtool counter names for packets the NIC could not accept, tried in order (empty = built-in list)")
+	phyDiscardWarn := flag.Float64("phy-discard-warn-ratio", flowingest.DefaultPhyDiscardWarnRatio, "health warning when NIC discards exceed this share of arriving packets in one health interval (0.0001 = 0.01%)")
+	phyDiscardCrit := flag.Float64("phy-discard-crit-ratio", flowingest.DefaultPhyDiscardCritRatio, "health critical when NIC discards exceed this share of arriving packets in one health interval (0.001 = 0.1%)")
 	flag.Parse()
 
 	if strings.TrimSpace(*configPath) != "" {
@@ -732,8 +734,10 @@ func main() {
 			Stages:         stages,
 			LocalSinkPorts: sinkPorts,
 
-			PhyPacketCounters:  splitCSV(*phyPktCounters),
-			PhyDiscardCounters: splitCSV(*phyDiscardCounters),
+			PhyPacketCounters:   splitCSV(*phyPktCounters),
+			PhyDiscardCounters:  splitCSV(*phyDiscardCounters),
+			PhyDiscardWarnRatio: *phyDiscardWarn,
+			PhyDiscardCritRatio: *phyDiscardCrit,
 		})
 		if err != nil {
 			log.Error("health reporter init", "err", err)

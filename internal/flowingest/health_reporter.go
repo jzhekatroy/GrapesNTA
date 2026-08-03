@@ -71,24 +71,31 @@ type HealthReporterConfig struct {
 	// DefaultLinkDiscardCounters; set them when a NIC names things unusually.
 	PhyPacketCounters  []string
 	PhyDiscardCounters []string
+	// Share of arriving packets the NIC may discard before the collector is
+	// marked warning / critical. Zero uses the Default*Ratio constants.
+	PhyDiscardWarnRatio float64
+	PhyDiscardCritRatio float64
 }
 
 // HealthReporter writes cumulative health snapshots to ClickHouse.
 type HealthReporter struct {
-	log         *slog.Logger
-	conn        chdriver.Conn
-	table       string
-	collectorID string
-	sourceID    string
-	daemon      string
-	iface       string
-	hostname    string
-	stages      []string
-	sinkPorts   []uint16
-	phyPktNames []string
-	phyDscNames []string
+	log          *slog.Logger
+	conn         chdriver.Conn
+	table        string
+	collectorID  string
+	sourceID     string
+	daemon       string
+	iface        string
+	hostname     string
+	stages       []string
+	sinkPorts    []uint16
+	phyPktNames  []string
+	phyDscNames  []string
+	phyWarnRatio float64
+	phyCritRatio float64
 
 	prevPhyDiscards uint64
+	prevPhyPackets  uint64
 	havePhyBaseline bool
 }
 
@@ -119,18 +126,20 @@ func NewHealthReporter(log *slog.Logger, cfg HealthReporterConfig) (*HealthRepor
 	}
 	host, _ := os.Hostname()
 	r := &HealthReporter{
-		log:         log,
-		conn:        conn,
-		table:       table,
-		collectorID: strings.TrimSpace(cfg.CollectorID),
-		sourceID:    sourceID,
-		daemon:      daemon,
-		iface:       strings.TrimSpace(cfg.Iface),
-		hostname:    host,
-		stages:      append([]string(nil), cfg.Stages...),
-		sinkPorts:   append([]uint16(nil), cfg.LocalSinkPorts...),
-		phyPktNames: append([]string(nil), cfg.PhyPacketCounters...),
-		phyDscNames: append([]string(nil), cfg.PhyDiscardCounters...),
+		log:          log,
+		conn:         conn,
+		table:        table,
+		collectorID:  strings.TrimSpace(cfg.CollectorID),
+		sourceID:     sourceID,
+		daemon:       daemon,
+		iface:        strings.TrimSpace(cfg.Iface),
+		hostname:     host,
+		stages:       append([]string(nil), cfg.Stages...),
+		sinkPorts:    append([]uint16(nil), cfg.LocalSinkPorts...),
+		phyPktNames:  append([]string(nil), cfg.PhyPacketCounters...),
+		phyDscNames:  append([]string(nil), cfg.PhyDiscardCounters...),
+		phyWarnRatio: cfg.PhyDiscardWarnRatio,
+		phyCritRatio: cfg.PhyDiscardCritRatio,
 	}
 	log.Info("health reporter enabled",
 		"table", table,
@@ -165,12 +174,51 @@ type HealthWriteInput struct {
 	UDPQueueDropsDelta   uint64
 	NFSendErrsDelta      uint64
 	SpoolCorruptionDelta uint64
-	// PhyRxDiscardDelta is filled by the reporter itself, which owns the
-	// interface counters; callers leave it alone.
+	// The reporter owns the interface counters, so it fills these itself;
+	// callers leave them alone.
+	PhyRxPacketDelta       uint64
 	PhyRxDiscardDelta      uint64
+	PhyDiscardWarnRatio    float64
+	PhyDiscardCritRatio    float64
 	LagSegmentsThreshold   int64
 	WriterLagRowsThreshold uint64
 	DrainerAgeThreshold    time.Duration
+}
+
+// Share of mirrored traffic the NIC may shed before anyone is told.
+const (
+	DefaultPhyDiscardWarnRatio = 0.0001 // 0.01%
+	DefaultPhyDiscardCritRatio = 0.001  // 0.1%
+)
+
+// classifyPhyDiscards returns the severity of interface-level loss, or false
+// when there is nothing to report.
+func classifyPhyDiscards(in HealthWriteInput) (string, bool) {
+	if in.PhyRxDiscardDelta == 0 {
+		return "", false
+	}
+	// Discards without a packet count means the driver exposes only half the
+	// pair — no denominator, so fall back to the bare fact.
+	if in.PhyRxPacketDelta == 0 {
+		return "warning", true
+	}
+	warn := in.PhyDiscardWarnRatio
+	if warn <= 0 {
+		warn = DefaultPhyDiscardWarnRatio
+	}
+	crit := in.PhyDiscardCritRatio
+	if crit <= 0 {
+		crit = DefaultPhyDiscardCritRatio
+	}
+	ratio := float64(in.PhyRxDiscardDelta) / float64(in.PhyRxPacketDelta+in.PhyRxDiscardDelta)
+	switch {
+	case ratio >= crit:
+		return "critical", true
+	case ratio >= warn:
+		return "warning", true
+	default:
+		return "", false
+	}
 }
 
 func classifyHealthStatus(in HealthWriteInput) (string, []string) {
@@ -209,9 +257,11 @@ func classifyHealthStatus(in HealthWriteInput) (string, []string) {
 		add("critical", "spool_corruption")
 	}
 	// The port could not take the traffic in — nothing downstream can recover
-	// it, and no amount of tuning inside the collector will show it.
-	if in.PhyRxDiscardDelta > 0 {
-		add("warning", "phy_rx_discards")
+	// it. A mirror port always sheds a few packets per million, so judge the
+	// share rather than the fact: a permanently yellow collector teaches
+	// operators to ignore the indicator.
+	if level, ok := classifyPhyDiscards(in); ok {
+		add(level, "phy_rx_discards")
 	}
 	writerLag := uint64(0)
 	if in.CH.RecordsQueued > in.CH.RecordsWritten {
@@ -246,12 +296,20 @@ func (r *HealthReporter) Write(ctx context.Context, in HealthWriteInput) error {
 	// First tick only establishes the baseline: a counter that has been
 	// growing since boot must not report the whole history as a fresh loss.
 	if link.Source != "" {
-		if r.havePhyBaseline && link.RxDiscards > r.prevPhyDiscards {
-			in.PhyRxDiscardDelta = link.RxDiscards - r.prevPhyDiscards
+		if r.havePhyBaseline {
+			if link.RxDiscards > r.prevPhyDiscards {
+				in.PhyRxDiscardDelta = link.RxDiscards - r.prevPhyDiscards
+			}
+			if link.RxPackets > r.prevPhyPackets {
+				in.PhyRxPacketDelta = link.RxPackets - r.prevPhyPackets
+			}
 		}
 		r.prevPhyDiscards = link.RxDiscards
+		r.prevPhyPackets = link.RxPackets
 		r.havePhyBaseline = true
 	}
+	in.PhyDiscardWarnRatio = r.phyWarnRatio
+	in.PhyDiscardCritRatio = r.phyCritRatio
 	status, reasons := classifyHealthStatus(in)
 
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
@@ -409,6 +467,7 @@ func (r *HealthReporter) Write(ctx context.Context, in HealthWriteInput) error {
 		"nic_rx_fifo_errors", nic.RxFifo,
 		"phy_rx_packets", link.RxPackets,
 		"phy_rx_discards", link.RxDiscards,
+		"phy_rx_discard_delta", in.PhyRxDiscardDelta,
 		"phy_counter_source", link.Source,
 		"nf_packets_out", in.NetFlow.PacketsOut,
 		"nf_send_errs", in.NetFlow.SendErrs,
