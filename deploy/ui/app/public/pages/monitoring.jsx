@@ -123,6 +123,7 @@ function PageMonitoring({ displayTimezone }) {
     () => parameters.find((item) => item.id === selectedId) || null,
     [parameters, selectedId],
   );
+  const boundsRequiresCiMinimum = bounds?.boundsRequiresCiMinimum ?? selectedParam?.boundsRequiresCiMinimum ?? true;
 
   const visibleChartLines = useMemo(
     () => MONITORING_CHART_LINES.filter((line) => !chartHidden.has(line.key)),
@@ -278,11 +279,14 @@ function PageMonitoring({ displayTimezone }) {
     setBoundsSaveError('');
   }, [bounds]);
 
-  const validateBoundsDraft = (draft) => {
+  const validateBoundsDraft = (draft, requiresMinimum = boundsRequiresCiMinimum) => {
     const low = Number(draft.ciLow);
     const high = Number(draft.ciHigh);
     const minimum = Number(draft.ciMinimum);
-    if (!Number.isFinite(low) || !Number.isFinite(high) || !Number.isFinite(minimum)) {
+    if (!Number.isFinite(low) || !Number.isFinite(high)) {
+      return 'Все границы должны быть числами';
+    }
+    if (requiresMinimum && !Number.isFinite(minimum)) {
       return 'Все границы должны быть числами';
     }
     return '';
@@ -297,11 +301,14 @@ function PageMonitoring({ displayTimezone }) {
     }
     setBoundsSaving(true);
     setBoundsSaveError('');
-    const result = await ApiClient.saveMonitoringBounds(selectedId, {
+    const payload = {
       ciLow: Number(boundsDraft.ciLow),
       ciHigh: Number(boundsDraft.ciHigh),
-      ciMinimum: Number(boundsDraft.ciMinimum),
-    });
+    };
+    if (boundsRequiresCiMinimum) {
+      payload.ciMinimum = Number(boundsDraft.ciMinimum);
+    }
+    const result = await ApiClient.saveMonitoringBounds(selectedId, payload);
     setBoundsSaving(false);
     if (result.source === 'error') {
       const message = result.error || LOAD_FAILED;
@@ -560,6 +567,7 @@ function PageMonitoring({ displayTimezone }) {
                       onChange={(e) => setBoundsDraft((prev) => ({ ...prev, ciHigh: e.target.value }))}
                     />
                   </div>
+                  {boundsRequiresCiMinimum && (
                   <div className="field">
                     <label htmlFor="monitoring-ci-minimum">Минимальная граница (ci_minimum)</label>
                     <input
@@ -572,6 +580,7 @@ function PageMonitoring({ displayTimezone }) {
                       onChange={(e) => setBoundsDraft((prev) => ({ ...prev, ciMinimum: e.target.value }))}
                     />
                   </div>
+                  )}
                   {canWrite && (
                     <div className="monitoring-page__bounds-actions">
                       <Button kind="primary" onClick={saveBounds} disabled={boundsSaving}>

@@ -202,7 +202,7 @@ input, button, select, textarea { font-family: inherit; color: inherit; }
   border-right: 1px solid var(--bd-soft);
   display: flex;
   flex-direction: column;
-  overflow: hidden;
+  overflow: visible;
   position: relative;
   z-index: 20;
 }
@@ -214,6 +214,7 @@ input, button, select, textarea { font-family: inherit; color: inherit; }
   padding: 0 18px;
   border-bottom: 1px solid var(--bd-soft);
   white-space: nowrap;
+  overflow: hidden;
 }
 .sidebar__logo {
   width: 32px; height: 32px;
@@ -331,7 +332,7 @@ input, button, select, textarea { font-family: inherit; color: inherit; }
 .app[data-collapsed="true"] .nav-group__head .nav-item__label,
 .app[data-collapsed="true"] .nav-group__chev,
 .app[data-collapsed="true"] .nav-item__badge,
-.app[data-collapsed="true"] .sidebar__wordmark > *:not(:first-child),
+.app[data-collapsed="true"] .sidebar__wordmark,
 .app[data-collapsed="true"] .nav-group__body { display: none; }
 .app[data-collapsed="true"] .nav-item, .app[data-collapsed="true"] .nav-group__head { justify-content: center; padding: 9px 0; }
 .app[data-collapsed="true"] .sidebar__nav { padding: 14px 8px; }
@@ -342,10 +343,37 @@ input, button, select, textarea { font-family: inherit; color: inherit; }
   display: flex; align-items: center; gap: 10px;
   cursor: pointer;
   color: var(--fg-secondary);
+  background: var(--bg-surface);
+  border-right: 0;
+  border-bottom: 0;
+  border-left: 0;
+  position: relative;
+  text-align: left;
+  width: 100%;
 }
 .sidebar__footer:hover { color: var(--fg-primary); }
 .sidebar__footer svg { transition: transform var(--pv-dur-base) var(--pv-ease-out); }
 .app[data-collapsed="true"] .sidebar__footer svg { transform: rotate(180deg); }
+.sidebar__footer-label { font: var(--pv-text-body-3-bold); white-space: nowrap; }
+.sidebar__footer--collapsed { justify-content: center; }
+.sidebar__footer--collapsed .sidebar__footer-label {
+  position: absolute;
+  left: calc(100% + 8px);
+  top: 50%;
+  transform: translateY(-50%);
+  padding: 6px 10px;
+  border: 1px solid var(--bd-default);
+  border-radius: 6px;
+  background: var(--bg-surface-3);
+  color: var(--fg-primary);
+  box-shadow: var(--pv-shadow-popover);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--pv-dur-fast);
+  z-index: 30;
+}
+.sidebar__footer--collapsed:hover .sidebar__footer-label,
+.sidebar__footer--collapsed:focus-visible .sidebar__footer-label { opacity: 1; }
 
 /* ===================== Header ===================== */
 .header {
@@ -732,6 +760,50 @@ input, button, select, textarea { font-family: inherit; color: inherit; }
   z-index: 130;
 }
 
+.explorer-filters-panel__body {
+  gap: 0;
+}
+
+.explorer-panel-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid var(--bd-default);
+}
+
+.explorer-panel-section__head {
+  font: var(--pv-text-body-3-bold);
+  color: var(--fg-secondary);
+}
+
+.explorer-panel-section__empty {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  font: var(--pv-text-body-3);
+  color: var(--fg-muted);
+  padding: 2px 0 4px;
+}
+
+.explorer-panel-section__add {
+  display: flex;
+  justify-content: flex-start;
+  align-self: flex-start;
+}
+
+.explorer-filters-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid var(--bd-default);
+}
+
 .explorer-filter-row {
   display: flex;
   flex-direction: column;
@@ -834,7 +906,16 @@ input, button, select, textarea { font-family: inherit; color: inherit; }
   display: flex;
   flex-direction: column;
   gap: 8px;
-  margin-top: 4px;
+}
+
+.explorer-threshold-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px 8px;
+  background: var(--surf-1);
+  border: 1px solid var(--bd-soft);
+  border-radius: 10px;
 }
 
 .explorer-threshold-row__main {
@@ -846,6 +927,19 @@ input, button, select, textarea { font-family: inherit; color: inherit; }
 
 .explorer-threshold-row__agg {
   flex: 0 0 auto;
+}
+
+.explorer-threshold-row__agg button {
+  padding: 6px 10px;
+  font: var(--pv-text-body-3);
+  white-space: nowrap;
+}
+
+.explorer-threshold-row__agg button.is-active {
+  background: color-mix(in srgb, var(--accent) 20%, var(--surf-3));
+  color: var(--accent);
+  font-weight: 600;
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 35%, transparent);
 }
 
 .explorer-threshold-row__metric {
@@ -4574,7 +4668,7 @@ html.modal-open #root {
 /* Responsive: collapse sidebar under 1280px automatically */
 @media (max-width: 1280px) {
   .app:not([data-collapsed="true"]) { grid-template-columns: var(--sidebar-w-collapsed) 1fr; }
-  .app:not([data-collapsed="true"]) .sidebar__wordmark > *:not(:first-child),
+  .app:not([data-collapsed="true"]) .sidebar__wordmark,
   .app:not([data-collapsed="true"]) .nav-item__label,
   .app:not([data-collapsed="true"]) .nav-group__head .nav-item__label,
   .app:not([data-collapsed="true"]) .nav-group__chev,

@@ -1492,23 +1492,47 @@ async function explorerFlowsPeakPath({
   const peakWindowKey = thresholds.find((thr) => thr.aggregate === 'peak')?.peakWindow || '5m';
   const peakSec = peakWindowSeconds(peakWindowKey);
   const bucketExpr = `toStartOfInterval(f.${t}, INTERVAL ${peakSec} SECOND)`;
+  const needsUniqSrc = metricKey === 'uniq_src'
+    || thresholds.some((thr) => thr.metric === 'uniq_src');
+  const peakPctCol = metricKey === 'uniq_src'
+    ? 'uniq_src_count'
+    : (pctCol === 'bytes' ? 'bytes' : pctCol);
+  const peakMetricExpr = metricKey === 'uniq_src'
+    ? 'b.uniq_src_count'
+    : metricKey === 'volume'
+      ? 'b.bytes'
+      : metricKey === 'pps'
+        ? 'round(b.packets / window_seconds, 0)'
+        : metricKey === 'fps'
+          ? 'round(b.flows / window_seconds, 2)'
+          : metricKey === 'flows'
+            ? 'b.flows'
+            : 'round(b.bytes * 8 / window_seconds, 0)';
+  const bucketUniqState = needsUniqSrc
+    ? `,\n            uniqCombinedState(f.${col('srcIp')}) AS uniq_src_state`
+    : '';
+  const mergedUniqCount = needsUniqSrc
+    ? ',\n          uniqCombinedMerge(uniq_src_state) AS uniq_src_count'
+    : '';
+  const exposedUniqCount = needsUniqSrc
+    ? ',\n        b.uniq_src_count AS uniq_src_count'
+    : '';
 
   if (!plan.useTwoPhase) {
     const joinSql = collectExplorerJoins(groups, dims, filterJoins);
     const groupSelect = groups.map((g, i) => `${dims[g].expr} AS g${i}`);
     const groupAliases = groups.map((_, i) => `g${i}`);
-    const pctBase = metricSpec.pctBase;
     const innerSql = `
       WITH
         ${windowSpec.cteHead}
         dateDiff('second', ts_from, ts_to) AS window_seconds,
         grouped_total AS (
-          SELECT sum(${pctCol === 'bytes' ? 'bytes' : pctCol}) AS total FROM (
+          SELECT sum(${peakPctCol}) AS total FROM (
             SELECT
               ${groupSelect.join(',\n              ')},
               sum(${scaled.bytes}) AS bytes,
               sum(${scaled.packets}) AS packets,
-              sum(${scaled.flowWeight}) AS flows
+              sum(${scaled.flowWeight}) AS flows${needsUniqSrc ? `,\n              uniqCombined(f.${col('srcIp')}) AS uniq_src_count` : ''}
             FROM ${flowsRawTableRef()} AS f
             ${joinSql}
             PREWHERE f.date >= toDate(ts_from) - 1
@@ -1519,8 +1543,8 @@ async function explorerFlowsPeakPath({
         )
       SELECT
         ${groupAliases.map((g) => `b.${g}`).join(',\n        ')},
-        ${metricKey === 'volume' ? 'b.bytes' : metricKey === 'pps' ? 'round(b.packets / window_seconds, 0)' : metricKey === 'fps' ? 'round(b.flows / window_seconds, 2)' : metricKey === 'flows' ? 'b.flows' : 'round(b.bytes * 8 / window_seconds, 0)'} AS metric_value,
-        round(b.${pctCol === 'bytes' ? 'bytes' : pctCol} * 100 / nullIf(gt.total, 0), 2) AS pct,
+        ${peakMetricExpr} AS metric_value,
+        round(b.${peakPctCol} * 100 / nullIf(gt.total, 0), 2) AS pct,
         b.bytes AS bytes,
         round(b.bytes * 8 / window_seconds, 0) AS avg_bps,
         b.packets AS packets,
@@ -1533,7 +1557,7 @@ async function explorerFlowsPeakPath({
         b.peak_bytes AS peak_bytes,
         b.peak_pps AS peak_pps,
         b.peak_fps AS peak_fps,
-        b.peak_flows AS peak_flows
+        b.peak_flows AS peak_flows${exposedUniqCount}
       FROM (
         SELECT
           ${groupAliases.join(',\n          ')},
@@ -1544,12 +1568,12 @@ async function explorerFlowsPeakPath({
           max(bucket_bytes) AS peak_bytes,
           max(bucket_pps) AS peak_pps,
           max(bucket_fps) AS peak_fps,
-          max(bucket_flows) AS peak_flows
+          max(bucket_flows) AS peak_flows${mergedUniqCount}
         FROM (
           SELECT
             ${groupSelect.join(',\n            ')},
             ${bucketExpr} AS bucket,
-            ${peakBucketMetricExprs(scaled, peakSec)}
+            ${peakBucketMetricExprs(scaled, peakSec)}${bucketUniqState}
           FROM ${flowsRawTableRef()} AS f
           ${joinSql}
           PREWHERE f.date >= toDate(ts_from) - 1
@@ -1677,6 +1701,8 @@ async function explorerFlows(body = {}, options = {}) {
   const metricSpecs = buildExplorerMetricSpecs(scaled);
   const metricSpec = metricSpecs[metricKey];
   const thresholds = q.thresholds || [];
+  const needsUniqSrc = metricKey === 'uniq_src'
+    || thresholds.some((threshold) => threshold.metric === 'uniq_src');
   const pctCol = explorerAggPctColumn(metricKey);
   const pctExpr = `round(${metricSpec.pctBase} * 100 / nullIf(sum(${metricSpec.pctBase}) OVER (), 0), 2)`;
   const windowSpec = explorerResolveTrafficWindow(body, q);
@@ -1693,8 +1719,9 @@ async function explorerFlows(body = {}, options = {}) {
   const whereClauses = [`f.${t} >= ts_from`, `f.${t} < ts_to`];
   if (filterSql) whereClauses.push(filterSql);
   const scopedParams = applyLegacyCollectorFilter(q.filters, q.collectorId, params, whereClauses);
-  // uniq_src needs per-row uniqueness — keep single-pass path.
-  const plan = metricKey === 'uniq_src'
+  // uniq_src needs per-row uniqueness — keep single-pass path whether it is
+  // the selected metric or only used by a threshold.
+  const plan = needsUniqSrc
     ? { useTwoPhase: false }
     : buildExplorerGroupPlan(groups, dims);
 
@@ -1727,7 +1754,8 @@ async function explorerFlows(body = {}, options = {}) {
   const thresholdExtras = explorerThresholdsActive(thresholds)
     ? `,\n        ${explorerFlowsThresholdExtras(scaled, false)}`
     : '';
-  const uniqSrcExtra = explorerThresholdsActive(thresholds) && metricKey === 'uniq_src'
+  const uniqSrcExtra = explorerThresholdsActive(thresholds)
+    && thresholds.some((threshold) => threshold.metric === 'uniq_src')
     ? `,\n        uniqCombined(f.${col('srcIp')}) AS uniq_src_count`
     : '';
 

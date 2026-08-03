@@ -100,6 +100,13 @@ const {
   setL3PrefixEnabled,
   deleteL3Prefix,
 } = require('./l3-prefixes');
+const {
+  listFlowExclusions,
+  flowExclusionsExcludedStats,
+  saveFlowExclusion,
+  setFlowExclusionEnabled,
+  deleteFlowExclusion,
+} = require('./flow-exclusions');
 const { listNetEntitiesAdmin, saveNetEntity } = require('./net-entities');
 const {
   listVlansAdmin,
@@ -1482,6 +1489,27 @@ app.get('/api/refs/l3-prefixes', async (_req, res) => {
   }
 });
 
+app.get('/api/refs/flow-exclusions', async (_req, res) => {
+  try {
+    const [result, stats] = await Promise.all([
+      runNamed(() => listFlowExclusions(), { name: 'refs/flow-exclusions' }),
+      flowExclusionsExcludedStats(),
+    ]);
+    const rules = Array.isArray(result.data) ? result.data : [];
+    res.json({
+      ...result,
+      meta: {
+        ...result.meta,
+        rulesTotal: rules.length,
+        rulesEnabled: rules.filter((r) => r.enabled === 1).length,
+        ...stats,
+      },
+    });
+  } catch (err) {
+    res.status(502).json({ error: err.message });
+  }
+});
+
 app.get('/api/refs/entities', async (_req, res) => {
   try {
     const result = await runNamed(() => listNetEntities(), { name: 'refs/entities' });
@@ -2069,6 +2097,36 @@ app.post('/api/refs/l3-prefixes/toggle', async (req, res) => {
 app.delete('/api/refs/l3-prefixes', async (req, res) => {
   try {
     const { elapsedMs } = await deleteL3Prefix(req.body || {});
+    res.json({ ok: true, meta: { elapsedMs } });
+  } catch (err) {
+    const status = err.statusCode === 400 ? 400 : err.statusCode === 404 ? 404 : 502;
+    res.status(status).json({ error: err.message });
+  }
+});
+
+app.post('/api/refs/flow-exclusions', async (req, res) => {
+  try {
+    const { elapsedMs, ruleId } = await saveFlowExclusion(req.body || {});
+    res.json({ ok: true, ruleId, meta: { elapsedMs } });
+  } catch (err) {
+    const status = err.statusCode === 400 ? 400 : 502;
+    res.status(status).json({ error: err.message });
+  }
+});
+
+app.post('/api/refs/flow-exclusions/toggle', async (req, res) => {
+  try {
+    const { elapsedMs, enabled } = await setFlowExclusionEnabled(req.body || {});
+    res.json({ ok: true, enabled, meta: { elapsedMs } });
+  } catch (err) {
+    const status = err.statusCode === 400 ? 400 : err.statusCode === 404 ? 404 : 502;
+    res.status(status).json({ error: err.message });
+  }
+});
+
+app.delete('/api/refs/flow-exclusions', async (req, res) => {
+  try {
+    const { elapsedMs } = await deleteFlowExclusion(req.body || {});
     res.json({ ok: true, meta: { elapsedMs } });
   } catch (err) {
     const status = err.statusCode === 400 ? 400 : err.statusCode === 404 ? 404 : 502;

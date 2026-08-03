@@ -82,6 +82,7 @@ function buildParameters(apiData) {
       id,
       label: param.label,
       section: param.boundsConfigKey,
+      boundsRequiresCiMinimum: param.boundsRequiresCiMinimum !== false,
       ciLow: Number.isFinite(bounds.ciLow) ? bounds.ciLow : null,
       ciHigh: Number.isFinite(bounds.ciHigh) ? bounds.ciHigh : null,
       ciMinimum: Number.isFinite(bounds.ciMinimum) ? bounds.ciMinimum : null,
@@ -134,7 +135,8 @@ function buildProblems({ urlConfigured, health, config, parameters }) {
   }
 
   for (const p of parameters) {
-    if (p.ciLow == null || p.ciHigh == null || p.ciMinimum == null) {
+    const missingMinimum = p.boundsRequiresCiMinimum && p.ciMinimum == null;
+    if (p.ciLow == null || p.ciHigh == null || missingMinimum) {
       problems.push(problem(
         'warning',
         'bounds_value_missing',

@@ -2,6 +2,7 @@ const {
   config,
   dashboardTableRef,
   countryTableRef,
+  protocolTableRef,
   intervalsControlTableRef,
   intervalsTableRef,
   monitoringCol,
@@ -32,6 +33,31 @@ const PARAMETERS = {
     unit: 'Гбит/мин',
     featureName: 'country_F',
     boundsConfigKey: 'intervals_country_F',
+  },
+  protocol_in_tcp: {
+    id: 'protocol_in_tcp',
+    label: 'Входящий трафик ШПД по протоколу TCP',
+    unit: 'Гбит/мин',
+    featureName: 'protocol_tcp',
+    boundsConfigKey: 'intervals_protocols_tcp',
+    protocolFilter: 'tcp',
+  },
+  protocol_in_udp: {
+    id: 'protocol_in_udp',
+    label: 'Входящий трафик ШПД по протоколу UDP',
+    unit: 'Гбит/мин',
+    featureName: 'protocol_udp',
+    boundsConfigKey: 'intervals_protocols_udp',
+    protocolFilter: 'udp',
+  },
+  protocol_in_other: {
+    id: 'protocol_in_other',
+    label: 'Входящий трафик ШПД по протоколу другие',
+    unit: 'Гбит/мин',
+    featureName: 'protocol_oth',
+    boundsConfigKey: 'intervals_protocols_oth',
+    protocolFilter: 'other',
+    boundsRequiresCiMinimum: false,
   },
 };
 
@@ -133,6 +159,7 @@ function monitoringParameters() {
           unit: param.unit,
           featureName: param.featureName,
           deviations24h: deviationMap.get(param.featureName) || 0,
+          boundsRequiresCiMinimum: param.boundsRequiresCiMinimum !== false,
         };
       });
 
@@ -141,6 +168,39 @@ function monitoringParameters() {
         totalDeviations24h,
       };
     },
+  };
+}
+
+function protocolProtoSql(protocolFilter) {
+  if (protocolFilter === 'tcp') return 'proto = 6';
+  if (protocolFilter === 'udp') return 'proto = 17';
+  if (protocolFilter === 'other') return 'proto NOT IN (6, 17)';
+  throw new Error(`Неизвестный протокольный фильтр: ${protocolFilter}`);
+}
+
+function monitoringProtocolSeriesValues(param, from, to) {
+  const protoSql = protocolProtoSql(param.protocolFilter);
+  return {
+    sql: `
+      SELECT
+        dt,
+        toUnixTimestamp(dt) AS bucket_ts,
+        Gbit AS value
+      FROM (
+        SELECT
+          toTimeZone(minute, '${MONITORING_TIMEZONE}') AS dt,
+          round(sum(bytes) / 8 * 1e-9, 3) AS Gbit
+        FROM ${protocolTableRef()}
+        WHERE source_id = {source_id:String}
+          AND direction = 'in'
+          AND ${protoSql}
+          AND toTimeZone(minute, '${MONITORING_TIMEZONE}') >= ${parseDataDatetimeSql('from')}
+          AND toTimeZone(minute, '${MONITORING_TIMEZONE}') < ${parseDataDatetimeSql('to')}
+        GROUP BY dt
+      )
+      ORDER BY dt
+    `,
+    params: { from, to, source_id: DEFAULT_SOURCE_ID },
   };
 }
 
@@ -163,6 +223,10 @@ function monitoringSeriesValues({ parameter, from, to }) {
       `,
       params: { from, to, source_id: DEFAULT_SOURCE_ID },
     };
+  }
+
+  if (param.protocolFilter) {
+    return monitoringProtocolSeriesValues(param, from, to);
   }
 
   const countryFilter = param.id === 'broadband_in_ru'
@@ -305,6 +369,7 @@ module.exports = {
   getParameter,
   getParameterLabel,
   listParameterIds,
+  protocolProtoSql,
   parseMonitoringSeriesQuery,
   parseMonitoringDeviationsQuery,
   monitoringParameters,

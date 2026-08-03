@@ -7,7 +7,7 @@ const NAV = [
     section: 'Обзор',
     items: [
       { id: 'dashboard', label: 'Обзор', icon: 'dashboard' },
-      { id: 'monitoring', label: 'Мониторинг', icon: 'clock' },
+      // { id: 'monitoring', label: 'Мониторинг', icon: 'clock' },
       { id: 'observations', label: 'Наблюдения', icon: 'query' },
     ],
   },
@@ -27,6 +27,7 @@ const NAV = [
       icon: 'collectors',
       children: [
         { id: 'collectors', label: 'Коллекторы' },
+        { id: 'flow-exclusions', label: 'Исключения из статистики' },
         { id: 'snmp', label: 'SNMP' },
         { id: 'bmp', label: 'BMP / BGP' },
       ],
@@ -71,6 +72,7 @@ const PAGES_WITHOUT_HEADER_FILTERS = new Set([
   'cidr',
   'interface-roles',
   'port-services',
+  'flow-exclusions',
   'vlan',
   'smtp',
   'ttl',
@@ -109,14 +111,14 @@ function Sidebar({ current, onNavigate, collapsed, effectivePermissions }) {
     visibleNav.forEach(s => {
       if (s.group) o[s.group.id] = s.group.children.some(c => c.id === current);
     });
-    if (!o.data && (current === 'collectors' || current === 'snmp' || current === 'bmp')) o.data = true;
+    if (!o.data && (current === 'collectors' || current === 'flow-exclusions' || current === 'snmp' || current === 'bmp')) o.data = true;
     if (!o.netmodel && (current === 'entities' || current === 'cidr' || current === 'vlan' || current === 'port-services' || current === 'interface-roles' || current === 'routers')) o.netmodel = true;
     o.data = o.data ?? true;
     o.netmodel = o.netmodel ?? true;
     return o;
   });
   useEffect(() => {
-    if (current === 'collectors' || current === 'snmp' || current === 'bmp') setOpenGroups((s) => ({ ...s, data: true }));
+    if (current === 'collectors' || current === 'flow-exclusions' || current === 'snmp' || current === 'bmp') setOpenGroups((s) => ({ ...s, data: true }));
     if (current === 'entities' || current === 'cidr' || current === 'vlan' || current === 'port-services' || current === 'interface-roles' || current === 'routers') {
       setOpenGroups((s) => ({ ...s, netmodel: true }));
     }
@@ -163,10 +165,17 @@ function Sidebar({ current, onNavigate, collapsed, effectivePermissions }) {
           </React.Fragment>
         ))}
       </nav>
-      <div className="sidebar__footer" onClick={() => onNavigate('__toggle')}>
+      <button
+        type="button"
+        className={`sidebar__footer${collapsed ? ' sidebar__footer--collapsed' : ''}`}
+        onClick={() => onNavigate('__toggle')}
+        aria-label={collapsed ? 'Развернуть меню' : 'Свернуть меню'}
+      >
         <Icon name="chevL" size={16} />
-        <span style={{font: 'var(--pv-text-body-3-bold)'}}>Свернуть меню</span>
-      </div>
+        <span className="sidebar__footer-label">
+          {collapsed ? 'Развернуть меню' : 'Свернуть меню'}
+        </span>
+      </button>
     </aside>
   );
 }

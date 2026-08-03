@@ -26,7 +26,7 @@ const EXPLORER_THRESHOLD_UNITS = {
   volume: ['b', 'kb', 'mb', 'gb', 'tb'],
   pps: ['pps', 'kpps', 'mpps'],
   fps: ['fps'],
-  flows: ['count'],
+  flows: ['count', 'k', 'm'],
   uniq_src: ['count'],
   avg_packet_size: ['b'],
   avg_flow_size: ['b'],

@@ -54,31 +54,28 @@ async function boundsServiceFetch(path, { method = 'GET', body } = {}) {
   return payload;
 }
 
-function parseBoundsConfig(apiData) {
-  const intervals = apiData?.intervals || {};
-  const countryRu = apiData?.intervals_country_ru || {};
-  const countryForeign = apiData?.intervals_country_F || {};
+function parseSectionCiMinimum(section, requiresCiMinimum) {
+  if (section?.ci_minimum == null || section?.ci_minimum === '') {
+    return requiresCiMinimum ? Number.NaN : null;
+  }
+  return Number(section.ci_minimum);
+}
 
-  return {
-    broadband_total: {
-      ciLow: Number(intervals.ci_low),
-      ciHigh: Number(intervals.ci_high),
-      ciMinimum: Number(intervals.ci_minimum),
-      source: 'intervals',
-    },
-    broadband_in_ru: {
-      ciLow: Number(countryRu.ci_low),
-      ciHigh: Number(countryRu.ci_high),
-      ciMinimum: Number(countryRu.ci_minimum),
-      source: 'intervals_country_ru',
-    },
-    broadband_in_foreign: {
-      ciLow: Number(countryForeign.ci_low),
-      ciHigh: Number(countryForeign.ci_high),
-      ciMinimum: Number(countryForeign.ci_minimum),
-      source: 'intervals_country_F',
-    },
-  };
+function parseBoundsConfig(apiData) {
+  const { listParameterIds, getParameter } = require('./monitoring-intervals');
+  const result = {};
+  for (const id of listParameterIds()) {
+    const param = getParameter(id);
+    const section = apiData?.[param.boundsConfigKey] || {};
+    const requiresCiMinimum = param.boundsRequiresCiMinimum !== false;
+    result[id] = {
+      ciLow: Number(section.ci_low),
+      ciHigh: Number(section.ci_high),
+      ciMinimum: parseSectionCiMinimum(section, requiresCiMinimum),
+      source: param.boundsConfigKey,
+    };
+  }
+  return result;
 }
 
 async function loadBoundsConfig({ force = false } = {}) {
@@ -116,10 +113,11 @@ async function getMonitoringBounds(parameterId) {
 
   const configData = await loadBoundsConfig();
   const bounds = configData.boundsByParameter[param.id];
+  const requiresCiMinimum = param.boundsRequiresCiMinimum !== false;
   if (!bounds
     || !Number.isFinite(bounds.ciLow)
     || !Number.isFinite(bounds.ciHigh)
-    || !Number.isFinite(bounds.ciMinimum)) {
+    || (requiresCiMinimum && !Number.isFinite(bounds.ciMinimum))) {
     throw new Error(`В config.yaml не найдены границы для показателя ${param.id}`);
   }
 
@@ -129,9 +127,10 @@ async function getMonitoringBounds(parameterId) {
     unit: param.unit,
     featureName: param.featureName,
     configKey: param.boundsConfigKey,
+    boundsRequiresCiMinimum: requiresCiMinimum,
     ciLow: bounds.ciLow,
     ciHigh: bounds.ciHigh,
-    ciMinimum: bounds.ciMinimum,
+    ciMinimum: Number.isFinite(bounds.ciMinimum) ? bounds.ciMinimum : null,
     source: bounds.source,
     mode: configData.mode,
     host: configData.host || null,
@@ -147,19 +146,27 @@ async function saveMonitoringBounds(parameterId, { ciLow, ciHigh, ciMinimum }) {
 
   const low = Number(ciLow);
   const high = Number(ciHigh);
-  const minimum = Number(ciMinimum);
-  if (!Number.isFinite(low) || !Number.isFinite(high) || !Number.isFinite(minimum)) {
+  const requiresCiMinimum = param.boundsRequiresCiMinimum !== false;
+  const minimum = requiresCiMinimum ? Number(ciMinimum) : null;
+  if (!Number.isFinite(low) || !Number.isFinite(high)) {
     throw new Error('Границы должны быть числами');
+  }
+  if (requiresCiMinimum && !Number.isFinite(minimum)) {
+    throw new Error('Границы должны быть числами');
+  }
+
+  const body = {
+    section: param.boundsConfigKey,
+    ci_low: low,
+    ci_high: high,
+  };
+  if (requiresCiMinimum) {
+    body.ci_minimum = minimum;
   }
 
   await boundsServiceFetch('/config/bounds', {
     method: 'PUT',
-    body: {
-      section: param.boundsConfigKey,
-      ci_low: low,
-      ci_high: high,
-      ci_minimum: minimum,
-    },
+    body,
   });
 
   invalidateBoundsCache();

@@ -8,6 +8,7 @@ function getResourceForPath(path, method) {
   if (p.startsWith('/api/dns/')) return 'dns';
   if (p.startsWith('/api/monitoring/')) return 'monitoring';
   if (p.startsWith('/api/refs/l3-prefixes')) return 'cidr';
+  if (p.startsWith('/api/refs/flow-exclusions')) return 'flow-exclusions';
   if (p.startsWith('/api/refs/locations')
     || p.startsWith('/api/refs/collectors')
     || p.startsWith('/api/refs/flow-sources')

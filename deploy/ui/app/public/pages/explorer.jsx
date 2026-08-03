@@ -874,7 +874,7 @@ function resolveExplorerDraftSnapshot({ hasAppliedQuery, appliedSnapshot, lastAp
   return null;
 }
 
-function restoreExplorerDraftFromSnapshot(snapshot, setters, { filterMode, setFilterText } = {}) {
+function restoreExplorerDraftFromSnapshot(snapshot, setters, { filterMode, setFilterText, schema } = {}) {
   if (!snapshot) return null;
   const migrated = migrateExplorerSnapshot(snapshot);
   if (!migrated) return null;
@@ -884,6 +884,8 @@ function restoreExplorerDraftFromSnapshot(snapshot, setters, { filterMode, setFi
       timeRange: migrated.timeRange,
       customPeriod: migrated.customPeriod,
       filters: migrated.filters,
+      thresholds: migrated.thresholds,
+      schema,
     }));
   }
   return migrated;
@@ -916,7 +918,7 @@ function parseLogicPrefix(line) {
 }
 
 function serializeExplorerFilterDsl({
-  timeRange, customPeriod, filters,
+  timeRange, customPeriod, filters, thresholds, schema,
 }) {
   const lines = [];
   if (timeRange === 'custom' && customPeriod?.from && customPeriod?.to) {
@@ -968,18 +970,33 @@ function serializeExplorerFilterDsl({
     }
   });
 
+  const schemaMetrics = explorerThresholdApi().thresholdMetricsFromSchema?.(schema) || [];
+  explorerThresholdApi().serializeExplorerThresholdsToDsl?.(thresholds, schemaMetrics)
+    .forEach((line) => lines.push(line));
+
   return lines.join('\n');
 }
 
 function parseExplorerFilterDsl(text, schema = null) {
-  const lines = String(text || '').split('\n').map((l) => l.trim()).filter(Boolean);
+  const rawLines = String(text || '').split('\n');
+  const lines = [];
+  const lineNumbers = [];
+  rawLines.forEach((line, index) => {
+    const trimmed = line.trim();
+    if (trimmed) {
+      lines.push(trimmed);
+      lineNumbers.push(index + 1);
+    }
+  });
   if (!lines.length) throw new Error('Фильтр пуст');
 
   let timeRange = '1h';
   let customPeriod = defaultCustomPeriod();
   const filters = [];
+  const thresholds = [];
   let conditionIndex = 0;
   let pendingLogic = null;
+  const schemaMetrics = explorerThresholdApi().thresholdMetricsFromSchema?.(schema) || [];
 
   const pushFilter = (partial) => {
     filters.push({
@@ -992,142 +1009,165 @@ function parseExplorerFilterDsl(text, schema = null) {
     });
   };
 
-  for (const rawLine of lines) {
-    const lineLower = rawLine.toLowerCase();
+  const parseError = (lineNum, message) => {
+    throw new Error(`Строка ${lineNum}: ${message}`);
+  };
 
-    const logicOnly = parseLogicOnlyLine(rawLine);
-    if (logicOnly) {
-      pendingLogic = logicOnly;
-      continue;
-    }
+  for (let index = 0; index < lines.length; index += 1) {
+    const rawLine = lines[index];
+    const lineNum = lineNumbers[index];
 
-    if (lineLower.startsWith('time ')) {
-      const betweenMatch = rawLine.match(/^time\s+between\s+"([^"]+)"\s+and\s+"([^"]+)"/i);
-      if (betweenMatch) {
-        timeRange = 'custom';
-        customPeriod = { from: betweenMatch[1], to: betweenMatch[2] };
-        const err = validateExplorerCustomPeriod(customPeriod, 'custom');
-        if (err) throw new Error(err);
-        continue;
-      }
-      const rangeMatch = rawLine.match(/^time\s+range\s+(\S+)/i);
-      if (rangeMatch) {
-        timeRange = rangeMatch[1];
-        continue;
-      }
-      throw new Error(`Неверный формат времени: ${rawLine}`);
-    }
-
-    const { logic: inlineLogic, rest } = parseLogicPrefix(rawLine);
-    const logic = pendingLogic ?? (filters.length > 0 ? inlineLogic : 'and');
-    pendingLogic = null;
-
-    const systemInMatch = rest.match(/^(direction|collector)\s+(in|not_in|один из|ни один из)\s*\(([^)]+)\)/i);
-    if (systemInMatch) {
-      const field = systemInMatch[1].toLowerCase();
-      const value = systemInMatch[3]
-        .split(',')
-        .map((s) => s.trim().replace(/^"|"$/g, ''))
-        .join(',');
-      pushFilter({
-        field,
-        op: resolveExplorerOpToken(systemInMatch[2]),
-        value: field === 'collector' ? normalizeCollectorDslValue(value) : value,
-        logic,
-      });
-      continue;
-    }
-
-    const systemSimpleMatch = rest.match(/^(direction|collector)\s*(=|!=|<>|равно|не равно)\s+(.+)$/i);
-    if (systemSimpleMatch) {
-      const field = systemSimpleMatch[1].toLowerCase();
-      const value = systemSimpleMatch[3].trim().replace(/^"|"$/g, '');
-      pushFilter({
-        field,
-        op: resolveExplorerOpToken(systemSimpleMatch[2]),
-        value: field === 'collector' ? normalizeCollectorDslValue(value) : value,
-        logic,
-      });
-      continue;
-    }
-
-    const cidrMatch = rest.match(/^([\w.]+)\s+(cidr|в сети \(CIDR\))\s+(.+)$/i);
-    if (cidrMatch) {
-      pushFilter({
-        field: cidrMatch[1],
-        op: 'cidr',
-        value: cidrMatch[3].trim().replace(/^"|"$/g, ''),
-        logic,
-      });
-      continue;
-    }
-
-    const betweenMatch = rest.match(/^([\w.]+)\s+(between|между)\s+(\S+)\s+and\s+(\S+)$/i);
-    if (betweenMatch) {
-      pushFilter({
-        field: betweenMatch[1],
-        op: 'between',
-        value: `${betweenMatch[3]},${betweenMatch[4]}`,
-        logic,
-      });
-      continue;
-    }
-
-    const tcpFlagsMatch = rest.match(/^([\w.]+)\s+(has_any|has_all|eq|neq|есть\s+любой\s+из|есть\s+все\s+из|равно\s+маске|не\s+равно\s+маске)\s*\(([^)]+)\)/i);
-    if (tcpFlagsMatch) {
-      pushFilter({
-        field: tcpFlagsMatch[1],
-        op: resolveExplorerOpToken(tcpFlagsMatch[2]),
-        value: tcpFlagsMatch[3].split(',').map((s) => s.trim().replace(/^"|"$/g, '').toUpperCase()).filter(Boolean).join(','),
-        logic,
-      });
-      continue;
-    }
-
-    const tcpFlagsSimpleMatch = rest.match(/^([\w.]+)\s+(has_any|has_all|eq|neq|есть\s+любой\s+из|есть\s+все\s+из|равно\s+маске|не\s+равно\s+маске)\s+(.+)$/i);
-    if (tcpFlagsSimpleMatch) {
-      pushFilter({
-        field: tcpFlagsSimpleMatch[1],
-        op: resolveExplorerOpToken(tcpFlagsSimpleMatch[2]),
-        value: tcpFlagsSimpleMatch[3].trim().replace(/^"|"$/g, '').split(/[\s,]+/).map((s) => s.trim().toUpperCase()).filter(Boolean).join(','),
-        logic,
-      });
-      continue;
-    }
-
-    const inMatch = rest.match(/^([\w.]+)\s+(in|not_in|один из|ни один из)\s*\(([^)]+)\)/i);
-    if (inMatch) {
-      pushFilter({
-        field: inMatch[1],
-        op: resolveExplorerOpToken(inMatch[2]),
-        value: inMatch[3].split(',').map((s) => s.trim().replace(/^"|"$/g, '')).join(','),
-        logic,
-      });
-      continue;
-    }
-
-    let simpleHandled = false;
-    const fieldLead = rest.match(/^([\w.]+)\s+(.+)$/);
-    if (fieldLead) {
-      const remainder = fieldLead[2].trim();
-      for (const { token, op } of getExplorerOpTokens()) {
-        const opRe = new RegExp(`^${token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s+(.+)$`, 'i');
-        const opMatch = remainder.match(opRe);
-        if (opMatch) {
-          pushFilter({
-            field: fieldLead[1],
-            op,
-            value: opMatch[1].trim().replace(/^"|"$/g, ''),
-            logic,
+    try {
+      if (/^threshold\s+/i.test(rawLine)) {
+        const draft = explorerThresholdApi().parseExplorerThresholdDslLine?.(rawLine, schemaMetrics);
+        if (draft) {
+          thresholds.push({
+            ...draft,
+            id: `thr-${Date.now()}-${index}-${Math.random().toString(36).slice(2, 6)}`,
           });
-          simpleHandled = true;
-          break;
+        }
+        continue;
+      }
+
+      const logicOnly = parseLogicOnlyLine(rawLine);
+      if (logicOnly) {
+        pendingLogic = logicOnly;
+        continue;
+      }
+
+      const lineLower = rawLine.toLowerCase();
+
+      if (lineLower.startsWith('time ')) {
+        const betweenMatch = rawLine.match(/^time\s+between\s+"([^"]+)"\s+and\s+"([^"]+)"/i);
+        if (betweenMatch) {
+          timeRange = 'custom';
+          customPeriod = { from: betweenMatch[1], to: betweenMatch[2] };
+          const err = validateExplorerCustomPeriod(customPeriod, 'custom');
+          if (err) parseError(lineNum, err);
+          continue;
+        }
+        const rangeMatch = rawLine.match(/^time\s+range\s+(\S+)/i);
+        if (rangeMatch) {
+          timeRange = rangeMatch[1];
+          continue;
+        }
+        parseError(lineNum, `неверный формат времени: ${rawLine}`);
+      }
+
+      const { logic: inlineLogic, rest } = parseLogicPrefix(rawLine);
+      const logic = pendingLogic ?? (filters.length > 0 ? inlineLogic : 'and');
+      pendingLogic = null;
+
+      const systemInMatch = rest.match(/^(direction|collector)\s+(in|not_in|один из|ни один из)\s*\(([^)]+)\)/i);
+      if (systemInMatch) {
+        const field = systemInMatch[1].toLowerCase();
+        const value = systemInMatch[3]
+          .split(',')
+          .map((s) => s.trim().replace(/^"|"$/g, ''))
+          .join(',');
+        pushFilter({
+          field,
+          op: resolveExplorerOpToken(systemInMatch[2]),
+          value: field === 'collector' ? normalizeCollectorDslValue(value) : value,
+          logic,
+        });
+        continue;
+      }
+
+      const systemSimpleMatch = rest.match(/^(direction|collector)\s*(=|!=|<>|равно|не равно)\s+(.+)$/i);
+      if (systemSimpleMatch) {
+        const field = systemSimpleMatch[1].toLowerCase();
+        const value = systemSimpleMatch[3].trim().replace(/^"|"$/g, '');
+        pushFilter({
+          field,
+          op: resolveExplorerOpToken(systemSimpleMatch[2]),
+          value: field === 'collector' ? normalizeCollectorDslValue(value) : value,
+          logic,
+        });
+        continue;
+      }
+
+      const cidrMatch = rest.match(/^([\w.]+)\s+(cidr|в сети \(CIDR\))\s+(.+)$/i);
+      if (cidrMatch) {
+        pushFilter({
+          field: cidrMatch[1],
+          op: 'cidr',
+          value: cidrMatch[3].trim().replace(/^"|"$/g, ''),
+          logic,
+        });
+        continue;
+      }
+
+      const betweenMatch = rest.match(/^([\w.]+)\s+(between|между)\s+(\S+)\s+and\s+(\S+)$/i);
+      if (betweenMatch) {
+        pushFilter({
+          field: betweenMatch[1],
+          op: 'between',
+          value: `${betweenMatch[3]},${betweenMatch[4]}`,
+          logic,
+        });
+        continue;
+      }
+
+      const tcpFlagsMatch = rest.match(/^([\w.]+)\s+(has_any|has_all|eq|neq|есть\s+любой\s+из|есть\s+все\s+из|равно\s+маске|не\s+равно\s+маске)\s*\(([^)]+)\)/i);
+      if (tcpFlagsMatch) {
+        pushFilter({
+          field: tcpFlagsMatch[1],
+          op: resolveExplorerOpToken(tcpFlagsMatch[2]),
+          value: tcpFlagsMatch[3].split(',').map((s) => s.trim().replace(/^"|"$/g, '').toUpperCase()).filter(Boolean).join(','),
+          logic,
+        });
+        continue;
+      }
+
+      const tcpFlagsSimpleMatch = rest.match(/^([\w.]+)\s+(has_any|has_all|eq|neq|есть\s+любой\s+из|есть\s+все\s+из|равно\s+маске|не\s+равно\s+маске)\s+(.+)$/i);
+      if (tcpFlagsSimpleMatch) {
+        pushFilter({
+          field: tcpFlagsSimpleMatch[1],
+          op: resolveExplorerOpToken(tcpFlagsSimpleMatch[2]),
+          value: tcpFlagsSimpleMatch[3].trim().replace(/^"|"$/g, '').split(/[\s,]+/).map((s) => s.trim().toUpperCase()).filter(Boolean).join(','),
+          logic,
+        });
+        continue;
+      }
+
+      const inMatch = rest.match(/^([\w.]+)\s+(in|not_in|один из|ни один из)\s*\(([^)]+)\)/i);
+      if (inMatch) {
+        pushFilter({
+          field: inMatch[1],
+          op: resolveExplorerOpToken(inMatch[2]),
+          value: inMatch[3].split(',').map((s) => s.trim().replace(/^"|"$/g, '')).join(','),
+          logic,
+        });
+        continue;
+      }
+
+      let simpleHandled = false;
+      const fieldLead = rest.match(/^([\w.]+)\s+(.+)$/);
+      if (fieldLead) {
+        const remainder = fieldLead[2].trim();
+        for (const { token, op } of getExplorerOpTokens()) {
+          const opRe = new RegExp(`^${token.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&')}\\s+(.+)$`, 'i');
+          const opMatch = remainder.match(opRe);
+          if (opMatch) {
+            pushFilter({
+              field: fieldLead[1],
+              op,
+              value: opMatch[1].trim().replace(/^"|"$/g, ''),
+              logic,
+            });
+            simpleHandled = true;
+            break;
+          }
         }
       }
-    }
-    if (simpleHandled) continue;
+      if (simpleHandled) continue;
 
-    throw new Error(`Не удалось разобрать строку: ${rawLine}`);
+      parseError(lineNum, `не удалось разобрать строку: ${rawLine}`);
+    } catch (err) {
+      if (/^Строка \d+:/.test(String(err.message || ''))) throw err;
+      parseError(lineNum, err.message || 'ошибка разбора');
+    }
   }
 
   if (pendingLogic) {
@@ -1140,7 +1180,7 @@ function parseExplorerFilterDsl(text, schema = null) {
   );
   if (periodErr) throw new Error(periodErr);
 
-  return { timeRange, customPeriod, filters };
+  return { timeRange, customPeriod, filters, thresholds };
 }
 
 function explorerTextLineBounds(value, cursor) {
@@ -1228,6 +1268,11 @@ function buildExplorerTextSuggestions({ value, cursor, schema, entityItems = [] 
     String(label || '').toLowerCase().includes(needle)
     || String(hint || '').toLowerCase().includes(needle)
   );
+
+  if (trimmed.toLowerCase().startsWith('threshold')) {
+    const schemaMetrics = explorerThresholdApi().thresholdMetricsFromSchema?.(schema) || [];
+    return explorerThresholdApi().buildExplorerThresholdDslSuggestions?.(trimmed, leading, schemaMetrics) || [];
+  }
 
   [
     lineSuggestion('time range', 'time range 1h', 'Период'),
@@ -2049,7 +2094,7 @@ function PageExplorer({ onNavigate, displayTimezone }) {
     setTimeRange, setCustomPeriod, setFilters, setThresholds, setMetric, setGroupBy, setLimit, setVis,
   }), []);
 
-  const draftRestoreOpts = useMemo(() => ({ filterMode, setFilterText }), [filterMode]);
+  const draftRestoreOpts = useMemo(() => ({ filterMode, setFilterText, schema }), [filterMode, schema]);
 
   const cacheHydrateHandlers = useMemo(() => ({
     querySetters,
@@ -2134,7 +2179,7 @@ function PageExplorer({ onNavigate, displayTimezone }) {
   useEffect(() => {
     if (filterMode !== 'text') return;
     setFilterText(serializeExplorerFilterDsl({
-      timeRange, customPeriod, filters,
+      timeRange, customPeriod, filters, thresholds, schema,
     }));
     setFilterTextError(null);
   }, [filterMode]);
@@ -2144,6 +2189,7 @@ function PageExplorer({ onNavigate, displayTimezone }) {
     setTimeRange(parsed.timeRange);
     if (parsed.timeRange === 'custom') setCustomPeriod(parsed.customPeriod);
     setFilters(cloneExplorerFilters(parsed.filters));
+    setThresholds(cloneExplorerThresholdsList(parsed.thresholds || []));
     setFilterTextError(null);
     return parsed;
   };
@@ -2151,17 +2197,23 @@ function PageExplorer({ onNavigate, displayTimezone }) {
   const changeFilterMode = (nextMode) => {
     if (nextMode === filterMode) return;
     if (filterMode === 'text' && nextMode === 'graphic') {
-      try {
-        applyParsedTextToDraft(filterText);
-      } catch (err) {
-        setFilterTextError(err.message);
-        pushToast({ kind: 'error', title: 'Ошибка фильтра', desc: err.message });
-        return;
+      if (String(filterText || '').trim()) {
+        try {
+          applyParsedTextToDraft(filterText);
+        } catch (err) {
+          setFilterTextError(err.message);
+          pushToast({ kind: 'error', title: 'Ошибка фильтра', desc: err.message });
+          return;
+        }
+      } else {
+        setFilters([]);
+        setThresholds([]);
+        setFilterTextError(null);
       }
     }
     if (nextMode === 'text') {
       setFilterText(serializeExplorerFilterDsl({
-        timeRange, customPeriod, filters,
+        timeRange, customPeriod, filters, thresholds, schema,
       }));
       setFilterTextError(null);
     }
@@ -2175,6 +2227,8 @@ function PageExplorer({ onNavigate, displayTimezone }) {
       timeRange,
       customPeriod,
       filters: [],
+      thresholds,
+      schema,
     }));
     setFilterTextError(null);
     setFilterRowErrors({});
@@ -2383,15 +2437,18 @@ function PageExplorer({ onNavigate, displayTimezone }) {
       timeRange, customPeriod, filters, thresholds, metric, groupBy, limit, vis,
     });
     let activeFilters = filters;
+    let activeThresholds = thresholds;
     if (filterMode === 'text') {
       try {
         const parsed = applyParsedTextToDraft(filterText);
         activeFilters = parsed.filters;
+        activeThresholds = parsed.thresholds || [];
         snapshot = {
           ...snapshot,
           timeRange: parsed.timeRange,
           customPeriod: parsed.customPeriod,
           filters: parsed.filters,
+          thresholds: cloneExplorerThresholdsList(activeThresholds),
         };
       } catch (err) {
         setFilterTextError(err.message);
@@ -2412,7 +2469,7 @@ function PageExplorer({ onNavigate, displayTimezone }) {
       setFilterRowErrors({});
     }
 
-    snapshot = { ...snapshot, filters: validFilters, thresholds: cloneExplorerThresholdsList(thresholds) };
+    snapshot = { ...snapshot, filters: validFilters, thresholds: cloneExplorerThresholdsList(activeThresholds) };
 
     const periodErr = validateExplorerCustomPeriod(
       snapshot.timeRange === 'custom' ? snapshot.customPeriod : {},
@@ -2896,10 +2953,6 @@ function PageExplorer({ onNavigate, displayTimezone }) {
     && (!meta?.pctScope || meta.pctScope === 'full_filtered')
     && !(meta?.rowsHidden > 0);
   const appliedThresholds = activeQuery?.thresholds || [];
-  const displayThresholds = useMemo(() => {
-    if (meta?.thresholds?.length) return meta.thresholds;
-    return resolveExplorerThresholdPayload(appliedThresholds, schema).validThresholds;
-  }, [meta?.thresholds, appliedThresholds, schema]);
   const thresholdEmptyState = hasAppliedQuery
     && source !== 'loading'
     && !isRefreshingData
@@ -2914,46 +2967,12 @@ function PageExplorer({ onNavigate, displayTimezone }) {
     });
     setQueryVersion((v) => v + 1);
   };
-  const removeAppliedThreshold = (index) => {
-    const next = cloneExplorerThresholdsList(appliedThresholds).filter((_, i) => i !== index);
-    setThresholds(next);
-    if (!hasAppliedQuery || !appliedSnapshot) return;
-    setAppliedSnapshot({
-      ...migrateExplorerSnapshot(appliedSnapshot),
-      thresholds: next,
-    });
-    setQueryVersion((v) => v + 1);
-  };
   const clientThresholdWarning = explorerThresholdApi().shouldShowThresholdPeakWarning?.({
     thresholds: resolveExplorerThresholdPayload(thresholds, schema).validThresholds,
     groupBy,
     timeRange,
     customPeriod,
   });
-  const thresholdWarningText = meta?.thresholdWarning || clientThresholdWarning || null;
-  const thresholdFeedback = (displayThresholds.length > 0 || thresholdWarningText || (meta?.rowsHidden > 0)) ? (
-    <div className="explorer-threshold-feedback">
-      {thresholdWarningText && (
-        <div className="explorer-threshold-warning" role="status">{thresholdWarningText}</div>
-      )}
-      {displayThresholds.length > 0 && (
-        <div className="explorer-threshold-chips">
-          {displayThresholds.map((t, i) => (
-            <button
-              key={`${t.metric}-${i}-${t.value}`}
-              type="button"
-              className="explorer-threshold-chip"
-              onClick={() => removeAppliedThreshold(i)}
-              title="Снять порог"
-            >
-              <span>{explorerThresholdApi().formatThresholdChipLabel?.(t, schema?.thresholdMetrics) || t.metric}</span>
-              <Icon name="x" size={10} stroke={2.5} />
-            </button>
-          ))}
-        </div>
-      )}
-    </div>
-  ) : null;
   const othersRow = useMemo(() => buildExplorerOthersRow({
     shownRows: visibleResults,
     summary,
@@ -3220,7 +3239,6 @@ function PageExplorer({ onNavigate, displayTimezone }) {
                       </div>
                     )}
                   >
-                    {thresholdFeedback}
                     {analysisBody || (
                       <div className="explorer-results-layout">
                         <div className="explorer-results-chart">
@@ -3295,7 +3313,6 @@ function PageExplorer({ onNavigate, displayTimezone }) {
                   serverMs={serverMs}
                   tools={analysisToolbar}
                 >
-                  {thresholdFeedback}
                   {analysisBody || (
                     <ContributionBarsExplorer
                       results={othersRow ? [...visibleResults, othersRow] : visibleResults}
@@ -3791,9 +3808,7 @@ function ExplorerFilterTextEditor({ value, onChange, error, schema, filters = []
 
   useEffect(() => {
     setActiveIndex(0);
-    if (suggestions.length > 0) {
-      setAutocompleteOpen(true);
-    } else if (!entityLoading) {
+    if (suggestions.length === 0 && !entityLoading) {
       setAutocompleteOpen(false);
     }
   }, [suggestions.length, currentLine, entityLoading]);
@@ -3913,7 +3928,7 @@ function ExplorerFilterTextEditor({ value, onChange, error, schema, filters = []
         onKeyUp={updateCursor}
         onKeyDown={handleKeyDown}
         onFocus={updateCursor}
-        placeholder={'time range 1h\ndirection in (in, out)\nproto = UDP'}
+        placeholder={'time range 1h\ndirection in (in, out)\nproto = UDP\nthreshold avg bps > 100 mbps'}
         spellCheck={false}
         style={{ minHeight: 180, resize: 'vertical', fontSize: 12, lineHeight: 1.45 }}
       />
@@ -4084,7 +4099,7 @@ function ExplorerAddFilterMenu({
   return (
     <>
       <div ref={anchorRef}>
-        <Button kind="ghost" size="sm" icon="plus" onClick={() => setOpen((v) => !v)}>Добавить</Button>
+        <Button kind="ghost" size="sm" icon="plus" onClick={() => setOpen((v) => !v)}>Условие</Button>
       </div>
       {open && menuStyle && ReactDOM.createPortal(
         <div
@@ -4422,9 +4437,23 @@ function ExplorerThresholdRow({
     <div className="explorer-threshold-row">
       <div className="explorer-threshold-row__main">
         {showPeak && (
-          <div className="seg explorer-threshold-row__agg">
-            <button type="button" className={row.aggregate === 'avg' ? 'active' : ''} onClick={() => onChange({ aggregate: 'avg' })}>средняя</button>
-            <button type="button" className={row.aggregate === 'peak' ? 'active' : ''} onClick={() => onChange({ aggregate: 'peak' })}>пик</button>
+          <div className="seg explorer-threshold-row__agg" role="group" aria-label="Режим порога">
+            <button
+              type="button"
+              className={(row.aggregate || 'avg') === 'avg' ? 'is-active' : ''}
+              aria-pressed={(row.aggregate || 'avg') === 'avg'}
+              onClick={() => onChange({ aggregate: 'avg' })}
+            >
+              средняя
+            </button>
+            <button
+              type="button"
+              className={row.aggregate === 'peak' ? 'is-active' : ''}
+              aria-pressed={row.aggregate === 'peak'}
+              onClick={() => onChange({ aggregate: 'peak' })}
+            >
+              пик
+            </button>
           </div>
         )}
         <select className="input explorer-threshold-row__metric" value={row.metric} onChange={(e) => onChange({ metric: e.target.value, unit: api.defaultThresholdUnit?.(e.target.value, metrics) })}>
@@ -4590,7 +4619,7 @@ function ExplorerFilters({
       </div>
 
       {filterMode === 'graphic' ? (
-        <div className="col" style={{ gap: 8, marginBottom: 12 }}>
+        <div className="col explorer-filters-panel__body" style={{ marginBottom: 12 }}>
           <ExplorerSystemFilterRow title="Период" mandatory>
             <TimeFilter
               variant="explorer"
@@ -4615,13 +4644,14 @@ function ExplorerFilters({
             </div>
           </ExplorerSystemFilterRow>
 
-          {!hasAnyFilter && (
-            <div style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-secondary)', padding: '6px 0' }}>
-              Добавьте фильтры из меню «Добавить».
-            </div>
-          )}
-
-          {filters.map((f, i) => {
+          <div className="explorer-panel-section">
+            <div className="explorer-panel-section__head">Условия</div>
+            {!hasAnyFilter && (
+              <div className="explorer-panel-section__empty">
+                <span>Добавьте при необходимости кнопкой «Условие»</span>
+              </div>
+            )}
+            {filters.map((f, i) => {
             const meta = filterFieldMeta(schema, f.field);
             const ops = filterOpsForField(schema, f.field);
             const isSpecialField = f.field === 'direction' || f.field === 'collector';
@@ -4731,24 +4761,39 @@ function ExplorerFilters({
               </div>
             );
           })}
+            <div className="explorer-panel-section__add">
+              <ExplorerAddFilterMenu
+                schema={schema}
+                onPickSystem={pickSystemFilter}
+                onPickField={(fieldId) => {
+                  const nextOps = filterOpsForField(schema, fieldId);
+                  addFilter({ field: fieldId, op: nextOps[0], value: '' });
+                }}
+              />
+            </div>
+          </div>
 
-          <ExplorerThresholdEditor
-            schema={schema}
-            thresholds={thresholds}
-            setThresholds={setThresholds}
-            peakWarning={thresholdPeakWarning}
-          />
-
-          <div className="row" style={{ gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
-            <ExplorerAddFilterMenu
+          <div className="explorer-panel-section">
+            <div className="explorer-panel-section__head">Пороги</div>
+            <ExplorerThresholdEditor
               schema={schema}
-              onPickSystem={pickSystemFilter}
-              onPickField={(fieldId) => {
-                const nextOps = filterOpsForField(schema, fieldId);
-                addFilter({ field: fieldId, op: nextOps[0], value: '' });
-              }}
+              thresholds={thresholds}
+              setThresholds={setThresholds}
+              peakWarning={thresholdPeakWarning}
             />
-            <Button kind="ghost" size="sm" icon="plus" onClick={addThreshold}>Порог</Button>
+            {!thresholds.length && !thresholdPeakWarning ? (
+              <div className="explorer-panel-section__empty">
+                <span>Добавьте при необходимости кнопкой «Порог»</span>
+                <Button kind="ghost" size="sm" icon="plus" onClick={addThreshold}>Порог</Button>
+              </div>
+            ) : (
+              <div className="explorer-panel-section__add">
+                <Button kind="ghost" size="sm" icon="plus" onClick={addThreshold}>Порог</Button>
+              </div>
+            )}
+          </div>
+
+          <div className="explorer-filters-actions">
             <ExplorerFilterTemplatesMenu
               lastApplied={lastApplied}
               savedQueries={savedQueries}
@@ -4773,7 +4818,7 @@ function ExplorerFilters({
           </div>
         </div>
       ) : (
-        <div className="col" style={{ gap: 8, marginBottom: 12 }}>
+        <div className="col explorer-filters-panel__body" style={{ marginBottom: 12 }}>
           <ExplorerFilterTextEditor
             value={filterText}
             onChange={onFilterTextChange}
@@ -4781,7 +4826,7 @@ function ExplorerFilters({
             schema={schema}
             filters={filters}
           />
-          <div className="row" style={{ gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
+          <div className="explorer-filters-actions">
             <ExplorerFilterTemplatesMenu
               lastApplied={lastApplied}
               savedQueries={savedQueries}

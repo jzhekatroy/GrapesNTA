@@ -265,6 +265,7 @@ const PERMISSION_MATRIX = [
   { id: 'snmp',       label: 'SNMP' },
   { id: 'routers',    label: 'Роутеры и экспортёры' },
   { id: 'cidr',       label: 'Собственные сети (CIDR)' },
+  { id: 'flow-exclusions', label: 'Исключения из статистики' },
   { id: 'users',      label: 'Пользователи и права' },
 ];
 

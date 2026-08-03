@@ -14,7 +14,7 @@ const {
   thresholdAvgColumnSql,
   thresholdPeakColumnSql,
 } = require('./explorer-thresholds');
-const { normalizeExplorerQuery } = require('./explorer');
+const { explorerFlows, normalizeExplorerQuery } = require('./explorer');
 
 describe('normalizeExplorerThreshold', () => {
   it('normalizes bps threshold with unit', () => {
@@ -72,6 +72,13 @@ describe('normalizeExplorerThreshold', () => {
     });
     assert.equal(t.aggregate, 'peak');
     assert.equal(t.peakWindow, '1h');
+  });
+
+  it('accepts flows count with thousand and million units', () => {
+    const k = normalizeExplorerThreshold({ metric: 'flows', op: 'gt', value: 100, unit: 'k' });
+    const m = normalizeExplorerThreshold({ metric: 'flows', op: 'gt', value: 2, unit: 'm' });
+    assert.equal(k.unit, 'k');
+    assert.equal(m.unit, 'm');
   });
 });
 
@@ -202,6 +209,40 @@ describe('normalizeExplorerQuery thresholds', () => {
     });
     assert.equal(q.thresholds.length, 1);
     assert.equal(q.thresholds[0].metric, 'bps');
+  });
+});
+
+describe('explorerFlows uniq_src thresholds', () => {
+  it('selects uniq_src_count when uniq_src is only a threshold metric', async () => {
+    const spec = await explorerFlows({
+      metric: 'bps',
+      groupBy: ['src_ip', 'dst_ip'],
+      thresholds: [
+        { metric: 'uniq_src', aggregate: 'avg', op: 'gt', value: 1, unit: 'count' },
+      ],
+      range: '30m',
+      limit: 25,
+    });
+
+    assert.match(spec.sql, /uniqCombined\(f\.`[^`]+`\) AS uniq_src_count/);
+    assert.match(spec.sql, /WHERE t\.uniq_src_count > \{thr_0_v0:Float64\}/);
+    assert.doesNotMatch(spec.sql, /inner_agg AS \(/);
+  });
+
+  it('selects uniq_src_count when combined with a peak threshold', async () => {
+    const spec = await explorerFlows({
+      metric: 'bps',
+      groupBy: ['src_ip', 'dst_ip'],
+      thresholds: [
+        { metric: 'bps', aggregate: 'peak', peakWindow: '5m', op: 'gt', value: 1, unit: 'bps' },
+        { metric: 'uniq_src', aggregate: 'avg', op: 'gt', value: 1, unit: 'count' },
+      ],
+      range: '30m',
+      limit: 25,
+    });
+
+    assert.match(spec.sql, /uniqCombinedMerge\(uniq_src_state\) AS uniq_src_count/);
+    assert.match(spec.sql, /WHERE t\.peak_bps > \{thr_0_v0:Float64\} AND t\.uniq_src_count > \{thr_1_v0:Float64\}/);
   });
 });
 

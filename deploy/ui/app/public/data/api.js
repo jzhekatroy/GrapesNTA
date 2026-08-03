@@ -1164,6 +1164,69 @@ const ApiClient = (() => {
     return body;
   }
 
+  async function loadFlowExclusions() {
+    const health = await checkHealth();
+    if (!health.connected) {
+      return { source: 'error', rows: [], stats: null, error: LOAD_FAILED };
+    }
+    const result = await fetchDashboard('/api/refs/flow-exclusions', 'refs/flow-exclusions');
+    if (!result.ok) {
+      return { source: 'error', rows: [], stats: null, error: LOAD_FAILED };
+    }
+    const meta = result.meta || {};
+    return {
+      source: 'clickhouse',
+      rows: Array.isArray(result.data) ? result.data : [],
+      stats: {
+        rulesTotal: meta.rulesTotal ?? 0,
+        rulesEnabled: meta.rulesEnabled ?? 0,
+        excludedPackets24h: meta.excludedPackets24h ?? 0,
+        excludedBytes24h: meta.excludedBytes24h ?? 0,
+      },
+      loadMs: result.loadMs,
+      serverMs: result.serverMs,
+    };
+  }
+
+  async function saveFlowExclusion(payload) {
+    const res = await fetch('/api/refs/flow-exclusions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      cache: 'no-store',
+      credentials: 'same-origin',
+      body: JSON.stringify(payload),
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
+    return body;
+  }
+
+  async function toggleFlowExclusion({ ruleId, enabled }) {
+    const res = await fetch('/api/refs/flow-exclusions/toggle', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      cache: 'no-store',
+      credentials: 'same-origin',
+      body: JSON.stringify({ ruleId, enabled }),
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
+    return body;
+  }
+
+  async function deleteFlowExclusion({ ruleId }) {
+    const res = await fetch('/api/refs/flow-exclusions', {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      cache: 'no-store',
+      credentials: 'same-origin',
+      body: JSON.stringify({ ruleId }),
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
+    return body;
+  }
+
   async function loadNetEntitiesAdmin() {
     const health = await checkHealth();
     if (!health.connected) {
@@ -1982,6 +2045,10 @@ const ApiClient = (() => {
     saveL3Prefix,
     toggleL3Prefix,
     deleteL3Prefix,
+    loadFlowExclusions,
+    saveFlowExclusion,
+    toggleFlowExclusion,
+    deleteFlowExclusion,
     saveNetEntity,
     loadPortServices,
     savePortService,

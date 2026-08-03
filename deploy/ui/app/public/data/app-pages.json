@@ -6,6 +6,7 @@
   { "id": "top", "title": "Топ ASN", "section": "Анализ трафика" },
   { "id": "dns", "title": "DNS-запросы", "section": "Анализ трафика" },
   { "id": "collectors", "title": "Коллекторы", "section": "Сбор данных" },
+  { "id": "flow-exclusions", "title": "Исключения из статистики", "section": "Сбор данных" },
   { "id": "snmp", "title": "SNMP", "section": "Сбор данных" },
   { "id": "bmp", "title": "BMP / BGP", "section": "Сбор данных" },
   { "id": "routers", "title": "Роутеры и экспортёры", "section": "Модель сети", "hidden": true },

@@ -90,6 +90,8 @@ const config = {
   bmpRouteEventsTable: env('CLICKHOUSE_BMP_ROUTE_EVENTS_TABLE', 'bmp_route_events'),
   l3PrefixesTable: env('CLICKHOUSE_L3_PREFIXES_TABLE', 'net_l3_prefixes'),
   l3PrefixesView: env('CLICKHOUSE_L3_PREFIXES_VIEW', 'net_l3_prefixes_enabled'),
+  flowExclusionsTable: env('CLICKHOUSE_FLOW_EXCLUSIONS_TABLE', 'net_flow_exclusions'),
+  flowExclusionsView: env('CLICKHOUSE_FLOW_EXCLUSIONS_VIEW', 'net_flow_exclusions_enabled'),
   l2VlansTable: env('CLICKHOUSE_L2_VLANS_TABLE', 'net_l2_vlans'),
   l2VlansView: env('CLICKHOUSE_L2_VLANS_VIEW', 'net_l2_vlans_enabled'),
   vlanTable: env('CLICKHOUSE_VLAN_TABLE', 'traffic_vlan_1m'),
@@ -416,6 +418,14 @@ function l3PrefixesViewRef() {
   return `${qIdent(config.database)}.${qIdent(config.l3PrefixesView)}`;
 }
 
+function flowExclusionsTableRef() {
+  return `${qIdent(config.database)}.${qIdent(config.flowExclusionsTable)}`;
+}
+
+function flowExclusionsViewRef() {
+  return `${qIdent(config.database)}.${qIdent(config.flowExclusionsView)}`;
+}
+
 function l2VlansTableRef() {
   return `${qIdent(config.database)}.${qIdent(config.l2VlansTable)}`;
 }
@@ -631,6 +641,8 @@ function getConfig() {
     bmpRouteEventsTable: config.bmpRouteEventsTable,
     l3PrefixesTable: config.l3PrefixesTable,
     l3PrefixesView: config.l3PrefixesView,
+    flowExclusionsTable: config.flowExclusionsTable,
+    flowExclusionsView: config.flowExclusionsView,
     collectorsTable: config.collectorsTable,
     collectorsView: config.collectorsView,
     snmpSettingsCurrent: config.snmpSettingsCurrent,
@@ -720,6 +732,8 @@ module.exports = {
   dnsClients1hTableRef,
   l3PrefixesTableRef,
   l3PrefixesViewRef,
+  flowExclusionsTableRef,
+  flowExclusionsViewRef,
   l2VlansTableRef,
   l2VlansViewRef,
   vlanTableRef,
