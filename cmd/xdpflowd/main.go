@@ -466,6 +466,8 @@ func main() {
 	sourceID := flag.String("source-id", "xdp-default", "logical flow observation point id written to flows_raw.source_id")
 	chHealthTable := flag.String("ch-health-table", flowingest.DefaultHealthTable, "ClickHouse table for periodic health snapshots (empty = disabled)")
 	collectorID := flag.String("collector-id", "", "collector_id for health snapshots (see net_collectors)")
+	phyPktCounters := flag.String("phy-packet-counters", "", "comma-separated ethtool counter names for packets received on the wire, tried in order (empty = built-in list); see `ethtool -S <iface>`")
+	phyDiscardCounters := flag.String("phy-discard-counters", "", "comma-separated ethtool counter names for packets the NIC could not accept, tried in order (empty = built-in list)")
 	flag.Parse()
 
 	if strings.TrimSpace(*configPath) != "" {
@@ -729,6 +731,9 @@ func main() {
 			Iface:          *iface,
 			Stages:         stages,
 			LocalSinkPorts: sinkPorts,
+
+			PhyPacketCounters:  splitCSV(*phyPktCounters),
+			PhyDiscardCounters: splitCSV(*phyDiscardCounters),
 		})
 		if err != nil {
 			log.Error("health reporter init", "err", err)

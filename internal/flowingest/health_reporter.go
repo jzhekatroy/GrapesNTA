@@ -16,10 +16,10 @@ const DefaultHealthTable = "default.collector_health_snapshots"
 
 // ReceiverMetrics holds UDP/sFlow receive-side counters.
 type ReceiverMetrics struct {
-	Datagrams      uint64
-	RecordsParsed  uint64
-	ParseErrors    uint64
-	UDPQueueDrops  uint64
+	Datagrams     uint64
+	RecordsParsed uint64
+	ParseErrors   uint64
+	UDPQueueDrops uint64
 }
 
 // XDPMetrics holds BPF PERCPU stats counters.
@@ -66,6 +66,11 @@ type HealthReporterConfig struct {
 	// UDP ports of export sinks living on this host, whose kernel drop
 	// counters we can read. Remote sinks are left out on purpose.
 	LocalSinkPorts []uint16
+	// Driver counter names for the wire-side interface numbers, in priority
+	// order. Empty falls back to DefaultLinkPacketCounters /
+	// DefaultLinkDiscardCounters; set them when a NIC names things unusually.
+	PhyPacketCounters  []string
+	PhyDiscardCounters []string
 }
 
 // HealthReporter writes cumulative health snapshots to ClickHouse.
@@ -80,6 +85,11 @@ type HealthReporter struct {
 	hostname    string
 	stages      []string
 	sinkPorts   []uint16
+	phyPktNames []string
+	phyDscNames []string
+
+	prevPhyDiscards uint64
+	havePhyBaseline bool
 }
 
 func NewHealthReporter(log *slog.Logger, cfg HealthReporterConfig) (*HealthReporter, error) {
@@ -119,6 +129,8 @@ func NewHealthReporter(log *slog.Logger, cfg HealthReporterConfig) (*HealthRepor
 		hostname:    host,
 		stages:      append([]string(nil), cfg.Stages...),
 		sinkPorts:   append([]uint16(nil), cfg.LocalSinkPorts...),
+		phyPktNames: append([]string(nil), cfg.PhyPacketCounters...),
+		phyDscNames: append([]string(nil), cfg.PhyDiscardCounters...),
 	}
 	log.Info("health reporter enabled",
 		"table", table,
@@ -139,21 +151,23 @@ func (r *HealthReporter) Close() {
 }
 
 type HealthWriteInput struct {
-	XDP                    XDPMetrics
-	Receiver               ReceiverMetrics
-	CH                     HealthSnapshot
+	XDP      XDPMetrics
+	Receiver ReceiverMetrics
+	CH       HealthSnapshot
 	// Exclusions is what the operator rule catalog deliberately discarded.
 	// Without it the XDP-vs-ClickHouse completeness ratio reads intentional
 	// drops as ingest loss.
-	Exclusions             ExclusionStats
-	NetFlow                NetFlowMetrics
-	MapFullDelta           uint64
-	InsertErrsDelta        uint64
-	QueueDropsDelta        uint64
-	UDPQueueDropsDelta     uint64
-	NFSendErrsDelta        uint64
-	SpoolCorruptionDelta   uint64
-	NICRxDropDelta         uint64
+	Exclusions           ExclusionStats
+	NetFlow              NetFlowMetrics
+	MapFullDelta         uint64
+	InsertErrsDelta      uint64
+	QueueDropsDelta      uint64
+	UDPQueueDropsDelta   uint64
+	NFSendErrsDelta      uint64
+	SpoolCorruptionDelta uint64
+	// PhyRxDiscardDelta is filled by the reporter itself, which owns the
+	// interface counters; callers leave it alone.
+	PhyRxDiscardDelta      uint64
 	LagSegmentsThreshold   int64
 	WriterLagRowsThreshold uint64
 	DrainerAgeThreshold    time.Duration
@@ -194,8 +208,10 @@ func classifyHealthStatus(in HealthWriteInput) (string, []string) {
 	if in.SpoolCorruptionDelta > 0 {
 		add("critical", "spool_corruption")
 	}
-	if in.NICRxDropDelta > 0 {
-		add("warning", "nic_rx_drops")
+	// The port could not take the traffic in — nothing downstream can recover
+	// it, and no amount of tuning inside the collector will show it.
+	if in.PhyRxDiscardDelta > 0 {
+		add("warning", "phy_rx_discards")
 	}
 	writerLag := uint64(0)
 	if in.CH.RecordsQueued > in.CH.RecordsWritten {
@@ -224,7 +240,18 @@ func (r *HealthReporter) Write(ctx context.Context, in HealthWriteInput) error {
 		return nil
 	}
 	nic := ReadNICStats(r.iface)
+	link := ReadLinkStats(r.iface, r.phyPktNames, r.phyDscNames)
 	sinkDrops, sinkObserved := ReadUDPSocketDrops(r.sinkPorts)
+
+	// First tick only establishes the baseline: a counter that has been
+	// growing since boot must not report the whole history as a fresh loss.
+	if link.Source != "" {
+		if r.havePhyBaseline && link.RxDiscards > r.prevPhyDiscards {
+			in.PhyRxDiscardDelta = link.RxDiscards - r.prevPhyDiscards
+		}
+		r.prevPhyDiscards = link.RxDiscards
+		r.havePhyBaseline = true
+	}
 	status, reasons := classifyHealthStatus(in)
 
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
@@ -248,6 +275,9 @@ func (r *HealthReporter) Write(ctx context.Context, in HealthWriteInput) error {
     nic_rx_errors,
     nic_rx_missed,
     nic_rx_fifo_errors,
+    phy_rx_packets,
+    phy_rx_discards,
+    phy_counter_source,
     datagrams,
     records_parsed,
     receiver_parse_errors,
@@ -311,6 +341,9 @@ func (r *HealthReporter) Write(ctx context.Context, in HealthWriteInput) error {
 		nic.RxErrors,
 		nic.RxMissed,
 		nic.RxFifo,
+		link.RxPackets,
+		link.RxDiscards,
+		link.Source,
 		in.Receiver.Datagrams,
 		in.Receiver.RecordsParsed,
 		in.Receiver.ParseErrors,
@@ -374,6 +407,9 @@ func (r *HealthReporter) Write(ctx context.Context, in HealthWriteInput) error {
 		"exclusion_rules", in.Exclusions.Rules,
 		"nic_rx_dropped", nic.RxDropped,
 		"nic_rx_fifo_errors", nic.RxFifo,
+		"phy_rx_packets", link.RxPackets,
+		"phy_rx_discards", link.RxDiscards,
+		"phy_counter_source", link.Source,
 		"nf_packets_out", in.NetFlow.PacketsOut,
 		"nf_send_errs", in.NetFlow.SendErrs,
 		"nf_socket_drops", sinkDrops,

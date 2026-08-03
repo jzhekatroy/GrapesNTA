@@ -31,6 +31,13 @@ CREATE TABLE IF NOT EXISTS default.collector_health_snapshots
     nic_rx_missed UInt64 DEFAULT 0,
     nic_rx_fifo_errors UInt64 DEFAULT 0,
 
+    -- Wire-side numbers from the driver stat table. Under XDP the netdev
+    -- counters above see only what was passed upstack, so these are the only
+    -- honest answer to "how much actually arrived on the port".
+    phy_rx_packets UInt64 DEFAULT 0,
+    phy_rx_discards UInt64 DEFAULT 0,
+    phy_counter_source LowCardinality(String) DEFAULT '',
+
     datagrams UInt64 DEFAULT 0,
     records_parsed UInt64 DEFAULT 0,
     receiver_parse_errors UInt64 DEFAULT 0,
@@ -105,6 +112,9 @@ ALTER TABLE default.collector_health_snapshots
     ADD COLUMN IF NOT EXISTS nic_rx_errors UInt64 DEFAULT 0 AFTER nic_rx_dropped,
     ADD COLUMN IF NOT EXISTS nic_rx_missed UInt64 DEFAULT 0 AFTER nic_rx_errors,
     ADD COLUMN IF NOT EXISTS nic_rx_fifo_errors UInt64 DEFAULT 0 AFTER nic_rx_missed,
+    ADD COLUMN IF NOT EXISTS phy_rx_packets UInt64 DEFAULT 0 AFTER nic_rx_fifo_errors,
+    ADD COLUMN IF NOT EXISTS phy_rx_discards UInt64 DEFAULT 0 AFTER phy_rx_packets,
+    ADD COLUMN IF NOT EXISTS phy_counter_source LowCardinality(String) DEFAULT '' AFTER phy_rx_discards,
     ADD COLUMN IF NOT EXISTS spool_corruption_frames UInt64 DEFAULT 0 AFTER drainer_progress_age_sec,
     ADD COLUMN IF NOT EXISTS spool_corruption_bytes UInt64 DEFAULT 0 AFTER spool_corruption_frames,
     ADD COLUMN IF NOT EXISTS nf_records_out UInt64 DEFAULT 0 AFTER exclusion_rules,
