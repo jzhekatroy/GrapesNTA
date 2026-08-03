@@ -46,6 +46,36 @@ docker logs --tail 80 -f grapes-worker
 
 Expect: `grapes-worker: starting observations loop`, then `analytics started` / `analytics tick`.
 
+Note the service runs in Docker, so `systemctl is-active grapes-worker` reports
+`inactive` on a healthy host. Check `docker ps` instead.
+
+## After a ClickHouse outage or a host reboot
+
+The chain is collector spool drain, then rollup catch-up, then graphs. Nothing
+here needs a manual step, but the order explains the delay: rollups deliberately
+hold their cursor while a collector is still replaying its spool
+(`TRAFFIC_ROLLUP_REQUIRE_SPOOL_DRAINED`), because `flows_raw` is incomplete for
+recent buckets until the replay ends.
+
+To see where it stands:
+
+```bash
+# how far behind the dashboard rollup is (~300-360s is the configured safety lag)
+clickhouse-client -q "SELECT max(minute), dateDiff('second', max(minute), now()) FROM default.traffic_dashboard_1m"
+clickhouse-client -q "SELECT job, last_bucket, status, last_error FROM default.traffic_rollup_state FINAL ORDER BY job FORMAT PrettyCompact"
+docker logs --since 10m grapes-worker 2>&1 | grep -E 'run start|precheck|action=|run complete'
+```
+
+`action=hold reason=spool_draining` means it is waiting on purpose.
+`action=stop reason=live_wall` means the tick ran out of its time budget and the
+next one continues from the same cursor — normal while catching up a long gap.
+
+Every ClickHouse call is bounded (see the hang-containment block in
+`env.example`): one request, one query, one tick, plus a `timeout` around each
+cron wrapper. This exists because supercronic holds a flock for the whole tick,
+so a single unbounded query used to block every later tick until someone
+restarted the container.
+
 ## Cutover from host timers
 
 1. Start `grapes-worker` and verify rollups + observations.

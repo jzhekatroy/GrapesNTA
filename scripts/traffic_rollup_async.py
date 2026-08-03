@@ -117,6 +117,7 @@ class ClickHouseClient:
     def __init__(self, args: argparse.Namespace) -> None:
         self.args = args
         self.base = self._base_cmd(args)
+        self.timeout_s = max(0, int(getattr(args, "query_timeout_sec", 0) or 0)) or None
 
     @staticmethod
     def _base_cmd(args: argparse.Namespace) -> List[str]:
@@ -130,11 +131,22 @@ class ClickHouseClient:
         return cmd
 
     def query(self, sql: str, *, display: Optional[str] = None) -> str:
-        proc = subprocess.run(
-            self.base + ["--query", sql],
-            capture_output=True,
-            text=True,
-        )
+        try:
+            proc = subprocess.run(
+                self.base + ["--query", sql],
+                capture_output=True,
+                text=True,
+                timeout=self.timeout_s,
+            )
+        except subprocess.TimeoutExpired:
+            # The caller runs under a flock held for the whole cron tick, so a
+            # query that never returns silences every following tick. Surface it
+            # as a normal failure and let the next tick retry.
+            shown = display if display is not None else sql
+            raise RuntimeError(
+                f"clickhouse query timed out after {self.timeout_s}s\n"
+                f"query: {shown[:800]}{'...' if len(shown) > 800 else ''}"
+            ) from None
         if proc.returncode != 0:
             shown = display if display is not None else sql
             err = (proc.stderr or proc.stdout or "").strip()
@@ -839,6 +851,22 @@ def parse_args() -> argparse.Namespace:
         default=int(env("TRAFFIC_ROLLUP_QUEUE_WALL_SEC", "180") or "180"),
         help="max wall seconds to spend on a queue request per cron tick",
     )
+    parser.add_argument(
+        "--live-wall-sec",
+        type=int,
+        default=int(env("TRAFFIC_ROLLUP_LIVE_WALL_SEC", "45") or "45"),
+        help=(
+            "max wall seconds for a live tick; the cursor is saved per bucket, so "
+            "the next tick resumes where this one stopped. Keeps a slow ClickHouse "
+            "from holding the cron flock past its own interval (0 = no limit)"
+        ),
+    )
+    parser.add_argument(
+        "--query-timeout-sec",
+        type=int,
+        default=int(env("TRAFFIC_ROLLUP_QUERY_TIMEOUT_SEC", "180") or "180"),
+        help="abort a single ClickHouse query after this many seconds (0 = wait forever)",
+    )
     return parser.parse_args()
 
 
@@ -1477,10 +1505,28 @@ def run_live(args: argparse.Namespace, logger: logging.Logger) -> int:
         args.dry_run,
     )
 
+    wall_sec = max(0, int(args.live_wall_sec or 0))
+    wall_reached = False
+
     for job in jobs:
+        if wall_reached:
+            break
         processed = 0
         job_until = safe_until_for_job(job, args)
         while processed < args.max_buckets_per_job:
+            # Every bucket persists the cursor, so stopping mid-catch-up costs
+            # nothing but the remainder of this tick. Overrunning the cron
+            # interval costs far more: the flock blocks every following tick.
+            if wall_sec and time.monotonic() - started >= wall_sec:
+                logger.info(
+                    "job=%s action=stop reason=live_wall wall_s=%s ok=%s",
+                    job.job_id,
+                    wall_sec,
+                    ok_count,
+                )
+                wall_reached = True
+                break
+
             state = states.get(job.job_id)
             bucket_start = next_bucket(
                 job,
@@ -1575,11 +1621,12 @@ def run_live(args: argparse.Namespace, logger: logging.Logger) -> int:
 
     elapsed = time.monotonic() - started
     logger.info(
-        "run complete ok=%s skipped=%s failed=%s elapsed_s=%.1f",
+        "run complete ok=%s skipped=%s failed=%s elapsed_s=%.1f wall_reached=%s",
         ok_count,
         skip_count,
         fail_count,
         elapsed,
+        wall_reached,
     )
     return 1 if fail_count else 0
 

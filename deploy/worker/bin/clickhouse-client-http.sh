@@ -10,6 +10,10 @@ HOST="${CLICKHOUSE_HTTP_HOST:-127.0.0.1}"
 PORT="${CLICKHOUSE_HTTP_PORT:-8123}"
 USER="${CLICKHOUSE_HTTP_USER:-default}"
 PASSWORD="${CLICKHOUSE_HTTP_PASSWORD:-}"
+# A hung ClickHouse must not become a hung caller: the rollup cron holds a flock
+# for the whole run, so a request that waits an hour silently kills every tick
+# in that hour. Fail fast and let the next tick retry.
+MAX_TIME="${CLICKHOUSE_HTTP_MAX_TIME:-180}"
 DATABASE=""
 QUERY=""
 
@@ -67,6 +71,6 @@ if [ -n "$DATABASE" ]; then
   URL="${URL}&database=$(printf %s "$DATABASE" | sed 's/ /%20/g')"
 fi
 
-curl -sS -f --max-time 3600 -X POST "$URL" --data-binary @"$BODY"
+curl -sS -f --max-time "$MAX_TIME" -X POST "$URL" --data-binary @"$BODY"
 # Ensure trailing newline like clickhouse-client
 echo

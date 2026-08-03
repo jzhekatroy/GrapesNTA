@@ -6,6 +6,10 @@ HOST="${CLICKHOUSE_HTTP_HOST:-127.0.0.1}"
 PORT="${CLICKHOUSE_HTTP_PORT:-8123}"
 USER="${CLICKHOUSE_HTTP_USER:-default}"
 PASSWORD="${CLICKHOUSE_HTTP_PASSWORD:-}"
+# See the worker copy: an hour-long wait on a hung ClickHouse turns into a
+# stuck cron job. Enrichment loads are heavier than rollup buckets, so give
+# them more room while still bounding the wait.
+MAX_TIME="${CLICKHOUSE_HTTP_MAX_TIME:-900}"
 DATABASE=""
 QUERY=""
 
@@ -55,5 +59,5 @@ if [ -n "$DATABASE" ]; then
   URL="${URL}&database=$(printf %s "$DATABASE" | sed 's/ /%20/g')"
 fi
 
-curl -sS -f --max-time 3600 -X POST "$URL" --data-binary @"$BODY"
+curl -sS -f --max-time "$MAX_TIME" -X POST "$URL" --data-binary @"$BODY"
 echo
