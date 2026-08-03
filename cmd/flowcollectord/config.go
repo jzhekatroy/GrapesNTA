@@ -39,6 +39,10 @@ type config struct {
 	ClassifierDirectionSettingsView string
 	ClassifierInterfaceRolesView string
 
+	ExclusionsEnabled bool
+	ExclusionsView    string
+	ExclusionsRefresh time.Duration
+
 	UDPReadBuffer int
 	UDPReaders    int
 	UDPWorkers    int
@@ -77,6 +81,10 @@ func loadConfig() config {
 	classifierL2 := flag.String("classifier-l2-vlans-view", envString("FC_CLASSIFIER_L2_VLANS_VIEW", "default.net_l2_vlans_enabled"), "L2 VLANs view")
 	classifierDirectionSettings := flag.String("classifier-direction-settings-view", envString("FC_CLASSIFIER_DIRECTION_SETTINGS_VIEW", "default.net_direction_settings_current"), "direction mode settings view (empty = always derive direction from prefixes)")
 	classifierInterfaceRoles := flag.String("classifier-interface-roles-view", envString("FC_CLASSIFIER_INTERFACE_ROLES_VIEW", "default.net_interface_roles_effective_current"), "effective port sides view for direction mode ports (empty = disabled)")
+
+	exclusionsEnabled := flag.Bool("exclusions", envBool("FC_EXCLUSIONS", true), "drop flows matched by the operator exclusion catalog")
+	exclusionsView := flag.String("exclusions-view", envString("FC_EXCLUSIONS_VIEW", flowingest.DefaultExclusionsTable), "view with enabled flow exclusion rules (empty = disabled)")
+	exclusionsRefresh := flag.Duration("exclusions-refresh", envDuration("FC_EXCLUSIONS_REFRESH", time.Minute), "flow exclusion catalog refresh interval")
 
 	udpReadBuffer := flag.Int("udp-read-buffer", envInt("FC_UDP_READ_BUFFER", 64*1024*1024), "kernel UDP socket receive buffer bytes (SO_RCVBUF, per reader)")
 	udpReaders := flag.Int("udp-readers", envInt("FC_UDP_READERS", 1), "parallel sFlow UDP sockets using SO_REUSEPORT")
@@ -120,6 +128,9 @@ func loadConfig() config {
 		ClassifierL2VLANsView: strings.TrimSpace(*classifierL2),
 		ClassifierDirectionSettingsView: strings.TrimSpace(*classifierDirectionSettings),
 		ClassifierInterfaceRolesView: strings.TrimSpace(*classifierInterfaceRoles),
+		ExclusionsEnabled: *exclusionsEnabled,
+		ExclusionsView: strings.TrimSpace(*exclusionsView),
+		ExclusionsRefresh: *exclusionsRefresh,
 		UDPReadBuffer: *udpReadBuffer,
 		UDPReaders: *udpReaders,
 		UDPWorkers: *udpWorkers,

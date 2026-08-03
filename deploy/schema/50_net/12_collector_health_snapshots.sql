@@ -34,6 +34,10 @@ CREATE TABLE IF NOT EXISTS default.collector_health_snapshots
     `ch_queue_drops` UInt64 DEFAULT 0,
     `lag_segments` Int64 DEFAULT 0,
     `drainer_progress_age_sec` Float64 DEFAULT 0,
+    `flow_rows_excluded` UInt64 DEFAULT 0,
+    `flow_packets_excluded` UInt64 DEFAULT 0,
+    `flow_bytes_excluded` UInt64 DEFAULT 0,
+    `exclusion_rules` UInt32 DEFAULT 0,
     `status` LowCardinality(String) DEFAULT 'ok',
     `status_reasons` Array(String) DEFAULT []
 )

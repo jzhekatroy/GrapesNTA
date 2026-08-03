@@ -145,6 +145,18 @@ if [[ "${XDP_CLASSIFIER:-0}" == "1" ]]; then
   fi
 fi
 
+# Flow exclusions are on by default; an empty catalog drops nothing. Set
+# XDP_EXCLUSIONS=0 to bypass the rule engine entirely.
+if [[ "${XDP_EXCLUSIONS:-1}" == "1" ]]; then
+  CH_ARGS+=(
+    -exclusions
+    -exclusions-view "${XDP_EXCLUSIONS_VIEW:-default.net_flow_exclusions_enabled}"
+    -exclusions-refresh "${XDP_EXCLUSIONS_REFRESH:-60s}"
+  )
+else
+  CH_ARGS+=( -exclusions=false )
+fi
+
 case "${XDP_CH_SPOOL_MODE:-off}" in
   off)
     echo "ERROR: permanent xdpflowd profile expects XDP_CH_SPOOL_MODE on or required (got: off)" >&2

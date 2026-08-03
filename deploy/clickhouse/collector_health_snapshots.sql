@@ -50,6 +50,11 @@ CREATE TABLE IF NOT EXISTS default.collector_health_snapshots
     lag_segments Int64 DEFAULT 0,
     drainer_progress_age_sec Float64 DEFAULT 0,
 
+    flow_rows_excluded UInt64 DEFAULT 0,
+    flow_packets_excluded UInt64 DEFAULT 0,
+    flow_bytes_excluded UInt64 DEFAULT 0,
+    exclusion_rules UInt32 DEFAULT 0,
+
     status LowCardinality(String) DEFAULT 'ok',
     status_reasons Array(String) DEFAULT []
 )
@@ -68,4 +73,8 @@ ALTER TABLE default.collector_health_snapshots
     ADD COLUMN IF NOT EXISTS flow_packets_spooled UInt64 DEFAULT 0 AFTER flow_bytes_written,
     ADD COLUMN IF NOT EXISTS flow_bytes_spooled UInt64 DEFAULT 0 AFTER flow_packets_spooled,
     ADD COLUMN IF NOT EXISTS flow_packets_acked UInt64 DEFAULT 0 AFTER flow_bytes_spooled,
-    ADD COLUMN IF NOT EXISTS flow_bytes_acked UInt64 DEFAULT 0 AFTER flow_packets_acked;
+    ADD COLUMN IF NOT EXISTS flow_bytes_acked UInt64 DEFAULT 0 AFTER flow_packets_acked,
+    ADD COLUMN IF NOT EXISTS flow_rows_excluded UInt64 DEFAULT 0 AFTER drainer_progress_age_sec,
+    ADD COLUMN IF NOT EXISTS flow_packets_excluded UInt64 DEFAULT 0 AFTER flow_rows_excluded,
+    ADD COLUMN IF NOT EXISTS flow_bytes_excluded UInt64 DEFAULT 0 AFTER flow_packets_excluded,
+    ADD COLUMN IF NOT EXISTS exclusion_rules UInt32 DEFAULT 0 AFTER flow_bytes_excluded;

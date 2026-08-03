@@ -474,6 +474,38 @@ type FlowDrainer struct {
 	legacyCount      uint64 // bumped per call that fell back to Iterate+Delete
 	batchCount       uint64 // bumped per call that used the batch full-drain
 	demotedAtRuntime bool   // set when atomic was probed-supported but errored later
+
+	// exclude drops operator-excluded flows from every chunk handed to the
+	// export sinks. It runs here, and not in the sinks, because the drainer is
+	// the one place both the NetFlow v9 encoder and the ClickHouse path go
+	// through — one hook keeps the two exports byte-for-byte consistent.
+	exclude func([]flowKV) []flowKV
+}
+
+// SetExclusionFilter installs the flow exclusion hook. Filtering happens after
+// the BPF entries have been drained, so excluded flows still leave the map and
+// cannot accumulate there.
+func (d *FlowDrainer) SetExclusionFilter(fn func([]flowKV) []flowKV) {
+	if d == nil {
+		return
+	}
+	d.exclude = fn
+}
+
+// filtered wraps a chunk consumer so it only sees kept flows. The chunk the
+// underlying drain helper holds is left intact: the legacy paths reuse it to
+// issue the follow-up deletes.
+func (d *FlowDrainer) filtered(onChunk func([]flowKV) error) func([]flowKV) error {
+	if d == nil || d.exclude == nil || onChunk == nil {
+		return onChunk
+	}
+	return func(chunk []flowKV) error {
+		kept := d.exclude(chunk)
+		if len(kept) == 0 {
+			return nil
+		}
+		return onChunk(kept)
+	}
 }
 
 // NewFlowDrainer picks the per-key drain mode (atomic vs legacy) and, when
@@ -513,7 +545,7 @@ func (d *FlowDrainer) BatchEnabled() bool {
 // map (no follow-up delete). This is the production batch path: it keeps memory
 // bounded by flowBatchChunk instead of by the whole map cardinality.
 func (d *FlowDrainer) StreamFullBatchDrain(objs *loader.Objects, onChunk func([]flowKV) error) (int, error) {
-	n, err := streamBatchDrainAllFlows(objs, onChunk)
+	n, err := streamBatchDrainAllFlows(objs, d.filtered(onChunk))
 	if d != nil {
 		d.batchCount++
 	}
@@ -594,6 +626,7 @@ func (d *FlowDrainer) Expired(objs *loader.Objects, idleTimeout, activeTimeout t
 // timer/atomic semantics (only idle/active-expired flows leave the map) but
 // exports bounded chunks instead of building one large []flowKV.
 func (d *FlowDrainer) StreamExpired(objs *loader.Objects, idleTimeout, activeTimeout time.Duration, nowMonoNs uint64, onChunk func([]flowKV) error) (exported, deleted int, atomicDrained bool, err error) {
+	onChunk = d.filtered(onChunk)
 	if onChunk == nil {
 		onChunk = func([]flowKV) error { return nil }
 	}
@@ -635,6 +668,7 @@ func (d *FlowDrainer) All(objs *loader.Objects) ([]flowKV, bool) {
 // StreamAll is the memory-bounded final-flush variant. It is intended for
 // shutdown and should not be used as the steady-state export mode.
 func (d *FlowDrainer) StreamAll(objs *loader.Objects, onChunk func([]flowKV) error) (exported, deleted int, atomicDrained bool, err error) {
+	onChunk = d.filtered(onChunk)
 	if onChunk == nil {
 		onChunk = func([]flowKV) error { return nil }
 	}

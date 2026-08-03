@@ -85,6 +85,8 @@ function mapCompletenessRow(row) {
     chPackets: num(row, 'ch_packets'),
     xdpBytes: num(row, 'xdp_bytes'),
     chBytes: num(row, 'ch_bytes'),
+    excludedPackets: num(row, 'excluded_packets'),
+    excludedBytes: num(row, 'excluded_bytes'),
     packetsPct: num(row, 'packets_pct'),
     bytesPct: num(row, 'bytes_pct'),
     mapFullDelta: num(row, 'map_full_delta'),
@@ -113,15 +115,20 @@ async function fetchCollectorCompleteness() {
         max(flow_packets_acked) - min(flow_packets_acked) AS ch_packets,
         max(xdp_total_bytes) - min(xdp_total_bytes) AS xdp_bytes,
         max(flow_bytes_acked) - min(flow_bytes_acked) AS ch_bytes,
+        -- Traffic the operator excluded on purpose never reaches ClickHouse,
+        -- so it counts towards the numerator: otherwise every exclusion rule
+        -- would surface as ingest loss.
+        max(flow_packets_excluded) - min(flow_packets_excluded) AS excluded_packets,
+        max(flow_bytes_excluded) - min(flow_bytes_excluded) AS excluded_bytes,
         if(
           max(xdp_total_packets) > min(xdp_total_packets),
-          (max(flow_packets_acked) - min(flow_packets_acked))
+          (max(flow_packets_acked) - min(flow_packets_acked) + excluded_packets)
             / (max(xdp_total_packets) - min(xdp_total_packets)) * 100,
           0
         ) AS packets_pct,
         if(
           max(xdp_total_bytes) > min(xdp_total_bytes),
-          (max(flow_bytes_acked) - min(flow_bytes_acked))
+          (max(flow_bytes_acked) - min(flow_bytes_acked) + excluded_bytes)
             / (max(xdp_total_bytes) - min(xdp_total_bytes)) * 100,
           0
         ) AS bytes_pct,

@@ -25,6 +25,7 @@ type sflowListener struct {
 	flushEvery time.Duration
 	delivery   *flowingest.Delivery
 	classifier *flowingest.TrafficClassifier
+	exclusions *flowingest.ExclusionFilter
 	seq        atomic.Uint32
 	metrics    sflowMetrics
 }
@@ -40,6 +41,7 @@ func newSflowListener(
 	flushEvery time.Duration,
 	delivery *flowingest.Delivery,
 	classifier *flowingest.TrafficClassifier,
+	exclusions *flowingest.ExclusionFilter,
 ) *sflowListener {
 	if batchSize < 1 {
 		batchSize = 1
@@ -68,6 +70,7 @@ func newSflowListener(
 		flushEvery: flushEvery,
 		delivery:   delivery,
 		classifier: classifier,
+		exclusions: exclusions,
 	}
 }
 
@@ -241,6 +244,9 @@ func (l *sflowListener) runWorker(ctx context.Context, datagrams <-chan sflowDat
 				return
 			}
 			rows := parseSFlowV5(d.b, d.receivedAt, l.sourceID, l.classifier, nil, &l.metrics)
+			// Drop excluded rows before they take sequence numbers, so the
+			// numbering stays continuous for what actually reaches ClickHouse.
+			rows = l.exclusions.FilterRows(rows)
 			for i := range rows {
 				rows[i].SequenceNum = l.seq.Add(1)
 			}

@@ -460,6 +460,9 @@ func main() {
 	classifierL2VLANsView := flag.String("classifier-l2-vlans-view", "default.net_l2_vlans_enabled", "ClickHouse view for enabled L2 VLAN map")
 	classifierDirectionSettingsView := flag.String("classifier-direction-settings-view", "default.net_direction_settings_current", "ClickHouse view with the direction mode setting (empty = always derive direction from prefixes)")
 	classifierInterfaceRolesView := flag.String("classifier-interface-roles-view", "default.net_interface_roles_effective_current", "ClickHouse view with effective port sides (empty = disabled); the mirror path has no ifIndex, so direction mode ports yields unknown here")
+	exclusionsEnabled := flag.Bool("exclusions", true, "drop flows matched by the operator exclusion catalog (applies to both ClickHouse and NetFlow v9 export)")
+	exclusionsView := flag.String("exclusions-view", flowingest.DefaultExclusionsTable, "ClickHouse view with enabled flow exclusion rules (empty = disabled)")
+	exclusionsRefresh := flag.Duration("exclusions-refresh", time.Minute, "refresh interval for the flow exclusion catalog")
 	sourceID := flag.String("source-id", "xdp-default", "logical flow observation point id written to flows_raw.source_id")
 	chHealthTable := flag.String("ch-health-table", flowingest.DefaultHealthTable, "ClickHouse table for periodic health snapshots (empty = disabled)")
 	collectorID := flag.String("collector-id", "", "collector_id for health snapshots (see net_collectors)")
@@ -621,6 +624,7 @@ func main() {
 	}
 
 	var chDel *clickhouseDelivery
+	var exclFilter *flowingest.ExclusionFilter
 	if strings.TrimSpace(*sourceID) == "" {
 		log.Error("source-id must not be empty")
 		os.Exit(1)
@@ -652,6 +656,23 @@ func main() {
 		}
 		if classifier != nil {
 			defer classifier.Close()
+		}
+		// Installed on the drainer rather than on either sink: excluded flows
+		// must disappear from the ClickHouse rows and the NetFlow v9 records
+		// alike, and the drainer is the only shared stage of the two paths.
+		exclFilter, err = flowingest.NewExclusionFilter(ctx, log, flowingest.ExclusionConfig{
+			Enabled: *exclusionsEnabled,
+			DSN:     strings.TrimSpace(*chDSN),
+			Refresh: *exclusionsRefresh,
+			Table:   strings.TrimSpace(*exclusionsView),
+		})
+		if err != nil {
+			log.Error("flow exclusions init", "err", err)
+			os.Exit(1)
+		}
+		if exclFilter != nil {
+			defer exclFilter.Close()
+			drainer.SetExclusionFilter(newFlowKVExcluder(exclFilter, *sourceID, sampler))
 		}
 		mapper := newFlowRowMapper(exportClock, sampler, 0, *sourceID, classifier)
 		log.Info("flow source configured", "source_id", *sourceID)
@@ -989,6 +1010,7 @@ func main() {
 						NonIPPass:    readStat(objs, 3),
 					},
 					CH:                     chSnap,
+					Exclusions:             exclFilter.Stats(),
 					MapFullDelta:           mapFullDelta,
 					InsertErrsDelta:        insertErrsDelta,
 					QueueDropsDelta:        queueDropsDelta,

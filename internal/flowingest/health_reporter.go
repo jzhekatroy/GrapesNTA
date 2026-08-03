@@ -109,6 +109,10 @@ type HealthWriteInput struct {
 	XDP                    XDPMetrics
 	Receiver               ReceiverMetrics
 	CH                     HealthSnapshot
+	// Exclusions is what the operator rule catalog deliberately discarded.
+	// Without it the XDP-vs-ClickHouse completeness ratio reads intentional
+	// drops as ingest loss.
+	Exclusions             ExclusionStats
 	MapFullDelta           uint64
 	InsertErrsDelta        uint64
 	QueueDropsDelta        uint64
@@ -212,6 +216,10 @@ func (r *HealthReporter) Write(ctx context.Context, in HealthWriteInput) error {
     ch_queue_drops,
     lag_segments,
     drainer_progress_age_sec,
+    flow_rows_excluded,
+    flow_packets_excluded,
+    flow_bytes_excluded,
+    exclusion_rules,
     status,
     status_reasons
 )`
@@ -257,6 +265,10 @@ func (r *HealthReporter) Write(ctx context.Context, in HealthWriteInput) error {
 		in.CH.QueueDrops,
 		in.CH.LagSegments,
 		in.CH.DrainerProgressAge.Seconds(),
+		in.Exclusions.Rows,
+		in.Exclusions.Packets,
+		in.Exclusions.Bytes,
+		uint32(in.Exclusions.Rules),
 		status,
 		reasons,
 	)
@@ -280,6 +292,9 @@ func (r *HealthReporter) Write(ctx context.Context, in HealthWriteInput) error {
 		"flow_bytes_acked", in.CH.FlowBytesAcked,
 		"insert_errs", in.CH.InsertErrs,
 		"ch_queue_drops", in.CH.QueueDrops,
+		"flow_rows_excluded", in.Exclusions.Rows,
+		"flow_packets_excluded", in.Exclusions.Packets,
+		"exclusion_rules", in.Exclusions.Rules,
 	)
 	return nil
 }

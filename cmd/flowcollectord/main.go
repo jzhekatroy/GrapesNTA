@@ -57,6 +57,20 @@ func main() {
 		defer classifier.Close()
 	}
 
+	exclusions, err := flowingest.NewExclusionFilter(ctx, log, flowingest.ExclusionConfig{
+		Enabled: cfg.ExclusionsEnabled,
+		DSN:     cfg.CHDSN,
+		Refresh: cfg.ExclusionsRefresh,
+		Table:   cfg.ExclusionsView,
+	})
+	if err != nil {
+		log.Error("flow exclusions init", "err", err)
+		os.Exit(1)
+	}
+	if exclusions != nil {
+		defer exclusions.Close()
+	}
+
 	delivery, err := flowingest.NewDelivery(log, flowingest.DeliveryConfig{
 		DSN:                 cfg.CHDSN,
 		Table:               cfg.CHTable,
@@ -101,7 +115,7 @@ func main() {
 		}
 	}
 
-	listener := newSflowListener(log, cfg.SFlowListen, cfg.SFlowSourceID, cfg.UDPReadBuffer, cfg.UDPReaders, cfg.UDPWorkers, cfg.UDPQueueSize, cfg.CHBatchSize, cfg.CHFlushInterval, delivery, classifier)
+	listener := newSflowListener(log, cfg.SFlowListen, cfg.SFlowSourceID, cfg.UDPReadBuffer, cfg.UDPReaders, cfg.UDPWorkers, cfg.UDPQueueSize, cfg.CHBatchSize, cfg.CHFlushInterval, delivery, classifier, exclusions)
 
 	errCh := make(chan error, 1)
 	go func() {
@@ -149,6 +163,7 @@ func main() {
 				_ = healthReporter.Write(ctx, flowingest.HealthWriteInput{
 					Receiver:               rx,
 					CH:                     h,
+					Exclusions:             exclusions.Stats(),
 					InsertErrsDelta:        insertErrsDelta,
 					QueueDropsDelta:        queueDropsDelta,
 					UDPQueueDropsDelta:     udpDropsDelta,
