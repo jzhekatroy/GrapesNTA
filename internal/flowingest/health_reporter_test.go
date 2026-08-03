@@ -51,17 +51,6 @@ func TestClassifyPhyDiscards(t *testing.T) {
 	}
 }
 
-func TestClassifyPhyDiscardsCustomThreshold(t *testing.T) {
-	in := HealthWriteInput{
-		PhyRxPacketDelta:    154958093,
-		PhyRxDiscardDelta:   6324,
-		PhyDiscardWarnRatio: 0.00001,
-	}
-	if level, ok := classifyPhyDiscards(in); !ok || level != "warning" {
-		t.Fatalf("stricter threshold ignored: level=%q ok=%v", level, ok)
-	}
-}
-
 func TestClassifyHealthStatusWarningLag(t *testing.T) {
 	status, reasons := classifyHealthStatus(HealthWriteInput{
 		CH: HealthSnapshot{

@@ -71,29 +71,22 @@ type HealthReporterConfig struct {
 	// DefaultLinkDiscardCounters; set them when a NIC names things unusually.
 	PhyPacketCounters  []string
 	PhyDiscardCounters []string
-	// Share of arriving packets the NIC may discard before the collector is
-	// marked warning / critical. Zero uses the Default*Ratio constants.
-	PhyDiscardWarnRatio float64
-	PhyDiscardCritRatio float64
 }
 
 // HealthReporter writes cumulative health snapshots to ClickHouse.
 type HealthReporter struct {
-	log          *slog.Logger
-	conn         chdriver.Conn
-	table        string
-	collectorID  string
-	sourceID     string
-	daemon       string
-	iface        string
-	hostname     string
-	stages       []string
-	sinkPorts    []uint16
-	phyPktNames  []string
-	phyDscNames  []string
-	phyWarnRatio float64
-	phyCritRatio float64
-
+	log             *slog.Logger
+	conn            chdriver.Conn
+	table           string
+	collectorID     string
+	sourceID        string
+	daemon          string
+	iface           string
+	hostname        string
+	stages          []string
+	sinkPorts       []uint16
+	phyPktNames     []string
+	phyDscNames     []string
 	prevPhyDiscards uint64
 	prevPhyPackets  uint64
 	havePhyBaseline bool
@@ -126,20 +119,18 @@ func NewHealthReporter(log *slog.Logger, cfg HealthReporterConfig) (*HealthRepor
 	}
 	host, _ := os.Hostname()
 	r := &HealthReporter{
-		log:          log,
-		conn:         conn,
-		table:        table,
-		collectorID:  strings.TrimSpace(cfg.CollectorID),
-		sourceID:     sourceID,
-		daemon:       daemon,
-		iface:        strings.TrimSpace(cfg.Iface),
-		hostname:     host,
-		stages:       append([]string(nil), cfg.Stages...),
-		sinkPorts:    append([]uint16(nil), cfg.LocalSinkPorts...),
-		phyPktNames:  append([]string(nil), cfg.PhyPacketCounters...),
-		phyDscNames:  append([]string(nil), cfg.PhyDiscardCounters...),
-		phyWarnRatio: cfg.PhyDiscardWarnRatio,
-		phyCritRatio: cfg.PhyDiscardCritRatio,
+		log:         log,
+		conn:        conn,
+		table:       table,
+		collectorID: strings.TrimSpace(cfg.CollectorID),
+		sourceID:    sourceID,
+		daemon:      daemon,
+		iface:       strings.TrimSpace(cfg.Iface),
+		hostname:    host,
+		stages:      append([]string(nil), cfg.Stages...),
+		sinkPorts:   append([]uint16(nil), cfg.LocalSinkPorts...),
+		phyPktNames: append([]string(nil), cfg.PhyPacketCounters...),
+		phyDscNames: append([]string(nil), cfg.PhyDiscardCounters...),
 	}
 	log.Info("health reporter enabled",
 		"table", table,
@@ -178,17 +169,17 @@ type HealthWriteInput struct {
 	// callers leave them alone.
 	PhyRxPacketDelta       uint64
 	PhyRxDiscardDelta      uint64
-	PhyDiscardWarnRatio    float64
-	PhyDiscardCritRatio    float64
 	LagSegmentsThreshold   int64
 	WriterLagRowsThreshold uint64
 	DrainerAgeThreshold    time.Duration
 }
 
-// Share of mirrored traffic the NIC may shed before anyone is told.
+// Share of mirrored traffic the NIC may shed before anyone is told. Calibrated
+// on m61: a mirror port at 2.5 Mpps steadily discards ~0.004%, and a collector
+// that is permanently yellow is a collector nobody looks at.
 const (
-	DefaultPhyDiscardWarnRatio = 0.0001 // 0.01%
-	DefaultPhyDiscardCritRatio = 0.001  // 0.1%
+	phyDiscardWarnRatio = 0.0001 // 0.01%
+	phyDiscardCritRatio = 0.001  // 0.1%
 )
 
 // classifyPhyDiscards returns the severity of interface-level loss, or false
@@ -202,19 +193,11 @@ func classifyPhyDiscards(in HealthWriteInput) (string, bool) {
 	if in.PhyRxPacketDelta == 0 {
 		return "warning", true
 	}
-	warn := in.PhyDiscardWarnRatio
-	if warn <= 0 {
-		warn = DefaultPhyDiscardWarnRatio
-	}
-	crit := in.PhyDiscardCritRatio
-	if crit <= 0 {
-		crit = DefaultPhyDiscardCritRatio
-	}
 	ratio := float64(in.PhyRxDiscardDelta) / float64(in.PhyRxPacketDelta+in.PhyRxDiscardDelta)
 	switch {
-	case ratio >= crit:
+	case ratio >= phyDiscardCritRatio:
 		return "critical", true
-	case ratio >= warn:
+	case ratio >= phyDiscardWarnRatio:
 		return "warning", true
 	default:
 		return "", false
@@ -308,8 +291,6 @@ func (r *HealthReporter) Write(ctx context.Context, in HealthWriteInput) error {
 		r.prevPhyPackets = link.RxPackets
 		r.havePhyBaseline = true
 	}
-	in.PhyDiscardWarnRatio = r.phyWarnRatio
-	in.PhyDiscardCritRatio = r.phyCritRatio
 	status, reasons := classifyHealthStatus(in)
 
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
