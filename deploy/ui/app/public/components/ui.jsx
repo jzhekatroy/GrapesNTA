@@ -428,18 +428,12 @@ function DataTable({
     e.preventDefault();
     e.stopPropagation();
     const startX = e.clientX;
-    const table = e.currentTarget.closest('table');
-    const measuredWidths = { ...colWidths };
-    table?.querySelectorAll('th[data-col-key]').forEach((th) => {
-      measuredWidths[th.dataset.colKey] = Math.round(th.getBoundingClientRect().width);
-    });
-    const startWidth = measuredWidths[c.key] || columnWidth(c);
-    setColWidths(measuredWidths);
+    const startWidth = columnWidth(c);
     const minWidth = Number(c.minWidth) || 72;
     const maxWidth = Number(c.maxWidth) || 800;
     const onMove = (ev) => {
       const next = Math.max(minWidth, Math.min(maxWidth, startWidth + ev.clientX - startX));
-      setColWidths({ ...measuredWidths, [c.key]: Math.round(next) });
+      setColWidths((prev) => ({ ...prev, [c.key]: Math.round(next) }));
     };
     const onUp = () => {
       window.removeEventListener('mousemove', onMove);
@@ -496,7 +490,7 @@ function DataTable({
       <div className="table-wrap">
         <table
           className={`table${resizableColumns ? ' table--resizable' : ''}`}
-          style={resizableColumns ? { width: resizableTableWidth, minWidth: '100%' } : undefined}
+          style={resizableColumns ? { width: `${resizableTableWidth}px`, minWidth: '100%' } : undefined}
         >
           {resizableColumns && (
             <colgroup>

@@ -4,6 +4,9 @@ const {
   dnsActivity5mTableRef,
   dnsDomains1hTableRef,
   dnsClients1hTableRef,
+  dnsServers1hTableRef,
+  dnsResolversViewRef,
+  l3PrefixesViewRef,
   sourcesTableRef,
   collectorsViewRef,
   parseDataDatetimeSql,
@@ -168,6 +171,112 @@ function clientIpFilterSql(alias) {
   )`;
 }
 
+function serverIpFilterSql(alias) {
+  const col = dnsCol('server_ip', alias);
+  return `(
+    (positionCaseInsensitive({server_ip:String}, ':') = 0
+      AND substring(${col}, 1, 4) = reverse(reinterpretAsString(toIPv4({server_ip:String})))
+      AND substring(${col}, 5) = unhex('000000000000000000000000'))
+    OR
+    (positionCaseInsensitive({server_ip:String}, ':') > 0
+      AND ${col} = IPv6StringToNum({server_ip:String}))
+  )`;
+}
+
+function dnsResolverLabelSql(prefix = 'r') {
+  return `if(${prefix}.display_name != '', ${prefix}.display_name,
+    multiIf(${prefix}.role = 'resolver', 'Резолвер', ${prefix}.role = 'client', 'Клиент', ${prefix}.role = 'public', 'Публичный', ${prefix}.role))`;
+}
+
+function dnsBadgeCtes(aggregatedName, ipColumn) {
+  const resolversView = dnsResolversViewRef();
+  const l3View = l3PrefixesViewRef();
+  return `
+    resolver_badges AS (
+      SELECT
+        a.${ipColumn} AS ip,
+        argMax(r.role, length(r.prefix)) AS resolver_role,
+        argMax(${dnsResolverLabelSql('r')}, length(r.prefix)) AS resolver_label
+      FROM ${aggregatedName} AS a
+      CROSS JOIN ${resolversView} AS r
+      WHERE isIPAddressInRange(a.${ipColumn}, r.prefix)
+      GROUP BY a.${ipColumn}
+    ),
+    internal_ips AS (
+      SELECT DISTINCT a.${ipColumn} AS ip
+      FROM ${aggregatedName} AS a
+      CROSS JOIN ${l3View} AS p
+      WHERE isIPAddressInRange(a.${ipColumn}, p.prefix)
+    )`;
+}
+
+function dnsBadgeJoinSql(aggregatedAlias, ipColumn) {
+  return `
+    LEFT JOIN resolver_badges AS rb ON ${aggregatedAlias}.${ipColumn} = rb.ip
+    LEFT JOIN internal_ips AS ii ON ${aggregatedAlias}.${ipColumn} = ii.ip`;
+}
+
+function dnsBadgeSelectSql() {
+  return `
+    rb.resolver_role AS resolver_role,
+    rb.resolver_label AS resolver_label,
+    ii.ip IS NULL AS is_external`;
+}
+
+function dnsRecentBadgeCtes() {
+  const resolversView = dnsResolversViewRef();
+  const l3View = l3PrefixesViewRef();
+  const label = dnsResolverLabelSql('res');
+  return `
+    client_resolver_badges AS (
+      SELECT
+        r.client AS ip,
+        argMax(res.role, length(res.prefix)) AS resolver_role,
+        argMax(${label}, length(res.prefix)) AS resolver_label
+      FROM recent_rows AS r
+      CROSS JOIN ${resolversView} AS res
+      WHERE isIPAddressInRange(r.client, res.prefix)
+      GROUP BY r.client
+    ),
+    server_resolver_badges AS (
+      SELECT
+        r.server AS ip,
+        argMax(res.role, length(res.prefix)) AS resolver_role,
+        argMax(${label}, length(res.prefix)) AS resolver_label
+      FROM recent_rows AS r
+      CROSS JOIN ${resolversView} AS res
+      WHERE isIPAddressInRange(r.server, res.prefix)
+      GROUP BY r.server
+    ),
+    client_internal_ips AS (
+      SELECT DISTINCT r.client AS ip
+      FROM recent_rows AS r
+      CROSS JOIN ${l3View} AS p
+      WHERE isIPAddressInRange(r.client, p.prefix)
+    ),
+    server_internal_ips AS (
+      SELECT DISTINCT r.server AS ip
+      FROM recent_rows AS r
+      CROSS JOIN ${l3View} AS p
+      WHERE isIPAddressInRange(r.server, p.prefix)
+    )`;
+}
+
+function mapIpBadgeFields(row, prefix = '') {
+  const roleKey = prefix ? `${prefix}_resolver_role` : 'resolver_role';
+  const labelKey = prefix ? `${prefix}_resolver_label` : 'resolver_label';
+  const externalKey = prefix ? `${prefix}_is_external` : 'is_external';
+  return {
+    resolverRole: String(row[roleKey] ?? ''),
+    resolverLabel: String(row[labelKey] ?? ''),
+    isExternal: Number(row[externalKey]) === 1,
+  };
+}
+
+function hideResolversWhereSql() {
+  return `(NOT {hide_resolvers:UInt8} OR coalesce(resolver_role, '') NOT IN ('resolver', 'client'))`;
+}
+
 function scopeCol(alias, name) {
   return alias ? `${alias}.${name}` : name;
 }
@@ -251,6 +360,7 @@ function buildRawDnsFilters(filters = {}) {
     rcode,
     domainSearch,
     clientIp,
+    serverIp,
     alias,
   } = filters;
   const window = resolveDnsWindow({ range, from, to });
@@ -278,6 +388,11 @@ function buildRawDnsFilters(filters = {}) {
   if (clientIp) {
     clauses.push(clientIpFilterSql(alias));
     params.client_ip = clientIp;
+  }
+
+  if (serverIp) {
+    clauses.push(serverIpFilterSql(alias));
+    params.server_ip = serverIp;
   }
 
   return {
@@ -370,9 +485,36 @@ function buildClients1hFilters(filters = {}) {
   };
 }
 
+function buildServers1hFilters(filters = {}) {
+  const {
+    range = '24h',
+    from,
+    to,
+    serverIp,
+    alias,
+  } = filters;
+  const window = resolveTimeWindow({ range, from, to, timeCol: 'hour' });
+  const hourCol = dnsCol('hour', alias);
+  const clauses = [window.whereTime.replace(/\bhour\b/g, hourCol)];
+  const params = { ...window.params };
+
+  appendSourceFilter(clauses, params, filters, alias);
+
+  if (serverIp) {
+    clauses.push(serverIpFilterSql(alias));
+    params.server_ip = serverIp;
+  }
+
+  return {
+    whereSql: clauses.join('\n  AND '),
+    params,
+    windowSeconds: window.windowSeconds,
+  };
+}
+
 function resolveRecentWindow(filters = {}) {
   const usesAgg = dnsUsesAggregates(filters.range, filters.from, filters.to);
-  const hasNarrowingFilter = Boolean(filters.clientIp || filters.domainSearch);
+  const hasNarrowingFilter = Boolean(filters.clientIp || filters.serverIp || filters.domainSearch);
 
   if (usesAgg && !hasNarrowingFilter) {
     return {
@@ -611,26 +753,41 @@ function dnsTopClients(filters = {}, limit = 50) {
   const usesAgg = dnsUsesAggregates(filters.range, filters.from, filters.to);
   const lim = Math.min(Math.max(Number(limit) || 50, 1), 200);
   const clientExpr = dnsIpExpr('client_ip');
+  const hideResolvers = filters.hideResolvers === false ? 0 : 1;
 
   if (!usesAgg) {
     const { whereSql, params } = buildRawDnsFilters(filters);
 
     return {
       sql: `
+        WITH aggregated AS (
+          SELECT
+            ${clientExpr} AS client,
+            countIf(is_response = 0) AS queries,
+            uniqExact(query_name) AS unique_domains,
+            countIf(is_response = 1 AND rcode = 3) AS nxdomain,
+            countIf(is_response = 1 AND rcode = 2) AS servfail,
+            round((nxdomain + servfail) * 100.0 / nullIf(countIf(is_response = 1), 0), 2) AS error_percent
+          FROM ${dnsLogTableRef()}
+          WHERE ${whereSql}
+          GROUP BY client
+        ),
+        ${dnsBadgeCtes('aggregated', 'client')}
         SELECT
-          ${clientExpr} AS client,
-          countIf(is_response = 0) AS queries,
-          uniqExact(query_name) AS unique_domains,
-          countIf(is_response = 1 AND rcode = 3) AS nxdomain,
-          countIf(is_response = 1 AND rcode = 2) AS servfail,
-          round((nxdomain + servfail) * 100.0 / nullIf(countIf(is_response = 1), 0), 2) AS error_percent
-        FROM ${dnsLogTableRef()}
-        WHERE ${whereSql}
-        GROUP BY client
-        ORDER BY queries DESC
+          a.client,
+          a.queries,
+          a.unique_domains,
+          a.nxdomain,
+          a.servfail,
+          a.error_percent,
+          ${dnsBadgeSelectSql()}
+        FROM aggregated AS a
+        ${dnsBadgeJoinSql('a', 'client')}
+        WHERE ${hideResolversWhereSql()}
+        ORDER BY a.queries DESC
         LIMIT {limit:UInt32}
       `,
-      params: { ...params, limit: lim },
+      params: { ...params, limit: lim, hide_resolvers: hideResolvers },
       meta: dnsMeta(filters, { limit: lim, dataTable: config.dnsLogTable, dataTier: 'raw' }),
       map(rows) {
         return rows.map((r) => ({
@@ -640,6 +797,7 @@ function dnsTopClients(filters = {}, limit = 50) {
           nxdomain: Number(r.nxdomain) || 0,
           servfail: Number(r.servfail) || 0,
           errorPercent: Number(r.error_percent) || 0,
+          ...mapIpBadgeFields(r),
         }));
       },
     };
@@ -649,29 +807,43 @@ function dnsTopClients(filters = {}, limit = 50) {
 
   return {
     sql: `
-      SELECT
-        client,
-        queries,
-        unique_domains,
-        nxdomain,
-        servfail,
-        round((nxdomain + servfail) * 100.0 / nullIf(responses, 0), 2) AS error_percent
-      FROM (
+      WITH aggregated AS (
         SELECT
-          ${clientExpr} AS client,
-          sum(queries) AS queries,
-          sum(responses) AS responses,
-          uniqCombinedMerge(unique_domains_state) AS unique_domains,
-          sum(nxdomain) AS nxdomain,
-          sum(servfail) AS servfail
-        FROM ${dnsClients1hTableRef()}
-        WHERE ${whereSql}
-        GROUP BY client
-      )
-      ORDER BY queries DESC
+          client,
+          queries,
+          unique_domains,
+          nxdomain,
+          servfail,
+          round((nxdomain + servfail) * 100.0 / nullIf(responses, 0), 2) AS error_percent
+        FROM (
+          SELECT
+            ${clientExpr} AS client,
+            sum(queries) AS queries,
+            sum(responses) AS responses,
+            uniqCombinedMerge(unique_domains_state) AS unique_domains,
+            sum(nxdomain) AS nxdomain,
+            sum(servfail) AS servfail
+          FROM ${dnsClients1hTableRef()}
+          WHERE ${whereSql}
+          GROUP BY client
+        )
+      ),
+      ${dnsBadgeCtes('aggregated', 'client')}
+      SELECT
+        a.client,
+        a.queries,
+        a.unique_domains,
+        a.nxdomain,
+        a.servfail,
+        a.error_percent,
+        ${dnsBadgeSelectSql()}
+      FROM aggregated AS a
+      ${dnsBadgeJoinSql('a', 'client')}
+      WHERE ${hideResolversWhereSql()}
+      ORDER BY a.queries DESC
       LIMIT {limit:UInt32}
     `,
-    params: { ...params, limit: lim },
+    params: { ...params, limit: lim, hide_resolvers: hideResolvers },
     meta: dnsMeta(filters, { limit: lim, dataTable: config.dnsClients1hTable, dataTier: 'aggregate' }),
     map(rows) {
       return rows.map((r) => ({
@@ -681,6 +853,113 @@ function dnsTopClients(filters = {}, limit = 50) {
         nxdomain: Number(r.nxdomain) || 0,
         servfail: Number(r.servfail) || 0,
         errorPercent: Number(r.error_percent) || 0,
+        ...mapIpBadgeFields(r),
+      }));
+    },
+  };
+}
+
+function dnsTopServers(filters = {}, limit = 50) {
+  const usesAgg = dnsUsesAggregates(filters.range, filters.from, filters.to);
+  const lim = Math.min(Math.max(Number(limit) || 50, 1), 200);
+  const serverExpr = dnsIpExpr('server_ip');
+
+  if (!usesAgg) {
+    const { whereSql, params } = buildRawDnsFilters(filters);
+
+    return {
+      sql: `
+        WITH aggregated AS (
+          SELECT
+            ${serverExpr} AS server,
+            countIf(is_response = 0) AS queries,
+            countIf(is_response = 1) AS responses,
+            countIf(is_response = 1 AND rcode = 3) AS nxdomain,
+            countIf(is_response = 1 AND rcode = 2) AS servfail,
+            round((nxdomain + servfail) * 100.0 / nullIf(responses, 0), 2) AS error_percent
+          FROM ${dnsLogTableRef()}
+          WHERE ${whereSql}
+          GROUP BY server
+        ),
+        ${dnsBadgeCtes('aggregated', 'server')}
+        SELECT
+          a.server,
+          a.queries,
+          a.responses,
+          a.nxdomain,
+          a.servfail,
+          a.error_percent,
+          ${dnsBadgeSelectSql()}
+        FROM aggregated AS a
+        ${dnsBadgeJoinSql('a', 'server')}
+        ORDER BY a.queries DESC
+        LIMIT {limit:UInt32}
+      `,
+      params: { ...params, limit: lim },
+      meta: dnsMeta(filters, { limit: lim, dataTable: config.dnsLogTable, dataTier: 'raw' }),
+      map(rows) {
+        return rows.map((r) => ({
+          server: String(r.server || ''),
+          queries: Number(r.queries) || 0,
+          responses: Number(r.responses) || 0,
+          nxdomain: Number(r.nxdomain) || 0,
+          servfail: Number(r.servfail) || 0,
+          errorPercent: Number(r.error_percent) || 0,
+          ...mapIpBadgeFields(r),
+        }));
+      },
+    };
+  }
+
+  const { whereSql, params } = buildServers1hFilters(filters);
+
+  return {
+    sql: `
+      WITH aggregated AS (
+        SELECT
+          server,
+          queries,
+          responses,
+          nxdomain,
+          servfail,
+          round((nxdomain + servfail) * 100.0 / nullIf(responses, 0), 2) AS error_percent
+        FROM (
+          SELECT
+            ${serverExpr} AS server,
+            sum(queries) AS queries,
+            sum(responses) AS responses,
+            sum(nxdomain) AS nxdomain,
+            sum(servfail) AS servfail
+          FROM ${dnsServers1hTableRef()}
+          WHERE ${whereSql}
+          GROUP BY server
+        )
+      ),
+      ${dnsBadgeCtes('aggregated', 'server')}
+      SELECT
+        a.server,
+        a.queries,
+        a.responses,
+        a.nxdomain,
+        a.servfail,
+        a.error_percent,
+        ${dnsBadgeSelectSql()}
+      FROM aggregated AS a
+      ${dnsBadgeJoinSql('a', 'server')}
+      ORDER BY a.queries DESC
+      LIMIT {limit:UInt32}
+    `,
+    params: { ...params, limit: lim },
+    meta: dnsMeta(filters, { limit: lim, dataTable: config.dnsServers1hTable, dataTier: 'aggregate' }),
+    map(rows) {
+      return rows.map((r) => ({
+        server: String(r.server || ''),
+        queries: Number(r.queries) || 0,
+        responses: Number(r.responses) || 0,
+        nxdomain: Number(r.nxdomain) || 0,
+        servfail: Number(r.servfail) || 0,
+        errorPercent: Number(r.error_percent) || 0,
+        ...mapIpBadgeFields(r),
       }));
     },
   };
@@ -706,23 +985,51 @@ function dnsRecent(filters = {}, limit = 100) {
 
   return {
     sql: `
+      WITH recent_rows AS (
+        SELECT
+          toString(d.ts) AS event_time,
+          d.source_id,
+          ${clientExpr} AS client,
+          ${serverExpr} AS server,
+          if(d.is_response = 1, 'response', 'query') AS event_type,
+          d.query_name,
+          d.qtype,
+          d.rcode,
+          d.answers_cname,
+          arrayMap(x -> toString(toIPv4(reinterpretAsUInt32(reverse(substring(x, 1, 4))))), d.answers_a) AS answers_a,
+          arrayMap(x -> IPv6NumToString(x), d.answers_aaaa) AS answers_aaaa,
+          d.raw_size
+        FROM ${dnsLogTableRef()} AS d
+        WHERE ${whereSql}
+        ORDER BY d.ts DESC
+        LIMIT {limit:UInt32}
+      ),
+      ${dnsRecentBadgeCtes()}
       SELECT
-        toString(d.ts) AS event_time,
-        d.source_id,
-        ${clientExpr} AS client,
-        ${serverExpr} AS server,
-        if(d.is_response = 1, 'response', 'query') AS event_type,
-        d.query_name,
-        d.qtype,
-        d.rcode,
-        d.answers_cname,
-        arrayMap(x -> toString(toIPv4(reinterpretAsUInt32(reverse(substring(x, 1, 4))))), d.answers_a) AS answers_a,
-        arrayMap(x -> IPv6NumToString(x), d.answers_aaaa) AS answers_aaaa,
-        d.raw_size
-      FROM ${dnsLogTableRef()} AS d
-      WHERE ${whereSql}
-      ORDER BY d.ts DESC
-      LIMIT {limit:UInt32}
+        r.event_time,
+        r.source_id,
+        r.client,
+        r.server,
+        r.event_type,
+        r.query_name,
+        r.qtype,
+        r.rcode,
+        r.answers_cname,
+        r.answers_a,
+        r.answers_aaaa,
+        r.raw_size,
+        crb.resolver_role AS client_resolver_role,
+        crb.resolver_label AS client_resolver_label,
+        ci.ip IS NULL AS client_is_external,
+        srb.resolver_role AS server_resolver_role,
+        srb.resolver_label AS server_resolver_label,
+        si.ip IS NULL AS server_is_external
+      FROM recent_rows AS r
+      LEFT JOIN client_resolver_badges AS crb ON r.client = crb.ip
+      LEFT JOIN client_internal_ips AS ci ON r.client = ci.ip
+      LEFT JOIN server_resolver_badges AS srb ON r.server = srb.ip
+      LEFT JOIN server_internal_ips AS si ON r.server = si.ip
+      ORDER BY r.event_time DESC
     `,
     params: { ...params, limit: lim },
     meta: dnsMeta(filters, {
@@ -747,6 +1054,8 @@ function dnsRecent(filters = {}, limit = 100) {
         answersAaaa: Array.isArray(r.answers_aaaa) ? r.answers_aaaa.map(String) : [],
         answersCname: Array.isArray(r.answers_cname) ? r.answers_cname.map(String) : [],
         rawSize: Number(r.raw_size) || 0,
+        clientBadges: mapIpBadgeFields(r, 'client'),
+        serverBadges: mapIpBadgeFields(r, 'server'),
       }));
     },
   };
@@ -829,6 +1138,12 @@ function parseDnsFiltersQuery(query = {}) {
     : undefined;
   const domainSearch = query.domain_search ? String(query.domain_search).trim() : undefined;
   const clientIp = query.client_ip ? String(query.client_ip).trim() : undefined;
+  const serverIp = query.server_ip ? String(query.server_ip).trim() : undefined;
+  const hideResolvers = query.hide_resolvers === '0' || query.hide_resolvers === 'false'
+    ? false
+    : query.hide_resolvers === '1' || query.hide_resolvers === 'true'
+      ? true
+      : undefined;
   const limit = query.limit !== undefined ? Number(query.limit) : undefined;
 
   return {
@@ -842,6 +1157,8 @@ function parseDnsFiltersQuery(query = {}) {
     rcode: Number.isFinite(rcode) ? rcode : undefined,
     domainSearch: domainSearch || undefined,
     clientIp: clientIp || undefined,
+    serverIp: serverIp || undefined,
+    hideResolvers,
     limit,
   };
 }
@@ -851,6 +1168,7 @@ module.exports = {
   dnsActivityChart,
   dnsTopDomains,
   dnsTopClients,
+  dnsTopServers,
   dnsRecent,
   dnsQtypes,
   parseDnsFiltersQuery,
@@ -860,5 +1178,6 @@ module.exports = {
   buildActivity5mFilters,
   buildDomains1hFilters,
   buildClients1hFilters,
+  buildServers1hFilters,
   resolveRecentWindow,
 };

@@ -1,9 +1,7 @@
 const {
-  config,
   dashboardTableRef,
   countryTableRef,
   protocolTableRef,
-  intervalsControlTableRef,
   intervalsTableRef,
   monitoringCol,
   parseDataDatetimeSql,
@@ -11,6 +9,7 @@ const {
 
 const MONITORING_TIMEZONE = 'Europe/Moscow';
 const DEFAULT_SOURCE_ID = 'netflow';
+const MONITORING_24H_FILTER = `toTimeZone(minute, '${MONITORING_TIMEZONE}') > toTimeZone(now(), '${MONITORING_TIMEZONE}') - INTERVAL 1 DAY`;
 
 const PARAMETERS = {
   broadband_total: {
@@ -122,25 +121,111 @@ function parseMonitoringDeviationsQuery(query = {}) {
   return { limit };
 }
 
-function monitoringParameters() {
+function monitoringLiveTrafficSql(param) {
+  if (param.id === 'broadband_total') {
+    return `
+      SELECT
+        toTimeZone(minute, '${MONITORING_TIMEZONE}') AS dt,
+        round(total_bytes / 8 * 1e-9, 3) AS value
+      FROM ${dashboardTableRef()}
+      WHERE ${MONITORING_24H_FILTER}
+        AND source_id = {source_id:String}
+    `;
+  }
+
+  if (param.protocolFilter) {
+    const protoSql = protocolProtoSql(param.protocolFilter);
+    return `
+      SELECT
+        toTimeZone(minute, '${MONITORING_TIMEZONE}') AS dt,
+        round(sum(bytes) / 8 * 1e-9, 3) AS value
+      FROM ${protocolTableRef()}
+      WHERE source_id = {source_id:String}
+        AND direction = 'in'
+        AND ${protoSql}
+        AND ${MONITORING_24H_FILTER}
+      GROUP BY dt
+    `;
+  }
+
+  const countryFilter = param.id === 'broadband_in_ru'
+    ? "country_code = 'RU'"
+    : "country_code != 'RU'";
+
+  return `
+    SELECT
+      toTimeZone(minute, '${MONITORING_TIMEZONE}') AS dt,
+      round(sum(bytes) / 8 * 1e-9, 3) AS value
+    FROM ${countryTableRef()}
+    WHERE country_side = 'src'
+      AND source_id = {source_id:String}
+      AND country_basis = 'asn'
+      AND ${countryFilter}
+      AND direction = 'in'
+      AND ${MONITORING_24H_FILTER}
+    GROUP BY dt
+  `;
+}
+
+function monitoringLiveCiSql(featureName) {
   const dtCol = monitoringCol('dt');
   const featureCol = monitoringCol('featureName');
-  const outsideCol = monitoringCol('outsideCi');
+  const dtExpr = `toTimeZone(${dtCol}, '${MONITORING_TIMEZONE}')`;
+  const ci24hFilter = `${dtExpr} > toTimeZone(now(), '${MONITORING_TIMEZONE}') - INTERVAL 1 DAY`;
 
+  return `
+    SELECT
+      ${dtExpr} AS dt,
+      ci_low,
+      ci_high
+    FROM ${intervalsTableRef()}
+    WHERE ${ci24hFilter}
+      AND ${featureCol} = '${featureName}'
+  `;
+}
+
+function monitoringLiveDeviationsBranchSql(param) {
+  const trafficSql = monitoringLiveTrafficSql(param);
+  const ciSql = monitoringLiveCiSql(param.featureName);
+
+  return `
+    SELECT
+      t.dt AS dt,
+      toUnixTimestamp(t.dt) AS bucket_ts,
+      '${param.featureName}' AS feature_name,
+      t.value AS value,
+      c.ci_low AS ci_low,
+      c.ci_high AS ci_high
+    FROM (${trafficSql}) AS t
+    INNER JOIN (${ciSql}) AS c ON t.dt = c.dt
+    WHERE t.value IS NOT NULL
+      AND c.ci_low IS NOT NULL
+      AND c.ci_high IS NOT NULL
+      AND (t.value < c.ci_low OR t.value > c.ci_high)
+  `;
+}
+
+function monitoringLiveDeviationsUnionSql() {
+  return listParameterIds()
+    .map((id) => monitoringLiveDeviationsBranchSql(PARAMETERS[id]))
+    .join('\n        UNION ALL\n        ');
+}
+
+function monitoringParameters() {
   return {
     sql: `
       SELECT
-        ${featureCol} AS feature_name,
-        sum(${outsideCol}) AS deviations
-      FROM ${intervalsControlTableRef()}
-      WHERE ${outsideCol} = 1
-        AND ${dtCol} > now() - INTERVAL 1 DAY
+        feature_name,
+        count() AS deviations
+      FROM (
+        ${monitoringLiveDeviationsUnionSql()}
+      )
       GROUP BY feature_name
     `,
-    params: {},
+    params: { source_id: DEFAULT_SOURCE_ID },
     meta: {
       period: '24h',
-      controlTable: config.intervalsControlTable,
+      source: 'live',
     },
     map(rows) {
       const deviationMap = new Map(
@@ -275,8 +360,8 @@ function monitoringSeriesCi({ parameter, from, to }) {
         ci_low,
         ci_high
       FROM ${intervalsTableRef()}
-      WHERE ${dtCol} >= ${parseDataDatetimeSql('from')}
-        AND ${dtCol} < ${parseDataDatetimeSql('to')}
+      WHERE ${dtExpr} >= ${parseDataDatetimeSql('from')}
+        AND ${dtExpr} < ${parseDataDatetimeSql('to')}
         AND ${featureCol} = {feature_name:String}
       ORDER BY dt
     `,
@@ -322,32 +407,26 @@ function monitoringSeriesMeta({ parameter, from, to }) {
 }
 
 function monitoringDeviations({ limit = 10 } = {}) {
-  const dtCol = monitoringCol('dt');
-  const featureCol = monitoringCol('featureName');
-  const outsideCol = monitoringCol('outsideCi');
-  const parameterCol = monitoringCol('parameter');
-  const dtExpr = `toTimeZone(${dtCol}, '${MONITORING_TIMEZONE}')`;
-
   return {
     sql: `
       SELECT
-        ${dtExpr} AS dt,
-        toUnixTimestamp(toStartOfMinute(${dtExpr})) AS bucket_ts,
-        ${featureCol} AS feature_name,
-        ${parameterCol} AS value,
+        dt,
+        bucket_ts,
+        feature_name,
+        value,
         ci_low,
         ci_high
-      FROM ${intervalsControlTableRef()}
-      WHERE ${outsideCol} = 1
-        AND ${dtCol} > now() - INTERVAL 1 DAY
+      FROM (
+        ${monitoringLiveDeviationsUnionSql()}
+      )
       ORDER BY dt DESC, feature_name
       LIMIT {limit:UInt32}
     `,
-    params: { limit },
+    params: { limit, source_id: DEFAULT_SOURCE_ID },
     meta: {
       period: '24h',
       limit,
-      controlTable: config.intervalsControlTable,
+      source: 'live',
     },
     map(rows) {
       return rows.map((row) => ({
@@ -355,9 +434,9 @@ function monitoringDeviations({ limit = 10 } = {}) {
         dtMs: row.bucket_ts != null ? Number(row.bucket_ts) * 1000 : null,
         featureName: String(row.feature_name || ''),
         featureLabel: getParameterLabel(row.feature_name),
-        value: Number(row.value) || 0,
-        ciLow: Number(row.ci_low),
-        ciHigh: Number(row.ci_high),
+        value: seriesNumber(row.value),
+        ciLow: seriesNumber(row.ci_low),
+        ciHigh: seriesNumber(row.ci_high),
       }));
     },
   };
@@ -372,6 +451,7 @@ module.exports = {
   protocolProtoSql,
   parseMonitoringSeriesQuery,
   parseMonitoringDeviationsQuery,
+  monitoringLiveDeviationsBranchSql,
   monitoringParameters,
   monitoringSeriesValues,
   monitoringSeriesCi,

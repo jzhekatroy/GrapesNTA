@@ -525,7 +525,7 @@ function PageMonitoring({ displayTimezone }) {
                     displayTimezone={displayTimezone}
                     onRangeSelect={applyMonitoringChartRangeZoom}
                     valueFormatter={fmtGbitMin}
-                    axisFormatter={fmtCompact}
+                    axisFormatter={fmtGbitMin}
                     tipUnitLabel={selectedParam.unit}
                     yAxisLabel={selectedParam.label}
                     yAxisUnit={selectedParam.unit}

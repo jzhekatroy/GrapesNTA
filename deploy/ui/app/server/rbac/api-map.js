@@ -8,6 +8,7 @@ function getResourceForPath(path, method) {
   if (p.startsWith('/api/dns/')) return 'dns';
   if (p.startsWith('/api/monitoring/')) return 'monitoring';
   if (p.startsWith('/api/refs/l3-prefixes')) return 'cidr';
+  if (p.startsWith('/api/refs/dns-resolvers')) return 'dns-resolvers';
   if (p.startsWith('/api/refs/flow-exclusions')) return 'flow-exclusions';
   if (p.startsWith('/api/refs/locations')
     || p.startsWith('/api/refs/collectors')
@@ -17,6 +18,7 @@ function getResourceForPath(path, method) {
   if (p.startsWith('/api/collectors/overview')
     || p.startsWith('/api/collectors/discovered')
     || p.startsWith('/api/collectors/completeness')) return 'collectors';
+  if (p.startsWith('/api/collectors/pipeline')) return 'collection-chain';
   if (p.startsWith('/api/collectors/status')) return 'collector-status';
   if (p.startsWith('/api/bmp/')) return 'bmp';
   if (p.startsWith('/api/refs/entities') || p.startsWith('/api/refs/net-entities')) return 'entities';

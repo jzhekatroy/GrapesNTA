@@ -760,6 +760,8 @@ const ApiClient = (() => {
     rcode,
     domainSearch,
     clientIp,
+    serverIp,
+    hideResolvers,
     limit,
   } = {}) {
     const params = new URLSearchParams();
@@ -770,6 +772,8 @@ const ApiClient = (() => {
     if (rcode !== undefined && rcode !== null && rcode !== '') params.set('rcode', String(rcode));
     if (domainSearch) params.set('domain_search', domainSearch);
     if (clientIp) params.set('client_ip', clientIp);
+    if (serverIp) params.set('server_ip', serverIp);
+    if (hideResolvers !== undefined) params.set('hide_resolvers', hideResolvers ? '1' : '0');
     if (limit != null) params.set('limit', String(limit));
     return params.toString();
   }
@@ -843,6 +847,10 @@ const ApiClient = (() => {
 
   async function loadDnsTopClients(filters) {
     return loadDnsWidget('/api/dns/top-clients', 'dns/top-clients', filters);
+  }
+
+  async function loadDnsTopServers(filters) {
+    return loadDnsWidget('/api/dns/top-servers', 'dns/top-servers', filters);
   }
 
   async function loadDnsRecent(filters) {
@@ -1158,6 +1166,62 @@ const ApiClient = (() => {
       cache: 'no-store',
       credentials: 'same-origin',
       body: JSON.stringify({ prefix, family }),
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
+    return body;
+  }
+
+  async function loadDnsResolvers() {
+    const health = await checkHealth();
+    if (!health.connected) {
+      return { source: 'error', rows: [], error: LOAD_FAILED };
+    }
+    const result = await fetchDashboard('/api/refs/dns-resolvers', 'refs/dns-resolvers');
+    if (!result.ok) {
+      return { source: 'error', rows: [], error: LOAD_FAILED };
+    }
+    return {
+      source: 'clickhouse',
+      rows: Array.isArray(result.data) ? result.data : [],
+      loadMs: result.loadMs,
+      serverMs: result.serverMs,
+    };
+  }
+
+  async function saveDnsResolver(payload) {
+    const res = await fetch('/api/refs/dns-resolvers', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      cache: 'no-store',
+      credentials: 'same-origin',
+      body: JSON.stringify(payload),
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
+    return body;
+  }
+
+  async function toggleDnsResolver({ resolverId, enabled }) {
+    const res = await fetch('/api/refs/dns-resolvers/toggle', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      cache: 'no-store',
+      credentials: 'same-origin',
+      body: JSON.stringify({ resolverId, enabled }),
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
+    return body;
+  }
+
+  async function deleteDnsResolver({ resolverId }) {
+    const res = await fetch('/api/refs/dns-resolvers', {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      cache: 'no-store',
+      credentials: 'same-origin',
+      body: JSON.stringify({ resolverId }),
     });
     const body = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
@@ -1797,6 +1861,61 @@ const ApiClient = (() => {
     };
   }
 
+  function pipelineQueryString(sourceId, window) {
+    const q = new URLSearchParams();
+    if (sourceId) q.set('sourceId', sourceId);
+    if (window) q.set('window', window);
+    const s = q.toString();
+    return s ? `?${s}` : '';
+  }
+
+  async function loadCollectorPipeline(sourceId, window = '1h') {
+    const health = await checkHealth();
+    if (!health.connected) {
+      return { source: 'error', data: null, error: LOAD_FAILED };
+    }
+    try {
+      const body = await getJson(`/api/collectors/pipeline${pipelineQueryString(sourceId, window)}`, {
+        widget: 'collectors/pipeline',
+      });
+      return { source: 'clickhouse', data: body };
+    } catch (err) {
+      return { source: 'error', data: null, error: err.message || LOAD_FAILED };
+    }
+  }
+
+  async function loadCollectorPipelineHistory(sourceId, window = '1h') {
+    const health = await checkHealth();
+    if (!health.connected) {
+      return { source: 'error', data: null, error: LOAD_FAILED };
+    }
+    try {
+      const body = await getJson(`/api/collectors/pipeline/history${pipelineQueryString(sourceId, window)}`, {
+        widget: 'collectors/pipeline/history',
+      });
+      return { source: 'clickhouse', data: body };
+    } catch (err) {
+      return { source: 'error', data: null, error: err.message || LOAD_FAILED };
+    }
+  }
+
+  async function loadPipelineThresholds() {
+    try {
+      const body = await requestJson('/api/collectors/pipeline/thresholds');
+      return { source: 'clickhouse', data: body.data || body };
+    } catch (err) {
+      return { source: 'error', data: null, error: err.message || LOAD_FAILED };
+    }
+  }
+
+  async function savePipelineThresholds(payload) {
+    const body = await requestJson('/api/collectors/pipeline/thresholds', {
+      method: 'POST',
+      body: payload,
+    });
+    return body;
+  }
+
   function bmpQueryString(params = {}) {
     const q = new URLSearchParams();
     for (const [k, v] of Object.entries(params)) {
@@ -2032,6 +2151,7 @@ const ApiClient = (() => {
     loadDnsActivity,
     loadDnsTopDomains,
     loadDnsTopClients,
+    loadDnsTopServers,
     loadDnsRecent,
     loadDnsQtypes,
     loadMonitoringParameters,
@@ -2045,6 +2165,10 @@ const ApiClient = (() => {
     saveL3Prefix,
     toggleL3Prefix,
     deleteL3Prefix,
+    loadDnsResolvers,
+    saveDnsResolver,
+    toggleDnsResolver,
+    deleteDnsResolver,
     loadFlowExclusions,
     saveFlowExclusion,
     toggleFlowExclusion,
@@ -2081,6 +2205,10 @@ const ApiClient = (() => {
     loadCollectorOverview,
     loadCollectorStatus,
     loadCollectorCompleteness,
+    loadCollectorPipeline,
+    loadCollectorPipelineHistory,
+    loadPipelineThresholds,
+    savePipelineThresholds,
     loadBmpSummary,
     loadBmpPeers,
     loadBmpRouters,

@@ -13,6 +13,52 @@ const DNS_CHART_LINES = [
 ];
 const DNS_CHART_HEIGHT = 320;
 
+const DNS_TOPS_SPLIT_KEY = 'grapes-dns-tops-split';
+const DEFAULT_DNS_LEFT_SPLIT = 1 / 3;
+const DEFAULT_DNS_MID_SPLIT = 1 / 3;
+const DNS_TOPS_SPLIT_MIN = 0.15;
+const DNS_TOPS_SPLITTER_WIDTH = 10;
+
+function loadDnsTopsSplit() {
+  try {
+    const raw = localStorage.getItem(DNS_TOPS_SPLIT_KEY);
+    if (!raw) return { left: DEFAULT_DNS_LEFT_SPLIT, mid: DEFAULT_DNS_MID_SPLIT };
+    const parsed = JSON.parse(raw);
+    const left = Number(parsed?.left);
+    const mid = Number(parsed?.mid);
+    if (!Number.isFinite(left) || !Number.isFinite(mid)) {
+      return { left: DEFAULT_DNS_LEFT_SPLIT, mid: DEFAULT_DNS_MID_SPLIT };
+    }
+    return normalizeDnsTopsSplit(left, mid);
+  } catch {
+    return { left: DEFAULT_DNS_LEFT_SPLIT, mid: DEFAULT_DNS_MID_SPLIT };
+  }
+}
+
+function saveDnsTopsSplit(left, mid) {
+  try {
+    localStorage.setItem(DNS_TOPS_SPLIT_KEY, JSON.stringify({ left, mid }));
+  } catch { /* ignore */ }
+}
+
+function normalizeDnsTopsSplit(left, mid) {
+  const min = DNS_TOPS_SPLIT_MIN;
+  let l = Math.min(1 - min * 2, Math.max(min, left));
+  let m = Math.min(1 - l - min, Math.max(min, mid));
+  if (1 - l - m < min) m = Math.max(min, 1 - l - min);
+  return { left: l, mid: m };
+}
+
+function clampDnsLeftSplit(left, mid) {
+  const min = DNS_TOPS_SPLIT_MIN;
+  return Math.min(1 - mid - min, Math.max(min, left));
+}
+
+function clampDnsMidSplit(left, mid) {
+  const min = DNS_TOPS_SPLIT_MIN;
+  return Math.min(1 - left - min, Math.max(min, mid));
+}
+
 function fmtDnsTipValue(n) {
   if (n == null || Number.isNaN(n)) return '—';
   const v = Number(n);
@@ -92,6 +138,48 @@ function DnsRcodeBadge({ label, rcode }) {
   );
 }
 
+function DnsIpCell({ ip, resolverLabel, isExternal, onClick, className }) {
+  return (
+    <span className={`dns-ip-cell${className ? ` ${className}` : ''}`}>
+      {onClick ? (
+        <button
+          type="button"
+          className="link-btn mono dns-recent-ip"
+          onClick={onClick}
+          title="Фильтровать по этому IP"
+        >
+          {ip}
+        </button>
+      ) : (
+        <span className="mono dns-recent-ip">{ip}</span>
+      )}
+      {resolverLabel ? (
+        <span className="dns-ip-cell__badge">
+          <Badge tone="neutral">{resolverLabel}</Badge>
+        </span>
+      ) : null}
+      {isExternal ? (
+        <span className="dns-ip-cell__badge">
+          <Badge tone="info">внешний</Badge>
+        </span>
+      ) : null}
+    </span>
+  );
+}
+
+function DnsHideResolversToggle({ checked, onChange }) {
+  return (
+    <label className="dns-hide-resolvers">
+      <input
+        type="checkbox"
+        checked={checked}
+        onChange={(e) => onChange(e.target.checked)}
+      />
+      <span>Скрыть резолверы</span>
+    </label>
+  );
+}
+
 const RCODE_FILTER_OPTS = [
   { value: '', label: 'Все RCODE' },
   { value: '0', label: 'NOERROR' },
@@ -136,6 +224,176 @@ function useDebouncedValue(value, delay = 300) {
   return debounced;
 }
 
+function DnsTopsRow({ leftSplit, midSplit, onSplitChange, children }) {
+  const rowRef = useRef(null);
+  const clientsPaneRef = useRef(null);
+  const domainsPaneRef = useRef(null);
+  const serversPaneRef = useRef(null);
+  const splitRef = useRef({ left: leftSplit, mid: midSplit });
+  const isDraggingRef = useRef(false);
+  const skipTransitionRef = useRef(true);
+  const pendingDragRef = useRef(null);
+  const rafRef = useRef(null);
+  const childArray = React.Children.toArray(children);
+  const clientsPane = childArray[0];
+  const domainsPane = childArray[1];
+  const serversPane = childArray[2];
+
+  splitRef.current = { left: leftSplit, mid: midSplit };
+
+  const paneRefs = [clientsPaneRef, domainsPaneRef, serversPaneRef];
+
+  const clearPaneFlex = () => {
+    paneRefs.forEach((ref) => ref.current?.style.removeProperty('flex'));
+  };
+
+  const applySplit = (left, mid, { live = false } = {}) => {
+    const right = 1 - left - mid;
+    rowRef.current?.style.setProperty('--dns-left-split', String(left));
+    rowRef.current?.style.setProperty('--dns-mid-split', String(mid));
+    rowRef.current?.style.setProperty('--dns-right-split', String(right));
+    if (!live) {
+      clearPaneFlex();
+      return;
+    }
+    clientsPaneRef.current?.style.setProperty('flex', `${left} 1 0`);
+    domainsPaneRef.current?.style.setProperty('flex', `${mid} 1 0`);
+    serversPaneRef.current?.style.setProperty('flex', `${right} 1 0`);
+  };
+
+  useEffect(() => {
+    if (isDraggingRef.current) return;
+    const row = rowRef.current;
+    if (!row) return;
+    const normalized = normalizeDnsTopsSplit(leftSplit, midSplit);
+    if (skipTransitionRef.current) {
+      skipTransitionRef.current = false;
+      row.classList.add('is-snapping');
+      applySplit(normalized.left, normalized.mid);
+      requestAnimationFrame(() => row.classList.remove('is-snapping'));
+      return;
+    }
+    applySplit(normalized.left, normalized.mid);
+  }, [leftSplit, midSplit]);
+
+  const flexWidth = () => {
+    const el = rowRef.current;
+    if (!el) return 1;
+    const rect = el.getBoundingClientRect();
+    return Math.max(rect.width - 2 * DNS_TOPS_SPLITTER_WIDTH, 1);
+  };
+
+  const splitFromClientX = (which, clientX, dragStart) => {
+    const el = rowRef.current;
+    if (!el) return splitRef.current;
+    const rect = el.getBoundingClientRect();
+    const boundaryX = clientX - rect.left;
+    const fraction = boundaryX / flexWidth();
+    if (which === 1) {
+      const left = clampDnsLeftSplit(fraction, dragStart.mid);
+      return { left, mid: dragStart.mid };
+    }
+    const mid = clampDnsMidSplit(dragStart.left, fraction - dragStart.left);
+    return { left: dragStart.left, mid };
+  };
+
+  const flushSplitUpdate = () => {
+    rafRef.current = null;
+    const pending = pendingDragRef.current;
+    if (!pending) return;
+    const next = splitFromClientX(pending.which, pending.clientX, pending.dragStart);
+    const prev = splitRef.current;
+    if (Math.abs(next.left - prev.left) < 0.001 && Math.abs(next.mid - prev.mid) < 0.001) return;
+    splitRef.current = next;
+    applySplit(next.left, next.mid, { live: true });
+  };
+
+  const scheduleSplitUpdate = (which, clientX, dragStart) => {
+    pendingDragRef.current = { which, clientX, dragStart };
+    if (rafRef.current != null) return;
+    rafRef.current = requestAnimationFrame(flushSplitUpdate);
+  };
+
+  const stopDrag = (onMove, onUp) => {
+    document.removeEventListener('mousemove', onMove);
+    document.removeEventListener('mouseup', onUp);
+    if (rafRef.current != null) {
+      cancelAnimationFrame(rafRef.current);
+      rafRef.current = null;
+    }
+    pendingDragRef.current = null;
+    isDraggingRef.current = false;
+    rowRef.current?.classList.remove('is-dragging');
+    document.body.style.cursor = '';
+    document.body.style.userSelect = '';
+  };
+
+  const onSplitterMouseDown = (which, e) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    isDraggingRef.current = true;
+    const dragStart = { ...splitRef.current };
+    applySplit(dragStart.left, dragStart.mid, { live: true });
+
+    const onMove = (ev) => scheduleSplitUpdate(which, ev.clientX, dragStart);
+
+    const onUp = () => {
+      flushSplitUpdate();
+      stopDrag(onMove, onUp);
+      applySplit(splitRef.current.left, splitRef.current.mid);
+      if (
+        Math.abs(splitRef.current.left - dragStart.left) >= 0.005
+        || Math.abs(splitRef.current.mid - dragStart.mid) >= 0.005
+      ) {
+        onSplitChange(splitRef.current);
+        saveDnsTopsSplit(splitRef.current.left, splitRef.current.mid);
+      }
+    };
+
+    rowRef.current?.classList.add('is-dragging');
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+  };
+
+  return (
+    <div ref={rowRef} className="dns-tops-row">
+      <div ref={clientsPaneRef} className="dns-tops-row__pane dns-tops-row__pane--clients">
+        {clientsPane}
+      </div>
+      <div
+        className="dns-tops-row__splitter"
+        role="separator"
+        aria-orientation="vertical"
+        aria-valuenow={Math.round(leftSplit * 100)}
+        aria-valuemin={Math.round(DNS_TOPS_SPLIT_MIN * 100)}
+        aria-valuemax={Math.round((1 - midSplit - DNS_TOPS_SPLIT_MIN) * 100)}
+        aria-label="Изменить ширину топа клиентов"
+        tabIndex={0}
+        onMouseDown={(e) => onSplitterMouseDown(1, e)}
+      />
+      <div ref={domainsPaneRef} className="dns-tops-row__pane dns-tops-row__pane--domains">
+        {domainsPane}
+      </div>
+      <div
+        className="dns-tops-row__splitter"
+        role="separator"
+        aria-orientation="vertical"
+        aria-valuenow={Math.round((leftSplit + midSplit) * 100)}
+        aria-valuemin={Math.round((leftSplit + DNS_TOPS_SPLIT_MIN) * 100)}
+        aria-valuemax={Math.round((1 - DNS_TOPS_SPLIT_MIN) * 100)}
+        aria-label="Изменить ширину топа доменов"
+        tabIndex={0}
+        onMouseDown={(e) => onSplitterMouseDown(2, e)}
+      />
+      <div ref={serversPaneRef} className="dns-tops-row__pane dns-tops-row__pane--servers">
+        {serversPane}
+      </div>
+    </div>
+  );
+}
+
 function formatDnsBucketLabel(bucket) {
   if (!bucket) return '—';
   const d = new Date(bucket);
@@ -168,8 +426,12 @@ function PageDnsQueries({ onNavigate, timeRange, customPeriod, collectorFilter, 
   const [rcode, setRcode] = useState('');
   const [domainSearch, setDomainSearch] = useState('');
   const [clientIp, setClientIp] = useState('');
+  const [serverIp, setServerIp] = useState('');
+  const [hideResolvers, setHideResolvers] = useState(true);
+  const [topsSplit, setTopsSplit] = useState(() => loadDnsTopsSplit());
   const [domainDraft, setDomainDraft] = useState('');
   const [clientIpDraft, setClientIpDraft] = useState('');
+  const [serverIpDraft, setServerIpDraft] = useState('');
 
   const [qtypeOpts, setQtypeOpts] = useState([]);
 
@@ -192,6 +454,12 @@ function PageDnsQueries({ onNavigate, timeRange, customPeriod, collectorFilter, 
   const [topClientsLoadMs, setTopClientsLoadMs] = useState(null);
   const [topClientsServerMs, setTopClientsServerMs] = useState(null);
 
+  const [topServers, setTopServers] = useState([]);
+  const [topServersSource, setTopServersSource] = useState('loading');
+  const [topServersMeta, setTopServersMeta] = useState(null);
+  const [topServersLoadMs, setTopServersLoadMs] = useState(null);
+  const [topServersServerMs, setTopServersServerMs] = useState(null);
+
   const [recentRows, setRecentRows] = useState([]);
   const [recentSource, setRecentSource] = useState('loading');
   const [recentMeta, setRecentMeta] = useState(null);
@@ -200,9 +468,11 @@ function PageDnsQueries({ onNavigate, timeRange, customPeriod, collectorFilter, 
 
   const debouncedDomain = useDebouncedValue(domainDraft, 300);
   const debouncedClientIp = useDebouncedValue(clientIpDraft, 300);
+  const debouncedServerIp = useDebouncedValue(serverIpDraft, 300);
 
   useEffect(() => { setDomainSearch(debouncedDomain.trim()); }, [debouncedDomain]);
   useEffect(() => { setClientIp(debouncedClientIp.trim()); }, [debouncedClientIp]);
+  useEffect(() => { setServerIp(debouncedServerIp.trim()); }, [debouncedServerIp]);
 
   const periodLabel = timeRangeLabel(timeRange, customPeriod);
   const chartLongRange = isLongChartRange(timeRange, customPeriod);
@@ -215,7 +485,13 @@ function PageDnsQueries({ onNavigate, timeRange, customPeriod, collectorFilter, 
     rcode: rcode !== '' ? Number(rcode) : undefined,
     domainSearch: domainSearch || undefined,
     clientIp: clientIp || undefined,
-  }), [timeRange, customPeriod?.from, customPeriod?.to, collectorFilterKey, collectorFilter, qtype, rcode, domainSearch, clientIp]);
+    serverIp: serverIp || undefined,
+  }), [timeRange, customPeriod?.from, customPeriod?.to, collectorFilterKey, collectorFilter, qtype, rcode, domainSearch, clientIp, serverIp]);
+
+  const topClientsFilters = useMemo(() => ({
+    ...apiFilters,
+    hideResolvers,
+  }), [apiFilters, hideResolvers]);
 
   useEffect(() => {
     let cancelled = false;
@@ -267,13 +543,28 @@ function PageDnsQueries({ onNavigate, timeRange, customPeriod, collectorFilter, 
   useEffect(() => {
     let cancelled = false;
     setTopClientsSource('loading');
-    ApiClient.loadDnsTopClients(apiFilters).then((r) => {
+    ApiClient.loadDnsTopClients(topClientsFilters).then((r) => {
       if (!cancelled) {
         setTopClients(Array.isArray(r.rows) ? r.rows : []);
         setTopClientsMeta(r.meta ?? null);
         setTopClientsSource(r.source || 'error');
         setTopClientsLoadMs(r.loadMs ?? null);
         setTopClientsServerMs(r.serverMs ?? null);
+      }
+    });
+    return () => { cancelled = true; };
+  }, [topClientsFilters]);
+
+  useEffect(() => {
+    let cancelled = false;
+    setTopServersSource('loading');
+    ApiClient.loadDnsTopServers(apiFilters).then((r) => {
+      if (!cancelled) {
+        setTopServers(Array.isArray(r.rows) ? r.rows : []);
+        setTopServersMeta(r.meta ?? null);
+        setTopServersSource(r.source || 'error');
+        setTopServersLoadMs(r.loadMs ?? null);
+        setTopServersServerMs(r.serverMs ?? null);
       }
     });
     return () => { cancelled = true; };
@@ -333,13 +624,14 @@ function PageDnsQueries({ onNavigate, timeRange, customPeriod, collectorFilter, 
     setRcode('');
     setDomainDraft('');
     setClientIpDraft('');
+    setServerIpDraft('');
   };
 
-  const hasActiveFilters = qtype || rcode !== '' || domainDraft || clientIpDraft;
+  const hasActiveFilters = qtype || rcode !== '' || domainDraft || clientIpDraft || serverIpDraft;
 
   const recentForced30m = recentMeta?.recentWindow === '30m' && dnsIsLongPeriod(timeRange, customPeriod);
   const recentSub = recentForced30m
-    ? 'Показаны последние 30 минут (ограничение для производительности). Укажите IP клиента или домен для поиска за весь период'
+    ? 'Показаны последние 30 минут (ограничение для производительности). Укажите IP клиента, сервера или домен для поиска за весь период'
     : `Последние события · ${periodLabel}`;
 
   return (
@@ -347,7 +639,7 @@ function PageDnsQueries({ onNavigate, timeRange, customPeriod, collectorFilter, 
       <div className="page-head">
         <div>
           <h1>DNS-запросы</h1>
-          <p>Анализ DNS-активности, топ доменов и клиентов · {periodLabel}</p>
+          <p>Анализ DNS-активности, топ клиентов, доменов и серверов · {periodLabel}</p>
         </div>
       </div>
 
@@ -394,6 +686,17 @@ function PageDnsQueries({ onNavigate, timeRange, customPeriod, collectorFilter, 
               placeholder="188.143.128.3"
               value={clientIpDraft}
               onChange={(e) => setClientIpDraft(e.target.value)}
+            />
+          </div>
+
+          <div className="dns-filters__group">
+            <label className="dns-filters__label" htmlFor="dns-server">Server IP</label>
+            <input
+              id="dns-server"
+              className="input"
+              placeholder="8.8.8.8"
+              value={serverIpDraft}
+              onChange={(e) => setServerIpDraft(e.target.value)}
             />
           </div>
 
@@ -462,7 +765,66 @@ function PageDnsQueries({ onNavigate, timeRange, customPeriod, collectorFilter, 
         )}
       </Card>
 
-      <div className="dns-tops-grid">
+      <DnsTopsRow
+        leftSplit={topsSplit.left}
+        midSplit={topsSplit.mid}
+        onSplitChange={setTopsSplit}
+      >
+        <Card className="dns-top-card">
+          <div className="dns-card-head">
+            <div>
+              <div className="dns-card-head__title">Топ клиентов</div>
+              <div className="dns-card-head__sub">{periodLabel}</div>
+            </div>
+            <WidgetLoadBadge loadMs={topClientsLoadMs} serverMs={topClientsServerMs} />
+          </div>
+          <div className="dns-top-card__toolbar">
+            <DnsHideResolversToggle checked={hideResolvers} onChange={setHideResolvers} />
+          </div>
+          {topClientsSource === 'error' ? (
+            <DnsLoadState />
+          ) : topClientsSource === 'loading' ? (
+            <div className="skeleton" style={{ height: 200 }} />
+          ) : topClients.length === 0 && topClientsMeta?.dataTier === 'aggregate' ? (
+            <DnsEmptyState>{dnsAggregateEmptyMessage()}</DnsEmptyState>
+          ) : (
+            <div className="dns-top-card__body">
+            <DataTable
+              rows={topClients}
+              rowKey="client"
+              dense
+              pageSize={10}
+              resizableColumns={false}
+              columns={[
+                {
+                  key: 'client',
+                  title: 'IP клиента',
+                  render: (row) => (
+                    <DnsIpCell
+                      ip={row.client}
+                      resolverLabel={row.resolverLabel}
+                      isExternal={row.isExternal}
+                      onClick={() => setClientIpDraft(row.client)}
+                    />
+                  ),
+                },
+                { key: 'queries', title: 'Запросы', align: 'right', num: true, render: (r) => fmtNum(r.queries) },
+                { key: 'uniqueDomains', title: 'Уник. домены', align: 'right', num: true, render: (r) => fmtNum(r.uniqueDomains) },
+                { key: 'nxdomain', title: 'NXDOMAIN', align: 'right', num: true, render: (r) => fmtNum(r.nxdomain) },
+                { key: 'servfail', title: 'SERVFAIL', align: 'right', num: true, render: (r) => fmtNum(r.servfail) },
+                {
+                  key: 'errorPercent',
+                  title: 'Ошибки, %',
+                  align: 'right',
+                  render: (r) => <DnsErrorPercent value={r.errorPercent} />,
+                },
+              ]}
+              getRowClassName={(row) => dnsErrorRowClass(row.errorPercent)}
+            />
+            </div>
+          )}
+        </Card>
+
         <Card className="dns-top-card">
           <div className="dns-card-head">
             <div>
@@ -484,6 +846,7 @@ function PageDnsQueries({ onNavigate, timeRange, customPeriod, collectorFilter, 
               rowKey="_id"
               dense
               pageSize={10}
+              resizableColumns={false}
               columns={[
                 {
                   key: 'queryName',
@@ -520,41 +883,40 @@ function PageDnsQueries({ onNavigate, timeRange, customPeriod, collectorFilter, 
         <Card className="dns-top-card">
           <div className="dns-card-head">
             <div>
-              <div className="dns-card-head__title">Топ клиентов</div>
+              <div className="dns-card-head__title">Топ серверов</div>
               <div className="dns-card-head__sub">{periodLabel}</div>
             </div>
-            <WidgetLoadBadge loadMs={topClientsLoadMs} serverMs={topClientsServerMs} />
+            <WidgetLoadBadge loadMs={topServersLoadMs} serverMs={topServersServerMs} />
           </div>
-          {topClientsSource === 'error' ? (
+          {topServersSource === 'error' ? (
             <DnsLoadState />
-          ) : topClientsSource === 'loading' ? (
+          ) : topServersSource === 'loading' ? (
             <div className="skeleton" style={{ height: 200 }} />
-          ) : topClients.length === 0 && topClientsMeta?.dataTier === 'aggregate' ? (
+          ) : topServers.length === 0 && topServersMeta?.dataTier === 'aggregate' ? (
             <DnsEmptyState>{dnsAggregateEmptyMessage()}</DnsEmptyState>
           ) : (
             <div className="dns-top-card__body">
             <DataTable
-              rows={topClients}
-              rowKey="client"
+              rows={topServers}
+              rowKey="server"
               dense
               pageSize={10}
+              resizableColumns={false}
               columns={[
                 {
-                  key: 'client',
-                  title: 'IP клиента',
+                  key: 'server',
+                  title: 'IP сервера',
                   render: (row) => (
-                    <button
-                      type="button"
-                      className="link-btn mono"
-                      onClick={() => setClientIpDraft(row.client)}
-                      title="Фильтровать по этому IP"
-                    >
-                      {row.client}
-                    </button>
+                    <DnsIpCell
+                      ip={row.server}
+                      resolverLabel={row.resolverLabel}
+                      isExternal={row.isExternal}
+                      onClick={() => setServerIpDraft(row.server)}
+                    />
                   ),
                 },
                 { key: 'queries', title: 'Запросы', align: 'right', num: true, render: (r) => fmtNum(r.queries) },
-                { key: 'uniqueDomains', title: 'Уникальные домены', align: 'right', num: true, render: (r) => fmtNum(r.uniqueDomains) },
+                { key: 'responses', title: 'Ответы', align: 'right', num: true, render: (r) => fmtNum(r.responses) },
                 { key: 'nxdomain', title: 'NXDOMAIN', align: 'right', num: true, render: (r) => fmtNum(r.nxdomain) },
                 { key: 'servfail', title: 'SERVFAIL', align: 'right', num: true, render: (r) => fmtNum(r.servfail) },
                 {
@@ -569,7 +931,7 @@ function PageDnsQueries({ onNavigate, timeRange, customPeriod, collectorFilter, 
             </div>
           )}
         </Card>
-      </div>
+      </DnsTopsRow>
 
       <Card className="dns-recent-card">
         <div className="dns-card-head">
@@ -588,6 +950,7 @@ function PageDnsQueries({ onNavigate, timeRange, customPeriod, collectorFilter, 
               rowKey="_id"
               dense
               pageSize={15}
+              resizableColumns={false}
               columns={[
                 {
                   key: 'eventTime',
@@ -605,23 +968,28 @@ function PageDnsQueries({ onNavigate, timeRange, customPeriod, collectorFilter, 
                 {
                   key: 'client',
                   title: 'Клиент',
-                  width: 130,
+                  width: 180,
                   render: (r) => (
-                    <button
-                      type="button"
-                      className="link-btn mono dns-recent-ip"
+                    <DnsIpCell
+                      ip={r.client}
+                      resolverLabel={r.clientBadges?.resolverLabel}
+                      isExternal={r.clientBadges?.isExternal}
                       onClick={() => setClientIpDraft(r.client)}
-                      title="Фильтровать по этому IP"
-                    >
-                      {r.client}
-                    </button>
+                    />
                   ),
                 },
                 {
                   key: 'server',
                   title: 'DNS-сервер',
-                  width: 130,
-                  render: (r) => <span className="mono dns-recent-ip">{r.server}</span>,
+                  width: 180,
+                  render: (r) => (
+                    <DnsIpCell
+                      ip={r.server}
+                      resolverLabel={r.serverBadges?.resolverLabel}
+                      isExternal={r.serverBadges?.isExternal}
+                      onClick={() => setServerIpDraft(r.server)}
+                    />
+                  ),
                 },
                 {
                   key: 'queryName',

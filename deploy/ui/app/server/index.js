@@ -78,6 +78,7 @@ const {
   dnsActivityChart,
   dnsTopDomains,
   dnsTopClients,
+  dnsTopServers,
   dnsRecent,
   dnsQtypes,
   parseDnsFiltersQuery,
@@ -100,6 +101,12 @@ const {
   setL3PrefixEnabled,
   deleteL3Prefix,
 } = require('./l3-prefixes');
+const {
+  listDnsResolvers,
+  saveDnsResolver,
+  setDnsResolverEnabled,
+  deleteDnsResolver,
+} = require('./dns-resolvers');
 const {
   listFlowExclusions,
   flowExclusionsExcludedStats,
@@ -156,6 +163,8 @@ const {
 const { fetchCollectorStatus } = require('./collector-status');
 const { fetchCollectorOverview, fetchDiscoveredSources } = require('./collector-overview');
 const { fetchCollectorCompleteness } = require('./collector-completeness');
+const { fetchCollectorPipeline, fetchCollectorPipelineHistory } = require('./collector-pipeline');
+const { getPipelineThresholds, savePipelineThresholds } = require('./collector-pipeline-thresholds');
 const {
   getBmpSummary,
   getBmpPeers,
@@ -1284,6 +1293,20 @@ app.get('/api/dns/top-clients', async (req, res) => {
   }
 });
 
+app.get('/api/dns/top-servers', async (req, res) => {
+  try {
+    const filters = parseDnsFiltersQuery(req.query);
+    const limit = Math.min(Math.max(Number(req.query.limit) || 50, 1), 200);
+    const result = await runNamed(() => dnsTopServers(filters, limit), { name: 'dns/top-servers' });
+    res.json({
+      ...result,
+      meta: { ...result.meta, ...dnsRouteMeta(filters, { limit }) },
+    });
+  } catch (err) {
+    res.status(502).json({ error: err.message });
+  }
+});
+
 app.get('/api/dns/recent', async (req, res) => {
   try {
     const filters = parseDnsFiltersQuery(req.query);
@@ -1483,6 +1506,15 @@ app.put('/api/admin/ttl/:id', async (req, res) => {
 app.get('/api/refs/l3-prefixes', async (_req, res) => {
   try {
     const result = await runNamed(() => listL3Prefixes(), { name: 'refs/l3-prefixes' });
+    res.json(result);
+  } catch (err) {
+    res.status(502).json({ error: err.message });
+  }
+});
+
+app.get('/api/refs/dns-resolvers', async (_req, res) => {
+  try {
+    const result = await runNamed(() => listDnsResolvers(), { name: 'refs/dns-resolvers' });
     res.json(result);
   } catch (err) {
     res.status(502).json({ error: err.message });
@@ -2006,6 +2038,42 @@ app.get('/api/collectors/completeness', async (_req, res) => {
   }
 });
 
+app.get('/api/collectors/pipeline/thresholds', async (_req, res) => {
+  try {
+    const settings = await getPipelineThresholds();
+    res.json({ data: settings });
+  } catch (err) {
+    res.status(err.statusCode === 400 ? 400 : 502).json({ error: err.message });
+  }
+});
+
+app.post('/api/collectors/pipeline/thresholds', async (req, res) => {
+  try {
+    const result = await savePipelineThresholds(req.body || {});
+    res.json(result);
+  } catch (err) {
+    res.status(err.statusCode === 400 ? 400 : 502).json({ error: err.message });
+  }
+});
+
+app.get('/api/collectors/pipeline/history', async (req, res) => {
+  try {
+    const result = await fetchCollectorPipelineHistory(req.query?.sourceId, req.query?.window);
+    res.json(result);
+  } catch (err) {
+    res.status(err.statusCode === 400 ? 400 : 502).json({ error: err.message });
+  }
+});
+
+app.get('/api/collectors/pipeline', async (req, res) => {
+  try {
+    const result = await fetchCollectorPipeline(req.query?.sourceId, req.query?.window);
+    res.json(result);
+  } catch (err) {
+    res.status(err.statusCode === 400 ? 400 : 502).json({ error: err.message });
+  }
+});
+
 function bmpStatus(err) {
   return err.statusCode === 400 ? 400 : 502;
 }
@@ -2084,6 +2152,16 @@ app.post('/api/refs/l3-prefixes', async (req, res) => {
   }
 });
 
+app.post('/api/refs/dns-resolvers', async (req, res) => {
+  try {
+    const { elapsedMs } = await saveDnsResolver(req.body || {});
+    res.json({ ok: true, meta: { elapsedMs } });
+  } catch (err) {
+    const status = err.statusCode === 400 ? 400 : 502;
+    res.status(status).json({ error: err.message });
+  }
+});
+
 app.post('/api/refs/l3-prefixes/toggle', async (req, res) => {
   try {
     const { elapsedMs, enabled } = await setL3PrefixEnabled(req.body || {});
@@ -2094,9 +2172,29 @@ app.post('/api/refs/l3-prefixes/toggle', async (req, res) => {
   }
 });
 
+app.post('/api/refs/dns-resolvers/toggle', async (req, res) => {
+  try {
+    const { elapsedMs, enabled } = await setDnsResolverEnabled(req.body || {});
+    res.json({ ok: true, enabled, meta: { elapsedMs } });
+  } catch (err) {
+    const status = err.statusCode === 400 ? 400 : err.statusCode === 404 ? 404 : 502;
+    res.status(status).json({ error: err.message });
+  }
+});
+
 app.delete('/api/refs/l3-prefixes', async (req, res) => {
   try {
     const { elapsedMs } = await deleteL3Prefix(req.body || {});
+    res.json({ ok: true, meta: { elapsedMs } });
+  } catch (err) {
+    const status = err.statusCode === 400 ? 400 : err.statusCode === 404 ? 404 : 502;
+    res.status(status).json({ error: err.message });
+  }
+});
+
+app.delete('/api/refs/dns-resolvers', async (req, res) => {
+  try {
+    const { elapsedMs } = await deleteDnsResolver(req.body || {});
     res.json({ ok: true, meta: { elapsedMs } });
   } catch (err) {
     const status = err.statusCode === 400 ? 400 : err.statusCode === 404 ? 404 : 502;

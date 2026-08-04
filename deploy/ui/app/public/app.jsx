@@ -280,8 +280,10 @@ function App() {
       case 'routers':    pageEl = <PageRouters key={refreshKey} />; break;
       case 'entities':   pageEl = <PageEntities key={refreshKey} />; break;
       case 'cidr':       pageEl = <PageCIDR key={refreshKey} />; break;
+      case 'dns-resolvers': pageEl = <PageDnsResolvers key={refreshKey} />; break;
       case 'port-services': pageEl = <PagePortServices key={refreshKey} />; break;
       case 'flow-exclusions': pageEl = <PageFlowExclusions key={refreshKey} />; break;
+      case 'collection-chain': pageEl = <PageCollectionChain key={refreshKey} onNavigate={navigate} />; break;
       case 'users':      pageEl = <PageUsers key={refreshKey} currentUser={auth.user} onAuthRefresh={reloadCurrentUser} />; break;
       case 'ttl':        pageEl = <PageTTL key={refreshKey} />; break;
       default:           pageEl = <PageComingSoon key={refreshKey} pageId={page} onNavigate={navigate} />;

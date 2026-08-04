@@ -27,6 +27,7 @@ const NAV = [
       icon: 'collectors',
       children: [
         { id: 'collectors', label: 'Коллекторы' },
+        { id: 'collection-chain', label: 'Цепочка сбора' },
         { id: 'flow-exclusions', label: 'Исключения из статистики' },
         { id: 'snmp', label: 'SNMP' },
         { id: 'bmp', label: 'BMP / BGP' },
@@ -41,6 +42,7 @@ const NAV = [
       icon: 'refs',
       children: [
         { id: 'cidr', label: 'Собственные сети (CIDR)' },
+        { id: 'dns-resolvers', label: 'DNS-резолверы' },
         { id: 'vlan', label: 'VLAN' },
         { id: 'entities', label: 'Владельцы L3' },
         { id: 'interface-roles', label: 'Порты оборудования' },
@@ -66,10 +68,12 @@ const PAGES_WITHOUT_HEADER_FILTERS = new Set([
   'diagnostics',
   'users',
   'collectors',
+  'collection-chain',
   'snmp',
   'bmp',
   'entities',
   'cidr',
+  'dns-resolvers',
   'interface-roles',
   'port-services',
   'flow-exclusions',
@@ -111,15 +115,15 @@ function Sidebar({ current, onNavigate, collapsed, effectivePermissions }) {
     visibleNav.forEach(s => {
       if (s.group) o[s.group.id] = s.group.children.some(c => c.id === current);
     });
-    if (!o.data && (current === 'collectors' || current === 'flow-exclusions' || current === 'snmp' || current === 'bmp')) o.data = true;
-    if (!o.netmodel && (current === 'entities' || current === 'cidr' || current === 'vlan' || current === 'port-services' || current === 'interface-roles' || current === 'routers')) o.netmodel = true;
+    if (!o.data && (current === 'collectors' || current === 'collection-chain' || current === 'flow-exclusions' || current === 'snmp' || current === 'bmp')) o.data = true;
+    if (!o.netmodel && (current === 'entities' || current === 'cidr' || current === 'dns-resolvers' || current === 'vlan' || current === 'port-services' || current === 'interface-roles' || current === 'routers')) o.netmodel = true;
     o.data = o.data ?? true;
     o.netmodel = o.netmodel ?? true;
     return o;
   });
   useEffect(() => {
-    if (current === 'collectors' || current === 'flow-exclusions' || current === 'snmp' || current === 'bmp') setOpenGroups((s) => ({ ...s, data: true }));
-    if (current === 'entities' || current === 'cidr' || current === 'vlan' || current === 'port-services' || current === 'interface-roles' || current === 'routers') {
+    if (current === 'collectors' || current === 'collection-chain' || current === 'flow-exclusions' || current === 'snmp' || current === 'bmp') setOpenGroups((s) => ({ ...s, data: true }));
+    if (current === 'entities' || current === 'cidr' || current === 'dns-resolvers' || current === 'vlan' || current === 'port-services' || current === 'interface-roles' || current === 'routers') {
       setOpenGroups((s) => ({ ...s, netmodel: true }));
     }
   }, [current]);

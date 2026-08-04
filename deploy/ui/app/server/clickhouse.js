@@ -87,6 +87,9 @@ const config = {
   dnsActivity5mTable: env('CLICKHOUSE_DNS_ACTIVITY_5M_TABLE', 'dns_activity_5m'),
   dnsDomains1hTable: env('CLICKHOUSE_DNS_DOMAINS_1H_TABLE', 'dns_domains_1h'),
   dnsClients1hTable: env('CLICKHOUSE_DNS_CLIENTS_1H_TABLE', 'dns_clients_1h'),
+  dnsServers1hTable: env('CLICKHOUSE_DNS_SERVERS_1H_TABLE', 'dns_servers_1h'),
+  dnsResolversTable: env('CLICKHOUSE_DNS_RESOLVERS_TABLE', 'net_dns_resolvers'),
+  dnsResolversView: env('CLICKHOUSE_DNS_RESOLVERS_VIEW', 'net_dns_resolvers_enabled'),
   bmpRouteEventsTable: env('CLICKHOUSE_BMP_ROUTE_EVENTS_TABLE', 'bmp_route_events'),
   l3PrefixesTable: env('CLICKHOUSE_L3_PREFIXES_TABLE', 'net_l3_prefixes'),
   l3PrefixesView: env('CLICKHOUSE_L3_PREFIXES_VIEW', 'net_l3_prefixes_enabled'),
@@ -378,6 +381,18 @@ function dnsClients1hTableRef() {
   return `${qIdent(config.database)}.${qIdent(config.dnsClients1hTable)}`;
 }
 
+function dnsServers1hTableRef() {
+  return `${qIdent(config.database)}.${qIdent(config.dnsServers1hTable)}`;
+}
+
+function dnsResolversTableRef() {
+  return `${qIdent(config.database)}.${qIdent(config.dnsResolversTable)}`;
+}
+
+function dnsResolversViewRef() {
+  return `${qIdent(config.database)}.${qIdent(config.dnsResolversView)}`;
+}
+
 function protocolTableRef() {
   return `${qIdent(config.database)}.${qIdent(config.protocolTable)}`;
 }
@@ -638,6 +653,9 @@ function getConfig() {
     dnsActivity5mTable: config.dnsActivity5mTable,
     dnsDomains1hTable: config.dnsDomains1hTable,
     dnsClients1hTable: config.dnsClients1hTable,
+    dnsServers1hTable: config.dnsServers1hTable,
+    dnsResolversTable: config.dnsResolversTable,
+    dnsResolversView: config.dnsResolversView,
     bmpRouteEventsTable: config.bmpRouteEventsTable,
     l3PrefixesTable: config.l3PrefixesTable,
     l3PrefixesView: config.l3PrefixesView,
@@ -730,6 +748,9 @@ module.exports = {
   dnsActivity5mTableRef,
   dnsDomains1hTableRef,
   dnsClients1hTableRef,
+  dnsServers1hTableRef,
+  dnsResolversTableRef,
+  dnsResolversViewRef,
   l3PrefixesTableRef,
   l3PrefixesViewRef,
   flowExclusionsTableRef,
