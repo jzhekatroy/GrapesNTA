@@ -47,20 +47,11 @@ GROUP BY
     source_id,
     server_ip;
 
--- Backfill the retention window from raw dns_log (the MV only sees new rows).
--- dns_log keeps 30 days, the rollup keeps 90; older hours simply stay empty.
-INSERT INTO default.dns_servers_1h
-SELECT
-    toStartOfHour(toDateTime(ts)) AS hour,
-    source_id,
-    server_ip,
-    countIf(is_response = 0) AS queries,
-    countIf(is_response = 1) AS responses,
-    countIf(is_response = 1 AND rcode = 3) AS nxdomain,
-    countIf(is_response = 1 AND rcode = 2) AS servfail
-FROM default.dns_log
-WHERE ts < toStartOfHour(now())
-GROUP BY
-    hour,
-    source_id,
-    server_ip;
+-- History is NOT backfilled here on purpose. The MV only sees new inserts, so
+-- the rollup starts empty and fills going forward; that is enough to make the
+-- server top work from today on.
+--
+-- dns_log holds ~18 billion rows over its 30-day window on a live install, so
+-- a single backfill statement is a full scan of the whole log and has no place
+-- in a migration. Backfill one day at a time instead, newest first, and stop
+-- when the depth is enough — see deploy/clickhouse/dns_servers_1h_backfill.sh.
