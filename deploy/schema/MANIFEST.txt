@@ -7,6 +7,8 @@
 20_dns/06_dns_activity_5m_mv.sql
 20_dns/07_dns_clients_1h_mv.sql
 20_dns/08_dns_domains_1h_mv.sql
+20_dns/09_dns_servers_1h.sql
+20_dns/10_dns_servers_1h_mv.sql
 30_bmp/01_bmp_peers.sql
 30_bmp/02_bmp_route_events.sql
 30_bmp/03_bgp_updates_1m.sql
@@ -58,6 +60,8 @@
 50_net/34_net_interface_roles_effective_current.sql
 50_net/35_net_flow_exclusions.sql
 50_net/36_net_flow_exclusions_enabled.sql
+50_net/37_net_dns_resolvers.sql
+50_net/38_net_dns_resolvers_enabled.sql
 60_traffic/01_traffic_rollup_state.sql
 60_traffic/02_traffic_dashboard_1m.sql
 60_traffic/03_traffic_dashboard_1h.sql
