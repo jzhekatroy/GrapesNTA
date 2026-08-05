@@ -15,7 +15,10 @@ CREATE TABLE IF NOT EXISTS default.net_snmp_agents
     `last_poll_status` LowCardinality(String) DEFAULT 'never',
     `last_poll_error` String DEFAULT '',
     `is_new` UInt8 DEFAULT 1,
-    `updated_at` DateTime('UTC') DEFAULT now()
+    `updated_at` DateTime('UTC') DEFAULT now(),
+    -- Last poll that actually answered. last_poll_at moves on failures too, so
+    -- only this column tells whether the catalog is still trustworthy.
+    `last_ok_at` DateTime('UTC') DEFAULT toDateTime(0, 'UTC')
 )
 ENGINE = ReplacingMergeTree(updated_at)
 ORDER BY switch_ip

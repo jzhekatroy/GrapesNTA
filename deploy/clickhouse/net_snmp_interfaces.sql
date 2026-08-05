@@ -27,7 +27,18 @@ SETTINGS index_granularity = 8192;
 -- Upgrades (run missing columns once; many CH builds lack IF NOT EXISTS):
 --   ALTER TABLE default.net_snmp_settings
 --       ADD COLUMN auto_enable_new_agents UInt8 DEFAULT 0;
+--   ALTER TABLE default.net_snmp_agents
+--       ADD COLUMN last_ok_at DateTime('UTC') DEFAULT toDateTime(0, 'UTC');
 -- Then re-apply this file so *_current views are recreated.
+-- After adding last_ok_at, seed it once from the catalog so the UI is not blank
+-- until the next successful poll:
+--   INSERT INTO default.net_snmp_agents
+--   SELECT a.* EXCEPT (last_ok_at, updated_at),
+--          ifNull(i.last_catalog_at, toDateTime(0, 'UTC')), now()
+--   FROM default.net_snmp_agents_current AS a
+--   LEFT JOIN (SELECT switch_ip, max(updated_at) AS last_catalog_at
+--              FROM default.net_interfaces GROUP BY switch_ip) AS i
+--     ON a.switch_ip = i.switch_ip;
 -- If net_interfaces_dict depends on net_interfaces_current, drop/recreate the
 -- dictionary after this file (see apply_net_snmp_interfaces_dict.sh).
 
@@ -83,7 +94,10 @@ CREATE TABLE IF NOT EXISTS default.net_snmp_agents
     last_poll_status     LowCardinality(String) DEFAULT 'never',
     last_poll_error      String DEFAULT '',
     is_new               UInt8 DEFAULT 1,
-    updated_at           DateTime('UTC') DEFAULT now()
+    updated_at           DateTime('UTC') DEFAULT now(),
+    -- Last poll that actually answered. last_poll_at moves on failures too, so
+    -- only this column tells whether the catalog is still trustworthy.
+    last_ok_at           DateTime('UTC') DEFAULT toDateTime(0, 'UTC')
 )
 ENGINE = ReplacingMergeTree(updated_at)
 ORDER BY switch_ip
@@ -108,7 +122,8 @@ SELECT
     tuple_state.11 AS last_poll_status,
     tuple_state.12 AS last_poll_error,
     tuple_state.13 AS is_new,
-    tuple_state.14 AS updated_at
+    tuple_state.14 AS updated_at,
+    tuple_state.15 AS last_ok_at
 FROM
 (
     SELECT
@@ -116,6 +131,8 @@ FROM
         min(first_seen_at) AS first_seen_at,
         -- Single-row pick: avoid per-column argMax ties when discover()+poll
         -- share the same updated_at second (UI showed never while poll was ok).
+        -- New fields are appended to the tuple: inserting them in the middle
+        -- would shift every existing tuple_state.N above.
         argMax(
             tuple(
                 display_name,
@@ -131,7 +148,8 @@ FROM
                 last_poll_status,
                 last_poll_error,
                 is_new,
-                updated_at
+                updated_at,
+                last_ok_at
             ),
             (
                 updated_at,

@@ -78,6 +78,23 @@ names (“cache”) when status is timeout/queued.
 | `never` | never successfully queued/polled (legacy) |
 | `timeout` / `auth_error` / `error` / `config_error` | last attempt failed |
 
+`last_poll_at` is the last **attempt** — it advances on failures too. Use
+`last_ok_at` to tell whether the catalog is still trustworthy; it only moves on
+a poll the switch answered, and stays at the epoch until the first success.
+NTAdmin shows `last_ok_at` as «Последний успешный опрос».
+
+### Removing decommissioned hardware
+
+NTAdmin `DELETE /api/refs/snmp-agents/:ip` physically deletes the inventory row
+(`ALTER TABLE … DELETE`). There is no tombstone: the poller rebuilds the list
+from `flows_raw.sampler_address` on every tick, so a switch that stopped
+exporting sFlow stays gone, while one that still sends samples is rediscovered
+within the discovery window and returns as new with polling off
+(`auto_enable_new_agents` defaults to 0).
+
+The interface catalog is left untouched on purpose — Explorer joins it to name
+ports on historical flows.
+
 NTAdmin labels (when catalog rows exist): «Идёт опрос», «Недоступен · есть кэш».
 
 ### Cadence
@@ -101,6 +118,17 @@ so the next tick picks the agent up without waiting for `refresh_interval_sec`.
 clickhouse-client --host CH_HOST --port 6124 --user USER --password \
   --multiquery < deploy/clickhouse/net_snmp_interfaces.sql
 ```
+
+Upgrading an install that predates `last_ok_at` (adds the column, rebuilds the
+view, seeds the column from the catalog):
+
+```bash
+clickhouse-client --host CH_HOST --port 6124 --user USER --password \
+  --multiquery < deploy/clickhouse/migrate_net_snmp_agents_last_ok.sql
+```
+
+Apply it **before** deploying the UI: `/api/refs/snmp-agents` selects
+`last_ok_at` and fails while the column is missing.
 
 Notes:
 
@@ -246,6 +274,7 @@ LIMIT 20;
 
 ```text
 deploy/clickhouse/net_snmp_interfaces.sql       tables + views
+deploy/clickhouse/migrate_net_snmp_agents_last_ok.sql  upgrade: last_ok_at
 deploy/clickhouse/net_snmp_interfaces_dict.sql  optional dictionary template
 deploy/clickhouse/apply_net_snmp_interfaces_dict.sh
 deploy/systemd/snmp-iface-sync.{service,timer,env.example}

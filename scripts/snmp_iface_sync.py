@@ -153,6 +153,8 @@ class Agent:
     last_poll_status: str
     last_poll_error: str
     is_new: int
+    # last_poll_at moves on failures too; only this marks a poll that answered.
+    last_ok_at: datetime = EPOCH
 
 
 class ClickHouseClient:
@@ -252,7 +254,7 @@ def load_agents(ch: ClickHouseClient) -> Dict[str, Agent]:
                community_override, port_override, timeout_ms_override,
                retries_override, first_seen_at, last_seen_at,
                last_poll_at, last_full_walk_at, last_poll_status,
-               last_poll_error, is_new
+               last_poll_error, is_new, last_ok_at
         FROM default.net_snmp_agents_current
         """,
         "load SNMP agents",
@@ -275,6 +277,7 @@ def load_agents(ch: ClickHouseClient) -> Dict[str, Agent]:
             last_poll_status=str(row["last_poll_status"]),
             last_poll_error=str(row["last_poll_error"]),
             is_new=int(row["is_new"]),
+            last_ok_at=parse_dt(str(row.get("last_ok_at") or "")),
         )
         result[agent.switch_ip] = agent
     return result
@@ -298,6 +301,7 @@ def agent_row(agent: Agent, now: datetime) -> Dict[str, Any]:
         "last_poll_error": agent.last_poll_error[:1000],
         "is_new": agent.is_new,
         "updated_at": fmt_dt(now),
+        "last_ok_at": fmt_dt(agent.last_ok_at),
     }
 
 
@@ -825,6 +829,11 @@ def main() -> int:
             if polled_at <= now:
                 polled_at = now + timedelta(seconds=1)
             agent.last_poll_at = polled_at
+            # last_poll_at tracks attempts; last_ok_at only moves when the
+            # switch actually answered, so the UI can tell stale data apart
+            # from a device that simply stopped responding.
+            if agent.last_poll_status == "ok":
+                agent.last_ok_at = polled_at
             if walked:
                 agent.last_full_walk_at = polled_at
             ch.insert_json(
