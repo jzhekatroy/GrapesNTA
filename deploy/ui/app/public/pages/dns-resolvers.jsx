@@ -88,13 +88,6 @@ function PageDnsResolvers() {
     });
   }, [rows, search]);
 
-  const stats = useMemo(() => ({
-    total: rows.length,
-    active: rows.filter((r) => r.enabled === 1).length,
-    disabled: rows.filter((r) => r.enabled !== 1).length,
-    public: rows.filter((r) => r.role === 'public').length,
-  }), [rows]);
-
   const handleToggle = async (row) => {
     const next = row.enabled === 1 ? 0 : 1;
     const label = next === 1 ? 'включить' : 'отключить';
@@ -211,13 +204,6 @@ function PageDnsResolvers() {
           <Button kind="ghost" icon="refresh" onClick={reload} disabled={loading}>Обновить</Button>
           <Button kind="primary" icon="plus" onClick={() => setShowAdd(true)} disabled={!!loadError || !canWrite}>Добавить резолвер</Button>
         </div>
-      </div>
-
-      <div className="grid grid--4col grid--mb">
-        <SumCard label="Всего записей" value={stats.total} icon="globe" />
-        <SumCard label="Активных" value={stats.active} icon="check" tone="success" />
-        <SumCard label="Отключённых" value={stats.disabled} icon="x" tone="warning" />
-        <SumCard label="Публичных" value={stats.public} icon="network" />
       </div>
 
       {loading ? (
@@ -434,22 +420,6 @@ function DnsResolverFormModal({ open, row, isNew, onClose, onSaved }) {
         </div>
       </div>
     </Modal>
-  );
-}
-
-function SumCard({ label, value, icon, tone, hint }) {
-  const bgTone = tone === 'success' ? 'var(--st-success-bg)' : tone === 'warning' ? 'var(--st-warning-bg)' : tone === 'critical' ? 'var(--st-critical-bg)' : 'var(--surf-2)';
-  return (
-    <div className="card card--pad-sm" style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
-      <div style={{ width: 40, height: 40, borderRadius: 10, background: bgTone, color: 'var(--accent)', display: 'grid', placeItems: 'center' }}>
-        <Icon name={icon} size={20} />
-      </div>
-      <div>
-        <div className="sum-card__label">{label}</div>
-        <div className="sum-card__value sum-card__value--sm">{value}</div>
-        {hint && <div className="sum-card__hint">{hint}</div>}
-      </div>
-    </div>
   );
 }
 

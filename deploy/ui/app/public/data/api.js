@@ -751,16 +751,11 @@ const ApiClient = (() => {
     return body.data;
   }
 
-  function dnsQuery({
+  function dnsOverviewQuery({
     timeRange = '24h',
     customPeriod,
     sourceIds,
     collectorFilter,
-    qtype,
-    rcode,
-    domainSearch,
-    clientIp,
-    serverIp,
     hideResolvers,
     limit,
   } = {}) {
@@ -768,14 +763,73 @@ const ApiClient = (() => {
     appendCustomPeriodParams(params, timeRange, customPeriod);
     if (sourceIds?.length) params.set('source_ids', sourceIds.join(','));
     appendCollectorFilter(params, collectorFilter);
-    if (qtype) params.set('qtype', qtype);
-    if (rcode !== undefined && rcode !== null && rcode !== '') params.set('rcode', String(rcode));
-    if (domainSearch) params.set('domain_search', domainSearch);
-    if (clientIp) params.set('client_ip', clientIp);
-    if (serverIp) params.set('server_ip', serverIp);
     if (hideResolvers !== undefined) params.set('hide_resolvers', hideResolvers ? '1' : '0');
     if (limit != null) params.set('limit', String(limit));
     return params.toString();
+  }
+
+  /** @deprecated use dnsOverviewQuery for overview widgets */
+  function dnsQuery(opts) {
+    return dnsOverviewQuery(opts);
+  }
+
+  async function loadDnsExplorerSchema() {
+    const body = await getJson('/api/dns-explorer/schema', { widget: 'dns-explorer/schema' });
+    return body.data;
+  }
+
+  async function runDnsExplorerQuery(payload) {
+    try {
+      const res = await requestJson('/api/dns-explorer/query', { method: 'POST', body: payload });
+      return {
+        ok: true,
+        source: 'clickhouse',
+        data: res.data,
+        meta: res.meta,
+        loadMs: res.loadMs ?? null,
+        serverMs: res.meta?.elapsedMs ?? null,
+      };
+    } catch (err) {
+      return {
+        ok: false,
+        source: 'error',
+        error: err,
+        message: err.message || LOAD_FAILED,
+        loadMs: err.loadMs ?? null,
+        serverMs: null,
+      };
+    }
+  }
+
+  async function suggestDnsExplorerDomains(ctx, q) {
+    const params = new URLSearchParams(dnsOverviewQuery(ctx));
+    if (ctx.filters?.length) params.set('filters', encodeURIComponent(JSON.stringify(ctx.filters)));
+    if (q) params.set('q', q);
+    const body = await getJson(`/api/dns-explorer/suggest/domains?${params}`, { widget: 'dns-explorer/suggest/domains' });
+    return body.data || [];
+  }
+
+  async function suggestDnsExplorerClientIps(ctx, q) {
+    const params = new URLSearchParams(dnsOverviewQuery(ctx));
+    if (ctx.filters?.length) params.set('filters', encodeURIComponent(JSON.stringify(ctx.filters)));
+    if (q) params.set('q', q);
+    const body = await getJson(`/api/dns-explorer/suggest/client-ips?${params}`, { widget: 'dns-explorer/suggest/client-ips' });
+    return body.data || [];
+  }
+
+  async function suggestDnsExplorerServerIps(ctx, q) {
+    const params = new URLSearchParams(dnsOverviewQuery(ctx));
+    if (ctx.filters?.length) params.set('filters', encodeURIComponent(JSON.stringify(ctx.filters)));
+    if (q) params.set('q', q);
+    const body = await getJson(`/api/dns-explorer/suggest/server-ips?${params}`, { widget: 'dns-explorer/suggest/server-ips' });
+    return body.data || [];
+  }
+
+  async function suggestDnsExplorerQtypes(ctx) {
+    const params = new URLSearchParams(dnsOverviewQuery(ctx));
+    if (ctx.filters?.length) params.set('filters', encodeURIComponent(JSON.stringify(ctx.filters)));
+    const body = await getJson(`/api/dns-explorer/suggest/qtypes?${params}`, { widget: 'dns-explorer/suggest/qtypes' });
+    return body.data || [];
   }
 
   async function fetchDns(path, widget) {
@@ -803,7 +857,7 @@ const ApiClient = (() => {
     if (!health.connected) {
       return { source: 'error', data: null, rows: [], error: LOAD_FAILED, loadMs: null, serverMs: null };
     }
-    const qs = dnsQuery(filters);
+    const qs = dnsOverviewQuery(filters);
     const result = await fetchDns(`${path}?${qs}`, widget);
     if (!result.ok) {
       return {
@@ -1618,6 +1672,12 @@ const ApiClient = (() => {
     });
   }
 
+  async function deleteSnmpAgent(switchIp) {
+    return requestJson(`/api/refs/snmp-agents/${encodeURIComponent(switchIp)}`, {
+      method: 'DELETE',
+    });
+  }
+
   async function loadCollectorOptions() {
     const health = await checkHealth();
     if (!health.connected) {
@@ -1869,14 +1929,14 @@ const ApiClient = (() => {
     return s ? `?${s}` : '';
   }
 
-  async function loadCollectorPipeline(sourceId, window = '1h') {
+  async function loadCompletenessDetail(sourceId, window = '30m') {
     const health = await checkHealth();
     if (!health.connected) {
       return { source: 'error', data: null, error: LOAD_FAILED };
     }
     try {
-      const body = await getJson(`/api/collectors/pipeline${pipelineQueryString(sourceId, window)}`, {
-        widget: 'collectors/pipeline',
+      const body = await getJson(`/api/collectors/completeness/detail${pipelineQueryString(sourceId, window)}`, {
+        widget: 'collectors/completeness/detail',
       });
       return { source: 'clickhouse', data: body };
     } catch (err) {
@@ -1884,36 +1944,19 @@ const ApiClient = (() => {
     }
   }
 
-  async function loadCollectorPipelineHistory(sourceId, window = '1h') {
+  async function loadCompletenessHistory(sourceId, window = '24h') {
     const health = await checkHealth();
     if (!health.connected) {
       return { source: 'error', data: null, error: LOAD_FAILED };
     }
     try {
-      const body = await getJson(`/api/collectors/pipeline/history${pipelineQueryString(sourceId, window)}`, {
-        widget: 'collectors/pipeline/history',
+      const body = await getJson(`/api/collectors/completeness/history${pipelineQueryString(sourceId, window)}`, {
+        widget: 'collectors/completeness/history',
       });
       return { source: 'clickhouse', data: body };
     } catch (err) {
       return { source: 'error', data: null, error: err.message || LOAD_FAILED };
     }
-  }
-
-  async function loadPipelineThresholds() {
-    try {
-      const body = await requestJson('/api/collectors/pipeline/thresholds');
-      return { source: 'clickhouse', data: body.data || body };
-    } catch (err) {
-      return { source: 'error', data: null, error: err.message || LOAD_FAILED };
-    }
-  }
-
-  async function savePipelineThresholds(payload) {
-    const body = await requestJson('/api/collectors/pipeline/thresholds', {
-      method: 'POST',
-      body: payload,
-    });
-    return body;
   }
 
   function bmpQueryString(params = {}) {
@@ -2146,7 +2189,14 @@ const ApiClient = (() => {
     dashboardRecentFlows,
     recentFlowsQuery,
     loadRecentFlows,
+    dnsOverviewQuery,
     dnsQuery,
+    loadDnsExplorerSchema,
+    runDnsExplorerQuery,
+    suggestDnsExplorerDomains,
+    suggestDnsExplorerClientIps,
+    suggestDnsExplorerServerIps,
+    suggestDnsExplorerQtypes,
     loadDnsSources,
     loadDnsActivity,
     loadDnsTopDomains,
@@ -2200,15 +2250,14 @@ const ApiClient = (() => {
     loadSnmpInterfaces,
     requestSnmpProbe,
     requestSnmpProbeAll,
+    deleteSnmpAgent,
     loadCollectorOptions,
     loadDiscoveredSources,
     loadCollectorOverview,
     loadCollectorStatus,
     loadCollectorCompleteness,
-    loadCollectorPipeline,
-    loadCollectorPipelineHistory,
-    loadPipelineThresholds,
-    savePipelineThresholds,
+    loadCompletenessDetail,
+    loadCompletenessHistory,
     loadBmpSummary,
     loadBmpPeers,
     loadBmpRouters,

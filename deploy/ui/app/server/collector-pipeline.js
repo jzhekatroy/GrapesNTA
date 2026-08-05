@@ -1,55 +1,25 @@
 'use strict';
 
 const { query, collectorHealthSnapshotsTableRef } = require('./clickhouse');
-const { loadPipelineThresholds, DEFAULT_THRESHOLDS } = require('./collector-pipeline-thresholds');
-
-const WINDOW_MINUTES = {
-  '15m': 15,
-  '1h': 60,
-  '24h': 1440,
-};
 
 const LAG_MINUTES = 2;
-
-const STAGE_LABELS = {
-  interface: 'Интерфейс',
-  collector: 'Коллектор (XDP)',
-  receiver: 'Коллектор (приёмник)',
-  exclusions: 'Исключения',
-  spool: 'Спул',
-  clickhouse: 'ClickHouse',
-  netflow: 'NetFlow-экспорт',
-  socket: 'Сокет получателя',
-};
-
-/** Тип счётчика «Прошло» — для подписи к проценту между звеньями. */
-const STAGE_PASSED_UNIT = {
-  interface: 'packets',
-  collector: 'packets',
-  receiver: 'records',
-  exclusions: 'packets',
-  spool: 'records',
-  clickhouse: 'packets',
-  netflow: 'packets',
-  socket: null,
-};
-
-const PASSED_UNIT_LABELS = {
-  packets: 'пакеты',
-  records: 'flow-записи',
-};
+/** L: лаг формирования flow — смещение seen_window назад относительно acked_window,
+ *  чтобы пакеты успели пройти map → spool → ClickHouse до сравнения полноты. */
+const ACK_OFFSET_MINUTES = 5;
+const HISTORY_WINDOW_MINUTES = 1440;
+const HISTORY_BUCKET_SECONDS = 900;
+const COMPLETENESS_GREEN_PCT = 99;
+const COMPLETENESS_YELLOW_PCT = 90;
+const PHY_DISCARD_YELLOW_PCT = 0.01;
+const PHY_DISCARD_RED_PCT = 0.1;
+const NF_SOCKET_YELLOW_PCT = 0.1;
+const NF_SOCKET_RED_PCT = 1;
+const DRAINER_AGE_HEALTHY_SEC = 60;
 
 function apiError(message, statusCode = 400) {
   const err = new Error(message);
   err.statusCode = statusCode;
   return err;
-}
-
-function parseWindow(raw = '1h') {
-  const key = String(raw || '1h').trim();
-  const minutes = WINDOW_MINUTES[key];
-  if (!minutes) throw apiError(`Недопустимое окно: ${key}. Допустимо: 15m, 1h, 24h`);
-  return { key, minutes };
 }
 
 function parseSourceId(raw) {
@@ -67,6 +37,16 @@ function delta(row, key) {
   return Math.max(0, num(row[`${key}_delta`]));
 }
 
+function pctOf(part, whole) {
+  if (!whole || whole <= 0) return null;
+  return Number(((part / whole) * 100).toFixed(6));
+}
+
+function capCompletenessPct(rawPct) {
+  if (rawPct == null || !Number.isFinite(rawPct)) return null;
+  return Number(Math.min(100, rawPct).toFixed(4));
+}
+
 function parsePipelineStages(raw) {
   if (Array.isArray(raw)) return raw.map(String);
   if (typeof raw === 'string' && raw.trim()) {
@@ -74,7 +54,7 @@ function parsePipelineStages(raw) {
       const parsed = JSON.parse(raw);
       if (Array.isArray(parsed)) return parsed.map(String);
     } catch {
-      // ClickHouse may return tuple-like string; split on comma
+      // ClickHouse tuple-like string
     }
     return raw.replace(/^\[|\]$/g, '').split(',').map((s) => s.trim().replace(/^'|'$/g, '')).filter(Boolean);
   }
@@ -85,57 +65,112 @@ function counterSourceLabel(phyCounterSource) {
   const src = String(phyCounterSource || '').trim();
   if (!src) return null;
   if (src === 'sysfs') return 'sysfs (оценка)';
-  if (src.startsWith('ethtool:')) return src;
+  if (src.startsWith('ethtool:')) return null;
   return src;
 }
 
-function stageSourceLabel(stageId, meta = {}) {
-  if (stageId === 'interface') return counterSourceLabel(meta.phyCounterSource) || 'интерфейс';
-  if (stageId === 'collector') return 'xdpflowd';
-  if (stageId === 'receiver') return 'flowcollectord';
-  if (stageId === 'exclusions') return 'коллектор';
-  if (stageId === 'spool') return 'коллектор';
-  if (stageId === 'clickhouse') return 'writer';
-  if (stageId === 'netflow') return 'xdpflowd';
-  if (stageId === 'socket') return 'ядро';
-  return '';
+function isXdpMeasurable(meta) {
+  return parsePipelineStages(meta.pipelineStages).includes('collector');
 }
 
-function classifyStage(stageId, stage, thresholds) {
-  if (stageId === 'exclusions') {
-    return stage.passed > 0 ? 'info' : 'ok';
-  }
+function deltaIf(column, startExpr, endExpr, alias) {
+  return `greatest(maxIf(${column}, ts >= ${startExpr} AND ts < ${endExpr}) - minIf(${column}, ts >= ${startExpr} AND ts < ${endExpr}), 0) AS ${alias}`;
+}
 
-  const t = thresholds[stageId] || {};
+function envInt(name, fallback) {
+  const v = process.env[name];
+  if (v === undefined || v === '') return fallback;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : fallback;
+}
 
-  if (stageId === 'spool') {
-    if (stage.lost > 0) return 'critical';
-    return 'ok';
-  }
+function resolveCompletenessTiming(windowMinutesOverride) {
+  return {
+    windowMinutes: windowMinutesOverride ?? envInt('COMPLETENESS_WINDOW_MINUTES', 30),
+    lagMinutes: envInt('COMPLETENESS_LAG_MINUTES', LAG_MINUTES),
+    ackOffsetMinutes: envInt('COMPLETENESS_ACK_OFFSET_MINUTES', ACK_OFFSET_MINUTES),
+  };
+}
 
-  if (stageId === 'clickhouse') {
-    if (num(stage.insertErrs) > 0) return 'critical';
-    if (stage.lost > 0) return 'warning';
-    return 'ok';
-  }
+function windowsRelativeToNow(windowMinutes, lagMinutes = LAG_MINUTES, ackOffsetMinutes = ACK_OFFSET_MINUTES) {
+  const ackEnd = `now64(3) - INTERVAL ${lagMinutes} MINUTE`;
+  const ackStart = `now64(3) - INTERVAL ${windowMinutes + lagMinutes} MINUTE`;
+  const seenEnd = `now64(3) - INTERVAL ${lagMinutes + ackOffsetMinutes} MINUTE`;
+  const seenStart = `now64(3) - INTERVAL ${windowMinutes + lagMinutes + ackOffsetMinutes} MINUTE`;
+  return { ackStart, ackEnd, seenStart, seenEnd };
+}
 
-  if (stageId === 'netflow') {
-    if (num(stage.sendErrs) > 0) return 'critical';
-    return 'ok';
-  }
+function windowsRelativeToBucketEnd(bucketEndExpr) {
+  const ackEnd = `${bucketEndExpr} - INTERVAL {lag_minutes:UInt32} MINUTE`;
+  const ackStart = `${ackEnd} - INTERVAL {window_minutes:UInt32} MINUTE`;
+  const seenEnd = `${bucketEndExpr} - INTERVAL {lag_plus_offset:UInt32} MINUTE`;
+  const seenStart = `${seenEnd} - INTERVAL {window_minutes:UInt32} MINUTE`;
+  return { ackStart, ackEnd, seenStart, seenEnd };
+}
 
-  const lossPct = stage.lossPct ?? 0;
-  if (t.critPct != null && lossPct >= t.critPct) return 'critical';
-  if (t.warnPct != null && lossPct >= t.warnPct) return 'warning';
-  if (stage.lost > 0 && t.warnAny) return 'warning';
-  return 'ok';
+function buildCompletenessDeltaSql(windows, aliases = {}) {
+  const alias = (key, fallback) => aliases[key] || fallback;
+  const { ackStart, ackEnd, seenStart, seenEnd } = windows;
+  return `
+    ${deltaIf('xdp_total_packets', seenStart, seenEnd, alias('seen_packets', 'seen_packets'))},
+    ${deltaIf('xdp_non_ip_pass', seenStart, seenEnd, alias('xdp_non_ip_pass', 'xdp_non_ip_pass'))},
+    countIf(ts >= ${seenStart} AND ts < ${seenEnd}) AS seen_snapshot_count,
+    countIf(ts >= ${ackStart} AND ts < ${ackEnd}) AS ack_snapshot_count,
+    ${deltaIf('flow_packets_acked', ackStart, ackEnd, alias('flow_packets_acked', 'flow_packets_acked_delta'))},
+    ${deltaIf('flow_packets_excluded', ackStart, ackEnd, alias('flow_packets_excluded', 'flow_packets_excluded_delta'))},
+    ${deltaIf('phy_rx_packets', seenStart, seenEnd, alias('phy_rx_packets', 'phy_rx_packets_delta'))},
+    ${deltaIf('phy_rx_discards', seenStart, seenEnd, alias('phy_rx_discards', 'phy_rx_discards_delta'))},
+    ${deltaIf('xdp_map_full', ackStart, ackEnd, alias('xdp_map_full', 'xdp_map_full_delta'))},
+    ${deltaIf('xdp_parse_errors', ackStart, ackEnd, alias('xdp_parse_errors', 'xdp_parse_errors_delta'))},
+    ${deltaIf('datagrams', ackStart, ackEnd, alias('datagrams', 'datagrams_delta'))},
+    ${deltaIf('records_parsed', ackStart, ackEnd, alias('records_parsed', 'records_parsed_delta'))},
+    ${deltaIf('udp_queue_drops', ackStart, ackEnd, alias('udp_queue_drops', 'udp_queue_drops_delta'))},
+    ${deltaIf('receiver_parse_errors', ackStart, ackEnd, alias('receiver_parse_errors', 'receiver_parse_errors_delta'))},
+    ${deltaIf('records_spooled', ackStart, ackEnd, alias('records_spooled', 'records_spooled_delta'))},
+    ${deltaIf('spool_corruption_frames', ackStart, ackEnd, alias('spool_corruption', 'spool_corruption_frames_delta'))},
+    ${deltaIf('records_acked', ackStart, ackEnd, alias('records_acked', 'records_acked_delta'))},
+    ${deltaIf('insert_errs', ackStart, ackEnd, alias('insert_errs', 'insert_errs_delta'))},
+    ${deltaIf('ch_queue_drops', ackStart, ackEnd, alias('queue_drops', 'ch_queue_drops_delta'))},
+    ${deltaIf('nf_records_out', ackStart, ackEnd, alias('nf_records_out', 'nf_records_out_delta'))},
+    ${deltaIf('nf_packets_out', ackStart, ackEnd, alias('nf_packets_out', 'nf_packets_out_delta'))},
+    ${deltaIf('nf_send_errs', ackStart, ackEnd, alias('nf_send_errs', 'nf_send_errs_delta'))},
+    ${deltaIf('nf_socket_drops', ackStart, ackEnd, alias('nf_socket_drops', 'nf_socket_drops_delta'))},
+    ${deltaIf('xdp_total_packets', ackStart, ackEnd, alias('xdp_total_packets', 'xdp_total_packets_delta'))}
+  `;
+}
+
+function computeCompletenessPct(counters) {
+  const seen = num(counters.seen_packets);
+  const nonIp = num(counters.xdp_non_ip_pass);
+  const denominator = Math.max(0, seen - nonIp);
+  if (denominator <= 0) return null;
+  const accounted = num(counters.flow_packets_acked) + num(counters.flow_packets_excluded);
+  return capCompletenessPct((accounted / denominator) * 100);
+}
+
+function computeCompletenessDenominator(counters) {
+  return Math.max(0, num(counters.seen_packets) - num(counters.xdp_non_ip_pass));
+}
+
+function computeUnconfirmedPackets(counters) {
+  const denominator = computeCompletenessDenominator(counters);
+  if (denominator <= 0) return 0;
+  const accounted = num(counters.flow_packets_acked) + num(counters.flow_packets_excluded);
+  return Math.max(0, denominator - accounted);
+}
+
+function hasCompletenessSnapshots(row) {
+  return num(row.seen_snapshot_count) >= 2 && num(row.ack_snapshot_count) >= 2;
 }
 
 function buildRawCounters(row) {
+  const seenPackets = num(row.seen_packets);
   return {
+    seen_packets: seenPackets,
+    xdp_non_ip_pass: num(row.xdp_non_ip_pass),
     phy_rx_packets: delta(row, 'phy_rx_packets'),
     phy_rx_discards: delta(row, 'phy_rx_discards'),
-    xdp_total_packets: delta(row, 'xdp_total_packets'),
+    xdp_total_packets: seenPackets || delta(row, 'xdp_total_packets'),
     xdp_map_full: delta(row, 'xdp_map_full'),
     xdp_parse_errors: delta(row, 'xdp_parse_errors'),
     datagrams: delta(row, 'datagrams'),
@@ -146,181 +181,33 @@ function buildRawCounters(row) {
     records_spooled: delta(row, 'records_spooled'),
     spool_corruption_frames: delta(row, 'spool_corruption_frames'),
     flow_packets_acked: delta(row, 'flow_packets_acked'),
+    records_acked: delta(row, 'records_acked'),
     insert_errs: delta(row, 'insert_errs'),
     ch_queue_drops: delta(row, 'ch_queue_drops'),
+    nf_records_out: delta(row, 'nf_records_out'),
     nf_packets_out: delta(row, 'nf_packets_out'),
     nf_send_errs: delta(row, 'nf_send_errs'),
     nf_socket_drops: delta(row, 'nf_socket_drops'),
+    lag_segments: num(row.lag_segments),
+    drainer_progress_age_sec: num(row.drainer_progress_age_sec),
+    seen_snapshot_count: num(row.seen_snapshot_count),
+    ack_snapshot_count: num(row.ack_snapshot_count),
   };
 }
 
-function buildPipelineStages(row, meta, counters) {
-  const stages = parsePipelineStages(meta.pipelineStages);
-  const stageSet = new Set(stages);
-  const built = [];
-
-  const pushStage = (def) => {
-    built.push(def);
-  };
-
-  if (stageSet.has('interface') && String(meta.phyCounterSource || '').trim()) {
-    pushStage({
-      id: 'interface',
-      label: STAGE_LABELS.interface,
-      sourceLabel: stageSourceLabel('interface', meta),
-      passed: counters.phy_rx_packets,
-      lost: counters.phy_rx_discards,
-      isEstimate: String(meta.phyCounterSource || '').trim() === 'sysfs',
-    });
-  }
-
-  if (stageSet.has('collector')) {
-    pushStage({
-      id: 'collector',
-      label: STAGE_LABELS.collector,
-      sourceLabel: stageSourceLabel('collector', meta),
-      passed: counters.xdp_total_packets,
-      lost: counters.xdp_map_full + counters.xdp_parse_errors,
-      mapFull: counters.xdp_map_full,
-      parseErrors: counters.xdp_parse_errors,
-    });
-  }
-
-  if (stageSet.has('receiver')) {
-    pushStage({
-      id: 'receiver',
-      label: STAGE_LABELS.receiver,
-      sourceLabel: stageSourceLabel('receiver', meta),
-      passed: counters.records_parsed,
-      lost: counters.udp_queue_drops + counters.receiver_parse_errors,
-      datagrams: counters.datagrams,
-    });
-  }
-
-  if (counters.flow_packets_excluded > 0) {
-    pushStage({
-      id: 'exclusions',
-      label: STAGE_LABELS.exclusions,
-      sourceLabel: stageSourceLabel('exclusions', meta),
-      passed: counters.flow_packets_excluded,
-      lost: 0,
-      isExclusion: true,
-    });
-  }
-
-  if (stageSet.has('collector') || stageSet.has('receiver')) {
-    pushStage({
-      id: 'spool',
-      label: STAGE_LABELS.spool,
-      sourceLabel: stageSourceLabel('spool', meta),
-      passed: counters.records_spooled,
-      lost: counters.spool_corruption_frames,
-    });
-  }
-
-  if (stageSet.has('clickhouse')) {
-    pushStage({
-      id: 'clickhouse',
-      label: STAGE_LABELS.clickhouse,
-      sourceLabel: stageSourceLabel('clickhouse', meta),
-      passed: counters.flow_packets_acked,
-      lost: counters.insert_errs + counters.ch_queue_drops,
-      insertErrs: counters.insert_errs,
-      queueDrops: counters.ch_queue_drops,
-    });
-  }
-
-  if (stageSet.has('netflow')) {
-    pushStage({
-      id: 'netflow',
-      label: STAGE_LABELS.netflow,
-      sourceLabel: stageSourceLabel('netflow', meta),
-      passed: counters.nf_packets_out,
-      lost: counters.nf_send_errs,
-      sendErrs: counters.nf_send_errs,
-    });
-  }
-
-  if (stageSet.has('netflow') && Number(meta.nfSocketObserved) === 1) {
-    pushStage({
-      id: 'socket',
-      label: STAGE_LABELS.socket,
-      sourceLabel: stageSourceLabel('socket', meta),
-      passed: 0,
-      lost: counters.nf_socket_drops,
-    });
-  }
-
-  return built;
+function toneFromPctThresholds(pct, yellowPct, redPct) {
+  if (pct == null || pct <= 0) return 'healthy';
+  if (pct >= redPct) return 'critical';
+  if (pct >= yellowPct) return 'warning';
+  return 'healthy';
 }
 
-function buildPassPctNote(prevUnit, currUnit, prevPassed, passed, passPctRaw) {
-  if (prevUnit && currUnit && prevUnit !== currUnit) {
-    return `разные счётчики (${PASSED_UNIT_LABELS[prevUnit]} → ${PASSED_UNIT_LABELS[currUnit]}), не потери`;
-  }
-  if (prevPassed != null && prevPassed > 0 && passed > prevPassed) {
-    return 'текущий счётчик больше предыдущего — доля обрезана до 100%';
-  }
-  if (passPctRaw === 0 && passed === 0 && prevPassed != null && prevPassed > 0) {
-    return 'на этом звене «Прошло» = 0';
-  }
-  return null;
-}
-
-function enrichStages(rawStages, thresholds) {
-  let prevPassed = null;
-  let prevUnit = null;
-  const enriched = rawStages.map((stage) => {
-    const currUnit = STAGE_PASSED_UNIT[stage.id] ?? null;
-    const lossBase = prevPassed != null && prevPassed > 0
-      ? prevPassed
-      : (stage.passed > 0 ? stage.passed : 0);
-    const lossPct = lossBase > 0 ? (stage.lost / lossBase) * 100 : 0;
-    const passPctRaw = prevPassed != null && prevPassed > 0 && stage.passed > 0
-      ? (stage.passed / prevPassed) * 100
-      : (prevPassed == null ? 100 : 0);
-
-    const out = {
-      ...stage,
-      passedUnit: currUnit,
-      lossPct: Number(lossPct.toFixed(6)),
-      passPct: Number(Math.min(100, passPctRaw).toFixed(4)),
-      passPctRaw: Number(passPctRaw.toFixed(4)),
-      passPctLabel: prevPassed == null ? null : 'от предыдущего звена',
-      passPctNote: prevPassed == null
-        ? null
-        : buildPassPctNote(prevUnit, currUnit, prevPassed, stage.passed, passPctRaw),
-      severity: classifyStage(stage.id, { ...stage, lossPct }, thresholds),
-    };
-
-    if (!stage.isExclusion) {
-      if (stage.id === 'socket') {
-        // только потери; база для следующего звена не меняется
-      } else if (stage.passed > 0) {
-        prevPassed = Math.max(0, stage.passed - stage.lost);
-        prevUnit = currUnit;
-      } else if (prevPassed == null) {
-        prevPassed = stage.passed;
-        prevUnit = currUnit;
-      }
-    }
-
-    return out;
-  });
-
-  let rootCauseStageId = null;
-  for (const stage of enriched) {
-    if (stage.isExclusion) continue;
-    if (stage.severity === 'warning' || stage.severity === 'critical') {
-      rootCauseStageId = stage.id;
-      break;
-    }
-  }
-
-  return enriched.map((stage) => ({
-    ...stage,
-    isRootCause: stage.id === rootCauseStageId,
-  }));
+function isSpoolHealthy(counters) {
+  return counters.insert_errs === 0
+    && counters.ch_queue_drops === 0
+    && counters.spool_corruption_frames === 0
+    && counters.lag_segments === 0
+    && counters.drainer_progress_age_sec <= DRAINER_AGE_HEALTHY_SEC;
 }
 
 function mapMeta(row) {
@@ -335,32 +222,308 @@ function mapMeta(row) {
     nfSocketObserved: num(row.nf_socket_observed),
     pipelineStages: parsePipelineStages(row.pipeline_stages),
     snapshotCount: num(row.snapshot_count),
+    snapshotAgeMinutes: num(row.snapshot_age_minutes),
     windowFrom: row.window_from ?? null,
     windowTo: row.window_to ?? null,
     lastSnapshotAt: row.last_snapshot_at ?? null,
   };
 }
 
-const DELTA_COLUMNS_SQL = `
-  greatest(max(phy_rx_packets) - min(phy_rx_packets), 0) AS phy_rx_packets_delta,
-  greatest(max(phy_rx_discards) - min(phy_rx_discards), 0) AS phy_rx_discards_delta,
-  greatest(max(xdp_total_packets) - min(xdp_total_packets), 0) AS xdp_total_packets_delta,
-  greatest(max(xdp_map_full) - min(xdp_map_full), 0) AS xdp_map_full_delta,
-  greatest(max(xdp_parse_errors) - min(xdp_parse_errors), 0) AS xdp_parse_errors_delta,
-  greatest(max(datagrams) - min(datagrams), 0) AS datagrams_delta,
-  greatest(max(records_parsed) - min(records_parsed), 0) AS records_parsed_delta,
-  greatest(max(udp_queue_drops) - min(udp_queue_drops), 0) AS udp_queue_drops_delta,
-  greatest(max(receiver_parse_errors) - min(receiver_parse_errors), 0) AS receiver_parse_errors_delta,
-  greatest(max(flow_packets_excluded) - min(flow_packets_excluded), 0) AS flow_packets_excluded_delta,
-  greatest(max(records_spooled) - min(records_spooled), 0) AS records_spooled_delta,
-  greatest(max(spool_corruption_frames) - min(spool_corruption_frames), 0) AS spool_corruption_frames_delta,
-  greatest(max(flow_packets_acked) - min(flow_packets_acked), 0) AS flow_packets_acked_delta,
-  greatest(max(insert_errs) - min(insert_errs), 0) AS insert_errs_delta,
-  greatest(max(ch_queue_drops) - min(ch_queue_drops), 0) AS ch_queue_drops_delta,
-  greatest(max(nf_packets_out) - min(nf_packets_out), 0) AS nf_packets_out_delta,
-  greatest(max(nf_send_errs) - min(nf_send_errs), 0) AS nf_send_errs_delta,
-  greatest(max(nf_socket_drops) - min(nf_socket_drops), 0) AS nf_socket_drops_delta
-`;
+function resolveGrowthCounter(meta, counters) {
+  const stages = parsePipelineStages(meta.pipelineStages);
+  if (stages.includes('collector')) return counters.seen_packets || counters.xdp_total_packets;
+  if (stages.includes('receiver')) return counters.records_parsed;
+  return counters.seen_packets || counters.xdp_total_packets || counters.records_parsed;
+}
+
+function resolveExporterStatus(meta, counters, snapshotCount, snapshotAgeMinutes) {
+  if (snapshotAgeMinutes > 3) return 'no_connection';
+  if (snapshotCount < 2) return 'no_data';
+  if (resolveGrowthCounter(meta, counters) <= 0) return 'no_data';
+  return 'working';
+}
+
+function buildPacketFunnel(counters, meta) {
+  const stages = parsePipelineStages(meta.pipelineStages);
+  const stageSet = new Set(stages);
+  const lines = [];
+
+  if (stageSet.has('interface') && String(meta.phyCounterSource || '').trim()) {
+    lines.push({
+      id: 'wire',
+      label: 'Пришло на сетевую карту',
+      sourceLabel: counterSourceLabel(meta.phyCounterSource),
+      value: counters.phy_rx_packets,
+      isEstimate: String(meta.phyCounterSource || '').trim() === 'sysfs',
+    });
+    if (counters.phy_rx_discards > 0 || counters.phy_rx_packets > 0) {
+      const discardPct = pctOf(counters.phy_rx_discards, counters.phy_rx_packets);
+      lines.push({
+        id: 'wire_loss',
+        kind: 'loss',
+        label: 'Сетевая карта отбросила',
+        value: counters.phy_rx_discards,
+        lossPct: discardPct,
+        lossPctLabel: formatPctLabel(discardPct),
+        tone: toneFromPctThresholds(discardPct, PHY_DISCARD_YELLOW_PCT, PHY_DISCARD_RED_PCT),
+      });
+    }
+  }
+
+  if (stageSet.has('collector')) {
+    lines.push({
+      id: 'xdp',
+      label: 'Получено коллектором',
+      value: counters.seen_packets || counters.xdp_total_packets,
+    });
+    const bpfLost = counters.xdp_map_full + counters.xdp_parse_errors;
+    const xdpBase = counters.seen_packets || counters.xdp_total_packets;
+    const bpfPct = pctOf(bpfLost, xdpBase);
+    lines.push({
+      id: 'xdp_loss',
+      kind: 'loss',
+      label: 'Коллектор отбросил',
+      value: bpfLost,
+      lossPct: bpfPct,
+      lossPctLabel: formatPctLabel(bpfPct),
+      tone: bpfLost > 0 ? 'warning' : 'healthy',
+    });
+  }
+
+  if (counters.flow_packets_excluded > 0) {
+    lines.push({
+      id: 'exclusions',
+      kind: 'exclusion',
+      label: 'Исключено правилами',
+      value: counters.flow_packets_excluded,
+      note: 'не потеря',
+    });
+  }
+
+  if (stageSet.has('clickhouse')) {
+    const completenessPct = computeCompletenessPct(counters);
+    const chLine = {
+      id: 'clickhouse',
+      label: 'Учтено в ClickHouse',
+      value: counters.flow_packets_acked,
+      completenessPct,
+    };
+    if (counters.insert_errs === 0) {
+      chLine.note = 'ещё может быть в обработке, не потеря';
+    }
+    lines.push(chLine);
+  }
+
+  return lines;
+}
+
+function buildSpoolCard(counters) {
+  return {
+    recordsAcked: counters.records_acked,
+    spoolCorruptionFrames: counters.spool_corruption_frames,
+    lagSegments: counters.lag_segments,
+    drainerProgressAgeSec: counters.drainer_progress_age_sec,
+    insertErrs: counters.insert_errs,
+    chQueueDrops: counters.ch_queue_drops,
+  };
+}
+
+function buildNetflowCard(counters, meta) {
+  const stages = parsePipelineStages(meta.pipelineStages);
+  if (!stages.includes('netflow')) return null;
+  const card = {
+    nfRecordsOut: counters.nf_records_out,
+    nfPacketsOut: counters.nf_packets_out,
+    nfSendErrs: counters.nf_send_errs,
+    nfDsts: meta.nfDsts || '',
+  };
+  if (Number(meta.nfSocketObserved) === 1) {
+    card.nfSocketDrops = counters.nf_socket_drops;
+    card.nfSocketDropPct = pctOf(counters.nf_socket_drops, counters.nf_packets_out);
+    card.nfSocketDropTone = toneFromPctThresholds(
+      card.nfSocketDropPct,
+      NF_SOCKET_YELLOW_PCT,
+      NF_SOCKET_RED_PCT,
+    );
+  }
+  return card;
+}
+
+function buildAggregationLine(counters) {
+  const seen = counters.seen_packets || counters.xdp_total_packets;
+  if (seen <= 0 || counters.records_spooled <= 0) return null;
+  const ratio = seen / counters.records_spooled;
+  return {
+    packetsPerRecord: Number(ratio.toFixed(1)),
+    fromPackets: seen,
+    toRecords: counters.records_spooled,
+    text: `агрегация: ${ratio.toFixed(1)} пакета на flow-запись (${seen.toLocaleString('ru-RU')} → ${counters.records_spooled.toLocaleString('ru-RU')})`,
+  };
+}
+
+function breakdownRow(key, label, value, base, kind) {
+  return {
+    key,
+    label,
+    value,
+    pctOfBase: capCompletenessPct(pctOf(value, base)),
+    kind,
+  };
+}
+
+function buildLossBreakdown(counters, meta) {
+  if (!isXdpMeasurable(meta)) return null;
+  const denominator = computeCompletenessDenominator(counters);
+  if (denominator <= 0) return null;
+
+  const stages = parsePipelineStages(meta.pipelineStages);
+  const acked = counters.flow_packets_acked;
+  const excluded = counters.flow_packets_excluded;
+  const unconfirmed = computeUnconfirmedPackets(counters);
+
+  const sections = [
+    {
+      id: 'completeness',
+      title: 'Расчёт полноты',
+      rows: [
+        breakdownRow('seen', 'Получено коллектором', counters.seen_packets, denominator, 'base'),
+        breakdownRow('non_ip', 'Служебные пакеты', counters.xdp_non_ip_pass, denominator, 'info'),
+        breakdownRow('denominator', 'Пакеты для учёта', denominator, denominator, 'sum'),
+        breakdownRow('acked', 'Подтверждено в ClickHouse', acked, denominator, 'accounted'),
+        breakdownRow('excluded', 'Исключено правилами', excluded, denominator, 'exclusion'),
+      ],
+    },
+    {
+      id: 'losses',
+      title: 'Явные потери',
+      rows: [
+        ...(stages.includes('interface')
+          ? [breakdownRow('phy_discards', 'Сетевая карта отбросила', counters.phy_rx_discards, denominator, 'loss')]
+          : []),
+        breakdownRow('map_full', 'Коллектор: map_full', counters.xdp_map_full, denominator, 'loss'),
+        breakdownRow('parse_errors', 'Коллектор: parse_errors', counters.xdp_parse_errors, denominator, 'loss'),
+        breakdownRow('insert_errs', 'Ошибки INSERT', counters.insert_errs, denominator, 'critical'),
+        breakdownRow('ch_queue_drops', 'Сбросы очереди CH', counters.ch_queue_drops, denominator, 'critical'),
+        breakdownRow('spool_corruption', 'Повреждённые кадры спула', counters.spool_corruption_frames, denominator, 'critical'),
+        breakdownRow('nf_send_errs', 'Ошибки отправки NetFlow', counters.nf_send_errs, denominator, 'critical'),
+      ],
+    },
+    {
+      id: 'unconfirmed',
+      title: 'Не подтверждено',
+      rows: [
+        breakdownRow('unconfirmed', 'Остаток', unconfirmed, denominator, 'unconfirmed'),
+      ],
+    },
+    {
+      id: 'spool',
+      title: 'Кеш и запись',
+      rows: [
+        breakdownRow('records_spooled', 'Записей в спул', counters.records_spooled, denominator, 'info'),
+        breakdownRow('records_acked', 'Записей подтверждено', counters.records_acked, denominator, 'info'),
+        breakdownRow('lag_segments', 'Отставание сегментов', counters.lag_segments, null, 'info'),
+        breakdownRow('drainer_age', 'Возраст прогресса, с', counters.drainer_progress_age_sec, null, 'info'),
+      ],
+    },
+  ];
+
+  return { sections };
+}
+
+function buildExplicitLosses(counters, meta) {
+  const losses = [];
+  const stages = parsePipelineStages(meta.pipelineStages);
+
+  if (stages.includes('interface') && counters.phy_rx_discards > 0) {
+    const pct = pctOf(counters.phy_rx_discards, counters.phy_rx_packets);
+    losses.push({
+      id: 'phy_discards',
+      label: 'Сетевая карта отбросила',
+      value: counters.phy_rx_discards,
+      pct,
+      pctLabel: formatPctLabel(pct),
+      tone: toneFromPctThresholds(pct, PHY_DISCARD_YELLOW_PCT, PHY_DISCARD_RED_PCT),
+    });
+  }
+
+  const bpfLost = counters.xdp_map_full + counters.xdp_parse_errors;
+  if (bpfLost > 0) {
+    const xdpBase = counters.seen_packets || counters.xdp_total_packets;
+    const pct = pctOf(bpfLost, xdpBase);
+    losses.push({
+      id: 'bpf',
+      label: 'BPF отбросил',
+      value: bpfLost,
+      pct,
+      pctLabel: formatPctLabel(pct),
+      tone: 'warning',
+    });
+  }
+
+  if (counters.insert_errs > 0) {
+    losses.push({ id: 'insert_errs', label: 'ошибки INSERT', value: counters.insert_errs, tone: 'critical' });
+  }
+  if (counters.ch_queue_drops > 0) {
+    losses.push({ id: 'ch_queue_drops', label: 'сбросы очереди CH', value: counters.ch_queue_drops, tone: 'critical' });
+  }
+  if (counters.spool_corruption_frames > 0) {
+    losses.push({ id: 'spool_corruption', label: 'повреждение спула', value: counters.spool_corruption_frames, tone: 'critical' });
+  }
+  if (counters.nf_send_errs > 0) {
+    losses.push({ id: 'nf_send_errs', label: 'ошибки отправки NetFlow', value: counters.nf_send_errs, tone: 'critical' });
+  }
+
+  return losses;
+}
+
+function buildVerdict(counters, meta, windowMinutes, ackOffsetMinutes = ACK_OFFSET_MINUTES) {
+  const measurable = isXdpMeasurable(meta);
+  const completenessPct = measurable ? computeCompletenessPct(counters) : null;
+  if (!measurable || completenessPct == null) {
+    return {
+      headline: 'Полнота не измеряется',
+      subline: 'sFlow приходит уже агрегированным',
+      measurable: false,
+    };
+  }
+
+  const losses = buildExplicitLosses(counters, meta);
+  const unconfirmed = computeUnconfirmedPackets(counters);
+  const spoolHealthy = isSpoolHealthy(counters);
+  const collectorChLosses = losses.filter((l) => ['bpf', 'insert_errs', 'ch_queue_drops', 'spool_corruption', 'nf_send_errs'].includes(l.id));
+
+  return {
+    headline: `Полнота ${completenessPct.toFixed(1)}% за ${windowMinutes} минут`,
+    measurable: true,
+    completenessPct,
+    losses,
+    lossesFooter: collectorChLosses.length === 0 ? 'в коллекторе и ClickHouse — нет' : null,
+    unconfirmed: {
+      packets: unconfirmed,
+      label: spoolHealthy ? 'скорее всего в обработке' : 'не подтверждено / возможны потери',
+      tone: spoolHealthy ? 'neutral' : 'critical',
+      hint: spoolHealthy
+        ? 'спул здоров → хвост окна, не классифицируем как потерю'
+        : 'есть ошибки или отставание спула/CH',
+    },
+  };
+}
+
+function formatCompactCount(value) {
+  const n = Number(value) || 0;
+  if (n >= 1e9) return `${(n / 1e9).toFixed(2)} млрд`;
+  if (n >= 1e6) return `${(n / 1e6).toFixed(1)} млн`;
+  if (n >= 1e3) return `${(n / 1e3).toFixed(1)} тыс`;
+  return String(n);
+}
+
+function formatPctLabel(value) {
+  if (value == null) return '—';
+  if (value === 0) return '0%';
+  if (value > 0 && value < 0.01) return '<0.01%';
+  if (value < 1) return `${value.toFixed(3)}%`;
+  return `${value.toFixed(2)}%`;
+}
 
 const META_COLUMNS_SQL = `
   argMax(collector_id, ts) AS collector_id,
@@ -372,169 +535,174 @@ const META_COLUMNS_SQL = `
   argMax(phy_counter_source, ts) AS phy_counter_source,
   argMax(nf_socket_observed, ts) AS nf_socket_observed,
   argMax(pipeline_stages, ts) AS pipeline_stages,
+  argMax(lag_segments, ts) AS lag_segments,
+  argMax(drainer_progress_age_sec, ts) AS drainer_progress_age_sec,
   max(ts) AS last_snapshot_at,
+  dateDiff('minute', max(ts), now64(3)) AS snapshot_age_minutes,
   count() AS snapshot_count,
   min(ts) AS window_from,
   max(ts) AS window_to
 `;
 
-function bucketSecondsForWindow(windowKey) {
-  if (windowKey === '15m') return 15;
-  if (windowKey === '24h') return 900;
-  return 60;
-}
-
-async function fetchSnapshotRow(sourceId, windowMinutes) {
+async function fetchSnapshotRow(sourceId, windowMinutes, timing = resolveCompletenessTiming(windowMinutes)) {
   const table = collectorHealthSnapshotsTableRef();
-  const windowPlusLag = windowMinutes + LAG_MINUTES;
+  const windows = windowsRelativeToNow(timing.windowMinutes, timing.lagMinutes, timing.ackOffsetMinutes);
+  const fetchSpan = timing.windowMinutes + timing.lagMinutes + timing.ackOffsetMinutes + 5;
 
   const { rows, elapsedMs } = await query(
     `
       SELECT
         source_id,
         ${META_COLUMNS_SQL},
-        ${DELTA_COLUMNS_SQL}
+        ${buildCompletenessDeltaSql(windows)}
       FROM ${table}
       WHERE source_id = {source_id:String}
-        AND ts >= now64(3) - INTERVAL {window_plus_lag:UInt32} MINUTE
+        AND ts >= now64(3) - INTERVAL {fetch_span:UInt32} MINUTE
         AND ts <  now64(3) - INTERVAL {lag_minutes:UInt32} MINUTE
       GROUP BY source_id
     `,
     {
       source_id: sourceId,
-      window_plus_lag: windowPlusLag,
-      lag_minutes: LAG_MINUTES,
+      fetch_span: fetchSpan,
+      lag_minutes: timing.lagMinutes,
     },
-    { name: 'collectors/pipeline' },
+    { name: 'collectors/completeness/detail' },
   );
 
   return { row: rows[0] || null, elapsedMs };
 }
 
-async function fetchCollectorPipeline(sourceIdRaw, windowRaw) {
-  const sourceId = parseSourceId(sourceIdRaw);
-  const { key: window, minutes: windowMinutes } = parseWindow(windowRaw);
-  const thresholds = await loadPipelineThresholds();
-
-  const { row, elapsedMs } = await fetchSnapshotRow(sourceId, windowMinutes);
-
-  if (!row || num(row.snapshot_count) < 2) {
+function buildDetailFromRow(row, timing) {
+  if (!row || !hasCompletenessSnapshots(row)) {
     return {
-      sourceId,
-      window,
-      windowMinutes,
-      lagMinutes: LAG_MINUTES,
-      stages: [],
-      rootCauseStageId: null,
-      meta: row ? mapMeta(row) : null,
       insufficientData: true,
-      metaResponse: { elapsedMs, enabled: true },
+      meta: row ? mapMeta(row) : null,
     };
   }
 
   const meta = mapMeta(row);
   const counters = buildRawCounters(row);
-  const rawStages = buildPipelineStages(row, meta, counters);
-  const stages = enrichStages(rawStages, thresholds);
-
-  const rootCauseStageId = stages.find((s) => s.isRootCause)?.id ?? null;
+  const measurable = isXdpMeasurable(meta);
 
   return {
-    sourceId,
-    window,
-    windowMinutes,
-    lagMinutes: LAG_MINUTES,
-    stages,
-    rootCauseStageId,
-    meta,
     insufficientData: false,
-    metaResponse: { elapsedMs, enabled: true, thresholds },
+    measurable,
+    meta,
+    counters,
+    ackOffsetMinutes: timing.ackOffsetMinutes,
+    exporterStatus: resolveExporterStatus(meta, counters, meta.snapshotCount, meta.snapshotAgeMinutes),
+    completenessPct: measurable ? computeCompletenessPct(counters) : null,
+    verdict: buildVerdict(counters, meta, timing.windowMinutes, timing.ackOffsetMinutes),
+    packetFunnel: measurable ? buildPacketFunnel(counters, meta) : [],
+    spool: buildSpoolCard(counters),
+    netflow: buildNetflowCard(counters, meta),
+    aggregation: buildAggregationLine(counters),
+    lossBreakdown: measurable ? buildLossBreakdown(counters, meta) : null,
   };
 }
 
-async function fetchCollectorPipelineHistory(sourceIdRaw, windowRaw) {
+async function fetchCompletenessDetail(sourceIdRaw, windowMinutes) {
   const sourceId = parseSourceId(sourceIdRaw);
-  const { key: window, minutes: windowMinutes } = parseWindow(windowRaw);
-  const bucketSec = bucketSecondsForWindow(window);
+  const timing = resolveCompletenessTiming(windowMinutes);
+  const { row, elapsedMs } = await fetchSnapshotRow(sourceId, windowMinutes, timing);
+  const detail = buildDetailFromRow(row, timing);
+  return {
+    sourceId,
+    windowMinutes: timing.windowMinutes,
+    lagMinutes: timing.lagMinutes,
+    ackOffsetMinutes: timing.ackOffsetMinutes,
+    ...detail,
+    metaResponse: { elapsedMs, enabled: true },
+  };
+}
+
+async function fetchCompletenessHistory(sourceIdRaw, windowMinutes = 30) {
+  const sourceId = parseSourceId(sourceIdRaw);
+  const timing = resolveCompletenessTiming(windowMinutes);
   const table = collectorHealthSnapshotsTableRef();
-  const windowPlusLag = windowMinutes + LAG_MINUTES;
+  const fetchSpan = HISTORY_WINDOW_MINUTES + timing.windowMinutes + timing.lagMinutes + timing.ackOffsetMinutes + 5;
+  const bucketEndExpr = 'toStartOfInterval(ts, INTERVAL {bucket_sec:UInt32} SECOND) + INTERVAL {bucket_sec:UInt32} SECOND';
+  const windows = windowsRelativeToBucketEnd(bucketEndExpr);
 
   const { rows, elapsedMs } = await query(
     `
       SELECT
         toStartOfInterval(ts, INTERVAL {bucket_sec:UInt32} SECOND) AS bucket_ts,
-        ${DELTA_COLUMNS_SQL},
-        argMax(phy_counter_source, ts) AS phy_counter_source,
-        argMax(nf_socket_observed, ts) AS nf_socket_observed,
-        argMax(pipeline_stages, ts) AS pipeline_stages,
-        count() AS snapshot_count
+        ${buildCompletenessDeltaSql(windows)},
+        argMax(pipeline_stages, ts) AS pipeline_stages
       FROM ${table}
       WHERE source_id = {source_id:String}
-        AND ts >= now64(3) - INTERVAL {window_plus_lag:UInt32} MINUTE
+        AND ts >= now64(3) - INTERVAL {fetch_span:UInt32} MINUTE
         AND ts <  now64(3) - INTERVAL {lag_minutes:UInt32} MINUTE
       GROUP BY bucket_ts
       ORDER BY bucket_ts
     `,
     {
       source_id: sourceId,
-      window_plus_lag: windowPlusLag,
-      lag_minutes: LAG_MINUTES,
-      bucket_sec: bucketSec,
+      fetch_span: fetchSpan,
+      lag_minutes: timing.lagMinutes,
+      bucket_sec: HISTORY_BUCKET_SECONDS,
+      window_minutes: timing.windowMinutes,
+      lag_plus_offset: timing.lagMinutes + timing.ackOffsetMinutes,
     },
-    { name: 'collectors/pipeline/history' },
+    { name: 'collectors/completeness/history' },
   );
 
-  const thresholds = await loadPipelineThresholds();
   const buckets = rows
-    .filter((row) => num(row.snapshot_count) >= 2)
+    .filter((row) => hasCompletenessSnapshots(row))
     .map((row) => {
-      const meta = {
-        pipelineStages: parsePipelineStages(row.pipeline_stages),
-        phyCounterSource: String(row.phy_counter_source ?? ''),
-        nfSocketObserved: num(row.nf_socket_observed),
-      };
+      const meta = { pipelineStages: parsePipelineStages(row.pipeline_stages) };
       const counters = buildRawCounters(row);
-      const rawStages = buildPipelineStages(row, meta, counters);
-      const stages = enrichStages(rawStages, thresholds);
-      const stageLoss = {};
-      for (const s of stages) {
-        if (!s.isExclusion) stageLoss[s.id] = s.lossPct;
-      }
+      const measurable = isXdpMeasurable(meta);
       return {
         ts: row.bucket_ts,
-        stages: stageLoss,
+        completenessPct: measurable ? computeCompletenessPct(counters) : null,
       };
-    });
+    })
+    .filter((b) => b.completenessPct != null);
 
   return {
     sourceId,
-    window,
-    windowMinutes,
-    bucketSeconds: bucketSec,
+    windowMinutes: HISTORY_WINDOW_MINUTES,
+    completenessWindowMinutes: timing.windowMinutes,
+    ackOffsetMinutes: timing.ackOffsetMinutes,
+    bucketSeconds: HISTORY_BUCKET_SECONDS,
     buckets,
     meta: { elapsedMs, enabled: true },
   };
 }
 
-function buildPipelineFromCounters(meta, counters, thresholds = DEFAULT_THRESHOLDS) {
-  const rawStages = buildPipelineStages({}, meta, counters);
-  return enrichStages(rawStages, thresholds);
-}
-
 module.exports = {
-  WINDOW_MINUTES,
   LAG_MINUTES,
-  STAGE_LABELS,
-  STAGE_PASSED_UNIT,
-  buildPassPctNote,
-  parseWindow,
+  ACK_OFFSET_MINUTES,
+  resolveCompletenessTiming,
+  envInt,
+  HISTORY_WINDOW_MINUTES,
+  COMPLETENESS_GREEN_PCT,
+  COMPLETENESS_YELLOW_PCT,
   parseSourceId,
   parsePipelineStages,
   buildRawCounters,
-  buildPipelineStages,
-  enrichStages,
-  classifyStage,
-  buildPipelineFromCounters,
-  fetchCollectorPipeline,
-  fetchCollectorPipelineHistory,
+  buildCompletenessDeltaSql,
+  windowsRelativeToNow,
+  hasCompletenessSnapshots,
+  computeCompletenessDenominator,
+  computeUnconfirmedPackets,
+  isSpoolHealthy,
+  mapMeta,
+  isXdpMeasurable,
+  computeCompletenessPct,
+  capCompletenessPct,
+  resolveExporterStatus,
+  resolveGrowthCounter,
+  buildPacketFunnel,
+  buildSpoolCard,
+  buildNetflowCard,
+  buildAggregationLine,
+  buildLossBreakdown,
+  buildVerdict,
+  buildDetailFromRow,
+  fetchCompletenessDetail,
+  fetchCompletenessHistory,
+  META_COLUMNS_SQL,
 };

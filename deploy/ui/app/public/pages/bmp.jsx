@@ -25,15 +25,6 @@ function fmtBmpTime(value) {
   });
 }
 
-function fmtAgeSec(sec) {
-  const n = Number(sec);
-  if (!Number.isFinite(n)) return '—';
-  if (n < 60) return `${n} с`;
-  if (n < 3600) return `${Math.floor(n / 60)} мин`;
-  if (n < 86400) return `${Math.floor(n / 3600)} ч`;
-  return `${Math.floor(n / 86400)} дн`;
-}
-
 function BmpErrorBanner({ error }) {
   if (!error) return null;
   return (
@@ -96,41 +87,8 @@ function BmpPager({ offset, limit, total, onChange, loading }) {
 }
 
 function BmpHealthTab({ summary, peers, routers, loading }) {
-  const statusLabel = summary?.healthy ? 'Работает' : 'Нет свежих событий';
-  const statusTone = summary?.healthy ? 'success' : 'critical';
-
   return (
     <div className="col" style={{ gap: 14 }}>
-      <div className="grid grid--3col grid--gap-sm">
-        {typeof SumCard === 'function' ? (
-          <>
-            <SumCard
-              label="Состояние"
-              value={loading ? '…' : statusLabel}
-              icon={summary?.healthy ? 'check' : 'alert'}
-              tone={statusTone}
-              hint={summary?.routeEventAgeSec != null ? `события ${fmtAgeSec(summary.routeEventAgeSec)} назад` : null}
-            />
-            <SumCard
-              label="Пиры"
-              value={loading ? '…' : `${summary?.peersUp ?? 0} up / ${summary?.peersDown ?? 0} down`}
-              icon="collectors"
-              tone={(summary?.peersDown || 0) > 0 ? 'warning' : 'success'}
-            />
-            <SumCard
-              label="Обновления / 1 ч"
-              value={loading ? '…' : fmtNum((summary?.announces1h || 0) + (summary?.withdraws1h || 0))}
-              icon="refresh"
-              hint={loading ? null : `+${fmtNum(summary?.announces1h)} / −${fmtNum(summary?.withdraws1h)}`}
-            />
-          </>
-        ) : (
-          <Card pad="sm">
-            <div style={{ font: 'var(--pv-text-body-2-bold)' }}>{statusLabel}</div>
-          </Card>
-        )}
-      </div>
-
       <Card title="Роутеры BMP" pad="sm">
         <table className="table">
           <thead>

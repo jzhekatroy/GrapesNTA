@@ -9,14 +9,15 @@ const NAV = [
       { id: 'dashboard', label: 'Обзор', icon: 'dashboard' },
       // { id: 'monitoring', label: 'Мониторинг', icon: 'clock' },
       { id: 'observations', label: 'Наблюдения', icon: 'query' },
+      { id: 'dns', label: 'DNS', icon: 'globe' },
     ],
   },
   {
     section: 'Анализ трафика',
     items: [
       { id: 'explorer', label: 'Разбор трафика', icon: 'explorer' },
+      { id: 'dns-explorer', label: 'Разбор DNS', icon: 'globe' },
       { id: 'top', label: 'Топ ASN', icon: 'top' },
-      { id: 'dns', label: 'DNS-запросы', icon: 'globe' },
     ],
   },
   {
@@ -27,7 +28,6 @@ const NAV = [
       icon: 'collectors',
       children: [
         { id: 'collectors', label: 'Коллекторы' },
-        { id: 'collection-chain', label: 'Цепочка сбора' },
         { id: 'flow-exclusions', label: 'Исключения из статистики' },
         { id: 'snmp', label: 'SNMP' },
         { id: 'bmp', label: 'BMP / BGP' },
@@ -63,12 +63,12 @@ const NAV = [
 
 const PAGES_WITHOUT_HEADER_FILTERS = new Set([
   'explorer',
+  'dns-explorer',
   'observations',
   'monitoring',
   'diagnostics',
   'users',
   'collectors',
-  'collection-chain',
   'snmp',
   'bmp',
   'entities',
@@ -115,14 +115,14 @@ function Sidebar({ current, onNavigate, collapsed, effectivePermissions }) {
     visibleNav.forEach(s => {
       if (s.group) o[s.group.id] = s.group.children.some(c => c.id === current);
     });
-    if (!o.data && (current === 'collectors' || current === 'collection-chain' || current === 'flow-exclusions' || current === 'snmp' || current === 'bmp')) o.data = true;
+    if (!o.data && (current === 'collectors' || current === 'flow-exclusions' || current === 'snmp' || current === 'bmp')) o.data = true;
     if (!o.netmodel && (current === 'entities' || current === 'cidr' || current === 'dns-resolvers' || current === 'vlan' || current === 'port-services' || current === 'interface-roles' || current === 'routers')) o.netmodel = true;
     o.data = o.data ?? true;
     o.netmodel = o.netmodel ?? true;
     return o;
   });
   useEffect(() => {
-    if (current === 'collectors' || current === 'collection-chain' || current === 'flow-exclusions' || current === 'snmp' || current === 'bmp') setOpenGroups((s) => ({ ...s, data: true }));
+    if (current === 'collectors' || current === 'flow-exclusions' || current === 'snmp' || current === 'bmp') setOpenGroups((s) => ({ ...s, data: true }));
     if (current === 'entities' || current === 'cidr' || current === 'dns-resolvers' || current === 'vlan' || current === 'port-services' || current === 'interface-roles' || current === 'routers') {
       setOpenGroups((s) => ({ ...s, netmodel: true }));
     }
@@ -1349,6 +1349,19 @@ function parseAppHash() {
   return { pageId, params };
 }
 
+function parseJsonSearchParam(raw) {
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw);
+  } catch {
+    try {
+      return JSON.parse(decodeURIComponent(raw));
+    } catch {
+      return null;
+    }
+  }
+}
+
 function parseDirectionsParam(value) {
   if (!value) return null;
   const ids = new Set(value.split(',').map((s) => s.trim()).filter(Boolean));
@@ -1437,16 +1450,10 @@ function parseExplorerPageParams(params) {
   const groupBy = (params.get('groupBy') || '').split(',').map((s) => s.trim()).filter(Boolean);
   const limit = Number(params.get('limit'));
   const vis = params.get('vis');
-  let filters = [];
-  const filtersRaw = params.get('filters');
-  if (filtersRaw) {
-    try { filters = JSON.parse(decodeURIComponent(filtersRaw)); } catch { filters = []; }
-  }
-  let thresholds = [];
-  const thresholdsRaw = params.get('thresholds');
-  if (thresholdsRaw) {
-    try { thresholds = JSON.parse(decodeURIComponent(thresholdsRaw)); } catch { thresholds = []; }
-  }
+  const filtersParsed = parseJsonSearchParam(params.get('filters'));
+  const filters = Array.isArray(filtersParsed) ? filtersParsed : [];
+  const thresholdsParsed = parseJsonSearchParam(params.get('thresholds'));
+  const thresholds = Array.isArray(thresholdsParsed) ? thresholdsParsed : [];
   const EXPLORER_VIS_IDS = new Set([
     'contribution', 'dynamics', 'data',
     'lines', 'donut', 'sankey', 'table', 'bars', 'relations',
@@ -1499,14 +1506,74 @@ function buildExplorerShareUrl({
   if (groupBy?.length) params.set('groupBy', groupBy.join(','));
   if (limit) params.set('limit', String(limit));
   if (vis) params.set('vis', vis);
-  if (filters?.length) params.set('filters', encodeURIComponent(JSON.stringify(filters)));
-  if (thresholds?.length) params.set('thresholds', encodeURIComponent(JSON.stringify(thresholds)));
+  if (filters?.length) params.set('filters', JSON.stringify(filters));
+  if (thresholds?.length) params.set('thresholds', JSON.stringify(thresholds));
   params.set('range', timeRange || '1h');
   if (timeRange === 'custom' && customPeriod?.from && customPeriod?.to) {
     params.set('from', customPeriod.from);
     params.set('to', customPeriod.to);
   }
   return `${window.location.origin}${window.location.pathname}#explorer?${params.toString()}`;
+}
+
+function parseDnsExplorerPageParams(params) {
+  const metric = params.get('metric');
+  const groupBy = (params.get('groupBy') || '').split(',').map((s) => s.trim()).filter(Boolean);
+  const filtersParsed = parseJsonSearchParam(params.get('filters'));
+  const filters = Array.isArray(filtersParsed) ? filtersParsed : [];
+  return {
+    metric: metric || 'queries_per_sec',
+    groupBy,
+    filters,
+  };
+}
+
+function readDnsExplorerPageParamsFromHash() {
+  const { pageId, params } = parseAppHash();
+  if (pageId !== 'dns-explorer' || !params.toString()) return null;
+  return parseDnsExplorerPageParams(params);
+}
+
+function applyDnsExplorerUrlGlobals(params) {
+  return applyTopTalkersUrlGlobals(params);
+}
+
+function buildDnsExplorerDraftUrl({
+  metric,
+  groupBy,
+  filters,
+  timeRange,
+  customPeriod,
+}) {
+  const params = new URLSearchParams();
+  if (metric) params.set('metric', metric);
+  if (groupBy?.length) params.set('groupBy', groupBy.join(','));
+  if (filters?.length) params.set('filters', JSON.stringify(filters));
+  params.set('range', timeRange || '24h');
+  if (timeRange === 'custom' && customPeriod?.from && customPeriod?.to) {
+    params.set('from', customPeriod.from);
+    params.set('to', customPeriod.to);
+  }
+  return `#dns-explorer?${params.toString()}`;
+}
+
+function buildDnsExplorerShareUrl({
+  metric,
+  groupBy,
+  filters,
+  timeRange,
+  customPeriod,
+}) {
+  const params = new URLSearchParams();
+  params.set('metric', metric || 'queries_per_sec');
+  if (groupBy?.length) params.set('groupBy', groupBy.join(','));
+  if (filters?.length) params.set('filters', JSON.stringify(filters));
+  params.set('range', timeRange || '24h');
+  if (timeRange === 'custom' && customPeriod?.from && customPeriod?.to) {
+    params.set('from', customPeriod.from);
+    params.set('to', customPeriod.to);
+  }
+  return `${window.location.origin}${window.location.pathname}#dns-explorer?${params.toString()}`;
 }
 
 let PAGE_TITLES = {};
@@ -1522,7 +1589,9 @@ Object.assign(window, {
   defaultCustomPeriod, formatCustomPeriodLabel, validateCustomPeriod, validateExplorerCustomPeriod, EXPLORER_MAX_RANGE_DAYS, timeRangeLabel,
   toDatetimeLocalValue, dnsBucketSecondsFromMode, explorerGranularityBucketSeconds,
   collectorFilterLabel, directionSummaryLabel, TimezoneSelector,
-  parseAppHash, parseDirectionsParam, applyTopTalkersUrlGlobals,
+  parseAppHash, parseJsonSearchParam, parseDirectionsParam, applyTopTalkersUrlGlobals,
   parseTopTalkersPageParams, readTopTalkersPageParamsFromHash, buildTopTalkersShareUrl,
   parseExplorerPageParams, readExplorerPageParamsFromHash, applyExplorerUrlGlobals, buildExplorerShareUrl,
+  parseDnsExplorerPageParams, readDnsExplorerPageParamsFromHash, applyDnsExplorerUrlGlobals,
+  buildDnsExplorerDraftUrl, buildDnsExplorerShareUrl,
 });

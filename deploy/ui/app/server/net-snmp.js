@@ -1,10 +1,12 @@
 const net = require('net');
 const {
   config,
+  executeCommand,
   insertRows,
   netInterfacesCurrentRef,
   query,
   snmpAgentsCurrentRef,
+  snmpAgentsTableRef,
   snmpSettingsCurrentRef,
 } = require('./clickhouse');
 
@@ -43,6 +45,14 @@ function boundedInt(value, fallback, min, max, label) {
 function nullableBoundedInt(value, min, max, label) {
   if (value === undefined || value === null || value === '') return null;
   return boundedInt(value, null, min, max, label);
+}
+
+// The poller stores "never happened" as the epoch, which would render as a
+// 1970 timestamp in the UI.
+function epochToNull(value) {
+  const text = value == null ? '' : String(value);
+  if (!text || text.startsWith('1970-01-01')) return null;
+  return value;
 }
 
 function mapSettings(r = {}) {
@@ -143,6 +153,8 @@ function mapAgent(r) {
     firstSeenAt: r.first_seen_at ?? null,
     lastSeenAt: r.last_seen_at ?? null,
     lastPollAt: r.last_poll_at ?? null,
+    // Attempts move lastPollAt; only this advances when the switch answered.
+    lastOkAt: epochToNull(r.last_ok_at),
     lastFullWalkAt: r.last_full_walk_at ?? null,
     lastPollStatus: String(r.last_poll_status ?? 'never'),
     lastPollError: String(r.last_poll_error ?? ''),
@@ -165,7 +177,8 @@ function listSnmpAgents() {
       SELECT
         a.switch_ip, a.display_name, a.snmp_enabled, a.community_override,
         a.port_override, a.timeout_ms_override, a.retries_override,
-        a.first_seen_at, a.last_seen_at, a.last_poll_at, a.last_full_walk_at,
+        a.first_seen_at, a.last_seen_at, a.last_poll_at, a.last_ok_at,
+        a.last_full_walk_at,
         a.last_poll_status, a.last_poll_error, a.is_new, a.updated_at,
         a.source_ids,
         ifNull(i.interface_count, 0) AS interface_count,
@@ -224,6 +237,9 @@ function agentWriteRecord(existing, patch = {}) {
     first_seen_at: existing.first_seen_at,
     last_seen_at: existing.last_seen_at,
     last_poll_at: existing.last_poll_at,
+    // Carried over explicitly: a missing key would reset the column to its
+    // epoch default and erase when the switch last answered.
+    last_ok_at: existing.last_ok_at ?? '1970-01-01 00:00:00',
     last_full_walk_at: existing.last_full_walk_at,
     last_poll_status: existing.last_poll_status,
     last_poll_error: existing.last_poll_error,
@@ -304,6 +320,31 @@ async function requestSnmpProbeAll({ enable = true } = {}) {
   return { elapsedMs, accepted: records.length, total: records.length };
 }
 
+/**
+ * Drop decommissioned hardware from the inventory.
+ *
+ * Physical delete, not a flag: the poller rebuilds the agent list from
+ * flows_raw.sampler_address on every tick, so a switch that no longer exports
+ * sFlow stays gone. One that still sends samples is rediscovered within the
+ * discovery window and comes back as new with polling off.
+ *
+ * The interface catalog is deliberately left in place — Explorer joins it to
+ * name ports on historical flows.
+ */
+async function deleteSnmpAgent(switchIp) {
+  const ip = String(switchIp || '').trim();
+  if (!net.isIP(ip)) throw apiError('Некорректный IP коммутатора');
+  const existing = await getAgentRaw(ip);
+  if (!existing) throw apiError(`Коммутатор «${ip}» не найден`, 404);
+  // Mutations are asynchronous in ClickHouse; the row disappears from the
+  // ReplacingMergeTree once the mutation is applied.
+  const { elapsedMs } = await executeCommand(`
+    ALTER TABLE ${snmpAgentsTableRef()}
+    DELETE WHERE switch_ip = {switch_ip:String}
+  `, { switch_ip: ip }, { name: 'refs/snmp-agent-delete' });
+  return { elapsedMs, switchIp: ip, deleted: true };
+}
+
 module.exports = {
   listSnmpSettings,
   saveSnmpSettings,
@@ -312,4 +353,5 @@ module.exports = {
   listSnmpInterfaces,
   requestSnmpProbe,
   requestSnmpProbeAll,
+  deleteSnmpAgent,
 };

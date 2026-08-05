@@ -162,11 +162,6 @@ function PageTop({ onNavigate, timeRange, customPeriod, directions, collectorFil
     return Math.max(...filtered.map((row) => talkerMetricValue(row, metric)), 1);
   }, [filtered, metric]);
 
-  const leaderRow = rows[0];
-  const leaderMetric = leaderRow ? talkerMetricValue(leaderRow, metric) : 0;
-  const leaderShare = totalMetric > 0 ? (leaderMetric / totalMetric) * 100 : 0;
-  const leaderLabel = leaderRow ? talkerBarLabel(leaderRow, isPair) : '—';
-  const leaderVolume = leaderRow ? fmtVolumeSize(leaderRow.trafficGb, leaderRow.trafficTb) : '—';
   const colSpan = 5;
 
   const toggleRow = (key) => {
@@ -238,18 +233,6 @@ function PageTop({ onNavigate, timeRange, customPeriod, directions, collectorFil
           </BuilderControl>
         </div>
       </Card>
-
-      <div className="grid top-talkers-summary-grid">
-        <TopSumCard
-          label="Суммарно"
-          value={metric === 'volume' ? talkerRowsVolumeTotalDisplay(rows) : formatMetric(totalMetric, metric)}
-          icon="flow"
-          hint={metricLabel}
-        />
-        <TopSumCard label="Лидер" value={leaderLabel} icon="star" tone="warning" hint={`${leaderShare.toFixed(1)}% от загруженного`} />
-        <TopSumCard label="Записей" value={rows.length} icon="layers" hint={hasMore ? 'загружено, есть ещё' : 'загружено полностью'} />
-        <TopSumCard label="Объём лидера" value={leaderVolume} icon="top" tone="success" hint="по объёму трафика" />
-      </div>
 
       <div className="top-talkers-panels">
         <Card
@@ -457,25 +440,6 @@ function TopBarRow({ row, i, max, metric, isPair }) {
         <div className="top-bar-row__fill" style={{ width: `${pct}%`, background: color }} />
       </div>
     </div>
-  );
-}
-
-function TopSumCard({ label, value, icon, tone, hint }) {
-  const bgTone = tone === 'success' ? 'var(--st-success-bg)' : tone === 'warning' ? 'var(--st-warning-bg)' : tone === 'critical' ? 'var(--st-critical-bg)' : 'var(--surf-2)';
-  const fg = tone === 'success' ? 'var(--st-success)' : tone === 'warning' ? 'var(--st-warning)' : tone === 'critical' ? 'var(--st-critical)' : 'var(--fg-secondary)';
-  return (
-    <Card>
-      <div className="row" style={{ alignItems: 'center', gap: 14 }}>
-        <div style={{ width: 44, height: 44, borderRadius: 12, background: bgTone, color: fg, display: 'grid', placeItems: 'center' }}>
-          <Icon name={icon} size={20} stroke={2.2} />
-        </div>
-        <div style={{ flex: 1, minWidth: 0 }}>
-          <div className="sum-card__label">{label}</div>
-          <div className="sum-card__value" style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{value}</div>
-          {hint && <div className="sum-card__hint">{hint}</div>}
-        </div>
-      </div>
-    </Card>
   );
 }
 

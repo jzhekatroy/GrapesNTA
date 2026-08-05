@@ -11,6 +11,7 @@ function App() {
   const initialQ = initialRaw.indexOf('?');
   const initialPageId = initialQ >= 0 ? initialRaw.slice(0, initialQ) : initialRaw;
   const [page, setPage] = useState(initialPageId === 'collector-status' ? 'collectors' : initialPageId);
+  const [hashRoute, setHashRoute] = useState(() => location.hash || '');
   const [collapsed, setCollapsed] = useState(false);
   const [theme, setTheme] = useState(() => localStorage.getItem('grapes-theme') || 'dark');
   const [timeRange, setTimeRange] = useState('24h');
@@ -46,6 +47,7 @@ function App() {
           location.replace(`${location.pathname}${location.search}#collectors`);
         }
         setPage(hashId);
+        setHashRoute(location.hash || '');
         if (hashId === 'top' && params.toString()) {
           const global = applyTopTalkersUrlGlobals(params);
           if (global.timeRange) setTimeRange(global.timeRange);
@@ -58,6 +60,12 @@ function App() {
           if (global.timeRange) setTimeRange(global.timeRange);
           if (global.customPeriod) setCustomPeriod(global.customPeriod);
           if (global.directions) setDirections(global.directions);
+          if (global.collectorFilter !== undefined) setCollectorFilter(global.collectorFilter);
+        }
+        if (hashId === 'dns-explorer' && params.toString()) {
+          const global = applyDnsExplorerUrlGlobals(params);
+          if (global.timeRange) setTimeRange(global.timeRange);
+          if (global.customPeriod) setCustomPeriod(global.customPeriod);
           if (global.collectorFilter !== undefined) setCollectorFilter(global.collectorFilter);
         }
       })
@@ -157,6 +165,7 @@ function App() {
         return;
       }
       setPage(resolved);
+      setHashRoute(location.hash || '');
       if (pageId === 'top' && params.toString()) {
         const global = applyTopTalkersUrlGlobals(params);
         if (global.timeRange) setTimeRange(global.timeRange);
@@ -169,6 +178,12 @@ function App() {
         if (global.timeRange) setTimeRange(global.timeRange);
         if (global.customPeriod) setCustomPeriod(global.customPeriod);
         if (global.directions) setDirections(global.directions);
+        if (global.collectorFilter !== undefined) setCollectorFilter(global.collectorFilter);
+      }
+      if (pageId === 'dns-explorer' && params.toString()) {
+        const global = applyDnsExplorerUrlGlobals(params);
+        if (global.timeRange) setTimeRange(global.timeRange);
+        if (global.customPeriod) setCustomPeriod(global.customPeriod);
         if (global.collectorFilter !== undefined) setCollectorFilter(global.collectorFilter);
       }
     };
@@ -260,14 +275,15 @@ function App() {
     switch (page) {
       case 'dashboard':  pageEl = <PageDashboard key={`${refreshKey}-${displayTimezone}`} onNavigate={navigate} directions={directions} timeRange={timeRange} customPeriod={customPeriod} collectorFilter={collectorFilter} displayTimezone={displayTimezone} onChartRangeSelect={applyChartRangeZoom} />; break;
       case 'monitoring': pageEl = <PageMonitoring key={`${refreshKey}-${displayTimezone}`} displayTimezone={displayTimezone} />; break;
-      case 'explorer':   pageEl = <PageExplorer key={`${refreshKey}-${displayTimezone}`} onNavigate={navigate} displayTimezone={displayTimezone} />; break;
+      case 'explorer':   pageEl = <PageExplorer key={`${refreshKey}-${displayTimezone}-${hashRoute}`} onNavigate={navigate} displayTimezone={displayTimezone} />; break;
+      case 'dns-explorer': pageEl = <PageDnsExplorer key={`${refreshKey}-${displayTimezone}-${hashRoute}`} onNavigate={navigate} displayTimezone={displayTimezone} />; break;
       case 'observations': pageEl = <PageObservations key={refreshKey} onNavigate={navigate} />; break;
       case 'diagnostics': pageEl = <PageDiagnostics key={refreshKey} />; break;
       case 'top':        pageEl = <PageTop key={`${refreshKey}-${displayTimezone}`} onNavigate={navigate} timeRange={timeRange} customPeriod={customPeriod} directions={directions} collectorFilter={collectorFilter} displayTimezone={displayTimezone} />; break;
       case 'vlan':       pageEl = <PageVlan key={refreshKey} />; break;
       case 'smtp':       pageEl = <PageSmtp key={refreshKey} />; break;
       case 'dns':        pageEl = <PageDnsQueries key={`${refreshKey}-${displayTimezone}-${(collectorFilter || []).join(',')}`} onNavigate={navigate} timeRange={timeRange} customPeriod={customPeriod} collectorFilter={collectorFilter} displayTimezone={displayTimezone} onChartRangeSelect={applyChartRangeZoom} />; break;
-      case 'collectors': pageEl = <PageCollectors key={refreshKey} />; break;
+      case 'collectors': pageEl = <PageCollectors key={refreshKey} onNavigate={navigate} />; break;
       case 'snmp': pageEl = (
         <PageSnmp
           key={`${refreshKey}-${displayTimezone}`}
@@ -283,7 +299,6 @@ function App() {
       case 'dns-resolvers': pageEl = <PageDnsResolvers key={refreshKey} />; break;
       case 'port-services': pageEl = <PagePortServices key={refreshKey} />; break;
       case 'flow-exclusions': pageEl = <PageFlowExclusions key={refreshKey} />; break;
-      case 'collection-chain': pageEl = <PageCollectionChain key={refreshKey} onNavigate={navigate} />; break;
       case 'users':      pageEl = <PageUsers key={refreshKey} currentUser={auth.user} onAuthRefresh={reloadCurrentUser} />; break;
       case 'ttl':        pageEl = <PageTTL key={refreshKey} />; break;
       default:           pageEl = <PageComingSoon key={refreshKey} pageId={page} onNavigate={navigate} />;

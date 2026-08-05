@@ -683,7 +683,7 @@ function dnsTopDomains(filters = {}, limit = 50) {
           countIf(is_response = 1) AS responses,
           countIf(is_response = 1 AND rcode = 3) AS nxdomain,
           countIf(is_response = 1 AND rcode = 2) AS servfail,
-          round((nxdomain + servfail) * 100.0 / nullIf(responses, 0), 2) AS error_percent
+          round(servfail * 100.0 / nullIf(responses, 0), 2) AS error_percent
         FROM ${dnsLogTableRef()}
         WHERE ${whereSql}
         GROUP BY query_name, qtype
@@ -717,7 +717,7 @@ function dnsTopDomains(filters = {}, limit = 50) {
         responses,
         nxdomain,
         servfail,
-        round((nxdomain + servfail) * 100.0 / nullIf(responses, 0), 2) AS error_percent
+        round(servfail * 100.0 / nullIf(responses, 0), 2) AS error_percent
       FROM (
         SELECT
           query_name,
@@ -767,7 +767,7 @@ function dnsTopClients(filters = {}, limit = 50) {
             uniqExact(query_name) AS unique_domains,
             countIf(is_response = 1 AND rcode = 3) AS nxdomain,
             countIf(is_response = 1 AND rcode = 2) AS servfail,
-            round((nxdomain + servfail) * 100.0 / nullIf(countIf(is_response = 1), 0), 2) AS error_percent
+            round(servfail * 100.0 / nullIf(countIf(is_response = 1), 0), 2) AS error_percent
           FROM ${dnsLogTableRef()}
           WHERE ${whereSql}
           GROUP BY client
@@ -814,7 +814,7 @@ function dnsTopClients(filters = {}, limit = 50) {
           unique_domains,
           nxdomain,
           servfail,
-          round((nxdomain + servfail) * 100.0 / nullIf(responses, 0), 2) AS error_percent
+          round(servfail * 100.0 / nullIf(responses, 0), 2) AS error_percent
         FROM (
           SELECT
             ${clientExpr} AS client,
@@ -876,7 +876,7 @@ function dnsTopServers(filters = {}, limit = 50) {
             countIf(is_response = 1) AS responses,
             countIf(is_response = 1 AND rcode = 3) AS nxdomain,
             countIf(is_response = 1 AND rcode = 2) AS servfail,
-            round((nxdomain + servfail) * 100.0 / nullIf(responses, 0), 2) AS error_percent
+            round(servfail * 100.0 / nullIf(responses, 0), 2) AS error_percent
           FROM ${dnsLogTableRef()}
           WHERE ${whereSql}
           GROUP BY server
@@ -922,7 +922,7 @@ function dnsTopServers(filters = {}, limit = 50) {
           responses,
           nxdomain,
           servfail,
-          round((nxdomain + servfail) * 100.0 / nullIf(responses, 0), 2) AS error_percent
+          round(servfail * 100.0 / nullIf(responses, 0), 2) AS error_percent
         FROM (
           SELECT
             ${serverExpr} AS server,
@@ -970,16 +970,26 @@ function formatRcodeLabel(rcode) {
   return RCODE_LABELS[n] ?? String(rcode);
 }
 
-function dnsRecent(filters = {}, limit = 100) {
-  const recentWindow = resolveRecentWindow(filters);
-  const recentFilters = {
-    ...filters,
-    range: recentWindow.range,
-    from: recentWindow.from,
-    to: recentWindow.to,
-  };
-  const { whereSql, params } = buildRawDnsFilters({ ...recentFilters, alias: 'd' });
-  const lim = Math.min(Math.max(Number(limit) || 100, 1), 500);
+function formatRcodeHumanLabel(rcode) {
+  const n = Number(rcode);
+  if (n === 0) return 'Успешно';
+  if (n === 2) return 'Ошибка DNS-сервера';
+  if (n === 3) return 'Домен не найден';
+  return 'Другой код';
+}
+
+function formatRcodeHumanTitle(rcode) {
+  const n = Number(rcode);
+  const tech = formatRcodeLabel(rcode);
+  if (n === 0) return `Успешно (${tech})`;
+  if (n === 2) return `Ошибка DNS-сервера (${tech})`;
+  if (n === 3) return `Домен не найден (${tech})`;
+  return `${formatRcodeHumanLabel(rcode)} (${tech})`;
+}
+
+function dnsRecent(filters = {}, limit = 50) {
+  const { whereSql, params } = buildRawDnsFilters({ ...filters, alias: 'd' });
+  const lim = Math.min(Math.max(Number(limit) || 50, 1), 500);
   const clientExpr = dnsIpExpr('d.client_ip');
   const serverExpr = dnsIpExpr('d.server_ip');
 
@@ -1036,8 +1046,6 @@ function dnsRecent(filters = {}, limit = 100) {
       limit: lim,
       dataTable: config.dnsLogTable,
       dataTier: 'raw',
-      recentWindow: recentWindow.recentWindow,
-      forced30m: recentWindow.forced30m,
     }),
     map(rows) {
       return rows.map((r) => ({
@@ -1049,7 +1057,8 @@ function dnsRecent(filters = {}, limit = 100) {
         queryName: String(r.query_name || ''),
         qtype: String(r.qtype || ''),
         rcode: Number(r.rcode),
-        rcodeLabel: formatRcodeLabel(r.rcode),
+        rcodeLabel: formatRcodeHumanLabel(r.rcode),
+        rcodeTitle: formatRcodeHumanTitle(r.rcode),
         answersA: Array.isArray(r.answers_a) ? r.answers_a.map(String) : [],
         answersAaaa: Array.isArray(r.answers_aaaa) ? r.answers_aaaa.map(String) : [],
         answersCname: Array.isArray(r.answers_cname) ? r.answers_cname.map(String) : [],
@@ -1123,7 +1132,7 @@ function parseCollectorIdValue(raw) {
   return v || undefined;
 }
 
-function parseDnsFiltersQuery(query = {}) {
+function parseDnsOverviewQuery(query = {}) {
   const range = String(query.range || '24h');
   const from = query.from ? String(query.from) : undefined;
   const to = query.to ? String(query.to) : undefined;
@@ -1132,13 +1141,6 @@ function parseDnsFiltersQuery(query = {}) {
     : undefined;
   const collectorId = parseCollectorIdValue(query.collector_id);
   const collectorScopes = collectorId ? parseCollectorScopes(collectorId) : undefined;
-  const qtype = query.qtype ? String(query.qtype) : undefined;
-  const rcode = query.rcode !== undefined && query.rcode !== ''
-    ? Number(query.rcode)
-    : undefined;
-  const domainSearch = query.domain_search ? String(query.domain_search).trim() : undefined;
-  const clientIp = query.client_ip ? String(query.client_ip).trim() : undefined;
-  const serverIp = query.server_ip ? String(query.server_ip).trim() : undefined;
   const hideResolvers = query.hide_resolvers === '0' || query.hide_resolvers === 'false'
     ? false
     : query.hide_resolvers === '1' || query.hide_resolvers === 'true'
@@ -1153,13 +1155,28 @@ function parseDnsFiltersQuery(query = {}) {
     sourceIds,
     collectorId,
     collectorScopes,
+    hideResolvers,
+    limit,
+  };
+}
+
+function parseDnsFiltersQuery(query = {}) {
+  const overview = parseDnsOverviewQuery(query);
+  const qtype = query.qtype ? String(query.qtype) : undefined;
+  const rcode = query.rcode !== undefined && query.rcode !== ''
+    ? Number(query.rcode)
+    : undefined;
+  const domainSearch = query.domain_search ? String(query.domain_search).trim() : undefined;
+  const clientIp = query.client_ip ? String(query.client_ip).trim() : undefined;
+  const serverIp = query.server_ip ? String(query.server_ip).trim() : undefined;
+
+  return {
+    ...overview,
     qtype: qtype || undefined,
     rcode: Number.isFinite(rcode) ? rcode : undefined,
     domainSearch: domainSearch || undefined,
     clientIp: clientIp || undefined,
     serverIp: serverIp || undefined,
-    hideResolvers,
-    limit,
   };
 }
 
@@ -1172,7 +1189,10 @@ module.exports = {
   dnsRecent,
   dnsQtypes,
   parseDnsFiltersQuery,
+  parseDnsOverviewQuery,
   formatRcodeLabel,
+  formatRcodeHumanLabel,
+  formatRcodeHumanTitle,
   dnsUsesAggregates,
   buildRawDnsFilters,
   buildActivity5mFilters,
@@ -1180,4 +1200,14 @@ module.exports = {
   buildClients1hFilters,
   buildServers1hFilters,
   resolveRecentWindow,
+  dnsIpExpr,
+  clientIpFilterSql,
+  serverIpFilterSql,
+  appendSourceFilter,
+  resolveDnsWindow,
+  dnsBucketExpr,
+  dnsBucketSeconds,
+  dnsMeta,
+  mapIpBadgeFields,
+  dnsResolverLabelSql,
 };

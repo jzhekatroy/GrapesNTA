@@ -283,6 +283,10 @@ function snmpAgentsCurrentRef() {
   return `${qIdent(config.database)}.${qIdent(config.snmpAgentsCurrent)}`;
 }
 
+function snmpAgentsTableRef() {
+  return `${qIdent(config.database)}.${qIdent(config.snmpAgentsTable)}`;
+}
+
 function netInterfacesCurrentRef() {
   return `${qIdent(config.database)}.${qIdent(config.netInterfacesCurrent)}`;
 }
@@ -724,6 +728,7 @@ module.exports = {
   collectorsTableRef,
   snmpSettingsCurrentRef,
   snmpAgentsCurrentRef,
+  snmpAgentsTableRef,
   netInterfacesCurrentRef,
   netInterfacesDictRef,
   directionSettingsTableRef,

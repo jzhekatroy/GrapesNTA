@@ -82,7 +82,18 @@ const {
   dnsRecent,
   dnsQtypes,
   parseDnsFiltersQuery,
+  parseDnsOverviewQuery,
 } = require('./dns-queries');
+const {
+  dnsExplorerSchema,
+  dnsExplorerQuery,
+  dnsExplorerSuggestDomains,
+  dnsExplorerSuggestClientIps,
+  dnsExplorerSuggestServerIps,
+  dnsExplorerSuggestQtypes,
+  parseDnsExplorerBody,
+  parseDnsExplorerSuggestQuery,
+} = require('./dns-explorer');
 const {
   parseMonitoringSeriesQuery,
   parseMonitoringDeviationsQuery,
@@ -133,6 +144,7 @@ const {
   listSnmpInterfaces,
   requestSnmpProbe,
   requestSnmpProbeAll,
+  deleteSnmpAgent,
 } = require('./net-snmp');
 const {
   getDirectionSettings,
@@ -162,9 +174,8 @@ const {
 } = require('./port-services');
 const { fetchCollectorStatus } = require('./collector-status');
 const { fetchCollectorOverview, fetchDiscoveredSources } = require('./collector-overview');
-const { fetchCollectorCompleteness } = require('./collector-completeness');
-const { fetchCollectorPipeline, fetchCollectorPipelineHistory } = require('./collector-pipeline');
-const { getPipelineThresholds, savePipelineThresholds } = require('./collector-pipeline-thresholds');
+const { fetchCollectorCompleteness, settings: completenessSettings } = require('./collector-completeness');
+const { fetchCompletenessDetail, fetchCompletenessHistory } = require('./collector-pipeline');
 const {
   getBmpSummary,
   getBmpPeers,
@@ -1235,10 +1246,7 @@ function dnsRouteMeta(filters, extra = {}) {
     to: filters.to,
     sourceIds: filters.sourceIds,
     collectorId: filters.collectorId,
-    qtype: filters.qtype,
-    rcode: filters.rcode,
-    domainSearch: filters.domainSearch,
-    clientIp: filters.clientIp,
+    hideResolvers: filters.hideResolvers,
     ...extra,
   };
 }
@@ -1254,7 +1262,7 @@ app.get('/api/dns/sources', async (_req, res) => {
 
 app.get('/api/dns/activity', async (req, res) => {
   try {
-    const filters = parseDnsFiltersQuery(req.query);
+    const filters = parseDnsOverviewQuery(req.query);
     const result = await runNamed(() => dnsActivityChart(filters), { name: 'dns/activity' });
     res.json({
       ...result,
@@ -1267,7 +1275,7 @@ app.get('/api/dns/activity', async (req, res) => {
 
 app.get('/api/dns/top-domains', async (req, res) => {
   try {
-    const filters = parseDnsFiltersQuery(req.query);
+    const filters = parseDnsOverviewQuery(req.query);
     const limit = Math.min(Math.max(Number(req.query.limit) || 50, 1), 200);
     const result = await runNamed(() => dnsTopDomains(filters, limit), { name: 'dns/top-domains' });
     res.json({
@@ -1281,7 +1289,7 @@ app.get('/api/dns/top-domains', async (req, res) => {
 
 app.get('/api/dns/top-clients', async (req, res) => {
   try {
-    const filters = parseDnsFiltersQuery(req.query);
+    const filters = parseDnsOverviewQuery(req.query);
     const limit = Math.min(Math.max(Number(req.query.limit) || 50, 1), 200);
     const result = await runNamed(() => dnsTopClients(filters, limit), { name: 'dns/top-clients' });
     res.json({
@@ -1295,7 +1303,7 @@ app.get('/api/dns/top-clients', async (req, res) => {
 
 app.get('/api/dns/top-servers', async (req, res) => {
   try {
-    const filters = parseDnsFiltersQuery(req.query);
+    const filters = parseDnsOverviewQuery(req.query);
     const limit = Math.min(Math.max(Number(req.query.limit) || 50, 1), 200);
     const result = await runNamed(() => dnsTopServers(filters, limit), { name: 'dns/top-servers' });
     res.json({
@@ -1309,8 +1317,8 @@ app.get('/api/dns/top-servers', async (req, res) => {
 
 app.get('/api/dns/recent', async (req, res) => {
   try {
-    const filters = parseDnsFiltersQuery(req.query);
-    const limit = Math.min(Math.max(Number(req.query.limit) || 100, 1), 500);
+    const filters = parseDnsOverviewQuery(req.query);
+    const limit = Math.min(Math.max(Number(req.query.limit) || 50, 1), 500);
     const result = await runNamed(() => dnsRecent(filters, limit), { name: 'dns/recent' });
     res.json({
       ...result,
@@ -1331,6 +1339,124 @@ app.get('/api/dns/qtypes', async (req, res) => {
     });
   } catch (err) {
     res.status(502).json({ error: err.message });
+  }
+});
+
+app.get('/api/dns-explorer/schema', async (_req, res) => {
+  try {
+    res.json({ data: dnsExplorerSchema() });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/dns-explorer/query', async (req, res) => {
+  try {
+    const body = parseDnsExplorerBody(req.body || {});
+    const started = Date.now();
+    const spec = dnsExplorerQuery(body);
+    const groupBy = spec.meta.groupBy || [];
+    const runTimeseries = (querySpec, name) => runNamed(
+      () => ({ sql: querySpec.timeseriesSql, params: querySpec.params, map: querySpec.mapTimeseries }),
+      { name },
+    );
+    const queries = [
+      runTimeseries(spec, 'dns-explorer/timeseries'),
+      runNamed(() => ({ sql: spec.tableSql, params: spec.params, map: spec.mapTable }), { name: 'dns-explorer/table' }),
+    ];
+    if (groupBy.length) {
+      queries.push(runTimeseries(dnsExplorerQuery({ ...body, groupBy: [] }), 'dns-explorer/timeseries-total'));
+    }
+    const [tsResult, tableResult, totalTsResult] = await Promise.all(queries);
+    const tsRows = tsResult.data || [];
+    const tableRows = tableResult.data || [];
+    const timeseries = normalizeDnsExplorerTimeseries(
+      groupBy.length ? (totalTsResult?.data || []) : tsRows,
+    );
+    res.json({
+      data: {
+        rows: tableRows,
+        timeseries,
+        resultSeries: groupBy.length ? buildDnsExplorerResultSeries(tsRows, tableRows) : null,
+      },
+      meta: {
+        ...spec.meta,
+        range: body.range,
+        from: body.from,
+        to: body.to,
+        elapsedMs: Date.now() - started,
+      },
+    });
+  } catch (err) {
+    const status = /Неизвестн|укажите|Некоррект|недоступ|retention|должен|период/i.test(err.message) ? 400 : 502;
+    res.status(status).json({ error: err.message });
+  }
+});
+
+function normalizeDnsExplorerTimeseries(rows) {
+  return (rows || []).map((r) => ({
+    bucket: String(r.bucket || ''),
+    bucketMs: Number(r.bucketMs) || 0,
+    value: Number(r.value) || 0,
+  }));
+}
+
+function buildDnsExplorerResultSeries(tsRows, tableRows) {
+  const seriesByRow = Object.fromEntries((tableRows || []).map((row) => [row.id, []]));
+  const keyToId = new Map((tableRows || []).map((row) => [row.seriesKey, row.id]));
+  for (const pt of tsRows || []) {
+    const rowId = keyToId.get(pt.seriesKey);
+    if (!rowId) continue;
+    seriesByRow[rowId].push({
+      bucket: String(pt.bucket || ''),
+      bucketMs: Number(pt.bucketMs) || 0,
+      value: Number(pt.value) || 0,
+    });
+  }
+  return { seriesByRow };
+}
+
+app.get('/api/dns-explorer/suggest/domains', async (req, res) => {
+  try {
+    const ctx = parseDnsExplorerSuggestQuery(req.query);
+    const spec = dnsExplorerSuggestDomains(ctx, ctx.q, 20);
+    const result = await runNamed(() => spec, { name: 'dns-explorer/suggest/domains' });
+    res.json(result);
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.get('/api/dns-explorer/suggest/client-ips', async (req, res) => {
+  try {
+    const ctx = parseDnsExplorerSuggestQuery(req.query);
+    const spec = dnsExplorerSuggestClientIps(ctx, ctx.q, 20);
+    const result = await runNamed(() => spec, { name: 'dns-explorer/suggest/client-ips' });
+    res.json(result);
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.get('/api/dns-explorer/suggest/server-ips', async (req, res) => {
+  try {
+    const ctx = parseDnsExplorerSuggestQuery(req.query);
+    const spec = dnsExplorerSuggestServerIps(ctx, ctx.q, 20);
+    const result = await runNamed(() => spec, { name: 'dns-explorer/suggest/server-ips' });
+    res.json(result);
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.get('/api/dns-explorer/suggest/qtypes', async (req, res) => {
+  try {
+    const ctx = parseDnsExplorerSuggestQuery(req.query);
+    const spec = dnsExplorerSuggestQtypes(ctx);
+    const result = await runNamed(() => spec, { name: 'dns-explorer/suggest/qtypes' });
+    res.json(result);
+  } catch (err) {
+    res.status(400).json({ error: err.message });
   }
 });
 
@@ -1855,6 +1981,15 @@ app.post('/api/refs/snmp-agents/:ip/probe', async (req, res) => {
   }
 });
 
+app.delete('/api/refs/snmp-agents/:ip', async (req, res) => {
+  try {
+    const meta = await deleteSnmpAgent(req.params.ip);
+    res.json({ ok: true, meta });
+  } catch (err) {
+    sendApiError(res, err);
+  }
+});
+
 app.get('/api/refs/direction-settings', async (_req, res) => {
   try {
     res.json({ data: await getDirectionSettings() });
@@ -2038,36 +2173,18 @@ app.get('/api/collectors/completeness', async (_req, res) => {
   }
 });
 
-app.get('/api/collectors/pipeline/thresholds', async (_req, res) => {
+app.get('/api/collectors/completeness/detail', async (req, res) => {
   try {
-    const settings = await getPipelineThresholds();
-    res.json({ data: settings });
-  } catch (err) {
-    res.status(err.statusCode === 400 ? 400 : 502).json({ error: err.message });
-  }
-});
-
-app.post('/api/collectors/pipeline/thresholds', async (req, res) => {
-  try {
-    const result = await savePipelineThresholds(req.body || {});
+    const result = await fetchCompletenessDetail(req.query?.sourceId, completenessSettings.windowMinutes);
     res.json(result);
   } catch (err) {
     res.status(err.statusCode === 400 ? 400 : 502).json({ error: err.message });
   }
 });
 
-app.get('/api/collectors/pipeline/history', async (req, res) => {
+app.get('/api/collectors/completeness/history', async (req, res) => {
   try {
-    const result = await fetchCollectorPipelineHistory(req.query?.sourceId, req.query?.window);
-    res.json(result);
-  } catch (err) {
-    res.status(err.statusCode === 400 ? 400 : 502).json({ error: err.message });
-  }
-});
-
-app.get('/api/collectors/pipeline', async (req, res) => {
-  try {
-    const result = await fetchCollectorPipeline(req.query?.sourceId, req.query?.window);
+    const result = await fetchCompletenessHistory(req.query?.sourceId);
     res.json(result);
   } catch (err) {
     res.status(err.statusCode === 400 ? 400 : 502).json({ error: err.message });

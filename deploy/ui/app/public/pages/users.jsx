@@ -160,15 +160,6 @@ function PageUsers({ currentUser, onAuthRefresh }) {
         <Button kind={tab === 'roles' ? 'primary' : 'ghost'} onClick={() => setTab('roles')}>Роли</Button>
       </div>
 
-      {tab === 'users' && (
-        <div className="grid grid--4col grid--mb">
-          <SumCard label="Всего пользователей" value={rows.length} icon="users" />
-          <SumCard label="Ролей" value={roles.length} icon="key" />
-          <SumCard label="Требуют смену пароля" value={rows.filter(u => u.forcePasswordChange).length} icon="clock" tone="warning" />
-          <SumCard label="Страниц в реестре" value={visibleResources.length} icon="check" tone="success" />
-        </div>
-      )}
-
       {error && (
         <Card pad="sm" style={{marginBottom: 16}}>
           <div className="form-error">{error}</div>

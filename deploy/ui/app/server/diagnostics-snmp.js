@@ -20,6 +20,12 @@ function ageSecFrom(isoOrDate, now = Date.now()) {
   return Math.max(0, Math.floor((now - t) / 1000));
 }
 
+// The poller stores "never happened" as the epoch, which would render as 1970.
+function epochToNull(value) {
+  const text = value == null ? '' : String(value);
+  return !text || text.startsWith('1970-01-01') ? null : value;
+}
+
 function toIsoLoose(value) {
   if (value == null || value === '') return null;
   if (value instanceof Date) return value.toISOString();
@@ -90,7 +96,10 @@ async function loadAgentStats() {
         countIf(snmp_enabled = 1 AND last_poll_status = 'timeout') AS timeout,
         countIf(snmp_enabled = 1 AND last_poll_status = 'auth_error') AS auth_error,
         countIf(snmp_enabled = 1 AND last_poll_status IN ('error', 'config_error')) AS error,
-        max(last_poll_at) AS last_poll_at
+        max(last_poll_at) AS last_poll_at,
+        max(last_ok_at) AS last_ok_at,
+        -- Enabled agents that have never answered at all.
+        countIf(snmp_enabled = 1 AND last_ok_at = toDateTime(0, 'UTC')) AS never_ok
       FROM ${config.database}.net_snmp_agents_current
     `, {}, { name: 'diagnostics/snmp-agents' });
     const r = rows[0] || {};
@@ -105,12 +114,15 @@ async function loadAgentStats() {
       authError: Number(r.auth_error) || 0,
       error: Number(r.error) || 0,
       lastPollAt: toIsoLoose(r.last_poll_at),
+      lastOkAt: epochToNull(toIsoLoose(r.last_ok_at)),
+      neverOk: Number(r.never_ok) || 0,
       errorMessage: null,
     };
   } catch (err) {
     return {
       total: 0, enabled: 0, disabled: 0, ok: 0, queued: 0, never: 0,
-      timeout: 0, authError: 0, error: 0, lastPollAt: null, errorMessage: err.message,
+      timeout: 0, authError: 0, error: 0, lastPollAt: null, lastOkAt: null,
+      neverOk: 0, errorMessage: err.message,
     };
   }
 }
@@ -234,6 +246,18 @@ function buildProblems({ job, agents, settings, interfaces }) {
         `Все опросы падают в timeout (${agents.timeout} агентов), интерфейсов 0. `
           + 'Скорее всего с хоста nta нет маршрута/ACL до mgmt-сети свитчей (UDP/161). '
           + '«Опросить всех» ставит в очередь — поллер работает, но ответа от железа нет.',
+      ));
+    } else if (agents.timeout > 0 && agents.ok === 0) {
+      const okAge = ageSecFrom(agents.lastOkAt);
+      problems.push(problem(
+        'critical',
+        'snmp_all_timeout_cached',
+        `Ни один свитч не отвечает (${agents.timeout} агентов в timeout). `
+          + (okAge != null
+            ? `Последний успешный опрос — ${Math.round(okAge / 3600)} ч назад, `
+              + 'в UI показан устаревший каталог портов. '
+            : 'Успешных опросов не было вообще. ')
+          + 'Проверьте маршрут/ACL до mgmt-сети свитчей (UDP/161).',
       ));
     } else if (agents.timeout > 0 && agents.timeout >= agents.ok) {
       problems.push(problem(

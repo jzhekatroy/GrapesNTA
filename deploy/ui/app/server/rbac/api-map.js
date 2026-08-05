@@ -2,6 +2,7 @@ function getResourceForPath(path, method) {
   const p = String(path || '');
 
   if (p.startsWith('/api/explorer/')) return 'explorer';
+  if (p.startsWith('/api/dns-explorer/')) return 'dns-explorer';
   if (p.startsWith('/api/observations')) return 'observations';
   if (p.startsWith('/api/settings/smtp')) return 'diagnostics';
   if (p.startsWith('/api/dashboard/')) return 'dashboard';
@@ -18,7 +19,6 @@ function getResourceForPath(path, method) {
   if (p.startsWith('/api/collectors/overview')
     || p.startsWith('/api/collectors/discovered')
     || p.startsWith('/api/collectors/completeness')) return 'collectors';
-  if (p.startsWith('/api/collectors/pipeline')) return 'collection-chain';
   if (p.startsWith('/api/collectors/status')) return 'collector-status';
   if (p.startsWith('/api/bmp/')) return 'bmp';
   if (p.startsWith('/api/refs/entities') || p.startsWith('/api/refs/net-entities')) return 'entities';

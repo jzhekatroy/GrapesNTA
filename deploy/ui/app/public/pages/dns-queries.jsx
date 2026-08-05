@@ -7,9 +7,9 @@ const SIX_HOURS_MS = 6 * 60 * 60 * 1000;
 
 const DNS_CHART_LINES = [
   { key: 'qps', label: 'Запросы', color: '#7E92F8' },
-  { key: 'responses_per_sec', label: 'Ответы', color: '#51D16D' },
-  { key: 'nxdomain_per_sec', label: 'NXDOMAIN', color: '#F0B400' },
-  { key: 'servfail_per_sec', label: 'SERVFAIL', color: '#F06B6B' },
+  { key: 'responses_per_sec', label: 'Все ответы', color: '#51D16D', tip: 'Включает успешные ответы, NXDOMAIN и SERVFAIL' },
+  { key: 'nxdomain_per_sec', label: 'Домен не найден', color: '#F0B400', tip: 'Домен не найден (NXDOMAIN)' },
+  { key: 'servfail_per_sec', label: 'Ошибка DNS-сервера', color: '#F06B6B', tip: 'Ошибка DNS-сервера (SERVFAIL)' },
 ];
 const DNS_CHART_HEIGHT = 320;
 
@@ -129,10 +129,10 @@ function DnsEventTypeBadge({ eventType }) {
   );
 }
 
-function DnsRcodeBadge({ label, rcode }) {
+function DnsRcodeBadge({ label, rcode, title }) {
   const text = label || '—';
   return (
-    <span className="dns-recent-badge">
+    <span className="dns-recent-badge" title={title || text}>
       <Badge tone={dnsRcodeTone(label, rcode)}>{text}</Badge>
     </span>
   );
@@ -146,7 +146,7 @@ function DnsIpCell({ ip, resolverLabel, isExternal, onClick, className }) {
           type="button"
           className="link-btn mono dns-recent-ip"
           onClick={onClick}
-          title="Фильтровать по этому IP"
+          title="Открыть в разборе DNS"
         >
           {ip}
         </button>
@@ -169,23 +169,24 @@ function DnsIpCell({ ip, resolverLabel, isExternal, onClick, className }) {
 
 function DnsHideResolversToggle({ checked, onChange }) {
   return (
-    <label className="dns-hide-resolvers">
+    <label className="dns-hide-resolvers" title="Резолверы обслуживают много пользователей и обычно занимают верхние строки. Список настраивается вручную.">
       <input
         type="checkbox"
         checked={checked}
         onChange={(e) => onChange(e.target.checked)}
       />
-      <span>Скрыть резолверы</span>
+      <span>Скрыть резолверы из списка</span>
     </label>
   );
 }
 
-const RCODE_FILTER_OPTS = [
-  { value: '', label: 'Все RCODE' },
-  { value: '0', label: 'NOERROR' },
-  { value: '2', label: 'SERVFAIL' },
-  { value: '3', label: 'NXDOMAIN' },
-];
+function openDnsExplorerDraft({ field, value, timeRange, customPeriod }) {
+  location.hash = buildDnsExplorerDraftUrl({
+    filters: [{ field, op: 'eq', value }],
+    timeRange,
+    customPeriod,
+  });
+}
 
 function DnsLoadState({ children, style, className }) {
   return (
@@ -213,15 +214,6 @@ function dnsIsLongPeriod(timeRange, customPeriod) {
 
 function dnsAggregateEmptyMessage() {
   return 'Нет данных в агрегатах за выбранный период. Возможно, агрегация ещё не выполнена.';
-}
-
-function useDebouncedValue(value, delay = 300) {
-  const [debounced, setDebounced] = useState(value);
-  useEffect(() => {
-    const timer = setTimeout(() => setDebounced(value), delay);
-    return () => clearTimeout(timer);
-  }, [value, delay]);
-  return debounced;
 }
 
 function DnsTopsRow({ leftSplit, midSplit, onSplitChange, children }) {
@@ -422,18 +414,8 @@ function formatDnsTs(ts) {
 }
 
 function PageDnsQueries({ onNavigate, timeRange, customPeriod, collectorFilter, displayTimezone, onChartRangeSelect }) {
-  const [qtype, setQtype] = useState('');
-  const [rcode, setRcode] = useState('');
-  const [domainSearch, setDomainSearch] = useState('');
-  const [clientIp, setClientIp] = useState('');
-  const [serverIp, setServerIp] = useState('');
   const [hideResolvers, setHideResolvers] = useState(true);
   const [topsSplit, setTopsSplit] = useState(() => loadDnsTopsSplit());
-  const [domainDraft, setDomainDraft] = useState('');
-  const [clientIpDraft, setClientIpDraft] = useState('');
-  const [serverIpDraft, setServerIpDraft] = useState('');
-
-  const [qtypeOpts, setQtypeOpts] = useState([]);
 
   const [activityRows, setActivityRows] = useState([]);
   const [activitySource, setActivitySource] = useState('loading');
@@ -466,48 +448,30 @@ function PageDnsQueries({ onNavigate, timeRange, customPeriod, collectorFilter, 
   const [recentLoadMs, setRecentLoadMs] = useState(null);
   const [recentServerMs, setRecentServerMs] = useState(null);
 
-  const debouncedDomain = useDebouncedValue(domainDraft, 300);
-  const debouncedClientIp = useDebouncedValue(clientIpDraft, 300);
-  const debouncedServerIp = useDebouncedValue(serverIpDraft, 300);
-
-  useEffect(() => { setDomainSearch(debouncedDomain.trim()); }, [debouncedDomain]);
-  useEffect(() => { setClientIp(debouncedClientIp.trim()); }, [debouncedClientIp]);
-  useEffect(() => { setServerIp(debouncedServerIp.trim()); }, [debouncedServerIp]);
-
   const periodLabel = timeRangeLabel(timeRange, customPeriod);
   const chartLongRange = isLongChartRange(timeRange, customPeriod);
   const collectorFilterKey = (collectorFilter || []).join(',');
-  const apiFilters = useMemo(() => ({
+  const overviewFilters = useMemo(() => ({
     timeRange,
     customPeriod,
     collectorFilter: collectorFilterKey ? collectorFilter : undefined,
-    qtype: qtype || undefined,
-    rcode: rcode !== '' ? Number(rcode) : undefined,
-    domainSearch: domainSearch || undefined,
-    clientIp: clientIp || undefined,
-    serverIp: serverIp || undefined,
-  }), [timeRange, customPeriod?.from, customPeriod?.to, collectorFilterKey, collectorFilter, qtype, rcode, domainSearch, clientIp, serverIp]);
+  }), [timeRange, customPeriod?.from, customPeriod?.to, collectorFilterKey, collectorFilter]);
 
   const topClientsFilters = useMemo(() => ({
-    ...apiFilters,
+    ...overviewFilters,
     hideResolvers,
-  }), [apiFilters, hideResolvers]);
+  }), [overviewFilters, hideResolvers]);
 
-  useEffect(() => {
-    let cancelled = false;
-    ApiClient.loadDnsQtypes(apiFilters).then((r) => {
-      if (!cancelled) {
-        setQtypeOpts(Array.isArray(r.rows) ? r.rows : []);
-      }
-    });
-    return () => { cancelled = true; };
-  }, [apiFilters]);
+  const recentFilters = useMemo(() => ({
+    ...overviewFilters,
+    limit: 50,
+  }), [overviewFilters]);
 
   useEffect(() => {
     let cancelled = false;
     const load = (initial) => {
       if (initial) setActivitySource('loading');
-      ApiClient.loadDnsActivity(apiFilters).then((r) => {
+      ApiClient.loadDnsActivity(overviewFilters).then((r) => {
         if (!cancelled) {
           setActivityRows(Array.isArray(r.rows) ? r.rows : []);
           setActivityMeta(r.meta ?? null);
@@ -520,12 +484,12 @@ function PageDnsQueries({ onNavigate, timeRange, customPeriod, collectorFilter, 
     load(true);
     const timer = setInterval(() => load(false), DNS_REFRESH_MS);
     return () => { cancelled = true; clearInterval(timer); };
-  }, [apiFilters]);
+  }, [overviewFilters]);
 
   useEffect(() => {
     let cancelled = false;
     setTopDomainsSource('loading');
-    ApiClient.loadDnsTopDomains(apiFilters).then((r) => {
+    ApiClient.loadDnsTopDomains(overviewFilters).then((r) => {
       if (!cancelled) {
         setTopDomains((Array.isArray(r.rows) ? r.rows : []).map((row, i) => ({
           ...row,
@@ -538,7 +502,7 @@ function PageDnsQueries({ onNavigate, timeRange, customPeriod, collectorFilter, 
       }
     });
     return () => { cancelled = true; };
-  }, [apiFilters]);
+  }, [overviewFilters]);
 
   useEffect(() => {
     let cancelled = false;
@@ -558,7 +522,7 @@ function PageDnsQueries({ onNavigate, timeRange, customPeriod, collectorFilter, 
   useEffect(() => {
     let cancelled = false;
     setTopServersSource('loading');
-    ApiClient.loadDnsTopServers(apiFilters).then((r) => {
+    ApiClient.loadDnsTopServers(overviewFilters).then((r) => {
       if (!cancelled) {
         setTopServers(Array.isArray(r.rows) ? r.rows : []);
         setTopServersMeta(r.meta ?? null);
@@ -568,13 +532,13 @@ function PageDnsQueries({ onNavigate, timeRange, customPeriod, collectorFilter, 
       }
     });
     return () => { cancelled = true; };
-  }, [apiFilters]);
+  }, [overviewFilters]);
 
   useEffect(() => {
     let cancelled = false;
     const load = (initial) => {
       if (initial) setRecentSource('loading');
-      ApiClient.loadDnsRecent(apiFilters).then((r) => {
+      ApiClient.loadDnsRecent(recentFilters).then((r) => {
         if (!cancelled) {
           setRecentRows((Array.isArray(r.rows) ? r.rows : []).map((row, i) => ({
             ...row,
@@ -590,7 +554,7 @@ function PageDnsQueries({ onNavigate, timeRange, customPeriod, collectorFilter, 
     load(true);
     const timer = setInterval(() => load(false), DNS_REFRESH_MS);
     return () => { cancelled = true; clearInterval(timer); };
-  }, [apiFilters]);
+  }, [recentFilters]);
 
   const chartPoints = useMemo(() => activityRows.map((row) => {
     const bucket = normalizeBucketString(row.bucket);
@@ -619,94 +583,16 @@ function PageDnsQueries({ onNavigate, timeRange, customPeriod, collectorFilter, 
     });
   };
 
-  const clearFilters = () => {
-    setQtype('');
-    setRcode('');
-    setDomainDraft('');
-    setClientIpDraft('');
-    setServerIpDraft('');
-  };
-
-  const hasActiveFilters = qtype || rcode !== '' || domainDraft || clientIpDraft || serverIpDraft;
-
-  const recentForced30m = recentMeta?.recentWindow === '30m' && dnsIsLongPeriod(timeRange, customPeriod);
-  const recentSub = recentForced30m
-    ? 'Показаны последние 30 минут (ограничение для производительности). Укажите IP клиента, сервера или домен для поиска за весь период'
-    : `Последние события · ${periodLabel}`;
+  const recentSub = `Последние 50 событий · ${periodLabel}`;
 
   return (
     <div className="main__container">
       <div className="page-head">
         <div>
-          <h1>DNS-запросы</h1>
-          <p>Анализ DNS-активности, топ клиентов, доменов и серверов · {periodLabel}</p>
+          <h1>DNS</h1>
+          <p>Оперативный обзор DNS-активности, источников, доменов и серверов · {periodLabel}</p>
         </div>
       </div>
-
-      <Card style={{ marginBottom: 16 }}>
-        <div className="dns-filters">
-          <div className="dns-filters__group">
-            <label className="dns-filters__label" htmlFor="dns-qtype">QTYPE</label>
-            <select id="dns-qtype" className="input" value={qtype} onChange={(e) => setQtype(e.target.value)}>
-              <option value="">Все типы</option>
-              {qtypeOpts.map((o) => (
-                <option key={o.qtype} value={o.qtype}>{o.qtype} ({fmtNum(o.rows)})</option>
-              ))}
-            </select>
-          </div>
-
-          <div className="dns-filters__group">
-            <label className="dns-filters__label" htmlFor="dns-rcode">RCODE</label>
-            <select id="dns-rcode" className="input" value={rcode} onChange={(e) => setRcode(e.target.value)}>
-              {RCODE_FILTER_OPTS.map((o) => (
-                <option key={o.value} value={o.value}>{o.label}</option>
-              ))}
-            </select>
-          </div>
-
-          <div className="dns-filters__group">
-            <label className="dns-filters__label" htmlFor="dns-domain">Поиск домена</label>
-            <div className="input-wrap">
-              <Icon name="search" size={14} />
-              <input
-                id="dns-domain"
-                className="input input--with-icon"
-                placeholder="cisco.com"
-                value={domainDraft}
-                onChange={(e) => setDomainDraft(e.target.value)}
-              />
-            </div>
-          </div>
-
-          <div className="dns-filters__group">
-            <label className="dns-filters__label" htmlFor="dns-client">Client IP</label>
-            <input
-              id="dns-client"
-              className="input"
-              placeholder="188.143.128.3"
-              value={clientIpDraft}
-              onChange={(e) => setClientIpDraft(e.target.value)}
-            />
-          </div>
-
-          <div className="dns-filters__group">
-            <label className="dns-filters__label" htmlFor="dns-server">Server IP</label>
-            <input
-              id="dns-server"
-              className="input"
-              placeholder="8.8.8.8"
-              value={serverIpDraft}
-              onChange={(e) => setServerIpDraft(e.target.value)}
-            />
-          </div>
-
-          {hasActiveFilters && (
-            <div className="dns-filters__group dns-filters__group--actions">
-              <Button kind="ghost" size="sm" onClick={clearFilters}>Сбросить фильтры</Button>
-            </div>
-          )}
-        </div>
-      </Card>
 
       <Card className="dns-chart-card">
         <div className="dns-chart-card__head">
@@ -725,7 +611,7 @@ function PageDnsQueries({ onNavigate, timeRange, customPeriod, collectorFilter, 
                 type="button"
                 className={`chart-legend__item${off ? ' is-off' : ''}`}
                 aria-pressed={!off}
-                title={off ? 'Показать на графике' : 'Скрыть с графика'}
+                title={ln.tip || (off ? 'Показать на графике' : 'Скрыть с графика')}
                 onClick={() => toggleChartSeries(ln.key)}
               >
                 <span
@@ -739,7 +625,9 @@ function PageDnsQueries({ onNavigate, timeRange, customPeriod, collectorFilter, 
         </div>
         <div className="dns-chart-card__hint">
           <Icon name="info" size={12} />
-          {onChartRangeSelect ? 'Выделите диапазон на графике · авто-обновление каждую минуту' : 'Авто-обновление каждую минуту'}
+          «Все ответы» включает успешные ответы, NXDOMAIN и SERVFAIL — последние две линии показывают подмножества ответов.
+          {onChartRangeSelect ? ' · Выделите диапазон на графике' : ''}
+          {' · Авто-обновление каждую минуту'}
         </div>
         {activitySource === 'error' ? (
           <DnsLoadState className="dns-chart-card__state" />
@@ -773,13 +661,14 @@ function PageDnsQueries({ onNavigate, timeRange, customPeriod, collectorFilter, 
         <Card className="dns-top-card">
           <div className="dns-card-head">
             <div>
-              <div className="dns-card-head__title">Топ клиентов</div>
+              <div className="dns-card-head__title">Источники запросов</div>
               <div className="dns-card-head__sub">{periodLabel}</div>
             </div>
             <WidgetLoadBadge loadMs={topClientsLoadMs} serverMs={topClientsServerMs} />
           </div>
           <div className="dns-top-card__toolbar">
             <DnsHideResolversToggle checked={hideResolvers} onChange={setHideResolvers} />
+            <Button kind="ghost" size="sm" onClick={() => onNavigate?.('dns-resolvers')}>Настроить список</Button>
           </div>
           {topClientsSource === 'error' ? (
             <DnsLoadState />
@@ -798,23 +687,28 @@ function PageDnsQueries({ onNavigate, timeRange, customPeriod, collectorFilter, 
               columns={[
                 {
                   key: 'client',
-                  title: 'IP клиента',
+                  title: 'IP-адрес',
                   render: (row) => (
                     <DnsIpCell
                       ip={row.client}
                       resolverLabel={row.resolverLabel}
                       isExternal={row.isExternal}
-                      onClick={() => setClientIpDraft(row.client)}
+                      onClick={() => openDnsExplorerDraft({
+                        field: 'client_ip',
+                        value: row.client,
+                        timeRange,
+                        customPeriod,
+                      })}
                     />
                   ),
                 },
                 { key: 'queries', title: 'Запросы', align: 'right', num: true, render: (r) => fmtNum(r.queries) },
                 { key: 'uniqueDomains', title: 'Уник. домены', align: 'right', num: true, render: (r) => fmtNum(r.uniqueDomains) },
-                { key: 'nxdomain', title: 'NXDOMAIN', align: 'right', num: true, render: (r) => fmtNum(r.nxdomain) },
-                { key: 'servfail', title: 'SERVFAIL', align: 'right', num: true, render: (r) => fmtNum(r.servfail) },
+                { key: 'nxdomain', title: 'Не найдено', align: 'right', num: true, render: (r) => fmtNum(r.nxdomain) },
+                { key: 'servfail', title: 'Сбои DNS', align: 'right', num: true, render: (r) => fmtNum(r.servfail) },
                 {
                   key: 'errorPercent',
-                  title: 'Ошибки, %',
+                  title: 'Сбои DNS, %',
                   align: 'right',
                   render: (r) => <DnsErrorPercent value={r.errorPercent} />,
                 },
@@ -828,7 +722,7 @@ function PageDnsQueries({ onNavigate, timeRange, customPeriod, collectorFilter, 
         <Card className="dns-top-card">
           <div className="dns-card-head">
             <div>
-              <div className="dns-card-head__title">Топ доменов</div>
+              <div className="dns-card-head__title">Домены</div>
               <div className="dns-card-head__sub">{periodLabel}</div>
             </div>
             <WidgetLoadBadge loadMs={topDomainsLoadMs} serverMs={topDomainsServerMs} />
@@ -855,8 +749,13 @@ function PageDnsQueries({ onNavigate, timeRange, customPeriod, collectorFilter, 
                     <button
                       type="button"
                       className="link-btn dns-table-domain"
-                      onClick={() => setDomainDraft(row.queryName)}
-                      title="Фильтровать по этому домену"
+                      onClick={() => openDnsExplorerDraft({
+                        field: 'query_name',
+                        value: row.queryName,
+                        timeRange,
+                        customPeriod,
+                      })}
+                      title="Открыть в разборе DNS"
                     >
                       {row.queryName}
                     </button>
@@ -865,11 +764,11 @@ function PageDnsQueries({ onNavigate, timeRange, customPeriod, collectorFilter, 
                 { key: 'qtype', title: 'QTYPE' },
                 { key: 'queries', title: 'Запросы', align: 'right', num: true, render: (r) => fmtNum(r.queries) },
                 { key: 'responses', title: 'Ответы', align: 'right', num: true, render: (r) => fmtNum(r.responses) },
-                { key: 'nxdomain', title: 'NXDOMAIN', align: 'right', num: true, render: (r) => fmtNum(r.nxdomain) },
-                { key: 'servfail', title: 'SERVFAIL', align: 'right', num: true, render: (r) => fmtNum(r.servfail) },
+                { key: 'nxdomain', title: 'Не найдено', align: 'right', num: true, render: (r) => fmtNum(r.nxdomain) },
+                { key: 'servfail', title: 'Сбои DNS', align: 'right', num: true, render: (r) => fmtNum(r.servfail) },
                 {
                   key: 'errorPercent',
-                  title: 'Ошибки, %',
+                  title: 'Сбои DNS, %',
                   align: 'right',
                   render: (r) => <DnsErrorPercent value={r.errorPercent} />,
                 },
@@ -883,7 +782,7 @@ function PageDnsQueries({ onNavigate, timeRange, customPeriod, collectorFilter, 
         <Card className="dns-top-card">
           <div className="dns-card-head">
             <div>
-              <div className="dns-card-head__title">Топ серверов</div>
+              <div className="dns-card-head__title">DNS-серверы</div>
               <div className="dns-card-head__sub">{periodLabel}</div>
             </div>
             <WidgetLoadBadge loadMs={topServersLoadMs} serverMs={topServersServerMs} />
@@ -905,23 +804,28 @@ function PageDnsQueries({ onNavigate, timeRange, customPeriod, collectorFilter, 
               columns={[
                 {
                   key: 'server',
-                  title: 'IP сервера',
+                  title: 'IP-адрес',
                   render: (row) => (
                     <DnsIpCell
                       ip={row.server}
                       resolverLabel={row.resolverLabel}
                       isExternal={row.isExternal}
-                      onClick={() => setServerIpDraft(row.server)}
+                      onClick={() => openDnsExplorerDraft({
+                        field: 'server_ip',
+                        value: row.server,
+                        timeRange,
+                        customPeriod,
+                      })}
                     />
                   ),
                 },
                 { key: 'queries', title: 'Запросы', align: 'right', num: true, render: (r) => fmtNum(r.queries) },
                 { key: 'responses', title: 'Ответы', align: 'right', num: true, render: (r) => fmtNum(r.responses) },
-                { key: 'nxdomain', title: 'NXDOMAIN', align: 'right', num: true, render: (r) => fmtNum(r.nxdomain) },
-                { key: 'servfail', title: 'SERVFAIL', align: 'right', num: true, render: (r) => fmtNum(r.servfail) },
+                { key: 'nxdomain', title: 'Не найдено', align: 'right', num: true, render: (r) => fmtNum(r.nxdomain) },
+                { key: 'servfail', title: 'Сбои DNS', align: 'right', num: true, render: (r) => fmtNum(r.servfail) },
                 {
                   key: 'errorPercent',
-                  title: 'Ошибки, %',
+                  title: 'Сбои DNS, %',
                   align: 'right',
                   render: (r) => <DnsErrorPercent value={r.errorPercent} />,
                 },
@@ -936,7 +840,7 @@ function PageDnsQueries({ onNavigate, timeRange, customPeriod, collectorFilter, 
       <Card className="dns-recent-card">
         <div className="dns-card-head">
           <div>
-            <div className="dns-card-head__title">Последние запросы DNS</div>
+            <div className="dns-card-head__title">Последние DNS-события</div>
             <div className="dns-card-head__sub">{recentSub}</div>
           </div>
           <WidgetLoadBadge loadMs={recentLoadMs} serverMs={recentServerMs} />
@@ -974,7 +878,6 @@ function PageDnsQueries({ onNavigate, timeRange, customPeriod, collectorFilter, 
                       ip={r.client}
                       resolverLabel={r.clientBadges?.resolverLabel}
                       isExternal={r.clientBadges?.isExternal}
-                      onClick={() => setClientIpDraft(r.client)}
                     />
                   ),
                 },
@@ -987,7 +890,6 @@ function PageDnsQueries({ onNavigate, timeRange, customPeriod, collectorFilter, 
                       ip={r.server}
                       resolverLabel={r.serverBadges?.resolverLabel}
                       isExternal={r.serverBadges?.isExternal}
-                      onClick={() => setServerIpDraft(r.server)}
                     />
                   ),
                 },
@@ -995,23 +897,18 @@ function PageDnsQueries({ onNavigate, timeRange, customPeriod, collectorFilter, 
                   key: 'queryName',
                   title: 'Домен',
                   render: (r) => (
-                    <button
-                      type="button"
-                      className="link-btn dns-table-domain dns-recent-domain"
-                      onClick={() => setDomainDraft(r.queryName)}
-                      title={r.queryName ? `Фильтровать по домену ${r.queryName}` : 'Фильтровать по этому домену'}
-                    >
+                    <span className="dns-table-domain dns-recent-domain" title={r.queryName || '—'}>
                       {r.queryName || '—'}
-                    </button>
+                    </span>
                   ),
                 },
-                { key: 'qtype', title: 'QTYPE', width: 72 },
+                { key: 'qtype', title: 'Тип запроса', width: 88 },
                 {
                   key: 'rcodeLabel',
-                  title: 'RCODE',
-                  width: 110,
+                  title: 'Результат ответа',
+                  width: 140,
                   sortable: false,
-                  render: (r) => <DnsRcodeBadge label={r.rcodeLabel} rcode={r.rcode} />,
+                  render: (r) => <DnsRcodeBadge label={r.rcodeLabel} rcode={r.rcode} title={r.rcodeTitle} />,
                 },
                 {
                   key: 'answers',

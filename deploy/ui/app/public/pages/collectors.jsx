@@ -88,36 +88,23 @@ function buildLiveSourceMap(overview, discoveredRows = []) {
   return live;
 }
 
-function SourceLiveBadge({ isLive }) {
-  return (
-    <StatusIndicator
-      status={isLive ? 'healthy' : 'idle'}
-      label={isLive ? 'Работает' : 'Нет данных'}
-    />
-  );
-}
-
-const COMPLETENESS_LABELS = {
-  ok: 'Учтено',
-  warning: 'Есть риск',
-  critical: 'Потери',
-  unknown: 'Нет метрик',
+const EXPORTER_STATUS_LABELS = {
+  working: 'работает',
+  no_data: 'нет данных',
+  no_connection: 'нет связи',
 };
 
-const COMPLETENESS_TONES = {
-  ok: 'healthy',
-  warning: 'warning',
-  critical: 'critical',
-  unknown: 'idle',
+const EXPORTER_STATUS_TONE = {
+  working: 'healthy',
+  no_data: 'critical',
+  no_connection: 'critical',
 };
 
-const COMPLETENESS_REASON_LABELS = {
-  insufficient_snapshots: 'Мало snapshots',
-  xdp_map_full: 'XDP map_full',
-  insert_errors: 'Ошибки INSERT',
-  queue_drops: 'Сброс очереди CH',
-  udp_drops: 'Сброс UDP',
-  low_completeness: 'Низкая полнота',
+const COMPLETENESS_TONE_CLASS = {
+  healthy: 'completeness-pct-green',
+  warning: 'completeness-pct-yellow',
+  critical: 'completeness-pct-red',
+  idle: 'completeness-pct-muted',
 };
 
 function fmtPct(value) {
@@ -125,13 +112,46 @@ function fmtPct(value) {
   return `${Number(value).toFixed(2)}%`;
 }
 
-function CompletenessBadge({ status }) {
-  const id = status || 'unknown';
+function ExporterStatusCell({ completeness, isLive, flowsPerMin }) {
+  const status = completeness?.exporterStatus || (isLive ? 'working' : 'no_data');
+  const tone = EXPORTER_STATUS_TONE[status] || 'idle';
   return (
-    <StatusIndicator
-      status={COMPLETENESS_TONES[id] || 'idle'}
-      label={COMPLETENESS_LABELS[id] || id}
-    />
+    <div>
+      <StatusIndicator
+        status={tone}
+        label={EXPORTER_STATUS_LABELS[status] || status}
+      />
+      {isLive && (
+        <div style={{ marginTop: 3, color: 'var(--fg-secondary)', font: 'var(--pv-text-body-3)' }}>
+          {fmtNum(flowsPerMin)} потоков/мин
+        </div>
+      )}
+    </div>
+  );
+}
+
+function CompletenessPctCell({ completeness, onOpen }) {
+  const c = completeness;
+  const label = c?.measurable ? 'Подробнее о полноте сбора' : (c?.tooltip || 'Полнота не измеряется');
+  const content = !c || !c.measurable ? (
+    <span className="completeness-pct-muted">—</span>
+  ) : (
+    <span className={`completeness-pct-value mono ${COMPLETENESS_TONE_CLASS[c.tone] || 'completeness-pct-muted'}`}>
+      {fmtPct(c.completenessPct)}
+    </span>
+  );
+
+  return (
+    <button
+      type="button"
+      className="completeness-pct-btn tt"
+      data-tt={label}
+      aria-label={label}
+      onClick={(e) => { e.stopPropagation(); onOpen?.(); }}
+    >
+      {content}
+      <Icon name="chevR" size={12} className="completeness-pct-chevron" aria-hidden="true" />
+    </button>
   );
 }
 
@@ -154,7 +174,7 @@ function fmtCatalogUpdatedAt(value) {
   });
 }
 
-function PageCollectors() {
+function PageCollectors({ onNavigate }) {
   const [tab, setTab] = useState(() => {
     const pending = sessionStorage.getItem(COLLECTORS_TAB_KEY);
     if (pending) {
@@ -193,7 +213,7 @@ function PageCollectors() {
         <CollectorsTab refreshKey={refreshKey} onReload={reload} />
       )}
       {tab === 'sources' && (
-        <SourcesTab refreshKey={refreshKey} onReload={reload} />
+        <SourcesTab refreshKey={refreshKey} onReload={reload} onNavigate={onNavigate} />
       )}
       {tab === 'unassigned' && (
         <UnassignedTab refreshKey={refreshKey} onReload={reload} />
@@ -1089,73 +1109,6 @@ function SourceStateBadge({ state }) {
   );
 }
 
-function CompletenessKvItem({ label, value }) {
-  return (
-    <div className="talker-detail-item">
-      <dt>{label}</dt>
-      <dd>{value ?? '—'}</dd>
-    </div>
-  );
-}
-
-function CompletenessDetailsModal({ open, source, meta, onClose }) {
-  if (!open || !source) return null;
-
-  const c = source.completeness;
-  const windowLabel = meta
-    ? `${meta.windowMinutes || 5} мин, лаг ${meta.lagMinutes || 2} мин`
-    : '5 мин, лаг 2 мин';
-  const reasons = (c?.reasons || []).map((r) => COMPLETENESS_REASON_LABELS[r] || r);
-
-  return (
-    <Modal
-      open={open}
-      onClose={onClose}
-      title="Полнота учёта"
-      subtitle={`${source.sourceId} · окно ${windowLabel}`}
-      footer={<Button kind="ghost" onClick={onClose}>Закрыть</Button>}
-    >
-      {!c ? (
-        <div style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-secondary)' }}>
-          Нет health snapshots для этого экспортёра. Проверьте, что коллектор пишет в таблицу
-          {' '}
-          <span className="mono">collector_health_snapshots</span>
-          {' '}
-          и что
-          {' '}
-          <span className="mono">source_id</span>
-          {' '}
-          совпадает.
-        </div>
-      ) : (
-        <dl className="talker-detail-grid">
-          <CompletenessKvItem label="Статус" value={<CompletenessBadge status={c.status} />} />
-          {reasons.length > 0 && (
-            <CompletenessKvItem label="Причины" value={reasons.join(', ')} />
-          )}
-          <CompletenessKvItem label="Окно" value={`${fmtCatalogUpdatedAt(c.windowFrom)} — ${fmtCatalogUpdatedAt(c.windowTo)}`} />
-          <CompletenessKvItem label="Snapshots" value={fmtNum(c.snapshotCount)} />
-          <CompletenessKvItem label="XDP пакеты" value={fmtNum(c.xdpPackets)} />
-          <CompletenessKvItem label="В CH пакеты" value={fmtNum(c.chPackets)} />
-          <CompletenessKvItem label="Полнота пакетов" value={fmtPct(c.packetsPct)} />
-          <CompletenessKvItem label="XDP байты" value={fmtBytes(c.xdpBytes)} />
-          <CompletenessKvItem label="В CH байты" value={fmtBytes(c.chBytes)} />
-          <CompletenessKvItem label="Полнота байт" value={fmtPct(c.bytesPct)} />
-          <CompletenessKvItem label="map_full Δ" value={fmtNum(c.mapFullDelta)} />
-          <CompletenessKvItem label="insert_errs Δ" value={fmtNum(c.insertErrsDelta)} />
-          <CompletenessKvItem label="queue_drops Δ" value={fmtNum(c.queueDropsDelta)} />
-          <CompletenessKvItem label="udp_drops Δ" value={fmtNum(c.udpDropsDelta)} />
-          <CompletenessKvItem label="records_acked Δ" value={`${fmtNum(c.recordsAckedDelta)} (техн.)`} />
-          <CompletenessKvItem label="Коллектор" value={c.collectorId || '—'} />
-          <CompletenessKvItem label="Демон" value={c.daemon || '—'} />
-          <CompletenessKvItem label="Последний snapshot" value={fmtCatalogUpdatedAt(c.lastSnapshotAt)} />
-          <CompletenessKvItem label="Статус демона" value={c.lastDaemonStatus || '—'} />
-        </dl>
-      )}
-    </Modal>
-  );
-}
-
 function BindSourceModal({ open, source, collectorOptions, onClose, onSaved }) {
   const [collectorId, setCollectorId] = useState('');
   const [saving, setSaving] = useState(false);
@@ -1222,11 +1175,11 @@ function BindSourceModal({ open, source, collectorOptions, onClose, onSaved }) {
   );
 }
 
-function SourcesTab({ refreshKey, onReload }) {
-  return <FlowSourcesTab refreshKey={refreshKey} onReload={onReload} />;
+function SourcesTab({ refreshKey, onReload, onNavigate }) {
+  return <FlowSourcesTab refreshKey={refreshKey} onReload={onReload} onNavigate={onNavigate} />;
 }
 
-function FlowSourcesTab({ refreshKey, onReload }) {
+function FlowSourcesTab({ refreshKey, onReload, onNavigate }) {
   const canWrite = AuthAccess.canWritePage('collectors');
   const [rows, setRows] = useState([]);
   const [collectorOptions, setCollectorOptions] = useState([]);
@@ -1235,7 +1188,6 @@ function FlowSourcesTab({ refreshKey, onReload }) {
   const [search, setSearch] = useState('');
   const [binding, setBinding] = useState(null);
   const [completenessBySource, setCompletenessBySource] = useState(new Map());
-  const [completenessMeta, setCompletenessMeta] = useState(null);
   const [details, setDetails] = useState(null);
 
   useEffect(() => {
@@ -1260,7 +1212,6 @@ function FlowSourcesTab({ refreshKey, onReload }) {
           (completenessRes.rows || []).map((row) => [row.sourceId, row]),
         );
         setCompletenessBySource(completenessMap);
-        setCompletenessMeta(completenessRes.meta || null);
         setRows((srcRes.rows || []).map((r) => {
           const live = liveBySource.get(r.sourceId);
           return {
@@ -1336,41 +1287,30 @@ function FlowSourcesTab({ refreshKey, onReload }) {
     {
       key: 'isLive',
       title: 'Работает',
-      width: 140,
+      width: 150,
       render: (r) => (
-        <div>
-          <SourceLiveBadge isLive={r.isLive} />
-          {r.isLive && (
-            <div style={{ marginTop: 3, color: 'var(--fg-secondary)', font: 'var(--pv-text-body-3)' }}>
-              {fmtNum(r.flowsPerMin)} потоков/мин
-            </div>
-          )}
-        </div>
+        <ExporterStatusCell
+          completeness={r.completeness || completenessBySource.get(r.sourceId)}
+          isLive={r.isLive}
+          flowsPerMin={r.flowsPerMin}
+        />
       ),
     },
     {
       key: 'completeness',
-      title: 'Полнота',
-      width: 150,
+      title: (
+        <span className="tt" data-tt="Нажмите на значение для подробностей">
+          Полнота
+        </span>
+      ),
+      width: 120,
       render: (r) => {
         const c = r.completeness || completenessBySource.get(r.sourceId);
         return (
-          <button
-            type="button"
-            style={{ all: 'unset', textAlign: 'left', cursor: 'pointer' }}
-            onClick={(e) => {
-              e.stopPropagation();
-              setDetails({ ...r, completeness: c || null });
-            }}
-            title="Показать детали полноты учёта"
-          >
-            <CompletenessBadge status={c?.status} />
-            {c && c.status !== 'unknown' && (
-              <div style={{ marginTop: 3, color: 'var(--fg-secondary)', font: 'var(--pv-text-body-3)' }}>
-                {fmtPct(c.bytesPct)} байт
-              </div>
-            )}
-          </button>
+          <CompletenessPctCell
+            completeness={c}
+            onOpen={() => setDetails({ ...r, completeness: c || null })}
+          />
         );
       },
     },
@@ -1419,21 +1359,38 @@ function FlowSourcesTab({ refreshKey, onReload }) {
         emptyTitle="Нет экспортёров потоков в каталоге"
         emptyDesc={`${flowExporterHint()} Новые экспортёры появятся на вкладке «Непривязанные», когда от них придут live-данные.`}
         toolbar={{ search, onSearch: setSearch }}
-        rowActions={canWrite ? (r) => (
+        rowActions={(r) => (
           <div className="row" style={{ gap: 4, justifyContent: 'flex-end' }}>
-            <Button size="sm" kind="ghost" icon="link" onClick={(e) => { e.stopPropagation(); setBinding(r); }}>
-              Привязать
+            <Button
+              size="sm"
+              kind="ghost"
+              onClick={(e) => {
+                e.stopPropagation();
+                const c = r.completeness || completenessBySource.get(r.sourceId);
+                setDetails({ ...r, completeness: c || null });
+              }}
+            >
+              Подробнее
             </Button>
-            {r.currentCollectorId && (
-              <Button size="sm" kind="ghost" onClick={(e) => { e.stopPropagation(); handleUnbind(r); }}>
-                Отвязать
-              </Button>
+            {canWrite && (
+              <>
+                {r.state !== 'assigned' && (
+                  <Button size="sm" kind="ghost" icon="link" onClick={(e) => { e.stopPropagation(); setBinding(r); }}>
+                    Привязать
+                  </Button>
+                )}
+                {r.currentCollectorId && (
+                  <Button size="sm" kind="ghost" onClick={(e) => { e.stopPropagation(); handleUnbind(r); }}>
+                    Отвязать
+                  </Button>
+                )}
+                <Button size="sm" kind="ghost" icon="trash" onClick={(e) => { e.stopPropagation(); handleDelete(r); }}>
+                  Удалить
+                </Button>
+              </>
             )}
-            <Button size="sm" kind="ghost" icon="trash" onClick={(e) => { e.stopPropagation(); handleDelete(r); }}>
-              Удалить
-            </Button>
           </div>
-        ) : null}
+        )}
       />
       <BindSourceModal
         open={!!binding}
@@ -1446,11 +1403,11 @@ function FlowSourcesTab({ refreshKey, onReload }) {
           pushToast({ kind: 'success', title: SAVE_SUCCESS_TITLE, desc: SAVE_SUCCESS_DESC });
         }}
       />
-      <CompletenessDetailsModal
+      <CollectorsCompletenessModal
         open={!!details}
         source={details}
-        meta={completenessMeta}
         onClose={() => setDetails(null)}
+        onNavigate={onNavigate}
       />
     </>
   );
