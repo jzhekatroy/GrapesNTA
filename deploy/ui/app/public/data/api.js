@@ -801,6 +801,39 @@ const ApiClient = (() => {
     }
   }
 
+  async function exportDnsExplorerCsv(queryBody = {}) {
+    const body = { ...queryBody };
+    if (body.collectorFilter?.length) {
+      body.collectorId = body.collectorFilter.join(',');
+    }
+    delete body.collectorFilter;
+    if (body.from && body.to) {
+      body.range = 'custom';
+      delete body.timeRange;
+      delete body.customPeriod;
+    } else if (body.timeRange === 'custom' && body.customPeriod?.from && body.customPeriod?.to) {
+      const apiPeriod = apiCustomPeriodParams(body.customPeriod);
+      body.range = 'custom';
+      body.from = apiPeriod.from;
+      body.to = apiPeriod.to;
+    } else if (body.timeRange) {
+      body.range = body.timeRange;
+    }
+    delete body.customPeriod;
+    delete body.timeRange;
+    const res = await fetch('/api/dns-explorer/export', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'same-origin',
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) {
+      const errBody = await res.json().catch(() => ({}));
+      throw new Error(errBody.error || `HTTP ${res.status}`);
+    }
+    return res.blob();
+  }
+
   async function suggestDnsExplorerDomains(ctx, q) {
     const params = new URLSearchParams(dnsOverviewQuery(ctx));
     if (ctx.filters?.length) params.set('filters', encodeURIComponent(JSON.stringify(ctx.filters)));
@@ -2193,6 +2226,7 @@ const ApiClient = (() => {
     dnsQuery,
     loadDnsExplorerSchema,
     runDnsExplorerQuery,
+    exportDnsExplorerCsv,
     suggestDnsExplorerDomains,
     suggestDnsExplorerClientIps,
     suggestDnsExplorerServerIps,

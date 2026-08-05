@@ -87,6 +87,7 @@ const {
 const {
   dnsExplorerSchema,
   dnsExplorerQuery,
+  dnsExplorerExportCsv,
   dnsExplorerSuggestDomains,
   dnsExplorerSuggestClientIps,
   dnsExplorerSuggestServerIps,
@@ -1387,6 +1388,18 @@ app.post('/api/dns-explorer/query', async (req, res) => {
         elapsedMs: Date.now() - started,
       },
     });
+  } catch (err) {
+    const status = /Неизвестн|укажите|Некоррект|недоступ|retention|должен|период/i.test(err.message) ? 400 : 502;
+    res.status(status).json({ error: err.message });
+  }
+});
+
+app.post('/api/dns-explorer/export', async (req, res) => {
+  try {
+    const csv = await dnsExplorerExportCsv(req.body || {});
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="dns-explorer-${Date.now()}.csv"`);
+    res.send(`\uFEFF${csv}`);
   } catch (err) {
     const status = /Неизвестн|укажите|Некоррект|недоступ|retention|должен|период/i.test(err.message) ? 400 : 502;
     res.status(status).json({ error: err.message });

@@ -4,6 +4,7 @@ const {
   dnsResolversViewRef,
   l3PrefixesViewRef,
   sourcesTableRef,
+  query,
 } = require('./clickhouse');
 const {
   buildRawDnsFilters,
@@ -25,6 +26,9 @@ const { parseCollectorScopes, mergeCollectorParams } = require('./queries');
 const DNS_EXPLORER_MAX_RANGE_DAYS = 7;
 const DNS_EXPLORER_DEFAULT_LIMIT = 50;
 const DNS_EXPLORER_MAX_LIMIT = 200;
+const DNS_EXPLORER_MAX_EXPORT_ROWS = 10000;
+
+const DNS_FILTER_LOGIC = new Set(['and', 'or', 'and_not', 'or_not']);
 
 const METRICS = [
   { id: 'queries_per_sec', label: 'Запросы/с', kind: 'rate', event: 'queries' },
@@ -147,11 +151,34 @@ function metricPeriodValueSql(metricId, windowSeconds, alias = '') {
   return expr;
 }
 
+function normalizeFilterLogic(logic) {
+  const key = String(logic || 'and').trim().toLowerCase();
+  return DNS_FILTER_LOGIC.has(key) ? key : 'and';
+}
+
+function combineDnsExplorerFilterSql(clauses) {
+  if (!clauses.length) return null;
+  let sql = clauses[0].clause;
+  for (let i = 1; i < clauses.length; i += 1) {
+    const { logic, clause } = clauses[i];
+    const op = (logic === 'or' || logic === 'or_not') ? 'OR' : 'AND';
+    const part = (logic === 'and_not' || logic === 'or_not') ? `NOT (${clause})` : clause;
+    sql = `(${sql} ${op} ${part})`;
+  }
+  return sql;
+}
+
+function pushDnsExplorerFilterClause(clauses, clause, logic) {
+  if (!clause) return;
+  clauses.push({ clause, logic: normalizeFilterLogic(logic) });
+}
+
 function validateDnsExplorerFilters(filters = []) {
   if (!Array.isArray(filters)) throw new Error('filters должен быть массивом');
   return filters.map((raw, idx) => {
     const field = String(raw?.field || '');
     const op = String(raw?.op || '');
+    const logic = normalizeFilterLogic(raw?.logic);
     const def = FIELD_BY_ID[field];
     if (!def) throw new Error(`Строка ${idx + 1}: неизвестное поле «${field}»`);
     if (!def.ops.includes(op)) {
@@ -160,11 +187,11 @@ function validateDnsExplorerFilters(filters = []) {
     if (op === 'in') {
       const values = Array.isArray(raw.values) ? raw.values.map(String).filter(Boolean) : [];
       if (!values.length) throw new Error(`Строка ${idx + 1}: укажите значения для «один из»`);
-      return { field, op, values };
+      return { field, op, values, logic };
     }
     const value = raw.value != null ? String(raw.value).trim() : '';
     if (!value) throw new Error(`Строка ${idx + 1}: укажите значение`);
-    return { field, op, value };
+    return { field, op, value, logic };
   });
 }
 
@@ -178,61 +205,61 @@ function buildExplorerWhereClauses(filters, alias = 'd') {
     const key = `f${i}`;
     if (f.field === 'client_ip') {
       if (f.op === 'eq') {
-        clauses.push(clientIpFilterSql(alias));
+        pushDnsExplorerFilterClause(clauses, clientIpFilterSql(alias), f.logic);
         params.client_ip = f.value;
       } else if (f.op === 'ne') {
-        clauses.push(`NOT (${clientIpFilterSql(alias)})`);
+        pushDnsExplorerFilterClause(clauses, `NOT (${clientIpFilterSql(alias)})`, f.logic);
         params.client_ip = f.value;
       } else if (f.op === 'in_cidr') {
-        clauses.push(`isIPAddressInRange(${dnsIpExpr(col('client_ip'))}, {${key}:String})`);
+        pushDnsExplorerFilterClause(clauses, `isIPAddressInRange(${dnsIpExpr(col('client_ip'))}, {${key}:String})`, f.logic);
         params[key] = f.value;
       }
     } else if (f.field === 'server_ip') {
       if (f.op === 'eq') {
-        clauses.push(serverIpFilterSql(alias));
+        pushDnsExplorerFilterClause(clauses, serverIpFilterSql(alias), f.logic);
         params.server_ip = f.value;
       } else if (f.op === 'ne') {
-        clauses.push(`NOT (${serverIpFilterSql(alias)})`);
+        pushDnsExplorerFilterClause(clauses, `NOT (${serverIpFilterSql(alias)})`, f.logic);
         params.server_ip = f.value;
       } else if (f.op === 'in_cidr') {
-        clauses.push(`isIPAddressInRange(${dnsIpExpr(col('server_ip'))}, {${key}:String})`);
+        pushDnsExplorerFilterClause(clauses, `isIPAddressInRange(${dnsIpExpr(col('server_ip'))}, {${key}:String})`, f.logic);
         params[key] = f.value;
       }
     } else if (f.field === 'query_name') {
       if (f.op === 'eq') {
-        clauses.push(`${col('query_name')} = {${key}:String}`);
+        pushDnsExplorerFilterClause(clauses, `${col('query_name')} = {${key}:String}`, f.logic);
         params[key] = f.value;
       } else if (f.op === 'contains') {
-        clauses.push(`positionCaseInsensitive(${col('query_name')}, {${key}:String}) > 0`);
+        pushDnsExplorerFilterClause(clauses, `positionCaseInsensitive(${col('query_name')}, {${key}:String}) > 0`, f.logic);
         params[key] = f.value;
       } else if (f.op === 'not_contains') {
-        clauses.push(`positionCaseInsensitive(${col('query_name')}, {${key}:String}) = 0`);
+        pushDnsExplorerFilterClause(clauses, `positionCaseInsensitive(${col('query_name')}, {${key}:String}) = 0`, f.logic);
         params[key] = f.value;
       }
     } else if (f.field === 'qtype') {
       if (f.op === 'eq') {
-        clauses.push(`${col('qtype')} = {${key}:String}`);
+        pushDnsExplorerFilterClause(clauses, `${col('qtype')} = {${key}:String}`, f.logic);
         params[key] = f.value;
       } else if (f.op === 'ne') {
-        clauses.push(`${col('qtype')} != {${key}:String}`);
+        pushDnsExplorerFilterClause(clauses, `${col('qtype')} != {${key}:String}`, f.logic);
         params[key] = f.value;
       } else if (f.op === 'in') {
-        clauses.push(`${col('qtype')} IN {${key}:Array(String)}`);
+        pushDnsExplorerFilterClause(clauses, `${col('qtype')} IN {${key}:Array(String)}`, f.logic);
         params[key] = f.values;
       }
     } else if (f.field === 'rcode') {
       if (f.op === 'eq') {
         const n = normalizeRcodeFilterValue(f.value);
-        if (n === 'other') clauses.push(`${col('rcode')} NOT IN (0, 2, 3)`);
+        if (n === 'other') pushDnsExplorerFilterClause(clauses, `${col('rcode')} NOT IN (0, 2, 3)`, f.logic);
         else {
-          clauses.push(`${col('rcode')} = {${key}:UInt8}`);
+          pushDnsExplorerFilterClause(clauses, `${col('rcode')} = {${key}:UInt8}`, f.logic);
           params[key] = n;
         }
       } else if (f.op === 'ne') {
         const n = normalizeRcodeFilterValue(f.value);
-        if (n === 'other') clauses.push(`${col('rcode')} IN (0, 2, 3)`);
+        if (n === 'other') pushDnsExplorerFilterClause(clauses, `${col('rcode')} IN (0, 2, 3)`, f.logic);
         else {
-          clauses.push(`${col('rcode')} != {${key}:UInt8}`);
+          pushDnsExplorerFilterClause(clauses, `${col('rcode')} != {${key}:UInt8}`, f.logic);
           params[key] = n;
         }
       } else if (f.op === 'in') {
@@ -250,10 +277,14 @@ function buildExplorerWhereClauses(filters, alias = 'd') {
         }
         if (hasOther) parts.push(`${col('rcode')} NOT IN (0, 2, 3)`);
         if (!parts.length) throw new Error('Укажите значения результата ответа');
-        clauses.push(parts.length > 1 ? `(${parts.join(' OR ')})` : parts[0]);
+        pushDnsExplorerFilterClause(
+          clauses,
+          parts.length > 1 ? `(${parts.join(' OR ')})` : parts[0],
+          f.logic,
+        );
       }
     } else if (f.field === 'source_id') {
-      clauses.push(`${col('source_id')} IN {${key}:Array(String)}`);
+      pushDnsExplorerFilterClause(clauses, `${col('source_id')} IN {${key}:Array(String)}`, f.logic);
       params[key] = f.values;
     }
   }
@@ -279,7 +310,8 @@ function buildDnsExplorerBaseWhere(body = {}) {
   }, 'd');
 
   const explorer = buildExplorerWhereClauses(filters, 'd');
-  clauses.push(...explorer.clauses);
+  const filterSql = combineDnsExplorerFilterSql(explorer.clauses);
+  if (filterSql) clauses.push(filterSql);
   Object.assign(params, explorer.params);
 
   return {
@@ -293,7 +325,7 @@ function buildDnsExplorerBaseWhere(body = {}) {
   };
 }
 
-function dnsExplorerQuery(body = {}) {
+function dnsExplorerQuery(body = {}, options = {}) {
   const metricId = String(body.metric || 'queries_per_sec');
   if (!METRIC_BY_ID[metricId]) throw new Error(`Неизвестная метрика: ${metricId}`);
 
@@ -304,9 +336,10 @@ function dnsExplorerQuery(body = {}) {
     throw new Error('Указана неизвестная группировка');
   }
 
+  const hardMax = options.maxLimit || DNS_EXPLORER_MAX_LIMIT;
   const limit = Math.min(
     Math.max(Number(body.limit) || DNS_EXPLORER_DEFAULT_LIMIT, 1),
-    DNS_EXPLORER_MAX_LIMIT,
+    hardMax,
   );
 
   const base = buildDnsExplorerBaseWhere(body);
@@ -651,7 +684,12 @@ function parseDnsExplorerSuggestQuery(query = {}) {
   const collectorScopes = collectorId ? parseCollectorScopes(collectorId) : undefined;
   let filters = [];
   if (query.filters) {
-    try { filters = JSON.parse(decodeURIComponent(String(query.filters))); } catch { filters = []; }
+    try {
+      const parsed = JSON.parse(decodeURIComponent(String(query.filters)));
+      filters = Array.isArray(parsed) ? parsed : [];
+    } catch {
+      filters = [];
+    }
   }
   return {
     range,
@@ -665,9 +703,47 @@ function parseDnsExplorerSuggestQuery(query = {}) {
   };
 }
 
+function dnsRowsToCsv(rows, groupByIds, metricLabel) {
+  const headers = [
+    ...groupByIds.map((id) => GROUP_BY_ID[id]?.label || id),
+    metricLabel,
+  ];
+  const escape = (value) => {
+    const s = String(value ?? '');
+    return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+  };
+  const lines = [headers.map(escape).join(',')];
+  for (const row of rows) {
+    const values = row.values?.length ? row.values : [row.label || ''];
+    lines.push([
+      ...values,
+      row.value,
+    ].map(escape).join(','));
+  }
+  return lines.join('\n');
+}
+
+async function dnsExplorerExportCsv(body = {}) {
+  const exportBody = {
+    ...parseDnsExplorerBody(body),
+    limit: DNS_EXPLORER_MAX_EXPORT_ROWS,
+  };
+  if (body.from && body.to) {
+    exportBody.from = String(body.from);
+    exportBody.to = String(body.to);
+    exportBody.range = 'custom';
+  }
+  const spec = dnsExplorerQuery(exportBody, { maxLimit: DNS_EXPLORER_MAX_EXPORT_ROWS });
+  const { rows } = await query(spec.tableSql, spec.params || {}, { name: 'dns-explorer/export' });
+  const mapped = spec.mapTable(rows);
+  const metricLabel = METRIC_BY_ID[spec.meta?.metric]?.label || spec.meta?.metric || 'metric';
+  return dnsRowsToCsv(mapped, spec.meta?.groupBy || [], metricLabel);
+}
+
 module.exports = {
   dnsExplorerSchema,
   dnsExplorerQuery,
+  dnsExplorerExportCsv,
   dnsExplorerSuggestDomains,
   dnsExplorerSuggestClientIps,
   dnsExplorerSuggestServerIps,

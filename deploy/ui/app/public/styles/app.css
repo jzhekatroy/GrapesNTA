@@ -4545,9 +4545,14 @@ html.modal-open #root {
 }
 .dns-explorer-filter-row {
   display: grid;
-  grid-template-columns: minmax(140px, 1fr) minmax(120px, 0.8fr) minmax(180px, 1.5fr) auto;
+  grid-template-columns: 56px minmax(140px, 1fr) minmax(120px, 0.8fr) minmax(180px, 1.5fr) auto;
   gap: 8px;
   align-items: center;
+}
+.dns-explorer-filter-row .explorer-filter-row__logic {
+  padding: 4px 2px;
+  font-size: 11px;
+  text-align: center;
 }
 .dns-explorer-builder__actions {
   display: flex;

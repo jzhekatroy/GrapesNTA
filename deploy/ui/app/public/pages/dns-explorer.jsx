@@ -12,6 +12,13 @@ const DNS_RCODE_OPTIONS = [
   { value: 'other', label: 'Другой код' },
 ];
 
+const DNS_EXPLORER_FILTER_LOGIC_OPTIONS = [
+  { id: 'and', label: 'И' },
+  { id: 'or', label: 'ИЛИ' },
+  { id: 'and_not', label: 'И НЕ' },
+  { id: 'or_not', label: 'ИЛИ НЕ' },
+];
+
 const DNS_FIELD_OPS = {
   client_ip: [
     { id: 'eq', label: 'равно' },
@@ -41,8 +48,22 @@ const DNS_FIELD_OPS = {
   source_id: [{ id: 'in', label: 'один из' }],
 };
 
+function normalizeDnsExplorerFilterLogic(logic) {
+  const key = String(logic || 'and').trim().toLowerCase();
+  return DNS_EXPLORER_FILTER_LOGIC_OPTIONS.some((o) => o.id === key) ? key : 'and';
+}
+
+function normalizeDnsExplorerFilter(filter) {
+  const next = {
+    ...filter,
+    logic: normalizeDnsExplorerFilterLogic(filter?.logic),
+    values: filter?.values ? [...filter.values] : undefined,
+  };
+  return next;
+}
+
 function cloneDnsExplorerFilters(filters) {
-  return (filters || []).map((f) => ({ ...f, values: f.values ? [...f.values] : undefined }));
+  return (filters || []).map((f) => normalizeDnsExplorerFilter(f));
 }
 
 function dnsExplorerFilterLabel(fieldId, schema) {
@@ -482,10 +503,29 @@ function DnsExplorerFilterRow({
 
   return (
     <div className="dns-explorer-filter-row">
+      {index > 0 ? (
+        <select
+          className="input explorer-filter-row__logic"
+          value={normalizeDnsExplorerFilterLogic(row.logic)}
+          onChange={(e) => onChange(index, { ...row, logic: e.target.value })}
+          title="Связь с предыдущим условием"
+        >
+          {DNS_EXPLORER_FILTER_LOGIC_OPTIONS.map((opt) => (
+            <option key={opt.id} value={opt.id}>{opt.label}</option>
+          ))}
+        </select>
+      ) : (
+        <span className="explorer-filter-row__logic-placeholder" aria-hidden="true" />
+      )}
       <select
         className="input"
         value={row.field}
-        onChange={(e) => onChange(index, { field: e.target.value, op: DNS_FIELD_OPS[e.target.value]?.[0]?.id || 'eq', value: '' })}
+        onChange={(e) => onChange(index, {
+          field: e.target.value,
+          op: DNS_FIELD_OPS[e.target.value]?.[0]?.id || 'eq',
+          value: '',
+          logic: row.logic || 'and',
+        })}
       >
         {(schema?.fields || []).map((f) => (
           <option key={f.id} value={f.id}>{f.label}</option>
@@ -537,6 +577,7 @@ function PageDnsExplorer({ onNavigate, displayTimezone }) {
   const prevVisualLimitRef = useRef(null);
   const [loadMs, setLoadMs] = useState(null);
   const [serverMs, setServerMs] = useState(null);
+  const [exporting, setExporting] = useState(false);
 
   useEffect(() => {
     ApiClient.loadDnsExplorerSchema().then(setSchema).catch(() => setSchema(null));
@@ -631,7 +672,7 @@ function PageDnsExplorer({ onNavigate, displayTimezone }) {
   };
 
   const addFilter = () => {
-    setFilters((prev) => [...prev, { field: 'query_name', op: 'contains', value: '' }]);
+    setFilters((prev) => [...prev, { field: 'query_name', op: 'contains', value: '', logic: 'and' }]);
   };
 
   const updateFilter = (index, next) => {
@@ -706,6 +747,45 @@ function PageDnsExplorer({ onNavigate, displayTimezone }) {
     navigator.clipboard?.writeText(url);
   };
 
+  const exportCsv = async () => {
+    if (!hasAppliedQuery || !appliedSnapshot) return;
+    setExporting(true);
+    try {
+      const exportPayload = buildDnsExplorerPayload({
+        ...appliedSnapshot,
+        filters: (appliedSnapshot.filters || []).map(normalizeDnsExplorerFilter),
+        limit: DNS_EXPLORER_DEFAULT_LIMIT,
+      });
+      if (meta?.from && meta?.to) {
+        exportPayload.from = meta.from;
+        exportPayload.to = meta.to;
+        exportPayload.range = 'custom';
+      }
+      const blob = await ApiClient.exportDnsExplorerCsv(exportPayload);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `dns-explorer-${Date.now()}.csv`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      pushToast?.({
+        kind: 'success',
+        title: 'CSV экспортирован',
+        desc: 'Файл сохранён на ваш компьютер.',
+      });
+    } catch (err) {
+      pushToast?.({
+        kind: 'error',
+        title: 'Не удалось экспортировать CSV',
+        desc: err.message || ApiClient.LOAD_FAILED,
+      });
+    } finally {
+      setExporting(false);
+    }
+  };
+
   return (
     <div className="main__container dns-explorer-page">
       <div className="page-head">
@@ -716,7 +796,12 @@ function PageDnsExplorer({ onNavigate, displayTimezone }) {
         <div className="row" style={{ gap: 8 }}>
           <Button kind="ghost" size="sm" onClick={() => onNavigate?.('dns')}>Вернуться в обзор DNS</Button>
           {hasAppliedQuery && (
-            <Button kind="ghost" size="sm" icon="link" onClick={copyShareUrl}>Копировать ссылку</Button>
+            <>
+              <Button kind="ghost" size="sm" icon="export" onClick={exportCsv} disabled={exporting}>
+                {exporting ? 'Экспорт…' : 'CSV'}
+              </Button>
+              <Button kind="ghost" size="sm" icon="link" onClick={copyShareUrl}>Копировать ссылку</Button>
+            </>
           )}
         </div>
       </div>
@@ -847,6 +932,9 @@ function PageDnsExplorer({ onNavigate, displayTimezone }) {
                       onChange={setVisualLimit}
                     />
                   </div>
+                  <Button kind="ghost" size="sm" icon="download" onClick={exportCsv} disabled={!rows.length || exporting}>
+                    CSV
+                  </Button>
                 </div>
               </div>
             )}
