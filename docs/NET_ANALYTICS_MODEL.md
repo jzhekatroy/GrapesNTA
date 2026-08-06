@@ -92,13 +92,44 @@ View: `default.net_l2_vlans_enabled`
 
 | Source | Destination | Direction |
 |--------|-------------|-----------|
-| local-or-customer | external (`remote`) | `out` |
-| external | local-or-customer | `in` |
+| local-or-customer | anything else | `out` |
+| anything else | local-or-customer | `in` |
 | local-or-customer | local-or-customer | `internal` |
 | external | external | `transit` |
 | not classified | any | `unknown` |
 
-If no L3 prefixes are configured, direction stays `unknown`.
+With one end inside our networks the direction holds regardless of the other
+end, so foreign networks never need markup for `in` / `out`.
+
+### What counts as `external`
+
+An address absent from `net_l3_prefixes` is not somebody else's — it is merely
+undescribed, and both cases used to collapse into role `remote` and hence
+`transit`. A single forgotten prefix of our own then turned ordinary in/out
+traffic into transit, invisibly. Measured on a live install, two thirds of all
+`transit` was exactly that.
+
+`net_direction_settings.unknown_networks` decides how strict to be:
+
+| Value | Meaning |
+|-------|---------|
+| `foreign` (default) | Anything not catalogued is treated as somebody else's, so two such ends give `transit`. Historical behaviour. |
+| `unclassified` | `transit` requires **both** networks to be present in `net_l3_prefixes` — a deliberate statement by the operator. Otherwise the flow is `unknown`. |
+
+Foreign networks are described the same way as our own: a row in
+`net_l3_prefixes` with role `remote`.
+
+`unknown` is deliberately reused rather than adding a new direction value:
+rollups filter on a fixed direction list, so a new value would silently drop
+out of every aggregate. To tell "markup missing" from "classifier never ran",
+read `src_endpoint_source` / `dst_endpoint_source` (`prefix` vs `fallback`).
+
+The classifier logs `unknown_networks` and the cumulative counter
+`direction_networks_unclassified` on every refresh, and warns when the strict
+policy is on while the L3 catalog is empty — otherwise every flow would land in
+`unknown`.
+
+If no L3 prefixes are configured at all, direction stays `unknown`.
 
 ## flows_raw Columns
 

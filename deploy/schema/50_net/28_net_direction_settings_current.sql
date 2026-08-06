@@ -4,6 +4,7 @@ CREATE VIEW IF NOT EXISTS default.net_direction_settings_current
     `direction_mode` LowCardinality(String),
     `default_boundary` LowCardinality(String),
     `one_sided` LowCardinality(String),
+    `unknown_networks` LowCardinality(String),
     `updated_by` String,
     `updated_at` DateTime('UTC')
 )
@@ -12,6 +13,7 @@ AS SELECT
     direction_mode,
     default_boundary,
     one_sided,
+    unknown_networks,
     updated_by,
     updated_at_latest AS updated_at
 FROM
@@ -21,6 +23,7 @@ FROM
         argMax(direction_mode, updated_at) AS direction_mode,
         argMax(default_boundary, updated_at) AS default_boundary,
         argMax(one_sided, updated_at) AS one_sided,
+        argMax(unknown_networks, updated_at) AS unknown_networks,
         argMax(updated_by, updated_at) AS updated_by,
         max(updated_at) AS updated_at_latest
     FROM default.net_direction_settings

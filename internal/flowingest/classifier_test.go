@@ -7,39 +7,74 @@ import (
 
 func TestDeriveDirection(t *testing.T) {
 	cases := []struct {
-		name string
-		src  EndpointClass
-		dst  EndpointClass
-		want string
+		name            string
+		src             EndpointClass
+		dst             EndpointClass
+		unknownNetworks string
+		want            string
 	}{
 		{
-			name: "provider to remote is out",
-			src:  EndpointClass{Role: "provider_public"},
-			dst:  EndpointClass{Role: "remote"},
-			want: "out",
+			name:            "provider to remote is out",
+			src:             EndpointClass{Role: "provider_public"},
+			dst:             EndpointClass{Role: "remote"},
+			unknownNetworks: UnknownNetworksForeign,
+			want:            "out",
 		},
 		{
-			name: "remote to customer allocated is in",
-			src:  EndpointClass{Role: "remote"},
-			dst:  EndpointClass{Role: "customer_allocated"},
-			want: "in",
+			name:            "remote to customer allocated is in",
+			src:             EndpointClass{Role: "remote"},
+			dst:             EndpointClass{Role: "customer_allocated"},
+			unknownNetworks: UnknownNetworksForeign,
+			want:            "in",
 		},
 		{
-			name: "internal to customer transit is internal",
-			src:  EndpointClass{Role: "internal"},
-			dst:  EndpointClass{Role: "customer_transit"},
-			want: "internal",
+			name:            "internal to customer transit is internal",
+			src:             EndpointClass{Role: "internal"},
+			dst:             EndpointClass{Role: "customer_transit"},
+			unknownNetworks: UnknownNetworksForeign,
+			want:            "internal",
 		},
 		{
-			name: "remote to remote is transit",
-			src:  EndpointClass{Role: "remote"},
-			dst:  EndpointClass{Role: "remote"},
-			want: "transit",
+			name:            "remote to remote is transit",
+			src:             EndpointClass{Role: "remote"},
+			dst:             EndpointClass{Role: "remote"},
+			unknownNetworks: UnknownNetworksForeign,
+			want:            "transit",
+		},
+		{
+			// One end is ours, so the direction holds no matter what the other
+			// end is: foreign networks never need markup for in/out.
+			name:            "local to undescribed stays out when strict",
+			src:             EndpointClass{Role: "provider_public", Source: endpointSourcePrefix},
+			dst:             EndpointClass{Role: "remote", Source: "fallback"},
+			unknownNetworks: UnknownNetworksUnclassified,
+			want:            "out",
+		},
+		{
+			name:            "two catalogued foreign networks are transit when strict",
+			src:             EndpointClass{Role: "remote", Source: endpointSourcePrefix},
+			dst:             EndpointClass{Role: "remote", Source: endpointSourcePrefix},
+			unknownNetworks: UnknownNetworksUnclassified,
+			want:            "transit",
+		},
+		{
+			name:            "one undescribed end is not transit when strict",
+			src:             EndpointClass{Role: "remote", Source: endpointSourcePrefix},
+			dst:             EndpointClass{Role: "remote", Source: "fallback"},
+			unknownNetworks: UnknownNetworksUnclassified,
+			want:            DirectionUnknown,
+		},
+		{
+			name:            "two undescribed ends are unclassified when strict",
+			src:             EndpointClass{Role: "remote", Source: "fallback"},
+			dst:             EndpointClass{Role: "remote", Source: "fallback"},
+			unknownNetworks: UnknownNetworksUnclassified,
+			want:            DirectionUnknown,
 		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := DeriveDirection(tc.src, tc.dst)
+			got := DeriveDirection(tc.src, tc.dst, tc.unknownNetworks)
 			if got != tc.want {
 				t.Fatalf("DeriveDirection() = %q, want %q", got, tc.want)
 			}
@@ -47,11 +82,13 @@ func TestDeriveDirection(t *testing.T) {
 	}
 }
 
-func TestDeriveDirectionEmptyCatalogIsTransit(t *testing.T) {
-	// Empty L3 catalog → classify() yields remote/remote → transit.
+func TestDeriveDirectionEmptyCatalogKeepsTransitByDefault(t *testing.T) {
+	// Empty L3 catalog → classify() yields remote/remote. Installations that
+	// never touched the setting must not see their traffic move categories.
 	got := DeriveDirection(
-		EndpointClass{Role: "remote"},
-		EndpointClass{Role: "remote"},
+		EndpointClass{Role: "remote", Source: "fallback"},
+		EndpointClass{Role: "remote", Source: "fallback"},
+		UnknownNetworksForeign,
 	)
 	if got != "transit" {
 		t.Fatalf("DeriveDirection() = %q, want transit", got)
@@ -186,7 +223,7 @@ func TestClassifyPairOutboundUsesLocalOriginASN(t *testing.T) {
 
 	src := st.classify(netip.MustParseAddr("188.143.128.236"), 0)
 	dst := st.classify(netip.MustParseAddr("142.250.74.46"), 0)
-	direction := DeriveDirection(src, dst)
+	direction := DeriveDirection(src, dst, UnknownNetworksForeign)
 	if direction != "out" {
 		t.Fatalf("direction = %q, want out", direction)
 	}

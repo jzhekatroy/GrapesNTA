@@ -36,6 +36,29 @@ const (
 	directionSettingsID = "global"
 )
 
+// How to read a flow whose both endpoints are missing from the L3 catalog,
+// stored in net_direction_settings.unknown_networks.
+const (
+	// UnknownNetworksForeign assumes anything not catalogued belongs to
+	// somebody else, so such a flow is transit. Historical behaviour.
+	UnknownNetworksForeign = "foreign"
+	// UnknownNetworksUnclassified refuses to guess: transit then requires both
+	// networks to be present in the catalog, and everything else is reported
+	// as a gap in the markup.
+	UnknownNetworksUnclassified = "unclassified"
+)
+
+// DirectionUnknown is the existing "we could not tell" bucket. Rollups filter
+// on a fixed direction list and the UI already renders this value, so an
+// undescribed pair reuses it instead of introducing a value that would drop
+// out of every aggregate. src_endpoint_source still distinguishes a missing
+// prefix from a classifier that never ran.
+const DirectionUnknown = "unknown"
+
+// endpointSourcePrefix marks an endpoint resolved through net_l3_prefixes —
+// i.e. a network somebody deliberately described, ours or foreign.
+const endpointSourcePrefix = "prefix"
+
 // Port sides as marked by the operator. Ports missing from the map have no
 // known side, which always yields an unknown direction.
 const (
@@ -65,6 +88,10 @@ type TrafficClassifier struct {
 	portsClassified atomic.Uint64
 	portsNoIfIndex  atomic.Uint64
 	portsUnmarked   atomic.Uint64
+
+	// Flows left unclassified because neither network is described. Growth
+	// here is the signal to go and fill in the L3 catalog.
+	networksUnclassified atomic.Uint64
 }
 
 type classifierState struct {
@@ -77,8 +104,9 @@ type classifierState struct {
 
 	vlans map[uint16]vlanClass
 
-	directionMode string
-	portSides     map[portKey]uint8
+	directionMode   string
+	unknownNetworks string
+	portSides       map[portKey]uint8
 
 	hasLocalConfig bool
 }
@@ -201,15 +229,16 @@ func (tc *TrafficClassifier) run(ctx context.Context) {
 func (tc *TrafficClassifier) refreshOnce(ctx context.Context) error {
 	start := time.Now()
 	st := &classifierState{
-		bgp4:          newIPTrie(),
-		bgp6:          newIPTrie(),
-		asn4:          newIPTrie(),
-		asn6:          newIPTrie(),
-		l3v4:          newIPTrie(),
-		l3v6:          newIPTrie(),
-		vlans:         make(map[uint16]vlanClass),
-		directionMode: DirectionModePrefixes,
-		portSides:     make(map[portKey]uint8),
+		bgp4:            newIPTrie(),
+		bgp6:            newIPTrie(),
+		asn4:            newIPTrie(),
+		asn6:            newIPTrie(),
+		l3v4:            newIPTrie(),
+		l3v6:            newIPTrie(),
+		vlans:           make(map[uint16]vlanClass),
+		directionMode:   DirectionModePrefixes,
+		unknownNetworks: UnknownNetworksForeign,
+		portSides:       make(map[portKey]uint8),
 	}
 	bgpRows, err := tc.loadBGP(ctx, st)
 	if err != nil {
@@ -232,6 +261,7 @@ func (tc *TrafficClassifier) refreshOnce(ctx context.Context) error {
 	// outage is already caught by the loaders above, which keep the previous
 	// state in place.
 	tc.loadDirectionMode(ctx, st)
+	tc.loadUnknownNetworksPolicy(ctx, st)
 	portSwitches := tc.loadPortSides(ctx, st)
 	st.hasLocalConfig = l3Rows > 0
 	tc.state.Store(st)
@@ -243,6 +273,8 @@ func (tc *TrafficClassifier) refreshOnce(ctx context.Context) error {
 		"internal_vlans", internalVLANs,
 		"has_local_config", st.hasLocalConfig,
 		"direction_mode", st.directionMode,
+		"unknown_networks", st.unknownNetworks,
+		"direction_networks_unclassified", tc.networksUnclassified.Load(),
 		"port_sides", len(st.portSides),
 		"port_switches", portSwitches,
 		"direction_ports_classified", tc.portsClassified.Load(),
@@ -253,6 +285,11 @@ func (tc *TrafficClassifier) refreshOnce(ctx context.Context) error {
 	if st.directionMode == DirectionModePorts && len(st.portSides) == 0 {
 		tc.log.Warn("direction mode is ports but no port sides are marked: every flow will be unclassified",
 			"interface_roles_table", tc.cfg.Tables.InterfaceRoles,
+		)
+	}
+	if st.unknownNetworks == UnknownNetworksUnclassified && l3Rows == 0 {
+		tc.log.Warn("unknown networks are marked unclassified but the L3 catalog is empty: every flow will be unclassified",
+			"l3_prefixes_table", tc.cfg.Tables.L3Prefixes,
 		)
 	}
 	return nil
@@ -285,6 +322,37 @@ func (tc *TrafficClassifier) loadDirectionMode(ctx context.Context, st *classifi
 	}
 	if err := rows.Err(); err != nil {
 		tc.log.Warn("read direction settings", "table", table, "err", err)
+	}
+}
+
+// loadUnknownNetworksPolicy reads the setting in its own query: installations
+// upgraded from before the column exists must keep reading direction_mode,
+// which a combined SELECT would break.
+func (tc *TrafficClassifier) loadUnknownNetworksPolicy(ctx context.Context, st *classifierState) {
+	table := strings.TrimSpace(tc.cfg.Tables.DirectionSettings)
+	if table == "" {
+		return
+	}
+	rows, err := tc.conn.Query(ctx,
+		"SELECT unknown_networks FROM "+table+" WHERE settings_id = '"+directionSettingsID+"' LIMIT 1")
+	if err != nil {
+		// Missing column on an older schema: keep the historical behaviour.
+		tc.log.Warn("load unknown networks policy", "table", table, "err", err)
+		return
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var policy string
+		if err := rows.Scan(&policy); err != nil {
+			tc.log.Warn("scan unknown networks policy", "table", table, "err", err)
+			return
+		}
+		if strings.ToLower(strings.TrimSpace(policy)) == UnknownNetworksUnclassified {
+			st.unknownNetworks = UnknownNetworksUnclassified
+		}
+	}
+	if err := rows.Err(); err != nil {
+		tc.log.Warn("read unknown networks policy", "table", table, "err", err)
 	}
 }
 
@@ -479,7 +547,11 @@ func (tc *TrafficClassifier) ClassifyPair(src, dst [16]byte, ipVersion uint8, sr
 	}
 	srcClass := st.classify(srcAddr, srcVLAN)
 	dstClass := st.classify(dstAddr, dstVLAN)
-	return srcClass, dstClass, DeriveDirection(srcClass, dstClass)
+	direction := DeriveDirection(srcClass, dstClass, st.unknownNetworks)
+	if direction == DirectionUnknown {
+		tc.networksUnclassified.Add(1)
+	}
+	return srcClass, dstClass, direction
 }
 
 // DirectionMode reports the active direction model.
@@ -545,7 +617,7 @@ func (st *classifierState) classify(addr netip.Addr, vlan uint16) EndpointClass 
 			Role:        role,
 			Entity:      p.EntityID,
 			DisplayName: p.DisplayName,
-			Source:      "prefix",
+			Source:      endpointSourcePrefix,
 			Scope:       scope,
 			NetworkName: p.DisplayName,
 			NetworkRole: role,
@@ -607,22 +679,36 @@ func (st *classifierState) lookupL3Prefix(addr netip.Addr) (prefixClass, bool) {
 }
 
 // DeriveDirection maps endpoint roles to traffic direction.
-// Unmatched addresses are role=remote, so with an empty L3 catalog both sides
-// are remote → transit (not "unknown"). "unknown" is reserved for classifier
-// off / unparseable endpoints, not for "networks not labeled yet".
-func DeriveDirection(src, dst EndpointClass) string {
+//
+// With one end inside our networks the direction is unambiguous and the other
+// end needs no markup. When neither end is ours the answer depends on how much
+// we actually know: an address absent from net_l3_prefixes is not "somebody
+// else's", it is simply undescribed, and calling that transit hides forgotten
+// prefixes of our own inside a meaningful category. Under
+// UnknownNetworksUnclassified transit therefore requires both networks to be
+// catalogued — a deliberate statement by the operator; unknownNetworks
+// defaults to the historical UnknownNetworksForeign.
+func DeriveDirection(src, dst EndpointClass, unknownNetworks string) string {
 	srcLocal := isLocalOrCustomerRole(src.Role)
 	dstLocal := isLocalOrCustomerRole(dst.Role)
 	switch {
 	case srcLocal && dstLocal:
 		return "internal"
-	case srcLocal && !dstLocal:
+	case srcLocal:
 		return "out"
-	case !srcLocal && dstLocal:
+	case dstLocal:
 		return "in"
-	default:
+	}
+	if unknownNetworks != UnknownNetworksUnclassified || (isCatalogued(src) && isCatalogued(dst)) {
 		return "transit"
 	}
+	return DirectionUnknown
+}
+
+// isCatalogued reports whether the endpoint matched a described network rather
+// than falling through to the default remote role.
+func isCatalogued(c EndpointClass) bool {
+	return c.Source == endpointSourcePrefix
 }
 
 func normalizeRole(role string) string {
