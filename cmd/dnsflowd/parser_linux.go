@@ -57,9 +57,9 @@ func ethPayloadOffset(frame []byte) (off int, et uint16, ok bool) {
 	return off, et, true
 }
 
-// classifyPort53Frame classifies a BPF-matched port-53 frame. For IPv4/UDP it
-// also returns addresses, ports and DNS payload (same as parseIPv4UDPPayload).
-// Other classes return kind only; payload is nil.
+// classifyPort53Frame classifies a BPF-matched port-53 frame. For IPv4/UDP and
+// IPv6/UDP (no extension headers) it also returns addresses, ports and DNS
+// payload. TCP and other classes return kind only; payload is nil.
 func classifyPort53Frame(frame []byte) (kind dnsFrameKind, srcIP, dstIP [16]byte, sport, dport uint16, payload []byte) {
 	off, et, ok := ethPayloadOffset(frame)
 	if !ok {
@@ -119,12 +119,21 @@ func classifyPort53Frame(frame []byte) (kind dnsFrameKind, srcIP, dstIP [16]byte
 		l4 := ip[40:]
 		switch next {
 		case 17: // UDP
-			if len(l4) < 4 {
+			if len(l4) < 8 {
 				return dnsFrameOther, srcIP, dstIP, 0, 0, nil
 			}
 			sport = binary.BigEndian.Uint16(l4[0:2])
 			dport = binary.BigEndian.Uint16(l4[2:4])
-			return dnsFrameIPv6UDP, srcIP, dstIP, sport, dport, nil
+			ulen := int(binary.BigEndian.Uint16(l4[4:6]))
+			if ulen < 8 {
+				return dnsFrameIPv6UDP, srcIP, dstIP, sport, dport, nil
+			}
+			wantEnd := 8 + (ulen - 8)
+			if wantEnd > len(l4) {
+				wantEnd = len(l4)
+			}
+			payload = l4[8:wantEnd]
+			return dnsFrameIPv6UDP, srcIP, dstIP, sport, dport, payload
 		case 6: // TCP
 			if len(l4) < 4 {
 				return dnsFrameOther, srcIP, dstIP, 0, 0, nil

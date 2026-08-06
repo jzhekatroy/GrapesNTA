@@ -160,7 +160,8 @@ func main() {
 				dIPv6TCP := curIPv6TCP - prevIPv6TCP
 				dOther := curOther - prevOther
 				classifiedDelta := dIPv4UDP + dIPv6UDP + dIPv4TCP + dIPv6TCP + dOther
-				blindDelta := classifiedDelta - dIPv4UDP
+				// Blind = frames we still do not parse into dns_log (TCP + other).
+				blindDelta := dIPv4TCP + dIPv6TCP + dOther
 				var blindPct float64
 				if classifiedDelta > 0 {
 					blindPct = 100 * float64(blindDelta) / float64(classifiedDelta)
@@ -335,7 +336,6 @@ func main() {
 				ipv4UDP.Add(1)
 			case dnsFrameIPv6UDP:
 				ipv6UDP.Add(1)
-				continue
 			case dnsFrameIPv4TCP:
 				ipv4TCP.Add(1)
 				continue
@@ -347,7 +347,7 @@ func main() {
 				continue
 			}
 			if len(payload) == 0 || (sport != 53 && dport != 53) {
-				// Still counted as ipv4_udp for blind-spot ratios; nothing to parse.
+				// Counted in ipv4_udp/ipv6_udp for ratios; nothing to parse.
 				continue
 			}
 			lastPayloadLen.Store(uint64(len(payload)))
@@ -398,7 +398,7 @@ func main() {
 		"iface", *iface,
 		"source_id", *sourceID,
 		"bpf_filter", "port 53",
-		"parse_path", "ipv4_udp_only",
+		"parse_path", "ipv4_udp+ipv6_udp",
 		"ch_raw_enabled", *chRawEnabled,
 		"ch_table", *chTable,
 		"ch_answers_enabled", *chAnswersEnabled,

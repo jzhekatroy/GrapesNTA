@@ -62,17 +62,29 @@ func TestClassifyPort53Frame(t *testing.T) {
 		}
 		return frame
 	}
-	mkIPv6 := func(next byte, sport, dport uint16) []byte {
-		frame := make([]byte, 14+40+8)
+	mkIPv6 := func(next byte, sport, dport uint16, payloadLen int) []byte {
+		l4hdr := 8
+		if next == 6 {
+			l4hdr = 20
+			payloadLen = 0
+		}
+		frame := make([]byte, 14+40+l4hdr+payloadLen)
 		binary.BigEndian.PutUint16(frame[12:14], 0x86dd)
 		ip := frame[14:]
 		ip[0] = 0x60
 		ip[6] = next
+		binary.BigEndian.PutUint16(ip[4:6], uint16(l4hdr+payloadLen))
 		copy(ip[8:24], []byte{0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1})
 		copy(ip[24:40], []byte{0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2})
 		l4 := frame[54:]
 		binary.BigEndian.PutUint16(l4[0:2], sport)
 		binary.BigEndian.PutUint16(l4[2:4], dport)
+		if next == 17 {
+			binary.BigEndian.PutUint16(l4[4:6], uint16(8+payloadLen))
+			for i := 0; i < payloadLen; i++ {
+				l4[8+i] = byte(i + 1)
+			}
+		}
 		return frame
 	}
 
@@ -89,15 +101,18 @@ func TestClassifyPort53Frame(t *testing.T) {
 		}
 	})
 	t.Run("ipv6_udp", func(t *testing.T) {
-		kind, _, _, sp, dp, pay := classifyPort53Frame(mkIPv6(17, 53, 40000))
-		if kind != dnsFrameIPv6UDP || sp != 53 || dp != 40000 || pay != nil {
+		kind, sip, dip, sp, dp, pay := classifyPort53Frame(mkIPv6(17, 53, 40000, 4))
+		if kind != dnsFrameIPv6UDP || sp != 53 || dp != 40000 || len(pay) != 4 || pay[0] != 1 {
 			t.Fatalf("got kind=%s sp=%d dp=%d pay=%v", kind, sp, dp, pay)
+		}
+		if sip[0] != 0x20 || sip[15] != 1 || dip[15] != 2 {
+			t.Fatalf("ipv6 addrs sip[0]=%x sip[15]=%d dip[15]=%d", sip[0], sip[15], dip[15])
 		}
 	})
 	t.Run("ipv6_tcp", func(t *testing.T) {
-		kind, _, _, _, _, _ := classifyPort53Frame(mkIPv6(6, 53, 40000))
-		if kind != dnsFrameIPv6TCP {
-			t.Fatalf("got kind=%s", kind)
+		kind, _, _, _, _, pay := classifyPort53Frame(mkIPv6(6, 53, 40000, 0))
+		if kind != dnsFrameIPv6TCP || pay != nil {
+			t.Fatalf("got kind=%s pay=%v", kind, pay)
 		}
 	})
 	t.Run("other", func(t *testing.T) {
