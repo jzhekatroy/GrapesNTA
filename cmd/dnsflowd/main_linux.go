@@ -124,7 +124,8 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
-	var framesRead, emptyFrames, nonIPv4UDP, nonDNS, dnsRows, parseErrs, readTimeouts atomic.Uint64
+	var framesRead, emptyFrames, dnsRows, parseErrs, readTimeouts atomic.Uint64
+	var ipv4UDP, ipv6UDP, ipv4TCP, ipv6TCP, otherL3 atomic.Uint64
 	var readAttempts, readReturns atomic.Uint64
 	var lastFrameLen, lastCaptureLen, lastWireLen, lastPayloadLen, lastPacketUnix, lastReadAttemptUnix, lastReadReturnUnix atomic.Uint64
 
@@ -138,6 +139,7 @@ func main() {
 	go func() {
 		defer metricsWG.Done()
 		var prevFramesRead, prevDNSRows uint64
+		var prevIPv4UDP, prevIPv6UDP, prevIPv4TCP, prevIPv6TCP, prevOther uint64
 		var prevRawQueueDrops, prevAnswersQueueDrops, prevRawInsertErrs, prevAnswersInsertErrs uint64
 		for {
 			select {
@@ -147,14 +149,40 @@ func main() {
 				sink.LogMetrics()
 				curFramesRead := framesRead.Load()
 				curDNSRows := dnsRows.Load()
+				curIPv4UDP := ipv4UDP.Load()
+				curIPv6UDP := ipv6UDP.Load()
+				curIPv4TCP := ipv4TCP.Load()
+				curIPv6TCP := ipv6TCP.Load()
+				curOther := otherL3.Load()
+				dIPv4UDP := curIPv4UDP - prevIPv4UDP
+				dIPv6UDP := curIPv6UDP - prevIPv6UDP
+				dIPv4TCP := curIPv4TCP - prevIPv4TCP
+				dIPv6TCP := curIPv6TCP - prevIPv6TCP
+				dOther := curOther - prevOther
+				classifiedDelta := dIPv4UDP + dIPv6UDP + dIPv4TCP + dIPv6TCP + dOther
+				blindDelta := classifiedDelta - dIPv4UDP
+				var blindPct float64
+				if classifiedDelta > 0 {
+					blindPct = 100 * float64(blindDelta) / float64(classifiedDelta)
+				}
 				log.Info("dnsflowd capture", "iface", *iface,
 					"frames_read", curFramesRead,
 					"frames_delta", curFramesRead-prevFramesRead,
 					"dns_rows", curDNSRows,
 					"dns_rows_delta", curDNSRows-prevDNSRows,
 					"empty_frames", emptyFrames.Load(),
-					"non_ipv4_udp", nonIPv4UDP.Load(),
-					"non_dns", nonDNS.Load(),
+					"ipv4_udp", curIPv4UDP,
+					"ipv4_udp_delta", dIPv4UDP,
+					"ipv6_udp", curIPv6UDP,
+					"ipv6_udp_delta", dIPv6UDP,
+					"ipv4_tcp", curIPv4TCP,
+					"ipv4_tcp_delta", dIPv4TCP,
+					"ipv6_tcp", curIPv6TCP,
+					"ipv6_tcp_delta", dIPv6TCP,
+					"other_l3", curOther,
+					"other_l3_delta", dOther,
+					"blind_delta", blindDelta,
+					"blind_pct", blindPct,
 					"parse_errs", parseErrs.Load(),
 					"read_timeouts", readTimeouts.Load(),
 					"read_attempts", readAttempts.Load(),
@@ -167,6 +195,11 @@ func main() {
 					"last_read_attempt_unix", lastReadAttemptUnix.Load(),
 					"last_read_return_unix", lastReadReturnUnix.Load(),
 				)
+				prevIPv4UDP = curIPv4UDP
+				prevIPv6UDP = curIPv6UDP
+				prevIPv4TCP = curIPv4TCP
+				prevIPv6TCP = curIPv6TCP
+				prevOther = curOther
 				if readAttempts.Load() > readReturns.Load() && curFramesRead == prevFramesRead {
 					log.Warn("dnsflowd capture stall",
 						"iface", *iface,
@@ -296,13 +329,25 @@ func main() {
 			}
 			lastPacketUnix.Store(uint64(ts.Unix()))
 
-			srcIP, dstIP, sport, dport, payload, ok := parseIPv4UDPPayload(data)
-			if !ok || len(payload) == 0 {
-				nonIPv4UDP.Add(1)
+			kind, srcIP, dstIP, sport, dport, payload := classifyPort53Frame(data)
+			switch kind {
+			case dnsFrameIPv4UDP:
+				ipv4UDP.Add(1)
+			case dnsFrameIPv6UDP:
+				ipv6UDP.Add(1)
+				continue
+			case dnsFrameIPv4TCP:
+				ipv4TCP.Add(1)
+				continue
+			case dnsFrameIPv6TCP:
+				ipv6TCP.Add(1)
+				continue
+			default:
+				otherL3.Add(1)
 				continue
 			}
-			if sport != 53 && dport != 53 {
-				nonDNS.Add(1)
+			if len(payload) == 0 || (sport != 53 && dport != 53) {
+				// Still counted as ipv4_udp for blind-spot ratios; nothing to parse.
 				continue
 			}
 			lastPayloadLen.Store(uint64(len(payload)))
@@ -352,6 +397,8 @@ func main() {
 	log.Info("dnsflowd started",
 		"iface", *iface,
 		"source_id", *sourceID,
+		"bpf_filter", "port 53",
+		"parse_path", "ipv4_udp_only",
 		"ch_raw_enabled", *chRawEnabled,
 		"ch_table", *chTable,
 		"ch_answers_enabled", *chAnswersEnabled,

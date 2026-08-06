@@ -53,7 +53,10 @@ func openPacketCapture(ifname string) (*packetCapture, error) {
 	if err != nil {
 		return nil, fmt.Errorf("pcap activate %q: %w", ifname, err)
 	}
-	if err := h.SetBPFFilter("ip and udp port 53"); err != nil {
+	// port 53 covers IPv4/IPv6 and UDP/TCP so we can measure blind spots
+	// (IPv6 and TCP DNS) that the previous "ip and udp port 53" filter hid.
+	// Only IPv4/UDP is parsed into dns_log; other classes are counted and dropped.
+	if err := h.SetBPFFilter("port 53"); err != nil {
 		h.Close()
 		return nil, fmt.Errorf("pcap set DNS BPF filter: %w", err)
 	}
