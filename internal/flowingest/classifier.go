@@ -25,6 +25,12 @@ type ClassifierTables struct {
 	// working.
 	DirectionSettings string
 	InterfaceRoles    string
+
+	// ClientPrefixes / ClientPorts feed cabinet-client tagging (src_client /
+	// dst_client). Empty disables the corresponding loader so older installs
+	// keep working before the net_clients DDL is applied.
+	ClientPrefixes string
+	ClientPorts    string
 }
 
 // Direction modes stored in net_direction_settings.direction_mode.
@@ -101,6 +107,11 @@ type classifierState struct {
 	asn6 *ipTrie
 	l3v4 *ipTrie
 	l3v6 *ipTrie
+
+	// Cabinet clients: prefix -> client_id (EntityID slot) and port -> client_id.
+	client4    *ipTrie
+	client6    *ipTrie
+	clientPorts map[portKey]string
 
 	vlans map[uint16]vlanClass
 
@@ -198,6 +209,12 @@ func (t ClassifierTables) withDefaults() ClassifierTables {
 	if strings.TrimSpace(t.L2VLANs) == "" {
 		t.L2VLANs = "default.net_l2_vlans_enabled"
 	}
+	if strings.TrimSpace(t.ClientPrefixes) == "" {
+		t.ClientPrefixes = "default.net_client_prefixes_enabled"
+	}
+	if strings.TrimSpace(t.ClientPorts) == "" {
+		t.ClientPorts = "default.net_client_ports_enabled"
+	}
 	return t
 }
 
@@ -235,6 +252,9 @@ func (tc *TrafficClassifier) refreshOnce(ctx context.Context) error {
 		asn6:            newIPTrie(),
 		l3v4:            newIPTrie(),
 		l3v6:            newIPTrie(),
+		client4:         newIPTrie(),
+		client6:         newIPTrie(),
+		clientPorts:     make(map[portKey]string),
 		vlans:           make(map[uint16]vlanClass),
 		directionMode:   DirectionModePrefixes,
 		unknownNetworks: UnknownNetworksForeign,
@@ -263,6 +283,8 @@ func (tc *TrafficClassifier) refreshOnce(ctx context.Context) error {
 	tc.loadDirectionMode(ctx, st)
 	tc.loadUnknownNetworksPolicy(ctx, st)
 	portSwitches := tc.loadPortSides(ctx, st)
+	clientPrefixRows := tc.loadClientPrefixes(ctx, st)
+	clientPortRows := tc.loadClientPorts(ctx, st)
 	st.hasLocalConfig = l3Rows > 0
 	tc.state.Store(st)
 	tc.log.Info("traffic classifier refreshed",
@@ -277,6 +299,8 @@ func (tc *TrafficClassifier) refreshOnce(ctx context.Context) error {
 		"direction_networks_unclassified", tc.networksUnclassified.Load(),
 		"port_sides", len(st.portSides),
 		"port_switches", portSwitches,
+		"client_prefixes", clientPrefixRows,
+		"client_ports", clientPortRows,
 		"direction_ports_classified", tc.portsClassified.Load(),
 		"direction_ports_no_ifindex", tc.portsNoIfIndex.Load(),
 		"direction_ports_unmarked", tc.portsUnmarked.Load(),
@@ -469,6 +493,137 @@ func (tc *TrafficClassifier) loadIPASNPrefixes(ctx context.Context, st *classifi
 		n++
 	}
 	return n, rows.Err()
+}
+
+// loadClientPrefixes fills the cabinet-client prefix tries. Failures are
+// non-fatal: tagging simply stays empty until the next successful refresh.
+func (tc *TrafficClassifier) loadClientPrefixes(ctx context.Context, st *classifierState) int {
+	table := strings.TrimSpace(tc.cfg.Tables.ClientPrefixes)
+	if table == "" {
+		return 0
+	}
+	rows, err := tc.conn.Query(ctx, "SELECT client_id, prefix, family FROM "+table)
+	if err != nil {
+		tc.log.Warn("load client prefixes", "table", table, "err", err)
+		return 0
+	}
+	defer rows.Close()
+	n := 0
+	for rows.Next() {
+		var clientID, prefix string
+		var family uint8
+		if err := rows.Scan(&clientID, &prefix, &family); err != nil {
+			tc.log.Warn("scan client prefixes", "table", table, "err", err)
+			return n
+		}
+		clientID = strings.TrimSpace(clientID)
+		if clientID == "" {
+			continue
+		}
+		p, err := netip.ParsePrefix(strings.TrimSpace(prefix))
+		if err != nil || !p.IsValid() {
+			continue
+		}
+		pc := prefixClass{EntityID: clientID}
+		if family == 4 || p.Addr().Is4() {
+			st.client4.Insert(p.Masked(), pc)
+		} else {
+			st.client6.Insert(p.Masked(), pc)
+		}
+		n++
+	}
+	if err := rows.Err(); err != nil {
+		tc.log.Warn("read client prefixes", "table", table, "err", err)
+	}
+	return n
+}
+
+// loadClientPorts fills the cabinet-client port map (sampler + ifIndex).
+func (tc *TrafficClassifier) loadClientPorts(ctx context.Context, st *classifierState) int {
+	table := strings.TrimSpace(tc.cfg.Tables.ClientPorts)
+	if table == "" {
+		return 0
+	}
+	rows, err := tc.conn.Query(ctx, "SELECT client_id, switch_ip, if_index FROM "+table)
+	if err != nil {
+		tc.log.Warn("load client ports", "table", table, "err", err)
+		return 0
+	}
+	defer rows.Close()
+	n := 0
+	skipped := 0
+	for rows.Next() {
+		var clientID, switchIP string
+		var ifIndex uint32
+		if err := rows.Scan(&clientID, &switchIP, &ifIndex); err != nil {
+			tc.log.Warn("scan client ports", "table", table, "err", err)
+			return n
+		}
+		clientID = strings.TrimSpace(clientID)
+		sampler, err := ParseSamplerAddress(switchIP)
+		if err != nil || clientID == "" || sampler == ([16]byte{}) || ifIndex == 0 {
+			skipped++
+			continue
+		}
+		st.clientPorts[portKey{sampler: sampler, ifIndex: ifIndex}] = clientID
+		n++
+	}
+	if err := rows.Err(); err != nil {
+		tc.log.Warn("read client ports", "table", table, "err", err)
+	}
+	if skipped > 0 {
+		tc.log.Warn("client ports rows skipped", "table", table, "rows", skipped)
+	}
+	return n
+}
+
+func (st *classifierState) lookupClientPrefix(addr netip.Addr) string {
+	if st == nil || !addr.IsValid() {
+		return ""
+	}
+	var trie *ipTrie
+	if addr.Is4() {
+		trie = st.client4
+	} else {
+		trie = st.client6
+	}
+	if pc, ok := trie.Lookup(addr); ok {
+		return pc.EntityID
+	}
+	return ""
+}
+
+// AttachClients sets src_client / dst_client on a flow row.
+// Prefix match wins; if empty, ingress ifIndex -> src, egress ifIndex -> dst.
+func (tc *TrafficClassifier) AttachClients(r *FlowRow) {
+	if tc == nil || r == nil {
+		return
+	}
+	st := tc.state.Load()
+	if st == nil {
+		return
+	}
+	ipVersion := IPVersionFromEtype(r.Etype)
+	if srcAddr, ok := addrFromFlow(r.SrcAddr, ipVersion); ok {
+		if id := st.lookupClientPrefix(srcAddr); id != "" {
+			r.SrcClient = id
+		}
+	}
+	if dstAddr, ok := addrFromFlow(r.DstAddr, ipVersion); ok {
+		if id := st.lookupClientPrefix(dstAddr); id != "" {
+			r.DstClient = id
+		}
+	}
+	if r.SrcClient == "" && r.InIf != 0 {
+		if id, ok := st.clientPorts[portKey{sampler: r.SamplerAddress, ifIndex: r.InIf}]; ok {
+			r.SrcClient = id
+		}
+	}
+	if r.DstClient == "" && r.OutIf != 0 {
+		if id, ok := st.clientPorts[portKey{sampler: r.SamplerAddress, ifIndex: r.OutIf}]; ok {
+			r.DstClient = id
+		}
+	}
 }
 
 func (tc *TrafficClassifier) loadL3Prefixes(ctx context.Context, st *classifierState) (int, error) {

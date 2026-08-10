@@ -51,6 +51,9 @@ type FlowRow struct {
 	DstRole               string
 	SrcEntity             string
 	DstEntity             string
+	// Cabinet client on each side of the flow (independent from L3 entity).
+	SrcClient             string
+	DstClient             string
 	SrcVLAN          uint16
 	DstVLAN          uint16
 	Etype            uint32

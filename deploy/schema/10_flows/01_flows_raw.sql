@@ -47,6 +47,8 @@ CREATE TABLE IF NOT EXISTS default.flows_raw
     `dst_role` LowCardinality(String) DEFAULT '',
     `src_entity` LowCardinality(String) DEFAULT '',
     `dst_entity` LowCardinality(String) DEFAULT '',
+    `src_client` LowCardinality(String) DEFAULT '',
+    `dst_client` LowCardinality(String) DEFAULT '',
     `source_id` LowCardinality(String) DEFAULT 'xdp-default',
     `src_mac` FixedString(6) DEFAULT '',
     `dst_mac` FixedString(6) DEFAULT '',
@@ -58,7 +60,9 @@ CREATE TABLE IF NOT EXISTS default.flows_raw
     INDEX idx_obs_src_vlan src_vlan TYPE set(0) GRANULARITY 4,
     INDEX idx_obs_dst_vlan dst_vlan TYPE set(0) GRANULARITY 4,
     INDEX idx_obs_src_port src_port TYPE bloom_filter(0.01) GRANULARITY 4,
-    INDEX idx_obs_dst_port dst_port TYPE bloom_filter(0.01) GRANULARITY 4
+    INDEX idx_obs_dst_port dst_port TYPE bloom_filter(0.01) GRANULARITY 4,
+    INDEX idx_src_client src_client TYPE bloom_filter(0.01) GRANULARITY 4,
+    INDEX idx_dst_client dst_client TYPE bloom_filter(0.01) GRANULARITY 4
 )
 ENGINE = MergeTree
 PARTITION BY date

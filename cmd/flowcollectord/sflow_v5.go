@@ -383,6 +383,7 @@ func flowRowFromRawHeader(
 			direction = d
 		}
 		flowingest.ApplyEndpointClasses(&row, srcClass, dstClass, direction)
+		classifier.AttachClients(&row)
 	}
 	return row, ethParseOK
 }

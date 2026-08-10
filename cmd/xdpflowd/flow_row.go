@@ -70,6 +70,7 @@ func flowRowFromKV(fv flowKV, m flowRowMapper, receivedAt time.Time) flowingest.
 			direction = d
 		}
 		flowingest.ApplyEndpointClasses(&row, srcClass, dstClass, direction)
+		m.classifier.AttachClients(&row)
 	}
 	return row
 }

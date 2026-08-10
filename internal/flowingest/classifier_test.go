@@ -356,3 +356,58 @@ func TestPortSideKeyMatchesSFlowSamplerEncoding(t *testing.T) {
 		t.Fatalf("sampler = %v, want %v", sampler, want)
 	}
 }
+
+func TestAttachClientsByPrefixAndPort(t *testing.T) {
+	st := &classifierState{
+		client4:     newIPTrie(),
+		client6:     newIPTrie(),
+		clientPorts: make(map[portKey]string),
+	}
+	st.client4.Insert(netip.MustParsePrefix("203.0.113.0/24"), prefixClass{EntityID: "client:prefix"})
+	sampler, err := ParseSamplerAddress("192.0.2.1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	st.clientPorts[portKey{sampler: sampler, ifIndex: 12}] = "client:port"
+
+	tc := &TrafficClassifier{}
+	tc.state.Store(st)
+
+	// Prefix on destination.
+	row := FlowRow{
+		Etype:          0x0800,
+		SrcAddr:        [16]byte{198, 51, 100, 1},
+		DstAddr:        [16]byte{203, 0, 113, 10},
+		SamplerAddress: sampler,
+	}
+	tc.AttachClients(&row)
+	if row.SrcClient != "" || row.DstClient != "client:prefix" {
+		t.Fatalf("prefix attach: src=%q dst=%q", row.SrcClient, row.DstClient)
+	}
+
+	// Port: ingress -> src, egress -> dst. Prefix wins over port on the same side.
+	row2 := FlowRow{
+		Etype:          0x0800,
+		SrcAddr:        [16]byte{198, 51, 100, 1},
+		DstAddr:        [16]byte{198, 51, 100, 2},
+		SamplerAddress: sampler,
+		InIf:           12,
+		OutIf:          12,
+	}
+	tc.AttachClients(&row2)
+	if row2.SrcClient != "client:port" || row2.DstClient != "client:port" {
+		t.Fatalf("port attach: src=%q dst=%q", row2.SrcClient, row2.DstClient)
+	}
+
+	row3 := FlowRow{
+		Etype:          0x0800,
+		SrcAddr:        [16]byte{203, 0, 113, 5},
+		DstAddr:        [16]byte{198, 51, 100, 2},
+		SamplerAddress: sampler,
+		InIf:           12,
+	}
+	tc.AttachClients(&row3)
+	if row3.SrcClient != "client:prefix" {
+		t.Fatalf("prefix must win over port: src=%q", row3.SrcClient)
+	}
+}
