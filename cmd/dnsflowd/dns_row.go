@@ -10,6 +10,11 @@ type DNSRow struct {
 	SourceID           string
 	SamplerAddress     [16]byte
 	ClientIP           [16]byte
+	// ClientID is the cabinet client owning ClientIP, empty when the address
+	// belongs to nobody registered. Resolved here rather than at query time so
+	// an address that later moves to another client cannot expose the previous
+	// owner's history.
+	ClientID           string
 	ServerIP           [16]byte
 	ClientPort         uint16
 	ServerPort         uint16

@@ -16,6 +16,8 @@ import (
 	"time"
 
 	"github.com/google/gopacket/pcap"
+
+	"xdpflowd/internal/flowingest"
 )
 
 func main() {
@@ -46,6 +48,9 @@ func main() {
 	chAnswersLagRecover := flag.Uint64("ch-answers-lag-recover-threshold", 50000, "resume raw after answers lag stays below this")
 	chRawShedRecoverCooldown := flag.Duration("ch-raw-shed-recover-cooldown", 2*time.Minute, "how long answers lag must stay low before raw resumes")
 	chAnswersDedupTTL := flag.Duration("ch-answers-dedup-ttl", 60*time.Second, "suppress duplicate dns_answers within this window (0 disables)")
+	clientsEnabled := flag.Bool("clients-enabled", true, "resolve the cabinet client owning client_ip and write it to dns_log.client_id")
+	clientsTable := flag.String("clients-table", flowingest.DefaultClientPrefixesTable, "view of enabled cabinet client networks")
+	clientsRefresh := flag.Duration("clients-refresh", time.Minute, "how often to reload cabinet client networks")
 	flag.Parse()
 
 	log := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
@@ -124,6 +129,22 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
+	// Clients bound to equipment ports cannot be resolved here: a DNS packet
+	// carries no sampler address and no ifIndex, so only network-bound clients
+	// are ever tagged.
+	clientTagger, err := flowingest.NewClientTagger(ctx, log, flowingest.ClientTaggerConfig{
+		Enabled: *clientsEnabled,
+		DSN:     strings.TrimSpace(*chDSN),
+		Refresh: *clientsRefresh,
+		Table:   strings.TrimSpace(*clientsTable),
+	})
+	if err != nil {
+		log.Error("client tagging", "err", err)
+		handle.Close()
+		os.Exit(1)
+	}
+	defer clientTagger.Close()
+
 	var framesRead, emptyFrames, dnsRows, parseErrs, readTimeouts atomic.Uint64
 	var ipv4UDP, ipv6UDP, ipv4TCP, ipv6TCP, otherL3 atomic.Uint64
 	var readAttempts, readReturns atomic.Uint64
@@ -166,7 +187,14 @@ func main() {
 				if classifiedDelta > 0 {
 					blindPct = 100 * float64(blindDelta) / float64(classifiedDelta)
 				}
+				// client_prefixes staying at 0 while client_rows_untagged grows is
+				// the only way to tell an unloaded catalog from clients that are
+				// genuinely quiet.
+				clientStats := clientTagger.Stats()
 				log.Info("dnsflowd capture", "iface", *iface,
+					"client_prefixes", clientStats.Prefixes,
+					"client_rows_tagged", clientStats.Tagged,
+					"client_rows_untagged", clientStats.Untagged,
 					"frames_read", curFramesRead,
 					"frames_delta", curFramesRead-prevFramesRead,
 					"dns_rows", curDNSRows,
@@ -371,6 +399,9 @@ func main() {
 				continue
 			}
 			row.SourceID = *sourceID
+			// Only the asking side is tagged: server_ip is a resolver, and the
+			// cabinet answers "what did my network look up", never "who asked me".
+			row.ClientID = clientTagger.ClientForIP(row.ClientIP, dnsFrameIPVersion(kind))
 			dnsRows.Add(1)
 			if dnsRows.Load() <= 10 {
 				log.Info("dnsflowd dns sample",

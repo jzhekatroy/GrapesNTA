@@ -355,9 +355,13 @@ def bootstrap_bucket(
             f"WHERE date >= today() - {lookback}"
         )
     else:
+        # Bound by the same window. The result is clamped to now - days just
+        # below, so a wider scan cannot change the answer, while on a raw log
+        # such as dns_log an unbounded min() reads the whole retention.
         sql = (
             f"SELECT ifNull(min({expr}), toDateTime('1970-01-01 00:00:00', 'UTC')) "
-            f"FROM {table}"
+            f"FROM {table} "
+            f"WHERE {col} >= now() - INTERVAL {lookback} DAY"
         )
     raw = ch.query(sql, display=f"bootstrap min bucket for {job.job_id}")
     if raw == "1970-01-01 00:00:00":

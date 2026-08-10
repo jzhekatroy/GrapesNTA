@@ -149,6 +149,19 @@ func classifyPort53Frame(frame []byte) (kind dnsFrameKind, srcIP, dstIP [16]byte
 	}
 }
 
+// dnsFrameIPVersion reports the IP version of a classified frame in the same
+// encoding the client tagger expects, and 0 for a frame that carries no address.
+func dnsFrameIPVersion(kind dnsFrameKind) uint8 {
+	switch kind {
+	case dnsFrameIPv4UDP, dnsFrameIPv4TCP:
+		return 4
+	case dnsFrameIPv6UDP, dnsFrameIPv6TCP:
+		return 6
+	default:
+		return 0
+	}
+}
+
 // parseIPv4UDPPayload extracts IPv4 UDP payload from an Ethernet frame (optional one 802.1Q tag).
 func parseIPv4UDPPayload(frame []byte) (srcIP, dstIP [16]byte, sport, dport uint16, payload []byte, ok bool) {
 	kind, sip, dip, sp, dp, pay := classifyPort53Frame(frame)

@@ -1193,6 +1193,67 @@ GROUP BY day, client_id, source_id, direction, transport, service_code, service_
 """,
         pre_delete_sql="ALTER TABLE default.traffic_client_service_1d DELETE WHERE day = {bucket_dt}",
     ),
+    RollupJob(
+        job_id="dns_client_domain_1h",
+        dest_table="default.dns_client_domain_1h",
+        bucket_kind="hour",
+        time_column="ts",
+        source_table="default.dns_log",
+        priority=330,
+        depends_on=(),
+        # A materialized view would be cheaper, but it sees one insert block at a
+        # time and so cannot rank an hour: folding the tail requires the whole
+        # bucket, which is what this job has and a view never does.
+        #
+        # The tail past the top 50 by queries becomes 'other' rather than being
+        # dropped, so a client's shares still add up to their total. Without the
+        # fold one residential client can contribute tens of thousands of rows an
+        # hour, and the whole log carries about 1.9 million distinct names.
+        #
+        # Only rows the collector tagged are read: client_id is empty for
+        # everything else and PREWHERE with the set index turns the scan into the
+        # client subset instead of the full hour.
+        select_sql="""
+SELECT
+    hour,
+    client_id,
+    source_id,
+    if(fold_tail, 'other', domain) AS domain,
+    sum(queries) AS queries,
+    sum(responses) AS responses,
+    sum(nxdomain) AS nxdomain,
+    sum(servfail) AS servfail
+FROM
+(
+    SELECT
+        *,
+        row_number() OVER (
+            PARTITION BY hour, client_id, source_id
+            ORDER BY queries DESC, responses DESC, domain ASC
+        ) > 50 AS fold_tail
+    FROM
+    (
+        WITH cutToFirstSignificantSubdomain(d.query_name) AS registrable
+        SELECT
+            toStartOfHour(d.ts) AS hour,
+            d.client_id AS client_id,
+            d.source_id AS source_id,
+            if(registrable = '', 'unknown', registrable) AS domain,
+            countIf(d.is_response = 0) AS queries,
+            countIf(d.is_response = 1) AS responses,
+            countIf((d.is_response = 1) AND (d.rcode = 3)) AS nxdomain,
+            countIf((d.is_response = 1) AND (d.rcode = 2)) AS servfail
+        FROM default.dns_log AS d
+        PREWHERE d.client_id != ''
+        WHERE {time_filter}
+        GROUP BY hour, client_id, source_id, domain
+    ) AS detail
+) AS ranked
+GROUP BY hour, client_id, source_id, domain
+""",
+        pre_delete_sql="ALTER TABLE default.dns_client_domain_1h DELETE WHERE hour = {bucket_dt}",
+        time_filter_column="d.ts",
+    ),
 ]
 
 
