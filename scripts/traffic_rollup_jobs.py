@@ -1233,7 +1233,17 @@ FROM
         ) > 50 AS fold_tail
     FROM
     (
-        WITH cutToFirstSignificantSubdomain(d.query_name) AS registrable
+        WITH
+            -- The collector stores the name as the resolver sent it, so it is a
+            -- FQDN ending in the root dot. Left in place the last label is empty
+            -- and cutToFirstSignificantSubdomain returns nothing at all, which
+            -- collapsed every client's whole vitrine into one 'unknown' row.
+            if(
+                endsWith(d.query_name, '.'),
+                substring(d.query_name, 1, length(d.query_name) - 1),
+                d.query_name
+            ) AS fqdn,
+            cutToFirstSignificantSubdomain(fqdn) AS registrable
         SELECT
             toStartOfHour(d.ts) AS hour,
             d.client_id AS client_id,
