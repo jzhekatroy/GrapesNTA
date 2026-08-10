@@ -980,8 +980,11 @@ GROUP BY hour, client_id, source_id, direction, country_code
         # port (below the 32768 ephemeral floor) it names the service, because a
         # client that serves is the interesting side. Otherwise the client dialled
         # out, and the peer's port names the service. If neither side has a usable
-        # port - both ephemeral, or ICMP with no ports at all - the traffic is
-        # genuinely unidentifiable and collapses to 'other'.
+        # port, the traffic is genuinely unidentifiable and collapses to 'other'.
+        #
+        # Only tcp, udp and sctp carry ports at all. The port columns are not
+        # empty for ICMP - they hold the type and code - so without the transport
+        # guard an unreachable reply surfaced as the invented service 'icmp/769'.
         #
         # The tail is still folded: per-port detail is ranked by bytes inside the
         # bucket and everything past the top 20 becomes 'other'. That bounds the
@@ -1018,10 +1021,11 @@ FROM
 WITH
     dst_svc.service_code != '' AS has_dst_service,
     src_svc.service_code != '' AS has_src_service,
+    e.transport IN ('tcp', 'udp', 'sctp') AS has_ports,
     if(e.direction = 'out', e.src_port, e.dst_port) AS client_port,
     if(e.direction = 'out', e.dst_port, e.src_port) AS peer_port,
-    (client_port > 0) AND (client_port < 32768) AS client_serves,
-    (peer_port > 0) AND (peer_port < 32768) AS peer_serves,
+    has_ports AND (client_port > 0) AND (client_port < 32768) AS client_serves,
+    has_ports AND (peer_port > 0) AND (peer_port < 32768) AS peer_serves,
     if(client_serves, client_port, peer_port) AS svc_port_raw,
     (NOT has_dst_service) AND (NOT has_src_service) AND (client_serves OR peer_serves) AS keep_port
 SELECT
