@@ -1,6 +1,11 @@
 -- Cabinet client showcase aggregates: country / ASN / service (hour + day).
 -- Safe to re-run.
 --
+-- ORDER BY starts with client_id because every cabinet query is scoped to one
+-- client, which leaves the bucket column outside the primary key prefix: the
+-- idx_hour / idx_day minmax indexes are what keeps the rollup runner's
+-- idempotency probe and per-bucket DELETE from scanning the whole partition.
+--
 -- Apply:
 --   clickhouse-client ... --multiquery < deploy/clickhouse/migrate_traffic_client_vitrines.sql
 
@@ -13,10 +18,11 @@ CREATE TABLE IF NOT EXISTS default.traffic_client_country_1h
     `country_code` LowCardinality(String),
     `bytes` UInt64,
     `packets` UInt64,
-    `flows_count` UInt64
+    `flows_count` UInt64,
+    INDEX idx_hour hour TYPE minmax GRANULARITY 1
 )
 ENGINE = SummingMergeTree
-PARTITION BY toYYYYMM(hour)
+PARTITION BY toYYYYMMDD(hour)
 ORDER BY (client_id, hour, source_id, direction, country_code)
 SETTINGS index_granularity = 8192;
 
@@ -29,7 +35,8 @@ CREATE TABLE IF NOT EXISTS default.traffic_client_country_1d
     `country_code` LowCardinality(String),
     `bytes` UInt64,
     `packets` UInt64,
-    `flows_count` UInt64
+    `flows_count` UInt64,
+    INDEX idx_day day TYPE minmax GRANULARITY 1
 )
 ENGINE = SummingMergeTree
 PARTITION BY toYYYYMM(day)
@@ -48,10 +55,11 @@ CREATE TABLE IF NOT EXISTS default.traffic_client_asn_1h
     `remote_as_country` LowCardinality(String),
     `bytes` UInt64,
     `packets` UInt64,
-    `flows_count` UInt64
+    `flows_count` UInt64,
+    INDEX idx_hour hour TYPE minmax GRANULARITY 1
 )
 ENGINE = SummingMergeTree
-PARTITION BY toYYYYMM(hour)
+PARTITION BY toYYYYMMDD(hour)
 ORDER BY (client_id, hour, source_id, direction, is_total, remote_asn)
 SETTINGS index_granularity = 8192;
 
@@ -67,7 +75,8 @@ CREATE TABLE IF NOT EXISTS default.traffic_client_asn_1d
     `remote_as_country` LowCardinality(String),
     `bytes` UInt64,
     `packets` UInt64,
-    `flows_count` UInt64
+    `flows_count` UInt64,
+    INDEX idx_day day TYPE minmax GRANULARITY 1
 )
 ENGINE = SummingMergeTree
 PARTITION BY toYYYYMM(day)
@@ -86,10 +95,11 @@ CREATE TABLE IF NOT EXISTS default.traffic_client_service_1h
     `category` LowCardinality(String),
     `bytes` UInt64,
     `packets` UInt64,
-    `flows_count` UInt64
+    `flows_count` UInt64,
+    INDEX idx_hour hour TYPE minmax GRANULARITY 1
 )
 ENGINE = SummingMergeTree
-PARTITION BY toYYYYMM(hour)
+PARTITION BY toYYYYMMDD(hour)
 ORDER BY (client_id, hour, source_id, direction, transport, category, service_code, service_name)
 SETTINGS index_granularity = 8192;
 
@@ -105,7 +115,8 @@ CREATE TABLE IF NOT EXISTS default.traffic_client_service_1d
     `category` LowCardinality(String),
     `bytes` UInt64,
     `packets` UInt64,
-    `flows_count` UInt64
+    `flows_count` UInt64,
+    INDEX idx_day day TYPE minmax GRANULARITY 1
 )
 ENGINE = SummingMergeTree
 PARTITION BY toYYYYMM(day)

@@ -13,9 +13,10 @@ CREATE TABLE IF NOT EXISTS default.traffic_client_asn_1h
     `remote_as_country` LowCardinality(String),
     `bytes` UInt64,
     `packets` UInt64,
-    `flows_count` UInt64
+    `flows_count` UInt64,
+    INDEX idx_hour hour TYPE minmax GRANULARITY 1
 )
 ENGINE = SummingMergeTree
-PARTITION BY toYYYYMM(hour)
+PARTITION BY toYYYYMMDD(hour)
 ORDER BY (client_id, hour, source_id, direction, is_total, remote_asn)
 SETTINGS index_granularity = 8192;

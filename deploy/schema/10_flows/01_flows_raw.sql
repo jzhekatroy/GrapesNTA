@@ -61,8 +61,10 @@ CREATE TABLE IF NOT EXISTS default.flows_raw
     INDEX idx_obs_dst_vlan dst_vlan TYPE set(0) GRANULARITY 4,
     INDEX idx_obs_src_port src_port TYPE bloom_filter(0.01) GRANULARITY 4,
     INDEX idx_obs_dst_port dst_port TYPE bloom_filter(0.01) GRANULARITY 4,
-    INDEX idx_src_client src_client TYPE bloom_filter(0.01) GRANULARITY 4,
-    INDEX idx_dst_client dst_client TYPE bloom_filter(0.01) GRANULARITY 4
+    -- Cabinet lookups are "this client on either side", i.e. an OR over both
+    -- columns. Per-column indexes cannot decide such an OR on their own, so both
+    -- columns live in one set index that evaluates the whole expression.
+    INDEX idx_client (src_client, dst_client) TYPE set(0) GRANULARITY 4
 )
 ENGINE = MergeTree
 PARTITION BY date

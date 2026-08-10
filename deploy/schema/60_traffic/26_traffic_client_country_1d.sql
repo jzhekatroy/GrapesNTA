@@ -7,7 +7,8 @@ CREATE TABLE IF NOT EXISTS default.traffic_client_country_1d
     `country_code` LowCardinality(String),
     `bytes` UInt64,
     `packets` UInt64,
-    `flows_count` UInt64
+    `flows_count` UInt64,
+    INDEX idx_day day TYPE minmax GRANULARITY 1
 )
 ENGINE = SummingMergeTree
 PARTITION BY toYYYYMM(day)
