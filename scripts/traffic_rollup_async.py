@@ -876,6 +876,7 @@ DEFAULT_BACKFILL_JOBS = [
     "traffic_direction_1m",
     "traffic_role_1m",
     "traffic_entity_1m",
+    "traffic_client_1m",
     "traffic_vlan_1m",
     "traffic_country_1m",
     "traffic_service_1m",
@@ -883,9 +884,11 @@ DEFAULT_BACKFILL_JOBS = [
     "traffic_asn_1m",
     "traffic_asn_pair_1m",
     "traffic_dashboard_1h",
+    "traffic_client_1h",
     "traffic_asn_1h",
     "traffic_asn_pair_1h",
     "traffic_dashboard_1d",
+    "traffic_client_1d",
 ]
 
 BACKFILL_QUEUE_TABLE = "default.traffic_rollup_backfill_queue"

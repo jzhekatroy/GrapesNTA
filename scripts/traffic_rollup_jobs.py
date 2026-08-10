@@ -534,6 +534,58 @@ GROUP BY
         time_filter_column="f.time_received_ns",
     ),
     RollupJob(
+        job_id="traffic_client_1m",
+        dest_table="default.traffic_client_1m",
+        bucket_kind="minute",
+        time_column="time_received_ns",
+        source_table="default.flows_raw",
+        priority=55,
+        depends_on=(),
+        # Direction is from the client's point of view, not the operator's:
+        # src_client -> out, dst_client -> in. A flow with the same client on
+        # both sides is skipped (self-traffic). A flow between two different
+        # clients produces two rows via ARRAY JOIN.
+        select_sql="""
+SELECT
+    toStartOfMinute(time_received_ns) AS minute,
+    client_id,
+    source_id,
+    direction,
+    sum(bytes) AS bytes,
+    sum(packets) AS packets,
+    sum(coalesce(sampling_rate, 1)) AS flows_count
+FROM
+(
+    SELECT
+        time_received_ns,
+        source_id,
+        bytes,
+        packets,
+        sampling_rate,
+        side.1 AS client_id,
+        side.2 AS direction
+    FROM default.flows_raw
+    ARRAY JOIN arrayFilter(
+        x -> (tupleElement(x, 1) != ''),
+        [
+            (
+                if(src_client != '' AND src_client != dst_client, src_client, ''),
+                'out'
+            ),
+            (
+                if(dst_client != '' AND src_client != dst_client, dst_client, ''),
+                'in'
+            )
+        ]
+    ) AS side
+    WHERE {time_filter}
+      AND (src_client != '' OR dst_client != '')
+)
+GROUP BY minute, client_id, source_id, direction
+""",
+        pre_delete_sql="ALTER TABLE default.traffic_client_1m DELETE WHERE minute = {bucket_dt}",
+    ),
+    RollupJob(
         job_id="traffic_dashboard_1h",
         dest_table="default.traffic_dashboard_1h",
         bucket_kind="hour",
@@ -638,6 +690,29 @@ GROUP BY
         pre_delete_sql="ALTER TABLE default.traffic_asn_pair_1h DELETE WHERE hour = {bucket_dt}",
     ),
     RollupJob(
+        job_id="traffic_client_1h",
+        dest_table="default.traffic_client_1h",
+        bucket_kind="hour",
+        time_column="minute",
+        source_table="default.traffic_client_1m",
+        priority=230,
+        depends_on=("traffic_client_1m",),
+        select_sql="""
+SELECT
+    toStartOfHour(minute) AS hour,
+    client_id,
+    source_id,
+    direction,
+    sum(bytes) AS bytes,
+    sum(packets) AS packets,
+    sum(flows_count) AS flows_count
+FROM default.traffic_client_1m
+WHERE {time_filter}
+GROUP BY hour, client_id, source_id, direction
+""",
+        pre_delete_sql="ALTER TABLE default.traffic_client_1h DELETE WHERE hour = {bucket_dt}",
+    ),
+    RollupJob(
         job_id="traffic_dashboard_1d",
         dest_table="default.traffic_dashboard_1d",
         bucket_kind="day",
@@ -677,6 +752,29 @@ WHERE {time_filter}
 GROUP BY day, source_id
 """,
         pre_delete_sql="ALTER TABLE default.traffic_dashboard_1d DELETE WHERE day = {bucket_dt}",
+    ),
+    RollupJob(
+        job_id="traffic_client_1d",
+        dest_table="default.traffic_client_1d",
+        bucket_kind="day",
+        time_column="minute",
+        source_table="default.traffic_client_1m",
+        priority=310,
+        depends_on=("traffic_client_1m",),
+        select_sql="""
+SELECT
+    toStartOfDay(minute) AS day,
+    client_id,
+    source_id,
+    direction,
+    sum(bytes) AS bytes,
+    sum(packets) AS packets,
+    sum(flows_count) AS flows_count
+FROM default.traffic_client_1m
+WHERE {time_filter}
+GROUP BY day, client_id, source_id, direction
+""",
+        pre_delete_sql="ALTER TABLE default.traffic_client_1d DELETE WHERE day = {bucket_dt}",
     ),
 ]
 

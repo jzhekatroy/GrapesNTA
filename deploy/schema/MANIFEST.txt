@@ -85,6 +85,9 @@
 60_traffic/15_traffic_entity_1m.sql
 60_traffic/16_traffic_vlan_1m.sql
 60_traffic/21_traffic_rollup_backfill_queue.sql
+60_traffic/22_traffic_client_1m.sql
+60_traffic/23_traffic_client_1h.sql
+60_traffic/24_traffic_client_1d.sql
 70_observations/01_observations.sql
 70_observations/03_observation_rollups_5m.sql
 70_observations/04_observation_runs.sql
