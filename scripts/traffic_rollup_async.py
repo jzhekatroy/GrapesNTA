@@ -1062,15 +1062,39 @@ def run_range_backfill(
     skipping = bool(resume_job)
 
     for job in jobs:
+        # Never write a bucket that is still open. The bucket would be filled
+        # from the part of it that exists right now, state would advance past it,
+        # and the live runner only moves forward - so the target keeps a partial
+        # bucket for good. This actually happened: a hand-run backfill whose
+        # --range-to reached into the current hour left dns_client_domain_1h with
+        # 15 of that hour's 83 queries and skipped the hour before it entirely.
+        job_range_to = min(range_to, safe_until_for_job(job, args))
+        if job_range_to < range_to:
+            logger.info(
+                "job=%s action=clamp_open_bucket requested_to=%s effective_to=%s",
+                job.job_id,
+                fmt_dt(range_to),
+                fmt_dt(job_range_to),
+            )
+
         if skipping:
             if job.job_id != resume_job:
                 continue
             skipping = False
-            bucket_list = iter_range_buckets(job, range_from, range_to)
+            bucket_list = iter_range_buckets(job, range_from, job_range_to)
             if resume_minute is not None:
                 bucket_list = [b for b in bucket_list if b >= resume_minute]
         else:
-            bucket_list = iter_range_buckets(job, range_from, range_to)
+            bucket_list = iter_range_buckets(job, range_from, job_range_to)
+
+        if not bucket_list:
+            logger.info(
+                "job=%s action=range_empty from=%s to=%s",
+                job.job_id,
+                fmt_dt(range_from),
+                fmt_dt(job_range_to),
+            )
+            continue
 
         # One range DELETE per job instead of a per-minute mutation. Each
         # ALTER ... DELETE rewrites the whole daily partition, so 206 per-minute
@@ -1082,7 +1106,7 @@ def run_range_backfill(
         if not args.dry_run and job.pre_delete_sql and bucket_list:
             col = bucket_column(job)
             lo_dt = f"toDateTime('{fmt_dt(bucket_list[0])}', 'UTC')"
-            hi_dt = f"toDateTime('{fmt_dt(range_to)}', 'UTC')"
+            hi_dt = f"toDateTime('{fmt_dt(job_range_to)}', 'UTC')"
             try:
                 has_rows = ch.query(
                     f"SELECT 1 FROM {job.dest_table} "
@@ -1096,7 +1120,7 @@ def run_range_backfill(
                     "job=%s action=range_delete from=%s to=%s",
                     job.job_id,
                     fmt_dt(bucket_list[0]),
-                    fmt_dt(range_to),
+                    fmt_dt(job_range_to),
                 )
                 ch.execute(
                     f"ALTER TABLE {job.dest_table} DELETE "
