@@ -15,14 +15,18 @@ DDoS с Grapes NTA. Описание поверхностное: где каки
 | Задача | Рекомендуемая таблица |
 |--------|------------------------|
 | Общий трафик по направлениям | `traffic_dashboard_1m`, `traffic_dashboard_1h`, `traffic_dashboard_1d` |
-| Top источники / назначения | `traffic_talker_1m`, `traffic_talker_1h` |
-| Top пары `src -> dst` | `traffic_pair_1m`, `traffic_pair_1h` |
+| Top ASN источники / назначения | `traffic_asn_1m`, `traffic_asn_1h` |
+| Top пары ASN `src -> dst` | `traffic_asn_pair_1m`, `traffic_asn_pair_1h` |
 | Top протоколы IP | `traffic_protocol_1m` |
 | Top сервисы/порты | `traffic_service_1m`, `traffic_unknown_port_1m` |
 | География / страны | `traffic_country_1m` |
 | DNS события | `dns_log`, `dns_answers` |
 | Справочник наших сетей | `net_l3_prefixes_enabled` |
 | Справочник источников данных | `net_flow_sources_enabled` |
+
+> **Важно:** `traffic_talker_*` и `traffic_pair_*` (по IP) **deprecated** и больше не наполняются rollup-ами.
+> Для top talkers / pairs использовать `traffic_asn_*` и `traffic_asn_pair_*`.
+> Детализацию до IP брать из `flows_raw` только на коротком окне после срабатывания алерта.
 
 ## Направления трафика
 
@@ -139,11 +143,12 @@ L2/VLAN-контекст: где пакет был увиден.
 
 Для DDoS-модуля это быстрый источник baseline по скорости и объёму.
 
-## Top talkers
+## Top talkers (ASN)
 
-### `traffic_talker_1m`, `traffic_talker_1h`
+### `traffic_asn_1m`, `traffic_asn_1h`
 
-Top endpoint-ы. Одна и та же flow-запись попадает в таблицу дважды:
+Актуальные top talkers — по ASN, не по IP.
+Одна и та же flow-запись попадает в таблицу дважды:
 `endpoint_side = 'src'` и `endpoint_side = 'dst'`.
 
 | Поле | Назначение | Где используется |
@@ -152,21 +157,16 @@ Top endpoint-ы. Одна и та же flow-запись попадает в т�
 | `source_id` | источник данных | фильтр источников |
 | `endpoint_side` | `src` или `dst` | вкладки «Источники» / «Назначения» |
 | `direction` | направление flow | входящий/исходящий/total |
-| `endpoint_ip` | IP endpoint-а | top IP |
-| `endpoint_asn`, `endpoint_as_name` | ASN endpoint-а | ASN display/filter |
-| `endpoint_ip_country` | страна IP | GEO |
-| `endpoint_as_country` | страна ASN | дополнительная справка |
-| `endpoint_scope` | `local`, `customer`, `remote`, `unknown` | понять, внешний это IP или наш |
-| `endpoint_label` | label/DNS/name | UI |
-| `endpoint_network_name`, `endpoint_network_role` | сеть/роль, если IP локальный/клиентский | DDoS target attribution |
+| `endpoint_asn`, `endpoint_as_name` | ASN endpoint-а | top ASN |
+| `endpoint_as_country` | страна ASN | GEO |
 | `bytes`, `packets`, `flows_count` | метрики | сортировка/детали |
 
 Использование:
 
 | UI/задача | Фильтр |
 |-----------|--------|
-| Топ источников входящего DDoS | `direction = 'in' AND endpoint_side = 'src'` |
-| Топ целей входящего DDoS | `direction = 'in' AND endpoint_side = 'dst'` |
+| Топ ASN-источников входящего DDoS | `direction = 'in' AND endpoint_side = 'src'` |
+| Топ ASN-целей входящего DDoS | `direction = 'in' AND endpoint_side = 'dst'` |
 | Топ наших исходящих отправителей | `direction = 'out' AND endpoint_side = 'src'` |
 | Топ внешних назначений исходящего | `direction = 'out' AND endpoint_side = 'dst'` |
 
@@ -174,32 +174,34 @@ Top endpoint-ы. Одна и та же flow-запись попадает в т�
 
 | Период | Таблица |
 |--------|---------|
-| до 1 часа | `traffic_talker_1m` |
-| 3h/6h/12h/24h+ | `traffic_talker_1h` |
+| до 1 часа | `traffic_asn_1m` |
+| 3h/6h/12h/24h+ | `traffic_asn_1h` |
 
-### `traffic_pair_1m`, `traffic_pair_1h`
+### `traffic_asn_pair_1m`, `traffic_asn_pair_1h`
 
-Top пары `src_ip -> dst_ip`. Самый детальный и самый тяжёлый top-агрегат.
+Top пары `src_asn -> dst_asn`.
 
 | Поле | Назначение | Где используется |
 |------|------------|------------------|
 | `minute` / `hour` | bucket | период |
 | `source_id` | источник данных | фильтр источников |
 | `direction` | направление flow | входящий/исходящий |
-| `src_ip`, `dst_ip` | пара IP | вкладка «Пары» |
-| `src_asn`, `dst_asn` | ASN обеих сторон | подробности |
+| `src_asn`, `dst_asn` | пара ASN | вкладка «Пары» |
 | `src_as_name`, `dst_as_name` | названия ASN | UI |
-| `src_ip_country`, `dst_ip_country` | GEO обеих сторон | UI |
-| `src_scope`, `dst_scope` | чей IP | понять атакующий/цель |
-| `src_label`, `dst_label` | подписи | UI |
+| `src_as_country`, `dst_as_country` | GEO обеих сторон | UI |
 | `bytes`, `packets`, `flows_count` | метрики | сортировка/детали |
 
 Для DDoS:
 
 | Задача | Фильтр |
 |--------|--------|
-| Кто атакует какую цель | `direction = 'in'`, group by `src_ip -> dst_ip` |
-| Какие наши IP создают исходящий трафик | `direction = 'out'`, group by `src_ip -> dst_ip` |
+| Какие ASN атакуют какие ASN-цели | `direction = 'in'`, group by `src_asn -> dst_asn` |
+| Куда уходит наш исходящий трафик | `direction = 'out'`, group by `src_asn -> dst_asn` |
+
+### Deprecated: `traffic_talker_*`, `traffic_pair_*`
+
+Таблицы по IP больше **не наполняются**. Не использовать в новых интеграциях.
+Если нужна детализация до IP — короткий drill-down в `flows_raw` после алерта.
 
 ## Протоколы и сервисы
 
@@ -325,43 +327,50 @@ BMP/BGP raw/служебные таблицы. Для DDoS-интеграции 
 
 1. Смотреть `traffic_dashboard_1m` / `traffic_dashboard_1h` по `in_bytes`,
    `in_packets`.
-2. При всплеске взять top источники:
-   `traffic_talker_1m/1h` с `direction = 'in' AND endpoint_side = 'src'`.
-3. Взять top целей:
-   `traffic_talker_1m/1h` с `direction = 'in' AND endpoint_side = 'dst'`.
-4. Для конкретных связок:
-   `traffic_pair_1m/1h` с `direction = 'in'`.
+2. При всплеске взять top ASN-источники:
+   `traffic_asn_1m/1h` с `direction = 'in' AND endpoint_side = 'src'`.
+3. Взять top ASN-цели:
+   `traffic_asn_1m/1h` с `direction = 'in' AND endpoint_side = 'dst'`.
+4. Для связок ASN:
+   `traffic_asn_pair_1m/1h` с `direction = 'in'`.
 5. Для профиля атаки:
-   `traffic_protocol_1m`, `traffic_service_1m`, `traffic_unknown_port_1m`.
+   `traffic_protocol_1m`, `traffic_service_1m`, `traffic_unknown_port_1m`,
+   `traffic_country_1m`.
+6. Для атрибуции до IP (какой адрес под ударом, кто бьёт) —
+   короткий запрос в `flows_raw` на окно алерты.
 
 ### Что считать внешним источником
 
-Для входящего DDoS:
+Для входящего DDoS по ASN-агрегатам:
 
 ```sql
 direction = 'in'
 endpoint_side = 'src'
-endpoint_scope = 'remote'
 ```
 
-`endpoint_scope` уже есть в `traffic_talker_*`.
+Для drill-down в `flows_raw`:
+
+```sql
+direction = 'in'
+src_endpoint_scope = 'remote'
+```
 
 ### Что считать целью
 
-Для входящего DDoS:
+Для входящего DDoS по ASN-агрегатам:
 
 ```sql
 direction = 'in'
 endpoint_side = 'dst'
 ```
 
-Цель можно дополнительно читать через:
+Цель до IP читать из `flows_raw` на коротком окне через:
 
-- `endpoint_ip`;
-- `endpoint_label`;
-- `endpoint_network_name`;
-- `endpoint_network_role`;
-- `endpoint_scope`.
+- `dst_addr`;
+- `dst_label`;
+- `dst_network_name`;
+- `dst_network_role`;
+- `dst_endpoint_scope`.
 
 ## Важные оговорки
 
@@ -369,8 +378,12 @@ endpoint_side = 'dst'
 - Всегда учитывать `source_id` и `include_in_total`, чтобы не double-count-ить
   трафик с разных источников.
 - В ClickHouse нет `direction = 'total'`; total — это сумма реальных направлений.
-- `traffic_pair_*` имеет высокую кардинальность. Для длинных периодов использовать
-  только `traffic_pair_1h`.
+- `traffic_talker_*` / `traffic_pair_*` deprecated и пустые. Использовать
+  `traffic_asn_*` / `traffic_asn_pair_*`.
+- `traffic_asn_pair_*` имеет высокую кардинальность. Для длинных периодов
+  использовать `traffic_asn_pair_1h`.
 - `IP country` и `ASN country` — разные вещи. Для географии атаки обычно
-  использовать IP-country.
+  использовать IP-country из `traffic_country_1m` (`country_basis = 'ip'`).
+- Клиентские агрегаты (`traffic_client_*`) появятся отдельно; для DDoS по клиенту
+  использовать их, а не общесетевые `traffic_dashboard_*`.
 

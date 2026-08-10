@@ -15,14 +15,18 @@
   Задача                              | Рекомендуемая таблица
   ------------------------------------+------------------------------------------
   Общий трафик по направлениям        | traffic_dashboard_1m, 1h, 1d
-  Top источники / назначения          | traffic_talker_1m, traffic_talker_1h
-  Top пары src -> dst                 | traffic_pair_1m, traffic_pair_1h
+  Top ASN источники / назначения      | traffic_asn_1m, traffic_asn_1h
+  Top пары ASN src -> dst             | traffic_asn_pair_1m, traffic_asn_pair_1h
   Top протоколы IP                    | traffic_protocol_1m
   Top сервисы / порты                 | traffic_service_1m, traffic_unknown_port_1m
   География / страны                  | traffic_country_1m
   DNS события                         | dns_log, dns_answers
   Справочник наших сетей            | net_l3_prefixes_enabled
   Справочник источников данных        | net_flow_sources_enabled
+
+ВАЖНО: traffic_talker_* и traffic_pair_* (по IP) — deprecated, больше не наполняются.
+Использовать traffic_asn_* / traffic_asn_pair_*. Детализацию до IP — из flows_raw
+только на коротком окне после алерта. Актуальная версия: DB_OVERVIEW_FOR_DDOS_INTEGRATION.md
 
 
 --------------------------------------------------------------------------------
