@@ -88,6 +88,12 @@
 60_traffic/22_traffic_client_1m.sql
 60_traffic/23_traffic_client_1h.sql
 60_traffic/24_traffic_client_1d.sql
+60_traffic/25_traffic_client_country_1h.sql
+60_traffic/26_traffic_client_country_1d.sql
+60_traffic/27_traffic_client_asn_1h.sql
+60_traffic/28_traffic_client_asn_1d.sql
+60_traffic/29_traffic_client_service_1h.sql
+60_traffic/30_traffic_client_service_1d.sql
 70_observations/01_observations.sql
 70_observations/03_observation_rollups_5m.sql
 70_observations/04_observation_runs.sql

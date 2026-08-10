@@ -776,6 +776,354 @@ GROUP BY day, client_id, source_id, direction
 """,
         pre_delete_sql="ALTER TABLE default.traffic_client_1d DELETE WHERE day = {bucket_dt}",
     ),
+    # --- Cabinet showcase vitrines (hour from flows_raw, day from hour) ---
+    RollupJob(
+        job_id="traffic_client_country_1h",
+        dest_table="default.traffic_client_country_1h",
+        bucket_kind="hour",
+        time_column="time_received_ns",
+        source_table="default.flows_raw",
+        priority=240,
+        depends_on=(),
+        select_sql="""
+SELECT
+    hour,
+    client_id,
+    source_id,
+    direction,
+    if(length(trimBoth(remote_cc)) = 0, '??', trimBoth(remote_cc)) AS country_code,
+    sum(bytes) AS bytes,
+    sum(packets) AS packets,
+    sum(flows_count) AS flows_count
+FROM
+(
+    SELECT
+        toStartOfHour(f.time_received_ns) AS hour,
+        side.1 AS client_id,
+        f.source_id AS source_id,
+        side.2 AS direction,
+        multiIf(
+            side.2 = 'out' AND f.etype = 2048,
+            dictGetString('default.geo_country_dict', 'cc', tuple(toIPv4(reinterpretAsUInt32(reverse(substring(f.dst_addr, 1, 4)))))),
+            side.2 = 'out',
+            dictGetString('default.geo_country_dict', 'cc', tuple(toIPv6(IPv6NumToString(f.dst_addr)))),
+            f.etype = 2048,
+            dictGetString('default.geo_country_dict', 'cc', tuple(toIPv4(reinterpretAsUInt32(reverse(substring(f.src_addr, 1, 4)))))),
+            dictGetString('default.geo_country_dict', 'cc', tuple(toIPv6(IPv6NumToString(f.src_addr))))
+        ) AS remote_cc,
+        f.bytes AS bytes,
+        f.packets AS packets,
+        coalesce(f.sampling_rate, 1) AS flows_count
+    FROM default.flows_raw AS f
+    ARRAY JOIN arrayFilter(
+        x -> (tupleElement(x, 1) != ''),
+        [
+            (if(f.src_client != '' AND f.src_client != f.dst_client, f.src_client, ''), 'out'),
+            (if(f.dst_client != '' AND f.src_client != f.dst_client, f.dst_client, ''), 'in')
+        ]
+    ) AS side
+    WHERE {time_filter}
+      AND (f.src_client != '' OR f.dst_client != '')
+)
+GROUP BY hour, client_id, source_id, direction, country_code
+""",
+        pre_delete_sql="ALTER TABLE default.traffic_client_country_1h DELETE WHERE hour = {bucket_dt}",
+        time_filter_column="f.time_received_ns",
+    ),
+    RollupJob(
+        job_id="traffic_client_asn_1h",
+        dest_table="default.traffic_client_asn_1h",
+        bucket_kind="hour",
+        time_column="time_received_ns",
+        source_table="default.flows_raw",
+        priority=241,
+        depends_on=(),
+        # Top-100 remote ASN per (hour, client, source, direction) plus is_total=1
+        # row with the full total so the UI can render "Прочие".
+        select_sql="""
+WITH
+    base AS
+    (
+        SELECT
+            toStartOfHour(f.time_received_ns) AS hour,
+            side.1 AS client_id,
+            f.source_id AS source_id,
+            side.2 AS direction,
+            if(side.2 = 'out', f.dst_asn, f.src_asn) AS remote_asn,
+            if(
+                side.2 = 'out',
+                multiIf(f.dst_asn = 0, '', dst_as.asn != 0 AND dst_as.name != '', dst_as.name, concat('AS', toString(f.dst_asn))),
+                multiIf(f.src_asn = 0, '', src_as.asn != 0 AND src_as.name != '', src_as.name, concat('AS', toString(f.src_asn)))
+            ) AS remote_as_name,
+            if(
+                side.2 = 'out',
+                if(f.dst_asn = 0 OR dst_as.asn = 0, '??', trimBoth(toString(dst_as.cc))),
+                if(f.src_asn = 0 OR src_as.asn = 0, '??', trimBoth(toString(src_as.cc)))
+            ) AS remote_as_country,
+            f.bytes AS bytes,
+            f.packets AS packets,
+            coalesce(f.sampling_rate, 1) AS flows_count
+        FROM default.flows_raw AS f
+        LEFT JOIN default.asn_registry_enriched AS src_as ON src_as.asn = f.src_asn
+        LEFT JOIN default.asn_registry_enriched AS dst_as ON dst_as.asn = f.dst_asn
+        ARRAY JOIN arrayFilter(
+            x -> (tupleElement(x, 1) != ''),
+            [
+                (if(f.src_client != '' AND f.src_client != f.dst_client, f.src_client, ''), 'out'),
+                (if(f.dst_client != '' AND f.src_client != f.dst_client, f.dst_client, ''), 'in')
+            ]
+        ) AS side
+        WHERE {time_filter}
+          AND (f.src_client != '' OR f.dst_client != '')
+    ),
+    agg AS
+    (
+        SELECT
+            hour,
+            client_id,
+            source_id,
+            direction,
+            remote_asn,
+            any(remote_as_name) AS remote_as_name,
+            any(remote_as_country) AS remote_as_country,
+            sum(bytes) AS bytes,
+            sum(packets) AS packets,
+            sum(flows_count) AS flows_count
+        FROM base
+        GROUP BY hour, client_id, source_id, direction, remote_asn
+    )
+SELECT
+    hour,
+    client_id,
+    source_id,
+    direction,
+    toUInt8(0) AS is_total,
+    remote_asn,
+    remote_as_name,
+    remote_as_country,
+    bytes,
+    packets,
+    flows_count
+FROM
+(
+    SELECT *
+    FROM agg
+    ORDER BY hour, client_id, source_id, direction, bytes DESC
+    LIMIT 100 BY hour, client_id, source_id, direction
+)
+UNION ALL
+SELECT
+    hour,
+    client_id,
+    source_id,
+    direction,
+    toUInt8(1) AS is_total,
+    toUInt32(0) AS remote_asn,
+    '' AS remote_as_name,
+    '' AS remote_as_country,
+    sum(bytes) AS bytes,
+    sum(packets) AS packets,
+    sum(flows_count) AS flows_count
+FROM agg
+GROUP BY hour, client_id, source_id, direction
+""",
+        pre_delete_sql="ALTER TABLE default.traffic_client_asn_1h DELETE WHERE hour = {bucket_dt}",
+        time_filter_column="f.time_received_ns",
+    ),
+    RollupJob(
+        job_id="traffic_client_service_1h",
+        dest_table="default.traffic_client_service_1h",
+        bucket_kind="hour",
+        time_column="time_received_ns",
+        source_table="default.flows_raw",
+        priority=242,
+        depends_on=(),
+        select_sql="""
+WITH
+    multiIf(
+        f.proto = 6, 'tcp',
+        f.proto = 17, 'udp',
+        f.proto = 1, 'icmp',
+        f.proto = 58, 'icmpv6',
+        f.proto = 132, 'sctp',
+        'other'
+    ) AS transport,
+    dst_svc.service_code != '' AS has_dst_service,
+    src_svc.service_code != '' AS has_src_service,
+    multiIf(
+        has_dst_service, dst_svc.service_code,
+        has_src_service, src_svc.service_code,
+        'other'
+    ) AS service_code,
+    multiIf(
+        has_dst_service, dst_svc.service_name,
+        has_src_service, src_svc.service_name,
+        'Other'
+    ) AS service_name,
+    multiIf(
+        has_dst_service, dst_svc.category,
+        has_src_service, src_svc.category,
+        'other'
+    ) AS category
+SELECT
+    toStartOfHour(f.time_received_ns) AS hour,
+    side.1 AS client_id,
+    f.source_id,
+    side.2 AS direction,
+    transport,
+    service_code,
+    service_name,
+    category,
+    sum(f.bytes) AS bytes,
+    sum(f.packets) AS packets,
+    sum(coalesce(f.sampling_rate, 1)) AS flows_count
+FROM default.flows_raw AS f
+LEFT JOIN default.port_services_expanded_enabled AS dst_svc
+    ON dst_svc.transport = transport
+   AND dst_svc.port = toUInt16(f.dst_port)
+LEFT JOIN default.port_services_expanded_enabled AS src_svc
+    ON src_svc.transport = transport
+   AND src_svc.port = toUInt16(f.src_port)
+ARRAY JOIN arrayFilter(
+    x -> (tupleElement(x, 1) != ''),
+    [
+        (if(f.src_client != '' AND f.src_client != f.dst_client, f.src_client, ''), 'out'),
+        (if(f.dst_client != '' AND f.src_client != f.dst_client, f.dst_client, ''), 'in')
+    ]
+) AS side
+WHERE {time_filter}
+  AND (f.src_client != '' OR f.dst_client != '')
+GROUP BY
+    hour,
+    client_id,
+    f.source_id,
+    direction,
+    transport,
+    service_code,
+    service_name,
+    category
+""",
+        pre_delete_sql="ALTER TABLE default.traffic_client_service_1h DELETE WHERE hour = {bucket_dt}",
+        time_filter_column="f.time_received_ns",
+    ),
+    RollupJob(
+        job_id="traffic_client_country_1d",
+        dest_table="default.traffic_client_country_1d",
+        bucket_kind="day",
+        time_column="hour",
+        source_table="default.traffic_client_country_1h",
+        priority=320,
+        depends_on=("traffic_client_country_1h",),
+        select_sql="""
+SELECT
+    toStartOfDay(hour) AS day,
+    client_id,
+    source_id,
+    direction,
+    country_code,
+    sum(bytes) AS bytes,
+    sum(packets) AS packets,
+    sum(flows_count) AS flows_count
+FROM default.traffic_client_country_1h
+WHERE {time_filter}
+GROUP BY day, client_id, source_id, direction, country_code
+""",
+        pre_delete_sql="ALTER TABLE default.traffic_client_country_1d DELETE WHERE day = {bucket_dt}",
+    ),
+    RollupJob(
+        job_id="traffic_client_asn_1d",
+        dest_table="default.traffic_client_asn_1d",
+        bucket_kind="day",
+        time_column="hour",
+        source_table="default.traffic_client_asn_1h",
+        priority=321,
+        depends_on=("traffic_client_asn_1h",),
+        select_sql="""
+WITH
+    detail AS
+    (
+        SELECT
+            toStartOfDay(hour) AS day,
+            client_id,
+            source_id,
+            direction,
+            remote_asn,
+            any(remote_as_name) AS remote_as_name,
+            any(remote_as_country) AS remote_as_country,
+            sum(bytes) AS bytes,
+            sum(packets) AS packets,
+            sum(flows_count) AS flows_count
+        FROM default.traffic_client_asn_1h
+        WHERE {time_filter}
+          AND is_total = 0
+        GROUP BY day, client_id, source_id, direction, remote_asn
+    )
+SELECT
+    day,
+    client_id,
+    source_id,
+    direction,
+    toUInt8(0) AS is_total,
+    remote_asn,
+    remote_as_name,
+    remote_as_country,
+    bytes,
+    packets,
+    flows_count
+FROM
+(
+    SELECT *
+    FROM detail
+    ORDER BY day, client_id, source_id, direction, bytes DESC
+    LIMIT 100 BY day, client_id, source_id, direction
+)
+UNION ALL
+SELECT
+    toStartOfDay(hour) AS day,
+    client_id,
+    source_id,
+    direction,
+    toUInt8(1) AS is_total,
+    toUInt32(0) AS remote_asn,
+    '' AS remote_as_name,
+    '' AS remote_as_country,
+    sum(bytes) AS bytes,
+    sum(packets) AS packets,
+    sum(flows_count) AS flows_count
+FROM default.traffic_client_asn_1h
+WHERE {time_filter}
+  AND is_total = 1
+GROUP BY day, client_id, source_id, direction
+""",
+        pre_delete_sql="ALTER TABLE default.traffic_client_asn_1d DELETE WHERE day = {bucket_dt}",
+    ),
+    RollupJob(
+        job_id="traffic_client_service_1d",
+        dest_table="default.traffic_client_service_1d",
+        bucket_kind="day",
+        time_column="hour",
+        source_table="default.traffic_client_service_1h",
+        priority=322,
+        depends_on=("traffic_client_service_1h",),
+        select_sql="""
+SELECT
+    toStartOfDay(hour) AS day,
+    client_id,
+    source_id,
+    direction,
+    transport,
+    service_code,
+    service_name,
+    category,
+    sum(bytes) AS bytes,
+    sum(packets) AS packets,
+    sum(flows_count) AS flows_count
+FROM default.traffic_client_service_1h
+WHERE {time_filter}
+GROUP BY day, client_id, source_id, direction, transport, service_code, service_name, category
+""",
+        pre_delete_sql="ALTER TABLE default.traffic_client_service_1d DELETE WHERE day = {bucket_dt}",
+    ),
 ]
 
 
