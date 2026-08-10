@@ -57,28 +57,6 @@ PARTITION BY toYYYYMMDD(hour)
 ORDER BY (client_id, hour, source_id, direction, country_code)
 SETTINGS index_granularity = 8192;
 
-DROP TABLE IF EXISTS default.traffic_client_asn_1h SYNC;
-
-CREATE TABLE default.traffic_client_asn_1h
-(
-    `hour` DateTime('UTC'),
-    `client_id` LowCardinality(String),
-    `source_id` LowCardinality(String),
-    `direction` LowCardinality(String),
-    `is_total` UInt8,
-    `remote_asn` UInt32,
-    `remote_as_name` String,
-    `remote_as_country` LowCardinality(String),
-    `bytes` UInt64,
-    `packets` UInt64,
-    `flows_count` UInt64,
-    INDEX idx_hour hour TYPE minmax GRANULARITY 1
-)
-ENGINE = SummingMergeTree
-PARTITION BY toYYYYMMDD(hour)
-ORDER BY (client_id, hour, source_id, direction, is_total, remote_asn)
-SETTINGS index_granularity = 8192;
-
 DROP TABLE IF EXISTS default.traffic_client_service_1h SYNC;
 
 CREATE TABLE default.traffic_client_service_1h
@@ -109,9 +87,6 @@ ALTER TABLE default.traffic_client_1d MATERIALIZE INDEX idx_day SETTINGS mutatio
 
 ALTER TABLE default.traffic_client_country_1d ADD INDEX IF NOT EXISTS idx_day day TYPE minmax GRANULARITY 1;
 ALTER TABLE default.traffic_client_country_1d MATERIALIZE INDEX idx_day SETTINGS mutations_sync = 1;
-
-ALTER TABLE default.traffic_client_asn_1d ADD INDEX IF NOT EXISTS idx_day day TYPE minmax GRANULARITY 1;
-ALTER TABLE default.traffic_client_asn_1d MATERIALIZE INDEX idx_day SETTINGS mutations_sync = 1;
 
 ALTER TABLE default.traffic_client_service_1d ADD INDEX IF NOT EXISTS idx_day day TYPE minmax GRANULARITY 1;
 ALTER TABLE default.traffic_client_service_1d MATERIALIZE INDEX idx_day SETTINGS mutations_sync = 1;

@@ -1,5 +1,9 @@
--- Cabinet client showcase aggregates: country / ASN / service (hour + day).
+-- Cabinet client showcase aggregates: country / service (hour + day).
 -- Safe to re-run.
+--
+-- There is deliberately no ASN vitrine: remote ASN tops cost an extra pass over
+-- flows_raw plus a registry join, and the cabinet needs countries far more. ASN
+-- detail stays available through raw-flow analysis over a short window.
 --
 -- ORDER BY starts with client_id because every cabinet query is scoped to one
 -- client, which leaves the bucket column outside the primary key prefix: the
@@ -41,46 +45,6 @@ CREATE TABLE IF NOT EXISTS default.traffic_client_country_1d
 ENGINE = SummingMergeTree
 PARTITION BY toYYYYMM(day)
 ORDER BY (client_id, day, source_id, direction, country_code)
-SETTINGS index_granularity = 8192;
-
-CREATE TABLE IF NOT EXISTS default.traffic_client_asn_1h
-(
-    `hour` DateTime('UTC'),
-    `client_id` LowCardinality(String),
-    `source_id` LowCardinality(String),
-    `direction` LowCardinality(String),
-    `is_total` UInt8,
-    `remote_asn` UInt32,
-    `remote_as_name` String,
-    `remote_as_country` LowCardinality(String),
-    `bytes` UInt64,
-    `packets` UInt64,
-    `flows_count` UInt64,
-    INDEX idx_hour hour TYPE minmax GRANULARITY 1
-)
-ENGINE = SummingMergeTree
-PARTITION BY toYYYYMMDD(hour)
-ORDER BY (client_id, hour, source_id, direction, is_total, remote_asn)
-SETTINGS index_granularity = 8192;
-
-CREATE TABLE IF NOT EXISTS default.traffic_client_asn_1d
-(
-    `day` DateTime('UTC'),
-    `client_id` LowCardinality(String),
-    `source_id` LowCardinality(String),
-    `direction` LowCardinality(String),
-    `is_total` UInt8,
-    `remote_asn` UInt32,
-    `remote_as_name` String,
-    `remote_as_country` LowCardinality(String),
-    `bytes` UInt64,
-    `packets` UInt64,
-    `flows_count` UInt64,
-    INDEX idx_day day TYPE minmax GRANULARITY 1
-)
-ENGINE = SummingMergeTree
-PARTITION BY toYYYYMM(day)
-ORDER BY (client_id, day, source_id, direction, is_total, remote_asn)
 SETTINGS index_granularity = 8192;
 
 CREATE TABLE IF NOT EXISTS default.traffic_client_service_1h
