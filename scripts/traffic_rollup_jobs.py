@@ -545,6 +545,11 @@ GROUP BY
         # src_client -> out, dst_client -> in. A flow with the same client on
         # both sides is skipped (self-traffic). A flow between two different
         # clients produces two rows via ARRAY JOIN.
+        #
+        # Client rows are a small fraction of flows_raw, so the innermost
+        # subquery narrows the scan with PREWHERE on the two client columns
+        # before anything else touches the row: only the surviving rows pay for
+        # the remaining columns and the ARRAY JOIN expansion.
         select_sql="""
 SELECT
     toStartOfMinute(time_received_ns) AS minute,
@@ -553,7 +558,7 @@ SELECT
     direction,
     sum(bytes) AS bytes,
     sum(packets) AS packets,
-    sum(coalesce(sampling_rate, 1)) AS flows_count
+    sum(flows_count) AS flows_count
 FROM
 (
     SELECT
@@ -561,10 +566,23 @@ FROM
         source_id,
         bytes,
         packets,
-        sampling_rate,
+        coalesce(sampling_rate, 1) AS flows_count,
         side.1 AS client_id,
         side.2 AS direction
-    FROM default.flows_raw
+    FROM
+    (
+        SELECT
+            f.time_received_ns AS time_received_ns,
+            f.source_id AS source_id,
+            f.bytes AS bytes,
+            f.packets AS packets,
+            f.sampling_rate AS sampling_rate,
+            f.src_client AS src_client,
+            f.dst_client AS dst_client
+        FROM default.flows_raw AS f
+        PREWHERE (f.src_client != '') OR (f.dst_client != '')
+        WHERE {time_filter}
+    ) AS c
     ARRAY JOIN arrayFilter(
         x -> (tupleElement(x, 1) != ''),
         [
@@ -578,12 +596,11 @@ FROM
             )
         ]
     ) AS side
-    WHERE {time_filter}
-      AND (src_client != '' OR dst_client != '')
 )
 GROUP BY minute, client_id, source_id, direction
 """,
         pre_delete_sql="ALTER TABLE default.traffic_client_1m DELETE WHERE minute = {bucket_dt}",
+        time_filter_column="f.time_received_ns",
     ),
     RollupJob(
         job_id="traffic_dashboard_1h",
@@ -798,32 +815,46 @@ SELECT
 FROM
 (
     SELECT
-        toStartOfHour(f.time_received_ns) AS hour,
+        toStartOfHour(time_received_ns) AS hour,
         side.1 AS client_id,
-        f.source_id AS source_id,
+        source_id,
         side.2 AS direction,
         multiIf(
-            side.2 = 'out' AND f.etype = 2048,
-            dictGetString('default.geo_country_dict', 'cc', tuple(toIPv4(reinterpretAsUInt32(reverse(substring(f.dst_addr, 1, 4)))))),
+            side.2 = 'out' AND etype = 2048,
+            dictGetString('default.geo_country_dict', 'cc', tuple(toIPv4(reinterpretAsUInt32(reverse(substring(dst_addr, 1, 4)))))),
             side.2 = 'out',
-            dictGetString('default.geo_country_dict', 'cc', tuple(toIPv6(IPv6NumToString(f.dst_addr)))),
-            f.etype = 2048,
-            dictGetString('default.geo_country_dict', 'cc', tuple(toIPv4(reinterpretAsUInt32(reverse(substring(f.src_addr, 1, 4)))))),
-            dictGetString('default.geo_country_dict', 'cc', tuple(toIPv6(IPv6NumToString(f.src_addr))))
+            dictGetString('default.geo_country_dict', 'cc', tuple(toIPv6(IPv6NumToString(dst_addr)))),
+            etype = 2048,
+            dictGetString('default.geo_country_dict', 'cc', tuple(toIPv4(reinterpretAsUInt32(reverse(substring(src_addr, 1, 4)))))),
+            dictGetString('default.geo_country_dict', 'cc', tuple(toIPv6(IPv6NumToString(src_addr))))
         ) AS remote_cc,
-        f.bytes AS bytes,
-        f.packets AS packets,
-        coalesce(f.sampling_rate, 1) AS flows_count
-    FROM default.flows_raw AS f
+        bytes,
+        packets,
+        coalesce(sampling_rate, 1) AS flows_count
+    FROM
+    (
+        SELECT
+            f.time_received_ns AS time_received_ns,
+            f.source_id AS source_id,
+            f.etype AS etype,
+            f.src_addr AS src_addr,
+            f.dst_addr AS dst_addr,
+            f.bytes AS bytes,
+            f.packets AS packets,
+            f.sampling_rate AS sampling_rate,
+            f.src_client AS src_client,
+            f.dst_client AS dst_client
+        FROM default.flows_raw AS f
+        PREWHERE (f.src_client != '') OR (f.dst_client != '')
+        WHERE {time_filter}
+    ) AS c
     ARRAY JOIN arrayFilter(
         x -> (tupleElement(x, 1) != ''),
         [
-            (if(f.src_client != '' AND f.src_client != f.dst_client, f.src_client, ''), 'out'),
-            (if(f.dst_client != '' AND f.src_client != f.dst_client, f.dst_client, ''), 'in')
+            (if(src_client != '' AND src_client != dst_client, src_client, ''), 'out'),
+            (if(dst_client != '' AND src_client != dst_client, dst_client, ''), 'in')
         ]
     ) AS side
-    WHERE {time_filter}
-      AND (f.src_client != '' OR f.dst_client != '')
 )
 GROUP BY hour, client_id, source_id, direction, country_code
 """,
@@ -840,43 +871,15 @@ GROUP BY hour, client_id, source_id, direction, country_code
         depends_on=(),
         # Top-100 remote ASN per (hour, client, source, direction) plus is_total=1
         # row with the full total so the UI can render "Прочие".
+        #
+        # flows_raw is read once: the client filter runs in PREWHERE, only the
+        # remote side of the expanded row is resolved against the ASN registry
+        # (one join instead of one per side), and the is_total row is produced by
+        # re-aggregating the already grouped per-ASN result instead of scanning
+        # the raw table a second time.
         select_sql="""
 WITH
-    base AS
-    (
-        SELECT
-            toStartOfHour(f.time_received_ns) AS hour,
-            side.1 AS client_id,
-            f.source_id AS source_id,
-            side.2 AS direction,
-            if(side.2 = 'out', f.dst_asn, f.src_asn) AS remote_asn,
-            if(
-                side.2 = 'out',
-                multiIf(f.dst_asn = 0, '', dst_as.asn != 0 AND dst_as.name != '', dst_as.name, concat('AS', toString(f.dst_asn))),
-                multiIf(f.src_asn = 0, '', src_as.asn != 0 AND src_as.name != '', src_as.name, concat('AS', toString(f.src_asn)))
-            ) AS remote_as_name,
-            if(
-                side.2 = 'out',
-                if(f.dst_asn = 0 OR dst_as.asn = 0, '??', trimBoth(toString(dst_as.cc))),
-                if(f.src_asn = 0 OR src_as.asn = 0, '??', trimBoth(toString(src_as.cc)))
-            ) AS remote_as_country,
-            f.bytes AS bytes,
-            f.packets AS packets,
-            coalesce(f.sampling_rate, 1) AS flows_count
-        FROM default.flows_raw AS f
-        LEFT JOIN default.asn_registry_enriched AS src_as ON src_as.asn = f.src_asn
-        LEFT JOIN default.asn_registry_enriched AS dst_as ON dst_as.asn = f.dst_asn
-        ARRAY JOIN arrayFilter(
-            x -> (tupleElement(x, 1) != ''),
-            [
-                (if(f.src_client != '' AND f.src_client != f.dst_client, f.src_client, ''), 'out'),
-                (if(f.dst_client != '' AND f.src_client != f.dst_client, f.dst_client, ''), 'in')
-            ]
-        ) AS side
-        WHERE {time_filter}
-          AND (f.src_client != '' OR f.dst_client != '')
-    ),
-    agg AS
+    detail AS
     (
         SELECT
             hour,
@@ -889,7 +892,60 @@ WITH
             sum(bytes) AS bytes,
             sum(packets) AS packets,
             sum(flows_count) AS flows_count
-        FROM base
+        FROM
+        (
+            SELECT
+                e.hour AS hour,
+                e.client_id AS client_id,
+                e.source_id AS source_id,
+                e.direction AS direction,
+                e.remote_asn AS remote_asn,
+                multiIf(
+                    e.remote_asn = 0, '',
+                    r.asn != 0 AND r.name != '', r.name,
+                    concat('AS', toString(e.remote_asn))
+                ) AS remote_as_name,
+                if(e.remote_asn = 0 OR r.asn = 0, '??', trimBoth(toString(r.cc))) AS remote_as_country,
+                e.bytes AS bytes,
+                e.packets AS packets,
+                e.flows_count AS flows_count
+            FROM
+            (
+                SELECT
+                    toStartOfHour(time_received_ns) AS hour,
+                    side.1 AS client_id,
+                    source_id,
+                    side.2 AS direction,
+                    if(side.2 = 'out', dst_asn, src_asn) AS remote_asn,
+                    bytes,
+                    packets,
+                    coalesce(sampling_rate, 1) AS flows_count
+                FROM
+                (
+                    SELECT
+                        f.time_received_ns AS time_received_ns,
+                        f.source_id AS source_id,
+                        f.src_asn AS src_asn,
+                        f.dst_asn AS dst_asn,
+                        f.bytes AS bytes,
+                        f.packets AS packets,
+                        f.sampling_rate AS sampling_rate,
+                        f.src_client AS src_client,
+                        f.dst_client AS dst_client
+                    FROM default.flows_raw AS f
+                    PREWHERE (f.src_client != '') OR (f.dst_client != '')
+                    WHERE {time_filter}
+                ) AS c
+                ARRAY JOIN arrayFilter(
+                    x -> (tupleElement(x, 1) != ''),
+                    [
+                        (if(src_client != '' AND src_client != dst_client, src_client, ''), 'out'),
+                        (if(dst_client != '' AND src_client != dst_client, dst_client, ''), 'in')
+                    ]
+                ) AS side
+            ) AS e
+            LEFT JOIN default.asn_registry_enriched AS r ON r.asn = e.remote_asn
+        )
         GROUP BY hour, client_id, source_id, direction, remote_asn
     )
 SELECT
@@ -897,35 +953,33 @@ SELECT
     client_id,
     source_id,
     direction,
-    toUInt8(0) AS is_total,
+    is_total,
     remote_asn,
-    remote_as_name,
-    remote_as_country,
-    bytes,
-    packets,
-    flows_count
-FROM
-(
-    SELECT *
-    FROM agg
-    ORDER BY hour, client_id, source_id, direction, bytes DESC
-    LIMIT 100 BY hour, client_id, source_id, direction
-)
-UNION ALL
-SELECT
-    hour,
-    client_id,
-    source_id,
-    direction,
-    toUInt8(1) AS is_total,
-    toUInt32(0) AS remote_asn,
-    '' AS remote_as_name,
-    '' AS remote_as_country,
+    if(is_total = 1, '', any(remote_as_name)) AS remote_as_name,
+    if(is_total = 1, '', any(remote_as_country)) AS remote_as_country,
     sum(bytes) AS bytes,
     sum(packets) AS packets,
     sum(flows_count) AS flows_count
-FROM agg
-GROUP BY hour, client_id, source_id, direction
+FROM
+(
+    SELECT
+        hour,
+        client_id,
+        source_id,
+        direction,
+        tot AS is_total,
+        if(tot = 1, toUInt32(0), remote_asn) AS remote_asn,
+        remote_as_name,
+        remote_as_country,
+        bytes,
+        packets,
+        flows_count
+    FROM detail
+    ARRAY JOIN [toUInt8(0), toUInt8(1)] AS tot
+)
+GROUP BY hour, client_id, source_id, direction, is_total, remote_asn
+ORDER BY hour, client_id, source_id, direction, is_total DESC, bytes DESC
+LIMIT 101 BY hour, client_id, source_id, direction
 """,
         pre_delete_sql="ALTER TABLE default.traffic_client_asn_1h DELETE WHERE hour = {bucket_dt}",
         time_filter_column="f.time_received_ns",
@@ -938,18 +992,20 @@ GROUP BY hour, client_id, source_id, direction
         source_table="default.flows_raw",
         priority=242,
         depends_on=(),
+        # Same shape as the ASN vitrine: narrow flows_raw down to client rows in
+        # PREWHERE first, expand the sides, and only then probe the port/service
+        # table, so the two joins run over the client subset instead of the whole
+        # hour of raw flows.
         select_sql="""
 WITH
-    multiIf(
-        f.proto = 6, 'tcp',
-        f.proto = 17, 'udp',
-        f.proto = 1, 'icmp',
-        f.proto = 58, 'icmpv6',
-        f.proto = 132, 'sctp',
-        'other'
-    ) AS transport,
     dst_svc.service_code != '' AS has_dst_service,
-    src_svc.service_code != '' AS has_src_service,
+    src_svc.service_code != '' AS has_src_service
+SELECT
+    e.hour AS hour,
+    e.client_id AS client_id,
+    e.source_id AS source_id,
+    e.direction AS direction,
+    e.transport AS transport,
     multiIf(
         has_dst_service, dst_svc.service_code,
         has_src_service, src_svc.service_code,
@@ -964,39 +1020,65 @@ WITH
         has_dst_service, dst_svc.category,
         has_src_service, src_svc.category,
         'other'
-    ) AS category
-SELECT
-    toStartOfHour(f.time_received_ns) AS hour,
-    side.1 AS client_id,
-    f.source_id,
-    side.2 AS direction,
-    transport,
-    service_code,
-    service_name,
-    category,
-    sum(f.bytes) AS bytes,
-    sum(f.packets) AS packets,
-    sum(coalesce(f.sampling_rate, 1)) AS flows_count
-FROM default.flows_raw AS f
+    ) AS category,
+    sum(e.bytes) AS bytes,
+    sum(e.packets) AS packets,
+    sum(e.flows_count) AS flows_count
+FROM
+(
+    SELECT
+        toStartOfHour(time_received_ns) AS hour,
+        side.1 AS client_id,
+        source_id,
+        side.2 AS direction,
+        multiIf(
+            proto = 6, 'tcp',
+            proto = 17, 'udp',
+            proto = 1, 'icmp',
+            proto = 58, 'icmpv6',
+            proto = 132, 'sctp',
+            'other'
+        ) AS transport,
+        toUInt16(src_port) AS src_port,
+        toUInt16(dst_port) AS dst_port,
+        bytes,
+        packets,
+        coalesce(sampling_rate, 1) AS flows_count
+    FROM
+    (
+        SELECT
+            f.time_received_ns AS time_received_ns,
+            f.source_id AS source_id,
+            f.proto AS proto,
+            f.src_port AS src_port,
+            f.dst_port AS dst_port,
+            f.bytes AS bytes,
+            f.packets AS packets,
+            f.sampling_rate AS sampling_rate,
+            f.src_client AS src_client,
+            f.dst_client AS dst_client
+        FROM default.flows_raw AS f
+        PREWHERE (f.src_client != '') OR (f.dst_client != '')
+        WHERE {time_filter}
+    ) AS c
+    ARRAY JOIN arrayFilter(
+        x -> (tupleElement(x, 1) != ''),
+        [
+            (if(src_client != '' AND src_client != dst_client, src_client, ''), 'out'),
+            (if(dst_client != '' AND src_client != dst_client, dst_client, ''), 'in')
+        ]
+    ) AS side
+) AS e
 LEFT JOIN default.port_services_expanded_enabled AS dst_svc
-    ON dst_svc.transport = transport
-   AND dst_svc.port = toUInt16(f.dst_port)
+    ON dst_svc.transport = e.transport
+   AND dst_svc.port = e.dst_port
 LEFT JOIN default.port_services_expanded_enabled AS src_svc
-    ON src_svc.transport = transport
-   AND src_svc.port = toUInt16(f.src_port)
-ARRAY JOIN arrayFilter(
-    x -> (tupleElement(x, 1) != ''),
-    [
-        (if(f.src_client != '' AND f.src_client != f.dst_client, f.src_client, ''), 'out'),
-        (if(f.dst_client != '' AND f.src_client != f.dst_client, f.dst_client, ''), 'in')
-    ]
-) AS side
-WHERE {time_filter}
-  AND (f.src_client != '' OR f.dst_client != '')
+    ON src_svc.transport = e.transport
+   AND src_svc.port = e.src_port
 GROUP BY
     hour,
     client_id,
-    f.source_id,
+    source_id,
     direction,
     transport,
     service_code,
@@ -1038,62 +1120,28 @@ GROUP BY day, client_id, source_id, direction, country_code
         source_table="default.traffic_client_asn_1h",
         priority=321,
         depends_on=("traffic_client_asn_1h",),
+        # The hourly table already carries both the per-ASN rows and the is_total
+        # row, so one pass with is_total as a group key yields both; ordering
+        # is_total first lets a single LIMIT 101 BY keep the total plus the daily
+        # top-100.
         select_sql="""
-WITH
-    detail AS
-    (
-        SELECT
-            toStartOfDay(hour) AS day,
-            client_id,
-            source_id,
-            direction,
-            remote_asn,
-            any(remote_as_name) AS remote_as_name,
-            any(remote_as_country) AS remote_as_country,
-            sum(bytes) AS bytes,
-            sum(packets) AS packets,
-            sum(flows_count) AS flows_count
-        FROM default.traffic_client_asn_1h
-        WHERE {time_filter}
-          AND is_total = 0
-        GROUP BY day, client_id, source_id, direction, remote_asn
-    )
-SELECT
-    day,
-    client_id,
-    source_id,
-    direction,
-    toUInt8(0) AS is_total,
-    remote_asn,
-    remote_as_name,
-    remote_as_country,
-    bytes,
-    packets,
-    flows_count
-FROM
-(
-    SELECT *
-    FROM detail
-    ORDER BY day, client_id, source_id, direction, bytes DESC
-    LIMIT 100 BY day, client_id, source_id, direction
-)
-UNION ALL
 SELECT
     toStartOfDay(hour) AS day,
     client_id,
     source_id,
     direction,
-    toUInt8(1) AS is_total,
-    toUInt32(0) AS remote_asn,
-    '' AS remote_as_name,
-    '' AS remote_as_country,
+    is_total,
+    remote_asn,
+    if(is_total = 1, '', any(remote_as_name)) AS remote_as_name,
+    if(is_total = 1, '', any(remote_as_country)) AS remote_as_country,
     sum(bytes) AS bytes,
     sum(packets) AS packets,
     sum(flows_count) AS flows_count
 FROM default.traffic_client_asn_1h
 WHERE {time_filter}
-  AND is_total = 1
-GROUP BY day, client_id, source_id, direction
+GROUP BY day, client_id, source_id, direction, is_total, remote_asn
+ORDER BY day, client_id, source_id, direction, is_total DESC, bytes DESC
+LIMIT 101 BY day, client_id, source_id, direction
 """,
         pre_delete_sql="ALTER TABLE default.traffic_client_asn_1d DELETE WHERE day = {bucket_dt}",
     ),
