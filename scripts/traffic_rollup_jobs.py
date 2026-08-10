@@ -969,24 +969,25 @@ GROUP BY hour, client_id, source_id, direction, country_code
         # different transport, which would have made the cabinet answer "which
         # services do you use" with "Other".
         #
-        # Missing ports become 65535 before least(), so ICMP (no ports at all)
-        # lands above the ephemeral cut-off and collapses to 'other' without a
-        # special case.
+        # Which of the two ports names the service is decided from the client's
+        # own side, not by "the lower number wins". The lower-number rule is a
+        # guess about which end is the server and it breaks whenever a peer dials
+        # in from a port below the service port: a client serving 12545/tcp had
+        # ~5 GiB of that service relabelled as fictional remote services on ports
+        # 2723, 5079 and 4436, which were merely the peers' source ports.
         #
-        # "Lower port wins" is only a guess at which side is the server, and it
-        # guesses wrong whenever a peer dials in from a port below the client's
-        # service port: a client serving 12545/tcp got its traffic smeared over
-        # ~1700 peer ports in one hour, one row each. So the per-port detail is
-        # ranked by bytes inside the bucket and everything past the top 20 is
-        # folded back into 'other'. A real service port carries the volume and
-        # survives; a peer's ephemeral port carries a sliver and merges away.
-        # Folding rather than dropping the tail keeps the totals equal to the
-        # base client aggregate, so shares in the cabinet still add up to 100%.
+        # The rule instead is: if the client's own port looks like a listening
+        # port (below the 32768 ephemeral floor) it names the service, because a
+        # client that serves is the interesting side. Otherwise the client dialled
+        # out, and the peer's port names the service. If neither side has a usable
+        # port - both ephemeral, or ICMP with no ports at all - the traffic is
+        # genuinely unidentifiable and collapses to 'other'.
         #
-        # port_owner is read from the client's side. The kept port comes from the
-        # source when lo_src <= lo_dst, and the client is the source exactly when
-        # direction is 'out', so the two agreeing means the port is the client's
-        # own.
+        # The tail is still folded: per-port detail is ranked by bytes inside the
+        # bucket and everything past the top 20 becomes 'other'. That bounds the
+        # rows a port scan can invent, since a scan hits many low client ports.
+        # Folding rather than dropping keeps totals equal to the base client
+        # aggregate, so shares in the cabinet still add up to 100%.
         select_sql="""
 SELECT
     hour,
@@ -1017,10 +1018,12 @@ FROM
 WITH
     dst_svc.service_code != '' AS has_dst_service,
     src_svc.service_code != '' AS has_src_service,
-    if(e.src_port = 0, 65535, e.src_port) AS lo_src,
-    if(e.dst_port = 0, 65535, e.dst_port) AS lo_dst,
-    least(lo_src, lo_dst) AS svc_port_raw,
-    (NOT has_dst_service) AND (NOT has_src_service) AND (svc_port_raw < 32768) AS keep_port
+    if(e.direction = 'out', e.src_port, e.dst_port) AS client_port,
+    if(e.direction = 'out', e.dst_port, e.src_port) AS peer_port,
+    (client_port > 0) AND (client_port < 32768) AS client_serves,
+    (peer_port > 0) AND (peer_port < 32768) AS peer_serves,
+    if(client_serves, client_port, peer_port) AS svc_port_raw,
+    (NOT has_dst_service) AND (NOT has_src_service) AND (client_serves OR peer_serves) AS keep_port
 SELECT
     e.hour AS hour,
     e.client_id AS client_id,
@@ -1048,7 +1051,7 @@ SELECT
     if(keep_port, toUInt16(svc_port_raw), toUInt16(0)) AS service_port,
     multiIf(
         NOT keep_port, '',
-        (e.direction = 'out') = (lo_src <= lo_dst), 'local',
+        client_serves, 'local',
         'remote'
     ) AS port_owner,
     sum(e.bytes) AS bytes,
