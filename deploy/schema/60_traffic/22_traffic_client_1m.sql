@@ -17,4 +17,8 @@ CREATE TABLE IF NOT EXISTS default.traffic_client_1m
 ENGINE = SummingMergeTree
 PARTITION BY toYYYYMMDD(minute)
 ORDER BY (client_id, minute, source_id, direction)
+-- Per-minute detail is kept for two weeks, matching traffic_client_anomaly_1m:
+-- long enough for a weekly baseline, short enough that minute rows do not pile
+-- up forever. Depth lives in the hourly and daily tables.
+TTL minute + toIntervalDay(14)
 SETTINGS index_granularity = 8192;

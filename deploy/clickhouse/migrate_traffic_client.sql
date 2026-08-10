@@ -24,6 +24,7 @@ CREATE TABLE IF NOT EXISTS default.traffic_client_1m
 ENGINE = SummingMergeTree
 PARTITION BY toYYYYMMDD(minute)
 ORDER BY (client_id, minute, source_id, direction)
+TTL minute + toIntervalDay(14)
 SETTINGS index_granularity = 8192;
 
 CREATE TABLE IF NOT EXISTS default.traffic_client_1h
@@ -40,6 +41,7 @@ CREATE TABLE IF NOT EXISTS default.traffic_client_1h
 ENGINE = SummingMergeTree
 PARTITION BY toYYYYMMDD(hour)
 ORDER BY (client_id, hour, source_id, direction)
+TTL hour + toIntervalDay(180)
 SETTINGS index_granularity = 8192;
 
 CREATE TABLE IF NOT EXISTS default.traffic_client_1d
@@ -56,4 +58,5 @@ CREATE TABLE IF NOT EXISTS default.traffic_client_1d
 ENGINE = SummingMergeTree
 PARTITION BY toYYYYMM(day)
 ORDER BY (client_id, day, source_id, direction)
+TTL day + toIntervalDay(730)
 SETTINGS index_granularity = 8192;

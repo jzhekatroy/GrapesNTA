@@ -959,14 +959,68 @@ GROUP BY hour, client_id, source_id, direction, country_code
         source_table="default.flows_raw",
         priority=242,
         depends_on=(),
-        # Same shape as the ASN vitrine: narrow flows_raw down to client rows in
-        # PREWHERE first, expand the sides, and only then probe the port/service
-        # table, so the two joins run over the client subset instead of the whole
-        # hour of raw flows.
+        # Narrow flows_raw down to client rows in PREWHERE first, expand the
+        # sides, and only then probe the port/service table, so the two joins run
+        # over the client subset instead of the whole hour of raw flows.
+        #
+        # A port the dictionary does not know keeps service_code='port' and the
+        # port itself instead of vanishing into 'other': on a real client 78% of
+        # outbound bytes sat on one stable port the dictionary only covers for a
+        # different transport, which would have made the cabinet answer "which
+        # services do you use" with "Other".
+        #
+        # Missing ports become 65535 before least(), so ICMP (no ports at all)
+        # lands above the ephemeral cut-off and collapses to 'other' without a
+        # special case.
+        #
+        # "Lower port wins" is only a guess at which side is the server, and it
+        # guesses wrong whenever a peer dials in from a port below the client's
+        # service port: a client serving 12545/tcp got its traffic smeared over
+        # ~1700 peer ports in one hour, one row each. So the per-port detail is
+        # ranked by bytes inside the bucket and everything past the top 20 is
+        # folded back into 'other'. A real service port carries the volume and
+        # survives; a peer's ephemeral port carries a sliver and merges away.
+        # Folding rather than dropping the tail keeps the totals equal to the
+        # base client aggregate, so shares in the cabinet still add up to 100%.
+        #
+        # port_owner is read from the client's side. The kept port comes from the
+        # source when lo_src <= lo_dst, and the client is the source exactly when
+        # direction is 'out', so the two agreeing means the port is the client's
+        # own.
         select_sql="""
+SELECT
+    hour,
+    client_id,
+    source_id,
+    direction,
+    transport,
+    if(fold_tail, 'other', service_code) AS service_code,
+    if(fold_tail, 'Other', service_name) AS service_name,
+    if(fold_tail, 'other', category) AS category,
+    if(fold_tail, toUInt16(0), service_port) AS service_port,
+    if(fold_tail, '', port_owner) AS port_owner,
+    sum(bytes) AS bytes,
+    sum(packets) AS packets,
+    sum(flows_count) AS flows_count
+FROM
+(
+    SELECT
+        *,
+        (service_code = 'port') AND (
+            row_number() OVER (
+                PARTITION BY hour, client_id, source_id, direction, transport
+                ORDER BY bytes DESC
+            ) > 20
+        ) AS fold_tail
+    FROM
+    (
 WITH
     dst_svc.service_code != '' AS has_dst_service,
-    src_svc.service_code != '' AS has_src_service
+    src_svc.service_code != '' AS has_src_service,
+    if(e.src_port = 0, 65535, e.src_port) AS lo_src,
+    if(e.dst_port = 0, 65535, e.dst_port) AS lo_dst,
+    least(lo_src, lo_dst) AS svc_port_raw,
+    (NOT has_dst_service) AND (NOT has_src_service) AND (svc_port_raw < 32768) AS keep_port
 SELECT
     e.hour AS hour,
     e.client_id AS client_id,
@@ -976,18 +1030,27 @@ SELECT
     multiIf(
         has_dst_service, dst_svc.service_code,
         has_src_service, src_svc.service_code,
+        keep_port, 'port',
         'other'
     ) AS service_code,
     multiIf(
         has_dst_service, dst_svc.service_name,
         has_src_service, src_svc.service_name,
+        keep_port, concat(e.transport, '/', toString(svc_port_raw)),
         'Other'
     ) AS service_name,
     multiIf(
         has_dst_service, dst_svc.category,
         has_src_service, src_svc.category,
+        keep_port, 'unclassified',
         'other'
     ) AS category,
+    if(keep_port, toUInt16(svc_port_raw), toUInt16(0)) AS service_port,
+    multiIf(
+        NOT keep_port, '',
+        (e.direction = 'out') = (lo_src <= lo_dst), 'local',
+        'remote'
+    ) AS port_owner,
     sum(e.bytes) AS bytes,
     sum(e.packets) AS packets,
     sum(e.flows_count) AS flows_count
@@ -1050,7 +1113,22 @@ GROUP BY
     transport,
     service_code,
     service_name,
-    category
+    category,
+    service_port,
+    port_owner
+    ) AS detail
+) AS ranked
+GROUP BY
+    hour,
+    client_id,
+    source_id,
+    direction,
+    transport,
+    service_code,
+    service_name,
+    category,
+    service_port,
+    port_owner
 """,
         pre_delete_sql="ALTER TABLE default.traffic_client_service_1h DELETE WHERE hour = {bucket_dt}",
         time_filter_column="f.time_received_ns",
@@ -1097,12 +1175,14 @@ SELECT
     service_code,
     service_name,
     category,
+    service_port,
+    port_owner,
     sum(bytes) AS bytes,
     sum(packets) AS packets,
     sum(flows_count) AS flows_count
 FROM default.traffic_client_service_1h
 WHERE {time_filter}
-GROUP BY day, client_id, source_id, direction, transport, service_code, service_name, category
+GROUP BY day, client_id, source_id, direction, transport, service_code, service_name, category, service_port, port_owner
 """,
         pre_delete_sql="ALTER TABLE default.traffic_client_service_1d DELETE WHERE day = {bucket_dt}",
     ),

@@ -12,4 +12,5 @@ CREATE TABLE IF NOT EXISTS default.traffic_client_1d
 ENGINE = SummingMergeTree
 PARTITION BY toYYYYMM(day)
 ORDER BY (client_id, day, source_id, direction)
+TTL day + toIntervalDay(730)
 SETTINGS index_granularity = 8192;
