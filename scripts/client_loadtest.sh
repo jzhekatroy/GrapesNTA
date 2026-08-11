@@ -21,6 +21,7 @@
 #
 # Переменные окружения:
 #   CH_HOST, CH_PORT, CH_USER, CH_PASSWORD, CH_DB — доступ к ClickHouse
+#   CH_HTTP_URL — если задан, ходим по HTTP вместо нативного clickhouse-client
 #   ENV_FILE — файл с ними же (по умолчанию /etc/grapesnta/traffic-rollups.env)
 #   PLAN_WINDOW_MIN — окно для расчёта плана, минут (по умолчанию 10)
 #
@@ -60,10 +61,31 @@ load_env() {
   CH_DB="${CH_DB:-${TRAFFIC_ROLLUP_CH_DATABASE:-default}}"
 }
 
+# Нативный клиент есть не на каждом хосте, поэтому при заданном CH_HTTP_URL
+# ходим по HTTP. Формат ответа задаётся самим запросом через FORMAT.
 chq() {
+  if [[ -n "${CH_HTTP_URL:-}" ]]; then
+    local out
+    out="$(curl -sS --fail-with-body --max-time "${CH_HTTP_TIMEOUT:-600}" \
+      "${CH_HTTP_URL}/?database=${CH_DB}&default_format=PrettyCompactMonoBlock" \
+      -H "X-ClickHouse-User: ${CH_USER}" \
+      -H "X-ClickHouse-Key: ${CH_PASSWORD}" \
+      --data-binary "$1")" || { echo "$out" >&2; return 1; }
+    [[ -n "$out" ]] && printf '%s\n' "$out"
+    return 0
+  fi
   local args=(--host "$CH_HOST" --port "$CH_PORT" --user "$CH_USER" --database "$CH_DB")
   [[ -n "$CH_PASSWORD" ]] && args+=(--password "$CH_PASSWORD")
   clickhouse-client "${args[@]}" --query "$1"
+}
+
+# Снимок метрик лезет в system.query_log и system.part_log, а у роллапного
+# пользователя доступа к ним может не быть. Такая дырка в снимке не повод
+# ронять весь замер.
+chq_soft() {
+  if ! chq "$1" 2>&1; then
+    echo "  (недоступно)"
+  fi
 }
 
 # Окно расчёта: последние PLAN_WINDOW_MIN полных минут.
@@ -242,7 +264,7 @@ SQL
   echo "== стоимость запросов роллапов (system.query_log)"
   # Роллап пишет 'INSERT INTO <db>.<table>\nSELECT ...', поэтому цель определяем
   # по началу запроса, а не регуляркой по всему тексту.
-  chq "$(cat <<SQL
+  chq_soft "$(cat <<SQL
 SELECT
     arrayFirst(t -> startsWith(query, concat('INSERT INTO ${CH_DB}.', t)),
                [$(printf "'%s'," "${CLIENT_TABLES[@]}" | sed 's/,$//')]) AS target,
@@ -264,7 +286,7 @@ SQL
 )"
 
   echo "== запросы, обрезанные лимитом чтения (read_overflow_mode)"
-  chq "$(cat <<SQL
+  chq_soft "$(cat <<SQL
 SELECT count() AS truncated_queries
 FROM system.query_log
 WHERE type = 'QueryFinish'
@@ -276,7 +298,7 @@ SQL
 )"
 
   echo "== размер клиентских таблиц"
-  chq "$(cat <<SQL
+  chq_soft "$(cat <<SQL
 SELECT
     table,
     sum(rows) AS rows,
@@ -314,7 +336,7 @@ SQL
 )"
 
   echo "== мержи клиентских таблиц"
-  chq "$(cat <<SQL
+  chq_soft "$(cat <<SQL
 SELECT
     table,
     count() AS merges,
