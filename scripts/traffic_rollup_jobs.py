@@ -991,6 +991,13 @@ GROUP BY hour, client_id, source_id, direction, country_code
         # rows a port scan can invent, since a scan hits many low client ports.
         # Folding rather than dropping keeps totals equal to the base client
         # aggregate, so shares in the cabinet still add up to 100%.
+        #
+        # The trailing SETTINGS cap peak memory. Grouping per client, transport
+        # and port produces ~4.6M groups on an hour where 90% of flows carry a
+        # client, and every aggregation thread builds its own hash table over
+        # them: measured 9.14 GiB peak, a fifth of the server budget, for a job
+        # that only emits ~9k rows. Fewer threads plus spilling to disk brings
+        # that to 1.91 GiB for the same output, byte for byte, and costs 10s.
         select_sql="""
 SELECT
     hour,
@@ -1136,6 +1143,10 @@ GROUP BY
     category,
     service_port,
     port_owner
+SETTINGS
+    max_threads = 8,
+    max_bytes_before_external_group_by = 2000000000,
+    max_bytes_before_external_sort = 2000000000
 """,
         pre_delete_sql="ALTER TABLE default.traffic_client_service_1h DELETE WHERE hour = {bucket_dt}",
         time_filter_column="f.time_received_ns",
