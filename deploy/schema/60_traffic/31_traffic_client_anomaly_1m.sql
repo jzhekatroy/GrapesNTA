@@ -1,5 +1,10 @@
 -- Per-minute client profile for anomaly and DDoS detection.
 --
+-- Not scheduled in traffic-rollups yet: nothing reads this table until detection
+-- lands, and the uniqCombined peer state is expensive at high client coverage.
+-- Schema and the rollup job definition stay in-tree; re-add the job id to the
+-- systemd unit / cron list when detection work starts.
+--
 -- Deliberately separate from the cabinet vitrines: an hour is too coarse for an
 -- attack that unfolds in tens of seconds, while a full per-minute breakdown by
 -- country would cost tens of millions of rows a day. Cardinality here is capped

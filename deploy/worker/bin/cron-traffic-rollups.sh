@@ -26,5 +26,6 @@ LIVE_TIMEOUT="${TRAFFIC_ROLLUP_LIVE_TIMEOUT_SEC:-55}"
 timeout -k 10 "$QUEUE_TIMEOUT" python3 /app/scripts/traffic_rollup_async.py --process-queue || true
 
 # 2) Steady-state live rollups.
+# traffic_client_anomaly_1m intentionally omitted until anomaly detection exists.
 exec timeout -k 10 "$LIVE_TIMEOUT" python3 /app/scripts/traffic_rollup_async.py \
-  --jobs traffic_dashboard_1m,traffic_protocol_1m,traffic_direction_1m,traffic_role_1m,traffic_entity_1m,traffic_client_1m,traffic_client_anomaly_1m,traffic_vlan_1m,traffic_country_1m,traffic_service_1m,traffic_unknown_port_1m,traffic_dashboard_1h,traffic_client_1h,traffic_client_country_1h,traffic_client_service_1h,traffic_dashboard_1d,traffic_client_1d,traffic_client_country_1d,traffic_client_service_1d,dns_client_domain_1h
+  --jobs traffic_dashboard_1m,traffic_protocol_1m,traffic_direction_1m,traffic_role_1m,traffic_entity_1m,traffic_client_1m,traffic_vlan_1m,traffic_country_1m,traffic_service_1m,traffic_unknown_port_1m,traffic_dashboard_1h,traffic_client_1h,traffic_client_country_1h,traffic_client_service_1h,traffic_dashboard_1d,traffic_client_1d,traffic_client_country_1d,traffic_client_service_1d,dns_client_domain_1h

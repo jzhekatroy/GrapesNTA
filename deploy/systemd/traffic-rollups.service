@@ -10,7 +10,9 @@ EnvironmentFile=-/etc/grapesnta/traffic-rollups.env
 # traffic-talkers-rollups.service. Keep these two lists complete and disjoint:
 # a job missing from both timers never advances (its table goes stale), a job
 # listed in both races itself. dashboard_1h/_1d MUST stay here.
-ExecStart=/usr/bin/python3 /opt/GrapesNTA/scripts/traffic_rollup_async.py --jobs traffic_dashboard_1m,traffic_protocol_1m,traffic_direction_1m,traffic_role_1m,traffic_entity_1m,traffic_client_1m,traffic_client_anomaly_1m,traffic_vlan_1m,traffic_country_1m,traffic_service_1m,traffic_unknown_port_1m,traffic_dashboard_1h,traffic_client_1h,traffic_client_country_1h,traffic_client_service_1h,traffic_dashboard_1d,traffic_client_1d,traffic_client_country_1d,traffic_client_service_1d,dns_client_domain_1h
+# traffic_client_anomaly_1m is defined but not scheduled: no detector consumes it
+# yet, and the uniqCombined peer state is the expensive part of the client layer.
+ExecStart=/usr/bin/python3 /opt/GrapesNTA/scripts/traffic_rollup_async.py --jobs traffic_dashboard_1m,traffic_protocol_1m,traffic_direction_1m,traffic_role_1m,traffic_entity_1m,traffic_client_1m,traffic_vlan_1m,traffic_country_1m,traffic_service_1m,traffic_unknown_port_1m,traffic_dashboard_1h,traffic_client_1h,traffic_client_country_1h,traffic_client_service_1h,traffic_dashboard_1d,traffic_client_1d,traffic_client_country_1d,traffic_client_service_1d,dns_client_domain_1h
 StandardOutput=journal
 StandardError=journal
 TimeoutStartSec=3600
