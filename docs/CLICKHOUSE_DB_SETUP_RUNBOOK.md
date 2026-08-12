@@ -105,8 +105,24 @@ ch -q "SELECT version(), now()"
 
 ```sql
 CREATE USER IF NOT EXISTS collector_write IDENTIFIED BY '***';
-CREATE USER IF NOT EXISTS ui_read IDENTIFIED BY '***';
-CREATE USER IF NOT EXISTS ui_admin IDENTIFIED BY '***';
+CREATE USER IF NOT EXISTS ui_read IDENTIFIED BY '***'
+  SETTINGS
+    max_execution_time = 120,
+    timeout_overflow_mode = 'throw',
+    max_rows_to_read = 0,
+    max_bytes_to_read = 0,
+    read_overflow_mode = 'throw',
+    max_result_rows = 0,
+    result_overflow_mode = 'throw';
+CREATE USER IF NOT EXISTS ui_admin IDENTIFIED BY '***'
+  SETTINGS
+    max_execution_time = 30,
+    timeout_overflow_mode = 'throw',
+    max_rows_to_read = 100000000,
+    max_bytes_to_read = 20000000000,
+    read_overflow_mode = 'throw',
+    max_result_rows = 500000,
+    result_overflow_mode = 'throw';
 
 GRANT INSERT ON default.flows_raw TO collector_write;
 GRANT INSERT ON default.dns_log TO collector_write;
@@ -123,6 +139,72 @@ GRANT CREATE DICTIONARY, DROP DICTIONARY ON default.* TO ui_admin;
 GRANT SYSTEM RELOAD DICTIONARY ON *.* TO ui_admin;
 GRANT SELECT ON system.* TO ui_admin;
 ```
+
+### Политика лимитов: только `throw`, никогда `break`
+
+Лимиты (`max_execution_time`, `max_rows_to_read`, `max_bytes_to_read`,
+`max_result_rows`) ставить можно и нужно. Режим при достижении лимита —
+**только** `throw`.
+
+| Режим | Поведение | Допустимо? |
+|-------|-----------|------------|
+| `throw` | запрос падает с ошибкой | да |
+| `break` | запрос «успешен», но ответ обрезан | **нет** |
+
+`break` опасен тем, что агрегаты и сверки выглядят корректными, хотя часть
+входных строк уже отброшена. Это уже ловили на проде у `ui_admin`:
+`max_rows_to_read = 100M` + `read_overflow_mode = 'break'` тихо обрезал
+тяжёлые `INSERT … SELECT` / сверки.
+
+Правило для всех инсталляций:
+
+1. При создании UI-пользователей всегда явно задавать `*_overflow_mode = 'throw'`.
+2. Не копировать с прода `SHOW CREATE USER` без проверки режимов.
+3. После bootstrap — проверочный запрос ниже должен вернуть **0 строк**.
+
+```sql
+-- Должно быть пусто. Любая строка = мина на инсталляции.
+SELECT
+  user_name,
+  setting_name,
+  value
+FROM system.settings_profile_elements
+WHERE user_name IN ('ui_read', 'ui_admin', 'collector_write', 'develop')
+  AND setting_name IN (
+    'read_overflow_mode',
+    'result_overflow_mode',
+    'timeout_overflow_mode'
+  )
+  AND value = 'break'
+ORDER BY user_name, setting_name;
+```
+
+Если на уже живом сервере нашёлся `break` — поправить идемпотентно
+(пароль не трогать):
+
+```sql
+ALTER USER ui_admin SETTINGS
+  max_execution_time = 30,
+  timeout_overflow_mode = 'throw',
+  max_rows_to_read = 100000000,
+  max_bytes_to_read = 20000000000,
+  read_overflow_mode = 'throw',
+  max_result_rows = 500000,
+  result_overflow_mode = 'throw';
+
+ALTER USER ui_read SETTINGS
+  max_execution_time = 120,
+  timeout_overflow_mode = 'throw',
+  max_rows_to_read = 0,
+  max_bytes_to_read = 0,
+  read_overflow_mode = 'throw',
+  max_result_rows = 0,
+  result_overflow_mode = 'throw';
+```
+
+Права (GRANT) по-прежнему вынесены в `NTAdmin/scripts/grant-ui-users.sql`;
+настройки пользователей живут здесь, в bootstrap, а не «набиваются руками»
+после установки.
 
 ### Проблема: `ACCESS_DENIED` у UI
 
@@ -680,6 +762,8 @@ GROUP BY source_id"
 - [ ] `traffic_rollup_state FINAL`: `last_bucket` двигается каждую минуту
 - [ ] `geo_country_dict` — `LOADED`, тест `dictGet` работает
 - [ ] Users: `collector_write`, `ui_read`, `ui_admin` + grants
+- [ ] Users: у `ui_read` / `ui_admin` нет `*_overflow_mode = 'break'`
+      (проверочный SELECT из §4 должен вернуть 0 строк)
 - [ ] `xdpflowd`: `lag_segments` ≈ 0, `map_full=0`, `raw_5m` > 0
 - [ ] UI открывается без `Unknown table`
 
