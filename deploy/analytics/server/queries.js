@@ -236,7 +236,7 @@ const CHART_LINE_META = [
   { sql: 'out', id: 'outgoing', label: 'Исходящий', color: '#6972F0' },
   { sql: 'transit', id: 'transit', label: 'Транзит', color: '#F0B400' },
   { sql: 'internal', id: 'internal', label: 'Внутренний', color: '#A4ADFF' },
-  { sql: 'unknown', id: 'unclassified', label: 'Неклассифицировано', color: '#7F7F9D' },
+  { sql: 'unknown', id: 'unclassified', label: 'Неразмеченный', color: '#7F7F9D' },
   { sql: 'total', id: 'total', label: 'Всего', color: '#7E92F8' },
 ];
 
@@ -2497,4 +2497,5 @@ module.exports = {
   sourcesScopeSql,
   mergeCollectorParams,
   appendFlowsRawCollectorFilter,
+  CHART_LINE_META,
 };

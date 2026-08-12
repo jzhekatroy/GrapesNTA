@@ -87,9 +87,14 @@ const config = {
   dnsActivity5mTable: env('CLICKHOUSE_DNS_ACTIVITY_5M_TABLE', 'dns_activity_5m'),
   dnsDomains1hTable: env('CLICKHOUSE_DNS_DOMAINS_1H_TABLE', 'dns_domains_1h'),
   dnsClients1hTable: env('CLICKHOUSE_DNS_CLIENTS_1H_TABLE', 'dns_clients_1h'),
+  dnsServers1hTable: env('CLICKHOUSE_DNS_SERVERS_1H_TABLE', 'dns_servers_1h'),
+  dnsResolversTable: env('CLICKHOUSE_DNS_RESOLVERS_TABLE', 'net_dns_resolvers'),
+  dnsResolversView: env('CLICKHOUSE_DNS_RESOLVERS_VIEW', 'net_dns_resolvers_enabled'),
   bmpRouteEventsTable: env('CLICKHOUSE_BMP_ROUTE_EVENTS_TABLE', 'bmp_route_events'),
   l3PrefixesTable: env('CLICKHOUSE_L3_PREFIXES_TABLE', 'net_l3_prefixes'),
   l3PrefixesView: env('CLICKHOUSE_L3_PREFIXES_VIEW', 'net_l3_prefixes_enabled'),
+  flowExclusionsTable: env('CLICKHOUSE_FLOW_EXCLUSIONS_TABLE', 'net_flow_exclusions'),
+  flowExclusionsView: env('CLICKHOUSE_FLOW_EXCLUSIONS_VIEW', 'net_flow_exclusions_enabled'),
   l2VlansTable: env('CLICKHOUSE_L2_VLANS_TABLE', 'net_l2_vlans'),
   l2VlansView: env('CLICKHOUSE_L2_VLANS_VIEW', 'net_l2_vlans_enabled'),
   vlanTable: env('CLICKHOUSE_VLAN_TABLE', 'traffic_vlan_1m'),
@@ -137,15 +142,19 @@ const config = {
     dstLabel: envOpt('CH_COL_DST_LABEL', 'dst_label'),
     srcEndpointScope: envOpt('CH_COL_SRC_ENDPOINT_SCOPE', 'src_endpoint_scope'),
     dstEndpointScope: envOpt('CH_COL_DST_ENDPOINT_SCOPE', 'dst_endpoint_scope'),
+    srcEndpointSource: envOpt('CH_COL_SRC_ENDPOINT_SOURCE', 'src_endpoint_source'),
+    dstEndpointSource: envOpt('CH_COL_DST_ENDPOINT_SOURCE', 'dst_endpoint_source'),
     srcNetworkName: envOpt('CH_COL_SRC_NETWORK_NAME', 'src_network_name'),
     dstNetworkName: envOpt('CH_COL_DST_NETWORK_NAME', 'dst_network_name'),
+    srcEntity: envOpt('CH_COL_SRC_ENTITY', 'src_entity'),
+    dstEntity: envOpt('CH_COL_DST_ENTITY', 'dst_entity'),
     srcVlan: envOpt('CH_COL_SRC_VLAN', 'src_vlan'),
     dstVlan: envOpt('CH_COL_DST_VLAN', 'dst_vlan'),
     vlanId: envOpt('CH_COL_VLAN_ID', 'vlan_id'),
     srcAttachmentKind: envOpt('CH_COL_SRC_ATTACHMENT_KIND', 'src_attachment_kind'),
     dstAttachmentKind: envOpt('CH_COL_DST_ATTACHMENT_KIND', 'dst_attachment_kind'),
-    srcMac: envOpt('CH_COL_SRC_MAC', 'SrcMAC'),
-    dstMac: envOpt('CH_COL_DST_MAC', 'DstMAC'),
+    srcMac: envOpt('CH_COL_SRC_MAC', 'src_mac'),
+    dstMac: envOpt('CH_COL_DST_MAC', 'dst_mac'),
     samplingRate: envOpt('CH_COL_SAMPLING_RATE', null),
     samplerAddress: envOpt('CH_COL_SAMPLER_ADDRESS', 'sampler_address'),
     inIf: envOpt('CH_COL_IN_IF', 'in_if'),
@@ -278,6 +287,10 @@ function snmpAgentsCurrentRef() {
   return `${qIdent(config.database)}.${qIdent(config.snmpAgentsCurrent)}`;
 }
 
+function snmpAgentsTableRef() {
+  return `${qIdent(config.database)}.${qIdent(config.snmpAgentsTable)}`;
+}
+
 function netInterfacesCurrentRef() {
   return `${qIdent(config.database)}.${qIdent(config.netInterfacesCurrent)}`;
 }
@@ -376,6 +389,18 @@ function dnsClients1hTableRef() {
   return `${qIdent(config.database)}.${qIdent(config.dnsClients1hTable)}`;
 }
 
+function dnsServers1hTableRef() {
+  return `${qIdent(config.database)}.${qIdent(config.dnsServers1hTable)}`;
+}
+
+function dnsResolversTableRef() {
+  return `${qIdent(config.database)}.${qIdent(config.dnsResolversTable)}`;
+}
+
+function dnsResolversViewRef() {
+  return `${qIdent(config.database)}.${qIdent(config.dnsResolversView)}`;
+}
+
 function protocolTableRef() {
   return `${qIdent(config.database)}.${qIdent(config.protocolTable)}`;
 }
@@ -414,6 +439,14 @@ function l3PrefixesTableRef() {
 
 function l3PrefixesViewRef() {
   return `${qIdent(config.database)}.${qIdent(config.l3PrefixesView)}`;
+}
+
+function flowExclusionsTableRef() {
+  return `${qIdent(config.database)}.${qIdent(config.flowExclusionsTable)}`;
+}
+
+function flowExclusionsViewRef() {
+  return `${qIdent(config.database)}.${qIdent(config.flowExclusionsView)}`;
 }
 
 function l2VlansTableRef() {
@@ -530,14 +563,16 @@ async function query(sql, params = {}, options = {}) {
   let ephemeralClient = null;
   try {
     const timeoutMs = Number(options.requestTimeoutMs) || 0;
-    const ch = timeoutMs > 0 && timeoutMs !== config.requestTimeoutMs
-      ? (ephemeralClient = createChClient(
-        config.readUsername,
-        config.readPassword,
-        timeoutMs,
-        options.clickhouse_settings,
-      ))
-      : getReadClient();
+    const ch = options.useWrite
+      ? getWriteClient()
+      : (timeoutMs > 0 && timeoutMs !== config.requestTimeoutMs
+        ? (ephemeralClient = createChClient(
+          config.readUsername,
+          config.readPassword,
+          timeoutMs,
+          options.clickhouse_settings,
+        ))
+        : getReadClient());
     const result = await ch.query({
       query: sql,
       query_params: params,
@@ -628,9 +663,14 @@ function getConfig() {
     dnsActivity5mTable: config.dnsActivity5mTable,
     dnsDomains1hTable: config.dnsDomains1hTable,
     dnsClients1hTable: config.dnsClients1hTable,
+    dnsServers1hTable: config.dnsServers1hTable,
+    dnsResolversTable: config.dnsResolversTable,
+    dnsResolversView: config.dnsResolversView,
     bmpRouteEventsTable: config.bmpRouteEventsTable,
     l3PrefixesTable: config.l3PrefixesTable,
     l3PrefixesView: config.l3PrefixesView,
+    flowExclusionsTable: config.flowExclusionsTable,
+    flowExclusionsView: config.flowExclusionsView,
     collectorsTable: config.collectorsTable,
     collectorsView: config.collectorsView,
     snmpSettingsCurrent: config.snmpSettingsCurrent,
@@ -694,6 +734,7 @@ module.exports = {
   collectorsTableRef,
   snmpSettingsCurrentRef,
   snmpAgentsCurrentRef,
+  snmpAgentsTableRef,
   netInterfacesCurrentRef,
   netInterfacesDictRef,
   directionSettingsTableRef,
@@ -718,8 +759,13 @@ module.exports = {
   dnsActivity5mTableRef,
   dnsDomains1hTableRef,
   dnsClients1hTableRef,
+  dnsServers1hTableRef,
+  dnsResolversTableRef,
+  dnsResolversViewRef,
   l3PrefixesTableRef,
   l3PrefixesViewRef,
+  flowExclusionsTableRef,
+  flowExclusionsViewRef,
   l2VlansTableRef,
   l2VlansViewRef,
   vlanTableRef,

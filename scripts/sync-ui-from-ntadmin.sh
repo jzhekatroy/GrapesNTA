@@ -88,7 +88,23 @@ if [[ -f "${DEST}/.env.example" ]]; then
   cp "${DEST}/.env.example" "${REPO_ROOT}/deploy/ui/env.example"
 fi
 
+# grapes-worker vendors a subset of server/ modules. They must move together with
+# the UI: a stale clickhouse.js/explorer.js pair makes the worker reject dimensions
+# the UI happily saves ("Неизвестное измерение разреза: …").
+WORKER_DEST="${REPO_ROOT}/deploy/analytics/server"
+if [[ -d "${WORKER_DEST}" ]]; then
+  log "sync worker modules → ${WORKER_DEST}/"
+  for dst in "${WORKER_DEST}"/*.js; do
+    [[ -e "${dst}" ]] || continue
+    name="$(basename "${dst}")"
+    src="${SRC}/server/${name}"
+    [[ -f "${src}" ]] || die "worker module has no NTAdmin counterpart: server/${name}"
+    cp "${src}" "${dst}"
+  done
+fi
+
 log "done → ${DEST}"
 log "SOURCE.txt:"
 cat "${SOURCE_TXT}"
-log "next: git add deploy/ui && git commit && git push && on server: ./deploy/deploy.sh ui"
+log "next: git add deploy/ui deploy/analytics && git commit && git push"
+log "      on server: ./deploy/deploy.sh ui && ./deploy/deploy.sh --no-pull worker"

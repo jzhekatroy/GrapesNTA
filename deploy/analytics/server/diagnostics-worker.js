@@ -24,8 +24,9 @@ const TRAFFIC_1M_STALE_UPDATE_SEC = 15 * 60;
 const TRAFFIC_1H_STALE_UPDATE_SEC = 2 * 3600;
 const TRAFFIC_1D_STALE_UPDATE_SEC = 30 * 3600;
 /**
- * Jobs grapes-worker actually runs (deploy/worker cron). Everything else in
- * traffic_rollup_state is legacy noise (IP talker/pair, old experiments).
+ * Jobs grapes-worker actually runs (deploy/worker cron / traffic-rollups).
+ * Everything else in traffic_rollup_state is legacy noise (IP talker/pair,
+ * old experiments). Client cabinet jobs are part of the same timer.
  */
 const ACTIVE_TRAFFIC_JOBS = [
   'traffic_dashboard_1m',
@@ -33,12 +34,20 @@ const ACTIVE_TRAFFIC_JOBS = [
   'traffic_direction_1m',
   'traffic_role_1m',
   'traffic_entity_1m',
+  'traffic_client_1m',
   'traffic_vlan_1m',
   'traffic_country_1m',
   'traffic_service_1m',
   'traffic_unknown_port_1m',
   'traffic_dashboard_1h',
+  'traffic_client_1h',
+  'traffic_client_country_1h',
+  'traffic_client_service_1h',
+  'dns_client_domain_1h',
   'traffic_dashboard_1d',
+  'traffic_client_1d',
+  'traffic_client_country_1d',
+  'traffic_client_service_1d',
   'traffic_asn_1m',
   'traffic_asn_1h',
   'traffic_asn_pair_1m',
@@ -396,14 +405,15 @@ async function getWorkerDiagnostics() {
   });
 
   const dashboard = trafficRows.find((r) => r.job === DASHBOARD_JOB) || null;
-  const queries = (Array.isArray(diag.queries) ? diag.queries : [])
+  const recentQueries = (Array.isArray(diag.queries) ? diag.queries : []).slice(0, 30);
+  const queries = recentQueries
     .filter((q) => q && (q.error || Number(q.elapsedMs) >= 500))
     .slice(0, 20);
 
   return {
     service: 'grapes-worker',
     serviceLabel: 'grapes-worker',
-    description: 'Observations analytics loop + traffic/ASN rollups (Docker).',
+    description: 'Observations analytics loop + traffic/ASN/client rollups (Docker).',
     updatedAt: new Date().toISOString(),
     problems,
     summary: {
@@ -423,6 +433,7 @@ async function getWorkerDiagnostics() {
       containerHint: 'grapes-worker',
     },
     lastTick: diag.lastTick || null,
+    recentQueries,
     queries,
     storePath: diag.storePath || null,
     observations: {
