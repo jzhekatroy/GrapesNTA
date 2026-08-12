@@ -55,10 +55,18 @@ const ONE_SIDED_POLICIES = ['strict', 'infer'];
 
 const DIRECTION_MODES = ['prefixes', 'ports'];
 
+const UNKNOWN_NETWORKS = ['foreign', 'unclassified'];
+
+const UNKNOWN_NETWORK_LABELS = {
+  foreign: 'Считать транзитом',
+  unclassified: 'Помечать как неразмеченный',
+};
+
 const DEFAULT_SETTINGS = {
   directionMode: 'prefixes',
   defaultBoundary: 'unknown',
   oneSided: 'strict',
+  unknownNetworks: 'foreign',
 };
 
 const MAX_PATTERN_LENGTH = 500;
@@ -96,6 +104,11 @@ function newRuleId() {
 /* Настройки инсталляции                                               */
 /* ------------------------------------------------------------------ */
 
+function normalizeUnknownNetworks(value, fallback = DEFAULT_SETTINGS.unknownNetworks) {
+  const mode = String(value ?? '').trim().toLowerCase();
+  return UNKNOWN_NETWORKS.includes(mode) ? mode : fallback;
+}
+
 function mapSettingsRow(r = {}) {
   const mode = String(r.direction_mode ?? '').trim().toLowerCase();
   const policy = String(r.one_sided ?? '').trim().toLowerCase();
@@ -103,6 +116,7 @@ function mapSettingsRow(r = {}) {
     directionMode: DIRECTION_MODES.includes(mode) ? mode : DEFAULT_SETTINGS.directionMode,
     defaultBoundary: normalizeBoundary(r.default_boundary, DEFAULT_SETTINGS.defaultBoundary),
     oneSided: ONE_SIDED_POLICIES.includes(policy) ? policy : DEFAULT_SETTINGS.oneSided,
+    unknownNetworks: normalizeUnknownNetworks(r.unknown_networks),
     updatedBy: String(r.updated_by ?? ''),
     updatedAt: r.updated_at ?? null,
   };
@@ -112,7 +126,7 @@ async function fetchDirectionSettings() {
   try {
     const { rows } = await query(
       `
-        SELECT direction_mode, default_boundary, one_sided, updated_by, updated_at
+        SELECT direction_mode, default_boundary, one_sided, unknown_networks, updated_by, updated_at
         FROM ${directionSettingsViewRef()}
         WHERE settings_id = 'global'
         LIMIT 1
@@ -137,6 +151,8 @@ async function getDirectionSettings() {
       connectivity: CONNECTIVITY_VALUES,
       connectivityLabels: CONNECTIVITY_LABELS,
       oneSidedPolicies: ONE_SIDED_POLICIES,
+      unknownNetworks: UNKNOWN_NETWORKS,
+      unknownNetworkLabels: UNKNOWN_NETWORK_LABELS,
     },
   };
 }
@@ -147,11 +163,19 @@ async function saveDirectionSettings(body = {}, { updatedBy = '' } = {}) {
     .trim().toLowerCase();
   if (!DIRECTION_MODES.includes(mode)) throw apiError('Неизвестный режим определения направления');
 
+  const unknownNetworks = normalizeUnknownNetworks(
+    body?.unknownNetworks ?? body?.unknown_networks ?? current.unknownNetworks,
+  );
+  if (!UNKNOWN_NETWORKS.includes(unknownNetworks)) {
+    throw apiError('Недопустимое значение unknownNetworks');
+  }
+
   const record = {
     settings_id: 'global',
     direction_mode: mode,
     default_boundary: 'unknown',
     one_sided: 'strict',
+    unknown_networks: unknownNetworks,
     updated_by: String(updatedBy || '').slice(0, 128),
   };
   const { elapsedMs } = await insertRows(config.directionSettingsTable, [record], {
@@ -708,7 +732,11 @@ module.exports = {
   MATCH_FIELDS,
   ONE_SIDED_POLICIES,
   DIRECTION_MODES,
+  UNKNOWN_NETWORKS,
+  UNKNOWN_NETWORK_LABELS,
   DEFAULT_SETTINGS,
+  normalizeUnknownNetworks,
+  mapSettingsRow,
   fetchDirectionSettings,
   getDirectionSettings,
   saveDirectionSettings,

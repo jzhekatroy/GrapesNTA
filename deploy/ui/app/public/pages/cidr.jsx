@@ -5,6 +5,7 @@ const L3_ROLES = [
   { value: 'internal', label: 'Внутренняя сеть провайдера' },
   { value: 'customer_allocated', label: 'Сеть клиента из нашего пула' },
   { value: 'customer_transit', label: 'Транзитная сеть клиента' },
+  { value: 'remote', label: 'Чужая / внешняя сеть' },
 ];
 
 const L3_ROLE_LABELS = Object.fromEntries(L3_ROLES.map((r) => [r.value, r.label]));
@@ -43,21 +44,24 @@ function fmtL3UpdatedAt(value) {
   });
 }
 
-function PageCIDR() {
+function PageCIDR({ embedded = false, refreshKey: parentRefreshKey = 0, onReload } = {}) {
   const canWrite = AuthAccess.canWritePage('cidr');
   const [rows, setRows] = useState([]);
   const [entities, setEntities] = useState([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(null);
-  const [view, setView] = useState('list');
   const [search, setSearch] = useState('');
   const [selected, setSelected] = useState(new Set());
   const [editing, setEditing] = useState(null);
   const [showAdd, setShowAdd] = useState(false);
-  const [refreshKey, setRefreshKey] = useState(0);
+  const [localRefreshKey, setLocalRefreshKey] = useState(0);
   const [togglingId, setTogglingId] = useState(null);
 
-  const reload = useCallback(() => setRefreshKey((k) => k + 1), []);
+  const refreshKey = onReload ? parentRefreshKey : localRefreshKey;
+  const reload = useCallback(() => {
+    if (onReload) onReload();
+    else setLocalRefreshKey((k) => k + 1);
+  }, [onReload]);
 
   useEffect(() => {
     let cancelled = false;
@@ -219,31 +223,30 @@ function PageCIDR() {
     },
   ];
 
-  return (
-    <div className="main__container">
-      <div className="page-head">
-        <div>
-          <h1>Собственные сети (CIDR)</h1>
-          <p>L3-префиксы для классификации трафика: владелец сети и роль адресов. Изменения применяются автоматически (~60 с).</p>
+  const body = (
+    <>
+      {!embedded && (
+        <div className="page-head">
+          <div>
+            <h1>Собственные сети (CIDR)</h1>
+            <p>L3-префиксы для классификации трафика: владелец сети и роль адресов. Изменения применяются автоматически (~60 с).</p>
+          </div>
+          <div className="row" style={{ gap: 8 }}>
+            <Button kind="ghost" icon="upload" disabled title="В разработке" onClick={() => pushToast({ kind: 'info', title: 'Импорт CSV', desc: 'Функция в разработке.' })}>Импорт из CSV</Button>
+            <Button kind="ghost" icon="export" disabled title="В разработке" onClick={() => pushToast({ kind: 'info', title: 'Экспорт', desc: 'Функция в разработке.' })}>Экспорт</Button>
+            <Button kind="ghost" icon="refresh" onClick={reload} disabled={loading}>Обновить</Button>
+            <Button kind="primary" icon="plus" onClick={() => setShowAdd(true)} disabled={!!loadError || !canWrite}>Добавить сеть</Button>
+          </div>
         </div>
-        <div className="row" style={{ gap: 8 }}>
+      )}
+
+      {embedded && (
+        <div className="row" style={{ justifyContent: 'flex-end', marginBottom: 12, gap: 8 }}>
           <Button kind="ghost" icon="upload" disabled title="В разработке" onClick={() => pushToast({ kind: 'info', title: 'Импорт CSV', desc: 'Функция в разработке.' })}>Импорт из CSV</Button>
           <Button kind="ghost" icon="export" disabled title="В разработке" onClick={() => pushToast({ kind: 'info', title: 'Экспорт', desc: 'Функция в разработке.' })}>Экспорт</Button>
-          <Button kind="ghost" icon="refresh" onClick={reload} disabled={loading}>Обновить</Button>
           <Button kind="primary" icon="plus" onClick={() => setShowAdd(true)} disabled={!!loadError || !canWrite}>Добавить сеть</Button>
         </div>
-      </div>
-
-      <div className="table-toolbar" style={{ marginBottom: view === 'list' ? 0 : 12 }}>
-        <div className="seg">
-          <button className={view === 'tree' ? 'is-active' : ''} onClick={() => setView('tree')}>
-            <Icon name="layers" size={13} /> Дерево
-          </button>
-          <button className={view === 'list' ? 'is-active' : ''} onClick={() => setView('list')}>
-            <Icon name="menu" size={13} /> Список
-          </button>
-        </div>
-      </div>
+      )}
 
       {loading ? (
         <Card pad="sm">
@@ -251,15 +254,6 @@ function PageCIDR() {
         </Card>
       ) : loadError ? (
         <Empty icon="db" title="Не удалось загрузить" desc={loadError} action={<Button kind="primary" icon="refresh" onClick={reload}>Повторить</Button>} />
-      ) : view === 'tree' ? (
-        <Card pad="sm">
-          <Empty
-            icon="layers"
-            title="Иерархия префиксов"
-            desc="Режим дерева будет доступен позже. Используйте список для управления L3-сетями."
-            action={<Button kind="ghost" onClick={() => setView('list')}>Открыть список</Button>}
-          />
-        </Card>
       ) : (
         <DataTable
           rows={filtered}
@@ -278,7 +272,7 @@ function PageCIDR() {
             left: selected.size > 0 ? (
               <div className="row" style={{ gap: 8 }}>
                 <span style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-secondary)' }}>
-                  Выбрано: <b style={{ color: '#fff' }}>{selected.size}</b>
+                  Выбрано: <b style={{ color: 'var(--fg-primary)' }}>{selected.size}</b>
                 </span>
                 <Button size="sm" kind="ghost" disabled onClick={() => pushToast({ kind: 'info', title: 'Bulk edit', desc: 'Функция в разработке.' })}>Bulk edit</Button>
               </div>
@@ -310,8 +304,11 @@ function PageCIDR() {
           pushToast({ kind: 'success', title: SAVE_SUCCESS_TITLE, desc: SAVE_SUCCESS_DESC });
         }}
       />
-    </div>
+    </>
   );
+
+  if (embedded) return body;
+  return <div className="main__container">{body}</div>;
 }
 
 function L3EnabledToggle({ enabled, disabled, onChange }) {
@@ -343,7 +340,7 @@ function L3EnabledToggle({ enabled, disabled, onChange }) {
         width: 16,
         height: 16,
         borderRadius: 999,
-        background: '#fff',
+        background: 'var(--pv-white-main)',
         transition: 'left var(--pv-dur-fast) var(--pv-ease-out)',
       }} />
     </button>

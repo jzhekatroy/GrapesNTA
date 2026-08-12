@@ -32,7 +32,7 @@ function PageTTL() {
       width: 220,
       render: (r) => (
         <div>
-          <div style={{ font: 'var(--pv-text-body-2-bold)', color: '#fff' }}>{r.label}</div>
+          <div style={{ font: 'var(--pv-text-body-2-bold)', color: 'var(--fg-primary)' }}>{r.label}</div>
           {r.heavy && (
             <div style={{ marginTop: 4 }}>
               <Badge tone="warning">Тяжёлая</Badge>

@@ -286,7 +286,7 @@ function DnsResolverEnabledToggle({ enabled, disabled, onChange }) {
         width: 16,
         height: 16,
         borderRadius: 999,
-        background: '#fff',
+        background: 'var(--pv-white-main)',
         transition: 'left var(--pv-dur-fast) var(--pv-ease-out)',
       }} />
     </button>

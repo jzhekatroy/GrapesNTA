@@ -45,6 +45,8 @@ const GROUP_BY = [
   { id: 'server_ip', label: 'IP DNS-сервера', column: 'server_ip' },
   { id: 'qtype', label: 'Тип запроса', column: 'qtype' },
   { id: 'rcode', label: 'Результат ответа', column: 'rcode' },
+  { id: 'answer', label: 'Ответ', column: 'answer' },
+  { id: 'answer_type', label: 'Тип ответа', column: 'answer_type' },
 ];
 
 const FIELDS = [
@@ -53,8 +55,11 @@ const FIELDS = [
   { id: 'server_ip', label: 'IP DNS-сервера', ops: ['eq', 'ne', 'in_cidr'] },
   { id: 'qtype', label: 'Тип запроса', ops: ['eq', 'ne', 'in'] },
   { id: 'rcode', label: 'Результат ответа', ops: ['eq', 'ne', 'in'] },
+  { id: 'answer', label: 'Ответ', ops: ['eq', 'ne', 'in_cidr', 'contains'] },
   { id: 'source_id', label: 'Источник/коллектор', ops: ['in'] },
 ];
+
+const ANSWER_GROUP_IDS = new Set(['answer', 'answer_type']);
 
 const RCODE_VALUES = [
   { id: '0', label: 'Успешно', code: 0 },
@@ -113,12 +118,110 @@ function rcodeSqlForValue(value, alias = '') {
   return `${col} = {rcode_${String(value).replace(/[^a-zA-Z0-9]/g, '_')}:UInt8}`;
 }
 
+function needsAnswerExpand(groupBy = []) {
+  return groupBy.some((id) => ANSWER_GROUP_IDS.has(id));
+}
+
+function dnsDomainNormalizeExpr(colExpr) {
+  return `replaceRegexpOne(${colExpr}, '\\\\.$', '')`;
+}
+
+function dnsDomainEqSql(colExpr, paramKey) {
+  return `${dnsDomainNormalizeExpr(colExpr)} = ${dnsDomainNormalizeExpr(`{${paramKey}:String}`)}`;
+}
+
+function dnsAnswerPairJoinExpr(alias = 'inner_d') {
+  const p = alias ? `${alias}.` : '';
+  return `arrayJoin(
+    if(
+      empty(${p}answers_a) AND empty(${p}answers_aaaa) AND empty(${p}answers_cname),
+      [tuple('none', '')],
+      arrayConcat(
+        arrayMap(x -> tuple('A', toString(toIPv4(reinterpretAsUInt32(reverse(substring(x, 1, 4)))))), ${p}answers_a),
+        arrayMap(x -> tuple('AAAA', IPv6NumToString(x)), ${p}answers_aaaa),
+        arrayMap(x -> tuple('CNAME', x), ${p}answers_cname)
+      )
+    )
+  )`;
+}
+
+function dnsExplorerInnerWhereSql(whereSql, innerAlias = 'inner_d') {
+  return String(whereSql || '').replace(/\bd\./g, `${innerAlias}.`);
+}
+
+function dnsExplorerDataSource(base, groupBy = []) {
+  if (!needsAnswerExpand(groupBy)) {
+    return {
+      fromSql: `${dnsLogTableRef()} AS d`,
+      whereSql: base.whereSql,
+    };
+  }
+  const answerJoin = dnsAnswerPairJoinExpr('inner_d');
+  const innerWhere = dnsExplorerInnerWhereSql(base.whereSql, 'inner_d');
+  return {
+    fromSql: `(
+      SELECT
+        inner_d.ts,
+        inner_d.source_id,
+        inner_d.client_ip,
+        inner_d.server_ip,
+        inner_d.query_name,
+        inner_d.qtype,
+        inner_d.rcode,
+        inner_d.is_response,
+        ${answerJoin} AS answer_pair,
+        answer_pair.1 AS answer_type,
+        answer_pair.2 AS answer
+      FROM ${dnsLogTableRef()} AS inner_d
+      WHERE ${innerWhere}
+        AND inner_d.is_response = 1
+    ) AS d`,
+    whereSql: '1',
+  };
+}
+
+function answerEqFilterSql(alias, paramKey) {
+  const col = (name) => `${alias}.${name}`;
+  return `(
+    arrayExists(x ->
+      positionCaseInsensitive({${paramKey}:String}, ':') = 0
+      AND substring(x, 1, 4) = reverse(reinterpretAsString(toIPv4({${paramKey}:String})))
+      AND substring(x, 5) = unhex('000000000000000000000000'),
+      ${col('answers_a')}
+    )
+    OR arrayExists(x ->
+      positionCaseInsensitive({${paramKey}:String}, ':') > 0
+      AND x = IPv6StringToNum({${paramKey}:String}),
+      ${col('answers_aaaa')}
+    )
+    OR has(${col('answers_cname')}, {${paramKey}:String})
+  )`;
+}
+
+function answerInCidrFilterSql(alias, paramKey) {
+  const col = (name) => `${alias}.${name}`;
+  return `(
+    arrayExists(x -> isIPAddressInRange(
+      toString(toIPv4(reinterpretAsUInt32(reverse(substring(x, 1, 4))))),
+      {${paramKey}:String}
+    ), ${col('answers_a')})
+    OR arrayExists(x -> isIPAddressInRange(IPv6NumToString(x), {${paramKey}:String}), ${col('answers_aaaa')})
+  )`;
+}
+
+function answerContainsFilterSql(alias, paramKey) {
+  const col = (name) => `${alias}.${name}`;
+  return `arrayExists(x -> positionCaseInsensitive(x, {${paramKey}:String}) > 0, ${col('answers_cname')})`;
+}
+
 function groupExpr(fieldId, alias = '') {
   const g = GROUP_BY_ID[fieldId];
   if (!g) throw new Error(`Неизвестная группировка: ${fieldId}`);
   if (fieldId === 'client_ip') return `${dnsIpExpr(`${alias ? `${alias}.` : ''}client_ip`)}`;
   if (fieldId === 'server_ip') return `${dnsIpExpr(`${alias ? `${alias}.` : ''}server_ip`)}`;
   if (fieldId === 'rcode') return `toString(${alias ? `${alias}.` : ''}rcode)`;
+  if (fieldId === 'answer_type') return `${alias ? `${alias}.` : ''}answer_type`;
+  if (fieldId === 'answer') return `${alias ? `${alias}.` : ''}answer`;
   return `${alias ? `${alias}.` : ''}${g.column}`;
 }
 
@@ -227,7 +330,7 @@ function buildExplorerWhereClauses(filters, alias = 'd') {
       }
     } else if (f.field === 'query_name') {
       if (f.op === 'eq') {
-        pushDnsExplorerFilterClause(clauses, `${col('query_name')} = {${key}:String}`, f.logic);
+        pushDnsExplorerFilterClause(clauses, dnsDomainEqSql(col('query_name'), key), f.logic);
         params[key] = f.value;
       } else if (f.op === 'contains') {
         pushDnsExplorerFilterClause(clauses, `positionCaseInsensitive(${col('query_name')}, {${key}:String}) > 0`, f.logic);
@@ -282,6 +385,20 @@ function buildExplorerWhereClauses(filters, alias = 'd') {
           parts.length > 1 ? `(${parts.join(' OR ')})` : parts[0],
           f.logic,
         );
+      }
+    } else if (f.field === 'answer') {
+      if (f.op === 'eq') {
+        pushDnsExplorerFilterClause(clauses, answerEqFilterSql(alias, key), f.logic);
+        params[key] = f.value;
+      } else if (f.op === 'ne') {
+        pushDnsExplorerFilterClause(clauses, `NOT (${answerEqFilterSql(alias, key)})`, f.logic);
+        params[key] = f.value;
+      } else if (f.op === 'in_cidr') {
+        pushDnsExplorerFilterClause(clauses, answerInCidrFilterSql(alias, key), f.logic);
+        params[key] = f.value;
+      } else if (f.op === 'contains') {
+        pushDnsExplorerFilterClause(clauses, answerContainsFilterSql(alias, key), f.logic);
+        params[key] = f.value;
       }
     } else if (f.field === 'source_id') {
       pushDnsExplorerFilterClause(clauses, `${col('source_id')} IN {${key}:Array(String)}`, f.logic);
@@ -343,6 +460,7 @@ function dnsExplorerQuery(body = {}, options = {}) {
   );
 
   const base = buildDnsExplorerBaseWhere(body);
+  const dataSource = dnsExplorerDataSource(base, groupBy);
   const bucketMode = base.window.bucketMode;
   const bucketSec = dnsBucketSeconds(bucketMode);
   const windowSeconds = base.window.windowSeconds;
@@ -357,8 +475,8 @@ function dnsExplorerQuery(body = {}, options = {}) {
         ${bucket} AS bucket,
         toUnixTimestamp(${bucket}) AS bucket_ts,
         ${metricSql} AS value
-      FROM ${dnsLogTableRef()} AS d
-      WHERE ${base.whereSql}
+      FROM ${dataSource.fromSql}
+      WHERE ${dataSource.whereSql}
       GROUP BY bucket
       ORDER BY bucket
     `;
@@ -366,8 +484,8 @@ function dnsExplorerQuery(body = {}, options = {}) {
       timeseriesSql: sql,
       tableSql: `
         SELECT 'Всего' AS label, ${tableMetricSql} AS value
-        FROM ${dnsLogTableRef()} AS d
-        WHERE ${base.whereSql}
+        FROM ${dataSource.fromSql}
+        WHERE ${dataSource.whereSql}
       `,
       params: base.params,
       meta: {
@@ -411,16 +529,16 @@ function dnsExplorerQuery(body = {}, options = {}) {
           ${bucket} AS bucket,
           ${groupSelects.join(',\n          ')},
           ${metricSql} AS value
-        FROM ${dnsLogTableRef()} AS d
-        WHERE ${base.whereSql}
+        FROM ${dataSource.fromSql}
+        WHERE ${dataSource.whereSql}
         GROUP BY bucket, ${groupList}
       ),
       ranked AS (
         SELECT
           ${groupSelects.join(',\n          ')},
           ${rankMetricSql} AS total
-        FROM ${dnsLogTableRef()} AS d
-        WHERE ${base.whereSql}
+        FROM ${dataSource.fromSql}
+        WHERE ${dataSource.whereSql}
         GROUP BY ${groupList}
         ORDER BY total DESC
         LIMIT {limit:UInt32}
@@ -439,8 +557,8 @@ function dnsExplorerQuery(body = {}, options = {}) {
         SELECT
           ${groupSelects.join(',\n          ')},
           ${tableMetricSql} AS value
-        FROM ${dnsLogTableRef()} AS d
-        WHERE ${base.whereSql}
+        FROM ${dataSource.fromSql}
+        WHERE ${dataSource.whereSql}
         GROUP BY ${groupList}
       )
       SELECT ${groupList}, value
@@ -499,10 +617,11 @@ function dnsExplorerSuggestDomains(body = {}, q = '', lim = 20) {
     clauses.push('positionCaseInsensitive(d.query_name, {q:String}) > 0');
     params.q = needle;
   }
+  const domainValueExpr = dnsDomainNormalizeExpr('d.query_name');
   return {
     sql: `
       SELECT
-        d.query_name AS value,
+        ${domainValueExpr} AS value,
         count() AS cnt
       FROM ${dnsLogTableRef()} AS d
       WHERE ${clauses.join('\n  AND ')}
@@ -650,6 +769,45 @@ function dnsExplorerSuggestQtypes(body = {}) {
   };
 }
 
+function dnsExplorerSuggestAnswers(body = {}, q = '', lim = 50) {
+  const base = buildDnsExplorerBaseWhere(body);
+  const needle = String(q || '').trim();
+  const answerJoin = dnsAnswerPairJoinExpr('inner_d');
+  const innerWhere = dnsExplorerInnerWhereSql(base.whereSql, 'inner_d');
+  const params = { ...base.params, limit: lim };
+  const answerFilter = needle
+    ? 'AND positionCaseInsensitive(answer_pair.2, {q:String}) > 0'
+    : '';
+  if (needle) params.q = needle;
+  return {
+    sql: `
+      SELECT
+        answer_pair.2 AS value,
+        count() AS cnt
+      FROM (
+        SELECT
+          ${answerJoin} AS answer_pair
+        FROM ${dnsLogTableRef()} AS inner_d
+        WHERE ${innerWhere}
+          AND inner_d.is_response = 1
+      )
+      WHERE answer_pair.1 != 'none'
+        AND answer_pair.2 != ''
+        ${answerFilter}
+      GROUP BY value
+      ORDER BY cnt DESC
+      LIMIT {limit:UInt32}
+    `,
+    params,
+    map(rows) {
+      return rows.map((r) => ({
+        value: String(r.value || ''),
+        count: Number(r.cnt) || 0,
+      }));
+    },
+  };
+}
+
 function parseDnsExplorerBody(body = {}) {
   const range = String(body.range || '24h');
   const from = body.from ? String(body.from) : undefined;
@@ -748,7 +906,17 @@ module.exports = {
   dnsExplorerSuggestClientIps,
   dnsExplorerSuggestServerIps,
   dnsExplorerSuggestQtypes,
+  dnsExplorerSuggestAnswers,
   parseDnsExplorerBody,
   parseDnsExplorerSuggestQuery,
   dnsSources,
+  needsAnswerExpand,
+  dnsExplorerDataSource,
+  dnsExplorerInnerWhereSql,
+  dnsDomainEqSql,
+  answerEqFilterSql,
+  answerInCidrFilterSql,
+  answerContainsFilterSql,
+  GROUP_BY,
+  FIELDS,
 };

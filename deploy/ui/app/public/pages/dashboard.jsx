@@ -1256,7 +1256,7 @@ function VlanDistributionCard({
         <div className="distribution-card__title">VLAN</div>
         <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
           {onNavigate && (
-            <Button kind="ghost" size="sm" onClick={() => onNavigate('vlan')}>Справочник VLAN</Button>
+            <Button kind="ghost" size="sm" onClick={() => onNavigate('vlan')}>Моя сеть · VLAN</Button>
           )}
           <div className="seg distribution-card__switch">
             <button type="button" className={mode === 'share' ? 'is-active' : ''} onClick={() => setMode('share')}>Доля</button>

@@ -397,7 +397,7 @@ function isCollectorOnlyRule(conditions) {
   return !!String(conditions[0].sourceId || '').trim();
 }
 
-function PageFlowExclusions() {
+function PageFlowExclusions({ embedded = false, refreshKey: parentRefreshKey = 0, onReload } = {}) {
   const canWrite = AuthAccess.canWritePage('flow-exclusions');
   const [rows, setRows] = useState([]);
   const [flowSources, setFlowSources] = useState([]);
@@ -406,10 +406,14 @@ function PageFlowExclusions() {
   const [search, setSearch] = useState('');
   const [editing, setEditing] = useState(null);
   const [showAdd, setShowAdd] = useState(false);
-  const [refreshKey, setRefreshKey] = useState(0);
+  const [localRefreshKey, setLocalRefreshKey] = useState(0);
   const [togglingId, setTogglingId] = useState(null);
 
-  const reload = useCallback(() => setRefreshKey((k) => k + 1), []);
+  const refreshKey = onReload ? parentRefreshKey : localRefreshKey;
+  const reload = useCallback(() => {
+    if (onReload) onReload();
+    else setLocalRefreshKey((k) => k + 1);
+  }, [onReload]);
 
   useEffect(() => {
     let cancelled = false;
@@ -541,19 +545,29 @@ function PageFlowExclusions() {
     },
   ];
 
-  return (
-    <div className="main__container">
-      <div className="page-head">
-        <div>
-          <h1>Исключения из статистики</h1>
+  const body = (
+    <>
+      {!embedded && (
+        <div className="page-head">
+          <div>
+            <h1>Исключения из статистики</h1>
+          </div>
+          <div className="row" style={{ gap: 8 }}>
+            <Button kind="ghost" icon="refresh" onClick={reload} disabled={loading}>Обновить</Button>
+            <Button kind="primary" icon="plus" onClick={() => setShowAdd(true)} disabled={!!loadError || !canWrite}>
+              Добавить правило
+            </Button>
+          </div>
         </div>
-        <div className="row" style={{ gap: 8 }}>
-          <Button kind="ghost" icon="refresh" onClick={reload} disabled={loading}>Обновить</Button>
+      )}
+
+      {embedded && (
+        <div className="row" style={{ justifyContent: 'flex-end', marginBottom: 12 }}>
           <Button kind="primary" icon="plus" onClick={() => setShowAdd(true)} disabled={!!loadError || !canWrite}>
             Добавить правило
           </Button>
         </div>
-      </div>
+      )}
 
       {loading ? (
         <Card pad="sm">
@@ -605,8 +619,11 @@ function PageFlowExclusions() {
           pushToast({ kind: 'success', title: SAVE_SUCCESS_TITLE, desc: SAVE_SUCCESS_DESC });
         }}
       />
-    </div>
+    </>
   );
+
+  if (embedded) return body;
+  return <div className="main__container">{body}</div>;
 }
 
 function RuleEnabledToggle({ enabled, disabled, onChange }) {
@@ -638,7 +655,7 @@ function RuleEnabledToggle({ enabled, disabled, onChange }) {
         width: 16,
         height: 16,
         borderRadius: 999,
-        background: '#fff',
+        background: 'var(--pv-white-main)',
         transition: 'left var(--pv-dur-fast) var(--pv-ease-out)',
       }} />
     </button>

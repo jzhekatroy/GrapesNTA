@@ -208,7 +208,7 @@ function ToastStack() {
     return () => toastListeners.delete(fn);
   }, []);
   const iconFor = (k) => ({ success: 'check', error: 'alert', info: 'info' }[k] || 'info');
-  return (
+  const stack = (
     <div className="toast-stack">
       {items.map((t) => (
         <div key={t.id} className={`toast toast--${t.kind || 'info'}`}>
@@ -218,12 +218,13 @@ function ToastStack() {
             {t.desc && <div className="toast__desc">{t.desc}</div>}
           </div>
           <button className="icon-btn" style={{width: 28, height: 28}} onClick={() => setItems((s) => s.filter((i) => i.id !== t.id))}>
-            <Icon name="x" size={14} />
+            <Icon name="x" size={16} />
           </button>
         </div>
       ))}
     </div>
   );
+  return ReactDOM.createPortal(stack, document.body);
 }
 
 /* =================== Empty state =================== */
@@ -329,6 +330,8 @@ function DataTable({
   initialSort,
   toolbar,           // { left, right, search, onSearch }
   rowActions,        // fn(row) => element rendered in actions column
+  actionsColumnWidth = 120,
+  actionsColumnAlign = 'right',
   onRowClick,
   getRowClassName,
   pageSize = 10,
@@ -450,7 +453,7 @@ function DataTable({
   };
   const resizableTableWidth = resizableColumns
     ? visibleCols.reduce((sum, c) => sum + columnWidth(c), selectable ? 36 : 0)
-      + (rowActions ? 120 : 0)
+      + (rowActions ? actionsColumnWidth : 0)
     : null;
 
   return (
@@ -496,7 +499,7 @@ function DataTable({
             <colgroup>
               {selectable && <col style={{ width: 36 }} />}
               {visibleCols.map((c) => <col key={c.key} style={{ width: columnWidth(c) }} />)}
-              {rowActions && <col style={{ width: 120 }} />}
+              {rowActions && <col style={{ width: actionsColumnWidth }} />}
             </colgroup>
           )}
           <thead>
@@ -540,7 +543,7 @@ function DataTable({
                   </th>
                 );
               })}
-              {rowActions && <th className="actions" style={{textAlign: 'right'}}>Действия</th>}
+              {rowActions && <th className="actions" style={{ textAlign: actionsColumnAlign }}>Действия</th>}
             </tr>
           </thead>
           <tbody>
@@ -637,7 +640,7 @@ function Pagination({ page, totalPages, onChange }) {
               className="btn btn--sm"
               onClick={() => onChange(p)}
               style={p === page
-                ? {background: 'var(--grad-primary)', borderColor: 'transparent', color: '#fff', minWidth: 30}
+                ? {background: 'var(--grad-primary)', borderColor: 'transparent', color: 'var(--fg-on-grad)', minWidth: 30}
                 : {minWidth: 30}}>{p}</button>
           </React.Fragment>
         );

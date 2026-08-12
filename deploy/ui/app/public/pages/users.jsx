@@ -6,7 +6,7 @@ const OVERRIDE_OPTIONS = [
   { id: 'DENY', label: 'Запретить' },
 ];
 
-function PageUsers({ currentUser, onAuthRefresh }) {
+function PageUsers({ currentUser, onAuthRefresh, onNavigate }) {
   const [tab, setTab] = useState('users');
   const [rows, setRows] = useState([]);
   const [roles, setRoles] = useState([]);
@@ -22,6 +22,7 @@ function PageUsers({ currentUser, onAuthRefresh }) {
   const [roleFormOpen, setRoleFormOpen] = useState(false);
   const canChangePassword = currentUser?.permissions?.includes('users.change_password');
   const canWrite = !!currentUser?.effectiveWritePermissions?.users;
+  const canDiagnostics = !!currentUser?.effectivePermissions?.diagnostics;
 
   const loadAll = useCallback(async () => {
     setLoading(true);
@@ -108,7 +109,7 @@ function PageUsers({ currentUser, onAuthRefresh }) {
           width: 36, height: 36, borderRadius: 999,
           background: avatarBg(u.id),
           display: 'grid', placeItems: 'center',
-          color: '#fff', font: 'var(--pv-text-body-2-bold)',
+          color: 'var(--fg-on-grad)', font: 'var(--pv-text-body-2-bold)',
           flexShrink: 0,
         }}>{userInitial(u)}</div>
         <div>
@@ -142,7 +143,24 @@ function PageUsers({ currentUser, onAuthRefresh }) {
       <div className="page-head">
         <div>
           <h1>Пользователи и права доступа</h1>
-          <p>Локальные учётные записи, роли и индивидуальные переопределения доступа к страницам.</p>
+          <p>
+            Локальные учётные записи, роли и индивидуальные переопределения доступа к страницам.
+            {canDiagnostics && (
+              <>
+                {' '}
+                Состояние системы можно узнать из{' '}
+                <button
+                  type="button"
+                  className="link-btn"
+                  style={{ color: 'var(--fg-secondary)', font: 'var(--pv-text-body-3)' }}
+                  onClick={() => (onNavigate ? onNavigate('diagnostics') : (location.hash = 'diagnostics'))}
+                >
+                  диагностики
+                </button>
+                .
+              </>
+            )}
+          </p>
         </div>
         <div className="row" style={{gap: 8}}>
           <Button kind="ghost" icon="refresh" onClick={loadAll} disabled={loading}>Обновить</Button>
@@ -575,7 +593,7 @@ function SwitchField({ label, hint, checked, onChange, disabled }) {
           width: 18,
           height: 18,
           borderRadius: '50%',
-          background: '#fff',
+          background: 'var(--pv-white-main)',
           transition: 'left var(--pv-dur-fast)',
           boxShadow: '0 1px 3px rgba(0,0,0,0.25)',
         }} />

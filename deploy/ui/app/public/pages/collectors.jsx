@@ -174,12 +174,15 @@ function fmtCatalogUpdatedAt(value) {
   });
 }
 
-function PageCollectors({ onNavigate }) {
+const COLLECTORS_TABS = ['locations', 'collectors', 'sources', 'unassigned', 'exclusions'];
+
+function PageCollectors({ onNavigate, effectivePermissions }) {
+  const canExclusions = !effectivePermissions || !!effectivePermissions['flow-exclusions'];
   const [tab, setTab] = useState(() => {
     const pending = sessionStorage.getItem(COLLECTORS_TAB_KEY);
     if (pending) {
       sessionStorage.removeItem(COLLECTORS_TAB_KEY);
-      if (['locations', 'collectors', 'sources', 'unassigned'].includes(pending)) return pending;
+      if (COLLECTORS_TABS.includes(pending)) return pending;
     }
     return 'collectors';
   });
@@ -187,12 +190,16 @@ function PageCollectors({ onNavigate }) {
 
   const reload = useCallback(() => setRefreshKey((k) => k + 1), []);
 
+  useEffect(() => {
+    if (tab === 'exclusions' && !canExclusions) setTab('collectors');
+  }, [tab, canExclusions]);
+
   return (
     <div className="main__container">
       <div className="page-head">
         <div>
           <h1>Коллекторы</h1>
-          <p>Справочник локаций, коллекторов и экспортёров потоков.</p>
+          <p>Справочник локаций, коллекторов, экспортёров и исключений из статистики.</p>
         </div>
         <div className="row" style={{ gap: 8 }}>
           <Button kind="ghost" icon="refresh" onClick={reload}>Обновить</Button>
@@ -204,6 +211,9 @@ function PageCollectors({ onNavigate }) {
         <button className={tab === 'collectors' ? 'is-active' : ''} onClick={() => setTab('collectors')}>Коллекторы</button>
         <button className={tab === 'sources' ? 'is-active' : ''} onClick={() => setTab('sources')}>Экспортёры</button>
         <button className={tab === 'unassigned' ? 'is-active' : ''} onClick={() => setTab('unassigned')}>Непривязанные</button>
+        {canExclusions && (
+          <button className={tab === 'exclusions' ? 'is-active' : ''} onClick={() => setTab('exclusions')}>Исключения</button>
+        )}
       </div>
 
       {tab === 'locations' && (
@@ -217,6 +227,9 @@ function PageCollectors({ onNavigate }) {
       )}
       {tab === 'unassigned' && (
         <UnassignedTab refreshKey={refreshKey} onReload={reload} />
+      )}
+      {tab === 'exclusions' && canExclusions && (
+        <PageFlowExclusions embedded refreshKey={refreshKey} onReload={reload} />
       )}
     </div>
   );

@@ -2045,8 +2045,34 @@ function buildExplorerResultColumns({
   return [...baseCols, ...buildExplorerMetricColumnDefs(meta), actionsCol];
 }
 
-function PageExplorer({ onNavigate, displayTimezone }) {
-  const canWrite = AuthAccess.canWritePage('explorer');
+function createExplorerApi(cabinetMode) {
+  if (!cabinetMode) {
+    return {
+      loadSchema: () => ApiClient.loadExplorerSchema(),
+      loadQuery: (opts) => ApiClient.loadExplorerQuery(opts),
+      exportCsv: (opts) => ApiClient.exportExplorerCsv(opts),
+      loadSavedFilters: () => ApiClient.loadExplorerSavedFilters(),
+      searchEntities: (opts) => ApiClient.searchExplorerEntities(opts),
+      supportsSavedFilters: true,
+      supportsObservations: true,
+      maxRangeDays: EXPLORER_MAX_RANGE_DAYS,
+    };
+  }
+  return {
+    loadSchema: () => ApiClient.loadCabinetExplorerSchema(),
+    loadQuery: (opts) => ApiClient.loadCabinetExplorerQuery(opts),
+    exportCsv: (opts) => ApiClient.exportCabinetExplorerCsv(opts),
+    loadSavedFilters: () => Promise.resolve([]),
+    searchEntities: () => Promise.resolve([]),
+    supportsSavedFilters: false,
+    supportsObservations: false,
+    maxRangeDays: 6,
+  };
+}
+
+function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOnly = false }) {
+  const explorerApi = useMemo(() => createExplorerApi(cabinetMode), [cabinetMode]);
+  const canWrite = !cabinetMode && !readOnly && AuthAccess.canWritePage('explorer');
   const urlGlobals = useMemo(() => readExplorerUrlGlobals(), []);
   const urlState = useMemo(() => {
     const state = readExplorerPageParamsFromHash?.() || null;
@@ -2113,7 +2139,7 @@ function PageExplorer({ onNavigate, displayTimezone }) {
   const [showSave, setShowSave] = useState(false);
   const [showObservationSave, setShowObservationSave] = useState(false);
   const [editingSaved, setEditingSaved] = useState(null);
-  const canWriteObservation = AuthAccess.canWritePage('observations') || canWrite;
+  const canWriteObservation = !cabinetMode && (AuthAccess.canWritePage('observations') || canWrite);
   const [hasAppliedQuery, setHasAppliedQuery] = useState(false);
   const [appliedSnapshot, setAppliedSnapshot] = useState(null);
   const [queryVersion, setQueryVersion] = useState(0);
@@ -2140,6 +2166,15 @@ function PageExplorer({ onNavigate, displayTimezone }) {
   const dynamicsVisualLimitRef = React.useRef(visualLimit);
   const skipDynamicsDefaultRef = React.useRef(false);
   const mountRestoreDoneRef = React.useRef(false);
+
+  useEffect(() => {
+    window.__GRAPES_CABINET_EXPLORER__ = cabinetMode;
+    return () => { window.__GRAPES_CABINET_EXPLORER__ = false; };
+  }, [cabinetMode]);
+
+  useEffect(() => {
+    if (cabinetMode) setSavedFilters([]);
+  }, [cabinetMode]);
 
   useEffect(() => {
     periodRef.current = { timeRange, customPeriod };
@@ -2224,16 +2259,18 @@ function PageExplorer({ onNavigate, displayTimezone }) {
 
   useEffect(() => {
     let cancelled = false;
-    ApiClient.loadExplorerSchema().then((data) => {
+    explorerApi.loadSchema().then((data) => {
       if (!cancelled && data) setSchema(data);
     }).catch(() => {});
-    ApiClient.loadExplorerSavedFilters().then((items) => {
-      if (!cancelled && Array.isArray(items)) {
-        setSavedFilters(mergeExplorerSavedFilters(items));
-      }
-    }).catch(() => {});
+    if (explorerApi.supportsSavedFilters) {
+      explorerApi.loadSavedFilters().then((items) => {
+        if (!cancelled && Array.isArray(items)) {
+          setSavedFilters(mergeExplorerSavedFilters(items));
+        }
+      }).catch(() => {});
+    }
     return () => { cancelled = true; };
-  }, []);
+  }, [explorerApi]);
 
   useEffect(() => {
     if (filterMode !== 'text') return;
@@ -2332,7 +2369,7 @@ function PageExplorer({ onNavigate, displayTimezone }) {
       groupBy: qGroupBy,
     } = migrated;
     const { validThresholds } = resolveExplorerThresholdPayload(qThresholds, schema);
-    ApiClient.loadExplorerQuery({
+    explorerApi.loadQuery({
       metric: qMetric,
       groupBy: qGroupBy,
       filters: (qFilters || []).map(normalizeExplorerFilter),
@@ -2798,7 +2835,7 @@ function PageExplorer({ onNavigate, displayTimezone }) {
         exportPayload.customPeriod = activeQuery.customPeriod;
         if (meta?.windowAnchor) exportPayload.windowAnchor = meta.windowAnchor;
       }
-      const blob = await ApiClient.exportExplorerCsv(exportPayload);
+      const blob = await explorerApi.exportCsv(exportPayload);
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
@@ -3622,6 +3659,11 @@ function EntityPicker({ entityType, value, label, onSelect, onClear, placeholder
     let cancelled = false;
     setLoading(true);
     const timer = setTimeout(() => {
+      if (window.__GRAPES_CABINET_EXPLORER__) {
+        setItems([]);
+        setLoading(false);
+        return;
+      }
       ApiClient.searchExplorerEntities({ type: entityType, q, limit: 20, switchIp }).then((rows) => {
         if (!cancelled) {
           setItems(rows || []);
@@ -3788,6 +3830,11 @@ function ExplorerFilterTextEditor({ value, onChange, error, schema, filters = []
     let cancelled = false;
     setEntityLoading(true);
     const timer = setTimeout(() => {
+      if (window.__GRAPES_CABINET_EXPLORER__) {
+        setEntityItems([]);
+        setEntityLoading(false);
+        return;
+      }
       ApiClient.searchExplorerEntities({
         type: entityType,
         q,
@@ -5174,13 +5221,14 @@ function SaveObservationModal({
   const [reportPeriod, setReportPeriod] = useState('yesterday');
   const [topGroup, setTopGroup] = useState(defaultTop);
   const [busy, setBusy] = useState(false);
+  // Группировка из разбора трафика всегда важнее селектора: см. saveAsObservation.
+  const groupSummary = (groupBy || []).map((g) => dimensionById?.[g]?.label || g).join(' × ');
 
   useEffect(() => {
     if (!open) return;
     setName(initialName || `Наблюдение · ${metricLabel}`);
     setLookback(defaultLookback);
-    setLiveEnabled(true);
-    setRefreshSec(60);
+    setMaterializeEnabled(true);
     setReportEnabled(false);
     setReportPeriod('yesterday');
     setTopGroup(defaultTop);
@@ -5244,12 +5292,22 @@ function SaveObservationModal({
             </select>
           </div>
           <div className="field" style={{ flex: 1, minWidth: 160 }}>
-            <label>Топ по полю</label>
-            <select className="input" value={topGroup} onChange={(e) => setTopGroup(e.target.value)}>
-              {['src_asn', 'dst_asn', 'src_ip', 'dst_ip', 'vlan', 'proto', 'src_country', 'dst_country'].map((id) => (
-                <option key={id} value={id}>{dimensionById?.[id]?.label || id}</option>
-              ))}
-            </select>
+            <label>{groupSummary ? 'Разрез' : 'Топ по полю'}</label>
+            {groupSummary ? (
+              <div
+                className="input"
+                style={{ display: 'flex', alignItems: 'center', color: 'var(--fg-secondary)' }}
+                title={`Взято из группировки в разборе трафика: ${groupSummary}`}
+              >
+                {groupSummary}
+              </div>
+            ) : (
+              <select className="input" value={topGroup} onChange={(e) => setTopGroup(e.target.value)}>
+                {['src_asn', 'dst_asn', 'src_ip', 'dst_ip', 'vlan', 'proto', 'src_country', 'dst_country'].map((id) => (
+                  <option key={id} value={id}>{dimensionById?.[id]?.label || id}</option>
+                ))}
+              </select>
+            )}
           </div>
         </div>
         <label className="row" style={{ gap: 8, alignItems: 'center' }}>

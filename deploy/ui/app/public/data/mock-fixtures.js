@@ -67,7 +67,7 @@ const CHART_MOCK_LINES = [
   { key: 'outgoing', label: 'Исходящий', color: '#6972F0', share: 0.17 },
   { key: 'transit', label: 'Транзит', color: '#F0B400', share: 0.21 },
   { key: 'internal', label: 'Внутренний', color: '#A4ADFF', share: 0.28 },
-  { key: 'unclassified', label: 'Неклассифицировано', color: '#7F7F9D', share: 0.01 },
+  { key: 'unclassified', label: 'Неразмеченный', color: '#7F7F9D', share: 0.01 },
   { key: 'total', label: 'Всего', color: '#7E92F8', share: 1 },
 ];
 

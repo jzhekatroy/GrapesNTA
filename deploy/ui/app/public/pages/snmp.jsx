@@ -4,6 +4,90 @@ const { useCallback, useEffect, useMemo, useState } = React;
 
 const SAVE_SUCCESS_TITLE = 'Настройки сохранены';
 const SAVE_SUCCESS_DESC = 'Изменения записаны в ClickHouse.';
+const SFLOW_STALE_DAYS = 7;
+const LAST_OK_STALE_FACTOR = 3;
+
+function parseCatalogMs(value) {
+  if (!value) return null;
+  const text = String(value).replace('T', ' ').trim().slice(0, 19);
+  if (
+    !text
+    || text.startsWith('1970-01-01')
+    || text.startsWith('0000-00-00')
+    || text.startsWith('0001-01-01')
+  ) return null;
+  const ms = typeof parseChartBucketMs === 'function'
+    ? parseChartBucketMs(text)
+    : Date.parse(`${text.replace(' ', 'T')}Z`);
+  if (ms == null || !Number.isFinite(ms) || ms <= 0) return null;
+  return ms;
+}
+
+function fmtLastOkAt(value, displayTimezone = getDisplayTimezone()) {
+  const formatted = fmtCatalogUpdatedAt(value, displayTimezone);
+  if (formatted === '—') return 'не опрашивался';
+  return formatted;
+}
+
+function isLastOkStale(lastOkAt, refreshIntervalSec) {
+  const ms = parseCatalogMs(lastOkAt);
+  const interval = Number(refreshIntervalSec);
+  if (ms == null || !Number.isFinite(interval) || interval <= 0) return false;
+  return (Date.now() - ms) > LAST_OK_STALE_FACTOR * interval * 1000;
+}
+
+function sflowStaleDays(lastSeenAt) {
+  const ms = parseCatalogMs(lastSeenAt);
+  if (ms == null) return null;
+  const days = Math.floor((Date.now() - ms) / (24 * 60 * 60 * 1000));
+  if (days < SFLOW_STALE_DAYS) return null;
+  return days;
+}
+
+function lastPollAttemptTitle(agent, displayTimezone = getDisplayTimezone()) {
+  if (!agent.snmpEnabled || !agent.lastPollAt) return undefined;
+  const formatted = fmtCatalogUpdatedAt(agent.lastPollAt, displayTimezone);
+  if (formatted === '—') return undefined;
+  return `Последняя попытка: ${formatted}`;
+}
+
+async function deleteSnmpAgentFromInventory(switchIp) {
+  if (typeof ApiClient.deleteSnmpAgent === 'function') {
+    return ApiClient.deleteSnmpAgent(switchIp);
+  }
+  const res = await fetch(`/api/refs/snmp-agents/${encodeURIComponent(switchIp)}`, {
+    method: 'DELETE',
+    credentials: 'same-origin',
+    cache: 'no-store',
+  });
+  const payload = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const err = new Error(payload.error || `HTTP ${res.status}`);
+    err.status = res.status;
+    throw err;
+  }
+  return payload;
+}
+
+function confirmSnmpAgentRemoval(count) {
+  const noun = count === 1
+    ? 'коммутатор'
+    : (count >= 2 && count <= 4 ? 'коммутатора' : 'коммутаторов');
+  return window.confirm(`Удалить ${count} ${noun} из опроса?`);
+}
+
+async function deleteSnmpAgentsFromInventory(switchIps) {
+  const results = await Promise.allSettled(
+    switchIps.map((switchIp) => deleteSnmpAgentFromInventory(switchIp)),
+  );
+  const deleted = [];
+  const failed = [];
+  switchIps.forEach((switchIp, index) => {
+    if (results[index].status === 'fulfilled') deleted.push(switchIp);
+    else failed.push({ switchIp, error: results[index].reason?.message || 'ошибка' });
+  });
+  return { deleted, failed };
+}
 
 function fmtCatalogUpdatedAt(value, displayTimezone = getDisplayTimezone()) {
   if (!value) return '—';
@@ -202,39 +286,57 @@ function SnmpSettingsCard({ settings, canWrite, onSaved }) {
   );
 }
 
-function SnmpAgentStatus({ agent }) {
+function SnmpAgentStatus({ agent, displayTimezone }) {
+  const pollTitle = lastPollAttemptTitle(agent, displayTimezone);
   if (!agent.snmpEnabled) return <StatusIndicator status="idle" label="Отключён" />;
   const status = agent.lastPollStatus || 'never';
   const hasCache = !!agent.hasCachedInterfaces || Number(agent.interfaceCount) > 0;
 
   if (status === 'ok') {
-    return <StatusIndicator status="healthy" label="SNMP работает" />;
+    return (
+      <div title={pollTitle}>
+        <StatusIndicator status="healthy" label="SNMP работает" />
+      </div>
+    );
   }
   // Re-poll queued: keep using last catalog; do not look like "never seen".
   if (status === 'queued' || status === 'never') {
-    if (hasCache) return <StatusIndicator status="warning" label="Идёт опрос" />;
-    return <StatusIndicator status="warning" label="Ожидает опроса" />;
+    if (hasCache) {
+      return (
+        <div title={pollTitle}>
+          <StatusIndicator status="warning" label="Идёт опрос" />
+        </div>
+      );
+    }
+    return (
+      <div title={pollTitle}>
+        <StatusIndicator status="warning" label="Ожидает опроса" />
+      </div>
+    );
   }
   // timeout / auth / error — catalog rows stay in CH; Explorer uses last names.
   const err = String(agent.lastPollError || '').trim();
   const shortErr = err ? (err.length > 48 ? `${err.slice(0, 48)}…` : err) : '';
+  const title = [pollTitle, err].filter(Boolean).join('\n') || undefined;
   if (hasCache) {
     return (
-      <div title={err || undefined}>
+      <div title={title}>
         <StatusIndicator status="warning" label="Недоступен · есть кэш" />
         {shortErr ? <div className="mono" style={{ color: 'var(--fg-secondary)', font: 'var(--pv-text-body-3)', marginTop: 2 }}>{shortErr}</div> : null}
       </div>
     );
   }
   return (
-    <div title={err || undefined}>
+    <div title={title}>
       <StatusIndicator status="critical" label={status === 'timeout' ? 'Timeout' : 'Ошибка SNMP'} />
       {shortErr ? <div className="mono" style={{ color: 'var(--fg-secondary)', font: 'var(--pv-text-body-3)', marginTop: 2 }}>{shortErr}</div> : null}
     </div>
   );
 }
 
-function SnmpAgentModal({ open, agent, canWrite, onClose, onSaved, canOpenInterfaceRoles }) {
+function SnmpAgentModal({
+  open, agent, canWrite, onClose, onSaved, onDeleted, displayTimezone, canOpenInterfaceRoles,
+}) {
   const [form, setForm] = useState(null);
   const [interfaces, setInterfaces] = useState([]);
   const [roleByIndex, setRoleByIndex] = useState({});
@@ -242,7 +344,9 @@ function SnmpAgentModal({ open, agent, canWrite, onClose, onSaved, canOpenInterf
   const [interfacesError, setInterfacesError] = useState('');
   const [saving, setSaving] = useState(false);
   const [probing, setProbing] = useState(false);
+  const [deleting, setDeleting] = useState(false);
   const [error, setError] = useState('');
+  const tz = displayTimezone || getDisplayTimezone();
 
   const showInterfaceRolesLink = !!canOpenInterfaceRoles;
 
@@ -329,6 +433,20 @@ function SnmpAgentModal({ open, agent, canWrite, onClose, onSaved, canOpenInterf
       setProbing(false);
     }
   };
+  const remove = async () => {
+    if (!confirmSnmpAgentRemoval(1)) return;
+    setDeleting(true);
+    setError('');
+    try {
+      await deleteSnmpAgentFromInventory(agent.switchIp);
+      pushToast({ kind: 'success', title: 'Удалено из опроса', desc: agent.switchIp });
+      onDeleted(agent.switchIp);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setDeleting(false);
+    }
+  };
   const interfaceCols = [
     { key: 'ifIndex', title: 'ifIndex', width: 80, render: (r) => <span className="mono">{r.ifIndex}</span> },
     { key: 'ifName', title: 'Имя', width: 140, render: (r) => <span className="mono">{r.ifName || '—'}</span> },
@@ -355,15 +473,25 @@ function SnmpAgentModal({ open, agent, canWrite, onClose, onSaved, canOpenInterf
       subtitle={agent.switchIp}
       size="lg"
       footer={(
-        <>
-          <Button kind="ghost" onClick={onClose} disabled={saving || probing}>Закрыть</Button>
-          <Button kind="ghost" icon="refresh" onClick={probe} disabled={!canWrite || saving || probing}>
-            {probing ? 'Постановка…' : 'Опросить'}
+        <div className="row" style={{ width: '100%', gap: 8, justifyContent: 'space-between', flexWrap: 'wrap' }}>
+          <Button
+            kind="danger"
+            icon="trash"
+            onClick={remove}
+            disabled={!canWrite || saving || probing || deleting}
+          >
+            {deleting ? 'Удаление…' : 'Удалить из опроса'}
           </Button>
-          <Button kind="primary" icon="save" onClick={save} disabled={!canWrite || saving || probing}>
-            {saving ? 'Сохранение…' : 'Сохранить'}
-          </Button>
-        </>
+          <div className="row" style={{ gap: 8, marginLeft: 'auto' }}>
+            <Button kind="ghost" onClick={onClose} disabled={saving || probing || deleting}>Закрыть</Button>
+            <Button kind="ghost" icon="refresh" onClick={probe} disabled={!canWrite || saving || probing || deleting}>
+              {probing ? 'Постановка…' : 'Опросить'}
+            </Button>
+            <Button kind="primary" icon="save" onClick={save} disabled={!canWrite || saving || probing || deleting}>
+              {saving ? 'Сохранение…' : 'Сохранить'}
+            </Button>
+          </div>
+        </div>
       )}
     >
       {error && <div style={{ marginBottom: 12, color: 'var(--st-critical)' }}>{error}</div>}
@@ -429,11 +557,16 @@ function SnmpAgentModal({ open, agent, canWrite, onClose, onSaved, canOpenInterf
           </Button>
         </div>
       )}
+      {agent.snmpEnabled && agent.lastPollAt && (
+        <div style={{ marginBottom: 8, color: 'var(--fg-secondary)', font: 'var(--pv-text-body-3)' }}>
+          Последняя попытка опроса: {fmtCatalogUpdatedAt(agent.lastPollAt, tz)}
+          {agent.lastPollError ? ` · ${agent.lastPollError}` : ''}
+        </div>
+      )}
       {agent.hasCachedInterfaces && agent.lastPollStatus && agent.lastPollStatus !== 'ok' && (
         <div style={{ marginBottom: 8, color: 'var(--fg-secondary)', font: 'var(--pv-text-body-3)' }}>
           Показан последний успешный каталог
-          {agent.interfacesUpdatedAt ? ` · ${fmtCatalogUpdatedAt(agent.interfacesUpdatedAt)}` : ''}.
-          {agent.lastPollError ? ` Последняя попытка: ${agent.lastPollError}` : ''}
+          {agent.lastOkAt ? ` · ${fmtLastOkAt(agent.lastOkAt, tz)}` : ''}.
         </div>
       )}
       {interfacesError ? (
@@ -459,8 +592,18 @@ function SnmpSwitchesPage({ refreshKey, onReload, displayTimezone, canOpenInterf
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState('');
   const [search, setSearch] = useState('');
+  const [selected, setSelected] = useState(() => new Set());
+  const [bulkDeleting, setBulkDeleting] = useState(false);
   const [editing, setEditing] = useState(null);
   const tz = displayTimezone || getDisplayTimezone();
+
+  useEffect(() => {
+    setSelected((prev) => {
+      const ids = new Set(rows.map((r) => r.switchIp));
+      const next = new Set([...prev].filter((id) => ids.has(id)));
+      return next.size === prev.size ? prev : next;
+    });
+  }, [rows]);
 
   useEffect(() => {
     let cancelled = false;
@@ -493,22 +636,68 @@ function SnmpSwitchesPage({ refreshKey, onReload, displayTimezone, canOpenInterf
     ));
   }, [rows, search]);
 
+  const selectStaleSflow = () => {
+    const staleIps = rows
+      .filter((row) => sflowStaleDays(row.lastSeenAt) != null)
+      .map((row) => row.switchIp);
+    setSelected(new Set(staleIps));
+  };
+
+  const removeSelected = async () => {
+    const switchIps = [...selected];
+    if (!switchIps.length || !confirmSnmpAgentRemoval(switchIps.length)) return;
+    setBulkDeleting(true);
+    try {
+      const { deleted, failed } = await deleteSnmpAgentsFromInventory(switchIps);
+      if (deleted.length) {
+        setRows((prev) => prev.filter((r) => !deleted.includes(r.switchIp)));
+        setSelected((prev) => {
+          const next = new Set(prev);
+          deleted.forEach((ip) => next.delete(ip));
+          return next;
+        });
+      }
+      if (failed.length) {
+        pushToast({
+          kind: 'error',
+          title: 'Не все удалены',
+          desc: `Удалено: ${deleted.length}, ошибок: ${failed.length}. ${failed[0].switchIp}: ${failed[0].error}`,
+        });
+      } else {
+        pushToast({
+          kind: 'success',
+          title: 'Удалено из опроса',
+          desc: deleted.length === 1 ? deleted[0] : `Коммутаторов: ${deleted.length}`,
+        });
+      }
+      if (deleted.length) onReload();
+    } catch (err) {
+      pushToast({ kind: 'error', title: 'Не удалось удалить', desc: err.message });
+    } finally {
+      setBulkDeleting(false);
+    }
+  };
+
   const cols = [
     {
       key: 'displayName',
       title: 'Коммутатор',
       width: 230,
-      render: (r) => (
-        <div>
-          <div className="row" style={{ gap: 6 }}>
-            <span style={{ font: 'var(--pv-text-body-2-bold)' }}>{r.displayName || 'Без sysName'}</span>
-            {r.isNew && <Badge tone="warning">New</Badge>}
+      render: (r) => {
+        const staleDays = sflowStaleDays(r.lastSeenAt);
+        return (
+          <div>
+            <div className="row" style={{ gap: 6, flexWrap: 'wrap' }}>
+              <span style={{ font: 'var(--pv-text-body-2-bold)' }}>{r.displayName || 'Без sysName'}</span>
+              {r.isNew && <Badge tone="warning">New</Badge>}
+              {staleDays != null && <Badge tone="neutral">нет sFlow {staleDays} дн.</Badge>}
+            </div>
+            <div className="mono" style={{ color: 'var(--fg-secondary)', font: 'var(--pv-text-body-3)' }}>{r.switchIp}</div>
           </div>
-          <div className="mono" style={{ color: 'var(--fg-secondary)', font: 'var(--pv-text-body-3)' }}>{r.switchIp}</div>
-        </div>
-      ),
+        );
+      },
     },
-    { key: 'status', title: 'SNMP', width: 180, render: (r) => <SnmpAgentStatus agent={r} /> },
+    { key: 'status', title: 'SNMP', width: 180, render: (r) => <SnmpAgentStatus agent={r} displayTimezone={tz} /> },
     {
       key: 'lastSeenAt',
       title: 'Последний sFlow',
@@ -528,10 +717,17 @@ function SnmpSwitchesPage({ refreshKey, onReload, displayTimezone, canOpenInterf
       ),
     },
     {
-      key: 'lastPollAt',
-      title: 'Последний опрос',
-      width: 160,
-      render: (r) => fmtCatalogUpdatedAt(r.lastPollAt, tz),
+      key: 'lastOkAt',
+      title: 'Последний успешный опрос',
+      width: 180,
+      render: (r) => {
+        const stale = isLastOkStale(r.lastOkAt, settings?.refreshIntervalSec);
+        return (
+          <span style={{ color: stale ? 'var(--st-warning)' : undefined }}>
+            {fmtLastOkAt(r.lastOkAt, tz)}
+          </span>
+        );
+      },
     },
   ];
 
@@ -565,11 +761,11 @@ function SnmpSwitchesPage({ refreshKey, onReload, displayTimezone, canOpenInterf
           <span>включено: <b className="mono">{statusSummary.enabled}</b></span>
           <span>ok: <b className="mono">{statusSummary.ok}</b></span>
           <span>очередь: <b className="mono">{statusSummary.queued}</b></span>
-          <span>timeout: <b className="mono" style={{ color: statusSummary.timeout ? 'crimson' : undefined }}>{statusSummary.timeout}</b></span>
+          <span>timeout: <b className="mono" style={{ color: statusSummary.timeout ? 'var(--st-critical)' : undefined }}>{statusSummary.timeout}</b></span>
           <span>auth/error: <b className="mono">{statusSummary.auth + statusSummary.error}</b></span>
         </div>
         {allFailing ? (
-          <div style={{ marginTop: 8, color: 'crimson', font: 'var(--pv-text-body-3)' }}>
+          <div style={{ marginTop: 8, color: 'var(--st-critical)', font: 'var(--pv-text-body-3)' }}>
             Опросы идут, но свитчи не отвечают (timeout). Проверьте маршрут/ACL с хоста UI/поллера до mgmt-сети (UDP/161).
             Детали — Диагностика → SNMP.
           </div>
@@ -580,7 +776,40 @@ function SnmpSwitchesPage({ refreshKey, onReload, displayTimezone, canOpenInterf
         columns={cols}
         rowKey="id"
         pageSize={15}
-        toolbar={{ search, onSearch: setSearch }}
+        selectable={canWrite}
+        selected={selected}
+        onSelectChange={setSelected}
+        toolbar={{
+          search,
+          onSearch: setSearch,
+          left: canWrite ? (
+            <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
+              {selected.size > 0 ? (
+                <>
+                  <span style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-secondary)' }}>
+                    Выбрано: <b>{selected.size}</b>
+                  </span>
+                  <Button
+                    size="sm"
+                    kind="danger"
+                    icon="trash"
+                    onClick={removeSelected}
+                    disabled={bulkDeleting}
+                  >
+                    {bulkDeleting ? 'Удаление…' : 'Удалить выбранные'}
+                  </Button>
+                  <Button size="sm" kind="ghost" onClick={() => setSelected(new Set())} disabled={bulkDeleting}>
+                    Снять выбор
+                  </Button>
+                </>
+              ) : (
+                <Button size="sm" kind="ghost" onClick={selectStaleSflow} disabled={bulkDeleting}>
+                  Выбрать без sFlow {SFLOW_STALE_DAYS}+ дн.
+                </Button>
+              )}
+            </div>
+          ) : null,
+        }}
         onRowClick={(r) => setEditing(r)}
         emptyTitle="Коммутаторы sFlow не обнаружены"
         emptyDesc="Poller добавит устройства из sampler_address после появления потоков."
@@ -589,10 +818,16 @@ function SnmpSwitchesPage({ refreshKey, onReload, displayTimezone, canOpenInterf
         open={!!editing}
         agent={editing}
         canWrite={canWrite}
+        displayTimezone={tz}
         onClose={() => setEditing(null)}
         canOpenInterfaceRoles={canOpenInterfaceRoles}
         onSaved={() => {
           setEditing(null);
+          onReload();
+        }}
+        onDeleted={(switchIp) => {
+          setEditing(null);
+          setRows((prev) => prev.filter((r) => r.switchIp !== switchIp));
           onReload();
         }}
       />

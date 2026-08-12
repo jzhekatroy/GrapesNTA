@@ -47,64 +47,6 @@ function filterSwitchPorts(rows, { aliasQ, nameQ }) {
   });
 }
 
-function DirectionModeCard({ settings, canWrite, onSaved }) {
-  const [form, setForm] = useState(null);
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState('');
-
-  useEffect(() => {
-    if (!settings) return;
-    setForm({ directionMode: settings.directionMode || 'prefixes' });
-    setError('');
-  }, [settings]);
-
-  if (!form) return null;
-
-  const save = async () => {
-    setSaving(true);
-    setError('');
-    try {
-      await ApiClient.saveDirectionSettings({ directionMode: form.directionMode });
-      pushToast({ kind: 'success', title: 'Настройки сохранены' });
-      onSaved();
-    } catch (err) {
-      setError(err.message);
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  return (
-    <Card pad="sm" title="Определение направления" className="ir-direction-mode" style={{ marginBottom: 16 }}>
-      {error && <div className="form-error" style={{ marginBottom: 12 }}>{error}</div>}
-      <p className="ir-direction-mode__desc">
-        Размечается сторона порта (наш / внешний). Вход и исход считаются сами.
-        Неразмеченный порт даёт «Неклассифицировано».
-      </p>
-      <div className="field ir-direction-mode__field">
-        <label>Режим</label>
-        <div className="ir-direction-mode__row">
-          <select
-            className="input ir-direction-mode__select"
-            value={form.directionMode}
-            disabled={!canWrite}
-            onChange={(e) => setForm({ directionMode: e.target.value })}
-          >
-            <option value="prefixes">{IR_DIRECTION_MODE_LABELS.prefixes}</option>
-            <option value="ports">{IR_DIRECTION_MODE_LABELS.ports}</option>
-          </select>
-          {canWrite && (
-            <Button kind="primary" icon="save" onClick={save} disabled={saving}>
-              {saving ? 'Сохранение…' : 'Сохранить'}
-            </Button>
-          )}
-        </div>
-        <div className="field-hint">По портам заработает после обновления коллектора</div>
-      </div>
-    </Card>
-  );
-}
-
 function SwitchListScreen({ switches, loading, loadError, onOpenSwitch }) {
   const rows = useMemo(() => switches.map((s) => ({
     ...s,
@@ -377,11 +319,10 @@ function SwitchPortsScreen({
   );
 }
 
-function PageInterfaceRoles() {
+function PageInterfaceRoles({ onNavigate }) {
   const canWrite = AuthAccess.canWritePage('interface-roles');
   const [switchIp, setSwitchIp] = useState(() => readInterfaceRolesHashParams().switchIp || '');
   const [refreshKey, setRefreshKey] = useState(0);
-  const [settings, setSettings] = useState(null);
   const [switches, setSwitches] = useState([]);
   const [ports, setPorts] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -413,14 +354,6 @@ function PageInterfaceRoles() {
     (async () => {
       setLoading(true);
       setLoadError('');
-      const settingsR = await ApiClient.loadDirectionSettings();
-      if (cancelled) return;
-      if (settingsR.source === 'error') {
-        setLoadError(settingsR.error || ApiClient.LOAD_FAILED);
-        setSettings(null);
-      } else {
-        setSettings(settingsR.data);
-      }
 
       if (switchIp) {
         const [portsR, swR] = await Promise.all([
@@ -456,8 +389,6 @@ function PageInterfaceRoles() {
     return sw?.displayName || '';
   }, [switches, switchIp]);
 
-  const afterMutation = reload;
-
   return (
     <div className="main__container">
       {!switchIp && (
@@ -468,11 +399,16 @@ function PageInterfaceRoles() {
               <p>
                 Ручная разметка стороны порта для определения направления трафика.
                 Выберите коммутатор в таблице ниже — откроется детальный список его портов.
+                {' '}
+                Режим «по портам» настраивается на странице{' '}
+                <button type="button" className="link-btn" onClick={() => { location.hash = 'traffic-classification'; }}>
+                  Классификация трафика
+                </button>
+                .
               </p>
             </div>
             <Button kind="ghost" icon="refresh" onClick={reload} disabled={loading}>Обновить</Button>
           </div>
-          <DirectionModeCard settings={settings} canWrite={canWrite} onSaved={afterMutation} />
           <SwitchListScreen
             switches={switches}
             loading={loading}

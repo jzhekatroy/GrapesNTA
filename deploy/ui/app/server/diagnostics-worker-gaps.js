@@ -22,6 +22,7 @@ const SCAN_1M_JOBS = [
   { job: 'traffic_protocol_1m', table: 'traffic_protocol_1m' },
   { job: 'traffic_direction_1m', table: 'traffic_direction_1m' },
   { job: 'traffic_role_1m', table: 'traffic_role_1m' },
+  { job: 'traffic_client_1m', table: 'traffic_client_1m' },
   { job: 'traffic_vlan_1m', table: 'traffic_vlan_1m' },
   { job: 'traffic_country_1m', table: 'traffic_country_1m' },
   { job: 'traffic_service_1m', table: 'traffic_service_1m' },
@@ -36,6 +37,7 @@ const DEFAULT_BACKFILL_JOBS = [
   'traffic_direction_1m',
   'traffic_role_1m',
   'traffic_entity_1m',
+  'traffic_client_1m',
   'traffic_vlan_1m',
   'traffic_country_1m',
   'traffic_service_1m',
@@ -43,9 +45,16 @@ const DEFAULT_BACKFILL_JOBS = [
   'traffic_asn_1m',
   'traffic_asn_pair_1m',
   'traffic_dashboard_1h',
+  'traffic_client_1h',
+  'traffic_client_country_1h',
+  'traffic_client_service_1h',
+  'dns_client_domain_1h',
   'traffic_asn_1h',
   'traffic_asn_pair_1h',
   'traffic_dashboard_1d',
+  'traffic_client_1d',
+  'traffic_client_country_1d',
+  'traffic_client_service_1d',
 ];
 
 const MAX_SCAN_DAYS = 31;

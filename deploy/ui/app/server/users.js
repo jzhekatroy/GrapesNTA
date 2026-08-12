@@ -9,6 +9,7 @@ const {
 } = require('./clickhouse');
 
 const { DEFAULT_ROLE_ID, DEFAULT_NEW_USER_ROLE_ID, userPermissions, hasPermission } = require('./rbac/permissions');
+const { CLIENT_ROLE_ID, MAX_USERS_PER_CLIENT } = require('./cabinet/constants');
 
 const LEGACY_DEFAULT_ROLE_ID = DEFAULT_ROLE_ID;
 const DEFAULT_ADMIN = {
@@ -20,7 +21,7 @@ const PASSWORD_MIN_LENGTH = 12;
 const BCRYPT_ROUNDS = 12;
 
 function clickhouseDateTime(date = new Date()) {
-  return date.toISOString().replace('T', ' ').replace('Z', '');
+  return date.toISOString().slice(0, 19).replace('T', ' ');
 }
 
 function publicUser(row) {
@@ -30,6 +31,8 @@ function publicUser(row) {
     fullName: String(row.full_name ?? ''),
     roleId: String(row.role_id ?? LEGACY_DEFAULT_ROLE_ID),
     forcePasswordChange: Number(row.force_password_change) === 1,
+    active: row.is_active === undefined ? true : Number(row.is_active) === 1,
+    clientId: String(row.client_id ?? row.clientId ?? ''),
     createdAt: row.created_at ?? null,
     updatedAt: row.updated_at ?? null,
     passwordChangedAt: row.password_changed_at ?? null,
@@ -78,6 +81,8 @@ function latestUsersCte() {
         password_hash,
         role_id,
         force_password_change,
+        is_active,
+        client_id,
         created_at,
         updated_at,
         password_changed_at,
@@ -101,6 +106,8 @@ function baseUserSelect(where = '') {
       password_hash,
       role_id,
       force_password_change,
+      is_active,
+      client_id,
       created_at,
       updated_at,
       password_changed_at
@@ -108,6 +115,42 @@ function baseUserSelect(where = '') {
     WHERE rn = 1
     ${where}
   `;
+}
+
+function parseActive(body) {
+  if (body?.active === undefined && body?.is_active === undefined && body?.isActive === undefined) {
+    return undefined;
+  }
+  const value = body?.active ?? body?.is_active ?? body?.isActive;
+  return value === true || value === 1 || value === '1';
+}
+
+function parseClientId(body) {
+  if (body?.clientId === undefined && body?.client_id === undefined) return undefined;
+  return String(body?.clientId ?? body?.client_id ?? '').trim();
+}
+
+async function countUsersForClient(clientId, { exceptId } = {}) {
+  const params = { clientId: String(clientId || '') };
+  let except = '';
+  if (exceptId) {
+    params.exceptId = String(exceptId);
+    except = 'AND id != {exceptId:String}';
+  }
+  const { rows } = await query(
+    `
+      WITH ${latestUsersCte()}
+      SELECT count() AS count
+      FROM latest
+      WHERE rn = 1
+        AND client_id = {clientId:String}
+        AND client_id != ''
+        ${except}
+    `,
+    params,
+    { name: 'users/count-for-client' },
+  );
+  return Number(rows[0]?.count) || 0;
 }
 
 async function ensureUsersTable() {
@@ -121,6 +164,8 @@ async function ensureUsersTable() {
         password_hash String,
         role_id String DEFAULT '${LEGACY_DEFAULT_ROLE_ID}',
         force_password_change UInt8 DEFAULT 0,
+        is_active UInt8 DEFAULT 1,
+        client_id String DEFAULT '',
         created_at DateTime64(3) DEFAULT now64(3),
         updated_at DateTime64(3) DEFAULT now64(3),
         password_changed_at Nullable(DateTime64(3)) DEFAULT NULL
@@ -136,6 +181,16 @@ async function ensureUsersTable() {
     `ALTER TABLE ${usersTableRef()} ADD COLUMN IF NOT EXISTS password_changed_at Nullable(DateTime64(3)) DEFAULT NULL`,
     {},
     { name: 'users/add-password-changed-at' },
+  );
+  await executeCommand(
+    `ALTER TABLE ${usersTableRef()} ADD COLUMN IF NOT EXISTS is_active UInt8 DEFAULT 1`,
+    {},
+    { name: 'users/add-is-active' },
+  );
+  await executeCommand(
+    `ALTER TABLE ${usersTableRef()} ADD COLUMN IF NOT EXISTS client_id String DEFAULT ''`,
+    {},
+    { name: 'users/add-client-id' },
   );
 
   const { rows } = await query(
@@ -154,6 +209,8 @@ async function ensureUsersTable() {
     password_hash: passwordHash,
     role_id: LEGACY_DEFAULT_ROLE_ID,
     force_password_change: 1,
+    is_active: 1,
+    client_id: '',
     created_at: now,
     updated_at: now,
     password_changed_at: now,
@@ -162,13 +219,25 @@ async function ensureUsersTable() {
   return { bootstrapped: true };
 }
 
-async function listUsers() {
+async function listUsers({ clientId } = {}) {
+  const params = {};
+  const where = clientId ? 'AND client_id = {clientId:String}' : '';
+  if (clientId) params.clientId = String(clientId).trim();
   const { rows, elapsedMs } = await query(
-    `${baseUserSelect()} ORDER BY username`,
-    {},
+    `${baseUserSelect(where)} ORDER BY username`,
+    params,
     { name: 'users/list' },
   );
-  return { data: rows.map(publicUser), meta: { elapsedMs, rows: rows.length } };
+  const data = rows.map(publicUser);
+  const meta = { elapsedMs, rows: rows.length };
+  if (clientId) {
+    const used = data.length;
+    meta.clientId = String(clientId);
+    meta.limit = MAX_USERS_PER_CLIENT;
+    meta.used = used;
+    meta.remaining = Math.max(MAX_USERS_PER_CLIENT - used, 0);
+  }
+  return { data, meta };
 }
 
 async function getUserById(id) {
@@ -212,7 +281,7 @@ async function usernameExists(username, { exceptId } = {}) {
   return Number(rows[0]?.count) > 0;
 }
 
-async function validateUserPayload(body, { isNew, existingId } = {}) {
+async function validateUserPayload(body, { isNew, existingId, existing } = {}) {
   const username = normalizeUsername(body?.username);
   const fullName = normalizeFullName(body?.fullName ?? body?.full_name);
 
@@ -231,9 +300,39 @@ async function validateUserPayload(body, { isNew, existingId } = {}) {
   const payload = { ok: true, username, fullName };
   const forcePasswordChange = parseForcePasswordChange(body);
   if (forcePasswordChange !== undefined) payload.forcePasswordChange = forcePasswordChange;
+
+  const active = parseActive(body);
+  if (active !== undefined) payload.active = active;
+
+  let roleId = existing?.roleId || LEGACY_DEFAULT_ROLE_ID;
   if (isNew) {
-    payload.roleId = String(body?.roleId ?? body?.role_id ?? '').trim() || DEFAULT_NEW_USER_ROLE_ID;
+    roleId = String(body?.roleId ?? body?.role_id ?? '').trim() || DEFAULT_NEW_USER_ROLE_ID;
+    payload.roleId = roleId;
+  } else if (body?.roleId !== undefined || body?.role_id !== undefined) {
+    roleId = String(body?.roleId ?? body?.role_id ?? '').trim() || existing.roleId;
+    payload.roleId = roleId;
   }
+
+  const clientIdRaw = parseClientId(body);
+  let clientId = existing?.clientId || '';
+  if (clientIdRaw !== undefined) clientId = clientIdRaw;
+  if (roleId === CLIENT_ROLE_ID) {
+    if (!clientId) {
+      return { ok: false, statusCode: 400, error: 'Для роли Client укажите clientId' };
+    }
+    const count = await countUsersForClient(clientId, { exceptId: existingId });
+    if (count >= MAX_USERS_PER_CLIENT) {
+      return {
+        ok: false,
+        statusCode: 400,
+        error: `У клиента уже ${MAX_USERS_PER_CLIENT} учётных записей`,
+      };
+    }
+  } else {
+    clientId = '';
+  }
+  payload.clientId = clientId;
+
   return payload;
 }
 
@@ -256,6 +355,8 @@ async function createUser(body) {
     password_hash: passwordHash,
     role_id: validation.roleId,
     force_password_change: validation.forcePasswordChange ? 1 : 0,
+    is_active: validation.active === undefined ? 1 : (validation.active ? 1 : 0),
+    client_id: validation.clientId || '',
     created_at: now,
     updated_at: now,
     password_changed_at: now,
@@ -275,18 +376,27 @@ async function updateUser(id, body) {
     throw err;
   }
 
-  const validation = await validateUserPayload(body, { isNew: false, existingId: id });
+  const validation = await validateUserPayload(body, {
+    isNew: false,
+    existingId: id,
+    existing,
+  });
   if (!validation.ok) throw validationError(validation);
 
+  const clientIdRaw = parseClientId(body);
   const record = {
     id: existing.id,
     username: validation.username,
     full_name: validation.fullName,
     password_hash: existing.passwordHash,
-    role_id: existing.roleId || LEGACY_DEFAULT_ROLE_ID,
+    role_id: validation.roleId || existing.roleId || LEGACY_DEFAULT_ROLE_ID,
     force_password_change: validation.forcePasswordChange !== undefined
       ? (validation.forcePasswordChange ? 1 : 0)
       : (existing.forcePasswordChange ? 1 : 0),
+    is_active: validation.active !== undefined
+      ? (validation.active ? 1 : 0)
+      : (existing.active ? 1 : 0),
+    client_id: clientIdRaw !== undefined ? validation.clientId : (existing.clientId || ''),
     created_at: existing.createdAt,
     updated_at: clickhouseDateTime(),
     password_changed_at: existing.passwordChangedAt ?? null,
@@ -370,6 +480,8 @@ async function changeUserPassword(id, password, { clearForce = false } = {}) {
     password_hash: passwordHash,
     role_id: existing.roleId || LEGACY_DEFAULT_ROLE_ID,
     force_password_change: clearForce ? 0 : existing.forcePasswordChange ? 1 : 0,
+    is_active: existing.active ? 1 : 0,
+    client_id: existing.clientId || '',
     created_at: existing.createdAt,
     updated_at: now,
     password_changed_at: now,
@@ -384,6 +496,16 @@ async function changeUserPassword(id, password, { clearForce = false } = {}) {
 async function verifyCredentials(username, password) {
   const user = await getUserByUsername(username);
   if (!user?.passwordHash) return null;
+  if (!user.active) {
+    const err = new Error('Учётная запись отключена');
+    err.statusCode = 403;
+    throw err;
+  }
+  if (user.roleId === CLIENT_ROLE_ID && !user.clientId) {
+    const err = new Error('Учётная запись клиента не привязана к клиенту');
+    err.statusCode = 403;
+    throw err;
+  }
   const ok = await bcrypt.compare(String(password ?? ''), user.passwordHash);
   return ok ? user : null;
 }

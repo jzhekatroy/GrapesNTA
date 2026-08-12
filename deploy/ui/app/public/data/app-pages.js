@@ -32,7 +32,8 @@ const AppPages = (() => {
   }
 
   function resolvePageId(pageId, validIdSet) {
-    if (pageId === 'collector-status') return 'collectors';
+    if (pageId === 'collector-status' || pageId === 'flow-exclusions') return 'collectors';
+    if (pageId === 'vlan' || pageId === 'entities') return 'cidr';
     return validIdSet.has(pageId) ? pageId : 'dashboard';
   }
 

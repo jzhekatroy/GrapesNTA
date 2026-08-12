@@ -10,14 +10,21 @@ const {
   usersTableRef,
 } = require('../clickhouse');
 const { pageIds } = require('./resources');
+const {
+  CLIENT_ROLE_ID,
+  CLIENTS_RESOURCE,
+  CLIENT_PAGE_RESOURCES,
+} = require('../cabinet/constants');
 
 const STANDARD_ROLES = [
   { id: 'Administrator', name: 'Administrator', displayName: 'Администратор' },
   { id: 'Operator', name: 'Operator', displayName: 'Оператор' },
   { id: 'ReadOnly', name: 'ReadOnly', displayName: 'Только чтение' },
+  { id: CLIENT_ROLE_ID, name: CLIENT_ROLE_ID, displayName: 'Клиент' },
 ];
 
 const ADMIN_ONLY_RESOURCES = new Set(['ttl', 'diagnostics', 'smtp']);
+const OPERATOR_MANAGED_RESOURCES = new Set([CLIENTS_RESOURCE]);
 
 function clickhouseDateTime(date = new Date()) {
   return date.toISOString().replace('T', ' ').replace('Z', '');
@@ -53,8 +60,23 @@ function latestRolePermissionsCte() {
   `;
 }
 
-function defaultCanWrite(roleId) {
-  return roleId === 'ReadOnly' ? 0 : 1;
+function defaultAllowed(roleId, resource) {
+  if (roleId === CLIENT_ROLE_ID) {
+    return CLIENT_PAGE_RESOURCES.has(resource) ? 1 : 0;
+  }
+  if (OPERATOR_MANAGED_RESOURCES.has(resource)) {
+    return (roleId === 'Administrator' || roleId === 'Operator') ? 1 : 0;
+  }
+  if (ADMIN_ONLY_RESOURCES.has(resource)) {
+    return roleId === 'Administrator' ? 1 : 0;
+  }
+  return 1;
+}
+
+function defaultCanWrite(roleId, resource, allowed) {
+  if (!allowed) return 0;
+  if (roleId === 'ReadOnly' || roleId === CLIENT_ROLE_ID) return 0;
+  return 1;
 }
 
 async function ensureRbacTables() {
@@ -184,14 +206,12 @@ async function syncRolePermissions() {
     const existing = await listRolePermissionKeys(roleId);
     for (const resource of resources) {
       if (!existing.has(resource)) {
-        const allowed = ADMIN_ONLY_RESOURCES.has(resource)
-          ? (roleId === 'Administrator' ? 1 : 0)
-          : 1;
+        const allowed = defaultAllowed(roleId, resource);
         rows.push({
           role_id: roleId,
           resource,
           allowed,
-          can_write: allowed ? defaultCanWrite(roleId) : 0,
+          can_write: defaultCanWrite(roleId, resource, allowed),
           updated_at: now,
         });
       }
@@ -272,8 +292,11 @@ async function migrateUserRoles() {
             password_hash,
             role_id,
             force_password_change,
+            is_active,
+            client_id,
             created_at,
             updated_at,
+            password_changed_at,
             row_number() OVER (PARTITION BY id ORDER BY updated_at DESC) AS rn
           FROM ${usersTableRef()}
         )
@@ -295,8 +318,11 @@ async function migrateUserRoles() {
       password_hash: r.password_hash,
       role_id: 'Administrator',
       force_password_change: Number(r.force_password_change),
+      is_active: r.is_active === undefined ? 1 : Number(r.is_active),
+      client_id: String(r.client_id ?? ''),
       created_at: r.created_at,
       updated_at: now,
+      password_changed_at: r.password_changed_at ?? null,
     }));
 
   if (patchRows.length) {
@@ -305,13 +331,37 @@ async function migrateUserRoles() {
   return patchRows.length;
 }
 
+async function syncClientRolePermissions() {
+  const roleIds = await listRoleIds();
+  if (!roleIds.includes(CLIENT_ROLE_ID)) return 0;
+
+  const resources = pageIds();
+  const now = clickhouseDateTime();
+  const rows = resources.map((resource) => {
+    const allowed = defaultAllowed(CLIENT_ROLE_ID, resource);
+    return {
+      role_id: CLIENT_ROLE_ID,
+      resource,
+      allowed,
+      can_write: 0,
+      updated_at: now,
+    };
+  });
+
+  if (rows.length) {
+    await insertRows(config.rolePermissionsTable, rows, { name: 'rbac/sync-client-permissions' });
+  }
+  return rows.length;
+}
+
 async function ensureRbac() {
   await ensureRbacTables();
   const rolesCreated = await bootstrapStandardRoles();
   await migrateUserRoles();
   const permissionsAdded = await syncRolePermissions();
   const writePermissionsPatched = await syncReadOnlyWritePermissions();
-  return { rolesCreated, permissionsAdded, writePermissionsPatched };
+  const clientPermissionsSynced = await syncClientRolePermissions();
+  return { rolesCreated, permissionsAdded, writePermissionsPatched, clientPermissionsSynced };
 }
 
 module.exports = {

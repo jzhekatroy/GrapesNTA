@@ -142,15 +142,19 @@ const config = {
     dstLabel: envOpt('CH_COL_DST_LABEL', 'dst_label'),
     srcEndpointScope: envOpt('CH_COL_SRC_ENDPOINT_SCOPE', 'src_endpoint_scope'),
     dstEndpointScope: envOpt('CH_COL_DST_ENDPOINT_SCOPE', 'dst_endpoint_scope'),
+    srcEndpointSource: envOpt('CH_COL_SRC_ENDPOINT_SOURCE', 'src_endpoint_source'),
+    dstEndpointSource: envOpt('CH_COL_DST_ENDPOINT_SOURCE', 'dst_endpoint_source'),
     srcNetworkName: envOpt('CH_COL_SRC_NETWORK_NAME', 'src_network_name'),
     dstNetworkName: envOpt('CH_COL_DST_NETWORK_NAME', 'dst_network_name'),
+    srcEntity: envOpt('CH_COL_SRC_ENTITY', 'src_entity'),
+    dstEntity: envOpt('CH_COL_DST_ENTITY', 'dst_entity'),
     srcVlan: envOpt('CH_COL_SRC_VLAN', 'src_vlan'),
     dstVlan: envOpt('CH_COL_DST_VLAN', 'dst_vlan'),
     vlanId: envOpt('CH_COL_VLAN_ID', 'vlan_id'),
     srcAttachmentKind: envOpt('CH_COL_SRC_ATTACHMENT_KIND', 'src_attachment_kind'),
     dstAttachmentKind: envOpt('CH_COL_DST_ATTACHMENT_KIND', 'dst_attachment_kind'),
-    srcMac: envOpt('CH_COL_SRC_MAC', 'SrcMAC'),
-    dstMac: envOpt('CH_COL_DST_MAC', 'DstMAC'),
+    srcMac: envOpt('CH_COL_SRC_MAC', 'src_mac'),
+    dstMac: envOpt('CH_COL_DST_MAC', 'dst_mac'),
     samplingRate: envOpt('CH_COL_SAMPLING_RATE', null),
     samplerAddress: envOpt('CH_COL_SAMPLER_ADDRESS', 'sampler_address'),
     inIf: envOpt('CH_COL_IN_IF', 'in_if'),
@@ -559,14 +563,16 @@ async function query(sql, params = {}, options = {}) {
   let ephemeralClient = null;
   try {
     const timeoutMs = Number(options.requestTimeoutMs) || 0;
-    const ch = timeoutMs > 0 && timeoutMs !== config.requestTimeoutMs
-      ? (ephemeralClient = createChClient(
-        config.readUsername,
-        config.readPassword,
-        timeoutMs,
-        options.clickhouse_settings,
-      ))
-      : getReadClient();
+    const ch = options.useWrite
+      ? getWriteClient()
+      : (timeoutMs > 0 && timeoutMs !== config.requestTimeoutMs
+        ? (ephemeralClient = createChClient(
+          config.readUsername,
+          config.readPassword,
+          timeoutMs,
+          options.clickhouse_settings,
+        ))
+        : getReadClient());
     const result = await ch.query({
       query: sql,
       query_params: params,

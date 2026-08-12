@@ -1,39 +1,56 @@
-/* VLAN — справочник имён (net_l2_vlans), раздел «Модель сети». */
+/* VLAN — справочник имён (net_l2_vlans) + VLAN, увиденные в трафике. */
 
 const VLAN_SAVE_TITLE = 'Сохранено';
 const VLAN_SAVE_DESC = 'Изменения справочника применятся в течение 60 секунд.';
+const VLAN_SEEN_HOURS = 24 * 7;
+const VLAN_SEEN_LIMIT = 1000;
 
-function PageVlan() {
+function PageVlan({ embedded = false, refreshKey: parentRefreshKey = 0, onReload } = {}) {
   const canWrite = AuthAccess.canWritePage('vlan');
-  const [rows, setRows] = useState([]);
+  const [namedRows, setNamedRows] = useState([]);
+  const [seenRows, setSeenRows] = useState([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(null);
   const [search, setSearch] = useState('');
   const [editing, setEditing] = useState(null);
   const [showAdd, setShowAdd] = useState(false);
-  const [refreshKey, setRefreshKey] = useState(0);
+  const [localRefreshKey, setLocalRefreshKey] = useState(0);
 
-  const reload = useCallback(() => setRefreshKey((k) => k + 1), []);
+  const refreshKey = onReload ? parentRefreshKey : localRefreshKey;
+  const reload = useCallback(() => {
+    if (onReload) onReload();
+    else setLocalRefreshKey((k) => k + 1);
+  }, [onReload]);
 
   useEffect(() => {
     let cancelled = false;
     (async () => {
       setLoading(true);
       setLoadError(null);
-      const namedR = await ApiClient.loadRefVlans();
+      const [namedR, seenR] = await Promise.all([
+        ApiClient.loadRefVlans(),
+        ApiClient.loadRefVlansSeen({ hours: VLAN_SEEN_HOURS, limit: VLAN_SEEN_LIMIT }),
+      ]);
       if (cancelled) return;
       if (namedR.source === 'error') {
         setLoadError(ApiClient.LOAD_FAILED);
-        setRows([]);
+        setNamedRows([]);
+        setSeenRows([]);
       } else {
-        setRows((namedR.rows || []).map((r) => ({ ...r, id: r.vlanId })));
+        setNamedRows((namedR.rows || []).map((r) => ({ ...r, id: r.vlanId })));
+        // seen API уже отдаёт только безымянные; ошибку seen не валим всю страницу
+        setSeenRows(
+          seenR.source === 'error'
+            ? []
+            : (seenR.rows || []).map((r) => ({ ...r, id: r.vlanId })),
+        );
       }
       setLoading(false);
     })();
     return () => { cancelled = true; };
   }, [refreshKey]);
 
-  const filtered = useMemo(() => {
+  const filterRows = useCallback((rows) => {
     if (!search) return rows;
     const s = search.toLowerCase();
     return rows.filter((r) => (
@@ -41,10 +58,13 @@ function PageVlan() {
       || (r.displayName || '').toLowerCase().includes(s)
       || (r.comment || '').toLowerCase().includes(s)
     ));
-  }, [rows, search]);
+  }, [search]);
+
+  const filteredNamed = useMemo(() => filterRows(namedRows), [namedRows, filterRows]);
+  const filteredSeen = useMemo(() => filterRows(seenRows), [seenRows, filterRows]);
 
   const handleDelete = async (row) => {
-    if (!window.confirm(`Удалить VLAN ${row.vlanId}${row.displayName ? ` («${row.displayName}»)` : ''}?`)) return;
+    if (!window.confirm(`Удалить имя VLAN ${row.vlanId}${row.displayName ? ` («${row.displayName}»)` : ''}? VLAN останется в списке обнаруженных, если есть в трафике.`)) return;
     try {
       await ApiClient.deleteRefVlan({ vlanId: row.vlanId });
       pushToast({ kind: 'success', title: VLAN_SAVE_TITLE, desc: VLAN_SAVE_DESC });
@@ -54,7 +74,18 @@ function PageVlan() {
     }
   };
 
-  const cols = [
+  const openNameSeen = (row) => {
+    setShowAdd(false);
+    setEditing({
+      vlanId: row.vlanId,
+      displayName: '',
+      comment: '',
+      isNew: true,
+      fromSeen: true,
+    });
+  };
+
+  const namedCols = [
     {
       key: 'vlanId',
       title: 'VLAN',
@@ -70,13 +101,20 @@ function PageVlan() {
       render: (r) => (
         r.displayName
           ? <span style={{ font: 'var(--pv-text-body-2-bold)' }}>{r.displayName}</span>
-          : <span style={{ color: 'var(--fg-tertiary)' }}>без имени</span>
+          : <span style={{ color: 'var(--fg-muted)' }}>без имени</span>
       ),
+    },
+    {
+      key: 'status',
+      title: 'Статус',
+      width: 120,
+      sortAccessor: () => 1,
+      render: () => <Badge tone="success" dot>Размечен</Badge>,
     },
     {
       key: 'comment',
       title: 'Комментарий',
-      width: 320,
+      width: 280,
       sortAccessor: (r) => r.comment || '',
       render: (r) => (
         <span style={{ color: 'var(--fg-secondary)', font: 'var(--pv-text-body-3)' }}>
@@ -86,18 +124,76 @@ function PageVlan() {
     },
   ];
 
-  return (
-    <div className="main__container">
-      <div className="page-head">
-        <div>
-          <h1>VLAN</h1>
-          <p>Справочник VLAN: имена для отчётов и разбора трафика.</p>
+  const seenCols = [
+    {
+      key: 'vlanId',
+      title: 'VLAN',
+      width: 100,
+      sortAccessor: (r) => r.vlanId,
+      render: (r) => <span className="mono" style={{ font: 'var(--pv-text-body-2-bold)' }}>{r.vlanId}</span>,
+    },
+    {
+      key: 'status',
+      title: 'Статус',
+      width: 140,
+      sortAccessor: () => 0,
+      render: () => <Badge tone="warning" dot>Не размечен</Badge>,
+    },
+    {
+      key: 'bytes',
+      title: 'Объём (7д)',
+      width: 140,
+      sortAccessor: (r) => r.bytes || 0,
+      render: (r) => (
+        <span className="mono" style={{ font: 'var(--pv-text-body-3)' }}>
+          {typeof fmtBytes === 'function' ? fmtBytes(r.bytes || 0) : String(r.bytes || 0)}
+        </span>
+      ),
+    },
+    {
+      key: 'flows',
+      title: 'Потоки',
+      width: 120,
+      sortAccessor: (r) => r.flows || 0,
+      render: (r) => (
+        <span className="mono" style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-secondary)' }}>
+          {typeof fmtNum === 'function' ? fmtNum(r.flows || 0) : String(r.flows || 0)}
+        </span>
+      ),
+    },
+  ];
+
+  const toolbar = { search, onSearch: setSearch };
+
+  const body = (
+    <>
+      {!embedded && (
+        <div className="page-head">
+          <div>
+            <h1>VLAN</h1>
+            <p>
+              Сверху — размеченные имена для отчётов. Ниже — VLAN, увиденные в трафике за 7 дней без имени.
+            </p>
+          </div>
+          <div className="row" style={{ gap: 8 }}>
+            <Button kind="ghost" icon="refresh" onClick={reload} disabled={loading}>Обновить</Button>
+            <Button kind="primary" icon="plus" onClick={() => { setEditing(null); setShowAdd(true); }} disabled={!canWrite}>
+              Добавить VLAN
+            </Button>
+          </div>
         </div>
-        <div className="row" style={{ gap: 8 }}>
-          <Button kind="ghost" icon="refresh" onClick={reload} disabled={loading}>Обновить</Button>
-          <Button kind="primary" icon="plus" onClick={() => setShowAdd(true)} disabled={!canWrite}>Добавить VLAN</Button>
+      )}
+
+      {embedded && (
+        <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center', marginBottom: 12, gap: 8 }}>
+          <div style={{ color: 'var(--fg-secondary)', font: 'var(--pv-text-body-3)' }}>
+            Размеченные сверху, затем обнаруженные в трафике за 7 дней.
+          </div>
+          <Button kind="primary" icon="plus" onClick={() => { setEditing(null); setShowAdd(true); }} disabled={!canWrite}>
+            Добавить VLAN
+          </Button>
         </div>
-      </div>
+      )}
 
       {loading ? (
         <Card pad="sm">
@@ -106,33 +202,72 @@ function PageVlan() {
       ) : loadError ? (
         <Empty icon="db" title="Не удалось загрузить" desc={loadError} action={<Button kind="primary" icon="refresh" onClick={reload}>Повторить</Button>} />
       ) : (
-        <DataTable
-          rows={filtered}
-          columns={cols}
-          rowKey="id"
-          pageSize={50}
-          initialSort={{ key: 'vlanId', dir: 'asc' }}
-          onRowClick={canWrite ? (r) => setEditing(r) : undefined}
-          emptyTitle="Каталог пуст"
-          emptyDesc="Добавьте VLAN — укажите ID и название."
-          toolbar={{ search, onSearch: setSearch }}
-          rowActions={canWrite ? (r) => (
-            <div className="row" style={{ gap: 4, justifyContent: 'flex-end' }}>
-              <button className="icon-btn tt" data-tt="Редактировать" onClick={(e) => { e.stopPropagation(); setEditing(r); }}>
-                <Icon name="edit" size={15} />
-              </button>
-              <button className="icon-btn tt" data-tt="Удалить" onClick={(e) => { e.stopPropagation(); handleDelete(r); }}>
-                <Icon name="trash" size={15} />
-              </button>
+        <div className="col" style={{ gap: 20 }}>
+          <div>
+            <div className="row" style={{ justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 10 }}>
+              <h2 style={{ margin: 0, font: 'var(--pv-text-h4)' }}>Размеченные</h2>
+              <span style={{ color: 'var(--fg-muted)', font: 'var(--pv-text-body-3)' }}>
+                {filteredNamed.length}
+                {search && filteredNamed.length !== namedRows.length ? ` из ${namedRows.length}` : ''}
+              </span>
             </div>
-          ) : null}
-        />
+            <DataTable
+              rows={filteredNamed}
+              columns={namedCols}
+              rowKey="id"
+              pageSize={50}
+              initialSort={{ key: 'vlanId', dir: 'asc' }}
+              onRowClick={canWrite ? (r) => { setShowAdd(false); setEditing({ ...r, isNew: false }); } : undefined}
+              emptyTitle="Нет размеченных VLAN"
+              emptyDesc="Назовите VLAN из списка обнаруженных ниже или добавьте вручную."
+              toolbar={toolbar}
+              rowActions={canWrite ? (r) => (
+                <div className="row" style={{ gap: 4, justifyContent: 'flex-end' }}>
+                  <button className="icon-btn tt" data-tt="Редактировать" onClick={(e) => { e.stopPropagation(); setShowAdd(false); setEditing({ ...r, isNew: false }); }}>
+                    <Icon name="edit" size={15} />
+                  </button>
+                  <button className="icon-btn tt" data-tt="Удалить имя" onClick={(e) => { e.stopPropagation(); handleDelete(r); }}>
+                    <Icon name="trash" size={15} />
+                  </button>
+                </div>
+              ) : null}
+            />
+          </div>
+
+          <div>
+            <div className="row" style={{ justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 10 }}>
+              <h2 style={{ margin: 0, font: 'var(--pv-text-h4)' }}>Обнаруженные в трафике</h2>
+              <span style={{ color: 'var(--fg-muted)', font: 'var(--pv-text-body-3)' }}>
+                без имени · {filteredSeen.length}
+                {search && filteredSeen.length !== seenRows.length ? ` из ${seenRows.length}` : ''}
+              </span>
+            </div>
+            <DataTable
+              rows={filteredSeen}
+              columns={seenCols}
+              rowKey="id"
+              pageSize={50}
+              initialSort={{ key: 'bytes', dir: 'desc' }}
+              onRowClick={canWrite ? openNameSeen : undefined}
+              emptyTitle="Нет неразмеченных VLAN"
+              emptyDesc="За последние 7 дней в трафике нет VLAN без имени в справочнике."
+              toolbar={null}
+              rowActions={canWrite ? (r) => (
+                <div className="row" style={{ gap: 4, justifyContent: 'flex-end' }}>
+                  <Button size="sm" kind="primary" onClick={(e) => { e.stopPropagation(); openNameSeen(r); }}>
+                    Назвать
+                  </Button>
+                </div>
+              ) : null}
+            />
+          </div>
+        </div>
       )}
 
       <VlanFormModal
         open={showAdd || !!editing}
         row={editing}
-        isNew={showAdd}
+        isNew={showAdd || !!editing?.isNew || !!editing?.fromSeen}
         onClose={() => { setShowAdd(false); setEditing(null); }}
         onSaved={() => {
           setShowAdd(false);
@@ -141,8 +276,11 @@ function PageVlan() {
           pushToast({ kind: 'success', title: VLAN_SAVE_TITLE, desc: VLAN_SAVE_DESC });
         }}
       />
-    </div>
+    </>
   );
+
+  if (embedded) return body;
+  return <div className="main__container">{body}</div>;
 }
 
 function VlanFormModal({ open, row, isNew, onClose, onSaved }) {
@@ -151,6 +289,8 @@ function VlanFormModal({ open, row, isNew, onClose, onSaved }) {
   const [comment, setComment] = useState('');
   const [saving, setSaving] = useState(false);
   const [formError, setFormError] = useState('');
+  const fromSeen = !!row?.fromSeen;
+  const vlanIdLocked = !isNew || fromSeen;
 
   useEffect(() => {
     if (!open) return;
@@ -173,7 +313,6 @@ function VlanFormModal({ open, row, isNew, onClose, onSaved }) {
     setSaving(true);
     setFormError('');
     try {
-      // Поля type/boundary/owner в UI убраны — при правке сохраняем прежние значения из записи.
       await ApiClient.saveRefVlan({
         vlanId: idNum,
         displayName: displayName.trim(),
@@ -193,11 +332,15 @@ function VlanFormModal({ open, row, isNew, onClose, onSaved }) {
 
   if (!open) return null;
 
+  const title = fromSeen
+    ? `Назвать VLAN ${row?.vlanId}`
+    : (isNew ? 'Добавить VLAN' : `Редактировать VLAN ${row?.vlanId}`);
+
   return (
     <Modal
       open={open}
       onClose={onClose}
-      title={isNew ? 'Добавить VLAN' : `Редактировать VLAN ${row?.vlanId}`}
+      title={title}
       footer={
         <>
           <Button kind="ghost" onClick={onClose} disabled={saving}>Отмена</Button>
@@ -223,8 +366,8 @@ function VlanFormModal({ open, row, isNew, onClose, onSaved }) {
             placeholder="445"
             value={vlanId}
             onChange={(e) => setVlanId(e.target.value)}
-            disabled={!isNew}
-            readOnly={!isNew}
+            disabled={vlanIdLocked}
+            readOnly={vlanIdLocked}
           />
         </div>
         <div className="field">
@@ -234,6 +377,7 @@ function VlanFormModal({ open, row, isNew, onClose, onSaved }) {
             placeholder="Клиент А, Uplink M9…"
             value={displayName}
             onChange={(e) => setDisplayName(e.target.value)}
+            autoFocus
           />
         </div>
         <div className="field" style={{ gridColumn: '1 / -1' }}>

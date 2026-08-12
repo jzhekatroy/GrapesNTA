@@ -77,7 +77,7 @@ function PageRouters() {
           onSearch: setSearch,
           left: selected.size > 0 ? (
             <div className="row" style={{gap: 8}}>
-              <span style={{font: 'var(--pv-text-body-3)', color: 'var(--fg-secondary)'}}>Выбрано: <b style={{color: '#fff'}}>{selected.size}</b></span>
+              <span style={{font: 'var(--pv-text-body-3)', color: 'var(--fg-secondary)'}}>Выбрано: <b style={{color: 'var(--fg-primary)'}}>{selected.size}</b></span>
               <Button size="sm" kind="ghost" icon="refresh">Опросить</Button>
               <Button size="sm" kind="ghost" icon="export">Экспорт</Button>
               <Button size="sm" kind="danger" icon="trash">Удалить</Button>
@@ -135,7 +135,7 @@ function RouterEditModal({ router, onClose }) {
               all: 'unset', cursor: 'pointer',
               padding: '12px 16px',
               font: 'var(--pv-text-body-2-bold)',
-              color: tab === t.id ? '#fff' : 'var(--fg-secondary)',
+              color: tab === t.id ? 'var(--fg-primary)' : 'var(--fg-secondary)',
               borderBottom: tab === t.id ? '2px solid var(--accent)' : '2px solid transparent',
               marginBottom: -1,
               display: 'inline-flex', alignItems: 'center', gap: 8,
@@ -207,7 +207,7 @@ function RouterEditModal({ router, onClose }) {
             <div className="row" style={{gap: 10, alignItems: 'flex-start'}}>
               <Icon name="info" size={16} style={{color: '#A4ADFF', marginTop: 2}} />
               <div>
-                <div style={{font: 'var(--pv-text-body-2-bold)', color: '#fff'}}>Подсказка</div>
+                <div style={{font: 'var(--pv-text-body-2-bold)', color: 'var(--fg-primary)'}}>Подсказка</div>
                 <div style={{font: 'var(--pv-text-body-3)', color: 'var(--fg-secondary)', marginTop: 2}}>
                   Используйте sampling 1:1000 на интерфейсах ≥10G. Для аналитики DDoS снизьте до 1:100.
                 </div>

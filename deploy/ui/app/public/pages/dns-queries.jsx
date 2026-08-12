@@ -404,11 +404,15 @@ function formatDnsAnswers(row) {
   return parts.length ? parts.join(', ') : '—';
 }
 
-function formatDnsTs(ts) {
+function formatDnsTs(ts, displayTimezone = getDisplayTimezone()) {
   if (!ts) return '—';
-  const d = new Date(ts);
-  if (Number.isNaN(d.getTime())) return String(ts);
-  return d.toLocaleString('ru-RU', {
+  const text = String(ts).replace('T', ' ').trim().slice(0, 19);
+  const ms = typeof parseChartBucketMs === 'function'
+    ? parseChartBucketMs(text)
+    : Date.parse(`${text.replace(' ', 'T')}Z`);
+  if (ms == null || !Number.isFinite(ms)) return String(ts);
+  return new Date(ms).toLocaleString('ru-RU', {
+    timeZone: displayTimezone || getDisplayTimezone(),
     day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit',
   });
 }
@@ -860,7 +864,7 @@ function PageDnsQueries({ onNavigate, timeRange, customPeriod, collectorFilter, 
                   key: 'eventTime',
                   title: 'Время',
                   width: 150,
-                  render: (r) => <span className="mono dns-recent-time">{formatDnsTs(r.eventTime)}</span>,
+                  render: (r) => <span className="mono dns-recent-time">{formatDnsTs(r.eventTime, displayTimezone)}</span>,
                 },
                 {
                   key: 'eventType',

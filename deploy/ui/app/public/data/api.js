@@ -865,6 +865,14 @@ const ApiClient = (() => {
     return body.data || [];
   }
 
+  async function suggestDnsExplorerAnswers(ctx, q) {
+    const params = new URLSearchParams(dnsOverviewQuery(ctx));
+    if (ctx.filters?.length) params.set('filters', encodeURIComponent(JSON.stringify(ctx.filters)));
+    if (q) params.set('q', q);
+    const body = await getJson(`/api/dns-explorer/suggest/answers?${params}`, { widget: 'dns-explorer/suggest/answers' });
+    return body.data || [];
+  }
+
   async function fetchDns(path, widget) {
     try {
       const body = await getJson(path, { widget });
@@ -2059,6 +2067,190 @@ const ApiClient = (() => {
     services: [],
   });
 
+  const CABINET_TIME_RANGE_HOURS = {
+    '30m': 1,
+    '1h': 1,
+    '3h': 3,
+    '6h': 6,
+    '12h': 12,
+    '24h': 24,
+    '2d': 48,
+    '7d': 168,
+    '14d': 336,
+    '30d': 720,
+  };
+
+  function cabinetRangeQuery({ timeRange = '24h', customPeriod } = {}) {
+    const params = new URLSearchParams();
+    if (timeRange === 'custom' && customPeriod?.from && customPeriod?.to) {
+      const apiPeriod = apiCustomPeriodParams(customPeriod);
+      params.set('from', apiPeriod.from);
+      params.set('to', apiPeriod.to);
+    } else {
+      params.set('hours', String(CABINET_TIME_RANGE_HOURS[timeRange] || 24));
+    }
+    return params;
+  }
+
+  async function fetchCabinet(path, widget) {
+    try {
+      const body = await getJson(path, { widget });
+      return {
+        ok: true,
+        data: body.data,
+        meta: body.meta,
+        loadMs: body.loadMs,
+        serverMs: body.serverMs,
+      };
+    } catch (err) {
+      return {
+        ok: false,
+        loadMs: err.loadMs ?? null,
+        serverMs: null,
+        error: err,
+      };
+    }
+  }
+
+  async function loadCabinetOverviewSeries({ timeRange = '24h', customPeriod, granularity = 'auto' } = {}) {
+    const params = cabinetRangeQuery({ timeRange, customPeriod });
+    params.set('granularity', granularity || 'auto');
+    const result = await fetchCabinet(`/api/cabinet/overview/series?${params}`, 'cabinet/overview/series');
+    if (!result.ok) {
+      return {
+        source: 'error',
+        data: [],
+        meta: null,
+        error: result.error?.message || LOAD_FAILED,
+        loadMs: result.loadMs,
+        serverMs: null,
+      };
+    }
+    return {
+      source: 'clickhouse',
+      data: result.data || [],
+      meta: result.meta || null,
+      loadMs: result.loadMs,
+      serverMs: result.serverMs,
+    };
+  }
+
+  async function loadCabinetOverviewCountries({
+    timeRange = '24h',
+    customPeriod,
+    direction,
+    limit = 20,
+  } = {}) {
+    const params = cabinetRangeQuery({ timeRange, customPeriod });
+    if (direction) params.set('direction', direction);
+    if (limit != null) params.set('limit', String(limit));
+    const result = await fetchCabinet(`/api/cabinet/overview/countries?${params}`, 'cabinet/overview/countries');
+    if (!result.ok) {
+      return {
+        source: 'error',
+        data: [],
+        meta: null,
+        error: result.error?.message || LOAD_FAILED,
+        loadMs: result.loadMs,
+        serverMs: null,
+      };
+    }
+    return {
+      source: 'clickhouse',
+      data: result.data || [],
+      meta: result.meta || null,
+      loadMs: result.loadMs,
+      serverMs: result.serverMs,
+    };
+  }
+
+  async function loadCabinetOverviewServices({
+    timeRange = '24h',
+    customPeriod,
+    direction,
+    limit = 20,
+  } = {}) {
+    const params = cabinetRangeQuery({ timeRange, customPeriod });
+    if (direction) params.set('direction', direction);
+    if (limit != null) params.set('limit', String(limit));
+    const result = await fetchCabinet(`/api/cabinet/overview/services?${params}`, 'cabinet/overview/services');
+    if (!result.ok) {
+      return {
+        source: 'error',
+        data: [],
+        meta: null,
+        error: result.error?.message || LOAD_FAILED,
+        loadMs: result.loadMs,
+        serverMs: null,
+      };
+    }
+    return {
+      source: 'clickhouse',
+      data: result.data || [],
+      meta: result.meta || null,
+      loadMs: result.loadMs,
+      serverMs: result.serverMs,
+    };
+  }
+
+  async function loadCabinetDnsDomains({
+    timeRange = '24h',
+    customPeriod,
+    sourceId,
+    limit = 50,
+  } = {}) {
+    const params = cabinetRangeQuery({ timeRange, customPeriod });
+    if (sourceId) params.set('sourceId', sourceId);
+    if (limit != null) params.set('limit', String(limit));
+    const result = await fetchCabinet(`/api/cabinet/dns/domains?${params}`, 'cabinet/dns/domains');
+    if (!result.ok) {
+      return {
+        source: 'error',
+        data: [],
+        meta: null,
+        error: result.error?.message || LOAD_FAILED,
+        loadMs: result.loadMs,
+        serverMs: null,
+      };
+    }
+    return {
+      source: 'clickhouse',
+      data: result.data || [],
+      meta: result.meta || null,
+      loadMs: result.loadMs,
+      serverMs: result.serverMs,
+    };
+  }
+
+  async function loadCabinetDnsQueries({
+    timeRange = '24h',
+    customPeriod,
+    domain,
+    limit = 100,
+  } = {}) {
+    const params = cabinetRangeQuery({ timeRange, customPeriod });
+    if (domain) params.set('domain', domain);
+    if (limit != null) params.set('limit', String(Math.min(Math.max(Number(limit) || 100, 100), 1000)));
+    const result = await fetchCabinet(`/api/cabinet/dns/queries?${params}`, 'cabinet/dns/queries');
+    if (!result.ok) {
+      return {
+        source: 'error',
+        data: [],
+        meta: null,
+        error: result.error?.message || LOAD_FAILED,
+        loadMs: result.loadMs,
+        serverMs: null,
+      };
+    }
+    return {
+      source: 'clickhouse',
+      data: result.data || [],
+      meta: result.meta || null,
+      loadMs: result.loadMs,
+      serverMs: result.serverMs,
+    };
+  }
+
   /** Статистика по направлениям — отдельно от остального dashboard. */
   async function loadTrafficStats({ timeRange = '24h', customPeriod, collectorFilter } = {}) {
     const finish = DashboardLog?.widgetStart?.('traffic-stats') ?? ((extra) => ({ loadMs: 0, ...extra }));
@@ -2145,16 +2337,301 @@ const ApiClient = (() => {
     };
   }
 
+  const CABINET_RANGE_HOURS = {
+    '30m': 1,
+    '1h': 1,
+    '3h': 3,
+    '6h': 6,
+    '12h': 12,
+    '24h': 24,
+    '2d': 48,
+    '7d': 168,
+    '14d': 336,
+    '30d': 720,
+  };
+
+  function cabinetRangeQueryParams(timeRange, customPeriod) {
+    if (timeRange === 'custom' && customPeriod?.from && customPeriod?.to) {
+      const apiPeriod = apiCustomPeriodParams(customPeriod);
+      return { from: apiPeriod.from, to: apiPeriod.to };
+    }
+    return { hours: CABINET_RANGE_HOURS[timeRange] ?? CABINET_RANGE_HOURS['24h'] };
+  }
+
+  function appendCabinetRangeParams(params, timeRange, customPeriod) {
+    const rangeParams = cabinetRangeQueryParams(timeRange, customPeriod);
+    if (rangeParams.from && rangeParams.to) {
+      params.set('from', rangeParams.from);
+      params.set('to', rangeParams.to);
+    } else {
+      params.set('hours', String(rangeParams.hours));
+    }
+  }
+
+  function appendCabinetRangeBody(body, timeRange, customPeriod) {
+    if (timeRange === 'custom' && customPeriod?.from && customPeriod?.to) {
+      const apiPeriod = apiCustomPeriodParams(customPeriod);
+      body.range = 'custom';
+      body.from = apiPeriod.from;
+      body.to = apiPeriod.to;
+      return;
+    }
+    body.range = timeRange || '24h';
+  }
+
+  async function loadClients() {
+    const body = await requestJson('/api/clients');
+    return { data: body.data || [], meta: body.meta || null };
+  }
+
+  async function createClient(payload) {
+    return requestJson('/api/clients', { method: 'POST', body: payload });
+  }
+
+  async function updateClient(clientId, payload) {
+    return requestJson(`/api/clients/${encodeURIComponent(clientId)}`, {
+      method: 'PUT',
+      body: payload,
+    });
+  }
+
+  async function loadClientPrefixes(clientId) {
+    const body = await requestJson(`/api/clients/${encodeURIComponent(clientId)}/prefixes`);
+    return { data: body.data || [], meta: body.meta || null };
+  }
+
+  async function saveClientPrefixes(clientId, { items }) {
+    return requestJson(`/api/clients/${encodeURIComponent(clientId)}/prefixes`, {
+      method: 'PUT',
+      body: { items },
+    });
+  }
+
+  async function loadClientPorts(clientId) {
+    const body = await requestJson(`/api/clients/${encodeURIComponent(clientId)}/ports`);
+    return { data: body.data || [], meta: body.meta || null };
+  }
+
+  async function saveClientPorts(clientId, { items }) {
+    return requestJson(`/api/clients/${encodeURIComponent(clientId)}/ports`, {
+      method: 'PUT',
+      body: { items },
+    });
+  }
+
+  async function loadClientPrefixOptions({ q, limit } = {}) {
+    const params = new URLSearchParams();
+    if (q) params.set('q', q);
+    if (limit != null) params.set('limit', String(limit));
+    const qs = params.toString();
+    const body = await requestJson(`/api/clients/options/prefixes${qs ? `?${qs}` : ''}`);
+    return { data: body.data || [], meta: body.meta || null };
+  }
+
+  async function loadClientPortOptions({ q, limit } = {}) {
+    const params = new URLSearchParams();
+    if (q) params.set('q', q);
+    if (limit != null) params.set('limit', String(limit));
+    const qs = params.toString();
+    const body = await requestJson(`/api/clients/options/ports${qs ? `?${qs}` : ''}`);
+    return { data: body.data || [], meta: body.meta || null };
+  }
+
+  async function impersonateClient(clientId) {
+    return requestJson(`/api/clients/${encodeURIComponent(clientId)}/impersonate`, { method: 'POST' });
+  }
+
+  async function stopImpersonation() {
+    return requestJson('/api/auth/stop-impersonation', { method: 'POST' });
+  }
+
+  async function loadImpersonationAudit({ limit } = {}) {
+    const params = new URLSearchParams();
+    if (limit != null) params.set('limit', String(limit));
+    const qs = params.toString();
+    return requestJson(`/api/clients/impersonation/audit${qs ? `?${qs}` : ''}`);
+  }
+
+  async function loadUsersForClient(clientId) {
+    const params = new URLSearchParams({ clientId: String(clientId) });
+    const body = await requestJson(`/api/users?${params}`);
+    return { data: body.data || [], meta: body.meta || null };
+  }
+
+  async function loadCabinetExplorerSchema() {
+    const body = await getJson('/api/cabinet/explorer/schema', { widget: 'cabinet/explorer/schema' });
+    return body.data;
+  }
+
+  async function loadCabinetExplorerQuery({
+    metric = 'bps',
+    groupBy = [],
+    filters = [],
+    thresholds = [],
+    limit = 10,
+    offset = 0,
+    timeRange = '1h',
+    customPeriod,
+    granularity = 'auto',
+    includeSummary = true,
+    includeTimeseries = true,
+    includeBreakdowns = true,
+  } = {}) {
+    const finish = DashboardLog?.widgetStart?.('cabinet/explorer/query') ?? ((extra) => ({ loadMs: 0, ...extra }));
+    const body = {
+      metric,
+      groupBy,
+      filters,
+      thresholds: Array.isArray(thresholds) ? thresholds : [],
+      limit,
+      offset,
+      granularity,
+      includeSummary,
+      includeTimeseries,
+      includeBreakdowns,
+    };
+    appendCabinetRangeBody(body, timeRange, customPeriod);
+    try {
+      const res = await requestJson('/api/cabinet/explorer/query', { method: 'POST', body });
+      const metrics = finish({
+        source: 'clickhouse',
+        rows: res.meta?.rows,
+        serverMs: res.meta?.elapsedMs,
+      });
+      return {
+        source: 'clickhouse',
+        rows: Array.isArray(res.data?.rows) ? res.data.rows : [],
+        summary: res.data?.summary || null,
+        timeseries: Array.isArray(res.data?.timeseries) ? res.data.timeseries : [],
+        resultSeries: res.data?.resultSeries || null,
+        breakdowns: res.data?.breakdowns || {},
+        meta: res.meta || null,
+        loadMs: metrics.loadMs,
+        serverMs: res.meta?.elapsedMs ?? null,
+      };
+    } catch (err) {
+      const metrics = finish({ source: 'error', error: err.message });
+      return {
+        source: 'error',
+        rows: [],
+        summary: null,
+        timeseries: [],
+        resultSeries: null,
+        breakdowns: {},
+        error: err.message || LOAD_FAILED,
+        meta: null,
+        loadMs: metrics.loadMs,
+        serverMs: null,
+      };
+    }
+  }
+
+  async function loadCabinetExplorerFlows({
+    metric = 'bps',
+    groupBy = [],
+    filters = [],
+    thresholds = [],
+    limit = 10,
+    timeRange = '1h',
+    customPeriod,
+  } = {}) {
+    const finish = DashboardLog?.widgetStart?.('cabinet/explorer/flows') ?? ((extra) => ({ loadMs: 0, ...extra }));
+    const body = {
+      metric,
+      groupBy,
+      filters,
+      thresholds: Array.isArray(thresholds) ? thresholds : [],
+      limit,
+    };
+    appendCabinetRangeBody(body, timeRange, customPeriod);
+    try {
+      const res = await requestJson('/api/cabinet/explorer/flows', { method: 'POST', body });
+      const metrics = finish({
+        source: 'clickhouse',
+        rows: res.meta?.rows,
+        serverMs: res.meta?.elapsedMs,
+      });
+      return {
+        source: 'clickhouse',
+        rows: Array.isArray(res.data) ? res.data : [],
+        meta: res.meta || null,
+        loadMs: metrics.loadMs,
+        serverMs: res.meta?.elapsedMs ?? null,
+      };
+    } catch (err) {
+      const metrics = finish({ source: 'error', error: err.message });
+      return {
+        source: 'error',
+        rows: [],
+        error: err.message || LOAD_FAILED,
+        meta: null,
+        loadMs: metrics.loadMs,
+        serverMs: null,
+      };
+    }
+  }
+
+  async function exportCabinetExplorerCsv(queryBody = {}) {
+    const body = { ...queryBody };
+    if (body.from && body.to) {
+      body.range = 'custom';
+      delete body.timeRange;
+      delete body.customPeriod;
+    } else if (body.timeRange === 'custom' && body.customPeriod?.from && body.customPeriod?.to) {
+      const apiPeriod = apiCustomPeriodParams(body.customPeriod);
+      body.range = 'custom';
+      body.from = apiPeriod.from;
+      body.to = apiPeriod.to;
+    } else if (body.timeRange) {
+      body.range = body.timeRange;
+    }
+    delete body.customPeriod;
+    const res = await fetch('/api/cabinet/explorer/export', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'same-origin',
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) {
+      const errBody = await res.json().catch(() => ({}));
+      throw new Error(errBody.error || `HTTP ${res.status}`);
+    }
+    return res.blob();
+  }
+
   return {
     LOAD_FAILED,
     login,
     logout,
     loadCurrentUser,
     loadUsers,
+    loadUsersForClient,
     createUser,
     updateUser,
     deleteUser,
     changeUserPassword,
+    loadClients,
+    createClient,
+    updateClient,
+    loadClientPrefixes,
+    saveClientPrefixes,
+    loadClientPorts,
+    saveClientPorts,
+    loadClientPrefixOptions,
+    loadClientPortOptions,
+    impersonateClient,
+    stopImpersonation,
+    loadImpersonationAudit,
+    cabinetRangeQueryParams,
+    loadCabinetOverviewSeries,
+    loadCabinetOverviewCountries,
+    loadCabinetOverviewServices,
+    loadCabinetDnsDomains,
+    loadCabinetDnsQueries,
+    loadCabinetExplorerSchema,
+    loadCabinetExplorerQuery,
+    loadCabinetExplorerFlows,
+    exportCabinetExplorerCsv,
     loadRbacResources,
     loadRoles,
     loadRole,
@@ -2231,6 +2708,7 @@ const ApiClient = (() => {
     suggestDnsExplorerClientIps,
     suggestDnsExplorerServerIps,
     suggestDnsExplorerQtypes,
+    suggestDnsExplorerAnswers,
     loadDnsSources,
     loadDnsActivity,
     loadDnsTopDomains,

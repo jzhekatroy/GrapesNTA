@@ -13,6 +13,7 @@ const ALLOWED_ROLES = new Set([
   'internal',
   'customer_allocated',
   'customer_transit',
+  'remote',
 ]);
 
 function mapPrefixRow(r) {

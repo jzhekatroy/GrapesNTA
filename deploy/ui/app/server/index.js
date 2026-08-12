@@ -92,6 +92,7 @@ const {
   dnsExplorerSuggestClientIps,
   dnsExplorerSuggestServerIps,
   dnsExplorerSuggestQtypes,
+  dnsExplorerSuggestAnswers,
   parseDnsExplorerBody,
   parseDnsExplorerSuggestQuery,
 } = require('./dns-explorer');
@@ -208,12 +209,27 @@ const {
 } = require('./rbac/permissions');
 const { apiResourceGuard } = require('./rbac/middleware');
 const { createRbacRouter } = require('./rbac/routes');
+const { createCabinetGuard } = require('./cabinet/guard');
+const {
+  createCabinetRouter,
+  createClientsRouter,
+  stopImpersonationHandler,
+} = require('./cabinet/routes');
+const {
+  resolveCabinetContext,
+  cabinetPayload,
+  clearImpersonation,
+  getSessionRecord,
+} = require('./cabinet/context');
+const { ensureImpersonationAuditTable, writeImpersonationEvent } = require('./cabinet/impersonation-audit');
+const { fillClientDisplayName } = require('./cabinet/clients-lookup');
 
 const PORT = Number(process.env.PORT) || 3000;
 const app = express();
 const SESSION_COOKIE = 'grapes_session';
 const SESSION_TTL_MS = 24 * 60 * 60 * 1000;
 const sessions = new Map();
+const cabinetIsolationGuard = createCabinetGuard({ sessions });
 
 function envBool(name, fallback = false) {
   const v = process.env[name];
@@ -298,19 +314,26 @@ function createSession(user) {
   return sessionId;
 }
 
-async function sessionUserPayload(user) {
+async function sessionUserPayload(user, sessionRecord = null) {
   const [effectivePermissions, effectiveWritePermissions, permissions, role] = await Promise.all([
     buildEffectivePermissions(user),
     buildEffectiveWritePermissions(user),
     userPermissions(user),
     loadRole(user.roleId),
   ]);
+
+  const cabinet = await fillClientDisplayName(
+    cabinetPayload(resolveCabinetContext(user, sessionRecord)),
+  );
+
   return {
     id: user.id,
     username: user.username,
     fullName: user.fullName,
     roleId: user.roleId,
     forcePasswordChange: user.forcePasswordChange,
+    active: user.active !== false,
+    clientId: user.clientId || '',
     updatedAt: user.updatedAt ?? null,
     permissions,
     effectivePermissions,
@@ -320,6 +343,7 @@ async function sessionUserPayload(user) {
       name: role.name,
       displayName: role.displayName,
     } : null,
+    cabinet,
   };
 }
 
@@ -340,7 +364,7 @@ async function getSessionUser(req) {
     sessions.delete(sessionId);
     return null;
   }
-  return { user, sessionId };
+  return { user, sessionId, session };
 }
 
 function sendApiError(res, err, fallbackStatus = 502) {
@@ -423,17 +447,41 @@ app.post('/api/auth/login', async (req, res) => {
     }
     const sessionId = createSession(user);
     setSessionCookie(res, sessionId);
-    res.json({ ok: true, user: await sessionUserPayload(user) });
+    res.json({ ok: true, user: await sessionUserPayload(user, sessions.get(sessionId)) });
   } catch (err) {
     sendApiError(res, err);
   }
 });
 
 app.post('/api/auth/logout', async (req, res) => {
-  const cookies = parseCookies(req.headers.cookie);
-  if (cookies[SESSION_COOKIE]) sessions.delete(cookies[SESSION_COOKIE]);
-  clearSessionCookie(res);
-  res.json({ ok: true });
+  try {
+    const cookies = parseCookies(req.headers.cookie);
+    const sessionId = cookies[SESSION_COOKIE];
+    if (sessionId) {
+      const sessionRecord = getSessionRecord(sessions, sessionId);
+      if (sessionRecord?.impersonation) {
+        const ended = clearImpersonation(sessionRecord, 'logout');
+        const user = await getUserById(sessionRecord.userId).catch(() => null);
+        if (ended && user) {
+          await writeImpersonationEvent({
+            auditId: ended.auditId,
+            sessionAuditId: ended.auditId,
+            event: 'end',
+            actorUserId: user.id,
+            actorUsername: user.username,
+            clientId: ended.clientId,
+            clientDisplayName: ended.clientDisplayName,
+            reason: 'logout',
+          }).catch(() => {});
+        }
+      }
+      sessions.delete(sessionId);
+    }
+    clearSessionCookie(res);
+    res.json({ ok: true });
+  } catch (err) {
+    sendApiError(res, err);
+  }
 });
 
 app.get('/api/auth/me', async (req, res) => {
@@ -443,7 +491,22 @@ app.get('/api/auth/me', async (req, res) => {
       res.status(401).json({ error: 'Требуется авторизация' });
       return;
     }
-    res.json({ user: await sessionUserPayload(session.user) });
+    res.json({ user: await sessionUserPayload(session.user, session.session) });
+  } catch (err) {
+    sendApiError(res, err);
+  }
+});
+
+app.post('/api/auth/stop-impersonation', async (req, res) => {
+  try {
+    const session = await getSessionUser(req);
+    if (!session) {
+      res.status(401).json({ error: 'Требуется авторизация' });
+      return;
+    }
+    req.user = session.user;
+    req.sessionId = session.sessionId;
+    await stopImpersonationHandler(req, res, { sessions, reason: 'stop' });
   } catch (err) {
     sendApiError(res, err);
   }
@@ -451,8 +514,11 @@ app.get('/api/auth/me', async (req, res) => {
 
 app.use('/api', requireSession);
 app.use('/api', apiResourceGuard);
+app.use('/api', cabinetIsolationGuard);
 
 app.use('/api/rbac', createRbacRouter());
+app.use('/api/cabinet', createCabinetRouter({ sessions }));
+app.use('/api/clients', createClientsRouter({ sessions }));
 
 app.get('/api/dashboard/collectors', async (_req, res) => {
   try {
@@ -1473,6 +1539,17 @@ app.get('/api/dns-explorer/suggest/qtypes', async (req, res) => {
   }
 });
 
+app.get('/api/dns-explorer/suggest/answers', async (req, res) => {
+  try {
+    const ctx = parseDnsExplorerSuggestQuery(req.query);
+    const spec = dnsExplorerSuggestAnswers(ctx, ctx.q, 50);
+    const result = await runNamed(() => spec, { name: 'dns-explorer/suggest/answers' });
+    res.json(result);
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
 app.get('/api/monitoring/parameters', async (_req, res) => {
   try {
     const result = await runNamed(() => monitoringParameters(), { name: 'monitoring/parameters' });
@@ -1569,9 +1646,10 @@ app.put('/api/monitoring/bounds', async (req, res) => {
   }
 });
 
-app.get('/api/users', async (_req, res) => {
+app.get('/api/users', async (req, res) => {
   try {
-    res.json(await listUsers());
+    const clientId = String(req.query.clientId ?? req.query.client_id ?? '').trim() || undefined;
+    res.json(await listUsers({ clientId }));
   } catch (err) {
     sendApiError(res, err);
   }
@@ -2401,12 +2479,17 @@ app.listen(PORT, () => {
           if (rbac.writePermissionsPatched) {
             console.log(`RBAC: patched ${rbac.writePermissionsPatched} write permission row(s).`);
           }
+          if (rbac.clientPermissionsSynced) {
+            console.log(`RBAC: synced ${rbac.clientPermissionsSynced} Client permission row(s).`);
+          }
           console.log('RBAC ready.');
+          await ensureImpersonationAuditTable();
+          console.log('Cabinet impersonation audit ready.');
           await ensureObservationsStore();
           console.log('Observations store ready (ClickHouse).');
         })
         .catch((err) => {
-          console.error(`Users/RBAC/observations initialization failed: ${err.message}`);
+          console.error(`Users/RBAC/observations/cabinet initialization failed: ${err.message}`);
         });
     } else {
       console.warn(`ClickHouse недоступен: ${s.error}`);

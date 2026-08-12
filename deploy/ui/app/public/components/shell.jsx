@@ -4,62 +4,79 @@ const { useState, useEffect, useLayoutEffect, useRef, useMemo } = React;
 
 const NAV = [
   {
-    section: 'Обзор',
+    id: 'overview',
+    section: 'Главное',
     items: [
       { id: 'dashboard', label: 'Обзор', icon: 'dashboard' },
-      // { id: 'monitoring', label: 'Мониторинг', icon: 'clock' },
       { id: 'observations', label: 'Наблюдения', icon: 'query' },
       { id: 'dns', label: 'DNS', icon: 'globe' },
     ],
   },
   {
+    id: 'traffic',
     section: 'Анализ трафика',
     items: [
       { id: 'explorer', label: 'Разбор трафика', icon: 'explorer' },
-      { id: 'dns-explorer', label: 'Разбор DNS', icon: 'globe' },
+      { id: 'dns-explorer', label: 'Разбор DNS', icon: 'search' },
       { id: 'top', label: 'Топ ASN', icon: 'top' },
     ],
   },
   {
+    id: 'data',
     section: 'Сбор данных',
-    group: {
-      id: 'data',
-      label: 'Сбор данных',
-      icon: 'collectors',
-      children: [
-        { id: 'collectors', label: 'Коллекторы' },
-        { id: 'flow-exclusions', label: 'Исключения из статистики' },
-        { id: 'snmp', label: 'SNMP' },
-        { id: 'bmp', label: 'BMP / BGP' },
-      ],
-    },
+    icon: 'collectors',
+    items: [
+      { id: 'collectors', label: 'Коллекторы', icon: 'collectors' },
+      { id: 'snmp', label: 'SNMP', icon: 'network' },
+      { id: 'bmp', label: 'BMP / BGP', icon: 'router' },
+    ],
   },
   {
+    id: 'netmodel',
     section: 'Модель сети',
-    group: {
-      id: 'netmodel',
-      label: 'Модель сети',
-      icon: 'refs',
-      children: [
-        { id: 'cidr', label: 'Собственные сети (CIDR)' },
-        { id: 'dns-resolvers', label: 'DNS-резолверы' },
-        { id: 'vlan', label: 'VLAN' },
-        { id: 'entities', label: 'Владельцы L3' },
-        { id: 'interface-roles', label: 'Порты оборудования' },
-        { id: 'port-services', label: 'Сервисы и порты приложений' },
-      ],
-    },
+    icon: 'refs',
+    items: [
+      { id: 'traffic-classification', label: 'Классификация трафика', icon: 'filter' },
+      { id: 'cidr', label: 'Моя сеть', icon: 'cidr' },
+      { id: 'dns-resolvers', label: 'DNS-резолверы', icon: 'db' },
+      { id: 'interface-roles', label: 'Порты оборудования', icon: 'link' },
+      { id: 'port-services', label: 'Сервисы и порты приложений', icon: 'flow' },
+    ],
   },
   {
+    id: 'admin',
     section: 'Администрирование',
     items: [
-      { id: 'users', label: 'Пользователи и права', icon: 'users' },
-      { id: 'smtp', label: 'Почта (SMTP)', icon: 'globe' },
-      { id: 'diagnostics', label: 'Диагностика', icon: 'query' },
+      { id: 'users', label: 'Пользователи и права', icon: 'shield' },
+      { id: 'clients', label: 'Клиенты', icon: 'users' },
+      { id: 'smtp', label: 'Почта (SMTP)', icon: 'export' },
       { id: 'ttl', label: 'Сроки хранения', icon: 'clock' },
     ],
   },
 ];
+
+const CABINET_NAV = [
+  {
+    id: 'cabinet',
+    section: 'Кабинет',
+    items: [
+      { id: 'dashboard', label: 'Обзор', icon: 'dashboard' },
+      { id: 'explorer', label: 'Разбор трафика', icon: 'explorer' },
+      { id: 'dns', label: 'DNS', icon: 'globe' },
+    ],
+  },
+];
+
+const CABINET_PAGE_IDS = new Set(['dashboard', 'explorer', 'dns']);
+
+function isCabinetMode(user) {
+  const mode = user?.cabinet?.mode;
+  return mode === 'client' || mode === 'impersonation';
+}
+
+function isImpersonating(user) {
+  return user?.cabinet?.mode === 'impersonation';
+}
 
 const PAGES_WITHOUT_HEADER_FILTERS = new Set([
   'explorer',
@@ -68,6 +85,7 @@ const PAGES_WITHOUT_HEADER_FILTERS = new Set([
   'monitoring',
   'diagnostics',
   'users',
+  'clients',
   'collectors',
   'snmp',
   'bmp',
@@ -75,6 +93,7 @@ const PAGES_WITHOUT_HEADER_FILTERS = new Set([
   'cidr',
   'dns-resolvers',
   'interface-roles',
+  'traffic-classification',
   'port-services',
   'flow-exclusions',
   'vlan',
@@ -87,86 +106,72 @@ function hasNavPermission(effectivePermissions, pageId) {
   if (pageId === 'snmp') return !!(effectivePermissions.snmp || effectivePermissions.collectors);
   // SMTP API и доступ завязаны на diagnostics (только администратор).
   if (pageId === 'smtp') return !!effectivePermissions.diagnostics;
+  // «Моя сеть» — общая оболочка для cidr / entities / vlan.
+  if (pageId === 'cidr') {
+    return !!(effectivePermissions.cidr || effectivePermissions.entities || effectivePermissions.vlan);
+  }
   return !!effectivePermissions[pageId];
 }
+
+const DEFAULT_OPEN_SECTIONS = new Set(['overview', 'traffic']);
 
 function filterNav(nav, effectivePermissions) {
   if (!effectivePermissions) return nav;
   return nav.map((sec) => {
-    if (sec.items) {
-      const items = sec.items.filter((it) => hasNavPermission(effectivePermissions, it.id));
-      if (!items.length && !sec.group) return null;
-      return { ...sec, items };
-    }
-    if (sec.group) {
-      const children = sec.group.children.filter((c) => hasNavPermission(effectivePermissions, c.id));
-      if (!children.length) return null;
-      return { ...sec, group: { ...sec.group, children } };
-    }
-    return sec;
+    const items = sec.items.filter((it) => hasNavPermission(effectivePermissions, it.id));
+    if (!items.length) return null;
+    return { ...sec, items };
   }).filter(Boolean);
 }
 
 /* =============== Sidebar =============== */
-function Sidebar({ current, onNavigate, collapsed, effectivePermissions }) {
-  const visibleNav = useMemo(() => filterNav(NAV, effectivePermissions), [effectivePermissions]);
-  const [openGroups, setOpenGroups] = useState(() => {
+function Sidebar({ current, onNavigate, collapsed, effectivePermissions, cabinetMode, clientDisplayName }) {
+  const visibleNav = useMemo(
+    () => (cabinetMode ? CABINET_NAV : filterNav(NAV, effectivePermissions)),
+    [cabinetMode, effectivePermissions],
+  );
+  const [openSections, setOpenSections] = useState(() => {
     const o = {};
-    visibleNav.forEach(s => {
-      if (s.group) o[s.group.id] = s.group.children.some(c => c.id === current);
+    visibleNav.forEach((sec) => {
+      // В кабинете одна секция — держим открытой. В админке по умолчанию
+      // только «Главное» и «Анализ трафика».
+      o[sec.id] = cabinetMode || DEFAULT_OPEN_SECTIONS.has(sec.id);
     });
-    if (!o.data && (current === 'collectors' || current === 'flow-exclusions' || current === 'snmp' || current === 'bmp')) o.data = true;
-    if (!o.netmodel && (current === 'entities' || current === 'cidr' || current === 'dns-resolvers' || current === 'vlan' || current === 'port-services' || current === 'interface-roles' || current === 'routers')) o.netmodel = true;
-    o.data = o.data ?? true;
-    o.netmodel = o.netmodel ?? true;
     return o;
   });
   useEffect(() => {
-    if (current === 'collectors' || current === 'flow-exclusions' || current === 'snmp' || current === 'bmp') setOpenGroups((s) => ({ ...s, data: true }));
-    if (current === 'entities' || current === 'cidr' || current === 'dns-resolvers' || current === 'vlan' || current === 'port-services' || current === 'interface-roles' || current === 'routers') {
-      setOpenGroups((s) => ({ ...s, netmodel: true }));
-    }
-  }, [current]);
+    visibleNav.forEach((sec) => {
+      if (sec.items.some((it) => it.id === current)) {
+        setOpenSections((s) => ({ ...s, [sec.id]: true }));
+      }
+    });
+  }, [current, visibleNav]);
 
-  const toggle = (gid) => setOpenGroups((s) => ({ ...s, [gid]: !s[gid] }));
+  const toggleSection = (sid) => setOpenSections((s) => ({ ...s, [sid]: !s[sid] }));
 
   return (
     <aside className="sidebar">
-      <div className="sidebar__brand" onClick={() => onNavigate('dashboard')} style={{cursor: 'pointer'}}>
+      <div className="sidebar__brand" onClick={() => onNavigate('dashboard')} style={{cursor: 'pointer'}} title={cabinetMode ? clientDisplayName : undefined}>
         <div className="sidebar__logo">
           <GrapesGlyph size={18} />
         </div>
         <div className="sidebar__wordmark">
-          <span className="sidebar__wordmark-name">grapes</span>
-          <span className="sidebar__wordmark-dot">.</span>
-          <small>NTA</small>
+          <span className="sidebar__wordmark-name">{cabinetMode ? (clientDisplayName || 'кабинет') : 'grapes'}</span>
+          {!cabinetMode && <span className="sidebar__wordmark-dot">.</span>}
+          <small>{cabinetMode ? 'кабинет' : 'NTA'}</small>
         </div>
       </div>
       <nav className="sidebar__nav">
         {visibleNav.map((sec) => (
-          <React.Fragment key={sec.section}>
-            <div className="sidebar__section">{sec.section}</div>
-            {sec.items && sec.items.map((it) => (
-              <NavItem
-                key={it.id}
-                item={it}
-                active={current === it.id}
-                onClick={() => onNavigate(it.id)}
-                collapsed={collapsed}
-              />
-            ))}
-            {sec.group && (
-              <NavGroup
-                key={sec.group.id}
-                group={sec.group}
-                open={openGroups[sec.group.id]}
-                onToggle={() => toggle(sec.group.id)}
-                current={current}
-                onNavigate={onNavigate}
-                collapsed={collapsed}
-              />
-            )}
-          </React.Fragment>
+          <NavSection
+            key={sec.id}
+            sec={sec}
+            open={openSections[sec.id] ?? false}
+            onToggle={() => toggleSection(sec.id)}
+            current={current}
+            onNavigate={onNavigate}
+            collapsed={collapsed}
+          />
         ))}
       </nav>
       <button
@@ -184,37 +189,84 @@ function Sidebar({ current, onNavigate, collapsed, effectivePermissions }) {
   );
 }
 
-function NavItem({ item, active, onClick, collapsed }) {
-  return (
-    <div className={`nav-item ${active ? 'nav-item--active' : ''}`} onClick={onClick} title={collapsed ? item.label : undefined}>
+function NavItem({ item, active, onNavigate, collapsed }) {
+  const content = (
+    <>
       <Icon name={item.icon} size={18} className="nav-item__icon" />
       <span className="nav-item__label">{item.label}</span>
       {item.badge && <span className="nav-item__badge">{item.badge}</span>}
-      {item.soon && <span className="tag" style={{fontSize: 10, padding: '1px 6px'}}>скоро</span>}
-    </div>
+      {item.soon && <span className="tag" style={{ fontSize: 10, padding: '1px 6px' }}>скоро</span>}
+    </>
+  );
+
+  if (item.soon) {
+    return (
+      <div className="nav-item" title={collapsed ? item.label : undefined}>
+        {content}
+      </div>
+    );
+  }
+
+  // <a href="#…"> даёт «Открыть в новой вкладке» и клик колёсиком.
+  // Обычный левый клик без модификаторов оставляем на SPA-navigate.
+  const handleClick = (e) => {
+    if (e.defaultPrevented) return;
+    if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+    e.preventDefault();
+    onNavigate(item.id);
+  };
+
+  return (
+    <a
+      href={`#${item.id}`}
+      className={`nav-item ${active ? 'nav-item--active' : ''}`}
+      onClick={handleClick}
+      title={collapsed ? item.label : undefined}
+      aria-current={active ? 'page' : undefined}
+    >
+      {content}
+    </a>
   );
 }
 
-function NavGroup({ group, open, onToggle, current, onNavigate, collapsed }) {
-  const activeChild = group.children.some((c) => c.id === current);
+function NavSection({ sec, open, onToggle, current, onNavigate, collapsed }) {
+  const hasActive = sec.items.some((it) => it.id === current);
+
+  if (collapsed) {
+    return (
+      <>
+        {sec.items.map((it) => (
+          <NavItem
+            key={it.id}
+            item={it}
+            active={current === it.id}
+            onNavigate={onNavigate}
+            collapsed={collapsed}
+          />
+        ))}
+      </>
+    );
+  }
+
   return (
-    <div className={`nav-group ${open ? 'nav-group--open' : ''}`}>
-      <div className={`nav-group__head ${activeChild && !open ? 'nav-item--active' : ''}`} onClick={onToggle} title={collapsed ? group.label : undefined}>
-        <Icon name={group.icon} size={18} className="nav-item__icon" />
-        <span className="nav-item__label">{group.label}</span>
-        <Icon name="chevR" size={14} className="nav-group__chev" />
+    <div className={`nav-section ${open ? 'nav-section--open' : ''}`}>
+      <div
+        className={`nav-section__head ${hasActive && !open ? 'nav-section__head--active' : ''}`}
+        onClick={onToggle}
+      >
+        {sec.icon && <Icon name={sec.icon} size={16} className="nav-section__icon" />}
+        <span className="nav-section__label">{sec.section}</span>
+        <Icon name="chevR" size={14} className="nav-section__chev" />
       </div>
-      <div className="nav-group__body">
-        {group.children.map((c) => (
-          <div
-            key={c.id}
-            className={`nav-sub ${current === c.id ? 'nav-sub--active' : ''}`}
-            onClick={() => !c.soon && onNavigate(c.id)}
-            style={c.soon ? {opacity: 0.5, cursor: 'default'} : null}
-          >
-            <span>{c.label}</span>
-            {c.soon && <span className="tag" style={{fontSize: 10, padding: '1px 6px', marginLeft: 'auto'}}>скоро</span>}
-          </div>
+      <div className="nav-section__body">
+        {sec.items.map((it) => (
+          <NavItem
+            key={it.id}
+            item={it}
+            active={current === it.id}
+            onNavigate={onNavigate}
+            collapsed={collapsed}
+          />
         ))}
       </div>
     </div>
@@ -301,18 +353,22 @@ function UserAccountMenu({ currentUser, pageTitles, hiddenPageIds }) {
   );
 }
 
-function Header({ current, onNavigate, onToggleSidebar, currentUser, onLogout, onRefresh, theme, onToggleTheme, timeRange, onTimeRangeChange, customPeriod, onCustomPeriodChange, chartZoomDepth, onChartZoomReset, directions, onDirectionsChange, collectorFilter, onCollectorFilterChange, pageTitles, hiddenPageIds, displayTimezone, timezonePref, onTimezonePrefChange, monitoringDeviationsTotal, monitoringDeviationsError }) {
+function Header({ current, onNavigate, onToggleSidebar, currentUser, onLogout, onRefresh, theme, onToggleTheme, timeRange, onTimeRangeChange, customPeriod, onCustomPeriodChange, chartZoomDepth, onChartZoomReset, directions, onDirectionsChange, collectorFilter, onCollectorFilterChange, pageTitles, hiddenPageIds, displayTimezone, timezonePref, onTimezonePrefChange, monitoringDeviationsTotal, monitoringDeviationsError, cabinetMode, clientDisplayName, onStopImpersonation }) {
   const titles = pageTitles || PAGE_TITLES || {};
   const meta = titles[current] || titles.dashboard || { title: current, section: '' };
-  const hidePageFilters = PAGES_WITHOUT_HEADER_FILTERS.has(current);
-  const hideDirectionFilter = current === 'dns';
+  const hidePageFilters = cabinetMode
+    ? current === 'explorer'
+    : PAGES_WITHOUT_HEADER_FILTERS.has(current);
+  const hideDirectionFilter = current === 'dns' || cabinetMode;
+  const hideCollectorFilter = cabinetMode;
+  const sectionLabel = cabinetMode ? (clientDisplayName || 'Кабинет клиента') : meta.section;
   return (
     <header className="header">
       <button className="icon-btn" onClick={onToggleSidebar} title="Меню">
         <Icon name="menu" size={20} />
       </button>
       <div className="header__breadcrumb">
-        <span>{meta.section}</span>
+        <span>{sectionLabel}</span>
         <span className="crumb-sep">/</span>
         <span className="crumb-cur">{meta.title}</span>
       </div>
@@ -326,10 +382,12 @@ function Header({ current, onNavigate, onToggleSidebar, currentUser, onLogout, o
                   onDirectionsChange={onDirectionsChange}
                 />
               )}
-              <CollectorFilter
-                collectorFilter={collectorFilter}
-                onCollectorFilterChange={onCollectorFilterChange}
-              />
+              {!hideCollectorFilter && (
+                <CollectorFilter
+                  collectorFilter={collectorFilter}
+                  onCollectorFilterChange={onCollectorFilterChange}
+                />
+              )}
               <TimeFilter
                 timeRange={timeRange}
                 onTimeRangeChange={onTimeRangeChange}
@@ -379,6 +437,9 @@ function Header({ current, onNavigate, onToggleSidebar, currentUser, onLogout, o
         </button>
         <span className="hr-v" />
         <UserAccountMenu currentUser={currentUser} pageTitles={pageTitles} hiddenPageIds={hiddenPageIds} />
+        {isImpersonating(currentUser) && onStopImpersonation && (
+          <Button kind="ghost" size="sm" onClick={onStopImpersonation}>Выйти из кабинета</Button>
+        )}
         <button className="icon-btn tt" data-tt="Выйти" onClick={onLogout}>
           <Icon name="logOut" size={18} />
         </button>
@@ -407,7 +468,7 @@ const TRAFFIC_DIRECTIONS = [
   { id: 'outgoing', label: 'Исходящий', color: '#6972F0' },
   { id: 'transit', label: 'Транзит', color: '#F0B400' },
   { id: 'internal', label: 'Внутренний', color: '#A4ADFF' },
-  { id: 'unclassified', label: 'Неклассифицировано', color: '#7F7F9D' },
+  { id: 'unclassified', label: 'Неразмеченный', color: '#7F7F9D' },
 ];
 
 function defaultDirectionsEnabled() {
@@ -1578,13 +1639,59 @@ function buildDnsExplorerShareUrl({
 
 let PAGE_TITLES = {};
 
+function ImpersonationBanner({ cabinet, onStop, onRefreshUser }) {
+  const [now, setNow] = useState(Date.now());
+  const expiresAt = Number(cabinet?.impersonation?.expiresAt) || 0;
+  const startedAt = cabinet?.impersonation?.startedAt;
+  const clientName = cabinet?.clientDisplayName || cabinet?.clientId || 'клиент';
+
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, []);
+
+  useEffect(() => {
+    if (!expiresAt) return undefined;
+    if (expiresAt <= now) {
+      onRefreshUser?.();
+      return undefined;
+    }
+    const delay = Math.max(expiresAt - now, 0);
+    const timer = setTimeout(() => onRefreshUser?.(), delay);
+    return () => clearTimeout(timer);
+  }, [expiresAt, now, onRefreshUser]);
+
+  const remainingMs = Math.max(expiresAt - now, 0);
+  const mins = Math.floor(remainingMs / 60000);
+  const secs = Math.floor((remainingMs % 60000) / 1000);
+  const timerLabel = `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+
+  return (
+    <div className="impersonation-banner" role="status">
+      <div className="impersonation-banner__content">
+        <Icon name="users" size={16} />
+        <span>
+          Просмотр кабинета «{clientName}» · только чтение · осталось {timerLabel}
+        </span>
+        {startedAt && (
+          <span className="impersonation-banner__meta">
+            с {formatUserDateTime(startedAt)}
+          </span>
+        )}
+      </div>
+      <Button kind="primary" size="sm" onClick={onStop}>Выйти из кабинета</Button>
+    </div>
+  );
+}
+
 function setPageTitles(map) {
   PAGE_TITLES = map || {};
   window.PAGE_TITLES = PAGE_TITLES;
 }
 
 Object.assign(window, {
-  Sidebar, Header, NAV, PAGE_TITLES, setPageTitles, GrapesGlyph,
+  Sidebar, Header, NAV, CABINET_NAV, CABINET_PAGE_IDS, PAGE_TITLES, setPageTitles, GrapesGlyph,
+  isCabinetMode, isImpersonating, ImpersonationBanner,
   TIME_RANGE_OPTIONS, TIMEZONE_PRESETS, TRAFFIC_DIRECTIONS, defaultDirectionsEnabled,
   defaultCustomPeriod, formatCustomPeriodLabel, validateCustomPeriod, validateExplorerCustomPeriod, EXPLORER_MAX_RANGE_DAYS, timeRangeLabel,
   toDatetimeLocalValue, dnsBucketSecondsFromMode, explorerGranularityBucketSeconds,

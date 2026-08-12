@@ -66,7 +66,10 @@ function FunnelLine({ line, onNavigate }) {
           <button
             type="button"
             className="completeness-funnel-link"
-            onClick={() => onNavigate('flow-exclusions')}
+            onClick={() => {
+              sessionStorage.setItem('grapes-collectors-tab', 'exclusions');
+              onNavigate('collectors');
+            }}
           >
             Исключения потоков
           </button>

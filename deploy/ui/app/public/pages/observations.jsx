@@ -134,7 +134,7 @@ function TimezonePicker({ value, onChange }) {
             right: 0,
             maxHeight: 240,
             overflowY: 'auto',
-            background: 'var(--surf-0, #fff)',
+            background: 'var(--surf-0)',
             border: '1px solid var(--bd-soft, #ddd)',
             borderRadius: 6,
             boxShadow: '0 8px 20px rgba(0,0,0,.14)',
@@ -785,13 +785,13 @@ function ObservationLiveTile({
       </div>
 
       {error && (
-        <div style={{ color: 'crimson', font: 'var(--pv-text-body-3)' }}>{error}</div>
+        <div style={{ color: 'var(--st-critical)', font: 'var(--pv-text-body-3)' }}>{error}</div>
       )}
       {(item.warnings || []).map((w) => (
-        <div key={w} style={{ color: 'var(--fg-warning, #b78103)', font: 'var(--pv-text-body-3)' }}>{w}</div>
+        <div key={w} style={{ color: 'var(--fg-warning)', font: 'var(--pv-text-body-3)' }}>{w}</div>
       ))}
       {chartWidget?.warning && (
-        <div style={{ color: 'var(--fg-warning, #b78103)', font: 'var(--pv-text-body-3)' }}>
+        <div style={{ color: 'var(--fg-warning)', font: 'var(--pv-text-body-3)' }}>
           {chartWidget.warning}
         </div>
       )}
@@ -932,7 +932,7 @@ function ObservationLiveTile({
               <div style={{ color: 'var(--fg-secondary)', font: 'var(--pv-text-body-3)' }}>
                 {`Отчёт за: ${reportPeriodLabel(item)} — период берётся из настроек отчёта, а не из time range плитки.`}
               </div>
-              {runsError && <div style={{ color: 'crimson', font: 'var(--pv-text-body-3)' }}>{runsError}</div>}
+              {runsError && <div style={{ color: 'var(--st-critical)', font: 'var(--pv-text-body-3)' }}>{runsError}</div>}
               {!runs.length && !runsError && (
                 <div style={{ color: 'var(--fg-secondary)', font: 'var(--pv-text-body-3)' }}>Пока нет запусков</div>
               )}
@@ -994,233 +994,6 @@ function fmtDiagTime(iso) {
   }
 }
 
-function workerStatusMeta(worker) {
-  if (!worker) return { label: 'неизвестно', color: 'var(--fg-muted)' };
-  if (worker.alive) return { label: 'работает', color: '#1a7f37' };
-  if (worker.status === 'stale') return { label: 'нет heartbeat', color: '#b78103' };
-  return { label: 'остановлен', color: 'crimson' };
-}
-
-function ObservationDiagnosticsPanel() {
-  const [data, setData] = useState(null);
-  const [error, setError] = useState('');
-  const [loading, setLoading] = useState(true);
-  const [expandedId, setExpandedId] = useState(null);
-
-  const reload = useCallback((opts = { initial: false }) => {
-    if (opts.initial) setLoading(true);
-    ApiClient.loadObservationAnalyticsDiagnostics()
-      .then((body) => {
-        setData(body);
-        setError('');
-        setLoading(false);
-      })
-      .catch((e) => {
-        setError(e.message);
-        setLoading(false);
-      });
-  }, []);
-
-  useEffect(() => {
-    reload({ initial: true });
-    // Diagnostics should refresh often — worker health is the point of this tab.
-    const t = setInterval(() => reload({ initial: false }), 15000);
-    return () => clearInterval(t);
-  }, [reload]);
-
-  const worker = data?.worker;
-  const status = workerStatusMeta(worker);
-
-  return (
-    <div className="col" style={{ gap: 14 }}>
-      <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
-        <div style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-secondary)' }}>
-          Состояние analytics loop в `grapes-worker` и запросы к ClickHouse.
-          Полная диагностика (rollups + проблемы): Администрирование → Диагностика.
-        </div>
-        <button type="button" className="btn" onClick={() => reload({ initial: false })} disabled={loading}>
-          {loading && !data ? 'загрузка…' : 'Обновить'}
-        </button>
-      </div>
-
-      {error && (
-        <div style={{ padding: 10, borderRadius: 8, background: 'rgba(220,50,50,.12)', color: 'crimson' }}>
-          {error}
-        </div>
-      )}
-
-      {worker && !worker.alive && (
-        <div style={{
-          padding: 12,
-          borderRadius: 8,
-          background: 'rgba(183,129,3,.12)',
-          color: 'var(--fg-primary)',
-          font: 'var(--pv-text-body-3)',
-        }}>
-          Воркер analytics сейчас не работает ({status.label}
-          {worker.heartbeatAgeSec != null ? `, последний heartbeat ${worker.heartbeatAgeSec}с назад` : ''}
-          ). Запуск: <span className="mono">GRAPES_ANALYTICS_WORKER=1 node server/analytics.js loop</span>
-        </div>
-      )}
-
-      <Card title="Воркер">
-        <div className="grid grid--auto-fit-md grid--gap-sm" style={{ font: 'var(--pv-text-body-3)' }}>
-          <div>
-            <div style={{ color: 'var(--fg-muted)' }}>Статус</div>
-            <div style={{ font: 'var(--pv-text-body-2-bold)', color: status.color }}>{status.label}</div>
-            {worker?.statusReason && (
-              <div style={{ color: 'var(--fg-secondary)', marginTop: 2 }}>{worker.statusReason}</div>
-            )}
-          </div>
-          <div>
-            <div style={{ color: 'var(--fg-muted)' }}>Источник</div>
-            <div className="mono">
-              {worker?.source === 'clickhouse' ? 'ClickHouse' : worker?.source === 'file' ? 'локальный файл' : (worker?.source || '—')}
-            </div>
-            {data?.storePath && (
-              <div style={{ color: 'var(--fg-secondary)', marginTop: 2, wordBreak: 'break-all' }}>{data.storePath}</div>
-            )}
-          </div>
-          <div>
-            <div style={{ color: 'var(--fg-muted)' }}>Host</div>
-            <div className="mono">{worker?.host || '—'}</div>
-          </div>
-          <div>
-            <div style={{ color: 'var(--fg-muted)' }}>PID</div>
-            <div className="mono">{worker?.pid ?? '—'}</div>
-          </div>
-          <div>
-            <div style={{ color: 'var(--fg-muted)' }}>Последний heartbeat</div>
-            <div>{fmtDiagTime(worker?.lastHeartbeatAt)}</div>
-            {worker?.heartbeatAgeSec != null && (
-              <div style={{ color: 'var(--fg-secondary)' }}>{worker.heartbeatAgeSec}с назад</div>
-            )}
-          </div>
-          <div>
-            <div style={{ color: 'var(--fg-muted)' }}>Последний tick</div>
-            <div>{fmtDiagTime(worker?.lastTickAt)}</div>
-            {worker?.lastTickMs != null && (
-              <div style={{ color: 'var(--fg-secondary)' }}>{worker.lastTickMs} мс</div>
-            )}
-          </div>
-          <div>
-            <div style={{ color: 'var(--fg-muted)' }}>Запущен</div>
-            <div>{fmtDiagTime(worker?.startedAt)}</div>
-          </div>
-          <div>
-            <div style={{ color: 'var(--fg-muted)' }}>Ошибка tick</div>
-            <div style={{ color: worker?.lastError ? 'crimson' : 'inherit' }}>{worker?.lastError || '—'}</div>
-          </div>
-        </div>
-        {data?.lastTick && (
-          <pre style={{
-            marginTop: 12,
-            padding: 10,
-            borderRadius: 8,
-            background: 'var(--surf-2)',
-            font: 'var(--pv-text-body-3)',
-            overflow: 'auto',
-            maxHeight: 180,
-          }}>
-            {JSON.stringify(data.lastTick, null, 2)}
-          </pre>
-        )}
-      </Card>
-
-      <Card title="Наблюдения (rollup)">
-        <table style={{ width: '100%', borderCollapse: 'collapse', font: 'var(--pv-text-body-3)' }}>
-          <thead>
-            <tr>
-              <th style={{ textAlign: 'left', padding: 6 }}>Наблюдение</th>
-              <th style={{ textAlign: 'left', padding: 6 }}>materialize</th>
-              <th style={{ textAlign: 'left', padding: 6 }}>cursor</th>
-              <th style={{ textAlign: 'right', padding: 6 }}>lag</th>
-              <th style={{ textAlign: 'left', padding: 6 }}>max minute CH (`observation_rollups_5m`)</th>
-            </tr>
-          </thead>
-          <tbody>
-            {(data?.jobs || []).map((j) => (
-              <tr key={j.id}>
-                <td style={{ padding: 6 }}>{j.name}</td>
-                <td style={{ padding: 6 }} className="mono">{j.materialize?.status || '—'}</td>
-                <td style={{ padding: 6 }} className="mono">{fmtDiagTime(j.materialize?.cursorMinute)}</td>
-                <td style={{ padding: 6, textAlign: 'right' }} className="mono">{j.materialize?.lagSeconds ?? '—'}</td>
-                <td style={{ padding: 6 }} className="mono">{j.rollup?.maxMinute || '—'}</td>
-              </tr>
-            ))}
-            {!loading && !(data?.jobs || []).length && (
-              <tr><td colSpan={5} style={{ padding: 8, color: 'var(--fg-secondary)' }}>Нет materialize job’ов</td></tr>
-            )}
-          </tbody>
-        </table>
-        {data?.rollupStatsError && (
-          <div style={{ marginTop: 8, color: 'var(--fg-warning, #b78103)', font: 'var(--pv-text-body-3)' }}>
-            CH stats: {data.rollupStatsError}
-          </div>
-        )}
-      </Card>
-
-      <Card title="Последние запросы">
-        <table style={{ width: '100%', borderCollapse: 'collapse', font: 'var(--pv-text-body-3)' }}>
-          <thead>
-            <tr>
-              <th style={{ textAlign: 'left', padding: 6 }}>время</th>
-              <th style={{ textAlign: 'left', padding: 6 }}>имя</th>
-              <th style={{ textAlign: 'right', padding: 6 }}>мс</th>
-              <th style={{ textAlign: 'right', padding: 6 }}>строк</th>
-              <th style={{ textAlign: 'left', padding: 6 }}>ошибка</th>
-            </tr>
-          </thead>
-          <tbody>
-            {(data?.queries || []).map((q) => (
-              <React.Fragment key={q.id}>
-                <tr
-                  onClick={() => setExpandedId((cur) => (cur === q.id ? null : q.id))}
-                  style={{ cursor: 'pointer', background: expandedId === q.id ? 'var(--surf-2)' : 'transparent' }}
-                >
-                  <td style={{ padding: 6 }} className="mono">{fmtDiagTime(q.at)}</td>
-                  <td style={{ padding: 6 }} className="mono">{q.name}</td>
-                  <td style={{ padding: 6, textAlign: 'right' }} className="mono">{q.elapsedMs}</td>
-                  <td style={{ padding: 6, textAlign: 'right' }} className="mono">{q.rows}</td>
-                  <td style={{ padding: 6, color: q.error ? 'crimson' : 'var(--fg-secondary)' }}>
-                    {q.error || '—'}
-                  </td>
-                </tr>
-                {expandedId === q.id && (
-                  <tr>
-                    <td colSpan={5} style={{ padding: '8px 6px 12px' }}>
-                      <pre style={{
-                        margin: 0,
-                        padding: 10,
-                        borderRadius: 8,
-                        background: 'var(--surf-1)',
-                        border: '1px solid var(--bd-soft)',
-                        whiteSpace: 'pre-wrap',
-                        wordBreak: 'break-word',
-                        font: 'var(--pv-text-body-3)',
-                        maxHeight: 360,
-                        overflow: 'auto',
-                      }}>
-                        {q.sql}
-                        {'\n\n-- params\n'}
-                        {JSON.stringify(q.params || {}, null, 2)}
-                      </pre>
-                    </td>
-                  </tr>
-                )}
-              </React.Fragment>
-            ))}
-            {!loading && !(data?.queries || []).length && (
-              <tr><td colSpan={5} style={{ padding: 8, color: 'var(--fg-secondary)' }}>Запросов пока нет — воркер не писал диагностику</td></tr>
-            )}
-          </tbody>
-        </table>
-      </Card>
-
-    </div>
-  );
-}
-
 function PageObservations({ onNavigate }) {
   const canWriteObservations = AuthAccess.canWritePage('observations');
   const canWrite = canWriteObservations || AuthAccess.canWritePage('explorer');
@@ -1231,7 +1004,6 @@ function PageObservations({ onNavigate }) {
   const [settings, setSettings] = useState(null);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
-  const [pageTab, setPageTab] = useState('board');
 
   const settingsItem = useMemo(
     () => items.find((x) => x.id === settingsItemId) || null,
@@ -1275,12 +1047,11 @@ function PageObservations({ onNavigate }) {
   }, [reload]);
 
   useEffect(() => {
-    if (pageTab !== 'board') return undefined;
     const t = setInterval(() => {
       reload().catch((e) => setError(e.message));
     }, MIN_REFRESH_SEC * 1000);
     return () => clearInterval(t);
-  }, [pageTab, reload]);
+  }, [reload]);
 
   const openSettings = (item) => {
     setSettingsItemId(item.id);
@@ -1392,7 +1163,7 @@ function PageObservations({ onNavigate }) {
           </button>
         </div>
         {error && (
-          <div style={{ padding: 10, borderRadius: 8, background: 'rgba(220,50,50,.12)' }}>{error}</div>
+          <div style={{ padding: 10, borderRadius: 8, background: 'var(--st-critical-bg)' }}>{error}</div>
         )}
         <Card title={settingsItem.name}>
           <div className="col" style={{ gap: 12 }}>
@@ -1611,13 +1382,8 @@ function PageObservations({ onNavigate }) {
       <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
         <div>
           <h1 style={{ margin: 0, font: 'var(--pv-text-headline)' }}>Наблюдения</h1>
-          <div style={{ color: 'var(--fg-secondary)', font: 'var(--pv-text-body-3)', marginTop: 4 }}>
-            {pageTab === 'board'
-              ? 'Live-доска: обновление раз в 5 минут (бакет 5 минут + запас на late flows).'
-              : 'Диагностика воркера analytics — обновление раз в 5 минут.'}
-          </div>
         </div>
-        {pageTab === 'board' && canWrite && (
+        {canWrite && (
           <button
             type="button"
             className="btn btn--primary"
@@ -1628,29 +1394,8 @@ function PageObservations({ onNavigate }) {
         )}
       </div>
 
-      <div className="seg" style={{ width: 'fit-content' }}>
-        <button
-          type="button"
-          className={pageTab === 'board' ? 'is-active' : ''}
-          onClick={() => setPageTab('board')}
-        >
-          Доска
-        </button>
-        <button
-          type="button"
-          className={pageTab === 'diagnostics' ? 'is-active' : ''}
-          onClick={() => setPageTab('diagnostics')}
-        >
-          Диагностика воркера
-        </button>
-      </div>
-
-      {pageTab === 'diagnostics' && <ObservationDiagnosticsPanel />}
-
-      {pageTab === 'board' && (
-        <>
       {error && (
-        <div style={{ padding: 10, borderRadius: 8, background: 'rgba(220,50,50,.12)', color: 'var(--fg-primary)' }}>
+        <div style={{ padding: 10, borderRadius: 8, background: 'var(--st-critical-bg)', color: 'var(--fg-primary)' }}>
           {error}
         </div>
       )}
@@ -1718,9 +1463,6 @@ function PageObservations({ onNavigate }) {
           </div>
         ));
       })()}
-
-        </>
-      )}
     </div>
   );
 }

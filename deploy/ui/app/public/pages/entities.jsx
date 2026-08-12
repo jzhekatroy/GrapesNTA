@@ -72,7 +72,7 @@ function fmtEntityUpdatedAt(value) {
   });
 }
 
-function PageEntities() {
+function PageEntities({ embedded = false, refreshKey: parentRefreshKey = 0, onReload } = {}) {
   const canWrite = AuthAccess.canWritePage('entities');
   const [rows, setRows] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -81,9 +81,13 @@ function PageEntities() {
   const [selected, setSelected] = useState(new Set());
   const [editing, setEditing] = useState(null);
   const [showAdd, setShowAdd] = useState(false);
-  const [refreshKey, setRefreshKey] = useState(0);
+  const [localRefreshKey, setLocalRefreshKey] = useState(0);
 
-  const reload = useCallback(() => setRefreshKey((k) => k + 1), []);
+  const refreshKey = onReload ? parentRefreshKey : localRefreshKey;
+  const reload = useCallback(() => {
+    if (onReload) onReload();
+    else setLocalRefreshKey((k) => k + 1);
+  }, [onReload]);
 
   useEffect(() => {
     let cancelled = false;
@@ -178,18 +182,26 @@ function PageEntities() {
     },
   ];
 
-  return (
-    <div className="main__container">
-      <div className="page-head">
-        <div>
-          <h1>Владельцы L3</h1>
-          <p>Справочник владельцев сетей для L3-префиксов и классификации. Идентификатор entity_id задаётся один раз при создании.</p>
+  const body = (
+    <>
+      {!embedded && (
+        <div className="page-head">
+          <div>
+            <h1>Владельцы L3</h1>
+            <p>Справочник владельцев сетей для L3-префиксов и классификации. Идентификатор entity_id задаётся один раз при создании.</p>
+          </div>
+          <div className="row" style={{ gap: 8 }}>
+            <Button kind="ghost" icon="refresh" onClick={reload} disabled={loading}>Обновить</Button>
+            <Button kind="primary" icon="plus" onClick={() => setShowAdd(true)} disabled={!!loadError || !canWrite}>Добавить владельца</Button>
+          </div>
         </div>
-        <div className="row" style={{ gap: 8 }}>
-          <Button kind="ghost" icon="refresh" onClick={reload} disabled={loading}>Обновить</Button>
+      )}
+
+      {embedded && (
+        <div className="row" style={{ justifyContent: 'flex-end', marginBottom: 12 }}>
           <Button kind="primary" icon="plus" onClick={() => setShowAdd(true)} disabled={!!loadError || !canWrite}>Добавить владельца</Button>
         </div>
-      </div>
+      )}
 
       {loading ? (
         <Card pad="sm">
@@ -238,8 +250,11 @@ function PageEntities() {
           pushToast({ kind: 'success', title: SAVE_SUCCESS_TITLE, desc: SAVE_SUCCESS_DESC });
         }}
       />
-    </div>
+    </>
   );
+
+  if (embedded) return body;
+  return <div className="main__container">{body}</div>;
 }
 
 function EntityFormModal({ open, row, isNew, onClose, onSaved }) {

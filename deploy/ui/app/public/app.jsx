@@ -7,10 +7,17 @@ function App() {
   const [validIds, setValidIds] = useState(new Set(['dashboard']));
   const [hiddenPageIds, setHiddenPageIds] = useState(new Set());
   const [pageTitles, setPageTitlesState] = useState({});
-  const initialRaw = (location.hash || '#dashboard').slice(1);
-  const initialQ = initialRaw.indexOf('?');
-  const initialPageId = initialQ >= 0 ? initialRaw.slice(0, initialQ) : initialRaw;
-  const [page, setPage] = useState(initialPageId === 'collector-status' ? 'collectors' : initialPageId);
+  const [page, setPage] = useState(() => {
+    const raw = (location.hash || '#dashboard').slice(1);
+    const q = raw.indexOf('?');
+    const pageId = q >= 0 ? raw.slice(0, q) : raw;
+    if (pageId === 'flow-exclusions') {
+      sessionStorage.setItem('grapes-collectors-tab', 'exclusions');
+      return 'collectors';
+    }
+    if (pageId === 'collector-status') return 'collectors';
+    return pageId;
+  });
   const [hashRoute, setHashRoute] = useState(() => location.hash || '');
   const [collapsed, setCollapsed] = useState(false);
   const [theme, setTheme] = useState(() => localStorage.getItem('grapes-theme') || 'dark');
@@ -43,8 +50,15 @@ function App() {
         setRegistryReady(true);
         const { pageId, params } = parseAppHash();
         const hashId = AppPages.resolvePageId(pageId, ids);
-        if (pageId === 'collector-status') {
+        if (pageId === 'collector-status' || pageId === 'flow-exclusions') {
+          if (pageId === 'flow-exclusions') {
+            sessionStorage.setItem('grapes-collectors-tab', 'exclusions');
+          }
           location.replace(`${location.pathname}${location.search}#collectors`);
+        }
+        if (pageId === 'vlan' || pageId === 'entities') {
+          sessionStorage.setItem('grapes-network-tab', pageId);
+          location.replace(`${location.pathname}${location.search}#cidr`);
         }
         setPage(hashId);
         setHashRoute(location.hash || '');
@@ -122,6 +136,7 @@ function App() {
 
   useEffect(() => {
     if (!auth.user) return undefined;
+    if (isCabinetMode(auth.user)) return undefined;
     const perms = auth.user?.effectivePermissions;
     if (perms && !perms.monitoring) return undefined;
 
@@ -160,8 +175,16 @@ function App() {
     const onHash = () => {
       const { pageId, params } = parseAppHash();
       const resolved = AppPages.resolvePageId(pageId, validIds);
-      if (pageId === 'collector-status') {
+      if (pageId === 'collector-status' || pageId === 'flow-exclusions') {
+        if (pageId === 'flow-exclusions') {
+          sessionStorage.setItem('grapes-collectors-tab', 'exclusions');
+        }
         location.replace(`${location.pathname}${location.search}#collectors`);
+        return;
+      }
+      if (pageId === 'vlan' || pageId === 'entities') {
+        sessionStorage.setItem('grapes-network-tab', pageId);
+        location.replace(`${location.pathname}${location.search}#cidr`);
         return;
       }
       setPage(resolved);
@@ -194,9 +217,18 @@ function App() {
   const navigate = useCallback((id) => {
     if (id === '__toggle') { setCollapsed(v => !v); return; }
     if (id === '__theme')  { setTheme(t => t === 'dark' ? 'light' : 'dark'); return; }
-    if (!validIds.has(id)) return;
-    setPage(id);
-    location.hash = id;
+    let target = id;
+    if (target === 'flow-exclusions') {
+      sessionStorage.setItem('grapes-collectors-tab', 'exclusions');
+      target = 'collectors';
+    }
+    if (target === 'vlan' || target === 'entities') {
+      sessionStorage.setItem('grapes-network-tab', target);
+      target = 'cidr';
+    }
+    if (!validIds.has(target)) return;
+    setPage(target);
+    location.hash = target;
   }, [validIds]);
 
   const handleLogin = (user) => setAuth({ loading: false, user });
@@ -211,6 +243,18 @@ function App() {
   const reloadCurrentUser = async () => {
     const user = await ApiClient.loadCurrentUser();
     setAuth({ loading: false, user });
+    return user;
+  };
+  const handleStopImpersonation = async () => {
+    try {
+      await ApiClient.stopImpersonation();
+      await reloadCurrentUser();
+      pushToast({ kind: 'success', title: 'Выход из кабинета клиента' });
+      setPage('clients');
+      location.hash = 'clients';
+    } catch (err) {
+      pushToast({ kind: 'error', title: 'Не удалось выйти из кабинета', desc: err.message });
+    }
   };
   const handleRefresh = useCallback(() => setRefreshKey((k) => k + 1), []);
   const toggleTheme = useCallback(() => setTheme(t => t === 'dark' ? 'light' : 'dark'), []);
@@ -250,11 +294,29 @@ function App() {
 
   const canAccessPage = useCallback((pageId) => {
     const perms = auth.user?.effectivePermissions;
+    if (isCabinetMode(auth.user)) {
+      return CABINET_PAGE_IDS.has(pageId);
+    }
     if (!perms) return true;
     if (pageId === 'snmp') return !!(perms.snmp || perms.collectors);
     if (pageId === 'smtp') return !!perms.diagnostics;
+    if (pageId === 'cidr' || pageId === 'vlan' || pageId === 'entities') {
+      return !!(perms.cidr || perms.vlan || perms.entities);
+    }
     return !!perms[pageId];
   }, [auth.user]);
+
+  const cabinetMode = isCabinetMode(auth.user);
+  const cabinetReadOnly = !!auth.user?.cabinet?.readOnly;
+  const clientDisplayName = auth.user?.cabinet?.clientDisplayName || '';
+
+  useEffect(() => {
+    if (!auth.user || !registryReady) return;
+    if (isCabinetMode(auth.user) && !CABINET_PAGE_IDS.has(page)) {
+      setPage('dashboard');
+      location.hash = 'dashboard';
+    }
+  }, [auth.user, registryReady, page]);
 
   if (auth.loading || !registryReady) {
     return <AuthFrame title="Grapes NTA" subtitle="Проверяем сессию..." theme={theme} onToggleTheme={toggleTheme} />;
@@ -273,17 +335,26 @@ function App() {
     pageEl = <PageAccessDenied pageId={page} onNavigate={navigate} />;
   } else {
     switch (page) {
-      case 'dashboard':  pageEl = <PageDashboard key={`${refreshKey}-${displayTimezone}`} onNavigate={navigate} directions={directions} timeRange={timeRange} customPeriod={customPeriod} collectorFilter={collectorFilter} displayTimezone={displayTimezone} onChartRangeSelect={applyChartRangeZoom} />; break;
+      case 'dashboard':
+        pageEl = cabinetMode
+          ? <PageCabinetOverview key={`${refreshKey}-${displayTimezone}`} onNavigate={navigate} timeRange={timeRange} customPeriod={customPeriod} displayTimezone={displayTimezone} readOnly={cabinetReadOnly} />
+          : <PageDashboard key={`${refreshKey}-${displayTimezone}`} onNavigate={navigate} directions={directions} timeRange={timeRange} customPeriod={customPeriod} collectorFilter={collectorFilter} displayTimezone={displayTimezone} onChartRangeSelect={applyChartRangeZoom} />;
+        break;
       case 'monitoring': pageEl = <PageMonitoring key={`${refreshKey}-${displayTimezone}`} displayTimezone={displayTimezone} />; break;
-      case 'explorer':   pageEl = <PageExplorer key={`${refreshKey}-${displayTimezone}-${hashRoute}`} onNavigate={navigate} displayTimezone={displayTimezone} />; break;
+      case 'explorer':
+        pageEl = <PageExplorer key={`${refreshKey}-${displayTimezone}-${hashRoute}`} onNavigate={navigate} displayTimezone={displayTimezone} cabinetMode={cabinetMode} readOnly={cabinetReadOnly} />;
+        break;
       case 'dns-explorer': pageEl = <PageDnsExplorer key={`${refreshKey}-${displayTimezone}-${hashRoute}`} onNavigate={navigate} displayTimezone={displayTimezone} />; break;
       case 'observations': pageEl = <PageObservations key={refreshKey} onNavigate={navigate} />; break;
       case 'diagnostics': pageEl = <PageDiagnostics key={refreshKey} />; break;
       case 'top':        pageEl = <PageTop key={`${refreshKey}-${displayTimezone}`} onNavigate={navigate} timeRange={timeRange} customPeriod={customPeriod} directions={directions} collectorFilter={collectorFilter} displayTimezone={displayTimezone} />; break;
-      case 'vlan':       pageEl = <PageVlan key={refreshKey} />; break;
       case 'smtp':       pageEl = <PageSmtp key={refreshKey} />; break;
-      case 'dns':        pageEl = <PageDnsQueries key={`${refreshKey}-${displayTimezone}-${(collectorFilter || []).join(',')}`} onNavigate={navigate} timeRange={timeRange} customPeriod={customPeriod} collectorFilter={collectorFilter} displayTimezone={displayTimezone} onChartRangeSelect={applyChartRangeZoom} />; break;
-      case 'collectors': pageEl = <PageCollectors key={refreshKey} onNavigate={navigate} />; break;
+      case 'dns':
+        pageEl = cabinetMode
+          ? <PageCabinetDns key={`${refreshKey}-${displayTimezone}`} onNavigate={navigate} timeRange={timeRange} customPeriod={customPeriod} displayTimezone={displayTimezone} readOnly={cabinetReadOnly} />
+          : <PageDnsQueries key={`${refreshKey}-${displayTimezone}-${(collectorFilter || []).join(',')}`} onNavigate={navigate} timeRange={timeRange} customPeriod={customPeriod} collectorFilter={collectorFilter} displayTimezone={displayTimezone} onChartRangeSelect={applyChartRangeZoom} />;
+        break;
+      case 'collectors': pageEl = <PageCollectors key={refreshKey} onNavigate={navigate} effectivePermissions={auth.user?.effectivePermissions} />; break;
       case 'snmp': pageEl = (
         <PageSnmp
           key={`${refreshKey}-${displayTimezone}`}
@@ -293,25 +364,47 @@ function App() {
       ); break;
       case 'bmp':        pageEl = <PageBmp key={refreshKey} />; break;
       case 'interface-roles': pageEl = <PageInterfaceRoles key={refreshKey} onNavigate={navigate} />; break;
+      case 'traffic-classification': pageEl = <PageTrafficClassification key={refreshKey} />; break;
       case 'routers':    pageEl = <PageRouters key={refreshKey} />; break;
-      case 'entities':   pageEl = <PageEntities key={refreshKey} />; break;
-      case 'cidr':       pageEl = <PageCIDR key={refreshKey} />; break;
+      case 'cidr':
+      case 'vlan':
+      case 'entities':
+        pageEl = (
+          <PageNetwork
+            key={refreshKey}
+            effectivePermissions={auth.user?.effectivePermissions}
+            initialTab={page === 'cidr' ? undefined : page}
+          />
+        );
+        break;
       case 'dns-resolvers': pageEl = <PageDnsResolvers key={refreshKey} />; break;
       case 'port-services': pageEl = <PagePortServices key={refreshKey} />; break;
-      case 'flow-exclusions': pageEl = <PageFlowExclusions key={refreshKey} />; break;
-      case 'users':      pageEl = <PageUsers key={refreshKey} currentUser={auth.user} onAuthRefresh={reloadCurrentUser} />; break;
+      case 'flow-exclusions':
+        pageEl = <PageCollectors key={refreshKey} onNavigate={navigate} effectivePermissions={auth.user?.effectivePermissions} />;
+        break;
+      case 'users':      pageEl = <PageUsers key={refreshKey} currentUser={auth.user} onAuthRefresh={reloadCurrentUser} onNavigate={navigate} />; break;
+      case 'clients':    pageEl = <PageClients key={refreshKey} currentUser={auth.user} onAuthRefresh={reloadCurrentUser} onNavigate={navigate} />; break;
       case 'ttl':        pageEl = <PageTTL key={refreshKey} />; break;
       default:           pageEl = <PageComingSoon key={refreshKey} pageId={page} onNavigate={navigate} />;
     }
   }
 
   return (
-    <div className="app" data-collapsed={collapsed} data-screen-label={`Grapes NTA · ${pageTitles[page]?.title || page}`}>
+    <div className="app" data-collapsed={collapsed} data-cabinet={cabinetMode ? '1' : '0'} data-screen-label={`Grapes NTA · ${pageTitles[page]?.title || page}`}>
+      {isImpersonating(auth.user) && (
+        <ImpersonationBanner
+          cabinet={auth.user.cabinet}
+          onStop={handleStopImpersonation}
+          onRefreshUser={reloadCurrentUser}
+        />
+      )}
       <Sidebar
         current={page}
         onNavigate={navigate}
         collapsed={collapsed}
         effectivePermissions={auth.user?.effectivePermissions}
+        cabinetMode={cabinetMode}
+        clientDisplayName={clientDisplayName}
       />
       <Header
         current={page}
@@ -339,6 +432,9 @@ function App() {
         onTimezonePrefChange={handleTimezonePrefChange}
         monitoringDeviationsTotal={monitoringDeviationsTotal}
         monitoringDeviationsError={monitoringDeviationsError}
+        cabinetMode={cabinetMode}
+        clientDisplayName={clientDisplayName}
+        onStopImpersonation={handleStopImpersonation}
       />
       <main className="main">
         {pageEl}
@@ -376,6 +472,20 @@ function AuthFrame({ title, subtitle, children, theme, onToggleTheme }) {
   );
 }
 
+async function offerBrowserPasswordSave(username, password) {
+  // SPA login (fetch + preventDefault) often skips Chrome's heuristic "save password"
+  // prompt. Credential Management API asks explicitly; localhost is a secure context.
+  try {
+    if (typeof PasswordCredential === 'undefined' || !navigator.credentials?.store) return;
+    const id = String(username || '').trim();
+    const secret = String(password || '');
+    if (!id || !secret) return;
+    await navigator.credentials.store(new PasswordCredential({ id, password: secret, name: id }));
+  } catch (_) {
+    // User dismissed, "Never" for this origin, or policy blocked — ignore.
+  }
+}
+
 function LoginScreen({ onLogin, theme, onToggleTheme }) {
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
@@ -388,6 +498,7 @@ function LoginScreen({ onLogin, theme, onToggleTheme }) {
     setSaving(true);
     try {
       const result = await ApiClient.login({ username, password });
+      await offerBrowserPasswordSave(username, password);
       onLogin(result.user);
     } catch (err) {
       setError(err.message || 'Не удалось войти');
@@ -398,14 +509,38 @@ function LoginScreen({ onLogin, theme, onToggleTheme }) {
 
   return (
     <AuthFrame title="Вход в Grapes NTA" subtitle="Используйте локальную учётную запись" theme={theme} onToggleTheme={onToggleTheme}>
-      <form className="col" style={{gap: 14}} onSubmit={submit}>
+      <form
+        className="col"
+        style={{gap: 14}}
+        onSubmit={submit}
+        autoComplete="on"
+        method="post"
+        action="/api/auth/login"
+      >
         <div className="field">
-          <label>Имя пользователя</label>
-          <input className="input" value={username} onChange={(e) => setUsername(e.target.value)} autoFocus />
+          <label htmlFor="login-username">Имя пользователя</label>
+          <input
+            id="login-username"
+            className="input"
+            name="username"
+            type="text"
+            autoComplete="username"
+            value={username}
+            onChange={(e) => setUsername(e.target.value)}
+            autoFocus
+          />
         </div>
         <div className="field">
-          <label>Пароль</label>
-          <input className="input" type="password" value={password} onChange={(e) => setPassword(e.target.value)} />
+          <label htmlFor="login-password">Пароль</label>
+          <input
+            id="login-password"
+            className="input"
+            name="password"
+            type="password"
+            autoComplete="current-password"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+          />
         </div>
         {error && <div className="form-error">{error}</div>}
         <Button kind="primary" type="submit" disabled={saving || !username || !password}>
@@ -439,13 +574,16 @@ function ForcePasswordChangeScreen({ user, onDone, onLogout, theme, onToggleThem
 
   return (
     <AuthFrame title="Смена пароля" subtitle={`Первый вход: ${user.username}`} theme={theme} onToggleTheme={onToggleTheme}>
-      <form className="col" style={{gap: 14}} onSubmit={submit}>
+      <form className="col" style={{gap: 14}} onSubmit={submit} autoComplete="on" method="post">
         <div className="field">
-          <label>Новый пароль</label>
+          <label htmlFor="login-new-password">Новый пароль</label>
           <div className="row" style={{gap: 8}}>
             <input
+              id="login-new-password"
               className="input"
+              name="new-password"
               type={showPassword ? 'text' : 'password'}
+              autoComplete="new-password"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               placeholder="Минимум 12 символов"

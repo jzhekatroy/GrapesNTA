@@ -69,7 +69,7 @@ function PageSmtp() {
       ) : (
         <Card title="Параметры SMTP">
           <div className="col" style={{ gap: 10, font: 'var(--pv-text-body-3)' }}>
-            {error && <div style={{ color: 'crimson' }}>{error}</div>}
+            {error && <div style={{ color: 'var(--st-critical)' }}>{error}</div>}
             <label className="row" style={{ gap: 8, alignItems: 'center' }}>
               <input
                 type="checkbox"

@@ -25,9 +25,9 @@ function fmtAge(sec) {
 
 function workerStatusMeta(worker) {
   if (!worker) return { label: 'неизвестно', color: 'var(--fg-muted)', tone: 'idle' };
-  if (worker.alive) return { label: 'работает', color: '#1a7f37', tone: 'healthy' };
-  if (worker.status === 'stale') return { label: 'нет heartbeat', color: '#b78103', tone: 'warning' };
-  return { label: 'остановлен', color: 'crimson', tone: 'critical' };
+  if (worker.alive) return { label: 'работает', color: 'var(--st-success)', tone: 'healthy' };
+  if (worker.status === 'stale') return { label: 'нет heartbeat', color: 'var(--st-warning)', tone: 'warning' };
+  return { label: 'остановлен', color: 'var(--st-critical)', tone: 'critical' };
 }
 
 function matStatusTone(status) {
@@ -54,7 +54,7 @@ function ProblemsBanner({ problems, okText }) {
       <div style={{
         padding: 12,
         borderRadius: 8,
-        background: 'rgba(26,127,55,.10)',
+        background: 'var(--st-success-bg)',
         color: 'var(--fg-primary)',
         font: 'var(--pv-text-body-3)',
       }}>
@@ -66,9 +66,9 @@ function ProblemsBanner({ problems, okText }) {
     <div className="col" style={{ gap: 8 }}>
       {problems.map((p) => {
         const bg = p.level === 'critical'
-          ? 'rgba(220,50,50,.12)'
-          : 'rgba(183,129,3,.12)';
-        const color = p.level === 'critical' ? 'crimson' : 'var(--fg-primary)';
+          ? 'var(--st-critical-bg)'
+          : 'var(--st-warning-bg)';
+        const color = p.level === 'critical' ? 'var(--st-critical)' : 'var(--fg-primary)';
         return (
           <div
             key={`${p.code}-${p.observationId || p.job || p.message}`}
@@ -360,8 +360,8 @@ function GapsPanel() {
           </div>
         )}
 
-        {err && <div style={{ color: 'crimson' }}>{err}</div>}
-        {msg && <div style={{ color: '#1a7f37' }}>{msg}</div>}
+        {err && <div style={{ color: 'var(--st-critical)' }}>{err}</div>}
+        {msg && <div style={{ color: 'var(--st-success)' }}>{msg}</div>}
 
         {/* Результат скана */}
         {scan && (
@@ -375,7 +375,7 @@ function GapsPanel() {
             {!hasGaps && (
               <div style={{
                 padding: 10, borderRadius: 8,
-                background: 'rgba(26,127,55,.10)', color: 'var(--fg-primary)',
+                background: 'var(--st-success-bg)', color: 'var(--fg-primary)',
               }}>
                 Дыр за выбранный период не найдено.
               </div>
@@ -385,7 +385,7 @@ function GapsPanel() {
               <div className="col" style={{ gap: 8 }}>
                 <div style={{
                   padding: 10, borderRadius: 8,
-                  background: 'rgba(183,129,3,.12)', color: 'var(--fg-primary)',
+                  background: 'var(--st-warning-bg)', color: 'var(--fg-primary)',
                 }}>
                   Найдено окон дыр: <b>{scan.summary.windowCount}</b>
                   {' · суммарно '}<b>{fmtMinutes(scan.summary.totalGapMinutes)}</b>
@@ -544,12 +544,12 @@ function GapsPanel() {
                     }}>
                       <div style={{
                         width: `${pct}%`, height: '100%',
-                        background: r.status === 'done' ? '#1a7f37' : 'var(--accent, #3b82f6)',
+                        background: r.status === 'done' ? 'var(--st-success)' : 'var(--accent, #3b82f6)',
                         transition: 'width .4s ease',
                       }} />
                     </div>
                   )}
-                  {r.error && <span style={{ color: r.status === 'cancelled' ? 'var(--fg-muted)' : 'crimson' }}>{r.error}</span>}
+                  {r.error && <span style={{ color: r.status === 'cancelled' ? 'var(--fg-muted)' : 'var(--st-critical)' }}>{r.error}</span>}
                   {isActive && (
                     <span className="mono" style={{ color: 'var(--fg-muted)', fontSize: 11 }}>{r.requestId}</span>
                   )}
@@ -649,7 +649,7 @@ function WorkerPanel({ data, loading, onReload }) {
             </div>
             <div style={{ gridColumn: '1 / -1' }}>
               <div style={{ color: 'var(--fg-muted)' }}>Ошибка tick</div>
-              <div style={{ color: worker?.lastError ? 'crimson' : 'inherit' }}>{worker?.lastError || '—'}</div>
+              <div style={{ color: worker?.lastError ? 'var(--st-critical)' : 'inherit' }}>{worker?.lastError || '—'}</div>
             </div>
           </div>
           {data?.lastTick && (worker?.lastError || data.lastTick.error
@@ -697,7 +697,7 @@ function WorkerPanel({ data, loading, onReload }) {
                   || '—';
                 const bad = Boolean(j.materialize?.lastError || (j.liveEnabled && j.skipReason) || j.materialize?.status === 'error');
                 return (
-                  <tr key={j.id} style={{ background: bad ? 'rgba(220,50,50,.06)' : 'transparent' }}>
+                  <tr key={j.id} style={{ background: bad ? 'var(--st-critical-bg)' : 'transparent' }}>
                     <td style={{ padding: 6 }}>
                       <div style={{ font: 'var(--pv-text-body-2-bold)' }}>{j.name}</div>
                       <div className="mono" style={{ color: 'var(--fg-muted)', fontSize: 11 }}>{j.id}</div>
@@ -736,7 +736,7 @@ function WorkerPanel({ data, loading, onReload }) {
                     </td>
                     <td style={{
                       padding: 6,
-                      color: bad ? 'crimson' : 'var(--fg-secondary)',
+                      color: bad ? 'var(--st-critical)' : 'var(--fg-secondary)',
                       maxWidth: 320,
                       wordBreak: 'break-word',
                     }}>
@@ -756,7 +756,7 @@ function WorkerPanel({ data, loading, onReload }) {
           </table>
         </div>
         {data?.observations?.rollupStatsError && (
-          <div style={{ marginTop: 8, color: '#b78103', font: 'var(--pv-text-body-3)' }}>
+          <div style={{ marginTop: 8, color: 'var(--st-warning)', font: 'var(--pv-text-body-3)' }}>
             CH rollup stats: {data.observations.rollupStatsError}
           </div>
         )}
@@ -764,12 +764,14 @@ function WorkerPanel({ data, loading, onReload }) {
 
       <GapsPanel />
 
-      <Card title="Traffic / ASN rollups (только активные jobs worker)">
+      <Card title="Traffic / ASN / client rollups (только активные jobs worker)">
         <div style={{ marginBottom: 8, color: 'var(--fg-secondary)', font: 'var(--pv-text-body-3)' }}>
-          Без legacy IP talker/pair. Для 1h/1d смотри «обновлён» — бакет вчерашнего дня днём нормален.
+          Без legacy IP talker/pair. Включая клиентские витрины кабинета
+          (<span className="mono">traffic_client_*</span>, <span className="mono">dns_client_domain_1h</span>).
+          Для 1h/1d смотри «обновлён» — бакет вчерашнего дня днём нормален.
         </div>
         {data?.trafficRollups?.error && (
-          <div style={{ marginBottom: 8, color: 'crimson', font: 'var(--pv-text-body-3)' }}>
+          <div style={{ marginBottom: 8, color: 'var(--st-critical)', font: 'var(--pv-text-body-3)' }}>
             {data.trafficRollups.error}
           </div>
         )}
@@ -788,7 +790,7 @@ function WorkerPanel({ data, loading, onReload }) {
             </thead>
             <tbody>
               {traffic.map((r) => (
-                <tr key={r.job} style={{ background: r.stale || r.status === 'failed' ? 'rgba(183,129,3,.08)' : 'transparent' }}>
+                <tr key={r.job} style={{ background: r.stale || r.status === 'failed' ? 'var(--st-warning-bg)' : 'transparent' }}>
                   <td style={{ padding: 6 }} className="mono">{r.job}</td>
                   <td style={{ padding: 6 }}>
                     <StatusIndicator
@@ -802,7 +804,7 @@ function WorkerPanel({ data, loading, onReload }) {
                   <td style={{ padding: 6, textAlign: 'right' }} className="mono">
                     {r.durationMs != null ? `${r.durationMs} мс` : '—'}
                   </td>
-                  <td style={{ padding: 6, color: r.lastError ? 'crimson' : 'var(--fg-secondary)' }}>
+                  <td style={{ padding: 6, color: r.lastError ? 'var(--st-critical)' : 'var(--fg-secondary)' }}>
                     {r.lastError || '—'}
                   </td>
                 </tr>
@@ -819,61 +821,66 @@ function WorkerPanel({ data, loading, onReload }) {
         </div>
       </Card>
 
-      {(data?.queries || []).length > 0 && (
-        <Card title="Медленные / ошибочные CH-запросы">
-          <table style={{ width: '100%', borderCollapse: 'collapse', font: 'var(--pv-text-body-3)' }}>
-            <thead>
-              <tr>
-                <th style={{ textAlign: 'left', padding: 6 }}>время</th>
-                <th style={{ textAlign: 'left', padding: 6 }}>имя</th>
-                <th style={{ textAlign: 'right', padding: 6 }}>мс</th>
-                <th style={{ textAlign: 'right', padding: 6 }}>строк</th>
-                <th style={{ textAlign: 'left', padding: 6 }}>ошибка</th>
-              </tr>
-            </thead>
-            <tbody>
-              {data.queries.map((q) => (
-                <React.Fragment key={q.id}>
-                  <tr
-                    onClick={() => setExpandedId((cur) => (cur === q.id ? null : q.id))}
-                    style={{ cursor: 'pointer', background: expandedId === q.id ? 'var(--surf-2)' : 'transparent' }}
-                  >
-                    <td style={{ padding: 6 }} className="mono">{fmtDiagTime(q.at)}</td>
-                    <td style={{ padding: 6 }} className="mono">{q.name}</td>
-                    <td style={{ padding: 6, textAlign: 'right' }} className="mono">{q.elapsedMs}</td>
-                    <td style={{ padding: 6, textAlign: 'right' }} className="mono">{q.rows}</td>
-                    <td style={{ padding: 6, color: q.error ? 'crimson' : 'var(--fg-secondary)' }}>
-                      {q.error || '—'}
+      <Card title="Последние запросы">
+        <table style={{ width: '100%', borderCollapse: 'collapse', font: 'var(--pv-text-body-3)' }}>
+          <thead>
+            <tr>
+              <th style={{ textAlign: 'left', padding: 6 }}>время</th>
+              <th style={{ textAlign: 'left', padding: 6 }}>имя</th>
+              <th style={{ textAlign: 'right', padding: 6 }}>мс</th>
+              <th style={{ textAlign: 'right', padding: 6 }}>строк</th>
+              <th style={{ textAlign: 'left', padding: 6 }}>ошибка</th>
+            </tr>
+          </thead>
+          <tbody>
+            {(data?.recentQueries || data?.queries || []).map((q) => (
+              <React.Fragment key={q.id}>
+                <tr
+                  onClick={() => setExpandedId((cur) => (cur === q.id ? null : q.id))}
+                  style={{ cursor: 'pointer', background: expandedId === q.id ? 'var(--surf-2)' : 'transparent' }}
+                >
+                  <td style={{ padding: 6 }} className="mono">{fmtDiagTime(q.at)}</td>
+                  <td style={{ padding: 6 }} className="mono">{q.name}</td>
+                  <td style={{ padding: 6, textAlign: 'right' }} className="mono">{q.elapsedMs}</td>
+                  <td style={{ padding: 6, textAlign: 'right' }} className="mono">{q.rows}</td>
+                  <td style={{ padding: 6, color: q.error ? 'var(--st-critical)' : 'var(--fg-secondary)' }}>
+                    {q.error || '—'}
+                  </td>
+                </tr>
+                {expandedId === q.id && (
+                  <tr>
+                    <td colSpan={5} style={{ padding: '8px 6px 12px' }}>
+                      <pre style={{
+                        margin: 0,
+                        padding: 10,
+                        borderRadius: 8,
+                        background: 'var(--surf-1)',
+                        border: '1px solid var(--bd-soft)',
+                        whiteSpace: 'pre-wrap',
+                        wordBreak: 'break-word',
+                        font: 'var(--pv-text-body-3)',
+                        maxHeight: 360,
+                        overflow: 'auto',
+                      }}>
+                        {q.sql}
+                        {'\n\n-- params\n'}
+                        {JSON.stringify(q.params || {}, null, 2)}
+                      </pre>
                     </td>
                   </tr>
-                  {expandedId === q.id && (
-                    <tr>
-                      <td colSpan={5} style={{ padding: '8px 6px 12px' }}>
-                        <pre style={{
-                          margin: 0,
-                          padding: 10,
-                          borderRadius: 8,
-                          background: 'var(--surf-1)',
-                          border: '1px solid var(--bd-soft)',
-                          whiteSpace: 'pre-wrap',
-                          wordBreak: 'break-word',
-                          font: 'var(--pv-text-body-3)',
-                          maxHeight: 360,
-                          overflow: 'auto',
-                        }}>
-                          {q.sql}
-                          {'\n\n-- params\n'}
-                          {JSON.stringify(q.params || {}, null, 2)}
-                        </pre>
-                      </td>
-                    </tr>
-                  )}
-                </React.Fragment>
-              ))}
-            </tbody>
-          </table>
-        </Card>
-      )}
+                )}
+              </React.Fragment>
+            ))}
+            {!loading && !(data?.recentQueries || data?.queries || []).length && (
+              <tr>
+                <td colSpan={5} style={{ padding: 8, color: 'var(--fg-secondary)' }}>
+                  Запросов пока нет — воркер не писал диагностику
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </Card>
     </div>
   );
 }
@@ -916,7 +923,7 @@ function EnrichmentPanel({ data, loading, onReload }) {
             <div>
               <div style={{ color: 'var(--fg-muted)' }}>Статус</div>
               <StatusIndicator status={jobStatusTone(j.status)} label={j.status || 'idle'} />
-              {j.stale && <div style={{ color: '#b78103', marginTop: 4 }}>давно не обновлялся</div>}
+              {j.stale && <div style={{ color: 'var(--st-warning)', marginTop: 4 }}>давно не обновлялся</div>}
             </div>
             <div>
               <div style={{ color: 'var(--fg-muted)' }}>Интервал</div>
@@ -937,7 +944,7 @@ function EnrichmentPanel({ data, loading, onReload }) {
             </div>
             <div style={{ gridColumn: '1 / -1' }}>
               <div style={{ color: 'var(--fg-muted)' }}>Сообщение</div>
-              <div style={{ color: j.status === 'error' ? 'crimson' : 'inherit' }}>{j.message || '—'}</div>
+              <div style={{ color: j.status === 'error' ? 'var(--st-critical)' : 'inherit' }}>{j.message || '—'}</div>
             </div>
             <div style={{ gridColumn: '1 / -1' }}>
               <div style={{ color: 'var(--fg-muted)', marginBottom: 4 }}>Таблицы</div>
@@ -1050,9 +1057,9 @@ function SnmpPanel({ data, loading, onReload }) {
               minWidth: 110,
               padding: '10px 12px',
               borderRadius: 8,
-              background: t === 'critical' ? 'rgba(220,50,50,.10)'
-                : t === 'warning' ? 'rgba(183,129,3,.10)'
-                  : t === 'healthy' ? 'rgba(26,127,55,.10)' : 'var(--bg-secondary)',
+              background: t === 'critical' ? 'var(--st-critical-bg)'
+                : t === 'warning' ? 'var(--st-warning-bg)'
+                  : t === 'healthy' ? 'var(--st-success-bg)' : 'var(--bg-secondary)',
             }}
           >
             <div style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-secondary)' }}>{k}</div>
@@ -1163,9 +1170,9 @@ function BoundsPanel({ data, loading, onReload }) {
               minWidth: 110,
               padding: '10px 12px',
               borderRadius: 8,
-              background: t === 'critical' ? 'rgba(220,50,50,.10)'
-                : t === 'warning' ? 'rgba(183,129,3,.10)'
-                  : t === 'healthy' ? 'rgba(26,127,55,.10)' : 'var(--bg-secondary)',
+              background: t === 'critical' ? 'var(--st-critical-bg)'
+                : t === 'warning' ? 'var(--st-warning-bg)'
+                  : t === 'healthy' ? 'var(--st-success-bg)' : 'var(--bg-secondary)',
             }}
           >
             <div style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-secondary)' }}>{k}</div>
@@ -1188,7 +1195,7 @@ function BoundsPanel({ data, loading, onReload }) {
               <span> · latency=<span className="mono">{health.latencyMs} ms</span></span>
             ) : null}
             {health.error ? (
-              <span style={{ color: 'crimson' }}> · {health.error}</span>
+              <span style={{ color: 'var(--st-critical)' }}> · {health.error}</span>
             ) : null}
           </div>
         </div>
@@ -1213,7 +1220,7 @@ function BoundsPanel({ data, loading, onReload }) {
             ) : null}
           </div>
           {config.error ? (
-            <div style={{ color: 'crimson' }}>{config.error}</div>
+            <div style={{ color: 'var(--st-critical)' }}>{config.error}</div>
           ) : null}
         </div>
       </Card>
@@ -1333,7 +1340,7 @@ function PageDiagnostics() {
       </div>
 
       {error && (
-        <div style={{ padding: 10, borderRadius: 8, background: 'rgba(220,50,50,.12)', color: 'crimson' }}>
+        <div style={{ padding: 10, borderRadius: 8, background: 'var(--st-critical-bg)', color: 'var(--st-critical)' }}>
           {error}
         </div>
       )}

@@ -32,8 +32,8 @@ function BmpErrorBanner({ error }) {
       marginBottom: 12,
       padding: '10px 12px',
       borderRadius: 8,
-      background: 'rgba(220,50,50,.10)',
-      color: 'crimson',
+      background: 'var(--st-critical-bg)',
+      color: 'var(--st-critical)',
       font: 'var(--pv-text-body-3)',
     }}>
       {error}
@@ -428,11 +428,6 @@ function bmpChartLabel(bucket, longRange) {
 }
 
 function BmpChurnTab({ counts, churn, flap, range, onRangeChange, loading, onOpenEvents }) {
-  const totals = counts?.totals || {};
-  const announces = Number(totals.announces) || 0;
-  const withdraws = Number(totals.withdraws) || 0;
-  const total = announces + withdraws;
-  const wdShare = total > 0 ? Math.round((withdraws / total) * 100) : 0;
   const series = churn?.series || [];
   const longRange = range === '6h' || range === '24h';
   const bucketSeconds = range === '24h' ? 300 : 60;
@@ -446,7 +441,7 @@ function BmpChurnTab({ counts, churn, flap, range, onRangeChange, loading, onOpe
     };
   });
   const lines = [
-    { key: 'announces', label: 'Announce', color: 'var(--st-success, #1a7f37)' },
+    { key: 'announces', label: 'Announce', color: 'var(--st-success)' },
     { key: 'withdraws', label: 'Withdraw', color: 'var(--st-critical, #c0392b)' },
   ];
   const peak = series.reduce((acc, p) => {
@@ -475,21 +470,6 @@ function BmpChurnTab({ counts, churn, flap, range, onRangeChange, loading, onOpe
           </div>
         </div>
       </Card>
-
-      {typeof SumCard === 'function' && (
-        <div className="grid grid--4col grid--gap-sm">
-          <SumCard label="События" value={loading ? '…' : fmtNum(total)} icon="layers" />
-          <SumCard label="Announce" value={loading ? '…' : fmtNum(announces)} icon="check" tone="success" />
-          <SumCard label="Withdraw" value={loading ? '…' : fmtNum(withdraws)} icon="x" tone="critical" />
-          <SumCard
-            label="Доля withdraw"
-            value={loading ? '…' : `${wdShare}%`}
-            icon="alert"
-            tone={wdShare >= 40 ? 'warning' : 'neutral'}
-            hint={`IPv4 ${fmtNum(totals.ipv4_events)} · IPv6 ${fmtNum(totals.ipv6_events)}`}
-          />
-        </div>
-      )}
 
       <Card title="Динамика announce / withdraw" pad="sm">
         {churn?.seriesNote && (

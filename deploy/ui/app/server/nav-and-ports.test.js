@@ -6,10 +6,18 @@ const {
   portDirectionSql,
   listInterfaceRoleSwitches,
   saveInterfaceRole,
+  mapSettingsRow,
+  normalizeUnknownNetworks,
+  UNKNOWN_NETWORKS,
 } = require('./net-interface-roles');
+const { ALLOWED_ROLES, validateL3PrefixPayload } = require('./l3-prefixes');
+const { CHART_LINE_META } = require('./queries');
+
+test('api-map maps direction-settings to traffic-classification', () => {
+  assert.equal(getResourceForPath('/api/refs/direction-settings'), 'traffic-classification');
+});
 
 test('api-map maps interface-roles refs endpoints', () => {
-  assert.equal(getResourceForPath('/api/refs/direction-settings'), 'interface-roles');
   assert.equal(getResourceForPath('/api/refs/interface-role-rules'), 'interface-roles');
   assert.equal(getResourceForPath('/api/refs/interface-role-rules/preview', 'POST'), 'interface-roles');
   assert.equal(getResourceForPath('/api/refs/interface-roles/summary'), 'interface-roles');
@@ -17,10 +25,16 @@ test('api-map maps interface-roles refs endpoints', () => {
   assert.equal(getResourceForPath('/api/refs/interface-roles/172.18.1.1'), 'interface-roles');
 });
 
+test('api-map normalizes paths stripped by /api mount', () => {
+  assert.equal(getResourceForPath('/dashboard/traffic-stats'), 'dashboard');
+  assert.equal(getResourceForPath('/clients/foo/impersonate', 'POST'), 'clients');
+  assert.equal(getResourceForPath('/users'), 'users');
+});
+
 test('api-map maps direction diagnostics before generic diagnostics', () => {
-  assert.equal(getResourceForPath('/api/diagnostics/direction/coverage'), 'interface-roles');
-  assert.equal(getResourceForPath('/api/diagnostics/direction/compare'), 'interface-roles');
-  assert.equal(getResourceForPath('/api/diagnostics/direction/interfaces'), 'interface-roles');
+  assert.equal(getResourceForPath('/api/diagnostics/direction/coverage'), 'traffic-classification');
+  assert.equal(getResourceForPath('/api/diagnostics/direction/compare'), 'traffic-classification');
+  assert.equal(getResourceForPath('/api/diagnostics/direction/interfaces'), 'traffic-classification');
   assert.equal(getResourceForPath('/api/diagnostics/enrichment'), 'diagnostics');
 });
 
@@ -142,4 +156,45 @@ test('normalizeVlanDirections keeps unknown like protocol charts', () => {
     ['in', 'out', 'transit', 'internal', 'unknown'],
   );
   assert.ok(normalizeVlanDirections(undefined).includes('unknown'));
+});
+
+test('mapSettingsRow defaults unknownNetworks to foreign', () => {
+  assert.equal(mapSettingsRow({ direction_mode: 'prefixes' }).unknownNetworks, 'foreign');
+  assert.equal(
+    mapSettingsRow({ direction_mode: 'prefixes', unknown_networks: 'unclassified' }).unknownNetworks,
+    'unclassified',
+  );
+});
+
+test('normalizeUnknownNetworks rejects invalid values', () => {
+  assert.equal(normalizeUnknownNetworks('foreign'), 'foreign');
+  assert.equal(normalizeUnknownNetworks('unclassified'), 'unclassified');
+  assert.equal(normalizeUnknownNetworks('invalid'), 'foreign');
+  assert.deepEqual(UNKNOWN_NETWORKS, ['foreign', 'unclassified']);
+});
+
+test('l3 prefixes allow remote role', () => {
+  assert.ok(ALLOWED_ROLES.has('remote'));
+});
+
+test('validateL3PrefixPayload rejects unknown l3 role', async () => {
+  const result = await validateL3PrefixPayload({
+    prefix: '203.0.113.0/24',
+    family: 4,
+    role: 'not-a-role',
+    entityId: 'entity-1',
+    enabled: 1,
+  });
+  assert.equal(result.ok, false);
+  assert.match(result.error, /роль/i);
+});
+
+test('chart line meta uses Неразмеченный label', () => {
+  const line = CHART_LINE_META.find((entry) => entry.id === 'unclassified');
+  assert.equal(line.label, 'Неразмеченный');
+  assert.equal(line.sql, 'unknown');
+});
+
+test('api-map maps l3-prefixes refs to cidr', () => {
+  assert.equal(getResourceForPath('/api/refs/l3-prefixes'), 'cidr');
 });
