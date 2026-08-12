@@ -21,7 +21,9 @@
 
 require('dotenv').config({ path: require('path').join(__dirname, '..', '.env') });
 
-const { query, insertRows, executeCommand } = require('./clickhouse');
+const {
+  query, insertRows, executeCommand, config, escapeSqlString,
+} = require('./clickhouse');
 const {
   ensureObservationsStore,
   listMaterializeJobs,
@@ -74,6 +76,15 @@ let lastRewindAtMs = 0;
 
 const ROLLUP_DIM_COLUMNS = Array.from({ length: ROLLUP_DIM_COUNT }, (_, i) => `dim${i}`);
 
+/**
+ * Explorer печатает время бакета в dataTimezone, и в rollup оно приезжает строкой
+ * без зоны. Колонка обязана быть в той же зоне, иначе ClickHouse прочитает строку
+ * в зоне сервера и сдвинет момент времени на её смещение.
+ */
+function rollupMinuteType() {
+  return `DateTime('${escapeSqlString(config.dataTimezone || 'UTC')}')`;
+}
+
 function rollupTableDdl(table) {
   const dimDefs = ROLLUP_DIM_COLUMNS
     .map((c) => `      ${c} LowCardinality(String) DEFAULT '',`)
@@ -82,7 +93,7 @@ function rollupTableDdl(table) {
     CREATE TABLE IF NOT EXISTS default.${table}
     (
       observation_id String,
-      minute DateTime,
+      minute ${rollupMinuteType()},
 ${dimDefs}
       bytes UInt64,
       packets UInt64,
@@ -138,6 +149,28 @@ async function migrateRollupDims() {
   await executeCommand(`DROP TABLE IF EXISTS default.${staging} SYNC`, {}, { name: 'observations/rollup-drop-old' });
 }
 
+/**
+ * Таблицы, созданные до привязки времени к зоне, объявляли minute как DateTime без
+ * зоны, и ClickHouse печатал их в зоне сервера, а UI читал как dataTimezone.
+ * Смена типа затрагивает только метаданные: хранится epoch, поэтому уже записанные
+ * моменты времени остаются прежними и начинают печататься в нужной зоне.
+ */
+async function migrateRollupMinuteTz() {
+  const wanted = rollupMinuteType();
+  const { rows } = await query(`
+    SELECT type
+    FROM system.columns
+    WHERE database = 'default' AND table = {table:String} AND name = 'minute'
+  `, { table: ROLLUP_TABLE }, { name: 'observations/rollup-minute-type' });
+  const current = String(rows[0]?.type || '');
+  if (!current || current === wanted) return;
+  await executeCommand(
+    `ALTER TABLE default.${ROLLUP_TABLE} MODIFY COLUMN minute ${wanted}`,
+    {},
+    { name: 'observations/rollup-minute-tz' },
+  );
+}
+
 async function ensureTable() {
   if (!ensureTablePromise) {
     ensureTablePromise = executeCommand(
@@ -146,6 +179,7 @@ async function ensureTable() {
       { name: 'observations/ensure-rollup-table' },
     )
       .then(() => migrateRollupDims())
+      .then(() => migrateRollupMinuteTz())
       .catch((err) => {
         ensureTablePromise = null;
         throw err;

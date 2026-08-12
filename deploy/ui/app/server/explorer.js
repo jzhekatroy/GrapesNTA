@@ -906,6 +906,24 @@ function explorerAggPctColumn(metricKey) {
   }
 }
 
+/**
+ * Время бакета для оси графика и таблиц.
+ *
+ * flows_raw.time_received_ns объявлен как DateTime64(9) без зоны, поэтому
+ * ClickHouse печатает его в зоне сервера, тогда как rollup-таблицы дашборда
+ * (DateTime('UTC')) печатают UTC. UI читает и то, и другое как dataTimezone,
+ * так что без приведения подписи разъезжаются на смещение зоны сервера.
+ * Зона применяется до усечения: иначе toStartOfDay резал бы сутки по зоне
+ * сервера, а подписывал их чужой зоной.
+ */
+function explorerBucketExpr(timeExpr, granKey, seconds) {
+  const tz = escapeSqlString(config.dataTimezone || 'UTC');
+  const zoned = `toTimeZone(${timeExpr}, '${tz}')`;
+  return granKey === '1d'
+    ? `toStartOfDay(${zoned})`
+    : `toStartOfInterval(${zoned}, INTERVAL ${seconds} SECOND)`;
+}
+
 async function createExplorerWindowAnchor() {
   const tz = escapeSqlString(config.dataTimezone || 'UTC');
   const { rows } = await query(
@@ -1689,7 +1707,7 @@ async function explorerFlowsPeakPath({
 }) {
   const peakWindowKey = thresholds.find((thr) => thr.aggregate === 'peak')?.peakWindow || '5m';
   const peakSec = peakWindowSeconds(peakWindowKey);
-  const bucketExpr = `toStartOfInterval(f.${t}, INTERVAL ${peakSec} SECOND)`;
+  const bucketExpr = explorerBucketExpr(`f.${t}`, null, peakSec);
   const needsUniqSrc = metricKey === 'uniq_src'
     || thresholds.some((thr) => thr.metric === 'uniq_src');
   const peakPctCol = metricKey === 'uniq_src'
@@ -2320,9 +2338,7 @@ async function explorerResultSeries(body = {}, flowRows = []) {
   const groupSelect = groups.map((g, i) => `${dims[g].expr} AS g${i}`);
   const groupAliases = groups.map((_, i) => `g${i}`);
   const groupBySql = ['bucket', ...groupAliases].join(', ');
-  const bucketExpr = gran.key === '1d'
-    ? `toStartOfDay(f.${t})`
-    : `toStartOfInterval(f.${t}, INTERVAL ${gran.seconds} SECOND)`;
+  const bucketExpr = explorerBucketExpr(`f.${t}`, gran.key, gran.seconds);
 
   return {
     sql: `
@@ -2422,9 +2438,7 @@ async function explorerGroupedTimeseries(body = {}) {
   if (filterSql) whereClauses.push(filterSql);
   const scopedParams = applyExplorerScope(whereClauses, params, q);
   const plan = buildExplorerGroupPlan(groups, dims);
-  const bucketExpr = gran.key === '1d'
-    ? `toStartOfDay(f.${t})`
-    : `toStartOfInterval(f.${t}, INTERVAL ${gran.seconds} SECOND)`;
+  const bucketExpr = explorerBucketExpr(`f.${t}`, gran.key, gran.seconds);
   const vlanGroupIndexes = groups.map((g, i) => (dims[g].kind === 'vlan' ? i : -1)).filter((i) => i >= 0);
   const asnGroupIndexes = groups.map((g, i) => (dims[g].kind === 'asn' ? i : -1)).filter((i) => i >= 0);
   const tcpGroupIndexes = groups.map((g, i) => (dims[g].kind === 'tcp_flags' ? i : -1)).filter((i) => i >= 0);
@@ -2637,9 +2651,7 @@ async function explorerTimeseries(body = {}, options = {}) {
   const whereClauses = [`f.${t} >= ts_from`, `f.${t} < ts_to`];
   if (filterSql) whereClauses.push(filterSql);
   const scopedParams = applyExplorerScope(whereClauses, params, q);
-  const bucketExpr = gran.key === '1d'
-    ? `toStartOfDay(f.${t})`
-    : `toStartOfInterval(f.${t}, INTERVAL ${gran.seconds} SECOND)`;
+  const bucketExpr = explorerBucketExpr(`f.${t}`, gran.key, gran.seconds);
   const metricExpr = {
     bps: `round(sum(${scaled.bytes}) * 8 / ${gran.seconds}, 0)`,
     volume: `sum(${scaled.bytes})`,
