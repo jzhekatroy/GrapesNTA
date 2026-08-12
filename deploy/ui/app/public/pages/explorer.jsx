@@ -34,6 +34,8 @@ const DEFAULT_EXPLORER_PRESETS = [
 ];
 
 const EXPLORER_DEFAULT_VISUAL_LIMIT = 5;
+/** Rollup наблюдений хранит четыре измерения разреза (dim0…dim3). */
+const OBSERVATION_MAX_GROUP_BY = 4;
 const EXPLORER_DEFAULT_FETCH_LIMIT = 25;
 const EXPLORER_ON_DEMAND_FETCH_LIMITS = [50, 100];
 const EXPLORER_CHART_HEIGHT = 196;
@@ -2699,13 +2701,16 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
     })).filter((f) => f.field);
     const { validThresholds } = resolveExplorerThresholdPayload(thresholds, schema);
 
+    // Rollup наблюдений хранит только dim0/dim1 — глубже двух измерений разрез
+    // не доедет до графика, поэтому режем здесь, а не молча теряем в воркере.
+    const chartGroup = ((groupBy || []).length
+      ? [...groupBy]
+      : [topGroup || 'src_asn']).slice(0, OBSERVATION_MAX_GROUP_BY);
+
     try {
       let id = observationCompose?.editId || null;
       if (id) {
         const existing = await ApiClient.loadObservation(id);
-        const chartGroup = (groupBy || []).length
-          ? [...groupBy]
-          : [topGroup || 'src_asn'];
         await ApiClient.updateObservation(id, {
           ...existing,
           name: (name || '').trim() || existing.name,
@@ -2731,9 +2736,6 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
         });
         pushToast({ kind: 'success', title: 'Фильтры наблюдения обновлены', desc: name || existing.name });
       } else {
-        const chartGroup = (groupBy || []).length
-          ? [...groupBy]
-          : [topGroup || 'src_asn'];
         const payload = {
           name: (name || '').trim() || `Наблюдение · ${metricLabel}`,
           description: '',
@@ -5310,6 +5312,16 @@ function SaveObservationModal({
             )}
           </div>
         </div>
+        {(groupBy || []).length > OBSERVATION_MAX_GROUP_BY && (
+          <div style={{ color: 'var(--fg-warning)', font: 'var(--pv-text-body-3)' }}>
+            Наблюдение сохранит первые {OBSERVATION_MAX_GROUP_BY} измерения разреза:
+            {' '}
+            {(groupBy || []).slice(0, OBSERVATION_MAX_GROUP_BY)
+              .map((g) => dimensionById?.[g]?.label || g)
+              .join(' × ')}
+            . Остальные останутся только в разборе трафика.
+          </div>
+        )}
         <label className="row" style={{ gap: 8, alignItems: 'center' }}>
           <input
             type="checkbox"

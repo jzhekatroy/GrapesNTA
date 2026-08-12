@@ -210,42 +210,22 @@ function chartSeriesStats(points, lines, mode = 'total') {
   return { min, max, avg, last, pctOfMax, n: values.length };
 }
 
-function topGroupFromWidgets(widgets) {
-  const top = (widgets || []).find((w) => w.type === 'top_table');
-  return top?.groupBy?.[0] || 'src_asn';
+/**
+ * Разрез наблюдения — весь список измерений, а не первое поле: наблюдение из
+ * разбора трафика может группировать по четырём измерениям, и обрезка теряла остальные.
+ */
+function groupLabel(id, options) {
+  return (options || []).find((o) => o.id === id)?.label
+    || TOP_GROUP_OPTIONS.find((o) => o.id === id)?.label
+    || String(id || '');
 }
 
-function withTopGroup(widgets, groupId) {
-  const groupBy = [groupId || 'src_asn'];
-  const list = Array.isArray(widgets) ? widgets.map((w) => ({ ...w })) : [];
-  if (!list.some((w) => w.type === 'timeseries_bps')) {
-    list.unshift({
-      id: 'w-ts',
-      type: 'timeseries_bps',
-      metric: 'bps',
-      groupBy,
-      seriesLimit: 8,
-      limit: null,
-    });
-  } else {
-    for (const w of list) {
-      if (w.type === 'timeseries_bps') {
-        w.groupBy = groupBy;
-        w.seriesLimit = w.seriesLimit || 8;
-      }
-    }
-  }
-  const idx = list.findIndex((w) => w.type === 'top_table');
-  const top = {
-    id: 'w-top',
-    type: 'top_table',
-    metric: 'bps',
-    groupBy,
-    limit: 15,
-  };
-  if (idx >= 0) list[idx] = { ...list[idx], ...top, id: list[idx].id || 'w-top' };
-  else list.push(top);
-  return list;
+function groupByFromWidgets(widgets) {
+  const list = Array.isArray(widgets) ? widgets : [];
+  const chart = list.find((w) => w.type === 'timeseries_bps' && w.groupBy?.length);
+  if (chart) return chart.groupBy.map(String);
+  const top = list.find((w) => w.type === 'top_table' && w.groupBy?.length);
+  return top ? top.groupBy.map(String) : ['src_asn'];
 }
 
 function formatFilterSummary(filters, filterFields) {
@@ -721,8 +701,8 @@ function ObservationLiveTile({
     }
     return Number(last.bps) || 0;
   })();
-  const topBy = topGroupFromWidgets(item.widgets);
-  const topLabel = groupOptions.find((g) => g.id === topBy)?.label || topBy;
+  const topGroupBy = groupByFromWidgets(item.widgets);
+  const topLabel = topGroupBy.map((g) => groupLabel(g, groupOptions)).join(' × ');
   const rollup = rollupStatusLabel(item);
   const chartH = expanded ? 320 : 200;
   const periodLabel = observationPeriodLabel(lookback, customRange);
@@ -882,7 +862,7 @@ function ObservationLiveTile({
                     <tr>
                       {(topWidget.groupBy || []).map((g) => (
                         <th key={g} style={{ textAlign: 'left', padding: 4 }}>
-                          {groupOptions.find((o) => o.id === g)?.label || g}
+                          {groupLabel(g, groupOptions)}
                         </th>
                       ))}
                       <th style={{ textAlign: 'right', padding: 4 }}>бит/с</th>
@@ -1011,14 +991,12 @@ function PageObservations({ onNavigate }) {
   );
 
   const filterFields = config?.schema?.filterFields || [];
+  // Все измерения схемы, а не только «топовые»: разрез приходит из разбора
+  // трафика и может содержать любое поле, иначе подпись падает до сырого id.
   const groupOptions = useMemo(() => {
     const dims = config?.schema?.dimensions || [];
     if (!dims.length) return TOP_GROUP_OPTIONS;
-    const mapped = TOP_GROUP_OPTIONS
-      .map((o) => dims.find((d) => d.id === o.id))
-      .filter(Boolean)
-      .map((d) => ({ id: d.id, label: d.label }));
-    return mapped.length ? mapped : TOP_GROUP_OPTIONS;
+    return dims.map((d) => ({ id: d.id, label: d.label }));
   }, [config]);
 
   const reload = useCallback(async () => {
@@ -1092,7 +1070,7 @@ function PageObservations({ onNavigate }) {
         description: settings.description,
         folder: settings.folder,
         lookback: settings.lookback,
-        widgets: withTopGroup(settings.widgets, topGroupFromWidgets(settings.widgets)),
+        widgets: settings.widgets,
         layout: settings.layout,
         materialize: settings.materialize,
         report: settings.report,
@@ -1151,7 +1129,7 @@ function PageObservations({ onNavigate }) {
     }
   };
 
-  const settingsTop = topGroupFromWidgets(settings?.widgets);
+  const settingsGroupBy = groupByFromWidgets(settings?.widgets);
 
   if (settings && settingsItem) {
     return (
@@ -1180,7 +1158,7 @@ function PageObservations({ onNavigate }) {
                   name: settingsItem.name || settings.name,
                   filters: settings.filters || settingsItem.filters || [],
                   thresholds: settings.thresholds || settingsItem.thresholds || [],
-                  groupBy: settingsTop ? [settingsTop] : null,
+                  groupBy: settingsGroupBy.length ? settingsGroupBy : null,
                   lookback: settings.lookback || settingsItem.lookback || null,
                 })}
               >
@@ -1199,34 +1177,6 @@ function PageObservations({ onNavigate }) {
                 onChange={(e) => setSettings({ ...settings, description: e.target.value })}
               />
             </label>
-            <div className="row" style={{ gap: 16, flexWrap: 'wrap' }}>
-              <label className="col" style={{ gap: 4, minWidth: 160 }}>
-                <span>Папка</span>
-                <input
-                  className="input"
-                  value={settings.folder || 'Мои наблюдения'}
-                  onChange={(e) => setSettings({ ...settings, folder: e.target.value })}
-                />
-              </label>
-              <label className="col" style={{ gap: 4, minWidth: 160 }}>
-                <span>Окно графика</span>
-                <select className="input" value={settings.lookback} onChange={(e) => setSettings({ ...settings, lookback: e.target.value })}>
-                  {(config?.lookbacks || Object.keys(LOOKBACK_LABELS)).map((v) => (
-                    <option key={v} value={v}>{LOOKBACK_LABELS[v] || v}</option>
-                  ))}
-                </select>
-              </label>
-              <label className="col" style={{ gap: 4, minWidth: 180 }}>
-                <span>Топ по полю</span>
-                <select
-                  className="input"
-                  value={settingsTop}
-                  onChange={(e) => setSettings({ ...settings, widgets: withTopGroup(settings.widgets, e.target.value) })}
-                >
-                  {groupOptions.map((g) => <option key={g.id} value={g.id}>{g.label}</option>)}
-                </select>
-              </label>
-            </div>
             <label className="row" style={{ gap: 8, alignItems: 'center' }}>
               <input
                 type="checkbox"
@@ -1423,45 +1373,32 @@ function PageObservations({ onNavigate }) {
           if (ao !== bo) return ao - bo;
           return String(a.name || '').localeCompare(String(b.name || ''), 'ru');
         });
-        const folders = [];
-        const byFolder = new Map();
-        for (const item of sorted) {
-          const folder = item.folder || 'Мои наблюдения';
-          if (!byFolder.has(folder)) {
-            byFolder.set(folder, []);
-            folders.push(folder);
-          }
-          byFolder.get(folder).push(item);
-        }
-        return folders.map((folder) => (
-          <div key={folder} className="col" style={{ gap: 10 }}>
-            <div style={{ font: 'var(--pv-text-body-2-bold)' }}>{folder}</div>
-            <div className="observations-board">
-              {byFolder.get(folder).map((item) => (
-                <ObservationLiveTile
-                  key={item.id}
-                  item={item}
-                  filterFields={filterFields}
-                  groupOptions={groupOptions}
-                  lookbackOptions={config?.lookbacks || LOOKBACK_OPTIONS}
-                  expanded={expandedId === item.id}
-                  onToggleExpand={() => setExpandedId((cur) => (cur === item.id ? null : item.id))}
-                  canWrite={canWriteObservations}
-                  onSettings={() => openSettings(item)}
-                  onDelete={() => removeItem(item.id)}
-                  onCancel={() => ApiClient.cancelObservationMaterialize(item.id)
-                    .then(() => reload())
-                    .then(() => pushToast?.({ kind: 'success', title: 'Подготовка отменена' }))
-                    .catch((e) => setError(e.message))}
-                  onLookbackChange={changeTileLookback}
-                  onRunReport={() => ApiClient.runObservationReport(item.id)
-                    .then(() => pushToast?.({ kind: 'success', title: 'Отчёт сформирован' }))
-                    .catch((e) => setError(e.message))}
-                />
-              ))}
-            </div>
+        return (
+          <div className="observations-board">
+            {sorted.map((item) => (
+              <ObservationLiveTile
+                key={item.id}
+                item={item}
+                filterFields={filterFields}
+                groupOptions={groupOptions}
+                lookbackOptions={config?.lookbacks || LOOKBACK_OPTIONS}
+                expanded={expandedId === item.id}
+                onToggleExpand={() => setExpandedId((cur) => (cur === item.id ? null : item.id))}
+                canWrite={canWriteObservations}
+                onSettings={() => openSettings(item)}
+                onDelete={() => removeItem(item.id)}
+                onCancel={() => ApiClient.cancelObservationMaterialize(item.id)
+                  .then(() => reload())
+                  .then(() => pushToast?.({ kind: 'success', title: 'Подготовка отменена' }))
+                  .catch((e) => setError(e.message))}
+                onLookbackChange={changeTileLookback}
+                onRunReport={() => ApiClient.runObservationReport(item.id)
+                  .then(() => pushToast?.({ kind: 'success', title: 'Отчёт сформирован' }))
+                  .catch((e) => setError(e.message))}
+              />
+            ))}
           </div>
-        ));
+        );
       })()}
     </div>
   );

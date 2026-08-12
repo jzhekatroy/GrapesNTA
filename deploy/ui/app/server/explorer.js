@@ -3157,6 +3157,8 @@ module.exports = {
   parseExplorerAsnNumber,
   asnExplorerDisplayLabel,
   lookupAsnDisplayNames,
+  explorerEntityDisplayLabel,
+  lookupEntityDisplayNames,
   EXPLORER_MAX_LIMIT,
   EXPLORER_MAX_EXPORT_ROWS,
   explorerAggPctColumn,

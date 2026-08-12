@@ -6,10 +6,20 @@ const { query, executeCommand, parseDataDatetimeSql } = require('./clickhouse');
 const {
   explorerTimeseries,
   explorerSchema,
+  explorerFlows,
+  explorerResultSeries,
   parseExplorerAsnNumber,
   asnExplorerDisplayLabel,
   lookupAsnDisplayNames,
+  explorerEntityDisplayLabel,
+  lookupEntityDisplayNames,
+  buildSummaryFromFlowRows: summaryFromExplorerFlowRows,
 } = require('./explorer');
+const {
+  normalizeExplorerThresholds,
+  explorerThresholdsActive,
+  describeThresholds,
+} = require('./explorer-thresholds');
 const { protocolChartColor } = require('./protocol-colors');
 const { tcpFlagsMaskToLabel } = require('./tcp-flags');
 const { getMergedDiagnosticsPayload } = require('./analytics-diagnostics');
@@ -59,6 +69,8 @@ const MIN_REFRESH_SEC = 300;
 /** Observation rollup bucket (aligned with dashboard 5m charts). */
 const ROLLUP_TABLE = 'observation_rollups_5m';
 const ROLLUP_BUCKET_SEC = 300;
+/** Сколько измерений разреза хранит rollup — колонки dim0…dim3. */
+const ROLLUP_DIM_COUNT = 4;
 const DEFAULT_TTL_HINT_DAYS = 14;
 const BACKFILL_HOURS = Math.max(0, Number(process.env.OBSERVATION_BACKFILL_HOURS) || 24);
 const STUCK_SEC = Math.max(60, Number(process.env.OBSERVATION_ROLLUP_STUCK_SEC) || 900);
@@ -276,6 +288,9 @@ function materializeWarning(activeCount) {
 
 function normalizeObservation(raw = {}, { userId, existing = null } = {}) {
   const filters = normalizeFilters(raw.filters != null ? raw.filters : existing?.filters);
+  const thresholds = normalizeExplorerThresholds(
+    raw.thresholds != null ? raw.thresholds : (existing?.thresholds || []),
+  );
   const widgets = normalizeWidgets(raw.widgets != null ? raw.widgets : existing?.widgets);
   const scope = classifyScope(filters, widgets);
   const lookback = LOOKBACKS.has(raw.lookback) ? raw.lookback : (existing?.lookback || '1h');
@@ -327,6 +342,7 @@ function normalizeObservation(raw = {}, { userId, existing = null } = {}) {
     // Наблюдения всегда видны всем; редактировать по-прежнему может владелец.
     isShared: true,
     filters,
+    thresholds,
     lookback,
     widgets,
     layout: normalizeLayout(raw, existing),
@@ -608,13 +624,47 @@ function observationSeriesLimit() {
   return CHART_SERIES_LIMIT;
 }
 
-function dimKey(dim0, dim1) {
-  return dim1 ? `${dim0}|${dim1}` : String(dim0 || '');
+/** Колонки разреза rollup: dim0…dim3. */
+function rollupDimColumns(count = ROLLUP_DIM_COUNT) {
+  const n = Math.min(Math.max(Number(count) || 1, 1), ROLLUP_DIM_COUNT);
+  return Array.from({ length: n }, (_, i) => `dim${i}`);
 }
 
-function dimLabel(dim0, dim1) {
-  if (dim1) return `${dim0} · ${dim1}`;
-  return String(dim0 || '—');
+/**
+ * Ключ серии — значения ровно тех колонок, которые занимает разрез. Для одного и
+ * двух измерений совпадает с прежним форматом, поэтому старые строки rollup
+ * читаются без миграции данных.
+ */
+function dimKey(values, count) {
+  const list = Array.isArray(values) ? values : [values];
+  const n = Math.min(Math.max(Number(count) || list.length || 1, 1), ROLLUP_DIM_COUNT);
+  return Array.from({ length: n }, (_, i) => String(list[i] ?? '')).join('|');
+}
+
+function dimKeyFromRow(row, count) {
+  return dimKey(rollupDimColumns(count).map((c) => row[c]), count);
+}
+
+function dimLabel(values) {
+  const shown = (Array.isArray(values) ? values : [values])
+    .map((v) => String(v ?? '').trim())
+    .filter(Boolean);
+  return shown.length ? shown.join(' · ') : '—';
+}
+
+/** Итоговые строки rollup помечены пустыми значениями во всех колонках разреза. */
+function rollupTotalRowSql() {
+  return rollupDimColumns().map((c) => `${c} = ''`).join('\n        AND ');
+}
+
+function rollupGroupedRowSql() {
+  return `NOT (${rollupDimColumns().map((c) => `${c} = ''`).join(' AND ')})`;
+}
+
+/** SQL-ключ серии; должен совпадать с dimKey для того же разреза. */
+function rollupKeySql(count) {
+  const cols = rollupDimColumns(count);
+  return cols.length > 1 ? `arrayStringConcat([${cols.join(', ')}], '|')` : cols[0];
 }
 
 function asnGroupIndexes(groupBy = []) {
@@ -645,6 +695,38 @@ async function enrichAsnLabelsInRows(rows, groupBy = []) {
       const asn = parseExplorerAsnNumber(rawValues[idx] ?? values[idx]);
       if (asn == null) continue;
       values[idx] = asnExplorerDisplayLabel(asn, nameMap.get(asn) || '');
+    }
+    return { ...row, values, rawValues };
+  });
+}
+
+function entityGroupIndexes(groupBy = []) {
+  return groupBy
+    .map((g, i) => (g === 'src_entity' || g === 'dst_entity' ? i : -1))
+    .filter((i) => i >= 0);
+}
+
+/** Rollup хранит entity_id вида isp:arbital; в UI показываем «Арбиталь (isp:arbital)». */
+async function enrichEntityLabelsInRows(rows, groupBy = []) {
+  const indexes = entityGroupIndexes(groupBy);
+  if (!indexes.length || !rows?.length) return rows || [];
+
+  const ids = new Set();
+  for (const row of rows) {
+    for (const idx of indexes) {
+      const id = String(row.rawValues?.[idx] ?? row.values?.[idx] ?? '').trim();
+      if (id && id !== '—') ids.add(id);
+    }
+  }
+  const nameMap = await lookupEntityDisplayNames([...ids]);
+  return rows.map((row) => {
+    const rawValues = Array.isArray(row.rawValues)
+      ? [...row.rawValues]
+      : [...(row.values || [])];
+    const values = Array.isArray(row.values) ? [...row.values] : [...rawValues];
+    for (const idx of indexes) {
+      const id = String(rawValues[idx] ?? values[idx] ?? '').trim();
+      values[idx] = explorerEntityDisplayLabel(id, nameMap.get(id) || '');
     }
     return { ...row, values, rawValues };
   });
@@ -688,8 +770,7 @@ async function readRollupTimeseries(observationId, window) {
       WHERE observation_id = {id:String}
         AND minute >= ${parseDataDatetimeSql('from')}
         AND minute < ${parseDataDatetimeSql('to')}
-        AND dim0 = ''
-        AND dim1 = ''
+        AND ${rollupTotalRowSql()}
       GROUP BY minute
       ORDER BY minute
     `, {
@@ -725,8 +806,7 @@ async function readRollupPeriodTotals(observationId, window) {
       WHERE observation_id = {id:String}
         AND minute >= ${parseDataDatetimeSql('from')}
         AND minute < ${parseDataDatetimeSql('to')}
-        AND dim0 = ''
-        AND dim1 = ''
+        AND ${rollupTotalRowSql()}
     `, {
       id: observationId,
       from: window.from,
@@ -775,10 +855,11 @@ async function readRollupTop(observationId, window, { limit = TOP_ROWS_LIMIT, gr
       60,
       Math.round((new Date(window.to) - new Date(window.from)) / 1000) || 3600,
     );
+    const dimCount = Math.min(Math.max(groupBy.length || 1, 1), ROLLUP_DIM_COUNT);
+    const dimCols = rollupDimColumns(dimCount).join(',\n        ');
     const { rows } = await query(`
       SELECT
-        dim0,
-        dim1,
+        ${dimCols},
         sum(bytes) AS bytes,
         sum(packets) AS packets,
         sum(flows) AS flows
@@ -786,8 +867,8 @@ async function readRollupTop(observationId, window, { limit = TOP_ROWS_LIMIT, gr
       WHERE observation_id = {id:String}
         AND minute >= ${parseDataDatetimeSql('from')}
         AND minute < ${parseDataDatetimeSql('to')}
-        AND dim0 != ''
-      GROUP BY dim0, dim1
+        AND ${rollupGroupedRowSql()}
+      GROUP BY ${rollupDimColumns(dimCount).join(', ')}
       ORDER BY bytes DESC
       LIMIT {limit:UInt32}
     `, {
@@ -803,10 +884,10 @@ async function readRollupTop(observationId, window, { limit = TOP_ROWS_LIMIT, gr
     const pctBase = totals?.bytes || shownBytes || 1;
     const mapped = rows.map((r, i) => {
       const bytes = Number(r.bytes) || 0;
-      const values = r.dim1 ? [String(r.dim0), String(r.dim1)] : [String(r.dim0)];
+      const values = rollupDimColumns(dimCount).map((c) => String(r[c] ?? ''));
       return {
-        id: `rollup-${dimKey(r.dim0, r.dim1)}`,
-        key: dimKey(r.dim0, r.dim1),
+        id: `rollup-${dimKeyFromRow(r, dimCount)}`,
+        key: dimKeyFromRow(r, dimCount),
         values,
         rawValues: [...values],
         metric: Math.round((bytes * 8) / windowSeconds),
@@ -819,7 +900,8 @@ async function readRollupTop(observationId, window, { limit = TOP_ROWS_LIMIT, gr
       };
     });
     const withAsn = await enrichAsnLabelsInRows(mapped, groupBy);
-    return { rows: enrichTcpFlagsLabelsInRows(withAsn, groupBy), totals, windowSeconds };
+    const withEntity = await enrichEntityLabelsInRows(withAsn, groupBy);
+    return { rows: enrichTcpFlagsLabelsInRows(withEntity, groupBy), totals, windowSeconds };
   } catch (err) {
     return { rows: [], error: err.message };
   }
@@ -837,14 +919,14 @@ async function readRollupGroupedTimeseries(observationId, window, { seriesLimit 
   }
 
   const keys = top.rows.map((r) => r.key);
+  const dimCount = Math.min(Math.max(groupBy.length || 1, 1), ROLLUP_DIM_COUNT);
 
   try {
     const totalSeries = await readRollupTimeseries(observationId, window);
     const { rows } = await query(`
       SELECT
         minute,
-        dim0,
-        dim1,
+        ${rollupDimColumns(dimCount).join(',\n        ')},
         sum(bytes) AS bytes,
         sum(packets) AS packets,
         sum(flows) AS flows
@@ -852,9 +934,9 @@ async function readRollupGroupedTimeseries(observationId, window, { seriesLimit 
       WHERE observation_id = {id:String}
         AND minute >= ${parseDataDatetimeSql('from')}
         AND minute < ${parseDataDatetimeSql('to')}
-        AND dim0 != ''
-        AND if(dim1 = '', dim0, concat(dim0, '|', dim1)) IN ({keys:Array(String)})
-      GROUP BY minute, dim0, dim1
+        AND ${rollupGroupedRowSql()}
+        AND ${rollupKeySql(dimCount)} IN ({keys:Array(String)})
+      GROUP BY minute, ${rollupDimColumns(dimCount).join(', ')}
       ORDER BY minute
     `, {
       id: observationId,
@@ -866,7 +948,7 @@ async function readRollupGroupedTimeseries(observationId, window, { seriesLimit 
     const wanted = new Set(keys);
     const bucketMap = new Map();
     for (const r of rows) {
-      const key = dimKey(r.dim0, r.dim1);
+      const key = dimKeyFromRow(r, dimCount);
       if (!wanted.has(key)) continue;
       const minute = r.minute;
       if (!bucketMap.has(minute)) {
@@ -898,7 +980,7 @@ async function readRollupGroupedTimeseries(observationId, window, { seriesLimit 
     const points = [...bucketMap.values()].sort((a, b) => String(a.bucket).localeCompare(String(b.bucket)));
     const lines = top.rows.map((row) => ({
       key: row.key,
-      label: dimLabel(row.values[0], row.values[1]),
+      label: dimLabel(row.values),
       color: row.color,
     }));
     if (otherSeen) {
@@ -917,6 +999,222 @@ async function readRollupGroupedTimeseries(observationId, window, { seriesLimit 
   } catch (err) {
     return { points: [], lines: [], rows: top.rows, error: err.message };
   }
+}
+
+async function runExplorerSpec(spec) {
+  const { rows } = await query(spec.sql, spec.params || {}, {
+    name: 'observations/explorer-threshold',
+    clickhouse_settings: spec.clickhouse_settings,
+    requestTimeoutMs: spec.requestTimeoutMs,
+  });
+  return { data: await spec.map(rows), meta: spec.meta || {} };
+}
+
+function mapFlowRowsToObservationRows(flowRows, groupBy = []) {
+  return (flowRows || []).map((r, i) => {
+    const values = r.values || [];
+    const rawValues = r.rawValues || values;
+    const key = dimKey(rawValues, groupBy.length || 1);
+    return {
+      id: r.id,
+      key,
+      values,
+      rawValues,
+      metric: r.avgBps ?? r.metric,
+      avgBps: r.avgBps ?? r.metric,
+      pct: r.pct,
+      bytes: r.bytes,
+      packets: r.packets,
+      flows: r.flows,
+      color: r.color || protocolChartColor(i),
+    };
+  });
+}
+
+async function fetchThresholdTopRows(obs, window, { groupBy, limit, metric = 'bps' }) {
+  const body = {
+    range: 'custom',
+    from: window.from,
+    to: window.to,
+    filters: obs.filters,
+    thresholds: obs.thresholds,
+    metric,
+    groupBy,
+    limit,
+    includeSummary: false,
+    includeTimeseries: false,
+  };
+  const spec = await explorerFlows(body);
+  const result = await runExplorerSpec(spec);
+  const windowSeconds = result.meta?.windowSeconds || Math.max(
+    60,
+    Math.round((Date.parse(window.to) - Date.parse(window.from)) / 1000) || 3600,
+  );
+  const summary = summaryFromExplorerFlowRows(result.data, windowSeconds);
+  return {
+    rows: mapFlowRowsToObservationRows(result.data, groupBy),
+    totals: summary ? { bytes: summary.bytes, packets: summary.packets, flows: summary.flows } : null,
+    windowSeconds,
+    meta: result.meta,
+  };
+}
+
+async function fetchThresholdGroupedTimeseries(obs, window, { groupBy, seriesLimit }) {
+  const top = await fetchThresholdTopRows(obs, window, { groupBy, limit: seriesLimit });
+  if (!top.rows.length) {
+    return {
+      points: [],
+      lines: [],
+      rows: [],
+      totals: top.totals,
+      windowSeconds: top.windowSeconds,
+      warning: top.meta?.thresholdWarning || null,
+    };
+  }
+
+  const body = {
+    range: 'custom',
+    from: window.from,
+    to: window.to,
+    filters: obs.filters,
+    thresholds: obs.thresholds,
+    metric: 'bps',
+    groupBy,
+    granularity: '5m',
+  };
+  const seriesSpec = await explorerResultSeries(body, top.rows);
+  const seriesResult = await runExplorerSpec(seriesSpec);
+  const seriesByRow = seriesResult.data?.seriesByRow || {};
+  const bucketMap = new Map();
+  for (const row of top.rows) {
+    const series = seriesByRow[row.id] || [];
+    for (const pt of series) {
+      const bucket = pt.bucket;
+      if (!bucketMap.has(bucket)) bucketMap.set(bucket, { t: bucket, bucket });
+      bucketMap.get(bucket)[row.key] = Number(pt.bps ?? pt.value) || 0;
+    }
+  }
+  const points = [...bucketMap.values()].sort((a, b) => String(a.bucket).localeCompare(String(b.bucket)));
+  const lines = top.rows.map((row) => ({
+    key: row.key,
+    label: dimLabel(row.values),
+    color: row.color,
+  }));
+  return {
+    points,
+    lines,
+    rows: top.rows,
+    totals: top.totals,
+    windowSeconds: top.windowSeconds,
+    warning: top.meta?.thresholdWarning || null,
+  };
+}
+
+async function previewObservationWithThresholds(obs, window) {
+  const widgets = [];
+  let cachedTop = null;
+
+  for (const w of obs.widgets) {
+    try {
+      if (w.type === 'timeseries_bps') {
+        const groupBy = observationChartGroupBy(obs, w);
+        if (groupBy.length) {
+          const seriesLimit = observationSeriesLimit(obs, w);
+          const data = await fetchThresholdGroupedTimeseries(obs, window, { groupBy, seriesLimit });
+          widgets.push({
+            id: w.id,
+            type: w.type,
+            mode: 'grouped',
+            groupBy,
+            source: 'flows_raw',
+            status: data.points.length || data.rows.length ? 'ok' : 'ok',
+            series: data.points,
+            points: data.points,
+            lines: data.lines,
+            rows: data.rows,
+            warning: data.warning,
+          });
+          if (!cachedTop) {
+            cachedTop = {
+              rows: data.rows,
+              groupBy,
+              requested: seriesLimit,
+              totals: data.totals,
+              windowSeconds: data.windowSeconds,
+            };
+          }
+          continue;
+        }
+
+        const bundle = await explorerTimeseries({
+          ...window,
+          metric: 'bps',
+          filters: obs.filters,
+          thresholds: obs.thresholds,
+          granularity: '5m',
+        });
+        const { rows } = await query(bundle.sql, bundle.params, { name: 'observations/threshold-ts' });
+        const series = await bundle.map(rows);
+        widgets.push({
+          id: w.id,
+          type: w.type,
+          mode: 'total',
+          source: 'flows_raw',
+          status: 'ok',
+          series,
+          warning: null,
+        });
+        continue;
+      }
+
+      if (w.type === 'top_table') {
+        const groupBy = w.groupBy?.length ? w.groupBy : ['src_asn'];
+        const wantRows = TOP_ROWS_LIMIT;
+        const cachedRows = Array.isArray(cachedTop?.rows)
+          ? cachedTop.rows.filter((r) => !r.isOther)
+          : null;
+        const cacheCovers = cachedTop
+          && cachedTop.groupBy.join('|') === groupBy.join('|')
+          && cachedRows
+          && (cachedRows.length >= wantRows || cachedRows.length < (cachedTop.requested || 0));
+        if (cacheCovers) {
+          widgets.push({
+            id: w.id,
+            type: w.type,
+            source: 'flows_raw',
+            status: 'ok',
+            rows: cachedRows.slice(0, wantRows),
+            groupBy,
+            warning: null,
+          });
+          continue;
+        }
+        const data = await fetchThresholdTopRows(obs, window, { groupBy, limit: wantRows });
+        widgets.push({
+          id: w.id,
+          type: w.type,
+          source: 'flows_raw',
+          status: 'ok',
+          rows: data.rows.slice(0, wantRows),
+          groupBy,
+          warning: data.meta?.thresholdWarning || null,
+        });
+      }
+    } catch (err) {
+      widgets.push({
+        id: w.id,
+        type: w.type,
+        status: 'error',
+        error: err.message,
+      });
+    }
+  }
+
+  return {
+    observation: obs,
+    window,
+    widgets,
+  };
 }
 
 function rollupEmptyWarning(obs) {
@@ -938,6 +1236,9 @@ async function previewObservation(id, userId, body = {}) {
   const obs = await getObservation(id, userId);
   if (!obs) return null;
   const window = resolvePreviewWindow(obs, body);
+  if (explorerThresholdsActive(obs.thresholds)) {
+    return previewObservationWithThresholds(obs, window);
+  }
   const widgets = [];
   let cachedTop = null;
   const useRollup = Boolean(obs.materialize?.enabled);
@@ -1234,6 +1535,13 @@ function describeFilters(filters) {
   }).join(' · ');
 }
 
+function describeObservationScope(obs) {
+  const filterDesc = describeFilters(obs.filters);
+  const thrDesc = describeThresholds(obs.thresholds);
+  if (thrDesc) return `${filterDesc}; пороги: ${thrDesc}`;
+  return filterDesc;
+}
+
 function describeGroupBy(widgets = []) {
   const fields = [...new Set(collectWidgetGroupFields(widgets))];
   if (!fields.length) return 'без группировки';
@@ -1254,6 +1562,9 @@ function explorerLinkForReport(obs, window, timeZone) {
     logic: f.logic,
   }));
   if (filters.length) params.set('filters', encodeURIComponent(JSON.stringify(filters)));
+  if (obs.thresholds?.length) {
+    params.set('thresholds', encodeURIComponent(JSON.stringify(obs.thresholds)));
+  }
   params.set('range', 'custom');
   params.set('from', zonedDateTime(window.from, timeZone, 'T'));
   params.set('to', zonedDateTime(window.to, timeZone, 'T'));
@@ -1659,7 +1970,7 @@ a{color:#1a56c4}
 </head><body>
 <h1>${escapeHtml(obs.name)}</h1>
 <p class="sub">Период: ${escapeHtml(periodLabel)}</p>
-<p class="sub">Фильтры: ${escapeHtml(describeFilters(obs.filters))}</p>
+<p class="sub">Фильтры: ${escapeHtml(describeObservationScope(obs))}</p>
 <p class="sub">Группировка: ${escapeHtml(describeGroupBy(obs.widgets))}</p>
 ${previewError ? `<p style="color:#a00">Ошибка выборки: ${escapeHtml(previewError)}</p>` : ''}
 ${reportKpiHtml(totals, timeZone)}
@@ -1930,7 +2241,7 @@ async function listMaterializeJobs() {
     .map((o) => {
       const ts = (o.widgets || []).find((w) => w.type === 'timeseries_bps');
       const top = (o.widgets || []).find((w) => w.type === 'top_table' && w.groupBy?.length);
-      const groupBy = observationChartGroupBy(o, ts).slice(0, 2);
+      const groupBy = observationChartGroupBy(o, ts).slice(0, ROLLUP_DIM_COUNT);
       const mat = o.materialize || {};
       return {
         id: o.id,
@@ -2147,6 +2458,7 @@ module.exports = {
   MIN_REFRESH_SEC,
   ROLLUP_TABLE,
   ROLLUP_BUCKET_SEC,
+  ROLLUP_DIM_COUNT,
   ARTIFACTS_DIR,
   BACKFILL_HOURS,
   STUCK_SEC,

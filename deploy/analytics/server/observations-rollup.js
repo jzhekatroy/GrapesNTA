@@ -30,6 +30,7 @@ const {
   MIN_REFRESH_SEC,
   ROLLUP_TABLE,
   ROLLUP_BUCKET_SEC,
+  ROLLUP_DIM_COUNT,
   STUCK_SEC,
   MAX_FAIL_COUNT,
 } = require('./observations');
@@ -40,6 +41,7 @@ const {
 const {
   explorerTimeseries,
   explorerGroupedTimeseries,
+  explorerSchema,
 } = require('./explorer');
 
 const CONCURRENCY = Math.max(1, Number(process.env.OBSERVATION_ROLLUP_CONCURRENCY) || 1);
@@ -61,31 +63,93 @@ function backoffMinutes(failCount) {
   return steps[Math.min(steps.length - 1, Math.max(0, failCount - 1))];
 }
 
+function emptyRollupDims() {
+  return Object.fromEntries(
+    Array.from({ length: ROLLUP_DIM_COUNT }, (_, i) => [`dim${i}`, '']),
+  );
+}
+
 let ensureTablePromise = null;
 let lastRewindAtMs = 0;
 
-async function ensureTable() {
-  if (!ensureTablePromise) {
-    ensureTablePromise = executeCommand(`
-    CREATE TABLE IF NOT EXISTS default.${ROLLUP_TABLE}
+const ROLLUP_DIM_COLUMNS = Array.from({ length: ROLLUP_DIM_COUNT }, (_, i) => `dim${i}`);
+
+function rollupTableDdl(table) {
+  const dimDefs = ROLLUP_DIM_COLUMNS
+    .map((c) => `      ${c} LowCardinality(String) DEFAULT '',`)
+    .join('\n');
+  return `
+    CREATE TABLE IF NOT EXISTS default.${table}
     (
       observation_id String,
       minute DateTime,
-      dim0 LowCardinality(String) DEFAULT '',
-      dim1 LowCardinality(String) DEFAULT '',
+${dimDefs}
       bytes UInt64,
       packets UInt64,
       flows UInt64
     )
     ENGINE = SummingMergeTree
     PARTITION BY toYYYYMM(minute)
-    ORDER BY (observation_id, minute, dim0, dim1)
+    ORDER BY (observation_id, minute, ${ROLLUP_DIM_COLUMNS.join(', ')})
     TTL minute + INTERVAL 14 DAY
     SETTINGS index_granularity = 8192
-  `, {}, { name: 'observations/ensure-rollup-table' }).catch((err) => {
-      ensureTablePromise = null;
-      throw err;
-    });
+  `;
+}
+
+/**
+ * Таблицы, созданные до разреза из четырёх измерений, знают только dim0/dim1.
+ * Новые колонки обязаны войти в ключ сортировки, иначе SummingMergeTree схлопнет
+ * строки, различающиеся только dim2/dim3, и суммы поедут. ALTER MODIFY ORDER BY
+ * умеет добавлять в ключ только колонки, созданные тем же запросом, поэтому
+ * переливаем данные в новую таблицу и подменяем её атомарно.
+ */
+async function migrateRollupDims() {
+  const { rows: tables } = await query(`
+    SELECT sorting_key
+    FROM system.tables
+    WHERE database = 'default' AND name = {table:String}
+  `, { table: ROLLUP_TABLE }, { name: 'observations/rollup-sorting-key' });
+  const sortingKey = String(tables[0]?.sorting_key || '');
+  if (!sortingKey || sortingKey.includes(ROLLUP_DIM_COLUMNS[ROLLUP_DIM_COUNT - 1])) return;
+
+  const { rows: cols } = await query(`
+    SELECT name
+    FROM system.columns
+    WHERE database = 'default' AND table = {table:String}
+  `, { table: ROLLUP_TABLE }, { name: 'observations/rollup-columns' });
+  const present = new Set(cols.map((r) => String(r.name)));
+  const dimSelect = ROLLUP_DIM_COLUMNS
+    .map((c) => (present.has(c) ? c : `'' AS ${c}`))
+    .join(', ');
+
+  const staging = `${ROLLUP_TABLE}_migrating`;
+  await executeCommand(`DROP TABLE IF EXISTS default.${staging} SYNC`, {}, { name: 'observations/rollup-drop-staging' });
+  await executeCommand(rollupTableDdl(staging), {}, { name: 'observations/rollup-create-staging' });
+  await executeCommand(`
+    INSERT INTO default.${staging}
+    SELECT observation_id, minute, ${dimSelect}, bytes, packets, flows
+    FROM default.${ROLLUP_TABLE}
+  `, {}, { name: 'observations/rollup-copy-staging' });
+  await executeCommand(
+    `EXCHANGE TABLES default.${ROLLUP_TABLE} AND default.${staging}`,
+    {},
+    { name: 'observations/rollup-exchange' },
+  );
+  await executeCommand(`DROP TABLE IF EXISTS default.${staging} SYNC`, {}, { name: 'observations/rollup-drop-old' });
+}
+
+async function ensureTable() {
+  if (!ensureTablePromise) {
+    ensureTablePromise = executeCommand(
+      rollupTableDdl(ROLLUP_TABLE),
+      {},
+      { name: 'observations/ensure-rollup-table' },
+    )
+      .then(() => migrateRollupDims())
+      .catch((err) => {
+        ensureTablePromise = null;
+        throw err;
+      });
   }
   return ensureTablePromise;
 }
@@ -155,9 +219,25 @@ function resolveCatchupFrom(job, safeTo) {
   return from;
 }
 
+/**
+ * Explorer молча выбрасывает неизвестные измерения из groupBy. Для rollup это
+ * опаснее ошибки: dim0 заполнился бы вторым измерением, а UI подписал бы его
+ * первым. Поэтому проверяем разрез до запроса.
+ */
+function assertKnownGroupBy(groupBy) {
+  const known = new Set((explorerSchema().dimensions || []).map((d) => d.id));
+  const unknown = groupBy.filter((g) => !known.has(g));
+  if (unknown.length) {
+    throw new Error(`Неизвестное измерение разреза: ${unknown.join(', ')}`);
+  }
+}
+
 async function catchupGrouped(job, window, seriesLimit) {
-  const groupBy = Array.isArray(job.groupBy) ? job.groupBy.filter(Boolean).slice(0, 2) : [];
+  const groupBy = Array.isArray(job.groupBy)
+    ? job.groupBy.filter(Boolean).slice(0, ROLLUP_DIM_COUNT)
+    : [];
   if (!groupBy.length) return { groupedPoints: 0, values: [] };
+  assertKnownGroupBy(groupBy);
 
   const groupedBundle = await explorerGroupedTimeseries({
     ...window,
@@ -175,17 +255,17 @@ async function catchupGrouped(job, window, seriesLimit) {
 
   const values = [];
   for (const row of flowRows) {
-    const dim0 = String(row.rawValues?.[0] ?? row.values?.[0] ?? '');
-    const dim1 = groupBy.length > 1
-      ? String(row.rawValues?.[1] ?? row.values?.[1] ?? '')
-      : '';
-    if (!dim0 && !dim1) continue;
+    const dims = emptyRollupDims();
+    for (let i = 0; i < groupBy.length; i += 1) {
+      dims[`dim${i}`] = String(row.rawValues?.[i] ?? row.values?.[i] ?? '');
+    }
+    // Строка со всеми пустыми значениями неотличима от итоговой — пропускаем.
+    if (!Object.values(dims).some(Boolean)) continue;
     for (const pt of seriesByRow[row.id] || []) {
       values.push({
         observation_id: job.id,
         minute: pt.bucket,
-        dim0,
-        dim1,
+        ...dims,
         bytes: Number(pt.bytes) || 0,
         packets: Number(pt.packets) || 0,
         flows: Number(pt.flows) || 0,
@@ -265,8 +345,7 @@ async function materializeWindow(job, from, to) {
   const values = totalPoints.map((p) => ({
     observation_id: job.id,
     minute: p.bucket,
-    dim0: '',
-    dim1: '',
+    ...emptyRollupDims(),
     bytes: Number(p.bytes) || 0,
     packets: Number(p.packets) || 0,
     flows: Number(p.flows) || 0,

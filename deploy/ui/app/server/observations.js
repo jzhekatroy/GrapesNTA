@@ -11,6 +11,8 @@ const {
   parseExplorerAsnNumber,
   asnExplorerDisplayLabel,
   lookupAsnDisplayNames,
+  explorerEntityDisplayLabel,
+  lookupEntityDisplayNames,
   buildSummaryFromFlowRows: summaryFromExplorerFlowRows,
 } = require('./explorer');
 const {
@@ -67,6 +69,8 @@ const MIN_REFRESH_SEC = 300;
 /** Observation rollup bucket (aligned with dashboard 5m charts). */
 const ROLLUP_TABLE = 'observation_rollups_5m';
 const ROLLUP_BUCKET_SEC = 300;
+/** Сколько измерений разреза хранит rollup — колонки dim0…dim3. */
+const ROLLUP_DIM_COUNT = 4;
 const DEFAULT_TTL_HINT_DAYS = 14;
 const BACKFILL_HOURS = Math.max(0, Number(process.env.OBSERVATION_BACKFILL_HOURS) || 24);
 const STUCK_SEC = Math.max(60, Number(process.env.OBSERVATION_ROLLUP_STUCK_SEC) || 900);
@@ -620,13 +624,47 @@ function observationSeriesLimit() {
   return CHART_SERIES_LIMIT;
 }
 
-function dimKey(dim0, dim1) {
-  return dim1 ? `${dim0}|${dim1}` : String(dim0 || '');
+/** Колонки разреза rollup: dim0…dim3. */
+function rollupDimColumns(count = ROLLUP_DIM_COUNT) {
+  const n = Math.min(Math.max(Number(count) || 1, 1), ROLLUP_DIM_COUNT);
+  return Array.from({ length: n }, (_, i) => `dim${i}`);
 }
 
-function dimLabel(dim0, dim1) {
-  if (dim1) return `${dim0} · ${dim1}`;
-  return String(dim0 || '—');
+/**
+ * Ключ серии — значения ровно тех колонок, которые занимает разрез. Для одного и
+ * двух измерений совпадает с прежним форматом, поэтому старые строки rollup
+ * читаются без миграции данных.
+ */
+function dimKey(values, count) {
+  const list = Array.isArray(values) ? values : [values];
+  const n = Math.min(Math.max(Number(count) || list.length || 1, 1), ROLLUP_DIM_COUNT);
+  return Array.from({ length: n }, (_, i) => String(list[i] ?? '')).join('|');
+}
+
+function dimKeyFromRow(row, count) {
+  return dimKey(rollupDimColumns(count).map((c) => row[c]), count);
+}
+
+function dimLabel(values) {
+  const shown = (Array.isArray(values) ? values : [values])
+    .map((v) => String(v ?? '').trim())
+    .filter(Boolean);
+  return shown.length ? shown.join(' · ') : '—';
+}
+
+/** Итоговые строки rollup помечены пустыми значениями во всех колонках разреза. */
+function rollupTotalRowSql() {
+  return rollupDimColumns().map((c) => `${c} = ''`).join('\n        AND ');
+}
+
+function rollupGroupedRowSql() {
+  return `NOT (${rollupDimColumns().map((c) => `${c} = ''`).join(' AND ')})`;
+}
+
+/** SQL-ключ серии; должен совпадать с dimKey для того же разреза. */
+function rollupKeySql(count) {
+  const cols = rollupDimColumns(count);
+  return cols.length > 1 ? `arrayStringConcat([${cols.join(', ')}], '|')` : cols[0];
 }
 
 function asnGroupIndexes(groupBy = []) {
@@ -657,6 +695,38 @@ async function enrichAsnLabelsInRows(rows, groupBy = []) {
       const asn = parseExplorerAsnNumber(rawValues[idx] ?? values[idx]);
       if (asn == null) continue;
       values[idx] = asnExplorerDisplayLabel(asn, nameMap.get(asn) || '');
+    }
+    return { ...row, values, rawValues };
+  });
+}
+
+function entityGroupIndexes(groupBy = []) {
+  return groupBy
+    .map((g, i) => (g === 'src_entity' || g === 'dst_entity' ? i : -1))
+    .filter((i) => i >= 0);
+}
+
+/** Rollup хранит entity_id вида isp:arbital; в UI показываем «Арбиталь (isp:arbital)». */
+async function enrichEntityLabelsInRows(rows, groupBy = []) {
+  const indexes = entityGroupIndexes(groupBy);
+  if (!indexes.length || !rows?.length) return rows || [];
+
+  const ids = new Set();
+  for (const row of rows) {
+    for (const idx of indexes) {
+      const id = String(row.rawValues?.[idx] ?? row.values?.[idx] ?? '').trim();
+      if (id && id !== '—') ids.add(id);
+    }
+  }
+  const nameMap = await lookupEntityDisplayNames([...ids]);
+  return rows.map((row) => {
+    const rawValues = Array.isArray(row.rawValues)
+      ? [...row.rawValues]
+      : [...(row.values || [])];
+    const values = Array.isArray(row.values) ? [...row.values] : [...rawValues];
+    for (const idx of indexes) {
+      const id = String(rawValues[idx] ?? values[idx] ?? '').trim();
+      values[idx] = explorerEntityDisplayLabel(id, nameMap.get(id) || '');
     }
     return { ...row, values, rawValues };
   });
@@ -700,8 +770,7 @@ async function readRollupTimeseries(observationId, window) {
       WHERE observation_id = {id:String}
         AND minute >= ${parseDataDatetimeSql('from')}
         AND minute < ${parseDataDatetimeSql('to')}
-        AND dim0 = ''
-        AND dim1 = ''
+        AND ${rollupTotalRowSql()}
       GROUP BY minute
       ORDER BY minute
     `, {
@@ -737,8 +806,7 @@ async function readRollupPeriodTotals(observationId, window) {
       WHERE observation_id = {id:String}
         AND minute >= ${parseDataDatetimeSql('from')}
         AND minute < ${parseDataDatetimeSql('to')}
-        AND dim0 = ''
-        AND dim1 = ''
+        AND ${rollupTotalRowSql()}
     `, {
       id: observationId,
       from: window.from,
@@ -787,10 +855,11 @@ async function readRollupTop(observationId, window, { limit = TOP_ROWS_LIMIT, gr
       60,
       Math.round((new Date(window.to) - new Date(window.from)) / 1000) || 3600,
     );
+    const dimCount = Math.min(Math.max(groupBy.length || 1, 1), ROLLUP_DIM_COUNT);
+    const dimCols = rollupDimColumns(dimCount).join(',\n        ');
     const { rows } = await query(`
       SELECT
-        dim0,
-        dim1,
+        ${dimCols},
         sum(bytes) AS bytes,
         sum(packets) AS packets,
         sum(flows) AS flows
@@ -798,8 +867,8 @@ async function readRollupTop(observationId, window, { limit = TOP_ROWS_LIMIT, gr
       WHERE observation_id = {id:String}
         AND minute >= ${parseDataDatetimeSql('from')}
         AND minute < ${parseDataDatetimeSql('to')}
-        AND dim0 != ''
-      GROUP BY dim0, dim1
+        AND ${rollupGroupedRowSql()}
+      GROUP BY ${rollupDimColumns(dimCount).join(', ')}
       ORDER BY bytes DESC
       LIMIT {limit:UInt32}
     `, {
@@ -815,10 +884,10 @@ async function readRollupTop(observationId, window, { limit = TOP_ROWS_LIMIT, gr
     const pctBase = totals?.bytes || shownBytes || 1;
     const mapped = rows.map((r, i) => {
       const bytes = Number(r.bytes) || 0;
-      const values = r.dim1 ? [String(r.dim0), String(r.dim1)] : [String(r.dim0)];
+      const values = rollupDimColumns(dimCount).map((c) => String(r[c] ?? ''));
       return {
-        id: `rollup-${dimKey(r.dim0, r.dim1)}`,
-        key: dimKey(r.dim0, r.dim1),
+        id: `rollup-${dimKeyFromRow(r, dimCount)}`,
+        key: dimKeyFromRow(r, dimCount),
         values,
         rawValues: [...values],
         metric: Math.round((bytes * 8) / windowSeconds),
@@ -831,7 +900,8 @@ async function readRollupTop(observationId, window, { limit = TOP_ROWS_LIMIT, gr
       };
     });
     const withAsn = await enrichAsnLabelsInRows(mapped, groupBy);
-    return { rows: enrichTcpFlagsLabelsInRows(withAsn, groupBy), totals, windowSeconds };
+    const withEntity = await enrichEntityLabelsInRows(withAsn, groupBy);
+    return { rows: enrichTcpFlagsLabelsInRows(withEntity, groupBy), totals, windowSeconds };
   } catch (err) {
     return { rows: [], error: err.message };
   }
@@ -849,14 +919,14 @@ async function readRollupGroupedTimeseries(observationId, window, { seriesLimit 
   }
 
   const keys = top.rows.map((r) => r.key);
+  const dimCount = Math.min(Math.max(groupBy.length || 1, 1), ROLLUP_DIM_COUNT);
 
   try {
     const totalSeries = await readRollupTimeseries(observationId, window);
     const { rows } = await query(`
       SELECT
         minute,
-        dim0,
-        dim1,
+        ${rollupDimColumns(dimCount).join(',\n        ')},
         sum(bytes) AS bytes,
         sum(packets) AS packets,
         sum(flows) AS flows
@@ -864,9 +934,9 @@ async function readRollupGroupedTimeseries(observationId, window, { seriesLimit 
       WHERE observation_id = {id:String}
         AND minute >= ${parseDataDatetimeSql('from')}
         AND minute < ${parseDataDatetimeSql('to')}
-        AND dim0 != ''
-        AND if(dim1 = '', dim0, concat(dim0, '|', dim1)) IN ({keys:Array(String)})
-      GROUP BY minute, dim0, dim1
+        AND ${rollupGroupedRowSql()}
+        AND ${rollupKeySql(dimCount)} IN ({keys:Array(String)})
+      GROUP BY minute, ${rollupDimColumns(dimCount).join(', ')}
       ORDER BY minute
     `, {
       id: observationId,
@@ -878,7 +948,7 @@ async function readRollupGroupedTimeseries(observationId, window, { seriesLimit 
     const wanted = new Set(keys);
     const bucketMap = new Map();
     for (const r of rows) {
-      const key = dimKey(r.dim0, r.dim1);
+      const key = dimKeyFromRow(r, dimCount);
       if (!wanted.has(key)) continue;
       const minute = r.minute;
       if (!bucketMap.has(minute)) {
@@ -910,7 +980,7 @@ async function readRollupGroupedTimeseries(observationId, window, { seriesLimit 
     const points = [...bucketMap.values()].sort((a, b) => String(a.bucket).localeCompare(String(b.bucket)));
     const lines = top.rows.map((row) => ({
       key: row.key,
-      label: dimLabel(row.values[0], row.values[1]),
+      label: dimLabel(row.values),
       color: row.color,
     }));
     if (otherSeen) {
@@ -944,9 +1014,7 @@ function mapFlowRowsToObservationRows(flowRows, groupBy = []) {
   return (flowRows || []).map((r, i) => {
     const values = r.values || [];
     const rawValues = r.rawValues || values;
-    const key = groupBy.length > 1
-      ? dimKey(rawValues[0], rawValues[1])
-      : dimKey(rawValues[0], '');
+    const key = dimKey(rawValues, groupBy.length || 1);
     return {
       id: r.id,
       key,
@@ -1029,7 +1097,7 @@ async function fetchThresholdGroupedTimeseries(obs, window, { groupBy, seriesLim
   const points = [...bucketMap.values()].sort((a, b) => String(a.bucket).localeCompare(String(b.bucket)));
   const lines = top.rows.map((row) => ({
     key: row.key,
-    label: dimLabel(row.values[0], row.values[1]),
+    label: dimLabel(row.values),
     color: row.color,
   }));
   return {
@@ -2173,7 +2241,7 @@ async function listMaterializeJobs() {
     .map((o) => {
       const ts = (o.widgets || []).find((w) => w.type === 'timeseries_bps');
       const top = (o.widgets || []).find((w) => w.type === 'top_table' && w.groupBy?.length);
-      const groupBy = observationChartGroupBy(o, ts).slice(0, 2);
+      const groupBy = observationChartGroupBy(o, ts).slice(0, ROLLUP_DIM_COUNT);
       const mat = o.materialize || {};
       return {
         id: o.id,
@@ -2390,6 +2458,7 @@ module.exports = {
   MIN_REFRESH_SEC,
   ROLLUP_TABLE,
   ROLLUP_BUCKET_SEC,
+  ROLLUP_DIM_COUNT,
   ARTIFACTS_DIR,
   BACKFILL_HOURS,
   STUCK_SEC,
