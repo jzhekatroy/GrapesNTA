@@ -62,39 +62,108 @@ GrapesNTA — установка с нуля
   6. Справочники в UI и проверка данных
 
 
-3. ClickHouse (база с нуля)
----------------------------
+3. ClickHouse — установка сервера
+---------------------------------
 
-3.1. Сервер и диск
+Отдельный хост с диском. Не ставить CH в контейнер без named volume:
+recreate контейнера без volume = пустая база (это уже ловили).
 
-Пакет или Docker — неважно. Обязательно сохранить:
+Ориентир версии: 24.11.x (как на текущем стенде). Канал stable из
+официального репозитория ClickHouse.
 
-  /var/lib/clickhouse          данные
-  /etc/clickhouse-server       users.xml, config.d
+Нужно:
+  диск под /var/lib/clickhouse (лучше SSD/NVMe)
+  RAM: от 16 ГБ на маленьком стенде, на потоке ISP — десятки ГБ
+  сеть до коллекторов, worker и UI (не в интернет)
 
-Без volume recreate контейнера = пустая база.
+Порты по умолчанию: HTTP 8123, native TCP 9000.
+Если снаружи другие (на текущем стенде 6123 / 6124) — везде одни и те же цифры.
 
-Порты по умолчанию: native 9000, HTTP 8123.
-Если снаружи другие (на текущем стенде HTTP 6123, native 6124) —
-везде подставляйте фактические.
 
-Часовой пояс сервера — файл /etc/clickhouse-server/config.d/timezone.xml:
+3.1. Пакет (рекомендуется)
 
-  <clickhouse>
-    <timezone>Europe/Moscow</timezone>
-  </clickhouse>
+Debian 12/13, root:
 
-UI и grapes-worker: CLICKHOUSE_TIMEZONE=Europe/Moscow
-Если сервер UTC, а клиенты Moscow (или наоборот), графики съедут на +-3 часа.
+  apt-get update
+  apt-get install -y apt-transport-https ca-certificates curl gnupg
+  curl -fsSL 'https://packages.clickhouse.com/rpm/lts/repodata/repomd.xml.key' \
+    | gpg --dearmor -o /usr/share/keyrings/clickhouse-keyring.gpg
+  ARCH=$(dpkg --print-architecture)
+  echo "deb [signed-by=/usr/share/keyrings/clickhouse-keyring.gpg arch=${ARCH}] https://packages.clickhouse.com/deb stable main" \
+    > /etc/apt/sources.list.d/clickhouse.list
+  apt-get update
+  apt-get install -y clickhouse-server clickhouse-client
 
-Проверка:
+Инсталлятор спросит пароль пользователя default — это bootstrap-админ.
+Запомните его. Пустой пароль на проде не оставлять.
 
-  clickhouse-client --host 127.0.0.1 --port 9000 -q "SELECT timezone(), now(), now('UTC')"
+  systemctl enable --now clickhouse-server
+  systemctl status clickhouse-server --no-pager
+  clickhouse-client --user default --password '...' -q "SELECT version(), timezone(), now(), now('UTC')"
+
+
+3.2. Конфиг сервера
+
+Файлы класть в /etc/clickhouse-server/config.d/ (не править огромный config.xml).
+
+Часовой пояс — Europe/Moscow. UI и worker: CLICKHOUSE_TIMEZONE=Europe/Moscow.
+Иначе графики +-3 часа.
+
+  cat >/etc/clickhouse-server/config.d/timezone.xml <<'EOF'
+<clickhouse>
+  <timezone>Europe/Moscow</timezone>
+</clickhouse>
+EOF
+
+Слушать не только localhost, если коллекторы на другой машине:
+
+  cat >/etc/clickhouse-server/config.d/listen.xml <<'EOF'
+<clickhouse>
+  <listen_host>0.0.0.0</listen_host>
+</clickhouse>
+EOF
+
+Лучше подставить конкретный management-IP вместо 0.0.0.0.
+
+Свои порты (пример как на текущем стенде) — только если 8123/9000 заняты:
+
+  cat >/etc/clickhouse-server/config.d/ports.xml <<'EOF'
+<clickhouse>
+  <http_port>6123</http_port>
+  <tcp_port>6124</tcp_port>
+</clickhouse>
+EOF
+
+  systemctl restart clickhouse-server
+
+Проверка native (если меняли tcp_port — укажите его, иначе 9000):
+
+  clickhouse-client --host 127.0.0.1 --port 9000 --user default --password '...' \
+    -q "SELECT timezone(), now(), now('UTC')"
 
 now() и timezone() — Москва; now('UTC') на 3 часа меньше.
 
+Проверка HTTP:
 
-3.2. Репозиторий (машина с доступом к CH)
+  curl -u 'default:...' 'http://127.0.0.1:8123/ping'
+  # должно ответить Ok.
+
+
+3.3. Docker (только если пакет нельзя)
+
+Не рекомендуется: легко потерять данные. Если всё же Docker:
+
+  mkdir -p /data/clickhouse /data/clickhouse-config
+  docker run -d --name grapes-clickhouse --restart always --network host \
+    -v /data/clickhouse:/var/lib/clickhouse \
+    -v /data/clickhouse-config:/etc/clickhouse-server \
+    clickhouse/clickhouse-server:24.11
+
+Дальше те же timezone.xml / listen.xml в /data/clickhouse-config/config.d/
+и пароль default через users.d. Без обоих volume любой docker rm = с нуля.
+
+
+3.4. Репозиторий GrapesNTA (машина с доступом к CH)
 
   apt install -y clickhouse-client gettext-base curl git
   git clone https://github.com/jzhekatroy/GrapesNTA.git /opt/GrapesNTA
@@ -105,7 +174,7 @@ now() и timezone() — Москва; now('UTC') на 3 часа меньше.
 Нужны clickhouse-client ИЛИ curl, плюс envsubst (пакет gettext-base).
 
 
-3.3. Накатить схему
+3.5. Накатить схему
 
 Словари подставляют CH_DICT_* через envsubst.
 SOURCE словаря — как сервер ClickHouse ходит САМ В СЕБЯ:
@@ -165,11 +234,12 @@ deploy/clickhouse/*.sql — не схема, а ALTER/ops для уже живо
   FORMAT PrettyCompact
 
 
-3.4. Пользователи и GRANT
+3.6. Пользователи и GRANT
 
 Три роли. Пароли свои на каждом стенде.
 
   collector_write   xdpflowd, dnsflowd, flowcollectord, bmpgrapes
+                    INSERT в raw-таблицы + SELECT справочников (классификатор)
   ui_read           UI SELECT
   ui_admin          UI запись справочников, grapes-worker, grapes-enrichment,
                     SYSTEM RELOAD DICTIONARY
@@ -219,6 +289,7 @@ deploy/clickhouse/*.sql — не схема, а ALTER/ops для уже живо
   GRANT INSERT ON default.bmp_route_events TO collector_write;
   GRANT INSERT ON default.bgp_updates_1m TO collector_write;
   GRANT INSERT ON default.collector_health_snapshots TO collector_write;
+  GRANT SELECT ON default.* TO collector_write;
 
   GRANT SELECT ON default.* TO ui_read;
   GRANT SELECT ON system.tables TO ui_read;
@@ -251,28 +322,49 @@ deploy/clickhouse/*.sql — не схема, а ALTER/ops для уже живо
   clickhouse-client --host "$CH_HOST" --port "$CH_PORT" --user ui_admin --password '...' -q "SELECT currentUser()"
 
 
-3.5. Firewall
+3.7. Firewall хоста ClickHouse
 
 Снаружи открывать только нужное:
-  native/HTTP ClickHouse — НЕ в интернет, только коллекторы, worker, UI, админ
-  sFlow :6343/udp, BMP TCP (часто не 5000), UI :3000 — по allowlist
+  HTTP и native ClickHouse — НЕ в интернет, только IP коллекторов, worker, UI, админ
+  sFlow :6343/udp, BMP TCP, UI :3000 — на хосте коллекторов/UI, по allowlist
+
+Пример (iptables, подставьте сети):
+
+  iptables -A INPUT -p tcp -s COLLECTOR_IP --dport 9000 -j ACCEPT
+  iptables -A INPUT -p tcp -s COLLECTOR_IP --dport 8123 -j ACCEPT
+  iptables -A INPUT -p tcp --dport 9000 -j DROP
+  iptables -A INPUT -p tcp --dport 8123 -j DROP
 
 
 4. Хост коллекторов
 -------------------
 
-Debian 12/13, root, Go 1.23+, clang, libbpf-dev, linux-libc-dev,
-Docker CE с плагином compose.
+Debian 12/13, root. Зеркальный NIC отдельно от management.
 
-  apt install -y clang llvm libbpf-dev linux-libc-dev build-essential git docker-ce docker-compose-plugin
+  apt-get update
+  apt-get install -y clang llvm libbpf-dev linux-libc-dev build-essential git
+
+Go 1.23+ (в Debian часто старый /usr/bin/go — не подходит):
+
+  curl -fsSL https://go.dev/dl/go1.23.6.linux-amd64.tar.gz -o /tmp/go.tgz
+  rm -rf /usr/local/go && tar -C /usr/local -xzf /tmp/go.tgz
+  echo 'export PATH=/usr/local/go/bin:$PATH' >/etc/profile.d/go.sh
+  export PATH=/usr/local/go/bin:$PATH
+  go version
+
+Docker CE, если ещё нет: https://docs.docker.com/engine/install/debian/
+
+  git clone https://github.com/jzhekatroy/GrapesNTA.git /opt/GrapesNTA
   cd /opt/GrapesNTA
+  git checkout main && git pull --ff-only origin main
   make build                 # xdpflowd + bpf/xdp_flow.o
-  make build-dns             # dnsflowd
+  make build-dns             # если будет DNS-зеркало
   make build-flowcollectord  # sFlow / NetFlow UDP
   make build-bmp             # BMP
 
 Бинарники: /opt/GrapesNTA/bin/
 Unit-файлы рассчитаны на REPO_ROOT=/opt/GrapesNTA
+Spool коллектора держите на диске с запасом (десятки–сотни ГБ), не в tmpfs.
 
 
 4.1. xdpflowd (зеркало / TAP)
@@ -297,6 +389,9 @@ Unit-файлы рассчитаны на REPO_ROOT=/opt/GrapesNTA
   XDPFLOWD_SOURCE_ID=netflow
   XDP_CH_SPOOL_MODE=required
   XDP_CH_SPOOL_DIR=/var/lib/xdpflowd/ch-spool
+  XDP_MODE=native                 # mlx5/ixgbe; если XDP native не встаёт — generic
+  XDP_ACTION=drop                 # ТОЛЬКО зеркало; на routing-интерфейсе сломает сеть
+  XDP_DNS_PASSTHROUGH=1           # если на том же IFACE будет dnsflowd
   XDP_CLASSIFIER=1
   XDP_EXCLUSIONS=1
 
@@ -420,7 +515,8 @@ source_id уникален на весь стенд.
 Оба варианта ходят в тот же ClickHouse.
 Не поднимать два UI-писателя справочников без нужды.
 
-После старта: логин (таблица users создаётся сама), диагностики, дашборд.
+После старта: логин admin / adminadmin (создаётся сам, если таблица users пустая).
+Сразу смените пароль (force_password_change). Страницы: диагностики, дашборд.
 
 
 7. Первый трафик в UI

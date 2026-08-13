@@ -37,6 +37,8 @@ GRANT INSERT ON default.bmp_peers TO collector_write;
 GRANT INSERT ON default.bmp_route_events TO collector_write;
 GRANT INSERT ON default.bgp_updates_1m TO collector_write;
 GRANT INSERT ON default.collector_health_snapshots TO collector_write;
+-- Classifier on the collector reads L3/L2/BGP catalogs over the same DSN.
+GRANT SELECT ON default.* TO collector_write;
 
 GRANT SELECT ON default.* TO ui_read;
 GRANT SELECT ON system.tables TO ui_read;

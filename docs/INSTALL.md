@@ -54,35 +54,45 @@ UI :3000      ──► читает CH (ui_read / ui_admin)
 
 `deploy/clickhouse/*.sql` — не схема, а ops/ALTER для уже живой базы. На пустой CH их не гонять списком из старых runbook'ов: части файлов больше нет.
 
-### 3.1. Сервер и диск
+### 3.1. Установка сервера ClickHouse
 
-Пакет или Docker — неважно. Обязательно:
-
-| Путь в контейнере/пакете | Зачем |
-|--------------------------|--------|
-| `/var/lib/clickhouse` | данные; без volume recreate контейнера = пустая база |
-| `/etc/clickhouse-server` | `users.xml`, `config.d` |
-
-Порты по умолчанию: native **9000**, HTTP **8123**. Если снаружи другие (на текущем стенде HTTP `6123`, native `6124`) — дальше везде подставляйте фактические.
-
-Часовой пояс сервера:
-
-```xml
-<!-- /etc/clickhouse-server/config.d/timezone.xml -->
-<clickhouse>
-  <timezone>Europe/Moscow</timezone>
-</clickhouse>
-```
-
-UI и `grapes-worker` читают `CLICKHOUSE_TIMEZONE=Europe/Moscow`. Если сервер UTC, а клиенты Moscow (или наоборот), графики наблюдений и explorer разъедутся на ±3 часа.
-
-Проверка после старта:
+Отдельный хост. Пакет из официального репозитория (ориентир **24.11.x**). Docker без named volume не использовать: recreate = пустая база.
 
 ```bash
-clickhouse-client --host 127.0.0.1 --port 9000 -q "SELECT timezone(), now(), now('UTC')"
+apt-get update
+apt-get install -y apt-transport-https ca-certificates curl gnupg
+curl -fsSL 'https://packages.clickhouse.com/rpm/lts/repodata/repomd.xml.key' \
+  | gpg --dearmor -o /usr/share/keyrings/clickhouse-keyring.gpg
+ARCH=$(dpkg --print-architecture)
+echo "deb [signed-by=/usr/share/keyrings/clickhouse-keyring.gpg arch=${ARCH}] https://packages.clickhouse.com/deb stable main" \
+  > /etc/apt/sources.list.d/clickhouse.list
+apt-get update
+apt-get install -y clickhouse-server clickhouse-client
+# инсталлятор спросит пароль пользователя default — это bootstrap-админ
+systemctl enable --now clickhouse-server
 ```
 
-`now()` и `timezone()` должны быть Москва; `now('UTC')` на 3 часа меньше.
+Конфиг только через `/etc/clickhouse-server/config.d/`:
+
+```xml
+<!-- timezone.xml -->
+<clickhouse><timezone>Europe/Moscow</timezone></clickhouse>
+```
+
+```xml
+<!-- listen.xml, если коллекторы не на этой машине; лучше конкретный IP -->
+<clickhouse><listen_host>0.0.0.0</listen_host></clickhouse>
+```
+
+Порты по умолчанию: HTTP **8123**, native **9000**. Свои (как на текущем стенде `6123`/`6124`) — `http_port` / `tcp_port` в `ports.xml`.
+
+```bash
+systemctl restart clickhouse-server
+clickhouse-client --user default --password '...' -q "SELECT version(), timezone(), now(), now('UTC')"
+curl -u 'default:...' 'http://127.0.0.1:8123/ping'   # Ok
+```
+
+Полный текст с Docker-вариантом и firewall: [`INSTALL.txt`](INSTALL.txt) §3.
 
 ### 3.2. Репозиторий
 
