@@ -51,7 +51,7 @@ if [ ! -s "$BODY" ]; then
   exit 1
 fi
 
-URL="http://${HOST}:${PORT}/?user=$(printf %s "$USER" | sed 's/ /%20/g')"
+URL="http://${HOST}:${PORT}/?max_execution_time=${MAX_TIME}&timeout_overflow_mode=throw&wait_end_of_query=1&user=$(printf %s "$USER" | sed 's/ /%20/g')"
 if [ -n "$PASSWORD" ]; then
   URL="${URL}&password=$(printf %s "$PASSWORD" | sed 's/ /%20/g')"
 fi

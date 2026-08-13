@@ -14,7 +14,7 @@ Typical usage on collector m61:
 
 Before first run:
 
-  clickhouse-client ... --multiquery < deploy/clickhouse/traffic_rollup_state.sql
+  ./deploy/schema/apply.sh 60_traffic
   clickhouse-client ... --multiquery < deploy/clickhouse/detach_traffic_mvs.sql
 
 Keep all traffic_*_mv detached while this script is the rollup source.
@@ -198,7 +198,7 @@ def ensure_state_table(ch: ClickHouseClient, logger: logging.Logger) -> None:
     if exists == "0":
         raise RuntimeError(
             "table default.traffic_rollup_state is missing; run "
-            "deploy/clickhouse/traffic_rollup_state.sql first"
+            "deploy/schema/60_traffic/01_traffic_rollup_state.sql first"
         )
     logger.debug("state table present")
 
@@ -337,42 +337,23 @@ def bootstrap_bucket(
     days: int,
     safety_lag_minutes: int,
 ) -> datetime:
-    col = job.time_column
-    table = job.source_table
-    if job.bucket_kind == "minute":
-        expr = f"toStartOfMinute({col})"
-    elif job.bucket_kind == "hour":
-        expr = f"toStartOfHour({col})"
-    else:
-        expr = f"toStartOfDay({col})"
-    # Bound by retention window — full-history min() on flows_raw is too expensive
-    # on high-EPS stands and was burning ClickHouse CPU every rollup tick.
+    """Start catch-up at the retention floor without scanning raw tables.
+
+    min(time) over N days of flows_raw/dns_log reads billions of rows, saturates
+    ClickHouse, and on a live stand is then clamped to the same floor anyway.
+    """
     lookback = max(int(days), 1)
-    if table == "default.flows_raw":
-        sql = (
-            f"SELECT ifNull(min({expr}), toDateTime('1970-01-01 00:00:00', 'UTC')) "
-            f"FROM {table} "
-            f"WHERE date >= today() - {lookback}"
-        )
-    else:
-        # Bound by the same window. The result is clamped to now - days just
-        # below, so a wider scan cannot change the answer, while on a raw log
-        # such as dns_log an unbounded min() reads the whole retention.
-        sql = (
-            f"SELECT ifNull(min({expr}), toDateTime('1970-01-01 00:00:00', 'UTC')) "
-            f"FROM {table} "
-            f"WHERE {col} >= now() - INTERVAL {lookback} DAY"
-        )
-    raw = ch.query(sql, display=f"bootstrap min bucket for {job.job_id}")
-    if raw == "1970-01-01 00:00:00":
+    occupied = ch.query(
+        f"SELECT 1 FROM {job.source_table} LIMIT 1",
+        display=f"bootstrap occupancy for {job.job_id}",
+    )
+    if occupied.strip() == "":
         # Fresh stand: do not backfill empty bootstrap_days of silent buckets.
         return truncate_bucket(
             utc_now() - timedelta(minutes=safety_lag_minutes),
             job.bucket_kind,
         )
-    dt = datetime.strptime(raw, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
-    floor = truncate_bucket(utc_now() - timedelta(days=days), job.bucket_kind)
-    return dt if dt > floor else floor
+    return truncate_bucket(utc_now() - timedelta(days=lookback), job.bucket_kind)
 
 
 def flows_raw_enabled_min_bucket(
@@ -382,32 +363,32 @@ def flows_raw_enabled_min_bucket(
     lookback_days: int = 7,
     cache: Optional[Dict[str, Optional[datetime]]] = None,
 ) -> Optional[datetime]:
-    """Earliest bucket in flows_raw for enabled catalog sources (bounded + cached)."""
+    """Earliest occupied UTC day in flows_raw for enabled sources.
+
+    Uses one LIMIT 1 probe per date partition instead of min(time_received_ns)
+    over the whole lookback window.
+    """
     if job.source_table != "default.flows_raw":
         return None
     cache_key = f"{job.bucket_kind}:{lookback_days}"
     if cache is not None and cache_key in cache:
         return cache[cache_key]
-    # time_filter_column may be aliased (f.time_received_ns); this query has no alias.
-    col = (job.time_filter_column or job.time_column).split(".")[-1]
-    if job.bucket_kind == "minute":
-        expr = f"toStartOfMinute({col})"
-    elif job.bucket_kind == "hour":
-        expr = f"toStartOfHour({col})"
-    else:
-        expr = f"toStartOfDay({col})"
     lookback = max(int(lookback_days), 1)
-    raw = ch.query(
-        f"SELECT ifNull(min({expr}), toDateTime('1970-01-01 00:00:00', 'UTC')) "
-        "FROM default.flows_raw "
-        f"WHERE date >= today() - {lookback} "
-        "AND source_id IN (SELECT source_id FROM default.net_flow_sources_enabled)",
-        display=f"enabled flows_raw min bucket for {job.job_id}",
-    )
-    if raw == "1970-01-01 00:00:00":
-        result = None
-    else:
-        result = datetime.strptime(raw, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+    today = truncate_bucket(utc_now(), "day")
+    result: Optional[datetime] = None
+    for offset in range(lookback, -1, -1):
+        day = today - timedelta(days=offset)
+        day_s = day.strftime("%Y-%m-%d")
+        hit = ch.query(
+            "SELECT 1 FROM default.flows_raw "
+            f"WHERE date = toDate('{day_s}') "
+            "AND source_id IN (SELECT source_id FROM default.net_flow_sources_enabled) "
+            "LIMIT 1",
+            display=f"probe flows_raw {day_s} for {job.job_id}",
+        )
+        if hit.strip():
+            result = truncate_bucket(day, job.bucket_kind)
+            break
     if cache is not None:
         cache[cache_key] = result
     return result
