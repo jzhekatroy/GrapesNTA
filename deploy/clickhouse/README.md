@@ -7,7 +7,10 @@ Fresh installs use:
 ./deploy/schema/apply.sh
 ```
 
-This directory keeps **what you run against an already-live database**:
+This directory keeps **ops against a database**, not CREATE TABLE:
+
+- fresh install: `bootstrap_users.sql` after `../schema/apply.sh`
+- already-live: ALTER/migrate, backfill, dictionary SOURCE wrappers
 
 | What | Why it stays here |
 |---|---|
@@ -20,6 +23,7 @@ This directory keeps **what you run against an already-live database**:
 | `register_sel_collector.sql`, `monitor_sel_collector.sql` | SEL collector seed/ops |
 | `dns_servers_1h_backfill.sh` | History backfill, not schema |
 | `local_networks_dict.xml` | ClickHouse server config snippet |
+| `bootstrap_users.sql` | CREATE USER + GRANT for a fresh install (replace passwords) |
 | `seed_net_client_example.sql` | Example rows, not DDL |
 
 Do not add new `CREATE TABLE` files here. Put them in `deploy/schema/NN_*/`.

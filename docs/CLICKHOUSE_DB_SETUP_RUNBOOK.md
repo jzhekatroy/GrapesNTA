@@ -223,8 +223,14 @@ ALTER USER ui_read SETTINGS
 
 ## 5. Порядок применения SQL (с нуля)
 
-Все скрипты: `deploy/clickhouse/*.sql`. Применять `--multiquery` от `develop`
-или `ui_admin`.
+**Новый стенд:** не этот список, а [`INSTALL.md`](INSTALL.md) §3 —
+`./deploy/schema/apply.sh`, затем `deploy/clickhouse/bootstrap_users.sql`.
+Файлы `deploy/clickhouse/net_*.sql` / `traffic_*.sql` / `dns_log.sql` удалены
+как дубли схемы.
+
+Ниже — исторический порядок восстановления **уже живой** базы (июнь 2026).
+Часть путей в командах устарела; для ALTER на существующей установке смотрите
+`deploy/clickhouse/migrate_*.sql` и `flows_raw_*.sql`.
 
 ### 5.1. База raw и enrichment
 
