@@ -393,7 +393,7 @@ SELECT dictGet('default.geo_country_dict', 'country_code', toIPv6('8.8.8.8'));
 | Job SQL | `scripts/traffic_rollup_jobs.py` (15 jobs) |
 | State | `deploy/clickhouse/traffic_rollup_state.sql` |
 | Detach legacy MV | `deploy/clickhouse/detach_traffic_mvs.sql` |
-| systemd | `deploy/systemd/traffic-rollups.{service,timer,env.example}` |
+| systemd | archived in `attic/systemd/`; production uses `grapes-worker` |
 
 Jobs (порядок выполнения): `traffic_dashboard_1m`, `traffic_protocol_1m`,
 `traffic_direction_1m`, `traffic_role_1m`, `traffic_entity_1m`,

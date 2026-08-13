@@ -9,13 +9,13 @@
 | [`deploy/systemd/xdpflowd.env.example`](../deploy/systemd/xdpflowd.env.example) | Универсальный шаблон `/etc/xdpflowd/xdpflowd.env` |
 | [`deploy/systemd/xdpflowd-exec.sh`](../deploy/systemd/xdpflowd-exec.sh) | Обёртка systemd: читает env и запускает `xdpflowd` |
 | [`deploy/systemd/xdpflowd.service`](../deploy/systemd/xdpflowd.service) | Универсальный unit-файл |
-| [`scripts/prod_enable_xdpflowd.sh`](../scripts/prod_enable_xdpflowd.sh) | Включить постоянный режим |
-| [`scripts/prod_rollback_legacy.sh`](../scripts/prod_rollback_legacy.sh) | Быстрый откат |
+| [`attic/scripts/prod_enable_xdpflowd.sh`](../attic/scripts/prod_enable_xdpflowd.sh) | Включить постоянный режим |
+| [`attic/scripts/prod_rollback_legacy.sh`](../attic/scripts/prod_rollback_legacy.sh) | Быстрый откат |
 
 `sel`-совместимые команды сохранены как wrappers:
 
-- [`scripts/prod_enable_xdpflowd_sel.sh`](../scripts/prod_enable_xdpflowd_sel.sh)
-- [`scripts/prod_rollback_legacy_sel.sh`](../scripts/prod_rollback_legacy_sel.sh)
+- [`attic/scripts/prod_enable_xdpflowd_sel.sh`](../attic/scripts/prod_enable_xdpflowd_sel.sh)
+- [`attic/scripts/prod_rollback_legacy_sel.sh`](../attic/scripts/prod_rollback_legacy_sel.sh)
 - [`deploy/sel/xdpflowd.env.example`](../deploy/sel/xdpflowd.env.example)
 
 ## Универсальное развёртывание
@@ -78,7 +78,7 @@ XDP_JSON_OUT_ENABLE=0
 ## Включение
 
 ```bash
-sudo ./scripts/prod_enable_xdpflowd.sh
+sudo ./attic/scripts/prod_enable_xdpflowd.sh
 ```
 
 Для host-specific путей можно переопределить:
@@ -90,13 +90,13 @@ sudo ENV_INSTALL=/etc/xdpflowd/sel.env \
   SERVICE_TEMPLATE=$PWD/deploy/sel/xdpflowd.service \
   EXEC_WRAPPER=$PWD/deploy/sel/xdpflowd-exec.sh \
   BACKUP_TAG=sel-permanent \
-  ./scripts/prod_enable_xdpflowd.sh
+  ./attic/scripts/prod_enable_xdpflowd.sh
 ```
 
 Или для `sel` просто:
 
 ```bash
-sudo ./scripts/prod_enable_xdpflowd_sel.sh
+sudo ./attic/scripts/prod_enable_xdpflowd_sel.sh
 ```
 
 Скрипт сохраняет rollback state, снимает `ipt_NETFLOW`, останавливает `goflow2`, ставит systemd unit и проверяет, что сервис стал active. Если сервис не стартует, скрипт делает best-effort rollback.
@@ -130,13 +130,13 @@ clickhouse-client --host ... --query "SELECT count(), sum(packets), sum(bytes) F
 ## Откат
 
 ```bash
-sudo ./scripts/prod_rollback_legacy.sh
+sudo ./attic/scripts/prod_rollback_legacy.sh
 ```
 
 Для `sel`:
 
 ```bash
-sudo ./scripts/prod_rollback_legacy_sel.sh
+sudo ./attic/scripts/prod_rollback_legacy_sel.sh
 ```
 
 Откат останавливает `xdpflowd`, снимает XDP best-effort, возвращает `ipt_NETFLOW` правило из state и запускает `goflow2`. Spool не удаляется.
@@ -156,7 +156,7 @@ Durable spool (`/var/lib/xdpflowd/ch-spool`) рассчитан на сцена�
 
 - При запуске pipeline `meta/consumer.json` проходит две проверки. Если файл невалидный JSON (например, после ручной правки или прерванной записи), он автоматически переименовывается в `consumer.json.corrupt.<unix_ns>`, а pipeline стартует с дефолта (`seg=1 off=0`). В логах появляется `spool checkpoint corrupt; quarantined and reset to defaults`. Это закрывает старый crash-loop сценарий.
 - Если checkpoint указывает за пределы реальных сегментов на диске (`cp.Segment > maxSeg+1`, например после очистки spool с сохранением `meta/`), либо отстаёт от ретеншна (`cp.Segment < minSeg`), checkpoint сбрасывается на самый старый существующий сегмент и сохраняется обратно. В логе строка `spool normalize: checkpoint ahead of writer; resetting to oldest segment` или `... behind retention; advancing to oldest segment` с `old`, `new`, `min_seg`, `max_seg`.
-- Скрипт `scripts/prod_repair_spool.sh` остаётся для ручного контроля и старых бинарей, но рутинно его звать больше не надо — нормализация работает прозрачно при старте сервиса.
+- Скрипт `attic/scripts/prod_repair_spool.sh` остаётся для ручного контроля и старых бинарей, но рутинно его звать больше не надо — нормализация работает прозрачно при старте сервиса.
 
 ## Flow drainer: атомарное чтение BPF map
 
@@ -182,14 +182,14 @@ sudo journalctl -u xdpflowd -n 100 --no-pager | grep 'flow drainer'
 
 ```bash
 # Dry-run: скрипт сам остановит сервис, скажет какой будет новый чекпоинт.
-sudo ./scripts/prod_repair_spool.sh
+sudo ./attic/scripts/prod_repair_spool.sh
 
 # Применить и поднять сервис.
-sudo ./scripts/prod_repair_spool.sh --apply
+sudo ./attic/scripts/prod_repair_spool.sh --apply
 
 # Кастомный путь к spool / имя сервиса:
 sudo SPOOL_DIR=/var/lib/xdpflowd/ch-spool SERVICE=xdpflowd \
-  ./scripts/prod_repair_spool.sh --apply
+  ./attic/scripts/prod_repair_spool.sh --apply
 ```
 
 Скрипт делает резервные копии `consumer.json` и подозрительного сегмента (`*.suspect.<ts>`) — их можно потом отдать на forensics или удалить.

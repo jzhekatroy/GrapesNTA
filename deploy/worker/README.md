@@ -78,16 +78,12 @@ restarted the container.
 
 ## Cutover from host timers
 
-1. Start `grapes-worker` and verify rollups + observations.
-2. `docker stop grapes-analytics` (or remove container).
-3. `systemctl disable --now traffic-rollups.timer traffic-talkers-rollups.timer`
+Host timers are archived in [`attic/systemd/`](../../attic/systemd/). A new
+stand should never enable them: this container is the only rollup writer.
 
 Do **not** run two observation workers or two rollup timers against the same CH.
 
 ## Rollback
 
-```bash
-docker compose down
-systemctl enable --now traffic-rollups.timer traffic-talkers-rollups.timer
-cd /opt/grapes/worker/../analytics && docker compose up -d
-```
+Re-enabling host `traffic-rollups.timer` is not supported. Restore a previous
+`grapes-worker` image/compose instead.

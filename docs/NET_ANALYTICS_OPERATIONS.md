@@ -1,6 +1,9 @@
 # Network Analytics Operations
 
-Step-by-step deployment and verification for the new L3/L2 model.
+Step-by-step deployment and verification for the L3/L2 model.
+
+Traffic rollups run in Docker `grapes-worker`, not host `traffic-rollups.timer`
+(those units are in `attic/systemd/`). Fresh install: [`INSTALL.txt`](INSTALL.txt).
 
 ## Prerequisites
 

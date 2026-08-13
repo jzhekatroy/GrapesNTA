@@ -261,7 +261,7 @@ XDP_EXCLUSIONS=1
 
 Классификатор читает `net_l3_prefixes_enabled` / `net_l2_vlans_enabled` / `bgp_prefix_origin_current`. Без BMP+enrichment `src_asn`/`dst_asn` будут 0.
 
-Подробности профиля XDP: [`PERMANENT_XDPFLOWD_RUNBOOK.md`](PERMANENT_XDPFLOWD_RUNBOOK.md). Скрипт `prod_enable_xdpflowd.sh` — это cutover с `ipt_NETFLOW`, на чистом хосте не нужен.
+Профиль XDP: [`PERMANENT_XDPFLOWD_RUNBOOK.md`](PERMANENT_XDPFLOWD_RUNBOOK.md). Cutover с `ipt_NETFLOW` — `attic/scripts/`; на чистом хосте не нужен.
 
 ### 4.2. dnsflowd / flowcollectord / bmpgrapes
 

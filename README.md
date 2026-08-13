@@ -121,98 +121,13 @@ sudo -E ./scripts/accuracy_test.sh
 sudo IFACE=ens18 ./scripts/pcap_replay_test.sh
 ```
 
-### Production deployment: 2-phase migration from ipt_NETFLOW
+### Production: new stand vs old ipt_NETFLOW cutover
 
-Scripts [`scripts/prod_observe.sh`](scripts/prod_observe.sh) (zero-risk parallel) and
-[`scripts/prod_ab_swap.sh`](scripts/prod_ab_swap.sh) (10-min A/B with auto-restore)
-are designed to safely validate and benchmark `xdpflowd` against a running
-`ipt_NETFLOW` on an ISP mirror port. Both are reversible: an SSH drop, Ctrl+C,
-or a crash restores the original `iptables` rule via `EXIT`/`INT`/`TERM`/`HUP` traps.
+A new stand: [docs/INSTALL.txt](docs/INSTALL.txt).
 
-**Phase 0 — baseline snapshot (reference state, do this first):**
-
-```bash
-sudo ./scripts/prod_snapshot.sh enp5s0d1
-# writes /root/xdpflowd_baseline_<TS>/ and symlinks /root/xdpflowd_baseline_latest
-# saved: iptables -c (all tables), ip6tables, sysctl net.*, /proc/net/stat/ipt_netflow,
-# ethtool -i/-g/-l/-c/-k/-S, ip link/addr/route, ss -ulnp, docker ps + inspect,
-# systemd units for goflow2/nfcapd/xdpflowd, NIC counter baselines, manifest.txt
-```
-
-At any time later run [`scripts/prod_verify.sh`](scripts/prod_verify.sh) to confirm
-the running state matches the snapshot — it diffs iptables rules, checks the
-`ipt_NETFLOW` rule is back in place, validates `net.netflow.*` sysctls,
-confirms `goflow2` container is running, asserts neither `xdpflowd` nor
-`afxdpflowd` is running, and that XDP/AF_XDP is detached from the iface.
-
-```bash
-sudo ./scripts/prod_verify.sh           # against /root/xdpflowd_baseline_latest
-sudo ./scripts/prod_verify.sh /root/xdpflowd_baseline_<TS>
-# exit 0 == identical; exit 1 == drift (diffs are printed)
-```
-
-Full hard rollback from a snapshot:
-
-```bash
-sudo iptables-restore  < /root/xdpflowd_baseline_latest/10_iptables_save_counters.txt
-sudo ip6tables-restore < /root/xdpflowd_baseline_latest/10_ip6tables_save_counters.txt
-```
-
-**Phase 1 — parallel observation (no pipeline changes):**
-
-```bash
-sudo ./scripts/prod_observe.sh 300 enp5s0d1 12055
-```
-
-Runs `xdpflowd` in `XDP_PASS` on the mirror iface, exports NFv9 to a **separate**
-port (12055) to its own `nfcapd`. `ipt_NETFLOW` / `goflow2` / ClickHouse keep
-running untouched. Prints NIC deltas, ipt_NETFLOW /proc counters, xdpflowd stats,
-and `nfdump` aggregates — compare them to confirm `xdpflowd` counts match.
-
-**Phase 2 — temporary swap (writes to real destinations, 10 min):**
-
-```bash
-sudo ./scripts/prod_ab_swap.sh --dry-run                              # rehearse
-sudo ./scripts/prod_ab_swap.sh 600 enp5s0d1 127.0.0.1:9996,127.0.0.1:9999
-```
-
-Automatically refreshes the baseline snapshot if `/root/xdpflowd_baseline_latest`
-is older than 1 hour (otherwise reuses it), detects the exact `-j NETFLOW` rule
-in `raw`/`mangle`/`nat`, takes an additional `iptables-save -c` backup under
-`/root/iptables-save-before-<TS>.txt`, installs traps, removes the rule, starts
-`xdpflowd` on the same destinations (`127.0.0.1:9996`, `127.0.0.1:9999`), runs
-a watchdog that aborts on stall, always restores the rule on exit, **and then
-runs `prod_verify.sh` to confirm the live state matches the baseline**.
-Measure CPU (`mpstat`, `pidstat`), NIC drops (`ethtool -S`) and verify ClickHouse
-still receives rows during the window.
-
-**AF_XDP variant** — same trap / `state.env` / `prod_restore.sh` / `prod_verify.sh`
-discipline, but runs [`scripts/prod_ab_swap_afxdp.sh`](scripts/prod_ab_swap_afxdp.sh)
-(`make build-afxdp`, `./bin/afxdpflowd`). Watchdog uses `wire_ground_truth.packets`
-and/or `packets_out` in the merged log. Rehearse with `--dry-run` or
-`sudo env DRY_RUN=1 ./scripts/prod_ab_swap_afxdp.sh`. **AF_XDP consumes RX on the
-iface** — use only on a SPAN/mirror port (same operational caution as
-`XDP_ACTION=drop` for `xdpflowd`). Optional: `AFXDP_SKB=1` for generic XDP (`-skb`).
-
-```bash
-sudo ./scripts/prod_ab_swap_afxdp.sh --dry-run
-sudo ./scripts/prod_ab_swap_afxdp.sh 120 enp5s0d1 127.0.0.1:9996,127.0.0.1:9999
-```
-
-**Phase-3 style** (same layout as `prod_phase3_drop.sh`: snapshot, optional IRQ tune, window A/B with `mpstat`, then `prod_ab_swap_afxdp` in background). Map `XDP_MODE=generic` → `AFXDP_SKB=1`:
-
-```bash
-XDP_MODE=generic SKIP_IRQ_TUNE=1 ./scripts/prod_phase3_afxdp.sh 120 enp5s0d1 2>&1 | tee /tmp/phase3_afxdp_generic.log
-```
-
-**Panic recovery** (if the trap somehow did not run):
-
-```bash
-sudo ./scripts/prod_restore.sh                              # show options
-sudo ./scripts/prod_restore.sh /tmp/xdpflowd_abswap_<TS>/state.env
-sudo ./scripts/prod_restore.sh /tmp/afxdpflowd_abswap_<TS>/state.env
-sudo ./scripts/prod_restore.sh --full-restore /root/iptables-save-before-<TS>.txt
-```
+The ipt_NETFLOW A/B scripts, experimental AF_XDP daemon, and host systemd
+timers for rollups/geo are in [`attic/`](attic/). Do not enable them next to
+`grapes-worker` / `grapes-enrichment`.
 
 ### Flow fields (kernel / raw)
 

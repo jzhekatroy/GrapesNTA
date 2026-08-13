@@ -311,7 +311,7 @@ source_id уникален на весь стенд.
 
 Без BMP + enrichment поля src_asn/dst_asn будут 0.
 
-Скрипт prod_enable_xdpflowd.sh — это cutover с ipt_NETFLOW, на чистом хосте не нужен.
+Скрипт cutover с ipt_NETFLOW лежит в attic/scripts/; на чистом хосте не нужен.
 
 
 4.2. dnsflowd / flowcollectord / bmpgrapes

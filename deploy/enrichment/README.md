@@ -72,16 +72,14 @@ First bgp-origin run may take minutes after BMP peers are online. Raise `BGPORIG
 
 ## Cutover from host timers
 
-1. Start `grapes-enrichment` and verify CH tables refresh.
-2. `systemctl disable --now geoloaderd.timer bgp-origin-refresh.timer asn-names-loader.timer snmp-iface-sync.timer`
+Host timers are archived in [`attic/systemd/`](../../attic/systemd/). Do not
+enable `geoloaderd` / `bgp-origin-refresh` / `asn-names-loader` /
+`snmp-iface-sync` next to this container.
 
 ## Rollback
 
-```bash
-docker compose down
-systemctl enable --now geoloaderd.timer bgp-origin-refresh.timer asn-names-loader.timer snmp-iface-sync.timer
-```
-
+Re-enabling those host timers is not supported. Restore a previous
+`grapes-enrichment` image/compose instead.
 ## Locks
 
 - Full RIR download holds `/tmp/enrichment-heavy.lock`; bgp-origin skips that cycle if geo is running.

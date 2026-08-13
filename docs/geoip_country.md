@@ -16,9 +16,9 @@ refreshes do not overwrite manual or separately loaded organization names.
 
 | Path | Purpose |
 |------|---------|
-| [deploy/clickhouse/geo_country.sql](deploy/clickhouse/geo_country.sql) | `geo_prefix_country`, `asn_registry`, `asn_names` + staging table DDL |
+| [deploy/schema/40_enrichment](../deploy/schema/40_enrichment) | `geo_prefix_country`, `asn_registry`, `asn_names` + staging DDL |
 | [scripts/load_rir_geo.py](scripts/load_rir_geo.py) | Downloads RIR files, parses prefixes and ASN allocations, loads staging, swaps tables, creates/updates `geo_country_dict`, reloads dictionary |
-| [deploy/systemd/geoloaderd.*](deploy/systemd/) | `systemd` oneshot + daily timer |
+| [deploy/enrichment](../deploy/enrichment) | Docker `grapes-enrichment` (daily geoloaderd). Host timer units are in `attic/systemd/` |
 
 ## One-time ClickHouse setup
 

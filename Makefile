@@ -1,9 +1,10 @@
-# xdpflowd — XDP flow collector (eBPF + Go).
+# GrapesNTA collectors (eBPF + Go).
 #
 # Requires on Linux: clang, llvm, libbpf-dev, linux-libc-dev, Go 1.23+.
 #   apt install clang llvm libbpf-dev linux-libc-dev build-essential
 #
 # Default BPF object path expected by the binary: bpf/xdp_flow.o (relative to CWD).
+# Fresh install: docs/INSTALL.txt
 
 # Auto-detect a Go >= 1.21 binary even if the default /usr/bin/go is
 # older (e.g. Debian 11 ships go 1.15). We need 1.21+ for log/slog and
@@ -24,11 +25,8 @@ BPF_CFLAGS := -O2 -g -Wall -target bpf -I/usr/include/x86_64-linux-gnu \
               -DFLOWS_MAP_SIZE=$(FLOWS_MAP_SIZE)
 
 BPF_O := bpf/xdp_flow.o
-AFXDP_BPF_O := bpf/afxdp_redirect.o
-LIGHT_BPF_O := bpf/xdp_light.o
-FAST_BPF_O := bpf/xdp_flow_fast.o
 
-.PHONY: all bpf afxdp-bpf bpf-light bpf-fast bpf-variants build build-afxdp build-dns build-bmp build-flowcollectord build-sflowdump clean run tidy ensure-mod
+.PHONY: all bpf build build-dns build-bmp build-flowcollectord build-sflowdump clean run tidy ensure-mod
 
 all: build
 
@@ -43,42 +41,12 @@ $(BPF_O): bpf/xdp_flow.c
 	@mkdir -p bpf
 	$(CLANG) $(BPF_CFLAGS) -c bpf/xdp_flow.c -o $(BPF_O)
 
-$(AFXDP_BPF_O): bpf/afxdp_redirect.c
-	@mkdir -p bpf
-	$(CLANG) $(BPF_CFLAGS) -c bpf/afxdp_redirect.c -o $(AFXDP_BPF_O)
-
-# Diagnostic "light" XDP program: only bumps stats[0] and returns
-# xdp_final_action. Used to isolate driver/kernel XDP overhead from the cost
-# of the real flow-tracking program. Loadable by the same xdpflowd binary
-# via `-bpf bpf/xdp_light.o`.
-$(LIGHT_BPF_O): bpf/xdp_light.c
-	@mkdir -p bpf
-	$(CLANG) $(BPF_CFLAGS) -c bpf/xdp_light.c -o $(LIGHT_BPF_O)
-
-$(FAST_BPF_O): bpf/xdp_flow_fast.c
-	@mkdir -p bpf
-	$(CLANG) $(BPF_CFLAGS) -c bpf/xdp_flow_fast.c -o $(FAST_BPF_O)
-
 bpf: $(BPF_O)
-
-afxdp-bpf: $(AFXDP_BPF_O)
-
-bpf-light: $(LIGHT_BPF_O)
-
-bpf-fast: $(FAST_BPF_O)
-
-bpf-variants: $(BPF_O) $(FAST_BPF_O) $(LIGHT_BPF_O)
 
 build: ensure-mod $(BPF_O)
 	@mkdir -p bin
 	@echo "Using Go: $(GO)" && $(GO) version
 	$(GO) build -o bin/xdpflowd ./cmd/xdpflowd
-
-# AF_XDP daemon: uses embedded xsk eBPF (planktonzp/xdp); optional separate bpf/afxdp_redirect.o is not required.
-build-afxdp: ensure-mod
-	@mkdir -p bin
-	@echo "Using Go: $(GO)" && $(GO) version
-	$(GO) build -o bin/afxdpflowd ./cmd/afxdpflowd
 
 build-dns: ensure-mod
 	@mkdir -p bin
@@ -106,6 +74,6 @@ run: build
 	sudo ./bin/xdpflowd -iface ens18 -mode native -bpf $(BPF_O)
 
 clean:
-	rm -f bin/xdpflowd bin/dnsflowd bin/afxdpflowd bin/bmpgrapes bin/flowcollectord bin/sflowdump $(BPF_O) $(AFXDP_BPF_O) $(LIGHT_BPF_O) $(FAST_BPF_O)
+	rm -f bin/xdpflowd bin/dnsflowd bin/bmpgrapes bin/flowcollectord bin/sflowdump $(BPF_O)
 
 .DEFAULT_GOAL := build

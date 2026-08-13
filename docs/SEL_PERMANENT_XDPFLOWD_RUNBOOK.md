@@ -24,10 +24,10 @@
 | [`deploy/sel/xdpflowd.env.example`](../deploy/sel/xdpflowd.env.example) | Шаблон `/etc/xdpflowd/sel.env` |
 | [`deploy/sel/xdpflowd-exec.sh`](../deploy/sel/xdpflowd-exec.sh) | Обёртка: читает env и запускает `xdpflowd` (вызывается из systemd) |
 | [`deploy/sel/xdpflowd.service`](../deploy/sel/xdpflowd.service) | Шаблон unit-файла (пути `/opt/GrapesNTA` подменяются при установке) |
-| [`scripts/prod_enable_xdpflowd.sh`](../scripts/prod_enable_xdpflowd.sh) | Универсальное включение постоянного режима |
-| [`scripts/prod_rollback_legacy.sh`](../scripts/prod_rollback_legacy.sh) | Универсальный откат на legacy |
-| [`scripts/prod_enable_xdpflowd_sel.sh`](../scripts/prod_enable_xdpflowd_sel.sh) | Sel-wrapper с путями `/etc/xdpflowd/sel.env` и `/root/xdpflowd_sel_permanent_state.env` |
-| [`scripts/prod_rollback_legacy_sel.sh`](../scripts/prod_rollback_legacy_sel.sh) | Sel-wrapper для быстрого отката |
+| [`attic/scripts/prod_enable_xdpflowd.sh`](../attic/scripts/prod_enable_xdpflowd.sh) | Универсальное включение постоянного режима |
+| [`attic/scripts/prod_rollback_legacy.sh`](../attic/scripts/prod_rollback_legacy.sh) | Универсальный откат на legacy |
+| [`attic/scripts/prod_enable_xdpflowd_sel.sh`](../attic/scripts/prod_enable_xdpflowd_sel.sh) | Sel-wrapper с путями `/etc/xdpflowd/sel.env` и `/root/xdpflowd_sel_permanent_state.env` |
+| [`attic/scripts/prod_rollback_legacy_sel.sh`](../attic/scripts/prod_rollback_legacy_sel.sh) | Sel-wrapper для быстрого отката |
 
 После включения:
 
@@ -71,7 +71,7 @@
 
 ```bash
 cd /opt/GrapesNTA
-sudo ./scripts/prod_enable_xdpflowd_sel.sh
+sudo ./attic/scripts/prod_enable_xdpflowd_sel.sh
 ```
 
 Скрипт:
@@ -119,7 +119,7 @@ systemctl status xdpflowd --no-pager
 Одна команда:
 
 ```bash
-sudo /opt/GrapesNTA/scripts/prod_rollback_legacy_sel.sh
+sudo /opt/GrapesNTA/attic/scripts/prod_rollback_legacy_sel.sh
 ```
 
 Ожидаемое состояние после отката:
@@ -132,7 +132,7 @@ sudo /opt/GrapesNTA/scripts/prod_rollback_legacy_sel.sh
 
 Если state потерян, см. аварийный restore:
 
-[`scripts/prod_restore.sh`](../scripts/prod_restore.sh) с `--full-restore` на файл `/root/iptables-save-before-xdpflowd-sel-permanent-*.txt`.
+[`attic/scripts/prod_restore.sh`](../attic/scripts/prod_restore.sh) с `--full-restore` на файл `/root/iptables-save-before-xdpflowd-sel-permanent-*.txt`.
 
 ## Примечания
 
