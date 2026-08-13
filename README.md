@@ -1,8 +1,12 @@
-# GrapesNTA (xdpflowd)
+# GrapesNTA
 
-XDP/eBPF flow collector for ISP-style mirror/TAP ports: parses L2/L3/L4 on the NIC, aggregates into a per-flow hash map; userspace reads maps and can emit NDJSON for accuracy tests.
+XDP/eBPF flow collectors, ClickHouse analytics, Docker workers, and the NTAdmin UI.
+
+**Новый стенд с нуля:** [docs/INSTALL.md](docs/INSTALL.md) — ClickHouse → коллекторы → `grapes-worker` / `grapes-enrichment` → UI на порту 3000.
 
 Repository: [github.com/jzhekatroy/GrapesNTA](https://github.com/jzhekatroy/GrapesNTA)
+
+The rest of this README is the `xdpflowd` collector: build flags, NetFlow export, and the old `ipt_NETFLOW` cutover. Collector binaries still live here; rollups and the UI do not.
 
 **Build (Linux only):** requires `clang`, `libbpf-dev`, `linux-libc-dev` (or kernel headers), Go 1.23+.
 
