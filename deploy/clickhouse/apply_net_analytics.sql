@@ -1,66 +1,15 @@
--- Apply new Network Analytics schema after cleanup_old_classification.sql.
+-- Network analytics schema is canonical in deploy/schema/.
 --
--- Order:
---   1. cleanup_old_classification.sql
---   2. flows_raw_extensions.sql
---   2a. flows_raw_mac.sql (L2 MAC columns; apply before MAC-writing binaries)
---   2b. net_flow_sources.sql + flows_raw_source_id.sql (when enabling source tracking)
---   2c. geo_country.sql + geoloaderd (geo_country_dict, asn_registry_enriched)
---   2d. ip_asn_prefixes.sql + iptoasn-loader (remote ASN fallback)
---   3. net_entities.sql
---   4. net_l3_prefixes.sql
---   4a. net_special_ip_prefixes.sql (special-use blocks for quality checks)
---   4b. migrate_net_l3_prefixes_origin_asn.sql (existing DBs without origin_asn)
---   5. net_l2_vlans.sql
---   6. traffic_direction_1m.sql
---   7. traffic_role_1m.sql
---   8. traffic_entity_1m.sql
---   9. traffic_vlan_1m.sql
---  10. port_services.sql
---      Existing DBs with the old single-port schema must run
---      migrate_port_services_ranges.sh and then
---      migrate_port_service_rollups_ranges.sql instead of dropping rollup tables.
---  11. traffic_protocol_1m.sql
---  12. traffic_service_1m.sql
---  13. traffic_unknown_port_1m.sql
---  14. traffic_country_1m.sql
---  15. traffic_talkers_1m.sql
---  16. traffic_talkers_1h.sql
---  17. traffic_dashboard_1m.sql
---  18. traffic_dashboard_1d.sql
---  19. net_reports.sql
---  20. traffic_rollup_state.sql
---  21. detach_traffic_mvs.sql   (idempotent; no sync MV on ingest)
---  22. systemd traffic-rollups.timer on collector (after spool catch-up)
+-- Fresh install:
+--   ./deploy/schema/apply.sh
 --
--- traffic_*.sql create aggregate TABLES only (no CREATE MATERIALIZED VIEW).
--- Rollups are filled by scripts/traffic_rollup_async.py — see
--- docs/CLICKHOUSE_DB_SETUP_RUNBOOK.md §7.
+-- Existing DB that still has pre-analytics objects:
+--   1. deploy/clickhouse/cleanup_old_classification.sql
+--   2. deploy/clickhouse/flows_raw_extensions.sql
+--   3. deploy/clickhouse/flows_raw_mac.sql
+--   4. deploy/schema/apply.sh 50_net 60_traffic
+--   5. deploy/clickhouse/detach_traffic_mvs.sql
 --
--- Example:
---   for f in deploy/clickhouse/cleanup_old_classification.sql \
---            deploy/clickhouse/flows_raw_extensions.sql \
---            deploy/clickhouse/ip_asn_prefixes.sql \
---            deploy/clickhouse/net_entities.sql \
---            deploy/clickhouse/net_l3_prefixes.sql \
---            deploy/clickhouse/net_special_ip_prefixes.sql \
---            deploy/clickhouse/net_l2_vlans.sql \
---            deploy/clickhouse/traffic_direction_1m.sql \
---            deploy/clickhouse/traffic_role_1m.sql \
---            deploy/clickhouse/traffic_entity_1m.sql \
---            deploy/clickhouse/traffic_vlan_1m.sql \
---            deploy/clickhouse/port_services.sql \
---            deploy/clickhouse/traffic_protocol_1m.sql \
---            deploy/clickhouse/traffic_service_1m.sql \
---            deploy/clickhouse/geo_country.sql \
---            deploy/clickhouse/traffic_unknown_port_1m.sql \
---            deploy/clickhouse/traffic_country_1m.sql \
---            deploy/clickhouse/traffic_talkers_1m.sql \
---            deploy/clickhouse/traffic_talkers_1h.sql \
---            deploy/clickhouse/traffic_dashboard_1m.sql \
---            deploy/clickhouse/traffic_dashboard_1d.sql \
---            deploy/clickhouse/net_reports.sql \
---            deploy/clickhouse/traffic_rollup_state.sql \
---            deploy/clickhouse/detach_traffic_mvs.sql; do
---     clickhouse-client --host HOST --user USER --password PASS --multiquery < "$f"
---   done
+-- Rollups: grapes-worker (scripts/traffic_rollup_async.py), not sync MVs.
+-- See docs/CLICKHOUSE_DB_SETUP_RUNBOOK.md.
+SELECT 'use deploy/schema/apply.sh instead of this file';

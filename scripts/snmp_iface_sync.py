@@ -231,7 +231,7 @@ def load_settings(ch: ClickHouseClient) -> Settings:
     )
     if not rows:
         raise RuntimeError(
-            "global SNMP settings missing; apply deploy/clickhouse/net_snmp_interfaces.sql"
+            "global SNMP settings missing; apply deploy/schema/50_net/11_net_snmp_settings.sql"
         )
     row = rows[0]
     return Settings(

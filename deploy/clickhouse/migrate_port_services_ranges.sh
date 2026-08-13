@@ -47,7 +47,7 @@ WHERE database = '${CH_DATABASE}'
 
 if [[ "$table_exists" == "0" ]]; then
   echo "port_services does not exist; applying fresh DDL"
-  clickhouse-client "${args[@]}" --multiquery <"$ROOT/deploy/clickhouse/port_services.sql"
+  clickhouse-client "${args[@]}" --multiquery <"$ROOT/deploy/schema/50_net/08_port_services.sql"
   exit 0
 fi
 

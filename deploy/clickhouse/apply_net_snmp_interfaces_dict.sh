@@ -12,7 +12,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-TEMPLATE="$ROOT/deploy/clickhouse/net_snmp_interfaces_dict.sql"
+TEMPLATE="$ROOT/deploy/schema/50_net/23_net_interfaces_dict.sql"
 CH_CLIENT="${CH_CLIENT:-clickhouse-client}"
 
 if [[ -z "${CH_DICT_USER:-}" || -z "${CH_DICT_PASSWORD:-}" ]]; then

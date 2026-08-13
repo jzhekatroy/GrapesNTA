@@ -2,16 +2,11 @@
 -- Old aggregate rows are discarded (SummingMergeTree ORDER BY key changed).
 --
 -- Apply in order:
---   clickhouse-client ... --multiquery < deploy/clickhouse/net_flow_sources.sql
+--   ./deploy/schema/apply.sh 50_net 60_traffic
 --   clickhouse-client ... --multiquery < deploy/clickhouse/flows_raw_source_id.sql
 --   clickhouse-client ... --multiquery < deploy/clickhouse/apply_flow_sources.sql
---   for f in traffic_direction_1m.sql traffic_role_1m.sql traffic_entity_1m.sql \
---            traffic_vlan_1m.sql traffic_protocol_1m.sql traffic_service_1m.sql \
---            traffic_unknown_port_1m.sql traffic_country_1m.sql \
---            traffic_talkers_1m.sql traffic_talkers_1h.sql traffic_dashboard_1m.sql \
---            traffic_dashboard_1d.sql; do
---     clickhouse-client ... --multiquery < deploy/clickhouse/$f
---   done
+--   ./deploy/schema/apply.sh 60_traffic
+--   clickhouse-client ... --multiquery < deploy/clickhouse/detach_traffic_mvs.sql
 
 DROP TABLE IF EXISTS default.traffic_direction_1m_mv;
 DROP TABLE IF EXISTS default.traffic_role_1m_mv;

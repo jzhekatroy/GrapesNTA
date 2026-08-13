@@ -12,6 +12,8 @@
 - [`UI_CLICKHOUSE_QUERIES.md`](UI_CLICKHOUSE_QUERIES.md) — запросы UI
 - [`NET_ANALYTICS_OPERATIONS.md`](NET_ANALYTICS_OPERATIONS.md) — L3/L2 classifier deploy
 
+Канонический DDL — [`deploy/schema/`](../deploy/schema/). Скрипты `deploy/clickhouse/*.sql` в старых разделах ниже — одноразовые ALTER/ops; `CREATE TABLE` оттуда перенесены в `deploy/schema`. Свежая установка: `./deploy/schema/apply.sh`. См. [`deploy/clickhouse/README.md`](../deploy/clickhouse/README.md).
+
 ---
 
 ## 1. Что случилось

@@ -2201,7 +2201,7 @@ FROM {SPECIAL_IP_PREFIXES_VIEW}
             results,
             "FAIL",
             "special_prefixes.catalog",
-            f"missing or empty view {SPECIAL_IP_PREFIXES_VIEW}; apply deploy/clickhouse/net_special_ip_prefixes.sql",
+            f"missing or empty view {SPECIAL_IP_PREFIXES_VIEW}; apply deploy/schema/50_net/07_net_special_ip_prefixes.sql",
         )
         return
     prefixes, kinds, no_asn, no_country = row

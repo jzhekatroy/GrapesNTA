@@ -1,4 +1,4 @@
-"""Rollup job definitions mirroring deploy/clickhouse/traffic_*_mv SELECT bodies."""
+"""Rollup job definitions (SELECT bodies for deploy/schema/60_traffic tables)."""
 
 from __future__ import annotations
 
