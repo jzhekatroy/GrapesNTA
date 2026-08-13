@@ -2,6 +2,8 @@
 
 Инструкция для инженера на **новом стенде**. Один проход: ClickHouse → коллекторы → Docker-воркеры → UI.
 
+Текстовая копия для передачи: [`INSTALL.txt`](INSTALL.txt).
+
 Это не дневник конкретной машины. Историю стенда `nta` см. [`FIRST_INSTALL_NTA_2026-07-20.md`](FIRST_INSTALL_NTA_2026-07-20.md). Восстановление уже живой базы после потери volume — [`CLICKHOUSE_DB_SETUP_RUNBOOK.md`](CLICKHOUSE_DB_SETUP_RUNBOOK.md). Cutover с `ipt_NETFLOW` — [`PERMANENT_XDPFLOWD_RUNBOOK.md`](PERMANENT_XDPFLOWD_RUNBOOK.md).
 
 Секреты в git не класть. Пароли генерировать заново на каждом стенде.

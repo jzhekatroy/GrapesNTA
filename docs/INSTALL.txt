@@ -1,0 +1,473 @@
+GrapesNTA — установка с нуля
+============================
+
+Для инженера. Один проход: ClickHouse -> коллекторы -> Docker-воркеры -> UI.
+
+Репозиторий: https://github.com/jzhekatroy/GrapesNTA
+Ветка: main
+Каноническая схема БД: deploy/schema/apply.sh
+Пользователи БД: deploy/clickhouse/bootstrap_users.sql
+
+Секреты в git не класть. Пароли генерировать заново на каждом стенде.
+
+
+1. Что ставим
+-------------
+
+Четыре роли (можно на одном хосте, в проде обычно разделены):
+
+  ClickHouse     сырые потоки, DNS, BMP, справочники, агрегаты
+                 отдельный сервер или Docker СО persistent volume
+
+  Коллекторы     xdpflowd, dnsflowd, flowcollectord, bmpgrapes
+                 systemd на хосте с зеркалом / sFlow / BMP
+
+  Воркеры        grapes-worker     (роллапы трафика + наблюдения)
+                 grapes-enrichment (geo / ASN / SNMP)
+                 Docker, network_mode: host
+
+  UI             NTAdmin, порт 3000
+                 контейнер grapes-nta из этого репо
+                 ИЛИ отдельный процесс из mavotronik/NTAdmin
+
+Профиль площадки выбирает какие демоны включить, не форму БД.
+Схема одна на всех: ./deploy/schema/apply.sh
+
+Цепочка данных:
+
+  зеркало NIC  --> xdpflowd        --> flows_raw
+  DNS mirror   --> dnsflowd        --> dns_log / dns_answers
+  sFlow/NFv9   --> flowcollectord  --> flows_raw
+  роутеры BMP  --> bmpgrapes       --> bmp_* --> grapes-enrichment
+                                            --> bgp_prefix_origin_current
+  grapes-worker --> traffic_* / observation_rollups_5m
+  UI :3000      --> читает CH (ui_read / ui_admin)
+
+НЕ ВКЛЮЧАТЬ хостовые таймеры:
+  traffic-rollups, traffic-talkers-rollups, geoloaderd,
+  bgp-origin-refresh, asn-names-loader, snmp-iface-sync,
+  iptoasn-loader и сервис grapes-analytics.
+
+Их работу делают контейнеры. Два писателя в одни таблицы портят агрегаты.
+
+
+2. Порядок
+----------
+
+  1. ClickHouse с диском, схема, пользователи
+  2. git clone на хосте коллекторов / воркеров
+  3. Коллекторы (только нужные площадке)
+  4. grapes-worker и grapes-enrichment
+  5. UI на порту 3000
+  6. Справочники в UI и проверка данных
+
+
+3. ClickHouse (база с нуля)
+---------------------------
+
+3.1. Сервер и диск
+
+Пакет или Docker — неважно. Обязательно сохранить:
+
+  /var/lib/clickhouse          данные
+  /etc/clickhouse-server       users.xml, config.d
+
+Без volume recreate контейнера = пустая база.
+
+Порты по умолчанию: native 9000, HTTP 8123.
+Если снаружи другие (на текущем стенде HTTP 6123, native 6124) —
+везде подставляйте фактические.
+
+Часовой пояс сервера — файл /etc/clickhouse-server/config.d/timezone.xml:
+
+  <clickhouse>
+    <timezone>Europe/Moscow</timezone>
+  </clickhouse>
+
+UI и grapes-worker: CLICKHOUSE_TIMEZONE=Europe/Moscow
+Если сервер UTC, а клиенты Moscow (или наоборот), графики съедут на +-3 часа.
+
+Проверка:
+
+  clickhouse-client --host 127.0.0.1 --port 9000 -q "SELECT timezone(), now(), now('UTC')"
+
+now() и timezone() — Москва; now('UTC') на 3 часа меньше.
+
+
+3.2. Репозиторий (машина с доступом к CH)
+
+  apt install -y clickhouse-client gettext-base curl git
+  git clone https://github.com/jzhekatroy/GrapesNTA.git /opt/GrapesNTA
+  cd /opt/GrapesNTA
+  git checkout main
+  git pull --ff-only origin main
+
+Нужны clickhouse-client ИЛИ curl, плюс envsubst (пакет gettext-base).
+
+
+3.3. Накатить схему
+
+Словари подставляют CH_DICT_* через envsubst.
+SOURCE словаря — как сервер ClickHouse ходит САМ В СЕБЯ:
+loopback native, обычно 127.0.0.1:9000. Не ставьте внешний IP зеркала.
+
+Вариант HTTP:
+
+  cd /opt/GrapesNTA
+  export CH_URL='http://127.0.0.1:8123'
+  export CH_USER='default'
+  export CH_PASS='...'
+  export CH_DICT_HOST=127.0.0.1
+  export CH_DICT_PORT=9000
+  export CH_DICT_USER="$CH_USER"
+  export CH_DICT_PASSWORD="$CH_PASS"
+  ./deploy/schema/apply.sh
+
+Вариант native:
+
+  cd /opt/GrapesNTA
+  export CH_HOST=127.0.0.1 CH_PORT=9000
+  export CH_USER=default CH_PASS='...'
+  export CH_DICT_HOST=127.0.0.1 CH_DICT_PORT=9000
+  export CH_DICT_USER="$CH_USER" CH_DICT_PASSWORD="$CH_PASS"
+  ./deploy/schema/apply.sh
+
+Слои по отдельности: ./deploy/schema/apply.sh 10_flows 60_traffic
+
+Скрипт идемпотентен (IF NOT EXISTS), но НЕ мигрирует уже изменённые колонки.
+Повторный прогон на пустой базе безопасен.
+
+deploy/clickhouse/*.sql — не схема, а ALTER/ops для уже живой базы.
+На пустой CH их списком из старых runbook'ов не гонять.
+
+Проверка каркаса (должно вернуться 14 имён):
+
+  clickhouse-client --host "$CH_HOST" --port "$CH_PORT" \
+    --user "$CH_USER" --password "$CH_PASS" -q "
+  SELECT name FROM system.tables
+  WHERE database = 'default'
+    AND name IN (
+      'flows_raw', 'dns_log', 'dns_answers',
+      'bmp_peers', 'bmp_route_events', 'bgp_prefix_origin_current',
+      'geo_prefix_country', 'net_flow_sources', 'net_l3_prefixes',
+      'traffic_dashboard_1m', 'traffic_rollup_state',
+      'observations', 'observation_rollups_5m', 'users'
+    )
+  ORDER BY name
+  FORMAT TSV"
+
+Словари (объекты должны существовать; пустой SOURCE на свежей базе нормален,
+пока enrichment не заполнит таблицы):
+
+  SELECT name, status FROM system.dictionaries
+  WHERE database = 'default'
+    AND name IN ('geo_country_dict', 'bgp_origin_asn_dict', 'net_interfaces_dict')
+  FORMAT PrettyCompact
+
+
+3.4. Пользователи и GRANT
+
+Три роли. Пароли свои на каждом стенде.
+
+  collector_write   xdpflowd, dnsflowd, flowcollectord, bmpgrapes
+  ui_read           UI SELECT
+  ui_admin          UI запись справочников, grapes-worker, grapes-enrichment,
+                    SYSTEM RELOAD DICTIONARY
+
+Лимиты — только overflow_mode = 'throw'.
+Режим 'break' тихо обрезает ответ, агрегаты выглядят успешными.
+
+В файле deploy/clickhouse/bootstrap_users.sql заменить:
+  CHANGE_ME_COLLECTOR
+  CHANGE_ME_UI_READ
+  CHANGE_ME_UI_ADMIN
+
+Затем от bootstrap-админа:
+
+  clickhouse-client --host "$CH_HOST" --port "$CH_PORT" \
+    --user "$CH_USER" --password "$CH_PASS" \
+    --multiquery < /opt/GrapesNTA/deploy/clickhouse/bootstrap_users.sql
+
+Тот же SQL (пароли заменить до запуска):
+
+  CREATE USER IF NOT EXISTS collector_write IDENTIFIED BY 'CHANGE_ME_COLLECTOR';
+
+  CREATE USER IF NOT EXISTS ui_read IDENTIFIED BY 'CHANGE_ME_UI_READ'
+    SETTINGS
+      max_execution_time = 120,
+      timeout_overflow_mode = 'throw',
+      max_rows_to_read = 0,
+      max_bytes_to_read = 0,
+      read_overflow_mode = 'throw',
+      max_result_rows = 0,
+      result_overflow_mode = 'throw';
+
+  CREATE USER IF NOT EXISTS ui_admin IDENTIFIED BY 'CHANGE_ME_UI_ADMIN'
+    SETTINGS
+      max_execution_time = 30,
+      timeout_overflow_mode = 'throw',
+      max_rows_to_read = 100000000,
+      max_bytes_to_read = 20000000000,
+      read_overflow_mode = 'throw',
+      max_result_rows = 500000,
+      result_overflow_mode = 'throw';
+
+  GRANT INSERT ON default.flows_raw TO collector_write;
+  GRANT INSERT ON default.dns_log TO collector_write;
+  GRANT INSERT ON default.dns_answers TO collector_write;
+  GRANT INSERT ON default.bmp_peers TO collector_write;
+  GRANT INSERT ON default.bmp_route_events TO collector_write;
+  GRANT INSERT ON default.bgp_updates_1m TO collector_write;
+  GRANT INSERT ON default.collector_health_snapshots TO collector_write;
+
+  GRANT SELECT ON default.* TO ui_read;
+  GRANT SELECT ON system.tables TO ui_read;
+  GRANT SELECT ON system.columns TO ui_read;
+  GRANT SELECT ON system.dictionaries TO ui_read;
+  GRANT dictGet ON default.geo_country_dict TO ui_read;
+  GRANT dictGet ON default.bgp_origin_asn_dict TO ui_read;
+  GRANT dictGet ON default.net_interfaces_dict TO ui_read;
+
+  GRANT SELECT, INSERT, CREATE TABLE, ALTER TABLE, DROP TABLE, ALTER DELETE ON default.* TO ui_admin;
+  GRANT CREATE DICTIONARY, DROP DICTIONARY ON default.* TO ui_admin;
+  GRANT SYSTEM RELOAD DICTIONARY ON *.* TO ui_admin;
+  GRANT SELECT ON system.* TO ui_admin;
+  GRANT dictGet ON default.geo_country_dict TO ui_admin;
+  GRANT dictGet ON default.bgp_origin_asn_dict TO ui_admin;
+  GRANT dictGet ON default.net_interfaces_dict TO ui_admin;
+
+Проверка, что ни у кого нет break (должно быть 0 строк):
+
+  SELECT user_name, setting_name, value
+  FROM system.settings_profile_elements
+  WHERE user_name IN ('ui_read', 'ui_admin', 'collector_write')
+    AND setting_name LIKE '%overflow_mode%'
+    AND value = 'break';
+
+Проверка входа:
+
+  clickhouse-client --host "$CH_HOST" --port "$CH_PORT" --user collector_write --password '...' -q "SELECT currentUser()"
+  clickhouse-client --host "$CH_HOST" --port "$CH_PORT" --user ui_read --password '...' -q "SELECT count() FROM system.tables WHERE database='default'"
+  clickhouse-client --host "$CH_HOST" --port "$CH_PORT" --user ui_admin --password '...' -q "SELECT currentUser()"
+
+
+3.5. Firewall
+
+Снаружи открывать только нужное:
+  native/HTTP ClickHouse — НЕ в интернет, только коллекторы, worker, UI, админ
+  sFlow :6343/udp, BMP TCP (часто не 5000), UI :3000 — по allowlist
+
+
+4. Хост коллекторов
+-------------------
+
+Debian 12/13, root, Go 1.23+, clang, libbpf-dev, linux-libc-dev,
+Docker CE с плагином compose.
+
+  apt install -y clang llvm libbpf-dev linux-libc-dev build-essential git docker-ce docker-compose-plugin
+  cd /opt/GrapesNTA
+  make build                 # xdpflowd + bpf/xdp_flow.o
+  make build-dns             # dnsflowd
+  make build-flowcollectord  # sFlow / NetFlow UDP
+  make build-bmp             # BMP
+
+Бинарники: /opt/GrapesNTA/bin/
+Unit-файлы рассчитаны на REPO_ROOT=/opt/GrapesNTA
+
+
+4.1. xdpflowd (зеркало / TAP)
+
+Только на mirror-интерфейсе.
+На routing/management XDP_ACTION=drop ломает форвардинг.
+
+  sudo mkdir -p /etc/xdpflowd /var/lib/xdpflowd/ch-spool
+  sudo cp deploy/systemd/xdpflowd.env.example /etc/xdpflowd/xdpflowd.env
+  sudo chmod 0600 /etc/xdpflowd/xdpflowd.env
+  # заполнить: IFACE, REPO_ROOT, XDP_CH_DSN, XDPFLOWD_SOURCE_ID
+  sudo cp deploy/systemd/xdpflowd.service /etc/systemd/system/
+  sudo systemctl daemon-reload
+  sudo systemctl enable --now xdpflowd
+
+Обязательное в /etc/xdpflowd/xdpflowd.env:
+
+  REPO_ROOT=/opt/GrapesNTA
+  IFACE=ens1np0
+  XDP_CH_DSN=clickhouse://collector_write:PASS@CH_HOST:9000/default
+  XDP_CH_TABLE=default.flows_raw
+  XDPFLOWD_SOURCE_ID=netflow
+  XDP_CH_SPOOL_MODE=required
+  XDP_CH_SPOOL_DIR=/var/lib/xdpflowd/ch-spool
+  XDP_CLASSIFIER=1
+  XDP_EXCLUSIONS=1
+
+Пароль в DSN URL-кодировать.
+Native-порт — тот, что слушает CH с этой машины.
+source_id уникален на весь стенд.
+
+Классификатор читает:
+  net_l3_prefixes_enabled
+  net_l2_vlans_enabled
+  bgp_prefix_origin_current
+
+Без BMP + enrichment поля src_asn/dst_asn будут 0.
+
+Скрипт prod_enable_xdpflowd.sh — это cutover с ipt_NETFLOW, на чистом хосте не нужен.
+
+
+4.2. dnsflowd / flowcollectord / bmpgrapes
+
+Включать только нужные.
+
+  dnsflowd         /etc/dnsflowd/dnsflowd.env
+                   DNS-зеркало -> dns_log / dns_answers
+                   нужен XDP_DNS_PASSTHROUGH=1 у xdpflowd на том же IFACE
+
+  flowcollectord   /etc/flowcollectord/flowcollectord.env
+                   sFlow :6343/udp / NFv9 -> flows_raw
+
+  bmpgrapes        /etc/bmpgrapes/bmpgrapes.env
+                   BMP от роутеров; без него ASN в потоках пустые
+
+  sudo mkdir -p /etc/dnsflowd
+  sudo cp deploy/systemd/dnsflowd.env.example /etc/dnsflowd/dnsflowd.env
+  sudo cp deploy/systemd/dnsflowd.service /etc/systemd/system/
+  # DNS_CH_DSN=clickhouse://collector_write:PASS@CH_HOST:9000/default
+  # DNSFLOWD_SOURCE_ID=dns-netflow
+
+  sudo mkdir -p /etc/flowcollectord
+  sudo cp deploy/systemd/flowcollectord.env.example /etc/flowcollectord/flowcollectord.env
+  sudo cp deploy/systemd/flowcollectord.service /etc/systemd/system/
+  # FC_CH_DSN=...  FC_SFLOW_SOURCE_ID=sflow-default
+
+  sudo mkdir -p /etc/bmpgrapes
+  sudo cp deploy/systemd/bmpgrapes.env.example /etc/bmpgrapes/bmpgrapes.env
+  sudo cp deploy/systemd/bmpgrapes.service /etc/systemd/system/
+  # BMP_CH_DSN=...  BMP_LISTEN=0.0.0.0:10179
+  # порт BMP как на роутерах, не обязательно 5000
+
+  sudo chmod 0600 /etc/dnsflowd/dnsflowd.env \
+                  /etc/flowcollectord/flowcollectord.env \
+                  /etc/bmpgrapes/bmpgrapes.env
+  sudo systemctl daemon-reload
+  sudo systemctl enable --now dnsflowd flowcollectord bmpgrapes
+
+У каждого коллектора свой source_id.
+Два процесса с одним id дважды учтут один трафик.
+
+
+5. Docker-воркеры
+-----------------
+
+Хост, который видит ClickHouse по HTTP (часто тот же, что коллекторы).
+
+  cd /opt/GrapesNTA/deploy/worker
+  cp -n env.example .env
+  # CLICKHOUSE_URL, пароли ui_admin / ui_read, TRAFFIC_ROLLUP_CH_*
+  # CLICKHOUSE_TIMEZONE=Europe/Moscow
+  mkdir -p logs data
+  chown -R 1001:1001 data
+
+  cd /opt/GrapesNTA/deploy/enrichment
+  cp -n env.example .env
+  # GEOLOADERD_CH_*, BGPORIGIN_CH_*, пароли
+  mkdir -p logs
+
+  cd /opt/GrapesNTA
+  ./deploy/deploy.sh worker
+  ./deploy/deploy.sh enrichment
+  # или сразу оба: ./deploy/deploy.sh
+
+Если ClickHouse НЕ на localhost:
+  клиентские *_CH_HOST / CLICKHOUSE_URL / CLICKHOUSE_HTTP_PORT — внешний адрес
+    (например HTTP 6123)
+  *_DICT_SOURCE_HOST=127.0.0.1 и *_DICT_SOURCE_PORT=9000 —
+    как сервер CH ходит сам в себя.
+  Внешний IP в DICT_SOURCE даёт ALL_CONNECTION_TRIES_FAILED.
+
+Не запускать два grapes-worker на одну базу.
+
+Проверка:
+
+  docker ps --format 'table {{.Names}}\t{{.Status}}'
+  docker logs --since 5m grapes-worker 2>&1 | grep -E 'analytics started|run complete|precheck ok'
+  docker logs --since 10m grapes-enrichment | tail
+
+Первые минуты роллапов пустые: safety lag ~5 минут плюс пустой flows_raw.
+
+
+6. UI, порт 3000
+----------------
+
+Исходники продукта — приватный mavotronik/NTAdmin.
+В GrapesNTA лежит вендорная копия deploy/ui/app.
+
+Вариант A — контейнер из GrapesNTA:
+
+  cd /opt/GrapesNTA
+  cp -n deploy/ui/env.example deploy/ui/.env
+  # CLICKHOUSE_URL=http://CH_HOST:8123  (или :6123)
+  # CLICKHOUSE_READ_USER / WRITE_USER, пароли
+  # CLICKHOUSE_TIMEZONE=Europe/Moscow
+  ./deploy/deploy.sh ui
+
+Вариант B — NTAdmin как отдельный процесс:
+
+  cd /path/to/NTAdmin
+  cp -n .env.example .env
+  # те же CLICKHOUSE_* и CLICKHOUSE_TIMEZONE=Europe/Moscow
+  PORT=3000 npm run dev
+
+Оба варианта ходят в тот же ClickHouse.
+Не поднимать два UI-писателя справочников без нужды.
+
+После старта: логин (таблица users создаётся сама), диагностики, дашборд.
+
+
+7. Первый трафик в UI
+---------------------
+
+Пока оператор не заполнит справочники, классификатор и дашборд слепые.
+
+В UI:
+  1. Локации / коллекторы / источники (net_flow_sources, include_in_total)
+  2. L3-префиксы своих сетей и сущности
+  3. VLAN, если нужны
+  4. SNMP-агенты — если нужны имена интерфейсов
+     (опрос делает grapes-enrichment)
+  5. BMP-пиры на роутерах -> bmpgrapes -> job bgp-origin в enrichment
+
+Ожидание: сырой flows_raw — секунды; дашборд traffic_* — 5-10 минут.
+
+
+8. Чеклист
+----------
+
+  clickhouse-client ... -q "SELECT name FROM system.tables WHERE database='default' AND name IN ('flows_raw','traffic_dashboard_1m','dns_log','observations') FORMAT TSV"
+
+  systemctl is-active xdpflowd dnsflowd flowcollectord bmpgrapes
+  journalctl -u xdpflowd -n 30 --no-pager
+
+  systemctl list-timers --all | grep -Ei 'traffic|geo|asn|snmp|bgp|iptoasn' || true
+  docker ps --format '{{.Names}}'
+
+  clickhouse-client ... -q "SELECT source_id, count() FROM flows_raw WHERE time_received_ns > now() - 300 GROUP BY source_id"
+  clickhouse-client ... -q "SELECT max(minute), dateDiff('second', max(minute), now()) FROM traffic_dashboard_1m"
+
+Дашборд, наблюдения и explorer — московское время, близко к now().
+Если наблюдения -3ч, а explorer +3ч — не совпал CLICKHOUSE_TIMEZONE
+у UI и worker (нужен Europe/Moscow).
+
+
+9. Куда смотреть в репозитории
+------------------------------
+
+  docs/INSTALL.md                         этот же текст в markdown
+  deploy/schema/                          CREATE TABLE / VIEW / DICTIONARY
+  deploy/schema/apply.sh                  накат схемы
+  deploy/clickhouse/bootstrap_users.sql   пользователи и GRANT
+  deploy/clickhouse/                      ALTER/migrate живой базы, не схема
+  deploy/worker/                          grapes-worker
+  deploy/enrichment/                      grapes-enrichment
+  deploy/ui/                              grapes-nta
+  deploy/deploy.sh                        git pull + rebuild контейнеров
+  deploy/systemd/                         unit-файлы коллекторов

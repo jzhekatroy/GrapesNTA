@@ -2,7 +2,7 @@
 
 XDP/eBPF flow collectors, ClickHouse analytics, Docker workers, and the NTAdmin UI.
 
-**Новый стенд с нуля:** [docs/INSTALL.md](docs/INSTALL.md) — ClickHouse → коллекторы → `grapes-worker` / `grapes-enrichment` → UI на порту 3000.
+**Новый стенд с нуля:** [docs/INSTALL.txt](docs/INSTALL.txt) (текст для инженера) или [docs/INSTALL.md](docs/INSTALL.md).
 
 Repository: [github.com/jzhekatroy/GrapesNTA](https://github.com/jzhekatroy/GrapesNTA)
 
