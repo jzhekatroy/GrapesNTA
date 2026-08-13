@@ -25,6 +25,7 @@
 40_enrichment/07_asn_registry.sql
 40_enrichment/08_asn_registry_staging.sql
 40_enrichment/09_asn_registry_enriched.sql
+40_enrichment/10_enrichment_job_status.sql
 50_net/01_net_locations.sql
 50_net/02_net_collectors.sql
 50_net/03_net_entities.sql
@@ -85,6 +86,10 @@
 60_traffic/14_traffic_role_1m.sql
 60_traffic/15_traffic_entity_1m.sql
 60_traffic/16_traffic_vlan_1m.sql
+60_traffic/17_traffic_talker_1m.sql
+60_traffic/18_traffic_talker_1h.sql
+60_traffic/19_traffic_pair_1m.sql
+60_traffic/20_traffic_pair_1h.sql
 60_traffic/21_traffic_rollup_backfill_queue.sql
 60_traffic/22_traffic_client_1m.sql
 60_traffic/23_traffic_client_1h.sql

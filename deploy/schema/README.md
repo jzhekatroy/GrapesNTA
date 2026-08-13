@@ -17,6 +17,8 @@ One schema covers collectors and product surfaces:
 
 ## Apply (fresh CH)
 
+`apply.sh` walks `NN_*/*.sql` in filename order. `MANIFEST.txt` is the inventory of those files; keep it in sync when adding SQL.
+
 HTTP (as used on prod admin port):
 
 ```bash
