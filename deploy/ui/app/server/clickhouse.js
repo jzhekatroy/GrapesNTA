@@ -114,7 +114,7 @@ const config = {
   intervalsCountryRuTable: env('CLICKHOUSE_INTERVALS_COUNTRY_RU_TABLE', 'intervals_country_ru'),
   requestTimeoutMs: envInt('CLICKHOUSE_REQUEST_TIMEOUT_MS', 30000),
   logSql: envBool('CLICKHOUSE_LOG_SQL', process.env.NODE_ENV !== 'production'),
-  dataTimezone: env('CLICKHOUSE_TIMEZONE', 'UTC'),
+  dataTimezone: env('CLICKHOUSE_TIMEZONE', 'Europe/Moscow'),
   monitoringColumns: {
     dt: env('CH_COL_INTERVALS_DT', 'dt'),
     value: env('CH_COL_INTERVALS_VALUE', 'value'),

@@ -763,6 +763,7 @@ async function readRollupTimeseries(observationId, window) {
     const { rows } = await query(`
       SELECT
         minute,
+        toUnixTimestamp(minute) AS bucket_ts,
         sum(bytes) AS bytes,
         sum(packets) AS packets,
         sum(flows) AS flows
@@ -780,8 +781,12 @@ async function readRollupTimeseries(observationId, window) {
     }, { name: 'observations/rollup-ts' });
     const points = rows.map((r) => {
       const bytes = Number(r.bytes) || 0;
+      const ts = Number(r.bucket_ts);
+      const bucketMs = Number.isFinite(ts) && ts > 0 ? ts * 1000 : null;
       return {
         t: r.minute,
+        bucket: r.minute,
+        bucketMs,
         bytes,
         bps: Math.round((bytes * 8) / ROLLUP_BUCKET_SEC),
         packets: Number(r.packets) || 0,
@@ -926,6 +931,7 @@ async function readRollupGroupedTimeseries(observationId, window, { seriesLimit 
     const { rows } = await query(`
       SELECT
         minute,
+        toUnixTimestamp(minute) AS bucket_ts,
         ${rollupDimColumns(dimCount).join(',\n        ')},
         sum(bytes) AS bytes,
         sum(packets) AS packets,
@@ -951,8 +957,10 @@ async function readRollupGroupedTimeseries(observationId, window, { seriesLimit 
       const key = dimKeyFromRow(r, dimCount);
       if (!wanted.has(key)) continue;
       const minute = r.minute;
+      const ts = Number(r.bucket_ts);
+      const bucketMs = Number.isFinite(ts) && ts > 0 ? ts * 1000 : null;
       if (!bucketMap.has(minute)) {
-        bucketMap.set(minute, { t: minute, bucket: minute });
+        bucketMap.set(minute, { t: minute, bucket: minute, bucketMs });
       }
       const bytes = Number(r.bytes) || 0;
       bucketMap.get(minute)[key] = Math.round((bytes * 8) / ROLLUP_BUCKET_SEC);
@@ -961,7 +969,7 @@ async function readRollupGroupedTimeseries(observationId, window, { seriesLimit 
     const totalByBucket = new Map();
     for (const p of totalSeries.points || []) {
       totalByBucket.set(p.t, Number(p.bps) || 0);
-      if (!bucketMap.has(p.t)) bucketMap.set(p.t, { t: p.t, bucket: p.t });
+      if (!bucketMap.has(p.t)) bucketMap.set(p.t, { t: p.t, bucket: p.t, bucketMs: p.bucketMs ?? null });
     }
 
     let otherSeen = false;
@@ -1090,7 +1098,9 @@ async function fetchThresholdGroupedTimeseries(obs, window, { groupBy, seriesLim
     const series = seriesByRow[row.id] || [];
     for (const pt of series) {
       const bucket = pt.bucket;
-      if (!bucketMap.has(bucket)) bucketMap.set(bucket, { t: bucket, bucket });
+      if (!bucketMap.has(bucket)) {
+        bucketMap.set(bucket, { t: bucket, bucket, bucketMs: pt.bucketMs ?? null });
+      }
       bucketMap.get(bucket)[row.key] = Number(pt.bps ?? pt.value) || 0;
     }
   }

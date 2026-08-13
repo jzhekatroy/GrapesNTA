@@ -924,6 +924,16 @@ function explorerBucketExpr(timeExpr, granKey, seconds) {
     : `toStartOfInterval(${zoned}, INTERVAL ${seconds} SECOND)`;
 }
 
+/** Same instant as explorerBucketExpr, as unix seconds — UI axis must not parse naive DateTime strings. */
+function explorerBucketSelect(bucketExpr) {
+  return `${bucketExpr} AS bucket,\n        toUnixTimestamp(${bucketExpr}) AS bucket_ts`;
+}
+
+function explorerBucketMs(row) {
+  const ts = Number(row.bucket_ts);
+  return Number.isFinite(ts) && ts > 0 ? ts * 1000 : null;
+}
+
 async function createExplorerWindowAnchor() {
   const tz = escapeSqlString(config.dataTimezone || 'UTC');
   const { rows } = await query(
@@ -2346,7 +2356,7 @@ async function explorerResultSeries(body = {}, flowRows = []) {
         ${windowSpec.cteHead}
         dateDiff('second', ts_from, ts_to) AS window_seconds
       SELECT
-        ${bucketExpr} AS bucket,
+        ${explorerBucketSelect(bucketExpr)},
         ${groupSelect.join(',\n        ')},
         sum(${scaled.bytes}) AS bytes,
         sum(${scaled.packets}) AS packets,
@@ -2372,6 +2382,7 @@ async function explorerResultSeries(body = {}, flowRows = []) {
         if (!row) continue;
         seriesByRow[row.id].push({
           bucket: r.bucket,
+          bucketMs: explorerBucketMs(r),
           bytes: Number(r.bytes) || 0,
           packets: Number(r.packets) || 0,
           flows: Number(r.flows) || 0,
@@ -2465,6 +2476,7 @@ async function explorerGroupedTimeseries(body = {}) {
         dateDiff('second', ts_from, ts_to) AS window_seconds
       SELECT
         bucket,
+        toUnixTimestamp(bucket) AS bucket_ts,
         ${plan.keys.map((k) => `g${k.groupIdx}`).join(',\n        ')},
         bytes,
         packets,
@@ -2529,6 +2541,7 @@ async function explorerGroupedTimeseries(body = {}) {
         dateDiff('second', ts_from, ts_to) AS window_seconds
       SELECT
         bucket,
+        toUnixTimestamp(bucket) AS bucket_ts,
         ${groupAliases.join(',\n        ')},
         bytes,
         packets,
@@ -2624,6 +2637,7 @@ async function explorerGroupedTimeseries(body = {}) {
         if (!rowId) continue;
         seriesByRow[rowId].push({
           bucket: r.bucket,
+          bucketMs: explorerBucketMs(r),
           bytes: Number(r.bytes) || 0,
           packets: Number(r.packets) || 0,
           flows: Number(r.flows) || 0,
@@ -2667,7 +2681,7 @@ async function explorerTimeseries(body = {}, options = {}) {
         ${windowSpec.cteHead}
         dateDiff('second', ts_from, ts_to) AS window_seconds
       SELECT
-        ${bucketExpr} AS bucket,
+        ${explorerBucketSelect(bucketExpr)},
         sum(${scaled.bytes}) AS bytes,
         sum(${scaled.packets}) AS packets,
         sum(${scaled.flowWeight}) AS flows,
@@ -2686,6 +2700,7 @@ async function explorerTimeseries(body = {}, options = {}) {
     async map(rows) {
       return rows.map((r) => ({
         bucket: r.bucket,
+        bucketMs: explorerBucketMs(r),
         bytes: Number(r.bytes) || 0,
         packets: Number(r.packets) || 0,
         flows: Number(r.flows) || 0,

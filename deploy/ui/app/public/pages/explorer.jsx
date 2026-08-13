@@ -4984,6 +4984,12 @@ function ContributionBarsExplorer({
   );
 }
 
+function explorerPointBucketKey(pt) {
+  const ms = Number(pt?.bucketMs);
+  if (Number.isFinite(ms) && ms > 0) return `ms:${ms}`;
+  return normalizeBucketString(pt?.bucket);
+}
+
 function ExplorerTotalChart({
   points,
   metric,
@@ -5000,6 +5006,7 @@ function ExplorerTotalChart({
         bucket: normalizeBucketString(point.bucket),
         value: Number(point.value) || 0,
       };
+      if (point.bucketMs != null) next.bucketMs = Number(point.bucketMs);
       next.t = formatPointTimeLabel(next, chartLongRange, displayTimezone);
       return next;
     })
@@ -5074,12 +5081,14 @@ function DynamicsChartExplorer({
   for (const rowId of chartRowIds) {
     const rawPoints = seriesByRow[rowId] || [];
     for (const pt of rawPoints) {
-      const bucket = normalizeBucketString(pt.bucket);
-      if (!pointsByBucket.has(bucket)) {
-        pointsByBucket.set(bucket, { ...pt, bucket });
+      const key = explorerPointBucketKey(pt);
+      if (!pointsByBucket.has(key)) {
+        const next = { ...pt, bucket: normalizeBucketString(pt.bucket) };
+        if (pt.bucketMs != null) next.bucketMs = Number(pt.bucketMs);
+        pointsByBucket.set(key, next);
       }
-      const current = Number(pointsByBucket.get(bucket)[rowId]) || 0;
-      pointsByBucket.get(bucket)[rowId] = current + (Number(pt.value) || 0);
+      const current = Number(pointsByBucket.get(key)[rowId]) || 0;
+      pointsByBucket.get(key)[rowId] = current + (Number(pt.value) || 0);
     }
   }
 
@@ -5087,10 +5096,10 @@ function DynamicsChartExplorer({
   let hasOthers = false;
   if (Array.isArray(totalPoints) && totalPoints.length && chartRowIds.length) {
     for (const pt of totalPoints) {
-      const bucket = normalizeBucketString(pt.bucket);
+      const key = explorerPointBucketKey(pt);
       const total = Number(pt.value) || 0;
       if (!total) continue;
-      const target = pointsByBucket.get(bucket);
+      const target = pointsByBucket.get(key);
       if (!target) continue;
       const shown = chartRowIds.reduce((s, id) => s + (Number(target[id]) || 0), 0);
       const rest = total - shown;
