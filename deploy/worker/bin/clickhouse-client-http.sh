@@ -65,15 +65,15 @@ fi
 
 # Kill the query on the server when curl dies. Without this, `timeout` on the
 # Python process leaves SELECT min(time) over flows_raw running for minutes.
+#
+# Auth MUST be curl --user, not ?user=&password= in the URL. A password with
+# `#` becomes a URL fragment and ClickHouse sees a truncated secret → HTTP 403.
 URL="http://${HOST}:${PORT}/?max_execution_time=${MAX_TIME}&timeout_overflow_mode=throw&wait_end_of_query=1"
-URL="${URL}&user=$(printf %s "$USER" | sed 's/ /%20/g')"
-if [ -n "$PASSWORD" ]; then
-  URL="${URL}&password=$(printf %s "$PASSWORD" | sed 's/ /%20/g')"
-fi
 if [ -n "$DATABASE" ]; then
   URL="${URL}&database=$(printf %s "$DATABASE" | sed 's/ /%20/g')"
 fi
 
-curl -sS -f --max-time "$MAX_TIME" -X POST "$URL" --data-binary @"$BODY"
+curl -sS -f --max-time "$MAX_TIME" --user "${USER}:${PASSWORD}" \
+  -X POST "$URL" --data-binary @"$BODY"
 # Ensure trailing newline like clickhouse-client
 echo

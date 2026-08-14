@@ -179,12 +179,17 @@ def setup_logging(log_file: Optional[str], verbose: bool) -> logging.Logger:
     logger.addHandler(stream)
 
     if log_file:
-        parent = os.path.dirname(log_file)
-        if parent:
-            os.makedirs(parent, exist_ok=True)
-        file_handler = logging.FileHandler(log_file)
-        file_handler.setFormatter(formatter)
-        logger.addHandler(file_handler)
+        try:
+            parent = os.path.dirname(log_file)
+            if parent:
+                os.makedirs(parent, exist_ok=True)
+            file_handler = logging.FileHandler(log_file)
+            file_handler.setFormatter(formatter)
+            logger.addHandler(file_handler)
+        except OSError as exc:
+            # Host bind-mount is often root:root; the container runs as uid 1001.
+            # Graphs must still roll up — file log is optional.
+            logger.warning("cannot write log file %s: %s; stderr only", log_file, exc)
 
     return logger
 

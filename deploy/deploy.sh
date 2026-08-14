@@ -78,9 +78,24 @@ git_pull() {
   fi
 }
 
+# grapes-worker / grapes-enrichment run as uid 1001. Docker creates bind-mount
+# dirs as root, then FileHandler('/var/log/grapesnta/...') aborts the cron
+# before any INSERT into traffic_dashboard_1m — empty graphs on a fresh box.
+ensure_app_owned_dir() {
+  local dir="$1"
+  mkdir -p "${dir}"
+  chown -R 1001:1001 "${dir}" 2>/dev/null || true
+}
+
 compose_up() {
   local dir="$1" name="$2"
   need_compose_dir "${dir}" "${name}"
+  if [[ "${name}" == "grapes-worker" ]]; then
+    ensure_app_owned_dir "${WORKER_DIR}/logs"
+    ensure_app_owned_dir "${WORKER_DIR}/data"
+  elif [[ "${name}" == "grapes-enrichment" ]]; then
+    ensure_app_owned_dir "${ENRICH_DIR}/logs"
+  fi
   log "rebuild ${name} in ${dir}"
   (
     cd "${dir}"

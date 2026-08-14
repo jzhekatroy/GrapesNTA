@@ -37,8 +37,9 @@ cp -n env.example .env
 # fill CLICKHOUSE_* and TRAFFIC_ROLLUP_* passwords
 # reuse existing observation data: WORKER_DATA_DIR=/opt/grapes/analytics/data
 
-mkdir -p logs
-# if fresh install: mkdir -p data && chown -R 1001:1001 data
+mkdir -p logs data
+# uid 1001 = app user inside grapes-worker; root-owned logs abort rollups
+chown -R 1001:1001 logs data
 
 docker compose up -d --build
 docker logs --tail 80 -f grapes-worker
