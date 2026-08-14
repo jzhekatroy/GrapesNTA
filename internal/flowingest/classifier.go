@@ -471,7 +471,10 @@ func (tc *TrafficClassifier) loadIPASNPrefixes(ctx context.Context, st *classifi
 	}
 	rows, err := tc.conn.Query(ctx, "SELECT prefix, origin_asn FROM "+tc.cfg.Tables.IPASNPrefixes)
 	if err != nil {
-		return 0, fmt.Errorf("load IP ASN prefixes: %w", err)
+		// Default-on: a fresh box may not have loaded iptoasn yet. Do not
+		// fail the whole classifier (that exits flowcollectord).
+		tc.log.Warn("IP ASN fallback unavailable", "table", tc.cfg.Tables.IPASNPrefixes, "err", err)
+		return 0, nil
 	}
 	defer rows.Close()
 	n := 0

@@ -76,7 +76,7 @@ func loadConfig() config {
 	classifierEnabled := flag.Bool("classifier", envBool("FC_CLASSIFIER", true), "enable traffic classifier")
 	classifierRefresh := flag.Duration("classifier-refresh", envDuration("FC_CLASSIFIER_REFRESH", time.Minute), "classifier refresh interval")
 	classifierBGP := flag.String("classifier-bgp-table", envString("FC_CLASSIFIER_BGP_TABLE", "default.bgp_prefix_origin_current"), "BGP origin table")
-	classifierIPASN := flag.String("classifier-ip-asn-table", envString("FC_CLASSIFIER_IP_ASN_TABLE", ""), "optional fallback IP prefix -> ASN table (e.g. default.ip_asn_prefixes_current)")
+	classifierIPASN := flag.String("classifier-ip-asn-table", envString("FC_CLASSIFIER_IP_ASN_TABLE", "default.ip_asn_prefixes_current"), "public IP→ASN fallback (iptoasn); empty env still uses this default")
 	classifierL3 := flag.String("classifier-l3-prefixes-view", envString("FC_CLASSIFIER_L3_PREFIXES_VIEW", "default.net_l3_prefixes_enabled"), "L3 prefixes view")
 	classifierL2 := flag.String("classifier-l2-vlans-view", envString("FC_CLASSIFIER_L2_VLANS_VIEW", "default.net_l2_vlans_enabled"), "L2 VLANs view")
 	classifierDirectionSettings := flag.String("classifier-direction-settings-view", envString("FC_CLASSIFIER_DIRECTION_SETTINGS_VIEW", "default.net_direction_settings_current"), "direction mode settings view (empty = always derive direction from prefixes)")
