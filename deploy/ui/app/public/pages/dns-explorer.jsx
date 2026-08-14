@@ -1633,9 +1633,53 @@ function DnsExplorerFilterRow({
   );
 }
 
+function hydrateDnsFromSharedSnapshot({ snapshot, payload, shareMeta }, handlers) {
+  if (snapshot.timeRange) handlers.setTimeRange(snapshot.timeRange);
+  if (snapshot.timeRange === 'custom' && snapshot.customPeriod) {
+    handlers.setCustomPeriod(snapshot.customPeriod);
+  }
+  if (snapshot.collectorFilter) handlers.setCollectorFilter([...(snapshot.collectorFilter || [])]);
+  handlers.setMetric(snapshot.metric || DNS_EXPLORER_DEFAULT_METRIC);
+  handlers.setGroupBy([...(snapshot.groupBy || [])]);
+  handlers.setFilters(ensureDnsFilterIds(snapshot.filters || []));
+  handlers.setAppliedSnapshot({
+    metric: snapshot.metric || DNS_EXPLORER_DEFAULT_METRIC,
+    groupBy: [...(snapshot.groupBy || [])],
+    filters: cloneDnsExplorerFilters(snapshot.filters || []),
+    timeRange: snapshot.timeRange,
+    customPeriod: snapshot.customPeriod ? { ...snapshot.customPeriod } : handlers.customPeriod,
+    collectorFilter: [...(snapshot.collectorFilter || [])],
+  });
+  handlers.setHasAppliedQuery(true);
+  handlers.setRows(Array.isArray(payload.rows) ? payload.rows : []);
+  handlers.setTimeseries(Array.isArray(payload.timeseries) ? payload.timeseries : []);
+  handlers.setResultSeries(payload.resultSeries || null);
+  handlers.setMeta(payload.meta || null);
+  handlers.setLoadMs(payload.loadMs ?? null);
+  handlers.setServerMs(payload.serverMs ?? null);
+  handlers.setSource('snapshot');
+  handlers.setError(null);
+  handlers.setShareMeta(shareMeta || null);
+  handlers.setSnapshotId(shareMeta?.id || null);
+  handlers.setChartSeriesIds((snapshot.groupBy || []).length
+    ? defaultDnsChartSeriesIds(payload.rows || [], handlers.visualLimit)
+    : new Set());
+}
+
+function formatDnsSnapshotTimestamp(value, displayTimezone) {
+  if (!value) return '—';
+  try {
+    return new Date(value).toLocaleString('ru-RU', displayTimezone ? { timeZone: displayTimezone } : undefined);
+  } catch {
+    return String(value);
+  }
+}
+
 function PageDnsExplorer({ onNavigate, displayTimezone }) {
   const urlGlobals = useMemo(() => applyDnsExplorerUrlGlobals(parseAppHash().params), []);
   const urlState = useMemo(() => readDnsExplorerPageParamsFromHash?.() || null, []);
+  const urlSnapshotToken = urlState?.snapshot || null;
+  const mountRestoreDoneRef = useRef(false);
 
   const [schema, setSchema] = useState(null);
   const [dnsSources, setDnsSources] = useState([]);
@@ -1676,6 +1720,54 @@ function PageDnsExplorer({ onNavigate, displayTimezone }) {
   const [loadMs, setLoadMs] = useState(null);
   const [serverMs, setServerMs] = useState(null);
   const [exporting, setExporting] = useState(false);
+  const [snapshotId, setSnapshotId] = useState(null);
+  const [shareMeta, setShareMeta] = useState(null);
+  const [sharing, setSharing] = useState(false);
+
+  useEffect(() => {
+    if (mountRestoreDoneRef.current) return;
+    mountRestoreDoneRef.current = true;
+    if (!urlSnapshotToken) return undefined;
+
+    let cancelled = false;
+    setSource('loading');
+    ApiClient.loadDnsExplorerSharedSnapshot(urlSnapshotToken).then((result) => {
+      if (cancelled) return;
+      if (!result.ok) {
+        setSource('error');
+        setError(result.message || ApiClient.LOAD_FAILED);
+        return;
+      }
+      hydrateDnsFromSharedSnapshot(result, {
+        setTimeRange,
+        setCustomPeriod,
+        setCollectorFilter,
+        setMetric,
+        setGroupBy,
+        setFilters,
+        setAppliedSnapshot,
+        setHasAppliedQuery,
+        setRows,
+        setTimeseries,
+        setResultSeries,
+        setMeta,
+        setLoadMs,
+        setServerMs,
+        setSource,
+        setError,
+        setShareMeta,
+        setSnapshotId,
+        setChartSeriesIds,
+        visualLimit,
+        customPeriod,
+      });
+    }).catch((err) => {
+      if (cancelled) return;
+      setSource('error');
+      setError(err.message || ApiClient.LOAD_FAILED);
+    });
+    return () => { cancelled = true; };
+  }, []);
 
   useEffect(() => {
     ApiClient.loadDnsExplorerSchema().then(setSchema).catch(() => setSchema(null));
@@ -1804,6 +1896,8 @@ function PageDnsExplorer({ onNavigate, displayTimezone }) {
     setMeta(result.meta);
     setLoadMs(result.loadMs);
     setServerMs(result.serverMs);
+    setSnapshotId(result.snapshotId || null);
+    setShareMeta(result.snapshotExpiresAt ? { expiresAt: result.snapshotExpiresAt } : null);
     setRows(apiRows);
     setTimeseries(result.data?.timeseries || []);
     setResultSeries(result.data?.resultSeries || null);
@@ -1919,12 +2013,47 @@ function PageDnsExplorer({ onNavigate, displayTimezone }) {
   );
   const visiblePageSize = Math.max(resolveDnsVisualCount(visualLimit, visibleResults.length), 1);
 
-  const copyShareUrl = () => {
-    if (!appliedSnapshot) return;
+  const copyFilterShareUrl = async () => {
     const url = buildDnsExplorerShareUrl({
-      ...appliedSnapshot,
+      metric,
+      groupBy,
+      filters: cloneDnsExplorerFilters(filters).map(normalizeDnsExplorerFilter),
+      timeRange,
+      customPeriod,
     });
-    navigator.clipboard?.writeText(url);
+    try {
+      await copyTextToClipboard(url);
+      pushToast?.({ kind: 'success', title: 'Ссылка скопирована', desc: 'URL содержит параметры фильтра.' });
+    } catch (err) {
+      pushToast?.({ kind: 'error', title: 'Не удалось скопировать', desc: err.message });
+    }
+  };
+
+  const copyResultsShareUrl = async () => {
+    if (!snapshotId) {
+      pushToast?.({ kind: 'error', title: 'Нет данных для шаринга', desc: 'Сначала выполните запрос.' });
+      return;
+    }
+    setSharing(true);
+    try {
+      const data = await ApiClient.shareDnsExplorerSnapshot(snapshotId);
+      const url = buildDnsExplorerSnapshotShareUrl(data.token);
+      await copyTextToClipboard(url);
+      setShareMeta((prev) => ({
+        ...(prev || {}),
+        expiresAt: data.expiresAt,
+        sharedAt: data.sharedAt,
+      }));
+      pushToast?.({
+        kind: 'success',
+        title: 'Ссылка скопирована',
+        desc: `Сохранённые результаты доступны до ${formatDnsSnapshotTimestamp(data.expiresAt, displayTimezone)}.`,
+      });
+    } catch (err) {
+      pushToast?.({ kind: 'error', title: 'Не удалось создать ссылку', desc: err.message });
+    } finally {
+      setSharing(false);
+    }
   };
 
   const exportCsv = async () => {
@@ -1975,16 +2104,47 @@ function PageDnsExplorer({ onNavigate, displayTimezone }) {
         </div>
         <div className="row" style={{ gap: 8 }}>
           <Button kind="ghost" size="sm" onClick={() => onNavigate?.('dns')}>Вернуться в обзор DNS</Button>
+          <Button kind="ghost" size="sm" icon="link" onClick={copyFilterShareUrl}>Поделиться фильтрами</Button>
           {hasAppliedQuery && (
             <>
               <Button kind="ghost" size="sm" icon="export" onClick={exportCsv} disabled={exporting}>
                 {exporting ? 'Экспорт…' : 'CSV'}
               </Button>
-              <Button kind="ghost" size="sm" icon="link" onClick={copyShareUrl}>Копировать ссылку</Button>
+              <Button
+                kind="ghost"
+                size="sm"
+                icon="copy"
+                onClick={copyResultsShareUrl}
+                disabled={!snapshotId || sharing}
+              >
+                {sharing ? 'Ссылка…' : 'Поделиться результатами'}
+              </Button>
             </>
           )}
         </div>
       </div>
+
+      {(source === 'snapshot' || shareMeta?.expiresAt) && hasAppliedQuery && (
+        <div
+          className="row"
+          style={{
+            gap: 12,
+            flexWrap: 'wrap',
+            alignItems: 'center',
+            padding: '10px 14px',
+            marginBottom: 8,
+            borderRadius: 10,
+            border: '1px solid var(--bd-soft)',
+            background: 'rgba(126, 146, 248, 0.08)',
+          }}
+        >
+          <div style={{ flex: 1, minWidth: 220, font: 'var(--pv-text-body-3)' }}>
+            Просмотр сохранённого снимка результатов
+            {shareMeta?.createdAt ? ` · создан ${formatDnsSnapshotTimestamp(shareMeta.createdAt, displayTimezone)}` : ''}
+            {shareMeta?.expiresAt ? ` · доступен до ${formatDnsSnapshotTimestamp(shareMeta.expiresAt, displayTimezone)}` : ''}
+          </div>
+        </div>
+      )}
 
       <div className="col" style={{ gap: 16, minWidth: 0 }}>
         <Card pad="sm">

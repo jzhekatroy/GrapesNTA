@@ -31,14 +31,13 @@ const {
   explorerFlows,
   explorerSchema,
   explorerQuery,
+  executeExplorerQueryBundle,
   searchExplorerEntities,
   listSavedExplorerFilters,
   createSavedExplorerFilter,
   updateSavedExplorerFilter,
   deleteSavedExplorerFilter,
   explorerExportCsv,
-  explorerResultSeries,
-  summaryFromExplorerFlowRows,
 } = require('./explorer');
 const {
   ensureObservationsStore,
@@ -73,6 +72,7 @@ const {
 const { getEnrichmentDiagnostics } = require('./diagnostics-enrichment');
 const { getSnmpDiagnostics } = require('./diagnostics-snmp');
 const { getBoundsDiagnostics } = require('./diagnostics-bounds');
+const { getBuildInfo, formatBuildInfoLogLine } = require('./build-info');
 const {
   dnsSources,
   dnsActivityChart,
@@ -96,6 +96,19 @@ const {
   parseDnsExplorerBody,
   parseDnsExplorerSuggestQuery,
 } = require('./dns-explorer');
+const {
+  tryCreateSnapshot,
+  shareSnapshot,
+  revokeShare,
+  getSharedSnapshot,
+  getActiveShareLinkStats,
+  buildExplorerStoredQuery,
+  buildExplorerStoredPayload,
+  buildDnsExplorerStoredQuery,
+  buildDnsExplorerStoredPayload,
+  ensureStore: ensureAnalysisSnapshotsStore,
+} = require('./analysis-snapshots');
+const { isCabinetScoped } = require('./cabinet/context');
 const {
   parseMonitoringSeriesQuery,
   parseMonitoringDeviationsQuery,
@@ -412,6 +425,53 @@ async function runNamed(builder, { label = 'other', name } = {}) {
     data: await spec.map(rows),
     meta: { elapsedMs, rows: rows.length, ...(spec.meta || {}) },
   };
+}
+
+function snapshotReaderClientId(req) {
+  if (!isCabinetScoped(req.cabinet)) return null;
+  return req.cabinet?.clientId || req.user?.clientId || null;
+}
+
+function attachExplorerSnapshotMeta(responseBody, {
+  ownerId,
+  clientId = null,
+  body,
+  data,
+  meta,
+  elapsedMs,
+}) {
+  const stored = tryCreateSnapshot({
+    kind: 'explorer',
+    ownerId,
+    clientId,
+    query: buildExplorerStoredQuery(body, meta),
+    payload: buildExplorerStoredPayload(data, meta, elapsedMs),
+  });
+  if (stored) {
+    responseBody.meta.snapshotId = stored.id;
+    responseBody.meta.snapshotExpiresAt = stored.expiresAt;
+  }
+  return responseBody;
+}
+
+function attachDnsExplorerSnapshotMeta(responseBody, {
+  ownerId,
+  body,
+  data,
+  meta,
+  elapsedMs,
+}) {
+  const stored = tryCreateSnapshot({
+    kind: 'dns-explorer',
+    ownerId,
+    query: buildDnsExplorerStoredQuery(body, meta),
+    payload: buildDnsExplorerStoredPayload(data, meta, elapsedMs),
+  });
+  if (stored) {
+    responseBody.meta.snapshotId = stored.id;
+    responseBody.meta.snapshotExpiresAt = stored.expiresAt;
+  }
+  return responseBody;
 }
 
 function parseCollectorIdQuery(query) {
@@ -887,34 +947,25 @@ app.post('/api/explorer/query', async (req, res) => {
     const started = Date.now();
     const bundle = await explorerQuery(body);
     const queryBody = bundle.queryBody || body;
-    const flowsResult = bundle.flowsSpec
-      ? await runNamed(() => Promise.resolve(bundle.flowsSpec), { name: 'explorer/flows' })
-      : null;
-    const resultSeriesResult = flowsResult?.data?.length
-      ? await runNamed(
-        () => explorerResultSeries(queryBody, flowsResult.data),
-        { name: 'explorer/result-series' },
-      )
-      : null;
-    const summaryResult = bundle.summarySpec
-      ? await runNamed(() => Promise.resolve(bundle.summarySpec), { name: 'explorer/summary' })
-      : null;
-    const timeseriesResult = bundle.timeseriesSpec
-      ? await runNamed(() => Promise.resolve(bundle.timeseriesSpec), { name: 'explorer/timeseries' })
-      : null;
-    const breakdownResults = {};
-    for (const item of bundle.breakdownSpecs) {
-      breakdownResults[item.dim] = (await runNamed(() => Promise.resolve(item.spec), { name: `explorer/breakdown/${item.dim}` })).data;
-    }
-    const flowRows = flowsResult?.data || [];
-    const hasThresholds = Array.isArray(flowsResult?.meta?.thresholds) && flowsResult.meta.thresholds.length > 0;
-    let summaryData = summaryResult?.data || null;
-    if (hasThresholds && bundle.flowsSpec && flowRows.length) {
-      summaryData = summaryFromExplorerFlowRows(flowRows, flowsResult.meta?.windowSeconds);
-    } else if (hasThresholds && bundle.flowsSpec && !flowRows.length) {
-      summaryData = summaryFromExplorerFlowRows([], flowsResult?.meta?.windowSeconds);
-    }
-    res.json({
+    const {
+      flowsResult,
+      resultSeriesResult,
+      summaryData,
+      timeseriesResult,
+      breakdownResults,
+      flowRows,
+    } = await executeExplorerQueryBundle(bundle, queryBody, runNamed, 'explorer');
+    const elapsedMs = Date.now() - started;
+    const responseMeta = {
+      ...(flowsResult?.meta || {
+        dataTable: 'flows_raw',
+        groupBy: [],
+        grouped: false,
+        granularity: timeseriesResult?.meta?.granularity,
+      }),
+      elapsedMs,
+    };
+    const responseBody = {
       data: {
         rows: flowRows,
         summary: summaryData,
@@ -922,16 +973,16 @@ app.post('/api/explorer/query', async (req, res) => {
         resultSeries: resultSeriesResult?.data || null,
         breakdowns: breakdownResults,
       },
-      meta: {
-        ...(flowsResult?.meta || {
-          dataTable: 'flows_raw',
-          groupBy: [],
-          grouped: false,
-          granularity: timeseriesResult?.meta?.granularity,
-        }),
-        elapsedMs: Date.now() - started,
-      },
+      meta: responseMeta,
+    };
+    attachExplorerSnapshotMeta(responseBody, {
+      ownerId: req.user.id,
+      body: queryBody,
+      data: responseBody.data,
+      meta: responseMeta,
+      elapsedMs,
     });
+    res.json(responseBody);
   } catch (err) {
     res.status(400).json({ error: err.message });
   }
@@ -1002,6 +1053,37 @@ app.delete('/api/explorer/saved-filters/:id', async (req, res) => {
     res.json({ ok: true });
   } catch (err) {
     res.status(400).json({ error: err.message });
+  }
+});
+
+app.post('/api/explorer/snapshots/:id/share', async (req, res) => {
+  try {
+    const data = shareSnapshot(req.params.id, req.user.id, { kind: 'explorer' });
+    res.json({ ok: true, data });
+  } catch (err) {
+    res.status(err.statusCode || 400).json({ error: err.message });
+  }
+});
+
+app.get('/api/explorer/snapshots/shared/:token', async (req, res) => {
+  try {
+    const data = getSharedSnapshot(req.params.token, {
+      kind: 'explorer',
+      readerClientId: snapshotReaderClientId(req),
+      readerUserId: req.user.id,
+    });
+    res.json({ ok: true, data });
+  } catch (err) {
+    res.status(err.statusCode || 400).json({ error: err.message });
+  }
+});
+
+app.delete('/api/explorer/snapshots/:id/share', async (req, res) => {
+  try {
+    revokeShare(req.params.id, req.user.id, { kind: 'explorer' });
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(err.statusCode || 400).json({ error: err.message });
   }
 });
 
@@ -1163,6 +1245,18 @@ app.get('/api/diagnostics/bounds', async (_req, res) => {
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
+});
+
+app.get('/api/diagnostics/analysis-snapshots', async (_req, res) => {
+  try {
+    res.json({ data: getActiveShareLinkStats() });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/diagnostics/build-info', (_req, res) => {
+  res.json({ data: getBuildInfo() });
 });
 
 app.get('/api/observations/:id', async (req, res) => {
@@ -1440,20 +1534,30 @@ app.post('/api/dns-explorer/query', async (req, res) => {
     const timeseries = normalizeDnsExplorerTimeseries(
       groupBy.length ? (totalTsResult?.data || []) : tsRows,
     );
-    res.json({
+    const elapsedMs = Date.now() - started;
+    const responseMeta = {
+      ...spec.meta,
+      range: body.range,
+      from: body.from,
+      to: body.to,
+      elapsedMs,
+    };
+    const responseBody = {
       data: {
         rows: tableRows,
         timeseries,
         resultSeries: groupBy.length ? buildDnsExplorerResultSeries(tsRows, tableRows) : null,
       },
-      meta: {
-        ...spec.meta,
-        range: body.range,
-        from: body.from,
-        to: body.to,
-        elapsedMs: Date.now() - started,
-      },
+      meta: responseMeta,
+    };
+    attachDnsExplorerSnapshotMeta(responseBody, {
+      ownerId: req.user.id,
+      body,
+      data: responseBody.data,
+      meta: responseMeta,
+      elapsedMs,
     });
+    res.json(responseBody);
   } catch (err) {
     const status = /Неизвестн|укажите|Некоррект|недоступ|retention|должен|период/i.test(err.message) ? 400 : 502;
     res.status(status).json({ error: err.message });
@@ -1469,6 +1573,37 @@ app.post('/api/dns-explorer/export', async (req, res) => {
   } catch (err) {
     const status = /Неизвестн|укажите|Некоррект|недоступ|retention|должен|период/i.test(err.message) ? 400 : 502;
     res.status(status).json({ error: err.message });
+  }
+});
+
+app.post('/api/dns-explorer/snapshots/:id/share', async (req, res) => {
+  try {
+    const data = shareSnapshot(req.params.id, req.user.id, { kind: 'dns-explorer' });
+    res.json({ ok: true, data });
+  } catch (err) {
+    res.status(err.statusCode || 400).json({ error: err.message });
+  }
+});
+
+app.get('/api/dns-explorer/snapshots/shared/:token', async (req, res) => {
+  try {
+    const data = getSharedSnapshot(req.params.token, {
+      kind: 'dns-explorer',
+      readerClientId: snapshotReaderClientId(req),
+      readerUserId: req.user.id,
+    });
+    res.json({ ok: true, data });
+  } catch (err) {
+    res.status(err.statusCode || 400).json({ error: err.message });
+  }
+});
+
+app.delete('/api/dns-explorer/snapshots/:id/share', async (req, res) => {
+  try {
+    revokeShare(req.params.id, req.user.id, { kind: 'dns-explorer' });
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(err.statusCode || 400).json({ error: err.message });
   }
 });
 
@@ -2453,6 +2588,8 @@ app.get('/runtime-config.js', (_req, res) => {
 app.use(express.static(path.join(__dirname, '..', 'public')));
 
 app.listen(PORT, () => {
+  const buildInfoLine = formatBuildInfoLogLine(getBuildInfo());
+  if (buildInfoLine) console.log(buildInfoLine);
   console.log(`Grapes NTA → http://localhost:${PORT}`);
   const { logSql } = getConfig();
   const { verbose } = getLogConfig();
@@ -2487,6 +2624,8 @@ app.listen(PORT, () => {
           console.log('Cabinet impersonation audit ready.');
           await ensureObservationsStore();
           console.log('Observations store ready (ClickHouse).');
+          ensureAnalysisSnapshotsStore();
+          console.log('Analysis snapshots store ready (SQLite).');
         })
         .catch((err) => {
           console.error(`Users/RBAC/observations/cabinet initialization failed: ${err.message}`);

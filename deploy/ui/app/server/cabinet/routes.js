@@ -2,8 +2,7 @@ const express = require('express');
 const { query } = require('../clickhouse');
 const { canWrite } = require('../rbac/permissions');
 const {
-  explorerResultSeries,
-  summaryFromExplorerFlowRows,
+  executeExplorerQueryBundle,
 } = require('../explorer');
 const { CLIENTS_RESOURCE } = require('./constants');
 const { getEnabledClient, fillClientDisplayName } = require('./clients-lookup');
@@ -44,6 +43,14 @@ const {
   cabinetExplorerFlows,
   cabinetExplorerExportCsv,
 } = require('./explorer');
+const {
+  tryCreateSnapshot,
+  shareSnapshot,
+  revokeShare,
+  getSharedSnapshot,
+  buildExplorerStoredQuery,
+  buildExplorerStoredPayload,
+} = require('../analysis-snapshots');
 
 async function runNamed(builder, { name } = {}) {
   const spec = await builder();
@@ -147,30 +154,24 @@ function createCabinetRouter({ sessions }) {
       const started = Date.now();
       const bundle = await cabinetExplorerQuery(clientId, body);
       const queryBody = bundle.queryBody || body;
-      const flowsResult = bundle.flowsSpec
-        ? await runNamed(() => Promise.resolve(bundle.flowsSpec), { name: 'cabinet/explorer/flows' })
-        : null;
-      const resultSeriesResult = flowsResult?.data?.length
-        ? await runNamed(
-          () => explorerResultSeries(queryBody, flowsResult.data),
-          { name: 'cabinet/explorer/result-series' },
-        )
-        : null;
-      const summaryResult = bundle.summarySpec
-        ? await runNamed(() => Promise.resolve(bundle.summarySpec), { name: 'cabinet/explorer/summary' })
-        : null;
-      const timeseriesResult = bundle.timeseriesSpec
-        ? await runNamed(() => Promise.resolve(bundle.timeseriesSpec), { name: 'cabinet/explorer/timeseries' })
-        : null;
-      const flowRows = flowsResult?.data || [];
-      const hasThresholds = Array.isArray(flowsResult?.meta?.thresholds) && flowsResult.meta.thresholds.length > 0;
-      let summaryData = summaryResult?.data || null;
-      if (hasThresholds && bundle.flowsSpec && flowRows.length) {
-        summaryData = summaryFromExplorerFlowRows(flowRows, flowsResult.meta?.windowSeconds);
-      } else if (hasThresholds && bundle.flowsSpec && !flowRows.length) {
-        summaryData = summaryFromExplorerFlowRows([], flowsResult?.meta?.windowSeconds);
-      }
-      res.json({
+      const {
+        flowsResult,
+        resultSeriesResult,
+        summaryData,
+        timeseriesResult,
+        flowRows,
+      } = await executeExplorerQueryBundle(bundle, queryBody, runNamed, 'cabinet/explorer');
+      const elapsedMs = Date.now() - started;
+      const responseMeta = {
+        ...(flowsResult?.meta || {
+          dataTable: 'flows_raw',
+          groupBy: [],
+          grouped: false,
+          granularity: timeseriesResult?.meta?.granularity,
+        }),
+        elapsedMs,
+      };
+      const responseBody = {
         data: {
           rows: flowRows,
           summary: summaryData,
@@ -178,16 +179,20 @@ function createCabinetRouter({ sessions }) {
           resultSeries: resultSeriesResult?.data || null,
           breakdowns: {},
         },
-        meta: {
-          ...(flowsResult?.meta || {
-            dataTable: 'flows_raw',
-            groupBy: [],
-            grouped: false,
-            granularity: timeseriesResult?.meta?.granularity,
-          }),
-          elapsedMs: Date.now() - started,
-        },
+        meta: responseMeta,
+      };
+      const stored = tryCreateSnapshot({
+        kind: 'explorer',
+        ownerId: req.user.id,
+        clientId,
+        query: buildExplorerStoredQuery(queryBody, responseMeta),
+        payload: buildExplorerStoredPayload(responseBody.data, responseMeta, elapsedMs),
       });
+      if (stored) {
+        responseBody.meta.snapshotId = stored.id;
+        responseBody.meta.snapshotExpiresAt = stored.expiresAt;
+      }
+      res.json(responseBody);
     } catch (err) {
       sendError(res, err, err.statusCode || 400);
     }
@@ -213,6 +218,38 @@ function createCabinetRouter({ sessions }) {
       res.setHeader('Content-Type', 'text/csv; charset=utf-8');
       res.setHeader('Content-Disposition', `attachment; filename="cabinet-explorer-${Date.now()}.csv"`);
       res.send(`\uFEFF${csv}`);
+    } catch (err) {
+      sendError(res, err, err.statusCode || 400);
+    }
+  });
+
+  router.post('/explorer/snapshots/:id/share', async (req, res) => {
+    try {
+      const data = shareSnapshot(req.params.id, req.user.id, { kind: 'explorer' });
+      res.json({ ok: true, data });
+    } catch (err) {
+      sendError(res, err, err.statusCode || 400);
+    }
+  });
+
+  router.get('/explorer/snapshots/shared/:token', async (req, res) => {
+    try {
+      const clientId = requireScopedClientId(req.cabinet);
+      const data = getSharedSnapshot(req.params.token, {
+        kind: 'explorer',
+        readerClientId: clientId,
+        readerUserId: req.user.id,
+      });
+      res.json({ ok: true, data });
+    } catch (err) {
+      sendError(res, err, err.statusCode || 400);
+    }
+  });
+
+  router.delete('/explorer/snapshots/:id/share', async (req, res) => {
+    try {
+      revokeShare(req.params.id, req.user.id, { kind: 'explorer' });
+      res.json({ ok: true });
     } catch (err) {
       sendError(res, err, err.statusCode || 400);
     }

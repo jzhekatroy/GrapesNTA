@@ -23,6 +23,21 @@ function fmtAge(sec) {
   return m ? `${h} ч ${m} мин` : `${h} ч`;
 }
 
+function fmtBuildDate(iso) {
+  if (!iso) return '';
+  try {
+    return new Date(iso).toLocaleString('ru-RU', {
+      day: '2-digit',
+      month: '2-digit',
+      year: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+    });
+  } catch {
+    return String(iso);
+  }
+}
+
 function workerStatusMeta(worker) {
   if (!worker) return { label: 'неизвестно', color: 'var(--fg-muted)', tone: 'idle' };
   if (worker.alive) return { label: 'работает', color: 'var(--st-success)', tone: 'healthy' };
@@ -1259,14 +1274,91 @@ function BoundsPanel({ data, loading, onReload }) {
   );
 }
 
+function AnalysisSnapshotsPanel({ data, loading, onReload }) {
+  const oldest = data?.oldest || null;
+
+  return (
+    <div className="col" style={{ gap: 14 }}>
+      <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
+        <div style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-secondary)', maxWidth: 760 }}>
+          Активные публичные ссылки на сохранённые результаты разбора трафика и DNS (SQLite, TTL 24 ч).
+        </div>
+        <Button kind="ghost" icon="refresh" onClick={onReload} disabled={loading}>
+          {loading ? 'Обновление…' : 'Обновить'}
+        </Button>
+      </div>
+
+      <div className="row" style={{ gap: 10, flexWrap: 'wrap' }}>
+        {[
+          ['Всего ссылок', data?.total ?? '—'],
+          ['Explorer', data?.explorer ?? '—'],
+          ['DNS Explorer', data?.dnsExplorer ?? '—'],
+        ].map(([label, value]) => (
+          <div
+            key={label}
+            style={{
+              minWidth: 140,
+              padding: '12px 14px',
+              borderRadius: 8,
+              background: 'var(--bg-secondary)',
+            }}
+          >
+            <div style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-secondary)' }}>{label}</div>
+            <div className="mono" style={{ font: 'var(--pv-text-header-3)', marginTop: 4 }}>{String(value)}</div>
+          </div>
+        ))}
+      </div>
+
+      <Card title="Самая старая активная ссылка">
+        {oldest ? (
+          <div className="col" style={{ gap: 8, font: 'var(--pv-text-body-3)' }}>
+            <div>
+              Создана: <span className="mono">{fmtDiagTime(oldest.createdAt)}</span>
+            </div>
+            <div>
+              Истекает: <span className="mono">{fmtDiagTime(oldest.expiresAt)}</span>
+            </div>
+            <div>
+              До истечения: <span className="mono">{fmtAge(oldest.expiresInSec)}</span>
+            </div>
+          </div>
+        ) : (
+          <div style={{ color: 'var(--fg-secondary)', font: 'var(--pv-text-body-3)' }}>
+            Нет активных опубликованных ссылок.
+          </div>
+        )}
+      </Card>
+
+      {data?.checkedAt && (
+        <div style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-muted)' }}>
+          Проверено: <span className="mono">{fmtDiagTime(data.checkedAt)}</span>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function PageDiagnostics() {
   const [tab, setTab] = useState('worker');
   const [workerData, setWorkerData] = useState(null);
   const [enrichData, setEnrichData] = useState(null);
   const [snmpData, setSnmpData] = useState(null);
   const [boundsData, setBoundsData] = useState(null);
+  const [snapshotsData, setSnapshotsData] = useState(null);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(true);
+  const [buildInfo, setBuildInfo] = useState(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    ApiClient.loadBuildInfo()
+      .then((data) => {
+        if (cancelled) return;
+        if (data?.buildDate || data?.commit) setBuildInfo(data);
+      })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, []);
 
   const reload = useCallback((opts = { initial: false }) => {
     if (opts.initial) setLoading(true);
@@ -1276,12 +1368,15 @@ function PageDiagnostics() {
         ? ApiClient.loadSnmpDiagnostics()
         : tab === 'bounds'
           ? ApiClient.loadBoundsDiagnostics()
-          : ApiClient.loadWorkerDiagnostics();
+          : tab === 'snapshots'
+            ? ApiClient.loadAnalysisSnapshotsDiagnostics()
+            : ApiClient.loadWorkerDiagnostics();
     loader
       .then((body) => {
         if (tab === 'enrichment') setEnrichData(body);
         else if (tab === 'snmp') setSnmpData(body);
         else if (tab === 'bounds') setBoundsData(body);
+        else if (tab === 'snapshots') setSnapshotsData(body);
         else setWorkerData(body);
         setError('');
         setLoading(false);
@@ -1304,7 +1399,7 @@ function PageDiagnostics() {
         <div>
           <h1 style={{ margin: 0, font: 'var(--pv-text-header-1)' }}>Диагностика</h1>
           <div style={{ color: 'var(--fg-secondary)', font: 'var(--pv-text-body-3)', marginTop: 4 }}>
-            Статус периодических сервисов: worker, enrichment, SNMP и bounds-service.
+            Статус периодических сервисов: worker, enrichment, SNMP, bounds-service и ссылки на результаты анализа.
           </div>
         </div>
         <div className="seg">
@@ -1335,6 +1430,13 @@ function PageDiagnostics() {
             onClick={() => setTab('bounds')}
           >
             bounds-service
+          </button>
+          <button
+            type="button"
+            className={tab === 'snapshots' ? 'seg__item seg__item--active' : 'seg__item'}
+            onClick={() => setTab('snapshots')}
+          >
+            Ссылки анализа
           </button>
         </div>
       </div>
@@ -1372,6 +1474,32 @@ function PageDiagnostics() {
           loading={loading}
           onReload={() => reload({ initial: false })}
         />
+      )}
+      {tab === 'snapshots' && (
+        <AnalysisSnapshotsPanel
+          data={snapshotsData}
+          loading={loading}
+          onReload={() => reload({ initial: false })}
+        />
+      )}
+
+      {buildInfo && (buildInfo.buildDate || buildInfo.commit) && (
+        <div
+          style={{
+            marginTop: 8,
+            font: 'var(--pv-text-body-3)',
+            color: 'var(--fg-muted)',
+            textAlign: 'right',
+          }}
+        >
+          {buildInfo.buildDate && (
+            <>Сборка: {fmtBuildDate(buildInfo.buildDate)}</>
+          )}
+          {buildInfo.buildDate && buildInfo.commit && ' · '}
+          {buildInfo.commit && (
+            <span className="mono">{buildInfo.commit}</span>
+          )}
+        </div>
       )}
     </div>
   );

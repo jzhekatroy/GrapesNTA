@@ -6,6 +6,7 @@ src/
 .env
 .vscode/
 server/data/
+server/build-info.json
 __pycache__/
 *.pyc
 bounds-service/data/

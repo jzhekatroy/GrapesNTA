@@ -66,6 +66,7 @@ const CABINET_EXPLORER_MAX_RANGE_DAYS = 6;
 const CABINET_EXPLORER_MAX_RANGE_MS = CABINET_EXPLORER_MAX_RANGE_DAYS * 86400000;
 const EXPLORER_FILTER_LOGIC = new Set(['and', 'or', 'and_not', 'or_not']);
 const EXPLORER_METRIC_KEYS = new Set(['bps', 'volume', 'pps', 'fps', 'flows', 'uniq_src']);
+const EXPLORER_ENTITY_SERIES_DIMS = new Set(['src_entity', 'dst_entity']);
 const SAVED_FILTERS_FILE = path.join(__dirname, 'data', 'explorer-saved-filters.json');
 
 const FILTER_OPS_BY_TYPE = {
@@ -768,6 +769,9 @@ function explorerDimensions() {
   }
 
   const directionCol = flowCol('direction');
+  if (dims.direction && directionCol) {
+    dims.direction.filterExpr = `f.${directionCol}`;
+  }
   const srcAkCol = flowCol('srcAttachmentKind');
   const dstAkCol = flowCol('dstAttachmentKind');
   if (directionCol && srcAkCol && dstAkCol) {
@@ -1103,6 +1107,29 @@ function applyLegacyCollectorFilter(filters, collectorId, params, whereClauses, 
   return appendFlowsRawCollectorFilter(collectorId, params, whereClauses, flowAlias);
 }
 
+/** Bare column refs compare as-is; avoid toString(toString(f.direction)). */
+function explorerStringCompareExpr(dim) {
+  const raw = String(dim?.filterExpr || dim?.expr || '').trim();
+  if (/^f\.(`?[A-Za-z_][A-Za-z0-9_]*`?)$/.test(raw)) return raw;
+  return `toString(${dim.filterExpr || dim.expr})`;
+}
+
+function buildExplorerEntitySeriesMatch(groups, dims, flowRows, params) {
+  if (groups.length !== 1 || !EXPLORER_ENTITY_SERIES_DIMS.has(groups[0])) return null;
+  const dim = dims[groups[0]];
+  if (!dim?.groupKeyExpr) return null;
+  const values = flowRows.map((row) => String(row.rawValues?.[0] ?? row.values?.[0] ?? ''));
+  const ids = [...new Set(values.filter((v) => v && v !== '—'))];
+  const hasEmpty = values.some((v) => !v || v === '—');
+  const parts = [];
+  if (ids.length) {
+    params.series_ids = ids;
+    parts.push(`${dim.groupKeyExpr} IN {series_ids:Array(String)}`);
+  }
+  if (hasEmpty) parts.push(`(${dim.groupKeyExpr} = '' OR ${dim.groupKeyExpr} = '—')`);
+  return parts.length ? `(${parts.join(' OR ')})` : null;
+}
+
 function combineExplorerFilterSql(clauses) {
   if (!clauses.length) return null;
   let sql = clauses[0].clause;
@@ -1431,16 +1458,17 @@ async function buildExplorerFilterClauses(filters, dims, params) {
     }
 
     params[paramName] = String(f.value ?? '').trim();
-    if (op === '!=' || op === '<>') addClause(`${expr} != {${paramName}:String}`);
+    const cmpExpr = explorerStringCompareExpr(dim);
+    if (op === '!=' || op === '<>') addClause(`${cmpExpr} != {${paramName}:String}`);
     else if (op === 'contains') addClause(`positionCaseInsensitive(toString(${expr}), {${paramName}:String}) > 0`);
     else if (op === 'not_contains') addClause(`positionCaseInsensitive(toString(${expr}), {${paramName}:String}) = 0`);
     else if (op === 'in') {
       params[paramName] = values;
-      addClause(`toString(${expr}) IN {${paramName}:Array(String)}`);
+      addClause(`${cmpExpr} IN {${paramName}:Array(String)}`);
     } else if (op === 'not_in') {
       params[paramName] = values;
-      addClause(`toString(${expr}) NOT IN {${paramName}:Array(String)}`);
-    } else addClause(`toString(${expr}) = {${paramName}:String}`);
+      addClause(`${cmpExpr} NOT IN {${paramName}:Array(String)}`);
+    } else addClause(`${cmpExpr} = {${paramName}:String}`);
   }
 
   return { filterSql: combineExplorerFilterSql(clauses), joins: [...joins] };
@@ -1751,26 +1779,11 @@ async function explorerFlowsPeakPath({
     const innerSql = `
       WITH
         ${windowSpec.cteHead}
-        dateDiff('second', ts_from, ts_to) AS window_seconds,
-        grouped_total AS (
-          SELECT sum(${peakPctCol}) AS total FROM (
-            SELECT
-              ${groupSelect.join(',\n              ')},
-              sum(${scaled.bytes}) AS bytes,
-              sum(${scaled.packets}) AS packets,
-              sum(${scaled.flowWeight}) AS flows${needsUniqSrc ? `,\n              uniqCombined(f.${col('srcIp')}) AS uniq_src_count` : ''}
-            FROM ${flowsRawTableRef()} AS f
-            ${joinSql}
-            PREWHERE f.date >= toDate(ts_from) - 1
-              AND f.date <= toDate(ts_to)
-            WHERE ${whereClauses.join('\n              AND ')}
-            GROUP BY ${groupAliases.join(', ')}
-          )
-        )
+        dateDiff('second', ts_from, ts_to) AS window_seconds
       SELECT
         ${groupAliases.map((g) => `b.${g}`).join(',\n        ')},
         ${peakMetricExpr} AS metric_value,
-        round(b.${peakPctCol} * 100 / nullIf(gt.total, 0), 2) AS pct,
+        round(b.${peakPctCol} * 100 / nullIf(sum(b.${peakPctCol}) OVER (), 0), 2) AS pct,
         b.bytes AS bytes,
         round(b.bytes * 8 / window_seconds, 0) AS avg_bps,
         b.packets AS packets,
@@ -1809,7 +1822,6 @@ async function explorerFlowsPeakPath({
         )
         GROUP BY ${groupAliases.join(', ')}
       ) AS b
-      CROSS JOIN grouped_total AS gt
     `;
 
     return buildExplorerFlowsReturn({
@@ -1872,14 +1884,11 @@ async function explorerFlowsPeakPath({
           GROUP BY ${keyGroupBy}, bucket
         )
         GROUP BY ${keyGroupBy}
-      ),
-      grouped_total AS (
-        SELECT sum(${pctCol}) AS total FROM inner_agg
       )
     SELECT
       ${labelSelectParts.join(',\n      ')},
       round(a.bytes * 8 / window_seconds, 0) AS metric_value,
-      round(a.${pctCol} * 100 / nullIf(gt.total, 0), 2) AS pct,
+      round(a.${pctCol} * 100 / nullIf(sum(a.${pctCol}) OVER (), 0), 2) AS pct,
       a.bytes AS bytes,
       round(a.bytes * 8 / window_seconds, 0) AS avg_bps,
       a.packets AS packets,
@@ -1894,7 +1903,6 @@ async function explorerFlowsPeakPath({
       a.peak_fps AS peak_fps,
       a.peak_flows AS peak_flows
     FROM inner_agg AS a
-    CROSS JOIN grouped_total AS gt
     ${uniqueLabelJoins.join('\n    ')}
   `;
 
@@ -2202,20 +2210,16 @@ async function explorerFlows(body = {}, options = {}) {
         ${withHead},
         inner_agg AS (
           ${innerAggSql}
-        ),
-        grouped_total AS (
-          SELECT sum(${pctCol}) AS total FROM inner_agg
         )
       SELECT
         ${labelSelectParts.join(',\n        ')},
         ${metricFromAgg('a')} AS metric_value,
-        round(a.${pctCol} * 100 / nullIf(gt.total, 0), 2) AS pct,
+        round(a.${pctCol} * 100 / nullIf(sum(a.${pctCol}) OVER (), 0), 2) AS pct,
         a.bytes AS bytes,
         round(a.bytes * 8 / window_seconds, 0) AS avg_bps,
         a.packets AS packets,
         a.flows AS flows${twoPhaseThresholdExtrasPlain}
       FROM inner_agg AS a
-      CROSS JOIN grouped_total AS gt
       ${uniqueLabelJoins.join('\n      ')}
     `;
 
@@ -2264,8 +2268,6 @@ async function explorerSummary(body = {}, options = {}) {
         sum(${scaled.packets}) AS total_packets,
         sum(${scaled.flowWeight}) AS total_flows,
         round(sum(${scaled.bytes}) * 8 / window_seconds, 0) AS avg_bps,
-        uniqCombined(f.${col('srcIp')}) AS uniq_src,
-        uniqCombined(f.${col('dstIp')}) AS uniq_dst,
         ${directionSelect}
         topK(5)(f.${protoCol}) AS top_protocol_ids
       FROM ${flowsRawTableRef()} AS f
@@ -2285,8 +2287,8 @@ async function explorerSummary(body = {}, options = {}) {
         totalPackets: Number(r.total_packets) || 0,
         totalFlows: Number(r.total_flows) || 0,
         avgBps: Number(r.avg_bps) || (windowSeconds > 0 ? Math.round(totalBytes * 8 / windowSeconds) : 0),
-        uniqSrc: Number(r.uniq_src) || 0,
-        uniqDst: Number(r.uniq_dst) || 0,
+        uniqSrc: null,
+        uniqDst: null,
         inBytes: Number(r.in_bytes) || null,
         outBytes: Number(r.out_bytes) || null,
         topProtocols: (Array.isArray(r.top_protocol_ids) ? r.top_protocol_ids : []).map((id) => protoLabel(id)),
@@ -2328,22 +2330,34 @@ async function explorerResultSeries(body = {}, flowRows = []) {
   if (filterSql) whereClauses.push(filterSql);
   const scopedParams = applyExplorerScope(whereClauses, params, q);
 
-  const groupMatchParts = flowRows.map((row) => {
-    const conds = groups.map((g, gi) => {
-      const paramName = `series_g_${idxRef.i++}`;
-      const dim = dims[g];
-      const raw = String(row.rawValues?.[gi] ?? row.values?.[gi] ?? '');
-      if (dim.filterType === 'tcp_flags') {
-        const { mask } = parseTcpFlagsFilterValue(raw);
-        scopedParams[paramName] = mask;
-        return `${dim.filterExpr} = {${paramName}:UInt8}`;
-      }
-      scopedParams[paramName] = raw;
-      return `toString(${dim.expr}) = {${paramName}:String}`;
+  const entitySeriesMatch = buildExplorerEntitySeriesMatch(groups, dims, flowRows, scopedParams);
+  if (entitySeriesMatch) {
+    whereClauses.push(entitySeriesMatch);
+  } else {
+    const groupMatchParts = flowRows.map((row) => {
+      const conds = groups.map((g, gi) => {
+        const paramName = `series_g_${idxRef.i++}`;
+        const dim = dims[g];
+        const raw = String(row.rawValues?.[gi] ?? row.values?.[gi] ?? '');
+        if (dim.filterType === 'tcp_flags') {
+          const { mask } = parseTcpFlagsFilterValue(raw);
+          scopedParams[paramName] = mask;
+          return `${dim.filterExpr} = {${paramName}:UInt8}`;
+        }
+        if (EXPLORER_ENTITY_SERIES_DIMS.has(g) && dim.groupKeyExpr) {
+          if (raw === '—' || raw === '') {
+            return `(${dim.groupKeyExpr} = '' OR ${dim.groupKeyExpr} = '—')`;
+          }
+          scopedParams[paramName] = raw;
+          return `${dim.groupKeyExpr} = {${paramName}:String}`;
+        }
+        scopedParams[paramName] = raw;
+        return `toString(${dim.expr}) = {${paramName}:String}`;
+      });
+      return `(${conds.join(' AND ')})`;
     });
-    return `(${conds.join(' AND ')})`;
-  });
-  whereClauses.push(`(${groupMatchParts.join(' OR ')})`);
+    whereClauses.push(`(${groupMatchParts.join(' OR ')})`);
+  }
 
   const groupSelect = groups.map((g, i) => `${dims[g].expr} AS g${i}`);
   const groupAliases = groups.map((_, i) => `g${i}`);
@@ -2780,6 +2794,49 @@ async function explorerQuery(body = {}, options = {}) {
   return { flowsSpec, summarySpec, timeseriesSpec, breakdownSpecs, q, queryBody };
 }
 
+/** Two CH reads at a time: flows+summary, then series+timeseries. */
+async function executeExplorerQueryBundle(bundle, queryBody, runNamed, namePrefix = 'explorer') {
+  const [flowsResult, summaryResult] = await Promise.all([
+    bundle.flowsSpec
+      ? runNamed(() => Promise.resolve(bundle.flowsSpec), { name: `${namePrefix}/flows` })
+      : null,
+    bundle.summarySpec
+      ? runNamed(() => Promise.resolve(bundle.summarySpec), { name: `${namePrefix}/summary` })
+      : null,
+  ]);
+  const [resultSeriesResult, timeseriesResult] = await Promise.all([
+    flowsResult?.data?.length
+      ? runNamed(
+        () => explorerResultSeries(queryBody, flowsResult.data),
+        { name: `${namePrefix}/result-series` },
+      )
+      : null,
+    bundle.timeseriesSpec
+      ? runNamed(() => Promise.resolve(bundle.timeseriesSpec), { name: `${namePrefix}/timeseries` })
+      : null,
+  ]);
+  const breakdownResults = {};
+  for (const item of bundle.breakdownSpecs || []) {
+    breakdownResults[item.dim] = (
+      await runNamed(() => Promise.resolve(item.spec), { name: `${namePrefix}/breakdown/${item.dim}` })
+    ).data;
+  }
+  const flowRows = flowsResult?.data || [];
+  const hasThresholds = Array.isArray(flowsResult?.meta?.thresholds) && flowsResult.meta.thresholds.length > 0;
+  let summaryData = summaryResult?.data || null;
+  if (hasThresholds && bundle.flowsSpec) {
+    summaryData = summaryFromExplorerFlowRows(flowRows, flowsResult?.meta?.windowSeconds);
+  }
+  return {
+    flowsResult,
+    resultSeriesResult,
+    summaryData,
+    timeseriesResult,
+    breakdownResults,
+    flowRows,
+  };
+}
+
 function normalizeExplorerSwitchIpFilter(raw) {
   const values = String(raw || '')
     .split(/[\s,]+/)
@@ -3173,6 +3230,7 @@ module.exports = {
   explorerGroupedTimeseries,
   explorerBreakdown,
   explorerQuery,
+  executeExplorerQueryBundle,
   searchExplorerEntities,
   listSavedExplorerFilters,
   getSavedExplorerFilter,

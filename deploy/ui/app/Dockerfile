@@ -8,6 +8,8 @@ RUN npm ci --omit=dev
 FROM node:22-alpine AS runtime
 WORKDIR /app
 
+ARG BUILD_DATE
+
 ENV NODE_ENV=production \
     PORT=3000
 
@@ -18,7 +20,11 @@ COPY package.json ./
 COPY server ./server
 COPY public ./public
 
-RUN mkdir -p server/data && chown -R app:app server/data
+RUN set -e; \
+    TS="${BUILD_DATE:-}"; \
+    if [ -z "$TS" ] || [ "$TS" = "unknown" ]; then TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"; fi; \
+    printf '{"buildDate":"%s"}\n' "$TS" > server/build-info.json \
+  && mkdir -p server/data && chown -R app:app server/data server/build-info.json
 
 USER app
 EXPOSE 3000

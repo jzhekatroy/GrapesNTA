@@ -191,8 +191,8 @@ const EMPTY_EXPLORER_SUMMARY = {
   totalPackets: 0,
   totalFlows: 0,
   avgBps: 0,
-  uniqSrc: 0,
-  uniqDst: 0,
+  uniqSrc: null,
+  uniqDst: null,
   inBytes: null,
   outBytes: null,
   topProtocols: [],
@@ -2055,6 +2055,8 @@ function createExplorerApi(cabinetMode) {
       exportCsv: (opts) => ApiClient.exportExplorerCsv(opts),
       loadSavedFilters: () => ApiClient.loadExplorerSavedFilters(),
       searchEntities: (opts) => ApiClient.searchExplorerEntities(opts),
+      loadSharedSnapshot: (token) => ApiClient.loadExplorerSharedSnapshot(token, false),
+      shareSnapshot: (id) => ApiClient.shareExplorerSnapshot(id, false),
       supportsSavedFilters: true,
       supportsObservations: true,
       maxRangeDays: EXPLORER_MAX_RANGE_DAYS,
@@ -2066,10 +2068,21 @@ function createExplorerApi(cabinetMode) {
     exportCsv: (opts) => ApiClient.exportCabinetExplorerCsv(opts),
     loadSavedFilters: () => Promise.resolve([]),
     searchEntities: () => Promise.resolve([]),
+    loadSharedSnapshot: (token) => ApiClient.loadExplorerSharedSnapshot(token, true),
+    shareSnapshot: (id) => ApiClient.shareExplorerSnapshot(id, true),
     supportsSavedFilters: false,
     supportsObservations: false,
     maxRangeDays: 6,
   };
+}
+
+function formatSnapshotTimestamp(value, displayTimezone) {
+  if (!value) return '—';
+  try {
+    return new Date(value).toLocaleString('ru-RU', displayTimezone ? { timeZone: displayTimezone } : undefined);
+  } catch {
+    return String(value);
+  }
 }
 
 function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOnly = false }) {
@@ -2154,6 +2167,10 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
   const [meta, setMeta] = useState(null);
   const [loadMs, setLoadMs] = useState(null);
   const [serverMs, setServerMs] = useState(null);
+  const [snapshotId, setSnapshotId] = useState(null);
+  const [shareMeta, setShareMeta] = useState(null);
+  const [sharing, setSharing] = useState(false);
+  const urlSnapshotToken = urlState?.snapshot || null;
   const [savedFilters, setSavedFilters] = useState(DEFAULT_EXPLORER_PRESETS);
   const [lastApplied, setLastApplied] = useState(() => loadLastAppliedExplorerQuery());
   const [exporting, setExporting] = useState(false);
@@ -2218,6 +2235,31 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
   useEffect(() => {
     if (mountRestoreDoneRef.current) return;
     mountRestoreDoneRef.current = true;
+
+    if (urlSnapshotToken) {
+      setSource('loading');
+      let cancelled = false;
+      explorerApi.loadSharedSnapshot(urlSnapshotToken).then((result) => {
+        if (cancelled) return;
+        if (!result.ok) {
+          setSource('error');
+          setError(result.message || ApiClient.LOAD_FAILED);
+          return;
+        }
+        hydrateExplorerFromCachedEntry({
+          snapshot: result.snapshot,
+          payload: result.payload,
+        }, { ...cacheHydrateHandlers, queryVersion: 0 });
+        setSource('snapshot');
+        setShareMeta(result.shareMeta || null);
+        setSnapshotId(result.shareMeta?.id || null);
+      }).catch((err) => {
+        if (cancelled) return;
+        setSource('error');
+        setError(err.message || ApiClient.LOAD_FAILED);
+      });
+      return () => { cancelled = true; };
+    }
 
     // Prefer observation filters when opened via «Изменить фильтры в Explorer».
     if (composeFilters) {
@@ -2424,6 +2466,8 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
       setError(r.error || null);
       setLoadMs(r.loadMs ?? null);
       setServerMs(r.serverMs ?? null);
+      setSnapshotId(r.snapshotId || null);
+      setShareMeta(r.snapshotExpiresAt ? { expiresAt: r.snapshotExpiresAt } : null);
       setRefreshing(false);
     }).catch((err) => {
       if (cancelled) return;
@@ -2798,7 +2842,7 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
     }
   };
 
-  const copyShareLink = async () => {
+  const copyFilterShareLink = async () => {
     const { validThresholds } = resolveExplorerThresholdPayload(thresholds, schema);
     const url = buildExplorerShareUrl({
       metric,
@@ -2812,9 +2856,36 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
     });
     try {
       await copyTextToClipboard(url);
-      pushToast({ kind: 'success', title: 'Ссылка скопирована', desc: 'URL содержит параметры запроса.' });
+      pushToast({ kind: 'success', title: 'Ссылка скопирована', desc: 'URL содержит параметры фильтра.' });
     } catch (err) {
       pushToast({ kind: 'error', title: 'Не удалось скопировать', desc: err.message });
+    }
+  };
+
+  const copyResultsShareLink = async () => {
+    if (!snapshotId) {
+      pushToast({ kind: 'error', title: 'Нет данных для шаринга', desc: 'Сначала выполните запрос.' });
+      return;
+    }
+    setSharing(true);
+    try {
+      const data = await explorerApi.shareSnapshot(snapshotId);
+      const url = buildExplorerSnapshotShareUrl(data.token);
+      await copyTextToClipboard(url);
+      setShareMeta((prev) => ({
+        ...(prev || {}),
+        expiresAt: data.expiresAt,
+        sharedAt: data.sharedAt,
+      }));
+      pushToast({
+        kind: 'success',
+        title: 'Ссылка скопирована',
+        desc: `Сохранённые результаты доступны до ${formatSnapshotTimestamp(data.expiresAt, displayTimezone)}.`,
+      });
+    } catch (err) {
+      pushToast({ kind: 'error', title: 'Не удалось создать ссылку', desc: err.message });
+    } finally {
+      setSharing(false);
     }
   };
 
@@ -3054,12 +3125,42 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
           <p>Historical flow explorer: фильтры по времени, направлению, коллекторам, сущностям, протоколам, VLAN, ASN, L3 и сервисам.</p>
         </div>
         <div className="row" style={{ gap: 8 }}>
-          <Button kind="ghost" icon="copy" onClick={copyShareLink}>Поделиться</Button>
+          <Button kind="ghost" icon="link" onClick={copyFilterShareLink}>Поделиться фильтрами</Button>
+          <Button
+            kind="ghost"
+            icon="copy"
+            onClick={copyResultsShareLink}
+            disabled={!snapshotId || sharing || !hasAppliedQuery}
+          >
+            {sharing ? 'Ссылка…' : 'Поделиться результатами'}
+          </Button>
           <Button kind="ghost" icon="export" onClick={exportCsv} disabled={!hasAppliedQuery || !results.length || exporting}>
             {exporting ? 'Экспорт…' : 'Экспорт'}
           </Button>
         </div>
       </div>
+
+      {(source === 'snapshot' || shareMeta?.expiresAt) && hasAppliedQuery && (
+        <div
+          className="row"
+          style={{
+            gap: 12,
+            flexWrap: 'wrap',
+            alignItems: 'center',
+            padding: '10px 14px',
+            margin: '0 4px',
+            borderRadius: 10,
+            border: '1px solid var(--bd-soft)',
+            background: 'rgba(126, 146, 248, 0.08)',
+          }}
+        >
+          <div style={{ flex: 1, minWidth: 220, font: 'var(--pv-text-body-3)' }}>
+            Просмотр сохранённого снимка результатов
+            {shareMeta?.createdAt ? ` · создан ${formatSnapshotTimestamp(shareMeta.createdAt, displayTimezone)}` : ''}
+            {shareMeta?.expiresAt ? ` · доступен до ${formatSnapshotTimestamp(shareMeta.expiresAt, displayTimezone)}` : ''}
+          </div>
+        </div>
+      )}
 
       <div className="col" style={{ gap: 16, minWidth: 0 }}>
         {observationCompose && (
@@ -3160,6 +3261,7 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
             }}
             onCollapse={() => setFilterPanel(false)}
             onRun={runQuery}
+            runDisabled={source === 'loading' || refreshing}
             canWrite={canWrite}
             onSave={() => { setEditingSaved(null); setShowSave(true); }}
             onSaveAsObservation={canWriteObservation ? openSaveAsObservation : null}
@@ -3538,8 +3640,8 @@ function ExplorerSummary({ summary, loading = false }) {
     { label: 'Packets', value: fmtNum(data.totalPackets) },
     { label: 'Flows', value: fmtNum(data.totalFlows) },
     { label: 'Avg bps', value: fmtBits(data.avgBps) },
-    { label: 'Unique src', value: fmtNum(data.uniqSrc) },
-    { label: 'Unique dst', value: fmtNum(data.uniqDst) },
+    { label: 'Unique src', value: data.uniqSrc == null ? '—' : fmtNum(data.uniqSrc) },
+    { label: 'Unique dst', value: data.uniqDst == null ? '—' : fmtNum(data.uniqDst) },
     { label: 'Ingress', value: fmtBytes(data.inBytes) },
     { label: 'Egress', value: fmtBytes(data.outBytes) },
   ];
@@ -4279,6 +4381,7 @@ function ExplorerFilterTemplatesMenu({
   lastApplied,
   savedQueries = [],
   canWrite,
+  runDisabled = false,
   onApplyLastApplied,
   onRestoreLastApplied,
   onSaveLastApplied,
@@ -4368,7 +4471,7 @@ function ExplorerFilterTemplatesMenu({
               <div className="col" style={{ gap: 6, padding: '8px 10px', background: 'var(--surf-1)', border: '1px solid var(--bd-soft)', borderRadius: 10 }}>
                 <div style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-secondary)' }}>{summarizeExplorerQuery(lastApplied)}</div>
                 <div className="row" style={{ gap: 6, flexWrap: 'wrap' }}>
-                  <Button kind="ghost" size="xs" icon="play" onClick={() => { onApplyLastApplied?.(); setOpen(false); }}>Применить</Button>
+                  <Button kind="ghost" size="xs" icon="play" onClick={() => { onApplyLastApplied?.(); setOpen(false); }} disabled={runDisabled}>Применить</Button>
                   <Button kind="ghost" size="xs" icon="filter" onClick={() => { onRestoreLastApplied?.(); setOpen(false); }}>В конструктор</Button>
                   {canWrite && (
                     <Button kind="ghost" size="xs" icon="save" onClick={() => { onSaveLastApplied?.(); setOpen(false); }}>Сохранить</Button>
@@ -4621,6 +4724,7 @@ function ExplorerFilters({
   onSaveLastApplied,
   onCollapse,
   onRun,
+  runDisabled = false,
   canWrite,
   onSave,
   onSaveAsObservation,
@@ -4636,6 +4740,7 @@ function ExplorerFilters({
 
   useEffect(() => {
     const onKeyDown = (e) => {
+      if (runDisabled) return;
       if (!(e.ctrlKey || e.metaKey) || e.key !== 'Enter') return;
       if (!panelRef.current?.contains(document.activeElement)) return;
       e.preventDefault();
@@ -4643,7 +4748,7 @@ function ExplorerFilters({
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [onRun]);
+  }, [onRun, runDisabled]);
   const updateFilter = (id, patch) => setFilters(filters.map((f) => (f.id === id ? { ...f, ...patch } : f)));
   const addThreshold = () => {
     setThresholds([
@@ -4865,6 +4970,7 @@ function ExplorerFilters({
               lastApplied={lastApplied}
               savedQueries={savedQueries}
               canWrite={canWrite}
+              runDisabled={runDisabled}
               onApplyLastApplied={onApplyLastApplied}
               onRestoreLastApplied={onRestoreLastApplied}
               onSaveLastApplied={onSaveLastApplied}
@@ -4874,7 +4980,9 @@ function ExplorerFilters({
               onAddQuickFilter={addFilter}
             />
             <Button kind="ghost" size="sm" icon="x" onClick={onClearFilters}>Очистить фильтры</Button>
-            <Button kind="ghost" size="sm" icon="play" onClick={onRun}>Применить</Button>
+            <Button kind="ghost" size="sm" icon="play" onClick={onRun} disabled={runDisabled}>
+              {runDisabled ? 'Загрузка…' : 'Применить'}
+            </Button>
             {canWrite && (
               <Button kind="ghost" size="sm" icon="save" onClick={onSave}>Сохранить</Button>
             )}
@@ -4898,6 +5006,7 @@ function ExplorerFilters({
               lastApplied={lastApplied}
               savedQueries={savedQueries}
               canWrite={canWrite}
+              runDisabled={runDisabled}
               onApplyLastApplied={onApplyLastApplied}
               onRestoreLastApplied={onRestoreLastApplied}
               onSaveLastApplied={onSaveLastApplied}
@@ -4907,7 +5016,9 @@ function ExplorerFilters({
               onAddQuickFilter={addFilter}
             />
             <Button kind="ghost" size="sm" icon="x" onClick={onClearFilters}>Очистить фильтры</Button>
-            <Button kind="ghost" size="sm" icon="play" onClick={onRun}>Применить</Button>
+            <Button kind="ghost" size="sm" icon="play" onClick={onRun} disabled={runDisabled}>
+              {runDisabled ? 'Загрузка…' : 'Применить'}
+            </Button>
             {canWrite && (
               <Button kind="ghost" size="sm" icon="save" onClick={onSave}>Сохранить</Button>
             )}

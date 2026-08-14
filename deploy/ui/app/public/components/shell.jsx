@@ -1507,6 +1507,10 @@ function buildTopTalkersShareUrl({
 }
 
 function parseExplorerPageParams(params) {
+  const snapshot = String(params.get('snapshot') || '').trim();
+  if (snapshot) {
+    return { snapshot };
+  }
   const metric = params.get('metric');
   const groupBy = (params.get('groupBy') || '').split(',').map((s) => s.trim()).filter(Boolean);
   const limit = Number(params.get('limit'));
@@ -1577,7 +1581,17 @@ function buildExplorerShareUrl({
   return `${window.location.origin}${window.location.pathname}#explorer?${params.toString()}`;
 }
 
+function buildExplorerSnapshotShareUrl(token) {
+  const params = new URLSearchParams();
+  params.set('snapshot', token);
+  return `${window.location.origin}${window.location.pathname}#explorer?${params.toString()}`;
+}
+
 function parseDnsExplorerPageParams(params) {
+  const snapshot = String(params.get('snapshot') || '').trim();
+  if (snapshot) {
+    return { snapshot };
+  }
   const metric = params.get('metric');
   const groupBy = (params.get('groupBy') || '').split(',').map((s) => s.trim()).filter(Boolean);
   const filtersParsed = parseJsonSearchParam(params.get('filters'));
@@ -1634,6 +1648,12 @@ function buildDnsExplorerShareUrl({
     params.set('from', customPeriod.from);
     params.set('to', customPeriod.to);
   }
+  return `${window.location.origin}${window.location.pathname}#dns-explorer?${params.toString()}`;
+}
+
+function buildDnsExplorerSnapshotShareUrl(token) {
+  const params = new URLSearchParams();
+  params.set('snapshot', token);
   return `${window.location.origin}${window.location.pathname}#dns-explorer?${params.toString()}`;
 }
 
@@ -1698,7 +1718,7 @@ Object.assign(window, {
   collectorFilterLabel, directionSummaryLabel, TimezoneSelector,
   parseAppHash, parseJsonSearchParam, parseDirectionsParam, applyTopTalkersUrlGlobals,
   parseTopTalkersPageParams, readTopTalkersPageParamsFromHash, buildTopTalkersShareUrl,
-  parseExplorerPageParams, readExplorerPageParamsFromHash, applyExplorerUrlGlobals, buildExplorerShareUrl,
+  parseExplorerPageParams, readExplorerPageParamsFromHash, applyExplorerUrlGlobals, buildExplorerShareUrl, buildExplorerSnapshotShareUrl,
   parseDnsExplorerPageParams, readDnsExplorerPageParamsFromHash, applyDnsExplorerUrlGlobals,
-  buildDnsExplorerDraftUrl, buildDnsExplorerShareUrl,
+  buildDnsExplorerDraftUrl, buildDnsExplorerShareUrl, buildDnsExplorerSnapshotShareUrl,
 });

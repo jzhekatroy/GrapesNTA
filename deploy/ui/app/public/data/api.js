@@ -449,6 +449,8 @@ const ApiClient = (() => {
         resultSeries: res.data?.resultSeries || null,
         breakdowns: res.data?.breakdowns || {},
         meta: res.meta || null,
+        snapshotId: res.meta?.snapshotId ?? null,
+        snapshotExpiresAt: res.meta?.snapshotExpiresAt ?? null,
         loadMs: metrics.loadMs,
         serverMs: res.meta?.elapsedMs ?? null,
       };
@@ -637,6 +639,20 @@ const ApiClient = (() => {
     return body.data || body;
   }
 
+  async function loadAnalysisSnapshotsDiagnostics() {
+    const body = await getJson('/api/diagnostics/analysis-snapshots', {
+      widget: 'diagnostics/analysis-snapshots',
+    });
+    return body.data || body;
+  }
+
+  async function loadBuildInfo() {
+    const body = await getJson('/api/diagnostics/build-info', {
+      widget: 'diagnostics/build-info',
+    });
+    return body.data || body;
+  }
+
   async function loadObservation(id) {
     const body = await getJson(`/api/observations/${encodeURIComponent(id)}`, { widget: 'observations/get' });
     return body.data;
@@ -786,6 +802,8 @@ const ApiClient = (() => {
         source: 'clickhouse',
         data: res.data,
         meta: res.meta,
+        snapshotId: res.meta?.snapshotId ?? null,
+        snapshotExpiresAt: res.meta?.snapshotExpiresAt ?? null,
         loadMs: res.loadMs ?? null,
         serverMs: res.meta?.elapsedMs ?? null,
       };
@@ -799,6 +817,110 @@ const ApiClient = (() => {
         serverMs: null,
       };
     }
+  }
+
+  function explorerSnapshotApiBase(cabinetMode = false) {
+    return cabinetMode ? '/api/cabinet/explorer/snapshots' : '/api/explorer/snapshots';
+  }
+
+  function mapExplorerSharedSnapshot(data) {
+    const q = data?.query || {};
+    const timeRange = q.range === 'custom' ? 'custom' : (q.range || '1h');
+    const customPeriod = timeRange === 'custom'
+      ? { from: q.from, to: q.to }
+      : null;
+    const payload = data?.payload || {};
+    return {
+      snapshot: {
+        timeRange,
+        customPeriod,
+        filters: q.filters || [],
+        thresholds: q.thresholds || [],
+        metric: q.metric || 'bps',
+        groupBy: q.groupBy || [],
+        limit: q.limit || 25,
+      },
+      payload: {
+        rows: payload.rows || [],
+        summary: payload.summary || null,
+        timeseries: payload.timeseries || [],
+        resultSeries: payload.resultSeries || null,
+        meta: payload.meta || null,
+        loadMs: payload.loadMs ?? null,
+        serverMs: payload.serverMs ?? null,
+      },
+      shareMeta: data?.meta || null,
+    };
+  }
+
+  function mapDnsExplorerSharedSnapshot(data) {
+    const q = data?.query || {};
+    const timeRange = q.range === 'custom' ? 'custom' : (q.range || '24h');
+    const customPeriod = timeRange === 'custom'
+      ? { from: q.from, to: q.to }
+      : null;
+    const payload = data?.payload || {};
+    const collectorFilter = q.collectorId
+      ? String(q.collectorId).split(',').map((v) => v.trim()).filter(Boolean)
+      : [];
+    return {
+      snapshot: {
+        metric: q.metric || 'queries_per_sec',
+        groupBy: q.groupBy || [],
+        filters: q.filters || [],
+        timeRange,
+        customPeriod,
+        collectorFilter,
+      },
+      payload: {
+        rows: payload.rows || [],
+        timeseries: payload.timeseries || [],
+        resultSeries: payload.resultSeries || null,
+        meta: payload.meta || null,
+        loadMs: payload.loadMs ?? null,
+        serverMs: payload.serverMs ?? null,
+      },
+      shareMeta: data?.meta || null,
+    };
+  }
+
+  async function shareExplorerSnapshot(snapshotId, cabinetMode = false) {
+    const base = explorerSnapshotApiBase(cabinetMode);
+    const body = await requestJson(`${base}/${encodeURIComponent(snapshotId)}/share`, { method: 'POST' });
+    return body.data;
+  }
+
+  async function loadExplorerSharedSnapshot(token, cabinetMode = false) {
+    const base = explorerSnapshotApiBase(cabinetMode);
+    try {
+      const body = await getJson(`${base}/shared/${encodeURIComponent(token)}`, { widget: 'explorer/snapshot' });
+      return { ok: true, ...mapExplorerSharedSnapshot(body.data) };
+    } catch (err) {
+      return { ok: false, message: err.message, status: err.status || 0 };
+    }
+  }
+
+  async function revokeExplorerSnapshotShare(snapshotId, cabinetMode = false) {
+    const base = explorerSnapshotApiBase(cabinetMode);
+    return requestJson(`${base}/${encodeURIComponent(snapshotId)}/share`, { method: 'DELETE' });
+  }
+
+  async function shareDnsExplorerSnapshot(snapshotId) {
+    const body = await requestJson(`/api/dns-explorer/snapshots/${encodeURIComponent(snapshotId)}/share`, { method: 'POST' });
+    return body.data;
+  }
+
+  async function loadDnsExplorerSharedSnapshot(token) {
+    try {
+      const body = await getJson(`/api/dns-explorer/snapshots/shared/${encodeURIComponent(token)}`, { widget: 'dns-explorer/snapshot' });
+      return { ok: true, ...mapDnsExplorerSharedSnapshot(body.data) };
+    } catch (err) {
+      return { ok: false, message: err.message, status: err.status || 0 };
+    }
+  }
+
+  async function revokeDnsExplorerSnapshotShare(snapshotId) {
+    return requestJson(`/api/dns-explorer/snapshots/${encodeURIComponent(snapshotId)}/share`, { method: 'DELETE' });
   }
 
   async function exportDnsExplorerCsv(queryBody = {}) {
@@ -2506,6 +2628,8 @@ const ApiClient = (() => {
         resultSeries: res.data?.resultSeries || null,
         breakdowns: res.data?.breakdowns || {},
         meta: res.meta || null,
+        snapshotId: res.meta?.snapshotId ?? null,
+        snapshotExpiresAt: res.meta?.snapshotExpiresAt ?? null,
         loadMs: metrics.loadMs,
         serverMs: res.meta?.elapsedMs ?? null,
       };
@@ -2661,6 +2785,9 @@ const ApiClient = (() => {
     loadExplorerQuery,
     loadExplorerFlows,
     exportExplorerCsv,
+    shareExplorerSnapshot,
+    loadExplorerSharedSnapshot,
+    revokeExplorerSnapshotShare,
     loadExplorerSavedFilters,
     saveExplorerFilter,
     deleteExplorerFilter,
@@ -2676,6 +2803,8 @@ const ApiClient = (() => {
     loadEnrichmentDiagnostics,
     loadSnmpDiagnostics,
     loadBoundsDiagnostics,
+    loadAnalysisSnapshotsDiagnostics,
+    loadBuildInfo,
     loadObservation,
     createObservation,
     updateObservation,
@@ -2704,6 +2833,9 @@ const ApiClient = (() => {
     loadDnsExplorerSchema,
     runDnsExplorerQuery,
     exportDnsExplorerCsv,
+    shareDnsExplorerSnapshot,
+    loadDnsExplorerSharedSnapshot,
+    revokeDnsExplorerSnapshotShare,
     suggestDnsExplorerDomains,
     suggestDnsExplorerClientIps,
     suggestDnsExplorerServerIps,

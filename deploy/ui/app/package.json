@@ -5,7 +5,7 @@
   "description": "Grapes NTA — UI-шаблон системы анализа сетевого трафика",
   "scripts": {
     "setup": "node scripts/setup-project.js",
-    "dev": "node server/index.js",
+    "dev": "node scripts/write-build-info.js && node server/index.js",
     "dev:static": "npx serve public -p 3000",
     "start": "npm run dev",
     "test": "node --test server/*.test.js server/**/*.test.js"

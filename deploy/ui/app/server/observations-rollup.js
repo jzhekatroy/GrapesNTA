@@ -204,7 +204,8 @@ function toChUtc(d) {
  * on overlapping catch-up / rebuild. Waits for the mutation to finish.
  */
 async function deleteRollupWindow(observationId, from, to) {
-  if (!(from instanceof Date) || !(to instanceof Date) || !(from < to)) return;
+  if (!(from instanceof Date) || !(to instanceof Date) || !(from < to)) return { elapsedMs: 0 };
+  const started = Date.now();
   await executeCommand(`
     ALTER TABLE default.${ROLLUP_TABLE}
     DELETE WHERE observation_id = {id:String}
@@ -216,6 +217,7 @@ async function deleteRollupWindow(observationId, from, to) {
     from: toChUtc(from),
     to: toChUtc(to),
   }, { name: `observations/rollup-delete-${observationId}` });
+  return { elapsedMs: Date.now() - started };
 }
 
 function earliestLiveFrom(safeTo) {
@@ -361,6 +363,10 @@ async function applyFail(job, message) {
   return { id: job.id, error: message, failCount, nextAttemptAt };
 }
 
+function isTotalRollupRow(row) {
+  return ROLLUP_DIM_COLUMNS.every((c) => !row[c]);
+}
+
 async function materializeWindow(job, from, to) {
   const window = {
     range: 'custom',
@@ -389,11 +395,61 @@ async function materializeWindow(job, from, to) {
   const grouped = await catchupGrouped(job, window, seriesLimit);
   values.push(...grouped.values);
 
-  await deleteRollupWindow(job.id, from, to);
+  const insertedTotalBytes = values
+    .filter(isTotalRollupRow)
+    .reduce((acc, row) => acc + (Number(row.bytes) || 0), 0);
+  const sampleMinute = values[0]?.minute;
+  const { elapsedMs: deleteMs } = await deleteRollupWindow(job.id, from, to);
+  let insertMs = 0;
   if (values.length) {
+    const insertStarted = Date.now();
     await insertRows(ROLLUP_TABLE, values, { name: `observations/rollup-insert-${job.id}` });
+    insertMs = Date.now() - insertStarted;
   }
-  return { totalPoints, groupedPoints: grouped.groupedPoints };
+
+  let storedTotalBytes = null;
+  let storedRatio = null;
+  try {
+    const { rows } = await query(`
+      SELECT sum(bytes) AS bytes
+      FROM default.${ROLLUP_TABLE}
+      WHERE observation_id = {id:String}
+        AND minute >= parseDateTimeBestEffort({from:String}, 'UTC')
+        AND minute < parseDateTimeBestEffort({to:String}, 'UTC')
+        AND dim0 = '' AND dim1 = '' AND dim2 = '' AND dim3 = ''
+    `, {
+      id: job.id,
+      from: toChUtc(from),
+      to: toChUtc(to),
+    }, { name: `observations/rollup-verify-${job.id}` });
+    storedTotalBytes = Number(rows[0]?.bytes) || 0;
+    storedRatio = insertedTotalBytes > 0 ? storedTotalBytes / insertedTotalBytes : null;
+  } catch (err) {
+    console.warn(new Date().toISOString(), 'observation rollup verify failed', job.id, err.message);
+  }
+
+  const shotLog = {
+    id: job.id,
+    pid: process.pid,
+    from: from.toISOString(),
+    to: to.toISOString(),
+    deleteMs,
+    insertMs,
+    insertRows: values.length,
+    totalBuckets: totalPoints.length,
+    groupedPoints: grouped.groupedPoints,
+    insertedTotalBytes,
+    storedTotalBytes,
+    storedRatio,
+    sampleMinute,
+    sampleMinuteType: sampleMinute == null ? null : typeof sampleMinute,
+  };
+  if (storedRatio != null && storedRatio > 1.05) {
+    console.error(new Date().toISOString(), 'observation rollup DOUBLE', JSON.stringify(shotLog));
+  } else {
+    console.log(new Date().toISOString(), 'observation rollup shot', JSON.stringify(shotLog));
+  }
+  return { totalPoints, groupedPoints: grouped.groupedPoints, storedRatio };
 }
 
 async function catchupBackfill(job, liveStart) {
@@ -448,8 +504,19 @@ async function catchupBackfill(job, liveStart) {
   }
 }
 
+function isFreshRunning(job) {
+  if (job.status !== 'running') return false;
+  const startedMs = Date.parse(job.runningStartedAt || '');
+  if (!Number.isFinite(startedMs)) return false;
+  return (Date.now() - startedMs) <= STUCK_SEC * 1000;
+}
+
 async function catchupOne(job) {
   const intervalSec = Math.max(MIN_REFRESH_SEC, Number(job.intervalSec) || MIN_REFRESH_SEC);
+
+  if (isFreshRunning(job)) {
+    return { id: job.id, skipped: true, reason: 'already_running', pid: process.pid };
+  }
 
   if (await honorCancel(job)) return { id: job.id, cancelled: true };
 
@@ -532,7 +599,7 @@ async function catchupOne(job) {
   }
 }
 
-async function recoverStuckRunning() {
+async function recoverStuckRunning({ onStart = false } = {}) {
   const jobs = await listMaterializeJobs();
   let recovered = 0;
   for (const job of jobs) {
@@ -540,7 +607,9 @@ async function recoverStuckRunning() {
     const startedMs = Date.parse(job.runningStartedAt || '');
     const stuckByAge = Number.isFinite(startedMs)
       && (Date.now() - startedMs) > STUCK_SEC * 1000;
-    // Always clear on worker start; also clear by watchdog age.
+    // Periodic ticks only clear shots that exceeded STUCK_SEC.
+    // Clearing a fresh `running` here starts a second INSERT into SummingMergeTree.
+    if (!onStart && !stuckByAge) continue;
     await patchMaterializeStatus(job.id, {
       status: stuckByAge ? 'error' : 'queued',
       lastError: stuckByAge
@@ -553,13 +622,6 @@ async function recoverStuckRunning() {
   return recovered;
 }
 
-function chUtcToIso(value) {
-  const s = String(value || '').trim();
-  if (!s) return null;
-  if (s.includes('T')) return s.endsWith('Z') ? s : `${s}Z`;
-  return `${s.replace(' ', 'T')}.000Z`;
-}
-
 async function rewindCursorsIfAhead({ force = false } = {}) {
   const now = Date.now();
   if (!force && lastRewindAtMs && now - lastRewindAtMs < REWIND_EVERY_MS) {
@@ -570,17 +632,23 @@ async function rewindCursorsIfAhead({ force = false } = {}) {
   for (const job of jobs) {
     if (!job.cursorMinute) continue;
     const { rows } = await query(
-      `SELECT toTimeZone(max(minute), 'UTC') AS max_utc
+      `SELECT toUnixTimestamp(max(minute)) AS max_unix
        FROM default.${ROLLUP_TABLE}
        WHERE observation_id = {id:String}`,
       { id: job.id },
       { name: `observations/rollup-max-${job.id}` },
     );
-    const maxIso = chUtcToIso(rows[0]?.max_utc);
-    if (!maxIso) continue;
+    const maxUnix = Number(rows[0]?.max_unix);
+    if (!Number.isFinite(maxUnix) || maxUnix <= 0) continue;
     // max(minute) is bucket start; exclusive cursor should be max + 5m
-    const exclusiveEnd = new Date(new Date(maxIso).getTime() + BUCKET_MS);
+    const exclusiveEnd = new Date(maxUnix * 1000 + BUCKET_MS);
     if (new Date(job.cursorMinute) > exclusiveEnd) {
+      console.warn(new Date().toISOString(), 'observation rollup rewind', JSON.stringify({
+        id: job.id,
+        cursorMinute: job.cursorMinute,
+        maxUnix,
+        exclusiveEnd: exclusiveEnd.toISOString(),
+      }));
       await patchMaterializeStatus(job.id, {
         cursorMinute: exclusiveEnd.toISOString(),
         status: 'queued',
@@ -615,7 +683,6 @@ async function runOnce() {
       || j.status === 'lagging'
       || j.status === 'ok'
       || j.status === 'error'
-      || j.status === 'running'
       || j.status === 'idle'
     ))
     .sort((a, b) => {
@@ -695,12 +762,38 @@ async function rebuildObservation(observationId, fromIso) {
   return shots;
 }
 
+/** Delete+insert one [from, to) window. Does not move the live cursor. */
+async function rematerializeRange(observationId, fromIso, toIso) {
+  await ensureObservationsStore();
+  await ensureTable();
+  const jobs = await listMaterializeJobs();
+  const job = jobs.find((j) => j.id === observationId);
+  if (!job) {
+    throw new Error(`Нет live-материализации для ${observationId}`);
+  }
+  const from = floorToBucket(new Date(fromIso));
+  const to = floorToBucket(new Date(toIso));
+  if (!(from instanceof Date) || !Number.isFinite(from.getTime()) || !(from < to)) {
+    throw new Error(`Некорректное окно: ${fromIso} … ${toIso}`);
+  }
+  const { totalPoints, groupedPoints, storedRatio } = await materializeWindow(job, from, to);
+  return {
+    id: observationId,
+    from: from.toISOString(),
+    to: to.toISOString(),
+    points: totalPoints.length,
+    groupedPoints,
+    storedRatio,
+  };
+}
+
 module.exports = {
   runOnce,
   recoverStuckRunning,
   ensureTable,
   deleteRollupWindow,
   rebuildObservation,
+  rematerializeRange,
   floorToBucket,
 };
 
@@ -717,8 +810,20 @@ async function main() {
     console.log(JSON.stringify(shots, null, 2));
     return;
   }
+  if (mode === 'shot') {
+    const id = process.argv[3];
+    const fromIso = process.argv[4];
+    const toIso = process.argv[5];
+    if (!id || !fromIso || !toIso) {
+      console.error('Usage: node server/observations-rollup.js shot <observationId> <fromIso> <toIso>');
+      process.exit(1);
+    }
+    const out = await rematerializeRange(id, fromIso, toIso);
+    console.log(JSON.stringify(out, null, 2));
+    return;
+  }
 
-  const recovered = await recoverStuckRunning();
+  const recovered = await recoverStuckRunning({ onStart: true });
   if (recovered) {
     console.log(new Date().toISOString(), 'recovered stuck running jobs:', recovered);
   }
