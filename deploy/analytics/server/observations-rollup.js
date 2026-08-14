@@ -343,6 +343,7 @@ async function applyFail(job, message) {
         failCount,
         nextAttemptAt: null,
         runningStartedAt: null,
+        shotToken: null,
         lastError: `остановлено после ${MAX_FAIL_COUNT} ошибок: ${message}`,
         cancelRequested: false,
       };
@@ -358,6 +359,7 @@ async function applyFail(job, message) {
     failCount,
     nextAttemptAt,
     runningStartedAt: null,
+    shotToken: null,
     lastCatchupAt: new Date().toISOString(),
   });
   return { id: job.id, error: message, failCount, nextAttemptAt };
@@ -365,6 +367,48 @@ async function applyFail(job, message) {
 
 function isTotalRollupRow(row) {
   return ROLLUP_DIM_COLUMNS.every((c) => !row[c]);
+}
+
+function newShotToken() {
+  return `${process.pid}:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`;
+}
+
+/**
+ * Two workers (analytics.js + observations-rollup.js loop) can both read
+ * status=ok and INSERT the same window into SummingMergeTree. The second
+ * write doubles the chart. Claim with a unique token after writing
+ * `running`; only the last writer proceeds.
+ */
+async function claimShot(job) {
+  const shotToken = newShotToken();
+  await patchMaterializeStatus(job.id, {
+    status: 'running',
+    runningStartedAt: new Date().toISOString(),
+    shotToken,
+  });
+  const latest = (await listMaterializeJobs()).find((j) => j.id === job.id);
+  if (!latest || latest.shotToken !== shotToken) {
+    return { claimed: false, shotToken };
+  }
+  return { claimed: true, shotToken, job: { ...job, ...latest, shotToken } };
+}
+
+async function verifyStoredTotal(job, from, to, insertedTotalBytes) {
+  const { rows } = await query(`
+    SELECT sum(bytes) AS bytes
+    FROM default.${ROLLUP_TABLE}
+    WHERE observation_id = {id:String}
+      AND minute >= parseDateTimeBestEffort({from:String}, 'UTC')
+      AND minute < parseDateTimeBestEffort({to:String}, 'UTC')
+      AND dim0 = '' AND dim1 = '' AND dim2 = '' AND dim3 = ''
+  `, {
+    id: job.id,
+    from: toChUtc(from),
+    to: toChUtc(to),
+  }, { name: `observations/rollup-verify-${job.id}` });
+  const storedTotalBytes = Number(rows[0]?.bytes) || 0;
+  const storedRatio = insertedTotalBytes > 0 ? storedTotalBytes / insertedTotalBytes : null;
+  return { storedTotalBytes, storedRatio };
 }
 
 async function materializeWindow(job, from, to) {
@@ -410,20 +454,20 @@ async function materializeWindow(job, from, to) {
   let storedTotalBytes = null;
   let storedRatio = null;
   try {
-    const { rows } = await query(`
-      SELECT sum(bytes) AS bytes
-      FROM default.${ROLLUP_TABLE}
-      WHERE observation_id = {id:String}
-        AND minute >= parseDateTimeBestEffort({from:String}, 'UTC')
-        AND minute < parseDateTimeBestEffort({to:String}, 'UTC')
-        AND dim0 = '' AND dim1 = '' AND dim2 = '' AND dim3 = ''
-    `, {
-      id: job.id,
-      from: toChUtc(from),
-      to: toChUtc(to),
-    }, { name: `observations/rollup-verify-${job.id}` });
-    storedTotalBytes = Number(rows[0]?.bytes) || 0;
-    storedRatio = insertedTotalBytes > 0 ? storedTotalBytes / insertedTotalBytes : null;
+    ({ storedTotalBytes, storedRatio } = await verifyStoredTotal(job, from, to, insertedTotalBytes));
+    if (storedRatio != null && storedRatio > 1.05 && values.length) {
+      console.error(new Date().toISOString(), 'observation rollup DOUBLE, healing', JSON.stringify({
+        id: job.id,
+        from: from.toISOString(),
+        to: to.toISOString(),
+        insertedTotalBytes,
+        storedTotalBytes,
+        storedRatio,
+      }));
+      await deleteRollupWindow(job.id, from, to);
+      await insertRows(ROLLUP_TABLE, values, { name: `observations/rollup-heal-${job.id}` });
+      ({ storedTotalBytes, storedRatio } = await verifyStoredTotal(job, from, to, insertedTotalBytes));
+    }
   } catch (err) {
     console.warn(new Date().toISOString(), 'observation rollup verify failed', job.id, err.message);
   }
@@ -469,10 +513,11 @@ async function catchupBackfill(job, liveStart) {
   if (to <= from) to = new Date(from.getTime() + BUCKET_MS);
   if (to > end) to = end;
 
-  await patchMaterializeStatus(job.id, {
-    status: 'running',
-    runningStartedAt: new Date().toISOString(),
-  });
+  const claim = await claimShot(job);
+  if (!claim.claimed) {
+    return { id: job.id, skipped: true, reason: 'lost_claim', pid: process.pid };
+  }
+  job = claim.job;
   if (await honorCancel(job)) return { id: job.id, cancelled: true };
 
   try {
@@ -484,6 +529,7 @@ async function catchupBackfill(job, liveStart) {
       backfillCursor: to.toISOString(),
       backfillDone: done,
       runningStartedAt: null,
+      shotToken: null,
       failCount: 0,
       nextAttemptAt: null,
       lastError: null,
@@ -564,10 +610,11 @@ async function catchupOne(job) {
     if (to > safeTo) to = safeTo;
   }
 
-  await patchMaterializeStatus(job.id, {
-    status: 'running',
-    runningStartedAt: new Date().toISOString(),
-  });
+  const claim = await claimShot(job);
+  if (!claim.claimed) {
+    return { id: job.id, skipped: true, reason: 'lost_claim', pid: process.pid };
+  }
+  job = claim.job;
   if (await honorCancel(job)) return { id: job.id, cancelled: true };
 
   try {
@@ -583,6 +630,7 @@ async function catchupOne(job) {
       failCount: 0,
       nextAttemptAt: null,
       runningStartedAt: null,
+      shotToken: null,
     });
     return {
       id: job.id,
@@ -616,6 +664,7 @@ async function recoverStuckRunning({ onStart = false } = {}) {
         ? `превышено время выполнения (${STUCK_SEC}с)`
         : 'воркер перезапущен — продолжаем с cursor/start',
       runningStartedAt: null,
+      shotToken: null,
     });
     recovered += 1;
   }

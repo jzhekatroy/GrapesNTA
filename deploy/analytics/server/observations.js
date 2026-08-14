@@ -2268,6 +2268,7 @@ async function listMaterializeJobs() {
         nextAttemptAt: mat.nextAttemptAt || null,
         cancelRequested: Boolean(mat.cancelRequested),
         runningStartedAt: mat.runningStartedAt || null,
+        shotToken: mat.shotToken || null,
         backfillFrom: mat.backfillFrom || null,
         backfillCursor: mat.backfillCursor || null,
         backfillDone: Boolean(mat.backfillDone),
