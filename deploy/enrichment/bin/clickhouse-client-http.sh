@@ -51,13 +51,13 @@ if [ ! -s "$BODY" ]; then
   exit 1
 fi
 
-URL="http://${HOST}:${PORT}/?max_execution_time=${MAX_TIME}&timeout_overflow_mode=throw&wait_end_of_query=1&user=$(printf %s "$USER" | sed 's/ /%20/g')"
-if [ -n "$PASSWORD" ]; then
-  URL="${URL}&password=$(printf %s "$PASSWORD" | sed 's/ /%20/g')"
-fi
+# Auth MUST be curl --user. A password with `#` in the URL becomes a fragment
+# and ClickHouse returns HTTP 403 (same bug as the worker shim).
+URL="http://${HOST}:${PORT}/?max_execution_time=${MAX_TIME}&timeout_overflow_mode=throw&wait_end_of_query=1"
 if [ -n "$DATABASE" ]; then
   URL="${URL}&database=$(printf %s "$DATABASE" | sed 's/ /%20/g')"
 fi
 
-curl -sS -f --max-time "$MAX_TIME" -X POST "$URL" --data-binary @"$BODY"
+curl -sS -f --max-time "$MAX_TIME" --user "${USER}:${PASSWORD}" \
+  -X POST "$URL" --data-binary @"$BODY"
 echo

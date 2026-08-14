@@ -368,10 +368,12 @@ def flows_raw_enabled_min_bucket(
     lookback_days: int = 7,
     cache: Optional[Dict[str, Optional[datetime]]] = None,
 ) -> Optional[datetime]:
-    """Earliest occupied UTC day in flows_raw for enabled sources.
+    """Earliest occupied bucket in flows_raw for enabled sources.
 
-    Uses one LIMIT 1 probe per date partition instead of min(time_received_ns)
-    over the whole lookback window.
+    Finds the first occupied date partition with LIMIT 1, then the first
+    time_received_ns in that partition (ORDER BY matches the table key).
+    Jumping to midnight of that day would grind empty morning hours on a
+    fresh stand that started sFlow at noon.
     """
     if job.source_table != "default.flows_raw":
         return None
@@ -391,9 +393,22 @@ def flows_raw_enabled_min_bucket(
             "LIMIT 1",
             display=f"probe flows_raw {day_s} for {job.job_id}",
         )
-        if hit.strip():
+        if not hit.strip():
+            continue
+        first = ch.query(
+            "SELECT toStartOfMinute(time_received_ns) "
+            "FROM default.flows_raw "
+            f"WHERE date = toDate('{day_s}') "
+            "AND source_id IN (SELECT source_id FROM default.net_flow_sources_enabled) "
+            "ORDER BY time_received_ns ASC "
+            "LIMIT 1",
+            display=f"first flows_raw minute {day_s} for {job.job_id}",
+        )
+        if first.strip():
+            result = truncate_bucket(parse_utc_dt(first.strip()), job.bucket_kind)
+        else:
             result = truncate_bucket(day, job.bucket_kind)
-            break
+        break
     if cache is not None:
         cache[cache_key] = result
     return result
@@ -422,9 +437,9 @@ def skip_forward_stale_bucket(
     """Jump rollup state forward when it trails real flows_raw data."""
     if job.source_table != "default.flows_raw":
         return bucket_start
-    # Steady-state / near-realtime cursor: never pay for a global min() scan.
-    # skip_forward only matters when state is stuck far behind the first real data.
-    if bucket_start >= utc_now() - timedelta(days=2):
+    # Live edge: do not probe. The old 2-day guard skipped the same-day empty
+    # prefix (sFlow started at 09:17, cursor walked 00:00..06:17 UTC).
+    if bucket_start >= utc_now() - timedelta(minutes=30):
         return bucket_start
 
     data_min = flows_raw_enabled_min_bucket(
