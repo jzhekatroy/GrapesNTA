@@ -76,9 +76,11 @@ async function tick() {
 
 async function loop() {
   markWorkerStart('loop');
+  const recoveredOnStart = await recoverStuckRunning({ onStart: true });
   console.log(new Date().toISOString(), 'analytics started', {
     rollupIntervalSec: MIN_INTERVAL_SEC,
     reportCheckSec: REPORT_CHECK_SEC,
+    recoveredOnStart,
   });
   // eslint-disable-next-line no-constant-condition
   while (true) {
