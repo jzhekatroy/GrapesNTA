@@ -526,6 +526,9 @@ WHERE ts >= now() - INTERVAL {args.lookback_days} DAY
             f"events={source[0]} announces={source[1]} withdraws={source[2]} "
             f"first_ts={source[3]} last_ts={source[4]}"
         )
+        if source[0] == "0":
+            log_info("no BMP route events in lookback window; skip rebuild")
+            return 0
 
     existing_rows = ch_run_int(base, f"SELECT count() FROM {args.table}")
     log_info(f"current_table rows={existing_rows}")

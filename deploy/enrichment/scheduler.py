@@ -110,6 +110,24 @@ def _ensure_reporter_http_env() -> None:
     os.environ.setdefault("CLICKHOUSE_HTTP_PASSWORD", password)
 
 
+def _table_rows(table: str) -> int | None:
+    """Row count for a fresh-install gate. None = query failed."""
+    _ensure_reporter_http_env()
+    try:
+        proc = subprocess.run(
+            ["/usr/local/bin/clickhouse-client", "--query", f"SELECT count() FROM {table}"],
+            capture_output=True,
+            text=True,
+            timeout=20,
+            check=False,
+        )
+        if proc.returncode != 0:
+            return None
+        return int((proc.stdout or "0").strip() or "0")
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return None
+
+
 def _seed_deferred_job_status() -> None:
     """Heavy jobs wait a full interval after start; seed status so Diagnostics
     does not show neverRan until the first real run (day/week)."""
@@ -153,12 +171,25 @@ def main() -> int:
                 os.environ.setdefault(k, v)
 
     last_run = {name: 0.0 for name, *_ in JOBS}
-    # Run bgp-origin soon after start; delay heavy jobs a bit.
+    # bgp-origin: first tick ~1 min after start.
     last_run["bgp-origin"] = time.time() - 240
-    last_run["geoloaderd"] = time.time()  # wait ~1 day unless forced
+    last_run["snmp-iface-sync"] = 0.0
+    # Heavy RIR/Cymru jobs: run immediately only when the target table is empty
+    # (fresh install). Otherwise wait a full interval so a restart does not
+    # re-download the internet.
+    last_run["geoloaderd"] = time.time()
     last_run["asn-names"] = time.time()
     last_run["iptoasn"] = time.time()
-    last_run["snmp-iface-sync"] = 0.0  # run on first tick
+    empty_start = {
+        "geoloaderd": "default.geo_prefix_country",
+        "asn-names": "default.asn_names",
+        "iptoasn": "default.ip_asn_prefixes_current",
+    }
+    for name, table in empty_start.items():
+        rows = _table_rows(table)
+        if rows is None or rows == 0:
+            last_run[name] = 0.0
+            log(f"{name}: {table} empty — run on first tick")
 
     log("grapes-enrichment scheduler started")
     _seed_deferred_job_status()
