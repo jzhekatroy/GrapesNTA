@@ -872,7 +872,7 @@ a.nav-item--active:visited { color: var(--fg-primary); }
 
 .explorer-filter-row__main {
   display: grid;
-  grid-template-columns: 84px minmax(120px, 180px) minmax(120px, 148px) minmax(180px, 1fr) 26px;
+  grid-template-columns: 107px minmax(120px, 180px) minmax(120px, 148px) minmax(180px, 1fr) 26px;
   align-items: center;
   gap: 6px;
   min-width: 0;
@@ -903,11 +903,8 @@ a.nav-item--active:visited { color: var(--fg-primary); }
 }
 
 .explorer-filter-row select.input.explorer-filter-row__logic {
-  min-width: 84px;
-}
-
-.explorer-filter-row__logic {
-  padding: 0 22px 0 6px;
+  min-width: 107px;
+  padding: 0 26px 0 8px;
   font-size: 12px;
   text-align: left;
 }
@@ -1175,7 +1172,7 @@ a.nav-item--active:visited { color: var(--fg-primary); }
 
 @container (max-width: 600px) {
   .explorer-filter-row__main {
-    grid-template-columns: 84px minmax(0, 1fr) 104px 26px;
+    grid-template-columns: 107px minmax(0, 1fr) 104px 26px;
   }
 
   .explorer-filter-row__field,
