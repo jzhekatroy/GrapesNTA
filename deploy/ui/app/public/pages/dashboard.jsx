@@ -322,7 +322,13 @@ function PageDashboard({ onNavigate, directions, timeRange, customPeriod, collec
               displayTimezone={displayTimezone}
               periodStartMs={chartPeriodBounds.startMs}
               periodEndMs={chartPeriodBounds.endMs}
+              skipTrailingGaps
             />
+          )}
+          {chartPoints.length > 0 && (
+            <div className="chart-data-until">
+              по завершённым пятиминуткам, до {chartPoints[chartPoints.length - 1].t}
+            </div>
           )}
         </Card>
 
@@ -1183,6 +1189,7 @@ function DistributionPane({
         onRangeSelect={onRangeSelect}
         periodStartMs={periodStartMs}
         periodEndMs={periodEndMs}
+        skipTrailingGaps
       />
     );
   }

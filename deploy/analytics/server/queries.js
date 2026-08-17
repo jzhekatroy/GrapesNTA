@@ -244,7 +244,13 @@ const CHART_LINE_DRAW_ORDER = ['incoming', 'outgoing', 'transit', 'internal', 'u
 
 const BUCKET_SECONDS = 300;
 
-/** Drop the trailing bucket that is still open or only partially rolled up. */
+/**
+ * Drop the trailing bucket that is still open or only partially rolled up.
+ * Strict `<` also drops the newest wall-clock-closed bucket on purpose: the 1m
+ * rollup trails ~6 minutes (its own safety margin plus cron cadence), so that
+ * bucket usually holds 3–4 of its 5 minutes while the divisor stays the full
+ * bucket, and the last point would dip by 20–40% instead of being absent.
+ */
 function closedChartBucketSql(bucketColumn, bucketSeconds, boundaryExpr = 'ts_to') {
   return `${bucketColumn} + toIntervalSecond(${bucketSeconds}) < ${boundaryExpr}`;
 }

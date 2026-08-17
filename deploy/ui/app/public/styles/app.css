@@ -3981,6 +3981,13 @@ html.modal-open #root {
   margin-left: auto;
 }
 
+.chart-data-until {
+  margin-top: 6px;
+  text-align: right;
+  color: var(--fg-secondary);
+  font: var(--pv-text-caption-1);
+}
+
 .dual-chart {
   position: relative;
   width: 100%;

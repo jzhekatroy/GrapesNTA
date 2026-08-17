@@ -1063,6 +1063,7 @@ function CategoryTrendChart({
   onRangeSelect,
   periodStartMs,
   periodEndMs,
+  skipTrailingGaps = false,
   tipTranslucent = false,
 }) {
   const wrapRef = useRef(null);
@@ -1082,8 +1083,9 @@ function CategoryTrendChart({
       startMs: periodStartMs,
       endMs: periodEndMs,
       valueKeys,
+      skipTrailingGaps,
     }),
-    [points, bucketSeconds, periodStartMs, periodEndMs, valueKeys.join(',')],
+    [points, bucketSeconds, periodStartMs, periodEndMs, valueKeys.join(','), skipTrailingGaps],
   );
   const w = 800;
   const padL = 48;
