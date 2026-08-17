@@ -58,6 +58,7 @@ rsync -a --delete \
   --exclude '.git/' \
   --exclude 'node_modules/' \
   --exclude '.tmp/' \
+  --exclude '.tmp-*' \
   --exclude 'server/data/' \
   --exclude '.env' \
   --exclude '.env.docker.example' \

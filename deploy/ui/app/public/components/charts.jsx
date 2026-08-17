@@ -126,7 +126,7 @@ function makeChartGapPlaceholder(bucketMs, valueKeys, gapValue = null) {
   return pt;
 }
 
-function fillChartTimeGaps(points, { bucketSeconds, startMs, endMs, valueKeys = [], skipLeadingGaps = false, gapValue = null } = {}) {
+function fillChartTimeGaps(points, { bucketSeconds, startMs, endMs, valueKeys = [], skipLeadingGaps = false, skipTrailingGaps = false, gapValue = null } = {}) {
   if (!Array.isArray(points) || !points.length || !bucketSeconds) return points || [];
 
   const step = bucketSeconds * 1000;
@@ -154,7 +154,9 @@ function fillChartTimeGaps(points, { bucketSeconds, startMs, endMs, valueKeys = 
       const delta = Math.ceil((startMs - anchorMs) / step);
       ms = anchorMs + delta * step;
     }
-    while (ms <= endMs) {
+    const lastMs = sorted[sorted.length - 1].ms;
+    const stopMs = skipTrailingGaps ? Math.min(endMs, lastMs) : endMs;
+    while (ms <= stopMs) {
       result.push(byMs.get(ms) || makeChartGapPlaceholder(ms, valueKeys, gapValue));
       ms += step;
     }
@@ -712,6 +714,7 @@ function DualChart({
   periodStartMs,
   periodEndMs,
   skipLeadingGaps = false,
+  skipTrailingGaps = false,
   gapAsZero = false,
   valueFormatter = fmtBits,
   axisFormatter = fmtCompact,
@@ -744,9 +747,10 @@ function DualChart({
       endMs: periodEndMs,
       valueKeys,
       skipLeadingGaps,
+      skipTrailingGaps,
       gapValue,
     }),
-    [points, bucketSeconds, periodStartMs, periodEndMs, valueKeys.join(','), skipLeadingGaps, gapValue],
+    [points, bucketSeconds, periodStartMs, periodEndMs, valueKeys.join(','), skipLeadingGaps, skipTrailingGaps, gapValue],
   );
   const seriesBwValue = (pt, key) => {
     const v = chartSeriesNumber(pt[key]);
@@ -1348,6 +1352,7 @@ function TimeSeriesSparkChart({
   periodStartMs,
   periodEndMs,
   skipLeadingGaps = false,
+  skipTrailingGaps = false,
   tipTranslucent = false,
 }) {
   const wrapRef = useRef(null);
@@ -1364,12 +1369,13 @@ function TimeSeriesSparkChart({
       endMs: periodEndMs,
       valueKeys: [valueKey, 'bps', 'v'],
       skipLeadingGaps,
+      skipTrailingGaps,
     });
     return densified.map((pt) => ({
       ...pt,
       v: chartSeriesNumber(pt[valueKey] ?? pt.bps),
     }));
-  }, [points, bucketSeconds, periodStartMs, periodEndMs, valueKey, skipLeadingGaps]);
+  }, [points, bucketSeconds, periodStartMs, periodEndMs, valueKey, skipLeadingGaps, skipTrailingGaps]);
   if (!data.length) return null;
 
   const w = 800;

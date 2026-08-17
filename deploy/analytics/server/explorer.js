@@ -267,7 +267,7 @@ function explorerEntityDisplayLabel(entityId, displayName) {
   const id = String(entityId || '').trim();
   if (!id || id === '—') return '—';
   const name = String(displayName || '').trim();
-  if (name && name !== id) return `${name} (${id})`;
+  if (name && name !== id) return name;
   return id;
 }
 

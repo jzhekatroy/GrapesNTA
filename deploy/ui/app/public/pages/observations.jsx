@@ -4,19 +4,34 @@ const { useState, useEffect, useCallback, useMemo, useRef } = React;
 
 const LOOKBACK_LABELS = {
   '15m': '15 минут',
+  '30m': '30 минут',
   '1h': '1 час',
   '6h': '6 часов',
   '24h': '24 часа',
   '7d': '7 дней',
 };
 
-const LOOKBACK_OPTIONS = Object.keys(LOOKBACK_LABELS);
+const LOOKBACK_SHORT = {
+  '15m': '15м',
+  '30m': '30м',
+  '1h': '1ч',
+  '6h': '6ч',
+  '24h': '24ч',
+  '7d': '7д',
+};
+
+const LOOKBACK_OPTIONS = ['30m', '1h', '6h', '24h', '7d'];
+
+function normalizeObservationLookback(value) {
+  return value === '15m' ? '30m' : (value || '1h');
+}
 
 /** Строк топа в плитке; «Прочие» показывается сверх этого числа. */
 const TOP_ROWS_VIEW_LIMIT = 100;
 
 const OBSERVATION_LOOKBACK_MS = {
   '15m': 15 * 60 * 1000,
+  '30m': 30 * 60 * 1000,
   '1h': 3600 * 1000,
   '6h': 6 * 3600 * 1000,
   '24h': 86400 * 1000,
@@ -43,14 +58,6 @@ function observationChartPeriodBounds({ customRange, lookback, window, displayTi
 }
 
 const MIN_REFRESH_SEC = 300;
-
-const REFRESH_LABELS = {
-  15: '15 сек',
-  30: '30 сек',
-  60: '1 мин',
-  300: '5 мин',
-  900: '15 мин',
-};
 
 /** Fallback, если браузер не умеет Intl.supportedValuesOf('timeZone'). */
 const TIMEZONE_FALLBACK = [
@@ -246,24 +253,6 @@ function formatObservationScopeSummary(item, filterFields) {
   return parts.join(' · ');
 }
 
-function formatDataThrough(item) {
-  const iso = item.materialize?.dataThrough || item.materialize?.cursorMinute;
-  if (!iso) return null;
-  try {
-    const d = new Date(iso);
-    if (!Number.isFinite(d.getTime())) return null;
-    return d.toLocaleString('ru-RU', {
-      timeZone: typeof getDisplayTimezone === 'function' ? getDisplayTimezone() : undefined,
-      day: '2-digit',
-      month: '2-digit',
-      hour: '2-digit',
-      minute: '2-digit',
-    });
-  } catch {
-    return null;
-  }
-}
-
 function reportPeriodLabel(item) {
   const tz = item.report?.schedule?.timezone || 'Europe/Moscow';
   return item.report?.period === 'last_24h'
@@ -271,43 +260,28 @@ function reportPeriodLabel(item) {
     : `вчера, календарные сутки (${tz})`;
 }
 
-function rollupStatusLabel(item) {
-  const through = formatDataThrough(item);
-  const throughPart = through ? `данные по ${through}` : null;
-  if (!item.scope?.materializeRequired) return throughPart;
-  if (!item.materialize?.enabled) {
-    const hint = 'подготовка выключена — включите в настройках';
-    return throughPart ? `${throughPart} · ${hint}` : hint;
-  }
-  const st = item.materialize.status;
-  const bf = item.backfillProgress;
-  const bfPart = bf && !bf.done ? `история: ${bf.hoursDone} из ${bf.hoursTotal} ч` : null;
-  const parts = [throughPart];
-  if (st === 'lagging') parts.push(`отставание ${item.materialize.lagSeconds || '?'}с`);
-  else if (st === 'queued' || st === 'running') parts.push('готовим данные…');
-  else if (st === 'error') parts.push(item.materialize.lastError ? `ошибка: ${item.materialize.lastError}` : 'ошибка подготовки');
-  if (bfPart) parts.push(bfPart);
-  return parts.filter(Boolean).join(' · ') || null;
-}
-
-function downloadTextFile(filename, text, mime = 'text/csv;charset=utf-8') {
-  const blob = new Blob([text], { type: mime });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = filename;
-  a.click();
-  URL.revokeObjectURL(url);
-}
-
-function csvEscapeCell(v) {
-  const s = String(v ?? '');
-  return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
-}
-
 /** Live не настраивается: плитка и воркер всегда идут шагом 5 минут. */
 function tileRefreshSec() {
   return MIN_REFRESH_SEC;
+}
+
+const ROLLUP_BUCKET_MS = 5 * 60 * 1000;
+/** Тик воркера (60 с) плюс запись шота — раньше нового бакета в rollup не будет. */
+const WORKER_WRITE_LAG_MS = 75 * 1000;
+/** Бакет мог задержаться — перепроверяем шагом воркера, а не через все 5 минут. */
+const TILE_RETRY_MS = 60 * 1000;
+
+/**
+ * Следующий запрос назначаем на момент, когда rollup должен получить очередной
+ * бакет: window.to — правый край готовых данных. Слепой опрос раз в 5 минут
+ * добавлял к отставанию графика ещё до 5 минут, потому что попадал в паузу
+ * между записями. Ожидание само по себе не превышает бакет плюс лаг воркера.
+ */
+function nextTileDelayMs(windowTo) {
+  const endMs = Date.parse(windowTo || '');
+  if (!Number.isFinite(endMs)) return tileRefreshSec() * 1000;
+  const waitMs = endMs + ROLLUP_BUCKET_MS + WORKER_WRITE_LAG_MS - Date.now();
+  return Math.max(TILE_RETRY_MS, waitMs);
 }
 
 function startComposeInExplorer(onNavigate, {
@@ -371,6 +345,7 @@ function ObservationChart({
   periodStartMs,
   periodEndMs,
   skipLeadingGaps = false,
+  skipTrailingGaps = false,
   tipTranslucent = true,
 }) {
   if (!points?.length) {
@@ -411,6 +386,7 @@ function ObservationChart({
         periodStartMs={periodStartMs}
         periodEndMs={periodEndMs}
         skipLeadingGaps={skipLeadingGaps}
+        skipTrailingGaps={skipTrailingGaps}
         tipTranslucent={tipTranslucent}
         tipUnitLabel="бит/с"
       />
@@ -437,6 +413,7 @@ function ObservationChart({
         periodStartMs={periodStartMs}
         periodEndMs={periodEndMs}
         skipLeadingGaps={skipLeadingGaps}
+        skipTrailingGaps={skipTrailingGaps}
         tipTranslucent={tipTranslucent}
       />
     );
@@ -486,37 +463,30 @@ function ObservationChartStats({ points, lines, mode = 'total' }) {
   );
 }
 
-function LookbackPicker({ value, options, onChange, compact = false }) {
-  const list = options?.length ? options : LOOKBACK_OPTIONS;
+function ObservationSeriesFocus({ lines, focusKey, onFocus }) {
+  if (!lines?.length || lines.length < 2) return null;
   return (
-    <div
-      className="row"
-      role="group"
-      aria-label="Окно графика"
-      style={{ gap: 4, flexWrap: 'wrap', alignItems: 'center' }}
-    >
-      {!compact && (
-        <span style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-muted)', marginRight: 2 }}>
-          Окно
-        </span>
-      )}
-      {list.map((v) => {
-        const active = v === value;
+    <div className="obs-tile__legend" role="group" aria-label="Серии графика">
+      <button
+        type="button"
+        className={`obs-tile__chip${focusKey == null ? ' is-active' : ''}`}
+        onClick={() => onFocus(null)}
+      >
+        Все
+      </button>
+      {lines.map((ln) => {
+        const solo = focusKey === ln.key;
+        const dim = focusKey != null && !solo;
         return (
           <button
-            key={v}
+            key={ln.key}
             type="button"
-            className="btn"
-            onClick={() => onChange(v)}
-            style={{
-              padding: compact ? '2px 8px' : '4px 10px',
-              font: 'var(--pv-text-body-3)',
-              background: active ? 'var(--surf-3, var(--surf-2))' : 'transparent',
-              borderColor: active ? 'var(--bd-strong, var(--bd-soft))' : 'var(--bd-soft)',
-              fontWeight: active ? 600 : 400,
-            }}
+            className={`obs-tile__chip${solo ? ' is-solo' : ''}${dim ? ' is-off' : ''}`}
+            title={solo ? 'Показать все серии' : `Только ${ln.label || ln.key}`}
+            onClick={() => onFocus(solo ? null : ln.key)}
           >
-            {v}
+            <span className="obs-tile__chip-swatch" style={{ background: ln.color || 'var(--fg-muted)' }} />
+            <span className="obs-tile__chip-label">{ln.label || ln.key}</span>
           </button>
         );
       })}
@@ -524,9 +494,27 @@ function LookbackPicker({ value, options, onChange, compact = false }) {
   );
 }
 
+function LookbackPicker({ value, options, onChange }) {
+  const list = options?.length ? options : LOOKBACK_OPTIONS;
+  return (
+    <div className="seg obs-tile__lookback" role="group" aria-label="Период графика">
+      {list.map((v) => (
+        <button
+          key={v}
+          type="button"
+          className={v === value ? 'is-active' : ''}
+          title={LOOKBACK_LABELS[v] || v}
+          onClick={() => onChange(v)}
+        >
+          {LOOKBACK_SHORT[v] || v}
+        </button>
+      ))}
+    </div>
+  );
+}
+
 function ObservationLiveTile({
   item,
-  filterFields,
   groupOptions,
   lookbackOptions,
   expanded,
@@ -543,12 +531,13 @@ function ObservationLiveTile({
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [updatedAt, setUpdatedAt] = useState(null);
-  const [lookback, setLookback] = useState(item.lookback || '1h');
+  const [lookback, setLookback] = useState(normalizeObservationLookback(item.lookback));
   const [customRange, setCustomRange] = useState(null);
   const [zoomStack, setZoomStack] = useState([]);
   const [runs, setRuns] = useState([]);
   const [runsError, setRunsError] = useState('');
   const [expandedTab, setExpandedTab] = useState('top'); // top | reports
+  const [focusKey, setFocusKey] = useState(null);
   const customRangeRef = useRef(null);
   const displayTimezone = typeof getDisplayTimezone === 'function' ? getDisplayTimezone() : undefined;
 
@@ -557,9 +546,10 @@ function ObservationLiveTile({
   }, [customRange]);
 
   useEffect(() => {
-    setLookback(item.lookback || '1h');
+    setLookback(normalizeObservationLookback(item.lookback));
     setCustomRange(null);
     setZoomStack([]);
+    setFocusKey(null);
   }, [item.id, item.lookback]);
 
   const previewPayload = useMemo(() => (
@@ -580,31 +570,41 @@ function ObservationLiveTile({
 
   useEffect(() => {
     let cancelled = false;
+    let timer = null;
+    // У фиксированного диапазона данные не меняются — подстраиваться под бакеты незачем.
+    const isLive = !(previewPayload.from && previewPayload.to);
     setLoading(true);
-    const tick = (opts = { initial: true }) => {
+    function scheduleNext(windowTo) {
+      if (cancelled) return;
+      const delay = isLive ? nextTileDelayMs(windowTo) : tileRefreshSec() * 1000;
+      timer = setTimeout(() => tick({ initial: false }), delay);
+    }
+    function tick(opts = { initial: true }) {
       if (opts.initial) setLoading(true);
       else setRefreshing(true);
       ApiClient.previewObservation(item.id, previewPayload)
         .then((body) => {
           if (cancelled) return;
-          setPreview(body.data || body);
+          const data = body.data || body;
+          setPreview(data);
           setLoading(false);
           setRefreshing(false);
           setError('');
           setUpdatedAt(new Date());
+          scheduleNext(data?.window?.to);
         })
         .catch((e) => {
           if (cancelled) return;
           setError(e.message);
           setLoading(false);
           setRefreshing(false);
+          scheduleNext(null);
         });
-    };
+    }
     tick({ initial: true });
-    const timer = setInterval(() => tick({ initial: false }), tileRefreshSec() * 1000);
     return () => {
       cancelled = true;
-      clearInterval(timer);
+      if (timer) clearTimeout(timer);
     };
   }, [item.id, previewPayload]);
 
@@ -630,38 +630,6 @@ function ObservationLiveTile({
     setZoomStack([]);
     setLookback(next);
     if (typeof onLookbackChange === 'function') onLookbackChange(item.id, next);
-  };
-
-  const exportCsv = () => {
-    const chartW = (preview?.widgets || []).find((w) => w.type === 'timeseries_bps');
-    const topW = (preview?.widgets || []).find((w) => w.type === 'top_table');
-    const pts = chartW?.points || chartW?.series || [];
-    const linesLocal = chartW?.lines || [];
-    const mode = chartW?.mode === 'grouped' ? 'grouped' : 'total';
-    const grouped = mode === 'grouped' && linesLocal.length > 0;
-    const headers = grouped ? ['t', 'series', 'bps'] : ['t', 'bps'];
-    const rows = [];
-    for (const p of pts) {
-      if (!grouped) {
-        rows.push([p.t, p.bps].map(csvEscapeCell).join(','));
-        continue;
-      }
-      for (const ln of linesLocal) {
-        if (p[ln.key] == null) continue;
-        rows.push([p.t, ln.label || ln.key, p[ln.key]].map(csvEscapeCell).join(','));
-      }
-    }
-    let text = `${headers.join(',')}\n${rows.join('\n')}\n`;
-    if (Array.isArray(topW?.rows) && topW.rows.length) {
-      text += '\n# top\n';
-      const gh = [...(topW.groupBy || []), 'metric', 'pct'];
-      text += `${gh.join(',')}\n`;
-      for (const r of topW.rows) {
-        text += [...(r.values || []), r.metric, r.pct].map(csvEscapeCell).join(',');
-        text += '\n';
-      }
-    }
-    downloadTextFile(`${item.name || item.id}.csv`, text);
   };
 
   const handleChartRangeSelect = (range) => {
@@ -693,73 +661,76 @@ function ObservationLiveTile({
   const chartMode = chartWidget?.mode === 'grouped' ? 'grouped' : 'total';
   const points = chartWidget?.points || chartWidget?.series || [];
   const lines = chartWidget?.lines || [];
-  const lastBps = (() => {
-    if (!points.length) return null;
-    const last = points[points.length - 1];
-    if (chartMode === 'grouped' && lines.length) {
-      return lines.reduce((sum, ln) => sum + (Number(last[ln.key]) || 0), 0);
-    }
-    return Number(last.bps) || 0;
-  })();
+  const lineKeys = lines.map((ln) => ln.key).join('\0');
+  useEffect(() => {
+    if (focusKey && !lines.some((ln) => ln.key === focusKey)) setFocusKey(null);
+  }, [focusKey, lineKeys]);
+  const visibleLines = focusKey ? lines.filter((ln) => ln.key === focusKey) : lines;
+  const focusLabel = focusKey
+    ? (lines.find((ln) => ln.key === focusKey)?.label || focusKey)
+    : null;
   const topGroupBy = groupByFromWidgets(item.widgets);
   const topLabel = topGroupBy.map((g) => groupLabel(g, groupOptions)).join(' × ');
-  const rollup = rollupStatusLabel(item);
   const chartH = expanded ? 320 : 200;
   const periodLabel = observationPeriodLabel(lookback, customRange);
   const canResetZoom = Boolean(customRange || zoomStack.length);
 
   return (
-    <Card
-      pad="sm"
-      style={{
-        gridColumn: expanded ? '1 / -1' : 'auto',
-        display: 'flex',
-        flexDirection: 'column',
-        gap: 10,
-        minWidth: 0,
-      }}
-    >
-      <div className="row" style={{ justifyContent: 'space-between', gap: 8, alignItems: 'flex-start', flexWrap: 'wrap' }}>
+    <Card pad="sm" className={`obs-tile${expanded ? ' obs-tile--expanded' : ''}`}>
+      <div className="obs-tile__head">
         <div style={{ flex: 1, minWidth: 160 }}>
-          <div style={{ font: 'var(--pv-text-body-2-bold)' }}>{item.name}</div>
-          {item.description ? (
-            <div style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-secondary)', marginTop: 2 }}>
-              {item.description}
+          <div className="obs-tile__title">{item.name}</div>
+          {item.description ? <div className="obs-tile__desc">{item.description}</div> : null}
+          {topLabel ? (
+            <div className="obs-tile__sub">
+              Топ по {topLabel}
+              {focusLabel ? ` · фокус: ${focusLabel}` : ''}
             </div>
           ) : null}
-          <div style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-secondary)', marginTop: 2 }}>
-            {formatObservationScopeSummary(item, filterFields)}
-          </div>
-          <div
-            style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-muted)', marginTop: 2 }}
-            title="Нормальная задержка ~10 минут: бакет 5 минут + запас на late flows"
-          >
-            график: топ по {topLabel}
-            {' · '}
-            таблица: топ {topLabel}
-            {` · обновл. ${REFRESH_LABELS[MIN_REFRESH_SEC]}`}
-            {rollup ? ` · ${rollup}` : ''}
-          </div>
         </div>
-        <div className="row" style={{ gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
-          {lastBps != null && (
-            <span
-              className="mono"
-              title={chartMode === 'grouped' ? `Сумма топ-серий по ${topLabel}` : 'Суммарный трафик по фильтру'}
-              style={{ font: 'var(--pv-text-body-2-bold)', marginRight: 4 }}
-            >
-              {formatBps(lastBps)}
-            </span>
-          )}
-          <button type="button" className="btn" onClick={onToggleExpand}>
-            {expanded ? 'Свернуть' : `Топ · ${topLabel}`}
+        <div className="obs-tile__tools">
+          <button
+            type="button"
+            className="obs-tile__expand"
+            onClick={onToggleExpand}
+            aria-expanded={expanded}
+            title={expanded ? 'Свернуть график и таблицу' : 'Развернуть график и таблицу'}
+          >
+            <Icon name={expanded ? 'collapse' : 'expand'} size={14} />
+            <span>{expanded ? 'Свернуть' : 'Развернуть'}</span>
           </button>
-          {canWrite && <button type="button" className="btn" onClick={onSettings}>Настройки</button>}
+          {canWrite && (
+            <button
+              type="button"
+              className="obs-tile__icon tt"
+              data-tt="Настройки"
+              aria-label="Настройки"
+              onClick={onSettings}
+            >
+              <Icon name="sliders" size={15} />
+            </button>
+          )}
           {canWrite && item.materialize?.status === 'running' && onCancel && (
-            <button type="button" className="btn" onClick={onCancel}>Отменить</button>
+            <button
+              type="button"
+              className="obs-tile__icon tt"
+              data-tt="Отменить подготовку"
+              aria-label="Отменить подготовку"
+              onClick={onCancel}
+            >
+              <Icon name="x" size={15} />
+            </button>
           )}
           {canWrite && (
-            <button type="button" className="btn" onClick={onDelete}>Удалить</button>
+            <button
+              type="button"
+              className="obs-tile__icon obs-tile__icon--danger tt"
+              data-tt="Удалить"
+              aria-label="Удалить"
+              onClick={onDelete}
+            >
+              <Icon name="trash" size={15} />
+            </button>
           )}
         </div>
       </div>
@@ -776,42 +747,10 @@ function ObservationLiveTile({
         </div>
       )}
 
-      <div className="row" style={{ justifyContent: 'space-between', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
-        <div style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-secondary)' }}>
-          {chartMode === 'grouped'
-            ? `Динамика топ-${lines.length || 8} по ${topLabel} (из rollup)`
-            : 'Суммарный трафик по фильтру (из rollup)'}
-          {points.length > 1 && (
-            <span style={{ color: 'var(--fg-muted)', marginLeft: 8 }}>
-              · выделите диапазон на графике
-            </span>
-          )}
-        </div>
-        <div className="row" style={{ gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
-          {canResetZoom && (
-            <button
-              type="button"
-              className="time-pill time-pill--reset"
-              title="Вернуть предыдущий период"
-              onClick={resetTileZoom}
-            >
-              <Icon name="zoom" size={14} />
-              <span>Сброс zoom</span>
-            </button>
-          )}
-          <button type="button" className="btn" onClick={exportCsv} disabled={!points.length}>CSV</button>
-          <LookbackPicker
-            value={lookback}
-            options={lookbackOptions}
-            onChange={changeLookback}
-            compact={!expanded}
-          />
-        </div>
-      </div>
       <div style={{ minHeight: chartH, opacity: loading && !points.length ? 0.55 : 1, transition: 'opacity .15s', overflow: 'visible' }}>
         <ObservationChart
           points={points}
-          lines={lines}
+          lines={visibleLines}
           mode={chartMode}
           height={chartH}
           onRangeSelect={points.length > 1 ? handleChartRangeSelect : undefined}
@@ -820,24 +759,49 @@ function ObservationLiveTile({
           periodStartMs={chartPeriodBounds.periodStartMs}
           periodEndMs={chartPeriodBounds.periodEndMs}
           skipLeadingGaps
+          skipTrailingGaps
         />
       </div>
+      {chartMode === 'grouped' && (
+        <ObservationSeriesFocus
+          lines={lines}
+          focusKey={focusKey}
+          onFocus={setFocusKey}
+        />
+      )}
       {!!points.length && (
-        <ObservationChartStats points={points} lines={lines} mode={chartMode} />
+        <ObservationChartStats points={points} lines={visibleLines} mode={chartMode} />
       )}
 
-      <div className="row" style={{ justifyContent: 'space-between', color: 'var(--fg-muted)', font: 'var(--pv-text-body-3)' }}>
-        <span>
+      <div className="obs-tile__footer">
+        <span className="obs-tile__meta">
           {loading && !points.length
             ? 'загрузка…'
             : refreshing
               ? 'обновление…'
               : chartMode === 'grouped'
-              ? `${lines.length} серий · ${points.length} точек · ${periodLabel}${customRange ? ' · zoom' : ''}`
+              ? `${focusLabel ? `1 серия · ${focusLabel}` : `${lines.length} серий`} · ${points.length} точек · ${periodLabel}${customRange ? ' · zoom' : ''}`
               : `${points.length} точек · ${periodLabel}${customRange ? ' · zoom' : ''}`}
           {updatedAt ? ` · ${updatedAt.toLocaleTimeString('ru-RU')}` : ''}
         </span>
-        <span>бит/с</span>
+        <div className="obs-tile__footer-tools">
+          {canResetZoom && (
+            <button
+              type="button"
+              className="time-pill time-pill--reset"
+              title="Вернуть предыдущий период"
+              onClick={resetTileZoom}
+            >
+              <Icon name="zoom" size={14} />
+              <span>Сброс</span>
+            </button>
+          )}
+          <LookbackPicker
+            value={lookback}
+            options={lookbackOptions}
+            onChange={changeLookback}
+          />
+        </div>
       </div>
 
       {expanded && (
@@ -870,19 +834,33 @@ function ObservationLiveTile({
                     </tr>
                   </thead>
                   <tbody>
-                    {topRowsWithOther.map((r) => (
-                      <tr key={r.id || r.key} style={r.isOther ? { color: 'var(--fg-secondary)' } : undefined}>
-                        {(r.values || []).map((v, i) => (
-                          <td key={i} style={{ padding: 4 }} className="mono">{v}</td>
-                        ))}
-                        <td style={{ padding: 4, textAlign: 'right' }} className="mono">{formatBps(r.metric)}</td>
-                        <td style={{ padding: 4, textAlign: 'right' }} className="mono">
-                          {r.pct != null && Number.isFinite(Number(r.pct))
-                            ? `${Number(r.pct).toFixed(1)}%`
-                            : '—'}
-                        </td>
-                      </tr>
-                    ))}
+                    {topRowsWithOther.map((r) => {
+                      const rowKey = r.key || r.id;
+                      const onChart = lines.some((ln) => ln.key === rowKey);
+                      const isFocus = focusKey != null && rowKey === focusKey;
+                      return (
+                        <tr
+                          key={rowKey}
+                          className={[
+                            r.isOther ? 'obs-tile__row--other' : '',
+                            onChart ? 'obs-tile__row--pick' : '',
+                            isFocus ? 'obs-tile__row--focus' : '',
+                          ].filter(Boolean).join(' ') || undefined}
+                          title={onChart ? (isFocus ? 'Показать все серии' : 'Показать только эту серию') : undefined}
+                          onClick={onChart ? () => setFocusKey(isFocus ? null : rowKey) : undefined}
+                        >
+                          {(r.values || []).map((v, i) => (
+                            <td key={i} style={{ padding: 4 }} className="mono">{v}</td>
+                          ))}
+                          <td style={{ padding: 4, textAlign: 'right' }} className="mono">{formatBps(r.metric)}</td>
+                          <td style={{ padding: 4, textAlign: 'right' }} className="mono">
+                            {r.pct != null && Number.isFinite(Number(r.pct))
+                              ? `${Number(r.pct).toFixed(1)}%`
+                              : '—'}
+                          </td>
+                        </tr>
+                      );
+                    })}
                   </tbody>
                 </table>
               ) : (
@@ -1379,7 +1357,6 @@ function PageObservations({ onNavigate }) {
               <ObservationLiveTile
                 key={item.id}
                 item={item}
-                filterFields={filterFields}
                 groupOptions={groupOptions}
                 lookbackOptions={config?.lookbacks || LOOKBACK_OPTIONS}
                 expanded={expandedId === item.id}

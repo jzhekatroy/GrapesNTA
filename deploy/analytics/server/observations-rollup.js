@@ -59,6 +59,26 @@ const REWIND_EVERY_MS = Math.max(
   60_000,
   Number(process.env.OBSERVATION_ROLLUP_REWIND_SEC) || 600,
 ) * 1000;
+/**
+ * Запас «на опоздавшие флоу» в бакетах перед закрытым бакетом. Коллектор пишет
+ * в ClickHouse сразу (time_inserted_ns == time_received_ns), и закрытый бакет
+ * больше не меняется, поэтому по умолчанию запаса нет: каждый лишний бакет —
+ * это ровно +5 минут отставания графика от реального времени.
+ */
+const SAFETY_BUCKETS = readBucketCount(process.env.OBSERVATION_ROLLUP_SAFETY_BUCKETS, 0);
+/**
+ * Сколько уже записанных бакетов пересчитывать вместе с новым окном. Это замена
+ * SAFETY_BUCKETS: опоздавшие флоу попадают в rollup при следующем шоте, а не за
+ * счёт постоянного отставания. Пересчёт безопасен — окно удаляется перед вставкой.
+ */
+const RECHECK_BUCKETS = readBucketCount(process.env.OBSERVATION_ROLLUP_RECHECK_BUCKETS, 1);
+
+function readBucketCount(raw, fallback) {
+  if (raw == null || raw === '') return fallback;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n < 0) return fallback;
+  return Math.floor(n);
+}
 
 function backoffMinutes(failCount) {
   const steps = [1, 5, 15, 60];
@@ -195,6 +215,17 @@ function floorToBucket(d) {
   return new Date(Math.floor(ms / BUCKET_MS) * BUCKET_MS);
 }
 
+/**
+ * Exclusive end of the newest window we may materialize: the bucket that just
+ * closed, minus SAFETY_BUCKETS (0 by default).
+ * e.g. now 12:07 → 12:05 → materialize through […, 12:05).
+ */
+function computeSafeTo(now = new Date()) {
+  const closed = floorToBucket(now);
+  if (!SAFETY_BUCKETS) return closed;
+  return new Date(closed.getTime() - SAFETY_BUCKETS * BUCKET_MS);
+}
+
 function toChUtc(d) {
   return (d instanceof Date ? d : new Date(d)).toISOString();
 }
@@ -253,6 +284,19 @@ function resolveCatchupFrom(job, safeTo) {
   // Hard cap for very old observations (charts only need recent lookbacks).
   if (from < earliest) from = earliest;
   return from;
+}
+
+/**
+ * Расширяет окно назад на RECHECK_BUCKETS уже записанных бакетов. Вызывается
+ * только когда есть новый бакет, поэтому частота шотов не растёт — растёт лишь
+ * ширина окна, а последний бакет перезаписывается с учётом опоздавших флоу.
+ */
+function widenForRecheck(job, from) {
+  if (!RECHECK_BUCKETS || !job.cursorMinute) return from;
+  const started = jobStartedBucket(job);
+  let widened = new Date(from.getTime() - RECHECK_BUCKETS * BUCKET_MS);
+  if (started && widened < started) widened = started;
+  return widened < from ? widened : from;
 }
 
 /**
@@ -343,7 +387,6 @@ async function applyFail(job, message) {
         failCount,
         nextAttemptAt: null,
         runningStartedAt: null,
-        shotToken: null,
         lastError: `остановлено после ${MAX_FAIL_COUNT} ошибок: ${message}`,
         cancelRequested: false,
       };
@@ -359,7 +402,6 @@ async function applyFail(job, message) {
     failCount,
     nextAttemptAt,
     runningStartedAt: null,
-    shotToken: null,
     lastCatchupAt: new Date().toISOString(),
   });
   return { id: job.id, error: message, failCount, nextAttemptAt };
@@ -367,48 +409,6 @@ async function applyFail(job, message) {
 
 function isTotalRollupRow(row) {
   return ROLLUP_DIM_COLUMNS.every((c) => !row[c]);
-}
-
-function newShotToken() {
-  return `${process.pid}:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`;
-}
-
-/**
- * Two workers (analytics.js + observations-rollup.js loop) can both read
- * status=ok and INSERT the same window into SummingMergeTree. The second
- * write doubles the chart. Claim with a unique token after writing
- * `running`; only the last writer proceeds.
- */
-async function claimShot(job) {
-  const shotToken = newShotToken();
-  await patchMaterializeStatus(job.id, {
-    status: 'running',
-    runningStartedAt: new Date().toISOString(),
-    shotToken,
-  });
-  const latest = (await listMaterializeJobs()).find((j) => j.id === job.id);
-  if (!latest || latest.shotToken !== shotToken) {
-    return { claimed: false, shotToken };
-  }
-  return { claimed: true, shotToken, job: { ...job, ...latest, shotToken } };
-}
-
-async function verifyStoredTotal(job, from, to, insertedTotalBytes) {
-  const { rows } = await query(`
-    SELECT sum(bytes) AS bytes
-    FROM default.${ROLLUP_TABLE}
-    WHERE observation_id = {id:String}
-      AND minute >= parseDateTimeBestEffort({from:String}, 'UTC')
-      AND minute < parseDateTimeBestEffort({to:String}, 'UTC')
-      AND dim0 = '' AND dim1 = '' AND dim2 = '' AND dim3 = ''
-  `, {
-    id: job.id,
-    from: toChUtc(from),
-    to: toChUtc(to),
-  }, { name: `observations/rollup-verify-${job.id}` });
-  const storedTotalBytes = Number(rows[0]?.bytes) || 0;
-  const storedRatio = insertedTotalBytes > 0 ? storedTotalBytes / insertedTotalBytes : null;
-  return { storedTotalBytes, storedRatio };
 }
 
 async function materializeWindow(job, from, to) {
@@ -454,20 +454,20 @@ async function materializeWindow(job, from, to) {
   let storedTotalBytes = null;
   let storedRatio = null;
   try {
-    ({ storedTotalBytes, storedRatio } = await verifyStoredTotal(job, from, to, insertedTotalBytes));
-    if (storedRatio != null && storedRatio > 1.05 && values.length) {
-      console.error(new Date().toISOString(), 'observation rollup DOUBLE, healing', JSON.stringify({
-        id: job.id,
-        from: from.toISOString(),
-        to: to.toISOString(),
-        insertedTotalBytes,
-        storedTotalBytes,
-        storedRatio,
-      }));
-      await deleteRollupWindow(job.id, from, to);
-      await insertRows(ROLLUP_TABLE, values, { name: `observations/rollup-heal-${job.id}` });
-      ({ storedTotalBytes, storedRatio } = await verifyStoredTotal(job, from, to, insertedTotalBytes));
-    }
+    const { rows } = await query(`
+      SELECT sum(bytes) AS bytes
+      FROM default.${ROLLUP_TABLE}
+      WHERE observation_id = {id:String}
+        AND minute >= parseDateTimeBestEffort({from:String}, 'UTC')
+        AND minute < parseDateTimeBestEffort({to:String}, 'UTC')
+        AND dim0 = '' AND dim1 = '' AND dim2 = '' AND dim3 = ''
+    `, {
+      id: job.id,
+      from: toChUtc(from),
+      to: toChUtc(to),
+    }, { name: `observations/rollup-verify-${job.id}` });
+    storedTotalBytes = Number(rows[0]?.bytes) || 0;
+    storedRatio = insertedTotalBytes > 0 ? storedTotalBytes / insertedTotalBytes : null;
   } catch (err) {
     console.warn(new Date().toISOString(), 'observation rollup verify failed', job.id, err.message);
   }
@@ -513,11 +513,10 @@ async function catchupBackfill(job, liveStart) {
   if (to <= from) to = new Date(from.getTime() + BUCKET_MS);
   if (to > end) to = end;
 
-  const claim = await claimShot(job);
-  if (!claim.claimed) {
-    return { id: job.id, skipped: true, reason: 'lost_claim', pid: process.pid };
-  }
-  job = claim.job;
+  await patchMaterializeStatus(job.id, {
+    status: 'running',
+    runningStartedAt: new Date().toISOString(),
+  });
   if (await honorCancel(job)) return { id: job.id, cancelled: true };
 
   try {
@@ -529,7 +528,6 @@ async function catchupBackfill(job, liveStart) {
       backfillCursor: to.toISOString(),
       backfillDone: done,
       runningStartedAt: null,
-      shotToken: null,
       failCount: 0,
       nextAttemptAt: null,
       lastError: null,
@@ -573,10 +571,7 @@ async function catchupOne(job) {
     }
   }
 
-  // Exclusive end of latest closed 5m bucket, minus one more bucket for late flows.
-  // e.g. now 12:07 → floor 12:05 → safeTo 12:00 (materialize through […, 12:00)).
-  let safeTo = floorToBucket(new Date());
-  safeTo = new Date(safeTo.getTime() - BUCKET_MS);
+  const safeTo = computeSafeTo();
 
   let from = resolveCatchupFrom(job, safeTo);
   if (from >= safeTo) {
@@ -602,6 +597,8 @@ async function catchupOne(job) {
     return { id: job.id, skipped: true };
   }
 
+  from = widenForRecheck(job, from);
+
   let to = safeTo;
   const maxSpanMs = MAX_SHOT_MINUTES * 60 * 1000;
   if (to - from > maxSpanMs) {
@@ -610,11 +607,10 @@ async function catchupOne(job) {
     if (to > safeTo) to = safeTo;
   }
 
-  const claim = await claimShot(job);
-  if (!claim.claimed) {
-    return { id: job.id, skipped: true, reason: 'lost_claim', pid: process.pid };
-  }
-  job = claim.job;
+  await patchMaterializeStatus(job.id, {
+    status: 'running',
+    runningStartedAt: new Date().toISOString(),
+  });
   if (await honorCancel(job)) return { id: job.id, cancelled: true };
 
   try {
@@ -630,7 +626,6 @@ async function catchupOne(job) {
       failCount: 0,
       nextAttemptAt: null,
       runningStartedAt: null,
-      shotToken: null,
     });
     return {
       id: job.id,
@@ -664,7 +659,6 @@ async function recoverStuckRunning({ onStart = false } = {}) {
         ? `превышено время выполнения (${STUCK_SEC}с)`
         : 'воркер перезапущен — продолжаем с cursor/start',
       runningStartedAt: null,
-      shotToken: null,
     });
     recovered += 1;
   }
@@ -723,8 +717,7 @@ async function runOnce() {
   // Force rewind on cold start; later ticks throttle to REWIND_EVERY_MS.
   await rewindCursorsIfAhead({ force: !lastRewindAtMs });
 
-  let safeTo = floorToBucket(new Date());
-  safeTo = new Date(safeTo.getTime() - BUCKET_MS);
+  const safeTo = computeSafeTo();
 
   const jobs = (await listMaterializeJobs())
     .filter((j) => (
@@ -769,8 +762,7 @@ async function rebuildObservation(observationId, fromIso) {
     throw new Error(`Нет live-материализации для ${observationId}`);
   }
 
-  let safeTo = floorToBucket(new Date());
-  safeTo = new Date(safeTo.getTime() - BUCKET_MS);
+  const safeTo = computeSafeTo();
 
   const started = jobStartedBucket(job) || earliestLiveFrom(safeTo);
   let from = fromIso
@@ -844,6 +836,10 @@ module.exports = {
   rebuildObservation,
   rematerializeRange,
   floorToBucket,
+  computeSafeTo,
+  widenForRecheck,
+  SAFETY_BUCKETS,
+  RECHECK_BUCKETS,
 };
 
 async function main() {

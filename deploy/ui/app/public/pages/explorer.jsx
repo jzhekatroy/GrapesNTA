@@ -5332,7 +5332,9 @@ function SaveObservationModal({
   initialName,
   onSave,
 }) {
-  const defaultLookback = ['15m', '1h', '6h', '24h', '7d'].includes(timeRange) ? timeRange : '1h';
+  const defaultLookback = timeRange === '15m'
+    ? '30m'
+    : (['30m', '1h', '6h', '24h', '7d'].includes(timeRange) ? timeRange : '1h');
   const defaultTop = (groupBy || []).find((g) => ['src_asn', 'dst_asn', 'src_ip', 'dst_ip', 'vlan', 'proto'].includes(g))
     || groupBy?.[0]
     || 'src_asn';
@@ -5406,7 +5408,7 @@ function SaveObservationModal({
           <div className="field" style={{ flex: 1, minWidth: 140 }}>
             <label>Окно графика</label>
             <select className="input" value={lookback} onChange={(e) => setLookback(e.target.value)}>
-              <option value="15m">15 минут</option>
+              <option value="30m">30 минут</option>
               <option value="1h">1 час</option>
               <option value="6h">6 часов</option>
               <option value="24h">24 часа</option>

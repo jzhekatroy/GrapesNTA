@@ -64,7 +64,7 @@ const MAX_MATERIALIZE = (() => {
 const MATERIALIZE_LIMIT_ENABLED = MAX_MATERIALIZE > 0;
 /** Worker loop tick (catch-up when lagging). Per-observation cadence is ≥ MIN_REFRESH_SEC. */
 const MIN_INTERVAL_SEC = 60;
-/** Min live refresh / materialize cadence — wait for late flows. */
+/** Min live refresh / materialize cadence — один шаг rollup-бакета. */
 const MIN_REFRESH_SEC = 300;
 /** Observation rollup bucket (aligned with dashboard 5m charts). */
 const ROLLUP_TABLE = 'observation_rollups_5m';
@@ -89,7 +89,7 @@ const NATIVE_FILTER_FIELDS = new Set([
   'src_asn', 'dst_asn', 'proto', 'src_country', 'dst_country',
 ]);
 
-const LOOKBACKS = new Set(['15m', '1h', '6h', '24h', '7d']);
+const LOOKBACKS = new Set(['15m', '30m', '1h', '6h', '24h', '7d']);
 const REFRESH_SECS = new Set([300, 900]);
 const WIDGET_TYPES = new Set(['timeseries_bps', 'top_table']);
 
@@ -579,21 +579,45 @@ async function queueMaterialize(id, userId) {
   return withMeta(next, items.map((row) => (row.id === id ? next : row)));
 }
 
-function lookbackWindow(lookback) {
+const ROLLUP_BUCKET_MS = ROLLUP_BUCKET_SEC * 1000;
+
+function floorToRollupBucket(ms) {
+  return Math.floor(Number(ms) / ROLLUP_BUCKET_MS) * ROLLUP_BUCKET_MS;
+}
+
+/**
+ * Правый край готовых данных rollup: dataThrough — метка последнего записанного
+ * бакета, поэтому окно заканчивается на бакет позже. Опираться на wall clock
+ * нельзя — последний бакет ещё не закрыт, и график упирался бы в пустоту.
+ */
+function previewWindowEndMs(obs) {
+  const through = Date.parse(obs?.materialize?.dataThrough || '');
+  if (Number.isFinite(through)) {
+    return Math.min(through + ROLLUP_BUCKET_MS, Date.now());
+  }
+  const cursor = Date.parse(obs?.materialize?.cursorMinute || '');
+  if (Number.isFinite(cursor)) {
+    return Math.min(cursor, Date.now());
+  }
+  return Date.now();
+}
+
+function lookbackWindow(lookback, endMs = Date.now()) {
   const map = {
     '15m': 15 * 60 * 1000,
+    '30m': 30 * 60 * 1000,
     '1h': 3600 * 1000,
     '6h': 6 * 3600 * 1000,
     '24h': 86400 * 1000,
     '7d': 7 * 86400 * 1000,
   };
   const ms = map[lookback] || 3600 * 1000;
-  const to = new Date();
-  const from = new Date(to.getTime() - ms);
+  const toMs = Number(endMs) || Date.now();
+  const fromMs = floorToRollupBucket(toMs - ms);
   return {
     range: 'custom',
-    from: from.toISOString(),
-    to: to.toISOString(),
+    from: new Date(fromMs).toISOString(),
+    to: new Date(toMs).toISOString(),
   };
 }
 
@@ -601,7 +625,7 @@ function resolvePreviewWindow(obs, body = {}) {
   if (body.from && body.to) {
     return { range: 'custom', from: String(body.from), to: String(body.to) };
   }
-  return lookbackWindow(body.lookback || obs.lookback);
+  return lookbackWindow(body.lookback || obs.lookback, previewWindowEndMs(obs));
 }
 
 function reportWindow(obs, now = new Date()) {
@@ -706,7 +730,7 @@ function entityGroupIndexes(groupBy = []) {
     .filter((i) => i >= 0);
 }
 
-/** Rollup хранит entity_id вида isp:arbital; в UI показываем «Арбиталь (isp:arbital)». */
+/** Rollup хранит entity_id; в UI показываем display_name из справочника. */
 async function enrichEntityLabelsInRows(rows, groupBy = []) {
   const indexes = entityGroupIndexes(groupBy);
   if (!indexes.length || !rows?.length) return rows || [];
@@ -2353,7 +2377,7 @@ function observationsConfig() {
     minIntervalSec: MIN_INTERVAL_SEC,
     backfillHours: BACKFILL_HOURS,
     stuckSec: STUCK_SEC,
-    lookbacks: [...LOOKBACKS],
+    lookbacks: ['30m', '1h', '6h', '24h', '7d'],
     refreshSecs: [...REFRESH_SECS],
     widgetTypes: [...WIDGET_TYPES],
     nativeFilterFields: [...NATIVE_FILTER_FIELDS],

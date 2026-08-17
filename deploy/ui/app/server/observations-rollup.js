@@ -59,6 +59,26 @@ const REWIND_EVERY_MS = Math.max(
   60_000,
   Number(process.env.OBSERVATION_ROLLUP_REWIND_SEC) || 600,
 ) * 1000;
+/**
+ * Запас «на опоздавшие флоу» в бакетах перед закрытым бакетом. Коллектор пишет
+ * в ClickHouse сразу (time_inserted_ns == time_received_ns), и закрытый бакет
+ * больше не меняется, поэтому по умолчанию запаса нет: каждый лишний бакет —
+ * это ровно +5 минут отставания графика от реального времени.
+ */
+const SAFETY_BUCKETS = readBucketCount(process.env.OBSERVATION_ROLLUP_SAFETY_BUCKETS, 0);
+/**
+ * Сколько уже записанных бакетов пересчитывать вместе с новым окном. Это замена
+ * SAFETY_BUCKETS: опоздавшие флоу попадают в rollup при следующем шоте, а не за
+ * счёт постоянного отставания. Пересчёт безопасен — окно удаляется перед вставкой.
+ */
+const RECHECK_BUCKETS = readBucketCount(process.env.OBSERVATION_ROLLUP_RECHECK_BUCKETS, 1);
+
+function readBucketCount(raw, fallback) {
+  if (raw == null || raw === '') return fallback;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n < 0) return fallback;
+  return Math.floor(n);
+}
 
 function backoffMinutes(failCount) {
   const steps = [1, 5, 15, 60];
@@ -195,6 +215,17 @@ function floorToBucket(d) {
   return new Date(Math.floor(ms / BUCKET_MS) * BUCKET_MS);
 }
 
+/**
+ * Exclusive end of the newest window we may materialize: the bucket that just
+ * closed, minus SAFETY_BUCKETS (0 by default).
+ * e.g. now 12:07 → 12:05 → materialize through […, 12:05).
+ */
+function computeSafeTo(now = new Date()) {
+  const closed = floorToBucket(now);
+  if (!SAFETY_BUCKETS) return closed;
+  return new Date(closed.getTime() - SAFETY_BUCKETS * BUCKET_MS);
+}
+
 function toChUtc(d) {
   return (d instanceof Date ? d : new Date(d)).toISOString();
 }
@@ -253,6 +284,19 @@ function resolveCatchupFrom(job, safeTo) {
   // Hard cap for very old observations (charts only need recent lookbacks).
   if (from < earliest) from = earliest;
   return from;
+}
+
+/**
+ * Расширяет окно назад на RECHECK_BUCKETS уже записанных бакетов. Вызывается
+ * только когда есть новый бакет, поэтому частота шотов не растёт — растёт лишь
+ * ширина окна, а последний бакет перезаписывается с учётом опоздавших флоу.
+ */
+function widenForRecheck(job, from) {
+  if (!RECHECK_BUCKETS || !job.cursorMinute) return from;
+  const started = jobStartedBucket(job);
+  let widened = new Date(from.getTime() - RECHECK_BUCKETS * BUCKET_MS);
+  if (started && widened < started) widened = started;
+  return widened < from ? widened : from;
 }
 
 /**
@@ -527,10 +571,7 @@ async function catchupOne(job) {
     }
   }
 
-  // Exclusive end of latest closed 5m bucket, minus one more bucket for late flows.
-  // e.g. now 12:07 → floor 12:05 → safeTo 12:00 (materialize through […, 12:00)).
-  let safeTo = floorToBucket(new Date());
-  safeTo = new Date(safeTo.getTime() - BUCKET_MS);
+  const safeTo = computeSafeTo();
 
   let from = resolveCatchupFrom(job, safeTo);
   if (from >= safeTo) {
@@ -555,6 +596,8 @@ async function catchupOne(job) {
     });
     return { id: job.id, skipped: true };
   }
+
+  from = widenForRecheck(job, from);
 
   let to = safeTo;
   const maxSpanMs = MAX_SHOT_MINUTES * 60 * 1000;
@@ -674,8 +717,7 @@ async function runOnce() {
   // Force rewind on cold start; later ticks throttle to REWIND_EVERY_MS.
   await rewindCursorsIfAhead({ force: !lastRewindAtMs });
 
-  let safeTo = floorToBucket(new Date());
-  safeTo = new Date(safeTo.getTime() - BUCKET_MS);
+  const safeTo = computeSafeTo();
 
   const jobs = (await listMaterializeJobs())
     .filter((j) => (
@@ -720,8 +762,7 @@ async function rebuildObservation(observationId, fromIso) {
     throw new Error(`Нет live-материализации для ${observationId}`);
   }
 
-  let safeTo = floorToBucket(new Date());
-  safeTo = new Date(safeTo.getTime() - BUCKET_MS);
+  const safeTo = computeSafeTo();
 
   const started = jobStartedBucket(job) || earliestLiveFrom(safeTo);
   let from = fromIso
@@ -795,6 +836,10 @@ module.exports = {
   rebuildObservation,
   rematerializeRange,
   floorToBucket,
+  computeSafeTo,
+  widenForRecheck,
+  SAFETY_BUCKETS,
+  RECHECK_BUCKETS,
 };
 
 async function main() {
