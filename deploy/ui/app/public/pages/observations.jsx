@@ -1098,13 +1098,14 @@ function PageObservations({ onNavigate }) {
 
   if (settings && settingsItem) {
     return (
-      <div className="col" style={{ gap: 16, padding: '0 0 24px' }}>
-        <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
-          <h1 style={{ margin: 0, font: 'var(--pv-text-headline)' }}>Настройки</h1>
+      <div className="main__container">
+        <div className="page-head">
+          <h1>Настройки</h1>
           <button type="button" className="btn" onClick={() => { setSettings(null); setSettingsItemId(null); }}>
             К доске
           </button>
         </div>
+        <div className="col" style={{ gap: 16, padding: '0 0 24px' }}>
         {error && (
           <div style={{ padding: 10, borderRadius: 8, background: 'var(--st-critical-bg)' }}>{error}</div>
         )}
@@ -1288,15 +1289,16 @@ function PageObservations({ onNavigate }) {
             </button>
           </div>
         </Card>
+        </div>
       </div>
     );
   }
 
   return (
-    <div className="col" style={{ gap: 16, padding: '0 0 24px' }}>
-      <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
+    <div className="main__container">
+      <div className="page-head">
         <div>
-          <h1 style={{ margin: 0, font: 'var(--pv-text-headline)' }}>Наблюдения</h1>
+          <h1>Наблюдения</h1>
         </div>
         {canWrite && (
           <button
@@ -1308,6 +1310,7 @@ function PageObservations({ onNavigate }) {
           </button>
         )}
       </div>
+      <div className="col" style={{ gap: 16, padding: '0 0 24px' }}>
 
       {error && (
         <div style={{ padding: 10, borderRadius: 8, background: 'var(--st-critical-bg)', color: 'var(--fg-primary)' }}>
@@ -1364,6 +1367,7 @@ function PageObservations({ onNavigate }) {
           </div>
         );
       })()}
+      </div>
     </div>
   );
 }

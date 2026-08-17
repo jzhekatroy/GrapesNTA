@@ -1170,6 +1170,26 @@ a.nav-item--active:visited { color: var(--fg-primary); }
   color: var(--fg-secondary);
 }
 
+.explorer-picker-group + .explorer-picker-group {
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px solid var(--bd-soft);
+}
+
+.explorer-picker-group__heading {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  margin: 4px 0 6px;
+  padding: 6px 10px;
+  font: var(--pv-text-body-3-bold);
+  color: var(--fg-primary);
+  background: var(--bg-surface-2);
+  border-left: 3px solid var(--bd-strong);
+  border-radius: 0 8px 8px 0;
+  line-height: 1.35;
+}
+
 @container (max-width: 600px) {
   .explorer-filter-row__main {
     grid-template-columns: 107px minmax(0, 1fr) 104px 26px;

@@ -1484,7 +1484,7 @@ function cloneExplorerFilters(filters) {
 function normalizeExplorerFilter(f) {
   let op = f.op || '=';
   if (f.field === 'tcp_flags') {
-    if (!f.op || op === '=') op = 'has_any';
+    if (!f.op || op === '=') op = 'eq';
     if (op === '!=') op = 'neq';
   }
   return {
@@ -1518,6 +1518,13 @@ function filterOpsForField(schema, fieldId) {
   if (fieldId === 'tcp_flags') return ['has_any', 'has_all', 'eq', 'neq'];
   const meta = filterFieldMeta(schema, fieldId);
   return meta?.ops || ['=', '!=', 'contains', 'not_contains'];
+}
+
+function defaultOpForField(schema, fieldId) {
+  const ops = filterOpsForField(schema, fieldId);
+  if (ops.includes('=')) return '=';
+  if (ops.includes('eq')) return 'eq';
+  return ops[0] || '=';
 }
 
 function normalizeFilterPickerItem(item) {
@@ -1666,9 +1673,9 @@ function FilterSearchPicker({
           {Object.keys(groups).length === 0 ? (
             <div style={{ padding: '8px 4px', color: 'var(--fg-secondary)', font: 'var(--pv-text-body-3)' }}>Ничего не найдено</div>
           ) : Object.entries(groups).map(([groupName, groupItems]) => (
-            <div key={groupName || 'all'}>
+            <div key={groupName || 'all'} className="explorer-picker-group">
               {grouped && groupName && (
-                <div style={{ font: 'var(--pv-text-body-3-bold)', color: 'var(--fg-muted)', padding: '8px 4px 4px' }}>{groupName}</div>
+                <div className="explorer-picker-group__heading">{groupName}</div>
               )}
               {groupItems.map((item) => {
                 const active = String(item.id) === String(value);
@@ -3747,8 +3754,8 @@ function DimensionPicker({ anchorRef, dimensions, selected, onPick, onClose }) {
     <div ref={panelRef} style={{ ...menuStyle, background: 'var(--bg-surface)', border: '1px solid var(--bd-default)', borderRadius: 12, boxShadow: 'var(--pv-shadow-popover)', padding: 8 }}>
       <input className="input" placeholder="Поиск измерения..." value={q} onChange={(e) => setQ(e.target.value)} autoFocus />
       {Object.entries(groups).map(([gn, items]) => (
-        <div key={gn}>
-          <div style={{ font: 'var(--pv-text-body-3-bold)', color: 'var(--fg-muted)', padding: '10px 8px 4px' }}>{gn}</div>
+        <div key={gn} className="explorer-picker-group">
+          <div className="explorer-picker-group__heading">{gn}</div>
           {items.map((d) => {
             const dis = selected.includes(d.id);
             return (
@@ -4315,8 +4322,8 @@ function ExplorerAddFilterMenu({
           {Object.keys(groups).length === 0 ? (
             <div style={{ padding: '8px 4px', color: 'var(--fg-secondary)', font: 'var(--pv-text-body-3)' }}>Ничего не найдено</div>
           ) : Object.entries(groups).map(([groupName, groupItems]) => (
-            <div key={groupName}>
-              <div style={{ font: 'var(--pv-text-body-3-bold)', color: 'var(--fg-muted)', padding: '8px 4px 4px' }}>{groupName}</div>
+            <div key={groupName} className="explorer-picker-group">
+              <div className="explorer-picker-group__heading">{groupName}</div>
               {groupItems.map((item) => (
                 <button
                   key={item.id}
@@ -4793,9 +4800,9 @@ function ExplorerFilters({
 
   const pickSystemFilter = (systemId) => {
     if (systemId === '__direction__') {
-      addFilter({ field: 'direction', op: 'in', value: defaultDirectionFilterValue() });
+      addFilter({ field: 'direction', op: '=', value: '' });
     } else if (systemId === '__collector__') {
-      addFilter({ field: 'collector', op: 'in', value: '' });
+      addFilter({ field: 'collector', op: '=', value: '' });
     }
   };
 
@@ -4880,11 +4887,12 @@ function ExplorerFilters({
                         value={f.field}
                         onChange={(fieldId) => {
                           const nextOps = filterOpsForField(schema, fieldId);
+                          const defaultOp = defaultOpForField(schema, fieldId);
                           updateFilter(f.id, {
                             field: fieldId,
                             value: '',
                             label: null,
-                            op: nextOps.includes(f.op) ? f.op : nextOps[0],
+                            op: nextOps.includes(f.op) ? f.op : defaultOp,
                           });
                         }}
                         searchPlaceholder="Поиск поля..."
@@ -4909,7 +4917,7 @@ function ExplorerFilters({
                         onDirectionsChange={(dirs) => {
                           const value = directionMapToFilterValue(dirs);
                           const nextOp = !value
-                            ? 'in'
+                            ? '='
                             : (value.includes(',')
                               ? (['=', '!='].includes(f.op) ? f.op : 'in')
                               : (['in', 'not_in'].includes(f.op) ? f.op : '='));
@@ -4960,8 +4968,7 @@ function ExplorerFilters({
                 schema={schema}
                 onPickSystem={pickSystemFilter}
                 onPickField={(fieldId) => {
-                  const nextOps = filterOpsForField(schema, fieldId);
-                  addFilter({ field: fieldId, op: nextOps[0], value: '' });
+                  addFilter({ field: fieldId, op: defaultOpForField(schema, fieldId), value: '' });
                 }}
               />
             </div>

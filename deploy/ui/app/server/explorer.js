@@ -358,6 +358,7 @@ function explorerSnmpPollStatusLabel(status, snmpEnabled, hasCache = false) {
 function explorerFilterEntityType(filterType) {
   if (filterType === 'l3_owner') return 'l3_owner';
   if (filterType === 'own_network') return 'own_network';
+  if (filterType === 'source_id') return 'source_id';
   if (filterType === 'vlan') return 'vlan';
   if (filterType === 'vlan_name') return 'vlan_name';
   if (filterType === 'asn') return 'asn';
@@ -768,7 +769,7 @@ function explorerDimensions() {
 
   const optional = {
     direction: ['direction', 'Direction', 'Инфраструктура', 'enum'],
-    source_id: ['sourceId', 'Source ID', 'Инфраструктура', 'string'],
+    source_id: ['sourceId', 'Source ID', 'Инфраструктура', 'source_id'],
     src_label: ['srcLabel', 'Source label', 'Инфраструктура', 'string'],
     dst_label: ['dstLabel', 'Destination label', 'Инфраструктура', 'string'],
     src_scope: ['srcEndpointScope', 'Source scope', 'Инфраструктура', 'string'],
@@ -3089,6 +3090,34 @@ async function searchExplorerEntities({ type, q = '', limit = 20, switchIp = '' 
   const lim = Math.min(Math.max(Number(limit) || 20, 1), 50);
   const needle = search.toLowerCase();
   const switchIps = normalizeExplorerSwitchIpFilter(switchIp);
+
+  if (type === 'source_id') {
+    const sources = sourcesTableRef();
+    const params = { limit: lim };
+    let where = '1';
+    if (search) {
+      params.search = `%${search}%`;
+      where = `positionCaseInsensitive(source_id, trim(BOTH '%' FROM {search:String})) > 0
+        OR positionCaseInsensitive(display_name, trim(BOTH '%' FROM {search:String})) > 0`;
+    }
+    const { rows } = await query(`
+      SELECT source_id, display_name, source_type, collector_id
+      FROM ${sources}
+      WHERE ${where}
+      ORDER BY display_name, source_id
+      LIMIT {limit:UInt32}
+    `, params, { name: 'explorer/entities-source-id' });
+    return rows.map((r) => ({
+      id: String(r.source_id),
+      label: String(r.display_name || r.source_id),
+      sublabel: [
+        r.display_name && String(r.display_name) !== String(r.source_id) ? r.source_id : null,
+        r.source_type || null,
+        r.collector_id || null,
+      ].filter(Boolean).join(' · '),
+      value: String(r.source_id),
+    }));
+  }
 
   if (type === 'asn') {
     const asnNames = asnNamesTableRef();

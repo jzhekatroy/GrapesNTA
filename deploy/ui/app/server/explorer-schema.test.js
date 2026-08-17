@@ -56,6 +56,12 @@ describe('explorer schema field naming', () => {
     assert.ok(srcScope.valueOptions.some((o) => o.value === 'local' && o.label.includes('Наш')));
   });
 
+  it('exposes source_id as a searchable value picker', () => {
+    const schema = explorerSchema();
+    const sourceId = schema.filterFields.find((f) => f.id === 'source_id');
+    assert.equal(sourceId?.entityType, 'source_id');
+  });
+
   it('matches side aliases in field search', () => {
     const schema = explorerSchema();
     const srcIp = schema.filterFields.find((f) => f.id === 'src_ip');
