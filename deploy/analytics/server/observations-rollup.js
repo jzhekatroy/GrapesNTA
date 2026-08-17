@@ -43,7 +43,7 @@ const {
 const {
   explorerTimeseries,
   explorerGroupedTimeseries,
-  explorerSchema,
+  explorerDimensions,
 } = require('./explorer');
 
 const CONCURRENCY = Math.max(1, Number(process.env.OBSERVATION_ROLLUP_CONCURRENCY) || 1);
@@ -305,7 +305,7 @@ function widenForRecheck(job, from) {
  * первым. Поэтому проверяем разрез до запроса.
  */
 function assertKnownGroupBy(groupBy) {
-  const known = new Set((explorerSchema().dimensions || []).map((d) => d.id));
+  const known = new Set(Object.keys(explorerDimensions()));
   const unknown = groupBy.filter((g) => !known.has(g));
   if (unknown.length) {
     throw new Error(`Неизвестное измерение разреза: ${unknown.join(', ')}`);

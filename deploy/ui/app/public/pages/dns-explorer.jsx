@@ -1897,7 +1897,6 @@ function PageDnsExplorer({ onNavigate, displayTimezone }) {
     setLoadMs(result.loadMs);
     setServerMs(result.serverMs);
     setSnapshotId(result.snapshotId || null);
-    setShareMeta(result.snapshotExpiresAt ? { expiresAt: result.snapshotExpiresAt } : null);
     setRows(apiRows);
     setTimeseries(result.data?.timeseries || []);
     setResultSeries(result.data?.resultSeries || null);
@@ -2124,7 +2123,7 @@ function PageDnsExplorer({ onNavigate, displayTimezone }) {
         </div>
       </div>
 
-      {(source === 'snapshot' || shareMeta?.expiresAt) && hasAppliedQuery && (
+      {(source === 'snapshot') && hasAppliedQuery && (
         <div
           className="row"
           style={{

@@ -872,7 +872,7 @@ a.nav-item--active:visited { color: var(--fg-primary); }
 
 .explorer-filter-row__main {
   display: grid;
-  grid-template-columns: 68px minmax(120px, 180px) minmax(120px, 148px) minmax(180px, 1fr) 26px;
+  grid-template-columns: 84px minmax(120px, 180px) minmax(120px, 148px) minmax(180px, 1fr) 26px;
   align-items: center;
   gap: 6px;
   min-width: 0;
@@ -892,7 +892,6 @@ a.nav-item--active:visited { color: var(--fg-primary); }
   grid-column: 1;
   grid-row: 1;
   width: 100%;
-  min-width: 0;
 }
 
 .explorer-filter-row select.input {
@@ -903,10 +902,14 @@ a.nav-item--active:visited { color: var(--fg-primary); }
   min-width: 0;
 }
 
+.explorer-filter-row select.input.explorer-filter-row__logic {
+  min-width: 84px;
+}
+
 .explorer-filter-row__logic {
-  padding: 0 20px 0 4px;
-  font-size: 11px;
-  text-align: center;
+  padding: 0 22px 0 6px;
+  font-size: 12px;
+  text-align: left;
 }
 
 .explorer-filter-row__logic-placeholder {
@@ -1172,7 +1175,7 @@ a.nav-item--active:visited { color: var(--fg-primary); }
 
 @container (max-width: 600px) {
   .explorer-filter-row__main {
-    grid-template-columns: 68px minmax(0, 1fr) 104px 26px;
+    grid-template-columns: 84px minmax(0, 1fr) 104px 26px;
   }
 
   .explorer-filter-row__field,

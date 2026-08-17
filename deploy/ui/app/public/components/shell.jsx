@@ -1456,12 +1456,12 @@ const TOP_TALKERS_PAGE_GROUPS = ['src', 'dst', 'pair'];
 // the global METRICS). It used to live in explorer.jsx and was dropped when the
 // Explorer page was rewritten; restore it here so those pages keep resolving labels.
 const METRICS = [
-  { id: 'bps', label: 'Средняя бит/с', unit: 'бит/с', icon: 'flow' },
-  { id: 'volume', label: 'Объём', unit: 'байт', icon: 'layers' },
-  { id: 'pps', label: 'Пакеты/с', unit: 'п/с', icon: 'top' },
-  { id: 'fps', label: 'Потоки/с', unit: 'ф/с', icon: 'explorer' },
-  { id: 'flows', label: 'Всего потоков', unit: '', icon: 'layers' },
-  { id: 'uniq_src', label: 'Уникальных source IP', unit: '', icon: 'network' },
+  { id: 'bps', label: 'Средняя скорость / Average bitrate', unit: 'бит/с', icon: 'flow' },
+  { id: 'volume', label: 'Объём / Volume', unit: 'байт', icon: 'layers' },
+  { id: 'pps', label: 'Пакеты/с / Packets per second', unit: 'п/с', icon: 'top' },
+  { id: 'fps', label: 'Потоки/с / Flows per second', unit: 'ф/с', icon: 'explorer' },
+  { id: 'flows', label: 'Всего потоков / Total flows', unit: '', icon: 'layers' },
+  { id: 'uniq_src', label: 'Уникальных IP источника / Unique source IPs', unit: '', icon: 'network' },
 ];
 
 function parseTopTalkersPageParams(params) {

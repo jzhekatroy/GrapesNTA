@@ -16,12 +16,12 @@ const EXPLORER_THRESHOLD_PEAK_WINDOWS = [
 ];
 
 const EXPLORER_THRESHOLD_DEFAULT_METRICS = [
-  { id: 'bps', label: 'Средняя бит/с', peakSupported: true, defaultUnit: 'mbps' },
-  { id: 'volume', label: 'Объём', peakSupported: true, defaultUnit: 'gb' },
-  { id: 'pps', label: 'Пакеты/с', peakSupported: true, defaultUnit: 'pps' },
-  { id: 'fps', label: 'Потоки/с', peakSupported: true, defaultUnit: 'fps' },
-  { id: 'flows', label: 'Всего потоков', peakSupported: true, defaultUnit: 'count' },
-  { id: 'uniq_src', label: 'Уникальных source IP', peakSupported: false, defaultUnit: 'count' },
+  { id: 'bps', label: 'Средняя скорость / Average bitrate', peakSupported: true, defaultUnit: 'mbps' },
+  { id: 'volume', label: 'Объём / Volume', peakSupported: true, defaultUnit: 'gb' },
+  { id: 'pps', label: 'Пакеты/с / Packets per second', peakSupported: true, defaultUnit: 'pps' },
+  { id: 'fps', label: 'Потоки/с / Flows per second', peakSupported: true, defaultUnit: 'fps' },
+  { id: 'flows', label: 'Всего потоков / Total flows', peakSupported: true, defaultUnit: 'count' },
+  { id: 'uniq_src', label: 'Уникальных IP источника / Unique source IPs', peakSupported: false, defaultUnit: 'count' },
   { id: 'avg_packet_size', label: 'Средний размер пакета', peakSupported: false, defaultUnit: 'b' },
   { id: 'avg_flow_size', label: 'Средний размер потока', peakSupported: false, defaultUnit: 'b' },
   { id: 'pct', label: 'Доля от общего', peakSupported: false, defaultUnit: 'pct' },

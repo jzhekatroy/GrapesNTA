@@ -75,27 +75,167 @@ const FILTER_OPS_BY_TYPE = {
   ip: ['=', '!=', 'cidr', 'in'],
   switch_ip: ['=', '!=', 'cidr', 'in'],
   if_name: ['=', '!=', 'contains', 'not_contains', 'in', 'not_in'],
+  if_alias: ['=', '!=', 'contains', 'not_contains', 'in', 'not_in'],
   mac: ['=', '!=', 'in', 'not_in', 'contains'],
   enum: ['=', '!=', 'in', 'not_in'],
   tcp_flags: ['has_any', 'has_all', 'eq', 'neq'],
   country: ['=', '!=', 'contains', 'not_contains', 'in', 'not_in'],
   entity: ['=', 'in'],
+  vlan_name: ['=', '!=', 'contains', 'not_contains', 'in', 'not_in'],
 };
 
-/** Dimensions whose value comes from the SNMP interface JOIN, not from flows_raw. */
-const EXPLORER_IF_LABEL_DIMS = new Set(['in_if_name', 'in_if_alias', 'out_if_name', 'out_if_alias']);
+const EXPLORER_GROUP = {
+  ADDR: 'Адреса и порты / Addresses & ports',
+  PROTO: 'Протокол и сервисы / Protocol & services',
+  ASGEO: 'Автономные системы и гео / AS & geo',
+  L3: 'Операторы и префиксы / Owners & prefixes',
+  EQUIP: 'Сетевое оборудование и интерфейсы / Network equipment & interfaces',
+  DIR: 'Направление и классификация / Direction & classification',
+  L2: 'L2 и VLAN / L2 & VLAN',
+  SYS: 'Система / System',
+};
+
+const EXPLORER_SRC_ALIASES = ['src', 'source', 'источник'];
+const EXPLORER_DST_ALIASES = ['dst', 'destination', 'dest', 'назначение'];
+
+const EXPLORER_SCOPE_OPTIONS = [
+  { value: 'local', label: 'Наш / local' },
+  { value: 'customer', label: 'Клиент / customer' },
+  { value: 'remote', label: 'Чужой / remote' },
+  { value: 'unknown', label: 'Неизвестно / unknown' },
+];
+
+const EXPLORER_COUNTRY_OPTIONS = [
+  { value: 'RU', label: 'RU / Россия' },
+  { value: 'US', label: 'US / США' },
+  { value: 'DE', label: 'DE / Германия' },
+  { value: 'CN', label: 'CN / Китай' },
+  { value: 'GB', label: 'GB / Великобритания' },
+  { value: 'FR', label: 'FR / Франция' },
+  { value: 'NL', label: 'NL / Нидерланды' },
+  { value: 'UA', label: 'UA / Украина' },
+  { value: 'KZ', label: 'KZ / Казахстан' },
+  { value: 'BY', label: 'BY / Беларусь' },
+];
+
+/** Per-field metadata overlay (labels, groups, aliases, visibility). */
+const EXPLORER_DIM_META = {
+  src_ip: { label: 'IP источника / Source IP', group: EXPLORER_GROUP.ADDR },
+  dst_ip: { label: 'IP назначения / Destination IP', group: EXPLORER_GROUP.ADDR },
+  src_port: { label: 'Порт источника / Source port', group: EXPLORER_GROUP.ADDR },
+  dst_port: { label: 'Порт назначения / Destination port', group: EXPLORER_GROUP.ADDR },
+  proto: { label: 'Протокол / Protocol', group: EXPLORER_GROUP.PROTO },
+  src_service: { label: 'Сервис источника / Source service', group: EXPLORER_GROUP.PROTO },
+  dst_service: { label: 'Сервис назначения / Destination service', group: EXPLORER_GROUP.PROTO },
+  tcp_flags: { label: 'Флаги TCP / TCP flags', group: EXPLORER_GROUP.PROTO },
+  src_asn: { label: 'ASN источника / Source ASN', group: EXPLORER_GROUP.ASGEO },
+  dst_asn: { label: 'ASN назначения / Destination ASN', group: EXPLORER_GROUP.ASGEO },
+  src_country: { label: 'Страна источника / Source country', group: EXPLORER_GROUP.ASGEO, valueOptions: EXPLORER_COUNTRY_OPTIONS },
+  dst_country: { label: 'Страна назначения / Destination country', group: EXPLORER_GROUP.ASGEO, valueOptions: EXPLORER_COUNTRY_OPTIONS },
+  l3_owner: {
+    label: 'Оператор / клиент / L3 owner',
+    group: EXPLORER_GROUP.L3,
+    aliases: ['оператор', 'клиент', 'пин', 'owner', 'entity'],
+  },
+  own_network: {
+    label: 'Префикс / CIDR',
+    group: EXPLORER_GROUP.L3,
+    aliases: ['cidr', 'префикс', 'сеть', 'prefix', 'own'],
+  },
+  src_entity: {
+    label: 'Оператор источника / Source owner',
+    group: EXPLORER_GROUP.L3,
+    hiddenFromFilters: true,
+    aliases: ['owner', 'оператор', 'entity'],
+  },
+  dst_entity: {
+    label: 'Оператор назначения / Destination owner',
+    group: EXPLORER_GROUP.L3,
+    hiddenFromFilters: true,
+    aliases: ['owner', 'оператор', 'entity'],
+  },
+  src_network: { hiddenFromPicker: true },
+  dst_network: { hiddenFromPicker: true },
+  src_label: { hiddenFromPicker: true },
+  dst_label: { hiddenFromPicker: true },
+  switch_ip: {
+    label: 'Оборудование — источник потоков / Flow-exporting device',
+    group: EXPLORER_GROUP.EQUIP,
+    aliases: ['exporter', 'экспортёр', 'sampler', 'устройство', 'snmp'],
+    valueHint: 'IP или имя из SNMP-инвентаря',
+  },
+  in_if_name: {
+    label: 'Входной интерфейс / In interface',
+    group: EXPLORER_GROUP.EQUIP,
+    aliases: ['ifname', 'интерфейс', 'interface'],
+  },
+  in_if_alias: {
+    label: 'Входной alias / In alias',
+    group: EXPLORER_GROUP.EQUIP,
+    filterType: 'if_alias',
+    aliases: ['alias', 'ifalias', 'description', 'описание'],
+    valueHint: 'ifAlias входного порта из SNMP',
+  },
+  out_if_name: {
+    label: 'Выходной интерфейс / Out interface',
+    group: EXPLORER_GROUP.EQUIP,
+    aliases: ['ifname', 'интерфейс', 'interface'],
+  },
+  out_if_alias: {
+    label: 'Выходной alias / Out alias',
+    group: EXPLORER_GROUP.EQUIP,
+    filterType: 'if_alias',
+    aliases: ['alias', 'ifalias', 'description', 'описание'],
+    valueHint: 'ifAlias выходного порта из SNMP',
+  },
+  source_id: {
+    label: 'ID источника потоков / Flow source ID',
+    group: EXPLORER_GROUP.EQUIP,
+    aliases: ['exporter', 'source id'],
+    valueHint: 'ID источника в коллекторе',
+  },
+  direction: {
+    label: 'Направление / Direction',
+    group: EXPLORER_GROUP.DIR,
+    aliases: ['вход', 'исход', 'транзит'],
+  },
+  src_scope: {
+    label: 'Принадлежность IP источника / Source IP ownership',
+    group: EXPLORER_GROUP.DIR,
+    filterType: 'enum',
+    valueOptions: EXPLORER_SCOPE_OPTIONS,
+    aliases: ['scope', 'принадлежность', 'ownership', 'local', 'customer', 'remote'],
+  },
+  dst_scope: {
+    label: 'Принадлежность IP назначения / Destination IP ownership',
+    group: EXPLORER_GROUP.DIR,
+    filterType: 'enum',
+    valueOptions: EXPLORER_SCOPE_OPTIONS,
+    aliases: ['scope', 'принадлежность', 'ownership', 'local', 'customer', 'remote'],
+  },
+  src_mac: { label: 'MAC источника / Source MAC', group: EXPLORER_GROUP.L2 },
+  dst_mac: { label: 'MAC назначения / Destination MAC', group: EXPLORER_GROUP.L2 },
+  vlan: { label: 'VLAN', group: EXPLORER_GROUP.L2 },
+  vlan_name: {
+    label: 'Название VLAN / VLAN name',
+    group: EXPLORER_GROUP.L2,
+    aliases: ['имя vlan', 'vlan name', 'display_name'],
+  },
+  src_vlan: { label: 'VLAN источника (raw) / Source VLAN', group: EXPLORER_GROUP.L2 },
+  vlan_attachment: { hiddenFromPicker: true },
+};
 
 const DIMENSION_GROUPS = {
-  IP: ['src_ip', 'dst_ip', 'src_port', 'dst_port', 'proto', 'tcp_flags', 'src_service', 'dst_service'],
-  'AS / GEO': ['src_asn', 'dst_asn', 'src_country', 'dst_country'],
-  'L2 / MAC': ['src_mac', 'dst_mac'],
-  'L3 / Сети': ['src_entity', 'dst_entity', 'l3_owner', 'own_network', 'src_network', 'dst_network'],
-  'Инфраструктура': [
-    'direction', 'source_id', 'switch_ip',
-    'in_if_name', 'in_if_alias', 'out_if_name', 'out_if_alias',
-    'src_label', 'dst_label', 'src_scope', 'dst_scope',
+  [EXPLORER_GROUP.ADDR]: ['src_ip', 'dst_ip', 'src_port', 'dst_port'],
+  [EXPLORER_GROUP.PROTO]: ['proto', 'src_service', 'dst_service', 'tcp_flags'],
+  [EXPLORER_GROUP.ASGEO]: ['src_asn', 'dst_asn', 'src_country', 'dst_country'],
+  [EXPLORER_GROUP.L3]: ['l3_owner', 'own_network', 'src_entity', 'dst_entity'],
+  [EXPLORER_GROUP.EQUIP]: [
+    'switch_ip', 'in_if_name', 'in_if_alias', 'out_if_name', 'out_if_alias', 'source_id',
   ],
-  VLAN: ['vlan', 'vlan_attachment', 'src_vlan'],
+  [EXPLORER_GROUP.DIR]: ['direction', 'src_scope', 'dst_scope'],
+  [EXPLORER_GROUP.L2]: ['src_mac', 'dst_mac', 'vlan', 'vlan_name', 'src_vlan'],
+  [EXPLORER_GROUP.SYS]: ['collector'],
 };
 
 const EXPLORER_FILTER_HINTS = {
@@ -112,7 +252,62 @@ const EXPLORER_FILTER_HINTS = {
   service: 'Код или название сервиса',
   l3_owner: 'Поиск L3-сущности',
   own_network: 'Префикс CIDR — напр. 10.0.0.0/24',
+  vlan_name: 'Имя VLAN из справочника L2',
+  if_alias: 'ifAlias порта из SNMP',
 };
+
+/** Dimensions whose value comes from the SNMP interface JOIN, not from flows_raw. */
+const EXPLORER_IF_LABEL_DIMS = new Set(['in_if_name', 'in_if_alias', 'out_if_name', 'out_if_alias']);
+
+function explorerSideAliases(id) {
+  if (id.startsWith('src_')) return EXPLORER_SRC_ALIASES;
+  if (id.startsWith('dst_')) return EXPLORER_DST_ALIASES;
+  return [];
+}
+
+function explorerFieldAliases(id, dim = {}) {
+  const meta = EXPLORER_DIM_META[id] || {};
+  const extra = Array.isArray(meta.aliases) ? meta.aliases : [];
+  const own = Array.isArray(dim.aliases) ? dim.aliases : [];
+  return [...new Set([...explorerSideAliases(id), ...extra, ...own])];
+}
+
+function enrichExplorerDimensions(dims) {
+  for (const [id, dim] of Object.entries(dims)) {
+    const meta = EXPLORER_DIM_META[id];
+    if (!meta) {
+      dim.aliases = explorerFieldAliases(id, dim);
+      continue;
+    }
+    if (meta.label) dim.label = meta.label;
+    if (meta.group) dim.group = meta.group;
+    if (meta.filterType) dim.filterType = meta.filterType;
+    if (meta.valueOptions) dim.valueOptions = meta.valueOptions;
+    if (meta.valueHint) dim.valueHint = meta.valueHint;
+    if (meta.hiddenFromPicker) dim.hiddenFromPicker = true;
+    if (meta.hiddenFromFilters) dim.hiddenFromFilters = true;
+    dim.aliases = explorerFieldAliases(id, dim);
+  }
+}
+
+function explorerFieldMatchesQuery(field, q) {
+  const needle = String(q ?? '').trim().toLocaleLowerCase();
+  if (!needle) return true;
+  const id = String(field?.id ?? '').toLocaleLowerCase();
+  const label = String(field?.label ?? '').toLocaleLowerCase();
+  const aliases = (field?.aliases || []).map((a) => String(a).toLocaleLowerCase());
+  return id.includes(needle)
+    || label.includes(needle)
+    || aliases.some((a) => a.includes(needle));
+}
+
+function explorerDimensionVisibleInPicker(id, dim) {
+  return !dim.hiddenFromPicker;
+}
+
+function explorerDimensionVisibleInFilters(id, dim) {
+  return !dim.hiddenFromPicker && !dim.hiddenFromFilters;
+}
 
 const EXPLORER_PROTO_OPTIONS = [
   { value: 'ICMP', hint: 'proto 1' },
@@ -141,12 +336,12 @@ const EXPLORER_FIELD_HINTS = {
   dst_asn: 'Номер ASN — напр. 12389 или AS0',
   src_country: 'Код ISO-2 — напр. RU',
   dst_country: 'Код ISO-2 — напр. RU',
-  source_id: 'ID экспортёра / source_id',
-  switch_ip: 'IP или название из SNMP-инвентаря',
+  source_id: 'ID источника в коллекторе',
+  switch_ip: 'IP или имя из SNMP-инвентаря',
   in_if_name: 'ifName, alias или ifIndex входного порта',
   out_if_name: 'ifName, alias или ifIndex выходного порта',
-  in_if_alias: 'Описание (alias) входного порта из SNMP',
-  out_if_alias: 'Описание (alias) выходного порта из SNMP',
+  in_if_alias: 'ifAlias входного порта из SNMP',
+  out_if_alias: 'ifAlias выходного порта из SNMP',
 };
 
 function explorerSnmpPollStatusLabel(status, snmpEnabled, hasCache = false) {
@@ -164,10 +359,12 @@ function explorerFilterEntityType(filterType) {
   if (filterType === 'l3_owner') return 'l3_owner';
   if (filterType === 'own_network') return 'own_network';
   if (filterType === 'vlan') return 'vlan';
+  if (filterType === 'vlan_name') return 'vlan_name';
   if (filterType === 'asn') return 'asn';
   if (filterType === 'service') return 'service';
   if (filterType === 'switch_ip') return 'switch_ip';
   if (filterType === 'if_name') return 'if_name';
+  if (filterType === 'if_alias') return 'if_alias';
   return null;
 }
 
@@ -186,16 +383,17 @@ function explorerFilterFieldMeta(id, d) {
     entityType: explorerFilterEntityType(type),
     valueHint: d.valueHint || EXPLORER_FIELD_HINTS[id] || EXPLORER_FILTER_HINTS[type] || EXPLORER_FILTER_HINTS.string,
     valueOptions,
+    aliases: d.aliases || explorerFieldAliases(id, d),
   };
 }
 
 const EXPLORER_RESULT_EXPORT_COLUMNS = [
-  { key: 'bytes', label: 'Объём' },
-  { key: 'avgBps', label: 'Средняя бит/с' },
-  { key: 'pps', label: 'Пакеты/с' },
-  { key: 'fps', label: 'Потоки/с' },
-  { key: 'flows', label: 'Flows' },
-  { key: 'packets', label: 'Packets' },
+  { key: 'bytes', label: 'Объём / Volume' },
+  { key: 'avgBps', label: 'Средняя скорость / Average bitrate' },
+  { key: 'pps', label: 'Пакеты/с / Packets per second' },
+  { key: 'fps', label: 'Потоки/с / Flows per second' },
+  { key: 'flows', label: 'Потоков / Flows' },
+  { key: 'packets', label: 'Пакетов / Packets' },
 ];
 
 function enrichExplorerFlowRow(row, windowSeconds) {
@@ -430,37 +628,37 @@ function buildExplorerMetricSpecs(scaled) {
   const srcIp = col('srcIp');
   return {
     bps: {
-      label: 'Средняя бит/с',
+      label: 'Средняя скорость / Average bitrate',
       expr: `round(sum(${scaled.bytes}) * 8 / window_seconds, 0)`,
       pctBase: `sum(${scaled.bytes})`,
       sortField: 'bytes',
     },
     volume: {
-      label: 'Объём',
+      label: 'Объём / Volume',
       expr: `sum(${scaled.bytes})`,
       pctBase: `sum(${scaled.bytes})`,
       sortField: 'bytes',
     },
     pps: {
-      label: 'Пакеты/с',
+      label: 'Пакеты/с / Packets per second',
       expr: `round(sum(${scaled.packets}) / window_seconds, 0)`,
       pctBase: `sum(${scaled.packets})`,
       sortField: 'packets',
     },
     fps: {
-      label: 'Потоки/с',
+      label: 'Потоки/с / Flows per second',
       expr: `round(sum(${scaled.flowWeight}) / window_seconds, 2)`,
       pctBase: `sum(${scaled.flowWeight})`,
       sortField: 'flows',
     },
     flows: {
-      label: 'Всего потоков',
+      label: 'Всего потоков / Total flows',
       expr: `sum(${scaled.flowWeight})`,
       pctBase: `sum(${scaled.flowWeight})`,
       sortField: 'flows',
     },
     uniq_src: {
-      label: 'Уникальных source IP',
+      label: 'Уникальных IP источника / Unique source IPs',
       expr: `uniqCombined(f.${srcIp})`,
       pctBase: `uniqCombined(f.${srcIp})`,
       sortField: 'metric_value',
@@ -766,6 +964,19 @@ function explorerDimensions() {
       groupKeyExpr: effVlan,
       labelFromKey: (k) => `toString(${k})`,
     };
+    const l2View = l2VlansViewRef();
+    const vlanJoinSql = `
+      LEFT JOIN ${l2View} AS l2_vlan
+        ON l2_vlan.vlan_id = ${effVlan}`;
+    dims.vlan_name = {
+      label: 'Название VLAN / VLAN name',
+      group: EXPLORER_GROUP.L2,
+      kind: 'vlan_name',
+      filterType: 'vlan_name',
+      expr: `ifNull(nullIf(l2_vlan.display_name, ''), '—')`,
+      filterExpr: `ifNull(nullIf(l2_vlan.display_name, ''), '')`,
+      joinSql: vlanJoinSql,
+    };
   }
 
   const directionCol = flowCol('direction');
@@ -834,6 +1045,7 @@ function explorerDimensions() {
     };
   }
 
+  enrichExplorerDimensions(dims);
   return dims;
 }
 
@@ -842,16 +1054,18 @@ function explorerSchema(options = {}) {
   const metrics = buildExplorerMetricSpecs(explorerScaledFlowExprs('f'));
   const collectorField = {
     id: 'collector',
-    label: 'Коллекторы',
-    group: 'Система',
+    label: 'Коллектор / Collector',
+    group: EXPLORER_GROUP.SYS,
     filterType: 'collector',
     ops: ['in', 'not_in', '=', '!='],
     valueHint: 'ID коллектора или loc:location-id',
     entityType: null,
+    aliases: ['коллекторы'],
   };
   const hiddenInCabinet = new Set(['source_id', 'collector']);
   const dimensions = Object.entries(dims)
     .filter(([, d]) => !d.virtual)
+    .filter(([id, d]) => explorerDimensionVisibleInPicker(id, d))
     .filter(([id]) => !options.cabinet || !hiddenInCabinet.has(id))
     .map(([id, d]) => ({
       id,
@@ -861,14 +1075,18 @@ function explorerSchema(options = {}) {
       filterType: d.filterType || d.kind,
       filterOps: FILTER_OPS_BY_TYPE[d.filterType] || FILTER_OPS_BY_TYPE.string,
       groupable: !d.virtual,
+      aliases: d.aliases || [],
     }));
   const filterFields = options.cabinet
     ? Object.entries(dims)
+      .filter(([id, d]) => explorerDimensionVisibleInFilters(id, d))
       .filter(([id]) => !hiddenInCabinet.has(id))
       .map(([id, d]) => explorerFilterFieldMeta(id, d))
     : [
       collectorField,
-      ...Object.entries(dims).map(([id, d]) => explorerFilterFieldMeta(id, d)),
+      ...Object.entries(dims)
+        .filter(([id, d]) => explorerDimensionVisibleInFilters(id, d))
+        .map(([id, d]) => explorerFilterFieldMeta(id, d)),
     ];
   if (options.cabinet) {
     return {
@@ -1309,6 +1527,27 @@ async function buildExplorerFilterClauses(filters, dims, params) {
       else if (op === 'in') {
         params[paramName] = values.map(Number);
         addClause(`${eff} IN {${paramName}:Array(UInt16)}`);
+      }
+      continue;
+    }
+
+    if (dim.filterType === 'vlan_name') {
+      const compareExpr = explorerStringCompareExpr(dim);
+      const paramName = `filter_${idx++}`;
+      if (op === 'contains' || op === 'not_contains') {
+        params[paramName] = `%${String(f.value ?? '').trim()}%`;
+        const neg = op === 'not_contains' ? 'NOT ' : '';
+        addClause(`${neg}positionCaseInsensitive(${compareExpr}, trim(BOTH '%' FROM {${paramName}:String})) > 0`);
+      } else if (op === 'in' || op === 'not_in') {
+        params[paramName] = values;
+        const inOp = op === 'not_in' ? 'NOT IN' : 'IN';
+        addClause(`${compareExpr} ${inOp} {${paramName}:Array(String)}`);
+      } else if (op === '!=') {
+        params[paramName] = String(f.value ?? '').trim();
+        addClause(`${compareExpr} != {${paramName}:String}`);
+      } else {
+        params[paramName] = String(f.value ?? '').trim();
+        addClause(`${compareExpr} = {${paramName}:String}`);
       }
       continue;
     }
@@ -2914,6 +3153,35 @@ async function searchExplorerEntities({ type, q = '', limit = 20, switchIp = '' 
     }));
   }
 
+  if (type === 'vlan_name') {
+    const view = l2VlansViewRef();
+    const params = { limit: lim };
+    let where = "display_name != ''";
+    if (search) {
+      params.search = `%${search}%`;
+      where += ` AND (
+        positionCaseInsensitive(display_name, trim(BOTH '%' FROM {search:String})) > 0
+        OR toString(vlan_id) LIKE {search:String}
+      )`;
+    }
+    const { rows } = await query(`
+      SELECT display_name, groupArray(vlan_id) AS vlan_ids
+      FROM ${view}
+      WHERE ${where}
+      GROUP BY display_name
+      ORDER BY display_name
+      LIMIT {limit:UInt32}
+    `, params, { name: 'explorer/entities-vlan-name' });
+    return rows.map((r) => ({
+      id: String(r.display_name),
+      label: String(r.display_name),
+      sublabel: (r.vlan_ids || []).length > 1
+        ? `VLAN ${(r.vlan_ids || []).join(', ')}`
+        : `VLAN ${(r.vlan_ids || [])[0] || '—'}`,
+      value: String(r.display_name),
+    }));
+  }
+
   if (type === 'service') {
     const view = portServicesExpandedViewRef();
     const params = { limit: lim };
@@ -3092,6 +3360,44 @@ async function searchExplorerEntities({ type, q = '', limit = 20, switchIp = '' 
     }));
   }
 
+  if (type === 'if_alias') {
+    const ifaces = netInterfacesCurrentRef();
+    const params = { limit: lim };
+    let where = "if_alias != ''";
+    if (switchIps.length) {
+      params.switch_ips = switchIps;
+      where += ' AND switch_ip IN {switch_ips:Array(String)}';
+    }
+    if (search) {
+      params.search = `%${search}%`;
+      where += ` AND positionCaseInsensitive(if_alias, trim(BOTH '%' FROM {search:String})) > 0`;
+    }
+    const { rows } = await query(`
+      SELECT
+        if_alias,
+        any(if_name) AS if_name,
+        any(switch_ip) AS switch_ip,
+        count() AS switches
+      FROM (
+        SELECT switch_ip, if_index, if_name, if_alias
+        FROM ${ifaces}
+        WHERE ${where}
+      ) AS i
+      GROUP BY if_alias
+      ORDER BY switches DESC, if_alias
+      LIMIT {limit:UInt32}
+    `, params, { name: 'explorer/entities-if-alias' });
+    return rows.map((r) => ({
+      id: String(r.if_alias),
+      label: String(r.if_alias),
+      sublabel: [
+        r.if_name || null,
+        Number(r.switches) > 1 ? `${r.switches} свитчей` : r.switch_ip,
+      ].filter(Boolean).join(' · '),
+      value: String(r.if_alias),
+    }));
+  }
+
   return [];
 }
 
@@ -3223,6 +3529,8 @@ function summaryFromExplorerFlowRows(rows, windowSeconds = 3600) {
 
 module.exports = {
   explorerSchema,
+  explorerDimensions,
+  explorerFieldMatchesQuery,
   explorerFlows,
   explorerSummary,
   explorerTimeseries,

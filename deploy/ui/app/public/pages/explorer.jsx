@@ -261,35 +261,35 @@ const EXPLORER_RESULT_METRIC_COLUMNS = [
   },
   {
     key: 'avgBps',
-    title: 'Средняя бит/с',
+    title: 'Средняя скорость / Average bitrate',
     width: 140,
     sortAccessor: (r, meta) => explorerAvgBps(r, meta),
     render: (r, meta) => fmtBits(explorerAvgBps(r, meta)),
   },
   {
     key: 'pps',
-    title: 'Пакеты/с',
+    title: 'Пакеты/с / Packets per second',
     width: 120,
     sortAccessor: (r) => r.pps,
     render: (r) => formatMetric(r.pps, 'pps'),
   },
   {
     key: 'fps',
-    title: 'Потоков/сек',
+    title: 'Потоки/с / Flows per second',
     width: 120,
     sortAccessor: (r) => r.fps,
     render: (r) => formatMetric(r.fps, 'fps'),
   },
   {
     key: 'flows',
-    title: 'Flows',
+    title: 'Потоков / Flows',
     width: 110,
     sortAccessor: (r) => r.flows,
     render: (r) => fmtNum(r.flows),
   },
   {
     key: 'packets',
-    title: 'Packets',
+    title: 'Пакетов / Packets',
     width: 120,
     sortAccessor: (r) => r.packets,
     render: (r) => fmtNum(r.packets),
@@ -502,6 +502,10 @@ function resolveExplorerFieldId(token, schema) {
   if (!raw) return raw;
   const fields = schema?.filterFields || [];
   if (fields.some((f) => f.id === raw)) return raw;
+  const exactId = fields.find((f) => String(f.id).toLowerCase() === raw.toLowerCase());
+  if (exactId) return exactId.id;
+  const byAlias = fields.filter((f) => explorerFieldMatchesQuery(f, raw));
+  if (byAlias.length === 1) return byAlias[0].id;
   const exact = fields.find((f) => String(f.label || '').toLowerCase() === raw.toLowerCase());
   if (exact) return exact.id;
   const partial = fields.filter((f) => String(f.label || '').toLowerCase().includes(raw.toLowerCase()));
@@ -521,7 +525,7 @@ function explorerInterfaceScopeHint(fieldId, switchIpScope) {
   if (fieldId !== 'in_if_name' && fieldId !== 'out_if_name') return '';
   return switchIpScope
     ? 'Поиск по выбранному коммутатору'
-    : 'Поиск по всем коммутаторам · уточните «IP или название»';
+    : 'Поиск по всем коммутаторам · уточните оборудование';
 }
 
 function isExplorerIpLikeValue(value) {
@@ -808,17 +812,44 @@ function migrateExplorerUrlGlobals(globals = {}, urlFilters = []) {
   }).filters;
 }
 
-const EXPLORER_ADD_FILTER_DEFS = [
-  { id: '__direction__', label: 'Направление', group: 'Система', hint: 'Входящий, исходящий, транзит…' },
-  { id: '__collector__', label: 'Коллекторы', group: 'Система', hint: 'Локации и экспортёры' },
-];
-
 const EXPLORER_QUICK_FILTERS = [
   { field: 'proto', label: 'TCP', val: 'TCP' },
   { field: 'proto', label: 'UDP', val: 'UDP' },
   { field: 'dst_port', label: 'DNS dst/53', val: '53' },
   { field: 'dst_port', label: 'HTTPS dst/443', val: '443' },
 ];
+
+function explorerFieldMatchesQuery(field, q) {
+  if (window.ExplorerFieldSearch?.explorerFieldMatchesQuery) {
+    return window.ExplorerFieldSearch.explorerFieldMatchesQuery(field, q);
+  }
+  const needle = String(q ?? '').trim().toLocaleLowerCase();
+  if (!needle) return true;
+  const id = String(field?.id ?? '').toLocaleLowerCase();
+  const label = String(field?.label ?? '').toLocaleLowerCase();
+  return id.includes(needle) || label.includes(needle);
+}
+
+function explorerSystemFilterDefs(schema) {
+  const direction = (schema?.filterFields || []).find((f) => f.id === 'direction');
+  const collector = (schema?.filterFields || []).find((f) => f.id === 'collector');
+  return [
+    {
+      id: '__direction__',
+      label: direction?.label || 'Направление / Direction',
+      group: direction?.group || 'Система / System',
+      hint: 'Входящий, исходящий, транзит…',
+      aliases: direction?.aliases || [],
+    },
+    {
+      id: '__collector__',
+      label: collector?.label || 'Коллектор / Collector',
+      group: collector?.group || 'Система / System',
+      hint: 'Локации и экспортёры',
+      aliases: collector?.aliases || ['коллекторы'],
+    },
+  ];
+}
 
 function explorerThresholdApi() {
   return window.ExplorerThresholds || {};
@@ -1345,10 +1376,7 @@ function buildExplorerTextSuggestions({ value, cursor, schema, entityItems = [] 
   if (!rest.includes(' ') && !['time', 'direction', 'collector'].some((k) => lowerRest.startsWith(k))) {
     const fieldNeedle = rest.toLowerCase();
     fields
-      .filter((f) => fieldNeedle && (
-        f.id.toLowerCase().includes(fieldNeedle)
-        || String(f.label).toLowerCase().includes(fieldNeedle)
-      ))
+      .filter((f) => fieldNeedle && explorerFieldMatchesQuery(f, fieldNeedle))
       .slice(0, 12)
       .forEach((f) => {
         const display = f.label && f.label !== f.id ? f.label : f.id;
@@ -1471,10 +1499,11 @@ function normalizeExplorerFilter(f) {
 
 function filterFieldMeta(schema, fieldId) {
   if (fieldId === 'collector') {
-    return {
+    const fromSchema = (schema?.filterFields || []).find((f) => f.id === 'collector');
+    return fromSchema || {
       id: 'collector',
-      label: 'Коллекторы',
-      group: 'Система',
+      label: 'Коллектор / Collector',
+      group: 'Система / System',
       filterType: 'collector',
       ops: ['in', 'not_in', '=', '!='],
       valueHint: 'ID коллектора или loc:location-id',
@@ -1497,8 +1526,9 @@ function normalizeFilterPickerItem(item) {
   return {
     id: item.value ?? item.id,
     label: item.label ?? item.value ?? item.id,
-    hint: item.hint || null,
+    hint: item.hint || item.valueHint || null,
     group: item.group || null,
+    aliases: item.aliases || [],
   };
 }
 
@@ -1527,13 +1557,9 @@ function FilterSearchPicker({
   );
 
   const filtered = useMemo(() => {
-    const needle = q.trim().toLowerCase();
+    const needle = q.trim();
     if (!needle) return normalized;
-    return normalized.filter((item) => (
-      String(item.label).toLowerCase().includes(needle)
-      || String(item.id).toLowerCase().includes(needle)
-      || String(item.hint || '').toLowerCase().includes(needle)
-    ));
+    return normalized.filter((item) => explorerFieldMatchesQuery(item, needle));
   }, [normalized, q]);
 
   const groups = useMemo(() => {
@@ -2467,7 +2493,6 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
       setLoadMs(r.loadMs ?? null);
       setServerMs(r.serverMs ?? null);
       setSnapshotId(r.snapshotId || null);
-      setShareMeta(r.snapshotExpiresAt ? { expiresAt: r.snapshotExpiresAt } : null);
       setRefreshing(false);
     }).catch((err) => {
       if (cancelled) return;
@@ -3140,7 +3165,7 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
         </div>
       </div>
 
-      {(source === 'snapshot' || shareMeta?.expiresAt) && hasAppliedQuery && (
+      {(source === 'snapshot') && hasAppliedQuery && (
         <div
           className="row"
           style={{
@@ -3636,11 +3661,11 @@ function ExplorerRowActions({
 function ExplorerSummary({ summary, loading = false }) {
   const data = { ...EMPTY_EXPLORER_SUMMARY, ...summary };
   const cards = [
-    { label: 'Объём', value: fmtBytes(data.totalBytes) },
-    { label: 'Packets', value: fmtNum(data.totalPackets) },
-    { label: 'Flows', value: fmtNum(data.totalFlows) },
-    { label: 'Avg bps', value: fmtBits(data.avgBps) },
-    { label: 'Unique src', value: data.uniqSrc == null ? '—' : fmtNum(data.uniqSrc) },
+    { label: 'Объём / Volume', value: fmtBytes(data.totalBytes) },
+    { label: 'Пакетов / Packets', value: fmtNum(data.totalPackets) },
+    { label: 'Потоков / Flows', value: fmtNum(data.totalFlows) },
+    { label: 'Средняя скорость / Average bitrate', value: fmtBits(data.avgBps) },
+    { label: 'Уникальных IP источника / Unique source IPs', value: data.uniqSrc == null ? '—' : fmtNum(data.uniqSrc) },
     { label: 'Unique dst', value: data.uniqDst == null ? '—' : fmtNum(data.uniqDst) },
     { label: 'Ingress', value: fmtBytes(data.inBytes) },
     { label: 'Egress', value: fmtBytes(data.outBytes) },
@@ -3688,7 +3713,7 @@ function DimensionPicker({ anchorRef, dimensions, selected, onPick, onClose }) {
   const [menuStyle, setMenuStyle] = useState(null);
   const groups = useMemo(() => {
     const g = {};
-    dimensions.filter((d) => d.groupable !== false && (!q || d.label.toLowerCase().includes(q.toLowerCase()))).forEach((d) => {
+    dimensions.filter((d) => d.groupable !== false && explorerFieldMatchesQuery(d, q)).forEach((d) => {
       (g[d.group] = g[d.group] || []).push(d);
     });
     return g;
@@ -4194,23 +4219,20 @@ function ExplorerAddFilterMenu({
         label: f.label,
         group: f.group || 'Поля',
         hint: f.valueHint || null,
+        aliases: f.aliases || [],
       })),
     [schema],
   );
 
   const allItems = useMemo(
-    () => [...EXPLORER_ADD_FILTER_DEFS, ...fieldItems],
-    [fieldItems],
+    () => [...explorerSystemFilterDefs(schema), ...fieldItems],
+    [schema, fieldItems],
   );
 
   const filtered = useMemo(() => {
-    const needle = q.trim().toLowerCase();
+    const needle = q.trim();
     if (!needle) return allItems;
-    return allItems.filter((item) => (
-      String(item.label).toLowerCase().includes(needle)
-      || String(item.id).toLowerCase().includes(needle)
-      || String(item.hint || '').toLowerCase().includes(needle)
-    ));
+    return allItems.filter((item) => explorerFieldMatchesQuery(item, needle));
   }, [allItems, q]);
 
   const groups = useMemo(() => filtered.reduce((acc, item) => {

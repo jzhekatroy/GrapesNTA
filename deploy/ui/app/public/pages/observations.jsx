@@ -170,20 +170,6 @@ function TimezonePicker({ value, onChange }) {
   );
 }
 
-const TOP_GROUP_OPTIONS = [
-  { id: 'src_asn', label: 'Source ASN' },
-  { id: 'dst_asn', label: 'Destination ASN' },
-  { id: 'src_ip', label: 'Source IP' },
-  { id: 'dst_ip', label: 'Destination IP' },
-  { id: 'vlan', label: 'VLAN' },
-  { id: 'proto', label: 'Протокол' },
-  { id: 'src_country', label: 'Страна src' },
-  { id: 'dst_country', label: 'Страна dst' },
-];
-
-const COMPOSE_KEY = 'grapes-observation-compose';
-const OPEN_KEY = 'grapes-observation-open';
-
 function formatBps(v) {
   if (typeof fmtBits === 'function') return fmtBits(v);
   const n = Number(v) || 0;
@@ -223,9 +209,11 @@ function chartSeriesStats(points, lines, mode = 'total') {
  */
 function groupLabel(id, options) {
   return (options || []).find((o) => o.id === id)?.label
-    || TOP_GROUP_OPTIONS.find((o) => o.id === id)?.label
     || String(id || '');
 }
+
+const COMPOSE_KEY = 'grapes-observation-compose';
+const OPEN_KEY = 'grapes-observation-open';
 
 function groupByFromWidgets(widgets) {
   const list = Array.isArray(widgets) ? widgets : [];
@@ -973,7 +961,6 @@ function PageObservations({ onNavigate }) {
   // трафика и может содержать любое поле, иначе подпись падает до сырого id.
   const groupOptions = useMemo(() => {
     const dims = config?.schema?.dimensions || [];
-    if (!dims.length) return TOP_GROUP_OPTIONS;
     return dims.map((d) => ({ id: d.id, label: d.label }));
   }, [config]);
 
