@@ -123,12 +123,15 @@ Upgrading an install that predates `last_ok_at` (adds the column, rebuilds the
 view, seeds the column from the catalog):
 
 ```bash
-clickhouse-client --host CH_HOST --port 6124 --user USER --password \
-  --multiquery < deploy/clickhouse/migrate_net_snmp_agents_last_ok.sql
+./deploy/deploy.sh --no-pull schema
 ```
 
-Apply it **before** deploying the UI: `/api/refs/snmp-agents` selects
-`last_ok_at` and fails while the column is missing.
+That reads `deploy/ui/.env` and applies `deploy/schema/ensure.list` (includes
+this migration). `./deploy/deploy.sh ui` and `full` run the same ensure before
+rebuilding the container, so `/api/refs/snmp-agents` does not meet a stale view.
+
+HTTP cannot take `DROP`+`CREATE` in one body — `ensure-live.sh` splits statements.
+Do not pass `?multiquery=1` to ClickHouse HTTP; that setting does not exist there.
 
 Notes:
 

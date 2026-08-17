@@ -16,7 +16,7 @@ This directory keeps **ops against a database**, not CREATE TABLE:
 |---|---|
 | `apply_dns_tables.sh`, `apply_catalog_tables.sh` | Wrappers around `deploy/schema/apply.sh` |
 | `apply_net_snmp_interfaces_dict.sh` | Dictionary SOURCE credentials |
-| `migrate_*.sql`, `migrate_*.sh` | One-off ALTERs for existing installs |
+| `migrate_*.sql`, `migrate_*.sh` | One-off ALTERs for existing installs. Idempotent ones that UI/worker need go into `../schema/ensure.list` and run on `./deploy/deploy.sh schema` / `ui` / `full`. |
 | `flows_raw_*.sql` | Column adds for older `flows_raw` |
 | `detach_traffic_mvs.sql` | Drop leftover sync MVs |
 | `cleanup_old_classification.sql` | One-time drop of pre-analytics objects |

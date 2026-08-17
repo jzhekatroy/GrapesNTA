@@ -1,0 +1,5 @@
+# Idempotent SQL applied on every `./deploy/deploy.sh ui|full|schema`.
+# One path per line, relative to the repo root. Safe to re-run.
+# Add a file here when UI/worker start selecting a new column or view.
+
+deploy/clickhouse/migrate_net_snmp_agents_last_ok.sql

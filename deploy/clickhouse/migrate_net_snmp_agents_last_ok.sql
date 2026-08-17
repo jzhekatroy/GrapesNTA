@@ -6,7 +6,9 @@
 --
 -- Safe to re-run on existing deployments.
 --
--- Apply:
+-- Apply on a live stand (reads deploy/ui/.env, splits statements for HTTP):
+--   ./deploy/deploy.sh --no-pull schema
+-- Native client still works:
 --   clickhouse-client ... --multiquery < deploy/clickhouse/migrate_net_snmp_agents_last_ok.sql
 
 ALTER TABLE default.net_snmp_agents

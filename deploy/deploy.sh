@@ -14,8 +14,9 @@
 #   ./deploy/deploy.sh              # pull + rebuild worker + enrichment
 #   ./deploy/deploy.sh worker       # only grapes-worker
 #   ./deploy/deploy.sh enrichment   # only grapes-enrichment
-#   ./deploy/deploy.sh ui           # pull + rebuild grapes-nta (from this repo)
-#   ./deploy/deploy.sh full         # worker + enrichment + ui
+#   ./deploy/deploy.sh ui           # pull + schema ensure + rebuild grapes-nta
+#   ./deploy/deploy.sh full         # schema ensure + worker + enrichment + ui
+#   ./deploy/deploy.sh schema       # only apply idempotent ClickHouse ensures
 #   ./deploy/deploy.sh pull         # only git pull
 #   ./deploy/deploy.sh status       # containers + repo head
 #   ./deploy/deploy.sh logs [svc]   # follow logs (worker|enrichment|ui|all)
@@ -120,6 +121,13 @@ ensure_ui_env() {
   die "missing ${UI_DIR}/.env"
 }
 
+ensure_clickhouse_schema() {
+  local script="${REPO_ROOT}/deploy/schema/ensure-live.sh"
+  [[ -x "${script}" || -f "${script}" ]] || die "missing ${script}"
+  log "ensure ClickHouse schema (from deploy/ui/.env)"
+  bash "${script}"
+}
+
 ui_up() {
   [[ -f "${UI_APP_DIR}/Dockerfile" ]] || die "missing vendored UI app at ${UI_APP_DIR} (run scripts/sync-ui-from-ntadmin.sh on a dev machine and push)"
   [[ -f "${UI_APP_DIR}/package.json" ]] || die "missing ${UI_APP_DIR}/package.json"
@@ -214,7 +222,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     -h|--help) usage 0 ;;
     --no-pull) DO_PULL=0; shift ;;
-    pull|worker|enrichment|ui|nta|all|full|status|logs)
+    pull|worker|enrichment|ui|nta|all|full|schema|status|logs)
       if [[ -n "${TARGET}" && "$1" != "logs" ]]; then
         die "only one target allowed (got ${TARGET} and $1)"
       fi
@@ -254,7 +262,7 @@ case "${TARGET}" in
     git_pull
     exit 0
     ;;
-  worker|enrichment|ui|all|full)
+  worker|enrichment|ui|all|full|schema)
     need_root
     if [[ "${DO_PULL}" -eq 1 ]]; then
       git_pull
@@ -264,12 +272,17 @@ case "${TARGET}" in
     case "${TARGET}" in
       worker)      compose_up "${WORKER_DIR}" grapes-worker ;;
       enrichment)  compose_up "${ENRICH_DIR}" grapes-enrichment ;;
-      ui)          ui_up ;;
+      schema)      ensure_clickhouse_schema ;;
+      ui)
+        ensure_clickhouse_schema
+        ui_up
+        ;;
       all)
         compose_up "${WORKER_DIR}" grapes-worker
         compose_up "${ENRICH_DIR}" grapes-enrichment
         ;;
       full)
+        ensure_clickhouse_schema
         compose_up "${WORKER_DIR}" grapes-worker
         compose_up "${ENRICH_DIR}" grapes-enrichment
         ui_up

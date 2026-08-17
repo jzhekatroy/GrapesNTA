@@ -31,8 +31,7 @@ if [[ -n "${CH_URL:-}" ]]; then
   : "${CH_DICT_PASSWORD:=$CH_PASS}"
   run_sql() {
     local f="$1"
-    echo "APPLY $f"
-    render_sql "$f" | curl -sS "${CH_URL}/" --user "${CH_USER}:${CH_PASS}" --data-binary @- >/dev/null
+    bash "$ROOT/http_apply.sh" "$f"
   }
 else
   : "${CH_HOST:=127.0.0.1}"
