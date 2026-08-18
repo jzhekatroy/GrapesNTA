@@ -21,6 +21,19 @@ describe('explorer schema field naming', () => {
     assert.equal(switchIp?.label, 'Оборудование — источник потоков / Flow-exporting device');
   });
 
+  it('exposes IPv4 mask settings only for groupable source and destination IPs', () => {
+    const schema = explorerSchema();
+    for (const id of ['src_ip', 'dst_ip']) {
+      const field = schema.dimensions.find((d) => d.id === id);
+      assert.equal(field?.maskable, true);
+      assert.equal(field?.maskMin, 1);
+      assert.equal(field?.maskMax, 32);
+      assert.equal(field?.maskDefault, 32);
+    }
+    assert.equal(schema.dimensions.find((d) => d.id === 'switch_ip')?.maskable, undefined);
+    assert.equal(schema.dimensions.find((d) => d.id === 'src_port')?.maskable, undefined);
+  });
+
   it('hides duplicate fields from pickers but keeps them in dimensions registry', () => {
     const schema = explorerSchema();
     const dims = explorerDimensions();

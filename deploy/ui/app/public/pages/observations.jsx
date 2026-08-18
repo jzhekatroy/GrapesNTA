@@ -20,6 +20,18 @@ const LOOKBACK_SHORT = {
   '7d': '7д',
 };
 
+function parseObservationGroupToken(token) {
+  const raw = String(token ?? '').trim();
+  const slash = raw.indexOf('/');
+  const candidateId = slash < 0 ? raw : raw.slice(0, slash);
+  if (candidateId !== 'src_ip' && candidateId !== 'dst_ip') return { id: raw, mask: null };
+  const value = slash < 0 ? 32 : Number(raw.slice(slash + 1).trim());
+  return {
+    id: candidateId,
+    mask: Number.isInteger(value) && value >= 1 && value <= 32 ? value : 32,
+  };
+}
+
 const LOOKBACK_OPTIONS = ['30m', '1h', '6h', '24h', '7d'];
 
 function normalizeObservationLookback(value) {
@@ -207,9 +219,10 @@ function chartSeriesStats(points, lines, mode = 'total') {
  * Разрез наблюдения — весь список измерений, а не первое поле: наблюдение из
  * разбора трафика может группировать по четырём измерениям, и обрезка теряла остальные.
  */
-function groupLabel(id, options) {
-  return (options || []).find((o) => o.id === id)?.label
-    || String(id || '');
+function groupLabel(token, options) {
+  const { id, mask } = parseObservationGroupToken(token);
+  const label = (options || []).find((o) => o.id === id)?.label || id;
+  return mask != null && mask !== 32 ? `${label} /${mask}` : label;
 }
 
 const COMPOSE_KEY = 'grapes-observation-compose';
@@ -1156,6 +1169,7 @@ function PageObservations({ onNavigate }) {
             </label>
             <div style={{ marginLeft: 24, color: 'var(--fg-muted)', font: 'var(--pv-text-body-3)' }}>
               Без неё график и таблица топа по группировке пустые. Каждая подготовка — постоянная нагрузка на ClickHouse.
+              Счёт с момента включения, прошлые сутки не пересчитываются.
             </div>
             <label className="row" style={{ gap: 8, alignItems: 'center' }}>
               <input

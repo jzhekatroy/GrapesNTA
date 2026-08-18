@@ -1,5 +1,7 @@
 'use strict';
 
+const { explorerGroupFieldId } = require('./explorer-group-mask');
+
 const EXPLORER_THRESHOLD_METRICS = new Set([
   'bps', 'volume', 'pps', 'fps', 'flows', 'uniq_src',
   'avg_packet_size', 'avg_flow_size', 'pct',
@@ -310,9 +312,8 @@ function peakBucketMetricExprs(scaled, peakWindowSec) {
 
 function explorerThresholdWarning({ thresholds, groupBy, windowSeconds }) {
   if (!explorerThresholdsNeedPeak(thresholds)) return null;
-  const groups = Array.isArray(groupBy) ? groupBy : [];
-  const ipPair = groups.includes('src_ip') || groups.includes('dst_ip')
-    || (groups.includes('src_ip') && groups.includes('dst_ip'));
+  const groups = (Array.isArray(groupBy) ? groupBy : []).map(explorerGroupFieldId);
+  const ipPair = groups.includes('src_ip') || groups.includes('dst_ip');
   if (!ipPair) return null;
   if (windowSeconds <= 86400) return null;
   return 'Режим пика при группировке по IP на длинном периоде может выполняться долго. Попробуйте увеличить окно пика (например, 1 час).';

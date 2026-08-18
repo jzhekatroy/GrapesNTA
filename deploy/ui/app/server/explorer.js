@@ -45,6 +45,10 @@ const {
   parseTcpFlagNames,
 } = require('./tcp-flags');
 const {
+  parseExplorerGroupToken,
+  normalizeExplorerGroupTokens,
+} = require('./explorer-group-mask');
+const {
   normalizeExplorerThresholds,
   explorerThresholdsNeedPeak,
   explorerThresholdsActive,
@@ -718,11 +722,19 @@ function explorerDimensions() {
       label: 'Source IP', group: 'IP', kind: 'ip', expr: srcIpExpr, filterType: 'ip', filterExpr: srcIpExpr,
       groupKeyExpr: `f.${t.srcIp}`,
       labelFromKey: ipLabelFromKey,
+      maskable: true,
+      maskMin: 1,
+      maskMax: 32,
+      maskDefault: 32,
     },
     dst_ip: {
       label: 'Destination IP', group: 'IP', kind: 'ip', expr: dstIpExpr, filterType: 'ip', filterExpr: dstIpExpr,
       groupKeyExpr: `f.${t.dstIp}`,
       labelFromKey: ipLabelFromKey,
+      maskable: true,
+      maskMin: 1,
+      maskMax: 32,
+      maskDefault: 32,
     },
     src_port: {
       label: 'Source Port', group: 'IP', kind: 'number', expr: `toString(f.${t.srcPort})`, filterType: 'number', filterExpr: `f.${t.srcPort}`,
@@ -1077,6 +1089,12 @@ function explorerSchema(options = {}) {
       filterOps: FILTER_OPS_BY_TYPE[d.filterType] || FILTER_OPS_BY_TYPE.string,
       groupable: !d.virtual,
       aliases: d.aliases || [],
+      ...(d.maskable ? {
+        maskable: true,
+        maskMin: d.maskMin,
+        maskMax: d.maskMax,
+        maskDefault: d.maskDefault,
+      } : {}),
     }));
   const filterFields = options.cabinet
     ? Object.entries(dims)
@@ -1219,10 +1237,48 @@ function buildExplorerWindowMeta(body = {}, q = null) {
   };
 }
 
+function explorerIpPrefixSql(ipExpr, mask, etypeExpr) {
+  const prefixLen = Number(mask);
+  const ipv4 = `toIPv4(reinterpretAsUInt32(reverse(substring(${ipExpr}, 1, 4))))`;
+  const isIpv4 = etypeExpr
+    ? `${etypeExpr} = 2048`
+    : `length(${ipExpr}) = 16 AND substring(${ipExpr}, 5) = unhex('000000000000000000000000')`;
+  const network = `toString(tupleElement(IPv4CIDRToRange(${ipv4}, ${prefixLen}), 1))`;
+  return `if(${isIpv4}, concat(${network}, '/${prefixLen}'), IPv6NumToString(${ipExpr}))`;
+}
+
+function applyExplorerGroupMasks(groupBy, dims) {
+  const etypeCol = flowCol('etype');
+  const etypeExpr = etypeCol ? `f.${etypeCol}` : null;
+  const outDims = { ...dims };
+  const groups = [];
+  for (const token of normalizeExplorerGroupTokens(groupBy)) {
+    const { id, mask } = parseExplorerGroupToken(token);
+    const dim = dims[id];
+    if (!dim || dim.virtual) continue;
+    if (dim.maskable && mask && mask < 32 && dim.groupKeyExpr) {
+      const prefixSql = explorerIpPrefixSql(dim.groupKeyExpr, mask, etypeExpr);
+      outDims[token] = {
+        ...dim,
+        expr: prefixSql,
+        groupKeyExpr: prefixSql,
+        labelFromKey: (k) => `toString(${k})`,
+        label: `${dim.label} /${mask}`,
+      };
+      groups.push(token);
+    } else {
+      groups.push(id);
+    }
+  }
+  return { groups, dims: outDims };
+}
+
+function resolveExplorerGroupState(groupBy, dims = explorerDimensions()) {
+  return applyExplorerGroupMasks(groupBy, dims);
+}
+
 function normalizeExplorerGroupBy(groupBy, dims) {
-  const raw = Array.isArray(groupBy) ? groupBy : [];
-  const list = raw.map((d) => String(d || '').trim()).filter((d) => dims[d] && !dims[d].virtual);
-  return [...new Set(list)];
+  return applyExplorerGroupMasks(groupBy, dims).groups;
 }
 
 function normalizeExplorerMetric(metric) {
@@ -2166,8 +2222,7 @@ async function explorerFlowsPeakPath({
 
 async function explorerFlows(body = {}, options = {}) {
   const q = normalizeExplorerQuery(body, options);
-  const dims = explorerDimensions();
-  const groups = normalizeExplorerGroupBy(q.groupBy, dims);
+  const { groups, dims } = resolveExplorerGroupState(q.groupBy);
   if (!groups.length) throw new Error('Выберите хотя бы одну группировку');
 
   const metricKey = q.metric;
@@ -2547,8 +2602,7 @@ async function explorerResultSeries(body = {}, flowRows = []) {
     };
   }
 
-  const dims = explorerDimensions();
-  const groups = normalizeExplorerGroupBy(q.groupBy, dims);
+  const { groups, dims } = resolveExplorerGroupState(q.groupBy);
   if (!groups.length) {
     return {
       params: {},
@@ -2687,8 +2741,7 @@ function explorerSeriesMetricValue(row, metricKey) {
  */
 async function explorerGroupedTimeseries(body = {}) {
   const q = normalizeExplorerQuery(body);
-  const dims = explorerDimensions();
-  const groups = normalizeExplorerGroupBy(q.groupBy, dims);
+  const { groups, dims } = resolveExplorerGroupState(q.groupBy);
   if (!groups.length) throw new Error('Выберите хотя бы одну группировку');
 
   const metricKey = q.metric;
@@ -3016,8 +3069,7 @@ async function explorerBreakdown(body = {}, dimension = 'proto', limit = 5, opti
 async function explorerQuery(body = {}, options = {}) {
   const queryBody = await ensureExplorerWindowSnapshot(body, options);
   const q = normalizeExplorerQuery(queryBody, options);
-  const dims = explorerDimensions();
-  const groups = normalizeExplorerGroupBy(q.groupBy, dims);
+  const { groups } = resolveExplorerGroupState(q.groupBy);
   const flowsSpec = groups.length ? await explorerFlows(queryBody, options) : null;
   let summarySpec = null;
   let timeseriesSpec = null;

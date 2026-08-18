@@ -271,6 +271,37 @@ function initBackfillFields(createdAt, existingMat = {}) {
   };
 }
 
+function disabledBackfillFields() {
+  return { backfillFrom: null, backfillCursor: null, backfillDone: true };
+}
+
+function wantsHistoryBackfill(rawMat = {}) {
+  return rawMat?.backfill === true || rawMat?.backfill === 'true';
+}
+
+/** History before createdAt is opt-in. Default: count from creation only. */
+function resolveObservationBackfill({
+  materializeEnabled,
+  wasEnabled,
+  createdAt,
+  existingMat = {},
+  rawMat = {},
+} = {}) {
+  const current = {
+    backfillFrom: existingMat.backfillFrom ?? null,
+    backfillCursor: existingMat.backfillCursor ?? null,
+    backfillDone: Boolean(existingMat.backfillDone),
+  };
+  if (!materializeEnabled) return current;
+  if (!wasEnabled) {
+    return wantsHistoryBackfill(rawMat)
+      ? initBackfillFields(createdAt, {})
+      : disabledBackfillFields();
+  }
+  if (!current.backfillFrom && !current.backfillDone) return disabledBackfillFields();
+  return current;
+}
+
 function isObservationOwner(item, userId) {
   if (!item) return false;
   const owner = String(item.ownerId || '').trim();
@@ -311,18 +342,17 @@ function normalizeObservation(raw = {}, { userId, existing = null } = {}) {
   const wasEnabled = Boolean(existing?.materialize?.enabled);
   let cursorMinute = existing?.materialize?.cursorMinute ?? raw.materialize?.cursorMinute ?? null;
   let matStatus = existing?.materialize?.status || (materializeEnabled ? 'queued' : 'idle');
-  let backfill = {
-    backfillFrom: existing?.materialize?.backfillFrom ?? null,
-    backfillCursor: existing?.materialize?.backfillCursor ?? null,
-    backfillDone: Boolean(existing?.materialize?.backfillDone),
-  };
+  let backfill = resolveObservationBackfill({
+    materializeEnabled,
+    wasEnabled,
+    createdAt,
+    existingMat: existing?.materialize || {},
+    rawMat: raw.materialize || {},
+  });
   if (materializeEnabled && !wasEnabled) {
-    // Fresh live: catch up from creation time first; history via separate backfill cursor.
+    // Live from creation. History backfill only if materialize.backfill === true.
     matStatus = 'queued';
     cursorMinute = createdAt;
-    backfill = initBackfillFields(createdAt, {});
-  } else if (materializeEnabled && !backfill.backfillFrom) {
-    backfill = initBackfillFields(createdAt, existing?.materialize || {});
   }
   if (!materializeEnabled) {
     matStatus = 'idle';
@@ -462,7 +492,12 @@ async function updateObservation(id, userId, payload = {}) {
   if (next.materialize.enabled && !existing.materialize?.enabled) {
     next.materialize.status = 'queued';
     next.materialize.cursorMinute = existing.createdAt || next.createdAt;
-    Object.assign(next.materialize, initBackfillFields(existing.createdAt || next.createdAt, {}));
+    Object.assign(
+      next.materialize,
+      wantsHistoryBackfill(payload.materialize)
+        ? initBackfillFields(existing.createdAt || next.createdAt, {})
+        : disabledBackfillFields(),
+    );
     next.materialize.failCount = 0;
     next.materialize.nextAttemptAt = null;
     next.materialize.cancelRequested = false;
@@ -2387,8 +2422,9 @@ function observationsConfig() {
 }
 
 function backfillProgress(mat) {
-  if (!mat?.enabled || !mat.backfillFrom || mat.backfillDone) {
-    return mat?.backfillDone ? { done: true, hoursDone: BACKFILL_HOURS, hoursTotal: BACKFILL_HOURS } : null;
+  if (!mat?.enabled || !mat.backfillFrom) return null;
+  if (mat.backfillDone) {
+    return { done: true, hoursDone: BACKFILL_HOURS, hoursTotal: BACKFILL_HOURS };
   }
   const fromMs = Date.parse(mat.backfillFrom);
   const cursorMs = Date.parse(mat.backfillCursor || mat.backfillFrom);
@@ -2497,4 +2533,5 @@ module.exports = {
   BACKFILL_HOURS,
   STUCK_SEC,
   MAX_FAIL_COUNT,
+  resolveObservationBackfill,
 };

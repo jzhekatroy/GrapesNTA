@@ -45,6 +45,7 @@ const {
   explorerGroupedTimeseries,
   explorerDimensions,
 } = require('./explorer');
+const { explorerGroupFieldId } = require('./explorer-group-mask');
 
 const CONCURRENCY = Math.max(1, Number(process.env.OBSERVATION_ROLLUP_CONCURRENCY) || 1);
 const MAX_SHOT_MINUTES = Math.max(15, Number(process.env.OBSERVATION_ROLLUP_SHOT_MINUTES) || 15);
@@ -306,7 +307,7 @@ function widenForRecheck(job, from) {
  */
 function assertKnownGroupBy(groupBy) {
   const known = new Set(Object.keys(explorerDimensions()));
-  const unknown = groupBy.filter((g) => !known.has(g));
+  const unknown = groupBy.filter((g) => !known.has(explorerGroupFieldId(g)));
   if (unknown.length) {
     throw new Error(`Неизвестное измерение разреза: ${unknown.join(', ')}`);
   }

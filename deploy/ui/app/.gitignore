@@ -10,3 +10,4 @@ server/build-info.json
 __pycache__/
 *.pyc
 bounds-service/data/
+deploy.md

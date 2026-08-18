@@ -40,6 +40,56 @@ const EXPLORER_DEFAULT_FETCH_LIMIT = 25;
 const EXPLORER_ON_DEMAND_FETCH_LIMITS = [50, 100];
 const EXPLORER_CHART_HEIGHT = 196;
 const EXPLORER_VIS_DEFAULT = 'data';
+const EXPLORER_MASKABLE_GROUPS = new Set(['src_ip', 'dst_ip']);
+const EXPLORER_GROUP_MASK_DEFAULT = 32;
+
+function parseExplorerGroupToken(token) {
+  const raw = String(token ?? '').trim();
+  const slash = raw.indexOf('/');
+  const candidateId = slash < 0 ? raw : raw.slice(0, slash);
+  if (!EXPLORER_MASKABLE_GROUPS.has(candidateId)) return { id: raw, mask: null };
+  const value = slash < 0 ? EXPLORER_GROUP_MASK_DEFAULT : Number(raw.slice(slash + 1).trim());
+  const mask = Number.isInteger(value) && value >= 1 && value <= 32
+    ? value
+    : EXPLORER_GROUP_MASK_DEFAULT;
+  return { id: candidateId, mask };
+}
+
+function explorerGroupFieldId(token) {
+  return parseExplorerGroupToken(token).id;
+}
+
+function explorerGroupMask(token) {
+  return parseExplorerGroupToken(token).mask;
+}
+
+function formatExplorerGroupToken(id, mask) {
+  const fieldId = String(id ?? '').trim();
+  if (!EXPLORER_MASKABLE_GROUPS.has(fieldId)) return fieldId;
+  const value = Number(String(mask ?? '').trim());
+  const normalized = Number.isInteger(value) && value >= 1 && value <= 32
+    ? value
+    : EXPLORER_GROUP_MASK_DEFAULT;
+  return normalized === EXPLORER_GROUP_MASK_DEFAULT ? fieldId : `${fieldId}/${normalized}`;
+}
+
+function normalizeExplorerGroupTokens(list) {
+  const result = [];
+  const seen = new Set();
+  for (const token of Array.isArray(list) ? list : []) {
+    const { id, mask } = parseExplorerGroupToken(token);
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    result.push(formatExplorerGroupToken(id, mask));
+  }
+  return result;
+}
+
+function explorerGroupLabel(token, dimensionById) {
+  const { id, mask } = parseExplorerGroupToken(token);
+  const label = dimensionById[id]?.label || id;
+  return mask != null && mask !== EXPLORER_GROUP_MASK_DEFAULT ? `${label} /${mask}` : label;
+}
 
 const VIS_TYPES = [
   { id: 'contribution', label: 'Вклад', icon: 'pieChart', hint: 'Кто даёт основной объём' },
@@ -151,8 +201,9 @@ function dedupeExplorerEntityItems(items) {
 }
 
 function explorerRowFilterValue(row, dimId, valueIdx, dimensionById) {
-  const kind = dimensionById[dimId]?.kind;
-  if (kind === 'tcp_flags' || dimId === 'tcp_flags') {
+  const fieldId = explorerGroupFieldId(dimId);
+  const kind = dimensionById[fieldId]?.kind;
+  if (kind === 'tcp_flags' || fieldId === 'tcp_flags') {
     const raw = row.rawValues?.[valueIdx] ?? row.values[valueIdx];
     const num = Number(raw);
     if (Number.isFinite(num) && /^\d+$/.test(String(raw).trim())) {
@@ -369,8 +420,9 @@ function fitExplorerTableColumnWidths(columns, rows, pinnedRows, { meta, metric,
     let contentW = measureExplorerTableText(col.title);
 
     if (col.key.startsWith('dim-')) {
-      const dimId = col.key.slice(4);
-      const valueIdx = groupBy.indexOf(dimId);
+      const groupToken = col.key.slice(4);
+      const dimId = explorerGroupFieldId(groupToken);
+      const valueIdx = groupBy.indexOf(groupToken);
       const isAsn = dimId.endsWith('asn');
       const mono = dimId.endsWith('ip') || dimId.endsWith('_mac');
       sampleRows.forEach((row) => {
@@ -875,7 +927,7 @@ function buildExplorerQuerySnapshot({
     filters: filters.map(normalizeExplorerFilter),
     thresholds: cloneExplorerThresholdsList(thresholds || []),
     metric,
-    groupBy: [...groupBy],
+    groupBy: normalizeExplorerGroupTokens(groupBy),
     limit,
     vis: normalizeExplorerVis(vis),
     fetchLimit: fetchLimit ?? resolveExplorerFetchLimit(limit),
@@ -950,7 +1002,7 @@ function applyExplorerQuerySnapshot(snapshot, setters) {
   if (migrated.filters) setters.setFilters(cloneExplorerFilters(migrated.filters));
   if (migrated.thresholds && setters.setThresholds) setters.setThresholds(cloneExplorerThresholdsList(migrated.thresholds));
   if (migrated.metric) setters.setMetric(migrated.metric);
-  if (Array.isArray(migrated.groupBy)) setters.setGroupBy(migrated.groupBy);
+  if (Array.isArray(migrated.groupBy)) setters.setGroupBy(normalizeExplorerGroupTokens(migrated.groupBy));
   if (migrated.limit) setters.setLimit(migrated.limit);
   if (migrated.vis) setters.setVis(normalizeExplorerVis(migrated.vis));
 }
@@ -1963,14 +2015,20 @@ function buildExplorerResultColumns({
   onToggleOthersOnChart,
 }) {
   const visibleDimensionIds = groupBy;
+  const hasMaskedIpGroup = groupBy.some((token) => {
+    const mask = explorerGroupMask(token);
+    return mask != null && mask !== EXPLORER_GROUP_MASK_DEFAULT;
+  });
 
-  const groupCols = visibleDimensionIds.map((dimId, colIdx) => {
-    const valueIdx = groupBy.indexOf(dimId);
+  const groupCols = visibleDimensionIds.map((groupToken, colIdx) => {
+    const dimId = explorerGroupFieldId(groupToken);
+    const mask = explorerGroupMask(groupToken);
+    const valueIdx = groupBy.indexOf(groupToken);
     const hasValue = valueIdx >= 0;
     const isAsn = dimId.endsWith('asn');
     return {
-      key: `dim-${dimId}`,
-      title: dimensionById[dimId]?.label || dimId,
+      key: `dim-${groupToken}`,
+      title: explorerGroupLabel(groupToken, dimensionById),
       width: 160,
       minWidth: 72,
       maxWidth: 520,
@@ -1999,7 +2057,9 @@ function buildExplorerResultColumns({
             )
             : <span style={{ color: 'var(--fg-secondary)' }}>—</span>;
         }
-        const filterVal = explorerRowFilterValue(r, dimId, valueIdx, dimensionById);
+        const filterVal = mask != null && mask !== EXPLORER_GROUP_MASK_DEFAULT
+          ? { value: r.values[valueIdx], label: null }
+          : explorerRowFilterValue(r, dimId, valueIdx, dimensionById);
         const monoClass = dimId.endsWith('ip') || dimId.endsWith('_mac') ? 'mono' : '';
         const isTcpFlags = dimId === 'tcp_flags';
         const rawTooltip = isTcpFlags && r.rawValues?.[valueIdx] != null
@@ -2012,7 +2072,7 @@ function buildExplorerResultColumns({
             displayValue={displayValue}
             monoClass={monoClass}
             filterTitle={`Добавить в фильтры${rawTooltip}`}
-            onAddFilter={() => onAddFilter(dimId, filterVal.value, filterVal.label)}
+            onAddFilter={() => onAddFilter(dimId, filterVal.value, filterVal.label, mask)}
             showColorSwatch={showColorSwatch}
             color={r.color}
           />
@@ -2068,7 +2128,7 @@ function buildExplorerResultColumns({
       <ExplorerRowActions
         row={r}
         onFocus={onFocusRow}
-        onExclude={onExcludeRow}
+        onExclude={hasMaskedIpGroup ? null : onExcludeRow}
         chartSeriesIds={chartSeriesIds}
         onToggleDynamicsSeries={onToggleDynamicsSeries}
       />
@@ -2153,9 +2213,9 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
     : null;
   const [metric, setMetric] = useState(urlState?.metric || 'bps');
   const [groupBy, setGroupBy] = useState(
-    composeGroupBy
+    normalizeExplorerGroupTokens(composeGroupBy
       || urlState?.groupBy
-      || ['src_ip', 'dst_ip'],
+      || ['src_ip', 'dst_ip']),
   );
   const [filters, setFilters] = useState(() => {
     // Editing an observation must load THAT observation's filters, not last Explorer query.
@@ -2409,12 +2469,12 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
 
   const availableMetrics = useMemo(
     () => (metrics.length ? metrics : [{ id: 'bps', label: 'Средняя бит/с' }])
-      .filter((m) => !(m.id === 'uniq_src' && groupBy.includes('src_ip'))),
+      .filter((m) => !(m.id === 'uniq_src' && groupBy.some((g) => explorerGroupFieldId(g) === 'src_ip'))),
     [metrics, groupBy],
   );
 
   useEffect(() => {
-    if (metric === 'uniq_src' && groupBy.includes('src_ip')) setMetric('bps');
+    if (metric === 'uniq_src' && groupBy.some((g) => explorerGroupFieldId(g) === 'src_ip')) setMetric('bps');
   }, [groupBy, metric]);
 
   const activeQuery = useMemo(
@@ -2557,9 +2617,9 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
 
   const schemaMetrics = metrics.length ? metrics : [{ id: 'bps', label: 'Средняя бит/с' }];
   const metricLabel = availableMetrics.find((m) => m.id === metric)?.label || metric;
-  const groupLabels = groupBy.map((g) => dimensionById[g]?.label || g);
+  const groupLabels = groupBy.map((g) => explorerGroupLabel(g, dimensionById));
   const appliedMetricLabel = schemaMetrics.find((m) => m.id === appliedMetric)?.label || appliedMetric;
-  const appliedGroupLabels = appliedGroupBy.map((g) => dimensionById[g]?.label || g);
+  const appliedGroupLabels = appliedGroupBy.map((g) => explorerGroupLabel(g, dimensionById));
   const appliedDefaultSortKey = appliedMetric === 'volume' ? 'bytes' : appliedMetric === 'bps' ? 'avgBps' : appliedMetric === 'flows' ? 'flows' : 'metric';
 
   const requeryWithPeriod = (nextTimeRange, nextCustomPeriod) => {
@@ -2593,6 +2653,21 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
     const prev = periodZoomStack[periodZoomStack.length - 1];
     setPeriodZoomStack((stack) => stack.slice(0, -1));
     requeryWithPeriod(prev.timeRange, prev.customPeriod);
+  };
+
+  const replaceExplorerUrl = (snapshot) => {
+    if (cabinetMode || typeof buildExplorerShareUrl !== 'function') return;
+    const url = buildExplorerShareUrl({
+      metric: snapshot.metric,
+      groupBy: snapshot.groupBy,
+      filters: snapshot.filters,
+      thresholds: snapshot.thresholds,
+      limit: snapshot.limit,
+      vis: snapshot.vis,
+      timeRange: snapshot.timeRange,
+      customPeriod: snapshot.customPeriod,
+    });
+    window.history.replaceState(window.history.state, '', url);
   };
 
   const runQuery = () => {
@@ -2648,13 +2723,16 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
     skipDynamicsDefaultRef.current = false;
     setDynamicsSeriesIds(new Set());
     setShowOthersOnChart(false);
-    setAppliedSnapshot(buildExplorerQuerySnapshot({
+    const nextAppliedSnapshot = buildExplorerQuerySnapshot({
       ...snapshot,
       limit: resolveExplorerFetchLimit(snapshot.limit ?? limit),
       fetchLimit: resolveExplorerFetchLimit(snapshot.limit ?? limit),
       visualLimit: EXPLORER_DEFAULT_VISUAL_LIMIT,
       dynamicsSeriesIds: [],
-    }));
+    });
+    setGroupBy(nextAppliedSnapshot.groupBy);
+    setAppliedSnapshot(nextAppliedSnapshot);
+    replaceExplorerUrl(nextAppliedSnapshot);
     setHasAppliedQuery(true);
     setFetchLimit(resolveExplorerFetchLimit(snapshot.limit ?? limit));
     setVisualLimit(EXPLORER_DEFAULT_VISUAL_LIMIT);
@@ -2681,7 +2759,7 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
     });
     applyExplorerQuerySnapshot(snapshot, querySetters);
     setMetric(snapshot.metric);
-    setGroupBy(snapshot.groupBy);
+    setGroupBy(normalizeExplorerGroupTokens(snapshot.groupBy));
     setFetchLimit(resolveExplorerFetchLimit(snapshot.limit));
     setVis(normalizeExplorerVis(snapshot.vis));
     setVisualLimit(EXPLORER_DEFAULT_VISUAL_LIMIT);
@@ -2703,7 +2781,7 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
     }
     applyExplorerQuerySnapshot(migrateExplorerSnapshot(lastApplied), querySetters);
     setMetric(lastApplied.metric || metric);
-    setGroupBy(lastApplied.groupBy || groupBy);
+    setGroupBy(normalizeExplorerGroupTokens(lastApplied.groupBy || groupBy));
     setFetchLimit(resolveExplorerFetchLimit(lastApplied.fetchLimit ?? lastApplied.limit));
     setVis(normalizeExplorerVis(lastApplied.vis));
     setVisualLimit(lastApplied.visualLimit ?? EXPLORER_DEFAULT_VISUAL_LIMIT);
@@ -2966,9 +3044,11 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
     }
   };
 
-  const addFilterFromCell = (field, value, label) => {
+  const addFilterFromCell = (field, value, label, groupMask = null) => {
     const meta = filterFieldMeta(schema, field);
-    const op = meta?.type === 'tcp_flags' ? 'eq' : '=';
+    const op = groupMask != null && groupMask !== EXPLORER_GROUP_MASK_DEFAULT
+      ? 'cidr'
+      : meta?.type === 'tcp_flags' ? 'eq' : '=';
     setFilters((prev) => [...prev, {
       id: Date.now() + Math.random(),
       field,
@@ -2992,6 +3072,7 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
       vis,
     });
     setAppliedSnapshot(snapshot);
+    replaceExplorerUrl(snapshot);
     setHasAppliedQuery(true);
     setQueryVersion((v) => v + 1);
     if (toastTitle) {
@@ -3002,13 +3083,17 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
   const focusRow = (row) => {
     const nextFilters = [
       ...filters,
-      ...appliedGroupBy.map((field, idx) => {
-        const filterVal = explorerRowFilterValue(row, field, idx, dimensionById);
+      ...appliedGroupBy.map((groupToken, idx) => {
+        const field = explorerGroupFieldId(groupToken);
+        const mask = explorerGroupMask(groupToken);
+        const filterVal = mask != null && mask !== EXPLORER_GROUP_MASK_DEFAULT
+          ? { value: row.values[idx], label: null }
+          : explorerRowFilterValue(row, groupToken, idx, dimensionById);
         const isTcpFlags = field === 'tcp_flags' || dimensionById[field]?.kind === 'tcp_flags';
         return {
           id: Date.now() + idx + Math.random(),
           field,
-          op: isTcpFlags ? 'eq' : '=',
+          op: mask != null && mask !== EXPLORER_GROUP_MASK_DEFAULT ? 'cidr' : isTcpFlags ? 'eq' : '=',
           value: filterVal.value,
           label: filterVal.label,
           logic: 'and',
@@ -3021,8 +3106,9 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
   const excludeRow = (row) => {
     const nextFilters = [
       ...filters,
-      ...appliedGroupBy.map((field, idx) => {
-        const filterVal = explorerRowFilterValue(row, field, idx, dimensionById);
+      ...appliedGroupBy.map((groupToken, idx) => {
+        const field = explorerGroupFieldId(groupToken);
+        const filterVal = explorerRowFilterValue(row, groupToken, idx, dimensionById);
         const isTcpFlags = field === 'tcp_flags' || dimensionById[field]?.kind === 'tcp_flags';
         return {
           id: Date.now() + idx + Math.random(),
@@ -3237,22 +3323,33 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
             </BuilderControl>
             <BuilderControl label="Группировка">
               <div className="row" style={{ gap: 6, flexWrap: 'wrap' }}>
-                {groupBy.map((d) => (
-                  <span key={d} className="badge badge--info" style={{ padding: '4px 10px 4px 8px', gap: 6, fontSize: 12 }}>
-                    {dimensionById[d]?.label || d}
-                    <button onClick={() => setGroupBy((g) => g.filter((x) => x !== d))} style={{ all: 'unset', cursor: 'pointer', opacity: 0.8, marginLeft: 2 }}>
-                      <Icon name="x" size={10} stroke={2.5} />
-                    </button>
-                  </span>
-                ))}
+                {groupBy.map((token) => {
+                  const id = explorerGroupFieldId(token);
+                  return (
+                    <ExplorerGroupChip
+                      key={id}
+                      token={token}
+                      dimension={dimensionById[id]}
+                      onChange={(nextToken) => setGroupBy((current) => normalizeExplorerGroupTokens(
+                        current.map((item) => (explorerGroupFieldId(item) === id ? nextToken : item)),
+                      ))}
+                      onRemove={() => setGroupBy((current) => current.filter((item) => explorerGroupFieldId(item) !== id))}
+                    />
+                  );
+                })}
                 <div ref={dimAnchorRef}>
                   <Button kind="ghost" size="xs" icon="plus" onClick={() => setAddingDim((v) => !v)}>Измерение</Button>
                   {addingDim && (
                     <DimensionPicker
                       anchorRef={dimAnchorRef}
                       dimensions={dimensions}
-                      selected={groupBy}
-                      onPick={(id) => { if (!groupBy.includes(id)) setGroupBy([...groupBy, id]); setAddingDim(false); }}
+                      selected={groupBy.map(explorerGroupFieldId)}
+                      onPick={(id) => {
+                        if (!groupBy.some((token) => explorerGroupFieldId(token) === id)) {
+                          setGroupBy(normalizeExplorerGroupTokens([...groupBy, id]));
+                        }
+                        setAddingDim(false);
+                      }}
                       onClose={() => setAddingDim(false)}
                     />
                   )}
@@ -3301,7 +3398,7 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
               const payload = migrateExplorerSnapshot(q.query || q);
               applyExplorerQuerySnapshot(payload, querySetters);
               if (payload.metric) setMetric(payload.metric);
-              if (Array.isArray(payload.groupBy)) setGroupBy(payload.groupBy);
+              if (Array.isArray(payload.groupBy)) setGroupBy(normalizeExplorerGroupTokens(payload.groupBy));
               if (payload.limit) setLimit(payload.limit);
               if (payload.vis) setVis(normalizeExplorerVis(payload.vis));
               setEditingSaved(q);
@@ -3650,7 +3747,13 @@ function ExplorerRowActions({
       <button type="button" className="badge explorer-row-actions__btn" title="Добавить значения строки в фильтр" onClick={() => onFocus?.(row)}>
         <ExplorerActionLabel full="В фильтр" short="Фильтр" />
       </button>
-      <button type="button" className="badge explorer-row-actions__btn" title="Исключить значения строки из выборки" onClick={() => onExclude?.(row)}>
+      <button
+        type="button"
+        className="badge explorer-row-actions__btn"
+        title={onExclude ? 'Исключить значения строки из выборки' : 'Исключение недоступно для группировки по IP-сети'}
+        disabled={!onExclude}
+        onClick={() => onExclude?.(row)}
+      >
         <ExplorerActionLabel full="Исключить" short="Искл." />
       </button>
       <button
@@ -3711,6 +3814,51 @@ function BuilderControl({ label, children }) {
       <div style={{ font: 'var(--pv-text-body-3-bold)', textTransform: 'uppercase', letterSpacing: '0.08em', color: 'var(--fg-secondary)', fontSize: 10 }}>{label}</div>
       <div className="row" style={{ gap: 4 }}>{children}</div>
     </div>
+  );
+}
+
+function ExplorerGroupChip({ token, dimension, onChange, onRemove }) {
+  const { id, mask } = parseExplorerGroupToken(token);
+  const defaultMask = dimension?.maskDefault || EXPLORER_GROUP_MASK_DEFAULT;
+  const [draftMask, setDraftMask] = useState(String(mask ?? defaultMask));
+
+  useEffect(() => {
+    setDraftMask(String(mask ?? defaultMask));
+  }, [mask, defaultMask]);
+
+  const commitMask = () => {
+    const nextToken = formatExplorerGroupToken(id, draftMask);
+    setDraftMask(String(explorerGroupMask(nextToken) ?? defaultMask));
+    if (nextToken !== token) onChange?.(nextToken);
+  };
+
+  return (
+    <span className="badge badge--info" style={{ padding: '4px 10px 4px 8px', gap: 5, fontSize: 12 }}>
+      {dimension?.label || id}
+      {dimension?.maskable && (
+        <>
+          <span aria-hidden="true">/</span>
+          <input
+            className="input mono"
+            type="number"
+            min={dimension.maskMin || 1}
+            max={dimension.maskMax || 32}
+            step="1"
+            aria-label={`Маска для ${dimension.label || id}`}
+            value={draftMask}
+            onChange={(e) => setDraftMask(e.target.value)}
+            onBlur={commitMask}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') e.currentTarget.blur();
+            }}
+            style={{ width: 44, height: 24, padding: '1px 3px', fontSize: 12, textAlign: 'center' }}
+          />
+        </>
+      )}
+      <button onClick={onRemove} style={{ all: 'unset', cursor: 'pointer', opacity: 0.8, marginLeft: 2 }}>
+        <Icon name="x" size={10} stroke={2.5} />
+      </button>
+    </span>
   );
 }
 
@@ -5364,7 +5512,9 @@ function SaveObservationModal({
   const defaultLookback = timeRange === '15m'
     ? '30m'
     : (['30m', '1h', '6h', '24h', '7d'].includes(timeRange) ? timeRange : '1h');
-  const defaultTop = (groupBy || []).find((g) => ['src_asn', 'dst_asn', 'src_ip', 'dst_ip', 'vlan', 'proto'].includes(g))
+  const defaultTop = (groupBy || []).find((g) => (
+    ['src_asn', 'dst_asn', 'src_ip', 'dst_ip', 'vlan', 'proto'].includes(explorerGroupFieldId(g))
+  ))
     || groupBy?.[0]
     || 'src_asn';
   const [name, setName] = useState('');
@@ -5375,7 +5525,7 @@ function SaveObservationModal({
   const [topGroup, setTopGroup] = useState(defaultTop);
   const [busy, setBusy] = useState(false);
   // Группировка из разбора трафика всегда важнее селектора: см. saveAsObservation.
-  const groupSummary = (groupBy || []).map((g) => dimensionById?.[g]?.label || g).join(' × ');
+  const groupSummary = (groupBy || []).map((g) => explorerGroupLabel(g, dimensionById || {})).join(' × ');
 
   useEffect(() => {
     if (!open) return;
@@ -5468,7 +5618,7 @@ function SaveObservationModal({
             Наблюдение сохранит первые {OBSERVATION_MAX_GROUP_BY} измерения разреза:
             {' '}
             {(groupBy || []).slice(0, OBSERVATION_MAX_GROUP_BY)
-              .map((g) => dimensionById?.[g]?.label || g)
+              .map((g) => explorerGroupLabel(g, dimensionById || {}))
               .join(' × ')}
             . Остальные останутся только в разборе трафика.
           </div>
@@ -5483,6 +5633,7 @@ function SaveObservationModal({
         </label>
         <div style={{ marginLeft: 24, color: 'var(--fg-muted)', font: 'var(--pv-text-body-3)' }}>
           Без неё плитка будет пустой: график и топ по группировке считаются из подготовленных данных.
+          Счёт с момента создания, прошлые сутки не пересчитываются.
         </div>
         <label className="row" style={{ gap: 8, alignItems: 'center' }}>
           <input type="checkbox" checked={reportEnabled} onChange={(e) => setReportEnabled(e.target.checked)} />
@@ -5503,7 +5654,7 @@ function SaveObservationModal({
 }
 
 function SaveQueryModal({ open, onClose, groupBy, metric, filters, dimensionById, metricLabel, editing, onSave }) {
-  const defaultName = editing?.name || `${metricLabel} · ${groupBy.map((g) => dimensionById[g]?.label || g).join(' × ')}`;
+  const defaultName = editing?.name || `${metricLabel} · ${groupBy.map((g) => explorerGroupLabel(g, dimensionById)).join(' × ')}`;
   const [name, setName] = useState(defaultName);
   const [description, setDescription] = useState(editing?.description || '');
   const [folder, setFolder] = useState(editing?.folder || 'Мои фильтры');
@@ -5561,7 +5712,7 @@ function SaveQueryModal({ open, onClose, groupBy, metric, filters, dimensionById
         </div>
         <Card pad="sm" style={{ gridColumn: '1 / -1', background: 'var(--surf-1)' }}>
           <div>Метрика: <b>{metricLabel}</b></div>
-          <div>Группировка: <b>{groupBy.map((g) => dimensionById[g]?.label || g).join(', ')}</b></div>
+          <div>Группировка: <b>{groupBy.map((g) => explorerGroupLabel(g, dimensionById)).join(', ')}</b></div>
           <div>Фильтры: <b>{filters.length || 'нет'}</b></div>
         </Card>
       </div>

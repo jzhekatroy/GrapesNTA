@@ -55,6 +55,17 @@ describe('explorer query shape', () => {
     assert.deepEqual(spec.params.series_ids, ['isp:pin', 'isp:arbital']);
   });
 
+  it('groups IPv4 by prefix when groupBy is src_ip/24', async () => {
+    const spec = await explorerFlows({
+      ...WINDOW,
+      groupBy: ['src_ip/24'],
+    });
+    assert.match(spec.sql, /IPv4CIDRToRange\(/);
+    assert.match(spec.sql, /\/24/);
+    assert.equal(spec.meta.groupBy[0].id, 'src_ip/24');
+    assert.match(spec.meta.groupBy[0].label, /\/24/);
+  });
+
   it('omits unique IP sketches from the default summary', async () => {
     const spec = await explorerSummary({
       ...WINDOW,
