@@ -394,6 +394,7 @@ function Header({ current, onNavigate, onToggleSidebar, currentUser, onLogout, o
                 customPeriod={customPeriod}
                 onCustomPeriodChange={onCustomPeriodChange}
                 displayTimezone={displayTimezone}
+                maxRangeDays={cabinetMode && current === 'dashboard' ? 730 : null}
               />
             </>
           )}
@@ -929,7 +930,7 @@ function TimeFilter({ timeRange, onTimeRangeChange, customPeriod, onCustomPeriod
   }, [open]);
 
   const applyCustomPeriod = () => {
-    const err = isExplorer
+    const err = (isExplorer || Number(maxRangeDays) > 0)
       ? validateExplorerCustomPeriod(draftPeriod, 'custom', maxRangeDays)
       : validateCustomPeriod(draftPeriod);
     if (err) {

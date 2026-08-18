@@ -71,6 +71,12 @@ const CABINET_EXPLORER_MAX_RANGE_MS = CABINET_EXPLORER_MAX_RANGE_DAYS * 86400000
 const EXPLORER_FILTER_LOGIC = new Set(['and', 'or', 'and_not', 'or_not']);
 const EXPLORER_METRIC_KEYS = new Set(['bps', 'volume', 'pps', 'fps', 'flows', 'uniq_src']);
 const EXPLORER_ENTITY_SERIES_DIMS = new Set(['src_entity', 'dst_entity']);
+const CABINET_EXPLORER_FIELD_IDS = new Set([
+  'src_ip', 'dst_ip', 'src_port', 'dst_port',
+  'proto', 'src_service', 'dst_service', 'tcp_flags',
+  'src_asn', 'dst_asn', 'src_country', 'dst_country',
+  'client_direction',
+]);
 const SAVED_FILTERS_FILE = path.join(__dirname, 'data', 'explorer-saved-filters.json');
 
 const FILTER_OPS_BY_TYPE = {
@@ -331,6 +337,12 @@ const EXPLORER_DIRECTION_OPTIONS = [
   { value: 'transit', hint: 'транзит' },
   { value: 'internal', hint: 'внутренний' },
   { value: 'unknown', hint: 'неизвестный' },
+];
+
+const CABINET_CLIENT_DIRECTION_OPTIONS = [
+  { value: 'in', label: 'К вам' },
+  { value: 'out', label: 'От вас' },
+  { value: 'internal', label: 'Внутри вашей сети' },
 ];
 
 const EXPLORER_FIELD_HINTS = {
@@ -1062,8 +1074,81 @@ function explorerDimensions() {
   return dims;
 }
 
+function cabinetClientDirectionExpr() {
+  return `multiIf(`
+    + `f.src_client = {cabinet_client_id:String} AND f.dst_client = {cabinet_client_id:String}, 'internal', `
+    + `f.dst_client = {cabinet_client_id:String}, 'in', `
+    + `f.src_client = {cabinet_client_id:String}, 'out', '')`;
+}
+
+function cabinetExplorerDimensions() {
+  const base = explorerDimensions();
+  const dims = Object.fromEntries(
+    Object.entries(base).filter(([id]) => CABINET_EXPLORER_FIELD_IDS.has(id)),
+  );
+  const directionExpr = cabinetClientDirectionExpr();
+  dims.client_direction = {
+    label: 'Направление',
+    group: EXPLORER_GROUP.DIR,
+    kind: 'enum',
+    filterType: 'enum',
+    expr: directionExpr,
+    filterExpr: directionExpr,
+    groupKeyExpr: directionExpr,
+    labelFromKey: (key) => `multiIf(${key} = 'in', 'К вам', ${key} = 'out', 'От вас', ${key} = 'internal', 'Внутри вашей сети', toString(${key}))`,
+    valueOptions: CABINET_CLIENT_DIRECTION_OPTIONS,
+    aliases: ['направление', 'direction'],
+  };
+  return dims;
+}
+
+function explorerDimensionsForOptions(options = {}) {
+  return options.cabinet || options.cabinetClientId
+    ? cabinetExplorerDimensions()
+    : explorerDimensions();
+}
+
+function cabinetExplorerValidationError(message) {
+  const error = new Error(message);
+  error.statusCode = 400;
+  return error;
+}
+
+function validateCabinetExplorerFields(body = {}) {
+  if (body.groupBy != null && !Array.isArray(body.groupBy)) {
+    throw cabinetExplorerValidationError('groupBy должен быть массивом');
+  }
+  for (const token of Array.isArray(body.groupBy) ? body.groupBy : []) {
+    const raw = String(token ?? '').trim();
+    const { id } = parseExplorerGroupToken(raw);
+    const validMask = id === 'src_ip' || id === 'dst_ip'
+      ? new RegExp(`^${id}(?:/(?:[1-9]|[12][0-9]|3[0-2]))?$`).test(raw)
+      : raw === id;
+    if (!CABINET_EXPLORER_FIELD_IDS.has(id) || !validMask) {
+      throw cabinetExplorerValidationError(`Недоступная группировка: ${raw || 'пустое значение'}`);
+    }
+  }
+
+  if (body.filters != null && !Array.isArray(body.filters)) {
+    throw cabinetExplorerValidationError('filters должен быть массивом');
+  }
+  const dims = cabinetExplorerDimensions();
+  for (const filter of Array.isArray(body.filters) ? body.filters : []) {
+    const field = String(filter?.field || filter?.dim || '').trim();
+    const dim = dims[field];
+    if (!field || !CABINET_EXPLORER_FIELD_IDS.has(field) || !dim) {
+      throw cabinetExplorerValidationError(`Недоступное поле фильтра: ${field || 'пустое значение'}`);
+    }
+    const op = String(filter?.op || '=').trim().toLowerCase();
+    const allowedOps = FILTER_OPS_BY_TYPE[dim.filterType] || FILTER_OPS_BY_TYPE.string;
+    if (!allowedOps.includes(op)) {
+      throw cabinetExplorerValidationError(`Недоступный оператор фильтра ${field}: ${op}`);
+    }
+  }
+}
+
 function explorerSchema(options = {}) {
-  const dims = explorerDimensions();
+  const dims = explorerDimensionsForOptions(options);
   const metrics = buildExplorerMetricSpecs(explorerScaledFlowExprs('f'));
   const collectorField = {
     id: 'collector',
@@ -1075,11 +1160,9 @@ function explorerSchema(options = {}) {
     entityType: null,
     aliases: ['коллекторы'],
   };
-  const hiddenInCabinet = new Set(['source_id', 'collector']);
   const dimensions = Object.entries(dims)
     .filter(([, d]) => !d.virtual)
     .filter(([id, d]) => explorerDimensionVisibleInPicker(id, d))
-    .filter(([id]) => !options.cabinet || !hiddenInCabinet.has(id))
     .map(([id, d]) => ({
       id,
       label: d.label,
@@ -1089,6 +1172,7 @@ function explorerSchema(options = {}) {
       filterOps: FILTER_OPS_BY_TYPE[d.filterType] || FILTER_OPS_BY_TYPE.string,
       groupable: !d.virtual,
       aliases: d.aliases || [],
+      ...(options.cabinet && d.valueOptions ? { valueOptions: d.valueOptions } : {}),
       ...(d.maskable ? {
         maskable: true,
         maskMin: d.maskMin,
@@ -1099,7 +1183,6 @@ function explorerSchema(options = {}) {
   const filterFields = options.cabinet
     ? Object.entries(dims)
       .filter(([id, d]) => explorerDimensionVisibleInFilters(id, d))
-      .filter(([id]) => !hiddenInCabinet.has(id))
       .map(([id, d]) => explorerFilterFieldMeta(id, d))
     : [
       collectorField,
@@ -1115,7 +1198,17 @@ function explorerSchema(options = {}) {
       metricKeys: [...EXPLORER_METRIC_KEYS],
       maxLimit: EXPLORER_MAX_LIMIT,
       maxExportRows: EXPLORER_MAX_EXPORT_ROWS,
-      dimensionGroups: DIMENSION_GROUPS,
+      dimensionGroups: Object.fromEntries(
+        Object.entries({
+          ...DIMENSION_GROUPS,
+          [EXPLORER_GROUP.DIR]: ['client_direction'],
+        })
+          .map(([group, ids]) => [
+            group,
+            ids.filter((id) => CABINET_EXPLORER_FIELD_IDS.has(id)),
+          ])
+          .filter(([, ids]) => ids.length),
+      ),
       granularities: ['auto', '1m', '5m', '1h', '1d'],
       maxRangeDays: CABINET_EXPLORER_MAX_RANGE_DAYS,
       ...explorerThresholdSchemaExtras(),
@@ -1448,15 +1541,6 @@ function applyExplorerScope(whereClauses, params, q, flowAlias = 'f') {
   return scopedParams;
 }
 
-function stripCabinetForbiddenFilters(filters) {
-  return normalizeFilterList(filters).filter((f) => (
-    f.field !== 'collector'
-    && f.field !== 'source_id'
-    && f.field !== 'src_client'
-    && f.field !== 'dst_client'
-  ));
-}
-
 function normalizeMacValue(raw) {
   const hex = String(raw ?? '').replace(/[:\-\s.]/g, '').toLowerCase();
   if (!/^[0-9a-f]{12}$/.test(hex)) return null;
@@ -1781,6 +1865,7 @@ function collectExplorerJoins(groupBy, dims, filterJoins = []) {
 }
 
 function normalizeExplorerQuery(body = {}, options = {}) {
+  if (options.cabinetClientId) validateCabinetExplorerFields(body);
   const range = body.range || body.timeRange || '1h';
   const from = body.from;
   const to = body.to;
@@ -1803,9 +1888,7 @@ function normalizeExplorerQuery(body = {}, options = {}) {
   }
   const granKey = body.granularity || 'auto';
   const defaultPeakWindow = granKey === '1m' ? '1m' : granKey === '1h' || granKey === '1d' ? '1h' : '5m';
-  const filters = options.cabinetClientId
-    ? stripCabinetForbiddenFilters(body.filters)
-    : normalizeFilterList(body.filters);
+  const filters = normalizeFilterList(body.filters);
   return {
     metric: normalizeExplorerMetric(body.metric),
     groupBy: body.groupBy,
@@ -2223,7 +2306,10 @@ async function explorerFlowsPeakPath({
 
 async function explorerFlows(body = {}, options = {}) {
   const q = normalizeExplorerQuery(body, options);
-  const { groups, dims } = resolveExplorerGroupState(q.groupBy);
+  const { groups, dims } = resolveExplorerGroupState(
+    q.groupBy,
+    explorerDimensionsForOptions(options),
+  );
   if (!groups.length) throw new Error('Выберите хотя бы одну группировку');
 
   const metricKey = q.metric;
@@ -2537,7 +2623,7 @@ async function explorerFlows(body = {}, options = {}) {
 
 async function explorerSummary(body = {}, options = {}) {
   const q = normalizeExplorerQuery(body, options);
-  const dims = explorerDimensions();
+  const dims = explorerDimensionsForOptions(options);
   const scaled = explorerScaledFlowExprs('f');
   const windowSpec = explorerResolveTrafficWindow(body, q);
   const params = { ...windowSpec.params };
@@ -2548,10 +2634,13 @@ async function explorerSummary(body = {}, options = {}) {
   const whereClauses = [`f.${t} >= ts_from`, `f.${t} < ts_to`];
   if (filterSql) whereClauses.push(filterSql);
   const scopedParams = applyExplorerScope(whereClauses, params, q);
-  const directionSelect = directionCol
-    ? `sumIf(${scaled.bytes}, f.${directionCol} = 'in') AS in_bytes,
-        sumIf(${scaled.bytes}, f.${directionCol} = 'out') AS out_bytes,`
-    : '';
+  const directionSelect = q.cabinetClientId
+    ? `sumIf(${scaled.bytes}, ${cabinetClientDirectionExpr()} = 'in') AS in_bytes,
+        sumIf(${scaled.bytes}, ${cabinetClientDirectionExpr()} = 'out') AS out_bytes,`
+    : directionCol
+      ? `sumIf(${scaled.bytes}, f.${directionCol} = 'in') AS in_bytes,
+          sumIf(${scaled.bytes}, f.${directionCol} = 'out') AS out_bytes,`
+      : '';
   const protoCol = col('proto');
 
   return {
@@ -2593,8 +2682,8 @@ async function explorerSummary(body = {}, options = {}) {
   };
 }
 
-async function explorerResultSeries(body = {}, flowRows = []) {
-  const q = normalizeExplorerQuery(body);
+async function explorerResultSeries(body = {}, flowRows = [], options = {}) {
+  const q = normalizeExplorerQuery(body, options);
   if (!flowRows.length) {
     return {
       params: {},
@@ -2603,7 +2692,10 @@ async function explorerResultSeries(body = {}, flowRows = []) {
     };
   }
 
-  const { groups, dims } = resolveExplorerGroupState(q.groupBy);
+  const { groups, dims } = resolveExplorerGroupState(
+    q.groupBy,
+    explorerDimensionsForOptions(options),
+  );
   if (!groups.length) {
     return {
       params: {},
@@ -2962,7 +3054,7 @@ async function explorerGroupedTimeseries(body = {}) {
 
 async function explorerTimeseries(body = {}, options = {}) {
   const q = normalizeExplorerQuery(body, options);
-  const dims = explorerDimensions();
+  const dims = explorerDimensionsForOptions(options);
   const scaled = explorerScaledFlowExprs('f');
   const gran = resolveExplorerGranularity(q);
   const windowSpec = explorerResolveTrafficWindow(body, q);
@@ -3021,7 +3113,7 @@ async function explorerTimeseries(body = {}, options = {}) {
 
 async function explorerBreakdown(body = {}, dimension = 'proto', limit = 5, options = {}) {
   const q = normalizeExplorerQuery(body, options);
-  const dims = explorerDimensions();
+  const dims = explorerDimensionsForOptions(options);
   const dim = dims[dimension];
   if (!dim || dim.virtual) throw new Error(`Недоступное измерение: ${dimension}`);
   const scaled = explorerScaledFlowExprs('f');
@@ -3068,9 +3160,13 @@ async function explorerBreakdown(body = {}, dimension = 'proto', limit = 5, opti
 }
 
 async function explorerQuery(body = {}, options = {}) {
+  if (options.cabinetClientId) validateCabinetExplorerFields(body);
   const queryBody = await ensureExplorerWindowSnapshot(body, options);
   const q = normalizeExplorerQuery(queryBody, options);
-  const { groups } = resolveExplorerGroupState(q.groupBy);
+  const { groups } = resolveExplorerGroupState(
+    q.groupBy,
+    explorerDimensionsForOptions(options),
+  );
   const flowsSpec = groups.length ? await explorerFlows(queryBody, options) : null;
   let summarySpec = null;
   let timeseriesSpec = null;
@@ -3089,6 +3185,9 @@ async function explorerQuery(body = {}, options = {}) {
 
 /** Two CH reads at a time: flows+summary, then series+timeseries. */
 async function executeExplorerQueryBundle(bundle, queryBody, runNamed, namePrefix = 'explorer') {
+  const queryOptions = bundle?.q?.cabinetClientId
+    ? { cabinetClientId: bundle.q.cabinetClientId }
+    : {};
   const [flowsResult, summaryResult] = await Promise.all([
     bundle.flowsSpec
       ? runNamed(() => Promise.resolve(bundle.flowsSpec), { name: `${namePrefix}/flows` })
@@ -3100,7 +3199,7 @@ async function executeExplorerQueryBundle(bundle, queryBody, runNamed, namePrefi
   const [resultSeriesResult, timeseriesResult] = await Promise.all([
     flowsResult?.data?.length
       ? runNamed(
-        () => explorerResultSeries(queryBody, flowsResult.data),
+        () => explorerResultSeries(queryBody, flowsResult.data, queryOptions),
         { name: `${namePrefix}/result-series` },
       )
       : null,
@@ -3563,6 +3662,7 @@ function rowsToCsv(rows, groupBy, metricLabel) {
 }
 
 async function explorerExportCsv(body = {}, options = {}) {
+  if (options.cabinetClientId) validateCabinetExplorerFields(body);
   const hasPinnedWindow = body.from && body.to;
   const snapshotBody = hasPinnedWindow
     ? { ...body, range: 'custom', timeRange: undefined }

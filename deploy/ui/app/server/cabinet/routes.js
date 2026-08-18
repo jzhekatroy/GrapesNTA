@@ -32,6 +32,8 @@ const {
 } = require('./client-admin');
 const {
   overviewSeries,
+  overviewStats,
+  overviewRecentFlows,
   overviewCountries,
   overviewServices,
   dnsDomains,
@@ -92,6 +94,26 @@ function createCabinetRouter({ sessions }) {
     try {
       const clientId = requireScopedClientId(req.cabinet);
       const result = await overviewSeries(clientId, req.query);
+      res.json(result);
+    } catch (err) {
+      sendError(res, err);
+    }
+  });
+
+  router.get('/overview/stats', async (req, res) => {
+    try {
+      const clientId = requireScopedClientId(req.cabinet);
+      const result = await overviewStats(clientId, req.query);
+      res.json(result);
+    } catch (err) {
+      sendError(res, err);
+    }
+  });
+
+  router.get('/overview/recent-flows', async (req, res) => {
+    try {
+      const clientId = requireScopedClientId(req.cabinet);
+      const result = await overviewRecentFlows(clientId, req.query);
       res.json(result);
     } catch (err) {
       sendError(res, err);

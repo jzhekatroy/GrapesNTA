@@ -378,9 +378,20 @@ function App() {
   } else {
     switch (page) {
       case 'dashboard':
-        pageEl = cabinetMode
-          ? <PageCabinetOverview key={`${refreshKey}-${displayTimezone}`} onNavigate={navigate} timeRange={timeRange} customPeriod={customPeriod} displayTimezone={displayTimezone} readOnly={cabinetReadOnly} />
-          : <PageDashboard key={`${refreshKey}-${displayTimezone}`} onNavigate={navigate} directions={directions} timeRange={timeRange} customPeriod={customPeriod} collectorFilter={collectorFilter} displayTimezone={displayTimezone} onChartRangeSelect={applyChartRangeZoom} />;
+        pageEl = (
+          <PageDashboard
+            key={`${refreshKey}-${displayTimezone}`}
+            onNavigate={navigate}
+            directions={directions}
+            timeRange={timeRange}
+            customPeriod={customPeriod}
+            collectorFilter={collectorFilter}
+            displayTimezone={displayTimezone}
+            onChartRangeSelect={applyChartRangeZoom}
+            cabinetMode={cabinetMode}
+            readOnly={cabinetReadOnly}
+          />
+        );
         break;
       case 'monitoring': pageEl = <PageMonitoring key={`${refreshKey}-${displayTimezone}`} displayTimezone={displayTimezone} />; break;
       case 'explorer':

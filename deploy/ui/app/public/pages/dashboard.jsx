@@ -60,7 +60,13 @@ const TRAFFIC_STAT_TILES = [
   { id: 'volume', label: 'Объём', mode: 'volume' },
 ];
 
-function PageDashboard({ onNavigate, directions, timeRange, customPeriod, collectorFilter, displayTimezone, onChartRangeSelect }) {
+function PageDashboard(props) {
+  return props.cabinetMode
+    ? <CabinetDashboard {...props} />
+    : <OperatorDashboard {...props} />;
+}
+
+function OperatorDashboard({ onNavigate, directions, timeRange, customPeriod, collectorFilter, displayTimezone, onChartRangeSelect }) {
   const [data, setData] = useState({
     source: 'loading',
     series: { points: [], lines: [] },
@@ -190,9 +196,6 @@ function PageDashboard({ onNavigate, directions, timeRange, customPeriod, collec
     }
     return next;
   });
-  const visibleChartLines = chartLines.filter((ln) => !chartHidden.has(ln.key));
-  const visiblePpsLines = chartLines.filter((ln) => !chartHidden.has(`${ln.key}_pps`));
-  const chartPpsHiddenKey = (key) => `${key}_pps`;
   const dataSource = statsSource === 'clickhouse' || source === 'clickhouse'
     ? 'clickhouse'
     : statsSource === 'loading' || source === 'loading'
@@ -220,12 +223,14 @@ function PageDashboard({ onNavigate, directions, timeRange, customPeriod, collec
             <DataLoadState />
           </Card>
         ) : TRAFFIC_STAT_TILES.map((tile) => (
-          <TrafficStatTile
+          <OverviewTrafficStatTile
             key={tile.id}
             label={tile.label}
             mode={tile.mode}
             stats={trafficStats?.[tile.id] || {}}
-            directions={directions}
+            directionDefs={TRAFFIC_DIRECTIONS
+              .filter((direction) => directions?.[direction.id])
+              .map((direction) => ({ ...direction, enabled: true }))}
             loadMs={statsLoadMs}
             serverMs={statsServerMs}
           />
@@ -238,99 +243,32 @@ function PageDashboard({ onNavigate, directions, timeRange, customPeriod, collec
         trendSplit={trendSplit}
         onTrendSplitChange={setTrendSplit}
       >
-        <Card
+        <OverviewTrafficChartCard
           title="Полоса пропускания и pps"
           subtitle={`${periodLabel} · NetFlow v9 + IPFIX · ${dataSubtitleSuffix}`}
+          points={chartPoints}
+          lines={chartLines}
+          ppsLines={chartLines}
+          mode={chartMode}
+          onModeChange={setChartMode}
+          hiddenKeys={chartHidden}
+          onToggleLine={toggleChartSeries}
+          loading={false}
+          failed={(source === 'error' || failedWidgets.series) && source !== 'loading'}
           loadMs={loadTimings.series}
           serverMs={loadServerMs.series}
-          tools={
-            <>
-              <div className="seg">
-                <button className={chartMode === 'bw' ? 'is-active' : ''} onClick={() => setChartMode('bw')}>Полоса</button>
-                <button className={chartMode === 'pps' ? 'is-active' : ''} onClick={() => setChartMode('pps')}>pps</button>
-              </div>
-              <Button kind="ghost" size="sm" icon="zoom" />
-              <Button kind="ghost" size="sm" icon="more" />
-            </>
-          }
-        >
-          <div className="chart-legend row" style={{gap: 14, marginBottom: 8, font: 'var(--pv-text-body-3)', color: 'var(--fg-secondary)', flexWrap: 'wrap'}}>
-            {chartMode === 'bw' && chartLines.map((ln) => {
-              const off = chartHidden.has(ln.key);
-              return (
-                <button
-                  key={ln.key}
-                  type="button"
-                  className={`chart-legend__item${off ? ' is-off' : ''}`}
-                  aria-pressed={!off}
-                  title={off ? 'Показать на графике' : 'Скрыть с графика'}
-                  onClick={() => toggleChartSeries(ln.key)}
-                >
-                  <span
-                    className="chart-legend__swatch"
-                    style={{
-                      width: 12,
-                      height: ln.key === 'total' ? 3 : 2,
-                      background: ln.color,
-                      opacity: off ? 0.35 : 1,
-                    }}
-                  />
-                  {ln.label}, бит/с
-                </button>
-              );
-            })}
-            {chartMode === 'pps' && chartLines.map((ln) => {
-              const ppsKey = chartPpsHiddenKey(ln.key);
-              const off = chartHidden.has(ppsKey);
-              return (
-                <button
-                  key={ppsKey}
-                  type="button"
-                  className={`chart-legend__item${off ? ' is-off' : ''}`}
-                  aria-pressed={!off}
-                  title={off ? 'Показать на графике' : 'Скрыть с графика'}
-                  onClick={() => toggleChartSeries(ppsKey)}
-                >
-                  <span
-                    className="chart-legend__swatch"
-                    style={{
-                      width: 12,
-                      height: ln.key === 'total' ? 3 : 2,
-                      background: ln.color,
-                      opacity: off ? 0.35 : 1,
-                    }}
-                  />
-                  {ln.label}, пакеты/с
-                </button>
-              );
-            })}
-            <span className="chart-legend__meta" style={{display: 'inline-flex', alignItems: 'center', gap: 6}}>
-              <Icon name="info" size={12} /> {onChartRangeSelect ? 'Выделите диапазон на графике · авто-обновление каждую минуту' : 'Авто-обновление каждую минуту'}
-            </span>
-          </div>
-          {(source === 'error' || failedWidgets.series) && source !== 'loading' ? (
-            <DataLoadState style={{ minHeight: 280 }} />
-          ) : (
-            <DualChart
-              points={chartPoints}
-              lines={visibleChartLines}
-              ppsLines={visiblePpsLines}
-              height={280}
-              mode={chartMode}
-              onRangeSelect={onChartRangeSelect}
-              bucketSeconds={300}
-              displayTimezone={displayTimezone}
-              periodStartMs={chartPeriodBounds.startMs}
-              periodEndMs={chartPeriodBounds.endMs}
-              skipTrailingGaps
-            />
-          )}
-          {chartPoints.length > 0 && (
+          displayTimezone={displayTimezone}
+          periodStartMs={chartPeriodBounds.startMs}
+          periodEndMs={chartPeriodBounds.endMs}
+          bucketSeconds={300}
+          onRangeSelect={onChartRangeSelect}
+          showEmptyState={false}
+          footer={chartPoints.length > 0 ? (
             <div className="chart-data-until">
               по завершённым пятиминуткам, до {chartPoints[chartPoints.length - 1].t}
             </div>
-          )}
-        </Card>
+          ) : null}
+        />
 
         <Card pad="sm">
           <div className="distribution-card__head">
@@ -353,7 +291,7 @@ function PageDashboard({ onNavigate, directions, timeRange, customPeriod, collec
             </div>
           </div>
           <div className="distribution-split">
-            <DistributionPane
+            <OverviewDistributionPane
               title="Протоколы"
               subtitle={distributionMode === 'share'
                 ? `L4 по объёму · ${periodLabel}`
@@ -372,7 +310,7 @@ function PageDashboard({ onNavigate, directions, timeRange, customPeriod, collec
               serverMs={distributionMode === 'trend' ? protocolTrend.serverMs : loadServerMs.protocols}
             />
             <div className="distribution-split__divider" aria-hidden="true" />
-            <DistributionPane
+            <OverviewDistributionPane
               title="Сервисы"
               subtitle={distributionMode === 'share'
                 ? `L7 по объёму · ${periodLabel}`
@@ -451,6 +389,282 @@ function PageDashboard({ onNavigate, directions, timeRange, customPeriod, collec
   );
 }
 
+const CABINET_OVERVIEW_DIRECTIONS = [
+  { id: 'in', label: 'К вам', color: '#51D16D' },
+  { id: 'out', label: 'От вас', color: '#6972F0' },
+];
+
+function cabinetOverviewState(result, emptyData) {
+  return {
+    source: result?.source || 'error',
+    data: result?.data ?? emptyData,
+    meta: result?.meta || null,
+    error: result?.error || '',
+    status: result?.status || 0,
+    loadMs: result?.loadMs ?? null,
+    serverMs: result?.serverMs ?? null,
+  };
+}
+
+function cabinetStatsForTile(data, tile) {
+  const output = {};
+  for (const direction of ['in', 'out']) {
+    const raw = data?.[tile]?.[direction];
+    if (raw && typeof raw === 'object') {
+      output[direction] = raw;
+    } else if (tile === 'volume') {
+      const bytes = Number(raw) || 0;
+      output[direction] = { gb: (bytes * 8) / 1e9, packets: 0 };
+    } else {
+      output[direction] = { bps: Number(raw) || 0, pps: 0 };
+    }
+  }
+  return output;
+}
+
+function cabinetCountryRows(rows, totalBytes, bounds) {
+  const windowSeconds = bounds?.startMs != null && bounds?.endMs != null
+    ? Math.max((Number(bounds.endMs) - Number(bounds.startMs)) / 1000, 1)
+    : 0;
+  return cabinetShareItems(rows, totalBytes).map((row) => {
+    const bytes = Number(row.bytes) || 0;
+    return {
+      ...row,
+      countryCode: row.synthetic ? '??' : row.countryCode,
+      trafficGb: (bytes * 8) / 1e9,
+      avgGbps: windowSeconds > 0 ? (bytes * 8 / windowSeconds) / 1e9 : 0,
+      packetCount: Number(row.packets) || 0,
+      flowCount: Number(row.flowsCount) || 0,
+    };
+  });
+}
+
+function cabinetServiceDonutItems(rows, totalBytes) {
+  const colors = ['#6972F0', '#51D16D', '#F0B400', '#22B8CF', '#A4ADFF', '#D16BA5', '#7F7F9D'];
+  return cabinetShareItems(rows, totalBytes).map((row, index) => ({
+    ...row,
+    label: row.synthetic ? 'Прочее' : formatCabinetServiceLabel(row),
+    value: Number(row.sharePercent) || 0,
+    percent: Number(row.sharePercent) || 0,
+    trafficGb: ((Number(row.bytes) || 0) * 8) / 1e9,
+    color: colors[index % colors.length],
+    ...(row.synthetic ? { key: 'other' } : {}),
+  }));
+}
+
+function CabinetDashboard({ onNavigate, timeRange, customPeriod, displayTimezone, readOnly, onChartRangeSelect }) {
+  const periodLabel = timeRangeLabel(timeRange, customPeriod);
+  const periodKey = `${timeRange}|${customPeriod?.from || ''}|${customPeriod?.to || ''}`;
+  const chartLongRange = isLongChartRange(timeRange, customPeriod);
+  const bounds = useMemo(
+    () => computeChartPeriodBounds(timeRange, customPeriod),
+    [timeRange, customPeriod?.from, customPeriod?.to],
+  );
+  const [series, setSeries] = useState({ source: 'loading', data: [], meta: null });
+  const [stats, setStats] = useState({ source: 'loading', data: null, meta: null });
+  const [countries, setCountries] = useState({ source: 'loading', data: [], meta: null });
+  const [services, setServices] = useState({ source: 'loading', data: [], meta: null });
+  const [recent, setRecent] = useState({ source: 'loading', data: [], meta: null });
+  const [countryDirection, setCountryDirection] = useState('in');
+  const [serviceDirection, setServiceDirection] = useState('in');
+  const [countryMetric, setCountryMetric] = useState('share');
+  const [chartHidden, setChartHidden] = useState(() => new Set());
+
+  useEffect(() => {
+    let cancelled = false;
+    setSeries({ source: 'loading', data: [], meta: null });
+    setStats({ source: 'loading', data: null, meta: null });
+    Promise.all([
+      ApiClient.loadCabinetOverviewSeries({ timeRange, customPeriod, granularity: 'auto' }),
+      ApiClient.loadCabinetOverviewStats({ timeRange, customPeriod }),
+    ]).then(([seriesResult, statsResult]) => {
+      if (cancelled) return;
+      setSeries(cabinetOverviewState(seriesResult, []));
+      setStats(cabinetOverviewState(statsResult, null));
+    });
+    return () => { cancelled = true; };
+  }, [periodKey]);
+
+  useEffect(() => {
+    let cancelled = false;
+    setCountries({ source: 'loading', data: [], meta: null });
+    ApiClient.loadCabinetOverviewCountries({
+      timeRange, customPeriod, direction: countryDirection, limit: 20,
+    }).then((result) => {
+      if (!cancelled) setCountries(cabinetOverviewState(result, []));
+    });
+    return () => { cancelled = true; };
+  }, [periodKey, countryDirection]);
+
+  useEffect(() => {
+    let cancelled = false;
+    setServices({ source: 'loading', data: [], meta: null });
+    ApiClient.loadCabinetOverviewServices({
+      timeRange, customPeriod, direction: serviceDirection, limit: 20,
+    }).then((result) => {
+      if (!cancelled) setServices(cabinetOverviewState(result, []));
+    });
+    return () => { cancelled = true; };
+  }, [periodKey, serviceDirection]);
+
+  useEffect(() => {
+    let cancelled = false;
+    setRecent({ source: 'loading', data: [], meta: null });
+    ApiClient.loadCabinetOverviewRecentFlows({ limit: 20 }).then((result) => {
+      if (!cancelled) setRecent(cabinetOverviewState(result, []));
+    });
+    return () => { cancelled = true; };
+  }, []);
+
+  const chart = useMemo(
+    () => cabinetSeriesToChart(series.data, series.meta),
+    [series.data, series.meta?.granularity],
+  );
+  const chartPoints = useMemo(
+    () => (chart.points || []).map((point) => ({
+      ...point,
+      t: formatPointTimeLabel(point, chartLongRange, displayTimezone),
+    })),
+    [chart.points, chartLongRange, displayTimezone],
+  );
+  const countryRows = useMemo(
+    () => cabinetCountryRows(countries.data, countries.meta?.totalBytes, bounds),
+    [countries.data, countries.meta?.totalBytes, bounds],
+  );
+  const serviceItems = useMemo(
+    () => cabinetServiceDonutItems(services.data, services.meta?.totalBytes),
+    [services.data, services.meta?.totalBytes],
+  );
+  const toggleChartLine = (key) => setChartHidden((previous) => {
+    const next = new Set(previous);
+    if (next.has(key)) next.delete(key); else next.add(key);
+    return next;
+  });
+  const dataMeta = (meta, granularity) => (
+    <CabinetDataMeta
+      granularity={granularity || meta?.granularity || meta?.breakdownGranularity}
+      dataUntil={meta?.dataUntil}
+      readOnly={readOnly}
+      displayTimezone={displayTimezone}
+      style={{ marginTop: 10 }}
+    />
+  );
+
+  return (
+    <div className="main__container">
+      <div className="page-head">
+        <div>
+          <h1>Сводка по сети</h1>
+          <p>Обзор входящего и исходящего трафика вашей сети.</p>
+        </div>
+        {onNavigate && (
+          <Button
+            kind="ghost"
+            size="sm"
+            iconRight="arrowURight"
+            onClick={() => openCabinetExplorer(onNavigate, { timeRange, customPeriod })}
+          >
+            Разбор трафика
+          </Button>
+        )}
+      </div>
+
+      <div className="grid traffic-stat-grid grid--mb">
+        {stats.source === 'error' ? (
+          <Card style={{ gridColumn: '1 / -1' }}>
+            <OverviewDataState error={stats.error} status={stats.status} />
+          </Card>
+        ) : ['max', 'avg', 'volume'].map((id) => (
+          <OverviewTrafficStatTile
+            key={id}
+            label={id === 'max' ? 'Максимально' : id === 'avg' ? 'Среднее' : 'Объём'}
+            mode={id === 'volume' ? 'volume' : 'rate'}
+            stats={cabinetStatsForTile(stats.data, id)}
+            directionDefs={CABINET_OVERVIEW_DIRECTIONS}
+            loadMs={stats.loadMs}
+            serverMs={stats.serverMs}
+            footer={dataMeta(stats.meta)}
+          />
+        ))}
+      </div>
+
+      <DashboardChartRow distributionMode="share" trendSplit={SHARE_RIGHT_SPLIT} onTrendSplitChange={() => {}}>
+        <OverviewTrafficChartCard
+          title="Полоса пропускания"
+          subtitle={`${periodLabel} · ${formatCabinetGranularityLabel(series.meta?.granularity) || '…'}`}
+          points={chartPoints}
+          lines={chart.lines}
+          mode="bw"
+          hiddenKeys={chartHidden}
+          onToggleLine={toggleChartLine}
+          loading={series.source === 'loading'}
+          failed={series.source === 'error'}
+          error={series.error}
+          status={series.status}
+          loadMs={series.loadMs}
+          serverMs={series.serverMs}
+          displayTimezone={displayTimezone}
+          periodStartMs={bounds.startMs}
+          periodEndMs={bounds.endMs}
+          bucketSeconds={chart.bucketSeconds}
+          onRangeSelect={onChartRangeSelect}
+          allowPps={false}
+          footer={dataMeta(series.meta)}
+        />
+        <Card pad="sm">
+          <div className="distribution-card__head">
+            <div className="distribution-card__title">Сервисы</div>
+            <OverviewDirectionToggle value={serviceDirection} onChange={setServiceDirection} />
+          </div>
+          <div className="distribution-split distribution-split--solo">
+            <OverviewDistributionPane
+              title="Сервисы по объёму"
+              subtitle={`${periodLabel} · ${serviceDirection === 'in' ? 'к вам' : 'от вас'}`}
+              items={serviceItems}
+              failed={services.source === 'error'}
+              error={services.error}
+              status={services.status}
+              loadMs={services.loadMs}
+              serverMs={services.serverMs}
+              centered
+            />
+          </div>
+          {dataMeta(services.meta)}
+        </Card>
+      </DashboardChartRow>
+
+      <div className="grid grid--1col grid--mb">
+        <OverviewCountryCard
+          subtitle={`${periodLabel} · ${countryDirection === 'in' ? 'к вам' : 'от вас'}`}
+          rows={countryRows}
+          colorMetric={countryMetric}
+          onColorMetricChange={setCountryMetric}
+          extraTools={<OverviewDirectionToggle value={countryDirection} onChange={setCountryDirection} />}
+          loading={countries.source === 'loading'}
+          failed={countries.source === 'error'}
+          error={countries.error}
+          status={countries.status}
+          loadMs={countries.loadMs}
+          serverMs={countries.serverMs}
+          listKey={`${periodKey}|${countryDirection}`}
+          footer={dataMeta(countries.meta)}
+        />
+      </div>
+
+      <OverviewRecentFlowsCard
+        rows={recent.data}
+        source={recent.source}
+        error={recent.error}
+        status={recent.status}
+        subtitle="Последние минуты, независимо от выбранного периода"
+        loadMs={recent.loadMs}
+        serverMs={recent.serverMs}
+        cabinetMode
+      />
+    </div>
+  );
+}
+
 function RecentFlowsCard({ directions, directionsKey, collectorFilter }) {
   const collectorFilterKey = (collectorFilter || []).join('|');
   const [rows, setRows] = useState([]);
@@ -479,71 +693,15 @@ function RecentFlowsCard({ directions, directionsKey, collectorFilter }) {
     return () => { cancelled = true; };
   }, [directionsKey, collectorFilterKey]);
 
-  const hasData = flowsSource === 'clickhouse';
-
   return (
-    <Card
-      className="card--recent-flows"
-      title="Последние потоки"
+    <OverviewRecentFlowsCard
+      rows={rows}
+      source={flowsSource}
       subtitle={`Последние потоки из flows_raw · ${directionFilterLabel}`}
       loadMs={loadMs}
       serverMs={serverMs}
-      pad="0"
-    >
-      <table className="table table--recent-flows" style={{ borderRadius: 0 }}>
-        <thead>
-          <tr>
-            <th className="recent-flows__time-col">Время</th>
-            <th>Поток</th>
-            <th className="recent-flows__meta-col">VLAN / GEO</th>
-            <th className="recent-flows__proto-col">Proto</th>
-            <th className="recent-flows__bytes-col">Объём</th>
-            <th className="recent-flows__asn-col">ASN</th>
-          </tr>
-        </thead>
-        <tbody>
-          {flowsSource === 'loading' && (
-            <tr>
-              <td colSpan={6} className="talker-table-state">Загрузка…</td>
-            </tr>
-          )}
-          {flowsSource === 'error' && (
-            <tr>
-              <td colSpan={6} className="talker-table-state">{LOAD_FAILED}</td>
-            </tr>
-          )}
-          {hasData && rows.length === 0 && (
-            <tr>
-              <td colSpan={6} className="talker-table-state">Нет потоков для выбранного направления</td>
-            </tr>
-          )}
-          {hasData && rows.map((f, i) => (
-            <tr key={`${f.ts}-${f.src}-${f.dst}-${i}`}>
-              <td className="recent-flows__time mono">{f.ts}</td>
-              <td>
-                <RecentFlowEndpointCell flow={f} />
-              </td>
-              <td>
-                <RecentFlowMetaCell flow={f} />
-              </td>
-              <td><RecentFlowProtoBadge proto={f.proto} /></td>
-              <td className="recent-flows__bytes num">
-                <div>{fmtBytes(f.bytes)}</div>
-                <small>{fmtNum(f.pkts)} пак.</small>
-              </td>
-              <td className="recent-flows__asn-cell">
-                <RecentFlowAsnCell
-                  srcAsn={f.srcAsn}
-                  dstAsn={f.dstAsn}
-                  srcAsName={f.srcAsName}
-                  dstAsName={f.dstAsName}
-                />
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </Card>
+      emptyLabel="Нет потоков для выбранного направления"
+    />
   );
 }
 
@@ -820,7 +978,6 @@ function CountryHeatmapCard({ timeRange, customPeriod, directions, directionsKey
   const [countrySource, setCountrySource] = useState('loading');
   const [loadMs, setLoadMs] = useState(null);
   const [serverMs, setServerMs] = useState(null);
-  const [mapModalOpen, setMapModalOpen] = useState(false);
 
   const flowDirections = TRAFFIC_DIRECTIONS.filter((d) => d.id !== 'total');
   const enabledFlow = flowDirections.filter((d) => directions?.[d.id]);
@@ -862,17 +1019,20 @@ function CountryHeatmapCard({ timeRange, customPeriod, directions, directionsKey
   }, [timeRange, customPeriod?.from, customPeriod?.to, directionsKey, countryBasis, mapSide, collectorFilterKey]);
 
   const countryListKey = `${directionsKey}|${countryBasis}|${mapSide}|${timeRange}|${customPeriod?.from}|${customPeriod?.to}|${collectorFilterKey || ''}`;
-  const mapSubtitle = `${periodLabel} · ${basisLabel} · ${mapSideLabel} · ${sourceNote}`;
-
   return (
-    <>
-    <Card
+    <OverviewCountryCard
       title="География источников"
       subtitle={`${periodLabel} · ${basisLabel} · ${mapSideLabel} · ${sourceNote}`}
+      rows={countryRows}
+      colorMetric={colorMetric}
+      onColorMetricChange={setColorMetric}
+      loading={countrySource === 'loading'}
+      failed={countrySource === 'error'}
       loadMs={loadMs}
       serverMs={serverMs}
-      tools={
-        <div className="country-heatmap-tools row">
+      listKey={countryListKey}
+      extraTools={
+        <>
           <div className="seg seg--compact" title="Метод определения страны">
             <button
               type="button"
@@ -912,77 +1072,14 @@ function CountryHeatmapCard({ timeRange, customPeriod, directions, directionsKey
               Dst
             </button>
           </div>
-          <div className="seg seg--compact" title="Метрика заливки карты">
-            <button
-              type="button"
-              className={colorMetric === 'share' ? 'is-active' : ''}
-              onClick={() => setColorMetric('share')}
-            >
-              %
-            </button>
-            <button
-              type="button"
-              className={colorMetric === 'volume' ? 'is-active' : ''}
-              onClick={() => setColorMetric('volume')}
-            >
-              Gb
-            </button>
-          </div>
-        </div>
+        </>
       }
-    >
-      {showInternalHint && (
+      notice={showInternalHint ? (
         <div className="country-heatmap-hint">
           Для internal используйте src или dst
         </div>
-      )}
-      <CountryChoropleth
-        rows={countryRows}
-        colorMetric={colorMetric}
-        loading={countrySource === 'loading'}
-        failed={countrySource === 'error'}
-        showExpand
-        onExpand={() => setMapModalOpen(true)}
-      />
-      {countryRows.length > 0 && (
-        <div style={{ marginTop: 12 }}>
-          <CountryRankList rows={countryRows} listKey={countryListKey} colorMetric={colorMetric} />
-        </div>
-      )}
-    </Card>
-
-    <CountryMapModal
-      open={mapModalOpen}
-      onClose={() => setMapModalOpen(false)}
-      rows={countryRows}
-      colorMetric={colorMetric}
-      loading={countrySource === 'loading'}
-      failed={countrySource === 'error'}
-      subtitle={mapSubtitle}
+      ) : null}
     />
-    </>
-  );
-}
-
-function CountryMapModal({ open, onClose, rows, colorMetric, loading, failed, subtitle }) {
-  return (
-    <Modal
-      open={open}
-      onClose={onClose}
-      size="map"
-      title="География источников"
-      subtitle={subtitle}
-    >
-      <div className="country-map-modal__body">
-        <CountryChoropleth
-          rows={rows}
-          colorMetric={colorMetric}
-          loading={loading}
-          failed={failed}
-          large
-        />
-      </div>
-    </Modal>
   );
 }
 
@@ -1128,84 +1225,6 @@ function DashboardChartRow({ distributionMode, trendSplit, onTrendSplitChange, c
   );
 }
 
-function DistributionPane({
-  title,
-  subtitle,
-  mode = 'share',
-  items,
-  trend,
-  chartLongRange,
-  displayTimezone,
-  onOtherClick,
-  onRangeSelect,
-  bucketSeconds = 300,
-  periodStartMs,
-  periodEndMs,
-  failed,
-  trendFailed,
-  loadMs,
-  serverMs,
-  centered = false,
-}) {
-  const center = donutCenterTraffic(filterNonZeroDonutSegments(items));
-  const trendSeries = trend?.series || { points: [], lines: [] };
-  const trendPoints = (trendSeries.points || []).map((pt) => {
-    const next = { ...pt };
-    if (next.bucket) next.bucket = normalizeBucketString(next.bucket);
-    next.t = formatPointTimeLabel(next, chartLongRange, displayTimezone);
-    if (next.bucketMs != null) next.bucketMs = Number(next.bucketMs);
-    return next;
-  });
-  const trendLoading = mode === 'trend' && (trend?.source === 'loading' || trend?.source === 'idle');
-  const showTrendError = mode === 'trend' && (trendFailed || trend?.source === 'error');
-  const showShareError = mode === 'share' && failed;
-
-  let content;
-  if (mode === 'share' && showShareError) {
-    content = <DataLoadState style={{ flex: 1, minHeight: 150 }} />;
-  } else if (mode === 'share') {
-    content = (
-      <Donut
-        data={items}
-        centerLabel={center.label}
-        centerSub={center.sub}
-        size={150}
-        thickness={20}
-        onOtherClick={onOtherClick}
-      />
-    );
-  } else if (trendLoading) {
-    content = <div className="distribution-pane__loading">Загрузка…</div>;
-  } else if (showTrendError) {
-    content = <DataLoadState style={{ flex: 1, minHeight: 150 }} />;
-  } else {
-    content = (
-      <CategoryTrendChart
-        points={trendPoints}
-        lines={trendSeries.lines || []}
-        height={190}
-        bucketSeconds={bucketSeconds}
-        displayTimezone={displayTimezone}
-        onRangeSelect={onRangeSelect}
-        periodStartMs={periodStartMs}
-        periodEndMs={periodEndMs}
-        skipTrailingGaps
-      />
-    );
-  }
-
-  return (
-    <div className={`distribution-pane${centered ? ' distribution-pane--centered' : ''}`}>
-      <WidgetLoadBadge loadMs={loadMs} serverMs={serverMs} />
-      <div className="distribution-pane__head">
-        <div className="distribution-pane__title">{title}</div>
-        {subtitle && <div className="distribution-pane__sub">{subtitle}</div>}
-      </div>
-      <div className="distribution-pane__content">{content}</div>
-    </div>
-  );
-}
-
 function VlanDistributionCard({
   timeRange,
   customPeriod,
@@ -1272,7 +1291,7 @@ function VlanDistributionCard({
         </div>
       </div>
       <div className={`distribution-split distribution-split--solo${mode === 'trend' ? ' distribution-split--solo-trend' : ''}`}>
-        <DistributionPane
+        <OverviewDistributionPane
           title="Top VLAN по объёму"
           subtitle={mode === 'share'
             ? `По объёму · ${periodLabel}`
@@ -1386,33 +1405,4 @@ function OtherPortsModal({ open, onClose, timeRange, customPeriod, directions, c
   );
 }
 
-function TrafficStatTile({ label, mode, stats, directions, loadMs, serverMs }) {
-  const rows = TRAFFIC_DIRECTIONS.filter((d) => directions?.[d.id]);
-
-  return (
-    <Card loadMs={loadMs} serverMs={serverMs}>
-      <div className="traffic-stat-tile">
-        <div className="traffic-stat-tile__title">{label}</div>
-        <div className="traffic-stat-tile__rows">
-          {rows.map((d) => {
-            const s = stats[d.id] || {};
-            const vals = mode === 'volume'
-              ? `${fmtVolumeSize(s.gb, s.tb)}, ${fmtMpTotal(s.packets || 0)}`
-              : `${fmtGbps(s.bps || 0)}, ${fmtMpps(s.pps || 0)}`;
-            return (
-              <div key={d.id} className="traffic-stat-tile__row">
-                <span className="traffic-stat-tile__dir">
-                  <span className="traffic-stat-tile__swatch" style={{ background: d.color }} />
-                  {d.label}
-                </span>
-                <span className="traffic-stat-tile__vals mono">{vals}</span>
-              </div>
-            );
-          })}
-        </div>
-      </div>
-    </Card>
-  );
-}
-
-Object.assign(window, { PageDashboard, DistributionPane, OtherPortsModal, TrafficStatTile, CountryHeatmapCard, CountryMapModal, RecentFlowsCard });
+Object.assign(window, { PageDashboard, OtherPortsModal, CountryHeatmapCard, RecentFlowsCard });

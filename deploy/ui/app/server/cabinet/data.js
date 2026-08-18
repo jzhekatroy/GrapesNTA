@@ -1,5 +1,15 @@
-const { query } = require('../clickhouse');
+const {
+  query,
+  config,
+  col,
+  flowCol,
+  flowsRawTableRef,
+  asnNamesTableRef,
+  asnRegistryEnrichedTableRef,
+  escapeSqlString,
+} = require('../clickhouse');
 const { dnsIpExpr } = require('../dns-queries');
+const { flowIpExpr, protoLabel } = require('../queries');
 
 function parseRange(queryParams = {}) {
   const fromRaw = String(queryParams.from || queryParams.range_from || '').trim();
@@ -165,6 +175,199 @@ async function overviewSeries(clientId, queryParams = {}) {
       totals,
       dataUntil,
     },
+  };
+}
+
+function statsGranularityForRange(range) {
+  const spanHours = rangeSpanHours(range);
+  if (spanHours <= MINUTE_RETENTION_HOURS) return 'minute';
+  if (spanHours <= HOUR_RETENTION_HOURS) return 'hour';
+  return 'day';
+}
+
+function emptyTrafficStats() {
+  return {
+    max: {
+      in: { bps: 0, pps: 0 },
+      out: { bps: 0, pps: 0 },
+    },
+    avg: {
+      in: { bps: 0, pps: 0 },
+      out: { bps: 0, pps: 0 },
+    },
+    volume: {
+      in: { gb: 0, tb: 0, packets: 0 },
+      out: { gb: 0, tb: 0, packets: 0 },
+    },
+  };
+}
+
+async function overviewStats(clientId, queryParams = {}) {
+  const range = parseRange(queryParams);
+  const granularity = statsGranularityForRange(range);
+  const { table, bucketColumn } = overviewTableForGranularity(granularity);
+  const filter = timeFilterSql(bucketColumn, range);
+  const bucketSeconds = granularity === 'minute' ? 60 : granularity === 'hour' ? 3600 : 86400;
+  const windowSeconds = Math.max(1, rangeSpanHours(range) * 3600);
+  const [{ rows, elapsedMs }, dataUntil] = await Promise.all([query(
+    `
+      SELECT
+        direction,
+        max(bucket_bytes * 8 / {bucketSeconds:UInt32}) AS max_bps,
+        sum(bucket_bytes) * 8 / {windowSeconds:Float64} AS avg_bps,
+        max(bucket_packets / {bucketSeconds:UInt32}) AS max_pps,
+        sum(bucket_packets) / {windowSeconds:Float64} AS avg_pps,
+        sum(bucket_bytes) AS total_bytes,
+        sum(bucket_packets) AS total_packets
+      FROM
+      (
+        SELECT
+          ${bucketColumn} AS bucket,
+          direction,
+          sum(bytes) AS bucket_bytes,
+          sum(packets) AS bucket_packets
+        FROM default.${table}
+        WHERE client_id = {clientId:String}
+          AND (${filter.sql})
+          AND direction IN ('in', 'out')
+        GROUP BY bucket, direction
+      )
+      GROUP BY direction
+      ORDER BY direction ASC
+    `,
+    {
+      clientId,
+      ...filter.params,
+      bucketSeconds,
+      windowSeconds,
+    },
+    { name: 'cabinet/overview-stats' },
+  ), lastCompleteBucket(table, bucketColumn, clientId)]);
+
+  const data = emptyTrafficStats();
+  for (const row of rows) {
+    const direction = String(row.direction);
+    if (direction !== 'in' && direction !== 'out') continue;
+    const totalBytes = Number(row.total_bytes) || 0;
+    data.max[direction] = {
+      bps: Number(row.max_bps) || 0,
+      pps: Number(row.max_pps) || 0,
+    };
+    data.avg[direction] = {
+      bps: Number(row.avg_bps) || 0,
+      pps: Number(row.avg_pps) || 0,
+    };
+    data.volume[direction] = {
+      gb: totalBytes / 1e9,
+      tb: totalBytes / 1e12,
+      packets: Number(row.total_packets) || 0,
+    };
+  }
+
+  return {
+    data,
+    meta: {
+      elapsedMs,
+      rows: rows.length,
+      granularity,
+      dataUntil,
+    },
+  };
+}
+
+function geoCountrySql(ipExpr, etypeExpr) {
+  const dict = escapeSqlString(config.geoCountryDict);
+  const ipv4Expr = `toIPv4(reinterpretAsUInt32(reverse(substring(${ipExpr}, 1, 4))))`;
+  const isIpv4 = etypeExpr
+    ? `${etypeExpr} = 2048`
+    : `length(${ipExpr}) = 16 AND substring(${ipExpr}, 5) = unhex('000000000000000000000000')`;
+  return `nullIf(nullIf(upper(if(
+    ${isIpv4},
+    dictGetString('${dict}', 'cc', tuple(${ipv4Expr})),
+    dictGetString('${dict}', 'cc', tuple(${ipExpr}))
+  )), ''), '??')`;
+}
+
+async function overviewRecentFlows(clientId, queryParams = {}) {
+  const limit = Math.min(Math.max(Number(queryParams.limit) || 20, 1), 100);
+  const table = flowsRawTableRef();
+  const time = col('time');
+  const bytes = col('bytes');
+  const packets = col('packets');
+  const srcIp = col('srcIp');
+  const dstIp = col('dstIp');
+  const srcPort = col('srcPort');
+  const dstPort = col('dstPort');
+  const proto = col('proto');
+  const srcAsn = col('srcAsn');
+  const dstAsn = col('dstAsn');
+  const etype = flowCol('etype');
+  const srcCountry = geoCountrySql(`f.${srcIp}`, etype ? `f.${etype}` : null);
+  const dstCountry = geoCountrySql(`f.${dstIp}`, etype ? `f.${etype}` : null);
+  const asnNames = asnNamesTableRef();
+  const asnRegistry = asnRegistryEnrichedTableRef();
+
+  const { rows, elapsedMs } = await query(
+    `
+      SELECT
+        recent.*,
+        coalesce(nullIf(src_name.name, ''), nullIf(src_registry.name, concat('AS', toString(recent.src_asn))), '') AS src_as_name,
+        coalesce(nullIf(dst_name.name, ''), nullIf(dst_registry.name, concat('AS', toString(recent.dst_asn))), '') AS dst_as_name
+      FROM
+      (
+        SELECT
+          f.${time} AS ts,
+          ${flowIpExpr(`f.${srcIp}`)} AS src_ip,
+          ${flowIpExpr(`f.${dstIp}`)} AS dst_ip,
+          f.${srcPort} AS src_port,
+          f.${dstPort} AS dst_port,
+          f.${proto} AS proto,
+          f.${bytes} AS bytes,
+          f.${packets} AS packets,
+          f.${srcAsn} AS src_asn,
+          f.${dstAsn} AS dst_asn,
+          ${srcCountry} AS src_country,
+          ${dstCountry} AS dst_country,
+          multiIf(
+            f.src_client = {clientId:String} AND f.dst_client = {clientId:String}, 'both',
+            f.src_client = {clientId:String}, 'src',
+            'dst'
+          ) AS client_side
+        FROM ${table} AS f
+        PREWHERE f.date >= today() - 1
+        WHERE (f.src_client = {clientId:String} OR f.dst_client = {clientId:String})
+        ORDER BY f.${time} DESC
+        LIMIT {limit:UInt32}
+      ) AS recent
+      LEFT JOIN ${asnNames} AS src_name ON src_name.asn = recent.src_asn AND recent.src_asn > 0
+      LEFT JOIN ${asnNames} AS dst_name ON dst_name.asn = recent.dst_asn AND recent.dst_asn > 0
+      LEFT JOIN ${asnRegistry} AS src_registry ON src_registry.asn = recent.src_asn AND recent.src_asn > 0
+      LEFT JOIN ${asnRegistry} AS dst_registry ON dst_registry.asn = recent.dst_asn AND recent.dst_asn > 0
+      ORDER BY recent.ts DESC
+    `,
+    { clientId, limit },
+    { name: 'cabinet/overview-recent-flows' },
+  );
+
+  return {
+    data: rows.map((row) => ({
+      ts: row.ts,
+      srcIp: String(row.src_ip || ''),
+      dstIp: String(row.dst_ip || ''),
+      srcPort: Number(row.src_port) || 0,
+      dstPort: Number(row.dst_port) || 0,
+      proto: protoLabel(row.proto),
+      bytes: Number(row.bytes) || 0,
+      pkts: Number(row.packets) || 0,
+      srcAsn: Number(row.src_asn) || 0,
+      dstAsn: Number(row.dst_asn) || 0,
+      srcAsName: String(row.src_as_name || '').trim(),
+      dstAsName: String(row.dst_as_name || '').trim(),
+      srcCountry: String(row.src_country || '').trim(),
+      dstCountry: String(row.dst_country || '').trim(),
+      clientSide: String(row.client_side || ''),
+    })),
+    meta: { elapsedMs, rows: rows.length },
   };
 }
 
@@ -438,6 +641,8 @@ module.exports = {
   parseGranularity,
   resolveOverviewGranularity,
   overviewSeries,
+  overviewStats,
+  overviewRecentFlows,
   overviewCountries,
   overviewServices,
   dnsDomains,

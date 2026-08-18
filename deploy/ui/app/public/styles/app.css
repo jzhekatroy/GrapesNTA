@@ -2350,6 +2350,17 @@ a.nav-item--active:visited { color: var(--fg-primary); }
   padding: 9px 10px;
 }
 .table--recent-flows .recent-flows__time-col { width: 92px; }
+.table--recent-flows--cabinet .recent-flows__time-col { width: 108px; }
+.table--recent-flows .recent-flows__direction-col {
+  width: 108px;
+  min-width: 108px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.table--recent-flows .recent-flows__flow-col {
+  min-width: 0;
+}
 .table--recent-flows .recent-flows__meta-col { width: 118px; }
 .table--recent-flows .recent-flows__proto-col { width: 68px; }
 .table--recent-flows .recent-flows__bytes-col { width: 92px; text-align: right; }
@@ -2361,6 +2372,9 @@ a.nav-item--active:visited { color: var(--fg-primary); }
   font: var(--pv-text-body-3);
   color: var(--fg-secondary);
   white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 0;
 }
 .table--recent-flows .recent-flows__asn {
   display: block;

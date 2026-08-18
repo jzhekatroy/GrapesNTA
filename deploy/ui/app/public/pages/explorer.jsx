@@ -467,6 +467,23 @@ function mergeExplorerSavedFilters(items) {
   return [...DEFAULT_EXPLORER_PRESETS, ...(items || []).filter((q) => !isBuiltinExplorerPreset(q))];
 }
 
+function explorerPresetFields(query) {
+  return [
+    ...(query?.groupBy || []).map(explorerGroupFieldId),
+    ...(query?.filters || []).map((filter) => filter.field),
+  ].filter(Boolean);
+}
+
+function builtinExplorerPresetsForSchema(schema) {
+  const allowed = new Set([
+    ...(schema?.dimensions || []).map((field) => field.id),
+    ...(schema?.filterFields || []).map((field) => field.id),
+  ]);
+  return DEFAULT_EXPLORER_PRESETS.filter((preset) => (
+    explorerPresetFields(preset).every((field) => allowed.has(field))
+  ));
+}
+
 const EXPLORER_LAST_APPLIED_KEY = 'explorer.lastAppliedQuery';
 const EXPLORER_RESULT_CACHE_KEY = 'explorer.resultCache';
 const EXPLORER_CACHE_TTL_RELATIVE_MS = 15 * 60 * 1000;
@@ -890,21 +907,21 @@ function explorerSystemFilterDefs(schema) {
   const direction = (schema?.filterFields || []).find((f) => f.id === 'direction');
   const collector = (schema?.filterFields || []).find((f) => f.id === 'collector');
   return [
-    {
+    direction && {
       id: '__direction__',
-      label: direction?.label || 'Направление / Direction',
-      group: direction?.group || 'Система / System',
+      label: direction.label,
+      group: direction.group || 'Система / System',
       hint: 'Входящий, исходящий, транзит…',
-      aliases: direction?.aliases || [],
+      aliases: direction.aliases || [],
     },
-    {
+    collector && {
       id: '__collector__',
-      label: collector?.label || 'Коллектор / Collector',
-      group: collector?.group || 'Система / System',
+      label: collector.label,
+      group: collector.group || 'Система / System',
       hint: 'Локации и экспортёры',
-      aliases: collector?.aliases || ['коллекторы'],
+      aliases: collector.aliases || ['коллекторы'],
     },
-  ];
+  ].filter(Boolean);
 }
 
 function explorerThresholdApi() {
@@ -1211,6 +1228,9 @@ function parseExplorerFilterDsl(text, schema = null) {
       const systemInMatch = rest.match(/^(direction|collector)\s+(in|not_in|один из|ни один из)\s*\(([^)]+)\)/i);
       if (systemInMatch) {
         const field = systemInMatch[1].toLowerCase();
+        if (!(schema?.filterFields || []).some((item) => item.id === field)) {
+          parseError(lineNum, `поле недоступно: ${field}`);
+        }
         const value = systemInMatch[3]
           .split(',')
           .map((s) => s.trim().replace(/^"|"$/g, ''))
@@ -1227,6 +1247,9 @@ function parseExplorerFilterDsl(text, schema = null) {
       const systemSimpleMatch = rest.match(/^(direction|collector)\s*(=|!=|<>|равно|не равно)\s+(.+)$/i);
       if (systemSimpleMatch) {
         const field = systemSimpleMatch[1].toLowerCase();
+        if (!(schema?.filterFields || []).some((item) => item.id === field)) {
+          parseError(lineNum, `поле недоступно: ${field}`);
+        }
         const value = systemSimpleMatch[3].trim().replace(/^"|"$/g, '');
         pushFilter({
           field,
@@ -1428,8 +1451,8 @@ function buildExplorerTextSuggestions({ value, cursor, schema, entityItems = [] 
   [
     lineSuggestion('time range', 'time range 1h', 'Период'),
     lineSuggestion('time between', 'time between "YYYY-MM-DDTHH:mm" and "YYYY-MM-DDTHH:mm"', 'Ручной диапазон'),
-    lineSuggestion('direction', 'direction in (in, out, transit)', 'Направления'),
-    lineSuggestion('collector', 'collector in ("collector-id")', 'Коллекторы'),
+    ...(fieldById.direction ? [lineSuggestion('direction', 'direction in (in, out, transit)', 'Направления')] : []),
+    ...(fieldById.collector ? [lineSuggestion('collector', 'collector in ("collector-id")', 'Коллекторы')] : []),
     ...explorerLogicAutocompleteEntries().map(({ token, hint }) => lineSuggestion(token, `${token} `, hint)),
   ]
     .filter((item) => matchesNeedle(item.label, item.hint))
@@ -1457,14 +1480,14 @@ function buildExplorerTextSuggestions({ value, cursor, schema, entityItems = [] 
     suggestions.push(lineSuggestion('time between ...', 'time between "YYYY-MM-DDTHH:mm" and "YYYY-MM-DDTHH:mm"', 'Ручной диапазон'));
   }
 
-  if (lowerRest.startsWith('direction')) {
+  if (fieldById.direction && lowerRest.startsWith('direction')) {
     ['total', 'in', 'out', 'transit', 'internal', 'unknown'].forEach((dir) => {
       suggestions.push(lineSuggestion(dir, `direction in (${dir})`, 'Значение direction'));
     });
     suggestions.push(lineSuggestion('total, in, out', 'direction in (total, in, out)', 'Несколько направлений'));
   }
 
-  if (lowerRest.startsWith('collector')) {
+  if (fieldById.collector && lowerRest.startsWith('collector')) {
     suggestions.push(lineSuggestion('Все коллекторы', 'collector in (all)', 'Без ограничения по коллекторам'));
     suggestions.push(lineSuggestion('collector in ("collector-id")', 'collector in ("collector-id")', 'ID коллектора или локации'));
   }
@@ -1943,7 +1966,9 @@ function FilterValueInput({ fieldId, meta, value, label, onChange, onClear, swit
       items={meta.valueOptions}
       value={value}
       onChange={(next) => onChange({ value: next, label: null })}
-      buttonLabel={value ? String(value) : undefined}
+      buttonLabel={value
+        ? (meta.valueOptions.find((item) => String(item.value ?? item.id) === String(value))?.label || String(value))
+        : undefined}
       searchPlaceholder="Поиск значения..."
       emptyLabel="Выбрать значение…"
       inputPlaceholder={meta.valueHint}
@@ -2274,7 +2299,7 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
   const [shareMeta, setShareMeta] = useState(null);
   const [sharing, setSharing] = useState(false);
   const urlSnapshotToken = urlState?.snapshot || null;
-  const [savedFilters, setSavedFilters] = useState(DEFAULT_EXPLORER_PRESETS);
+  const [savedFilters, setSavedFilters] = useState(() => (cabinetMode ? [] : DEFAULT_EXPLORER_PRESETS));
   const [lastApplied, setLastApplied] = useState(() => loadLastAppliedExplorerQuery(cabinetMode));
   const [exporting, setExporting] = useState(false);
   const [showAllResultColumns, setShowAllResultColumns] = useState(true);
@@ -2292,10 +2317,6 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
   useEffect(() => {
     window.__GRAPES_CABINET_EXPLORER__ = cabinetMode;
     return () => { window.__GRAPES_CABINET_EXPLORER__ = false; };
-  }, [cabinetMode]);
-
-  useEffect(() => {
-    if (cabinetMode) setSavedFilters([]);
   }, [cabinetMode]);
 
   useEffect(() => {
@@ -2411,7 +2432,16 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
   useEffect(() => {
     let cancelled = false;
     explorerApi.loadSchema().then((data) => {
-      if (!cancelled && data) setSchema(data);
+      if (!cancelled && data) {
+        setSchema(data);
+        if (cabinetMode) {
+          const allowedDimensions = new Set((data.dimensions || []).map((field) => field.id));
+          const allowedFilters = new Set((data.filterFields || []).map((field) => field.id));
+          setGroupBy((current) => current.filter((token) => allowedDimensions.has(explorerGroupFieldId(token))));
+          setFilters((current) => current.filter((filter) => allowedFilters.has(filter.field)));
+          setSavedFilters(builtinExplorerPresetsForSchema(data));
+        }
+      }
     }).catch(() => {});
     if (explorerApi.supportsSavedFilters) {
       explorerApi.loadSavedFilters().then((items) => {

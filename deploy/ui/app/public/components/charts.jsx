@@ -2103,6 +2103,11 @@ function countryViewAtPoint(view, mx, my, factor) {
 
 function countryMapTooltipContent(hover) {
   if (!hover?.row) return null;
+  const row = hover.row;
+  const sharePercent = Number(row.sharePercent) || 0;
+  const avgGbps = Number(row.avgGbps) || 0;
+  const packetCount = Number(row.packetCount ?? row.packets) || 0;
+  const flowCount = Number(row.flowCount ?? row.flowsCount) || 0;
   return (
     <>
       <div className="country-choropleth__tooltip-title">
@@ -2110,23 +2115,23 @@ function countryMapTooltipContent(hover) {
       </div>
       <div className="country-choropleth__tooltip-row">
         <span>Объём</span>
-        <span className="mono">{fmtVolumeSize(hover.row.trafficGb)}</span>
+        <span className="mono">{fmtVolumeSize(row.trafficGb)}</span>
       </div>
       <div className="country-choropleth__tooltip-row">
         <span>Доля</span>
-        <span className="mono">{hover.row.sharePercent.toFixed(2)}%</span>
+        <span className="mono">{sharePercent.toFixed(2)}%</span>
       </div>
       <div className="country-choropleth__tooltip-row">
         <span>Средняя скорость</span>
-        <span className="mono">{hover.row.avgGbps.toFixed(3)} Gbps</span>
+        <span className="mono">{avgGbps.toFixed(3)} Gbps</span>
       </div>
       <div className="country-choropleth__tooltip-row">
         <span>Пакеты</span>
-        <span className="mono">{fmtNum(hover.row.packetCount)}</span>
+        <span className="mono">{fmtNum(packetCount)}</span>
       </div>
       <div className="country-choropleth__tooltip-row">
         <span>Потоки</span>
-        <span className="mono">{fmtNum(hover.row.flowCount)}</span>
+        <span className="mono">{fmtNum(flowCount)}</span>
       </div>
     </>
   );

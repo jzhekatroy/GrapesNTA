@@ -2272,6 +2272,7 @@ const ApiClient = (() => {
         data: [],
         meta: null,
         error: result.error?.message || LOAD_FAILED,
+        status: result.error?.status || 0,
         loadMs: result.loadMs,
         serverMs: null,
       };
@@ -2279,6 +2280,29 @@ const ApiClient = (() => {
     return {
       source: 'clickhouse',
       data: result.data || [],
+      meta: result.meta || null,
+      loadMs: result.loadMs,
+      serverMs: result.serverMs,
+    };
+  }
+
+  async function loadCabinetOverviewStats({ timeRange = '24h', customPeriod } = {}) {
+    const params = cabinetRangeQuery({ timeRange, customPeriod });
+    const result = await fetchCabinet(`/api/cabinet/overview/stats?${params}`, 'cabinet/overview/stats');
+    if (!result.ok) {
+      return {
+        source: 'error',
+        data: null,
+        meta: null,
+        error: result.error?.message || LOAD_FAILED,
+        status: result.error?.status || 0,
+        loadMs: result.loadMs,
+        serverMs: null,
+      };
+    }
+    return {
+      source: 'clickhouse',
+      data: result.data || null,
       meta: result.meta || null,
       loadMs: result.loadMs,
       serverMs: result.serverMs,
@@ -2301,6 +2325,7 @@ const ApiClient = (() => {
         data: [],
         meta: null,
         error: result.error?.message || LOAD_FAILED,
+        status: result.error?.status || 0,
         loadMs: result.loadMs,
         serverMs: null,
       };
@@ -2330,6 +2355,7 @@ const ApiClient = (() => {
         data: [],
         meta: null,
         error: result.error?.message || LOAD_FAILED,
+        status: result.error?.status || 0,
         loadMs: result.loadMs,
         serverMs: null,
       };
@@ -2337,6 +2363,33 @@ const ApiClient = (() => {
     return {
       source: 'clickhouse',
       data: result.data || [],
+      meta: result.meta || null,
+      loadMs: result.loadMs,
+      serverMs: result.serverMs,
+    };
+  }
+
+  async function loadCabinetOverviewRecentFlows({ limit = 20 } = {}) {
+    const params = new URLSearchParams();
+    params.set('limit', String(limit));
+    const result = await fetchCabinet(
+      `/api/cabinet/overview/recent-flows?${params}`,
+      'cabinet/overview/recent-flows',
+    );
+    if (!result.ok) {
+      return {
+        source: 'error',
+        data: [],
+        meta: null,
+        error: result.error?.message || LOAD_FAILED,
+        status: result.error?.status || 0,
+        loadMs: result.loadMs,
+        serverMs: null,
+      };
+    }
+    return {
+      source: 'clickhouse',
+      data: Array.isArray(result.data) ? result.data : [],
       meta: result.meta || null,
       loadMs: result.loadMs,
       serverMs: result.serverMs,
@@ -2670,7 +2723,7 @@ const ApiClient = (() => {
         timeseries: [],
         resultSeries: null,
         breakdowns: {},
-        error: err.message || LOAD_FAILED,
+        error: err.status === 403 ? 'Недостаточно прав' : (err.message || LOAD_FAILED),
         meta: null,
         loadMs: metrics.loadMs,
         serverMs: null,
@@ -2715,7 +2768,7 @@ const ApiClient = (() => {
       return {
         source: 'error',
         rows: [],
-        error: err.message || LOAD_FAILED,
+        error: err.status === 403 ? 'Недостаточно прав' : (err.message || LOAD_FAILED),
         meta: null,
         loadMs: metrics.loadMs,
         serverMs: null,
@@ -2776,8 +2829,10 @@ const ApiClient = (() => {
     loadImpersonationAudit,
     cabinetRangeQueryParams,
     loadCabinetOverviewSeries,
+    loadCabinetOverviewStats,
     loadCabinetOverviewCountries,
     loadCabinetOverviewServices,
+    loadCabinetOverviewRecentFlows,
     loadCabinetDnsDomains,
     loadCabinetDnsQueries,
     loadCabinetExplorerSchema,

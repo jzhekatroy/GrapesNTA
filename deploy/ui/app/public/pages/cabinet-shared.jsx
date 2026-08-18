@@ -62,7 +62,9 @@ function cabinetSeriesToChart(data, meta) {
     const dir = String(row.direction || '');
     if (dir !== 'in' && dir !== 'out') continue;
     const bytes = Number(row.bytes) || 0;
+    const packets = Number(row.packets) || 0;
     pt[dir] = bucketSeconds > 0 ? (bytes * 8) / bucketSeconds : 0;
+    pt[`${dir}_pps`] = bucketSeconds > 0 ? packets / bucketSeconds : 0;
   }
 
   const points = Array.from(byBucket.values()).sort((a, b) => {
@@ -74,8 +76,8 @@ function cabinetSeriesToChart(data, meta) {
   return {
     points,
     lines: [
-      { key: 'in', label: 'Входящий', color: '#51D16D' },
-      { key: 'out', label: 'Исходящий', color: '#6972F0' },
+      { key: 'in', label: 'К вам', color: '#51D16D' },
+      { key: 'out', label: 'От вас', color: '#6972F0' },
     ],
     bucketSeconds,
   };
@@ -194,9 +196,9 @@ function openCabinetExplorer(onNavigate, {
     params.set('to', customPeriod.to);
   }
   const dir = String(direction || '').trim().toLowerCase();
-  if (dir === 'in' || dir === 'out') {
+  if (dir === 'in' || dir === 'out' || dir === 'internal') {
     params.set('filters', JSON.stringify([
-      { id: 1, field: 'direction', op: '=', value: dir, logic: 'and' },
+      { id: 1, field: 'client_direction', op: '=', value: dir, logic: 'and' },
     ]));
   }
   if (typeof onNavigate === 'function') onNavigate('explorer');
