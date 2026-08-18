@@ -159,6 +159,48 @@ function App() {
   }, [auth.user]);
 
   useEffect(() => {
+    if (!auth.user) return undefined;
+
+    let cancelled = false;
+    let baseline = '';
+    let notified = false;
+    const versionKey = (info) => {
+      if (info?.commit) return info.commit;
+      if (info?.buildDate) return info.buildDate;
+      return '';
+    };
+    const load = async () => {
+      try {
+        const info = await ApiClient.loadLatestBuildInfo();
+        if (cancelled) return;
+        const key = versionKey(info);
+        if (!key) return;
+        if (!baseline) {
+          baseline = key;
+          return;
+        }
+        if (key !== baseline && !notified) {
+          notified = true;
+          pushToast({
+            kind: 'info',
+            title: 'Доступна новая версия',
+            desc: 'Перезагрузите страницу, чтобы использовать актуальную версию.',
+            duration: 0,
+            actionLabel: 'Перезагрузить',
+            onAction: () => { ApiClient.hardReload(); },
+          });
+        }
+      } catch {
+        // A temporary polling failure must not interrupt the current session.
+      }
+    };
+
+    load();
+    const timer = setInterval(load, 60_000);
+    return () => { cancelled = true; clearInterval(timer); };
+  }, [auth.user?.id]);
+
+  useEffect(() => {
     let cancelled = false;
     ApiClient.loadCurrentUser()
       .then((user) => {

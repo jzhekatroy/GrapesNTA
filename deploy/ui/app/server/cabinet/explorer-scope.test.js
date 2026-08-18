@@ -5,6 +5,7 @@ const {
   sanitizeCabinetExplorerBody,
   cabinetExplorerSchema,
 } = require('./explorer');
+const { explorerSchema } = require('../explorer');
 
 test('sanitizeCabinetExplorerBody removes client and collector fields', () => {
   const body = sanitizeCabinetExplorerBody({
@@ -23,4 +24,10 @@ test('cabinetExplorerSchema hides collector and source_id', () => {
   assert.equal(schema.filterFields.some((f) => f.id === 'collector'), false);
   assert.equal(schema.dimensions.some((d) => d.id === 'source_id'), false);
   assert.equal(schema.maxRangeDays, 6);
+});
+
+test('operator schema publishes its own range limit so the UI can follow it', () => {
+  const schema = explorerSchema();
+  assert.equal(schema.maxRangeDays, 365);
+  assert.ok(schema.maxRangeDays > cabinetExplorerSchema().maxRangeDays);
 });

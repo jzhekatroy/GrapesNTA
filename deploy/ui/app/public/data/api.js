@@ -653,6 +653,34 @@ const ApiClient = (() => {
     return body.data || body;
   }
 
+  async function loadLatestBuildInfo() {
+    const body = await requestJson('/api/build-info');
+    return body.data || body;
+  }
+
+  async function hardReload() {
+    if (window.caches) {
+      try {
+        const keys = await window.caches.keys();
+        await Promise.all(keys.map((key) => caches.delete(key)));
+      } catch {
+        // Best-effort cache purge before reload.
+      }
+    }
+    if (navigator.serviceWorker) {
+      try {
+        const registrations = await navigator.serviceWorker.getRegistrations();
+        await Promise.all(registrations.map((reg) => reg.unregister()));
+      } catch {
+        // Service workers are not used in this app.
+      }
+    }
+
+    const url = new URL(window.location.href);
+    url.searchParams.set('_', String(Date.now()));
+    window.location.replace(url.href);
+  }
+
   async function loadObservation(id) {
     const body = await getJson(`/api/observations/${encodeURIComponent(id)}`, { widget: 'observations/get' });
     return body.data;
@@ -2805,6 +2833,8 @@ const ApiClient = (() => {
     loadBoundsDiagnostics,
     loadAnalysisSnapshotsDiagnostics,
     loadBuildInfo,
+    loadLatestBuildInfo,
+    hardReload,
     loadObservation,
     createObservation,
     updateObservation,

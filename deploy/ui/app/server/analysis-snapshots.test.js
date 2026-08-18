@@ -203,6 +203,24 @@ test('client scoped snapshots require matching reader clientId', () => {
   assert.equal(loaded.meta.clientId, 'client:demo');
 });
 
+test('operator snapshot is not readable by a client scoped reader', () => {
+  const dbPath = tempDbPath('operator-scope');
+  resetStoreForTests(dbPath);
+  const created = createSnapshot({
+    kind: 'explorer',
+    ownerId: 'owner',
+    query: buildExplorerStoredQuery({ metric: 'bps', groupBy: [], filters: [], range: '1h' }, {}),
+    payload: buildExplorerStoredPayload(sampleExplorerPayload(), {}, 1),
+  });
+  const shared = shareSnapshot(created.id, 'owner', { kind: 'explorer' });
+  assert.throws(
+    () => getSharedSnapshot(shared.token, { kind: 'explorer', readerClientId: 'client:demo' }),
+    (err) => err.statusCode === 403,
+  );
+  const loaded = getSharedSnapshot(shared.token, { kind: 'explorer', readerClientId: null });
+  assert.equal(loaded.meta.clientId, null);
+});
+
 test('foreign owner cannot share snapshot', () => {
   const dbPath = tempDbPath('foreign-owner');
   resetStoreForTests(dbPath);

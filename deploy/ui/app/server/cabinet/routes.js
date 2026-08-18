@@ -448,6 +448,7 @@ function createClientsRouter({ sessions }) {
         clientDisplayName: client.displayName,
         auditId: start.auditId,
       });
+      sessions.set(req.sessionId, sessionRecord);
 
       res.json({
         ok: true,
@@ -475,6 +476,7 @@ async function stopImpersonationHandler(req, res, { sessions, reason = 'stop' } 
       return;
     }
     const ended = clearImpersonation(sessionRecord, reason);
+    sessions.set(req.sessionId, sessionRecord);
     await writeImpersonationEvent({
       auditId: ended.auditId,
       sessionAuditId: ended.auditId,

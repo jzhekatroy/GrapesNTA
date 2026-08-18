@@ -73,6 +73,7 @@ const { getEnrichmentDiagnostics } = require('./diagnostics-enrichment');
 const { getSnmpDiagnostics } = require('./diagnostics-snmp');
 const { getBoundsDiagnostics } = require('./diagnostics-bounds');
 const { getBuildInfo, formatBuildInfoLogLine } = require('./build-info');
+const { createSessionStore } = require('./sessions');
 const {
   dnsSources,
   dnsActivityChart,
@@ -241,7 +242,7 @@ const PORT = Number(process.env.PORT) || 3000;
 const app = express();
 const SESSION_COOKIE = 'grapes_session';
 const SESSION_TTL_MS = 24 * 60 * 60 * 1000;
-const sessions = new Map();
+const sessions = createSessionStore();
 const cabinetIsolationGuard = createCabinetGuard({ sessions });
 
 function envBool(name, fallback = false) {
@@ -372,6 +373,7 @@ async function getSessionUser(req) {
   }
 
   session.expiresAt = Date.now() + SESSION_TTL_MS;
+  sessions.set(sessionId, session);
   const user = await getUserById(session.userId);
   if (!user) {
     sessions.delete(sessionId);
@@ -496,6 +498,11 @@ app.get('/api/health', async (_req, res) => {
       ...getConfig(),
     },
   });
+});
+
+app.get('/api/build-info', (_req, res) => {
+  res.set('Cache-Control', 'no-store');
+  res.json({ data: getBuildInfo() });
 });
 
 app.post('/api/auth/login', async (req, res) => {
@@ -2585,7 +2592,13 @@ app.get('/runtime-config.js', (_req, res) => {
   })};`);
 });
 
-app.use(express.static(path.join(__dirname, '..', 'public')));
+app.use(express.static(path.join(__dirname, '..', 'public'), {
+  setHeaders(res, filePath) {
+    if (/\.(?:jsx?|css|html?)$/i.test(filePath)) {
+      res.set('Cache-Control', 'no-cache');
+    }
+  },
+}));
 
 app.listen(PORT, () => {
   const buildInfoLine = formatBuildInfoLogLine(getBuildInfo());

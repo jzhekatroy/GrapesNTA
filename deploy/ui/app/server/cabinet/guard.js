@@ -39,6 +39,7 @@ function createCabinetGuard({ sessions }) {
       if (context.impersonationExpired && sessionRecord) {
         const ended = clearImpersonation(sessionRecord, 'timeout');
         if (ended) {
+          sessions.set(req.sessionId, sessionRecord);
           await writeImpersonationEvent({
             auditId: ended.auditId,
             event: 'end',

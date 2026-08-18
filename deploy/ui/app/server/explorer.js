@@ -1130,6 +1130,7 @@ function explorerSchema(options = {}) {
     maxExportRows: EXPLORER_MAX_EXPORT_ROWS,
     dimensionGroups: DIMENSION_GROUPS,
     granularities: ['auto', '1m', '5m', '1h', '1d'],
+    maxRangeDays: EXPLORER_MAX_RANGE_DAYS,
     ...explorerThresholdSchemaExtras(),
   };
 }

@@ -511,17 +511,29 @@ function validateCustomPeriod({ from, to }) {
 }
 
 const EXPLORER_MAX_RANGE_DAYS = 365;
-const EXPLORER_MAX_RANGE_MS = EXPLORER_MAX_RANGE_DAYS * 86400000;
 
-function validateExplorerCustomPeriod({ from, to }, timeRange = '1h') {
+function explorerRangeLimitDays(maxRangeDays) {
+  const days = Number(maxRangeDays);
+  return Number.isFinite(days) && days > 0 ? days : EXPLORER_MAX_RANGE_DAYS;
+}
+
+function timeRangePresetMs(rangeId) {
+  const match = /^(\d+)([mhd])$/.exec(String(rangeId || ''));
+  if (!match) return null;
+  const unitMs = match[2] === 'm' ? 60000 : match[2] === 'h' ? 3600000 : 86400000;
+  return Number(match[1]) * unitMs;
+}
+
+function validateExplorerCustomPeriod({ from, to }, timeRange = '1h', maxRangeDays = EXPLORER_MAX_RANGE_DAYS) {
   if (timeRange !== 'custom') return null;
   const err = validateCustomPeriod({ from, to });
   if (err) return err;
   const fromMs = new Date(from).getTime();
   const toMs = new Date(to).getTime();
   if (!Number.isFinite(fromMs) || !Number.isFinite(toMs)) return 'Некорректная дата';
-  if (toMs - fromMs > EXPLORER_MAX_RANGE_MS) {
-    return `Период не может превышать ${EXPLORER_MAX_RANGE_DAYS} дней`;
+  const limitDays = explorerRangeLimitDays(maxRangeDays);
+  if (toMs - fromMs > limitDays * 86400000) {
+    return `Период не может превышать ${limitDays} дней`;
   }
   return null;
 }
@@ -830,7 +842,7 @@ function timeFilterMenuPositionChanged(prev, next) {
     || prev.availableHeight !== next.availableHeight;
 }
 
-function TimeFilter({ timeRange, onTimeRangeChange, customPeriod, onCustomPeriodChange, displayTimezone, variant = 'header' }) {
+function TimeFilter({ timeRange, onTimeRangeChange, customPeriod, onCustomPeriodChange, displayTimezone, variant = 'header', maxRangeDays = null }) {
   const isExplorer = variant === 'explorer';
   const [open, setOpen] = useState(false);
   const [menuView, setMenuView] = useState('presets');
@@ -848,6 +860,14 @@ function TimeFilter({ timeRange, onTimeRangeChange, customPeriod, onCustomPeriod
   const rangeLabel = timeRangeLabel(timeRange, customPeriod);
   const timezoneLabel = formatTimezoneShortLabel(displayTimezone);
   const customViewOpen = menuView === 'custom';
+  const presetOptions = useMemo(() => {
+    const limitMs = Number(maxRangeDays) > 0 ? Number(maxRangeDays) * 86400000 : null;
+    if (!limitMs) return TIME_RANGE_OPTIONS;
+    return TIME_RANGE_OPTIONS.filter((o) => {
+      const presetMs = timeRangePresetMs(o.id);
+      return presetMs == null || presetMs <= limitMs;
+    });
+  }, [maxRangeDays]);
 
   useEffect(() => {
     if (!open) return;
@@ -910,7 +930,7 @@ function TimeFilter({ timeRange, onTimeRangeChange, customPeriod, onCustomPeriod
 
   const applyCustomPeriod = () => {
     const err = isExplorer
-      ? validateExplorerCustomPeriod(draftPeriod, 'custom')
+      ? validateExplorerCustomPeriod(draftPeriod, 'custom', maxRangeDays)
       : validateCustomPeriod(draftPeriod);
     if (err) {
       setPeriodError(err);
@@ -961,7 +981,7 @@ function TimeFilter({ timeRange, onTimeRangeChange, customPeriod, onCustomPeriod
     >
       {!customViewOpen ? (
       <div ref={optionsRef} className="time-filter__section time-filter__section--options">
-        {TIME_RANGE_OPTIONS.map((o) => {
+        {presetOptions.map((o) => {
           const current = isPresetCurrent(o.id);
           if (isExplorer) {
             return (
@@ -1713,7 +1733,7 @@ Object.assign(window, {
   Sidebar, Header, NAV, CABINET_NAV, CABINET_PAGE_IDS, PAGE_TITLES, setPageTitles, GrapesGlyph,
   isCabinetMode, isImpersonating, ImpersonationBanner,
   TIME_RANGE_OPTIONS, TIMEZONE_PRESETS, TRAFFIC_DIRECTIONS, defaultDirectionsEnabled,
-  defaultCustomPeriod, formatCustomPeriodLabel, validateCustomPeriod, validateExplorerCustomPeriod, EXPLORER_MAX_RANGE_DAYS, timeRangeLabel,
+  defaultCustomPeriod, formatCustomPeriodLabel, validateCustomPeriod, validateExplorerCustomPeriod, explorerRangeLimitDays, timeRangePresetMs, EXPLORER_MAX_RANGE_DAYS, timeRangeLabel,
   toDatetimeLocalValue, dnsBucketSecondsFromMode, explorerGranularityBucketSeconds,
   collectorFilterLabel, directionSummaryLabel, TimezoneSelector,
   parseAppHash, parseJsonSearchParam, parseDirectionsParam, applyTopTalkersUrlGlobals,

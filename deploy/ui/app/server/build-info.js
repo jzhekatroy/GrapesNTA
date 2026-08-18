@@ -16,10 +16,16 @@ function trimValue(raw) {
   return v || undefined;
 }
 
+function shortCommit(raw, length = 8) {
+  const v = trimValue(raw);
+  if (!v) return undefined;
+  return v.slice(0, length);
+}
+
 function parseSourceTxt(content) {
   const out = {};
   for (const line of String(content || '').split(/\r?\n/)) {
-    const syncedCommit = line.match(/^synced_commit=(.+)$/);
+    const syncedCommit = line.match(/^\s*synced_commit\s*=\s*(.+?)\s*$/);
     if (syncedCommit) {
       out.commit = trimValue(syncedCommit[1]);
       continue;
@@ -28,14 +34,33 @@ function parseSourceTxt(content) {
   return out;
 }
 
-function readSourceTxt(repoRoot) {
-  const filePath = path.join(repoRoot, SOURCE_FILE);
+function sourceTxtCandidates(repoRoot, env = process.env) {
+  const paths = [];
+  const explicitPath = trimValue(env.SOURCE_TXT_PATH);
+  if (explicitPath) paths.push(explicitPath);
+  paths.push(path.join(repoRoot, SOURCE_FILE));
+  return paths;
+}
+
+function sourceTxtIsReadable(filePath) {
   try {
-    return parseSourceTxt(fs.readFileSync(filePath, 'utf8'));
-  } catch (err) {
-    if (err.code === 'ENOENT') return {};
-    throw err;
+    return fs.statSync(filePath).isFile();
+  } catch {
+    return false;
   }
+}
+
+function readSourceTxt(repoRoot, env = process.env) {
+  for (const filePath of sourceTxtCandidates(repoRoot, env)) {
+    if (!sourceTxtIsReadable(filePath)) continue;
+    try {
+      const parsed = parseSourceTxt(fs.readFileSync(filePath, 'utf8'));
+      if (parsed.commit) return parsed;
+    } catch {
+      // ignore unreadable candidate
+    }
+  }
+  return {};
 }
 
 function readBuildInfoJson(repoRoot) {
@@ -68,7 +93,7 @@ function gitShortHead(repoRoot) {
     return undefined;
   }
 
-  const result = spawnSync('git', ['-C', repoRoot, 'rev-parse', '--short', 'HEAD'], {
+  const result = spawnSync('git', ['-C', repoRoot, 'rev-parse', '--short=8', 'HEAD'], {
     encoding: 'utf8',
     timeout: GIT_TIMEOUT_MS,
   });
@@ -77,13 +102,16 @@ function gitShortHead(repoRoot) {
 }
 
 function resolveCommit(repoRoot, env = process.env) {
-  const fromSource = readSourceTxt(repoRoot).commit;
+  const fromSource = shortCommit(readSourceTxt(repoRoot, env).commit);
   if (fromSource) return fromSource;
 
-  const fromGit = gitShortHead(repoRoot);
-  if (fromGit) return fromGit;
+  const hasSourceTxt = sourceTxtCandidates(repoRoot, env).some(sourceTxtIsReadable);
+  if (hasSourceTxt) return undefined;
 
-  return trimValue(env.GIT_COMMIT);
+  const fromGit = gitShortHead(repoRoot);
+  if (fromGit) return shortCommit(fromGit);
+
+  return shortCommit(env.GIT_COMMIT);
 }
 
 function resolveBuildDate(repoRoot, env = process.env) {
@@ -125,6 +153,7 @@ function formatBuildInfoLogLine(info) {
 module.exports = {
   getBuildInfo,
   parseSourceTxt,
+  shortCommit,
   formatBuildInfoLogLine,
   resetBuildInfoCacheForTests,
 };

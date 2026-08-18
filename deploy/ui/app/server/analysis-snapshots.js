@@ -288,9 +288,9 @@ function revokeShare(id, ownerId, { kind } = {}) {
 }
 
 function assertReaderClientScope(row, readerClientId) {
-  if (!row.client_id) return;
   const readerId = String(readerClientId || '').trim();
-  if (!readerId || readerId !== row.client_id) {
+  const snapshotClientId = String(row.client_id || '').trim();
+  if (readerId !== snapshotClientId) {
     const err = new Error('Недостаточно прав');
     err.statusCode = 403;
     throw err;

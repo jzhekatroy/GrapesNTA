@@ -193,9 +193,12 @@ function pushToast(t) {
   const id = ++toastSeq;
   const item = { id, ...t };
   toastListeners.forEach((fn) => fn({ type: 'add', item }));
-  setTimeout(() => {
-    toastListeners.forEach((fn) => fn({ type: 'remove', id }));
-  }, t.duration || 4000);
+  const duration = t.duration ?? 4000;
+  if (duration > 0) {
+    setTimeout(() => {
+      toastListeners.forEach((fn) => fn({ type: 'remove', id }));
+    }, duration);
+  }
 }
 function ToastStack() {
   const [items, setItems] = useState([]);
@@ -216,6 +219,20 @@ function ToastStack() {
           <div className="toast__body">
             <div className="toast__title">{t.title}</div>
             {t.desc && <div className="toast__desc">{t.desc}</div>}
+            {t.actionLabel && (
+              <button
+                className="btn btn--primary btn--sm toast__action"
+                onClick={() => {
+                  try {
+                    t.onAction?.();
+                  } finally {
+                    setItems((s) => s.filter((i) => i.id !== t.id));
+                  }
+                }}
+              >
+                {t.actionLabel}
+              </button>
+            )}
           </div>
           <button className="icon-btn" style={{width: 28, height: 28}} onClick={() => setItems((s) => s.filter((i) => i.id !== t.id))}>
             <Icon name="x" size={16} />

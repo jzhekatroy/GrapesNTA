@@ -671,9 +671,13 @@ function readExplorerUrlGlobals() {
   return applyExplorerUrlGlobals?.(params) || {};
 }
 
-function loadLastAppliedExplorerQuery() {
+function explorerStorageKey(baseKey, cabinetMode) {
+  return cabinetMode ? `${baseKey}.cabinet` : baseKey;
+}
+
+function loadLastAppliedExplorerQuery(cabinetMode = false) {
   try {
-    const raw = localStorage.getItem(EXPLORER_LAST_APPLIED_KEY);
+    const raw = localStorage.getItem(explorerStorageKey(EXPLORER_LAST_APPLIED_KEY, cabinetMode));
     if (!raw) return null;
     const parsed = JSON.parse(raw);
     return parsed && typeof parsed === 'object' ? parsed : null;
@@ -682,9 +686,9 @@ function loadLastAppliedExplorerQuery() {
   }
 }
 
-function saveLastAppliedExplorerQuery(snapshot) {
+function saveLastAppliedExplorerQuery(snapshot, cabinetMode = false) {
   try {
-    localStorage.setItem(EXPLORER_LAST_APPLIED_KEY, JSON.stringify(snapshot));
+    localStorage.setItem(explorerStorageKey(EXPLORER_LAST_APPLIED_KEY, cabinetMode), JSON.stringify(snapshot));
   } catch { /* ignore quota */ }
 }
 
@@ -708,7 +712,7 @@ function buildExplorerQueryKey(snapshot) {
   });
 }
 
-function saveExplorerResultCache({ snapshot, payload }) {
+function saveExplorerResultCache({ snapshot, payload, cabinetMode = false }) {
   try {
     const migrated = migrateExplorerSnapshot(snapshot);
     if (!migrated) return;
@@ -721,13 +725,13 @@ function saveExplorerResultCache({ snapshot, payload }) {
       snapshot: migrated,
       payload,
     };
-    sessionStorage.setItem(EXPLORER_RESULT_CACHE_KEY, JSON.stringify(entry));
+    sessionStorage.setItem(explorerStorageKey(EXPLORER_RESULT_CACHE_KEY, cabinetMode), JSON.stringify(entry));
   } catch { /* ignore quota */ }
 }
 
-function loadExplorerResultCache(queryKey) {
+function loadExplorerResultCache(queryKey, cabinetMode = false) {
   try {
-    const raw = sessionStorage.getItem(EXPLORER_RESULT_CACHE_KEY);
+    const raw = sessionStorage.getItem(explorerStorageKey(EXPLORER_RESULT_CACHE_KEY, cabinetMode));
     if (!raw) return null;
     const entry = JSON.parse(raw);
     if (!entry || entry.queryKey !== queryKey) return null;
@@ -738,9 +742,9 @@ function loadExplorerResultCache(queryKey) {
   }
 }
 
-function updateExplorerResultCacheUi(patch) {
+function updateExplorerResultCacheUi(patch, cabinetMode = false) {
   try {
-    const raw = sessionStorage.getItem(EXPLORER_RESULT_CACHE_KEY);
+    const raw = sessionStorage.getItem(explorerStorageKey(EXPLORER_RESULT_CACHE_KEY, cabinetMode));
     if (!raw) return;
     const entry = JSON.parse(raw);
     if (!entry?.snapshot) return;
@@ -751,13 +755,13 @@ function updateExplorerResultCacheUi(patch) {
         ? [...patch.dynamicsSeriesIds]
         : entry.snapshot.dynamicsSeriesIds,
     };
-    sessionStorage.setItem(EXPLORER_RESULT_CACHE_KEY, JSON.stringify(entry));
+    sessionStorage.setItem(explorerStorageKey(EXPLORER_RESULT_CACHE_KEY, cabinetMode), JSON.stringify(entry));
   } catch { /* ignore quota */ }
 }
 
-function clearExplorerResultCache() {
+function clearExplorerResultCache(cabinetMode = false) {
   try {
-    sessionStorage.removeItem(EXPLORER_RESULT_CACHE_KEY);
+    sessionStorage.removeItem(explorerStorageKey(EXPLORER_RESULT_CACHE_KEY, cabinetMode));
   } catch { /* ignore */ }
 }
 
@@ -987,7 +991,7 @@ function hydrateExplorerFromCachedEntry(entry, handlers) {
   handlers.setAppliedSnapshot(migrated);
   handlers.setHasAppliedQuery(true);
   handlers.setLastApplied(migrated);
-  saveLastAppliedExplorerQuery(migrated);
+  saveLastAppliedExplorerQuery(migrated, handlers.cabinetMode);
   handlers.dynamicsQueryVersionRef.current = handlers.queryVersion ?? 0;
   return true;
 }
@@ -1183,13 +1187,18 @@ function parseExplorerFilterDsl(text, schema = null) {
         if (betweenMatch) {
           timeRange = 'custom';
           customPeriod = { from: betweenMatch[1], to: betweenMatch[2] };
-          const err = validateExplorerCustomPeriod(customPeriod, 'custom');
+          const err = validateExplorerCustomPeriod(customPeriod, 'custom', schema?.maxRangeDays);
           if (err) parseError(lineNum, err);
           continue;
         }
         const rangeMatch = rawLine.match(/^time\s+range\s+(\S+)/i);
         if (rangeMatch) {
           timeRange = rangeMatch[1];
+          const limitDays = explorerRangeLimitDays(schema?.maxRangeDays);
+          const presetMs = timeRangePresetMs(timeRange);
+          if (presetMs != null && presetMs > limitDays * 86400000) {
+            parseError(lineNum, `Период не может превышать ${limitDays} дней`);
+          }
           continue;
         }
         parseError(lineNum, `неверный формат времени: ${rawLine}`);
@@ -1318,6 +1327,7 @@ function parseExplorerFilterDsl(text, schema = null) {
   const periodErr = validateExplorerCustomPeriod(
     timeRange === 'custom' ? customPeriod : {},
     timeRange,
+    schema?.maxRangeDays,
   );
   if (periodErr) throw new Error(periodErr);
 
@@ -2221,14 +2231,14 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
     // Editing an observation must load THAT observation's filters, not last Explorer query.
     if (composeFilters) return cloneExplorerFilters(composeFilters);
     if (urlState?.filters?.length) return cloneExplorerFilters(urlState.filters);
-    const last = loadLastAppliedExplorerQuery();
+    const last = loadLastAppliedExplorerQuery(cabinetMode);
     if (last) return cloneExplorerFilters(migrateExplorerSnapshot(last).filters);
     return cloneExplorerFilters(migrateExplorerUrlGlobals(urlGlobals, []));
   });
   const [thresholds, setThresholds] = useState(() => {
     if (composeThresholds) return cloneExplorerThresholdsList(composeThresholds);
     if (urlState?.thresholds?.length) return cloneExplorerThresholdsList(urlState.thresholds);
-    const last = loadLastAppliedExplorerQuery();
+    const last = loadLastAppliedExplorerQuery(cabinetMode);
     if (last?.thresholds?.length) return cloneExplorerThresholdsList(migrateExplorerSnapshot(last).thresholds);
     return [];
   });
@@ -2265,7 +2275,7 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
   const [sharing, setSharing] = useState(false);
   const urlSnapshotToken = urlState?.snapshot || null;
   const [savedFilters, setSavedFilters] = useState(DEFAULT_EXPLORER_PRESETS);
-  const [lastApplied, setLastApplied] = useState(() => loadLastAppliedExplorerQuery());
+  const [lastApplied, setLastApplied] = useState(() => loadLastAppliedExplorerQuery(cabinetMode));
   const [exporting, setExporting] = useState(false);
   const [showAllResultColumns, setShowAllResultColumns] = useState(true);
   const [visualLimit, setVisualLimit] = useState(EXPLORER_DEFAULT_VISUAL_LIMIT);
@@ -2295,6 +2305,7 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
   const dimensions = schema?.dimensions || [];
   const metrics = schema?.metrics || [];
   const dimensionById = useMemo(() => Object.fromEntries(dimensions.map((d) => [d.id, d])), [dimensions]);
+  const maxRangeDays = explorerRangeLimitDays(schema?.maxRangeDays ?? explorerApi.maxRangeDays);
 
   const querySetters = useMemo(() => ({
     setTimeRange, setCustomPeriod, setFilters, setThresholds, setMetric, setGroupBy, setLimit, setVis,
@@ -2303,6 +2314,7 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
   const draftRestoreOpts = useMemo(() => ({ filterMode, setFilterText, schema }), [filterMode, schema]);
 
   const cacheHydrateHandlers = useMemo(() => ({
+    cabinetMode,
     querySetters,
     draftRestoreOpts,
     setFetchLimit,
@@ -2323,7 +2335,7 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
     setLastApplied,
     skipDynamicsDefaultRef,
     dynamicsQueryVersionRef,
-  }), [querySetters, draftRestoreOpts]);
+  }), [cabinetMode, querySetters, draftRestoreOpts]);
 
   useEffect(() => {
     if (mountRestoreDoneRef.current) return;
@@ -2375,7 +2387,7 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
     if (!snapshot) return;
 
     const queryKey = buildExplorerQueryKey(snapshot);
-    const cached = loadExplorerResultCache(queryKey);
+    const cached = loadExplorerResultCache(queryKey, cabinetMode);
     const cachedGroupBy = normalizeExplorerGroupTokens(cached?.snapshot?.groupBy);
     const snapshotGroupBy = normalizeExplorerGroupTokens(snapshot.groupBy);
     if (cached && JSON.stringify(cachedGroupBy) === JSON.stringify(snapshotGroupBy)) {
@@ -2538,9 +2550,10 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
           visualLimit,
           dynamicsSeriesIds: [...resolvedSeriesIds],
         });
-        saveLastAppliedExplorerQuery(snapshot);
+        saveLastAppliedExplorerQuery(snapshot, cabinetMode);
         setLastApplied(snapshot);
         saveExplorerResultCache({
+          cabinetMode,
           snapshot,
           payload: {
             rows: Array.isArray(r.rows) ? r.rows : [],
@@ -2614,8 +2627,8 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
       vis,
       visualLimit,
       dynamicsSeriesIds: [...dynamicsSeriesIds],
-    });
-  }, [vis, visualLimit, dynamicsSeriesKey, hasAppliedQuery, source]);
+    }, cabinetMode);
+  }, [vis, visualLimit, dynamicsSeriesKey, hasAppliedQuery, source, cabinetMode]);
 
   const schemaMetrics = metrics.length ? metrics : [{ id: 'bps', label: 'Средняя бит/с' }];
   const metricLabel = availableMetrics.find((m) => m.id === metric)?.label || metric;
@@ -2631,6 +2644,7 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
     const periodErr = validateExplorerCustomPeriod(
       nextTimeRange === 'custom' ? nextCustomPeriod : {},
       nextTimeRange,
+      maxRangeDays,
     );
     if (periodErr) {
       pushToast({ kind: 'error', title: 'Неверный период', desc: periodErr });
@@ -2645,7 +2659,7 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
   };
 
   const applyExplorerChartRangeZoom = (range) => {
-    if (!range?.from || !range?.to || validateExplorerCustomPeriod(range, 'custom')) return;
+    if (!range?.from || !range?.to || validateExplorerCustomPeriod(range, 'custom', maxRangeDays)) return;
     setPeriodZoomStack((stack) => [...stack, periodRef.current]);
     requeryWithPeriod('custom', { from: range.from, to: range.to });
   };
@@ -2714,6 +2728,7 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
     const periodErr = validateExplorerCustomPeriod(
       snapshot.timeRange === 'custom' ? snapshot.customPeriod : {},
       snapshot.timeRange,
+      maxRangeDays,
     );
     if (periodErr) {
       pushToast({ kind: 'error', title: 'Неверный период', desc: periodErr });
@@ -2777,7 +2792,7 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
   const applyLastApplied = () => {
     if (!lastApplied) return;
     const queryKey = buildExplorerQueryKey(lastApplied);
-    const cached = loadExplorerResultCache(queryKey);
+    const cached = loadExplorerResultCache(queryKey, cabinetMode);
     if (cached && hydrateExplorerFromCachedEntry(cached, { ...cacheHydrateHandlers, queryVersion })) {
       return;
     }
@@ -4925,6 +4940,7 @@ function ExplorerFilters({
   const panelRef = React.useRef(null);
   const filterFields = (schema?.filterFields || []).filter((f) => f.id !== 'direction' && f.id !== 'collector');
   const switchIpScope = explorerSwitchIpScopeFromFilters(filters);
+  const maxRangeDays = explorerRangeLimitDays(schema?.maxRangeDays);
 
   useEffect(() => {
     const onKeyDown = (e) => {
@@ -4987,6 +5003,7 @@ function ExplorerFilters({
               onTimeRangeChange={onTimeRangeChange}
               customPeriod={customPeriod}
               onCustomPeriodChange={onCustomPeriodChange}
+              maxRangeDays={maxRangeDays}
             />
             {chartZoomDepth > 0 && (
               <button
@@ -5000,7 +5017,7 @@ function ExplorerFilters({
               </button>
             )}
             <div style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-muted)' }}>
-              Макс. {EXPLORER_MAX_RANGE_DAYS} дней
+              Макс. {maxRangeDays} дней
             </div>
           </ExplorerSystemFilterRow>
 
