@@ -1176,6 +1176,17 @@ a.nav-item--active:visited { color: var(--fg-primary); }
   border-top: 1px solid var(--bd-soft);
 }
 
+.explorer-group-mask-input {
+  -moz-appearance: textfield;
+  appearance: textfield;
+}
+
+.explorer-group-mask-input::-webkit-outer-spin-button,
+.explorer-group-mask-input::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
 .explorer-picker-group__heading {
   position: sticky;
   top: 0;

@@ -699,7 +699,7 @@ function buildExplorerQueryKey(snapshot) {
   const { validThresholds } = resolveExplorerThresholdPayload(migrated.thresholds, { thresholdMetrics: explorerThresholdApi().EXPLORER_THRESHOLD_DEFAULT_METRICS });
   return JSON.stringify({
     metric: migrated.metric || 'bps',
-    groupBy: migrated.groupBy || [],
+    groupBy: normalizeExplorerGroupTokens(migrated.groupBy || []),
     filters: (migrated.filters || []).map(normalizeExplorerFilter),
     thresholds: validThresholds,
     timeRange: migrated.timeRange || '1h',
@@ -944,7 +944,7 @@ function buildSnapshotFromUrl(urlState, urlGlobals) {
     filters: urlState.filters || [],
     thresholds: urlState.thresholds || [],
     metric: urlState.metric || 'bps',
-    groupBy: urlState.groupBy || ['src_ip', 'dst_ip'],
+    groupBy: normalizeExplorerGroupTokens(urlState.groupBy || ['src_ip', 'dst_ip']),
     limit: urlState.limit || EXPLORER_DEFAULT_FETCH_LIMIT,
     vis: urlState.vis,
   });
@@ -2376,7 +2376,9 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
 
     const queryKey = buildExplorerQueryKey(snapshot);
     const cached = loadExplorerResultCache(queryKey);
-    if (cached) {
+    const cachedGroupBy = normalizeExplorerGroupTokens(cached?.snapshot?.groupBy);
+    const snapshotGroupBy = normalizeExplorerGroupTokens(snapshot.groupBy);
+    if (cached && JSON.stringify(cachedGroupBy) === JSON.stringify(snapshotGroupBy)) {
       hydrateExplorerFromCachedEntry(cached, { ...cacheHydrateHandlers, queryVersion: 0 });
       return;
     }
@@ -2956,7 +2958,7 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
     const { validThresholds } = resolveExplorerThresholdPayload(thresholds, schema);
     const url = buildExplorerShareUrl({
       metric,
-      groupBy,
+      groupBy: normalizeExplorerGroupTokens(groupBy),
       filters: filters.map(normalizeExplorerFilter),
       thresholds: validThresholds,
       limit,
@@ -3826,10 +3828,19 @@ function ExplorerGroupChip({ token, dimension, onChange, onRemove }) {
     setDraftMask(String(mask ?? defaultMask));
   }, [mask, defaultMask]);
 
-  const commitMask = () => {
-    const nextToken = formatExplorerGroupToken(id, draftMask);
-    setDraftMask(String(explorerGroupMask(nextToken) ?? defaultMask));
+  const commitMask = (rawValue = draftMask) => {
+    const nextToken = formatExplorerGroupToken(id, rawValue);
+    const normalizedMask = String(explorerGroupMask(nextToken) ?? defaultMask);
+    setDraftMask(normalizedMask);
     if (nextToken !== token) onChange?.(nextToken);
+  };
+
+  const handleMaskChange = (rawValue) => {
+    setDraftMask(rawValue);
+    const trimmed = String(rawValue ?? '').trim();
+    if (!/^\d{1,2}$/.test(trimmed)) return;
+    const num = Number(trimmed);
+    if (num >= 1 && num <= 32) commitMask(trimmed);
   };
 
   return (
@@ -3839,15 +3850,15 @@ function ExplorerGroupChip({ token, dimension, onChange, onRemove }) {
         <>
           <span aria-hidden="true">/</span>
           <input
-            className="input mono"
+            className="input mono explorer-group-mask-input"
             type="number"
             min={dimension.maskMin || 1}
             max={dimension.maskMax || 32}
             step="1"
             aria-label={`Маска для ${dimension.label || id}`}
             value={draftMask}
-            onChange={(e) => setDraftMask(e.target.value)}
-            onBlur={commitMask}
+            onChange={(e) => handleMaskChange(e.target.value)}
+            onBlur={() => commitMask()}
             onKeyDown={(e) => {
               if (e.key === 'Enter') e.currentTarget.blur();
             }}
