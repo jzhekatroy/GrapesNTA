@@ -16,9 +16,21 @@ function requestApiPath(req) {
   return String(req.originalUrl || '').split('?')[0];
 }
 
+/** POST endpoints that only read data (allowed in impersonation read-only mode). */
+const CABINET_READONLY_POST_ALLOWLIST = [
+  /^\/api\/cabinet\/explorer\/query$/,
+  /^\/api\/cabinet\/explorer\/flows$/,
+  /^\/api\/cabinet\/explorer\/export$/,
+];
+
 function pathAllowedForClient(path) {
   const p = String(path || '');
   return CLIENT_API_ALLOWLIST.some((re) => re.test(p));
+}
+
+function isReadOnlyCabinetPost(path) {
+  const p = String(path || '');
+  return CABINET_READONLY_POST_ALLOWLIST.some((re) => re.test(p));
 }
 
 function isMutatingMethod(method) {
@@ -85,7 +97,8 @@ function createCabinetGuard({ sessions }) {
 
       if (context.readOnly && isMutatingMethod(req.method)) {
         const allowedWrite = apiPath === '/api/auth/stop-impersonation'
-          || apiPath === '/api/auth/logout';
+          || apiPath === '/api/auth/logout'
+          || isReadOnlyCabinetPost(apiPath);
         if (!allowedWrite) {
           res.status(403).json({ error: 'Режим просмотра кабинета: только чтение' });
           return;
@@ -118,6 +131,7 @@ function createCabinetGuard({ sessions }) {
 module.exports = {
   requestApiPath,
   pathAllowedForClient,
+  isReadOnlyCabinetPost,
   isMutatingMethod,
   createCabinetGuard,
 };

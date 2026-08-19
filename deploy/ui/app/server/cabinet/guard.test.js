@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { pathAllowedForClient, createCabinetGuard } = require('./guard');
+const { pathAllowedForClient, isReadOnlyCabinetPost, createCabinetGuard } = require('./guard');
 const {
   resolveCabinetContext,
   requireScopedClientId,
@@ -18,6 +18,10 @@ test('client allowlist permits cabinet and auth, denies operator APIs', () => {
   assert.equal(pathAllowedForClient('/api/explorer/query'), false);
   assert.equal(pathAllowedForClient('/api/users'), false);
   assert.equal(pathAllowedForClient('/api/clients/x/impersonate'), false);
+  assert.equal(isReadOnlyCabinetPost('/api/cabinet/explorer/query'), true);
+  assert.equal(isReadOnlyCabinetPost('/api/cabinet/explorer/flows'), true);
+  assert.equal(isReadOnlyCabinetPost('/api/cabinet/explorer/export'), true);
+  assert.equal(isReadOnlyCabinetPost('/api/cabinet/explorer/snapshots/x/share'), false);
 });
 
 test('api-map maps clients and exempts cabinet from resource guard', () => {
@@ -153,6 +157,43 @@ test('impersonation guard blocks mutating cabinet calls', async () => {
   });
   assert.equal(result.res.statusCode, 403);
   assert.match(result.res.body.error, /только чтение/i);
+});
+
+test('impersonation guard allows read-only cabinet explorer POSTs', async () => {
+  const sessions = new Map();
+  const now = Date.now();
+  sessions.set('s1', {
+    userId: 'admin',
+    expiresAt: now + 60_000,
+    impersonation: buildImpersonationSession({
+      clientId: 'client:real',
+      clientDisplayName: 'Real',
+      auditId: 'a1',
+      now,
+    }),
+  });
+  const guard = createCabinetGuard({ sessions });
+
+  for (const path of ['/cabinet/explorer/query', '/cabinet/explorer/flows', '/cabinet/explorer/export']) {
+    const result = await new Promise((resolve) => {
+      const req = {
+        sessionId: 's1',
+        user: { id: 'admin', roleId: 'Administrator', clientId: '', username: 'admin' },
+        baseUrl: '/api',
+        path,
+        method: 'POST',
+        query: {},
+        body: {},
+      };
+      const res = {
+        status(code) { this.statusCode = code; return this; },
+        json(payload) { this.body = payload; resolve({ res }); },
+      };
+      guard(req, res, () => resolve({ next: true, req }));
+    });
+    assert.equal(result.next, true, path);
+    assert.equal(result.req.cabinet.clientId, 'client:real');
+  }
 });
 
 test('Client role page resources include dashboard explorer dns only', () => {
