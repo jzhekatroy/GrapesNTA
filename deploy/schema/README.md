@@ -13,7 +13,7 @@ One schema covers collectors and product surfaces:
 | `50_net` | locations, sources, L3/L2, SNMP catalog, port services, health |
 | `60_traffic` | async rollup targets + `traffic_rollup_state` |
 | `70_observations` | observations store + personal rollups |
-| `80_rbac` | users / roles / permissions |
+| `80_rbac` | users / roles / permissions / UI audit log |
 
 ## Apply (fresh CH)
 

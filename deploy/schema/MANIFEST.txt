@@ -110,3 +110,4 @@
 80_rbac/02_users.sql
 80_rbac/03_role_permissions.sql
 80_rbac/04_user_permissions.sql
+80_rbac/05_app_audit_log.sql
