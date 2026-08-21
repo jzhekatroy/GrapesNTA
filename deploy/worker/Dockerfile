@@ -38,6 +38,7 @@ COPY deploy/worker/entrypoint.sh /app/entrypoint.sh
 
 RUN chmod +x /app/entrypoint.sh /app/bin/*.sh /app/bin/*.js \
   && ln -sf /app/bin/clickhouse-client-http.sh /usr/local/bin/clickhouse-client \
+  && node /app/bin/check-analytics-requires.js /app/analytics/server \
   && mkdir -p /app/analytics/server/data/observation_runs /var/log/grapesnta \
   && chown -R app:app /app/analytics/server/data /var/log/grapesnta
 

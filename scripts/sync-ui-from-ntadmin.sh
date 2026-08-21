@@ -92,6 +92,40 @@ fi
 # grapes-worker vendors a subset of server/ modules. They must move together with
 # the UI: a stale clickhouse.js/explorer.js pair makes the worker reject dimensions
 # the UI happily saves ("Неизвестное измерение разреза: …").
+#
+# The first loop only refreshes files that already exist in the snapshot. After
+# that, follow same-dir require() so a new sibling (explorer-cabinet-client.js)
+# is copied instead of leaving the worker image to crash-loop on MODULE_NOT_FOUND.
+copy_missing_worker_requires() {
+  local dest="$1"
+  local src_root="$2"
+  local added=1
+  local pass=0
+  while [[ "${added}" -eq 1 ]]; do
+    added=0
+    pass=$((pass + 1))
+    [[ "${pass}" -le 10 ]] || die "worker require() follow exceeded 10 passes"
+    local spec name src
+    while IFS= read -r spec; do
+      [[ -z "${spec}" ]] && continue
+      name="${spec%.js}.js"
+      [[ -f "${dest}/${name}" ]] && continue
+      src="${src_root}/server/${name}"
+      [[ -f "${src}" ]] || die "worker require() has no NTAdmin counterpart: server/${name}"
+      log "add worker module ${name}"
+      cp "${src}" "${dest}/${name}"
+      added=1
+    done < <(
+      { grep -hE "require\(['\"]\./[^'\"]+['\"]\)" "${dest}"/*.js || true; } \
+        | sed -E "s/.*require\(['\"]\.\/([^'\"]+)['\"]\).*/\1/" \
+        | sed 's/\.js$//' \
+        | grep -v '/' \
+        | awk '{ print $0 ".js" }' \
+        | sort -u
+    )
+  done
+}
+
 WORKER_DEST="${REPO_ROOT}/deploy/analytics/server"
 if [[ -d "${WORKER_DEST}" ]]; then
   log "sync worker modules → ${WORKER_DEST}/"
@@ -102,6 +136,9 @@ if [[ -d "${WORKER_DEST}" ]]; then
     [[ -f "${src}" ]] || die "worker module has no NTAdmin counterpart: server/${name}"
     cp "${src}" "${dst}"
   done
+  copy_missing_worker_requires "${WORKER_DEST}" "${SRC}"
+  node "${REPO_ROOT}/deploy/worker/bin/check-analytics-requires.js" "${WORKER_DEST}" \
+    || die "worker analytics snapshot has missing require() siblings"
 fi
 
 log "done → ${DEST}"
