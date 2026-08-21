@@ -9,7 +9,7 @@ const DEFAULTS = {
   cat_piter_ix: 1,
   cat_dc: 0,
   cat_bb: 0,
-  apiBase: 'https://195.2.241.23:8443',
+  apiBase: 'https://erp.bth.su',
   apiHost: 'erp.bth.su',
   apiToken: 'aBZFW5bH1tG80pxqon5S0noQXBX1wni0',
   apiInsecure: 1,
@@ -97,7 +97,7 @@ function resolveErpConfig(settings) {
     host: String(mapped.apiHost || DEFAULTS.apiHost),
     token: String(mapped.apiToken || '').trim(),
     insecure: mapped.apiInsecure !== false,
-    pageLimit: Math.min(Math.max(Number(process.env.ERP_API_PAGE_LIMIT) || 500, 1), 500),
+    pageLimit: Math.min(Math.max(Number(process.env.ERP_API_PAGE_LIMIT) || 20, 1), 500),
   };
 }
 

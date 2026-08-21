@@ -65,12 +65,23 @@ test('enabledCategoryIds берёт только включённые', () => {
   );
   const pub = mapSettings({});
   assert.equal(pub.apiHost, 'erp.bth.su');
-  assert.equal(pub.apiBase, 'https://195.2.241.23:8443');
+  assert.equal(pub.apiBase, 'https://erp.bth.su');
   assert.equal(pub.tokenSet, true);
   assert.equal(pub.apiToken, undefined);
   const cfg = resolveErpConfig(mapSettings({}, { includeToken: true }));
   assert.equal(cfg.host, 'erp.bth.su');
+  assert.equal(cfg.pageLimit, 20);
   assert.ok(cfg.token);
+});
+
+test('Host заголовок только если URL — IP, как на PiterIX', () => {
+  const { erpRequestHeaders } = require('./erp-piterix-run');
+  const cfg = { token: 't', host: 'erp.bth.su' };
+  const byName = erpRequestHeaders(cfg, 'https://erp.bth.su/api/v1/clients/by-category/bb?limit=20');
+  assert.equal(byName.Host, undefined);
+  assert.equal(byName.Accept, 'application/json');
+  const byIp = erpRequestHeaders(cfg, 'https://195.2.241.23:8443/api/v1/clients/by-category/piter_ix?limit=20');
+  assert.equal(byIp.Host, 'erp.bth.su');
 });
 
 test('uniquePrefixes берёт текущий IP из ERP, историю не трогает', () => {

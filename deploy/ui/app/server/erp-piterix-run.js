@@ -3,6 +3,7 @@
 const fs = require('fs');
 const path = require('path');
 const https = require('https');
+const net = require('net');
 const { URL } = require('url');
 const crypto = require('crypto');
 
@@ -128,7 +129,7 @@ function httpsGetJson(urlString, { headers = {}, insecure = false } = {}) {
       res.on('end', () => {
         const body = Buffer.concat(chunks).toString('utf8');
         if (res.statusCode < 200 || res.statusCode >= 300) {
-          reject(new Error(`ERP HTTP ${res.statusCode}: ${body.slice(0, 200)}`));
+          reject(new Error(`ERP HTTP ${res.statusCode} ${urlString}: ${body.slice(0, 200) || 'пустое тело'}`));
           return;
         }
         try {
@@ -144,25 +145,41 @@ function httpsGetJson(urlString, { headers = {}, insecure = false } = {}) {
   });
 }
 
+function erpRequestHeaders(cfg, urlString) {
+  const headers = {
+    Accept: 'application/json',
+    Authorization: `Bearer ${cfg.token}`,
+  };
+  const hostname = new URL(urlString).hostname;
+  if (net.isIP(hostname) && cfg.host) headers.Host = cfg.host;
+  return headers;
+}
+
 async function fetchErpClients(db, { category = CATEGORY } = {}) {
   const cfg = resolveErpConfig(await getSettings(db, { includeToken: true }));
   if (!cfg.token) throw new Error('Нет токена ERP');
   const clients = [];
   let after = '';
-  for (let page = 0; page < 40; page += 1) {
-    const qs = new URLSearchParams({ limit: String(cfg.pageLimit) });
+  let pageLimit = cfg.pageLimit;
+  const maxPages = Math.max(80, Math.ceil(15000 / Math.min(pageLimit, 20)));
+  for (let page = 0; page < maxPages; page += 1) {
+    const qs = new URLSearchParams({ limit: String(pageLimit) });
     if (after) qs.set('after', after);
-    const payload = await httpsGetJson(
-      `${cfg.base}/api/v1/clients/by-category/${encodeURIComponent(category)}?${qs}`,
-      {
+    const url = `${cfg.base}/api/v1/clients/by-category/${encodeURIComponent(category)}?${qs}`;
+    let payload;
+    try {
+      payload = await httpsGetJson(url, {
         insecure: cfg.insecure,
-        headers: {
-          Accept: 'application/json',
-          Authorization: `Bearer ${cfg.token}`,
-          Host: cfg.host,
-        },
-      },
-    );
+        headers: erpRequestHeaders(cfg, url),
+      });
+    } catch (err) {
+      if (/ERP HTTP 500/.test(String(err.message || '')) && pageLimit > 20) {
+        pageLimit = 20;
+        page -= 1;
+        continue;
+      }
+      throw err;
+    }
     const rows = Array.isArray(payload?.data) ? payload.data : [];
     clients.push(...rows);
     const next = payload?.next_after ?? payload?.meta?.next_after ?? '';
@@ -557,6 +574,7 @@ module.exports = {
   FIELD_MAP,
   ENSURE_SQL,
   erpConfig,
+  erpRequestHeaders,
   fetchErpClients,
   getSettings,
   saveSettings,

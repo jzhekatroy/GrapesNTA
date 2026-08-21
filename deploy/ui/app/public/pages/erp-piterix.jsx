@@ -47,7 +47,7 @@ function PageErpPiterix() {
   const [full, setFull] = useState(false);
   const [cronEnabled, setCronEnabled] = useState(false);
   const [categories, setCategories] = useState({ piter_ix: true, dc: false, bb: false });
-  const [apiBase, setApiBase] = useState('https://195.2.241.23:8443');
+  const [apiBase, setApiBase] = useState('https://erp.bth.su');
   const [apiHost, setApiHost] = useState('erp.bth.su');
   const [apiToken, setApiToken] = useState('');
   const [apiInsecure, setApiInsecure] = useState(true);
@@ -63,7 +63,7 @@ function PageErpPiterix() {
       if (st?.settings) {
         setCronEnabled(!!st.settings.cronEnabled);
         setCategories({ piter_ix: true, dc: false, bb: false, ...st.settings.categories });
-        setApiBase(st.settings.apiBase || 'https://195.2.241.23:8443');
+        setApiBase(st.settings.apiBase || 'https://erp.bth.su');
         setApiHost(st.settings.apiHost || 'erp.bth.su');
         setApiInsecure(st.settings.apiInsecure !== false);
         setBindMode(st.settings.bindMode === 'prefixes' ? 'prefixes' : 'ports');
@@ -160,7 +160,7 @@ function PageErpPiterix() {
               value={apiBase}
               disabled={saving}
               onChange={(e) => setApiBase(e.target.value)}
-              placeholder="https://195.2.241.23:8443"
+              placeholder="https://erp.bth.su"
               className="mono"
             />
           </label>
