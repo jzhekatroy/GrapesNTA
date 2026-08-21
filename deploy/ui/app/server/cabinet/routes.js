@@ -18,6 +18,7 @@ const {
   writeImpersonationEvent,
   listRecentImpersonationEvents,
 } = require('./impersonation-audit');
+const { writeImpersonateAuditEvent } = require('../audit-log');
 const {
   listClients,
   getClientAdmin,
@@ -472,6 +473,13 @@ function createClientsRouter({ sessions }) {
       });
       sessions.set(req.sessionId, sessionRecord);
 
+      await writeImpersonateAuditEvent(req, {
+        kind: 'start',
+        clientId: client.clientId,
+        clientDisplayName: client.displayName,
+        sessionId: req.sessionId,
+      }).catch(() => {});
+
       res.json({
         ok: true,
         cabinet: cabinetPayload({
@@ -509,6 +517,12 @@ async function stopImpersonationHandler(req, res, { sessions, reason = 'stop' } 
       clientDisplayName: ended.clientDisplayName,
       reason,
     });
+    await writeImpersonateAuditEvent(req, {
+      kind: 'end',
+      clientId: ended.clientId,
+      clientDisplayName: ended.clientDisplayName,
+      sessionId: req.sessionId,
+    }).catch(() => {});
     res.json({ ok: true, cabinet: cabinetPayload({
       mode: 'operator',
       clientId: null,

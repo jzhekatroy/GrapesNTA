@@ -4,3 +4,5 @@
 
 deploy/clickhouse/migrate_net_snmp_agents_last_ok.sql
 deploy/schema/80_rbac/05_app_audit_log.sql
+deploy/schema/80_rbac/06_app_erp_sync_settings.sql
+deploy/schema/80_rbac/07_erp_piterix_sync_log.sql

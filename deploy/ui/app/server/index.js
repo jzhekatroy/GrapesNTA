@@ -109,6 +109,11 @@ const {
   buildDnsExplorerStoredPayload,
   ensureStore: ensureAnalysisSnapshotsStore,
 } = require('./analysis-snapshots');
+const {
+  getLayout: getDashboardLayout,
+  putLayout: putDashboardLayout,
+  resetLayout: resetDashboardLayout,
+} = require('./dashboard-layout');
 const { isCabinetScoped } = require('./cabinet/context');
 const {
   parseMonitoringSeriesQuery,
@@ -229,6 +234,7 @@ const {
   createClientsRouter,
   stopImpersonationHandler,
 } = require('./cabinet/routes');
+const { createErpPiterixRouter } = require('./erp-piterix-routes');
 const {
   resolveCabinetContext,
   cabinetPayload,
@@ -236,6 +242,14 @@ const {
   getSessionRecord,
 } = require('./cabinet/context');
 const { ensureImpersonationAuditTable, writeImpersonationEvent } = require('./cabinet/impersonation-audit');
+const {
+  writeAuditEvent,
+  writePageViewEvent,
+  writeImpersonateAuditEvent,
+  createAuditMiddleware,
+  listAuditEvents,
+  auditContextFromReq,
+} = require('./audit-log');
 const { fillClientDisplayName } = require('./cabinet/clients-lookup');
 
 const PORT = Number(process.env.PORT) || 3000;
@@ -507,13 +521,34 @@ app.get('/api/build-info', (_req, res) => {
 
 app.post('/api/auth/login', async (req, res) => {
   try {
+    const username = String(req.body?.username || '').trim();
     const user = await verifyCredentials(req.body?.username, req.body?.password);
     if (!user) {
+      await writeAuditEvent({
+        ...auditContextFromReq(req),
+        action: 'login_fail',
+        resource: 'auth',
+        method: 'POST',
+        path: '/api/auth/login',
+        objectLabel: username,
+        result: 'fail',
+      }).catch(() => {});
       res.status(401).json({ error: 'Вход с паролем не сработал. Попробуйте еще раз, пожалуйста' });
       return;
     }
     const sessionId = createSession(user);
     setSessionCookie(res, sessionId);
+    await writeAuditEvent({
+      ...auditContextFromReq(req, sessionId),
+      actorUserId: user.id,
+      actorUsername: user.username,
+      actorRole: user.roleId,
+      action: 'login',
+      resource: 'auth',
+      method: 'POST',
+      path: '/api/auth/login',
+      result: 'ok',
+    }).catch(() => {});
     res.json({ ok: true, user: await sessionUserPayload(user, sessions.get(sessionId)) });
   } catch (err) {
     sendApiError(res, err);
@@ -524,11 +559,13 @@ app.post('/api/auth/logout', async (req, res) => {
   try {
     const cookies = parseCookies(req.headers.cookie);
     const sessionId = cookies[SESSION_COOKIE];
+    let logoutUser = null;
     if (sessionId) {
       const sessionRecord = getSessionRecord(sessions, sessionId);
       if (sessionRecord?.impersonation) {
         const ended = clearImpersonation(sessionRecord, 'logout');
         const user = await getUserById(sessionRecord.userId).catch(() => null);
+        logoutUser = user;
         if (ended && user) {
           await writeImpersonationEvent({
             auditId: ended.auditId,
@@ -540,9 +577,32 @@ app.post('/api/auth/logout', async (req, res) => {
             clientDisplayName: ended.clientDisplayName,
             reason: 'logout',
           }).catch(() => {});
+          req.user = user;
+          await writeImpersonateAuditEvent(req, {
+            kind: 'end',
+            clientId: ended.clientId,
+            clientDisplayName: ended.clientDisplayName,
+            sessionId,
+            path: '/api/auth/logout',
+          }).catch(() => {});
         }
+      } else if (sessionRecord?.userId) {
+        logoutUser = await getUserById(sessionRecord.userId).catch(() => null);
       }
       sessions.delete(sessionId);
+    }
+    if (logoutUser) {
+      await writeAuditEvent({
+        ...auditContextFromReq(req, sessionId),
+        actorUserId: logoutUser.id,
+        actorUsername: logoutUser.username,
+        actorRole: logoutUser.roleId,
+        action: 'logout',
+        resource: 'auth',
+        method: 'POST',
+        path: '/api/auth/logout',
+        result: 'ok',
+      }).catch(() => {});
     }
     clearSessionCookie(res);
     res.json({ ok: true });
@@ -582,10 +642,44 @@ app.post('/api/auth/stop-impersonation', async (req, res) => {
 app.use('/api', requireSession);
 app.use('/api', apiResourceGuard);
 app.use('/api', cabinetIsolationGuard);
+app.use('/api', createAuditMiddleware());
+
+app.post('/api/audit/page', async (req, res) => {
+  try {
+    const pageId = String(req.body?.pageId || '').trim();
+    if (!pageId) {
+      res.status(400).json({ error: 'pageId обязателен' });
+      return;
+    }
+    await writePageViewEvent(req, pageId, req.sessionId);
+    res.json({ ok: true });
+  } catch (err) {
+    sendApiError(res, err);
+  }
+});
+
+app.get('/api/audit', async (req, res) => {
+  try {
+    const result = await listAuditEvents({
+      from: req.query.from,
+      to: req.query.to,
+      q: req.query.q,
+      ip: req.query.ip,
+      kind: req.query.kind,
+      result: req.query.result,
+      limit: req.query.limit,
+      offset: req.query.offset,
+    });
+    res.json(result);
+  } catch (err) {
+    sendApiError(res, err);
+  }
+});
 
 app.use('/api/rbac', createRbacRouter());
 app.use('/api/cabinet', createCabinetRouter({ sessions }));
 app.use('/api/clients', createClientsRouter({ sessions }));
+app.use('/api/erp-piterix', createErpPiterixRouter());
 
 app.get('/api/dashboard/collectors', async (_req, res) => {
   try {
@@ -923,6 +1017,47 @@ app.get('/api/dashboard/recent-flows', async (req, res) => {
     });
   } catch (err) {
     res.status(502).json({ error: err.message });
+  }
+});
+
+function rejectCabinetDashboardLayout(req, res) {
+  if (isCabinetScoped(req.cabinet)) {
+    res.status(403).json({ error: 'Layout недоступен в клиентском кабинете' });
+    return true;
+  }
+  return false;
+}
+
+app.get('/api/dashboard/layout', async (req, res) => {
+  try {
+    if (rejectCabinetDashboardLayout(req, res)) return;
+    const stored = getDashboardLayout(req.user.id);
+    res.json({
+      data: stored?.layout || null,
+      updatedAt: stored?.updatedAt || null,
+    });
+  } catch (err) {
+    res.status(err.statusCode || 500).json({ error: err.message });
+  }
+});
+
+app.put('/api/dashboard/layout', async (req, res) => {
+  try {
+    if (rejectCabinetDashboardLayout(req, res)) return;
+    const saved = putDashboardLayout(req.user.id, req.body || {});
+    res.json({ ok: true, data: saved.layout, updatedAt: saved.updatedAt });
+  } catch (err) {
+    res.status(err.statusCode || 400).json({ error: err.message });
+  }
+});
+
+app.post('/api/dashboard/layout/reset', async (req, res) => {
+  try {
+    if (rejectCabinetDashboardLayout(req, res)) return;
+    const result = resetDashboardLayout(req.user.id);
+    res.json({ ok: true, data: result.layout, updatedAt: result.updatedAt });
+  } catch (err) {
+    res.status(err.statusCode || 400).json({ error: err.message });
   }
 });
 
@@ -1836,6 +1971,17 @@ app.post('/api/users/:id/password', async (req, res) => {
       clearForce: isSelf && req.user.forcePasswordChange,
     });
     if (isSelf && req.user.forcePasswordChange) req.user.forcePasswordChange = false;
+    const targetUser = isSelf ? req.user : await getUserById(targetId).catch(() => null);
+    await writeAuditEvent({
+      ...auditContextFromReq(req, req.sessionId),
+      action: 'password_change',
+      resource: 'users',
+      method: 'POST',
+      path: `/api/users/${encodeURIComponent(targetId)}/password`,
+      objectId: targetId,
+      objectLabel: targetUser?.username || targetId,
+      result: 'ok',
+    }).catch(() => {});
     res.json({ ok: true, ...result });
   } catch (err) {
     sendApiError(res, err, err.statusCode || 502);

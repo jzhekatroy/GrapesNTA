@@ -48,6 +48,7 @@ const NAV = [
     section: 'Администрирование',
     items: [
       { id: 'users', label: 'Пользователи и права', icon: 'shield' },
+      { id: 'audit', label: 'Журнал аудита', icon: 'clock' },
       { id: 'clients', label: 'Клиенты', icon: 'users' },
       { id: 'smtp', label: 'Почта (SMTP)', icon: 'export' },
       { id: 'ttl', label: 'Сроки хранения', icon: 'clock' },
@@ -85,6 +86,7 @@ const PAGES_WITHOUT_HEADER_FILTERS = new Set([
   'monitoring',
   'diagnostics',
   'users',
+  'audit',
   'clients',
   'collectors',
   'snmp',
@@ -525,7 +527,7 @@ function timeRangePresetMs(rangeId) {
   return Number(match[1]) * unitMs;
 }
 
-function validateExplorerCustomPeriod({ from, to }, timeRange = '1h', maxRangeDays = EXPLORER_MAX_RANGE_DAYS) {
+function validateExplorerCustomPeriod({ from, to }, timeRange = '1h', maxRangeDays = EXPLORER_MAX_RANGE_DAYS, periodOptions = {}) {
   if (timeRange !== 'custom') return null;
   const err = validateCustomPeriod({ from, to });
   if (err) return err;
@@ -533,8 +535,12 @@ function validateExplorerCustomPeriod({ from, to }, timeRange = '1h', maxRangeDa
   const toMs = new Date(to).getTime();
   if (!Number.isFinite(fromMs) || !Number.isFinite(toMs)) return 'Некорректная дата';
   const limitDays = explorerRangeLimitDays(maxRangeDays);
-  if (toMs - fromMs > limitDays * 86400000) {
-    return `Период не может превышать ${limitDays} дней`;
+  const limitMs = Number(periodOptions.maxRangeMs) > 0
+    ? Number(periodOptions.maxRangeMs)
+    : limitDays * 86400000;
+  const overMsg = periodOptions.rangeErrorMessage || `Период не может превышать ${limitDays} дней`;
+  if (toMs - fromMs > limitMs) {
+    return overMsg;
   }
   return null;
 }

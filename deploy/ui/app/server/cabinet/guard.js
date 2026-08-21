@@ -6,6 +6,7 @@ const {
   cabinetPayload,
 } = require('./context');
 const { writeImpersonationEvent } = require('./impersonation-audit');
+const { writeImpersonateAuditEvent } = require('../audit-log');
 
 function requestApiPath(req) {
   // Middleware is mounted at /api, so Express strips that prefix from req.path.
@@ -61,6 +62,14 @@ function createCabinetGuard({ sessions }) {
             clientDisplayName: ended.clientDisplayName,
             reason: 'timeout',
           }).catch(() => {});
+          req.sessionId = req.sessionId || '';
+          await writeImpersonateAuditEvent(req, {
+            kind: 'end',
+            clientId: ended.clientId,
+            clientDisplayName: ended.clientDisplayName,
+            sessionId: req.sessionId,
+            path: req.originalUrl?.split('?')[0] || '',
+          }).catch(() => {});
         }
         context = resolveCabinetContext(req.user, sessionRecord);
       }
@@ -98,6 +107,7 @@ function createCabinetGuard({ sessions }) {
       if (context.readOnly && isMutatingMethod(req.method)) {
         const allowedWrite = apiPath === '/api/auth/stop-impersonation'
           || apiPath === '/api/auth/logout'
+          || apiPath === '/api/audit/page'
           || isReadOnlyCabinetPost(apiPath);
         if (!allowedWrite) {
           res.status(403).json({ error: 'Режим просмотра кабинета: только чтение' });

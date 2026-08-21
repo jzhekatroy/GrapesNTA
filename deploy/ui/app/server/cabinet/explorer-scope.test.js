@@ -111,3 +111,9 @@ test('operator schema publishes its own range limit so the UI can follow it', ()
   assert.equal(schema.maxRangeDays, 365);
   assert.ok(schema.maxRangeDays > cabinetExplorerSchema().maxRangeDays);
 });
+
+test('cabinet explorer schema excludes cabinet_client field', () => {
+  const schema = cabinetExplorerSchema();
+  assert.equal(schema.filterFields.some((f) => f.id === 'cabinet_client'), false);
+  assert.equal(schema.dimensions.some((d) => d.id === 'cabinet_client'), false);
+});

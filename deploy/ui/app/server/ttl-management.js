@@ -81,6 +81,14 @@ const TTL_CATALOG = [
     defaultDays: 365,
     heavy: false,
   },
+  {
+    id: 'app_audit_log',
+    label: 'Журнал аудита',
+    table: () => 'app_audit_log',
+    ttlColumn: 'event_at',
+    defaultDays: 180,
+    heavy: false,
+  },
 ];
 
 const catalogById = Object.fromEntries(TTL_CATALOG.map((entry) => [entry.id, entry]));

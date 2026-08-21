@@ -23,7 +23,7 @@ const STANDARD_ROLES = [
   { id: CLIENT_ROLE_ID, name: CLIENT_ROLE_ID, displayName: 'Клиент' },
 ];
 
-const ADMIN_ONLY_RESOURCES = new Set(['ttl', 'diagnostics', 'smtp']);
+const ADMIN_ONLY_RESOURCES = new Set(['ttl', 'diagnostics', 'smtp', 'audit']);
 const OPERATOR_MANAGED_RESOURCES = new Set([CLIENTS_RESOURCE]);
 
 function clickhouseDateTime(date = new Date()) {

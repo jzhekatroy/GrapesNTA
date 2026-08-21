@@ -1,0 +1,14 @@
+[Unit]
+Description=ERP PiterIX client sync (full)
+After=docker.service
+Wants=docker.service
+
+[Service]
+Type=oneshot
+Nice=10
+EnvironmentFile=-/etc/grapes/erp-piterix.env
+ExecStart=/opt/grapes/erp-piterix/run.sh
+TimeoutStartSec=1800
+
+[Install]
+WantedBy=multi-user.target

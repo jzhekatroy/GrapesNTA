@@ -1,9 +1,15 @@
 const { canAccess, canWrite } = require('./permissions');
-const { getResourceForPath, isResourceGuardExempt, isMutatingRequest } = require('./api-map');
+const {
+  getResourceForPath,
+  isResourceGuardExempt,
+  isMutatingRequest,
+  isDashboardLayoutPath,
+} = require('./api-map');
 
 async function checkResourceAccess(req, res, resource) {
   const mutating = isMutatingRequest(req.path, req.method);
-  const allowed = mutating
+  const personalLayout = isDashboardLayoutPath(req.path);
+  const allowed = mutating && !personalLayout
     ? await canWrite(req.user, resource)
     : await canAccess(req.user, resource);
   if (!allowed) {

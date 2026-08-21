@@ -13,6 +13,7 @@ test('client allowlist permits cabinet and auth, denies operator APIs', () => {
   assert.equal(pathAllowedForClient('/api/cabinet/overview/series'), true);
   assert.equal(pathAllowedForClient('/api/auth/me'), true);
   assert.equal(pathAllowedForClient('/api/auth/stop-impersonation'), true);
+  assert.equal(pathAllowedForClient('/api/audit/page'), true);
   assert.equal(pathAllowedForClient('/api/users/abc/password'), true);
   assert.equal(pathAllowedForClient('/api/dashboard/traffic-stats'), false);
   assert.equal(pathAllowedForClient('/api/explorer/query'), false);
@@ -28,6 +29,8 @@ test('api-map maps clients and exempts cabinet from resource guard', () => {
   assert.equal(getResourceForPath('/api/clients/foo/impersonate', 'POST'), 'clients');
   assert.equal(getResourceForPath('/api/clients/impersonation/audit', 'GET'), 'clients');
   assert.equal(getResourceForPath('/api/cabinet/overview/series', 'GET'), null);
+  assert.equal(getResourceForPath('/api/audit', 'GET'), 'audit');
+  assert.equal(getResourceForPath('/api/audit/page', 'POST'), null);
   assert.equal(isResourceGuardExempt('/api/cabinet/overview/series'), true);
 });
 

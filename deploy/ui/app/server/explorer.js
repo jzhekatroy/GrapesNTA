@@ -49,6 +49,18 @@ const {
   normalizeExplorerGroupTokens,
 } = require('./explorer-group-mask');
 const {
+  CABINET_CLIENT_MAX_RANGE_MS,
+  CABINET_CLIENT_MAX_RANGE_HOURS,
+  searchCabinetClients,
+  buildCabinetClientFilterSql,
+  cabinetClientGroupKeyExpr,
+  cabinetClientLabelFromKey,
+  lookupCabinetClientDisplayNames,
+  queryUsesCabinetClient,
+  explorerCabinetClientDisplayLabel,
+  explorerWindowSpecWithCabinetClientCatalog,
+} = require('./explorer-cabinet-client');
+const {
   normalizeExplorerThresholds,
   explorerThresholdsNeedPeak,
   explorerThresholdsActive,
@@ -91,6 +103,7 @@ const FILTER_OPS_BY_TYPE = {
   tcp_flags: ['has_any', 'has_all', 'eq', 'neq'],
   country: ['=', '!=', 'contains', 'not_contains', 'in', 'not_in'],
   entity: ['=', 'in'],
+  cabinet_client: ['=', '!=', 'in', 'not_in'],
   vlan_name: ['=', '!=', 'contains', 'not_contains', 'in', 'not_in'],
 };
 
@@ -145,7 +158,14 @@ const EXPLORER_DIM_META = {
   l3_owner: {
     label: 'Оператор / клиент / L3 owner',
     group: EXPLORER_GROUP.L3,
-    aliases: ['оператор', 'клиент', 'пин', 'owner', 'entity'],
+    aliases: ['оператор', 'пин', 'owner', 'entity', 'l3'],
+    valueHint: 'L3-сущность из net_entities — это не клиент кабинета',
+  },
+  cabinet_client: {
+    label: 'Клиент',
+    group: EXPLORER_GROUP.SYS,
+    aliases: ['клиент', 'лс', 'кабинет', 'cabinet client'],
+    valueHint: 'Название, client_id или IP/CIDR из привязанных сетей клиента',
   },
   own_network: {
     label: 'Префикс / CIDR',
@@ -245,7 +265,7 @@ const DIMENSION_GROUPS = {
   ],
   [EXPLORER_GROUP.DIR]: ['direction', 'src_scope', 'dst_scope'],
   [EXPLORER_GROUP.L2]: ['src_mac', 'dst_mac', 'vlan', 'vlan_name', 'src_vlan'],
-  [EXPLORER_GROUP.SYS]: ['collector'],
+  [EXPLORER_GROUP.SYS]: ['collector', 'cabinet_client'],
 };
 
 const EXPLORER_FILTER_HINTS = {
@@ -260,8 +280,9 @@ const EXPLORER_FILTER_HINTS = {
   asn: 'Номер ASN или название — напр. 12389',
   vlan: 'ID VLAN или имя',
   service: 'Код или название сервиса',
-  l3_owner: 'Поиск L3-сущности',
+  l3_owner: 'L3-сущность из net_entities — это не клиент кабинета',
   own_network: 'Префикс CIDR — напр. 10.0.0.0/24',
+  cabinet_client: 'Название, client_id или IP/CIDR из привязанных сетей клиента',
   vlan_name: 'Имя VLAN из справочника L2',
   if_alias: 'ifAlias порта из SNMP',
 };
@@ -382,6 +403,7 @@ function explorerFilterEntityType(filterType) {
   if (filterType === 'switch_ip') return 'switch_ip';
   if (filterType === 'if_name') return 'if_name';
   if (filterType === 'if_alias') return 'if_alias';
+  if (filterType === 'cabinet_client') return 'cabinet_client';
   return null;
 }
 
@@ -1054,6 +1076,18 @@ function explorerDimensions() {
     expr: `'—'`, filterType: 'own_network', virtual: true,
   };
 
+  const cabinetClientKeyExpr = cabinetClientGroupKeyExpr('f');
+  dims.cabinet_client = {
+    label: 'Клиент',
+    group: EXPLORER_GROUP.SYS,
+    kind: 'entity',
+    filterType: 'cabinet_client',
+    expr: cabinetClientLabelFromKey(cabinetClientKeyExpr),
+    filterExpr: cabinetClientKeyExpr,
+    groupKeyExpr: cabinetClientKeyExpr,
+    labelFromKey: cabinetClientLabelFromKey,
+  };
+
   const tcpFlagsCol = flowCol('tcpFlags');
   if (tcpFlagsCol) {
     dims.tcp_flags = {
@@ -1224,6 +1258,7 @@ function explorerSchema(options = {}) {
     dimensionGroups: DIMENSION_GROUPS,
     granularities: ['auto', '1m', '5m', '1h', '1d'],
     maxRangeDays: EXPLORER_MAX_RANGE_DAYS,
+    maxCabinetClientRangeHours: CABINET_CLIENT_MAX_RANGE_HOURS,
     ...explorerThresholdSchemaExtras(),
   };
 }
@@ -1514,17 +1549,18 @@ function combineExplorerFilterSql(clauses) {
 function validateExplorerWindow({ range = '1h', from, to } = {}, options = {}) {
   const maxRangeMs = Number(options.maxRangeMs) || EXPLORER_MAX_RANGE_MS;
   const maxRangeDays = Math.ceil(maxRangeMs / 86400000);
+  const overMsg = options.rangeErrorMessage || `Период не может превышать ${maxRangeDays} дней`;
   if (range === 'custom') {
     if (!from || !to) throw new Error('Для своего периода нужны параметры from и to');
     const durationMs = customRangeDurationMs(from, to);
     if (durationMs > maxRangeMs) {
-      throw new Error(`Период не может превышать ${maxRangeDays} дней`);
+      throw new Error(overMsg);
     }
     return;
   }
   const windowMs = explorerWindowSeconds({ range }) * 1000;
   if (windowMs > maxRangeMs) {
-    throw new Error(`Период не может превышать ${maxRangeDays} дней`);
+    throw new Error(overMsg);
   }
 }
 
@@ -1624,6 +1660,12 @@ async function buildExplorerFilterClauses(filters, dims, params) {
 
     if (dim.filterType === 'l3_owner' || dim.filterType === 'own_network') {
       addClause(await buildEntityPrefixFilter(f.field, f.value, params, idxRef));
+      continue;
+    }
+
+    if (dim.filterType === 'cabinet_client') {
+      const filterValues = op === 'in' || op === 'not_in' ? values : [String(f.value ?? '').trim()];
+      addClause(await buildCabinetClientFilterSql(filterValues, op, params, 'f'));
       continue;
     }
 
@@ -1869,8 +1911,20 @@ function normalizeExplorerQuery(body = {}, options = {}) {
   const range = body.range || body.timeRange || '1h';
   const from = body.from;
   const to = body.to;
+  const filters = normalizeFilterList(body.filters);
+  const usesCabinetClient = !options.cabinetClientId && queryUsesCabinetClient({
+    filters,
+    groupBy: body.groupBy,
+  });
   validateExplorerWindow({ range, from, to }, {
-    maxRangeMs: options.cabinetClientId ? CABINET_EXPLORER_MAX_RANGE_MS : EXPLORER_MAX_RANGE_MS,
+    maxRangeMs: options.cabinetClientId
+      ? CABINET_EXPLORER_MAX_RANGE_MS
+      : usesCabinetClient
+        ? CABINET_CLIENT_MAX_RANGE_MS
+        : EXPLORER_MAX_RANGE_MS,
+    rangeErrorMessage: usesCabinetClient
+      ? 'Фильтр по клиенту на сырых потоках: период не может превышать 6 часов'
+      : undefined,
   });
 
   const collectorRaw = options.cabinetClientId
@@ -1888,7 +1942,6 @@ function normalizeExplorerQuery(body = {}, options = {}) {
   }
   const granKey = body.granularity || 'auto';
   const defaultPeakWindow = granKey === '1m' ? '1m' : granKey === '1h' || granKey === '1d' ? '1h' : '5m';
-  const filters = normalizeFilterList(body.filters);
   return {
     metric: normalizeExplorerMetric(body.metric),
     groupBy: body.groupBy,
@@ -1972,6 +2025,9 @@ function mapExplorerFlowRows(groups, rows, windowSeconds, vlanGroupIndexes, asnG
     const entityGroupIndexes = groups
       .map((g, i) => (g === 'src_entity' || g === 'dst_entity' ? i : -1))
       .filter((i) => i >= 0);
+    const cabinetClientGroupIndexes = groups
+      .map((g, i) => (g === 'cabinet_client' ? i : -1))
+      .filter((i) => i >= 0);
     const asnNums = new Set();
     if (asnGroupIndexes.length) {
       for (const r of rows) {
@@ -1995,6 +2051,18 @@ function mapExplorerFlowRows(groups, rows, windowSeconds, vlanGroupIndexes, asnG
     }
     const entityNameMap = entityGroupIndexes.length
       ? await lookupEntityDisplayNames([...entityIds])
+      : null;
+    const cabinetClientIds = new Set();
+    if (cabinetClientGroupIndexes.length) {
+      for (const r of rows) {
+        for (const idx of cabinetClientGroupIndexes) {
+          const id = String(r[`g${idx}`] ?? '').trim();
+          if (id && id !== '—') cabinetClientIds.add(id);
+        }
+      }
+    }
+    const cabinetClientNameMap = cabinetClientGroupIndexes.length
+      ? await lookupCabinetClientDisplayNames([...cabinetClientIds])
       : null;
     return rows.map((r, i) => {
       const rawValues = groups.map((_, idx) => String(r[`g${idx}`] ?? '—') || '—');
@@ -2023,6 +2091,16 @@ function mapExplorerFlowRows(groups, rows, windowSeconds, vlanGroupIndexes, asnG
             continue;
           }
           values[idx] = explorerEntityDisplayLabel(id, entityNameMap.get(id) || '');
+        }
+      }
+      if (cabinetClientNameMap) {
+        for (const idx of cabinetClientGroupIndexes) {
+          const id = String(rawValues[idx] || '').trim();
+          if (!id || id === '—') {
+            values[idx] = '—';
+            continue;
+          }
+          values[idx] = explorerCabinetClientDisplayLabel(id, cabinetClientNameMap.get(id) || '');
         }
       }
       for (const idx of tcpGroupIndexes) {
@@ -2321,7 +2399,8 @@ async function explorerFlows(body = {}, options = {}) {
     || thresholds.some((threshold) => threshold.metric === 'uniq_src');
   const pctCol = explorerAggPctColumn(metricKey);
   const pctExpr = `round(${metricSpec.pctBase} * 100 / nullIf(sum(${metricSpec.pctBase}) OVER (), 0), 2)`;
-  const windowSpec = explorerResolveTrafficWindow(body, q);
+  let windowSpec = explorerResolveTrafficWindow(body, q);
+  windowSpec = explorerWindowSpecWithCabinetClientCatalog(windowSpec, groups);
   const gran = resolveExplorerGranularity(q);
   const windowSeconds = explorerResolvedWindowSeconds(body, q);
   const params = { ...windowSpec.params, limit: q.limit, offset: q.offset };
@@ -2707,7 +2786,8 @@ async function explorerResultSeries(body = {}, flowRows = [], options = {}) {
   const metricKey = q.metric;
   const scaled = explorerScaledFlowExprs('f');
   const gran = resolveExplorerGranularity(q);
-  const windowSpec = explorerResolveTrafficWindow(body, q);
+  let windowSpec = explorerResolveTrafficWindow(body, q);
+  windowSpec = explorerWindowSpecWithCabinetClientCatalog(windowSpec, groups);
   const params = { ...windowSpec.params };
   const idxRef = { i: 0 };
   const { filterSql, joins: filterJoins } = await buildExplorerFilterClauses(q.filters, dims, params);
@@ -2732,6 +2812,13 @@ async function explorerResultSeries(body = {}, flowRows = [], options = {}) {
           return `${dim.filterExpr} = {${paramName}:UInt8}`;
         }
         if (EXPLORER_ENTITY_SERIES_DIMS.has(g) && dim.groupKeyExpr) {
+          if (raw === '—' || raw === '') {
+            return `(${dim.groupKeyExpr} = '' OR ${dim.groupKeyExpr} = '—')`;
+          }
+          scopedParams[paramName] = raw;
+          return `${dim.groupKeyExpr} = {${paramName}:String}`;
+        }
+        if (g === 'cabinet_client' && dim.groupKeyExpr) {
           if (raw === '—' || raw === '') {
             return `(${dim.groupKeyExpr} = '' OR ${dim.groupKeyExpr} = '—')`;
           }
@@ -2839,7 +2926,8 @@ async function explorerGroupedTimeseries(body = {}) {
 
   const metricKey = q.metric;
   const scaled = explorerScaledFlowExprs('f');
-  const windowSpec = explorerResolveTrafficWindow(body, q);
+  let windowSpec = explorerResolveTrafficWindow(body, q);
+  windowSpec = explorerWindowSpecWithCabinetClientCatalog(windowSpec, groups);
   const gran = resolveExplorerGranularity(q);
   const windowSeconds = explorerResolvedWindowSeconds(body, q);
   const params = { ...windowSpec.params, limit: q.limit };
@@ -3242,6 +3330,10 @@ async function searchExplorerEntities({ type, q = '', limit = 20, switchIp = '' 
   const lim = Math.min(Math.max(Number(limit) || 20, 1), 50);
   const needle = search.toLowerCase();
   const switchIps = normalizeExplorerSwitchIpFilter(switchIp);
+
+  if (type === 'cabinet_client') {
+    return searchCabinetClients({ q: search, limit: lim });
+  }
 
   if (type === 'source_id') {
     const sources = sourcesTableRef();

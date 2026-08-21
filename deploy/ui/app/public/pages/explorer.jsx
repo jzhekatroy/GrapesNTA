@@ -200,6 +200,20 @@ function dedupeExplorerEntityItems(items) {
   return [...byId.values()];
 }
 
+function explorerUsesCabinetClient({ filters = [], groupBy = [] } = {}) {
+  if ((filters || []).some((f) => String(f?.field || '').trim() === 'cabinet_client')) return true;
+  return (groupBy || []).some((token) => explorerGroupFieldId(token) === 'cabinet_client');
+}
+
+function explorerCabinetClientPeriodOptions(schema) {
+  const hours = Number(schema?.maxCabinetClientRangeHours) || 6;
+  return {
+    maxRangeMs: hours * 3600000,
+    maxRangeDays: hours / 24,
+    rangeErrorMessage: `Фильтр по клиенту на сырых потоках: период не может превышать ${hours} часов`,
+  };
+}
+
 function explorerRowFilterValue(row, dimId, valueIdx, dimensionById) {
   const fieldId = explorerGroupFieldId(dimId);
   const kind = dimensionById[fieldId]?.kind;
@@ -224,6 +238,14 @@ function explorerRowFilterValue(row, dimId, valueIdx, dimensionById) {
     return {
       value: meta?.asn ?? parseExplorerAsnNumber(row.rawValues?.[valueIdx] ?? row.values[valueIdx]),
       label: meta?.asName || null,
+    };
+  }
+  if (fieldId === 'cabinet_client') {
+    const raw = row.rawValues?.[valueIdx] ?? row.values[valueIdx];
+    const label = row.values[valueIdx];
+    return {
+      value: raw,
+      label: label && String(label) !== String(raw) ? label : null,
     };
   }
   const raw = row.rawValues?.[valueIdx] ?? row.values[valueIdx];
@@ -928,6 +950,10 @@ function explorerThresholdApi() {
   return window.ExplorerThresholds || {};
 }
 
+function explorerGroupDslApi() {
+  return window.ExplorerGroupDsl || {};
+}
+
 function cloneExplorerThresholdsList(rows) {
   return explorerThresholdApi().cloneExplorerThresholds?.(rows) || [];
 }
@@ -1047,6 +1073,7 @@ function restoreExplorerDraftFromSnapshot(snapshot, setters, { filterMode, setFi
       customPeriod: migrated.customPeriod,
       filters: migrated.filters,
       thresholds: migrated.thresholds,
+      groupBy: migrated.groupBy,
       schema,
     }));
   }
@@ -1080,7 +1107,7 @@ function parseLogicPrefix(line) {
 }
 
 function serializeExplorerFilterDsl({
-  timeRange, customPeriod, filters, thresholds, schema,
+  timeRange, customPeriod, filters, thresholds, schema, groupBy,
 }) {
   const lines = [];
   if (timeRange === 'custom' && customPeriod?.from && customPeriod?.to) {
@@ -1088,6 +1115,11 @@ function serializeExplorerFilterDsl({
   } else {
     lines.push(`time range ${timeRange}`);
   }
+
+  const groupLine = explorerGroupDslApi().serializeExplorerGroupByDsl?.(
+    normalizeExplorerGroupTokens(groupBy?.length ? groupBy : ['src_ip', 'dst_ip']),
+  );
+  if (groupLine) lines.push(groupLine);
 
   (filters || []).forEach((f, i) => {
     const logicOpt = EXPLORER_FILTER_LOGIC_OPTIONS.find((o) => o.id === normalizeFilterLogicValue(f.logic));
@@ -1156,9 +1188,13 @@ function parseExplorerFilterDsl(text, schema = null) {
   let customPeriod = defaultCustomPeriod();
   const filters = [];
   const thresholds = [];
+  let groupBy;
+  let groupBySeen = false;
   let conditionIndex = 0;
   let pendingLogic = null;
   const schemaMetrics = explorerThresholdApi().thresholdMetricsFromSchema?.(schema) || [];
+  const dimensions = schema?.dimensions || [];
+  const groupDsl = explorerGroupDslApi();
 
   const pushFilter = (partial) => {
     filters.push({
@@ -1187,6 +1223,21 @@ function parseExplorerFilterDsl(text, schema = null) {
             ...draft,
             id: `thr-${Date.now()}-${index}-${Math.random().toString(36).slice(2, 6)}`,
           });
+        }
+        continue;
+      }
+
+      if (groupDsl.isExplorerGroupByDslLine?.(rawLine)) {
+        if (groupBySeen) parseError(lineNum, 'строка group by указана более одного раза');
+        groupBySeen = true;
+        try {
+          groupBy = groupDsl.parseExplorerGroupByDslLine?.(
+            rawLine,
+            dimensions,
+            { maxCount: OBSERVATION_MAX_GROUP_BY },
+          );
+        } catch (err) {
+          parseError(lineNum, err.message || 'ошибка группировки');
         }
         continue;
       }
@@ -1354,7 +1405,13 @@ function parseExplorerFilterDsl(text, schema = null) {
   );
   if (periodErr) throw new Error(periodErr);
 
-  return { timeRange, customPeriod, filters, thresholds };
+  return {
+    timeRange,
+    customPeriod,
+    filters,
+    thresholds,
+    ...(groupBy !== undefined ? { groupBy } : {}),
+  };
 }
 
 function explorerTextLineBounds(value, cursor) {
@@ -1448,9 +1505,18 @@ function buildExplorerTextSuggestions({ value, cursor, schema, entityItems = [] 
     return explorerThresholdApi().buildExplorerThresholdDslSuggestions?.(trimmed, leading, schemaMetrics) || [];
   }
 
+  if (explorerGroupDslApi().isExplorerGroupByDslContext?.(trimmed)) {
+    return explorerGroupDslApi().buildExplorerGroupByDslSuggestions?.(
+      trimmed,
+      leading,
+      schema?.dimensions || [],
+    ) || [];
+  }
+
   [
     lineSuggestion('time range', 'time range 1h', 'Период'),
     lineSuggestion('time between', 'time between "YYYY-MM-DDTHH:mm" and "YYYY-MM-DDTHH:mm"', 'Ручной диапазон'),
+    lineSuggestion('group by', 'group by src_ip, dst_ip', 'Группировка'),
     ...(fieldById.direction ? [lineSuggestion('direction', 'direction in (in, out, transit)', 'Направления')] : []),
     ...(fieldById.collector ? [lineSuggestion('collector', 'collector in ("collector-id")', 'Коллекторы')] : []),
     ...explorerLogicAutocompleteEntries().map(({ token, hint }) => lineSuggestion(token, `${token} `, hint)),
@@ -1458,7 +1524,8 @@ function buildExplorerTextSuggestions({ value, cursor, schema, entityItems = [] 
     .filter((item) => matchesNeedle(item.label, item.hint))
     .forEach((item) => suggestions.push(item));
 
-  if (!rest.includes(' ') && !['time', 'direction', 'collector'].some((k) => lowerRest.startsWith(k))) {
+  if (!rest.includes(' ') && !['time', 'direction', 'collector'].some((k) => lowerRest.startsWith(k))
+    && !explorerGroupDslApi().isExplorerGroupByDslContext?.(trimmed)) {
     const fieldNeedle = rest.toLowerCase();
     fields
       .filter((f) => fieldNeedle && explorerFieldMatchesQuery(f, fieldNeedle))
@@ -1527,9 +1594,10 @@ function buildExplorerTextSuggestions({ value, cursor, schema, entityItems = [] 
     dedupeExplorerEntityItems(entityItems).slice(0, 8).forEach((item) => {
       const v = item.value ?? item.id;
       const resolvedOp = resolveExplorerOpToken(op);
+      const formatted = /[:,\s]/.test(String(v)) ? `"${v}"` : String(v);
       suggestions.push(lineSuggestion(
         String(item.label || v),
-        `${logicPrefix}${field} ${resolvedOp} ${v}`,
+        `${logicPrefix}${field} ${resolvedOp} ${formatted}`,
         item.sublabel || 'Сущность',
       ));
     });
@@ -2326,7 +2394,19 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
   const dimensions = schema?.dimensions || [];
   const metrics = schema?.metrics || [];
   const dimensionById = useMemo(() => Object.fromEntries(dimensions.map((d) => [d.id, d])), [dimensions]);
-  const maxRangeDays = explorerRangeLimitDays(schema?.maxRangeDays ?? explorerApi.maxRangeDays);
+  const usesCabinetClient = useMemo(
+    () => explorerUsesCabinetClient({ filters, groupBy }),
+    [filters, groupBy],
+  );
+  const cabinetClientPeriod = useMemo(
+    () => (usesCabinetClient ? explorerCabinetClientPeriodOptions(schema) : null),
+    [usesCabinetClient, schema],
+  );
+  const maxRangeDays = cabinetClientPeriod?.maxRangeDays
+    ?? explorerRangeLimitDays(schema?.maxRangeDays ?? explorerApi.maxRangeDays);
+  const periodValidationOptions = cabinetClientPeriod
+    ? { maxRangeMs: cabinetClientPeriod.maxRangeMs, rangeErrorMessage: cabinetClientPeriod.rangeErrorMessage }
+    : {};
 
   const querySetters = useMemo(() => ({
     setTimeRange, setCustomPeriod, setFilters, setThresholds, setMetric, setGroupBy, setLimit, setVis,
@@ -2456,7 +2536,7 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
   useEffect(() => {
     if (filterMode !== 'text') return;
     setFilterText(serializeExplorerFilterDsl({
-      timeRange, customPeriod, filters, thresholds, schema,
+      timeRange, customPeriod, filters, thresholds, groupBy, schema,
     }));
     setFilterTextError(null);
   }, [filterMode]);
@@ -2467,6 +2547,7 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
     if (parsed.timeRange === 'custom') setCustomPeriod(parsed.customPeriod);
     setFilters(cloneExplorerFilters(parsed.filters));
     setThresholds(cloneExplorerThresholdsList(parsed.thresholds || []));
+    if (parsed.groupBy) setGroupBy(normalizeExplorerGroupTokens(parsed.groupBy));
     setFilterTextError(null);
     return parsed;
   };
@@ -2490,7 +2571,7 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
     }
     if (nextMode === 'text') {
       setFilterText(serializeExplorerFilterDsl({
-        timeRange, customPeriod, filters, thresholds, schema,
+        timeRange, customPeriod, filters, thresholds, groupBy, schema,
       }));
       setFilterTextError(null);
     }
@@ -2505,6 +2586,7 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
       customPeriod,
       filters: [],
       thresholds,
+      groupBy: [],
       schema,
     }));
     setFilterTextError(null);
@@ -2675,6 +2757,7 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
       nextTimeRange === 'custom' ? nextCustomPeriod : {},
       nextTimeRange,
       maxRangeDays,
+      periodValidationOptions,
     );
     if (periodErr) {
       pushToast({ kind: 'error', title: 'Неверный период', desc: periodErr });
@@ -2689,7 +2772,7 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
   };
 
   const applyExplorerChartRangeZoom = (range) => {
-    if (!range?.from || !range?.to || validateExplorerCustomPeriod(range, 'custom', maxRangeDays)) return;
+    if (!range?.from || !range?.to || validateExplorerCustomPeriod(range, 'custom', maxRangeDays, periodValidationOptions)) return;
     setPeriodZoomStack((stack) => [...stack, periodRef.current]);
     requeryWithPeriod('custom', { from: range.from, to: range.to });
   };
@@ -2727,12 +2810,14 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
         const parsed = applyParsedTextToDraft(filterText);
         activeFilters = parsed.filters;
         activeThresholds = parsed.thresholds || [];
+        const activeGroupBy = normalizeExplorerGroupTokens(parsed.groupBy ?? groupBy);
         snapshot = {
           ...snapshot,
           timeRange: parsed.timeRange,
           customPeriod: parsed.customPeriod,
           filters: parsed.filters,
           thresholds: cloneExplorerThresholdsList(activeThresholds),
+          groupBy: activeGroupBy,
         };
       } catch (err) {
         setFilterTextError(err.message);
@@ -2759,10 +2844,27 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
       snapshot.timeRange === 'custom' ? snapshot.customPeriod : {},
       snapshot.timeRange,
       maxRangeDays,
+      periodValidationOptions,
     );
     if (periodErr) {
       pushToast({ kind: 'error', title: 'Неверный период', desc: periodErr });
       return;
+    }
+    const snapshotUsesCabinetClient = explorerUsesCabinetClient({
+      filters: snapshot.filters,
+      groupBy: snapshot.groupBy,
+    });
+    if (snapshotUsesCabinetClient && snapshot.timeRange !== 'custom') {
+      const presetMs = timeRangePresetMs(snapshot.timeRange);
+      const limitMs = cabinetClientPeriod?.maxRangeMs || periodValidationOptions.maxRangeMs;
+      if (presetMs != null && limitMs && presetMs > limitMs) {
+        pushToast({
+          kind: 'error',
+          title: 'Неверный период',
+          desc: cabinetClientPeriod?.rangeErrorMessage || periodValidationOptions.rangeErrorMessage,
+        });
+        return;
+      }
     }
     if (filterMode === 'graphic' && validFilters.length !== activeFilters.length) {
       setFilters(validFilters);
@@ -3368,6 +3470,7 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
                 {availableMetrics.map((m) => <option key={m.id} value={m.id}>{m.label}</option>)}
               </select>
             </BuilderControl>
+            {filterMode !== 'text' && (
             <BuilderControl label="Группировка">
               <div className="row" style={{ gap: 6, flexWrap: 'wrap' }}>
                 {groupBy.map((token) => {
@@ -3403,6 +3506,7 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
                 </div>
               </div>
             </BuilderControl>
+            )}
           </div>
         </Card>
 
@@ -3455,6 +3559,8 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
             thresholds={thresholds}
             setThresholds={setThresholds}
             thresholdPeakWarning={clientThresholdWarning}
+            maxRangeDays={maxRangeDays}
+            cabinetClientWarning={usesCabinetClient ? cabinetClientPeriod?.rangeErrorMessage : null}
           />
         )}
 
@@ -3976,13 +4082,16 @@ function DimensionPicker({ anchorRef, dimensions, selected, onPick, onClose }) {
 }
 
 function EntityPicker({ entityType, value, label, onSelect, onClear, placeholder = 'Поиск сущности...', switchIp = '' }) {
+  const rootRef = React.useRef(null);
   const inputRef = React.useRef(null);
+  const menuRef = React.useRef(null);
   const focusedRef = React.useRef(false);
   const [q, setQ] = useState('');
   const [items, setItems] = useState([]);
   const [open, setOpen] = useState(false);
   const [loading, setLoading] = useState(false);
   const [editing, setEditing] = useState(false);
+  const [menuStyle, setMenuStyle] = useState(null);
 
   const visibleItems = useMemo(() => dedupeExplorerEntityItems(items), [items]);
 
@@ -3993,6 +4102,48 @@ function EntityPicker({ entityType, value, label, onSelect, onClear, placeholder
     if (focusedRef.current || editing) return;
     setQ(displayValue);
   }, [displayValue, editing]);
+
+  useEffect(() => {
+    if (!open) {
+      setMenuStyle(null);
+      return undefined;
+    }
+    const anchor = rootRef.current;
+    if (!anchor) return undefined;
+    const updatePosition = () => {
+      const rect = anchor.getBoundingClientRect();
+      setMenuStyle({
+        position: 'fixed',
+        top: rect.bottom + 4,
+        left: Math.max(8, rect.left),
+        width: Math.max(rect.width, 280),
+        maxHeight: 320,
+        zIndex: 1300,
+        overflowY: 'auto',
+      });
+    };
+    updatePosition();
+    window.addEventListener('resize', updatePosition);
+    window.addEventListener('scroll', updatePosition, true);
+    return () => {
+      window.removeEventListener('resize', updatePosition);
+      window.removeEventListener('scroll', updatePosition, true);
+    };
+  }, [open, showComposite, q, visibleItems.length, loading]);
+
+  useEffect(() => {
+    if (!open) return undefined;
+    const onPointerDown = (e) => {
+      if (menuRef.current?.contains(e.target) || rootRef.current?.contains(e.target)) return;
+      focusedRef.current = false;
+      setEditing(false);
+      setOpen(false);
+      setLoading(false);
+      if (value != null && value !== '') setQ(displayValue);
+    };
+    document.addEventListener('mousedown', onPointerDown);
+    return () => document.removeEventListener('mousedown', onPointerDown);
+  }, [open, displayValue, value]);
 
   useEffect(() => {
     if (!entityType || !open) return undefined;
@@ -4037,8 +4188,55 @@ function EntityPicker({ entityType, value, label, onSelect, onClear, placeholder
     requestAnimationFrame(() => inputRef.current?.focus());
   };
 
+  const selectItem = (item) => {
+    onSelect(item);
+    setQ(item.label);
+    focusedRef.current = false;
+    setEditing(false);
+    setOpen(false);
+  };
+
+  const pickerMenu = open && menuStyle ? ReactDOM.createPortal(
+    <div
+      ref={menuRef}
+      className="explorer-entity-picker__menu explorer-entity-picker__menu--portal"
+      style={menuStyle}
+      onMouseDown={(e) => e.preventDefault()}
+    >
+      {loading ? (
+        <div className="explorer-entity-picker__empty">Поиск…</div>
+      ) : visibleItems.length === 0 ? (
+        <div className="explorer-entity-picker__empty">Ничего не найдено</div>
+      ) : visibleItems.map((item) => (
+        <button
+          key={item.id}
+          type="button"
+          className={`explorer-entity-picker__item${item.disabled ? ' is-disabled' : ''}${item.hasBinding === false ? ' is-weak' : ''}`}
+          disabled={Boolean(item.disabled)}
+          title={item.hasBinding === false ? 'Нет CIDR/портов — фильтр сработает только по метке src_client/dst_client' : undefined}
+          onMouseDown={(e) => {
+            if (item.disabled) return;
+            e.preventDefault();
+            selectItem(item);
+          }}
+        >
+          <span className="explorer-entity-picker__item-label">{item.label}</span>
+          {item.sublabel && (
+            <span className="explorer-entity-picker__item-sublabel">{item.sublabel}</span>
+          )}
+        </button>
+      ))}
+    </div>,
+    document.body,
+  ) : null;
+
   return (
-    <div className="explorer-entity-picker" style={{ position: 'relative', flex: 1, minWidth: 0 }}>
+    <div
+      ref={rootRef}
+      className="explorer-entity-picker"
+      style={{ position: 'relative', flex: 1, minWidth: 0 }}
+      aria-expanded={open}
+    >
       {showComposite ? (
         <button
           type="button"
@@ -4062,17 +4260,6 @@ function EntityPicker({ entityType, value, label, onSelect, onClear, placeholder
             setOpen(true);
           }}
           onChange={(e) => handleInputChange(e.target.value)}
-          onBlur={() => {
-            setTimeout(() => {
-              focusedRef.current = false;
-              setEditing(false);
-              setOpen(false);
-              setLoading(false);
-              if (value != null && value !== '') {
-                setQ(displayValue);
-              }
-            }, 150);
-          }}
         />
       )}
       {value != null && value !== '' && (
@@ -4092,37 +4279,7 @@ function EntityPicker({ entityType, value, label, onSelect, onClear, placeholder
           <Icon name="x" size={10} />
         </button>
       )}
-      {open && (
-        <div
-          className="explorer-entity-picker__menu"
-          onMouseDown={(e) => e.preventDefault()}
-        >
-          {loading ? (
-            <div className="explorer-entity-picker__empty">Поиск…</div>
-          ) : visibleItems.length === 0 ? (
-            <div className="explorer-entity-picker__empty">Ничего не найдено</div>
-          ) : visibleItems.map((item) => (
-            <button
-              key={item.id}
-              type="button"
-              className="explorer-entity-picker__item"
-              onMouseDown={(e) => {
-                e.preventDefault();
-                onSelect(item);
-                setQ(item.label);
-                focusedRef.current = false;
-                setEditing(false);
-                setOpen(false);
-              }}
-            >
-              <span className="explorer-entity-picker__item-label">{item.label}</span>
-              {item.sublabel && (
-                <span className="explorer-entity-picker__item-sublabel">{item.sublabel}</span>
-              )}
-            </button>
-          ))}
-        </div>
-      )}
+      {pickerMenu}
     </div>
   );
 }
@@ -4333,7 +4490,7 @@ function ExplorerFilterTextEditor({ value, onChange, error, schema, filters = []
         onKeyUp={updateCursor}
         onKeyDown={handleKeyDown}
         onFocus={updateCursor}
-        placeholder={'time range 1h\ndirection in (in, out)\nproto = UDP\nthreshold avg bps > 100 mbps'}
+        placeholder={'time range 1h\ngroup by src_ip, dst_ip\nproto = UDP\nthreshold avg bps > 100 mbps'}
         spellCheck={false}
         style={{ minHeight: 180, resize: 'vertical', fontSize: 12, lineHeight: 1.45 }}
       />
@@ -4966,11 +5123,15 @@ function ExplorerFilters({
   thresholds = [],
   setThresholds,
   thresholdPeakWarning,
+  maxRangeDays: maxRangeDaysProp,
+  cabinetClientWarning = null,
 }) {
   const panelRef = React.useRef(null);
   const filterFields = (schema?.filterFields || []).filter((f) => f.id !== 'direction' && f.id !== 'collector');
   const switchIpScope = explorerSwitchIpScopeFromFilters(filters);
-  const maxRangeDays = explorerRangeLimitDays(schema?.maxRangeDays);
+  const maxRangeDays = Number(maxRangeDaysProp) > 0
+    ? Number(maxRangeDaysProp)
+    : explorerRangeLimitDays(schema?.maxRangeDays);
 
   useEffect(() => {
     const onKeyDown = (e) => {
@@ -5026,6 +5187,19 @@ function ExplorerFilters({
 
       {filterMode === 'graphic' ? (
         <div className="col explorer-filters-panel__body" style={{ marginBottom: 12 }}>
+          {cabinetClientWarning && (
+            <div style={{
+              padding: '8px 10px',
+              borderRadius: 8,
+              background: 'var(--surf-2)',
+              border: '1px solid var(--bd-soft)',
+              color: 'var(--fg-secondary)',
+              font: 'var(--pv-text-body-3)',
+            }}
+            >
+              {cabinetClientWarning}. Для суток и дольше используйте кабинет клиента, не Explorer.
+            </div>
+          )}
           <ExplorerSystemFilterRow title="Период" mandatory>
             <TimeFilter
               variant="explorer"

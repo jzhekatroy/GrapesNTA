@@ -15,6 +15,10 @@ function App() {
       sessionStorage.setItem('grapes-collectors-tab', 'exclusions');
       return 'collectors';
     }
+    if (pageId === 'erp-piterix') {
+      sessionStorage.setItem('grapes-diagnostics-tab', 'erp');
+      return 'diagnostics';
+    }
     if (pageId === 'collector-status') return 'collectors';
     return pageId;
   });
@@ -34,6 +38,7 @@ function App() {
   const [monitoringDeviationsTotal, setMonitoringDeviationsTotal] = useState(0);
   const [monitoringDeviationsError, setMonitoringDeviationsError] = useState('');
   const themeInitialized = useRef(false);
+  const lastAuditPageRef = useRef({ pageId: '', at: 0 });
 
   useEffect(() => {
     let cancelled = false;
@@ -55,6 +60,10 @@ function App() {
             sessionStorage.setItem('grapes-collectors-tab', 'exclusions');
           }
           location.replace(`${location.pathname}${location.search}#collectors`);
+        }
+        if (pageId === 'erp-piterix') {
+          sessionStorage.setItem('grapes-diagnostics-tab', 'erp');
+          location.replace(`${location.pathname}${location.search}#diagnostics`);
         }
         if (pageId === 'vlan' || pageId === 'entities') {
           sessionStorage.setItem('grapes-network-tab', pageId);
@@ -224,6 +233,11 @@ function App() {
         location.replace(`${location.pathname}${location.search}#collectors`);
         return;
       }
+      if (pageId === 'erp-piterix') {
+        sessionStorage.setItem('grapes-diagnostics-tab', 'erp');
+        location.replace(`${location.pathname}${location.search}#diagnostics`);
+        return;
+      }
       if (pageId === 'vlan' || pageId === 'entities') {
         sessionStorage.setItem('grapes-network-tab', pageId);
         location.replace(`${location.pathname}${location.search}#cidr`);
@@ -256,6 +270,17 @@ function App() {
     return () => removeEventListener('hashchange', onHash);
   }, [registryReady, validIds]);
 
+  useEffect(() => {
+    if (!auth.user || auth.loading) return undefined;
+    const pageId = page;
+    const now = Date.now();
+    const prev = lastAuditPageRef.current;
+    if (prev.pageId === pageId && now - prev.at < 2000) return undefined;
+    lastAuditPageRef.current = { pageId, at: now };
+    ApiClient.reportAuditPage(pageId);
+    return undefined;
+  }, [auth.user, auth.loading, page]);
+
   const navigate = useCallback((id) => {
     if (id === '__toggle') { setCollapsed(v => !v); return; }
     if (id === '__theme')  { setTheme(t => t === 'dark' ? 'light' : 'dark'); return; }
@@ -263,6 +288,10 @@ function App() {
     if (target === 'flow-exclusions') {
       sessionStorage.setItem('grapes-collectors-tab', 'exclusions');
       target = 'collectors';
+    }
+    if (target === 'erp-piterix') {
+      sessionStorage.setItem('grapes-diagnostics-tab', 'erp');
+      target = 'diagnostics';
     }
     if (target === 'vlan' || target === 'entities') {
       sessionStorage.setItem('grapes-network-tab', target);
@@ -436,6 +465,7 @@ function App() {
         pageEl = <PageCollectors key={refreshKey} onNavigate={navigate} effectivePermissions={auth.user?.effectivePermissions} />;
         break;
       case 'users':      pageEl = <PageUsers key={refreshKey} currentUser={auth.user} onAuthRefresh={reloadCurrentUser} onNavigate={navigate} />; break;
+      case 'audit':      pageEl = <PageAudit key={`${refreshKey}-${displayTimezone}`} currentUser={auth.user} displayTimezone={displayTimezone} />; break;
       case 'clients':    pageEl = <PageClients key={refreshKey} currentUser={auth.user} onAuthRefresh={reloadCurrentUser} onNavigate={navigate} />; break;
       case 'ttl':        pageEl = <PageTTL key={refreshKey} />; break;
       default:           pageEl = <PageComingSoon key={refreshKey} pageId={page} onNavigate={navigate} />;

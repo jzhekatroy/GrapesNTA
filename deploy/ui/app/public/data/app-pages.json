@@ -21,6 +21,7 @@
   { "id": "databases", "title": "Внешние базы данных", "section": "Модель сети", "hidden": true },
   { "id": "other", "title": "Другие справочники", "section": "Модель сети", "hidden": true },
   { "id": "users", "title": "Пользователи и права", "section": "Администрирование" },
+  { "id": "audit", "title": "Журнал аудита", "section": "Администрирование" },
   { "id": "clients", "title": "Клиенты", "section": "Администрирование" },
   { "id": "smtp", "title": "Почта (SMTP)", "section": "Администрирование" },
   { "id": "diagnostics", "title": "Диагностика", "section": "Администрирование", "hidden": true },

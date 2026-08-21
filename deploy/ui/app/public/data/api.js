@@ -741,6 +741,26 @@ const ApiClient = (() => {
     return requestJson('/api/settings/smtp/test', { method: 'POST', body: { to } });
   }
 
+  async function loadErpPiterixStatus() {
+    const body = await requestJson('/api/erp-piterix/status');
+    return body.data;
+  }
+
+  async function loadErpPiterixJournal() {
+    const body = await requestJson('/api/erp-piterix/journal');
+    return body.data || [];
+  }
+
+  async function saveErpPiterixSettings(payload) {
+    const body = await requestJson('/api/erp-piterix/settings', { method: 'PUT', body: payload });
+    return body.data;
+  }
+
+  async function runErpPiterixSync(payload) {
+    const body = await requestJson('/api/erp-piterix/run', { method: 'POST', body: payload });
+    return body.data;
+  }
+
   function countryQuery({ timeRange = '24h', customPeriod, directions, basis = 'ip', mapSide = 'remote', sourceIds, collectorFilter } = {}) {
     const params = new URLSearchParams();
     appendCustomPeriodParams(params, timeRange, customPeriod);
@@ -1927,6 +1947,28 @@ const ApiClient = (() => {
     return body.data || [];
   }
 
+  async function loadAudit({ from, to, q, ip, kind, result, limit, offset } = {}) {
+    const params = new URLSearchParams();
+    if (from) params.set('from', from);
+    if (to) params.set('to', to);
+    if (q) params.set('q', q);
+    if (ip) params.set('ip', ip);
+    if (kind) params.set('kind', kind);
+    if (result) params.set('result', result);
+    if (limit != null) params.set('limit', String(limit));
+    if (offset != null) params.set('offset', String(offset));
+    const qs = params.toString();
+    return requestJson(`/api/audit${qs ? `?${qs}` : ''}`);
+  }
+
+  function reportAuditPage(pageId) {
+    if (!pageId) return Promise.resolve();
+    return requestJson('/api/audit/page', {
+      method: 'POST',
+      body: { pageId },
+    }).catch(() => {});
+  }
+
   async function updateTtl(id, days) {
     const body = await requestJson(`/api/admin/ttl/${encodeURIComponent(id)}`, {
       method: 'PUT',
@@ -2478,6 +2520,22 @@ const ApiClient = (() => {
     };
   }
 
+  async function loadDashboardLayout() {
+    const body = await getJson('/api/dashboard/layout', { widget: 'dashboard/layout' });
+    return {
+      data: body.data || null,
+      updatedAt: body.updatedAt || null,
+    };
+  }
+
+  async function saveDashboardLayout(layout) {
+    return requestJson('/api/dashboard/layout', { method: 'PUT', body: layout });
+  }
+
+  async function resetDashboardLayout() {
+    return requestJson('/api/dashboard/layout/reset', { method: 'POST', body: {} });
+  }
+
   /** Загрузить данные dashboard из ClickHouse. Ошибка одного блока не сбрасывает остальные. */
   async function loadDashboardData({ timeRange = '24h', customPeriod, directions, collectorFilter } = {}) {
     const finishBatch = DashboardLog?.batchStart?.('main') ?? ((extra) => ({ loadMs: 0, ...extra }));
@@ -2850,6 +2908,9 @@ const ApiClient = (() => {
     updateUserRole,
     checkHealth,
     loadDashboardCollectors,
+    loadDashboardLayout,
+    saveDashboardLayout,
+    resetDashboardLayout,
     loadDashboardData,
     loadTrafficStats,
     resolveChartSqlDirections,
@@ -2904,6 +2965,10 @@ const ApiClient = (() => {
     loadSmtpSettings,
     saveSmtpSettings,
     testSmtpSettings,
+    loadErpPiterixStatus,
+    loadErpPiterixJournal,
+    saveErpPiterixSettings,
+    runErpPiterixSync,
     dashboardOtherPorts,
     dashboardCountries,
     loadCountries,
@@ -2996,6 +3061,8 @@ const ApiClient = (() => {
     loadBmpChurn,
     loadBmpFlap,
     loadTtl,
+    loadAudit,
+    reportAuditPage,
     updateTtl,
     loadDirectionSettings,
     saveDirectionSettings,

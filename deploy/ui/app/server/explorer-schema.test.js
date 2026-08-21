@@ -93,4 +93,28 @@ describe('explorer schema field naming', () => {
     const uniq = schema.metrics.find((m) => m.id === 'uniq_src');
     assert.equal(uniq?.label, 'Уникальных IP источника / Unique source IPs');
   });
+
+  it('exposes cabinet_client in operator schema with entity picker', () => {
+    const schema = explorerSchema();
+    const filter = schema.filterFields.find((f) => f.id === 'cabinet_client');
+    const dimension = schema.dimensions.find((d) => d.id === 'cabinet_client');
+    assert.ok(filter);
+    assert.equal(filter.entityType, 'cabinet_client');
+    assert.ok(filter.ops.includes('='));
+    assert.ok(filter.ops.includes('in'));
+    assert.ok(dimension);
+    assert.equal(dimension.groupable, true);
+    assert.equal(schema.maxCabinetClientRangeHours, 6);
+    assert.deepEqual(schema.dimensionGroups['Система / System'], ['collector', 'cabinet_client']);
+  });
+
+  it('reserves client alias for cabinet_client field', () => {
+    const schema = explorerSchema();
+    const cabinetClient = schema.filterFields.find((f) => f.id === 'cabinet_client');
+    const l3Owner = schema.filterFields.find((f) => f.id === 'l3_owner');
+    assert.equal(explorerFieldMatchesQuery(cabinetClient, 'клиент'), true);
+    assert.equal((cabinetClient.aliases || []).includes('клиент'), true);
+    assert.equal((l3Owner.aliases || []).includes('клиент'), false);
+    assert.match(l3Owner.valueHint, /не клиент кабинета/i);
+  });
 });

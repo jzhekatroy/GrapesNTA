@@ -1339,7 +1339,7 @@ function AnalysisSnapshotsPanel({ data, loading, onReload }) {
 }
 
 function PageDiagnostics() {
-  const [tab, setTab] = useState('worker');
+  const [tab, setTab] = useState(() => sessionStorage.getItem('grapes-diagnostics-tab') || 'worker');
   const [workerData, setWorkerData] = useState(null);
   const [enrichData, setEnrichData] = useState(null);
   const [snmpData, setSnmpData] = useState(null);
@@ -1361,6 +1361,11 @@ function PageDiagnostics() {
   }, []);
 
   const reload = useCallback((opts = { initial: false }) => {
+    if (tab === 'erp') {
+      setLoading(false);
+      setError('');
+      return;
+    }
     if (opts.initial) setLoading(true);
     const loader = tab === 'enrichment'
       ? ApiClient.loadEnrichmentDiagnostics()
@@ -1399,7 +1404,7 @@ function PageDiagnostics() {
         <div>
           <h1 style={{ margin: 0, font: 'var(--pv-text-header-1)' }}>Диагностика</h1>
           <div style={{ color: 'var(--fg-secondary)', font: 'var(--pv-text-body-3)', marginTop: 4 }}>
-            Статус периодических сервисов: worker, enrichment, SNMP, bounds-service и ссылки на результаты анализа.
+            Статус периодических сервисов, синхронизация ERP и ссылки на результаты анализа.
           </div>
         </div>
         <div className="seg">
@@ -1437,6 +1442,13 @@ function PageDiagnostics() {
             onClick={() => setTab('snapshots')}
           >
             Ссылки анализа
+          </button>
+          <button
+            type="button"
+            className={tab === 'erp' ? 'seg__item seg__item--active' : 'seg__item'}
+            onClick={() => { sessionStorage.setItem('grapes-diagnostics-tab', 'erp'); setTab('erp'); }}
+          >
+            ERP
           </button>
         </div>
       </div>
@@ -1482,6 +1494,7 @@ function PageDiagnostics() {
           onReload={() => reload({ initial: false })}
         />
       )}
+      {tab === 'erp' && <PageErpPiterix />}
 
       {buildInfo && (buildInfo.buildDate || buildInfo.commit) && (
         <div

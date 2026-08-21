@@ -7,6 +7,11 @@ function normalizeApiPath(path) {
   return `/api/${raw}`;
 }
 
+function isDashboardLayoutPath(path) {
+  const p = normalizeApiPath(path);
+  return p === '/api/dashboard/layout' || p === '/api/dashboard/layout/reset';
+}
+
 function getResourceForPath(path, method) {
   const p = normalizeApiPath(path);
 
@@ -38,6 +43,11 @@ function getResourceForPath(path, method) {
     || p.startsWith('/api/refs/interface-roles')) return 'interface-roles';
   if (p.startsWith('/api/diagnostics/direction/')) return 'traffic-classification';
   if (p.startsWith('/api/admin/ttl')) return 'ttl';
+  if (p.startsWith('/api/erp-piterix')) return 'diagnostics';
+  if (p.startsWith('/api/audit')) {
+    if (p === '/api/audit/page' && method === 'POST') return null;
+    return 'audit';
+  }
   if (p.startsWith('/api/diagnostics')) return 'diagnostics';
   if (p.startsWith('/api/cabinet/')) return null;
   if (p.startsWith('/api/clients')) return 'clients';
@@ -71,4 +81,5 @@ module.exports = {
   getResourceForPath,
   isResourceGuardExempt,
   isMutatingRequest,
+  isDashboardLayoutPath,
 };
