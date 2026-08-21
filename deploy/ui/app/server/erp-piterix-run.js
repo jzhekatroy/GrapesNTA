@@ -155,13 +155,15 @@ function erpRequestHeaders(cfg, urlString) {
   return headers;
 }
 
-async function fetchErpClients(db, { category = CATEGORY } = {}) {
+async function fetchErpClients(db, { category = CATEGORY, full = false, fetchCap = 0 } = {}) {
   const cfg = resolveErpConfig(await getSettings(db, { includeToken: true }));
   if (!cfg.token) throw new Error('Нет токена ERP');
   const clients = [];
   let after = '';
-  let pageLimit = cfg.pageLimit;
-  const maxPages = Math.max(80, Math.ceil(15000 / Math.min(pageLimit, 20)));
+  let pageLimit = full ? cfg.pageLimit : Math.min(cfg.pageLimit, 20);
+  const maxPages = full
+    ? Math.max(80, Math.ceil(15000 / Math.min(pageLimit, 20)))
+    : Math.max(8, Math.ceil((fetchCap || 40) / pageLimit) + 2);
   for (let page = 0; page < maxPages; page += 1) {
     const qs = new URLSearchParams({ limit: String(pageLimit) });
     if (after) qs.set('after', after);
@@ -184,6 +186,7 @@ async function fetchErpClients(db, { category = CATEGORY } = {}) {
     clients.push(...rows);
     const next = payload?.next_after ?? payload?.meta?.next_after ?? '';
     if (!next || !rows.length) break;
+    if (fetchCap && clients.length >= fetchCap) break;
     after = String(next);
   }
   return clients;
@@ -451,7 +454,11 @@ async function runSync(db, options = {}) {
     for (const category of categories) {
       const clients = options.clients && categories.length === 1
         ? options.clients
-        : await fetchErpClients(db, { category });
+        : await fetchErpClients(db, {
+          category,
+          full: !!options.full,
+          fetchCap: options.full ? 0 : Math.max(Number(options.limit) || 50, 2) * 20,
+        });
       parts.push(await applySync(db, { ...options, clients, category, bindMode }));
     }
     summary = {

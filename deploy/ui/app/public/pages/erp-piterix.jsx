@@ -328,10 +328,15 @@ function PageErpPiterix() {
             Полный прогон
           </label>
           <div>
-            <button type="button" className="btn btn--primary" disabled={busy || !status.erpConfigured} onClick={run}>
-              {busy ? 'выполняется…' : 'Запустить'}
+            <button type="button" className="btn btn--primary" disabled={busy || !status.erpConfigured || status.running} onClick={run}>
+              {busy || status.running ? 'выполняется…' : 'Запустить'}
             </button>
           </div>
+          {(busy || status.running) && (
+            <div style={{ color: 'var(--st-warning)' }}>
+              Идёт запрос в ERP. Если крутится дольше минуты — перезапустите UI, предыдущий прогон завис.
+            </div>
+          )}
         </div>
       </Card>
 
