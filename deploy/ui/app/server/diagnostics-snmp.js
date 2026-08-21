@@ -98,9 +98,12 @@ async function loadAgentStats() {
         countIf(snmp_enabled = 1 AND last_poll_status IN ('error', 'config_error')) AS error,
         max(last_poll_at) AS last_poll_at,
         max(last_ok_at) AS last_ok_at,
-        -- Enabled agents that have never answered at all.
         countIf(snmp_enabled = 1 AND last_ok_at = toDateTime(0, 'UTC')) AS never_ok
-      FROM ${config.database}.net_snmp_agents_current
+      FROM
+      (
+        SELECT snmp_enabled, last_poll_status, last_poll_at, last_ok_at
+        FROM ${config.database}.net_snmp_agents_current
+      )
     `, {}, { name: 'diagnostics/snmp-agents' });
     const r = rows[0] || {};
     return {
