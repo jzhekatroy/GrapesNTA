@@ -107,8 +107,6 @@ function PageCabinetDns({ timeRange, customPeriod, displayTimezone, readOnly }) 
 
   return (
     <div className="main__container">
-      <CabinetDnsWarningBanner style={{ marginBottom: 16 }} />
-
       <div className="page-head">
         <div>
           <h1>DNS</h1>
@@ -155,9 +153,7 @@ function PageCabinetDns({ timeRange, customPeriod, displayTimezone, readOnly }) 
           ) : domainsState.source === 'error' ? (
             <CabinetErrorState error={domainsState.error} />
           ) : !domainsState.data.length ? (
-            <CabinetEmptyState>
-              За выбранный период DNS-запросов нет. Если клиент привязан только по портам, DNS-данные недоступны.
-            </CabinetEmptyState>
+            <CabinetEmptyState titleHint={CABINET_DNS_EMPTY_HINT} />
           ) : (
             <>
               <DataTable

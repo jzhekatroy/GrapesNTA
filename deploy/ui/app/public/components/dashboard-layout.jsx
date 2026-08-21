@@ -858,9 +858,9 @@ function DashboardGrid({
   const dragPreviewKeyRef = useRef('');
   const dragMoveRafRef = useRef(null);
   const resizeMoveRafRef = useRef(null);
-  const dragContextRef = useRef({ layout, dragPreview, resizePreview });
   const [dragPreview, setDragPreview] = useState(null);
   const [resizePreview, setResizePreview] = useState(null);
+  const dragContextRef = useRef({ layout, dragPreview, resizePreview });
   const [draggingId, setDraggingId] = useState(null);
   const [resizingId, setResizingId] = useState(null);
   const [compact, setCompact] = useState(() => (

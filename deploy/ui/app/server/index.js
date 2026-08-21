@@ -2730,16 +2730,22 @@ app.delete('/api/refs/flow-exclusions', async (req, res) => {
 
 app.get('/runtime-config.js', (_req, res) => {
   const { verbose } = getLogConfig();
+  const frontendMode = process.env.FRONTEND_MODE === 'bundled' ? 'bundled' : 'babel';
   res.type('application/javascript');
   res.set('Cache-Control', 'no-store');
   res.send(`window.__GRAPES_RUNTIME__=${JSON.stringify({
     verbose,
     dataTimezone: getConfig().dataTimezone || 'UTC',
+    frontendMode,
   })};`);
 });
 
 app.use(express.static(path.join(__dirname, '..', 'public'), {
   setHeaders(res, filePath) {
+    if (/\/dist\/[^/]+\.[a-f0-9]{8,}\./i.test(filePath)) {
+      res.set('Cache-Control', 'max-age=31536000, immutable');
+      return;
+    }
     if (/\.(?:jsx?|css|html?)$/i.test(filePath)) {
       res.set('Cache-Control', 'no-cache');
     }

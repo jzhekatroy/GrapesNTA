@@ -1,5 +1,6 @@
-const { col, flowCol, query } = require('./clickhouse');
+const { col, flowCol, query, netInterfacesCurrentRef } = require('./clickhouse');
 const { flowSamplerIpExpr, sflowIfIndexExpr } = require('./queries');
+const { asStringArray, buildClientSearchWhere } = require('./client-search');
 
 const CLIENTS_ENABLED = 'default.net_clients_enabled';
 const CLIENTS_TABLE = 'default.net_clients';
@@ -28,72 +29,13 @@ function bindingCountLabel(bindMode, prefixCount, portCount) {
   return `${n} CIDR`;
 }
 
-function parseIpv4SearchTerm(raw) {
-  const q = String(raw ?? '').trim();
-  const m = q.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
-  if (!m) return null;
-  if (m.slice(1).some((octet) => Number(octet) > 255)) return null;
-  return q;
-}
-
-function cabinetClientSearchLooksLikeNetwork(raw) {
-  const q = String(raw ?? '').trim();
-  if (!q) return false;
-  return /^[\d.a-fA-F:/%-]+$/.test(q) && /\d/.test(q);
-}
-
-function buildCabinetClientPrefixSearchSql(search, params) {
-  if (!search || !cabinetClientSearchLooksLikeNetwork(search)) return null;
-  if (!params.qPlain) params.qPlain = search;
-  if (!params.prefixLike) params.prefixLike = `%${search}%`;
-  const parts = [
-    'positionCaseInsensitive(p.prefix, {qPlain:String}) > 0',
-    'p.prefix LIKE {prefixLike:String}',
-  ];
-  const ipv4 = parseIpv4SearchTerm(search);
-  if (ipv4) {
-    params.searchIp = ipv4;
-    parts.push('isIPAddressInRange({searchIp:String}, p.prefix)');
-  }
-  return `c.client_id IN (
-    SELECT client_id
-    FROM ${PREFIXES_ENABLED} AS p
-    WHERE ${parts.join(' OR ')}
-  )`;
-}
-
-function buildCabinetClientPortSearchSql(search, params) {
-  if (!search) return null;
-  const ipv4 = parseIpv4SearchTerm(search);
-  if (!ipv4 && !cabinetClientSearchLooksLikeNetwork(search)) return null;
-  if (!params.qPlain) params.qPlain = search;
-  const parts = [`positionCaseInsensitive(p.switch_ip, {qPlain:String}) > 0`];
-  if (ipv4) {
-    params.portIp = ipv4;
-    parts.push('p.switch_ip = {portIp:String}');
-  }
-  return `c.client_id IN (
-    SELECT client_id
-    FROM ${PORTS_ENABLED} AS p
-    WHERE ${parts.join(' OR ')}
-  )`;
-}
-
 function buildCabinetClientSearchWhere(search, params) {
-  params.qPlain = search;
-  params.exactId = search;
-  params.prefixLike = `%${search}%`;
-  const parts = [
-    'positionCaseInsensitive(c.display_name, {qPlain:String}) > 0',
-    'positionCaseInsensitive(c.client_id, {qPlain:String}) > 0',
-    'startsWith(c.client_id, {exactId:String})',
-    'c.client_id = {exactId:String}',
-  ];
-  const prefixMatch = buildCabinetClientPrefixSearchSql(search, params);
-  if (prefixMatch) parts.push(prefixMatch);
-  const portMatch = buildCabinetClientPortSearchSql(search, params);
-  if (portMatch) parts.push(portMatch);
-  return `(${parts.join('\n      OR ')})`;
+  return buildClientSearchWhere(search, params, {
+    clientAlias: 'c',
+    prefixesFrom: PREFIXES_ENABLED,
+    portsFrom: PORTS_ENABLED,
+    interfacesFrom: netInterfacesCurrentRef(),
+  });
 }
 
 function flowIpRangeExpr(flowAlias, ipColName) {
@@ -403,16 +345,22 @@ function mapCabinetClientSearchRow(row) {
   const hasBinding = bindingCount > 0;
   const bindLabel = bindModeLabel(bindMode);
   const countLabel = bindingCountLabel(bindMode, prefixCount, portCount);
+  const preview = asStringArray(row.binding_preview ?? row.bindingPreview).slice(0, 3);
+  const extra = Math.max(0, bindingCount - preview.length);
+  const previewLabel = preview.length
+    ? `${preview.join(', ')}${extra > 0 ? ` +${extra}` : ''}`
+    : countLabel;
 
   return {
     id: clientId,
     label: displayName,
     sublabel: hasBinding
-      ? `${clientId} · ${bindLabel} · ${countLabel}`
+      ? `${clientId} · ${bindLabel} · ${previewLabel}`
       : `${clientId} · нет привязки · только потоки с меткой`,
     value: clientId,
     disabled: false,
     hasBinding,
+    bindingPreview: preview,
   };
 }
 
@@ -429,7 +377,8 @@ async function searchCabinetClients({ q = '', limit = 20 } = {}) {
         c.display_name AS display_name,
         c.bind_mode AS bind_mode,
         coalesce(pc.prefix_count, 0) AS prefix_count,
-        coalesce(pt.port_count, 0) AS port_count
+        coalesce(pt.port_count, 0) AS port_count,
+        if(c.bind_mode = 'ports', coalesce(pp.items, []), coalesce(px.items, [])) AS binding_preview
       FROM ${CLIENTS_ENABLED} AS c
       LEFT JOIN (
         SELECT client_id, count() AS prefix_count
@@ -441,6 +390,28 @@ async function searchCabinetClients({ q = '', limit = 20 } = {}) {
         FROM ${PORTS_ENABLED}
         GROUP BY client_id
       ) AS pt ON pt.client_id = c.client_id
+      LEFT JOIN (
+        SELECT
+          client_id,
+          arraySlice(arraySort(groupArray(prefix)), 1, 3) AS items
+        FROM ${PREFIXES_ENABLED}
+        GROUP BY client_id
+      ) AS px ON px.client_id = c.client_id
+      LEFT JOIN (
+        SELECT
+          p.client_id AS client_id,
+          arraySlice(arraySort(groupArray(
+            concat(
+              p.switch_ip,
+              ' · ',
+              if(ni.if_name != '', ni.if_name, concat('ifIndex ', toString(p.if_index)))
+            )
+          )), 1, 3) AS items
+        FROM ${PORTS_ENABLED} AS p
+        LEFT JOIN ${netInterfacesCurrentRef()} AS ni
+          ON ni.switch_ip = p.switch_ip AND ni.if_index = p.if_index
+        GROUP BY p.client_id
+      ) AS pp ON pp.client_id = c.client_id
       WHERE ${where}
       ORDER BY c.display_name, c.client_id
       LIMIT {limit:UInt32}

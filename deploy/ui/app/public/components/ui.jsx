@@ -245,11 +245,16 @@ function ToastStack() {
 }
 
 /* =================== Empty state =================== */
-function Empty({ icon = 'info', title, desc, action }) {
+function Empty({ icon = 'info', title, desc, titleHint, action }) {
+  const titleStyle = { font: 'var(--pv-text-h4)', color: 'var(--fg-primary)' };
   return (
     <div className="empty">
       <div className="empty__icon"><Icon name={icon} size={24} /></div>
-      <div style={{font: 'var(--pv-text-h4)', color: 'var(--fg-primary)'}}>{title}</div>
+      {titleHint ? (
+        <span className="tt tt--wrap" data-tt={titleHint} style={titleStyle}>{title}</span>
+      ) : (
+        <div style={titleStyle}>{title}</div>
+      )}
       {desc && <div style={{maxWidth: 360}}>{desc}</div>}
       {action && <div style={{marginTop: 8}}>{action}</div>}
     </div>
@@ -479,9 +484,14 @@ function DataTable({
         <div className="table-toolbar">
           {toolbar.left}
           {toolbar.search !== undefined && (
-            <div className="input-wrap" style={{maxWidth: 280, flex: 1}}>
+            <div className="input-wrap" style={{maxWidth: toolbar.searchMaxWidth || 280, flex: 1}}>
               <Icon name="search" size={14} />
-              <input className="input input--with-icon" placeholder="Поиск..." value={toolbar.search} onChange={(e) => toolbar.onSearch && toolbar.onSearch(e.target.value)} />
+              <input
+                className="input input--with-icon"
+                placeholder={toolbar.searchPlaceholder || 'Поиск...'}
+                value={toolbar.search}
+                onChange={(e) => toolbar.onSearch && toolbar.onSearch(e.target.value)}
+              />
             </div>
           )}
           <div style={{marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 8, position: 'relative'}}>
@@ -667,6 +677,15 @@ function Pagination({ page, totalPages, onChange }) {
   );
 }
 
+function BuilderControl({ label, children }) {
+  return (
+    <div className="col" style={{ gap: 4, minWidth: 0 }}>
+      <div style={{ font: 'var(--pv-text-body-3-bold)', textTransform: 'uppercase', letterSpacing: '0.08em', color: 'var(--fg-secondary)', fontSize: 10 }}>{label}</div>
+      <div className="row" style={{ gap: 4 }}>{children}</div>
+    </div>
+  );
+}
+
 async function copyTextToClipboard(text) {
   const value = String(text ?? '');
   if (navigator.clipboard?.writeText) {
@@ -691,5 +710,6 @@ async function copyTextToClipboard(text) {
 Object.assign(window, {
   Card, Button, Badge, Tag, StatusIndicator, Checkbox, MiniBar, Modal, SidePanel,
   ToastStack, pushToast, Empty, OverflowText, splitTextMiddle, DataTable, Pagination, pluralRu, WidgetLoadBadge,
+  BuilderControl,
   copyTextToClipboard,
 });

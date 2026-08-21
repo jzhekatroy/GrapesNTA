@@ -165,7 +165,7 @@ const EXPLORER_DIM_META = {
     label: 'Клиент',
     group: EXPLORER_GROUP.SYS,
     aliases: ['клиент', 'лс', 'кабинет', 'cabinet client'],
-    valueHint: 'Название, client_id или IP/CIDR из привязанных сетей клиента',
+    valueHint: 'Название, client_id, IP/CIDR, свитч или ifName — напр. PortChannel32 172.18.19.12',
   },
   own_network: {
     label: 'Префикс / CIDR',
@@ -282,7 +282,7 @@ const EXPLORER_FILTER_HINTS = {
   service: 'Код или название сервиса',
   l3_owner: 'L3-сущность из net_entities — это не клиент кабинета',
   own_network: 'Префикс CIDR — напр. 10.0.0.0/24',
-  cabinet_client: 'Название, client_id или IP/CIDR из привязанных сетей клиента',
+  cabinet_client: 'Название, client_id, IP/CIDR, свитч или ifName — напр. PortChannel32 172.18.19.12',
   vlan_name: 'Имя VLAN из справочника L2',
   if_alias: 'ifAlias порта из SNMP',
 };

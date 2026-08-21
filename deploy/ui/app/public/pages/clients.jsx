@@ -113,6 +113,67 @@ function bindCountTitle(row) {
   return row.bindMode === 'ports' ? 'Портов' : 'Сетей';
 }
 
+function parseIpv4SearchTerm(raw) {
+  const q = String(raw ?? '').trim();
+  const m = q.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  if (!m) return null;
+  if (m.slice(1).some((octet) => Number(octet) > 255)) return null;
+  return q;
+}
+
+function ipv4ToInt(ip) {
+  const parsed = parseIpv4SearchTerm(ip);
+  if (!parsed) return null;
+  return parsed.split('.').reduce((acc, octet) => ((acc << 8) + Number(octet)) >>> 0, 0);
+}
+
+function ipv4InCidr(ip, cidr) {
+  const raw = String(cidr ?? '').trim();
+  const slash = raw.indexOf('/');
+  const net = slash >= 0 ? raw.slice(0, slash) : raw;
+  const bitsRaw = slash >= 0 ? Number(raw.slice(slash + 1)) : 32;
+  const ipInt = ipv4ToInt(ip);
+  const netInt = ipv4ToInt(net);
+  if (ipInt == null || netInt == null) return false;
+  if (!Number.isInteger(bitsRaw) || bitsRaw < 0 || bitsRaw > 32) return false;
+  const mask = bitsRaw === 0 ? 0 : (0xFFFFFFFF << (32 - bitsRaw)) >>> 0;
+  return (ipInt & mask) === (netInt & mask);
+}
+
+function asBindingList(value) {
+  if (Array.isArray(value)) return value.map((item) => String(item || '').trim()).filter(Boolean);
+  if (!value) return [];
+  return String(value).split(/\s*,\s*/).map((item) => item.trim()).filter(Boolean);
+}
+
+function clientRowMatchesSearch(row, raw) {
+  const tokens = String(raw || '').trim().split(/\s+/).filter(Boolean);
+  if (!tokens.length) return true;
+  const prefixes = asBindingList(row.bindingPrefixes);
+  const hay = [
+    row.displayName,
+    row.clientId,
+    row.comment,
+    BIND_MODE_LABELS[row.bindMode],
+    row.bindMode,
+    ...(asBindingList(row.bindingPreview)),
+    row.bindingSearch || '',
+    ...prefixes,
+  ].join('\n').toLowerCase();
+  return tokens.every((token) => {
+    if (hay.includes(token.toLowerCase())) return true;
+    const ip = parseIpv4SearchTerm(token);
+    return !!(ip && prefixes.some((prefix) => ipv4InCidr(ip, prefix)));
+  });
+}
+
+function formatBindingPreview(row) {
+  const items = asBindingList(row.bindingPreview);
+  const total = bindCountLabel(row);
+  const extra = Math.max(0, total - items.length);
+  return { items, extra };
+}
+
 function groupImpersonationSessions(events) {
   const bySession = new Map();
   for (const ev of events || []) {
@@ -214,13 +275,7 @@ function PageClients({ onAuthRefresh, onNavigate }) {
 
   const filtered = useMemo(() => {
     if (!search) return rows;
-    const s = search.toLowerCase();
-    return rows.filter((r) => (
-      (r.displayName || '').toLowerCase().includes(s)
-      || (r.clientId || '').toLowerCase().includes(s)
-      || (r.comment || '').toLowerCase().includes(s)
-      || (BIND_MODE_LABELS[r.bindMode] || r.bindMode || '').toLowerCase().includes(s)
-    ));
+    return rows.filter((r) => clientRowMatchesSearch(r, search));
   }, [rows, search]);
 
   const patchRow = useCallback((clientId, patch) => {
@@ -334,6 +389,32 @@ function PageClients({ onAuthRefresh, onNavigate }) {
       ),
     },
     {
+      key: 'bindings',
+      title: 'Привязки',
+      width: 280,
+      sortAccessor: (r) => (asBindingList(r.bindingPreview)[0] || bindCountLabel(r)),
+      render: (r) => {
+        const { items, extra } = formatBindingPreview(r);
+        if (!items.length && !bindCountLabel(r)) {
+          return <span style={{ color: 'var(--fg-secondary)', opacity: r.enabled ? 1 : 0.55 }}>—</span>;
+        }
+        return (
+          <div style={{ opacity: r.enabled ? 1 : 0.55 }} title={bindCountTitle(r)}>
+            {items.map((item) => (
+              <div key={item} className="mono" style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-secondary)' }}>
+                {item}
+              </div>
+            ))}
+            {extra > 0 && (
+              <div style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-tertiary, var(--fg-secondary))' }}>
+                +{extra}
+              </div>
+            )}
+          </div>
+        );
+      },
+    },
+    {
       key: 'bindCount',
       title: 'Сетей / портов',
       width: 120,
@@ -386,7 +467,7 @@ function PageClients({ onAuthRefresh, onNavigate }) {
       <div className="page-head">
         <div>
           <h1>Клиенты</h1>
-          <p>Справочник клиентских кабинетов: привязка по сетям или портам, учётные записи и журнал входов администратора.</p>
+          <p>Справочник клиентских кабинетов: привязка по сетям или портам. В поиске — название, IP/CIDR, свитч и ifName, несколько слов через пробел.</p>
         </div>
         <div className="row" style={{ gap: 8 }}>
           <Button kind="ghost" icon="refresh" onClick={reload} disabled={loading || !canWrite}>Обновить</Button>
@@ -427,6 +508,8 @@ function PageClients({ onAuthRefresh, onNavigate }) {
           toolbar={{
             search,
             onSearch: setSearch,
+            searchPlaceholder: 'Название, IP, CIDR, свитч, PortChannel32…',
+            searchMaxWidth: 420,
           }}
           rowActions={canWrite ? (r) => (
             <div className="row" style={{ gap: 4, justifyContent: 'flex-end' }}>

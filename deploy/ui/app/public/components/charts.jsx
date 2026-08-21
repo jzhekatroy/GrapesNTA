@@ -2787,6 +2787,28 @@ function fmtNum(n) {
   if (n >= 1e3) return (n / 1e3).toFixed(1) + ' тыс';
   return String(Math.round(n));
 }
+
+function formatMetric(v, metric) {
+  if (metric === 'bps') return fmtBits(v);
+  if (metric === 'volume') return fmtBytes(v);
+  if (metric === 'pps') return `${fmtNum(v)} п/с`;
+  if (metric === 'fps') return `${fmtNum(v)} потоков/сек`;
+  return fmtNum(v);
+}
+
+function formatMetricAxis(v, metric) {
+  if (metric === 'bps' && typeof fmtBitsAxis === 'function') return fmtBitsAxis(v);
+  const n = Number(v);
+  if (!Number.isFinite(n)) return '0';
+  if (metric === 'pps' || metric === 'fps') {
+    if (n >= 1e6) return `${(n / 1e6).toFixed(n >= 10e6 ? 0 : 1)}M`;
+    if (n >= 1e3) return `${(n / 1e3).toFixed(n >= 10e3 ? 0 : 1)}k`;
+    return n < 10 && !Number.isInteger(n) ? n.toFixed(1) : String(Math.round(n));
+  }
+  if (typeof fmtCompact === 'function') return fmtCompact(n);
+  return String(Math.round(n));
+}
+
 function fmtGbps(bps) {
   if (bps == null || bps === 0) return '0 Gbps';
   const g = bps / 1e9;
@@ -2859,5 +2881,5 @@ Object.assign(window, {
   resolveDisplayTimezone, getDisplayTimezone, setDisplayTimezonePreference,
   formatTimezoneShortLabel, formatTimezoneLongLabel,
   dataDatetimeLocalToDisplay, displayDatetimeLocalToData,
-  fmtBytes, fmtBits, fmtBitsAxis, fmtNum, fmtGbps, fmtMpps, fmtGbTotal, fmtVolumeSize, fmtMpTotal, fmtCompact, fmtTime, fmtAgo,
+  fmtBytes, fmtBits, fmtBitsAxis, fmtNum, formatMetric, formatMetricAxis, fmtGbps, fmtMpps, fmtGbTotal, fmtVolumeSize, fmtMpTotal, fmtCompact, fmtTime, fmtAgo,
 });

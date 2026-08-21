@@ -4225,6 +4225,14 @@ html.modal-open #root {
   z-index: 30;
 }
 .header__actions .tt::after { z-index: 40; }
+.tt--wrap::after {
+  white-space: normal;
+  width: 440px;
+  max-width: min(480px, 92vw);
+  box-sizing: border-box;
+  text-align: left;
+  line-height: 1.45;
+}
 .tt:hover::after { opacity: 1; }
 
 /* Dashboard chart legend — toggle series visibility */

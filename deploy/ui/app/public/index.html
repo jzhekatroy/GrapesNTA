@@ -46,61 +46,40 @@
   <script src="/runtime-config.js"></script>
   <script src="/data/boot-log.js"></script>
 
-  <!-- React + Babel (без сборки — JSX транспилируется в браузере) -->
+  <!-- React (core); Babel только в режиме frontendMode=babel -->
   <script src="/vendor/react.js" data-boot-label="react.js"></script>
   <script src="/vendor/react-dom.js" data-boot-label="react-dom.js"></script>
-  <script src="/vendor/babel.min.js" data-boot-label="babel.min.js"></script>
-  <script src="/data/boot-bridge.js"></script>
+  <script>
+    (function loadFrontendRuntime() {
+      const mode = window.__GRAPES_RUNTIME__?.frontendMode
+        || (window.__GRAPES_BUNDLE_MANIFEST__ ? 'bundled' : 'babel');
+      if (mode === 'bundled') {
+        // Prod после npm run build:frontend — без Babel, prebuilt bundles:
+        // document.write('<script src="/dist/manifest.js"><\/script>');
+        // document.write('<script src="' + __GRAPES_BUNDLE_MANIFEST__.core + '"><\/script>');
+        console.warn('[Grapes] frontendMode=bundled, но /dist не собран — используйте npm run build:frontend');
+      }
+      if (mode !== 'bundled') {
+        document.write('<script src="/vendor/babel.min.js" data-boot-label="babel.min.js"><\/script>');
+        document.write('<script src="/data/boot-bridge.js"><\/script>');
+      }
+    })();
+  </script>
 
-  <!-- Порядок загрузки важен: данные → компоненты → страницы → app -->
+  <!-- Core boot: данные, shell, lazy-loader, app (страницы — по demand через PageChunks) -->
   <script src="/data/protocol-colors.js" data-boot-label="protocol-colors.js"></script>
   <script src="/data/mock-fixtures.js" data-boot-label="mock-fixtures.js"></script>
   <script src="/data/logger.js" data-boot-label="logger.js"></script>
   <script src="/data/api.js" data-boot-label="api.js"></script>
   <script src="/data/auth-access.js" data-boot-label="auth-access.js"></script>
   <script src="/data/app-pages.js" data-boot-label="app-pages.js"></script>
-  <script src="/data/interface-role-labels.js" data-boot-label="interface-role-labels.js"></script>
-  <script src="/data/explorer-thresholds.js" data-boot-label="explorer-thresholds.js"></script>
-  <script src="/data/explorer-field-search.js" data-boot-label="explorer-field-search.js"></script>
-  <script src="/data/explorer-group-dsl.js" data-boot-label="explorer-group-dsl.js"></script>
+  <script src="/data/page-chunks.manifest.js" data-boot-label="page-chunks.manifest.js"></script>
+  <script src="/data/page-chunks.js" data-boot-label="page-chunks.js"></script>
   <script type="text/babel" src="/components/icons.jsx" data-boot-label="icons.jsx"></script>
   <script type="text/babel" src="/components/ui.jsx" data-boot-label="ui.jsx"></script>
   <script type="text/babel" src="/components/charts.jsx" data-boot-label="charts.jsx"></script>
   <script type="text/babel" src="/components/shell.jsx" data-boot-label="shell.jsx"></script>
-  <script type="text/babel" src="/components/talkers.jsx" data-boot-label="talkers.jsx"></script>
-  <script type="text/babel" src="/components/overview.jsx" data-boot-label="overview.jsx"></script>
-  <script type="text/babel" src="/components/dashboard-layout.jsx" data-boot-label="dashboard-layout.jsx"></script>
-  <script type="text/babel" src="/pages/cabinet-shared.jsx" data-boot-label="cabinet-shared.jsx"></script>
-  <script type="text/babel" src="/pages/cabinet-dns.jsx" data-boot-label="cabinet-dns.jsx"></script>
-  <script type="text/babel" src="/pages/dashboard.jsx" data-boot-label="dashboard.jsx"></script>
-  <script type="text/babel" src="/pages/explorer.jsx" data-boot-label="explorer.jsx"></script>
-  <script type="text/babel" src="/pages/dns-explorer.jsx" data-boot-label="dns-explorer.jsx"></script>
-  <script type="text/babel" src="/pages/observations.jsx" data-boot-label="observations.jsx"></script>
-  <script type="text/babel" src="/pages/diagnostics.jsx" data-boot-label="diagnostics.jsx"></script>
-  <script type="text/babel" src="/pages/top-talkers.jsx" data-boot-label="top-talkers.jsx"></script>
-  <script type="text/babel" src="/pages/smtp.jsx" data-boot-label="smtp.jsx"></script>
-  <script type="text/babel" src="/pages/dns-queries.jsx" data-boot-label="dns-queries.jsx"></script>
-  <script type="text/babel" src="/pages/monitoring.jsx" data-boot-label="monitoring.jsx"></script>
-  <script type="text/babel" src="/pages/collectors-completeness-modal.jsx" data-boot-label="collectors-completeness-modal.jsx"></script>
-  <script type="text/babel" src="/pages/flow-exclusions.jsx" data-boot-label="flow-exclusions.jsx"></script>
-  <script type="text/babel" src="/pages/collectors.jsx" data-boot-label="collectors.jsx"></script>
-  <script type="text/babel" src="/pages/snmp.jsx" data-boot-label="snmp.jsx"></script>
-  <script type="text/babel" src="/pages/bmp.jsx" data-boot-label="bmp.jsx"></script>
-  <script type="text/babel" src="/pages/routers.jsx" data-boot-label="routers.jsx"></script>
-  <script type="text/babel" src="/pages/entities.jsx" data-boot-label="entities.jsx"></script>
-  <script type="text/babel" src="/pages/cidr.jsx" data-boot-label="cidr.jsx"></script>
-  <script type="text/babel" src="/pages/vlan.jsx" data-boot-label="vlan.jsx"></script>
-  <script type="text/babel" src="/pages/network.jsx" data-boot-label="network.jsx"></script>
-  <script type="text/babel" src="/pages/traffic-classification.jsx" data-boot-label="traffic-classification.jsx"></script>
-  <script type="text/babel" src="/pages/dns-resolvers.jsx" data-boot-label="dns-resolvers.jsx"></script>
-  <script type="text/babel" src="/pages/port-services.jsx" data-boot-label="port-services.jsx"></script>
-  <script type="text/babel" src="/pages/interface-roles.jsx" data-boot-label="interface-roles.jsx"></script>
   <script type="text/babel" src="/pages/access-denied.jsx" data-boot-label="access-denied.jsx"></script>
-  <script type="text/babel" src="/pages/users.jsx" data-boot-label="users.jsx"></script>
-  <script type="text/babel" src="/pages/audit.jsx" data-boot-label="audit.jsx"></script>
-  <script type="text/babel" src="/pages/erp-piterix.jsx" data-boot-label="erp-piterix.jsx"></script>
-  <script type="text/babel" src="/pages/clients.jsx" data-boot-label="clients.jsx"></script>
-  <script type="text/babel" src="/pages/ttl.jsx" data-boot-label="ttl.jsx"></script>
   <script type="text/babel" src="/pages/coming-soon.jsx" data-boot-label="coming-soon.jsx"></script>
   <script type="text/babel" src="/app.jsx" data-boot-label="app.jsx"></script>
 </body>

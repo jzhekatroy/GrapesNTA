@@ -1061,7 +1061,6 @@ function DnsExplorerFilters({
                 onTimeRangeChange={onTimeRangeChange}
                 customPeriod={customPeriod}
                 onCustomPeriodChange={onCustomPeriodChange}
-                displayTimezone={displayTimezone}
               />
               <div style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-muted)' }}>
                 Макс. {DNS_EXPLORER_MAX_RANGE_DAYS} дней

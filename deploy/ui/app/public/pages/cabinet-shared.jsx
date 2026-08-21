@@ -1,6 +1,6 @@
 /* Общие компоненты и утилиты личного кабинета клиента */
 
-const CABINET_DNS_INCOMPLETE_WARNING = 'DNS-данные могут быть неполными: при перегрузке коллектора часть запросов не попадает в журнал. Нулевая активность не всегда означает, что запросов не было — признак потерь будет добавлен позже.';
+const CABINET_DNS_EMPTY_HINT = 'DNS-данные могут быть неполными: при перегрузке коллектора часть запросов не попадает в журнал. Нулевая активность не всегда означает, что запросов не было — признак потерь будет добавлен позже.';
 
 const CABINET_DIRECTION_LABELS = {
   in: 'Входящий',
@@ -205,15 +205,6 @@ function openCabinetExplorer(onNavigate, {
   location.hash = `explorer?${params.toString()}`;
 }
 
-function CabinetDnsWarningBanner({ style }) {
-  return (
-    <div className="cabinet-dns-warning" style={style}>
-      <Icon name="info" size={16} stroke={1.8} />
-      <span>{CABINET_DNS_INCOMPLETE_WARNING}</span>
-    </div>
-  );
-}
-
 function CabinetDataMeta({ granularity, dataUntil, readOnly, displayTimezone, style }) {
   const parts = [];
   const granLabel = formatCabinetGranularityLabel(granularity);
@@ -237,12 +228,14 @@ function CabinetLoadState({ children, style }) {
   );
 }
 
-function CabinetEmptyState({ children, style }) {
+function CabinetEmptyState({ children, style, titleHint }) {
+  const defaultDesc = 'За выбранный период данных пока нет. Для нового клиента агрегаты начинают заполняться с момента подключения.';
   return (
     <Empty
       icon="info"
       title="Нет данных"
-      desc={children || 'За выбранный период данных пока нет. Для нового клиента агрегаты начинают заполняться с момента подключения.'}
+      titleHint={titleHint}
+      desc={children ?? (titleHint ? null : defaultDesc)}
     />
   );
 }
@@ -256,9 +249,8 @@ function CabinetErrorState({ error, style }) {
 }
 
 Object.assign(window, {
-  CABINET_DNS_INCOMPLETE_WARNING,
+  CABINET_DNS_EMPTY_HINT,
   CABINET_DIRECTION_LABELS,
-  CabinetDnsWarningBanner,
   CabinetDataMeta,
   CabinetLoadState,
   CabinetEmptyState,

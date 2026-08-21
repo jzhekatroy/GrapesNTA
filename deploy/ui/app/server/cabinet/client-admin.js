@@ -4,7 +4,9 @@ const {
   query,
   insertRows,
   l3PrefixesViewRef,
+  netInterfacesCurrentRef,
 } = require('../clickhouse');
+const { asStringArray } = require('../client-search');
 
 const CLIENTS_TABLE = 'net_clients';
 const CLIENT_PREFIXES_TABLE = 'net_client_prefixes';
@@ -35,6 +37,9 @@ function mapClientRow(row) {
     portCount: Number(row.port_count ?? row.portCount) || 0,
     userCount: Number(row.user_count ?? row.userCount) || 0,
     updatedAt: row.updated_at ?? row.updatedAt ?? row?.['c.updated_at'] ?? null,
+    bindingPreview: asStringArray(row.binding_preview ?? row.bindingPreview),
+    bindingPrefixes: asStringArray(row.binding_prefixes ?? row.bindingPrefixes),
+    bindingSearch: String(row.binding_search ?? row.bindingSearch ?? ''),
   };
 }
 
@@ -267,6 +272,42 @@ async function listClients() {
           WHERE rn = 1 AND enabled = 1
           GROUP BY client_id
         ),
+        prefix_preview AS (
+          SELECT
+            client_id,
+            arraySlice(arraySort(groupArray(prefix)), 1, 3) AS items,
+            groupArray(prefix) AS prefixes,
+            arrayStringConcat(groupArray(prefix), ' ') AS hay
+          FROM latest_prefixes
+          WHERE rn = 1 AND enabled = 1
+          GROUP BY client_id
+        ),
+        port_preview AS (
+          SELECT
+            p.client_id AS client_id,
+            arraySlice(arraySort(groupArray(
+              concat(
+                p.switch_ip,
+                ' · ',
+                if(ni.if_name != '', ni.if_name, concat('ifIndex ', toString(p.if_index)))
+              )
+            )), 1, 3) AS items,
+            arrayStringConcat(groupArray(
+              concat(
+                p.switch_ip, ' ',
+                toString(p.if_index), ' ',
+                p.comment, ' ',
+                ifNull(ni.if_name, ''), ' ',
+                ifNull(ni.if_alias, ''), ' ',
+                ifNull(ni.if_descr, '')
+              )
+            ), ' ') AS hay
+          FROM latest_ports AS p
+          LEFT JOIN ${netInterfacesCurrentRef()} AS ni
+            ON ni.switch_ip = p.switch_ip AND ni.if_index = p.if_index
+          WHERE p.rn = 1 AND p.enabled = 1
+          GROUP BY p.client_id
+        ),
         user_counts AS (
           SELECT
             client_id,
@@ -290,10 +331,15 @@ async function listClients() {
         c.updated_at AS updated_at,
         coalesce(pc.prefix_count, 0) AS prefix_count,
         coalesce(pt.port_count, 0) AS port_count,
-        coalesce(uc.user_count, 0) AS user_count
+        coalesce(uc.user_count, 0) AS user_count,
+        if(c.bind_mode = 'ports', coalesce(pp.items, []), coalesce(px.items, [])) AS binding_preview,
+        coalesce(px.prefixes, []) AS binding_prefixes,
+        if(c.bind_mode = 'ports', coalesce(pp.hay, ''), coalesce(px.hay, '')) AS binding_search
       FROM latest_clients AS c
       LEFT JOIN prefix_counts AS pc ON pc.client_id = c.client_id
       LEFT JOIN port_counts AS pt ON pt.client_id = c.client_id
+      LEFT JOIN prefix_preview AS px ON px.client_id = c.client_id
+      LEFT JOIN port_preview AS pp ON pp.client_id = c.client_id
       LEFT JOIN user_counts AS uc ON uc.client_id = c.client_id
       WHERE c.rn = 1
       ORDER BY c.display_name, c.client_id

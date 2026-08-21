@@ -2,6 +2,46 @@
 
 const THEME_TRANSITION_MS = 350;
 
+function LazyPage({ pageId, exportName, fallback, ...props }) {
+  const [ready, setReady] = useState(() => PageChunks.isLoaded(pageId));
+  const [error, setError] = useState(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (PageChunks.isLoaded(pageId)) {
+      setReady(true);
+      setError(null);
+      return undefined;
+    }
+    setReady(false);
+    setError(null);
+    PageChunks.load(pageId)
+      .then(() => {
+        if (!cancelled) setReady(true);
+      })
+      .catch((e) => {
+        if (!cancelled) setError(e);
+      });
+    return () => { cancelled = true; };
+  }, [pageId]);
+
+  if (error) {
+    return (
+      <div className="other-ports-table__state">
+        {error.message || 'Не удалось загрузить страницу'}
+      </div>
+    );
+  }
+  if (!ready) {
+    return fallback ?? <div className="other-ports-table__state">Загрузка…</div>;
+  }
+  const Comp = PageChunks.component(pageId, exportName);
+  if (!Comp) {
+    return <div className="other-ports-table__state">Компонент не найден</div>;
+  }
+  return <Comp {...props} />;
+}
+
 function App() {
   const [registryReady, setRegistryReady] = useState(false);
   const [validIds, setValidIds] = useState(new Set(['dashboard']));
@@ -408,7 +448,8 @@ function App() {
     switch (page) {
       case 'dashboard':
         pageEl = (
-          <PageDashboard
+          <LazyPage
+            pageId="dashboard"
             key={`${refreshKey}-${displayTimezone}`}
             onNavigate={navigate}
             directions={directions}
@@ -422,53 +463,178 @@ function App() {
           />
         );
         break;
-      case 'monitoring': pageEl = <PageMonitoring key={`${refreshKey}-${displayTimezone}`} displayTimezone={displayTimezone} />; break;
-      case 'explorer':
-        pageEl = <PageExplorer key={`${refreshKey}-${displayTimezone}-${hashRoute}`} onNavigate={navigate} displayTimezone={displayTimezone} cabinetMode={cabinetMode} readOnly={cabinetReadOnly} />;
+      case 'monitoring':
+        pageEl = <LazyPage pageId="monitoring" key={`${refreshKey}-${displayTimezone}`} displayTimezone={displayTimezone} />;
         break;
-      case 'dns-explorer': pageEl = <PageDnsExplorer key={`${refreshKey}-${displayTimezone}-${hashRoute}`} onNavigate={navigate} displayTimezone={displayTimezone} />; break;
-      case 'observations': pageEl = <PageObservations key={refreshKey} onNavigate={navigate} />; break;
-      case 'diagnostics': pageEl = <PageDiagnostics key={refreshKey} />; break;
-      case 'top':        pageEl = <PageTop key={`${refreshKey}-${displayTimezone}`} onNavigate={navigate} timeRange={timeRange} customPeriod={customPeriod} directions={directions} collectorFilter={collectorFilter} displayTimezone={displayTimezone} />; break;
-      case 'smtp':       pageEl = <PageSmtp key={refreshKey} />; break;
+      case 'explorer':
+        pageEl = (
+          <LazyPage
+            pageId="explorer"
+            key={`${refreshKey}-${displayTimezone}-${hashRoute}`}
+            onNavigate={navigate}
+            displayTimezone={displayTimezone}
+            cabinetMode={cabinetMode}
+            readOnly={cabinetReadOnly}
+          />
+        );
+        break;
+      case 'dns-explorer':
+        pageEl = (
+          <LazyPage
+            pageId="dns-explorer"
+            key={`${refreshKey}-${displayTimezone}-${hashRoute}`}
+            onNavigate={navigate}
+            displayTimezone={displayTimezone}
+          />
+        );
+        break;
+      case 'observations':
+        pageEl = <LazyPage pageId="observations" key={refreshKey} onNavigate={navigate} />;
+        break;
+      case 'diagnostics':
+        pageEl = <LazyPage pageId="diagnostics" key={refreshKey} />;
+        break;
+      case 'top':
+        pageEl = (
+          <LazyPage
+            pageId="top"
+            key={`${refreshKey}-${displayTimezone}`}
+            onNavigate={navigate}
+            timeRange={timeRange}
+            customPeriod={customPeriod}
+            directions={directions}
+            collectorFilter={collectorFilter}
+            displayTimezone={displayTimezone}
+          />
+        );
+        break;
+      case 'smtp':
+        pageEl = <LazyPage pageId="smtp" key={refreshKey} />;
+        break;
       case 'dns':
         pageEl = cabinetMode
-          ? <PageCabinetDns key={`${refreshKey}-${displayTimezone}`} onNavigate={navigate} timeRange={timeRange} customPeriod={customPeriod} displayTimezone={displayTimezone} readOnly={cabinetReadOnly} />
-          : <PageDnsQueries key={`${refreshKey}-${displayTimezone}-${(collectorFilter || []).join(',')}`} onNavigate={navigate} timeRange={timeRange} customPeriod={customPeriod} collectorFilter={collectorFilter} displayTimezone={displayTimezone} onChartRangeSelect={applyChartRangeZoom} />;
+          ? (
+            <LazyPage
+              pageId="dashboard"
+              exportName="PageCabinetDns"
+              key={`${refreshKey}-${displayTimezone}`}
+              onNavigate={navigate}
+              timeRange={timeRange}
+              customPeriod={customPeriod}
+              displayTimezone={displayTimezone}
+              readOnly={cabinetReadOnly}
+            />
+          )
+          : (
+            <LazyPage
+              pageId="dns"
+              key={`${refreshKey}-${displayTimezone}-${(collectorFilter || []).join(',')}`}
+              onNavigate={navigate}
+              timeRange={timeRange}
+              customPeriod={customPeriod}
+              collectorFilter={collectorFilter}
+              displayTimezone={displayTimezone}
+              onChartRangeSelect={applyChartRangeZoom}
+            />
+          );
         break;
-      case 'collectors': pageEl = <PageCollectors key={refreshKey} onNavigate={navigate} effectivePermissions={auth.user?.effectivePermissions} />; break;
-      case 'snmp': pageEl = (
-        <PageSnmp
-          key={`${refreshKey}-${displayTimezone}`}
-          displayTimezone={displayTimezone}
-          canOpenInterfaceRoles={canAccessPage('interface-roles')}
-        />
-      ); break;
-      case 'bmp':        pageEl = <PageBmp key={refreshKey} />; break;
-      case 'interface-roles': pageEl = <PageInterfaceRoles key={refreshKey} onNavigate={navigate} />; break;
-      case 'traffic-classification': pageEl = <PageTrafficClassification key={refreshKey} />; break;
-      case 'routers':    pageEl = <PageRouters key={refreshKey} />; break;
+      case 'collectors':
+        pageEl = (
+          <LazyPage
+            pageId="collectors"
+            key={refreshKey}
+            onNavigate={navigate}
+            effectivePermissions={auth.user?.effectivePermissions}
+          />
+        );
+        break;
+      case 'snmp':
+        pageEl = (
+          <LazyPage
+            pageId="snmp"
+            key={`${refreshKey}-${displayTimezone}`}
+            displayTimezone={displayTimezone}
+            canOpenInterfaceRoles={canAccessPage('interface-roles')}
+          />
+        );
+        break;
+      case 'bmp':
+        pageEl = <LazyPage pageId="bmp" key={refreshKey} />;
+        break;
+      case 'interface-roles':
+        pageEl = <LazyPage pageId="interface-roles" key={refreshKey} onNavigate={navigate} />;
+        break;
+      case 'traffic-classification':
+        pageEl = <LazyPage pageId="traffic-classification" key={refreshKey} />;
+        break;
+      case 'routers':
+        pageEl = <LazyPage pageId="routers" key={refreshKey} />;
+        break;
       case 'cidr':
       case 'vlan':
       case 'entities':
         pageEl = (
-          <PageNetwork
+          <LazyPage
+            pageId="network"
             key={refreshKey}
             effectivePermissions={auth.user?.effectivePermissions}
             initialTab={page === 'cidr' ? undefined : page}
           />
         );
         break;
-      case 'dns-resolvers': pageEl = <PageDnsResolvers key={refreshKey} />; break;
-      case 'port-services': pageEl = <PagePortServices key={refreshKey} />; break;
-      case 'flow-exclusions':
-        pageEl = <PageCollectors key={refreshKey} onNavigate={navigate} effectivePermissions={auth.user?.effectivePermissions} />;
+      case 'dns-resolvers':
+        pageEl = <LazyPage pageId="dns-resolvers" key={refreshKey} />;
         break;
-      case 'users':      pageEl = <PageUsers key={refreshKey} currentUser={auth.user} onAuthRefresh={reloadCurrentUser} onNavigate={navigate} />; break;
-      case 'audit':      pageEl = <PageAudit key={`${refreshKey}-${displayTimezone}`} currentUser={auth.user} displayTimezone={displayTimezone} />; break;
-      case 'clients':    pageEl = <PageClients key={refreshKey} currentUser={auth.user} onAuthRefresh={reloadCurrentUser} onNavigate={navigate} />; break;
-      case 'ttl':        pageEl = <PageTTL key={refreshKey} />; break;
-      default:           pageEl = <PageComingSoon key={refreshKey} pageId={page} onNavigate={navigate} />;
+      case 'port-services':
+        pageEl = <LazyPage pageId="port-services" key={refreshKey} />;
+        break;
+      case 'flow-exclusions':
+        pageEl = (
+          <LazyPage
+            pageId="collectors"
+            key={refreshKey}
+            onNavigate={navigate}
+            effectivePermissions={auth.user?.effectivePermissions}
+          />
+        );
+        break;
+      case 'users':
+        pageEl = (
+          <LazyPage
+            pageId="users"
+            key={refreshKey}
+            currentUser={auth.user}
+            onAuthRefresh={reloadCurrentUser}
+            onNavigate={navigate}
+          />
+        );
+        break;
+      case 'audit':
+        pageEl = (
+          <LazyPage
+            pageId="audit"
+            key={`${refreshKey}-${displayTimezone}`}
+            currentUser={auth.user}
+            displayTimezone={displayTimezone}
+          />
+        );
+        break;
+      case 'clients':
+        pageEl = (
+          <LazyPage
+            pageId="clients"
+            key={refreshKey}
+            currentUser={auth.user}
+            onAuthRefresh={reloadCurrentUser}
+            onNavigate={navigate}
+          />
+        );
+        break;
+      case 'ttl':
+        pageEl = <LazyPage pageId="ttl" key={refreshKey} />;
+        break;
+      default:
+        pageEl = <PageComingSoon key={refreshKey} pageId={page} onNavigate={navigate} />;
     }
   }
 

@@ -6,6 +6,7 @@
   "scripts": {
     "setup": "node scripts/setup-project.js",
     "dev": "node scripts/write-build-info.js && node server/index.js",
+    "build:frontend": "node scripts/build-frontend.js",
     "dev:static": "npx serve public -p 3000",
     "start": "npm run dev",
     "test": "node --test server/*.test.js server/**/*.test.js"

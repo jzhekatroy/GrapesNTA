@@ -223,6 +223,7 @@ function NavItem({ item, active, onNavigate, collapsed }) {
       href={`#${item.id}`}
       className={`nav-item ${active ? 'nav-item--active' : ''}`}
       onClick={handleClick}
+      onMouseEnter={() => PageChunks?.preload?.(item.id)}
       title={collapsed ? item.label : undefined}
       aria-current={active ? 'page' : undefined}
     >
@@ -395,7 +396,6 @@ function Header({ current, onNavigate, onToggleSidebar, currentUser, onLogout, o
                 onTimeRangeChange={onTimeRangeChange}
                 customPeriod={customPeriod}
                 onCustomPeriodChange={onCustomPeriodChange}
-                displayTimezone={displayTimezone}
                 maxRangeDays={cabinetMode && current === 'dashboard' ? 730 : null}
               />
             </>
@@ -849,7 +849,7 @@ function timeFilterMenuPositionChanged(prev, next) {
     || prev.availableHeight !== next.availableHeight;
 }
 
-function TimeFilter({ timeRange, onTimeRangeChange, customPeriod, onCustomPeriodChange, displayTimezone, variant = 'header', maxRangeDays = null }) {
+function TimeFilter({ timeRange, onTimeRangeChange, customPeriod, onCustomPeriodChange, variant = 'header', maxRangeDays = null }) {
   const isExplorer = variant === 'explorer';
   const [open, setOpen] = useState(false);
   const [menuView, setMenuView] = useState('presets');
@@ -865,7 +865,6 @@ function TimeFilter({ timeRange, onTimeRangeChange, customPeriod, onCustomPeriod
   const customToId = isExplorer ? 'time-filter-to-explorer' : 'time-filter-to';
 
   const rangeLabel = timeRangeLabel(timeRange, customPeriod);
-  const timezoneLabel = formatTimezoneShortLabel(displayTimezone);
   const customViewOpen = menuView === 'custom';
   const presetOptions = useMemo(() => {
     const limitMs = Number(maxRangeDays) > 0 ? Number(maxRangeDays) * 86400000 : null;
@@ -1083,8 +1082,6 @@ function TimeFilter({ timeRange, onTimeRangeChange, customPeriod, onCustomPeriod
           <span className="live-dot" />
           <Icon name="clock" size={14} />
           <span className="time-pill__label" title={timeRange === 'custom' ? rangeLabel : undefined}>{rangeLabel}</span>
-          <span className="time-pill__sep">·</span>
-          <span className="time-pill__range">{timezoneLabel}</span>
           <Icon name="chevD" size={14} />
         </button>
       )}
@@ -1745,6 +1742,7 @@ Object.assign(window, {
   collectorFilterLabel, directionSummaryLabel, TimezoneSelector,
   parseAppHash, parseJsonSearchParam, parseDirectionsParam, applyTopTalkersUrlGlobals,
   parseTopTalkersPageParams, readTopTalkersPageParamsFromHash, buildTopTalkersShareUrl,
+  METRICS,
   parseExplorerPageParams, readExplorerPageParamsFromHash, applyExplorerUrlGlobals, buildExplorerShareUrl, buildExplorerSnapshotShareUrl,
   parseDnsExplorerPageParams, readDnsExplorerPageParamsFromHash, applyDnsExplorerUrlGlobals,
   buildDnsExplorerDraftUrl, buildDnsExplorerShareUrl, buildDnsExplorerSnapshotShareUrl,

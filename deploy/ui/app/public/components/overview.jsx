@@ -323,6 +323,66 @@ function OverviewFlowEndpoint({ flow }) {
   );
 }
 
+function RecentFlowProtoBadge({ proto }) {
+  return (
+    <Badge tone={proto === 'TCP' ? 'info' : proto === 'UDP' ? 'neutral' : proto === 'QUIC' ? 'success' : 'warning'}>
+      {proto}
+    </Badge>
+  );
+}
+
+function recentVlanLabel(flow) {
+  for (const value of [flow.srcVlan, flow.vlanId, flow.dstVlan]) {
+    const n = Number(value);
+    if (Number.isFinite(n) && n > 0) return String(n);
+  }
+  return '—';
+}
+
+function countryShort(code, ip) {
+  const c = String(code || '').trim();
+  if (c && c !== '??') return countryFlagEmoji(c);
+  return specialIpLabel(ip) || '—';
+}
+
+function RecentFlowMetaCell({ flow }) {
+  const srcGeo = countryShort(flow.srcCountry, flow.srcIp);
+  const dstGeo = countryShort(flow.dstCountry, flow.dstIp);
+  return (
+    <div className="recent-flow-meta">
+      <span className="recent-flow-meta__vlan mono">{recentVlanLabel(flow)}</span>
+      <span className="recent-flow-meta__geo" title={`${flow.srcCountry || '??'} → ${flow.dstCountry || '??'}`}>
+        {srcGeo}<span className="recent-flow-meta__arrow">→</span>{dstGeo}
+      </span>
+    </div>
+  );
+}
+
+function recentFlowAsnLabel(asn, asName) {
+  const n = Number(asn);
+  if (!Number.isFinite(n) || n <= 0) return '—';
+  const name = String(asName || '').trim();
+  if (name && !/^AS?\d+$/i.test(name)) return `${name} · AS${n}`;
+  return `AS${n}`;
+}
+
+function RecentFlowAsnCell({ srcAsn, dstAsn, srcAsName, dstAsName }) {
+  const src = recentFlowAsnLabel(srcAsn, srcAsName);
+  const dst = recentFlowAsnLabel(dstAsn, dstAsName);
+  if (src === '—' && dst === '—') {
+    return <span className="recent-flows__asn mono">—</span>;
+  }
+  if (src !== '—' && dst !== '—') {
+    return (
+      <div className="recent-flows__asn-stack">
+        <span className="recent-flows__asn-line mono" title={src}>{src}</span>
+        <span className="recent-flows__asn-line mono" title={dst}>{dst}</span>
+      </div>
+    );
+  }
+  return <span className="recent-flows__asn mono">{dst !== '—' ? dst : src}</span>;
+}
+
 function OverviewRecentFlowsCard({
   rows,
   source,

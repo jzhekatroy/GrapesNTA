@@ -215,8 +215,18 @@ describe('cabinet client SQL builders', () => {
     const where = buildCabinetClientSearchWhere('client:188-143-203-173', params);
     assert.match(where, /positionCaseInsensitive\(c\.display_name/);
     assert.match(where, /positionCaseInsensitive\(c\.client_id/);
-    assert.match(where, /c\.client_id = \{exactId:String\}/);
-    assert.equal(params.qPlain, 'client:188-143-203-173');
+    assert.match(where, /c\.client_id = \{q0:String\}/);
+    assert.match(where, /ni\.if_name/);
+    assert.equal(params.q0, 'client:188-143-203-173');
+  });
+
+  it('buildCabinetClientSearchWhere ANDs switch and ifName tokens', () => {
+    const params = {};
+    const where = buildCabinetClientSearchWhere('PortChannel32 172.18.19.12', params);
+    assert.match(where, /AND/);
+    assert.match(where, /isIPAddressInRange/);
+    assert.equal(params.q0, 'PortChannel32');
+    assert.equal(params.q1, '172.18.19.12');
   });
 
   it('searchCabinetClients finds clients by partial client_id', async () => {
