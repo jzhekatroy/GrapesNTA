@@ -47,6 +47,11 @@ function PageErpPiterix() {
   const [full, setFull] = useState(false);
   const [cronEnabled, setCronEnabled] = useState(false);
   const [categories, setCategories] = useState({ piter_ix: true, dc: false, bb: false });
+  const [apiBase, setApiBase] = useState('https://195.2.241.23:8443');
+  const [apiHost, setApiHost] = useState('erp.bth.su');
+  const [apiToken, setApiToken] = useState('');
+  const [apiInsecure, setApiInsecure] = useState(true);
+  const [bindMode, setBindMode] = useState('ports');
 
   const load = useCallback(() => {
     return Promise.all([
@@ -58,6 +63,11 @@ function PageErpPiterix() {
       if (st?.settings) {
         setCronEnabled(!!st.settings.cronEnabled);
         setCategories({ piter_ix: true, dc: false, bb: false, ...st.settings.categories });
+        setApiBase(st.settings.apiBase || 'https://195.2.241.23:8443');
+        setApiHost(st.settings.apiHost || 'erp.bth.su');
+        setApiInsecure(st.settings.apiInsecure !== false);
+        setBindMode(st.settings.bindMode === 'prefixes' ? 'prefixes' : 'ports');
+        setApiToken('');
       }
       setForbidden(false);
       setError('');
@@ -73,9 +83,22 @@ function PageErpPiterix() {
     setSaving(true);
     setError('');
     try {
-      const next = await ApiClient.saveErpPiterixSettings({ cronEnabled, categories });
+      const next = await ApiClient.saveErpPiterixSettings({
+        cronEnabled,
+        categories,
+        apiBase,
+        apiHost,
+        apiToken,
+        apiInsecure,
+        bindMode,
+      });
       setCronEnabled(!!next.cronEnabled);
       setCategories({ piter_ix: true, dc: false, bb: false, ...next.categories });
+      setApiBase(next.apiBase || apiBase);
+      setApiHost(next.apiHost || apiHost);
+      setApiInsecure(next.apiInsecure !== false);
+      setBindMode(next.bindMode === 'prefixes' ? 'prefixes' : 'ports');
+      setApiToken('');
       pushToast?.({ kind: 'success', title: 'Настройки ERP сохранены' });
       await load();
     } catch (e) {
@@ -131,6 +154,71 @@ function PageErpPiterix() {
 
       <Card title="Настройки">
         <div className="col" style={{ gap: 12, font: 'var(--pv-text-body-3)' }}>
+          <label className="col" style={{ gap: 4 }}>
+            URL API
+            <input
+              value={apiBase}
+              disabled={saving}
+              onChange={(e) => setApiBase(e.target.value)}
+              placeholder="https://195.2.241.23:8443"
+              className="mono"
+            />
+          </label>
+          <label className="col" style={{ gap: 4 }}>
+            Host
+            <input
+              value={apiHost}
+              disabled={saving}
+              onChange={(e) => setApiHost(e.target.value)}
+              placeholder="erp.bth.su"
+              className="mono"
+            />
+          </label>
+          <label className="col" style={{ gap: 4 }}>
+            Токен
+            <input
+              type="password"
+              value={apiToken}
+              disabled={saving}
+              onChange={(e) => setApiToken(e.target.value)}
+              placeholder={status.settings?.tokenSet ? 'задан, введите чтобы сменить' : 'Bearer token'}
+              autoComplete="off"
+            />
+          </label>
+          <label className="row" style={{ gap: 8, alignItems: 'center' }}>
+            <input
+              type="checkbox"
+              checked={apiInsecure}
+              disabled={saving}
+              onChange={(e) => setApiInsecure(e.target.checked)}
+            />
+            Не проверять TLS-сертификат (--insecure)
+          </label>
+          <div>
+            Как размечать клиента
+            <div className="col" style={{ gap: 6, marginTop: 6 }}>
+              <label className="row" style={{ gap: 8, alignItems: 'center' }}>
+                <input
+                  type="radio"
+                  name="erp-bind-mode"
+                  checked={bindMode === 'prefixes'}
+                  disabled={saving}
+                  onChange={() => setBindMode('prefixes')}
+                />
+                По IP — текущие ips[].ip, если cidr пустой то /32
+              </label>
+              <label className="row" style={{ gap: 8, alignItems: 'center' }}>
+                <input
+                  type="radio"
+                  name="erp-bind-mode"
+                  checked={bindMode === 'ports'}
+                  disabled={saving}
+                  onChange={() => setBindMode('ports')}
+                />
+                По портам коммутатора — ips[].switch.host + port
+              </label>
+            </div>
+          </div>
           <label className="row" style={{ gap: 8, alignItems: 'center' }}>
             <input
               type="checkbox"
@@ -221,7 +309,7 @@ function PageErpPiterix() {
       <Card title="Запустить сейчас">
         <div className="col" style={{ gap: 10, font: 'var(--pv-text-body-3)' }}>
           <div>
-            Берёт включённые категории. Порция — только новые. Полный прогон обновляет имена и снимает пропавших внутри этих категорий.
+            Берёт включённые категории и выбранный способ разметки. Порция — только новые. Полный прогон обновляет имена и снимает пропавших внутри этих категорий.
           </div>
           <label className="row" style={{ gap: 8, alignItems: 'center' }}>
             Лимит порции

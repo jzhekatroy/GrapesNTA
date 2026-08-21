@@ -24,6 +24,8 @@ const {
   portComment,
   clientsToDisable,
   portsToDisable,
+  prefixesToDisable,
+  normalizeBindMode,
   summarizeSkipped,
 } = require('./erp-piterix-sync');
 const {
@@ -31,6 +33,7 @@ const {
   getSettings,
   saveSettings,
   enabledCategoryIds,
+  resolveErpConfig,
 } = require('./erp-piterix-settings');
 
 const LOG_TABLE = 'erp_piterix_sync_log';
@@ -57,6 +60,16 @@ const ENSURE_SQL = [
   )
   ENGINE = ReplacingMergeTree(updated_at)
   ORDER BY (switch_ip, if_index)`,
+  `CREATE TABLE IF NOT EXISTS default.net_client_prefixes
+  (
+    client_id LowCardinality(String),
+    prefix String,
+    family UInt8,
+    enabled UInt8,
+    updated_at DateTime DEFAULT now()
+  )
+  ENGINE = ReplacingMergeTree(updated_at)
+  ORDER BY (family, prefix)`,
   `CREATE TABLE IF NOT EXISTS default.${LOG_TABLE}
   (
     run_id String,
@@ -85,7 +98,8 @@ const FIELD_MAP = [
   { erp: 'basic_account', ours: 'net_clients.client_id', note: 'номер ЛС как в биллинге' },
   { erp: 'name', ours: 'net_clients.display_name', note: 'каждую ночь перезаписываем' },
   { erp: 'int_status + block.is_blocked', ours: 'только активные', note: 'int_status=1 и не заблокирован' },
-  { erp: 'ips[].switch.host', ours: 'net_client_ports.switch_ip', note: 'IPv4 коммутатора' },
+  { erp: 'ips[].ip / ips[].cidr', ours: 'net_client_prefixes.prefix', note: 'режим IP: cidr или адрес как /32' },
+  { erp: 'ips[].switch.host', ours: 'net_client_ports.switch_ip', note: 'режим портов: IPv4 коммутатора' },
   { erp: 'ips[].switch.port', ours: 'net_client_ports.if_index', note: 'Huawei ifIndex, не номер на панели' },
   { erp: 'ips[].switch.inven_number + SNMP if_name/if_alias', ours: 'net_client_ports.comment', note: '' },
   { erp: 'category piter_ix|dc|bb', ours: 'net_clients.comment', note: 'erp:<категория>' },
@@ -93,14 +107,8 @@ const FIELD_MAP = [
 
 let running = null;
 
-function erpConfig() {
-  return {
-    base: String(process.env.ERP_API_BASE || 'https://195.2.241.23:8443').replace(/\/$/, ''),
-    host: String(process.env.ERP_API_HOST || 'erp.bth.su'),
-    token: String(process.env.ERP_API_TOKEN || '').trim(),
-    insecure: !['0', 'false', 'no'].includes(String(process.env.ERP_API_INSECURE || '1').toLowerCase()),
-    pageLimit: Math.min(Math.max(Number(process.env.ERP_API_PAGE_LIMIT) || 500, 1), 500),
-  };
+function erpConfig(settings) {
+  return resolveErpConfig(settings);
 }
 
 function httpsGetJson(urlString, { headers = {}, insecure = false } = {}) {
@@ -136,9 +144,9 @@ function httpsGetJson(urlString, { headers = {}, insecure = false } = {}) {
   });
 }
 
-async function fetchErpClients({ category = CATEGORY } = {}) {
-  const cfg = erpConfig();
-  if (!cfg.token) throw new Error('Нет ERP_API_TOKEN');
+async function fetchErpClients(db, { category = CATEGORY } = {}) {
+  const cfg = resolveErpConfig(await getSettings(db, { includeToken: true }));
+  if (!cfg.token) throw new Error('Нет токена ERP');
   const clients = [];
   let after = '';
   for (let page = 0; page < 40; page += 1) {
@@ -228,11 +236,13 @@ async function applySync(db, {
   trigger = 'cli',
   actor = '',
   category = CATEGORY,
+  bindMode = 'ports',
 } = {}) {
   await ensureSchema(db);
   const sourceTag = sourceTagFor(category);
-  const catalog = await loadCatalog(db);
-  const classified = classifyClients(clients, catalog, { sourceTag });
+  const mode = normalizeBindMode(bindMode);
+  const catalog = mode === 'ports' ? await loadCatalog(db) : { agents: new Map(), ifaces: new Set(), ifaceRows: new Map() };
+  const classified = classifyClients(clients, catalog, { sourceTag, bindMode: mode });
   const existingRows = await db.query(`
     SELECT client_id
     FROM default.net_clients_enabled
@@ -247,21 +257,34 @@ async function applySync(db, {
     client_id: c.clientId,
     display_name: c.displayName,
     comment: c.comment,
-    bind_mode: 'ports',
+    bind_mode: mode,
     enabled: 1,
     updated_at: now,
   }));
   const portRows = [];
+  const prefixRows = [];
   for (const c of take) {
-    for (const p of c.ports) {
-      portRows.push({
-        client_id: c.clientId,
-        switch_ip: p.switchIp,
-        if_index: p.ifIndex,
-        comment: portComment(p),
-        enabled: 1,
-        updated_at: now,
-      });
+    if (mode === 'prefixes') {
+      for (const p of c.prefixes || []) {
+        prefixRows.push({
+          client_id: c.clientId,
+          prefix: p.prefix,
+          family: p.family,
+          enabled: 1,
+          updated_at: now,
+        });
+      }
+    } else {
+      for (const p of c.ports) {
+        portRows.push({
+          client_id: c.clientId,
+          switch_ip: p.switchIp,
+          if_index: p.ifIndex,
+          comment: portComment(p),
+          enabled: 1,
+          updated_at: now,
+        });
+      }
     }
   }
 
@@ -278,30 +301,48 @@ async function applySync(db, {
         client_id: id,
         display_name: names.get(id) || id,
         comment: sourceTag,
-        bind_mode: 'ports',
+        bind_mode: mode,
         enabled: 0,
         updated_at: now,
       });
     }
-    const currentPorts = await db.query(`
-      SELECT p.client_id, p.switch_ip, p.if_index, p.comment
-      FROM default.net_client_ports_enabled AS p
-      INNER JOIN default.net_clients_enabled AS c ON c.client_id = p.client_id
-      WHERE c.comment = {tag:String}
-    `, { tag: sourceTag });
-    const dropPorts = portsToDisable(currentPorts, portRows, gone);
-    for (const p of dropPorts) {
-      portRows.push({
-        ...p,
-        enabled: 0,
-        updated_at: now,
-      });
+    if (mode === 'prefixes') {
+      const currentPrefixes = await db.query(`
+        SELECT p.client_id, p.prefix, p.family
+        FROM default.net_client_prefixes_enabled AS p
+        INNER JOIN default.net_clients_enabled AS c ON c.client_id = p.client_id
+        WHERE c.comment = {tag:String}
+      `, { tag: sourceTag });
+      const dropPrefixes = prefixesToDisable(currentPrefixes, prefixRows, gone);
+      for (const p of dropPrefixes) {
+        prefixRows.push({
+          ...p,
+          enabled: 0,
+          updated_at: now,
+        });
+      }
+    } else {
+      const currentPorts = await db.query(`
+        SELECT p.client_id, p.switch_ip, p.if_index, p.comment
+        FROM default.net_client_ports_enabled AS p
+        INNER JOIN default.net_clients_enabled AS c ON c.client_id = p.client_id
+        WHERE c.comment = {tag:String}
+      `, { tag: sourceTag });
+      const dropPorts = portsToDisable(currentPorts, portRows, gone);
+      for (const p of dropPorts) {
+        portRows.push({
+          ...p,
+          enabled: 0,
+          updated_at: now,
+        });
+      }
     }
     disabled = gone.length;
   }
 
   if (clientRows.length) await db.insert('net_clients', clientRows);
   if (portRows.length) await db.insert('net_client_ports', portRows);
+  if (prefixRows.length) await db.insert('net_client_prefixes', prefixRows);
 
   return {
     source: sourceTag,
@@ -314,7 +355,10 @@ async function applySync(db, {
     already: existing.size,
     pending: full ? 0 : Math.max(0, pending.length - take.length),
     upserted: take.length,
-    ports: portRows.filter((p) => p.enabled !== 0).length,
+    bindMode: mode,
+    ports: mode === 'prefixes'
+      ? prefixRows.filter((p) => p.enabled !== 0).length
+      : portRows.filter((p) => p.enabled !== 0).length,
     skipped: classified.skipped.length,
     skippedSummary: summarizeSkipped(classified.skipped),
     disableOthers: full,
@@ -362,6 +406,7 @@ async function runSync(db, options = {}) {
   };
   try {
     const settings = await getSettings(db);
+    const bindMode = normalizeBindMode(options.bindMode || settings.bindMode);
     if ((options.trigger || 'cli') === 'cron' && !settings.cronEnabled) {
       summary = {
         ...summary,
@@ -389,8 +434,8 @@ async function runSync(db, options = {}) {
     for (const category of categories) {
       const clients = options.clients && categories.length === 1
         ? options.clients
-        : await fetchErpClients({ category });
-      parts.push(await applySync(db, { ...options, clients, category }));
+        : await fetchErpClients(db, { category });
+      parts.push(await applySync(db, { ...options, clients, category, bindMode }));
     }
     summary = {
       trigger: options.trigger || 'cli',
@@ -410,6 +455,7 @@ async function runSync(db, options = {}) {
       disabled: parts.reduce((n, p) => n + p.disabled, 0),
       skippedSummary: mergeSkipped(parts.map((p) => p.skippedSummary)),
       disableOthers: !!options.full,
+      bindMode,
       parts,
     };
     await writeLog(db, startedAt, summary);
@@ -479,7 +525,7 @@ async function getStatus(db) {
     source: SOURCE_TAG,
     category: enabledCategoryIds(settings).join(',') || CATEGORY,
     running: !!running,
-    erpConfigured: !!erpConfig().token,
+    erpConfigured: !!settings.tokenSet,
     clients,
     clientsByCategory,
     ports: Number(ports[0]?.n) || 0,

@@ -58,11 +58,54 @@ test('classifyClients оставляет только активных с уни
 });
 
 test('enabledCategoryIds берёт только включённые', () => {
-  const { enabledCategoryIds } = require('./erp-piterix-settings');
+  const { enabledCategoryIds, mapSettings, resolveErpConfig } = require('./erp-piterix-settings');
   assert.deepEqual(
     enabledCategoryIds({ categories: { piter_ix: true, dc: false, bb: true } }),
     ['piter_ix', 'bb'],
   );
+  const pub = mapSettings({});
+  assert.equal(pub.apiHost, 'erp.bth.su');
+  assert.equal(pub.apiBase, 'https://195.2.241.23:8443');
+  assert.equal(pub.tokenSet, true);
+  assert.equal(pub.apiToken, undefined);
+  const cfg = resolveErpConfig(mapSettings({}, { includeToken: true }));
+  assert.equal(cfg.host, 'erp.bth.su');
+  assert.ok(cfg.token);
+});
+
+test('uniquePrefixes берёт текущий IP из ERP, историю не трогает', () => {
+  const { uniquePrefixes } = require('./erp-piterix-sync');
+  const prefixes = uniquePrefixes({
+    ips: [{ ip: '188.143.132.189', cidr: null, switch: { host: '10.72.31.15', port: 3 } }],
+    ip_history: [{ ip: '1.2.3.4', cidr: null }],
+  });
+  assert.equal(prefixes.length, 1);
+  assert.equal(prefixes[0].prefix, '188.143.132.189/32');
+  assert.equal(prefixes[0].family, 4);
+});
+
+test('classifyClients в режиме IP размечает по адресу без SNMP', () => {
+  const { classifyClients } = require('./erp-piterix-sync');
+  const { labelable, skipped } = classifyClients([
+    {
+      basic_account: 104,
+      name: 'Калинин',
+      int_status: 1,
+      block: { is_blocked: false },
+      ips: [{ ip: '188.143.132.189', cidr: null }],
+    },
+    {
+      basic_account: 113,
+      name: 'Екимова',
+      int_status: 1,
+      block: { is_blocked: false },
+      ips: [{ ip: '188.143.134.119', cidr: null }],
+    },
+  ], {}, { bindMode: 'prefixes', sourceTag: 'erp:bb' });
+  assert.equal(labelable.length, 2);
+  assert.equal(labelable[0].prefixes[0].prefix, '188.143.132.189/32');
+  assert.equal(labelable[0].comment, 'erp:bb');
+  assert.equal(skipped.length, 0);
 });
 
 test('clientsToDisable снимает только пропавших из ERP', () => {

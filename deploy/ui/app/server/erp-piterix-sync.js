@@ -1,5 +1,7 @@
 'use strict';
 
+const net = require('net');
+
 const SOURCE_TAG = 'erp:piter_ix';
 const CATEGORY = 'piter_ix';
 
@@ -28,11 +30,58 @@ function sourceTagFor(categoryId) {
 const REASON = {
   inactive: 'неактивный',
   no_port: 'есть адреса, но в ERP нет ни одного порта',
+  no_ip: 'в ERP нет текущего IP',
   no_ip_no_port: 'нет ни адреса, ни порта в ERP',
   switch_unknown: 'порт есть, этого коммутатора нет у нас',
   ifindex_unknown: 'коммутатор есть, такого ifIndex нет',
   conflict: 'конфликт: порт указан у другого ЛС',
+  conflict_prefix: 'конфликт: этот IP указан у другого ЛС',
 };
+
+function normalizeBindMode(value, fallback = 'ports') {
+  return value === 'prefixes' || value === 'ports' ? value : fallback;
+}
+
+function normalizePrefix(text) {
+  const trimmed = String(text || '').trim();
+  const slash = trimmed.indexOf('/');
+  if (slash < 0) return null;
+  const ipPart = trimmed.slice(0, slash);
+  const mask = Number(trimmed.slice(slash + 1));
+  const family = net.isIP(ipPart);
+  if (family === 4 && Number.isInteger(mask) && mask >= 0 && mask <= 32) {
+    return { prefix: `${ipPart}/${mask}`, family: 4, key: `4:${ipPart}/${mask}` };
+  }
+  if (family === 6 && Number.isInteger(mask) && mask >= 0 && mask <= 128) {
+    return { prefix: `${ipPart}/${mask}`, family: 6, key: `6:${ipPart}/${mask}` };
+  }
+  return null;
+}
+
+function prefixFromIpRow(row) {
+  if (!row || typeof row !== 'object') return null;
+  const cidr = row.cidr != null && row.cidr !== '' ? String(row.cidr).trim() : '';
+  const ip = row.ip != null ? String(row.ip).trim() : '';
+  if (cidr && cidr.includes('/')) return normalizePrefix(cidr);
+  if (cidr && net.isIP(cidr)) {
+    return prefixFromIpRow({ ip: cidr, cidr: null });
+  }
+  if (ip.includes('/')) return normalizePrefix(ip);
+  if (net.isIP(ip) === 4) return { prefix: `${ip}/32`, family: 4, key: `4:${ip}/32` };
+  if (net.isIP(ip) === 6) return { prefix: `${ip}/128`, family: 6, key: `6:${ip}/128` };
+  return null;
+}
+
+function uniquePrefixes(client) {
+  const seen = [];
+  for (const row of client.ips || []) {
+    const prefix = prefixFromIpRow(row);
+    if (!prefix) continue;
+    if (seen.some((p) => p.key === prefix.key)) continue;
+    seen.push(prefix);
+  }
+  return seen;
+}
 
 function isActive(client) {
   if (!client || (client.error && client.name == null)) return false;
@@ -63,7 +112,8 @@ function uniquePorts(client) {
   return seen;
 }
 
-function classifyClients(clients, catalog, { sourceTag = SOURCE_TAG } = {}) {
+function classifyClients(clients, catalog, { sourceTag = SOURCE_TAG, bindMode = 'ports' } = {}) {
+  const mode = normalizeBindMode(bindMode);
   const agents = catalog.agents || new Map();
   const ifaces = catalog.ifaces || new Set();
 
@@ -75,6 +125,39 @@ function classifyClients(clients, catalog, { sourceTag = SOURCE_TAG } = {}) {
       continue;
     }
     active.push(client);
+  }
+
+  if (mode === 'prefixes') {
+    const owners = new Map();
+    for (const client of active) {
+      for (const prefix of uniquePrefixes(client)) {
+        if (!owners.has(prefix.key)) owners.set(prefix.key, new Set());
+        owners.get(prefix.key).add(String(client.basic_account));
+      }
+    }
+    const labelable = [];
+    for (const client of active) {
+      const account = String(client.basic_account);
+      const prefixes = uniquePrefixes(client);
+      if (!prefixes.length) {
+        skipped.push({ account, name: client.name || '', reason: REASON.no_ip });
+        continue;
+      }
+      const good = prefixes.filter((prefix) => owners.get(prefix.key).size === 1);
+      if (!good.length) {
+        skipped.push({ account, name: client.name || '', reason: REASON.conflict_prefix });
+        continue;
+      }
+      labelable.push({
+        clientId: account,
+        displayName: String(client.name || '').trim() || `ЛС ${account}`,
+        comment: sourceTag,
+        bindMode: 'prefixes',
+        ports: [],
+        prefixes: good,
+      });
+    }
+    return { activeCount: active.length, labelable, skipped, bindMode: mode };
   }
 
   const owners = new Map();
@@ -136,11 +219,13 @@ function classifyClients(clients, catalog, { sourceTag = SOURCE_TAG } = {}) {
       clientId: account,
       displayName: String(client.name || '').trim() || `ЛС ${account}`,
       comment: sourceTag,
+      bindMode: 'ports',
       ports: good,
+      prefixes: [],
     });
   }
 
-  return { activeCount: active.length, labelable, skipped };
+  return { activeCount: active.length, labelable, skipped, bindMode: mode };
 }
 
 function clickhouseDateTime(date = new Date()) {
@@ -154,6 +239,29 @@ function portComment(port) {
 function clientsToDisable(existingIds, labelableIds) {
   const keep = new Set((labelableIds || []).map(String));
   return [...new Set((existingIds || []).map(String))].filter((id) => id && !keep.has(id));
+}
+
+function prefixesToDisable(currentPrefixes, desiredPrefixes, disabledClientIds = []) {
+  const desired = new Set(
+    (desiredPrefixes || []).map((p) => `${p.client_id}|${p.family}|${p.prefix}`),
+  );
+  const disabled = new Set((disabledClientIds || []).map(String));
+  const out = [];
+  const seen = new Set();
+  for (const p of currentPrefixes || []) {
+    const clientId = String(p.client_id || '');
+    const key = `${clientId}|${Number(p.family) || 0}|${p.prefix}`;
+    if (seen.has(key)) continue;
+    const drop = disabled.has(clientId) || (clientId && !desired.has(key));
+    if (!drop) continue;
+    seen.add(key);
+    out.push({
+      client_id: clientId,
+      prefix: String(p.prefix || ''),
+      family: Number(p.family) || 0,
+    });
+  }
+  return out;
 }
 
 function portsToDisable(currentPorts, desiredPorts, disabledClientIds = []) {
@@ -202,12 +310,16 @@ module.exports = {
   CATEGORIES,
   sourceTagFor,
   REASON,
+  normalizeBindMode,
   isActive,
   uniquePorts,
+  uniquePrefixes,
+  prefixFromIpRow,
   classifyClients,
   clickhouseDateTime,
   portComment,
   clientsToDisable,
   portsToDisable,
+  prefixesToDisable,
   summarizeSkipped,
 };
