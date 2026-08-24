@@ -1,20 +1,22 @@
 'use strict';
 
 /**
- * Per-run ERP report: one row per client×port and per client×prefix, with the
+ * Per-run ERP report: one row per client×port or client×prefix, with the
  * verdict the sync itself reached plus the data-quality findings an operator
  * needs to act on. runSync only keeps counters, so without this the detail that
  * classifyClients already computes is thrown away.
  *
- * Both sections are built on every run regardless of bindMode: an operator
- * deciding whether to switch a stand from ports to prefixes needs to see what
- * the other mode would produce.
+ * The report follows the active bindMode. Building both sections made the sheet
+ * lie: on a ports stand a client with addresses but no port came out as "нет" in
+ * one section and "да" in the other, and picked up CIDR notes that mean nothing
+ * where binding never looks at addresses.
  */
 
 const net = require('net');
 
 const {
   REASON,
+  normalizeBindMode,
   isActive,
   uniquePorts,
   uniquePrefixes,
@@ -26,9 +28,10 @@ const SECTION = {
   gone: 'пропал из ERP',
 };
 
+// Only two outcomes: either the sync created the binding or it did not. A port
+// claimed by two accounts is dropped for both, so it belongs under "нет".
 const VERDICT = {
   yes: 'да',
-  doubt: 'спорный',
   no: 'нет',
 };
 
@@ -39,31 +42,36 @@ const WIDE_MASK = { 4: 24, 6: 48 };
 // Addresses that cannot belong to a client. The PiterIX export carries dozens
 // of 0.0.0.x rows where an operator typed a VLAN or a port number into the IP
 // field, and those look like ordinary /32 until you check the range.
+// Each label names the range it came from: "зарезервированный диапазон" on its
+// own tells the operator nothing about which range or why it is a problem.
 const UNUSABLE_RANGES = [
-  ['0.0.0.0/8', 'служебный адрес, похоже на опечатку в ERP'],
-  ['127.0.0.0/8', 'loopback'],
-  ['169.254.0.0/16', 'link-local'],
-  ['224.0.0.0/4', 'multicast'],
-  ['240.0.0.0/4', 'зарезервированный диапазон'],
-  ['::1/128', 'loopback'],
-  ['fe80::/10', 'link-local'],
-  ['ff00::/8', 'multicast'],
+  ['0.0.0.0/8', 'адрес из 0.0.0.0/8, похоже на опечатку в ERP'],
+  ['127.0.0.0/8', 'loopback 127.0.0.0/8, не адрес клиента'],
+  ['169.254.0.0/16', 'link-local 169.254.0.0/16, не адрес клиента'],
+  ['224.0.0.0/4', 'multicast 224.0.0.0/4, не адрес клиента'],
+  ['240.0.0.0/4', 'диапазон 240.0.0.0/4 зарезервирован IANA и не маршрутизируется'],
+  ['::1/128', 'loopback ::1, не адрес клиента'],
+  ['fe80::/10', 'link-local fe80::/10, не адрес клиента'],
+  ['ff00::/8', 'multicast ff00::/8, не адрес клиента'],
 ];
 
 const PRIVATE_RANGES = [
-  ['10.0.0.0/8', 'приватный диапазон RFC1918'],
-  ['172.16.0.0/12', 'приватный диапазон RFC1918'],
-  ['192.168.0.0/16', 'приватный диапазон RFC1918'],
-  ['100.64.0.0/10', 'CGNAT RFC6598'],
-  ['fc00::/7', 'приватный диапазон ULA'],
+  ['10.0.0.0/8', 'приватный диапазон RFC1918 10.0.0.0/8'],
+  ['172.16.0.0/12', 'приватный диапазон RFC1918 172.16.0.0/12'],
+  ['192.168.0.0/16', 'приватный диапазон RFC1918 192.168.0.0/16'],
+  ['100.64.0.0/10', 'CGNAT RFC6598 100.64.0.0/10'],
+  ['fc00::/7', 'приватный диапазон ULA fc00::/7'],
 ];
 
-const REPORT_COLUMNS = [
+const COLUMNS_HEAD = [
   ['section', 'Раздел'],
   ['category', 'Категория'],
   ['account', 'ЛС'],
   ['client_name', 'Клиент'],
   ['services', 'Услуги'],
+];
+
+const COLUMNS_PORTS = [
   ['switch_host', 'Коммутатор (ERP host)'],
   ['inven', 'Инв. номер'],
   ['if_index', 'ifIndex'],
@@ -71,12 +79,25 @@ const REPORT_COLUMNS = [
   ['if_name', 'if_name'],
   ['if_alias', 'if_alias'],
   ['speed_mbps', 'Скорость, Мбит/с'],
+];
+
+const COLUMNS_PREFIXES = [
   ['prefix', 'Префикс'],
   ['l3_prefix', 'Наш CIDR'],
   ['l3_role', 'Роль CIDR'],
+];
+
+const COLUMNS_TAIL = [
   ['verdict', 'Можно разметить'],
   ['reason', 'Причина'],
   ['notes', 'Замечания'],
+];
+
+const REPORT_COLUMNS = [
+  ...COLUMNS_HEAD,
+  ...COLUMNS_PORTS,
+  ...COLUMNS_PREFIXES,
+  ...COLUMNS_TAIL,
 ];
 
 function ipv4ToBigInt(ip) {
@@ -236,6 +257,10 @@ function emptyRow(section, category) {
   };
 }
 
+function joinNotes(...parts) {
+  return parts.filter(Boolean).join('; ');
+}
+
 function ownersOf(active, pick) {
   const owners = new Map();
   for (const client of active) {
@@ -257,10 +282,15 @@ function buildPortRows(active, catalog, category) {
 
   for (const client of active) {
     const account = String(client.basic_account);
+    // Binding by ports never looks at addresses, so an empty address list is a
+    // note and not a cause. It still matters: it is what would block this client
+    // if the stand were switched to IP binding.
+    const noAddress = uniquePrefixes(client).length ? '' : 'в ERP нет ни одного адреса';
     const base = {
       account,
       client_name: clientName(client),
       services: formatServices(client),
+      notes: noAddress,
     };
     const ports = uniquePorts(client);
     if (!ports.length) {
@@ -268,11 +298,13 @@ function buildPortRows(active, catalog, category) {
         ...emptyRow(SECTION.ports, category),
         ...base,
         verdict: VERDICT.no,
-        reason: (client.ips || []).length ? REASON.no_port : REASON.no_ip_no_port,
+        reason: REASON.no_port,
       });
       continue;
     }
     for (const port of ports) {
+      const iface = ifaceRows.get(port.key) || {};
+      const agent = agents.get(port.switchIp) || {};
       const row = {
         ...emptyRow(SECTION.ports, category),
         ...base,
@@ -280,18 +312,21 @@ function buildPortRows(active, catalog, category) {
         inven: port.inven,
         if_index: port.ifIndex,
       };
-      const iface = ifaceRows.get(port.key) || {};
-      const agent = agents.get(port.switchIp) || {};
-      if (owners.get(port.key).size > 1) {
-        const others = [...owners.get(port.key)].filter((id) => id !== account);
+      const known = {
+        switch_name: agent.display_name || '',
+        if_name: iface.if_name || '',
+        if_alias: iface.if_alias || '',
+        speed_mbps: Math.round(Number(iface.if_speed_bps || 0) / 1e6),
+      };
+      const shared = owners.get(port.key);
+      if (shared.size > 1) {
+        const others = [...shared].filter((id) => id !== account);
         rows.push({
           ...row,
-          switch_name: agent.display_name || '',
-          if_name: iface.if_name || '',
-          if_alias: iface.if_alias || '',
-          speed_mbps: Math.round(Number(iface.if_speed_bps || 0) / 1e6),
-          verdict: VERDICT.doubt,
-          notes: `тот же порт у ЛС ${others.join(', ')}`,
+          ...known,
+          verdict: VERDICT.no,
+          reason: REASON.conflict,
+          notes: joinNotes(noAddress, `тот же порт у ЛС ${others.join(', ')}`),
         });
         continue;
       }
@@ -302,25 +337,13 @@ function buildPortRows(active, catalog, category) {
       if (!ifaces.has(port.key)) {
         rows.push({
           ...row,
-          switch_name: agent.display_name || '',
+          switch_name: known.switch_name,
           verdict: VERDICT.no,
           reason: REASON.ifindex_unknown,
         });
         continue;
       }
-      const notes = [];
-      if (agent.last_poll_status && agent.last_poll_status !== 'ok') {
-        notes.push(`SNMP коммутатора: ${agent.last_poll_status}`);
-      }
-      rows.push({
-        ...row,
-        switch_name: agent.display_name || '',
-        if_name: iface.if_name || '',
-        if_alias: iface.if_alias || '',
-        speed_mbps: Math.round(Number(iface.if_speed_bps || 0) / 1e6),
-        verdict: VERDICT.yes,
-        notes: notes.join('; '),
-      });
+      rows.push({ ...row, ...known, verdict: VERDICT.yes });
     }
   }
   return rows;
@@ -387,7 +410,7 @@ function buildPrefixRows(active, l3Index, category, { l3Known = true } = {}) {
         prefix: prefix.prefix,
         l3_prefix: covering ? covering.text : '',
         l3_role: covering ? String(covering.role || '') : '',
-        verdict: isDuplicate ? VERDICT.doubt : VERDICT.yes,
+        verdict: isDuplicate ? VERDICT.no : VERDICT.yes,
         reason: isDuplicate ? REASON.conflict_prefix : '',
         notes: notes.join('; '),
       });
@@ -414,22 +437,23 @@ function buildReportRows({
   gone = [],
   goneNames = new Map(),
   category = '',
+  bindMode = 'ports',
 } = {}) {
   const active = clients.filter(isActive);
-  const l3Known = Array.isArray(l3);
-  const l3Index = [];
-  for (const row of l3Known ? l3 : []) {
-    const parsed = parseCidr(row.prefix);
-    if (parsed) l3Index.push({ ...parsed, role: String(row.role || '') });
+  const mode = normalizeBindMode(bindMode);
+  const main = [];
+  if (mode === 'ports') {
+    main.push(...buildPortRows(active, catalog, category));
+  } else {
+    const l3Known = Array.isArray(l3);
+    const l3Index = [];
+    for (const row of l3Known ? l3 : []) {
+      const parsed = parseCidr(row.prefix);
+      if (parsed) l3Index.push({ ...parsed, role: String(row.role || '') });
+    }
+    main.push(...buildPrefixRows(active, l3Index, category, { l3Known }));
   }
-  // Without the SNMP catalogue every port would look unknown, which reads as a
-  // fleet-wide outage rather than a missing table. Drop the section instead.
-  const ports = catalog.unavailable ? [] : buildPortRows(active, catalog, category);
-  return [
-    ...ports,
-    ...buildPrefixRows(active, l3Index, category, { l3Known }),
-    ...buildGoneRows(gone, goneNames, category),
-  ];
+  return [...main, ...buildGoneRows(gone, goneNames, category)];
 }
 
 function summarizeReport(rows = []) {
@@ -437,7 +461,7 @@ function summarizeReport(rows = []) {
   const problems = {};
   for (const row of rows) {
     const section = row.section || '';
-    if (!bySection[section]) bySection[section] = { total: 0, да: 0, спорный: 0, нет: 0 };
+    if (!bySection[section]) bySection[section] = { total: 0, да: 0, нет: 0 };
     bySection[section].total += 1;
     if (row.verdict) bySection[section][row.verdict] += 1;
     for (const note of String(row.notes || '').split('; ')) {
@@ -455,14 +479,26 @@ function csvEscape(value) {
   return /[",\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
 }
 
-// ifIndex and speed are UInt32 in ClickHouse, so a row from the other section
-// carries 0 rather than null. Print those cells empty, as the sheet used to.
+// ifIndex and speed are UInt32 in ClickHouse, so a row the sync could not
+// resolve carries 0 rather than null. Print those cells empty, as the sheet did.
 const BLANK_WHEN_ZERO = new Set(['if_index', 'speed_mbps']);
 
+/** Columns of the mode the run used, read back from the rows themselves so the
+ *  CSV route does not have to know how the run was configured. */
+function reportColumns(rows = []) {
+  const ports = rows.some((row) => row.section === SECTION.ports);
+  return [
+    ...COLUMNS_HEAD,
+    ...(ports ? COLUMNS_PORTS : COLUMNS_PREFIXES),
+    ...COLUMNS_TAIL,
+  ];
+}
+
 function reportToCsv(rows = []) {
-  const lines = [REPORT_COLUMNS.map(([, label]) => csvEscape(label)).join(',')];
+  const columns = reportColumns(rows);
+  const lines = [columns.map(([, label]) => csvEscape(label)).join(',')];
   for (const row of rows) {
-    lines.push(REPORT_COLUMNS.map(([key]) => {
+    lines.push(columns.map(([key]) => {
       const value = row[key];
       if (BLANK_WHEN_ZERO.has(key) && !Number(value)) return '';
       return csvEscape(value);
@@ -475,6 +511,7 @@ module.exports = {
   SECTION,
   VERDICT,
   REPORT_COLUMNS,
+  reportColumns,
   parseCidr,
   coveringPrefix,
   findNesting,

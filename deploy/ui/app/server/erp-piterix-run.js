@@ -300,15 +300,6 @@ async function loadCatalog(db) {
   };
 }
 
-async function loadCatalogFor(db, mode) {
-  try {
-    return await loadCatalog(db);
-  } catch (err) {
-    if (mode === 'ports') throw err;
-    return { agents: new Map(), ifaces: new Set(), ifaceRows: new Map(), unavailable: true };
-  }
-}
-
 /** null when the L3 catalogue is absent, so the report can omit that check
  *  instead of claiming every client prefix is outside our networks. */
 async function loadOwnPrefixes(db) {
@@ -334,11 +325,9 @@ async function applySync(db, {
   await ensureSchema(db);
   const sourceTag = sourceTagFor(category);
   const mode = normalizeBindMode(bindMode);
-  // Loaded in both modes: the report always carries a ports section and an IP
-  // section, so an operator can see what switching bindMode would produce. In
-  // prefixes mode the catalog is report-only, and a stand without the SNMP
-  // tables must lose the ports section, not the whole run.
-  const catalog = await loadCatalogFor(db, mode);
+  const catalog = mode === 'ports'
+    ? await loadCatalog(db)
+    : { agents: new Map(), ifaces: new Set(), ifaceRows: new Map() };
   const classified = classifyClients(clients, catalog, { sourceTag, bindMode: mode });
   const existingRows = await db.query(`
     SELECT client_id
@@ -446,10 +435,11 @@ async function applySync(db, {
   const reportRows = buildReportRows({
     clients,
     catalog,
-    l3: await loadOwnPrefixes(db),
+    l3: mode === 'prefixes' ? await loadOwnPrefixes(db) : null,
     gone,
     goneNames: names,
     category,
+    bindMode: mode,
   });
 
   return {

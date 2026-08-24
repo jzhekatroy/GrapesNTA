@@ -27,11 +27,12 @@ function sourceTagFor(categoryId) {
   return `erp:${String(categoryId || CATEGORY)}`;
 }
 
+// Binding by ports only ever looks at switch.host + switch.port, so whether the
+// client also has an address changes nothing: one cause, not two.
 const REASON = {
   inactive: 'неактивный',
-  no_port: 'есть адреса, но в ERP нет ни одного порта',
+  no_port: 'в ERP нет порта коммутатора',
   no_ip: 'в ERP нет текущего IP',
-  no_ip_no_port: 'нет ни адреса, ни порта в ERP',
   switch_unknown: 'порт есть, этого коммутатора нет у нас',
   ifindex_unknown: 'коммутатор есть, такого ifIndex нет',
   conflict: 'конфликт: порт указан у другого ЛС',
@@ -171,13 +172,9 @@ function classifyClients(clients, catalog, { sourceTag = SOURCE_TAG, bindMode = 
   const labelable = [];
   for (const client of active) {
     const account = String(client.basic_account);
-    const ips = client.ips || [];
     const ports = uniquePorts(client);
     if (!ports.length) {
-      skipped.push({
-        account,
-        reason: ips.length ? REASON.no_port : REASON.no_ip_no_port,
-      });
+      skipped.push({ account, name: client.name || '', reason: REASON.no_port });
       continue;
     }
 

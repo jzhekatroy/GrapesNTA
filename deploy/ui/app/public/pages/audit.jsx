@@ -109,12 +109,26 @@ function auditResultStyle(result) {
   return { color: 'var(--fg-primary)' };
 }
 
+function normalizeClientIp(ip) {
+  const s = String(ip || '').trim();
+  if (!s) return '';
+  if (s.toLowerCase().startsWith('::ffff:')) return s.slice(7);
+  return s;
+}
+
+function auditFilterIp(raw) {
+  const s = String(raw || '').trim();
+  if (!s) return undefined;
+  if (s.includes(':')) return s;
+  return `::ffff:${s}`;
+}
+
 function auditExportFields(row, displayTimezone) {
   return {
     time: fmtAuditDateTime(row.eventAt, displayTimezone),
     actor: row.actorUsername || '',
     role: row.actorRole || '',
-    ip: row.ip || '',
+    ip: normalizeClientIp(row.ip),
     action: auditActionLabel(row),
     object: auditObjectLabel(row),
     result: auditResultLabel(row.result),
@@ -224,7 +238,7 @@ function PageAudit({ currentUser, displayTimezone }) {
       from: range.from,
       to: range.to,
       q: userQuery.trim() || undefined,
-      ip: ipQuery.trim() || undefined,
+      ip: auditFilterIp(ipQuery),
       kind: kind === 'all' ? undefined : kind,
       result: resultFilter === 'all' ? undefined : resultFilter,
     };
@@ -250,7 +264,7 @@ function PageAudit({ currentUser, displayTimezone }) {
         from: range.from,
         to: range.to,
         q: userQuery.trim() || undefined,
-        ip: ipQuery.trim() || undefined,
+        ip: auditFilterIp(ipQuery),
         kind: kind === 'all' ? undefined : kind,
         result: resultFilter === 'all' ? undefined : resultFilter,
         limit: 100,
@@ -326,7 +340,7 @@ function PageAudit({ currentUser, displayTimezone }) {
       key: 'ip',
       title: 'IP',
       width: 130,
-      render: (r) => <span className="mono">{r.ip || '—'}</span>,
+      render: (r) => <span className="mono">{normalizeClientIp(r.ip) || '—'}</span>,
     },
     {
       key: 'action',
@@ -473,7 +487,7 @@ function PageAudit({ currentUser, displayTimezone }) {
           <div className="col" style={{ gap: 12, font: 'var(--pv-text-body-3)' }}>
             <div><strong>Действие:</strong> {auditActionLabel(selected)}</div>
             <div><strong>Кто:</strong> {selected.actorUsername || '—'}{selected.actorRole ? ` (${selected.actorRole})` : ''}</div>
-            <div><strong>IP:</strong> <span className="mono">{selected.ip || '—'}</span></div>
+            <div><strong>IP:</strong> <span className="mono">{normalizeClientIp(selected.ip) || '—'}</span></div>
             <div><strong>Объект:</strong> {auditObjectLabel(selected)}</div>
             <div><strong>Результат:</strong> <span style={auditResultStyle(selected.result)}>{auditResultLabel(selected.result)}</span></div>
             {selected.path && (

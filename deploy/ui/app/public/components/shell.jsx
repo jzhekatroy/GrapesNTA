@@ -371,7 +371,7 @@ function Header({ current, onNavigate, onToggleSidebar, currentUser, onLogout, o
         <Icon name="menu" size={20} />
       </button>
       <div className="header__breadcrumb">
-        <span>{sectionLabel}</span>
+        <span className="crumb-section" title={sectionLabel}>{sectionLabel}</span>
         <span className="crumb-sep">/</span>
         <span className="crumb-cur">{meta.title}</span>
       </div>
@@ -1709,13 +1709,14 @@ function ImpersonationBanner({ cabinet, onStop, onRefreshUser }) {
   const mins = Math.floor(remainingMs / 60000);
   const secs = Math.floor((remainingMs % 60000) / 1000);
   const timerLabel = `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+  const bannerText = `Просмотр кабинета «${clientName}» · только чтение · осталось ${timerLabel}`;
 
   return (
     <div className="impersonation-banner" role="status">
       <div className="impersonation-banner__content">
         <Icon name="users" size={16} />
-        <span>
-          Просмотр кабинета «{clientName}» · только чтение · осталось {timerLabel}
+        <span className="impersonation-banner__text" title={bannerText}>
+          {bannerText}
         </span>
         {startedAt && (
           <span className="impersonation-banner__meta">
