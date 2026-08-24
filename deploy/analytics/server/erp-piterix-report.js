@@ -484,12 +484,16 @@ function csvEscape(value) {
 const BLANK_WHEN_ZERO = new Set(['if_index', 'speed_mbps']);
 
 /** Columns of the mode the run used, read back from the rows themselves so the
- *  CSV route does not have to know how the run was configured. */
+ *  CSV route does not have to know how the run was configured. Runs stored
+ *  before the report became mode-specific carry both sections and keep the
+ *  full set. */
 function reportColumns(rows = []) {
   const ports = rows.some((row) => row.section === SECTION.ports);
+  const prefixes = rows.some((row) => row.section === SECTION.prefixes);
+  if (ports && prefixes) return REPORT_COLUMNS;
   return [
     ...COLUMNS_HEAD,
-    ...(ports ? COLUMNS_PORTS : COLUMNS_PREFIXES),
+    ...(prefixes ? COLUMNS_PREFIXES : COLUMNS_PORTS),
     ...COLUMNS_TAIL,
   ];
 }
