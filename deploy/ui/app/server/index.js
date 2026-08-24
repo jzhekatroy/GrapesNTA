@@ -6,6 +6,8 @@ const path = require('path');
 const express = require('express');
 const { ping, query, getConfig } = require('./clickhouse');
 const { logApiIncoming, logApiDone, logApiError, getLogConfig } = require('./logger');
+const { runWithRequestContext, getRequestContext } = require('./request-context');
+const { recordFailedRequest, listFailedRequests } = require('./failed-requests');
 const {
   trafficBandwidthSeries,
   trafficDirectionStats,
@@ -25,7 +27,7 @@ const {
   parseChartDirectionsQuery,
   topTalkersDashboard,
   normalizeTopTalkersGroup,
-  recentFlows,
+  fetchRecentFlows,
 } = require('./queries');
 const {
   explorerFlows,
@@ -275,27 +277,40 @@ app.use(express.json({ limit: '256kb' }));
 app.use((req, res, next) => {
   if (!req.path.startsWith('/api/')) return next();
 
-  const started = Date.now();
-  const route = req.originalUrl || req.url;
-  logApiIncoming(req);
+  runWithRequestContext({ failedSql: null }, () => {
+    const started = Date.now();
+    const route = req.originalUrl || req.url;
+    logApiIncoming(req);
 
-  const sendJson = res.json.bind(res);
-  res.json = (body) => {
-    if (body?.meta) res.locals.apiMeta = body.meta;
-    if (body?.error) res.locals.apiError = body.error;
-    return sendJson(body);
-  };
+    const sendJson = res.json.bind(res);
+    res.json = (body) => {
+      if (body?.meta) res.locals.apiMeta = body.meta;
+      if (body?.error) res.locals.apiError = body.error;
+      return sendJson(body);
+    };
 
-  res.on('finish', () => {
-    const elapsedMs = Date.now() - started;
-    if (res.statusCode >= 400) {
-      logApiError(route, res.locals.apiError || `HTTP ${res.statusCode}`, elapsedMs);
-      return;
-    }
-    logApiDone(route, res.statusCode, elapsedMs, res.locals.apiMeta);
+    res.on('finish', () => {
+      const elapsedMs = Date.now() - started;
+      if (res.statusCode >= 400) {
+        logApiError(route, res.locals.apiError || `HTTP ${res.statusCode}`, elapsedMs);
+        recordFailedRequest({
+          method: req.method,
+          route,
+          query: req.query,
+          body: req.body,
+          statusCode: res.statusCode,
+          error: res.locals.apiError || `HTTP ${res.statusCode}`,
+          userId: req.user?.id,
+          elapsedMs,
+          failedSql: getRequestContext()?.failedSql,
+        });
+        return;
+      }
+      logApiDone(route, res.statusCode, elapsedMs, res.locals.apiMeta);
+    });
+
+    next();
   });
-
-  next();
 });
 
 function parseCookies(header = '') {
@@ -1007,10 +1022,9 @@ app.get('/api/dashboard/recent-flows', async (req, res) => {
         ? normalizeProtocolDirections([String(req.query.direction)])
         : undefined;
     const collectorId = parseCollectorIdQuery(req.query);
-    const result = await runNamed(
-      () => recentFlows(limit, directions, collectorId),
-      { name: 'dashboard/recent-flows' },
-    );
+    const result = await fetchRecentFlows(limit, directions, collectorId, {
+      name: 'dashboard/recent-flows',
+    });
     res.json({
       ...result,
       meta: { ...result.meta, directions, collectorId },
@@ -1399,6 +1413,17 @@ app.get('/api/diagnostics/analysis-snapshots', async (_req, res) => {
 
 app.get('/api/diagnostics/build-info', (_req, res) => {
   res.json({ data: getBuildInfo() });
+});
+
+app.get('/api/diagnostics/failed-requests', async (req, res) => {
+  try {
+    const limit = req.query.limit;
+    const offset = req.query.offset;
+    const data = listFailedRequests({ limit, offset });
+    res.json({ data });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 app.get('/api/observations/:id', async (req, res) => {

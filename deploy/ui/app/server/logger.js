@@ -114,4 +114,5 @@ module.exports = {
   logSqlDone,
   logSqlError,
   getLogConfig,
+  summarizeBody,
 };

@@ -653,6 +653,16 @@ const ApiClient = (() => {
     return body.data || body;
   }
 
+  async function loadFailedRequestsDiagnostics({ limit = 50, offset = 0 } = {}) {
+    const q = new URLSearchParams();
+    if (limit != null) q.set('limit', String(limit));
+    if (offset != null) q.set('offset', String(offset));
+    const body = await getJson(`/api/diagnostics/failed-requests?${q.toString()}`, {
+      widget: 'diagnostics/failed-requests',
+    });
+    return body.data || body;
+  }
+
   async function loadLatestBuildInfo() {
     const body = await requestJson('/api/build-info');
     return body.data || body;
@@ -2952,6 +2962,7 @@ const ApiClient = (() => {
     loadSnmpDiagnostics,
     loadBoundsDiagnostics,
     loadAnalysisSnapshotsDiagnostics,
+    loadFailedRequestsDiagnostics,
     loadBuildInfo,
     loadLatestBuildInfo,
     hardReload,

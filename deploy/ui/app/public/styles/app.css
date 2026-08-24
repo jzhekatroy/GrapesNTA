@@ -787,6 +787,13 @@ a.nav-item--active:visited { color: var(--fg-primary); }
   border-radius: 12px;
   box-shadow: var(--pv-shadow-popover);
 }
+.collector-filter__menu--portal {
+  padding: 6px;
+  background: var(--bg-surface-2);
+  border: 1px solid var(--bd-default);
+  border-radius: 12px;
+  box-shadow: var(--pv-shadow-popover);
+}
 .direction-picker-item {
   padding: 8px 10px;
   border-radius: 8px;

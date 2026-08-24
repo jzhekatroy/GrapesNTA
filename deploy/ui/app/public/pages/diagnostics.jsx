@@ -1338,6 +1338,175 @@ function AnalysisSnapshotsPanel({ data, loading, onReload }) {
   );
 }
 
+function fmtApiRequestText(item) {
+  const lines = [`${item.method} ${item.route}`];
+  if (item.query && Object.keys(item.query).length) {
+    lines.push('', 'Query:', JSON.stringify(item.query, null, 2));
+  }
+  if (item.body && Object.keys(item.body).length) {
+    lines.push('', 'Body:', JSON.stringify(item.body, null, 2));
+  }
+  return lines.join('\n');
+}
+
+function FailedRequestsPanel({ data, loading, onReload }) {
+  const [expandedId, setExpandedId] = React.useState(null);
+  const items = data?.items || [];
+  const latest = items[0] || null;
+
+  async function handleCopy(label, text) {
+    try {
+      await copyTextToClipboard(text);
+      pushToast({ kind: 'success', title: `${label} скопировано` });
+    } catch (err) {
+      pushToast({ kind: 'error', title: 'Не удалось скопировать', desc: err.message });
+    }
+  }
+
+  return (
+    <div className="col" style={{ gap: 14 }}>
+      <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
+        <div style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-secondary)', maxWidth: 760 }}>
+          Журнал неуспешных API-запросов (4xx/5xx) с SQL для анализа в ClickHouse. Хранение {data?.retentionDays ?? 3} дн. в SQLite.
+        </div>
+        <Button kind="ghost" icon="refresh" onClick={onReload} disabled={loading}>
+          {loading ? 'Обновление…' : 'Обновить'}
+        </Button>
+      </div>
+
+      <div className="row" style={{ gap: 10, flexWrap: 'wrap' }}>
+        {[
+          ['Записей', data?.total ?? '—'],
+          ['На странице', items.length || '—'],
+          ['Последняя ошибка', latest ? fmtDiagTime(latest.at) : '—'],
+        ].map(([label, value]) => (
+          <div
+            key={label}
+            style={{
+              minWidth: 140,
+              padding: '12px 14px',
+              borderRadius: 8,
+              background: 'var(--bg-secondary)',
+            }}
+          >
+            <div style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-secondary)' }}>{label}</div>
+            <div className="mono" style={{ font: 'var(--pv-text-header-3)', marginTop: 4 }}>{String(value)}</div>
+          </div>
+        ))}
+      </div>
+
+      <Card title="Упавшие запросы">
+        <table style={{ width: '100%', borderCollapse: 'collapse', font: 'var(--pv-text-body-3)' }}>
+          <thead>
+            <tr>
+              <th style={{ textAlign: 'left', padding: 6 }}>время</th>
+              <th style={{ textAlign: 'left', padding: 6 }}>метод</th>
+              <th style={{ textAlign: 'left', padding: 6 }}>маршрут</th>
+              <th style={{ textAlign: 'right', padding: 6 }}>HTTP</th>
+              <th style={{ textAlign: 'right', padding: 6 }}>мс</th>
+              <th style={{ textAlign: 'left', padding: 6 }}>ошибка</th>
+            </tr>
+          </thead>
+          <tbody>
+            {items.map((item) => (
+              <React.Fragment key={item.id}>
+                <tr
+                  onClick={() => setExpandedId((cur) => (cur === item.id ? null : item.id))}
+                  style={{ cursor: 'pointer', background: expandedId === item.id ? 'var(--surf-2)' : 'transparent' }}
+                >
+                  <td style={{ padding: 6 }} className="mono">{fmtDiagTime(item.at)}</td>
+                  <td style={{ padding: 6 }} className="mono">{item.method}</td>
+                  <td style={{ padding: 6 }} className="mono">{item.route}</td>
+                  <td style={{ padding: 6, textAlign: 'right' }} className="mono">{item.statusCode}</td>
+                  <td style={{ padding: 6, textAlign: 'right' }} className="mono">{item.elapsedMs ?? '—'}</td>
+                  <td style={{ padding: 6, color: 'var(--st-critical)' }}>
+                    {item.error?.length > 120 ? `${item.error.slice(0, 120)}…` : (item.error || '—')}
+                  </td>
+                </tr>
+                {expandedId === item.id && (
+                  <tr>
+                    <td colSpan={6} style={{ padding: '8px 6px 12px' }}>
+                      <div className="col" style={{ gap: 12 }}>
+                        <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
+                          <Button kind="ghost" onClick={() => handleCopy('API-запрос', fmtApiRequestText(item))}>
+                            Копировать API
+                          </Button>
+                          {item.sql?.inlined && (
+                            <Button kind="ghost" onClick={() => handleCopy('SQL', item.sql.inlined)}>
+                              Копировать SQL
+                            </Button>
+                          )}
+                        </div>
+
+                        <div>
+                          <div style={{ font: 'var(--pv-text-body-3-bold)', marginBottom: 6 }}>API</div>
+                          <pre style={{
+                            margin: 0,
+                            padding: 10,
+                            borderRadius: 8,
+                            background: 'var(--surf-1)',
+                            border: '1px solid var(--bd-soft)',
+                            whiteSpace: 'pre-wrap',
+                            wordBreak: 'break-word',
+                            font: 'var(--pv-text-body-3)',
+                            maxHeight: 240,
+                            overflow: 'auto',
+                          }}>
+                            {fmtApiRequestText(item)}
+                          </pre>
+                        </div>
+
+                        {item.sql && (
+                          <div>
+                            <div style={{ font: 'var(--pv-text-body-3-bold)', marginBottom: 6 }}>
+                              SQL {item.sql.name ? `· ${item.sql.name}` : ''}
+                            </div>
+                            <pre style={{
+                              margin: 0,
+                              padding: 10,
+                              borderRadius: 8,
+                              background: 'var(--surf-1)',
+                              border: '1px solid var(--bd-soft)',
+                              whiteSpace: 'pre-wrap',
+                              wordBreak: 'break-word',
+                              font: 'var(--pv-text-body-3)',
+                              maxHeight: 360,
+                              overflow: 'auto',
+                            }}>
+                              {item.sql.inlined || item.sql.template}
+                              {'\n\n-- template\n'}
+                              {item.sql.template}
+                              {'\n\n-- params\n'}
+                              {JSON.stringify(item.sql.params || {}, null, 2)}
+                            </pre>
+                          </div>
+                        )}
+                      </div>
+                    </td>
+                  </tr>
+                )}
+              </React.Fragment>
+            ))}
+            {!loading && !items.length && (
+              <tr>
+                <td colSpan={6} style={{ padding: 8, color: 'var(--fg-secondary)' }}>
+                  Упавших запросов пока нет.
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </Card>
+
+      {data?.checkedAt && (
+        <div style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-muted)' }}>
+          Проверено: <span className="mono">{fmtDiagTime(data.checkedAt)}</span>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function PageDiagnostics() {
   const [tab, setTab] = useState(() => sessionStorage.getItem('grapes-diagnostics-tab') || 'worker');
   const [workerData, setWorkerData] = useState(null);
@@ -1345,6 +1514,7 @@ function PageDiagnostics() {
   const [snmpData, setSnmpData] = useState(null);
   const [boundsData, setBoundsData] = useState(null);
   const [snapshotsData, setSnapshotsData] = useState(null);
+  const [failuresData, setFailuresData] = useState(null);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(true);
   const [buildInfo, setBuildInfo] = useState(null);
@@ -1375,13 +1545,16 @@ function PageDiagnostics() {
           ? ApiClient.loadBoundsDiagnostics()
           : tab === 'snapshots'
             ? ApiClient.loadAnalysisSnapshotsDiagnostics()
-            : ApiClient.loadWorkerDiagnostics();
+            : tab === 'failures'
+              ? ApiClient.loadFailedRequestsDiagnostics()
+              : ApiClient.loadWorkerDiagnostics();
     loader
       .then((body) => {
         if (tab === 'enrichment') setEnrichData(body);
         else if (tab === 'snmp') setSnmpData(body);
         else if (tab === 'bounds') setBoundsData(body);
         else if (tab === 'snapshots') setSnapshotsData(body);
+        else if (tab === 'failures') setFailuresData(body);
         else setWorkerData(body);
         setError('');
         setLoading(false);
@@ -1404,7 +1577,7 @@ function PageDiagnostics() {
         <div>
           <h1 style={{ margin: 0, font: 'var(--pv-text-header-1)' }}>Диагностика</h1>
           <div style={{ color: 'var(--fg-secondary)', font: 'var(--pv-text-body-3)', marginTop: 4 }}>
-            Статус периодических сервисов, синхронизация ERP и ссылки на результаты анализа.
+            Статус периодических сервисов, журнал ошибок API, синхронизация ERP и ссылки на результаты анализа.
           </div>
         </div>
         <div className="seg">
@@ -1442,6 +1615,13 @@ function PageDiagnostics() {
             onClick={() => setTab('snapshots')}
           >
             Ссылки анализа
+          </button>
+          <button
+            type="button"
+            className={tab === 'failures' ? 'seg__item seg__item--active' : 'seg__item'}
+            onClick={() => setTab('failures')}
+          >
+            Ошибки запросов
           </button>
           <button
             type="button"
@@ -1490,6 +1670,13 @@ function PageDiagnostics() {
       {tab === 'snapshots' && (
         <AnalysisSnapshotsPanel
           data={snapshotsData}
+          loading={loading}
+          onReload={() => reload({ initial: false })}
+        />
+      )}
+      {tab === 'failures' && (
+        <FailedRequestsPanel
+          data={failuresData}
           loading={loading}
           onReload={() => reload({ initial: false })}
         />

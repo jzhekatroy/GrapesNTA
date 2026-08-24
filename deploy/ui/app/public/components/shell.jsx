@@ -1102,8 +1102,6 @@ function DirectionFilter({ directions, onDirectionsChange, embedded = false, for
   const allEnabled = enabledCount === TRAFFIC_DIRECTIONS.length;
   const summary = (formatSummary || directionSummaryLabel)(directions);
 
-  useCloseOnOutsideClick(!embedded && open, setOpen, rootRef);
-
   const toggleDirection = (id) => {
     onDirectionsChange({ ...directions, [id]: !directions[id] });
   };
@@ -1127,22 +1125,22 @@ function DirectionFilter({ directions, onDirectionsChange, embedded = false, for
   };
 
   useLayoutEffect(() => {
-    if (!embedded || !open) {
+    if (!open) {
       setMenuStyle(null);
       return undefined;
     }
-    const anchor = addRef.current;
+    const anchor = embedded ? addRef.current : rootRef.current;
     if (!anchor) return undefined;
     const updatePosition = () => {
       const rect = anchor.getBoundingClientRect();
-      const width = 248;
+      const width = embedded ? 248 : Math.max(rect.width, 248);
       setMenuStyle({
         position: 'fixed',
         top: rect.bottom + 6,
         left: Math.max(8, rect.left),
         width,
         maxHeight: 360,
-        zIndex: 1200,
+        zIndex: 1300,
         overflowY: 'auto',
       });
     };
@@ -1156,17 +1154,22 @@ function DirectionFilter({ directions, onDirectionsChange, embedded = false, for
   }, [embedded, open]);
 
   useEffect(() => {
-    if (!embedded || !open) return undefined;
+    if (!open) return undefined;
     const onPointerDown = (e) => {
-      if (menuRef.current?.contains(e.target) || addRef.current?.contains(e.target)) return;
+      if (rootRef.current?.contains(e.target) || menuRef.current?.contains(e.target)) return;
       setOpen(false);
     };
     document.addEventListener('mousedown', onPointerDown);
     return () => document.removeEventListener('mousedown', onPointerDown);
-  }, [embedded, open]);
+  }, [open]);
 
-  const headerMenu = open ? (
-    <div className="direction-filter__menu" role="menu">
+  const headerMenu = open && menuStyle && !embedded ? ReactDOM.createPortal(
+    <div
+      ref={menuRef}
+      className="direction-filter__menu direction-filter__menu--portal"
+      style={menuStyle}
+      role="menu"
+    >
       <div className="time-filter__heading">
         <span>Направления</span>
         <button
@@ -1193,7 +1196,8 @@ function DirectionFilter({ directions, onDirectionsChange, embedded = false, for
           );
         })}
       </div>
-    </div>
+    </div>,
+    document.body,
   ) : null;
 
   const embeddedMenu = open && menuStyle ? ReactDOM.createPortal(
@@ -1309,9 +1313,11 @@ function DirectionFilter({ directions, onDirectionsChange, embedded = false, for
 
 function CollectorFilter({ collectorFilter, onCollectorFilterChange, embedded = false }) {
   const [open, setOpen] = useState(false);
+  const [menuStyle, setMenuStyle] = useState(null);
   const [collectors, setCollectors] = useState([]);
   const [locations, setLocations] = useState([]);
   const rootRef = useRef(null);
+  const menuRef = useRef(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -1323,7 +1329,43 @@ function CollectorFilter({ collectorFilter, onCollectorFilterChange, embedded = 
     return () => { cancelled = true; };
   }, []);
 
-  useCloseOnOutsideClick(open, setOpen, rootRef);
+  useLayoutEffect(() => {
+    if (embedded || !open) {
+      setMenuStyle(null);
+      return undefined;
+    }
+    const anchor = rootRef.current;
+    if (!anchor) return undefined;
+    const updatePosition = () => {
+      const rect = anchor.getBoundingClientRect();
+      setMenuStyle({
+        position: 'fixed',
+        top: rect.bottom + 6,
+        left: Math.max(8, rect.right - Math.max(rect.width, 248)),
+        width: Math.max(rect.width, 248),
+        maxHeight: 360,
+        zIndex: 1300,
+        overflowY: 'auto',
+      });
+    };
+    updatePosition();
+    window.addEventListener('resize', updatePosition);
+    window.addEventListener('scroll', updatePosition, true);
+    return () => {
+      window.removeEventListener('resize', updatePosition);
+      window.removeEventListener('scroll', updatePosition, true);
+    };
+  }, [embedded, open]);
+
+  useEffect(() => {
+    if (!open) return undefined;
+    const onPointerDown = (e) => {
+      if (rootRef.current?.contains(e.target) || menuRef.current?.contains(e.target)) return;
+      setOpen(false);
+    };
+    document.addEventListener('mousedown', onPointerDown);
+    return () => document.removeEventListener('mousedown', onPointerDown);
+  }, [open]);
 
   const selected = useMemo(() => new Set(collectorFilter || []), [collectorFilter]);
   const grouped = useMemo(
@@ -1335,6 +1377,54 @@ function CollectorFilter({ collectorFilter, onCollectorFilterChange, embedded = 
   const applySelection = (nextItems) => {
     onCollectorFilterChange(nextItems);
   };
+
+  const menuBody = (
+    <>
+      <button
+        type="button"
+        role="menuitemcheckbox"
+        aria-checked={!collectorFilter?.length}
+        className={`time-filter__option ${!collectorFilter?.length ? 'is-active' : ''}`}
+        onClick={() => applySelection([])}
+      >
+        <input type="checkbox" checked={!collectorFilter?.length} readOnly tabIndex={-1} />
+        Все коллекторы
+      </button>
+      {grouped.map((group) => {
+        const locationSelected = isLocationSelected(selected, group);
+        return (
+          <div key={group.locationId} className="collector-filter__group">
+            <button
+              type="button"
+              role="menuitemcheckbox"
+              aria-checked={locationSelected}
+              className={`collector-filter__location ${locationSelected ? 'is-active' : ''}`}
+              onClick={() => applySelection(toggleLocationSelection(selected, group))}
+            >
+              <input type="checkbox" checked={locationSelected} readOnly tabIndex={-1} />
+              <span>{group.locationName}</span>
+            </button>
+            {group.collectors.map((item) => {
+              const collectorChecked = isCollectorSelected(selected, group, item);
+              return (
+                <button
+                  key={item.collectorId}
+                  type="button"
+                  role="menuitemcheckbox"
+                  aria-checked={collectorChecked}
+                  className={`time-filter__option time-filter__option--nested time-filter__option--collector ${collectorChecked ? 'is-active' : ''}`}
+                  onClick={() => applySelection(toggleCollectorSelection(selected, group, item))}
+                >
+                  <input type="checkbox" checked={collectorChecked} readOnly tabIndex={-1} />
+                  {item.collectorName}
+                </button>
+              );
+            })}
+          </div>
+        );
+      })}
+    </>
+  );
 
   return (
     <div className={`collector-filter${embedded ? ' collector-filter--embedded' : ''}`} ref={rootRef}>
@@ -1361,52 +1451,21 @@ function CollectorFilter({ collectorFilter, onCollectorFilterChange, embedded = 
         </span>
         <Icon name="chevD" size={embedded ? 12 : 14} />
       </button>
-      {open && (
+      {embedded && open && (
         <div className="collector-filter__menu" role="menu">
-          <button
-            type="button"
-            role="menuitemcheckbox"
-            aria-checked={!collectorFilter?.length}
-            className={`time-filter__option ${!collectorFilter?.length ? 'is-active' : ''}`}
-            onClick={() => applySelection([])}
-          >
-            <input type="checkbox" checked={!collectorFilter?.length} readOnly tabIndex={-1} />
-            Все коллекторы
-          </button>
-          {grouped.map((group) => {
-            const locationSelected = isLocationSelected(selected, group);
-            return (
-              <div key={group.locationId} className="collector-filter__group">
-                <button
-                  type="button"
-                  role="menuitemcheckbox"
-                  aria-checked={locationSelected}
-                  className={`collector-filter__location ${locationSelected ? 'is-active' : ''}`}
-                  onClick={() => applySelection(toggleLocationSelection(selected, group))}
-                >
-                  <input type="checkbox" checked={locationSelected} readOnly tabIndex={-1} />
-                  <span>{group.locationName}</span>
-                </button>
-                {group.collectors.map((item) => {
-                  const collectorChecked = isCollectorSelected(selected, group, item);
-                  return (
-                    <button
-                      key={item.collectorId}
-                      type="button"
-                      role="menuitemcheckbox"
-                      aria-checked={collectorChecked}
-                      className={`time-filter__option time-filter__option--nested time-filter__option--collector ${collectorChecked ? 'is-active' : ''}`}
-                      onClick={() => applySelection(toggleCollectorSelection(selected, group, item))}
-                    >
-                      <input type="checkbox" checked={collectorChecked} readOnly tabIndex={-1} />
-                      {item.collectorName}
-                    </button>
-                  );
-                })}
-              </div>
-            );
-          })}
+          {menuBody}
         </div>
+      )}
+      {!embedded && open && menuStyle && ReactDOM.createPortal(
+        <div
+          ref={menuRef}
+          className="collector-filter__menu collector-filter__menu--portal"
+          style={menuStyle}
+          role="menu"
+        >
+          {menuBody}
+        </div>,
+        document.body,
       )}
     </div>
   );

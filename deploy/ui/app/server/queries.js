@@ -1594,8 +1594,11 @@ function topTalkersDashboard({
 function flowIpExpr(ipCol) {
   const etype = flowCol('etype');
   if (!etype) return `IPv6NumToString(${ipCol})`;
+  const etypeRef = ipCol.includes('.')
+    ? `${ipCol.split('.')[0]}.${etype}`
+    : etype;
   return `if(
-        ${etype} = 2048,
+        ${etypeRef} = 2048,
         toString(toIPv4(reinterpretAsUInt32(reverse(substring(${ipCol}, 1, 4))))),
         IPv6NumToString(${ipCol})
       )`;
@@ -1721,7 +1724,7 @@ function geoCountryExpr(ipExpr, etypeExpr = null) {
   return `nullIf(nullIf(${country}, ''), '??')`;
 }
 
-const RECENT_FLOWS_LOOKBACK_MINUTES = 10;
+const RECENT_FLOWS_LOOKBACK_MINUTES = 1;
 
 function protoLabelSql(expr) {
   return `multiIf(
@@ -1758,7 +1761,7 @@ function explorerWindowSeconds({ range = '24h', from, to } = {}) {
   return secondsByRange[range] || 3600;
 }
 
-/** Recent flow records from flows_raw (ASN joins optional; zero ASN still shown). */
+/** Recent flow records from flows_raw (enrichment via fetchRecentFlows). */
 function recentFlows(limit = 20, directions, collectorId) {
   const collectorScope = parseCollectorScopes(collectorId);
   const t = col('time');
@@ -1773,23 +1776,13 @@ function recentFlows(limit = 20, directions, collectorId) {
   const dstAsn = col('dstAsn');
   const directionCol = flowCol('direction');
   const sourceIdCol = flowCol('sourceId');
-  const etypeCol = flowCol('etype');
-  const etypeExpr = etypeCol ? `f.${etypeCol}` : null;
   const dirs = normalizeProtocolDirections(directions);
   const dirsSql = protocolDirectionsInSql(dirs);
-  const psView = portServicesExpandedViewRef();
-  const asnNames = asnNamesTableRef();
-  const asnRegistry = asnRegistryEnrichedTableRef();
-  const transportSql = flowTransportSql(`f.${proto}`);
   const lim = Math.min(Math.max(Number(limit) || 20, 1), 200);
   const perSourceLimit = collectorScope.length ? lim : lim;
   const recentLimitSql = collectorScope.length || !sourceIdCol
     ? 'LIMIT {limit:UInt32}'
     : `LIMIT {per_source_limit:UInt32} BY f.${sourceIdCol}`;
-  const sourceRankPartitionSql = sourceIdCol ? 'limited.source_id' : '1';
-  const finalOrderSql = collectorScope.length || !sourceIdCol
-    ? 'f.ts DESC'
-    : 'f.source_rank ASC, f.ts DESC';
   const recentInnerOrderSql = collectorScope.length || !sourceIdCol
     ? `f.${t} DESC`
     : `f.${sourceIdCol} ASC, f.${t} DESC`;
@@ -1800,22 +1793,6 @@ function recentFlows(limit = 20, directions, collectorId) {
           FROM ${sourcesTableRef()}
           WHERE ${sourceScope}
         )`;
-  const anchorWhere = [];
-  if (directionCol) anchorWhere.push(`f.${directionCol} IN (${dirsSql})`);
-  if (sourceIdCol) {
-    anchorWhere.push(`f.${sourceIdCol} IN (SELECT source_id FROM enabled_sources)`);
-  }
-  const anchorWhereSql = anchorWhere.length ? `WHERE ${anchorWhere.join(' AND ')}` : '';
-  const latestCtes = `${enabledSourcesCte},
-        latest_anchor AS (
-          SELECT max(f.${t}) AS ts_to
-          FROM ${flowsRawTableRef()} AS f
-          PREWHERE f.date >= today() - 1
-          ${anchorWhereSql}
-        ),
-        (SELECT ts_to FROM latest_anchor) - INTERVAL ${RECENT_FLOWS_LOOKBACK_MINUTES} MINUTE AS ts_floor,
-        (SELECT ts_to FROM latest_anchor) AS ts_to`;
-  const latestTimeFilterSql = `AND f.${t} <= ts_to`;
 
   const innerSelectCols = [
     `f.${t} AS ts`,
@@ -1828,8 +1805,6 @@ function recentFlows(limit = 20, directions, collectorId) {
     `f.${proto} AS proto`,
     `f.${srcAsn} AS src_asn`,
     `f.${dstAsn} AS dst_asn`,
-    `${geoCountryExpr(`f.${srcIp}`, etypeExpr)} AS src_geo_country`,
-    `${geoCountryExpr(`f.${dstIp}`, etypeExpr)} AS dst_geo_country`,
     flowColSelect('srcLabel', 'src_label', 'f'),
     flowColSelect('dstLabel', 'dst_label', 'f'),
     flowColSelect('srcEndpointScope', 'src_endpoint_scope', 'f'),
@@ -1843,50 +1818,14 @@ function recentFlows(limit = 20, directions, collectorId) {
     `f.${packets} AS packets`,
   ].filter(Boolean);
 
-  const selectCols = [
-    'f.ts',
-    ...(sourceIdCol ? ['f.source_id'] : []),
-    ...(directionCol ? ['f.direction'] : []),
-    'f.src_ip',
-    'f.dst_ip',
-    'f.src_port',
-    'f.dst_port',
-    'f.proto',
-    'f.src_asn',
-    'f.dst_asn',
-    'f.src_geo_country',
-    'f.dst_geo_country',
-    ...(flowCol('srcLabel') ? ['f.src_label'] : []),
-    ...(flowCol('dstLabel') ? ['f.dst_label'] : []),
-    ...(flowCol('srcEndpointScope') ? ['f.src_endpoint_scope'] : []),
-    ...(flowCol('dstEndpointScope') ? ['f.dst_endpoint_scope'] : []),
-    ...(flowCol('srcNetworkName') ? ['f.src_network_name'] : []),
-    ...(flowCol('dstNetworkName') ? ['f.dst_network_name'] : []),
-    ...(flowCol('srcVlan') ? ['f.src_vlan'] : []),
-    ...(flowCol('dstVlan') ? ['f.dst_vlan'] : []),
-    ...(flowCol('vlanId') ? ['f.vlan_id'] : []),
-    'f.bytes',
-    'f.packets',
-    'ps.service_code AS dst_service_code',
-    'ps.service_name AS dst_service_name',
-    'ps.category AS dst_service_category',
-    `${asnDisplayNameSql('src_name.name', 'src_as.name', 'f.src_asn')} AS src_as_name`,
-    `${asnDisplayNameSql('dst_name.name', 'dst_as.name', 'f.dst_asn')} AS dst_as_name`,
-    'src_as.cc AS src_as_country',
-    'dst_as.cc AS dst_as_country',
-  ];
-
   const prewhereClauses = [
-    'f.date >= toDate(ts_floor) - 1',
-    `f.${t} >= ts_floor`,
+    'f.date >= today()',
+    `f.${t} >= now() - INTERVAL ${RECENT_FLOWS_LOOKBACK_MINUTES} MINUTE`,
   ];
   const whereClauses = [];
   if (directionCol) whereClauses.push(`f.${directionCol} IN (${dirsSql})`);
   if (sourceIdCol) {
-    whereClauses.push(`f.${sourceIdCol} IN (
-      SELECT source_id FROM ${sourcesTableRef()}
-      WHERE ${sourceScope}
-    )`);
+    whereClauses.push(`f.${sourceIdCol} IN (SELECT source_id FROM enabled_sources)`);
   }
   const innerWhere = whereClauses.length ? `WHERE ${whereClauses.join(' AND ')}` : '';
   const params = mergeCollectorParams({ limit: lim, per_source_limit: perSourceLimit }, collectorScope);
@@ -1894,81 +1833,160 @@ function recentFlows(limit = 20, directions, collectorId) {
   return {
     sql: `
       WITH
-        ${latestCtes}
+        ${enabledSourcesCte}
       SELECT
-        ${selectCols.join(',\n        ')}
+        recent.*
       FROM (
         SELECT
-          limited.*,
-          row_number() OVER (PARTITION BY ${sourceRankPartitionSql} ORDER BY limited.ts DESC) AS source_rank
-        FROM (
-          SELECT
-            ${innerSelectCols.join(',\n            ')}
-          FROM ${flowsRawTableRef()} AS f
-          PREWHERE ${prewhereClauses.join(' AND ')}
-          ${innerWhere}
-            ${latestTimeFilterSql}
-          ORDER BY ${recentInnerOrderSql}
-          ${recentLimitSql}
-        ) AS limited
-      ) AS f
-      LEFT JOIN ${psView} AS ps
-        ON ps.transport = ${transportSql}
-        AND ps.port = f.dst_port
-      LEFT JOIN ${asnNames} AS src_name
-        ON src_name.asn = f.src_asn AND f.src_asn > 0
-      LEFT JOIN ${asnNames} AS dst_name
-        ON dst_name.asn = f.dst_asn AND f.dst_asn > 0
-      LEFT JOIN ${asnRegistry} AS src_as
-        ON src_as.asn = f.src_asn AND f.src_asn > 0
-      LEFT JOIN ${asnRegistry} AS dst_as
-        ON dst_as.asn = f.dst_asn AND f.dst_asn > 0
-      ORDER BY ${finalOrderSql}
+          ${innerSelectCols.join(',\n          ')}
+        FROM ${flowsRawTableRef()} AS f
+        PREWHERE ${prewhereClauses.join(' AND ')}
+        ${innerWhere}
+        ORDER BY ${recentInnerOrderSql}
+        ${recentLimitSql}
+      ) AS recent
+      ORDER BY recent.ts DESC
       LIMIT {limit:UInt32}
     `,
     params,
-    map(rows) {
-      return rows.map((r) => {
-        const srcIpVal = String(r.src_ip || '');
-        const dstIpVal = String(r.dst_ip || '');
-        const srcPortVal = r.src_port;
-        const dstPortVal = r.dst_port;
-        return {
-          ts: formatFlowTimestamp(r.ts),
-          src: `${srcIpVal}:${srcPortVal}`,
-          dst: `${dstIpVal}:${dstPortVal}`,
-          srcIp: srcIpVal,
-          dstIp: dstIpVal,
-          srcPort: srcPortVal,
-          dstPort: dstPortVal,
-          srcLabel: String(r.src_label || '').trim(),
-          dstLabel: String(r.dst_label || '').trim(),
-          proto: protoLabel(r.proto),
-          bytes: Number(r.bytes) || 0,
-          pkts: Number(r.packets) || 0,
-          dur: '—',
-          asn: formatFlowAsnPair(r.src_asn, r.dst_asn),
-          srcAsn: Number(r.src_asn) || 0,
-          dstAsn: Number(r.dst_asn) || 0,
-          srcAsName: String(r.src_as_name || '').trim(),
-          dstAsName: String(r.dst_as_name || '').trim(),
-          srcCountry: cleanCountryCode(r.src_geo_country) || cleanCountryCode(r.src_as_country),
-          dstCountry: cleanCountryCode(r.dst_geo_country) || cleanCountryCode(r.dst_as_country),
-          srcVlan: Number(r.src_vlan) || 0,
-          dstVlan: Number(r.dst_vlan) || 0,
-          vlanId: Number(r.vlan_id) || 0,
-          direction: r.direction || '',
-          sourceId: r.source_id || '',
-          srcScope: r.src_endpoint_scope || '',
-          dstScope: r.dst_endpoint_scope || '',
-          srcNetworkName: r.src_network_name || '',
-          dstNetworkName: r.dst_network_name || '',
-          dstServiceCode: String(r.dst_service_code || ''),
-          dstServiceName: String(r.dst_service_name || ''),
-          dstServiceCategory: String(r.dst_service_category || ''),
-        };
-      });
+    map: mapRecentFlowRows,
+  };
+}
+
+function flowTransportFromProto(proto) {
+  const n = Number(proto);
+  if (n === 6) return 'tcp';
+  if (n === 17) return 'udp';
+  if (n === 132) return 'sctp';
+  if (n === 1) return 'icmp';
+  if (n === 58) return 'icmpv6';
+  return '';
+}
+
+function mapRecentFlowRows(rows) {
+  return rows.map(mapRecentFlowRow);
+}
+
+function mapRecentFlowRow(r, enrich = {}) {
+  const srcIpVal = String(r.src_ip || '');
+  const dstIpVal = String(r.dst_ip || '');
+  const srcPortVal = r.src_port;
+  const dstPortVal = r.dst_port;
+  const srcAsn = Number(r.src_asn) || 0;
+  const dstAsn = Number(r.dst_asn) || 0;
+  const transport = flowTransportFromProto(r.proto);
+  const portService = enrich.portServices?.get(`${transport}:${dstPortVal}`) || {};
+  return {
+    ts: formatFlowTimestamp(r.ts),
+    src: `${srcIpVal}:${srcPortVal}`,
+    dst: `${dstIpVal}:${dstPortVal}`,
+    srcIp: srcIpVal,
+    dstIp: dstIpVal,
+    srcPort: srcPortVal,
+    dstPort: dstPortVal,
+    srcLabel: String(r.src_label || '').trim(),
+    dstLabel: String(r.dst_label || '').trim(),
+    proto: protoLabel(r.proto),
+    bytes: Number(r.bytes) || 0,
+    pkts: Number(r.packets) || 0,
+    dur: '—',
+    asn: formatFlowAsnPair(srcAsn, dstAsn),
+    srcAsn,
+    dstAsn,
+    srcAsName: enrich.asnNames?.get(srcAsn) || enrich.asnRegistry?.get(srcAsn)?.name || '',
+    dstAsName: enrich.asnNames?.get(dstAsn) || enrich.asnRegistry?.get(dstAsn)?.name || '',
+    srcCountry: cleanCountryCode(r.src_geo_country) || cleanCountryCode(enrich.asnRegistry?.get(srcAsn)?.cc),
+    dstCountry: cleanCountryCode(r.dst_geo_country) || cleanCountryCode(enrich.asnRegistry?.get(dstAsn)?.cc),
+    srcVlan: Number(r.src_vlan) || 0,
+    dstVlan: Number(r.dst_vlan) || 0,
+    vlanId: Number(r.vlan_id) || 0,
+    direction: r.direction || '',
+    sourceId: r.source_id || '',
+    srcScope: r.src_endpoint_scope || '',
+    dstScope: r.dst_endpoint_scope || '',
+    srcNetworkName: r.src_network_name || '',
+    dstNetworkName: r.dst_network_name || '',
+    dstServiceCode: String(portService.service_code || ''),
+    dstServiceName: String(portService.service_name || ''),
+    dstServiceCategory: String(portService.category || ''),
+  };
+}
+
+async function loadRecentFlowEnrichment(rows, queryFn, { name = 'dashboard/recent-flows' } = {}) {
+  const runQuery = queryFn || require('./clickhouse').query;
+  if (!rows.length) {
+    return { asnNames: new Map(), asnRegistry: new Map(), portServices: new Map() };
+  }
+
+  const asns = [...new Set(rows.flatMap((row) => [
+    Number(row.src_asn) || 0,
+    Number(row.dst_asn) || 0,
+  ]).filter((asn) => asn > 0))];
+
+  const portClauses = [];
+  const seenPorts = new Set();
+  for (const row of rows) {
+    const transport = flowTransportFromProto(row.proto);
+    const port = Number(row.dst_port);
+    if (!transport || !Number.isFinite(port)) continue;
+    const key = `${transport}:${port}`;
+    if (seenPorts.has(key)) continue;
+    seenPorts.add(key);
+    portClauses.push(`(ps.transport = '${transport}' AND ps.port = ${port})`);
+  }
+
+  const [asnNameResult, asnRegistryResult, portServiceResult] = await Promise.all([
+    asns.length
+      ? runQuery(
+        `SELECT asn, name FROM ${asnNamesTableRef()} WHERE asn IN {asns:Array(UInt32)}`,
+        { asns },
+        { name: `${name}/asn-names` },
+      )
+      : { rows: [] },
+    asns.length
+      ? runQuery(
+        `SELECT asn, name, cc FROM ${asnRegistryEnrichedTableRef()} WHERE asn IN {asns:Array(UInt32)}`,
+        { asns },
+        { name: `${name}/asn-registry` },
+      )
+      : { rows: [] },
+    portClauses.length
+      ? runQuery(
+        `SELECT ps.transport, ps.port, ps.service_code, ps.service_name, ps.category
+         FROM ${portServicesExpandedViewRef()} AS ps
+         WHERE ${portClauses.join(' OR ')}`,
+        {},
+        { name: `${name}/port-services` },
+      )
+      : { rows: [] },
+  ]);
+
+  const asnNames = new Map(asnNameResult.rows.map((row) => [Number(row.asn), String(row.name || '').trim()]));
+  const asnRegistry = new Map(asnRegistryResult.rows.map((row) => [Number(row.asn), {
+    name: String(row.name || '').trim(),
+    cc: cleanCountryCode(row.cc),
+  }]));
+  const portServices = new Map(portServiceResult.rows.map((row) => [
+    `${String(row.transport)}:${Number(row.port)}`,
+    {
+      service_code: String(row.service_code || ''),
+      service_name: String(row.service_name || ''),
+      category: String(row.category || ''),
     },
+  ]));
+
+  return { asnNames, asnRegistry, portServices };
+}
+
+async function fetchRecentFlows(limit = 20, directions, collectorId, { name = 'dashboard/recent-flows', queryFn } = {}) {
+  const runQuery = queryFn || require('./clickhouse').query;
+  const spec = recentFlows(limit, directions, collectorId);
+  const started = Date.now();
+  const { rows, elapsedMs } = await runQuery(spec.sql, spec.params || {}, { name });
+  const enrich = await loadRecentFlowEnrichment(rows, runQuery, { name });
+  return {
+    data: rows.map((row) => mapRecentFlowRow(row, enrich)),
+    meta: { elapsedMs: Date.now() - started, rows: rows.length, queryMs: elapsedMs },
   };
 }
 
@@ -2487,6 +2505,7 @@ module.exports = {
   resolveTalkersGranularity,
   normalizeTopTalkersGroup,
   recentFlows,
+  fetchRecentFlows,
   resolveTrafficWindow,
   probeTrafficWindowBounds,
   anchoredNowSql,

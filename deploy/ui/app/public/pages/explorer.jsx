@@ -3358,6 +3358,7 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
     groupBy: appliedGroupBy,
   }), [visibleResults, summary, meta, appliedMetric, appliedGroupBy]);
   const othersChartAvailable = Boolean(othersRow);
+  const isRefreshingData = refreshing;
   const appliedThresholds = activeQuery?.thresholds || [];
   const thresholdEmptyState = hasAppliedQuery
     && source !== 'loading'
@@ -3382,7 +3383,6 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
   const activeVisMeta = VIS_TYPES.find((v) => v.id === vis) || VIS_TYPES[0];
 
   const idleState = !hasAppliedQuery && source !== 'loading';
-  const isRefreshingData = refreshing;
 
   return (
     <div className="main__container" style={{ maxWidth: 1820, padding: 0 }}>

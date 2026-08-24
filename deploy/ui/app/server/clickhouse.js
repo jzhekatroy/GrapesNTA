@@ -1,5 +1,7 @@
 const { createClient } = require('@clickhouse/client');
 const { logVerbose, logSqlStart, logSqlDone, logSqlError } = require('./logger');
+const { setFailedSql } = require('./request-context');
+const { inlineClickHouseParams } = require('./clickhouse-sql-inline');
 
 function env(name, fallback = '') {
   return process.env[name] ?? fallback;
@@ -586,6 +588,14 @@ async function query(sql, params = {}, options = {}) {
   } catch (err) {
     const elapsedMs = Date.now() - started;
     logSqlError(name, err, elapsedMs);
+    setFailedSql({
+      name,
+      sql,
+      params,
+      error: err?.message || String(err),
+      elapsedMs,
+      sqlInlined: inlineClickHouseParams(sql, params),
+    });
     throw err;
   } finally {
     if (ephemeralClient) {
@@ -609,6 +619,14 @@ async function executeCommand(sql, params = {}, options = {}) {
   } catch (err) {
     const elapsedMs = Date.now() - started;
     logSqlError(name, err, elapsedMs);
+    setFailedSql({
+      name,
+      sql,
+      params,
+      error: err?.message || String(err),
+      elapsedMs,
+      sqlInlined: inlineClickHouseParams(sql, params),
+    });
     throw err;
   }
 }
