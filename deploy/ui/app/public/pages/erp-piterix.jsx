@@ -301,6 +301,13 @@ function PageErpPiterix() {
                   обновлено {last.upserted}, снято {last.disabled}, пропущено {last.skipped}
                 </div>
               )}
+              {journal[0]?.reportRows > 0 && (
+                <div>
+                  <a href={ApiClient.erpPiterixReportUrl(journal[0].run_id)} download>
+                    Скачать отчёт (CSV, {journal[0].reportRows} строк)
+                  </a>
+                </div>
+              )}
             </div>
           )}
         </Card>
@@ -350,6 +357,16 @@ function PageErpPiterix() {
         </Card>
       )}
 
+      <Card title="Что в отчёте">
+        <div className="col" style={{ gap: 4, font: 'var(--pv-text-body-3)' }}>
+          <div>Отчёт пишется при каждом прогоне, включая ночной, и хранится 90 дней.</div>
+          <div>Строка — это клиент и один его порт либо один префикс. Разделы «порты» и «IP» считаются всегда, независимо от выбранного способа разметки, поэтому видно, что дал бы второй режим.</div>
+          <div>«Можно разметить»: да — привязка однозначная; спорный — тот же порт или префикс есть у другого ЛС; нет — привязать не к чему, смотри «Причина».</div>
+          <div>«Замечания» — то, что разметке не мешает, но требует решения: префикс вне наших CIDR, широкая маска, вложенность в чужой префикс, роль remote, SNMP коммутатора не отвечает.</div>
+          <div>Раздел «пропал из ERP» — клиенты, которых полный прогон отключил.</div>
+        </div>
+      </Card>
+
       <Card title="Журнал прогонов">
         <table style={{ width: '100%', borderCollapse: 'collapse', font: 'var(--pv-text-body-3)' }}>
           <thead>
@@ -361,12 +378,13 @@ function PageErpPiterix() {
               <th style={{ textAlign: 'right', padding: '6px 8px' }}>Обновлено</th>
               <th style={{ textAlign: 'right', padding: '6px 8px' }}>Снято</th>
               <th style={{ textAlign: 'left', padding: '6px 8px' }}>Итог</th>
+              <th style={{ textAlign: 'left', padding: '6px 8px' }}>Отчёт</th>
             </tr>
           </thead>
           <tbody>
             {journal.length === 0 ? (
               <tr>
-                <td colSpan="7" style={{ padding: 8, color: 'var(--fg-secondary)' }}>Записей нет</td>
+                <td colSpan="8" style={{ padding: 8, color: 'var(--fg-secondary)' }}>Записей нет</td>
               </tr>
             ) : journal.map((row) => (
               <tr key={row.run_id}>
@@ -378,6 +396,15 @@ function PageErpPiterix() {
                 <td style={{ padding: '6px 8px', textAlign: 'right' }}>{row.disabled}</td>
                 <td style={{ padding: '6px 8px', color: row.error ? 'var(--st-critical)' : undefined }}>
                   {row.error || 'ок'}
+                </td>
+                <td style={{ padding: '6px 8px' }}>
+                  {row.reportRows > 0 ? (
+                    <a href={ApiClient.erpPiterixReportUrl(row.run_id)} download>
+                      CSV, {row.reportRows} строк
+                    </a>
+                  ) : (
+                    <span style={{ color: 'var(--fg-secondary)' }}>—</span>
+                  )}
                 </td>
               </tr>
             ))}

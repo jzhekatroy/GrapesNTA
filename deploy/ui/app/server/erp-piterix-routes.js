@@ -9,6 +9,8 @@ const {
   listJournal,
   getSettings,
   saveSettings,
+  getReport,
+  reportToCsv,
 } = require('./erp-piterix-run');
 
 function sendError(res, err) {
@@ -47,6 +49,22 @@ function createErpPiterixRouter() {
   router.get('/journal', async (req, res) => {
     try {
       res.json({ data: await listJournal(db, req.query.limit) });
+    } catch (err) {
+      sendError(res, err);
+    }
+  });
+
+  router.get('/runs/:runId/report.csv', async (req, res) => {
+    try {
+      const rows = await getReport(db, req.params.runId);
+      if (!rows.length) {
+        res.status(404).json({ error: 'Отчёт за этот прогон не найден' });
+        return;
+      }
+      const stamp = String(req.params.runId).slice(0, 8);
+      res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+      res.setHeader('Content-Disposition', `attachment; filename="erp-piterix-report-${stamp}.csv"`);
+      res.send(`\uFEFF${reportToCsv(rows)}`);
     } catch (err) {
       sendError(res, err);
     }

@@ -36,8 +36,10 @@ const {
   enabledCategoryIds,
   resolveErpConfig,
 } = require('./erp-piterix-settings');
+const { buildReportRows, summarizeReport, reportToCsv } = require('./erp-piterix-report');
 
 const LOG_TABLE = 'erp_piterix_sync_log';
+const REPORT_TABLE = 'erp_piterix_report_rows';
 const ENSURE_SQL = [
   `CREATE TABLE IF NOT EXISTS default.net_clients
   (
@@ -93,6 +95,33 @@ const ENSURE_SQL = [
   ENGINE = MergeTree
   ORDER BY (started_at, run_id)
   TTL started_at + toIntervalDay(180)`,
+  `CREATE TABLE IF NOT EXISTS default.${REPORT_TABLE}
+  (
+    run_id String,
+    started_at DateTime,
+    section LowCardinality(String),
+    category LowCardinality(String),
+    account String,
+    client_name String,
+    services String,
+    switch_host String,
+    inven String,
+    if_index UInt32,
+    switch_name String,
+    if_name String,
+    if_alias String,
+    speed_mbps UInt32,
+    prefix String,
+    l3_prefix String,
+    l3_role LowCardinality(String),
+    verdict LowCardinality(String),
+    reason String,
+    notes String
+  )
+  ENGINE = MergeTree
+  PARTITION BY toYYYYMM(started_at)
+  ORDER BY (run_id, section, account)
+  TTL started_at + toIntervalDay(90)`,
 ];
 
 const FIELD_MAP = [
@@ -261,7 +290,7 @@ async function loadCatalog(db) {
     FROM default.net_snmp_agents_current
   `);
   const ifaceRowsRaw = await db.query(`
-    SELECT switch_ip, if_index, if_name, if_alias
+    SELECT switch_ip, if_index, if_name, if_alias, if_speed_bps
     FROM default.net_interfaces_current
   `);
   return {
@@ -269,6 +298,28 @@ async function loadCatalog(db) {
     ifaces: new Set(ifaceRowsRaw.map((r) => `${r.switch_ip}:${Number(r.if_index)}`)),
     ifaceRows: new Map(ifaceRowsRaw.map((r) => [`${r.switch_ip}:${Number(r.if_index)}`, r])),
   };
+}
+
+async function loadCatalogFor(db, mode) {
+  try {
+    return await loadCatalog(db);
+  } catch (err) {
+    if (mode === 'ports') throw err;
+    return { agents: new Map(), ifaces: new Set(), ifaceRows: new Map(), unavailable: true };
+  }
+}
+
+/** null when the L3 catalogue is absent, so the report can omit that check
+ *  instead of claiming every client prefix is outside our networks. */
+async function loadOwnPrefixes(db) {
+  try {
+    return await db.query(`
+      SELECT prefix, family, role
+      FROM default.net_l3_prefixes_enabled
+    `);
+  } catch {
+    return null;
+  }
 }
 
 async function applySync(db, {
@@ -283,7 +334,11 @@ async function applySync(db, {
   await ensureSchema(db);
   const sourceTag = sourceTagFor(category);
   const mode = normalizeBindMode(bindMode);
-  const catalog = mode === 'ports' ? await loadCatalog(db) : { agents: new Map(), ifaces: new Set(), ifaceRows: new Map() };
+  // Loaded in both modes: the report always carries a ports section and an IP
+  // section, so an operator can see what switching bindMode would produce. In
+  // prefixes mode the catalog is report-only, and a stand without the SNMP
+  // tables must lose the ports section, not the whole run.
+  const catalog = await loadCatalogFor(db, mode);
   const classified = classifyClients(clients, catalog, { sourceTag, bindMode: mode });
   const existingRows = await db.query(`
     SELECT client_id
@@ -331,9 +386,11 @@ async function applySync(db, {
   }
 
   let disabled = 0;
+  let gone = [];
+  let names = new Map();
   if (full) {
-    const gone = clientsToDisable([...existing], take.map((c) => c.clientId));
-    const names = new Map((await db.query(`
+    gone = clientsToDisable([...existing], take.map((c) => c.clientId));
+    names = new Map((await db.query(`
       SELECT client_id, display_name
       FROM default.net_clients_enabled
       WHERE comment = {tag:String}
@@ -386,7 +443,17 @@ async function applySync(db, {
   if (portRows.length) await db.insert('net_client_ports', portRows);
   if (prefixRows.length) await db.insert('net_client_prefixes', prefixRows);
 
+  const reportRows = buildReportRows({
+    clients,
+    catalog,
+    l3: await loadOwnPrefixes(db),
+    gone,
+    goneNames: names,
+    category,
+  });
+
   return {
+    reportRows,
     source: sourceTag,
     category,
     full,
@@ -410,10 +477,20 @@ async function applySync(db, {
   };
 }
 
-async function writeLog(db, startedAt, summary, error = '') {
+async function writeReport(db, runId, startedAt, rows) {
+  if (!rows.length) return;
+  const startedAtText = clickhouseDateTime(startedAt);
+  await db.insert(REPORT_TABLE, rows.map((row) => ({
+    ...row,
+    run_id: runId,
+    started_at: startedAtText,
+  })));
+}
+
+async function writeLog(db, runId, startedAt, summary, error = '') {
   const finished = new Date();
   await db.insert(LOG_TABLE, [{
-    run_id: crypto.randomUUID(),
+    run_id: runId,
     started_at: clickhouseDateTime(startedAt),
     finished_at: clickhouseDateTime(finished),
     trigger: summary.trigger || 'cli',
@@ -440,7 +517,9 @@ async function runSync(db, options = {}) {
   }
   running = true;
   const startedAt = new Date();
+  const runId = crypto.randomUUID();
   let summary = {
+    run_id: runId,
     trigger: options.trigger || 'cli',
     actor: options.actor || '',
     full: !!options.full,
@@ -461,7 +540,7 @@ async function runSync(db, options = {}) {
         disabled: 0,
         skippedSummary: { byReason: { 'cron выключен в настройках': 1 } },
       };
-      await writeLog(db, startedAt, summary);
+      await writeLog(db, runId, startedAt, summary);
       return summary;
     }
     const categories = options.category
@@ -473,6 +552,7 @@ async function runSync(db, options = {}) {
       throw err;
     }
     const parts = [];
+    const reportRows = [];
     for (const category of categories) {
       const clients = options.clients && categories.length === 1
         ? options.clients
@@ -481,9 +561,18 @@ async function runSync(db, options = {}) {
           full: !!options.full,
           fetchCap: options.full ? 0 : Math.max(Number(options.limit) || 50, 2) * 20,
         });
-      parts.push(await applySync(db, { ...options, clients, category, bindMode }));
+      // Report rows stay out of the part summary: it is serialised into the API
+      // response and the journal, and a full run carries tens of thousands.
+      const { reportRows: partRows = [], ...part } = await applySync(db, {
+        ...options, clients, category, bindMode,
+      });
+      reportRows.push(...partRows);
+      parts.push(part);
     }
+    await writeReport(db, runId, startedAt, reportRows);
     summary = {
+      run_id: runId,
+      report: summarizeReport(reportRows),
       trigger: options.trigger || 'cli',
       actor: options.actor || '',
       full: !!options.full,
@@ -504,12 +593,12 @@ async function runSync(db, options = {}) {
       bindMode,
       parts,
     };
-    await writeLog(db, startedAt, summary);
+    await writeLog(db, runId, startedAt, summary);
     return summary;
   } catch (err) {
     try {
       await ensureSchema(db);
-      await writeLog(db, startedAt, summary, err.message || String(err));
+      await writeLog(db, runId, startedAt, summary, err.message || String(err));
     } catch {
       // journal is secondary to the original error
     }
@@ -591,16 +680,41 @@ async function listJournal(db, limit = 30) {
     ORDER BY started_at DESC
     LIMIT {limit:UInt32}
   `, { limit: Math.min(Math.max(Number(limit) || 30, 1), 100) });
+  const counts = new Map();
+  if (rows.length) {
+    const countRows = await db.query(`
+      SELECT run_id, count() AS n
+      FROM default.${REPORT_TABLE}
+      WHERE run_id IN ({runIds:Array(String)})
+      GROUP BY run_id
+    `, { runIds: rows.map((r) => String(r.run_id)) });
+    for (const row of countRows) counts.set(String(row.run_id), Number(row.n) || 0);
+  }
   return rows.map((row) => {
     let skippedSummary = {};
     try { skippedSummary = JSON.parse(row.skipped_json || '{}'); } catch { /* ignore */ }
-    return { ...row, skippedSummary };
+    return { ...row, skippedSummary, reportRows: counts.get(String(row.run_id)) || 0 };
   });
+}
+
+async function getReport(db, runId) {
+  await ensureSchema(db);
+  return db.query(`
+    SELECT section, category, account, client_name, services,
+           switch_host, inven, if_index, switch_name, if_name, if_alias, speed_mbps,
+           prefix, l3_prefix, l3_role, verdict, reason, notes
+    FROM default.${REPORT_TABLE}
+    WHERE run_id = {runId:String}
+    ORDER BY section, account, prefix, switch_host, if_index
+  `, { runId: String(runId || '') });
 }
 
 module.exports = {
   LOG_TABLE,
+  REPORT_TABLE,
   FIELD_MAP,
+  getReport,
+  reportToCsv,
   ENSURE_SQL,
   erpConfig,
   erpRequestHeaders,

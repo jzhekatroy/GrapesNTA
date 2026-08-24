@@ -761,6 +761,10 @@ const ApiClient = (() => {
     return body.data;
   }
 
+  function erpPiterixReportUrl(runId) {
+    return `/api/erp-piterix/runs/${encodeURIComponent(runId)}/report.csv`;
+  }
+
   function countryQuery({ timeRange = '24h', customPeriod, directions, basis = 'ip', mapSide = 'remote', sourceIds, collectorFilter } = {}) {
     const params = new URLSearchParams();
     appendCustomPeriodParams(params, timeRange, customPeriod);
@@ -2969,6 +2973,7 @@ const ApiClient = (() => {
     loadErpPiterixJournal,
     saveErpPiterixSettings,
     runErpPiterixSync,
+    erpPiterixReportUrl,
     dashboardOtherPorts,
     dashboardCountries,
     loadCountries,
