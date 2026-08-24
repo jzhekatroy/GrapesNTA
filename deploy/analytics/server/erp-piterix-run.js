@@ -155,6 +155,13 @@ function erpRequestHeaders(cfg, urlString) {
   return headers;
 }
 
+// ERP does not report a total, so the only correct stop condition is an empty
+// next_after. The bound below guards against a stuck cursor, not against volume:
+// it used to be a flat 15000 rows, which a full run hit silently and then handed
+// the truncated set to disableOthers — every client past the cap would have been
+// switched off. Now exhausting it fails the run instead.
+const MAX_CLIENTS = Math.min(Math.max(Number(process.env.ERP_API_MAX_CLIENTS) || 200000, 1000), 2000000);
+
 async function fetchErpClients(db, { category = CATEGORY, full = false, fetchCap = 0 } = {}) {
   const cfg = resolveErpConfig(await getSettings(db, { includeToken: true }));
   if (!cfg.token) throw new Error('Нет токена ERP');
@@ -162,8 +169,9 @@ async function fetchErpClients(db, { category = CATEGORY, full = false, fetchCap
   let after = '';
   let pageLimit = full ? cfg.pageLimit : Math.min(cfg.pageLimit, 20);
   const maxPages = full
-    ? Math.max(80, Math.ceil(15000 / Math.min(pageLimit, 20)))
+    ? Math.ceil(MAX_CLIENTS / 20) + 10
     : Math.max(8, Math.ceil((fetchCap || 40) / pageLimit) + 2);
+  let complete = false;
   for (let page = 0; page < maxPages; page += 1) {
     const qs = new URLSearchParams({ limit: String(pageLimit) });
     if (after) qs.set('after', after);
@@ -184,10 +192,24 @@ async function fetchErpClients(db, { category = CATEGORY, full = false, fetchCap
     }
     const rows = Array.isArray(payload?.data) ? payload.data : [];
     clients.push(...rows);
-    const next = payload?.next_after ?? payload?.meta?.next_after ?? '';
-    if (!next || !rows.length) break;
-    if (fetchCap && clients.length >= fetchCap) break;
-    after = String(next);
+    const next = String(payload?.next_after ?? payload?.meta?.next_after ?? '');
+    if (!next || !rows.length) {
+      complete = true;
+      break;
+    }
+    // Only a partial peek asks for a cap, and it never disables anything.
+    if (fetchCap && clients.length >= fetchCap) {
+      complete = true;
+      break;
+    }
+    if (next === after) {
+      throw new Error(`ERP повторил курсор after=${next}: выгрузка «${category}» зациклилась на ${clients.length} клиентах`);
+    }
+    if (clients.length >= MAX_CLIENTS) break;
+    after = next;
+  }
+  if (full && !complete) {
+    throw new Error(`Выгрузка ERP «${category}» оборвалась на ${clients.length} клиентах, ERP отдаёт ещё. Поднимите ERP_API_MAX_CLIENTS (сейчас ${MAX_CLIENTS}).`);
   }
   return clients;
 }
