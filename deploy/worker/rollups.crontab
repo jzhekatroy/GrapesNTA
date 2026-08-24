@@ -3,3 +3,7 @@
 
 # ASN talkers / pairs — every 5 minutes (matches traffic-talkers-rollups.timer).
 */5 * * * * flock -n /tmp/traffic-talkers.lock /app/bin/cron-traffic-talkers.sh
+
+# ERP PiterIX full sync — nightly (replaces host erp-piterix-sync.timer).
+# Container TZ is Europe/Moscow, so this is 03:15 MSK as the UI promises.
+15 3 * * * flock -n /tmp/erp-piterix-sync.lock /app/bin/cron-erp-sync.sh

@@ -18,6 +18,7 @@ RUN apt-get update \
     python3 \
     ca-certificates \
     curl \
+    tzdata \
     util-linux \
   && curl -fsSL -o /usr/local/bin/supercronic \
     https://github.com/aptible/supercronic/releases/download/v0.2.33/supercronic-linux-amd64 \
@@ -31,6 +32,8 @@ RUN groupadd --gid 1001 app \
 COPY --from=deps /app/analytics/node_modules /app/analytics/node_modules
 COPY deploy/analytics/package.json /app/analytics/
 COPY deploy/analytics/server /app/analytics/server
+# CLI must sit next to analytics/server so require('../server/erp-piterix-run') resolves.
+COPY deploy/analytics/scripts /app/analytics/scripts
 COPY scripts/traffic_rollup_async.py scripts/traffic_rollup_jobs.py /app/scripts/
 COPY deploy/worker/bin /app/bin
 COPY deploy/worker/rollups.crontab /etc/grapesnta/rollups.crontab

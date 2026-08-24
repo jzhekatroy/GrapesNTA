@@ -141,6 +141,29 @@ if [[ -d "${WORKER_DEST}" ]]; then
     || die "worker analytics snapshot has missing require() siblings"
 fi
 
+# CLI entrypoints the worker crontab calls (ERP nightly sync). They live one
+# level above analytics/server in the image so their require('../server/…')
+# resolves against the snapshot refreshed just above.
+WORKER_SCRIPTS="${REPO_ROOT}/deploy/analytics/scripts"
+if [[ -d "${WORKER_SCRIPTS}" ]]; then
+  log "sync worker CLI → ${WORKER_SCRIPTS}/"
+  for dst in "${WORKER_SCRIPTS}"/*.js; do
+    [[ -e "${dst}" ]] || continue
+    name="$(basename "${dst}")"
+    src="${SRC}/scripts/${name}"
+    [[ -f "${src}" ]] || die "worker CLI has no NTAdmin counterpart: scripts/${name}"
+    cp "${src}" "${dst}"
+    while IFS= read -r req; do
+      [[ -f "${WORKER_DEST}/${req}.js" ]] \
+        || die "worker CLI ${name} requires server/${req}.js, missing from snapshot"
+    done < <(
+      sed -nE "s|.*require\(['\"]\.\./server/([^'\"]+)['\"]\).*|\1|p" "${dst}" \
+        | sed 's/\.js$//' \
+        | sort -u
+    )
+  done
+fi
+
 log "done → ${DEST}"
 log "SOURCE.txt:"
 cat "${SOURCE_TXT}"

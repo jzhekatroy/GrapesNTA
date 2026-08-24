@@ -5,8 +5,10 @@ Docker service for **periodic CH aggregates** (minute-scale):
 - Observations rollup + scheduled reports (Node, long-running)
 - Traffic dashboard/direction/… rollups (Python, every minute)
 - ASN talkers/pairs rollups (Python, every 5 minutes)
+- ERP PiterIX client sync (Node, nightly at 03:15)
 
-Replaces host `grapes-analytics` + `traffic-rollups.timer` + `traffic-talkers-rollups.timer`.
+Replaces host `grapes-analytics` + `traffic-rollups.timer` + `traffic-talkers-rollups.timer`
++ `erp-piterix-sync.timer`.
 
 Enrichment (geo/bgp/asn-names) lives in [`../enrichment/`](../enrichment/).
 
@@ -77,12 +79,40 @@ cron wrapper. This exists because supercronic holds a flock for the whole tick,
 so a single unbounded query used to block every later tick until someone
 restarted the container.
 
+## ERP PiterIX nightly sync
+
+`bin/cron-erp-sync.sh` runs the same code as the UI's «Прогон» button
+(`analytics/server/erp-piterix-run.js`), just with `trigger=cron`. Consequences
+worth knowing:
+
+- The on/off switch and the API token stay in `default.app_erp_sync_settings`,
+  edited in the UI. `.env` needs nothing; toggling the checkbox takes effect the
+  next night without a restart, and a disabled night is written to
+  `erp_piterix_sync_log` as `skipped`.
+- Writes go in as `CLICKHOUSE_WRITE_USER` (`ui_admin`), which already holds
+  INSERT on `default.*`.
+- Schedule is local time, so the container sets `TZ=${WORKER_TZ:-Europe/Moscow}`.
+  With an unset TZ the crontab would fire at 06:15 MSK.
+- There is no catch-up. If the container was down at 03:15 the run is lost and
+  the next one is the following night; trigger it by hand from the UI, or:
+
+```bash
+docker exec grapes-worker /app/bin/cron-erp-sync.sh
+clickhouse-client -q "SELECT started_at, trigger, status, fetched, active FROM default.erp_piterix_sync_log ORDER BY started_at DESC LIMIT 5 FORMAT PrettyCompact"
+```
+
 ## Cutover from host timers
 
 Host timers are archived in [`attic/systemd/`](../../attic/systemd/). A new
 stand should never enable them: this container is the only rollup writer.
 
 Do **not** run two observation workers or two rollup timers against the same CH.
+Same for ERP: if a stand still has the host unit, disable it before deploying
+this image, otherwise both write `net_clients` on the same night.
+
+```bash
+systemctl disable --now erp-piterix-sync.timer 2>/dev/null || true
+```
 
 ## Rollback
 

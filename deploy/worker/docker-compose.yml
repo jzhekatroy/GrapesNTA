@@ -17,6 +17,10 @@ services:
         required: true
     restart: always
     network_mode: host
+    # supercronic reads the crontab in local time; the ERP entry is written as
+    # 03:15 MSK, so an unset TZ (= UTC) would fire it at 06:15 MSK.
+    environment:
+      TZ: ${WORKER_TZ:-Europe/Moscow}
     volumes:
       - ${WORKER_DATA_DIR:-./data}:/app/analytics/server/data
       - ${WORKER_LOG_DIR:-./logs}:/var/log/grapesnta
