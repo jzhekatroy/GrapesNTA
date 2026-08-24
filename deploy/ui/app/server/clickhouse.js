@@ -95,6 +95,8 @@ const config = {
   bmpRouteEventsTable: env('CLICKHOUSE_BMP_ROUTE_EVENTS_TABLE', 'bmp_route_events'),
   l3PrefixesTable: env('CLICKHOUSE_L3_PREFIXES_TABLE', 'net_l3_prefixes'),
   l3PrefixesView: env('CLICKHOUSE_L3_PREFIXES_VIEW', 'net_l3_prefixes_enabled'),
+  clientsView: env('CLICKHOUSE_CLIENTS_VIEW', 'net_clients_enabled'),
+  clientPortsView: env('CLICKHOUSE_CLIENT_PORTS_VIEW', 'net_client_ports_enabled'),
   flowExclusionsTable: env('CLICKHOUSE_FLOW_EXCLUSIONS_TABLE', 'net_flow_exclusions'),
   flowExclusionsView: env('CLICKHOUSE_FLOW_EXCLUSIONS_VIEW', 'net_flow_exclusions_enabled'),
   l2VlansTable: env('CLICKHOUSE_L2_VLANS_TABLE', 'net_l2_vlans'),
@@ -443,6 +445,14 @@ function l3PrefixesViewRef() {
   return `${qIdent(config.database)}.${qIdent(config.l3PrefixesView)}`;
 }
 
+function clientsViewRef() {
+  return `${qIdent(config.database)}.${qIdent(config.clientsView)}`;
+}
+
+function clientPortsViewRef() {
+  return `${qIdent(config.database)}.${qIdent(config.clientPortsView)}`;
+}
+
 function flowExclusionsTableRef() {
   return `${qIdent(config.database)}.${qIdent(config.flowExclusionsTable)}`;
 }
@@ -782,6 +792,8 @@ module.exports = {
   dnsResolversViewRef,
   l3PrefixesTableRef,
   l3PrefixesViewRef,
+  clientsViewRef,
+  clientPortsViewRef,
   flowExclusionsTableRef,
   flowExclusionsViewRef,
   l2VlansTableRef,

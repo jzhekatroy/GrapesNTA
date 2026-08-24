@@ -20,6 +20,7 @@ const IR_CONNECTIVITY_LABELS = {
 
 const IR_SOURCE_LABELS = {
   manual: 'Вручную',
+  client: 'Из биллинга',
   rule: 'Правило',
   default: 'По умолчанию',
 };

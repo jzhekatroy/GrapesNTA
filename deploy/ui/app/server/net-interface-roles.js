@@ -11,6 +11,8 @@ const {
   interfaceRolesViewRef,
   interfaceRolesEffectiveTableRef,
   interfaceRolesEffectiveViewRef,
+  clientsViewRef,
+  clientPortsViewRef,
 } = require('./clickhouse');
 
 /**
@@ -265,25 +267,53 @@ function ruleValueSql(rules, ifAlias, field, { returnRuleId = false } = {}) {
 }
 
 /**
- * Итоговые выражения: ручной override важнее правил, затем значение
- * по умолчанию из настроек.
+ * Порты, на которых висит включённый клиент. Клиента заводит биллинг (или
+ * оператор руками), а порт клиента — это всегда наша сторона сети, поэтому
+ * сторону можно не размечать вручную. Подзапрос сворачивает порт в одну строку:
+ * при историческом конфликте на порту могло остаться два ЛС, а размножать
+ * строки интерфейсов из-за этого нельзя.
  */
-function effectiveSqlParts(rules, _settings, { ifAlias = 'i', overrideAlias = 'o' } = {}) {
+function clientPortsJoinSql(ifAlias = 'i', clientAlias = 'cp') {
+  return `LEFT JOIN
+      (
+        SELECT p.switch_ip AS switch_ip, p.if_index AS if_index, any(p.client_id) AS client_id
+        FROM ${clientPortsViewRef()} AS p
+        INNER JOIN ${clientsViewRef()} AS c ON c.client_id = p.client_id
+        GROUP BY p.switch_ip, p.if_index
+      ) AS ${clientAlias}
+        ON ${clientAlias}.switch_ip = ${ifAlias}.switch_ip
+       AND ${clientAlias}.if_index = ${ifAlias}.if_index`;
+}
+
+/**
+ * Итоговые выражения: ручной override важнее всего, затем клиент из биллинга,
+ * затем правила. Биллинг выше правил намеренно: это факт по конкретному порту,
+ * а правило — широкий шаблон по алиасу или скорости, который иначе перекрыл бы
+ * тысячи клиентских портов разом.
+ */
+function effectiveSqlParts(rules, _settings, {
+  ifAlias = 'i',
+  overrideAlias = 'o',
+  clientAlias = 'cp',
+} = {}) {
   const ruleBoundary = ruleValueSql(rules, ifAlias, 'boundary');
   const ruleBoundaryId = ruleValueSql(rules, ifAlias, 'boundary', { returnRuleId: true });
   const ruleConnectivity = ruleValueSql(rules, ifAlias, 'connectivity');
   const ruleConnectivityId = ruleValueSql(rules, ifAlias, 'connectivity', { returnRuleId: true });
   const manualBoundary = `${overrideAlias}.boundary`;
   const manualConnectivity = `${overrideAlias}.connectivity`;
+  const clientPort = `${clientAlias}.client_id != ''`;
 
   return {
     boundary: `multiIf(${manualBoundary} != '', ${manualBoundary},
+      ${clientPort}, 'internal',
       ${ruleBoundary} != '', ${ruleBoundary},
       '')`,
     boundarySource: `multiIf(${manualBoundary} != '', 'manual',
+      ${clientPort}, 'client',
       ${ruleBoundary} != '', 'rule',
       'default')`,
-    boundaryRuleId: `if(${manualBoundary} != '', '', ${ruleBoundaryId})`,
+    boundaryRuleId: `if(${manualBoundary} != '' OR ${clientPort}, '', ${ruleBoundaryId})`,
     connectivity: `if(${manualConnectivity} != '', ${manualConnectivity}, ${ruleConnectivity})`,
     connectivitySource: `multiIf(${manualConnectivity} != '', 'manual',
       ${ruleConnectivity} != '', 'rule',
@@ -502,6 +532,7 @@ async function listInterfaceRoles(switchIp) {
         o.boundary AS manual_boundary,
         o.connectivity AS manual_connectivity,
         o.comment AS manual_comment,
+        cp.client_id AS client_id,
         ${parts.boundary} AS boundary,
         ${parts.boundarySource} AS boundary_source,
         ${parts.boundaryRuleId} AS boundary_rule_id,
@@ -511,6 +542,7 @@ async function listInterfaceRoles(switchIp) {
       FROM ${netInterfacesCurrentRef()} AS i
       LEFT JOIN ${interfaceRolesViewRef()} AS o
         ON o.switch_ip = i.switch_ip AND o.if_index = i.if_index
+      ${clientPortsJoinSql('i', 'cp')}
       WHERE i.switch_ip = {switch_ip:String}
       ORDER BY i.if_index
     `,
@@ -522,6 +554,7 @@ async function listInterfaceRoles(switchIp) {
         ifAlias: String(r.if_alias ?? ''),
         ifDescr: String(r.if_descr ?? ''),
         speedMbps: Number(r.speed_mbps) || 0,
+        clientId: String(r.client_id ?? ''),
         boundary: normalizeBoundary(r.boundary),
         boundarySource: String(r.boundary_source ?? 'default'),
         boundaryRuleId: String(r.boundary_rule_id ?? ''),
@@ -632,6 +665,7 @@ async function materializeEffectiveRoles() {
       FROM ${netInterfacesCurrentRef()} AS i
       LEFT JOIN ${interfaceRolesViewRef()} AS o
         ON o.switch_ip = i.switch_ip AND o.if_index = i.if_index
+      ${clientPortsJoinSql('i', 'cp')}
     `,
     {},
     { name: 'refs/interface-roles-materialize' },

@@ -237,6 +237,22 @@ function SwitchPortsScreen({
         );
       },
     },
+    {
+      key: 'boundarySource',
+      title: 'Откуда',
+      width: 140,
+      render: (r) => {
+        if (r.boundarySource === 'client') {
+          return (
+            <span title={r.clientId ? `ЛС ${r.clientId}` : ''}>
+              <Badge tone="info">{irSourceLabel('client')}</Badge>
+            </span>
+          );
+        }
+        if (r.boundarySource === 'default') return '—';
+        return <Badge tone="neutral">{irSourceLabel(r.boundarySource)}</Badge>;
+      },
+    },
   ];
 
   const bulkPanel = canWrite && (
