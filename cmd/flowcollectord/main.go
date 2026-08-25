@@ -1,4 +1,4 @@
-// flowcollectord — UDP flow collector (sFlow v5 MVP; NetFlow/IPFIX later).
+// flowcollectord — UDP flow collector (sFlow v5, NetFlow v9).
 package main
 
 import (
@@ -16,16 +16,20 @@ func main() {
 	cfg := loadConfig()
 	log := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
-	if !cfg.SFlowEnabled {
-		log.Error("no listeners enabled (set -sflow-enabled or FC_SFLOW_ENABLED=1)")
+	if !cfg.SFlowEnabled && !cfg.NetFlowEnabled {
+		log.Error("no listeners enabled (set FC_SFLOW_ENABLED and/or FC_NETFLOW_ENABLED)")
 		os.Exit(1)
 	}
 	if cfg.CHDSN == "" {
 		log.Error("missing ClickHouse DSN (-ch-dsn / FC_CH_DSN)")
 		os.Exit(1)
 	}
-	if cfg.SFlowSourceID == "" {
+	if cfg.SFlowEnabled && cfg.SFlowSourceID == "" {
 		log.Error("missing sflow source_id")
+		os.Exit(1)
+	}
+	if cfg.NetFlowEnabled && cfg.NetFlowSourceID == "" {
+		log.Error("missing netflow source_id")
 		os.Exit(1)
 	}
 	if cfg.CHSpoolMode != flowingest.SpoolOff && cfg.CHSpoolDir == "" {
@@ -96,17 +100,22 @@ func main() {
 		delivery.LogMetrics()
 	}()
 
+	healthSourceID := cfg.SFlowSourceID
+	if !cfg.SFlowEnabled {
+		healthSourceID = cfg.NetFlowSourceID
+	}
+
 	var healthReporter *flowingest.HealthReporter
 	if cfg.CHHealthTable != "" {
 		hr, err := flowingest.NewHealthReporter(log, flowingest.HealthReporterConfig{
 			DSN:         cfg.CHDSN,
 			Table:       cfg.CHHealthTable,
 			CollectorID: cfg.CollectorID,
-			SourceID:    cfg.SFlowSourceID,
+			SourceID:    healthSourceID,
 			Daemon:      "flowcollectord",
-			// No mirror interface and no NetFlow export leg: sFlow arrives
-			// over UDP and only goes to ClickHouse. Declaring the shorter
-			// chain keeps the missing legs off the screen instead of reading
+			// No mirror interface and no NetFlow export leg: UDP arrives
+			// and only goes to ClickHouse. Declaring the shorter chain
+			// keeps the missing legs off the screen instead of reading
 			// them as loss.
 			Stages: []string{flowingest.StageReceiver, flowingest.StageClickHouse},
 		})
@@ -120,12 +129,31 @@ func main() {
 		}
 	}
 
-	listener := newSflowListener(log, cfg.SFlowListen, cfg.SFlowSourceID, cfg.UDPReadBuffer, cfg.UDPReaders, cfg.UDPWorkers, cfg.UDPQueueSize, cfg.CHBatchSize, cfg.CHFlushInterval, delivery, classifier, exclusions)
+	var listeners []*udpListener
+	if cfg.SFlowEnabled {
+		listeners = append(listeners, newUDPListener(
+			log, "sflow", cfg.SFlowListen, cfg.SFlowSourceID,
+			cfg.UDPReadBuffer, cfg.UDPReaders, cfg.UDPWorkers, cfg.UDPQueueSize,
+			cfg.CHBatchSize, cfg.CHFlushInterval, delivery, exclusions,
+			&sflowParser{sourceID: cfg.SFlowSourceID, classifier: classifier},
+		))
+	}
+	if cfg.NetFlowEnabled {
+		listeners = append(listeners, newUDPListener(
+			log, "netflow", cfg.NetFlowListen, cfg.NetFlowSourceID,
+			cfg.UDPReadBuffer, cfg.UDPReaders, cfg.UDPWorkers, cfg.UDPQueueSize,
+			cfg.CHBatchSize, cfg.CHFlushInterval, delivery, exclusions,
+			newNFParser(log, cfg.NetFlowSourceID, cfg.NetFlowSamplingRate, cfg.NetFlowTemplateTTL, classifier),
+		))
+	}
 
-	errCh := make(chan error, 1)
-	go func() {
-		errCh <- listener.Run(ctx)
-	}()
+	errCh := make(chan error, len(listeners))
+	for _, l := range listeners {
+		listener := l
+		go func() {
+			errCh <- listener.Run(ctx)
+		}()
+	}
 
 	ticker := time.NewTicker(cfg.Interval)
 	defer ticker.Stop()
@@ -146,13 +174,19 @@ func main() {
 			}
 			return
 		case <-ticker.C:
-			listener.LogMetrics()
+			for _, l := range listeners {
+				l.LogMetrics()
+			}
 			delivery.LogMetrics()
 		case <-healthTicker.C:
 			h := delivery.HealthSnapshot()
 			insertErrsDelta := h.InsertErrs - prevInsertErrs
 			queueDropsDelta := h.QueueDrops - prevQueueDrops
-			rx := listener.receiverMetrics()
+			rxItems := make([]flowingest.ReceiverMetrics, 0, len(listeners))
+			for _, l := range listeners {
+				rxItems = append(rxItems, l.receiverMetrics())
+			}
+			rx := sumReceiverMetrics(rxItems)
 			udpDropsDelta := rx.UDPQueueDrops - prevUDPDrops
 			if h.InsertErrs > 0 || h.QueueDrops > 0 || h.LagSegments > 10 || udpDropsDelta > 0 {
 				log.Error("health",

@@ -11,9 +11,15 @@ import (
 )
 
 type config struct {
-	SFlowEnabled bool
-	SFlowListen  string
+	SFlowEnabled  bool
+	SFlowListen   string
 	SFlowSourceID string
+
+	NetFlowEnabled       bool
+	NetFlowListen        string
+	NetFlowSourceID      string
+	NetFlowSamplingRate  uint64
+	NetFlowTemplateTTL   time.Duration
 
 	CHDSN              string
 	CHTable            string
@@ -58,6 +64,12 @@ func loadConfig() config {
 	sflowListen := flag.String("sflow-listen", envString("FC_SFLOW_LISTEN", "0.0.0.0:6343"), "sFlow v5 UDP listen address")
 	sflowSourceID := flag.String("sflow-source-id", envString("FC_SFLOW_SOURCE_ID", "sflow-default"), "source_id written to flows_raw")
 
+	netflowEnabled := flag.Bool("netflow-enabled", envBool("FC_NETFLOW_ENABLED", false), "enable NetFlow v9 UDP listener")
+	netflowListen := flag.String("netflow-listen", envString("FC_NETFLOW_LISTEN", "0.0.0.0:2055"), "NetFlow v9 UDP listen address")
+	netflowSourceID := flag.String("netflow-source-id", envString("FC_NETFLOW_SOURCE_ID", "netflow-default"), "source_id written to flows_raw")
+	netflowSampling := flag.Uint64("netflow-sampling-rate", envUint64("FC_NETFLOW_SAMPLING_RATE", 1), "fallback sampling rate when the exporter sends no option template")
+	netflowTTL := flag.Duration("netflow-template-ttl", envDuration("FC_NETFLOW_TEMPLATE_TTL", time.Hour), "forget NetFlow v9 templates not refreshed within this interval")
+
 	chDSN := flag.String("ch-dsn", envString("FC_CH_DSN", ""), "ClickHouse DSN")
 	chTable := flag.String("ch-table", envString("FC_CH_TABLE", "default.flows_raw"), "target flows_raw table")
 	chBatchSize := flag.Int("ch-batch-size", envInt("FC_CH_BATCH_SIZE", 5000), "ClickHouse batch size")
@@ -87,9 +99,9 @@ func loadConfig() config {
 	exclusionsRefresh := flag.Duration("exclusions-refresh", envDuration("FC_EXCLUSIONS_REFRESH", time.Minute), "flow exclusion catalog refresh interval")
 
 	udpReadBuffer := flag.Int("udp-read-buffer", envInt("FC_UDP_READ_BUFFER", 64*1024*1024), "kernel UDP socket receive buffer bytes (SO_RCVBUF, per reader)")
-	udpReaders := flag.Int("udp-readers", envInt("FC_UDP_READERS", 1), "parallel sFlow UDP sockets using SO_REUSEPORT")
-	udpWorkers := flag.Int("udp-workers", envInt("FC_UDP_WORKERS", 8), "sFlow parser worker count")
-	udpQueueSize := flag.Int("udp-queue-size", envInt("FC_UDP_QUEUE_SIZE", 65536), "sFlow datagram queue depth")
+	udpReaders := flag.Int("udp-readers", envInt("FC_UDP_READERS", 1), "parallel UDP sockets using SO_REUSEPORT (per listener)")
+	udpWorkers := flag.Int("udp-workers", envInt("FC_UDP_WORKERS", 8), "parser worker count (per listener)")
+	udpQueueSize := flag.Int("udp-queue-size", envInt("FC_UDP_QUEUE_SIZE", 65536), "datagram queue depth (per listener)")
 	interval := flag.Duration("interval", envDuration("FC_INTERVAL", 5*time.Second), "metrics log interval")
 	healthInterval := flag.Duration("health-interval", envDuration("FC_HEALTH_INTERVAL", time.Minute), "health log interval")
 	chHealthTable := flag.String("ch-health-table", envString("FC_CH_HEALTH_TABLE", flowingest.DefaultHealthTable), "ClickHouse table for health snapshots (empty = disabled)")
@@ -103,9 +115,14 @@ func loadConfig() config {
 	}
 
 	return config{
-		SFlowEnabled: *sflowEnabled,
-		SFlowListen:  strings.TrimSpace(*sflowListen),
-		SFlowSourceID: strings.TrimSpace(*sflowSourceID),
+		SFlowEnabled:         *sflowEnabled,
+		SFlowListen:          strings.TrimSpace(*sflowListen),
+		SFlowSourceID:        strings.TrimSpace(*sflowSourceID),
+		NetFlowEnabled:       *netflowEnabled,
+		NetFlowListen:        strings.TrimSpace(*netflowListen),
+		NetFlowSourceID:      strings.TrimSpace(*netflowSourceID),
+		NetFlowSamplingRate:  *netflowSampling,
+		NetFlowTemplateTTL:   *netflowTTL,
 		CHDSN: strings.TrimSpace(*chDSN),
 		CHTable: strings.TrimSpace(*chTable),
 		CHBatchSize: *chBatchSize,
@@ -147,6 +164,18 @@ func envString(key, def string) string {
 		return v
 	}
 	return def
+}
+
+func envUint64(key string, def uint64) uint64 {
+	v := strings.TrimSpace(os.Getenv(key))
+	if v == "" {
+		return def
+	}
+	n, err := strconv.ParseUint(v, 10, 64)
+	if err != nil {
+		return def
+	}
+	return n
 }
 
 func envInt(key string, def int) int {
