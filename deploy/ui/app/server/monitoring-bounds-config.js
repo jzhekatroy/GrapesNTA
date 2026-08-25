@@ -106,73 +106,6 @@ function invalidateBoundsCache() {
   cache = { loadedAt: 0, config: null, error: null };
 }
 
-async function getMonitoringBounds(parameterId) {
-  const { getParameter } = require('./monitoring-intervals');
-  const param = getParameter(parameterId);
-  if (!param) throw new Error(`Неизвестный показатель: ${parameterId}`);
-
-  const configData = await loadBoundsConfig();
-  const bounds = configData.boundsByParameter[param.id];
-  const requiresCiMinimum = param.boundsRequiresCiMinimum !== false;
-  if (!bounds
-    || !Number.isFinite(bounds.ciLow)
-    || !Number.isFinite(bounds.ciHigh)
-    || (requiresCiMinimum && !Number.isFinite(bounds.ciMinimum))) {
-    throw new Error(`В config.yaml не найдены границы для показателя ${param.id}`);
-  }
-
-  return {
-    parameter: param.id,
-    label: param.label,
-    unit: param.unit,
-    featureName: param.featureName,
-    configKey: param.boundsConfigKey,
-    boundsRequiresCiMinimum: requiresCiMinimum,
-    ciLow: bounds.ciLow,
-    ciHigh: bounds.ciHigh,
-    ciMinimum: Number.isFinite(bounds.ciMinimum) ? bounds.ciMinimum : null,
-    source: bounds.source,
-    mode: configData.mode,
-    host: configData.host || null,
-    configPath: configData.configPath,
-    loadedAt: configData.loadedAt,
-  };
-}
-
-async function saveMonitoringBounds(parameterId, { ciLow, ciHigh, ciMinimum }) {
-  const { getParameter } = require('./monitoring-intervals');
-  const param = getParameter(parameterId);
-  if (!param) throw new Error(`Неизвестный показатель: ${parameterId}`);
-
-  const low = Number(ciLow);
-  const high = Number(ciHigh);
-  const requiresCiMinimum = param.boundsRequiresCiMinimum !== false;
-  const minimum = requiresCiMinimum ? Number(ciMinimum) : null;
-  if (!Number.isFinite(low) || !Number.isFinite(high)) {
-    throw new Error('Границы должны быть числами');
-  }
-  if (requiresCiMinimum && !Number.isFinite(minimum)) {
-    throw new Error('Границы должны быть числами');
-  }
-
-  const body = {
-    section: param.boundsConfigKey,
-    ci_low: low,
-    ci_high: high,
-  };
-  if (requiresCiMinimum) {
-    body.ci_minimum = minimum;
-  }
-
-  await boundsServiceFetch('/config/bounds', {
-    method: 'PUT',
-    body,
-  });
-
-  invalidateBoundsCache();
-  return getMonitoringBounds(parameterId);
-}
-
 module.exports = {
   boundsServiceUrl,
   boundsServiceToken,
@@ -180,6 +113,4 @@ module.exports = {
   parseBoundsConfig,
   loadBoundsConfig,
   invalidateBoundsCache,
-  getMonitoringBounds,
-  saveMonitoringBounds,
 };

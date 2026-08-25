@@ -113,19 +113,9 @@ const config = {
   userPermissionsTable: env('CLICKHOUSE_USER_PERMISSIONS_TABLE', 'user_permissions'),
   collectorHealthView: envOpt('CLICKHOUSE_COLLECTOR_HEALTH_VIEW', null),
   collectorHealthSnapshotsTable: env('CLICKHOUSE_COLLECTOR_HEALTH_SNAPSHOTS_TABLE', 'collector_health_snapshots'),
-  intervalsControlTable: env('CLICKHOUSE_INTERVALS_CONTROL_TABLE', 'intervals_control'),
-  intervalsTable: env('CLICKHOUSE_INTERVALS_TABLE', 'intervals'),
-  intervalsCountryRuTable: env('CLICKHOUSE_INTERVALS_COUNTRY_RU_TABLE', 'intervals_country_ru'),
   requestTimeoutMs: envInt('CLICKHOUSE_REQUEST_TIMEOUT_MS', 30000),
   logSql: envBool('CLICKHOUSE_LOG_SQL', process.env.NODE_ENV !== 'production'),
   dataTimezone: env('CLICKHOUSE_TIMEZONE', 'Europe/Moscow'),
-  monitoringColumns: {
-    dt: env('CH_COL_INTERVALS_DT', 'dt'),
-    value: env('CH_COL_INTERVALS_VALUE', 'value'),
-    parameter: env('CH_COL_INTERVALS_PARAMETER', 'parameter'),
-    featureName: env('CH_COL_INTERVALS_FEATURE', 'feature_name'),
-    outsideCi: env('CH_COL_INTERVALS_OUTSIDE_CI', 'outside_ci'),
-  },
   columns: {
     time: env('CH_COL_TIME', 'TimeReceived'),
     bytes: env('CH_COL_BYTES', 'Bytes'),
@@ -349,23 +339,6 @@ function collectorHealthViewRef() {
 
 function collectorHealthSnapshotsTableRef() {
   return `${qIdent(config.database)}.${qIdent(config.collectorHealthSnapshotsTable)}`;
-}
-
-function intervalsControlTableRef() {
-  return `${qIdent(config.database)}.${qIdent(config.intervalsControlTable)}`;
-}
-
-function intervalsTableRef() {
-  return `${qIdent(config.database)}.${qIdent(config.intervalsTable)}`;
-}
-
-function intervalsCountryRuTableRef() {
-  return `${qIdent(config.database)}.${qIdent(config.intervalsCountryRuTable)}`;
-}
-
-function monitoringCol(key) {
-  const name = config.monitoringColumns[key];
-  return name ? qIdent(name) : null;
 }
 
 function healthCol(key) {
@@ -777,10 +750,6 @@ module.exports = {
   locationsTableRef,
   collectorHealthViewRef,
   collectorHealthSnapshotsTableRef,
-  intervalsControlTableRef,
-  intervalsTableRef,
-  intervalsCountryRuTableRef,
-  monitoringCol,
   healthCol,
   dnsLogTableRef,
   dnsAnswersTableRef,

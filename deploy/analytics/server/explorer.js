@@ -156,10 +156,10 @@ const EXPLORER_DIM_META = {
   src_country: { label: 'Страна источника / Source country', group: EXPLORER_GROUP.ASGEO, valueOptions: EXPLORER_COUNTRY_OPTIONS },
   dst_country: { label: 'Страна назначения / Destination country', group: EXPLORER_GROUP.ASGEO, valueOptions: EXPLORER_COUNTRY_OPTIONS },
   l3_owner: {
-    label: 'Оператор / клиент / L3 owner',
+    label: 'Оператор / L3 owner',
     group: EXPLORER_GROUP.L3,
     aliases: ['оператор', 'пин', 'owner', 'entity', 'l3'],
-    valueHint: 'L3-сущность из net_entities — это не клиент кабинета',
+    valueHint: 'L3-сущность из net_entities',
   },
   cabinet_client: {
     label: 'Клиент',
@@ -280,7 +280,7 @@ const EXPLORER_FILTER_HINTS = {
   asn: 'Номер ASN или название — напр. 12389',
   vlan: 'ID VLAN или имя',
   service: 'Код или название сервиса',
-  l3_owner: 'L3-сущность из net_entities — это не клиент кабинета',
+  l3_owner: 'L3-сущность из net_entities',
   own_network: 'Префикс CIDR — напр. 10.0.0.0/24',
   cabinet_client: 'Название, client_id, IP/CIDR, свитч или ifName — напр. PortChannel32 172.18.19.12',
   vlan_name: 'Имя VLAN из справочника L2',

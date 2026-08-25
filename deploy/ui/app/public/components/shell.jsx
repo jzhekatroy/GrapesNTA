@@ -83,7 +83,6 @@ const PAGES_WITHOUT_HEADER_FILTERS = new Set([
   'explorer',
   'dns-explorer',
   'observations',
-  'monitoring',
   'diagnostics',
   'users',
   'audit',
@@ -286,13 +285,13 @@ function formatUserDateTime(value) {
 
 function UserAccountMenu({ currentUser, pageTitles, hiddenPageIds }) {
   const [open, setOpen] = useState(false);
+  const [menuStyle, setMenuStyle] = useState(null);
   const rootRef = useRef(null);
+  const menuRef = useRef(null);
   const titles = pageTitles || PAGE_TITLES || {};
   const displayName = currentUser?.fullName || currentUser?.username || 'Пользователь';
   const displayRole = currentUser?.role?.displayName || currentUser?.roleId || 'Пользователь';
   const initials = displayName.trim().slice(0, 1).toUpperCase() || 'U';
-
-  useCloseOnOutsideClick(open, setOpen, rootRef);
 
   const allowedPages = useMemo(() => {
     const perms = currentUser?.effectivePermissions;
@@ -311,6 +310,66 @@ function UserAccountMenu({ currentUser, pageTitles, hiddenPageIds }) {
       ));
   }, [currentUser, pageTitles, hiddenPageIds]);
 
+  useLayoutEffect(() => {
+    if (!open) {
+      setMenuStyle(null);
+      return undefined;
+    }
+    const anchor = rootRef.current;
+    if (!anchor) return undefined;
+    const updatePosition = () => {
+      const width = Math.min(320, window.innerWidth - 16);
+      setMenuStyle({
+        ...computeFixedDropdownStyle(anchor, { minWidth: width, align: 'right' }),
+        width,
+        minWidth: width,
+      });
+    };
+    updatePosition();
+    window.addEventListener('resize', updatePosition);
+    window.addEventListener('scroll', updatePosition, true);
+    return () => {
+      window.removeEventListener('resize', updatePosition);
+      window.removeEventListener('scroll', updatePosition, true);
+    };
+  }, [open]);
+
+  useEffect(() => {
+    if (!open) return undefined;
+    const onPointerDown = (e) => {
+      if (rootRef.current?.contains(e.target) || menuRef.current?.contains(e.target)) return;
+      setOpen(false);
+    };
+    document.addEventListener('mousedown', onPointerDown);
+    return () => document.removeEventListener('mousedown', onPointerDown);
+  }, [open]);
+
+  const dropdownBody = (
+    <>
+      <div className="user-menu__header">
+        <span className="user-menu__name">{displayName}</span>
+        <span className="user-menu__username">{currentUser?.username}</span>
+      </div>
+      <div className="time-filter__divider" />
+      <div className="time-filter__heading">Разрешённые разделы</div>
+      <div className="user-menu__pages">
+        {allowedPages.length ? allowedPages.map((page) => (
+          <div key={page.id} className="user-menu__page">
+            <span className="user-menu__page-title">{page.title}</span>
+            <span className="user-menu__page-section">{page.section}</span>
+          </div>
+        )) : (
+          <div className="user-menu__empty">Нет доступных разделов</div>
+        )}
+      </div>
+      <div className="time-filter__divider" />
+      <div className="user-menu__meta-row">
+        <span className="user-menu__meta-label">Последняя смена пароля</span>
+        <span className="user-menu__meta-value">{formatUserDateTime(currentUser?.updatedAt)}</span>
+      </div>
+    </>
+  );
+
   return (
     <div className="user-menu" ref={rootRef}>
       <button
@@ -327,36 +386,23 @@ function UserAccountMenu({ currentUser, pageTitles, hiddenPageIds }) {
         </div>
         <Icon name="chevD" size={14} className="user-chip__chev" />
       </button>
-      {open && (
-        <div className="user-menu__dropdown" role="dialog" aria-label="Профиль пользователя">
-          <div className="user-menu__header">
-            <span className="user-menu__name">{displayName}</span>
-            <span className="user-menu__username">{currentUser?.username}</span>
-          </div>
-          <div className="time-filter__divider" />
-          <div className="time-filter__heading">Разрешённые разделы</div>
-          <div className="user-menu__pages">
-            {allowedPages.length ? allowedPages.map((page) => (
-              <div key={page.id} className="user-menu__page">
-                <span className="user-menu__page-title">{page.title}</span>
-                <span className="user-menu__page-section">{page.section}</span>
-              </div>
-            )) : (
-              <div className="user-menu__empty">Нет доступных разделов</div>
-            )}
-          </div>
-          <div className="time-filter__divider" />
-          <div className="user-menu__meta-row">
-            <span className="user-menu__meta-label">Последняя смена пароля</span>
-            <span className="user-menu__meta-value">{formatUserDateTime(currentUser?.updatedAt)}</span>
-          </div>
-        </div>
+      {open && menuStyle && ReactDOM.createPortal(
+        <div
+          ref={menuRef}
+          className="user-menu__dropdown user-menu__dropdown--portal"
+          style={menuStyle}
+          role="dialog"
+          aria-label="Профиль пользователя"
+        >
+          {dropdownBody}
+        </div>,
+        document.body,
       )}
     </div>
   );
 }
 
-function Header({ current, onNavigate, onToggleSidebar, currentUser, onLogout, onRefresh, theme, onToggleTheme, timeRange, onTimeRangeChange, customPeriod, onCustomPeriodChange, chartZoomDepth, onChartZoomReset, directions, onDirectionsChange, collectorFilter, onCollectorFilterChange, pageTitles, hiddenPageIds, displayTimezone, timezonePref, onTimezonePrefChange, monitoringDeviationsTotal, monitoringDeviationsError, cabinetMode, clientDisplayName, onStopImpersonation }) {
+function Header({ current, onNavigate, onToggleSidebar, currentUser, onLogout, onRefresh, theme, onToggleTheme, timeRange, onTimeRangeChange, customPeriod, onCustomPeriodChange, chartZoomDepth, onChartZoomReset, directions, onDirectionsChange, collectorFilter, onCollectorFilterChange, pageTitles, hiddenPageIds, displayTimezone, timezonePref, onTimezonePrefChange, cabinetMode, clientDisplayName, onStopImpersonation }) {
   const titles = pageTitles || PAGE_TITLES || {};
   const meta = titles[current] || titles.dashboard || { title: current, section: '' };
   const hidePageFilters = cabinetMode
@@ -418,34 +464,30 @@ function Header({ current, onNavigate, onToggleSidebar, currentUser, onLogout, o
           timezonePref={timezonePref}
           onTimezonePrefChange={onTimezonePrefChange}
         />
-        <button className="icon-btn tt" data-tt="Обновить" title="Обновить" onClick={onRefresh}>
-          <Icon name="refresh" size={18} />
-        </button>
-        {/*
-        <button
-          type="button"
-          className={`icon-btn tt header-bell-btn${monitoringDeviationsTotal > 0 ? ' header-bell-btn--has-badge' : ''}`}
-          data-tt={monitoringDeviationsError || 'Мониторинг отклонений'}
-          title={monitoringDeviationsError || 'Мониторинг отклонений'}
-          onClick={() => onNavigate('monitoring')}
-        >
-          <Icon name="bell" size={18} />
-          {monitoringDeviationsTotal > 0 && (
-            <span className="header-bell-badge">{monitoringDeviationsTotal}</span>
-          )}
-        </button>
-        */}
-        <button className="icon-btn tt" data-tt={theme === 'dark' ? 'Светлая тема' : 'Тёмная тема'} onClick={onToggleTheme}>
-          <Icon name={theme === 'dark' ? 'sun' : 'moon'} size={18} />
-        </button>
+        <PortalTooltip label="Обновить">
+          <button className="icon-btn" title="Обновить" onClick={onRefresh}>
+            <Icon name="refresh" size={18} />
+          </button>
+        </PortalTooltip>
+        <PortalTooltip label={theme === 'dark' ? 'Светлая тема' : 'Тёмная тема'}>
+          <button
+            className="icon-btn"
+            title={theme === 'dark' ? 'Светлая тема' : 'Тёмная тема'}
+            onClick={onToggleTheme}
+          >
+            <Icon name={theme === 'dark' ? 'sun' : 'moon'} size={18} />
+          </button>
+        </PortalTooltip>
         <span className="hr-v" />
         <UserAccountMenu currentUser={currentUser} pageTitles={pageTitles} hiddenPageIds={hiddenPageIds} />
         {isImpersonating(currentUser) && onStopImpersonation && (
           <Button kind="ghost" size="sm" onClick={onStopImpersonation}>Выйти из кабинета</Button>
         )}
-        <button className="icon-btn tt" data-tt="Выйти" onClick={onLogout}>
-          <Icon name="logOut" size={18} />
-        </button>
+        <PortalTooltip label="Выйти">
+          <button className="icon-btn" title="Выйти" onClick={onLogout}>
+            <Icon name="logOut" size={18} />
+          </button>
+        </PortalTooltip>
       </div>
     </header>
   );
@@ -748,15 +790,117 @@ function useCloseOnOutsideClick(open, setOpen, rootRef) {
   }, [open]);
 }
 
+function computeFixedDropdownStyle(anchorEl, { minWidth = 248, maxHeight = 360, align = 'left' } = {}) {
+  const rect = anchorEl.getBoundingClientRect();
+  const gap = 6;
+  const pad = 8;
+  const width = Math.max(rect.width, minWidth);
+  const left = align === 'right'
+    ? Math.max(pad, rect.right - width)
+    : Math.max(pad, Math.min(rect.left, window.innerWidth - width - pad));
+  return {
+    position: 'fixed',
+    top: rect.bottom + gap,
+    left,
+    width,
+    minWidth: width,
+    maxHeight,
+    zIndex: 1300,
+    overflowY: 'auto',
+  };
+}
+
+function PortalTooltip({ label, children }) {
+  const [visible, setVisible] = useState(false);
+  const [style, setStyle] = useState(null);
+  const anchorRef = useRef(null);
+
+  useLayoutEffect(() => {
+    if (!visible) {
+      setStyle(null);
+      return undefined;
+    }
+    const anchor = anchorRef.current;
+    if (!anchor) return undefined;
+    const updatePosition = () => {
+      const rect = anchor.getBoundingClientRect();
+      setStyle({
+        position: 'fixed',
+        top: rect.bottom + 6,
+        left: rect.left + rect.width / 2,
+        transform: 'translateX(-50%)',
+        zIndex: 1300,
+      });
+    };
+    updatePosition();
+    window.addEventListener('resize', updatePosition);
+    window.addEventListener('scroll', updatePosition, true);
+    return () => {
+      window.removeEventListener('resize', updatePosition);
+      window.removeEventListener('scroll', updatePosition, true);
+    };
+  }, [visible]);
+
+  return (
+    <>
+      <span
+        ref={anchorRef}
+        className="portal-tooltip-anchor"
+        onMouseEnter={() => setVisible(true)}
+        onMouseLeave={() => setVisible(false)}
+        onFocus={() => setVisible(true)}
+        onBlur={() => setVisible(false)}
+      >
+        {children}
+      </span>
+      {visible && label && style && ReactDOM.createPortal(
+        <div className="portal-tooltip" style={style} role="tooltip">
+          {label}
+        </div>,
+        document.body,
+      )}
+    </>
+  );
+}
+
 function TimezoneSelector({ displayTimezone, timezonePref, onTimezonePrefChange }) {
   const [open, setOpen] = useState(false);
+  const [menuStyle, setMenuStyle] = useState(null);
   const rootRef = useRef(null);
+  const menuRef = useRef(null);
   const browserTimezone = detectBrowserTimezone();
   const shortLabel = formatTimezoneShortLabel(displayTimezone);
   const mode = timezonePref?.mode === 'manual' ? 'manual' : 'auto';
   const activeManual = mode === 'manual' ? timezonePref.timezone : null;
 
-  useCloseOnOutsideClick(open, setOpen, rootRef);
+  useLayoutEffect(() => {
+    if (!open) {
+      setMenuStyle(null);
+      return undefined;
+    }
+    const anchor = rootRef.current;
+    if (!anchor) return undefined;
+    const updatePosition = () => {
+      setMenuStyle(computeFixedDropdownStyle(anchor, { minWidth: 280, align: 'right' }));
+    };
+    updatePosition();
+    window.addEventListener('resize', updatePosition);
+    window.addEventListener('scroll', updatePosition, true);
+    return () => {
+      window.removeEventListener('resize', updatePosition);
+      window.removeEventListener('scroll', updatePosition, true);
+    };
+  }, [open]);
+
+  useEffect(() => {
+    if (!open) return undefined;
+    const onPointerDown = (e) => {
+      if (rootRef.current?.contains(e.target) || menuRef.current?.contains(e.target)) return;
+      setOpen(false);
+    };
+    document.addEventListener('mousedown', onPointerDown);
+    return () => document.removeEventListener('mousedown', onPointerDown);
+  }, [open]);
 
   const selectPreset = (presetId) => {
     if (presetId === 'auto') {
@@ -780,8 +924,13 @@ function TimezoneSelector({ displayTimezone, timezonePref, onTimezonePrefChange 
         <span className="time-pill__range">{shortLabel}</span>
         <Icon name="chevD" size={14} />
       </button>
-      {open && (
-        <div className="time-filter__menu timezone-filter__menu" role="menu">
+      {open && menuStyle && ReactDOM.createPortal(
+        <div
+          ref={menuRef}
+          className="time-filter__menu timezone-filter__menu timezone-filter__menu--portal"
+          style={menuStyle}
+          role="menu"
+        >
           <div className="time-filter__section timezone-filter__section">
             <div className="timezone-filter__hint">
               Данные ClickHouse: {formatTimezoneShortLabel(getDataTimezone())} · отображение ниже
@@ -805,7 +954,8 @@ function TimezoneSelector({ displayTimezone, timezonePref, onTimezonePrefChange 
               );
             })}
           </div>
-        </div>
+        </div>,
+        document.body,
       )}
     </div>
   );

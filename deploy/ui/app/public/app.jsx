@@ -75,8 +75,6 @@ function App() {
   const displayTimezone = resolveDisplayTimezone(timezonePref);
   const [auth, setAuth] = useState({ loading: true, user: null });
   const [refreshKey, setRefreshKey] = useState(0);
-  const [monitoringDeviationsTotal, setMonitoringDeviationsTotal] = useState(0);
-  const [monitoringDeviationsError, setMonitoringDeviationsError] = useState('');
   const themeInitialized = useRef(false);
   const lastAuditPageRef = useRef({ pageId: '', at: 0 });
 
@@ -182,30 +180,6 @@ function App() {
   useEffect(() => {
     periodRef.current = { timeRange, customPeriod };
   }, [timeRange, customPeriod]);
-
-  useEffect(() => {
-    if (!auth.user) return undefined;
-    if (isCabinetMode(auth.user)) return undefined;
-    const perms = auth.user?.effectivePermissions;
-    if (perms && !perms.monitoring) return undefined;
-
-    let cancelled = false;
-    const load = () => {
-      ApiClient.loadMonitoringParameters().then((result) => {
-        if (cancelled) return;
-        if (result.source === 'error') {
-          setMonitoringDeviationsTotal(0);
-          setMonitoringDeviationsError(result.error || ApiClient.LOAD_FAILED);
-          return;
-        }
-        setMonitoringDeviationsTotal(Number(result.meta?.totalDeviations24h) || 0);
-        setMonitoringDeviationsError('');
-      });
-    };
-    load();
-    const timer = setInterval(load, 60_000);
-    return () => { cancelled = true; clearInterval(timer); };
-  }, [auth.user]);
 
   useEffect(() => {
     if (!auth.user) return undefined;
@@ -463,9 +437,6 @@ function App() {
           />
         );
         break;
-      case 'monitoring':
-        pageEl = <LazyPage pageId="monitoring" key={`${refreshKey}-${displayTimezone}`} displayTimezone={displayTimezone} />;
-        break;
       case 'explorer':
         pageEl = (
           <LazyPage
@@ -679,8 +650,6 @@ function App() {
         displayTimezone={displayTimezone}
         timezonePref={timezonePref}
         onTimezonePrefChange={handleTimezonePrefChange}
-        monitoringDeviationsTotal={monitoringDeviationsTotal}
-        monitoringDeviationsError={monitoringDeviationsError}
         cabinetMode={cabinetMode}
         clientDisplayName={clientDisplayName}
         onStopImpersonation={handleStopImpersonation}

@@ -170,23 +170,25 @@ function PageTrafficClassification() {
             )}
           </Card>
 
-          <Card pad="sm" title="Трафик между неизвестными сетями">
-            <ChoiceGroup
-              name="unknownNetworks"
-              value={form.unknownNetworks}
-              options={unknownOptions}
-              disabled={!canWrite}
-              onChange={(unknownNetworks) => setForm((prev) => ({ ...prev, unknownNetworks }))}
-            />
-            <div className="tc-impact">
-              <button type="button" className="link-btn" onClick={openUnclassifiedTrafficExplorer}>
-                Посмотреть неразмеченный трафик по автономным системам
-              </button>
-            </div>
-            <p className="field-hint" style={{ marginTop: 8 }}>
-              Правило применяется к новому трафику в течение ~60 секунд. Уже сохранённые данные не пересчитываются.
-            </p>
-          </Card>
+          {form.directionMode === 'prefixes' && (
+            <Card pad="sm" title="Трафик между неизвестными сетями">
+              <ChoiceGroup
+                name="unknownNetworks"
+                value={form.unknownNetworks}
+                options={unknownOptions}
+                disabled={!canWrite}
+                onChange={(unknownNetworks) => setForm((prev) => ({ ...prev, unknownNetworks }))}
+              />
+              <div className="tc-impact">
+                <button type="button" className="link-btn" onClick={openUnclassifiedTrafficExplorer}>
+                  Посмотреть неразмеченный трафик по автономным системам
+                </button>
+              </div>
+              <p className="field-hint" style={{ marginTop: 8 }}>
+                Правило применяется к новому трафику в течение ~60 секунд. Уже сохранённые данные не пересчитываются.
+              </p>
+            </Card>
+          )}
 
           {canWrite && (
             <div>

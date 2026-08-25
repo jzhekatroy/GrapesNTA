@@ -115,6 +115,6 @@ describe('explorer schema field naming', () => {
     assert.equal(explorerFieldMatchesQuery(cabinetClient, 'клиент'), true);
     assert.equal((cabinetClient.aliases || []).includes('клиент'), true);
     assert.equal((l3Owner.aliases || []).includes('клиент'), false);
-    assert.match(l3Owner.valueHint, /не клиент кабинета/i);
+    assert.match(l3Owner.valueHint, /net_entities/i);
   });
 });

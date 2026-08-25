@@ -118,17 +118,6 @@ const {
 } = require('./dashboard-layout');
 const { isCabinetScoped } = require('./cabinet/context');
 const {
-  parseMonitoringSeriesQuery,
-  parseMonitoringDeviationsQuery,
-  monitoringParameters,
-  monitoringSeriesValues,
-  monitoringSeriesCi,
-  mergeMonitoringSeries,
-  monitoringSeriesMeta,
-  monitoringDeviations,
-} = require('./monitoring-intervals');
-const { getMonitoringBounds, saveMonitoringBounds } = require('./monitoring-bounds-config');
-const {
   listL3Prefixes,
   listNetEntities,
   saveL3Prefix,
@@ -1849,102 +1838,6 @@ app.get('/api/dns-explorer/suggest/answers', async (req, res) => {
     res.json(result);
   } catch (err) {
     res.status(400).json({ error: err.message });
-  }
-});
-
-app.get('/api/monitoring/parameters', async (_req, res) => {
-  try {
-    const result = await runNamed(() => monitoringParameters(), { name: 'monitoring/parameters' });
-    const payload = result.data || {};
-    res.json({
-      data: payload.parameters || [],
-      meta: {
-        ...result.meta,
-        totalDeviations24h: payload.totalDeviations24h || 0,
-      },
-    });
-  } catch (err) {
-    res.status(502).json({ error: err.message });
-  }
-});
-
-app.get('/api/monitoring/series', async (req, res) => {
-  try {
-    const filters = parseMonitoringSeriesQuery(req.query);
-    const started = Date.now();
-    const valueSpec = monitoringSeriesValues(filters);
-    const ciSpec = monitoringSeriesCi(filters);
-    const [valueResult, ciResult] = await Promise.all([
-      query(valueSpec.sql, valueSpec.params || {}, { name: 'monitoring/series/values' }),
-      query(ciSpec.sql, ciSpec.params || {}, { name: 'monitoring/series/ci' }),
-    ]);
-    const data = mergeMonitoringSeries(valueResult.rows, ciResult.rows);
-    res.json({
-      data,
-      meta: {
-        elapsedMs: Date.now() - started,
-        rows: data.length,
-        valueRows: valueResult.rows.length,
-        ciRows: ciResult.rows.length,
-        ...monitoringSeriesMeta(filters),
-      },
-    });
-  } catch (err) {
-    const status = /Укажите|Неизвестный|Некоррект|должен быть/.test(err.message) ? 400 : 502;
-    res.status(status).json({ error: err.message });
-  }
-});
-
-app.get('/api/monitoring/deviations', async (req, res) => {
-  try {
-    const filters = parseMonitoringDeviationsQuery(req.query);
-    const result = await runNamed(
-      () => monitoringDeviations(filters),
-      { name: 'monitoring/deviations' },
-    );
-    res.json(result);
-  } catch (err) {
-    res.status(502).json({ error: err.message });
-  }
-});
-
-app.get('/api/monitoring/bounds', async (req, res) => {
-  try {
-    const parameter = String(req.query.parameter || '').trim();
-    if (!parameter) {
-      res.status(400).json({ error: 'Укажите parameter' });
-      return;
-    }
-    const data = await getMonitoringBounds(parameter);
-    res.json({ data, meta: { parameter } });
-  } catch (err) {
-    const msg = err.message || 'Не удалось загрузить config.yaml';
-    const status = err.status
-      || (/Не настроен|bounds-service недоступен/.test(msg) ? 503
-        : /Неизвестный показатель|Укажите|должны быть/.test(msg) ? 400 : 502);
-    res.status(status).json({ error: msg });
-  }
-});
-
-app.put('/api/monitoring/bounds', async (req, res) => {
-  try {
-    const parameter = String(req.body?.parameter || '').trim();
-    if (!parameter) {
-      res.status(400).json({ error: 'Укажите parameter' });
-      return;
-    }
-    const data = await saveMonitoringBounds(parameter, {
-      ciLow: req.body?.ciLow,
-      ciHigh: req.body?.ciHigh,
-      ciMinimum: req.body?.ciMinimum,
-    });
-    res.json({ data, meta: { parameter } });
-  } catch (err) {
-    const msg = err.message || 'Не удалось сохранить config.yaml';
-    const status = err.status
-      || (/Не настроен|bounds-service недоступен/.test(msg) ? 503
-        : /Неизвестный показатель|Укажите|должны быть|Некоррект/.test(msg) ? 400 : 502);
-    res.status(status).json({ error: msg });
   }
 });
 

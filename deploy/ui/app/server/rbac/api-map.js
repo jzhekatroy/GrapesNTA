@@ -21,7 +21,6 @@ function getResourceForPath(path, method) {
   if (p.startsWith('/api/settings/smtp')) return 'diagnostics';
   if (p.startsWith('/api/dashboard/')) return 'dashboard';
   if (p.startsWith('/api/dns/')) return 'dns';
-  if (p.startsWith('/api/monitoring/')) return 'monitoring';
   if (p.startsWith('/api/refs/l3-prefixes')) return 'cidr';
   if (p.startsWith('/api/refs/dns-resolvers')) return 'dns-resolvers';
   if (p.startsWith('/api/refs/flow-exclusions')) return 'flow-exclusions';

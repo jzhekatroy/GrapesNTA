@@ -77,11 +77,6 @@ const PAGE_CHUNKS_MANIFEST = {
     },
     observations: {
       scripts: ['/pages/observations.jsx'],
-      exports: { default: 'PageObservations' },
-    },
-    monitoring: {
-      scripts: ['/pages/monitoring.jsx'],
-      exports: { default: 'PageMonitoring' },
     },
     users: {
       scripts: ['/pages/users.jsx'],
@@ -100,7 +95,7 @@ const PAGE_CHUNKS_MANIFEST = {
       exports: { default: 'PageBmp' },
     },
     'traffic-classification': {
-      scripts: ['/pages/traffic-classification.jsx'],
+      scripts: ['/data/interface-role-labels.js', '/pages/traffic-classification.jsx'],
       exports: { default: 'PageTrafficClassification' },
     },
     'dns-resolvers': {

@@ -128,6 +128,16 @@ function ensureStore() {
   return db;
 }
 
+const SKIPPED_STATUS_CODES = new Set([401, 403]);
+
+function shouldRecordFailedRequest(entry = {}) {
+  const route = String(entry.route || '');
+  if (route.startsWith('/api/diagnostics/failed-requests')) return false;
+  const statusCode = Number(entry.statusCode) || 500;
+  if (SKIPPED_STATUS_CODES.has(statusCode)) return false;
+  return true;
+}
+
 function rowToItem(row) {
   return {
     id: row.id,
@@ -153,8 +163,7 @@ function rowToItem(row) {
 
 function recordFailedRequest(entry = {}) {
   try {
-    const route = String(entry.route || '');
-    if (route.startsWith('/api/diagnostics/failed-requests')) return null;
+    if (!shouldRecordFailedRequest(entry)) return null;
 
     const now = Date.now();
     const ttlMs = getTtlMs();
@@ -167,6 +176,7 @@ function recordFailedRequest(entry = {}) {
     cleanupExpired();
 
     const id = newId();
+    const route = String(entry.route || '');
     ensureStore().prepare(`
       INSERT INTO failed_requests (
         id, created_at, expires_at, method, route, query_json, body_json,
@@ -204,10 +214,15 @@ function listFailedRequests({ limit = 50, offset = 0 } = {}) {
   const safeLimit = Math.min(Math.max(Number(limit) || 50, 1), 200);
   const safeOffset = Math.max(Number(offset) || 0, 0);
   const database = ensureStore();
-  const totalRow = database.prepare('SELECT COUNT(*) AS cnt FROM failed_requests').get();
+  const totalRow = database.prepare(`
+    SELECT COUNT(*) AS cnt
+    FROM failed_requests
+    WHERE status_code NOT IN (401, 403)
+  `).get();
   const rows = database.prepare(`
     SELECT *
     FROM failed_requests
+    WHERE status_code NOT IN (401, 403)
     ORDER BY created_at DESC
     LIMIT ? OFFSET ?
   `).all(safeLimit, safeOffset);
@@ -215,6 +230,8 @@ function listFailedRequests({ limit = 50, offset = 0 } = {}) {
   return {
     items: rows.map(rowToItem),
     total: Number(totalRow?.cnt) || 0,
+    limit: safeLimit,
+    offset: safeOffset,
     checkedAt: new Date().toISOString(),
     retentionDays: getTtlMs() / (24 * 60 * 60 * 1000),
   };
@@ -242,6 +259,7 @@ module.exports = {
   ensureStore,
   cleanupExpired,
   trimToMaxRows,
+  shouldRecordFailedRequest,
   recordFailedRequest,
   listFailedRequests,
   closeStore,

@@ -3,6 +3,8 @@
 const { useState, useEffect, useCallback } = React;
 
 const DIAG_REFRESH_MS = 15000;
+const FAILED_REQUESTS_PAGE_SIZES = [25, 50, 100];
+const FAILED_REQUESTS_DEFAULT_LIMIT = 25;
 
 function fmtDiagTime(iso) {
   if (!iso) return '—';
@@ -1338,6 +1340,28 @@ function AnalysisSnapshotsPanel({ data, loading, onReload }) {
   );
 }
 
+function fmtFailedRequestRoute(route) {
+  const raw = String(route || '');
+  const q = raw.indexOf('?');
+  return q >= 0 ? raw.slice(0, q) : raw;
+}
+
+function fmtFailedRequestRouteShort(route, maxLen = 48) {
+  const path = fmtFailedRequestRoute(route);
+  if (path.length <= maxLen) return path;
+  const head = Math.ceil((maxLen - 1) / 2);
+  const tail = Math.floor((maxLen - 1) / 2);
+  return `${path.slice(0, head)}…${path.slice(path.length - tail)}`;
+}
+
+function fmtFailedRequestErrorShort(error) {
+  if (!error) return '—';
+  const firstLine = String(error).split(/\r?\n/).find((line) => line.trim()) || String(error);
+  const text = firstLine.trim();
+  if (text.length <= 96) return text;
+  return `${text.slice(0, 96)}…`;
+}
+
 function fmtApiRequestText(item) {
   const lines = [`${item.method} ${item.route}`];
   if (item.query && Object.keys(item.query).length) {
@@ -1349,10 +1373,65 @@ function fmtApiRequestText(item) {
   return lines.join('\n');
 }
 
-function FailedRequestsPanel({ data, loading, onReload }) {
+function FailedRequestsPager({ offset, limit, total, onChange, loading }) {
+  const page = Math.floor(offset / limit) + 1;
+  const pages = Math.max(1, Math.ceil((total || 0) / limit));
+  const from = total ? offset + 1 : 0;
+  const to = Math.min(offset + limit, total || 0);
+
+  return (
+    <div className="row" style={{ gap: 10, flexWrap: 'wrap', alignItems: 'center', justifyContent: 'space-between' }}>
+      <span style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-secondary)' }}>
+        {total ? `${from}–${to} из ${total}` : 'нет записей'}
+      </span>
+      <div className="row" style={{ gap: 8, alignItems: 'center' }}>
+        <select
+          className="input"
+          value={limit}
+          disabled={loading}
+          onChange={(e) => onChange({ offset: 0, limit: Number(e.target.value) })}
+          style={{ width: 90 }}
+          title="Записей на странице"
+        >
+          {FAILED_REQUESTS_PAGE_SIZES.map((n) => (
+            <option key={n} value={n}>{n}</option>
+          ))}
+        </select>
+        <Button
+          kind="ghost"
+          size="sm"
+          disabled={loading || page <= 1}
+          onClick={() => onChange({ offset: Math.max(0, offset - limit), limit })}
+        >
+          Назад
+        </Button>
+        <span style={{ font: 'var(--pv-text-body-3)', minWidth: 70, textAlign: 'center' }}>
+          {page} / {pages}
+        </span>
+        <Button
+          kind="ghost"
+          size="sm"
+          disabled={loading || page >= pages}
+          onClick={() => onChange({ offset: offset + limit, limit })}
+        >
+          Далее
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+function FailedRequestsPanel({ data, loading, onReload, page, onPageChange }) {
   const [expandedId, setExpandedId] = React.useState(null);
   const items = data?.items || [];
-  const latest = items[0] || null;
+  const total = data?.total ?? 0;
+  const offset = page?.offset ?? 0;
+  const limit = page?.limit ?? FAILED_REQUESTS_DEFAULT_LIMIT;
+  const latest = offset === 0 ? (items[0] || null) : null;
+
+  React.useEffect(() => {
+    setExpandedId(null);
+  }, [offset, limit]);
 
   async function handleCopy(label, text) {
     try {
@@ -1367,7 +1446,7 @@ function FailedRequestsPanel({ data, loading, onReload }) {
     <div className="col" style={{ gap: 14 }}>
       <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
         <div style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-secondary)', maxWidth: 760 }}>
-          Журнал неуспешных API-запросов (4xx/5xx) с SQL для анализа в ClickHouse. Хранение {data?.retentionDays ?? 3} дн. в SQLite.
+          Ошибки API и ClickHouse (без 401/403). Хранение {data?.retentionDays ?? 3} дн. в SQLite.
         </div>
         <Button kind="ghost" icon="refresh" onClick={onReload} disabled={loading}>
           {loading ? 'Обновление…' : 'Обновить'}
@@ -1376,9 +1455,9 @@ function FailedRequestsPanel({ data, loading, onReload }) {
 
       <div className="row" style={{ gap: 10, flexWrap: 'wrap' }}>
         {[
-          ['Записей', data?.total ?? '—'],
+          ['Всего записей', total || '—'],
           ['На странице', items.length || '—'],
-          ['Последняя ошибка', latest ? fmtDiagTime(latest.at) : '—'],
+          ['Последняя ошибка', latest ? fmtDiagTime(latest.at) : (total ? 'см. стр. 1' : '—')],
         ].map(([label, value]) => (
           <div
             key={label}
@@ -1395,8 +1474,24 @@ function FailedRequestsPanel({ data, loading, onReload }) {
         ))}
       </div>
 
+      <FailedRequestsPager
+        offset={offset}
+        limit={limit}
+        total={total}
+        loading={loading}
+        onChange={onPageChange}
+      />
+
       <Card title="Упавшие запросы">
-        <table style={{ width: '100%', borderCollapse: 'collapse', font: 'var(--pv-text-body-3)' }}>
+        <table style={{ width: '100%', tableLayout: 'fixed', borderCollapse: 'collapse', font: 'var(--pv-text-body-3)' }}>
+          <colgroup>
+            <col style={{ width: '12%' }} />
+            <col style={{ width: '7%' }} />
+            <col style={{ width: '24%' }} />
+            <col style={{ width: '7%' }} />
+            <col style={{ width: '7%' }} />
+            <col style={{ width: '43%' }} />
+          </colgroup>
           <thead>
             <tr>
               <th style={{ textAlign: 'left', padding: 6 }}>время</th>
@@ -1414,13 +1509,23 @@ function FailedRequestsPanel({ data, loading, onReload }) {
                   onClick={() => setExpandedId((cur) => (cur === item.id ? null : item.id))}
                   style={{ cursor: 'pointer', background: expandedId === item.id ? 'var(--surf-2)' : 'transparent' }}
                 >
-                  <td style={{ padding: 6 }} className="mono">{fmtDiagTime(item.at)}</td>
-                  <td style={{ padding: 6 }} className="mono">{item.method}</td>
-                  <td style={{ padding: 6 }} className="mono">{item.route}</td>
-                  <td style={{ padding: 6, textAlign: 'right' }} className="mono">{item.statusCode}</td>
-                  <td style={{ padding: 6, textAlign: 'right' }} className="mono">{item.elapsedMs ?? '—'}</td>
-                  <td style={{ padding: 6, color: 'var(--st-critical)' }}>
-                    {item.error?.length > 120 ? `${item.error.slice(0, 120)}…` : (item.error || '—')}
+                  <td style={{ padding: 6, whiteSpace: 'nowrap' }} className="mono">{fmtDiagTime(item.at)}</td>
+                  <td style={{ padding: 6, whiteSpace: 'nowrap' }} className="mono">{item.method}</td>
+                  <td style={{ padding: 6, overflow: 'hidden', minWidth: 0, maxWidth: 0 }}>
+                    <OverflowText
+                      mode="middle"
+                      value={fmtFailedRequestRouteShort(item.route)}
+                      title={item.route}
+                      className="mono"
+                    />
+                  </td>
+                  <td style={{ padding: 6, textAlign: 'right', whiteSpace: 'nowrap' }} className="mono">{item.statusCode}</td>
+                  <td style={{ padding: 6, textAlign: 'right', whiteSpace: 'nowrap' }} className="mono">{item.elapsedMs ?? '—'}</td>
+                  <td style={{ padding: 6, color: 'var(--st-critical)', overflow: 'hidden' }}>
+                    <OverflowText
+                      value={fmtFailedRequestErrorShort(item.error)}
+                      title={item.error || ''}
+                    />
                   </td>
                 </tr>
                 {expandedId === item.id && (
@@ -1431,11 +1536,35 @@ function FailedRequestsPanel({ data, loading, onReload }) {
                           <Button kind="ghost" onClick={() => handleCopy('API-запрос', fmtApiRequestText(item))}>
                             Копировать API
                           </Button>
+                          {item.error && (
+                            <Button kind="ghost" onClick={() => handleCopy('Ошибка', item.error)}>
+                              Копировать ошибку
+                            </Button>
+                          )}
                           {item.sql?.inlined && (
                             <Button kind="ghost" onClick={() => handleCopy('SQL', item.sql.inlined)}>
                               Копировать SQL
                             </Button>
                           )}
+                        </div>
+
+                        <div>
+                          <div style={{ font: 'var(--pv-text-body-3-bold)', marginBottom: 6 }}>Ошибка</div>
+                          <pre style={{
+                            margin: 0,
+                            padding: 10,
+                            borderRadius: 8,
+                            background: 'var(--surf-1)',
+                            border: '1px solid var(--bd-soft)',
+                            whiteSpace: 'pre-wrap',
+                            wordBreak: 'break-word',
+                            font: 'var(--pv-text-body-3)',
+                            maxHeight: 240,
+                            overflow: 'auto',
+                            color: 'var(--st-critical)',
+                          }}>
+                            {item.error || '—'}
+                          </pre>
                         </div>
 
                         <div>
@@ -1498,6 +1627,14 @@ function FailedRequestsPanel({ data, loading, onReload }) {
         </table>
       </Card>
 
+      <FailedRequestsPager
+        offset={offset}
+        limit={limit}
+        total={total}
+        loading={loading}
+        onChange={onPageChange}
+      />
+
       {data?.checkedAt && (
         <div style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-muted)' }}>
           Проверено: <span className="mono">{fmtDiagTime(data.checkedAt)}</span>
@@ -1515,6 +1652,10 @@ function PageDiagnostics() {
   const [boundsData, setBoundsData] = useState(null);
   const [snapshotsData, setSnapshotsData] = useState(null);
   const [failuresData, setFailuresData] = useState(null);
+  const [failuresPage, setFailuresPage] = useState({
+    limit: FAILED_REQUESTS_DEFAULT_LIMIT,
+    offset: 0,
+  });
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(true);
   const [buildInfo, setBuildInfo] = useState(null);
@@ -1546,7 +1687,10 @@ function PageDiagnostics() {
           : tab === 'snapshots'
             ? ApiClient.loadAnalysisSnapshotsDiagnostics()
             : tab === 'failures'
-              ? ApiClient.loadFailedRequestsDiagnostics()
+              ? ApiClient.loadFailedRequestsDiagnostics({
+                limit: failuresPage.limit,
+                offset: failuresPage.offset,
+              })
               : ApiClient.loadWorkerDiagnostics();
     loader
       .then((body) => {
@@ -1554,8 +1698,13 @@ function PageDiagnostics() {
         else if (tab === 'snmp') setSnmpData(body);
         else if (tab === 'bounds') setBoundsData(body);
         else if (tab === 'snapshots') setSnapshotsData(body);
-        else if (tab === 'failures') setFailuresData(body);
-        else setWorkerData(body);
+        else if (tab === 'failures') {
+          if (body?.total && failuresPage.offset >= body.total && failuresPage.offset > 0) {
+            setFailuresPage((prev) => ({ ...prev, offset: 0 }));
+            return;
+          }
+          setFailuresData(body);
+        } else setWorkerData(body);
         setError('');
         setLoading(false);
       })
@@ -1563,7 +1712,7 @@ function PageDiagnostics() {
         setError(e.message);
         setLoading(false);
       });
-  }, [tab]);
+  }, [tab, failuresPage.limit, failuresPage.offset]);
 
   useEffect(() => {
     reload({ initial: true });
@@ -1678,6 +1827,8 @@ function PageDiagnostics() {
         <FailedRequestsPanel
           data={failuresData}
           loading={loading}
+          page={failuresPage}
+          onPageChange={setFailuresPage}
           onReload={() => reload({ initial: false })}
         />
       )}
