@@ -28,7 +28,7 @@ def log(msg: str) -> None:
     print(f"{ts} {msg}", flush=True)
 
 
-def run_locked(name: str, script: str, lock_path: str) -> None:
+def run_locked(name: str, script: str, lock_path: str) -> int:
     # Skip bgp while heavy RIR lock is held.
     if name == "bgp-origin":
         try:
@@ -40,7 +40,7 @@ def run_locked(name: str, script: str, lock_path: str) -> None:
                 log(f"{name}: skip (geoloaderd heavy lock held)")
                 heavy.close()
                 _report_skipped(name, "geoloaderd heavy lock held")
-                return
+                return 0
             heavy.close()
         except OSError as e:
             log(f"{name}: heavy-lock check failed: {e}")
@@ -52,12 +52,13 @@ def run_locked(name: str, script: str, lock_path: str) -> None:
         log(f"{name}: skip (already running)")
         lockf.close()
         _report_skipped(name, "already running")
-        return
+        return 0
 
     log(f"{name}: start {script}")
     try:
         proc = subprocess.run([script], check=False)
         log(f"{name}: exit={proc.returncode}")
+        return proc.returncode
     finally:
         fcntl.flock(lockf.fileno(), fcntl.LOCK_UN)
         lockf.close()
@@ -185,6 +186,10 @@ def main() -> int:
         "asn-names": "default.asn_names",
         "iptoasn": "default.ip_asn_prefixes_current",
     }
+    # After a failed first-fill do not wait a full day/week. iptoasn.com
+    # often times out on a cold start; retry in 15 minutes until the table
+    # has rows.
+    empty_retry_sec = 900
     for name, table in empty_start.items():
         rows = _table_rows(table)
         if rows is None or rows == 0:
@@ -197,8 +202,14 @@ def main() -> int:
         now = time.time()
         for name, script, interval, lock_path in JOBS:
             if now - last_run[name] >= interval:
+                rc = run_locked(name, script, lock_path)
                 last_run[name] = now
-                run_locked(name, script, lock_path)
+                table = empty_start.get(name)
+                if rc != 0 and table:
+                    rows = _table_rows(table)
+                    if rows is None or rows == 0:
+                        last_run[name] = now - interval + empty_retry_sec
+                        log(f"{name}: empty after failure — retry in {empty_retry_sec}s")
         time.sleep(30)
 
 

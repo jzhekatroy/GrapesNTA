@@ -24,6 +24,8 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
+import urllib.error
 import urllib.request
 from datetime import datetime, timezone
 from typing import Iterator, List, Optional, Sequence, Tuple
@@ -108,22 +110,38 @@ def swap_tables(base: Sequence[str], staging_table: str, current_table: str) -> 
     )
 
 
-def download(url: str, path: str, timeout: float) -> int:
-    tmp = path + ".tmp"
-    try:
-        req = urllib.request.Request(url, headers={"User-Agent": "GrapesNTA-iptoasn-loader/1.0"})
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            code = getattr(resp, "status", None) or resp.getcode()
-            if code != 200:
-                raise RuntimeError(f"{url}: HTTP {code}")
-            data = resp.read()
-        with open(tmp, "wb") as f:
-            f.write(data)
-        os.replace(tmp, path)
-        return len(data)
-    finally:
-        if os.path.exists(tmp):
-            os.remove(tmp)
+def download(url: str, path: str, timeout: float, retries: int = 3) -> int:
+    last_err: Optional[BaseException] = None
+    attempts = max(int(retries), 1)
+    for attempt in range(1, attempts + 1):
+        tmp = path + ".tmp"
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "GrapesNTA-iptoasn-loader/1.0"})
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                code = getattr(resp, "status", None) or resp.getcode()
+                if code != 200:
+                    raise RuntimeError(f"{url}: HTTP {code}")
+                written = 0
+                with open(tmp, "wb") as f:
+                    while True:
+                        chunk = resp.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        f.write(chunk)
+                        written += len(chunk)
+            os.replace(tmp, path)
+            tmp = ""
+            return written
+        except (TimeoutError, OSError, urllib.error.URLError, RuntimeError) as exc:
+            last_err = exc
+            print(f"download attempt {attempt}/{attempts} failed: {exc}", file=sys.stderr)
+            if attempt < attempts:
+                time.sleep(min(30, 5 * attempt))
+        finally:
+            if tmp and os.path.exists(tmp):
+                os.remove(tmp)
+    assert last_err is not None
+    raise last_err
 
 
 def iter_prefix_rows(gz_path: str, snapshot_ts: str) -> Iterator[Tuple[str, int, int, str, str, str, str]]:
@@ -188,7 +206,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--cache-dir", default=env("IPTOASN_CACHE_DIR", "/var/lib/iptoasn-loader/cache"))
     p.add_argument("--current-table", default=env("IPTOASN_CH_TABLE", "default.ip_asn_prefixes_current"))
     p.add_argument("--staging-table", default=env("IPTOASN_CH_STAGING", "default.ip_asn_prefixes_staging"))
-    p.add_argument("--timeout", type=float, default=float(env("IPTOASN_TIMEOUT", "180") or 180))
+    p.add_argument("--timeout", type=float, default=float(env("IPTOASN_TIMEOUT", "600") or 600))
     p.add_argument("--min-rows", type=int, default=int(env("IPTOASN_MIN_ROWS", "100000") or 100000))
     p.add_argument("--skip-download", action="store_true", default=env("IPTOASN_SKIP_DOWNLOAD") == "1")
     return p.parse_args()

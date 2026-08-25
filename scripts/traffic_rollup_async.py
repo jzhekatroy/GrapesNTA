@@ -247,7 +247,7 @@ def save_state(
         "INSERT INTO default.traffic_rollup_state "
         "(job, last_bucket, status, last_error, rows_written, duration_ms, updated_at) "
         f"VALUES ('{job_id}', toDateTime('{fmt_dt(bucket)}', 'UTC'), "
-        f"'{status}', '{err}', {rows_written}, {duration_ms}, now())"
+        f"'{status}', '{err}', {rows_written}, {duration_ms}, now('UTC'))"
     )
     ch.execute(sql, display=f"save state for {job_id}")
 
@@ -716,6 +716,122 @@ def next_bucket(
     return truncate_bucket(add_bucket(state.last_bucket, job.bucket_kind), job.bucket_kind)
 
 
+def clamp_future_last_bucket(
+    job: RollupJob,
+    state: Optional[JobState],
+    *,
+    now: datetime,
+    safety_lag_minutes: int,
+) -> Optional[datetime]:
+    """If last_bucket is in the future, rewind to the live closed edge.
+
+    A leftover or TZ-mixed cursor (last_bucket > now) makes next_bucket stay
+    ahead of safe_until forever, so every tick skips with reason=safe_lag.
+    Returns the new last_bucket, or None if no clamp is needed.
+    """
+    if state is None or state.last_bucket is None:
+        return None
+    if state.last_bucket <= now:
+        return None
+    edge = truncate_bucket(now - timedelta(minutes=max(int(safety_lag_minutes), 0)), job.bucket_kind)
+    return subtract_bucket(edge, job.bucket_kind)
+
+
+def dest_max_bucket(ch: ClickHouseClient, job: RollupJob) -> Optional[datetime]:
+    raw = ch.query(
+        f"SELECT max({bucket_column(job)}) FROM {job.dest_table}",
+        display=f"dest max for {job.job_id}",
+    ).strip()
+    if not raw or raw.startswith("1970-01-01"):
+        return None
+    try:
+        return parse_utc_dt(raw)
+    except ValueError:
+        return None
+
+
+def flows_raw_enabled_max_minute(
+    ch: ClickHouseClient,
+    cache: Optional[Dict[str, Optional[datetime]]] = None,
+) -> Optional[datetime]:
+    cache_key = "enabled_max_minute"
+    if cache is not None and cache_key in cache:
+        return cache[cache_key]
+    raw = ch.query(
+        "SELECT toStartOfMinute(max(time_received_ns)) "
+        "FROM default.flows_raw "
+        "WHERE date >= today() - 1 "
+        "AND source_id IN (SELECT source_id FROM default.net_flow_sources_enabled)",
+        display="flows_raw enabled max minute",
+    ).strip()
+    result: Optional[datetime] = None
+    if raw and not raw.startswith("1970-01-01"):
+        try:
+            result = parse_utc_dt(raw)
+        except ValueError:
+            result = None
+    if cache is not None:
+        cache[cache_key] = result
+    return result
+
+
+def rewind_if_dest_lags_raw(
+    ch: ClickHouseClient,
+    logger: logging.Logger,
+    job: RollupJob,
+    bucket_start: datetime,
+    job_until: datetime,
+    states: Dict[str, JobState],
+    *,
+    safety_lag_minutes: int,
+    raw_max_cache: Optional[Dict[str, Optional[datetime]]],
+    dry_run: bool,
+) -> datetime:
+    """Rewind a live-edge cursor if dest tables missed newly enabled sources.
+
+    skip_forward only jumps *old* cursors toward the first raw minute. When a
+    source is added after the cursor already reached now, dest.max stays stale
+    while last_bucket keeps skipping safe_lag. Re-open dest.max so those
+    minutes are aggregated again (writes are idempotent).
+    """
+    if job.source_table != "default.flows_raw":
+        return bucket_start
+    dest_max = dest_max_bucket(ch, job)
+    if dest_max is None:
+        return bucket_start
+    if bucket_start <= add_bucket(dest_max, job.bucket_kind):
+        return bucket_start
+    # Stay at least two closed buckets behind the live edge to avoid a
+    # rewind → still-safe_lag loop on the same tick.
+    if dest_max >= subtract_bucket(job_until, job.bucket_kind):
+        return bucket_start
+    raw_max = flows_raw_enabled_max_minute(ch, raw_max_cache)
+    if raw_max is None:
+        return bucket_start
+    raw_edge = truncate_bucket(
+        raw_max - timedelta(minutes=max(int(safety_lag_minutes), 0)),
+        job.bucket_kind,
+    )
+    if dest_max >= raw_edge:
+        return bucket_start
+    logger.info(
+        "job=%s action=rewind_dest_lag dest_max=%s cursor=%s raw_max=%s new_last=%s",
+        job.job_id,
+        fmt_dt(dest_max),
+        fmt_dt(bucket_start),
+        fmt_dt(raw_max),
+        fmt_dt(dest_max),
+    )
+    if not dry_run:
+        save_state(ch, job.job_id, dest_max, "rewind_dest_lag", "", 0, 0)
+    states[job.job_id] = JobState(
+        last_bucket=dest_max,
+        status="rewind_dest_lag",
+        last_error="",
+    )
+    return add_bucket(dest_max, job.bucket_kind)
+
+
 def parse_args() -> argparse.Namespace:
     port_s = env("TRAFFIC_ROLLUP_CH_PORT", env("GEOLOADERD_CH_PORT", "6124"))
     parser = argparse.ArgumentParser(description="Async GrapesNTA traffic rollups")
@@ -871,6 +987,16 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=int(env("TRAFFIC_ROLLUP_QUERY_TIMEOUT_SEC", "180") or "180"),
         help="abort a single ClickHouse query after this many seconds (0 = wait forever)",
+    )
+    parser.add_argument(
+        "--rewind-minutes",
+        type=int,
+        default=int(env("TRAFFIC_ROLLUP_REWIND_MINUTES", "0") or "0"),
+        help=(
+            "one-shot: set last_bucket of minute jobs to now()-N so the next "
+            "buckets (including newly enabled sources) are re-aggregated. "
+            "Hourly/daily cursors in the future are clamped separately"
+        ),
     )
     return parser.parse_args()
 
@@ -1533,6 +1659,25 @@ def run_live(args: argparse.Namespace, logger: logging.Logger) -> int:
     states = load_states(ch)
     until = safe_until(args)
     raw_min_cache: Dict[str, Optional[datetime]] = {}
+    rewind_minutes = max(0, int(getattr(args, "rewind_minutes", 0) or 0))
+    if rewind_minutes > 0:
+        target = truncate_bucket(utc_now() - timedelta(minutes=rewind_minutes), "minute")
+        new_last = subtract_bucket(target, "minute")
+        for job in jobs:
+            if job.bucket_kind != "minute":
+                continue
+            logger.info(
+                "job=%s action=rewind_minutes last_bucket=%s",
+                job.job_id,
+                fmt_dt(new_last),
+            )
+            if not args.dry_run:
+                save_state(ch, job.job_id, new_last, "rewind", "", 0, 0)
+            states[job.job_id] = JobState(
+                last_bucket=new_last,
+                status="rewind",
+                last_error="",
+            )
     logger.info(
         "run start jobs=%s max_buckets_per_job=%s sleep_between_buckets=%s safe_until=%s dry_run=%s",
         ",".join(job.job_id for job in jobs),
@@ -1565,6 +1710,24 @@ def run_live(args: argparse.Namespace, logger: logging.Logger) -> int:
                 break
 
             state = states.get(job.job_id)
+            clamped = clamp_future_last_bucket(
+                job,
+                state,
+                now=utc_now(),
+                safety_lag_minutes=args.safety_lag_minutes,
+            )
+            if clamped is not None:
+                logger.warning(
+                    "job=%s action=clamp_future last_bucket=%s now=%s new_last=%s",
+                    job.job_id,
+                    fmt_dt(state.last_bucket) if state and state.last_bucket else "-",
+                    fmt_dt(utc_now()),
+                    fmt_dt(clamped),
+                )
+                if not args.dry_run:
+                    save_state(ch, job.job_id, clamped, "clamp_future", "", 0, 0)
+                state = JobState(last_bucket=clamped, status="clamp_future", last_error="")
+                states[job.job_id] = state
             bucket_start = next_bucket(
                 job,
                 state,
@@ -1584,12 +1747,39 @@ def run_live(args: argparse.Namespace, logger: logging.Logger) -> int:
             bucket_end = add_bucket(bucket_start, job.bucket_kind)
 
             if bucket_start >= job_until:
+                rewound = rewind_if_dest_lags_raw(
+                    ch,
+                    logger,
+                    job,
+                    bucket_start,
+                    job_until,
+                    states,
+                    safety_lag_minutes=args.safety_lag_minutes,
+                    raw_max_cache=raw_min_cache,
+                    dry_run=args.dry_run,
+                )
+                if rewound < job_until:
+                    continue
                 logger.info(
                     "job=%s action=skip reason=safe_lag bucket=%s safe_until=%s",
                     job.job_id,
                     fmt_dt(bucket_start),
                     fmt_dt(job_until),
                 )
+                # Live edge: touch updated_at so Diagnostics does not treat a
+                # healthy skip as "the job died".
+                if not args.dry_run:
+                    heartbeat = (
+                        state.last_bucket
+                        if state and state.last_bucket
+                        else subtract_bucket(bucket_start, job.bucket_kind)
+                    )
+                    save_state(ch, job.job_id, heartbeat, "ok", "", 0, 0)
+                    states[job.job_id] = JobState(
+                        last_bucket=heartbeat,
+                        status="ok",
+                        last_error="",
+                    )
                 skip_count += 1
                 break
 
