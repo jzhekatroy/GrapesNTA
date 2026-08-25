@@ -56,7 +56,7 @@ func nfHeader(count uint16, sysUp, unixSecs, seq, domain uint32) []byte {
 	return b
 }
 
-func nfTemplateFlowset(tid uint16, fields []nfField) []byte {
+func buildNFTemplateFlowset(tid uint16, fields []nfField) []byte {
 	body := putU16(nil, tid)
 	body = putU16(body, uint16(len(fields)))
 	for _, f := range fields {
@@ -120,7 +120,7 @@ func TestNetFlowV9CiscoTemplate(t *testing.T) {
 	sysUp := uint32(394_900_000)
 	unixSecs := uint32(1_787_649_533)
 	first := sysUp - 1_500
-	pkt := append(nfHeader(2, sysUp, unixSecs, 1, 1536), nfTemplateFlowset(257, ciscoV4Fields)...)
+	pkt := append(nfHeader(2, sysUp, unixSecs, 1, 1536), buildNFTemplateFlowset(257, ciscoV4Fields)...)
 	pkt = append(pkt, nfDataFlowset(257, ciscoRecord("10.1.2.3", "10.4.5.6", 443, 51234, 6, 408, 6, 31, 198, first, sysUp))...)
 
 	rows := parseNF(t, p, pkt)
@@ -176,7 +176,7 @@ func TestNetFlowV9UnknownTemplateDropped(t *testing.T) {
 
 func TestNetFlowV9DomainsDoNotShareTemplates(t *testing.T) {
 	p := newNFParser(nil, "netflow-default", 1, time.Hour, nil)
-	learn := append(nfHeader(1, 1, 1, 1, 1536), nfTemplateFlowset(257, ciscoV4Fields)...)
+	learn := append(nfHeader(1, 1, 1, 1, 1536), buildNFTemplateFlowset(257, ciscoV4Fields)...)
 	_ = parseNF(t, p, learn)
 	other := append(nfHeader(1, 1, 1, 2, 1280), nfDataFlowset(257, ciscoRecord("10.0.0.1", "10.0.0.2", 1, 2, 17, 76, 1, 1, 2, 1, 1))...)
 	if rows := parseNF(t, p, other); len(rows) != 0 {
@@ -230,7 +230,7 @@ func TestNetFlowV9SamplingFromOptionTemplate(t *testing.T) {
 
 	rec := ciscoRecord("10.1.2.3", "10.4.5.6", 80, 9, 6, 100, 2, 1, 2, 1, 1)
 	rec[38] = 7 // FLOW_SAMPLER_ID sits after first/last/bytes/pkts/ifaces/addrs/proto/tos/ports
-	data := append(nfHeader(1, 1, 1, 2, 1536), nfTemplateFlowset(257, ciscoV4Fields)...)
+	data := append(nfHeader(1, 1, 1, 2, 1536), buildNFTemplateFlowset(257, ciscoV4Fields)...)
 	data = append(data, nfDataFlowset(257, rec)...)
 	rows := parseNF(t, p, data)
 	if len(rows) != 1 {
@@ -249,7 +249,7 @@ func TestNetFlowV9SamplingFromOptionTemplate(t *testing.T) {
 
 func TestNetFlowV9ConfigRateWhenNoOption(t *testing.T) {
 	p := newNFParser(nil, "netflow-default", 64, time.Hour, nil)
-	pkt := append(nfHeader(2, 1, 1, 1, 1536), nfTemplateFlowset(257, ciscoV4Fields)...)
+	pkt := append(nfHeader(2, 1, 1, 1, 1536), buildNFTemplateFlowset(257, ciscoV4Fields)...)
 	pkt = append(pkt, nfDataFlowset(257, ciscoRecord("10.0.0.1", "10.0.0.2", 1, 2, 17, 80, 1, 1, 2, 1, 1))...)
 	rows := parseNF(t, p, pkt)
 	if len(rows) != 1 || rows[0].SamplingRate != 64 || rows[0].Bytes != 80*64 {
