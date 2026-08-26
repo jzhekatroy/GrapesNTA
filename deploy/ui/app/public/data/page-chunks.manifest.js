@@ -77,6 +77,7 @@ const PAGE_CHUNKS_MANIFEST = {
     },
     observations: {
       scripts: ['/pages/observations.jsx'],
+      exports: { default: 'PageObservations' },
     },
     users: {
       scripts: ['/pages/users.jsx'],
