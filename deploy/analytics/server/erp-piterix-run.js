@@ -37,6 +37,7 @@ const {
   resolveErpConfig,
 } = require('./erp-piterix-settings');
 const { buildReportRows, summarizeReport, reportToCsv } = require('./erp-piterix-report');
+const { refreshEffectiveRolesAfterClientPorts } = require('./refresh-effective-roles');
 
 const LOG_TABLE = 'erp_piterix_sync_log';
 const REPORT_TABLE = 'erp_piterix_report_rows';
@@ -431,6 +432,10 @@ async function applySync(db, {
   if (clientRows.length) await db.insert('net_clients', clientRows);
   if (portRows.length) await db.insert('net_client_ports', portRows);
   if (prefixRows.length) await db.insert('net_client_prefixes', prefixRows);
+
+  if (mode === 'ports' && (portRows.length || clientRows.length)) {
+    await refreshEffectiveRolesAfterClientPorts();
+  }
 
   const reportRows = buildReportRows({
     clients,

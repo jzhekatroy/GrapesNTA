@@ -7,6 +7,7 @@ const {
   netInterfacesCurrentRef,
 } = require('../clickhouse');
 const { asStringArray } = require('../client-search');
+const { refreshEffectiveRolesAfterClientPorts } = require('../refresh-effective-roles');
 
 const CLIENTS_TABLE = 'net_clients';
 const CLIENT_PREFIXES_TABLE = 'net_client_prefixes';
@@ -465,7 +466,13 @@ async function updateClient(clientId, body = {}) {
     updated_at: clickhouseDateTime(),
   };
   const { elapsedMs } = await insertRows(CLIENTS_TABLE, [record], { name: 'cabinet/client-update' });
-  return { data: await getClientAdmin(clientId, { useWrite: true }), meta: { elapsedMs } };
+  const data = await getClientAdmin(clientId, { useWrite: true });
+  const portsTouched = String(existing.bind_mode) === 'ports' || bindMode === 'ports';
+  const enabledChanged = enabled !== (Number(existing.enabled) === 1 ? 1 : 0);
+  if (portsTouched && enabledChanged) {
+    await refreshEffectiveRolesAfterClientPorts();
+  }
+  return { data, meta: { elapsedMs } };
 }
 
 async function listClientPrefixes(clientId) {
@@ -669,7 +676,11 @@ async function syncClientPorts(clientId, body = {}) {
     await insertRows(CLIENT_PORTS_TABLE, inserts, { name: 'cabinet/client-ports-sync' });
   }
 
-  return listClientPorts(clientId);
+  const result = await listClientPorts(clientId);
+  if (inserts.length) {
+    await refreshEffectiveRolesAfterClientPorts();
+  }
+  return result;
 }
 
 async function listPrefixOptions({ q = '', limit = 50 } = {}) {
