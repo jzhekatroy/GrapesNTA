@@ -4047,6 +4047,15 @@ function ExplorerGroupChip({ token, dimension, onChange, onRemove }) {
   );
 }
 
+function explorerCatalogConditionCountLabel(count) {
+  const n = Number(count) || 0;
+  const mod10 = n % 10;
+  const mod100 = n % 100;
+  if (mod10 === 1 && mod100 !== 11) return `${n} условие`;
+  if (mod10 >= 2 && mod10 <= 4 && (mod100 < 10 || mod100 >= 20)) return `${n} условия`;
+  return `${n} условий`;
+}
+
 function explorerCatalogFieldList(schema, items, { excludeIds = [] } = {}) {
   const exclude = new Set(excludeIds);
   const visible = items.filter((item) => item && !exclude.has(item.id));
@@ -4068,7 +4077,6 @@ function ExplorerCatalogFieldPickerPanel({
   menuStyle,
   schema,
   items,
-  leadingItems = [],
   excludeIds = [],
   selectedIds = [],
   onPick,
@@ -4082,14 +4090,6 @@ function ExplorerCatalogFieldPickerPanel({
     [schema, items, excludeIds],
   );
   const needle = q.trim();
-  const pinnedItems = useMemo(
-    () => (Array.isArray(leadingItems) ? leadingItems : []).filter(Boolean),
-    [leadingItems],
-  );
-  const searchableItems = useMemo(
-    () => [...pinnedItems, ...visible],
-    [pinnedItems, visible],
-  );
 
   useEffect(() => {
     if (needle) setActiveCatalog(null);
@@ -4097,8 +4097,8 @@ function ExplorerCatalogFieldPickerPanel({
 
   const searchResults = useMemo(() => {
     if (!needle) return [];
-    return searchableItems.filter((item) => explorerFieldMatchesQuery(item, needle));
-  }, [searchableItems, needle]);
+    return visible.filter((item) => explorerFieldMatchesQuery(item, needle));
+  }, [visible, needle]);
 
   const activeCatalogEntry = useMemo(
     () => catalogs.find((catalog) => catalog.id === activeCatalog) || null,
@@ -4126,6 +4126,23 @@ function ExplorerCatalogFieldPickerPanel({
     borderRadius: 8,
     cursor: 'pointer',
   };
+
+  const renderCatalogButton = (catalog) => (
+    <button
+      key={catalog.id}
+      type="button"
+      className="explorer-catalog-picker__catalog"
+      onClick={() => setActiveCatalog(catalog.id)}
+    >
+      <span className="explorer-catalog-picker__catalog-main">
+        <span className="explorer-catalog-picker__catalog-label">{catalog.label}</span>
+        <span className="explorer-catalog-picker__catalog-meta">
+          {explorerCatalogConditionCountLabel(catalog.fields.length)} · нажмите, чтобы раскрыть
+        </span>
+      </span>
+      <Icon name="chevR" size={14} className="explorer-catalog-picker__catalog-chevron" />
+    </button>
+  );
 
   const renderFieldButton = (item, { catalogLabel = null } = {}) => {
     const disabled = selectedIds.includes(item.id);
@@ -4162,27 +4179,17 @@ function ExplorerCatalogFieldPickerPanel({
       <>
         <button
           type="button"
-          className="btn btn--ghost btn--sm"
-          style={{ marginBottom: 6 }}
+          className="btn btn--ghost btn--sm explorer-catalog-picker__back"
           onClick={() => setActiveCatalog(null)}
         >
-          ← Назад
+          ← {activeCatalogEntry.label}
         </button>
         {activeCatalogEntry.fields.map((item) => renderFieldButton(item))}
       </>
     ) : (
       <>
-        {pinnedItems.map((item) => renderFieldButton(item))}
-        {catalogs.map((catalog) => (
-          <button
-            key={catalog.id}
-            type="button"
-            onClick={() => setActiveCatalog(catalog.id)}
-            style={itemButtonStyle}
-          >
-            {catalog.label}
-          </button>
-        ))}
+        <div className="explorer-catalog-picker__hint">Выберите категорию — внутри список условий</div>
+        {catalogs.map((catalog) => renderCatalogButton(catalog))}
       </>
     );
   } else {
@@ -4758,22 +4765,8 @@ function ExplorerAddFilterMenu({
   const panelRef = React.useRef(null);
   const [menuStyle, setMenuStyle] = useState(null);
 
-  const collectorItem = useMemo(() => {
-    const field = (schema?.filterFields || []).find((f) => f.id === 'collector');
-    if (!field) return null;
-    return {
-      id: field.id,
-      label: field.label,
-      group: field.group || 'Система / System',
-      hint: 'Локации и экспортёры',
-      valueHint: field.valueHint || 'Локации и экспортёры',
-      aliases: field.aliases || ['коллекторы'],
-    };
-  }, [schema]);
-
   const fieldItems = useMemo(
     () => (schema?.filterFields || [])
-      .filter((f) => f.id !== 'collector')
       .map((f) => ({
         id: f.id,
         label: f.label,
@@ -4836,7 +4829,6 @@ function ExplorerAddFilterMenu({
           menuStyle={menuStyle}
           schema={schema}
           items={fieldItems}
-          leadingItems={collectorItem ? [collectorItem] : []}
           onPick={pick}
           searchPlaceholder="Поиск фильтра..."
           useCatalogs={!cabinetMode}

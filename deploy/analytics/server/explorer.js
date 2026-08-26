@@ -270,7 +270,7 @@ const DIMENSION_GROUPS = {
   [EXPLORER_GROUP.PROTO]: ['proto', 'src_service', 'dst_service', 'tcp_flags'],
   [EXPLORER_GROUP.CLIENTS]: ['cabinet_client', 'client_direction'],
   [EXPLORER_GROUP.L2]: ['src_mac', 'dst_mac', 'vlan', 'vlan_name', 'src_vlan'],
-  [EXPLORER_GROUP.MY_NETWORK]: ['direction', 'l3_owner', 'own_network', 'src_entity', 'dst_entity'],
+  [EXPLORER_GROUP.MY_NETWORK]: ['collector', 'direction', 'l3_owner', 'own_network', 'src_entity', 'dst_entity'],
   [EXPLORER_GROUP.EQUIP]: [
     'switch_ip', 'in_if_name', 'in_if_alias', 'out_if_name', 'out_if_alias', 'source_id',
   ],
@@ -1237,7 +1237,7 @@ function explorerSchema(options = {}) {
   const collectorField = {
     id: 'collector',
     label: 'Коллектор / Collector',
-    group: 'Система / System',
+    group: EXPLORER_GROUP.MY_NETWORK,
     filterType: 'collector',
     ops: ['in', 'not_in', '=', '!='],
     valueHint: 'ID коллектора или loc:location-id',
