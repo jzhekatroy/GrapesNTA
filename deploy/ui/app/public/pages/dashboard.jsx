@@ -75,12 +75,24 @@ function OperatorDashboard({
     resizeWidget,
     resizeWidgetHeight,
     setWidgetVisible,
+    addStack,
+    extractFromStack,
   } = useDashboardLayout({ enabled: true, canEdit: canEditLayout });
 
-  const visibleIds = useMemo(
-    () => new Set(layout.widgets.filter((w) => w.visible).map((w) => w.id)),
-    [layout.widgets],
-  );
+  const visibleIds = useMemo(() => {
+    const widgets = layout.widgets || [];
+    const ids = new Set();
+    for (const widget of widgets) {
+      if (widget.visible === false) continue;
+      if (widget.parentStack) {
+        const stack = widgets.find((item) => item.id === widget.parentStack);
+        if (stack?.visible !== false) ids.add(widget.id);
+        continue;
+      }
+      ids.add(widget.id);
+    }
+    return ids;
+  }, [layout.widgets]);
   const needsStats = useMemo(
     () => STAT_WIDGET_IDS.some((id) => visibleIds.has(id)),
     [visibleIds],
@@ -492,6 +504,8 @@ function OperatorDashboard({
           editMode={editMode}
           onToggleEdit={setEditMode}
           onReset={resetLayout}
+          onAddVerticalStack={() => addStack('vertical')}
+          onAddHorizontalStack={() => addStack('horizontal')}
           saveState={saveState}
           canEdit={canEditLayout}
         />
@@ -506,6 +520,7 @@ function OperatorDashboard({
         onResizeWidget={resizeWidget}
         onResizeWidgetHeight={resizeWidgetHeight}
         onToggleWidgetVisible={setWidgetVisible}
+        onExtractFromStack={extractFromStack}
       />
 
       <OtherPortsModal

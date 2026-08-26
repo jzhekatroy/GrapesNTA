@@ -941,25 +941,27 @@ function explorerFieldMatchesQuery(field, q) {
   return id.includes(needle) || label.includes(needle);
 }
 
-function explorerSystemFilterDefs(schema) {
-  const direction = (schema?.filterFields || []).find((f) => f.id === 'direction');
-  const collector = (schema?.filterFields || []).find((f) => f.id === 'collector');
-  return [
-    direction && {
-      id: '__direction__',
-      label: direction.label,
-      group: direction.group || 'Система / System',
-      hint: 'Входящий, исходящий, транзит…',
-      aliases: direction.aliases || [],
-    },
-    collector && {
-      id: '__collector__',
-      label: collector.label,
-      group: collector.group || 'Система / System',
-      hint: 'Локации и экспортёры',
-      aliases: collector.aliases || ['коллекторы'],
-    },
-  ].filter(Boolean);
+function computeExplorerPopoverStyle(anchorEl, { minWidth = 280, maxHeight = 420, gap = 4 } = {}) {
+  const rect = anchorEl.getBoundingClientRect();
+  const pad = 8;
+  const width = Math.max(rect.width, minWidth);
+  const left = Math.min(Math.max(pad, rect.left), window.innerWidth - width - pad);
+  const below = window.innerHeight - rect.bottom - gap - pad;
+  const above = rect.top - gap - pad;
+  const preferBelow = below >= above;
+  const availableHeight = Math.max(120, Math.min(maxHeight, preferBelow ? below : above));
+  const top = preferBelow
+    ? rect.bottom + gap
+    : Math.max(pad, rect.top - gap - availableHeight);
+  return {
+    position: 'fixed',
+    top,
+    left,
+    width,
+    maxHeight: availableHeight,
+    zIndex: 1300,
+    overflowY: 'auto',
+  };
 }
 
 function explorerThresholdApi() {
@@ -3511,7 +3513,9 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
                     <DimensionPicker
                       anchorRef={dimAnchorRef}
                       dimensions={dimensions}
+                      schema={schema}
                       selected={groupBy.map(explorerGroupFieldId)}
+                      cabinetMode={cabinetMode}
                       onPick={(id) => {
                         if (!groupBy.some((token) => explorerGroupFieldId(token) === id)) {
                           setGroupBy(normalizeExplorerGroupTokens([...groupBy, id]));
@@ -3579,6 +3583,7 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
             thresholdPeakWarning={clientThresholdWarning}
             maxRangeDays={maxRangeDays}
             cabinetClientWarning={cabinetClientPeriodWarning}
+            cabinetMode={cabinetMode}
           />
         )}
 
@@ -4042,17 +4047,182 @@ function ExplorerGroupChip({ token, dimension, onChange, onRemove }) {
   );
 }
 
-function DimensionPicker({ anchorRef, dimensions, selected, onPick, onClose }) {
+function explorerCatalogFieldList(schema, items, { excludeIds = [] } = {}) {
+  const exclude = new Set(excludeIds);
+  const visible = items.filter((item) => item && !exclude.has(item.id));
+  const byId = Object.fromEntries(visible.map((item) => [item.id, item]));
+  const catalogs = Object.entries(schema?.dimensionGroups || {})
+    .map(([catalogName, fieldIds]) => ({
+      id: catalogName,
+      label: catalogName,
+      fields: (Array.isArray(fieldIds) ? fieldIds : [])
+        .map((id) => byId[id])
+        .filter(Boolean),
+    }))
+    .filter((catalog) => catalog.fields.length > 0);
+  return { visible, byId, catalogs };
+}
+
+function ExplorerCatalogFieldPickerPanel({
+  panelRef,
+  menuStyle,
+  schema,
+  items,
+  leadingItems = [],
+  excludeIds = [],
+  selectedIds = [],
+  onPick,
+  searchPlaceholder = 'Поиск...',
+  useCatalogs = true,
+}) {
   const [q, setQ] = useState('');
+  const [activeCatalog, setActiveCatalog] = useState(null);
+  const { visible, catalogs } = useMemo(
+    () => explorerCatalogFieldList(schema, items, { excludeIds }),
+    [schema, items, excludeIds],
+  );
+  const needle = q.trim();
+  const pinnedItems = useMemo(
+    () => (Array.isArray(leadingItems) ? leadingItems : []).filter(Boolean),
+    [leadingItems],
+  );
+  const searchableItems = useMemo(
+    () => [...pinnedItems, ...visible],
+    [pinnedItems, visible],
+  );
+
+  useEffect(() => {
+    if (needle) setActiveCatalog(null);
+  }, [needle]);
+
+  const searchResults = useMemo(() => {
+    if (!needle) return [];
+    return searchableItems.filter((item) => explorerFieldMatchesQuery(item, needle));
+  }, [searchableItems, needle]);
+
+  const activeCatalogEntry = useMemo(
+    () => catalogs.find((catalog) => catalog.id === activeCatalog) || null,
+    [catalogs, activeCatalog],
+  );
+
+  const flatGroups = useMemo(() => {
+    const grouped = {};
+    visible.forEach((item) => {
+      const key = item.group || 'Прочее';
+      grouped[key] = grouped[key] || [];
+      grouped[key].push(item);
+    });
+    return grouped;
+  }, [visible]);
+
+  if (!menuStyle) return null;
+
+  const itemButtonStyle = {
+    all: 'unset',
+    display: 'block',
+    width: '100%',
+    boxSizing: 'border-box',
+    padding: '8px 10px',
+    borderRadius: 8,
+    cursor: 'pointer',
+  };
+
+  const renderFieldButton = (item, { catalogLabel = null } = {}) => {
+    const disabled = selectedIds.includes(item.id);
+    const hint = item.valueHint || item.hint || null;
+    return (
+      <button
+        key={item.id}
+        type="button"
+        disabled={disabled}
+        onClick={() => { if (!disabled) onPick(item); }}
+        style={{
+          ...itemButtonStyle,
+          cursor: disabled ? 'default' : 'pointer',
+          color: disabled ? 'var(--fg-muted)' : 'var(--fg-primary)',
+        }}
+      >
+        <span>{item.label}</span>
+        {(catalogLabel || hint) && (
+          <div style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-muted)', marginTop: 2 }}>
+            {[catalogLabel, hint].filter(Boolean).join(' · ')}
+          </div>
+        )}
+      </button>
+    );
+  };
+
+  let body = null;
+  if (needle) {
+    body = searchResults.length === 0
+      ? <div style={{ padding: '8px 4px', color: 'var(--fg-secondary)', font: 'var(--pv-text-body-3)' }}>Ничего не найдено</div>
+      : searchResults.map((item) => renderFieldButton(item, { catalogLabel: item.group || null }));
+  } else if (useCatalogs && catalogs.length > 0) {
+    body = activeCatalogEntry ? (
+      <>
+        <button
+          type="button"
+          className="btn btn--ghost btn--sm"
+          style={{ marginBottom: 6 }}
+          onClick={() => setActiveCatalog(null)}
+        >
+          ← Назад
+        </button>
+        {activeCatalogEntry.fields.map((item) => renderFieldButton(item))}
+      </>
+    ) : (
+      <>
+        {pinnedItems.map((item) => renderFieldButton(item))}
+        {catalogs.map((catalog) => (
+          <button
+            key={catalog.id}
+            type="button"
+            onClick={() => setActiveCatalog(catalog.id)}
+            style={itemButtonStyle}
+          >
+            {catalog.label}
+          </button>
+        ))}
+      </>
+    );
+  } else {
+    body = Object.entries(flatGroups).map(([groupName, groupItems]) => (
+      <div key={groupName} className="explorer-picker-group">
+        {groupName && <div className="explorer-picker-group__heading">{groupName}</div>}
+        {groupItems.map((item) => renderFieldButton(item))}
+      </div>
+    ));
+  }
+
+  return ReactDOM.createPortal(
+    <div
+      ref={panelRef}
+      style={{
+        ...menuStyle,
+        background: 'var(--bg-surface)',
+        border: '1px solid var(--bd-default)',
+        borderRadius: 12,
+        boxShadow: 'var(--pv-shadow-popover)',
+        padding: 8,
+      }}
+    >
+      <input
+        className="input"
+        placeholder={searchPlaceholder}
+        value={q}
+        onChange={(e) => setQ(e.target.value)}
+        autoFocus
+        style={{ marginBottom: 6 }}
+      />
+      {body}
+    </div>,
+    document.body,
+  );
+}
+
+function DimensionPicker({ anchorRef, dimensions, schema, selected, onPick, onClose, cabinetMode = false }) {
   const panelRef = React.useRef(null);
   const [menuStyle, setMenuStyle] = useState(null);
-  const groups = useMemo(() => {
-    const g = {};
-    dimensions.filter((d) => d.groupable !== false && explorerFieldMatchesQuery(d, q)).forEach((d) => {
-      (g[d.group] = g[d.group] || []).push(d);
-    });
-    return g;
-  }, [dimensions, q]);
 
   React.useLayoutEffect(() => {
     const anchor = anchorRef?.current;
@@ -4077,25 +4247,17 @@ function DimensionPicker({ anchorRef, dimensions, selected, onPick, onClose }) {
     return () => document.removeEventListener('mousedown', onPointerDown);
   }, [onClose, anchorRef]);
 
-  if (!menuStyle) return null;
-  return ReactDOM.createPortal(
-    <div ref={panelRef} style={{ ...menuStyle, background: 'var(--bg-surface)', border: '1px solid var(--bd-default)', borderRadius: 12, boxShadow: 'var(--pv-shadow-popover)', padding: 8 }}>
-      <input className="input" placeholder="Поиск измерения..." value={q} onChange={(e) => setQ(e.target.value)} autoFocus />
-      {Object.entries(groups).map(([gn, items]) => (
-        <div key={gn} className="explorer-picker-group">
-          <div className="explorer-picker-group__heading">{gn}</div>
-          {items.map((d) => {
-            const dis = selected.includes(d.id);
-            return (
-              <div key={d.id} onClick={() => !dis && onPick(d.id)} style={{ padding: '8px 10px', borderRadius: 8, cursor: dis ? 'default' : 'pointer', color: dis ? 'var(--fg-muted)' : 'var(--fg-primary)' }}>
-                {d.label}
-              </div>
-            );
-          })}
-        </div>
-      ))}
-    </div>,
-    document.body,
+  return (
+    <ExplorerCatalogFieldPickerPanel
+      panelRef={panelRef}
+      menuStyle={menuStyle}
+      schema={schema}
+      items={dimensions.filter((d) => d.groupable !== false)}
+      selectedIds={selected}
+      onPick={(item) => onPick(item.id)}
+      searchPlaceholder="Поиск измерения..."
+      useCatalogs={!cabinetMode}
+    />
   );
 }
 
@@ -4588,45 +4750,40 @@ function ExplorerFilterTextEditor({ value, onChange, error, schema, filters = []
 
 function ExplorerAddFilterMenu({
   schema,
-  onPickSystem,
   onPickField,
+  cabinetMode = false,
 }) {
   const [open, setOpen] = useState(false);
-  const [q, setQ] = useState('');
   const anchorRef = React.useRef(null);
   const panelRef = React.useRef(null);
   const [menuStyle, setMenuStyle] = useState(null);
 
+  const collectorItem = useMemo(() => {
+    const field = (schema?.filterFields || []).find((f) => f.id === 'collector');
+    if (!field) return null;
+    return {
+      id: field.id,
+      label: field.label,
+      group: field.group || 'Система / System',
+      hint: 'Локации и экспортёры',
+      valueHint: field.valueHint || 'Локации и экспортёры',
+      aliases: field.aliases || ['коллекторы'],
+    };
+  }, [schema]);
+
   const fieldItems = useMemo(
     () => (schema?.filterFields || [])
-      .filter((f) => f.id !== 'direction' && f.id !== 'collector')
+      .filter((f) => f.id !== 'collector')
       .map((f) => ({
         id: f.id,
         label: f.label,
         group: f.group || 'Поля',
         hint: f.valueHint || null,
+        valueHint: f.valueHint || null,
         aliases: f.aliases || [],
       })),
     [schema],
   );
-
-  const allItems = useMemo(
-    () => [...explorerSystemFilterDefs(schema), ...fieldItems],
-    [schema, fieldItems],
-  );
-
-  const filtered = useMemo(() => {
-    const needle = q.trim();
-    if (!needle) return allItems;
-    return allItems.filter((item) => explorerFieldMatchesQuery(item, needle));
-  }, [allItems, q]);
-
-  const groups = useMemo(() => filtered.reduce((acc, item) => {
-    const key = item.group || 'Прочее';
-    acc[key] = acc[key] || [];
-    acc[key].push(item);
-    return acc;
-  }, {}), [filtered]);
 
   React.useLayoutEffect(() => {
     if (!open) return undefined;
@@ -4664,13 +4821,8 @@ function ExplorerAddFilterMenu({
   }, [open]);
 
   const pick = (item) => {
-    if (item.id.startsWith('__')) {
-      onPickSystem(item.id);
-    } else {
-      onPickField(item.id);
-    }
+    onPickField(item.id);
     setOpen(false);
-    setQ('');
   };
 
   return (
@@ -4678,56 +4830,17 @@ function ExplorerAddFilterMenu({
       <div ref={anchorRef}>
         <Button kind="ghost" size="sm" icon="plus" onClick={() => setOpen((v) => !v)}>Условие</Button>
       </div>
-      {open && menuStyle && ReactDOM.createPortal(
-        <div
-          ref={panelRef}
-          style={{
-            ...menuStyle,
-            background: 'var(--bg-surface)',
-            border: '1px solid var(--bd-default)',
-            borderRadius: 10,
-            boxShadow: 'var(--pv-shadow-popover)',
-            padding: 8,
-          }}
-        >
-          <input
-            className="input"
-            placeholder="Поиск фильтра..."
-            value={q}
-            onChange={(e) => setQ(e.target.value)}
-            autoFocus
-            style={{ marginBottom: 6 }}
-          />
-          {Object.keys(groups).length === 0 ? (
-            <div style={{ padding: '8px 4px', color: 'var(--fg-secondary)', font: 'var(--pv-text-body-3)' }}>Ничего не найдено</div>
-          ) : Object.entries(groups).map(([groupName, groupItems]) => (
-            <div key={groupName} className="explorer-picker-group">
-              <div className="explorer-picker-group__heading">{groupName}</div>
-              {groupItems.map((item) => (
-                <button
-                  key={item.id}
-                  type="button"
-                  onClick={() => pick(item)}
-                  style={{
-                    all: 'unset',
-                    display: 'block',
-                    width: '100%',
-                    boxSizing: 'border-box',
-                    padding: '8px 10px',
-                    borderRadius: 8,
-                    cursor: 'pointer',
-                  }}
-                >
-                  <span>{item.label}</span>
-                  {item.hint && (
-                    <div style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-muted)', marginTop: 2 }}>{item.hint}</div>
-                  )}
-                </button>
-              ))}
-            </div>
-          ))}
-        </div>,
-        document.body,
+      {open && (
+        <ExplorerCatalogFieldPickerPanel
+          panelRef={panelRef}
+          menuStyle={menuStyle}
+          schema={schema}
+          items={fieldItems}
+          leadingItems={collectorItem ? [collectorItem] : []}
+          onPick={pick}
+          searchPlaceholder="Поиск фильтра..."
+          useCatalogs={!cabinetMode}
+        />
       )}
     </>
   );
@@ -4808,16 +4921,7 @@ function ExplorerFilterTemplatesMenu({
     const anchor = anchorRef.current;
     if (!anchor) return undefined;
     const updatePosition = () => {
-      const rect = anchor.getBoundingClientRect();
-      setMenuStyle({
-        position: 'fixed',
-        top: rect.bottom + 4,
-        left: Math.max(8, rect.left),
-        width: Math.max(rect.width, 300),
-        maxHeight: 420,
-        zIndex: 1300,
-        overflowY: 'auto',
-      });
+      setMenuStyle(computeExplorerPopoverStyle(anchor, { minWidth: 300, maxHeight: 420, gap: 4 }));
     };
     updatePosition();
     window.addEventListener('resize', updatePosition);
@@ -5143,9 +5247,10 @@ function ExplorerFilters({
   thresholdPeakWarning,
   maxRangeDays: maxRangeDaysProp,
   cabinetClientWarning = null,
+  cabinetMode = false,
 }) {
   const panelRef = React.useRef(null);
-  const filterFields = (schema?.filterFields || []).filter((f) => f.id !== 'direction' && f.id !== 'collector');
+  const filterFields = (schema?.filterFields || []);
   const switchIpScope = explorerSwitchIpScopeFromFilters(filters);
   const maxRangeDays = Number(maxRangeDaysProp) > 0
     ? Number(maxRangeDaysProp)
@@ -5180,14 +5285,6 @@ function ExplorerFilters({
   };
   const addFilter = (filter = {}) => {
     setFilters([...filters, { id: Date.now() + Math.random(), field: 'src_ip', op: '=', value: '', logic: 'and', ...filter }]);
-  };
-
-  const pickSystemFilter = (systemId) => {
-    if (systemId === '__direction__') {
-      addFilter({ field: 'direction', op: '=', value: '' });
-    } else if (systemId === '__collector__') {
-      addFilter({ field: 'collector', op: '=', value: '' });
-    }
   };
 
   const hasAnyFilter = filters.length > 0;
@@ -5364,7 +5461,7 @@ function ExplorerFilters({
             <div className="explorer-panel-section__add">
               <ExplorerAddFilterMenu
                 schema={schema}
-                onPickSystem={pickSystemFilter}
+                cabinetMode={cabinetMode}
                 onPickField={(fieldId) => {
                   addFilter({ field: fieldId, op: defaultOpForField(schema, fieldId), value: '' });
                 }}

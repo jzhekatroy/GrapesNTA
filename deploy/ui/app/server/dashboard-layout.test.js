@@ -67,7 +67,7 @@ test('mergeWithDefaults preserves user order and adds new widgets', () => {
 
 test('migrateV1ToV2 expands composite widgets and maps settings', () => {
   const migrated = migrateV1ToV2(LEGACY_V1_LAYOUT);
-  assert.equal(migrated.version, 2);
+  assert.equal(migrated.version, 3);
   assert.equal(migrated.settings.distribution.protocolsMode, 'trend');
   assert.equal(migrated.settings.distribution.servicesMode, 'trend');
   assert.equal(migrated.settings.distribution.trendSplit, 0.4);
@@ -81,7 +81,7 @@ test('migrateV1ToV2 expands composite widgets and maps settings', () => {
 
 test('mergeWithDefaults migrates legacy v1 layouts', () => {
   const merged = mergeWithDefaults(LEGACY_V1_LAYOUT);
-  assert.equal(merged.version, 2);
+  assert.equal(merged.version, 3);
   assert.equal(merged.widgets.length, OPERATOR_WIDGET_IDS.length);
   assert.equal(merged.settings.distribution.protocolsMode, 'trend');
   assert.equal(merged.settings.distribution.servicesMode, 'trend');
@@ -117,6 +117,110 @@ test('validateLayout clamps widget width', () => {
   });
   const talkers = layout.widgets.find((w) => w.id === 'top-talkers');
   assert.equal(talkers.w, 8);
+});
+
+test('validateLayout accepts stack grouping', () => {
+  const layout = validateLayout({
+    version: 3,
+    widgets: [
+      ...DEFAULT_OPERATOR_LAYOUT.widgets.filter((w) => !['top-talkers', 'countries'].includes(w.id)),
+      {
+        id: 'stack-v-test01',
+        kind: 'stack',
+        direction: 'vertical',
+        x: 0,
+        y: 4,
+        w: 12,
+        h: 4,
+        visible: true,
+        childIds: ['top-talkers', 'countries'],
+      },
+      { id: 'top-talkers', parentStack: 'stack-v-test01', x: 0, y: 0, w: 7, h: 2, visible: true },
+      { id: 'countries', parentStack: 'stack-v-test01', x: 0, y: 2, w: 5, h: 2, visible: true },
+    ],
+    settings: DEFAULT_OPERATOR_LAYOUT.settings,
+  });
+  const stack = layout.widgets.find((w) => w.id === 'stack-v-test01');
+  assert.equal(stack.kind, 'stack');
+  assert.deepEqual(stack.childIds, ['top-talkers', 'countries']);
+});
+
+test('validateLayout accepts horizontal stack children with inner widths', () => {
+  const layout = validateLayout({
+    version: 3,
+    widgets: [
+      ...DEFAULT_OPERATOR_LAYOUT.widgets.filter((w) => !['stat-max', 'stat-avg', 'stat-volume'].includes(w.id)),
+      {
+        id: 'stack-h-test01',
+        kind: 'stack',
+        direction: 'horizontal',
+        x: 0,
+        y: 0,
+        w: 12,
+        h: 2,
+        visible: true,
+        childIds: ['stat-max', 'stat-avg', 'stat-volume'],
+      },
+      { id: 'stat-max', parentStack: 'stack-h-test01', x: 0, y: 0, w: 4, h: 1, visible: true },
+      { id: 'stat-avg', parentStack: 'stack-h-test01', x: 4, y: 0, w: 4, h: 1, visible: true },
+      { id: 'stat-volume', parentStack: 'stack-h-test01', x: 8, y: 0, w: 4, h: 1, visible: true },
+    ],
+    settings: DEFAULT_OPERATOR_LAYOUT.settings,
+  });
+  const stack = layout.widgets.find((w) => w.id === 'stack-h-test01');
+  assert.equal(stack.direction, 'horizontal');
+  assert.equal(layout.widgets.find((w) => w.id === 'stat-max').w, 4);
+  assert.equal(layout.widgets.find((w) => w.id === 'stat-avg').parentStack, 'stack-h-test01');
+});
+
+test('validateLayout keeps non-allowed inner widths for stacked widgets', () => {
+  const layout = validateLayout({
+    version: 3,
+    widgets: [
+      ...DEFAULT_OPERATOR_LAYOUT.widgets.filter((w) => !['stat-max', 'stat-avg', 'stat-volume'].includes(w.id)),
+      {
+        id: 'stack-h-test02',
+        kind: 'stack',
+        direction: 'horizontal',
+        x: 0,
+        y: 0,
+        w: 12,
+        h: 2,
+        visible: true,
+        childIds: ['stat-max', 'stat-avg', 'stat-volume'],
+      },
+      { id: 'stat-max', parentStack: 'stack-h-test02', x: 0, y: 0, w: 3, h: 1, visible: true },
+      { id: 'stat-avg', parentStack: 'stack-h-test02', x: 3, y: 0, w: 3, h: 1, visible: true },
+      { id: 'stat-volume', parentStack: 'stack-h-test02', x: 6, y: 0, w: 6, h: 1, visible: true },
+    ],
+    settings: DEFAULT_OPERATOR_LAYOUT.settings,
+  });
+  assert.equal(layout.widgets.find((w) => w.id === 'stat-max').w, 3);
+  assert.equal(layout.widgets.find((w) => w.id === 'stat-volume').w, 6);
+});
+
+test('validateLayout rejects inconsistent stack membership', () => {
+  assert.throws(
+    () => validateLayout({
+      version: 3,
+      widgets: [
+        ...DEFAULT_OPERATOR_LAYOUT.widgets,
+        {
+          id: 'stack-v-bad001',
+          kind: 'stack',
+          direction: 'vertical',
+          x: 0,
+          y: 8,
+          w: 6,
+          h: 2,
+          visible: true,
+          childIds: ['vlan'],
+        },
+      ],
+      settings: {},
+    }),
+    /Несогласованный parentStack/,
+  );
 });
 
 test('putLayout and getLayout round-trip per user', () => {

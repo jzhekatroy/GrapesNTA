@@ -10,7 +10,10 @@ const TREND_SPLIT_MIN = 0.35;
 const TREND_SPLIT_MAX = 0.65;
 const SHARE_RIGHT_SPLIT = 1 / 3;
 
-const DASHBOARD_LAYOUT_VERSION = 2;
+const DASHBOARD_LAYOUT_VERSION = 3;
+const STACK_INNER_COLS = 12;
+const STACK_ROW_SIZE_PX = 128;
+const STACK_ID_PATTERN = /^stack-[vh]-[a-z0-9]+$/;
 const LEGACY_V1_COMPOSITE_IDS = new Set(['traffic-stats', 'traffic-chart-row']);
 
 const OPERATOR_WIDGET_REGISTRY = {
@@ -25,6 +28,25 @@ const OPERATOR_WIDGET_REGISTRY = {
   countries: { label: 'География', allowedW: [4, 5, 6, 12], minH: 2, maxH: 3 },
   'recent-flows': { label: 'Последние потоки', allowedW: [4, 5, 6, 7, 8, 9, 10, 11, 12], minH: 1, maxH: 2 },
 };
+
+const STACK_WIDGET_TEMPLATES = {
+  'stack-v': {
+    label: 'Вертикальный стек',
+    direction: 'vertical',
+    allowedW: [4, 5, 6, 7, 8, 9, 10, 11, 12],
+    minH: 2,
+    maxH: 8,
+  },
+  'stack-h': {
+    label: 'Горизонтальный стек',
+    direction: 'horizontal',
+    allowedW: [6, 7, 8, 9, 10, 11, 12],
+    minH: 1,
+    maxH: 3,
+  },
+};
+
+const CONTENT_WIDGET_IDS = Object.keys(OPERATOR_WIDGET_REGISTRY);
 
 const DEFAULT_OPERATOR_LAYOUT = {
   version: DASHBOARD_LAYOUT_VERSION,
@@ -48,6 +70,246 @@ const DEFAULT_OPERATOR_LAYOUT = {
     },
   },
 };
+
+function isStackWidget(widget) {
+  return widget?.kind === 'stack' || isStackWidgetId(widget?.id);
+}
+
+function normalizeStackWidget(widget) {
+  if (!isStackWidget(widget)) return widget;
+  const direction = widget.direction === 'horizontal' || String(widget.id || '').startsWith('stack-h')
+    ? 'horizontal'
+    : 'vertical';
+  return {
+    ...widget,
+    kind: 'stack',
+    direction,
+    childIds: Array.isArray(widget.childIds) ? widget.childIds.map(String) : [],
+  };
+}
+
+function isStackChild(widget) {
+  return !!widget?.parentStack;
+}
+
+function isStackWidgetId(id) {
+  return STACK_ID_PATTERN.test(String(id || ''));
+}
+
+function getTopLevelWidgets(widgets) {
+  return widgets.filter((w) => !w.parentStack);
+}
+
+function getDashboardWidgetMeta(widget) {
+  if (isStackWidget(widget)) {
+    return STACK_WIDGET_TEMPLATES[widget.direction === 'horizontal' ? 'stack-h' : 'stack-v'];
+  }
+  return OPERATOR_WIDGET_REGISTRY[widget.id];
+}
+
+function getStackChildWidgets(widgets, stack) {
+  if (!stack) return [];
+  const ids = new Set(Array.isArray(stack.childIds) ? stack.childIds : []);
+  for (const widget of widgets) {
+    if (widget.parentStack === stack.id) ids.add(widget.id);
+  }
+  return [...ids]
+    .map((id) => widgets.find((w) => w.id === id))
+    .filter(Boolean);
+}
+
+function reconcileStackMembership(widgets) {
+  const list = widgets.map((w) => normalizeStackWidget(w));
+  const stackIds = new Set(list.filter(isStackWidget).map((stack) => stack.id));
+
+  for (const widget of list) {
+    if (widget.parentStack && !stackIds.has(widget.parentStack)) {
+      delete widget.parentStack;
+    }
+  }
+
+  for (const stack of list.filter(isStackWidget)) {
+    const members = list.filter((widget) => widget.parentStack === stack.id);
+    stack.childIds = members.map((member) => member.id);
+    const visible = members.filter((member) => member.visible !== false);
+    const hidden = members.filter((member) => member.visible === false);
+    const packed = stack.direction === 'horizontal'
+      ? reflowHorizontalStackChildren(visible)
+      : reflowVerticalStackChildren(visible);
+    const nextMembers = [
+      ...packed,
+      ...hidden.map((member) => normalizeStackChildLayout(member, stack)),
+    ];
+    for (const member of nextMembers) {
+      const memberIdx = list.findIndex((widget) => widget.id === member.id);
+      if (memberIdx >= 0) list[memberIdx] = member;
+    }
+  }
+
+  return list;
+}
+
+function clampStackInnerW(value) {
+  const n = Math.round(Number(value) || 1);
+  return Math.min(STACK_INNER_COLS, Math.max(1, n));
+}
+
+function sortStackChildren(children) {
+  return [...children].sort((a, b) => (
+    (Number(a.x) || 0) - (Number(b.x) || 0)
+    || (Number(a.y) || 0) - (Number(b.y) || 0)
+    || String(a.id).localeCompare(String(b.id))
+  ));
+}
+
+function equalSplitInnerWidths(count) {
+  const n = Math.max(1, count);
+  if (n >= STACK_INNER_COLS) return Array.from({ length: n }, () => 1);
+  const base = Math.floor(STACK_INNER_COLS / n);
+  const remainder = STACK_INNER_COLS % n;
+  return Array.from({ length: n }, (_, i) => base + (i < remainder ? 1 : 0));
+}
+
+function applyHorizontalInnerXs(children, widths) {
+  let x = 0;
+  return children.map((child, i) => {
+    const w = clampStackInnerW(widths[i]);
+    const next = { ...child, x, y: 0, w };
+    x += w;
+    return next;
+  });
+}
+
+function normalizeStackChildLayout(child, stack) {
+  const meta = getDashboardWidgetMeta(child);
+  if (!meta || !stack) return child;
+
+  const next = { ...child };
+  next.h = Math.min(meta.maxH, Math.max(meta.minH, Math.round(Number(next.h) || meta.minH)));
+  if (stack.direction === 'vertical') {
+    next.x = 0;
+    next.w = STACK_INNER_COLS;
+    next.y = Math.max(0, Math.round(Number(next.y) || 0));
+    return next;
+  }
+
+  next.y = 0;
+  next.w = clampStackInnerW(next.w);
+  next.x = Math.max(0, Math.min(Math.round(Number(next.x) || 0), STACK_INNER_COLS - next.w));
+  return next;
+}
+
+function reflowVerticalStackChildren(children) {
+  const ordered = sortStackChildren(children.map((child) => normalizeStackChildLayout(child, { direction: 'vertical' })));
+  let y = 0;
+  return ordered.map((child) => {
+    const next = { ...child, x: 0, y, w: STACK_INNER_COLS };
+    y += next.h;
+    return next;
+  });
+}
+
+function horizontalStackNeedsReflow(children) {
+  const ordered = sortStackChildren(children);
+  if (!ordered.length) return false;
+  let x = 0;
+  for (const child of ordered) {
+    const w = Math.round(Number(child.w) || 0);
+    if ((Number(child.y) || 0) !== 0 || (Number(child.x) || 0) !== x || w < 1) return true;
+    x += w;
+  }
+  return x !== STACK_INNER_COLS;
+}
+
+function redistributeHorizontalStackChildren(children) {
+  const ordered = sortStackChildren(children);
+  if (!ordered.length) return [];
+  if (ordered.length === 1) {
+    return [{ ...ordered[0], x: 0, y: 0, w: STACK_INNER_COLS }];
+  }
+  return applyHorizontalInnerXs(ordered, equalSplitInnerWidths(ordered.length));
+}
+
+function reflowHorizontalStackChildren(children) {
+  const ordered = sortStackChildren(children.map((child) => normalizeStackChildLayout(child, { direction: 'horizontal' })));
+  if (!ordered.length) return [];
+  if (!horizontalStackNeedsReflow(ordered)) return ordered.map((child) => ({ ...child, y: 0 }));
+  const widths = ordered.map((child) => clampStackInnerW(child.w));
+  const total = widths.reduce((sum, w) => sum + w, 0);
+  if (total === STACK_INNER_COLS) return applyHorizontalInnerXs(ordered, widths);
+  return redistributeHorizontalStackChildren(ordered);
+}
+
+function applyHorizontalStackChildWidth(children, childId, nextW, { fromWest = false } = {}) {
+  const ordered = reflowHorizontalStackChildren(children);
+  const idx = ordered.findIndex((child) => child.id === childId);
+  if (idx < 0) return ordered;
+  const neighborIdx = fromWest ? idx - 1 : idx + 1;
+  if (neighborIdx < 0 || neighborIdx >= ordered.length) return ordered;
+  const self = ordered[idx];
+  const neighbor = ordered[neighborIdx];
+  const pair = self.w + neighbor.w;
+  self.w = Math.min(pair - 1, Math.max(1, clampStackInnerW(nextW)));
+  neighbor.w = pair - self.w;
+  return applyHorizontalInnerXs(ordered, ordered.map((child) => child.w));
+}
+
+function syncStackDimensions(stack, widgets) {
+  const template = getDashboardWidgetMeta(stack);
+  const children = getStackChildWidgets(widgets, stack).filter((child) => child.visible !== false);
+  const packed = stack.direction === 'horizontal'
+    ? reflowHorizontalStackChildren(children)
+    : reflowVerticalStackChildren(children);
+  if (!packed.length) {
+    return {
+      ...stack,
+      w: nearestAllowedW(stack.w, template.allowedW),
+      h: template.minH,
+    };
+  }
+  const maxBottom = Math.max(...packed.map((child) => child.y + child.h));
+  return {
+    ...stack,
+    w: nearestAllowedW(stack.w, template.allowedW),
+    h: Math.min(template.maxH, Math.max(template.minH, maxBottom, Math.round(Number(stack.h) || maxBottom))),
+  };
+}
+
+function syncAllStackDimensions(widgets) {
+  const list = widgets.map((w) => ({ ...w }));
+  for (const stack of list.filter(isStackWidget)) {
+    const synced = syncStackDimensions(stack, list);
+    const idx = list.findIndex((w) => w.id === stack.id);
+    if (idx >= 0) list[idx] = synced;
+  }
+  return list;
+}
+
+function createStackWidget(direction) {
+  const dir = direction === 'horizontal' ? 'horizontal' : 'vertical';
+  const templateKey = dir === 'horizontal' ? 'stack-h' : 'stack-v';
+  const template = STACK_WIDGET_TEMPLATES[templateKey];
+  const id = `${templateKey}-${Math.random().toString(36).slice(2, 9)}`;
+  const defaultW = template.allowedW[Math.min(2, template.allowedW.length - 1)];
+  return {
+    id,
+    kind: 'stack',
+    direction: dir,
+    x: 0,
+    y: 0,
+    w: defaultW,
+    h: dir === 'horizontal' ? Math.max(template.minH, 2) : template.minH,
+    visible: true,
+    childIds: [],
+  };
+}
+
+function stackChildStyle(child) {
+  return {
+    gridColumn: `${child.x + 1} / span ${child.w}`,
+    gridRow: `${child.y + 1} / span ${child.h}`,
+  };
+}
 
 const V1_STAT_CHILDREN = ['stat-max', 'stat-avg', 'stat-volume'];
 const V1_CHART_CHILDREN = ['traffic-chart', 'distribution-protocols', 'distribution-services'];
@@ -102,12 +364,46 @@ function nearestAllowedW(value, allowedW) {
 }
 
 function clampDashboardWidget(widget, registry = OPERATOR_WIDGET_REGISTRY) {
+  if (isStackWidget(widget)) {
+    const normalized = normalizeStackWidget(widget);
+    const template = STACK_WIDGET_TEMPLATES[normalized.direction === 'horizontal' ? 'stack-h' : 'stack-v'];
+    if (!template) return null;
+    const w = nearestAllowedW(normalized.w, template.allowedW);
+    const h = Math.min(template.maxH, Math.max(template.minH, Math.round(Number(normalized.h) || template.minH)));
+    const x = Math.min(DASHBOARD_GRID_COLS - w, Math.max(0, Math.round(Number(normalized.x) || 0)));
+    const y = Math.max(0, Math.round(Number(normalized.y) || 0));
+    return {
+      id: String(normalized.id),
+      kind: 'stack',
+      direction: normalized.direction,
+      x,
+      y,
+      w,
+      h,
+      visible: normalized.visible !== false,
+      childIds: Array.isArray(normalized.childIds) ? normalized.childIds.map(String) : [],
+    };
+  }
+
   const meta = registry[widget.id];
   if (!meta) return null;
+  let h = Math.min(meta.maxH, Math.max(meta.minH, Math.round(Number(widget.h) || meta.minH)));
+  let y = Math.max(0, Math.round(Number(widget.y) || 0));
+  if (widget.parentStack) {
+    const w = clampStackInnerW(widget.w);
+    const x = Math.max(0, Math.min(Math.round(Number(widget.x) || 0), STACK_INNER_COLS - w));
+    return {
+      id: widget.id,
+      x,
+      y,
+      w,
+      h,
+      visible: widget.visible !== false,
+      parentStack: String(widget.parentStack),
+    };
+  }
   const w = nearestAllowedW(widget.w, meta.allowedW);
-  const h = Math.min(meta.maxH, Math.max(meta.minH, Math.round(Number(widget.h) || meta.minH)));
   const x = Math.min(DASHBOARD_GRID_COLS - w, Math.max(0, Math.round(Number(widget.x) || 0)));
-  const y = Math.max(0, Math.round(Number(widget.y) || 0));
   return {
     id: widget.id,
     x,
@@ -207,11 +503,16 @@ function mergeDashboardLayout(saved, defaults = DEFAULT_OPERATOR_LAYOUT) {
 
   for (const leftover of byId.values()) {
     const id = String(leftover.id || '');
-    if (!OPERATOR_WIDGET_REGISTRY[id]) continue;
-    mergedWidgets.push(clampDashboardWidget(leftover));
+    if (isStackWidget(leftover) && isStackWidgetId(id)) {
+      mergedWidgets.push(clampDashboardWidget(leftover));
+    }
   }
 
-  mergedWidgets.sort((a, b) => (a.y - b.y) || (a.x - b.x));
+  mergedWidgets.sort((a, b) => {
+    if (a.parentStack && !b.parentStack) return 1;
+    if (!a.parentStack && b.parentStack) return -1;
+    return (a.y - b.y) || (a.x - b.x);
+  });
 
   const layout = {
     version: DASHBOARD_LAYOUT_VERSION,
@@ -224,6 +525,7 @@ function mergeDashboardLayout(saved, defaults = DEFAULT_OPERATOR_LAYOUT) {
     layout.settings.distribution.trendSplit = legacySplit;
   }
 
+  layout.widgets = syncAllStackDimensions(reconcileStackMembership(layout.widgets));
   layout.widgets = finalizeResizeDashboardLayout(layout.widgets);
   return layout;
 }
@@ -241,9 +543,10 @@ function dashboardWidgetsOverlap(a, b) {
 }
 
 function dashboardLayoutHasCollisions(visible) {
-  for (let i = 0; i < visible.length; i += 1) {
-    for (let j = i + 1; j < visible.length; j += 1) {
-      if (dashboardWidgetsOverlap(visible[i], visible[j])) return true;
+  const topLevel = getTopLevelWidgets(visible);
+  for (let i = 0; i < topLevel.length; i += 1) {
+    for (let j = i + 1; j < topLevel.length; j += 1) {
+      if (dashboardWidgetsOverlap(topLevel[i], topLevel[j])) return true;
     }
   }
   return false;
@@ -296,7 +599,7 @@ function markGridOccupancy(grid, x, y, w, h, id) {
 }
 
 function preferredWidgetWidths(widget) {
-  const meta = OPERATOR_WIDGET_REGISTRY[widget.id];
+  const meta = getDashboardWidgetMeta(widget);
   const allowed = meta?.allowedW || [DASHBOARD_GRID_COLS];
   return [...allowed].sort((a, b) => Math.abs(a - widget.w) - Math.abs(b - widget.w));
 }
@@ -351,19 +654,112 @@ function layoutDashboardWidgets(visible) {
 }
 
 function repackDashboardWidgets(widgets, { keepOrder = false } = {}) {
-  const hidden = widgets.filter((w) => !w.visible);
-  let visible = keepOrder
-    ? widgets.filter((w) => w.visible !== false)
-    : sortDashboardWidgets(widgets.filter((w) => w.visible));
-  visible = normalizeGroupedStatWidths(visible);
-  const packed = layoutDashboardWidgets(visible);
-  return [...packed, ...layoutHiddenDashboardWidgets(packed, hidden)];
+  const inputById = new Map(widgets.map((widget) => [widget.id, widget]));
+  const all = reconcileStackMembership(syncAllStackDimensions(widgets.map((w) => ({ ...w }))));
+  const hiddenTop = all.filter((w) => !w.visible && !isStackChild(w));
+  const hiddenChildren = all.filter((w) => !w.visible && isStackChild(w));
+
+  let visibleTop = getTopLevelWidgets(all).filter((w) => w.visible !== false);
+  if (keepOrder) {
+    const order = all.filter((w) => w.visible !== false && !isStackChild(w)).map((w) => w.id);
+    visibleTop.sort((a, b) => order.indexOf(a.id) - order.indexOf(b.id));
+  } else {
+    visibleTop = sortDashboardWidgets(visibleTop);
+  }
+  visibleTop = normalizeGroupedStatWidths(visibleTop).map((widget) => (
+    isStackWidget(widget) ? syncStackDimensions(widget, all) : widget
+  ));
+  const packed = layoutDashboardWidgets(visibleTop);
+  const visibleChildren = all.filter((w) => isStackChild(w) && w.visible !== false);
+
+  const resultById = new Map();
+  for (const widget of [...packed, ...visibleChildren, ...hiddenTop, ...hiddenChildren]) {
+    resultById.set(widget.id, widget);
+  }
+  for (const [id, widget] of inputById.entries()) {
+    if (!resultById.has(id)) resultById.set(id, widget);
+  }
+
+  return reconcileStackMembership([...resultById.values()]);
 }
 
-function moveDashboardWidget(widgets, sourceId, targetId, { insertAfter = false } = {}) {
+function moveWidgetIntoStack(widgets, widgetId, stackId) {
+  if (!widgetId || !stackId || widgetId === stackId) return widgets;
+  const list = widgets.map((w) => ({ ...w }));
+  const widget = list.find((w) => w.id === widgetId);
+  const stack = list.find((w) => w.id === stackId);
+  if (!widget || !stack || !isStackWidget(stack) || isStackWidget(widget)) return widgets;
+  if (widget.parentStack === stackId) return widgets;
+
+  if (widget.parentStack) {
+    const oldStack = list.find((w) => w.id === widget.parentStack);
+    if (oldStack?.childIds) {
+      oldStack.childIds = oldStack.childIds.filter((id) => id !== widgetId);
+    }
+  }
+
+  const siblings = getStackChildWidgets(list, stack).filter((w) => w.id !== widgetId);
+  let relX = 0;
+  let relY = 0;
+  if (stack.direction === 'horizontal') {
+    relX = siblings.reduce((max, child) => Math.max(max, child.x + child.w), 0);
+  } else {
+    relY = siblings.reduce((max, child) => Math.max(max, child.y + child.h), 0);
+  }
+
+  widget.parentStack = stackId;
+  widget.x = relX;
+  widget.y = relY;
+
+  if (!stack.childIds.includes(widgetId)) {
+    stack.childIds = [...(stack.childIds || []), widgetId];
+  }
+
+  if (stack.direction === 'horizontal') {
+    const members = list.filter((item) => item.parentStack === stackId && item.visible !== false);
+    const packed = redistributeHorizontalStackChildren(members);
+    for (const member of packed) {
+      const memberIdx = list.findIndex((item) => item.id === member.id);
+      if (memberIdx >= 0) list[memberIdx] = member;
+    }
+  }
+
+  return repackDashboardWidgets(reconcileStackMembership(list), { keepOrder: true });
+}
+
+function extractWidgetFromStack(widgets, widgetId) {
+  const list = widgets.map((w) => ({ ...w }));
+  const widget = list.find((w) => w.id === widgetId);
+  if (!widget?.parentStack) return widgets;
+  const stack = list.find((w) => w.id === widget.parentStack);
+  if (stack?.childIds) {
+    stack.childIds = stack.childIds.filter((id) => id !== widgetId);
+  }
+  delete widget.parentStack;
+  return repackDashboardWidgets(list, { keepOrder: true });
+}
+
+function addDashboardStack(widgets, direction) {
+  const stack = createStackWidget(direction);
+  return repackDashboardWidgets([...widgets, stack], { keepOrder: true });
+}
+
+function moveDashboardWidget(widgets, sourceId, targetId, { insertAfter = false, insertIntoStack = false } = {}) {
   if (!sourceId || !targetId || sourceId === targetId) return widgets;
-  const visible = sortDashboardWidgets(widgets.filter((w) => w.visible));
+
+  const source = widgets.find((w) => w.id === sourceId);
+  if (source?.parentStack && !isStackWidget(source)) return widgets;
+
+  if (insertIntoStack) {
+    const target = widgets.find((w) => w.id === targetId);
+    if (target && isStackWidget(target) && source && !isStackWidget(source)) {
+      return moveWidgetIntoStack(widgets, sourceId, targetId);
+    }
+  }
+
+  const visible = sortDashboardWidgets(getTopLevelWidgets(widgets).filter((w) => w.visible));
   const hidden = widgets.filter((w) => !w.visible);
+  const stackChildren = widgets.filter((w) => isStackChild(w) && w.visible !== false);
   const fromIdx = visible.findIndex((w) => w.id === sourceId);
   let toIdx = visible.findIndex((w) => w.id === targetId);
   if (fromIdx < 0 || toIdx < 0) return widgets;
@@ -373,22 +769,72 @@ function moveDashboardWidget(widgets, sourceId, targetId, { insertAfter = false 
   const nextVisible = [...visible];
   const [moved] = nextVisible.splice(fromIdx, 1);
   nextVisible.splice(toIdx, 0, moved);
-  return repackDashboardWidgets([...nextVisible, ...hidden], { keepOrder: true });
+  return repackDashboardWidgets([...nextVisible, ...stackChildren, ...hidden], { keepOrder: true });
 }
 
 function previewDashboardMove(widgets, sourceId, targetId, options) {
   if (!sourceId || !targetId) return null;
-  if (sourceId === targetId && !options?.insertAfter) return null;
+  if (sourceId === targetId && !options?.insertAfter && !options?.insertIntoStack) return null;
   return moveDashboardWidget(widgets, sourceId, targetId, options);
 }
 
-function findDropTargetFromPoint(clientX, clientY, sourceId, grid, layoutWidgets) {
+function readWidgetLayoutRect(el) {
+  if (!el) return null;
+  const rect = el.getBoundingClientRect();
+  const transform = getComputedStyle(el).transform;
+  if (!transform || transform === 'none') return rect;
+  try {
+    const matrix = new DOMMatrixReadOnly(transform);
+    return new DOMRect(
+      rect.left - matrix.e,
+      rect.top - matrix.f,
+      rect.width,
+      rect.height,
+    );
+  } catch {
+    return rect;
+  }
+}
+
+function widgetCoversColumn(widget, hoverCol) {
+  return hoverCol >= widget.x && hoverCol <= widget.x + widget.w - 1;
+}
+
+function pointInRect(rect, clientX, clientY, inset = 0) {
+  if (!rect) return false;
+  return clientX >= rect.left + inset
+    && clientX <= rect.right - inset
+    && clientY >= rect.top + inset
+    && clientY <= rect.bottom - inset;
+}
+
+function dropTargetFromWidgetHit(widget, rect, clientY, { sourceWidget = null } = {}) {
+  if (isStackWidget(widget) && sourceWidget && !isStackWidget(sourceWidget)) {
+    return { id: widget.id, insertIntoStack: true, insertAfter: false };
+  }
+  const midY = rect.top + rect.height / 2;
+  return {
+    id: widget.id,
+    insertAfter: clientY >= midY,
+    insertIntoStack: false,
+  };
+}
+
+function findDropTargetFromPoint(clientX, clientY, sourceId, grid, layoutWidgets, {
+  phantomRect = null,
+  lastTarget = null,
+} = {}) {
   if (!grid) return null;
 
+  if (phantomRect && pointInRect(phantomRect, clientX, clientY) && lastTarget) {
+    return lastTarget;
+  }
+
+  const sourceWidget = layoutWidgets.find((w) => w.id === sourceId) || null;
   const activeWidgets = sortDashboardWidgets(
-    layoutWidgets.filter((w) => w.visible !== false && w.id !== sourceId),
+    getTopLevelWidgets(layoutWidgets).filter((w) => w.visible !== false && w.id !== sourceId),
   );
-  if (!activeWidgets.length) return null;
+  if (!activeWidgets.length) return lastTarget;
 
   const gridRect = grid.getBoundingClientRect();
   const colWidth = gridRect.width / DASHBOARD_GRID_COLS;
@@ -397,146 +843,185 @@ function findDropTargetFromPoint(clientX, clientY, sourceId, grid, layoutWidgets
     Math.floor((clientX - gridRect.left) / Math.max(colWidth, 1)),
   ));
 
-  const rowsByY = new Map();
+  const widgetHits = [];
   for (const widget of activeWidgets) {
-    if (!rowsByY.has(widget.y)) rowsByY.set(widget.y, []);
-    rowsByY.get(widget.y).push(widget);
+    const el = grid.querySelector(`[data-widget-id="${widget.id}"]`);
+    const rect = readWidgetLayoutRect(el);
+    if (!rect) continue;
+    widgetHits.push({ widget, rect });
+  }
+  if (!widgetHits.length) return lastTarget;
+
+  const directHits = widgetHits.filter(({ rect }) => pointInRect(rect, clientX, clientY));
+  if (directHits.length) {
+    directHits.sort((a, b) => (
+      (a.rect.width * a.rect.height) - (b.rect.width * b.rect.height)
+    ));
+    return dropTargetFromWidgetHit(directHits[0].widget, directHits[0].rect, clientY, { sourceWidget });
   }
 
-  let targetRow = null;
-
-  for (const [, rowWidgets] of rowsByY.entries()) {
-    let rowTop = Infinity;
-    let rowBottom = -Infinity;
-    for (const widget of rowWidgets) {
-      const el = grid.querySelector(`[data-widget-id="${widget.id}"]`);
-      if (!el) continue;
-      const rect = el.getBoundingClientRect();
-      rowTop = Math.min(rowTop, rect.top);
-      rowBottom = Math.max(rowBottom, rect.bottom);
-    }
-    if (!Number.isFinite(rowTop)) continue;
-    if (clientY >= rowTop - 20 && clientY <= rowBottom + 20) {
-      targetRow = rowWidgets.sort((a, b) => a.x - b.x);
-      break;
+  const colHits = widgetHits.filter(({ widget, rect }) => (
+    widgetCoversColumn(widget, hoverCol) || (clientX >= rect.left && clientX <= rect.right)
+  ));
+  const candidates = colHits.length ? colHits : widgetHits;
+  let nearest = null;
+  let nearestDist = Infinity;
+  for (const hit of candidates) {
+    const midY = hit.rect.top + hit.rect.height / 2;
+    const dist = Math.abs(clientY - midY);
+    if (dist < nearestDist) {
+      nearestDist = dist;
+      nearest = hit;
     }
   }
 
-  if (!targetRow) {
-    const rowEntries = [...rowsByY.entries()].sort((a, b) => a[0] - b[0]);
-    let nearest = rowEntries[0]?.[1]?.sort((a, b) => a.x - b.x) || null;
-    let nearestDist = Infinity;
-    for (const [, rowWidgets] of rowEntries) {
-      let rowTop = Infinity;
-      let rowBottom = -Infinity;
-      for (const widget of rowWidgets) {
-        const el = grid.querySelector(`[data-widget-id="${widget.id}"]`);
-        if (!el) continue;
-        const rect = el.getBoundingClientRect();
-        rowTop = Math.min(rowTop, rect.top);
-        rowBottom = Math.max(rowBottom, rect.bottom);
-      }
-      if (!Number.isFinite(rowTop)) continue;
-      const rowMid = (rowTop + rowBottom) / 2;
-      const dist = Math.abs(clientY - rowMid);
-      if (dist < nearestDist) {
-        nearestDist = dist;
-        nearest = rowWidgets.sort((a, b) => a.x - b.x);
-      }
-    }
-    targetRow = nearest;
-  }
-
-  if (!targetRow?.length) {
+  if (!nearest) {
     const last = activeWidgets[activeWidgets.length - 1];
-    return { id: last.id, insertAfter: true };
+    return { id: last.id, insertAfter: true, insertIntoStack: false };
   }
 
-  for (let i = 0; i < targetRow.length; i += 1) {
-    const widget = targetRow[i];
-    const startCol = widget.x;
-    const endCol = widget.x + widget.w - 1;
+  return dropTargetFromWidgetHit(nearest.widget, nearest.rect, clientY, { sourceWidget });
+}
 
-    if (hoverCol < startCol) {
-      return { id: widget.id, insertAfter: false };
-    }
+const DASHBOARD_DROP_TARGET_SWITCH_PX = 28;
 
-    if (hoverCol >= startCol && hoverCol <= endCol) {
-      const midCol = widget.x + widget.w / 2;
-      return hoverCol < midCol
-        ? { id: widget.id, insertAfter: false }
-        : { id: widget.id, insertAfter: true };
-    }
+function dropTargetMatches(a, b) {
+  return !!a && !!b
+    && a.id === b.id
+    && !!a.insertIntoStack === !!b.insertIntoStack
+    && (a.insertIntoStack || a.insertAfter === b.insertAfter);
+}
 
-    const next = targetRow[i + 1];
-    if (!next && hoverCol > endCol) {
-      return { id: widget.id, insertAfter: true };
-    }
-    if (next && hoverCol > endCol && hoverCol < next.x) {
-      return { id: widget.id, insertAfter: true };
+function stabilizeDropTarget(next, prev, clientX, clientY, grid) {
+  if (!next) return null;
+  if (!prev || dropTargetMatches(next, prev)) return next;
+
+  const el = grid?.querySelector(`[data-widget-id="${next.id}"]`);
+  const rect = readWidgetLayoutRect(el);
+  if (!rect) return next;
+
+  if (next.id !== prev.id) {
+    const inset = DASHBOARD_DROP_TARGET_SWITCH_PX;
+    const insideNext = clientX >= rect.left + inset
+      && clientX <= rect.right - inset
+      && clientY >= rect.top + inset
+      && clientY <= rect.bottom - inset;
+    return insideNext ? next : prev;
+  }
+
+  if (next.insertIntoStack) return next;
+  if (prev.insertIntoStack) return prev;
+
+  const midY = rect.top + rect.height / 2;
+  const buffer = DASHBOARD_DROP_TARGET_SWITCH_PX;
+  if (next.insertAfter && clientY < midY + buffer) return prev;
+  if (!next.insertAfter && clientY > midY - buffer) return prev;
+  return next;
+}
+
+function applyDashboardWidgetResize(widgets, widgetId, { w, h, anchorRight, anchorBottom } = {}) {
+  const list = widgets.map((item) => ({ ...item }));
+  const idx = list.findIndex((item) => item.id === widgetId);
+  if (idx < 0) return widgets;
+
+  const widget = list[idx];
+  const meta = getDashboardWidgetMeta(widget);
+  if (!meta) return widgets;
+
+  if (widget.parentStack && w != null) {
+    const stack = list.find((item) => item.id === widget.parentStack);
+    if (stack?.direction === 'horizontal') {
+      const members = list.filter((item) => item.parentStack === stack.id && item.visible !== false);
+      const packed = applyHorizontalStackChildWidth(members, widget.id, w, { fromWest: anchorRight != null });
+      for (const member of packed) {
+        const memberIdx = list.findIndex((item) => item.id === member.id);
+        if (memberIdx >= 0) list[memberIdx] = clampDashboardWidget(member);
+      }
+      if (h == null) return list;
     }
   }
 
-  const last = targetRow[targetRow.length - 1];
-  return { id: last.id, insertAfter: true };
+  let next = { ...list[idx] };
+
+  if (w != null && !widget.parentStack) {
+    let newW = nearestAllowedW(w, meta.allowedW);
+    let x = widget.x;
+    if (anchorRight != null) {
+      x = anchorRight - newW;
+      if (x < 0) {
+        x = 0;
+        newW = nearestAllowedW(anchorRight, meta.allowedW);
+      }
+    } else if (x + newW > DASHBOARD_GRID_COLS) {
+      x = DASHBOARD_GRID_COLS - newW;
+    }
+    next = { ...next, x: Math.max(0, x), w: newW };
+  }
+
+  if (h != null && meta.maxH > meta.minH) {
+    let newH = Math.min(meta.maxH, Math.max(meta.minH, Math.round(Number(h) || meta.minH)));
+    let y = widget.y;
+    if (anchorBottom != null) {
+      y = anchorBottom - newH;
+      if (y < 0) {
+        y = 0;
+        newH = Math.min(meta.maxH, Math.max(meta.minH, anchorBottom));
+      }
+    }
+    next = { ...next, y: Math.max(0, y), h: newH };
+  }
+
+  list[idx] = clampDashboardWidget(next);
+
+  if (next.parentStack) {
+    const stack = list.find((item) => item.id === next.parentStack);
+    if (stack?.direction === 'vertical') {
+      const members = list.filter((item) => item.parentStack === stack.id && item.visible !== false);
+      const packed = reflowVerticalStackChildren(members);
+      for (const member of packed) {
+        const memberIdx = list.findIndex((item) => item.id === member.id);
+        if (memberIdx >= 0) list[memberIdx] = clampDashboardWidget(member);
+      }
+    }
+  }
+
+  return list;
+}
+
+function finalizeStackChildResize(widgets, childId) {
+  let list = reconcileStackMembership(widgets.map((item) => ({ ...item })));
+  const child = list.find((item) => item.id === childId);
+  if (!child?.parentStack) return list;
+  const stackIdx = list.findIndex((item) => item.id === child.parentStack);
+  if (stackIdx < 0) return list;
+  list[stackIdx] = syncStackDimensions(list[stackIdx], list);
+  return list;
 }
 
 function resizeDashboardWidgetHeight(widgets, widgetId, nextH, { anchorBottom = null } = {}) {
-  const list = widgets.map((w) => ({ ...w }));
-  const idx = list.findIndex((w) => w.id === widgetId);
-  if (idx < 0) return widgets;
-
-  const widget = list[idx];
-  const meta = OPERATOR_WIDGET_REGISTRY[widget.id];
-  if (!meta || meta.maxH <= meta.minH) return widgets;
-
-  let h = Math.min(meta.maxH, Math.max(meta.minH, Math.round(Number(nextH) || meta.minH)));
-  let y = widget.y;
-  if (anchorBottom != null) {
-    y = anchorBottom - h;
-    if (y < 0) {
-      y = 0;
-      h = Math.min(meta.maxH, Math.max(meta.minH, anchorBottom));
-    }
-  }
-
-  list[idx] = clampDashboardWidget({ ...widget, y: Math.max(0, y), h });
-  return finalizeResizeDashboardLayout(list);
+  const next = applyDashboardWidgetResize(widgets, widgetId, { h: nextH, anchorBottom });
+  const widget = next.find((item) => item.id === widgetId);
+  if (widget?.parentStack) return finalizeStackChildResize(next, widgetId);
+  return finalizeResizeDashboardLayout(next);
 }
 
 function resizeDashboardWidget(widgets, widgetId, nextW, { anchorRight = null } = {}) {
-  const list = widgets.map((w) => ({ ...w }));
-  const idx = list.findIndex((w) => w.id === widgetId);
-  if (idx < 0) return widgets;
-
-  const widget = list[idx];
-  const meta = OPERATOR_WIDGET_REGISTRY[widget.id];
-  if (!meta) return widgets;
-
-  let newW = nearestAllowedW(nextW, meta.allowedW);
-  let x = widget.x;
-  if (anchorRight != null) {
-    x = anchorRight - newW;
-    if (x < 0) {
-      x = 0;
-      newW = nearestAllowedW(anchorRight, meta.allowedW);
-    }
-  } else if (x + newW > DASHBOARD_GRID_COLS) {
-    x = DASHBOARD_GRID_COLS - newW;
-  }
-
-  list[idx] = clampDashboardWidget({
-    ...widget,
-    x: Math.max(0, x),
-    w: newW,
-  });
-  return finalizeResizeDashboardLayout(list);
+  const next = applyDashboardWidgetResize(widgets, widgetId, { w: nextW, anchorRight });
+  const widget = next.find((item) => item.id === widgetId);
+  if (widget?.parentStack) return finalizeStackChildResize(next, widgetId);
+  return finalizeResizeDashboardLayout(next);
 }
 
 function previewResizeDashboardWidget(widgets, widgetId, { w, h, anchorRight, anchorBottom } = {}) {
   let next = widgets;
-  if (w != null) next = resizeDashboardWidget(next, widgetId, w, { anchorRight });
-  if (h != null) next = resizeDashboardWidgetHeight(next, widgetId, h, { anchorBottom });
+  if (w != null) next = applyDashboardWidgetResize(next, widgetId, { w, anchorRight });
+  if (h != null) next = applyDashboardWidgetResize(next, widgetId, { h, anchorBottom });
+  const widget = next.find((item) => item.id === widgetId);
+  if (widget?.parentStack) {
+    next = reconcileStackMembership(next.map((item) => ({ ...item })));
+    const stackIdx = next.findIndex((item) => item.id === widget.parentStack);
+    if (stackIdx >= 0) next[stackIdx] = syncStackDimensions(next[stackIdx], next);
+  }
   return next;
 }
 
@@ -544,7 +1029,9 @@ function finalizeDashboardWidgetLayout(prev, widgets) {
   return {
     ...prev,
     version: DASHBOARD_LAYOUT_VERSION,
-    widgets: widgets.map((widget) => clampDashboardWidget(widget)).filter(Boolean),
+    widgets: reconcileStackMembership(
+      widgets.map((widget) => clampDashboardWidget(widget)).filter(Boolean),
+    ),
   };
 }
 
@@ -689,6 +1176,14 @@ function useDashboardLayout({ enabled = true, canEdit = true } = {}) {
       ...prev,
       widgets: resizeDashboardWidgetHeight(prev.widgets, widgetId, nextH, options),
     })),
+    extractFromStack: (widgetId) => updateLayout((prev) => ({
+      ...prev,
+      widgets: extractWidgetFromStack(prev.widgets, widgetId),
+    })),
+    addStack: (direction) => updateLayout((prev) => ({
+      ...prev,
+      widgets: addDashboardStack(prev.widgets, direction),
+    })),
     setWidgetVisible: (widgetId, visible) => updateLayout((prev) => ({
       ...prev,
       widgets: toggleDashboardWidgetVisibility(prev.widgets, widgetId, visible),
@@ -700,6 +1195,8 @@ function DashboardLayoutToolbar({
   editMode,
   onToggleEdit,
   onReset,
+  onAddVerticalStack,
+  onAddHorizontalStack,
   saveState,
   canEdit,
 }) {
@@ -722,6 +1219,8 @@ function DashboardLayoutToolbar({
       ) : null}
       {editMode ? (
         <>
+          <Button kind="ghost" size="sm" onClick={onAddVerticalStack}>Вертикальный стек</Button>
+          <Button kind="ghost" size="sm" onClick={onAddHorizontalStack}>Горизонтальный стек</Button>
           <Button kind="ghost" size="sm" onClick={onReset}>Сбросить</Button>
           <Button kind="primary" size="sm" onClick={() => onToggleEdit(false)}>Готово</Button>
         </>
@@ -737,31 +1236,51 @@ function DashboardWidgetChrome({
   editMode,
   onToggleVisibility,
   onDragHandleMouseDown,
+  onExtractFromStack,
+  inStack = false,
   children,
 }) {
   if (!editMode) return children;
 
-  const meta = OPERATOR_WIDGET_REGISTRY[widget.id];
+  const meta = getDashboardWidgetMeta(widget);
 
   return (
-    <div className={`dashboard-widget-chrome${widget.visible ? '' : ' is-hidden'}`}>
+    <div className={`dashboard-widget-chrome${widget.visible ? '' : ' is-hidden'}${inStack ? ' dashboard-widget-chrome--in-stack' : ''}`}>
       <div className="dashboard-widget-chrome__bar">
-        <div
-          className="dashboard-widget-chrome__handle"
-          title="Перетащите для изменения порядка"
-          onMouseDown={onDragHandleMouseDown}
-        >
-          <Icon name="drag" />
-          <span>{meta?.label || widget.id}</span>
+        {onDragHandleMouseDown ? (
+          <div
+            className="dashboard-widget-chrome__handle"
+            title="Перетащите для изменения порядка"
+            onMouseDown={onDragHandleMouseDown}
+          >
+            <Icon name="drag" />
+            <span>{meta?.label || widget.id}</span>
+          </div>
+        ) : (
+          <div className="dashboard-widget-chrome__label">
+            <span>{meta?.label || widget.id}</span>
+          </div>
+        )}
+        <div className="dashboard-widget-chrome__actions">
+          {inStack && onExtractFromStack ? (
+            <button
+              type="button"
+              className="dashboard-widget-chrome__extract"
+              title="Извлечь из стека"
+              onClick={onExtractFromStack}
+            >
+              <Icon name="arrowURight" />
+            </button>
+          ) : null}
+          <button
+            type="button"
+            className="dashboard-widget-chrome__hide"
+            title={widget.visible ? 'Скрыть виджет' : 'Показать виджет'}
+            onClick={onToggleVisibility}
+          >
+            <Icon name={widget.visible ? 'eyeOff' : 'eye'} />
+          </button>
         </div>
-        <button
-          type="button"
-          className="dashboard-widget-chrome__hide"
-          title={widget.visible ? 'Скрыть виджет' : 'Показать виджет'}
-          onClick={onToggleVisibility}
-        >
-          <Icon name={widget.visible ? 'eyeOff' : 'eye'} />
-        </button>
       </div>
       <div className="dashboard-widget-chrome__body">
         {children}
@@ -770,18 +1289,48 @@ function DashboardWidgetChrome({
   );
 }
 
+function DashboardStack({
+  stack,
+  widgets,
+  editMode,
+  renderChild,
+}) {
+  const children = getStackChildWidgets(widgets, stack).filter((child) => child.visible !== false);
+
+  return (
+    <div className={`dashboard-stack dashboard-stack--${stack.direction === 'horizontal' ? 'horizontal' : 'vertical'}${editMode ? ' dashboard-stack--edit' : ''}`}>
+      {children.length ? children.map((child) => (
+        <div
+          key={child.id}
+          className="dashboard-stack__item"
+          style={stackChildStyle(child)}
+        >
+          {renderChild(child, { inStack: true, stack })}
+        </div>
+      )) : (
+        editMode ? <div className="dashboard-stack__empty">Перетащите виджеты сюда</div> : null
+      )}
+    </div>
+  );
+}
+
 function DashboardWidgetPhantom({ widget, compact, detail }) {
-  const meta = OPERATOR_WIDGET_REGISTRY[widget.id];
+  const meta = getDashboardWidgetMeta(widget);
   const w = compact ? DASHBOARD_GRID_COLS : widget.w;
+  const h = Math.max(1, Number(widget.h) || 1);
   const style = {
     gridColumn: `${widget.x + 1} / span ${w}`,
-    gridRow: `${widget.y + 1} / span ${widget.h}`,
+    gridRow: `${widget.y + 1} / span ${h}`,
+    minHeight: `${Math.max(72, h * STACK_ROW_SIZE_PX)}px`,
+    '--dw-w': w,
+    '--dw-h': h,
   };
 
   return (
     <div
-      className="dashboard-widget dashboard-widget--phantom"
+      className={`dashboard-widget dashboard-widget--phantom${isStackWidget(widget) ? ' dashboard-widget--phantom-stack' : ''}`}
       style={style}
+      data-dashboard-phantom="true"
       data-flip-id={`phantom-${widget.id}`}
       aria-hidden="true"
     >
@@ -806,7 +1355,12 @@ const DASHBOARD_FLIP_TRANSITION = 'transform 0.34s cubic-bezier(0.22, 1, 0.36, 1
 function dashboardLayoutPreviewKey(widgets) {
   return widgets
     .filter((w) => w.visible !== false)
-    .map((w) => `${w.id}@${w.x},${w.y},${w.w},${w.h}`)
+    .map((w) => {
+      let key = `${w.id}@${w.x},${w.y},${w.w},${w.h}`;
+      if (w.parentStack) key += `:p${w.parentStack}`;
+      if (isStackWidget(w)) key += `:c${(w.childIds || []).join('.')}`;
+      return key;
+    })
     .join('|');
 }
 
@@ -851,9 +1405,11 @@ function DashboardGrid({
   onResizeWidget,
   onResizeWidgetHeight,
   onToggleWidgetVisible,
+  onExtractFromStack,
 }) {
   const gridRef = useRef(null);
   const dragSourceRef = useRef(null);
+  const lastDropTargetRef = useRef(null);
   const flipFirstRectsRef = useRef(null);
   const dragPreviewKeyRef = useRef('');
   const dragMoveRafRef = useRef(null);
@@ -878,28 +1434,25 @@ function DashboardGrid({
   }, []);
 
   useLayoutEffect(() => {
-    if (!flipFirstRectsRef.current || !gridRef.current) return;
+    if (draggingId || resizingId || !flipFirstRectsRef.current || !gridRef.current) return;
     runDashboardFlipAnimation(gridRef.current, flipFirstRectsRef.current);
     flipFirstRectsRef.current = null;
   }, [dragPreview, resizePreview, layout.widgets, draggingId, resizingId]);
 
   const layoutWidgets = resizePreview?.widgets || dragPreview?.widgets || layout.widgets;
   const visibleWidgets = sortDashboardWidgets(
-    layoutWidgets.filter((w) => w.visible && !(draggingId && w.id === draggingId)),
+    getTopLevelWidgets(layoutWidgets).filter((w) => w.visible && !(draggingId && w.id === draggingId)),
   );
-  const hiddenSource = layoutWidgets.filter((w) => !w.visible);
+  const hiddenSource = getTopLevelWidgets(layoutWidgets).filter((w) => !w.visible);
   const maxVisibleY = visibleWidgets.reduce((max, widget) => Math.max(max, widget.y + widget.h), 0);
   const hiddenWidgets = editMode
     ? layoutHiddenDashboardWidgets(visibleWidgets, hiddenSource, { startY: maxVisibleY + 1 })
     : [];
   const hiddenDividerY = editMode && hiddenWidgets.length ? maxVisibleY : null;
-  const phantomWidget = draggingId && dragPreview
+  const phantomWidget = draggingId
     ? layoutWidgets.find((w) => w.id === draggingId && w.visible !== false)
     : null;
-  const resizePhantomWidget = resizingId && resizePreview
-    ? layoutWidgets.find((w) => w.id === resizingId && w.visible !== false)
-    : null;
-  const interactionPhantom = resizePhantomWidget || phantomWidget;
+  const interactionPhantom = phantomWidget;
 
   const queueResizePreview = (widgetId, previewWidgets) => {
     if (!previewWidgets) {
@@ -909,19 +1462,21 @@ function DashboardGrid({
     const nextKey = dashboardLayoutPreviewKey(previewWidgets);
     const currentKey = resizePreview ? dashboardLayoutPreviewKey(resizePreview.widgets) : '';
     if (nextKey === currentKey) return;
-    flipFirstRectsRef.current = captureDashboardFlipRects(gridRef.current);
     setResizePreview({ widgetId, widgets: previewWidgets });
   };
 
   const resolveDropTarget = (clientX, clientY, sourceId) => {
     const { layout: liveLayout, dragPreview: livePreview } = dragContextRef.current;
     const widgetsForHitTest = livePreview?.widgets || liveLayout.widgets;
+    const phantomEl = gridRef.current?.querySelector('[data-dashboard-phantom="true"]');
+    const phantomRect = phantomEl ? phantomEl.getBoundingClientRect() : null;
     return findDropTargetFromPoint(
       clientX,
       clientY,
       sourceId,
       gridRef.current,
       widgetsForHitTest,
+      { phantomRect, lastTarget: lastDropTargetRef.current },
     );
   };
 
@@ -929,7 +1484,6 @@ function DashboardGrid({
     const nextKey = nextPreview ? dashboardLayoutPreviewKey(nextPreview.widgets) : '';
     if (nextKey === dragPreviewKeyRef.current) return;
     dragPreviewKeyRef.current = nextKey;
-    flipFirstRectsRef.current = captureDashboardFlipRects(gridRef.current);
     setDragPreview(nextPreview);
   };
 
@@ -937,6 +1491,7 @@ function DashboardGrid({
     if (!editMode || e.button !== 0) return;
     e.preventDefault();
     dragSourceRef.current = widgetId;
+    lastDropTargetRef.current = null;
     dragPreviewKeyRef.current = dashboardLayoutPreviewKey(layout.widgets);
     setDraggingId(widgetId);
     setDragPreview(null);
@@ -945,7 +1500,15 @@ function DashboardGrid({
       const sourceId = dragSourceRef.current;
       if (!sourceId) return;
       const { layout: liveLayout } = dragContextRef.current;
-      const dropTarget = resolveDropTarget(ev.clientX, ev.clientY, sourceId);
+      const rawTarget = resolveDropTarget(ev.clientX, ev.clientY, sourceId);
+      const dropTarget = stabilizeDropTarget(
+        rawTarget,
+        lastDropTargetRef.current,
+        ev.clientX,
+        ev.clientY,
+        gridRef.current,
+      );
+      if (dropTarget) lastDropTargetRef.current = dropTarget;
       if (!dropTarget) {
         queueDragPreview(null);
         return;
@@ -954,7 +1517,10 @@ function DashboardGrid({
         liveLayout.widgets,
         sourceId,
         dropTarget.id,
-        { insertAfter: dropTarget.insertAfter },
+        {
+          insertAfter: dropTarget.insertAfter,
+          insertIntoStack: dropTarget.insertIntoStack,
+        },
       );
       if (!previewWidgets) {
         queueDragPreview(null);
@@ -997,14 +1563,19 @@ function DashboardGrid({
       const preview = sourceId && dropTarget
         ? previewDashboardMove(liveLayout.widgets, sourceId, dropTarget.id, {
           insertAfter: dropTarget.insertAfter,
+          insertIntoStack: dropTarget.insertIntoStack,
         })
         : null;
       dragSourceRef.current = null;
+      lastDropTargetRef.current = null;
       dragPreviewKeyRef.current = '';
       const previewKey = preview ? dashboardLayoutPreviewKey(preview) : '';
       const originalKey = dashboardLayoutPreviewKey(liveLayout.widgets);
       if (sourceId && dropTarget && preview && previewKey !== originalKey) {
-        onMoveWidget(sourceId, dropTarget.id, { insertAfter: dropTarget.insertAfter });
+        onMoveWidget(sourceId, dropTarget.id, {
+          insertAfter: dropTarget.insertAfter,
+          insertIntoStack: dropTarget.insertIntoStack,
+        });
       }
       setDraggingId(null);
       setDragPreview(null);
@@ -1033,8 +1604,14 @@ function DashboardGrid({
     const startW = widget.w;
     const startWidgetX = widget.x;
     const anchorRight = fromWest ? widget.x + widget.w : null;
-    const rect = grid.getBoundingClientRect();
-    const colWidth = rect.width / DASHBOARD_GRID_COLS;
+    const isStackChild = !!widget.parentStack;
+    const stackEl = isStackChild
+      ? grid.querySelector(`[data-widget-id="${widget.parentStack}"] .dashboard-stack`)
+      : null;
+    const measureEl = (isStackChild && stackEl) ? stackEl : grid;
+    const maxCols = isStackChild ? STACK_INNER_COLS : DASHBOARD_GRID_COLS;
+    const rect = measureEl.getBoundingClientRect();
+    const colWidth = rect.width / maxCols;
     let pendingW = startW;
     let pendingEv = null;
 
@@ -1102,7 +1679,7 @@ function DashboardGrid({
     const grid = gridRef.current;
     if (!grid || compact) return;
 
-    const meta = OPERATOR_WIDGET_REGISTRY[widget.id];
+    const meta = getDashboardWidgetMeta(widget);
     if (!meta || meta.maxH <= meta.minH) return;
 
     setResizingId(widget.id);
@@ -1111,10 +1688,15 @@ function DashboardGrid({
     setDraggingId(null);
 
     const fromNorth = edge === 'north';
+    const isStackChild = !!widget.parentStack;
     const widgetEl = grid.querySelector(`[data-widget-id="${widget.id}"]`);
-    const rowHeight = widgetEl && widget.h > 0
-      ? widgetEl.getBoundingClientRect().height / widget.h
-      : 120;
+    const layoutEl = isStackChild
+      ? (widgetEl?.closest('.dashboard-stack__item') || widgetEl)
+      : widgetEl;
+    const widgetRect = readWidgetLayoutRect(layoutEl);
+    const rowHeight = widgetRect && widget.h > 0
+      ? widgetRect.height / widget.h
+      : STACK_ROW_SIZE_PX;
     const startY = e.clientY;
     const startH = widget.h;
     const startWidgetY = widget.y;
@@ -1183,24 +1765,110 @@ function DashboardGrid({
     ? `${distributionModes.protocols}:${distributionModes.services}`
     : '';
 
-  const renderWidgetShell = (widget, { hiddenPreview = false } = {}) => {
-    const meta = OPERATOR_WIDGET_REGISTRY[widget.id];
-    const isInteractionSource = widget.id === draggingId || widget.id === resizingId;
+  const renderWidgetShell = (widget, { hiddenPreview = false, inStack = false, stack = null } = {}) => {
+    const meta = getDashboardWidgetMeta(widget);
+    const stackWidget = isStackWidget(widget);
+
+    if (inStack) {
+      const childContent = renderers[widget.id] ? renderers[widget.id]() : null;
+      const parentStack = stack || (widget.parentStack
+        ? layoutWidgets.find((item) => item.id === widget.parentStack)
+        : null);
+      const siblings = parentStack
+        ? sortStackChildren(getStackChildWidgets(layoutWidgets, parentStack).filter((item) => item.visible !== false))
+        : [];
+      const siblingIdx = siblings.findIndex((item) => item.id === widget.id);
+      const canResizeWidth = editMode && !compact && parentStack?.direction === 'horizontal' && siblings.length > 1;
+      const canResizeWest = canResizeWidth && siblingIdx > 0;
+      const canResizeEast = canResizeWidth && siblingIdx >= 0 && siblingIdx < siblings.length - 1;
+      const canResizeHeight = editMode && !compact && !!meta && meta.maxH > meta.minH;
+      return (
+        <div
+          key={widget.id}
+          className={`dashboard-widget dashboard-widget--in-stack${editMode ? ' dashboard-widget--in-stack-edit' : ''}`}
+          data-widget-id={widget.id}
+        >
+          <DashboardWidgetChrome
+            widget={widget}
+            editMode={editMode}
+            inStack
+            onToggleVisibility={() => onToggleWidgetVisible(widget.id, !widget.visible)}
+            onExtractFromStack={() => onExtractFromStack(widget.id)}
+          >
+            {childContent || (editMode ? (
+              <div className="dashboard-widget-phantom__frame dashboard-widget-phantom__frame--compact">
+                <span>{meta?.label || widget.id}</span>
+              </div>
+            ) : null)}
+          </DashboardWidgetChrome>
+          {canResizeWest ? (
+            <div
+              className="dashboard-widget__resize-w"
+              role="separator"
+              aria-orientation="vertical"
+              aria-label="Изменить ширину слева"
+              onMouseDown={onResizeWidthMouseDown(widget, 'west')}
+            />
+          ) : null}
+          {canResizeEast ? (
+            <div
+              className="dashboard-widget__resize-e"
+              role="separator"
+              aria-orientation="vertical"
+              aria-label="Изменить ширину справа"
+              onMouseDown={onResizeWidthMouseDown(widget, 'east')}
+            />
+          ) : null}
+          {canResizeHeight ? (
+            <>
+              <div
+                className="dashboard-widget__resize-n"
+                role="separator"
+                aria-orientation="horizontal"
+                aria-label="Изменить высоту сверху"
+                onMouseDown={onResizeHeightMouseDown(widget, 'north')}
+              />
+              <div
+                className="dashboard-widget__resize-s"
+                role="separator"
+                aria-orientation="horizontal"
+                aria-label="Изменить высоту снизу"
+                onMouseDown={onResizeHeightMouseDown(widget, 'south')}
+              />
+            </>
+          ) : null}
+        </div>
+      );
+    }
+
+    const isInteractionSource = widget.id === draggingId && interactionPhantom;
     const canResizeWidth = editMode && !compact && !!meta;
     const canResizeHeight = editMode && !compact && !!meta && meta.maxH > meta.minH;
     const style = dashboardWidgetStyle(widget, compact);
     const modeKey = (widget.id === 'distribution-protocols' || widget.id === 'distribution-services')
       ? distributionRenderKey
       : '';
-    const content = renderers[widget.id] ? renderers[widget.id]() : null;
-    if (!content && !editMode && !hiddenPreview) return null;
+    let content = null;
+    if (stackWidget) {
+      content = (
+        <DashboardStack
+          stack={widget}
+          widgets={layoutWidgets}
+          editMode={editMode}
+          renderChild={(child, options) => renderWidgetShell(child, options)}
+        />
+      );
+    } else {
+      content = renderers[widget.id] ? renderers[widget.id]() : null;
+    }
+    if (!content && !editMode && !hiddenPreview && !stackWidget) return null;
 
     return (
       <div
         key={`${widget.id}${modeKey ? `:${modeKey}` : ''}`}
         data-widget-id={widget.id}
         data-flip-id={widget.id}
-        className={`dashboard-widget${hiddenPreview ? ' is-hidden-preview' : ''}${isInteractionSource && interactionPhantom ? ' is-interaction-source' : ''}${dragPreview || resizePreview ? ' is-preview-shifted' : ''}`}
+        className={`dashboard-widget${stackWidget ? ' dashboard-widget--stack' : ''}${hiddenPreview ? ' is-hidden-preview' : ''}${isInteractionSource && interactionPhantom ? ' is-interaction-source' : ''}${dragPreview || resizePreview ? ' is-preview-shifted' : ''}`}
         style={style}
       >
         <DashboardWidgetChrome
@@ -1258,7 +1926,7 @@ function DashboardGrid({
   return (
     <div
       ref={gridRef}
-      className={`dashboard-grid${editMode ? ' dashboard-grid--edit' : ''}${dragPreview || resizePreview ? ' dashboard-grid--drag-preview' : ''}${compact ? ' dashboard-grid--compact' : ''}`}
+      className={`dashboard-grid${editMode ? ' dashboard-grid--edit' : ''}${draggingId ? ' dashboard-grid--dragging' : ''}${resizingId ? ' dashboard-grid--resizing' : ''}${dragPreview || resizePreview ? ' dashboard-grid--drag-preview' : ''}${compact ? ' dashboard-grid--compact' : ''}`}
     >
       {visibleWidgets.map((widget) => {
         if (interactionPhantom && widget.id === interactionPhantom.id) return null;
@@ -1268,7 +1936,7 @@ function DashboardGrid({
         <DashboardWidgetPhantom
           widget={interactionPhantom}
           compact={compact}
-          detail={`${OPERATOR_WIDGET_REGISTRY[interactionPhantom.id]?.label || interactionPhantom.id} · ${interactionPhantom.w}×${interactionPhantom.h}`}
+          detail={`${getDashboardWidgetMeta(interactionPhantom)?.label || interactionPhantom.id} · ${interactionPhantom.w}×${interactionPhantom.h}`}
         />
       ) : null}
       {editMode && hiddenDividerY != null ? (

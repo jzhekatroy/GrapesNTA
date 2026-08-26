@@ -12,6 +12,9 @@ const HIDDEN_PICKER = new Set([
   'src_network', 'dst_network', 'src_label', 'dst_label', 'vlan_attachment',
 ]);
 
+const CLIENTS_CATALOG = 'Клиенты / Clients';
+const MY_NETWORK_CATALOG = 'Моя сеть / My network';
+
 describe('explorer schema field naming', () => {
   it('uses bilingual labels for core fields', () => {
     const schema = explorerSchema();
@@ -62,11 +65,16 @@ describe('explorer schema field naming', () => {
     assert.ok(schema.dimensions.some((d) => d.id === 'vlan_name'));
   });
 
-  it('exposes scope value options with bilingual labels', () => {
+  it('hides scope fields from pickers but keeps them in the internal registry', () => {
     const schema = explorerSchema();
-    const srcScope = schema.filterFields.find((f) => f.id === 'src_scope');
-    assert.ok(srcScope?.valueOptions?.length >= 4);
-    assert.ok(srcScope.valueOptions.some((o) => o.value === 'local' && o.label.includes('Наш')));
+    const dims = explorerDimensions();
+    for (const id of ['src_scope', 'dst_scope']) {
+      assert.equal(schema.dimensions.some((d) => d.id === id), false, id);
+      assert.equal(schema.filterFields.some((f) => f.id === id), false, id);
+      assert.ok(dims[id], `${id} must remain in internal registry`);
+      assert.equal(dims[id].hiddenFromPicker, true);
+      assert.equal(dims[id].hiddenFromFilters, true);
+    }
   });
 
   it('exposes source_id as a searchable value picker', () => {
@@ -105,7 +113,39 @@ describe('explorer schema field naming', () => {
     assert.ok(dimension);
     assert.equal(dimension.groupable, true);
     assert.equal(schema.maxCabinetClientRangeHours, 6);
-    assert.deepEqual(schema.dimensionGroups['Система / System'], ['collector', 'cabinet_client']);
+    assert.deepEqual(schema.dimensionGroups[CLIENTS_CATALOG], ['cabinet_client', 'client_direction']);
+    assert.equal(schema.dimensionGroups['Система / System'], undefined);
+  });
+
+  it('exposes operator client_direction in clients catalog', () => {
+    const schema = explorerSchema();
+    const filter = schema.filterFields.find((f) => f.id === 'client_direction');
+    const dimension = schema.dimensions.find((d) => d.id === 'client_direction');
+    assert.ok(filter);
+    assert.ok(dimension);
+    assert.match(filter.label, /Направление относительно клиента/);
+    assert.equal(explorerFieldMatchesQuery(filter, 'к клиенту'), true);
+    assert.ok(filter.valueOptions.some((o) => o.value === 'between'));
+    assert.ok(filter.valueOptions.some((o) => o.value === 'none'));
+  });
+
+  it('uses tag-based SQL for operator client_direction', () => {
+    const dims = explorerDimensions();
+    const expr = dims.client_direction?.filterExpr || '';
+    assert.match(expr, /f\.src_client != ''/);
+    assert.match(expr, /f\.dst_client != ''/);
+    assert.match(expr, /'between'/);
+    assert.match(expr, /'none'/);
+    assert.doesNotMatch(expr, /cabinet_client_id/);
+  });
+
+  it('labels operator direction separately from client direction', () => {
+    const schema = explorerSchema();
+    const direction = schema.filterFields.find((f) => f.id === 'direction');
+    assert.match(direction?.label, /сети оператора/i);
+    assert.equal(direction?.group, MY_NETWORK_CATALOG);
+    const unknownOpt = (direction?.valueOptions || []).find((o) => o.value === 'unknown');
+    assert.match(unknownOpt?.label || unknownOpt?.hint || '', /неразмеч/i);
   });
 
   it('reserves client alias for cabinet_client field', () => {

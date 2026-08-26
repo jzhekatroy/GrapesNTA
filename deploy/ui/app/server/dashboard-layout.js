@@ -5,7 +5,8 @@ const path = require('path');
 const { DatabaseSync } = require('node:sqlite');
 
 const GRID_COLS = 12;
-const LAYOUT_VERSION = 2;
+const LAYOUT_VERSION = 3;
+const STACK_ID_PATTERN = /^stack-[vh]-[a-z0-9]+$/;
 const MAX_LAYOUT_BYTES = 16 * 1024;
 const TREND_SPLIT_MIN = 0.35;
 const TREND_SPLIT_MAX = 0.65;
@@ -24,6 +25,11 @@ const OPERATOR_WIDGET_CONSTRAINTS = {
   'top-talkers': { allowedW: [6, 7, 8, 12], minH: 2, maxH: 3 },
   countries: { allowedW: [4, 5, 6, 12], minH: 2, maxH: 3 },
   'recent-flows': { allowedW: [4, 5, 6, 7, 8, 9, 10, 11, 12], minH: 1, maxH: 2 },
+};
+
+const STACK_WIDGET_CONSTRAINTS = {
+  vertical: { allowedW: [4, 5, 6, 7, 8, 9, 10, 11, 12], minH: 2, maxH: 8 },
+  horizontal: { allowedW: [6, 7, 8, 9, 10, 11, 12], minH: 1, maxH: 3 },
 };
 
 const OPERATOR_WIDGET_IDS = Object.keys(OPERATOR_WIDGET_CONSTRAINTS);
@@ -92,12 +98,27 @@ function nearestAllowedW(value, allowedW) {
   return best;
 }
 
-function clampWidget(widget, constraints) {
-  const w = nearestAllowedW(widget.w, constraints.allowedW);
+function isStackWidget(widget) {
+  return widget?.kind === 'stack' || isStackWidgetId(widget?.id);
+}
+
+function isStackWidgetId(id) {
+  return STACK_ID_PATTERN.test(String(id || ''));
+}
+
+function stackDirectionKey(direction) {
+  return direction === 'horizontal' ? 'horizontal' : 'vertical';
+}
+
+function clampContentWidget(widget, constraints) {
+  const inner = !!widget.parentStack;
   const h = Math.min(constraints.maxH, Math.max(constraints.minH, Math.round(Number(widget.h) || constraints.minH)));
-  const x = Math.min(GRID_COLS - w, Math.max(0, Math.round(Number(widget.x) || 0)));
   const y = Math.max(0, Math.round(Number(widget.y) || 0));
-  return {
+  const w = inner
+    ? Math.min(GRID_COLS, Math.max(1, Math.round(Number(widget.w) || 1)))
+    : nearestAllowedW(widget.w, constraints.allowedW);
+  const x = Math.min(GRID_COLS - w, Math.max(0, Math.round(Number(widget.x) || 0)));
+  const next = {
     id: widget.id,
     x,
     y,
@@ -105,6 +126,36 @@ function clampWidget(widget, constraints) {
     h,
     visible: widget.visible !== false,
   };
+  if (widget.parentStack) next.parentStack = String(widget.parentStack);
+  return next;
+}
+
+function clampStackWidget(widget) {
+  const direction = stackDirectionKey(
+    widget.direction || (String(widget.id || '').startsWith('stack-h') ? 'horizontal' : 'vertical'),
+  );
+  const constraints = STACK_WIDGET_CONSTRAINTS[direction];
+  const w = nearestAllowedW(widget.w, constraints.allowedW);
+  const h = Math.min(constraints.maxH, Math.max(constraints.minH, Math.round(Number(widget.h) || constraints.minH)));
+  const x = Math.min(GRID_COLS - w, Math.max(0, Math.round(Number(widget.x) || 0)));
+  const y = Math.max(0, Math.round(Number(widget.y) || 0));
+  return {
+    id: String(widget.id),
+    kind: 'stack',
+    direction,
+    x,
+    y,
+    w,
+    h,
+    visible: widget.visible !== false,
+    childIds: Array.isArray(widget.childIds)
+      ? widget.childIds.map((id) => String(id)).filter(Boolean)
+      : [],
+  };
+}
+
+function clampWidget(widget, constraints) {
+  return clampContentWidget(widget, constraints);
 }
 
 function normalizeSettings(raw = {}, defaults = DEFAULT_OPERATOR_LAYOUT.settings) {
@@ -182,23 +233,28 @@ function mergeWithDefaults(saved, defaults = DEFAULT_OPERATOR_LAYOUT) {
   for (const defaultWidget of base.widgets) {
     const savedWidget = byId.get(defaultWidget.id);
     if (savedWidget) {
-      mergedWidgets.push(clampWidget(
+      mergedWidgets.push(clampContentWidget(
         { ...defaultWidget, ...savedWidget, id: defaultWidget.id },
         OPERATOR_WIDGET_CONSTRAINTS[defaultWidget.id],
       ));
       byId.delete(defaultWidget.id);
     } else {
-      mergedWidgets.push(clampWidget(defaultWidget, OPERATOR_WIDGET_CONSTRAINTS[defaultWidget.id]));
+      mergedWidgets.push(clampContentWidget(defaultWidget, OPERATOR_WIDGET_CONSTRAINTS[defaultWidget.id]));
     }
   }
 
   for (const leftover of byId.values()) {
     const id = String(leftover.id || '');
-    if (!OPERATOR_WIDGET_CONSTRAINTS[id]) continue;
-    mergedWidgets.push(clampWidget(leftover, OPERATOR_WIDGET_CONSTRAINTS[id]));
+    if (isStackWidget(leftover) && isStackWidgetId(id)) {
+      mergedWidgets.push(clampStackWidget(leftover));
+    }
   }
 
-  mergedWidgets.sort((a, b) => (a.y - b.y) || (a.x - b.x));
+  mergedWidgets.sort((a, b) => {
+    if (a.parentStack && !b.parentStack) return 1;
+    if (!a.parentStack && b.parentStack) return -1;
+    return (a.y - b.y) || (a.x - b.x);
+  });
 
   return {
     version: LAYOUT_VERSION,
@@ -229,9 +285,28 @@ function validateLayout(layout) {
 
   const ids = new Set();
   let visibleCount = 0;
+  const stacksById = new Map();
+  const parentByContentId = new Map();
 
   for (const widget of layout.widgets) {
     const id = String(widget?.id || '');
+    if (isStackWidget(widget)) {
+      if (!isStackWidgetId(id)) {
+        const err = new Error(`Некорректный стек: ${id || '(пусто)'}`);
+        err.statusCode = 400;
+        throw err;
+      }
+      if (ids.has(id)) {
+        const err = new Error(`Дублирующийся стек: ${id}`);
+        err.statusCode = 400;
+        throw err;
+      }
+      ids.add(id);
+      stacksById.set(id, clampStackWidget(widget));
+      if (widget.visible !== false) visibleCount += 1;
+      continue;
+    }
+
     if (!OPERATOR_WIDGET_CONSTRAINTS[id]) {
       const err = new Error(`Неизвестный виджет: ${id || '(пусто)'}`);
       err.statusCode = 400;
@@ -243,6 +318,7 @@ function validateLayout(layout) {
       throw err;
     }
     ids.add(id);
+    if (widget.parentStack) parentByContentId.set(id, String(widget.parentStack));
     if (widget.visible !== false) visibleCount += 1;
   }
 
@@ -257,6 +333,35 @@ function validateLayout(layout) {
       const err = new Error(`Отсутствует виджет: ${requiredId}`);
       err.statusCode = 400;
       throw err;
+    }
+  }
+
+  for (const [childId, stackId] of parentByContentId.entries()) {
+    const stack = stacksById.get(stackId);
+    if (!stack) {
+      const err = new Error(`Стек не найден для виджета: ${childId}`);
+      err.statusCode = 400;
+      throw err;
+    }
+    if (!stack.childIds.includes(childId)) {
+      const err = new Error(`Виджет ${childId} не входит в стек ${stackId}`);
+      err.statusCode = 400;
+      throw err;
+    }
+  }
+
+  for (const stack of stacksById.values()) {
+    for (const childId of stack.childIds) {
+      if (!OPERATOR_WIDGET_CONSTRAINTS[childId]) {
+        const err = new Error(`Стек ${stack.id} содержит неизвестный виджет: ${childId}`);
+        err.statusCode = 400;
+        throw err;
+      }
+      if (parentByContentId.get(childId) !== stack.id) {
+        const err = new Error(`Несогласованный parentStack для ${childId}`);
+        err.statusCode = 400;
+        throw err;
+      }
     }
   }
 

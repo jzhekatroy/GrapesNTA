@@ -106,14 +106,13 @@ const FILTER_OPS_BY_TYPE = {
 };
 
 const EXPLORER_GROUP = {
-  ADDR: 'Адреса и порты / Addresses & ports',
-  PROTO: 'Протокол и сервисы / Protocol & services',
-  ASGEO: 'Автономные системы и гео / AS & geo',
-  L3: 'Операторы и префиксы / Owners & prefixes',
-  EQUIP: 'Сетевое оборудование и интерфейсы / Network equipment & interfaces',
-  DIR: 'Направление и классификация / Direction & classification',
+  ADDR: 'IP адреса и порты / IP addresses & ports',
+  ASGEO: 'Автономные системы и страны / AS & countries',
+  PROTO: 'Протоколы и сервисы / Protocols & services',
+  CLIENTS: 'Клиенты / Clients',
   L2: 'L2 и VLAN / L2 & VLAN',
-  SYS: 'Система / System',
+  MY_NETWORK: 'Моя сеть / My network',
+  EQUIP: 'Сетевое оборудование / Network equipment',
 };
 
 const EXPLORER_SRC_ALIASES = ['src', 'source', 'источник'];
@@ -155,30 +154,37 @@ const EXPLORER_DIM_META = {
   dst_country: { label: 'Страна назначения / Destination country', group: EXPLORER_GROUP.ASGEO, valueOptions: EXPLORER_COUNTRY_OPTIONS },
   l3_owner: {
     label: 'Оператор / L3 owner',
-    group: EXPLORER_GROUP.L3,
+    group: EXPLORER_GROUP.MY_NETWORK,
     aliases: ['оператор', 'пин', 'owner', 'entity', 'l3'],
     valueHint: 'L3-сущность из net_entities',
   },
   cabinet_client: {
     label: 'Клиент',
-    group: EXPLORER_GROUP.SYS,
+    group: EXPLORER_GROUP.CLIENTS,
     aliases: ['клиент', 'лс', 'кабинет', 'cabinet client'],
     valueHint: 'Название, client_id, IP/CIDR, свитч или ifName — напр. PortChannel32 172.18.19.12',
   },
+  client_direction: {
+    label: 'Направление относительно клиента / Client-relative direction',
+    group: EXPLORER_GROUP.CLIENTS,
+    filterType: 'enum',
+    aliases: ['к клиенту', 'от клиента', 'client direction', 'incoming client', 'направление клиента'],
+    valueHint: 'Считается по привязке клиента (префикс или порт), не по разметке сторон. Клиента в фильтре выбирать не обязательно.',
+  },
   own_network: {
     label: 'Префикс / CIDR',
-    group: EXPLORER_GROUP.L3,
+    group: EXPLORER_GROUP.MY_NETWORK,
     aliases: ['cidr', 'префикс', 'сеть', 'prefix', 'own'],
   },
   src_entity: {
     label: 'Оператор источника / Source owner',
-    group: EXPLORER_GROUP.L3,
+    group: EXPLORER_GROUP.MY_NETWORK,
     hiddenFromFilters: true,
     aliases: ['owner', 'оператор', 'entity'],
   },
   dst_entity: {
     label: 'Оператор назначения / Destination owner',
-    group: EXPLORER_GROUP.L3,
+    group: EXPLORER_GROUP.MY_NETWORK,
     hiddenFromFilters: true,
     aliases: ['owner', 'оператор', 'entity'],
   },
@@ -223,23 +229,28 @@ const EXPLORER_DIM_META = {
     valueHint: 'ID источника в коллекторе',
   },
   direction: {
-    label: 'Направление / Direction',
-    group: EXPLORER_GROUP.DIR,
+    label: 'Направление в сети оператора / Operator network direction',
+    group: EXPLORER_GROUP.MY_NETWORK,
     aliases: ['вход', 'исход', 'транзит'],
+    valueHint: 'Разметка по ролям портов и префиксам оператора',
   },
   src_scope: {
     label: 'Принадлежность IP источника / Source IP ownership',
-    group: EXPLORER_GROUP.DIR,
+    group: EXPLORER_GROUP.MY_NETWORK,
     filterType: 'enum',
     valueOptions: EXPLORER_SCOPE_OPTIONS,
     aliases: ['scope', 'принадлежность', 'ownership', 'local', 'customer', 'remote'],
+    hiddenFromPicker: true,
+    hiddenFromFilters: true,
   },
   dst_scope: {
     label: 'Принадлежность IP назначения / Destination IP ownership',
-    group: EXPLORER_GROUP.DIR,
+    group: EXPLORER_GROUP.MY_NETWORK,
     filterType: 'enum',
     valueOptions: EXPLORER_SCOPE_OPTIONS,
     aliases: ['scope', 'принадлежность', 'ownership', 'local', 'customer', 'remote'],
+    hiddenFromPicker: true,
+    hiddenFromFilters: true,
   },
   src_mac: { label: 'MAC источника / Source MAC', group: EXPLORER_GROUP.L2 },
   dst_mac: { label: 'MAC назначения / Destination MAC', group: EXPLORER_GROUP.L2 },
@@ -255,15 +266,14 @@ const EXPLORER_DIM_META = {
 
 const DIMENSION_GROUPS = {
   [EXPLORER_GROUP.ADDR]: ['src_ip', 'dst_ip', 'src_port', 'dst_port'],
-  [EXPLORER_GROUP.PROTO]: ['proto', 'src_service', 'dst_service', 'tcp_flags'],
   [EXPLORER_GROUP.ASGEO]: ['src_asn', 'dst_asn', 'src_country', 'dst_country'],
-  [EXPLORER_GROUP.L3]: ['l3_owner', 'own_network', 'src_entity', 'dst_entity'],
+  [EXPLORER_GROUP.PROTO]: ['proto', 'src_service', 'dst_service', 'tcp_flags'],
+  [EXPLORER_GROUP.CLIENTS]: ['cabinet_client', 'client_direction'],
+  [EXPLORER_GROUP.L2]: ['src_mac', 'dst_mac', 'vlan', 'vlan_name', 'src_vlan'],
+  [EXPLORER_GROUP.MY_NETWORK]: ['direction', 'l3_owner', 'own_network', 'src_entity', 'dst_entity'],
   [EXPLORER_GROUP.EQUIP]: [
     'switch_ip', 'in_if_name', 'in_if_alias', 'out_if_name', 'out_if_alias', 'source_id',
   ],
-  [EXPLORER_GROUP.DIR]: ['direction', 'src_scope', 'dst_scope'],
-  [EXPLORER_GROUP.L2]: ['src_mac', 'dst_mac', 'vlan', 'vlan_name', 'src_vlan'],
-  [EXPLORER_GROUP.SYS]: ['collector', 'cabinet_client'],
 };
 
 const EXPLORER_FILTER_HINTS = {
@@ -355,7 +365,15 @@ const EXPLORER_DIRECTION_OPTIONS = [
   { value: 'out', hint: 'исходящий' },
   { value: 'transit', hint: 'транзит' },
   { value: 'internal', hint: 'внутренний' },
-  { value: 'unknown', hint: 'неизвестный' },
+  { value: 'unknown', hint: 'неразмеченный', label: 'Неразмеченный / unmarked' },
+];
+
+const OPERATOR_CLIENT_DIRECTION_OPTIONS = [
+  { value: 'in', label: 'К клиенту / To client' },
+  { value: 'out', label: 'От клиента / From client' },
+  { value: 'internal', label: 'Внутри сети клиента / Within client network' },
+  { value: 'between', label: 'Между клиентами / Between clients' },
+  { value: 'none', label: 'Без клиента / No client' },
 ];
 
 const CABINET_CLIENT_DIRECTION_OPTIONS = [
@@ -1077,13 +1095,28 @@ function explorerDimensions() {
   const cabinetClientKeyExpr = cabinetClientGroupKeyExpr('f');
   dims.cabinet_client = {
     label: 'Клиент',
-    group: EXPLORER_GROUP.SYS,
+    group: EXPLORER_GROUP.CLIENTS,
     kind: 'entity',
     filterType: 'cabinet_client',
     expr: cabinetClientLabelFromKey(cabinetClientKeyExpr),
     filterExpr: cabinetClientKeyExpr,
     groupKeyExpr: cabinetClientKeyExpr,
     labelFromKey: cabinetClientLabelFromKey,
+  };
+
+  const operatorClientDirExpr = operatorClientDirectionExpr();
+  dims.client_direction = {
+    label: 'Направление относительно клиента / Client-relative direction',
+    group: EXPLORER_GROUP.CLIENTS,
+    kind: 'enum',
+    filterType: 'enum',
+    expr: operatorClientDirExpr,
+    filterExpr: operatorClientDirExpr,
+    groupKeyExpr: operatorClientDirExpr,
+    labelFromKey: operatorClientDirectionLabelFromKey,
+    valueOptions: OPERATOR_CLIENT_DIRECTION_OPTIONS,
+    valueHint: 'Считается по привязке клиента (префикс или порт), не по разметке сторон. Клиента в фильтре выбирать не обязательно.',
+    aliases: ['к клиенту', 'от клиента', 'client direction', 'incoming client', 'направление клиента'],
   };
 
   const tcpFlagsCol = flowCol('tcpFlags');
@@ -1106,6 +1139,25 @@ function explorerDimensions() {
   return dims;
 }
 
+function operatorClientDirectionExpr(flowAlias = 'f') {
+  return `multiIf(`
+    + `${flowAlias}.src_client != '' AND ${flowAlias}.dst_client != '' AND ${flowAlias}.src_client = ${flowAlias}.dst_client, 'internal', `
+    + `${flowAlias}.src_client != '' AND ${flowAlias}.dst_client != '' AND ${flowAlias}.src_client != ${flowAlias}.dst_client, 'between', `
+    + `${flowAlias}.dst_client != '', 'in', `
+    + `${flowAlias}.src_client != '', 'out', `
+    + `'none')`;
+}
+
+function operatorClientDirectionLabelFromKey(keyExpr) {
+  return `multiIf(`
+    + `${keyExpr} = 'in', 'К клиенту', `
+    + `${keyExpr} = 'out', 'От клиента', `
+    + `${keyExpr} = 'internal', 'Внутри сети клиента', `
+    + `${keyExpr} = 'between', 'Между клиентами', `
+    + `${keyExpr} = 'none', 'Без клиента', `
+    + `toString(${keyExpr}))`;
+}
+
 function cabinetClientDirectionExpr() {
   return `multiIf(`
     + `f.src_client = {cabinet_client_id:String} AND f.dst_client = {cabinet_client_id:String}, 'internal', `
@@ -1121,7 +1173,7 @@ function cabinetExplorerDimensions() {
   const directionExpr = cabinetClientDirectionExpr();
   dims.client_direction = {
     label: 'Направление',
-    group: EXPLORER_GROUP.DIR,
+    group: EXPLORER_GROUP.CLIENTS,
     kind: 'enum',
     filterType: 'enum',
     expr: directionExpr,
@@ -1185,7 +1237,7 @@ function explorerSchema(options = {}) {
   const collectorField = {
     id: 'collector',
     label: 'Коллектор / Collector',
-    group: EXPLORER_GROUP.SYS,
+    group: 'Система / System',
     filterType: 'collector',
     ops: ['in', 'not_in', '=', '!='],
     valueHint: 'ID коллектора или loc:location-id',
@@ -1231,10 +1283,7 @@ function explorerSchema(options = {}) {
       maxLimit: EXPLORER_MAX_LIMIT,
       maxExportRows: EXPLORER_MAX_EXPORT_ROWS,
       dimensionGroups: Object.fromEntries(
-        Object.entries({
-          ...DIMENSION_GROUPS,
-          [EXPLORER_GROUP.DIR]: ['client_direction'],
-        })
+        Object.entries(DIMENSION_GROUPS)
           .map(([group, ids]) => [
             group,
             ids.filter((id) => CABINET_EXPLORER_FIELD_IDS.has(id)),
