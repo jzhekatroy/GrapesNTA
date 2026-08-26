@@ -208,10 +208,26 @@ function explorerUsesCabinetClient({ filters = [], groupBy = [] } = {}) {
 function explorerCabinetClientPeriodOptions(schema) {
   const hours = Number(schema?.maxCabinetClientRangeHours) || 6;
   return {
-    maxRangeMs: hours * 3600000,
-    maxRangeDays: hours / 24,
-    rangeErrorMessage: `Фильтр по клиенту на сырых потоках: период не может превышать ${hours} часов`,
+    recommendedRangeMs: hours * 3600000,
+    rangeWarningMessage: `Фильтр по клиенту считается по сырым потокам: рекомендуется период не более ${hours} часов`,
   };
+}
+
+function explorerPeriodDurationMs(timeRange, customPeriod) {
+  if (timeRange === 'custom') {
+    const fromMs = new Date(customPeriod?.from).getTime();
+    const toMs = new Date(customPeriod?.to).getTime();
+    if (!Number.isFinite(fromMs) || !Number.isFinite(toMs) || toMs <= fromMs) return null;
+    return toMs - fromMs;
+  }
+  return timeRangePresetMs(timeRange);
+}
+
+function explorerCabinetClientPeriodWarning({ usesCabinetClient, cabinetClientPeriod, timeRange, customPeriod }) {
+  if (!usesCabinetClient || !cabinetClientPeriod) return null;
+  const durationMs = explorerPeriodDurationMs(timeRange, customPeriod);
+  if (durationMs == null || durationMs <= cabinetClientPeriod.recommendedRangeMs) return null;
+  return cabinetClientPeriod.rangeWarningMessage;
 }
 
 function explorerRowFilterValue(row, dimId, valueIdx, dimensionById) {
@@ -2402,11 +2418,16 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
     () => (usesCabinetClient ? explorerCabinetClientPeriodOptions(schema) : null),
     [usesCabinetClient, schema],
   );
-  const maxRangeDays = cabinetClientPeriod?.maxRangeDays
-    ?? explorerRangeLimitDays(schema?.maxRangeDays ?? explorerApi.maxRangeDays);
-  const periodValidationOptions = cabinetClientPeriod
-    ? { maxRangeMs: cabinetClientPeriod.maxRangeMs, rangeErrorMessage: cabinetClientPeriod.rangeErrorMessage }
-    : {};
+  const maxRangeDays = explorerRangeLimitDays(schema?.maxRangeDays ?? explorerApi.maxRangeDays);
+  const cabinetClientPeriodWarning = useMemo(
+    () => explorerCabinetClientPeriodWarning({
+      usesCabinetClient,
+      cabinetClientPeriod,
+      timeRange,
+      customPeriod,
+    }),
+    [usesCabinetClient, cabinetClientPeriod, timeRange, customPeriod],
+  );
 
   const querySetters = useMemo(() => ({
     setTimeRange, setCustomPeriod, setFilters, setThresholds, setMetric, setGroupBy, setLimit, setVis,
@@ -2757,7 +2778,6 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
       nextTimeRange === 'custom' ? nextCustomPeriod : {},
       nextTimeRange,
       maxRangeDays,
-      periodValidationOptions,
     );
     if (periodErr) {
       pushToast({ kind: 'error', title: 'Неверный период', desc: periodErr });
@@ -2772,7 +2792,7 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
   };
 
   const applyExplorerChartRangeZoom = (range) => {
-    if (!range?.from || !range?.to || validateExplorerCustomPeriod(range, 'custom', maxRangeDays, periodValidationOptions)) return;
+    if (!range?.from || !range?.to || validateExplorerCustomPeriod(range, 'custom', maxRangeDays)) return;
     setPeriodZoomStack((stack) => [...stack, periodRef.current]);
     requeryWithPeriod('custom', { from: range.from, to: range.to });
   };
@@ -2844,7 +2864,6 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
       snapshot.timeRange === 'custom' ? snapshot.customPeriod : {},
       snapshot.timeRange,
       maxRangeDays,
-      periodValidationOptions,
     );
     if (periodErr) {
       pushToast({ kind: 'error', title: 'Неверный период', desc: periodErr });
@@ -2854,16 +2873,15 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
       filters: snapshot.filters,
       groupBy: snapshot.groupBy,
     });
-    if (snapshotUsesCabinetClient && snapshot.timeRange !== 'custom') {
-      const presetMs = timeRangePresetMs(snapshot.timeRange);
-      const limitMs = cabinetClientPeriod?.maxRangeMs || periodValidationOptions.maxRangeMs;
-      if (presetMs != null && limitMs && presetMs > limitMs) {
+    if (snapshotUsesCabinetClient) {
+      const periodOpts = explorerCabinetClientPeriodOptions(schema);
+      const durationMs = explorerPeriodDurationMs(snapshot.timeRange, snapshot.customPeriod);
+      if (durationMs != null && durationMs > periodOpts.recommendedRangeMs) {
         pushToast({
-          kind: 'error',
-          title: 'Неверный период',
-          desc: cabinetClientPeriod?.rangeErrorMessage || periodValidationOptions.rangeErrorMessage,
+          kind: 'warning',
+          title: 'Длинный период',
+          desc: periodOpts.rangeWarningMessage,
         });
-        return;
       }
     }
     if (filterMode === 'graphic' && validFilters.length !== activeFilters.length) {
@@ -3560,7 +3578,7 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
             setThresholds={setThresholds}
             thresholdPeakWarning={clientThresholdWarning}
             maxRangeDays={maxRangeDays}
-            cabinetClientWarning={usesCabinetClient ? cabinetClientPeriod?.rangeErrorMessage : null}
+            cabinetClientWarning={cabinetClientPeriodWarning}
           />
         )}
 
@@ -5197,7 +5215,7 @@ function ExplorerFilters({
               font: 'var(--pv-text-body-3)',
             }}
             >
-              {cabinetClientWarning}. Для суток и дольше используйте кабинет клиента, не Explorer.
+              {cabinetClientWarning}. Для суток и дольше удобнее кабинет клиента.
             </div>
           )}
           <ExplorerSystemFilterRow title="Период" mandatory>

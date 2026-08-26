@@ -49,14 +49,12 @@ const {
   normalizeExplorerGroupTokens,
 } = require('./explorer-group-mask');
 const {
-  CABINET_CLIENT_MAX_RANGE_MS,
   CABINET_CLIENT_MAX_RANGE_HOURS,
   searchCabinetClients,
   buildCabinetClientFilterSql,
   cabinetClientGroupKeyExpr,
   cabinetClientLabelFromKey,
   lookupCabinetClientDisplayNames,
-  queryUsesCabinetClient,
   explorerCabinetClientDisplayLabel,
   explorerWindowSpecWithCabinetClientCatalog,
 } = require('./explorer-cabinet-client');
@@ -1912,19 +1910,10 @@ function normalizeExplorerQuery(body = {}, options = {}) {
   const from = body.from;
   const to = body.to;
   const filters = normalizeFilterList(body.filters);
-  const usesCabinetClient = !options.cabinetClientId && queryUsesCabinetClient({
-    filters,
-    groupBy: body.groupBy,
-  });
   validateExplorerWindow({ range, from, to }, {
     maxRangeMs: options.cabinetClientId
       ? CABINET_EXPLORER_MAX_RANGE_MS
-      : usesCabinetClient
-        ? CABINET_CLIENT_MAX_RANGE_MS
-        : EXPLORER_MAX_RANGE_MS,
-    rangeErrorMessage: usesCabinetClient
-      ? 'Фильтр по клиенту на сырых потоках: период не может превышать 6 часов'
-      : undefined,
+      : EXPLORER_MAX_RANGE_MS,
   });
 
   const collectorRaw = options.cabinetClientId

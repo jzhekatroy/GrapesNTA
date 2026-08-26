@@ -244,14 +244,12 @@ describe('cabinet client SQL builders', () => {
 });
 
 describe('normalizeExplorerQuery cabinet client period limit', () => {
-  it('rejects periods longer than 6 hours with cabinet_client filter', () => {
-    assert.throws(
-      () => normalizeExplorerQuery({
-        range: '24h',
-        filters: [{ field: 'cabinet_client', op: '=', value: '69862' }],
-      }),
-      /6 часов/,
-    );
+  it('allows periods longer than 6 hours with cabinet_client filter', () => {
+    const q = normalizeExplorerQuery({
+      range: '24h',
+      filters: [{ field: 'cabinet_client', op: '=', value: '69862' }],
+    });
+    assert.equal(q.range, '24h');
   });
 
   it('allows 6h period with cabinet_client filter', () => {
@@ -262,14 +260,12 @@ describe('normalizeExplorerQuery cabinet client period limit', () => {
     assert.equal(q.range, '6h');
   });
 
-  it('rejects long period with cabinet_client grouping', () => {
-    assert.throws(
-      () => normalizeExplorerQuery({
-        range: '24h',
-        groupBy: ['cabinet_client'],
-      }),
-      /6 часов/,
-    );
+  it('allows long period with cabinet_client grouping', () => {
+    const q = normalizeExplorerQuery({
+      range: '24h',
+      groupBy: ['cabinet_client'],
+    });
+    assert.equal(q.range, '24h');
   });
 });
 

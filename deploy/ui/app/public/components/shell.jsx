@@ -22,36 +22,43 @@ const NAV = [
     ],
   },
   {
-    id: 'data',
-    section: 'Сбор данных',
-    icon: 'collectors',
-    items: [
-      { id: 'collectors', label: 'Коллекторы', icon: 'collectors' },
-      { id: 'snmp', label: 'SNMP', icon: 'network' },
-      { id: 'bmp', label: 'BMP / BGP', icon: 'router' },
-    ],
-  },
-  {
-    id: 'netmodel',
-    section: 'Модель сети',
-    icon: 'refs',
-    items: [
-      { id: 'traffic-classification', label: 'Классификация трафика', icon: 'filter' },
-      { id: 'cidr', label: 'Моя сеть', icon: 'cidr' },
-      { id: 'dns-resolvers', label: 'DNS-резолверы', icon: 'db' },
-      { id: 'interface-roles', label: 'Порты оборудования', icon: 'link' },
-      { id: 'port-services', label: 'Сервисы и порты приложений', icon: 'flow' },
-    ],
-  },
-  {
-    id: 'admin',
-    section: 'Администрирование',
-    items: [
-      { id: 'users', label: 'Пользователи и права', icon: 'shield' },
-      { id: 'audit', label: 'Журнал аудита', icon: 'clock' },
-      { id: 'clients', label: 'Клиенты', icon: 'users' },
-      { id: 'smtp', label: 'Почта (SMTP)', icon: 'export' },
-      { id: 'ttl', label: 'Сроки хранения', icon: 'clock' },
+    id: 'settings',
+    section: 'Настройка',
+    icon: 'sliders',
+    groups: [
+      {
+        id: 'data',
+        section: 'Сбор данных',
+        icon: 'collectors',
+        items: [
+          { id: 'collectors', label: 'Коллекторы', icon: 'collectors' },
+          { id: 'snmp', label: 'SNMP', icon: 'network' },
+          { id: 'bmp', label: 'BMP / BGP', icon: 'router' },
+        ],
+      },
+      {
+        id: 'netmodel',
+        section: 'Модель сети',
+        icon: 'refs',
+        items: [
+          { id: 'traffic-classification', label: 'Классификация трафика', icon: 'filter' },
+          { id: 'cidr', label: 'Моя сеть', icon: 'cidr' },
+          { id: 'dns-resolvers', label: 'DNS-резолверы', icon: 'db' },
+          { id: 'interface-roles', label: 'Порты оборудования', icon: 'link' },
+          { id: 'port-services', label: 'Сервисы и порты приложений', icon: 'flow' },
+        ],
+      },
+      {
+        id: 'admin',
+        section: 'Администрирование',
+        items: [
+          { id: 'users', label: 'Пользователи и права', icon: 'shield' },
+          { id: 'audit', label: 'Журнал аудита', icon: 'clock' },
+          { id: 'clients', label: 'Клиенты', icon: 'users' },
+          { id: 'smtp', label: 'Почта (SMTP)', icon: 'export' },
+          { id: 'ttl', label: 'Сроки хранения', icon: 'clock' },
+        ],
+      },
     ],
   },
 ];
@@ -116,9 +123,24 @@ function hasNavPermission(effectivePermissions, pageId) {
 
 const DEFAULT_OPEN_SECTIONS = new Set(['overview', 'traffic']);
 
+function getSectionItems(sec) {
+  if (sec.items) return sec.items;
+  if (sec.groups) return sec.groups.flatMap((g) => g.items || []);
+  return [];
+}
+
 function filterNav(nav, effectivePermissions) {
   if (!effectivePermissions) return nav;
   return nav.map((sec) => {
+    if (sec.groups) {
+      const groups = sec.groups.map((grp) => {
+        const items = grp.items.filter((it) => hasNavPermission(effectivePermissions, it.id));
+        if (!items.length) return null;
+        return { ...grp, items };
+      }).filter(Boolean);
+      if (!groups.length) return null;
+      return { ...sec, groups };
+    }
     const items = sec.items.filter((it) => hasNavPermission(effectivePermissions, it.id));
     if (!items.length) return null;
     return { ...sec, items };
@@ -142,7 +164,13 @@ function Sidebar({ current, onNavigate, collapsed, effectivePermissions, cabinet
   });
   useEffect(() => {
     visibleNav.forEach((sec) => {
-      if (sec.items.some((it) => it.id === current)) {
+      if (sec.groups) {
+        sec.groups.forEach((grp) => {
+          if (grp.items.some((it) => it.id === current)) {
+            setOpenSections((s) => ({ ...s, [sec.id]: true, [grp.id]: true }));
+          }
+        });
+      } else if (sec.items.some((it) => it.id === current)) {
         setOpenSections((s) => ({ ...s, [sec.id]: true }));
       }
     });
@@ -169,6 +197,8 @@ function Sidebar({ current, onNavigate, collapsed, effectivePermissions, cabinet
             sec={sec}
             open={openSections[sec.id] ?? false}
             onToggle={() => toggleSection(sec.id)}
+            openSections={openSections}
+            onToggleSection={toggleSection}
             current={current}
             onNavigate={onNavigate}
             collapsed={collapsed}
@@ -231,13 +261,24 @@ function NavItem({ item, active, onNavigate, collapsed }) {
   );
 }
 
-function NavSection({ sec, open, onToggle, current, onNavigate, collapsed }) {
-  const hasActive = sec.items.some((it) => it.id === current);
+function NavSection({
+  sec,
+  open,
+  onToggle,
+  openSections,
+  onToggleSection,
+  current,
+  onNavigate,
+  collapsed,
+  nested = false,
+}) {
+  const items = getSectionItems(sec);
+  const hasActive = items.some((it) => it.id === current);
 
   if (collapsed) {
     return (
       <>
-        {sec.items.map((it) => (
+        {items.map((it) => (
           <NavItem
             key={it.id}
             item={it}
@@ -250,8 +291,41 @@ function NavSection({ sec, open, onToggle, current, onNavigate, collapsed }) {
     );
   }
 
+  if (sec.groups) {
+    return (
+      <div className={`nav-section nav-section--parent ${open ? 'nav-section--open' : ''}`}>
+        <div
+          className={`nav-section__head ${hasActive && !open ? 'nav-section__head--active' : ''}`}
+          onClick={onToggle}
+        >
+          {sec.icon && <Icon name={sec.icon} size={16} className="nav-section__icon" />}
+          <span className="nav-section__label">{sec.section}</span>
+          <Icon name="chevR" size={14} className="nav-section__chev" />
+        </div>
+        <div className="nav-section__body">
+          <div className="nav-section__body-inner">
+            {sec.groups.map((grp) => (
+              <NavSection
+                key={grp.id}
+                sec={grp}
+                open={openSections[grp.id] ?? false}
+                onToggle={() => onToggleSection(grp.id)}
+                openSections={openSections}
+                onToggleSection={onToggleSection}
+                current={current}
+                onNavigate={onNavigate}
+                collapsed={false}
+                nested
+              />
+            ))}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
-    <div className={`nav-section ${open ? 'nav-section--open' : ''}`}>
+    <div className={`nav-section${nested ? ' nav-section--nested' : ''} ${open ? 'nav-section--open' : ''}`}>
       <div
         className={`nav-section__head ${hasActive && !open ? 'nav-section__head--active' : ''}`}
         onClick={onToggle}
@@ -261,15 +335,17 @@ function NavSection({ sec, open, onToggle, current, onNavigate, collapsed }) {
         <Icon name="chevR" size={14} className="nav-section__chev" />
       </div>
       <div className="nav-section__body">
-        {sec.items.map((it) => (
-          <NavItem
-            key={it.id}
-            item={it}
-            active={current === it.id}
-            onNavigate={onNavigate}
-            collapsed={collapsed}
-          />
-        ))}
+        <div className="nav-section__body-inner">
+          {sec.items.map((it) => (
+            <NavItem
+              key={it.id}
+              item={it}
+              active={current === it.id}
+              onNavigate={onNavigate}
+              collapsed={collapsed}
+            />
+          ))}
+        </div>
       </div>
     </div>
   );

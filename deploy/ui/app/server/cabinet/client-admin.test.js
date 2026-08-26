@@ -17,6 +17,11 @@ clickhouse.insertRows = async (table, rows, opts) => {
   return { elapsedMs: 1, rows: rows.length };
 };
 
+clickhouse.executeCommand = async (sql, params, opts) => {
+  calls.push({ sql, params, opts, kind: 'command' });
+  return { elapsedMs: 1 };
+};
+
 const {
   normalizeBindMode,
   normalizeClientId,
