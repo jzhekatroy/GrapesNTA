@@ -92,6 +92,40 @@ function createSessionStore({
       return removeExpired.run(Number(now)).changes;
     },
 
+    deleteByUserIds(userIds = []) {
+      const ids = [...new Set(userIds.map((id) => String(id || '')).filter(Boolean))];
+      if (!ids.length) return 0;
+      const placeholders = ids.map(() => '?').join(', ');
+      const stmt = db.prepare(`DELETE FROM sessions WHERE user_id IN (${placeholders})`);
+      return stmt.run(...ids).changes;
+    },
+
+    deleteByImpersonationClientId(clientId) {
+      const targetId = String(clientId || '');
+      if (!targetId) return 0;
+      const rows = db.prepare(
+        'SELECT id, impersonation_json FROM sessions WHERE impersonation_json IS NOT NULL',
+      ).all();
+      let removed = 0;
+      for (const row of rows) {
+        try {
+          const impersonation = parseImpersonation(row.impersonation_json);
+          if (impersonation?.clientId === targetId && remove.run(String(row.id)).changes > 0) {
+            removed += 1;
+          }
+        } catch {
+          // ignore malformed impersonation payloads
+        }
+      }
+      return removed;
+    },
+
+    revokeClientSessions({ userIds = [], clientId } = {}) {
+      let removed = store.deleteByUserIds(userIds);
+      if (clientId) removed += store.deleteByImpersonationClientId(clientId);
+      return removed;
+    },
+
     close() {
       if (cleanupTimer) clearInterval(cleanupTimer);
       db.close();

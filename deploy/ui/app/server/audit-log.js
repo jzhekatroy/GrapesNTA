@@ -18,6 +18,7 @@ const WRITE_ACTIONS = new Set([
   'role_change',
   'permissions_change',
   'password_change',
+  'password_reset',
   'impersonate_start',
   'impersonate_end',
   'api_write',
@@ -160,6 +161,7 @@ function resolveWriteAction(method, apiPath) {
   if (/^\/api\/users\/[^/]+$/.test(p) && m === 'PUT') return 'user_update';
   if (/^\/api\/users\/[^/]+$/.test(p) && m === 'DELETE') return 'user_delete';
   if (/^\/api\/users\/[^/]+\/password$/.test(p) && m === 'POST') return 'password_change';
+  if (/^\/api\/users\/[^/]+\/password-reset$/.test(p) && m === 'POST') return 'password_reset';
   if (/^\/api\/rbac\/users\/[^/]+\/role$/.test(p) && m === 'PUT') return 'role_change';
   if (/^\/api\/rbac\/users\/[^/]+\/permissions$/.test(p) && m === 'PUT') return 'permissions_change';
   if (/^\/api\/rbac\/roles$/.test(p) && m === 'POST') return 'role_change';
@@ -205,6 +207,7 @@ function isAuditWriteExempt(apiPath) {
   if (p.startsWith('/api/auth/')) return true;
   if (p === '/api/audit/page') return true;
   if (/^\/api\/users\/[^/]+\/password$/.test(p)) return true;
+  if (/^\/api\/users\/[^/]+\/password-reset$/.test(p)) return true;
   if (/^\/api\/clients\/[^/]+\/impersonate$/.test(p)) return true;
   return false;
 }

@@ -1,4 +1,7 @@
 const { query } = require('../clickhouse');
+const { CLIENT_ROLE_ID } = require('./constants');
+
+const CLIENT_DISABLED_MESSAGE = 'Доступ приостановлен. Обратитесь к оператору.';
 
 async function getEnabledClient(clientId) {
   const id = String(clientId ?? '').trim();
@@ -39,7 +42,22 @@ async function fillClientDisplayName(cabinet) {
   return { ...cabinet, clientDisplayName: client ? client.displayName : cabinet.clientId };
 }
 
+/**
+ * End the session when a Client-role user belongs to a disabled company.
+ * Returns true if the response was sent and the caller should stop.
+ */
+async function rejectDisabledClientSession(user, sessionId, sessions, res) {
+  if (!user || user.roleId !== CLIENT_ROLE_ID || !user.clientId) return false;
+  const client = await getEnabledClient(user.clientId).catch(() => null);
+  if (client) return false;
+  if (sessionId) sessions.delete(sessionId);
+  res.status(403).json({ error: CLIENT_DISABLED_MESSAGE, code: 'client_disabled' });
+  return true;
+}
+
 module.exports = {
+  CLIENT_DISABLED_MESSAGE,
   getEnabledClient,
   fillClientDisplayName,
+  rejectDisabledClientSession,
 };

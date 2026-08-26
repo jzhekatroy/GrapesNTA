@@ -104,6 +104,10 @@ function generatePassword() {
     .join('');
 }
 
+function isErpClientId(clientId) {
+  return !String(clientId ?? '').startsWith('client:');
+}
+
 function bindCountLabel(row) {
   if (row.bindMode === 'ports') return row.portCount ?? 0;
   return row.prefixCount ?? 0;
@@ -698,13 +702,16 @@ function ClientDrawer({ client, canWrite, onClose, onSaved, onImpersonate, onUse
     setSaving(true);
     setError('');
     try {
-      const res = await ApiClient.updateClient(client.clientId, {
-        displayName: name,
+      const payload = {
         comment: comment.trim(),
         bindMode: client.bindMode,
         enabled,
-      });
-      onSaved(res.data || { ...client, displayName: name, comment, enabled });
+      };
+      if (!isErpClientId(client.clientId)) {
+        payload.displayName = name;
+      }
+      const res = await ApiClient.updateClient(client.clientId, payload);
+      onSaved(res.data || { ...client, displayName: isErpClientId(client.clientId) ? client.displayName : name, comment, enabled });
       pushToast({ kind: 'success', title: SAVE_SUCCESS_TITLE, desc: SAVE_SUCCESS_DESC });
     } catch (err) {
       setError(err.message);
@@ -724,7 +731,12 @@ function ClientDrawer({ client, canWrite, onClose, onSaved, onImpersonate, onUse
     <SidePanel
       open={!!client}
       onClose={onClose}
-      title={client?.displayName || 'Клиент'}
+      title={(
+        <span className="row" style={{ gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+          <span>{client?.displayName || 'Клиент'}</span>
+          {client && isErpClientId(client.clientId) && <Badge tone="neutral">ERP</Badge>}
+        </span>
+      )}
       subtitle={client ? `${client.clientId} · ${BIND_MODE_LABELS[client.bindMode] || client.bindMode}` : ''}
       footer={
         tab === 'general' ? (
@@ -812,6 +824,7 @@ function ClientGeneralTab({
   onImpersonate,
   error,
 }) {
+  const erpClient = isErpClientId(client?.clientId);
   return (
     <div className="col" style={{ gap: 14 }}>
       <div className="field">
@@ -824,8 +837,14 @@ function ClientGeneralTab({
           className="input"
           value={displayName}
           onChange={(e) => onDisplayNameChange(e.target.value)}
-          disabled={!canWrite}
+          disabled={!canWrite || erpClient}
+          readOnly={erpClient}
         />
+        {erpClient && (
+          <div style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-secondary)', marginTop: 6 }}>
+            Название задаётся из ERP PiterIX и обновляется при синхронизации.
+          </div>
+        )}
       </div>
       <div className="field">
         <label>Комментарий</label>
@@ -1247,7 +1266,7 @@ function ClientUsersTab({ client, canWrite, onChanged }) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [createOpen, setCreateOpen] = useState(false);
-  const [createdPassword, setCreatedPassword] = useState(null);
+  const [revealPassword, setRevealPassword] = useState(null);
   const [passwordFor, setPasswordFor] = useState(null);
   const [togglingId, setTogglingId] = useState(null);
 
@@ -1342,7 +1361,7 @@ function ClientUsersTab({ client, canWrite, onChanged }) {
                 </div>
                 {canWrite && (
                   <div className="row" style={{ gap: 4 }}>
-                    <button className="icon-btn tt" data-tt="Сменить пароль" onClick={() => setPasswordFor(u)}>
+                    <button className="icon-btn tt" data-tt="Сбросить пароль" onClick={() => setPasswordFor(u)}>
                       <Icon name="key" size={15} />
                     </button>
                     <button
@@ -1369,21 +1388,26 @@ function ClientUsersTab({ client, canWrite, onChanged }) {
         onClose={() => setCreateOpen(false)}
         onCreated={async (result) => {
           setCreateOpen(false);
-          setCreatedPassword(result);
+          setRevealPassword({ ...result, mode: 'created' });
           await loadUsers();
           if (onChanged) onChanged();
         }}
       />
 
-      <ClientUserPasswordModal
+      <ClientUserPasswordResetModal
         user={passwordFor}
         onClose={() => setPasswordFor(null)}
-        onSaved={loadUsers}
+        onReset={async (result) => {
+          setPasswordFor(null);
+          setRevealPassword({ ...result, mode: 'reset' });
+          await loadUsers();
+          if (onChanged) onChanged();
+        }}
       />
 
       <ClientUserPasswordRevealModal
-        result={createdPassword}
-        onClose={() => setCreatedPassword(null)}
+        result={revealPassword}
+        onClose={() => setRevealPassword(null)}
       />
     </div>
   );
@@ -1484,7 +1508,7 @@ function ClientUserCreateModal({ open, client, onClose, onCreated }) {
   );
 }
 
-function ClientUserPasswordModal({ user, onClose, onSaved }) {
+function ClientUserPasswordResetModal({ user, onClose, onReset }) {
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState('');
@@ -1502,12 +1526,19 @@ function ClientUserPasswordModal({ user, onClose, onSaved }) {
     if (password.length < 12) { setError('Пароль должен быть не короче 12 символов'); return; }
     setSaving(true);
     try {
-      await ApiClient.changeUserPassword(user.id, { password });
-      pushToast({ kind: 'success', title: 'Пароль изменён' });
+      const body = await ApiClient.resetUserPassword(user.id, { password });
+      pushToast({ kind: 'success', title: 'Пароль сброшен' });
       onClose();
-      if (onSaved) await onSaved();
+      if (onReset) {
+        await onReset({
+          user: body.data,
+          password: body.password,
+          username: user.username,
+          fullName: user.fullName,
+        });
+      }
     } catch (err) {
-      setError(err.message || 'Не удалось изменить пароль');
+      setError(err.message || 'Не удалось сбросить пароль');
     } finally {
       setSaving(false);
     }
@@ -1517,12 +1548,12 @@ function ClientUserPasswordModal({ user, onClose, onSaved }) {
     <Modal
       open={!!user}
       onClose={onClose}
-      title="Сменить пароль"
+      title="Сбросить пароль"
       subtitle={user ? `${user.fullName} · ${user.username}` : ''}
       footer={
         <>
           <Button kind="ghost" onClick={onClose}>Отмена</Button>
-          <Button kind="primary" icon="key" onClick={submit} disabled={saving}>{saving ? 'Сохранение…' : 'Сменить пароль'}</Button>
+          <Button kind="primary" icon="key" onClick={submit} disabled={saving}>{saving ? 'Сброс…' : 'Сбросить пароль'}</Button>
         </>
       }
     >
@@ -1534,6 +1565,16 @@ function ClientUserPasswordModal({ user, onClose, onSaved }) {
           <Button kind="ghost" onClick={() => setShowPassword((v) => !v)}>{showPassword ? 'Скрыть' : 'Показать'}</Button>
         </div>
       </div>
+      <SwitchField
+        label="Требовать смену пароля при входе"
+        hint="После сброса клиент должен задать новый пароль при первом входе."
+        checked
+        disabled
+        onChange={() => {}}
+      />
+      <div style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-secondary)', marginTop: 12 }}>
+        Передайте логин и пароль клиенту любым удобным способом. По почте система их не отправляет.
+      </div>
       {error && <div className="form-error" style={{ marginTop: 12 }}>{error}</div>}
     </Modal>
   );
@@ -1541,16 +1582,38 @@ function ClientUserPasswordModal({ user, onClose, onSaved }) {
 
 function ClientUserPasswordRevealModal({ result, onClose }) {
   if (!result) return null;
+
+  const copyCredentials = async () => {
+    const text = `Логин: ${result.username}\nПароль: ${result.password}`;
+    try {
+      await copyTextToClipboard(text);
+      pushToast({ kind: 'success', title: 'Скопировано' });
+    } catch (err) {
+      pushToast({ kind: 'error', title: 'Не удалось скопировать', desc: err.message || '' });
+    }
+  };
+
+  const title = result.mode === 'reset' ? 'Пароль сброшен' : 'Пароль создан';
+
   return (
     <Modal
       open
       onClose={onClose}
-      title="Пароль создан"
+      title={title}
       subtitle={`${result.fullName} · ${result.username}`}
-      footer={<Button kind="primary" onClick={onClose}>Понятно</Button>}
+      footer={(
+        <>
+          <Button kind="ghost" icon="copy" onClick={copyCredentials}>Скопировать</Button>
+          <Button kind="primary" onClick={onClose}>Понятно</Button>
+        </>
+      )}
     >
       <div style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-secondary)', marginBottom: 12 }}>
-        Сохраните пароль сейчас — он больше не будет показан.
+        Пароль больше не будет показан. Если потеряли — сбросьте снова.
+      </div>
+      <div className="field">
+        <label>Логин</label>
+        <input className="input mono" value={result.username} readOnly onFocus={(e) => e.target.select()} />
       </div>
       <div className="field">
         <label>Пароль</label>

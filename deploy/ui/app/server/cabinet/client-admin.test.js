@@ -68,6 +68,7 @@ test('mapClientRow maps counts and enabled flag', () => {
     comment: 'x',
     bindMode: 'prefixes',
     enabled: false,
+    source: 'manual',
     prefixCount: 2,
     portCount: 0,
     userCount: 1,
@@ -91,6 +92,49 @@ test('mapClientRow accepts ClickHouse qualified c.client_id keys', () => {
   assert.equal(row.clientId, 'client:demo');
   assert.equal(row.displayName, 'Demo');
   assert.equal(row.userCount, 2);
+  assert.equal(row.source, 'manual');
+});
+
+test('clientSource marks ERP clients by id prefix', () => {
+  const { clientSource, isErpClientId } = require('./client-admin');
+  assert.equal(clientSource('1234567'), 'erp');
+  assert.equal(clientSource('client:demo'), 'manual');
+  assert.equal(isErpClientId('1234567'), true);
+  assert.equal(isErpClientId('client:demo'), false);
+});
+
+test('updateClient keeps ERP displayName from catalog', async () => {
+  resetCalls();
+  queryResults.push(
+    {
+      rows: [{
+        client_id: '1234567',
+        display_name: 'ERP Name',
+        comment: 'erp:piter_ix',
+        bind_mode: 'prefixes',
+        enabled: 1,
+      }],
+    },
+    {
+      rows: [{
+        client_id: '1234567',
+        display_name: 'ERP Name',
+        comment: 'erp:piter_ix',
+        bind_mode: 'prefixes',
+        enabled: 1,
+        updated_at: '2026-08-10 10:00:00',
+        prefix_count: 0,
+        port_count: 0,
+        user_count: 0,
+      }],
+    },
+    { rows: [{ count: 0 }] },
+    { rows: [{ count: 0 }] },
+  );
+  const result = await updateClient('1234567', { displayName: 'Manual Override', comment: 'note' });
+  const insert = calls.find((c) => c.kind === 'insert');
+  assert.equal(insert.rows[0].display_name, 'ERP Name');
+  assert.equal(result.data.displayName, 'ERP Name');
 });
 
 test('createClient rejects duplicate clientId', async () => {

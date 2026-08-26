@@ -14,6 +14,12 @@ const {
   requireScopedClientId,
   cabinetPayload,
 } = require('./context');
+const { listUsers } = require('../users');
+const {
+  getCabinetProfile,
+  patchCabinetProfile,
+  changeCabinetProfilePassword,
+} = require('./profile');
 const {
   writeImpersonationEvent,
   listRecentImpersonationEvents,
@@ -88,6 +94,32 @@ function createCabinetRouter({ sessions }) {
       });
     } catch (err) {
       sendError(res, err);
+    }
+  });
+
+  router.get('/profile', async (req, res) => {
+    try {
+      res.json(await getCabinetProfile(req.user, req.cabinet));
+    } catch (err) {
+      sendError(res, err, err.statusCode || 502);
+    }
+  });
+
+  router.patch('/profile', async (req, res) => {
+    try {
+      res.json(await patchCabinetProfile(req.user.id, req.body || {}));
+    } catch (err) {
+      sendError(res, err, err.statusCode || 502);
+    }
+  });
+
+  router.post('/profile/password', async (req, res) => {
+    try {
+      const result = await changeCabinetProfilePassword(req.user.id, req.body?.password);
+      if (req.user.forcePasswordChange) req.user.forcePasswordChange = false;
+      res.json({ ok: true, ...result });
+    } catch (err) {
+      sendError(res, err, err.statusCode || 502);
     }
   });
 
@@ -411,7 +443,12 @@ function createClientsRouter({ sessions }) {
         return;
       }
       const result = await updateClient(req.params.clientId, req.body || {});
-      res.json({ ok: true, ...result });
+      if (result.clientDisabled && sessions?.revokeClientSessions) {
+        const usersResult = await listUsers({ clientId: req.params.clientId });
+        const userIds = (usersResult.data || []).map((u) => u.id);
+        sessions.revokeClientSessions({ userIds, clientId: req.params.clientId });
+      }
+      res.json({ ok: true, data: result.data, meta: result.meta });
     } catch (err) {
       sendError(res, err, err.statusCode || 502);
     }

@@ -1,5 +1,6 @@
 [
   { "id": "dashboard", "title": "Обзор", "section": "Главное" },
+  { "id": "cabinet-settings", "title": "Настройки", "section": "Кабинет" },
   { "id": "observations", "title": "Наблюдения", "section": "Главное" },
   { "id": "dns", "title": "DNS", "section": "Главное" },
   { "id": "explorer", "title": "Разбор трафика", "section": "Анализ трафика" },

@@ -71,11 +71,12 @@ const CABINET_NAV = [
       { id: 'dashboard', label: 'Обзор', icon: 'dashboard' },
       { id: 'explorer', label: 'Разбор трафика', icon: 'explorer' },
       { id: 'dns', label: 'DNS', icon: 'globe' },
+      { id: 'cabinet-settings', label: 'Настройки', icon: 'sliders' },
     ],
   },
 ];
 
-const CABINET_PAGE_IDS = new Set(['dashboard', 'explorer', 'dns']);
+const CABINET_PAGE_IDS = new Set(['dashboard', 'explorer', 'dns', 'cabinet-settings']);
 
 function isCabinetMode(user) {
   const mode = user?.cabinet?.mode;
@@ -94,6 +95,7 @@ const PAGES_WITHOUT_HEADER_FILTERS = new Set([
   'users',
   'audit',
   'clients',
+  'cabinet-settings',
   'collectors',
   'snmp',
   'bmp',
@@ -482,7 +484,7 @@ function Header({ current, onNavigate, onToggleSidebar, currentUser, onLogout, o
   const titles = pageTitles || PAGE_TITLES || {};
   const meta = titles[current] || titles.dashboard || { title: current, section: '' };
   const hidePageFilters = cabinetMode
-    ? current === 'explorer'
+    ? (current === 'explorer' || current === 'cabinet-settings')
     : PAGES_WITHOUT_HEADER_FILTERS.has(current);
   const hideDirectionFilter = current === 'dns' || cabinetMode;
   const hideCollectorFilter = cabinetMode;

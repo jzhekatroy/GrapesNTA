@@ -3,6 +3,64 @@
 const ApiClient = (() => {
   const LOAD_FAILED = 'Не удалось загрузить';
   let status = { connected: false, checkedAt: 0 };
+  let onSessionInvalid = null;
+
+  function isSessionInvalidError(err) {
+    if (!err?.status) return false;
+    if (err.status === 401) return true;
+    if (err.status !== 403) return false;
+    if (err.body?.code === 'client_disabled') return true;
+    const msg = String(err.message || '').toLowerCase();
+    return msg.includes('приостановлен') || msg.includes('учётная запись отключена');
+  }
+
+  function sessionInvalidToast(err, { wasCabinetClient = false } = {}) {
+    const msg = String(err?.message || '').toLowerCase();
+    if (err?.body?.code === 'client_disabled' || msg.includes('приостановлен')) {
+      return {
+        kind: 'warning',
+        title: 'Доступ приостановлен',
+        desc: 'Компания отключена оператором. Обратитесь к оператору.',
+        duration: 8000,
+      };
+    }
+    if (msg.includes('учётная запись отключена')) {
+      return {
+        kind: 'warning',
+        title: 'Учётная запись отключена',
+        desc: 'Обратитесь к оператору для восстановления доступа.',
+        duration: 8000,
+      };
+    }
+    if (wasCabinetClient) {
+      return {
+        kind: 'warning',
+        title: 'Доступ приостановлен',
+        desc: 'Сессия завершена. Если доступ был отключён оператором, обратитесь к нему.',
+        duration: 8000,
+      };
+    }
+    return {
+      kind: 'info',
+      title: 'Сессия завершена',
+      desc: 'Войдите снова.',
+      duration: 5000,
+    };
+  }
+
+  let sessionInvalidNotified = false;
+
+  function maybeInvalidateSession(err) {
+    if (!isSessionInvalidError(err) || !onSessionInvalid) return;
+    if (sessionInvalidNotified) return;
+    sessionInvalidNotified = true;
+    onSessionInvalid(err);
+    setTimeout(() => { sessionInvalidNotified = false; }, 1500);
+  }
+
+  function setSessionInvalidHandler(fn) {
+    onSessionInvalid = typeof fn === 'function' ? fn : null;
+  }
 
   function apiCustomPeriodParams(customPeriod) {
     if (!customPeriod?.from || !customPeriod?.to) return null;
@@ -92,6 +150,7 @@ const ApiClient = (() => {
     } catch (err) {
       const metrics = finish({ source: 'error', error: err.message });
       err.loadMs = metrics.loadMs;
+      maybeInvalidateSession(err);
       throw err;
     }
   }
@@ -111,6 +170,7 @@ const ApiClient = (() => {
       err.occupants = payload.occupants;
       err.quotas = payload.quotas;
       err.body = payload;
+      maybeInvalidateSession(err);
       throw err;
     }
     return payload;
@@ -161,6 +221,33 @@ const ApiClient = (() => {
 
   async function changeUserPassword(id, payload) {
     const body = await requestJson(`/api/users/${encodeURIComponent(id)}/password`, {
+      method: 'POST',
+      body: payload,
+    });
+    return body.data;
+  }
+
+  async function resetUserPassword(id, payload = {}) {
+    return requestJson(`/api/users/${encodeURIComponent(id)}/password-reset`, {
+      method: 'POST',
+      body: payload,
+    });
+  }
+
+  async function loadCabinetProfile() {
+    return requestJson('/api/cabinet/profile');
+  }
+
+  async function patchCabinetProfile(payload) {
+    const body = await requestJson('/api/cabinet/profile', {
+      method: 'PATCH',
+      body: payload,
+    });
+    return body.data;
+  }
+
+  async function changeCabinetProfilePassword(payload) {
+    const body = await requestJson('/api/cabinet/profile/password', {
       method: 'POST',
       body: payload,
     });
@@ -2710,13 +2797,20 @@ const ApiClient = (() => {
     });
     if (!res.ok) {
       const errBody = await res.json().catch(() => ({}));
-      throw new Error(errBody.error || `HTTP ${res.status}`);
+      const err = new Error(errBody.error || `HTTP ${res.status}`);
+      err.status = res.status;
+      err.body = errBody;
+      maybeInvalidateSession(err);
+      throw err;
     }
     return res.blob();
   }
 
   return {
     LOAD_FAILED,
+    isSessionInvalidError,
+    sessionInvalidToast,
+    setSessionInvalidHandler,
     login,
     logout,
     loadCurrentUser,
@@ -2726,6 +2820,10 @@ const ApiClient = (() => {
     updateUser,
     deleteUser,
     changeUserPassword,
+    resetUserPassword,
+    loadCabinetProfile,
+    patchCabinetProfile,
+    changeCabinetProfilePassword,
     loadClients,
     createClient,
     updateClient,

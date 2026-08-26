@@ -71,3 +71,22 @@ test('session store persists updates and deletion', (t) => {
   assert.equal(store.delete('session-1'), true);
   assert.equal(store.get('session-1'), undefined);
 });
+
+test('session store deletes by user ids and impersonation client', (t) => {
+  const store = createSessionStore({ dbPath: ':memory:', cleanupIntervalMs: 0 });
+  t.after(() => store.close());
+
+  store.set('s1', { userId: 'user-1', expiresAt: 300 });
+  store.set('s2', { userId: 'user-2', expiresAt: 300 });
+  store.set('s3', {
+    userId: 'admin-1',
+    expiresAt: 300,
+    impersonation: { clientId: '1234567', auditId: 'a1', expiresAt: 300 },
+  });
+
+  assert.equal(store.deleteByUserIds(['user-1', 'user-2']), 2);
+  assert.equal(store.get('s1'), undefined);
+  assert.equal(store.get('s2'), undefined);
+  assert.equal(store.deleteByImpersonationClientId('1234567'), 1);
+  assert.equal(store.get('s3'), undefined);
+});

@@ -51,7 +51,7 @@ function getResourceForPath(path, method) {
   if (p.startsWith('/api/cabinet/')) return null;
   if (p.startsWith('/api/clients')) return 'clients';
   if (p.startsWith('/api/users') || p.startsWith('/api/rbac/')) {
-    if (method === 'POST' && /^\/api\/users\/[^/]+\/password$/.test(p)) return null;
+    if (method === 'POST' && /^\/api\/users\/[^/]+\/password(-reset)?$/.test(p)) return null;
     return 'users';
   }
   return null;
@@ -70,7 +70,7 @@ function isMutatingRequest(path, method) {
   if (m === 'GET' || m === 'HEAD' || m === 'OPTIONS') return false;
 
   const p = normalizeApiPath(path);
-  if (m === 'POST' && /^\/api\/users\/[^/]+\/password$/.test(p)) return false;
+  if (m === 'POST' && /^\/api\/users\/[^/]+\/password(-reset)?$/.test(p)) return false;
 
   return true;
 }

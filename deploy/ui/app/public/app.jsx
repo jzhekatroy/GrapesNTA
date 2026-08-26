@@ -74,6 +74,8 @@ function App() {
   const [timezonePref, setTimezonePref] = useState(() => loadTimezonePreference());
   const displayTimezone = resolveDisplayTimezone(timezonePref);
   const [auth, setAuth] = useState({ loading: true, user: null });
+  const authRef = useRef(auth);
+  authRef.current = auth;
   const [refreshKey, setRefreshKey] = useState(0);
   const themeInitialized = useRef(false);
   const lastAuditPageRef = useRef({ pageId: '', at: 0 });
@@ -222,6 +224,34 @@ function App() {
     const timer = setInterval(load, 60_000);
     return () => { cancelled = true; clearInterval(timer); };
   }, [auth.user?.id]);
+
+  useEffect(() => {
+    ApiClient.setSessionInvalidHandler((err) => {
+      const user = authRef.current?.user;
+      const wasCabinetClient = user?.cabinet?.mode === 'client';
+      const toast = ApiClient.sessionInvalidToast(err, { wasCabinetClient });
+      setAuth({ loading: false, user: null });
+      setTimeout(() => pushToast(toast), 0);
+    });
+    return () => ApiClient.setSessionInvalidHandler(null);
+  }, []);
+
+  useEffect(() => {
+    if (!auth.user || auth.loading || !isCabinetMode(auth.user)) return undefined;
+    let cancelled = false;
+    const tick = async () => {
+      try {
+        const user = await ApiClient.loadCurrentUser();
+        if (!cancelled) setAuth((prev) => ({ ...prev, user }));
+      } catch (err) {
+        if (!cancelled && ApiClient.isSessionInvalidError(err)) {
+          setAuth({ loading: false, user: null });
+        }
+      }
+    };
+    const timer = setInterval(tick, 10_000);
+    return () => { cancelled = true; clearInterval(timer); };
+  }, [auth.user?.id, auth.user?.cabinet?.mode]);
 
   useEffect(() => {
     let cancelled = false;
@@ -379,6 +409,9 @@ function App() {
 
   const canAccessPage = useCallback((pageId) => {
     const perms = auth.user?.effectivePermissions;
+    if (pageId === 'cabinet-settings' && !isCabinetMode(auth.user)) {
+      return false;
+    }
     if (isCabinetMode(auth.user)) {
       return CABINET_PAGE_IDS.has(pageId);
     }
@@ -601,6 +634,16 @@ function App() {
           />
         );
         break;
+      case 'cabinet-settings':
+        pageEl = (
+          <LazyPage
+            pageId="cabinet-settings"
+            key={refreshKey}
+            readOnly={cabinetReadOnly}
+            onAuthRefresh={reloadCurrentUser}
+          />
+        );
+        break;
       case 'ttl':
         pageEl = <LazyPage pageId="ttl" key={refreshKey} />;
         break;
@@ -708,18 +751,25 @@ function LoginScreen({ onLogin, theme, onToggleTheme }) {
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
+  const [errorKind, setErrorKind] = useState('');
   const [saving, setSaving] = useState(false);
 
   const submit = async (e) => {
     e.preventDefault();
     setError('');
+    setErrorKind('');
     setSaving(true);
     try {
       const result = await ApiClient.login({ username, password });
       await offerBrowserPasswordSave(username, password);
       onLogin(result.user);
     } catch (err) {
+      const suspended = err.status === 403
+        && (String(err.message || '').toLowerCase().includes('приостановлен')
+          || err.body?.code === 'client_disabled');
+      setErrorKind(suspended ? 'suspended' : 'default');
       setError(err.message || 'Не удалось войти');
+      if (suspended) setPassword('');
     } finally {
       setSaving(false);
     }
@@ -760,7 +810,16 @@ function LoginScreen({ onLogin, theme, onToggleTheme }) {
             onChange={(e) => setPassword(e.target.value)}
           />
         </div>
-        {error && <div className="form-error">{error}</div>}
+        {error && (
+          <div
+            className="form-error"
+            style={errorKind === 'suspended'
+              ? { font: 'var(--pv-text-body-1-bold)', lineHeight: 1.4 }
+              : undefined}
+          >
+            {error}
+          </div>
+        )}
         <Button kind="primary" type="submit" disabled={saving || !username || !password}>
           {saving ? 'Вход...' : 'Войти'}
         </Button>

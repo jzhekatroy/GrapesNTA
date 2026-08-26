@@ -1,4 +1,5 @@
 const { CLIENT_API_ALLOWLIST } = require('./constants');
+const { getEnabledClient } = require('./clients-lookup');
 const {
   isCabinetScoped,
   resolveCabinetContext,
@@ -43,7 +44,7 @@ function isMutatingMethod(method) {
  * Attach req.cabinet and enforce the client allowlist / impersonation read-only.
  * Must run after requireSession.
  */
-function createCabinetGuard({ sessions }) {
+function createCabinetGuard({ sessions, getEnabledClientFn = getEnabledClient }) {
   return async function cabinetIsolationGuard(req, res, next) {
     try {
       const sessionRecord = sessions.get(req.sessionId);
@@ -84,6 +85,16 @@ function createCabinetGuard({ sessions }) {
 
       if (!context.clientId) {
         res.status(403).json({ error: 'Кабинет недоступен: клиент не привязан к учётной записи' });
+        return;
+      }
+
+      const enabledClient = await getEnabledClientFn(context.clientId);
+      if (!enabledClient) {
+        if (req.sessionId) sessions.delete(req.sessionId);
+        res.status(403).json({
+          error: 'Доступ приостановлен. Обратитесь к оператору.',
+          code: 'client_disabled',
+        });
         return;
       }
 

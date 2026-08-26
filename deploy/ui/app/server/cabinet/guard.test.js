@@ -79,7 +79,15 @@ test('cabinet guard strips client_id from query/body and blocks operator paths',
     userId: 'u2',
     expiresAt: Date.now() + 60_000,
   });
-  const guard = createCabinetGuard({ sessions });
+  const guard = createCabinetGuard({
+    sessions,
+    getEnabledClientFn: async (clientId) => ({
+      clientId,
+      displayName: clientId,
+      comment: '',
+      bindMode: 'prefixes',
+    }),
+  });
 
   const denied = await new Promise((resolve) => {
     const req = {
@@ -139,7 +147,15 @@ test('impersonation guard blocks mutating cabinet calls', async () => {
       now,
     }),
   });
-  const guard = createCabinetGuard({ sessions });
+  const guard = createCabinetGuard({
+    sessions,
+    getEnabledClientFn: async (clientId) => ({
+      clientId,
+      displayName: clientId,
+      comment: '',
+      bindMode: 'prefixes',
+    }),
+  });
 
   const result = await new Promise((resolve) => {
     const req = {
@@ -175,7 +191,15 @@ test('impersonation guard allows read-only cabinet explorer POSTs', async () => 
       now,
     }),
   });
-  const guard = createCabinetGuard({ sessions });
+  const guard = createCabinetGuard({
+    sessions,
+    getEnabledClientFn: async (clientId) => ({
+      clientId,
+      displayName: clientId,
+      comment: '',
+      bindMode: 'prefixes',
+    }),
+  });
 
   for (const path of ['/cabinet/explorer/query', '/cabinet/explorer/flows', '/cabinet/explorer/export']) {
     const result = await new Promise((resolve) => {
@@ -199,7 +223,7 @@ test('impersonation guard allows read-only cabinet explorer POSTs', async () => 
   }
 });
 
-test('Client role page resources include dashboard explorer dns only', () => {
+test('Client role page resources include cabinet pages only', () => {
   const { CLIENT_PAGE_RESOURCES } = require('./constants');
-  assert.deepEqual([...CLIENT_PAGE_RESOURCES].sort(), ['dashboard', 'dns', 'explorer']);
+  assert.deepEqual([...CLIENT_PAGE_RESOURCES].sort(), ['cabinet-settings', 'dashboard', 'dns', 'explorer']);
 });

@@ -10,6 +10,7 @@ const {
 
 const { DEFAULT_ROLE_ID, DEFAULT_NEW_USER_ROLE_ID, userPermissions, hasPermission } = require('./rbac/permissions');
 const { CLIENT_ROLE_ID, MAX_USERS_PER_CLIENT } = require('./cabinet/constants');
+const { getEnabledClient } = require('./cabinet/clients-lookup');
 
 const LEGACY_DEFAULT_ROLE_ID = DEFAULT_ROLE_ID;
 const DEFAULT_ADMIN = {
@@ -61,6 +62,26 @@ function validatePassword(password) {
     return `Пароль должен быть не короче ${PASSWORD_MIN_LENGTH} символов`;
   }
   return null;
+}
+
+function generatePassword() {
+  const groups = [
+    'abcdefghijklmnopqrstuvwxyz',
+    'ABCDEFGHIJKLMNOPQRSTUVWXYZ',
+    '0123456789',
+    '!@#$%^&*()-_=+[]{}',
+  ];
+  const pick = (chars) => chars[crypto.randomInt(chars.length)];
+  const parts = groups.map(pick);
+  const all = groups.join('');
+  while (parts.length < 14) {
+    parts.push(pick(all));
+  }
+  for (let i = parts.length - 1; i > 0; i -= 1) {
+    const j = crypto.randomInt(i + 1);
+    [parts[i], parts[j]] = [parts[j], parts[i]];
+  }
+  return parts.join('');
 }
 
 function parseForcePasswordChange(body) {
@@ -456,7 +477,7 @@ async function deleteUser(id) {
   return { meta: { elapsedMs } };
 }
 
-async function changeUserPassword(id, password, { clearForce = false } = {}) {
+async function changeUserPassword(id, password, { clearForce = false, forcePasswordChange } = {}) {
   const existing = await getUserById(id);
   if (!existing) {
     const err = new Error('Пользователь не найден');
@@ -471,6 +492,15 @@ async function changeUserPassword(id, password, { clearForce = false } = {}) {
     throw err;
   }
 
+  let forceFlag;
+  if (clearForce) {
+    forceFlag = 0;
+  } else if (forcePasswordChange === true) {
+    forceFlag = 1;
+  } else {
+    forceFlag = existing.forcePasswordChange ? 1 : 0;
+  }
+
   const passwordHash = await bcrypt.hash(String(password), BCRYPT_ROUNDS);
   const now = clickhouseDateTime();
   const record = {
@@ -479,7 +509,7 @@ async function changeUserPassword(id, password, { clearForce = false } = {}) {
     full_name: existing.fullName,
     password_hash: passwordHash,
     role_id: existing.roleId || LEGACY_DEFAULT_ROLE_ID,
-    force_password_change: clearForce ? 0 : existing.forcePasswordChange ? 1 : 0,
+    force_password_change: forceFlag,
     is_active: existing.active ? 1 : 0,
     client_id: existing.clientId || '',
     created_at: existing.createdAt,
@@ -489,6 +519,65 @@ async function changeUserPassword(id, password, { clearForce = false } = {}) {
 
   const { elapsedMs } = await insertRows(config.usersTable, [record], {
     name: 'users/change-password',
+  });
+  return { data: publicUser(record), meta: { elapsedMs } };
+}
+
+async function resetUserPassword(id, password) {
+  const pwd = password ? String(password) : generatePassword();
+  const passwordError = validatePassword(pwd);
+  if (passwordError) {
+    const err = new Error(passwordError);
+    err.statusCode = 400;
+    throw err;
+  }
+  const result = await changeUserPassword(id, pwd, { forcePasswordChange: true });
+  return { ...result, password: pwd };
+}
+
+async function updateOwnProfile(id, body = {}) {
+  if (body?.username !== undefined) {
+    const err = new Error('Логин нельзя изменить');
+    err.statusCode = 400;
+    throw err;
+  }
+  if (body?.roleId !== undefined || body?.role_id !== undefined
+    || body?.active !== undefined || body?.clientId !== undefined || body?.client_id !== undefined) {
+    const err = new Error('Недостаточно прав');
+    err.statusCode = 403;
+    throw err;
+  }
+
+  const existing = await getUserById(id);
+  if (!existing) {
+    const err = new Error('Пользователь не найден');
+    err.statusCode = 404;
+    throw err;
+  }
+
+  const fullName = normalizeFullName(body?.fullName ?? body?.full_name);
+  if (!fullName) {
+    const err = new Error('Укажите ФИО пользователя');
+    err.statusCode = 400;
+    throw err;
+  }
+
+  const record = {
+    id: existing.id,
+    username: existing.username,
+    full_name: fullName,
+    password_hash: existing.passwordHash,
+    role_id: existing.roleId || LEGACY_DEFAULT_ROLE_ID,
+    force_password_change: existing.forcePasswordChange ? 1 : 0,
+    is_active: existing.active ? 1 : 0,
+    client_id: existing.clientId || '',
+    created_at: existing.createdAt,
+    updated_at: clickhouseDateTime(),
+    password_changed_at: existing.passwordChangedAt ?? null,
+  };
+
+  const { elapsedMs } = await insertRows(config.usersTable, [record], {
+    name: 'users/update-own-profile',
   });
   return { data: publicUser(record), meta: { elapsedMs } };
 }
@@ -507,7 +596,19 @@ async function verifyCredentials(username, password) {
     throw err;
   }
   const ok = await bcrypt.compare(String(password ?? ''), user.passwordHash);
-  return ok ? user : null;
+  if (!ok) return null;
+
+  if (user.roleId === CLIENT_ROLE_ID && user.clientId) {
+    const client = await getEnabledClient(user.clientId);
+    if (!client) {
+      const err = new Error('Доступ приостановлен. Обратитесь к оператору.');
+      err.statusCode = 403;
+      err.code = 'client_disabled';
+      throw err;
+    }
+  }
+
+  return user;
 }
 
 module.exports = {
@@ -521,6 +622,9 @@ module.exports = {
   updateUser,
   deleteUser,
   changeUserPassword,
+  resetUserPassword,
+  updateOwnProfile,
+  generatePassword,
   verifyCredentials,
   userPermissions,
   hasPermission,

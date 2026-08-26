@@ -114,6 +114,10 @@ const PAGE_CHUNKS_MANIFEST = {
       scripts: ['/pages/ttl.jsx'],
       exports: { default: 'PageTTL' },
     },
+    'cabinet-settings': {
+      scripts: ['/pages/cabinet-settings.jsx'],
+      exports: { default: 'PageCabinetSettings' },
+    },
     routers: {
       scripts: ['/pages/routers.jsx'],
       exports: { default: 'PageRouters' },

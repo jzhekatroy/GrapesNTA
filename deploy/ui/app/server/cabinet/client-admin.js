@@ -25,6 +25,14 @@ function httpError(message, statusCode = 400) {
   return err;
 }
 
+function clientSource(clientId) {
+  return String(clientId ?? '').startsWith('client:') ? 'manual' : 'erp';
+}
+
+function isErpClientId(clientId) {
+  return clientSource(clientId) === 'erp';
+}
+
 function mapClientRow(row) {
   // ClickHouse may qualify joined columns as c.client_id instead of client_id.
   const clientId = String(row?.client_id ?? row?.clientId ?? row?.['c.client_id'] ?? '');
@@ -34,6 +42,7 @@ function mapClientRow(row) {
     comment: String(row.comment ?? row?.['c.comment'] ?? ''),
     bindMode: String(row.bind_mode ?? row.bindMode ?? row?.['c.bind_mode'] ?? ''),
     enabled: Number(row.enabled ?? row?.['c.enabled']) === 1,
+    source: clientSource(clientId),
     prefixCount: Number(row.prefix_count ?? row.prefixCount) || 0,
     portCount: Number(row.port_count ?? row.portCount) || 0,
     userCount: Number(row.user_count ?? row.userCount) || 0,
@@ -436,7 +445,9 @@ async function updateClient(clientId, body = {}) {
     }
   }
 
-  const displayName = String(body.displayName ?? body.display_name ?? existing.display_name ?? '').trim();
+  const displayName = isErpClientId(existing.client_id)
+    ? String(existing.display_name ?? '').trim()
+    : String(body.displayName ?? body.display_name ?? existing.display_name ?? '').trim();
   if (!displayName) throw httpError('Укажите название клиента');
 
   let bindMode = String(existing.bind_mode ?? '');
@@ -453,6 +464,7 @@ async function updateClient(clientId, body = {}) {
   }
 
   let enabled = Number(existing.enabled) === 1 ? 1 : 0;
+  const wasEnabled = enabled === 1;
   if (body.enabled !== undefined) {
     enabled = body.enabled === true || body.enabled === 1 || body.enabled === '1' ? 1 : 0;
   }
@@ -472,7 +484,11 @@ async function updateClient(clientId, body = {}) {
   if (portsTouched && enabledChanged) {
     await refreshEffectiveRolesAfterClientPorts();
   }
-  return { data, meta: { elapsedMs } };
+  return {
+    data,
+    meta: { elapsedMs },
+    clientDisabled: wasEnabled && enabled === 0,
+  };
 }
 
 async function listClientPrefixes(clientId) {
@@ -801,4 +817,7 @@ module.exports = {
   mapClientRow,
   normalizeBindMode,
   normalizeClientId,
+  clientSource,
+  isErpClientId,
+  fetchLatestClient,
 };

@@ -207,6 +207,7 @@ const {
   updateUser,
   deleteUser,
   changeUserPassword,
+  resetUserPassword,
   verifyCredentials,
   hasPermission,
 } = require('./users');
@@ -241,7 +242,7 @@ const {
   listAuditEvents,
   auditContextFromReq,
 } = require('./audit-log');
-const { fillClientDisplayName } = require('./cabinet/clients-lookup');
+const { fillClientDisplayName, rejectDisabledClientSession } = require('./cabinet/clients-lookup');
 
 const PORT = Number(process.env.PORT) || 3000;
 const app = express();
@@ -402,14 +403,21 @@ async function getSessionUser(req) {
 
 function sendApiError(res, err, fallbackStatus = 502) {
   const status = err.statusCode || fallbackStatus;
-  res.status(status).json({ error: err.message });
+  const body = { error: err.message };
+  if (err.code) body.code = err.code;
+  res.status(status).json(body);
 }
 
 function forcedPasswordRouteAllowed(req) {
   if (req.method !== 'POST') return false;
-  const match = req.path.match(/^\/users\/([^/]+)\/password$/);
-  if (!match) return false;
-  return decodeURIComponent(match[1]) === req.user?.id;
+  const userPassword = req.path.match(/^\/users\/([^/]+)\/password$/);
+  if (userPassword) {
+    return decodeURIComponent(userPassword[1]) === req.user?.id;
+  }
+  if (req.path === '/cabinet/profile/password') {
+    return true;
+  }
+  return false;
 }
 
 async function requireSession(req, res, next) {
@@ -421,6 +429,16 @@ async function requireSession(req, res, next) {
     }
     req.user = session.user;
     req.sessionId = session.sessionId;
+
+    if (!req.user.active) {
+      sessions.delete(req.sessionId);
+      res.status(403).json({ error: 'Учётная запись отключена' });
+      return;
+    }
+
+    if (await rejectDisabledClientSession(req.user, req.sessionId, sessions, res)) {
+      return;
+    }
 
     if (req.user.forcePasswordChange && !forcedPasswordRouteAllowed(req)) {
       res.status(403).json({ error: 'Необходимо сменить пароль' });
@@ -620,6 +638,14 @@ app.get('/api/auth/me', async (req, res) => {
     const session = await getSessionUser(req);
     if (!session) {
       res.status(401).json({ error: 'Требуется авторизация' });
+      return;
+    }
+    if (!session.user.active) {
+      sessions.delete(session.sessionId);
+      res.status(403).json({ error: 'Учётная запись отключена' });
+      return;
+    }
+    if (await rejectDisabledClientSession(session.user, session.sessionId, sessions, res)) {
       return;
     }
     res.json({ user: await sessionUserPayload(session.user, session.session) });
@@ -1872,6 +1898,35 @@ app.delete('/api/users/:id', async (req, res) => {
   try {
     const result = await deleteUser(req.params.id);
     res.json({ ok: true, ...result });
+  } catch (err) {
+    sendApiError(res, err, err.statusCode || 502);
+  }
+});
+
+app.post('/api/users/:id/password-reset', async (req, res) => {
+  try {
+    const targetId = String(req.params.id);
+    if (!(await hasPermission(req.user, 'users.change_password'))) {
+      res.status(403).json({ error: 'Недостаточно прав для смены пароля' });
+      return;
+    }
+    const result = await resetUserPassword(targetId, req.body?.password);
+    const targetUser = await getUserById(targetId).catch(() => null);
+    await writeAuditEvent({
+      ...auditContextFromReq(req, req.sessionId),
+      action: 'password_reset',
+      resource: 'users',
+      method: 'POST',
+      path: `/api/users/${encodeURIComponent(targetId)}/password-reset`,
+      objectId: targetId,
+      objectLabel: targetUser?.username || targetId,
+      result: 'ok',
+    }).catch(() => {});
+    res.json({
+      ok: true,
+      data: result.data,
+      password: result.password,
+    });
   } catch (err) {
     sendApiError(res, err, err.statusCode || 502);
   }
