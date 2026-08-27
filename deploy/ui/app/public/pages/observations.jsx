@@ -787,6 +787,17 @@ function ObservationLiveTile({
     lookback: lookback || item.lookback || null,
   });
 
+  const verboseMeta = DashboardLog?.isVerbose?.() === true;
+  let footerMeta = null;
+  if (loading && !points.length) footerMeta = 'загрузка…';
+  else if (refreshing) footerMeta = 'обновление…';
+  else if (verboseMeta) {
+    footerMeta = chartMode === 'grouped'
+      ? `${focusLabel ? `1 серия · ${focusLabel}` : `${lines.length} серий`} · ${points.length} точек · ${periodLabel}${customRange ? ' · zoom' : ''}`
+      : `${points.length} точек · ${periodLabel}${customRange ? ' · zoom' : ''}`;
+    if (updatedAt) footerMeta += ` · ${updatedAt.toLocaleTimeString('ru-RU')}`;
+  }
+
   return (
     <Card pad="sm" className={`obs-tile${expanded ? ' obs-tile--expanded' : ''}`}>
       <div className="obs-tile__head">
@@ -900,16 +911,7 @@ function ObservationLiveTile({
       )}
 
       <div className="obs-tile__footer">
-        <span className="obs-tile__meta">
-          {loading && !points.length
-            ? 'загрузка…'
-            : refreshing
-              ? 'обновление…'
-              : chartMode === 'grouped'
-              ? `${focusLabel ? `1 серия · ${focusLabel}` : `${lines.length} серий`} · ${points.length} точек · ${periodLabel}${customRange ? ' · zoom' : ''}`
-              : `${points.length} точек · ${periodLabel}${customRange ? ' · zoom' : ''}`}
-          {updatedAt ? ` · ${updatedAt.toLocaleTimeString('ru-RU')}` : ''}
-        </span>
+        {footerMeta ? <span className="obs-tile__meta">{footerMeta}</span> : null}
         <div className="obs-tile__footer-tools">
           {canResetZoom && (
             <button
