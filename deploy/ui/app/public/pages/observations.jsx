@@ -289,9 +289,17 @@ function formatFilterSummary(filters, filterFields) {
   }).join(' · ') + (filters.length > 3 ? ' …' : '');
 }
 
-function formatObservationScopeSummary(item, filterFields) {
+function formatGroupSummary(groupBy, groupOptions) {
+  const list = Array.isArray(groupBy) ? groupBy : [];
+  if (!list.length) return '';
+  return list.map((g) => groupLabel(g, groupOptions)).join(' × ');
+}
+
+function formatObservationScopeSummary(item, filterFields, groupOptions) {
   const parts = [];
   parts.push(item.filters?.length ? formatFilterSummary(item.filters, filterFields) : 'без фильтров');
+  const groupSummary = formatGroupSummary(groupByFromWidgets(item.widgets), groupOptions);
+  if (groupSummary) parts.push(`группировка: ${groupSummary}`);
   if (item.thresholds?.length && window.ExplorerThresholds?.formatThresholdChipLabel) {
     const thr = item.thresholds.slice(0, 2).map((t) => window.ExplorerThresholds.formatThresholdChipLabel(t)).join(' · ');
     parts.push(`пороги: ${thr}${item.thresholds.length > 2 ? ' …' : ''}`);
@@ -763,7 +771,7 @@ function ObservationLiveTile({
     : null;
   const topGroupBy = groupByFromWidgets(item.widgets);
   const topLabel = topGroupBy.map((g) => groupLabel(g, groupOptions)).join(' × ');
-  const filterSummary = formatFilterSummary(item.filters || [], filterFields);
+  const conditionSummary = formatFilterSummary(item.filters || [], filterFields);
   const chartH = expanded ? 320 : 200;
   const periodLabel = observationPeriodLabel(lookback, customRange);
   const canResetZoom = Boolean(customRange || zoomStack.length);
@@ -790,7 +798,18 @@ function ObservationLiveTile({
             onClick={openInExplorer}
             title="Открыть в разборе трафика"
           >
-            <span className="obs-tile__filter-link-text">{filterSummary}</span>
+            <span className="obs-tile__filter-scope">
+              <span className="obs-tile__filter-scope-label">Фильтры:</span>
+              {' '}
+              <span className="obs-tile__filter-link-text">{conditionSummary}</span>
+            </span>
+            {topLabel ? (
+              <span className="obs-tile__filter-scope obs-tile__filter-scope--group">
+                <span className="obs-tile__filter-scope-label">Группировка:</span>
+                {' '}
+                <span className="obs-tile__filter-link-text">{topLabel}</span>
+              </span>
+            ) : null}
           </button>
         </div>
         <div className="obs-tile__tools">
@@ -1259,8 +1278,23 @@ function PageObservations({ onNavigate }) {
         )}
         <Card title={settingsItem.name}>
           <div className="col" style={{ gap: 12 }}>
-            <div style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-secondary)' }}>
-              Фильтры: {formatObservationScopeSummary(settings, filterFields)}
+            <div className="col" style={{ gap: 4, font: 'var(--pv-text-body-3)', color: 'var(--fg-secondary)' }}>
+              <div>
+                Фильтры:{' '}
+                {settings.filters?.length
+                  ? formatFilterSummary(settings.filters, filterFields)
+                  : 'без фильтров'}
+              </div>
+              {formatGroupSummary(settingsGroupBy, groupOptions) ? (
+                <div>Группировка: {formatGroupSummary(settingsGroupBy, groupOptions)}</div>
+              ) : null}
+              {settings.thresholds?.length && window.ExplorerThresholds?.formatThresholdChipLabel ? (
+                <div>
+                  Пороги:{' '}
+                  {settings.thresholds.slice(0, 2).map((t) => window.ExplorerThresholds.formatThresholdChipLabel(t)).join(' · ')}
+                  {settings.thresholds.length > 2 ? ' …' : ''}
+                </div>
+              ) : null}
             </div>
             {canWrite && (
               <button

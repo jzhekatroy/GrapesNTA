@@ -6275,6 +6275,8 @@ function SaveObservationModal({
 
   const filterSummary = (filters || []).slice(0, 5).map((f) => `${f.field} ${f.op} ${f.value}`).join(' · ')
     + ((filters || []).length > 5 ? ' …' : '');
+  const effectiveGroupSummary = groupSummary
+    || (topGroup ? (dimensionById?.[explorerGroupFieldId(topGroup)]?.label || topGroup) : '');
 
   return (
     <Modal
@@ -6293,8 +6295,11 @@ function SaveObservationModal({
     >
       <div className="col" style={{ gap: 12 }}>
         <Card pad="sm" style={{ background: 'var(--surf-1)' }}>
-          <div className="field-static field-static--compact">
-            Фильтры: {filterSummary || 'нет'}
+          <div className="field-static field-static--compact col" style={{ gap: 4 }}>
+            <div>Фильтры: {filterSummary || 'нет'}</div>
+            {effectiveGroupSummary ? (
+              <div>Группировка: {effectiveGroupSummary}</div>
+            ) : null}
           </div>
         </Card>
         <div className="field">
@@ -6323,17 +6328,6 @@ function SaveObservationModal({
             </div>
           )}
         </div>
-        {groupSummary ? (
-          <div className="field">
-            <label>Разрез</label>
-            <div
-              className="field-static"
-              title={`Взято из группировки в разборе трафика: ${groupSummary}`}
-            >
-              {groupSummary}
-            </div>
-          </div>
-        ) : null}
         {(groupBy || []).length > OBSERVATION_MAX_GROUP_BY && (
           <div style={{ color: 'var(--fg-warning)', font: 'var(--pv-text-body-3)' }}>
             Наблюдение сохранит первые {OBSERVATION_MAX_GROUP_BY} измерения разреза:

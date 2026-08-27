@@ -5748,7 +5748,10 @@ html.modal-open #root {
 .obs-tile__filter-link {
   appearance: none;
   -webkit-appearance: none;
-  display: block;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
   width: 100%;
   margin-top: 2px;
   padding: 0;
@@ -5762,7 +5765,18 @@ html.modal-open #root {
   color: var(--fg-secondary);
   transition: color var(--pv-dur-fast);
 }
+.obs-tile__filter-scope {
+  display: block;
+  width: 100%;
+  min-width: 0;
+}
+.obs-tile__filter-scope-label {
+  color: var(--fg-muted);
+}
 .obs-tile__filter-link-text {
+  display: inline;
+}
+.obs-tile__filter-scope .obs-tile__filter-link-text {
   display: -webkit-box;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 2;
