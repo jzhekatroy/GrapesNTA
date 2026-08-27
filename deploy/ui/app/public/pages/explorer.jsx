@@ -110,6 +110,15 @@ function explorerVisToStackMode(vis) {
   return undefined;
 }
 
+function isExplorerStackVis(vis) {
+  const id = normalizeExplorerVis(vis);
+  return id === 'stack' || id === 'stackShare';
+}
+
+function explorerDefaultShowOthersOnChart(vis) {
+  return isExplorerStackVis(vis);
+}
+
 const EXPLORER_VIS_LEGACY_MAP = {
   lines: 'data',
   dynamics: 'data',
@@ -1052,6 +1061,7 @@ function hydrateExplorerFromCachedEntry(entry, handlers) {
   handlers.setAppliedSnapshot(migrated);
   handlers.setHasAppliedQuery(true);
   handlers.setLastApplied(migrated);
+  handlers.setShowOthersOnChart?.(explorerDefaultShowOthersOnChart(migrated.vis));
   saveLastAppliedExplorerQuery(migrated, handlers.cabinetMode);
   handlers.dynamicsQueryVersionRef.current = handlers.queryVersion ?? 0;
   return true;
@@ -2391,7 +2401,9 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
   const [showAllResultColumns, setShowAllResultColumns] = useState(true);
   const [visualLimit, setVisualLimit] = useState(EXPLORER_DEFAULT_VISUAL_LIMIT);
   const [dynamicsSeriesIds, setDynamicsSeriesIds] = useState(() => new Set());
-  const [showOthersOnChart, setShowOthersOnChart] = useState(false);
+  const [showOthersOnChart, setShowOthersOnChart] = useState(
+    () => explorerDefaultShowOthersOnChart(normalizeExplorerVis(urlState?.vis)),
+  );
   const [refreshing, setRefreshing] = useState(false);
   const [periodZoomStack, setPeriodZoomStack] = useState([]);
   const periodRef = React.useRef({ timeRange, customPeriod });
@@ -2457,6 +2469,7 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
     setAppliedSnapshot,
     setHasAppliedQuery,
     setLastApplied,
+    setShowOthersOnChart,
     skipDynamicsDefaultRef,
     dynamicsQueryVersionRef,
   }), [cabinetMode, querySetters, draftRestoreOpts]);
@@ -2891,7 +2904,7 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
     }
     skipDynamicsDefaultRef.current = false;
     setDynamicsSeriesIds(new Set());
-    setShowOthersOnChart(false);
+    setShowOthersOnChart(explorerDefaultShowOthersOnChart(snapshot.vis ?? vis));
     const nextAppliedSnapshot = buildExplorerQuerySnapshot({
       ...snapshot,
       limit: resolveExplorerFetchLimit(snapshot.limit ?? limit),
@@ -2935,7 +2948,7 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
     setLimit(EXPLORER_DEFAULT_VISUAL_LIMIT);
     skipDynamicsDefaultRef.current = false;
     setDynamicsSeriesIds(new Set());
-    setShowOthersOnChart(false);
+    setShowOthersOnChart(explorerDefaultShowOthersOnChart(snapshot.vis ?? vis));
     setAppliedSnapshot(snapshot);
     setHasAppliedQuery(true);
     setQueryVersion((v) => v + 1);
@@ -2957,7 +2970,7 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
     setLimit(lastApplied.visualLimit ?? EXPLORER_DEFAULT_VISUAL_LIMIT);
     skipDynamicsDefaultRef.current = false;
     setDynamicsSeriesIds(new Set());
-    setShowOthersOnChart(false);
+    setShowOthersOnChart(explorerDefaultShowOthersOnChart(lastApplied.vis));
     setAppliedSnapshot(lastApplied);
     setHasAppliedQuery(true);
     setQueryVersion((v) => v + 1);
@@ -3341,6 +3354,12 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
 
   const toggleOthersOnChart = () => setShowOthersOnChart((v) => !v);
 
+  const changeExplorerVis = (nextVis) => {
+    const normalized = normalizeExplorerVis(nextVis);
+    setVis(normalized);
+    if (isExplorerStackVis(normalized)) setShowOthersOnChart(true);
+  };
+
   const resultTableColumns = useMemo(() => buildExplorerResultColumns({
     groupBy: appliedGroupBy,
     dimensions,
@@ -3633,7 +3652,7 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
               const analysisToolbar = (
                 <>
                   <div className="explorer-results-tools__cluster">
-                    <ExplorerAnalysisTabs value={vis} onChange={setVis} compact />
+                    <ExplorerAnalysisTabs value={vis} onChange={changeExplorerVis} compact />
                     <div className="explorer-results-tools__limit-block">
                       <ExplorerVisualLimitControl
                         total={results.length}
