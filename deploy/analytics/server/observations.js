@@ -313,6 +313,14 @@ function isObservationOwner(item, userId) {
   return owner === uid;
 }
 
+function assertObservationOwner(existing, userId) {
+  if (!existing) return false;
+  if (isObservationOwner(existing, userId)) return true;
+  const err = new Error('Нет прав на изменение этого наблюдения');
+  err.status = 403;
+  throw err;
+}
+
 function materializeWarning(activeCount) {
   if (MATERIALIZE_LIMIT_ENABLED) {
     return `Подготовка данных: ${activeCount}/${MAX_MATERIALIZE}`;
@@ -485,8 +493,7 @@ async function createObservation(userId, payload = {}) {
 async function updateObservation(id, userId, payload = {}) {
   const items = await loadAllObservations();
   const existing = items.find((row) => row.id === id);
-  if (!existing) return null;
-  if (!isObservationOwner(existing, userId)) return null;
+  if (!assertObservationOwner(existing, userId)) return null;
   const next = normalizeObservation(payload, { userId, existing });
   if (MATERIALIZE_LIMIT_ENABLED
     && next.materialize.enabled
@@ -507,7 +514,7 @@ async function updateObservation(id, userId, payload = {}) {
     next.materialize.cancelRequested = false;
   }
   await upsertObservation(next);
-  return withMeta(next, items.map((row) => (row.id === id ? next : row)));
+  return withMeta(next, items.map((row) => (row.id === id ? next : row)), userId);
 }
 
 async function duplicateObservation(id, userId) {
@@ -546,8 +553,7 @@ async function duplicateObservation(id, userId) {
 async function cancelMaterialize(id, userId) {
   const items = await loadAllObservations();
   const existing = items.find((row) => row.id === id);
-  if (!existing) return null;
-  if (!isObservationOwner(existing, userId)) return null;
+  if (!assertObservationOwner(existing, userId)) return null;
   const next = {
     ...existing,
     materialize: {
@@ -563,12 +569,13 @@ async function cancelMaterialize(id, userId) {
     next.materialize.enabled = false;
   }
   await upsertObservation(next);
-  return withMeta(next, items.map((row) => (row.id === id ? next : row)));
+  return withMeta(next, items.map((row) => (row.id === id ? next : row)), userId);
 }
 
 async function deleteObservation(id, userId) {
   const item = await getObservation(id, userId);
-  if (!item || !isObservationOwner(item, userId)) return false;
+  if (!item) return false;
+  assertObservationOwner(item, userId);
   await softDeleteObservation(item);
   // best-effort rollup cleanup (needs write privileges)
   executeCommand(`
@@ -581,8 +588,7 @@ async function deleteObservation(id, userId) {
 async function queueMaterialize(id, userId) {
   const items = await loadAllObservations();
   const existing = items.find((row) => row.id === id);
-  if (!existing) return null;
-  if (!isObservationOwner(existing, userId)) return null;
+  if (!assertObservationOwner(existing, userId)) return null;
   const scope = classifyScope(existing.filters, existing.widgets);
   if (!scope.materializeRequired) {
     const err = new Error('Для этого scope materialize не нужен (native агрегаты).');

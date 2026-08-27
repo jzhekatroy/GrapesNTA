@@ -1480,7 +1480,7 @@ app.delete('/api/observations/:id', async (req, res) => {
     }
     res.json({ ok: true });
   } catch (err) {
-    res.status(400).json({ error: err.message });
+    res.status(err.status || 400).json({ error: err.message });
   }
 });
 

@@ -65,6 +65,10 @@ function observationNotFoundError(err) {
   return err?.status === 404 || /не найден/i.test(String(err?.message || ''));
 }
 
+function observationCannotEditError(err) {
+  return err?.status === 403 || /нет прав/i.test(String(err?.message || ''));
+}
+
 function isObservationComposeEdit(draft) {
   if (!draft) return false;
   if (draft.mode === 'new') return false;
@@ -3156,6 +3160,12 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
           }
         }
       }
+      // Shared observations are visible via GET, but only the owner can PUT.
+      // Opening filters from a shared tile must create a personal copy.
+      if (id && existing && existing.canEdit === false) {
+        id = null;
+        existing = null;
+      }
       if (id && existing) {
         const existingChartStyle = (existing.widgets || []).find((w) => w.type === 'timeseries_bps')?.chartStyle;
         try {
@@ -3186,7 +3196,7 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
           pushToast({ kind: 'success', title: 'Фильтры наблюдения обновлены', desc: name || existing.name });
           updated = true;
         } catch (err) {
-          if (!observationNotFoundError(err)) throw err;
+          if (!observationNotFoundError(err) && !observationCannotEditError(err)) throw err;
           id = null;
         }
       }

@@ -721,14 +721,14 @@ function ObservationLiveTile({
     setCustomRange(null);
     setZoomStack([]);
     setLookback(next);
-    if (typeof onLookbackChange === 'function') onLookbackChange(item.id, next);
+    if (canEdit && typeof onLookbackChange === 'function') onLookbackChange(item.id, next);
   };
 
   const changeChartStyle = (next) => {
     const normalized = normalizeObservationChartStyle(next);
     if (normalized === chartStyle) return;
     setChartStyle(normalized);
-    if (typeof onChartStyleChange === 'function') onChartStyleChange(item.id, normalized);
+    if (canEdit && typeof onChartStyleChange === 'function') onChartStyleChange(item.id, normalized);
   };
 
   const handleChartRangeSelect = (range) => {
@@ -775,10 +775,11 @@ function ObservationLiveTile({
   const chartH = expanded ? 320 : 200;
   const periodLabel = observationPeriodLabel(lookback, customRange);
   const canResetZoom = Boolean(customRange || zoomStack.length);
+  const canEdit = Boolean(canWrite && item.canEdit);
 
   const openInExplorer = () => startComposeInExplorer(onNavigate, {
-    mode: item.canEdit ? 'edit' : 'new',
-    editId: item.canEdit ? item.id : null,
+    mode: canEdit ? 'edit' : 'new',
+    editId: canEdit ? item.id : null,
     name: item.name || '',
     filters: item.filters || [],
     thresholds: item.thresholds || [],
@@ -823,7 +824,7 @@ function ObservationLiveTile({
             <Icon name={expanded ? 'collapse' : 'expand'} size={14} />
             <span>{expanded ? 'Свернуть' : 'Развернуть'}</span>
           </button>
-          {canWrite && (
+          {canEdit && (
             <button
               type="button"
               className="obs-tile__icon tt"
@@ -834,7 +835,7 @@ function ObservationLiveTile({
               <Icon name="sliders" size={15} />
             </button>
           )}
-          {canWrite && item.materialize?.status === 'running' && onCancel && (
+          {canEdit && item.materialize?.status === 'running' && onCancel && (
             <button
               type="button"
               className="obs-tile__icon tt"
@@ -845,7 +846,7 @@ function ObservationLiveTile({
               <Icon name="x" size={15} />
             </button>
           )}
-          {canWrite && (
+          {canEdit && (
             <button
               type="button"
               className="obs-tile__icon obs-tile__icon--danger tt"
@@ -1004,7 +1005,7 @@ function ObservationLiveTile({
             <div className="col" style={{ gap: 8 }}>
               <div className="row" style={{ justifyContent: 'space-between', gap: 8, flexWrap: 'wrap' }}>
                 <div style={{ font: 'var(--pv-text-body-2-bold)' }}>История запусков</div>
-                {canWrite && (
+                {canEdit && (
                   <button
                     type="button"
                     className="btn"
@@ -1170,6 +1171,10 @@ function PageObservations({ onNavigate }) {
 
   const saveSettings = async () => {
     if (!canWriteObservations || !settingsItemId || !settings) return;
+    if (settingsItem?.canEdit === false) {
+      setError('Нет прав на изменение этого наблюдения');
+      return;
+    }
     setBusy(true);
     setError('');
     try {
@@ -1223,7 +1228,7 @@ function PageObservations({ onNavigate }) {
       current = prev.find((row) => row.id === id) || null;
       return prev.map((row) => (row.id === id ? { ...row, lookback } : row));
     });
-    if (!canWriteObservations || !current) return;
+    if (!canWriteObservations || !current?.canEdit) return;
     try {
       // Смена периода не должна выключать подготовку данных.
       await ApiClient.updateObservation(id, {
@@ -1247,7 +1252,7 @@ function PageObservations({ onNavigate }) {
           : row
       ));
     });
-    if (!canWriteObservations || !current) return;
+    if (!canWriteObservations || !current?.canEdit) return;
     try {
       await ApiClient.updateObservation(id, {
         ...current,
@@ -1302,8 +1307,8 @@ function PageObservations({ onNavigate }) {
                 className="btn"
                 style={{ alignSelf: 'flex-start' }}
                 onClick={() => startComposeInExplorer(onNavigate, {
-                  mode: 'edit',
-                  editId: settingsItem.id,
+                  mode: settingsItem.canEdit ? 'edit' : 'new',
+                  editId: settingsItem.canEdit ? settingsItem.id : null,
                   name: settingsItem.name || settings.name,
                   filters: settings.filters || settingsItem.filters || [],
                   thresholds: settings.thresholds || settingsItem.thresholds || [],
@@ -1311,7 +1316,9 @@ function PageObservations({ onNavigate }) {
                   lookback: settings.lookback || settingsItem.lookback || null,
                 })}
               >
-                Изменить фильтры в разборе трафика
+                {settingsItem.canEdit
+                  ? 'Изменить фильтры в разборе трафика'
+                  : 'Скопировать фильтры в разбор трафика'}
               </button>
             )}
             <label className="col" style={{ gap: 4 }}>
@@ -1480,7 +1487,7 @@ function PageObservations({ onNavigate }) {
                 </label>
               </div>
             )}
-            <button type="button" className="btn btn--primary" disabled={busy || !canWriteObservations} onClick={saveSettings}>
+            <button type="button" className="btn btn--primary" disabled={busy || !canWriteObservations || settingsItem.canEdit === false} onClick={saveSettings}>
               Сохранить
             </button>
           </div>
