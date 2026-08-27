@@ -1831,21 +1831,22 @@ function parseExplorerPageParams(params) {
   const thresholdsParsed = parseJsonSearchParam(params.get('thresholds'));
   const thresholds = Array.isArray(thresholdsParsed) ? thresholdsParsed : [];
   const EXPLORER_VIS_IDS = new Set([
-    'contribution', 'dynamics', 'data',
+    'contribution', 'dynamics', 'data', 'stack', 'stackShare',
     'lines', 'donut', 'sankey', 'table', 'bars', 'relations',
   ]);
   const EXPLORER_VIS_LEGACY_MAP = {
     lines: 'data',
     dynamics: 'data',
-    donut: 'contribution',
-    bars: 'contribution',
-    sankey: 'contribution',
-    relations: 'contribution',
     table: 'data',
+    contribution: 'stack',
+    donut: 'stack',
+    bars: 'stack',
+    sankey: 'stack',
+    relations: 'stack',
   };
   const normalizedVis = EXPLORER_VIS_IDS.has(vis)
     ? (EXPLORER_VIS_LEGACY_MAP[vis] || vis)
-    : 'data';
+    : 'stack';
   return {
     metric: metric || 'bps',
     groupBy: groupBy.length ? groupBy : ['src_ip', 'dst_ip'],

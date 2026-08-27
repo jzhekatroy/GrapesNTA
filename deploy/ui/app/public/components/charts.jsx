@@ -87,7 +87,7 @@ function buildChartPolylineSegments(points, xAt, yAt, getValue) {
   const segments = [];
   let current = [];
   points.forEach((pt, i) => {
-    const value = getValue(pt);
+    const value = getValue(pt, i);
     if (value == null) {
       if (current.length) {
         segments.push(current);
@@ -255,6 +255,60 @@ function buildChartAreaPathSegments(points, xAt, yAt, yZero, getValue) {
     const top = seg.map(({ i, value }) => `${xAt(i)},${yAt(value)}`).join(' L ');
     return `M ${xAt(first.i)},${yZero} L ${top} L ${xAt(last.i)},${yZero} Z`;
   });
+}
+
+function buildChartStackedBandPathSegments(points, xAt, yAt, getBottom, getTop) {
+  const segments = [];
+  let current = [];
+  points.forEach((pt, i) => {
+    const bottom = getBottom(pt, i);
+    const top = getTop(pt, i);
+    if (bottom == null || top == null) {
+      if (current.length) {
+        segments.push(current);
+        current = [];
+      }
+      return;
+    }
+    current.push({ i, bottom, top });
+  });
+  if (current.length) segments.push(current);
+
+  return segments.map((seg) => {
+    const first = seg[0];
+    const last = seg[seg.length - 1];
+    const topEdge = seg.map(({ i, top }) => `${xAt(i)},${yAt(top)}`).join(' L ');
+    const bottomEdge = [...seg].reverse().map(({ i, bottom }) => `${xAt(i)},${yAt(bottom)}`).join(' L ');
+    return `M ${xAt(first.i)},${yAt(first.bottom)} L ${topEdge} L ${xAt(last.i)},${yAt(last.bottom)} L ${bottomEdge} Z`;
+  });
+}
+
+function computeChartStackBands(pt, lines, getValue, stackMode) {
+  const rawValues = lines.map((ln) => Math.max(0, getValue(pt, ln.key) ?? 0));
+  const total = rawValues.reduce((s, v) => s + v, 0);
+  const bands = [];
+  let cum = 0;
+  for (let i = 0; i < lines.length; i += 1) {
+    const raw = rawValues[i];
+    const bottom = stackMode === 'share'
+      ? (total > 0 ? (cum / total) * 100 : 0)
+      : cum;
+    cum += raw;
+    const top = stackMode === 'share'
+      ? (total > 0 ? (cum / total) * 100 : 0)
+      : cum;
+    bands.push({ raw, bottom, top, share: total > 0 ? (raw / total) * 100 : 0 });
+  }
+  return { bands, total };
+}
+
+function formatChartSharePercent(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return '0%';
+  if (n >= 10) return `${Math.round(n)}%`;
+  if (n >= 1) return `${n.toFixed(1)}%`;
+  if (n > 0) return `${n.toFixed(2)}%`;
+  return '0%';
 }
 
 const CHART_TIP_LINE_ORDER = ['total', 'incoming', 'outgoing', 'transit', 'internal', 'unclassified'];
@@ -708,6 +762,7 @@ function DualChart({
   ppsLines,
   height = 280,
   mode = 'bw',
+  stackMode,
   onRangeSelect,
   bucketSeconds = 300,
   displayTimezone,
@@ -732,6 +787,7 @@ function DualChart({
   const [selection, setSelection] = useState(null);
 
   const isPps = mode === 'pps';
+  const isStack = stackMode === 'sum' || stackMode === 'share';
   const activeLines = isPps ? [] : lines;
   const ppsSeries = ppsLines != null ? ppsLines : lines;
   const activePpsLines = isPps ? ppsSeries : [];
@@ -774,7 +830,14 @@ function DualChart({
       .map((ln) => chartSeriesPps(pt, ln.key))
       .filter((v) => v != null))
     : [];
-  const max1 = bwValues.length ? Math.max(...bwValues) * 1.15 || 1 : 1;
+  const stackTotals = isStack
+    ? data.map((pt) => activeLines.reduce((sum, ln) => sum + Math.max(0, seriesBwValue(pt, ln.key) ?? 0), 0))
+    : [];
+  const max1 = isStack && stackMode === 'share'
+    ? 100
+    : isStack
+      ? (stackTotals.length ? Math.max(...stackTotals) * 1.15 || 1 : 1)
+      : (bwValues.length ? Math.max(...bwValues) * 1.15 || 1 : 1);
   const max2 = ppsValues.length ? Math.max(...ppsValues) * 1.15 || 1 : 1;
   const n = Math.max(data.length, 1);
   const timeScale = data.length > 1 ? buildChartTimeScale(data, padL, padR, w) : null;
@@ -888,11 +951,21 @@ function DualChart({
   const tipMeta = hoverPoint && (tipBucket || tipUnitLabel)
     ? [tipBucket ? `интервал ${tipBucket}` : null, tipUnitLabel || null].filter(Boolean).join(' · ')
     : null;
+  const hoverStack = hoverPoint && isStack
+    ? computeChartStackBands(hoverPoint, activeLines, seriesBwValue, stackMode)
+    : null;
+  const stackAxisFormatter = stackMode === 'share'
+    ? (v) => formatChartSharePercent(v)
+    : axisFormatter;
+  const stackBandsByPoint = useMemo(() => {
+    if (!isStack || !activeLines.length) return [];
+    return data.map((pt) => computeChartStackBands(pt, activeLines, seriesBwValue, stackMode));
+  }, [data, activeLines, isStack, stackMode, gapAsZero]);
 
   return (
     <div
       ref={wrapRef}
-      className={`dual-chart dual-chart--fluid${selectable ? ' dual-chart--selectable' : ''}${selection ? ' dual-chart--dragging' : ''}`}
+      className={`dual-chart dual-chart--fluid${isStack ? ' dual-chart--stack' : ''}${selectable ? ' dual-chart--selectable' : ''}${selection ? ' dual-chart--dragging' : ''}`}
       style={{
         ...fluidChartStyle(height),
         ...(yAxisLabel || yAxisUnit ? {
@@ -919,11 +992,51 @@ function DualChart({
           return (
             <g key={i}>
               <line x1={padL} x2={w - padR} y1={yy} y2={yy} stroke="rgba(255,255,255,0.05)" />
-              <text x={padL - 8} y={yy + 4} textAnchor="end" fontSize="10" fill="var(--fg-muted)" fontFamily="Mulish">{axisFormatter(vLeft)}</text>
+              <text x={padL - 8} y={yy + 4} textAnchor="end" fontSize="10" fill="var(--fg-muted)" fontFamily="Mulish">{isStack ? stackAxisFormatter(vLeft) : axisFormatter(vLeft)}</text>
             </g>
           );
         })}
-        {activeLines.map((ln) => {
+        {isStack && activeLines.map((ln, lineIdx) => {
+          const areaSegments = buildChartStackedBandPathSegments(
+            data,
+            x,
+            y1,
+            (_pt, i) => stackBandsByPoint[i]?.bands?.[lineIdx]?.bottom ?? null,
+            (_pt, i) => stackBandsByPoint[i]?.bands?.[lineIdx]?.top ?? null,
+          );
+          const lineSegments = buildChartPolylineSegments(
+            data,
+            x,
+            y1,
+            (_pt, i) => stackBandsByPoint[i]?.bands?.[lineIdx]?.top ?? null,
+          );
+          return (
+            <g key={ln.key}>
+              {areaSegments.map((pathD, segmentIdx) => (
+                <path
+                  key={`${ln.key}-area-${segmentIdx}`}
+                  d={pathD}
+                  fill={ln.color}
+                  fillOpacity="0.72"
+                  stroke="none"
+                />
+              ))}
+              {lineSegments.map((pts, segmentIdx) => (
+                <polyline
+                  key={`${ln.key}-edge-${segmentIdx}`}
+                  points={pts.join(' ')}
+                  fill="none"
+                  stroke={ln.color}
+                  strokeWidth="1"
+                  strokeLinejoin="round"
+                  strokeLinecap="round"
+                  opacity="0.95"
+                />
+              ))}
+            </g>
+          );
+        })}
+        {!isStack && activeLines.map((ln) => {
           const segments = buildChartPolylineSegments(
             data,
             x,
@@ -944,7 +1057,7 @@ function DualChart({
             />
           ));
         })}
-        {activePpsLines.map((ln) => {
+        {!isStack && activePpsLines.map((ln) => {
           const segments = buildChartPolylineSegments(
             data,
             x,
@@ -976,7 +1089,22 @@ function DualChart({
               strokeWidth="1"
               strokeDasharray="4 3"
             />
-            {activeLines.map((ln) => {
+            {isStack && hoverStack && activeLines.map((ln, lineIdx) => {
+              const band = hoverStack.bands[lineIdx];
+              if (!band || band.raw <= 0) return null;
+              return (
+                <circle
+                  key={ln.key}
+                  cx={x(hoverIdx)}
+                  cy={y1(band.top)}
+                  r={3.5}
+                  fill={ln.color}
+                  stroke="#14131F"
+                  strokeWidth="1.5"
+                />
+              );
+            })}
+            {!isStack && activeLines.map((ln) => {
               const v = seriesBwValue(hoverPoint, ln.key);
               if (!gapAsZero && v == null) return null;
               return (
@@ -991,7 +1119,7 @@ function DualChart({
               />
               );
             })}
-            {activePpsLines.map((ln) => {
+            {!isStack && activePpsLines.map((ln) => {
               const v = seriesPpsValue(hoverPoint, ln.key);
               if (!gapAsZero && v == null) return null;
               return (
@@ -1031,7 +1159,29 @@ function DualChart({
         >
           <div className="dual-chart__tip-time">{tipTimeLabel}</div>
           {tipMeta && <div className="dual-chart__tip-meta">{tipMeta}</div>}
-          {sortLinesForTip(activeLines).map((ln) => (
+          {isStack && hoverStack && sortLinesForTip(activeLines).map((ln) => {
+            const lineIdx = activeLines.findIndex((item) => item.key === ln.key);
+            const band = lineIdx >= 0 ? hoverStack.bands[lineIdx] : null;
+            if (!band) return null;
+            return (
+              <div key={ln.key} className="dual-chart__tip-row">
+                <span className="dual-chart__tip-swatch" style={{ background: ln.color }} />
+                <span className="dual-chart__tip-label">{ln.label}</span>
+                <span className="dual-chart__tip-val mono">
+                  {stackMode === 'share'
+                    ? `${formatChartSharePercent(band.share)} · ${valueFormatter(band.raw)}`
+                    : valueFormatter(band.raw)}
+                </span>
+              </div>
+            );
+          })}
+          {isStack && hoverStack && stackMode === 'sum' && (
+            <div className="dual-chart__tip-row dual-chart__tip-row--total">
+              <span className="dual-chart__tip-label">Итого</span>
+              <span className="dual-chart__tip-val mono">{valueFormatter(hoverStack.total)}</span>
+            </div>
+          )}
+          {!isStack && sortLinesForTip(activeLines).map((ln) => (
             <div key={ln.key} className="dual-chart__tip-row">
               <span className="dual-chart__tip-swatch" style={{ background: ln.color }} />
               <span className="dual-chart__tip-label">{ln.label}</span>
@@ -1040,7 +1190,7 @@ function DualChart({
               </span>
             </div>
           ))}
-          {sortLinesForTip(activePpsLines).map((ln) => (
+          {!isStack && sortLinesForTip(activePpsLines).map((ln) => (
             <div key={`pps-${ln.key}`} className="dual-chart__tip-row">
               <span className="dual-chart__tip-swatch" style={{ background: ln.color }} />
               <span className="dual-chart__tip-label">{ln.label}, п/с</span>
@@ -2882,4 +3032,5 @@ Object.assign(window, {
   formatTimezoneShortLabel, formatTimezoneLongLabel,
   dataDatetimeLocalToDisplay, displayDatetimeLocalToData,
   fmtBytes, fmtBits, fmtBitsAxis, fmtNum, formatMetric, formatMetricAxis, fmtGbps, fmtMpps, fmtGbTotal, fmtVolumeSize, fmtMpTotal, fmtCompact, fmtTime, fmtAgo,
+  formatChartSharePercent,
 });

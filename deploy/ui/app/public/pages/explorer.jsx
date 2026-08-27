@@ -8,7 +8,7 @@ const DEFAULT_EXPLORER_PRESETS = [
     groupBy: ['src_ip', 'dst_ip'],
     filters: [{ id: 1, field: 'proto', op: '=', value: 'UDP' }],
     limit: 10,
-    vis: 'data',
+    vis: 'stack',
   },
   {
     id: 'dns-candidates',
@@ -20,7 +20,7 @@ const DEFAULT_EXPLORER_PRESETS = [
       { id: 2, field: 'dst_port', op: '=', value: '53' },
     ],
     limit: 25,
-    vis: 'data',
+    vis: 'stack',
   },
   {
     id: 'top-dst-asn',
@@ -29,7 +29,7 @@ const DEFAULT_EXPLORER_PRESETS = [
     groupBy: ['dst_asn'],
     filters: [],
     limit: 25,
-    vis: 'data',
+    vis: 'stack',
   },
 ];
 
@@ -39,7 +39,7 @@ const OBSERVATION_MAX_GROUP_BY = 4;
 const EXPLORER_DEFAULT_FETCH_LIMIT = 25;
 const EXPLORER_ON_DEMAND_FETCH_LIMITS = [50, 100];
 const EXPLORER_CHART_HEIGHT = 196;
-const EXPLORER_VIS_DEFAULT = 'data';
+const EXPLORER_VIS_DEFAULT = 'stack';
 const EXPLORER_MASKABLE_GROUPS = new Set(['src_ip', 'dst_ip']);
 const EXPLORER_GROUP_MASK_DEFAULT = 32;
 
@@ -92,18 +92,33 @@ function explorerGroupLabel(token, dimensionById) {
 }
 
 const VIS_TYPES = [
-  { id: 'contribution', label: 'Вклад', icon: 'pieChart', hint: 'Кто даёт основной объём' },
+  { id: 'stack', label: 'Стек (сумма)', icon: 'layers', hint: 'Площади друг на друге, верхняя кромка = сумма выбранных серий' },
+  { id: 'stackShare', label: 'Стек (доли)', icon: 'stackShare', hint: 'Тот же стек, нормализован к 100%' },
   { id: 'data', label: 'Данные', icon: 'menu', hint: 'График динамики и детальная таблица' },
 ];
+
+const EXPLORER_DYNAMICS_VIS = new Set(['data', 'stack', 'stackShare']);
+
+function isExplorerDynamicsVis(vis) {
+  return EXPLORER_DYNAMICS_VIS.has(normalizeExplorerVis(vis));
+}
+
+function explorerVisToStackMode(vis) {
+  const id = normalizeExplorerVis(vis);
+  if (id === 'stack') return 'sum';
+  if (id === 'stackShare') return 'share';
+  return undefined;
+}
 
 const EXPLORER_VIS_LEGACY_MAP = {
   lines: 'data',
   dynamics: 'data',
-  donut: 'contribution',
-  bars: 'contribution',
-  sankey: 'contribution',
-  relations: 'contribution',
   table: 'data',
+  contribution: 'stack',
+  donut: 'stack',
+  bars: 'stack',
+  sankey: 'stack',
+  relations: 'stack',
 };
 
 function normalizeExplorerVis(vis) {
@@ -138,21 +153,6 @@ function resolveExplorerFetchLimit(queryLimit) {
 function isExplorerDisplayLimitActive(buttonLimit, visualLimit, fetchLimit) {
   if (visualLimit === 'all') return buttonLimit === fetchLimit;
   return Number(visualLimit) === buttonLimit;
-}
-
-function buildExplorerAnalysisCardTitle({
-  visLabel,
-  metricLabel,
-  groupLabels,
-  visualLimit,
-  loadedCount,
-}) {
-  const shown = resolveExplorerVisualCount(visualLimit, loadedCount);
-  const groups = groupLabels.join(' × ');
-  if (shown < loadedCount) {
-    return `${visLabel}: ${metricLabel} · ${groups} · показано ${shown} из ${loadedCount}`;
-  }
-  return `${visLabel}: ${metricLabel} · топ ${loadedCount} ${groups}`;
 }
 
 function explorerRowLabel(row) {
@@ -3293,7 +3293,7 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
   };
 
   const toggleDynamicsSeries = (rowId) => {
-    setVis('data');
+    setVis((prev) => (isExplorerDynamicsVis(prev) ? prev : EXPLORER_VIS_DEFAULT));
     setDynamicsSeriesIds((prev) => {
       const next = new Set(prev);
       if (next.has(rowId)) next.delete(rowId);
@@ -3400,8 +3400,6 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
     timeRange,
     customPeriod,
   });
-  const activeVisMeta = VIS_TYPES.find((v) => v.id === vis) || VIS_TYPES[0];
-
   const idleState = !hasAppliedQuery && source !== 'loading';
 
   return (
@@ -3657,7 +3655,7 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
                     >
                       {showAllResultColumns ? 'Скрыть поля' : 'Все поля'}
                     </Button>
-                    {vis === 'data' && (
+                    {isExplorerDynamicsVis(vis) && (
                       <Button kind="ghost" size="sm" icon="download" onClick={exportCsv} disabled={!hasAppliedQuery || !results.length || exporting}>CSV</Button>
                     )}
                   </div>
@@ -3681,8 +3679,7 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
                 </div>
               ) : null;
 
-              if (vis === 'data') {
-                return (
+              return (
                   <Card
                     className="card--explorer-results"
                     title="Результаты"
@@ -3700,7 +3697,8 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
                       <div className="explorer-results-layout">
                         <div className="explorer-results-chart">
                           <DynamicsChartExplorer
-                            active={vis === 'data'}
+                            active={isExplorerDynamicsVis(vis)}
+                            stackMode={explorerVisToStackMode(vis)}
                             results={results}
                             metric={appliedMetric}
                             metricLabel={appliedMetricLabel}
@@ -3745,41 +3743,6 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
                       </div>
                     )}
                   </Card>
-                );
-              }
-
-              return (
-                <Card
-                  title={buildExplorerAnalysisCardTitle({
-                    visLabel: activeVisMeta.label,
-                    metricLabel: appliedMetricLabel,
-                    groupLabels: appliedGroupLabels,
-                    visualLimit,
-                    loadedCount: results.length,
-                  })}
-                  subtitle={`${timeRangeLabel(appliedTimeRange, appliedCustomPeriod)} · ${meta?.dataTable || 'flows_raw'}${source === 'error' ? ` · ${error || ApiClient.LOAD_FAILED}` : ''}`}
-                  loadMs={loadMs}
-                  serverMs={serverMs}
-                  tools={(
-                    <div className="explorer-results-tools">
-                      {analysisToolbar}
-                    </div>
-                  )}
-                >
-                  {analysisBody || (
-                    <ContributionBarsExplorer
-                      results={othersRow ? [...visibleResults, othersRow] : visibleResults}
-                      metric={appliedMetric}
-                      metricLabel={appliedMetricLabel}
-                      onFocus={focusRow}
-                      onExclude={excludeRow}
-                      onToggleDynamicsSeries={toggleDynamicsSeries}
-                      chartSeriesIds={dynamicsSeriesIds}
-                      showOthersOnChart={showOthersOnChart}
-                      onToggleOthersOnChart={toggleOthersOnChart}
-                    />
-                  )}
-                </Card>
               );
             })()}
           </>
@@ -4883,7 +4846,7 @@ function ExplorerAnalysisTabs({ value, onChange, compact = false }) {
           aria-pressed={value === v.id}
         >
           <Icon name={v.icon} size={compact ? 14 : 12} />
-          {!compact && <span>{v.label}</span>}
+          <span>{v.label}</span>
         </button>
       ))}
     </div>
@@ -5549,68 +5512,6 @@ function ExplorerFilters({
   );
 }
 
-function ContributionBarsExplorer({
-  results,
-  metric,
-  metricLabel,
-  onFocus,
-  onExclude,
-  chartSeriesIds,
-  onToggleDynamicsSeries,
-  showOthersOnChart = false,
-  onToggleOthersOnChart,
-}) {
-  if (!results.length) {
-    return (
-      <div className="explorer-lines__empty">
-        Нет значений для отображения вклада. Измените фильтры или группировку.
-      </div>
-    );
-  }
-
-  const maxMetric = Math.max(...results.map((r) => Number(r.metric) || 0), 1);
-
-  return (
-    <div className="explorer-bars col" style={{ gap: 12 }}>
-      <div style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-muted)' }}>
-        Кто даёт основной объём по метрике «{metricLabel}».
-      </div>
-      {results.map((row) => {
-        const widthPct = Math.max(2, ((Number(row.metric) || 0) / maxMetric) * 100);
-        return (
-          <div key={row.id} className="explorer-bars__row">
-            <div className="explorer-bars__head">
-              <span className="explorer-bars__swatch" style={{ background: row.color }} aria-hidden="true" />
-              <span className="explorer-bars__label" title={explorerRowLabel(row)}>{explorerRowLabel(row)}</span>
-              <span className="explorer-bars__value mono">{formatMetric(row.metric, metric)}</span>
-              <span className="explorer-bars__value mono">{Number(row.pct || 0).toFixed(2)}%</span>
-            </div>
-            <div className="explorer-bars__track">
-              <div className="explorer-bars__fill" style={{ width: `${widthPct}%`, background: row.color }} />
-            </div>
-            {!row.isOthers ? (
-              <ExplorerRowActions
-                row={row}
-                onFocus={onFocus}
-                onExclude={onExclude}
-                chartSeriesIds={chartSeriesIds}
-                onToggleDynamicsSeries={onToggleDynamicsSeries}
-              />
-            ) : (
-              <div className="explorer-row-actions row">
-                <ExplorerChartToggleButton
-                  onChart={showOthersOnChart}
-                  onClick={onToggleOthersOnChart}
-                />
-              </div>
-            )}
-          </div>
-        );
-      })}
-    </div>
-  );
-}
-
 function explorerPointBucketKey(pt) {
   const ms = Number(pt?.bucketMs);
   if (Number.isFinite(ms) && ms > 0) return `ms:${ms}`;
@@ -5676,6 +5577,7 @@ function ExplorerTotalChart({
 
 function DynamicsChartExplorer({
   active = true,
+  stackMode,
   results,
   metric,
   metricLabel,
@@ -5692,7 +5594,7 @@ function DynamicsChartExplorer({
   const selectedSeriesKey = [...selectedSeriesIds].sort().join('|');
   useEffect(() => {
     if (active) setChartKey((k) => k + 1);
-  }, [active, selectedSeriesKey, showOthers]);
+  }, [active, selectedSeriesKey, showOthers, stackMode]);
   const seriesByRow = resultSeries?.seriesByRow || {};
   const resultIdSet = new Set(results.map((r) => r.id));
   const selectedIds = [...selectedSeriesIds].filter((id) => resultIdSet.has(id));
@@ -5753,6 +5655,16 @@ function DynamicsChartExplorer({
       return next;
     });
   const chartPoints = points.length === 1 ? [points[0], { ...points[0] }] : points;
+  const isStack = stackMode === 'sum' || stackMode === 'share';
+  const chartAxisUnit = isStack && stackMode === 'share' ? '%' : metricAxisUnit(metric);
+  const chartAxisFormatter = isStack && stackMode === 'share'
+    ? (v) => formatChartSharePercent(v)
+    : (v) => formatMetricAxis(v, metric);
+  const chartCaption = stackMode === 'sum'
+    ? 'Верхняя кромка = сумма выбранных серий в каждом временном интервале.'
+    : stackMode === 'share'
+      ? 'Доли выбранных серий, нормализованные к 100%. Абсолютный объём виден только в подсказке.'
+      : `Ось Y — ${metricLabel || metric} в каждом временном интервале, не сумма за весь период.`;
 
   return (
     <div className="explorer-lines col" style={{ gap: 12 }}>
@@ -5768,6 +5680,7 @@ function DynamicsChartExplorer({
               key={chartKey}
               points={chartPoints}
               lines={lines}
+              stackMode={stackMode}
               height={EXPLORER_CHART_HEIGHT}
               mode="bw"
               gapAsZero
@@ -5775,12 +5688,12 @@ function DynamicsChartExplorer({
               bucketSeconds={bucketSeconds}
               displayTimezone={displayTimezone}
               valueFormatter={(v) => formatMetric(v, metric)}
-              axisFormatter={(v) => formatMetricAxis(v, metric)}
-              yAxisUnit={metricAxisUnit(metric)}
+              axisFormatter={chartAxisFormatter}
+              yAxisUnit={chartAxisUnit}
             />
           </div>
           <div style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-muted)', marginTop: -4 }}>
-            Ось Y — {metricLabel || metric} в каждом временном интервале, не сумма за весь период.
+            {chartCaption}
             {onRangeSelect && (
               <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, marginLeft: 8 }}>
                 <Icon name="info" size={12} /> Выделите диапазон на графике

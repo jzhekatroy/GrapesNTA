@@ -2956,10 +2956,11 @@ a.nav-item--active:visited { color: var(--fg-primary); }
 }
 
 .explorer-analysis-tabs--compact button {
-  gap: 0;
-  min-width: 34px;
-  padding: 6px 10px;
+  gap: 4px;
+  min-width: 0;
+  padding: 6px 8px;
   justify-content: center;
+  font-size: 11px;
 }
 
 .explorer-filter-templates-menu {
@@ -4781,6 +4782,12 @@ html.modal-open #root {
   font: var(--pv-text-body-3);
   color: var(--fg-muted);
   white-space: nowrap;
+}
+.dual-chart__tip-row--total {
+  margin-top: 4px;
+  padding-top: 4px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  font-weight: 600;
 }
 
 /* DNS queries page */
