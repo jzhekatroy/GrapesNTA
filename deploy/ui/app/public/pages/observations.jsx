@@ -252,6 +252,26 @@ function groupLabel(token, options) {
 
 const COMPOSE_KEY = 'grapes-observation-compose';
 const OPEN_KEY = 'grapes-observation-open';
+const COMPOSE_CHANGED_EVENT = 'grapes-observation-compose';
+
+function readObservationComposeDraft() {
+  try {
+    const raw = sessionStorage.getItem(COMPOSE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    return parsed?.active ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function notifyObservationComposeChanged() {
+  try {
+    window.dispatchEvent(new CustomEvent(COMPOSE_CHANGED_EVENT));
+  } catch {
+    // ignore
+  }
+}
 
 function groupByFromWidgets(widgets) {
   const list = Array.isArray(widgets) ? widgets : [];
@@ -311,6 +331,7 @@ function nextTileDelayMs(windowTo) {
 }
 
 function startComposeInExplorer(onNavigate, {
+  mode = null,
   editId = null,
   name = '',
   filters = null,
@@ -318,10 +339,13 @@ function startComposeInExplorer(onNavigate, {
   groupBy = null,
   lookback = null,
 } = {}) {
+  const resolvedEditId = editId || null;
+  const resolvedMode = mode || (resolvedEditId ? 'edit' : 'new');
   try {
     sessionStorage.setItem(COMPOSE_KEY, JSON.stringify({
       active: true,
-      editId: editId || null,
+      mode: resolvedMode,
+      editId: resolvedMode === 'edit' ? resolvedEditId : null,
       name: name || '',
       filters: Array.isArray(filters) ? filters : null,
       thresholds: Array.isArray(thresholds) ? thresholds : null,
@@ -332,6 +356,7 @@ function startComposeInExplorer(onNavigate, {
   } catch {
     // ignore
   }
+  notifyObservationComposeChanged();
   if (typeof onNavigate === 'function') onNavigate('explorer');
   else location.hash = 'explorer';
 }
@@ -419,6 +444,7 @@ function ObservationChart({
         tipTranslucent={tipTranslucent}
         tipUnitLabel="бит/с"
         yAxisUnit="бит/с"
+        yAxisTitlePad={36}
       />
     );
   }
@@ -445,6 +471,8 @@ function ObservationChart({
         skipLeadingGaps={skipLeadingGaps}
         skipTrailingGaps={skipTrailingGaps}
         tipTranslucent={tipTranslucent}
+        yAxisUnit="бит/с"
+        yAxisTitlePad={36}
       />
     );
   }
@@ -567,9 +595,11 @@ function ObservationChartStylePicker({ value, onChange, disabled = false }) {
 function ObservationLiveTile({
   item,
   groupOptions,
+  filterFields,
   lookbackOptions,
   expanded,
   onToggleExpand,
+  onNavigate,
   canWrite,
   onSettings,
   onDelete,
@@ -733,9 +763,20 @@ function ObservationLiveTile({
     : null;
   const topGroupBy = groupByFromWidgets(item.widgets);
   const topLabel = topGroupBy.map((g) => groupLabel(g, groupOptions)).join(' × ');
+  const filterSummary = formatFilterSummary(item.filters || [], filterFields);
   const chartH = expanded ? 320 : 200;
   const periodLabel = observationPeriodLabel(lookback, customRange);
   const canResetZoom = Boolean(customRange || zoomStack.length);
+
+  const openInExplorer = () => startComposeInExplorer(onNavigate, {
+    mode: item.canEdit ? 'edit' : 'new',
+    editId: item.canEdit ? item.id : null,
+    name: item.name || '',
+    filters: item.filters || [],
+    thresholds: item.thresholds || [],
+    groupBy: topGroupBy.length ? topGroupBy : null,
+    lookback: lookback || item.lookback || null,
+  });
 
   return (
     <Card pad="sm" className={`obs-tile${expanded ? ' obs-tile--expanded' : ''}`}>
@@ -743,12 +784,14 @@ function ObservationLiveTile({
         <div style={{ flex: 1, minWidth: 160 }}>
           <div className="obs-tile__title">{item.name}</div>
           {item.description ? <div className="obs-tile__desc">{item.description}</div> : null}
-          {topLabel ? (
-            <div className="obs-tile__sub">
-              Топ по {topLabel}
-              {focusLabel ? ` · фокус: ${focusLabel}` : ''}
-            </div>
-          ) : null}
+          <button
+            type="button"
+            className="obs-tile__filter-link"
+            onClick={openInExplorer}
+            title="Открыть в разборе трафика"
+          >
+            <span className="obs-tile__filter-link-text">{filterSummary}</span>
+          </button>
         </div>
         <div className="obs-tile__tools">
           <button
@@ -809,7 +852,7 @@ function ObservationLiveTile({
         </div>
       )}
 
-      <div style={{ minHeight: chartH, opacity: loading && !points.length ? 0.55 : 1, transition: 'opacity .15s', overflow: 'visible' }}>
+      <div className="obs-tile__chart" style={{ minHeight: chartH, opacity: loading && !points.length ? 0.55 : 1, transition: 'opacity .15s' }}>
         <ObservationChart
           points={points}
           lines={visibleLines}
@@ -1225,6 +1268,7 @@ function PageObservations({ onNavigate }) {
                 className="btn"
                 style={{ alignSelf: 'flex-start' }}
                 onClick={() => startComposeInExplorer(onNavigate, {
+                  mode: 'edit',
                   editId: settingsItem.id,
                   name: settingsItem.name || settings.name,
                   filters: settings.filters || settingsItem.filters || [],
@@ -1422,7 +1466,7 @@ function PageObservations({ onNavigate }) {
           <button
             type="button"
             className="btn btn--primary"
-            onClick={() => startComposeInExplorer(onNavigate)}
+            onClick={() => startComposeInExplorer(onNavigate, { mode: 'new' })}
           >
             + Новое
           </button>
@@ -1466,6 +1510,8 @@ function PageObservations({ onNavigate }) {
                 key={item.id}
                 item={item}
                 groupOptions={groupOptions}
+                filterFields={filterFields}
+                onNavigate={onNavigate}
                 lookbackOptions={config?.lookbacks || LOOKBACK_OPTIONS}
                 expanded={expandedId === item.id}
                 onToggleExpand={() => setExpandedId((cur) => (cur === item.id ? null : item.id))}
@@ -1493,3 +1539,4 @@ function PageObservations({ onNavigate }) {
 
 window.PageObservations = PageObservations;
 window.startObservationCompose = startComposeInExplorer;
+window.readObservationComposeDraft = readObservationComposeDraft;

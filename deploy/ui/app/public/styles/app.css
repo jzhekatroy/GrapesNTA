@@ -4604,9 +4604,26 @@ a.nav-item--active:visited { color: var(--fg-primary); }
 .input-wrap { position: relative; }
 .input-wrap > svg { position: absolute; left: 12px; top: 50%; transform: translateY(-50%); color: var(--fg-muted); pointer-events: none; }
 
-.field { display: flex; flex-direction: column; gap: 6px; }
+.field { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
 .field label { font: var(--pv-text-body-3-bold); color: var(--fg-secondary); }
 .field .hint { font: var(--pv-text-body-3); color: var(--fg-muted); }
+.field-static {
+  padding: 8px 12px;
+  background: var(--bg-input);
+  border: 1px solid var(--bd-default);
+  border-radius: var(--radius-control);
+  color: var(--fg-secondary);
+  font: var(--pv-text-body-3);
+  line-height: 1.45;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+.field-static--compact {
+  padding: 0;
+  border: none;
+  background: transparent;
+}
 
 /* Segmented control */
 .seg { display: inline-flex; background: var(--bg-input); border: 1px solid var(--bd-default); border-radius: var(--radius-control); padding: 3px; gap: 2px; }
@@ -5727,6 +5744,48 @@ html.modal-open #root {
   margin-top: 2px;
   font: var(--pv-text-body-3);
   color: var(--fg-muted);
+}
+.obs-tile__filter-link {
+  appearance: none;
+  -webkit-appearance: none;
+  display: block;
+  width: 100%;
+  margin-top: 2px;
+  padding: 0;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  text-align: left;
+  cursor: pointer;
+  font: var(--pv-text-body-3);
+  color: var(--fg-secondary);
+  transition: color var(--pv-dur-fast);
+}
+.obs-tile__filter-link-text {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  overflow: hidden;
+}
+.obs-tile__filter-link:hover {
+  color: var(--accent);
+}
+.obs-tile__filter-link:hover .obs-tile__filter-link-text {
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.obs-tile__filter-link:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+.obs-tile__chart {
+  overflow: visible;
+}
+.obs-tile .dual-chart__y-axis-title-inner {
+  font-size: 11px;
 }
 .obs-tile__tools {
   display: flex;

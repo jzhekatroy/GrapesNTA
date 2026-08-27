@@ -780,6 +780,7 @@ function DualChart({
   tipTranslucent = false,
   yAxisLabel,
   yAxisUnit,
+  yAxisTitlePad: yAxisTitlePadProp = 28,
 }) {
   const wrapRef = useRef(null);
   const dragRef = useRef(null);
@@ -818,7 +819,7 @@ function DualChart({
   };
 
   const w = 800;
-  const yAxisTitlePad = yAxisLabel || yAxisUnit ? 28 : 0;
+  const yAxisTitlePad = yAxisLabel || yAxisUnit ? yAxisTitlePadProp : 0;
   const padL = 68 + yAxisTitlePad;
   const padR = 12;
   const padT = 20;
@@ -1506,6 +1507,9 @@ function TimeSeriesSparkChart({
   skipLeadingGaps = false,
   skipTrailingGaps = false,
   tipTranslucent = false,
+  yAxisLabel,
+  yAxisUnit,
+  yAxisTitlePad: yAxisTitlePadProp = 28,
 }) {
   const wrapRef = useRef(null);
   const dragRef = useRef(null);
@@ -1531,7 +1535,8 @@ function TimeSeriesSparkChart({
   if (!data.length) return null;
 
   const w = 800;
-  const padL = 72;
+  const yAxisTitlePad = yAxisLabel || yAxisUnit ? yAxisTitlePadProp : 0;
+  const padL = 68 + yAxisTitlePad;
   const padR = 12;
   const padT = 16;
   const padB = 32;
@@ -1639,11 +1644,25 @@ function TimeSeriesSparkChart({
     <div
       ref={wrapRef}
       className={`dual-chart dual-chart--fluid${selectable ? ' dual-chart--selectable' : ''}${selection ? ' dual-chart--dragging' : ''}${className ? ` ${className}` : ''}`}
-      style={fluidChartStyle(height)}
+      style={{
+        ...fluidChartStyle(height),
+        ...(yAxisLabel || yAxisUnit ? {
+          '--dual-chart-y-title-w': `${(yAxisTitlePad / w) * 100}%`,
+          '--dual-chart-pad-t': `${(padT / h) * 100}%`,
+          '--dual-chart-pad-b': `${(padB / h) * 100}%`,
+        } : {}),
+      }}
       onMouseMove={onChartMouseMove}
       onMouseLeave={onChartMouseLeave}
       onMouseDown={onChartMouseDown}
     >
+      {(yAxisLabel || yAxisUnit) && (
+        <div className="dual-chart__y-axis-title" aria-hidden="true">
+          <div className="dual-chart__y-axis-title-inner">
+            {[yAxisLabel, yAxisUnit].filter(Boolean).join('\n')}
+          </div>
+        </div>
+      )}
       <svg viewBox={`0 0 ${w} ${h}`} preserveAspectRatio="none" overflow="visible" className="dual-chart__svg">
         <defs>
           <linearGradient id={gradId} x1="0" y1="0" x2="0" y2="1">

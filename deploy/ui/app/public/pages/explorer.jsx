@@ -36,6 +36,41 @@ const DEFAULT_EXPLORER_PRESETS = [
 const EXPLORER_DEFAULT_VISUAL_LIMIT = 5;
 /** Rollup наблюдений хранит четыре измерения разреза (dim0…dim3). */
 const OBSERVATION_MAX_GROUP_BY = 4;
+const OBSERVATION_COMPOSE_KEY = 'grapes-observation-compose';
+const OBSERVATION_COMPOSE_CHANGED_EVENT = 'grapes-observation-compose';
+
+function readObservationComposeDraft() {
+  if (typeof window.readObservationComposeDraft === 'function') {
+    return window.readObservationComposeDraft();
+  }
+  try {
+    const raw = sessionStorage.getItem(OBSERVATION_COMPOSE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    return parsed?.active ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function notifyObservationComposeChanged() {
+  try {
+    window.dispatchEvent(new CustomEvent(OBSERVATION_COMPOSE_CHANGED_EVENT));
+  } catch {
+    // ignore
+  }
+}
+
+function observationNotFoundError(err) {
+  return err?.status === 404 || /не найден/i.test(String(err?.message || ''));
+}
+
+function isObservationComposeEdit(draft) {
+  if (!draft) return false;
+  if (draft.mode === 'new') return false;
+  if (draft.mode === 'edit') return Boolean(draft.editId);
+  return Boolean(draft.editId);
+}
 const EXPLORER_DEFAULT_FETCH_LIMIT = 25;
 const EXPLORER_ON_DEMAND_FETCH_LIMITS = [50, 100];
 const EXPLORER_CHART_HEIGHT = 196;
@@ -2387,16 +2422,7 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
     };
   }, []);
   const [schema, setSchema] = useState(null);
-  const [observationCompose, setObservationCompose] = useState(() => {
-    try {
-      const raw = sessionStorage.getItem('grapes-observation-compose');
-      if (!raw) return null;
-      const parsed = JSON.parse(raw);
-      return parsed?.active ? parsed : null;
-    } catch {
-      return null;
-    }
-  });
+  const [observationCompose, setObservationCompose] = useState(() => readObservationComposeDraft());
   const composeFilters = Array.isArray(observationCompose?.filters)
     ? observationCompose.filters
     : null;
@@ -3076,9 +3102,16 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
   };
 
   const clearObservationCompose = () => {
-    try { sessionStorage.removeItem('grapes-observation-compose'); } catch { /* ignore */ }
+    try { sessionStorage.removeItem(OBSERVATION_COMPOSE_KEY); } catch { /* ignore */ }
     setObservationCompose(null);
+    notifyObservationComposeChanged();
   };
+
+  useEffect(() => {
+    const syncCompose = () => setObservationCompose(readObservationComposeDraft());
+    window.addEventListener(OBSERVATION_COMPOSE_CHANGED_EVENT, syncCompose);
+    return () => window.removeEventListener(OBSERVATION_COMPOSE_CHANGED_EVENT, syncCompose);
+  }, []);
 
   const openSaveAsObservation = () => {
     const { validThresholds } = resolveExplorerThresholdPayload(thresholds, schema);
@@ -3107,36 +3140,57 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
       : [topGroup || 'src_asn']).slice(0, OBSERVATION_MAX_GROUP_BY);
 
     try {
-      let id = observationCompose?.editId || null;
+      const composeDraft = readObservationComposeDraft();
+      const editing = isObservationComposeEdit(composeDraft);
+      let id = editing ? composeDraft.editId : null;
+      let existing = null;
+      let updated = false;
       if (id) {
-        const existing = await ApiClient.loadObservation(id);
+        try {
+          existing = await ApiClient.loadObservation(id);
+        } catch (err) {
+          if (observationNotFoundError(err)) {
+            id = null;
+          } else {
+            throw err;
+          }
+        }
+      }
+      if (id && existing) {
         const existingChartStyle = (existing.widgets || []).find((w) => w.type === 'timeseries_bps')?.chartStyle;
-        await ApiClient.updateObservation(id, {
-          ...existing,
-          name: (name || '').trim() || existing.name,
-          filters: nextFilters,
-          thresholds: validThresholds,
-          widgets: [
-            {
-              id: 'w-ts',
-              type: 'timeseries_bps',
-              metric: metric || 'bps',
-              groupBy: chartGroup,
-              chartStyle: existingChartStyle === 'lines' ? 'lines' : 'stack',
-              seriesLimit: 8,
-              limit: null,
-            },
-            {
-              id: 'w-top',
-              type: 'top_table',
-              metric: metric || 'bps',
-              groupBy: chartGroup,
-              limit: 15,
-            },
-          ],
-        });
-        pushToast({ kind: 'success', title: 'Фильтры наблюдения обновлены', desc: name || existing.name });
-      } else {
+        try {
+          await ApiClient.updateObservation(id, {
+            ...existing,
+            name: (name || '').trim() || existing.name,
+            filters: nextFilters,
+            thresholds: validThresholds,
+            widgets: [
+              {
+                id: 'w-ts',
+                type: 'timeseries_bps',
+                metric: metric || 'bps',
+                groupBy: chartGroup,
+                chartStyle: existingChartStyle === 'lines' ? 'lines' : 'stack',
+                seriesLimit: 8,
+                limit: null,
+              },
+              {
+                id: 'w-top',
+                type: 'top_table',
+                metric: metric || 'bps',
+                groupBy: chartGroup,
+                limit: 15,
+              },
+            ],
+          });
+          pushToast({ kind: 'success', title: 'Фильтры наблюдения обновлены', desc: name || existing.name });
+          updated = true;
+        } catch (err) {
+          if (!observationNotFoundError(err)) throw err;
+          id = null;
+        }
+      }
+      if (!updated) {
         const payload = {
           name: (name || '').trim() || `Наблюдение · ${metricLabel}`,
           description: '',
@@ -3547,7 +3601,7 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
             }}
           >
             <div style={{ flex: 1, minWidth: 220, font: 'var(--pv-text-body-3)' }}>
-              {observationCompose.editId
+              {isObservationComposeEdit(observationCompose)
                 ? 'Редактируете фильтры наблюдения. Соберите условия и нажмите «Добавить в наблюдения».'
                 : 'Новое наблюдение: соберите фильтр здесь, затем «Добавить в наблюдения».'}
             </div>
@@ -3829,7 +3883,7 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
         groupBy={groupBy}
         dimensionById={dimensionById}
         timeRange={timeRange}
-        editingId={observationCompose?.editId || null}
+        editingId={isObservationComposeEdit(observationCompose) ? observationCompose?.editId : null}
         initialName={observationCompose?.name || ''}
         onSave={saveAsObservation}
       />
@@ -5276,7 +5330,7 @@ function ExplorerMetricGroupControls({
       <ExplorerMetricChipPicker metrics={availableMetrics} value={metric} onChange={setMetric} />
       {showGroupBy && (
         <>
-          <span className="explorer-chip-row__sep">группировать по</span>
+          <span className="explorer-chip-row__sep">по</span>
           {groupBy.map((token) => {
             const id = explorerGroupFieldId(token);
             return (
@@ -6239,7 +6293,7 @@ function SaveObservationModal({
     >
       <div className="col" style={{ gap: 12 }}>
         <Card pad="sm" style={{ background: 'var(--surf-1)' }}>
-          <div style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-secondary)' }}>
+          <div className="field-static field-static--compact">
             Фильтры: {filterSummary || 'нет'}
           </div>
         </Card>
@@ -6248,7 +6302,7 @@ function SaveObservationModal({
           <input className="input" value={name} onChange={(e) => setName(e.target.value)} autoFocus />
         </div>
         <div className="row" style={{ gap: 12, flexWrap: 'wrap' }}>
-          <div className="field" style={{ flex: 1, minWidth: 140 }}>
+          <div className="field" style={{ flex: '1 1 140px', minWidth: 140 }}>
             <label>Окно графика</label>
             <select className="input" value={lookback} onChange={(e) => setLookback(e.target.value)}>
               <option value="30m">30 минут</option>
@@ -6258,25 +6312,28 @@ function SaveObservationModal({
               <option value="7d">7 дней</option>
             </select>
           </div>
-          <div className="field" style={{ flex: 1, minWidth: 160 }}>
-            <label>{groupSummary ? 'Разрез' : 'Топ по полю'}</label>
-            {groupSummary ? (
-              <div
-                className="input"
-                style={{ display: 'flex', alignItems: 'center', color: 'var(--fg-secondary)' }}
-                title={`Взято из группировки в разборе трафика: ${groupSummary}`}
-              >
-                {groupSummary}
-              </div>
-            ) : (
+          {!groupSummary && (
+            <div className="field" style={{ flex: '1 1 160px', minWidth: 160 }}>
+              <label>Топ по полю</label>
               <select className="input" value={topGroup} onChange={(e) => setTopGroup(e.target.value)}>
                 {['src_asn', 'dst_asn', 'src_ip', 'dst_ip', 'vlan', 'proto', 'src_country', 'dst_country'].map((id) => (
                   <option key={id} value={id}>{dimensionById?.[id]?.label || id}</option>
                 ))}
               </select>
-            )}
-          </div>
+            </div>
+          )}
         </div>
+        {groupSummary ? (
+          <div className="field">
+            <label>Разрез</label>
+            <div
+              className="field-static"
+              title={`Взято из группировки в разборе трафика: ${groupSummary}`}
+            >
+              {groupSummary}
+            </div>
+          </div>
+        ) : null}
         {(groupBy || []).length > OBSERVATION_MAX_GROUP_BY && (
           <div style={{ color: 'var(--fg-warning)', font: 'var(--pv-text-body-3)' }}>
             Наблюдение сохранит первые {OBSERVATION_MAX_GROUP_BY} измерения разреза:

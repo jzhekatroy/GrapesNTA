@@ -413,7 +413,7 @@ function normalizeObservation(raw = {}, { userId, existing = null } = {}) {
   };
 }
 
-async function withMeta(item, allItems = null) {
+async function withMeta(item, allItems = null, userId = null) {
   const scope = classifyScope(item.filters, item.widgets);
   const all = allItems || await loadAllObservations();
   const active = countActiveMaterialize(all);
@@ -440,6 +440,7 @@ async function withMeta(item, allItems = null) {
     ...item,
     report,
     scope,
+    canEdit: userId ? isObservationOwner(item, userId) : undefined,
     quotas: {
       maxMaterialize: MATERIALIZE_LIMIT_ENABLED ? MAX_MATERIALIZE : null,
       activeMaterialize: active,
@@ -456,7 +457,7 @@ async function listObservations(userId) {
   const visible = all.filter((item) => item.isShared
     || !String(item.ownerId || '').trim()
     || isObservationOwner(item, userId));
-  return Promise.all(visible.map((item) => withMeta(item, all)));
+  return Promise.all(visible.map((item) => withMeta(item, all, userId)));
 }
 
 async function getObservation(id, userId) {
@@ -465,7 +466,7 @@ async function getObservation(id, userId) {
   if (!item.isShared
     && String(item.ownerId || '').trim()
     && !isObservationOwner(item, userId)) return null;
-  return withMeta(item);
+  return withMeta(item, null, userId);
 }
 
 async function createObservation(userId, payload = {}) {
@@ -478,7 +479,7 @@ async function createObservation(userId, payload = {}) {
   }
   if (item.materialize.enabled) item.materialize.status = 'queued';
   await upsertObservation(item);
-  return withMeta(item, [...items, item]);
+  return withMeta(item, [...items, item], userId);
 }
 
 async function updateObservation(id, userId, payload = {}) {

@@ -77,6 +77,7 @@ function App() {
   const authRef = useRef(auth);
   authRef.current = auth;
   const [refreshKey, setRefreshKey] = useState(0);
+  const [observationComposeTick, setObservationComposeTick] = useState(0);
   const themeInitialized = useRef(false);
   const lastAuditPageRef = useRef({ pageId: '', at: 0 });
 
@@ -315,6 +316,12 @@ function App() {
   }, [registryReady, validIds]);
 
   useEffect(() => {
+    const bumpComposeTick = () => setObservationComposeTick((tick) => tick + 1);
+    window.addEventListener('grapes-observation-compose', bumpComposeTick);
+    return () => window.removeEventListener('grapes-observation-compose', bumpComposeTick);
+  }, []);
+
+  useEffect(() => {
     if (!auth.user || auth.loading) return undefined;
     const pageId = page;
     const now = Date.now();
@@ -474,7 +481,7 @@ function App() {
         pageEl = (
           <LazyPage
             pageId="explorer"
-            key={`${refreshKey}-${displayTimezone}-${hashRoute}`}
+            key={`${refreshKey}-${displayTimezone}-${hashRoute}-${observationComposeTick}`}
             onNavigate={navigate}
             displayTimezone={displayTimezone}
             cabinetMode={cabinetMode}
