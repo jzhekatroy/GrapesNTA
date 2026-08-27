@@ -1023,11 +1023,15 @@ function isExplorerNestedMenuTarget(target) {
   return target instanceof Element && Boolean(target.closest(EXPLORER_NESTED_MENU_SELECTOR));
 }
 
-function computeExplorerPopoverStyle(anchorEl, { minWidth = 280, maxHeight = 420, gap = 4 } = {}) {
+function computeExplorerPopoverStyle(anchorEl, { minWidth = 280, maxHeight = 420, gap = 4, zIndex = 1300 } = {}) {
   const rect = anchorEl.getBoundingClientRect();
   const pad = 8;
   const width = Math.max(rect.width, minWidth);
-  const left = Math.min(Math.max(pad, rect.left), window.innerWidth - width - pad);
+  let left = rect.left;
+  if (left + width > window.innerWidth - pad) {
+    left = rect.right - width;
+  }
+  left = Math.max(pad, Math.min(left, window.innerWidth - width - pad));
   const below = window.innerHeight - rect.bottom - gap - pad;
   const above = rect.top - gap - pad;
   const preferBelow = below >= above;
@@ -1041,7 +1045,7 @@ function computeExplorerPopoverStyle(anchorEl, { minWidth = 280, maxHeight = 420
     left,
     width,
     maxHeight: availableHeight,
-    zIndex: 1300,
+    zIndex,
     overflowY: 'auto',
   };
 }
@@ -1838,16 +1842,7 @@ function FilterSearchPicker({
     const anchor = anchorRef.current;
     if (!anchor) return undefined;
     const updatePosition = () => {
-      const rect = anchor.getBoundingClientRect();
-      setMenuStyle({
-        position: 'fixed',
-        top: rect.bottom + 4,
-        left: Math.max(8, rect.left),
-        width: Math.max(rect.width, 280),
-        maxHeight: 320,
-        zIndex: 1400,
-        overflowY: 'auto',
-      });
+      setMenuStyle(computeExplorerPopoverStyle(anchor, { minWidth: 280, maxHeight: 320, gap: 4 }));
     };
     updatePosition();
     window.addEventListener('resize', updatePosition);
@@ -2014,16 +2009,7 @@ function TcpFlagsFilter({ value, onChange, onClear }) {
     const anchor = addRef.current;
     if (!anchor) return undefined;
     const updatePosition = () => {
-      const rect = anchor.getBoundingClientRect();
-      setMenuStyle({
-        position: 'fixed',
-        top: rect.bottom + 6,
-        left: Math.max(8, rect.left),
-        width: 220,
-        maxHeight: 360,
-        zIndex: 1400,
-        overflowY: 'auto',
-      });
+      setMenuStyle(computeExplorerPopoverStyle(anchor, { minWidth: 220, maxHeight: 360, gap: 6, zIndex: 1400 }));
     };
     updatePosition();
     window.addEventListener('resize', updatePosition);
@@ -4277,9 +4263,7 @@ function DimensionPicker({ anchorRef, dimensions, schema, selected, onPick, onCl
     const anchor = anchorRef?.current;
     if (!anchor) return undefined;
     const updatePosition = () => {
-      const rect = anchor.getBoundingClientRect();
-      const width = 320;
-      setMenuStyle({ position: 'fixed', top: rect.bottom + 6, left: Math.max(8, rect.left), width, maxHeight: 440, zIndex: 1200, overflowY: 'auto' });
+      setMenuStyle(computeExplorerPopoverStyle(anchor, { minWidth: 320, maxHeight: 440, gap: 6, zIndex: 1400 }));
     };
     updatePosition();
     window.addEventListener('resize', updatePosition);
@@ -4340,16 +4324,7 @@ function EntityPicker({ entityType, value, label, onSelect, onClear, placeholder
     const anchor = rootRef.current;
     if (!anchor) return undefined;
     const updatePosition = () => {
-      const rect = anchor.getBoundingClientRect();
-      setMenuStyle({
-        position: 'fixed',
-        top: rect.bottom + 4,
-        left: Math.max(8, rect.left),
-        width: Math.max(rect.width, 280),
-        maxHeight: 320,
-        zIndex: 1400,
-        overflowY: 'auto',
-      });
+      setMenuStyle(computeExplorerPopoverStyle(anchor, { minWidth: 280, maxHeight: 320, gap: 4, zIndex: 1400 }));
     };
     updatePosition();
     window.addEventListener('resize', updatePosition);
@@ -4825,16 +4800,7 @@ function ExplorerAddFilterMenu({
     const anchor = anchorRef.current;
     if (!anchor) return undefined;
     const updatePosition = () => {
-      const rect = anchor.getBoundingClientRect();
-      setMenuStyle({
-        position: 'fixed',
-        top: rect.bottom + 4,
-        left: Math.max(8, rect.left),
-        width: Math.max(rect.width, 280),
-        maxHeight: 320,
-        zIndex: 1300,
-        overflowY: 'auto',
-      });
+      setMenuStyle(computeExplorerPopoverStyle(anchor, { minWidth: 280, maxHeight: 320, gap: 4 }));
     };
     updatePosition();
     window.addEventListener('resize', updatePosition);
@@ -5310,7 +5276,7 @@ function ExplorerMetricGroupControls({
       <ExplorerMetricChipPicker metrics={availableMetrics} value={metric} onChange={setMetric} />
       {showGroupBy && (
         <>
-          <span className="explorer-chip-row__sep">по</span>
+          <span className="explorer-chip-row__sep">группировать по</span>
           {groupBy.map((token) => {
             const id = explorerGroupFieldId(token);
             return (
@@ -5567,7 +5533,7 @@ function ExplorerConditionChipsRow({
             switchIpScope={switchIpScope}
             rowError={filterRowErrors[f.id]}
             isEditing={editingFilterId === f.id}
-            onToggleEdit={() => setEditingFilterId(editingFilterId === f.id ? null : f.id)}
+            onToggleEdit={() => setEditingFilterId(f.id)}
             onCloseEdit={() => setEditingFilterId(null)}
             onChange={(patch) => updateFilter(f.id, patch)}
             onRemove={() => {
@@ -5633,7 +5599,7 @@ function ExplorerThresholdChipsRow({
             row={row}
             schema={schema}
             isEditing={editingThresholdId === row.id}
-            onToggleEdit={() => setEditingThresholdId(editingThresholdId === row.id ? null : row.id)}
+            onToggleEdit={() => setEditingThresholdId(row.id)}
             onCloseEdit={() => setEditingThresholdId(null)}
             onChange={(patch) => updateThreshold(row.id, patch)}
             onRemove={() => {
@@ -5795,7 +5761,7 @@ function ExplorerFilters({
         unit: 'mbps',
       },
     ]);
-    setEditingThresholdId(id);
+    requestAnimationFrame(() => setEditingThresholdId(id));
   };
 
   const addFilterWithField = (fieldId) => {
@@ -5810,7 +5776,7 @@ function ExplorerFilters({
         logic: 'and',
       },
     ]);
-    setEditingFilterId(id);
+    requestAnimationFrame(() => setEditingFilterId(id));
   };
 
   const filterActions = (
