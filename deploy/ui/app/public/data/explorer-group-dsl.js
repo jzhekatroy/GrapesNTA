@@ -90,7 +90,7 @@
     return `group by ${tokens.join(', ')}`;
   }
 
-  function parseExplorerGroupByDslLine(line, dimensions, { maxCount = EXPLORER_GROUP_DSL_MAX } = {}) {
+  function parseExplorerGroupByDslLine(line, dimensions, { maxCount } = {}) {
     const trimmed = String(line || '').trim();
     const match = trimmed.match(/^(group\s+by|группировка)(?:\s+(.*))?$/i);
     if (!match) {
@@ -122,7 +122,7 @@
     if (!normalized.length) {
       throw new Error('нужна хотя бы одна группировка');
     }
-    if (normalized.length > maxCount) {
+    if (Number.isFinite(maxCount) && maxCount > 0 && normalized.length > maxCount) {
       throw new Error(`не более ${maxCount} измерений в группировке`);
     }
     return normalized;

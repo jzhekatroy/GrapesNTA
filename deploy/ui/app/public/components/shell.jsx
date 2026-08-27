@@ -679,6 +679,24 @@ function timeRangeLabel(timeRange, customPeriod) {
   return TIME_RANGE_OPTIONS.find((o) => o.id === timeRange)?.label || '1 час';
 }
 
+const TIME_RANGE_CHIP_LABELS = {
+  '30m': '30м',
+  '1h': '1ч',
+  '3h': '3ч',
+  '6h': '6ч',
+  '12h': '12ч',
+  '24h': '24ч',
+  '2d': '2д',
+  '7d': '7д',
+  '14d': '14д',
+  '30d': '30д',
+};
+
+function timeRangeChipLabel(timeRange, customPeriod) {
+  if (timeRange === 'custom') return formatCustomPeriodLabel(customPeriod);
+  return TIME_RANGE_CHIP_LABELS[timeRange] || timeRangeLabel(timeRange, customPeriod);
+}
+
 const TIMEZONE_PRESETS = [
   { id: 'auto', label: 'Авто — пояс браузера' },
   { id: 'Europe/Moscow', label: 'Москва' },
@@ -1077,7 +1095,10 @@ function timeFilterMenuPositionChanged(prev, next) {
     || prev.availableHeight !== next.availableHeight;
 }
 
-function TimeFilter({ timeRange, onTimeRangeChange, customPeriod, onCustomPeriodChange, variant = 'header', maxRangeDays = null }) {
+function TimeFilter({
+  timeRange, onTimeRangeChange, customPeriod, onCustomPeriodChange,
+  variant = 'header', maxRangeDays = null, appearance = 'default',
+}) {
   const isExplorer = variant === 'explorer';
   const [open, setOpen] = useState(false);
   const [menuView, setMenuView] = useState('presets');
@@ -1298,9 +1319,22 @@ function TimeFilter({ timeRange, onTimeRangeChange, customPeriod, onCustomPeriod
     </div>
   ) : null;
 
+  const chipLabel = timeRangeChipLabel(timeRange, customPeriod);
+
   return (
-    <div className={`time-filter${isExplorer ? ' time-filter--explorer' : ''}`} ref={rootRef}>
-      {isExplorer ? (
+    <div className={`time-filter${isExplorer ? ' time-filter--explorer' : ''}${appearance === 'chip' ? ' time-filter--chip' : ''}`} ref={rootRef}>
+      {isExplorer && appearance === 'chip' ? (
+        <button
+          type="button"
+          className="explorer-query-chip explorer-query-chip--period"
+          onClick={() => setOpen((v) => !v)}
+          aria-expanded={open}
+          title={timeRange === 'custom' ? rangeLabel : undefined}
+        >
+          <span className="explorer-query-chip__label">{chipLabel}</span>
+          <Icon name="chevD" size={12} />
+        </button>
+      ) : isExplorer ? (
         <button type="button" className="period-select" onClick={() => setOpen((v) => !v)} aria-expanded={open}>
           <span className="period-select__label" title={timeRange === 'custom' ? rangeLabel : undefined}>{rangeLabel}</span>
           <Icon name="chevD" size={14} />
@@ -1368,7 +1402,7 @@ function DirectionFilter({ directions, onDirectionsChange, embedded = false, for
         left: Math.max(8, rect.left),
         width,
         maxHeight: 360,
-        zIndex: 1300,
+        zIndex: 1400,
         overflowY: 'auto',
       });
     };
@@ -1558,7 +1592,7 @@ function CollectorFilter({ collectorFilter, onCollectorFilterChange, embedded = 
   }, []);
 
   useLayoutEffect(() => {
-    if (embedded || !open) {
+    if (!open) {
       setMenuStyle(null);
       return undefined;
     }
@@ -1569,10 +1603,10 @@ function CollectorFilter({ collectorFilter, onCollectorFilterChange, embedded = 
       setMenuStyle({
         position: 'fixed',
         top: rect.bottom + 6,
-        left: Math.max(8, rect.right - Math.max(rect.width, 248)),
+        left: Math.max(8, embedded ? rect.left : rect.right - Math.max(rect.width, 248)),
         width: Math.max(rect.width, 248),
         maxHeight: 360,
-        zIndex: 1300,
+        zIndex: 1400,
         overflowY: 'auto',
       });
     };
@@ -1679,12 +1713,7 @@ function CollectorFilter({ collectorFilter, onCollectorFilterChange, embedded = 
         </span>
         <Icon name="chevD" size={embedded ? 12 : 14} />
       </button>
-      {embedded && open && (
-        <div className="collector-filter__menu" role="menu">
-          {menuBody}
-        </div>
-      )}
-      {!embedded && open && menuStyle && ReactDOM.createPortal(
+      {open && menuStyle && ReactDOM.createPortal(
         <div
           ref={menuRef}
           className="collector-filter__menu collector-filter__menu--portal"
@@ -2026,7 +2055,7 @@ Object.assign(window, {
   Sidebar, Header, NAV, CABINET_NAV, CABINET_PAGE_IDS, PAGE_TITLES, setPageTitles, GrapesGlyph,
   isCabinetMode, isImpersonating, ImpersonationBanner,
   TIME_RANGE_OPTIONS, TIMEZONE_PRESETS, TRAFFIC_DIRECTIONS, defaultDirectionsEnabled,
-  defaultCustomPeriod, formatCustomPeriodLabel, validateCustomPeriod, validateExplorerCustomPeriod, explorerRangeLimitDays, timeRangePresetMs, EXPLORER_MAX_RANGE_DAYS, timeRangeLabel,
+  defaultCustomPeriod, formatCustomPeriodLabel, validateCustomPeriod, validateExplorerCustomPeriod, explorerRangeLimitDays, timeRangePresetMs, EXPLORER_MAX_RANGE_DAYS, timeRangeLabel, timeRangeChipLabel, TIME_RANGE_CHIP_LABELS,
   toDatetimeLocalValue, dnsBucketSecondsFromMode, explorerGranularityBucketSeconds,
   collectorFilterLabel, directionSummaryLabel, TimezoneSelector,
   parseAppHash, parseJsonSearchParam, parseDirectionsParam, applyTopTalkersUrlGlobals,

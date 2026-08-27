@@ -1200,6 +1200,378 @@ a.nav-item--active:visited { color: var(--fg-primary); }
   color: var(--fg-primary);
 }
 
+.explorer-chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 8px 12px;
+  padding: 4px 0;
+}
+
+.explorer-chip-row__label {
+  flex: 0 0 72px;
+  padding-top: 6px;
+  font: var(--pv-text-body-3-bold);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-size: 10px;
+  color: var(--fg-secondary);
+}
+
+.explorer-chip-row__mandatory {
+  color: var(--st-critical);
+  margin-left: 2px;
+}
+
+.explorer-chip-row__chips {
+  flex: 1 1 200px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.explorer-chip-row__sep {
+  font: var(--pv-text-body-3);
+  color: var(--fg-muted);
+  padding: 0 2px;
+}
+
+.explorer-query-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 100%;
+  padding: 4px 6px 4px 10px;
+  border-radius: var(--pv-radius-pill);
+  border: 1px solid var(--bd-soft);
+  background: var(--surf-1);
+  color: var(--fg-primary);
+  font: var(--pv-text-body-3);
+  line-height: 1.2;
+}
+
+.explorer-query-chip:hover {
+  border-color: var(--bd-strong);
+}
+
+.explorer-query-chip--warn {
+  border-color: color-mix(in srgb, var(--st-warning) 55%, var(--bd-soft));
+  background: color-mix(in srgb, var(--st-warning) 8%, var(--surf-1));
+}
+
+.explorer-query-chip--period {
+  cursor: pointer;
+  padding-right: 8px;
+}
+
+.explorer-query-chip__body,
+.explorer-query-chip--period {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border: none;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  padding: 0;
+  max-width: 100%;
+}
+
+.explorer-query-chip__label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 280px;
+}
+
+.explorer-query-chip__body {
+  padding: 0;
+}
+
+.explorer-query-chip__remove {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
+  border: none;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--fg-muted);
+  cursor: pointer;
+  padding: 0;
+}
+
+.explorer-query-chip__remove:hover {
+  background: var(--surf-3);
+  color: var(--fg-primary);
+}
+
+.explorer-logic-chip {
+  padding: 4px 8px;
+  font: var(--pv-text-body-3-bold);
+  font-size: 11px;
+  color: var(--fg-secondary);
+  cursor: pointer;
+}
+
+.explorer-logic-chip:hover {
+  color: var(--fg-primary);
+  border-color: var(--bd-strong);
+}
+
+.explorer-chip-add {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px;
+  border-radius: var(--pv-radius-pill);
+  border: 1px dashed var(--bd-default);
+  background: transparent;
+  color: var(--fg-secondary);
+  font: var(--pv-text-body-3);
+  cursor: pointer;
+}
+
+.explorer-chip-add:hover {
+  border-color: var(--bd-strong);
+  color: var(--fg-primary);
+  background: var(--surf-1);
+}
+
+.explorer-metric-group-chips {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.explorer-metric-group-chips .explorer-query-chip,
+.explorer-metric-group-chips .explorer-group-chip,
+.explorer-metric-group-chips .explorer-chip-add {
+  height: 28px;
+  min-height: 28px;
+  max-height: 28px;
+  box-sizing: border-box;
+}
+
+.explorer-metric-group-chips .explorer-query-chip,
+.explorer-metric-group-chips .explorer-group-chip {
+  padding: 0 6px 0 10px;
+  gap: 4px;
+  font-size: 12px;
+}
+
+.explorer-metric-group-chips .explorer-chip-add {
+  width: 28px;
+  min-width: 28px;
+  padding: 0;
+  justify-content: center;
+}
+
+.explorer-group-chip {
+  background: color-mix(in srgb, var(--st-info-bg) 88%, var(--surf-1));
+  border-color: color-mix(in srgb, var(--st-info-fg) 18%, var(--bd-soft));
+  color: var(--st-info-fg);
+}
+
+.explorer-group-chip__sep {
+  color: var(--fg-muted);
+  font-size: 11px;
+  line-height: 1;
+}
+
+.explorer-metric-group-chips .explorer-group-mask-input {
+  width: 34px;
+  height: 20px !important;
+  min-height: 20px !important;
+  max-height: 20px !important;
+  padding: 0 4px;
+  font-size: 11px;
+  text-align: center;
+  border-radius: 6px;
+  flex: none;
+}
+
+.explorer-filter-edit-popover,
+.explorer-threshold-edit-popover {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 100%;
+  box-sizing: border-box;
+  padding: 10px 12px;
+  background: var(--bg-surface-2);
+  border: 1px solid var(--bd-default);
+  border-radius: 12px;
+  box-shadow: var(--pv-shadow-popover);
+}
+
+.explorer-filter-edit-popover .input,
+.explorer-threshold-edit-popover .input {
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+}
+
+.explorer-filter-edit-popover__row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  width: 100%;
+  min-width: 0;
+}
+
+.explorer-filter-edit-popover__control {
+  width: 100%;
+  min-width: 0;
+}
+
+.explorer-filter-edit-popover__control > .input,
+.explorer-filter-edit-popover__control > button.input,
+.explorer-filter-edit-popover__control > select.input,
+.explorer-filter-edit-popover__control .explorer-filter-value-wrap > .input,
+.explorer-filter-edit-popover__control .explorer-filter-value-wrap > button.input,
+.explorer-filter-edit-popover__control .explorer-entity-picker > .input,
+.explorer-filter-edit-popover__control .explorer-entity-picker .explorer-entity-value__display,
+.explorer-filter-edit-popover__control .collector-filter--embedded > button.input {
+  width: 100% !important;
+  height: 38px !important;
+  min-height: 38px !important;
+  max-height: 38px !important;
+  flex: none !important;
+  box-sizing: border-box;
+}
+
+.explorer-filter-edit-popover__control > select.input {
+  display: block;
+  padding: 0 28px 0 12px;
+  line-height: 36px;
+}
+
+.explorer-filter-edit-popover__control .explorer-filter-value-wrap,
+.explorer-filter-edit-popover__control .explorer-entity-picker,
+.explorer-filter-edit-popover__control .direction-filter--embedded,
+.explorer-filter-edit-popover__control .collector-filter--embedded {
+  width: 100%;
+  min-width: 0;
+  flex: none;
+}
+
+.explorer-filter-edit-popover__static {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  height: 38px;
+  min-height: 38px;
+  padding: 0 12px;
+  box-sizing: border-box;
+  font: var(--pv-text-body-2);
+  background: var(--bg-input);
+  border: 1px solid var(--bd-default);
+  border-radius: var(--radius-control);
+  color: var(--fg-primary);
+}
+
+.explorer-filter-edit-popover__label {
+  font: var(--pv-text-body-3-bold);
+  color: var(--fg-secondary);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.explorer-chip-row__errors {
+  flex: 1 1 100%;
+  margin-left: 84px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.explorer-chip-row__error {
+  font: var(--pv-text-body-3);
+  color: var(--st-warning);
+}
+
+.explorer-threshold-edit-popover .explorer-threshold-row {
+  border: none;
+  padding: 0;
+  background: transparent;
+}
+
+.explorer-threshold-edit-popover .explorer-threshold-row__main {
+  flex-direction: column;
+  align-items: stretch;
+}
+
+.explorer-threshold-edit-popover .explorer-threshold-row__metric,
+.explorer-threshold-edit-popover .explorer-threshold-row__op,
+.explorer-threshold-edit-popover .explorer-threshold-row__value,
+.explorer-threshold-edit-popover .explorer-threshold-row__unit,
+.explorer-threshold-edit-popover .explorer-threshold-row__peak {
+  width: 100%;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.time-filter--chip {
+  display: inline-flex;
+}
+
+.explorer-filters-panel__body--chips {
+  gap: 2px;
+}
+
+.explorer-metric-picker-item {
+  padding: 8px 10px;
+  border-radius: 8px;
+  cursor: pointer;
+  font: var(--pv-text-body-2);
+}
+
+.explorer-metric-picker-item:hover {
+  background: var(--surf-2);
+}
+
+.explorer-metric-picker-item.is-active {
+  background: color-mix(in srgb, var(--accent) 12%, var(--surf-2));
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.explorer-logic-picker-item {
+  padding: 6px 10px;
+  border-radius: 8px;
+  cursor: pointer;
+  font: var(--pv-text-body-3);
+}
+
+.explorer-logic-picker-item:hover {
+  background: var(--surf-2);
+}
+
+.explorer-logic-picker-item.is-active {
+  font-weight: 600;
+  color: var(--accent);
+}
+
+@media (max-width: 640px) {
+  .explorer-chip-row__label {
+    flex: 1 1 100%;
+    padding-top: 0;
+  }
+
+  .explorer-chip-row__errors {
+    margin-left: 0;
+  }
+}
+
 .explorer-threshold-empty {
   padding: 48px 16px;
   text-align: center;

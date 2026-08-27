@@ -90,7 +90,7 @@ describe('Explorer group-by DSL', () => {
     );
   });
 
-  it('rejects more than max dimensions', () => {
+  it('rejects more than max dimensions when maxCount is set', () => {
     assert.throws(
       () => G.parseExplorerGroupByDslLine(
         'group by src_ip, dst_ip, src_asn, dst_asn, proto',
@@ -98,6 +98,16 @@ describe('Explorer group-by DSL', () => {
         { maxCount: 4 },
       ),
       /не более 4 измерений/,
+    );
+  });
+
+  it('allows more than four dimensions without maxCount', () => {
+    assert.deepEqual(
+      G.parseExplorerGroupByDslLine(
+        'group by src_ip, dst_ip, src_asn, dst_asn, proto',
+        dimensions,
+      ),
+      ['src_ip', 'dst_ip', 'src_asn', 'dst_asn', 'proto'],
     );
   });
 

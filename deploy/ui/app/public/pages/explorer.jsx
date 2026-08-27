@@ -570,6 +570,68 @@ function explorerOpLabel(op) {
   return EXPLORER_OP_LABELS[op] || op;
 }
 
+const EXPLORER_OP_CHIP_LABELS = {
+  '=': '=',
+  '!=': '≠',
+  '>': '>',
+  '>=': '≥',
+  '<': '<',
+  '<=': '≤',
+  eq: '=',
+  neq: '≠',
+  in: '∈',
+  not_in: '∉',
+};
+
+function explorerOpChipLabel(op) {
+  return EXPLORER_OP_CHIP_LABELS[op] || explorerOpLabel(op);
+}
+
+function formatExplorerFilterValueDisplay(f, schema) {
+  const meta = filterFieldMeta(schema, f.field);
+  if (f.label) return f.label;
+  if (f.value == null || f.value === '') return '…';
+  if (f.field === 'direction') {
+    return explorerDirectionSummaryLabel(directionFilterToMap(f.value));
+  }
+  if (f.field === 'collector') {
+    const arr = collectorFilterToArray(f.value);
+    if (!arr.length) return '…';
+    if (arr.length === 1) return arr[0];
+    return `${arr.length} колл.`;
+  }
+  if (f.field === 'tcp_flags' || meta?.type === 'tcp_flags') {
+    const flags = parseTcpFlagsValue(f.value);
+    if (!flags.length) return '…';
+    return flags.join(', ');
+  }
+  const val = String(f.value);
+  if (val.length > 28) return `${val.slice(0, 26)}…`;
+  return val;
+}
+
+function formatExplorerFilterChipLabel(f, schema) {
+  const meta = filterFieldMeta(schema, f.field);
+  const fieldLabel = meta?.label || f.field;
+  const shortField = fieldLabel.length > 18 ? f.field : fieldLabel;
+  return `${shortField} ${explorerOpChipLabel(f.op)} ${formatExplorerFilterValueDisplay(f, schema)}`;
+}
+
+function formatExplorerThresholdChipLabel(row, schema) {
+  const api = explorerThresholdApi();
+  const schemaMetrics = api.thresholdMetricsFromSchema?.(schema) || [];
+  if (api.formatThresholdChipLabel && String(row.value ?? '').trim() !== '') {
+    return api.formatThresholdChipLabel(row, schemaMetrics);
+  }
+  const meta = schemaMetrics.find((m) => m.id === row.metric);
+  const metricLabel = meta?.label || row.metric || 'метрика';
+  const opMeta = (api.EXPLORER_THRESHOLD_OPS || []).find((o) => o.id === row.op);
+  const opLabel = opMeta?.label || row.op || '>';
+  const val = String(row.value ?? '').trim();
+  if (!val) return `${metricLabel} ${opLabel} …`;
+  return api.formatThresholdChipLabel?.(row, schemaMetrics) || `${metricLabel} ${opLabel} ${val}`;
+}
+
 const EXPLORER_TCP_FLAG_NAMES = ['FIN', 'SYN', 'RST', 'PSH', 'ACK', 'URG', 'ECE', 'CWR'];
 const EXPLORER_TCP_FLAG_BITS = {
   FIN: 1, SYN: 2, RST: 4, PSH: 8, ACK: 16, URG: 32, ECE: 64, CWR: 128,
@@ -950,6 +1012,17 @@ function explorerFieldMatchesQuery(field, q) {
   return id.includes(needle) || label.includes(needle);
 }
 
+const EXPLORER_NESTED_MENU_SELECTOR = [
+  '.direction-filter__menu--portal',
+  '.collector-filter__menu--portal',
+  '.explorer-entity-picker__menu--portal',
+  '.explorer-filter-picker-menu--portal',
+].join(', ');
+
+function isExplorerNestedMenuTarget(target) {
+  return target instanceof Element && Boolean(target.closest(EXPLORER_NESTED_MENU_SELECTOR));
+}
+
 function computeExplorerPopoverStyle(anchorEl, { minWidth = 280, maxHeight = 420, gap = 4 } = {}) {
   const rect = anchorEl.getBoundingClientRect();
   const pad = 8;
@@ -1262,7 +1335,6 @@ function parseExplorerFilterDsl(text, schema = null) {
           groupBy = groupDsl.parseExplorerGroupByDslLine?.(
             rawLine,
             dimensions,
-            { maxCount: OBSERVATION_MAX_GROUP_BY },
           );
         } catch (err) {
           parseError(lineNum, err.message || 'ошибка группировки');
@@ -1732,6 +1804,7 @@ function FilterSearchPicker({
   allowCustom = false,
   mono = false,
   style,
+  fullWidth = false,
 }) {
   const [open, setOpen] = useState(false);
   const [q, setQ] = useState('');
@@ -1772,7 +1845,7 @@ function FilterSearchPicker({
         left: Math.max(8, rect.left),
         width: Math.max(rect.width, 280),
         maxHeight: 320,
-        zIndex: 1300,
+        zIndex: 1400,
         overflowY: 'auto',
       });
     };
@@ -1807,7 +1880,7 @@ function FilterSearchPicker({
         onClick={() => { setOpen((v) => !v); setQ(''); }}
         style={{
           minWidth: 0,
-          flex: 1,
+          ...(fullWidth ? { width: '100%', flex: 'none' } : { flex: 1 }),
           textAlign: 'left',
           display: 'flex',
           alignItems: 'center',
@@ -1824,8 +1897,10 @@ function FilterSearchPicker({
       {open && menuStyle && ReactDOM.createPortal(
         <div
           ref={panelRef}
+          className="explorer-filter-picker-menu--portal"
           style={{
             ...menuStyle,
+            zIndex: 1400,
             background: 'var(--bg-surface)',
             border: '1px solid var(--bd-default)',
             borderRadius: 10,
@@ -1946,7 +2021,7 @@ function TcpFlagsFilter({ value, onChange, onClear }) {
         left: Math.max(8, rect.left),
         width: 220,
         maxHeight: 360,
-        zIndex: 1200,
+        zIndex: 1400,
         overflowY: 'auto',
       });
     };
@@ -1963,6 +2038,7 @@ function TcpFlagsFilter({ value, onChange, onClear }) {
     if (!open) return undefined;
     const onPointerDown = (e) => {
       if (menuRef.current?.contains(e.target) || addRef.current?.contains(e.target)) return;
+      if (rootRef.current?.contains(e.target)) return;
       setOpen(false);
     };
     document.addEventListener('mousedown', onPointerDown);
@@ -2045,7 +2121,8 @@ function TcpFlagsFilter({ value, onChange, onClear }) {
   );
 }
 
-function FilterValueInput({ fieldId, meta, value, label, onChange, onClear, switchIpScope = '' }) {
+function FilterValueInput({ fieldId, meta, value, label, onChange, onClear, switchIpScope = '', fullWidth = false }) {
+  const controlStyle = fullWidth ? { width: '100%', flex: 'none', minWidth: 0 } : { flex: 1, minWidth: 0 };
   const scopeHint = explorerInterfaceScopeHint(fieldId, switchIpScope);
   const valueControl = meta?.entityType ? (
     <EntityPicker
@@ -2056,6 +2133,7 @@ function FilterValueInput({ fieldId, meta, value, label, onChange, onClear, swit
       switchIp={meta.entityType === 'if_name' ? switchIpScope : ''}
       onSelect={(item) => onChange({ value: item.value, label: item.label })}
       onClear={onClear}
+      fullWidth={fullWidth}
     />
   ) : meta?.valueOptions?.length ? (
     <FilterSearchPicker
@@ -2070,7 +2148,8 @@ function FilterValueInput({ fieldId, meta, value, label, onChange, onClear, swit
       inputPlaceholder={meta.valueHint}
       allowCustom
       mono
-      style={{ flex: 1, minWidth: 0 }}
+      fullWidth={fullWidth}
+      style={controlStyle}
     />
   ) : (
     <input
@@ -2079,7 +2158,7 @@ function FilterValueInput({ fieldId, meta, value, label, onChange, onClear, swit
       placeholder={meta?.valueHint || 'value'}
       title={meta?.valueHint || undefined}
       onChange={(e) => onChange({ value: e.target.value, label: null })}
-      style={{ flex: 1, minWidth: 0 }}
+      style={controlStyle}
     />
   );
 
@@ -2373,8 +2452,6 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
   const [filterTextError, setFilterTextError] = useState(null);
   const [filterRowErrors, setFilterRowErrors] = useState({});
   const [filterPanel, setFilterPanel] = useState(true);
-  const [addingDim, setAddingDim] = useState(false);
-  const dimAnchorRef = React.useRef(null);
   const [showSave, setShowSave] = useState(false);
   const [showObservationSave, setShowObservationSave] = useState(false);
   const [editingSaved, setEditingSaved] = useState(null);
@@ -3497,60 +3574,28 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
           </div>
         )}
 
-        <Card pad="sm">
-          <div className="row" style={{ gap: 14, flexWrap: 'wrap' }}>
-            {!filterPanel && (
+        {!filterPanel && (
+          <Card pad="sm">
+            <div className="row" style={{ gap: 14, flexWrap: 'wrap', alignItems: 'center' }}>
               <Button kind="ghost" size="sm" icon="filter" onClick={openFilterPanel}>
                 Фильтры
                 {filters.length > 0 && <span className="nav-item__badge" style={{ marginLeft: 4 }}>{filters.length}</span>}
               </Button>
-            )}
-            <BuilderControl label="Метрика">
-              <select className="input" style={{ width: 'auto', minWidth: 140 }} value={metric} onChange={(e) => setMetric(e.target.value)}>
-                {availableMetrics.map((m) => <option key={m.id} value={m.id}>{m.label}</option>)}
-              </select>
-            </BuilderControl>
-            {filterMode !== 'text' && (
-            <BuilderControl label="Группировка">
-              <div className="row" style={{ gap: 6, flexWrap: 'wrap' }}>
-                {groupBy.map((token) => {
-                  const id = explorerGroupFieldId(token);
-                  return (
-                    <ExplorerGroupChip
-                      key={id}
-                      token={token}
-                      dimension={dimensionById[id]}
-                      onChange={(nextToken) => setGroupBy((current) => normalizeExplorerGroupTokens(
-                        current.map((item) => (explorerGroupFieldId(item) === id ? nextToken : item)),
-                      ))}
-                      onRemove={() => setGroupBy((current) => current.filter((item) => explorerGroupFieldId(item) !== id))}
-                    />
-                  );
-                })}
-                <div ref={dimAnchorRef}>
-                  <Button kind="ghost" size="xs" icon="plus" onClick={() => setAddingDim((v) => !v)}>Измерение</Button>
-                  {addingDim && (
-                    <DimensionPicker
-                      anchorRef={dimAnchorRef}
-                      dimensions={dimensions}
-                      schema={schema}
-                      selected={groupBy.map(explorerGroupFieldId)}
-                      cabinetMode={cabinetMode}
-                      onPick={(id) => {
-                        if (!groupBy.some((token) => explorerGroupFieldId(token) === id)) {
-                          setGroupBy(normalizeExplorerGroupTokens([...groupBy, id]));
-                        }
-                        setAddingDim(false);
-                      }}
-                      onClose={() => setAddingDim(false)}
-                    />
-                  )}
-                </div>
-              </div>
-            </BuilderControl>
-            )}
-          </div>
-        </Card>
+              <ExplorerMetricGroupControls
+                metric={metric}
+                setMetric={setMetric}
+                availableMetrics={availableMetrics}
+                groupBy={groupBy}
+                setGroupBy={setGroupBy}
+                dimensionById={dimensionById}
+                dimensions={dimensions}
+                schema={schema}
+                cabinetMode={cabinetMode}
+                showGroupBy={filterMode !== 'text'}
+              />
+            </div>
+          </Card>
+        )}
 
         {filterPanel && (
           <ExplorerFilters
@@ -3604,6 +3649,13 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
             maxRangeDays={maxRangeDays}
             cabinetClientWarning={cabinetClientPeriodWarning}
             cabinetMode={cabinetMode}
+            metric={metric}
+            setMetric={setMetric}
+            groupBy={groupBy}
+            setGroupBy={setGroupBy}
+            availableMetrics={availableMetrics}
+            dimensions={dimensions}
+            dimensionById={dimensionById}
           />
         )}
 
@@ -4003,11 +4055,11 @@ function ExplorerGroupChip({ token, dimension, onChange, onRemove }) {
   };
 
   return (
-    <span className="badge badge--info" style={{ padding: '4px 10px 4px 8px', gap: 5, fontSize: 12 }}>
-      {dimension?.label || id}
+    <span className="explorer-query-chip explorer-group-chip">
+      <span className="explorer-query-chip__label">{dimension?.label || id}</span>
       {dimension?.maskable && (
         <>
-          <span aria-hidden="true">/</span>
+          <span className="explorer-group-chip__sep" aria-hidden="true">/</span>
           <input
             className="input mono explorer-group-mask-input"
             type="number"
@@ -4021,11 +4073,16 @@ function ExplorerGroupChip({ token, dimension, onChange, onRemove }) {
             onKeyDown={(e) => {
               if (e.key === 'Enter') e.currentTarget.blur();
             }}
-            style={{ width: 44, height: 24, padding: '1px 3px', fontSize: 12, textAlign: 'center' }}
           />
         </>
       )}
-      <button onClick={onRemove} style={{ all: 'unset', cursor: 'pointer', opacity: 0.8, marginLeft: 2 }}>
+      <button
+        type="button"
+        className="explorer-query-chip__remove"
+        onClick={onRemove}
+        aria-label="Удалить измерение"
+        title="Удалить измерение"
+      >
         <Icon name="x" size={10} stroke={2.5} />
       </button>
     </span>
@@ -4253,7 +4310,7 @@ function DimensionPicker({ anchorRef, dimensions, schema, selected, onPick, onCl
   );
 }
 
-function EntityPicker({ entityType, value, label, onSelect, onClear, placeholder = 'Поиск сущности...', switchIp = '' }) {
+function EntityPicker({ entityType, value, label, onSelect, onClear, placeholder = 'Поиск сущности...', switchIp = '', fullWidth = false }) {
   const rootRef = React.useRef(null);
   const inputRef = React.useRef(null);
   const menuRef = React.useRef(null);
@@ -4290,7 +4347,7 @@ function EntityPicker({ entityType, value, label, onSelect, onClear, placeholder
         left: Math.max(8, rect.left),
         width: Math.max(rect.width, 280),
         maxHeight: 320,
-        zIndex: 1300,
+        zIndex: 1400,
         overflowY: 'auto',
       });
     };
@@ -4406,7 +4463,7 @@ function EntityPicker({ entityType, value, label, onSelect, onClear, placeholder
     <div
       ref={rootRef}
       className="explorer-entity-picker"
-      style={{ position: 'relative', flex: 1, minWidth: 0 }}
+      style={{ position: 'relative', ...(fullWidth ? { width: '100%', flex: 'none', minWidth: 0 } : { flex: 1, minWidth: 0 }) }}
       aria-expanded={open}
     >
       {showComposite ? (
@@ -5080,8 +5137,521 @@ function ExplorerFilterTemplatesMenu({
   );
 }
 
+function ExplorerChipRow({ label, mandatory, children, errors = [] }) {
+  return (
+    <div className="explorer-chip-row">
+      <div className="explorer-chip-row__label">
+        {label}
+        {mandatory && <span className="explorer-chip-row__mandatory">*</span>}
+      </div>
+      <div className="explorer-chip-row__chips">{children}</div>
+      {errors.length > 0 && (
+        <div className="explorer-chip-row__errors">
+          {errors.map((msg) => (
+            <div key={msg} className="explorer-chip-row__error" role="alert">{msg}</div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ExplorerQueryChip({
+  label, onClick, onRemove, warn = false, className = '', title,
+}) {
+  return (
+    <span className={`explorer-query-chip${warn ? ' explorer-query-chip--warn' : ''}${className ? ` ${className}` : ''}`} title={title}>
+      <button type="button" className="explorer-query-chip__body" onClick={onClick}>
+        <span className="explorer-query-chip__label">{label}</span>
+      </button>
+      {onRemove && (
+        <button
+          type="button"
+          className="explorer-query-chip__remove"
+          onClick={(e) => { e.stopPropagation(); onRemove(e); }}
+          aria-label="Удалить"
+          title="Удалить"
+        >
+          <Icon name="x" size={10} stroke={2.5} />
+        </button>
+      )}
+    </span>
+  );
+}
+
+function ExplorerPopoverMenu({ anchorRef, open, onClose, children, minWidth = 200, maxHeight = 320 }) {
+  const panelRef = React.useRef(null);
+  const [menuStyle, setMenuStyle] = useState(null);
+
+  React.useLayoutEffect(() => {
+    if (!open) {
+      setMenuStyle(null);
+      return undefined;
+    }
+    const anchor = anchorRef?.current;
+    if (!anchor) return undefined;
+    const updatePosition = () => {
+      setMenuStyle(computeExplorerPopoverStyle(anchor, { minWidth, maxHeight, gap: 4 }));
+    };
+    updatePosition();
+    window.addEventListener('resize', updatePosition);
+    window.addEventListener('scroll', updatePosition, true);
+    return () => {
+      window.removeEventListener('resize', updatePosition);
+      window.removeEventListener('scroll', updatePosition, true);
+    };
+  }, [open, anchorRef, minWidth, maxHeight]);
+
+  useEffect(() => {
+    if (!open) return undefined;
+    const onPointerDown = (e) => {
+      if (panelRef.current?.contains(e.target) || anchorRef?.current?.contains(e.target)) return;
+      if (isExplorerNestedMenuTarget(e.target)) return;
+      onClose?.();
+    };
+    document.addEventListener('mousedown', onPointerDown);
+    return () => document.removeEventListener('mousedown', onPointerDown);
+  }, [open, onClose, anchorRef]);
+
+  if (!open || !menuStyle) return null;
+  return ReactDOM.createPortal(
+    <div ref={panelRef} style={menuStyle}>{children}</div>,
+    document.body,
+  );
+}
+
+function ExplorerMetricChipPicker({ metrics, value, onChange }) {
+  const [open, setOpen] = useState(false);
+  const anchorRef = React.useRef(null);
+  const current = metrics.find((m) => m.id === value) || metrics[0];
+
+  return (
+    <>
+      <span ref={anchorRef}>
+        <ExplorerQueryChip
+          label={current?.label || value}
+          onClick={() => setOpen((v) => !v)}
+          className="explorer-query-chip--metric"
+        />
+      </span>
+      <ExplorerPopoverMenu anchorRef={anchorRef} open={open} onClose={() => setOpen(false)} minWidth={220}>
+        <div className="explorer-filter-edit-popover" style={{ boxShadow: 'none', border: 'none', padding: 4 }}>
+          {metrics.map((m) => (
+            <div
+              key={m.id}
+              className={`explorer-metric-picker-item${m.id === value ? ' is-active' : ''}`}
+              role="menuitem"
+              onClick={() => {
+                onChange(m.id);
+                setOpen(false);
+              }}
+            >
+              {m.label}
+            </div>
+          ))}
+        </div>
+      </ExplorerPopoverMenu>
+    </>
+  );
+}
+
+function ExplorerLogicChip({ value, onChange }) {
+  const [open, setOpen] = useState(false);
+  const anchorRef = React.useRef(null);
+  const normalized = normalizeFilterLogicValue(value);
+  const current = EXPLORER_FILTER_LOGIC_OPTIONS.find((o) => o.id === normalized) || EXPLORER_FILTER_LOGIC_OPTIONS[0];
+
+  return (
+    <>
+      <span ref={anchorRef}>
+        <button type="button" className="explorer-query-chip explorer-logic-chip" onClick={() => setOpen((v) => !v)}>
+          {current.label}
+          <Icon name="chevD" size={10} />
+        </button>
+      </span>
+      <ExplorerPopoverMenu anchorRef={anchorRef} open={open} onClose={() => setOpen(false)} minWidth={140} maxHeight={200}>
+        <div className="explorer-filter-edit-popover" style={{ boxShadow: 'none', border: 'none', padding: 4 }}>
+          {EXPLORER_FILTER_LOGIC_OPTIONS.map((opt) => (
+            <div
+              key={opt.id}
+              className={`explorer-logic-picker-item${opt.id === normalized ? ' is-active' : ''}`}
+              role="menuitem"
+              onClick={() => {
+                onChange(opt.id);
+                setOpen(false);
+              }}
+            >
+              {opt.label}
+            </div>
+          ))}
+        </div>
+      </ExplorerPopoverMenu>
+    </>
+  );
+}
+
+function ExplorerMetricGroupControls({
+  metric,
+  setMetric,
+  availableMetrics,
+  groupBy,
+  setGroupBy,
+  dimensionById,
+  dimensions,
+  schema,
+  cabinetMode,
+  showGroupBy = true,
+}) {
+  const [addingDim, setAddingDim] = useState(false);
+  const dimAnchorRef = React.useRef(null);
+
+  return (
+    <div className="explorer-metric-group-chips">
+      <ExplorerMetricChipPicker metrics={availableMetrics} value={metric} onChange={setMetric} />
+      {showGroupBy && (
+        <>
+          <span className="explorer-chip-row__sep">по</span>
+          {groupBy.map((token) => {
+            const id = explorerGroupFieldId(token);
+            return (
+              <ExplorerGroupChip
+                key={id}
+                token={token}
+                dimension={dimensionById[id]}
+                onChange={(nextToken) => setGroupBy((current) => normalizeExplorerGroupTokens(
+                  current.map((item) => (explorerGroupFieldId(item) === id ? nextToken : item)),
+                ))}
+                onRemove={() => setGroupBy((current) => current.filter((item) => explorerGroupFieldId(item) !== id))}
+              />
+            );
+          })}
+          <span ref={dimAnchorRef}>
+            <button type="button" className="explorer-chip-add" onClick={() => setAddingDim((v) => !v)}>
+              <Icon name="plus" size={12} />
+            </button>
+            {addingDim && (
+              <DimensionPicker
+                anchorRef={dimAnchorRef}
+                dimensions={dimensions}
+                schema={schema}
+                selected={groupBy.map(explorerGroupFieldId)}
+                cabinetMode={cabinetMode}
+                onPick={(id) => {
+                  if (!groupBy.some((token) => explorerGroupFieldId(token) === id)) {
+                    setGroupBy(normalizeExplorerGroupTokens([...groupBy, id]));
+                  }
+                  setAddingDim(false);
+                }}
+                onClose={() => setAddingDim(false)}
+              />
+            )}
+          </span>
+        </>
+      )}
+    </div>
+  );
+}
+
+function ExplorerFilterEditControl({ children }) {
+  return <div className="explorer-filter-edit-popover__control">{children}</div>;
+}
+
+function ExplorerFilterEditPopover({
+  filter,
+  schema,
+  filterFields,
+  switchIpScope,
+  onChange,
+  onClose,
+  anchorRef,
+  open,
+}) {
+  const meta = filterFieldMeta(schema, filter.field);
+  const ops = filterOpsForField(schema, filter.field);
+  const isSpecialField = filter.field === 'direction' || filter.field === 'collector';
+
+  return (
+    <ExplorerPopoverMenu anchorRef={anchorRef} open={open} onClose={onClose} minWidth={300} maxHeight={420}>
+      <div className="explorer-filter-edit-popover">
+        <div className="explorer-filter-edit-popover__row">
+          <div className="explorer-filter-edit-popover__label">Поле</div>
+          {isSpecialField ? (
+            <ExplorerFilterEditControl>
+              <div className="explorer-filter-edit-popover__static">{meta?.label || filter.field}</div>
+            </ExplorerFilterEditControl>
+          ) : (
+            <ExplorerFilterEditControl>
+              <FilterSearchPicker
+                items={filterFields}
+                value={filter.field}
+                onChange={(fieldId) => {
+                  const nextOps = filterOpsForField(schema, fieldId);
+                  const defaultOp = defaultOpForField(schema, fieldId);
+                  onChange({
+                    field: fieldId,
+                    value: '',
+                    label: null,
+                    op: nextOps.includes(filter.op) ? filter.op : defaultOp,
+                  });
+                }}
+                searchPlaceholder="Поиск поля..."
+                emptyLabel="Поле…"
+                grouped
+                fullWidth
+              />
+            </ExplorerFilterEditControl>
+          )}
+        </div>
+        <div className="explorer-filter-edit-popover__row">
+          <div className="explorer-filter-edit-popover__label">Оператор</div>
+          <ExplorerFilterEditControl>
+            <select
+              className="input"
+              value={filter.op}
+              onChange={(e) => onChange({ op: e.target.value })}
+            >
+              {ops.map((op) => <option key={op} value={op}>{explorerOpLabel(op)}</option>)}
+            </select>
+          </ExplorerFilterEditControl>
+        </div>
+        <div className="explorer-filter-edit-popover__row">
+          <div className="explorer-filter-edit-popover__label">Значение</div>
+          <ExplorerFilterEditControl>
+            {filter.field === 'direction' ? (
+              <DirectionFilter
+                embedded
+                formatSummary={explorerDirectionSummaryLabel}
+                directions={directionFilterToMap(filter.value)}
+                onDirectionsChange={(dirs) => {
+                  const value = directionMapToFilterValue(dirs);
+                  const nextOp = !value
+                    ? '='
+                    : (value.includes(',')
+                      ? (['=', '!='].includes(filter.op) ? filter.op : 'in')
+                      : (['in', 'not_in'].includes(filter.op) ? filter.op : '='));
+                  onChange({ value, op: nextOp });
+                }}
+              />
+            ) : filter.field === 'collector' ? (
+              <CollectorFilter
+                embedded
+                collectorFilter={collectorFilterToArray(filter.value)}
+                onCollectorFilterChange={(arr) => onChange({ value: collectorArrayToFilterValue(arr) })}
+              />
+            ) : (meta?.type === 'tcp_flags' || filter.field === 'tcp_flags') ? (
+              <TcpFlagsFilter
+                value={filter.value}
+                onChange={(patch) => onChange(patch)}
+                onClear={() => onChange({ value: '', label: null })}
+              />
+            ) : (
+              <FilterValueInput
+                fieldId={filter.field}
+                meta={meta}
+                value={filter.value}
+                label={filter.label}
+                switchIpScope={switchIpScope}
+                onChange={(patch) => onChange(patch)}
+                onClear={() => onChange({ value: '', label: null })}
+                fullWidth
+              />
+            )}
+          </ExplorerFilterEditControl>
+        </div>
+      </div>
+    </ExplorerPopoverMenu>
+  );
+}
+
+function ExplorerFilterChipItem({
+  filter,
+  schema,
+  filterFields,
+  switchIpScope,
+  rowError,
+  isEditing,
+  onToggleEdit,
+  onCloseEdit,
+  onChange,
+  onRemove,
+}) {
+  const anchorRef = React.useRef(null);
+  const chipLabel = formatExplorerFilterChipLabel(filter, schema);
+
+  return (
+    <span ref={anchorRef}>
+      <ExplorerQueryChip
+        label={chipLabel}
+        warn={Boolean(rowError)}
+        title={rowError || chipLabel}
+        onClick={onToggleEdit}
+        onRemove={onRemove}
+      />
+      <ExplorerFilterEditPopover
+        filter={filter}
+        schema={schema}
+        filterFields={filterFields}
+        switchIpScope={switchIpScope}
+        open={isEditing}
+        anchorRef={anchorRef}
+        onClose={onCloseEdit}
+        onChange={onChange}
+      />
+    </span>
+  );
+}
+
+function ExplorerThresholdChipItem({
+  row,
+  schema,
+  isEditing,
+  onToggleEdit,
+  onCloseEdit,
+  onChange,
+  onRemove,
+}) {
+  const anchorRef = React.useRef(null);
+  const chipLabel = formatExplorerThresholdChipLabel(row, schema);
+
+  return (
+    <span ref={anchorRef}>
+      <ExplorerQueryChip
+        label={chipLabel}
+        onClick={onToggleEdit}
+        onRemove={onRemove}
+      />
+      <ExplorerThresholdEditPopover
+        row={row}
+        schema={schema}
+        open={isEditing}
+        anchorRef={anchorRef}
+        onClose={onCloseEdit}
+        onChange={onChange}
+      />
+    </span>
+  );
+}
+
+function ExplorerConditionChipsRow({
+  schema,
+  filters,
+  setFilters,
+  filterRowErrors = {},
+  cabinetMode,
+  editingFilterId,
+  setEditingFilterId,
+  onPickField,
+}) {
+  const filterFields = schema?.filterFields || [];
+  const switchIpScope = explorerSwitchIpScopeFromFilters(filters);
+  const updateFilter = (id, patch) => setFilters(filters.map((f) => (f.id === id ? { ...f, ...patch } : f)));
+
+  const rowErrors = filters
+    .map((f) => filterRowErrors[f.id])
+    .filter(Boolean);
+
+  return (
+    <ExplorerChipRow label="Условия" errors={rowErrors}>
+      {filters.map((f, i) => (
+        <React.Fragment key={f.id}>
+          {i > 0 && (
+            <ExplorerLogicChip
+              value={f.logic}
+              onChange={(logic) => updateFilter(f.id, { logic })}
+            />
+          )}
+          <ExplorerFilterChipItem
+            filter={f}
+            schema={schema}
+            filterFields={filterFields}
+            switchIpScope={switchIpScope}
+            rowError={filterRowErrors[f.id]}
+            isEditing={editingFilterId === f.id}
+            onToggleEdit={() => setEditingFilterId(editingFilterId === f.id ? null : f.id)}
+            onCloseEdit={() => setEditingFilterId(null)}
+            onChange={(patch) => updateFilter(f.id, patch)}
+            onRemove={() => {
+              setFilters(filters.filter((x) => x.id !== f.id));
+              if (editingFilterId === f.id) setEditingFilterId(null);
+            }}
+          />
+        </React.Fragment>
+      ))}
+      <ExplorerAddFilterMenu
+        schema={schema}
+        cabinetMode={cabinetMode}
+        onPickField={onPickField}
+      />
+    </ExplorerChipRow>
+  );
+}
+
+function ExplorerThresholdEditPopover({
+  row,
+  schema,
+  onChange,
+  onClose,
+  anchorRef,
+  open,
+}) {
+  return (
+    <ExplorerPopoverMenu anchorRef={anchorRef} open={open} onClose={onClose} minWidth={320} maxHeight={480}>
+      <div className="explorer-threshold-edit-popover">
+        <ExplorerThresholdRow
+          row={row}
+          schema={schema}
+          onChange={onChange}
+          compact
+        />
+      </div>
+    </ExplorerPopoverMenu>
+  );
+}
+
+function ExplorerThresholdChipsRow({
+  schema,
+  thresholds,
+  setThresholds,
+  peakWarning,
+  editingThresholdId,
+  setEditingThresholdId,
+  onAddThreshold,
+}) {
+  const updateThreshold = (id, patch) => {
+    setThresholds(thresholds.map((t) => (t.id === id ? { ...t, ...patch } : t)));
+  };
+
+  return (
+    <>
+      {peakWarning && (
+        <div className="explorer-threshold-warning" role="status" style={{ marginBottom: 4 }}>{peakWarning}</div>
+      )}
+      <ExplorerChipRow label="Пороги">
+        {thresholds.map((row) => (
+          <ExplorerThresholdChipItem
+            key={row.id}
+            row={row}
+            schema={schema}
+            isEditing={editingThresholdId === row.id}
+            onToggleEdit={() => setEditingThresholdId(editingThresholdId === row.id ? null : row.id)}
+            onCloseEdit={() => setEditingThresholdId(null)}
+            onChange={(patch) => updateThreshold(row.id, patch)}
+            onRemove={() => {
+              setThresholds(thresholds.filter((t) => t.id !== row.id));
+              if (editingThresholdId === row.id) setEditingThresholdId(null);
+            }}
+          />
+        ))}
+        <button type="button" className="explorer-chip-add" onClick={onAddThreshold}>
+          <Icon name="plus" size={12} />
+        </button>
+      </ExplorerChipRow>
+    </>
+  );
+}
+
 function ExplorerThresholdRow({
-  row, schema, onChange, onRemove,
+  row, schema, onChange, onRemove, compact = false,
 }) {
   const api = explorerThresholdApi();
   const metrics = api.thresholdMetricsFromSchema?.(schema) || api.EXPLORER_THRESHOLD_DEFAULT_METRICS || [];
@@ -5135,54 +5705,12 @@ function ExplorerThresholdRow({
             {(api.EXPLORER_THRESHOLD_PEAK_WINDOWS || []).map((w) => <option key={w.id} value={w.id}>{w.label}</option>)}
           </select>
         )}
+        {!compact && onRemove && (
         <button type="button" className="icon-btn explorer-filter-row__remove" onClick={onRemove} title="Удалить порог">
           <Icon name="x" size={10} stroke={2.5} />
         </button>
-      </div>
-    </div>
-  );
-}
-
-function ExplorerThresholdEditor({ schema, thresholds, setThresholds, peakWarning }) {
-  const updateThreshold = (id, patch) => {
-    setThresholds(thresholds.map((t) => (t.id === id ? { ...t, ...patch } : t)));
-  };
-
-  if (!peakWarning && !thresholds.length) return null;
-
-  return (
-    <div className="explorer-threshold-editor">
-      {peakWarning && (
-        <div className="explorer-threshold-warning" role="status">{peakWarning}</div>
-      )}
-      {thresholds.map((row) => (
-        <ExplorerThresholdRow
-          key={row.id}
-          row={row}
-          schema={schema}
-          onChange={(patch) => updateThreshold(row.id, patch)}
-          onRemove={() => setThresholds(thresholds.filter((t) => t.id !== row.id))}
-        />
-      ))}
-    </div>
-  );
-}
-
-function ExplorerSystemFilterRow({ title, mandatory, onRemove, children }) {
-  return (
-    <div className="col" style={{ padding: '8px 10px', background: 'var(--surf-1)', border: '1px solid var(--bd-soft)', borderRadius: 10, gap: 6 }}>
-      <div className="row" style={{ gap: 6, alignItems: 'center', justifyContent: 'space-between' }}>
-        <div style={{ font: 'var(--pv-text-body-3-bold)', color: 'var(--fg-secondary)' }}>
-          {title}
-          {mandatory && <span style={{ color: 'var(--st-critical)', marginLeft: 4 }}>*</span>}
-        </div>
-        {!mandatory && onRemove && (
-          <button type="button" className="icon-btn" style={{ width: 26, height: 26 }} onClick={onRemove}>
-            <Icon name="x" size={10} stroke={2.5} />
-          </button>
         )}
       </div>
-      {children}
     </div>
   );
 }
@@ -5225,10 +5753,17 @@ function ExplorerFilters({
   maxRangeDays: maxRangeDaysProp,
   cabinetClientWarning = null,
   cabinetMode = false,
+  metric,
+  setMetric,
+  groupBy,
+  setGroupBy,
+  availableMetrics = [],
+  dimensions = [],
+  dimensionById = {},
 }) {
   const panelRef = React.useRef(null);
-  const filterFields = (schema?.filterFields || []);
-  const switchIpScope = explorerSwitchIpScopeFromFilters(filters);
+  const [editingFilterId, setEditingFilterId] = useState(null);
+  const [editingThresholdId, setEditingThresholdId] = useState(null);
   const maxRangeDays = Number(maxRangeDaysProp) > 0
     ? Number(maxRangeDaysProp)
     : explorerRangeLimitDays(schema?.maxRangeDays);
@@ -5244,12 +5779,13 @@ function ExplorerFilters({
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [onRun, runDisabled]);
-  const updateFilter = (id, patch) => setFilters(filters.map((f) => (f.id === id ? { ...f, ...patch } : f)));
+
   const addThreshold = () => {
+    const id = Date.now() + Math.random();
     setThresholds([
       ...thresholds,
       {
-        id: Date.now() + Math.random(),
+        id,
         metric: 'bps',
         aggregate: 'avg',
         peakWindow: '5m',
@@ -5259,12 +5795,57 @@ function ExplorerFilters({
         unit: 'mbps',
       },
     ]);
-  };
-  const addFilter = (filter = {}) => {
-    setFilters([...filters, { id: Date.now() + Math.random(), field: 'src_ip', op: '=', value: '', logic: 'and', ...filter }]);
+    setEditingThresholdId(id);
   };
 
-  const hasAnyFilter = filters.length > 0;
+  const addFilterWithField = (fieldId) => {
+    const id = Date.now() + Math.random();
+    setFilters([
+      ...filters,
+      {
+        id,
+        field: fieldId,
+        op: defaultOpForField(schema, fieldId),
+        value: '',
+        logic: 'and',
+      },
+    ]);
+    setEditingFilterId(id);
+  };
+
+  const filterActions = (
+    <div className="explorer-filters-actions">
+      <ExplorerFilterTemplatesMenu
+        lastApplied={lastApplied}
+        savedQueries={savedQueries}
+        canWrite={canWrite}
+        runDisabled={runDisabled}
+        onApplyLastApplied={onApplyLastApplied}
+        onRestoreLastApplied={onRestoreLastApplied}
+        onSaveLastApplied={onSaveLastApplied}
+        onApplySaved={onApplySaved}
+        onEditSaved={onEditSaved}
+        onDeleteSaved={onDeleteSaved}
+        onAddQuickFilter={(filter) => {
+          const id = Date.now() + Math.random();
+          setFilters([...filters, { field: 'src_ip', op: '=', value: '', logic: 'and', ...filter, id }]);
+        }}
+      />
+      <Button kind="ghost" size="sm" icon="x" onClick={onClearFilters}>Очистить фильтры</Button>
+      <Button kind="ghost" size="sm" icon="play" onClick={onRun} disabled={runDisabled}>
+        {runDisabled ? 'Загрузка…' : 'Применить'}
+      </Button>
+      {canWrite && (
+        <Button kind="ghost" size="sm" icon="save" onClick={onSave}>Сохранить</Button>
+      )}
+      {canWrite && onSaveAsObservation && (
+        <Button kind="primary" size="sm" onClick={onSaveAsObservation}>Добавить в наблюдения</Button>
+      )}
+      {filterMode === 'graphic' && (
+        <span style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-muted)' }}>Ctrl+Enter — применить</span>
+      )}
+    </div>
+  );
 
   return (
     <div ref={panelRef}>
@@ -5278,7 +5859,7 @@ function ExplorerFilters({
       </div>
 
       {filterMode === 'graphic' ? (
-        <div className="col explorer-filters-panel__body" style={{ marginBottom: 12 }}>
+        <div className="col explorer-filters-panel__body explorer-filters-panel__body--chips" style={{ marginBottom: 12 }}>
           {cabinetClientWarning && (
             <div style={{
               padding: '8px 10px',
@@ -5292,9 +5873,11 @@ function ExplorerFilters({
               {cabinetClientWarning}. Для суток и дольше удобнее кабинет клиента.
             </div>
           )}
-          <ExplorerSystemFilterRow title="Период" mandatory>
+
+          <ExplorerChipRow label="Период" mandatory>
             <TimeFilter
               variant="explorer"
+              appearance="chip"
               timeRange={timeRange}
               onTimeRangeChange={onTimeRangeChange}
               customPeriod={customPeriod}
@@ -5312,189 +5895,54 @@ function ExplorerFilters({
                 <span>Сброс zoom</span>
               </button>
             )}
-            <div style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-muted)' }}>
-              Макс. {maxRangeDays} дней
-            </div>
-          </ExplorerSystemFilterRow>
+          </ExplorerChipRow>
 
-          <div className="explorer-panel-section">
-            <div className="explorer-panel-section__head">Условия</div>
-            {!hasAnyFilter && (
-              <div className="explorer-panel-section__empty">
-                <span>Добавьте при необходимости кнопкой «Условие»</span>
-              </div>
-            )}
-            {filters.map((f, i) => {
-            const meta = filterFieldMeta(schema, f.field);
-            const ops = filterOpsForField(schema, f.field);
-            const isSpecialField = f.field === 'direction' || f.field === 'collector';
-            const rowError = filterRowErrors[f.id];
-            return (
-              <div
-                key={f.id}
-                className={`explorer-filter-row${i === 0 ? ' explorer-filter-row--first' : ''}${rowError ? ' explorer-filter-row--warn' : ''}`}
-              >
-                <div className="explorer-filter-row__main">
-                  {i > 0 && (
-                    <select
-                      className="input explorer-filter-row__logic"
-                      value={normalizeFilterLogicValue(f.logic)}
-                      onChange={(e) => updateFilter(f.id, { logic: e.target.value })}
-                      title="Связь с предыдущим условием"
-                    >
-                      {EXPLORER_FILTER_LOGIC_OPTIONS.map((opt) => (
-                        <option key={opt.id} value={opt.id}>{opt.label}</option>
-                      ))}
-                    </select>
-                  )}
-                  {i === 0 && <span className="explorer-filter-row__logic-placeholder" aria-hidden="true" />}
-                  {isSpecialField ? (
-                    <div className="explorer-filter-row__field-label">
-                      {meta?.label || f.field}
-                    </div>
-                  ) : (
-                    <div className="explorer-filter-row__field">
-                      <FilterSearchPicker
-                        items={filterFields}
-                        value={f.field}
-                        onChange={(fieldId) => {
-                          const nextOps = filterOpsForField(schema, fieldId);
-                          const defaultOp = defaultOpForField(schema, fieldId);
-                          updateFilter(f.id, {
-                            field: fieldId,
-                            value: '',
-                            label: null,
-                            op: nextOps.includes(f.op) ? f.op : defaultOp,
-                          });
-                        }}
-                        searchPlaceholder="Поиск поля..."
-                        emptyLabel="Поле…"
-                        grouped
-                      />
-                    </div>
-                  )}
-                  <select
-                    className="input explorer-filter-row__op"
-                    value={f.op}
-                    onChange={(e) => updateFilter(f.id, { op: e.target.value })}
-                  >
-                    {ops.map((op) => <option key={op} value={op}>{explorerOpLabel(op)}</option>)}
-                  </select>
-                  <div className="explorer-filter-row__value">
-                    {f.field === 'direction' ? (
-                      <DirectionFilter
-                        embedded
-                        formatSummary={explorerDirectionSummaryLabel}
-                        directions={directionFilterToMap(f.value)}
-                        onDirectionsChange={(dirs) => {
-                          const value = directionMapToFilterValue(dirs);
-                          const nextOp = !value
-                            ? '='
-                            : (value.includes(',')
-                              ? (['=', '!='].includes(f.op) ? f.op : 'in')
-                              : (['in', 'not_in'].includes(f.op) ? f.op : '='));
-                          updateFilter(f.id, { value, op: nextOp });
-                        }}
-                      />
-                    ) : f.field === 'collector' ? (
-                      <CollectorFilter
-                        embedded
-                        collectorFilter={collectorFilterToArray(f.value)}
-                        onCollectorFilterChange={(arr) => updateFilter(f.id, { value: collectorArrayToFilterValue(arr) })}
-                      />
-                    ) : (meta?.type === 'tcp_flags' || f.field === 'tcp_flags') ? (
-                      <TcpFlagsFilter
-                        value={f.value}
-                        onChange={(patch) => updateFilter(f.id, patch)}
-                        onClear={() => updateFilter(f.id, { value: '', label: null })}
-                      />
-                    ) : (
-                      <FilterValueInput
-                        fieldId={f.field}
-                        meta={meta}
-                        value={f.value}
-                        label={f.label}
-                        switchIpScope={switchIpScope}
-                        onChange={(patch) => updateFilter(f.id, patch)}
-                        onClear={() => updateFilter(f.id, { value: '', label: null })}
-                      />
-                    )}
-                  </div>
-                  <button
-                    type="button"
-                    className="icon-btn explorer-filter-row__remove"
-                    onClick={() => setFilters(filters.filter((x) => x.id !== f.id))}
-                    title="Удалить условие"
-                  >
-                    <Icon name="x" size={10} stroke={2.5} />
-                  </button>
-                </div>
-                {rowError && (
-                  <div className="explorer-filter-row__warn" role="alert">{rowError}</div>
-                )}
-              </div>
-            );
-          })}
-            <div className="explorer-panel-section__add">
-              <ExplorerAddFilterMenu
-                schema={schema}
-                cabinetMode={cabinetMode}
-                onPickField={(fieldId) => {
-                  addFilter({ field: fieldId, op: defaultOpForField(schema, fieldId), value: '' });
-                }}
-              />
-            </div>
-          </div>
-
-          <div className="explorer-panel-section">
-            <div className="explorer-panel-section__head">Пороги</div>
-            <ExplorerThresholdEditor
+          <ExplorerChipRow label="Метрика">
+            <ExplorerMetricGroupControls
+              metric={metric}
+              setMetric={setMetric}
+              availableMetrics={availableMetrics}
+              groupBy={groupBy}
+              setGroupBy={setGroupBy}
+              dimensionById={dimensionById}
+              dimensions={dimensions}
               schema={schema}
-              thresholds={thresholds}
-              setThresholds={setThresholds}
-              peakWarning={thresholdPeakWarning}
+              cabinetMode={cabinetMode}
             />
-            {!thresholds.length && !thresholdPeakWarning ? (
-              <div className="explorer-panel-section__empty">
-                <span>Добавьте при необходимости кнопкой «Порог»</span>
-                <Button kind="ghost" size="sm" icon="plus" onClick={addThreshold}>Порог</Button>
-              </div>
-            ) : (
-              <div className="explorer-panel-section__add">
-                <Button kind="ghost" size="sm" icon="plus" onClick={addThreshold}>Порог</Button>
-              </div>
-            )}
-          </div>
+          </ExplorerChipRow>
 
-          <div className="explorer-filters-actions">
-            <ExplorerFilterTemplatesMenu
-              lastApplied={lastApplied}
-              savedQueries={savedQueries}
-              canWrite={canWrite}
-              runDisabled={runDisabled}
-              onApplyLastApplied={onApplyLastApplied}
-              onRestoreLastApplied={onRestoreLastApplied}
-              onSaveLastApplied={onSaveLastApplied}
-              onApplySaved={onApplySaved}
-              onEditSaved={onEditSaved}
-              onDeleteSaved={onDeleteSaved}
-              onAddQuickFilter={addFilter}
-            />
-            <Button kind="ghost" size="sm" icon="x" onClick={onClearFilters}>Очистить фильтры</Button>
-            <Button kind="ghost" size="sm" icon="play" onClick={onRun} disabled={runDisabled}>
-              {runDisabled ? 'Загрузка…' : 'Применить'}
-            </Button>
-            {canWrite && (
-              <Button kind="ghost" size="sm" icon="save" onClick={onSave}>Сохранить</Button>
-            )}
-            {canWrite && onSaveAsObservation && (
-              <Button kind="primary" size="sm" onClick={onSaveAsObservation}>Добавить в наблюдения</Button>
-            )}
-            <span style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-muted)' }}>Ctrl+Enter — применить</span>
-          </div>
+          <ExplorerConditionChipsRow
+            schema={schema}
+            filters={filters}
+            setFilters={setFilters}
+            filterRowErrors={filterRowErrors}
+            cabinetMode={cabinetMode}
+            editingFilterId={editingFilterId}
+            setEditingFilterId={setEditingFilterId}
+            onPickField={addFilterWithField}
+          />
+
+          <ExplorerThresholdChipsRow
+            schema={schema}
+            thresholds={thresholds}
+            setThresholds={setThresholds}
+            peakWarning={thresholdPeakWarning}
+            editingThresholdId={editingThresholdId}
+            setEditingThresholdId={setEditingThresholdId}
+            onAddThreshold={addThreshold}
+          />
+
+          {filterActions}
         </div>
       ) : (
-        <div className="col explorer-filters-panel__body" style={{ marginBottom: 12 }}>
+        <div className="col explorer-filters-panel__body explorer-filters-panel__body--chips" style={{ marginBottom: 12 }}>
+          <ExplorerChipRow label="Метрика">
+            <ExplorerMetricChipPicker
+              metrics={availableMetrics}
+              value={metric}
+              onChange={setMetric}
+            />
+          </ExplorerChipRow>
           <ExplorerFilterTextEditor
             value={filterText}
             onChange={onFilterTextChange}
@@ -5502,31 +5950,7 @@ function ExplorerFilters({
             schema={schema}
             filters={filters}
           />
-          <div className="explorer-filters-actions">
-            <ExplorerFilterTemplatesMenu
-              lastApplied={lastApplied}
-              savedQueries={savedQueries}
-              canWrite={canWrite}
-              runDisabled={runDisabled}
-              onApplyLastApplied={onApplyLastApplied}
-              onRestoreLastApplied={onRestoreLastApplied}
-              onSaveLastApplied={onSaveLastApplied}
-              onApplySaved={onApplySaved}
-              onEditSaved={onEditSaved}
-              onDeleteSaved={onDeleteSaved}
-              onAddQuickFilter={addFilter}
-            />
-            <Button kind="ghost" size="sm" icon="x" onClick={onClearFilters}>Очистить фильтры</Button>
-            <Button kind="ghost" size="sm" icon="play" onClick={onRun} disabled={runDisabled}>
-              {runDisabled ? 'Загрузка…' : 'Применить'}
-            </Button>
-            {canWrite && (
-              <Button kind="ghost" size="sm" icon="save" onClick={onSave}>Сохранить</Button>
-            )}
-            {canWrite && onSaveAsObservation && (
-              <Button kind="primary" size="sm" onClick={onSaveAsObservation}>Добавить в наблюдения</Button>
-            )}
-          </div>
+          {filterActions}
         </div>
       )}
     </Card>
