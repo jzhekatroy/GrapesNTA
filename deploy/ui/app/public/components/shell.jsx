@@ -582,8 +582,16 @@ const TIME_RANGE_OPTIONS = [
   { id: '7d', label: '7 дней' },
   { id: '14d', label: '14 дней' },
   { id: '30d', label: '30 дней' },
-  { id: 'custom', label: 'Свой период' },
+  { id: 'yesterday', label: 'Вчера' },
 ];
+
+const CALENDAR_WEEKDAY_LABELS = ['П', 'В', 'С', 'Ч', 'П', 'С', 'В'];
+const CALENDAR_MONTH_NAMES = [
+  'январь', 'февраль', 'март', 'апрель', 'май', 'июнь',
+  'июль', 'август', 'сентябрь', 'октябрь', 'ноябрь', 'декабрь',
+];
+
+const TIME_FILTER_PANEL_WIDTH = 440;
 
 const TRAFFIC_DIRECTIONS = [
   { id: 'total', label: 'Всего', color: '#7E92F8' },
@@ -609,6 +617,121 @@ function defaultCustomPeriod() {
   return {
     from: msToDatetimeLocalValue(fromMs, getDisplayTimezone()),
     to: msToDatetimeLocalValue(toMs, getDisplayTimezone()),
+  };
+}
+
+function parseDatetimeLocalParts(value) {
+  const m = String(value || '').match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})$/);
+  if (!m) return null;
+  return { y: Number(m[1]), mo: Number(m[2]), d: Number(m[3]), h: Number(m[4]), mi: Number(m[5]) };
+}
+
+function formatDatetimeLocalParts(parts) {
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${parts.y}-${pad(parts.mo)}-${pad(parts.d)}T${pad(parts.h)}:${pad(parts.mi)}`;
+}
+
+function datePartKey(parts) {
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${parts.y}-${pad(parts.mo)}-${pad(parts.d)}`;
+}
+
+function compareDateParts(a, b) {
+  if (a.y !== b.y) return a.y - b.y;
+  if (a.mo !== b.mo) return a.mo - b.mo;
+  return a.d - b.d;
+}
+
+function addDaysToDateParts(parts, deltaDays) {
+  const dt = new Date(Date.UTC(parts.y, parts.mo - 1, parts.d + deltaDays));
+  return { y: dt.getUTCFullYear(), mo: dt.getUTCMonth() + 1, d: dt.getUTCDate() };
+}
+
+function weekdayMondayFirst(y, mo, d) {
+  const jsDay = new Date(Date.UTC(y, mo - 1, d)).getUTCDay();
+  return jsDay === 0 ? 6 : jsDay - 1;
+}
+
+function buildCalendarMonthGrid(year, month) {
+  const firstDow = weekdayMondayFirst(year, month, 1);
+  const daysInMonth = new Date(Date.UTC(year, month, 0)).getUTCDate();
+  const prevMonth = month === 1 ? 12 : month - 1;
+  const prevYear = month === 1 ? year - 1 : year;
+  const daysInPrevMonth = new Date(Date.UTC(prevYear, prevMonth, 0)).getUTCDate();
+  const cells = [];
+
+  for (let i = firstDow - 1; i >= 0; i -= 1) {
+    cells.push({
+      y: prevYear,
+      mo: prevMonth,
+      d: daysInPrevMonth - i,
+      outside: true,
+    });
+  }
+  for (let d = 1; d <= daysInMonth; d += 1) {
+    cells.push({ y: year, mo: month, d, outside: false });
+  }
+  let tail = cells[cells.length - 1];
+  while (cells.length % 7 !== 0 || cells.length < 35) {
+    tail = addDaysToDateParts(tail, 1);
+    cells.push({ ...tail, outside: tail.mo !== month || tail.y !== year });
+  }
+  return cells;
+}
+
+function formatCalendarMonthTitle(year, month) {
+  return `${CALENDAR_MONTH_NAMES[month - 1]} ${year} г.`;
+}
+
+function viewMonthFromPeriod(period) {
+  const parts = parseDatetimeLocalParts(period?.from);
+  if (parts) return { year: parts.y, month: parts.mo };
+  const now = parseDatetimeLocalParts(msToDatetimeLocalValue(Date.now(), getDisplayTimezone()));
+  return { year: now.y, month: now.mo };
+}
+
+function yesterdayCustomPeriod() {
+  const today = parseDatetimeLocalParts(msToDatetimeLocalValue(Date.now(), getDisplayTimezone()));
+  if (!today) return defaultCustomPeriod();
+  const yday = addDaysToDateParts(today, -1);
+  return {
+    from: formatDatetimeLocalParts({ ...yday, h: 0, mi: 0 }),
+    to: formatDatetimeLocalParts({ ...yday, h: 23, mi: 59 }),
+  };
+}
+
+function isYesterdayPeriod(period) {
+  const expected = yesterdayCustomPeriod();
+  return period?.from === expected.from && period?.to === expected.to;
+}
+
+function clampTimePart(value, max) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return 0;
+  return Math.min(max, Math.max(0, Math.floor(n)));
+}
+
+function calendarDayRangeState(day, fromParts, toParts) {
+  if (!fromParts || !toParts) {
+    return { inRange: false, isStart: false, isEnd: false, isMiddle: false };
+  }
+  const key = datePartKey(day);
+  let start = fromParts;
+  let end = toParts;
+  if (compareDateParts(end, start) < 0) {
+    start = toParts;
+    end = fromParts;
+  }
+  const startKey = datePartKey(start);
+  const endKey = datePartKey(end);
+  const inRange = key >= startKey && key <= endKey;
+  const isStart = key === startKey;
+  const isEnd = key === endKey;
+  return {
+    inRange,
+    isStart,
+    isEnd,
+    isMiddle: inRange && !isStart && !isEnd,
   };
 }
 
@@ -641,6 +764,7 @@ function explorerRangeLimitDays(maxRangeDays) {
 }
 
 function timeRangePresetMs(rangeId) {
+  if (rangeId === 'yesterday') return 86400000;
   const match = /^(\d+)([mhd])$/.exec(String(rangeId || ''));
   if (!match) return null;
   const unitMs = match[2] === 'm' ? 60000 : match[2] === 'h' ? 3600000 : 86400000;
@@ -1057,17 +1181,18 @@ function TimezoneSelector({ displayTimezone, timezonePref, onTimezonePrefChange 
   );
 }
 
-function computeTimeFilterMenuStyle(anchorEl, { customOpen = false } = {}) {
+function computeTimeFilterMenuStyle(anchorEl) {
   const rect = anchorEl.getBoundingClientRect();
   const gap = 6;
   const pad = 8;
-  const minWidth = customOpen ? 280 : 248;
-  const width = Math.max(rect.width, minWidth);
-  const left = Math.min(Math.max(pad, rect.left), window.innerWidth - width - pad);
+  const width = Math.min(TIME_FILTER_PANEL_WIDTH, window.innerWidth - pad * 2);
+  let left = rect.right - width;
+  if (left < pad) left = Math.max(pad, rect.left);
+  if (left + width > window.innerWidth - pad) left = window.innerWidth - width - pad;
   const below = window.innerHeight - rect.bottom - gap - pad;
   const above = rect.top - gap - pad;
   const preferBelow = below >= above;
-  const availableHeight = Math.max(160, preferBelow ? below : above);
+  const availableHeight = Math.max(200, preferBelow ? below : above);
   const top = preferBelow
     ? rect.bottom + gap
     : Math.max(pad, rect.top - gap - availableHeight);
@@ -1076,15 +1201,14 @@ function computeTimeFilterMenuStyle(anchorEl, { customOpen = false } = {}) {
     top,
     left,
     width,
-    minWidth,
+    minWidth: width,
     availableHeight,
     zIndex: 1300,
   };
 }
 
-function measureTimeFilterMenuNaturalHeight(menuEl, optionsEl) {
-  if (optionsEl) return optionsEl.scrollHeight + 12;
-  return menuEl.scrollHeight;
+function measureTimeFilterMenuNaturalHeight(menuEl) {
+  return menuEl?.scrollHeight || 0;
 }
 
 function timeFilterMenuPositionChanged(prev, next) {
@@ -1095,26 +1219,234 @@ function timeFilterMenuPositionChanged(prev, next) {
     || prev.availableHeight !== next.availableHeight;
 }
 
+function PeriodTimeField({ label, hour, minute, onHourChange, onMinuteChange, hourId, minuteId }) {
+  return (
+    <div className="time-filter__time-field">
+      <span className="time-filter__time-label">{label}</span>
+      <div className="time-filter__time-inputs">
+        <input
+          id={hourId}
+          type="number"
+          className="time-filter__time-part"
+          min={0}
+          max={23}
+          value={hour}
+          aria-label={`${label}, часы`}
+          onChange={(e) => onHourChange(clampTimePart(e.target.value, 23))}
+          onBlur={(e) => onHourChange(clampTimePart(e.target.value, 23))}
+        />
+        <span className="time-filter__time-sep" aria-hidden="true">:</span>
+        <input
+          id={minuteId}
+          type="number"
+          className="time-filter__time-part"
+          min={0}
+          max={59}
+          value={minute}
+          aria-label={`${label}, минуты`}
+          onChange={(e) => onMinuteChange(clampTimePart(e.target.value, 59))}
+          onBlur={(e) => onMinuteChange(clampTimePart(e.target.value, 59))}
+        />
+      </div>
+    </div>
+  );
+}
+
+function CustomPeriodCalendar({
+  draftPeriod,
+  onDraftChange,
+  viewMonth,
+  onViewMonthChange,
+  rangeAnchor,
+  onRangeAnchorChange,
+  periodError,
+  hourFromId,
+  hourToId,
+  minuteFromId,
+  minuteToId,
+}) {
+  const fromParts = parseDatetimeLocalParts(draftPeriod.from);
+  const toParts = parseDatetimeLocalParts(draftPeriod.to);
+  const selectionTimesRef = useRef(null);
+  const monthCells = useMemo(
+    () => buildCalendarMonthGrid(viewMonth.year, viewMonth.month),
+    [viewMonth.year, viewMonth.month],
+  );
+
+  useEffect(() => {
+    if (!rangeAnchor) selectionTimesRef.current = null;
+  }, [rangeAnchor]);
+
+  const buildRangePeriod = (startDay, endDay, fromTime, toTime) => {
+    let start = startDay;
+    let end = endDay;
+    if (compareDateParts(end, start) < 0) {
+      start = endDay;
+      end = startDay;
+    }
+    return {
+      from: formatDatetimeLocalParts({ ...start, h: fromTime.h, mi: fromTime.mi }),
+      to: formatDatetimeLocalParts({ ...end, h: toTime.h, mi: toTime.mi }),
+    };
+  };
+
+  const applyPreviewRange = (hoverDay) => {
+    if (!rangeAnchor || !selectionTimesRef.current) return;
+    const { from: fromTime, to: toTime } = selectionTimesRef.current;
+    onDraftChange(buildRangePeriod(rangeAnchor, hoverDay, fromTime, toTime));
+  };
+
+  const shiftMonth = (delta) => {
+    onViewMonthChange((prev) => {
+      let month = prev.month + delta;
+      let year = prev.year;
+      while (month < 1) {
+        month += 12;
+        year -= 1;
+      }
+      while (month > 12) {
+        month -= 12;
+        year += 1;
+      }
+      return { year, month };
+    });
+  };
+
+  const handleDayClick = (day) => {
+    const fp = fromParts || { h: 0, mi: 0 };
+    const tp = toParts || { h: 23, mi: 59 };
+    if (!rangeAnchor) {
+      selectionTimesRef.current = { from: { h: fp.h, mi: fp.mi }, to: { h: tp.h, mi: tp.mi } };
+      onRangeAnchorChange(day);
+      onDraftChange(buildRangePeriod(day, day, selectionTimesRef.current.from, selectionTimesRef.current.to));
+      return;
+    }
+    const times = selectionTimesRef.current || { from: { h: fp.h, mi: fp.mi }, to: { h: tp.h, mi: tp.mi } };
+    onRangeAnchorChange(null);
+    selectionTimesRef.current = null;
+    onDraftChange(buildRangePeriod(rangeAnchor, day, times.from, times.to));
+  };
+
+  const handleDayHover = (day) => {
+    applyPreviewRange(day);
+  };
+
+  const updateFromTime = (h, mi) => {
+    const base = fromParts || parseDatetimeLocalParts(msToDatetimeLocalValue(Date.now(), getDisplayTimezone()));
+    if (!base) return;
+    onDraftChange((prev) => ({
+      ...prev,
+      from: formatDatetimeLocalParts({ ...base, h, mi }),
+    }));
+  };
+
+  const updateToTime = (h, mi) => {
+    const base = toParts || fromParts || parseDatetimeLocalParts(msToDatetimeLocalValue(Date.now(), getDisplayTimezone()));
+    if (!base) return;
+    onDraftChange((prev) => ({
+      ...prev,
+      to: formatDatetimeLocalParts({ ...base, h, mi }),
+    }));
+  };
+
+  return (
+    <div className="time-filter__calendar-pane">
+      <div className="time-filter__calendar-header">
+        <button type="button" className="time-filter__calendar-nav" onClick={() => shiftMonth(-1)} aria-label="Предыдущий месяц">
+          <Icon name="chevL" size={14} />
+        </button>
+        <div className="time-filter__calendar-title">
+          <span>{formatCalendarMonthTitle(viewMonth.year, viewMonth.month)}</span>
+          <Icon name="calendar" size={14} className="time-filter__calendar-title-icon" />
+        </div>
+        <button type="button" className="time-filter__calendar-nav" onClick={() => shiftMonth(1)} aria-label="Следующий месяц">
+          <Icon name="chevR" size={14} />
+        </button>
+      </div>
+      <div className="time-filter__calendar-weekdays" aria-hidden="true">
+        {CALENDAR_WEEKDAY_LABELS.map((label, idx) => (
+          <span key={`${label}-${idx}`} className="time-filter__calendar-weekday">{label}</span>
+        ))}
+      </div>
+      <div
+        className={`time-filter__calendar-grid${rangeAnchor ? ' time-filter__calendar-grid--selecting' : ''}`}
+        role="grid"
+        aria-label="Календарь"
+      >
+        {monthCells.map((day) => {
+          const range = calendarDayRangeState(day, fromParts, toParts);
+          const cls = [
+            'time-filter__calendar-day',
+            day.outside && 'is-outside',
+            range.inRange && 'is-in-range',
+            range.isStart && 'is-range-start',
+            range.isEnd && 'is-range-end',
+            range.isMiddle && 'is-range-middle',
+            rangeAnchor && range.isEnd && 'is-range-preview-end',
+          ].filter(Boolean).join(' ');
+          const key = `${day.y}-${day.mo}-${day.d}`;
+          return (
+            <button
+              key={key}
+              type="button"
+              role="gridcell"
+              className={cls}
+              aria-pressed={range.inRange}
+              onClick={() => handleDayClick(day)}
+              onMouseEnter={() => handleDayHover(day)}
+            >
+              <span className="time-filter__calendar-day-label">{day.d}</span>
+            </button>
+          );
+        })}
+      </div>
+      <div className="time-filter__time-row">
+        <PeriodTimeField
+          label="Время от"
+          hour={fromParts?.h ?? 0}
+          minute={fromParts?.mi ?? 0}
+          hourId={hourFromId}
+          minuteId={minuteFromId}
+          onHourChange={(h) => updateFromTime(h, fromParts?.mi ?? 0)}
+          onMinuteChange={(mi) => updateFromTime(fromParts?.h ?? 0, mi)}
+        />
+        <PeriodTimeField
+          label="Время до"
+          hour={toParts?.h ?? 23}
+          minute={toParts?.mi ?? 59}
+          hourId={hourToId}
+          minuteId={minuteToId}
+          onHourChange={(h) => updateToTime(h, toParts?.mi ?? 59)}
+          onMinuteChange={(mi) => updateToTime(toParts?.h ?? 23, mi)}
+        />
+      </div>
+      {periodError && <div className="time-filter__custom-error" role="alert">{periodError}</div>}
+    </div>
+  );
+}
+
 function TimeFilter({
   timeRange, onTimeRangeChange, customPeriod, onCustomPeriodChange,
   variant = 'header', maxRangeDays = null, appearance = 'default',
 }) {
   const isExplorer = variant === 'explorer';
   const [open, setOpen] = useState(false);
-  const [menuView, setMenuView] = useState('presets');
   const [draftPeriod, setDraftPeriod] = useState(customPeriod);
   const [periodError, setPeriodError] = useState(null);
   const [menuPosition, setMenuPosition] = useState(null);
   const [needsScroll, setNeedsScroll] = useState(false);
+  const [viewMonth, setViewMonth] = useState(() => viewMonthFromPeriod(customPeriod));
+  const [rangeAnchor, setRangeAnchor] = useState(null);
   const rootRef = useRef(null);
   const menuRef = useRef(null);
-  const optionsRef = useRef(null);
+  const panelRef = useRef(null);
   const availableHeightRef = useRef(0);
-  const customFromId = isExplorer ? 'time-filter-from-explorer' : 'time-filter-from';
-  const customToId = isExplorer ? 'time-filter-to-explorer' : 'time-filter-to';
+  const hourFromId = isExplorer ? 'time-filter-hour-from-explorer' : 'time-filter-hour-from';
+  const minuteFromId = isExplorer ? 'time-filter-minute-from-explorer' : 'time-filter-minute-from';
+  const hourToId = isExplorer ? 'time-filter-hour-to-explorer' : 'time-filter-hour-to';
+  const minuteToId = isExplorer ? 'time-filter-minute-to-explorer' : 'time-filter-minute-to';
 
   const rangeLabel = timeRangeLabel(timeRange, customPeriod);
-  const customViewOpen = menuView === 'custom';
   const presetOptions = useMemo(() => {
     const limitMs = Number(maxRangeDays) > 0 ? Number(maxRangeDays) * 86400000 : null;
     if (!limitMs) return TIME_RANGE_OPTIONS;
@@ -1127,8 +1459,10 @@ function TimeFilter({
   useEffect(() => {
     if (!open) return;
     setDraftPeriod(customPeriod);
-    setMenuView(timeRange === 'custom' ? 'custom' : 'presets');
-  }, [open, customPeriod, timeRange]);
+    setViewMonth(viewMonthFromPeriod(customPeriod));
+    setRangeAnchor(null);
+    setPeriodError(null);
+  }, [open, customPeriod]);
 
   useLayoutEffect(() => {
     if (!open) {
@@ -1139,7 +1473,7 @@ function TimeFilter({
     const anchor = rootRef.current;
     if (!anchor) return undefined;
     const updatePosition = () => {
-      const next = computeTimeFilterMenuStyle(anchor, { customOpen: customViewOpen });
+      const next = computeTimeFilterMenuStyle(anchor);
       availableHeightRef.current = next.availableHeight;
       setMenuPosition((prev) => (timeFilterMenuPositionChanged(prev, next) ? next : prev));
     };
@@ -1154,7 +1488,7 @@ function TimeFilter({
       window.removeEventListener('resize', updatePosition);
       window.removeEventListener('scroll', onScroll, true);
     };
-  }, [open, customViewOpen]);
+  }, [open]);
 
   useLayoutEffect(() => {
     if (!open || !menuPosition) {
@@ -1164,14 +1498,14 @@ function TimeFilter({
     const updateScrollNeed = () => {
       const menu = menuRef.current;
       if (!menu) return;
-      const naturalHeight = measureTimeFilterMenuNaturalHeight(menu, optionsRef.current);
+      const naturalHeight = measureTimeFilterMenuNaturalHeight(menu);
       const next = naturalHeight > availableHeightRef.current;
       setNeedsScroll((prev) => (prev === next ? prev : next));
     };
     updateScrollNeed();
     window.addEventListener('resize', updateScrollNeed);
     return () => window.removeEventListener('resize', updateScrollNeed);
-  }, [open, menuPosition, customViewOpen]);
+  }, [open, menuPosition, draftPeriod, viewMonth]);
 
   useEffect(() => {
     if (!open) return undefined;
@@ -1198,11 +1532,11 @@ function TimeFilter({
   };
 
   const pickPreset = (optionId) => {
-    if (optionId === 'custom') {
-      onTimeRangeChange(optionId);
-      setDraftPeriod(customPeriod);
-      setPeriodError(null);
-      setMenuView('custom');
+    if (optionId === 'yesterday') {
+      const period = yesterdayCustomPeriod();
+      onTimeRangeChange('custom');
+      onCustomPeriodChange(period);
+      setOpen(false);
       return;
     }
     if (timeRange === optionId) return;
@@ -1210,11 +1544,30 @@ function TimeFilter({
     setOpen(false);
   };
 
-  const isPresetCurrent = (optionId) => timeRange === optionId;
+  const isPresetCurrent = (optionId) => {
+    if (optionId === 'yesterday') return timeRange === 'custom' && isYesterdayPeriod(customPeriod);
+    return timeRange === optionId;
+  };
 
-  const resetCustomDraft = () => {
-    setDraftPeriod(defaultCustomPeriod());
+  const handleDraftChange = (next) => {
+    setDraftPeriod(next);
     setPeriodError(null);
+  };
+
+  const openMenu = () => {
+    setDraftPeriod(customPeriod);
+    setViewMonth(viewMonthFromPeriod(customPeriod));
+    setRangeAnchor(null);
+    setPeriodError(null);
+    setOpen(true);
+  };
+
+  const toggleMenu = () => {
+    if (open) {
+      setOpen(false);
+      return;
+    }
+    openMenu();
   };
 
   const menuStyle = menuPosition ? {
@@ -1230,92 +1583,66 @@ function TimeFilter({
   const menu = open && menuStyle ? (
     <div
       ref={menuRef}
-      className={`time-filter__menu time-filter__menu--fixed${needsScroll ? ' time-filter__menu--scrollable' : ''}${isExplorer ? ' time-filter__menu--explorer' : ''}`}
-      role="menu"
+      className={`time-filter__menu time-filter__menu--fixed time-filter__menu--panel${needsScroll ? ' time-filter__menu--scrollable' : ''}${isExplorer ? ' time-filter__menu--explorer' : ''}`}
+      role="dialog"
+      aria-label="Выбор периода"
       style={menuStyle}
     >
-      {!customViewOpen ? (
-      <div ref={optionsRef} className="time-filter__section time-filter__section--options">
-        {presetOptions.map((o) => {
-          const current = isPresetCurrent(o.id);
-          if (isExplorer) {
+      <div ref={panelRef} className="time-filter__panel">
+        <div className="time-filter__sidebar">
+          {presetOptions.map((o) => {
+            const current = isPresetCurrent(o.id);
+            if (isExplorer) {
+              return (
+                <div
+                  key={o.id}
+                  className={`direction-picker-item${current ? ' is-active' : ''}`}
+                  role="menuitem"
+                  aria-current={current ? 'true' : undefined}
+                  onClick={() => pickPreset(o.id)}
+                >
+                  {o.label}
+                </div>
+              );
+            }
             return (
-              <div
+              <button
                 key={o.id}
-                className={`direction-picker-item${current ? ' is-disabled' : ''}`}
-                role="menuitem"
-                aria-disabled={current}
-                onClick={() => !current && pickPreset(o.id)}
+                type="button"
+                role="menuitemradio"
+                aria-checked={current}
+                className={`time-filter__option ${current ? 'is-active' : ''}`}
+                onClick={() => pickPreset(o.id)}
               >
                 {o.label}
-              </div>
+              </button>
             );
-          }
-          return (
-            <button
-              key={o.id}
-              type="button"
-              role="menuitemradio"
-              aria-checked={current}
-              className={`time-filter__option ${current ? 'is-active' : ''}`}
-              onClick={() => pickPreset(o.id)}
-            >
-              {o.label}
-            </button>
-          );
-        })}
-      </div>
-      ) : (
-        <>
-          <button
-            type="button"
-            className="time-filter__back"
-            onClick={() => setMenuView('presets')}
-          >
-            <Icon name="chevL" size={14} />
-            <span>Предустановленные</span>
-          </button>
-          <div className="time-filter__custom">
-            <div className="field">
-              <label htmlFor={customFromId}>Начало</label>
-              <input
-                id={customFromId}
-                type="datetime-local"
-                className="input"
-                value={draftPeriod.from}
-                max={draftPeriod.to || undefined}
-                onChange={(e) => {
-                  setDraftPeriod((p) => ({ ...p, from: e.target.value }));
-                  setPeriodError(null);
-                }}
-              />
-            </div>
-            <div className="field">
-              <label htmlFor={customToId}>Конец</label>
-              <input
-                id={customToId}
-                type="datetime-local"
-                className="input"
-                value={draftPeriod.to}
-                min={draftPeriod.from || undefined}
-                onChange={(e) => {
-                  setDraftPeriod((p) => ({ ...p, to: e.target.value }));
-                  setPeriodError(null);
-                }}
-              />
-            </div>
-            {periodError && <div className="time-filter__custom-error" role="alert">{periodError}</div>}
-            <div className="time-filter__custom-actions">
-              <Button kind="ghost" size="sm" type="button" onClick={resetCustomDraft}>
-                Сбросить
-              </Button>
-              <Button kind="primary" size="sm" type="button" onClick={applyCustomPeriod}>
-                Применить
-              </Button>
-            </div>
+          })}
+        </div>
+        <div className="time-filter__panel-main">
+          <CustomPeriodCalendar
+            draftPeriod={draftPeriod}
+            onDraftChange={handleDraftChange}
+            viewMonth={viewMonth}
+            onViewMonthChange={setViewMonth}
+            rangeAnchor={rangeAnchor}
+            onRangeAnchorChange={setRangeAnchor}
+            periodError={periodError}
+            hourFromId={hourFromId}
+            minuteFromId={minuteFromId}
+            hourToId={hourToId}
+            minuteToId={minuteToId}
+          />
+          <div className="time-filter__custom-actions">
+            <Button kind="ghost" size="sm" type="button" className="time-filter__cancel-btn" onClick={() => setOpen(false)}>
+              Отменить
+            </Button>
+            <Button kind="primary" size="sm" type="button" onClick={applyCustomPeriod}>
+              Выбрать
+            </Button>
           </div>
-        </>
-      )}
+        </div>
+      </div>
     </div>
   ) : null;
 
@@ -1327,7 +1654,7 @@ function TimeFilter({
         <button
           type="button"
           className="explorer-query-chip explorer-query-chip--period"
-          onClick={() => setOpen((v) => !v)}
+          onClick={toggleMenu}
           aria-expanded={open}
           title={timeRange === 'custom' ? rangeLabel : undefined}
         >
@@ -1335,12 +1662,12 @@ function TimeFilter({
           <Icon name="chevD" size={12} />
         </button>
       ) : isExplorer ? (
-        <button type="button" className="period-select" onClick={() => setOpen((v) => !v)} aria-expanded={open}>
+        <button type="button" className="period-select" onClick={toggleMenu} aria-expanded={open}>
           <span className="period-select__label" title={timeRange === 'custom' ? rangeLabel : undefined}>{rangeLabel}</span>
           <Icon name="chevD" size={14} />
         </button>
       ) : (
-        <button type="button" className="time-pill" onClick={() => setOpen((v) => !v)} aria-expanded={open}>
+        <button type="button" className="time-pill" onClick={toggleMenu} aria-expanded={open}>
           <span className="live-dot" />
           <Icon name="clock" size={14} />
           <span className="time-pill__label" title={timeRange === 'custom' ? rangeLabel : undefined}>{rangeLabel}</span>
@@ -2055,7 +2382,7 @@ Object.assign(window, {
   Sidebar, Header, NAV, CABINET_NAV, CABINET_PAGE_IDS, PAGE_TITLES, setPageTitles, GrapesGlyph,
   isCabinetMode, isImpersonating, ImpersonationBanner,
   TIME_RANGE_OPTIONS, TIMEZONE_PRESETS, TRAFFIC_DIRECTIONS, defaultDirectionsEnabled,
-  defaultCustomPeriod, formatCustomPeriodLabel, validateCustomPeriod, validateExplorerCustomPeriod, explorerRangeLimitDays, timeRangePresetMs, EXPLORER_MAX_RANGE_DAYS, timeRangeLabel, timeRangeChipLabel, TIME_RANGE_CHIP_LABELS,
+  defaultCustomPeriod, formatCustomPeriodLabel, validateCustomPeriod, validateExplorerCustomPeriod, explorerRangeLimitDays, timeRangePresetMs, EXPLORER_MAX_RANGE_DAYS, timeRangeLabel, timeRangeChipLabel, TIME_RANGE_CHIP_LABELS, yesterdayCustomPeriod, isYesterdayPeriod,
   toDatetimeLocalValue, dnsBucketSecondsFromMode, explorerGranularityBucketSeconds,
   collectorFilterLabel, directionSummaryLabel, TimezoneSelector,
   parseAppHash, parseJsonSearchParam, parseDirectionsParam, applyTopTalkersUrlGlobals,
