@@ -5340,7 +5340,7 @@ function ExplorerMetricGroupControls({
       <ExplorerMetricChipPicker metrics={availableMetrics} value={metric} onChange={setMetric} />
       {showGroupBy && (
         <>
-          <span className="explorer-chip-row__sep">по</span>
+          <span className="explorer-chip-row__sep">группировать по</span>
           {groupBy.map((token) => {
             const id = explorerGroupFieldId(token);
             return (

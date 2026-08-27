@@ -1233,6 +1233,8 @@ a.nav-item--active:visited { color: var(--fg-primary); }
 }
 
 .explorer-chip-row__sep {
+  flex-shrink: 0;
+  white-space: nowrap;
   font: var(--pv-text-body-3);
   color: var(--fg-muted);
   padding: 0 2px;
