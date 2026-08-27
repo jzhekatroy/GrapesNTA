@@ -3047,6 +3047,7 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
       let id = observationCompose?.editId || null;
       if (id) {
         const existing = await ApiClient.loadObservation(id);
+        const existingChartStyle = (existing.widgets || []).find((w) => w.type === 'timeseries_bps')?.chartStyle;
         await ApiClient.updateObservation(id, {
           ...existing,
           name: (name || '').trim() || existing.name,
@@ -3058,6 +3059,7 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
               type: 'timeseries_bps',
               metric: metric || 'bps',
               groupBy: chartGroup,
+              chartStyle: existingChartStyle === 'lines' ? 'lines' : 'stack',
               seriesLimit: 8,
               limit: null,
             },
@@ -3084,6 +3086,7 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
               type: 'timeseries_bps',
               metric: metric || 'bps',
               groupBy: chartGroup,
+              chartStyle: 'stack',
               seriesLimit: 10,
               limit: null,
             },

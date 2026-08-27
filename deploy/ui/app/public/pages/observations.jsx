@@ -38,6 +38,31 @@ function normalizeObservationLookback(value) {
   return value === '15m' ? '30m' : (value || '1h');
 }
 
+const OBS_CHART_STYLES = [
+  { id: 'lines', label: 'Линии', icon: 'lineChart', hint: 'Перекрывающиеся линии по сериям' },
+  { id: 'stack', label: 'Стек', icon: 'layers', hint: 'Площади друг на друге, сумма выбранных серий' },
+];
+
+function normalizeObservationChartStyle(value) {
+  return value === 'stack' ? 'stack' : 'lines';
+}
+
+function observationChartStyleToStackMode(chartStyle) {
+  return normalizeObservationChartStyle(chartStyle) === 'stack' ? 'sum' : undefined;
+}
+
+function observationWidgetsWithChartStyle(widgets, chartStyle) {
+  const nextStyle = normalizeObservationChartStyle(chartStyle);
+  return (widgets || []).map((w) => (
+    w.type === 'timeseries_bps' ? { ...w, chartStyle: nextStyle } : w
+  ));
+}
+
+function observationChartStyleFromWidgets(widgets) {
+  const chart = (widgets || []).find((w) => w.type === 'timeseries_bps');
+  return normalizeObservationChartStyle(chart?.chartStyle);
+}
+
 /** Строк топа в плитке; «Прочие» показывается сверх этого числа. */
 const TOP_ROWS_VIEW_LIMIT = 100;
 
@@ -339,6 +364,7 @@ function ObservationChart({
   points,
   lines,
   mode = 'total',
+  stackMode,
   height = 160,
   onRangeSelect,
   displayTimezone,
@@ -377,8 +403,10 @@ function ObservationChart({
       <DualChart
         points={ready}
         lines={lines}
+        stackMode={stackMode}
         height={height}
         mode="bw"
+        gapAsZero={stackMode === 'sum'}
         valueFormatter={formatBps}
         axisFormatter={formatAxisBps}
         onRangeSelect={onRangeSelect}
@@ -390,6 +418,7 @@ function ObservationChart({
         skipTrailingGaps={skipTrailingGaps}
         tipTranslucent={tipTranslucent}
         tipUnitLabel="бит/с"
+        yAxisUnit="бит/с"
       />
     );
   }
@@ -514,6 +543,27 @@ function LookbackPicker({ value, options, onChange }) {
   );
 }
 
+function ObservationChartStylePicker({ value, onChange, disabled = false }) {
+  return (
+    <div className="seg obs-tile__chart-style" role="group" aria-label="Тип графика">
+      {OBS_CHART_STYLES.map((style) => (
+        <button
+          key={style.id}
+          type="button"
+          className={style.id === value ? 'is-active' : ''}
+          title={style.hint || style.label}
+          aria-pressed={style.id === value}
+          disabled={disabled}
+          onClick={() => onChange(style.id)}
+        >
+          <Icon name={style.icon} size={12} />
+          <span>{style.label}</span>
+        </button>
+      ))}
+    </div>
+  );
+}
+
 function ObservationLiveTile({
   item,
   groupOptions,
@@ -526,6 +576,7 @@ function ObservationLiveTile({
   onCancel,
   onRunReport,
   onLookbackChange,
+  onChartStyleChange,
 }) {
   const [preview, setPreview] = useState(null);
   const [error, setError] = useState('');
@@ -533,6 +584,7 @@ function ObservationLiveTile({
   const [refreshing, setRefreshing] = useState(false);
   const [updatedAt, setUpdatedAt] = useState(null);
   const [lookback, setLookback] = useState(normalizeObservationLookback(item.lookback));
+  const [chartStyle, setChartStyle] = useState(() => observationChartStyleFromWidgets(item.widgets));
   const [customRange, setCustomRange] = useState(null);
   const [zoomStack, setZoomStack] = useState([]);
   const [runs, setRuns] = useState([]);
@@ -548,10 +600,11 @@ function ObservationLiveTile({
 
   useEffect(() => {
     setLookback(normalizeObservationLookback(item.lookback));
+    setChartStyle(observationChartStyleFromWidgets(item.widgets));
     setCustomRange(null);
     setZoomStack([]);
     setFocusKey(null);
-  }, [item.id, item.lookback]);
+  }, [item.id, item.lookback, item.widgets]);
 
   const previewPayload = useMemo(() => (
     customRange?.from && customRange?.to
@@ -633,6 +686,13 @@ function ObservationLiveTile({
     if (typeof onLookbackChange === 'function') onLookbackChange(item.id, next);
   };
 
+  const changeChartStyle = (next) => {
+    const normalized = normalizeObservationChartStyle(next);
+    if (normalized === chartStyle) return;
+    setChartStyle(normalized);
+    if (typeof onChartStyleChange === 'function') onChartStyleChange(item.id, normalized);
+  };
+
   const handleChartRangeSelect = (range) => {
     if (!range?.from || !range?.to) return;
     if (typeof validateCustomPeriod === 'function' && validateCustomPeriod(range)) return;
@@ -667,6 +727,7 @@ function ObservationLiveTile({
     if (focusKey && !lines.some((ln) => ln.key === focusKey)) setFocusKey(null);
   }, [focusKey, lineKeys]);
   const visibleLines = focusKey ? lines.filter((ln) => ln.key === focusKey) : lines;
+  const chartStackMode = observationChartStyleToStackMode(chartStyle);
   const focusLabel = focusKey
     ? (lines.find((ln) => ln.key === focusKey)?.label || focusKey)
     : null;
@@ -753,6 +814,7 @@ function ObservationLiveTile({
           points={points}
           lines={visibleLines}
           mode={chartMode}
+          stackMode={chartMode === 'grouped' ? chartStackMode : undefined}
           height={chartH}
           onRangeSelect={points.length > 1 ? handleChartRangeSelect : undefined}
           displayTimezone={displayTimezone}
@@ -796,6 +858,12 @@ function ObservationLiveTile({
               <Icon name="zoom" size={14} />
               <span>Сброс</span>
             </button>
+          )}
+          {chartMode === 'grouped' && lines.length > 1 && (
+            <ObservationChartStylePicker
+              value={chartStyle}
+              onChange={changeChartStyle}
+            />
           )}
           <LookbackPicker
             value={lookback}
@@ -1107,7 +1175,31 @@ function PageObservations({ onNavigate }) {
     }
   };
 
+  const changeTileChartStyle = async (id, chartStyle) => {
+    let current = null;
+    setItems((prev) => {
+      current = prev.find((row) => row.id === id) || null;
+      return prev.map((row) => (
+        row.id === id
+          ? { ...row, widgets: observationWidgetsWithChartStyle(row.widgets, chartStyle) }
+          : row
+      ));
+    });
+    if (!canWriteObservations || !current) return;
+    try {
+      await ApiClient.updateObservation(id, {
+        ...current,
+        widgets: observationWidgetsWithChartStyle(current.widgets, chartStyle),
+        materialize: { ...(current.materialize || {}), enabled: Boolean(current.materialize?.enabled) },
+      });
+    } catch (e) {
+      setError(e.message);
+      await reload();
+    }
+  };
+
   const settingsGroupBy = groupByFromWidgets(settings?.widgets);
+  const settingsChartStyle = observationChartStyleFromWidgets(settings?.widgets);
 
   if (settings && settingsItem) {
     return (
@@ -1171,6 +1263,18 @@ function PageObservations({ onNavigate }) {
               Без неё график и таблица топа по группировке пустые. Каждая подготовка — постоянная нагрузка на ClickHouse.
               Счёт с момента включения, прошлые сутки не пересчитываются.
             </div>
+            {settingsGroupBy.length > 0 && (
+              <div className="col" style={{ gap: 6 }}>
+                <span>Тип графика</span>
+                <ObservationChartStylePicker
+                  value={settingsChartStyle}
+                  onChange={(next) => setSettings({
+                    ...settings,
+                    widgets: observationWidgetsWithChartStyle(settings.widgets, next),
+                  })}
+                />
+              </div>
+            )}
             <label className="row" style={{ gap: 8, alignItems: 'center' }}>
               <input
                 type="checkbox"
@@ -1373,6 +1477,7 @@ function PageObservations({ onNavigate }) {
                   .then(() => pushToast?.({ kind: 'success', title: 'Подготовка отменена' }))
                   .catch((e) => setError(e.message))}
                 onLookbackChange={changeTileLookback}
+                onChartStyleChange={changeTileChartStyle}
                 onRunReport={() => ApiClient.runObservationReport(item.id)
                   .then(() => pushToast?.({ kind: 'success', title: 'Отчёт сформирован' }))
                   .catch((e) => setError(e.message))}

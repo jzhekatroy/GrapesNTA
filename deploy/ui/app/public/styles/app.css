@@ -5411,6 +5411,18 @@ html.modal-open #root {
   height: 26px;
   padding: 0 8px;
 }
+.obs-tile__chart-style.seg {
+  height: 32px;
+  align-items: center;
+}
+.obs-tile__chart-style.seg button {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 26px;
+  padding: 0 8px;
+  font-size: 11px;
+}
 .obs-tile__footer {
   display: flex;
   align-items: center;

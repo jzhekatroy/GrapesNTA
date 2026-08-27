@@ -148,6 +148,9 @@ function normalizeWidgets(widgets) {
     // Лимиты не настраиваются пользователем — держим единые значения.
     limit: w.type === 'timeseries_bps' ? null : TOP_ROWS_LIMIT,
     seriesLimit: w.type === 'timeseries_bps' ? CHART_SERIES_LIMIT : undefined,
+    chartStyle: w.type === 'timeseries_bps'
+      ? (w.chartStyle === 'stack' ? 'stack' : 'lines')
+      : undefined,
   }));
 }
 
