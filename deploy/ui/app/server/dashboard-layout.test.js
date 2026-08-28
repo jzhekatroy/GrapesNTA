@@ -38,13 +38,48 @@ test.afterEach(() => {
   resetStoreForTests();
 });
 
-test('default layout contains all widgets visible', () => {
-  assert.equal(DEFAULT_OPERATOR_LAYOUT.widgets.length, OPERATOR_WIDGET_IDS.length);
-  assert.equal(DEFAULT_OPERATOR_LAYOUT.widgets.length, 10);
-  for (const widget of DEFAULT_OPERATOR_LAYOUT.widgets) {
-    assert.equal(widget.visible, true);
+const DEFAULT_HIDDEN_WIDGET_IDS = new Set(['stat-max', 'stat-avg', 'stat-volume', 'vlan']);
+
+function isDefaultStackWidget(widget) {
+  return widget?.kind === 'stack' || String(widget?.id || '').startsWith('stack-');
+}
+
+function defaultContentWidgets() {
+  return DEFAULT_OPERATOR_LAYOUT.widgets
+    .filter((widget) => !isDefaultStackWidget(widget))
+    .map((widget) => {
+      const next = { ...widget };
+      delete next.parentStack;
+      return next;
+    });
+}
+
+test('default layout hides stats and VLAN widgets', () => {
+  const content = defaultContentWidgets();
+  assert.equal(content.length, OPERATOR_WIDGET_IDS.length);
+  assert.equal(content.length, 10);
+  for (const widget of content) {
     assert.ok(OPERATOR_WIDGET_IDS.includes(widget.id));
+    assert.equal(widget.visible, !DEFAULT_HIDDEN_WIDGET_IDS.has(widget.id));
   }
+});
+
+test('default layout stacks protocols/services and flows/talkers', () => {
+  const vertical = DEFAULT_OPERATOR_LAYOUT.widgets.find((w) => w.id === 'stack-v-bsu8e0s');
+  const horizontal = DEFAULT_OPERATOR_LAYOUT.widgets.find((w) => w.id === 'stack-h-kiphmzp');
+  assert.equal(vertical?.direction, 'vertical');
+  assert.deepEqual(vertical?.childIds, ['distribution-protocols', 'distribution-services']);
+  assert.equal(horizontal?.direction, 'horizontal');
+  assert.deepEqual(horizontal?.childIds, ['recent-flows', 'top-talkers']);
+  assert.equal(
+    DEFAULT_OPERATOR_LAYOUT.widgets.find((w) => w.id === 'distribution-protocols').parentStack,
+    'stack-v-bsu8e0s',
+  );
+  assert.equal(
+    DEFAULT_OPERATOR_LAYOUT.widgets.find((w) => w.id === 'top-talkers').parentStack,
+    'stack-h-kiphmzp',
+  );
+  assert.equal(DEFAULT_OPERATOR_LAYOUT.widgets.find((w) => w.id === 'countries').w, 12);
 });
 
 test('mergeWithDefaults preserves user order and adds new widgets', () => {
@@ -62,7 +97,21 @@ test('mergeWithDefaults preserves user order and adds new widgets', () => {
   assert.equal(merged.settings.distribution.protocolsMode, 'trend');
   assert.equal(merged.settings.distribution.servicesMode, 'trend');
   assert.equal(merged.settings.distribution.trendSplit, 0.4);
-  assert.equal(merged.widgets.length, OPERATOR_WIDGET_IDS.length);
+  assert.equal(merged.widgets.length, DEFAULT_OPERATOR_LAYOUT.widgets.length);
+});
+
+test('mergeWithDefaults does not inject default stacks into existing layouts', () => {
+  const saved = {
+    version: 3,
+    widgets: defaultContentWidgets().map((w) => (
+      w.id === 'countries' ? { ...w, y: 8 } : w
+    )),
+    settings: DEFAULT_OPERATOR_LAYOUT.settings,
+  };
+  const merged = mergeWithDefaults(saved);
+  assert.equal(merged.widgets.some((w) => isDefaultStackWidget(w)), false);
+  assert.equal(merged.widgets.find((w) => w.id === 'countries').y, 8);
+  assert.equal(merged.widgets.find((w) => w.id === 'distribution-protocols').parentStack, undefined);
 });
 
 test('migrateV1ToV2 expands composite widgets and maps settings', () => {
@@ -82,7 +131,7 @@ test('migrateV1ToV2 expands composite widgets and maps settings', () => {
 test('mergeWithDefaults migrates legacy v1 layouts', () => {
   const merged = mergeWithDefaults(LEGACY_V1_LAYOUT);
   assert.equal(merged.version, 3);
-  assert.equal(merged.widgets.length, OPERATOR_WIDGET_IDS.length);
+  assert.equal(merged.widgets.length, DEFAULT_OPERATOR_LAYOUT.widgets.length);
   assert.equal(merged.settings.distribution.protocolsMode, 'trend');
   assert.equal(merged.settings.distribution.servicesMode, 'trend');
 });
@@ -111,19 +160,19 @@ test('validateLayout clamps widget width', () => {
   const layout = validateLayout({
     version: 2,
     widgets: DEFAULT_OPERATOR_LAYOUT.widgets.map((w) => (
-      w.id === 'top-talkers' ? { ...w, w: 9 } : w
+      w.id === 'traffic-chart' ? { ...w, w: 9 } : w
     )),
     settings: {},
   });
-  const talkers = layout.widgets.find((w) => w.id === 'top-talkers');
-  assert.equal(talkers.w, 8);
+  const chart = layout.widgets.find((w) => w.id === 'traffic-chart');
+  assert.equal(chart.w, 8);
 });
 
 test('validateLayout accepts stack grouping', () => {
   const layout = validateLayout({
     version: 3,
     widgets: [
-      ...DEFAULT_OPERATOR_LAYOUT.widgets.filter((w) => !['top-talkers', 'countries'].includes(w.id)),
+      ...defaultContentWidgets().filter((w) => !['top-talkers', 'countries'].includes(w.id)),
       {
         id: 'stack-v-test01',
         kind: 'stack',
@@ -149,7 +198,7 @@ test('validateLayout accepts horizontal stack children with inner widths', () =>
   const layout = validateLayout({
     version: 3,
     widgets: [
-      ...DEFAULT_OPERATOR_LAYOUT.widgets.filter((w) => !['stat-max', 'stat-avg', 'stat-volume'].includes(w.id)),
+      ...defaultContentWidgets().filter((w) => !['stat-max', 'stat-avg', 'stat-volume'].includes(w.id)),
       {
         id: 'stack-h-test01',
         kind: 'stack',
@@ -177,7 +226,7 @@ test('validateLayout keeps non-allowed inner widths for stacked widgets', () => 
   const layout = validateLayout({
     version: 3,
     widgets: [
-      ...DEFAULT_OPERATOR_LAYOUT.widgets.filter((w) => !['stat-max', 'stat-avg', 'stat-volume'].includes(w.id)),
+      ...defaultContentWidgets().filter((w) => !['stat-max', 'stat-avg', 'stat-volume'].includes(w.id)),
       {
         id: 'stack-h-test02',
         kind: 'stack',
@@ -204,7 +253,7 @@ test('validateLayout rejects inconsistent stack membership', () => {
     () => validateLayout({
       version: 3,
       widgets: [
-        ...DEFAULT_OPERATOR_LAYOUT.widgets,
+        ...defaultContentWidgets(),
         {
           id: 'stack-v-bad001',
           kind: 'stack',

@@ -52,6 +52,75 @@ function OverviewTrafficStatTile({ label, mode, stats, directionDefs, loadMs, se
   );
 }
 
+function trafficChartPointValue(pt, line, mode) {
+  if (mode === 'pps') {
+    const raw = pt[`${line.key}_pps`] ?? (line.key === 'total' ? pt.pps : null);
+    return Number(raw) || 0;
+  }
+  return Number(pt[line.key]) || 0;
+}
+
+function trafficChartVisibleSeries(lines, ppsLines, mode, hidden) {
+  if (mode === 'pps') {
+    return (ppsLines || lines || []).filter((line) => !hidden.has(`${line.key}_pps`));
+  }
+  return (lines || []).filter((line) => !hidden.has(line.key));
+}
+
+function trafficChartStats(points, series, mode) {
+  if (!points?.length || !series?.length) return null;
+  const totalLine = series.find((ln) => ln.key === 'total');
+  const active = totalLine ? [totalLine] : series;
+  const values = points
+    .filter((pt) => !pt._gap)
+    .map((pt) => active.reduce((sum, ln) => sum + trafficChartPointValue(pt, ln, mode), 0));
+  if (!values.length) return null;
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  const avg = values.reduce((a, b) => a + b, 0) / values.length;
+  const last = values[values.length - 1];
+  return {
+    min,
+    max,
+    avg,
+    last,
+    pctOfMax: max > 0 ? (last / max) * 100 : null,
+  };
+}
+
+function formatTrafficChartStat(value, mode) {
+  if (!Number.isFinite(value)) return '—';
+  if (mode === 'pps') {
+    return typeof formatMetric === 'function' ? formatMetric(value, 'pps') : `${fmtNum(value)} п/с`;
+  }
+  return fmtBits(value);
+}
+
+function OverviewTrafficChartStats({ points, series, mode }) {
+  const stats = trafficChartStats(points, series, mode);
+  if (!stats) return null;
+  const items = [
+    { k: 'avg', v: formatTrafficChartStat(stats.avg, mode), t: 'Среднее по точкам окна' },
+    { k: 'min', v: formatTrafficChartStat(stats.min, mode), t: 'Минимум за окно' },
+    { k: 'max', v: formatTrafficChartStat(stats.max, mode), t: 'Максимум за окно' },
+    {
+      k: 'now/max',
+      v: stats.pctOfMax == null ? '—' : `${stats.pctOfMax.toFixed(1)}%`,
+      t: 'Последняя точка относительно пика окна',
+    },
+  ];
+  return (
+    <div className="chart-stats">
+      {items.map((it) => (
+        <span key={it.k} className="chart-stats__item" title={it.t}>
+          {it.k}{' '}
+          <span className="mono chart-stats__v">{it.v}</span>
+        </span>
+      ))}
+    </div>
+  );
+}
+
 function OverviewTrafficChartCard({
   title,
   subtitle,
@@ -80,6 +149,9 @@ function OverviewTrafficChartCard({
   const hidden = hiddenKeys || new Set();
   const visibleLines = (lines || []).filter((line) => !hidden.has(line.key));
   const visiblePps = (ppsLines || lines || []).filter((line) => !hidden.has(`${line.key}_pps`));
+  const visibleSeries = trafficChartVisibleSeries(lines, ppsLines, mode, hidden);
+  const showStats = !loading && !failed;
+  const showRefreshHint = DashboardLog?.isVerbose?.() === true;
   return (
     <Card
       title={title}
@@ -97,31 +169,20 @@ function OverviewTrafficChartCard({
         </>
       ) : null}
     >
-      <div className="chart-legend row" style={{ gap: 14, marginBottom: 8, font: 'var(--pv-text-body-3)', color: 'var(--fg-secondary)', flexWrap: 'wrap' }}>
-        {(lines || []).map((line) => {
-          const key = mode === 'pps' ? `${line.key}_pps` : line.key;
-          const off = hidden.has(key);
-          return (
-            <button
-              key={key}
-              type="button"
-              className={`chart-legend__item${off ? ' is-off' : ''}`}
-              aria-pressed={!off}
-              title={off ? 'Показать на графике' : 'Скрыть с графика'}
-              onClick={() => onToggleLine?.(key)}
-            >
-              <span
-                className="chart-legend__swatch"
-                style={{ width: 12, height: line.key === 'total' ? 3 : 2, background: line.color, opacity: off ? 0.35 : 1 }}
-              />
-              {line.label}, {mode === 'pps' ? 'пакеты/с' : 'бит/с'}
-            </button>
-          );
-        })}
-        <span className="chart-legend__meta" style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
-          <Icon name="info" size={12} /> {onRangeSelect ? 'Выделите диапазон на графике · авто-обновление каждую минуту' : 'Авто-обновление каждую минуту'}
-        </span>
-      </div>
+      {(onRangeSelect || showRefreshHint) ? (
+        <div className="chart-range-hint">
+          {onRangeSelect ? (
+            <>
+              <Icon name="info" size={12} /> Выделите диапазон на графике
+            </>
+          ) : null}
+          {showRefreshHint ? (
+            <span>
+              {onRangeSelect ? ' · авто-обновление каждую минуту' : 'Авто-обновление каждую минуту'}
+            </span>
+          ) : null}
+        </div>
+      ) : null}
       {loading ? (
         <div className="skeleton" style={{ height: 280 }} />
       ) : failed ? (
@@ -143,6 +204,33 @@ function OverviewTrafficChartCard({
           skipTrailingGaps
         />
       )}
+      <div className="chart-legend chart-legend--below row" style={{ gap: 14, font: 'var(--pv-text-body-3)', color: 'var(--fg-secondary)', flexWrap: 'wrap' }}>
+        {(lines || []).map((line) => {
+          const key = mode === 'pps' ? `${line.key}_pps` : line.key;
+          const off = hidden.has(key);
+          return (
+            <button
+              key={key}
+              type="button"
+              className={`chart-legend__item${off ? ' is-off' : ''}`}
+              aria-pressed={!off}
+              title={off ? 'Показать на графике' : 'Скрыть с графика'}
+              onClick={() => onToggleLine?.(key)}
+            >
+              <span
+                className="chart-legend__swatch"
+                style={{ width: 12, height: line.key === 'total' ? 3 : 2, background: line.color, opacity: off ? 0.35 : 1 }}
+              />
+              {line.label}, {mode === 'pps' ? 'пакеты/с' : 'бит/с'}
+            </button>
+          );
+        })}
+      </div>
+      {showStats ? (
+        <div className="chart-stats-row">
+          <OverviewTrafficChartStats points={points || []} series={visibleSeries} mode={mode} />
+        </div>
+      ) : null}
       {footer}
     </Card>
   );

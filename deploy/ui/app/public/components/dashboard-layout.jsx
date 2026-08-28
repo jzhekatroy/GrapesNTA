@@ -1,6 +1,6 @@
 /* Operator dashboard layout: grid, edit mode, server persistence. */
 
-const { useState, useEffect, useLayoutEffect, useCallback, useRef } = React;
+const { useState, useEffect, useLayoutEffect, useCallback, useMemo, useRef } = React;
 
 const DASHBOARD_GRID_COLS = 12;
 const DASHBOARD_LAYOUT_SAVE_MS = 400;
@@ -51,16 +51,38 @@ const CONTENT_WIDGET_IDS = Object.keys(OPERATOR_WIDGET_REGISTRY);
 const DEFAULT_OPERATOR_LAYOUT = {
   version: DASHBOARD_LAYOUT_VERSION,
   widgets: [
-    { id: 'stat-max', x: 0, y: 0, w: 4, h: 1, visible: true },
-    { id: 'stat-avg', x: 4, y: 0, w: 4, h: 1, visible: true },
-    { id: 'stat-volume', x: 8, y: 0, w: 4, h: 1, visible: true },
-    { id: 'traffic-chart', x: 0, y: 1, w: 8, h: 2, visible: true },
-    { id: 'distribution-protocols', x: 8, y: 1, w: 4, h: 1, visible: true },
-    { id: 'distribution-services', x: 8, y: 2, w: 4, h: 1, visible: true },
-    { id: 'vlan', x: 0, y: 3, w: 12, h: 1, visible: true },
-    { id: 'top-talkers', x: 0, y: 4, w: 7, h: 2, visible: true },
-    { id: 'countries', x: 7, y: 4, w: 5, h: 2, visible: true },
-    { id: 'recent-flows', x: 0, y: 6, w: 12, h: 1, visible: true },
+    { id: 'stat-max', x: 0, y: 0, w: 4, h: 1, visible: false },
+    { id: 'traffic-chart', x: 0, y: 0, w: 8, h: 2, visible: true },
+    { id: 'stat-volume', x: 8, y: 0, w: 4, h: 1, visible: false },
+    {
+      id: 'stack-v-bsu8e0s',
+      kind: 'stack',
+      direction: 'vertical',
+      x: 8,
+      y: 0,
+      w: 4,
+      h: 2,
+      visible: true,
+      childIds: ['distribution-protocols', 'distribution-services'],
+    },
+    { id: 'stat-avg', x: 0, y: 2, w: 4, h: 1, visible: false },
+    { id: 'vlan', x: 0, y: 2, w: 12, h: 1, visible: false },
+    {
+      id: 'stack-h-kiphmzp',
+      kind: 'stack',
+      direction: 'horizontal',
+      x: 0,
+      y: 2,
+      w: 12,
+      h: 2,
+      visible: true,
+      childIds: ['recent-flows', 'top-talkers'],
+    },
+    { id: 'countries', x: 0, y: 4, w: 12, h: 2, visible: true },
+    { id: 'distribution-protocols', x: 0, y: 0, w: 12, h: 1, visible: true, parentStack: 'stack-v-bsu8e0s' },
+    { id: 'recent-flows', x: 0, y: 0, w: 6, h: 1, visible: true, parentStack: 'stack-h-kiphmzp' },
+    { id: 'top-talkers', x: 6, y: 0, w: 6, h: 2, visible: true, parentStack: 'stack-h-kiphmzp' },
+    { id: 'distribution-services', x: 0, y: 1, w: 12, h: 1, visible: true, parentStack: 'stack-v-bsu8e0s' },
   ],
   settings: {
     distribution: {
@@ -116,6 +138,53 @@ function getStackChildWidgets(widgets, stack) {
   return [...ids]
     .map((id) => widgets.find((w) => w.id === id))
     .filter(Boolean);
+}
+
+function isEmptyStack(widgets, stack) {
+  return isStackWidget(stack) && getStackChildWidgets(widgets, stack).length === 0;
+}
+
+function stackContentsLabel(widgets, stack) {
+  const children = getStackChildWidgets(widgets, stack);
+  if (!children.length) return 'Пустой стек';
+  const order = Array.isArray(stack.childIds) ? stack.childIds : [];
+  return [...children]
+    .sort((a, b) => {
+      const ai = order.indexOf(a.id);
+      const bi = order.indexOf(b.id);
+      if (ai >= 0 && bi >= 0) return ai - bi;
+      if (ai >= 0) return -1;
+      if (bi >= 0) return 1;
+      return String(a.id).localeCompare(String(b.id));
+    })
+    .map((child) => getDashboardWidgetMeta(child)?.label || child.id)
+    .join(', ');
+}
+
+function removeDashboardStack(widgets, stackId) {
+  const stack = widgets.find((widget) => widget.id === stackId);
+  if (!stack || !isStackWidget(stack)) return widgets;
+  const remainingVisible = widgets.filter((widget) => widget.visible !== false && widget.id !== stackId).length;
+  if (remainingVisible < 1) return widgets;
+  const next = widgets
+    .filter((widget) => widget.id !== stackId)
+    .map((widget) => {
+      if (widget.parentStack !== stackId) return widget;
+      const copy = { ...widget };
+      delete copy.parentStack;
+      return copy;
+    });
+  return repackDashboardWidgets(next, { keepOrder: true });
+}
+
+function pruneHiddenEmptyStacks(widgets) {
+  const drop = new Set(
+    widgets
+      .filter((widget) => widget.visible === false && isEmptyStack(widgets, widget))
+      .map((widget) => widget.id),
+  );
+  if (!drop.size) return widgets;
+  return widgets.filter((widget) => !drop.has(widget.id));
 }
 
 function reconcileStackMembership(widgets) {
@@ -454,14 +523,17 @@ function isLegacyV1Layout(saved) {
 function migrateV1ToV2(saved) {
   const byId = new Map((saved.widgets || []).map((w) => [String(w.id), w]));
   const widgets = DEFAULT_OPERATOR_LAYOUT.widgets.map((defaultWidget) => {
+    if (isStackWidget(defaultWidget)) return clampDashboardWidget(defaultWidget);
     const next = { ...defaultWidget };
     const direct = byId.get(defaultWidget.id);
-    if (direct) {
+    if (direct && !defaultWidget.parentStack) {
       next.visible = direct.visible !== false;
       next.x = direct.x;
       next.y = direct.y;
       next.w = direct.w;
       next.h = direct.h;
+    } else if (direct) {
+      next.visible = direct.visible !== false;
     }
     const statsParent = byId.get('traffic-stats');
     if (statsParent && V1_STAT_CHILDREN.includes(defaultWidget.id)) {
@@ -491,13 +563,21 @@ function mergeDashboardLayout(saved, defaults = DEFAULT_OPERATOR_LAYOUT) {
 
   for (const defaultWidget of base.widgets) {
     const savedWidget = byId.get(defaultWidget.id);
+    if (isStackWidget(defaultWidget)) {
+      if (!savedWidget) continue;
+      mergedWidgets.push(clampDashboardWidget({ ...defaultWidget, ...savedWidget, id: defaultWidget.id }));
+      byId.delete(defaultWidget.id);
+      continue;
+    }
     if (savedWidget) {
-      mergedWidgets.push(clampDashboardWidget(
-        { ...defaultWidget, ...savedWidget, id: defaultWidget.id },
-      ));
+      const merged = { ...defaultWidget, ...savedWidget, id: defaultWidget.id };
+      if (!savedWidget.parentStack) delete merged.parentStack;
+      mergedWidgets.push(clampDashboardWidget(merged));
       byId.delete(defaultWidget.id);
     } else {
-      mergedWidgets.push(clampDashboardWidget(defaultWidget));
+      const fresh = { ...defaultWidget };
+      delete fresh.parentStack;
+      mergedWidgets.push(clampDashboardWidget(fresh));
     }
   }
 
@@ -557,22 +637,6 @@ function finalizeResizeDashboardLayout(widgets) {
   const visible = sortDashboardWidgets(widgets.filter((w) => w.visible !== false));
   if (!dashboardLayoutHasCollisions(visible)) return widgets;
   return repackDashboardWidgets([...visible, ...hidden], { keepOrder: true });
-}
-
-function layoutHiddenDashboardWidgets(visibleWidgets, hidden, { startY = null } = {}) {
-  if (!hidden.length) return [];
-  const maxY = visibleWidgets.reduce((max, widget) => Math.max(max, widget.y + widget.h), 0);
-  let y = startY ?? maxY;
-  return hidden.map((widget) => {
-    const placed = clampDashboardWidget({
-      ...widget,
-      x: 0,
-      y,
-      w: DASHBOARD_GRID_COLS,
-    });
-    y += placed.h;
-    return placed;
-  });
 }
 
 function ensureOccupancyRows(grid, rows) {
@@ -689,7 +753,10 @@ function moveWidgetIntoStack(widgets, widgetId, stackId) {
   const widget = list.find((w) => w.id === widgetId);
   const stack = list.find((w) => w.id === stackId);
   if (!widget || !stack || !isStackWidget(stack) || isStackWidget(widget)) return widgets;
-  if (widget.parentStack === stackId) return widgets;
+  if (widget.visible === false) widget.visible = true;
+  if (widget.parentStack === stackId) {
+    return repackDashboardWidgets(reconcileStackMembership(list), { keepOrder: true });
+  }
 
   if (widget.parentStack) {
     const oldStack = list.find((w) => w.id === widget.parentStack);
@@ -745,21 +812,30 @@ function addDashboardStack(widgets, direction) {
 }
 
 function moveDashboardWidget(widgets, sourceId, targetId, { insertAfter = false, insertIntoStack = false } = {}) {
-  if (!sourceId || !targetId || sourceId === targetId) return widgets;
+  if (!sourceId || !targetId) return widgets;
+  if (sourceId === targetId && !insertAfter && !insertIntoStack) return widgets;
 
-  const source = widgets.find((w) => w.id === sourceId);
-  if (source?.parentStack && !isStackWidget(source)) return widgets;
+  let list = widgets.map((w) => ({ ...w }));
+  const source = list.find((w) => w.id === sourceId);
+  if (!source) return widgets;
+  const wasHidden = source.visible === false;
+  if (wasHidden) source.visible = true;
 
   if (insertIntoStack) {
-    const target = widgets.find((w) => w.id === targetId);
-    if (target && isStackWidget(target) && source && !isStackWidget(source)) {
-      return moveWidgetIntoStack(widgets, sourceId, targetId);
+    const target = list.find((w) => w.id === targetId);
+    if (target && isStackWidget(target) && !isStackWidget(source)) {
+      return moveWidgetIntoStack(list, sourceId, targetId);
     }
   }
 
-  const visible = sortDashboardWidgets(getTopLevelWidgets(widgets).filter((w) => w.visible));
-  const hidden = widgets.filter((w) => !w.visible);
-  const stackChildren = widgets.filter((w) => isStackChild(w) && w.visible !== false);
+  if (source.parentStack && !isStackWidget(source)) {
+    if (!wasHidden) return widgets;
+    list = extractWidgetFromStack(list, sourceId);
+  }
+
+  const visible = sortDashboardWidgets(getTopLevelWidgets(list).filter((w) => w.visible));
+  const hidden = list.filter((w) => !w.visible);
+  const stackChildren = list.filter((w) => isStackChild(w) && w.visible !== false);
   const fromIdx = visible.findIndex((w) => w.id === sourceId);
   let toIdx = visible.findIndex((w) => w.id === targetId);
   if (fromIdx < 0 || toIdx < 0) return widgets;
@@ -774,8 +850,12 @@ function moveDashboardWidget(widgets, sourceId, targetId, { insertAfter = false,
 
 function previewDashboardMove(widgets, sourceId, targetId, options) {
   if (!sourceId || !targetId) return null;
-  if (sourceId === targetId && !options?.insertAfter && !options?.insertIntoStack) return null;
-  return moveDashboardWidget(widgets, sourceId, targetId, options);
+  if (sourceId === targetId && !options?.insertAfter && !options?.insertIntoStack) {
+    const source = widgets.find((w) => w.id === sourceId);
+    if (source?.visible !== false) return null;
+  }
+  const next = moveDashboardWidget(widgets, sourceId, targetId, options);
+  return next === widgets ? null : next;
 }
 
 function readWidgetLayoutRect(el) {
@@ -808,8 +888,35 @@ function pointInRect(rect, clientX, clientY, inset = 0) {
     && clientY <= rect.bottom - inset;
 }
 
-function dropTargetFromWidgetHit(widget, rect, clientY, { sourceWidget = null } = {}) {
-  if (isStackWidget(widget) && sourceWidget && !isStackWidget(sourceWidget)) {
+const STACK_DROP_BODY_INSET_PX = 10;
+
+function stackDropBodyRect(grid, widgetId) {
+  const el = grid?.querySelector(`[data-widget-id="${widgetId}"] .dashboard-stack`);
+  return el ? el.getBoundingClientRect() : null;
+}
+
+function pointInStackDropZone(rect, clientX, clientY) {
+  if (!rect) return false;
+  const insetX = Math.min(STACK_DROP_BODY_INSET_PX, Math.max(4, rect.width * 0.04));
+  const insetY = Math.min(STACK_DROP_BODY_INSET_PX, Math.max(4, rect.height * 0.08));
+  return clientX >= rect.left + insetX
+    && clientX <= rect.right - insetX
+    && clientY >= rect.top + insetY
+    && clientY <= rect.bottom - insetY;
+}
+
+function dropTargetFromWidgetHit(widget, rect, clientX, clientY, {
+  sourceWidget = null,
+  directHit = false,
+  stackBodyRect = null,
+} = {}) {
+  if (
+    directHit
+    && isStackWidget(widget)
+    && sourceWidget
+    && !isStackWidget(sourceWidget)
+    && pointInStackDropZone(stackBodyRect || rect, clientX, clientY)
+  ) {
     return { id: widget.id, insertIntoStack: true, insertAfter: false };
   }
   const midY = rect.top + rect.height / 2;
@@ -827,7 +934,9 @@ function findDropTargetFromPoint(clientX, clientY, sourceId, grid, layoutWidgets
   if (!grid) return null;
 
   if (phantomRect && pointInRect(phantomRect, clientX, clientY) && lastTarget) {
-    return lastTarget;
+    if (!lastTarget.insertIntoStack) return lastTarget;
+    const bodyRect = stackDropBodyRect(grid, lastTarget.id);
+    if (pointInStackDropZone(bodyRect || phantomRect, clientX, clientY)) return lastTarget;
   }
 
   const sourceWidget = layoutWidgets.find((w) => w.id === sourceId) || null;
@@ -857,7 +966,12 @@ function findDropTargetFromPoint(clientX, clientY, sourceId, grid, layoutWidgets
     directHits.sort((a, b) => (
       (a.rect.width * a.rect.height) - (b.rect.width * b.rect.height)
     ));
-    return dropTargetFromWidgetHit(directHits[0].widget, directHits[0].rect, clientY, { sourceWidget });
+    const hit = directHits[0];
+    return dropTargetFromWidgetHit(hit.widget, hit.rect, clientX, clientY, {
+      sourceWidget,
+      directHit: true,
+      stackBodyRect: isStackWidget(hit.widget) ? stackDropBodyRect(grid, hit.widget.id) : null,
+    });
   }
 
   const colHits = widgetHits.filter(({ widget, rect }) => (
@@ -880,7 +994,10 @@ function findDropTargetFromPoint(clientX, clientY, sourceId, grid, layoutWidgets
     return { id: last.id, insertAfter: true, insertIntoStack: false };
   }
 
-  return dropTargetFromWidgetHit(nearest.widget, nearest.rect, clientY, { sourceWidget });
+  return dropTargetFromWidgetHit(nearest.widget, nearest.rect, clientX, clientY, {
+    sourceWidget,
+    directHit: false,
+  });
 }
 
 const DASHBOARD_DROP_TARGET_SWITCH_PX = 28;
@@ -902,15 +1019,17 @@ function stabilizeDropTarget(next, prev, clientX, clientY, grid) {
 
   if (next.id !== prev.id) {
     const inset = DASHBOARD_DROP_TARGET_SWITCH_PX;
-    const insideNext = clientX >= rect.left + inset
-      && clientX <= rect.right - inset
-      && clientY >= rect.top + inset
-      && clientY <= rect.bottom - inset;
+    const insideNext = pointInRect(rect, clientX, clientY, inset);
     return insideNext ? next : prev;
   }
 
-  if (next.insertIntoStack) return next;
-  if (prev.insertIntoStack) return prev;
+  if (prev.insertIntoStack !== next.insertIntoStack) {
+    if (next.insertIntoStack) {
+      const bodyRect = stackDropBodyRect(grid, next.id) || rect;
+      return pointInStackDropZone(bodyRect, clientX, clientY) ? next : prev;
+    }
+    return next;
+  }
 
   const midY = rect.top + rect.height / 2;
   const buffer = DASHBOARD_DROP_TARGET_SWITCH_PX;
@@ -1026,17 +1145,25 @@ function previewResizeDashboardWidget(widgets, widgetId, { w, h, anchorRight, an
 }
 
 function finalizeDashboardWidgetLayout(prev, widgets) {
+  const clamped = pruneHiddenEmptyStacks(
+    reconcileStackMembership(
+      widgets.map((widget) => clampDashboardWidget(widget)).filter(Boolean),
+    ),
+  );
   return {
     ...prev,
     version: DASHBOARD_LAYOUT_VERSION,
-    widgets: reconcileStackMembership(
-      widgets.map((widget) => clampDashboardWidget(widget)).filter(Boolean),
-    ),
+    widgets: reconcileStackMembership(clamped),
   };
 }
 
 function toggleDashboardWidgetVisibility(widgets, widgetId, visible) {
+  const target = widgets.find((w) => w.id === widgetId);
+  if (!target) return widgets;
   const nextVisible = visible !== false;
+  if (!nextVisible && isEmptyStack(widgets, target)) {
+    return removeDashboardStack(widgets, widgetId);
+  }
   const visibleCount = widgets.filter((w) => w.visible && w.id !== widgetId).length;
   if (!nextVisible && visibleCount < 1) return widgets;
   const next = widgets.map((w) => (
@@ -1191,6 +1318,130 @@ function useDashboardLayout({ enabled = true, canEdit = true } = {}) {
   };
 }
 
+function getHiddenDashboardWidgets(widgets) {
+  const list = Array.isArray(widgets) ? widgets : [];
+  return list
+    .filter((widget) => {
+      if (widget.visible !== false) return false;
+      if (isEmptyStack(list, widget)) return false;
+      if (!widget.parentStack) return true;
+      const stack = list.find((item) => item.id === widget.parentStack);
+      return stack && stack.visible !== false;
+    })
+    .sort((a, b) => {
+      const labelA = getDashboardWidgetMeta(a)?.label || a.id;
+      const labelB = getDashboardWidgetMeta(b)?.label || b.id;
+      return String(labelA).localeCompare(String(labelB), 'ru');
+    });
+}
+
+function hiddenWidgetCaption(widgets, widget) {
+  if (isStackWidget(widget)) return stackContentsLabel(widgets, widget);
+  if (!widget.parentStack) return '';
+  const stack = (widgets || []).find((item) => item.id === widget.parentStack);
+  if (!stack) return '';
+  const stackLabel = getDashboardWidgetMeta(stack)?.label || stack.id;
+  return `В стеке «${stackLabel}»`;
+}
+
+function DashboardHiddenWidgetsMenu({ widgets, onRestore, onDragStart, editMode }) {
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef(null);
+  const hidden = useMemo(() => getHiddenDashboardWidgets(widgets), [widgets]);
+
+  useEffect(() => {
+    if (!editMode) setOpen(false);
+  }, [editMode]);
+
+  useEffect(() => {
+    if (!open) return undefined;
+    const onPointerDown = (event) => {
+      if (rootRef.current?.contains(event.target)) return;
+      setOpen(false);
+    };
+    const onKeyDown = (event) => {
+      if (event.key === 'Escape') setOpen(false);
+    };
+    document.addEventListener('mousedown', onPointerDown);
+    document.addEventListener('keydown', onKeyDown);
+    return () => {
+      document.removeEventListener('mousedown', onPointerDown);
+      document.removeEventListener('keydown', onKeyDown);
+    };
+  }, [open]);
+
+  if (!editMode) return null;
+
+  const handleDragMouseDown = (widgetId) => (event) => {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    setOpen(false);
+    onDragStart?.(widgetId, event);
+  };
+
+  return (
+    <div className={`dashboard-hidden-menu${open ? ' is-open' : ''}`} ref={rootRef}>
+      <Button
+        kind="ghost"
+        size="sm"
+        icon="eyeOff"
+        iconRight="chevD"
+        onClick={() => setOpen((value) => !value)}
+        title="Скрытые карточки"
+      >
+        Скрытые
+        {hidden.length ? (
+          <span className="dashboard-hidden-menu__count">{hidden.length}</span>
+        ) : null}
+      </Button>
+      {open ? (
+        <div className="dashboard-hidden-menu__dropdown" role="menu">
+          <div className="dashboard-hidden-menu__title">Скрытые карточки</div>
+          {hidden.length ? (
+            <div className="dashboard-hidden-menu__hint">Перетащите на дашборд, чтобы разместить</div>
+          ) : null}
+          {hidden.length ? hidden.map((widget) => {
+            const meta = getDashboardWidgetMeta(widget);
+            const caption = hiddenWidgetCaption(widgets, widget);
+            return (
+              <div
+                key={widget.id}
+                className="dashboard-hidden-menu__item"
+                role="menuitem"
+              >
+                <button
+                  type="button"
+                  className="dashboard-hidden-menu__item-drag"
+                  title="Перетащите на дашборд"
+                  onMouseDown={handleDragMouseDown(widget.id)}
+                >
+                  <Icon name="drag" size={14} />
+                  <span className="dashboard-hidden-menu__item-text">
+                    <span className="dashboard-hidden-menu__item-label">{meta?.label || widget.id}</span>
+                    {caption ? (
+                      <span className="dashboard-hidden-menu__item-meta">{caption}</span>
+                    ) : null}
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  className="dashboard-hidden-menu__restore"
+                  onClick={() => onRestore(widget.id)}
+                >
+                  <Icon name="eye" size={14} />
+                  Вернуть
+                </button>
+              </div>
+            );
+          }) : (
+            <div className="dashboard-hidden-menu__empty">Нет скрытых карточек</div>
+          )}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function DashboardLayoutToolbar({
   editMode,
   onToggleEdit,
@@ -1199,6 +1450,10 @@ function DashboardLayoutToolbar({
   onAddHorizontalStack,
   saveState,
   canEdit,
+  widgets,
+  onRestoreWidget,
+  onHiddenWidgetDragStart,
+  className = '',
 }) {
   if (!canEdit) return null;
 
@@ -1211,7 +1466,7 @@ function DashboardLayoutToolbar({
   }[saveState] || '';
 
   return (
-    <div className="dashboard-layout-toolbar">
+    <div className={`dashboard-layout-toolbar${editMode ? ' dashboard-layout-toolbar--edit' : ''}${className ? ` ${className}` : ''}`}>
       {saveLabel ? (
         <span className={`dashboard-layout-toolbar__status${saveState === 'error' ? ' is-error' : ''}`}>
           {saveLabel}
@@ -1219,6 +1474,12 @@ function DashboardLayoutToolbar({
       ) : null}
       {editMode ? (
         <>
+          <DashboardHiddenWidgetsMenu
+            editMode={editMode}
+            widgets={widgets}
+            onRestore={(widgetId) => onRestoreWidget?.(widgetId)}
+            onDragStart={(widgetId, event) => onHiddenWidgetDragStart?.(widgetId, event)}
+          />
           <Button kind="ghost" size="sm" onClick={onAddVerticalStack}>Вертикальный стек</Button>
           <Button kind="ghost" size="sm" onClick={onAddHorizontalStack}>Горизонтальный стек</Button>
           <Button kind="ghost" size="sm" onClick={onReset}>Сбросить</Button>
@@ -1238,11 +1499,16 @@ function DashboardWidgetChrome({
   onDragHandleMouseDown,
   onExtractFromStack,
   inStack = false,
+  emptyStack = false,
+  caption = '',
   children,
 }) {
   if (!editMode) return children;
 
   const meta = getDashboardWidgetMeta(widget);
+  const hideTitle = emptyStack
+    ? 'Удалить пустой стек'
+    : (widget.visible ? 'Скрыть виджет' : 'Показать виджет');
 
   return (
     <div className={`dashboard-widget-chrome${widget.visible ? '' : ' is-hidden'}${inStack ? ' dashboard-widget-chrome--in-stack' : ''}`}>
@@ -1254,11 +1520,15 @@ function DashboardWidgetChrome({
             onMouseDown={onDragHandleMouseDown}
           >
             <Icon name="drag" />
-            <span>{meta?.label || widget.id}</span>
+            <span className="dashboard-widget-chrome__title">
+              <span>{meta?.label || widget.id}</span>
+              {caption ? <span className="dashboard-widget-chrome__caption">{caption}</span> : null}
+            </span>
           </div>
         ) : (
           <div className="dashboard-widget-chrome__label">
             <span>{meta?.label || widget.id}</span>
+            {caption ? <span className="dashboard-widget-chrome__caption">{caption}</span> : null}
           </div>
         )}
         <div className="dashboard-widget-chrome__actions">
@@ -1274,11 +1544,11 @@ function DashboardWidgetChrome({
           ) : null}
           <button
             type="button"
-            className="dashboard-widget-chrome__hide"
-            title={widget.visible ? 'Скрыть виджет' : 'Показать виджет'}
+            className={`dashboard-widget-chrome__hide${emptyStack ? ' is-delete' : ''}`}
+            title={hideTitle}
             onClick={onToggleVisibility}
           >
-            <Icon name={widget.visible ? 'eyeOff' : 'eye'} />
+            <Icon name={emptyStack ? 'trash' : (widget.visible ? 'eyeOff' : 'eye')} />
           </button>
         </div>
       </div>
@@ -1406,6 +1676,7 @@ function DashboardGrid({
   onResizeWidgetHeight,
   onToggleWidgetVisible,
   onExtractFromStack,
+  beginDragRef,
 }) {
   const gridRef = useRef(null);
   const dragSourceRef = useRef(null);
@@ -1443,12 +1714,6 @@ function DashboardGrid({
   const visibleWidgets = sortDashboardWidgets(
     getTopLevelWidgets(layoutWidgets).filter((w) => w.visible && !(draggingId && w.id === draggingId)),
   );
-  const hiddenSource = getTopLevelWidgets(layoutWidgets).filter((w) => !w.visible);
-  const maxVisibleY = visibleWidgets.reduce((max, widget) => Math.max(max, widget.y + widget.h), 0);
-  const hiddenWidgets = editMode
-    ? layoutHiddenDashboardWidgets(visibleWidgets, hiddenSource, { startY: maxVisibleY + 1 })
-    : [];
-  const hiddenDividerY = editMode && hiddenWidgets.length ? maxVisibleY : null;
   const phantomWidget = draggingId
     ? layoutWidgets.find((w) => w.id === draggingId && w.visible !== false)
     : null;
@@ -1493,10 +1758,22 @@ function DashboardGrid({
     dragSourceRef.current = widgetId;
     lastDropTargetRef.current = null;
     dragPreviewKeyRef.current = dashboardLayoutPreviewKey(layout.widgets);
-    setDraggingId(widgetId);
     setDragPreview(null);
 
+    const originX = e.clientX;
+    const originY = e.clientY;
+    let dragStarted = false;
+
+    const ensureDragStarted = (ev) => {
+      if (dragStarted) return true;
+      if (Math.hypot(ev.clientX - originX, ev.clientY - originY) < 8) return false;
+      dragStarted = true;
+      setDraggingId(widgetId);
+      return true;
+    };
+
     const applyDragPreview = (ev) => {
+      if (!ensureDragStarted(ev)) return;
       const sourceId = dragSourceRef.current;
       if (!sourceId) return;
       const { layout: liveLayout } = dragContextRef.current;
@@ -1558,6 +1835,14 @@ function DashboardGrid({
       document.body.style.cursor = '';
       document.body.style.userSelect = '';
       const sourceId = dragSourceRef.current;
+      dragSourceRef.current = null;
+      lastDropTargetRef.current = null;
+      dragPreviewKeyRef.current = '';
+      if (!dragStarted) {
+        setDraggingId(null);
+        setDragPreview(null);
+        return;
+      }
       const { layout: liveLayout } = dragContextRef.current;
       const dropTarget = resolveDropTarget(ev.clientX, ev.clientY, sourceId);
       const preview = sourceId && dropTarget
@@ -1566,9 +1851,6 @@ function DashboardGrid({
           insertIntoStack: dropTarget.insertIntoStack,
         })
         : null;
-      dragSourceRef.current = null;
-      lastDropTargetRef.current = null;
-      dragPreviewKeyRef.current = '';
       const previewKey = preview ? dashboardLayoutPreviewKey(preview) : '';
       const originalKey = dashboardLayoutPreviewKey(liveLayout.widgets);
       if (sourceId && dropTarget && preview && previewKey !== originalKey) {
@@ -1586,6 +1868,10 @@ function DashboardGrid({
     document.addEventListener('mousemove', onMove);
     document.addEventListener('mouseup', onUp);
   };
+
+  if (beginDragRef) {
+    beginDragRef.current = (widgetId, event) => onDragHandleMouseDown(widgetId)(event);
+  }
 
   const onResizeWidthMouseDown = (widget, edge) => (e) => {
     if (e.button !== 0) return;
@@ -1848,6 +2134,8 @@ function DashboardGrid({
     const modeKey = (widget.id === 'distribution-protocols' || widget.id === 'distribution-services')
       ? distributionRenderKey
       : '';
+    const emptyStack = stackWidget && isEmptyStack(layoutWidgets, widget);
+    const stackCaption = stackWidget && !emptyStack ? stackContentsLabel(layoutWidgets, widget) : '';
     let content = null;
     if (stackWidget) {
       content = (
@@ -1874,6 +2162,8 @@ function DashboardGrid({
         <DashboardWidgetChrome
           widget={widget}
           editMode={editMode}
+          emptyStack={emptyStack}
+          caption={stackCaption}
           onToggleVisibility={() => onToggleWidgetVisible(widget.id, !widget.visible)}
           onDragHandleMouseDown={onDragHandleMouseDown(widget.id)}
         >
@@ -1939,16 +2229,6 @@ function DashboardGrid({
           detail={`${getDashboardWidgetMeta(interactionPhantom)?.label || interactionPhantom.id} · ${interactionPhantom.w}×${interactionPhantom.h}`}
         />
       ) : null}
-      {editMode && hiddenDividerY != null ? (
-        <div
-          key="dashboard-hidden-divider"
-          className="dashboard-grid__hidden-divider"
-          style={{ gridColumn: '1 / -1', gridRow: `${hiddenDividerY + 1} / span 1` }}
-        >
-          Скрытые виджеты
-        </div>
-      ) : null}
-      {hiddenWidgets.map((widget) => renderWidgetShell(widget, { hiddenPreview: true }))}
     </div>
   );
 }

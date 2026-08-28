@@ -26,12 +26,6 @@ const COUNTRY_BASIS_LABELS = {
   asn: 'Страна ASN (реестр)',
 };
 
-const MAP_SIDE_LABELS = {
-  remote: 'Удалённая',
-  src: 'Источник',
-  dst: 'Назначение',
-};
-
 const TRAFFIC_STAT_TILES = [
   { id: 'max', label: 'Максимально', mode: 'rate' },
   { id: 'avg', label: 'Среднее', mode: 'rate' },
@@ -64,6 +58,7 @@ function OperatorDashboard({
   readOnly,
 }) {
   const canEditLayout = !readOnly;
+  const beginHiddenDragRef = useRef(null);
   const {
     layout,
     editMode,
@@ -276,16 +271,6 @@ function OperatorDashboard({
     }
     return next;
   });
-  const dataSource = statsSource === 'clickhouse' || source === 'clickhouse'
-    ? 'clickhouse'
-    : statsSource === 'loading' || source === 'loading'
-      ? 'loading'
-      : 'error';
-  const dataSubtitleSuffix = dataSource === 'clickhouse'
-    ? 'ClickHouse'
-    : dataSource === 'loading'
-      ? '…'
-      : LOAD_FAILED;
   const trendRangeHint = onChartRangeSelect ? ' · выделите диапазон на графике' : '';
   const statDirectionDefs = TRAFFIC_DIRECTIONS
     .filter((direction) => directions?.[direction.id])
@@ -367,7 +352,6 @@ function OperatorDashboard({
     'traffic-chart': () => (
       <OverviewTrafficChartCard
         title="Полоса пропускания и pps"
-        subtitle={`${periodLabel} · NetFlow v9 + IPFIX · ${dataSubtitleSuffix}`}
         points={chartPoints}
         lines={chartLines}
         ppsLines={chartLines}
@@ -385,11 +369,6 @@ function OperatorDashboard({
         bucketSeconds={300}
         onRangeSelect={onChartRangeSelect}
         showEmptyState={false}
-        footer={chartPoints.length > 0 ? (
-          <div className="chart-data-until">
-            по завершённым пятиминуткам, до {chartPoints[chartPoints.length - 1].t}
-          </div>
-        ) : null}
       />
     ),
     'distribution-protocols': () => (
@@ -493,6 +472,22 @@ function OperatorDashboard({
     ),
   };
 
+  const layoutToolbar = (sticky = false) => (
+    <DashboardLayoutToolbar
+      editMode={editMode}
+      onToggleEdit={setEditMode}
+      onReset={resetLayout}
+      onAddVerticalStack={() => addStack('vertical')}
+      onAddHorizontalStack={() => addStack('horizontal')}
+      saveState={saveState}
+      canEdit={canEditLayout}
+      widgets={layout.widgets}
+      onRestoreWidget={(widgetId) => setWidgetVisible(widgetId, true)}
+      onHiddenWidgetDragStart={(widgetId, event) => beginHiddenDragRef.current?.(widgetId, event)}
+      className={sticky ? 'dashboard-layout-toolbar--sticky' : ''}
+    />
+  );
+
   return (
     <div className="main__container">
       <div className="page-head">
@@ -500,16 +495,9 @@ function OperatorDashboard({
           <h1>Сводка по сети</h1>
           <p>Живой обзор трафика, потоков и состояния инфраструктуры.</p>
         </div>
-        <DashboardLayoutToolbar
-          editMode={editMode}
-          onToggleEdit={setEditMode}
-          onReset={resetLayout}
-          onAddVerticalStack={() => addStack('vertical')}
-          onAddHorizontalStack={() => addStack('horizontal')}
-          saveState={saveState}
-          canEdit={canEditLayout}
-        />
+        {editMode ? null : layoutToolbar()}
       </div>
+      {editMode ? layoutToolbar(true) : null}
 
       <DashboardGrid
         layout={layout}
@@ -521,6 +509,7 @@ function OperatorDashboard({
         onResizeWidgetHeight={resizeWidgetHeight}
         onToggleWidgetVisible={setWidgetVisible}
         onExtractFromStack={extractFromStack}
+        beginDragRef={beginHiddenDragRef}
       />
 
       <OtherPortsModal
@@ -845,7 +834,7 @@ function RecentFlowsCard({ enabled = true, directions, directionsKey, collectorF
     <OverviewRecentFlowsCard
       rows={rows}
       source={flowsSource}
-      subtitle={`Последние потоки из flows_raw · ${directionFilterLabel}`}
+      subtitle={directionFilterLabel}
       loadMs={loadMs}
       serverMs={serverMs}
       emptyLabel="Нет потоков для выбранного направления"
@@ -1064,12 +1053,6 @@ function CountryHeatmapCard({
   const showInternalHint = onlyInternal && mapSide === 'remote';
 
   const basisLabel = COUNTRY_BASIS_LABELS[countryBasis] || countryBasis;
-  const mapSideLabel = MAP_SIDE_LABELS[mapSide] || mapSide;
-  const sourceNote = countrySource === 'clickhouse'
-    ? 'ClickHouse'
-    : countrySource === 'loading'
-      ? '…'
-      : LOAD_FAILED;
 
   useEffect(() => {
     if (!enabled) return undefined;
@@ -1102,7 +1085,7 @@ function CountryHeatmapCard({
   return (
     <OverviewCountryCard
       title="География источников"
-      subtitle={`${periodLabel} · ${basisLabel} · ${mapSideLabel} · ${sourceNote}`}
+      subtitle={`${periodLabel} · ${basisLabel}`}
       rows={countryRows}
       colorMetric={colorMetric}
       onColorMetricChange={setColorMetric}

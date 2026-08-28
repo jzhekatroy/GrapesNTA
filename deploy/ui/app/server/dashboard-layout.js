@@ -37,16 +37,38 @@ const OPERATOR_WIDGET_IDS = Object.keys(OPERATOR_WIDGET_CONSTRAINTS);
 const DEFAULT_OPERATOR_LAYOUT = {
   version: LAYOUT_VERSION,
   widgets: [
-    { id: 'stat-max', x: 0, y: 0, w: 4, h: 1, visible: true },
-    { id: 'stat-avg', x: 4, y: 0, w: 4, h: 1, visible: true },
-    { id: 'stat-volume', x: 8, y: 0, w: 4, h: 1, visible: true },
-    { id: 'traffic-chart', x: 0, y: 1, w: 8, h: 2, visible: true },
-    { id: 'distribution-protocols', x: 8, y: 1, w: 4, h: 1, visible: true },
-    { id: 'distribution-services', x: 8, y: 2, w: 4, h: 1, visible: true },
-    { id: 'vlan', x: 0, y: 3, w: 12, h: 1, visible: true },
-    { id: 'top-talkers', x: 0, y: 4, w: 7, h: 2, visible: true },
-    { id: 'countries', x: 7, y: 4, w: 5, h: 2, visible: true },
-    { id: 'recent-flows', x: 0, y: 6, w: 12, h: 1, visible: true },
+    { id: 'stat-max', x: 0, y: 0, w: 4, h: 1, visible: false },
+    { id: 'traffic-chart', x: 0, y: 0, w: 8, h: 2, visible: true },
+    { id: 'stat-volume', x: 8, y: 0, w: 4, h: 1, visible: false },
+    {
+      id: 'stack-v-bsu8e0s',
+      kind: 'stack',
+      direction: 'vertical',
+      x: 8,
+      y: 0,
+      w: 4,
+      h: 2,
+      visible: true,
+      childIds: ['distribution-protocols', 'distribution-services'],
+    },
+    { id: 'stat-avg', x: 0, y: 2, w: 4, h: 1, visible: false },
+    { id: 'vlan', x: 0, y: 2, w: 12, h: 1, visible: false },
+    {
+      id: 'stack-h-kiphmzp',
+      kind: 'stack',
+      direction: 'horizontal',
+      x: 0,
+      y: 2,
+      w: 12,
+      h: 2,
+      visible: true,
+      childIds: ['recent-flows', 'top-talkers'],
+    },
+    { id: 'countries', x: 0, y: 4, w: 12, h: 2, visible: true },
+    { id: 'distribution-protocols', x: 0, y: 0, w: 12, h: 1, visible: true, parentStack: 'stack-v-bsu8e0s' },
+    { id: 'recent-flows', x: 0, y: 0, w: 6, h: 1, visible: true, parentStack: 'stack-h-kiphmzp' },
+    { id: 'top-talkers', x: 6, y: 0, w: 6, h: 2, visible: true, parentStack: 'stack-h-kiphmzp' },
+    { id: 'distribution-services', x: 0, y: 1, w: 12, h: 1, visible: true, parentStack: 'stack-v-bsu8e0s' },
   ],
   settings: {
     distribution: {
@@ -194,14 +216,17 @@ function isLegacyV1Layout(saved) {
 function migrateV1ToV2(saved) {
   const byId = new Map((saved.widgets || []).map((w) => [String(w.id), w]));
   const widgets = DEFAULT_OPERATOR_LAYOUT.widgets.map((defaultWidget) => {
+    if (isStackWidget(defaultWidget)) return clampStackWidget(defaultWidget);
     const next = { ...defaultWidget };
     const direct = byId.get(defaultWidget.id);
-    if (direct) {
+    if (direct && !defaultWidget.parentStack) {
       next.visible = direct.visible !== false;
       next.x = direct.x;
       next.y = direct.y;
       next.w = direct.w;
       next.h = direct.h;
+    } else if (direct) {
+      next.visible = direct.visible !== false;
     }
     const statsParent = byId.get('traffic-stats');
     if (statsParent && V1_STAT_CHILDREN.includes(defaultWidget.id)) {
@@ -211,7 +236,7 @@ function migrateV1ToV2(saved) {
     if (chartParent && V1_CHART_CHILDREN.includes(defaultWidget.id)) {
       next.visible = chartParent.visible !== false;
     }
-    return clampWidget(next, OPERATOR_WIDGET_CONSTRAINTS[defaultWidget.id]);
+    return clampContentWidget(next, OPERATOR_WIDGET_CONSTRAINTS[defaultWidget.id]);
   });
 
   return {
@@ -232,14 +257,22 @@ function mergeWithDefaults(saved, defaults = DEFAULT_OPERATOR_LAYOUT) {
 
   for (const defaultWidget of base.widgets) {
     const savedWidget = byId.get(defaultWidget.id);
+    if (isStackWidget(defaultWidget)) {
+      if (!savedWidget) continue;
+      mergedWidgets.push(clampStackWidget({ ...defaultWidget, ...savedWidget, id: defaultWidget.id }));
+      byId.delete(defaultWidget.id);
+      continue;
+    }
+    const constraints = OPERATOR_WIDGET_CONSTRAINTS[defaultWidget.id];
     if (savedWidget) {
-      mergedWidgets.push(clampContentWidget(
-        { ...defaultWidget, ...savedWidget, id: defaultWidget.id },
-        OPERATOR_WIDGET_CONSTRAINTS[defaultWidget.id],
-      ));
+      const merged = { ...defaultWidget, ...savedWidget, id: defaultWidget.id };
+      if (!savedWidget.parentStack) delete merged.parentStack;
+      mergedWidgets.push(clampContentWidget(merged, constraints));
       byId.delete(defaultWidget.id);
     } else {
-      mergedWidgets.push(clampContentWidget(defaultWidget, OPERATOR_WIDGET_CONSTRAINTS[defaultWidget.id]));
+      const fresh = { ...defaultWidget };
+      delete fresh.parentStack;
+      mergedWidgets.push(clampContentWidget(fresh, constraints));
     }
   }
 
