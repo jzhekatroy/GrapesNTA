@@ -5376,33 +5376,13 @@ html.modal-open #root {
   color: var(--fg-secondary);
 }
 .chart-legend--below {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
   margin-top: 10px;
   margin-bottom: 0;
-}
-.chart-stats-row {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 4px 14px;
-  margin-top: 6px;
   font: var(--pv-text-body-3);
   color: var(--fg-secondary);
-}
-.chart-stats-row .chart-legend__meta {
-  margin-left: auto;
-}
-.chart-stats {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px 14px;
-}
-.chart-stats__item {
-  display: inline-flex;
-  align-items: baseline;
-  gap: 4px;
-}
-.chart-stats__v {
-  color: var(--fg-primary);
 }
 
 .chart-data-until {

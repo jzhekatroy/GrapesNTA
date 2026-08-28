@@ -64,13 +64,13 @@ test('default layout hides stats and VLAN widgets', () => {
   }
 });
 
-test('default layout stacks protocols/services and flows/talkers', () => {
+test('default layout stacks protocols/services and countries/talkers', () => {
   const vertical = DEFAULT_OPERATOR_LAYOUT.widgets.find((w) => w.id === 'stack-v-bsu8e0s');
   const horizontal = DEFAULT_OPERATOR_LAYOUT.widgets.find((w) => w.id === 'stack-h-kiphmzp');
   assert.equal(vertical?.direction, 'vertical');
   assert.deepEqual(vertical?.childIds, ['distribution-protocols', 'distribution-services']);
   assert.equal(horizontal?.direction, 'horizontal');
-  assert.deepEqual(horizontal?.childIds, ['recent-flows', 'top-talkers']);
+  assert.deepEqual(horizontal?.childIds, ['countries', 'top-talkers']);
   assert.equal(
     DEFAULT_OPERATOR_LAYOUT.widgets.find((w) => w.id === 'distribution-protocols').parentStack,
     'stack-v-bsu8e0s',
@@ -79,7 +79,13 @@ test('default layout stacks protocols/services and flows/talkers', () => {
     DEFAULT_OPERATOR_LAYOUT.widgets.find((w) => w.id === 'top-talkers').parentStack,
     'stack-h-kiphmzp',
   );
-  assert.equal(DEFAULT_OPERATOR_LAYOUT.widgets.find((w) => w.id === 'countries').w, 12);
+  assert.equal(
+    DEFAULT_OPERATOR_LAYOUT.widgets.find((w) => w.id === 'countries').parentStack,
+    'stack-h-kiphmzp',
+  );
+  assert.equal(DEFAULT_OPERATOR_LAYOUT.widgets.find((w) => w.id === 'countries').w, 6);
+  assert.equal(DEFAULT_OPERATOR_LAYOUT.widgets.find((w) => w.id === 'recent-flows').parentStack, undefined);
+  assert.equal(DEFAULT_OPERATOR_LAYOUT.widgets.find((w) => w.id === 'recent-flows').w, 12);
 });
 
 test('mergeWithDefaults preserves user order and adds new widgets', () => {
