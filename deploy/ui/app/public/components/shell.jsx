@@ -690,6 +690,23 @@ function viewMonthFromPeriod(period) {
   return { year: now.y, month: now.mo };
 }
 
+function pickerOpenDraft(period) {
+  const fromParts = parseDatetimeLocalParts(period?.from);
+  const toParts = parseDatetimeLocalParts(period?.to);
+  if (!fromParts || !toParts) {
+    const today = parseDatetimeLocalParts(msToDatetimeLocalValue(Date.now(), getDisplayTimezone()));
+    if (!today) return defaultCustomPeriod();
+    return {
+      from: formatDatetimeLocalParts({ ...today, h: 0, mi: 0 }),
+      to: formatDatetimeLocalParts({ ...today, h: 0, mi: 0 }),
+    };
+  }
+  return {
+    from: formatDatetimeLocalParts({ ...fromParts, h: 0, mi: 0 }),
+    to: formatDatetimeLocalParts({ ...toParts, h: 0, mi: 0 }),
+  };
+}
+
 function yesterdayCustomPeriod() {
   const today = parseDatetimeLocalParts(msToDatetimeLocalValue(Date.now(), getDisplayTimezone()));
   if (!today) return defaultCustomPeriod();
@@ -1314,7 +1331,7 @@ function CustomPeriodCalendar({
 
   const handleDayClick = (day) => {
     const fp = fromParts || { h: 0, mi: 0 };
-    const tp = toParts || { h: 23, mi: 59 };
+    const tp = toParts || { h: 0, mi: 0 };
     if (!rangeAnchor) {
       selectionTimesRef.current = { from: { h: fp.h, mi: fp.mi }, to: { h: tp.h, mi: tp.mi } };
       onRangeAnchorChange(day);
@@ -1412,12 +1429,12 @@ function CustomPeriodCalendar({
         />
         <PeriodTimeField
           label="Время до"
-          hour={toParts?.h ?? 23}
-          minute={toParts?.mi ?? 59}
+          hour={toParts?.h ?? 0}
+          minute={toParts?.mi ?? 0}
           hourId={hourToId}
           minuteId={minuteToId}
-          onHourChange={(h) => updateToTime(h, toParts?.mi ?? 59)}
-          onMinuteChange={(mi) => updateToTime(toParts?.h ?? 23, mi)}
+          onHourChange={(h) => updateToTime(h, toParts?.mi ?? 0)}
+          onMinuteChange={(mi) => updateToTime(toParts?.h ?? 0, mi)}
         />
       </div>
       {periodError && <div className="time-filter__custom-error" role="alert">{periodError}</div>}
@@ -1458,7 +1475,7 @@ function TimeFilter({
 
   useEffect(() => {
     if (!open) return;
-    setDraftPeriod(customPeriod);
+    setDraftPeriod(pickerOpenDraft(customPeriod));
     setViewMonth(viewMonthFromPeriod(customPeriod));
     setRangeAnchor(null);
     setPeriodError(null);
@@ -1555,7 +1572,7 @@ function TimeFilter({
   };
 
   const openMenu = () => {
-    setDraftPeriod(customPeriod);
+    setDraftPeriod(pickerOpenDraft(customPeriod));
     setViewMonth(viewMonthFromPeriod(customPeriod));
     setRangeAnchor(null);
     setPeriodError(null);
