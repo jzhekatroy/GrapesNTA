@@ -26,16 +26,14 @@
 #   ./deploy/deploy.sh logs [svc]      # follow logs (worker|enrichment|ui|detection|all)
 #   ./deploy/deploy.sh --no-pull ui    # rebuild without git pull
 #
-# Git pull as root never asks for a GitHub login. It uses, in order:
-#   GRAPES_GIT_TOKEN / GITHUB_TOKEN / deploy/.gittoken
-#   then sudo -u <user> if that user has stored git/gh credentials
-#   then root's own credential helper (no TTY prompt).
-# If none work, deploy stops — it will not rebuild an old tree.
+# Run it directly on a root shell: `./deploy/deploy.sh …`, not through sudo.
+# sudo resets HOME, git then loses root's stored GitHub credentials and the
+# pull stops on a login prompt. A failed pull aborts the deploy instead of
+# rebuilding the previous tree.
 #
 # Optional env:
 #   UI_DATA_DIR=/opt/grapes/ui/data
 #   UI_LEGACY_ENV=/opt/grapes/ui/.env
-#   GRAPES_GIT_TOKEN=ghp_...   # or put the PAT in deploy/.gittoken (mode 600)
 #
 set -euo pipefail
 
@@ -58,7 +56,7 @@ SEL_DETECTION=0
 SEL_SCHEMA=0
 
 usage() {
-  sed -n '2,42p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,37p' "$0" | sed 's/^# \{0,1\}//'
   exit "${1:-0}"
 }
 
@@ -68,6 +66,10 @@ die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 need_root() {
   if [[ "${EUID}" -ne 0 ]]; then
     die "run as root (docker + /opt). Example: sudo $0 $*"
+  fi
+  # Warn once: through sudo the pull loses root's git credentials.
+  if [[ -n "${SUDO_USER:-}" && "${DO_PULL}" -eq 1 ]]; then
+    log "note: запущено через sudo. Если git pull попросит логин — выйдите и запустите из root-шелла: ./deploy/deploy.sh $*"
   fi
 }
 
@@ -79,112 +81,22 @@ need_compose_dir() {
   docker compose version >/dev/null 2>&1 || die "docker compose plugin required"
 }
 
-# Never prompt on the TTY. Keep stored helpers (store/cache); if they are
-# empty, ASKPASS=/bin/false fails the pull instead of "Username for github".
-git_no_prompt() {
-  GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/bin/false SSH_ASKPASS=/bin/false \
-    git -c core.askPass=/bin/false "$@"
-}
-
-git_token_ok() {
-  local token="$1"
-  [[ -n "${token}" ]] || return 1
-  [[ "${#token}" -ge 20 ]] || return 1
-  case "${token}" in
-    ВСТАВЬТЕ_ТОКЕН|INSERT_TOKEN|changeme|xxx|your_token_here) return 1 ;;
-  esac
-  return 0
-}
-
-git_read_token() {
-  local token=""
-  if [[ -n "${GRAPES_GIT_TOKEN:-}" ]]; then
-    token="${GRAPES_GIT_TOKEN}"
-  elif [[ -n "${GITHUB_TOKEN:-}" ]]; then
-    token="${GITHUB_TOKEN}"
-  elif [[ -f "${REPO_ROOT}/deploy/.gittoken" ]]; then
-    token="$(tr -d '\n\r ' < "${REPO_ROOT}/deploy/.gittoken")"
-  fi
-  git_token_ok "${token}" || return 1
-  printf '%s' "${token}"
-}
-
-git_pull_users() {
-  local seen=":" user home
-  _add_user() {
-    local u="$1"
-    [[ -n "${u}" && "${u}" != "root" ]] || return 0
-    [[ "${seen}" == *":${u}:"* ]] && return 0
-    id -u "${u}" >/dev/null 2>&1 || return 0
-    seen="${seen}${u}:"
-    printf '%s\n' "${u}"
-  }
-  _add_user "${SUDO_USER:-}"
-  _add_user "$(stat -c '%U' "${REPO_ROOT}" 2>/dev/null || true)"
-  _add_user "$(stat -c '%U' "${REPO_ROOT}/.git" 2>/dev/null || true)"
-  for home in /home/*; do
-    [[ -d "${home}" ]] || continue
-    user="$(basename "${home}")"
-    if [[ -f "${home}/.git-credentials" || -f "${home}/.config/gh/hosts.yml" || -f "${home}/.netrc" ]]; then
-      _add_user "${user}"
-    fi
-  done
-}
-
-git_try_pull() {
-  local branch="$1"
-  git_no_prompt -C "${REPO_ROOT}" pull --ff-only origin "${branch}"
-}
-
-git_try_pull_token() {
-  local branch="$1" token="$2" url
-  url="$(git -C "${REPO_ROOT}" remote get-url origin)"
-  case "${url}" in
-    https://github.com/*|https://www.github.com/*)
-      log "git pull with token"
-      # Classic PAT: user x-access-token. Bearer extraHeader is often ignored.
-      GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/bin/false \
-        git -C "${REPO_ROOT}" \
-          -c core.askPass=/bin/false \
-          -c "url.https://x-access-token:${token}@github.com/.insteadOf=https://github.com/" \
-          pull --ff-only origin "${branch}"
-      ;;
-    *)
-      return 1
-      ;;
-  esac
-}
-
-git_try_pull_as() {
-  local user="$1" branch="$2"
-  log "git pull as ${user}"
-  sudo -n -u "${user}" -H env GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/bin/false SSH_ASKPASS=/bin/false \
-    git -c core.askPass=/bin/false -C "${REPO_ROOT}" pull --ff-only origin "${branch}"
-}
-
 git_pull() {
   cd "${REPO_ROOT}"
   [[ -d .git ]] || die "${REPO_ROOT} is not a git checkout"
-  local before after branch token user ok=0
+  local before after branch home
   before="$(git rev-parse --short HEAD)"
   branch="$(git rev-parse --abbrev-ref HEAD)"
   log "git pull origin ${branch} (was ${before})"
 
-  token="$(git_read_token || true)"
-  if [[ -n "${token}" ]]; then
-    git_try_pull_token "${branch}" "${token}" && ok=1
-  fi
-  if [[ "${ok}" -eq 0 ]]; then
-    while IFS= read -r user; do
-      [[ -n "${user}" ]] || continue
-      git_try_pull_as "${user}" "${branch}" && { ok=1; break; }
-    done < <(git_pull_users)
-  fi
-  if [[ "${ok}" -eq 0 ]]; then
-    git_try_pull "${branch}" && ok=1
-  fi
-  if [[ "${ok}" -eq 0 ]]; then
-    die "git pull failed without prompting. Put a repo-read PAT in ${REPO_ROOT}/deploy/.gittoken (chmod 600) or GRAPES_GIT_TOKEN, then retry. To rebuild the current tree only: $0 --no-pull …"
+  # sudo wipes HOME, so ~/.git-credentials disappears and git falls back to a
+  # login prompt. GIT_TERMINAL_PROMPT=0 turns that hang into a clean failure.
+  home="${HOME:-/root}"
+  [[ "${EUID}" -eq 0 ]] && home="$(getent passwd root | cut -d: -f6)"
+  [[ -n "${home}" ]] || home=/root
+
+  if ! HOME="${home}" GIT_TERMINAL_PROMPT=0 git pull --ff-only origin "${branch}"; then
+    die "git pull не прошёл (HOME=${home}). Запускайте из root-шелла напрямую: cd ${REPO_ROOT} && ./deploy/deploy.sh …  (без sudo). Собрать текущее дерево без обновления: $0 --no-pull …"
   fi
 
   after="$(git rev-parse --short HEAD)"
