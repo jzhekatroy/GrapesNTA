@@ -181,54 +181,73 @@ async function loadScopeFlags(scope, minuteTs) {
   const srcPort = col('srcPort');
   const dstPort = col('dstPort');
   const tcpFlags = flowCol('tcpFlags') || '`tcp_flags`';
-  const tcp = `f.${protoCol} = 6`;
-  const synSet = `bitAnd(f.${tcpFlags}, 2) > 0`;
-  const ackSet = `bitAnd(f.${tcpFlags}, 16) > 0`;
-  const inDir = `f.direction = 'in'`;
-  const outDir = `f.direction = 'out'`;
-  const flowAvg = `f.${bytesCol} / f.${packetsCol}`;
-  const sessionKey = `if(${inDir},
-    (f.${srcIp}, f.${dstIp}, f.${srcPort}, f.${dstPort}),
-    (f.${dstIp}, f.${srcIp}, f.${dstPort}, f.${srcPort})
-  )`;
+  const tcp = `e.proto = 6`;
+  const synSet = `bitAnd(e.tcp_flags, 2) > 0`;
+  const ackSet = `bitAnd(e.tcp_flags, 16) > 0`;
+  const flowAvg = `e.bytes / e.packets`;
   const from = formatCh(minuteTs);
   const to = formatCh(minuteTs + MINUTE);
   const until = formatCh(minuteTs + EXPORT_LAG + MINUTE);
 
-  let scopeExpr;
-  let scopeFilter;
+  // На части коллекторов почти всё в direction=unknown. Рукопожатие
+  // считаем по стороне объекта (dst = к нему, src = от него), не по in/out.
+  let towardId;
+  let fromId;
   if (scope === 'client') {
-    scopeExpr = `if(${inDir}, f.dst_client, f.src_client)`;
-    scopeFilter = `((${inDir} AND f.dst_client != '') OR (${outDir} AND f.src_client != ''))`;
+    towardId = 'f.dst_client';
+    fromId = 'f.src_client';
   } else {
-    const dstNet = netFromIpSql(dstIpSql());
-    const srcNet = netFromIpSql(srcIpSql());
-    scopeExpr = `if(${inDir}, ${dstNet}, ${srcNet})`;
-    scopeFilter = `((${inDir} AND ${dstNet} != '') OR (${outDir} AND ${srcNet} != ''))`;
+    towardId = netFromIpSql(dstIpSql());
+    fromId = netFromIpSql(srcIpSql());
   }
-
-  const { rows } = await query(`
-    SELECT
-      ${scopeExpr} AS scope_id,
-      sumIf(f.${bytesCol}, ${inDir}) AS bytes,
-      sumIf(f.${packetsCol}, ${inDir}) AS packets,
-      countIf(${inDir} AND f.${packetsCol} > 0) AS cv_n,
-      sumIf(${flowAvg}, ${inDir} AND f.${packetsCol} > 0) AS cv_sum,
-      sumIf(pow(${flowAvg}, 2), ${inDir} AND f.${packetsCol} > 0) AS cv_sum_sq,
-      uniqIf(${sessionKey}, ${inDir} AND ${tcp} AND ${synSet}) AS syn_attempts,
-      uniqIf(${sessionKey}, ${outDir} AND ${tcp} AND ${synSet} AND ${ackSet}) AS syn_answered,
-      countIf(${inDir} AND ${tcp} AND ${synSet}) AS syn_in_flows,
-      countIf(${inDir} AND ${tcp} AND f.${tcpFlags} = 2) AS syn_half_open,
-      countIf(${outDir} AND ${tcp} AND f.${tcpFlags} = 18) AS syn_half_open_reply
-    FROM ${flowsRawTableRef()} AS f
-    WHERE f.date >= toDate(${utcDateTime64('from')}) - 1
+  const timeFilter = `
+    f.date >= toDate(${utcDateTime64('from')}) - 1
       AND f.date <= toDate(${utcDateTime64('until')})
       AND f.time_flow_start_ns >= ${utcDateTime64('from')}
       AND f.time_flow_start_ns < ${utcDateTime64('to')}
       AND f.${timeCol} >= ${utcDateTime64('from')}
       AND f.${timeCol} < ${utcDateTime64('until')}
-      AND ${scopeFilter}
-    GROUP BY scope_id
+  `;
+  const flowCols = `
+    f.${bytesCol} AS bytes,
+    f.${packetsCol} AS packets,
+    f.${protoCol} AS proto,
+    f.${tcpFlags} AS tcp_flags
+  `;
+
+  const { rows } = await query(`
+    SELECT
+      e.scope_id AS scope_id,
+      sumIf(e.bytes, e.toward) AS bytes,
+      sumIf(e.packets, e.toward) AS packets,
+      countIf(e.toward AND e.packets > 0) AS cv_n,
+      sumIf(${flowAvg}, e.toward AND e.packets > 0) AS cv_sum,
+      sumIf(pow(${flowAvg}, 2), e.toward AND e.packets > 0) AS cv_sum_sq,
+      uniqIf(e.sess, e.toward AND ${tcp} AND ${synSet}) AS syn_attempts,
+      uniqIf(e.sess, NOT e.toward AND ${tcp} AND ${synSet} AND ${ackSet}) AS syn_answered,
+      countIf(e.toward AND ${tcp} AND ${synSet}) AS syn_in_flows,
+      countIf(e.toward AND ${tcp} AND e.tcp_flags = 2) AS syn_half_open,
+      countIf(NOT e.toward AND ${tcp} AND e.tcp_flags = 18) AS syn_half_open_reply
+    FROM (
+      SELECT
+        ${towardId} AS scope_id,
+        1 AS toward,
+        (f.${srcIp}, f.${dstIp}, f.${srcPort}, f.${dstPort}) AS sess,
+        ${flowCols}
+      FROM ${flowsRawTableRef()} AS f
+      WHERE ${timeFilter}
+        AND ${towardId} != ''
+      UNION ALL
+      SELECT
+        ${fromId} AS scope_id,
+        0 AS toward,
+        (f.${dstIp}, f.${srcIp}, f.${dstPort}, f.${srcPort}) AS sess,
+        ${flowCols}
+      FROM ${flowsRawTableRef()} AS f
+      WHERE ${timeFilter}
+        AND ${fromId} != ''
+    ) AS e
+    GROUP BY e.scope_id
   `, { from, to, until }, { name: `detection/flags-${scope}`, clickhouse_settings: HEAVY, requestTimeoutMs: 180000 });
 
   return new Map(rows.map((r) => [String(r.scope_id), mapFlagRow(r)]));
