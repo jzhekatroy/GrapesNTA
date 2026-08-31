@@ -105,6 +105,18 @@ function cloneLayout(layout) {
   return JSON.parse(JSON.stringify(layout));
 }
 
+function dashboardHeightStep(widgetId) {
+  return widgetId === 'traffic-chart' ? 0.5 : 1;
+}
+
+function snapDashboardHeight(h, minH, maxH, step = 1) {
+  const raw = Number(h);
+  const n = Number.isFinite(raw) ? raw : minH;
+  const snapped = Math.round(n / step) * step;
+  const clean = Math.round(snapped / step) * step;
+  return Math.min(maxH, Math.max(minH, clean));
+}
+
 function nearestAllowedW(value, allowedW) {
   const n = Number(value);
   if (!Number.isFinite(n)) return allowedW[0];
@@ -134,7 +146,7 @@ function stackDirectionKey(direction) {
 
 function clampContentWidget(widget, constraints) {
   const inner = !!widget.parentStack;
-  const h = Math.min(constraints.maxH, Math.max(constraints.minH, Math.round(Number(widget.h) || constraints.minH)));
+  const h = snapDashboardHeight(widget.h, constraints.minH, constraints.maxH, dashboardHeightStep(widget.id));
   const y = Math.max(0, Math.round(Number(widget.y) || 0));
   const w = inner
     ? Math.min(GRID_COLS, Math.max(1, Math.round(Number(widget.w) || 1)))

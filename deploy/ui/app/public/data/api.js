@@ -719,13 +719,6 @@ const ApiClient = (() => {
     return body.data || body;
   }
 
-  async function loadBoundsDiagnostics() {
-    const body = await getJson('/api/diagnostics/bounds', {
-      widget: 'diagnostics/bounds',
-    });
-    return body.data || body;
-  }
-
   async function loadAnalysisSnapshotsDiagnostics() {
     const body = await getJson('/api/diagnostics/analysis-snapshots', {
       widget: 'diagnostics/analysis-snapshots',
@@ -2902,7 +2895,6 @@ const ApiClient = (() => {
     cancelWorkerBackfill,
     loadEnrichmentDiagnostics,
     loadSnmpDiagnostics,
-    loadBoundsDiagnostics,
     loadAnalysisSnapshotsDiagnostics,
     loadFailedRequestsDiagnostics,
     loadBuildInfo,

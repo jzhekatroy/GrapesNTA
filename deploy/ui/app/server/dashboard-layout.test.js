@@ -196,6 +196,28 @@ test('validateLayout keeps traffic-chart at least one row', () => {
   assert.equal(layout.widgets.find((w) => w.id === 'traffic-chart').h, 1);
 });
 
+test('validateLayout keeps a 1.5-row traffic-chart', () => {
+  const layout = validateLayout({
+    version: 3,
+    widgets: DEFAULT_OPERATOR_LAYOUT.widgets.map((w) => (
+      w.id === 'traffic-chart' ? { ...w, h: 1.5 } : w
+    )),
+    settings: DEFAULT_OPERATOR_LAYOUT.settings,
+  });
+  assert.equal(layout.widgets.find((w) => w.id === 'traffic-chart').h, 1.5);
+});
+
+test('validateLayout snaps traffic-chart height to half rows', () => {
+  const layout = validateLayout({
+    version: 3,
+    widgets: DEFAULT_OPERATOR_LAYOUT.widgets.map((w) => (
+      w.id === 'traffic-chart' ? { ...w, h: 1.2 } : w
+    )),
+    settings: DEFAULT_OPERATOR_LAYOUT.settings,
+  });
+  assert.equal(layout.widgets.find((w) => w.id === 'traffic-chart').h, 1);
+});
+
 test('validateLayout accepts stack grouping', () => {
   const layout = validateLayout({
     version: 3,

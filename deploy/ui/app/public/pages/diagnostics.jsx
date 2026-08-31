@@ -1,4 +1,4 @@
-/* Диагностика контейнеров / периодических jobs: grapes-worker, grapes-enrichment, SNMP, bounds-service. */
+/* Диагностика контейнеров / периодических jobs: grapes-worker, grapes-enrichment, SNMP. */
 
 const { useState, useEffect, useCallback } = React;
 
@@ -1146,136 +1146,6 @@ function SnmpPanel({ data, loading, onReload }) {
   );
 }
 
-function BoundsPanel({ data, loading, onReload }) {
-  const health = data?.health || {};
-  const config = data?.config || {};
-  const connection = data?.connection || {};
-  const parameters = data?.parameters || [];
-  const problems = data?.problems || [];
-  const summary = data?.summary || {};
-
-  const aliveTone = health.ok ? 'healthy' : 'critical';
-  const configTone = config.ok ? 'healthy' : 'critical';
-
-  return (
-    <div className="col" style={{ gap: 14 }}>
-      <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
-        <div style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-secondary)', maxWidth: 760 }}>
-          Сервис управления границами (<span className="mono">bounds-service</span>):
-          чтение и запись CI-границ в <span className="mono">config.yaml</span> для страницы Мониторинг.
-        </div>
-        <Button kind="ghost" icon="refresh" onClick={onReload} disabled={loading}>
-          {loading ? 'Обновление…' : 'Обновить'}
-        </Button>
-      </div>
-
-      <ProblemsBanner
-        problems={problems}
-        okText="bounds-service доступен, config.yaml читается без ошибок."
-      />
-
-      <div className="row" style={{ gap: 10, flexWrap: 'wrap' }}>
-        {[
-          ['alive', health.ok ? 'ok' : 'down', aliveTone],
-          ['config', config.ok ? 'ok' : 'fail', configTone],
-          ['mode', summary.mode || '—', 'idle'],
-          ['problems', summary.problemCount ?? 0, (summary.problemCount || 0) > 0 ? 'warning' : 'healthy'],
-        ].map(([k, v, t]) => (
-          <div
-            key={k}
-            style={{
-              minWidth: 110,
-              padding: '10px 12px',
-              borderRadius: 8,
-              background: t === 'critical' ? 'var(--st-critical-bg)'
-                : t === 'warning' ? 'var(--st-warning-bg)'
-                  : t === 'healthy' ? 'var(--st-success-bg)' : 'var(--bg-secondary)',
-            }}
-          >
-            <div style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-secondary)' }}>{k}</div>
-            <div className="mono" style={{ font: 'var(--pv-text-body-2-bold)' }}>{String(v)}</div>
-          </div>
-        ))}
-      </div>
-
-      <Card title="Подключение">
-        <div className="col" style={{ gap: 8, font: 'var(--pv-text-body-3)' }}>
-          <div>
-            URL: <span className="mono">{connection.urlConfigured ? connection.serviceUrl : 'не настроен'}</span>
-          </div>
-          <div>
-            token: <span className="mono">{connection.tokenConfigured ? 'задан' : 'не задан'}</span>
-          </div>
-          <div>
-            /health: <span className="mono">{health.ok ? 'ok' : 'fail'}</span>
-            {health.latencyMs != null ? (
-              <span> · latency=<span className="mono">{health.latencyMs} ms</span></span>
-            ) : null}
-            {health.error ? (
-              <span style={{ color: 'var(--st-critical)' }}> · {health.error}</span>
-            ) : null}
-          </div>
-        </div>
-      </Card>
-
-      <Card title="Конфигурация">
-        <div className="col" style={{ gap: 8, font: 'var(--pv-text-body-3)' }}>
-          <div>
-            mode=<span className="mono">{config.mode ?? '—'}</span>
-            {' · '}configPath=<span className="mono">{config.configPath ?? '—'}</span>
-            {config.host ? (
-              <span> · host=<span className="mono">{config.host}</span></span>
-            ) : null}
-          </div>
-          <div>
-            /config/bounds: <span className="mono">{config.ok ? 'ok' : 'fail'}</span>
-            {config.latencyMs != null ? (
-              <span> · latency=<span className="mono">{config.latencyMs} ms</span></span>
-            ) : null}
-            {config.loadedAt ? (
-              <span> · loaded=<span className="mono">{fmtDiagTime(config.loadedAt)}</span></span>
-            ) : null}
-          </div>
-          {config.error ? (
-            <div style={{ color: 'var(--st-critical)' }}>{config.error}</div>
-          ) : null}
-        </div>
-      </Card>
-
-      <Card title="Границы по показателям">
-        <table style={{ width: '100%', borderCollapse: 'collapse', font: 'var(--pv-text-body-3)' }}>
-          <thead>
-            <tr>
-              <th style={{ textAlign: 'left', padding: 6 }}>показатель</th>
-              <th style={{ textAlign: 'left', padding: 6 }}>секция YAML</th>
-              <th style={{ textAlign: 'right', padding: 6 }}>ci_low</th>
-              <th style={{ textAlign: 'right', padding: 6 }}>ci_high</th>
-              <th style={{ textAlign: 'right', padding: 6 }}>ci_minimum</th>
-            </tr>
-          </thead>
-          <tbody>
-            {parameters.length === 0 ? (
-              <tr>
-                <td colSpan={5} style={{ padding: 6, color: 'var(--fg-secondary)' }}>Нет данных</td>
-              </tr>
-            ) : parameters.map((p) => (
-              <tr key={p.id}>
-                <td style={{ padding: 6 }}>
-                  {p.label}
-                </td>
-                <td style={{ padding: 6 }} className="mono">{p.section}</td>
-                <td style={{ padding: 6, textAlign: 'right' }} className="mono">{p.ciLow ?? '—'}</td>
-                <td style={{ padding: 6, textAlign: 'right' }} className="mono">{p.ciHigh ?? '—'}</td>
-                <td style={{ padding: 6, textAlign: 'right' }} className="mono">{p.ciMinimum ?? '—'}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </Card>
-    </div>
-  );
-}
-
 function AnalysisSnapshotsPanel({ data, loading, onReload }) {
   const oldest = data?.oldest || null;
 
@@ -1649,7 +1519,6 @@ function PageDiagnostics() {
   const [workerData, setWorkerData] = useState(null);
   const [enrichData, setEnrichData] = useState(null);
   const [snmpData, setSnmpData] = useState(null);
-  const [boundsData, setBoundsData] = useState(null);
   const [snapshotsData, setSnapshotsData] = useState(null);
   const [failuresData, setFailuresData] = useState(null);
   const [failuresPage, setFailuresPage] = useState({
@@ -1682,21 +1551,18 @@ function PageDiagnostics() {
       ? ApiClient.loadEnrichmentDiagnostics()
       : tab === 'snmp'
         ? ApiClient.loadSnmpDiagnostics()
-        : tab === 'bounds'
-          ? ApiClient.loadBoundsDiagnostics()
-          : tab === 'snapshots'
-            ? ApiClient.loadAnalysisSnapshotsDiagnostics()
-            : tab === 'failures'
-              ? ApiClient.loadFailedRequestsDiagnostics({
-                limit: failuresPage.limit,
-                offset: failuresPage.offset,
-              })
-              : ApiClient.loadWorkerDiagnostics();
+        : tab === 'snapshots'
+          ? ApiClient.loadAnalysisSnapshotsDiagnostics()
+          : tab === 'failures'
+            ? ApiClient.loadFailedRequestsDiagnostics({
+              limit: failuresPage.limit,
+              offset: failuresPage.offset,
+            })
+            : ApiClient.loadWorkerDiagnostics();
     loader
       .then((body) => {
         if (tab === 'enrichment') setEnrichData(body);
         else if (tab === 'snmp') setSnmpData(body);
-        else if (tab === 'bounds') setBoundsData(body);
         else if (tab === 'snapshots') setSnapshotsData(body);
         else if (tab === 'failures') {
           if (body?.total && failuresPage.offset >= body.total && failuresPage.offset > 0) {
@@ -1753,13 +1619,6 @@ function PageDiagnostics() {
           </button>
           <button
             type="button"
-            className={tab === 'bounds' ? 'seg__item seg__item--active' : 'seg__item'}
-            onClick={() => setTab('bounds')}
-          >
-            bounds-service
-          </button>
-          <button
-            type="button"
             className={tab === 'detection' ? 'seg__item seg__item--active' : 'seg__item'}
             onClick={() => { sessionStorage.setItem('grapes-diagnostics-tab', 'detection'); setTab('detection'); }}
           >
@@ -1812,13 +1671,6 @@ function PageDiagnostics() {
       {tab === 'snmp' && (
         <SnmpPanel
           data={snmpData}
-          loading={loading}
-          onReload={() => reload({ initial: false })}
-        />
-      )}
-      {tab === 'bounds' && (
-        <BoundsPanel
-          data={boundsData}
           loading={loading}
           onReload={() => reload({ initial: false })}
         />

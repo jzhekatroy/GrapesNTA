@@ -9,6 +9,8 @@
     "build:frontend": "node scripts/build-frontend.js",
     "dev:static": "npx serve public -p 3000",
     "start": "npm run dev",
+    "detection": "node server/detection-worker.js loop",
+    "detection:once": "node server/detection-worker.js once",
     "test": "node --test server/*.test.js server/**/*.test.js"
   },
   "dependencies": {

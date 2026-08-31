@@ -15,8 +15,9 @@ const STACK_INNER_COLS = 12;
 const STACK_ROW_SIZE_PX = 128;
 const DASHBOARD_GRID_ROW_PX = 200;
 const DASHBOARD_GRID_GAP_PX = 16;
-// One Protocols card: donut ~150px plus headers. Floor for a 1-row traffic chart.
-const TRAFFIC_CHART_MIN_HEIGHT_PX = 280;
+// Whole traffic-chart widget in edit mode: chrome + paddings + titles + donut (~150–180px).
+const TRAFFIC_CHART_MIN_HEIGHT_PX = 368;
+const TRAFFIC_CHART_HEIGHT_STEP = 0.5;
 const STACK_ID_PATTERN = /^stack-[vh]-[a-z0-9]+$/;
 const LEGACY_V1_COMPOSITE_IDS = new Set(['traffic-stats', 'traffic-chart-row']);
 
@@ -258,7 +259,7 @@ function normalizeStackChildLayout(child, stack) {
   if (!meta || !stack) return child;
 
   const next = { ...child };
-  next.h = Math.min(meta.maxH, Math.max(meta.minH, Math.round(Number(next.h) || meta.minH)));
+  next.h = snapDashboardHeight(next.h, meta.minH, meta.maxH, dashboardHeightStep(next));
   if (stack.direction === 'vertical') {
     next.x = 0;
     next.w = STACK_INNER_COLS;
@@ -383,9 +384,10 @@ function createStackWidget(direction) {
 
 function stackChildStyle(child) {
   const h = Math.max(1, Number(child.h) || 1);
+  const spanH = dashboardGridSpanH(h);
   return {
     gridColumn: `${child.x + 1} / span ${child.w}`,
-    gridRow: `${child.y + 1} / span ${h}`,
+    gridRow: `${child.y + 1} / span ${spanH}`,
     minHeight: `${h * STACK_ROW_SIZE_PX}px`,
   };
 }
@@ -427,6 +429,30 @@ function clearLegacyTrendSplit() {
   } catch { /* ignore */ }
 }
 
+function dashboardHeightStep(widget) {
+  return widget?.id === 'traffic-chart' ? TRAFFIC_CHART_HEIGHT_STEP : 1;
+}
+
+function snapDashboardHeight(h, minH, maxH, step = 1) {
+  const raw = Number(h);
+  const n = Number.isFinite(raw) ? raw : minH;
+  const snapped = Math.round(n / step) * step;
+  const clean = Math.round(snapped / step) * step;
+  return Math.min(maxH, Math.max(minH, clean));
+}
+
+function dashboardGridSpanH(h) {
+  return Math.max(1, Math.ceil(Number(h) || 1));
+}
+
+function isTrafficChartHalfHeight(widget) {
+  return widget?.id === 'traffic-chart' && Number(widget.h) % 1 !== 0;
+}
+
+function trafficChartHeightPx(h) {
+  return TRAFFIC_CHART_MIN_HEIGHT_PX * Math.max(1, Number(h) || 1);
+}
+
 function nearestAllowedW(value, allowedW) {
   const n = Number(value);
   if (!Number.isFinite(n)) return allowedW[0];
@@ -448,7 +474,7 @@ function clampDashboardWidget(widget, registry = OPERATOR_WIDGET_REGISTRY) {
     const template = STACK_WIDGET_TEMPLATES[normalized.direction === 'horizontal' ? 'stack-h' : 'stack-v'];
     if (!template) return null;
     const w = nearestAllowedW(normalized.w, template.allowedW);
-    const h = Math.min(template.maxH, Math.max(template.minH, Math.round(Number(normalized.h) || template.minH)));
+    const h = snapDashboardHeight(normalized.h, template.minH, template.maxH);
     const x = Math.min(DASHBOARD_GRID_COLS - w, Math.max(0, Math.round(Number(normalized.x) || 0)));
     const y = Math.max(0, Math.round(Number(normalized.y) || 0));
     return {
@@ -466,7 +492,7 @@ function clampDashboardWidget(widget, registry = OPERATOR_WIDGET_REGISTRY) {
 
   const meta = registry[widget.id];
   if (!meta) return null;
-  let h = Math.min(meta.maxH, Math.max(meta.minH, Math.round(Number(widget.h) || meta.minH)));
+  let h = snapDashboardHeight(widget.h, meta.minH, meta.maxH, dashboardHeightStep(widget));
   let y = Math.max(0, Math.round(Number(widget.y) || 0));
   if (widget.parentStack) {
     const w = clampStackInnerW(widget.w);
@@ -703,8 +729,9 @@ function ensureOccupancyRows(grid, rows) {
 }
 
 function canPlaceOnGrid(grid, x, y, w, h) {
-  ensureOccupancyRows(grid, y + h);
-  for (let dy = 0; dy < h; dy += 1) {
+  const spanH = dashboardGridSpanH(h);
+  ensureOccupancyRows(grid, y + spanH);
+  for (let dy = 0; dy < spanH; dy += 1) {
     for (let dx = 0; dx < w; dx += 1) {
       if (grid[y + dy][x + dx] != null) return false;
     }
@@ -713,8 +740,9 @@ function canPlaceOnGrid(grid, x, y, w, h) {
 }
 
 function markGridOccupancy(grid, x, y, w, h, id) {
-  ensureOccupancyRows(grid, y + h);
-  for (let dy = 0; dy < h; dy += 1) {
+  const spanH = dashboardGridSpanH(h);
+  ensureOccupancyRows(grid, y + spanH);
+  for (let dy = 0; dy < spanH; dy += 1) {
     for (let dx = 0; dx < w; dx += 1) {
       grid[y + dy][x + dx] = id;
     }
@@ -1138,13 +1166,15 @@ function applyDashboardWidgetResize(widgets, widgetId, { w, h, anchorRight, anch
 
   if (h != null && meta.maxH > meta.minH) {
     const oldBottom = widget.y + widget.h;
-    let newH = Math.min(meta.maxH, Math.max(meta.minH, Math.round(Number(h) || meta.minH)));
+    let newH = snapDashboardHeight(h, meta.minH, meta.maxH, dashboardHeightStep(widget));
     let y = widget.y;
     if (anchorBottom != null) {
       y = anchorBottom - newH;
       if (y < 0) {
         y = 0;
-        newH = Math.min(meta.maxH, Math.max(meta.minH, newH));
+        newH = snapDashboardHeight(newH, meta.minH, meta.maxH, dashboardHeightStep(widget));
+      } else {
+        y = Math.max(0, Math.floor(y + 1e-9));
       }
     }
     next = { ...next, y: Math.max(0, y), h: newH };
@@ -1647,7 +1677,7 @@ function DashboardWidgetPhantom({ widget, compact, detail }) {
 
   return (
     <div
-      className={`dashboard-widget dashboard-widget--phantom${isStackWidget(widget) ? ' dashboard-widget--phantom-stack' : ''}`}
+      className={`dashboard-widget dashboard-widget--phantom${isStackWidget(widget) ? ' dashboard-widget--phantom-stack' : ''}${isTrafficChartHalfHeight(widget) ? ' dashboard-widget--fixed-h' : ''}`}
       style={style}
       data-dashboard-phantom="true"
       data-flip-id={`phantom-${widget.id}`}
@@ -1663,17 +1693,26 @@ function DashboardWidgetPhantom({ widget, compact, detail }) {
 function dashboardWidgetStyle(widget, compact) {
   const w = compact ? DASHBOARD_GRID_COLS : widget.w;
   const h = Math.max(1, Number(widget.h) || 1);
+  const spanH = dashboardGridSpanH(h);
   const meta = getDashboardWidgetMeta(widget);
   const rowPx = (isStackWidget(widget) || widget.parentStack) ? STACK_ROW_SIZE_PX : DASHBOARD_GRID_ROW_PX;
   const style = {
     gridColumn: `${widget.x + 1} / span ${w}`,
-    gridRow: `${widget.y + 1} / span ${h}`,
+    gridRow: `${widget.y + 1} / span ${spanH}`,
     '--dw-w': w,
     '--dw-h': h,
   };
   if (meta && meta.maxH > meta.minH) {
     let minHeightPx = h * rowPx;
-    if (widget.id === 'traffic-chart') minHeightPx = Math.max(minHeightPx, TRAFFIC_CHART_MIN_HEIGHT_PX);
+    if (widget.id === 'traffic-chart') {
+      minHeightPx = trafficChartHeightPx(h);
+      if (isTrafficChartHalfHeight(widget)) {
+        style.height = `${minHeightPx}px`;
+        style.maxHeight = `${minHeightPx}px`;
+        style.alignSelf = 'start';
+        style['--dw-fixed-h'] = `${minHeightPx}px`;
+      }
+    }
     style.minHeight = `${minHeightPx}px`;
   }
   return style;
@@ -2034,7 +2073,8 @@ function DashboardGrid({
 
     const fromNorth = edge === 'north';
     const rowPx = (widget.parentStack || isStackWidget(widget)) ? STACK_ROW_SIZE_PX : DASHBOARD_GRID_ROW_PX;
-    const rowHeight = Math.max(72, (rowPx + DASHBOARD_GRID_GAP_PX) / 2);
+    const heightStep = dashboardHeightStep(widget);
+    const rowHeight = Math.max(72, (rowPx + DASHBOARD_GRID_GAP_PX) / 2) * heightStep;
     const startY = e.clientY;
     const startH = widget.h;
     const startWidgetY = widget.y;
@@ -2061,7 +2101,8 @@ function DashboardGrid({
       resizeMoveRafRef.current = requestAnimationFrame(() => {
         resizeMoveRafRef.current = null;
         if (!pendingEv) return;
-        const deltaRows = Math.round((pendingEv.clientY - startY) / Math.max(rowHeight, 1));
+        const rawDelta = (pendingEv.clientY - startY) / Math.max(rowHeight, 1);
+        const deltaRows = Math.round(rawDelta) * heightStep;
         pendingH = fromNorth ? startH - deltaRows : startH + deltaRows;
         applyPreview();
       });
@@ -2208,7 +2249,7 @@ function DashboardGrid({
         key={`${widget.id}${modeKey ? `:${modeKey}` : ''}`}
         data-widget-id={widget.id}
         data-flip-id={widget.id}
-        className={`dashboard-widget${stackWidget ? ' dashboard-widget--stack' : ''}${hiddenPreview ? ' is-hidden-preview' : ''}${isInteractionSource && interactionPhantom ? ' is-interaction-source' : ''}${dragPreview || resizePreview ? ' is-preview-shifted' : ''}${widget.id === resizingId ? ' is-resizing' : ''}`}
+        className={`dashboard-widget${stackWidget ? ' dashboard-widget--stack' : ''}${hiddenPreview ? ' is-hidden-preview' : ''}${isInteractionSource && interactionPhantom ? ' is-interaction-source' : ''}${dragPreview || resizePreview ? ' is-preview-shifted' : ''}${widget.id === resizingId ? ' is-resizing' : ''}${isTrafficChartHalfHeight(widget) ? ' dashboard-widget--fixed-h' : ''}`}
         style={style}
       >
         <DashboardWidgetChrome

@@ -73,7 +73,6 @@ const {
 } = require('./diagnostics-worker-gaps');
 const { getEnrichmentDiagnostics } = require('./diagnostics-enrichment');
 const { getSnmpDiagnostics } = require('./diagnostics-snmp');
-const { getBoundsDiagnostics } = require('./diagnostics-bounds');
 const { getBuildInfo, formatBuildInfoLogLine } = require('./build-info');
 const { createSessionStore } = require('./sessions');
 const {
@@ -1405,15 +1404,6 @@ app.get('/api/diagnostics/enrichment', async (_req, res) => {
 app.get('/api/diagnostics/snmp', async (_req, res) => {
   try {
     const data = await getSnmpDiagnostics();
-    res.json({ data });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-app.get('/api/diagnostics/bounds', async (_req, res) => {
-  try {
-    const data = await getBoundsDiagnostics();
     res.json({ data });
   } catch (err) {
     res.status(500).json({ error: err.message });

@@ -4460,6 +4460,12 @@ a.nav-item--active:visited { color: var(--fg-primary); }
 .dashboard-grid > .dashboard-widget {
   min-height: auto;
 }
+.dashboard-widget.dashboard-widget--fixed-h {
+  align-self: start;
+  height: var(--dw-fixed-h);
+  max-height: var(--dw-fixed-h);
+  min-height: var(--dw-fixed-h);
+}
 .dashboard-widget > .card,
 .dashboard-widget-chrome,
 .dashboard-widget-chrome__body {
@@ -5497,7 +5503,7 @@ html.modal-open #root {
 .dashboard-widget .dual-chart--fluid {
   flex: 1 1 0;
   min-width: 0;
-  min-height: 120px;
+  min-height: 160px;
   width: 100%;
   height: auto;
   aspect-ratio: unset;

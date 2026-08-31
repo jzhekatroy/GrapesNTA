@@ -104,7 +104,7 @@ const PageChunks = (() => {
 
   async function loadScript(src) {
     if (loadedScripts.has(src)) return;
-    if (/\.jsx$/i.test(src)) {
+    if (/\.jsx(?:\?|#|$)/i.test(src)) {
       await loadJsxScript(src);
       return;
     }
