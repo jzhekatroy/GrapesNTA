@@ -81,10 +81,23 @@ need_compose_dir() {
   docker compose version >/dev/null 2>&1 || die "docker compose plugin required"
 }
 
+# Checkout owned by another user makes git refuse with "dubious ownership".
+ensure_safe_directory() {
+  local owner
+  owner="$(stat -c '%U' "${REPO_ROOT}" 2>/dev/null || true)"
+  [[ -n "${owner}" && "${owner}" != "root" ]] || return 0
+  if git config --global --get-all safe.directory 2>/dev/null | grep -qx -- "${REPO_ROOT}"; then
+    return 0
+  fi
+  log "git config --global --add safe.directory ${REPO_ROOT} (owner=${owner})"
+  git config --global --add safe.directory "${REPO_ROOT}" || true
+}
+
 git_pull() {
   cd "${REPO_ROOT}"
   [[ -d .git ]] || die "${REPO_ROOT} is not a git checkout"
   local before after branch home
+  ensure_safe_directory
   before="$(git rev-parse --short HEAD)"
   branch="$(git rev-parse --abbrev-ref HEAD)"
   log "git pull origin ${branch} (was ${before})"
