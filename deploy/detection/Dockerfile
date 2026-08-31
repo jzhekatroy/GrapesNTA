@@ -25,7 +25,9 @@ RUN set -e; \
     TS="${BUILD_DATE:-}"; \
     if [ -z "$TS" ] || [ "$TS" = "unknown" ]; then TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"; fi; \
     printf '{"buildDate":"%s"}\n' "$TS" > server/build-info.json \
-  && mkdir -p server/data && chown -R app:app server/data server/build-info.json
+  && mkdir -p server/data \
+  && chmod -R a+rX /app \
+  && chown -R app:app server/data server/build-info.json
 
 USER app
 
