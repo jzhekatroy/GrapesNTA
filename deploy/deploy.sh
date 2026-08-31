@@ -86,21 +86,27 @@ git_no_prompt() {
     git -c core.askPass=/bin/false "$@"
 }
 
+git_token_ok() {
+  local token="$1"
+  [[ -n "${token}" ]] || return 1
+  [[ "${#token}" -ge 20 ]] || return 1
+  case "${token}" in
+    ВСТАВЬТЕ_ТОКЕН|INSERT_TOKEN|changeme|xxx|your_token_here) return 1 ;;
+  esac
+  return 0
+}
+
 git_read_token() {
+  local token=""
   if [[ -n "${GRAPES_GIT_TOKEN:-}" ]]; then
-    printf '%s' "${GRAPES_GIT_TOKEN}"
-    return 0
+    token="${GRAPES_GIT_TOKEN}"
+  elif [[ -n "${GITHUB_TOKEN:-}" ]]; then
+    token="${GITHUB_TOKEN}"
+  elif [[ -f "${REPO_ROOT}/deploy/.gittoken" ]]; then
+    token="$(tr -d '\n\r ' < "${REPO_ROOT}/deploy/.gittoken")"
   fi
-  if [[ -n "${GITHUB_TOKEN:-}" ]]; then
-    printf '%s' "${GITHUB_TOKEN}"
-    return 0
-  fi
-  local file="${REPO_ROOT}/deploy/.gittoken"
-  if [[ -f "${file}" ]]; then
-    tr -d '\n\r ' < "${file}"
-    return 0
-  fi
-  return 1
+  git_token_ok "${token}" || return 1
+  printf '%s' "${token}"
 }
 
 git_pull_users() {
@@ -136,10 +142,11 @@ git_try_pull_token() {
   case "${url}" in
     https://github.com/*|https://www.github.com/*)
       log "git pull with token"
+      # Classic PAT: user x-access-token. Bearer extraHeader is often ignored.
       GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/bin/false \
         git -C "${REPO_ROOT}" \
           -c core.askPass=/bin/false \
-          -c "http.https://github.com/.extraheader=AUTHORIZATION: bearer ${token}" \
+          -c "url.https://x-access-token:${token}@github.com/.insteadOf=https://github.com/" \
           pull --ff-only origin "${branch}"
       ;;
     *)
