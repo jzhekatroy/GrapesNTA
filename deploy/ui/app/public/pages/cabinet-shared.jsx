@@ -12,40 +12,6 @@ function cabinetGranularityBucketSeconds(granularity) {
   return map[String(granularity || '').toLowerCase()] || 3600;
 }
 
-function formatCabinetGranularityLabel(granularity) {
-  const value = String(granularity || '').toLowerCase();
-  if (value === 'minute') return 'по минутам';
-  if (value === 'day') return 'по дням';
-  if (value === 'hour') return 'по часам';
-  return granularity ? String(granularity) : '';
-}
-
-function formatDataUntil(dataUntil, displayTimezone) {
-  const raw = String(dataUntil || '').trim();
-  if (!raw) return '';
-  const ms = Date.parse(raw.includes('T') ? raw : `${raw.replace(' ', 'T')}Z`);
-  if (!Number.isFinite(ms)) return raw;
-  const tz = displayTimezone || (typeof getDisplayTimezone === 'function' ? getDisplayTimezone() : undefined);
-  const opts = {
-    day: '2-digit',
-    month: '2-digit',
-    year: 'numeric',
-    hour: '2-digit',
-    minute: '2-digit',
-    timeZone: tz,
-  };
-  return new Date(ms).toLocaleString('ru-RU', opts).replace(',', '');
-}
-
-function cabinetDataUntilCaption(granularity, dataUntil, displayTimezone) {
-  const until = formatDataUntil(dataUntil, displayTimezone);
-  if (!until) return '';
-  const gran = String(granularity || '').toLowerCase();
-  if (gran === 'minute') return `по завершённым минутам, до ${until}`;
-  if (gran === 'day') return `по завершённым суткам, до ${until}`;
-  return `по завершённым часам, до ${until}`;
-}
-
 function cabinetSeriesToChart(data, meta) {
   const granularity = meta?.granularity || 'hour';
   const bucketSeconds = cabinetGranularityBucketSeconds(granularity);
@@ -205,21 +171,6 @@ function openCabinetExplorer(onNavigate, {
   location.hash = `explorer?${params.toString()}`;
 }
 
-function CabinetDataMeta({ granularity, dataUntil, readOnly, displayTimezone, style }) {
-  const parts = [];
-  const granLabel = formatCabinetGranularityLabel(granularity);
-  const untilCaption = cabinetDataUntilCaption(granularity, dataUntil, displayTimezone);
-  if (granLabel) parts.push(granLabel);
-  if (untilCaption) parts.push(untilCaption);
-  if (readOnly) parts.push('только просмотр');
-  if (!parts.length) return null;
-  return (
-    <div className="cabinet-data-meta" style={{ color: 'var(--fg-secondary)', font: 'var(--pv-text-caption-1)', ...style }}>
-      {parts.join(' · ')}
-    </div>
-  );
-}
-
 function CabinetLoadState({ children, style }) {
   return (
     <div className="other-ports-table__state" style={style}>
@@ -251,15 +202,11 @@ function CabinetErrorState({ error, style }) {
 Object.assign(window, {
   CABINET_DNS_EMPTY_HINT,
   CABINET_DIRECTION_LABELS,
-  CabinetDataMeta,
   CabinetLoadState,
   CabinetEmptyState,
   CabinetErrorState,
   cabinetSeriesToChart,
   cabinetGranularityBucketSeconds,
-  formatCabinetGranularityLabel,
-  formatDataUntil,
-  cabinetDataUntilCaption,
   groupImpersonationSessions,
   cabinetShareItems,
   formatCabinetServiceLabel,

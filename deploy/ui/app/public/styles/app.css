@@ -6971,6 +6971,3 @@ html.modal-open #root {
   color: var(--fg-primary);
   font: var(--pv-text-body-3);
 }
-.cabinet-data-meta {
-  margin-top: 8px;
-}

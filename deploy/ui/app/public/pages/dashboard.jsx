@@ -588,7 +588,7 @@ function cabinetServiceDonutItems(rows, totalBytes) {
   }));
 }
 
-function CabinetDashboard({ onNavigate, timeRange, customPeriod, displayTimezone, readOnly, onChartRangeSelect }) {
+function CabinetDashboard({ onNavigate, timeRange, customPeriod, displayTimezone, onChartRangeSelect }) {
   const periodLabel = timeRangeLabel(timeRange, customPeriod);
   const periodKey = `${timeRange}|${customPeriod?.from || ''}|${customPeriod?.to || ''}`;
   const chartLongRange = isLongChartRange(timeRange, customPeriod);
@@ -677,15 +677,6 @@ function CabinetDashboard({ onNavigate, timeRange, customPeriod, displayTimezone
     if (next.has(key)) next.delete(key); else next.add(key);
     return next;
   });
-  const dataMeta = (meta, granularity) => (
-    <CabinetDataMeta
-      granularity={granularity || meta?.granularity || meta?.breakdownGranularity}
-      dataUntil={meta?.dataUntil}
-      readOnly={readOnly}
-      displayTimezone={displayTimezone}
-      style={{ marginTop: 10 }}
-    />
-  );
 
   return (
     <div className="main__container">
@@ -720,7 +711,6 @@ function CabinetDashboard({ onNavigate, timeRange, customPeriod, displayTimezone
             directionDefs={CABINET_OVERVIEW_DIRECTIONS}
             loadMs={stats.loadMs}
             serverMs={stats.serverMs}
-            footer={dataMeta(stats.meta)}
           />
         ))}
       </div>
@@ -728,7 +718,7 @@ function CabinetDashboard({ onNavigate, timeRange, customPeriod, displayTimezone
       <DashboardChartRow distributionMode="share" trendSplit={SHARE_RIGHT_SPLIT} onTrendSplitChange={() => {}}>
         <OverviewTrafficChartCard
           title="Полоса пропускания и pps"
-          subtitle={`${periodLabel} · ${formatCabinetGranularityLabel(series.meta?.granularity) || '…'}`}
+          subtitle={periodLabel}
           points={chartPoints}
           lines={chart.lines}
           ppsLines={chart.lines}
@@ -747,7 +737,6 @@ function CabinetDashboard({ onNavigate, timeRange, customPeriod, displayTimezone
           periodEndMs={bounds.endMs}
           bucketSeconds={chart.bucketSeconds}
           onRangeSelect={onChartRangeSelect}
-          footer={dataMeta(series.meta)}
         />
         <Card pad="sm">
           <div className="distribution-card__head">
@@ -767,7 +756,6 @@ function CabinetDashboard({ onNavigate, timeRange, customPeriod, displayTimezone
               centered
             />
           </div>
-          {dataMeta(services.meta)}
         </Card>
       </DashboardChartRow>
 
@@ -785,7 +773,6 @@ function CabinetDashboard({ onNavigate, timeRange, customPeriod, displayTimezone
           loadMs={countries.loadMs}
           serverMs={countries.serverMs}
           listKey={`${periodKey}|${countryDirection}`}
-          footer={dataMeta(countries.meta)}
         />
       </div>
 

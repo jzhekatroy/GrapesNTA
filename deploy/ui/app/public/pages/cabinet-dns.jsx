@@ -13,7 +13,7 @@ function dnsRcodeLabel(rcode) {
   return String(rcode ?? '—');
 }
 
-function PageCabinetDns({ timeRange, customPeriod, displayTimezone, readOnly }) {
+function PageCabinetDns({ timeRange, customPeriod, displayTimezone }) {
   const [domainsState, setDomainsState] = useState({ source: 'loading', data: [], meta: null, error: '' });
   const [queriesState, setQueriesState] = useState({ source: 'idle', data: [], meta: null, error: '' });
   const [selectedDomain, setSelectedDomain] = useState(null);
@@ -155,44 +155,35 @@ function PageCabinetDns({ timeRange, customPeriod, displayTimezone, readOnly }) 
           ) : !domainsState.data.length ? (
             <CabinetEmptyState titleHint={CABINET_DNS_EMPTY_HINT} />
           ) : (
-            <>
-              <DataTable
-                rows={domainsState.data}
-                rowKey="domain"
-                dense
-                pageSize={15}
-                resizableColumns={false}
-                columns={[
-                  {
-                    key: 'domain',
-                    title: 'Домен',
-                    render: (row) => {
-                      const label = formatCabinetDomainLabel(row);
-                      const clickable = !row.folded && row.domain !== 'other' && row.domain !== 'unknown';
-                      if (!clickable) {
-                        return <span className="cabinet-dns-domain-label">{label}</span>;
-                      }
-                      return (
-                        <button type="button" className="link-btn" onClick={() => openDomain(row)}>
-                          {label}
-                        </button>
-                      );
-                    },
+            <DataTable
+              rows={domainsState.data}
+              rowKey="domain"
+              dense
+              pageSize={15}
+              resizableColumns={false}
+              columns={[
+                {
+                  key: 'domain',
+                  title: 'Домен',
+                  render: (row) => {
+                    const label = formatCabinetDomainLabel(row);
+                    const clickable = !row.folded && row.domain !== 'other' && row.domain !== 'unknown';
+                    if (!clickable) {
+                      return <span className="cabinet-dns-domain-label">{label}</span>;
+                    }
+                    return (
+                      <button type="button" className="link-btn" onClick={() => openDomain(row)}>
+                        {label}
+                      </button>
+                    );
                   },
-                  { key: 'queries', title: 'Запросы', align: 'right', num: true, render: (r) => fmtNum(r.queries) },
-                  { key: 'responses', title: 'Ответы', align: 'right', num: true, render: (r) => fmtNum(r.responses) },
-                  { key: 'nxdomain', title: 'Не найдено', align: 'right', num: true, render: (r) => fmtNum(r.nxdomain) },
-                  { key: 'servfail', title: 'Сбои DNS', align: 'right', num: true, render: (r) => fmtNum(r.servfail) },
-                ]}
-              />
-              <CabinetDataMeta
-                granularity="hour"
-                dataUntil={domainsState.meta?.dataUntil}
-                readOnly={readOnly}
-                displayTimezone={displayTimezone}
-                style={{ marginTop: 10 }}
-              />
-            </>
+                },
+                { key: 'queries', title: 'Запросы', align: 'right', num: true, render: (r) => fmtNum(r.queries) },
+                { key: 'responses', title: 'Ответы', align: 'right', num: true, render: (r) => fmtNum(r.responses) },
+                { key: 'nxdomain', title: 'Не найдено', align: 'right', num: true, render: (r) => fmtNum(r.nxdomain) },
+                { key: 'servfail', title: 'Сбои DNS', align: 'right', num: true, render: (r) => fmtNum(r.servfail) },
+              ]}
+            />
           )}
         </Card>
       ) : (
