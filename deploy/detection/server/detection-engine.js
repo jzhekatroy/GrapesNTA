@@ -30,6 +30,24 @@ const HEAVY = {
   max_bytes_to_read: '0',
 };
 
+function logDetection(stage, extra) {
+  const payload = extra == null ? '' : ` ${JSON.stringify(extra)}`;
+  console.log(new Date().toISOString(), `detection ${stage}${payload}`);
+}
+
+function flagStats(map) {
+  const rows = [...map.values()];
+  const withAttempts = rows.filter((r) => r.synAttempts > 0).length;
+  const maxAttempts = rows.reduce((m, r) => Math.max(m, r.synAttempts), 0);
+  const maxAnswered = rows.reduce((m, r) => Math.max(m, r.synAnswered), 0);
+  const top = [...map.entries()]
+    .filter(([, r]) => r.synAttempts > 0)
+    .sort((a, b) => b[1].synAttempts - a[1].synAttempts)
+    .slice(0, 5)
+    .map(([id, r]) => ({ id, attempts: r.synAttempts, answered: r.synAnswered, half: r.synHalfOpen }));
+  return { scopes: map.size, withAttempts, maxAttempts, maxAnswered, top };
+}
+
 function utcDateTime(param) {
   return `toDateTime({${param}:String}, 'UTC')`;
 }
@@ -215,7 +233,18 @@ async function loadScopeFlags(scope, minuteTs) {
     f.${tcpFlags} AS tcp_flags
   `;
 
-  const { rows } = await query(`
+  logDetection(`flags-${scope} start`, {
+    from,
+    to,
+    until,
+    timeCol,
+    tcpFlags,
+    flows: flowsRawTableRef(),
+  });
+  const started = Date.now();
+  let result;
+  try {
+    result = await query(`
     SELECT
       e.scope_id AS scope_id,
       sumIf(e.bytes, e.toward) AS bytes,
@@ -249,8 +278,13 @@ async function loadScopeFlags(scope, minuteTs) {
     ) AS e
     GROUP BY e.scope_id
   `, { from, to, until }, { name: `detection/flags-${scope}`, clickhouse_settings: HEAVY, requestTimeoutMs: 180000 });
-
-  return new Map(rows.map((r) => [String(r.scope_id), mapFlagRow(r)]));
+  } catch (err) {
+    logDetection(`flags-${scope} error`, { ms: Date.now() - started, message: err.message, stack: err.stack });
+    throw err;
+  }
+  const map = new Map(result.rows.map((r) => [String(r.scope_id), mapFlagRow(r)]));
+  logDetection(`flags-${scope} done`, { ms: Date.now() - started, ...flagStats(map) });
+  return map;
 }
 
 let clientBaselineCache = { at: 0, map: new Map() };
@@ -337,10 +371,37 @@ function toInsertRow(object, raw, baseline) {
 async function tick() {
   await ensureDetectionTables();
   const closed = await lastClosedMinute();
-  if (!closed) return { skipped: 'no_minute' };
-  if (await minuteWritten(closed)) return { skipped: 'done', minute: formatCh(closed) };
+  if (!closed) {
+    logDetection('skip', { reason: 'no_minute' });
+    return { skipped: 'no_minute' };
+  }
+  const minute = formatCh(closed);
+  if (await minuteWritten(closed)) {
+    const { rows: written } = await query(`
+      SELECT
+        count() AS n,
+        countIf(syn_attempts > 0) AS with_attempts,
+        max(syn_attempts) AS max_attempts
+      FROM ${tableRef()}
+      WHERE minute = ${utcDateTime('m')}
+    `, { m: minute }, { name: 'detection/minute-written-stats' });
+    const stats = written[0] || {};
+    logDetection('skip', {
+      reason: 'done',
+      minute,
+      rows: Number(stats.n || 0),
+      withAttempts: Number(stats.with_attempts || 0),
+      maxAttempts: Number(stats.max_attempts || 0),
+    });
+    return { skipped: 'done', minute, ...stats };
+  }
 
   const objects = await loadObjects();
+  logDetection('objects', {
+    minute,
+    clients: objects.filter((o) => o.scope === 'client').length,
+    nets: objects.filter((o) => o.scope === 'net').length,
+  });
   const [clientVol, clientFlags, netFlags, baselines] = await Promise.all([
     loadClientVolume(closed),
     loadScopeFlags('client', closed),
@@ -348,15 +409,24 @@ async function tick() {
     loadBaselines(closed),
   ]);
 
-  const minute = formatCh(closed);
+  let matchedFlags = 0;
+  let insertedAttempts = 0;
+  const missed = [];
   const rows = objects.map((object) => {
-    const flags = (object.scope === 'client' ? clientFlags : netFlags).get(object.scopeId) || emptyRaw();
+    const flagMap = object.scope === 'client' ? clientFlags : netFlags;
+    const flags = flagMap.get(object.scopeId);
+    if (flags) {
+      matchedFlags += 1;
+      if (flags.synAttempts > 0) insertedAttempts += 1;
+    } else if (missed.length < 8) {
+      missed.push(`${object.scope}:${object.scopeId}`);
+    }
     const volume = object.scope === 'client' ? (clientVol.get(object.scopeId) || null) : null;
     const raw = {
-      ...flags,
+      ...(flags || emptyRaw()),
       minute,
-      bytes: volume ? volume.bytes : flags.bytes,
-      packets: volume ? volume.packets : flags.packets,
+      bytes: volume ? volume.bytes : (flags?.bytes || 0),
+      packets: volume ? volume.packets : (flags?.packets || 0),
     };
     return toInsertRow(object, raw, baselines.get(`${object.scope}|${object.scopeId}`));
   });
@@ -366,12 +436,19 @@ async function tick() {
     await insertRows(TABLE, rows.slice(i, i + chunk), { name: 'detection/insert-anomaly' });
   }
 
-  return {
+  const out = {
     minute,
     clients: objects.filter((o) => o.scope === 'client').length,
     nets: objects.filter((o) => o.scope === 'net').length,
     rows: rows.length,
+    flagRows: clientFlags.size + netFlags.size,
+    matchedFlags,
+    insertedWithAttempts: insertedAttempts,
+    maxAttempts: rows.reduce((m, r) => Math.max(m, r.syn_attempts), 0),
+    missedSample: missed,
   };
+  logDetection('insert', out);
+  return out;
 }
 
 async function loadLatest() {

@@ -26,6 +26,7 @@ async function loop() {
       console.log(new Date().toISOString(), 'detection tick', JSON.stringify(out));
     } catch (err) {
       console.error(new Date().toISOString(), 'detection tick fatal', err.message);
+      if (err.stack) console.error(err.stack);
     }
     const sleepMs = Math.max(5000, TICK_SEC * 1000 - (Date.now() - started));
     await new Promise((r) => setTimeout(r, sleepMs));
