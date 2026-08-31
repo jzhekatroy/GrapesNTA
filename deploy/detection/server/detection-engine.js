@@ -155,6 +155,8 @@ function emptyRaw() {
     synInFlows: 0,
     synHalfOpen: 0,
     synHalfOpenReply: 0,
+    udpPortEntropy: null,
+    udpPortEntropyOut: null,
   };
 }
 
@@ -189,6 +191,35 @@ async function loadClientVolume(minuteTs) {
   }]));
 }
 
+// На части коллекторов почти всё в direction=unknown. Рукопожатие
+// считаем по стороне объекта (dst = к нему, src = от него), не по in/out.
+function scopeSides(scope) {
+  if (scope === 'client') {
+    return { towardId: 'f.dst_client', fromId: 'f.src_client' };
+  }
+  return { towardId: netFromIpSql(dstIpSql()), fromId: netFromIpSql(srcIpSql()) };
+}
+
+function minuteFilterSql() {
+  const timeCol = col('time');
+  return `
+    f.date >= toDate(${utcDateTime64('from')}) - 1
+      AND f.date <= toDate(${utcDateTime64('until')})
+      AND f.time_flow_start_ns >= ${utcDateTime64('from')}
+      AND f.time_flow_start_ns < ${utcDateTime64('to')}
+      AND f.${timeCol} >= ${utcDateTime64('from')}
+      AND f.${timeCol} < ${utcDateTime64('until')}
+  `;
+}
+
+function minuteBounds(minuteTs) {
+  return {
+    from: formatCh(minuteTs),
+    to: formatCh(minuteTs + MINUTE),
+    until: formatCh(minuteTs + EXPORT_LAG + MINUTE),
+  };
+}
+
 async function loadScopeFlags(scope, minuteTs) {
   const timeCol = col('time');
   const bytesCol = col('bytes');
@@ -203,29 +234,9 @@ async function loadScopeFlags(scope, minuteTs) {
   const synSet = `bitAnd(e.tcp_flags, 2) > 0`;
   const ackSet = `bitAnd(e.tcp_flags, 16) > 0`;
   const flowAvg = `e.bytes / e.packets`;
-  const from = formatCh(minuteTs);
-  const to = formatCh(minuteTs + MINUTE);
-  const until = formatCh(minuteTs + EXPORT_LAG + MINUTE);
-
-  // На части коллекторов почти всё в direction=unknown. Рукопожатие
-  // считаем по стороне объекта (dst = к нему, src = от него), не по in/out.
-  let towardId;
-  let fromId;
-  if (scope === 'client') {
-    towardId = 'f.dst_client';
-    fromId = 'f.src_client';
-  } else {
-    towardId = netFromIpSql(dstIpSql());
-    fromId = netFromIpSql(srcIpSql());
-  }
-  const timeFilter = `
-    f.date >= toDate(${utcDateTime64('from')}) - 1
-      AND f.date <= toDate(${utcDateTime64('until')})
-      AND f.time_flow_start_ns >= ${utcDateTime64('from')}
-      AND f.time_flow_start_ns < ${utcDateTime64('to')}
-      AND f.${timeCol} >= ${utcDateTime64('from')}
-      AND f.${timeCol} < ${utcDateTime64('until')}
-  `;
+  const { from, to, until } = minuteBounds(minuteTs);
+  const { towardId, fromId } = scopeSides(scope);
+  const timeFilter = minuteFilterSql();
   const flowCols = `
     f.${bytesCol} AS bytes,
     f.${packetsCol} AS packets,
@@ -284,6 +295,80 @@ async function loadScopeFlags(scope, minuteTs) {
   }
   const map = new Map(result.rows.map((r) => [String(r.scope_id), mapFlagRow(r)]));
   logDetection(`flags-${scope} done`, { ms: Date.now() - started, ...flagStats(map) });
+  return map;
+}
+
+// Энтропия Шеннона по dst_port UDP, вес доли — пакеты, а не число flow:
+// один flow на 100k пакетов не должен весить столько же, сколько flow на один пакет.
+async function loadUdpPortEntropy(scope, minuteTs) {
+  const packetsCol = col('packets');
+  const protoCol = col('proto');
+  const dstPort = col('dstPort');
+  const { from, to, until } = minuteBounds(minuteTs);
+  const { towardId, fromId } = scopeSides(scope);
+  const timeFilter = minuteFilterSql();
+  const started = Date.now();
+
+  const { rows } = await query(`
+    WITH
+      per_port AS (
+        SELECT
+          e.scope_id AS scope_id,
+          e.side AS side,
+          sum(e.packets) AS pkts
+        FROM (
+          SELECT
+            ${towardId} AS scope_id,
+            1 AS side,
+            f.${dstPort} AS dst_port,
+            f.${packetsCol} AS packets
+          FROM ${flowsRawTableRef()} AS f
+          WHERE ${timeFilter}
+            AND f.${protoCol} = 17
+            AND ${towardId} != ''
+          UNION ALL
+          SELECT
+            ${fromId} AS scope_id,
+            0 AS side,
+            f.${dstPort} AS dst_port,
+            f.${packetsCol} AS packets
+          FROM ${flowsRawTableRef()} AS f
+          WHERE ${timeFilter}
+            AND f.${protoCol} = 17
+            AND ${fromId} != ''
+        ) AS e
+        GROUP BY scope_id, side, e.dst_port
+        HAVING pkts > 0
+      ),
+      shares AS (
+        SELECT
+          scope_id,
+          side,
+          pkts / sum(pkts) OVER (PARTITION BY scope_id, side) AS q
+        FROM per_port
+      )
+    SELECT
+      scope_id,
+      if(countIf(side = 1) > 0, -sumIf(q * log2(q), side = 1) + 0, NULL) AS udp_port_entropy,
+      if(countIf(side = 0) > 0, -sumIf(q * log2(q), side = 0) + 0, NULL) AS udp_port_entropy_out
+    FROM shares
+    GROUP BY scope_id
+  `, { from, to, until }, {
+    name: `detection/udp-entropy-${scope}`,
+    clickhouse_settings: HEAVY,
+    requestTimeoutMs: 180000,
+  });
+
+  const map = new Map(rows.map((r) => [String(r.scope_id), {
+    udpPortEntropy: r.udp_port_entropy == null ? null : Number(r.udp_port_entropy),
+    udpPortEntropyOut: r.udp_port_entropy_out == null ? null : Number(r.udp_port_entropy_out),
+  }]));
+  logDetection(`udp-entropy-${scope} done`, {
+    ms: Date.now() - started,
+    scopes: map.size,
+    maxIn: [...map.values()].reduce((m, r) => Math.max(m, r.udpPortEntropy || 0), 0).toFixed(2),
+    maxOut: [...map.values()].reduce((m, r) => Math.max(m, r.udpPortEntropyOut || 0), 0).toFixed(2),
+  });
   return map;
 }
 
@@ -365,6 +450,8 @@ function toInsertRow(object, raw, baseline) {
     answer_pct: m.answerPct,
     half_open_pct: m.halfOpenPct,
     half_open_reply_pct: m.halfOpenReplyPct,
+    udp_port_entropy: m.udpPortEntropy,
+    udp_port_entropy_out: m.udpPortEntropyOut,
   };
 }
 
@@ -402,10 +489,12 @@ async function tick() {
     clients: objects.filter((o) => o.scope === 'client').length,
     nets: objects.filter((o) => o.scope === 'net').length,
   });
-  const [clientVol, clientFlags, netFlags, baselines] = await Promise.all([
+  const [clientVol, clientFlags, netFlags, clientEntropy, netEntropy, baselines] = await Promise.all([
     loadClientVolume(closed),
     loadScopeFlags('client', closed),
     loadScopeFlags('net', closed),
+    loadUdpPortEntropy('client', closed),
+    loadUdpPortEntropy('net', closed),
     loadBaselines(closed),
   ]);
 
@@ -422,8 +511,10 @@ async function tick() {
       missed.push(`${object.scope}:${object.scopeId}`);
     }
     const volume = object.scope === 'client' ? (clientVol.get(object.scopeId) || null) : null;
+    const entropy = (object.scope === 'client' ? clientEntropy : netEntropy).get(object.scopeId);
     const raw = {
       ...(flags || emptyRaw()),
+      ...(entropy || {}),
       minute,
       bytes: volume ? volume.bytes : (flags?.bytes || 0),
       packets: volume ? volume.packets : (flags?.packets || 0),
@@ -478,6 +569,8 @@ async function loadLatest() {
       a.answer_pct,
       a.half_open_pct,
       a.half_open_reply_pct,
+      a.udp_port_entropy,
+      a.udp_port_entropy_out,
       if(a.scope = 'client', ifNull(c.display_name, a.scope_id), a.scope_id) AS name
     FROM ${tableRef()} AS a FINAL
     LEFT JOIN ${clientsViewRef()} AS c ON a.scope = 'client' AND c.client_id = a.scope_id
@@ -504,6 +597,8 @@ async function loadLatest() {
       answerPct: r.answer_pct == null ? null : Number(r.answer_pct),
       halfOpenPct: r.half_open_pct == null ? null : Number(r.half_open_pct),
       halfOpenReplyPct: r.half_open_reply_pct == null ? null : Number(r.half_open_reply_pct),
+      udpPortEntropy: r.udp_port_entropy == null ? null : Number(r.udp_port_entropy),
+      udpPortEntropyOut: r.udp_port_entropy_out == null ? null : Number(r.udp_port_entropy_out),
     })),
   };
 }

@@ -39,6 +39,11 @@ function variationPercent(n, sumX, sumSqX) {
   return (100 * Math.sqrt(variance)) / mu;
 }
 
+function finiteOrNull(value) {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
 function minuteMetrics(raw = {}) {
   const bytes = Number(raw.bytes || 0);
   const packets = Number(raw.packets || 0);
@@ -62,6 +67,8 @@ function minuteMetrics(raw = {}) {
     answerPct: ratePercent(synAnswered, synAttempts),
     halfOpenPct: ratePercent(synHalfOpen, synInFlows),
     halfOpenReplyPct: ratePercent(synHalfOpenReply, synAttempts),
+    udpPortEntropy: finiteOrNull(raw.udpPortEntropy),
+    udpPortEntropyOut: finiteOrNull(raw.udpPortEntropyOut),
   };
 }
 

@@ -30,7 +30,9 @@ CREATE TABLE IF NOT EXISTS ${DB()}.${TABLE}
   syn_half_open_reply UInt64 DEFAULT 0,
   answer_pct Nullable(Float64),
   half_open_pct Nullable(Float64),
-  half_open_reply_pct Nullable(Float64)
+  half_open_reply_pct Nullable(Float64),
+  udp_port_entropy Nullable(Float64),
+  udp_port_entropy_out Nullable(Float64)
 )
 ENGINE = ReplacingMergeTree
 PARTITION BY toYYYYMMDD(minute)
@@ -49,6 +51,18 @@ async function ensureDetectionTables() {
         WHERE database = {db:String} AND table = {table:String}
       `, { db: DB(), table: TABLE }, { name: 'detection/anomaly-cols' });
       const names = new Set(cols.map((r) => String(r.name)));
+      if (!names.size) {
+        await executeCommand(CREATE_SQL, {}, { name: 'detection/create-anomaly' });
+        return;
+      }
+      for (const column of ['udp_port_entropy', 'udp_port_entropy_out']) {
+        if (names.has(column)) continue;
+        await executeCommand(
+          `ALTER TABLE ${DB()}.${TABLE} ADD COLUMN IF NOT EXISTS ${column} Nullable(Float64)`,
+          {},
+          { name: `detection/add-${column.replace(/_/g, '-')}` },
+        );
+      }
       const matches = names.has('scope')
         && names.has('growth_bps')
         && names.has('answer_pct')
