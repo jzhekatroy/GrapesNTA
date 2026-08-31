@@ -1,0 +1,32 @@
+# syntax=docker/dockerfile:1
+# Grapes detection worker — attack/anomaly detector (no UI).
+# Build context is this directory (server/ snapshot from NTAdmin).
+
+FROM node:22-alpine AS deps
+WORKDIR /app
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev
+
+FROM node:22-alpine AS runtime
+WORKDIR /app
+
+ARG BUILD_DATE
+
+ENV NODE_ENV=production
+ENV GRAPES_DETECTION_WORKER=1
+
+RUN addgroup -g 1001 -S app && adduser -u 1001 -S -G app app
+
+COPY --from=deps /app/node_modules ./node_modules
+COPY package.json ./
+COPY server ./server
+
+RUN set -e; \
+    TS="${BUILD_DATE:-}"; \
+    if [ -z "$TS" ] || [ "$TS" = "unknown" ]; then TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"; fi; \
+    printf '{"buildDate":"%s"}\n' "$TS" > server/build-info.json \
+  && mkdir -p server/data && chown -R app:app server/data server/build-info.json
+
+USER app
+
+CMD ["node", "server/detection-worker.js", "loop"]

@@ -6,21 +6,25 @@
 #   /opt/GrapesNTA/deploy/worker     ← grapes-worker compose + .env
 #   /opt/GrapesNTA/deploy/enrichment ← grapes-enrichment compose + .env
 #   /opt/GrapesNTA/deploy/ui         ← grapes-nta compose + vendored NTAdmin app/
+#   /opt/GrapesNTA/deploy/detection  ← grapes-detection compose + .env
 #   /opt/grapes/ui/.env              ← legacy secrets (copied once into deploy/ui/.env)
 #   /opt/grapes/ui/data              ← UI data volume (default UI_DATA_DIR)
 #
 # Usage (as root on the server):
 #   cd /opt/GrapesNTA
-#   ./deploy/deploy.sh              # pull + rebuild worker + enrichment
-#   ./deploy/deploy.sh worker       # only grapes-worker
-#   ./deploy/deploy.sh enrichment   # only grapes-enrichment
-#   ./deploy/deploy.sh ui           # pull + schema ensure + rebuild grapes-nta
-#   ./deploy/deploy.sh full         # schema ensure + worker + enrichment + ui
-#   ./deploy/deploy.sh schema       # only apply idempotent ClickHouse ensures
-#   ./deploy/deploy.sh pull         # only git pull
-#   ./deploy/deploy.sh status       # containers + repo head
-#   ./deploy/deploy.sh logs [svc]   # follow logs (worker|enrichment|ui|all)
-#   ./deploy/deploy.sh --no-pull ui # rebuild without git pull
+#   ./deploy/deploy.sh                 # интерактив: мультивыбор компонентов
+#   ./deploy/deploy.sh worker          # only grapes-worker
+#   ./deploy/deploy.sh enrichment      # only grapes-enrichment
+#   ./deploy/deploy.sh ui              # pull + schema ensure + rebuild grapes-nta
+#   ./deploy/deploy.sh detection       # only grapes-detection
+#   ./deploy/deploy.sh ui detection    # несколько целей сразу
+#   ./deploy/deploy.sh full            # schema + worker + enrichment + ui + detection
+#   ./deploy/deploy.sh all             # worker + enrichment
+#   ./deploy/deploy.sh schema          # only apply idempotent ClickHouse ensures
+#   ./deploy/deploy.sh pull            # only git pull
+#   ./deploy/deploy.sh status          # containers + repo head
+#   ./deploy/deploy.sh logs [svc]      # follow logs (worker|enrichment|ui|detection|all)
+#   ./deploy/deploy.sh --no-pull ui    # rebuild without git pull
 #
 # Optional env:
 #   UI_DATA_DIR=/opt/grapes/ui/data
@@ -32,16 +36,22 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WORKER_DIR="${REPO_ROOT}/deploy/worker"
 ENRICH_DIR="${REPO_ROOT}/deploy/enrichment"
 UI_DIR="${REPO_ROOT}/deploy/ui"
+DETECTION_DIR="${REPO_ROOT}/deploy/detection"
 UI_APP_DIR="${UI_DIR}/app"
 UI_DATA_DIR="${UI_DATA_DIR:-/opt/grapes/ui/data}"
 UI_LEGACY_ENV="${UI_LEGACY_ENV:-/opt/grapes/ui/.env}"
 
 DO_PULL=1
-TARGET=""
+ACTION=""
 LOG_TARGET=""
+SEL_WORKER=0
+SEL_ENRICH=0
+SEL_UI=0
+SEL_DETECTION=0
+SEL_SCHEMA=0
 
 usage() {
-  sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,34p' "$0" | sed 's/^# \{0,1\}//'
   exit "${1:-0}"
 }
 
@@ -121,6 +131,28 @@ ensure_ui_env() {
   die "missing ${UI_DIR}/.env"
 }
 
+ensure_detection_env() {
+  if [[ -f "${DETECTION_DIR}/.env" ]]; then
+    return 0
+  fi
+  if [[ -f "${UI_DIR}/.env" ]]; then
+    log "bootstrap ${DETECTION_DIR}/.env from ${UI_DIR}/.env"
+    cp "${UI_DIR}/.env" "${DETECTION_DIR}/.env"
+    chmod 600 "${DETECTION_DIR}/.env"
+  elif [[ -f "${UI_LEGACY_ENV}" ]]; then
+    log "bootstrap ${DETECTION_DIR}/.env from ${UI_LEGACY_ENV}"
+    cp "${UI_LEGACY_ENV}" "${DETECTION_DIR}/.env"
+    chmod 600 "${DETECTION_DIR}/.env"
+  elif [[ -f "${DETECTION_DIR}/env.example" ]]; then
+    die "missing ${DETECTION_DIR}/.env — copy from env.example (or from ${UI_DIR}/.env) and fill secrets"
+  else
+    die "missing ${DETECTION_DIR}/.env"
+  fi
+  if ! grep -q '^DETECTION_TICK_SEC=' "${DETECTION_DIR}/.env" 2>/dev/null; then
+    printf '\nDETECTION_TICK_SEC=20\n' >> "${DETECTION_DIR}/.env"
+  fi
+}
+
 ensure_clickhouse_schema() {
   local script="${REPO_ROOT}/deploy/schema/ensure-live.sh"
   [[ -x "${script}" || -f "${script}" ]] || die "missing ${script}"
@@ -159,6 +191,14 @@ ui_up() {
   log "health check not ready yet — try: curl -sS http://127.0.0.1:3000/api/health"
 }
 
+detection_up() {
+  [[ -f "${DETECTION_DIR}/Dockerfile" ]] || die "missing ${DETECTION_DIR}/Dockerfile"
+  [[ -f "${DETECTION_DIR}/server/detection-worker.js" ]] || die "missing ${DETECTION_DIR}/server/detection-worker.js"
+  [[ -f "${DETECTION_DIR}/package-lock.json" ]] || die "missing ${DETECTION_DIR}/package-lock.json"
+  ensure_detection_env
+  compose_up "${DETECTION_DIR}" grapes-detection
+}
+
 show_repo_line() {
   local dir="$1" label="$2"
   if [[ -d "${dir}/.git" ]]; then
@@ -180,6 +220,7 @@ show_status() {
     --filter name=grapes-worker \
     --filter name=grapes-enrichment \
     --filter name=grapes-nta \
+    --filter name=grapes-detection \
     --format 'table {{.Names}}\t{{.Status}}\t{{.Image}}\t{{.RunningFor}}' || true
   echo
   log "repos"
@@ -196,6 +237,9 @@ show_status() {
   echo
   log "recent ui logs"
   docker logs --tail 10 grapes-nta 2>&1 || true
+  echo
+  log "recent detection logs"
+  docker logs --tail 10 grapes-detection 2>&1 || true
 }
 
 follow_logs() {
@@ -204,8 +248,11 @@ follow_logs() {
     worker)      docker logs --tail 80 -f grapes-worker ;;
     enrichment)  docker logs --tail 80 -f grapes-enrichment ;;
     ui|nta)      docker logs --tail 80 -f grapes-nta ;;
+    detection)   docker logs --tail 80 -f grapes-detection ;;
     all|"")
-      if docker ps --format '{{.Names}}' | grep -qx grapes-worker; then
+      if docker ps --format '{{.Names}}' | grep -qx grapes-detection; then
+        docker logs --tail 80 -f grapes-detection
+      elif docker ps --format '{{.Names}}' | grep -qx grapes-worker; then
         docker logs --tail 80 -f grapes-worker
       elif docker ps --format '{{.Names}}' | grep -qx grapes-nta; then
         docker logs --tail 80 -f grapes-nta
@@ -213,8 +260,101 @@ follow_logs() {
         docker logs --tail 80 -f grapes-enrichment
       fi
       ;;
-    *) die "unknown logs target: ${svc} (worker|enrichment|ui|all)" ;;
+    *) die "unknown logs target: ${svc} (worker|enrichment|ui|detection|all)" ;;
   esac
+}
+
+any_deploy_selected() {
+  [[ "${SEL_WORKER}" -eq 1 || "${SEL_ENRICH}" -eq 1 || "${SEL_UI}" -eq 1 || "${SEL_DETECTION}" -eq 1 || "${SEL_SCHEMA}" -eq 1 ]]
+}
+
+select_component() {
+  local token="$1"
+  case "${token}" in
+    worker)     SEL_WORKER=1 ;;
+    enrichment) SEL_ENRICH=1 ;;
+    ui|nta)     SEL_UI=1 ;;
+    detection)  SEL_DETECTION=1 ;;
+    schema)     SEL_SCHEMA=1 ;;
+    all)
+      SEL_WORKER=1
+      SEL_ENRICH=1
+      ;;
+    full)
+      SEL_SCHEMA=1
+      SEL_WORKER=1
+      SEL_ENRICH=1
+      SEL_UI=1
+      SEL_DETECTION=1
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+  return 0
+}
+
+apply_numeric_choice() {
+  local raw="$1"
+  raw="${raw//,/ }"
+  local token
+  for token in ${raw}; do
+    case "${token}" in
+      "" ) ;;
+      a|A|all|full) select_component full ;;
+      1|worker)     select_component worker ;;
+      2|enrichment) select_component enrichment ;;
+      3|ui|nta)     select_component ui ;;
+      4|detection)  select_component detection ;;
+      5|schema)     select_component schema ;;
+      *)
+        die "unknown component: ${token} (1 worker, 2 enrichment, 3 ui, 4 detection, 5 schema, a full)"
+        ;;
+    esac
+  done
+}
+
+pick_components_interactive() {
+  if [[ ! -t 0 || ! -t 1 ]]; then
+    die "no target given and not a TTY. Pass components: worker|enrichment|ui|detection|schema|all|full"
+  fi
+
+  if command -v whiptail >/dev/null 2>&1; then
+    local picked=""
+    picked="$(
+      whiptail --title "GrapesNTA deploy" --separate-output --checklist \
+        "Что разворачивать (пробел — выбрать, Enter — дальше)" 18 74 6 \
+        worker "grapes-worker (rollup / observations)" OFF \
+        enrichment "grapes-enrichment" OFF \
+        ui "grapes-nta UI/API" OFF \
+        detection "grapes-detection" OFF \
+        schema "ClickHouse schema ensure" OFF \
+        3>&1 1>&2 2>&3
+    )" || die "cancelled"
+    local token
+    while IFS= read -r token; do
+      [[ -z "${token}" ]] && continue
+      select_component "${token}" || die "unknown component: ${token}"
+    done <<< "${picked}"
+  else
+    echo
+    echo "Что разворачивать? Номера через пробел или запятую."
+    echo "  1) worker       grapes-worker"
+    echo "  2) enrichment   grapes-enrichment"
+    echo "  3) ui           grapes-nta"
+    echo "  4) detection    grapes-detection"
+    echo "  5) schema       ClickHouse ensure"
+    echo "  a) full         schema + worker + enrichment + ui + detection"
+    echo
+    local choice=""
+    read -r -p "> " choice || die "cancelled"
+    [[ -n "${choice}" ]] || die "nothing selected"
+    apply_numeric_choice "${choice}"
+  fi
+
+  if ! any_deploy_selected; then
+    die "nothing selected"
+  fi
 }
 
 # --- args ---
@@ -222,22 +362,29 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     -h|--help) usage 0 ;;
     --no-pull) DO_PULL=0; shift ;;
-    pull|worker|enrichment|ui|nta|all|full|schema|status|logs)
-      if [[ -n "${TARGET}" && "$1" != "logs" ]]; then
-        die "only one target allowed (got ${TARGET} and $1)"
+    pull|status)
+      if [[ -n "${ACTION}" ]]; then
+        die "only one action allowed (got ${ACTION} and $1)"
       fi
-      if [[ "$1" == "logs" ]]; then
-        TARGET="logs"
-        shift
-        LOG_TARGET="${1:-all}"
-        [[ $# -gt 0 ]] && shift
-        continue
+      ACTION="$1"
+      shift
+      ;;
+    logs)
+      if [[ -n "${ACTION}" ]]; then
+        die "only one action allowed (got ${ACTION} and $1)"
       fi
-      if [[ "$1" == "nta" ]]; then
-        TARGET="ui"
-      else
-        TARGET="$1"
+      ACTION="logs"
+      shift
+      LOG_TARGET="${1:-all}"
+      if [[ $# -gt 0 && "$1" != --* ]]; then
+        case "$1" in
+          worker|enrichment|ui|nta|detection|all) shift ;;
+        esac
       fi
+      ;;
+    worker|enrichment|ui|nta|detection|schema|all|full)
+      ACTION="deploy"
+      select_component "$1" || die "unknown arg: $1"
       shift
       ;;
     *)
@@ -246,9 +393,12 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-TARGET="${TARGET:-all}"
+if [[ -z "${ACTION}" ]]; then
+  ACTION="deploy"
+  pick_components_interactive
+fi
 
-case "${TARGET}" in
+case "${ACTION}" in
   status)
     show_status
     exit 0
@@ -262,36 +412,35 @@ case "${TARGET}" in
     git_pull
     exit 0
     ;;
-  worker|enrichment|ui|all|full|schema)
+  deploy)
+    if ! any_deploy_selected; then
+      die "no components selected"
+    fi
     need_root
     if [[ "${DO_PULL}" -eq 1 ]]; then
       git_pull
     else
       log "skip git pull (--no-pull)"
     fi
-    case "${TARGET}" in
-      worker)      compose_up "${WORKER_DIR}" grapes-worker ;;
-      enrichment)  compose_up "${ENRICH_DIR}" grapes-enrichment ;;
-      schema)      ensure_clickhouse_schema ;;
-      ui)
-        ensure_clickhouse_schema
-        ui_up
-        ;;
-      all)
-        compose_up "${WORKER_DIR}" grapes-worker
-        compose_up "${ENRICH_DIR}" grapes-enrichment
-        ;;
-      full)
-        ensure_clickhouse_schema
-        compose_up "${WORKER_DIR}" grapes-worker
-        compose_up "${ENRICH_DIR}" grapes-enrichment
-        ui_up
-        ;;
-    esac
+    if [[ "${SEL_SCHEMA}" -eq 1 || "${SEL_UI}" -eq 1 ]]; then
+      ensure_clickhouse_schema
+    fi
+    if [[ "${SEL_WORKER}" -eq 1 ]]; then
+      compose_up "${WORKER_DIR}" grapes-worker
+    fi
+    if [[ "${SEL_ENRICH}" -eq 1 ]]; then
+      compose_up "${ENRICH_DIR}" grapes-enrichment
+    fi
+    if [[ "${SEL_DETECTION}" -eq 1 ]]; then
+      detection_up
+    fi
+    if [[ "${SEL_UI}" -eq 1 ]]; then
+      ui_up
+    fi
     show_status
-    log "done. examples: $0 logs ui | $0 logs worker"
+    log "done. examples: $0 logs ui | $0 logs detection | $0 logs worker"
     ;;
   *)
-    die "unknown target: ${TARGET}"
+    die "unknown action: ${ACTION}"
     ;;
 esac

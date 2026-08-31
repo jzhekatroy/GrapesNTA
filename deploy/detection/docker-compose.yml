@@ -1,0 +1,24 @@
+# grapes-detection: per-minute subscriber /24 detector (NTAdmin worker).
+#
+#   cd /opt/GrapesNTA
+#   ./deploy/deploy.sh detection
+#
+# Secrets: deploy/detection/.env (bootstrap from deploy/ui/.env on first deploy).
+# Code:    this directory (Dockerfile + server/ snapshot from NTAdmin).
+
+services:
+  grapes-detection:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: grapes-detection:latest
+    container_name: grapes-detection
+    env_file:
+      - path: .env
+        required: true
+    restart: always
+    network_mode: host
+    environment:
+      TZ: ${DETECTION_TZ:-Europe/Moscow}
+      DETECTION_TICK_SEC: ${DETECTION_TICK_SEC:-20}
+      GRAPES_DETECTION_WORKER: "1"
