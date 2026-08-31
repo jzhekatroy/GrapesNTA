@@ -25,12 +25,17 @@
 #   ./deploy/deploy.sh status          # containers + repo head
 #   ./deploy/deploy.sh logs [svc]      # follow logs (worker|enrichment|ui|detection|all)
 #   ./deploy/deploy.sh --no-pull ui    # rebuild without git pull
-#   Если git pull просит логин GitHub: вы уже root, учёток нет.
-#   Сделайте pull от пользователя, который клонировал репо, затем --no-pull.
+#
+# Git pull as root never asks for a GitHub login. It uses, in order:
+#   GRAPES_GIT_TOKEN / GITHUB_TOKEN / deploy/.gittoken
+#   then sudo -u <user> if that user has stored git/gh credentials
+#   then root's own credential helper (no TTY prompt).
+# If none work, deploy stops — it will not rebuild an old tree.
 #
 # Optional env:
 #   UI_DATA_DIR=/opt/grapes/ui/data
 #   UI_LEGACY_ENV=/opt/grapes/ui/.env
+#   GRAPES_GIT_TOKEN=ghp_...   # or put the PAT in deploy/.gittoken (mode 600)
 #
 set -euo pipefail
 
@@ -53,7 +58,7 @@ SEL_DETECTION=0
 SEL_SCHEMA=0
 
 usage() {
-  sed -n '2,34p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,42p' "$0" | sed 's/^# \{0,1\}//'
   exit "${1:-0}"
 }
 
@@ -74,37 +79,107 @@ need_compose_dir() {
   docker compose version >/dev/null 2>&1 || die "docker compose plugin required"
 }
 
-# HTTPS credentials live in the user who cloned the repo, not in root.
-# `sudo ./deploy.sh` must pull as SUDO_USER; a root shell has no GitHub login.
-git_as_checkout_user() {
-  local user=""
-  if [[ -n "${SUDO_USER:-}" && "${SUDO_USER}" != "root" ]]; then
-    user="${SUDO_USER}"
-  elif [[ "${EUID}" -eq 0 ]]; then
-    local owner
-    owner="$(stat -c '%U' "${REPO_ROOT}" 2>/dev/null || true)"
-    if [[ -n "${owner}" && "${owner}" != "root" ]]; then
-      user="${owner}"
+# Never prompt on the TTY. Keep stored helpers (store/cache); if they are
+# empty, ASKPASS=/bin/false fails the pull instead of "Username for github".
+git_no_prompt() {
+  GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/bin/false SSH_ASKPASS=/bin/false \
+    git -c core.askPass=/bin/false "$@"
+}
+
+git_read_token() {
+  if [[ -n "${GRAPES_GIT_TOKEN:-}" ]]; then
+    printf '%s' "${GRAPES_GIT_TOKEN}"
+    return 0
+  fi
+  if [[ -n "${GITHUB_TOKEN:-}" ]]; then
+    printf '%s' "${GITHUB_TOKEN}"
+    return 0
+  fi
+  local file="${REPO_ROOT}/deploy/.gittoken"
+  if [[ -f "${file}" ]]; then
+    tr -d '\n\r ' < "${file}"
+    return 0
+  fi
+  return 1
+}
+
+git_pull_users() {
+  local seen=":" user home
+  _add_user() {
+    local u="$1"
+    [[ -n "${u}" && "${u}" != "root" ]] || return 0
+    [[ "${seen}" == *":${u}:"* ]] && return 0
+    id -u "${u}" >/dev/null 2>&1 || return 0
+    seen="${seen}${u}:"
+    printf '%s\n' "${u}"
+  }
+  _add_user "${SUDO_USER:-}"
+  _add_user "$(stat -c '%U' "${REPO_ROOT}" 2>/dev/null || true)"
+  _add_user "$(stat -c '%U' "${REPO_ROOT}/.git" 2>/dev/null || true)"
+  for home in /home/*; do
+    [[ -d "${home}" ]] || continue
+    user="$(basename "${home}")"
+    if [[ -f "${home}/.git-credentials" || -f "${home}/.config/gh/hosts.yml" || -f "${home}/.netrc" ]]; then
+      _add_user "${user}"
     fi
-  fi
-  if [[ -n "${user}" ]]; then
-    log "git as ${user}"
-    sudo -u "${user}" -H env GIT_TERMINAL_PROMPT=0 git -C "${REPO_ROOT}" "$@"
-  else
-    GIT_TERMINAL_PROMPT=0 git -C "${REPO_ROOT}" "$@"
-  fi
+  done
+}
+
+git_try_pull() {
+  local branch="$1"
+  git_no_prompt -C "${REPO_ROOT}" pull --ff-only origin "${branch}"
+}
+
+git_try_pull_token() {
+  local branch="$1" token="$2" url
+  url="$(git -C "${REPO_ROOT}" remote get-url origin)"
+  case "${url}" in
+    https://github.com/*|https://www.github.com/*)
+      log "git pull with token"
+      GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/bin/false \
+        git -C "${REPO_ROOT}" \
+          -c core.askPass=/bin/false \
+          -c "http.https://github.com/.extraheader=AUTHORIZATION: bearer ${token}" \
+          pull --ff-only origin "${branch}"
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+git_try_pull_as() {
+  local user="$1" branch="$2"
+  log "git pull as ${user}"
+  sudo -n -u "${user}" -H env GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/bin/false SSH_ASKPASS=/bin/false \
+    git -c core.askPass=/bin/false -C "${REPO_ROOT}" pull --ff-only origin "${branch}"
 }
 
 git_pull() {
   cd "${REPO_ROOT}"
   [[ -d .git ]] || die "${REPO_ROOT} is not a git checkout"
-  local before after branch
+  local before after branch token user ok=0
   before="$(git rev-parse --short HEAD)"
   branch="$(git rev-parse --abbrev-ref HEAD)"
   log "git pull origin ${branch} (was ${before})"
-  if ! git_as_checkout_user pull --ff-only origin "${branch}"; then
-    die "git pull failed. Root has no GitHub credentials. Either: sudo -u <clone-user> git -C ${REPO_ROOT} pull --ff-only origin ${branch}   then   $0 --no-pull …    or run: $0 --no-pull …"
+
+  token="$(git_read_token || true)"
+  if [[ -n "${token}" ]]; then
+    git_try_pull_token "${branch}" "${token}" && ok=1
   fi
+  if [[ "${ok}" -eq 0 ]]; then
+    while IFS= read -r user; do
+      [[ -n "${user}" ]] || continue
+      git_try_pull_as "${user}" "${branch}" && { ok=1; break; }
+    done < <(git_pull_users)
+  fi
+  if [[ "${ok}" -eq 0 ]]; then
+    git_try_pull "${branch}" && ok=1
+  fi
+  if [[ "${ok}" -eq 0 ]]; then
+    die "git pull failed without prompting. Put a repo-read PAT in ${REPO_ROOT}/deploy/.gittoken (chmod 600) or GRAPES_GIT_TOKEN, then retry. To rebuild the current tree only: $0 --no-pull …"
+  fi
+
   after="$(git rev-parse --short HEAD)"
   if [[ "${before}" == "${after}" ]]; then
     log "already up to date (${after})"

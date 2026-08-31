@@ -8,3 +8,4 @@
 # UI runtime secrets (bootstrapped on server)
 deploy/ui/.env
 deploy/ui/data/
+deploy/.gittoken
