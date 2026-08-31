@@ -18,7 +18,7 @@ const OPERATOR_WIDGET_CONSTRAINTS = {
   'stat-max': { allowedW: [4, 6, 12], minH: 1, maxH: 1 },
   'stat-avg': { allowedW: [4, 6, 12], minH: 1, maxH: 1 },
   'stat-volume': { allowedW: [4, 6, 12], minH: 1, maxH: 1 },
-  'traffic-chart': { allowedW: [6, 7, 8, 12], minH: 2, maxH: 3 },
+  'traffic-chart': { allowedW: [6, 7, 8, 12], minH: 1, maxH: 6 },
   'distribution-protocols': { allowedW: [4, 5, 6, 12], minH: 1, maxH: 2 },
   'distribution-services': { allowedW: [4, 5, 6, 12], minH: 1, maxH: 2 },
   vlan: { allowedW: [4, 5, 6, 7, 8, 9, 10, 11, 12], minH: 1, maxH: 2 },

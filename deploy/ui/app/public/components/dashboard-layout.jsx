@@ -13,6 +13,10 @@ const SHARE_RIGHT_SPLIT = 1 / 3;
 const DASHBOARD_LAYOUT_VERSION = 3;
 const STACK_INNER_COLS = 12;
 const STACK_ROW_SIZE_PX = 128;
+const DASHBOARD_GRID_ROW_PX = 200;
+const DASHBOARD_GRID_GAP_PX = 16;
+// One Protocols card: donut ~150px plus headers. Floor for a 1-row traffic chart.
+const TRAFFIC_CHART_MIN_HEIGHT_PX = 280;
 const STACK_ID_PATTERN = /^stack-[vh]-[a-z0-9]+$/;
 const LEGACY_V1_COMPOSITE_IDS = new Set(['traffic-stats', 'traffic-chart-row']);
 
@@ -20,7 +24,7 @@ const OPERATOR_WIDGET_REGISTRY = {
   'stat-max': { label: 'Максимально', allowedW: [4, 6, 12], minH: 1, maxH: 1 },
   'stat-avg': { label: 'Среднее', allowedW: [4, 6, 12], minH: 1, maxH: 1 },
   'stat-volume': { label: 'Объём', allowedW: [4, 6, 12], minH: 1, maxH: 1 },
-  'traffic-chart': { label: 'График трафика', allowedW: [6, 7, 8, 12], minH: 2, maxH: 3 },
+  'traffic-chart': { label: 'График трафика', allowedW: [6, 7, 8, 12], minH: 1, maxH: 6 },
   'distribution-protocols': { label: 'Протоколы', allowedW: [4, 5, 6, 12], minH: 1, maxH: 2 },
   'distribution-services': { label: 'Сервисы', allowedW: [4, 5, 6, 12], minH: 1, maxH: 2 },
   vlan: { label: 'VLAN', allowedW: [4, 5, 6, 7, 8, 9, 10, 11, 12], minH: 1, maxH: 2 },
@@ -323,7 +327,7 @@ function applyHorizontalStackChildWidth(children, childId, nextW, { fromWest = f
   return applyHorizontalInnerXs(ordered, ordered.map((child) => child.w));
 }
 
-function syncStackDimensions(stack, widgets) {
+function syncStackDimensions(stack, widgets, { followChildren = false } = {}) {
   const template = getDashboardWidgetMeta(stack);
   const children = getStackChildWidgets(widgets, stack).filter((child) => child.visible !== false);
   const packed = stack.direction === 'horizontal'
@@ -337,10 +341,14 @@ function syncStackDimensions(stack, widgets) {
     };
   }
   const maxBottom = Math.max(...packed.map((child) => child.y + child.h));
+  const contentH = Math.max(template.minH, maxBottom);
+  const nextH = followChildren
+    ? contentH
+    : Math.max(contentH, Math.round(Number(stack.h) || contentH));
   return {
     ...stack,
     w: nearestAllowedW(stack.w, template.allowedW),
-    h: Math.min(template.maxH, Math.max(template.minH, maxBottom, Math.round(Number(stack.h) || maxBottom))),
+    h: Math.min(template.maxH, nextH),
   };
 }
 
@@ -374,9 +382,11 @@ function createStackWidget(direction) {
 }
 
 function stackChildStyle(child) {
+  const h = Math.max(1, Number(child.h) || 1);
   return {
     gridColumn: `${child.x + 1} / span ${child.w}`,
-    gridRow: `${child.y + 1} / span ${child.h}`,
+    gridRow: `${child.y + 1} / span ${h}`,
+    minHeight: `${h * STACK_ROW_SIZE_PX}px`,
   };
 }
 
@@ -620,6 +630,55 @@ function dashboardWidgetsOverlap(a, b) {
     && a.x + a.w > b.x
     && a.y < b.y + b.h
     && a.y + a.h > b.y;
+}
+
+function dashboardWidgetsOverlapX(a, b) {
+  if (!a || !b || a.id === b.id) return false;
+  return a.x < b.x + b.w && a.x + a.w > b.x;
+}
+
+function shiftTopLevelWidgetsBelow(widgets, resized, oldBottom, newBottom) {
+  const delta = newBottom - oldBottom;
+  if (!delta || !resized || resized.parentStack) return widgets;
+
+  const nextById = new Map(widgets.map((widget) => [widget.id, { ...widget }]));
+  const candidates = widgets
+    .filter((other) => (
+      other.id !== resized.id
+      && !other.parentStack
+      && other.visible !== false
+      && other.y >= oldBottom
+      && dashboardWidgetsOverlapX(other, resized)
+    ))
+    // Growing pushes down, so move the lowest widget first to free the row below it.
+    .sort((a, b) => (delta > 0 ? b.y - a.y : a.y - b.y) || (a.x - b.x));
+
+  for (const candidate of candidates) {
+    const current = nextById.get(candidate.id);
+    const nextY = Math.max(0, current.y + delta);
+    if (nextY === current.y) continue;
+    const moved = { ...current, y: nextY };
+    const blocked = [...nextById.values()].some((blocker) => {
+      if (blocker.parentStack || blocker.visible === false) return false;
+      return dashboardWidgetsOverlap(moved, blocker);
+    });
+    if (!blocked) nextById.set(candidate.id, moved);
+  }
+
+  return widgets.map((widget) => nextById.get(widget.id) || widget);
+}
+
+function syncStackAfterChildHeightChange(widgets, childId) {
+  const list = widgets.map((item) => ({ ...item }));
+  const child = list.find((item) => item.id === childId);
+  if (!child?.parentStack) return list;
+  const stackIdx = list.findIndex((item) => item.id === child.parentStack);
+  if (stackIdx < 0) return list;
+  const prev = list[stackIdx];
+  const oldBottom = prev.y + prev.h;
+  const synced = syncStackDimensions(prev, list, { followChildren: true });
+  list[stackIdx] = synced;
+  return shiftTopLevelWidgetsBelow(list, synced, oldBottom, synced.y + synced.h);
 }
 
 function dashboardLayoutHasCollisions(visible) {
@@ -1039,7 +1098,7 @@ function stabilizeDropTarget(next, prev, clientX, clientY, grid) {
 }
 
 function applyDashboardWidgetResize(widgets, widgetId, { w, h, anchorRight, anchorBottom } = {}) {
-  const list = widgets.map((item) => ({ ...item }));
+  let list = widgets.map((item) => ({ ...item }));
   const idx = list.findIndex((item) => item.id === widgetId);
   if (idx < 0) return widgets;
 
@@ -1078,19 +1137,26 @@ function applyDashboardWidgetResize(widgets, widgetId, { w, h, anchorRight, anch
   }
 
   if (h != null && meta.maxH > meta.minH) {
+    const oldBottom = widget.y + widget.h;
     let newH = Math.min(meta.maxH, Math.max(meta.minH, Math.round(Number(h) || meta.minH)));
     let y = widget.y;
     if (anchorBottom != null) {
       y = anchorBottom - newH;
       if (y < 0) {
         y = 0;
-        newH = Math.min(meta.maxH, Math.max(meta.minH, anchorBottom));
+        newH = Math.min(meta.maxH, Math.max(meta.minH, newH));
       }
     }
     next = { ...next, y: Math.max(0, y), h: newH };
+    list[idx] = clampDashboardWidget(next);
+    if (!next.parentStack) {
+      list = shiftTopLevelWidgetsBelow(list, list[idx], oldBottom, list[idx].y + list[idx].h);
+    }
+  } else {
+    list[idx] = clampDashboardWidget(next);
   }
 
-  list[idx] = clampDashboardWidget(next);
+  next = list[idx];
 
   if (next.parentStack) {
     const stack = list.find((item) => item.id === next.parentStack);
@@ -1108,13 +1174,8 @@ function applyDashboardWidgetResize(widgets, widgetId, { w, h, anchorRight, anch
 }
 
 function finalizeStackChildResize(widgets, childId) {
-  let list = reconcileStackMembership(widgets.map((item) => ({ ...item })));
-  const child = list.find((item) => item.id === childId);
-  if (!child?.parentStack) return list;
-  const stackIdx = list.findIndex((item) => item.id === child.parentStack);
-  if (stackIdx < 0) return list;
-  list[stackIdx] = syncStackDimensions(list[stackIdx], list);
-  return list;
+  const list = reconcileStackMembership(widgets.map((item) => ({ ...item })));
+  return syncStackAfterChildHeightChange(list, childId);
 }
 
 function resizeDashboardWidgetHeight(widgets, widgetId, nextH, { anchorBottom = null } = {}) {
@@ -1136,11 +1197,7 @@ function previewResizeDashboardWidget(widgets, widgetId, { w, h, anchorRight, an
   if (w != null) next = applyDashboardWidgetResize(next, widgetId, { w, anchorRight });
   if (h != null) next = applyDashboardWidgetResize(next, widgetId, { h, anchorBottom });
   const widget = next.find((item) => item.id === widgetId);
-  if (widget?.parentStack) {
-    next = reconcileStackMembership(next.map((item) => ({ ...item })));
-    const stackIdx = next.findIndex((item) => item.id === widget.parentStack);
-    if (stackIdx >= 0) next[stackIdx] = syncStackDimensions(next[stackIdx], next);
-  }
+  if (widget?.parentStack) return syncStackAfterChildHeightChange(next, widgetId);
   return next;
 }
 
@@ -1586,15 +1643,7 @@ function DashboardStack({
 
 function DashboardWidgetPhantom({ widget, compact, detail }) {
   const meta = getDashboardWidgetMeta(widget);
-  const w = compact ? DASHBOARD_GRID_COLS : widget.w;
-  const h = Math.max(1, Number(widget.h) || 1);
-  const style = {
-    gridColumn: `${widget.x + 1} / span ${w}`,
-    gridRow: `${widget.y + 1} / span ${h}`,
-    minHeight: `${Math.max(72, h * STACK_ROW_SIZE_PX)}px`,
-    '--dw-w': w,
-    '--dw-h': h,
-  };
+  const style = dashboardWidgetStyle(widget, compact);
 
   return (
     <div
@@ -1613,11 +1662,21 @@ function DashboardWidgetPhantom({ widget, compact, detail }) {
 
 function dashboardWidgetStyle(widget, compact) {
   const w = compact ? DASHBOARD_GRID_COLS : widget.w;
-  return {
+  const h = Math.max(1, Number(widget.h) || 1);
+  const meta = getDashboardWidgetMeta(widget);
+  const rowPx = (isStackWidget(widget) || widget.parentStack) ? STACK_ROW_SIZE_PX : DASHBOARD_GRID_ROW_PX;
+  const style = {
     gridColumn: `${widget.x + 1} / span ${w}`,
-    gridRow: `${widget.y + 1} / span ${widget.h}`,
+    gridRow: `${widget.y + 1} / span ${h}`,
     '--dw-w': w,
+    '--dw-h': h,
   };
+  if (meta && meta.maxH > meta.minH) {
+    let minHeightPx = h * rowPx;
+    if (widget.id === 'traffic-chart') minHeightPx = Math.max(minHeightPx, TRAFFIC_CHART_MIN_HEIGHT_PX);
+    style.minHeight = `${minHeightPx}px`;
+  }
+  return style;
 }
 
 const DASHBOARD_FLIP_TRANSITION = 'transform 0.34s cubic-bezier(0.22, 1, 0.36, 1)';
@@ -1963,7 +2022,7 @@ function DashboardGrid({
     e.preventDefault();
     e.stopPropagation();
     const grid = gridRef.current;
-    if (!grid || compact) return;
+    if (!grid) return;
 
     const meta = getDashboardWidgetMeta(widget);
     if (!meta || meta.maxH <= meta.minH) return;
@@ -1974,15 +2033,8 @@ function DashboardGrid({
     setDraggingId(null);
 
     const fromNorth = edge === 'north';
-    const isStackChild = !!widget.parentStack;
-    const widgetEl = grid.querySelector(`[data-widget-id="${widget.id}"]`);
-    const layoutEl = isStackChild
-      ? (widgetEl?.closest('.dashboard-stack__item') || widgetEl)
-      : widgetEl;
-    const widgetRect = readWidgetLayoutRect(layoutEl);
-    const rowHeight = widgetRect && widget.h > 0
-      ? widgetRect.height / widget.h
-      : STACK_ROW_SIZE_PX;
+    const rowPx = (widget.parentStack || isStackWidget(widget)) ? STACK_ROW_SIZE_PX : DASHBOARD_GRID_ROW_PX;
+    const rowHeight = Math.max(72, (rowPx + DASHBOARD_GRID_GAP_PX) / 2);
     const startY = e.clientY;
     const startH = widget.h;
     const startWidgetY = widget.y;
@@ -2067,7 +2119,7 @@ function DashboardGrid({
       const canResizeWidth = editMode && !compact && parentStack?.direction === 'horizontal' && siblings.length > 1;
       const canResizeWest = canResizeWidth && siblingIdx > 0;
       const canResizeEast = canResizeWidth && siblingIdx >= 0 && siblingIdx < siblings.length - 1;
-      const canResizeHeight = editMode && !compact && !!meta && meta.maxH > meta.minH;
+      const canResizeHeight = editMode && !!meta && meta.maxH > meta.minH;
       return (
         <div
           key={widget.id}
@@ -2129,7 +2181,7 @@ function DashboardGrid({
 
     const isInteractionSource = widget.id === draggingId && interactionPhantom;
     const canResizeWidth = editMode && !compact && !!meta;
-    const canResizeHeight = editMode && !compact && !!meta && meta.maxH > meta.minH;
+    const canResizeHeight = editMode && !!meta && meta.maxH > meta.minH;
     const style = dashboardWidgetStyle(widget, compact);
     const modeKey = (widget.id === 'distribution-protocols' || widget.id === 'distribution-services')
       ? distributionRenderKey
@@ -2156,7 +2208,7 @@ function DashboardGrid({
         key={`${widget.id}${modeKey ? `:${modeKey}` : ''}`}
         data-widget-id={widget.id}
         data-flip-id={widget.id}
-        className={`dashboard-widget${stackWidget ? ' dashboard-widget--stack' : ''}${hiddenPreview ? ' is-hidden-preview' : ''}${isInteractionSource && interactionPhantom ? ' is-interaction-source' : ''}${dragPreview || resizePreview ? ' is-preview-shifted' : ''}`}
+        className={`dashboard-widget${stackWidget ? ' dashboard-widget--stack' : ''}${hiddenPreview ? ' is-hidden-preview' : ''}${isInteractionSource && interactionPhantom ? ' is-interaction-source' : ''}${dragPreview || resizePreview ? ' is-preview-shifted' : ''}${widget.id === resizingId ? ' is-resizing' : ''}`}
         style={style}
       >
         <DashboardWidgetChrome

@@ -604,6 +604,7 @@ function CabinetDashboard({ onNavigate, timeRange, customPeriod, displayTimezone
   const [countryDirection, setCountryDirection] = useState('in');
   const [serviceDirection, setServiceDirection] = useState('in');
   const [countryMetric, setCountryMetric] = useState('share');
+  const [chartMode, setChartMode] = useState('bw');
   const [chartHidden, setChartHidden] = useState(() => new Set());
 
   useEffect(() => {
@@ -726,11 +727,13 @@ function CabinetDashboard({ onNavigate, timeRange, customPeriod, displayTimezone
 
       <DashboardChartRow distributionMode="share" trendSplit={SHARE_RIGHT_SPLIT} onTrendSplitChange={() => {}}>
         <OverviewTrafficChartCard
-          title="Полоса пропускания"
+          title="Полоса пропускания и pps"
           subtitle={`${periodLabel} · ${formatCabinetGranularityLabel(series.meta?.granularity) || '…'}`}
           points={chartPoints}
           lines={chart.lines}
-          mode="bw"
+          ppsLines={chart.lines}
+          mode={chartMode}
+          onModeChange={setChartMode}
           hiddenKeys={chartHidden}
           onToggleLine={toggleChartLine}
           loading={series.source === 'loading'}
@@ -744,7 +747,6 @@ function CabinetDashboard({ onNavigate, timeRange, customPeriod, displayTimezone
           periodEndMs={bounds.endMs}
           bucketSeconds={chart.bucketSeconds}
           onRangeSelect={onChartRangeSelect}
-          allowPps={false}
           footer={dataMeta(series.meta)}
         />
         <Card pad="sm">
