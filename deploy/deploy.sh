@@ -25,6 +25,8 @@
 #   ./deploy/deploy.sh status          # containers + repo head
 #   ./deploy/deploy.sh logs [svc]      # follow logs (worker|enrichment|ui|detection|all)
 #   ./deploy/deploy.sh --no-pull ui    # rebuild without git pull
+#   Если git pull просит логин GitHub: вы уже root, учёток нет.
+#   Сделайте pull от пользователя, который клонировал репо, затем --no-pull.
 #
 # Optional env:
 #   UI_DATA_DIR=/opt/grapes/ui/data
@@ -72,6 +74,27 @@ need_compose_dir() {
   docker compose version >/dev/null 2>&1 || die "docker compose plugin required"
 }
 
+# HTTPS credentials live in the user who cloned the repo, not in root.
+# `sudo ./deploy.sh` must pull as SUDO_USER; a root shell has no GitHub login.
+git_as_checkout_user() {
+  local user=""
+  if [[ -n "${SUDO_USER:-}" && "${SUDO_USER}" != "root" ]]; then
+    user="${SUDO_USER}"
+  elif [[ "${EUID}" -eq 0 ]]; then
+    local owner
+    owner="$(stat -c '%U' "${REPO_ROOT}" 2>/dev/null || true)"
+    if [[ -n "${owner}" && "${owner}" != "root" ]]; then
+      user="${owner}"
+    fi
+  fi
+  if [[ -n "${user}" ]]; then
+    log "git as ${user}"
+    sudo -u "${user}" -H env GIT_TERMINAL_PROMPT=0 git -C "${REPO_ROOT}" "$@"
+  else
+    GIT_TERMINAL_PROMPT=0 git -C "${REPO_ROOT}" "$@"
+  fi
+}
+
 git_pull() {
   cd "${REPO_ROOT}"
   [[ -d .git ]] || die "${REPO_ROOT} is not a git checkout"
@@ -79,7 +102,9 @@ git_pull() {
   before="$(git rev-parse --short HEAD)"
   branch="$(git rev-parse --abbrev-ref HEAD)"
   log "git pull origin ${branch} (was ${before})"
-  git pull --ff-only origin "${branch}"
+  if ! git_as_checkout_user pull --ff-only origin "${branch}"; then
+    die "git pull failed. Root has no GitHub credentials. Either: sudo -u <clone-user> git -C ${REPO_ROOT} pull --ff-only origin ${branch}   then   $0 --no-pull …    or run: $0 --no-pull …"
+  fi
   after="$(git rev-parse --short HEAD)"
   if [[ "${before}" == "${after}" ]]; then
     log "already up to date (${after})"

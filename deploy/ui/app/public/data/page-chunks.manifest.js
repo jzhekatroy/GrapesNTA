@@ -9,6 +9,7 @@ const PAGE_CHUNKS_MANIFEST = {
     vlan: 'network',
     entities: 'network',
     'erp-piterix': 'diagnostics',
+    detection: 'diagnostics',
   },
   chunks: {
     dashboard: {
@@ -64,7 +65,7 @@ const PAGE_CHUNKS_MANIFEST = {
       exports: { default: 'PageNetwork' },
     },
     diagnostics: {
-      scripts: ['/pages/erp-piterix.jsx', '/pages/diagnostics.jsx'],
+      scripts: ['/pages/erp-piterix.jsx', '/pages/detection.jsx', '/pages/diagnostics.jsx'],
       exports: { default: 'PageDiagnostics' },
     },
     snmp: {

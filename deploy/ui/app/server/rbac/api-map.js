@@ -43,6 +43,7 @@ function getResourceForPath(path, method) {
   if (p.startsWith('/api/diagnostics/direction/')) return 'traffic-classification';
   if (p.startsWith('/api/admin/ttl')) return 'ttl';
   if (p.startsWith('/api/erp-piterix')) return 'diagnostics';
+  if (p.startsWith('/api/detection')) return 'diagnostics';
   if (p.startsWith('/api/audit')) {
     if (p === '/api/audit/page' && method === 'POST') return null;
     return 'audit';

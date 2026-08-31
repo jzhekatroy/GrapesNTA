@@ -89,6 +89,14 @@ const TTL_CATALOG = [
     defaultDays: 180,
     heavy: false,
   },
+  {
+    id: 'traffic_client_anomaly_1m',
+    label: 'Детекция: минута объекта',
+    table: () => 'traffic_client_anomaly_1m',
+    ttlColumn: 'minute',
+    defaultDays: 16,
+    heavy: false,
+  },
 ];
 
 const catalogById = Object.fromEntries(TTL_CATALOG.map((entry) => [entry.id, entry]));

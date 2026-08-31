@@ -1672,7 +1672,7 @@ function PageDiagnostics() {
   }, []);
 
   const reload = useCallback((opts = { initial: false }) => {
-    if (tab === 'erp') {
+    if (tab === 'erp' || tab === 'detection') {
       setLoading(false);
       setError('');
       return;
@@ -1760,6 +1760,13 @@ function PageDiagnostics() {
           </button>
           <button
             type="button"
+            className={tab === 'detection' ? 'seg__item seg__item--active' : 'seg__item'}
+            onClick={() => { sessionStorage.setItem('grapes-diagnostics-tab', 'detection'); setTab('detection'); }}
+          >
+            Детекция
+          </button>
+          <button
+            type="button"
             className={tab === 'snapshots' ? 'seg__item seg__item--active' : 'seg__item'}
             onClick={() => setTab('snapshots')}
           >
@@ -1816,6 +1823,7 @@ function PageDiagnostics() {
           onReload={() => reload({ initial: false })}
         />
       )}
+      {tab === 'detection' && <PageDetection />}
       {tab === 'snapshots' && (
         <AnalysisSnapshotsPanel
           data={snapshotsData}

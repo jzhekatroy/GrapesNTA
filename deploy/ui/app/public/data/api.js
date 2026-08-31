@@ -862,6 +862,11 @@ const ApiClient = (() => {
     return `/api/erp-piterix/runs/${encodeURIComponent(runId)}/report.csv`;
   }
 
+  async function loadDetectionLatest() {
+    const body = await requestJson('/api/detection/latest');
+    return body.data;
+  }
+
   function countryQuery({ timeRange = '24h', customPeriod, directions, basis = 'ip', mapSide = 'remote', sourceIds, collectorFilter } = {}) {
     const params = new URLSearchParams();
     appendCustomPeriodParams(params, timeRange, customPeriod);
@@ -2922,6 +2927,7 @@ const ApiClient = (() => {
     saveErpPiterixSettings,
     runErpPiterixSync,
     erpPiterixReportUrl,
+    loadDetectionLatest,
     dashboardOtherPorts,
     dashboardCountries,
     loadCountries,

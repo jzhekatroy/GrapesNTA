@@ -227,6 +227,7 @@ const {
   stopImpersonationHandler,
 } = require('./cabinet/routes');
 const { createErpPiterixRouter } = require('./erp-piterix-routes');
+const { createDetectionRouter } = require('./detection-routes');
 const {
   resolveCabinetContext,
   cabinetPayload,
@@ -710,6 +711,7 @@ app.use('/api/rbac', createRbacRouter());
 app.use('/api/cabinet', createCabinetRouter({ sessions }));
 app.use('/api/clients', createClientsRouter({ sessions }));
 app.use('/api/erp-piterix', createErpPiterixRouter());
+app.use('/api/detection', createDetectionRouter());
 
 app.get('/api/dashboard/collectors', async (_req, res) => {
   try {
