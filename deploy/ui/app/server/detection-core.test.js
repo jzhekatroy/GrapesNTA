@@ -3,6 +3,7 @@
 const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
 const { growthRatio, variationPercent, minuteMetrics, ratePercent, MIN_BPS } = require('./detection-core');
+const { loadHistory, HISTORY_METRICS } = require('./detection-engine');
 
 describe('detection-core', () => {
   it('рост пустой, если квантиль ноль', () => {
@@ -39,30 +40,32 @@ describe('detection-core', () => {
     assert.equal(m.answerPct, null);
     assert.equal(m.halfOpenPct, null);
     assert.equal(m.halfOpenReplyPct, null);
-    assert.equal(m.udpPortEntropy, null);
-    assert.equal(m.udpPortEntropyOut, null);
-    assert.equal(m.udpPortsPerIp, null);
-    assert.equal(m.udpPortsPerIpOut, null);
+    assert.equal(m.portEntropy, null);
+    assert.equal(m.portEntropyOut, null);
+    assert.equal(m.portsPerIp, null);
+    assert.equal(m.portsPerIpOut, null);
   });
 
-  it('энтропия UDP: число сохраняется, NaN становится пустым', () => {
-    assert.equal(minuteMetrics({ udpPortEntropy: 5.25 }).udpPortEntropy, 5.25);
-    assert.equal(minuteMetrics({ udpPortEntropy: Number.NaN }).udpPortEntropy, null);
+  it('энтропия портов: число сохраняется, NaN становится пустым', () => {
+    assert.equal(minuteMetrics({ portEntropy: 5.25 }).portEntropy, 5.25);
+    assert.equal(minuteMetrics({ portEntropy: Number.NaN }).portEntropy, null);
+    assert.equal(minuteMetrics({ udpPortEntropy: 5.25 }).portEntropy, 5.25);
   });
 
-  it('энтропия UDP: входящая и исходящая независимы', () => {
-    const m = minuteMetrics({ udpPortEntropy: 2.75, udpPortEntropyOut: 11.4 });
-    assert.equal(m.udpPortEntropy, 2.75);
-    assert.equal(m.udpPortEntropyOut, 11.4);
-    assert.equal(minuteMetrics({ udpPortEntropyOut: 4.5 }).udpPortEntropy, null);
+  it('энтропия портов: входящая и исходящая независимы', () => {
+    const m = minuteMetrics({ portEntropy: 2.75, portEntropyOut: 11.4 });
+    assert.equal(m.portEntropy, 2.75);
+    assert.equal(m.portEntropyOut, 11.4);
+    assert.equal(minuteMetrics({ portEntropyOut: 4.5 }).portEntropy, null);
   });
 
   it('пик портов на адрес: стороны независимы, NaN становится пустым', () => {
-    const m = minuteMetrics({ udpPortsPerIp: 5477, udpPortsPerIpOut: 12 });
-    assert.equal(m.udpPortsPerIp, 5477);
-    assert.equal(m.udpPortsPerIpOut, 12);
-    assert.equal(minuteMetrics({ udpPortsPerIpOut: 3 }).udpPortsPerIp, null);
-    assert.equal(minuteMetrics({ udpPortsPerIp: Number.NaN }).udpPortsPerIp, null);
+    const m = minuteMetrics({ portsPerIp: 5477, portsPerIpOut: 12 });
+    assert.equal(m.portsPerIp, 5477);
+    assert.equal(m.portsPerIpOut, 12);
+    assert.equal(minuteMetrics({ portsPerIpOut: 3 }).portsPerIp, null);
+    assert.equal(minuteMetrics({ portsPerIp: Number.NaN }).portsPerIp, null);
+    assert.equal(minuteMetrics({ udpPortsPerIp: 88 }).portsPerIp, 88);
   });
 
   it('порог тишины: 20 Мбит/с, объект на 19.9 не проходит', () => {
@@ -103,5 +106,34 @@ describe('detection-core', () => {
     assert.ok(Math.abs(m.answerPct - 0.581) < 0.01);
     assert.ok(Math.abs(m.halfOpenPct - 98.635) < 0.02);
     assert.ok(m.halfOpenReplyPct < 0.01);
+  });
+});
+
+describe('detection history', () => {
+  it('метрики только из белого списка колонок', () => {
+    for (const spec of Object.values(HISTORY_METRICS)) {
+      assert.match(spec.column, /^[a-z_]+$/);
+    }
+    assert.ok(HISTORY_METRICS.portEntropy);
+    assert.equal(HISTORY_METRICS.udpPortEntropy, undefined);
+  });
+
+  it('отклоняет неизвестную метрику, объект и протокол', async () => {
+    await assert.rejects(
+      () => loadHistory({ scope: 'client', scopeId: '1', metric: 'drop_table' }),
+      (err) => err.statusCode === 400,
+    );
+    await assert.rejects(
+      () => loadHistory({ scope: 'x', scopeId: '1', metric: 'bps' }),
+      (err) => err.statusCode === 400,
+    );
+    await assert.rejects(
+      () => loadHistory({ scope: 'client', scopeId: '1', proto: 'icmp', metric: 'bps' }),
+      (err) => err.statusCode === 400,
+    );
+    await assert.rejects(
+      () => loadHistory({ scope: 'client', scopeId: '1', metric: 'bps', from: 'плохо', to: '2026-09-01 10:00:00' }),
+      (err) => err.statusCode === 400,
+    );
   });
 });

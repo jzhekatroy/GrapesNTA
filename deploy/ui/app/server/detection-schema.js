@@ -4,6 +4,7 @@ const { executeCommand, query, config } = require('./clickhouse');
 
 const DB = () => config.database || 'default';
 const TABLE = 'traffic_client_anomaly_1m';
+const PROTOS = ['all', 'tcp', 'udp'];
 
 function tableRef() {
   return `${DB()}.${TABLE}`;
@@ -15,6 +16,7 @@ CREATE TABLE IF NOT EXISTS ${DB()}.${TABLE}
   minute DateTime('UTC'),
   scope LowCardinality(String),
   scope_id String,
+  proto LowCardinality(String),
   bytes UInt64 DEFAULT 0,
   packets UInt64 DEFAULT 0,
   bps Float64 DEFAULT 0,
@@ -31,16 +33,23 @@ CREATE TABLE IF NOT EXISTS ${DB()}.${TABLE}
   answer_pct Nullable(Float64),
   half_open_pct Nullable(Float64),
   half_open_reply_pct Nullable(Float64),
-  udp_port_entropy Nullable(Float64),
-  udp_port_entropy_out Nullable(Float64),
-  udp_ports_per_ip Nullable(Float64),
-  udp_ports_per_ip_out Nullable(Float64)
+  port_entropy Nullable(Float64),
+  port_entropy_out Nullable(Float64),
+  ports_per_ip Nullable(Float64),
+  ports_per_ip_out Nullable(Float64)
 )
 ENGINE = ReplacingMergeTree
 PARTITION BY toYYYYMMDD(minute)
-ORDER BY (scope, scope_id, minute)
+ORDER BY (scope, scope_id, proto, minute)
 TTL minute + toIntervalDay(16)
 `;
+
+const ADD_COLUMNS = [
+  'port_entropy',
+  'port_entropy_out',
+  'ports_per_ip',
+  'ports_per_ip_out',
+];
 
 let ensurePromise = null;
 
@@ -57,26 +66,23 @@ async function ensureDetectionTables() {
         await executeCommand(CREATE_SQL, {}, { name: 'detection/create-anomaly' });
         return;
       }
-      for (const column of [
-        'udp_port_entropy',
-        'udp_port_entropy_out',
-        'udp_ports_per_ip',
-        'udp_ports_per_ip_out',
-      ]) {
+      const hasProtoKey = names.has('proto');
+      const hasCore = names.has('scope')
+        && names.has('growth_bps')
+        && names.has('answer_pct')
+        && names.has('syn_half_open_reply');
+      if (!hasProtoKey || !hasCore) {
+        await executeCommand(`DROP TABLE IF EXISTS ${DB()}.${TABLE}`, {}, { name: 'detection/drop-anomaly' });
+        await executeCommand(CREATE_SQL, {}, { name: 'detection/create-anomaly' });
+        return;
+      }
+      for (const column of ADD_COLUMNS) {
         if (names.has(column)) continue;
         await executeCommand(
           `ALTER TABLE ${DB()}.${TABLE} ADD COLUMN IF NOT EXISTS ${column} Nullable(Float64)`,
           {},
           { name: `detection/add-${column.replace(/_/g, '-')}` },
         );
-      }
-      const matches = names.has('scope')
-        && names.has('growth_bps')
-        && names.has('answer_pct')
-        && names.has('syn_half_open_reply');
-      if (!matches) {
-        await executeCommand(`DROP TABLE IF EXISTS ${DB()}.${TABLE}`, {}, { name: 'detection/drop-anomaly' });
-        await executeCommand(CREATE_SQL, {}, { name: 'detection/create-anomaly' });
       }
     })().catch((err) => {
       ensurePromise = null;
@@ -90,4 +96,5 @@ module.exports = {
   TABLE,
   tableRef,
   ensureDetectionTables,
+  PROTOS,
 };

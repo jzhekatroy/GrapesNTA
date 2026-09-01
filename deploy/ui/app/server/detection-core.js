@@ -71,10 +71,10 @@ function minuteMetrics(raw = {}) {
     answerPct: ratePercent(synAnswered, synAttempts),
     halfOpenPct: ratePercent(synHalfOpen, synInFlows),
     halfOpenReplyPct: ratePercent(synHalfOpenReply, synAttempts),
-    udpPortEntropy: finiteOrNull(raw.udpPortEntropy),
-    udpPortEntropyOut: finiteOrNull(raw.udpPortEntropyOut),
-    udpPortsPerIp: finiteOrNull(raw.udpPortsPerIp),
-    udpPortsPerIpOut: finiteOrNull(raw.udpPortsPerIpOut),
+    portEntropy: finiteOrNull(raw.portEntropy ?? raw.udpPortEntropy),
+    portEntropyOut: finiteOrNull(raw.portEntropyOut ?? raw.udpPortEntropyOut),
+    portsPerIp: finiteOrNull(raw.portsPerIp ?? raw.udpPortsPerIp),
+    portsPerIpOut: finiteOrNull(raw.portsPerIpOut ?? raw.udpPortsPerIpOut),
   };
 }
 

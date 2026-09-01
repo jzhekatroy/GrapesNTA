@@ -877,6 +877,36 @@ const ApiClient = (() => {
     return body.data;
   }
 
+  async function loadDetectionHistory({ scope, scopeId, proto, metric, hours, from, to } = {}) {
+    const params = new URLSearchParams();
+    params.set('scope', scope);
+    params.set('scopeId', scopeId);
+    params.set('proto', proto || 'all');
+    params.set('metric', metric);
+    if (from && to) {
+      params.set('from', from);
+      params.set('to', to);
+    } else if (hours) {
+      params.set('hours', String(hours));
+    }
+    const body = await requestJson(`/api/detection/history?${params}`);
+    return body.data;
+  }
+
+  async function loadDetectionTelegramSettings() {
+    const body = await requestJson('/api/detection/telegram');
+    return body.data;
+  }
+
+  async function saveDetectionTelegramSettings(payload) {
+    const body = await requestJson('/api/detection/telegram', { method: 'PUT', body: payload });
+    return body.data;
+  }
+
+  async function testDetectionTelegramSettings() {
+    return requestJson('/api/detection/telegram/test', { method: 'POST', body: {} });
+  }
+
   function countryQuery({ timeRange = '24h', customPeriod, directions, basis = 'ip', mapSide = 'remote', sourceIds, collectorFilter } = {}) {
     const params = new URLSearchParams();
     appendCustomPeriodParams(params, timeRange, customPeriod);
@@ -2937,6 +2967,10 @@ const ApiClient = (() => {
     runErpPiterixSync,
     erpPiterixReportUrl,
     loadDetectionLatest,
+    loadDetectionHistory,
+    loadDetectionTelegramSettings,
+    saveDetectionTelegramSettings,
+    testDetectionTelegramSettings,
     dashboardOtherPorts,
     dashboardCountries,
     loadCountries,

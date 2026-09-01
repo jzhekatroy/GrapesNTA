@@ -1,5 +1,33 @@
 const { useState, useEffect, useCallback, useMemo } = React;
 
+const PROTOS = ['all', 'tcp', 'udp'];
+const PROTO_ORDER = { all: 0, tcp: 1, udp: 2 };
+const PROTO_LABEL = { all: 'общее', tcp: 'TCP', udp: 'UDP' };
+const PROTO_TONE = { all: 'neutral', tcp: 'info', udp: 'warning' };
+const CHART_PERIODS = [
+  { id: '1h', hours: 1, label: '1ч', title: '1 час' },
+  { id: '6h', hours: 6, label: '6ч', title: '6 часов' },
+  { id: '24h', hours: 24, label: '24ч', title: '24 часа' },
+  { id: '7d', hours: 168, label: '7д', title: '7 дней' },
+];
+const HANDSHAKE_METRICS = new Set(['synAttempts', 'answerPct', 'halfOpenPct', 'halfOpenReplyPct']);
+const METRIC_TITLES = {
+  bps: 'bps',
+  pps: 'pps',
+  growthBps: 'Рост bps',
+  growthPps: 'Рост pps',
+  synAttempts: 'Попытки',
+  answerPct: 'Ответ',
+  halfOpenPct: 'Полуоткрытые',
+  halfOpenReplyPct: 'Не зашли',
+  portEntropy: 'Энтропия портов вх.',
+  portEntropyOut: 'Энтропия портов исх.',
+  portsPerIp: 'Макс. портов/IP вх.',
+  portsPerIpOut: 'Макс. портов/IP исх.',
+  avgPacketBytes: 'Средний пакет',
+  cvPercent: 'CV',
+};
+
 function formatWhen(value) {
   if (!value) return '—';
   const raw = String(value);
@@ -7,6 +35,33 @@ function formatWhen(value) {
   const date = new Date(iso);
   if (Number.isNaN(date.getTime())) return raw;
   return `${date.toLocaleString('ru-RU', { timeZone: 'Europe/Moscow' })} МСК`;
+}
+
+function utcCh(ms) {
+  return new Date(ms).toISOString().slice(0, 19).replace('T', ' ');
+}
+
+function displayLocalToMs(value) {
+  if (!value || typeof displayDatetimeLocalToData !== 'function' || typeof parseChartBucketMs !== 'function') return null;
+  return parseChartBucketMs(String(displayDatetimeLocalToData(value)).replace('T', ' '));
+}
+
+function chartWindow(periodId, customRange) {
+  if (customRange?.from && customRange?.to) {
+    const fromMs = displayLocalToMs(customRange.from);
+    const toMs = displayLocalToMs(customRange.to);
+    if (fromMs != null && toMs != null && toMs > fromMs) return { fromMs, toMs, hours: null };
+  }
+  const hours = CHART_PERIODS.find((p) => p.id === periodId)?.hours || 6;
+  const toMs = Date.now();
+  return { fromMs: toMs - hours * 3600 * 1000, toMs, hours };
+}
+
+function chartPeriodLabel(periodId, customRange) {
+  if (customRange?.from && customRange?.to && typeof formatCustomPeriodLabel === 'function') {
+    return formatCustomPeriodLabel(customRange);
+  }
+  return CHART_PERIODS.find((p) => p.id === periodId)?.title || '6 часов';
 }
 
 function formatNum(value, digits = 2) {
@@ -59,10 +114,76 @@ function objectKind(row) {
   return String(row?.scope || '').toLowerCase() === 'net' ? 'net' : 'client';
 }
 
+function protoOf(row) {
+  return PROTO_ORDER[row?.proto] != null ? row.proto : 'all';
+}
+
 function matchesSearch(row, needle) {
   if (!needle) return true;
   const kindLabel = objectKind(row) === 'net' ? 'сеть net /24' : 'абонент клиент';
-  return `${row.name || ''} ${row.scopeId || ''} ${kindLabel}`.toLowerCase().includes(needle);
+  const protoLabel = PROTO_LABEL[protoOf(row)] || '';
+  return `${row.name || ''} ${row.scopeId || ''} ${kindLabel} ${protoLabel}`.toLowerCase().includes(needle);
+}
+
+function isBlankMetric(formatted) {
+  return formatted === '—' || formatted === 'пусто';
+}
+
+function metricText(row, metric, formatted) {
+  if (!row) return '—';
+  if (row.proto === 'udp' && HANDSHAKE_METRICS.has(metric)) return '—';
+  return formatted(row);
+}
+
+function sortMetric(group, key, protoFilter) {
+  const proto = protoFilter === 'any' ? 'all' : protoFilter;
+  const row = group?.byProto?.[proto] || group?.byProto?.all;
+  const value = row?.[key];
+  if (value == null || !Number.isFinite(Number(value))) return null;
+  return Number(value);
+}
+
+function MetricStack({ group, metric, formatted, onOpen, protos }) {
+  const list = protos?.length ? protos : PROTOS;
+  return (
+    <div className="detection-stack" style={{ '--detection-stack-rows': list.length }}>
+      {list.map((proto) => {
+        const row = group.byProto[proto];
+        const text = metricText(row, metric, formatted);
+        const clickable = row && !isBlankMetric(text);
+        return (
+          <div key={proto} className="detection-stack__line">
+            {clickable ? (
+              <button
+                type="button"
+                className="link-btn"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onOpen(row, metric);
+                }}
+              >
+                {text}
+              </button>
+            ) : text}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function chartFormatValue(metric, value) {
+  if (value == null || !Number.isFinite(Number(value))) return '—';
+  if (metric === 'bps') return formatBps(value);
+  if (metric === 'pps') return formatPps(value);
+  if (metric === 'growthBps' || metric === 'growthPps') return formatGrowth(value);
+  if (metric === 'answerPct' || metric === 'halfOpenPct' || metric === 'halfOpenReplyPct' || metric === 'cvPercent') {
+    return formatPct(value);
+  }
+  if (metric === 'portEntropy' || metric === 'portEntropyOut') return formatEntropy(value);
+  if (metric === 'portsPerIp' || metric === 'portsPerIpOut') return formatPorts(value);
+  if (metric === 'avgPacketBytes') return `${formatNum(value, 0)} Б`;
+  return formatNum(value, 0);
 }
 
 function PageDetection() {
@@ -70,6 +191,18 @@ function PageDetection() {
   const [error, setError] = useState('');
   const [q, setQ] = useState('');
   const [kind, setKind] = useState('all');
+  const [protoFilter, setProtoFilter] = useState('any');
+  const [chart, setChart] = useState(null);
+  const [chartData, setChartData] = useState(null);
+  const [chartError, setChartError] = useState('');
+  const [chartPeriod, setChartPeriod] = useState('6h');
+  const [chartCustom, setChartCustom] = useState(null);
+  const [chartZoomStack, setChartZoomStack] = useState([]);
+  const [telegram, setTelegram] = useState(null);
+  const [telegramError, setTelegramError] = useState('');
+  const [telegramForbidden, setTelegramForbidden] = useState(false);
+  const [telegramBusy, setTelegramBusy] = useState(false);
+  const [botToken, setBotToken] = useState('');
 
   const reload = useCallback(() => {
     setError('');
@@ -80,13 +213,159 @@ function PageDetection() {
 
   useEffect(() => { reload(); }, [reload]);
 
+  useEffect(() => {
+    ApiClient.loadDetectionTelegramSettings()
+      .then((data) => {
+        setTelegram(data);
+        setTelegramForbidden(false);
+        setTelegramError('');
+        setBotToken('');
+      })
+      .catch((e) => {
+        if (e.status === 403) setTelegramForbidden(true);
+        setTelegramError(e.message);
+      });
+  }, []);
+
+  useEffect(() => {
+    if (!chart) {
+      setChartData(null);
+      setChartError('');
+      return undefined;
+    }
+    let cancelled = false;
+    setChartData(null);
+    setChartError('');
+    const window = chartWindow(chartPeriod, chartCustom);
+    ApiClient.loadDetectionHistory({
+      scope: chart.scope,
+      scopeId: chart.scopeId,
+      proto: chart.proto,
+      metric: chart.metric,
+      hours: window.hours,
+      from: window.hours ? undefined : utcCh(window.fromMs),
+      to: window.hours ? undefined : utcCh(window.toMs),
+    })
+      .then((body) => { if (!cancelled) setChartData(body); })
+      .catch((e) => { if (!cancelled) setChartError(e.message); });
+    return () => { cancelled = true; };
+  }, [chart, chartPeriod, chartCustom]);
+
   const rows = useMemo(() => {
     const needle = q.trim().toLowerCase();
-    return (data.items || [])
-      .filter((r) => kind === 'all' || objectKind(r) === kind)
-      .filter((r) => matchesSearch(r, needle))
-      .map((r) => ({ ...r, id: `${objectKind(r)}:${r.scopeId}` }));
-  }, [data.items, q, kind]);
+    const groups = new Map();
+    for (const item of data.items || []) {
+      if (kind !== 'all' && objectKind(item) !== kind) continue;
+      const proto = protoOf(item);
+      const id = `${objectKind(item)}:${item.scopeId}`;
+      const cur = groups.get(id) || {
+        id,
+        scope: item.scope,
+        scopeId: item.scopeId,
+        name: item.name,
+        byProto: { all: null, tcp: null, udp: null },
+      };
+      cur.byProto[proto] = { ...item, proto };
+      if (item.name) cur.name = item.name;
+      groups.set(id, cur);
+    }
+    return [...groups.values()]
+      .filter((g) => !needle || [g, ...PROTOS.map((p) => g.byProto[p])].some((r) => r && matchesSearch(r, needle)))
+      .map((g) => ({
+        ...g,
+        bps: Number((protoFilter === 'any' ? g.byProto.all : g.byProto[protoFilter])?.bps || 0),
+      }));
+  }, [data.items, q, kind, protoFilter]);
+
+  const visibleProtos = protoFilter === 'any' ? PROTOS : [protoFilter];
+
+  const openChart = useCallback((row, metric) => {
+    setChart({
+      scope: row.scope,
+      scopeId: row.scopeId,
+      proto: protoOf(row),
+      name: row.name,
+      metric,
+      title: METRIC_TITLES[metric] || metric,
+    });
+  }, []);
+
+  const chartBounds = useMemo(
+    () => chartWindow(chartPeriod, chartCustom),
+    [chartPeriod, chartCustom],
+  );
+
+  const chartPoints = useMemo(() => {
+    if (!chartData?.points?.length) return [];
+    return chartData.points.map((p) => ({
+      bucket: p.bucket || p.t,
+      bucketMs: p.bucketMs,
+      bps: p.v == null ? null : Number(p.v),
+    }));
+  }, [chartData]);
+
+  const pickChartPeriod = useCallback((id) => {
+    setChartPeriod(id);
+    setChartCustom(null);
+    setChartZoomStack([]);
+  }, []);
+
+  const onChartRangeSelect = useCallback((range) => {
+    if (!range?.from || !range?.to) return;
+    if (typeof validateCustomPeriod === 'function' && validateCustomPeriod(range)) return;
+    setChartZoomStack((stack) => [...stack, chartCustom]);
+    setChartCustom({ from: range.from, to: range.to });
+  }, [chartCustom]);
+
+  const resetChartZoom = useCallback(() => {
+    if (!chartZoomStack.length) {
+      setChartCustom(null);
+      return;
+    }
+    setChartCustom(chartZoomStack[chartZoomStack.length - 1]);
+    setChartZoomStack((stack) => stack.slice(0, -1));
+  }, [chartZoomStack]);
+
+  const metric = (key, formatted) => (g) => (
+    <MetricStack group={g} metric={key} formatted={formatted} onOpen={openChart} protos={visibleProtos} />
+  );
+  const byMetric = (key) => (g) => sortMetric(g, key, protoFilter);
+
+  const saveTelegram = async () => {
+    setTelegramBusy(true);
+    setTelegramError('');
+    try {
+      const payload = {
+        enabled: telegram?.enabled,
+        chatId: telegram?.chatId || '',
+        growthThreshold: telegram?.growthThreshold ?? 1.6,
+        alertScope: telegram?.alertScope || 'all',
+        streak: telegram?.streak ?? 3,
+      };
+      if (botToken.trim()) payload.botToken = botToken.trim();
+      const data = await ApiClient.saveDetectionTelegramSettings(payload);
+      setTelegram(data);
+      setBotToken('');
+      pushToast?.({ kind: 'success', title: 'Telegram сохранён' });
+    } catch (e) {
+      setTelegramError(e.message);
+    } finally {
+      setTelegramBusy(false);
+    }
+  };
+
+  const testTelegram = async () => {
+    setTelegramBusy(true);
+    setTelegramError('');
+    try {
+      await ApiClient.testDetectionTelegramSettings();
+      pushToast?.({ kind: 'success', title: 'Тестовое сообщение отправлено' });
+    } catch (e) {
+      setTelegramError(e.message);
+    } finally {
+      setTelegramBusy(false);
+    }
+  };
 
   return (
     <div className="col" style={{ gap: 14 }}>
@@ -97,8 +376,217 @@ function PageDetection() {
       )}
 
       <Card
+        title="Telegram"
+        subtitle="Строка «общее»: рост bps или pps ≥ порога. Отправка — если стабильно X записанных значений подряд. Повтор — после возврата ниже порога."
+      >
+        <div className="col" style={{ gap: 10, font: 'var(--pv-text-body-3)' }}>
+          {telegramForbidden ? (
+            <div style={{ color: 'var(--fg-secondary)' }}>
+              Настройки Telegram доступны только администратору.
+            </div>
+          ) : !telegram && !telegramError ? (
+            <div style={{ color: 'var(--fg-muted)' }}>Загрузка настроек…</div>
+          ) : (
+            <>
+              {telegramError && (
+                <div style={{ color: 'var(--st-critical)' }}>{telegramError}</div>
+              )}
+              <label className="row" style={{ gap: 8, alignItems: 'center' }}>
+                <input
+                  type="checkbox"
+                  checked={!!telegram?.enabled}
+                  onChange={(e) => setTelegram({
+                    enabled: false,
+                    chatId: '',
+                    growthThreshold: 1.6,
+                    alertScope: 'all',
+                    streak: 3,
+                    tokenSet: false,
+                    ...telegram,
+                    enabled: e.target.checked,
+                  })}
+                />
+                Включить оповещения
+              </label>
+              <div className="row" style={{ gap: 12, flexWrap: 'wrap' }}>
+                <label className="col" style={{ gap: 4, minWidth: 260, flex: 1 }}>
+                  <span>Токен бота {telegram?.tokenSet ? '(задан)' : ''}</span>
+                  <input
+                    className="input"
+                    type="password"
+                    placeholder={telegram?.tokenSet ? 'оставьте пустым, чтобы не менять' : ''}
+                    value={botToken}
+                    onChange={(e) => setBotToken(e.target.value)}
+                  />
+                </label>
+                <label className="col" style={{ gap: 4, minWidth: 180 }}>
+                  <span>ID группы</span>
+                  <input
+                    className="input"
+                    value={telegram?.chatId || ''}
+                    onChange={(e) => setTelegram({
+                      enabled: false,
+                      chatId: '',
+                      growthThreshold: 1.6,
+                      alertScope: 'all',
+                      streak: 3,
+                      tokenSet: false,
+                      ...telegram,
+                      chatId: e.target.value,
+                    })}
+                    placeholder="-100…"
+                  />
+                </label>
+                <label className="col" style={{ gap: 4, minWidth: 120 }}>
+                  <span>Порог роста</span>
+                  <input
+                    className="input"
+                    type="number"
+                    step="0.1"
+                    min="0.1"
+                    value={telegram?.growthThreshold ?? 1.6}
+                    onChange={(e) => setTelegram({
+                      enabled: false,
+                      chatId: '',
+                      growthThreshold: 1.6,
+                      alertScope: 'all',
+                      streak: 3,
+                      tokenSet: false,
+                      ...telegram,
+                      growthThreshold: Number(e.target.value),
+                    })}
+                  />
+                </label>
+                <label className="col" style={{ gap: 4, minWidth: 160 }}>
+                  <span>Объекты</span>
+                  <select
+                    className="input"
+                    value={telegram?.alertScope || 'all'}
+                    onChange={(e) => setTelegram({
+                      enabled: false,
+                      chatId: '',
+                      growthThreshold: 1.6,
+                      alertScope: 'all',
+                      streak: 3,
+                      tokenSet: false,
+                      ...telegram,
+                      alertScope: e.target.value,
+                    })}
+                  >
+                    <option value="all">Всё</option>
+                    <option value="client">Абоненты</option>
+                    <option value="net">Сети</option>
+                  </select>
+                </label>
+                <label className="col" style={{ gap: 4, minWidth: 160 }}>
+                  <span>Подряд выше порога</span>
+                  <input
+                    className="input"
+                    type="number"
+                    min="1"
+                    max="60"
+                    step="1"
+                    value={telegram?.streak ?? 3}
+                    onChange={(e) => setTelegram({
+                      enabled: false,
+                      chatId: '',
+                      growthThreshold: 1.6,
+                      alertScope: 'all',
+                      streak: 3,
+                      tokenSet: false,
+                      ...telegram,
+                      streak: Number(e.target.value),
+                    })}
+                  />
+                </label>
+              </div>
+              <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
+                <Button size="sm" disabled={telegramBusy} onClick={saveTelegram}>Сохранить</Button>
+                <Button
+                  size="sm"
+                  disabled={telegramBusy || !(telegram?.tokenSet || botToken.trim())}
+                  onClick={testTelegram}
+                >
+                  Тестовое сообщение
+                </Button>
+              </div>
+            </>
+          )}
+        </div>
+      </Card>
+
+      {chart && (
+        <Card
+          title={`${chart.title} · ${chart.name}`}
+          subtitle={`${PROTO_LABEL[chart.proto] || chart.proto} · ${chartPeriodLabel(chartPeriod, chartCustom)} · выделите диапазон на графике`}
+          tools={(
+            <div className="row" style={{ gap: 8, alignItems: 'center' }}>
+              {(chartCustom || chartZoomStack.length > 0) && (
+                <button
+                  type="button"
+                  className="time-pill time-pill--reset"
+                  title="Вернуть предыдущий период"
+                  onClick={resetChartZoom}
+                >
+                  <Icon name="zoom" size={14} />
+                  <span>Сброс</span>
+                </button>
+              )}
+              <div className="seg" role="group" aria-label="Период графика">
+                {CHART_PERIODS.map((p) => (
+                  <button
+                    key={p.id}
+                    type="button"
+                    className={!chartCustom && chartPeriod === p.id ? 'seg__item seg__item--active' : 'seg__item'}
+                    onClick={() => pickChartPeriod(p.id)}
+                  >
+                    {p.label}
+                  </button>
+                ))}
+              </div>
+              <Button size="sm" onClick={() => setChart(null)}>Закрыть</Button>
+            </div>
+          )}
+        >
+          {chartError && (
+            <div style={{ padding: 10, borderRadius: 8, background: 'var(--st-critical-bg)', color: 'var(--st-critical)' }}>
+              {chartError}
+            </div>
+          )}
+          {!chartError && !chartData && (
+            <div style={{ color: 'var(--fg-muted)', padding: '8px 0' }}>Загрузка графика…</div>
+          )}
+          {!chartError && chartData && chartPoints.length < 2 && (
+            <div style={{ color: 'var(--fg-muted)', padding: '8px 0' }}>
+              Мало точек для графика. История появится, когда воркер запишет несколько минут.
+            </div>
+          )}
+          {!chartError && chartPoints.length >= 2 && (
+            <TimeSeriesSparkChart
+              points={chartPoints}
+              height={240}
+              valueKey="bps"
+              formatValue={(v) => chartFormatValue(chart.metric, v)}
+              axisFormatter={chart.metric === 'bps' ? fmtBitsAxis : fmtCompact}
+              onRangeSelect={onChartRangeSelect}
+              bucketSeconds={60}
+              displayTimezone={typeof getDisplayTimezone === 'function' ? getDisplayTimezone() : undefined}
+              periodStartMs={chartBounds.fromMs}
+              periodEndMs={chartBounds.toMs}
+              skipLeadingGaps
+              skipTrailingGaps
+              fillGaps={false}
+              yAxisUnit={chartData.units || ''}
+            />
+          )}
+        </Card>
+      )}
+
+      <Card
         title="Детекция"
-        subtitle={data.minute ? `Минута ${formatWhen(data.minute)} · ${rows.length} объектов` : 'Минута ещё не посчитана'}
+        subtitle={data.minute
+          ? `Минута ${formatWhen(data.minute)} · ${rows.length} объектов`
+          : 'Минута ещё не посчитана'}
         tools={(
           <div className="row" style={{ gap: 8, alignItems: 'center' }}>
             <div className="seg">
@@ -124,27 +612,48 @@ function PageDetection() {
                 Сеть
               </button>
             </div>
+            <div className="seg" role="group" aria-label="Протокол">
+              <button
+                type="button"
+                className={protoFilter === 'any' ? 'seg__item seg__item--active' : 'seg__item'}
+                onClick={() => setProtoFilter('any')}
+              >
+                Все
+              </button>
+              {PROTOS.map((proto) => (
+                <button
+                  key={proto}
+                  type="button"
+                  className={protoFilter === proto ? 'seg__item seg__item--active' : 'seg__item'}
+                  onClick={() => setProtoFilter(proto)}
+                >
+                  {PROTO_LABEL[proto]}
+                </button>
+              ))}
+            </div>
             <Button size="sm" onClick={reload}>Обновить</Button>
           </div>
         )}
       >
         <DataTable
-          key={`${data.minute || 'empty'}:${kind}`}
+          key={`${data.minute || 'empty'}:${kind}:${protoFilter}`}
           rows={rows}
           rowKey="id"
           pageSize={50}
           emptyTitle="Нет данных"
           emptyDesc="Воркер ещё не записал минуту. Запустите npm run detection."
+          initialSort={{ key: 'bps', dir: 'desc' }}
           toolbar={{
             search: q,
             onSearch: setQ,
-            searchPlaceholder: 'имя, сеть, /24, id…',
+            searchPlaceholder: 'имя, сеть, /24, id, TCP, UDP…',
           }}
           columns={[
             {
               key: 'name',
               title: 'Объект',
               width: 280,
+              sortAccessor: (r) => r.name || r.scopeId || '',
               render: (r) => (
                 <span>
                   <Badge tone={r.scope === 'client' ? 'neutral' : 'info'}>
@@ -155,68 +664,112 @@ function PageDetection() {
                 </span>
               ),
             },
-            { key: 'bps', title: 'bps', num: true, width: 120, render: (r) => formatBps(r.bps) },
-            { key: 'pps', title: 'pps', num: true, width: 120, render: (r) => formatPps(r.pps) },
-            { key: 'growthBps', title: 'Рост bps', num: true, width: 110, render: (r) => formatGrowth(r.growthBps) },
-            { key: 'growthPps', title: 'Рост pps', num: true, width: 110, render: (r) => formatGrowth(r.growthPps) },
+            {
+              key: 'proto',
+              title: '',
+              width: 84,
+              sortable: false,
+              render: () => (
+                <div className="detection-stack" style={{ '--detection-stack-rows': visibleProtos.length }}>
+                  {visibleProtos.map((proto) => (
+                    <div key={proto} className="detection-stack__line">
+                      <Badge tone={PROTO_TONE[proto]}>{PROTO_LABEL[proto]}</Badge>
+                    </div>
+                  ))}
+                </div>
+              ),
+            },
+            {
+              key: 'bps',
+              title: 'bps',
+              num: true,
+              width: 120,
+              sortAccessor: byMetric('bps'),
+              render: metric('bps', (r) => formatBps(r.bps)),
+            },
+            { key: 'pps', title: 'pps', num: true, width: 120, sortAccessor: byMetric('pps'), render: metric('pps', (r) => formatPps(r.pps)) },
+            { key: 'growthBps', title: 'Рост bps', num: true, width: 110, sortAccessor: byMetric('growthBps'), render: metric('growthBps', (r) => formatGrowth(r.growthBps)) },
+            { key: 'growthPps', title: 'Рост pps', num: true, width: 110, sortAccessor: byMetric('growthPps'), render: metric('growthPps', (r) => formatGrowth(r.growthPps)) },
             {
               key: 'synAttempts',
               title: 'Попытки',
               num: true,
               width: 110,
-              render: (r) => formatNum(r.synAttempts, 0),
+              sortAccessor: byMetric('synAttempts'),
+              render: metric('synAttempts', (r) => formatNum(r.synAttempts, 0)),
             },
             {
               key: 'answerPct',
               title: 'Ответ',
               num: true,
               width: 100,
-              render: (r) => formatPct(r.answerPct),
+              sortAccessor: byMetric('answerPct'),
+              render: metric('answerPct', (r) => formatPct(r.answerPct)),
             },
             {
               key: 'halfOpenPct',
               title: 'Полуоткрытые',
               num: true,
               width: 130,
-              render: (r) => formatPct(r.halfOpenPct),
+              sortAccessor: byMetric('halfOpenPct'),
+              render: metric('halfOpenPct', (r) => formatPct(r.halfOpenPct)),
             },
             {
               key: 'halfOpenReplyPct',
               title: 'Не зашли',
               num: true,
               width: 110,
-              render: (r) => formatPct(r.halfOpenReplyPct),
+              sortAccessor: byMetric('halfOpenReplyPct'),
+              render: metric('halfOpenReplyPct', (r) => formatPct(r.halfOpenReplyPct)),
             },
             {
-              key: 'udpPortEntropy',
-              title: 'Энтропия UDP вх.',
+              key: 'portEntropy',
+              title: 'Энтропия портов вх.',
               num: true,
-              width: 150,
-              render: (r) => formatEntropy(r.udpPortEntropy),
+              width: 165,
+              sortAccessor: byMetric('portEntropy'),
+              render: metric('portEntropy', (r) => formatEntropy(r.portEntropy)),
             },
             {
-              key: 'udpPortEntropyOut',
-              title: 'Энтропия UDP исх.',
+              key: 'portEntropyOut',
+              title: 'Энтропия портов исх.',
               num: true,
-              width: 155,
-              render: (r) => formatEntropy(r.udpPortEntropyOut),
+              width: 170,
+              sortAccessor: byMetric('portEntropyOut'),
+              render: metric('portEntropyOut', (r) => formatEntropy(r.portEntropyOut)),
             },
             {
-              key: 'udpPortsPerIp',
+              key: 'portsPerIp',
               title: 'Макс. портов/IP вх.',
               num: true,
               width: 165,
-              render: (r) => formatPorts(r.udpPortsPerIp),
+              sortAccessor: byMetric('portsPerIp'),
+              render: metric('portsPerIp', (r) => formatPorts(r.portsPerIp)),
             },
             {
-              key: 'udpPortsPerIpOut',
+              key: 'portsPerIpOut',
               title: 'Макс. портов/IP исх.',
               num: true,
               width: 170,
-              render: (r) => formatPorts(r.udpPortsPerIpOut),
+              sortAccessor: byMetric('portsPerIpOut'),
+              render: metric('portsPerIpOut', (r) => formatPorts(r.portsPerIpOut)),
             },
-            { key: 'avgPacketBytes', title: 'Средний пакет', num: true, width: 130, render: (r) => `${formatNum(r.avgPacketBytes, 0)} Б` },
-            { key: 'cvPercent', title: 'CV', num: true, width: 90, render: (r) => (r.cvPercent == null ? '—' : `${formatNum(r.cvPercent, 1)}%`) },
+            {
+              key: 'avgPacketBytes',
+              title: 'Средний пакет',
+              num: true,
+              width: 130,
+              sortAccessor: byMetric('avgPacketBytes'),
+              render: metric('avgPacketBytes', (r) => `${formatNum(r.avgPacketBytes, 0)} Б`),
+            },
+            {
+              key: 'cvPercent',
+              title: 'CV',
+              num: true,
+              width: 90,
+              sortAccessor: byMetric('cvPercent'),
+              render: metric('cvPercent', (r) => (r.cvPercent == null ? '—' : `${formatNum(r.cvPercent, 1)}%`)),
+            },
           ]}
         />
       </Card>

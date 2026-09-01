@@ -1506,6 +1506,7 @@ function TimeSeriesSparkChart({
   periodEndMs,
   skipLeadingGaps = false,
   skipTrailingGaps = false,
+  fillGaps = true,
   tipTranslucent = false,
   yAxisLabel,
   yAxisUnit,
@@ -1519,19 +1520,21 @@ function TimeSeriesSparkChart({
   const fmtValue = formatValue || fmtBits;
 
   const data = useMemo(() => {
-    const densified = fillChartTimeGaps(points || [], {
-      bucketSeconds,
-      startMs: periodStartMs,
-      endMs: periodEndMs,
-      valueKeys: [valueKey, 'bps', 'v'],
-      skipLeadingGaps,
-      skipTrailingGaps,
-    });
-    return densified.map((pt) => ({
+    const source = fillGaps
+      ? fillChartTimeGaps(points || [], {
+        bucketSeconds,
+        startMs: periodStartMs,
+        endMs: periodEndMs,
+        valueKeys: [valueKey, 'bps', 'v'],
+        skipLeadingGaps,
+        skipTrailingGaps,
+      })
+      : (points || []);
+    return source.map((pt) => ({
       ...pt,
       v: chartSeriesNumber(pt[valueKey] ?? pt.bps),
     }));
-  }, [points, bucketSeconds, periodStartMs, periodEndMs, valueKey, skipLeadingGaps, skipTrailingGaps]);
+  }, [points, bucketSeconds, periodStartMs, periodEndMs, valueKey, skipLeadingGaps, skipTrailingGaps, fillGaps]);
   if (!data.length) return null;
 
   const w = 800;

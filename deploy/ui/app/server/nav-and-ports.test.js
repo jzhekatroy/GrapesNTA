@@ -39,6 +39,9 @@ test('api-map maps direction diagnostics before generic diagnostics', () => {
   assert.equal(getResourceForPath('/api/erp-piterix/status'), 'diagnostics');
   assert.equal(getResourceForPath('/api/erp-piterix/run', 'POST'), 'diagnostics');
   assert.equal(getResourceForPath('/api/detection/latest'), 'diagnostics');
+  assert.equal(getResourceForPath('/api/detection/history'), 'diagnostics');
+  assert.equal(getResourceForPath('/api/detection/telegram'), 'diagnostics');
+  assert.equal(getResourceForPath('/api/detection/telegram/test', 'POST'), 'diagnostics');
 });
 
 test('parseLookbackHours clamps invalid values', () => {
