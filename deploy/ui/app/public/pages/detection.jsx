@@ -4,6 +4,21 @@ const PROTOS = ['all', 'tcp', 'udp'];
 const PROTO_ORDER = { all: 0, tcp: 1, udp: 2 };
 const PROTO_LABEL = { all: 'общее', tcp: 'TCP', udp: 'UDP' };
 const PROTO_TONE = { all: 'neutral', tcp: 'info', udp: 'warning' };
+const PAGE_TABS = [
+  { id: 'table', label: 'Таблица' },
+  { id: 'active', label: 'Активные' },
+  { id: 'history', label: 'История' },
+  { id: 'telegram', label: 'Telegram' },
+];
+const TELEGRAM_DEFAULTS = {
+  enabled: false,
+  chatId: '',
+  growthThreshold: 1.6,
+  alertScope: 'all',
+  streak: 3,
+  normalizeStreak: 3,
+  tokenSet: false,
+};
 const CHART_PERIODS = [
   { id: '1h', hours: 1, label: '1ч', title: '1 час' },
   { id: '6h', hours: 6, label: '6ч', title: '6 часов' },
@@ -143,6 +158,46 @@ function sortMetric(group, key, protoFilter) {
   return Number(value);
 }
 
+function patchTelegram(prev, patch) {
+  return { ...TELEGRAM_DEFAULTS, ...prev, ...patch };
+}
+
+function EventMark({ kind }) {
+  const ok = kind === 'ok';
+  return (
+    <span
+      className={`detection-event-mark ${ok ? 'detection-event-mark--ok' : 'detection-event-mark--alert'}`}
+      title={ok ? 'Нормализация' : 'Алерт'}
+    />
+  );
+}
+
+function EventMetricStack({ phases, metric, formatted }) {
+  const lines = [];
+  for (const phase of phases) {
+    for (const proto of PROTOS) {
+      const row = phase.byProto?.[proto];
+      lines.push({
+        key: `${phase.id}-${proto}`,
+        text: metricText(row, metric, formatted),
+      });
+    }
+  }
+  return (
+    <div className="detection-stack" style={{ '--detection-stack-rows': lines.length }}>
+      {lines.map((line) => (
+        <div key={line.key} className="detection-stack__line">{line.text}</div>
+      ))}
+    </div>
+  );
+}
+
+function eventPhases(event, withNormalize) {
+  const phases = [{ id: 'alert', kind: 'alert', byProto: event.alertByProto || {} }];
+  if (withNormalize) phases.push({ id: 'ok', kind: 'ok', byProto: event.normalizeByProto || {} });
+  return phases;
+}
+
 function MetricStack({ group, metric, formatted, onOpen, protos }) {
   const list = protos?.length ? protos : PROTOS;
   return (
@@ -203,6 +258,10 @@ function PageDetection() {
   const [telegramForbidden, setTelegramForbidden] = useState(false);
   const [telegramBusy, setTelegramBusy] = useState(false);
   const [botToken, setBotToken] = useState('');
+  const [pageTab, setPageTab] = useState('table');
+  const [events, setEvents] = useState([]);
+  const [eventsError, setEventsError] = useState('');
+  const [eventsBusy, setEventsBusy] = useState(false);
 
   const reload = useCallback(() => {
     setError('');
@@ -212,6 +271,20 @@ function PageDetection() {
   }, []);
 
   useEffect(() => { reload(); }, [reload]);
+
+  const reloadEvents = useCallback((status) => {
+    setEventsBusy(true);
+    setEventsError('');
+    return ApiClient.loadDetectionEvents({ status })
+      .then(setEvents)
+      .catch((e) => setEventsError(e.message))
+      .finally(() => setEventsBusy(false));
+  }, []);
+
+  useEffect(() => {
+    if (pageTab === 'active') reloadEvents('active');
+    if (pageTab === 'history') reloadEvents('normalized');
+  }, [pageTab, reloadEvents]);
 
   useEffect(() => {
     ApiClient.loadDetectionTelegramSettings()
@@ -341,6 +414,7 @@ function PageDetection() {
         growthThreshold: telegram?.growthThreshold ?? 1.6,
         alertScope: telegram?.alertScope || 'all',
         streak: telegram?.streak ?? 3,
+        normalizeStreak: telegram?.normalizeStreak ?? 3,
       };
       if (botToken.trim()) payload.botToken = botToken.trim();
       const data = await ApiClient.saveDetectionTelegramSettings(payload);
@@ -352,6 +426,11 @@ function PageDetection() {
     } finally {
       setTelegramBusy(false);
     }
+  };
+
+  const eventMetric = (key, formatted) => (event) => {
+    const withNormalize = pageTab === 'history';
+    return <EventMetricStack phases={eventPhases(event, withNormalize)} metric={key} formatted={formatted} />;
   };
 
   const testTelegram = async () => {
@@ -375,9 +454,25 @@ function PageDetection() {
         </div>
       )}
 
+      <div className="seg" role="tablist" aria-label="Разделы детекции">
+        {PAGE_TABS.map((tab) => (
+          <button
+            key={tab.id}
+            type="button"
+            role="tab"
+            aria-selected={pageTab === tab.id}
+            className={pageTab === tab.id ? 'seg__item seg__item--active' : 'seg__item'}
+            onClick={() => setPageTab(tab.id)}
+          >
+            {tab.label}
+          </button>
+        ))}
+      </div>
+
+      {pageTab === 'telegram' && (
       <Card
         title="Telegram"
-        subtitle="Строка «общее»: рост bps или pps ≥ порога. Отправка — если стабильно X записанных значений подряд. Повтор — после возврата ниже порога."
+        subtitle="Алерт — X значений подряд выше порога (строка «общее»). Нормализация — Y значений подряд ниже. Повторный алерт — только после нормализации."
       >
         <div className="col" style={{ gap: 10, font: 'var(--pv-text-body-3)' }}>
           {telegramForbidden ? (
@@ -395,16 +490,7 @@ function PageDetection() {
                 <input
                   type="checkbox"
                   checked={!!telegram?.enabled}
-                  onChange={(e) => setTelegram({
-                    enabled: false,
-                    chatId: '',
-                    growthThreshold: 1.6,
-                    alertScope: 'all',
-                    streak: 3,
-                    tokenSet: false,
-                    ...telegram,
-                    enabled: e.target.checked,
-                  })}
+                  onChange={(e) => setTelegram(patchTelegram(telegram, { enabled: e.target.checked }))}
                 />
                 Включить оповещения
               </label>
@@ -424,16 +510,7 @@ function PageDetection() {
                   <input
                     className="input"
                     value={telegram?.chatId || ''}
-                    onChange={(e) => setTelegram({
-                      enabled: false,
-                      chatId: '',
-                      growthThreshold: 1.6,
-                      alertScope: 'all',
-                      streak: 3,
-                      tokenSet: false,
-                      ...telegram,
-                      chatId: e.target.value,
-                    })}
+                    onChange={(e) => setTelegram(patchTelegram(telegram, { chatId: e.target.value }))}
                     placeholder="-100…"
                   />
                 </label>
@@ -445,16 +522,7 @@ function PageDetection() {
                     step="0.1"
                     min="0.1"
                     value={telegram?.growthThreshold ?? 1.6}
-                    onChange={(e) => setTelegram({
-                      enabled: false,
-                      chatId: '',
-                      growthThreshold: 1.6,
-                      alertScope: 'all',
-                      streak: 3,
-                      tokenSet: false,
-                      ...telegram,
-                      growthThreshold: Number(e.target.value),
-                    })}
+                    onChange={(e) => setTelegram(patchTelegram(telegram, { growthThreshold: Number(e.target.value) }))}
                   />
                 </label>
                 <label className="col" style={{ gap: 4, minWidth: 160 }}>
@@ -462,16 +530,7 @@ function PageDetection() {
                   <select
                     className="input"
                     value={telegram?.alertScope || 'all'}
-                    onChange={(e) => setTelegram({
-                      enabled: false,
-                      chatId: '',
-                      growthThreshold: 1.6,
-                      alertScope: 'all',
-                      streak: 3,
-                      tokenSet: false,
-                      ...telegram,
-                      alertScope: e.target.value,
-                    })}
+                    onChange={(e) => setTelegram(patchTelegram(telegram, { alertScope: e.target.value }))}
                   >
                     <option value="all">Всё</option>
                     <option value="client">Абоненты</option>
@@ -487,16 +546,19 @@ function PageDetection() {
                     max="60"
                     step="1"
                     value={telegram?.streak ?? 3}
-                    onChange={(e) => setTelegram({
-                      enabled: false,
-                      chatId: '',
-                      growthThreshold: 1.6,
-                      alertScope: 'all',
-                      streak: 3,
-                      tokenSet: false,
-                      ...telegram,
-                      streak: Number(e.target.value),
-                    })}
+                    onChange={(e) => setTelegram(patchTelegram(telegram, { streak: Number(e.target.value) }))}
+                  />
+                </label>
+                <label className="col" style={{ gap: 4, minWidth: 180 }}>
+                  <span>Подряд ниже порога</span>
+                  <input
+                    className="input"
+                    type="number"
+                    min="1"
+                    max="60"
+                    step="1"
+                    value={telegram?.normalizeStreak ?? 3}
+                    onChange={(e) => setTelegram(patchTelegram(telegram, { normalizeStreak: Number(e.target.value) }))}
                   />
                 </label>
               </div>
@@ -514,6 +576,7 @@ function PageDetection() {
           )}
         </div>
       </Card>
+      )}
 
       {chart && (
         <Card
@@ -582,6 +645,106 @@ function PageDetection() {
         </Card>
       )}
 
+      {(pageTab === 'active' || pageTab === 'history') && (
+        <Card
+          title={pageTab === 'active' ? 'Активные события' : 'История'}
+          subtitle={pageTab === 'active'
+            ? 'Алерт уже ушёл, нормализации ещё нет. Срез метрик — момент срабатывания, все протоколы.'
+            : 'Закрытые циклы. Две группы строк: срабатывание (🔴) и нормализация (🟢), все метрики трёх протоколов.'}
+          tools={(
+            <Button
+              size="sm"
+              disabled={eventsBusy}
+              onClick={() => reloadEvents(pageTab === 'active' ? 'active' : 'normalized')}
+            >
+              Обновить
+            </Button>
+          )}
+        >
+          {eventsError && (
+            <div style={{ padding: 10, borderRadius: 8, background: 'var(--st-critical-bg)', color: 'var(--st-critical)', marginBottom: 10 }}>
+              {eventsError}
+            </div>
+          )}
+          <DataTable
+            key={pageTab}
+            rows={events}
+            rowKey="id"
+            pageSize={50}
+            emptyTitle={eventsBusy ? 'Загрузка…' : 'Нет событий'}
+            emptyDesc={pageTab === 'active'
+              ? 'Пока нет объектов, которые держатся выше порога после алерта.'
+              : 'История появится после первой нормализации.'}
+            initialSort={{ key: 'alertMinute', dir: 'desc' }}
+            columns={[
+              {
+                key: 'name',
+                title: 'Объект',
+                width: 260,
+                sortAccessor: (r) => r.name || r.scopeId || '',
+                render: (r) => (
+                  <span>
+                    <Badge tone={r.scope === 'client' ? 'neutral' : 'info'}>
+                      {r.scope === 'client' ? 'абонент' : 'сеть /24'}
+                    </Badge>
+                    {' '}
+                    {r.name || r.scopeId}
+                  </span>
+                ),
+              },
+              {
+                key: 'phase',
+                title: '',
+                width: 150,
+                sortable: false,
+                render: (r) => {
+                  const phases = eventPhases(r, pageTab === 'history');
+                  return (
+                    <div className="detection-stack" style={{ '--detection-stack-rows': phases.length * PROTOS.length }}>
+                      {phases.flatMap((phase) => PROTOS.map((proto) => (
+                        <div key={`${phase.id}-${proto}`} className="detection-stack__line">
+                          <EventMark kind={phase.kind} />
+                          <span style={{ marginLeft: 6 }}>{PROTO_LABEL[proto]}</span>
+                        </div>
+                      )))}
+                    </div>
+                  );
+                },
+              },
+              {
+                key: 'alertMinute',
+                title: 'Срабатывание',
+                width: 180,
+                sortAccessor: (r) => r.alertMinute || '',
+                render: (r) => formatWhen(r.alertMinute),
+              },
+              {
+                key: 'normalizeMinute',
+                title: 'Нормализация',
+                width: 180,
+                sortAccessor: (r) => r.normalizeMinute || '',
+                render: (r) => (pageTab === 'history' ? formatWhen(r.normalizeMinute) : '—'),
+              },
+              { key: 'bps', title: 'bps', num: true, width: 120, sortable: false, render: eventMetric('bps', (row) => formatBps(row.bps)) },
+              { key: 'pps', title: 'pps', num: true, width: 120, sortable: false, render: eventMetric('pps', (row) => formatPps(row.pps)) },
+              { key: 'growthBps', title: 'Рост bps', num: true, width: 110, sortable: false, render: eventMetric('growthBps', (row) => formatGrowth(row.growthBps)) },
+              { key: 'growthPps', title: 'Рост pps', num: true, width: 110, sortable: false, render: eventMetric('growthPps', (row) => formatGrowth(row.growthPps)) },
+              { key: 'synAttempts', title: 'Попытки', num: true, width: 110, sortable: false, render: eventMetric('synAttempts', (row) => formatNum(row.synAttempts, 0)) },
+              { key: 'answerPct', title: 'Ответ', num: true, width: 100, sortable: false, render: eventMetric('answerPct', (row) => formatPct(row.answerPct)) },
+              { key: 'halfOpenPct', title: 'Полуоткрытые', num: true, width: 130, sortable: false, render: eventMetric('halfOpenPct', (row) => formatPct(row.halfOpenPct)) },
+              { key: 'halfOpenReplyPct', title: 'Не зашли', num: true, width: 110, sortable: false, render: eventMetric('halfOpenReplyPct', (row) => formatPct(row.halfOpenReplyPct)) },
+              { key: 'portEntropy', title: 'Энтропия портов вх.', num: true, width: 165, sortable: false, render: eventMetric('portEntropy', (row) => formatEntropy(row.portEntropy)) },
+              { key: 'portEntropyOut', title: 'Энтропия портов исх.', num: true, width: 170, sortable: false, render: eventMetric('portEntropyOut', (row) => formatEntropy(row.portEntropyOut)) },
+              { key: 'portsPerIp', title: 'Макс. портов/IP вх.', num: true, width: 165, sortable: false, render: eventMetric('portsPerIp', (row) => formatPorts(row.portsPerIp)) },
+              { key: 'portsPerIpOut', title: 'Макс. портов/IP исх.', num: true, width: 170, sortable: false, render: eventMetric('portsPerIpOut', (row) => formatPorts(row.portsPerIpOut)) },
+              { key: 'avgPacketBytes', title: 'Средний пакет', num: true, width: 130, sortable: false, render: eventMetric('avgPacketBytes', (row) => `${formatNum(row.avgPacketBytes, 0)} Б`) },
+              { key: 'cvPercent', title: 'CV', num: true, width: 90, sortable: false, render: eventMetric('cvPercent', (row) => (row.cvPercent == null ? '—' : `${formatNum(row.cvPercent, 1)}%`)) },
+            ]}
+          />
+        </Card>
+      )}
+
+      {pageTab === 'table' && (
       <Card
         title="Детекция"
         subtitle={data.minute
@@ -773,6 +936,7 @@ function PageDetection() {
           ]}
         />
       </Card>
+      )}
     </div>
   );
 }

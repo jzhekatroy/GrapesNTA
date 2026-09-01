@@ -907,6 +907,14 @@ const ApiClient = (() => {
     return requestJson('/api/detection/telegram/test', { method: 'POST', body: {} });
   }
 
+  async function loadDetectionEvents({ status = 'active', limit = 200 } = {}) {
+    const params = new URLSearchParams();
+    params.set('status', status);
+    params.set('limit', String(limit));
+    const body = await requestJson(`/api/detection/events?${params}`);
+    return body.data;
+  }
+
   function countryQuery({ timeRange = '24h', customPeriod, directions, basis = 'ip', mapSide = 'remote', sourceIds, collectorFilter } = {}) {
     const params = new URLSearchParams();
     appendCustomPeriodParams(params, timeRange, customPeriod);
@@ -2971,6 +2979,7 @@ const ApiClient = (() => {
     loadDetectionTelegramSettings,
     saveDetectionTelegramSettings,
     testDetectionTelegramSettings,
+    loadDetectionEvents,
     dashboardOtherPorts,
     dashboardCountries,
     loadCountries,

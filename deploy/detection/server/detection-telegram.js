@@ -6,14 +6,41 @@ const { formatCh, parseUtc } = require('./detection-core');
 
 const SETTINGS_TABLE = 'app_detection_telegram';
 const SETTINGS_VIEW = 'app_detection_telegram_current';
+const EVENTS_TABLE = 'app_detection_events';
 const SETTINGS_ID = 'global';
 const DEFAULT_GROWTH_THRESHOLD = 1.6;
 const DEFAULT_ALERT_SCOPE = 'all';
 const DEFAULT_STREAK = 3;
+const DEFAULT_NORMALIZE_STREAK = 3;
 const MAX_STREAK = 60;
 const ALERT_SCOPES = new Set(['all', 'client', 'net']);
 const ALERT_SCOPE_LABEL = { all: 'всё', client: 'абоненты', net: 'сети' };
 const PROTO_LABEL = { all: 'общее', tcp: 'TCP', udp: 'UDP' };
+const SNAPSHOT_FIELDS = [
+  'bps', 'pps', 'growth_bps', 'growth_pps', 'bytes', 'packets',
+  'avg_packet_bytes', 'cv_percent',
+  'syn_attempts', 'syn_answered', 'syn_in_flows', 'syn_half_open', 'syn_half_open_reply',
+  'answer_pct', 'half_open_pct', 'half_open_reply_pct',
+  'port_entropy', 'port_entropy_out', 'ports_per_ip', 'ports_per_ip_out',
+];
+const SNAPSHOT_CAMEL = {
+  growth_bps: 'growthBps',
+  growth_pps: 'growthPps',
+  avg_packet_bytes: 'avgPacketBytes',
+  cv_percent: 'cvPercent',
+  syn_attempts: 'synAttempts',
+  syn_answered: 'synAnswered',
+  syn_in_flows: 'synInFlows',
+  syn_half_open: 'synHalfOpen',
+  syn_half_open_reply: 'synHalfOpenReply',
+  answer_pct: 'answerPct',
+  half_open_pct: 'halfOpenPct',
+  half_open_reply_pct: 'halfOpenReplyPct',
+  port_entropy: 'portEntropy',
+  port_entropy_out: 'portEntropyOut',
+  ports_per_ip: 'portsPerIp',
+  ports_per_ip_out: 'portsPerIpOut',
+};
 
 const DEFAULT_SETTINGS = {
   bot_token: '',
@@ -21,6 +48,7 @@ const DEFAULT_SETTINGS = {
   growth_threshold: DEFAULT_GROWTH_THRESHOLD,
   alert_scope: DEFAULT_ALERT_SCOPE,
   streak: DEFAULT_STREAK,
+  normalize_streak: DEFAULT_NORMALIZE_STREAK,
   enabled: 0,
 };
 
@@ -70,6 +98,7 @@ function mapSettings(row = {}) {
     growthThreshold: Number(row.growth_threshold) || DEFAULT_GROWTH_THRESHOLD,
     alertScope: normalizeAlertScope(row.alert_scope),
     streak: normalizeStreak(row.streak),
+    normalizeStreak: normalizeStreak(row.normalize_streak, DEFAULT_NORMALIZE_STREAK),
     updatedAt: row.updated_at ?? null,
   };
 }
@@ -103,8 +132,91 @@ function shouldSendAlert(historyNewestFirst, threshold, streak = DEFAULT_STREAK,
   return false;
 }
 
+function shouldSendNormalize(historyNewestFirst, threshold, streak = DEFAULT_NORMALIZE_STREAK) {
+  const need = normalizeStreak(streak, DEFAULT_NORMALIZE_STREAK);
+  const history = Array.isArray(historyNewestFirst) ? historyNewestFirst : [];
+  if (!history.length || isAboveGrowthThreshold(history[0], threshold)) return false;
+  if (history.length < need) return false;
+  return history.slice(0, need).every((row) => !isAboveGrowthThreshold(row, threshold));
+}
+
 function objectKey(scope, scopeId) {
   return `${scope}|${scopeId}`;
+}
+
+function eventsTableRef() {
+  return `${config.database}.${EVENTS_TABLE}`;
+}
+
+function snapshotProto(row) {
+  if (!row) return null;
+  const out = {};
+  for (const field of SNAPSHOT_FIELDS) {
+    const camel = SNAPSHOT_CAMEL[field];
+    const value = row[field] ?? (camel ? row[camel] : undefined);
+    out[field] = value == null || value === '' ? null : value;
+  }
+  return out;
+}
+
+function snapshotByProto(group, fallbackRow) {
+  const byProto = group?.byProto || {};
+  return {
+    all: snapshotProto(byProto.all || fallbackRow),
+    tcp: snapshotProto(byProto.tcp),
+    udp: snapshotProto(byProto.udp),
+  };
+}
+
+function parseSnapshot(raw) {
+  if (!raw) return {};
+  if (typeof raw === 'object') return raw;
+  try {
+    return JSON.parse(String(raw));
+  } catch {
+    return {};
+  }
+}
+
+function mapSnapshotToUi(snapshot) {
+  const byProto = {};
+  for (const proto of ['all', 'tcp', 'udp']) {
+    const row = snapshot?.[proto];
+    if (!row) continue;
+    const mapped = { proto };
+    for (const field of SNAPSHOT_FIELDS) {
+      const camel = SNAPSHOT_CAMEL[field] || field;
+      const value = row[field];
+      mapped[camel] = value == null ? null : Number(value);
+    }
+    byProto[proto] = mapped;
+  }
+  return byProto;
+}
+
+function uiByProtoToSnapshot(byProto) {
+  const out = {};
+  for (const proto of ['all', 'tcp', 'udp']) {
+    const ui = byProto?.[proto];
+    if (!ui) {
+      out[proto] = null;
+      continue;
+    }
+    const snake = {};
+    for (const field of SNAPSHOT_FIELDS) {
+      const camel = SNAPSHOT_CAMEL[field] || field;
+      snake[field] = ui[camel] ?? ui[field] ?? null;
+    }
+    out[proto] = snake;
+  }
+  return out;
+}
+
+function escapeHtml(value) {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
 }
 
 function formatRateMsg(value, units) {
@@ -188,7 +300,7 @@ function formatAlertMessage({
 }) {
   const kind = scope === 'net' ? 'сеть /24' : 'абонент';
   const header = [
-    'Детекция: рост выше порога',
+    '🔴 Детекция: рост выше порога',
     '',
     `Объект: ${name || scopeId}`,
     `Тип: ${kind}`,
@@ -203,18 +315,63 @@ function formatAlertMessage({
   return [...header, ...body].join('\n');
 }
 
+function formatNormalizeMessage({
+  name,
+  scope,
+  scopeId,
+  minute,
+  alertMinute,
+  threshold,
+  streak = DEFAULT_NORMALIZE_STREAK,
+  byProto,
+}) {
+  const kind = scope === 'net' ? 'сеть /24' : 'абонент';
+  const header = [
+    '🟢 Детекция: нормализация',
+    '',
+    `Объект: ${name || scopeId}`,
+    `Тип: ${kind}`,
+    `ID: ${scopeId}`,
+    `Алерт: ${formatMinuteMsk(alertMinute)}`,
+    `Нормализация: ${formatMinuteMsk(minute)}`,
+    `Порог: ×${Number(threshold).toFixed(2)} (bps или pps)`,
+    `Ниже нормы: ${normalizeStreak(streak, DEFAULT_NORMALIZE_STREAK)} знач. подряд`,
+    '',
+  ];
+  const body = ['all', 'tcp', 'udp'].map((proto) => formatProtoBlock(proto, byProto[proto]));
+  return [...header, ...body].join('\n');
+}
+
 function pickAlertCandidates(allRows, previousByKey, threshold, options = {}) {
   const streak = normalizeStreak(options.streak);
   const enabledAtMs = options.enabledAtMs;
   const alertScope = normalizeAlertScope(options.alertScope);
+  const activeKeys = options.activeKeys instanceof Set ? options.activeKeys : new Set();
   const out = [];
   for (const row of allRows) {
     if (String(row.proto || '') !== 'all') continue;
     if (!matchesAlertScope(row, alertScope)) continue;
     const key = objectKey(row.scope, row.scope_id);
+    if (activeKeys.has(key)) continue;
     const prev = previousByKey.get(key) || [];
     const history = [row, ...prev];
     if (shouldSendAlert(history, threshold, streak, enabledAtMs)) out.push({ row, key });
+  }
+  return out;
+}
+
+function pickNormalizeCandidates(allRows, previousByKey, threshold, options = {}) {
+  const streak = normalizeStreak(options.streak, DEFAULT_NORMALIZE_STREAK);
+  const activeByKey = options.activeByKey instanceof Map ? options.activeByKey : new Map();
+  const out = [];
+  for (const row of allRows) {
+    if (String(row.proto || '') !== 'all') continue;
+    const key = objectKey(row.scope, row.scope_id);
+    const active = activeByKey.get(key);
+    if (!active) continue;
+    const prev = previousByKey.get(key) || [];
+    const history = [row, ...prev];
+    if (shouldSendNormalize(history, threshold, streak)) out.push({ row, key, active });
   }
   return out;
 }
@@ -242,6 +399,7 @@ async function ensureDetectionTelegramTables() {
           growth_threshold Float64 DEFAULT ${DEFAULT_GROWTH_THRESHOLD},
           alert_scope String DEFAULT '${DEFAULT_ALERT_SCOPE}',
           streak UInt16 DEFAULT ${DEFAULT_STREAK},
+          normalize_streak UInt16 DEFAULT ${DEFAULT_NORMALIZE_STREAK},
           enabled UInt8 DEFAULT 0,
           updated_at DateTime('UTC') DEFAULT now()
         )
@@ -253,8 +411,30 @@ async function ensureDetectionTelegramTables() {
       await executeCommand(`
         ALTER TABLE ${settingsTableRef()}
           ADD COLUMN IF NOT EXISTS alert_scope String DEFAULT '${DEFAULT_ALERT_SCOPE}',
-          ADD COLUMN IF NOT EXISTS streak UInt16 DEFAULT ${DEFAULT_STREAK}
+          ADD COLUMN IF NOT EXISTS streak UInt16 DEFAULT ${DEFAULT_STREAK},
+          ADD COLUMN IF NOT EXISTS normalize_streak UInt16 DEFAULT ${DEFAULT_NORMALIZE_STREAK}
       `, {}, { name: 'detection/telegram-ensure-columns' });
+
+      await executeCommand(`
+        CREATE TABLE IF NOT EXISTS ${eventsTableRef()}
+        (
+          event_id String,
+          scope LowCardinality(String),
+          scope_id String,
+          name String DEFAULT '',
+          status LowCardinality(String),
+          alert_minute DateTime('UTC'),
+          normalize_minute Nullable(DateTime('UTC')),
+          alert_json String DEFAULT '',
+          normalize_json String DEFAULT '',
+          threshold Float64 DEFAULT ${DEFAULT_GROWTH_THRESHOLD},
+          updated_at DateTime('UTC') DEFAULT now()
+        )
+        ENGINE = ReplacingMergeTree(updated_at)
+        ORDER BY (scope, scope_id, event_id)
+        TTL alert_minute + toIntervalDay(90)
+        SETTINGS index_granularity = 8192
+      `, {}, { name: 'detection/events-ensure-table' });
 
       await executeCommand(`
         CREATE OR REPLACE VIEW ${settingsViewRef()}
@@ -265,6 +445,7 @@ async function ensureDetectionTelegramTables() {
           growth_threshold Float64,
           alert_scope String,
           streak UInt16,
+          normalize_streak UInt16,
           enabled UInt8,
           updated_at DateTime('UTC')
         )
@@ -275,6 +456,7 @@ async function ensureDetectionTelegramTables() {
           growth_threshold,
           alert_scope,
           streak,
+          normalize_streak,
           enabled,
           updated_at_latest AS updated_at
         FROM
@@ -286,6 +468,7 @@ async function ensureDetectionTelegramTables() {
             argMax(growth_threshold, updated_at) AS growth_threshold,
             argMax(alert_scope, updated_at) AS alert_scope,
             argMax(streak, updated_at) AS streak,
+            argMax(normalize_streak, updated_at) AS normalize_streak,
             argMax(enabled, updated_at) AS enabled,
             max(updated_at) AS updated_at_latest
           FROM ${settingsTableRef()}
@@ -303,7 +486,7 @@ async function ensureDetectionTelegramTables() {
 async function getCurrentSettingsRaw() {
   await ensureDetectionTelegramTables();
   const { rows } = await query(`
-    SELECT bot_token, chat_id, growth_threshold, alert_scope, streak, enabled, updated_at
+    SELECT bot_token, chat_id, growth_threshold, alert_scope, streak, normalize_streak, enabled, updated_at
     FROM ${settingsViewRef()}
     WHERE settings_id = {id:String}
     LIMIT 1
@@ -338,6 +521,12 @@ async function saveDetectionTelegramSettings(payload = {}) {
     throw apiError(`Подряд выше порога: целое от 1 до ${MAX_STREAK}`);
   }
   const streak = normalizeStreak(streakNum);
+  const normalizeRaw = payload.normalizeStreak ?? payload.normalize_streak ?? base.normalize_streak;
+  const normalizeNum = Number(normalizeRaw);
+  if (!Number.isFinite(normalizeNum) || normalizeNum < 1 || normalizeNum > MAX_STREAK) {
+    throw apiError(`Подряд ниже порога: целое от 1 до ${MAX_STREAK}`);
+  }
+  const normalizeStreakValue = normalizeStreak(normalizeNum, DEFAULT_NORMALIZE_STREAK);
   if (enabled && (!botToken || !chatId)) {
     throw apiError('Укажите токен бота и id группы перед включением Telegram');
   }
@@ -349,6 +538,7 @@ async function saveDetectionTelegramSettings(payload = {}) {
     growth_threshold: growthThreshold,
     alert_scope: alertScope,
     streak,
+    normalize_streak: normalizeStreakValue,
     enabled,
   }], { name: 'detection/telegram-settings-save' });
 
@@ -371,6 +561,7 @@ async function loadTelegramConfig() {
     growthThreshold: Number(raw.growth_threshold) || DEFAULT_GROWTH_THRESHOLD,
     alertScope: normalizeAlertScope(raw.alert_scope),
     streak: normalizeStreak(raw.streak),
+    normalizeStreak: normalizeStreak(raw.normalize_streak, DEFAULT_NORMALIZE_STREAK),
     enabledAtMs: parseUtc(raw.updated_at),
   };
 }
@@ -378,15 +569,21 @@ async function loadTelegramConfig() {
 async function sendTelegramMessage(text, cfg) {
   const configRow = cfg || await loadTelegramConfig();
   const url = `https://api.telegram.org/bot${encodeURIComponent(configRow.botToken)}/sendMessage`;
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      chat_id: configRow.chatId,
-      text: String(text || ''),
-      disable_web_page_preview: true,
-    }),
-  });
+  let res;
+  try {
+    res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        chat_id: configRow.chatId,
+        text: String(text || ''),
+        disable_web_page_preview: true,
+      }),
+    });
+  } catch (err) {
+    const cause = err.cause?.code || err.cause?.message || err.message;
+    throw apiError(`Telegram: нет сети до api.telegram.org (${cause})`, 502);
+  }
   const body = await res.json().catch(() => ({}));
   if (!res.ok || body.ok === false) {
     const detail = body.description || body.error || `HTTP ${res.status}`;
@@ -437,56 +634,218 @@ function utcDateTime(param) {
   return `toDateTime({${param}:String}, 'UTC')`;
 }
 
-async function processDetectionAlerts({ minute, rows, nameByKey }) {
-  let cfg;
+function mapEventRow(row) {
+  const alertSnapshot = parseSnapshot(row.alert_json);
+  const normalizeSnapshot = parseSnapshot(row.normalize_json);
+  return {
+    id: String(row.event_id),
+    scope: String(row.scope || ''),
+    scopeId: String(row.scope_id || ''),
+    name: String(row.name || row.scope_id || ''),
+    status: String(row.status || ''),
+    alertMinute: row.alert_minute || null,
+    normalizeMinute: row.normalize_minute || null,
+    threshold: Number(row.threshold) || DEFAULT_GROWTH_THRESHOLD,
+    alertByProto: mapSnapshotToUi(alertSnapshot),
+    normalizeByProto: mapSnapshotToUi(normalizeSnapshot),
+  };
+}
+
+async function loadActiveEventsByKey() {
+  await ensureDetectionTelegramTables();
+  const { rows } = await query(`
+    SELECT event_id, scope, scope_id, name, status, alert_minute, normalize_minute, alert_json, normalize_json, threshold
+    FROM (
+      SELECT
+        event_id,
+        argMax(scope, updated_at) AS scope,
+        argMax(scope_id, updated_at) AS scope_id,
+        argMax(name, updated_at) AS name,
+        argMax(status, updated_at) AS status,
+        argMax(alert_minute, updated_at) AS alert_minute,
+        argMax(normalize_minute, updated_at) AS normalize_minute,
+        argMax(alert_json, updated_at) AS alert_json,
+        argMax(normalize_json, updated_at) AS normalize_json,
+        argMax(threshold, updated_at) AS threshold
+      FROM ${eventsTableRef()}
+      GROUP BY event_id
+    )
+    WHERE status = 'active'
+  `, {}, { name: 'detection/events-active' });
+  const map = new Map();
+  for (const row of rows) {
+    map.set(objectKey(row.scope, row.scope_id), mapEventRow(row));
+  }
+  return map;
+}
+
+async function insertDetectionEvent(row) {
+  await insertRows(EVENTS_TABLE, [row], { name: 'detection/events-insert' });
+}
+
+async function loadDetectionEvents({ status = 'active', limit = 200 } = {}) {
+  await ensureDetectionTelegramTables();
+  const wanted = String(status) === 'normalized' ? 'normalized' : 'active';
+  const take = Math.min(500, Math.max(1, Number(limit) || 200));
+  const { rows } = await query(`
+    SELECT event_id, scope, scope_id, name, status, alert_minute, normalize_minute, alert_json, normalize_json, threshold
+    FROM (
+      SELECT
+        event_id,
+        argMax(scope, updated_at) AS scope,
+        argMax(scope_id, updated_at) AS scope_id,
+        argMax(name, updated_at) AS name,
+        argMax(status, updated_at) AS status,
+        argMax(alert_minute, updated_at) AS alert_minute,
+        argMax(normalize_minute, updated_at) AS normalize_minute,
+        argMax(alert_json, updated_at) AS alert_json,
+        argMax(normalize_json, updated_at) AS normalize_json,
+        argMax(threshold, updated_at) AS threshold
+      FROM ${eventsTableRef()}
+      GROUP BY event_id
+    )
+    WHERE status = {status:String}
+    ORDER BY if(status = 'active', alert_minute, normalize_minute) DESC
+    LIMIT {take:UInt16}
+  `, { status: wanted, take }, { name: 'detection/events-list' });
+  return rows.map(mapEventRow);
+}
+
+async function maybeSendTelegram(text, cfg) {
+  if (!cfg) return { sent: false, skipped: 'disabled' };
   try {
-    cfg = await loadTelegramConfig();
+    await sendTelegramMessage(text, cfg);
+    return { sent: true };
   } catch (err) {
-    if (Number(err.statusCode) === 503) return { skipped: 'disabled', sent: 0 };
-    throw err;
+    return { sent: false, error: err.message };
+  }
+}
+
+async function processDetectionAlerts({ minute, rows, nameByKey }) {
+  await ensureDetectionTelegramTables();
+  const raw = await getCurrentSettingsRaw();
+  const settings = mapSettings(raw || DEFAULT_SETTINGS);
+  let tgCfg = null;
+  try {
+    tgCfg = await loadTelegramConfig();
+  } catch (err) {
+    if (Number(err.statusCode) !== 503) throw err;
   }
 
-  const allRows = rows.filter((r) => String(r.proto) === 'all' && matchesAlertScope(r, cfg.alertScope));
-  const above = allRows.filter((r) => isAboveGrowthThreshold(r, cfg.growthThreshold));
-  if (!above.length) return { skipped: 'none_above', sent: 0 };
-
-  const keys = above.map((r) => ({ scope: r.scope, scopeId: r.scope_id }));
-  const previousByKey = await loadPreviousAllRows(minute, keys, cfg.streak);
-  const candidates = pickAlertCandidates(allRows, previousByKey, cfg.growthThreshold, {
-    streak: cfg.streak,
-    enabledAtMs: cfg.enabledAtMs,
-    alertScope: cfg.alertScope,
-  });
-  if (!candidates.length) return { skipped: 'waiting_streak', sent: 0, above: above.length, streak: cfg.streak };
-
+  const allRows = rows.filter((r) => String(r.proto) === 'all' && matchesAlertScope(r, settings.alertScope));
   const grouped = groupRowsByObject(rows);
+  const activeByKey = await loadActiveEventsByKey();
+  const above = allRows.filter((r) => isAboveGrowthThreshold(r, settings.growthThreshold));
+  const watchKeys = [];
+  const seen = new Set();
+  for (const row of [...above, ...allRows.filter((r) => activeByKey.has(objectKey(r.scope, r.scope_id)))]) {
+    const key = objectKey(row.scope, row.scope_id);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    watchKeys.push({ scope: row.scope, scopeId: row.scope_id });
+  }
+
+  const take = Math.max(settings.streak, settings.normalizeStreak);
+  const previousByKey = await loadPreviousAllRows(minute, watchKeys, take);
+  const alertCandidates = pickAlertCandidates(allRows, previousByKey, settings.growthThreshold, {
+    streak: settings.streak,
+    enabledAtMs: settings.enabled && settings.updatedAt ? parseUtc(settings.updatedAt) : tgCfg?.enabledAtMs,
+    alertScope: settings.alertScope,
+    activeKeys: new Set(activeByKey.keys()),
+  });
+  const normalizeCandidates = pickNormalizeCandidates(allRows, previousByKey, settings.growthThreshold, {
+    streak: settings.normalizeStreak,
+    activeByKey,
+  });
+
+  if (!alertCandidates.length && !normalizeCandidates.length) {
+    return {
+      skipped: above.length ? 'waiting_streak' : (activeByKey.size ? 'waiting_normalize' : 'none_above'),
+      sent: 0,
+      above: above.length,
+      active: activeByKey.size,
+      streak: settings.streak,
+      normalizeStreak: settings.normalizeStreak,
+    };
+  }
+
   let sent = 0;
+  let opened = 0;
+  let closed = 0;
   const errors = [];
 
-  for (const { row, key } of candidates) {
+  for (const { row, key } of alertCandidates) {
     const group = grouped.get(key);
     const name = nameByKey?.get(key) || row.scope_id;
+    const snapshot = snapshotByProto(group, row);
+    const eventId = `${key}|${minute}`;
+    await insertDetectionEvent({
+      event_id: eventId,
+      scope: row.scope,
+      scope_id: row.scope_id,
+      name,
+      status: 'active',
+      alert_minute: minute,
+      normalize_minute: null,
+      alert_json: JSON.stringify(snapshot),
+      normalize_json: '',
+      threshold: settings.growthThreshold,
+    });
+    opened += 1;
     const text = formatAlertMessage({
       name,
       scope: row.scope,
       scopeId: row.scope_id,
       minute,
-      threshold: cfg.growthThreshold,
-      streak: cfg.streak,
-      alertScope: cfg.alertScope,
+      threshold: settings.growthThreshold,
+      streak: settings.streak,
+      alertScope: settings.alertScope,
       byProto: group?.byProto || { all: row },
     });
-    try {
-      await sendTelegramMessage(text, cfg);
-      sent += 1;
-    } catch (err) {
-      errors.push({ key, message: err.message });
-    }
+    const tg = await maybeSendTelegram(text, tgCfg);
+    if (tg.sent) sent += 1;
+    if (tg.error) errors.push({ key, message: tg.error });
+  }
+
+  for (const { row, key, active } of normalizeCandidates) {
+    const group = grouped.get(key);
+    const name = nameByKey?.get(key) || active.name || row.scope_id;
+    const snapshot = snapshotByProto(group, row);
+    await insertDetectionEvent({
+      event_id: active.id,
+      scope: active.scope,
+      scope_id: active.scopeId,
+      name,
+      status: 'normalized',
+      alert_minute: active.alertMinute,
+      normalize_minute: minute,
+      alert_json: JSON.stringify(uiByProtoToSnapshot(active.alertByProto)),
+      normalize_json: JSON.stringify(snapshot),
+      threshold: active.threshold || settings.growthThreshold,
+    });
+    closed += 1;
+    const text = formatNormalizeMessage({
+      name,
+      scope: active.scope,
+      scopeId: active.scopeId,
+      minute,
+      alertMinute: active.alertMinute,
+      threshold: active.threshold || settings.growthThreshold,
+      streak: settings.normalizeStreak,
+      byProto: group?.byProto || { all: row },
+    });
+    const tg = await maybeSendTelegram(text, tgCfg);
+    if (tg.sent) sent += 1;
+    if (tg.error) errors.push({ key, message: tg.error });
   }
 
   return {
     sent,
-    candidates: candidates.length,
+    opened,
+    closed,
+    alerts: alertCandidates.length,
+    normalized: normalizeCandidates.length,
+    telegram: tgCfg ? 'on' : 'disabled',
     errors: errors.length ? errors : undefined,
   };
 }
@@ -495,8 +854,10 @@ module.exports = {
   DEFAULT_GROWTH_THRESHOLD,
   DEFAULT_ALERT_SCOPE,
   DEFAULT_STREAK,
+  DEFAULT_NORMALIZE_STREAK,
   SETTINGS_TABLE,
   SETTINGS_VIEW,
+  EVENTS_TABLE,
   ensureDetectionTelegramTables,
   getDetectionTelegramSettings,
   saveDetectionTelegramSettings,
@@ -504,8 +865,13 @@ module.exports = {
   sendTelegramMessage,
   isAboveGrowthThreshold,
   shouldSendAlert,
+  shouldSendNormalize,
   matchesAlertScope,
   pickAlertCandidates,
+  pickNormalizeCandidates,
   formatAlertMessage,
+  formatNormalizeMessage,
+  snapshotByProto,
+  loadDetectionEvents,
   processDetectionAlerts,
 };

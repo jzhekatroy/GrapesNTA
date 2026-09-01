@@ -6,6 +6,7 @@ const {
   getDetectionTelegramSettings,
   saveDetectionTelegramSettings,
   sendTestTelegramMessage,
+  loadDetectionEvents,
 } = require('./detection-telegram');
 
 function sendError(res, err) {
@@ -43,6 +44,19 @@ function createDetectionRouter() {
           hours: req.query.hours,
           from: req.query.from,
           to: req.query.to,
+        }),
+      });
+    } catch (err) {
+      sendError(res, err);
+    }
+  });
+
+  router.get('/events', async (req, res) => {
+    try {
+      res.json({
+        data: await loadDetectionEvents({
+          status: req.query.status,
+          limit: req.query.limit,
         }),
       });
     } catch (err) {

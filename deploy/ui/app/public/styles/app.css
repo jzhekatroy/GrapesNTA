@@ -5157,6 +5157,21 @@ a.nav-item--active:visited { color: var(--fg-primary); }
 .table td.num .detection-stack__line {
   justify-content: flex-end;
 }
+.detection-event-mark {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+  flex: 0 0 auto;
+}
+.detection-event-mark--alert {
+  background: var(--st-critical);
+  box-shadow: 0 0 8px var(--st-critical);
+}
+.detection-event-mark--ok {
+  background: var(--st-success);
+  box-shadow: 0 0 10px var(--st-success);
+}
 .table--resizable {
   table-layout: fixed;
 }
