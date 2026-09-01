@@ -4,6 +4,9 @@ const MINUTE = 60 * 1000;
 const EXPORT_LAG = 3 * MINUTE;
 const BASELINE_DAYS = 14;
 const BASELINE_QUANTILE = 0.999;
+// Объекты тише порога не пишем: на них не бывает значимой атаки,
+// а таблицу и вкладку они забивают десятками тысяч пустых строк.
+const MIN_BPS = Number(process.env.DETECTION_MIN_BPS) || 20e6;
 
 function parseUtc(value) {
   if (value instanceof Date) return value.getTime();
@@ -21,7 +24,8 @@ function formatCh(ts) {
 function ratePercent(num, den) {
   const d = Number(den) || 0;
   if (d <= 0) return null;
-  return 100 * (Number(num) || 0) / d;
+  // sFlow может поймать SYN+ACK без SYN — тогда числитель больше знаменателя.
+  return Math.min(100, 100 * (Number(num) || 0) / d);
 }
 
 function growthRatio(fact, quantile) {
@@ -69,6 +73,8 @@ function minuteMetrics(raw = {}) {
     halfOpenReplyPct: ratePercent(synHalfOpenReply, synAttempts),
     udpPortEntropy: finiteOrNull(raw.udpPortEntropy),
     udpPortEntropyOut: finiteOrNull(raw.udpPortEntropyOut),
+    udpPortsPerIp: finiteOrNull(raw.udpPortsPerIp),
+    udpPortsPerIpOut: finiteOrNull(raw.udpPortsPerIpOut),
   };
 }
 
@@ -77,6 +83,7 @@ module.exports = {
   EXPORT_LAG,
   BASELINE_DAYS,
   BASELINE_QUANTILE,
+  MIN_BPS,
   parseUtc,
   formatCh,
   ratePercent,

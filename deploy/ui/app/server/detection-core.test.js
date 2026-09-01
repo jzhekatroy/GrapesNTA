@@ -2,7 +2,7 @@
 
 const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
-const { growthRatio, variationPercent, minuteMetrics, ratePercent } = require('./detection-core');
+const { growthRatio, variationPercent, minuteMetrics, ratePercent, MIN_BPS } = require('./detection-core');
 
 describe('detection-core', () => {
   it('рост пустой, если квантиль ноль', () => {
@@ -26,6 +26,7 @@ describe('detection-core', () => {
     assert.equal(ratePercent(0, 0), null);
     assert.equal(ratePercent(0, 100), 0);
     assert.equal(ratePercent(88, 100), 88);
+    assert.equal(ratePercent(200, 100), 100);
   });
 
   it('минута без трафика даёт нули и пустые доли', () => {
@@ -38,6 +39,57 @@ describe('detection-core', () => {
     assert.equal(m.answerPct, null);
     assert.equal(m.halfOpenPct, null);
     assert.equal(m.halfOpenReplyPct, null);
+    assert.equal(m.udpPortEntropy, null);
+    assert.equal(m.udpPortEntropyOut, null);
+    assert.equal(m.udpPortsPerIp, null);
+    assert.equal(m.udpPortsPerIpOut, null);
+  });
+
+  it('энтропия UDP: число сохраняется, NaN становится пустым', () => {
+    assert.equal(minuteMetrics({ udpPortEntropy: 5.25 }).udpPortEntropy, 5.25);
+    assert.equal(minuteMetrics({ udpPortEntropy: Number.NaN }).udpPortEntropy, null);
+  });
+
+  it('энтропия UDP: входящая и исходящая независимы', () => {
+    const m = minuteMetrics({ udpPortEntropy: 2.75, udpPortEntropyOut: 11.4 });
+    assert.equal(m.udpPortEntropy, 2.75);
+    assert.equal(m.udpPortEntropyOut, 11.4);
+    assert.equal(minuteMetrics({ udpPortEntropyOut: 4.5 }).udpPortEntropy, null);
+  });
+
+  it('пик портов на адрес: стороны независимы, NaN становится пустым', () => {
+    const m = minuteMetrics({ udpPortsPerIp: 5477, udpPortsPerIpOut: 12 });
+    assert.equal(m.udpPortsPerIp, 5477);
+    assert.equal(m.udpPortsPerIpOut, 12);
+    assert.equal(minuteMetrics({ udpPortsPerIpOut: 3 }).udpPortsPerIp, null);
+    assert.equal(minuteMetrics({ udpPortsPerIp: Number.NaN }).udpPortsPerIp, null);
+  });
+
+  it('порог тишины: 20 Мбит/с, объект на 19.9 не проходит', () => {
+    assert.equal(MIN_BPS, 20e6);
+    const quiet = minuteMetrics({ bytes: 19.9e6 * 60 / 8 });
+    const loud = minuteMetrics({ bytes: 20.1e6 * 60 / 8 });
+    assert.ok(quiet.bps < MIN_BPS);
+    assert.ok(loud.bps >= MIN_BPS);
+  });
+
+  it('доля топ-1 порта больше не считается', () => {
+    const m = minuteMetrics({ udpTopPortPct: 70.5, udpTopPortPctOut: 9.2 });
+    assert.equal(m.udpTopPortPct, undefined);
+    assert.equal(m.udpTopPortPctOut, undefined);
+  });
+
+  it('ответ и «не зашли» не больше 100%, даже если sFlow поймал SYN+ACK без SYN', () => {
+    const m = minuteMetrics({
+      synAttempts: 50,
+      synAnswered: 100,
+      synInFlows: 80,
+      synHalfOpen: 90,
+      synHalfOpenReply: 91,
+    });
+    assert.equal(m.answerPct, 100);
+    assert.equal(m.halfOpenPct, 100);
+    assert.equal(m.halfOpenReplyPct, 100);
   });
 
   it('атака: почти нет ответа, почти все полуоткрытые', () => {

@@ -16,6 +16,7 @@ const {
   EXPORT_LAG,
   BASELINE_DAYS,
   BASELINE_QUANTILE,
+  MIN_BPS,
   parseUtc,
   formatCh,
   growthRatio,
@@ -157,6 +158,8 @@ function emptyRaw() {
     synHalfOpenReply: 0,
     udpPortEntropy: null,
     udpPortEntropyOut: null,
+    udpPortsPerIp: null,
+    udpPortsPerIpOut: null,
   };
 }
 
@@ -298,12 +301,18 @@ async function loadScopeFlags(scope, minuteTs) {
   return map;
 }
 
-// Энтропия Шеннона по dst_port UDP, вес доли — пакеты, а не число flow:
-// один flow на 100k пакетов не должен весить столько же, сколько flow на один пакет.
-async function loadUdpPortEntropy(scope, minuteTs) {
+function nullableNum(value) {
+  return value == null ? null : Number(value);
+}
+
+// Энтропия Шеннона по dst_port UDP, вес доли — пакеты, а не число flow.
+// Рядом: пик портов на один dst_addr — флуд по случайным портам бьёт в один
+// хост, и среднее по адресам его размывает на абонентах с несколькими IP.
+async function loadUdpPortMetrics(scope, minuteTs) {
   const packetsCol = col('packets');
   const protoCol = col('proto');
   const dstPort = col('dstPort');
+  const dstAddr = dstIpSql();
   const { from, to, until } = minuteBounds(minuteTs);
   const { towardId, fromId } = scopeSides(scope);
   const timeFilter = minuteFilterSql();
@@ -311,33 +320,37 @@ async function loadUdpPortEntropy(scope, minuteTs) {
 
   const { rows } = await query(`
     WITH
+      ev AS (
+        SELECT
+          ${towardId} AS scope_id,
+          1 AS side,
+          f.${dstPort} AS dst_port,
+          ${dstAddr} AS dst_ip,
+          f.${packetsCol} AS packets
+        FROM ${flowsRawTableRef()} AS f
+        WHERE ${timeFilter}
+          AND f.${protoCol} = 17
+          AND ${towardId} != ''
+        UNION ALL
+        SELECT
+          ${fromId} AS scope_id,
+          0 AS side,
+          f.${dstPort} AS dst_port,
+          ${dstAddr} AS dst_ip,
+          f.${packetsCol} AS packets
+        FROM ${flowsRawTableRef()} AS f
+        WHERE ${timeFilter}
+          AND f.${protoCol} = 17
+          AND ${fromId} != ''
+      ),
       per_port AS (
         SELECT
-          e.scope_id AS scope_id,
-          e.side AS side,
-          sum(e.packets) AS pkts
-        FROM (
-          SELECT
-            ${towardId} AS scope_id,
-            1 AS side,
-            f.${dstPort} AS dst_port,
-            f.${packetsCol} AS packets
-          FROM ${flowsRawTableRef()} AS f
-          WHERE ${timeFilter}
-            AND f.${protoCol} = 17
-            AND ${towardId} != ''
-          UNION ALL
-          SELECT
-            ${fromId} AS scope_id,
-            0 AS side,
-            f.${dstPort} AS dst_port,
-            f.${packetsCol} AS packets
-          FROM ${flowsRawTableRef()} AS f
-          WHERE ${timeFilter}
-            AND f.${protoCol} = 17
-            AND ${fromId} != ''
-        ) AS e
-        GROUP BY scope_id, side, e.dst_port
+          scope_id,
+          side,
+          dst_port,
+          sum(packets) AS pkts
+        FROM ev
+        GROUP BY scope_id, side, dst_port
         HAVING pkts > 0
       ),
       shares AS (
@@ -346,28 +359,58 @@ async function loadUdpPortEntropy(scope, minuteTs) {
           side,
           pkts / sum(pkts) OVER (PARTITION BY scope_id, side) AS q
         FROM per_port
+      ),
+      by_side AS (
+        SELECT
+          scope_id,
+          if(countIf(side = 1) > 0, -sumIf(q * log2(q), side = 1) + 0, NULL) AS udp_port_entropy,
+          if(countIf(side = 0) > 0, -sumIf(q * log2(q), side = 0) + 0, NULL) AS udp_port_entropy_out
+        FROM shares
+        GROUP BY scope_id
+      ),
+      per_ip AS (
+        SELECT
+          scope_id,
+          side,
+          dst_ip,
+          uniqExact(dst_port) AS ports
+        FROM ev
+        WHERE dst_ip != ''
+        GROUP BY scope_id, side, dst_ip
+      ),
+      ip_peak AS (
+        SELECT
+          scope_id,
+          if(countIf(side = 1) > 0, maxIf(ports, side = 1), NULL) AS udp_ports_per_ip,
+          if(countIf(side = 0) > 0, maxIf(ports, side = 0), NULL) AS udp_ports_per_ip_out
+        FROM per_ip
+        GROUP BY scope_id
       )
     SELECT
-      scope_id,
-      if(countIf(side = 1) > 0, -sumIf(q * log2(q), side = 1) + 0, NULL) AS udp_port_entropy,
-      if(countIf(side = 0) > 0, -sumIf(q * log2(q), side = 0) + 0, NULL) AS udp_port_entropy_out
-    FROM shares
-    GROUP BY scope_id
+      s.scope_id AS scope_id,
+      s.udp_port_entropy,
+      s.udp_port_entropy_out,
+      p.udp_ports_per_ip,
+      p.udp_ports_per_ip_out
+    FROM by_side AS s
+    LEFT JOIN ip_peak AS p ON s.scope_id = p.scope_id
   `, { from, to, until }, {
-    name: `detection/udp-entropy-${scope}`,
+    name: `detection/udp-metrics-${scope}`,
     clickhouse_settings: HEAVY,
     requestTimeoutMs: 180000,
   });
 
   const map = new Map(rows.map((r) => [String(r.scope_id), {
-    udpPortEntropy: r.udp_port_entropy == null ? null : Number(r.udp_port_entropy),
-    udpPortEntropyOut: r.udp_port_entropy_out == null ? null : Number(r.udp_port_entropy_out),
+    udpPortEntropy: nullableNum(r.udp_port_entropy),
+    udpPortEntropyOut: nullableNum(r.udp_port_entropy_out),
+    udpPortsPerIp: nullableNum(r.udp_ports_per_ip),
+    udpPortsPerIpOut: nullableNum(r.udp_ports_per_ip_out),
   }]));
-  logDetection(`udp-entropy-${scope} done`, {
+  logDetection(`udp-metrics-${scope} done`, {
     ms: Date.now() - started,
     scopes: map.size,
-    maxIn: [...map.values()].reduce((m, r) => Math.max(m, r.udpPortEntropy || 0), 0).toFixed(2),
-    maxOut: [...map.values()].reduce((m, r) => Math.max(m, r.udpPortEntropyOut || 0), 0).toFixed(2),
+    maxEntropyIn: [...map.values()].reduce((m, r) => Math.max(m, r.udpPortEntropy || 0), 0).toFixed(2),
+    maxPortsPerIpIn: [...map.values()].reduce((m, r) => Math.max(m, r.udpPortsPerIp || 0), 0).toFixed(2),
   });
   return map;
 }
@@ -452,8 +495,14 @@ function toInsertRow(object, raw, baseline) {
     half_open_reply_pct: m.halfOpenReplyPct,
     udp_port_entropy: m.udpPortEntropy,
     udp_port_entropy_out: m.udpPortEntropyOut,
+    udp_ports_per_ip: m.udpPortsPerIp,
+    udp_ports_per_ip_out: m.udpPortsPerIpOut,
   };
 }
+
+// Порог MIN_BPS может отсечь все объекты сразу — тогда в таблице минуты нет
+// и minuteWritten() навсегда вернёт false. Помним её здесь, чтобы не зациклиться.
+let lastProcessedMinute = 0;
 
 async function tick() {
   await ensureDetectionTables();
@@ -463,6 +512,10 @@ async function tick() {
     return { skipped: 'no_minute' };
   }
   const minute = formatCh(closed);
+  if (closed <= lastProcessedMinute) {
+    logDetection('skip', { reason: 'processed', minute });
+    return { skipped: 'processed', minute };
+  }
   if (await minuteWritten(closed)) {
     const { rows: written } = await query(`
       SELECT
@@ -489,19 +542,19 @@ async function tick() {
     clients: objects.filter((o) => o.scope === 'client').length,
     nets: objects.filter((o) => o.scope === 'net').length,
   });
-  const [clientVol, clientFlags, netFlags, clientEntropy, netEntropy, baselines] = await Promise.all([
+  const [clientVol, clientFlags, netFlags, clientUdp, netUdp, baselines] = await Promise.all([
     loadClientVolume(closed),
     loadScopeFlags('client', closed),
     loadScopeFlags('net', closed),
-    loadUdpPortEntropy('client', closed),
-    loadUdpPortEntropy('net', closed),
+    loadUdpPortMetrics('client', closed),
+    loadUdpPortMetrics('net', closed),
     loadBaselines(closed),
   ]);
 
   let matchedFlags = 0;
   let insertedAttempts = 0;
   const missed = [];
-  const rows = objects.map((object) => {
+  const allRows = objects.map((object) => {
     const flagMap = object.scope === 'client' ? clientFlags : netFlags;
     const flags = flagMap.get(object.scopeId);
     if (flags) {
@@ -511,10 +564,10 @@ async function tick() {
       missed.push(`${object.scope}:${object.scopeId}`);
     }
     const volume = object.scope === 'client' ? (clientVol.get(object.scopeId) || null) : null;
-    const entropy = (object.scope === 'client' ? clientEntropy : netEntropy).get(object.scopeId);
+    const udp = (object.scope === 'client' ? clientUdp : netUdp).get(object.scopeId);
     const raw = {
       ...(flags || emptyRaw()),
-      ...(entropy || {}),
+      ...(udp || {}),
       minute,
       bytes: volume ? volume.bytes : (flags?.bytes || 0),
       packets: volume ? volume.packets : (flags?.packets || 0),
@@ -522,16 +575,21 @@ async function tick() {
     return toInsertRow(object, raw, baselines.get(`${object.scope}|${object.scopeId}`));
   });
 
+  const rows = allRows.filter((r) => r.bps >= MIN_BPS);
+
   const chunk = 5000;
   for (let i = 0; i < rows.length; i += chunk) {
     await insertRows(TABLE, rows.slice(i, i + chunk), { name: 'detection/insert-anomaly' });
   }
+  lastProcessedMinute = closed;
 
   const out = {
     minute,
     clients: objects.filter((o) => o.scope === 'client').length,
     nets: objects.filter((o) => o.scope === 'net').length,
     rows: rows.length,
+    skippedBelowMinBps: allRows.length - rows.length,
+    minBpsMbit: Math.round(MIN_BPS / 1e6),
     flagRows: clientFlags.size + netFlags.size,
     matchedFlags,
     insertedWithAttempts: insertedAttempts,
@@ -571,6 +629,8 @@ async function loadLatest() {
       a.half_open_reply_pct,
       a.udp_port_entropy,
       a.udp_port_entropy_out,
+      a.udp_ports_per_ip,
+      a.udp_ports_per_ip_out,
       if(a.scope = 'client', ifNull(c.display_name, a.scope_id), a.scope_id) AS name
     FROM ${tableRef()} AS a FINAL
     LEFT JOIN ${clientsViewRef()} AS c ON a.scope = 'client' AND c.client_id = a.scope_id
@@ -594,11 +654,13 @@ async function loadLatest() {
       synInFlows: Number(r.syn_in_flows || 0),
       synHalfOpen: Number(r.syn_half_open || 0),
       synHalfOpenReply: Number(r.syn_half_open_reply || 0),
-      answerPct: r.answer_pct == null ? null : Number(r.answer_pct),
-      halfOpenPct: r.half_open_pct == null ? null : Number(r.half_open_pct),
-      halfOpenReplyPct: r.half_open_reply_pct == null ? null : Number(r.half_open_reply_pct),
-      udpPortEntropy: r.udp_port_entropy == null ? null : Number(r.udp_port_entropy),
-      udpPortEntropyOut: r.udp_port_entropy_out == null ? null : Number(r.udp_port_entropy_out),
+      answerPct: r.answer_pct == null ? null : Math.min(100, Number(r.answer_pct)),
+      halfOpenPct: r.half_open_pct == null ? null : Math.min(100, Number(r.half_open_pct)),
+      halfOpenReplyPct: r.half_open_reply_pct == null ? null : Math.min(100, Number(r.half_open_reply_pct)),
+      udpPortEntropy: nullableNum(r.udp_port_entropy),
+      udpPortEntropyOut: nullableNum(r.udp_port_entropy_out),
+      udpPortsPerIp: nullableNum(r.udp_ports_per_ip),
+      udpPortsPerIpOut: nullableNum(r.udp_ports_per_ip_out),
     })),
   };
 }

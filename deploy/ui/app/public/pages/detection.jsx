@@ -29,6 +29,11 @@ function formatEntropy(value) {
   return Number(value).toFixed(2);
 }
 
+function formatPorts(value) {
+  if (value == null || !Number.isFinite(Number(value))) return 'пусто';
+  return Number(value).toLocaleString('ru-RU', { maximumFractionDigits: 0 });
+}
+
 function formatRate(value, units) {
   const n = Number(value);
   if (!Number.isFinite(n) || n < 0) return '—';
@@ -195,6 +200,20 @@ function PageDetection() {
               num: true,
               width: 155,
               render: (r) => formatEntropy(r.udpPortEntropyOut),
+            },
+            {
+              key: 'udpPortsPerIp',
+              title: 'Макс. портов/IP вх.',
+              num: true,
+              width: 165,
+              render: (r) => formatPorts(r.udpPortsPerIp),
+            },
+            {
+              key: 'udpPortsPerIpOut',
+              title: 'Макс. портов/IP исх.',
+              num: true,
+              width: 170,
+              render: (r) => formatPorts(r.udpPortsPerIpOut),
             },
             { key: 'avgPacketBytes', title: 'Средний пакет', num: true, width: 130, render: (r) => `${formatNum(r.avgPacketBytes, 0)} Б` },
             { key: 'cvPercent', title: 'CV', num: true, width: 90, render: (r) => (r.cvPercent == null ? '—' : `${formatNum(r.cvPercent, 1)}%`) },

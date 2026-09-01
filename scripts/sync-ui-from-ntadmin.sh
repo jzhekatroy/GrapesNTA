@@ -164,8 +164,27 @@ if [[ -d "${WORKER_SCRIPTS}" ]]; then
   done
 fi
 
+DETECTION_DEST="${REPO_ROOT}/deploy/detection/server"
+if [[ -d "${DETECTION_DEST}" ]]; then
+  log "sync detection modules → ${DETECTION_DEST}/"
+  for dst in "${DETECTION_DEST}"/*.js; do
+    [[ -e "${dst}" ]] || continue
+    name="$(basename "${dst}")"
+    src="${SRC}/server/${name}"
+    [[ -f "${src}" ]] || die "detection module has no NTAdmin counterpart: server/${name}"
+    cp "${src}" "${dst}"
+  done
+  copy_missing_worker_requires "${DETECTION_DEST}" "${SRC}"
+  if [[ -f "${SRC}/package.json" ]]; then
+    cp "${SRC}/package.json" "${REPO_ROOT}/deploy/detection/package.json"
+  fi
+  if [[ -f "${SRC}/package-lock.json" ]]; then
+    cp "${SRC}/package-lock.json" "${REPO_ROOT}/deploy/detection/package-lock.json"
+  fi
+fi
+
 log "done → ${DEST}"
 log "SOURCE.txt:"
 cat "${SOURCE_TXT}"
-log "next: git add deploy/ui deploy/analytics && git commit && git push"
+log "next: git add deploy/ui deploy/analytics deploy/detection && git commit && git push"
 log "      on server: ./deploy/deploy.sh ui detection"

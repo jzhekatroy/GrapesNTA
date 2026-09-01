@@ -32,7 +32,9 @@ CREATE TABLE IF NOT EXISTS ${DB()}.${TABLE}
   half_open_pct Nullable(Float64),
   half_open_reply_pct Nullable(Float64),
   udp_port_entropy Nullable(Float64),
-  udp_port_entropy_out Nullable(Float64)
+  udp_port_entropy_out Nullable(Float64),
+  udp_ports_per_ip Nullable(Float64),
+  udp_ports_per_ip_out Nullable(Float64)
 )
 ENGINE = ReplacingMergeTree
 PARTITION BY toYYYYMMDD(minute)
@@ -55,7 +57,12 @@ async function ensureDetectionTables() {
         await executeCommand(CREATE_SQL, {}, { name: 'detection/create-anomaly' });
         return;
       }
-      for (const column of ['udp_port_entropy', 'udp_port_entropy_out']) {
+      for (const column of [
+        'udp_port_entropy',
+        'udp_port_entropy_out',
+        'udp_ports_per_ip',
+        'udp_ports_per_ip_out',
+      ]) {
         if (names.has(column)) continue;
         await executeCommand(
           `ALTER TABLE ${DB()}.${TABLE} ADD COLUMN IF NOT EXISTS ${column} Nullable(Float64)`,

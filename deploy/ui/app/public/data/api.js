@@ -5,6 +5,19 @@ const ApiClient = (() => {
   let status = { connected: false, checkedAt: 0 };
   let onSessionInvalid = null;
 
+  function stripCacheBustQuery() {
+    try {
+      const url = new URL(window.location.href);
+      if (!url.searchParams.has('_')) return;
+      url.searchParams.delete('_');
+      window.history.replaceState(null, '', url.pathname + url.search + url.hash);
+    } catch {
+      // Ignore malformed URLs; navigation still works with the original address.
+    }
+  }
+
+  stripCacheBustQuery();
+
   function isSessionInvalidError(err) {
     if (!err?.status) return false;
     if (err.status === 401) return true;
@@ -766,9 +779,13 @@ const ApiClient = (() => {
       }
     }
 
-    const url = new URL(window.location.href);
-    url.searchParams.set('_', String(Date.now()));
-    window.location.replace(url.href);
+    stripCacheBustQuery();
+    try {
+      await fetch(window.location.pathname, { cache: 'reload', credentials: 'same-origin' });
+    } catch {
+      // Reload below still runs if the prefetch fails.
+    }
+    window.location.reload();
   }
 
   async function loadObservation(id) {
