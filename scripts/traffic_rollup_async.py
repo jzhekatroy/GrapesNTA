@@ -1761,17 +1761,9 @@ def live_job_step(
     """Process one live window. Returns ok|skip|defer|error|wall|rewound."""
     if remaining_budget_s(started, wall_sec) < 3:
         return "wall"
-    # Hour/day inserts can exceed the leftover minute-tick budget and would
-    # otherwise become a diagnostics-critical timeout. Leave them for a tick
-    # that still has room, so 1m jobs keep moving.
-    if job.bucket_kind in ("hour", "day") and remaining_budget_s(started, wall_sec) < 35:
-        logger.info(
-            "job=%s action=defer reason=low_budget kind=%s left_s=%.1f",
-            job.job_id,
-            job.bucket_kind,
-            remaining_budget_s(started, wall_sec),
-        )
-        return "defer"
+    # Pass 1 skips hour/day. Pass 2 may still have <35s left; do not refuse
+    # here — apply_query_timeout caps the query, and a timeout is deferred
+    # without marking the job error.
     cap = max(1, int(getattr(args, "query_timeout_sec", 180) or 180))
     apply_query_timeout(ch, started, wall_sec, cap)
 
@@ -1927,6 +1919,13 @@ def live_job_step(
             fmt_dt(bucket_start),
             msg,
         )
+        if "timed out" in msg.lower():
+            logger.info(
+                "job=%s action=defer reason=query_timeout bucket=%s",
+                job.job_id,
+                fmt_dt(bucket_start),
+            )
+            return "defer"
         prev = state.last_bucket if state and state.last_bucket else subtract_bucket(
             bucket_start, job.bucket_kind
         )
@@ -2134,8 +2133,12 @@ def run_live(args: argparse.Namespace, logger: logging.Logger) -> int:
             window_buckets=window_buckets,
         )
 
-    # Pass 1: every job gets one bucket so a lagging head cannot starve the tail.
+    # Pass 1: every minute job gets one bucket so a lagging head cannot
+    # starve the 1m tail. Hour/day wait for pass 2 — they used to be
+    # deferred+blocked here and then never ran.
     for job in jobs:
+        if job.bucket_kind in ("hour", "day"):
+            continue
         if remaining_budget_s(started, wall_sec) < 3:
             wall_reached = True
             logger.info(
