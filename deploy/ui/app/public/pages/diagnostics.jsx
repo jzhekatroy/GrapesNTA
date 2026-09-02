@@ -1216,14 +1216,6 @@ function fmtFailedRequestRoute(route) {
   return q >= 0 ? raw.slice(0, q) : raw;
 }
 
-function fmtFailedRequestRouteShort(route, maxLen = 48) {
-  const path = fmtFailedRequestRoute(route);
-  if (path.length <= maxLen) return path;
-  const head = Math.ceil((maxLen - 1) / 2);
-  const tail = Math.floor((maxLen - 1) / 2);
-  return `${path.slice(0, head)}…${path.slice(path.length - tail)}`;
-}
-
 function fmtFailedRequestErrorShort(error) {
   if (!error) return '—';
   const firstLine = String(error).split(/\r?\n/).find((line) => line.trim()) || String(error);
@@ -1383,8 +1375,7 @@ function FailedRequestsPanel({ data, loading, onReload, page, onPageChange }) {
                   <td style={{ padding: 6, whiteSpace: 'nowrap' }} className="mono">{item.method}</td>
                   <td style={{ padding: 6, overflow: 'hidden', minWidth: 0, maxWidth: 0 }}>
                     <OverflowText
-                      mode="middle"
-                      value={fmtFailedRequestRouteShort(item.route)}
+                      value={fmtFailedRequestRoute(item.route)}
                       title={item.route}
                       className="mono"
                     />

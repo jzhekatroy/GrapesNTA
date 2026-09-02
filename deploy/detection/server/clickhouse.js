@@ -706,6 +706,11 @@ function parseDataDatetimeSql(paramName) {
   return `parseDateTimeBestEffort({${paramName}:String}, '${tz}')`;
 }
 
+function formatDataDatetimeSql(expr) {
+  const tz = escapeSqlString(config.dataTimezone || 'UTC');
+  return `formatDateTime(${expr}, '%F %T', '${tz}')`;
+}
+
 module.exports = {
   config,
   getClient,
@@ -785,4 +790,5 @@ module.exports = {
   getConfig,
   escapeSqlString,
   parseDataDatetimeSql,
+  formatDataDatetimeSql,
 };

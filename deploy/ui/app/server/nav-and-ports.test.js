@@ -43,7 +43,6 @@ test('api-map maps direction diagnostics before generic diagnostics', () => {
   assert.equal(getResourceForPath('/api/detection/telegram'), 'diagnostics');
   assert.equal(getResourceForPath('/api/detection/telegram/test', 'POST'), 'diagnostics');
   assert.equal(getResourceForPath('/api/detection/events'), 'diagnostics');
-  assert.equal(getResourceForPath('/api/detection/events/export'), 'diagnostics');
 });
 
 test('parseLookbackHours clamps invalid values', () => {

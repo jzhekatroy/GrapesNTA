@@ -21,7 +21,13 @@ function cabinetSeriesToChart(data, meta) {
     const key = String(row.bucket || row.hour || '').trim();
     if (!key) continue;
     if (!byBucket.has(key)) {
-      const bucketMs = typeof parseChartBucketMs === 'function' ? parseChartBucketMs(key) : null;
+      const fromApiMs = Number(row.bucketMs);
+      const fromApiTs = Number(row.bucket_ts);
+      const bucketMs = Number.isFinite(fromApiMs) && fromApiMs > 0
+        ? fromApiMs
+        : (Number.isFinite(fromApiTs) && fromApiTs > 0
+          ? fromApiTs * 1000
+          : (typeof parseChartBucketMs === 'function' ? parseChartBucketMs(key) : null));
       byBucket.set(key, { bucket: key, bucketMs });
     }
     const pt = byBucket.get(key);

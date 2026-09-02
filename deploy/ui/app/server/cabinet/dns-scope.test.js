@@ -40,12 +40,26 @@ test('dns detail list filters by the tagged client and never by address', async 
   await dnsQueries('client:real', { hours: '2' });
 
   const call = callFor('cabinet/dns-queries');
-  assert.match(call.sql, /FROM default\.dns_log/);
-  assert.match(call.sql, /client_id = \{clientId:String\}/);
+  assert.match(call.sql, /FROM default\.dns_log AS d/);
+  assert.match(call.sql, /formatDateTime\(d\.ts/);
+  assert.match(call.sql, /d\.client_id = \{clientId:String\}/);
   assert.equal(call.params.clientId, 'client:real');
   // Matching addresses instead of the tag would hand a client the browsing
   // history of whoever held the address before them, for the whole retention.
   assert.equal(/isIPAddressInRange|client_ip\s*(=|>=|<=)/.test(call.sql), false);
+});
+
+// formatDateTime(ts) AS ts is String. If WHERE/ORDER BY pick up that alias,
+// ClickHouse cannot compare it with now() / parseDateTimeBestEffort (DateTime).
+test('dns detail time filter and sort use the DateTime column, not the formatted alias', async () => {
+  calls.length = 0;
+  await dnsQueries('client:real', { hours: '2' });
+
+  const call = callFor('cabinet/dns-queries');
+  assert.match(call.sql, /d\.ts >= now\(\) - INTERVAL \{hours:UInt32\} HOUR/);
+  assert.match(call.sql, /ORDER BY d\.ts DESC/);
+  assert.doesNotMatch(call.sql, /(?<![.\w])ts\s*>=/);
+  assert.doesNotMatch(call.sql, /ORDER BY ts DESC/);
 });
 
 test('dns limits are clamped so one call cannot pull the whole log', async () => {
@@ -67,7 +81,7 @@ test('dns domain filter is applied to the registrable domain', async () => {
   assert.equal(call.params.domain, 'youtube.com');
   // Names arrive as FQDNs ending in the root dot, and with it in place
   // cutToFirstSignificantSubdomain returns an empty string for everything.
-  assert.match(call.sql, /endsWith\(query_name, '\.'\)/);
+  assert.match(call.sql, /endsWith\(d\.query_name, '\.'\)/);
 });
 
 test('the root dot is tolerated on input and stripped on output', async () => {

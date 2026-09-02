@@ -7,6 +7,8 @@ const {
   asnNamesTableRef,
   asnRegistryEnrichedTableRef,
   escapeSqlString,
+  parseDataDatetimeSql,
+  formatDataDatetimeSql,
 } = require('../clickhouse');
 const { dnsIpExpr } = require('../dns-queries');
 const { flowIpExpr, protoLabel } = require('../queries');
@@ -33,7 +35,7 @@ function parseRange(queryParams = {}) {
 function timeFilterSql(column, range) {
   if (range.mode === 'absolute') {
     return {
-      sql: `${column} >= parseDateTimeBestEffort({from:String}) AND ${column} < parseDateTimeBestEffort({to:String})`,
+      sql: `${column} >= ${parseDataDatetimeSql('from')} AND ${column} < ${parseDataDatetimeSql('to')}`,
       params: { from: range.from, to: range.to },
     };
   }
@@ -43,13 +45,18 @@ function timeFilterSql(column, range) {
   };
 }
 
+function rowBucketMs(unixSeconds) {
+  const ts = Number(unixSeconds);
+  return Number.isFinite(ts) && ts > 0 ? ts * 1000 : null;
+}
+
 // The hourly vitrines only ever hold closed hours, so the cabinet is behind
 // real time by up to an hour plus the rollup lag. Rather than let the UI guess
 // that boundary, every hourly endpoint reports the last hour it actually has.
 // Asked without a range so an empty range still yields a boundary.
 async function lastCompleteHour(table, clientId) {
   const { rows } = await query(
-    `SELECT max(hour) AS data_until FROM default.${table} WHERE client_id = {clientId:String}`,
+    `SELECT ${formatDataDatetimeSql('max(hour)')} AS data_until FROM default.${table} WHERE client_id = {clientId:String}`,
     { clientId },
     { name: `cabinet/data-until/${table}` },
   );
@@ -118,7 +125,7 @@ function overviewTableForGranularity(granularity) {
 
 async function lastCompleteBucket(table, bucketColumn, clientId) {
   const { rows } = await query(
-    `SELECT max(${bucketColumn}) AS data_until FROM default.${table} WHERE client_id = {clientId:String}`,
+    `SELECT ${formatDataDatetimeSql(`max(${bucketColumn})`)} AS data_until FROM default.${table} WHERE client_id = {clientId:String}`,
     { clientId },
     { name: `cabinet/data-until/${table}` },
   );
@@ -134,7 +141,8 @@ async function overviewSeries(clientId, queryParams = {}) {
   const [{ rows, elapsedMs }, dataUntil] = await Promise.all([query(
     `
       SELECT
-        ${bucketColumn} AS bucket,
+        ${formatDataDatetimeSql(bucketColumn)} AS bucket,
+        toUnixTimestamp(${bucketColumn}) AS bucket_ts,
         direction,
         sum(bytes) AS bytes,
         sum(packets) AS packets,
@@ -142,8 +150,8 @@ async function overviewSeries(clientId, queryParams = {}) {
       FROM default.${table}
       WHERE client_id = {clientId:String}
         AND (${filter.sql})
-      GROUP BY bucket, direction
-      ORDER BY bucket ASC, direction ASC
+      GROUP BY ${bucketColumn}, direction
+      ORDER BY ${bucketColumn} ASC, direction ASC
     `,
     { clientId, ...filter.params },
     { name: 'cabinet/overview-series' },
@@ -152,6 +160,7 @@ async function overviewSeries(clientId, queryParams = {}) {
   const data = rows.map((r) => ({
     bucket: r.bucket,
     hour: r.bucket,
+    bucketMs: rowBucketMs(r.bucket_ts),
     direction: String(r.direction),
     bytes: Number(r.bytes) || 0,
     packets: Number(r.packets) || 0,
@@ -316,7 +325,7 @@ async function overviewRecentFlows(clientId, queryParams = {}) {
       FROM
       (
         SELECT
-          f.${time} AS ts,
+          ${formatDataDatetimeSql(`f.${time}`)} AS ts,
           ${flowIpExpr(`f.${srcIp}`)} AS src_ip,
           ${flowIpExpr(`f.${dstIp}`)} AS dst_ip,
           f.${srcPort} AS src_port,
@@ -539,9 +548,11 @@ function withoutRootDot(name) {
 // rollup that fills the vitrine strips it the same way, so the detail filter has
 // to match. Kept as a literal rather than trimRight(name, '.'), whose two
 // argument form is not in every ClickHouse we run against.
-const REGISTRABLE_DOMAIN_SQL = `cutToFirstSignificantSubdomain(
-  if(endsWith(query_name, '.'), substring(query_name, 1, length(query_name) - 1), query_name)
+function registrableDomainSql(column) {
+  return `cutToFirstSignificantSubdomain(
+  if(endsWith(${column}, '.'), substring(${column}, 1, length(${column}) - 1), ${column})
 )`;
+}
 
 async function dnsDomains(clientId, queryParams = {}) {
   const range = parseRange(queryParams);
@@ -592,25 +603,25 @@ async function dnsDomains(clientId, queryParams = {}) {
 // later moves to another client cannot expose the previous owner's history.
 async function dnsQueries(clientId, queryParams = {}) {
   const range = parseRange(queryParams);
-  const filter = timeFilterSql('ts', range);
+  const filter = timeFilterSql('d.ts', range);
   const domain = withoutRootDot(String(queryParams.domain || '').trim());
   const limit = Math.min(Math.max(Number(queryParams.limit) || 100, 1), 1000);
   const { rows, elapsedMs } = await query(
     `
       SELECT
-        ts,
-        ${dnsIpExpr('client_ip')} AS client_ip,
-        ${dnsIpExpr('server_ip')} AS server_ip,
-        query_name,
-        qtype,
-        rcode,
-        is_response,
-        transport
-      FROM default.dns_log
-      WHERE client_id = {clientId:String}
+        ${formatDataDatetimeSql('d.ts')} AS ts,
+        ${dnsIpExpr('d.client_ip')} AS client_ip,
+        ${dnsIpExpr('d.server_ip')} AS server_ip,
+        d.query_name,
+        d.qtype,
+        d.rcode,
+        d.is_response,
+        d.transport
+      FROM default.dns_log AS d
+      WHERE d.client_id = {clientId:String}
         AND (${filter.sql})
-        ${domain ? `AND ${REGISTRABLE_DOMAIN_SQL} = {domain:String}` : ''}
-      ORDER BY ts DESC
+        ${domain ? `AND ${registrableDomainSql('d.query_name')} = {domain:String}` : ''}
+      ORDER BY d.ts DESC
       LIMIT {limit:UInt32}
     `,
     {

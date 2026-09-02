@@ -468,6 +468,7 @@ function OperatorDashboard({
         directions={directions}
         directionsKey={directionsKey}
         collectorFilter={collectorFilter}
+        displayTimezone={displayTimezone}
       />
     ),
   };
@@ -784,13 +785,14 @@ function CabinetDashboard({ onNavigate, timeRange, customPeriod, displayTimezone
         subtitle="Последние минуты, независимо от выбранного периода"
         loadMs={recent.loadMs}
         serverMs={recent.serverMs}
+        displayTimezone={displayTimezone}
         cabinetMode
       />
     </div>
   );
 }
 
-function RecentFlowsCard({ enabled = true, directions, directionsKey, collectorFilter }) {
+function RecentFlowsCard({ enabled = true, directions, directionsKey, collectorFilter, displayTimezone }) {
   const collectorFilterKey = (collectorFilter || []).join('|');
   const [rows, setRows] = useState([]);
   const [flowsSource, setFlowsSource] = useState('loading');
@@ -826,6 +828,7 @@ function RecentFlowsCard({ enabled = true, directions, directionsKey, collectorF
       subtitle={directionFilterLabel}
       loadMs={loadMs}
       serverMs={serverMs}
+      displayTimezone={displayTimezone}
       emptyLabel="Нет потоков для выбранного направления"
     />
   );

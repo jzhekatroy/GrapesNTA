@@ -305,7 +305,10 @@ function OverviewCountryCard({
   );
 }
 
-function formatRecentFlowTs(ts) {
+function formatRecentFlowTs(ts, displayTimezone) {
+  if (typeof formatDataTimestamp === 'function') {
+    return formatDataTimestamp(ts, displayTimezone);
+  }
   if (!ts) return '—';
   const text = String(ts).replace('T', ' ').trim();
   const match = text.match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}:\d{2}:\d{2})/);
@@ -404,6 +407,7 @@ function OverviewRecentFlowsCard({
   loadMs,
   serverMs,
   cabinetMode = false,
+  displayTimezone,
   emptyLabel = 'Нет последних потоков',
 }) {
   const colSpan = cabinetMode ? 7 : 6;
@@ -433,7 +437,7 @@ function OverviewRecentFlowsCard({
           {source === 'clickhouse' && !(rows || []).length && <tr><td colSpan={colSpan} className="talker-table-state">{emptyLabel}</td></tr>}
           {source === 'clickhouse' && (rows || []).map((flow, index) => (
             <tr key={`${flow.ts}-${flow.srcIp}-${flow.dstIp}-${index}`}>
-              <td className="recent-flows__time mono" title={flow.ts}>{formatRecentFlowTs(flow.ts)}</td>
+              <td className="recent-flows__time mono" title={flow.ts}>{formatRecentFlowTs(flow.ts, displayTimezone)}</td>
               {cabinetMode && (
                 <td className="recent-flows__direction-col">
                   <Badge tone="info">{flow.clientSide === 'dst' ? 'К вам' : flow.clientSide === 'both' ? 'Внутри' : 'От вас'}</Badge>

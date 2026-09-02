@@ -593,6 +593,20 @@ function parseChartBucketMs(value) {
   return bucketWallToMs(value, getDataTimezone());
 }
 
+function formatDataTimestamp(ts, displayTimeZone = getDisplayTimezone()) {
+  if (ts == null || ts === '') return '—';
+  const text = String(ts).replace('T', ' ').trim().slice(0, 19);
+  const ms = parseChartBucketMs(text);
+  if (ms == null || !Number.isFinite(ms)) return String(ts);
+  const parts = intlPartsMs(Number(ms), displayTimeZone || getDisplayTimezone());
+  const day = pickIntlPart(parts, 'day');
+  const month = pickIntlPart(parts, 'month');
+  const hour = pickIntlPart(parts, 'hour');
+  const minute = pickIntlPart(parts, 'minute');
+  const second = pickIntlPart(parts, 'second');
+  return `${day}.${month} ${hour}:${minute}:${second}`;
+}
+
 function customPeriodSpanMs(customPeriod) {
   if (!customPeriod?.from || !customPeriod?.to) return null;
   const displayTz = getDisplayTimezone();
@@ -3045,7 +3059,7 @@ function fmtAgo(d) {
 
 Object.assign(window, {
   AreaChart, DualChart, CategoryTrendChart, TimeSeriesSparkChart, Sparkline, Donut, filterNonZeroDonutSegments, filterNonZeroDonutWithOtherLast, donutCenterTraffic, donutCenterTrafficGb, BarList, WorldHeat, CountryChoropleth, CountryRankList, Sankey,
-  computeChartPeriodBounds, chartRangeFromPointSelection, parseChartBucketMs,
+  computeChartPeriodBounds, chartRangeFromPointSelection, parseChartBucketMs, formatDataTimestamp,
   fillChartTimeGaps, buildChartTimeScale,
   formatChartPointTimeLabel, formatPointTimeLabel, formatBucketLabel, formatTipPointTime, formatTipBucketDuration, normalizeBucketString, isLongChartRange,
   msToDatetimeLocalValue, msToBucketString, bucketToDatetimeLocalInput, resolvePointEpochMs,

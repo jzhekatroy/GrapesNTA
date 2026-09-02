@@ -226,18 +226,7 @@ function PageCabinetDns({ timeRange, customPeriod, displayTimezone }) {
                 {
                   key: 'ts',
                   title: 'Время',
-                  render: (row) => {
-                    const ms = Date.parse(row.ts);
-                    if (!Number.isFinite(ms)) return row.ts || '—';
-                    return new Date(ms).toLocaleString('ru-RU', {
-                      day: '2-digit',
-                      month: '2-digit',
-                      hour: '2-digit',
-                      minute: '2-digit',
-                      second: '2-digit',
-                      timeZone: displayTimezone || getDisplayTimezone(),
-                    });
-                  },
+                  render: (row) => formatDataTimestamp(row.ts, displayTimezone || getDisplayTimezone()),
                 },
                 { key: 'clientIp', title: 'Клиент', mono: true },
                 { key: 'serverIp', title: 'Сервер', mono: true },

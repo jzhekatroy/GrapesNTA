@@ -51,8 +51,10 @@ test('overviewStats returns UI units for in/out and reports its source granulari
   assert.equal(result.meta.dataUntil, '2026-08-18 12:34:00');
 
   const statsCall = calls.find((call) => call.opts?.name === 'cabinet/overview-stats');
+  const untilCall = calls.find((call) => String(call.opts?.name || '').startsWith('cabinet/data-until/'));
   assert.match(statsCall.sql, /traffic_client_1m/);
   assert.match(statsCall.sql, /max\(bucket_bytes \* 8/);
+  assert.match(untilCall.sql, /formatDateTime\(/);
   assert.equal(statsCall.params.clientId, 'client:real');
   assert.equal(statsCall.params.bucketSeconds, 60);
   assert.equal(statsCall.params.windowSeconds, 6 * 3600);
@@ -118,6 +120,7 @@ test('overviewRecentFlows scopes raw flows and maps only the cabinet contract', 
     clientSide: 'src',
   }]);
   assert.match(calls[0].sql, /FROM `default`\.`flows_raw` AS f/);
+  assert.match(calls[0].sql, /formatDateTime\(/);
   assert.match(calls[0].sql, /f\.src_client = \{clientId:String\} OR f\.dst_client = \{clientId:String\}/);
   assert.equal(calls[0].params.clientId, 'client:real');
   assert.equal(calls[0].params.limit, 100);

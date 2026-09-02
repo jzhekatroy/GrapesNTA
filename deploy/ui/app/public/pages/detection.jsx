@@ -61,40 +61,6 @@ function displayLocalToMs(value) {
   return parseChartBucketMs(String(displayDatetimeLocalToData(value)).replace('T', ' '));
 }
 
-function displayLocalToUtcCh(value) {
-  const ms = displayLocalToMs(value);
-  return ms == null ? null : utcCh(ms);
-}
-
-function defaultHistoryRangeLocal() {
-  const toMs = Date.now();
-  const fromMs = toMs - 7 * 24 * 3600 * 1000;
-  if (typeof msToDatetimeLocalValue === 'function' && typeof getDisplayTimezone === 'function') {
-    const tz = getDisplayTimezone();
-    return {
-      from: msToDatetimeLocalValue(fromMs, tz),
-      to: msToDatetimeLocalValue(toMs, tz),
-    };
-  }
-  const pad = (n) => String(n).padStart(2, '0');
-  const fmt = (ms) => {
-    const d = new Date(ms);
-    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
-  };
-  return { from: fmt(fromMs), to: fmt(toMs) };
-}
-
-function downloadBlob(filename, blob) {
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = filename;
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  URL.revokeObjectURL(url);
-}
-
 function chartWindow(periodId, customRange) {
   if (customRange?.from && customRange?.to) {
     const fromMs = displayLocalToMs(customRange.from);
@@ -296,8 +262,6 @@ function PageDetection() {
   const [events, setEvents] = useState([]);
   const [eventsError, setEventsError] = useState('');
   const [eventsBusy, setEventsBusy] = useState(false);
-  const [historyRange, setHistoryRange] = useState(() => defaultHistoryRangeLocal());
-  const [eventsExporting, setEventsExporting] = useState(false);
 
   const reload = useCallback(() => {
     setError('');
@@ -308,61 +272,19 @@ function PageDetection() {
 
   useEffect(() => { reload(); }, [reload]);
 
-  const historyBounds = useCallback(() => {
-    const from = displayLocalToUtcCh(historyRange.from);
-    const to = displayLocalToUtcCh(historyRange.to);
-    return { from, to };
-  }, [historyRange.from, historyRange.to]);
-
   const reloadEvents = useCallback((status) => {
     setEventsBusy(true);
     setEventsError('');
-    const opts = { status, limit: status === 'normalized' ? 1000 : 200 };
-    if (status === 'normalized') {
-      const { from, to } = historyBounds();
-      if (from) opts.from = from;
-      if (to) opts.to = to;
-    }
-    return ApiClient.loadDetectionEvents(opts)
+    return ApiClient.loadDetectionEvents({ status })
       .then(setEvents)
       .catch((e) => setEventsError(e.message))
       .finally(() => setEventsBusy(false));
-  }, [historyBounds]);
+  }, []);
 
   useEffect(() => {
     if (pageTab === 'active') reloadEvents('active');
     if (pageTab === 'history') reloadEvents('normalized');
   }, [pageTab, reloadEvents]);
-
-  const exportHistory = async () => {
-    setEventsExporting(true);
-    setEventsError('');
-    try {
-      const { from, to } = historyBounds();
-      if (!from || !to) throw new Error('Укажите начало и конец периода');
-      if (displayLocalToMs(historyRange.from) >= displayLocalToMs(historyRange.to)) {
-        throw new Error('Начало периода должно быть раньше конца');
-      }
-      const { blob, count } = await ApiClient.exportDetectionEventsCsv({
-        status: 'normalized',
-        from,
-        to,
-        limit: 10000,
-      });
-      if (!count) {
-        pushToast?.({ kind: 'warning', title: 'Нечего выгружать', desc: 'За выбранный период записей нет.' });
-        return;
-      }
-      const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
-      downloadBlob(`detection-history-${stamp}.csv`, blob);
-      pushToast?.({ kind: 'success', title: 'CSV выгружен', desc: `${count} событий.` });
-    } catch (e) {
-      setEventsError(e.message);
-      pushToast?.({ kind: 'error', title: 'Ошибка выгрузки', desc: e.message });
-    } finally {
-      setEventsExporting(false);
-    }
-  };
 
   useEffect(() => {
     ApiClient.loadDetectionTelegramSettings()
@@ -728,57 +650,15 @@ function PageDetection() {
           title={pageTab === 'active' ? 'Активные события' : 'История'}
           subtitle={pageTab === 'active'
             ? 'Алерт уже ушёл, нормализации ещё нет. Срез метрик — момент срабатывания, все протоколы.'
-            : 'Закрытые циклы. Фильтр по времени нормализации. В CSV — срез алерта и нормализации по всем протоколам.'}
+            : 'Закрытые циклы. Две группы строк: срабатывание (🔴) и нормализация (🟢), все метрики трёх протоколов.'}
           tools={(
-            <div className="row" style={{ gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-              {pageTab === 'history' && (
-                <>
-                  <label className="row" style={{ gap: 6, alignItems: 'center', font: 'var(--pv-text-body-3)' }}>
-                    <span style={{ color: 'var(--fg-secondary)' }}>с</span>
-                    <input
-                      className="input"
-                      type="datetime-local"
-                      value={historyRange.from || ''}
-                      onChange={(e) => setHistoryRange((r) => ({ ...r, from: e.target.value }))}
-                    />
-                  </label>
-                  <label className="row" style={{ gap: 6, alignItems: 'center', font: 'var(--pv-text-body-3)' }}>
-                    <span style={{ color: 'var(--fg-secondary)' }}>по</span>
-                    <input
-                      className="input"
-                      type="datetime-local"
-                      value={historyRange.to || ''}
-                      onChange={(e) => setHistoryRange((r) => ({ ...r, to: e.target.value }))}
-                    />
-                  </label>
-                  <Button
-                    size="sm"
-                    disabled={eventsBusy || eventsExporting}
-                    onClick={() => reloadEvents('normalized')}
-                  >
-                    Показать
-                  </Button>
-                  <Button
-                    size="sm"
-                    kind="ghost"
-                    icon="export"
-                    disabled={eventsBusy || eventsExporting}
-                    onClick={exportHistory}
-                  >
-                    {eventsExporting ? 'Выгрузка…' : 'CSV'}
-                  </Button>
-                </>
-              )}
-              {pageTab === 'active' && (
-                <Button
-                  size="sm"
-                  disabled={eventsBusy}
-                  onClick={() => reloadEvents('active')}
-                >
-                  Обновить
-                </Button>
-              )}
-            </div>
+            <Button
+              size="sm"
+              disabled={eventsBusy}
+              onClick={() => reloadEvents(pageTab === 'active' ? 'active' : 'normalized')}
+            >
+              Обновить
+            </Button>
           )}
         >
           {eventsError && (
