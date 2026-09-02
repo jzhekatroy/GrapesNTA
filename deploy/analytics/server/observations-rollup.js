@@ -16,7 +16,8 @@
  * Live catch-up starts at observation createdAt; optional history backfill runs
  * at lower priority after live is caught up.
  * Each shot advances at most MAX_SHOT_MINUTES forward from the cursor.
- * Inserts are idempotent: the target window is deleted (mutations_sync=1) before insert.
+ * Inserts are idempotent: an existing dest window is skipped; only empty
+ * minutes are inserted. DELETE is reserved for explicit rebuild.
  */
 
 require('dotenv').config({ path: require('path').join(__dirname, '..', '.env') });
@@ -231,25 +232,78 @@ function toChUtc(d) {
   return (d instanceof Date ? d : new Date(d)).toISOString();
 }
 
+async function pendingRollupMutations() {
+  try {
+    const { rows } = await query(`
+      SELECT count() AS c
+      FROM system.mutations
+      WHERE database = 'default'
+        AND table = {t:String}
+        AND is_done = 0
+    `, { t: ROLLUP_TABLE }, { name: 'observations/pending-mutations' });
+    return Number(rows[0]?.c || 0);
+  } catch {
+    return 0;
+  }
+}
+
+function parseRollupMinute(raw) {
+  if (raw == null || raw === '') return null;
+  if (raw instanceof Date) return Number.isFinite(raw.getTime()) ? raw : null;
+  const s = String(raw).trim();
+  if (!s) return null;
+  const iso = s.includes('T') ? s : s.replace(' ', 'T');
+  const d = new Date(iso.endsWith('Z') || iso.includes('+') ? iso : `${iso}Z`);
+  return Number.isFinite(d.getTime()) ? d : null;
+}
+
+async function existingWindowMax(observationId, from, to) {
+  const { rows } = await query(`
+    SELECT max(minute) AS mx
+    FROM default.${ROLLUP_TABLE}
+    WHERE observation_id = {id:String}
+      AND minute >= parseDateTimeBestEffort({from:String}, 'UTC')
+      AND minute < parseDateTimeBestEffort({to:String}, 'UTC')
+  `, {
+    id: observationId,
+    from: toChUtc(from),
+    to: toChUtc(to),
+  }, { name: `observations/rollup-existing-${observationId}` });
+  return parseRollupMinute(rows[0]?.mx);
+}
+
 /**
- * Remove existing rollup rows for [from, to) so SummingMergeTree cannot double-count
- * on overlapping catch-up / rebuild. Waits for the mutation to finish.
+ * Rebuild-only: drop [from, to) without mutations_sync so an outer timeout
+ * cannot orphan the mutation. Live catch-up must not call this.
  */
 async function deleteRollupWindow(observationId, from, to) {
   if (!(from instanceof Date) || !(to instanceof Date) || !(from < to)) return { elapsedMs: 0 };
+  const pending = await pendingRollupMutations();
+  if (pending > 0) {
+    const err = new Error(`pending mutations=${pending} on ${ROLLUP_TABLE}`);
+    err.code = 'DEFER';
+    throw err;
+  }
   const started = Date.now();
   await executeCommand(`
     ALTER TABLE default.${ROLLUP_TABLE}
     DELETE WHERE observation_id = {id:String}
       AND minute >= parseDateTimeBestEffort({from:String}, 'UTC')
       AND minute < parseDateTimeBestEffort({to:String}, 'UTC')
-    SETTINGS mutations_sync = 1
   `, {
     id: observationId,
     from: toChUtc(from),
     to: toChUtc(to),
   }, { name: `observations/rollup-delete-${observationId}` });
-  return { elapsedMs: Date.now() - started };
+  while (Date.now() - started < 20_000) {
+    if (await pendingRollupMutations() === 0) {
+      return { elapsedMs: Date.now() - started };
+    }
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+  }
+  const err = new Error(`rollup delete mutation still running on ${ROLLUP_TABLE}`);
+  err.code = 'DEFER';
+  throw err;
 }
 
 function earliestLiveFrom(safeTo) {
@@ -413,9 +467,32 @@ function isTotalRollupRow(row) {
 }
 
 async function materializeWindow(job, from, to) {
+  const pending = await pendingRollupMutations();
+  if (pending > 0) {
+    const err = new Error(`pending mutations=${pending} on ${ROLLUP_TABLE}`);
+    err.code = 'DEFER';
+    throw err;
+  }
+
+  const haveMax = await existingWindowMax(job.id, from, to);
+  let insertFrom = from;
+  if (haveMax) {
+    const next = new Date(haveMax.getTime() + BUCKET_MS);
+    if (next >= to) {
+      console.log(new Date().toISOString(), 'observation rollup skip_existing', {
+        id: job.id,
+        from: from.toISOString(),
+        to: to.toISOString(),
+        haveMax: haveMax.toISOString(),
+      });
+      return { totalPoints: [{ bucket: to }], groupedPoints: 0, storedRatio: 1 };
+    }
+    if (next > insertFrom) insertFrom = next;
+  }
+
   const window = {
     range: 'custom',
-    from: from.toISOString(),
+    from: insertFrom.toISOString(),
     to: to.toISOString(),
     filters: job.filters,
     granularity: GRANULARITY,
@@ -444,7 +521,7 @@ async function materializeWindow(job, from, to) {
     .filter(isTotalRollupRow)
     .reduce((acc, row) => acc + (Number(row.bytes) || 0), 0);
   const sampleMinute = values[0]?.minute;
-  const { elapsedMs: deleteMs } = await deleteRollupWindow(job.id, from, to);
+  const deleteMs = 0;
   let insertMs = 0;
   if (values.length) {
     const insertStarted = Date.now();
@@ -544,6 +621,13 @@ async function catchupBackfill(job, liveStart) {
       backfillDone: done,
     };
   } catch (err) {
+    if (err && err.code === 'DEFER') {
+      await patchMaterializeStatus(job.id, {
+        status: 'ok',
+        runningStartedAt: null,
+      });
+      return { id: job.id, skipped: true, reason: 'pending_mutations' };
+    }
     await applyFail(job, err.message);
     throw err;
   }
@@ -638,6 +722,13 @@ async function catchupOne(job) {
       bucketSec: ROLLUP_BUCKET_SEC,
     };
   } catch (err) {
+    if (err && err.code === 'DEFER') {
+      await patchMaterializeStatus(job.id, {
+        status: 'ok',
+        runningStartedAt: null,
+      });
+      return { id: job.id, skipped: true, reason: 'pending_mutations' };
+    }
     await applyFail(job, err.message);
     throw err;
   }

@@ -1761,6 +1761,17 @@ def live_job_step(
     """Process one live window. Returns ok|skip|defer|error|wall|rewound."""
     if remaining_budget_s(started, wall_sec) < 3:
         return "wall"
+    # Hour/day inserts can exceed the leftover minute-tick budget and would
+    # otherwise become a diagnostics-critical timeout. Leave them for a tick
+    # that still has room, so 1m jobs keep moving.
+    if job.bucket_kind in ("hour", "day") and remaining_budget_s(started, wall_sec) < 35:
+        logger.info(
+            "job=%s action=defer reason=low_budget kind=%s left_s=%.1f",
+            job.job_id,
+            job.bucket_kind,
+            remaining_budget_s(started, wall_sec),
+        )
+        return "defer"
     cap = max(1, int(getattr(args, "query_timeout_sec", 180) or 180))
     apply_query_timeout(ch, started, wall_sec, cap)
 
