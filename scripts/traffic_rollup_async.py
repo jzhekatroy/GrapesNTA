@@ -106,6 +106,17 @@ def split_table_name(table: str, default_db: str = "default") -> Tuple[str, str]
     return default_db, table
 
 
+# Leave this much of --live-wall-sec unused so the outer `timeout` in
+# cron-traffic-rollups.sh (LIVE_TIMEOUT, default 55s) cannot SIGKILL a
+# still-running clickhouse-client. A killed client leaves ALTER DELETE
+# mutations queued; the next tick then stacks another DELETE.
+HARD_KILL_RESERVE_SEC = 8
+
+
+class JobDeferred(Exception):
+    """Skip this job this tick without failing the run or advancing the cursor."""
+
+
 @dataclass
 class JobState:
     last_bucket: Optional[datetime]
@@ -614,6 +625,224 @@ def wait_table_mutations(
         time.sleep(poll_s)
 
 
+def remaining_budget_s(started: float, wall_sec: int) -> float:
+    if not wall_sec:
+        return float("inf")
+    return float(wall_sec) - (time.monotonic() - started) - HARD_KILL_RESERVE_SEC
+
+
+def apply_query_timeout(
+    ch: ClickHouseClient,
+    started: float,
+    wall_sec: int,
+    cap_s: int,
+) -> int:
+    left = remaining_budget_s(started, wall_sec)
+    if left == float("inf"):
+        timeout = max(1, cap_s)
+    else:
+        timeout = max(1, min(cap_s, int(left)))
+    ch.timeout_s = timeout
+    return timeout
+
+
+def pending_mutations(ch: ClickHouseClient, table: str) -> Optional[int]:
+    db, name = split_table_name(table)
+    try:
+        raw = ch.query(
+            "SELECT count() FROM system.mutations "
+            f"WHERE database = {sql_string(db)} "
+            f"AND table = {sql_string(name)} "
+            "AND is_done = 0",
+            display=f"pending mutations for {table}",
+        )
+        return int(raw or "0")
+    except RuntimeError:
+        return None
+
+
+def parse_bucket_value(raw: str, kind: str) -> datetime:
+    text = raw.strip()
+    if kind == "day" and len(text) >= 10 and text[4] == "-":
+        try:
+            return datetime.strptime(text[:10], "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        except ValueError:
+            pass
+    return datetime.strptime(text[:19], "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+
+
+def probe_existing_buckets(
+    ch: ClickHouseClient,
+    job: RollupJob,
+    start: datetime,
+    end: datetime,
+) -> Optional[set]:
+    col = bucket_column(job)
+    lo = f"toDateTime('{fmt_dt(start)}', 'UTC')"
+    hi = f"toDateTime('{fmt_dt(end)}', 'UTC')"
+    try:
+        raw = ch.query(
+            f"SELECT {col} FROM {job.dest_table} "
+            f"WHERE {col} >= {lo} AND {col} < {hi} "
+            f"GROUP BY {col}",
+            display=f"existing buckets for {job.job_id}",
+        )
+    except RuntimeError:
+        return None
+    found: set = set()
+    if not raw:
+        return found
+    for line in raw.splitlines():
+        if line.strip():
+            found.add(parse_bucket_value(line, job.bucket_kind))
+    return found
+
+
+def split_window(
+    buckets: Sequence[datetime],
+    existing: set,
+    kind: str,
+) -> Tuple[Optional[datetime], Optional[datetime], Optional[datetime]]:
+    """Return (skip_last, insert_from, insert_end_exclusive) for a bucket list."""
+    if not buckets:
+        return None, None, None
+    skip_last: Optional[datetime] = None
+    insert_from: Optional[datetime] = None
+    empty: List[datetime] = []
+    for bucket in buckets:
+        if insert_from is None:
+            if bucket in existing:
+                skip_last = bucket
+                continue
+            insert_from = bucket
+        elif bucket in existing:
+            break
+        empty.append(bucket)
+    if not empty:
+        return skip_last, None, None
+    return skip_last, empty[0], add_bucket(empty[-1], kind)
+
+
+def _insert_window(
+    ch: ClickHouseClient,
+    logger: logging.Logger,
+    job: RollupJob,
+    start: datetime,
+    end: datetime,
+    args: argparse.Namespace,
+) -> Tuple[datetime, int, str]:
+    time_filter = build_time_filter(job, start, end)
+    select_sql = job.select_sql.format(time_filter=time_filter)
+    insert_sql = f"INSERT INTO {job.dest_table}\n{select_sql}"
+    source_rows = None
+    if args.preflight_count:
+        source_rows = count_source_rows(ch, job, time_filter)
+        if source_rows is not None:
+            logger.info(
+                "job=%s from=%s to=%s source_rows=%s",
+                job.job_id,
+                fmt_dt(start),
+                fmt_dt(end),
+                source_rows,
+            )
+    started = time.monotonic()
+    ch.execute(
+        insert_sql,
+        display=f"insert rollup for {job.job_id} {fmt_dt(start)}..{fmt_dt(end)}",
+    )
+    duration_ms = int((time.monotonic() - started) * 1000)
+    last = truncate_bucket(subtract_bucket(end, job.bucket_kind), job.bucket_kind)
+    n_buckets = len(iter_range_buckets(job, start, end))
+    logger.info(
+        "job=%s from=%s to=%s buckets=%s status=ok duration_ms=%s source_rows=%s",
+        job.job_id,
+        fmt_dt(start),
+        fmt_dt(end),
+        n_buckets,
+        duration_ms,
+        source_rows if source_rows is not None else "unknown",
+    )
+    return last, duration_ms, "ok"
+
+
+def run_window(
+    ch: ClickHouseClient,
+    logger: logging.Logger,
+    job: RollupJob,
+    start: datetime,
+    end: datetime,
+    args: argparse.Namespace,
+    *,
+    force_delete: bool = False,
+) -> Tuple[datetime, int, str]:
+    """Write [start, end). Returns (last_committed_bucket, duration_ms, action)."""
+    buckets = iter_range_buckets(job, start, end)
+    if not buckets:
+        raise ValueError(f"empty window for {job.job_id}")
+    window_end = add_bucket(buckets[-1], job.bucket_kind)
+
+    pending = pending_mutations(ch, job.dest_table)
+    rebuild = bool(force_delete or args.delete_before_insert)
+    if rebuild:
+        if pending is None:
+            raise JobDeferred(f"cannot read system.mutations for {job.dest_table}")
+        if pending > 0:
+            raise JobDeferred(f"pending mutations={pending} on {job.dest_table}")
+    elif pending is not None and pending > 0:
+        raise JobDeferred(f"pending mutations={pending} on {job.dest_table}")
+
+    if rebuild and job.pre_delete_sql:
+        col = bucket_column(job)
+        lo = f"toDateTime('{fmt_dt(start)}', 'UTC')"
+        hi = f"toDateTime('{fmt_dt(window_end)}', 'UTC')"
+        logger.info(
+            "job=%s action=delete from=%s to=%s reason=rebuild",
+            job.job_id,
+            fmt_dt(start),
+            fmt_dt(window_end),
+        )
+        ch.execute(
+            f"ALTER TABLE {job.dest_table} DELETE WHERE {col} >= {lo} AND {col} < {hi}",
+            display=f"range delete for {job.job_id}",
+        )
+        wait_s = ch.timeout_s if ch.timeout_s else 30
+        wait_table_mutations(ch, logger, job.dest_table, timeout_s=max(5, wait_s))
+        return _insert_window(ch, logger, job, start, window_end, args)
+
+    existing = probe_existing_buckets(ch, job, start, window_end)
+    if existing is None:
+        col = bucket_column(job)
+        bucket_dt = f"toDateTime('{fmt_dt(start)}', 'UTC')"
+        one = ch.query(
+            f"SELECT 1 FROM {job.dest_table} WHERE {col} = {bucket_dt} LIMIT 1",
+            display=f"idempotency probe for {job.job_id}",
+        )
+        existing = {start} if one.strip() else set()
+        if existing:
+            logger.info(
+                "job=%s action=skip_existing bucket=%s",
+                job.job_id,
+                fmt_dt(start),
+            )
+            return start, 0, "skip_existing"
+
+    skip_last, insert_from, insert_end = split_window(buckets, existing, job.bucket_kind)
+    if insert_from is None:
+        last = skip_last if skip_last is not None else buckets[-1]
+        logger.info(
+            "job=%s action=skip_existing from=%s to=%s",
+            job.job_id,
+            fmt_dt(start),
+            fmt_dt(add_bucket(last, job.bucket_kind)),
+        )
+        return last, 0, "skip_existing"
+
+    last, duration_ms, action = _insert_window(
+        ch, logger, job, insert_from, insert_end, args
+    )
+    return last, duration_ms, action
+
+
 def run_bucket(
     ch: ClickHouseClient,
     logger: logging.Logger,
@@ -622,85 +851,10 @@ def run_bucket(
     args: argparse.Namespace,
 ) -> Tuple[bool, int, str]:
     bucket_end = add_bucket(bucket_start, job.bucket_kind)
-    time_filter = build_time_filter(job, bucket_start, bucket_end)
-    bucket_dt = f"toDateTime('{fmt_dt(bucket_start)}', 'UTC')"
-    bucket_col = bucket_column(job)
-
-    # Idempotent write: a rollup bucket must never be summed twice into the
-    # SummingMergeTree target. The target only ADDS rows, so any reprocessing of
-    # a bucket that already has rows silently inflates every metric (this is what
-    # caused the historical ~6-9x over-count). Guarantee exactly-once per bucket:
-    #
-    #   * steady-state forward run  -> bucket is brand new, the probe below hits
-    #     no primary-key granule and returns instantly, so no delete happens
-    #     (mutations stay off the hot path);
-    #   * reprocessing (manual backfill, state re-bootstrap, or a crash between
-    #     INSERT and state commit) -> the bucket already has rows, so we delete
-    #     them before re-inserting.
-    #
-    # --delete-before-insert forces the delete unconditionally (explicit rebuild)
-    # and skips the probe. bucket_col is the first ORDER BY column of every target
-    # table, so both the probe and the DELETE predicate are primary-key scoped.
-    needs_delete = bool(args.delete_before_insert)
-    delete_reason = "flag"
-    if not needs_delete and job.pre_delete_sql:
-        existing = ch.query(
-            f"SELECT 1 FROM {job.dest_table} WHERE {bucket_col} = {bucket_dt} LIMIT 1",
-            display=f"idempotency probe for {job.job_id}",
-        )
-        if existing.strip() != "":
-            needs_delete = True
-            delete_reason = "bucket_exists"
-
-    if needs_delete and job.pre_delete_sql:
-        delete_sql = job.pre_delete_sql.format(bucket_dt=bucket_dt)
-        # Make the DELETE synchronous so we don't depend on reading
-        # system.mutations afterwards (the worker's ui_admin user may lack
-        # SELECT on system.mutations, which otherwise fails the wait step).
-        delete_sql = f"{delete_sql} SETTINGS mutations_sync = 1"
-        logger.info(
-            "job=%s action=delete bucket=%s reason=%s",
-            job.job_id,
-            fmt_dt(bucket_start),
-            delete_reason,
-        )
-        ch.execute(delete_sql, display=f"delete bucket for {job.job_id}")
-        # mutations_sync=1 already waited for completion; poll only as a
-        # best-effort and never fail the bucket if system.mutations is denied.
-        try:
-            wait_table_mutations(ch, logger, job.dest_table)
-        except RuntimeError as exc:
-            logger.warning(
-                "job=%s action=wait_mutations_skipped detail=%s",
-                job.job_id,
-                str(exc).splitlines()[0][:200],
-            )
-
-    select_sql = job.select_sql.format(time_filter=time_filter)
-    insert_sql = f"INSERT INTO {job.dest_table}\n{select_sql}"
-
-    source_rows = None
-    if args.preflight_count:
-        source_rows = count_source_rows(ch, job, time_filter)
-        if source_rows is not None:
-            logger.info(
-                "job=%s bucket=%s source_rows=%s",
-                job.job_id,
-                fmt_dt(bucket_start),
-                source_rows,
-            )
-
-    started = time.monotonic()
-    ch.execute(insert_sql, display=f"insert rollup for {job.job_id} {fmt_dt(bucket_start)}")
-    duration_ms = int((time.monotonic() - started) * 1000)
-    logger.info(
-        "job=%s bucket=%s status=ok duration_ms=%s source_rows=%s",
-        job.job_id,
-        fmt_dt(bucket_start),
-        duration_ms,
-        source_rows if source_rows is not None else "unknown",
+    last, duration_ms, action = run_window(
+        ch, logger, job, bucket_start, bucket_end, args
     )
-    return True, duration_ms, ""
+    return True, duration_ms, action
 
 
 def next_bucket(
@@ -859,6 +1013,15 @@ def parse_args() -> argparse.Namespace:
         "--max-buckets-per-job",
         type=int,
         default=int(env("TRAFFIC_ROLLUP_MAX_BUCKETS_PER_JOB", "1") or "1"),
+    )
+    parser.add_argument(
+        "--max-range-buckets",
+        type=int,
+        default=int(env("TRAFFIC_ROLLUP_MAX_RANGE_BUCKETS", "15") or "15"),
+        help=(
+            "catch-up window size for a lagging job in one INSERT; "
+            "SELECT already groups by bucket so N minutes is one query"
+        ),
     )
     parser.add_argument(
         "--sleep-between-buckets",
@@ -1223,13 +1386,10 @@ def run_range_backfill(
             )
             continue
 
-        # One range DELETE per job instead of a per-minute mutation. Each
-        # ALTER ... DELETE rewrites the whole daily partition, so 206 per-minute
-        # deletes = 206 full-partition rewrites (~41s each on high-cardinality
-        # tables like traffic_asn_pair_1m). Collapse to a single range mutation
-        # over the remaining window; run_bucket's per-bucket probe then finds the
-        # window empty and skips its own DELETE. Self-skips on resume ticks and
-        # on already-complete jobs because the probe returns no rows.
+        # One range DELETE per job instead of a per-minute mutation. Live
+        # catch-up no longer deletes (it skips existing buckets); rebuilds
+        # still need the dest empty before INSERT. Wait for the mutation
+        # ourselves — mutations_sync=1 plus an outer timeout orphans it.
         if not args.dry_run and job.pre_delete_sql and bucket_list:
             col = bucket_column(job)
             lo_dt = f"toDateTime('{fmt_dt(bucket_list[0])}', 'UTC')"
@@ -1243,18 +1403,46 @@ def run_range_backfill(
             except RuntimeError:
                 has_rows = "1"  # probe failed → delete to stay idempotent
             if has_rows:
+                pending = pending_mutations(ch, job.dest_table)
+                if pending is None or pending > 0:
+                    return (
+                        job.job_id,
+                        bucket_list[0],
+                        ok_count,
+                        fail_count,
+                        f"pending mutations on {job.dest_table}",
+                    )
                 logger.info(
                     "job=%s action=range_delete from=%s to=%s",
                     job.job_id,
                     fmt_dt(bucket_list[0]),
                     fmt_dt(job_range_to),
                 )
+                apply_query_timeout(
+                    ch,
+                    started,
+                    wall_sec,
+                    max(1, int(getattr(args, "query_timeout_sec", 180) or 180)),
+                )
                 ch.execute(
                     f"ALTER TABLE {job.dest_table} DELETE "
-                    f"WHERE {col} >= {lo_dt} AND {col} < {hi_dt} "
-                    f"SETTINGS mutations_sync = 1",
+                    f"WHERE {col} >= {lo_dt} AND {col} < {hi_dt}",
                     display=f"range delete for {job.job_id}",
                 )
+                left = remaining_budget_s(started, wall_sec)
+                wait_s = 120 if left == float("inf") else max(5, min(120, int(left)))
+                try:
+                    wait_table_mutations(
+                        ch, logger, job.dest_table, timeout_s=wait_s
+                    )
+                except RuntimeError as exc:
+                    return (
+                        job.job_id,
+                        bucket_list[0],
+                        ok_count,
+                        fail_count,
+                        str(exc),
+                    )
 
         for bucket_start in bucket_list:
             since_cancel_check += 1
@@ -1333,6 +1521,14 @@ def run_range_backfill(
                 ok_count += 1
                 if args.sleep_between_buckets > 0:
                     time.sleep(args.sleep_between_buckets)
+            except JobDeferred as exc:
+                logger.info(
+                    "job=%s action=defer bucket=%s reason=%s",
+                    job.job_id,
+                    fmt_dt(bucket_start),
+                    exc,
+                )
+                return job.job_id, bucket_start, ok_count, fail_count, str(exc)
             except Exception as exc:
                 msg = str(exc)
                 logger.error(
@@ -1550,6 +1746,222 @@ def process_queue(args: argparse.Namespace, logger: logging.Logger) -> int:
     return 0
 
 
+def live_job_step(
+    ch: ClickHouseClient,
+    logger: logging.Logger,
+    job: RollupJob,
+    args: argparse.Namespace,
+    states: Dict[str, JobState],
+    raw_min_cache: Dict[str, Optional[datetime]],
+    *,
+    started: float,
+    wall_sec: int,
+    window_buckets: int,
+) -> str:
+    """Process one live window. Returns ok|skip|defer|error|wall|rewound."""
+    if remaining_budget_s(started, wall_sec) < 3:
+        return "wall"
+    cap = max(1, int(getattr(args, "query_timeout_sec", 180) or 180))
+    apply_query_timeout(ch, started, wall_sec, cap)
+
+    job_until = safe_until_for_job(job, args)
+    state = states.get(job.job_id)
+    clamped = clamp_future_last_bucket(
+        job,
+        state,
+        now=utc_now(),
+        safety_lag_minutes=args.safety_lag_minutes,
+    )
+    if clamped is not None:
+        logger.warning(
+            "job=%s action=clamp_future last_bucket=%s now=%s new_last=%s",
+            job.job_id,
+            fmt_dt(state.last_bucket) if state and state.last_bucket else "-",
+            fmt_dt(utc_now()),
+            fmt_dt(clamped),
+        )
+        if not args.dry_run:
+            save_state(ch, job.job_id, clamped, "clamp_future", "", 0, 0)
+        state = JobState(last_bucket=clamped, status="clamp_future", last_error="")
+        states[job.job_id] = state
+
+    bucket_start = next_bucket(
+        job,
+        state,
+        ch,
+        args.bootstrap_days,
+        args.safety_lag_minutes,
+    )
+    bucket_start = skip_forward_stale_bucket(
+        ch,
+        logger,
+        job,
+        bucket_start,
+        states,
+        bootstrap_days=args.bootstrap_days,
+        raw_min_cache=raw_min_cache,
+    )
+    state = states.get(job.job_id)
+
+    if bucket_start >= job_until:
+        rewound = rewind_if_dest_lags_raw(
+            ch,
+            logger,
+            job,
+            bucket_start,
+            job_until,
+            states,
+            safety_lag_minutes=args.safety_lag_minutes,
+            raw_max_cache=raw_min_cache,
+            dry_run=args.dry_run,
+        )
+        if rewound < job_until:
+            return "rewound"
+        logger.info(
+            "job=%s action=skip reason=safe_lag bucket=%s safe_until=%s",
+            job.job_id,
+            fmt_dt(bucket_start),
+            fmt_dt(job_until),
+        )
+        if not args.dry_run:
+            heartbeat = (
+                state.last_bucket
+                if state and state.last_bucket
+                else subtract_bucket(bucket_start, job.bucket_kind)
+            )
+            save_state(ch, job.job_id, heartbeat, "ok", "", 0, 0)
+            states[job.job_id] = JobState(
+                last_bucket=heartbeat,
+                status="ok",
+                last_error="",
+            )
+        return "skip"
+
+    window_end = bucket_start
+    for _ in range(max(1, int(window_buckets))):
+        nxt = add_bucket(window_end, job.bucket_kind)
+        if nxt > job_until:
+            break
+        window_end = nxt
+    if window_end <= bucket_start:
+        window_end = add_bucket(bucket_start, job.bucket_kind)
+    if window_end > job_until:
+        window_end = job_until
+
+    while window_end > bucket_start:
+        ready, reason = dependency_ready(job, bucket_start, window_end, states)
+        if ready:
+            break
+        if add_bucket(bucket_start, job.bucket_kind) == window_end:
+            logger.warning(
+                "job=%s action=skip reason=dependency bucket=%s detail=%s",
+                job.job_id,
+                fmt_dt(bucket_start),
+                reason,
+            )
+            return "skip"
+        window_end = subtract_bucket(window_end, job.bucket_kind)
+        window_end = truncate_bucket(window_end, job.bucket_kind)
+
+    if args.dry_run:
+        last = truncate_bucket(
+            subtract_bucket(window_end, job.bucket_kind), job.bucket_kind
+        )
+        logger.info(
+            "job=%s action=dry_run from=%s to=%s dest=%s",
+            job.job_id,
+            fmt_dt(bucket_start),
+            fmt_dt(window_end),
+            job.dest_table,
+        )
+        states[job.job_id] = JobState(
+            last_bucket=last,
+            status="dry_run",
+            last_error="",
+        )
+        return "ok"
+
+    try:
+        last, duration_ms, action = run_window(
+            ch, logger, job, bucket_start, window_end, args
+        )
+        save_state(ch, job.job_id, last, "ok", "", 0, duration_ms)
+        states[job.job_id] = JobState(
+            last_bucket=last,
+            status="ok",
+            last_error="",
+        )
+        if action == "skip_existing":
+            logger.info(
+                "job=%s action=skip_existing committed=%s",
+                job.job_id,
+                fmt_dt(last),
+            )
+        if args.sleep_between_buckets > 0:
+            time.sleep(args.sleep_between_buckets)
+        return "ok"
+    except JobDeferred as exc:
+        logger.info(
+            "job=%s action=defer bucket=%s reason=%s",
+            job.job_id,
+            fmt_dt(bucket_start),
+            exc,
+        )
+        return "defer"
+    except Exception as exc:
+        msg = str(exc)
+        logger.error(
+            "job=%s bucket=%s status=error err=%s",
+            job.job_id,
+            fmt_dt(bucket_start),
+            msg,
+        )
+        prev = state.last_bucket if state and state.last_bucket else subtract_bucket(
+            bucket_start, job.bucket_kind
+        )
+        try:
+            save_state(ch, job.job_id, prev, "error", msg, 0, 0)
+        except Exception as save_exc:
+            logger.error(
+                "job=%s failed to persist error state: %s",
+                job.job_id,
+                save_exc,
+            )
+        states[job.job_id] = JobState(
+            last_bucket=prev,
+            status="error",
+            last_error=msg,
+        )
+        return "error"
+
+
+def _live_lag_seconds(
+    job: RollupJob,
+    states: Dict[str, JobState],
+    args: argparse.Namespace,
+    ch: ClickHouseClient,
+    blocked: set,
+) -> float:
+    if job.job_id in blocked:
+        return 0.0
+    state = states.get(job.job_id)
+    job_until = safe_until_for_job(job, args)
+    try:
+        bucket_start = next_bucket(
+            job, state, ch, args.bootstrap_days, args.safety_lag_minutes
+        )
+    except Exception:
+        return 0.0
+    if bucket_start >= job_until:
+        return 0.0
+    ready, _ = dependency_ready(
+        job, bucket_start, add_bucket(bucket_start, job.bucket_kind), states
+    )
+    if not ready:
+        return 0.0
+    return max(0.0, (job_until - bucket_start).total_seconds())
+
+
 def run_live(args: argparse.Namespace, logger: logging.Logger) -> int:
     selected = [item.strip() for item in args.jobs.split(",") if item.strip()] or None
     if selected:
@@ -1678,173 +2090,94 @@ def run_live(args: argparse.Namespace, logger: logging.Logger) -> int:
                 status="rewind",
                 last_error="",
             )
+    max_range = max(
+        1,
+        int(getattr(args, "max_range_buckets", 15) or 15),
+        int(getattr(args, "max_buckets_per_job", 1) or 1),
+    )
     logger.info(
-        "run start jobs=%s max_buckets_per_job=%s sleep_between_buckets=%s safe_until=%s dry_run=%s",
+        "run start jobs=%s max_range_buckets=%s sleep_between_buckets=%s "
+        "safe_until=%s live_wall_s=%s dry_run=%s",
         ",".join(job.job_id for job in jobs),
-        args.max_buckets_per_job,
+        max_range,
         args.sleep_between_buckets,
         fmt_dt(until),
+        int(args.live_wall_sec or 0),
         args.dry_run,
     )
 
     wall_sec = max(0, int(args.live_wall_sec or 0))
     wall_reached = False
+    blocked: set = set()
 
+    def _step(job: RollupJob, window_buckets: int) -> str:
+        return live_job_step(
+            ch,
+            logger,
+            job,
+            args,
+            states,
+            raw_min_cache,
+            started=started,
+            wall_sec=wall_sec,
+            window_buckets=window_buckets,
+        )
+
+    # Pass 1: every job gets one bucket so a lagging head cannot starve the tail.
     for job in jobs:
-        if wall_reached:
+        if remaining_budget_s(started, wall_sec) < 3:
+            wall_reached = True
+            logger.info(
+                "action=stop reason=live_wall wall_s=%s ok=%s pass=fair",
+                wall_sec,
+                ok_count,
+            )
             break
-        processed = 0
-        job_until = safe_until_for_job(job, args)
-        while processed < args.max_buckets_per_job:
-            # Every bucket persists the cursor, so stopping mid-catch-up costs
-            # nothing but the remainder of this tick. Overrunning the cron
-            # interval costs far more: the flock blocks every following tick.
-            if wall_sec and time.monotonic() - started >= wall_sec:
-                logger.info(
-                    "job=%s action=stop reason=live_wall wall_s=%s ok=%s",
-                    job.job_id,
-                    wall_sec,
-                    ok_count,
-                )
-                wall_reached = True
-                break
+        result = _step(job, 1)
+        if result == "rewound":
+            result = _step(job, 1)
+        if result == "ok":
+            ok_count += 1
+        elif result == "skip":
+            skip_count += 1
+        elif result == "defer":
+            skip_count += 1
+            blocked.add(job.job_id)
+        elif result == "error":
+            fail_count += 1
+            blocked.add(job.job_id)
+        elif result == "wall":
+            wall_reached = True
+            break
 
-            state = states.get(job.job_id)
-            clamped = clamp_future_last_bucket(
-                job,
-                state,
-                now=utc_now(),
-                safety_lag_minutes=args.safety_lag_minutes,
-            )
-            if clamped is not None:
-                logger.warning(
-                    "job=%s action=clamp_future last_bucket=%s now=%s new_last=%s",
-                    job.job_id,
-                    fmt_dt(state.last_bucket) if state and state.last_bucket else "-",
-                    fmt_dt(utc_now()),
-                    fmt_dt(clamped),
-                )
-                if not args.dry_run:
-                    save_state(ch, job.job_id, clamped, "clamp_future", "", 0, 0)
-                state = JobState(last_bucket=clamped, status="clamp_future", last_error="")
-                states[job.job_id] = state
-            bucket_start = next_bucket(
-                job,
-                state,
-                ch,
-                args.bootstrap_days,
-                args.safety_lag_minutes,
-            )
-            bucket_start = skip_forward_stale_bucket(
-                ch,
-                logger,
-                job,
-                bucket_start,
-                states,
-                bootstrap_days=args.bootstrap_days,
-                raw_min_cache=raw_min_cache,
-            )
-            bucket_end = add_bucket(bucket_start, job.bucket_kind)
-
-            if bucket_start >= job_until:
-                rewound = rewind_if_dest_lags_raw(
-                    ch,
-                    logger,
-                    job,
-                    bucket_start,
-                    job_until,
-                    states,
-                    safety_lag_minutes=args.safety_lag_minutes,
-                    raw_max_cache=raw_min_cache,
-                    dry_run=args.dry_run,
-                )
-                if rewound < job_until:
-                    continue
-                logger.info(
-                    "job=%s action=skip reason=safe_lag bucket=%s safe_until=%s",
-                    job.job_id,
-                    fmt_dt(bucket_start),
-                    fmt_dt(job_until),
-                )
-                # Live edge: touch updated_at so Diagnostics does not treat a
-                # healthy skip as "the job died".
-                if not args.dry_run:
-                    heartbeat = (
-                        state.last_bucket
-                        if state and state.last_bucket
-                        else subtract_bucket(bucket_start, job.bucket_kind)
-                    )
-                    save_state(ch, job.job_id, heartbeat, "ok", "", 0, 0)
-                    states[job.job_id] = JobState(
-                        last_bucket=heartbeat,
-                        status="ok",
-                        last_error="",
-                    )
-                skip_count += 1
-                break
-
-            ready, reason = dependency_ready(job, bucket_start, bucket_end, states)
-            if not ready:
-                logger.warning(
-                    "job=%s action=skip reason=dependency bucket=%s detail=%s",
-                    job.job_id,
-                    fmt_dt(bucket_start),
-                    reason,
-                )
-                skip_count += 1
-                break
-
-            if args.dry_run:
-                logger.info(
-                    "job=%s action=dry_run bucket=%s dest=%s",
-                    job.job_id,
-                    fmt_dt(bucket_start),
-                    job.dest_table,
-                )
-                ok_count += 1
-                processed += 1
-                states[job.job_id] = JobState(
-                    last_bucket=bucket_start,
-                    status="dry_run",
-                    last_error="",
-                )
-                continue
-
-            try:
-                _, duration_ms, _ = run_bucket(ch, logger, job, bucket_start, args)
-                save_state(ch, job.job_id, bucket_start, "ok", "", 0, duration_ms)
-                states[job.job_id] = JobState(
-                    last_bucket=bucket_start,
-                    status="ok",
-                    last_error="",
-                )
-                ok_count += 1
-                processed += 1
-                if args.sleep_between_buckets > 0:
-                    time.sleep(args.sleep_between_buckets)
-            except Exception as exc:
-                msg = str(exc)
-                logger.error(
-                    "job=%s bucket=%s status=error err=%s",
-                    job.job_id,
-                    fmt_dt(bucket_start),
-                    msg,
-                )
-                try:
-                    save_state(ch, job.job_id, bucket_start, "error", msg, 0, 0)
-                except Exception as save_exc:
-                    logger.error(
-                        "job=%s failed to persist error state: %s",
-                        job.job_id,
-                        save_exc,
-                    )
-                states[job.job_id] = JobState(
-                    last_bucket=state.last_bucket if state else None,
-                    status="error",
-                    last_error=msg,
-                )
-                fail_count += 1
-                break
+    # Pass 2: remaining budget goes to the most lagging writable job, as a range.
+    while not wall_reached and remaining_budget_s(started, wall_sec) >= 3:
+        best: Optional[RollupJob] = None
+        best_lag = 0.0
+        for job in jobs:
+            lag = _live_lag_seconds(job, states, args, ch, blocked)
+            if lag > best_lag:
+                best_lag = lag
+                best = job
+        if best is None:
+            break
+        result = _step(best, max_range)
+        if result == "rewound":
+            result = _step(best, max_range)
+        if result == "ok":
+            ok_count += 1
+        elif result == "skip":
+            skip_count += 1
+            blocked.add(best.job_id)
+        elif result == "defer":
+            skip_count += 1
+            blocked.add(best.job_id)
+        elif result == "error":
+            fail_count += 1
+            blocked.add(best.job_id)
+        elif result == "wall":
+            wall_reached = True
+            break
 
     elapsed = time.monotonic() - started
     logger.info(

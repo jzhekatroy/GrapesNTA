@@ -19,6 +19,8 @@ export CLICKHOUSE_HTTP_PASSWORD="${TRAFFIC_ROLLUP_CH_PASSWORD:-}"
 # child that ignores its deadline). Without them a single stuck run keeps the
 # flock and every later tick logs "job is still running".
 QUEUE_TIMEOUT="${TRAFFIC_ROLLUP_QUEUE_TIMEOUT_SEC:-210}"
+# Must stay above TRAFFIC_ROLLUP_LIVE_WALL_SEC (default 45) + 8s reserve so
+# the interpreter can stop itself instead of being SIGKILL'd mid-query.
 LIVE_TIMEOUT="${TRAFFIC_ROLLUP_LIVE_TIMEOUT_SEC:-55}"
 
 # 1) Drain any diagnostics backfill request (gap fill) before live catch-up.
