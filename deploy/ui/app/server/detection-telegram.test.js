@@ -17,6 +17,7 @@ const {
   pickAlertCandidates,
   pickNormalizeCandidates,
   formatAlertMessage,
+  mapEventRow,
   formatNormalizeMessage,
   snapshotByProto,
 } = require('./detection-telegram');
@@ -166,6 +167,64 @@ describe('detection-telegram', () => {
     assert.match(text, /3 знач/);
     assert.match(text, /всё/);
     assert.match(text, /🔴/);
+  });
+
+  it('formatAlertMessage для обычного пика — жёлтый заголовок, без атаки', () => {
+    const text = formatAlertMessage({
+      name: 'TTK',
+      scope: 'client',
+      scopeId: '107397',
+      minute: '2026-09-01 20:00:00',
+      threshold: 1.6,
+      streak: 3,
+      byProto: { all: { bps: 9.4e9, growth_bps: 1.8 } },
+      verdict: { kind: 'benign_peak', reason: 'в пределах нормы часа' },
+    });
+    assert.match(text, /🟡/);
+    assert.match(text, /похоже на легитимный всплеск/);
+    assert.match(text, /в пределах нормы часа/);
+    assert.doesNotMatch(text, /🔴/);
+  });
+
+  it('mapEventRow отдаёт текст сообщения из снимка', () => {
+    const event = mapEventRow({
+      event_id: 'client|1|2026-09-01 10:00:00',
+      scope: 'client',
+      scope_id: '1',
+      name: 'Hostland',
+      status: 'peak',
+      alert_minute: '2026-09-01 10:00:00',
+      normalize_minute: '2026-09-01 10:00:00',
+      threshold: 1.6,
+      alert_json: JSON.stringify({
+        all: { bps: 1 },
+        verdict: { kind: 'benign_peak' },
+        telegramText: '🟡 ПИК НАГРУЗКИ · обычный пик\nHostland',
+      }),
+      normalize_json: '',
+    });
+    assert.equal(event.alertText, '🟡 ПИК НАГРУЗКИ · обычный пик\nHostland');
+    assert.equal(event.normalizeText, '');
+    assert.equal(event.verdict.kind, 'benign_peak');
+  });
+
+  it('mapEventRow восстанавливает текст пика, если его ещё не сохраняли', () => {
+    const event = mapEventRow({
+      event_id: 'client|107397|2026-09-01 20:00:00',
+      scope: 'client',
+      scope_id: '107397',
+      name: 'TTK',
+      status: 'peak',
+      alert_minute: '2026-09-01 20:00:00',
+      threshold: 1.6,
+      alert_json: JSON.stringify({
+        all: { bps: 9.4e9, growth_bps: 1.8 },
+        verdict: { kind: 'benign_peak', reason: 'в пределах нормы часа' },
+      }),
+    });
+    assert.match(event.alertText, /🟡/);
+    assert.match(event.alertText, /похоже на легитимный всплеск/);
+    assert.match(event.alertText, /TTK/);
   });
 
   it('formatAlertMessage с разбором пишет жертву и коммутатор', () => {

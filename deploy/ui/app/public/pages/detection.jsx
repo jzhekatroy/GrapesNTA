@@ -203,6 +203,35 @@ function patchTelegram(prev, patch) {
   return { ...TELEGRAM_DEFAULTS, ...prev, ...patch };
 }
 
+function notifyHeadline(row) {
+  const text = String(row?.alertText || row?.normalizeText || '').trim();
+  if (!text) return '';
+  return text.split('\n').find((line) => line.trim()) || '';
+}
+
+function EventNotifyBox({ event }) {
+  if (!event) return null;
+  const peak = event.verdict?.kind === 'benign_peak' || event.status === 'peak';
+  return (
+    <div className={`detection-notify-box${peak ? ' detection-notify-box--peak' : ''}`}>
+      <div className="detection-notify-box__head">
+        Текст оповещения · {event.name || event.scopeId}
+      </div>
+      {event.alertText ? (
+        <pre className="detection-notify-text">{event.alertText}</pre>
+      ) : (
+        <div className="detection-notify-box__empty">Текста срабатывания нет</div>
+      )}
+      {event.normalizeText ? (
+        <>
+          <div className="detection-notify-box__head" style={{ marginTop: 12 }}>Нормализация</div>
+          <pre className="detection-notify-text">{event.normalizeText}</pre>
+        </>
+      ) : null}
+    </div>
+  );
+}
+
 function EventMark({ kind }) {
   const tone = kind === 'ok' ? 'ok' : kind === 'peak' ? 'peak' : 'alert';
   const title = tone === 'ok' ? 'Нормализация' : tone === 'peak' ? 'Пик' : 'Алерт';
@@ -330,6 +359,7 @@ function PageDetection() {
   const [eventsBusy, setEventsBusy] = useState(false);
   const [historyRange, setHistoryRange] = useState(() => defaultHistoryRangeLocal());
   const [eventsExporting, setEventsExporting] = useState(false);
+  const [messageEvent, setMessageEvent] = useState(null);
 
   const reload = useCallback(() => {
     setError('');
@@ -770,7 +800,7 @@ function PageDetection() {
           title={pageTab === 'active' ? 'Активные события' : 'История'}
           subtitle={pageTab === 'active'
             ? 'Алерт уже ушёл, нормализации ещё нет. Срез метрик — момент срабатывания, все протоколы.'
-            : 'Закрытые атаки и обычные пики. Фильтр по времени. В CSV — срез алерта и нормализации по всем протоколам.'}
+            : 'Закрытые атаки и обычные пики. Текст Telegram открыт над таблицей — клик по строке меняет событие.'}
           tools={(
             <div className="row" style={{ gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
               {pageTab === 'history' && (
@@ -828,11 +858,23 @@ function PageDetection() {
               {eventsError}
             </div>
           )}
+          <EventNotifyBox
+            event={
+              (messageEvent && events.find((e) => e.id === messageEvent.id))
+              || events[0]
+              || null
+            }
+          />
           <DataTable
             key={pageTab}
             rows={events}
             rowKey="id"
             pageSize={50}
+            onRowClick={(r) => setMessageEvent(r)}
+            getRowClassName={(r) => {
+              const openId = messageEvent?.id || events[0]?.id;
+              return r.id === openId ? 'is-selected' : '';
+            }}
             emptyTitle={eventsBusy ? 'Загрузка…' : 'Нет событий'}
             emptyDesc={pageTab === 'active'
               ? 'Пока нет объектов, которые держатся выше порога после алерта.'
@@ -867,6 +909,18 @@ function PageDetection() {
                       {KIND_LABEL[kind] || (peak ? 'обычный пик' : '—')}
                     </Badge>
                   );
+                },
+              },
+              {
+                key: 'notify',
+                title: 'Сообщение Telegram',
+                width: 280,
+                sortable: false,
+                render: (r) => {
+                  const line = notifyHeadline(r);
+                  return line
+                    ? <span className="detection-notify-line">{line}</span>
+                    : <span style={{ color: 'var(--fg-muted)' }}>нет текста</span>;
                 },
               },
               {

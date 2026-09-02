@@ -1958,7 +1958,7 @@ const ApiClient = (() => {
 
   async function loadTtl() {
     const body = await requestJson('/api/admin/ttl');
-    return body.data || [];
+    return { data: body.data || [], disk: body.disk || null };
   }
 
   async function loadAudit({ from, to, q, ip, kind, result, limit, offset } = {}) {

@@ -2272,6 +2272,104 @@ a.nav-item--active:visited { color: var(--fg-primary); }
 .page-head h1 { font: var(--pv-text-h1); color: var(--fg-primary); margin: 0 0 6px; }
 .page-head p { color: var(--fg-secondary); font: var(--pv-text-body-2); }
 
+.ttl-disk {
+  width: 220px;
+  max-width: 100%;
+  margin: 8px 0 12px;
+}
+.ttl-disk__caption {
+  font: var(--pv-text-body-3);
+  color: var(--fg-secondary);
+  margin-bottom: 6px;
+}
+.ttl-disk-bar {
+  position: relative;
+  width: 100%;
+  height: 18px;
+  border-radius: 999px;
+  overflow: hidden;
+  background: var(--ttl-disk-dim);
+}
+.ttl-disk-bar--ok {
+  --ttl-disk-bright: var(--st-success);
+  --ttl-disk-bright-2: color-mix(in srgb, var(--st-success) 62%, #0b2f14);
+  --ttl-disk-dim: color-mix(in srgb, var(--st-success) 22%, var(--bg-secondary));
+}
+.ttl-disk-bar--warn {
+  --ttl-disk-bright: var(--st-warning);
+  --ttl-disk-bright-2: color-mix(in srgb, var(--st-warning) 62%, #5a3a00);
+  --ttl-disk-dim: color-mix(in srgb, var(--st-warning) 22%, var(--bg-secondary));
+}
+.ttl-disk-bar--crit {
+  --ttl-disk-bright: var(--st-critical);
+  --ttl-disk-bright-2: color-mix(in srgb, var(--st-critical) 62%, #4a0c0a);
+  --ttl-disk-dim: color-mix(in srgb, var(--st-critical) 22%, var(--bg-secondary));
+}
+[data-theme="light"] .ttl-disk-bar--ok {
+  --ttl-disk-bright: #3CB85A;
+  --ttl-disk-bright-2: #2A9448;
+  --ttl-disk-dim: color-mix(in srgb, #51D16D 42%, #ffffff);
+}
+[data-theme="light"] .ttl-disk-bar--warn {
+  --ttl-disk-bright: #F0B400;
+  --ttl-disk-bright-2: #D48900;
+  --ttl-disk-dim: color-mix(in srgb, #F0B400 42%, #ffffff);
+}
+[data-theme="light"] .ttl-disk-bar--crit {
+  --ttl-disk-bright: #F04138;
+  --ttl-disk-bright-2: #C22A24;
+  --ttl-disk-dim: color-mix(in srgb, #F04138 42%, #ffffff);
+}
+[data-theme="light"] .ttl-disk-bar__crit-zone {
+  background: color-mix(in srgb, #F04138 42%, #ffffff);
+}
+.ttl-disk-bar__fill {
+  position: relative;
+  z-index: 1;
+  height: 100%;
+  background: repeating-linear-gradient(
+    -45deg,
+    var(--ttl-disk-bright),
+    var(--ttl-disk-bright) 8px,
+    var(--ttl-disk-bright-2) 8px,
+    var(--ttl-disk-bright-2) 16px
+  );
+}
+.ttl-disk-bar__crit-zone {
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 10%;
+  height: 100%;
+  z-index: 0;
+  background: color-mix(in srgb, var(--st-critical) 28%, transparent);
+  pointer-events: none;
+}
+.ttl-disk-bar__crit-edge {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  z-index: 2;
+  background: var(--st-critical);
+  pointer-events: none;
+}
+.ttl-disk-bar__crit-edge--start { left: 90%; }
+.ttl-disk-bar__crit-edge--end { right: 0; }
+.ttl-disk-bar__label {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font: var(--pv-text-body-3);
+  font-variant-numeric: tabular-nums;
+  color: var(--fg-primary);
+  text-shadow: 0 1px 2px color-mix(in srgb, var(--bg-canvas) 70%, transparent);
+  pointer-events: none;
+}
+
 /* ===================== Card ===================== */
 .card {
   position: relative;
@@ -5175,6 +5273,51 @@ a.nav-item--active:visited { color: var(--fg-primary); }
 .detection-event-mark--peak {
   background: var(--st-warning);
   box-shadow: 0 0 8px var(--st-warning);
+}
+.detection-notify-box {
+  margin: 0 0 14px;
+  padding: 12px 14px 14px;
+  border-radius: 10px;
+  background: var(--st-critical-bg, var(--bg-soft));
+  border: 1px solid var(--st-critical);
+}
+.detection-notify-box--peak {
+  background: var(--st-warning-bg, var(--bg-soft));
+  border-color: var(--st-warning);
+}
+.detection-notify-box__head {
+  font: var(--pv-text-body-3-bold);
+  color: var(--fg-primary);
+  margin-bottom: 8px;
+}
+.detection-notify-box__empty {
+  color: var(--fg-secondary);
+}
+.detection-notify-line {
+  display: inline-block;
+  max-width: 100%;
+  padding: 4px 8px;
+  border-radius: 6px;
+  background: var(--bg-soft);
+  border: 1px solid var(--bd-default);
+  font: var(--pv-text-body-3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.detection-notify-text {
+  margin: 0;
+  padding: 12px 14px;
+  border-radius: 8px;
+  background: var(--bg-card, var(--bg-primary, #111));
+  border: 1px solid var(--bd-soft);
+  font: var(--pv-text-body-3);
+  font-family: var(--pv-font-mono);
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow: auto;
+  max-height: 360px;
 }
 .table--resizable {
   table-layout: fixed;

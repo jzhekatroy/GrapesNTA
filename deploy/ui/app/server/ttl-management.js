@@ -236,6 +236,60 @@ async function fetchTableMeta(tableName) {
   return rows[0] || null;
 }
 
+function isCountableDisk(row) {
+  const type = String(row?.type ?? '').trim();
+  if (type && type !== 'Local') return false;
+  return Number(row?.total_space) > 0;
+}
+
+function summarizeDisks(rows) {
+  const disks = (Array.isArray(rows) ? rows : []).filter(isCountableDisk);
+  const totalBytes = disks.reduce((sum, row) => sum + (Number(row.total_space) || 0), 0);
+  const freeBytes = disks.reduce((sum, row) => sum + (Number(row.free_space) || 0), 0);
+  if (totalBytes <= 0) return null;
+
+  const usedBytes = Math.max(0, totalBytes - Math.max(0, freeBytes));
+  const usedPct = Math.min(100, Math.max(0, (usedBytes / totalBytes) * 100));
+  return { totalBytes, freeBytes: Math.max(0, freeBytes), usedBytes, usedPct };
+}
+
+function diskUsageTone(usedPct) {
+  const pct = Number(usedPct);
+  if (!Number.isFinite(pct)) return 'ok';
+  if (pct >= 90) return 'crit';
+  if (pct >= 65) return 'warn';
+  return 'ok';
+}
+
+async function fetchDiskUsage() {
+  const options = { name: 'admin/ttl-disks', useWrite: true };
+  try {
+    const { rows } = await query(
+      `
+        SELECT name, type, total_space, free_space
+        FROM system.disks
+      `,
+      {},
+      options,
+    );
+    return summarizeDisks(rows);
+  } catch {
+    try {
+      const { rows } = await query(
+        `
+          SELECT name, total_space, free_space
+          FROM system.disks
+        `,
+        {},
+        { name: 'admin/ttl-disks-compat', useWrite: true },
+      );
+      return summarizeDisks(rows);
+    } catch {
+      return null;
+    }
+  }
+}
+
 async function fetchColumnTypes(tableNames) {
   const uniqueTables = [...new Set(tableNames)];
   if (!uniqueTables.length) return {};
@@ -260,7 +314,7 @@ async function fetchColumnTypes(tableNames) {
 
 async function listTtlTables() {
   const tableNames = TTL_CATALOG.map((entry) => entry.table());
-  const [tablesResult, columnTypes] = await Promise.all([
+  const [tablesResult, columnTypes, disk] = await Promise.all([
     query(
       `
         SELECT name, engine_full, create_table_query, total_bytes, total_rows
@@ -272,6 +326,7 @@ async function listTtlTables() {
       { name: 'admin/ttl-list' },
     ),
     fetchColumnTypes(tableNames),
+    fetchDiskUsage(),
   ]);
 
   const { rows, elapsedMs } = tablesResult;
@@ -299,7 +354,7 @@ async function listTtlTables() {
     };
   });
 
-  return { data, meta: { elapsedMs, rows: data.length } };
+  return { data, disk, meta: { elapsedMs, rows: data.length } };
 }
 
 async function updateTtlTable(id, days, { roleId } = {}) {
@@ -347,4 +402,6 @@ module.exports = {
   parseTtlSpec,
   normalizeExprBase,
   buildExprBaseForColumn,
+  summarizeDisks,
+  diskUsageTone,
 };

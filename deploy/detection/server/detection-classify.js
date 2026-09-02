@@ -176,6 +176,7 @@ function actionFor(verdict, investigate) {
       : 'фильтр UDP по префиксу клиента, не один сервер';
   }
   if (kind === KINDS.syn_flood) return 'SYN-защита / лимит на префикс клиента';
+  if (kind === KINDS.benign_peak) return 'похоже на легитимный всплеск';
   return 'не эскалировать';
 }
 

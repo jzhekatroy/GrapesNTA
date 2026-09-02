@@ -2,9 +2,50 @@
 
 const HEAVY_WARNING = 'MODIFY TTL на больших таблицах запускает мутацию и может упереться в память сервера. Меняйте по одной таблице, желательно вне пиковой нагрузки.';
 
+function diskBarTone(usedPct) {
+  const pct = Number(usedPct);
+  if (!Number.isFinite(pct)) return 'ok';
+  if (pct >= 90) return 'crit';
+  if (pct >= 65) return 'warn';
+  return 'ok';
+}
+
+function TtlDiskBar({ disk }) {
+  if (!disk || !(Number(disk.totalBytes) > 0)) return null;
+
+  const usedPct = Math.min(100, Math.max(0, Number(disk.usedPct) || 0));
+  const tone = diskBarTone(usedPct);
+  const totalLabel = fmtBytes(disk.totalBytes);
+  const freeLabel = fmtBytes(disk.freeBytes);
+  const label = `${totalLabel} / ${freeLabel}`;
+
+  return (
+    <div className="ttl-disk">
+      <div className="ttl-disk__caption">Занятость диска</div>
+      <div
+        className={`ttl-disk-bar ttl-disk-bar--${tone}`}
+        role="progressbar"
+        aria-label="Занятость диска ClickHouse"
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-valuenow={Math.round(usedPct)}
+        aria-valuetext={label}
+        title={`Занято ${usedPct.toFixed(1)}% · всего ${totalLabel} · свободно ${freeLabel}`}
+      >
+        <div className="ttl-disk-bar__crit-zone" aria-hidden="true" />
+        <div className="ttl-disk-bar__fill" style={{ width: `${usedPct}%` }} />
+        <div className="ttl-disk-bar__crit-edge ttl-disk-bar__crit-edge--start" aria-hidden="true" />
+        <div className="ttl-disk-bar__crit-edge ttl-disk-bar__crit-edge--end" aria-hidden="true" />
+        <div className="ttl-disk-bar__label mono">{label}</div>
+      </div>
+    </div>
+  );
+}
+
 function PageTTL() {
   const canWrite = AuthAccess.canWritePage('ttl');
   const [rows, setRows] = useState([]);
+  const [disk, setDisk] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [editing, setEditing] = useState(null);
@@ -13,11 +54,14 @@ function PageTTL() {
     setLoading(true);
     setError('');
     try {
-      const data = await ApiClient.loadTtl();
+      const result = await ApiClient.loadTtl();
+      const data = Array.isArray(result) ? result : (result?.data || []);
       setRows((data || []).map((r) => ({ ...r, id: r.id })));
+      setDisk(Array.isArray(result) ? null : (result?.disk || null));
     } catch (err) {
       setError(err.message || ApiClient.LOAD_FAILED);
       setRows([]);
+      setDisk(null);
     } finally {
       setLoading(false);
     }
@@ -87,9 +131,10 @@ function PageTTL() {
       <div className="page-head">
         <div>
           <h1>Сроки хранения</h1>
+          <TtlDiskBar disk={disk} />
           <p>Сроки хранения таблиц ClickHouse. Изменения применяются через ALTER TABLE … MODIFY TTL.</p>
         </div>
-        <div className="row" style={{ gap: 8 }}>
+        <div className="row page-head__actions" style={{ gap: 8 }}>
           <Button kind="ghost" icon="refresh" onClick={loadAll} disabled={loading}>Обновить</Button>
         </div>
       </div>

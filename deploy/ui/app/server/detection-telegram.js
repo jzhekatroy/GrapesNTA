@@ -353,7 +353,7 @@ function formatAlertMessage({
   const title = isAttackKind(verdictKind)
     ? `🔴 ДЕТЕКЦИЯ · ${KIND_LABEL[verdictKind] || verdictKind}`
     : verdictKind === KINDS.benign_peak
-      ? `🟡 ПИК НАГРУЗКИ · ${KIND_LABEL[verdictKind]}`
+      ? '🟡 ПИК НАГРУЗКИ · похоже на легитимный всплеск'
       : '🔴 Детекция: рост выше порога';
   const hour = verdict?.hourRatio != null
     ? `×${Number(verdict.hourRatio).toFixed(2)} к норме часа`
@@ -723,6 +723,45 @@ function utcDateTime(param) {
   return `toDateTime({${param}:String}, 'UTC')`;
 }
 
+function byProtoFromSnapshot(snapshot) {
+  const byProto = {};
+  for (const proto of ['all', 'tcp', 'udp']) {
+    if (snapshot?.[proto]) byProto[proto] = snapshot[proto];
+  }
+  return byProto;
+}
+
+function storedOrFormattedAlertText(row, alertSnapshot) {
+  const stored = String(alertSnapshot.telegramText || '').trim();
+  if (stored) return stored;
+  if (!alertSnapshot?.all && !alertSnapshot?.verdict) return '';
+  return formatAlertMessage({
+    name: String(row.name || row.scope_id || ''),
+    scope: String(row.scope || ''),
+    scopeId: String(row.scope_id || ''),
+    minute: row.alert_minute,
+    threshold: Number(row.threshold) || DEFAULT_GROWTH_THRESHOLD,
+    byProto: byProtoFromSnapshot(alertSnapshot),
+    verdict: alertSnapshot.verdict,
+    investigate: alertSnapshot.investigate,
+  });
+}
+
+function storedOrFormattedNormalizeText(row, normalizeSnapshot) {
+  const stored = String(normalizeSnapshot.telegramText || '').trim();
+  if (stored) return stored;
+  if (!normalizeSnapshot?.all) return '';
+  return formatNormalizeMessage({
+    name: String(row.name || row.scope_id || ''),
+    scope: String(row.scope || ''),
+    scopeId: String(row.scope_id || ''),
+    minute: row.normalize_minute,
+    alertMinute: row.alert_minute,
+    threshold: Number(row.threshold) || DEFAULT_GROWTH_THRESHOLD,
+    byProto: byProtoFromSnapshot(normalizeSnapshot),
+  });
+}
+
 function mapEventRow(row) {
   const alertSnapshot = parseSnapshot(row.alert_json);
   const normalizeSnapshot = parseSnapshot(row.normalize_json);
@@ -739,7 +778,26 @@ function mapEventRow(row) {
     normalizeByProto: mapSnapshotToUi(normalizeSnapshot),
     verdict: alertSnapshot.verdict || null,
     investigate: alertSnapshot.investigate || null,
+    alertText: storedOrFormattedAlertText(row, alertSnapshot),
+    normalizeText: storedOrFormattedNormalizeText(row, normalizeSnapshot),
   };
+}
+
+function persistAlertSnapshot(metrics, extras = {}) {
+  return {
+    ...metrics,
+    verdict: extras.verdict || null,
+    investigate: extras.investigate || null,
+    telegramText: String(extras.telegramText || ''),
+  };
+}
+
+function persistActiveAlertSnapshot(active) {
+  return persistAlertSnapshot(uiByProtoToSnapshot(active?.alertByProto), {
+    verdict: active?.verdict,
+    investigate: active?.investigate,
+    telegramText: active?.alertText,
+  });
 }
 
 async function loadActiveEventsByKey() {
@@ -984,12 +1042,24 @@ async function processDetectionAlerts({ minute, rows, nameByKey }) {
         errors.push({ key, message: `investigate: ${err.message}` });
       }
     }
-    const snapshot = {
-      ...snapshotByProto(group, row),
+    const attack = isAttackKind(verdict.kind);
+    const text = formatAlertMessage({
+      name,
+      scope: row.scope,
+      scopeId: row.scope_id,
+      minute,
+      threshold: settings.growthThreshold,
+      streak: settings.streak,
+      alertScope: settings.alertScope,
+      byProto,
       verdict,
       investigate,
-    };
-    const attack = isAttackKind(verdict.kind);
+    });
+    const snapshot = persistAlertSnapshot(snapshotByProto(group, row), {
+      verdict,
+      investigate,
+      telegramText: text,
+    });
     const eventId = `${key}|${minute}`;
     await insertDetectionEvent({
       event_id: eventId,
@@ -1004,19 +1074,6 @@ async function processDetectionAlerts({ minute, rows, nameByKey }) {
       threshold: settings.growthThreshold,
     });
     opened += 1;
-    if (!attack) continue;
-    const text = formatAlertMessage({
-      name,
-      scope: row.scope,
-      scopeId: row.scope_id,
-      minute,
-      threshold: settings.growthThreshold,
-      streak: settings.streak,
-      alertScope: settings.alertScope,
-      byProto,
-      verdict,
-      investigate,
-    });
     const tg = await maybeSendTelegram(text, tgCfg);
     if (tg.sent) sent += 1;
     if (tg.error) errors.push({ key, message: tg.error });
@@ -1025,20 +1082,6 @@ async function processDetectionAlerts({ minute, rows, nameByKey }) {
   for (const { row, key, active } of normalizeCandidates) {
     const group = grouped.get(key);
     const name = nameByKey?.get(key) || active.name || row.scope_id;
-    const snapshot = snapshotByProto(group, row);
-    await insertDetectionEvent({
-      event_id: active.id,
-      scope: active.scope,
-      scope_id: active.scopeId,
-      name,
-      status: 'normalized',
-      alert_minute: active.alertMinute,
-      normalize_minute: minute,
-      alert_json: JSON.stringify(uiByProtoToSnapshot(active.alertByProto)),
-      normalize_json: JSON.stringify(snapshot),
-      threshold: active.threshold || settings.growthThreshold,
-    });
-    closed += 1;
     const text = formatNormalizeMessage({
       name,
       scope: active.scope,
@@ -1049,6 +1092,23 @@ async function processDetectionAlerts({ minute, rows, nameByKey }) {
       streak: settings.normalizeStreak,
       byProto: group?.byProto || { all: row },
     });
+    const snapshot = {
+      ...snapshotByProto(group, row),
+      telegramText: text,
+    };
+    await insertDetectionEvent({
+      event_id: active.id,
+      scope: active.scope,
+      scope_id: active.scopeId,
+      name,
+      status: 'normalized',
+      alert_minute: active.alertMinute,
+      normalize_minute: minute,
+      alert_json: JSON.stringify(persistActiveAlertSnapshot(active)),
+      normalize_json: JSON.stringify(snapshot),
+      threshold: active.threshold || settings.growthThreshold,
+    });
+    closed += 1;
     const tg = await maybeSendTelegram(text, tgCfg);
     if (tg.sent) sent += 1;
     if (tg.error) errors.push({ key, message: tg.error });
@@ -1090,6 +1150,7 @@ module.exports = {
   formatAlertMessage,
   formatNormalizeMessage,
   snapshotByProto,
+  mapEventRow,
   loadDetectionEvents,
   exportDetectionEventsCsv,
   buildDetectionEventsCsv,
