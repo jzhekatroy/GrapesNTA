@@ -7,6 +7,9 @@ const {
   DEFAULT_ALERT_SCOPE,
   DEFAULT_STREAK,
   DEFAULT_NORMALIZE_STREAK,
+  DEFAULT_TELEGRAM_API_URL,
+  normalizeTelegramApiUrl,
+  telegramMethodUrl,
   isAboveGrowthThreshold,
   shouldSendAlert,
   shouldSendNormalize,
@@ -32,6 +35,18 @@ describe('detection-telegram', () => {
     assert.equal(DEFAULT_ALERT_SCOPE, 'all');
     assert.equal(DEFAULT_STREAK, 3);
     assert.equal(DEFAULT_NORMALIZE_STREAK, 3);
+    assert.equal(DEFAULT_TELEGRAM_API_URL, 'https://api.telegram.org');
+  });
+
+  it('нормализует URL локального Bot API', () => {
+    assert.equal(normalizeTelegramApiUrl(''), 'https://api.telegram.org');
+    assert.equal(normalizeTelegramApiUrl('https://tba.pinspb.ru/'), 'https://tba.pinspb.ru');
+    assert.equal(normalizeTelegramApiUrl('http://tba.pinspb.ru:8081/bot'), 'http://tba.pinspb.ru:8081');
+    assert.equal(
+      telegramMethodUrl('https://tba.pinspb.ru/', 'tok', 'sendMessage'),
+      'https://tba.pinspb.ru/bottok/sendMessage',
+    );
+    assert.throws(() => normalizeTelegramApiUrl('ftp://tba.pinspb.ru'), /http/);
   });
 
   it('выше порога: рост bps или pps (OR)', () => {
@@ -153,6 +168,31 @@ describe('detection-telegram', () => {
     assert.match(text, /🔴/);
   });
 
+  it('formatAlertMessage с разбором пишет жертву и коммутатор', () => {
+    const text = formatAlertMessage({
+      name: 'Hostland',
+      scope: 'client',
+      scopeId: '83106',
+      minute: '2026-09-01 16:49:00',
+      threshold: 1.6,
+      streak: 3,
+      byProto: { all: { bps: 5.8e9, growth_bps: 2.45 } },
+      verdict: { kind: 'volumetric', reason: 'топ IP 99.4%', hourRatio: 1.57 },
+      investigate: {
+        victim: { ip: '185.26.122.4', port: 443, protoLabel: 'UDP', share: 0.994, net24: '185.26.122.0/24' },
+        source24: [{ net24: '125.224.150.0/24', share: 0.01, asn: 3462, ips: 4 }],
+        switchIn: { switchIp: '172.18.19.165', ifName: 'port-channel2', ifAlias: 'imaqliq.9236', share: 1 },
+        switchOut: { switchIp: '172.18.19.165', ifName: 'Ethernet1/31', ifAlias: 'hostland-', share: 1 },
+        l4src: [{ port: 80, proto: 17, share: 0.14 }],
+      },
+    });
+    assert.match(text, /атака в один сервер/);
+    assert.match(text, /185\.26\.122\.4:443/);
+    assert.match(text, /port-channel2/);
+    assert.match(text, /Ethernet1\/31/);
+    assert.match(text, /UDP\/80/);
+  });
+
   it('нормализация: 3 подряд ниже порога', () => {
     assert.equal(shouldSendNormalize([below('2026-09-01 12:11:00')], 1.6, 3), false);
     assert.equal(shouldSendNormalize([
@@ -179,6 +219,21 @@ describe('detection-telegram', () => {
       activeKeys: new Set(['net|10.0.0.0/24']),
     });
     assert.equal(picked.length, 0);
+  });
+
+  it('нормализация не закрывает, пока объём выше алерта', () => {
+    const history = [
+      { minute: '2026-09-01 19:45:00', growth_bps: 1.1, growth_pps: 1.0, bps: 9.4e9 },
+      { minute: '2026-09-01 19:44:00', growth_bps: 1.2, growth_pps: 1.0, bps: 9.1e9 },
+      { minute: '2026-09-01 19:43:00', growth_bps: 1.1, growth_pps: 1.0, bps: 8.8e9 },
+    ];
+    assert.equal(shouldSendNormalize(history, 1.6, 3), true);
+    assert.equal(shouldSendNormalize(history, 1.6, 3, { alertBps: 6.9e9 }), false);
+    assert.equal(shouldSendNormalize([
+      { minute: '2026-09-01 17:12:00', growth_bps: 0.3, bps: 0.64e9 },
+      { minute: '2026-09-01 17:11:00', growth_bps: 1.3, bps: 3e9 },
+      { minute: '2026-09-01 17:10:00', growth_bps: 0.9, bps: 2e9 },
+    ], 1.6, 3, { alertBps: 5.8e9 }), true);
   });
 
   it('нормализация только для активного события', () => {
@@ -233,5 +288,36 @@ describe('detection-telegram', () => {
     assert.equal(snap.all.answer_pct, 10);
     assert.equal(snap.tcp.syn_attempts, 9);
     assert.equal(snap.udp.port_entropy, 3);
+  });
+
+  it('buildDetectionEventsCsv содержит фазы alert и normalize', () => {
+    const { buildDetectionEventsCsv } = require('./detection-telegram');
+    const csv = buildDetectionEventsCsv([{
+      id: 'net|10.0.0.0/24|2026-09-01 10:00:00',
+      scope: 'net',
+      scopeId: '10.0.0.0/24',
+      name: 'TestNet',
+      status: 'normalized',
+      alertMinute: '2026-09-01 10:00:00',
+      normalizeMinute: '2026-09-01 11:00:00',
+      threshold: 1.6,
+      alertByProto: {
+        all: { bps: 1e9, growthBps: 2, synAttempts: 10 },
+        tcp: { bps: 5e8 },
+        udp: { bps: 1e6 },
+      },
+      normalizeByProto: {
+        all: { bps: 1e7, growthBps: 1.1 },
+        tcp: { bps: 5e6 },
+        udp: { bps: 1e5 },
+      },
+    }]);
+    assert.match(csv, /event_id/);
+    assert.match(csv, /TestNet/);
+    assert.match(csv, /,alert,/);
+    assert.match(csv, /,normalize,/);
+    assert.match(csv, /,all,/);
+    assert.match(csv, /,tcp,/);
+    assert.match(csv, /,udp,/);
   });
 });

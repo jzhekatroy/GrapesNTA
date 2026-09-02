@@ -507,15 +507,21 @@ async function loadNetBaselines(beforeTs) {
       scope,
       scope_id,
       proto,
-      quantileExact(${q})(bps) AS bps,
-      quantileExact(${q})(pps) AS pps
+      quantileExact(${q})(bps) AS bps_p999,
+      quantileExact(0.95)(bps) AS bps_p95,
+      quantileExact(${q})(pps) AS pps_p999,
+      quantileExact(0.95)(pps) AS pps_p95
     FROM ${tableRef()}
     WHERE minute >= now('UTC') - INTERVAL {days:UInt16} DAY
       AND minute < ${utcDateTime('before')}
     GROUP BY scope, scope_id, proto
   `, { days, before: formatCh(beforeTs) }, { name: 'detection/baseline-anomaly' });
   for (const r of nets) {
-    map.set(`${r.scope}|${r.scope_id}|${r.proto}`, { bps: Number(r.bps || 0), pps: Number(r.pps || 0) });
+    const usePeak = String(r.proto) === 'all';
+    map.set(`${r.scope}|${r.scope_id}|${r.proto}`, {
+      bps: Number((usePeak ? r.bps_p999 : r.bps_p95) || 0),
+      pps: Number((usePeak ? r.pps_p999 : r.pps_p95) || 0),
+    });
   }
   return map;
 }

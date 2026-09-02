@@ -4,6 +4,12 @@ const PROTOS = ['all', 'tcp', 'udp'];
 const PROTO_ORDER = { all: 0, tcp: 1, udp: 2 };
 const PROTO_LABEL = { all: 'общее', tcp: 'TCP', udp: 'UDP' };
 const PROTO_TONE = { all: 'neutral', tcp: 'info', udp: 'warning' };
+const KIND_LABEL = {
+  volumetric: 'атака в сервер',
+  carpet: 'атака по сети',
+  syn_flood: 'SYN-флуд',
+  benign_peak: 'обычный пик',
+};
 const PAGE_TABS = [
   { id: 'table', label: 'Таблица' },
   { id: 'active', label: 'Активные' },
@@ -17,6 +23,7 @@ const TELEGRAM_DEFAULTS = {
   alertScope: 'all',
   streak: 3,
   normalizeStreak: 3,
+  apiUrl: 'https://api.telegram.org',
   tokenSet: false,
 };
 const CHART_PERIODS = [
@@ -59,6 +66,40 @@ function utcCh(ms) {
 function displayLocalToMs(value) {
   if (!value || typeof displayDatetimeLocalToData !== 'function' || typeof parseChartBucketMs !== 'function') return null;
   return parseChartBucketMs(String(displayDatetimeLocalToData(value)).replace('T', ' '));
+}
+
+function displayLocalToUtcCh(value) {
+  const ms = displayLocalToMs(value);
+  return ms == null ? null : utcCh(ms);
+}
+
+function defaultHistoryRangeLocal() {
+  const toMs = Date.now();
+  const fromMs = toMs - 7 * 24 * 3600 * 1000;
+  if (typeof msToDatetimeLocalValue === 'function' && typeof getDisplayTimezone === 'function') {
+    const tz = getDisplayTimezone();
+    return {
+      from: msToDatetimeLocalValue(fromMs, tz),
+      to: msToDatetimeLocalValue(toMs, tz),
+    };
+  }
+  const pad = (n) => String(n).padStart(2, '0');
+  const fmt = (ms) => {
+    const d = new Date(ms);
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  };
+  return { from: fmt(fromMs), to: fmt(toMs) };
+}
+
+function downloadBlob(filename, blob) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
 }
 
 function chartWindow(periodId, customRange) {
@@ -163,13 +204,38 @@ function patchTelegram(prev, patch) {
 }
 
 function EventMark({ kind }) {
-  const ok = kind === 'ok';
+  const tone = kind === 'ok' ? 'ok' : kind === 'peak' ? 'peak' : 'alert';
+  const title = tone === 'ok' ? 'Нормализация' : tone === 'peak' ? 'Пик' : 'Алерт';
   return (
     <span
-      className={`detection-event-mark ${ok ? 'detection-event-mark--ok' : 'detection-event-mark--alert'}`}
-      title={ok ? 'Нормализация' : 'Алерт'}
+      className={`detection-event-mark detection-event-mark--${tone}`}
+      title={title}
     />
   );
+}
+
+function formatVictimCell(inv) {
+  const v = inv?.victim;
+  if (!v?.ip) return '—';
+  const proto = v.protoLabel ? `${v.protoLabel} ` : '';
+  const port = v.port != null ? `:${v.port}` : '';
+  const pct = v.share != null ? ` (${(Number(v.share) * 100).toFixed(1)}%)` : '';
+  return `${proto}${v.ip}${port}${pct}`;
+}
+
+function formatSwitchCell(inv) {
+  const port = inv?.switchIn;
+  if (!port || (!port.ifName && !port.ifAlias && !port.switchIp)) return '—';
+  const name = port.ifName || (port.ifIndex ? `ifIndex ${port.ifIndex}` : '');
+  const alias = port.ifAlias ? ` (${port.ifAlias})` : '';
+  return `${port.switchIp || ''} ${name}${alias}`.trim();
+}
+
+function formatSource24Cell(inv) {
+  const row = inv?.source24?.[0];
+  if (!row?.net24) return '—';
+  const pct = row.share != null ? ` ${(Number(row.share) * 100).toFixed(1)}%` : '';
+  return `${row.net24}${pct}`;
 }
 
 function EventMetricStack({ phases, metric, formatted }) {
@@ -262,6 +328,8 @@ function PageDetection() {
   const [events, setEvents] = useState([]);
   const [eventsError, setEventsError] = useState('');
   const [eventsBusy, setEventsBusy] = useState(false);
+  const [historyRange, setHistoryRange] = useState(() => defaultHistoryRangeLocal());
+  const [eventsExporting, setEventsExporting] = useState(false);
 
   const reload = useCallback(() => {
     setError('');
@@ -272,19 +340,61 @@ function PageDetection() {
 
   useEffect(() => { reload(); }, [reload]);
 
+  const historyBounds = useCallback(() => {
+    const from = displayLocalToUtcCh(historyRange.from);
+    const to = displayLocalToUtcCh(historyRange.to);
+    return { from, to };
+  }, [historyRange.from, historyRange.to]);
+
   const reloadEvents = useCallback((status) => {
     setEventsBusy(true);
     setEventsError('');
-    return ApiClient.loadDetectionEvents({ status })
+    const opts = { status, limit: status === 'normalized' ? 1000 : 200 };
+    if (status === 'normalized') {
+      const { from, to } = historyBounds();
+      if (from) opts.from = from;
+      if (to) opts.to = to;
+    }
+    return ApiClient.loadDetectionEvents(opts)
       .then(setEvents)
       .catch((e) => setEventsError(e.message))
       .finally(() => setEventsBusy(false));
-  }, []);
+  }, [historyBounds]);
 
   useEffect(() => {
     if (pageTab === 'active') reloadEvents('active');
     if (pageTab === 'history') reloadEvents('normalized');
   }, [pageTab, reloadEvents]);
+
+  const exportHistory = async () => {
+    setEventsExporting(true);
+    setEventsError('');
+    try {
+      const { from, to } = historyBounds();
+      if (!from || !to) throw new Error('Укажите начало и конец периода');
+      if (displayLocalToMs(historyRange.from) >= displayLocalToMs(historyRange.to)) {
+        throw new Error('Начало периода должно быть раньше конца');
+      }
+      const { blob, count } = await ApiClient.exportDetectionEventsCsv({
+        status: 'normalized',
+        from,
+        to,
+        limit: 10000,
+      });
+      if (!count) {
+        pushToast?.({ kind: 'warning', title: 'Нечего выгружать', desc: 'За выбранный период записей нет.' });
+        return;
+      }
+      const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
+      downloadBlob(`detection-history-${stamp}.csv`, blob);
+      pushToast?.({ kind: 'success', title: 'CSV выгружен', desc: `${count} событий.` });
+    } catch (e) {
+      setEventsError(e.message);
+      pushToast?.({ kind: 'error', title: 'Ошибка выгрузки', desc: e.message });
+    } finally {
+      setEventsExporting(false);
+    }
+  };
 
   useEffect(() => {
     ApiClient.loadDetectionTelegramSettings()
@@ -415,6 +525,7 @@ function PageDetection() {
         alertScope: telegram?.alertScope || 'all',
         streak: telegram?.streak ?? 3,
         normalizeStreak: telegram?.normalizeStreak ?? 3,
+        apiUrl: telegram?.apiUrl || 'https://api.telegram.org',
       };
       if (botToken.trim()) payload.botToken = botToken.trim();
       const data = await ApiClient.saveDetectionTelegramSettings(payload);
@@ -472,7 +583,7 @@ function PageDetection() {
       {pageTab === 'telegram' && (
       <Card
         title="Telegram"
-        subtitle="Алерт — X значений подряд выше порога (строка «общее»). Нормализация — Y значений подряд ниже. Повторный алерт — только после нормализации."
+        subtitle="Алерт — X значений подряд выше порога (строка «общее»). Нормализация — Y значений подряд ниже. Повторный алерт — только после нормализации. Если nta не достучится до api.telegram.org — укажите локальный Bot API, например https://tba.pinspb.ru."
       >
         <div className="col" style={{ gap: 10, font: 'var(--pv-text-body-3)' }}>
           {telegramForbidden ? (
@@ -503,6 +614,15 @@ function PageDetection() {
                     placeholder={telegram?.tokenSet ? 'оставьте пустым, чтобы не менять' : ''}
                     value={botToken}
                     onChange={(e) => setBotToken(e.target.value)}
+                  />
+                </label>
+                <label className="col" style={{ gap: 4, minWidth: 280, flex: 1 }}>
+                  <span>API Telegram</span>
+                  <input
+                    className="input"
+                    value={telegram?.apiUrl || 'https://api.telegram.org'}
+                    onChange={(e) => setTelegram(patchTelegram(telegram, { apiUrl: e.target.value }))}
+                    placeholder="https://tba.pinspb.ru"
                   />
                 </label>
                 <label className="col" style={{ gap: 4, minWidth: 180 }}>
@@ -650,15 +770,57 @@ function PageDetection() {
           title={pageTab === 'active' ? 'Активные события' : 'История'}
           subtitle={pageTab === 'active'
             ? 'Алерт уже ушёл, нормализации ещё нет. Срез метрик — момент срабатывания, все протоколы.'
-            : 'Закрытые циклы. Две группы строк: срабатывание (🔴) и нормализация (🟢), все метрики трёх протоколов.'}
+            : 'Закрытые атаки и обычные пики. Фильтр по времени. В CSV — срез алерта и нормализации по всем протоколам.'}
           tools={(
-            <Button
-              size="sm"
-              disabled={eventsBusy}
-              onClick={() => reloadEvents(pageTab === 'active' ? 'active' : 'normalized')}
-            >
-              Обновить
-            </Button>
+            <div className="row" style={{ gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+              {pageTab === 'history' && (
+                <>
+                  <label className="row" style={{ gap: 6, alignItems: 'center', font: 'var(--pv-text-body-3)' }}>
+                    <span style={{ color: 'var(--fg-secondary)' }}>с</span>
+                    <input
+                      className="input"
+                      type="datetime-local"
+                      value={historyRange.from || ''}
+                      onChange={(e) => setHistoryRange((r) => ({ ...r, from: e.target.value }))}
+                    />
+                  </label>
+                  <label className="row" style={{ gap: 6, alignItems: 'center', font: 'var(--pv-text-body-3)' }}>
+                    <span style={{ color: 'var(--fg-secondary)' }}>по</span>
+                    <input
+                      className="input"
+                      type="datetime-local"
+                      value={historyRange.to || ''}
+                      onChange={(e) => setHistoryRange((r) => ({ ...r, to: e.target.value }))}
+                    />
+                  </label>
+                  <Button
+                    size="sm"
+                    disabled={eventsBusy || eventsExporting}
+                    onClick={() => reloadEvents('normalized')}
+                  >
+                    Показать
+                  </Button>
+                  <Button
+                    size="sm"
+                    kind="ghost"
+                    icon="export"
+                    disabled={eventsBusy || eventsExporting}
+                    onClick={exportHistory}
+                  >
+                    {eventsExporting ? 'Выгрузка…' : 'CSV'}
+                  </Button>
+                </>
+              )}
+              {pageTab === 'active' && (
+                <Button
+                  size="sm"
+                  disabled={eventsBusy}
+                  onClick={() => reloadEvents('active')}
+                >
+                  Обновить
+                </Button>
+              )}
+            </div>
           )}
         >
           {eventsError && (
@@ -674,7 +836,7 @@ function PageDetection() {
             emptyTitle={eventsBusy ? 'Загрузка…' : 'Нет событий'}
             emptyDesc={pageTab === 'active'
               ? 'Пока нет объектов, которые держатся выше порога после алерта.'
-              : 'История появится после первой нормализации.'}
+              : 'История появится после первой атаки или пика.'}
             initialSort={{ key: 'alertMinute', dir: 'desc' }}
             columns={[
               {
@@ -691,6 +853,44 @@ function PageDetection() {
                     {r.name || r.scopeId}
                   </span>
                 ),
+              },
+              {
+                key: 'kind',
+                title: 'Тип',
+                width: 150,
+                sortAccessor: (r) => r.verdict?.kind || r.status || '',
+                render: (r) => {
+                  const kind = r.verdict?.kind;
+                  const peak = kind === 'benign_peak' || r.status === 'peak';
+                  return (
+                    <Badge tone={peak ? 'warning' : kind ? 'critical' : 'neutral'}>
+                      {KIND_LABEL[kind] || (peak ? 'обычный пик' : '—')}
+                    </Badge>
+                  );
+                },
+              },
+              {
+                key: 'victim',
+                title: 'Куда',
+                width: 220,
+                sortable: false,
+                render: (r) => (
+                  <span title={r.verdict?.reason || ''}>{formatVictimCell(r.investigate)}</span>
+                ),
+              },
+              {
+                key: 'source24',
+                title: 'Откуда /24',
+                width: 170,
+                sortable: false,
+                render: (r) => formatSource24Cell(r.investigate),
+              },
+              {
+                key: 'switchIn',
+                title: 'Коммутатор вход',
+                width: 220,
+                sortable: false,
+                render: (r) => formatSwitchCell(r.investigate),
               },
               {
                 key: 'phase',
@@ -723,7 +923,7 @@ function PageDetection() {
                 title: 'Нормализация',
                 width: 180,
                 sortAccessor: (r) => r.normalizeMinute || '',
-                render: (r) => (pageTab === 'history' ? formatWhen(r.normalizeMinute) : '—'),
+                render: (r) => (pageTab === 'history' && r.status !== 'peak' ? formatWhen(r.normalizeMinute) : '—'),
               },
               { key: 'bps', title: 'bps', num: true, width: 120, sortable: false, render: eventMetric('bps', (row) => formatBps(row.bps)) },
               { key: 'pps', title: 'pps', num: true, width: 120, sortable: false, render: eventMetric('pps', (row) => formatPps(row.pps)) },

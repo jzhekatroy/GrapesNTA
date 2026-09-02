@@ -5172,6 +5172,10 @@ a.nav-item--active:visited { color: var(--fg-primary); }
   background: var(--st-success);
   box-shadow: 0 0 10px var(--st-success);
 }
+.detection-event-mark--peak {
+  background: var(--st-warning);
+  box-shadow: 0 0 8px var(--st-warning);
+}
 .table--resizable {
   table-layout: fixed;
 }
