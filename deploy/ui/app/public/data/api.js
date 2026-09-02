@@ -907,12 +907,33 @@ const ApiClient = (() => {
     return requestJson('/api/detection/telegram/test', { method: 'POST', body: {} });
   }
 
-  async function loadDetectionEvents({ status = 'active', limit = 200 } = {}) {
+  async function loadDetectionEvents({ status = 'active', limit = 200, from, to } = {}) {
     const params = new URLSearchParams();
     params.set('status', status);
     params.set('limit', String(limit));
+    if (from) params.set('from', from);
+    if (to) params.set('to', to);
     const body = await requestJson(`/api/detection/events?${params}`);
     return body.data;
+  }
+
+  async function exportDetectionEventsCsv({ status = 'normalized', from, to, limit = 10000 } = {}) {
+    const params = new URLSearchParams();
+    params.set('status', status);
+    params.set('limit', String(limit));
+    if (from) params.set('from', from);
+    if (to) params.set('to', to);
+    const res = await fetch(`/api/detection/events/export?${params}`, {
+      credentials: 'same-origin',
+      cache: 'no-store',
+    });
+    if (!res.ok) {
+      const errBody = await res.json().catch(() => ({}));
+      throw new Error(errBody.error || `HTTP ${res.status}`);
+    }
+    const count = Number(res.headers.get('X-Detection-Events-Count') || 0);
+    const blob = await res.blob();
+    return { blob, count };
   }
 
   function countryQuery({ timeRange = '24h', customPeriod, directions, basis = 'ip', mapSide = 'remote', sourceIds, collectorFilter } = {}) {
@@ -2980,6 +3001,7 @@ const ApiClient = (() => {
     saveDetectionTelegramSettings,
     testDetectionTelegramSettings,
     loadDetectionEvents,
+    exportDetectionEventsCsv,
     dashboardOtherPorts,
     dashboardCountries,
     loadCountries,

@@ -234,4 +234,35 @@ describe('detection-telegram', () => {
     assert.equal(snap.tcp.syn_attempts, 9);
     assert.equal(snap.udp.port_entropy, 3);
   });
+
+  it('buildDetectionEventsCsv содержит фазы alert и normalize', () => {
+    const { buildDetectionEventsCsv } = require('./detection-telegram');
+    const csv = buildDetectionEventsCsv([{
+      id: 'net|10.0.0.0/24|2026-09-01 10:00:00',
+      scope: 'net',
+      scopeId: '10.0.0.0/24',
+      name: 'TestNet',
+      status: 'normalized',
+      alertMinute: '2026-09-01 10:00:00',
+      normalizeMinute: '2026-09-01 11:00:00',
+      threshold: 1.6,
+      alertByProto: {
+        all: { bps: 1e9, growthBps: 2, synAttempts: 10 },
+        tcp: { bps: 5e8 },
+        udp: { bps: 1e6 },
+      },
+      normalizeByProto: {
+        all: { bps: 1e7, growthBps: 1.1 },
+        tcp: { bps: 5e6 },
+        udp: { bps: 1e5 },
+      },
+    }]);
+    assert.match(csv, /event_id/);
+    assert.match(csv, /TestNet/);
+    assert.match(csv, /,alert,/);
+    assert.match(csv, /,normalize,/);
+    assert.match(csv, /,all,/);
+    assert.match(csv, /,tcp,/);
+    assert.match(csv, /,udp,/);
+  });
 });

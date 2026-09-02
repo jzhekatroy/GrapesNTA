@@ -683,10 +683,34 @@ async function insertDetectionEvent(row) {
   await insertRows(EVENTS_TABLE, [row], { name: 'detection/events-insert' });
 }
 
-async function loadDetectionEvents({ status = 'active', limit = 200 } = {}) {
+function parseEventBound(value, label) {
+  if (value == null || value === '') return null;
+  const ts = parseUtc(value);
+  if (!Number.isFinite(ts)) throw apiError(`${label}: неверная дата/время`);
+  return formatCh(ts);
+}
+
+async function loadDetectionEvents({ status = 'active', limit = 200, from, to } = {}) {
   await ensureDetectionTelegramTables();
   const wanted = String(status) === 'normalized' ? 'normalized' : 'active';
-  const take = Math.min(500, Math.max(1, Number(limit) || 200));
+  const take = Math.min(10000, Math.max(1, Number(limit) || 200));
+  const fromCh = parseEventBound(from, 'Начало периода');
+  const toCh = parseEventBound(to, 'Конец периода');
+  if (fromCh && toCh && parseUtc(fromCh) >= parseUtc(toCh)) {
+    throw apiError('Начало периода должно быть раньше конца');
+  }
+  const timeCol = wanted === 'normalized' ? 'normalize_minute' : 'alert_minute';
+  const timeClauses = [];
+  const params = { status: wanted, take };
+  if (fromCh) {
+    timeClauses.push(`${timeCol} >= ${utcDateTime('from')}`);
+    params.from = fromCh;
+  }
+  if (toCh) {
+    timeClauses.push(`${timeCol} < ${utcDateTime('to')}`);
+    params.to = toCh;
+  }
+  const timeSql = timeClauses.length ? `AND ${timeClauses.join(' AND ')}` : '';
   const { rows } = await query(`
     SELECT event_id, scope, scope_id, name, status, alert_minute, normalize_minute, alert_json, normalize_json, threshold
     FROM (
@@ -705,10 +729,78 @@ async function loadDetectionEvents({ status = 'active', limit = 200 } = {}) {
       GROUP BY event_id
     )
     WHERE status = {status:String}
+      ${timeSql}
     ORDER BY if(status = 'active', alert_minute, normalize_minute) DESC
     LIMIT {take:UInt16}
-  `, { status: wanted, take }, { name: 'detection/events-list' });
+  `, params, { name: 'detection/events-list' });
   return rows.map(mapEventRow);
+}
+
+function csvEscape(value) {
+  const s = String(value ?? '');
+  return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+}
+
+function csvCell(value) {
+  if (value == null || value === '') return '';
+  if (typeof value === 'number' && Number.isFinite(value)) return String(value);
+  return csvEscape(value);
+}
+
+function buildDetectionEventsCsv(events) {
+  const metricHeaders = [
+    'bps', 'pps', 'growth_bps', 'growth_pps',
+    'syn_attempts', 'answer_pct', 'half_open_pct', 'half_open_reply_pct',
+    'port_entropy', 'port_entropy_out', 'ports_per_ip', 'ports_per_ip_out',
+    'avg_packet_bytes', 'cv_percent',
+  ];
+  const headers = [
+    'event_id', 'scope', 'scope_id', 'name', 'status', 'phase', 'phase_minute',
+    'proto', 'threshold', ...metricHeaders,
+  ];
+  const lines = [headers.join(',')];
+  for (const event of events) {
+    const phases = [
+      { id: 'alert', minute: event.alertMinute, byProto: event.alertByProto },
+      { id: 'normalize', minute: event.normalizeMinute, byProto: event.normalizeByProto },
+    ];
+    for (const phase of phases) {
+      if (phase.id === 'normalize' && event.status !== 'normalized') continue;
+      for (const proto of ['all', 'tcp', 'udp']) {
+        const row = phase.byProto?.[proto] || {};
+        const cells = [
+          event.id,
+          event.scope,
+          event.scopeId,
+          event.name,
+          event.status,
+          phase.id,
+          phase.minute || '',
+          proto,
+          event.threshold,
+          ...metricHeaders.map((field) => {
+            const camel = SNAPSHOT_CAMEL[field] || field;
+            return row[camel] ?? row[field] ?? '';
+          }),
+        ];
+        lines.push(cells.map(csvCell).join(','));
+      }
+    }
+  }
+  return `\uFEFF${lines.join('\n')}`;
+}
+
+async function exportDetectionEventsCsv(options = {}) {
+  const events = await loadDetectionEvents({
+    status: options.status || 'normalized',
+    from: options.from,
+    to: options.to,
+    limit: options.limit || 10000,
+  });
+  return {
+    csv: buildDetectionEventsCsv(events),
+    count: events.length,
+  };
 }
 
 async function maybeSendTelegram(text, cfg) {
@@ -873,5 +965,7 @@ module.exports = {
   formatNormalizeMessage,
   snapshotByProto,
   loadDetectionEvents,
+  exportDetectionEventsCsv,
+  buildDetectionEventsCsv,
   processDetectionAlerts,
 };

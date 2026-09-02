@@ -7,6 +7,7 @@ const {
   saveDetectionTelegramSettings,
   sendTestTelegramMessage,
   loadDetectionEvents,
+  exportDetectionEventsCsv,
 } = require('./detection-telegram');
 
 function sendError(res, err) {
@@ -57,8 +58,28 @@ function createDetectionRouter() {
         data: await loadDetectionEvents({
           status: req.query.status,
           limit: req.query.limit,
+          from: req.query.from,
+          to: req.query.to,
         }),
       });
+    } catch (err) {
+      sendError(res, err);
+    }
+  });
+
+  router.get('/events/export', async (req, res) => {
+    try {
+      const { csv, count } = await exportDetectionEventsCsv({
+        status: req.query.status || 'normalized',
+        from: req.query.from,
+        to: req.query.to,
+        limit: req.query.limit || 10000,
+      });
+      const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
+      res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+      res.setHeader('Content-Disposition', `attachment; filename="detection-history-${stamp}.csv"`);
+      res.setHeader('X-Detection-Events-Count', String(count));
+      res.send(csv);
     } catch (err) {
       sendError(res, err);
     }
