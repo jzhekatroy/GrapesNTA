@@ -2,7 +2,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { query, executeCommand, insertRows, config } = require('./clickhouse');
+const { query, executeCommand, insertRows, config, formatDateTime64 } = require('./clickhouse');
 const {
   parseObservationFiltersEnvelope,
   serializeObservationFiltersEnvelope,
@@ -16,11 +16,22 @@ const LEGACY_RUNS_FILE = path.join(__dirname, 'data', 'observation-runs.json');
 let ensurePromise = null;
 
 function clickhouseDateTime(date = new Date()) {
-  const d = date instanceof Date ? date : new Date(date);
-  if (!Number.isFinite(d.getTime())) {
-    return new Date().toISOString().replace('T', ' ').replace('Z', '');
-  }
-  return d.toISOString().replace('T', ' ').replace('Z', '');
+  return formatDateTime64(date);
+}
+
+function latestByIdCte(table, extraWhere = '') {
+  return `
+    WITH latest AS (
+      SELECT
+        *,
+        row_number() OVER (
+          PARTITION BY id
+          ORDER BY updated_at DESC, deleted DESC
+        ) AS rn
+      FROM ${config.database}.${table}
+      ${extraWhere}
+    )
+  `;
 }
 
 function toIso(value) {
@@ -258,12 +269,7 @@ async function migrateFromJsonIfEmpty() {
 async function loadAllObservations() {
   await ensureObservationsStore();
   const { rows } = await query(`
-    WITH latest AS (
-      SELECT
-        *,
-        row_number() OVER (PARTITION BY id ORDER BY updated_at DESC) AS rn
-      FROM ${config.database}.${OBSERVATIONS_TABLE}
-    )
+    ${latestByIdCte(OBSERVATIONS_TABLE)}
     SELECT *
     FROM latest
     WHERE rn = 1 AND deleted = 0
@@ -275,13 +281,7 @@ async function loadAllObservations() {
 async function loadObservationById(id) {
   await ensureObservationsStore();
   const { rows } = await query(`
-    WITH latest AS (
-      SELECT
-        *,
-        row_number() OVER (PARTITION BY id ORDER BY updated_at DESC) AS rn
-      FROM ${config.database}.${OBSERVATIONS_TABLE}
-      WHERE id = {id:String}
-    )
+    ${latestByIdCte(OBSERVATIONS_TABLE, 'WHERE id = {id:String}')}
     SELECT *
     FROM latest
     WHERE rn = 1 AND deleted = 0
@@ -299,23 +299,54 @@ async function upsertObservation(item) {
 
 async function softDeleteObservation(item) {
   await ensureObservationsStore();
-  const row = observationToRow({
-    ...item,
-    updatedAt: new Date().toISOString(),
-  }, { deleted: 1 });
-  await insertRows(OBSERVATIONS_TABLE, [row], { name: 'observations/soft-delete' });
+  // Stamp the tombstone with ClickHouse now64() (server TZ). JSONEachRow +
+  // toISOString() writes UTC wall-clock, ~3h behind Europe/Moscow now64 values,
+  // so the live row stays "latest" and the observation comes back after DELETE.
+  await executeCommand(`
+    INSERT INTO ${config.database}.${OBSERVATIONS_TABLE}
+    (
+      id, owner_id, is_shared, name, description, folder, lookback,
+      filters_json, widgets_json, live_json, materialize_json, report_json,
+      deleted, created_at, updated_at
+    )
+    SELECT
+      id,
+      owner_id,
+      is_shared,
+      name,
+      description,
+      folder,
+      lookback,
+      filters_json,
+      widgets_json,
+      live_json,
+      materialize_json,
+      report_json,
+      1,
+      created_at,
+      if(
+        updated_at >= now64(3),
+        updated_at + INTERVAL 1 MILLISECOND,
+        now64(3)
+      )
+    FROM (
+      SELECT
+        *,
+        row_number() OVER (
+          PARTITION BY id
+          ORDER BY updated_at DESC, deleted DESC
+        ) AS rn
+      FROM ${config.database}.${OBSERVATIONS_TABLE}
+      WHERE id = {id:String}
+    )
+    WHERE rn = 1
+  `, { id: String(item.id) }, { name: 'observations/soft-delete' });
 }
 
 async function loadRunsForObservation(observationId) {
   await ensureObservationsStore();
   const { rows } = await query(`
-    WITH latest AS (
-      SELECT
-        *,
-        row_number() OVER (PARTITION BY id ORDER BY updated_at DESC) AS rn
-      FROM ${config.database}.${RUNS_TABLE}
-      WHERE observation_id = {id:String}
-    )
+    ${latestByIdCte(RUNS_TABLE, 'WHERE observation_id = {id:String}')}
     SELECT *
     FROM latest
     WHERE rn = 1 AND deleted = 0
@@ -327,13 +358,7 @@ async function loadRunsForObservation(observationId) {
 async function loadRunById(observationId, runId) {
   await ensureObservationsStore();
   const { rows } = await query(`
-    WITH latest AS (
-      SELECT
-        *,
-        row_number() OVER (PARTITION BY id ORDER BY updated_at DESC) AS rn
-      FROM ${config.database}.${RUNS_TABLE}
-      WHERE observation_id = {obsId:String} AND id = {runId:String}
-    )
+    ${latestByIdCte(RUNS_TABLE, 'WHERE observation_id = {obsId:String} AND id = {runId:String}')}
     SELECT *
     FROM latest
     WHERE rn = 1 AND deleted = 0

@@ -711,6 +711,30 @@ function formatDataDatetimeSql(expr) {
   return `formatDateTime(${expr}, '%F %T', '${tz}')`;
 }
 
+/** Naive DateTime64(3) in CLICKHOUSE_TIMEZONE — same clock as now64() on the server. */
+function formatDateTime64(date = new Date(), timeZone = config.dataTimezone || 'Europe/Moscow') {
+  const d = date instanceof Date ? date : new Date(date);
+  const instant = Number.isFinite(d.getTime()) ? d : new Date();
+  try {
+    const fmt = new Intl.DateTimeFormat('en-US', {
+      timeZone,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hourCycle: 'h23',
+      fractionalSecondDigits: 3,
+    });
+    const parts = Object.fromEntries(fmt.formatToParts(instant).map((p) => [p.type, p.value]));
+    const frac = String(parts.fractionalSecond ?? instant.getUTCMilliseconds()).padStart(3, '0').slice(0, 3);
+    return `${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute}:${parts.second}.${frac}`;
+  } catch {
+    return instant.toISOString().replace('T', ' ').replace('Z', '');
+  }
+}
+
 module.exports = {
   config,
   getClient,
@@ -791,4 +815,5 @@ module.exports = {
   escapeSqlString,
   parseDataDatetimeSql,
   formatDataDatetimeSql,
+  formatDateTime64,
 };
