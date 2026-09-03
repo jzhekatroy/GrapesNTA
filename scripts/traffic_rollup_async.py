@@ -111,6 +111,11 @@ def split_table_name(table: str, default_db: str = "default") -> Tuple[str, str]
 # still-running clickhouse-client. A killed client leaves ALTER DELETE
 # mutations queued; the next tick then stacks another DELETE.
 HARD_KILL_RESERVE_SEC = 8
+# Queue ticks share one wall clock across every job in the request. After the
+# 1m tables a leftover of 6–15s used to start traffic_client_country_1h (full
+# hour from flows_raw) and then mark the request error. Live already defers
+# on timeout; the queue must do the same and not begin a query it cannot finish.
+QUEUE_MIN_BUDGET_SEC = {"minute": 20, "hour": 60, "day": 60}
 
 
 class JobDeferred(Exception):
@@ -623,6 +628,15 @@ def wait_table_mutations(
             )
         logger.info("table=%s action=wait_mutations pending=%s", table, pending)
         time.sleep(poll_s)
+
+
+def is_retryable_queue_error(msg: str) -> bool:
+    text = (msg or "").lower()
+    return (
+        "timed out" in text
+        or "pending mutations" in text
+        or "cannot read system.mutations" in text
+    )
 
 
 def remaining_budget_s(started: float, wall_sec: int) -> float:
@@ -1391,6 +1405,19 @@ def run_range_backfill(
         # still need the dest empty before INSERT. Wait for the mutation
         # ourselves — mutations_sync=1 plus an outer timeout orphans it.
         if not args.dry_run and job.pre_delete_sql and bucket_list:
+            cap = max(1, int(getattr(args, "query_timeout_sec", 180) or 180))
+            need = min(cap, QUEUE_MIN_BUDGET_SEC.get(job.bucket_kind, 20))
+            left = remaining_budget_s(started, wall_sec)
+            if left < need:
+                logger.info(
+                    "queue leftover too small before delete job=%s left=%.0fs need=%ss",
+                    job.job_id,
+                    left,
+                    need,
+                )
+                if on_progress:
+                    on_progress(job.job_id, bucket_list[0])
+                return job.job_id, bucket_list[0], ok_count, fail_count, None
             col = bucket_column(job)
             lo_dt = f"toDateTime('{fmt_dt(bucket_list[0])}', 'UTC')"
             hi_dt = f"toDateTime('{fmt_dt(job_range_to)}', 'UTC')"
@@ -1405,13 +1432,15 @@ def run_range_backfill(
             if has_rows:
                 pending = pending_mutations(ch, job.dest_table)
                 if pending is None or pending > 0:
-                    return (
+                    logger.info(
+                        "job=%s action=defer reason=pending_mutations table=%s pending=%s",
                         job.job_id,
-                        bucket_list[0],
-                        ok_count,
-                        fail_count,
-                        f"pending mutations on {job.dest_table}",
+                        job.dest_table,
+                        pending,
                     )
+                    if on_progress:
+                        on_progress(job.job_id, bucket_list[0])
+                    return job.job_id, bucket_list[0], ok_count, fail_count, None
                 logger.info(
                     "job=%s action=range_delete from=%s to=%s",
                     job.job_id,
@@ -1436,12 +1465,23 @@ def run_range_backfill(
                         ch, logger, job.dest_table, timeout_s=wait_s
                     )
                 except RuntimeError as exc:
+                    msg = str(exc)
+                    if is_retryable_queue_error(msg):
+                        logger.info(
+                            "job=%s action=defer reason=mutation_wait table=%s err=%s",
+                            job.job_id,
+                            job.dest_table,
+                            msg,
+                        )
+                        if on_progress:
+                            on_progress(job.job_id, bucket_list[0])
+                        return job.job_id, bucket_list[0], ok_count, fail_count, None
                     return (
                         job.job_id,
                         bucket_list[0],
                         ok_count,
                         fail_count,
-                        str(exc),
+                        msg,
                     )
 
         for bucket_start in bucket_list:
@@ -1467,6 +1507,22 @@ def run_range_backfill(
                 if on_progress:
                     on_progress(job.job_id, bucket_start)
                 return job.job_id, bucket_start, ok_count, fail_count, None
+
+            cap = max(1, int(getattr(args, "query_timeout_sec", 180) or 180))
+            need = min(cap, QUEUE_MIN_BUDGET_SEC.get(job.bucket_kind, 20))
+            left = remaining_budget_s(started, wall_sec)
+            if left < need:
+                logger.info(
+                    "queue leftover too small job=%s bucket=%s left=%.0fs need=%ss",
+                    job.job_id,
+                    fmt_dt(bucket_start),
+                    left,
+                    need,
+                )
+                if on_progress:
+                    on_progress(job.job_id, bucket_start)
+                return job.job_id, bucket_start, ok_count, fail_count, None
+            apply_query_timeout(ch, started, wall_sec, cap)
 
             bucket_end = add_bucket(bucket_start, job.bucket_kind)
             ready, reason = dependency_ready(job, bucket_start, bucket_end, states)
@@ -1528,9 +1584,21 @@ def run_range_backfill(
                     fmt_dt(bucket_start),
                     exc,
                 )
-                return job.job_id, bucket_start, ok_count, fail_count, str(exc)
+                if on_progress:
+                    on_progress(job.job_id, bucket_start)
+                return job.job_id, bucket_start, ok_count, fail_count, None
             except Exception as exc:
                 msg = str(exc)
+                if is_retryable_queue_error(msg):
+                    logger.info(
+                        "job=%s action=defer reason=query_timeout bucket=%s err=%s",
+                        job.job_id,
+                        fmt_dt(bucket_start),
+                        msg,
+                    )
+                    if on_progress:
+                        on_progress(job.job_id, bucket_start)
+                    return job.job_id, bucket_start, ok_count, fail_count, None
                 logger.error(
                     "job=%s bucket=%s status=error err=%s",
                     job.job_id,
