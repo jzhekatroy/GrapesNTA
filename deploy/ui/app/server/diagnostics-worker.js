@@ -156,7 +156,7 @@ async function loadObservationRollupMax(ids) {
     const { rows } = await query(`
       SELECT
         observation_id,
-        toTimeZone(max(minute), 'UTC') AS max_minute,
+        max(minute) AS max_minute,
         count() AS row_count
       FROM ${config.database}.${ROLLUP_TABLE}
       WHERE observation_id IN {ids:Array(String)}

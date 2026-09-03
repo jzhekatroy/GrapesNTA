@@ -34,69 +34,13 @@ function latestByIdCte(table, extraWhere = '') {
   `;
 }
 
-function zoneOffsetMs(instantMs, timeZone) {
-  const fmt = new Intl.DateTimeFormat('en-US', {
-    timeZone,
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
-    hourCycle: 'h23',
-  });
-  const p = Object.fromEntries(
-    fmt.formatToParts(new Date(instantMs)).map((part) => [part.type, part.value]),
-  );
-  const asUtc = Date.UTC(
-    Number(p.year), Number(p.month) - 1, Number(p.day),
-    Number(p.hour), Number(p.minute), Number(p.second),
-  );
-  return asUtc - instantMs;
-}
-
-/**
- * DateTime64 columns here carry no timezone, and writes serialize local wall
- * clock in CLICKHOUSE_TIMEZONE (formatDateTime64). Reading that string as UTC
- * shifted the instant by one offset, and because every save re-serialized the
- * shifted value, created_at crept forward by +offset per write until it landed
- * in the future and froze the materialize cursor.
- */
-function naiveChToIso(naive, timeZone) {
-  const m = /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,3}))?$/.exec(naive);
-  if (!m) return `${naive.replace(' ', 'T')}Z`;
-  const millis = Number(String(m[7] ?? '0').padEnd(3, '0'));
-  // Offsets are resolved on whole seconds — Intl drops the fractional part, so
-  // milliseconds are re-applied afterwards instead of skewing the offset.
-  const wall = Date.UTC(
-    Number(m[1]), Number(m[2]) - 1, Number(m[3]),
-    Number(m[4]), Number(m[5]), Number(m[6]),
-  );
-  let instant = wall;
-  // Second pass settles DST boundaries, where the offset differs before/after.
-  for (let i = 0; i < 2; i += 1) instant = wall - zoneOffsetMs(instant, timeZone);
-  return new Date(instant + millis).toISOString();
-}
-
 function toIso(value) {
   if (value == null || value === '') return null;
   if (value instanceof Date) return value.toISOString();
   const s = String(value).trim();
   if (!s) return null;
   if (s.includes('T')) return s.endsWith('Z') ? s : `${s}Z`;
-  return naiveChToIso(s, config.dataTimezone || 'UTC');
-}
-
-/** Recover created_at values that drifted into the future before the fix above. */
-function sanitizeCreatedAt(createdIso, id, updatedIso) {
-  const now = Date.now();
-  const created = Date.parse(String(createdIso || ''));
-  if (Number.isFinite(created) && created <= now) return new Date(created).toISOString();
-  const stamp = Number(/^[a-z]+-(\d{13})-/.exec(String(id || ''))?.[1]);
-  if (Number.isFinite(stamp) && stamp > 0 && stamp <= now) return new Date(stamp).toISOString();
-  const updated = Date.parse(String(updatedIso || ''));
-  if (Number.isFinite(updated) && updated <= now) return new Date(updated).toISOString();
-  return new Date(now).toISOString();
+  return `${s.replace(' ', 'T')}Z`;
 }
 
 function safeJsonParse(raw, fallback) {
@@ -133,7 +77,7 @@ function rowToObservation(row) {
     live: liveClean,
     materialize: safeJsonParse(row.materialize_json, {}),
     report: safeJsonParse(row.report_json, {}),
-    createdAt: sanitizeCreatedAt(toIso(row.created_at), row.id, toIso(row.updated_at)),
+    createdAt: toIso(row.created_at) || new Date().toISOString(),
     updatedAt: toIso(row.updated_at) || new Date().toISOString(),
   };
 }
@@ -451,6 +395,4 @@ module.exports = {
   loadRunById,
   insertRun,
   lastSuccessfulRunAt,
-  naiveChToIso,
-  sanitizeCreatedAt,
 };

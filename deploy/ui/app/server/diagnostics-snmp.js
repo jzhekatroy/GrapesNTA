@@ -85,8 +85,6 @@ async function loadJobStatus() {
 
 async function loadAgentStats() {
   try {
-    // net_snmp_agents_current is already aggregated (argMax). Wrapping those
-    // columns in max()/countIf() inlines as nested aggregates and ClickHouse rejects it.
     const { rows } = await query(`
       SELECT
         count() AS total,
@@ -101,7 +99,11 @@ async function loadAgentStats() {
         max(last_poll_at) AS last_poll_at,
         max(last_ok_at) AS last_ok_at,
         countIf(snmp_enabled = 1 AND last_ok_at = toDateTime(0, 'UTC')) AS never_ok
-      FROM ${config.database}.net_snmp_agents FINAL
+      FROM
+      (
+        SELECT snmp_enabled, last_poll_status, last_poll_at, last_ok_at
+        FROM ${config.database}.net_snmp_agents_current
+      )
     `, {}, { name: 'diagnostics/snmp-agents' });
     const r = rows[0] || {};
     return {

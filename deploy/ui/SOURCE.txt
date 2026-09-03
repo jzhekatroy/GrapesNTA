@@ -1,4 +1,4 @@
 synced_from=https://github.com/mavotronik/NTAdmin.git
-synced_commit=810cbb108e6d6820a3e006ee76e8a2e74e1dd1e0
-synced_at=2026-09-02T14:25:54Z
-synced_src=/Users/evgenijtroanov/NTAdmin
+synced_commit=a09055ccc2ecddb8d6a4b45000ac65c7fd8d4832
+synced_at=2026-09-03T08:55:36Z
+synced_src=/home/mavotronik/work/Grapes NTA/

@@ -259,13 +259,7 @@ function earliestLiveFrom(safeTo) {
 function jobStartedBucket(job) {
   if (job?.startedAt) {
     const started = floorToBucket(job.startedAt);
-    if (started instanceof Date && Number.isFinite(started.getTime())) {
-      // Bad created_at (future clock / naive DateTime written as UTC) must not
-      // freeze live catch-up: resolveCatchupFrom would clamp from >= safeTo
-      // and leave status=ok with a stale cursor.
-      if (started.getTime() > Date.now() + BUCKET_MS) return null;
-      return started;
-    }
+    if (started instanceof Date && Number.isFinite(started.getTime())) return started;
   }
   return null;
 }

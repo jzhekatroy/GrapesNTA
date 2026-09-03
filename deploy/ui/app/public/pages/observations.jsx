@@ -289,6 +289,34 @@ function formatFilterSummary(filters, filterFields) {
   }).join(' · ') + (filters.length > 3 ? ' …' : '');
 }
 
+const FILTER_LOGIC_EXPR = {
+  and: 'AND',
+  or: 'OR',
+  and_not: 'AND NOT',
+  or_not: 'OR NOT',
+};
+
+function formatFilterPredicate(f) {
+  const field = f.field || '';
+  const op = String(f.op || '=').trim();
+  const raw = f.value ?? '';
+  const value = Array.isArray(raw) ? raw.join(', ') : String(raw);
+  if (op === '=' || op === '==' || op === 'eq') return `${field}=${value}`;
+  if (op === 'in' || op === 'not_in') return `${field} ${op} (${value})`;
+  return `${field} ${op} ${value}`.trim();
+}
+
+function formatFilterConditionsExpression(filters) {
+  const list = Array.isArray(filters) ? filters : [];
+  if (!list.length) return '';
+  return list.map((f, i) => {
+    const pred = formatFilterPredicate(f);
+    if (i === 0) return pred;
+    const logic = FILTER_LOGIC_EXPR[f.logic] || FILTER_LOGIC_EXPR.and;
+    return `${logic} ${pred}`;
+  }).join(' ');
+}
+
 function formatGroupSummary(groupBy, groupOptions) {
   const list = Array.isArray(groupBy) ? groupBy : [];
   if (!list.length) return '';
@@ -772,6 +800,7 @@ function ObservationLiveTile({
   const topGroupBy = groupByFromWidgets(item.widgets);
   const topLabel = topGroupBy.map((g) => groupLabel(g, groupOptions)).join(' × ');
   const conditionSummary = formatFilterSummary(item.filters || [], filterFields);
+  const conditionsExpression = formatFilterConditionsExpression(item.filters || []);
   const chartH = expanded ? 320 : 200;
   const periodLabel = observationPeriodLabel(lookback, customRange);
   const canResetZoom = Boolean(customRange || zoomStack.length);
@@ -820,6 +849,13 @@ function ObservationLiveTile({
                 <span className="obs-tile__filter-scope-label">Группировка:</span>
                 {' '}
                 <span className="obs-tile__filter-link-text">{topLabel}</span>
+              </span>
+            ) : null}
+            {conditionsExpression ? (
+              <span className="obs-tile__filter-scope obs-tile__filter-scope--conditions">
+                <span className="obs-tile__filter-scope-label">Условия:</span>
+                {' '}
+                <span className="obs-tile__filter-link-text">{conditionsExpression}</span>
               </span>
             ) : null}
           </button>
@@ -1269,6 +1305,8 @@ function PageObservations({ onNavigate }) {
 
   const settingsGroupBy = groupByFromWidgets(settings?.widgets);
   const settingsChartStyle = observationChartStyleFromWidgets(settings?.widgets);
+  const settingsGroupSummary = formatGroupSummary(settingsGroupBy, groupOptions);
+  const settingsConditions = formatFilterConditionsExpression(settings?.filters);
 
   if (settings && settingsItem) {
     return (
@@ -1292,8 +1330,14 @@ function PageObservations({ onNavigate }) {
                   ? formatFilterSummary(settings.filters, filterFields)
                   : 'без фильтров'}
               </div>
-              {formatGroupSummary(settingsGroupBy, groupOptions) ? (
-                <div>Группировка: {formatGroupSummary(settingsGroupBy, groupOptions)}</div>
+              {settingsGroupSummary ? (
+                <div>Группировка: {settingsGroupSummary}</div>
+              ) : null}
+              {settingsConditions ? (
+                <div>
+                  Условия:{' '}
+                  <span style={{ fontFamily: 'var(--pv-font-mono)' }}>{settingsConditions}</span>
+                </div>
               ) : null}
               {settings.thresholds?.length && window.ExplorerThresholds?.formatThresholdChipLabel ? (
                 <div>
