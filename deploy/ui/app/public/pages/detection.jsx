@@ -209,26 +209,29 @@ function notifyHeadline(row) {
   return text.split('\n').find((line) => line.trim()) || '';
 }
 
-function EventNotifyBox({ event }) {
-  if (!event) return null;
-  const peak = event.verdict?.kind === 'benign_peak' || event.status === 'peak';
+function EventNotifyModal({ event, onClose }) {
+  const peak = event?.verdict?.kind === 'benign_peak' || event?.status === 'peak';
   return (
-    <div className={`detection-notify-box${peak ? ' detection-notify-box--peak' : ''}`}>
-      <div className="detection-notify-box__head">
-        Текст оповещения · {event.name || event.scopeId}
-      </div>
-      {event.alertText ? (
+    <Modal
+      open={!!event}
+      onClose={onClose}
+      size="lg"
+      title="Текст оповещения"
+      subtitle={event ? `${event.name || event.scopeId}${peak ? ' · обычный пик' : ''}` : ''}
+      footer={<Button kind="ghost" onClick={onClose}>Закрыть</Button>}
+    >
+      {event?.alertText ? (
         <pre className="detection-notify-text">{event.alertText}</pre>
       ) : (
         <div className="detection-notify-box__empty">Текста срабатывания нет</div>
       )}
-      {event.normalizeText ? (
+      {event?.normalizeText ? (
         <>
-          <div className="detection-notify-box__head" style={{ marginTop: 12 }}>Нормализация</div>
+          <div className="detection-notify-box__head">Нормализация</div>
           <pre className="detection-notify-text">{event.normalizeText}</pre>
         </>
       ) : null}
-    </div>
+    </Modal>
   );
 }
 
@@ -858,23 +861,13 @@ function PageDetection() {
               {eventsError}
             </div>
           )}
-          <EventNotifyBox
-            event={
-              (messageEvent && events.find((e) => e.id === messageEvent.id))
-              || events[0]
-              || null
-            }
-          />
           <DataTable
             key={pageTab}
             rows={events}
             rowKey="id"
             pageSize={50}
             onRowClick={(r) => setMessageEvent(r)}
-            getRowClassName={(r) => {
-              const openId = messageEvent?.id || events[0]?.id;
-              return r.id === openId ? 'is-selected' : '';
-            }}
+            getRowClassName={(r) => (r.id === messageEvent?.id ? 'is-selected' : '')}
             emptyTitle={eventsBusy ? 'Загрузка…' : 'Нет событий'}
             emptyDesc={pageTab === 'active'
               ? 'Пока нет объектов, которые держатся выше порога после алерта.'
@@ -997,6 +990,8 @@ function PageDetection() {
           />
         </Card>
       )}
+
+      <EventNotifyModal event={messageEvent} onClose={() => setMessageEvent(null)} />
 
       {pageTab === 'table' && (
       <Card

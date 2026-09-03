@@ -179,6 +179,13 @@ async function ensureQueueTable() {
   `, {}, { name: 'diagnostics/ensure-backfill-queue' });
 }
 
+/**
+ * Bucket columns are not on one timezone: traffic_*_1m use DateTime('UTC'),
+ * observation_rollups_5m uses CLICKHOUSE_TIMEZONE. Missing buckets are therefore
+ * converted to UTC in SQL — labelling a Moscow wall clock as UTC shifted every
+ * enqueued window by the offset, so the backfill rewrote a window next to the
+ * hole and left the hole in place.
+ */
 async function scanJobGaps(table, t0Ch, t1Ch) {
   // Clamp to [first..last present bucket] within the window, then anti-join.
   // NOT IN is used deliberately: on DateTime('UTC') the LEFT JOIN ... IS NULL
@@ -189,7 +196,7 @@ async function scanJobGaps(table, t0Ch, t1Ch) {
       toDateTime({t1:String}, 'UTC') AS w1,
       (SELECT min(minute) FROM ${config.database}.${table} WHERE minute >= w0 AND minute <= w1) AS dmin,
       (SELECT max(minute) FROM ${config.database}.${table} WHERE minute >= w0 AND minute <= w1) AS dmax
-    SELECT ts AS missing
+    SELECT toTimeZone(ts, 'UTC') AS missing
     FROM (
       SELECT assumeNotNull(dmin) + INTERVAL number MINUTE AS ts
       FROM numbers(toUInt64(ifNull(if(dmax >= dmin AND dmin > toDateTime('2000-01-01', 'UTC'),
@@ -227,7 +234,7 @@ async function scanObservationGaps(t0Ch, t1Ch) {
         (SELECT toStartOfFiveMinutes(max(minute)) FROM ${config.database}.${ROLLUP_TABLE}
           WHERE observation_id = {id:String} AND dim0 = '' AND dim1 = ''
             AND minute >= w0 AND minute <= w1) AS dmax
-      SELECT ts AS missing
+      SELECT toTimeZone(ts, 'UTC') AS missing
       FROM (
         SELECT assumeNotNull(dmin) + INTERVAL (number * 5) MINUTE AS ts
         FROM numbers(toUInt64(ifNull(if(dmax >= dmin AND dmin > toDateTime('2000-01-01', 'UTC'),
