@@ -252,6 +252,37 @@ describe('detection-telegram', () => {
     assert.match(text, /UDP\/80/);
   });
 
+  it('formatAlertMessage для абонента по порту пишет коммутатор', () => {
+    const text = formatAlertMessage({
+      name: 'КИНГ-ОНЛАЙН',
+      scope: 'client',
+      scopeId: '94737',
+      minute: '2026-09-02 18:11:00',
+      threshold: 1.6,
+      byProto: { all: { bps: 4.14e10, growth_bps: 5.65 } },
+      verdict: { kind: 'volumetric', reason: 'узкий набор портов' },
+      binding: {
+        bindMode: 'ports',
+        ports: [{ switchIp: '172.18.19.207', ifIndex: 436209664, comment: 'КМ11350 · Ethernet1/5 · king-' }],
+      },
+    });
+    assert.match(text, /Порт: 172\.18\.19\.207 · КМ11350 · Ethernet1\/5 · king-/);
+    assert.doesNotMatch(text, /Разметка/);
+  });
+
+  it('formatAlertMessage для абонента по префиксу пишет IP', () => {
+    const text = formatAlertMessage({
+      name: 'Hostland',
+      scope: 'client',
+      scopeId: '83106',
+      minute: '2026-09-01 16:49:00',
+      threshold: 1.6,
+      byProto: { all: { bps: 1e9 } },
+      binding: { bindMode: 'prefixes', prefixes: ['185.26.122.0/24'] },
+    });
+    assert.match(text, /IP: 185\.26\.122\.0\/24/);
+  });
+
   it('нормализация: 3 подряд ниже порога', () => {
     assert.equal(shouldSendNormalize([below('2026-09-01 12:11:00')], 1.6, 3), false);
     assert.equal(shouldSendNormalize([
