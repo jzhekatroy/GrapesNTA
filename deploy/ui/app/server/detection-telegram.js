@@ -16,7 +16,7 @@ const {
   actionFor,
   volumeStillHigh,
 } = require('./detection-classify');
-const { loadHourEnvelope, loadClientBinding, formatClientMarkup, investigateIncident, emptyInvestigate } = require('./detection-investigate');
+const { loadHourEnvelope, investigateIncident, emptyInvestigate } = require('./detection-investigate');
 
 const SETTINGS_TABLE = 'app_detection_telegram';
 const SETTINGS_VIEW = 'app_detection_telegram_current';
@@ -347,7 +347,6 @@ function formatAlertMessage({
   byProto,
   verdict,
   investigate,
-  binding,
 }) {
   const kind = scope === 'net' ? 'сеть /24' : 'абонент';
   const verdictKind = verdict?.kind || '';
@@ -359,21 +358,16 @@ function formatAlertMessage({
   const hour = verdict?.hourRatio != null
     ? `×${Number(verdict.hourRatio).toFixed(2)} к норме часа`
     : formatGrowthMsg(byProto?.all?.growth_bps);
-  const markup = scope === 'client' ? formatClientMarkup(binding) : (scope === 'net' ? String(scopeId || '') : '');
-  const markupLine = markup
-    ? (binding?.bindMode === 'ports' ? `Порт: ${markup}` : `IP: ${markup}`)
-    : '';
   const header = [
     title,
     '',
     `Объект: ${name || scopeId}`,
     `Тип объекта: ${kind}`,
-    markupLine,
     `ID: ${scopeId}`,
     `Минута: ${formatMinuteMsk(minute)}`,
     `Объём: ${formatBpsMsg(byProto?.all?.bps)} · рост ${hour}`,
     verdict?.reason ? `Почему: ${verdict.reason}` : '',
-    `Куда: ${formatVictim(investigate?.victim)}${investigate?.error ? ` (${investigate.error})` : ''}`,
+    `Куда: ${formatVictim(investigate?.victim)}`,
     `Откуда сети: ${formatSourceNets(investigate?.source24)}`,
     `Коммутатор вход: ${formatSwitchPort(investigate?.switchIn)}`,
     `Коммутатор выход: ${formatSwitchPort(investigate?.switchOut)}`,
@@ -750,7 +744,6 @@ function storedOrFormattedAlertText(row, alertSnapshot) {
     byProto: byProtoFromSnapshot(alertSnapshot),
     verdict: alertSnapshot.verdict,
     investigate: alertSnapshot.investigate,
-    binding: alertSnapshot.binding,
   });
 }
 
@@ -795,7 +788,6 @@ function persistAlertSnapshot(metrics, extras = {}) {
     ...metrics,
     verdict: extras.verdict || null,
     investigate: extras.investigate || null,
-    binding: extras.binding || null,
     telegramText: String(extras.telegramText || ''),
   };
 }
@@ -1036,14 +1028,6 @@ async function processDetectionAlerts({ minute, rows, nameByKey }) {
     const byProto = group?.byProto || { all: row };
     let hour = { p95: null, p999: null };
     let investigate = emptyInvestigate();
-    let binding = null;
-    if (row.scope === 'client') {
-      try {
-        binding = await loadClientBinding(row.scope_id);
-      } catch (err) {
-        errors.push({ key, message: `binding: ${err.message}` });
-      }
-    }
     try {
       hour = await loadHourEnvelope({ scope: row.scope, scopeId: row.scope_id, minute });
     } catch (err) {
@@ -1056,7 +1040,6 @@ async function processDetectionAlerts({ minute, rows, nameByKey }) {
         verdict = refineClassification(verdict, investigate);
       } catch (err) {
         errors.push({ key, message: `investigate: ${err.message}` });
-        investigate = { ...emptyInvestigate(), error: err.message };
       }
     }
     const attack = isAttackKind(verdict.kind);
@@ -1071,12 +1054,10 @@ async function processDetectionAlerts({ minute, rows, nameByKey }) {
       byProto,
       verdict,
       investigate,
-      binding,
     });
     const snapshot = persistAlertSnapshot(snapshotByProto(group, row), {
       verdict,
       investigate,
-      binding,
       telegramText: text,
     });
     const eventId = `${key}|${minute}`;

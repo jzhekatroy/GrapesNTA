@@ -6466,8 +6466,9 @@ html.modal-open #root {
   line-clamp: 2;
   overflow: hidden;
 }
-.obs-tile__filter-scope--conditions .obs-tile__filter-link-text {
-  font-family: var(--pv-font-mono);
+.obs-tile__filter-logic {
+  color: var(--st-info-fg);
+  font-weight: 600;
 }
 .obs-tile__filter-link:hover {
   color: var(--accent);
