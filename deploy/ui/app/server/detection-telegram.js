@@ -175,8 +175,10 @@ function telegramFetchViaSocks(url, init, parsed) {
   const http = require('node:http');
   const https = require('node:https');
   const { SocksProxyAgent } = require('socks-proxy-agent');
+  // socks5h, never socks5: with plain socks5 the agent resolves the Bot API
+  // name locally, and the only reason for the proxy is that this host cannot.
   const socksUrl = new URL(parsed.toString());
-  socksUrl.protocol = 'socks5:';
+  socksUrl.protocol = 'socks5h:';
   const agent = new SocksProxyAgent(socksUrl, { timeout: 45_000 });
   const target = new URL(url);
   const lib = target.protocol === 'http:' ? http : https;
