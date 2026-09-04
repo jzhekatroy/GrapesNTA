@@ -265,39 +265,80 @@ async function investigateIncident({ scope, scopeId, minute }) {
   const ev = evCte();
   const ifaces = netInterfacesCurrentRef();
 
+  // groupArray lives inside each CTE, not around it: 24.8 inlines WITH
+  // and otherwise treats sum(bytes) as nested inside the outer aggregate.
   const { rows } = await query(`
     WITH ev AS (${ev}),
     dest AS (
-      SELECT dst_ip AS ip, dst24 AS net24, dst_port AS port, proto, sum(bytes) AS bytes
-      FROM ev GROUP BY ip, net24, port, proto ORDER BY bytes DESC LIMIT 8
+      SELECT groupArray(tuple(ip, net24, port, proto, byte_sum)) AS rows
+      FROM (
+        SELECT dst_ip AS ip, dst24 AS net24, dst_port AS port, proto, sum(bytes) AS byte_sum
+        FROM ev GROUP BY ip, net24, port, proto ORDER BY byte_sum DESC LIMIT 8
+      )
     ),
     dest24 AS (
-      SELECT dst24 AS net24, sum(bytes) AS bytes, uniqExact(dst_ip) AS ips
-      FROM ev WHERE dst24 != '' GROUP BY net24 ORDER BY bytes DESC LIMIT 8
+      SELECT groupArray(tuple(net24, byte_sum, ips)) AS rows
+      FROM (
+        SELECT dst24 AS net24, sum(bytes) AS byte_sum, uniqExact(dst_ip) AS ips
+        FROM ev WHERE dst24 != '' GROUP BY net24 ORDER BY byte_sum DESC LIMIT 8
+      )
     ),
     src24 AS (
-      SELECT src24 AS net24, any(src_asn) AS asn, sum(bytes) AS bytes, uniqExact(src_ip) AS ips
-      FROM ev WHERE src24 != '' GROUP BY net24 ORDER BY bytes DESC LIMIT 8
+      SELECT groupArray(tuple(net24, asn, byte_sum, ips)) AS rows
+      FROM (
+        SELECT src24 AS net24, any(src_asn) AS asn, sum(bytes) AS byte_sum, uniqExact(src_ip) AS ips
+        FROM ev WHERE src24 != '' GROUP BY net24 ORDER BY byte_sum DESC LIMIT 8
+      )
     ),
     srcip AS (
-      SELECT src_ip AS ip, src24 AS net24, src_asn AS asn, sum(bytes) AS bytes
-      FROM ev GROUP BY ip, net24, asn ORDER BY bytes DESC LIMIT 5
+      SELECT groupArray(tuple(ip, net24, asn, byte_sum)) AS rows
+      FROM (
+        SELECT src_ip AS ip, src24 AS net24, src_asn AS asn, sum(bytes) AS byte_sum
+        FROM ev GROUP BY ip, net24, asn ORDER BY byte_sum DESC LIMIT 5
+      )
     ),
     l4 AS (
-      SELECT src_port AS port, proto, sum(bytes) AS bytes
-      FROM ev GROUP BY port, proto ORDER BY bytes DESC LIMIT 8
+      SELECT groupArray(tuple(port, proto, byte_sum)) AS rows
+      FROM (
+        SELECT src_port AS port, proto, sum(bytes) AS byte_sum
+        FROM ev GROUP BY port, proto ORDER BY byte_sum DESC LIMIT 8
+      )
     ),
     sw_in AS (
-      SELECT switch_ip, in_idx AS if_index, sum(bytes) AS bytes
-      FROM ev GROUP BY switch_ip, if_index ORDER BY bytes DESC LIMIT 3
+      SELECT groupArray(tuple(switch_ip, if_index, if_name, if_alias, byte_sum)) AS rows
+      FROM (
+        SELECT
+          s.switch_ip,
+          s.if_index,
+          ifNull(nullIf(i.if_name, ''), '') AS if_name,
+          ifNull(nullIf(i.if_alias, ''), '') AS if_alias,
+          s.byte_sum
+        FROM (
+          SELECT switch_ip, in_idx AS if_index, sum(bytes) AS byte_sum
+          FROM ev GROUP BY switch_ip, if_index ORDER BY byte_sum DESC LIMIT 3
+        ) AS s
+        LEFT JOIN ${ifaces} AS i ON i.switch_ip = s.switch_ip AND i.if_index = s.if_index
+      )
     ),
     sw_out AS (
-      SELECT switch_ip, out_idx AS if_index, sum(bytes) AS bytes
-      FROM ev GROUP BY switch_ip, if_index ORDER BY bytes DESC LIMIT 3
+      SELECT groupArray(tuple(switch_ip, if_index, if_name, if_alias, byte_sum)) AS rows
+      FROM (
+        SELECT
+          s.switch_ip,
+          s.if_index,
+          ifNull(nullIf(i.if_name, ''), '') AS if_name,
+          ifNull(nullIf(i.if_alias, ''), '') AS if_alias,
+          s.byte_sum
+        FROM (
+          SELECT switch_ip, out_idx AS if_index, sum(bytes) AS byte_sum
+          FROM ev GROUP BY switch_ip, if_index ORDER BY byte_sum DESC LIMIT 3
+        ) AS s
+        LEFT JOIN ${ifaces} AS i ON i.switch_ip = s.switch_ip AND i.if_index = s.if_index
+      )
     ),
     totals AS (
       SELECT
-        sum(bytes) AS bytes,
+        sum(bytes) AS byte_sum,
         uniqExact(src_ip) AS src_ips,
         uniqExact(src24) AS src_nets,
         uniqExact(dst_ip) AS dst_ips,
@@ -305,36 +346,18 @@ async function investigateIncident({ scope, scopeId, minute }) {
       FROM ev
     )
     SELECT
-      (SELECT bytes FROM totals) AS bytes,
+      (SELECT byte_sum FROM totals) AS bytes,
       (SELECT src_ips FROM totals) AS src_ips,
       (SELECT src_nets FROM totals) AS src_nets,
       (SELECT dst_ips FROM totals) AS dst_ips,
       (SELECT dst_nets FROM totals) AS dst_nets,
-      (SELECT groupArray(tuple(ip, net24, port, proto, bytes)) FROM dest) AS dests,
-      (SELECT groupArray(tuple(net24, bytes, ips)) FROM dest24) AS dest24s,
-      (SELECT groupArray(tuple(net24, asn, bytes, ips)) FROM src24) AS src24s,
-      (SELECT groupArray(tuple(ip, net24, asn, bytes)) FROM srcip) AS srcips,
-      (SELECT groupArray(tuple(port, proto, bytes)) FROM l4) AS l4s,
-      (SELECT groupArray(tuple(
-          s.switch_ip,
-          s.if_index,
-          ifNull(nullIf(i.if_name, ''), ''),
-          ifNull(nullIf(i.if_alias, ''), ''),
-          s.bytes
-        ))
-        FROM sw_in AS s
-        LEFT JOIN ${ifaces} AS i ON i.switch_ip = s.switch_ip AND i.if_index = s.if_index
-      ) AS ins,
-      (SELECT groupArray(tuple(
-          s.switch_ip,
-          s.if_index,
-          ifNull(nullIf(i.if_name, ''), ''),
-          ifNull(nullIf(i.if_alias, ''), ''),
-          s.bytes
-        ))
-        FROM sw_out AS s
-        LEFT JOIN ${ifaces} AS i ON i.switch_ip = s.switch_ip AND i.if_index = s.if_index
-      ) AS outs
+      (SELECT rows FROM dest) AS dests,
+      (SELECT rows FROM dest24) AS dest24s,
+      (SELECT rows FROM src24) AS src24s,
+      (SELECT rows FROM srcip) AS srcips,
+      (SELECT rows FROM l4) AS l4s,
+      (SELECT rows FROM sw_in) AS ins,
+      (SELECT rows FROM sw_out) AS outs
   `, params, opts);
 
   const row = rows[0] || {};
