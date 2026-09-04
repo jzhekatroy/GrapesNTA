@@ -3,6 +3,7 @@
 # Add a file here when UI/worker start selecting a new column or view.
 
 deploy/clickhouse/migrate_net_snmp_agents_last_ok.sql
+deploy/clickhouse/migrate_dns_log_client.sql
 deploy/schema/20_dns/11_dns_client_domain_1h.sql
 deploy/schema/80_rbac/05_app_audit_log.sql
 deploy/schema/80_rbac/06_app_erp_sync_settings.sql
