@@ -907,6 +907,17 @@ const ApiClient = (() => {
     return requestJson('/api/detection/telegram/test', { method: 'POST', body: {} });
   }
 
+  async function loadDetectionThresholds() {
+    const body = await requestJson('/api/detection/thresholds');
+    const data = body.data || {};
+    return { global: Number(data.global) || 1.6, items: data.items || [] };
+  }
+
+  async function saveDetectionThreshold(payload) {
+    const body = await requestJson('/api/detection/thresholds', { method: 'PUT', body: payload });
+    return body.data;
+  }
+
   async function loadDetectionEvents({ status = 'active', limit = 200, from, to } = {}) {
     const params = new URLSearchParams();
     params.set('status', status);
@@ -3000,6 +3011,8 @@ const ApiClient = (() => {
     loadDetectionTelegramSettings,
     saveDetectionTelegramSettings,
     testDetectionTelegramSettings,
+    loadDetectionThresholds,
+    saveDetectionThreshold,
     loadDetectionEvents,
     exportDetectionEventsCsv,
     dashboardOtherPorts,

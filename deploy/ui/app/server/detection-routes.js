@@ -9,6 +9,7 @@ const {
   loadDetectionEvents,
   exportDetectionEventsCsv,
 } = require('./detection-telegram');
+const { listObjectThresholds, saveObjectThreshold } = require('./detection-thresholds');
 
 function sendError(res, err) {
   const status = Number(err.statusCode) || 500;
@@ -98,6 +99,30 @@ function createDetectionRouter() {
     try {
       if (!requireAdmin(req, res)) return;
       res.json({ ok: true, data: await saveDetectionTelegramSettings(req.body || {}) });
+    } catch (err) {
+      sendError(res, err);
+    }
+  });
+
+  // Общий порог отдаём здесь тоже: настройки Telegram видит только админ, а
+  // колонку с порогом читают все, и подставлять дефолт вместо реального
+  // значения — врать наблюдателю.
+  router.get('/thresholds', async (_req, res) => {
+    try {
+      const [items, settings] = await Promise.all([
+        listObjectThresholds(),
+        getDetectionTelegramSettings(),
+      ]);
+      res.json({ data: { global: settings.growthThreshold, items } });
+    } catch (err) {
+      sendError(res, err);
+    }
+  });
+
+  router.put('/thresholds', async (req, res) => {
+    try {
+      if (!requireAdmin(req, res)) return;
+      res.json({ ok: true, data: await saveObjectThreshold(req.body || {}) });
     } catch (err) {
       sendError(res, err);
     }

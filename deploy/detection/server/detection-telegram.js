@@ -17,6 +17,7 @@ const {
   volumeStillHigh,
 } = require('./detection-classify');
 const { loadHourEnvelope, loadClientBinding, formatClientMarkup, investigateIncident, emptyInvestigate } = require('./detection-investigate');
+const { loadThresholdMap, resolveGrowthThreshold, hasGrowthOverride } = require('./detection-thresholds');
 
 const SETTINGS_TABLE = 'app_detection_telegram';
 const SETTINGS_VIEW = 'app_detection_telegram_current';
@@ -455,6 +456,7 @@ function formatAlertMessage({
   scopeId,
   minute,
   threshold,
+  thresholdIsCustom = false,
   streak = DEFAULT_STREAK,
   alertScope = DEFAULT_ALERT_SCOPE,
   byProto,
@@ -494,7 +496,7 @@ function formatAlertMessage({
     `Коммутатор выход: ${formatSwitchPort(investigate?.switchOut)}`,
     `L4 откуда: ${formatL4Sources(investigate?.l4src)}`,
     `Что делать: ${actionFor(verdict, investigate)}`,
-    `Порог: ×${Number(threshold).toFixed(2)} (bps или pps)`,
+    `Порог: ×${Number(threshold).toFixed(2)} (bps или pps${thresholdIsCustom ? ', индивидуальный' : ''})`,
     `Стабильно: ${normalizeStreak(streak)} знач. подряд`,
     `Рассылка по: ${ALERT_SCOPE_LABEL[normalizeAlertScope(alertScope)] || 'всё'}`,
     '',
@@ -543,7 +545,15 @@ function pickAlertCandidates(allRows, previousByKey, threshold, options = {}) {
     if (activeKeys.has(key)) continue;
     const prev = previousByKey.get(key) || [];
     const history = [row, ...prev];
-    if (shouldSendAlert(history, threshold, streak, enabledAtMs)) out.push({ row, key });
+    const t = resolveGrowthThreshold(row.scope, row.scope_id, threshold, options.thresholdByKey);
+    if (shouldSendAlert(history, t, streak, enabledAtMs)) {
+      out.push({
+        row,
+        key,
+        threshold: t,
+        thresholdIsCustom: hasGrowthOverride(row.scope, row.scope_id, options.thresholdByKey),
+      });
+    }
   }
   return out;
 }
@@ -561,7 +571,8 @@ function pickNormalizeCandidates(allRows, previousByKey, threshold, options = {}
     const history = [row, ...prev];
     const alertBps = active.alertByProto?.all?.bps ?? active.alertBps;
     const hourP95 = active.verdict?.hourP95;
-    if (shouldSendNormalize(history, threshold, streak, { alertBps, hourP95 })) {
+    const t = Number(active.threshold) || resolveGrowthThreshold(row.scope, row.scope_id, threshold, options.thresholdByKey);
+    if (shouldSendNormalize(history, t, streak, { alertBps, hourP95 })) {
       out.push({ row, key, active });
     }
   }
@@ -1116,7 +1127,11 @@ async function processDetectionAlerts({ minute, rows, nameByKey }) {
   const allRows = rows.filter((r) => String(r.proto) === 'all' && matchesAlertScope(r, settings.alertScope));
   const grouped = groupRowsByObject(rows);
   const activeByKey = await loadActiveEventsByKey();
-  const above = allRows.filter((r) => isAboveGrowthThreshold(r, settings.growthThreshold));
+  const thresholdByKey = await loadThresholdMap();
+  const above = allRows.filter((r) => isAboveGrowthThreshold(
+    r,
+    resolveGrowthThreshold(r.scope, r.scope_id, settings.growthThreshold, thresholdByKey),
+  ));
   const watchKeys = [];
   const seen = new Set();
   for (const row of [...above, ...allRows.filter((r) => activeByKey.has(objectKey(r.scope, r.scope_id)))]) {
@@ -1133,10 +1148,12 @@ async function processDetectionAlerts({ minute, rows, nameByKey }) {
     enabledAtMs: settings.enabled && settings.updatedAt ? parseUtc(settings.updatedAt) : tgCfg?.enabledAtMs,
     alertScope: settings.alertScope,
     activeKeys: new Set(activeByKey.keys()),
+    thresholdByKey,
   });
   const normalizeCandidates = pickNormalizeCandidates(allRows, previousByKey, settings.growthThreshold, {
     streak: settings.normalizeStreak,
     activeByKey,
+    thresholdByKey,
   });
 
   if (!alertCandidates.length && !normalizeCandidates.length) {
@@ -1155,7 +1172,7 @@ async function processDetectionAlerts({ minute, rows, nameByKey }) {
   let closed = 0;
   const errors = [];
 
-  for (const { row, key } of alertCandidates) {
+  for (const { row, key, threshold: objectThreshold, thresholdIsCustom } of alertCandidates) {
     const group = grouped.get(key);
     const name = nameByKey?.get(key) || row.scope_id;
     const byProto = group?.byProto || { all: row };
@@ -1190,7 +1207,8 @@ async function processDetectionAlerts({ minute, rows, nameByKey }) {
       scope: row.scope,
       scopeId: row.scope_id,
       minute,
-      threshold: settings.growthThreshold,
+      threshold: objectThreshold,
+      thresholdIsCustom,
       streak: settings.streak,
       alertScope: settings.alertScope,
       byProto,
@@ -1215,7 +1233,7 @@ async function processDetectionAlerts({ minute, rows, nameByKey }) {
       normalize_minute: attack ? null : minute,
       alert_json: JSON.stringify(snapshot),
       normalize_json: '',
-      threshold: settings.growthThreshold,
+      threshold: objectThreshold,
     });
     opened += 1;
     const tg = await maybeSendTelegram(text, tgCfg);

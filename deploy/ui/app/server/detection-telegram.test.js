@@ -371,6 +371,66 @@ describe('detection-telegram', () => {
     ], 1.6, 3), false);
   });
 
+  it('индивидуальный порог выше общего не даёт алерт', () => {
+    const rows = [
+      { scope: 'client', scope_id: '71764', proto: 'all', growth_bps: 2, growth_pps: 0.5 },
+    ];
+    const prev = new Map([
+      ['client|71764', [above('2026-09-01 12:08:00'), above('2026-09-01 12:05:00')]],
+    ]);
+    const picked = pickAlertCandidates(rows, prev, 1.6, {
+      streak: 3,
+      thresholdByKey: new Map([['client|71764', 4]]),
+    });
+    assert.equal(picked.length, 0);
+  });
+
+  it('кандидат несёт сработавший порог, и текст помечает его индивидуальным', () => {
+    const rows = [
+      { scope: 'client', scope_id: '71764', proto: 'all', growth_bps: 6, growth_pps: 0.5 },
+      { scope: 'net', scope_id: '10.0.0.0/24', proto: 'all', growth_bps: 6, growth_pps: 0.5 },
+    ];
+    // Серия должна пробивать и ×4, поэтому рост выше, чем в above().
+    const history = [
+      { minute: '2026-09-01 12:08:00', growth_bps: 6, growth_pps: 0.5 },
+      { minute: '2026-09-01 12:05:00', growth_bps: 6, growth_pps: 0.5 },
+    ];
+    const prev = new Map([['client|71764', history], ['net|10.0.0.0/24', history]]);
+    const picked = pickAlertCandidates(rows, prev, 1.6, {
+      streak: 3,
+      thresholdByKey: new Map([['client|71764', 4]]),
+    });
+    const client = picked.find((c) => c.key === 'client|71764');
+    const net = picked.find((c) => c.key === 'net|10.0.0.0/24');
+    assert.equal(client.threshold, 4);
+    assert.equal(client.thresholdIsCustom, true);
+    assert.equal(net.threshold, 1.6);
+    assert.equal(net.thresholdIsCustom, false);
+
+    const custom = formatAlertMessage({
+      name: 'СпейсВэб',
+      scope: 'client',
+      scopeId: '71764',
+      minute: '2026-09-03 13:39:00',
+      threshold: client.threshold,
+      thresholdIsCustom: client.thresholdIsCustom,
+      byProto: { all: { bps: 1e9 } },
+      investigate: emptyInvestigate(),
+    });
+    assert.match(custom, /Порог: ×4\.00 \(bps или pps, индивидуальный\)/);
+    const shared = formatAlertMessage({
+      name: 'TestNet',
+      scope: 'net',
+      scopeId: '10.0.0.0/24',
+      minute: '2026-09-03 13:39:00',
+      threshold: net.threshold,
+      thresholdIsCustom: net.thresholdIsCustom,
+      byProto: { all: { bps: 1e9 } },
+      investigate: emptyInvestigate(),
+    });
+    assert.match(shared, /Порог: ×1\.60 \(bps или pps\)/);
+  });
+
   it('активный объект не получает повторный алерт', () => {
     const rows = [
       { scope: 'net', scope_id: '10.0.0.0/24', proto: 'all', growth_bps: 2, growth_pps: 0.1 },

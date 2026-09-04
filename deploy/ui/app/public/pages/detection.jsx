@@ -341,6 +341,55 @@ function chartFormatValue(metric, value) {
   return formatNum(value, 0);
 }
 
+function ThresholdCell({ globalThreshold, override, disabled, onSave }) {
+  const inherited = override == null;
+  const [draft, setDraft] = useState(inherited ? '' : String(override));
+  useEffect(() => {
+    setDraft(override == null ? '' : String(override));
+  }, [override]);
+  const commit = () => {
+    const raw = String(draft || '').trim().replace(',', '.');
+    if (raw === '') {
+      if (!inherited) onSave(null);
+      return;
+    }
+    const n = Number(raw);
+    if (!Number.isFinite(n) || n <= 0 || n > 1000) {
+      setDraft(inherited ? '' : String(override));
+      return;
+    }
+    if (inherited || n !== Number(override)) onSave(n);
+  };
+  const shown = Number(inherited ? globalThreshold : override);
+  return (
+    <input
+      className="input"
+      style={{
+        width: 78,
+        padding: '4px 6px',
+        fontWeight: inherited ? 400 : 600,
+        color: inherited ? 'var(--fg-secondary)' : 'var(--st-info-fg, inherit)',
+      }}
+      title={inherited
+        ? `Общий порог ×${Number(globalThreshold).toFixed(2)}. Задайте свой, чтобы перекрыть.`
+        : `Индивидуальный ×${Number(override).toFixed(2)}. Пустое поле вернёт общий ×${Number(globalThreshold).toFixed(2)}.`}
+      placeholder={`×${Number(shown).toFixed(2)}`}
+      value={draft}
+      disabled={disabled}
+      onClick={(e) => e.stopPropagation()}
+      onChange={(e) => setDraft(e.target.value)}
+      onBlur={commit}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter') e.currentTarget.blur();
+        if (e.key === 'Escape') {
+          setDraft(inherited ? '' : String(override));
+          e.currentTarget.blur();
+        }
+      }}
+    />
+  );
+}
+
 function PageDetection() {
   const [data, setData] = useState({ minute: null, items: [] });
   const [error, setError] = useState('');
@@ -365,6 +414,9 @@ function PageDetection() {
   const [historyRange, setHistoryRange] = useState(() => defaultHistoryRangeLocal());
   const [eventsExporting, setEventsExporting] = useState(false);
   const [messageEvent, setMessageEvent] = useState(null);
+  const [thresholdByKey, setThresholdByKey] = useState({});
+  const [thresholdBusyKey, setThresholdBusyKey] = useState('');
+  const [thresholdGlobal, setThresholdGlobal] = useState(1.6);
 
   const reload = useCallback(() => {
     setError('');
@@ -428,6 +480,46 @@ function PageDetection() {
       pushToast?.({ kind: 'error', title: 'Ошибка выгрузки', desc: e.message });
     } finally {
       setEventsExporting(false);
+    }
+  };
+
+  useEffect(() => {
+    ApiClient.loadDetectionThresholds()
+      .then((res) => {
+        const next = {};
+        for (const row of res.items) {
+          next[`${row.scope}|${row.scopeId}`] = Number(row.growthThreshold);
+        }
+        setThresholdByKey(next);
+        setThresholdGlobal(res.global);
+      })
+      .catch(() => { /* колонка покажет дефолтный порог */ });
+  }, []);
+
+  const saveObjectThreshold = async (row, value) => {
+    const key = `${row.scope}|${row.scopeId}`;
+    setThresholdBusyKey(key);
+    try {
+      const saved = await ApiClient.saveDetectionThreshold({
+        scope: row.scope,
+        scopeId: row.scopeId,
+        growthThreshold: value,
+      });
+      setThresholdByKey((prev) => {
+        const next = { ...prev };
+        if (saved?.growthThreshold == null) delete next[key];
+        else next[key] = Number(saved.growthThreshold);
+        return next;
+      });
+      pushToast?.({
+        kind: 'success',
+        title: saved?.growthThreshold == null ? 'Порог сброшен на общий' : `Порог ×${Number(saved.growthThreshold).toFixed(2)}`,
+        desc: row.name || row.scopeId,
+      });
+    } catch (e) {
+      pushToast?.({ kind: 'error', title: 'Порог не сохранён', desc: e.message });
+    } finally {
+      setThresholdBusyKey('');
     }
   };
 
@@ -593,6 +685,10 @@ function PageDetection() {
     }
   };
 
+  // Админ правит общий порог на вкладке Telegram — берём его значение сразу,
+  // не дожидаясь перезагрузки списка исключений.
+  const globalThreshold = Number(telegram?.growthThreshold ?? thresholdGlobal) || 1.6;
+
   return (
     <div className="col" style={{ gap: 14 }}>
       {error && (
@@ -681,7 +777,7 @@ function PageDetection() {
                   />
                 </label>
                 <label className="col" style={{ gap: 4, minWidth: 120 }}>
-                  <span>Порог роста</span>
+                  <span>Порог общий</span>
                   <input
                     className="input"
                     type="number"
@@ -1010,7 +1106,7 @@ function PageDetection() {
       <Card
         title="Детекция"
         subtitle={data.minute
-          ? `Минута ${formatWhen(data.minute)} · ${rows.length} объектов`
+          ? `Минута ${formatWhen(data.minute)} · ${rows.length} объектов · порог общий ×${globalThreshold.toFixed(2)}, в колонке можно задать свой`
           : 'Минута ещё не посчитана'}
         tools={(
           <div className="row" style={{ gap: 8, alignItems: 'center' }}>
@@ -1087,6 +1183,21 @@ function PageDetection() {
                   {' '}
                   {r.name}
                 </span>
+              ),
+            },
+            {
+              key: 'threshold',
+              title: 'Порог',
+              width: 96,
+              num: true,
+              sortAccessor: (r) => Number(thresholdByKey[`${r.scope}|${r.scopeId}`] ?? globalThreshold),
+              render: (r) => (
+                <ThresholdCell
+                  globalThreshold={globalThreshold}
+                  override={thresholdByKey[`${r.scope}|${r.scopeId}`]}
+                  disabled={telegramForbidden || thresholdBusyKey === `${r.scope}|${r.scopeId}`}
+                  onSave={(value) => saveObjectThreshold(r, value)}
+                />
               ),
             },
             {
