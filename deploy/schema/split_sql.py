@@ -90,8 +90,11 @@ def split_sql(text: str) -> list[str]:
     return statements
 
 
+# A line comment may end at end of input, not only at a newline: _meaningful
+# strips the chunk first, so a file whose last statement is followed by trailing
+# -- notes handed ClickHouse an empty query and failed the whole deploy.
 _COMMENT_ONLY = re.compile(
-    r"^(?:\s|--[^\n]*\n|/\*.*?\*/)*\s*$",
+    r"^(?:\s|--[^\n]*(?:\n|$)|/\*.*?\*/)*\s*$",
     re.DOTALL,
 )
 
@@ -130,6 +133,11 @@ WHERE s = 'a;b' AND t = 'it''s';
     assert "CREATE VIEW" in got[1]
     assert "a;b" in got[1]
     assert "it''s" in got[1]
+
+    trailing = "ALTER TABLE t ADD COLUMN c String;\n\n-- why the column exists\n-- second note"
+    assert split_sql(trailing) == ["ALTER TABLE t ADD COLUMN c String"], split_sql(trailing)
+    assert split_sql("-- nothing but a note") == []
+    assert split_sql("/* block */") == []
     return 0
 
 
