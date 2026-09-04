@@ -8,6 +8,7 @@ const {
   DEFAULT_STREAK,
   DEFAULT_NORMALIZE_STREAK,
   DEFAULT_TELEGRAM_API_URL,
+  shortErrorMsg,
   normalizeTelegramApiUrl,
   normalizeTelegramProxyUrl,
   redactTelegramProxyUrl,
@@ -24,6 +25,7 @@ const {
   formatNormalizeMessage,
   snapshotByProto,
 } = require('./detection-telegram');
+const { emptyInvestigate } = require('./detection-investigate');
 
 function above(minute) {
   return { minute, growth_bps: 2.0, growth_pps: 0.5 };
@@ -296,6 +298,50 @@ describe('detection-telegram', () => {
     });
     assert.match(text, /Порт: 172\.18\.19\.207 · КМ11350 · Ethernet1\/5 · king-/);
     assert.doesNotMatch(text, /Разметка/);
+  });
+
+  it('отношение к норме часа не называется ростом', () => {
+    const text = formatAlertMessage({
+      name: 'СпейсВэб',
+      scope: 'client',
+      scopeId: '71764',
+      minute: '2026-09-03 13:39:00',
+      threshold: 1.6,
+      byProto: { all: { bps: 2.37e9, growth_bps: 3.25 } },
+      verdict: { kind: 'volumetric', reason: 'узкий набор портов', hourRatio: 0.96 },
+    });
+    assert.match(text, /Объём: [^\n]*· к норме часа ×0\.96/);
+    assert.doesNotMatch(text, /рост ×0\.96/);
+  });
+
+  it('упавший разбор не выдаёт «не эскалировать» и не тащит весь текст ошибки', () => {
+    const text = formatAlertMessage({
+      name: 'СпейсВэб',
+      scope: 'client',
+      scopeId: '71764',
+      minute: '2026-09-03 13:39:00',
+      threshold: 1.6,
+      byProto: { all: { bps: 2.37e9 } },
+      verdict: { kind: 'volumetric', reason: 'узкий набор портов' },
+      investigate: {
+        ...emptyInvestigate(),
+        error: 'Cannot parse IPv4 a02:408:7722:54:168:222:203:60: Cannot parse IPv4 from String:'
+          + " while executing 'FUNCTION toIPv4(if(equals(__table3.etype, 2048_UInt16)",
+      },
+    });
+    assert.match(text, /Куда: — \(разбор не удался: Cannot parse IPv4/);
+    assert.match(text, /Что делать: разбор минуты не удался/);
+    assert.doesNotMatch(text, /не эскалировать/);
+    assert.doesNotMatch(text, /__table3/);
+  });
+
+  it('shortErrorMsg режет исключение ClickHouse до первой мысли', () => {
+    assert.equal(shortErrorMsg(''), '');
+    assert.equal(
+      shortErrorMsg("Code: 6. Cannot parse IPv4: while executing 'FUNCTION toIPv4(x)'"),
+      'Code: 6. Cannot parse IPv4:',
+    );
+    assert.ok(shortErrorMsg('x'.repeat(400)).length <= 120);
   });
 
   it('formatAlertMessage для абонента по префиксу пишет IP', () => {

@@ -403,6 +403,14 @@ function formatPctMsg(value) {
   return n == null ? '—' : `${n.toFixed(1)}%`;
 }
 
+// A ClickHouse exception carries the whole failing expression; pasted whole it
+// buried the rest of the alert. The event row keeps the full text.
+function shortErrorMsg(value, limit = 120) {
+  const raw = String(value ?? '').replace(/\s+/g, ' ').trim();
+  const head = raw.split(/\swhile\s+executing\s/i)[0] || raw;
+  return head.length > limit ? `${head.slice(0, limit - 1)}…` : head;
+}
+
 function formatNumMsg(value, digits = 0) {
   const n = Number(value);
   if (!Number.isFinite(n)) return '—';
@@ -461,9 +469,11 @@ function formatAlertMessage({
     : verdictKind === KINDS.benign_peak
       ? '🟡 ПИК НАГРУЗКИ · похоже на легитимный всплеск'
       : '🔴 Детекция: рост выше порога';
+  // Not "рост": the hour ratio is a share of the hour envelope, and ×0.96 read
+  // as growth suggested a spike while the volume was inside the norm.
   const hour = verdict?.hourRatio != null
-    ? `×${Number(verdict.hourRatio).toFixed(2)} к норме часа`
-    : formatGrowthMsg(byProto?.all?.growth_bps);
+    ? `к норме часа ×${Number(verdict.hourRatio).toFixed(2)}`
+    : `рост ${formatGrowthMsg(byProto?.all?.growth_bps)}`;
   const markup = scope === 'client' ? formatClientMarkup(binding) : (scope === 'net' ? String(scopeId || '') : '');
   const markupLine = markup
     ? (binding?.bindMode === 'ports' ? `Порт: ${markup}` : `IP: ${markup}`)
@@ -476,9 +486,9 @@ function formatAlertMessage({
     markupLine,
     `ID: ${scopeId}`,
     `Минута: ${formatMinuteMsk(minute)}`,
-    `Объём: ${formatBpsMsg(byProto?.all?.bps)} · рост ${hour}`,
+    `Объём: ${formatBpsMsg(byProto?.all?.bps)} · ${hour}`,
     verdict?.reason ? `Почему: ${verdict.reason}` : '',
-    `Куда: ${formatVictim(investigate?.victim)}${investigate?.error ? ` (${investigate.error})` : ''}`,
+    `Куда: ${formatVictim(investigate?.victim)}${investigate?.error ? ` (разбор не удался: ${shortErrorMsg(investigate.error)})` : ''}`,
     `Откуда сети: ${formatSourceNets(investigate?.source24)}`,
     `Коммутатор вход: ${formatSwitchPort(investigate?.switchIn)}`,
     `Коммутатор выход: ${formatSwitchPort(investigate?.switchOut)}`,
@@ -1265,6 +1275,7 @@ module.exports = {
   DEFAULT_STREAK,
   DEFAULT_NORMALIZE_STREAK,
   DEFAULT_TELEGRAM_API_URL,
+  shortErrorMsg,
   normalizeTelegramApiUrl,
   normalizeTelegramProxyUrl,
   redactTelegramProxyUrl,

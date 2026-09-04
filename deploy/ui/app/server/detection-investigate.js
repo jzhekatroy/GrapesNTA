@@ -26,10 +26,13 @@ function protoLabel(code) {
   return n ? String(n) : '';
 }
 
+// toIPv4OrZero, not toIPv4: ClickHouse evaluates both if() branches for every
+// row, so a single IPv6 flow in the slice made the whole investigate throw
+// "Cannot parse IPv4" and the alert arrived with an empty "Куда".
 function net24Sql(ipExpr) {
   return `if(
     isIPv4String(${ipExpr}),
-    concat(IPv4NumToString(tupleElement(IPv4CIDRToRange(toIPv4(${ipExpr}), 24), 1)), '/24'),
+    concat(IPv4NumToString(tupleElement(IPv4CIDRToRange(toIPv4OrZero(${ipExpr}), 24), 1)), '/24'),
     ''
   )`;
 }
@@ -165,8 +168,7 @@ function towardPred() {
     if(
       {scope:String} = 'client',
       f.dst_client = {scopeId:String},
-      isIPv4String(${dstIp})
-        AND concat(IPv4NumToString(tupleElement(IPv4CIDRToRange(toIPv4(${dstIp}), 24), 1)), '/24') = {scopeId:String}
+      ${net24Sql(dstIp)} = {scopeId:String}
     )
   `;
 }

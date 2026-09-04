@@ -164,6 +164,11 @@ function formatL4Sources(list) {
 function actionFor(verdict, investigate) {
   const kind = verdict?.kind;
   const victim = investigate?.victim;
+  // Without the investigate slice there is nothing to point a filter at, and
+  // "не эскалировать" would read as an all-clear on an attack verdict.
+  if (isAttackKind(kind) && investigate?.error) {
+    return 'разбор минуты не удался — смотреть вручную';
+  }
   if (kind === KINDS.volumetric && victim?.ip) {
     const proto = victim.protoLabel || 'трафик';
     const port = victim.port != null ? `:${victim.port}` : '';
@@ -177,6 +182,7 @@ function actionFor(verdict, investigate) {
   }
   if (kind === KINDS.syn_flood) return 'SYN-защита / лимит на префикс клиента';
   if (kind === KINDS.benign_peak) return 'похоже на легитимный всплеск';
+  if (kind === KINDS.volumetric) return 'один сервер под нагрузкой, цель в разборе не определилась';
   return 'не эскалировать';
 }
 
