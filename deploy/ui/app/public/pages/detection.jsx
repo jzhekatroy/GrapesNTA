@@ -692,7 +692,7 @@ function PageDetection() {
                   />
                 </label>
                 <label className="col" style={{ gap: 4, minWidth: 160 }}>
-                  <span>Объекты</span>
+                  <span>Рассылка по</span>
                   <select
                     className="input"
                     value={telegram?.alertScope || 'all'}
@@ -816,7 +816,7 @@ function PageDetection() {
           title={pageTab === 'active' ? 'Активные события' : 'История'}
           subtitle={pageTab === 'active'
             ? 'Алерт уже ушёл, нормализации ещё нет. Срез метрик — момент срабатывания, все протоколы.'
-            : 'Закрытые атаки и обычные пики. Текст Telegram открыт над таблицей — клик по строке меняет событие.'}
+            : 'Закрытые атаки и обычные пики. Клик по строке открывает текст Telegram.'}
           tools={(
             <div className="row" style={{ gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
               {pageTab === 'history' && (

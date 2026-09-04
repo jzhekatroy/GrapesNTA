@@ -195,7 +195,7 @@ describe('detection-telegram', () => {
     assert.match(text, /UDP/);
     assert.match(text, /попытки \/ ответ/);
     assert.match(text, /3 знач/);
-    assert.match(text, /всё/);
+    assert.match(text, /Рассылка по: всё/);
     assert.match(text, /🔴/);
   });
 

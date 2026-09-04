@@ -496,7 +496,7 @@ function formatAlertMessage({
     `Что делать: ${actionFor(verdict, investigate)}`,
     `Порог: ×${Number(threshold).toFixed(2)} (bps или pps)`,
     `Стабильно: ${normalizeStreak(streak)} знач. подряд`,
-    `Объекты: ${ALERT_SCOPE_LABEL[normalizeAlertScope(alertScope)] || 'всё'}`,
+    `Рассылка по: ${ALERT_SCOPE_LABEL[normalizeAlertScope(alertScope)] || 'всё'}`,
     '',
   ].filter((line, idx, arr) => line !== '' || arr[idx - 1] !== '');
   const body = ['all', 'tcp', 'udp'].map((proto) => formatProtoBlock(proto, byProto?.[proto]));
@@ -714,7 +714,7 @@ async function saveDetectionTelegramSettings(payload = {}) {
   }
   const alertScopeRaw = payload.alertScope ?? payload.alert_scope ?? base.alert_scope;
   if (alertScopeRaw != null && String(alertScopeRaw).trim() !== '' && !ALERT_SCOPES.has(String(alertScopeRaw).trim().toLowerCase())) {
-    throw apiError('Объекты: выберите всё, абоненты или сети');
+    throw apiError('Рассылка по: выберите всё, абоненты или сети');
   }
   const alertScope = normalizeAlertScope(alertScopeRaw);
   const streakRaw = payload.streak ?? base.streak;
