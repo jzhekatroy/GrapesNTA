@@ -1269,6 +1269,106 @@ async function processDetectionAlerts({ minute, rows, nameByKey }) {
   };
 }
 
+async function loadDetectionEventRaw(eventId) {
+  await ensureDetectionTelegramTables();
+  const { rows } = await query(`
+    SELECT event_id, scope, scope_id, name, status, alert_minute, normalize_minute, alert_json, normalize_json, threshold
+    FROM (
+      SELECT
+        event_id,
+        argMax(scope, updated_at) AS scope,
+        argMax(scope_id, updated_at) AS scope_id,
+        argMax(name, updated_at) AS name,
+        argMax(status, updated_at) AS status,
+        argMax(alert_minute, updated_at) AS alert_minute,
+        argMax(normalize_minute, updated_at) AS normalize_minute,
+        argMax(alert_json, updated_at) AS alert_json,
+        argMax(normalize_json, updated_at) AS normalize_json,
+        argMax(threshold, updated_at) AS threshold
+      FROM ${eventsTableRef()}
+      WHERE event_id = {id:String}
+      GROUP BY event_id
+    )
+  `, { id: String(eventId) }, { name: 'detection/events-one' });
+  return rows[0] || null;
+}
+
+// Re-run the minute breakdown for a stored alert and write a replacement row.
+// Metrics stay as they were; only verdict / investigate / telegramText change.
+async function rebuildDetectionEventAlert({ scope, scopeId, minute, sendTelegram = false } = {}) {
+  const minuteCh = formatCh(parseUtc(minute));
+  if (!Number.isFinite(parseUtc(minuteCh))) {
+    throw apiError('минута: неверная дата/время');
+  }
+  const key = objectKey(scope, scopeId);
+  const eventId = `${key}|${minuteCh}`;
+  const row = await loadDetectionEventRaw(eventId);
+  if (!row) throw apiError(`событие ${eventId} не найдено`, 404);
+  const snapshot = parseSnapshot(row.alert_json);
+  const byProto = byProtoFromSnapshot(snapshot);
+  if (!byProto.all) throw apiError(`у ${eventId} нет снимка метрик`);
+  const settings = await getDetectionTelegramSettings();
+  let hour = { p95: null, p999: null };
+  let investigate = emptyInvestigate();
+  let binding = snapshot.binding || null;
+  if (row.scope === 'client') {
+    try {
+      binding = await loadClientBinding(row.scope_id);
+    } catch {
+      binding = snapshot.binding || null;
+    }
+  }
+  try {
+    hour = await loadHourEnvelope({ scope: row.scope, scopeId: row.scope_id, minute: minuteCh });
+  } catch { /* keep empty envelope */ }
+  let verdict = classifyFromMetrics(byProto, hour);
+  if (verdict.needsInvestigate) {
+    try {
+      investigate = await investigateIncident({ scope: row.scope, scopeId: row.scope_id, minute: minuteCh });
+      verdict = refineClassification(verdict, investigate);
+    } catch (err) {
+      investigate = { ...emptyInvestigate(), error: err.message };
+    }
+  }
+  const text = formatAlertMessage({
+    name: row.name || row.scope_id,
+    scope: row.scope,
+    scopeId: row.scope_id,
+    minute: minuteCh,
+    threshold: Number(row.threshold) || settings.growthThreshold,
+    streak: settings.streak,
+    alertScope: settings.alertScope,
+    byProto,
+    verdict,
+    investigate,
+    binding,
+  });
+  const next = persistAlertSnapshot(snapshot, { verdict, investigate, binding, telegramText: text });
+  await insertDetectionEvent({
+    event_id: row.event_id,
+    scope: row.scope,
+    scope_id: row.scope_id,
+    name: row.name,
+    status: row.status,
+    alert_minute: row.alert_minute,
+    normalize_minute: row.normalize_minute,
+    alert_json: JSON.stringify(next),
+    normalize_json: row.normalize_json || '',
+    threshold: Number(row.threshold) || settings.growthThreshold,
+  });
+  let telegram = { sent: false, skipped: 'not_requested' };
+  if (sendTelegram) telegram = await maybeSendTelegram(text, null);
+  return {
+    eventId,
+    victim: investigate.victim,
+    switchIn: investigate.switchIn,
+    switchOut: investigate.switchOut,
+    error: investigate.error || null,
+    telegram,
+    text,
+  };
+}
+
 module.exports = {
   DEFAULT_GROWTH_THRESHOLD,
   DEFAULT_ALERT_SCOPE,
@@ -1303,4 +1403,27 @@ module.exports = {
   exportDetectionEventsCsv,
   buildDetectionEventsCsv,
   processDetectionAlerts,
+  rebuildDetectionEventAlert,
 };
+
+if (require.main === module) {
+  require('dotenv').config({ path: require('path').join(__dirname, '..', '.env') });
+  const [mode, scope, scopeId, minute] = process.argv.slice(2);
+  if (mode !== 'rebuild' || !scope || !scopeId || !minute) {
+    console.error("Usage: node server/detection-telegram.js rebuild <client|net> <id> '<YYYY-MM-DD HH:MM:SS>'");
+    process.exit(2);
+  }
+  rebuildDetectionEventAlert({ scope, scopeId, minute }).then((out) => {
+    process.stdout.write(`${out.text}\n`);
+    console.error(JSON.stringify({
+      eventId: out.eventId,
+      victim: out.victim,
+      switchIn: out.switchIn,
+      switchOut: out.switchOut,
+      error: out.error,
+    }, null, 2));
+  }).catch((err) => {
+    console.error(err.message || err);
+    process.exit(1);
+  });
+}
