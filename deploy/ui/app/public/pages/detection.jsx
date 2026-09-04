@@ -24,6 +24,8 @@ const TELEGRAM_DEFAULTS = {
   streak: 3,
   normalizeStreak: 3,
   apiUrl: 'https://api.telegram.org',
+  proxyUrl: '',
+  proxySet: false,
   tokenSet: false,
 };
 const CHART_PERIODS = [
@@ -559,6 +561,7 @@ function PageDetection() {
         streak: telegram?.streak ?? 3,
         normalizeStreak: telegram?.normalizeStreak ?? 3,
         apiUrl: telegram?.apiUrl || 'https://api.telegram.org',
+        proxyUrl: telegram?.proxyUrl || '',
       };
       if (botToken.trim()) payload.botToken = botToken.trim();
       const data = await ApiClient.saveDetectionTelegramSettings(payload);
@@ -616,7 +619,7 @@ function PageDetection() {
       {pageTab === 'telegram' && (
       <Card
         title="Telegram"
-        subtitle="Алерт — X значений подряд выше порога (строка «общее»). Нормализация — Y значений подряд ниже. Повторный алерт — только после нормализации. Если nta не достучится до api.telegram.org — укажите локальный Bot API, например https://tba.pinspb.ru."
+        subtitle="Алерт — X значений подряд выше порога (строка «общее»). Нормализация — Y значений подряд ниже. Повторный алерт — только после нормализации. Если api.telegram.org с nta не открывается — укажите SOCKS5 прокси. API URL меняйте только если есть своё зеркало Bot API."
       >
         <div className="col" style={{ gap: 10, font: 'var(--pv-text-body-3)' }}>
           {telegramForbidden ? (
@@ -656,6 +659,16 @@ function PageDetection() {
                     value={telegram?.apiUrl || 'https://api.telegram.org'}
                     onChange={(e) => setTelegram(patchTelegram(telegram, { apiUrl: e.target.value }))}
                     placeholder="https://tba.pinspb.ru"
+                  />
+                </label>
+                <label className="col" style={{ gap: 4, minWidth: 320, flex: 1 }}>
+                  <span>Прокси {telegram?.proxySet ? '(задан)' : ''}</span>
+                  <input
+                    className="input"
+                    value={telegram?.proxyUrl || ''}
+                    onChange={(e) => setTelegram(patchTelegram(telegram, { proxyUrl: e.target.value }))}
+                    placeholder="socks5://user:pass@host:port"
+                    autoComplete="off"
                   />
                 </label>
                 <label className="col" style={{ gap: 4, minWidth: 180 }}>

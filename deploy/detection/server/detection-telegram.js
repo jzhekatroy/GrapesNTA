@@ -65,6 +65,7 @@ const DEFAULT_SETTINGS = {
   streak: DEFAULT_STREAK,
   normalize_streak: DEFAULT_NORMALIZE_STREAK,
   api_url: DEFAULT_TELEGRAM_API_URL,
+  proxy_url: '',
   enabled: 0,
 };
 
@@ -123,6 +124,87 @@ function telegramMethodUrl(apiUrl, botToken, method) {
   return `${base}/bot${encodeURIComponent(botToken)}/${method}`;
 }
 
+const TELEGRAM_PROXY_PROTOCOLS = new Set(['socks5', 'socks5h', 'http', 'https']);
+
+function normalizeTelegramProxyUrl(value) {
+  const raw = String(value ?? '').trim();
+  if (!raw) return '';
+  const withScheme = /^[a-z][a-z0-9+.-]*:\/\//i.test(raw) ? raw : `socks5://${raw}`;
+  let parsed;
+  try {
+    parsed = new URL(withScheme);
+  } catch {
+    throw apiError('Прокси: укажите socks5://user:pass@host:port');
+  }
+  const proto = parsed.protocol.replace(/:$/, '').toLowerCase();
+  if (!TELEGRAM_PROXY_PROTOCOLS.has(proto)) {
+    throw apiError('Прокси: только socks5, socks5h, http или https');
+  }
+  if (!parsed.hostname || !parsed.port) {
+    throw apiError('Прокси: нужен хост и порт');
+  }
+  parsed.hash = '';
+  parsed.search = '';
+  parsed.pathname = '';
+  return parsed.toString().replace(/\/+$/, '');
+}
+
+function redactTelegramProxyUrl(value) {
+  const raw = String(value ?? '').trim();
+  if (!raw) return '';
+  try {
+    const parsed = new URL(normalizeTelegramProxyUrl(raw));
+    if (parsed.password) parsed.password = '';
+    return parsed.toString().replace(/\/+$/, '');
+  } catch {
+    return '';
+  }
+}
+
+function resolveTelegramProxyUrl(incoming, existing) {
+  if (incoming === undefined || incoming === null) return String(existing ?? '').trim();
+  const raw = String(incoming).trim();
+  const current = String(existing ?? '').trim();
+  if (!raw) return '';
+  const redacted = redactTelegramProxyUrl(current);
+  if (current && (raw === current || raw === redacted)) return current;
+  return normalizeTelegramProxyUrl(raw);
+}
+
+function createTelegramProxyDispatcher(proxyUrl) {
+  const parsed = new URL(proxyUrl);
+  const proto = parsed.protocol.replace(/:$/, '').toLowerCase();
+  const { Agent, ProxyAgent } = require('undici');
+  if (proto === 'http' || proto === 'https') {
+    return new ProxyAgent(proxyUrl);
+  }
+  const { SocksClient } = require('socks');
+  const proxy = {
+    host: parsed.hostname,
+    port: Number(parsed.port),
+    type: 5,
+    userId: parsed.username ? decodeURIComponent(parsed.username) : undefined,
+    password: parsed.password ? decodeURIComponent(parsed.password) : undefined,
+  };
+  return new Agent({
+    connectTimeout: 20_000,
+    connect(opts, done) {
+      SocksClient.createConnection({
+        proxy,
+        command: 'connect',
+        destination: { host: opts.hostname, port: Number(opts.port) },
+        timeout: 20_000,
+      }).then(({ socket }) => done(null, socket), done);
+    },
+  });
+}
+
+async function telegramFetch(url, init, proxyUrl) {
+  const { fetch } = require('undici');
+  if (!proxyUrl) return fetch(url, init);
+  return fetch(url, { ...init, dispatcher: createTelegramProxyDispatcher(proxyUrl) });
+}
+
 function matchesAlertScope(row, alertScope) {
   const scope = normalizeAlertScope(alertScope);
   if (scope === 'all') return true;
@@ -145,6 +227,8 @@ function mapSettings(row = {}) {
         return DEFAULT_TELEGRAM_API_URL;
       }
     })(),
+    proxyUrl: redactTelegramProxyUrl(row.proxy_url),
+    proxySet: Boolean(String(row.proxy_url ?? '').trim()),
     updatedAt: row.updated_at ?? null,
   };
 }
@@ -478,6 +562,7 @@ async function ensureDetectionTelegramTables() {
           streak UInt16 DEFAULT ${DEFAULT_STREAK},
           normalize_streak UInt16 DEFAULT ${DEFAULT_NORMALIZE_STREAK},
           api_url String DEFAULT '${DEFAULT_TELEGRAM_API_URL}',
+          proxy_url String DEFAULT '',
           enabled UInt8 DEFAULT 0,
           updated_at DateTime('UTC') DEFAULT now()
         )
@@ -491,7 +576,8 @@ async function ensureDetectionTelegramTables() {
           ADD COLUMN IF NOT EXISTS alert_scope String DEFAULT '${DEFAULT_ALERT_SCOPE}',
           ADD COLUMN IF NOT EXISTS streak UInt16 DEFAULT ${DEFAULT_STREAK},
           ADD COLUMN IF NOT EXISTS normalize_streak UInt16 DEFAULT ${DEFAULT_NORMALIZE_STREAK},
-          ADD COLUMN IF NOT EXISTS api_url String DEFAULT '${DEFAULT_TELEGRAM_API_URL}'
+          ADD COLUMN IF NOT EXISTS api_url String DEFAULT '${DEFAULT_TELEGRAM_API_URL}',
+          ADD COLUMN IF NOT EXISTS proxy_url String DEFAULT ''
       `, {}, { name: 'detection/telegram-ensure-columns' });
 
       await executeCommand(`
@@ -526,6 +612,7 @@ async function ensureDetectionTelegramTables() {
           streak UInt16,
           normalize_streak UInt16,
           api_url String,
+          proxy_url String,
           enabled UInt8,
           updated_at DateTime('UTC')
         )
@@ -538,6 +625,7 @@ async function ensureDetectionTelegramTables() {
           streak,
           normalize_streak,
           api_url,
+          proxy_url,
           enabled,
           updated_at_latest AS updated_at
         FROM
@@ -551,6 +639,7 @@ async function ensureDetectionTelegramTables() {
             argMax(streak, updated_at) AS streak,
             argMax(normalize_streak, updated_at) AS normalize_streak,
             argMax(api_url, updated_at) AS api_url,
+            argMax(proxy_url, updated_at) AS proxy_url,
             argMax(enabled, updated_at) AS enabled,
             max(updated_at) AS updated_at_latest
           FROM ${settingsTableRef()}
@@ -568,7 +657,7 @@ async function ensureDetectionTelegramTables() {
 async function getCurrentSettingsRaw() {
   await ensureDetectionTelegramTables();
   const { rows } = await query(`
-    SELECT bot_token, chat_id, growth_threshold, alert_scope, streak, normalize_streak, api_url, enabled, updated_at
+    SELECT bot_token, chat_id, growth_threshold, alert_scope, streak, normalize_streak, api_url, proxy_url, enabled, updated_at
     FROM ${settingsViewRef()}
     WHERE settings_id = {id:String}
     LIMIT 1
@@ -610,6 +699,7 @@ async function saveDetectionTelegramSettings(payload = {}) {
   }
   const normalizeStreakValue = normalizeStreak(normalizeNum, DEFAULT_NORMALIZE_STREAK);
   const apiUrl = normalizeTelegramApiUrl(payload.apiUrl ?? payload.api_url ?? base.api_url);
+  const proxyUrl = resolveTelegramProxyUrl(payload.proxyUrl ?? payload.proxy_url, base.proxy_url);
   if (enabled && (!botToken || !chatId)) {
     throw apiError('Укажите токен бота и id группы перед включением Telegram');
   }
@@ -623,6 +713,7 @@ async function saveDetectionTelegramSettings(payload = {}) {
     streak,
     normalize_streak: normalizeStreakValue,
     api_url: apiUrl,
+    proxy_url: proxyUrl,
     enabled,
   }], { name: 'detection/telegram-settings-save' });
 
@@ -649,6 +740,7 @@ async function loadTelegramConfig() {
         return DEFAULT_TELEGRAM_API_URL;
       }
     })(),
+    proxyUrl: String(raw.proxy_url ?? '').trim(),
     growthThreshold: Number(raw.growth_threshold) || DEFAULT_GROWTH_THRESHOLD,
     alertScope: normalizeAlertScope(raw.alert_scope),
     streak: normalizeStreak(raw.streak),
@@ -660,10 +752,11 @@ async function loadTelegramConfig() {
 async function sendTelegramMessage(text, cfg) {
   const configRow = cfg || await loadTelegramConfig();
   const apiUrl = configRow.apiUrl || DEFAULT_TELEGRAM_API_URL;
+  const proxyUrl = String(configRow.proxyUrl ?? '').trim();
   const url = telegramMethodUrl(apiUrl, configRow.botToken, 'sendMessage');
   let res;
   try {
-    res = await fetch(url, {
+    res = await telegramFetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -671,12 +764,13 @@ async function sendTelegramMessage(text, cfg) {
         text: String(text || ''),
         disable_web_page_preview: true,
       }),
-    });
+    }, proxyUrl);
   } catch (err) {
     const cause = err.cause?.code || err.cause?.message || err.message;
     let host = apiUrl;
     try { host = new URL(apiUrl).host; } catch { /* keep */ }
-    throw apiError(`Telegram: нет сети до ${host} (${cause})`, 502);
+    const via = proxyUrl ? ` через ${redactTelegramProxyUrl(proxyUrl) || 'прокси'}` : '';
+    throw apiError(`Telegram: нет сети до ${host}${via} (${cause})`, 502);
   }
   const body = await res.json().catch(() => ({}));
   if (!res.ok || body.ok === false) {
@@ -1151,6 +1245,9 @@ module.exports = {
   DEFAULT_NORMALIZE_STREAK,
   DEFAULT_TELEGRAM_API_URL,
   normalizeTelegramApiUrl,
+  normalizeTelegramProxyUrl,
+  redactTelegramProxyUrl,
+  resolveTelegramProxyUrl,
   telegramMethodUrl,
   SETTINGS_TABLE,
   SETTINGS_VIEW,

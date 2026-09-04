@@ -9,6 +9,9 @@ const {
   DEFAULT_NORMALIZE_STREAK,
   DEFAULT_TELEGRAM_API_URL,
   normalizeTelegramApiUrl,
+  normalizeTelegramProxyUrl,
+  redactTelegramProxyUrl,
+  resolveTelegramProxyUrl,
   telegramMethodUrl,
   isAboveGrowthThreshold,
   shouldSendAlert,
@@ -48,6 +51,31 @@ describe('detection-telegram', () => {
       'https://tba.pinspb.ru/bottok/sendMessage',
     );
     assert.throws(() => normalizeTelegramApiUrl('ftp://tba.pinspb.ru'), /http/);
+  });
+
+  it('нормализует SOCKS/HTTP прокси и прячет пароль', () => {
+    assert.equal(normalizeTelegramProxyUrl(''), '');
+    assert.equal(
+      normalizeTelegramProxyUrl('tgntasocks5temp20proxy:pass@63.141.251.43:31720'),
+      'socks5://tgntasocks5temp20proxy:pass@63.141.251.43:31720',
+    );
+    assert.equal(
+      normalizeTelegramProxyUrl('socks5h://u:p@10.0.0.1:1080'),
+      'socks5h://u:p@10.0.0.1:1080',
+    );
+    assert.equal(
+      redactTelegramProxyUrl('socks5://u:secret@63.141.251.43:31720'),
+      'socks5://u@63.141.251.43:31720',
+    );
+    const stored = 'socks5://u:secret@63.141.251.43:31720';
+    assert.equal(resolveTelegramProxyUrl('socks5://u@63.141.251.43:31720', stored), stored);
+    assert.equal(resolveTelegramProxyUrl('', stored), '');
+    assert.equal(
+      resolveTelegramProxyUrl('socks5://u:new@63.141.251.43:31720', stored),
+      'socks5://u:new@63.141.251.43:31720',
+    );
+    assert.throws(() => normalizeTelegramProxyUrl('ftp://x:1'), /socks5/);
+    assert.throws(() => normalizeTelegramProxyUrl('socks5://host-without-port'), /порт/);
   });
 
   it('выше порога: рост bps или pps (OR)', () => {
