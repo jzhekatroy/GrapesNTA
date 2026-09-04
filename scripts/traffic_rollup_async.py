@@ -685,6 +685,25 @@ def parse_bucket_value(raw: str, kind: str) -> datetime:
     return datetime.strptime(text[:19], "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
 
 
+def dest_table_exists(ch: ClickHouseClient, job: RollupJob) -> bool:
+    raw = str(job.dest_table or "")
+    if "." in raw:
+        database, name = raw.split(".", 1)
+    else:
+        database, name = "default", raw
+    if not database.isidentifier() or not name.isidentifier():
+        return False
+    try:
+        out = ch.query(
+            f"SELECT 1 FROM system.tables "
+            f"WHERE database = '{database}' AND name = '{name}' LIMIT 1",
+            display=f"exists {job.dest_table}",
+        )
+    except RuntimeError:
+        return False
+    return bool(out.strip())
+
+
 def probe_existing_buckets(
     ch: ClickHouseClient,
     job: RollupJob,
@@ -1827,6 +1846,13 @@ def live_job_step(
     window_buckets: int,
 ) -> str:
     """Process one live window. Returns ok|skip|defer|error|wall|rewound."""
+    if not dest_table_exists(ch, job):
+        logger.warning(
+            "job=%s action=skip reason=missing_dest_table table=%s",
+            job.job_id,
+            job.dest_table,
+        )
+        return "skip"
     if remaining_budget_s(started, wall_sec) < 3:
         return "wall"
     # Pass 1 skips hour/day. Pass 2 may still have <35s left; do not refuse

@@ -171,38 +171,57 @@ function resolveTelegramProxyUrl(incoming, existing) {
   return normalizeTelegramProxyUrl(raw);
 }
 
-function createTelegramProxyDispatcher(proxyUrl) {
-  const parsed = new URL(proxyUrl);
-  const proto = parsed.protocol.replace(/:$/, '').toLowerCase();
-  const { Agent, ProxyAgent } = require('undici');
-  if (proto === 'http' || proto === 'https') {
-    return new ProxyAgent(proxyUrl);
+function telegramFetchViaSocks(url, init, parsed) {
+  const http = require('node:http');
+  const https = require('node:https');
+  const { SocksProxyAgent } = require('socks-proxy-agent');
+  const socksUrl = new URL(parsed.toString());
+  socksUrl.protocol = 'socks5:';
+  const agent = new SocksProxyAgent(socksUrl, { timeout: 45_000 });
+  const target = new URL(url);
+  const lib = target.protocol === 'http:' ? http : https;
+  const body = init.body == null ? null : String(init.body);
+  const headers = { ...(init.headers || {}) };
+  if (body != null && headers['Content-Length'] == null && headers['content-length'] == null) {
+    headers['Content-Length'] = String(Buffer.byteLength(body));
   }
-  const { SocksClient } = require('socks');
-  const proxy = {
-    host: parsed.hostname,
-    port: Number(parsed.port),
-    type: 5,
-    userId: parsed.username ? decodeURIComponent(parsed.username) : undefined,
-    password: parsed.password ? decodeURIComponent(parsed.password) : undefined,
-  };
-  return new Agent({
-    connectTimeout: 20_000,
-    connect(opts, done) {
-      SocksClient.createConnection({
-        proxy,
-        command: 'connect',
-        destination: { host: opts.hostname, port: Number(opts.port) },
-        timeout: 20_000,
-      }).then(({ socket }) => done(null, socket), done);
-    },
+  return new Promise((resolve, reject) => {
+    const req = lib.request(target, {
+      method: init.method || 'GET',
+      headers,
+      agent,
+      timeout: 45_000,
+    }, (res) => {
+      const chunks = [];
+      res.on('data', (chunk) => chunks.push(chunk));
+      res.on('end', () => {
+        const buf = Buffer.concat(chunks);
+        resolve({
+          ok: res.statusCode >= 200 && res.statusCode < 300,
+          status: res.statusCode,
+          json: async () => {
+            if (!buf.length) return {};
+            return JSON.parse(buf.toString('utf8'));
+          },
+        });
+      });
+    });
+    req.on('timeout', () => req.destroy(new Error('timeout')));
+    req.on('error', reject);
+    if (body != null) req.write(body);
+    req.end();
   });
 }
 
 async function telegramFetch(url, init, proxyUrl) {
-  const { fetch } = require('undici');
+  const { fetch, ProxyAgent } = require('undici');
   if (!proxyUrl) return fetch(url, init);
-  return fetch(url, { ...init, dispatcher: createTelegramProxyDispatcher(proxyUrl) });
+  const parsed = new URL(proxyUrl);
+  const proto = parsed.protocol.replace(/:$/, '').toLowerCase();
+  if (proto === 'http' || proto === 'https') {
+    return fetch(url, { ...init, dispatcher: new ProxyAgent(proxyUrl) });
+  }
+  return telegramFetchViaSocks(url, init, parsed);
 }
 
 function matchesAlertScope(row, alertScope) {
