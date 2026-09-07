@@ -8,10 +8,13 @@ const {
   flowsRawTableRef,
   l3PrefixesViewRef,
   clientsViewRef,
+  config,
 } = require('./clickhouse');
 const { flowIpExpr } = require('./queries');
 const { TABLE, tableRef, ensureDetectionTables, PROTOS } = require('./detection-schema');
 const { processDetectionAlerts } = require('./detection-telegram');
+const { AMPLIFIER_PORTS } = require('./detection-signals');
+const { loadForeignEnvelopes } = require('./detection-investigate');
 const {
   MINUTE,
   EXPORT_LAG,
@@ -65,6 +68,17 @@ function dstIpSql() {
 
 function srcIpSql() {
   return flowIpExpr(col('srcIp'));
+}
+
+function flowCountryExpr(ipCol) {
+  const etype = flowCol('etype');
+  const etypeRef = ipCol.includes('.') ? `${ipCol.split('.')[0]}.${etype}` : etype;
+  const dict = config.geoCountryDict || 'default.geo_country_dict';
+  return `if(
+    ${etypeRef} = 2048,
+    dictGetString('${dict}', 'cc', tuple(toIPv4(reinterpretAsUInt32(reverse(substring(${ipCol}, 1, 4)))))),
+    dictGetString('${dict}', 'cc', tuple(toIPv6(IPv6NumToString(${ipCol}))))
+  )`;
 }
 
 function netFromIpSql(ipExpr) {
@@ -350,9 +364,15 @@ function nullableNum(value) {
 // Вес энтропии — пакеты. Пик — максимум уникальных dst_port на один dst_addr.
 async function loadPortMetrics(scope, minuteTs) {
   const packetsCol = col('packets');
+  const bytesCol = col('bytes');
   const protoCol = col('proto');
+  const srcPort = col('srcPort');
   const dstPort = col('dstPort');
+  const srcAddrCol = col('srcIp');
   const dstAddr = dstIpSql();
+  const srcAddr = srcIpSql();
+  const srcCountry = flowCountryExpr(`f.${srcAddrCol}`);
+  const ampPorts = AMPLIFIER_PORTS.join(', ');
   const { from, to, until } = minuteBounds(minuteTs);
   const { towardId, fromId } = scopeSides(scope);
   const timeFilter = minuteFilterSql();
@@ -367,7 +387,11 @@ async function loadPortMetrics(scope, minuteTs) {
           if(f.${protoCol} = 6, 'tcp', 'udp') AS proto,
           f.${dstPort} AS dst_port,
           ${dstAddr} AS dst_ip,
-          f.${packetsCol} AS packets
+          f.${srcPort} AS src_port,
+          ${srcAddr} AS src_ip,
+          f.${packetsCol} AS packets,
+          f.${bytesCol} AS bytes,
+          trimBoth(${srcCountry}) AS src_cc
         FROM ${flowsRawTableRef()} AS f
         WHERE ${timeFilter}
           AND f.${protoCol} IN (6, 17)
@@ -379,7 +403,11 @@ async function loadPortMetrics(scope, minuteTs) {
           if(f.${protoCol} = 6, 'tcp', 'udp') AS proto,
           f.${dstPort} AS dst_port,
           ${dstAddr} AS dst_ip,
-          f.${packetsCol} AS packets
+          f.${srcPort} AS src_port,
+          ${srcAddr} AS src_ip,
+          f.${packetsCol} AS packets,
+          f.${bytesCol} AS bytes,
+          trimBoth(${srcCountry}) AS src_cc
         FROM ${flowsRawTableRef()} AS f
         WHERE ${timeFilter}
           AND f.${protoCol} IN (6, 17)
@@ -437,6 +465,54 @@ async function loadPortMetrics(scope, minuteTs) {
           if(countIf(side = 0) > 0, maxIf(ports, side = 0), NULL) AS ports_per_ip_out
         FROM per_ip
         GROUP BY scope_id, proto
+      ),
+      amp AS (
+        SELECT
+          scope_id,
+          proto,
+          sumIf(bytes, side = 1 AND src_port IN (${ampPorts})) AS amp_bytes,
+          sumIf(packets, side = 1 AND src_port IN (${ampPorts})) AS amp_packets,
+          uniqExactIf(src_ip, side = 1 AND src_port IN (${ampPorts})) AS amp_srcs
+        FROM ev
+        WHERE proto = 'udp'
+        GROUP BY scope_id, proto
+      ),
+      geo_cc AS (
+        SELECT
+          scope_id,
+          if(src_cc = '', '??', src_cc) AS cc,
+          sum(bytes) AS bytes
+        FROM ev
+        WHERE side = 1
+        GROUP BY scope_id, cc
+      ),
+      geo_tot AS (
+        SELECT scope_id, sum(bytes) AS total FROM geo_cc GROUP BY scope_id
+      ),
+      geo_top AS (
+        SELECT
+          g.scope_id AS scope_id,
+          arrayStringConcat(
+            arrayMap(
+              t -> concat(tupleElement(t, 1), ':', toString(round(tupleElement(t, 2), 2))),
+              arraySlice(
+                arrayReverseSort(t -> tupleElement(t, 2), groupArray((g.cc, g.bytes / nullIf(t.total, 0)))),
+                1, 5
+              )
+            ),
+            ','
+          ) AS top_countries
+        FROM geo_cc AS g
+        INNER JOIN geo_tot AS t ON t.scope_id = g.scope_id
+        GROUP BY g.scope_id
+      ),
+      geo AS (
+        SELECT
+          scope_id,
+          sumIf(bytes, side = 1 AND src_cc NOT IN ('', 'RU', '??')) AS foreign_bytes,
+          uniqExactIf(src_ip, side = 1 AND src_cc NOT IN ('', 'RU', '??')) AS foreign_srcs
+        FROM ev
+        GROUP BY scope_id
       )
     SELECT
       s.scope_id AS scope_id,
@@ -444,9 +520,18 @@ async function loadPortMetrics(scope, minuteTs) {
       s.port_entropy,
       s.port_entropy_out,
       p.ports_per_ip,
-      p.ports_per_ip_out
+      p.ports_per_ip_out,
+      if(s.proto = 'udp', a.amp_bytes, 0) AS amp_bytes,
+      if(s.proto = 'udp', a.amp_packets, 0) AS amp_packets,
+      if(s.proto = 'udp', a.amp_srcs, 0) AS amp_srcs,
+      if(s.proto = 'all', g.foreign_bytes, 0) AS foreign_bytes,
+      if(s.proto = 'all', g.foreign_srcs, 0) AS foreign_srcs,
+      if(s.proto = 'all', gt.top_countries, '') AS top_countries
     FROM by_side AS s
     LEFT JOIN ip_peak AS p ON s.scope_id = p.scope_id AND s.proto = p.proto
+    LEFT JOIN amp AS a ON s.scope_id = a.scope_id AND s.proto = a.proto
+    LEFT JOIN geo AS g ON s.scope_id = g.scope_id
+    LEFT JOIN geo_top AS gt ON s.scope_id = gt.scope_id
   `, { from, to, until }, {
     name: `detection/port-metrics-${scope}`,
     clickhouse_settings: HEAVY,
@@ -460,6 +545,12 @@ async function loadPortMetrics(scope, minuteTs) {
       portEntropyOut: nullableNum(r.port_entropy_out),
       portsPerIp: nullableNum(r.ports_per_ip),
       portsPerIpOut: nullableNum(r.ports_per_ip_out),
+      ampBytes: Number(r.amp_bytes || 0),
+      ampPackets: Number(r.amp_packets || 0),
+      ampSrcs: Number(r.amp_srcs || 0),
+      foreignBytes: Number(r.foreign_bytes || 0),
+      foreignSrcs: Number(r.foreign_srcs || 0),
+      topCountries: String(r.top_countries || ''),
     });
   }
   logDetection(`port-metrics-${scope} done`, {
@@ -510,7 +601,8 @@ async function loadNetBaselines(beforeTs) {
       quantileExact(${q})(bps) AS bps_p999,
       quantileExact(0.95)(bps) AS bps_p95,
       quantileExact(${q})(pps) AS pps_p999,
-      quantileExact(0.95)(pps) AS pps_p95
+      quantileExact(0.95)(pps) AS pps_p95,
+      quantileExact(0.95)(amp_bytes * 8 / 60) AS amp_bps_p95
     FROM ${tableRef()}
     WHERE minute >= now('UTC') - INTERVAL {days:UInt16} DAY
       AND minute < ${utcDateTime('before')}
@@ -521,6 +613,7 @@ async function loadNetBaselines(beforeTs) {
     map.set(`${r.scope}|${r.scope_id}|${r.proto}`, {
       bps: Number((usePeak ? r.bps_p999 : r.bps_p95) || 0),
       pps: Number((usePeak ? r.pps_p999 : r.pps_p95) || 0),
+      ampBps: Number(r.amp_bps_p95 || 0) || null,
     });
   }
   return map;
@@ -531,7 +624,11 @@ async function loadBaselines(beforeTs) {
     loadClientBaselines(),
     loadNetBaselines(beforeTs),
   ]);
-  return new Map([...anomaly, ...clients]);
+  const map = new Map(anomaly);
+  for (const [key, value] of clients) {
+    map.set(key, { ...(map.get(key) || {}), ...value });
+  }
+  return map;
 }
 
 function toInsertRow(object, proto, raw, baseline) {
@@ -575,6 +672,18 @@ function toInsertRow(object, proto, raw, baseline) {
     port_entropy_out: m.portEntropyOut,
     ports_per_ip: m.portsPerIp,
     ports_per_ip_out: m.portsPerIpOut,
+    amp_bytes: m.ampBytes,
+    amp_packets: m.ampPackets,
+    amp_srcs: m.ampSrcs,
+    growth_amp: proto === 'udp' ? growthRatio(m.ampBytes * 8 / 60, baseline?.ampBps) : null,
+    foreign_bytes: m.foreignBytes,
+    foreign_srcs: m.foreignSrcs,
+    top_countries: m.topCountries,
+    growth_foreign_bps: proto === 'all' ? growthRatio(m.foreignBytes * 8 / 60, baseline?.foreignBps) : null,
+    growth_foreign_share: proto === 'all' ? growthRatio(
+      m.bytes > 0 ? m.foreignBytes / m.bytes : 0,
+      baseline?.foreignShare,
+    ) : null,
   };
 }
 
@@ -620,14 +729,23 @@ async function tick() {
     clients: objects.filter((o) => o.scope === 'client').length,
     nets: objects.filter((o) => o.scope === 'net').length,
   });
-  const [clientVol, clientFlags, netFlags, clientPorts, netPorts, baselines] = await Promise.all([
+  const [clientVol, clientFlags, netFlags, clientPorts, netPorts, baselines, foreignEnvelopes] = await Promise.all([
     loadClientVolume(closed),
     loadScopeFlags('client', closed),
     loadScopeFlags('net', closed),
     loadPortMetrics('client', closed),
     loadPortMetrics('net', closed),
     loadBaselines(closed),
+    loadForeignEnvelopes(closed),
   ]);
+  for (const [clientId, env] of foreignEnvelopes) {
+    const key = `client|${clientId}|all`;
+    baselines.set(key, {
+      ...(baselines.get(key) || {}),
+      foreignBps: env.bpsP95,
+      foreignShare: env.shareP95,
+    });
+  }
 
   let matchedFlags = 0;
   let insertedAttempts = 0;

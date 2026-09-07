@@ -1,9 +1,18 @@
 'use strict';
 
+const { BASELINE_P95_CAP, BASELINE_RECENT_CAP } = require('./detection-core');
+const {
+  isAmplificationHit,
+  ampMetrics,
+  evaluateForeignGeo,
+  amplifierPortsFromL4,
+} = require('./detection-signals');
+
 const KINDS = {
   volumetric: 'volumetric',
   carpet: 'carpet',
   syn_flood: 'syn_flood',
+  amplification: 'amplification',
   benign_peak: 'benign_peak',
 };
 
@@ -11,6 +20,7 @@ const KIND_LABEL = {
   volumetric: 'атака в один сервер',
   carpet: 'атака по сети',
   syn_flood: 'SYN-флуд',
+  amplification: 'амплификация',
   benign_peak: 'обычный пик',
 };
 
@@ -45,6 +55,21 @@ function hourRatio(bps, hourP999) {
   return cur / env;
 }
 
+// p999 по выборке из ~250 минут это её максимум, так что одна серия всплесков
+// поднимает норму до себя и следующие минуты той же атаки выглядят обычными.
+// Потолок от p95 оставляет норме запас на честные пики, но не на порядок,
+// а медиана последнего часа не даёт норме отстать от текущего уровня клиента.
+function hourCeiling(hour = {}) {
+  const p999 = num(hour?.p999);
+  const p95 = num(hour?.p95);
+  const recent = num(hour?.recentMedian);
+  const history = p999 > 0 && p95 > 0 ? Math.min(p999, p95 * BASELINE_P95_CAP) : p999;
+  const local = recent > 0 ? recent * BASELINE_RECENT_CAP : null;
+  if (local == null) return history;
+  if (!(history > 0)) return local;
+  return Math.max(history, local);
+}
+
 function classifyFromMetrics(byProto = {}, hour = {}) {
   const all = byProto.all || {};
   const tcp = byProto.tcp || {};
@@ -52,19 +77,28 @@ function classifyFromMetrics(byProto = {}, hour = {}) {
   const udpShare = protoShare(byProto, 'udp');
   const tcpShare = protoShare(byProto, 'tcp');
   const entropy = num(udp.port_entropy ?? udp.portEntropy ?? all.port_entropy ?? all.portEntropy);
-  const ratio = hourRatio(all.bps, hour.p999);
+  const ceiling = hourCeiling(hour);
+  const ratio = hourRatio(all.bps, ceiling);
   const synAttempts = num(all.syn_attempts ?? all.synAttempts) || 0;
   const answerPct = num(all.answer_pct ?? all.answerPct);
+  const amp = ampMetrics(udp);
+  const ampHit = isAmplificationHit(udp);
+  const geo = evaluateForeignGeo(all, hour.foreign || {});
   const reasons = [];
 
   if (ratio != null) reasons.push(`объём ×${ratio.toFixed(2)} к норме часа`);
   if (udpShare != null) reasons.push(`UDP ${(udpShare * 100).toFixed(0)}%`);
   if (entropy != null) reasons.push(`энтропия ${entropy.toFixed(2)}`);
+  if (ampHit && amp.share != null) reasons.push(`отражатели ${(amp.share * 100).toFixed(0)}%`);
+  if (geo.hit && geo.shareGrowth != null) reasons.push(`зарубежный трафик ×${geo.shareGrowth.toFixed(1)} к норме часа`);
 
   let kind = KINDS.benign_peak;
   if (synAttempts >= 200 && answerPct != null && answerPct < 15 && (tcpShare == null || tcpShare >= 0.5)) {
     kind = KINDS.syn_flood;
     reasons.unshift('много SYN, мало ответов');
+  } else if (ampHit) {
+    kind = KINDS.amplification;
+    reasons.unshift(`трафик с портов усилителей · ${amp.srcs} источников`);
   } else if (ratio != null && ratio < HOUR_RATIO_PEAK && (entropy == null || entropy >= ENTROPY_MIXED)) {
     kind = KINDS.benign_peak;
     reasons.unshift('объём в пределах часа, форма смешанная');
@@ -87,10 +121,18 @@ function classifyFromMetrics(byProto = {}, hour = {}) {
     reason: reasons.slice(0, 3).join(' · '),
     hourP95: num(hour.p95),
     hourP999: num(hour.p999),
+    hourCeiling: ceiling,
     hourRatio: ratio,
     udpShare,
     entropy,
-    needsInvestigate: kind !== KINDS.benign_peak,
+    ampShare: amp.share,
+    ampSrcs: amp.srcs,
+    ampBps: amp.bps,
+    foreignShare: geo.share,
+    foreignShareGrowth: geo.shareGrowth,
+    foreignBpsGrowth: geo.bpsGrowth,
+    foreignHit: geo.hit,
+    needsInvestigate: kind !== KINDS.benign_peak || geo.hit,
   };
 }
 
@@ -99,6 +141,15 @@ function refineClassification(verdict, investigate) {
   const topShare = num(investigate?.victim?.share);
   const ratio = num(next.hourRatio);
   const udpShare = num(next.udpShare);
+  if (next.kind === KINDS.amplification) {
+    if (topShare != null && topShare >= TOP_DST_VOLUMETRIC) {
+      next.reason = `амплификация в один сервер · топ IP ${(topShare * 100).toFixed(1)}% · ${next.reason || ''}`.trim();
+    } else if (topShare != null && topShare < TOP_DST_CARPET) {
+      next.reason = `амплификация по сети · топ IP ${(topShare * 100).toFixed(1)}% · ${next.reason || ''}`.trim();
+    }
+    next.needsInvestigate = true;
+    return next;
+  }
   if (topShare != null && topShare >= TOP_DST_VOLUMETRIC) {
     next.kind = KINDS.volumetric;
     next.reason = `топ IP ${(topShare * 100).toFixed(1)}% · ${next.reason || ''}`.trim();
@@ -119,7 +170,10 @@ function refineClassification(verdict, investigate) {
 }
 
 function isAttackKind(kind) {
-  return kind === KINDS.volumetric || kind === KINDS.carpet || kind === KINDS.syn_flood;
+  return kind === KINDS.volumetric
+    || kind === KINDS.carpet
+    || kind === KINDS.syn_flood
+    || kind === KINDS.amplification;
 }
 
 function formatSwitchPort(port) {
@@ -181,6 +235,12 @@ function actionFor(verdict, investigate) {
       : 'фильтр UDP по префиксу клиента, не один сервер';
   }
   if (kind === KINDS.syn_flood) return 'SYN-защита / лимит на префикс клиента';
+  if (kind === KINDS.amplification) {
+    const ports = amplifierPortsFromL4(investigate?.l4src);
+    const portText = ports.length ? ports.join(' и ') : 'усилителей';
+    if (victim?.ip) return `резать входящий UDP с портов ${portText} на ${victim.ip}`;
+    return `резать входящий UDP с портов ${portText} на префикс клиента`;
+  }
   if (kind === KINDS.benign_peak) return 'похоже на легитимный всплеск';
   if (kind === KINDS.volumetric) return 'один сервер под нагрузкой, цель в разборе не определилась';
   return 'не эскалировать';
@@ -200,6 +260,7 @@ module.exports = {
   KINDS,
   KIND_LABEL,
   HOUR_RATIO_PEAK,
+  ENTROPY_FOCUSED,
   classifyFromMetrics,
   refineClassification,
   isAttackKind,
@@ -211,4 +272,5 @@ module.exports = {
   volumeStillHigh,
   protoShare,
   hourRatio,
+  hourCeiling,
 };

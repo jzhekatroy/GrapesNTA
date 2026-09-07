@@ -6,6 +6,8 @@ const { formatCh, parseUtc } = require('./detection-core');
 const {
   KINDS,
   KIND_LABEL,
+  HOUR_RATIO_PEAK,
+  ENTROPY_FOCUSED,
   classifyFromMetrics,
   refineClassification,
   isAttackKind,
@@ -18,6 +20,19 @@ const {
 } = require('./detection-classify');
 const { loadHourEnvelope, loadClientBinding, formatClientMarkup, investigateIncident, emptyInvestigate } = require('./detection-investigate');
 const { loadThresholdMap, resolveGrowthThreshold, hasGrowthOverride } = require('./detection-thresholds');
+const {
+  SIGNALS,
+  SIGNAL_LABEL,
+  AMP_PKT_MIN,
+  isAmplificationHit,
+  ampMetrics,
+  foreignMetrics,
+  evaluateForeignGeo,
+  formatTopCountries,
+  amplifierPortsFromL4,
+  amplifierLabel,
+  objectSignalKey,
+} = require('./detection-signals');
 
 const SETTINGS_TABLE = 'app_detection_telegram';
 const SETTINGS_VIEW = 'app_detection_telegram_current';
@@ -38,7 +53,12 @@ const SNAPSHOT_FIELDS = [
   'syn_attempts', 'syn_answered', 'syn_in_flows', 'syn_half_open', 'syn_half_open_reply',
   'answer_pct', 'half_open_pct', 'half_open_reply_pct',
   'port_entropy', 'port_entropy_out', 'ports_per_ip', 'ports_per_ip_out',
+  'amp_bytes', 'amp_packets', 'amp_srcs', 'growth_amp',
+  'foreign_bytes', 'foreign_srcs', 'top_countries',
+  'growth_foreign_bps', 'growth_foreign_share',
 ];
+// Список стран — строка вида RU:0.60,UZ:0.12; числовое приведение убило бы её.
+const SNAPSHOT_STRING_FIELDS = new Set(['top_countries']);
 const SNAPSHOT_CAMEL = {
   growth_bps: 'growthBps',
   growth_pps: 'growthPps',
@@ -56,6 +76,15 @@ const SNAPSHOT_CAMEL = {
   port_entropy_out: 'portEntropyOut',
   ports_per_ip: 'portsPerIp',
   ports_per_ip_out: 'portsPerIpOut',
+  amp_bytes: 'ampBytes',
+  amp_packets: 'ampPackets',
+  amp_srcs: 'ampSrcs',
+  growth_amp: 'growthAmp',
+  foreign_bytes: 'foreignBytes',
+  foreign_srcs: 'foreignSrcs',
+  top_countries: 'topCountries',
+  growth_foreign_bps: 'growthForeignBps',
+  growth_foreign_share: 'growthForeignShare',
 };
 
 const DEFAULT_SETTINGS = {
@@ -68,6 +97,12 @@ const DEFAULT_SETTINGS = {
   api_url: DEFAULT_TELEGRAM_API_URL,
   proxy_url: '',
   enabled: 0,
+  amp_enabled: 1,
+  geo_enabled: 1,
+  amp_streak: 1,
+  geo_streak: 1,
+  amp_normalize_streak: DEFAULT_NORMALIZE_STREAK,
+  geo_normalize_streak: DEFAULT_NORMALIZE_STREAK,
 };
 
 let ensurePromise = null;
@@ -252,7 +287,65 @@ function mapSettings(row = {}) {
     proxyUrl: redactTelegramProxyUrl(row.proxy_url),
     proxySet: Boolean(String(row.proxy_url ?? '').trim()),
     updatedAt: row.updated_at ?? null,
+    ampEnabled: Number(row.amp_enabled ?? 1) === 1,
+    geoEnabled: Number(row.geo_enabled ?? 1) === 1,
+    ampStreak: normalizeStreak(row.amp_streak, 1),
+    geoStreak: normalizeStreak(row.geo_streak, 1),
+    ampNormalizeStreak: normalizeStreak(row.amp_normalize_streak, DEFAULT_NORMALIZE_STREAK),
+    geoNormalizeStreak: normalizeStreak(row.geo_normalize_streak, DEFAULT_NORMALIZE_STREAK),
   };
+}
+
+function signalSettings(settings = {}, signal = SIGNALS.volume) {
+  if (signal === SIGNALS.amplification) {
+    return {
+      enabled: settings.ampEnabled !== false,
+      streak: normalizeStreak(settings.ampStreak, 1),
+      normalizeStreak: normalizeStreak(settings.ampNormalizeStreak, DEFAULT_NORMALIZE_STREAK),
+    };
+  }
+  if (signal === SIGNALS.foreign_geo) {
+    return {
+      enabled: settings.geoEnabled !== false,
+      streak: normalizeStreak(settings.geoStreak, 1),
+      normalizeStreak: normalizeStreak(settings.geoNormalizeStreak, DEFAULT_NORMALIZE_STREAK),
+    };
+  }
+  return {
+    enabled: true,
+    streak: normalizeStreak(settings.streak, DEFAULT_STREAK),
+    normalizeStreak: normalizeStreak(settings.normalizeStreak, DEFAULT_NORMALIZE_STREAK),
+  };
+}
+
+function isSignalHot(signal, row, group, threshold) {
+  if (signal === SIGNALS.amplification) {
+    const udp = (row?.amp_bytes != null || row?.ampBytes != null)
+      ? row
+      : (group?.byProto?.udp || row);
+    return isAmplificationHit(udp);
+  }
+  if (signal === SIGNALS.foreign_geo) {
+    if (String(row?.scope || group?.scope || '') !== 'client') return false;
+    return evaluateForeignGeo(row).hit;
+  }
+  return isAboveGrowthThreshold(row, threshold);
+}
+
+function shouldSendSignal(historyNewestFirst, isHotFn, streak = DEFAULT_STREAK, enabledAtMs) {
+  const need = normalizeStreak(streak);
+  const history = Array.isArray(historyNewestFirst) ? historyNewestFirst : [];
+  if (!history.length || !isHotFn(history[0])) return false;
+  if (history.length < need) return false;
+  if (!history.slice(0, need).every((row) => isHotFn(row))) return false;
+  const before = history[need];
+  if (!before) return true;
+  if (!isHotFn(before)) return true;
+  if (enabledAtMs) {
+    const beforeTs = parseUtc(before.minute);
+    if (Number.isFinite(beforeTs) && beforeTs < enabledAtMs) return true;
+  }
+  return false;
 }
 
 function finiteGrowth(value) {
@@ -294,7 +387,8 @@ function shouldSendNormalize(historyNewestFirst, threshold, streak = DEFAULT_NOR
   return true;
 }
 
-function objectKey(scope, scopeId) {
+function objectKey(scope, scopeId, signal) {
+  if (signal) return objectSignalKey(scope, scopeId, signal);
   return `${scope}|${scopeId}`;
 }
 
@@ -341,7 +435,11 @@ function mapSnapshotToUi(snapshot) {
     for (const field of SNAPSHOT_FIELDS) {
       const camel = SNAPSHOT_CAMEL[field] || field;
       const value = row[field];
-      mapped[camel] = value == null ? null : Number(value);
+      if (value == null) {
+        mapped[camel] = null;
+      } else {
+        mapped[camel] = SNAPSHOT_STRING_FIELDS.has(field) ? String(value) : Number(value);
+      }
     }
     byProto[proto] = mapped;
   }
@@ -424,30 +522,149 @@ function formatMinuteMsk(minute) {
   return `${new Date(ts).toLocaleString('ru-RU', { timeZone: 'Europe/Moscow' })} МСК`;
 }
 
-function formatProtoBlock(proto, row) {
-  if (!row) return `${PROTO_LABEL[proto] || proto}\n  нет данных`;
+// Какие метрики строки вышли за рамки. Пороги те же, что у классификатора,
+// иначе пометка в сообщении расходилась бы с вердиктом.
+function outOfRangeFields(proto, row, { verdict, threshold } = {}) {
+  const flags = new Set();
+  if (!row) return flags;
+  const t = Number(threshold) > 0 ? Number(threshold) : DEFAULT_GROWTH_THRESHOLD;
+  const growthBps = finiteGrowth(row.growth_bps);
+  const growthPps = finiteGrowth(row.growth_pps);
+  if (growthBps != null && growthBps >= t) flags.add('growth_bps');
+  if (growthPps != null && growthPps >= t) flags.add('growth_pps');
+  const ratio = Number(verdict?.hourRatio);
+  if (proto === 'all' && Number.isFinite(ratio) && ratio >= HOUR_RATIO_PEAK) flags.add('bps');
+  const entropy = Number(row.port_entropy);
+  if (Number.isFinite(entropy) && entropy < ENTROPY_FOCUSED) flags.add('port_entropy');
+  const attempts = Number(row.syn_attempts);
+  const answer = Number(row.answer_pct);
+  if (attempts >= 200 && Number.isFinite(answer) && answer < 15) {
+    flags.add('syn_attempts');
+    flags.add('answer_pct');
+  }
+  if (Number(row.avg_packet_bytes) >= AMP_PKT_MIN) flags.add('avg_packet_bytes');
+  if (proto === 'udp' && isAmplificationHit(row)) flags.add('amp');
+  if (proto === 'all' && evaluateForeignGeo(row).hit) flags.add('foreign');
+  return flags;
+}
+
+function formatProtoBlock(proto, row, flags = new Set()) {
+  const title = `<b>${escapeHtml(PROTO_LABEL[proto] || proto)}</b>`;
+  if (!row) return `${title}\n  нет данных`;
+  // Вышедшее за рамки помечаем на месте, чтобы не искать его глазами в списке.
+  const at = (field, text) => `${flags.has(field) ? '‼' : ' '} ${text}`;
   const lines = [
-    `${PROTO_LABEL[proto] || proto}`,
-    `  bps: ${formatBpsMsg(row.bps)}`,
-    `  pps: ${formatPpsMsg(row.pps)}`,
-    `  рост bps: ${formatGrowthMsg(row.growth_bps)}`,
-    `  рост pps: ${formatGrowthMsg(row.growth_pps)}`,
+    title,
+    at('bps', `bps: ${formatBpsMsg(row.bps)}`),
+    at('pps', `pps: ${formatPpsMsg(row.pps)}`),
+    at('growth_bps', `рост bps: ${formatGrowthMsg(row.growth_bps)}`),
+    at('growth_pps', `рост pps: ${formatGrowthMsg(row.growth_pps)}`),
   ];
   if (proto === 'udp') {
     lines.push('  попытки / ответ / полуоткрытые / не зашли: —');
   } else {
-    lines.push(`  попытки: ${formatNumMsg(row.syn_attempts, 0)}`);
-    lines.push(`  ответ: ${formatPctMsg(row.answer_pct)}`);
-    lines.push(`  полуоткрытые: ${formatPctMsg(row.half_open_pct)}`);
-    lines.push(`  не зашли: ${formatPctMsg(row.half_open_reply_pct)}`);
+    lines.push(at('syn_attempts', `попытки: ${formatNumMsg(row.syn_attempts, 0)}`));
+    lines.push(at('answer_pct', `ответ: ${formatPctMsg(row.answer_pct)}`));
+    lines.push(at('half_open_pct', `полуоткрытые: ${formatPctMsg(row.half_open_pct)}`));
+    lines.push(at('half_open_reply_pct', `не зашли: ${formatPctMsg(row.half_open_reply_pct)}`));
   }
-  lines.push(`  энтропия портов вх.: ${formatNumMsg(row.port_entropy, 2)}`);
-  lines.push(`  энтропия портов исх.: ${formatNumMsg(row.port_entropy_out, 2)}`);
-  lines.push(`  макс. портов/IP вх.: ${formatNumMsg(row.ports_per_ip, 0)}`);
-  lines.push(`  макс. портов/IP исх.: ${formatNumMsg(row.ports_per_ip_out, 0)}`);
-  lines.push(`  средний пакет: ${formatNumMsg(row.avg_packet_bytes, 0)} Б`);
-  lines.push(`  CV: ${row.cv_percent == null ? '—' : `${formatNumMsg(row.cv_percent, 1)}%`}`);
+  lines.push(at('port_entropy', `энтропия портов вх.: ${formatNumMsg(row.port_entropy, 2)}`));
+  lines.push(at('port_entropy_out', `энтропия портов исх.: ${formatNumMsg(row.port_entropy_out, 2)}`));
+  lines.push(at('ports_per_ip', `макс. портов/IP вх.: ${formatNumMsg(row.ports_per_ip, 0)}`));
+  lines.push(at('ports_per_ip_out', `макс. портов/IP исх.: ${formatNumMsg(row.ports_per_ip_out, 0)}`));
+  lines.push(at('avg_packet_bytes', `средний пакет: ${formatNumMsg(row.avg_packet_bytes, 0)} Б`));
+  lines.push(at('cv_percent', `CV: ${row.cv_percent == null ? '—' : `${formatNumMsg(row.cv_percent, 1)}%`}`));
+  // Строки ниже есть не у каждой минуты: без трафика с портов усилителей и без
+  // зарубежных источников это были бы нули в каждом сообщении.
+  const amp = proto === 'udp' ? ampMetrics(row) : null;
+  if (amp && amp.bytes > 0) {
+    lines.push(at('amp', `с портов усилителей: ${formatBpsMsg(amp.bps)}`
+      + ` · доля ${amp.share == null ? '—' : `${(amp.share * 100).toFixed(0)}%`}`
+      + ` · ${formatNumMsg(amp.srcs, 0)} источников`
+      + ` · пакет ${formatNumMsg(amp.avgPkt, 0)} Б`));
+  }
+  const geo = proto === 'all' ? foreignMetrics(row) : null;
+  if (geo && geo.bytes > 0) {
+    lines.push(at('foreign', `заграница: ${formatBpsMsg(geo.bps)}`
+      + ` · доля ${geo.share == null ? '—' : `${(geo.share * 100).toFixed(0)}%`}`
+      + ` · ${formatNumMsg(geo.srcs, 0)} источников`
+      + ` · рост доли ${formatGrowthMsg(row.growth_foreign_share ?? row.growthForeignShare)}`));
+    const countries = formatTopCountries(geo.top);
+    if (countries) lines.push(`  страны: ${escapeHtml(countries)}`);
+  }
   return lines.join('\n');
+}
+
+function formatAlertHeadline(verdict, signals = []) {
+  const verdictKind = verdict?.kind || '';
+  const head = (emoji, text) => `${emoji} <b>${escapeHtml(text)}</b>`;
+  if (verdictKind === KINDS.amplification) {
+    const ports = amplifierPortsFromL4(verdict?.l4src);
+    const extra = amplifierLabel(ports);
+    return head('🔴', `АТАКА · ${KIND_LABEL.amplification}${extra ? ` ${extra}` : ''}`);
+  }
+  if (isAttackKind(verdictKind)) {
+    return head('🔴', `АТАКА · ${KIND_LABEL[verdictKind] || verdictKind}`);
+  }
+  if (signals.includes(SIGNALS.foreign_geo) && verdictKind === KINDS.benign_peak) {
+    return head('🔴', `АТАКА · ${SIGNAL_LABEL.foreign_geo}`);
+  }
+  if (verdictKind === KINDS.benign_peak) {
+    return head('🟡', 'ПИК НАГРУЗКИ · похоже на легитимный всплеск');
+  }
+  return head('🔴', 'Детекция: рост выше порога');
+}
+
+function formatAlertHighlights({ byProto, verdict, investigate, hourUsual }) {
+  const all = byProto?.all || {};
+  const udp = byProto?.udp || {};
+  const amp = ampMetrics(udp);
+  const geo = evaluateForeignGeo(all);
+  const hour = verdict?.hourRatio != null
+    ? `к норме часа ×${Number(verdict.hourRatio).toFixed(2)}`
+    : `рост ${formatGrowthMsg(all.growth_bps)}`;
+  const usual = hourUsual > 0 ? ` (обычно ${formatBpsMsg(hourUsual)})` : '';
+  const volumeMark = verdict?.hourRatio != null && Number(verdict.hourRatio) >= 1.8 ? '‼' : '⚠';
+  const lines = [
+    `${volumeMark} Объём: <b>${escapeHtml(formatBpsMsg(all.bps))}</b> · ${escapeHtml(hour)}${escapeHtml(usual)}`,
+  ];
+  const tcp = byProto?.tcp || {};
+  const split = [
+    Number(tcp.bps) > 0 ? `TCP ${formatBpsMsg(tcp.bps)}` : '',
+    Number(udp.bps) > 0 ? `UDP ${formatBpsMsg(udp.bps)}` : '',
+  ].filter(Boolean);
+  if (split.length) lines.push(`   ${escapeHtml(split.join(' · '))}`);
+  let ampShown = false;
+  if (amp.share != null && amp.bps >= 50e6) {
+    const mark = isAmplificationHit(udp) ? '‼' : '⚠';
+    const l4 = formatL4Sources(investigate?.l4src);
+    lines.push(`${mark} Отражатели: <b>${(amp.share * 100).toFixed(0)}% UDP</b>`
+      + ` · ${amp.srcs} источников${l4 !== '—' ? ` · ${escapeHtml(l4)}` : ''}`);
+    ampShown = true;
+  }
+  const victim = formatVictim(investigate?.victim);
+  if (victim !== '—' || investigate?.error) {
+    const focused = Number(investigate?.victim?.share) >= 0.8;
+    const prefix = focused ? '‼ Цель: ' : 'Куда: ';
+    const body = focused ? `<b>${escapeHtml(victim)}</b>` : escapeHtml(victim);
+    const failed = investigate?.error
+      ? ` (разбор не удался: ${escapeHtml(shortErrorMsg(investigate.error))})`
+      : '';
+    lines.push(`${prefix}${body}${failed}`);
+  } else {
+    lines.push(`Куда: ${escapeHtml(victim)}`);
+  }
+  if (geo.share != null && (geo.hit || geo.share >= 0.15)) {
+    const mark = geo.hit ? '‼' : '⚠';
+    const growth = geo.shareGrowth != null ? ` — ×${geo.shareGrowth.toFixed(1)} к норме часа` : '';
+    const usualShare = geo.shareNorm != null ? ` (обычно ${(geo.shareNorm * 100).toFixed(0)}%)` : '';
+    lines.push(`${mark} Заграница <b>${(geo.share * 100).toFixed(0)}%</b>${escapeHtml(growth)}${escapeHtml(usualShare)}`);
+    const countries = formatTopCountries(geo.top);
+    if (countries) lines.push(`   ${escapeHtml(countries)}`);
+  }
+  const pkt = Number(udp.avg_packet_bytes ?? udp.avgPacketBytes ?? all.avg_packet_bytes ?? all.avgPacketBytes);
+  if (pkt >= AMP_PKT_MIN) lines.push(`⚠ Пакеты <b>${Math.round(pkt)} Б</b> — крупные, близко к MTU`);
+  return { lines, ampShown };
 }
 
 function formatAlertMessage({
@@ -463,46 +680,63 @@ function formatAlertMessage({
   verdict,
   investigate,
   binding,
+  signals,
 }) {
-  const kind = scope === 'net' ? 'сеть /24' : 'абонент';
-  const verdictKind = verdict?.kind || '';
-  const title = isAttackKind(verdictKind)
-    ? `🔴 ДЕТЕКЦИЯ · ${KIND_LABEL[verdictKind] || verdictKind}`
-    : verdictKind === KINDS.benign_peak
-      ? '🟡 ПИК НАГРУЗКИ · похоже на легитимный всплеск'
-      : '🔴 Детекция: рост выше порога';
-  // Not "рост": the hour ratio is a share of the hour envelope, and ×0.96 read
-  // as growth suggested a spike while the volume was inside the norm.
-  const hour = verdict?.hourRatio != null
-    ? `к норме часа ×${Number(verdict.hourRatio).toFixed(2)}`
-    : `рост ${formatGrowthMsg(byProto?.all?.growth_bps)}`;
-  const markup = scope === 'client' ? formatClientMarkup(binding) : (scope === 'net' ? String(scopeId || '') : '');
+  const signalList = Array.isArray(signals) && signals.length ? signals : [SIGNALS.volume];
+  const title = formatAlertHeadline({ ...verdict, l4src: investigate?.l4src }, signalList);
+  // Префикс сети уже стоит в шапке, поэтому разметка нужна только абонентам.
+  const markup = scope === 'client' ? formatClientMarkup(binding) : '';
   const markupLine = markup
     ? (binding?.bindMode === 'ports' ? `Порт: ${markup}` : `IP: ${markup}`)
     : '';
-  const header = [
-    title,
-    '',
-    `Объект: ${name || scopeId}`,
-    `Тип объекта: ${kind}`,
-    markupLine,
-    `ID: ${scopeId}`,
-    `Минута: ${formatMinuteMsk(minute)}`,
-    `Объём: ${formatBpsMsg(byProto?.all?.bps)} · ${hour}`,
-    verdict?.reason ? `Почему: ${verdict.reason}` : '',
-    `Куда: ${formatVictim(investigate?.victim)}${investigate?.error ? ` (разбор не удался: ${shortErrorMsg(investigate.error)})` : ''}`,
-    `Откуда сети: ${formatSourceNets(investigate?.source24)}`,
-    `Коммутатор вход: ${formatSwitchPort(investigate?.switchIn)}`,
-    `Коммутатор выход: ${formatSwitchPort(investigate?.switchOut)}`,
-    `L4 откуда: ${formatL4Sources(investigate?.l4src)}`,
-    `Что делать: ${actionFor(verdict, investigate)}`,
-    `Порог: ×${Number(threshold).toFixed(2)} (bps или pps${thresholdIsCustom ? ', индивидуальный' : ''})`,
-    `Стабильно: ${normalizeStreak(streak)} знач. подряд`,
-    `Рассылка по: ${ALERT_SCOPE_LABEL[normalizeAlertScope(alertScope)] || 'всё'}`,
-    '',
-  ].filter((line, idx, arr) => line !== '' || arr[idx - 1] !== '');
-  const body = ['all', 'tcp', 'udp'].map((proto) => formatProtoBlock(proto, byProto?.[proto]));
-  return [...header, ...body].join('\n');
+  const { lines: highlights, ampShown } = formatAlertHighlights({
+    byProto,
+    verdict,
+    investigate,
+    hourUsual: Number(verdict?.hourCeiling || verdict?.hourP95 || 0),
+  });
+  const l4 = formatL4Sources(investigate?.l4src);
+  const switchIn = formatSwitchPort(investigate?.switchIn);
+  const switchOut = formatSwitchPort(investigate?.switchOut);
+  const sourceNets = formatSourceNets(investigate?.source24);
+  // У пика нет строк с маркерами, поэтому причина — единственное объяснение;
+  // у атаки она дословно повторяет то, что уже разложено по строкам выше.
+  const reasonLine = verdict?.kind === KINDS.benign_peak && verdict?.reason
+    ? `Почему: ${verdict.reason}`
+    : '';
+  const object = scope === 'net'
+    ? `Сеть /24: <b>${escapeHtml(name && name !== scopeId ? `${name} (${scopeId})` : scopeId)}</b>`
+    : `Клиент: <b>${escapeHtml(name || scopeId)}</b> (${escapeHtml(scopeId)})`;
+  const blocks = [
+    [
+      title,
+      object,
+      `Минута: ${escapeHtml(formatMinuteMsk(minute))}`,
+    ],
+    [...highlights, reasonLine],
+    [`<b>Что делать:</b> ${escapeHtml(actionFor(verdict, investigate))}`],
+    [
+      sourceNets !== '—' ? `Откуда сети: ${escapeHtml(sourceNets)}` : '',
+      // Порты источника уже названы в строке про отражатели.
+      !ampShown && l4 !== '—' ? `L4 откуда: ${escapeHtml(l4)}` : '',
+      switchIn !== '—' ? `Коммутатор вход: ${escapeHtml(switchIn)}` : '',
+      switchOut !== '—' ? `Коммутатор выход: ${escapeHtml(switchOut)}` : '',
+      markupLine ? escapeHtml(markupLine) : '',
+      escapeHtml(`Порог ×${Number(threshold).toFixed(2)}${thresholdIsCustom ? ' (индивидуальный)' : ''}`
+        + ` · стабильно ${normalizeStreak(streak)} знач.`
+        + ` · рассылка: ${ALERT_SCOPE_LABEL[normalizeAlertScope(alertScope)] || 'всё'}`),
+    ],
+    ['<b>Метрики за минуту</b>'],
+    ...['all', 'tcp', 'udp'].map((proto) => [formatProtoBlock(
+      proto,
+      byProto?.[proto],
+      outOfRangeFields(proto, byProto?.[proto], { verdict, threshold }),
+    )]),
+  ];
+  return blocks
+    .map((block) => block.filter(Boolean).join('\n'))
+    .filter(Boolean)
+    .join('\n\n');
 }
 
 function formatNormalizeMessage({
@@ -515,43 +749,63 @@ function formatNormalizeMessage({
   streak = DEFAULT_NORMALIZE_STREAK,
   byProto,
 }) {
-  const kind = scope === 'net' ? 'сеть /24' : 'абонент';
-  const header = [
-    '🟢 Детекция: нормализация',
-    '',
-    `Объект: ${name || scopeId}`,
-    `Тип: ${kind}`,
-    `ID: ${scopeId}`,
-    `Алерт: ${formatMinuteMsk(alertMinute)}`,
-    `Нормализация: ${formatMinuteMsk(minute)}`,
-    `Порог: ×${Number(threshold).toFixed(2)} (bps или pps)`,
-    `Ниже нормы: ${normalizeStreak(streak, DEFAULT_NORMALIZE_STREAK)} знач. подряд`,
-    '',
+  const blocks = [
+    [
+      '🟢 <b>НОРМА · трафик вернулся к обычному</b>',
+      scope === 'net'
+        ? `Сеть /24: <b>${escapeHtml(name && name !== scopeId ? `${name} (${scopeId})` : scopeId)}</b>`
+        : `Клиент: <b>${escapeHtml(name || scopeId)}</b> (${escapeHtml(scopeId)})`,
+      `Алерт был: ${escapeHtml(formatMinuteMsk(alertMinute))}`,
+      `Нормализация: ${escapeHtml(formatMinuteMsk(minute))}`,
+    ],
+    [
+      escapeHtml(`Порог ×${Number(threshold).toFixed(2)}`
+        + ` · ниже нормы ${normalizeStreak(streak, DEFAULT_NORMALIZE_STREAK)} знач. подряд`),
+    ],
+    ['<b>Метрики за минуту</b>'],
+    ...['all', 'tcp', 'udp'].map((proto) => [formatProtoBlock(proto, byProto?.[proto])]),
   ];
-  const body = ['all', 'tcp', 'udp'].map((proto) => formatProtoBlock(proto, byProto[proto]));
-  return [...header, ...body].join('\n');
+  return blocks
+    .map((block) => block.filter(Boolean).join('\n'))
+    .filter(Boolean)
+    .join('\n\n');
 }
 
 function pickAlertCandidates(allRows, previousByKey, threshold, options = {}) {
-  const streak = normalizeStreak(options.streak);
+  const settings = options.settings || {};
   const enabledAtMs = options.enabledAtMs;
   const alertScope = normalizeAlertScope(options.alertScope);
   const activeKeys = options.activeKeys instanceof Set ? options.activeKeys : new Set();
+  const grouped = options.grouped instanceof Map ? options.grouped : new Map();
   const out = [];
   for (const row of allRows) {
     if (String(row.proto || '') !== 'all') continue;
     if (!matchesAlertScope(row, alertScope)) continue;
-    const key = objectKey(row.scope, row.scope_id);
-    if (activeKeys.has(key)) continue;
-    const prev = previousByKey.get(key) || [];
-    const history = [row, ...prev];
+    const objectId = objectKey(row.scope, row.scope_id);
+    const group = grouped.get(objectId) || { byProto: { all: row } };
+    const prev = previousByKey.get(objectId) || [];
     const t = resolveGrowthThreshold(row.scope, row.scope_id, threshold, options.thresholdByKey);
-    if (shouldSendAlert(history, t, streak, enabledAtMs)) {
+    for (const signal of [SIGNALS.volume, SIGNALS.amplification, SIGNALS.foreign_geo]) {
+      const cfg = signalSettings(settings, signal);
+      if (!cfg.enabled) continue;
+      if (signal === SIGNALS.foreign_geo && String(row.scope) !== 'client') continue;
+      const signalKey = objectSignalKey(row.scope, row.scope_id, signal);
+      if (activeKeys.has(signalKey) || (signal === SIGNALS.volume && activeKeys.has(objectId))) continue;
+      const history = [row, ...prev];
+      const hot = (item) => isSignalHot(signal, item, group, t);
+      const ready = signal === SIGNALS.volume
+        ? shouldSendAlert(history, t, options.streak ?? cfg.streak, enabledAtMs)
+        : shouldSendSignal(history, hot, cfg.streak, enabledAtMs);
+      if (!ready) continue;
       out.push({
         row,
-        key,
+        key: signal === SIGNALS.volume ? objectId : signalKey,
+        objectKey: objectId,
+        signalKey,
+        signal,
         threshold: t,
         thresholdIsCustom: hasGrowthOverride(row.scope, row.scope_id, options.thresholdByKey),
+        streak: signal === SIGNALS.volume ? (options.streak ?? cfg.streak) : cfg.streak,
       });
     }
   }
@@ -559,21 +813,36 @@ function pickAlertCandidates(allRows, previousByKey, threshold, options = {}) {
 }
 
 function pickNormalizeCandidates(allRows, previousByKey, threshold, options = {}) {
-  const streak = normalizeStreak(options.streak, DEFAULT_NORMALIZE_STREAK);
+  const settings = options.settings || {};
   const activeByKey = options.activeByKey instanceof Map ? options.activeByKey : new Map();
+  const grouped = options.grouped instanceof Map ? options.grouped : new Map();
+  const seen = new Set();
   const out = [];
   for (const row of allRows) {
     if (String(row.proto || '') !== 'all') continue;
-    const key = objectKey(row.scope, row.scope_id);
-    const active = activeByKey.get(key);
-    if (!active) continue;
-    const prev = previousByKey.get(key) || [];
+    const objectId = objectKey(row.scope, row.scope_id);
+    const group = grouped.get(objectId) || { byProto: { all: row } };
+    const prev = previousByKey.get(objectId) || [];
     const history = [row, ...prev];
-    const alertBps = active.alertByProto?.all?.bps ?? active.alertBps;
-    const hourP95 = active.verdict?.hourP95;
-    const t = Number(active.threshold) || resolveGrowthThreshold(row.scope, row.scope_id, threshold, options.thresholdByKey);
-    if (shouldSendNormalize(history, t, streak, { alertBps, hourP95 })) {
-      out.push({ row, key, active });
+    for (const signal of [SIGNALS.volume, SIGNALS.amplification, SIGNALS.foreign_geo]) {
+      const signalKey = objectSignalKey(row.scope, row.scope_id, signal);
+      const active = activeByKey.get(signalKey) || (signal === SIGNALS.volume ? activeByKey.get(objectId) : null);
+      if (!active) continue;
+      const dedupe = active.id || signalKey;
+      if (seen.has(dedupe)) continue;
+      seen.add(dedupe);
+      const activeSignal = active.signal || SIGNALS.volume;
+      if (activeSignal !== signal && !(signal === SIGNALS.volume && !active.signal)) continue;
+      const cfg = signalSettings(settings, activeSignal);
+      const t = Number(active.threshold) || resolveGrowthThreshold(row.scope, row.scope_id, threshold, options.thresholdByKey);
+      const ready = activeSignal === SIGNALS.volume
+        ? shouldSendNormalize(history, t, options.streak ?? cfg.normalizeStreak, {
+          alertBps: active.alertByProto?.all?.bps ?? active.alertBps,
+          hourP95: active.verdict?.hourP95,
+        })
+        : shouldSendSignal(history, (item) => !isSignalHot(activeSignal, item, group, t), cfg.normalizeStreak);
+      if (!ready) continue;
+      out.push({ row, key: objectId, signalKey, signal: activeSignal, active });
     }
   }
   return out;
@@ -619,7 +888,13 @@ async function ensureDetectionTelegramTables() {
           ADD COLUMN IF NOT EXISTS streak UInt16 DEFAULT ${DEFAULT_STREAK},
           ADD COLUMN IF NOT EXISTS normalize_streak UInt16 DEFAULT ${DEFAULT_NORMALIZE_STREAK},
           ADD COLUMN IF NOT EXISTS api_url String DEFAULT '${DEFAULT_TELEGRAM_API_URL}',
-          ADD COLUMN IF NOT EXISTS proxy_url String DEFAULT ''
+          ADD COLUMN IF NOT EXISTS proxy_url String DEFAULT '',
+          ADD COLUMN IF NOT EXISTS amp_enabled UInt8 DEFAULT 1,
+          ADD COLUMN IF NOT EXISTS geo_enabled UInt8 DEFAULT 1,
+          ADD COLUMN IF NOT EXISTS amp_streak UInt16 DEFAULT 1,
+          ADD COLUMN IF NOT EXISTS geo_streak UInt16 DEFAULT 1,
+          ADD COLUMN IF NOT EXISTS amp_normalize_streak UInt16 DEFAULT ${DEFAULT_NORMALIZE_STREAK},
+          ADD COLUMN IF NOT EXISTS geo_normalize_streak UInt16 DEFAULT ${DEFAULT_NORMALIZE_STREAK}
       `, {}, { name: 'detection/telegram-ensure-columns' });
 
       await executeCommand(`
@@ -635,6 +910,7 @@ async function ensureDetectionTelegramTables() {
           alert_json String DEFAULT '',
           normalize_json String DEFAULT '',
           threshold Float64 DEFAULT ${DEFAULT_GROWTH_THRESHOLD},
+          signal LowCardinality(String) DEFAULT 'volume',
           updated_at DateTime('UTC') DEFAULT now()
         )
         ENGINE = ReplacingMergeTree(updated_at)
@@ -642,6 +918,11 @@ async function ensureDetectionTelegramTables() {
         TTL alert_minute + toIntervalDay(90)
         SETTINGS index_granularity = 8192
       `, {}, { name: 'detection/events-ensure-table' });
+
+      await executeCommand(`
+        ALTER TABLE ${eventsTableRef()}
+          ADD COLUMN IF NOT EXISTS signal LowCardinality(String) DEFAULT 'volume'
+      `, {}, { name: 'detection/events-ensure-signal' });
 
       await executeCommand(`
         CREATE OR REPLACE VIEW ${settingsViewRef()}
@@ -656,6 +937,12 @@ async function ensureDetectionTelegramTables() {
           api_url String,
           proxy_url String,
           enabled UInt8,
+          amp_enabled UInt8,
+          geo_enabled UInt8,
+          amp_streak UInt16,
+          geo_streak UInt16,
+          amp_normalize_streak UInt16,
+          geo_normalize_streak UInt16,
           updated_at DateTime('UTC')
         )
         AS SELECT
@@ -669,6 +956,12 @@ async function ensureDetectionTelegramTables() {
           api_url,
           proxy_url,
           enabled,
+          amp_enabled,
+          geo_enabled,
+          amp_streak,
+          geo_streak,
+          amp_normalize_streak,
+          geo_normalize_streak,
           updated_at_latest AS updated_at
         FROM
         (
@@ -683,6 +976,12 @@ async function ensureDetectionTelegramTables() {
             argMax(api_url, updated_at) AS api_url,
             argMax(proxy_url, updated_at) AS proxy_url,
             argMax(enabled, updated_at) AS enabled,
+            argMax(amp_enabled, updated_at) AS amp_enabled,
+            argMax(geo_enabled, updated_at) AS geo_enabled,
+            argMax(amp_streak, updated_at) AS amp_streak,
+            argMax(geo_streak, updated_at) AS geo_streak,
+            argMax(amp_normalize_streak, updated_at) AS amp_normalize_streak,
+            argMax(geo_normalize_streak, updated_at) AS geo_normalize_streak,
             max(updated_at) AS updated_at_latest
           FROM ${settingsTableRef()}
           GROUP BY settings_id
@@ -699,7 +998,8 @@ async function ensureDetectionTelegramTables() {
 async function getCurrentSettingsRaw() {
   await ensureDetectionTelegramTables();
   const { rows } = await query(`
-    SELECT bot_token, chat_id, growth_threshold, alert_scope, streak, normalize_streak, api_url, proxy_url, enabled, updated_at
+    SELECT bot_token, chat_id, growth_threshold, alert_scope, streak, normalize_streak, api_url, proxy_url, enabled,
+           amp_enabled, geo_enabled, amp_streak, geo_streak, amp_normalize_streak, geo_normalize_streak, updated_at
     FROM ${settingsViewRef()}
     WHERE settings_id = {id:String}
     LIMIT 1
@@ -742,6 +1042,18 @@ async function saveDetectionTelegramSettings(payload = {}) {
   const normalizeStreakValue = normalizeStreak(normalizeNum, DEFAULT_NORMALIZE_STREAK);
   const apiUrl = normalizeTelegramApiUrl(payload.apiUrl ?? payload.api_url ?? base.api_url);
   const proxyUrl = resolveTelegramProxyUrl(payload.proxyUrl ?? payload.proxy_url, base.proxy_url);
+  const ampEnabled = boolInt(payload.ampEnabled ?? payload.amp_enabled, Number(base.amp_enabled ?? 1) === 1 ? 1 : 0);
+  const geoEnabled = boolInt(payload.geoEnabled ?? payload.geo_enabled, Number(base.geo_enabled ?? 1) === 1 ? 1 : 0);
+  const ampStreak = normalizeStreak(payload.ampStreak ?? payload.amp_streak ?? base.amp_streak, 1);
+  const geoStreak = normalizeStreak(payload.geoStreak ?? payload.geo_streak ?? base.geo_streak, 1);
+  const ampNormalizeStreak = normalizeStreak(
+    payload.ampNormalizeStreak ?? payload.amp_normalize_streak ?? base.amp_normalize_streak,
+    DEFAULT_NORMALIZE_STREAK,
+  );
+  const geoNormalizeStreak = normalizeStreak(
+    payload.geoNormalizeStreak ?? payload.geo_normalize_streak ?? base.geo_normalize_streak,
+    DEFAULT_NORMALIZE_STREAK,
+  );
   if (enabled && (!botToken || !chatId)) {
     throw apiError('Укажите токен бота и id группы перед включением Telegram');
   }
@@ -757,6 +1069,12 @@ async function saveDetectionTelegramSettings(payload = {}) {
     api_url: apiUrl,
     proxy_url: proxyUrl,
     enabled,
+    amp_enabled: ampEnabled,
+    geo_enabled: geoEnabled,
+    amp_streak: ampStreak,
+    geo_streak: geoStreak,
+    amp_normalize_streak: ampNormalizeStreak,
+    geo_normalize_streak: geoNormalizeStreak,
   }], { name: 'detection/telegram-settings-save' });
 
   return getDetectionTelegramSettings();
@@ -804,6 +1122,9 @@ async function sendTelegramMessage(text, cfg) {
       body: JSON.stringify({
         chat_id: configRow.chatId,
         text: String(text || ''),
+        // Жирный текст в сообщениях детекции; всё подставляемое экранируется
+        // в формировщиках, иначе Telegram отклонит разметку.
+        parse_mode: 'HTML',
         disable_web_page_preview: true,
       }),
     }, proxyUrl);
@@ -823,7 +1144,48 @@ async function sendTelegramMessage(text, cfg) {
 }
 
 async function sendTestTelegramMessage() {
-  return sendTelegramMessage('Grapes NTA: проверка Telegram. Оповещения детекции настроены.');
+  const text = formatAlertMessage({
+    name: 'ООО "Митигатор Клауд"',
+    scope: 'client',
+    scopeId: '101443',
+    minute: '2026-09-06 16:27:00',
+    threshold: 1.6,
+    streak: 1,
+    alertScope: 'all',
+    signals: [SIGNALS.amplification, SIGNALS.foreign_geo],
+    byProto: {
+      all: {
+        bps: 2.925e9, growth_bps: 3.56, avg_packet_bytes: 1127,
+        foreign_bytes: 7.4e9, foreign_srcs: 45, top_countries: 'RU:0.60,UZ:0.12,SA:0.09,KZ:0.06,US:0.04',
+        growth_foreign_share: 3.7, growth_foreign_bps: 10,
+        bytes: 2.925e9 * 60 / 8,
+      },
+      tcp: { bps: 0.15e9 },
+      udp: {
+        bps: 2.741e9, amp_bytes: 3.683e9, amp_packets: 4065536, amp_srcs: 40,
+        avg_packet_bytes: 1216, bytes: 2.741e9 * 60 / 8,
+      },
+    },
+    verdict: {
+      kind: KINDS.amplification,
+      reason: 'амплификация в один сервер · топ IP 99.8% · отражатели 18%',
+      hourRatio: 12.44,
+      hourCeiling: 0.235e9,
+    },
+    investigate: {
+      victim: { ip: '185.x.x.x', port: 443, protoLabel: 'UDP', share: 0.998 },
+      source24: [{ net24: '5.188.0.0/24', share: 0.12, asn: 8193, ips: 7 }],
+      switchIn: { switchIp: '172.18.19.165', ifName: 'port-channel2', share: 1 },
+      switchOut: null,
+      l4src: [
+        { port: 53, proto: 17, share: 0.33 },
+        { port: 123, proto: 17, share: 0.13 },
+      ],
+    },
+  });
+  return sendTelegramMessage(
+    `Grapes NTA: тестовый алерт в новом формате.\n\n${text}`,
+  );
 }
 
 async function loadPreviousAllRows(minute, keys, limit = DEFAULT_STREAK) {
@@ -832,31 +1194,58 @@ async function loadPreviousAllRows(minute, keys, limit = DEFAULT_STREAK) {
   const take = normalizeStreak(limit);
   const keySet = new Set(keys.map((k) => objectKey(k.scope, k.scopeId)));
   const { rows } = await query(`
-    SELECT scope, scope_id, minute, growth_bps, growth_pps, bps
+    SELECT scope, scope_id, proto, minute, growth_bps, growth_pps, bps, bytes,
+           amp_bytes, amp_packets, amp_srcs, growth_amp,
+           foreign_bytes, foreign_srcs, top_countries, growth_foreign_bps, growth_foreign_share
     FROM (
       SELECT
         scope,
         scope_id,
+        proto,
         minute,
         growth_bps,
         growth_pps,
         bps,
-        row_number() OVER (PARTITION BY scope, scope_id ORDER BY minute DESC) AS rn
+        bytes,
+        amp_bytes,
+        amp_packets,
+        amp_srcs,
+        growth_amp,
+        foreign_bytes,
+        foreign_srcs,
+        top_countries,
+        growth_foreign_bps,
+        growth_foreign_share,
+        row_number() OVER (PARTITION BY scope, scope_id, proto ORDER BY minute DESC) AS rn
       FROM ${tableRef()} FINAL
-      WHERE proto = 'all'
+      WHERE proto IN ('all', 'udp')
         AND minute < ${utcDateTime('before')}
     )
     WHERE rn <= {take:UInt16}
     ORDER BY minute DESC
   `, { before: formatCh(parseUtc(minute)), take }, { name: 'detection/telegram-prev-rows' });
 
-  const map = new Map();
+  const merged = new Map();
   for (const r of rows) {
     const key = objectKey(r.scope, r.scope_id);
     if (!keySet.has(key)) continue;
-    const list = map.get(key) || [];
-    list.push(r);
-    map.set(key, list);
+    const stamp = String(r.minute);
+    const byMinute = merged.get(key) || new Map();
+    const cur = byMinute.get(stamp) || { minute: r.minute, scope: r.scope, scope_id: r.scope_id };
+    if (String(r.proto) === 'udp') {
+      cur.amp_bytes = r.amp_bytes;
+      cur.amp_packets = r.amp_packets;
+      cur.amp_srcs = r.amp_srcs;
+      cur.growth_amp = r.growth_amp;
+    } else {
+      Object.assign(cur, r);
+    }
+    byMinute.set(stamp, cur);
+    merged.set(key, byMinute);
+  }
+  const map = new Map();
+  for (const [key, byMinute] of merged) {
+    map.set(key, [...byMinute.values()].sort((a, b) => String(b.minute).localeCompare(String(a.minute))));
   }
   return map;
 }
@@ -912,6 +1301,7 @@ function mapEventRow(row) {
     id: String(row.event_id),
     scope: String(row.scope || ''),
     scopeId: String(row.scope_id || ''),
+    signal: String(row.signal || SIGNALS.volume),
     name: String(row.name || row.scope_id || ''),
     status: String(row.status || ''),
     alertMinute: row.alert_minute || null,
@@ -947,7 +1337,7 @@ function persistActiveAlertSnapshot(active) {
 async function loadActiveEventsByKey() {
   await ensureDetectionTelegramTables();
   const { rows } = await query(`
-    SELECT event_id, scope, scope_id, name, status, alert_minute, normalize_minute, alert_json, normalize_json, threshold
+    SELECT event_id, scope, scope_id, name, status, signal, alert_minute, normalize_minute, alert_json, normalize_json, threshold
     FROM (
       SELECT
         event_id,
@@ -955,6 +1345,7 @@ async function loadActiveEventsByKey() {
         argMax(scope_id, updated_at) AS scope_id,
         argMax(name, updated_at) AS name,
         argMax(status, updated_at) AS status,
+        argMax(signal, updated_at) AS signal,
         argMax(alert_minute, updated_at) AS alert_minute,
         argMax(normalize_minute, updated_at) AS normalize_minute,
         argMax(alert_json, updated_at) AS alert_json,
@@ -967,7 +1358,10 @@ async function loadActiveEventsByKey() {
   `, {}, { name: 'detection/events-active' });
   const map = new Map();
   for (const row of rows) {
-    map.set(objectKey(row.scope, row.scope_id), mapEventRow(row));
+    const event = mapEventRow(row);
+    const signal = event.signal || SIGNALS.volume;
+    map.set(objectSignalKey(event.scope, event.scopeId, signal), event);
+    if (signal === SIGNALS.volume) map.set(objectKey(event.scope, event.scopeId), event);
   }
   return map;
 }
@@ -1012,7 +1406,7 @@ async function loadDetectionEvents({ status = 'active', limit = 200, from, to } 
     ? `status IN ('normalized', 'peak')`
     : `status = 'active'`;
   const { rows } = await query(`
-    SELECT event_id, scope, scope_id, name, status, alert_minute, normalize_minute, alert_json, normalize_json, threshold
+    SELECT event_id, scope, scope_id, name, status, signal, alert_minute, normalize_minute, alert_json, normalize_json, threshold
     FROM (
       SELECT
         event_id,
@@ -1020,6 +1414,7 @@ async function loadDetectionEvents({ status = 'active', limit = 200, from, to } 
         argMax(scope_id, updated_at) AS scope_id,
         argMax(name, updated_at) AS name,
         argMax(status, updated_at) AS status,
+        argMax(signal, updated_at) AS signal,
         argMax(alert_minute, updated_at) AS alert_minute,
         argMax(normalize_minute, updated_at) AS normalize_minute,
         argMax(alert_json, updated_at) AS alert_json,
@@ -1055,7 +1450,7 @@ function buildDetectionEventsCsv(events) {
     'avg_packet_bytes', 'cv_percent',
   ];
   const headers = [
-    'event_id', 'scope', 'scope_id', 'name', 'status', 'phase', 'phase_minute',
+    'event_id', 'scope', 'scope_id', 'signal', 'name', 'status', 'phase', 'phase_minute',
     'proto', 'threshold', ...metricHeaders,
   ];
   const lines = [headers.join(',')];
@@ -1072,6 +1467,7 @@ function buildDetectionEventsCsv(events) {
           event.id,
           event.scope,
           event.scopeId,
+          event.signal || SIGNALS.volume,
           event.name,
           event.status,
           phase.id,
@@ -1128,32 +1524,52 @@ async function processDetectionAlerts({ minute, rows, nameByKey }) {
   const grouped = groupRowsByObject(rows);
   const activeByKey = await loadActiveEventsByKey();
   const thresholdByKey = await loadThresholdMap();
-  const above = allRows.filter((r) => isAboveGrowthThreshold(
-    r,
-    resolveGrowthThreshold(r.scope, r.scope_id, settings.growthThreshold, thresholdByKey),
-  ));
+  const above = allRows.filter((r) => {
+    const objectId = objectKey(r.scope, r.scope_id);
+    const group = grouped.get(objectId);
+    const t = resolveGrowthThreshold(r.scope, r.scope_id, settings.growthThreshold, thresholdByKey);
+    return isSignalHot(SIGNALS.volume, r, group, t)
+      || isSignalHot(SIGNALS.amplification, r, group, t)
+      || isSignalHot(SIGNALS.foreign_geo, r, group, t);
+  });
   const watchKeys = [];
   const seen = new Set();
-  for (const row of [...above, ...allRows.filter((r) => activeByKey.has(objectKey(r.scope, r.scope_id)))]) {
+  for (const row of allRows) {
     const key = objectKey(row.scope, row.scope_id);
     if (seen.has(key)) continue;
+    const hasActive = [SIGNALS.volume, SIGNALS.amplification, SIGNALS.foreign_geo]
+      .some((signal) => activeByKey.has(objectSignalKey(row.scope, row.scope_id, signal))
+        || (signal === SIGNALS.volume && activeByKey.has(key)));
+    if (!above.includes(row) && !hasActive) continue;
     seen.add(key);
     watchKeys.push({ scope: row.scope, scopeId: row.scope_id });
   }
 
-  const take = Math.max(settings.streak, settings.normalizeStreak);
+  const take = Math.max(
+    settings.streak,
+    settings.normalizeStreak,
+    settings.ampStreak,
+    settings.geoStreak,
+    settings.ampNormalizeStreak,
+    settings.geoNormalizeStreak,
+  );
   const previousByKey = await loadPreviousAllRows(minute, watchKeys, take);
-  const alertCandidates = pickAlertCandidates(allRows, previousByKey, settings.growthThreshold, {
-    streak: settings.streak,
+  const pickOpts = {
+    settings,
+    grouped,
     enabledAtMs: settings.enabled && settings.updatedAt ? parseUtc(settings.updatedAt) : tgCfg?.enabledAtMs,
     alertScope: settings.alertScope,
     activeKeys: new Set(activeByKey.keys()),
     thresholdByKey,
-  });
+    streak: settings.streak,
+  };
+  const alertCandidates = pickAlertCandidates(allRows, previousByKey, settings.growthThreshold, pickOpts);
   const normalizeCandidates = pickNormalizeCandidates(allRows, previousByKey, settings.growthThreshold, {
-    streak: settings.normalizeStreak,
+    settings,
+    grouped,
     activeByKey,
     thresholdByKey,
+    streak: settings.normalizeStreak,
   });
 
   if (!alertCandidates.length && !normalizeCandidates.length) {
@@ -1172,10 +1588,21 @@ async function processDetectionAlerts({ minute, rows, nameByKey }) {
   let closed = 0;
   const errors = [];
 
-  for (const { row, key, threshold: objectThreshold, thresholdIsCustom } of alertCandidates) {
-    const group = grouped.get(key);
-    const name = nameByKey?.get(key) || row.scope_id;
+  const alertGroups = new Map();
+  for (const candidate of alertCandidates) {
+    const groupKey = `${candidate.objectKey || candidate.key}|${minute}`;
+    const list = alertGroups.get(groupKey) || [];
+    list.push(candidate);
+    alertGroups.set(groupKey, list);
+  }
+
+  for (const candidates of alertGroups.values()) {
+    const { row, threshold: objectThreshold, thresholdIsCustom } = candidates[0];
+    const objectId = objectKey(row.scope, row.scope_id);
+    const group = grouped.get(objectId);
+    const name = nameByKey?.get(objectId) || row.scope_id;
     const byProto = group?.byProto || { all: row };
+    const signals = candidates.map((c) => c.signal || SIGNALS.volume);
     let hour = { p95: null, p999: null };
     let investigate = emptyInvestigate();
     let binding = null;
@@ -1183,25 +1610,25 @@ async function processDetectionAlerts({ minute, rows, nameByKey }) {
       try {
         binding = await loadClientBinding(row.scope_id);
       } catch (err) {
-        errors.push({ key, message: `binding: ${err.message}` });
+        errors.push({ key: objectId, message: `binding: ${err.message}` });
       }
     }
     try {
       hour = await loadHourEnvelope({ scope: row.scope, scopeId: row.scope_id, minute });
     } catch (err) {
-      errors.push({ key, message: `hour: ${err.message}` });
+      errors.push({ key: objectId, message: `hour: ${err.message}` });
     }
     let verdict = classifyFromMetrics(byProto, hour);
-    if (verdict.needsInvestigate) {
+    if (verdict.needsInvestigate || signals.includes(SIGNALS.amplification) || signals.includes(SIGNALS.foreign_geo)) {
       try {
         investigate = await investigateIncident({ scope: row.scope, scopeId: row.scope_id, minute });
         verdict = refineClassification(verdict, investigate);
       } catch (err) {
-        errors.push({ key, message: `investigate: ${err.message}` });
+        errors.push({ key: objectId, message: `investigate: ${err.message}` });
         investigate = { ...emptyInvestigate(), error: err.message };
       }
     }
-    const attack = isAttackKind(verdict.kind);
+    const attack = isAttackKind(verdict.kind) || signals.includes(SIGNALS.amplification) || signals.includes(SIGNALS.foreign_geo);
     const text = formatAlertMessage({
       name,
       scope: row.scope,
@@ -1209,12 +1636,13 @@ async function processDetectionAlerts({ minute, rows, nameByKey }) {
       minute,
       threshold: objectThreshold,
       thresholdIsCustom,
-      streak: settings.streak,
+      streak: candidates[0].streak || settings.streak,
       alertScope: settings.alertScope,
       byProto,
       verdict,
       investigate,
       binding,
+      signals,
     });
     const snapshot = persistAlertSnapshot(snapshotByProto(group, row), {
       verdict,
@@ -1222,23 +1650,29 @@ async function processDetectionAlerts({ minute, rows, nameByKey }) {
       binding,
       telegramText: text,
     });
-    const eventId = `${key}|${minute}`;
-    await insertDetectionEvent({
-      event_id: eventId,
-      scope: row.scope,
-      scope_id: row.scope_id,
-      name,
-      status: attack ? 'active' : 'peak',
-      alert_minute: minute,
-      normalize_minute: attack ? null : minute,
-      alert_json: JSON.stringify(snapshot),
-      normalize_json: '',
-      threshold: objectThreshold,
-    });
-    opened += 1;
+    for (const candidate of candidates) {
+      const signal = candidate.signal || SIGNALS.volume;
+      const eventId = signal === SIGNALS.volume
+        ? `${objectId}|${minute}`
+        : `${objectId}|${signal}|${minute}`;
+      await insertDetectionEvent({
+        event_id: eventId,
+        scope: row.scope,
+        scope_id: row.scope_id,
+        name,
+        status: attack ? 'active' : 'peak',
+        alert_minute: minute,
+        normalize_minute: attack ? null : minute,
+        alert_json: JSON.stringify(snapshot),
+        normalize_json: '',
+        threshold: objectThreshold,
+        signal,
+      });
+      opened += 1;
+    }
     const tg = await maybeSendTelegram(text, tgCfg);
     if (tg.sent) sent += 1;
-    if (tg.error) errors.push({ key, message: tg.error });
+    if (tg.error) errors.push({ key: objectId, message: tg.error });
   }
 
   for (const { row, key, active } of normalizeCandidates) {
@@ -1269,6 +1703,7 @@ async function processDetectionAlerts({ minute, rows, nameByKey }) {
       alert_json: JSON.stringify(persistActiveAlertSnapshot(active)),
       normalize_json: JSON.stringify(snapshot),
       threshold: active.threshold || settings.growthThreshold,
+      signal: active.signal || SIGNALS.volume,
     });
     closed += 1;
     const tg = await maybeSendTelegram(text, tgCfg);
@@ -1290,7 +1725,7 @@ async function processDetectionAlerts({ minute, rows, nameByKey }) {
 async function loadDetectionEventRaw(eventId) {
   await ensureDetectionTelegramTables();
   const { rows } = await query(`
-    SELECT event_id, scope, scope_id, name, status, alert_minute, normalize_minute, alert_json, normalize_json, threshold
+    SELECT event_id, scope, scope_id, name, status, signal, alert_minute, normalize_minute, alert_json, normalize_json, threshold
     FROM (
       SELECT
         event_id,
@@ -1298,6 +1733,7 @@ async function loadDetectionEventRaw(eventId) {
         argMax(scope_id, updated_at) AS scope_id,
         argMax(name, updated_at) AS name,
         argMax(status, updated_at) AS status,
+        argMax(signal, updated_at) AS signal,
         argMax(alert_minute, updated_at) AS alert_minute,
         argMax(normalize_minute, updated_at) AS normalize_minute,
         argMax(alert_json, updated_at) AS alert_json,
@@ -1373,6 +1809,7 @@ async function rebuildDetectionEventAlert({ scope, scopeId, minute, sendTelegram
     alert_json: JSON.stringify(next),
     normalize_json: row.normalize_json || '',
     threshold: Number(row.threshold) || settings.growthThreshold,
+    signal: row.signal || SIGNALS.volume,
   });
   let telegram = { sent: false, skipped: 'not_requested' };
   if (sendTelegram) telegram = await maybeSendTelegram(text, null);
@@ -1413,6 +1850,8 @@ module.exports = {
   matchesAlertScope,
   pickAlertCandidates,
   pickNormalizeCandidates,
+  shouldSendSignal,
+  SIGNALS,
   formatAlertMessage,
   formatNormalizeMessage,
   snapshotByProto,

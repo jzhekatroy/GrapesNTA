@@ -36,7 +36,16 @@ CREATE TABLE IF NOT EXISTS ${DB()}.${TABLE}
   port_entropy Nullable(Float64),
   port_entropy_out Nullable(Float64),
   ports_per_ip Nullable(Float64),
-  ports_per_ip_out Nullable(Float64)
+  ports_per_ip_out Nullable(Float64),
+  amp_bytes UInt64 DEFAULT 0,
+  amp_packets UInt64 DEFAULT 0,
+  amp_srcs UInt32 DEFAULT 0,
+  growth_amp Nullable(Float64),
+  foreign_bytes UInt64 DEFAULT 0,
+  foreign_srcs UInt32 DEFAULT 0,
+  top_countries String DEFAULT '',
+  growth_foreign_bps Nullable(Float64),
+  growth_foreign_share Nullable(Float64)
 )
 ENGINE = ReplacingMergeTree
 PARTITION BY toYYYYMMDD(minute)
@@ -45,10 +54,19 @@ TTL minute + toIntervalDay(16)
 `;
 
 const ADD_COLUMNS = [
-  'port_entropy',
-  'port_entropy_out',
-  'ports_per_ip',
-  'ports_per_ip_out',
+  { name: 'port_entropy', type: 'Nullable(Float64)' },
+  { name: 'port_entropy_out', type: 'Nullable(Float64)' },
+  { name: 'ports_per_ip', type: 'Nullable(Float64)' },
+  { name: 'ports_per_ip_out', type: 'Nullable(Float64)' },
+  { name: 'amp_bytes', type: 'UInt64 DEFAULT 0' },
+  { name: 'amp_packets', type: 'UInt64 DEFAULT 0' },
+  { name: 'amp_srcs', type: 'UInt32 DEFAULT 0' },
+  { name: 'growth_amp', type: 'Nullable(Float64)' },
+  { name: 'foreign_bytes', type: 'UInt64 DEFAULT 0' },
+  { name: 'foreign_srcs', type: 'UInt32 DEFAULT 0' },
+  { name: 'top_countries', type: 'String DEFAULT \'\'' },
+  { name: 'growth_foreign_bps', type: 'Nullable(Float64)' },
+  { name: 'growth_foreign_share', type: 'Nullable(Float64)' },
 ];
 
 let ensurePromise = null;
@@ -77,11 +95,11 @@ async function ensureDetectionTables() {
         return;
       }
       for (const column of ADD_COLUMNS) {
-        if (names.has(column)) continue;
+        if (names.has(column.name)) continue;
         await executeCommand(
-          `ALTER TABLE ${DB()}.${TABLE} ADD COLUMN IF NOT EXISTS ${column} Nullable(Float64)`,
+          `ALTER TABLE ${DB()}.${TABLE} ADD COLUMN IF NOT EXISTS ${column.name} ${column.type}`,
           {},
-          { name: `detection/add-${column.replace(/_/g, '-')}` },
+          { name: `detection/add-${column.name.replace(/_/g, '-')}` },
         );
       }
     })().catch((err) => {

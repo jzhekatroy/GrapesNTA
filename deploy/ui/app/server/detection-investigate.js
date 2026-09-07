@@ -2,7 +2,9 @@
 
 const { query, flowsRawTableRef, netInterfacesCurrentRef, clientsViewRef, col, flowCol } = require('./clickhouse');
 const { flowIpExpr, flowSamplerIpExpr, sflowIfIndexExpr } = require('./queries');
-const { formatCh, parseUtc, BASELINE_DAYS, EXPORT_LAG, MINUTE } = require('./detection-core');
+const {
+  formatCh, parseUtc, BASELINE_DAYS, BASELINE_QUARANTINE_MINUTES, EXPORT_LAG, MINUTE,
+} = require('./detection-core');
 const { tableRef } = require('./detection-schema');
 
 const CHEAP = {
@@ -65,18 +67,28 @@ function mapShareRow(row, extra = {}, totalBytes = 0) {
 async function loadHourEnvelope({ scope, scopeId, minute }) {
   const minuteTs = parseUtc(minute);
   if (!Number.isFinite(minuteTs) || !scopeId) {
-    return { p95: null, p999: null };
+    return { p95: null, p999: null, recentMedian: null };
   }
   const params = {
     scopeId: String(scopeId),
     minute: formatCh(minuteTs),
     days: BASELINE_DAYS,
+    quarantine: BASELINE_QUARANTINE_MINUTES,
   };
+  // Карантинный час всё равно нужен для медианы, поэтому окно остаётся одно, а
+  // квантили и медиана берутся условными агрегатами по разным его половинам.
+  const cutoff = `${utcDateTime('minute')} - INTERVAL {quarantine:UInt16} MINUTE`;
+  const envelope = (rows) => ({
+    p95: Number(rows[0]?.p95 || 0) || null,
+    p999: Number(rows[0]?.p999 || 0) || null,
+    recentMedian: Number(rows[0]?.recent_median || 0) || null,
+  });
   if (scope === 'client') {
     const { rows } = await query(`
       SELECT
-        quantileExact(0.95)(bytes * 8 / 60) AS p95,
-        quantileExact(0.999)(bytes * 8 / 60) AS p999
+        quantileExactIf(0.95)(bytes * 8 / 60, minute < ${cutoff}) AS p95,
+        quantileExactIf(0.999)(bytes * 8 / 60, minute < ${cutoff}) AS p999,
+        quantileExactIf(0.5)(bytes * 8 / 60, minute >= ${cutoff}) AS recent_median
       FROM default.traffic_client_1m
       WHERE client_id = {scopeId:String}
         AND direction = 'in'
@@ -85,12 +97,13 @@ async function loadHourEnvelope({ scope, scopeId, minute }) {
         AND toDayOfWeek(minute) = toDayOfWeek(${utcDateTime('minute')})
         AND abs(toInt8(toHour(minute)) - toInt8(toHour(${utcDateTime('minute')}))) <= 1
     `, params, { name: 'detection/hour-envelope-client' });
-    return { p95: Number(rows[0]?.p95 || 0) || null, p999: Number(rows[0]?.p999 || 0) || null };
+    return envelope(rows);
   }
   const { rows } = await query(`
     SELECT
-      quantileExact(0.95)(bps) AS p95,
-      quantileExact(0.999)(bps) AS p999
+      quantileExactIf(0.95)(bps, minute < ${cutoff}) AS p95,
+      quantileExactIf(0.999)(bps, minute < ${cutoff}) AS p999,
+      quantileExactIf(0.5)(bps, minute >= ${cutoff}) AS recent_median
     FROM ${tableRef()}
     WHERE scope = 'net'
       AND scope_id = {scopeId:String}
@@ -100,7 +113,48 @@ async function loadHourEnvelope({ scope, scopeId, minute }) {
       AND toDayOfWeek(minute) = toDayOfWeek(${utcDateTime('minute')})
       AND abs(toInt8(toHour(minute)) - toInt8(toHour(${utcDateTime('minute')}))) <= 1
   `, params, { name: 'detection/hour-envelope-net' });
-  return { p95: Number(rows[0]?.p95 || 0) || null, p999: Number(rows[0]?.p999 || 0) || null };
+  return envelope(rows);
+}
+
+async function loadForeignEnvelopes(minute) {
+  const minuteTs = parseUtc(minute);
+  if (!Number.isFinite(minuteTs)) return new Map();
+  try {
+    const { rows } = await query(`
+      SELECT
+        client_id,
+        quantileExact(0.95)(foreign_bps) AS p95_bps,
+        quantileExact(0.95)(foreign_share) AS p95_share
+      FROM (
+        SELECT
+          client_id,
+          hour,
+          sumIf(bytes, country_code NOT IN ('RU', '??', '')) * 8 / 3600 AS foreign_bps,
+          sumIf(bytes, country_code NOT IN ('RU', '??', '')) / nullIf(sum(bytes), 0) AS foreign_share
+        FROM default.traffic_client_country_1h
+        WHERE direction = 'in'
+          AND hour >= ${utcDateTime('minute')} - INTERVAL {days:UInt16} DAY
+          AND hour < toStartOfHour(${utcDateTime('minute')})
+          AND toDayOfWeek(hour) = toDayOfWeek(${utcDateTime('minute')})
+          AND abs(toInt8(toHour(hour)) - toInt8(toHour(${utcDateTime('minute')}))) <= 1
+        GROUP BY client_id, hour
+      )
+      GROUP BY client_id
+    `, {
+      minute: formatCh(minuteTs),
+      days: BASELINE_DAYS,
+    }, { name: 'detection/foreign-envelope' });
+    const map = new Map();
+    for (const row of rows) {
+      map.set(String(row.client_id), {
+        bpsP95: Number(row.p95_bps || 0) || null,
+        shareP95: Number(row.p95_share || 0) || null,
+      });
+    }
+    return map;
+  } catch {
+    return new Map();
+  }
 }
 
 async function loadClientBinding(scopeId) {
@@ -432,6 +486,7 @@ async function investigateIncident({ scope, scopeId, minute }) {
 
 module.exports = {
   loadHourEnvelope,
+  loadForeignEnvelopes,
   loadClientBinding,
   formatClientMarkup,
   investigateIncident,

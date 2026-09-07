@@ -174,7 +174,7 @@ describe('detection-telegram', () => {
     assert.equal(clients[0].key, 'client|42');
   });
 
-  it('formatAlertMessage содержит все три протокола и настройки серии', () => {
+  it('formatAlertMessage: саммери, полные метрики и без полей-дублей', () => {
     const text = formatAlertMessage({
       name: 'TestNet',
       scope: 'net',
@@ -189,14 +189,45 @@ describe('detection-telegram', () => {
         udp: { bps: 1e6, pps: 10, growth_bps: 3, growth_pps: 2, port_entropy: 4.5 },
       },
     });
-    assert.match(text, /TestNet/);
-    assert.match(text, /общее/);
-    assert.match(text, /TCP/);
-    assert.match(text, /UDP/);
-    assert.match(text, /попытки \/ ответ/);
-    assert.match(text, /3 знач/);
-    assert.match(text, /Рассылка по: всё/);
+    assert.match(text, /Сеть \/24: <b>TestNet \(10\.0\.0\.0\/24\)<\/b>/);
+    assert.match(text, /TCP 500 Мбит\/с · UDP 1\.00 Мбит\/с/);
+    assert.match(text, /Порог ×1\.60 · стабильно 3 знач\. · рассылка: всё/);
     assert.match(text, /🔴/);
+    // Полные метрики по трём протоколам остаются под саммери.
+    assert.match(text, /<b>Метрики за минуту<\/b>/);
+    assert.match(text, /<b>общее<\/b>/);
+    assert.match(text, /попытки \/ ответ/);
+    assert.match(text, /энтропия портов вх\./);
+    // Поля, дублировавшие шапку и порог.
+    assert.doesNotMatch(text, /Тип объекта/);
+    assert.doesNotMatch(text, /^ID: /m);
+    assert.doesNotMatch(text, /Порог: ×/);
+  });
+
+  it('метрики: вышедшее за рамки помечено, подставленный текст экранирован', () => {
+    const text = formatAlertMessage({
+      name: 'Ромашка & Ко <НТА>',
+      scope: 'client',
+      scopeId: '101443',
+      minute: '2026-09-06 16:27:00',
+      threshold: 1.6,
+      streak: 3,
+      byProto: {
+        all: { bps: 3e9, growth_bps: 4, bytes: 3e9 * 60 / 8 },
+        tcp: { bps: 1e9, growth_bps: 1.1 },
+        udp: {
+          bps: 2e9, bytes: 2e9 * 60 / 8, avg_packet_bytes: 1200,
+          amp_bytes: 1.125e10, amp_packets: 1.125e10 / 1200, amp_srcs: 40,
+        },
+      },
+      verdict: { kind: 'amplification', reason: 'амплификация', hourRatio: 12 },
+    });
+    assert.match(text, /Ромашка &amp; Ко &lt;НТА&gt;/);
+    assert.match(text, /‼ рост bps: ×4\.00/);
+    assert.match(text, /‼ с портов усилителей: 1\.50 Гбит\/с · доля 75% · 40 источников/);
+    assert.match(text, /<b>UDP<\/b>/);
+    // Спокойная метрика идёт без метки.
+    assert.match(text, / рост bps: ×1\.10/);
   });
 
   it('formatAlertMessage для обычного пика — жёлтый заголовок, без атаки', () => {
@@ -236,6 +267,7 @@ describe('detection-telegram', () => {
     assert.equal(event.alertText, '🟡 ПИК НАГРУЗКИ · обычный пик\nHostland');
     assert.equal(event.normalizeText, '');
     assert.equal(event.verdict.kind, 'benign_peak');
+    assert.equal(event.signal, 'volume');
   });
 
   it('mapEventRow восстанавливает текст пика, если его ещё не сохраняли', () => {
@@ -330,7 +362,7 @@ describe('detection-telegram', () => {
       },
     });
     assert.match(text, /Куда: — \(разбор не удался: Cannot parse IPv4/);
-    assert.match(text, /Что делать: разбор минуты не удался/);
+    assert.match(text, /<b>Что делать:<\/b> разбор минуты не удался/);
     assert.doesNotMatch(text, /не эскалировать/);
     assert.doesNotMatch(text, /__table3/);
   });
@@ -417,7 +449,7 @@ describe('detection-telegram', () => {
       byProto: { all: { bps: 1e9 } },
       investigate: emptyInvestigate(),
     });
-    assert.match(custom, /Порог: ×4\.00 \(bps или pps, индивидуальный\)/);
+    assert.match(custom, /Порог ×4\.00 \(индивидуальный\) · стабильно/);
     const shared = formatAlertMessage({
       name: 'TestNet',
       scope: 'net',
@@ -428,7 +460,8 @@ describe('detection-telegram', () => {
       byProto: { all: { bps: 1e9 } },
       investigate: emptyInvestigate(),
     });
-    assert.match(shared, /Порог: ×1\.60 \(bps или pps\)/);
+    assert.match(shared, /Порог ×1\.60 · стабильно/);
+    assert.doesNotMatch(shared, /индивидуальный/);
   });
 
   it('активный объект не получает повторный алерт', () => {
@@ -514,6 +547,30 @@ describe('detection-telegram', () => {
     assert.equal(snap.udp.port_entropy, 3);
   });
 
+  it('список стран переживает снимок и не превращается в число', () => {
+    const snap = snapshotByProto({
+      byProto: {
+        all: {
+          bps: 10, bytes: 100, foreign_bytes: 40, foreign_srcs: 7,
+          top_countries: 'RU:0.6,UZ:0.12', growth_foreign_share: 3.7,
+        },
+      },
+    });
+    assert.equal(snap.all.top_countries, 'RU:0.6,UZ:0.12');
+    const event = mapEventRow({
+      event_id: 'client|101443|2026-09-06 16:27:00',
+      scope: 'client',
+      scope_id: '101443',
+      signal: 'foreign_geo',
+      status: 'active',
+      alert_minute: '2026-09-06 16:27:00',
+      threshold: 1.6,
+      alert_json: JSON.stringify(snap),
+    });
+    assert.equal(event.alertByProto.all.topCountries, 'RU:0.6,UZ:0.12');
+    assert.equal(event.signal, 'foreign_geo');
+  });
+
   it('buildDetectionEventsCsv содержит фазы alert и normalize', () => {
     const { buildDetectionEventsCsv } = require('./detection-telegram');
     const csv = buildDetectionEventsCsv([{
@@ -537,6 +594,7 @@ describe('detection-telegram', () => {
       },
     }]);
     assert.match(csv, /event_id/);
+    assert.match(csv, /,signal,/);
     assert.match(csv, /TestNet/);
     assert.match(csv, /,alert,/);
     assert.match(csv, /,normalize,/);

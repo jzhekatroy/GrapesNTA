@@ -10,6 +10,7 @@ const {
   volumeStillHigh,
   formatVictim,
   formatSwitchPort,
+  hourCeiling,
 } = require('./detection-classify');
 
 describe('detection-classify', () => {
@@ -51,6 +52,50 @@ describe('detection-classify', () => {
     assert.equal(isAttackKind(first.kind), false);
   });
 
+  it('Митигатор Клауд: p999 задран началом той же атаки, потолок от p95 её возвращает', () => {
+    const byProto = {
+      all: { bps: 2.925e9, port_entropy: 2.07, syn_attempts: 0 },
+      tcp: { bps: 0.15e9, port_entropy: 5.1 },
+      udp: { bps: 2.741e9, port_entropy: 1.94 },
+    };
+    // p999 = 2.585 это минута 16:26 того же всплеска, попавшая в baseline;
+    // после карантина остаются p95 0.2 и p999 0.226, медиана часа 0.147.
+    const hour = { p95: 0.2e9, p999: 0.226e9, recentMedian: 0.147e9 };
+    const first = classifyFromMetrics(byProto, hour);
+    assert.equal(Math.round(first.hourRatio * 100) / 100, 12.44);
+    assert.equal(first.kind, KINDS.carpet);
+    assert.equal(first.needsInvestigate, true);
+    const refined = refineClassification(first, { victim: { share: 0.998 } });
+    assert.equal(refined.kind, KINDS.volumetric);
+  });
+
+  it('АТС Смольного: плавный утренний рост остаётся пиком, потолок не мешает', () => {
+    const byProto = {
+      all: { bps: 2.93e9, port_entropy: 8.53, syn_attempts: 4, answer_pct: 0 },
+      tcp: { bps: 2.862e9, port_entropy: 8.49 },
+      udp: { bps: 0.033e9, port_entropy: 3.17 },
+    };
+    // После карантина история даёт всего 1.273 Гбит/с — неделю назад клиент
+    // возил вдвое меньше. Норму держит медиана последнего часа.
+    const hour = { p95: 1.132e9, p999: 1.273e9, recentMedian: 1.813e9 };
+    const first = classifyFromMetrics(byProto, hour);
+    assert.equal(Math.round(first.hourRatio * 100) / 100, 1.01);
+    assert.equal(first.kind, KINDS.benign_peak);
+    assert.equal(first.needsInvestigate, false);
+  });
+
+  it('норма собирается из истории и последнего часа, что больше', () => {
+    // Потолок p95 срезает задранный p999.
+    assert.equal(hourCeiling({ p95: 1e9, p999: 8e9 }), 4e9);
+    // Ровный клиент: история выше локальной медианы, берём её.
+    assert.equal(hourCeiling({ p95: 40e9, p999: 48e9, recentMedian: 20e9 }), 48e9);
+    // Растущий клиент: локальный уровень выше истории.
+    assert.equal(hourCeiling({ p95: 1e9, p999: 1.2e9, recentMedian: 2e9 }), 3.2e9);
+    assert.equal(hourCeiling({ p999: 8e9 }), 8e9);
+    assert.equal(hourCeiling({ recentMedian: 2e9 }), 3.2e9);
+    assert.equal(hourCeiling({}), null);
+  });
+
   it('refine: нет концентрации и объём свой → пик', () => {
     const first = classifyFromMetrics(
       { all: { bps: 6.9e9, port_entropy: 10.1 }, tcp: { bps: 6e9 }, udp: { bps: 0.9e9 } },
@@ -63,6 +108,77 @@ describe('detection-classify', () => {
   it('объём не сел — нормализацию держим', () => {
     assert.equal(volumeStillHigh(9.4e9, 6.9e9, 3e9), true);
     assert.equal(volumeStillHigh(0.64e9, 5.8e9, 0.84e9), false);
+  });
+
+  it('Митигатор Клауд с amp-метриками → амплификация в один сервер', () => {
+    const byProto = {
+      all: { bps: 2.925e9, port_entropy: 2.07, syn_attempts: 0, bytes: 2.925e9 * 60 / 8 },
+      tcp: { bps: 0.15e9 },
+      udp: {
+        bps: 2.741e9,
+        bytes: 2.741e9 * 60 / 8,
+        amp_bytes: 3.683e9,
+        amp_packets: 4_065_536,
+        amp_srcs: 40,
+      },
+    };
+    const hour = { p95: 0.2e9, p999: 0.226e9, recentMedian: 0.147e9 };
+    const first = classifyFromMetrics(byProto, hour);
+    assert.equal(first.kind, KINDS.amplification);
+    assert.equal(first.needsInvestigate, true);
+    const refined = refineClassification(first, { victim: { share: 0.998 } });
+    assert.equal(refined.kind, KINDS.amplification);
+    assert.match(refined.reason, /амплификация в один сервер/);
+    assert.equal(isAttackKind(refined.kind), true);
+  });
+
+  it('81050: амплификация при росте объёма всего ×1.25', () => {
+    const byProto = {
+      all: { bps: 18.762e9, port_entropy: 6.53, growth_bps: 1.25 },
+      tcp: { bps: 12.781e9 },
+      udp: {
+        bps: 5.066e9,
+        bytes: 5.066e9 * 60 / 8,
+        amp_bytes: 12.12 * 1024 ** 3,
+        amp_packets: Math.round(12.12 * 1024 ** 3 / 1505),
+        amp_srcs: 119,
+      },
+    };
+    const first = classifyFromMetrics(byProto, { p95: 15e9, p999: 16e9, recentMedian: 14e9 });
+    assert.equal(first.kind, KINDS.amplification);
+  });
+
+  it('71762: UDP 1% и нет amp → обычный пик, не амплификация', () => {
+    const first = classifyFromMetrics({
+      all: { bps: 8e9, port_entropy: 8.2 },
+      tcp: { bps: 7.92e9 },
+      udp: { bps: 0.08e9, bytes: 0.08e9 * 60 / 8, amp_bytes: 0, amp_packets: 0, amp_srcs: 0 },
+    }, { p95: 6e9, p999: 7e9, recentMedian: 5e9 });
+    assert.notEqual(first.kind, KINDS.amplification);
+    assert.equal(first.kind, KINDS.benign_peak);
+  });
+
+  it('только география: вид инцидента по остальным метрикам, разбор нужен', () => {
+    const first = classifyFromMetrics({
+      all: {
+        bps: 6.9e9, port_entropy: 10.1, bytes: 6.9e9 * 60 / 8,
+        foreign_bytes: 14e9, growth_foreign_share: 3.7, growth_foreign_bps: 10,
+      },
+      tcp: { bps: 6e9 },
+      udp: { bps: 0.9e9, bytes: 0.9e9 * 60 / 8, amp_bytes: 0, amp_packets: 0, amp_srcs: 0 },
+    }, { p95: 8e9, p999: 8.5e9, recentMedian: 7e9 });
+    assert.equal(first.foreignHit, true);
+    assert.equal(first.kind, KINDS.benign_peak);
+    assert.equal(first.needsInvestigate, true);
+  });
+
+  it('один источник и 4.6 Мбит/с amp — не амплификация', () => {
+    const byProto = {
+      all: { bps: 5e6 },
+      udp: { bps: 5e6, bytes: 5e6 * 60 / 8, amp_bytes: 34e6, amp_packets: 34000, amp_srcs: 1 },
+    };
+    const first = classifyFromMetrics(byProto, { p95: 4e6, p999: 5e6 });
+    assert.notEqual(first.kind, KINDS.amplification);
   });
 
   it('форматирует жертву и порт коммутатора, иначе прочерк', () => {

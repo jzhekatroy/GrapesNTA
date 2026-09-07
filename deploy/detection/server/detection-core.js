@@ -4,6 +4,20 @@ const MINUTE = 60 * 1000;
 const EXPORT_LAG = 3 * MINUTE;
 const BASELINE_DAYS = 14;
 const BASELINE_QUANTILE = 0.999;
+// Норма часа берётся по тому же часу ±1 за прошлые недели, поэтому в выборку
+// попадают и минуты текущего часа прямо перед алертом. Атака, разогнавшаяся за
+// несколько минут, успевает записать себя в норму: на ~250 точках p999 это
+// фактически максимум выборки. Ближний час выкидываем...
+const BASELINE_QUARANTINE_MINUTES = 60;
+// ...а на p999 ставим потолок от p95, чтобы атака длиннее карантина тоже не
+// смогла назначить себя нормой.
+const BASELINE_P95_CAP = 4;
+// Карантин отрезает и сегодняшний контекст, а у растущих клиентов прошлые
+// недели ниже текущего рабочего уровня: у АТС Смольного норма без ближнего
+// часа выходила 1.27 Гбит/с при честных 2.9, и обычное утро читалось как
+// ковровая атака. Поэтому норма не опускается ниже медианы последнего часа с
+// небольшим запасом: плавный рост остаётся нормой, скачок в разы — нет.
+const BASELINE_RECENT_CAP = 1.6;
 // Объекты тише порога не пишем: на них не бывает значимой атаки,
 // а таблицу и вкладку они забивают десятками тысяч пустых строк.
 const MIN_BPS = Number(process.env.DETECTION_MIN_BPS) || 20e6;
@@ -75,6 +89,12 @@ function minuteMetrics(raw = {}) {
     portEntropyOut: finiteOrNull(raw.portEntropyOut ?? raw.udpPortEntropyOut),
     portsPerIp: finiteOrNull(raw.portsPerIp ?? raw.udpPortsPerIp),
     portsPerIpOut: finiteOrNull(raw.portsPerIpOut ?? raw.udpPortsPerIpOut),
+    ampBytes: Number(raw.ampBytes || 0),
+    ampPackets: Number(raw.ampPackets || 0),
+    ampSrcs: Number(raw.ampSrcs || 0),
+    foreignBytes: Number(raw.foreignBytes || 0),
+    foreignSrcs: Number(raw.foreignSrcs || 0),
+    topCountries: String(raw.topCountries || ''),
   };
 }
 
@@ -83,6 +103,9 @@ module.exports = {
   EXPORT_LAG,
   BASELINE_DAYS,
   BASELINE_QUANTILE,
+  BASELINE_QUARANTINE_MINUTES,
+  BASELINE_P95_CAP,
+  BASELINE_RECENT_CAP,
   MIN_BPS,
   parseUtc,
   formatCh,

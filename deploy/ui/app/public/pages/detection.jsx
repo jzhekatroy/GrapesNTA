@@ -8,7 +8,13 @@ const KIND_LABEL = {
   volumetric: 'атака в сервер',
   carpet: 'атака по сети',
   syn_flood: 'SYN-флуд',
+  amplification: 'амплификация',
   benign_peak: 'обычный пик',
+};
+const SIGNAL_LABEL = {
+  volume: 'объём',
+  amplification: 'амплификация',
+  foreign_geo: 'заграница',
 };
 const PAGE_TABS = [
   { id: 'table', label: 'Таблица' },
@@ -654,6 +660,10 @@ function PageDetection() {
         normalizeStreak: telegram?.normalizeStreak ?? 3,
         apiUrl: telegram?.apiUrl || 'https://api.telegram.org',
         proxyUrl: telegram?.proxyUrl || '',
+        ampEnabled: telegram?.ampEnabled !== false,
+        geoEnabled: telegram?.geoEnabled !== false,
+        ampStreak: telegram?.ampStreak ?? 1,
+        geoStreak: telegram?.geoStreak ?? 1,
       };
       if (botToken.trim()) payload.botToken = botToken.trim();
       const data = await ApiClient.saveDetectionTelegramSettings(payload);
@@ -821,6 +831,44 @@ function PageDetection() {
                     step="1"
                     value={telegram?.normalizeStreak ?? 3}
                     onChange={(e) => setTelegram(patchTelegram(telegram, { normalizeStreak: Number(e.target.value) }))}
+                  />
+                </label>
+                <label className="row" style={{ gap: 8, alignItems: 'center', minWidth: 180 }}>
+                  <input
+                    type="checkbox"
+                    checked={telegram?.ampEnabled !== false}
+                    onChange={(e) => setTelegram(patchTelegram(telegram, { ampEnabled: e.target.checked }))}
+                  />
+                  <span>Амплификация</span>
+                </label>
+                <label className="col" style={{ gap: 4, minWidth: 140 }}>
+                  <span>Амп. подряд</span>
+                  <input
+                    className="input"
+                    type="number"
+                    min="1"
+                    max="60"
+                    value={telegram?.ampStreak ?? 1}
+                    onChange={(e) => setTelegram(patchTelegram(telegram, { ampStreak: Number(e.target.value) }))}
+                  />
+                </label>
+                <label className="row" style={{ gap: 8, alignItems: 'center', minWidth: 180 }}>
+                  <input
+                    type="checkbox"
+                    checked={telegram?.geoEnabled !== false}
+                    onChange={(e) => setTelegram(patchTelegram(telegram, { geoEnabled: e.target.checked }))}
+                  />
+                  <span>Зарубежный трафик</span>
+                </label>
+                <label className="col" style={{ gap: 4, minWidth: 140 }}>
+                  <span>Гео подряд</span>
+                  <input
+                    className="input"
+                    type="number"
+                    min="1"
+                    max="60"
+                    value={telegram?.geoStreak ?? 1}
+                    onChange={(e) => setTelegram(patchTelegram(telegram, { geoStreak: Number(e.target.value) }))}
                   />
                 </label>
               </div>
@@ -1012,6 +1060,13 @@ function PageDetection() {
                     </Badge>
                   );
                 },
+              },
+              {
+                key: 'signal',
+                title: 'Признак',
+                width: 140,
+                sortAccessor: (r) => r.signal || 'volume',
+                render: (r) => SIGNAL_LABEL[r.signal] || SIGNAL_LABEL.volume,
               },
               {
                 key: 'notify',
