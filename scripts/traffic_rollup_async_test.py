@@ -37,6 +37,16 @@ class CatchupGates(unittest.TestCase):
         live = datetime(2026, 9, 7, 8, 5, tzinfo=timezone.utc)
         self.assertEqual(complete_raw_until(None, 5, live), live)
 
+    def test_draining_holds_back_further_than_the_safety_lag(self):
+        # While a spool replays, run_live adds 15 minutes to the safety lag so
+        # the minutes the drain may still fill are not rolled undercounted.
+        live = datetime(2026, 9, 7, 9, 0, tzinfo=timezone.utc)
+        raw = datetime(2026, 9, 7, 8, 55, tzinfo=timezone.utc)
+        self.assertEqual(
+            complete_raw_until(raw, 5 + 15, live),
+            datetime(2026, 9, 7, 8, 35, tzinfo=timezone.utc),
+        )
+
     def test_truncate_minute(self):
         dt = datetime(2026, 9, 5, 21, 0, 52, tzinfo=timezone.utc)
         self.assertEqual(

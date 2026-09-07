@@ -458,7 +458,7 @@ def flows_raw_enabled_min_bucket(
         if not hit.strip():
             continue
         first = ch.query(
-            "SELECT toStartOfMinute(time_received_ns) "
+            "SELECT formatDateTime(toStartOfMinute(time_received_ns), '%F %T', 'UTC') "
             "FROM default.flows_raw "
             f"WHERE date = toDate('{day_s}') "
             "AND source_id IN (SELECT source_id FROM default.net_flow_sources_enabled) "
