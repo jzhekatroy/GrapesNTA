@@ -380,54 +380,95 @@ GROUP BY
         source_table="default.flows_raw",
         priority=90,
         depends_on=(),
+        # Only the top ports of a minute are worth a row of their own. Keeping
+        # every unmatched port meant ~246k rows a minute (65k ports x direction
+        # x side x transport) and 15 GiB on disk to feed a top-20 widget, and
+        # made this the most expensive job on the tick. On 3h of real m61
+        # traffic a depth of 200 reproduces 19 of those 20 rows in the same
+        # order, the 20th differing by 0.3% of bytes, for 0.32% of the rows.
+        #
+        # The tail is summed into a single port=0 row instead of being dropped,
+        # so «percent within Other» keeps an exact denominator: the widget
+        # totals every row and ranks only those with port > 0.
         select_sql="""
 SELECT
-    toStartOfMinute(f.time_received_ns) AS minute,
-    f.source_id,
-    f.direction,
-    f.proto,
-    multiIf(
-        f.proto = 6, 'tcp',
-        f.proto = 17, 'udp',
-        f.proto = 1, 'icmp',
-        f.proto = 58, 'icmpv6',
-        f.proto = 132, 'sctp',
-        'other'
-    ) AS transport,
-    multiIf(f.dst_port > 0, 'dst', f.src_port > 0, 'src', 'unknown') AS port_side,
-    multiIf(f.dst_port > 0, toUInt16(f.dst_port), f.src_port > 0, toUInt16(f.src_port), toUInt16(0)) AS port,
-    sum(f.bytes) AS bytes,
-    sum(f.packets) AS packets,
-    sum(coalesce(f.sampling_rate, 1)) AS flows_count
-FROM default.flows_raw AS f
-LEFT JOIN default.port_services_expanded_enabled AS dst_svc
-    ON dst_svc.transport = multiIf(
-        f.proto = 6, 'tcp',
-        f.proto = 17, 'udp',
-        f.proto = 1, 'icmp',
-        f.proto = 58, 'icmpv6',
-        f.proto = 132, 'sctp',
-        'other'
-    )
-   AND dst_svc.port = toUInt16(f.dst_port)
-LEFT JOIN default.port_services_expanded_enabled AS src_svc
-    ON src_svc.transport = multiIf(
-        f.proto = 6, 'tcp',
-        f.proto = 17, 'udp',
-        f.proto = 1, 'icmp',
-        f.proto = 58, 'icmpv6',
-        f.proto = 132, 'sctp',
-        'other'
-    )
-   AND src_svc.port = toUInt16(f.src_port)
-WHERE {time_filter}
-  AND dst_svc.service_code = ''
-  AND src_svc.service_code = ''
+    minute,
+    source_id,
+    direction,
+    if(fold_tail, 0, proto) AS proto,
+    if(fold_tail, 'other', transport) AS transport,
+    if(fold_tail, 'rest', port_side) AS port_side,
+    if(fold_tail, toUInt16(0), port) AS port,
+    sum(bytes) AS bytes,
+    sum(packets) AS packets,
+    sum(flows_count) AS flows_count
+FROM
+(
+    SELECT
+        *,
+        row_number() OVER (
+            PARTITION BY minute, source_id, direction
+            ORDER BY bytes DESC, port ASC
+        ) > 200 AS fold_tail
+    FROM
+    (
+        SELECT
+            toStartOfMinute(f.time_received_ns) AS minute,
+            f.source_id,
+            f.direction,
+            f.proto,
+            multiIf(
+                f.proto = 6, 'tcp',
+                f.proto = 17, 'udp',
+                f.proto = 1, 'icmp',
+                f.proto = 58, 'icmpv6',
+                f.proto = 132, 'sctp',
+                'other'
+            ) AS transport,
+            multiIf(f.dst_port > 0, 'dst', f.src_port > 0, 'src', 'unknown') AS port_side,
+            multiIf(f.dst_port > 0, toUInt16(f.dst_port), f.src_port > 0, toUInt16(f.src_port), toUInt16(0)) AS port,
+            sum(f.bytes) AS bytes,
+            sum(f.packets) AS packets,
+            sum(coalesce(f.sampling_rate, 1)) AS flows_count
+        FROM default.flows_raw AS f
+        LEFT JOIN default.port_services_expanded_enabled AS dst_svc
+            ON dst_svc.transport = multiIf(
+                f.proto = 6, 'tcp',
+                f.proto = 17, 'udp',
+                f.proto = 1, 'icmp',
+                f.proto = 58, 'icmpv6',
+                f.proto = 132, 'sctp',
+                'other'
+            )
+           AND dst_svc.port = toUInt16(f.dst_port)
+        LEFT JOIN default.port_services_expanded_enabled AS src_svc
+            ON src_svc.transport = multiIf(
+                f.proto = 6, 'tcp',
+                f.proto = 17, 'udp',
+                f.proto = 1, 'icmp',
+                f.proto = 58, 'icmpv6',
+                f.proto = 132, 'sctp',
+                'other'
+            )
+           AND src_svc.port = toUInt16(f.src_port)
+        WHERE {time_filter}
+          AND dst_svc.service_code = ''
+          AND src_svc.service_code = ''
+        GROUP BY
+            minute,
+            f.source_id,
+            f.direction,
+            f.proto,
+            transport,
+            port_side,
+            port
+    ) AS detail
+) AS ranked
 GROUP BY
     minute,
-    f.source_id,
-    f.direction,
-    f.proto,
+    source_id,
+    direction,
+    proto,
     transport,
     port_side,
     port

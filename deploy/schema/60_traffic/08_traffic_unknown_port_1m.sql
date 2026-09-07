@@ -1,3 +1,7 @@
+-- Ports carrying traffic that matched no enabled port_services entry.
+-- The rollup keeps only the 200 largest ports of a minute; the rest is summed
+-- into one row with port = 0 and port_side = 'rest', so a total over every row
+-- stays exact while only ranked ports get a row of their own.
 CREATE TABLE IF NOT EXISTS default.traffic_unknown_port_1m
 (
     `minute` DateTime('UTC'),
