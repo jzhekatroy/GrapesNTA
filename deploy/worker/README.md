@@ -69,6 +69,12 @@ here needs a manual step. What the live tick does while a spool is replaying
 Queue and range backfill stay paused for the whole drain either way — they
 would write into the hole.
 
+A job more than a couple of buckets behind is rolled as a range
+(`TRAFFIC_ROLLUP_MAX_RANGE_BUCKETS`, 15 minutes by default) rather than one
+bucket per tick, because one minute per 60s tick never closes a multi-hour gap.
+Jobs run most-behind first, so whatever the wall budget cuts off leads the next
+tick.
+
 To see where it stands:
 
 ```bash

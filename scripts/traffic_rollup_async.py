@@ -116,6 +116,9 @@ HARD_KILL_RESERVE_SEC = 8
 # hour from flows_raw) and then mark the request error. Live already defers
 # on timeout; the queue must do the same and not begin a query it cannot finish.
 QUEUE_MIN_BUDGET_SEC = {"minute": 20, "hour": 60, "day": 60}
+# Lag above which the fair pass switches a job from one bucket to a full range.
+# Two buckets of slack keeps a steady tick on cheap single-bucket queries.
+CATCHUP_LAG_BUCKETS = 2
 
 
 class JobDeferred(Exception):
@@ -2091,6 +2094,24 @@ def live_job_step(
         return "error"
 
 
+def lag_buckets(
+    job: RollupJob,
+    states: Dict[str, JobState],
+    args: argparse.Namespace,
+) -> int:
+    """Closed buckets still waiting for this job, from state alone (no query)."""
+    state = states.get(job.job_id)
+    if not state or not state.last_bucket:
+        return 0
+    span = (
+        add_bucket(state.last_bucket, job.bucket_kind) - state.last_bucket
+    ).total_seconds()
+    if span <= 0:
+        return 0
+    behind = (safe_until_for_job(job, args) - state.last_bucket).total_seconds()
+    return max(0, int(behind // span) - 1)
+
+
 def _live_lag_seconds(
     job: RollupJob,
     states: Dict[str, JobState],
@@ -2313,12 +2334,18 @@ def run_live(args: argparse.Namespace, logger: logging.Logger) -> int:
             window_buckets=window_buckets,
         )
 
-    # Pass 1: every minute job gets one bucket so a lagging head cannot
-    # starve the 1m tail. Hour/day wait for pass 2 — they used to be
-    # deferred+blocked here and then never ran.
-    for job in jobs:
-        if job.bucket_kind in ("hour", "day"):
-            continue
+    # Pass 1: one window per minute job, most-behind first. Hour/day wait for
+    # pass 2 — they used to be deferred+blocked here and then never ran.
+    #
+    # A caught-up job takes a single bucket, which is all a steady minute tick
+    # needs. A job behind by more than CATCHUP_LAG_BUCKETS takes a full range:
+    # the SELECT already groups by bucket, so 15 minutes cost about the same as
+    # one and this is the difference between closing an outage gap and never
+    # catching up. Ordering by lag replaces the old one-bucket cap as the
+    # anti-starvation rule: whatever the wall cut off leads the next tick.
+    minute_jobs = [job for job in jobs if job.bucket_kind not in ("hour", "day")]
+    minute_jobs.sort(key=lambda job: lag_buckets(job, states, args), reverse=True)
+    for job in minute_jobs:
         if remaining_budget_s(started, wall_sec) < 3:
             wall_reached = True
             logger.info(
@@ -2327,9 +2354,14 @@ def run_live(args: argparse.Namespace, logger: logging.Logger) -> int:
                 ok_count,
             )
             break
-        result = _step(job, 1)
+        window = (
+            max_range
+            if lag_buckets(job, states, args) > CATCHUP_LAG_BUCKETS
+            else 1
+        )
+        result = _step(job, window)
         if result == "rewound":
-            result = _step(job, 1)
+            result = _step(job, window)
         if result == "ok":
             ok_count += 1
         elif result == "skip":
