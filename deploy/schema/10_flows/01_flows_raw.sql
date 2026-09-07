@@ -69,5 +69,5 @@ CREATE TABLE IF NOT EXISTS default.flows_raw
 ENGINE = MergeTree
 PARTITION BY date
 ORDER BY time_received_ns
-TTL date + toIntervalDay(6)
+TTL date + toIntervalDay(4)
 SETTINGS index_granularity = 8192, max_bytes_to_merge_at_max_space_in_pool = 8589934592;

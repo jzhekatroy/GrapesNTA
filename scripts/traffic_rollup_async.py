@@ -280,14 +280,57 @@ def check_attached_mvs(ch: ClickHouseClient) -> int:
     )
 
 
-def raw_lag_seconds(ch: ClickHouseClient) -> int:
-    value = ch.query(
-        "SELECT dateDiff('second', max(time_received_ns), now64(9)) "
+def is_epoch_timestamp(raw: str) -> bool:
+    text = (raw or "").strip()
+    return not text or text.startswith("1970-01-01")
+
+
+def raw_max_received(
+    ch: ClickHouseClient,
+    lookback_days: int = 14,
+) -> Optional[datetime]:
+    """Latest time_received_ns, ignoring an empty recent window.
+
+    `date >= today() - 1` returns 1970 after an outage longer than a day
+    (no partitions for yesterday/today yet). The worker then computed a
+    ~56-year lag and skipped every tick, so already-landed buckets never
+    rolled up while the collector spool was still draining.
+    """
+    days = max(int(lookback_days), 1)
+    raw = ch.query(
+        "SELECT max(time_received_ns) "
         "FROM default.flows_raw "
-        "WHERE date >= today() - 1",
-        display="flows_raw lag seconds",
+        f"WHERE date >= today() - {days}",
+        display="flows_raw max received",
+    ).strip()
+    if is_epoch_timestamp(raw):
+        return None
+    try:
+        return parse_utc_dt(raw[:19])
+    except ValueError:
+        return None
+
+
+def raw_lag_seconds(ch: ClickHouseClient, lookback_days: int = 14) -> Optional[int]:
+    mx = raw_max_received(ch, lookback_days=lookback_days)
+    if mx is None:
+        return None
+    return max(0, int((utc_now() - mx).total_seconds()))
+
+
+def complete_raw_until(
+    raw_max: Optional[datetime],
+    safety_lag_minutes: int,
+    live_until: datetime,
+) -> datetime:
+    """Furthest closed bucket that is safe to roll from already-landed raw."""
+    if raw_max is None:
+        return live_until
+    edge = truncate_bucket(
+        raw_max - timedelta(minutes=max(int(safety_lag_minutes), 0)),
+        "minute",
     )
-    return int(value or "0")
+    return edge if edge < live_until else live_until
 
 
 @dataclass
@@ -484,18 +527,23 @@ def skip_forward_stale_bucket(
     return data_min
 
 
-def safe_until(args: argparse.Namespace) -> datetime:
+def live_safe_until(args: argparse.Namespace) -> datetime:
     return truncate_bucket(
         utc_now() - timedelta(minutes=args.safety_lag_minutes),
         "minute",
     )
 
 
+def safe_until(args: argparse.Namespace) -> datetime:
+    live = live_safe_until(args)
+    clamp = getattr(args, "_until_clamp", None)
+    if clamp is not None and clamp < live:
+        return clamp
+    return live
+
+
 def safe_until_for_job(job: RollupJob, args: argparse.Namespace) -> datetime:
-    return truncate_bucket(
-        utc_now() - timedelta(minutes=args.safety_lag_minutes),
-        job.bucket_kind,
-    )
+    return truncate_bucket(safe_until(args), job.bucket_kind)
 
 
 def _column_time_range(col: str, start: datetime, end: datetime) -> str:
@@ -947,12 +995,12 @@ def flows_raw_enabled_max_minute(
     raw = ch.query(
         "SELECT toStartOfMinute(max(time_received_ns)) "
         "FROM default.flows_raw "
-        "WHERE date >= today() - 1 "
+        "WHERE date >= today() - 14 "
         "AND source_id IN (SELECT source_id FROM default.net_flow_sources_enabled)",
         display="flows_raw enabled max minute",
     ).strip()
     result: Optional[datetime] = None
-    if raw and not raw.startswith("1970-01-01"):
+    if raw and not is_epoch_timestamp(raw):
         try:
             result = parse_utc_dt(raw)
         except ValueError:
@@ -1071,12 +1119,16 @@ def parse_args() -> argparse.Namespace:
         "--max-raw-lag-seconds",
         type=int,
         default=int(env("TRAFFIC_ROLLUP_MAX_RAW_LAG_SECONDS", "120") or "120"),
-        help="skip rollups while flows_raw is fresher than this many seconds behind now",
+        help=(
+            "if flows_raw is this many seconds behind now, clamp the live "
+            "edge to the last landed raw minute instead of rolling empty "
+            "recent buckets"
+        ),
     )
     parser.add_argument(
         "--ignore-raw-lag",
         action="store_true",
-        help="run even if flows_raw lag is high (use only after spool catch-up)",
+        help="do not clamp to the landed raw edge when lag is high",
     )
     parser.add_argument(
         "--require-spool-drained",
@@ -1085,9 +1137,9 @@ def parse_args() -> argparse.Namespace:
         default=(env("TRAFFIC_ROLLUP_REQUIRE_SPOOL_DRAINED", "1") or "1").lower()
         in ("1", "true", "yes", "on"),
         help=(
-            "hold the rollup cursor while any enabled collector's spool is still "
-            "draining a backlog (collector_health_snapshots.lag_segments). Prevents "
-            "gaps after a ClickHouse outage; on by default"
+            "while any enabled collector's spool is draining, clamp the live "
+            "edge to already-landed flows_raw (do not roll buckets the spool "
+            "may still fill). Queue/range backfill still waits. On by default"
         ),
     )
     parser.add_argument(
@@ -2141,18 +2193,19 @@ def run_live(args: argparse.Namespace, logger: logging.Logger) -> int:
             return 1
         logger.info("precheck ok: no attached traffic_* MV")
 
-    if not args.ignore_raw_lag and not args.dry_run:
-        lag_s = raw_lag_seconds(ch)
-        if lag_s > args.max_raw_lag_seconds:
-            logger.warning(
-                "skip rollups: flows_raw lag_s=%s exceeds max_raw_lag_seconds=%s "
-                "(wait for spool catch-up or pass --ignore-raw-lag)",
-                lag_s,
-                args.max_raw_lag_seconds,
-            )
-            return 0
-        logger.info("precheck ok: flows_raw lag_s=%s", lag_s)
+    # A ClickHouse outage longer than a day leaves the last raw minute older
+    # than today()-1, which used to read as a ~56-year lag and skip every
+    # tick, so the cursor stayed frozen long after the data was back. Look
+    # far enough back to see the real edge, then clamp instead of skipping.
+    lookback = max(int(getattr(args, "bootstrap_days", 14) or 14), 14)
+    raw_max = raw_max_received(ch, lookback_days=lookback)
+    live = live_safe_until(args)
+    clamp = complete_raw_until(raw_max, args.safety_lag_minutes, live)
+    lag_s = raw_lag_seconds(ch, lookback_days=lookback)
+    raw_stale = lag_s is not None and lag_s > args.max_raw_lag_seconds
+    raw_edge = fmt_dt(raw_max) if raw_max else "-"
 
+    draining = None
     if args.require_spool_drained and not args.dry_run:
         draining = spool_backlog_sources(
             ch,
@@ -2160,17 +2213,50 @@ def run_live(args: argparse.Namespace, logger: logging.Logger) -> int:
             max_lag_segments=args.spool_max_lag_segments,
             snapshot_max_age_sec=args.spool_snapshot_max_age_sec,
         )
-        if draining:
-            detail = ",".join(
-                f"{s.source_id}:lag={s.lag_segments}(age={s.age_seconds}s)" for s in draining
-            )
-            logger.warning(
-                "action=hold reason=spool_draining sources=%s "
-                "(flows_raw incomplete for recent buckets; holding cursor until drained)",
-                detail,
-            )
-            return 0
-        logger.info("precheck ok: collector spool drained")
+
+    if draining and not raw_stale:
+        # Raw is fresh while the spool still holds a backlog: this collector
+        # writes live traffic past the spool, so recent buckets are missing
+        # rows that the replay will add later. Rolling them now would bake in
+        # undercounts, so keep the original hold.
+        detail = ",".join(
+            f"{s.source_id}:lag={s.lag_segments}(age={s.age_seconds}s)" for s in draining
+        )
+        logger.warning(
+            "action=hold reason=spool_draining sources=%s "
+            "(flows_raw fresh but incomplete; holding cursor until drained)",
+            detail,
+        )
+        return 0
+
+    if draining:
+        # Spool replays in order, so max(time_received_ns) is the drain
+        # frontier and everything before it is complete.
+        detail = ",".join(
+            f"{s.source_id}:lag={s.lag_segments}(age={s.age_seconds}s)" for s in draining
+        )
+        args._until_clamp = clamp
+        logger.warning(
+            "action=catchup reason=spool_draining sources=%s "
+            "raw_edge=%s until=%s (live edge waits for drain)",
+            detail,
+            raw_edge,
+            fmt_dt(clamp),
+        )
+    elif raw_stale and not args.ignore_raw_lag and not args.dry_run:
+        args._until_clamp = clamp
+        logger.warning(
+            "action=catchup reason=raw_lag lag_s=%s raw_edge=%s until=%s",
+            lag_s,
+            raw_edge,
+            fmt_dt(clamp),
+        )
+    else:
+        logger.info(
+            "precheck ok: flows_raw lag_s=%s spool=%s",
+            lag_s if lag_s is not None else "empty",
+            "drained" if draining == [] else "unchecked",
+        )
 
     states = load_states(ch)
     until = safe_until(args)

@@ -55,10 +55,19 @@ Note the service runs in Docker, so `systemctl is-active grapes-worker` reports
 ## After a ClickHouse outage or a host reboot
 
 The chain is collector spool drain, then rollup catch-up, then graphs. Nothing
-here needs a manual step, but the order explains the delay: rollups deliberately
-hold their cursor while a collector is still replaying its spool
-(`TRAFFIC_ROLLUP_REQUIRE_SPOOL_DRAINED`), because `flows_raw` is incomplete for
-recent buckets until the replay ends.
+here needs a manual step. What the live tick does while a spool is replaying
+(`TRAFFIC_ROLLUP_REQUIRE_SPOOL_DRAINED`) depends on where `flows_raw` ends:
+
+- Raw edge is old (`ch_mode=spool` collectors, where every row goes through the
+  spool in order): the edge is the drain frontier, so everything before it is
+  complete. The tick rolls those buckets (`action=catchup`) and clamps the
+  cursor to the frontier instead of the wall clock.
+- Raw edge is fresh: live traffic bypassed the spool, so recent buckets are
+  still missing replayed rows. The tick holds (`action=hold`), because rolling
+  them would store undercounts that nothing recomputes.
+
+Queue and range backfill stay paused for the whole drain either way — they
+would write into the hole.
 
 To see where it stands:
 
@@ -69,7 +78,9 @@ clickhouse-client -q "SELECT job, last_bucket, status, last_error FROM default.t
 docker logs --since 10m grapes-worker 2>&1 | grep -E 'run start|precheck|action=|run complete'
 ```
 
-`action=hold reason=spool_draining` means it is waiting on purpose.
+`action=catchup reason=spool_draining` / `raw_lag` means the cursor is moving
+through already-landed raw while the live edge waits. `action=hold` means the
+tick is waiting on purpose; with `queue_paused` it is only the backfill queue.
 `action=stop reason=live_wall` means the tick ran out of its time budget and the
 next one continues from the same cursor — normal while catching up a long gap.
 
