@@ -55,19 +55,11 @@ Note the service runs in Docker, so `systemctl is-active grapes-worker` reports
 ## After a ClickHouse outage or a host reboot
 
 The chain is collector spool drain, then rollup catch-up, then graphs. Nothing
-here needs a manual step. What the live tick does while a spool is replaying
-(`TRAFFIC_ROLLUP_REQUIRE_SPOOL_DRAINED`) depends on where `flows_raw` ends:
-
-- Raw edge is old (`ch_mode=spool` collectors, where every row goes through the
-  spool in order): the edge is the drain frontier, so everything before it is
-  complete. The tick rolls those buckets (`action=catchup`) and clamps the
-  cursor to the frontier instead of the wall clock.
-- Raw edge is fresh: live traffic bypassed the spool, so recent buckets are
-  still missing replayed rows. The tick holds (`action=hold`), because rolling
-  them would store undercounts that nothing recomputes.
-
-Queue and range backfill stay paused for the whole drain either way — they
-would write into the hole.
+here needs a manual step. While a spool is replaying, the live tick still rolls
+already-landed closed buckets (`action=catchup`) and clamps the live edge
+`safety_lag + 15` minutes behind `max(time_received_ns)`, so the last minutes
+the drain may still fill are not stored undercounted. Queue and range backfill
+stay paused for the whole drain — they would write into the hole.
 
 A job more than a couple of buckets behind is rolled as a range
 (`TRAFFIC_ROLLUP_MAX_RANGE_BUCKETS`, 15 minutes by default) rather than one

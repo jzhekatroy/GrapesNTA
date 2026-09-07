@@ -301,7 +301,7 @@ def raw_max_received(
     """
     days = max(int(lookback_days), 1)
     raw = ch.query(
-        "SELECT max(time_received_ns) "
+        "SELECT formatDateTime(max(time_received_ns), '%F %T', 'UTC') "
         "FROM default.flows_raw "
         f"WHERE date >= today() - {days}",
         display="flows_raw max received",
@@ -996,7 +996,7 @@ def flows_raw_enabled_max_minute(
     if cache is not None and cache_key in cache:
         return cache[cache_key]
     raw = ch.query(
-        "SELECT toStartOfMinute(max(time_received_ns)) "
+        "SELECT formatDateTime(toStartOfMinute(max(time_received_ns)), '%F %T', 'UTC') "
         "FROM default.flows_raw "
         "WHERE date >= today() - 14 "
         "AND source_id IN (SELECT source_id FROM default.net_flow_sources_enabled)",
@@ -1141,8 +1141,8 @@ def parse_args() -> argparse.Namespace:
         in ("1", "true", "yes", "on"),
         help=(
             "while any enabled collector's spool is draining, clamp the live "
-            "edge to already-landed flows_raw (do not roll buckets the spool "
-            "may still fill). Queue/range backfill still waits. On by default"
+            "edge 15 minutes further behind already-landed flows_raw. Queue "
+            "and range backfill still wait. On by default"
         ),
     )
     parser.add_argument(
@@ -2221,7 +2221,6 @@ def run_live(args: argparse.Namespace, logger: logging.Logger) -> int:
     lookback = max(int(getattr(args, "bootstrap_days", 14) or 14), 14)
     raw_max = raw_max_received(ch, lookback_days=lookback)
     live = live_safe_until(args)
-    clamp = complete_raw_until(raw_max, args.safety_lag_minutes, live)
     lag_s = raw_lag_seconds(ch, lookback_days=lookback)
     raw_stale = lag_s is not None and lag_s > args.max_raw_lag_seconds
     raw_edge = fmt_dt(raw_max) if raw_max else "-"
@@ -2235,20 +2234,18 @@ def run_live(args: argparse.Namespace, logger: logging.Logger) -> int:
             snapshot_max_age_sec=args.spool_snapshot_max_age_sec,
         )
 
-    if draining and not raw_stale:
-        # Raw is fresh while the spool still holds a backlog: this collector
-        # writes live traffic past the spool, so recent buckets are missing
-        # rows that the replay will add later. Rolling them now would bake in
-        # undercounts, so keep the original hold.
-        detail = ",".join(
-            f"{s.source_id}:lag={s.lag_segments}(age={s.age_seconds}s)" for s in draining
-        )
-        logger.warning(
-            "action=hold reason=spool_draining sources=%s "
-            "(flows_raw fresh but incomplete; holding cursor until drained)",
-            detail,
-        )
-        return 0
+    # Never hold the whole tick: the cursor on m61 sat at 5 Sep 17:19 while
+    # 40 hours of flows_raw were already in and the live edge looked "fresh"
+    # only because the drain had reached current timestamps (and, worse, a
+    # session-TZ max() parsed as UTC made lag_s=0). Clamp the live edge so
+    # the last minutes the spool may still fill are not rolled; everything
+    # before that is catch-up.
+    drain_extra = 15 if draining else 0
+    clamp = complete_raw_until(
+        raw_max,
+        args.safety_lag_minutes + drain_extra,
+        live,
+    )
 
     if draining:
         # Spool replays in order, so max(time_received_ns) is the drain
