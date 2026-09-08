@@ -30,6 +30,11 @@ const ENTROPY_FOCUSED = 1.5;
 const TOP_DST_VOLUMETRIC = 0.8;
 const TOP_DST_CARPET = 0.08;
 const UDP_DOMINANT = 0.6;
+const DOWNLOAD_TCP_SHARE_MIN = 0.85;
+const DOWNLOAD_PKT_MIN = 1200;
+const DOWNLOAD_SRC_SHARE_MIN = 0.75;
+const DOWNLOAD_L4_SHARE_MIN = 0.8;
+const DOWNLOAD_SRC_PORTS = new Set([80, 443, 8080, 8443]);
 const NORMALIZE_BPS_KEEP = 0.85;
 
 function num(value) {
@@ -132,8 +137,40 @@ function classifyFromMetrics(byProto = {}, hour = {}) {
     foreignShareGrowth: geo.shareGrowth,
     foreignBpsGrowth: geo.bpsGrowth,
     foreignHit: geo.hit,
+    tcpShare,
+    avgPkt: num(tcp.avg_packet_bytes ?? tcp.avgPacketBytes
+      ?? all.avg_packet_bytes ?? all.avgPacketBytes),
+    synAttempts,
+    answerPct,
     needsInvestigate: kind !== KINDS.benign_peak || geo.hit,
   };
+}
+
+// Одна жирная HTTPS/HTTP-выкачка с CDN: один источник, порт 80/443, полные
+// сегменты, цель на эфемерном порту. На /24 SYN при этом часто чужие, поэтому
+// смотрим разбор минуты, а не счётчик попыток всей сети.
+function isDownloadPeak(verdict = {}, investigate = {}) {
+  if (verdict.kind === KINDS.amplification || verdict.kind === KINDS.syn_flood) return false;
+  const tcpShare = num(verdict.tcpShare);
+  if (tcpShare != null && tcpShare < DOWNLOAD_TCP_SHARE_MIN) return false;
+  if (tcpShare == null) {
+    const udpShare = num(verdict.udpShare);
+    if (udpShare != null && udpShare > 1 - DOWNLOAD_TCP_SHARE_MIN) return false;
+  }
+  const pkt = num(verdict.avgPkt);
+  if (!(pkt >= DOWNLOAD_PKT_MIN)) return false;
+  const l4 = Array.isArray(investigate?.l4src) ? investigate.l4src[0] : null;
+  const l4Port = Number(l4?.port);
+  const l4Share = num(l4?.share);
+  const l4Tcp = Number(l4?.proto) === 6 || String(l4?.protoLabel || '').toUpperCase() === 'TCP';
+  if (!l4Tcp || !DOWNLOAD_SRC_PORTS.has(l4Port) || !(l4Share >= DOWNLOAD_L4_SHARE_MIN)) return false;
+  const src = Array.isArray(investigate?.source24) ? investigate.source24[0] : null;
+  const srcShare = num(src?.share);
+  const srcIps = num(src?.ips);
+  if (!(srcShare >= DOWNLOAD_SRC_SHARE_MIN) || (srcIps != null && srcIps > 2)) return false;
+  const victimPort = num(investigate?.victim?.port);
+  if (victimPort != null && victimPort < 1024) return false;
+  return true;
 }
 
 function refineClassification(verdict, investigate) {
@@ -148,6 +185,13 @@ function refineClassification(verdict, investigate) {
       next.reason = `амплификация по сети · топ IP ${(topShare * 100).toFixed(1)}% · ${next.reason || ''}`.trim();
     }
     next.needsInvestigate = true;
+    return next;
+  }
+  if (isDownloadPeak(next, investigate)) {
+    next.kind = KINDS.benign_peak;
+    next.reason = `пик загрузки · TCP/${Number(investigate?.l4src?.[0]?.port) || 443}`
+      + (topShare != null ? ` · топ IP ${(topShare * 100).toFixed(1)}%` : '');
+    next.needsInvestigate = false;
     return next;
   }
   if (topShare != null && topShare >= TOP_DST_VOLUMETRIC) {
@@ -241,7 +285,11 @@ function actionFor(verdict, investigate) {
     if (victim?.ip) return `резать входящий UDP с портов ${portText} на ${victim.ip}`;
     return `резать входящий UDP с портов ${portText} на префикс клиента`;
   }
-  if (kind === KINDS.benign_peak) return 'похоже на легитимный всплеск';
+  if (kind === KINDS.benign_peak) {
+    return /пик загрузки/.test(String(verdict?.reason || ''))
+      ? 'пик загрузки, фильтр не нужен'
+      : 'похоже на легитимный всплеск';
+  }
   if (kind === KINDS.volumetric) return 'один сервер под нагрузкой, цель в разборе не определилась';
   return 'не эскалировать';
 }

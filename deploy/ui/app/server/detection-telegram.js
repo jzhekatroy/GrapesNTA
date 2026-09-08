@@ -622,6 +622,9 @@ function formatAlertHeadline(verdict, signals = []) {
     return head('🔴', `АТАКА · ${SIGNAL_LABEL.foreign_geo}`);
   }
   if (verdictKind === KINDS.benign_peak) {
+    if (/пик загрузки/.test(String(verdict?.reason || ''))) {
+      return head('🟡', 'ПИК НАГРУЗКИ · легитимная загрузка');
+    }
     return head('🟡', 'ПИК НАГРУЗКИ · похоже на легитимный всплеск');
   }
   return head('🔴', 'Детекция: рост выше порога');

@@ -289,6 +289,27 @@ describe('detection-telegram', () => {
     assert.match(event.alertText, /TTK/);
   });
 
+  it('formatAlertMessage для загрузки пишет жёлтый пик, не атаку', () => {
+    const text = formatAlertMessage({
+      name: '94.26.164.0/24',
+      scope: 'net',
+      scopeId: '94.26.164.0/24',
+      minute: '2026-09-08 07:36:00',
+      threshold: 1.6,
+      byProto: { all: { bps: 923.6e6, growth_bps: 3.76, avg_packet_bytes: 1507 } },
+      verdict: { kind: 'benign_peak', reason: 'пик загрузки · TCP/443 · топ IP 99.4%', hourRatio: 15.21 },
+      investigate: {
+        victim: { ip: '94.26.164.176', port: 53495, protoLabel: 'TCP', share: 0.994 },
+        l4src: [{ port: 443, proto: 6, share: 1 }],
+      },
+    });
+    assert.match(text, /🟡/);
+    assert.match(text, /легитимная загрузка/);
+    assert.match(text, /пик загрузки, фильтр не нужен/);
+    assert.doesNotMatch(text, /АТАКА/);
+    assert.doesNotMatch(text, /резать TCP/);
+  });
+
   it('formatAlertMessage с разбором пишет жертву и коммутатор', () => {
     const text = formatAlertMessage({
       name: 'Hostland',

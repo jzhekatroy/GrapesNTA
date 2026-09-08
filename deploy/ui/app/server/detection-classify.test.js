@@ -7,6 +7,7 @@ const {
   classifyFromMetrics,
   refineClassification,
   isAttackKind,
+  actionFor,
   volumeStillHigh,
   formatVictim,
   formatSwitchPort,
@@ -170,6 +171,41 @@ describe('detection-classify', () => {
     assert.equal(first.foreignHit, true);
     assert.equal(first.kind, KINDS.benign_peak);
     assert.equal(first.needsInvestigate, true);
+  });
+
+  it('85932: HTTPS с одного IP Mail.ru на эфемерный порт → пик загрузки', () => {
+    const first = classifyFromMetrics({
+      all: {
+        bps: 923.6e6, port_entropy: 0.13, syn_attempts: 2003, answer_pct: 33.3,
+        avg_packet_bytes: 1507,
+      },
+      tcp: { bps: 923e6, port_entropy: 0.1, avg_packet_bytes: 1510 },
+      udp: { bps: 0.6e6 },
+    }, { p95: 60.7e6, p999: 60.7e6 });
+    assert.equal(first.kind, KINDS.carpet);
+    const refined = refineClassification(first, {
+      victim: { ip: '94.26.164.176', port: 53495, protoLabel: 'TCP', share: 0.994 },
+      source24: [{ net24: '95.163.51.0/24', asn: 47764, share: 0.994, ips: 1 }],
+      l4src: [{ port: 443, proto: 6, share: 1 }],
+    });
+    assert.equal(refined.kind, KINDS.benign_peak);
+    assert.match(refined.reason, /пик загрузки/);
+    assert.equal(isAttackKind(refined.kind), false);
+    assert.equal(actionFor(refined, { victim: { ip: '94.26.164.176', port: 53495 } }), 'пик загрузки, фильтр не нужен');
+  });
+
+  it('Hostland: UDP на 443 с многих IP не становится загрузкой', () => {
+    const first = classifyFromMetrics({
+      all: { bps: 5.84e9, port_entropy: 0.95, syn_attempts: 74, answer_pct: 24, avg_packet_bytes: 400 },
+      tcp: { bps: 1.54e9 },
+      udp: { bps: 4.29e9, port_entropy: 0.29 },
+    }, { p95: 0.84e9, p999: 3.71e9 });
+    const refined = refineClassification(first, {
+      victim: { ip: '185.26.122.4', port: 443, protoLabel: 'UDP', share: 0.994 },
+      source24: [{ net24: '125.224.150.0/24', share: 0.01, asn: 3462, ips: 4 }],
+      l4src: [{ port: 80, proto: 17, share: 0.14 }],
+    });
+    assert.equal(refined.kind, KINDS.volumetric);
   });
 
   it('один источник и 4.6 Мбит/с amp — не амплификация', () => {
