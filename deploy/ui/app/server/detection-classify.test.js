@@ -182,7 +182,7 @@ describe('detection-classify', () => {
       tcp: { bps: 923e6, port_entropy: 0.1, avg_packet_bytes: 1510 },
       udp: { bps: 0.6e6 },
     }, { p95: 60.7e6, p999: 60.7e6 });
-    assert.equal(first.kind, KINDS.carpet);
+    assert.equal(first.kind, KINDS.benign_peak);
     const refined = refineClassification(first, {
       victim: { ip: '94.26.164.176', port: 53495, protoLabel: 'TCP', share: 0.994 },
       source24: [{ net24: '95.163.51.0/24', asn: 47764, share: 0.994, ips: 1 }],
@@ -206,6 +206,47 @@ describe('detection-classify', () => {
       l4src: [{ port: 80, proto: 17, share: 0.14 }],
     });
     assert.equal(refined.kind, KINDS.volumetric);
+  });
+
+  it('рост к часу без UDP-формы — пик, не ковёр', () => {
+    const first = classifyFromMetrics({
+      all: { bps: 37.8e6, port_entropy: 4.96, syn_attempts: 62, answer_pct: 64.5, avg_packet_bytes: 1505 },
+      tcp: { bps: 0.175e6, avg_packet_bytes: 925 },
+      udp: { bps: 0 },
+    }, { p95: 0.27e6, p999: 0.27e6, recentMedian: 0.27e6 });
+    assert.equal(first.kind, KINDS.benign_peak);
+    assert.equal(isAttackKind(first.kind), false);
+  });
+
+  it('109749: HTTPS с нескольких CDN, TCP в сэмпле почти ноль → пик загрузки', () => {
+    const first = classifyFromMetrics({
+      all: { bps: 37.8e6, port_entropy: 4.96, syn_attempts: 62, answer_pct: 64.5, avg_packet_bytes: 1505 },
+      tcp: { bps: 0.175e6, avg_packet_bytes: 925 },
+      udp: { bps: 0 },
+    }, { p95: 0.27e6, p999: 0.27e6 });
+    const refined = refineClassification(first, {
+      victim: { ip: '188.143.148.57', port: 36556, protoLabel: 'TCP', share: 0.142 },
+      source24: [{ net24: '150.241.243.0/24', asn: 214647, share: 0.615, ips: 1 }],
+      l4src: [{ port: 443, proto: 6, share: 1 }],
+    });
+    assert.equal(refined.kind, KINDS.benign_peak);
+    assert.match(refined.reason, /пик загрузки/);
+  });
+
+  it('70807: HTTP с AWS в один IP, доля TCP 55% → пик загрузки, не volumetric', () => {
+    const first = classifyFromMetrics({
+      all: { bps: 202e6, port_entropy: 0.18, syn_attempts: 87, answer_pct: 80.5, avg_packet_bytes: 1494 },
+      tcp: { bps: 112e6, avg_packet_bytes: 1494 },
+      udp: { bps: 666 },
+    }, { p95: 50e6, p999: 50e6 });
+    const refined = refineClassification(first, {
+      victim: { ip: '188.143.152.77', port: 49986, protoLabel: 'TCP', share: 0.98 },
+      source24: [{ net24: '108.157.214.0/24', asn: 16509, share: 0.98, ips: 1 }],
+      l4src: [{ port: 80, proto: 6, share: 0.98 }],
+    });
+    assert.equal(refined.kind, KINDS.benign_peak);
+    assert.equal(isAttackKind(refined.kind), false);
+    assert.equal(actionFor(refined, { victim: { ip: '188.143.152.77', port: 49986 } }), 'пик загрузки, фильтр не нужен');
   });
 
   it('один источник и 4.6 Мбит/с amp — не амплификация', () => {

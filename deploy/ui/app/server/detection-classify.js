@@ -32,7 +32,7 @@ const TOP_DST_CARPET = 0.08;
 const UDP_DOMINANT = 0.6;
 const DOWNLOAD_TCP_SHARE_MIN = 0.85;
 const DOWNLOAD_PKT_MIN = 1200;
-const DOWNLOAD_SRC_SHARE_MIN = 0.75;
+const DOWNLOAD_SRC_SHARE_MIN = 0.5;
 const DOWNLOAD_L4_SHARE_MIN = 0.8;
 const DOWNLOAD_SRC_PORTS = new Set([80, 443, 8080, 8443]);
 const NORMALIZE_BPS_KEEP = 0.85;
@@ -113,10 +113,9 @@ function classifyFromMetrics(byProto = {}, hour = {}) {
   } else if ((ratio == null || ratio >= 1.8) && udpShare != null && udpShare >= UDP_DOMINANT) {
     kind = KINDS.carpet;
     reasons.unshift('сильный рост и доминирует UDP');
-  } else if (ratio != null && ratio >= 1.8) {
-    kind = KINDS.carpet;
-    reasons.unshift('объём сильно выше нормы часа');
   } else {
+    // Рост к норме часа сам по себе — не атака: у тихих абонентов любой
+    // скачивание даёт ×70–3000. Атака здесь только по форме (UDP / узкие порты / SYN / amp).
     kind = KINDS.benign_peak;
     reasons.unshift('нет явных признаков атаки');
   }
@@ -138,8 +137,8 @@ function classifyFromMetrics(byProto = {}, hour = {}) {
     foreignBpsGrowth: geo.bpsGrowth,
     foreignHit: geo.hit,
     tcpShare,
-    avgPkt: num(tcp.avg_packet_bytes ?? tcp.avgPacketBytes
-      ?? all.avg_packet_bytes ?? all.avgPacketBytes),
+    avgPkt: num(all.avg_packet_bytes ?? all.avgPacketBytes
+      ?? tcp.avg_packet_bytes ?? tcp.avgPacketBytes),
     synAttempts,
     answerPct,
     needsInvestigate: kind !== KINDS.benign_peak || geo.hit,
@@ -151,12 +150,10 @@ function classifyFromMetrics(byProto = {}, hour = {}) {
 // смотрим разбор минуты, а не счётчик попыток всей сети.
 function isDownloadPeak(verdict = {}, investigate = {}) {
   if (verdict.kind === KINDS.amplification || verdict.kind === KINDS.syn_flood) return false;
-  const tcpShare = num(verdict.tcpShare);
-  if (tcpShare != null && tcpShare < DOWNLOAD_TCP_SHARE_MIN) return false;
-  if (tcpShare == null) {
-    const udpShare = num(verdict.udpShare);
-    if (udpShare != null && udpShare > 1 - DOWNLOAD_TCP_SHARE_MIN) return false;
-  }
+  const udpShare = num(verdict.udpShare);
+  if (udpShare != null && udpShare > 1 - DOWNLOAD_TCP_SHARE_MIN) return false;
+  // Долю TCP из proto=tcp не берём: она из сэмпла и на жирном потоке часто 0,
+  // тогда как all — из витрины. Форму смотрим в разборе минуты.
   const pkt = num(verdict.avgPkt);
   if (!(pkt >= DOWNLOAD_PKT_MIN)) return false;
   const l4 = Array.isArray(investigate?.l4src) ? investigate.l4src[0] : null;
@@ -167,7 +164,7 @@ function isDownloadPeak(verdict = {}, investigate = {}) {
   const src = Array.isArray(investigate?.source24) ? investigate.source24[0] : null;
   const srcShare = num(src?.share);
   const srcIps = num(src?.ips);
-  if (!(srcShare >= DOWNLOAD_SRC_SHARE_MIN) || (srcIps != null && srcIps > 2)) return false;
+  if (src && (!(srcShare >= DOWNLOAD_SRC_SHARE_MIN) || (srcIps != null && srcIps > 2))) return false;
   const victimPort = num(investigate?.victim?.port);
   if (victimPort != null && victimPort < 1024) return false;
   return true;
