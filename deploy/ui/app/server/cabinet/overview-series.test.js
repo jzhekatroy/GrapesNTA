@@ -19,30 +19,57 @@ function resetCalls() {
   queryResults = [];
 }
 
+function pushEmptySeriesResults(dataUntil = '2026-08-10 12:00:00') {
+  queryResults.push(
+    { rows: [] },
+    { rows: [{ data_until: dataUntil }] },
+  );
+}
+
 test('parseRange defaults to relative hours', () => {
   assert.deepEqual(parseRange({ hours: '12' }), { hours: 12, mode: 'relative' });
 });
 
-test('overviewSeries auto uses minute table for short ranges', async () => {
+test('overviewSeries auto uses 5m buckets from minute table for short ranges', async () => {
   resetCalls();
-  queryResults.push(
-    { rows: [] },
-    { rows: [{ data_until: '2026-08-10 12:00:00' }] },
-  );
-  await overviewSeries('client:demo', { hours: '3', granularity: 'auto' });
+  pushEmptySeriesResults();
+  const result = await overviewSeries('client:demo', { hours: '3', granularity: 'auto' });
   const seriesCall = calls.find((c) => c.opts?.name === 'cabinet/overview-series');
   assert.match(seriesCall.sql, /traffic_client_1m/);
-  assert.match(seriesCall.sql, /bucket/);
+  assert.match(seriesCall.sql, /toStartOfInterval\(minute, INTERVAL 5 MINUTE\)/);
+  assert.match(seriesCall.sql, /toIntervalSecond\(300\)/);
   assert.match(seriesCall.sql, /toUnixTimestamp\(/);
   assert.match(seriesCall.sql, /formatDateTime\(/);
+  assert.equal(result.meta.granularity, '5m');
+});
+
+test('overviewSeries auto uses 5m buckets for 24h and 14d ranges', async () => {
+  for (const hours of ['24', String(14 * 24)]) {
+    resetCalls();
+    pushEmptySeriesResults();
+    const result = await overviewSeries('client:demo', { hours, granularity: 'auto' });
+    const seriesCall = calls.find((c) => c.opts?.name === 'cabinet/overview-series');
+    assert.match(seriesCall.sql, /traffic_client_1m/);
+    assert.match(seriesCall.sql, /toStartOfInterval\(minute, INTERVAL 5 MINUTE\)/);
+    assert.equal(result.meta.granularity, '5m');
+  }
+});
+
+test('overviewSeries auto uses hourly table after minute retention', async () => {
+  for (const hours of [String(15 * 24), '720']) {
+    resetCalls();
+    pushEmptySeriesResults('2026-08-18 12:00:00');
+    const result = await overviewSeries('client:demo', { hours, granularity: 'auto' });
+    const seriesCall = calls.find((c) => c.opts?.name === 'cabinet/overview-series');
+    assert.match(seriesCall.sql, /traffic_client_1h/);
+    assert.doesNotMatch(seriesCall.sql, /toStartOfInterval\(minute, INTERVAL 5 MINUTE\)/);
+    assert.equal(result.meta.granularity, 'hour');
+  }
 });
 
 test('overviewSeries day granularity uses daily table', async () => {
   resetCalls();
-  queryResults.push(
-    { rows: [] },
-    { rows: [{ data_until: '2026-08-10 00:00:00' }] },
-  );
+  pushEmptySeriesResults('2026-08-10 00:00:00');
   await overviewSeries('client:demo', {
     from: '2025-01-01T00:00:00Z',
     to: '2026-01-01T00:00:00Z',

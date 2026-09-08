@@ -68,12 +68,12 @@ async function lastCompleteHour(table, clientId) {
 const MINUTE_RETENTION_HOURS = 14 * 24;
 const HOUR_RETENTION_HOURS = 180 * 24;
 const DAY_RETENTION_HOURS = 730 * 24;
-const AUTO_MINUTE_MAX_HOURS = 6;
 const AUTO_HOUR_MAX_HOURS = 40 * 24;
+const FIVE_MINUTE_BUCKET_SECONDS = 300;
 
 function parseGranularity(raw) {
   const value = String(raw || 'auto').trim().toLowerCase();
-  if (['auto', 'minute', 'hour', 'day'].includes(value)) return value;
+  if (['auto', 'minute', '5m', 'hour', 'day'].includes(value)) return value;
   return 'auto';
 }
 
@@ -96,6 +96,14 @@ function resolveOverviewGranularity(range, requested) {
     }
     return 'minute';
   }
+  if (requestedGranularity === '5m') {
+    if (spanHours > MINUTE_RETENTION_HOURS) {
+      const err = new Error('5-минутная детализация доступна не глубже 14 суток');
+      err.statusCode = 400;
+      throw err;
+    }
+    return '5m';
+  }
   if (requestedGranularity === 'day') {
     if (spanHours > DAY_RETENTION_HOURS) {
       const err = new Error('Дневная детализация доступна не глубже 730 суток');
@@ -112,15 +120,28 @@ function resolveOverviewGranularity(range, requested) {
     }
     return 'hour';
   }
-  if (spanHours <= AUTO_MINUTE_MAX_HOURS) return 'minute';
+  if (spanHours <= MINUTE_RETENTION_HOURS) return '5m';
   if (spanHours <= AUTO_HOUR_MAX_HOURS) return 'hour';
   return 'day';
 }
 
 function overviewTableForGranularity(granularity) {
-  if (granularity === 'minute') return { table: 'traffic_client_1m', bucketColumn: 'minute' };
+  if (granularity === 'minute' || granularity === '5m') {
+    return { table: 'traffic_client_1m', bucketColumn: 'minute' };
+  }
   if (granularity === 'day') return { table: 'traffic_client_1d', bucketColumn: 'day' };
   return { table: 'traffic_client_1h', bucketColumn: 'hour' };
+}
+
+function overviewSeriesBoundarySql(range) {
+  if (range.mode === 'absolute') {
+    return { sql: parseDataDatetimeSql('to'), params: { from: range.from, to: range.to } };
+  }
+  return { sql: 'now() - INTERVAL 30 SECOND', params: {} };
+}
+
+function closedOverviewBucketSql(bucketColumn, bucketSeconds, boundarySql) {
+  return `${bucketColumn} + toIntervalSecond(${bucketSeconds}) < ${boundarySql}`;
 }
 
 async function lastCompleteBucket(table, bucketColumn, clientId) {
@@ -138,8 +159,33 @@ async function overviewSeries(clientId, queryParams = {}) {
   const granularity = resolveOverviewGranularity(range, queryParams.granularity);
   const { table, bucketColumn } = overviewTableForGranularity(granularity);
   const filter = timeFilterSql(bucketColumn, range);
-  const [{ rows, elapsedMs }, dataUntil] = await Promise.all([query(
+  const boundary = overviewSeriesBoundarySql(range);
+  const seriesSql = granularity === '5m'
+    ? `
+      SELECT
+        ${formatDataDatetimeSql('bucket')} AS bucket,
+        toUnixTimestamp(bucket) AS bucket_ts,
+        direction,
+        bytes,
+        packets,
+        flows_count
+      FROM
+      (
+        SELECT
+          toStartOfInterval(${bucketColumn}, INTERVAL 5 MINUTE) AS bucket,
+          direction,
+          sum(bytes) AS bytes,
+          sum(packets) AS packets,
+          sum(flows_count) AS flows_count
+        FROM default.${table}
+        WHERE client_id = {clientId:String}
+          AND (${filter.sql})
+        GROUP BY bucket, direction
+      )
+      WHERE ${closedOverviewBucketSql('bucket', FIVE_MINUTE_BUCKET_SECONDS, boundary.sql)}
+      ORDER BY bucket ASC, direction ASC
     `
+    : `
       SELECT
         ${formatDataDatetimeSql(bucketColumn)} AS bucket,
         toUnixTimestamp(${bucketColumn}) AS bucket_ts,
@@ -152,8 +198,10 @@ async function overviewSeries(clientId, queryParams = {}) {
         AND (${filter.sql})
       GROUP BY ${bucketColumn}, direction
       ORDER BY ${bucketColumn} ASC, direction ASC
-    `,
-    { clientId, ...filter.params },
+    `;
+  const [{ rows, elapsedMs }, dataUntil] = await Promise.all([query(
+    seriesSql,
+    { clientId, ...filter.params, ...boundary.params },
     { name: 'cabinet/overview-series' },
   ), lastCompleteBucket(table, bucketColumn, clientId)]);
 

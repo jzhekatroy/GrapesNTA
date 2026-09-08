@@ -8,7 +8,7 @@ const CABINET_DIRECTION_LABELS = {
 };
 
 function cabinetGranularityBucketSeconds(granularity) {
-  const map = { minute: 60, hour: 3600, day: 86400 };
+  const map = { minute: 60, '5m': 300, hour: 3600, day: 86400 };
   return map[String(granularity || '').toLowerCase()] || 3600;
 }
 
