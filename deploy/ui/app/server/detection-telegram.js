@@ -11,10 +11,12 @@ const {
   classifyFromMetrics,
   refineClassification,
   isAttackKind,
+  isLegitimatePeak,
   formatSwitchPort,
   formatVictim,
   formatSourceNets,
   formatL4Sources,
+  isUsableVictim,
   actionFor,
   volumeStillHigh,
 } = require('./detection-classify');
@@ -631,6 +633,14 @@ function formatProtoBlock(proto, row, flags = new Set()) {
   return lines.join('\n');
 }
 
+function isAlertAttack(verdict, signals = []) {
+  const list = Array.isArray(signals) ? signals : [];
+  if (isAttackKind(verdict?.kind)) return true;
+  if (list.includes(SIGNALS.amplification)) return true;
+  if (list.includes(SIGNALS.foreign_geo) && !isLegitimatePeak(verdict)) return true;
+  return false;
+}
+
 function formatAlertHeadline(verdict, signals = []) {
   const verdictKind = verdict?.kind || '';
   const head = (emoji, text) => `${emoji} <b>${escapeHtml(text)}</b>`;
@@ -642,11 +652,11 @@ function formatAlertHeadline(verdict, signals = []) {
   if (isAttackKind(verdictKind)) {
     return head('🔴', `АТАКА · ${KIND_LABEL[verdictKind] || verdictKind}`);
   }
-  if (signals.includes(SIGNALS.foreign_geo) && verdictKind === KINDS.benign_peak) {
+  if (signals.includes(SIGNALS.foreign_geo) && verdictKind === KINDS.benign_peak && !isLegitimatePeak(verdict)) {
     return head('🔴', `АТАКА · ${SIGNAL_LABEL.foreign_geo}`);
   }
   if (verdictKind === KINDS.benign_peak) {
-    if (/пик загрузки/.test(String(verdict?.reason || ''))) {
+    if (isLegitimatePeak(verdict)) {
       return head('🟡', 'ПИК НАГРУЗКИ · легитимная загрузка');
     }
     return head('🟡', 'ПИК НАГРУЗКИ · похоже на легитимный всплеск');
@@ -654,56 +664,117 @@ function formatAlertHeadline(verdict, signals = []) {
   return head('🔴', 'Детекция: рост выше порога');
 }
 
-function formatAlertHighlights({ byProto, verdict, investigate, hourUsual }) {
-  const all = byProto?.all || {};
-  const udp = byProto?.udp || {};
-  const amp = ampMetrics(udp);
-  const geo = evaluateForeignGeo(all);
+function formatVolumeLine(all, verdict, hourUsual) {
   const hour = verdict?.hourRatio != null
     ? `к норме часа ×${Number(verdict.hourRatio).toFixed(2)}`
     : `рост ${formatGrowthMsg(all.growth_bps)}`;
   const usual = hourUsual > 0 ? ` (обычно ${formatBpsMsg(hourUsual)})` : '';
-  const volumeMark = verdict?.hourRatio != null && Number(verdict.hourRatio) >= 1.8 ? '‼' : '⚠';
-  const lines = [
-    `${volumeMark} Объём: <b>${escapeHtml(formatBpsMsg(all.bps))}</b> · ${escapeHtml(hour)}${escapeHtml(usual)}`,
-  ];
-  const tcp = byProto?.tcp || {};
-  const split = [
-    Number(tcp.bps) > 0 ? `TCP ${formatBpsMsg(tcp.bps)}` : '',
-    Number(udp.bps) > 0 ? `UDP ${formatBpsMsg(udp.bps)}` : '',
-  ].filter(Boolean);
-  if (split.length) lines.push(`   ${escapeHtml(split.join(' · '))}`);
-  let ampShown = false;
-  if (amp.share != null && amp.bps >= 50e6) {
-    const mark = isAmplificationHit(udp) ? '‼' : '⚠';
-    const l4 = formatL4Sources(investigate?.l4src);
-    lines.push(`${mark} Отражатели: <b>${(amp.share * 100).toFixed(0)}% UDP</b>`
-      + ` · ${amp.srcs} источников${l4 !== '—' ? ` · ${escapeHtml(l4)}` : ''}`);
-    ampShown = true;
-  }
-  const victim = formatVictim(investigate?.victim);
-  if (victim !== '—' || investigate?.error) {
-    const focused = Number(investigate?.victim?.share) >= 0.8;
-    const prefix = focused ? '‼ Цель: ' : 'Куда: ';
-    const body = focused ? `<b>${escapeHtml(victim)}</b>` : escapeHtml(victim);
-    const failed = investigate?.error
-      ? ` (разбор не удался: ${escapeHtml(shortErrorMsg(investigate.error))})`
-      : '';
-    lines.push(`${prefix}${body}${failed}`);
+  const ratio = Number(verdict?.hourRatio);
+  let mark = '';
+  if (Number.isFinite(ratio)) {
+    if (ratio >= 1.8) mark = '‼';
+    else if (ratio >= HOUR_RATIO_PEAK) mark = '⚠';
   } else {
-    lines.push(`Куда: ${escapeHtml(victim)}`);
+    const growth = Number(all.growth_bps);
+    if (growth >= 1.8) mark = '‼';
+    else if (growth >= DEFAULT_GROWTH_THRESHOLD) mark = '⚠';
   }
-  if (geo.share != null && (geo.hit || geo.share >= 0.15)) {
-    const mark = geo.hit ? '‼' : '⚠';
+  const prefix = mark ? `${mark} ` : '';
+  return `${prefix}Объём: <b>${escapeHtml(formatBpsMsg(all.bps))}</b> · ${escapeHtml(hour)}${escapeHtml(usual)}`;
+}
+
+function formatAmpHighlight({ amp, udp, all, hourUsual, verdict, investigate }) {
+  const ports = amplifierPortsFromL4(investigate?.l4src);
+  const from = ports.length
+    ? `с ${ports.map((port) => `UDP/${port}`).join(' и ')}`
+    : 'с портов усилителей';
+  const hit = isAmplificationHit(udp) || verdict?.kind === KINDS.amplification;
+  const lines = [
+    `${hit ? '‼' : '⚠'} Паразит: <b>${escapeHtml(formatBpsMsg(amp.bps))}</b> ${escapeHtml(from)}`,
+  ];
+  const details = [
+    amp.srcs > 0 ? `${formatNumMsg(amp.srcs, 0)} отражателей` : '',
+    amp.avgPkt > 0 ? `пакет ${formatNumMsg(amp.avgPkt, 0)} Б` : '',
+  ].filter(Boolean);
+  if (details.length) lines.push(`   ${escapeHtml(details.join(' · '))}`);
+  const shares = [];
+  if (amp.share != null) shares.push(`от UDP это ${(amp.share * 100).toFixed(0)}%`);
+  if (Number(all.bps) > 0) {
+    shares.push(`от всего потока клиента ${((amp.bps / Number(all.bps)) * 100).toFixed(0)}%`);
+  }
+  if (shares.length) lines.push(`   ${escapeHtml(shares.join(', '))}`);
+  if (amp.growth > 0 && amp.bps > 0) {
+    const usualAmp = amp.bps / amp.growth;
+    lines.push(escapeHtml(`   обычно с усилителей ${formatBpsMsg(usualAmp)}, сейчас ${formatGrowthMsg(amp.growth)}`));
+  }
+  const ratio = Number(verdict?.hourRatio);
+  if (hourUsual > 0 && Number(all.bps) > 0) {
+    const shown = Number.isFinite(ratio) ? ratio : Number(all.bps) / hourUsual;
+    if (shown < HOUR_RATIO_PEAK) {
+      lines.push(escapeHtml(
+        `   общий объём ${formatBpsMsg(all.bps)} — ниже обычных ${formatBpsMsg(hourUsual)}`
+        + ` (×${shown.toFixed(2)}), в нём не видно`,
+      ));
+    } else {
+      lines.push(escapeHtml(
+        `   общий объём ${formatBpsMsg(all.bps)} · обычно ${formatBpsMsg(hourUsual)} (×${shown.toFixed(2)})`,
+      ));
+    }
+  }
+  return lines;
+}
+
+function formatVictimHighlight(investigate, verdict) {
+  if (investigate?.error) {
+    return [`Куда: — (разбор не удался: ${escapeHtml(shortErrorMsg(investigate.error))})`];
+  }
+  const victim = investigate?.victim;
+  if (!victim?.ip) return [];
+  const share = Number(victim.share);
+  if (verdict?.kind === KINDS.amplification && !isUsableVictim(victim)) {
+    if (Number.isFinite(share) && share < 0.15) {
+      return [`   в один адрес не бьёт (топ IP ${(share * 100).toFixed(1)}%)`];
+    }
+    return [];
+  }
+  if (!isUsableVictim(victim) && Number.isFinite(share) && share < 0.15) return [];
+  const text = formatVictim(victim);
+  if (text === '—') return [];
+  if (share >= 0.8) return [`‼ Цель: <b>${escapeHtml(text)}</b>`];
+  return [`Куда: ${escapeHtml(text)}`];
+}
+
+function formatAlertHighlights({ byProto, verdict, investigate, hourUsual }) {
+  const all = byProto?.all || {};
+  const udp = byProto?.udp || {};
+  const tcp = byProto?.tcp || {};
+  const amp = ampMetrics(udp);
+  const geo = evaluateForeignGeo(all);
+  const showAmp = verdict?.kind === KINDS.amplification || (amp.bps >= 50e6 && amp.share != null);
+  const lines = [];
+  if (showAmp && amp.bps > 0) {
+    lines.push(...formatAmpHighlight({ amp, udp, all, hourUsual, verdict, investigate }));
+  } else {
+    lines.push(formatVolumeLine(all, verdict, hourUsual));
+    const split = [
+      Number(tcp.bps) > 0 ? `TCP ${formatBpsMsg(tcp.bps)}` : '',
+      Number(udp.bps) > 0 ? `UDP ${formatBpsMsg(udp.bps)}` : '',
+    ].filter(Boolean);
+    if (split.length) lines.push(`   ${escapeHtml(split.join(' · '))}`);
+  }
+  lines.push(...formatVictimHighlight(investigate, verdict));
+  if (geo.hit) {
     const growth = geo.shareGrowth != null ? ` — ×${geo.shareGrowth.toFixed(1)} к норме часа` : '';
     const usualShare = geo.shareNorm != null ? ` (обычно ${(geo.shareNorm * 100).toFixed(0)}%)` : '';
-    lines.push(`${mark} Заграница <b>${(geo.share * 100).toFixed(0)}%</b>${escapeHtml(growth)}${escapeHtml(usualShare)}`);
+    lines.push(`‼ Заграница <b>${(geo.share * 100).toFixed(0)}%</b>${escapeHtml(growth)}${escapeHtml(usualShare)}`);
     const countries = formatTopCountries(geo.top);
     if (countries) lines.push(`   ${escapeHtml(countries)}`);
   }
-  const pkt = Number(udp.avg_packet_bytes ?? udp.avgPacketBytes ?? all.avg_packet_bytes ?? all.avgPacketBytes);
-  if (pkt >= AMP_PKT_MIN) lines.push(`⚠ Пакеты <b>${Math.round(pkt)} Б</b> — крупные, близко к MTU`);
-  return { lines, ampShown };
+  if (!showAmp) {
+    const pkt = Number(udp.avg_packet_bytes ?? udp.avgPacketBytes ?? all.avg_packet_bytes ?? all.avgPacketBytes);
+    if (pkt >= AMP_PKT_MIN) lines.push(`⚠ Пакеты <b>${Math.round(pkt)} Б</b> — крупные, близко к MTU`);
+  }
+  return { lines, ampShown: showAmp };
 }
 
 function formatAlertMessage({
@@ -1680,7 +1751,7 @@ async function processDetectionAlerts({ minute, rows, nameByKey }) {
         investigate = { ...emptyInvestigate(), error: err.message };
       }
     }
-    const attack = isAttackKind(verdict.kind) || signals.includes(SIGNALS.amplification) || signals.includes(SIGNALS.foreign_geo);
+    const attack = isAlertAttack(verdict, signals);
     const text = formatAlertMessage({
       name,
       scope: row.scope,
@@ -1902,6 +1973,7 @@ module.exports = {
   shouldSendNormalize,
   matchesAlertScope,
   matchesAlertKind,
+  isAlertAttack,
   historyStatusSql,
   normalizeAlertKind,
   pickAlertCandidates,

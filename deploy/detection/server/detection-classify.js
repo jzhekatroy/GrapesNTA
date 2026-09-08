@@ -35,6 +35,9 @@ const DOWNLOAD_PKT_MIN = 1200;
 const DOWNLOAD_SRC_SHARE_MIN = 0.5;
 const DOWNLOAD_L4_SHARE_MIN = 0.8;
 const DOWNLOAD_SRC_PORTS = new Set([80, 443, 8080, 8443]);
+const DOWNLOAD_QUIC_PORTS = new Set([443]);
+const DOWNLOAD_VPN_PORTS = new Set([1194]);
+const VICTIM_ACTION_SHARE_MIN = 0.15;
 const NORMALIZE_BPS_KEEP = 0.85;
 
 function num(value) {
@@ -145,29 +148,71 @@ function classifyFromMetrics(byProto = {}, hour = {}) {
   };
 }
 
-// Одна жирная HTTPS/HTTP-выкачка с CDN: один источник, порт 80/443, полные
-// сегменты, цель на эфемерном порту. На /24 SYN при этом часто чужие, поэтому
-// смотрим разбор минуты, а не счётчик попыток всей сети.
+function topL4(investigate) {
+  return Array.isArray(investigate?.l4src) ? investigate.l4src[0] : null;
+}
+
+function l4ProtoNum(l4) {
+  if (!l4) return null;
+  if (Number(l4.proto) === 17) return 17;
+  if (Number(l4.proto) === 6) return 6;
+  const label = String(l4.protoLabel || '').toUpperCase();
+  if (label === 'UDP') return 17;
+  if (label === 'TCP') return 6;
+  return null;
+}
+
+function l4Matches(investigate, proto, ports) {
+  const l4 = topL4(investigate);
+  const port = Number(l4?.port);
+  const share = num(l4?.share);
+  return l4ProtoNum(l4) === proto
+    && ports.has(port)
+    && share != null
+    && share >= DOWNLOAD_L4_SHARE_MIN;
+}
+
+function hasNarrowSource(investigate) {
+  const src = Array.isArray(investigate?.source24) ? investigate.source24[0] : null;
+  if (!src) return true;
+  const srcShare = num(src.share);
+  const srcIps = num(src.ips);
+  if (!(srcShare >= DOWNLOAD_SRC_SHARE_MIN)) return false;
+  if (srcIps != null && srcIps > 2) return false;
+  return true;
+}
+
+function hasEphemeralVictim(investigate) {
+  const victimPort = num(investigate?.victim?.port);
+  return victimPort == null || victimPort >= 1024;
+}
+
+function downloadPeakLabel(investigate) {
+  const l4 = topL4(investigate);
+  const proto = l4ProtoNum(l4) === 17 ? 'UDP' : 'TCP';
+  const port = Number(l4?.port);
+  return `${proto}/${Number.isFinite(port) ? port : 443}`;
+}
+
+// HTTPS/HTTP с CDN, QUIC UDP/443 или OpenVPN с 1–2 IP: цель на эфемерном
+// порту. На /24 SYN при этом часто чужие, поэтому смотрим разбор минуты.
 function isDownloadPeak(verdict = {}, investigate = {}) {
   if (verdict.kind === KINDS.amplification || verdict.kind === KINDS.syn_flood) return false;
+  if (!hasNarrowSource(investigate) || !hasEphemeralVictim(investigate)) return false;
+  if (l4Matches(investigate, 17, DOWNLOAD_VPN_PORTS)) return true;
+  const pkt = num(verdict.avgPkt);
+  if (!(pkt >= DOWNLOAD_PKT_MIN)) return false;
+  if (l4Matches(investigate, 17, DOWNLOAD_QUIC_PORTS)) return true;
   const udpShare = num(verdict.udpShare);
   if (udpShare != null && udpShare > 1 - DOWNLOAD_TCP_SHARE_MIN) return false;
   // Долю TCP из proto=tcp не берём: она из сэмпла и на жирном потоке часто 0,
   // тогда как all — из витрины. Форму смотрим в разборе минуты.
-  const pkt = num(verdict.avgPkt);
-  if (!(pkt >= DOWNLOAD_PKT_MIN)) return false;
-  const l4 = Array.isArray(investigate?.l4src) ? investigate.l4src[0] : null;
-  const l4Port = Number(l4?.port);
-  const l4Share = num(l4?.share);
-  const l4Tcp = Number(l4?.proto) === 6 || String(l4?.protoLabel || '').toUpperCase() === 'TCP';
-  if (!l4Tcp || !DOWNLOAD_SRC_PORTS.has(l4Port) || !(l4Share >= DOWNLOAD_L4_SHARE_MIN)) return false;
-  const src = Array.isArray(investigate?.source24) ? investigate.source24[0] : null;
-  const srcShare = num(src?.share);
-  const srcIps = num(src?.ips);
-  if (src && (!(srcShare >= DOWNLOAD_SRC_SHARE_MIN) || (srcIps != null && srcIps > 2))) return false;
-  const victimPort = num(investigate?.victim?.port);
-  if (victimPort != null && victimPort < 1024) return false;
-  return true;
+  return l4Matches(investigate, 6, DOWNLOAD_SRC_PORTS);
+}
+
+function isLegitimatePeak(verdict = {}) {
+  return verdict.kind === KINDS.benign_peak
+    && /пик загрузки/.test(String(verdict.reason || ''));
 }
 
 function refineClassification(verdict, investigate) {
@@ -186,7 +231,7 @@ function refineClassification(verdict, investigate) {
   }
   if (isDownloadPeak(next, investigate)) {
     next.kind = KINDS.benign_peak;
-    next.reason = `пик загрузки · TCP/${Number(investigate?.l4src?.[0]?.port) || 443}`
+    next.reason = `пик загрузки · ${downloadPeakLabel(investigate)}`
       + (topShare != null ? ` · топ IP ${(topShare * 100).toFixed(1)}%` : '');
     next.needsInvestigate = false;
     return next;
@@ -256,6 +301,18 @@ function formatL4Sources(list) {
   }).join(' · ');
 }
 
+function isUsableVictim(victim) {
+  if (!victim?.ip) return false;
+  const share = num(victim.share);
+  if (share != null && share < VICTIM_ACTION_SHARE_MIN) return false;
+  const proto = Number(victim.proto);
+  const label = String(victim.protoLabel || '').toUpperCase();
+  if (Number.isFinite(proto) && proto !== 6 && proto !== 17) return false;
+  if (label && label !== 'TCP' && label !== 'UDP') return false;
+  if (num(victim.port) === 0) return false;
+  return true;
+}
+
 function actionFor(verdict, investigate) {
   const kind = verdict?.kind;
   const victim = investigate?.victim;
@@ -264,7 +321,7 @@ function actionFor(verdict, investigate) {
   if (isAttackKind(kind) && investigate?.error) {
     return 'разбор минуты не удался — смотреть вручную';
   }
-  if (kind === KINDS.volumetric && victim?.ip) {
+  if (kind === KINDS.volumetric && isUsableVictim(victim)) {
     const proto = victim.protoLabel || 'трафик';
     const port = victim.port != null ? `:${victim.port}` : '';
     return `резать ${proto} на ${victim.ip}${port}`;
@@ -279,7 +336,7 @@ function actionFor(verdict, investigate) {
   if (kind === KINDS.amplification) {
     const ports = amplifierPortsFromL4(investigate?.l4src);
     const portText = ports.length ? ports.join(' и ') : 'усилителей';
-    if (victim?.ip) return `резать входящий UDP с портов ${portText} на ${victim.ip}`;
+    if (isUsableVictim(victim)) return `резать входящий UDP с портов ${portText} на ${victim.ip}`;
     return `резать входящий UDP с портов ${portText} на префикс клиента`;
   }
   if (kind === KINDS.benign_peak) {
@@ -308,11 +365,14 @@ module.exports = {
   ENTROPY_FOCUSED,
   classifyFromMetrics,
   refineClassification,
+  isDownloadPeak,
+  isLegitimatePeak,
   isAttackKind,
   formatSwitchPort,
   formatVictim,
   formatSourceNets,
   formatL4Sources,
+  isUsableVictim,
   actionFor,
   volumeStillHigh,
   protoShare,
