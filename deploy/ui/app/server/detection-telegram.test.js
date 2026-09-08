@@ -5,6 +5,7 @@ const assert = require('node:assert/strict');
 const {
   DEFAULT_GROWTH_THRESHOLD,
   DEFAULT_ALERT_SCOPE,
+  DEFAULT_ALERT_KIND,
   DEFAULT_STREAK,
   DEFAULT_NORMALIZE_STREAK,
   DEFAULT_TELEGRAM_API_URL,
@@ -18,6 +19,9 @@ const {
   shouldSendAlert,
   shouldSendNormalize,
   matchesAlertScope,
+  matchesAlertKind,
+  historyStatusSql,
+  normalizeAlertKind,
   pickAlertCandidates,
   pickNormalizeCandidates,
   formatAlertMessage,
@@ -39,6 +43,7 @@ describe('detection-telegram', () => {
   it('порог и серия по умолчанию', () => {
     assert.equal(DEFAULT_GROWTH_THRESHOLD, 1.6);
     assert.equal(DEFAULT_ALERT_SCOPE, 'all');
+    assert.equal(DEFAULT_ALERT_KIND, 'all');
     assert.equal(DEFAULT_STREAK, 3);
     assert.equal(DEFAULT_NORMALIZE_STREAK, 3);
     assert.equal(DEFAULT_TELEGRAM_API_URL, 'https://api.telegram.org');
@@ -96,6 +101,22 @@ describe('detection-telegram', () => {
     assert.equal(matchesAlertScope(net, 'client'), false);
     assert.equal(matchesAlertScope(net, 'net'), true);
     assert.equal(matchesAlertScope(client, 'net'), false);
+  });
+
+  it('рассылка: атаки / всплески / всё, в историю пишем всё', () => {
+    assert.equal(normalizeAlertKind(''), 'all');
+    assert.equal(normalizeAlertKind('attack'), 'attack');
+    assert.equal(normalizeAlertKind('peak'), 'peak');
+    assert.equal(normalizeAlertKind('noise'), 'all');
+    assert.equal(matchesAlertKind(true, 'all'), true);
+    assert.equal(matchesAlertKind(false, 'all'), true);
+    assert.equal(matchesAlertKind(true, 'attack'), true);
+    assert.equal(matchesAlertKind(false, 'attack'), false);
+    assert.equal(matchesAlertKind(true, 'peak'), false);
+    assert.equal(matchesAlertKind(false, 'peak'), true);
+    assert.equal(historyStatusSql('all'), "status IN ('normalized', 'peak')");
+    assert.equal(historyStatusSql('attack'), "status = 'normalized'");
+    assert.equal(historyStatusSql('peak'), "status = 'peak'");
   });
 
   it('серия: одно значение недостаточно при streak=3', () => {

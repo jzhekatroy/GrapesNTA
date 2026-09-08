@@ -61,6 +61,7 @@ function createDetectionRouter() {
           limit: req.query.limit,
           from: req.query.from,
           to: req.query.to,
+          kind: req.query.kind || req.query.alertKind,
         }),
       });
     } catch (err) {
@@ -75,6 +76,7 @@ function createDetectionRouter() {
         from: req.query.from,
         to: req.query.to,
         limit: req.query.limit || 10000,
+        kind: req.query.kind || req.query.alertKind,
       });
       const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
       res.setHeader('Content-Type', 'text/csv; charset=utf-8');

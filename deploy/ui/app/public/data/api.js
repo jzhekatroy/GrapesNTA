@@ -918,22 +918,24 @@ const ApiClient = (() => {
     return body.data;
   }
 
-  async function loadDetectionEvents({ status = 'active', limit = 200, from, to } = {}) {
+  async function loadDetectionEvents({ status = 'active', limit = 200, from, to, kind } = {}) {
     const params = new URLSearchParams();
     params.set('status', status);
     params.set('limit', String(limit));
     if (from) params.set('from', from);
     if (to) params.set('to', to);
+    if (kind && kind !== 'all') params.set('kind', kind);
     const body = await requestJson(`/api/detection/events?${params}`);
     return body.data;
   }
 
-  async function exportDetectionEventsCsv({ status = 'normalized', from, to, limit = 10000 } = {}) {
+  async function exportDetectionEventsCsv({ status = 'normalized', from, to, limit = 10000, kind } = {}) {
     const params = new URLSearchParams();
     params.set('status', status);
     params.set('limit', String(limit));
     if (from) params.set('from', from);
     if (to) params.set('to', to);
+    if (kind && kind !== 'all') params.set('kind', kind);
     const res = await fetch(`/api/detection/events/export?${params}`, {
       credentials: 'same-origin',
       cache: 'no-store',

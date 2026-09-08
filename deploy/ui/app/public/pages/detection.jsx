@@ -27,6 +27,7 @@ const TELEGRAM_DEFAULTS = {
   chatId: '',
   growthThreshold: 1.6,
   alertScope: 'all',
+  alertKind: 'all',
   streak: 3,
   normalizeStreak: 3,
   apiUrl: 'https://api.telegram.org',
@@ -418,6 +419,7 @@ function PageDetection() {
   const [eventsError, setEventsError] = useState('');
   const [eventsBusy, setEventsBusy] = useState(false);
   const [historyRange, setHistoryRange] = useState(() => defaultHistoryRangeLocal());
+  const [historyKind, setHistoryKind] = useState('all');
   const [eventsExporting, setEventsExporting] = useState(false);
   const [messageEvent, setMessageEvent] = useState(null);
   const [thresholdByKey, setThresholdByKey] = useState({});
@@ -447,12 +449,13 @@ function PageDetection() {
       const { from, to } = historyBounds();
       if (from) opts.from = from;
       if (to) opts.to = to;
+      if (historyKind && historyKind !== 'all') opts.kind = historyKind;
     }
     return ApiClient.loadDetectionEvents(opts)
       .then(setEvents)
       .catch((e) => setEventsError(e.message))
       .finally(() => setEventsBusy(false));
-  }, [historyBounds]);
+  }, [historyBounds, historyKind]);
 
   useEffect(() => {
     if (pageTab === 'active') reloadEvents('active');
@@ -473,6 +476,7 @@ function PageDetection() {
         from,
         to,
         limit: 10000,
+        kind: historyKind,
       });
       if (!count) {
         pushToast?.({ kind: 'warning', title: 'Нечего выгружать', desc: 'За выбранный период записей нет.' });
@@ -656,6 +660,7 @@ function PageDetection() {
         chatId: telegram?.chatId || '',
         growthThreshold: telegram?.growthThreshold ?? 1.6,
         alertScope: telegram?.alertScope || 'all',
+        alertKind: telegram?.alertKind || 'all',
         streak: telegram?.streak ?? 3,
         normalizeStreak: telegram?.normalizeStreak ?? 3,
         apiUrl: telegram?.apiUrl || 'https://api.telegram.org',
@@ -809,6 +814,18 @@ function PageDetection() {
                     <option value="net">Сети</option>
                   </select>
                 </label>
+                <label className="col" style={{ gap: 4, minWidth: 180 }}>
+                  <span>Отправлять</span>
+                  <select
+                    className="input"
+                    value={telegram?.alertKind || 'all'}
+                    onChange={(e) => setTelegram(patchTelegram(telegram, { alertKind: e.target.value }))}
+                  >
+                    <option value="all">Всё</option>
+                    <option value="attack">Атаки</option>
+                    <option value="peak">Всплески</option>
+                  </select>
+                </label>
                 <label className="col" style={{ gap: 4, minWidth: 160 }}>
                   <span>Подряд выше порога</span>
                   <input
@@ -960,11 +977,34 @@ function PageDetection() {
           title={pageTab === 'active' ? 'Активные события' : 'История'}
           subtitle={pageTab === 'active'
             ? 'Алерт уже ушёл, нормализации ещё нет. Срез метрик — момент срабатывания, все протоколы.'
-            : 'Закрытые атаки и обычные пики. Клик по строке открывает текст Telegram.'}
+            : 'В историю пишется всё. Фильтр — атаки, всплески или все. Клик по строке открывает текст.'}
           tools={(
             <div className="row" style={{ gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
               {pageTab === 'history' && (
                 <>
+                  <div className="seg" role="group" aria-label="Тип в истории">
+                    <button
+                      type="button"
+                      className={historyKind === 'all' ? 'seg__item seg__item--active' : 'seg__item'}
+                      onClick={() => setHistoryKind('all')}
+                    >
+                      Все
+                    </button>
+                    <button
+                      type="button"
+                      className={historyKind === 'attack' ? 'seg__item seg__item--active' : 'seg__item'}
+                      onClick={() => setHistoryKind('attack')}
+                    >
+                      Атаки
+                    </button>
+                    <button
+                      type="button"
+                      className={historyKind === 'peak' ? 'seg__item seg__item--active' : 'seg__item'}
+                      onClick={() => setHistoryKind('peak')}
+                    >
+                      Всплески
+                    </button>
+                  </div>
                   <label className="row" style={{ gap: 6, alignItems: 'center', font: 'var(--pv-text-body-3)' }}>
                     <span style={{ color: 'var(--fg-secondary)' }}>с</span>
                     <input

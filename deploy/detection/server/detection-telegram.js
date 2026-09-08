@@ -40,12 +40,14 @@ const EVENTS_TABLE = 'app_detection_events';
 const SETTINGS_ID = 'global';
 const DEFAULT_GROWTH_THRESHOLD = 1.6;
 const DEFAULT_ALERT_SCOPE = 'all';
+const DEFAULT_ALERT_KIND = 'all';
 const DEFAULT_STREAK = 3;
 const DEFAULT_NORMALIZE_STREAK = 3;
 const DEFAULT_TELEGRAM_API_URL = 'https://api.telegram.org';
 const MAX_STREAK = 60;
 const ALERT_SCOPES = new Set(['all', 'client', 'net']);
 const ALERT_SCOPE_LABEL = { all: 'всё', client: 'абоненты', net: 'сети' };
+const ALERT_KINDS = new Set(['all', 'attack', 'peak']);
 const PROTO_LABEL = { all: 'общее', tcp: 'TCP', udp: 'UDP' };
 const SNAPSHOT_FIELDS = [
   'bps', 'pps', 'growth_bps', 'growth_pps', 'bytes', 'packets',
@@ -92,6 +94,7 @@ const DEFAULT_SETTINGS = {
   chat_id: '',
   growth_threshold: DEFAULT_GROWTH_THRESHOLD,
   alert_scope: DEFAULT_ALERT_SCOPE,
+  alert_kind: DEFAULT_ALERT_KIND,
   streak: DEFAULT_STREAK,
   normalize_streak: DEFAULT_NORMALIZE_STREAK,
   api_url: DEFAULT_TELEGRAM_API_URL,
@@ -129,6 +132,26 @@ function settingsViewRef() {
 function normalizeAlertScope(value, fallback = DEFAULT_ALERT_SCOPE) {
   const v = String(value || '').trim().toLowerCase();
   return ALERT_SCOPES.has(v) ? v : fallback;
+}
+
+function normalizeAlertKind(value, fallback = DEFAULT_ALERT_KIND) {
+  const v = String(value || '').trim().toLowerCase();
+  return ALERT_KINDS.has(v) ? v : fallback;
+}
+
+// Рассылка: атаки / всплески / всё. В историю пишем независимо от этого.
+function matchesAlertKind(isAttack, alertKind) {
+  const kind = normalizeAlertKind(alertKind);
+  if (kind === 'attack') return !!isAttack;
+  if (kind === 'peak') return !isAttack;
+  return true;
+}
+
+function historyStatusSql(alertKind) {
+  const kind = normalizeAlertKind(alertKind);
+  if (kind === 'attack') return `status = 'normalized'`;
+  if (kind === 'peak') return `status = 'peak'`;
+  return `status IN ('normalized', 'peak')`;
 }
 
 function normalizeStreak(value, fallback = DEFAULT_STREAK) {
@@ -275,6 +298,7 @@ function mapSettings(row = {}) {
     tokenSet: Boolean(String(row.bot_token ?? '')),
     growthThreshold: Number(row.growth_threshold) || DEFAULT_GROWTH_THRESHOLD,
     alertScope: normalizeAlertScope(row.alert_scope),
+    alertKind: normalizeAlertKind(row.alert_kind),
     streak: normalizeStreak(row.streak),
     normalizeStreak: normalizeStreak(row.normalize_streak, DEFAULT_NORMALIZE_STREAK),
     apiUrl: (() => {
@@ -885,6 +909,7 @@ async function ensureDetectionTelegramTables() {
           chat_id String DEFAULT '',
           growth_threshold Float64 DEFAULT ${DEFAULT_GROWTH_THRESHOLD},
           alert_scope String DEFAULT '${DEFAULT_ALERT_SCOPE}',
+          alert_kind String DEFAULT '${DEFAULT_ALERT_KIND}',
           streak UInt16 DEFAULT ${DEFAULT_STREAK},
           normalize_streak UInt16 DEFAULT ${DEFAULT_NORMALIZE_STREAK},
           api_url String DEFAULT '${DEFAULT_TELEGRAM_API_URL}',
@@ -900,6 +925,7 @@ async function ensureDetectionTelegramTables() {
       await executeCommand(`
         ALTER TABLE ${settingsTableRef()}
           ADD COLUMN IF NOT EXISTS alert_scope String DEFAULT '${DEFAULT_ALERT_SCOPE}',
+          ADD COLUMN IF NOT EXISTS alert_kind String DEFAULT '${DEFAULT_ALERT_KIND}',
           ADD COLUMN IF NOT EXISTS streak UInt16 DEFAULT ${DEFAULT_STREAK},
           ADD COLUMN IF NOT EXISTS normalize_streak UInt16 DEFAULT ${DEFAULT_NORMALIZE_STREAK},
           ADD COLUMN IF NOT EXISTS api_url String DEFAULT '${DEFAULT_TELEGRAM_API_URL}',
@@ -947,6 +973,7 @@ async function ensureDetectionTelegramTables() {
           chat_id String,
           growth_threshold Float64,
           alert_scope String,
+          alert_kind String,
           streak UInt16,
           normalize_streak UInt16,
           api_url String,
@@ -966,6 +993,7 @@ async function ensureDetectionTelegramTables() {
           chat_id,
           growth_threshold,
           alert_scope,
+          alert_kind,
           streak,
           normalize_streak,
           api_url,
@@ -986,6 +1014,7 @@ async function ensureDetectionTelegramTables() {
             argMax(chat_id, updated_at) AS chat_id,
             argMax(growth_threshold, updated_at) AS growth_threshold,
             argMax(alert_scope, updated_at) AS alert_scope,
+            argMax(alert_kind, updated_at) AS alert_kind,
             argMax(streak, updated_at) AS streak,
             argMax(normalize_streak, updated_at) AS normalize_streak,
             argMax(api_url, updated_at) AS api_url,
@@ -1013,7 +1042,7 @@ async function ensureDetectionTelegramTables() {
 async function getCurrentSettingsRaw() {
   await ensureDetectionTelegramTables();
   const { rows } = await query(`
-    SELECT bot_token, chat_id, growth_threshold, alert_scope, streak, normalize_streak, api_url, proxy_url, enabled,
+    SELECT bot_token, chat_id, growth_threshold, alert_scope, alert_kind, streak, normalize_streak, api_url, proxy_url, enabled,
            amp_enabled, geo_enabled, amp_streak, geo_streak, amp_normalize_streak, geo_normalize_streak, updated_at
     FROM ${settingsViewRef()}
     WHERE settings_id = {id:String}
@@ -1043,6 +1072,11 @@ async function saveDetectionTelegramSettings(payload = {}) {
     throw apiError('Рассылка по: выберите всё, абоненты или сети');
   }
   const alertScope = normalizeAlertScope(alertScopeRaw);
+  const alertKindRaw = payload.alertKind ?? payload.alert_kind ?? base.alert_kind;
+  if (alertKindRaw != null && String(alertKindRaw).trim() !== '' && !ALERT_KINDS.has(String(alertKindRaw).trim().toLowerCase())) {
+    throw apiError('Отправлять: выберите всё, атаки или всплески');
+  }
+  const alertKind = normalizeAlertKind(alertKindRaw);
   const streakRaw = payload.streak ?? base.streak;
   const streakNum = Number(streakRaw);
   if (!Number.isFinite(streakNum) || streakNum < 1 || streakNum > MAX_STREAK) {
@@ -1079,6 +1113,7 @@ async function saveDetectionTelegramSettings(payload = {}) {
     chat_id: chatId,
     growth_threshold: growthThreshold,
     alert_scope: alertScope,
+    alert_kind: alertKind,
     streak,
     normalize_streak: normalizeStreakValue,
     api_url: apiUrl,
@@ -1118,6 +1153,7 @@ async function loadTelegramConfig() {
     proxyUrl: String(raw.proxy_url ?? '').trim(),
     growthThreshold: Number(raw.growth_threshold) || DEFAULT_GROWTH_THRESHOLD,
     alertScope: normalizeAlertScope(raw.alert_scope),
+    alertKind: normalizeAlertKind(raw.alert_kind),
     streak: normalizeStreak(raw.streak),
     normalizeStreak: normalizeStreak(raw.normalize_streak, DEFAULT_NORMALIZE_STREAK),
     enabledAtMs: parseUtc(raw.updated_at),
@@ -1392,7 +1428,7 @@ function parseEventBound(value, label) {
   return formatCh(ts);
 }
 
-async function loadDetectionEvents({ status = 'active', limit = 200, from, to } = {}) {
+async function loadDetectionEvents({ status = 'active', limit = 200, from, to, kind } = {}) {
   await ensureDetectionTelegramTables();
   const wanted = String(status) === 'normalized' || String(status) === 'history'
     ? 'history'
@@ -1418,7 +1454,7 @@ async function loadDetectionEvents({ status = 'active', limit = 200, from, to } 
   }
   const timeSql = timeClauses.length ? `AND ${timeClauses.join(' AND ')}` : '';
   const statusSql = wanted === 'history'
-    ? `status IN ('normalized', 'peak')`
+    ? historyStatusSql(kind)
     : `status = 'active'`;
   const { rows } = await query(`
     SELECT event_id, scope, scope_id, name, status, signal, alert_minute, normalize_minute, alert_json, normalize_json, threshold
@@ -1507,6 +1543,7 @@ async function exportDetectionEventsCsv(options = {}) {
     from: options.from,
     to: options.to,
     limit: options.limit || 10000,
+    kind: options.kind,
   });
   return {
     csv: buildDetectionEventsCsv(events),
@@ -1685,7 +1722,7 @@ async function processDetectionAlerts({ minute, rows, nameByKey }) {
       });
       opened += 1;
     }
-    const tg = await maybeSendTelegram(text, tgCfg);
+    const tg = await maybeSendTelegram(text, matchesAlertKind(attack, settings.alertKind) ? tgCfg : null);
     if (tg.sent) sent += 1;
     if (tg.error) errors.push({ key: objectId, message: tg.error });
   }
@@ -1721,7 +1758,7 @@ async function processDetectionAlerts({ minute, rows, nameByKey }) {
       signal: active.signal || SIGNALS.volume,
     });
     closed += 1;
-    const tg = await maybeSendTelegram(text, tgCfg);
+    const tg = await maybeSendTelegram(text, matchesAlertKind(true, settings.alertKind) ? tgCfg : null);
     if (tg.sent) sent += 1;
     if (tg.error) errors.push({ key, message: tg.error });
   }
@@ -1842,6 +1879,7 @@ async function rebuildDetectionEventAlert({ scope, scopeId, minute, sendTelegram
 module.exports = {
   DEFAULT_GROWTH_THRESHOLD,
   DEFAULT_ALERT_SCOPE,
+  DEFAULT_ALERT_KIND,
   DEFAULT_STREAK,
   DEFAULT_NORMALIZE_STREAK,
   DEFAULT_TELEGRAM_API_URL,
@@ -1863,6 +1901,9 @@ module.exports = {
   shouldSendAlert,
   shouldSendNormalize,
   matchesAlertScope,
+  matchesAlertKind,
+  historyStatusSql,
+  normalizeAlertKind,
   pickAlertCandidates,
   pickNormalizeCandidates,
   shouldSendSignal,
