@@ -261,7 +261,7 @@ describe('detection-classify', () => {
       l4src: [{ port: 443, proto: 17, share: 1 }],
     });
     assert.equal(refined.kind, KINDS.benign_peak);
-    assert.match(refined.reason, /пик загрузки · UDP\/443/);
+    assert.match(refined.reason, /пик загрузки · узкий источник · UDP\/443/);
     assert.equal(isAttackKind(refined.kind), false);
     assert.equal(actionFor(refined, { victim: { ip: '188.143.150.72', port: 49534, protoLabel: 'UDP' } }), 'пик загрузки, фильтр не нужен');
   });
@@ -293,9 +293,40 @@ describe('detection-classify', () => {
       l4src: [{ port: 1194, proto: 17, share: 1 }],
     });
     assert.equal(refined.kind, KINDS.benign_peak);
-    assert.match(refined.reason, /пик загрузки · UDP\/1194/);
+    assert.match(refined.reason, /пик загрузки · узкий источник · UDP\/1194/);
     assert.equal(isAttackKind(refined.kind), false);
     assert.equal(actionFor(refined, { victim: { ip: '188.143.164.169', port: 55893, protoLabel: 'UDP' } }), 'пик загрузки, фильтр не нужен');
+  });
+
+  it('5855: один UDP-пир на любом порту → пик, не volumetric', () => {
+    const first = classifyFromMetrics({
+      all: { bps: 146e6, port_entropy: 3.74, syn_attempts: 240, answer_pct: 81.7, avg_packet_bytes: 1241 },
+      tcp: { bps: 18.8e6 },
+      udp: { bps: 111e6, port_entropy: 3.56 },
+    }, { p95: 53.3e6, p999: 53.3e6 });
+    const refined = refineClassification(first, {
+      victim: { ip: '188.143.137.136', port: 42571, protoLabel: 'UDP', share: 0.841 },
+      source24: [{ net24: '130.49.187.0/24', asn: 215540, share: 0.848, ips: 1 }],
+      l4src: [{ port: 50264, proto: 17, share: 0.84 }],
+    });
+    assert.equal(refined.kind, KINDS.benign_peak);
+    assert.match(refined.reason, /узкий источник · UDP\/50264/);
+    assert.equal(isAttackKind(refined.kind), false);
+  });
+
+  it('56128: торрент, много пиров, топ /24 27% → остаётся атака', () => {
+    const first = classifyFromMetrics({
+      all: { bps: 71.1e6, port_entropy: 0.16, syn_attempts: 165, answer_pct: 37, avg_packet_bytes: 1197 },
+      tcp: { bps: 207e3 },
+      udp: { bps: 87.4e6, port_entropy: 0.01 },
+    }, { p95: 17.1e6, p999: 17.1e6 });
+    const refined = refineClassification(first, {
+      victim: { ip: '188.143.160.61', port: 15574, protoLabel: 'UDP', share: 0.998 },
+      source24: [{ net24: '77.45.229.0/24', asn: 12389, share: 0.273, ips: 1 }],
+      l4src: [{ port: 10550, proto: 17, share: 0.27 }],
+    });
+    assert.equal(refined.kind, KINDS.volumetric);
+    assert.equal(isAttackKind(refined.kind), true);
   });
 
   it('UDP/1194 с многих IP не становится VPN-пиком', () => {

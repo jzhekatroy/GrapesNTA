@@ -30,13 +30,8 @@ const ENTROPY_FOCUSED = 1.5;
 const TOP_DST_VOLUMETRIC = 0.8;
 const TOP_DST_CARPET = 0.08;
 const UDP_DOMINANT = 0.6;
-const DOWNLOAD_TCP_SHARE_MIN = 0.85;
-const DOWNLOAD_PKT_MIN = 1200;
 const DOWNLOAD_SRC_SHARE_MIN = 0.5;
-const DOWNLOAD_L4_SHARE_MIN = 0.8;
-const DOWNLOAD_SRC_PORTS = new Set([80, 443, 8080, 8443]);
-const DOWNLOAD_QUIC_PORTS = new Set([443]);
-const DOWNLOAD_VPN_PORTS = new Set([1194]);
+const DOWNLOAD_SRC_IPS_MAX = 2;
 const VICTIM_ACTION_SHARE_MIN = 0.15;
 const NORMALIZE_BPS_KEEP = 0.85;
 
@@ -162,52 +157,29 @@ function l4ProtoNum(l4) {
   return null;
 }
 
-function l4Matches(investigate, proto, ports) {
-  const l4 = topL4(investigate);
-  const port = Number(l4?.port);
-  const share = num(l4?.share);
-  return l4ProtoNum(l4) === proto
-    && ports.has(port)
-    && share != null
-    && share >= DOWNLOAD_L4_SHARE_MIN;
-}
-
 function hasNarrowSource(investigate) {
   const src = Array.isArray(investigate?.source24) ? investigate.source24[0] : null;
-  if (!src) return true;
+  if (!src) return false;
   const srcShare = num(src.share);
   const srcIps = num(src.ips);
   if (!(srcShare >= DOWNLOAD_SRC_SHARE_MIN)) return false;
-  if (srcIps != null && srcIps > 2) return false;
+  if (srcIps != null && srcIps > DOWNLOAD_SRC_IPS_MAX) return false;
   return true;
-}
-
-function hasEphemeralVictim(investigate) {
-  const victimPort = num(investigate?.victim?.port);
-  return victimPort == null || victimPort >= 1024;
 }
 
 function downloadPeakLabel(investigate) {
   const l4 = topL4(investigate);
   const proto = l4ProtoNum(l4) === 17 ? 'UDP' : 'TCP';
   const port = Number(l4?.port);
-  return `${proto}/${Number.isFinite(port) ? port : 443}`;
+  return `${proto}/${Number.isFinite(port) ? port : '?'}`;
 }
 
-// HTTPS/HTTP с CDN, QUIC UDP/443 или OpenVPN с 1–2 IP: цель на эфемерном
-// порту. На /24 SYN при этом часто чужие, поэтому смотрим разбор минуты.
+// Один–два адреса принесли большую часть минуты — сессия (VPN, выкачка,
+// туннель), не ботнет. Порт не смотрим: они бывают любыми. Без разбора
+// источника не утверждаем, что источник узкий.
 function isDownloadPeak(verdict = {}, investigate = {}) {
   if (verdict.kind === KINDS.amplification || verdict.kind === KINDS.syn_flood) return false;
-  if (!hasNarrowSource(investigate) || !hasEphemeralVictim(investigate)) return false;
-  if (l4Matches(investigate, 17, DOWNLOAD_VPN_PORTS)) return true;
-  const pkt = num(verdict.avgPkt);
-  if (!(pkt >= DOWNLOAD_PKT_MIN)) return false;
-  if (l4Matches(investigate, 17, DOWNLOAD_QUIC_PORTS)) return true;
-  const udpShare = num(verdict.udpShare);
-  if (udpShare != null && udpShare > 1 - DOWNLOAD_TCP_SHARE_MIN) return false;
-  // Долю TCP из proto=tcp не берём: она из сэмпла и на жирном потоке часто 0,
-  // тогда как all — из витрины. Форму смотрим в разборе минуты.
-  return l4Matches(investigate, 6, DOWNLOAD_SRC_PORTS);
+  return hasNarrowSource(investigate);
 }
 
 function isLegitimatePeak(verdict = {}) {
@@ -231,7 +203,10 @@ function refineClassification(verdict, investigate) {
   }
   if (isDownloadPeak(next, investigate)) {
     next.kind = KINDS.benign_peak;
-    next.reason = `пик загрузки · ${downloadPeakLabel(investigate)}`
+    const src = Array.isArray(investigate?.source24) ? investigate.source24[0] : null;
+    const srcShare = num(src?.share);
+    next.reason = `пик загрузки · узкий источник · ${downloadPeakLabel(investigate)}`
+      + (srcShare != null ? ` · /24 ${(srcShare * 100).toFixed(0)}%` : '')
       + (topShare != null ? ` · топ IP ${(topShare * 100).toFixed(1)}%` : '');
     next.needsInvestigate = false;
     return next;
