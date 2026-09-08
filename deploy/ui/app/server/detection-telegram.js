@@ -318,15 +318,27 @@ function signalSettings(settings = {}, signal = SIGNALS.volume) {
   };
 }
 
+// В строках proto='all' колонки amp_* приходят из ClickHouse нулями, а не null,
+// поэтому считать признак по самой строке минуты нельзя — нужна строка UDP той же
+// минуты: доля отражателей меряется к UDP, а не ко всему трафику.
+function ampRowFor(row, group) {
+  if (String(row?.proto || '') === 'udp') return row;
+  return row?.udpRow || group?.byProto?.udp || null;
+}
+
 function isSignalHot(signal, row, group, threshold) {
   if (signal === SIGNALS.amplification) {
-    const udp = (row?.amp_bytes != null || row?.ampBytes != null)
-      ? row
-      : (group?.byProto?.udp || row);
-    return isAmplificationHit(udp);
+    const udp = ampRowFor(row, group);
+    return udp ? isAmplificationHit(udp) : false;
   }
   if (signal === SIGNALS.foreign_geo) {
     if (String(row?.scope || group?.scope || '') !== 'client') return false;
+    // Замер 07.09 за 9 часов: все 150 горячих гео-минут пришлись на падающий
+    // трафик (рост максимум ×0.88) — доля заграницы растёт просто потому, что
+    // внутренний трафик к ночи проседает быстрее. Поэтому географию считаем
+    // только на растущем объёме. Амплификацию так гейтить нельзя: у 95558
+    // 3.7 Гбит/с с портов усилителей шли при росте объёма ×0.59.
+    if (!isAboveGrowthThreshold(row, threshold)) return false;
     return evaluateForeignGeo(row).hit;
   }
   return isAboveGrowthThreshold(row, threshold);
@@ -1233,10 +1245,10 @@ async function loadPreviousAllRows(minute, keys, limit = DEFAULT_STREAK) {
     const byMinute = merged.get(key) || new Map();
     const cur = byMinute.get(stamp) || { minute: r.minute, scope: r.scope, scope_id: r.scope_id };
     if (String(r.proto) === 'udp') {
-      cur.amp_bytes = r.amp_bytes;
-      cur.amp_packets = r.amp_packets;
-      cur.amp_srcs = r.amp_srcs;
-      cur.growth_amp = r.growth_amp;
+      // Держим строку UDP отдельным полем: Object.assign строки 'all' затирал бы
+      // amp_* нулями, а cur.bytes всё равно остался бы общим — доля отражателей
+      // считалась бы к сумме протоколов вместо UDP.
+      cur.udpRow = r;
     } else {
       Object.assign(cur, r);
     }

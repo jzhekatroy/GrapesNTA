@@ -10,7 +10,6 @@ const {
 const {
   pickAlertCandidates,
   pickNormalizeCandidates,
-  shouldSendAlert,
 } = require('./detection-telegram');
 
 describe('detection-signals', () => {
@@ -136,7 +135,11 @@ describe('detection-signals', () => {
       scope: 'client',
       scope_id: '101443',
       proto: 'all',
-      growth_bps: 1.1,
+      growth_bps: 3.56,
+      // ClickHouse отдаёт amp_* в строке 'all' нулями, а не null.
+      amp_bytes: 0,
+      amp_packets: 0,
+      amp_srcs: 0,
       bytes: 21e9,
       foreign_bytes: 8e9,
       growth_foreign_share: 3.7,
@@ -150,7 +153,72 @@ describe('detection-signals', () => {
     });
     const signals = picked.map((c) => c.signal).sort();
     assert.deepEqual(signals, ['amplification', 'foreign_geo']);
-    assert.equal(shouldSendAlert([all], 1.6, 3), false);
+  });
+
+  it('95558 17:45: нули amp_* в строке all не мешают признаку', () => {
+    const udp = {
+      proto: 'udp',
+      bytes: 88_749_309_952,
+      amp_bytes: 27_691_319_296,
+      amp_packets: 19_398_656,
+      amp_srcs: 227,
+    };
+    const all = {
+      scope: 'client', scope_id: '95558', proto: 'all',
+      bytes: 313_860_030_464, growth_bps: 0.5930, growth_pps: 0.6755,
+      amp_bytes: 0, amp_packets: 0, amp_srcs: 0,
+    };
+    const grouped = new Map([['client|95558', { byProto: { all, udp } }]]);
+    const picked = pickAlertCandidates([all], new Map(), 1.6, {
+      grouped,
+      settings: { ampEnabled: true, geoEnabled: true, ampStreak: 1, geoStreak: 1 },
+    });
+    // Объём ниже нормы часа, но 3.7 Гбит/с с портов усилителей от 227 отражателей.
+    assert.deepEqual(picked.map((c) => c.signal), ['amplification']);
+  });
+
+  it('95558 17:45–17:47: серия из трёх минут считается по строкам UDP', () => {
+    const minute = (bytes, ampBytes, ampPackets, ampSrcs, growthBps) => ({
+      scope: 'client', scope_id: '95558', proto: 'all',
+      growth_bps: growthBps, amp_bytes: 0, amp_packets: 0, amp_srcs: 0,
+      udpRow: { proto: 'udp', bytes, amp_bytes: ampBytes, amp_packets: ampPackets, amp_srcs: ampSrcs },
+    });
+    const m47 = minute(67_709_829_120, 15_959_064_576, 11_075_584, 134, 0.5189);
+    const m46 = minute(49_703_288_832, 9_778_626_560, 7_208_960, 83, 0.4670);
+    const m45 = minute(88_749_309_952, 27_691_319_296, 19_398_656, 227, 0.5930);
+    // 17:44 — 9 отражателей, ниже порога: серия начинается только с 17:45.
+    const m44 = minute(19_588_186_112, 739_704_832, 851_968, 9, 0.3988);
+    const grouped = new Map([['client|95558', { byProto: { all: m47, udp: m47.udpRow } }]]);
+    const prev = new Map([['client|95558', [m46, m45, m44]]]);
+    const picked = pickAlertCandidates([m47], prev, 1.6, {
+      grouped,
+      settings: { ampEnabled: true, geoEnabled: false, ampStreak: 3 },
+    });
+    assert.deepEqual(picked.map((c) => c.signal), ['amplification']);
+
+    const short = pickAlertCandidates([m46], new Map([['client|95558', [m45, m44]]]), 1.6, {
+      grouped: new Map([['client|95558', { byProto: { all: m46, udp: m46.udpRow } }]]),
+      settings: { ampEnabled: true, geoEnabled: false, ampStreak: 3 },
+    });
+    // Две горячие минуты подряд серию не закрывают.
+    assert.deepEqual(short.map((c) => c.signal), []);
+  });
+
+  it('71741 18:39: география на падающем трафике не срабатывает', () => {
+    const all = {
+      scope: 'client', scope_id: '71741', proto: 'all',
+      bytes: 1_206_288_384, growth_bps: 0.3857, growth_pps: 0.3580,
+      foreign_bytes: 266_993_664, foreign_srcs: 1,
+      growth_foreign_bps: 4.4469, growth_foreign_share: 5.4847,
+      top_countries: 'RU:0.78,HK:0.22',
+    };
+    assert.equal(evaluateForeignGeo(all).hit, true, 'сами гео-пороги пройдены');
+    const picked = pickAlertCandidates([all], new Map(), 1.6, {
+      grouped: new Map([['client|71741', { byProto: { all } }]]),
+      settings: { ampEnabled: true, geoEnabled: true, ampStreak: 1, geoStreak: 1 },
+    });
+    // Но трафик клиента втрое ниже нормы часа — алерта быть не должно.
+    assert.deepEqual(picked.map((c) => c.signal), []);
   });
 
   it('признак выключен — кандидатов нет', () => {
