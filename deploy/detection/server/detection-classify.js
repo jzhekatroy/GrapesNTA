@@ -158,29 +158,42 @@ function l4ProtoNum(l4) {
   return null;
 }
 
-function hasNarrowSource(investigate) {
+function hasNarrowSource(investigate, verdict = {}) {
   const src = Array.isArray(investigate?.source24) ? investigate.source24[0] : null;
   if (!src) return false;
   const srcShare = num(src.share);
   const srcIps = num(src.ips);
   if (!(srcShare >= DOWNLOAD_SRC_SHARE_MIN)) return false;
-  if (srcIps != null && srcIps > DOWNLOAD_SRC_IPS_MAX) return false;
+  if (srcIps != null && srcIps > DOWNLOAD_SRC_IPS_MAX) {
+    const udpShare = num(verdict.udpShare);
+    if (udpShare == null || udpShare >= UDP_DOMINANT) return false;
+  }
   return true;
 }
 
 function downloadPeakLabel(investigate) {
   const l4 = topL4(investigate);
+  const l4Share = num(l4?.share);
+  const victim = investigate?.victim;
+  const victimPort = num(victim?.port);
+  if ((l4Share == null || l4Share < 0.15) && victimPort) {
+    const proto = Number(victim.proto) === 17
+      || String(victim.protoLabel || '').toUpperCase() === 'UDP'
+      ? 'UDP'
+      : 'TCP';
+    return `${proto}/${victimPort}`;
+  }
   const proto = l4ProtoNum(l4) === 17 ? 'UDP' : 'TCP';
   const port = Number(l4?.port);
   return `${proto}/${Number.isFinite(port) ? port : '?'}`;
 }
 
-// Один–два адреса принесли большую часть минуты — сессия (VPN, выкачка,
-// туннель), не ботнет. Порт не смотрим: они бывают любыми. Без разбора
-// источника не утверждаем, что источник узкий.
+// Одна сеть дала большую часть минуты — сессия или CDN, не ботнет.
+// 1–2 IP достаточно всегда. Много IP в одной /24 — тоже, если минута
+// не UDP-доминантная (ковёр и флуд так маскироваться не должны).
 function isDownloadPeak(verdict = {}, investigate = {}) {
   if (verdict.kind === KINDS.amplification || verdict.kind === KINDS.syn_flood) return false;
-  return hasNarrowSource(investigate);
+  return hasNarrowSource(investigate, verdict);
 }
 
 function isLegitimatePeak(verdict = {}) {
@@ -256,12 +269,27 @@ function formatVictim(victim) {
   return `${proto} ${victim.ip}${port}${net}${pct}`.trim();
 }
 
+function shortAsnName(name) {
+  const raw = String(name || '').trim();
+  if (!raw || /^AS?\d+$/i.test(raw)) return '';
+  const parts = raw.split(' - ').map((p) => p.trim()).filter(Boolean);
+  const tail = parts.length > 1 ? parts[parts.length - 1] : raw;
+  return tail.replace(/\s+Pte\.?\s+Ltd\.?\.?$/i, '').replace(/\s+Ltd\.?\.?$/i, '').trim();
+}
+
+function formatAsnLabel(asn, name) {
+  const n = Number(asn);
+  if (!Number.isFinite(n) || n <= 0) return '';
+  const label = shortAsnName(name);
+  return label ? ` AS${n} ${label}` : ` AS${n}`;
+}
+
 function formatSourceNets(list) {
   const rows = Array.isArray(list) ? list.slice(0, 3) : [];
   if (!rows.length) return '—';
   return rows.map((row) => {
     const pct = row.share != null ? ` ${(row.share * 100).toFixed(1)}%` : '';
-    const asn = row.asn ? ` AS${row.asn}` : '';
+    const asn = formatAsnLabel(row.asn, row.asnName || row.asName);
     const ips = row.ips != null ? ` · ${row.ips} IP` : '';
     return `${row.net24 || row.ip || '—'}${asn}${pct}${ips}`;
   }).join('; ');
@@ -308,7 +336,7 @@ function actionFor(verdict, investigate) {
       ? `фильтр по сети клиента, вход ${l4}`
       : 'фильтр UDP по префиксу клиента, не один сервер';
   }
-  if (kind === KINDS.syn_flood) return 'SYN-защита / лимит на префикс клиента';
+  if (kind === KINDS.syn_flood) return 'SYN-защита / лимит на сеть клиента';
   if (kind === KINDS.amplification) {
     const ports = amplifierPortsFromL4(investigate?.l4src);
     const udp = ports.length ? ports.map((p) => `UDP/${p}`).join(' и ') : 'UDP с портов усилителей';
@@ -346,11 +374,13 @@ module.exports = {
   classifyFromMetrics,
   refineClassification,
   isDownloadPeak,
+  downloadPeakLabel,
   isLegitimatePeak,
   isAttackKind,
   formatSwitchPort,
   formatVictim,
   formatSourceNets,
+  formatAsnLabel,
   formatL4Sources,
   isUsableVictim,
   actionFor,

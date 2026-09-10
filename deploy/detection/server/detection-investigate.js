@@ -1,6 +1,6 @@
 'use strict';
 
-const { query, flowsRawTableRef, netInterfacesCurrentRef, clientsViewRef, col, flowCol } = require('./clickhouse');
+const { query, flowsRawTableRef, netInterfacesCurrentRef, clientsViewRef, col, flowCol, asnNamesTableRef } = require('./clickhouse');
 const { flowIpExpr, flowSamplerIpExpr, sflowIfIndexExpr } = require('./queries');
 const { AMPLIFIER_PORTS } = require('./detection-signals');
 const {
@@ -355,10 +355,19 @@ async function investigateIncident({ scope, scopeId, minute }) {
       )
     ),
     src24 AS (
-      SELECT groupArray(tuple(net24, asn, byte_sum, ips)) AS rows
+      SELECT groupArray(tuple(net24, asn, byte_sum, ips, asn_name)) AS rows
       FROM (
-        SELECT src24 AS net24, any(src_asn) AS asn, sum(bytes) AS byte_sum, uniqExact(src_ip) AS ips
-        FROM ev WHERE src24 != '' GROUP BY net24 ORDER BY byte_sum DESC LIMIT 8
+        SELECT
+          s.net24 AS net24,
+          s.asn AS asn,
+          s.byte_sum AS byte_sum,
+          s.ips AS ips,
+          ifNull(nullIf(n.name, ''), '') AS asn_name
+        FROM (
+          SELECT src24 AS net24, any(src_asn) AS asn, sum(bytes) AS byte_sum, uniqExact(src_ip) AS ips
+          FROM ev WHERE src24 != '' GROUP BY net24 ORDER BY byte_sum DESC LIMIT 8
+        ) AS s
+        LEFT JOIN ${asnNamesTableRef()} AS n ON n.asn = s.asn
       )
     ),
     srcip AS (
@@ -502,7 +511,12 @@ async function investigateIncident({ scope, scopeId, minute }) {
     },
     source24: src24s.filter((t) => t[0]).map((t) => mapShareRow(
       { bytes: t[2], gbit: toGbit(t[2]) },
-      { net24: String(t[0]), asn: Number(t[1] || 0) || null, ips: Number(t[3] || 0) },
+      {
+        net24: String(t[0]),
+        asn: Number(t[1] || 0) || null,
+        ips: Number(t[3] || 0),
+        asnName: String(t[4] || ''),
+      },
       total,
     )),
     l4src: l4s.map((t) => mapShareRow(
