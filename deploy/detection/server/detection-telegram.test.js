@@ -501,6 +501,16 @@ describe('detection-telegram', () => {
           { net24: '31.171.101.0/24', ips: 10, share: 0.99, bps: 172e6 },
           { net24: '91.218.160.0/24', ips: 1, share: 0.01 },
         ],
+        ampDestPort: {
+          count: 214,
+          top: [
+            { port: 53, share: 0.022 },
+            { port: 443, share: 0.005 },
+            { port: 55094, share: 0.004 },
+            { port: 14397, share: 0.004 },
+            { port: 8010, share: 0.004 },
+          ],
+        },
       },
     });
     assert.match(text, /С порта 53 \(DNS\) пришло <b>174 Мбит\/с<\/b>/);
@@ -509,6 +519,8 @@ describe('detection-telegram', () => {
     assert.match(text, /Куда \(UDP\/53\):/);
     assert.match(text, /31\.171\.101\.0\/24 — 99% · 10 адресов · 172 Мбит\/с/);
     assert.match(text, /91\.218\.160\.0\/24 — 1% · 1 адрес/);
+    assert.match(text, /На 214 портов/);
+    assert.match(text, /топ :53 2% · :443 0\.5% · :55094 0\.4% · :14397 0\.4% · :8010 0\.4%/);
     assert.match(text, /резать входящий UDP\/53 на 31\.171\.101\.0\/24/);
     assert.match(text, /Объём клиента сейчас 4\.68 Гбит\/с, обычно 6\.97 Гбит\/с — ниже нормы/);
     assert.doesNotMatch(text, /188\.143\.1\.10/);
@@ -573,12 +585,14 @@ describe('detection-telegram', () => {
       verdict: { kind: 'carpet', hourRatio: 7, hourCeiling: 840e6 },
       investigate: {
         victim: { ip: '10.0.0.8', port: 80, protoLabel: 'UDP', share: 0.002, net24: '10.0.0.0/24' },
+        destPort: { count: 3, top: [{ port: 80, share: 0.4 }, { port: 443, share: 0.3 }, { port: 53, share: 0.2 }] },
       },
     });
     assert.match(text, /АТАКА · по сети/);
     assert.match(text, /Пришло <b>5\.90 Гбит\/с<\/b> UDP/);
     assert.match(text, /размазано · топ IP 0\.2%/);
     assert.match(text, /Куда: по сети клиента, не один сервер/);
+    assert.match(text, /На порты :80 40% · :443 30% · :53 20%/);
     assert.match(text, /Объём клиента сейчас 5\.90 Гбит\/с, обычно 840 Мбит\/с — в 7 раз выше/);
     assert.doesNotMatch(text, /10\.0\.0\.8:80/);
   });

@@ -795,6 +795,39 @@ function ruAddresses(count) {
   return `${formatNumMsg(n, 0)} адресов`;
 }
 
+function ruPorts(count) {
+  const n = Number(count);
+  if (!Number.isFinite(n) || n < 0) return '';
+  const k = n % 100;
+  const d = n % 10;
+  if (k >= 11 && k <= 14) return `${formatNumMsg(n, 0)} портов`;
+  if (d === 1) return `${formatNumMsg(n, 0)} порт`;
+  if (d >= 2 && d <= 4) return `${formatNumMsg(n, 0)} порта`;
+  return `${formatNumMsg(n, 0)} портов`;
+}
+
+function formatAttackPortLines(portInfo) {
+  const top = (Array.isArray(portInfo?.top) ? portInfo.top : [])
+    .filter((row) => row && Number.isFinite(Number(row.port)))
+    .slice(0, 5);
+  const count = Number(portInfo?.count);
+  if (!top.length && !(count > 0)) return [];
+  if (count === 1 || (top.length === 1 && !(count > 1))) {
+    return [escapeHtml(`На порт :${top[0]?.port ?? 0}`)];
+  }
+  const listed = top.map((row) => {
+    const share = row.share != null ? ` ${formatSharePct(row.share)}` : '';
+    return `:${row.port}${share}`;
+  });
+  if (Number.isFinite(count) && count > 5) {
+    return [
+      escapeHtml(`На ${ruPorts(count)}`),
+      listed.length ? escapeHtml(`   топ ${listed.join(' · ')}`) : '',
+    ].filter(Boolean);
+  }
+  return [escapeHtml(`На порты ${listed.join(' · ')}`)];
+}
+
 function formatAmpDestLines(investigate, ports) {
   const rows = (Array.isArray(investigate?.ampDest24) ? investigate.ampDest24 : [])
     .filter((row) => row?.net24)
@@ -833,6 +866,7 @@ function formatAmpHighlight({ amp, udp, all, hourUsual, verdict, investigate }) 
   }
   if (shares.length) lines.push(escapeHtml(`   это ${shares.join(' и ')}`));
   lines.push(...formatAmpDestLines(investigate, ports));
+  lines.push(...formatAttackPortLines(investigate?.ampDestPort));
   const ratio = Number(verdict?.hourRatio);
   if (hourUsual > 0 && Number(all.bps) > 0) {
     const shown = Number.isFinite(ratio) ? ratio : Number(all.bps) / hourUsual;
@@ -888,6 +922,9 @@ function formatVolumetricHighlight({ all, tcp, udp, hourUsual, verdict, investig
   const details = bits.filter(Boolean);
   if (details.length) lines.push(`   ${escapeHtml(details.join(' · '))}`);
   lines.push(...formatDestLines(investigate, 'victim'));
+  if (!isUsableVictim(victim) || Number(investigate?.destPort?.count) > 1) {
+    lines.push(...formatAttackPortLines(investigate?.destPort));
+  }
   const volume = formatClientVolume(all, hourUsual, verdict);
   if (volume) lines.push(escapeHtml(volume));
   return lines;
@@ -906,6 +943,7 @@ function formatCarpetHighlight({ all, tcp, udp, hourUsual, verdict, investigate 
   if (share != null) bits.push(`топ IP ${formatSharePct(share)}`);
   lines.push(`   ${escapeHtml(bits.join(' · '))}`);
   lines.push(...formatDestLines(investigate, 'carpet'));
+  lines.push(...formatAttackPortLines(investigate?.destPort));
   const volume = formatClientVolume(all, hourUsual, verdict);
   if (volume) lines.push(escapeHtml(volume));
   return lines;
@@ -920,6 +958,7 @@ function formatSynHighlight({ all, investigate }) {
   const lines = [];
   if (bits.length) lines.push(escapeHtml(bits.join(' · ')));
   lines.push(...formatDestLines(investigate, 'syn'));
+  lines.push(...formatAttackPortLines(investigate?.destPort));
   return lines;
 }
 

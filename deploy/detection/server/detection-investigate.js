@@ -47,6 +47,8 @@ function emptyInvestigate() {
     sources: { ipCount: 0, net24Count: 0, top: [] },
     source24: [],
     ampDest24: [],
+    ampDestPort: { count: 0, top: [] },
+    destPort: { count: 0, top: [] },
     l4src: [],
     switchIn: null,
     switchOut: null,
@@ -286,6 +288,24 @@ function evCte() {
   `;
 }
 
+function mapDestPorts(tuples, countRaw, totalBytes) {
+  const top = (Array.isArray(tuples) ? tuples : []).map((t) => {
+    const bytes = Number(t[1] || 0);
+    return {
+      port: Number(t[0] || 0),
+      ips: Number(t[2] || 0),
+      bytes,
+      bps: bytes * 8 / 60,
+      share: totalBytes > 0 ? bytes / totalBytes : 0,
+    };
+  });
+  const counted = Number(countRaw);
+  return {
+    count: Number.isFinite(counted) ? counted : top.length,
+    top,
+  };
+}
+
 function mapSwitch(row, total) {
   if (!row) return null;
   const ifIndex = Number(row.if_index || 0);
@@ -340,7 +360,7 @@ async function investigateIncident({ scope, scopeId, minute }) {
       )
     ),
     amp_ev AS (
-      SELECT dst24, dst_ip, bytes
+      SELECT dst24, dst_ip, dst_port, bytes
       FROM ev
       WHERE proto = 17 AND src_port IN (${AMPLIFIER_PORTS.join(', ')})
     ),
@@ -353,6 +373,26 @@ async function investigateIncident({ scope, scopeId, minute }) {
         SELECT dst24 AS net24, sum(bytes) AS byte_sum, uniqExact(dst_ip) AS ips
         FROM amp_ev WHERE dst24 != '' GROUP BY net24 ORDER BY byte_sum DESC LIMIT 5
       )
+    ),
+    amp_dest_port AS (
+      SELECT groupArray(tuple(port, byte_sum, ips)) AS rows
+      FROM (
+        SELECT dst_port AS port, sum(bytes) AS byte_sum, uniqExact(dst_ip) AS ips
+        FROM amp_ev GROUP BY port ORDER BY byte_sum DESC LIMIT 5
+      )
+    ),
+    amp_port_n AS (
+      SELECT uniqExact(dst_port) AS n FROM amp_ev
+    ),
+    dest_port AS (
+      SELECT groupArray(tuple(port, byte_sum, ips)) AS rows
+      FROM (
+        SELECT dst_port AS port, sum(bytes) AS byte_sum, uniqExact(dst_ip) AS ips
+        FROM ev GROUP BY port ORDER BY byte_sum DESC LIMIT 5
+      )
+    ),
+    dest_port_n AS (
+      SELECT uniqExact(dst_port) AS n FROM ev
     ),
     src24 AS (
       SELECT groupArray(tuple(net24, asn, byte_sum, ips, asn_name)) AS rows
@@ -435,6 +475,10 @@ async function investigateIncident({ scope, scopeId, minute }) {
       (SELECT rows FROM dest24) AS dest24s,
       (SELECT rows FROM amp_dest24) AS amp_dest24s,
       (SELECT byte_sum FROM amp_tot) AS amp_bytes,
+      (SELECT rows FROM amp_dest_port) AS amp_dest_ports,
+      (SELECT n FROM amp_port_n) AS amp_port_count,
+      (SELECT rows FROM dest_port) AS dest_ports,
+      (SELECT n FROM dest_port_n) AS dest_port_count,
       (SELECT rows FROM src24) AS src24s,
       (SELECT rows FROM srcip) AS srcips,
       (SELECT rows FROM l4) AS l4s,
@@ -498,6 +542,8 @@ async function investigateIncident({ scope, scopeId, minute }) {
         share: ampTotal > 0 ? bytes / ampTotal : 0,
       };
     }),
+    ampDestPort: mapDestPorts(asTuples(row.amp_dest_ports), row.amp_port_count, Number(row.amp_bytes || 0)),
+    destPort: mapDestPorts(asTuples(row.dest_ports), row.dest_port_count, total),
     sources: {
       ipCount: Number(row.src_ips || 0),
       net24Count: Number(row.src_nets || 0),
