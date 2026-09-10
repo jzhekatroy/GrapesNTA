@@ -33,6 +33,7 @@ const {
   formatTopCountries,
   amplifierPortsFromL4,
   amplifierLabel,
+  AMPLIFIER_PORT_LABEL,
   objectSignalKey,
 } = require('./detection-signals');
 
@@ -683,42 +684,72 @@ function formatVolumeLine(all, verdict, hourUsual) {
   return `${prefix}Объём: <b>${escapeHtml(formatBpsMsg(all.bps))}</b> · ${escapeHtml(hour)}${escapeHtml(usual)}`;
 }
 
+function ampPortCameFrom(ports) {
+  if (!ports.length) return 'С портов усилителей пришло';
+  const bits = ports.map((port) => {
+    const name = AMPLIFIER_PORT_LABEL[port];
+    return name ? `порта ${port} (${name})` : `порта ${port}`;
+  });
+  return bits.length === 1 ? `С ${bits[0]} пришло` : `С ${bits.join(' и ')} пришло`;
+}
+
+function ruAddresses(count) {
+  const n = Number(count);
+  if (!Number.isFinite(n) || n < 0) return '';
+  const k = n % 100;
+  const d = n % 10;
+  if (k >= 11 && k <= 14) return `${formatNumMsg(n, 0)} адресов`;
+  if (d === 1) return `${formatNumMsg(n, 0)} адрес`;
+  if (d >= 2 && d <= 4) return `${formatNumMsg(n, 0)} адреса`;
+  return `${formatNumMsg(n, 0)} адресов`;
+}
+
+function formatAmpDestLines(investigate, ports) {
+  const rows = (Array.isArray(investigate?.ampDest24) ? investigate.ampDest24 : [])
+    .filter((row) => row?.net24)
+    .slice(0, 5);
+  if (!rows.length) return ['Куда: по сети клиента, не один сервер'];
+  const tag = ports.length ? ports.join(' и ') : 'усилители';
+  const lines = [`Куда (UDP/${escapeHtml(tag)}):`];
+  for (const row of rows) {
+    const parts = [];
+    if (row.share != null) parts.push(`${(Number(row.share) * 100).toFixed(0)}%`);
+    if (row.ips != null) parts.push(ruAddresses(row.ips));
+    const bps = row.bps != null ? row.bps : (row.gbit != null ? Number(row.gbit) * 1e9 : null);
+    if (bps != null && bps > 0) parts.push(formatBpsMsg(bps));
+    lines.push(escapeHtml(`   ${row.net24} — ${parts.join(' · ')}`));
+  }
+  return lines;
+}
+
 function formatAmpHighlight({ amp, udp, all, hourUsual, verdict, investigate }) {
   const ports = amplifierPortsFromL4(investigate?.l4src);
-  const from = ports.length
-    ? `с ${ports.map((port) => `UDP/${port}`).join(' и ')}`
-    : 'с портов усилителей';
-  const hit = isAmplificationHit(udp) || verdict?.kind === KINDS.amplification;
   const lines = [
-    `${hit ? '‼' : '⚠'} Паразит: <b>${escapeHtml(formatBpsMsg(amp.bps))}</b> ${escapeHtml(from)}`,
+    `🔴 ${escapeHtml(ampPortCameFrom(ports))} <b>${escapeHtml(formatBpsMsg(amp.bps))}</b>`,
   ];
-  const details = [
-    amp.srcs > 0 ? `${formatNumMsg(amp.srcs, 0)} отражателей` : '',
-    amp.avgPkt > 0 ? `пакет ${formatNumMsg(amp.avgPkt, 0)} Б` : '',
-  ].filter(Boolean);
+  const who = amp.srcs > 0
+    ? (ports.length === 1 && ports[0] === 53
+      ? `${formatNumMsg(amp.srcs, 0)} чужих резолверов`
+      : `${formatNumMsg(amp.srcs, 0)} чужих источников`)
+    : '';
+  const pkt = amp.avgPkt > 0 ? `ответы по ~${formatNumMsg(amp.avgPkt, 0)} байт` : '';
+  const details = [who, pkt].filter(Boolean);
   if (details.length) lines.push(`   ${escapeHtml(details.join(' · '))}`);
   const shares = [];
-  if (amp.share != null) shares.push(`от UDP это ${(amp.share * 100).toFixed(0)}%`);
+  if (amp.share != null) shares.push(`${(amp.share * 100).toFixed(0)}% его UDP`);
   if (Number(all.bps) > 0) {
-    shares.push(`от всего потока клиента ${((amp.bps / Number(all.bps)) * 100).toFixed(0)}%`);
+    shares.push(`${((amp.bps / Number(all.bps)) * 100).toFixed(0)}% всего трафика клиента`);
   }
-  if (shares.length) lines.push(`   ${escapeHtml(shares.join(', '))}`);
-  if (amp.growth > 0 && amp.bps > 0) {
-    const usualAmp = amp.bps / amp.growth;
-    lines.push(escapeHtml(`   обычно с усилителей ${formatBpsMsg(usualAmp)}, сейчас ${formatGrowthMsg(amp.growth)}`));
-  }
+  if (shares.length) lines.push(escapeHtml(`   это ${shares.join(' и ')}`));
+  lines.push(...formatAmpDestLines(investigate, ports));
   const ratio = Number(verdict?.hourRatio);
   if (hourUsual > 0 && Number(all.bps) > 0) {
     const shown = Number.isFinite(ratio) ? ratio : Number(all.bps) / hourUsual;
     if (shown < HOUR_RATIO_PEAK) {
       lines.push(escapeHtml(
-        `   общий объём ${formatBpsMsg(all.bps)} — ниже обычных ${formatBpsMsg(hourUsual)}`
-        + ` (×${shown.toFixed(2)}), в нём не видно`,
+        `Объём клиента сейчас ${formatBpsMsg(all.bps)}, обычно ${formatBpsMsg(hourUsual)} — ниже нормы.`,
       ));
-    } else {
-      lines.push(escapeHtml(
-        `   общий объём ${formatBpsMsg(all.bps)} · обычно ${formatBpsMsg(hourUsual)} (×${shown.toFixed(2)})`,
-      ));
+      lines.push('По общему графику эту атаку не видно.');
     }
   }
   return lines;
@@ -761,8 +792,8 @@ function formatAlertHighlights({ byProto, verdict, investigate, hourUsual }) {
       Number(udp.bps) > 0 ? `UDP ${formatBpsMsg(udp.bps)}` : '',
     ].filter(Boolean);
     if (split.length) lines.push(`   ${escapeHtml(split.join(' · '))}`);
+    lines.push(...formatVictimHighlight(investigate, verdict));
   }
-  lines.push(...formatVictimHighlight(investigate, verdict));
   if (geo.hit) {
     const growth = geo.shareGrowth != null ? ` — ×${geo.shareGrowth.toFixed(1)} к норме часа` : '';
     const usualShare = geo.shareNorm != null ? ` (обычно ${(geo.shareNorm * 100).toFixed(0)}%)` : '';
@@ -827,7 +858,7 @@ function formatAlertMessage({
     [`<b>Что делать:</b> ${escapeHtml(actionFor(verdict, investigate))}`],
     [
       sourceNets !== '—' ? `Откуда сети: ${escapeHtml(sourceNets)}` : '',
-      // Порты источника уже названы в строке про отражатели.
+      // Порты усилителей уже названы в шапке amp.
       !ampShown && l4 !== '—' ? `L4 откуда: ${escapeHtml(l4)}` : '',
       switchIn !== '—' ? `Коммутатор вход: ${escapeHtml(switchIn)}` : '',
       switchOut !== '—' ? `Коммутатор выход: ${escapeHtml(switchOut)}` : '',
@@ -1303,6 +1334,7 @@ async function sendTestTelegramMessage() {
         { port: 53, proto: 17, share: 0.33 },
         { port: 123, proto: 17, share: 0.13 },
       ],
+      ampDest24: [{ net24: '185.0.0.0/24', ips: 1, share: 0.998, bps: 2.74e9 }],
     },
   });
   return sendTelegramMessage(

@@ -2,6 +2,7 @@
 
 const { query, flowsRawTableRef, netInterfacesCurrentRef, clientsViewRef, col, flowCol } = require('./clickhouse');
 const { flowIpExpr, flowSamplerIpExpr, sflowIfIndexExpr } = require('./queries');
+const { AMPLIFIER_PORTS } = require('./detection-signals');
 const {
   formatCh, parseUtc, BASELINE_DAYS, BASELINE_QUARANTINE_MINUTES, EXPORT_LAG, MINUTE,
 } = require('./detection-core');
@@ -45,6 +46,7 @@ function emptyInvestigate() {
     dest24: [],
     sources: { ipCount: 0, net24Count: 0, top: [] },
     source24: [],
+    ampDest24: [],
     l4src: [],
     switchIn: null,
     switchOut: null,
@@ -337,6 +339,21 @@ async function investigateIncident({ scope, scopeId, minute }) {
         FROM ev WHERE dst24 != '' GROUP BY net24 ORDER BY byte_sum DESC LIMIT 8
       )
     ),
+    amp_ev AS (
+      SELECT dst24, dst_ip, bytes
+      FROM ev
+      WHERE proto = 17 AND src_port IN (${AMPLIFIER_PORTS.join(', ')})
+    ),
+    amp_tot AS (
+      SELECT sum(bytes) AS byte_sum FROM amp_ev
+    ),
+    amp_dest24 AS (
+      SELECT groupArray(tuple(net24, byte_sum, ips)) AS rows
+      FROM (
+        SELECT dst24 AS net24, sum(bytes) AS byte_sum, uniqExact(dst_ip) AS ips
+        FROM amp_ev WHERE dst24 != '' GROUP BY net24 ORDER BY byte_sum DESC LIMIT 5
+      )
+    ),
     src24 AS (
       SELECT groupArray(tuple(net24, asn, byte_sum, ips)) AS rows
       FROM (
@@ -407,6 +424,8 @@ async function investigateIncident({ scope, scopeId, minute }) {
       (SELECT dst_nets FROM totals) AS dst_nets,
       (SELECT rows FROM dest) AS dests,
       (SELECT rows FROM dest24) AS dest24s,
+      (SELECT rows FROM amp_dest24) AS amp_dest24s,
+      (SELECT byte_sum FROM amp_tot) AS amp_bytes,
       (SELECT rows FROM src24) AS src24s,
       (SELECT rows FROM srcip) AS srcips,
       (SELECT rows FROM l4) AS l4s,
@@ -458,6 +477,18 @@ async function investigateIncident({ scope, scopeId, minute }) {
       { net24: String(t[0]), ips: Number(t[2] || 0) },
       total,
     )),
+    ampDest24: asTuples(row.amp_dest24s).filter((t) => t[0]).map((t) => {
+      const bytes = Number(t[1] || 0);
+      const ampTotal = Number(row.amp_bytes || 0);
+      return {
+        net24: String(t[0]),
+        ips: Number(t[2] || 0),
+        bytes,
+        bps: bytes * 8 / 60,
+        gbit: toGbit(bytes),
+        share: ampTotal > 0 ? bytes / ampTotal : 0,
+      };
+    }),
     sources: {
       ipCount: Number(row.src_ips || 0),
       net24Count: Number(row.src_nets || 0),

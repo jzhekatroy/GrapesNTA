@@ -33,6 +33,7 @@ const UDP_DOMINANT = 0.6;
 const DOWNLOAD_SRC_SHARE_MIN = 0.5;
 const DOWNLOAD_SRC_IPS_MAX = 2;
 const VICTIM_ACTION_SHARE_MIN = 0.15;
+const AMP_DEST_ACTION_SHARE = 0.5;
 const NORMALIZE_BPS_KEEP = 0.85;
 
 function num(value) {
@@ -310,9 +311,13 @@ function actionFor(verdict, investigate) {
   if (kind === KINDS.syn_flood) return 'SYN-защита / лимит на префикс клиента';
   if (kind === KINDS.amplification) {
     const ports = amplifierPortsFromL4(investigate?.l4src);
-    const portText = ports.length ? ports.join(' и ') : 'усилителей';
-    if (isUsableVictim(victim)) return `резать входящий UDP с портов ${portText} на ${victim.ip}`;
-    return `резать входящий UDP с портов ${portText} на префикс клиента`;
+    const udp = ports.length ? ports.map((p) => `UDP/${p}`).join(' и ') : 'UDP с портов усилителей';
+    const ampNet = Array.isArray(investigate?.ampDest24) ? investigate.ampDest24[0] : null;
+    if (ampNet?.net24 && num(ampNet.share) >= AMP_DEST_ACTION_SHARE) {
+      return `резать входящий ${udp} на ${ampNet.net24}`;
+    }
+    if (isUsableVictim(victim)) return `резать входящий ${udp} на ${victim.ip}`;
+    return `резать входящий ${udp} на сеть клиента`;
   }
   if (kind === KINDS.benign_peak) {
     return /пик загрузки/.test(String(verdict?.reason || ''))
@@ -353,4 +358,5 @@ module.exports = {
   protoShare,
   hourRatio,
   hourCeiling,
+  AMP_DEST_ACTION_SHARE,
 };

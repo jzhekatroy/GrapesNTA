@@ -365,7 +365,7 @@ describe('detection-telegram', () => {
     assert.doesNotMatch(text, /АТАКА/);
   });
 
-  it('81050: шапка amp — паразит, без чужого L4 и тихой заграницы', () => {
+  it('81050: шапка amp — без паразита, чужого L4 и тихой заграницы', () => {
     const text = formatAlertMessage({
       name: 'АО "Когнитивные машины"',
       scope: 'client',
@@ -395,18 +395,60 @@ describe('detection-telegram', () => {
         ],
       },
     });
-    assert.match(text, /Паразит: <b>516 Мбит\/с<\/b> с UDP\/53/);
-    assert.match(text, /36 отражателей · пакет 1\s?136 Б/);
-    assert.match(text, /от UDP это 23%, от всего потока клиента 3%/);
-    assert.match(text, /обычно с усилителей/);
-    assert.match(text, /ниже обычных 53\.0 Гбит\/с \(×0\.29\), в нём не видно/);
-    assert.match(text, /в один адрес не бьёт \(топ IP 5\.7%\)/);
-    assert.match(text, /на префикс клиента/);
-    assert.doesNotMatch(text, /Отражатели/);
+    assert.match(text, /С порта 53 \(DNS\) пришло <b>516 Мбит\/с<\/b>/);
+    assert.match(text, /36 чужих резолверов · ответы по ~1\s?136 байт/);
+    assert.match(text, /это 23% его UDP и 3% всего трафика клиента/);
+    assert.match(text, /Куда: по сети клиента, не один сервер/);
+    assert.match(text, /Объём клиента сейчас 15\.5 Гбит\/с, обычно 53\.0 Гбит\/с — ниже нормы/);
+    assert.match(text, /По общему графику эту атаку не видно/);
+    assert.match(text, /резать входящий UDP\/53 на сеть клиента/);
+    assert.doesNotMatch(text, /Паразит/);
+    assert.doesNotMatch(text, /отражател/i);
+    assert.doesNotMatch(text, /в один адрес не бьёт/);
     assert.doesNotMatch(text, /TCP\/443/);
     assert.doesNotMatch(text, /185\.129\.101\.255/);
     assert.doesNotMatch(text, /Заграница/);
     assert.doesNotMatch(text, /⚠ Объём/);
+  });
+
+  it('81953: куда — топ /24 только по UDP с усилителей', () => {
+    const ampBytes = 174e6 * 60 / 8;
+    const text = formatAlertMessage({
+      name: 'ООО «Delta Telecom AS29049»',
+      scope: 'client',
+      scopeId: '81953',
+      minute: '2026-09-10 07:46:00',
+      threshold: 1.6,
+      byProto: {
+        all: { bps: 4.68e9, bytes: 4.68e9 * 60 / 8 },
+        tcp: { bps: 3.59e9 },
+        udp: {
+          bps: 174e6 / 0.16, bytes: ampBytes / 0.16,
+          amp_bytes: ampBytes, amp_packets: ampBytes / 1419, amp_srcs: 13,
+        },
+      },
+      verdict: { kind: 'amplification', reason: 'амплификация', hourRatio: 0.67, hourCeiling: 6.97e9 },
+      investigate: {
+        victim: { ip: '188.143.1.10', port: 443, protoLabel: 'TCP', share: 0.017 },
+        l4src: [{ port: 53, proto: 17, share: 0.04 }],
+        ampDest24: [
+          { net24: '31.171.101.0/24', ips: 10, share: 0.99, bps: 172e6 },
+          { net24: '91.218.160.0/24', ips: 1, share: 0.01 },
+        ],
+      },
+    });
+    assert.match(text, /С порта 53 \(DNS\) пришло <b>174 Мбит\/с<\/b>/);
+    assert.match(text, /13 чужих резолверов · ответы по ~1\s?419 байт/);
+    assert.match(text, /это 16% его UDP и 4% всего трафика клиента/);
+    assert.match(text, /Куда \(UDP\/53\):/);
+    assert.match(text, /31\.171\.101\.0\/24 — 99% · 10 адресов · 172 Мбит\/с/);
+    assert.match(text, /91\.218\.160\.0\/24 — 1% · 1 адрес/);
+    assert.match(text, /резать входящий UDP\/53 на 31\.171\.101\.0\/24/);
+    assert.match(text, /Объём клиента сейчас 4\.68 Гбит\/с, обычно 6\.97 Гбит\/с — ниже нормы/);
+    assert.doesNotMatch(text, /188\.143\.1\.10/);
+    assert.doesNotMatch(text, /Паразит/);
+    assert.doesNotMatch(text, /×1\.43/);
+    assert.doesNotMatch(text, /122 Мбит/);
   });
 
   it('foreign_geo без пика загрузки остаётся атакой', () => {

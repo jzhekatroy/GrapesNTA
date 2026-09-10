@@ -344,14 +344,25 @@ describe('detection-classify', () => {
     assert.equal(isAttackKind(refined.kind), true);
   });
 
-  it('81050: веерная amp без цели — резать на префикс, не на GRE :0', () => {
+  it('81050: веерная amp без цели — резать на сеть клиента, не на GRE :0', () => {
     assert.equal(actionFor({ kind: KINDS.amplification }, {
       victim: { ip: '185.129.101.255', port: 0, proto: 47, protoLabel: '47', share: 0.057 },
       l4src: [
         { port: 443, proto: 6, share: 0.43 },
         { port: 53, proto: 17, share: 0.03 },
       ],
-    }), 'резать входящий UDP с портов 53 на префикс клиента');
+    }), 'резать входящий UDP/53 на сеть клиента');
+  });
+
+  it('81953: amp в одну /24 — резать на неё, не на сеть клиента', () => {
+    assert.equal(actionFor({ kind: KINDS.amplification }, {
+      victim: { ip: '31.171.101.14', port: 0, proto: 17, protoLabel: 'UDP', share: 0.017 },
+      l4src: [{ port: 53, proto: 17, share: 0.04 }],
+      ampDest24: [
+        { net24: '31.171.101.0/24', share: 0.99, ips: 10 },
+        { net24: '91.218.160.0/24', share: 0.01, ips: 1 },
+      ],
+    }), 'резать входящий UDP/53 на 31.171.101.0/24');
   });
 
   it('один источник и 4.6 Мбит/с amp — не амплификация', () => {
