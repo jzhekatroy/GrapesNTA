@@ -28,6 +28,7 @@ const {
   SIGNAL_LABEL,
   AMP_PKT_MIN,
   isAmplificationHit,
+  ampStillGoing,
   ampMetrics,
   foreignMetrics,
   evaluateForeignGeo,
@@ -1195,7 +1196,14 @@ function pickNormalizeCandidates(allRows, previousByKey, threshold, options = {}
           alertBps: active.alertByProto?.all?.bps ?? active.alertBps,
           hourP95: active.verdict?.hourP95,
         })
-        : shouldSendSignal(history, (item) => !isSignalHot(activeSignal, item, group, t), cfg.normalizeStreak);
+        : shouldSendSignal(history, (item) => {
+          if (activeSignal === SIGNALS.amplification) {
+            const udp = ampRowFor(item, group);
+            if (!udp) return true;
+            return !isAmplificationHit(udp) && !ampStillGoing(udp);
+          }
+          return !isSignalHot(activeSignal, item, group, t);
+        }, cfg.normalizeStreak);
       if (!ready) continue;
       out.push({ row, key: objectId, signalKey, signal: activeSignal, active });
     }

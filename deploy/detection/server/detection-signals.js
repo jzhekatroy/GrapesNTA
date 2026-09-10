@@ -90,6 +90,15 @@ function isAmplificationHit(row = {}, options = {}) {
     && m.bps >= bpsMin;
 }
 
+// Упор нормализации: крупные ответы с усилителей ещё идут, даже если доля
+// UDP или число IP на минуту просели ниже порога открытия. Открытие не трогаем.
+function ampStillGoing(row = {}, options = {}) {
+  const m = ampMetrics(row);
+  const pktMin = num(options.pktMin) ?? AMP_PKT_MIN;
+  const bpsMin = num(options.bpsMin) ?? AMP_BPS_MIN;
+  return m.bps >= bpsMin && m.avgPkt >= pktMin;
+}
+
 function amplifierPortsFromL4(list) {
   const rows = Array.isArray(list) ? list : [];
   const ports = [];
@@ -204,6 +213,7 @@ module.exports = {
   GEO_BPS_MIN,
   ampMetrics,
   isAmplificationHit,
+  ampStillGoing,
   amplifierPortsFromL4,
   amplifierLabel,
   parseTopCountries,
