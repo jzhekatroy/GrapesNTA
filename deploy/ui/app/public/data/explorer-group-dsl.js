@@ -86,7 +86,8 @@
 
   function serializeExplorerGroupByDsl(groupBy) {
     const tokens = normalizeExplorerGroupTokens(groupBy);
-    if (!tokens.length) return 'group by src_ip, dst_ip';
+    // Empty grouping is valid; do not default to src_ip/dst_ip.
+    if (!tokens.length) return '';
     return `group by ${tokens.join(', ')}`;
   }
 

@@ -26,7 +26,8 @@ describe('Explorer group-by DSL', () => {
   it('serializes groupBy tokens', () => {
     assert.equal(G.serializeExplorerGroupByDsl(['src_ip', 'dst_ip']), 'group by src_ip, dst_ip');
     assert.equal(G.serializeExplorerGroupByDsl(['src_ip/24', 'dst_ip']), 'group by src_ip/24, dst_ip');
-    assert.equal(G.serializeExplorerGroupByDsl([]), 'group by src_ip, dst_ip');
+    assert.equal(G.serializeExplorerGroupByDsl([]), '');
+    assert.equal(G.serializeExplorerGroupByDsl(undefined), '');
   });
 
   it('parses english and russian headers', () => {

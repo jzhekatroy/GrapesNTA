@@ -1268,7 +1268,7 @@ function serializeExplorerFilterDsl({
   }
 
   const groupLine = explorerGroupDslApi().serializeExplorerGroupByDsl?.(
-    normalizeExplorerGroupTokens(groupBy?.length ? groupBy : ['src_ip', 'dst_ip']),
+    normalizeExplorerGroupTokens(groupBy),
   );
   if (groupLine) lines.push(groupLine);
 
@@ -2686,7 +2686,7 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
     if (parsed.timeRange === 'custom') setCustomPeriod(parsed.customPeriod);
     setFilters(cloneExplorerFilters(parsed.filters));
     setThresholds(cloneExplorerThresholdsList(parsed.thresholds || []));
-    if (parsed.groupBy) setGroupBy(normalizeExplorerGroupTokens(parsed.groupBy));
+    setGroupBy(normalizeExplorerGroupTokens(parsed.groupBy || []));
     setFilterTextError(null);
     return parsed;
   };
@@ -2705,6 +2705,7 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
       } else {
         setFilters([]);
         setThresholds([]);
+        setGroupBy([]);
         setFilterTextError(null);
       }
     }
@@ -2948,7 +2949,7 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
         const parsed = applyParsedTextToDraft(filterText);
         activeFilters = parsed.filters;
         activeThresholds = parsed.thresholds || [];
-        const activeGroupBy = normalizeExplorerGroupTokens(parsed.groupBy ?? groupBy);
+        const activeGroupBy = normalizeExplorerGroupTokens(parsed.groupBy || []);
         snapshot = {
           ...snapshot,
           timeRange: parsed.timeRange,
