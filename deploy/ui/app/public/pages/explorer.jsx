@@ -176,6 +176,12 @@ function normalizeExplorerVis(vis) {
   return EXPLORER_VIS_DEFAULT;
 }
 
+/** Persist stack/share; map leftover default vis=data to stack sum. */
+function restoreExplorerVis(vis) {
+  const id = normalizeExplorerVis(vis);
+  return id === 'stackShare' ? 'stackShare' : EXPLORER_VIS_DEFAULT;
+}
+
 function resolveExplorerVisualCount(visualLimit, total) {
   if (visualLimit === 'all') return total;
   const n = Number(visualLimit);
@@ -845,7 +851,8 @@ function loadLastAppliedExplorerQuery(cabinetMode = false) {
     const raw = localStorage.getItem(explorerStorageKey(EXPLORER_LAST_APPLIED_KEY, cabinetMode));
     if (!raw) return null;
     const parsed = JSON.parse(raw);
-    return parsed && typeof parsed === 'object' ? parsed : null;
+    if (!parsed || typeof parsed !== 'object') return null;
+    return { ...parsed, vis: restoreExplorerVis(parsed.vis) };
   } catch {
     return null;
   }
@@ -2460,7 +2467,7 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
   });
   const [limit, setLimit] = useState(urlState?.limit || EXPLORER_DEFAULT_FETCH_LIMIT);
   const [fetchLimit, setFetchLimit] = useState(EXPLORER_DEFAULT_FETCH_LIMIT);
-  const [vis, setVis] = useState(() => normalizeExplorerVis(urlState?.vis));
+  const [vis, setVis] = useState(() => restoreExplorerVis(urlState?.vis));
   const [timeRange, setTimeRange] = useState(composeLookback || urlGlobals.timeRange || '1h');
   const [customPeriod, setCustomPeriod] = useState(urlGlobals.customPeriod || defaultCustomPeriod());
   const [filterMode, setFilterMode] = useState('graphic');
@@ -2495,7 +2502,7 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
   const [visualLimit, setVisualLimit] = useState(EXPLORER_DEFAULT_VISUAL_LIMIT);
   const [dynamicsSeriesIds, setDynamicsSeriesIds] = useState(() => new Set());
   const [showOthersOnChart, setShowOthersOnChart] = useState(
-    () => explorerDefaultShowOthersOnChart(normalizeExplorerVis(urlState?.vis)),
+    () => explorerDefaultShowOthersOnChart(restoreExplorerVis(urlState?.vis)),
   );
   const [refreshing, setRefreshing] = useState(false);
   const [periodZoomStack, setPeriodZoomStack] = useState([]);
@@ -2612,8 +2619,8 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
     }
 
     const snapshot = urlState
-      ? buildSnapshotFromUrl(urlState, urlGlobals)
-      : lastApplied;
+      ? { ...buildSnapshotFromUrl(urlState, urlGlobals), vis: restoreExplorerVis(urlState.vis) }
+      : (lastApplied ? { ...lastApplied, vis: restoreExplorerVis(lastApplied.vis) } : null);
     if (!snapshot) return;
 
     const queryKey = buildExplorerQueryKey(snapshot);
@@ -2621,7 +2628,10 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
     const cachedGroupBy = normalizeExplorerGroupTokens(cached?.snapshot?.groupBy);
     const snapshotGroupBy = normalizeExplorerGroupTokens(snapshot.groupBy);
     if (cached && JSON.stringify(cachedGroupBy) === JSON.stringify(snapshotGroupBy)) {
-      hydrateExplorerFromCachedEntry(cached, { ...cacheHydrateHandlers, queryVersion: 0 });
+      hydrateExplorerFromCachedEntry({
+        ...cached,
+        snapshot: { ...cached.snapshot, vis: restoreExplorerVis(cached.snapshot?.vis) },
+      }, { ...cacheHydrateHandlers, queryVersion: 0 });
       return;
     }
 
@@ -3051,7 +3061,10 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
     if (!lastApplied) return;
     const queryKey = buildExplorerQueryKey(lastApplied);
     const cached = loadExplorerResultCache(queryKey, cabinetMode);
-    if (cached && hydrateExplorerFromCachedEntry(cached, { ...cacheHydrateHandlers, queryVersion })) {
+    if (cached && hydrateExplorerFromCachedEntry({
+      ...cached,
+      snapshot: { ...cached.snapshot, vis: normalizeExplorerVis(lastApplied.vis ?? cached.snapshot?.vis) },
+    }, { ...cacheHydrateHandlers, queryVersion })) {
       return;
     }
     applyExplorerQuerySnapshot(migrateExplorerSnapshot(lastApplied), querySetters);
