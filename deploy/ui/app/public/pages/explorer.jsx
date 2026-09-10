@@ -3744,25 +3744,22 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
                   </div>
                 </Card>
               ) : (
-                <>
-                  <ExplorerSummary summary={summary} />
-                  <Card
-                    title={`Динамика · ${appliedMetricLabel}`}
-                    subtitle={`${timeRangeLabel(appliedTimeRange, appliedCustomPeriod)} · ${meta?.dataTable || 'flows_raw'}`}
-                    loadMs={loadMs}
-                    serverMs={serverMs}
-                  >
-                    <ExplorerTotalChart
-                      points={timeseries}
-                      metric={appliedMetric}
-                      metricLabel={appliedMetricLabel}
-                      displayTimezone={displayTimezone}
-                      chartLongRange={isLongChartRange(appliedTimeRange, appliedCustomPeriod)}
-                      onRangeSelect={applyExplorerChartRangeZoom}
-                      bucketSeconds={explorerGranularityBucketSeconds(meta?.granularity)}
-                    />
-                  </Card>
-                </>
+                <Card
+                  title={`Динамика · ${appliedMetricLabel}`}
+                  subtitle={`${timeRangeLabel(appliedTimeRange, appliedCustomPeriod)} · ${meta?.dataTable || 'flows_raw'}`}
+                  loadMs={loadMs}
+                  serverMs={serverMs}
+                >
+                  <ExplorerTotalChart
+                    points={timeseries}
+                    metric={appliedMetric}
+                    metricLabel={appliedMetricLabel}
+                    displayTimezone={displayTimezone}
+                    chartLongRange={isLongChartRange(appliedTimeRange, appliedCustomPeriod)}
+                    onRangeSelect={applyExplorerChartRangeZoom}
+                    bucketSeconds={explorerGranularityBucketSeconds(meta?.granularity)}
+                  />
+                </Card>
               )
             )}
 
@@ -4040,46 +4037,6 @@ function ExplorerRowActions({
       >
         <ExplorerActionLabel full={onChart ? 'Скрыть с графика' : 'Показать'} short={onChart ? 'Скрыть' : 'Показать'} />
       </button>
-    </div>
-  );
-}
-
-function ExplorerSummary({ summary, loading = false }) {
-  const data = { ...EMPTY_EXPLORER_SUMMARY, ...summary };
-  const cards = [
-    { label: 'Объём / Volume', value: fmtBytes(data.totalBytes) },
-    { label: 'Пакетов / Packets', value: fmtNum(data.totalPackets) },
-    { label: 'Потоков / Flows', value: fmtNum(data.totalFlows) },
-    { label: 'Средняя скорость / Average bitrate', value: fmtBits(data.avgBps) },
-    { label: 'Уникальных IP источника / Unique source IPs', value: data.uniqSrc == null ? '—' : fmtNum(data.uniqSrc) },
-    { label: 'Unique dst', value: data.uniqDst == null ? '—' : fmtNum(data.uniqDst) },
-    { label: 'Ingress', value: fmtBytes(data.inBytes) },
-    { label: 'Egress', value: fmtBytes(data.outBytes) },
-  ];
-  return (
-    <div
-      className="grid grid--auto-fit-sm grid--gap-sm"
-      style={{
-        opacity: loading ? 0.65 : 1,
-        transition: 'opacity 0.15s ease',
-      }}
-    >
-      {cards.map((c) => (
-        <Card key={c.label} pad="sm">
-          <div style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-secondary)', marginBottom: 4 }}>{c.label}</div>
-          <div className="mono" style={{ font: 'var(--pv-text-h4)' }}>{c.value}</div>
-        </Card>
-      ))}
-      <Card pad="sm" style={{ gridColumn: 'span 2' }}>
-        <div style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-secondary)', marginBottom: 6 }}>Top protocols</div>
-        <div className="row" style={{ gap: 6, flexWrap: 'wrap', minHeight: 22 }}>
-          {data.topProtocols?.length > 0 ? (
-            data.topProtocols.slice(0, 5).map((p) => <span key={p} className="badge">{p}</span>)
-          ) : (
-            <span style={{ color: 'var(--fg-secondary)', font: 'var(--pv-text-body-3)' }}>—</span>
-          )}
-        </div>
-      </Card>
     </div>
   );
 }
