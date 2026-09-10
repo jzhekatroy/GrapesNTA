@@ -40,10 +40,14 @@ describe('detection-signals', () => {
     }), false);
   });
 
-  it('95558: доля 0.12 → не амплификация', () => {
+  it('81953 день: 150 Мбит, доля 13%, 12 источников, 1400 Б → амплификация', () => {
+    const ampBytes = 150e6 * 60 / 8;
     assert.equal(isAmplificationHit({
-      bytes: 25e9, amp_bytes: 3e9, amp_packets: 2e6, amp_srcs: 24,
-    }), false);
+      bytes: ampBytes / 0.13,
+      amp_bytes: ampBytes,
+      amp_packets: Math.round(ampBytes / 1400),
+      amp_srcs: 12,
+    }), true);
   });
 
   it('мелкий клиент: 30 Мбит/с отражателей и 20 источников → амплификация', () => {

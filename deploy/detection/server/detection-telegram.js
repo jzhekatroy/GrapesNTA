@@ -829,6 +829,14 @@ function formatAttackPortLines(portInfo) {
   return [escapeHtml(`На порты ${listed.join(' · ')}`)];
 }
 
+function formatAmpDestIpLine(row) {
+  const parts = [];
+  if (row.share != null) parts.push(`${(Number(row.share) * 100).toFixed(0)}%`);
+  const bps = row.bps != null ? row.bps : (row.gbit != null ? Number(row.gbit) * 1e9 : null);
+  if (bps != null && bps > 0) parts.push(formatBpsMsg(bps));
+  return escapeHtml(`   ${row.ip} — ${parts.join(' · ')}`);
+}
+
 function formatAmpDestLines(investigate, ports) {
   const rows = (Array.isArray(investigate?.ampDest24) ? investigate.ampDest24 : [])
     .filter((row) => row?.net24)
@@ -844,6 +852,10 @@ function formatAmpDestLines(investigate, ports) {
     if (bps != null && bps > 0) parts.push(formatBpsMsg(bps));
     lines.push(escapeHtml(`   ${row.net24} — ${parts.join(' · ')}`));
   }
+  const ips = (Array.isArray(investigate?.ampDestIp) ? investigate.ampDestIp : [])
+    .filter((row) => row?.ip)
+    .slice(0, 5);
+  for (const row of ips) lines.push(formatAmpDestIpLine(row));
   return lines;
 }
 
@@ -1557,6 +1569,7 @@ async function sendTestTelegramMessage() {
         { port: 123, proto: 17, share: 0.13 },
       ],
       ampDest24: [{ net24: '185.0.0.0/24', ips: 1, share: 0.998, bps: 2.74e9 }],
+      ampDestIp: [{ ip: '185.0.0.10', share: 0.998, bps: 2.74e9 }],
     },
   });
   return sendTelegramMessage(

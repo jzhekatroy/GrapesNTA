@@ -1,7 +1,8 @@
 'use strict';
 
-const { query, flowsRawTableRef, netInterfacesCurrentRef, clientsViewRef, col, flowCol } = require('./clickhouse');
+const { query, flowsRawTableRef, netInterfacesCurrentRef, clientsViewRef, col, flowCol, asnNamesTableRef } = require('./clickhouse');
 const { flowIpExpr, flowSamplerIpExpr, sflowIfIndexExpr } = require('./queries');
+const { AMPLIFIER_PORTS } = require('./detection-signals');
 const {
   formatCh, parseUtc, BASELINE_DAYS, BASELINE_QUARANTINE_MINUTES, EXPORT_LAG, MINUTE,
 } = require('./detection-core');
@@ -45,6 +46,10 @@ function emptyInvestigate() {
     dest24: [],
     sources: { ipCount: 0, net24Count: 0, top: [] },
     source24: [],
+    ampDest24: [],
+    ampDestIp: [],
+    ampDestPort: { count: 0, top: [] },
+    destPort: { count: 0, top: [] },
     l4src: [],
     switchIn: null,
     switchOut: null,
@@ -284,6 +289,24 @@ function evCte() {
   `;
 }
 
+function mapDestPorts(tuples, countRaw, totalBytes) {
+  const top = (Array.isArray(tuples) ? tuples : []).map((t) => {
+    const bytes = Number(t[1] || 0);
+    return {
+      port: Number(t[0] || 0),
+      ips: Number(t[2] || 0),
+      bytes,
+      bps: bytes * 8 / 60,
+      share: totalBytes > 0 ? bytes / totalBytes : 0,
+    };
+  });
+  const counted = Number(countRaw);
+  return {
+    count: Number.isFinite(counted) ? counted : top.length,
+    top,
+  };
+}
+
 function mapSwitch(row, total) {
   if (!row) return null;
   const ifIndex = Number(row.if_index || 0);
@@ -337,11 +360,62 @@ async function investigateIncident({ scope, scopeId, minute }) {
         FROM ev WHERE dst24 != '' GROUP BY net24 ORDER BY byte_sum DESC LIMIT 8
       )
     ),
-    src24 AS (
-      SELECT groupArray(tuple(net24, asn, byte_sum, ips)) AS rows
+    amp_ev AS (
+      SELECT dst24, dst_ip, dst_port, bytes
+      FROM ev
+      WHERE proto = 17 AND src_port IN (${AMPLIFIER_PORTS.join(', ')})
+    ),
+    amp_tot AS (
+      SELECT sum(bytes) AS byte_sum FROM amp_ev
+    ),
+    amp_dest24 AS (
+      SELECT groupArray(tuple(net24, byte_sum, ips)) AS rows
       FROM (
-        SELECT src24 AS net24, any(src_asn) AS asn, sum(bytes) AS byte_sum, uniqExact(src_ip) AS ips
-        FROM ev WHERE src24 != '' GROUP BY net24 ORDER BY byte_sum DESC LIMIT 8
+        SELECT dst24 AS net24, sum(bytes) AS byte_sum, uniqExact(dst_ip) AS ips
+        FROM amp_ev WHERE dst24 != '' GROUP BY net24 ORDER BY byte_sum DESC LIMIT 5
+      )
+    ),
+    amp_dest_ip AS (
+      SELECT groupArray(tuple(ip, net24, byte_sum)) AS rows
+      FROM (
+        SELECT dst_ip AS ip, dst24 AS net24, sum(bytes) AS byte_sum
+        FROM amp_ev GROUP BY ip, net24 ORDER BY byte_sum DESC LIMIT 5
+      )
+    ),
+    amp_dest_port AS (
+      SELECT groupArray(tuple(port, byte_sum, ips)) AS rows
+      FROM (
+        SELECT dst_port AS port, sum(bytes) AS byte_sum, uniqExact(dst_ip) AS ips
+        FROM amp_ev GROUP BY port ORDER BY byte_sum DESC LIMIT 5
+      )
+    ),
+    amp_port_n AS (
+      SELECT uniqExact(dst_port) AS n FROM amp_ev
+    ),
+    dest_port AS (
+      SELECT groupArray(tuple(port, byte_sum, ips)) AS rows
+      FROM (
+        SELECT dst_port AS port, sum(bytes) AS byte_sum, uniqExact(dst_ip) AS ips
+        FROM ev GROUP BY port ORDER BY byte_sum DESC LIMIT 5
+      )
+    ),
+    dest_port_n AS (
+      SELECT uniqExact(dst_port) AS n FROM ev
+    ),
+    src24 AS (
+      SELECT groupArray(tuple(net24, asn, byte_sum, ips, asn_name)) AS rows
+      FROM (
+        SELECT
+          s.net24 AS net24,
+          s.asn AS asn,
+          s.byte_sum AS byte_sum,
+          s.ips AS ips,
+          ifNull(nullIf(n.name, ''), '') AS asn_name
+        FROM (
+          SELECT src24 AS net24, any(src_asn) AS asn, sum(bytes) AS byte_sum, uniqExact(src_ip) AS ips
+          FROM ev WHERE src24 != '' GROUP BY net24 ORDER BY byte_sum DESC LIMIT 8
+        ) AS s
+        LEFT JOIN ${asnNamesTableRef()} AS n ON n.asn = s.asn
       )
     ),
     srcip AS (
@@ -407,6 +481,13 @@ async function investigateIncident({ scope, scopeId, minute }) {
       (SELECT dst_nets FROM totals) AS dst_nets,
       (SELECT rows FROM dest) AS dests,
       (SELECT rows FROM dest24) AS dest24s,
+      (SELECT rows FROM amp_dest24) AS amp_dest24s,
+      (SELECT rows FROM amp_dest_ip) AS amp_dest_ips,
+      (SELECT byte_sum FROM amp_tot) AS amp_bytes,
+      (SELECT rows FROM amp_dest_port) AS amp_dest_ports,
+      (SELECT n FROM amp_port_n) AS amp_port_count,
+      (SELECT rows FROM dest_port) AS dest_ports,
+      (SELECT n FROM dest_port_n) AS dest_port_count,
       (SELECT rows FROM src24) AS src24s,
       (SELECT rows FROM srcip) AS srcips,
       (SELECT rows FROM l4) AS l4s,
@@ -458,6 +539,32 @@ async function investigateIncident({ scope, scopeId, minute }) {
       { net24: String(t[0]), ips: Number(t[2] || 0) },
       total,
     )),
+    ampDest24: asTuples(row.amp_dest24s).filter((t) => t[0]).map((t) => {
+      const bytes = Number(t[1] || 0);
+      const ampTotal = Number(row.amp_bytes || 0);
+      return {
+        net24: String(t[0]),
+        ips: Number(t[2] || 0),
+        bytes,
+        bps: bytes * 8 / 60,
+        gbit: toGbit(bytes),
+        share: ampTotal > 0 ? bytes / ampTotal : 0,
+      };
+    }),
+    ampDestIp: asTuples(row.amp_dest_ips).filter((t) => t[0]).map((t) => {
+      const bytes = Number(t[2] || 0);
+      const ampTotal = Number(row.amp_bytes || 0);
+      return {
+        ip: String(t[0]),
+        net24: String(t[1] || ''),
+        bytes,
+        bps: bytes * 8 / 60,
+        gbit: toGbit(bytes),
+        share: ampTotal > 0 ? bytes / ampTotal : 0,
+      };
+    }),
+    ampDestPort: mapDestPorts(asTuples(row.amp_dest_ports), row.amp_port_count, Number(row.amp_bytes || 0)),
+    destPort: mapDestPorts(asTuples(row.dest_ports), row.dest_port_count, total),
     sources: {
       ipCount: Number(row.src_ips || 0),
       net24Count: Number(row.src_nets || 0),
@@ -471,7 +578,12 @@ async function investigateIncident({ scope, scopeId, minute }) {
     },
     source24: src24s.filter((t) => t[0]).map((t) => mapShareRow(
       { bytes: t[2], gbit: toGbit(t[2]) },
-      { net24: String(t[0]), asn: Number(t[1] || 0) || null, ips: Number(t[3] || 0) },
+      {
+        net24: String(t[0]),
+        asn: Number(t[1] || 0) || null,
+        ips: Number(t[3] || 0),
+        asnName: String(t[4] || ''),
+      },
       total,
     )),
     l4src: l4s.map((t) => mapShareRow(

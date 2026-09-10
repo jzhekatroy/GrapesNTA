@@ -4,6 +4,7 @@ const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
 const {
   isAmplificationHit,
+  ampStillGoing,
   evaluateForeignGeo,
   SIGNALS,
 } = require('./detection-signals');
@@ -39,10 +40,14 @@ describe('detection-signals', () => {
     }), false);
   });
 
-  it('95558: доля 0.12 → не амплификация', () => {
+  it('81953 день: 150 Мбит, доля 13%, 12 источников, 1400 Б → амплификация', () => {
+    const ampBytes = 150e6 * 60 / 8;
     assert.equal(isAmplificationHit({
-      bytes: 25e9, amp_bytes: 3e9, amp_packets: 2e6, amp_srcs: 24,
-    }), false);
+      bytes: ampBytes / 0.13,
+      amp_bytes: ampBytes,
+      amp_packets: Math.round(ampBytes / 1400),
+      amp_srcs: 12,
+    }), true);
   });
 
   it('мелкий клиент: 30 Мбит/с отражателей и 20 источников → амплификация', () => {
@@ -268,5 +273,50 @@ describe('detection-signals', () => {
     });
     assert.equal(picked.some((c) => c.signal === SIGNALS.amplification), true);
     assert.equal(picked.some((c) => c.signal === SIGNALS.volume), false);
+  });
+
+  it('81953: не хоронит amp, пока крупные ответы с усилителей идут', () => {
+    const ampBytes = 174e6 * 60 / 8;
+    const udp = {
+      proto: 'udp',
+      bytes: ampBytes / 0.10,
+      amp_bytes: ampBytes,
+      amp_packets: ampBytes / 1419,
+      amp_srcs: 8,
+    };
+    assert.equal(isAmplificationHit(udp), false);
+    assert.equal(ampStillGoing(udp), true);
+    const all = { scope: 'client', scope_id: '81953', proto: 'all', growth_bps: 0.68, udpRow: udp };
+    const prev = [all, all];
+    const picked = pickNormalizeCandidates([all], new Map([['client|81953', prev]]), 1.6, {
+      settings: { ampNormalizeStreak: 3 },
+      grouped: new Map([['client|81953', { byProto: { all, udp } }]]),
+      activeByKey: new Map([['client|81953|amplification', {
+        id: 'e1', signal: SIGNALS.amplification, threshold: 1.6,
+      }]]),
+    });
+    assert.equal(picked.some((c) => c.signal === SIGNALS.amplification), false);
+  });
+
+  it('amp хоронит, когда крупные ответы сели', () => {
+    const udp = {
+      proto: 'udp',
+      bytes: 15e6 * 60 / 8,
+      amp_bytes: 10e6 * 60 / 8,
+      amp_packets: (10e6 * 60 / 8) / 87,
+      amp_srcs: 3,
+    };
+    assert.equal(isAmplificationHit(udp), false);
+    assert.equal(ampStillGoing(udp), false);
+    const all = { scope: 'client', scope_id: '81953', proto: 'all', growth_bps: 0.9, udpRow: udp };
+    const prev = [all, all];
+    const picked = pickNormalizeCandidates([all], new Map([['client|81953', prev]]), 1.6, {
+      settings: { ampNormalizeStreak: 3 },
+      grouped: new Map([['client|81953', { byProto: { all, udp } }]]),
+      activeByKey: new Map([['client|81953|amplification', {
+        id: 'e1', signal: SIGNALS.amplification, threshold: 1.6,
+      }]]),
+    });
+    assert.equal(picked.some((c) => c.signal === SIGNALS.amplification), true);
   });
 });

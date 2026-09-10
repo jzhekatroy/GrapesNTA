@@ -477,6 +477,38 @@ describe('detection-telegram', () => {
     assert.doesNotMatch(text, /⚠ Объём/);
   });
 
+  it('amp в один IP: в «Куда» пишет /24 и сам адрес', () => {
+    const ampBytes = 188e6 * 60 / 8;
+    const text = formatAlertMessage({
+      name: 'клиент',
+      scope: 'client',
+      scopeId: '1',
+      minute: '2026-09-10 12:00:00',
+      threshold: 1.6,
+      byProto: {
+        all: { bps: 1.06e9, bytes: 1.06e9 * 60 / 8 },
+        udp: {
+          bps: 188e6 / 0.35, bytes: ampBytes / 0.35,
+          amp_bytes: ampBytes, amp_packets: ampBytes / 827, amp_srcs: 45,
+        },
+      },
+      verdict: { kind: 'amplification', reason: 'амплификация', hourRatio: 0.86, hourCeiling: 1.23e9 },
+      investigate: {
+        l4src: [
+          { port: 53, proto: 17, share: 0.2 },
+          { port: 123, proto: 17, share: 0.1 },
+          { port: 1900, proto: 17, share: 0.05 },
+        ],
+        ampDest24: [{ net24: '185.221.214.0/24', ips: 1, share: 1, bps: 188e6 }],
+        ampDestIp: [{ ip: '185.221.214.17', share: 1, bps: 188e6 }],
+        ampDestPort: { count: 1, top: [{ port: 7709, share: 1 }] },
+      },
+    });
+    assert.match(text, /185\.221\.214\.0\/24 — 100% · 1 адрес · 188 Мбит\/с/);
+    assert.match(text, /185\.221\.214\.17 — 100% · 188 Мбит\/с/);
+    assert.match(text, /На порт :7709/);
+  });
+
   it('81953: куда — топ /24 только по UDP с усилителей', () => {
     const ampBytes = 174e6 * 60 / 8;
     const text = formatAlertMessage({
@@ -501,6 +533,10 @@ describe('detection-telegram', () => {
           { net24: '31.171.101.0/24', ips: 10, share: 0.99, bps: 172e6 },
           { net24: '91.218.160.0/24', ips: 1, share: 0.01 },
         ],
+        ampDestIp: [
+          { ip: '31.171.101.14', share: 0.12, bps: 20e6 },
+          { ip: '31.171.101.88', share: 0.11, bps: 18e6 },
+        ],
         ampDestPort: {
           count: 214,
           top: [
@@ -519,6 +555,8 @@ describe('detection-telegram', () => {
     assert.match(text, /Куда \(UDP\/53\):/);
     assert.match(text, /31\.171\.101\.0\/24 — 99% · 10 адресов · 172 Мбит\/с/);
     assert.match(text, /91\.218\.160\.0\/24 — 1% · 1 адрес/);
+    assert.match(text, /31\.171\.101\.14 — 12% · 20(?:\.0)? Мбит\/с/);
+    assert.match(text, /31\.171\.101\.88 — 11% · 18(?:\.0)? Мбит\/с/);
     assert.match(text, /На 214 портов/);
     assert.match(text, /топ :53 2% · :443 0\.5% · :55094 0\.4% · :14397 0\.4% · :8010 0\.4%/);
     assert.match(text, /резать входящий UDP\/53 на 31\.171\.101\.0\/24/);

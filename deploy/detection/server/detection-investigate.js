@@ -47,6 +47,7 @@ function emptyInvestigate() {
     sources: { ipCount: 0, net24Count: 0, top: [] },
     source24: [],
     ampDest24: [],
+    ampDestIp: [],
     ampDestPort: { count: 0, top: [] },
     destPort: { count: 0, top: [] },
     l4src: [],
@@ -374,6 +375,13 @@ async function investigateIncident({ scope, scopeId, minute }) {
         FROM amp_ev WHERE dst24 != '' GROUP BY net24 ORDER BY byte_sum DESC LIMIT 5
       )
     ),
+    amp_dest_ip AS (
+      SELECT groupArray(tuple(ip, net24, byte_sum)) AS rows
+      FROM (
+        SELECT dst_ip AS ip, dst24 AS net24, sum(bytes) AS byte_sum
+        FROM amp_ev GROUP BY ip, net24 ORDER BY byte_sum DESC LIMIT 5
+      )
+    ),
     amp_dest_port AS (
       SELECT groupArray(tuple(port, byte_sum, ips)) AS rows
       FROM (
@@ -474,6 +482,7 @@ async function investigateIncident({ scope, scopeId, minute }) {
       (SELECT rows FROM dest) AS dests,
       (SELECT rows FROM dest24) AS dest24s,
       (SELECT rows FROM amp_dest24) AS amp_dest24s,
+      (SELECT rows FROM amp_dest_ip) AS amp_dest_ips,
       (SELECT byte_sum FROM amp_tot) AS amp_bytes,
       (SELECT rows FROM amp_dest_port) AS amp_dest_ports,
       (SELECT n FROM amp_port_n) AS amp_port_count,
@@ -536,6 +545,18 @@ async function investigateIncident({ scope, scopeId, minute }) {
       return {
         net24: String(t[0]),
         ips: Number(t[2] || 0),
+        bytes,
+        bps: bytes * 8 / 60,
+        gbit: toGbit(bytes),
+        share: ampTotal > 0 ? bytes / ampTotal : 0,
+      };
+    }),
+    ampDestIp: asTuples(row.amp_dest_ips).filter((t) => t[0]).map((t) => {
+      const bytes = Number(t[2] || 0);
+      const ampTotal = Number(row.amp_bytes || 0);
+      return {
+        ip: String(t[0]),
+        net24: String(t[1] || ''),
         bytes,
         bps: bytes * 8 / 60,
         gbit: toGbit(bytes),

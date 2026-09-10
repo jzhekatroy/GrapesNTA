@@ -31,12 +31,12 @@ const AMPLIFIER_PORT_LABEL = {
 const AMP_SHARE_MIN = 0.15;
 const AMP_SRCS_MIN = 10;
 const AMP_PKT_MIN = 800;
-// Отбор делают доля, число отражателей и размер пакета — пол нужен только
-// против мелких серверов, у которых весь UDP и есть ответы с порта 53 или 123.
-// Замер 07.09 на 10 спокойных минутах и 12 минутах суточных пиков: трафик с
-// портов усилителей нигде не превышает 34 кбит/с, а долю/источников/пакет
-// прошли всего две клиенто-минуты — обе по 8–9 кбит/с. При 200 Мбит/с признак
-// не увидел бы и атаку, забившую канал мелкому клиенту.
+// Отбор: число отражателей, размер пакета и пол по Мбит. Доля от всего UDP
+// клиента не гейтит — у 81953 днём amp 150 Мбит при своём UDP ~1.1 Гбит это
+// ~13%, и дежурный терял активное событие. Пол нужен против мелких серверов,
+// у которых весь UDP — ответы с 53/123. Замер 07.09: с портов усилителей
+// нигде не больше 34 кбит/с; долю/источников/пакет прошли две минуты по 8–9
+// кбит/с. При 200 Мбит/с без пола не видно атаку, забившую мелкий канал.
 const AMP_BPS_MIN = 20e6;
 
 const GEO_SHARE_GROWTH_MIN = 3;
@@ -79,15 +79,21 @@ function ampMetrics(row = {}) {
 
 function isAmplificationHit(row = {}, options = {}) {
   const m = ampMetrics(row);
-  const shareMin = num(options.shareMin) ?? AMP_SHARE_MIN;
   const srcsMin = num(options.srcsMin) ?? AMP_SRCS_MIN;
   const pktMin = num(options.pktMin) ?? AMP_PKT_MIN;
   const bpsMin = num(options.bpsMin) ?? AMP_BPS_MIN;
-  return m.share != null
-    && m.share >= shareMin
-    && m.srcs >= srcsMin
+  return m.srcs >= srcsMin
     && m.avgPkt >= pktMin
     && m.bps >= bpsMin;
+}
+
+// Упор нормализации: крупные ответы с усилителей ещё идут, даже если доля
+// UDP или число IP на минуту просели ниже порога открытия. Открытие не трогаем.
+function ampStillGoing(row = {}, options = {}) {
+  const m = ampMetrics(row);
+  const pktMin = num(options.pktMin) ?? AMP_PKT_MIN;
+  const bpsMin = num(options.bpsMin) ?? AMP_BPS_MIN;
+  return m.bps >= bpsMin && m.avgPkt >= pktMin;
 }
 
 function amplifierPortsFromL4(list) {
@@ -204,6 +210,7 @@ module.exports = {
   GEO_BPS_MIN,
   ampMetrics,
   isAmplificationHit,
+  ampStillGoing,
   amplifierPortsFromL4,
   amplifierLabel,
   parseTopCountries,
