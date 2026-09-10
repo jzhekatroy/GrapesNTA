@@ -7,10 +7,12 @@ const {
   classifyFromMetrics,
   refineClassification,
   isAttackKind,
+  isLegitimatePeak,
   actionFor,
   volumeStillHigh,
   formatVictim,
   formatSwitchPort,
+  formatSourceNets,
   hourCeiling,
 } = require('./detection-classify');
 
@@ -344,14 +346,79 @@ describe('detection-classify', () => {
     assert.equal(isAttackKind(refined.kind), true);
   });
 
-  it('81050: веерная amp без цели — резать на префикс, не на GRE :0', () => {
+  it('81050: веерная amp без цели — резать на сеть клиента, не на GRE :0', () => {
     assert.equal(actionFor({ kind: KINDS.amplification }, {
       victim: { ip: '185.129.101.255', port: 0, proto: 47, protoLabel: '47', share: 0.057 },
       l4src: [
         { port: 443, proto: 6, share: 0.43 },
         { port: 53, proto: 17, share: 0.03 },
       ],
-    }), 'резать входящий UDP с портов 53 на префикс клиента');
+    }), 'резать входящий UDP/53 на сеть клиента');
+  });
+
+  it('81953: amp в одну /24 — резать на неё, не на сеть клиента', () => {
+    assert.equal(actionFor({ kind: KINDS.amplification }, {
+      victim: { ip: '31.171.101.14', port: 0, proto: 17, protoLabel: 'UDP', share: 0.017 },
+      l4src: [{ port: 53, proto: 17, share: 0.04 }],
+      ampDest24: [
+        { net24: '31.171.101.0/24', share: 0.99, ips: 10 },
+        { net24: '91.218.160.0/24', share: 0.01, ips: 1 },
+      ],
+    }), 'резать входящий UDP/53 на 31.171.101.0/24');
+  });
+
+  it('amp: порты из ampSrcPort, не из общего L4', () => {
+    assert.equal(actionFor({ kind: KINDS.amplification }, {
+      l4src: [{ port: 443, proto: 6, share: 0.4 }],
+      ampSrcPort: { top: [{ port: 53, share: 0.56 }, { port: 123, share: 0.21 }] },
+      ampDest24: [{ net24: '65.109.94.0/24', share: 0.56, ips: 1 }],
+    }), 'резать входящий UDP/53 и UDP/123 на 65.109.94.0/24');
+  });
+
+  it('85783: TCP с одной CDN /24 и 37 IP → пик загрузки, не атака', () => {
+    const first = classifyFromMetrics({
+      all: {
+        bps: 2.74e9, port_entropy: 1.46, syn_attempts: 3, answer_pct: 0,
+        bytes: 2.74e9 * 60 / 8, foreign_bytes: 2.60e9 * 60 / 8,
+        growth_foreign_share: 4.66, growth_foreign_bps: 290,
+      },
+      tcp: { bps: 2.64e9, port_entropy: 1.42 },
+      udp: { bps: 91e6, port_entropy: 0.57 },
+    }, { p95: 116e6, p999: 116e6 });
+    assert.equal(first.kind, KINDS.benign_peak);
+    const refined = refineClassification(first, {
+      victim: { ip: '43.175.146.57', port: 1935, proto: 6, protoLabel: 'TCP', share: 0.411 },
+      source24: [{ net24: '154.85.88.0/24', asn: 139057, share: 0.814, ips: 37 }],
+      l4src: [{ port: 42328, proto: 6, share: 0.01 }],
+    });
+    assert.equal(refined.kind, KINDS.benign_peak);
+    assert.match(refined.reason, /пик загрузки · узкий источник · TCP\/1935/);
+    assert.equal(isLegitimatePeak(refined), true);
+    assert.equal(isAttackKind(refined.kind), false);
+    assert.equal(actionFor(refined, {
+      victim: { ip: '43.175.146.57', port: 1935, protoLabel: 'TCP', share: 0.411 },
+    }), 'пик загрузки, фильтр не нужен');
+  });
+
+  it('UDP-ковёр с одной /24 и многими IP остаётся атакой', () => {
+    const first = classifyFromMetrics({
+      all: { bps: 2e9, port_entropy: 8, avg_packet_bytes: 200 },
+      tcp: { bps: 10e6 },
+      udp: { bps: 1.9e9, port_entropy: 8 },
+    }, { p95: 50e6, p999: 50e6 });
+    const refined = refineClassification(first, {
+      victim: { ip: '188.143.1.10', port: 80, protoLabel: 'UDP', share: 0.02 },
+      source24: [{ net24: '45.95.201.0/24', share: 0.81, ips: 40 }],
+      l4src: [{ port: 12345, proto: 17, share: 0.2 }],
+    });
+    assert.equal(refined.kind, KINDS.carpet);
+    assert.equal(isAttackKind(refined.kind), true);
+  });
+
+  it('в «Откуда сети» пишет номер AS и имя', () => {
+    assert.match(formatSourceNets([
+      { net24: '154.85.88.0/24', asn: 139057, asnName: 'ELD-AS-AP - Edgenext Legend Dynasty Pte. Ltd.', share: 0.814, ips: 37 },
+    ]), /154\.85\.88\.0\/24 AS139057 Edgenext Legend Dynasty/);
   });
 
   it('один источник и 4.6 Мбит/с amp — не амплификация', () => {

@@ -16,7 +16,6 @@ const {
   formatSwitchPort,
   formatAsnLabel,
   formatSourceNets,
-  formatL4Sources,
   isUsableVictim,
   actionFor,
   volumeStillHigh,
@@ -654,7 +653,9 @@ function formatAlertHeadline(verdict, signals = []) {
   const verdictKind = verdict?.kind || '';
   const head = (emoji, text) => `${emoji} <b>${escapeHtml(text)}</b>`;
   if (verdictKind === KINDS.amplification) {
-    const ports = amplifierPortsFromL4(verdict?.l4src);
+    const fromAmp = (Array.isArray(verdict?.ampSrcPort?.top) ? verdict.ampSrcPort.top : [])
+      .map((row) => ({ port: row.port, proto: 17 }));
+    const ports = amplifierPortsFromL4(fromAmp.length ? fromAmp : verdict?.l4src);
     const extra = amplifierLabel(ports);
     return head('🔴', `АТАКА · ${KIND_LABEL.amplification}${extra ? ` ${extra}` : ''}`);
   }
@@ -776,13 +777,58 @@ function formatDestLines(investigate, mode) {
   return ['Куда:', escapeHtml(`   ${formatVictimDest(victim)}`)];
 }
 
-function ampPortCameFrom(ports) {
+function ampSrcPortRows(investigate) {
+  return (Array.isArray(investigate?.ampSrcPort?.top) ? investigate.ampSrcPort.top : [])
+    .filter((row) => row && Number.isFinite(Number(row.port)))
+    .slice(0, 5);
+}
+
+function l4ProtoName(row) {
+  const n = Number(row?.proto);
+  if (n === 17) return 'UDP';
+  if (n === 6) return 'TCP';
+  const label = String(row?.protoLabel || '').toUpperCase();
+  return label === 'UDP' || label === 'TCP' ? label : '';
+}
+
+function formatColonPorts(rows, { withProto = false, limit = 5 } = {}) {
+  const list = (Array.isArray(rows) ? rows : [])
+    .filter((row) => row && Number.isFinite(Number(row.port)))
+    .slice(0, limit);
+  if (!list.length) return '';
+  return list.map((row) => {
+    const proto = withProto ? l4ProtoName(row) : '';
+    const share = row.share != null ? ` ${formatSharePct(row.share)}` : '';
+    return `:${row.port}${proto ? ` ${proto}` : ''}${share}`;
+  }).join(' · ');
+}
+
+function footerPortLines(investigate, { ampShown, hidePeak }) {
+  if (hidePeak) return [];
+  const from = ampShown
+    ? formatColonPorts(investigate?.ampSrcPort?.top)
+    : formatColonPorts(investigate?.l4src, { withProto: true });
+  const to = ampShown
+    ? formatColonPorts(investigate?.ampDestPort?.top)
+    : formatColonPorts(investigate?.destPort?.top);
+  return [
+    from ? `Откуда порты: ${escapeHtml(from)}` : '',
+    to ? `Там порты: ${escapeHtml(to)}` : '',
+  ].filter(Boolean);
+}
+
+function ampPortCameFrom(investigate) {
+  const top = ampSrcPortRows(investigate);
+  if (top.length) {
+    const listed = top.map((row) => {
+      const share = row.share != null ? ` ${formatSharePct(row.share)}` : '';
+      return `:${row.port}${share}`;
+    });
+    return `С ${listed.join(' · ')} пришло`;
+  }
+  const ports = amplifierPortsFromL4(investigate?.l4src);
   if (!ports.length) return 'С портов усилителей пришло';
-  const bits = ports.map((port) => {
-    const name = AMPLIFIER_PORT_LABEL[port];
-    return name ? `порта ${port} (${name})` : `порта ${port}`;
-  });
-  return bits.length === 1 ? `С ${bits[0]} пришло` : `С ${bits.join(' и ')} пришло`;
+  return `С ${ports.map((port) => `:${port}`).join(' · ')} пришло`;
 }
 
 function ruAddresses(count) {
@@ -837,13 +883,12 @@ function formatAmpDestIpLine(row) {
   return escapeHtml(`   ${row.ip} — ${parts.join(' · ')}`);
 }
 
-function formatAmpDestLines(investigate, ports) {
+function formatAmpDestLines(investigate) {
   const rows = (Array.isArray(investigate?.ampDest24) ? investigate.ampDest24 : [])
     .filter((row) => row?.net24)
     .slice(0, 5);
   if (!rows.length) return ['Куда: по сети клиента, не один сервер'];
-  const tag = ports.length ? ports.join(' и ') : 'усилители';
-  const lines = [`Куда (UDP/${escapeHtml(tag)}):`];
+  const lines = ['Куда (UDP/усилители):', 'Топ 5 сетей'];
   for (const row of rows) {
     const parts = [];
     if (row.share != null) parts.push(`${(Number(row.share) * 100).toFixed(0)}%`);
@@ -855,14 +900,20 @@ function formatAmpDestLines(investigate, ports) {
   const ips = (Array.isArray(investigate?.ampDestIp) ? investigate.ampDestIp : [])
     .filter((row) => row?.ip)
     .slice(0, 5);
-  for (const row of ips) lines.push(formatAmpDestIpLine(row));
+  if (ips.length) {
+    lines.push('Топ 5 IP');
+    for (const row of ips) lines.push(formatAmpDestIpLine(row));
+  }
   return lines;
 }
 
 function formatAmpHighlight({ amp, udp, all, hourUsual, verdict, investigate }) {
-  const ports = amplifierPortsFromL4(investigate?.l4src);
+  const srcPorts = ampSrcPortRows(investigate);
+  const ports = srcPorts.length
+    ? srcPorts.map((row) => Number(row.port))
+    : amplifierPortsFromL4(investigate?.l4src);
   const lines = [
-    `🔴 ${escapeHtml(ampPortCameFrom(ports))} <b>${escapeHtml(formatBpsMsg(amp.bps))}</b>`,
+    `🔴 ${escapeHtml(ampPortCameFrom(investigate))} <b>${escapeHtml(formatBpsMsg(amp.bps))}</b>`,
   ];
   const who = amp.srcs > 0
     ? (ports.length === 1 && ports[0] === 53
@@ -878,7 +929,7 @@ function formatAmpHighlight({ amp, udp, all, hourUsual, verdict, investigate }) 
     shares.push(`${((amp.bps / Number(all.bps)) * 100).toFixed(0)}% всего трафика клиента`);
   }
   if (shares.length) lines.push(escapeHtml(`   это ${shares.join(' и ')}`));
-  lines.push(...formatAmpDestLines(investigate, ports));
+  lines.push(...formatAmpDestLines(investigate));
   lines.push(...formatAttackPortLines(investigate?.ampDestPort));
   const ratio = Number(verdict?.hourRatio);
   if (hourUsual > 0 && Number(all.bps) > 0) {
@@ -887,7 +938,6 @@ function formatAmpHighlight({ amp, udp, all, hourUsual, verdict, investigate }) 
       lines.push(escapeHtml(
         `Объём клиента сейчас ${formatBpsMsg(all.bps)}, обычно ${formatBpsMsg(hourUsual)} — ниже нормы.`,
       ));
-      lines.push('По общему графику эту атаку не видно.');
     }
   }
   return lines;
@@ -1049,7 +1099,11 @@ function formatAlertMessage({
   signals,
 }) {
   const signalList = Array.isArray(signals) && signals.length ? signals : [SIGNALS.volume];
-  const title = formatAlertHeadline({ ...verdict, l4src: investigate?.l4src }, signalList);
+  const title = formatAlertHeadline({
+    ...verdict,
+    l4src: investigate?.l4src,
+    ampSrcPort: investigate?.ampSrcPort,
+  }, signalList);
   // Префикс сети уже стоит в шапке, поэтому разметка нужна только абонентам.
   const markup = scope === 'client' ? formatClientMarkup(binding) : '';
   const markupLine = markup
@@ -1062,11 +1116,10 @@ function formatAlertMessage({
     hourUsual: Number(verdict?.hourCeiling || verdict?.hourP95 || 0),
     signals: signalList,
   });
-  const l4 = formatL4Sources(investigate?.l4src);
   const switchIn = formatSwitchPort(investigate?.switchIn);
   const switchOut = formatSwitchPort(investigate?.switchOut);
   const sourceNets = formatSourceNets(investigate?.source24);
-  const hideL4 = ampShown || isLegitimatePeak(verdict);
+  const hidePeakPorts = isLegitimatePeak(verdict);
   // У пика нет строк с маркерами, поэтому причина — единственное объяснение;
   // у атаки она дословно повторяет то, что уже разложено по строкам выше.
   const reasonLine = verdict?.kind === KINDS.benign_peak && verdict?.reason
@@ -1085,8 +1138,7 @@ function formatAlertMessage({
     [`<b>Что делать:</b> ${escapeHtml(actionFor(verdict, investigate))}`],
     [
       sourceNets !== '—' ? `Откуда сети: ${escapeHtml(sourceNets)}` : '',
-      // Порты усилителей уже в шапке amp; у загрузки L4 часто эфемерный.
-      !hideL4 && l4 !== '—' ? `L4 откуда: ${escapeHtml(l4)}` : '',
+      ...footerPortLines(investigate, { ampShown, hidePeak: hidePeakPorts }),
       switchIn !== '—' ? `Коммутатор вход: ${escapeHtml(switchIn)}` : '',
       switchOut !== '—' ? `Коммутатор выход: ${escapeHtml(switchOut)}` : '',
       markupLine ? escapeHtml(markupLine) : '',

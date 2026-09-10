@@ -49,6 +49,7 @@ function emptyInvestigate() {
     ampDest24: [],
     ampDestIp: [],
     ampDestPort: { count: 0, top: [] },
+    ampSrcPort: { count: 0, top: [] },
     destPort: { count: 0, top: [] },
     l4src: [],
     switchIn: null,
@@ -361,7 +362,7 @@ async function investigateIncident({ scope, scopeId, minute }) {
       )
     ),
     amp_ev AS (
-      SELECT dst24, dst_ip, dst_port, bytes
+      SELECT dst24, dst_ip, dst_port, src_port, src_ip, bytes
       FROM ev
       WHERE proto = 17 AND src_port IN (${AMPLIFIER_PORTS.join(', ')})
     ),
@@ -389,8 +390,18 @@ async function investigateIncident({ scope, scopeId, minute }) {
         FROM amp_ev GROUP BY port ORDER BY byte_sum DESC LIMIT 5
       )
     ),
+    amp_src_port AS (
+      SELECT groupArray(tuple(port, byte_sum, ips)) AS rows
+      FROM (
+        SELECT src_port AS port, sum(bytes) AS byte_sum, uniqExact(src_ip) AS ips
+        FROM amp_ev GROUP BY port ORDER BY byte_sum DESC LIMIT 5
+      )
+    ),
     amp_port_n AS (
       SELECT uniqExact(dst_port) AS n FROM amp_ev
+    ),
+    amp_src_port_n AS (
+      SELECT uniqExact(src_port) AS n FROM amp_ev
     ),
     dest_port AS (
       SELECT groupArray(tuple(port, byte_sum, ips)) AS rows
@@ -485,7 +496,9 @@ async function investigateIncident({ scope, scopeId, minute }) {
       (SELECT rows FROM amp_dest_ip) AS amp_dest_ips,
       (SELECT byte_sum FROM amp_tot) AS amp_bytes,
       (SELECT rows FROM amp_dest_port) AS amp_dest_ports,
+      (SELECT rows FROM amp_src_port) AS amp_src_ports,
       (SELECT n FROM amp_port_n) AS amp_port_count,
+      (SELECT n FROM amp_src_port_n) AS amp_src_port_count,
       (SELECT rows FROM dest_port) AS dest_ports,
       (SELECT n FROM dest_port_n) AS dest_port_count,
       (SELECT rows FROM src24) AS src24s,
@@ -564,6 +577,7 @@ async function investigateIncident({ scope, scopeId, minute }) {
       };
     }),
     ampDestPort: mapDestPorts(asTuples(row.amp_dest_ports), row.amp_port_count, Number(row.amp_bytes || 0)),
+    ampSrcPort: mapDestPorts(asTuples(row.amp_src_ports), row.amp_src_port_count, Number(row.amp_bytes || 0)),
     destPort: mapDestPorts(asTuples(row.dest_ports), row.dest_port_count, total),
     sources: {
       ipCount: Number(row.src_ips || 0),

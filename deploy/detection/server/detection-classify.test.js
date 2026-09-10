@@ -367,6 +367,14 @@ describe('detection-classify', () => {
     }), 'резать входящий UDP/53 на 31.171.101.0/24');
   });
 
+  it('amp: порты из ampSrcPort, не из общего L4', () => {
+    assert.equal(actionFor({ kind: KINDS.amplification }, {
+      l4src: [{ port: 443, proto: 6, share: 0.4 }],
+      ampSrcPort: { top: [{ port: 53, share: 0.56 }, { port: 123, share: 0.21 }] },
+      ampDest24: [{ net24: '65.109.94.0/24', share: 0.56, ips: 1 }],
+    }), 'резать входящий UDP/53 и UDP/123 на 65.109.94.0/24');
+  });
+
   it('85783: TCP с одной CDN /24 и 37 IP → пик загрузки, не атака', () => {
     const first = classifyFromMetrics({
       all: {

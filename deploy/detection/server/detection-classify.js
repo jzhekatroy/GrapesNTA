@@ -338,7 +338,9 @@ function actionFor(verdict, investigate) {
   }
   if (kind === KINDS.syn_flood) return 'SYN-защита / лимит на сеть клиента';
   if (kind === KINDS.amplification) {
-    const ports = amplifierPortsFromL4(investigate?.l4src);
+    const fromAmp = (Array.isArray(investigate?.ampSrcPort?.top) ? investigate.ampSrcPort.top : [])
+      .map((row) => ({ port: row.port, proto: 17 }));
+    const ports = amplifierPortsFromL4(fromAmp.length ? fromAmp : investigate?.l4src);
     const udp = ports.length ? ports.map((p) => `UDP/${p}`).join(' и ') : 'UDP с портов усилителей';
     const ampNet = Array.isArray(investigate?.ampDest24) ? investigate.ampDest24[0] : null;
     if (ampNet?.net24 && num(ampNet.share) >= AMP_DEST_ACTION_SHARE) {

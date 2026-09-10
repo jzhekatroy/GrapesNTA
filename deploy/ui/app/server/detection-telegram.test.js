@@ -461,13 +461,15 @@ describe('detection-telegram', () => {
         ],
       },
     });
-    assert.match(text, /С порта 53 \(DNS\) пришло <b>516 Мбит\/с<\/b>/);
+    assert.match(text, /С :53 пришло <b>516 Мбит\/с<\/b>/);
     assert.match(text, /36 чужих резолверов · ответы по ~1\s?136 байт/);
     assert.match(text, /это 23% его UDP и 3% всего трафика клиента/);
     assert.match(text, /Куда: по сети клиента, не один сервер/);
     assert.match(text, /Объём клиента сейчас 15\.5 Гбит\/с, обычно 53\.0 Гбит\/с — ниже нормы/);
-    assert.match(text, /По общему графику эту атаку не видно/);
+    assert.doesNotMatch(text, /По общему графику/);
     assert.match(text, /резать входящий UDP\/53 на сеть клиента/);
+    assert.doesNotMatch(text, /Откуда порты/);
+    assert.doesNotMatch(text, /Там порты/);
     assert.doesNotMatch(text, /Паразит/);
     assert.doesNotMatch(text, /отражател/i);
     assert.doesNotMatch(text, /в один адрес не бьёт/);
@@ -504,9 +506,74 @@ describe('detection-telegram', () => {
         ampDestPort: { count: 1, top: [{ port: 7709, share: 1 }] },
       },
     });
+    assert.match(text, /С :53 · :123 · :1900 пришло/);
+    assert.match(text, /Куда \(UDP\/усилители\):/);
+    assert.match(text, /Топ 5 сетей/);
     assert.match(text, /185\.221\.214\.0\/24 — 100% · 1 адрес · 188 Мбит\/с/);
+    assert.match(text, /Топ 5 IP/);
     assert.match(text, /185\.221\.214\.17 — 100% · 188 Мбит\/с/);
     assert.match(text, /На порт :7709/);
+    assert.match(text, /Там порты: :7709 100%/);
+    assert.doesNotMatch(text, /По общему графику/);
+  });
+
+  it('amp: топ портов с двоеточием, сети и IP раздельно', () => {
+    const ampBytes = 591e6 * 60 / 8;
+    const text = formatAlertMessage({
+      name: 'HETZNER',
+      scope: 'client',
+      scopeId: '79616',
+      minute: '2026-09-10 14:48:00',
+      threshold: 1.6,
+      byProto: {
+        all: { bps: 42.9e9, bytes: 42.9e9 * 60 / 8 },
+        udp: {
+          bps: 9.41e9, bytes: 9.41e9 * 60 / 8,
+          amp_bytes: ampBytes, amp_packets: ampBytes / 878, amp_srcs: 24,
+        },
+      },
+      verdict: { kind: 'amplification', reason: 'амплификация', hourRatio: 0.53, hourCeiling: 80.2e9 },
+      investigate: {
+        l4src: [{ port: 443, proto: 6, share: 0.4 }],
+        ampSrcPort: {
+          count: 3,
+          top: [
+            { port: 53, share: 0.48 },
+            { port: 123, share: 0.31 },
+            { port: 1900, share: 0.21 },
+          ],
+        },
+        ampDest24: [
+          { net24: '65.109.94.0/24', ips: 1, share: 0.56, bps: 333e6 },
+          { net24: '65.21.150.0/24', ips: 1, share: 0.21, bps: 126e6 },
+        ],
+        ampDestIp: [
+          { ip: '65.109.94.78', share: 0.56, bps: 333e6 },
+          { ip: '65.21.150.220', share: 0.21, bps: 126e6 },
+        ],
+        ampDestPort: {
+          count: 6,
+          top: [
+            { port: 443, share: 0.56 },
+            { port: 49740, share: 0.21 },
+          ],
+        },
+      },
+    });
+    assert.match(text, /АТАКА · амплификация DNS\/NTP\/SSDP/);
+    assert.match(text, /С :53 48% · :123 31% · :1900 21% пришло <b>591 Мбит\/с<\/b>/);
+    assert.match(text, /Куда \(UDP\/усилители\):/);
+    assert.match(text, /Топ 5 сетей/);
+    assert.match(text, /65\.109\.94\.0\/24 — 56%/);
+    assert.match(text, /Топ 5 IP/);
+    assert.match(text, /65\.109\.94\.78 — 56%/);
+    assert.match(text, /На 6 портов/);
+    assert.match(text, /топ :443 56%/);
+    assert.match(text, /Откуда порты: :53 48% · :123 31% · :1900 21%/);
+    assert.match(text, /Там порты: :443 56% · :49740 21%/);
+    assert.doesNotMatch(text, /С портов усилителей/);
+    assert.doesNotMatch(text, /L4 откуда/);
+    assert.doesNotMatch(text, /По общему графику/);
   });
 
   it('81953: куда — топ /24 только по UDP с усилителей', () => {
@@ -529,6 +596,7 @@ describe('detection-telegram', () => {
       investigate: {
         victim: { ip: '188.143.1.10', port: 443, protoLabel: 'TCP', share: 0.017 },
         l4src: [{ port: 53, proto: 17, share: 0.04 }],
+        ampSrcPort: { count: 1, top: [{ port: 53, share: 1 }] },
         ampDest24: [
           { net24: '31.171.101.0/24', ips: 10, share: 0.99, bps: 172e6 },
           { net24: '91.218.160.0/24', ips: 1, share: 0.01 },
@@ -549,18 +617,23 @@ describe('detection-telegram', () => {
         },
       },
     });
-    assert.match(text, /С порта 53 \(DNS\) пришло <b>174 Мбит\/с<\/b>/);
+    assert.match(text, /С :53 100% пришло <b>174 Мбит\/с<\/b>/);
     assert.match(text, /13 чужих резолверов · ответы по ~1\s?419 байт/);
     assert.match(text, /это 16% его UDP и 4% всего трафика клиента/);
-    assert.match(text, /Куда \(UDP\/53\):/);
+    assert.match(text, /Куда \(UDP\/усилители\):/);
+    assert.match(text, /Топ 5 сетей/);
     assert.match(text, /31\.171\.101\.0\/24 — 99% · 10 адресов · 172 Мбит\/с/);
     assert.match(text, /91\.218\.160\.0\/24 — 1% · 1 адрес/);
+    assert.match(text, /Топ 5 IP/);
     assert.match(text, /31\.171\.101\.14 — 12% · 20(?:\.0)? Мбит\/с/);
     assert.match(text, /31\.171\.101\.88 — 11% · 18(?:\.0)? Мбит\/с/);
     assert.match(text, /На 214 портов/);
     assert.match(text, /топ :53 2% · :443 0\.5% · :55094 0\.4% · :14397 0\.4% · :8010 0\.4%/);
     assert.match(text, /резать входящий UDP\/53 на 31\.171\.101\.0\/24/);
+    assert.match(text, /Откуда порты: :53 100%/);
+    assert.match(text, /Там порты: :53 2% · :443 0\.5% · :55094 0\.4% · :14397 0\.4% · :8010 0\.4%/);
     assert.match(text, /Объём клиента сейчас 4\.68 Гбит\/с, обычно 6\.97 Гбит\/с — ниже нормы/);
+    assert.doesNotMatch(text, /По общему графику/);
     assert.doesNotMatch(text, /188\.143\.1\.10/);
     assert.doesNotMatch(text, /Паразит/);
     assert.doesNotMatch(text, /×1\.43/);
@@ -599,6 +672,7 @@ describe('detection-telegram', () => {
         switchIn: { switchIp: '172.18.19.165', ifName: 'port-channel2', ifAlias: 'imaqliq.9236', share: 1 },
         switchOut: { switchIp: '172.18.19.165', ifName: 'Ethernet1/31', ifAlias: 'hostland-', share: 1 },
         l4src: [{ port: 80, proto: 17, share: 0.14 }],
+        destPort: { count: 1, top: [{ port: 443, share: 0.99 }] },
       },
     });
     assert.match(text, /АТАКА · в один сервер/);
@@ -607,7 +681,8 @@ describe('detection-telegram', () => {
     assert.match(text, /185\.26\.122\.4:443 — 99% · 185\.26\.122\.0\/24/);
     assert.match(text, /port-channel2/);
     assert.match(text, /Ethernet1\/31/);
-    assert.match(text, /UDP\/80/);
+    assert.match(text, /Откуда порты: :80 UDP 14%/);
+    assert.match(text, /Там порты: :443 99%/);
     assert.doesNotMatch(text, /‼ Цель/);
     assert.doesNotMatch(text, /Объём:/);
   });
@@ -631,6 +706,7 @@ describe('detection-telegram', () => {
     assert.match(text, /размазано · топ IP 0\.2%/);
     assert.match(text, /Куда: по сети клиента, не один сервер/);
     assert.match(text, /На порты :80 40% · :443 30% · :53 20%/);
+    assert.match(text, /Там порты: :80 40% · :443 30% · :53 20%/);
     assert.match(text, /Объём клиента сейчас 5\.90 Гбит\/с, обычно 840 Мбит\/с — в 7 раз выше/);
     assert.doesNotMatch(text, /10\.0\.0\.8:80/);
   });
