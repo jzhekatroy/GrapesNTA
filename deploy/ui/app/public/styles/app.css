@@ -1612,6 +1612,16 @@ a.nav-item--active:visited { color: var(--fg-primary); }
   background: color-mix(in srgb, var(--accent) 12%, transparent);
   pointer-events: auto;
   vertical-align: middle;
+  animation: explorer-chip-phantom-in 0.22s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+@keyframes explorer-chip-phantom-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
 }
 
 .explorer-chip-drag-source-hidden {
@@ -1713,6 +1723,16 @@ body.explorer-chip-dragging * {
   border-radius: 10px;
   border: 1px dashed color-mix(in srgb, var(--accent) 28%, var(--bd-soft));
   background: color-mix(in srgb, var(--accent) 5%, var(--surf-1));
+  transition:
+    background-color 0.26s cubic-bezier(0.22, 1, 0.36, 1),
+    border-color 0.26s cubic-bezier(0.22, 1, 0.36, 1),
+    box-shadow 0.26s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.explorer-filter-group:has(.explorer-chip-phantom) {
+  border-color: color-mix(in srgb, var(--accent) 58%, var(--bd-soft));
+  background: color-mix(in srgb, var(--accent) 12%, var(--surf-1));
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 18%, transparent);
 }
 
 .explorer-filter-group__paren {
@@ -1734,6 +1754,16 @@ body.explorer-chip-dragging * {
   align-items: center;
   gap: 6px;
   flex-wrap: wrap;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .explorer-chip-phantom {
+    animation: none;
+  }
+
+  .explorer-filter-group {
+    transition: none;
+  }
 }
 
 @media (max-width: 640px) {

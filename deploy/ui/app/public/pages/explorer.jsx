@@ -5453,38 +5453,127 @@ function explorerInsertIndexAmong(items, clientX, clientY) {
   return insertAt;
 }
 
-function readExplorerFilterDropTarget(clientX, clientY, dragId) {
-  const stack = document.elementsFromPoint(clientX, clientY);
-  if (stack.some((node) => node instanceof Element && node.closest('.explorer-chip-phantom'))) {
-    return null;
-  }
-  const dragKey = String(dragId);
-  let listEl = null;
-  let itemEl = null;
-  for (const node of stack) {
-    if (!(node instanceof Element)) continue;
-    if (!itemEl) {
-      const item = node.closest('[data-explorer-filter-item]');
-      if (item && item.getAttribute('data-explorer-filter-item') !== dragKey) itemEl = item;
-    }
-    if (!listEl) {
-      const list = node.closest('[data-explorer-filter-list]');
-      if (list) listEl = list;
-    }
-    if (itemEl && listEl) break;
-  }
+function explorerDropTargetsEqual(a, b) {
+  if (a == null && b == null) return true;
+  if (a == null || b == null) return false;
+  return String(a.parentId ?? '') === String(b.parentId ?? '') && Number(a.index) === Number(b.index);
+}
 
-  const listFromItem = itemEl?.closest('[data-explorer-filter-list]') || listEl;
-  if (!listFromItem) return null;
-  const parentId = explorerAttrParent(listFromItem.getAttribute('data-explorer-filter-list'));
-  const siblings = [...listFromItem.querySelectorAll(':scope > [data-explorer-filter-item]')]
-    .filter((el) => el.getAttribute('data-explorer-filter-item') !== dragKey);
+function explorerPointInRect(rect, clientX, clientY, pad = 6) {
+  return clientX >= rect.left - pad && clientX <= rect.right + pad
+    && clientY >= rect.top - pad && clientY <= rect.bottom + pad;
+}
+
+function readExplorerFilterDropTargetFromPhantom(phantomEl, dragId) {
+  const list = phantomEl.closest('[data-explorer-filter-list]');
+  if (!list) return null;
+  const parentId = explorerAttrParent(list.getAttribute('data-explorer-filter-list'));
+  const dragKey = String(dragId);
+  let index = 0;
+  for (const child of list.children) {
+    if (child === phantomEl || child.classList?.contains('explorer-chip-phantom')) {
+      return { parentId, index };
+    }
+    if (child.matches('[data-explorer-filter-item]')
+      && child.getAttribute('data-explorer-filter-item') !== dragKey
+      && !child.classList.contains('explorer-chip-drag-source-hidden')) {
+      index += 1;
+    }
+  }
+  return { parentId, index };
+}
+
+function readExplorerFilterDropTargetFromList(listEl, clientX, clientY, dragId) {
+  const parentId = explorerAttrParent(listEl.getAttribute('data-explorer-filter-list'));
+  const dragKey = String(dragId);
+  let itemEl = null;
+  for (const node of document.elementsFromPoint(clientX, clientY)) {
+    if (!(node instanceof Element)) continue;
+    const item = node.closest('[data-explorer-filter-item]');
+    if (item
+      && listEl.contains(item)
+      && item.getAttribute('data-explorer-filter-item') !== dragKey
+      && !item.classList.contains('explorer-chip-drag-source-hidden')) {
+      itemEl = item;
+      break;
+    }
+  }
+  const siblings = [...listEl.querySelectorAll(':scope > [data-explorer-filter-item]')]
+    .filter((el) => el.getAttribute('data-explorer-filter-item') !== dragKey
+      && !el.classList.contains('explorer-chip-drag-source-hidden'));
   if (itemEl && siblings.includes(itemEl)) {
-    return { parentId, index: explorerInsertIndexAmong([itemEl], clientX, clientY) === 0
-      ? siblings.indexOf(itemEl)
-      : siblings.indexOf(itemEl) + 1 };
+    const idx = siblings.indexOf(itemEl);
+    return {
+      parentId,
+      index: explorerInsertIndexAmong([itemEl], clientX, clientY) === 0 ? idx : idx + 1,
+    };
   }
   return { parentId, index: explorerInsertIndexAmong(siblings, clientX, clientY) };
+}
+
+function findExplorerFilterGroupDropList(clientX, clientY, stack) {
+  let bestList = null;
+  let bestDepth = -1;
+  for (const node of stack) {
+    if (!(node instanceof Element)) continue;
+    const group = node.closest('.explorer-filter-group');
+    if (!group || group.closest('.explorer-chip-drag-source-hidden')) continue;
+    const rect = group.getBoundingClientRect();
+    if (!explorerPointInRect(rect, clientX, clientY, 2)) continue;
+    const innerList = group.querySelector(':scope > [data-explorer-filter-list], :scope > .explorer-filter-chip-list');
+    if (!innerList) continue;
+    let depth = 0;
+    let parent = group.parentElement;
+    while (parent) {
+      if (parent.classList?.contains('explorer-filter-group')) depth += 1;
+      parent = parent.parentElement;
+    }
+    if (depth >= bestDepth) {
+      bestDepth = depth;
+      bestList = innerList;
+    }
+  }
+  return bestList;
+}
+
+function readExplorerFilterDropTarget(clientX, clientY, dragId) {
+  const stack = document.elementsFromPoint(clientX, clientY);
+  const phantom = stack.find((node) => node instanceof Element && node.closest('.explorer-chip-phantom'))
+    ?.closest('.explorer-chip-phantom');
+  if (phantom instanceof HTMLElement) {
+    return readExplorerFilterDropTargetFromPhantom(phantom, dragId);
+  }
+
+  const groupList = findExplorerFilterGroupDropList(clientX, clientY, stack);
+  if (groupList) {
+    return readExplorerFilterDropTargetFromList(groupList, clientX, clientY, dragId);
+  }
+
+  const listSet = new Set();
+  for (const node of stack) {
+    if (!(node instanceof Element)) continue;
+    const list = node.closest('[data-explorer-filter-list]');
+    if (list) listSet.add(list);
+  }
+  const lists = [...listSet];
+  if (!lists.length) return null;
+
+  lists.sort((a, b) => {
+    if (a.contains(b)) return 1;
+    if (b.contains(a)) return -1;
+    return 0;
+  });
+
+  let listEl = lists[0];
+  for (let i = lists.length - 1; i >= 0; i -= 1) {
+    const rect = lists[i].getBoundingClientRect();
+    if (explorerPointInRect(rect, clientX, clientY)) {
+      listEl = lists[i];
+      break;
+    }
+  }
+
+  return readExplorerFilterDropTargetFromList(listEl, clientX, clientY, dragId);
 }
 
 function readExplorerListDropIndex(clientX, clientY, dragIndex) {
@@ -5527,6 +5616,15 @@ function explorerChipRectFromEvent(event) {
   };
 }
 
+function clearExplorerChipFlipAnimations() {
+  if (typeof document === 'undefined' || typeof document.querySelectorAll !== 'function') return;
+  document.querySelectorAll('.explorer-chip-row__chips, .explorer-metric-group-chips').forEach((root) => {
+    root.getAnimations?.({ subtree: true }).forEach((anim) => {
+      if (anim.id === 'explorer-chip-flip') anim.cancel();
+    });
+  });
+}
+
 function bindExplorerPointerSession(dragRef, {
   onMove,
   onFinish,
@@ -5553,6 +5651,7 @@ function bindExplorerPointerSession(dragRef, {
     window.removeEventListener('pointercancel', finish);
     window.removeEventListener('selectstart', preventExplorerSelect);
     document.body.classList.remove('explorer-chip-dragging');
+    clearExplorerChipFlipAnimations();
     const drag = dragRef.current;
     try {
       drag?.target?.releasePointerCapture?.(drag.pointerId);
@@ -5654,6 +5753,7 @@ function useExplorerFilterDrag({ filters, setFilters }) {
     variant = 'chip',
   } = {}) => {
     if (!startExplorerChipPointerDrag(event, { bubble })) return;
+    clearExplorerChipFlipAnimations();
     const snapshot = cloneExplorerFilters(filters);
     const loc = treeApi.findExplorerFilterLocation?.(snapshot, id);
     const origin = {
@@ -5697,8 +5797,10 @@ function useExplorerFilterDrag({ filters, setFilters }) {
         const nextTarget = readExplorerFilterDropTarget(moveEvent.clientX, moveEvent.clientY, drag.id)
           || drag.dropTarget
           || drag.origin;
-        drag.dropTarget = nextTarget;
-        setDropTarget(nextTarget);
+        if (!explorerDropTargetsEqual(nextTarget, drag.dropTarget)) {
+          drag.dropTarget = nextTarget;
+          setDropTarget(nextTarget);
+        }
         updateOverlay({
           ...drag.overlayBase,
           x: moveEvent.clientX,

@@ -68,6 +68,53 @@ describe('explorer filter tree', () => {
     assert.deepEqual(next.map((f) => f.id), [20, 10]);
   });
 
+  it('keeps the tree intact if the drop parent is missing', () => {
+    const filters = [
+      { id: 'a', field: 'src_ip', op: '=', value: '1.1.1.1', logic: 'and' },
+      {
+        type: 'group',
+        id: 'g1',
+        logic: 'and',
+        children: [{ id: 'b', field: 'dst_ip', op: '=', value: '2.2.2.2', logic: 'and' }],
+      },
+    ];
+    const next = T.moveExplorerFilterNode(filters, 'b', 'missing', 0);
+    assert.equal(next[1].children[0].id, 'b');
+    assert.equal(T.findExplorerFilterLocation(next, 'b')?.parent?.id, 'g1');
+  });
+
+  it('moves a leaf into a group without flattening it', () => {
+    const filters = [
+      { id: 'a', field: 'src_ip', op: '=', value: '1.1.1.1', logic: 'and' },
+      {
+        type: 'group',
+        id: 'g1',
+        logic: 'or',
+        children: [{ id: 'b', field: 'dst_ip', op: '=', value: '2.2.2.2', logic: 'and' }],
+      },
+    ];
+    const next = T.moveExplorerFilterNode(filters, 'a', 'g1', 1);
+    assert.equal(next.length, 1);
+    assert.equal(next[0].id, 'g1');
+    assert.deepEqual(next[0].children.map((child) => child.id), ['b', 'a']);
+  });
+
+  it('moves a leaf out of a group to the root list', () => {
+    const filters = [
+      { id: 'a', field: 'src_ip', op: '=', value: '1.1.1.1', logic: 'and' },
+      {
+        type: 'group',
+        id: 'g1',
+        logic: 'or',
+        children: [{ id: 'b', field: 'dst_ip', op: '=', value: '2.2.2.2', logic: 'and' }],
+      },
+    ];
+    const next = T.moveExplorerFilterNode(filters, 'b', null, 1);
+    assert.deepEqual(next.map((node) => node.id), ['a', 'b', 'g1']);
+    assert.equal(next[2].children.length, 0);
+    assert.equal(T.findExplorerFilterLocation(next, 'b')?.parent, null);
+  });
+
   it('reorders a list including the last slot', () => {
     assert.deepEqual(T.reorderExplorerList(['a', 'b', 'c'], 0, 2), ['b', 'c', 'a']);
     assert.deepEqual(T.reorderExplorerList(['a', 'b', 'c'], 2, 0), ['c', 'a', 'b']);

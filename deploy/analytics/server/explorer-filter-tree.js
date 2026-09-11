@@ -190,7 +190,9 @@
       if (blocked) return filters;
     }
 
-    return insertExplorerFilterNode(next, targetParentId, targetIndex, removed);
+    const inserted = insertExplorerFilterNode(next, targetParentId, targetIndex, removed);
+    if (!findExplorerFilterLocation(inserted, dragId)) return filters;
+    return inserted;
   }
 
   function reorderExplorerList(items, fromIndex, toIndex) {
