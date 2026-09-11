@@ -131,6 +131,7 @@ type vlanClass struct {
 
 type prefixClass struct {
 	ASN         uint32
+	ASPath      []uint32
 	Role        string
 	EntityID    string
 	DisplayName string
@@ -138,6 +139,7 @@ type prefixClass struct {
 
 type EndpointClass struct {
 	ASN           uint32
+	ASPath        []uint32
 	Role          string
 	Entity        string
 	DisplayName   string
@@ -434,16 +436,27 @@ func (tc *TrafficClassifier) loadPortSides(ctx context.Context, st *classifierSt
 }
 
 func (tc *TrafficClassifier) loadBGP(ctx context.Context, st *classifierState) (int, error) {
-	rows, err := tc.conn.Query(ctx, "SELECT prefix, origin_asn FROM "+tc.cfg.Tables.BGPOrigins)
+	rows, err := tc.conn.Query(ctx, "SELECT prefix, origin_asn, as_path FROM "+tc.cfg.Tables.BGPOrigins)
+	withPath := err == nil
 	if err != nil {
-		return 0, fmt.Errorf("load BGP origins: %w", err)
+		rows, err = tc.conn.Query(ctx, "SELECT prefix, origin_asn FROM "+tc.cfg.Tables.BGPOrigins)
+		if err != nil {
+			return 0, fmt.Errorf("load BGP origins: %w", err)
+		}
+		tc.log.Warn("BGP origin table has no as_path; paths empty until migrate", "table", tc.cfg.Tables.BGPOrigins)
 	}
 	defer rows.Close()
+	intern := make(map[string][]uint32)
 	n := 0
 	for rows.Next() {
 		var prefix string
 		var asn uint32
-		if err := rows.Scan(&prefix, &asn); err != nil {
+		var path []uint32
+		if withPath {
+			if err := rows.Scan(&prefix, &asn, &path); err != nil {
+				return n, err
+			}
+		} else if err := rows.Scan(&prefix, &asn); err != nil {
 			return n, err
 		}
 		p, err := netip.ParsePrefix(strings.TrimSpace(prefix))
@@ -455,10 +468,11 @@ func (tc *TrafficClassifier) loadBGP(ctx context.Context, st *classifierState) (
 			// unmatched remote IPs as the default route's transit ASN.
 			continue
 		}
+		pc := prefixClass{ASN: asn, ASPath: internASPath(intern, path)}
 		if p.Addr().Is4() {
-			st.bgp4.Insert(p.Masked(), prefixClass{ASN: asn})
+			st.bgp4.Insert(p.Masked(), pc)
 		} else {
-			st.bgp6.Insert(p.Masked(), prefixClass{ASN: asn})
+			st.bgp6.Insert(p.Masked(), pc)
 		}
 		n++
 	}
@@ -762,7 +776,8 @@ func (tc *TrafficClassifier) PortDirection(sampler [16]byte, inIf, outIf uint32)
 }
 
 func (st *classifierState) classify(addr netip.Addr, vlan uint16) EndpointClass {
-	asn := st.lookupASN(addr)
+	origin := st.lookupOrigin(addr)
+	asn := origin.ASN
 	att := st.lookupAttachment(vlan)
 	if p, ok := st.lookupL3Prefix(addr); ok {
 		if p.ASN != 0 {
@@ -772,6 +787,7 @@ func (st *classifierState) classify(addr netip.Addr, vlan uint16) EndpointClass 
 		scope := scopeFromRole(role)
 		return EndpointClass{
 			ASN:         asn,
+			ASPath:      origin.ASPath,
 			Role:        role,
 			Entity:      p.EntityID,
 			DisplayName: p.DisplayName,
@@ -786,6 +802,7 @@ func (st *classifierState) classify(addr netip.Addr, vlan uint16) EndpointClass 
 	}
 	return EndpointClass{
 		ASN:         asn,
+		ASPath:      origin.ASPath,
 		Role:        "remote",
 		Entity:      "",
 		Source:      "fallback",
@@ -810,23 +827,27 @@ func (st *classifierState) lookupAttachment(vlan uint16) attachmentClass {
 	return attachmentClass{Kind: "unknown", Boundary: "unknown"}
 }
 
-func (st *classifierState) lookupASN(addr netip.Addr) uint32 {
+func (st *classifierState) lookupOrigin(addr netip.Addr) prefixClass {
 	if addr.Is4() {
 		if p, ok := st.bgp4.Lookup(addr); ok {
-			return p.ASN
+			return p
 		}
 		if p, ok := st.asn4.Lookup(addr); ok {
-			return p.ASN
+			return p
 		}
-		return 0
+		return prefixClass{}
 	}
 	if p, ok := st.bgp6.Lookup(addr); ok {
-		return p.ASN
+		return p
 	}
 	if p, ok := st.asn6.Lookup(addr); ok {
-		return p.ASN
+		return p
 	}
-	return 0
+	return prefixClass{}
+}
+
+func (st *classifierState) lookupASN(addr netip.Addr) uint32 {
+	return st.lookupOrigin(addr).ASN
 }
 
 func (st *classifierState) lookupL3Prefix(addr netip.Addr) (prefixClass, bool) {
@@ -1004,4 +1025,36 @@ func trieBit(addr netip.Addr, pos int) int {
 	}
 	a := addr.As16()
 	return int((a[pos/8] >> uint(7-pos%8)) & 1)
+}
+
+func internASPath(intern map[string][]uint32, path []uint32) []uint32 {
+	path = clipASPath(path)
+	if len(path) == 0 {
+		return nil
+	}
+	key := asPathInternKey(path)
+	if existing, ok := intern[key]; ok {
+		return existing
+	}
+	cp := append([]uint32(nil), path...)
+	intern[key] = cp
+	return cp
+}
+
+func clipASPath(path []uint32) []uint32 {
+	if len(path) > MaxASPathHops {
+		return path[:MaxASPathHops]
+	}
+	return path
+}
+
+func asPathInternKey(path []uint32) string {
+	b := make([]byte, len(path)*4)
+	for i, asn := range path {
+		b[i*4] = byte(asn)
+		b[i*4+1] = byte(asn >> 8)
+		b[i*4+2] = byte(asn >> 16)
+		b[i*4+3] = byte(asn >> 24)
+	}
+	return string(b)
 }

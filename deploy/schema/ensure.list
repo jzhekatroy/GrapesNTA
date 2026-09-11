@@ -2,6 +2,7 @@
 # One path per line, relative to the repo root. Safe to re-run.
 # Add a file here when UI/worker start selecting a new column or view.
 
+deploy/clickhouse/migrate_as_path.sql
 deploy/clickhouse/migrate_net_snmp_agents_last_ok.sql
 deploy/clickhouse/migrate_dns_log_client.sql
 deploy/schema/20_dns/11_dns_client_domain_1h.sql

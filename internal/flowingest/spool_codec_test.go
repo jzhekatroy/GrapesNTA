@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 )
@@ -31,6 +32,8 @@ func sampleFullRow() FlowRow {
 		DstAS:                 15169,
 		SrcASN:                64512,
 		DstASN:                15169,
+		SrcASPath:             []uint32{64512},
+		DstASPath:             []uint32{3356, 15169},
 		Direction:             "egress",
 		SrcKind:               "internal",
 		DstKind:               "external",
@@ -226,6 +229,82 @@ func encodeFlowRowsBinaryMetaNoClient(rows []FlowRow) []byte {
 	return buf
 }
 
+// encodeFlowRowsBinaryClientNoASPath replicates frame-version-5 wire layout
+// (clients, no AS path). Test-only for rolling restart.
+func encodeFlowRowsBinaryClientNoASPath(rows []FlowRow) []byte {
+	var buf []byte
+	var vtmp [binary.MaxVarintLen64]byte
+	putUvarint := func(x uint64) {
+		n := binary.PutUvarint(vtmp[:], x)
+		buf = append(buf, vtmp[:n]...)
+	}
+	putI64 := func(v int64) {
+		var b [8]byte
+		binary.LittleEndian.PutUint64(b[:], uint64(v))
+		buf = append(buf, b[:]...)
+	}
+	putTime := func(t time.Time) {
+		if t.IsZero() {
+			putI64(spoolZeroTimeSentinel)
+			return
+		}
+		putI64(t.UnixNano())
+	}
+	putStr := func(s string) {
+		putUvarint(uint64(len(s)))
+		buf = append(buf, s...)
+	}
+	putUvarint(uint64(len(rows)))
+	for i := range rows {
+		r := &rows[i]
+		putTime(r.Date)
+		putTime(r.TimeInsertedNs)
+		putTime(r.TimeReceivedNs)
+		putTime(r.TimeFlowStartNs)
+		putUvarint(uint64(r.SequenceNum))
+		putUvarint(r.SamplingRate)
+		buf = append(buf, r.SamplerAddress[:]...)
+		putStr(r.SourceID)
+		buf = append(buf, r.SrcAddr[:]...)
+		buf = append(buf, r.DstAddr[:]...)
+		putUvarint(uint64(r.SrcAS))
+		putUvarint(uint64(r.DstAS))
+		putUvarint(uint64(r.SrcASN))
+		putUvarint(uint64(r.DstASN))
+		for _, s := range []string{
+			r.Direction, r.SrcKind, r.DstKind, r.SrcLabel, r.DstLabel,
+			r.SrcOperator, r.DstOperator,
+			r.SrcAttachmentKind, r.DstAttachmentKind,
+			r.SrcAttachmentBoundary, r.DstAttachmentBoundary,
+			r.SrcAttachmentLabel, r.DstAttachmentLabel,
+			r.SrcAttachmentOperator, r.DstAttachmentOperator,
+			r.SrcEndpointScope, r.DstEndpointScope,
+			r.SrcEndpointSource, r.DstEndpointSource,
+			r.SrcNetworkName, r.DstNetworkName,
+			r.SrcNetworkRole, r.DstNetworkRole,
+			r.SrcRole, r.DstRole, r.SrcEntity, r.DstEntity,
+		} {
+			putStr(s)
+		}
+		putUvarint(uint64(r.SrcVLAN))
+		putUvarint(uint64(r.DstVLAN))
+		putUvarint(uint64(r.Etype))
+		putUvarint(uint64(r.Proto))
+		putUvarint(uint64(r.SrcPort))
+		putUvarint(uint64(r.DstPort))
+		putUvarint(r.Bytes)
+		putUvarint(r.Packets)
+		buf = append(buf, r.SrcMAC[:]...)
+		buf = append(buf, r.DstMAC[:]...)
+		putUvarint(uint64(r.InIf))
+		putUvarint(uint64(r.OutIf))
+		buf = append(buf, r.TCPFlags, r.IPTTL, r.IPTos)
+		putStr(r.SrcClient)
+		putStr(r.DstClient)
+	}
+	return buf
+}
+
 // encodeFlowRowsBinaryNoMAC replicates the legacy frame-version-2 wire layout
 // (no trailing SrcMAC/DstMAC). Test-only: it lets us assert that version-2
 // frames written before the MAC rollout still decode after the codec learned to
@@ -303,11 +382,17 @@ func flowRowsEqual(t *testing.T, want, got FlowRow) {
 		!want.TimeReceivedNs.Equal(got.TimeReceivedNs) || !want.TimeFlowStartNs.Equal(got.TimeFlowStartNs) {
 		t.Fatalf("time fields mismatch:\n want=%+v\n got =%+v", want, got)
 	}
-	// Zero out times so the remaining struct compares with ==.
+	if !slices.Equal(want.SrcASPath, got.SrcASPath) || !slices.Equal(want.DstASPath, got.DstASPath) {
+		t.Fatalf("as path mismatch:\n want src=%v dst=%v\n got  src=%v dst=%v",
+			want.SrcASPath, want.DstASPath, got.SrcASPath, got.DstASPath)
+	}
+	// Zero out times and slices so the remaining struct compares with ==.
 	want.Date, got.Date = time.Time{}, time.Time{}
 	want.TimeInsertedNs, got.TimeInsertedNs = time.Time{}, time.Time{}
 	want.TimeReceivedNs, got.TimeReceivedNs = time.Time{}, time.Time{}
 	want.TimeFlowStartNs, got.TimeFlowStartNs = time.Time{}, time.Time{}
+	want.SrcASPath, got.SrcASPath = nil, nil
+	want.DstASPath, got.DstASPath = nil, nil
 	if want != got {
 		t.Fatalf("row mismatch:\n want=%+v\n got =%+v", want, got)
 	}
@@ -375,6 +460,8 @@ func TestBinaryCodecV2FrameDecodesWithoutMAC(t *testing.T) {
 	wantNoMAC.IPTos = 0
 	wantNoMAC.SrcClient = ""
 	wantNoMAC.DstClient = ""
+	wantNoMAC.SrcASPath = nil
+	wantNoMAC.DstASPath = nil
 
 	payload := encodeFlowRowsBinaryNoMAC([]FlowRow{src})
 	got, err := decodeFramePayloadVersioned(spoolFrameVersionBinary, payload)
@@ -387,7 +474,7 @@ func TestBinaryCodecV2FrameDecodesWithoutMAC(t *testing.T) {
 	flowRowsEqual(t, wantNoMAC, got[0])
 }
 
-// TestSpoolMixedVersionSegment writes gob/v2/v3/v4/v5 frames into one segment
+// TestSpoolMixedVersionSegment writes gob/v2/v3/v4/v5/v6 frames into one segment
 // and verifies readNextFrame decodes all of them (rolling-restart path).
 func TestSpoolMixedVersionSegment(t *testing.T) {
 	dir := t.TempDir()
@@ -400,6 +487,7 @@ func TestSpoolMixedVersionSegment(t *testing.T) {
 	rowV3 := sampleFullRow()
 	rowV4 := sampleFullRow()
 	rowV5 := sampleFullRow()
+	rowV6 := sampleFullRow()
 
 	gobPayload, err := encodeFramePayload([]FlowRow{rowGob})
 	if err != nil {
@@ -408,7 +496,8 @@ func TestSpoolMixedVersionSegment(t *testing.T) {
 	v2Payload := encodeFlowRowsBinaryNoMAC([]FlowRow{rowV2})
 	v3Payload := encodeFlowRowsBinaryMACNoMeta([]FlowRow{rowV3})
 	v4Payload := encodeFlowRowsBinaryMetaNoClient([]FlowRow{rowV4})
-	v5Payload, err := encodeFlowRowsBinary([]FlowRow{rowV5})
+	v5Payload := encodeFlowRowsBinaryClientNoASPath([]FlowRow{rowV5})
+	v6Payload, err := encodeFlowRowsBinary([]FlowRow{rowV6})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -417,6 +506,7 @@ func TestSpoolMixedVersionSegment(t *testing.T) {
 	frameV3 := buildFrame(3, spoolFrameVersionBinaryMAC, v3Payload)
 	frameV4 := buildFrame(4, spoolFrameVersionBinaryMeta, v4Payload)
 	frameV5 := buildFrame(5, spoolFrameVersionBinaryClient, v5Payload)
+	frameV6 := buildFrame(6, spoolFrameVersionBinaryASPath, v6Payload)
 
 	segPath := filepath.Join(segDir, fmt.Sprintf("%016d.seg", uint64(1)))
 	f, err := os.Create(segPath)
@@ -428,6 +518,7 @@ func TestSpoolMixedVersionSegment(t *testing.T) {
 	all = append(all, frameV3...)
 	all = append(all, frameV4...)
 	all = append(all, frameV5...)
+	all = append(all, frameV6...)
 	if _, err := f.Write(all); err != nil {
 		t.Fatal(err)
 	}
@@ -468,6 +559,8 @@ func TestSpoolMixedVersionSegment(t *testing.T) {
 	wantV3.IPTos = 0
 	wantV3.SrcClient = ""
 	wantV3.DstClient = ""
+	wantV3.SrcASPath = nil
+	wantV3.DstASPath = nil
 	flowRowsEqual(t, wantV3, rowsV3[0])
 
 	next4, rowsV4, err := readNextFrame(segDir, next3)
@@ -480,14 +573,28 @@ func TestSpoolMixedVersionSegment(t *testing.T) {
 	wantV4 := rowV4
 	wantV4.SrcClient = ""
 	wantV4.DstClient = ""
+	wantV4.SrcASPath = nil
+	wantV4.DstASPath = nil
 	flowRowsEqual(t, wantV4, rowsV4[0])
 
-	_, rowsV5, err := readNextFrame(segDir, next4)
+	next5, rowsV5, err := readNextFrame(segDir, next4)
 	if err != nil {
 		t.Fatalf("read v5 binary frame: %v", err)
 	}
 	if len(rowsV5) != 1 {
 		t.Fatalf("v5 frame row count: %d", len(rowsV5))
 	}
-	flowRowsEqual(t, rowV5, rowsV5[0])
+	wantV5 := rowV5
+	wantV5.SrcASPath = nil
+	wantV5.DstASPath = nil
+	flowRowsEqual(t, wantV5, rowsV5[0])
+
+	_, rowsV6, err := readNextFrame(segDir, next5)
+	if err != nil {
+		t.Fatalf("read v6 binary frame: %v", err)
+	}
+	if len(rowsV6) != 1 {
+		t.Fatalf("v6 frame row count: %d", len(rowsV6))
+	}
+	flowRowsEqual(t, rowV6, rowsV6[0])
 }

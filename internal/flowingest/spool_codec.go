@@ -58,17 +58,20 @@ const spoolZeroTimeSentinel = math.MinInt64
 //	  uvarint  InIf, OutIf                    -- frame version 4+
 //	  byte     TCPFlags, IPTTL, IPTos         -- frame version 4+
 //	  string   SrcClient, DstClient           -- frame version 5+
+//	  u32arr   SrcASPath, DstASPath           -- frame version 6+
 //
 // A "string" is uvarint length followed by raw UTF-8 bytes.
+// A "u32arr" is uvarint count followed by that many uvarint ASN values.
 //
 // Versioning: extra fields are appended at the tail of each row so a lower
 // version record is an exact prefix of a higher one. decodeFlowRowsBinaryVersion
 // reads the MAC pair only when hasMAC is set (frame version 3+), the sFlow
-// metadata only when hasMeta is set (frame version 4+), and client ids only when
-// hasClients is set (frame version 5). Legacy frames still on disk during a
-// rolling restart decode unchanged (missing fields stay zero). Frame version 1
-// (gob) is decoded via decodeFramePayload. New frames are always written as
-// version 5. See spool.go version dispatch.
+// metadata only when hasMeta is set (frame version 4+), client ids only when
+// hasClients is set (frame version 5+), and AS paths only when hasASPath is set
+// (frame version 6). Legacy frames still on disk during a rolling restart
+// decode unchanged (missing fields stay zero). Frame version 1 (gob) is decoded
+// via decodeFramePayload. New frames are always written as version 6. See
+// spool.go version dispatch.
 
 // spoolMaxFrameRows caps decode-side allocation from a single (possibly torn or
 // hostile) frame. The writer chunks at maxFrameRows (default 50k); this bound is
@@ -103,6 +106,15 @@ func encodeFlowRowsBinary(rows []FlowRow) ([]byte, error) {
 	putStr := func(s string) {
 		putUvarint(uint64(len(s)))
 		buf.WriteString(s)
+	}
+	putU32Array := func(path []uint32) {
+		if len(path) > MaxASPathHops {
+			path = path[:MaxASPathHops]
+		}
+		putUvarint(uint64(len(path)))
+		for _, asn := range path {
+			putUvarint(uint64(asn))
+		}
 	}
 
 	putUvarint(uint64(len(rows)))
@@ -166,6 +178,8 @@ func encodeFlowRowsBinary(rows []FlowRow) ([]byte, error) {
 		buf.WriteByte(r.IPTos)
 		putStr(r.SrcClient)
 		putStr(r.DstClient)
+		putU32Array(r.SrcASPath)
+		putU32Array(r.DstASPath)
 	}
 
 	// Copy out of the pooled buffer: the caller (buildFrame) needs a stable
@@ -241,6 +255,28 @@ func (c *binCursor) mac6() ([6]byte, error) {
 	return m, nil
 }
 
+func (c *binCursor) u32Array() ([]uint32, error) {
+	n, err := c.uvarint()
+	if err != nil {
+		return nil, err
+	}
+	if n > MaxASPathHops {
+		return nil, fmt.Errorf("spool AS path length %d exceeds max %d", n, MaxASPathHops)
+	}
+	if n == 0 {
+		return nil, nil
+	}
+	out := make([]uint32, n)
+	for i := range out {
+		u, err := c.uvarint()
+		if err != nil {
+			return nil, err
+		}
+		out[i] = uint32(u)
+	}
+	return out, nil
+}
+
 func (c *binCursor) str() (string, error) {
 	n, err := c.uvarint()
 	if err != nil {
@@ -254,11 +290,11 @@ func (c *binCursor) str() (string, error) {
 	return s, nil
 }
 
-// decodeFlowRowsBinary decodes a current-format (version 3, MAC-bearing) binary
-// payload. It is the symmetric counterpart of encodeFlowRowsBinary and is used
-// by round-trip callers and tests.
+// decodeFlowRowsBinary decodes a current-format (version 6, AS-path-bearing)
+// binary payload. It is the symmetric counterpart of encodeFlowRowsBinary and
+// is used by round-trip callers and tests.
 func decodeFlowRowsBinary(b []byte) ([]FlowRow, error) {
-	return decodeFlowRowsBinaryVersion(b, true, true, true)
+	return decodeFlowRowsBinaryVersion(b, true, true, true, true)
 }
 
 // decodeFlowRowsBinaryVersion decodes a binary payload. When hasMAC is false the
@@ -266,8 +302,9 @@ func decodeFlowRowsBinary(b []byte) ([]FlowRow, error) {
 // fields are left zero. When true (frame version 3+) the pair is read per row.
 // When hasMeta is true (frame version 4+) the trailing sFlow metadata
 // (InIf/OutIf/TCPFlags/IPTTL/IPTos) is also read; otherwise those fields stay
-// zero. When hasClients is true (frame version 5) SrcClient/DstClient follow.
-func decodeFlowRowsBinaryVersion(b []byte, hasMAC, hasMeta, hasClients bool) ([]FlowRow, error) {
+// zero. When hasClients is true (frame version 5+) SrcClient/DstClient follow.
+// When hasASPath is true (frame version 6) SrcASPath/DstASPath follow.
+func decodeFlowRowsBinaryVersion(b []byte, hasMAC, hasMeta, hasClients, hasASPath bool) ([]FlowRow, error) {
 	c := binCursor{b: b}
 	count, err := c.uvarint()
 	if err != nil {
@@ -410,6 +447,14 @@ func decodeFlowRowsBinaryVersion(b []byte, hasMAC, hasMeta, hasClients bool) ([]
 				return nil, err
 			}
 			if r.DstClient, err = c.str(); err != nil {
+				return nil, err
+			}
+		}
+		if hasASPath {
+			if r.SrcASPath, err = c.u32Array(); err != nil {
+				return nil, err
+			}
+			if r.DstASPath, err = c.u32Array(); err != nil {
 				return nil, err
 			}
 		}

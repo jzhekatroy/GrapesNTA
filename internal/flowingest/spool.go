@@ -41,8 +41,12 @@ const (
 	// pair (see spool_codec.go). Still decoded during rolling restarts.
 	spoolFrameVersionBinaryMeta = uint32(4)
 	// spoolFrameVersionBinaryClient appends SrcClient/DstClient after the meta
-	// fields. Current writer format.
+	// fields. Still decoded so frames written before the AS-path rollout drain
+	// during a rolling restart.
 	spoolFrameVersionBinaryClient = uint32(5)
+	// spoolFrameVersionBinaryASPath appends SrcASPath/DstASPath after the client
+	// ids. Current writer format.
+	spoolFrameVersionBinaryASPath = uint32(6)
 	spoolFrameMagicBE             = uint32(0x50464c58) // 'PFLX' big-endian on wire
 	spoolFrameHeaderLen           = 24
 )
@@ -54,7 +58,8 @@ func spoolFrameVersionSupported(v uint32) bool {
 		v == spoolFrameVersionBinary ||
 		v == spoolFrameVersionBinaryMAC ||
 		v == spoolFrameVersionBinaryMeta ||
-		v == spoolFrameVersionBinaryClient
+		v == spoolFrameVersionBinaryClient ||
+		v == spoolFrameVersionBinaryASPath
 }
 
 type consumerCheckpoint struct {
@@ -263,13 +268,15 @@ func decodeFramePayloadVersioned(version uint32, b []byte) ([]FlowRow, error) {
 	case spoolFrameVersionGob:
 		return decodeFramePayload(b)
 	case spoolFrameVersionBinary:
-		return decodeFlowRowsBinaryVersion(b, false, false, false)
+		return decodeFlowRowsBinaryVersion(b, false, false, false, false)
 	case spoolFrameVersionBinaryMAC:
-		return decodeFlowRowsBinaryVersion(b, true, false, false)
+		return decodeFlowRowsBinaryVersion(b, true, false, false, false)
 	case spoolFrameVersionBinaryMeta:
-		return decodeFlowRowsBinaryVersion(b, true, true, false)
+		return decodeFlowRowsBinaryVersion(b, true, true, false, false)
 	case spoolFrameVersionBinaryClient:
-		return decodeFlowRowsBinaryVersion(b, true, true, true)
+		return decodeFlowRowsBinaryVersion(b, true, true, true, false)
+	case spoolFrameVersionBinaryASPath:
+		return decodeFlowRowsBinaryVersion(b, true, true, true, true)
 	default:
 		return nil, fmt.Errorf("unsupported spool frame version %d", version)
 	}
@@ -307,7 +314,7 @@ func (w *spoolWriter) appendFrame(rows []FlowRow) (consumerCheckpoint, error) {
 		return cp, err
 	}
 	seq := w.frameSeq.Add(1)
-	frame := buildFrame(seq, spoolFrameVersionBinaryClient, payload)
+	frame := buildFrame(seq, spoolFrameVersionBinaryASPath, payload)
 
 	w.mu.Lock()
 	defer w.mu.Unlock()

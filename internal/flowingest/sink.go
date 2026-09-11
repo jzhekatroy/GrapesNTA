@@ -169,6 +169,8 @@ func insertCompactBatchRows(ctx context.Context, log *slog.Logger, conn chdriver
     dst_addr,
     src_asn,
     dst_asn,
+    src_as_path,
+    dst_as_path,
     etype,
     proto,
     src_port,
@@ -213,6 +215,8 @@ func insertCompactBatchRows(ctx context.Context, log *slog.Logger, conn chdriver
 			r.DstAddr[:],
 			r.SrcASN,
 			r.DstASN,
+			r.SrcASPath,
+			r.DstASPath,
 			r.Etype,
 			r.Proto,
 			r.SrcPort,
@@ -261,6 +265,8 @@ func insertEnrichedBatchRows(ctx context.Context, log *slog.Logger, conn chdrive
     dst_addr,
     src_asn,
     dst_asn,
+    src_as_path,
+    dst_as_path,
     direction,
     src_kind,
     dst_kind,
@@ -331,6 +337,8 @@ func insertEnrichedBatchRows(ctx context.Context, log *slog.Logger, conn chdrive
 			r.DstAddr[:],
 			r.SrcASN,
 			r.DstASN,
+			r.SrcASPath,
+			r.DstASPath,
 			r.Direction,
 			r.SrcKind,
 			r.DstKind,
@@ -405,6 +413,7 @@ func RowsHaveEnrichment(rows []FlowRow) bool {
 			r.SrcRole != "" || r.DstRole != "" ||
 			r.SrcEntity != "" || r.DstEntity != "" ||
 			r.SrcClient != "" || r.DstClient != "" ||
+			len(r.SrcASPath) > 0 || len(r.DstASPath) > 0 ||
 			r.SrcVLAN != 0 || r.DstVLAN != 0 {
 			return true
 		}

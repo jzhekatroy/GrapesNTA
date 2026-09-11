@@ -20,6 +20,8 @@ CREATE TABLE IF NOT EXISTS default.flows_raw
     `packets` UInt64 CODEC(T64, ZSTD(1)),
     `src_asn` UInt32 DEFAULT 0 CODEC(T64, ZSTD(1)),
     `dst_asn` UInt32 DEFAULT 0 CODEC(T64, ZSTD(1)),
+    `src_as_path` Array(UInt32) DEFAULT [],
+    `dst_as_path` Array(UInt32) DEFAULT [],
     `direction` LowCardinality(String) DEFAULT 'unknown',
     `src_kind` LowCardinality(String) DEFAULT 'unknown',
     `dst_kind` LowCardinality(String) DEFAULT 'unknown',

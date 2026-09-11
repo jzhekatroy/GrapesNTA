@@ -254,6 +254,20 @@ def build_peer_down_clause(args: argparse.Namespace) -> str:
           )"""
 
 
+def table_has_column(base: Sequence[str], table: str, column: str) -> bool:
+    db, name = split_table_name(table)
+    return (
+        ch_run_int(
+            base,
+            "SELECT count() FROM system.columns "
+            f"WHERE database = {sql_string(db)} "
+            f"AND table = {sql_string(name)} "
+            f"AND name = {sql_string(column)}",
+        )
+        > 0
+    )
+
+
 def build_rebuild_query(args: argparse.Namespace, family: int) -> str:
     # Two-stage aggregation, one IP family at a time.
     #
@@ -270,6 +284,19 @@ def build_rebuild_query(args: argparse.Namespace, family: int) -> str:
     # keeps memory predictable on the shared ClickHouse. External group-by spill
     # is enabled and max_memory_usage is capped to stay below the server-wide
     # overcommit tracker limit.
+    if getattr(args, "include_as_path", False):
+        as_path_inner = ",\n            argMax(as_path, ts) AS peer_last_as_path"
+        as_path_mid = """,
+        argMaxIf(
+            peer_last_as_path,
+            peer_last_ts,
+            peer_last_event = 'announce' AND peer_last_origin_asn != 0
+        ) AS as_path"""
+        as_path_outer = ",\n    as_path"
+    else:
+        as_path_inner = ""
+        as_path_mid = ""
+        as_path_outer = ""
     return f"""
 INSERT INTO {args.staging_table}
 SELECT
@@ -284,7 +311,7 @@ SELECT
     active_paths,
     last_ts,
     'bmp_route_events' AS source,
-    now() AS snapshot_ts
+    now() AS snapshot_ts{as_path_outer}
 FROM
 (
     SELECT
@@ -302,7 +329,7 @@ FROM
             peer_last_ts,
             peer_last_event = 'announce' AND peer_last_origin_asn != 0
         ) AS peer_asn,
-        maxIf(peer_last_ts, peer_last_event = 'announce') AS last_ts
+        maxIf(peer_last_ts, peer_last_event = 'announce') AS last_ts{as_path_mid}
     FROM
     (
         SELECT
@@ -314,7 +341,7 @@ FROM
             argMax(event_type, ts) AS peer_last_event,
             argMax(origin_asn, ts) AS peer_last_origin_asn,
             argMax(peer_asn, ts) AS peer_last_peer_asn,
-            max(ts) AS peer_last_ts
+            max(ts) AS peer_last_ts{as_path_inner}
         FROM {args.route_events_table}
         WHERE ts >= now() - INTERVAL {args.lookback_days} DAY
           AND family = {family}
@@ -532,6 +559,12 @@ WHERE ts >= now() - INTERVAL {args.lookback_days} DAY
 
     existing_rows = ch_run_int(base, f"SELECT count() FROM {args.table}")
     log_info(f"current_table rows={existing_rows}")
+
+    args.include_as_path = table_has_column(base, args.staging_table, "as_path")
+    if args.include_as_path:
+        log_info("staging has as_path; snapshot will keep the freshest announce path")
+    else:
+        log_info("staging has no as_path column; origin-only snapshot")
 
     ch_run_query(base, f"TRUNCATE TABLE IF EXISTS {args.staging_table}")
     for family in (4, 6):

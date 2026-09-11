@@ -7,6 +7,10 @@ import (
 	"time"
 )
 
+// MaxASPathHops caps a stored BGP path. Real internet paths are much shorter;
+// this is a hostile-frame / bad-RIB bound shared by the snapshot loader and spool.
+const MaxASPathHops = 128
+
 // FlowRow is the production-shaped row for default.flows_raw (and internal spool).
 // Column order matches INSERT in sink.go.
 type FlowRow struct {
@@ -24,6 +28,10 @@ type FlowRow struct {
 	DstAS            uint32
 	SrcASN           uint32
 	DstASN           uint32
+	// BGP AS path as seen in the origin snapshot at ingest (neighbor first,
+	// origin last). Empty when the IP is not in BMP (iptoasn / L3 only).
+	SrcASPath        []uint32
+	DstASPath        []uint32
 	Direction        string
 	SrcKind          string
 	DstKind          string
@@ -100,6 +108,8 @@ func ApplyEndpointClasses(r *FlowRow, src, dst EndpointClass, direction string) 
 	r.DstAS = dst.ASN
 	r.SrcASN = src.ASN
 	r.DstASN = dst.ASN
+	r.SrcASPath = src.ASPath
+	r.DstASPath = dst.ASPath
 	r.Direction = direction
 	r.SrcKind = src.Scope
 	r.DstKind = dst.Scope

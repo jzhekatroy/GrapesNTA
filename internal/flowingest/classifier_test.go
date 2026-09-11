@@ -95,6 +95,26 @@ func TestDeriveDirectionEmptyCatalogKeepsTransitByDefault(t *testing.T) {
 	}
 }
 
+func TestInternASPathDedupsAndCaps(t *testing.T) {
+	intern := make(map[string][]uint32)
+	a := internASPath(intern, []uint32{1, 2, 3})
+	b := internASPath(intern, []uint32{1, 2, 3})
+	if len(a) != 3 || &a[0] != &b[0] {
+		t.Fatalf("same path must share backing: a=%v b=%v", a, b)
+	}
+	if internASPath(intern, nil) != nil {
+		t.Fatal("empty path must stay nil")
+	}
+	long := make([]uint32, MaxASPathHops+4)
+	for i := range long {
+		long[i] = uint32(i + 1)
+	}
+	got := internASPath(intern, long)
+	if len(got) != MaxASPathHops {
+		t.Fatalf("capped path length = %d, want %d", len(got), MaxASPathHops)
+	}
+}
+
 func TestClassifyLocalPrefixOriginASNWithoutBGP(t *testing.T) {
 	st := &classifierState{
 		l3v4: newIPTrie(),
@@ -144,7 +164,7 @@ func TestClassifyRemoteUsesBGP(t *testing.T) {
 		l3v4: newIPTrie(),
 		bgp4: newIPTrie(),
 	}
-	st.bgp4.Insert(netip.MustParsePrefix("8.8.8.0/24"), prefixClass{ASN: 15169})
+	st.bgp4.Insert(netip.MustParsePrefix("8.8.8.0/24"), prefixClass{ASN: 15169, ASPath: []uint32{3356, 15169}})
 
 	got := st.classify(netip.MustParseAddr("8.8.8.8"), 0)
 	if got.ASN != 15169 {
@@ -152,6 +172,69 @@ func TestClassifyRemoteUsesBGP(t *testing.T) {
 	}
 	if got.Role != "remote" {
 		t.Fatalf("classify().Role = %q, want remote", got.Role)
+	}
+	if len(got.ASPath) != 2 || got.ASPath[0] != 3356 || got.ASPath[1] != 15169 {
+		t.Fatalf("classify().ASPath = %v, want [3356 15169]", got.ASPath)
+	}
+}
+
+func TestClassifyRemoteIPASNHasNoASPath(t *testing.T) {
+	st := &classifierState{
+		bgp4: newIPTrie(),
+		asn4: newIPTrie(),
+		l3v4: newIPTrie(),
+	}
+	st.asn4.Insert(netip.MustParsePrefix("8.8.8.0/24"), prefixClass{ASN: 15169})
+
+	got := st.classify(netip.MustParseAddr("8.8.8.8"), 0)
+	if got.ASN != 15169 {
+		t.Fatalf("classify().ASN = %d, want 15169", got.ASN)
+	}
+	if got.ASPath != nil {
+		t.Fatalf("iptoasn fallback must not invent a path: %v", got.ASPath)
+	}
+}
+
+func TestClassifyLocalKeepsBGPPath(t *testing.T) {
+	st := &classifierState{
+		l3v4: newIPTrie(),
+		bgp4: newIPTrie(),
+	}
+	st.l3v4.Insert(netip.MustParsePrefix("188.143.128.0/17"), prefixClass{
+		ASN:         34665,
+		Role:        "provider_public",
+		EntityID:    "isp:pin",
+		DisplayName: "gb",
+	})
+	st.bgp4.Insert(netip.MustParsePrefix("188.143.128.0/17"), prefixClass{
+		ASN:    34665,
+		ASPath: []uint32{12389, 34665},
+	})
+
+	got := st.classify(netip.MustParseAddr("188.143.128.236"), 0)
+	if got.ASN != 34665 {
+		t.Fatalf("classify().ASN = %d, want 34665", got.ASN)
+	}
+	if len(got.ASPath) != 2 || got.ASPath[0] != 12389 || got.ASPath[1] != 34665 {
+		t.Fatalf("classify().ASPath = %v, want [12389 34665]", got.ASPath)
+	}
+}
+
+func TestApplyEndpointClassesCopiesASPath(t *testing.T) {
+	var row FlowRow
+	ApplyEndpointClasses(&row,
+		EndpointClass{ASN: 1, ASPath: []uint32{1, 2}},
+		EndpointClass{ASN: 3, ASPath: []uint32{4, 3}},
+		"in",
+	)
+	if row.SrcASN != 1 || row.DstASN != 3 {
+		t.Fatalf("asn src=%d dst=%d", row.SrcASN, row.DstASN)
+	}
+	if len(row.SrcASPath) != 2 || row.SrcASPath[0] != 1 || row.SrcASPath[1] != 2 {
+		t.Fatalf("src path = %v", row.SrcASPath)
+	}
+	if len(row.DstASPath) != 2 || row.DstASPath[0] != 4 || row.DstASPath[1] != 3 {
+		t.Fatalf("dst path = %v", row.DstASPath)
 	}
 }
 

@@ -7,7 +7,8 @@ CREATE TABLE IF NOT EXISTS default.bgp_prefix_origin_current_staging
     `active_paths` UInt32,
     `last_ts` DateTime64(6, 'UTC'),
     `source` LowCardinality(String),
-    `snapshot_ts` DateTime
+    `snapshot_ts` DateTime,
+    `as_path` Array(UInt32) DEFAULT []
 )
 ENGINE = MergeTree
 ORDER BY (family, prefix)
