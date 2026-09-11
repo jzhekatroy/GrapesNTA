@@ -2535,6 +2535,8 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
   const [showAllResultColumns, setShowAllResultColumns] = useState(true);
   const [visualLimit, setVisualLimit] = useState(EXPLORER_DEFAULT_VISUAL_LIMIT);
   const [dynamicsSeriesIds, setDynamicsSeriesIds] = useState(() => new Set());
+  const [hoveredSeriesId, setHoveredSeriesId] = useState(null);
+  const [focusedSeriesId, setFocusedSeriesId] = useState(null);
   const [showOthersOnChart, setShowOthersOnChart] = useState(
     () => explorerDefaultShowOthersOnChart(restoreExplorerVis(urlState?.vis)),
   );
@@ -2906,6 +2908,19 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
       return pruned;
     });
   }, [queryVersion, visualLimit, rows, hasAppliedQuery, results]);
+
+  useEffect(() => {
+    setHoveredSeriesId(null);
+    setFocusedSeriesId(null);
+  }, [queryVersion]);
+
+  useEffect(() => {
+    setFocusedSeriesId((prev) => {
+      if (prev == null) return null;
+      if (prev === EXPLORER_OTHERS_ID) return showOthersOnChart ? prev : null;
+      return dynamicsSeriesIds.has(prev) ? prev : null;
+    });
+  }, [dynamicsSeriesIds, showOthersOnChart]);
 
   const dynamicsSeriesKey = [...dynamicsSeriesIds].sort().join('|');
   useEffect(() => {
@@ -3494,6 +3509,28 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
     });
   };
 
+  const resolveChartHighlightKey = (rowId) => {
+    if (rowId === EXPLORER_OTHERS_ID) return showOthersOnChart ? rowId : null;
+    return dynamicsSeriesIds.has(rowId) ? rowId : null;
+  };
+
+  const effectiveHighlightId = hoveredSeriesId ?? focusedSeriesId;
+  const chartHighlightKey = effectiveHighlightId
+    ? resolveChartHighlightKey(effectiveHighlightId)
+    : null;
+
+  const handleSeriesRowHover = (row) => {
+    setHoveredSeriesId(row.id);
+  };
+
+  const handleSeriesRowHoverEnd = () => {
+    setHoveredSeriesId(null);
+  };
+
+  const handleSeriesRowClick = (row) => {
+    setFocusedSeriesId((prev) => (prev === row.id ? null : row.id));
+  };
+
   const requestFetchLimit = (nextLimit, nextVisual) => {
     const target = resolveExplorerFetchLimit(nextLimit, explorerMaxFetchLimit);
     const visual = nextVisual === 'all' ? 'all' : target;
@@ -3873,6 +3910,7 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
                             displayTimezone={displayTimezone}
                             chartLongRange={isLongChartRange(appliedTimeRange, appliedCustomPeriod)}
                             selectedSeriesIds={dynamicsSeriesIds}
+                            highlightKey={chartHighlightKey}
                             onRangeSelect={applyExplorerChartRangeZoom}
                             bucketSeconds={explorerGranularityBucketSeconds(meta?.granularity)}
                             totalPoints={othersChartAvailable ? timeseries : null}
@@ -3884,9 +3922,18 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
                           rowKey="id"
                           resizableColumns
                           getRowClassName={(row) => {
-                            if (row.isOthers) return showOthersOnChart ? 'is-dynamics-active' : '';
-                            return dynamicsSeriesIds.has(row.id) ? 'is-dynamics-active' : '';
+                            const classes = [];
+                            if (row.isOthers) {
+                              if (showOthersOnChart) classes.push('is-dynamics-active');
+                            } else if (dynamicsSeriesIds.has(row.id)) {
+                              classes.push('is-dynamics-active');
+                            }
+                            if (effectiveHighlightId === row.id) classes.push('is-series-highlight');
+                            return classes.join(' ');
                           }}
+                          onRowClick={handleSeriesRowClick}
+                          onRowMouseEnter={handleSeriesRowHover}
+                          onRowMouseLeave={handleSeriesRowHoverEnd}
                           pinnedRows={othersRow ? [othersRow] : null}
                           pageSize={Math.max(resolveExplorerVisualCount(visualLimit, results.length), 1)}
                           initialSort={{ key: appliedDefaultSortKey, dir: 'desc' }}
@@ -6101,6 +6148,7 @@ function DynamicsChartExplorer({
   displayTimezone,
   chartLongRange,
   selectedSeriesIds,
+  highlightKey = null,
   onRangeSelect,
   bucketSeconds = 300,
   totalPoints = null,
@@ -6200,6 +6248,7 @@ function DynamicsChartExplorer({
               height={EXPLORER_CHART_HEIGHT}
               mode="bw"
               gapAsZero
+              highlightKey={highlightKey}
               onRangeSelect={onRangeSelect}
               bucketSeconds={bucketSeconds}
               displayTimezone={displayTimezone}

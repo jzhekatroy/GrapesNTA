@@ -355,6 +355,8 @@ function DataTable({
   actionsColumnWidth = 120,
   actionsColumnAlign = 'right',
   onRowClick,
+  onRowMouseEnter,
+  onRowMouseLeave,
   getRowClassName,
   pageSize = 10,
   dense,
@@ -573,7 +575,7 @@ function DataTable({
               {rowActions && <th className="actions" style={{ textAlign: actionsColumnAlign }}>Действия</th>}
             </tr>
           </thead>
-          <tbody>
+          <tbody onMouseLeave={onRowMouseLeave ? () => onRowMouseLeave() : null}>
             {pageRows.length === 0 ? (
               <tr><td colSpan={visibleCols.length + (selectable ? 1 : 0) + (rowActions ? 1 : 0)}>
                 <Empty title={emptyTitle} desc={emptyDesc} />
@@ -585,6 +587,7 @@ function DataTable({
                   key={row[rowKey]}
                   className={[isSel ? 'is-selected' : '', getRowClassName?.(row)].filter(Boolean).join(' ')}
                   onClick={onRowClick ? () => onRowClick(row) : null}
+                  onMouseEnter={onRowMouseEnter ? () => onRowMouseEnter(row) : null}
                   style={onRowClick ? {cursor: 'pointer'} : null}
                 >
                   {selectable && (
@@ -610,7 +613,13 @@ function DataTable({
               );
             })}
             {(pinnedRows || []).map((row) => (
-              <tr key={`pinned-${row[rowKey]}`} className={['is-pinned', getRowClassName?.(row)].filter(Boolean).join(' ')}>
+              <tr
+                key={`pinned-${row[rowKey]}`}
+                className={['is-pinned', getRowClassName?.(row)].filter(Boolean).join(' ')}
+                onClick={onRowClick ? () => onRowClick(row) : null}
+                onMouseEnter={onRowMouseEnter ? () => onRowMouseEnter(row) : null}
+                style={onRowClick ? { cursor: 'pointer' } : null}
+              >
                 {selectable && <td />}
                 {visibleCols.map((c) => (
                   <td

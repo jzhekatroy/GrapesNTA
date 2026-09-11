@@ -3521,6 +3521,15 @@ a.nav-item--active:visited { color: var(--fg-primary); }
 .card--explorer-results .table tbody tr.is-dynamics-active:hover {
   background: rgba(126, 146, 248, 0.1);
 }
+.card--explorer-results .table tbody tr.is-series-highlight {
+  background: rgba(126, 146, 248, 0.14);
+}
+.card--explorer-results .table tbody tr.is-series-highlight.is-dynamics-active {
+  background: rgba(126, 146, 248, 0.16);
+}
+.card--explorer-results .table tbody tr.is-series-highlight:hover {
+  background: rgba(126, 146, 248, 0.2);
+}
 .explorer-results-layout {
   display: flex;
   flex-direction: column;

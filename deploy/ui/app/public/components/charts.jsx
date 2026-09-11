@@ -795,6 +795,7 @@ function DualChart({
   yAxisLabel,
   yAxisUnit,
   yAxisTitlePad: yAxisTitlePadProp = 28,
+  highlightKey = null,
 }) {
   const wrapRef = useRef(null);
   const dragRef = useRef(null);
@@ -977,6 +978,17 @@ function DualChart({
     return data.map((pt) => computeChartStackBands(pt, activeLines, seriesBwValue, stackMode));
   }, [data, activeLines, isStack, stackMode, gapAsZero]);
 
+  const seriesHighlightOpacity = (key) => {
+    if (highlightKey == null) return 1;
+    return highlightKey === key ? 1 : 0.28;
+  };
+  const lineModeLines = useMemo(() => {
+    if (isStack || highlightKey == null) return activeLines;
+    const rest = activeLines.filter((ln) => ln.key !== highlightKey);
+    const focused = activeLines.find((ln) => ln.key === highlightKey);
+    return focused ? [...rest, focused] : activeLines;
+  }, [activeLines, highlightKey, isStack]);
+
   return (
     <div
       ref={wrapRef}
@@ -1025,14 +1037,16 @@ function DualChart({
             y1,
             (_pt, i) => stackBandsByPoint[i]?.bands?.[lineIdx]?.top ?? null,
           );
+          const highlighted = highlightKey === ln.key;
+          const groupOpacity = seriesHighlightOpacity(ln.key);
           return (
-            <g key={ln.key}>
+            <g key={ln.key} style={{ opacity: groupOpacity }}>
               {areaSegments.map((pathD, segmentIdx) => (
                 <path
                   key={`${ln.key}-area-${segmentIdx}`}
                   d={pathD}
                   fill={ln.color}
-                  fillOpacity="0.72"
+                  fillOpacity={highlighted ? 0.85 : 0.72}
                   stroke="none"
                 />
               ))}
@@ -1042,7 +1056,7 @@ function DualChart({
                   points={pts.join(' ')}
                   fill="none"
                   stroke={ln.color}
-                  strokeWidth="1"
+                  strokeWidth={highlighted ? 1.5 : 1}
                   strokeLinejoin="round"
                   strokeLinecap="round"
                   opacity="0.95"
@@ -1051,7 +1065,7 @@ function DualChart({
             </g>
           );
         })}
-        {!isStack && activeLines.map((ln) => {
+        {!isStack && lineModeLines.map((ln) => {
           const segments = buildChartPolylineSegments(
             data,
             x,
@@ -1059,16 +1073,19 @@ function DualChart({
             (pt) => seriesBwValue(pt, ln.key),
           );
           const isTotal = ln.key === 'total';
+          const highlighted = highlightKey === ln.key;
+          const baseOpacity = isTotal ? 1 : 0.9;
+          const opacity = highlightKey == null ? baseOpacity : (highlighted ? 1 : 0.28);
           return segments.map((pts, segmentIdx) => (
             <polyline
               key={`${ln.key}-${segmentIdx}`}
               points={pts.join(' ')}
               fill="none"
               stroke={ln.color}
-              strokeWidth={isTotal ? 2.5 : 1.75}
+              strokeWidth={highlighted ? (isTotal ? 3 : 2.5) : (isTotal ? 2.5 : 1.75)}
               strokeLinejoin="round"
               strokeLinecap="round"
-              opacity={isTotal ? 1 : 0.9}
+              opacity={opacity}
             />
           ));
         })}
@@ -1080,16 +1097,19 @@ function DualChart({
             (pt) => seriesPpsValue(pt, ln.key),
           );
           const isTotal = ln.key === 'total';
+          const highlighted = highlightKey === ln.key;
+          const baseOpacity = isTotal ? 1 : 0.9;
+          const opacity = highlightKey == null ? baseOpacity : (highlighted ? 1 : 0.28);
           return segments.map((pts, segmentIdx) => (
             <polyline
               key={`pps-${ln.key}-${segmentIdx}`}
               points={pts.join(' ')}
               fill="none"
               stroke={ln.color}
-              strokeWidth={isTotal ? 2.5 : 2}
+              strokeWidth={highlighted ? (isTotal ? 3 : 2.5) : (isTotal ? 2.5 : 2)}
               strokeLinejoin="round"
               strokeLinecap="round"
-              opacity={isTotal ? 1 : 0.9}
+              opacity={opacity}
             />
           ));
         })}
@@ -1107,45 +1127,51 @@ function DualChart({
             {isStack && hoverStack && activeLines.map((ln, lineIdx) => {
               const band = hoverStack.bands[lineIdx];
               if (!band || band.raw <= 0) return null;
+              const highlighted = highlightKey === ln.key;
               return (
                 <circle
                   key={ln.key}
                   cx={x(hoverIdx)}
                   cy={y1(band.top)}
-                  r={3.5}
+                  r={highlighted ? 4.5 : 3.5}
                   fill={ln.color}
                   stroke="#14131F"
                   strokeWidth="1.5"
+                  style={{ opacity: seriesHighlightOpacity(ln.key) }}
                 />
               );
             })}
             {!isStack && activeLines.map((ln) => {
               const v = seriesBwValue(hoverPoint, ln.key);
               if (!gapAsZero && v == null) return null;
+              const highlighted = highlightKey === ln.key;
               return (
               <circle
                 key={ln.key}
                 cx={x(hoverIdx)}
                 cy={y1(v)}
-                r={4}
+                r={highlighted ? 5 : 4}
                 fill={ln.color}
                 stroke="#14131F"
                 strokeWidth="1.5"
+                style={{ opacity: seriesHighlightOpacity(ln.key) }}
               />
               );
             })}
             {!isStack && activePpsLines.map((ln) => {
               const v = seriesPpsValue(hoverPoint, ln.key);
               if (!gapAsZero && v == null) return null;
+              const highlighted = highlightKey === ln.key;
               return (
               <circle
                 key={`pps-${ln.key}`}
                 cx={x(hoverIdx)}
                 cy={y2(v)}
-                r={4}
+                r={highlighted ? 5 : 4}
                 fill={ln.color}
                 stroke="#14131F"
                 strokeWidth="1.5"
+                style={{ opacity: seriesHighlightOpacity(ln.key) }}
               />
               );
             })}
@@ -1179,7 +1205,7 @@ function DualChart({
             const band = lineIdx >= 0 ? hoverStack.bands[lineIdx] : null;
             if (!band) return null;
             return (
-              <div key={ln.key} className="dual-chart__tip-row">
+              <div key={ln.key} className="dual-chart__tip-row" style={{ opacity: seriesHighlightOpacity(ln.key) }}>
                 <span className="dual-chart__tip-swatch" style={{ background: ln.color }} />
                 <span className="dual-chart__tip-label">{ln.label}</span>
                 <span className="dual-chart__tip-val mono">
@@ -1197,7 +1223,7 @@ function DualChart({
             </div>
           )}
           {!isStack && sortLinesForTip(activeLines).map((ln) => (
-            <div key={ln.key} className="dual-chart__tip-row">
+            <div key={ln.key} className="dual-chart__tip-row" style={{ opacity: seriesHighlightOpacity(ln.key) }}>
               <span className="dual-chart__tip-swatch" style={{ background: ln.color }} />
               <span className="dual-chart__tip-label">{ln.label}</span>
               <span className="dual-chart__tip-val mono">
@@ -1206,7 +1232,7 @@ function DualChart({
             </div>
           ))}
           {!isStack && sortLinesForTip(activePpsLines).map((ln) => (
-            <div key={`pps-${ln.key}`} className="dual-chart__tip-row">
+            <div key={`pps-${ln.key}`} className="dual-chart__tip-row" style={{ opacity: seriesHighlightOpacity(ln.key) }}>
               <span className="dual-chart__tip-swatch" style={{ background: ln.color }} />
               <span className="dual-chart__tip-label">{ln.label}, п/с</span>
               <span className="dual-chart__tip-val mono">{ppsFormatter(seriesPpsValue(hoverPoint, ln.key))}</span>
