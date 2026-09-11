@@ -77,6 +77,10 @@ function isObservationComposeEdit(draft) {
 }
 const EXPLORER_DEFAULT_FETCH_LIMIT = 25;
 const EXPLORER_ON_DEMAND_FETCH_LIMITS = [50, 100];
+const EXPLORER_PRESET_VISUAL_LIMITS = [5, 10, 25, ...EXPLORER_ON_DEMAND_FETCH_LIMITS];
+const EXPLORER_ALL_FETCH_LIMIT = 250;
+const EXPLORER_MAX_FETCH_LIMIT = 10000;
+const EXPLORER_MAX_CHART_SERIES = 100;
 const EXPLORER_CHART_HEIGHT = 196;
 const EXPLORER_VIS_DEFAULT = 'stack';
 const EXPLORER_MASKABLE_GROUPS = new Set(['src_ip', 'dst_ip']);
@@ -194,19 +198,49 @@ function sliceExplorerVisualRows(rows, visualLimit) {
 }
 
 function defaultDynamicsSeriesIds(rows, visualLimit) {
-  return new Set(sliceExplorerVisualRows(rows, visualLimit).map((r) => r.id));
+  return new Set(
+    sliceExplorerVisualRows(rows, visualLimit)
+      .slice(0, EXPLORER_MAX_CHART_SERIES)
+      .map((r) => r.id),
+  );
 }
 
+function explorerMaxFetchFromSchema(schema) {
+  const n = Number(schema?.maxLimit);
+  return Number.isFinite(n) && n > 0 ? n : EXPLORER_MAX_FETCH_LIMIT;
+}
 
-function resolveExplorerFetchLimit(queryLimit) {
-  const n = Number(queryLimit);
-  if (EXPLORER_ON_DEMAND_FETCH_LIMITS.includes(n)) return n;
-  return EXPLORER_DEFAULT_FETCH_LIMIT;
+function resolveExplorerFetchLimit(queryLimit, maxLimit = EXPLORER_MAX_FETCH_LIMIT) {
+  const cap = Number(maxLimit);
+  const max = Number.isFinite(cap) && cap > 0 ? cap : EXPLORER_MAX_FETCH_LIMIT;
+  const n = Math.floor(Number(queryLimit));
+  if (!Number.isFinite(n) || n <= 0) return EXPLORER_DEFAULT_FETCH_LIMIT;
+  return Math.min(Math.max(n, 1), max);
 }
 
 function isExplorerDisplayLimitActive(buttonLimit, visualLimit, fetchLimit) {
   if (visualLimit === 'all') return buttonLimit === fetchLimit;
   return Number(visualLimit) === buttonLimit;
+}
+
+function isExplorerPresetVisualLimit(visualLimit) {
+  if (visualLimit === 'all') return true;
+  const n = Number(visualLimit);
+  return Number.isFinite(n) && EXPLORER_PRESET_VISUAL_LIMITS.includes(n);
+}
+
+function explorerCustomLimitDraft(visualLimit) {
+  if (isExplorerPresetVisualLimit(visualLimit)) return '';
+  const n = Number(visualLimit);
+  if (!Number.isFinite(n) || n <= 0) return '';
+  return String(n);
+}
+
+function isExplorerCustomLimitActive(visualLimit) {
+  if (visualLimit === 'all') return false;
+  const n = Number(visualLimit);
+  if (!Number.isFinite(n) || n <= 0) return false;
+  return !EXPLORER_PRESET_VISUAL_LIMITS.includes(n);
 }
 
 function explorerRowLabel(row) {
@@ -2533,6 +2567,7 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
     [usesCabinetClient, schema],
   );
   const maxRangeDays = explorerRangeLimitDays(schema?.maxRangeDays ?? explorerApi.maxRangeDays);
+  const explorerMaxFetchLimit = explorerMaxFetchFromSchema(schema);
   const cabinetClientPeriodWarning = useMemo(
     () => explorerCabinetClientPeriodWarning({
       usesCabinetClient,
@@ -3011,8 +3046,8 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
     setShowOthersOnChart(explorerDefaultShowOthersOnChart(snapshot.vis ?? vis));
     const nextAppliedSnapshot = buildExplorerQuerySnapshot({
       ...snapshot,
-      limit: resolveExplorerFetchLimit(snapshot.limit ?? limit),
-      fetchLimit: resolveExplorerFetchLimit(snapshot.limit ?? limit),
+      limit: EXPLORER_DEFAULT_FETCH_LIMIT,
+      fetchLimit: EXPLORER_DEFAULT_FETCH_LIMIT,
       visualLimit: EXPLORER_DEFAULT_VISUAL_LIMIT,
       dynamicsSeriesIds: [],
     });
@@ -3020,7 +3055,7 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
     setAppliedSnapshot(nextAppliedSnapshot);
     replaceExplorerUrl(nextAppliedSnapshot);
     setHasAppliedQuery(true);
-    setFetchLimit(resolveExplorerFetchLimit(snapshot.limit ?? limit));
+    setFetchLimit(EXPLORER_DEFAULT_FETCH_LIMIT);
     setVisualLimit(EXPLORER_DEFAULT_VISUAL_LIMIT);
     setLimit(EXPLORER_DEFAULT_VISUAL_LIMIT);
     setQueryVersion((v) => v + 1);
@@ -3046,7 +3081,7 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
     applyExplorerQuerySnapshot(snapshot, querySetters);
     setMetric(snapshot.metric);
     setGroupBy(normalizeExplorerGroupTokens(snapshot.groupBy));
-    setFetchLimit(resolveExplorerFetchLimit(snapshot.limit));
+    setFetchLimit(resolveExplorerFetchLimit(snapshot.limit, explorerMaxFetchLimit));
     setVis(normalizeExplorerVis(snapshot.vis));
     setVisualLimit(EXPLORER_DEFAULT_VISUAL_LIMIT);
     setLimit(EXPLORER_DEFAULT_VISUAL_LIMIT);
@@ -3071,7 +3106,7 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
     applyExplorerQuerySnapshot(migrateExplorerSnapshot(lastApplied), querySetters);
     setMetric(lastApplied.metric || metric);
     setGroupBy(normalizeExplorerGroupTokens(lastApplied.groupBy || groupBy));
-    setFetchLimit(resolveExplorerFetchLimit(lastApplied.fetchLimit ?? lastApplied.limit));
+    setFetchLimit(resolveExplorerFetchLimit(lastApplied.fetchLimit ?? lastApplied.limit, explorerMaxFetchLimit));
     setVis(normalizeExplorerVis(lastApplied.vis));
     setVisualLimit(lastApplied.visualLimit ?? EXPLORER_DEFAULT_VISUAL_LIMIT);
     setLimit(lastApplied.visualLimit ?? EXPLORER_DEFAULT_VISUAL_LIMIT);
@@ -3459,41 +3494,37 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
     });
   };
 
-  const requestFetchLimit = (nextLimit) => {
-    const target = Number(nextLimit);
-    if (!Number.isFinite(target) || target <= 0) return;
+  const requestFetchLimit = (nextLimit, nextVisual) => {
+    const target = resolveExplorerFetchLimit(nextLimit, explorerMaxFetchLimit);
+    const visual = nextVisual === 'all' ? 'all' : target;
     if (target <= fetchLimit) {
-      setVisualLimit(target);
-      setLimit(target);
+      setVisualLimit(visual);
+      setLimit(visual === 'all' ? fetchLimit : target);
       return;
     }
     setFetchLimit(target);
-    setLimit(target);
-    setVisualLimit(target);
+    setLimit(visual === 'all' ? target : visual);
+    setVisualLimit(visual);
   };
 
   const applyDisplayLimit = (next) => {
+    const allLimit = Math.min(EXPLORER_ALL_FETCH_LIMIT, explorerMaxFetchLimit);
     if (next === 'all') {
+      if (hasAppliedQuery && fetchLimit < allLimit) {
+        requestFetchLimit(allLimit, 'all');
+        return;
+      }
       setVisualLimit('all');
       setLimit(fetchLimit);
       return;
     }
-    const target = Number(next);
-    if (!Number.isFinite(target) || target <= 0) return;
-    if (EXPLORER_ON_DEMAND_FETCH_LIMITS.includes(target)) {
-      if (hasAppliedQuery && fetchLimit < target) {
-        requestFetchLimit(target);
-      } else {
-        setVisualLimit(target);
-        setLimit(target);
-      }
+    const target = resolveExplorerFetchLimit(next, explorerMaxFetchLimit);
+    if (hasAppliedQuery && fetchLimit < target) {
+      requestFetchLimit(target);
       return;
     }
-    const shown = hasAppliedQuery
-      ? Math.min(target, fetchLimit, results.length || target)
-      : target;
-    setVisualLimit(shown);
-    setLimit(shown);
+    setVisualLimit(target);
+    setLimit(target);
   };
 
   const toggleOthersOnChart = () => setShowOthersOnChart((v) => !v);
@@ -3774,6 +3805,7 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
                         total={results.length}
                         fetchLimit={fetchLimit}
                         value={visualLimit}
+                        maxLimit={explorerMaxFetchLimit}
                         loadingMore={refreshing}
                         onChange={applyDisplayLimit}
                         onRequestFetchLimit={requestFetchLimit}
@@ -3925,12 +3957,30 @@ function ExplorerVisualLimitControl({
   onChange,
   onRequestFetchLimit,
   loadingMore = false,
+  maxLimit = EXPLORER_MAX_FETCH_LIMIT,
 }) {
   const shown = resolveExplorerVisualCount(value, total);
   const instantOptions = [5, 10, 25].filter((n) => n <= fetchLimit);
-  const canExpandInstant = total > EXPLORER_DEFAULT_VISUAL_LIMIT || fetchLimit > EXPLORER_DEFAULT_VISUAL_LIMIT;
+  const allLimit = Math.min(EXPLORER_ALL_FETCH_LIMIT, maxLimit);
+  const [customDraft, setCustomDraft] = useState(() => explorerCustomLimitDraft(value));
 
-  if (!canExpandInstant && fetchLimit < 50) return null;
+  useEffect(() => {
+    setCustomDraft(explorerCustomLimitDraft(value));
+  }, [value]);
+
+  const commitCustom = () => {
+    const trimmed = String(customDraft ?? '').trim();
+    if (!trimmed) {
+      setCustomDraft('');
+      return;
+    }
+    const n = Math.floor(Number(trimmed));
+    if (!Number.isFinite(n) || n <= 0) {
+      setCustomDraft(explorerCustomLimitDraft(value));
+      return;
+    }
+    onChange(resolveExplorerFetchLimit(n, maxLimit));
+  };
 
   return (
     <div className="explorer-visual-limit">
@@ -3969,16 +4019,35 @@ function ExplorerVisualLimitControl({
               </button>
             );
           })}
-          {fetchLimit > EXPLORER_DEFAULT_VISUAL_LIMIT && (
-            <button
-              type="button"
-              className={value === 'all' ? 'is-active' : ''}
-              disabled={loadingMore}
-              onClick={() => onChange('all')}
-            >
-              Все
-            </button>
-          )}
+          <input
+            type="number"
+            min={1}
+            max={maxLimit}
+            className={`explorer-visual-limit__custom${isExplorerCustomLimitActive(value) ? ' is-active' : ''}`}
+            value={customDraft}
+            placeholder="N"
+            aria-label="Сколько строк показать"
+            disabled={loadingMore}
+            onChange={(e) => setCustomDraft(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') {
+                e.preventDefault();
+                commitCustom();
+              }
+            }}
+            onBlur={commitCustom}
+          />
+          <button
+            type="button"
+            className={value === 'all' ? 'is-active' : ''}
+            disabled={loadingMore}
+            title={fetchLimit >= allLimit
+              ? 'Показать все загруженные строки'
+              : `Загрузить до ${allLimit} строк`}
+            onClick={() => onChange('all')}
+          >
+            Все
+          </button>
         </div>
       </div>
     </div>

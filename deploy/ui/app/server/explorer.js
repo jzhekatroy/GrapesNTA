@@ -72,8 +72,10 @@ const {
   normalizePeakWindow,
 } = require('./explorer-thresholds');
 
-const EXPLORER_MAX_LIMIT = 100;
 const EXPLORER_MAX_EXPORT_ROWS = 10000;
+const EXPLORER_MAX_LIMIT = EXPLORER_MAX_EXPORT_ROWS;
+/** Per-row timeseries stay bounded so a large table fetch does not explode the chart query. */
+const EXPLORER_MAX_SERIES_ROWS = 100;
 const EXPLORER_MAX_RANGE_DAYS = 365;
 const EXPLORER_MAX_RANGE_MS = EXPLORER_MAX_RANGE_DAYS * 86400000;
 const CABINET_EXPLORER_MAX_RANGE_DAYS = 6;
@@ -3322,10 +3324,11 @@ async function executeExplorerQueryBundle(bundle, queryBody, runNamed, namePrefi
       ? runNamed(() => Promise.resolve(bundle.summarySpec), { name: `${namePrefix}/summary` })
       : null,
   ]);
+  const seriesRows = (flowsResult?.data || []).slice(0, EXPLORER_MAX_SERIES_ROWS);
   const [resultSeriesResult, timeseriesResult] = await Promise.all([
-    flowsResult?.data?.length
+    seriesRows.length
       ? runNamed(
-        () => explorerResultSeries(queryBody, flowsResult.data, queryOptions),
+        () => explorerResultSeries(queryBody, seriesRows, queryOptions),
         { name: `${namePrefix}/result-series` },
       )
       : null,
@@ -3866,6 +3869,7 @@ module.exports = {
   lookupEntityDisplayNames,
   EXPLORER_MAX_LIMIT,
   EXPLORER_MAX_EXPORT_ROWS,
+  EXPLORER_MAX_SERIES_ROWS,
   explorerAggPctColumn,
   summaryFromExplorerFlowRows,
   buildSummaryFromFlowRows: summaryFromExplorerFlowRows,

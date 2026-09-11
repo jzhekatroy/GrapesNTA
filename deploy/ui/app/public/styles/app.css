@@ -3725,6 +3725,58 @@ a.nav-item--active:visited { color: var(--fg-primary); }
   flex-wrap: wrap;
 }
 
+.explorer-visual-limit__seg .explorer-visual-limit__custom {
+  border: 0;
+  background: var(--surf-1);
+  color: var(--fg-secondary);
+  height: 30px;
+  width: 3.25rem;
+  min-width: 2.75rem;
+  flex: 0 0 auto;
+  padding: 0 8px;
+  border-radius: 8px;
+  font: var(--pv-text-body-3-bold);
+  text-align: center;
+  outline: none;
+  box-shadow: inset 0 0 0 1px var(--bd-default);
+  transition: background var(--pv-dur-fast), color var(--pv-dur-fast), box-shadow var(--pv-dur-fast);
+  -moz-appearance: textfield;
+}
+
+.explorer-visual-limit__seg .explorer-visual-limit__custom::placeholder {
+  color: var(--fg-muted);
+  font: var(--pv-text-body-3-bold);
+  opacity: 0.85;
+}
+
+.explorer-visual-limit__seg .explorer-visual-limit__custom:hover:not(:disabled):not(:focus) {
+  color: var(--fg-primary);
+  box-shadow: inset 0 0 0 1px var(--bd-strong);
+}
+
+.explorer-visual-limit__seg .explorer-visual-limit__custom:focus {
+  background: var(--surf-2);
+  color: var(--fg-primary);
+  box-shadow: inset 0 0 0 1px var(--bd-focus);
+}
+
+.explorer-visual-limit__seg .explorer-visual-limit__custom.is-active {
+  background: var(--surf-3);
+  color: var(--fg-primary);
+  box-shadow: inset 0 0 0 1px var(--bd-focus);
+}
+
+.explorer-visual-limit__seg .explorer-visual-limit__custom:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.explorer-visual-limit__seg .explorer-visual-limit__custom::-webkit-outer-spin-button,
+.explorer-visual-limit__seg .explorer-visual-limit__custom::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
 .explorer-row-actions {
   display: inline-flex;
   align-items: center;

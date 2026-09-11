@@ -11,8 +11,13 @@ const {
 } = require('./explorer');
 
 describe('normalizeExplorerQuery limit', () => {
-  it('caps UI limit at EXPLORER_MAX_LIMIT', () => {
+  it('allows interactive limit above the old UI cap of 100', () => {
     const q = normalizeExplorerQuery({ limit: 500 });
+    assert.equal(q.limit, 500);
+  });
+
+  it('caps UI limit at EXPLORER_MAX_LIMIT', () => {
+    const q = normalizeExplorerQuery({ limit: EXPLORER_MAX_LIMIT + 1 });
     assert.equal(q.limit, EXPLORER_MAX_LIMIT);
   });
 
