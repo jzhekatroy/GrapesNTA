@@ -67,9 +67,8 @@ func (p *nfParser) parse(d udpDatagram) []flowingest.FlowRow {
 	case 5:
 		p.metrics.unsupportedV5.Add(1)
 		return nil
-	case 10:
-		p.metrics.unsupportedIPFIX.Add(1)
-		return nil
+	case ipfixVersion:
+		return p.parseIPFIX(d)
 	default:
 		p.metrics.unsupportedOther.Add(1)
 		return nil
@@ -202,47 +201,37 @@ func (p *nfParser) learnOptionTemplates(exporter [16]byte, domain uint32, body [
 }
 
 func (p *nfParser) decodeOptionRecords(exporter [16]byte, domain uint32, body []byte, tmpl nfOptionTemplate, now time.Time) {
-	if tmpl.recordLen <= 0 {
+	if tmpl.recordLen < 0 {
 		return
 	}
 	fields := append(append([]nfField(nil), tmpl.scopes...), tmpl.options...)
-	for i := 0; i+tmpl.recordLen <= len(body); i += tmpl.recordLen {
-		rec := body[i : i+tmpl.recordLen]
-		var sampler uint32
-		var rate uint64
-		off := 0
-		for _, f := range fields {
-			val := rec[off : off+int(f.Length)]
-			off += int(f.Length)
-			switch f.Type {
-			case nfFLOW_SAMPLER_ID:
-				sampler = uint32(readNFUint(val))
-			case nfSAMPLING_INTERVAL, nfFLOW_SAMPLER_RANDOM_INTERVAL:
-				rate = readNFUint(val)
-			}
-		}
+	p.forEachNFRecord(body, fields, tmpl.recordLen, func(rec nfDecoded) {
+		rate := rec.sampleRate
 		if rate > 0 {
-			p.store.putRate(nfSamplerKey{exporter: exporter, domain: domain, sampler: sampler}, rate, now)
+			p.store.putRate(nfSamplerKey{exporter: exporter, domain: domain, sampler: rec.samplerID}, rate, now)
 		}
 		p.metrics.optionRecords.Add(1)
-	}
+	})
 }
 
 type nfDecoded struct {
-	src, dst                   [16]byte
-	hasSrc, hasDst             bool
-	ipVer                      uint8
-	proto                      uint32
-	srcPort, dstPort           uint32
-	bytes, packets             uint64
-	inIf, outIf                uint32
-	srcVLAN, dstVLAN           uint16
-	tos, tcpFlags, ttl         uint8
-	srcAS, dstAS               uint32
-	srcMAC, dstMAC             [6]byte
+	src, dst                    [16]byte
+	hasSrc, hasDst              bool
+	ipVer                       uint8
+	proto                       uint32
+	srcPort, dstPort            uint32
+	bytes, packets              uint64
+	inIf, outIf                 uint32
+	srcVLAN, dstVLAN            uint16
+	tos, tcpFlags, ttl          uint8
+	srcAS, dstAS                uint32
+	srcMAC, dstMAC              [6]byte
 	firstSwitched, lastSwitched uint32
-	hasFirst                   bool
-	samplerID                  uint32
+	hasFirst                    bool
+	hasAbsStart                 bool
+	absStart                    time.Time
+	samplerID                   uint32
+	sampleRate                  uint64
 }
 
 func (p *nfParser) decodeDataRecords(
@@ -253,18 +242,24 @@ func (p *nfParser) decodeDataRecords(
 	sysUp, unixSecs uint32,
 	now time.Time,
 ) []flowingest.FlowRow {
-	if tmpl.recordLen <= 0 {
+	if tmpl.recordLen < 0 {
 		return nil
 	}
-	rows := make([]flowingest.FlowRow, 0, len(body)/tmpl.recordLen)
-	for i := 0; i+tmpl.recordLen <= len(body); i += tmpl.recordLen {
-		rec := p.readRecord(body[i:i+tmpl.recordLen], tmpl.fields)
+	capHint := 1
+	if tmpl.recordLen > 0 {
+		capHint = len(body) / tmpl.recordLen
+	}
+	rows := make([]flowingest.FlowRow, 0, capHint)
+	p.forEachNFRecord(body, tmpl.fields, tmpl.recordLen, func(rec nfDecoded) {
 		if !rec.hasSrc || !rec.hasDst {
 			p.metrics.incompleteSkipped.Add(1)
-			continue
+			return
 		}
 		rate := p.fallbackRate
-		if optRate, ok := p.store.rate(exporter, domain, rec.samplerID, now); ok && optRate > 0 {
+		if rec.sampleRate > 0 {
+			rate = rec.sampleRate
+			p.metrics.rateFromOption.Add(1)
+		} else if optRate, ok := p.store.rate(exporter, domain, rec.samplerID, now); ok && optRate > 0 {
 			if optRate != p.fallbackRate && p.fallbackRate != 1 {
 				p.warnRate(exporter, domain, rec.samplerID, optRate)
 			}
@@ -278,8 +273,12 @@ func (p *nfParser) decodeDataRecords(
 		}
 
 		start := now
-		if rec.hasFirst {
+		if rec.hasAbsStart {
+			start = rec.absStart
+		} else if rec.hasFirst && sysUp != 0 {
 			start = flowStartTime(unixSecs, sysUp, rec.firstSwitched)
+		}
+		if rec.hasAbsStart || (rec.hasFirst && sysUp != 0) {
 			if skew := start.Sub(now); skew > nfTimeSkewLimit*time.Second || skew < -nfTimeSkewLimit*time.Second {
 				p.metrics.timeSkewFallback.Add(1)
 				start = now
@@ -341,80 +340,208 @@ func (p *nfParser) decodeDataRecords(
 		}
 		rows = append(rows, row)
 		p.metrics.recordsParsed.Add(1)
-	}
+	})
 	return rows
+}
+
+func (p *nfParser) forEachNFRecord(body []byte, fields []nfField, recordLen int, fn func(nfDecoded)) {
+	if recordLen > 0 {
+		for i := 0; i+recordLen <= len(body); i += recordLen {
+			fn(p.readRecord(body[i:i+recordLen], fields))
+		}
+		return
+	}
+	off := 0
+	for off < len(body) {
+		rec, n, ok := p.readVarRecord(body[off:], fields)
+		if !ok || n == 0 {
+			return
+		}
+		off += n
+		fn(rec)
+	}
 }
 
 func (p *nfParser) readRecord(rec []byte, fields []nfField) nfDecoded {
 	var out nfDecoded
 	off := 0
 	for _, f := range fields {
-		if off+int(f.Length) > len(rec) {
+		if f.Length == ipfixVarLen || off+int(f.Length) > len(rec) {
 			break
 		}
 		val := rec[off : off+int(f.Length)]
 		off += int(f.Length)
-		switch f.Type {
-		case nfIPV4_SRC_ADDR:
-			out.hasSrc = copyIPv4(&out.src, val)
-			if out.ipVer == 0 {
-				out.ipVer = 4
+		applyNFField(&out, f, val)
+	}
+	normalizeDecodedAddrs(&out)
+	return out
+}
+
+func (p *nfParser) readVarRecord(body []byte, fields []nfField) (nfDecoded, int, bool) {
+	var out nfDecoded
+	off := 0
+	for _, f := range fields {
+		var val []byte
+		if f.Length == ipfixVarLen {
+			if off >= len(body) {
+				return nfDecoded{}, 0, false
 			}
-		case nfIPV4_DST_ADDR:
-			out.hasDst = copyIPv4(&out.dst, val)
-			if out.ipVer == 0 {
-				out.ipVer = 4
+			n := int(body[off])
+			off++
+			if n == 255 {
+				if off+2 > len(body) {
+					return nfDecoded{}, 0, false
+				}
+				n = int(binary.BigEndian.Uint16(body[off : off+2]))
+				off += 2
 			}
-		case nfIPV6_SRC_ADDR:
-			out.hasSrc = copyIPv6(&out.src, val)
+			if off+n > len(body) {
+				return nfDecoded{}, 0, false
+			}
+			val = body[off : off+n]
+			off += n
+		} else {
+			if off+int(f.Length) > len(body) {
+				return nfDecoded{}, 0, false
+			}
+			val = body[off : off+int(f.Length)]
+			off += int(f.Length)
+		}
+		applyNFField(&out, f, val)
+	}
+	normalizeDecodedAddrs(&out)
+	return out, off, true
+}
+
+func applyNFField(out *nfDecoded, f nfField, val []byte) {
+	if f.Enterprise != 0 {
+		return
+	}
+	switch f.Type {
+	case nfIPV4_SRC_ADDR:
+		out.hasSrc = copyIPv4(&out.src, val)
+		if out.ipVer == 0 {
+			out.ipVer = 4
+		}
+	case nfIPV4_DST_ADDR:
+		out.hasDst = copyIPv4(&out.dst, val)
+		if out.ipVer == 0 {
+			out.ipVer = 4
+		}
+	case nfIPV6_SRC_ADDR:
+		out.hasSrc = copyIPv6(&out.src, val)
+		if out.ipVer == 0 {
 			out.ipVer = 6
-		case nfIPV6_DST_ADDR:
-			out.hasDst = copyIPv6(&out.dst, val)
+		}
+	case nfIPV6_DST_ADDR:
+		out.hasDst = copyIPv6(&out.dst, val)
+		if out.ipVer == 0 {
 			out.ipVer = 6
-		case nfL4_SRC_PORT:
-			out.srcPort = uint32(readNFUint(val))
-		case nfL4_DST_PORT:
-			out.dstPort = uint32(readNFUint(val))
-		case nfPROTOCOL:
-			out.proto = uint32(readNFUint(val))
-		case nfIN_BYTES:
+		}
+	case nfL4_SRC_PORT:
+		out.srcPort = uint32(readNFUint(val))
+	case nfL4_DST_PORT:
+		out.dstPort = uint32(readNFUint(val))
+	case nfPROTOCOL:
+		out.proto = uint32(readNFUint(val))
+	case nfIN_BYTES:
+		out.bytes = readNFUint(val)
+	case nfIN_PKTS:
+		out.packets = readNFUint(val)
+	case nfOCTET_TOTAL_COUNT, nfPOST_OCTET_DELTA:
+		if out.bytes == 0 {
 			out.bytes = readNFUint(val)
-		case nfIN_PKTS:
+		}
+	case nfPACKET_TOTAL_COUNT, nfPOST_PACKET_DELTA:
+		if out.packets == 0 {
 			out.packets = readNFUint(val)
-		case nfINPUT_SNMP:
-			out.inIf = uint32(readNFUint(val))
-		case nfOUTPUT_SNMP:
-			out.outIf = uint32(readNFUint(val))
-		case nfSRC_VLAN:
-			out.srcVLAN = uint16(readNFUint(val))
-		case nfDST_VLAN:
-			out.dstVLAN = uint16(readNFUint(val))
-		case nfSRC_TOS:
-			out.tos = uint8(readNFUint(val))
-		case nfTCP_FLAGS:
-			out.tcpFlags = uint8(readNFUint(val))
-		case nfMIN_TTL:
-			out.ttl = uint8(readNFUint(val))
-		case nfSRC_AS:
-			out.srcAS = uint32(readNFUint(val))
-		case nfDST_AS:
-			out.dstAS = uint32(readNFUint(val))
-		case nfFIRST_SWITCHED:
-			out.firstSwitched = uint32(readNFUint(val))
-			out.hasFirst = true
-		case nfLAST_SWITCHED:
-			out.lastSwitched = uint32(readNFUint(val))
-		case nfIN_SRC_MAC, nfOUT_SRC_MAC:
-			copyMAC(&out.srcMAC, val)
-		case nfOUT_DST_MAC, nfIN_DST_MAC:
-			copyMAC(&out.dstMAC, val)
-		case nfIP_PROTOCOL_VERSION:
-			out.ipVer = uint8(readNFUint(val))
-		case nfFLOW_SAMPLER_ID:
-			out.samplerID = uint32(readNFUint(val))
+		}
+	case nfINPUT_SNMP:
+		out.inIf = uint32(readNFUint(val))
+	case nfOUTPUT_SNMP:
+		out.outIf = uint32(readNFUint(val))
+	case nfSRC_VLAN:
+		out.srcVLAN = uint16(readNFUint(val))
+	case nfDST_VLAN:
+		out.dstVLAN = uint16(readNFUint(val))
+	case nfSRC_TOS:
+		out.tos = uint8(readNFUint(val))
+	case nfTCP_FLAGS:
+		out.tcpFlags = uint8(readNFUint(val))
+	case nfMIN_TTL, nfIP_TTL:
+		out.ttl = uint8(readNFUint(val))
+	case nfSRC_AS:
+		out.srcAS = uint32(readNFUint(val))
+	case nfDST_AS:
+		out.dstAS = uint32(readNFUint(val))
+	case nfFIRST_SWITCHED:
+		out.firstSwitched = uint32(readNFUint(val))
+		out.hasFirst = true
+	case nfLAST_SWITCHED:
+		out.lastSwitched = uint32(readNFUint(val))
+	case nfFLOW_START_SECONDS:
+		setAbsStart(out, time.Unix(int64(readNFUint(val)), 0).UTC())
+	case nfFLOW_START_MILLISECONDS:
+		setAbsStart(out, time.UnixMilli(int64(readNFUint(val))).UTC())
+	case nfFLOW_START_MICROSECONDS, nfFLOW_START_NANOSECONDS:
+		if ts, ok := ipfixNTPTime(val); ok {
+			setAbsStart(out, ts)
+		}
+	case nfIN_SRC_MAC, nfOUT_SRC_MAC:
+		copyMAC(&out.srcMAC, val)
+	case nfOUT_DST_MAC, nfIN_DST_MAC:
+		copyMAC(&out.dstMAC, val)
+	case nfIP_PROTOCOL_VERSION:
+		out.ipVer = uint8(readNFUint(val))
+	case nfFLOW_SAMPLER_ID, nfSELECTOR_ID:
+		out.samplerID = uint32(readNFUint(val))
+	case nfSAMPLING_INTERVAL, nfFLOW_SAMPLER_RANDOM_INTERVAL, nfSAMPLING_PACKET_INTERVAL:
+		if v := readNFUint(val); v > 0 {
+			out.sampleRate = v
 		}
 	}
-	return out
+}
+
+func setAbsStart(out *nfDecoded, ts time.Time) {
+	if ts.IsZero() {
+		return
+	}
+	out.absStart = ts
+	out.hasAbsStart = true
+}
+
+func ipfixNTPTime(b []byte) (time.Time, bool) {
+	if len(b) < 8 {
+		return time.Time{}, false
+	}
+	sec := int64(binary.BigEndian.Uint32(b[0:4])) - ntpUnixEpochDelta
+	if sec < 0 {
+		return time.Time{}, false
+	}
+	frac := binary.BigEndian.Uint32(b[4:8])
+	nsec := int64(frac) * 1e9 >> 32
+	return time.Unix(sec, nsec).UTC(), true
+}
+
+func normalizeDecodedAddrs(out *nfDecoded) {
+	src4 := out.hasSrc && foldV4Mapped(&out.src)
+	dst4 := out.hasDst && foldV4Mapped(&out.dst)
+	if (src4 || !out.hasSrc) && (dst4 || !out.hasDst) && (src4 || dst4) {
+		out.ipVer = 4
+	}
+}
+
+func foldV4Mapped(addr *[16]byte) bool {
+	if addr[0] == 0 && addr[1] == 0 && addr[2] == 0 && addr[3] == 0 &&
+		addr[4] == 0 && addr[5] == 0 && addr[6] == 0 && addr[7] == 0 &&
+		addr[8] == 0 && addr[9] == 0 && addr[10] == 0xff && addr[11] == 0xff {
+		copy(addr[:4], addr[12:16])
+		for i := 4; i < 16; i++ {
+			addr[i] = 0
+		}
+		return true
+	}
+	return false
 }
 
 func flowStartTime(unixSecs, sysUp, firstSwitched uint32) time.Time {

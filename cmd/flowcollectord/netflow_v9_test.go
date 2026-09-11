@@ -13,25 +13,25 @@ import (
 
 // Cisco IPv4 template from the live dump: 19 fields, 50-byte records.
 var ciscoV4Fields = []nfField{
-	{nfFIRST_SWITCHED, 4},
-	{nfLAST_SWITCHED, 4},
-	{nfIN_BYTES, 4},
-	{nfIN_PKTS, 4},
-	{nfINPUT_SNMP, 4},
-	{nfOUTPUT_SNMP, 4},
-	{nfIPV4_SRC_ADDR, 4},
-	{nfIPV4_DST_ADDR, 4},
-	{nfPROTOCOL, 1},
-	{nfSRC_TOS, 1},
-	{nfL4_SRC_PORT, 2},
-	{nfL4_DST_PORT, 2},
-	{nfFLOW_SAMPLER_ID, 1},
-	{nfIPV4_NEXT_HOP, 4},
-	{nfDST_MASK, 1},
-	{nfSRC_MASK, 1},
-	{nfTCP_FLAGS, 1},
-	{nfDST_AS, 2},
-	{nfSRC_AS, 2},
+	{Type: nfFIRST_SWITCHED, Length: 4},
+	{Type: nfLAST_SWITCHED, Length: 4},
+	{Type: nfIN_BYTES, Length: 4},
+	{Type: nfIN_PKTS, Length: 4},
+	{Type: nfINPUT_SNMP, Length: 4},
+	{Type: nfOUTPUT_SNMP, Length: 4},
+	{Type: nfIPV4_SRC_ADDR, Length: 4},
+	{Type: nfIPV4_DST_ADDR, Length: 4},
+	{Type: nfPROTOCOL, Length: 1},
+	{Type: nfSRC_TOS, Length: 1},
+	{Type: nfL4_SRC_PORT, Length: 2},
+	{Type: nfL4_DST_PORT, Length: 2},
+	{Type: nfFLOW_SAMPLER_ID, Length: 1},
+	{Type: nfIPV4_NEXT_HOP, Length: 4},
+	{Type: nfDST_MASK, Length: 1},
+	{Type: nfSRC_MASK, Length: 1},
+	{Type: nfTCP_FLAGS, Length: 1},
+	{Type: nfDST_AS, Length: 2},
+	{Type: nfSRC_AS, Length: 2},
 }
 
 func putU16(b []byte, v uint16) []byte {
@@ -191,10 +191,12 @@ func TestNetFlowV9UnsupportedVersions(t *testing.T) {
 	if rows := parseNF(t, p, v5); len(rows) != 0 || p.metrics.unsupportedV5.Load() != 1 {
 		t.Fatalf("v5: rows=%d unsupported=%d", len(rows), p.metrics.unsupportedV5.Load())
 	}
-	v10 := putU16(nil, 10)
+	// Version 10 with Length=0 is a broken IPFIX header, not a silent skip.
+	v10 := putU16(nil, ipfixVersion)
 	v10 = append(v10, make([]byte, 22)...)
-	if rows := parseNF(t, p, v10); len(rows) != 0 || p.metrics.unsupportedIPFIX.Load() != 1 {
-		t.Fatalf("ipfix: rows=%d unsupported=%d", len(rows), p.metrics.unsupportedIPFIX.Load())
+	if rows := parseNF(t, p, v10); len(rows) != 0 || p.metrics.parseErrors.Load() != 1 {
+		t.Fatalf("ipfix bad length: rows=%d parse_errors=%d unsupported=%d",
+			len(rows), p.metrics.parseErrors.Load(), p.metrics.unsupportedIPFIX.Load())
 	}
 }
 
@@ -304,6 +306,274 @@ func readTestdata(t *testing.T, name string) []byte {
 		t.Fatal(err)
 	}
 	return b
+}
+
+func ipfixHeader(length uint16, exportTime, seq, domain uint32) []byte {
+	b := putU16(nil, ipfixVersion)
+	b = putU16(b, length)
+	b = putU32(b, exportTime)
+	b = putU32(b, seq)
+	b = putU32(b, domain)
+	return b
+}
+
+func buildIPFIXTemplateSet(tid uint16, fields []nfField) []byte {
+	body := putU16(nil, tid)
+	body = putU16(body, uint16(len(fields)))
+	for _, f := range fields {
+		ie := f.Type
+		if f.Enterprise != 0 {
+			ie |= 0x8000
+		}
+		body = putU16(body, ie)
+		body = putU16(body, f.Length)
+		if f.Enterprise != 0 {
+			body = putU32(body, f.Enterprise)
+		}
+	}
+	for len(body)%4 != 0 {
+		body = append(body, 0)
+	}
+	out := putU16(nil, ipfixTemplateSetID)
+	out = putU16(out, uint16(4+len(body)))
+	return append(out, body...)
+}
+
+func ipfixMessage(domain uint32, exportTime uint32, sets ...[]byte) []byte {
+	body := make([]byte, 0)
+	for _, s := range sets {
+		body = append(body, s...)
+	}
+	hdr := ipfixHeader(uint16(ipfixHeaderLen+len(body)), exportTime, 1, domain)
+	return append(hdr, body...)
+}
+
+var ipfixV4Fields = []nfField{
+	{Type: nfIPV4_SRC_ADDR, Length: 4},
+	{Type: nfIPV4_DST_ADDR, Length: 4},
+	{Type: nfPROTOCOL, Length: 1},
+	{Type: nfL4_SRC_PORT, Length: 2},
+	{Type: nfL4_DST_PORT, Length: 2},
+	{Type: nfIN_BYTES, Length: 8},
+	{Type: nfIN_PKTS, Length: 8},
+	{Type: nfINPUT_SNMP, Length: 4},
+	{Type: nfOUTPUT_SNMP, Length: 4},
+	{Type: nfFLOW_START_MILLISECONDS, Length: 8},
+}
+
+func ipfixV4Record(src, dst string, sport, dport uint16, proto uint8, bytes, pkts, inIf, outIf uint32, startMs uint64) []byte {
+	r := make([]byte, 0, 45)
+	r = append(r, net.ParseIP(src).To4()...)
+	r = append(r, net.ParseIP(dst).To4()...)
+	r = append(r, proto)
+	r = putU16(r, sport)
+	r = putU16(r, dport)
+	var b8 [8]byte
+	binary.BigEndian.PutUint64(b8[:], uint64(bytes))
+	r = append(r, b8[:]...)
+	binary.BigEndian.PutUint64(b8[:], uint64(pkts))
+	r = append(r, b8[:]...)
+	r = putU32(r, inIf)
+	r = putU32(r, outIf)
+	binary.BigEndian.PutUint64(b8[:], startMs)
+	r = append(r, b8[:]...)
+	return r
+}
+
+func TestIPFIXTemplateAndData(t *testing.T) {
+	p := newNFParser(nil, "netflow-default", 1, time.Hour, nil)
+	export := uint32(1_787_649_533) // same instant as parseNF receivedAt
+	startMs := uint64(export)*1000 - 1500
+	tmpl := buildIPFIXTemplateSet(256, ipfixV4Fields)
+	data := nfDataFlowset(256, ipfixV4Record("10.1.2.3", "10.4.5.6", 443, 51234, 6, 408, 6, 31, 198, startMs))
+	pkt := ipfixMessage(7, export, tmpl, data)
+	rows := parseNF(t, p, pkt)
+	if len(rows) != 1 {
+		t.Fatalf("rows=%d", len(rows))
+	}
+	r := rows[0]
+	if r.SourceID != "netflow-default" || r.Proto != 6 || r.SrcPort != 443 || r.DstPort != 51234 {
+		t.Fatalf("l4 %+v", r)
+	}
+	if r.Bytes != 408 || r.Packets != 6 || r.InIf != 31 || r.OutIf != 198 {
+		t.Fatalf("vol/if bytes=%d pkts=%d in=%d out=%d", r.Bytes, r.Packets, r.InIf, r.OutIf)
+	}
+	wantStart := time.UnixMilli(int64(startMs)).UTC()
+	if !r.TimeFlowStartNs.Equal(wantStart) {
+		t.Fatalf("start %s want %s", r.TimeFlowStartNs, wantStart)
+	}
+	if p.metrics.unsupportedIPFIX.Load() != 0 {
+		t.Fatalf("unsupported_ipfix=%d", p.metrics.unsupportedIPFIX.Load())
+	}
+}
+
+func TestIPFIXUnknownTemplateDropped(t *testing.T) {
+	p := newNFParser(nil, "netflow-default", 1, time.Hour, nil)
+	data := nfDataFlowset(256, ipfixV4Record("10.0.0.1", "10.0.0.2", 1, 2, 17, 76, 1, 1, 2, 1))
+	pkt := ipfixMessage(7, 1, data)
+	if rows := parseNF(t, p, pkt); len(rows) != 0 {
+		t.Fatalf("expected drop, got %d", len(rows))
+	}
+	if p.metrics.unknownTemplates.Load() != 1 {
+		t.Fatalf("unknown_templates=%d", p.metrics.unknownTemplates.Load())
+	}
+}
+
+func TestIPFIXDomainsDoNotShareTemplates(t *testing.T) {
+	p := newNFParser(nil, "netflow-default", 1, time.Hour, nil)
+	_ = parseNF(t, p, ipfixMessage(1536, 1, buildIPFIXTemplateSet(256, ipfixV4Fields)))
+	data := nfDataFlowset(256, ipfixV4Record("10.0.0.1", "10.0.0.2", 1, 2, 17, 76, 1, 1, 2, 1))
+	if rows := parseNF(t, p, ipfixMessage(1280, 1, data)); len(rows) != 0 {
+		t.Fatalf("domain 1280 used domain 1536 template")
+	}
+}
+
+func TestIPFIXEnterpriseFieldSkipped(t *testing.T) {
+	p := newNFParser(nil, "netflow-default", 1, time.Hour, nil)
+	fields := []nfField{
+		{Type: nfIPV4_SRC_ADDR, Length: 4},
+		{Type: 100, Length: 4, Enterprise: 2636},
+		{Type: nfIPV4_DST_ADDR, Length: 4},
+		{Type: nfPROTOCOL, Length: 1},
+		{Type: nfIN_BYTES, Length: 4},
+		{Type: nfIN_PKTS, Length: 4},
+	}
+	rec := make([]byte, 0, 21)
+	rec = append(rec, net.ParseIP("192.0.2.1").To4()...)
+	rec = putU32(rec, 0xdeadbeef)
+	rec = append(rec, net.ParseIP("192.0.2.2").To4()...)
+	rec = append(rec, 17)
+	rec = putU32(rec, 80)
+	rec = putU32(rec, 1)
+	pkt := ipfixMessage(1, 1, buildIPFIXTemplateSet(300, fields), nfDataFlowset(300, rec))
+	rows := parseNF(t, p, pkt)
+	if len(rows) != 1 {
+		t.Fatalf("rows=%d", len(rows))
+	}
+	wantSrc, _ := flowingest.ParseSamplerAddress("192.0.2.1")
+	wantDst, _ := flowingest.ParseSamplerAddress("192.0.2.2")
+	if rows[0].SrcAddr != wantSrc || rows[0].DstAddr != wantDst || rows[0].Bytes != 80 {
+		t.Fatalf("enterprise shifted record: %+v", rows[0])
+	}
+}
+
+func TestIPFIXVariableLengthField(t *testing.T) {
+	p := newNFParser(nil, "netflow-default", 1, time.Hour, nil)
+	fields := []nfField{
+		{Type: nfIPV4_SRC_ADDR, Length: 4},
+		{Type: nfIPV4_DST_ADDR, Length: 4},
+		{Type: 371, Length: ipfixVarLen}, // unused IE, must not break alignment
+		{Type: nfIN_BYTES, Length: 4},
+		{Type: nfIN_PKTS, Length: 4},
+	}
+	rec := make([]byte, 0, 16)
+	rec = append(rec, net.ParseIP("192.0.2.1").To4()...)
+	rec = append(rec, net.ParseIP("192.0.2.2").To4()...)
+	rec = append(rec, 3) // varlen < 255
+	rec = append(rec, 'G', 'E', 'T')
+	rec = putU32(rec, 64)
+	rec = putU32(rec, 2)
+	pkt := ipfixMessage(1, 1, buildIPFIXTemplateSet(301, fields), nfDataFlowset(301, rec))
+	rows := parseNF(t, p, pkt)
+	if len(rows) != 1 || rows[0].Bytes != 64 || rows[0].Packets != 2 {
+		t.Fatalf("varlen rows=%d %+v", len(rows), rows)
+	}
+}
+
+func TestIPFIXSamplingFromDataRecord(t *testing.T) {
+	p := newNFParser(nil, "netflow-default", 1, time.Hour, nil)
+	fields := []nfField{
+		{Type: nfIPV4_SRC_ADDR, Length: 4},
+		{Type: nfIPV4_DST_ADDR, Length: 4},
+		{Type: nfIN_BYTES, Length: 4},
+		{Type: nfIN_PKTS, Length: 4},
+		{Type: nfSAMPLING_INTERVAL, Length: 4},
+	}
+	rec := make([]byte, 0, 20)
+	rec = append(rec, net.ParseIP("10.0.0.1").To4()...)
+	rec = append(rec, net.ParseIP("10.0.0.2").To4()...)
+	rec = putU32(rec, 10)
+	rec = putU32(rec, 2)
+	rec = putU32(rec, 1000)
+	pkt := ipfixMessage(1, 1, buildIPFIXTemplateSet(302, fields), nfDataFlowset(302, rec))
+	rows := parseNF(t, p, pkt)
+	if len(rows) != 1 {
+		t.Fatalf("rows=%d", len(rows))
+	}
+	if rows[0].SamplingRate != 1000 || rows[0].Bytes != 10*1000 || rows[0].Packets != 2*1000 {
+		t.Fatalf("rate=%d bytes=%d pkts=%d", rows[0].SamplingRate, rows[0].Bytes, rows[0].Packets)
+	}
+}
+
+func TestIPFIXSamplingFromOptionTemplate(t *testing.T) {
+	p := newNFParser(nil, "netflow-default", 1, time.Hour, nil)
+	optBody := putU16(nil, 400)
+	optBody = putU16(optBody, 2) // field count
+	optBody = putU16(optBody, 1) // scope field count
+	optBody = putU16(optBody, nfSELECTOR_ID)
+	optBody = putU16(optBody, 4)
+	optBody = putU16(optBody, nfSAMPLING_INTERVAL)
+	optBody = putU16(optBody, 4)
+	for len(optBody)%4 != 0 {
+		optBody = append(optBody, 0)
+	}
+	optSet := putU16(nil, ipfixOptionsSetID)
+	optSet = putU16(optSet, uint16(4+len(optBody)))
+	optSet = append(optSet, optBody...)
+
+	optRec := putU32(nil, 7)
+	optRec = putU32(optRec, 64)
+	optData := nfDataFlowset(400, optRec)
+
+	_ = parseNF(t, p, ipfixMessage(9, 1, optSet, optData))
+
+	fields := []nfField{
+		{Type: nfIPV4_SRC_ADDR, Length: 4},
+		{Type: nfIPV4_DST_ADDR, Length: 4},
+		{Type: nfIN_BYTES, Length: 4},
+		{Type: nfIN_PKTS, Length: 4},
+		{Type: nfSELECTOR_ID, Length: 4},
+	}
+	rec := make([]byte, 0, 20)
+	rec = append(rec, net.ParseIP("10.0.0.1").To4()...)
+	rec = append(rec, net.ParseIP("10.0.0.2").To4()...)
+	rec = putU32(rec, 5)
+	rec = putU32(rec, 1)
+	rec = putU32(rec, 7)
+	rows := parseNF(t, p, ipfixMessage(9, 1, buildIPFIXTemplateSet(256, fields), nfDataFlowset(256, rec)))
+	if len(rows) != 1 || rows[0].SamplingRate != 64 || rows[0].Bytes != 5*64 {
+		t.Fatalf("option sample %+v", rows)
+	}
+}
+
+func TestIPFIXV4MappedIPv6(t *testing.T) {
+	p := newNFParser(nil, "netflow-default", 1, time.Hour, nil)
+	fields := []nfField{
+		{Type: nfIPV6_SRC_ADDR, Length: 16},
+		{Type: nfIPV6_DST_ADDR, Length: 16},
+		{Type: nfIN_BYTES, Length: 4},
+		{Type: nfIN_PKTS, Length: 4},
+	}
+	mapped := func(ip string) []byte {
+		b := make([]byte, 16)
+		b[10], b[11] = 0xff, 0xff
+		copy(b[12:], net.ParseIP(ip).To4())
+		return b
+	}
+	rec := append(mapped("203.0.113.1"), mapped("203.0.113.2")...)
+	rec = putU32(rec, 20)
+	rec = putU32(rec, 1)
+	rows := parseNF(t, p, ipfixMessage(1, 1, buildIPFIXTemplateSet(256, fields), nfDataFlowset(256, rec)))
+	if len(rows) != 1 {
+		t.Fatalf("rows=%d", len(rows))
+	}
+	if rows[0].Etype != 0x0800 {
+		t.Fatalf("etype=%#x", rows[0].Etype)
+	}
+	wantSrc, _ := flowingest.ParseSamplerAddress("203.0.113.1")
+	if rows[0].SrcAddr != wantSrc {
+		t.Fatalf("src %x want %x", rows[0].SrcAddr, wantSrc)
+	}
 }
 
 func TestFlowStartTimeWrap(t *testing.T) {

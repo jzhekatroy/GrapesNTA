@@ -22,11 +22,16 @@ const (
 	nfDST_AS                       = 17
 	nfLAST_SWITCHED                = 21
 	nfFIRST_SWITCHED               = 22
+	nfPOST_OCTET_DELTA             = 23
+	nfPOST_PACKET_DELTA            = 24
 	nfIPV6_SRC_ADDR                = 27
 	nfIPV6_DST_ADDR                = 28
 	nfICMP_TYPE                    = 32
 	nfSAMPLING_INTERVAL            = 34
 	nfSAMPLING_ALGORITHM           = 35
+	nfFLOW_SAMPLER_ID              = 48
+	nfFLOW_SAMPLER_MODE            = 49
+	nfFLOW_SAMPLER_RANDOM_INTERVAL = 50
 	nfMIN_TTL                      = 52
 	nfIN_SRC_MAC                   = 56
 	nfOUT_DST_MAC                  = 57
@@ -36,9 +41,19 @@ const (
 	nfIPV6_NEXT_HOP                = 62
 	nfIN_DST_MAC                   = 80
 	nfOUT_SRC_MAC                  = 81
-	nfFLOW_SAMPLER_ID              = 48
-	nfFLOW_SAMPLER_MODE            = 49
-	nfFLOW_SAMPLER_RANDOM_INTERVAL = 50
+	nfOCTET_TOTAL_COUNT            = 85
+	nfPACKET_TOTAL_COUNT           = 86
+	nfFLOW_START_SECONDS           = 150
+	nfFLOW_END_SECONDS             = 151
+	nfFLOW_START_MILLISECONDS      = 152
+	nfFLOW_END_MILLISECONDS        = 153
+	nfFLOW_START_MICROSECONDS      = 154
+	nfFLOW_END_MICROSECONDS        = 155
+	nfFLOW_START_NANOSECONDS       = 156
+	nfFLOW_END_NANOSECONDS         = 157
+	nfIP_TTL                       = 192
+	nfSELECTOR_ID                  = 302
+	nfSAMPLING_PACKET_INTERVAL     = 305
 )
 
 const (
@@ -49,6 +64,13 @@ const (
 	nfMinDataTemplateID = 256
 	nfMaxTemplateFields = 128
 	nfTimeSkewLimit     = 3600 // seconds; fall back to receive time beyond this
+
+	ipfixVersion       = 10
+	ipfixHeaderLen     = 16
+	ipfixTemplateSetID = 2
+	ipfixOptionsSetID  = 3
+	ipfixVarLen        = 0xffff
+	ntpUnixEpochDelta  = 2208988800
 )
 
 func readNFUint(b []byte) uint64 {

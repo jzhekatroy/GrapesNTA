@@ -18,8 +18,9 @@ type nfSamplerKey struct {
 }
 
 type nfField struct {
-	Type   uint16
-	Length uint16
+	Type       uint16
+	Length     uint16
+	Enterprise uint32
 }
 
 type nfDataTemplate struct {
@@ -58,25 +59,28 @@ func newNFTemplateStore(ttl time.Duration) *nfTemplateStore {
 	}
 }
 
-func (s *nfTemplateStore) putData(key nfTemplateKey, fields []nfField, now time.Time) {
-	recLen := 0
-	for _, f := range fields {
-		recLen += int(f.Length)
+func nfRecordLen(groups ...[]nfField) int {
+	n := 0
+	for _, fields := range groups {
+		for _, f := range fields {
+			if f.Length == ipfixVarLen {
+				return 0
+			}
+			n += int(f.Length)
+		}
 	}
+	return n
+}
+
+func (s *nfTemplateStore) putData(key nfTemplateKey, fields []nfField, now time.Time) {
 	copied := append([]nfField(nil), fields...)
 	s.mu.Lock()
-	s.data[key] = nfDataTemplate{fields: copied, recordLen: recLen, updated: now}
+	s.data[key] = nfDataTemplate{fields: copied, recordLen: nfRecordLen(copied), updated: now}
 	s.mu.Unlock()
 }
 
 func (s *nfTemplateStore) putOption(key nfTemplateKey, scopes, options []nfField, now time.Time) {
-	recLen := 0
-	for _, f := range scopes {
-		recLen += int(f.Length)
-	}
-	for _, f := range options {
-		recLen += int(f.Length)
-	}
+	recLen := nfRecordLen(scopes, options)
 	s.mu.Lock()
 	s.option[key] = nfOptionTemplate{
 		scopes:    append([]nfField(nil), scopes...),
