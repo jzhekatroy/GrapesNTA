@@ -7,7 +7,17 @@ const {
   locationsViewRef,
 } = require('./clickhouse');
 
+function resolveIncludeInTotal(body, fallback = 1) {
+  if (body == null) return fallback === 0 ? 0 : 1;
+  if (body.additional === true || body.additional === 1 || body.additional === '1') return 0;
+  if (body.additional === false || body.additional === 0 || body.additional === '0') return 1;
+  const n = Number(body.includeInTotal ?? body.include_in_total);
+  if (n === 0 || n === 1) return n;
+  return fallback === 0 ? 0 : 1;
+}
+
 function mapFlowSourceRow(r) {
+  const includeInTotal = Number(r.include_in_total) === 1;
   return {
     sourceId: String(r.source_id ?? ''),
     sourceName: String(r.source_name ?? r.display_name ?? ''),
@@ -18,7 +28,8 @@ function mapFlowSourceRow(r) {
     state: String(r.state ?? 'assigned'),
     displayName: String(r.display_name ?? ''),
     description: String(r.description ?? ''),
-    includeInTotal: Number(r.include_in_total) === 1,
+    includeInTotal,
+    additional: !includeInTotal,
     location: String(r.location ?? ''),
   };
 }
@@ -162,13 +173,20 @@ async function registerFlowSource(body) {
 
   const existing = await getFlowSource(sourceId);
   if (existing) {
+    const hasFlag = body?.additional != null || body?.includeInTotal != null || body?.include_in_total != null;
+    if (hasFlag) {
+      return updateFlowSource({
+        ...body,
+        sourceId,
+        collectorId: collectorId || existing.collector_id,
+      });
+    }
     return bindFlowSource({ sourceId, collectorId: collectorId || existing.collector_id });
   }
 
   const displayName = String(body?.displayName ?? body?.display_name ?? sourceId).trim();
   const sourceType = String(body?.sourceType ?? body?.source_type ?? 'manual').trim();
-  let includeInTotal = Number(body?.includeInTotal ?? body?.include_in_total);
-  if (includeInTotal !== 0 && includeInTotal !== 1) includeInTotal = 1;
+  const includeInTotal = resolveIncludeInTotal(body, 1);
 
   const record = {
     source_id: sourceId,
@@ -185,7 +203,50 @@ async function registerFlowSource(body) {
     name: 'refs/flow-sources-register',
   });
 
-  return { elapsedMs, sourceId, collectorId, created: true };
+  return { elapsedMs, sourceId, collectorId, created: true, includeInTotal };
+}
+
+async function updateFlowSource(body) {
+  const sourceId = String(body?.sourceId ?? body?.source_id ?? '').trim();
+  if (!sourceId) {
+    const err = new Error('Не указан source_id');
+    err.statusCode = 400;
+    throw err;
+  }
+
+  const existing = await getFlowSource(sourceId);
+  if (!existing) {
+    const err = new Error(`Экспортёр «${sourceId}» не найден в каталоге`);
+    err.statusCode = 404;
+    throw err;
+  }
+
+  const collectorId = body?.collectorId ?? body?.collector_id;
+  const nextCollectorId = collectorId == null ? existing.collector_id : String(collectorId).trim();
+  if (nextCollectorId) await assertCollectorExists(nextCollectorId);
+
+  const displayName = body?.displayName ?? body?.display_name;
+  const sourceType = body?.sourceType ?? body?.source_type;
+  const description = body?.description;
+  const location = body?.location;
+  const includeInTotal = resolveIncludeInTotal(body, existing.include_in_total);
+
+  const record = {
+    source_id: existing.source_id,
+    display_name: displayName == null ? existing.display_name : String(displayName).trim() || existing.display_name,
+    source_type: sourceType == null ? existing.source_type : String(sourceType).trim() || existing.source_type,
+    collector_id: nextCollectorId,
+    location: location == null ? existing.location : String(location).trim(),
+    description: description == null ? existing.description : String(description).trim(),
+    include_in_total: includeInTotal,
+    enabled: 1,
+  };
+
+  const { elapsedMs } = await insertRows(config.flowSourcesTable, [record], {
+    name: 'refs/flow-sources-update',
+  });
+
+  return { elapsedMs, sourceId, collectorId: nextCollectorId, includeInTotal, additional: includeInTotal === 0 };
 }
 
 async function deleteFlowSource(body) {
@@ -226,5 +287,7 @@ module.exports = {
   getFlowSource,
   bindFlowSource,
   registerFlowSource,
+  updateFlowSource,
   deleteFlowSource,
+  resolveIncludeInTotal,
 };

@@ -1543,10 +1543,14 @@ function hasCollectorFilterInList(filters) {
   return normalizeFilterList(filters).some((f) => f.field === 'collector');
 }
 
-function buildCollectorScopeClause(scopes, op, flowAlias = 'f') {
+function hasSourceIdFilterInList(filters) {
+  return normalizeFilterList(filters).some((f) => f.field === 'source_id');
+}
+
+function buildCollectorScopeClause(scopes, op, flowAlias = 'f', options = {}) {
   const sourceIdCol = flowCol('sourceId');
   if (!scopes.length || !sourceIdCol) return null;
-  const sourceScope = sourcesScopeSql(scopes, 's');
+  const sourceScope = sourcesScopeSql(scopes, 's', options);
   const inner = `${flowAlias}.${sourceIdCol} IN (
     SELECT source_id FROM ${sourcesTableRef()} AS s
     WHERE ${sourceScope}
@@ -1557,7 +1561,9 @@ function buildCollectorScopeClause(scopes, op, flowAlias = 'f') {
 
 function applyLegacyCollectorFilter(filters, collectorId, params, whereClauses, flowAlias = 'f') {
   if (hasCollectorFilterInList(filters) || !collectorId) return params;
-  return appendFlowsRawCollectorFilter(collectorId, params, whereClauses, flowAlias);
+  return appendFlowsRawCollectorFilter(collectorId, params, whereClauses, flowAlias, {
+    totalsOnly: !hasSourceIdFilterInList(filters),
+  });
 }
 
 /** Bare column refs compare as-is; avoid toString(toString(f.direction)). */
@@ -1694,7 +1700,9 @@ async function buildExplorerFilterClauses(filters, dims, params) {
     if (f.field === 'collector') {
       const scopes = parseCollectorScopes(values.join(','));
       if (!scopes.length) continue;
-      const clause = buildCollectorScopeClause(scopes, op);
+      const clause = buildCollectorScopeClause(scopes, op, 'f', {
+        totalsOnly: !hasSourceIdFilterInList(filters),
+      });
       if (clause) {
         addClause(clause);
         Object.assign(params, mergeCollectorParams(params, scopes));

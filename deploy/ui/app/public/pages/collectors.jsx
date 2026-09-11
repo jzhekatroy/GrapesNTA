@@ -44,6 +44,10 @@ function flowExporterHint() {
   return 'Экспортёр потоков — source_id / observation domain, откуда приходят NetFlow, sFlow или DNS-записи.';
 }
 
+function additionalSourceHint() {
+  return 'Дополнительный источник не входит в «Всего» и детектор. Его можно смотреть только в разборе трафика, фильтр source_id.';
+}
+
 function collectorStatusHint(row) {
   if (row.state === 'online') {
     return `${row.liveSourceCount || 0}/${row.sourceCount || 0} активных за последние 5 минут`;
@@ -1202,6 +1206,7 @@ function FlowSourcesTab({ refreshKey, onReload, onNavigate }) {
   const [binding, setBinding] = useState(null);
   const [completenessBySource, setCompletenessBySource] = useState(new Map());
   const [details, setDetails] = useState(null);
+  const [savingAdditional, setSavingAdditional] = useState(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -1243,6 +1248,23 @@ function FlowSourcesTab({ refreshKey, onReload, onNavigate }) {
     })();
     return () => { cancelled = true; };
   }, [refreshKey]);
+
+  const handleAdditional = async (row, additional) => {
+    setSavingAdditional(row.sourceId);
+    const prev = rows;
+    setRows((cur) => cur.map((r) => (
+      r.sourceId === row.sourceId ? { ...r, includeInTotal: !additional, additional } : r
+    )));
+    try {
+      await ApiClient.updateFlowSource({ sourceId: row.sourceId, additional });
+      pushToast({ kind: 'success', title: SAVE_SUCCESS_TITLE, desc: SAVE_SUCCESS_DESC });
+    } catch (err) {
+      setRows(prev);
+      pushToast({ kind: 'error', title: 'Не удалось сохранить', desc: err.message });
+    } finally {
+      setSavingAdditional(null);
+    }
+  };
 
   const handleUnbind = async (row) => {
     if (!window.confirm(`Отвязать экспортёр «${row.sourceId}» от коллектора?`)) return;
@@ -1296,6 +1318,27 @@ function FlowSourcesTab({ refreshKey, onReload, onNavigate }) {
       title: 'Тип',
       width: 100,
       render: (r) => <Badge tone="neutral">{r.sourceType || '—'}</Badge>,
+    },
+    {
+      key: 'additional',
+      title: (
+        <span className="tt" data-tt={additionalSourceHint()}>
+          Дополнительный
+        </span>
+      ),
+      width: 150,
+      render: (r) => (
+        <label className="row" style={{ gap: 8, cursor: canWrite ? 'pointer' : 'default' }} onClick={(e) => e.stopPropagation()}>
+          <Checkbox
+            checked={!!r.additional || r.includeInTotal === false}
+            disabled={!canWrite || savingAdditional === r.sourceId}
+            onChange={(v) => handleAdditional(r, v)}
+          />
+          <span style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-secondary)' }}>
+            {r.additional || r.includeInTotal === false ? 'да' : 'нет'}
+          </span>
+        </label>
+      ),
     },
     {
       key: 'isLive',
@@ -1364,6 +1407,12 @@ function FlowSourcesTab({ refreshKey, onReload, onNavigate }) {
 
   return (
     <>
+      <Card pad="sm" style={{ marginBottom: 12 }}>
+        <div style={{ font: 'var(--pv-text-body-2-bold)', marginBottom: 4 }}>Дополнительный источник</div>
+        <div style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-secondary)' }}>
+          {additionalSourceHint()} Основной источник (сейчас sFlow) оставляйте без этой галки.
+        </div>
+      </Card>
       <DataTable
         rows={filtered}
         columns={cols}
@@ -1497,8 +1546,13 @@ function UnassignedTab({ refreshKey, onReload }) {
         sourceId: row.sourceId,
         sourceType: row.sourceType || 'manual',
         displayName: row.sourceId,
+        additional: true,
       });
-      pushToast({ kind: 'success', title: SAVE_SUCCESS_TITLE, desc: SAVE_SUCCESS_DESC });
+      pushToast({
+        kind: 'success',
+        title: SAVE_SUCCESS_TITLE,
+        desc: 'Записан как дополнительный — не в «Всего» и не в детекторе. Галку можно снять на вкладке «Экспортёры».',
+      });
       onReload();
     } catch (err) {
       pushToast({ kind: 'error', title: 'Не удалось зарегистрировать', desc: err.message });

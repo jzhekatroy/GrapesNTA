@@ -89,10 +89,12 @@ function scopeCol(alias, name) {
   return alias ? `${alias}.${name}` : name;
 }
 
-function sourcesScopeSql(scopes, alias = 's') {
-  const base = `${scopeCol(alias, 'include_in_total')} = 1`;
+function sourcesScopeSql(scopes, alias = 's', options = {}) {
+  const totalsOnly = options.totalsOnly !== false;
   const list = normalizeCollectorScopes(scopes);
-  if (!list.length) return base;
+  const parts = [];
+  if (totalsOnly) parts.push(`${scopeCol(alias, 'include_in_total')} = 1`);
+  if (!list.length) return parts.join(' AND ') || '1';
 
   const collectorsView = collectorsViewRef();
   const orParts = [];
@@ -121,7 +123,25 @@ function sourcesScopeSql(scopes, alias = 's') {
     )`);
   }
 
-  return `${base} AND (${orParts.join(' OR ')})`;
+  if (orParts.length) parts.push(`(${orParts.join(' OR ')})`);
+  return parts.join(' AND ') || '1';
+}
+
+function primarySourceIdsSql(alias = 'f') {
+  const sourceIdCol = flowCol('sourceId');
+  if (!sourceIdCol) return '1';
+  return `${alias}.${sourceIdCol} IN (
+    SELECT source_id FROM ${sourcesTableRef()}
+    WHERE include_in_total = 1
+  )`;
+}
+
+function primaryClientSourceSql(alias = '') {
+  const colName = alias ? `${alias}.source_id` : 'source_id';
+  return `${colName} IN (
+    SELECT source_id FROM ${sourcesTableRef()}
+    WHERE include_in_total = 1
+  )`;
 }
 
 function mergeCollectorParams(params, scopes) {
@@ -141,12 +161,12 @@ function mergeCollectorParams(params, scopes) {
   return next;
 }
 
-function appendFlowsRawCollectorFilter(collectorId, params, whereClauses, flowAlias = 'f') {
+function appendFlowsRawCollectorFilter(collectorId, params, whereClauses, flowAlias = 'f', options = {}) {
   const collectorScope = parseCollectorScopes(collectorId);
   const sourceIdCol = flowCol('sourceId');
   if (!collectorScope.length || !sourceIdCol) return params;
 
-  const sourceScope = sourcesScopeSql(collectorScope, 's');
+  const sourceScope = sourcesScopeSql(collectorScope, 's', options);
   whereClauses.push(`${flowAlias}.${sourceIdCol} IN (
     SELECT source_id FROM ${sourcesTableRef()} AS s
     WHERE ${sourceScope}
@@ -2520,6 +2540,8 @@ module.exports = {
   protoLabel,
   parseCollectorScopes,
   sourcesScopeSql,
+  primarySourceIdsSql,
+  primaryClientSourceSql,
   mergeCollectorParams,
   appendFlowsRawCollectorFilter,
   CHART_LINE_META,

@@ -146,7 +146,7 @@ const {
 } = require('./net-l2-vlans');
 const { listLocations, saveLocation } = require('./net-locations');
 const { listCollectorsAdmin, listCollectorsForSelect, saveCollector, deleteCollector } = require('./net-collectors');
-const { listFlowSources, bindFlowSource, registerFlowSource, deleteFlowSource } = require('./net-flow-sources');
+const { listFlowSources, bindFlowSource, registerFlowSource, updateFlowSource, deleteFlowSource } = require('./net-flow-sources');
 const {
   listSnmpSettings,
   saveSnmpSettings,
@@ -2247,6 +2247,16 @@ app.post('/api/refs/flow-sources', async (req, res) => {
     res.json({ ok: true, meta: result });
   } catch (err) {
     const status = err.statusCode === 400 ? 400 : 502;
+    res.status(status).json({ error: err.message });
+  }
+});
+
+app.post('/api/refs/flow-sources/update', async (req, res) => {
+  try {
+    const result = await updateFlowSource(req.body || {});
+    res.json({ ok: true, meta: result });
+  } catch (err) {
+    const status = err.statusCode === 400 ? 400 : err.statusCode === 404 ? 404 : 502;
     res.status(status).json({ error: err.message });
   }
 });

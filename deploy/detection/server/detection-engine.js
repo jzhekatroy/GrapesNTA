@@ -10,7 +10,7 @@ const {
   clientsViewRef,
   config,
 } = require('./clickhouse');
-const { flowIpExpr } = require('./queries');
+const { flowIpExpr, primarySourceIdsSql, primaryClientSourceSql } = require('./queries');
 const { TABLE, tableRef, ensureDetectionTables, PROTOS } = require('./detection-schema');
 const { processDetectionAlerts } = require('./detection-telegram');
 const { AMPLIFIER_PORTS } = require('./detection-signals');
@@ -228,6 +228,7 @@ async function loadClientVolume(minuteTs) {
       sum(packets) AS packets
     FROM default.traffic_client_1m
     WHERE direction = 'in' AND minute = ${utcDateTime('m')}
+      AND ${primaryClientSourceSql()}
     GROUP BY client_id
   `, { m: formatCh(minuteTs) }, { name: 'detection/client-volume' });
   return new Map(rows.map((r) => [String(r.scope_id), {
@@ -254,6 +255,7 @@ function minuteFilterSql() {
       AND f.time_flow_start_ns < ${utcDateTime64('to')}
       AND f.${timeCol} >= ${utcDateTime64('from')}
       AND f.${timeCol} < ${utcDateTime64('until')}
+      AND ${primarySourceIdsSql('f')}
   `;
 }
 
@@ -580,6 +582,7 @@ async function loadClientBaselines() {
     WHERE direction = 'in'
       AND minute >= now('UTC') - INTERVAL {days:UInt16} DAY
       AND minute < now('UTC')
+      AND ${primaryClientSourceSql()}
     GROUP BY client_id
   `, { days }, { name: 'detection/baseline-clients', clickhouse_settings: HEAVY, requestTimeoutMs: 180000 });
   for (const r of clients) {

@@ -1,7 +1,7 @@
 'use strict';
 
 const { query, flowsRawTableRef, netInterfacesCurrentRef, clientsViewRef, col, flowCol, asnNamesTableRef } = require('./clickhouse');
-const { flowIpExpr, flowSamplerIpExpr, sflowIfIndexExpr } = require('./queries');
+const { flowIpExpr, flowSamplerIpExpr, sflowIfIndexExpr, primarySourceIdsSql, primaryClientSourceSql } = require('./queries');
 const { AMPLIFIER_PORTS } = require('./detection-signals');
 const {
   formatCh, parseUtc, BASELINE_DAYS, BASELINE_QUARANTINE_MINUTES, EXPORT_LAG, MINUTE,
@@ -98,6 +98,7 @@ async function loadHourEnvelope({ scope, scopeId, minute }) {
       FROM default.traffic_client_1m
       WHERE client_id = {scopeId:String}
         AND direction = 'in'
+        AND ${primaryClientSourceSql()}
         AND minute >= ${utcDateTime('minute')} - INTERVAL {days:UInt16} DAY
         AND minute < ${utcDateTime('minute')}
         AND toDayOfWeek(minute) = toDayOfWeek(${utcDateTime('minute')})
@@ -139,6 +140,7 @@ async function loadForeignEnvelopes(minute) {
           sumIf(bytes, country_code NOT IN ('RU', '??', '')) / nullIf(sum(bytes), 0) AS foreign_share
         FROM default.traffic_client_country_1h
         WHERE direction = 'in'
+          AND ${primaryClientSourceSql()}
           AND hour >= ${utcDateTime('minute')} - INTERVAL {days:UInt16} DAY
           AND hour < toStartOfHour(${utcDateTime('minute')})
           AND toDayOfWeek(hour) = toDayOfWeek(${utcDateTime('minute')})
@@ -250,6 +252,7 @@ function timeFilterSql() {
       AND f.time_flow_start_ns < ${utcDateTime64('to')}
       AND f.${timeCol} >= ${utcDateTime64('from')}
       AND f.${timeCol} < ${utcDateTime64('until')}
+      AND ${primarySourceIdsSql('f')}
   `;
 }
 

@@ -1849,6 +1849,13 @@ const ApiClient = (() => {
     });
   }
 
+  async function updateFlowSource(payload) {
+    return requestJson('/api/refs/flow-sources/update', {
+      method: 'POST',
+      body: payload,
+    });
+  }
+
   async function deleteFlowSource(payload) {
     return requestJson('/api/refs/flow-sources/delete', {
       method: 'POST',
@@ -3079,6 +3086,7 @@ const ApiClient = (() => {
     loadFlowSources,
     bindFlowSource,
     registerFlowSource,
+    updateFlowSource,
     deleteFlowSource,
     loadSnmpSettings,
     saveSnmpSettings,
