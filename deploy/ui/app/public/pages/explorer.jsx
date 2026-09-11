@@ -5518,10 +5518,15 @@ function findExplorerFilterGroupDropList(clientX, clientY, stack) {
     if (!(node instanceof Element)) continue;
     const group = node.closest('.explorer-filter-group');
     if (!group || group.closest('.explorer-chip-drag-source-hidden')) continue;
-    const rect = group.getBoundingClientRect();
-    if (!explorerPointInRect(rect, clientX, clientY, 2)) continue;
     const innerList = group.querySelector(':scope > [data-explorer-filter-list], :scope > .explorer-filter-chip-list');
     if (!innerList) continue;
+    const innerRect = innerList.getBoundingClientRect();
+    const groupRect = group.getBoundingClientRect();
+    const hasInnerArea = innerRect.width > 8 && innerRect.height > 8;
+    const inDropZone = hasInnerArea
+      ? explorerPointInRect(innerRect, clientX, clientY, 6)
+      : explorerPointInRect(groupRect, clientX, clientY, 2);
+    if (!inDropZone) continue;
     let depth = 0;
     let parent = group.parentElement;
     while (parent) {
@@ -5536,6 +5541,27 @@ function findExplorerFilterGroupDropList(clientX, clientY, stack) {
   return bestList;
 }
 
+function findExplorerFilterRootDropList(clientX, clientY, stack) {
+  for (const node of stack) {
+    if (!(node instanceof Element)) continue;
+    const wrap = node.closest('.explorer-filter-group-wrap');
+    if (!wrap || wrap.closest('.explorer-chip-drag-source-hidden')) continue;
+    const rootList = wrap.closest('[data-explorer-filter-list]');
+    if (!rootList || explorerAttrParent(rootList.getAttribute('data-explorer-filter-list')) != null) continue;
+    const wrapRect = wrap.getBoundingClientRect();
+    if (!explorerPointInRect(wrapRect, clientX, clientY, 2)) continue;
+    const group = wrap.querySelector(':scope > .explorer-filter-group');
+    const innerList = group?.querySelector(':scope > [data-explorer-filter-list], :scope > .explorer-filter-chip-list');
+    const innerRect = innerList?.getBoundingClientRect();
+    if (innerRect && innerRect.width > 8 && innerRect.height > 8
+      && explorerPointInRect(innerRect, clientX, clientY, 6)) {
+      continue;
+    }
+    return rootList;
+  }
+  return null;
+}
+
 function readExplorerFilterDropTarget(clientX, clientY, dragId) {
   const stack = document.elementsFromPoint(clientX, clientY);
   const phantom = stack.find((node) => node instanceof Element && node.closest('.explorer-chip-phantom'))
@@ -5547,6 +5573,11 @@ function readExplorerFilterDropTarget(clientX, clientY, dragId) {
   const groupList = findExplorerFilterGroupDropList(clientX, clientY, stack);
   if (groupList) {
     return readExplorerFilterDropTargetFromList(groupList, clientX, clientY, dragId);
+  }
+
+  const rootList = findExplorerFilterRootDropList(clientX, clientY, stack);
+  if (rootList) {
+    return readExplorerFilterDropTargetFromList(rootList, clientX, clientY, dragId);
   }
 
   const listSet = new Set();
