@@ -289,6 +289,8 @@ function dedupeExplorerEntityItems(items) {
 }
 
 function explorerUsesCabinetClient({ filters = [], groupBy = [] } = {}) {
+  const api = explorerFilterTreeApi();
+  if (api.explorerFilterUsesField?.(filters, 'cabinet_client')) return true;
   if ((filters || []).some((f) => String(f?.field || '').trim() === 'cabinet_client')) return true;
   return (groupBy || []).some((token) => explorerGroupFieldId(token) === 'cabinet_client');
 }
@@ -795,9 +797,9 @@ function isExplorerIpLikeValue(value) {
 function validateExplorerFilterRows(filters, schema) {
   const warnings = [];
   const rowErrors = {};
-  const validFilters = [];
+  const api = explorerFilterTreeApi();
 
-  (filters || []).forEach((f) => {
+  const validateLeaf = (f) => {
     const meta = filterFieldMeta(schema, f.field);
     const valueStr = String(f.value ?? '').trim();
     const fieldLabel = meta?.label || f.field;
@@ -805,7 +807,7 @@ function validateExplorerFilterRows(filters, schema) {
     if (!valueStr && f.field !== 'direction' && f.field !== 'collector') {
       warnings.push(`Пустое значение: ${fieldLabel}`);
       rowErrors[f.id] = 'Укажите значение или удалите условие';
-      return;
+      return false;
     }
 
     const type = meta?.type || meta?.filterType;
@@ -830,9 +832,20 @@ function validateExplorerFilterRows(filters, schema) {
       }
     }
 
-    validFilters.push(f);
-  });
+    return !rowErrors[f.id];
+  };
 
+  const validateNode = (node) => {
+    if (api.isExplorerFilterGroup?.(node)) {
+      const children = (node.children || []).map(validateNode).filter(Boolean);
+      if (!children.length) return null;
+      return { ...node, children };
+    }
+    if (!validateLeaf(node)) return null;
+    return node;
+  };
+
+  const validFilters = (filters || []).map(validateNode).filter(Boolean);
   return { validFilters, warnings, rowErrors };
 }
 
@@ -910,7 +923,7 @@ function buildExplorerQueryKey(snapshot) {
   return JSON.stringify({
     metric: migrated.metric || 'bps',
     groupBy: normalizeExplorerGroupTokens(migrated.groupBy || []),
-    filters: (migrated.filters || []).map(normalizeExplorerFilter),
+    filters: normalizeExplorerFiltersList(migrated.filters || []),
     thresholds: validThresholds,
     timeRange: migrated.timeRange || '1h',
     customPeriod: migrated.timeRange === 'custom' ? migrated.customPeriod : null,
@@ -1061,7 +1074,7 @@ function migrateExplorerSnapshot(snapshot) {
   }
   return {
     ...rest,
-    filters: filters.map(normalizeExplorerFilter),
+    filters: normalizeExplorerFiltersList(filters),
     thresholds,
   };
 }
@@ -1138,6 +1151,18 @@ function explorerGroupDslApi() {
   return window.ExplorerGroupDsl || {};
 }
 
+function explorerFilterTreeApi() {
+  return window.ExplorerFilterTree || {};
+}
+
+function normalizeExplorerFiltersList(filters) {
+  const api = explorerFilterTreeApi();
+  if (api.normalizeExplorerFilterTree) {
+    return api.normalizeExplorerFilterTree(filters || [], { preserveId: true });
+  }
+  return (filters || []).map(normalizeExplorerFilter).filter((f) => f.field);
+}
+
 function cloneExplorerThresholdsList(rows) {
   return explorerThresholdApi().cloneExplorerThresholds?.(rows) || [];
 }
@@ -1155,7 +1180,7 @@ function buildExplorerQuerySnapshot({
   return {
     timeRange,
     customPeriod: timeRange === 'custom' ? { ...(customPeriod || {}) } : null,
-    filters: filters.map(normalizeExplorerFilter),
+    filters: normalizeExplorerFiltersList(filters),
     thresholds: cloneExplorerThresholdsList(thresholds || []),
     metric,
     groupBy: normalizeExplorerGroupTokens(groupBy),
@@ -1291,6 +1316,61 @@ function parseLogicPrefix(line) {
   return { logic: 'and', rest: trimmed };
 }
 
+function appendExplorerFilterLeafDsl(f, logicLabel, lines) {
+  const quoteVal = (v) => (String(v).includes(' ') ? `"${v}"` : v);
+  if (f.field === 'collector') {
+    const values = collectorFilterToArray(f.value);
+    const serializedValue = values.length
+      ? values.map((value) => quoteVal(value)).join(', ')
+      : 'all';
+    if (f.op === 'in' || f.op === 'not_in') {
+      lines.push(`${logicLabel}${f.field} ${f.op} (${serializedValue})`);
+    } else {
+      lines.push(`${logicLabel}${f.field} ${f.op} ${serializedValue}`);
+    }
+    return;
+  }
+  if (f.field === 'direction') {
+    if (f.op === 'in' || f.op === 'not_in') {
+      const vals = String(f.value).split(',').map((s) => quoteVal(s.trim())).join(', ');
+      lines.push(`${logicLabel}${f.field} ${f.op} (${vals})`);
+    } else {
+      lines.push(`${logicLabel}${f.field} ${f.op} ${quoteVal(f.value ?? '')}`.trim());
+    }
+    return;
+  }
+  if (f.field === 'tcp_flags') {
+    const vals = String(f.value).split(',').map((s) => s.trim()).filter(Boolean).join(', ');
+    lines.push(`${logicLabel}${f.field} ${f.op} (${vals})`);
+    return;
+  }
+  if (f.op === 'between') {
+    const parts = String(f.value).split(',').map((s) => s.trim());
+    lines.push(`${logicLabel}${f.field} between ${parts[0]} and ${parts[1] || parts[0]}`);
+  } else if (f.op === 'in' || f.op === 'not_in') {
+    const vals = String(f.value).split(',').map((s) => quoteVal(s.trim())).join(', ');
+    lines.push(`${logicLabel}${f.field} ${f.op} (${vals})`);
+  } else if (f.op === 'cidr') {
+    lines.push(`${logicLabel}${f.field} cidr ${quoteVal(f.value)}`);
+  } else {
+    lines.push(`${logicLabel}${f.field} ${f.op} ${quoteVal(f.value ?? '')}`.trim());
+  }
+}
+
+function appendExplorerFilterNodesDsl(nodes, lines) {
+  (nodes || []).forEach((node, index) => {
+    const logicOpt = EXPLORER_FILTER_LOGIC_OPTIONS.find((o) => o.id === normalizeFilterLogicValue(node.logic));
+    const logicLabel = index === 0 ? '' : `${logicOpt?.label || 'И'} `;
+    if (explorerFilterTreeApi().isExplorerFilterGroup?.(node)) {
+      lines.push(`${logicLabel}(`);
+      appendExplorerFilterNodesDsl(node.children, lines);
+      lines.push(')');
+      return;
+    }
+    appendExplorerFilterLeafDsl(node, logicLabel, lines);
+  });
+}
+
 function serializeExplorerFilterDsl({
   timeRange, customPeriod, filters, thresholds, schema, groupBy,
 }) {
@@ -1306,48 +1386,7 @@ function serializeExplorerFilterDsl({
   );
   if (groupLine) lines.push(groupLine);
 
-  (filters || []).forEach((f, i) => {
-    const logicOpt = EXPLORER_FILTER_LOGIC_OPTIONS.find((o) => o.id === normalizeFilterLogicValue(f.logic));
-    const logicLabel = i === 0 ? '' : `${logicOpt?.label || 'И'} `;
-    const quoteVal = (v) => (String(v).includes(' ') ? `"${v}"` : v);
-    if (f.field === 'collector') {
-      const values = collectorFilterToArray(f.value);
-      const serializedValue = values.length
-        ? values.map((value) => quoteVal(value)).join(', ')
-        : 'all';
-      if (f.op === 'in' || f.op === 'not_in') {
-        lines.push(`${logicLabel}${f.field} ${f.op} (${serializedValue})`);
-      } else {
-        lines.push(`${logicLabel}${f.field} ${f.op} ${serializedValue}`);
-      }
-      return;
-    }
-    if (f.field === 'direction') {
-      if (f.op === 'in' || f.op === 'not_in') {
-        const vals = String(f.value).split(',').map((s) => quoteVal(s.trim())).join(', ');
-        lines.push(`${logicLabel}${f.field} ${f.op} (${vals})`);
-      } else {
-        lines.push(`${logicLabel}${f.field} ${f.op} ${quoteVal(f.value ?? '')}`.trim());
-      }
-      return;
-    }
-    if (f.field === 'tcp_flags') {
-      const vals = String(f.value).split(',').map((s) => s.trim()).filter(Boolean).join(', ');
-      lines.push(`${logicLabel}${f.field} ${f.op} (${vals})`);
-      return;
-    }
-    if (f.op === 'between') {
-      const parts = String(f.value).split(',').map((s) => s.trim());
-      lines.push(`${logicLabel}${f.field} between ${parts[0]} and ${parts[1] || parts[0]}`);
-    } else if (f.op === 'in' || f.op === 'not_in') {
-      const vals = String(f.value).split(',').map((s) => quoteVal(s.trim())).join(', ');
-      lines.push(`${logicLabel}${f.field} ${f.op} (${vals})`);
-    } else if (f.op === 'cidr') {
-      lines.push(`${logicLabel}${f.field} cidr ${quoteVal(f.value)}`);
-    } else {
-      lines.push(`${logicLabel}${f.field} ${f.op} ${quoteVal(f.value ?? '')}`.trim());
-    }
-  });
+  appendExplorerFilterNodesDsl(filters, lines);
 
   const schemaMetrics = explorerThresholdApi().thresholdMetricsFromSchema?.(schema) || [];
   explorerThresholdApi().serializeExplorerThresholdsToDsl?.(thresholds, schemaMetrics)
@@ -1377,12 +1416,17 @@ function parseExplorerFilterDsl(text, schema = null) {
   let groupBySeen = false;
   let conditionIndex = 0;
   let pendingLogic = null;
+  const groupStack = [];
   const schemaMetrics = explorerThresholdApi().thresholdMetricsFromSchema?.(schema) || [];
   const dimensions = schema?.dimensions || [];
   const groupDsl = explorerGroupDslApi();
 
+  const currentFilterList = () => (
+    groupStack.length ? groupStack[groupStack.length - 1].children : filters
+  );
+
   const pushFilter = (partial) => {
-    filters.push({
+    currentFilterList().push({
       id: Date.now() + conditionIndex++,
       logic: partial.logic ?? 'and',
       field: resolveExplorerFieldId(partial.field, schema),
@@ -1390,6 +1434,17 @@ function parseExplorerFilterDsl(text, schema = null) {
       value: partial.value,
       label: partial.label ?? null,
     });
+  };
+
+  const pushFilterGroup = (logic) => {
+    const group = {
+      type: 'group',
+      id: Date.now() + conditionIndex++,
+      logic: normalizeFilterLogicValue(logic),
+      children: [],
+    };
+    currentFilterList().push(group);
+    groupStack.push(group);
   };
 
   const parseError = (lineNum, message) => {
@@ -1429,6 +1484,27 @@ function parseExplorerFilterDsl(text, schema = null) {
       const logicOnly = parseLogicOnlyLine(rawLine);
       if (logicOnly) {
         pendingLogic = logicOnly;
+        continue;
+      }
+
+      if (rawLine === ')') {
+        if (!groupStack.length) parseError(lineNum, 'лишняя закрывающая скобка )');
+        groupStack.pop();
+        continue;
+      }
+
+      const groupOpenMatch = rawLine.match(/^(?:(И\s+НЕ|AND\s+NOT|ИЛИ\s+НЕ|OR\s+NOT|ИЛИ|OR|И|AND)\s+)?\($/i);
+      if (rawLine === '(' || groupOpenMatch) {
+        let groupLogic = 'and';
+        if (groupOpenMatch?.[1]) {
+          groupLogic = parseLogicPrefix(`${groupOpenMatch[1]} x`).logic;
+        } else if (pendingLogic) {
+          groupLogic = pendingLogic;
+        } else if (currentFilterList().length > 0) {
+          groupLogic = 'and';
+        }
+        pendingLogic = null;
+        pushFilterGroup(groupLogic);
         continue;
       }
 
@@ -1580,6 +1656,10 @@ function parseExplorerFilterDsl(text, schema = null) {
 
   if (pendingLogic) {
     throw new Error('После связки условия (И, ИЛИ, И НЕ, ИЛИ НЕ) ожидается фильтр');
+  }
+
+  if (groupStack.length) {
+    throw new Error('Не закрыта группа условий (ожидается )');
   }
 
   const periodErr = validateExplorerCustomPeriod(
@@ -1800,16 +1880,22 @@ function summarizeExplorerQuery(snapshot) {
   const parts = [timeRangeLabel(snapshot.timeRange, snapshot.customPeriod)];
   const migrated = migrateExplorerSnapshot(snapshot);
   const filters = migrated.filters || [];
-  const dirCount = filters.filter((f) => f.field === 'direction').length;
-  const collCount = filters.filter((f) => f.field === 'collector').length;
+  const api = explorerFilterTreeApi();
+  const leaves = api.flattenExplorerFilters?.(filters) || filters;
+  const dirCount = leaves.filter((f) => f.field === 'direction').length;
+  const collCount = leaves.filter((f) => f.field === 'collector').length;
   if (dirCount) parts.push(`${dirCount} напр.`);
   if (collCount) parts.push(`${collCount} колл.`);
-  const otherCount = filters.filter((f) => f.field !== 'direction' && f.field !== 'collector').length;
+  const otherCount = leaves.filter((f) => f.field !== 'direction' && f.field !== 'collector').length;
   if (otherCount) parts.push(`${otherCount} усл.`);
   return parts.join(' · ');
 }
 
 function cloneExplorerFilters(filters) {
+  const api = explorerFilterTreeApi();
+  if (api.cloneExplorerFilterTree) {
+    return api.cloneExplorerFilterTree(filters || []);
+  }
   return (filters || []).map((f, i) => ({
     ...f,
     field: f.field || f.dim,
@@ -2046,15 +2132,22 @@ function FilterSearchPicker({
 
 function explorerSwitchIpScopeFromFilters(filters) {
   const ips = [];
-  for (const f of filters || []) {
-    if (f.field !== 'switch_ip') continue;
-    if (!['=', 'in'].includes(f.op)) continue;
+  const api = explorerFilterTreeApi();
+  const walk = api.walkExplorerFilters || ((list, visitor) => {
+    (list || []).forEach((node) => {
+      if (node?.type === 'group') walk(node.children || [], visitor);
+      else visitor(node);
+    });
+  });
+  walk(filters, (f) => {
+    if (f.field !== 'switch_ip') return;
+    if (!['=', 'in'].includes(f.op)) return;
     String(f.value || '')
       .split(/[\s,]+/)
       .map((v) => v.trim())
       .filter(Boolean)
       .forEach((ip) => ips.push(ip));
-  }
+  });
   return [...new Set(ips)].join(',');
 }
 
@@ -2694,7 +2787,13 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
           const allowedDimensions = new Set((data.dimensions || []).map((field) => field.id));
           const allowedFilters = new Set((data.filterFields || []).map((field) => field.id));
           setGroupBy((current) => current.filter((token) => allowedDimensions.has(explorerGroupFieldId(token))));
-          setFilters((current) => current.filter((filter) => allowedFilters.has(filter.field)));
+          setFilters((current) => {
+            const api = explorerFilterTreeApi();
+            if (api.pruneExplorerFilterTree) {
+              return api.pruneExplorerFilterTree(current, (filter) => allowedFilters.has(filter.field));
+            }
+            return current.filter((filter) => allowedFilters.has(filter.field));
+          });
           setSavedFilters(builtinExplorerPresetsForSchema(data));
         }
       }
@@ -2812,7 +2911,7 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
     explorerApi.loadQuery({
       metric: qMetric,
       groupBy: qGroupBy,
-      filters: (qFilters || []).map(normalizeExplorerFilter),
+      filters: normalizeExplorerFiltersList(qFilters || []),
       thresholds: validThresholds,
       limit: fetchLimit,
       timeRange: qTimeRange,
@@ -3053,7 +3152,7 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
         });
       }
     }
-    if (filterMode === 'graphic' && validFilters.length !== activeFilters.length) {
+    if (filterMode === 'graphic' && JSON.stringify(validFilters) !== JSON.stringify(activeFilters)) {
       setFilters(validFilters);
     }
     skipDynamicsDefaultRef.current = false;
@@ -3191,14 +3290,7 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
   };
 
   const saveAsObservation = async ({ name, lookback, materializeEnabled, reportEnabled, reportPeriod, topGroup }) => {
-    const nextFilters = (filters || []).map((f, i) => ({
-      id: f.id || `f-${i}`,
-      field: f.field,
-      op: f.op || '=',
-      value: f.value ?? '',
-      label: f.label ?? null,
-      logic: f.logic || 'and',
-    })).filter((f) => f.field);
+    const nextFilters = normalizeExplorerFiltersList(filters || []);
     const { validThresholds } = resolveExplorerThresholdPayload(thresholds, schema);
 
     // Rollup наблюдений хранит только dim0/dim1 — глубже двух измерений разрез
@@ -3333,7 +3425,7 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
     const url = buildExplorerShareUrl({
       metric,
       groupBy: normalizeExplorerGroupTokens(groupBy),
-      filters: filters.map(normalizeExplorerFilter),
+      filters: normalizeExplorerFiltersList(filters),
       thresholds: validThresholds,
       limit,
       vis,
@@ -3382,7 +3474,7 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
       const exportPayload = {
         metric: activeQuery.metric,
         groupBy: activeQuery.groupBy,
-        filters: (activeQuery.filters || []).map(normalizeExplorerFilter),
+        filters: normalizeExplorerFiltersList(activeQuery.filters || []),
         thresholds: resolveExplorerThresholdPayload(activeQuery.thresholds, schema).validThresholds,
       };
       if (meta?.windowFrom && meta?.windowTo) {
@@ -4927,6 +5019,7 @@ function ExplorerAddFilterMenu({
   schema,
   onPickField,
   cabinetMode = false,
+  compact = false,
 }) {
   const [open, setOpen] = useState(false);
   const anchorRef = React.useRef(null);
@@ -4980,7 +5073,13 @@ function ExplorerAddFilterMenu({
   return (
     <>
       <div ref={anchorRef}>
-        <Button kind="ghost" size="sm" icon="plus" onClick={() => setOpen((v) => !v)}>Условие</Button>
+        {compact ? (
+          <button type="button" className="explorer-chip-add" onClick={() => setOpen((v) => !v)}>
+            <Icon name="plus" size={12} />
+          </button>
+        ) : (
+          <Button kind="ghost" size="sm" icon="plus" onClick={() => setOpen((v) => !v)}>Условие</Button>
+        )}
       </div>
       {open && (
         <ExplorerCatalogFieldPickerPanel
@@ -5296,6 +5395,295 @@ function ExplorerQueryChip({
   );
 }
 
+let explorerChipDragClick = false;
+let explorerChipDragClickTimer = 0;
+
+function markExplorerChipDragClick() {
+  explorerChipDragClick = true;
+  window.clearTimeout(explorerChipDragClickTimer);
+  explorerChipDragClickTimer = window.setTimeout(() => {
+    explorerChipDragClick = false;
+  }, 80);
+}
+
+function consumeExplorerChipDragClick() {
+  if (!explorerChipDragClick) return false;
+  explorerChipDragClick = false;
+  return true;
+}
+
+const EXPLORER_CHIP_DRAG_SKIP = [
+  '.explorer-query-chip__remove',
+  '.explorer-group-mask-input',
+  '.explorer-logic-chip',
+  '.explorer-filter-group__remove',
+  '.explorer-chip-add',
+  '.explorer-filter-add-actions',
+  'input',
+  'select',
+  'textarea',
+].join(', ');
+
+function shouldSkipExplorerChipDrag(event) {
+  if (!(event.target instanceof Element)) return true;
+  return Boolean(event.target.closest(EXPLORER_CHIP_DRAG_SKIP));
+}
+
+function shouldSkipExplorerGroupWrapDrag(event) {
+  if (shouldSkipExplorerChipDrag(event)) return true;
+  if (!(event.target instanceof Element)) return true;
+  return Boolean(event.target.closest('.explorer-draggable-chip, .explorer-logic-chip'));
+}
+
+function explorerAttrParent(value) {
+  return value === '' || value == null ? null : value;
+}
+
+function explorerInsertIndexAmong(items, clientX, clientY) {
+  if (!items.length) return 0;
+  let insertAt = items.length;
+  for (let i = 0; i < items.length; i += 1) {
+    const rect = items[i].getBoundingClientRect();
+    const inRow = clientY >= rect.top - 10 && clientY <= rect.bottom + 10;
+    if (clientY < rect.top - 10) return i;
+    if (!inRow) continue;
+    if (clientX < rect.left + rect.width / 2) return i;
+    insertAt = i + 1;
+  }
+  return insertAt;
+}
+
+function readExplorerFilterDropTarget(clientX, clientY, dragId) {
+  const stack = document.elementsFromPoint(clientX, clientY);
+  const dragKey = String(dragId);
+  let listEl = null;
+  let itemEl = null;
+  for (const node of stack) {
+    if (!(node instanceof Element)) continue;
+    if (!itemEl) {
+      const item = node.closest('[data-explorer-filter-item]');
+      if (item && item.getAttribute('data-explorer-filter-item') !== dragKey) itemEl = item;
+    }
+    if (!listEl) {
+      const list = node.closest('[data-explorer-filter-list]');
+      if (list) listEl = list;
+    }
+    if (itemEl && listEl) break;
+  }
+
+  const listFromItem = itemEl?.closest('[data-explorer-filter-list]') || listEl;
+  if (!listFromItem) return null;
+  const parentId = explorerAttrParent(listFromItem.getAttribute('data-explorer-filter-list'));
+  const siblings = [...listFromItem.querySelectorAll(':scope > [data-explorer-filter-item]')]
+    .filter((el) => el.getAttribute('data-explorer-filter-item') !== dragKey);
+  if (itemEl && siblings.includes(itemEl)) {
+    return { parentId, index: explorerInsertIndexAmong([itemEl], clientX, clientY) === 0
+      ? siblings.indexOf(itemEl)
+      : siblings.indexOf(itemEl) + 1 };
+  }
+  return { parentId, index: explorerInsertIndexAmong(siblings, clientX, clientY) };
+}
+
+function readExplorerListDropIndex(clientX, clientY, dragIndex) {
+  const stack = document.elementsFromPoint(clientX, clientY);
+  let listEl = null;
+  let itemEl = null;
+  for (const node of stack) {
+    if (!(node instanceof Element)) continue;
+    if (!itemEl) {
+      const item = node.closest('[data-explorer-list-item]');
+      if (item && Number(item.getAttribute('data-explorer-list-item')) !== dragIndex) itemEl = item;
+    }
+    if (!listEl) {
+      const list = node.closest('[data-explorer-list]');
+      if (list) listEl = list;
+    }
+    if (itemEl && listEl) break;
+  }
+  if (!listEl) return null;
+  const siblings = [...listEl.querySelectorAll(':scope > [data-explorer-list-item]')]
+    .filter((el) => Number(el.getAttribute('data-explorer-list-item')) !== dragIndex);
+  if (itemEl && siblings.includes(itemEl)) {
+    const idx = siblings.indexOf(itemEl);
+    return explorerInsertIndexAmong([itemEl], clientX, clientY) === 0 ? idx : idx + 1;
+  }
+  return explorerInsertIndexAmong(siblings, clientX, clientY);
+}
+
+function bindExplorerPointerSession(dragRef, {
+  onMove,
+  onFinish,
+}) {
+  const preventExplorerSelect = (event) => event.preventDefault();
+  const move = (event) => {
+    const drag = dragRef.current;
+    if (!drag) return;
+    if (drag.moved && event.cancelable) event.preventDefault();
+    onMove(event);
+    const live = dragRef.current;
+    if (live?.moved && !live.captured) {
+      live.captured = true;
+      document.body.classList.add('explorer-chip-dragging');
+      window.addEventListener('selectstart', preventExplorerSelect);
+      try {
+        live.target?.setPointerCapture?.(live.pointerId);
+      } catch { /* ignore */ }
+    }
+  };
+  const finish = () => {
+    window.removeEventListener('pointermove', move);
+    window.removeEventListener('pointerup', finish);
+    window.removeEventListener('pointercancel', finish);
+    window.removeEventListener('selectstart', preventExplorerSelect);
+    document.body.classList.remove('explorer-chip-dragging');
+    const drag = dragRef.current;
+    try {
+      drag?.target?.releasePointerCapture?.(drag.pointerId);
+    } catch { /* already released */ }
+    onFinish();
+  };
+  window.addEventListener('pointermove', move, { passive: false });
+  window.addEventListener('pointerup', finish);
+  window.addEventListener('pointercancel', finish);
+}
+
+function startExplorerChipPointerDrag(event, { bubble = false } = {}) {
+  if (event.button !== 0) return false;
+  if (shouldSkipExplorerChipDrag(event)) return false;
+  if (bubble) event.stopPropagation();
+  return true;
+}
+
+function ExplorerChipDropMarker({ active }) {
+  return (
+    <span
+      className={`explorer-chip-drop-marker${active ? ' is-active' : ''}`}
+      aria-hidden="true"
+    />
+  );
+}
+
+function useExplorerFilterDrag({ filters, setFilters }) {
+  const treeApi = explorerFilterTreeApi();
+  const dragRef = React.useRef(null);
+  const [draggingId, setDraggingId] = React.useState(null);
+  const [dragMoved, setDragMoved] = React.useState(false);
+  const [dropTarget, setDropTarget] = React.useState(null);
+
+  const startDrag = React.useCallback((id, event, { bubble = false } = {}) => {
+    if (!startExplorerChipPointerDrag(event, { bubble })) return;
+    const snapshot = cloneExplorerFilters(filters);
+    dragRef.current = {
+      id,
+      moved: false,
+      captured: false,
+      startX: event.clientX,
+      startY: event.clientY,
+      filtersSnapshot: snapshot,
+      dropTarget: null,
+      pointerId: event.pointerId,
+      target: event.currentTarget,
+    };
+    setDraggingId(id);
+    setDragMoved(false);
+    setDropTarget(null);
+    bindExplorerPointerSession(dragRef, {
+      onMove: (moveEvent) => {
+        const drag = dragRef.current;
+        if (!drag) return;
+        if (!drag.moved
+          && Math.abs(moveEvent.clientX - drag.startX) + Math.abs(moveEvent.clientY - drag.startY) > 4) {
+          drag.moved = true;
+          setDragMoved(true);
+        }
+        if (!drag.moved) return;
+        const nextTarget = readExplorerFilterDropTarget(moveEvent.clientX, moveEvent.clientY, drag.id);
+        drag.dropTarget = nextTarget;
+        setDropTarget(nextTarget);
+      },
+      onFinish: () => {
+        const drag = dragRef.current;
+        dragRef.current = null;
+        setDraggingId(null);
+        setDragMoved(false);
+        setDropTarget(null);
+        if (!drag?.moved) return;
+        markExplorerChipDragClick();
+        if (!drag.dropTarget || !treeApi.moveExplorerFilterNode) return;
+        setFilters(treeApi.moveExplorerFilterNode(
+          drag.filtersSnapshot,
+          drag.id,
+          drag.dropTarget.parentId,
+          drag.dropTarget.index,
+        ));
+      },
+    });
+  }, [filters, setFilters, treeApi]);
+
+  return { draggingId, dragMoved, dropTarget, startDrag };
+}
+
+function useExplorerListDrag({ onReorder }) {
+  const dragRef = React.useRef(null);
+  const [draggingIndex, setDraggingIndex] = React.useState(null);
+  const [dragMoved, setDragMoved] = React.useState(false);
+  const [dropIndex, setDropIndex] = React.useState(null);
+
+  const startDrag = React.useCallback((index, event, { bubble = false } = {}) => {
+    if (!startExplorerChipPointerDrag(event, { bubble })) return;
+    dragRef.current = {
+      index,
+      moved: false,
+      captured: false,
+      startX: event.clientX,
+      startY: event.clientY,
+      dropIndex: null,
+      pointerId: event.pointerId,
+      target: event.currentTarget,
+    };
+    setDraggingIndex(index);
+    setDragMoved(false);
+    setDropIndex(null);
+    bindExplorerPointerSession(dragRef, {
+      onMove: (moveEvent) => {
+        const drag = dragRef.current;
+        if (!drag) return;
+        if (!drag.moved
+          && Math.abs(moveEvent.clientX - drag.startX) + Math.abs(moveEvent.clientY - drag.startY) > 4) {
+          drag.moved = true;
+          setDragMoved(true);
+        }
+        if (!drag.moved) return;
+        const nextIndex = readExplorerListDropIndex(moveEvent.clientX, moveEvent.clientY, drag.index);
+        drag.dropIndex = nextIndex;
+        setDropIndex(nextIndex);
+      },
+      onFinish: () => {
+        const drag = dragRef.current;
+        dragRef.current = null;
+        setDraggingIndex(null);
+        setDragMoved(false);
+        setDropIndex(null);
+        if (!drag?.moved) return;
+        markExplorerChipDragClick();
+        if (drag.dropIndex == null || drag.dropIndex === drag.index) return;
+        onReorder?.(drag.index, drag.dropIndex);
+      },
+    });
+  }, [onReorder]);
+
+  return { draggingIndex, dragMoved, dropIndex, startDrag };
+}
+
+function ExplorerListDropMarker({ active }) {
+  return (
+    <span
+      className={`explorer-chip-drop-marker explorer-chip-drop-marker--list${active ? ' is-active' : ''}`}
+      aria-hidden="true"
+    />
+  );
+}
+
 function ExplorerPopoverMenu({ anchorRef, open, onClose, children, minWidth = 200, maxHeight = 320 }) {
   const panelRef = React.useRef(null);
   const [menuStyle, setMenuStyle] = useState(null);
@@ -5421,25 +5809,41 @@ function ExplorerMetricGroupControls({
 }) {
   const [addingDim, setAddingDim] = useState(false);
   const dimAnchorRef = React.useRef(null);
+  const treeApi = explorerFilterTreeApi();
+  const { draggingIndex, dragMoved, dropIndex, startDrag } = useExplorerListDrag({
+    onReorder: (fromIndex, toIndex) => {
+      setGroupBy((current) => treeApi.reorderExplorerList?.(current, fromIndex, toIndex) || current);
+    },
+  });
 
   return (
-    <div className="explorer-metric-group-chips">
+    <div className="explorer-metric-group-chips" data-explorer-list="1">
       <ExplorerMetricChipPicker metrics={availableMetrics} value={metric} onChange={setMetric} />
       {showGroupBy && (
         <>
           <span className="explorer-chip-row__sep">группировать по</span>
-          {groupBy.map((token) => {
+          <ExplorerListDropMarker active={dropIndex === 0} />
+          {groupBy.map((token, index) => {
             const id = explorerGroupFieldId(token);
             return (
-              <ExplorerGroupChip
-                key={id}
-                token={token}
-                dimension={dimensionById[id]}
-                onChange={(nextToken) => setGroupBy((current) => normalizeExplorerGroupTokens(
-                  current.map((item) => (explorerGroupFieldId(item) === id ? nextToken : item)),
-                ))}
-                onRemove={() => setGroupBy((current) => current.filter((item) => explorerGroupFieldId(item) !== id))}
-              />
+              <React.Fragment key={`${id}-${index}`}>
+                <span
+                  className={`explorer-draggable-chip${draggingIndex === index && dragMoved ? ' is-dragging' : ''}`}
+                  data-explorer-list-item={index}
+                  title="Перетащить"
+                  onPointerDown={(event) => startDrag(index, event)}
+                >
+                  <ExplorerGroupChip
+                    token={token}
+                    dimension={dimensionById[id]}
+                    onChange={(nextToken) => setGroupBy((current) => normalizeExplorerGroupTokens(
+                      current.map((item, itemIndex) => (itemIndex === index ? nextToken : item)),
+                    ))}
+                    onRemove={() => setGroupBy((current) => current.filter((_, itemIndex) => itemIndex !== index))}
+                  />
+                </span>
+                <ExplorerListDropMarker active={dropIndex === index + 1} />
+              </React.Fragment>
             );
           })}
           <span ref={dimAnchorRef}>
@@ -5591,17 +5995,35 @@ function ExplorerFilterChipItem({
   onCloseEdit,
   onChange,
   onRemove,
+  onDragStart,
+  dragging = false,
 }) {
   const anchorRef = React.useRef(null);
   const chipLabel = formatExplorerFilterChipLabel(filter, schema);
 
   return (
-    <span ref={anchorRef}>
+    <span
+      ref={anchorRef}
+      className={`explorer-draggable-chip${dragging ? ' is-dragging' : ''}`}
+      data-explorer-filter-item={filter.id}
+      title="Перетащить"
+      onPointerDown={(event) => {
+        if (!onDragStart) return;
+        onDragStart(event);
+      }}
+    >
       <ExplorerQueryChip
         label={chipLabel}
         warn={Boolean(rowError)}
         title={rowError || chipLabel}
-        onClick={onToggleEdit}
+        onClick={(event) => {
+          if (consumeExplorerChipDragClick()) {
+            event.preventDefault();
+            event.stopPropagation();
+            return;
+          }
+          onToggleEdit();
+        }}
         onRemove={onRemove}
       />
       <ExplorerFilterEditPopover
@@ -5649,6 +6071,169 @@ function ExplorerThresholdChipItem({
   );
 }
 
+function ExplorerFilterChipList({
+  rootFilters,
+  setRootFilters,
+  parentId = null,
+  depth = 0,
+  schema,
+  filterFields,
+  switchIpScope,
+  filterRowErrors,
+  editingFilterId,
+  setEditingFilterId,
+  cabinetMode,
+  draggingId,
+  dragMoved = false,
+  dropTarget,
+  startDrag,
+}) {
+  const treeApi = explorerFilterTreeApi();
+  const list = parentId == null
+    ? (Array.isArray(rootFilters) ? rootFilters : [])
+    : (treeApi.findExplorerFilterLocation?.(rootFilters, parentId)?.node?.children || []);
+  const dropParentAttr = parentId == null ? '' : parentId;
+  const isDropActive = (index) => dropTarget?.parentId === parentId && dropTarget?.index === index;
+
+  const updateFilter = (id, patch) => {
+    if (treeApi.updateExplorerFilterNode) {
+      setRootFilters(treeApi.updateExplorerFilterNode(rootFilters, id, patch));
+      return;
+    }
+    setRootFilters(rootFilters.map((f) => (f.id === id ? { ...f, ...patch } : f)));
+  };
+
+  const removeNode = (id) => {
+    if (treeApi.removeExplorerFilterNode) {
+      setRootFilters(treeApi.removeExplorerFilterNode(rootFilters, id));
+      return;
+    }
+    setRootFilters(rootFilters.filter((x) => x.id !== id));
+  };
+
+  const appendLeaf = (fieldId) => {
+    const id = treeApi.newExplorerFilterId?.() || Date.now() + Math.random();
+    const leaf = {
+      id,
+      field: fieldId,
+      op: defaultOpForField(schema, fieldId),
+      value: '',
+      logic: 'and',
+    };
+    if (parentId == null) {
+      setRootFilters([...list, leaf]);
+    } else if (treeApi.updateExplorerFilterNode) {
+      setRootFilters(treeApi.updateExplorerFilterNode(rootFilters, parentId, {
+        children: [...list, leaf],
+      }));
+    }
+    requestAnimationFrame(() => setEditingFilterId(id));
+  };
+
+  return (
+    <span className="explorer-filter-chip-list" data-explorer-filter-list={dropParentAttr}>
+      <ExplorerChipDropMarker active={isDropActive(0)} />
+      {list.map((node, index) => {
+        if (treeApi.isExplorerFilterGroup?.(node)) {
+          return (
+            <React.Fragment key={node.id}>
+              {index > 0 && (
+                <ExplorerLogicChip
+                  value={node.logic}
+                  onChange={(logic) => updateFilter(node.id, { logic })}
+                />
+              )}
+              <span
+                className={`explorer-filter-group-wrap${draggingId === node.id && dragMoved ? ' is-dragging' : ''}`}
+                data-explorer-filter-item={node.id}
+                title="Перетащить группу"
+                onPointerDown={(event) => {
+                  if (shouldSkipExplorerGroupWrapDrag(event)) return;
+                  startDrag(node.id, event);
+                }}
+              >
+                <span className="explorer-filter-group">
+                  <span className="explorer-filter-group__paren" aria-hidden="true">(</span>
+                  <ExplorerFilterChipList
+                    rootFilters={rootFilters}
+                    setRootFilters={setRootFilters}
+                    parentId={node.id}
+                    depth={depth + 1}
+                    schema={schema}
+                    filterFields={filterFields}
+                    switchIpScope={switchIpScope}
+                    filterRowErrors={filterRowErrors}
+                    editingFilterId={editingFilterId}
+                    setEditingFilterId={setEditingFilterId}
+                    cabinetMode={cabinetMode}
+                    draggingId={draggingId}
+                    dragMoved={dragMoved}
+                    dropTarget={dropTarget}
+                    startDrag={startDrag}
+                  />
+                  <span className="explorer-filter-group__paren" aria-hidden="true">)</span>
+                  <button
+                    type="button"
+                    className="explorer-filter-group__remove icon-btn"
+                    title="Удалить группу"
+                    aria-label="Удалить группу"
+                    onClick={() => {
+                      removeNode(node.id);
+                      if (editingFilterId && (node.children || []).some((child) => child.id === editingFilterId)) {
+                        setEditingFilterId(null);
+                      }
+                    }}
+                  >
+                    <Icon name="x" size={10} stroke={2.5} />
+                  </button>
+                </span>
+              </span>
+              <ExplorerChipDropMarker active={isDropActive(index + 1)} />
+            </React.Fragment>
+          );
+        }
+
+        return (
+          <React.Fragment key={node.id}>
+            {index > 0 && (
+              <ExplorerLogicChip
+                value={node.logic}
+                onChange={(logic) => updateFilter(node.id, { logic })}
+              />
+            )}
+            <ExplorerFilterChipItem
+              filter={node}
+              schema={schema}
+              filterFields={filterFields}
+              switchIpScope={switchIpScope}
+              rowError={filterRowErrors[node.id]}
+              isEditing={editingFilterId === node.id}
+              onToggleEdit={() => setEditingFilterId(node.id)}
+              onCloseEdit={() => setEditingFilterId(null)}
+              onChange={(patch) => updateFilter(node.id, patch)}
+              onRemove={() => {
+                removeNode(node.id);
+                if (editingFilterId === node.id) setEditingFilterId(null);
+              }}
+              onDragStart={(event) => startDrag(node.id, event, { bubble: true })}
+              dragging={draggingId === node.id && dragMoved}
+            />
+            <ExplorerChipDropMarker active={isDropActive(index + 1)} />
+          </React.Fragment>
+        );
+      })}
+      {depth > 0 && (
+        <ExplorerAddFilterMenu
+          schema={schema}
+          cabinetMode={cabinetMode}
+          compact
+          onPickField={appendLeaf}
+        />
+      )}
+    </span>
+  );
+}
+
 function ExplorerConditionChipsRow({
   schema,
   filters,
@@ -5658,47 +6243,40 @@ function ExplorerConditionChipsRow({
   editingFilterId,
   setEditingFilterId,
   onPickField,
+  onAddGroup,
 }) {
   const filterFields = schema?.filterFields || [];
   const switchIpScope = explorerSwitchIpScopeFromFilters(filters);
-  const updateFilter = (id, patch) => setFilters(filters.map((f) => (f.id === id ? { ...f, ...patch } : f)));
+  const treeApi = explorerFilterTreeApi();
+  const { draggingId, dragMoved, dropTarget, startDrag } = useExplorerFilterDrag({ filters, setFilters });
 
-  const rowErrors = filters
-    .map((f) => filterRowErrors[f.id])
-    .filter(Boolean);
+  const rowErrors = Object.values(filterRowErrors).filter(Boolean);
 
   return (
     <ExplorerChipRow label="Условия" errors={rowErrors}>
-      {filters.map((f, i) => (
-        <React.Fragment key={f.id}>
-          {i > 0 && (
-            <ExplorerLogicChip
-              value={f.logic}
-              onChange={(logic) => updateFilter(f.id, { logic })}
-            />
-          )}
-          <ExplorerFilterChipItem
-            filter={f}
-            schema={schema}
-            filterFields={filterFields}
-            switchIpScope={switchIpScope}
-            rowError={filterRowErrors[f.id]}
-            isEditing={editingFilterId === f.id}
-            onToggleEdit={() => setEditingFilterId(f.id)}
-            onCloseEdit={() => setEditingFilterId(null)}
-            onChange={(patch) => updateFilter(f.id, patch)}
-            onRemove={() => {
-              setFilters(filters.filter((x) => x.id !== f.id));
-              if (editingFilterId === f.id) setEditingFilterId(null);
-            }}
-          />
-        </React.Fragment>
-      ))}
-      <ExplorerAddFilterMenu
+      <ExplorerFilterChipList
+        rootFilters={filters}
+        setRootFilters={setFilters}
         schema={schema}
+        filterFields={filterFields}
+        switchIpScope={switchIpScope}
+        filterRowErrors={filterRowErrors}
+        editingFilterId={editingFilterId}
+        setEditingFilterId={setEditingFilterId}
         cabinetMode={cabinetMode}
-        onPickField={onPickField}
+        draggingId={draggingId}
+        dragMoved={dragMoved}
+        dropTarget={dropTarget}
+        startDrag={startDrag}
       />
+      <div className="explorer-filter-add-actions">
+        <ExplorerAddFilterMenu
+          schema={schema}
+          cabinetMode={cabinetMode}
+          onPickField={onPickField}
+        />
+        <Button kind="ghost" size="sm" onClick={onAddGroup}>Группа</Button>
+      </div>
     </ExplorerChipRow>
   );
 }
@@ -5916,7 +6494,8 @@ function ExplorerFilters({
   };
 
   const addFilterWithField = (fieldId) => {
-    const id = Date.now() + Math.random();
+    const treeApi = explorerFilterTreeApi();
+    const id = treeApi.newExplorerFilterId?.() || Date.now() + Math.random();
     setFilters([
       ...filters,
       {
@@ -5928,6 +6507,13 @@ function ExplorerFilters({
       },
     ]);
     requestAnimationFrame(() => setEditingFilterId(id));
+  };
+
+  const addFilterGroup = () => {
+    const treeApi = explorerFilterTreeApi();
+    if (treeApi.addExplorerFilterGroup) {
+      setFilters(treeApi.addExplorerFilterGroup(filters, { logic: 'and' }));
+    }
   };
 
   const filterActions = (
@@ -6037,6 +6623,7 @@ function ExplorerFilters({
             editingFilterId={editingFilterId}
             setEditingFilterId={setEditingFilterId}
             onPickField={addFilterWithField}
+            onAddGroup={addFilterGroup}
           />
 
           <ExplorerThresholdChipsRow

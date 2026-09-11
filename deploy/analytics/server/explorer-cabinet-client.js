@@ -1,6 +1,7 @@
 const { col, flowCol, query, netInterfacesCurrentRef } = require('./clickhouse');
 const { flowSamplerIpExpr, sflowIfIndexExpr } = require('./queries');
 const { asStringArray, buildClientSearchWhere } = require('./client-search');
+const { explorerFilterUsesField } = require('./explorer-filter-tree.js');
 
 const CLIENTS_ENABLED = 'default.net_clients_enabled';
 const CLIENTS_TABLE = 'default.net_clients';
@@ -454,10 +455,7 @@ async function searchCabinetClients({ q = '', limit = 20 } = {}) {
 }
 
 function queryUsesCabinetClient(q = {}) {
-  const filters = Array.isArray(q.filters) ? q.filters : [];
-  if (filters.some((f) => String(f?.field || f?.dim || '').trim() === 'cabinet_client')) {
-    return true;
-  }
+  if (explorerFilterUsesField(q.filters, 'cabinet_client')) return true;
   const groupBy = Array.isArray(q.groupBy) ? q.groupBy : [];
   return groupBy.some((token) => {
     const raw = String(token ?? '').trim();

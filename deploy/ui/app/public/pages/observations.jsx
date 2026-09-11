@@ -294,35 +294,63 @@ function filterPredicateLabel(f, filterFields) {
   return `${label} ${f.op} ${f.value ?? ''}`;
 }
 
+function formatFilterNodeSummary(f, filterFields, index = 0) {
+  if (f?.type === 'group' && Array.isArray(f.children)) {
+    const inner = f.children.map((child, childIndex) => formatFilterNodeSummary(child, filterFields, childIndex)).join(' ');
+    const wrapped = f.children.length > 1 ? `(${inner})` : inner;
+    if (index === 0) return wrapped;
+    const logic = FILTER_LOGIC_EXPR[f.logic] || FILTER_LOGIC_EXPR.and;
+    return `· ${logic} · ${wrapped}`;
+  }
+  const pred = filterPredicateLabel(f, filterFields);
+  if (index === 0) return pred;
+  const logic = FILTER_LOGIC_EXPR[f.logic] || FILTER_LOGIC_EXPR.and;
+  return `· ${logic} · ${pred}`;
+}
+
 function formatFilterSummary(filters, filterFields) {
   const list = Array.isArray(filters) ? filters : [];
   if (!list.length) return 'без фильтров';
-  return list.map((f, i) => {
-    const pred = filterPredicateLabel(f, filterFields);
-    if (i === 0) return pred;
-    const logic = FILTER_LOGIC_EXPR[f.logic] || FILTER_LOGIC_EXPR.and;
-    return `· ${logic} · ${pred}`;
-  }).join(' ');
+  return list.map((f, i) => formatFilterNodeSummary(f, filterFields, i)).join(' ');
 }
 
-function renderFilterSummary(filters, filterFields) {
-  const list = Array.isArray(filters) ? filters : [];
-  if (!list.length) return 'без фильтров';
-  return list.map((f, i) => {
+function renderFilterNodeSummary(f, filterFields, index = 0) {
+  if (f?.type === 'group' && Array.isArray(f.children)) {
     const logic = FILTER_LOGIC_EXPR[f.logic] || FILTER_LOGIC_EXPR.and;
     return (
-      <React.Fragment key={f.id || `${f.field}-${i}`}>
-        {i > 0 ? (
+      <React.Fragment key={f.id || `group-${index}`}>
+        {index > 0 ? (
           <>
             {' · '}
             <span className="obs-tile__filter-logic">{logic}</span>
             {' · '}
           </>
         ) : null}
-        {filterPredicateLabel(f, filterFields)}
+        {'('}
+        {f.children.map((child, childIndex) => renderFilterNodeSummary(child, filterFields, childIndex))}
+        {')'}
       </React.Fragment>
     );
-  });
+  }
+  const logic = FILTER_LOGIC_EXPR[f.logic] || FILTER_LOGIC_EXPR.and;
+  return (
+    <React.Fragment key={f.id || `${f.field}-${index}`}>
+      {index > 0 ? (
+        <>
+          {' · '}
+          <span className="obs-tile__filter-logic">{logic}</span>
+          {' · '}
+        </>
+      ) : null}
+      {filterPredicateLabel(f, filterFields)}
+    </React.Fragment>
+  );
+}
+
+function renderFilterSummary(filters, filterFields) {
+  const list = Array.isArray(filters) ? filters : [];
+  if (!list.length) return 'без фильтров';
+  return list.map((f, i) => renderFilterNodeSummary(f, filterFields, i));
 }
 
 function formatGroupSummary(groupBy, groupOptions) {

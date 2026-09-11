@@ -71,6 +71,11 @@ const {
   peakWindowSeconds,
   normalizePeakWindow,
 } = require('./explorer-thresholds');
+const {
+  isExplorerFilterGroup,
+  normalizeExplorerFilterTree,
+  explorerFilterUsesField,
+} = require('./explorer-filter-tree.js');
 
 const EXPLORER_MAX_EXPORT_ROWS = 10000;
 const EXPLORER_MAX_LIMIT = EXPLORER_MAX_EXPORT_ROWS;
@@ -1219,7 +1224,11 @@ function validateCabinetExplorerFields(body = {}) {
     throw cabinetExplorerValidationError('filters должен быть массивом');
   }
   const dims = cabinetExplorerDimensions();
-  for (const filter of Array.isArray(body.filters) ? body.filters : []) {
+  const validateCabinetFilterNode = (filter) => {
+    if (isExplorerFilterGroup(filter)) {
+      (filter.children || []).forEach(validateCabinetFilterNode);
+      return;
+    }
     const field = String(filter?.field || filter?.dim || '').trim();
     const dim = dims[field];
     if (!field || !CABINET_EXPLORER_FIELD_IDS.has(field) || !dim) {
@@ -1230,6 +1239,9 @@ function validateCabinetExplorerFields(body = {}) {
     if (!allowedOps.includes(op)) {
       throw cabinetExplorerValidationError(`Недоступный оператор фильтра ${field}: ${op}`);
     }
+  };
+  for (const filter of Array.isArray(body.filters) ? body.filters : []) {
+    validateCabinetFilterNode(filter);
   }
 }
 
@@ -1470,13 +1482,7 @@ function normalizeFilterLogic(logic) {
 }
 
 function normalizeFilterList(filters) {
-  return (Array.isArray(filters) ? filters : []).map((f) => ({
-    field: String(f?.field || f?.dim || '').trim(),
-    op: String(f?.op || '=').trim().toLowerCase(),
-    value: f?.value,
-    label: f?.label || null,
-    logic: normalizeFilterLogic(f?.logic),
-  })).filter((f) => f.field);
+  return normalizeExplorerFilterTree(filters, { preserveId: true });
 }
 
 function protoNameToNumber(name) {
@@ -1540,7 +1546,7 @@ function pushExplorerFilterClause(clauses, clause, logic) {
 }
 
 function hasCollectorFilterInList(filters) {
-  return normalizeFilterList(filters).some((f) => f.field === 'collector');
+  return explorerFilterUsesField(filters, 'collector');
 }
 
 function hasSourceIdFilterInList(filters) {
@@ -1684,18 +1690,26 @@ function buildMacFilterClause(macCol, op, paramName, { normalized, hexValues, co
 }
 
 async function buildExplorerFilterClauses(filters, dims, params) {
-  const clauses = [];
   const joins = new Set();
   let idx = 0;
   const idxRef = { i: 0 };
   const asnNames = asnNamesTableRef();
   const asnRegistry = asnRegistryEnrichedTableRef();
 
-  for (const f of normalizeFilterList(filters)) {
-    const op = f.op;
-    const values = parseFilterValues(f.value);
-    if (!values.length && op !== 'between') continue;
-    const addClause = (clause) => pushExplorerFilterClause(clauses, clause, f.logic);
+  async function buildClausesForList(filterList) {
+    const clauses = [];
+    for (const f of filterList) {
+      if (isExplorerFilterGroup(f)) {
+        const nestedClauses = await buildClausesForList(f.children || []);
+        const nestedSql = combineExplorerFilterSql(nestedClauses);
+        if (nestedSql) pushExplorerFilterClause(clauses, nestedSql, f.logic);
+        continue;
+      }
+
+      const op = f.op;
+      const values = parseFilterValues(f.value);
+      if (!values.length && op !== 'between') continue;
+      const addClause = (clause) => pushExplorerFilterClause(clauses, clause, f.logic);
 
     if (f.field === 'collector') {
       const scopes = parseCollectorScopes(values.join(','));
@@ -1949,8 +1963,11 @@ async function buildExplorerFilterClauses(filters, dims, params) {
       params[paramName] = values;
       addClause(`${cmpExpr} NOT IN {${paramName}:Array(String)}`);
     } else addClause(`${cmpExpr} = {${paramName}:String}`);
+    }
+    return clauses;
   }
 
+  const clauses = await buildClausesForList(normalizeFilterList(filters));
   return { filterSql: combineExplorerFilterSql(clauses), joins: [...joins] };
 }
 
@@ -3881,4 +3898,5 @@ module.exports = {
   explorerAggPctColumn,
   summaryFromExplorerFlowRows,
   buildSummaryFromFlowRows: summaryFromExplorerFlowRows,
+  combineExplorerFilterSql,
 };

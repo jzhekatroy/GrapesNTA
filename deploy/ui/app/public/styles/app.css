@@ -1563,6 +1563,130 @@ a.nav-item--active:visited { color: var(--fg-primary); }
   color: var(--accent);
 }
 
+.explorer-logic-picker-item.is-active {
+  font-weight: 600;
+  color: var(--accent);
+}
+
+.explorer-draggable-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  max-width: 100%;
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.explorer-draggable-chip:active,
+.explorer-draggable-chip.is-dragging {
+  cursor: grabbing;
+}
+
+.explorer-draggable-chip .explorer-query-chip__body,
+.explorer-draggable-chip .explorer-group-chip {
+  cursor: inherit;
+}
+
+.explorer-draggable-chip .explorer-query-chip,
+.explorer-draggable-chip .explorer-query-chip__label {
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.explorer-draggable-chip.is-dragging,
+.explorer-filter-group-wrap.is-dragging {
+  opacity: 0.55;
+  pointer-events: none;
+}
+
+body.explorer-chip-dragging {
+  cursor: grabbing;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+body.explorer-chip-dragging * {
+  cursor: grabbing !important;
+}
+
+.explorer-chip-drop-marker {
+  flex: 0 0 4px;
+  width: 4px;
+  height: 28px;
+  border-radius: 999px;
+  background: transparent;
+  align-self: center;
+  pointer-events: none;
+}
+
+.explorer-chip-drop-marker.is-active {
+  background: var(--accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 20%, transparent);
+}
+
+.explorer-chip-drop-marker--list {
+  height: 28px;
+}
+
+.explorer-filter-chip-list {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.explorer-filter-group-wrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  max-width: 100%;
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.explorer-filter-group-wrap:active,
+.explorer-filter-group-wrap.is-dragging {
+  cursor: grabbing;
+}
+
+.explorer-filter-group {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 6px;
+  border-radius: 10px;
+  border: 1px dashed color-mix(in srgb, var(--accent) 28%, var(--bd-soft));
+  background: color-mix(in srgb, var(--accent) 5%, var(--surf-1));
+}
+
+.explorer-filter-group__paren {
+  color: var(--fg-muted);
+  font: var(--pv-text-body-3-bold);
+  font-size: 12px;
+  line-height: 1;
+  user-select: none;
+}
+
+.explorer-filter-group__remove {
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
+}
+
+.explorer-filter-add-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
 @media (max-width: 640px) {
   .explorer-chip-row__label {
     flex: 1 1 100%;

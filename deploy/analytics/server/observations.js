@@ -108,29 +108,43 @@ function looksLikeCidr(value) {
     || /^[0-9a-fA-F:]+\/\d{1,3}$/.test(s);
 }
 
+function normalizeFilterLeaf(f, index) {
+  const field = String(f.field || '').trim();
+  let op = String(f.op || '=').trim();
+  const value = f.value ?? '';
+  if (
+    looksLikeCidr(value)
+    && (op === '=' || op === '==' || op === 'contains')
+    && (field === 'src_ip' || field === 'dst_ip' || field === 'own_network' || field.endsWith('_ip'))
+  ) {
+    op = 'cidr';
+  }
+  if (!field) return null;
+  return {
+    id: f.id || `f-${index}`,
+    field,
+    op,
+    value,
+    label: f.label ?? null,
+    logic: f.logic || 'and',
+  };
+}
+
 function normalizeFilters(filters) {
   if (!Array.isArray(filters)) return [];
   return filters.map((f, i) => {
-    const field = String(f.field || '').trim();
-    let op = String(f.op || '=').trim();
-    const value = f.value ?? '';
-    // CIDR value with "=" never matches — coerce to cidr for IP fields
-    if (
-      looksLikeCidr(value)
-      && (op === '=' || op === '==' || op === 'contains')
-      && (field === 'src_ip' || field === 'dst_ip' || field === 'own_network' || field.endsWith('_ip'))
-    ) {
-      op = 'cidr';
+    if (f?.type === 'group' && Array.isArray(f.children)) {
+      const children = normalizeFilters(f.children);
+      if (!children.length) return null;
+      return {
+        type: 'group',
+        id: f.id || `g-${i}`,
+        logic: f.logic || 'and',
+        children,
+      };
     }
-    return {
-      id: f.id || `f-${i}`,
-      field,
-      op,
-      value,
-      label: f.label ?? null,
-      logic: f.logic || 'and',
-    };
-  }).filter((f) => f.field);
+    return normalizeFilterLeaf(f, i);
+  }).filter(Boolean);
 }
 
 function normalizeWidgets(widgets) {
@@ -1605,13 +1619,25 @@ const FILTER_OP_LABELS = {
   not_contains: 'не содержит',
 };
 
+function describeFilterNode(f, index = 0) {
+  if (f?.type === 'group' && Array.isArray(f.children)) {
+    const inner = f.children.map((child, i) => describeFilterNode(child, i)).join(' · ');
+    const wrapped = f.children.length > 1 ? `(${inner})` : inner;
+    if (index === 0) return wrapped;
+    const logic = String(f.logic || 'and').replace('_', ' ').toUpperCase();
+    return `${logic} ${wrapped}`;
+  }
+  const value = Array.isArray(f.value) ? f.value.join(', ') : String(f.value ?? '');
+  const pred = `${explorerFieldLabel(f.field)} ${FILTER_OP_LABELS[f.op] || f.op} ${value || '—'}`;
+  if (index === 0) return pred;
+  const logic = String(f.logic || 'and').replace('_', ' ').toUpperCase();
+  return `${logic} ${pred}`;
+}
+
 function describeFilters(filters) {
   const list = normalizeFilters(filters);
   if (!list.length) return 'без фильтров (весь трафик)';
-  return list.map((f) => {
-    const value = Array.isArray(f.value) ? f.value.join(', ') : String(f.value ?? '');
-    return `${explorerFieldLabel(f.field)} ${FILTER_OP_LABELS[f.op] || f.op} ${value || '—'}`;
-  }).join(' · ');
+  return list.map((f, i) => describeFilterNode(f, i)).join(' · ');
 }
 
 function describeObservationScope(obs) {
