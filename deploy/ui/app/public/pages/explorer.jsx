@@ -5455,6 +5455,9 @@ function explorerInsertIndexAmong(items, clientX, clientY) {
 
 function readExplorerFilterDropTarget(clientX, clientY, dragId) {
   const stack = document.elementsFromPoint(clientX, clientY);
+  if (stack.some((node) => node instanceof Element && node.closest('.explorer-chip-phantom'))) {
+    return null;
+  }
   const dragKey = String(dragId);
   let listEl = null;
   let itemEl = null;
@@ -5486,6 +5489,9 @@ function readExplorerFilterDropTarget(clientX, clientY, dragId) {
 
 function readExplorerListDropIndex(clientX, clientY, dragIndex) {
   const stack = document.elementsFromPoint(clientX, clientY);
+  if (stack.some((node) => node instanceof Element && node.closest('.explorer-chip-phantom'))) {
+    return null;
+  }
   let listEl = null;
   let itemEl = null;
   for (const node of stack) {
@@ -5508,6 +5514,17 @@ function readExplorerListDropIndex(clientX, clientY, dragIndex) {
     return explorerInsertIndexAmong([itemEl], clientX, clientY) === 0 ? idx : idx + 1;
   }
   return explorerInsertIndexAmong(siblings, clientX, clientY);
+}
+
+function explorerChipRectFromEvent(event) {
+  const rect = event.currentTarget?.getBoundingClientRect?.();
+  if (!rect) return { width: 72, height: 28, offsetX: 16, offsetY: 14 };
+  return {
+    width: Math.round(rect.width),
+    height: Math.round(rect.height),
+    offsetX: event.clientX - rect.left,
+    offsetY: event.clientY - rect.top,
+  };
 }
 
 function bindExplorerPointerSession(dragRef, {
@@ -5554,13 +5571,71 @@ function startExplorerChipPointerDrag(event, { bubble = false } = {}) {
   return true;
 }
 
-function ExplorerChipDropMarker({ active }) {
+function ExplorerChipPhantom({ width, height, variant = 'chip' }) {
   return (
     <span
-      className={`explorer-chip-drop-marker${active ? ' is-active' : ''}`}
+      className={`explorer-chip-phantom explorer-chip-phantom--${variant}`}
+      style={{ width, height }}
       aria-hidden="true"
     />
   );
+}
+
+function ExplorerChipDragSlot({ active, width, height, variant = 'chip', children }) {
+  return (
+    <>
+      {active ? <ExplorerChipPhantom width={width} height={height} variant={variant} /> : null}
+      {children}
+    </>
+  );
+}
+
+function ExplorerChipDragOverlay({ overlay }) {
+  if (!overlay) return null;
+  return ReactDOM.createPortal(
+    <span
+      className={`explorer-chip-drag-overlay explorer-chip-drag-overlay--${overlay.variant || 'chip'}`}
+      style={{
+        width: overlay.width,
+        height: overlay.height,
+        transform: `translate(${overlay.x - overlay.offsetX}px, ${overlay.y - overlay.offsetY}px)`,
+      }}
+      aria-hidden="true"
+    >
+      <span className="explorer-chip-drag-overlay__label">{overlay.label}</span>
+    </span>,
+    document.body,
+  );
+}
+
+function useExplorerChipOverlay() {
+  const [overlay, setOverlay] = React.useState(null);
+  const frameRef = React.useRef(null);
+  const latestRef = React.useRef(null);
+
+  const updateOverlay = React.useCallback((next) => {
+    latestRef.current = next;
+    if (frameRef.current != null) return;
+    frameRef.current = window.requestAnimationFrame(() => {
+      frameRef.current = null;
+      setOverlay(latestRef.current);
+    });
+  }, []);
+
+  const clearOverlay = React.useCallback(() => {
+    if (frameRef.current != null) {
+      window.cancelAnimationFrame(frameRef.current);
+      frameRef.current = null;
+    }
+    latestRef.current = null;
+    setOverlay(null);
+  }, []);
+
+  React.useEffect(() => () => {
+    if (frameRef.current != null) window.cancelAnimationFrame(frameRef.current);
+  }, []);
+
+  return { overlay, updateOverlay, clearOverlay };
 }
 
 function useExplorerFilterDrag({ filters, setFilters }) {
@@ -5569,10 +5644,28 @@ function useExplorerFilterDrag({ filters, setFilters }) {
   const [draggingId, setDraggingId] = React.useState(null);
   const [dragMoved, setDragMoved] = React.useState(false);
   const [dropTarget, setDropTarget] = React.useState(null);
+  const [dragSize, setDragSize] = React.useState(null);
+  const [dragSnapshot, setDragSnapshot] = React.useState(null);
+  const { overlay, updateOverlay, clearOverlay } = useExplorerChipOverlay();
 
-  const startDrag = React.useCallback((id, event, { bubble = false } = {}) => {
+  const startDrag = React.useCallback((id, event, {
+    bubble = false,
+    label = '',
+    variant = 'chip',
+  } = {}) => {
     if (!startExplorerChipPointerDrag(event, { bubble })) return;
     const snapshot = cloneExplorerFilters(filters);
+    const loc = treeApi.findExplorerFilterLocation?.(snapshot, id);
+    const origin = {
+      parentId: loc?.parent?.id ?? null,
+      index: loc?.index ?? 0,
+    };
+    const rect = explorerChipRectFromEvent(event);
+    const overlayBase = {
+      ...rect,
+      variant,
+      label,
+    };
     dragRef.current = {
       id,
       moved: false,
@@ -5580,13 +5673,17 @@ function useExplorerFilterDrag({ filters, setFilters }) {
       startX: event.clientX,
       startY: event.clientY,
       filtersSnapshot: snapshot,
-      dropTarget: null,
+      dropTarget: origin,
+      origin,
       pointerId: event.pointerId,
       target: event.currentTarget,
+      overlayBase,
     };
     setDraggingId(id);
     setDragMoved(false);
-    setDropTarget(null);
+    setDropTarget(origin);
+    setDragSize({ width: rect.width, height: rect.height, variant });
+    setDragSnapshot(snapshot);
     bindExplorerPointerSession(dragRef, {
       onMove: (moveEvent) => {
         const drag = dragRef.current;
@@ -5597,9 +5694,16 @@ function useExplorerFilterDrag({ filters, setFilters }) {
           setDragMoved(true);
         }
         if (!drag.moved) return;
-        const nextTarget = readExplorerFilterDropTarget(moveEvent.clientX, moveEvent.clientY, drag.id);
+        const nextTarget = readExplorerFilterDropTarget(moveEvent.clientX, moveEvent.clientY, drag.id)
+          || drag.dropTarget
+          || drag.origin;
         drag.dropTarget = nextTarget;
         setDropTarget(nextTarget);
+        updateOverlay({
+          ...drag.overlayBase,
+          x: moveEvent.clientX,
+          y: moveEvent.clientY,
+        });
       },
       onFinish: () => {
         const drag = dragRef.current;
@@ -5607,6 +5711,9 @@ function useExplorerFilterDrag({ filters, setFilters }) {
         setDraggingId(null);
         setDragMoved(false);
         setDropTarget(null);
+        setDragSize(null);
+        setDragSnapshot(null);
+        clearOverlay();
         if (!drag?.moved) return;
         markExplorerChipDragClick();
         if (!drag.dropTarget || !treeApi.moveExplorerFilterNode) return;
@@ -5618,9 +5725,9 @@ function useExplorerFilterDrag({ filters, setFilters }) {
         ));
       },
     });
-  }, [filters, setFilters, treeApi]);
+  }, [clearOverlay, filters, setFilters, treeApi, updateOverlay]);
 
-  return { draggingId, dragMoved, dropTarget, startDrag };
+  return { draggingId, dragMoved, dropTarget, dragSize, dragSnapshot, overlay, startDrag };
 }
 
 function useExplorerListDrag({ onReorder }) {
@@ -5628,22 +5735,28 @@ function useExplorerListDrag({ onReorder }) {
   const [draggingIndex, setDraggingIndex] = React.useState(null);
   const [dragMoved, setDragMoved] = React.useState(false);
   const [dropIndex, setDropIndex] = React.useState(null);
+  const [dragSize, setDragSize] = React.useState(null);
+  const { overlay, updateOverlay, clearOverlay } = useExplorerChipOverlay();
 
-  const startDrag = React.useCallback((index, event, { bubble = false } = {}) => {
+  const startDrag = React.useCallback((index, event, { bubble = false, label = '', variant = 'chip' } = {}) => {
     if (!startExplorerChipPointerDrag(event, { bubble })) return;
+    const rect = explorerChipRectFromEvent(event);
+    const overlayBase = { ...rect, variant, label };
     dragRef.current = {
       index,
       moved: false,
       captured: false,
       startX: event.clientX,
       startY: event.clientY,
-      dropIndex: null,
+      dropIndex: index,
       pointerId: event.pointerId,
       target: event.currentTarget,
+      overlayBase,
     };
     setDraggingIndex(index);
     setDragMoved(false);
-    setDropIndex(null);
+    setDropIndex(index);
+    setDragSize({ width: rect.width, height: rect.height, variant });
     bindExplorerPointerSession(dragRef, {
       onMove: (moveEvent) => {
         const drag = dragRef.current;
@@ -5655,8 +5768,13 @@ function useExplorerListDrag({ onReorder }) {
         }
         if (!drag.moved) return;
         const nextIndex = readExplorerListDropIndex(moveEvent.clientX, moveEvent.clientY, drag.index);
-        drag.dropIndex = nextIndex;
-        setDropIndex(nextIndex);
+        drag.dropIndex = nextIndex == null ? drag.dropIndex : nextIndex;
+        setDropIndex(drag.dropIndex);
+        updateOverlay({
+          ...drag.overlayBase,
+          x: moveEvent.clientX,
+          y: moveEvent.clientY,
+        });
       },
       onFinish: () => {
         const drag = dragRef.current;
@@ -5664,24 +5782,17 @@ function useExplorerListDrag({ onReorder }) {
         setDraggingIndex(null);
         setDragMoved(false);
         setDropIndex(null);
+        setDragSize(null);
+        clearOverlay();
         if (!drag?.moved) return;
         markExplorerChipDragClick();
         if (drag.dropIndex == null || drag.dropIndex === drag.index) return;
         onReorder?.(drag.index, drag.dropIndex);
       },
     });
-  }, [onReorder]);
+  }, [clearOverlay, onReorder, updateOverlay]);
 
-  return { draggingIndex, dragMoved, dropIndex, startDrag };
-}
-
-function ExplorerListDropMarker({ active }) {
-  return (
-    <span
-      className={`explorer-chip-drop-marker explorer-chip-drop-marker--list${active ? ' is-active' : ''}`}
-      aria-hidden="true"
-    />
-  );
+  return { draggingIndex, dragMoved, dropIndex, dragSize, overlay, startDrag };
 }
 
 function ExplorerPopoverMenu({ anchorRef, open, onClose, children, minWidth = 200, maxHeight = 320 }) {
@@ -5810,11 +5921,15 @@ function ExplorerMetricGroupControls({
   const [addingDim, setAddingDim] = useState(false);
   const dimAnchorRef = React.useRef(null);
   const treeApi = explorerFilterTreeApi();
-  const { draggingIndex, dragMoved, dropIndex, startDrag } = useExplorerListDrag({
+  const { draggingIndex, dragMoved, dropIndex, dragSize, overlay, startDrag } = useExplorerListDrag({
     onReorder: (fromIndex, toIndex) => {
       setGroupBy((current) => treeApi.reorderExplorerList?.(current, fromIndex, toIndex) || current);
     },
   });
+  const previewGroupBy = dragMoved && draggingIndex != null && dropIndex != null
+    ? (treeApi.reorderExplorerList?.(groupBy, draggingIndex, dropIndex) || groupBy)
+    : groupBy;
+  const dragToken = draggingIndex != null ? groupBy[draggingIndex] : null;
 
   return (
     <div className="explorer-metric-group-chips" data-explorer-list="1">
@@ -5822,27 +5937,38 @@ function ExplorerMetricGroupControls({
       {showGroupBy && (
         <>
           <span className="explorer-chip-row__sep">группировать по</span>
-          <ExplorerListDropMarker active={dropIndex === 0} />
-          {groupBy.map((token, index) => {
+          {previewGroupBy.map((token) => {
             const id = explorerGroupFieldId(token);
+            const originalIndex = groupBy.findIndex((item) => explorerGroupFieldId(item) === id);
+            const isPhantom = dragMoved && dragToken != null
+              && explorerGroupFieldId(token) === explorerGroupFieldId(dragToken);
             return (
-              <React.Fragment key={`${id}-${index}`}>
-                <span
-                  className={`explorer-draggable-chip${draggingIndex === index && dragMoved ? ' is-dragging' : ''}`}
-                  data-explorer-list-item={index}
-                  title="Перетащить"
-                  onPointerDown={(event) => startDrag(index, event)}
+              <React.Fragment key={id}>
+                <ExplorerChipDragSlot
+                  active={isPhantom}
+                  width={dragSize?.width}
+                  height={dragSize?.height}
+                  variant="chip"
                 >
-                  <ExplorerGroupChip
-                    token={token}
-                    dimension={dimensionById[id]}
-                    onChange={(nextToken) => setGroupBy((current) => normalizeExplorerGroupTokens(
-                      current.map((item, itemIndex) => (itemIndex === index ? nextToken : item)),
-                    ))}
-                    onRemove={() => setGroupBy((current) => current.filter((_, itemIndex) => itemIndex !== index))}
-                  />
-                </span>
-                <ExplorerListDropMarker active={dropIndex === index + 1} />
+                  <span
+                    className={`explorer-draggable-chip${isPhantom ? ' is-dragging explorer-chip-drag-source-hidden' : ''}`}
+                    data-explorer-list-item={originalIndex}
+                    title="Перетащить"
+                    onPointerDown={(event) => startDrag(originalIndex, event, {
+                      label: dimensionById[id]?.label || id,
+                      variant: 'chip',
+                    })}
+                  >
+                    <ExplorerGroupChip
+                      token={token}
+                      dimension={dimensionById[id]}
+                      onChange={(nextToken) => setGroupBy((current) => normalizeExplorerGroupTokens(
+                        current.map((item, itemIndex) => (itemIndex === originalIndex ? nextToken : item)),
+                      ))}
+                      onRemove={() => setGroupBy((current) => current.filter((_, itemIndex) => itemIndex !== originalIndex))}
+                    />
+                  </span>
+                </ExplorerChipDragSlot>
               </React.Fragment>
             );
           })}
@@ -5869,6 +5995,7 @@ function ExplorerMetricGroupControls({
           </span>
         </>
       )}
+      <ExplorerChipDragOverlay overlay={overlay} />
     </div>
   );
 }
@@ -6004,7 +6131,7 @@ function ExplorerFilterChipItem({
   return (
     <span
       ref={anchorRef}
-      className={`explorer-draggable-chip${dragging ? ' is-dragging' : ''}`}
+      className={`explorer-draggable-chip${dragging ? ' is-dragging explorer-chip-drag-source-hidden' : ''}`}
       data-explorer-filter-item={filter.id}
       title="Перетащить"
       onPointerDown={(event) => {
@@ -6074,6 +6201,7 @@ function ExplorerThresholdChipItem({
 function ExplorerFilterChipList({
   rootFilters,
   setRootFilters,
+  displayFilters,
   parentId = null,
   depth = 0,
   schema,
@@ -6085,15 +6213,15 @@ function ExplorerFilterChipList({
   cabinetMode,
   draggingId,
   dragMoved = false,
+  dragSize = null,
   dropTarget,
   startDrag,
 }) {
   const treeApi = explorerFilterTreeApi();
+  const sourceFilters = displayFilters || rootFilters;
   const list = parentId == null
-    ? (Array.isArray(rootFilters) ? rootFilters : [])
-    : (treeApi.findExplorerFilterLocation?.(rootFilters, parentId)?.node?.children || []);
-  const dropParentAttr = parentId == null ? '' : parentId;
-  const isDropActive = (index) => dropTarget?.parentId === parentId && dropTarget?.index === index;
+    ? (Array.isArray(sourceFilters) ? sourceFilters : [])
+    : (treeApi.findExplorerFilterLocation?.(sourceFilters, parentId)?.node?.children || []);
 
   const updateFilter = (id, patch) => {
     if (treeApi.updateExplorerFilterNode) {
@@ -6121,104 +6249,119 @@ function ExplorerFilterChipList({
       logic: 'and',
     };
     if (parentId == null) {
-      setRootFilters([...list, leaf]);
+      setRootFilters([...(Array.isArray(rootFilters) ? rootFilters : []), leaf]);
     } else if (treeApi.updateExplorerFilterNode) {
+      const originChildren = treeApi.findExplorerFilterLocation?.(rootFilters, parentId)?.node?.children || [];
       setRootFilters(treeApi.updateExplorerFilterNode(rootFilters, parentId, {
-        children: [...list, leaf],
+        children: [...originChildren, leaf],
       }));
     }
     requestAnimationFrame(() => setEditingFilterId(id));
   };
 
   return (
-    <span className="explorer-filter-chip-list" data-explorer-filter-list={dropParentAttr}>
-      <ExplorerChipDropMarker active={isDropActive(0)} />
+    <span className="explorer-filter-chip-list" data-explorer-filter-list={parentId == null ? '' : parentId}>
       {list.map((node, index) => {
+        const isPhantom = dragMoved && String(draggingId) === String(node.id);
+        const logicChip = index > 0 ? (
+          <ExplorerLogicChip
+            value={node.logic}
+            onChange={(logic) => updateFilter(node.id, { logic })}
+          />
+        ) : null;
+        const dragSlot = {
+          active: isPhantom,
+          width: dragSize?.width,
+          height: dragSize?.height,
+          variant: treeApi.isExplorerFilterGroup?.(node) ? 'group' : 'chip',
+        };
+
         if (treeApi.isExplorerFilterGroup?.(node)) {
           return (
             <React.Fragment key={node.id}>
-              {index > 0 && (
-                <ExplorerLogicChip
-                  value={node.logic}
-                  onChange={(logic) => updateFilter(node.id, { logic })}
-                />
-              )}
-              <span
-                className={`explorer-filter-group-wrap${draggingId === node.id && dragMoved ? ' is-dragging' : ''}`}
-                data-explorer-filter-item={node.id}
-                title="Перетащить группу"
-                onPointerDown={(event) => {
-                  if (shouldSkipExplorerGroupWrapDrag(event)) return;
-                  startDrag(node.id, event);
-                }}
-              >
-                <span className="explorer-filter-group">
-                  <span className="explorer-filter-group__paren" aria-hidden="true">(</span>
-                  <ExplorerFilterChipList
-                    rootFilters={rootFilters}
-                    setRootFilters={setRootFilters}
-                    parentId={node.id}
-                    depth={depth + 1}
-                    schema={schema}
-                    filterFields={filterFields}
-                    switchIpScope={switchIpScope}
-                    filterRowErrors={filterRowErrors}
-                    editingFilterId={editingFilterId}
-                    setEditingFilterId={setEditingFilterId}
-                    cabinetMode={cabinetMode}
-                    draggingId={draggingId}
-                    dragMoved={dragMoved}
-                    dropTarget={dropTarget}
-                    startDrag={startDrag}
-                  />
-                  <span className="explorer-filter-group__paren" aria-hidden="true">)</span>
-                  <button
-                    type="button"
-                    className="explorer-filter-group__remove icon-btn"
-                    title="Удалить группу"
-                    aria-label="Удалить группу"
-                    onClick={() => {
-                      removeNode(node.id);
-                      if (editingFilterId && (node.children || []).some((child) => child.id === editingFilterId)) {
-                        setEditingFilterId(null);
-                      }
-                    }}
-                  >
-                    <Icon name="x" size={10} stroke={2.5} />
-                  </button>
+              {logicChip}
+              <ExplorerChipDragSlot {...dragSlot}>
+                <span
+                  className={`explorer-filter-group-wrap${isPhantom ? ' is-dragging explorer-chip-drag-source-hidden' : ''}`}
+                  data-explorer-filter-item={node.id}
+                  title="Перетащить группу"
+                  onPointerDown={(event) => {
+                    if (shouldSkipExplorerGroupWrapDrag(event)) return;
+                    startDrag(node.id, event, {
+                      label: '( … )',
+                      variant: 'group',
+                    });
+                  }}
+                >
+                  <span className="explorer-filter-group">
+                    <span className="explorer-filter-group__paren" aria-hidden="true">(</span>
+                    <ExplorerFilterChipList
+                      rootFilters={rootFilters}
+                      setRootFilters={setRootFilters}
+                      displayFilters={sourceFilters}
+                      parentId={node.id}
+                      depth={depth + 1}
+                      schema={schema}
+                      filterFields={filterFields}
+                      switchIpScope={switchIpScope}
+                      filterRowErrors={filterRowErrors}
+                      editingFilterId={editingFilterId}
+                      setEditingFilterId={setEditingFilterId}
+                      cabinetMode={cabinetMode}
+                      draggingId={draggingId}
+                      dragMoved={dragMoved}
+                      dragSize={dragSize}
+                      dropTarget={dropTarget}
+                      startDrag={startDrag}
+                    />
+                    <span className="explorer-filter-group__paren" aria-hidden="true">)</span>
+                    <button
+                      type="button"
+                      className="explorer-filter-group__remove icon-btn"
+                      title="Удалить группу"
+                      aria-label="Удалить группу"
+                      onClick={() => {
+                        removeNode(node.id);
+                        if (editingFilterId && (node.children || []).some((child) => child.id === editingFilterId)) {
+                          setEditingFilterId(null);
+                        }
+                      }}
+                    >
+                      <Icon name="x" size={10} stroke={2.5} />
+                    </button>
+                  </span>
                 </span>
-              </span>
-              <ExplorerChipDropMarker active={isDropActive(index + 1)} />
+              </ExplorerChipDragSlot>
             </React.Fragment>
           );
         }
 
         return (
           <React.Fragment key={node.id}>
-            {index > 0 && (
-              <ExplorerLogicChip
-                value={node.logic}
-                onChange={(logic) => updateFilter(node.id, { logic })}
+            {logicChip}
+            <ExplorerChipDragSlot {...dragSlot}>
+              <ExplorerFilterChipItem
+                filter={node}
+                schema={schema}
+                filterFields={filterFields}
+                switchIpScope={switchIpScope}
+                rowError={filterRowErrors[node.id]}
+                isEditing={editingFilterId === node.id}
+                dragging={isPhantom}
+                onToggleEdit={() => setEditingFilterId(node.id)}
+                onCloseEdit={() => setEditingFilterId(null)}
+                onChange={(patch) => updateFilter(node.id, patch)}
+                onRemove={() => {
+                  removeNode(node.id);
+                  if (editingFilterId === node.id) setEditingFilterId(null);
+                }}
+                onDragStart={(event) => startDrag(node.id, event, {
+                  bubble: true,
+                  label: formatExplorerFilterChipLabel(node, schema),
+                  variant: 'chip',
+                })}
               />
-            )}
-            <ExplorerFilterChipItem
-              filter={node}
-              schema={schema}
-              filterFields={filterFields}
-              switchIpScope={switchIpScope}
-              rowError={filterRowErrors[node.id]}
-              isEditing={editingFilterId === node.id}
-              onToggleEdit={() => setEditingFilterId(node.id)}
-              onCloseEdit={() => setEditingFilterId(null)}
-              onChange={(patch) => updateFilter(node.id, patch)}
-              onRemove={() => {
-                removeNode(node.id);
-                if (editingFilterId === node.id) setEditingFilterId(null);
-              }}
-              onDragStart={(event) => startDrag(node.id, event, { bubble: true })}
-              dragging={draggingId === node.id && dragMoved}
-            />
-            <ExplorerChipDropMarker active={isDropActive(index + 1)} />
+            </ExplorerChipDragSlot>
           </React.Fragment>
         );
       })}
@@ -6248,7 +6391,11 @@ function ExplorerConditionChipsRow({
   const filterFields = schema?.filterFields || [];
   const switchIpScope = explorerSwitchIpScopeFromFilters(filters);
   const treeApi = explorerFilterTreeApi();
-  const { draggingId, dragMoved, dropTarget, startDrag } = useExplorerFilterDrag({ filters, setFilters });
+  const { draggingId, dragMoved, dropTarget, dragSize, dragSnapshot, overlay, startDrag } = useExplorerFilterDrag({ filters, setFilters });
+  const previewSource = dragSnapshot || filters;
+  const previewFilters = dragMoved && draggingId && dropTarget
+    ? (treeApi.moveExplorerFilterNode?.(previewSource, draggingId, dropTarget.parentId, dropTarget.index) || previewSource)
+    : filters;
 
   const rowErrors = Object.values(filterRowErrors).filter(Boolean);
 
@@ -6257,6 +6404,7 @@ function ExplorerConditionChipsRow({
       <ExplorerFilterChipList
         rootFilters={filters}
         setRootFilters={setFilters}
+        displayFilters={previewFilters}
         schema={schema}
         filterFields={filterFields}
         switchIpScope={switchIpScope}
@@ -6266,6 +6414,7 @@ function ExplorerConditionChipsRow({
         cabinetMode={cabinetMode}
         draggingId={draggingId}
         dragMoved={dragMoved}
+        dragSize={dragSize}
         dropTarget={dropTarget}
         startDrag={startDrag}
       />
@@ -6277,6 +6426,7 @@ function ExplorerConditionChipsRow({
         />
         <Button kind="ghost" size="sm" onClick={onAddGroup}>Группа</Button>
       </div>
+      <ExplorerChipDragOverlay overlay={overlay} />
     </ExplorerChipRow>
   );
 }

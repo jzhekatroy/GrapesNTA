@@ -1346,6 +1346,7 @@ a.nav-item--active:visited { color: var(--fg-primary); }
 }
 
 .explorer-metric-group-chips {
+  position: relative;
   display: inline-flex;
   flex-wrap: wrap;
   align-items: center;
@@ -1601,6 +1602,72 @@ a.nav-item--active:visited { color: var(--fg-primary); }
   pointer-events: none;
 }
 
+.explorer-chip-phantom {
+  display: inline-flex;
+  flex: 0 0 auto;
+  box-sizing: border-box;
+  min-width: 48px;
+  min-height: 28px;
+  border: 1px dashed color-mix(in srgb, var(--accent) 70%, var(--bd-default));
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  pointer-events: auto;
+  vertical-align: middle;
+}
+
+.explorer-chip-drag-source-hidden {
+  position: absolute;
+  width: 0 !important;
+  height: 0 !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  overflow: hidden;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.explorer-chip-phantom--chip {
+  border-radius: var(--pv-radius-pill);
+}
+
+.explorer-chip-phantom--group {
+  border-radius: 10px;
+}
+
+.explorer-chip-drag-overlay {
+  position: fixed;
+  left: 0;
+  top: 0;
+  z-index: 1400;
+  display: inline-flex;
+  align-items: center;
+  box-sizing: border-box;
+  padding: 0 10px;
+  pointer-events: none;
+  opacity: 0.92;
+  box-shadow: var(--pv-shadow-popover);
+  background: var(--surf-1);
+  border: 1px solid var(--bd-strong);
+  color: var(--fg-primary);
+  font: var(--pv-text-body-3);
+  line-height: 1.2;
+}
+
+.explorer-chip-drag-overlay--chip {
+  border-radius: var(--pv-radius-pill);
+}
+
+.explorer-chip-drag-overlay--group {
+  border-radius: 10px;
+  border-style: dashed;
+  background: color-mix(in srgb, var(--accent) 8%, var(--surf-1));
+}
+
+.explorer-chip-drag-overlay__label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 body.explorer-chip-dragging {
   cursor: grabbing;
   user-select: none;
@@ -1611,26 +1678,8 @@ body.explorer-chip-dragging * {
   cursor: grabbing !important;
 }
 
-.explorer-chip-drop-marker {
-  flex: 0 0 4px;
-  width: 4px;
-  height: 28px;
-  border-radius: 999px;
-  background: transparent;
-  align-self: center;
-  pointer-events: none;
-}
-
-.explorer-chip-drop-marker.is-active {
-  background: var(--accent);
-  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 20%, transparent);
-}
-
-.explorer-chip-drop-marker--list {
-  height: 28px;
-}
-
 .explorer-filter-chip-list {
+  position: relative;
   display: inline-flex;
   flex-wrap: wrap;
   align-items: center;

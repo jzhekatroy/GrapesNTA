@@ -48,10 +48,14 @@
     return out;
   }
 
+  function explorerFilterIdsEqual(a, b) {
+    return a != null && b != null && String(a) === String(b);
+  }
+
   function explorerFilterDepth(filters, nodeId) {
     let depth = null;
     walkExplorerFilters(filters, (node, ctx) => {
-      if (node.id === nodeId) depth = ctx.depth;
+      if (explorerFilterIdsEqual(node.id, nodeId)) depth = ctx.depth;
     });
     return depth;
   }
@@ -127,7 +131,7 @@
     const list = Array.isArray(filters) ? filters : [];
     for (let index = 0; index < list.length; index += 1) {
       const node = list[index];
-      if (node?.id === nodeId) {
+      if (explorerFilterIdsEqual(node?.id, nodeId)) {
         return { node, parent, index, siblings: list };
       }
       if (isExplorerFilterGroup(node)) {
@@ -139,10 +143,11 @@
   }
 
   function detachExplorerFilterNode(filters, nodeId) {
-    const loc = findExplorerFilterLocation(filters, nodeId);
-    if (!loc) return { next: filters, removed: null };
+    const next = cloneExplorerFilterTree(filters);
+    const loc = findExplorerFilterLocation(next, nodeId);
+    if (!loc) return { next, removed: null };
     const removed = loc.siblings.splice(loc.index, 1)[0] || null;
-    return { next: [...filters], removed };
+    return { next, removed };
   }
 
   function insertExplorerFilterNode(filters, parentId, index, node) {
@@ -176,11 +181,11 @@
       }
     }
 
-    if (targetParentId === dragId) return filters;
+    if (explorerFilterIdsEqual(targetParentId, dragId)) return filters;
     if (targetParentId != null) {
       let blocked = false;
       walkExplorerFilters([removed], (node) => {
-        if (node.id === targetParentId) blocked = true;
+        if (explorerFilterIdsEqual(node.id, targetParentId)) blocked = true;
       });
       if (blocked) return filters;
     }
@@ -276,6 +281,7 @@
     removeExplorerFilterNode,
     addExplorerFilterGroup,
     countExplorerFilterLeaves,
+    explorerFilterIdsEqual,
     explorerFilterUsesField,
     normalizeFilterLogicValue,
     pruneExplorerFilterTree,

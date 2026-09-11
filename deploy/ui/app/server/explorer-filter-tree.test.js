@@ -46,6 +46,28 @@ describe('explorer filter tree', () => {
     assert.equal(T.explorerFilterUsesField(filters, 'cabinet_client'), true);
   });
 
+  it('does not mutate the original filters while moving', () => {
+    const filters = [
+      { id: 'a', field: 'src_ip', op: '=', value: '1.1.1.1', logic: 'and' },
+      { id: 'b', field: 'dst_ip', op: '=', value: '2.2.2.2', logic: 'and' },
+      { id: 'c', field: 'proto', op: '=', value: 'UDP', logic: 'and' },
+    ];
+    const before = filters.map((f) => f.id);
+    T.moveExplorerFilterNode(filters, 'a', null, 2);
+    assert.deepEqual(filters.map((f) => f.id), before);
+  });
+
+  it('finds and moves nodes when ids differ only by type', () => {
+    const filters = [
+      { id: 10, field: 'src_ip', op: '=', value: '1.1.1.1', logic: 'and' },
+      { id: 20, field: 'dst_ip', op: '=', value: '2.2.2.2', logic: 'and' },
+    ];
+    const loc = T.findExplorerFilterLocation(filters, '10');
+    assert.equal(loc?.index, 0);
+    const next = T.moveExplorerFilterNode(filters, '10', null, 2);
+    assert.deepEqual(next.map((f) => f.id), [20, 10]);
+  });
+
   it('reorders a list including the last slot', () => {
     assert.deepEqual(T.reorderExplorerList(['a', 'b', 'c'], 0, 2), ['b', 'c', 'a']);
     assert.deepEqual(T.reorderExplorerList(['a', 'b', 'c'], 2, 0), ['c', 'a', 'b']);
