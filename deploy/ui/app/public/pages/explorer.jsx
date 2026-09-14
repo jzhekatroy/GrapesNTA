@@ -269,6 +269,17 @@ function explorerAsnDisplayValue(row, valueIdx, fallback) {
   return val ?? '—';
 }
 
+function explorerAsPathFilterValueHint(op) {
+  if (op === '=' || op === '!=') {
+    return 'полный путь — напр. 6939 12389 34665';
+  }
+  return 'AS в пути — напр. 1299 или AS1299';
+}
+
+function asPathFilterUsesEntityPicker(op) {
+  return ['contains', 'not_contains', 'in', 'not_in'].includes(op);
+}
+
 function dedupeExplorerEntityItems(items) {
   const byId = new Map();
   for (const item of items || []) {
@@ -344,6 +355,13 @@ function explorerRowFilterValue(row, dimId, valueIdx, dimensionById) {
     return {
       value: meta?.asn ?? parseExplorerAsnNumber(row.rawValues?.[valueIdx] ?? row.values[valueIdx]),
       label: meta?.asName || null,
+    };
+  }
+  if (kind === 'as_path') {
+    const raw = String(row.rawValues?.[valueIdx] ?? row.values[valueIdx] ?? '').trim();
+    return {
+      value: !raw || raw === '—' ? '' : raw,
+      label: null,
     };
   }
   if (fieldId === 'cabinet_client') {
@@ -551,7 +569,7 @@ function fitExplorerTableColumnWidths(columns, rows, pinnedRows, { meta, metric,
       const groupToken = col.key.slice(4);
       const dimId = explorerGroupFieldId(groupToken);
       const valueIdx = groupBy.indexOf(groupToken);
-      const isAsn = dimId.endsWith('asn');
+      const isAsn = dimId.endsWith('_asn');
       const mono = dimId.endsWith('ip') || dimId.endsWith('_mac');
       sampleRows.forEach((row) => {
         if (row.isOthers && valueIdx !== 0) return;
@@ -1944,7 +1962,9 @@ function filterOpsForField(schema, fieldId) {
 }
 
 function defaultOpForField(schema, fieldId) {
+  const meta = filterFieldMeta(schema, fieldId);
   const ops = filterOpsForField(schema, fieldId);
+  if (meta?.type === 'as_path' && ops.includes('contains')) return 'contains';
   if (ops.includes('=')) return '=';
   if (ops.includes('eq')) return 'eq';
   return ops[0] || '=';
@@ -2280,15 +2300,24 @@ function TcpFlagsFilter({ value, onChange, onClear }) {
   );
 }
 
-function FilterValueInput({ fieldId, meta, value, label, onChange, onClear, switchIpScope = '', fullWidth = false }) {
+function FilterValueInput({
+  fieldId, meta, value, label, onChange, onClear, switchIpScope = '', fullWidth = false, op = '=',
+}) {
   const controlStyle = fullWidth ? { width: '100%', flex: 'none', minWidth: 0 } : { flex: 1, minWidth: 0 };
   const scopeHint = explorerInterfaceScopeHint(fieldId, switchIpScope);
-  const valueControl = meta?.entityType ? (
+  const valueHint = meta?.type === 'as_path'
+    ? explorerAsPathFilterValueHint(op)
+    : meta?.valueHint;
+  const entityType = meta?.entityType
+    && (meta.type !== 'as_path' || asPathFilterUsesEntityPicker(op))
+    ? meta.entityType
+    : null;
+  const valueControl = entityType ? (
     <EntityPicker
-      entityType={meta.entityType}
+      entityType={entityType}
       value={value}
       label={label}
-      placeholder={meta.valueHint}
+      placeholder={valueHint}
       switchIp={meta.entityType === 'if_name' ? switchIpScope : ''}
       onSelect={(item) => onChange({ value: item.value, label: item.label })}
       onClear={onClear}
@@ -2304,7 +2333,7 @@ function FilterValueInput({ fieldId, meta, value, label, onChange, onClear, swit
         : undefined}
       searchPlaceholder="Поиск значения..."
       emptyLabel="Выбрать значение…"
-      inputPlaceholder={meta.valueHint}
+      inputPlaceholder={valueHint}
       allowCustom
       mono
       fullWidth={fullWidth}
@@ -2314,8 +2343,8 @@ function FilterValueInput({ fieldId, meta, value, label, onChange, onClear, swit
     <input
       className="input mono"
       value={value ?? ''}
-      placeholder={meta?.valueHint || 'value'}
-      title={meta?.valueHint || undefined}
+      placeholder={valueHint || 'value'}
+      title={valueHint || undefined}
       onChange={(e) => onChange({ value: e.target.value, label: null })}
       style={controlStyle}
     />
@@ -2394,7 +2423,8 @@ function buildExplorerResultColumns({
     const mask = explorerGroupMask(groupToken);
     const valueIdx = groupBy.indexOf(groupToken);
     const hasValue = valueIdx >= 0;
-    const isAsn = dimId.endsWith('asn');
+    const isAsn = dimId.endsWith('_asn');
+    const isAsPath = dimensionById[dimId]?.kind === 'as_path';
     return {
       key: `dim-${groupToken}`,
       title: explorerGroupLabel(groupToken, dimensionById),
@@ -2406,6 +2436,7 @@ function buildExplorerResultColumns({
       sortAccessor: (r) => {
         if (!hasValue) return '';
         if (isAsn) return explorerAsnSortKey(r, valueIdx);
+        if (isAsPath) return r.rawValues?.[valueIdx] ?? r.values[valueIdx];
         return r.values[valueIdx];
       },
       render: (r) => {
@@ -2435,11 +2466,13 @@ function buildExplorerResultColumns({
           ? ` · raw ${r.rawValues[valueIdx]}`
           : '';
         const showColorSwatch = dimId !== 'dst_ip' && (colIdx === 0 || chartSeriesIds?.has(r.id));
-        const displayValue = isAsn ? explorerAsnDisplayValue(r, valueIdx) : r.values[valueIdx];
+        const displayValue = isAsn
+          ? explorerAsnDisplayValue(r, valueIdx)
+          : (r.values[valueIdx] ?? '—');
         return (
           <ExplorerGroupCell
             displayValue={displayValue}
-            monoClass={monoClass}
+            monoClass={isAsPath ? `${monoClass} mono`.trim() : monoClass}
             filterTitle={`Добавить в фильтры${rawTooltip}`}
             onAddFilter={() => onAddFilter(dimId, filterVal.value, filterVal.label, mask)}
             showColorSwatch={showColorSwatch}
@@ -6231,6 +6264,7 @@ function ExplorerFilterEditPopover({
                 meta={meta}
                 value={filter.value}
                 label={filter.label}
+                op={filter.op}
                 switchIpScope={switchIpScope}
                 onChange={(patch) => onChange(patch)}
                 onClear={() => onChange({ value: '', label: null })}

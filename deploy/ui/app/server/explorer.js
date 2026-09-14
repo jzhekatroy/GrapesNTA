@@ -110,6 +110,7 @@ const FILTER_OPS_BY_TYPE = {
   entity: ['=', 'in'],
   cabinet_client: ['=', '!=', 'in', 'not_in'],
   vlan_name: ['=', '!=', 'contains', 'not_contains', 'in', 'not_in'],
+  as_path: ['contains', 'not_contains', 'in', 'not_in', '=', '!='],
 };
 
 const EXPLORER_GROUP = {
@@ -157,6 +158,16 @@ const EXPLORER_DIM_META = {
   tcp_flags: { label: 'Флаги TCP / TCP flags', group: EXPLORER_GROUP.PROTO },
   src_asn: { label: 'ASN источника / Source ASN', group: EXPLORER_GROUP.ASGEO },
   dst_asn: { label: 'ASN назначения / Destination ASN', group: EXPLORER_GROUP.ASGEO },
+  src_as_path: {
+    label: 'AS path источника / Source AS path',
+    group: EXPLORER_GROUP.ASGEO,
+    aliases: ['aspath', 'as path', 'путь'],
+  },
+  dst_as_path: {
+    label: 'AS path назначения / Destination AS path',
+    group: EXPLORER_GROUP.ASGEO,
+    aliases: ['aspath', 'as path', 'путь'],
+  },
   src_country: { label: 'Страна источника / Source country', group: EXPLORER_GROUP.ASGEO, valueOptions: EXPLORER_COUNTRY_OPTIONS },
   dst_country: { label: 'Страна назначения / Destination country', group: EXPLORER_GROUP.ASGEO, valueOptions: EXPLORER_COUNTRY_OPTIONS },
   l3_owner: {
@@ -273,7 +284,7 @@ const EXPLORER_DIM_META = {
 
 const DIMENSION_GROUPS = {
   [EXPLORER_GROUP.ADDR]: ['src_ip', 'dst_ip', 'src_port', 'dst_port'],
-  [EXPLORER_GROUP.ASGEO]: ['src_asn', 'dst_asn', 'src_country', 'dst_country'],
+  [EXPLORER_GROUP.ASGEO]: ['src_asn', 'dst_asn', 'src_as_path', 'dst_as_path', 'src_country', 'dst_country'],
   [EXPLORER_GROUP.PROTO]: ['proto', 'src_service', 'dst_service', 'tcp_flags'],
   [EXPLORER_GROUP.CLIENTS]: ['cabinet_client', 'client_direction'],
   [EXPLORER_GROUP.L2]: ['src_mac', 'dst_mac', 'vlan', 'vlan_name', 'src_vlan'],
@@ -293,6 +304,7 @@ const EXPLORER_FILTER_HINTS = {
   enum: 'Выберите из списка или введите значение',
   tcp_flags: 'Выберите один или несколько TCP-флагов',
   asn: 'Номер ASN или название — напр. 12389',
+  as_path: 'AS в пути — напр. 1299 или AS1299',
   vlan: 'ID VLAN или имя',
   service: 'Код или название сервиса',
   l3_owner: 'L3-сущность из net_entities',
@@ -394,6 +406,8 @@ const EXPLORER_FIELD_HINTS = {
   dst_port: 'Порт 1–65535',
   src_asn: 'Номер ASN — напр. 12389 или AS0',
   dst_asn: 'Номер ASN — напр. 12389 или AS0',
+  src_as_path: 'AS в пути — напр. 1299 или AS1299',
+  dst_as_path: 'AS в пути — напр. 1299 или AS1299',
   src_country: 'Код ISO-2 — напр. RU',
   dst_country: 'Код ISO-2 — напр. RU',
   source_id: 'ID источника в коллекторе',
@@ -422,6 +436,7 @@ function explorerFilterEntityType(filterType) {
   if (filterType === 'vlan') return 'vlan';
   if (filterType === 'vlan_name') return 'vlan_name';
   if (filterType === 'asn') return 'asn';
+  if (filterType === 'as_path') return 'asn';
   if (filterType === 'service') return 'service';
   if (filterType === 'switch_ip') return 'switch_ip';
   if (filterType === 'if_name') return 'if_name';
@@ -485,6 +500,56 @@ function parseExplorerAsnNumber(value) {
   if (prefixed) return Number(prefixed[1]);
   if (/^\d+$/.test(s)) return Number(s);
   return null;
+}
+
+function parseExplorerAsPathRaw(raw) {
+  if (raw == null || raw === '' || raw === '—') return [];
+  if (Array.isArray(raw)) {
+    return raw.map(Number).filter((n) => Number.isFinite(n) && n >= 0);
+  }
+  const s = String(raw).trim();
+  if (!s || s === '[]' || s === '—') return [];
+  if (s.startsWith('[')) {
+    try {
+      const parsed = JSON.parse(s.replace(/'/g, '"'));
+      if (Array.isArray(parsed)) {
+        return parsed.map(parseExplorerAsnNumber).filter((n) => n != null);
+      }
+    } catch {
+      // fall through to whitespace split
+    }
+  }
+  return s.split(/[\s,]+/)
+    .map((part) => parseExplorerAsnNumber(part))
+    .filter((n) => n != null);
+}
+
+function parseExplorerAsPathHops(value) {
+  const s = String(value ?? '').trim();
+  if (!s) return { empty: true, hops: [] };
+  const parts = s.split(/[\s,]+/).map((part) => part.trim()).filter(Boolean);
+  if (!parts.length) return { empty: true, hops: [] };
+  const hops = parts.map(parseExplorerAsnNumber);
+  if (hops.some((n) => n == null)) return null;
+  return { hops };
+}
+
+function formatExplorerAsPathRawValue(hops) {
+  if (!Array.isArray(hops) || !hops.length) return '';
+  return hops.join(' ');
+}
+
+function formatExplorerAsPathDisplayLabel(hops, nameMap) {
+  if (!Array.isArray(hops) || !hops.length) return '—';
+  return hops.map((asn) => {
+    const name = String(nameMap?.get(asn) || '').trim();
+    if (name && !isPseudoAsnName(name)) return `AS${asn} ${name}`;
+    return `AS${asn}`;
+  }).join(' → ');
+}
+
+function explorerAsPathSqlLabel(expr) {
+  return `if(empty(${expr}), '—', arrayStringConcat(arrayMap(x -> toString(x), ${expr}), ' '))`;
 }
 
 const EXPLORER_AS0_ENTITY = {
@@ -835,6 +900,35 @@ function explorerDimensions() {
       labelFromKey: (k) => `toString(${k})`,
     },
   };
+
+  const srcAsPathCol = flowCol('srcAsPath');
+  const dstAsPathCol = flowCol('dstAsPath');
+  if (srcAsPathCol) {
+    dims.src_as_path = {
+      label: 'Source AS path',
+      group: 'AS / GEO',
+      kind: 'as_path',
+      filterType: 'as_path',
+      side: 'src',
+      expr: `f.${srcAsPathCol}`,
+      filterExpr: `f.${srcAsPathCol}`,
+      groupKeyExpr: `f.${srcAsPathCol}`,
+      labelFromKey: (k) => explorerAsPathSqlLabel(k),
+    };
+  }
+  if (dstAsPathCol) {
+    dims.dst_as_path = {
+      label: 'Destination AS path',
+      group: 'AS / GEO',
+      kind: 'as_path',
+      filterType: 'as_path',
+      side: 'dst',
+      expr: `f.${dstAsPathCol}`,
+      filterExpr: `f.${dstAsPathCol}`,
+      groupKeyExpr: `f.${dstAsPathCol}`,
+      labelFromKey: (k) => explorerAsPathSqlLabel(k),
+    };
+  }
 
   const optional = {
     direction: ['direction', 'Direction', 'Инфраструктура', 'enum'],
@@ -1708,7 +1802,11 @@ async function buildExplorerFilterClauses(filters, dims, params) {
 
       const op = f.op;
       const values = parseFilterValues(f.value);
-      if (!values.length && op !== 'between') continue;
+      const dimPreview = dims[f.field];
+      const allowEmptyAsPathEq = dimPreview?.filterType === 'as_path'
+        && (op === '=' || op === '!=')
+        && !String(f.value ?? '').trim();
+      if (!values.length && op !== 'between' && !allowEmptyAsPathEq) continue;
       const addClause = (clause) => pushExplorerFilterClause(clauses, clause, f.logic);
 
     if (f.field === 'collector') {
@@ -1832,6 +1930,86 @@ async function buildExplorerFilterClauses(filters, dims, params) {
         SELECT asn FROM ${asnRegistry}
         WHERE positionCaseInsensitive(name, trim(BOTH '%' FROM {${paramName}:String})) > 0
       )`);
+      continue;
+    }
+
+    if (dim.filterType === 'as_path') {
+      const pathCol = dim.side === 'dst' ? flowCol('dstAsPath') : flowCol('srcAsPath');
+      if (!pathCol) {
+        addClause('0');
+        continue;
+      }
+      const pathExpr = `f.${pathCol}`;
+      const asnNameLookup = (param) => `(SELECT groupArray(asn) FROM (
+        SELECT asn FROM ${asnNames}
+        WHERE positionCaseInsensitive(name, trim(BOTH '%' FROM {${param}:String})) > 0
+        UNION ALL
+        SELECT asn FROM ${asnRegistry}
+        WHERE positionCaseInsensitive(name, trim(BOTH '%' FROM {${param}:String})) > 0
+      ))`;
+
+      if (op === '=' || op === '!=') {
+        const parsed = parseExplorerAsPathHops(f.value);
+        if (parsed === null) {
+          addClause('0');
+          continue;
+        }
+        if (parsed.empty) {
+          addClause(op === '=' ? `empty(${pathExpr})` : `NOT empty(${pathExpr})`);
+          continue;
+        }
+        const paramName = `filter_${idx++}`;
+        params[paramName] = parsed.hops;
+        if (op === '=') addClause(`${pathExpr} = {${paramName}:Array(UInt32)}`);
+        else addClause(`${pathExpr} != {${paramName}:Array(UInt32)}`);
+        continue;
+      }
+
+      if (op === 'in' || op === 'not_in') {
+        const asnNums = parseFilterValues(f.value).map(parseExplorerAsnNumber);
+        if (asnNums.length && asnNums.every((n) => n != null)) {
+          const paramName = `filter_${idx++}`;
+          params[paramName] = asnNums;
+          const fn = op === 'not_in'
+            ? `NOT hasAny(${pathExpr}, {${paramName}:Array(UInt32)})`
+            : `hasAny(${pathExpr}, {${paramName}:Array(UInt32)})`;
+          addClause(fn);
+          continue;
+        }
+        const paramName = `filter_${idx++}`;
+        params[paramName] = `%${String(f.value ?? '').trim()}%`;
+        const lookup = asnNameLookup(paramName);
+        addClause(op === 'not_in'
+          ? `NOT hasAny(${pathExpr}, ${lookup})`
+          : `hasAny(${pathExpr}, ${lookup})`);
+        continue;
+      }
+
+      if (op === 'contains' || op === 'not_contains') {
+        const asnNum = parseExplorerAsnNumber(String(f.value ?? '').trim());
+        if (asnNum != null) {
+          const paramName = `filter_${idx++}`;
+          params[paramName] = asnNum;
+          addClause(op === 'not_contains'
+            ? `NOT has(${pathExpr}, {${paramName}:UInt32})`
+            : `has(${pathExpr}, {${paramName}:UInt32})`);
+          continue;
+        }
+        const trimmed = String(f.value ?? '').trim();
+        if (!trimmed) {
+          addClause('0');
+          continue;
+        }
+        const paramName = `filter_${idx++}`;
+        params[paramName] = `%${trimmed}%`;
+        const lookup = asnNameLookup(paramName);
+        addClause(op === 'not_contains'
+          ? `NOT hasAny(${pathExpr}, ${lookup})`
+          : `hasAny(${pathExpr}, ${lookup})`);
+        continue;
+      }
+
+      addClause('0');
       continue;
     }
 
@@ -2084,7 +2262,15 @@ function buildExplorerGroupPlan(groups, dims) {
   return { useTwoPhase: true, keys, uniqueKeys, helpers, samplerAlias, mayCollapse };
 }
 
-function mapExplorerFlowRows(groups, rows, windowSeconds, vlanGroupIndexes, asnGroupIndexes, tcpGroupIndexes = []) {
+function mapExplorerFlowRows(
+  groups,
+  rows,
+  windowSeconds,
+  vlanGroupIndexes,
+  asnGroupIndexes,
+  tcpGroupIndexes = [],
+  asPathGroupIndexes = [],
+) {
   return (async () => {
     const nameMap = vlanGroupIndexes.length ? await getVlanNameMap() : null;
     const entityGroupIndexes = groups
@@ -2102,7 +2288,14 @@ function mapExplorerFlowRows(groups, rows, windowSeconds, vlanGroupIndexes, asnG
         }
       }
     }
-    const asnNameMap = asnGroupIndexes.length
+    if (asPathGroupIndexes.length) {
+      for (const r of rows) {
+        for (const idx of asPathGroupIndexes) {
+          for (const n of parseExplorerAsPathRaw(r[`g${idx}`])) asnNums.add(n);
+        }
+      }
+    }
+    const asnNameMap = (asnGroupIndexes.length || asPathGroupIndexes.length)
       ? await lookupAsnDisplayNames([...asnNums])
       : null;
     const entityIds = new Set();
@@ -2146,6 +2339,13 @@ function mapExplorerFlowRows(groups, rows, windowSeconds, vlanGroupIndexes, asnG
           const asName = asnNameMap.get(asn) || '';
           asnMeta[idx] = { asn, asName: asName || null };
           values[idx] = asnExplorerDisplayLabel(asn, asName);
+        }
+      }
+      if (asnNameMap && asPathGroupIndexes.length) {
+        for (const idx of asPathGroupIndexes) {
+          const hops = parseExplorerAsPathRaw(r[`g${idx}`]);
+          rawValues[idx] = hops.length ? formatExplorerAsPathRawValue(hops) : '—';
+          values[idx] = formatExplorerAsPathDisplayLabel(hops, asnNameMap);
         }
       }
       if (entityNameMap) {
@@ -2264,7 +2464,7 @@ function explorerFlowsThresholdExtras(scaled, withPeak = false) {
 async function explorerFlowsPeakPath({
   body, q, groups, dims, scaled, metricKey, metricSpec, pctCol,
   windowSpec, windowSeconds, params, filterJoins, whereClauses, t,
-  vlanGroupIndexes, asnGroupIndexes, tcpGroupIndexes, thresholds, meta, plan,
+  vlanGroupIndexes, asnGroupIndexes, tcpGroupIndexes, asPathGroupIndexes, thresholds, meta, plan,
 }) {
   const peakWindowKey = thresholds.find((thr) => thr.aggregate === 'peak')?.peakWindow || '5m';
   const peakSec = peakWindowSeconds(peakWindowKey);
@@ -2355,7 +2555,9 @@ async function explorerFlowsPeakPath({
       groups,
       clickhouse_settings: EXPLORER_CH_SETTINGS,
       async map(rows) {
-        return mapExplorerFlowRows(groups, rows, windowSeconds, vlanGroupIndexes, asnGroupIndexes, tcpGroupIndexes);
+        return mapExplorerFlowRows(
+          groups, rows, windowSeconds, vlanGroupIndexes, asnGroupIndexes, tcpGroupIndexes, asPathGroupIndexes,
+        );
       },
     });
   }
@@ -2442,7 +2644,9 @@ async function explorerFlowsPeakPath({
     },
     requestTimeoutMs: heavyTimeoutMs,
     async map(rows) {
-      return mapExplorerFlowRows(groups, rows, windowSeconds, vlanGroupIndexes, asnGroupIndexes, tcpGroupIndexes);
+      return mapExplorerFlowRows(
+        groups, rows, windowSeconds, vlanGroupIndexes, asnGroupIndexes, tcpGroupIndexes, asPathGroupIndexes,
+      );
     },
   });
 }
@@ -2474,6 +2678,7 @@ async function explorerFlows(body = {}, options = {}) {
   const groupRows = groups.map((g, i) => ({ id: g, label: dims[g].label, alias: `g${i}` }));
   const vlanGroupIndexes = groups.map((g, i) => (dims[g].kind === 'vlan' ? i : -1)).filter((i) => i >= 0);
   const asnGroupIndexes = groups.map((g, i) => (dims[g].kind === 'asn' ? i : -1)).filter((i) => i >= 0);
+  const asPathGroupIndexes = groups.map((g, i) => (dims[g].kind === 'as_path' ? i : -1)).filter((i) => i >= 0);
   const tcpGroupIndexes = groups.map((g, i) => (dims[g].kind === 'tcp_flags' ? i : -1)).filter((i) => i >= 0);
 
   const whereClauses = [`f.${t} >= ts_from`, `f.${t} < ts_to`];
@@ -2489,7 +2694,7 @@ async function explorerFlows(body = {}, options = {}) {
     return explorerFlowsPeakPath({
       body, q, groups, dims, scaled, metricKey, metricSpec, pctCol,
       windowSpec, windowSeconds, params: scopedParams, filterJoins, whereClauses, t,
-      vlanGroupIndexes, asnGroupIndexes, tcpGroupIndexes, thresholds,
+      vlanGroupIndexes, asnGroupIndexes, tcpGroupIndexes, asPathGroupIndexes, thresholds,
       meta: {
         metric: metricKey,
         metricLabel: metricSpec.label,
@@ -2567,7 +2772,9 @@ async function explorerFlows(body = {}, options = {}) {
       groups,
       clickhouse_settings: EXPLORER_CH_SETTINGS,
       async map(rows) {
-        return mapExplorerFlowRows(groups, rows, windowSeconds, vlanGroupIndexes, asnGroupIndexes, tcpGroupIndexes);
+        return mapExplorerFlowRows(
+          groups, rows, windowSeconds, vlanGroupIndexes, asnGroupIndexes, tcpGroupIndexes, asPathGroupIndexes,
+        );
       },
     });
   }
@@ -2760,7 +2967,9 @@ async function explorerFlows(body = {}, options = {}) {
     requestTimeoutMs: heavyTimeoutMs,
     orderBy,
     async map(rows) {
-      return mapExplorerFlowRows(groups, rows, windowSeconds, vlanGroupIndexes, asnGroupIndexes, tcpGroupIndexes);
+      return mapExplorerFlowRows(
+        groups, rows, windowSeconds, vlanGroupIndexes, asnGroupIndexes, tcpGroupIndexes, asPathGroupIndexes,
+      );
     },
   });
 }
@@ -2890,6 +3099,14 @@ async function explorerResultSeries(body = {}, flowRows = [], options = {}) {
           scopedParams[paramName] = raw;
           return `${dim.groupKeyExpr} = {${paramName}:String}`;
         }
+        if (dim.filterType === 'as_path' && dim.groupKeyExpr) {
+          const hops = parseExplorerAsPathRaw(row.rawValues?.[gi] ?? raw);
+          if (!hops.length) {
+            return `empty(${dim.groupKeyExpr})`;
+          }
+          scopedParams[paramName] = hops;
+          return `${dim.groupKeyExpr} = {${paramName}:Array(UInt32)}`;
+        }
         scopedParams[paramName] = raw;
         return `toString(${dim.expr}) = {${paramName}:String}`;
       });
@@ -3005,6 +3222,7 @@ async function explorerGroupedTimeseries(body = {}) {
   const bucketExpr = explorerBucketExpr(`f.${t}`, gran.key, gran.seconds);
   const vlanGroupIndexes = groups.map((g, i) => (dims[g].kind === 'vlan' ? i : -1)).filter((i) => i >= 0);
   const asnGroupIndexes = groups.map((g, i) => (dims[g].kind === 'asn' ? i : -1)).filter((i) => i >= 0);
+  const asPathGroupIndexes = groups.map((g, i) => (dims[g].kind === 'as_path' ? i : -1)).filter((i) => i >= 0);
   const tcpGroupIndexes = groups.map((g, i) => (dims[g].kind === 'tcp_flags' ? i : -1)).filter((i) => i >= 0);
 
   let sql;
@@ -3181,6 +3399,7 @@ async function explorerGroupedTimeseries(body = {}) {
         vlanGroupIndexes,
         asnGroupIndexes,
         tcpGroupIndexes,
+        asPathGroupIndexes,
       );
       const seriesByRow = Object.fromEntries(flowRows.map((row) => [row.id, []]));
       const idByKey = explorerFlowRowIdByGroupKey(flowRows);
@@ -3888,6 +4107,10 @@ module.exports = {
   explorerExportCsv,
   normalizeExplorerQuery,
   parseExplorerAsnNumber,
+  parseExplorerAsPathRaw,
+  parseExplorerAsPathHops,
+  formatExplorerAsPathRawValue,
+  formatExplorerAsPathDisplayLabel,
   asnExplorerDisplayLabel,
   lookupAsnDisplayNames,
   explorerEntityDisplayLabel,

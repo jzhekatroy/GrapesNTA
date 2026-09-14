@@ -155,6 +155,8 @@ const config = {
     outIf: envOpt('CH_COL_OUT_IF', 'out_if'),
     tcpFlags: envOpt('CH_COL_TCP_FLAGS', 'tcp_flags'),
     ipTtl: envOpt('CH_COL_IP_TTL', 'ip_ttl'),
+    srcAsPath: envOpt('CH_COL_SRC_AS_PATH', 'src_as_path'),
+    dstAsPath: envOpt('CH_COL_DST_AS_PATH', 'dst_as_path'),
   },
   /** MAC column storage: fixedstring (FixedString(6)) or uint64 (Akvorado SrcMAC/DstMAC). */
   macStorage: (() => {

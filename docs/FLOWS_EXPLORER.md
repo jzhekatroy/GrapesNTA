@@ -31,6 +31,17 @@ name:
 `default.port_services` создается через `deploy/clickhouse/port_services.sql`.
 Базовые сервисы включают `tcp/22 -> SSH` и `udp/tcp 5060 -> SIP`.
 
+## BGP AS path в разборе трафика
+
+В `flows_raw` есть колонки `src_as_path` и `dst_as_path` — BGP AS path на момент
+ingest (сосед первый, origin последний). Это **не** то же самое, что `src_asn` /
+`dst_asn`: последние — origin (последний hop), а path позволяет искать
+транзитный AS в цепочке (`contains 1299`), даже если он не origin.
+
+Фильтр по path и группировка по полному path читают сырые потоки из
+`flows_raw`. На окне до ~1 часа это обычно нормально; на более длинном периоде
+группировка по AS path заметно тяжелее, чем по origin ASN.
+
 ## API Defaults
 
 - `from_utc` и `to_utc` обязательны.

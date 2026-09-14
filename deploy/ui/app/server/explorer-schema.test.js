@@ -8,6 +8,8 @@ const {
   explorerFieldMatchesQuery,
 } = require('./explorer');
 
+const ASGEO_CATALOG = 'Автономные системы и страны / AS & countries';
+
 const HIDDEN_PICKER = new Set([
   'src_network', 'dst_network', 'src_label', 'dst_label', 'vlan_attachment',
 ]);
@@ -146,6 +148,34 @@ describe('explorer schema field naming', () => {
     assert.equal(direction?.group, MY_NETWORK_CATALOG);
     const unknownOpt = (direction?.valueOptions || []).find((o) => o.value === 'unknown');
     assert.match(unknownOpt?.label || unknownOpt?.hint || '', /неразмеч/i);
+  });
+
+  it('exposes AS path fields in ASGEO with contains as default filter op', () => {
+    const schema = explorerSchema();
+    for (const id of ['src_as_path', 'dst_as_path']) {
+      const filter = schema.filterFields.find((f) => f.id === id);
+      const dimension = schema.dimensions.find((d) => d.id === id);
+      assert.ok(filter, id);
+      assert.ok(dimension, id);
+      assert.equal(filter.type, 'as_path');
+      assert.equal(filter.ops[0], 'contains');
+      assert.ok(filter.ops.includes('='));
+      assert.equal(filter.entityType, 'asn');
+    }
+    assert.deepEqual(
+      schema.dimensionGroups[ASGEO_CATALOG],
+      ['src_asn', 'dst_asn', 'src_as_path', 'dst_as_path', 'src_country', 'dst_country'],
+    );
+    const srcPath = schema.filterFields.find((f) => f.id === 'src_as_path');
+    assert.equal(explorerFieldMatchesQuery(srcPath, 'aspath'), true);
+    assert.equal(explorerFieldMatchesQuery(srcPath, 'путь'), true);
+  });
+
+  it('keeps AS path fields out of cabinet explorer schema', () => {
+    const schema = explorerSchema({ cabinet: true });
+    assert.equal(schema.filterFields.some((f) => f.id === 'src_as_path'), false);
+    assert.equal(schema.filterFields.some((f) => f.id === 'dst_as_path'), false);
+    assert.equal(schema.dimensions.some((d) => d.id === 'src_as_path'), false);
   });
 
   it('reserves client alias for cabinet_client field', () => {
