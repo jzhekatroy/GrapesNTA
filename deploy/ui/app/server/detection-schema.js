@@ -45,7 +45,23 @@ CREATE TABLE IF NOT EXISTS ${DB()}.${TABLE}
   foreign_srcs UInt32 DEFAULT 0,
   top_countries String DEFAULT '',
   growth_foreign_bps Nullable(Float64),
-  growth_foreign_share Nullable(Float64)
+  growth_foreign_share Nullable(Float64),
+  syn_only_bytes UInt64 DEFAULT 0,
+  syn_only_packets UInt64 DEFAULT 0,
+  syn_only_rows UInt64 DEFAULT 0,
+  ack_only_bytes UInt64 DEFAULT 0,
+  ack_only_packets UInt64 DEFAULT 0,
+  ack_only_rows UInt64 DEFAULT 0,
+  rst_bytes UInt64 DEFAULT 0,
+  rst_packets UInt64 DEFAULT 0,
+  rst_rows UInt64 DEFAULT 0,
+  established_bytes UInt64 DEFAULT 0,
+  established_packets UInt64 DEFAULT 0,
+  established_rows UInt64 DEFAULT 0,
+  data_bytes UInt64 DEFAULT 0,
+  data_packets UInt64 DEFAULT 0,
+  data_rows UInt64 DEFAULT 0,
+  sampling_rate UInt64 DEFAULT 1
 )
 ENGINE = ReplacingMergeTree
 PARTITION BY toYYYYMMDD(minute)
@@ -67,6 +83,22 @@ const ADD_COLUMNS = [
   { name: 'top_countries', type: 'String DEFAULT \'\'' },
   { name: 'growth_foreign_bps', type: 'Nullable(Float64)' },
   { name: 'growth_foreign_share', type: 'Nullable(Float64)' },
+  { name: 'syn_only_bytes', type: 'UInt64 DEFAULT 0' },
+  { name: 'syn_only_packets', type: 'UInt64 DEFAULT 0' },
+  { name: 'syn_only_rows', type: 'UInt64 DEFAULT 0' },
+  { name: 'ack_only_bytes', type: 'UInt64 DEFAULT 0' },
+  { name: 'ack_only_packets', type: 'UInt64 DEFAULT 0' },
+  { name: 'ack_only_rows', type: 'UInt64 DEFAULT 0' },
+  { name: 'rst_bytes', type: 'UInt64 DEFAULT 0' },
+  { name: 'rst_packets', type: 'UInt64 DEFAULT 0' },
+  { name: 'rst_rows', type: 'UInt64 DEFAULT 0' },
+  { name: 'established_bytes', type: 'UInt64 DEFAULT 0' },
+  { name: 'established_packets', type: 'UInt64 DEFAULT 0' },
+  { name: 'established_rows', type: 'UInt64 DEFAULT 0' },
+  { name: 'data_bytes', type: 'UInt64 DEFAULT 0' },
+  { name: 'data_packets', type: 'UInt64 DEFAULT 0' },
+  { name: 'data_rows', type: 'UInt64 DEFAULT 0' },
+  { name: 'sampling_rate', type: 'UInt64 DEFAULT 1' },
 ];
 
 let ensurePromise = null;

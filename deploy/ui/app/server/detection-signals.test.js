@@ -6,6 +6,9 @@ const {
   isAmplificationHit,
   ampStillGoing,
   evaluateForeignGeo,
+  isSynFloodHit,
+  isTcpScan,
+  synFloodThresholdPps,
   SIGNALS,
 } = require('./detection-signals');
 const {
@@ -296,6 +299,67 @@ describe('detection-signals', () => {
       }]]),
     });
     assert.equal(picked.some((c) => c.signal === SIGNALS.amplification), false);
+  });
+
+  it('81050: голый SYN выше порога sFlow → SYN-флуд', () => {
+    assert.equal(isSynFloodHit({
+      syn_only_packets: 2248431 * 60,
+      syn_only_bytes: 2248431 * 60 * 72,
+      syn_only_rows: 2059,
+      sampling_rate: 32768,
+    }), true);
+    assert.ok(synFloodThresholdPps(32768) > 16000);
+  });
+
+  it('188.143.242: 190 п/с голого SYN — скан, не флуд', () => {
+    const row = {
+      syn_only_packets: 190 * 60,
+      syn_only_bytes: 190 * 60 * 61,
+      syn_only_rows: 10400,
+      syn_attempts: 9310,
+      sampling_rate: 1,
+    };
+    assert.equal(isSynFloodHit(row), false);
+    assert.equal(isTcpScan(row), true);
+  });
+
+  it('крупные ACK не считаются SYN-флудом', () => {
+    assert.equal(isSynFloodHit({
+      syn_only_packets: 100489 * 60,
+      syn_only_bytes: 100489 * 60 * 1505,
+      syn_only_rows: 184,
+      sampling_rate: 32768,
+    }), false);
+  });
+
+  it('188.143.242: скан не открывает SYN-флуд', () => {
+    const all = {
+      scope: 'net', scope_id: '188.143.242.0/24', proto: 'all', growth_bps: 13,
+      syn_only_packets: 190 * 60,
+      syn_only_bytes: 190 * 60 * 61,
+      syn_only_rows: 10400,
+      sampling_rate: 1,
+    };
+    const picked = pickAlertCandidates([all], new Map(), 1.6, {
+      grouped: new Map([['net|188.143.242.0/24', { byProto: { all } }]]),
+      settings: { ampEnabled: false, geoEnabled: false },
+    });
+    assert.equal(picked.some((c) => c.signal === SIGNALS.syn_flood), false);
+  });
+
+  it('SYN-флуд открывается без роста объёма', () => {
+    const all = {
+      scope: 'client', scope_id: '81050', proto: 'all', growth_bps: 0.37,
+      syn_only_packets: 2248431 * 60,
+      syn_only_bytes: 2248431 * 60 * 72,
+      syn_only_rows: 2059,
+      sampling_rate: 32768,
+    };
+    const picked = pickAlertCandidates([all], new Map(), 1.6, {
+      grouped: new Map([['client|81050', { byProto: { all } }]]),
+      settings: { ampEnabled: false, geoEnabled: false },
+    });
+    assert.deepEqual(picked.map((c) => c.signal), [SIGNALS.syn_flood]);
   });
 
   it('amp хоронит, когда крупные ответы сели', () => {

@@ -1,12 +1,14 @@
 'use strict';
 
 const { query, flowsRawTableRef, netInterfacesCurrentRef, clientsViewRef, col, flowCol, asnNamesTableRef } = require('./clickhouse');
-const { flowIpExpr, flowSamplerIpExpr, sflowIfIndexExpr } = require('./queries');
+const { flowIpExpr, flowSamplerIpExpr, sflowIfIndexExpr, primarySourceIdsSql, primaryClientSourceSql } = require('./queries');
 const { AMPLIFIER_PORTS } = require('./detection-signals');
 const {
   formatCh, parseUtc, BASELINE_DAYS, BASELINE_QUARANTINE_MINUTES, EXPORT_LAG, MINUTE,
 } = require('./detection-core');
 const { tableRef } = require('./detection-schema');
+
+const SYN_PAIR_LIMIT = 200;
 
 const CHEAP = {
   max_execution_time: 30,
@@ -51,9 +53,28 @@ function emptyInvestigate() {
     ampDestPort: { count: 0, top: [] },
     ampSrcPort: { count: 0, top: [] },
     destPort: { count: 0, top: [] },
+    syn: emptySyn(),
     l4src: [],
     switchIn: null,
     switchOut: null,
+  };
+}
+
+function emptySyn() {
+  return {
+    packets: 0,
+    bytes: 0,
+    pps: 0,
+    bps: 0,
+    avgPkt: 0,
+    srcIps: 0,
+    srcNets: 0,
+    srcAsns: 0,
+    dstIps: 0,
+    portCount: 0,
+    truncated: false,
+    dest: [],
+    ports: [],
   };
 }
 
@@ -98,6 +119,7 @@ async function loadHourEnvelope({ scope, scopeId, minute }) {
       FROM default.traffic_client_1m
       WHERE client_id = {scopeId:String}
         AND direction = 'in'
+        AND ${primaryClientSourceSql()}
         AND minute >= ${utcDateTime('minute')} - INTERVAL {days:UInt16} DAY
         AND minute < ${utcDateTime('minute')}
         AND toDayOfWeek(minute) = toDayOfWeek(${utcDateTime('minute')})
@@ -139,6 +161,7 @@ async function loadForeignEnvelopes(minute) {
           sumIf(bytes, country_code NOT IN ('RU', '??', '')) / nullIf(sum(bytes), 0) AS foreign_share
         FROM default.traffic_client_country_1h
         WHERE direction = 'in'
+          AND ${primaryClientSourceSql()}
           AND hour >= ${utcDateTime('minute')} - INTERVAL {days:UInt16} DAY
           AND hour < toStartOfHour(${utcDateTime('minute')})
           AND toDayOfWeek(hour) = toDayOfWeek(${utcDateTime('minute')})
@@ -250,6 +273,7 @@ function timeFilterSql() {
       AND f.time_flow_start_ns < ${utcDateTime64('to')}
       AND f.${timeCol} >= ${utcDateTime64('from')}
       AND f.${timeCol} < ${utcDateTime64('until')}
+      AND ${primarySourceIdsSql('f')}
   `;
 }
 
@@ -260,6 +284,8 @@ function evCte() {
   const srcPort = `f.${col('srcPort')}`;
   const dstPort = `f.${col('dstPort')}`;
   const bytes = `f.${col('bytes')}`;
+  const packets = `f.${col('packets')}`;
+  const tcpFlags = `f.${flowCol('tcpFlags') || '`tcp_flags`'}`;
   const srcAsn = col('srcAsn') ? `f.${col('srcAsn')}` : '0';
   const samplerCol = flowCol('samplerAddress') || 'sampler_address';
   const inIfCol = flowCol('inIf') || 'in_if';
@@ -281,6 +307,8 @@ function evCte() {
       ${protoCol} AS proto,
       ${srcAsn} AS src_asn,
       ${bytes} AS bytes,
+      ${packets} AS packets,
+      ${tcpFlags} AS tcp_flags,
       ${switchIp} AS switch_ip,
       ${inIdx} AS in_idx,
       ${outIdx} AS out_idx
@@ -305,6 +333,48 @@ function mapDestPorts(tuples, countRaw, totalBytes) {
   return {
     count: Number.isFinite(counted) ? counted : top.length,
     top,
+  };
+}
+
+// Пары (адрес, порт) приходят обрезанными по SYN_PAIR_LIMIT, поэтому доли
+// считаются от полной суммы пакетов: обрез может занизить долю, но не завысить.
+function mapSyn(raw, asTuples) {
+  const t = Array.isArray(raw) ? raw : Object.values(raw || {});
+  const packets = Number(t[0] || 0);
+  if (!(packets > 0)) return emptySyn();
+  const bytes = Number(t[1] || 0);
+  const share = (value) => Number(value || 0) / packets;
+  const pairs = asTuples(t[7]).map((pair) => ({
+    ip: String(pair[0] || ''),
+    port: Number(pair[1] || 0),
+    packets: Number(pair[2] || 0),
+    share: share(pair[2]),
+  }));
+  const byPort = new Map();
+  for (const pair of pairs) {
+    const prev = byPort.get(pair.port) || { port: pair.port, packets: 0, ips: 0 };
+    prev.packets += pair.packets;
+    prev.ips += 1;
+    byPort.set(pair.port, prev);
+  }
+  return {
+    packets,
+    bytes,
+    pps: packets / 60,
+    bps: bytes * 8 / 60,
+    avgPkt: bytes / packets,
+    srcIps: Number(t[2] || 0),
+    srcNets: Number(t[3] || 0),
+    srcAsns: Number(t[4] || 0),
+    dstIps: Number(t[5] || 0),
+    portCount: Number(t[6] || 0),
+    // Топ целей от обреза не страдает (срезан хвост), а доли по портам — да.
+    truncated: pairs.length >= SYN_PAIR_LIMIT,
+    dest: pairs.slice(0, 5),
+    ports: [...byPort.values()]
+      .sort((a, b) => b.packets - a.packets)
+      .slice(0, 5)
+      .map((row) => ({ ...row, share: share(row.packets) })),
   };
 }
 
@@ -410,6 +480,39 @@ async function investigateIncident({ scope, scopeId, minute }) {
         FROM ev GROUP BY port ORDER BY byte_sum DESC LIMIT 5
       )
     ),
+    -- Цель SYN-флуда ищется по пакетам и только среди голого SYN: в ту же
+    -- минуту у клиента может идти закачка, и по байтам первым встал бы её порт.
+    -- Всё считается одной группировкой и отдаётся одним кортежем: каждый
+    -- отдельный CTE здесь инлайнится и стоит ещё один проход по flows_raw.
+    syn_pair AS (
+      SELECT
+        dst_ip AS ip,
+        dst_port AS port,
+        sum(packets) AS packet_sum,
+        sum(bytes) AS byte_sum,
+        uniqState(src_ip) AS src_ip_st,
+        uniqState(src24) AS src_net_st,
+        uniqState(src_asn) AS src_asn_st
+      FROM ev
+      WHERE proto = 6 AND bitAnd(tcp_flags, 2) > 0 AND bitAnd(tcp_flags, 16) = 0
+      GROUP BY ip, port
+    ),
+    syn AS (
+      SELECT tuple(
+        sum(packet_sum),
+        sum(byte_sum),
+        uniqMerge(src_ip_st),
+        uniqMerge(src_net_st),
+        uniqMerge(src_asn_st),
+        uniqExact(ip),
+        uniqExact(port),
+        arraySlice(
+          arrayReverseSort(x -> tupleElement(x, 3), groupArray(tuple(ip, port, packet_sum))),
+          1, ${SYN_PAIR_LIMIT}
+        )
+      ) AS row
+      FROM syn_pair
+    ),
     dest_port_n AS (
       SELECT uniqExact(dst_port) AS n FROM ev
     ),
@@ -501,6 +604,7 @@ async function investigateIncident({ scope, scopeId, minute }) {
       (SELECT n FROM amp_src_port_n) AS amp_src_port_count,
       (SELECT rows FROM dest_port) AS dest_ports,
       (SELECT n FROM dest_port_n) AS dest_port_count,
+      (SELECT row FROM syn) AS syn,
       (SELECT rows FROM src24) AS src24s,
       (SELECT rows FROM srcip) AS srcips,
       (SELECT rows FROM l4) AS l4s,
@@ -579,6 +683,7 @@ async function investigateIncident({ scope, scopeId, minute }) {
     ampDestPort: mapDestPorts(asTuples(row.amp_dest_ports), row.amp_port_count, Number(row.amp_bytes || 0)),
     ampSrcPort: mapDestPorts(asTuples(row.amp_src_ports), row.amp_src_port_count, Number(row.amp_bytes || 0)),
     destPort: mapDestPorts(asTuples(row.dest_ports), row.dest_port_count, total),
+    syn: mapSyn(row.syn, asTuples),
     sources: {
       ipCount: Number(row.src_ips || 0),
       net24Count: Number(row.src_nets || 0),

@@ -25,6 +25,7 @@ const { loadThresholdMap, resolveGrowthThreshold, hasGrowthOverride } = require(
 const {
   SIGNALS,
   SIGNAL_LABEL,
+  SIGNAL_ORDER,
   AMP_PKT_MIN,
   isAmplificationHit,
   ampStillGoing,
@@ -36,6 +37,10 @@ const {
   amplifierLabel,
   AMPLIFIER_PORT_LABEL,
   objectSignalKey,
+  isSynFloodHit,
+  synFloodStillGoing,
+  isTcpScan,
+  tcpClassMetrics,
 } = require('./detection-signals');
 
 const SETTINGS_TABLE = 'app_detection_telegram';
@@ -62,6 +67,12 @@ const SNAPSHOT_FIELDS = [
   'amp_bytes', 'amp_packets', 'amp_srcs', 'growth_amp',
   'foreign_bytes', 'foreign_srcs', 'top_countries',
   'growth_foreign_bps', 'growth_foreign_share',
+  'syn_only_bytes', 'syn_only_packets', 'syn_only_rows',
+  'ack_only_bytes', 'ack_only_packets', 'ack_only_rows',
+  'rst_bytes', 'rst_packets', 'rst_rows',
+  'established_bytes', 'established_packets', 'established_rows',
+  'data_bytes', 'data_packets', 'data_rows',
+  'sampling_rate',
 ];
 // Список стран — строка вида RU:0.60,UZ:0.12; числовое приведение убило бы её.
 const SNAPSHOT_STRING_FIELDS = new Set(['top_countries']);
@@ -91,6 +102,22 @@ const SNAPSHOT_CAMEL = {
   top_countries: 'topCountries',
   growth_foreign_bps: 'growthForeignBps',
   growth_foreign_share: 'growthForeignShare',
+  syn_only_bytes: 'synOnlyBytes',
+  syn_only_packets: 'synOnlyPackets',
+  syn_only_rows: 'synOnlyRows',
+  ack_only_bytes: 'ackOnlyBytes',
+  ack_only_packets: 'ackOnlyPackets',
+  ack_only_rows: 'ackOnlyRows',
+  rst_bytes: 'rstBytes',
+  rst_packets: 'rstPackets',
+  rst_rows: 'rstRows',
+  established_bytes: 'establishedBytes',
+  established_packets: 'establishedPackets',
+  established_rows: 'establishedRows',
+  data_bytes: 'dataBytes',
+  data_packets: 'dataPackets',
+  data_rows: 'dataRows',
+  sampling_rate: 'samplingRate',
 };
 
 const DEFAULT_SETTINGS = {
@@ -339,6 +366,13 @@ function signalSettings(settings = {}, signal = SIGNALS.volume) {
       normalizeStreak: normalizeStreak(settings.geoNormalizeStreak, DEFAULT_NORMALIZE_STREAK),
     };
   }
+  if (signal === SIGNALS.syn_flood) {
+    return {
+      enabled: true,
+      streak: 1,
+      normalizeStreak: normalizeStreak(settings.normalizeStreak, DEFAULT_NORMALIZE_STREAK),
+    };
+  }
   return {
     enabled: true,
     streak: normalizeStreak(settings.streak, DEFAULT_STREAK),
@@ -358,6 +392,9 @@ function isSignalHot(signal, row, group, threshold) {
   if (signal === SIGNALS.amplification) {
     const udp = ampRowFor(row, group);
     return udp ? isAmplificationHit(udp) : false;
+  }
+  if (signal === SIGNALS.syn_flood) {
+    return isSynFloodHit(row) || isSynFloodHit(group?.byProto?.tcp || {});
   }
   if (signal === SIGNALS.foreign_geo) {
     if (String(row?.scope || group?.scope || '') !== 'client') return false;
@@ -576,12 +613,7 @@ function outOfRangeFields(proto, row, { verdict, threshold } = {}) {
   if (proto === 'all' && Number.isFinite(ratio) && ratio >= HOUR_RATIO_PEAK) flags.add('bps');
   const entropy = Number(row.port_entropy);
   if (Number.isFinite(entropy) && entropy < ENTROPY_FOCUSED) flags.add('port_entropy');
-  const attempts = Number(row.syn_attempts);
-  const answer = Number(row.answer_pct);
-  if (attempts >= 200 && Number.isFinite(answer) && answer < 15) {
-    flags.add('syn_attempts');
-    flags.add('answer_pct');
-  }
+  if (isSynFloodHit(row)) flags.add('syn_only');
   if (Number(row.avg_packet_bytes) >= AMP_PKT_MIN) flags.add('avg_packet_bytes');
   if (proto === 'udp' && isAmplificationHit(row)) flags.add('amp');
   if (proto === 'all' && evaluateForeignGeo(row).hit) flags.add('foreign');
@@ -603,10 +635,19 @@ function formatProtoBlock(proto, row, flags = new Set()) {
   if (proto === 'udp') {
     lines.push('  попытки / ответ / полуоткрытые / не зашли: —');
   } else {
-    lines.push(at('syn_attempts', `попытки: ${formatNumMsg(row.syn_attempts, 0)}`));
-    lines.push(at('answer_pct', `ответ: ${formatPctMsg(row.answer_pct)}`));
-    lines.push(at('half_open_pct', `полуоткрытые: ${formatPctMsg(row.half_open_pct)}`));
-    lines.push(at('half_open_reply_pct', `не зашли: ${formatPctMsg(row.half_open_reply_pct)}`));
+    const syn = tcpClassMetrics(row, 'syn_only');
+    if (syn.packets > 0) {
+      lines.push(at('syn_only', `голый SYN: ${formatPpsMsg(syn.pps)} · ${formatNumMsg(syn.avgPkt, 0)} Б · ${formatNumMsg(syn.rows, 0)} стр.`));
+    }
+    const ack = tcpClassMetrics(row, 'ack_only');
+    if (ack.packets > 0 && ack.avgPkt < 120) {
+      lines.push(`  голый ACK: ${formatPpsMsg(ack.pps)} · ${formatNumMsg(ack.avgPkt, 0)} Б`);
+    }
+    lines.push(`  попытки: ${formatNumMsg(row.syn_attempts, 0)}`);
+    lines.push(`  ответ: ${formatPctMsg(row.answer_pct)}`);
+    lines.push(`  полуоткрытые: ${formatPctMsg(row.half_open_pct)}`);
+    lines.push(`  не зашли: ${formatPctMsg(row.half_open_reply_pct)}`);
+    if (isTcpScan(row)) lines.push('  SYN-скан: много потоков, мало пакетов');
   }
   lines.push(at('port_entropy', `энтропия портов вх.: ${formatNumMsg(row.port_entropy, 2)}`));
   lines.push(at('port_entropy_out', `энтропия портов исх.: ${formatNumMsg(row.port_entropy_out, 2)}`));
@@ -639,6 +680,7 @@ function isAlertAttack(verdict, signals = []) {
   const list = Array.isArray(signals) ? signals : [];
   if (isAttackKind(verdict?.kind)) return true;
   if (list.includes(SIGNALS.amplification)) return true;
+  if (list.includes(SIGNALS.syn_flood) && !isLegitimatePeak(verdict)) return true;
   if (list.includes(SIGNALS.foreign_geo) && !isLegitimatePeak(verdict)) return true;
   return false;
 }
@@ -700,20 +742,6 @@ function formatSharePct(share) {
   return n < 1 ? `${n.toFixed(1)}%` : `${n.toFixed(0)}%`;
 }
 
-function formatCompactCount(value) {
-  const n = Number(value);
-  if (!Number.isFinite(n)) return '—';
-  if (n >= 1e6) {
-    const m = n / 1e6;
-    return `${formatNumMsg(m, m >= 10 ? 0 : 1)} млн`;
-  }
-  if (n >= 1000) {
-    const k = n / 1000;
-    return `${formatNumMsg(k, Number.isInteger(k) || k >= 10 ? 0 : 1)} тыс.`;
-  }
-  return formatNumMsg(n, 0);
-}
-
 function formatClientVolume(all, hourUsual, verdict) {
   const bps = Number(all.bps);
   if (!(bps > 0) || !(hourUsual > 0)) return '';
@@ -771,7 +799,13 @@ function formatDestLines(investigate, mode) {
     return [`Куда: — (разбор не удался: ${escapeHtml(shortErrorMsg(investigate.error))})`];
   }
   if (mode === 'carpet') return ['Куда: по сети клиента, не один сервер'];
-  if (mode === 'syn') return ['Куда: на сеть клиента'];
+  if (mode === 'syn') {
+    const victim = investigate?.victim;
+    if (isUsableVictim(victim)) {
+      return ['Куда:', escapeHtml(`   ${formatVictimDest(victim)}`)];
+    }
+    return ['Куда: на сеть клиента'];
+  }
   const victim = investigate?.victim;
   if (!isUsableVictim(victim)) return [];
   return ['Куда:', escapeHtml(`   ${formatVictimDest(victim)}`)];
@@ -803,8 +837,11 @@ function formatColonPorts(rows, { withProto = false, limit = 5 } = {}) {
   }).join(' · ');
 }
 
-function footerPortLines(investigate, { ampShown, hidePeak }) {
+function footerPortLines(investigate, { ampShown, hidePeak, synShown }) {
   if (hidePeak) return [];
+  // При SYN-флуде оба среза считаются по байтам всей минуты, а байты у голого
+  // SYN почти нулевые: в футер попала бы чужая закачка. Порты атаки уже в шапке.
+  if (synShown) return [];
   const from = ampShown
     ? formatColonPorts(investigate?.ampSrcPort?.top)
     : formatColonPorts(investigate?.l4src, { withProto: true });
@@ -840,6 +877,17 @@ function ruAddresses(count) {
   if (d === 1) return `${formatNumMsg(n, 0)} адрес`;
   if (d >= 2 && d <= 4) return `${formatNumMsg(n, 0)} адреса`;
   return `${formatNumMsg(n, 0)} адресов`;
+}
+
+function ruSources(count) {
+  const n = Number(count);
+  if (!Number.isFinite(n) || n < 0) return '';
+  const k = n % 100;
+  const d = n % 10;
+  if (k >= 11 && k <= 14) return `${formatNumMsg(n, 0)} источников`;
+  if (d === 1) return `${formatNumMsg(n, 0)} источник`;
+  if (d >= 2 && d <= 4) return `${formatNumMsg(n, 0)} источника`;
+  return `${formatNumMsg(n, 0)} источников`;
 }
 
 function ruPorts(count) {
@@ -1012,16 +1060,90 @@ function formatCarpetHighlight({ all, tcp, udp, hourUsual, verdict, investigate 
   return lines;
 }
 
-function formatSynHighlight({ all, investigate }) {
-  const attempts = Number(all.syn_attempts ?? all.synAttempts);
-  const answer = Number(all.answer_pct ?? all.answerPct);
+// Откуда: у SYN-флуда важны не имена сетей (их тысячи и адреса подделаны), а
+// сам разброс — сколько источников и из скольких сетей бьёт.
+function formatSynSourceLine(syn) {
   const bits = [];
-  if (Number.isFinite(attempts) && attempts > 0) bits.push(`SYN-попыток ${formatCompactCount(attempts)}`);
-  if (Number.isFinite(answer)) bits.push(`ответов ${answer.toFixed(0)}%`);
+  if (syn.avgPkt > 0) bits.push(`пакеты по ${formatNumMsg(syn.avgPkt, 0)} Б`);
+  if (syn.srcIps > 0) bits.push(ruSources(syn.srcIps));
+  if (syn.srcNets > 1) bits.push(`${formatNumMsg(syn.srcNets, 0)} сетей /24`);
+  if (syn.srcAsns > 1) bits.push(`${formatNumMsg(syn.srcAsns, 0)} AS`);
+  return bits.length ? `   ${bits.join(' · ')}` : '';
+}
+
+function formatSynDestLines(syn) {
+  const rows = (Array.isArray(syn.dest) ? syn.dest : []).filter((row) => row?.ip).slice(0, 3);
+  if (!rows.length) return [];
+  const lines = [syn.dstIps > rows.length
+    ? `Куда (SYN), топ ${rows.length} из ${ruAddresses(syn.dstIps)}:`
+    : 'Куда (SYN):'];
+  for (const row of rows) {
+    const port = row.port ? `:${row.port}` : '';
+    lines.push(escapeHtml(`   ${row.ip}${port} — ${formatSharePct(row.share)} SYN`));
+  }
+  return lines;
+}
+
+function formatSynPortLine(syn) {
+  const top = (Array.isArray(syn.ports) ? syn.ports : []).filter((row) => row?.port).slice(0, 3);
+  if (!top.length) return '';
+  if (top.length === 1 || Number(top[0].share) >= 0.9) {
+    return `На порт :${top[0].port} — ${formatSharePct(top[0].share)} SYN`;
+  }
+  // Разбор отдаёт только верхушку пар «адрес + порт», поэтому при широком
+  // веере доли по портам занижены — тогда даём разброс без процентов.
+  if (syn.truncated) {
+    return `На ${ruPorts(syn.portCount)}, топ ${top.map((row) => `:${row.port}`).join(' · ')}`;
+  }
+  return `На порты ${top.map((row) => `:${row.port} ${formatSharePct(row.share)}`).join(' · ')}`;
+}
+
+function formatSynHighlight({ all, tcp, hourUsual, verdict, investigate }) {
+  const fromRow = tcpClassMetrics(
+    tcpClassMetrics(tcp, 'syn_only').pps > tcpClassMetrics(all, 'syn_only').pps ? tcp : all,
+    'syn_only',
+  );
+  const detail = investigate?.syn;
+  // Разбор считает голый SYN по тем же флагам, но без сэмплирования минутки:
+  // п/с и байты берём из минутки, адреса и порты — из разбора.
+  const syn = {
+    pps: fromRow.pps > 0 ? fromRow.pps : Number(detail?.pps) || 0,
+    bps: fromRow.bps > 0 ? fromRow.bps : Number(detail?.bps) || 0,
+    avgPkt: fromRow.avgPkt > 0 ? fromRow.avgPkt : Number(detail?.avgPkt) || 0,
+    srcIps: Number(detail?.srcIps) || 0,
+    srcNets: Number(detail?.srcNets) || 0,
+    srcAsns: Number(detail?.srcAsns) || 0,
+    dstIps: Number(detail?.dstIps) || 0,
+    portCount: Number(detail?.portCount) || 0,
+    truncated: Boolean(detail?.truncated),
+    dest: detail?.dest || [],
+    ports: detail?.ports || [],
+  };
+  const volume = [
+    syn.pps > 0 ? formatPpsMsg(syn.pps) : '',
+    syn.bps > 0 ? formatBpsMsg(syn.bps) : '',
+  ].filter(Boolean).map((value) => `<b>${escapeHtml(value)}</b>`);
   const lines = [];
-  if (bits.length) lines.push(escapeHtml(bits.join(' · ')));
-  lines.push(...formatDestLines(investigate, 'syn'));
-  lines.push(...formatAttackPortLines(investigate?.destPort));
+  lines.push(volume.length
+    ? `🔴 Голого SYN ${volume.join(' · ')}`
+    : '🔴 Голый SYN');
+  const source = formatSynSourceLine(syn);
+  if (source) lines.push(escapeHtml(source));
+  const dest = formatSynDestLines(syn);
+  if (dest.length) {
+    lines.push(...dest);
+    const port = formatSynPortLine(syn);
+    if (port) lines.push(escapeHtml(port));
+  } else {
+    lines.push(...formatDestLines(investigate, 'syn'));
+    lines.push(...formatAttackPortLines(investigate?.destPort));
+  }
+  const share = Number(all?.pps) > 0 ? syn.pps / Number(all.pps) : null;
+  if (share != null && share > 0) {
+    lines.push(escapeHtml(`Это ${formatSharePct(share)} всех пакетов клиента.`));
+  }
+  const clientVolume = formatClientVolume(all, hourUsual, verdict);
+  if (clientVolume) lines.push(escapeHtml(clientVolume));
   return lines;
 }
 
@@ -1065,10 +1187,10 @@ function formatAlertHighlights({ byProto, verdict, investigate, hourUsual, signa
   const amp = ampMetrics(udp);
   const showAmp = verdict?.kind === KINDS.amplification || (amp.bps >= 50e6 && amp.share != null);
   const lines = [];
-  if (showAmp && amp.bps > 0) {
+  if (verdict?.kind === KINDS.syn_flood) {
+    lines.push(...formatSynHighlight({ all, tcp, hourUsual, verdict, investigate }));
+  } else if (showAmp && amp.bps > 0) {
     lines.push(...formatAmpHighlight({ amp, udp, all, hourUsual, verdict, investigate }));
-  } else if (verdict?.kind === KINDS.syn_flood) {
-    lines.push(...formatSynHighlight({ all, investigate }));
   } else if (isLegitimatePeak(verdict)) {
     lines.push(...formatDownloadHighlight({ all, hourUsual, verdict, investigate }));
   } else if (verdict?.kind === KINDS.volumetric) {
@@ -1118,7 +1240,11 @@ function formatAlertMessage({
   });
   const switchIn = formatSwitchPort(investigate?.switchIn);
   const switchOut = formatSwitchPort(investigate?.switchOut);
-  const sourceNets = formatSourceNets(investigate?.source24);
+  // Сети и порты футера считаются по байтам всей минуты, а у голого SYN байтов
+  // почти нет: у 81050 туда попадала чужая закачка. Откуда и куда бьёт SYN,
+  // уже сказано в шапке числом источников и целями по пакетам.
+  const synFlood = verdict?.kind === KINDS.syn_flood;
+  const sourceNets = synFlood ? '—' : formatSourceNets(investigate?.source24);
   const hidePeakPorts = isLegitimatePeak(verdict);
   // У пика нет строк с маркерами, поэтому причина — единственное объяснение;
   // у атаки она дословно повторяет то, что уже разложено по строкам выше.
@@ -1138,7 +1264,7 @@ function formatAlertMessage({
     [`<b>Что делать:</b> ${escapeHtml(actionFor(verdict, investigate))}`],
     [
       sourceNets !== '—' ? `Откуда сети: ${escapeHtml(sourceNets)}` : '',
-      ...footerPortLines(investigate, { ampShown, hidePeak: hidePeakPorts }),
+      ...footerPortLines(investigate, { ampShown, hidePeak: hidePeakPorts, synShown: synFlood }),
       switchIn !== '—' ? `Коммутатор вход: ${escapeHtml(switchIn)}` : '',
       switchOut !== '—' ? `Коммутатор выход: ${escapeHtml(switchOut)}` : '',
       markupLine ? escapeHtml(markupLine) : '',
@@ -1205,7 +1331,7 @@ function pickAlertCandidates(allRows, previousByKey, threshold, options = {}) {
     const group = grouped.get(objectId) || { byProto: { all: row } };
     const prev = previousByKey.get(objectId) || [];
     const t = resolveGrowthThreshold(row.scope, row.scope_id, threshold, options.thresholdByKey);
-    for (const signal of [SIGNALS.volume, SIGNALS.amplification, SIGNALS.foreign_geo]) {
+    for (const signal of SIGNAL_ORDER) {
       const cfg = signalSettings(settings, signal);
       if (!cfg.enabled) continue;
       if (signal === SIGNALS.foreign_geo && String(row.scope) !== 'client') continue;
@@ -1244,7 +1370,7 @@ function pickNormalizeCandidates(allRows, previousByKey, threshold, options = {}
     const group = grouped.get(objectId) || { byProto: { all: row } };
     const prev = previousByKey.get(objectId) || [];
     const history = [row, ...prev];
-    for (const signal of [SIGNALS.volume, SIGNALS.amplification, SIGNALS.foreign_geo]) {
+    for (const signal of SIGNAL_ORDER) {
       const signalKey = objectSignalKey(row.scope, row.scope_id, signal);
       const active = activeByKey.get(signalKey) || (signal === SIGNALS.volume ? activeByKey.get(objectId) : null);
       if (!active) continue;
@@ -1265,6 +1391,10 @@ function pickNormalizeCandidates(allRows, previousByKey, threshold, options = {}
             const udp = ampRowFor(item, group);
             if (!udp) return true;
             return !isAmplificationHit(udp) && !ampStillGoing(udp);
+          }
+          if (activeSignal === SIGNALS.syn_flood) {
+            return !isSynFloodHit(item) && !isSynFloodHit(group?.byProto?.tcp || {})
+              && !synFloodStillGoing(item);
           }
           return !isSignalHot(activeSignal, item, group, t);
         }, cfg.normalizeStreak);
@@ -1970,16 +2100,14 @@ async function processDetectionAlerts({ minute, rows, nameByKey }) {
     const objectId = objectKey(r.scope, r.scope_id);
     const group = grouped.get(objectId);
     const t = resolveGrowthThreshold(r.scope, r.scope_id, settings.growthThreshold, thresholdByKey);
-    return isSignalHot(SIGNALS.volume, r, group, t)
-      || isSignalHot(SIGNALS.amplification, r, group, t)
-      || isSignalHot(SIGNALS.foreign_geo, r, group, t);
+    return SIGNAL_ORDER.some((signal) => isSignalHot(signal, r, group, t));
   });
   const watchKeys = [];
   const seen = new Set();
   for (const row of allRows) {
     const key = objectKey(row.scope, row.scope_id);
     if (seen.has(key)) continue;
-    const hasActive = [SIGNALS.volume, SIGNALS.amplification, SIGNALS.foreign_geo]
+    const hasActive = SIGNAL_ORDER
       .some((signal) => activeByKey.has(objectSignalKey(row.scope, row.scope_id, signal))
         || (signal === SIGNALS.volume && activeByKey.has(key)));
     if (!above.includes(row) && !hasActive) continue;
@@ -2061,7 +2189,8 @@ async function processDetectionAlerts({ minute, rows, nameByKey }) {
       errors.push({ key: objectId, message: `hour: ${err.message}` });
     }
     let verdict = classifyFromMetrics(byProto, hour);
-    if (verdict.needsInvestigate || signals.includes(SIGNALS.amplification) || signals.includes(SIGNALS.foreign_geo)) {
+    if (verdict.needsInvestigate || signals.includes(SIGNALS.amplification)
+      || signals.includes(SIGNALS.syn_flood) || signals.includes(SIGNALS.foreign_geo)) {
       try {
         investigate = await investigateIncident({ scope: row.scope, scopeId: row.scope_id, minute });
         verdict = refineClassification(verdict, investigate);

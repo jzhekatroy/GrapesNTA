@@ -172,6 +172,22 @@ function emptyRaw() {
     synInFlows: 0,
     synHalfOpen: 0,
     synHalfOpenReply: 0,
+    synOnlyBytes: 0,
+    synOnlyPackets: 0,
+    synOnlyRows: 0,
+    ackOnlyBytes: 0,
+    ackOnlyPackets: 0,
+    ackOnlyRows: 0,
+    rstBytes: 0,
+    rstPackets: 0,
+    rstRows: 0,
+    establishedBytes: 0,
+    establishedPackets: 0,
+    establishedRows: 0,
+    dataBytes: 0,
+    dataPackets: 0,
+    dataRows: 0,
+    samplingRate: 1,
     portEntropy: null,
     portEntropyOut: null,
     portsPerIp: null,
@@ -198,6 +214,22 @@ function applyTcpHandshake(target, tcp) {
     synInFlows: tcp.synInFlows,
     synHalfOpen: tcp.synHalfOpen,
     synHalfOpenReply: tcp.synHalfOpenReply,
+    synOnlyBytes: tcp.synOnlyBytes,
+    synOnlyPackets: tcp.synOnlyPackets,
+    synOnlyRows: tcp.synOnlyRows,
+    ackOnlyBytes: tcp.ackOnlyBytes,
+    ackOnlyPackets: tcp.ackOnlyPackets,
+    ackOnlyRows: tcp.ackOnlyRows,
+    rstBytes: tcp.rstBytes,
+    rstPackets: tcp.rstPackets,
+    rstRows: tcp.rstRows,
+    establishedBytes: tcp.establishedBytes,
+    establishedPackets: tcp.establishedPackets,
+    establishedRows: tcp.establishedRows,
+    dataBytes: tcp.dataBytes,
+    dataPackets: tcp.dataPackets,
+    dataRows: tcp.dataRows,
+    samplingRate: tcp.samplingRate || 1,
   };
 }
 
@@ -217,6 +249,22 @@ function mapFlagRow(row) {
     synInFlows: Number(row.syn_in_flows || 0),
     synHalfOpen: Number(row.syn_half_open || 0),
     synHalfOpenReply: Number(row.syn_half_open_reply || 0),
+    synOnlyBytes: Number(row.syn_only_bytes || 0),
+    synOnlyPackets: Number(row.syn_only_packets || 0),
+    synOnlyRows: Number(row.syn_only_rows || 0),
+    ackOnlyBytes: Number(row.ack_only_bytes || 0),
+    ackOnlyPackets: Number(row.ack_only_packets || 0),
+    ackOnlyRows: Number(row.ack_only_rows || 0),
+    rstBytes: Number(row.rst_bytes || 0),
+    rstPackets: Number(row.rst_packets || 0),
+    rstRows: Number(row.rst_rows || 0),
+    establishedBytes: Number(row.established_bytes || 0),
+    establishedPackets: Number(row.established_packets || 0),
+    establishedRows: Number(row.established_rows || 0),
+    dataBytes: Number(row.data_bytes || 0),
+    dataPackets: Number(row.data_packets || 0),
+    dataRows: Number(row.data_rows || 0),
+    samplingRate: Number(row.sampling_rate || 0) || 1,
   };
 }
 
@@ -277,9 +325,15 @@ async function loadScopeFlags(scope, minuteTs) {
   const srcPort = col('srcPort');
   const dstPort = col('dstPort');
   const tcpFlags = flowCol('tcpFlags') || '`tcp_flags`';
+  const samplingRateCol = flowCol('samplingRate');
   const tcp = `e.proto = 6`;
   const synSet = `bitAnd(e.tcp_flags, 2) > 0`;
   const ackSet = `bitAnd(e.tcp_flags, 16) > 0`;
+  const synOnly = `${tcp} AND ${synSet} AND NOT ${ackSet}`;
+  const ackOnly = `${tcp} AND ${ackSet} AND NOT ${synSet} AND bitAnd(e.tcp_flags, 8) = 0 AND bitAnd(e.tcp_flags, 1) = 0 AND bitAnd(e.tcp_flags, 4) = 0`;
+  const rstOnly = `${tcp} AND bitAnd(e.tcp_flags, 4) > 0 AND bitAnd(e.tcp_flags, 8) = 0`;
+  const established = `${tcp} AND ${synSet} AND ${ackSet}`;
+  const dataPkts = `${tcp} AND bitAnd(e.tcp_flags, 8) > 0`;
   const flowAvg = `e.bytes / e.packets`;
   const { from, to, until } = minuteBounds(minuteTs);
   const { towardId, fromId } = scopeSides(scope);
@@ -288,7 +342,8 @@ async function loadScopeFlags(scope, minuteTs) {
     f.${bytesCol} AS bytes,
     f.${packetsCol} AS packets,
     f.${protoCol} AS proto,
-    f.${tcpFlags} AS tcp_flags
+    f.${tcpFlags} AS tcp_flags,
+    ${samplingRateCol ? `ifNull(toUInt64(f.${samplingRateCol}), 1)` : 'toUInt64(1)'} AS sampling_rate
   `;
 
   logDetection(`flags-${scope} start`, {
@@ -315,7 +370,23 @@ async function loadScopeFlags(scope, minuteTs) {
       uniqIf(e.sess, NOT e.toward AND ${tcp} AND ${synSet} AND ${ackSet}) AS syn_answered,
       countIf(e.toward AND ${tcp} AND ${synSet}) AS syn_in_flows,
       countIf(e.toward AND ${tcp} AND e.tcp_flags = 2) AS syn_half_open,
-      countIf(NOT e.toward AND ${tcp} AND e.tcp_flags = 18) AS syn_half_open_reply
+      countIf(NOT e.toward AND ${tcp} AND e.tcp_flags = 18) AS syn_half_open_reply,
+      sumIf(e.bytes, e.toward AND ${synOnly}) AS syn_only_bytes,
+      sumIf(e.packets, e.toward AND ${synOnly}) AS syn_only_packets,
+      countIf(e.toward AND ${synOnly}) AS syn_only_rows,
+      sumIf(e.bytes, e.toward AND ${ackOnly}) AS ack_only_bytes,
+      sumIf(e.packets, e.toward AND ${ackOnly}) AS ack_only_packets,
+      countIf(e.toward AND ${ackOnly}) AS ack_only_rows,
+      sumIf(e.bytes, e.toward AND ${rstOnly}) AS rst_bytes,
+      sumIf(e.packets, e.toward AND ${rstOnly}) AS rst_packets,
+      countIf(e.toward AND ${rstOnly}) AS rst_rows,
+      sumIf(e.bytes, e.toward AND ${established}) AS established_bytes,
+      sumIf(e.packets, e.toward AND ${established}) AS established_packets,
+      countIf(e.toward AND ${established}) AS established_rows,
+      sumIf(e.bytes, e.toward AND ${dataPkts}) AS data_bytes,
+      sumIf(e.packets, e.toward AND ${dataPkts}) AS data_packets,
+      countIf(e.toward AND ${dataPkts}) AS data_rows,
+      minIf(e.sampling_rate, e.toward AND e.sampling_rate > 0) AS sampling_rate
     FROM (
       SELECT
         ${towardId} AS scope_id,
@@ -646,6 +717,21 @@ function toInsertRow(object, proto, raw, baseline) {
       answer_pct: null,
       half_open_pct: null,
       half_open_reply_pct: null,
+      syn_only_bytes: 0,
+      syn_only_packets: 0,
+      syn_only_rows: 0,
+      ack_only_bytes: 0,
+      ack_only_packets: 0,
+      ack_only_rows: 0,
+      rst_bytes: 0,
+      rst_packets: 0,
+      rst_rows: 0,
+      established_bytes: 0,
+      established_packets: 0,
+      established_rows: 0,
+      data_bytes: 0,
+      data_packets: 0,
+      data_rows: 0,
     }
     : {
       syn_attempts: m.synAttempts,
@@ -656,6 +742,21 @@ function toInsertRow(object, proto, raw, baseline) {
       answer_pct: m.answerPct,
       half_open_pct: m.halfOpenPct,
       half_open_reply_pct: m.halfOpenReplyPct,
+      syn_only_bytes: m.synOnlyBytes,
+      syn_only_packets: m.synOnlyPackets,
+      syn_only_rows: m.synOnlyRows,
+      ack_only_bytes: m.ackOnlyBytes,
+      ack_only_packets: m.ackOnlyPackets,
+      ack_only_rows: m.ackOnlyRows,
+      rst_bytes: m.rstBytes,
+      rst_packets: m.rstPackets,
+      rst_rows: m.rstRows,
+      established_bytes: m.establishedBytes,
+      established_packets: m.establishedPackets,
+      established_rows: m.establishedRows,
+      data_bytes: m.dataBytes,
+      data_packets: m.dataPackets,
+      data_rows: m.dataRows,
     };
   return {
     minute: raw.minute,
@@ -687,6 +788,7 @@ function toInsertRow(object, proto, raw, baseline) {
       m.bytes > 0 ? m.foreignBytes / m.bytes : 0,
       baseline?.foreignShare,
     ) : null,
+    sampling_rate: m.samplingRate || 1,
   };
 }
 
@@ -857,6 +959,22 @@ async function loadLatest() {
       a.port_entropy_out,
       a.ports_per_ip,
       a.ports_per_ip_out,
+      a.syn_only_bytes,
+      a.syn_only_packets,
+      a.syn_only_rows,
+      a.ack_only_bytes,
+      a.ack_only_packets,
+      a.ack_only_rows,
+      a.rst_bytes,
+      a.rst_packets,
+      a.rst_rows,
+      a.established_bytes,
+      a.established_packets,
+      a.established_rows,
+      a.data_bytes,
+      a.data_packets,
+      a.data_rows,
+      a.sampling_rate,
       if(a.scope = 'client', ifNull(c.display_name, a.scope_id), a.scope_id) AS name
     FROM ${tableRef()} AS a FINAL
     LEFT JOIN ${clientsViewRef()} AS c ON a.scope = 'client' AND c.client_id = a.scope_id
@@ -888,6 +1006,22 @@ async function loadLatest() {
       portEntropyOut: nullableNum(r.port_entropy_out),
       portsPerIp: nullableNum(r.ports_per_ip),
       portsPerIpOut: nullableNum(r.ports_per_ip_out),
+      synOnlyBytes: Number(r.syn_only_bytes || 0),
+      synOnlyPackets: Number(r.syn_only_packets || 0),
+      synOnlyRows: Number(r.syn_only_rows || 0),
+      ackOnlyBytes: Number(r.ack_only_bytes || 0),
+      ackOnlyPackets: Number(r.ack_only_packets || 0),
+      ackOnlyRows: Number(r.ack_only_rows || 0),
+      rstBytes: Number(r.rst_bytes || 0),
+      rstPackets: Number(r.rst_packets || 0),
+      rstRows: Number(r.rst_rows || 0),
+      establishedBytes: Number(r.established_bytes || 0),
+      establishedPackets: Number(r.established_packets || 0),
+      establishedRows: Number(r.established_rows || 0),
+      dataBytes: Number(r.data_bytes || 0),
+      dataPackets: Number(r.data_packets || 0),
+      dataRows: Number(r.data_rows || 0),
+      samplingRate: Number(r.sampling_rate || 0) || 1,
     })),
   };
 }

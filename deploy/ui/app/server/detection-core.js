@@ -95,6 +95,22 @@ function minuteMetrics(raw = {}) {
     foreignBytes: Number(raw.foreignBytes || 0),
     foreignSrcs: Number(raw.foreignSrcs || 0),
     topCountries: String(raw.topCountries || ''),
+    synOnlyBytes: Number(raw.synOnlyBytes || 0),
+    synOnlyPackets: Number(raw.synOnlyPackets || 0),
+    synOnlyRows: Number(raw.synOnlyRows || 0),
+    ackOnlyBytes: Number(raw.ackOnlyBytes || 0),
+    ackOnlyPackets: Number(raw.ackOnlyPackets || 0),
+    ackOnlyRows: Number(raw.ackOnlyRows || 0),
+    rstBytes: Number(raw.rstBytes || 0),
+    rstPackets: Number(raw.rstPackets || 0),
+    rstRows: Number(raw.rstRows || 0),
+    establishedBytes: Number(raw.establishedBytes || 0),
+    establishedPackets: Number(raw.establishedPackets || 0),
+    establishedRows: Number(raw.establishedRows || 0),
+    dataBytes: Number(raw.dataBytes || 0),
+    dataPackets: Number(raw.dataPackets || 0),
+    dataRows: Number(raw.dataRows || 0),
+    samplingRate: Number(raw.samplingRate || 0) || 1,
   };
 }
 

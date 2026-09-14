@@ -6,6 +6,9 @@ const {
   ampMetrics,
   evaluateForeignGeo,
   amplifierPortsFromL4,
+  isSynFloodHit,
+  isTcpScan,
+  tcpClassMetrics,
 } = require('./detection-signals');
 
 const KINDS = {
@@ -52,6 +55,13 @@ function protoShare(byProto, proto) {
   return share(byProto?.[proto]?.bps, byProto?.all?.bps);
 }
 
+function formatSynPps(pps) {
+  const n = Number(pps) || 0;
+  if (n >= 1e6) return `${(n / 1e6).toFixed(n >= 10e6 ? 1 : 2)} млн п/с`;
+  if (n >= 1000) return `${(n / 1000).toFixed(n >= 10e3 ? 0 : 1)} тыс. п/с`;
+  return `${Math.round(n)} п/с`;
+}
+
 function hourRatio(bps, hourP999) {
   const env = num(hourP999);
   const cur = num(bps);
@@ -85,6 +95,11 @@ function classifyFromMetrics(byProto = {}, hour = {}) {
   const ratio = hourRatio(all.bps, ceiling);
   const synAttempts = num(all.syn_attempts ?? all.synAttempts) || 0;
   const answerPct = num(all.answer_pct ?? all.answerPct);
+  const synHit = isSynFloodHit(all) || isSynFloodHit(tcp);
+  const synAll = tcpClassMetrics(all, 'syn_only');
+  const synTcp = tcpClassMetrics(tcp, 'syn_only');
+  const syn = synTcp.pps > synAll.pps ? synTcp : synAll;
+  const scan = isTcpScan(all) || isTcpScan(tcp);
   const amp = ampMetrics(udp);
   const ampHit = isAmplificationHit(udp);
   const geo = evaluateForeignGeo(all, hour.foreign || {});
@@ -95,11 +110,12 @@ function classifyFromMetrics(byProto = {}, hour = {}) {
   if (entropy != null) reasons.push(`энтропия ${entropy.toFixed(2)}`);
   if (ampHit && amp.share != null) reasons.push(`отражатели ${(amp.share * 100).toFixed(0)}%`);
   if (geo.hit && geo.shareGrowth != null) reasons.push(`зарубежный трафик ×${geo.shareGrowth.toFixed(1)} к норме часа`);
+  if (scan && !synHit) reasons.push('фоновый SYN-скан');
 
   let kind = KINDS.benign_peak;
-  if (synAttempts >= 200 && answerPct != null && answerPct < 15 && (tcpShare == null || tcpShare >= 0.5)) {
+  if (synHit) {
     kind = KINDS.syn_flood;
-    reasons.unshift('много SYN, мало ответов');
+    reasons.unshift(`голый SYN ${formatSynPps(syn.pps)} · ${Math.round(syn.avgPkt)} Б`);
   } else if (ampHit) {
     kind = KINDS.amplification;
     reasons.unshift(`трафик с портов усилителей · ${amp.srcs} источников`);
@@ -140,6 +156,10 @@ function classifyFromMetrics(byProto = {}, hour = {}) {
       ?? tcp.avg_packet_bytes ?? tcp.avgPacketBytes),
     synAttempts,
     answerPct,
+    synPps: syn.pps,
+    synPkt: syn.avgPkt,
+    synRows: syn.rows,
+    tcpScan: scan && !synHit,
     needsInvestigate: kind !== KINDS.benign_peak || geo.hit,
   };
 }
@@ -192,7 +212,7 @@ function downloadPeakLabel(investigate) {
 // 1–2 IP достаточно всегда. Много IP в одной /24 — тоже, если минута
 // не UDP-доминантная (ковёр и флуд так маскироваться не должны).
 function isDownloadPeak(verdict = {}, investigate = {}) {
-  if (verdict.kind === KINDS.amplification || verdict.kind === KINDS.syn_flood) return false;
+  if (verdict.kind === KINDS.amplification) return false;
   return hasNarrowSource(investigate, verdict);
 }
 
@@ -211,6 +231,18 @@ function refineClassification(verdict, investigate) {
       next.reason = `амплификация в один сервер · топ IP ${(topShare * 100).toFixed(1)}% · ${next.reason || ''}`.trim();
     } else if (topShare != null && topShare < TOP_DST_CARPET) {
       next.reason = `амплификация по сети · топ IP ${(topShare * 100).toFixed(1)}% · ${next.reason || ''}`.trim();
+    }
+    next.needsInvestigate = true;
+    return next;
+  }
+  // SYN-флуд доказан пакетами, и дальше его трогать нельзя: доли ниже считаются
+  // по байтам, а у голого SYN их почти нет. У 81050 топ IP по байтам держал 9% —
+  // ветка «нет концентрации» превращала атаку в обычный пик.
+  if (next.kind === KINDS.syn_flood) {
+    const synTop = Array.isArray(investigate?.syn?.dest) ? investigate.syn.dest[0] : null;
+    if (synTop?.ip) {
+      const port = synTop.port ? `:${synTop.port}` : '';
+      next.reason = `${synTop.ip}${port} ${(num(synTop.share) * 100).toFixed(0)}% SYN · ${next.reason || ''}`.trim();
     }
     next.needsInvestigate = true;
     return next;
@@ -336,7 +368,20 @@ function actionFor(verdict, investigate) {
       ? `фильтр по сети клиента, вход ${l4}`
       : 'фильтр UDP по префиксу клиента, не один сервер';
   }
-  if (kind === KINDS.syn_flood) return 'SYN-защита / лимит на сеть клиента';
+  if (kind === KINDS.syn_flood) {
+    // Цель берём из среза по голому SYN: жертва по байтам в ту же минуту может
+    // быть сервером, на который просто шла закачка.
+    const synTop = Array.isArray(investigate?.syn?.dest) ? investigate.syn.dest[0] : null;
+    if (synTop?.ip && num(synTop.share) >= VICTIM_ACTION_SHARE_MIN) {
+      const port = synTop.port ? `:${synTop.port}` : '';
+      return `SYN-защита на ${synTop.ip}${port}`;
+    }
+    if (isUsableVictim(victim)) {
+      const port = victim.port != null ? `:${victim.port}` : '';
+      return `SYN-защита на ${victim.ip}${port}`;
+    }
+    return 'SYN-защита / лимит на сеть клиента';
+  }
   if (kind === KINDS.amplification) {
     const fromAmp = (Array.isArray(investigate?.ampSrcPort?.top) ? investigate.ampSrcPort.top : [])
       .map((row) => ({ port: row.port, proto: 17 }));

@@ -421,6 +421,68 @@ describe('detection-classify', () => {
     ]), /154\.85\.88\.0\/24 AS139057 Edgenext Legend Dynasty/);
   });
 
+  it('81050: голый SYN 2.2 млн п/с при росте ×0.37 → SYN-флуд', () => {
+    const first = classifyFromMetrics({
+      all: {
+        bps: 17.56e9, port_entropy: 6, syn_attempts: 2063, answer_pct: 0.6,
+        syn_only_packets: 2248431 * 60, syn_only_bytes: 2248431 * 60 * 72,
+        syn_only_rows: 2059, sampling_rate: 32768,
+      },
+      tcp: {
+        bps: 13.65e9,
+        syn_only_packets: 2248431 * 60, syn_only_bytes: 2248431 * 60 * 72,
+        syn_only_rows: 2059, sampling_rate: 32768,
+      },
+      udp: { bps: 2.7e9 },
+    }, { p95: 48e9, p999: 50e9, recentMedian: 40e9 });
+    assert.equal(first.kind, KINDS.syn_flood);
+    assert.match(first.reason, /голый SYN/);
+    assert.equal(isAttackKind(first.kind), true);
+    assert.equal(actionFor(first, {
+      victim: { ip: '5.39.222.138', port: 22, protoLabel: 'TCP', share: 0.4 },
+    }), 'SYN-защита на 5.39.222.138:22');
+    const refined = refineClassification(first, {
+      victim: { ip: '5.39.222.138', port: 22, protoLabel: 'TCP', share: 0.39 },
+      source24: [{ net24: '185.220.101.0/24', share: 0.08, ips: 40 }],
+    });
+    assert.equal(refined.kind, KINDS.syn_flood);
+  });
+
+  it('61988: голый SYN 12 млн п/с · 76 Б → SYN-флуд', () => {
+    const first = classifyFromMetrics({
+      all: {
+        bps: 9.59e9,
+        syn_only_packets: 12625510 * 60, syn_only_bytes: 12625510 * 60 * 76,
+        syn_only_rows: 23118, sampling_rate: 32768,
+      },
+      tcp: { bps: 9.28e9 },
+    }, { p95: 1e9, p999: 1e9 });
+    assert.equal(first.kind, KINDS.syn_flood);
+  });
+
+  it('188.143.242: 9310 попыток и 4.3% ответа — не SYN-флуд, а закачка', () => {
+    const first = classifyFromMetrics({
+      all: {
+        bps: 1.469e9, port_entropy: 4.66, syn_attempts: 9310, answer_pct: 4.3,
+        avg_packet_bytes: 1497,
+        syn_only_packets: 190 * 60, syn_only_bytes: 190 * 60 * 61,
+        syn_only_rows: 10400, sampling_rate: 1,
+      },
+      tcp: { bps: 1.463e9, avg_packet_bytes: 1501 },
+      udp: { bps: 6e6 },
+    }, { p95: 111e6, p999: 111e6 });
+    assert.equal(first.kind, KINDS.benign_peak);
+    assert.equal(first.tcpScan, true);
+    const refined = refineClassification(first, {
+      victim: { ip: '188.143.242.252', port: 55838, protoLabel: 'TCP', share: 0.965 },
+      source24: [{ net24: '143.14.230.0/24', asn: 139057, share: 0.646, ips: 2 }],
+      l4src: [{ port: 80, proto: 6, share: 0.97 }],
+    });
+    assert.equal(refined.kind, KINDS.benign_peak);
+    assert.match(refined.reason, /пик загрузки/);
+    assert.equal(isAttackKind(refined.kind), false);
+  });
+
   it('один источник и 4.6 Мбит/с amp — не амплификация', () => {
     const byProto = {
       all: { bps: 5e6 },

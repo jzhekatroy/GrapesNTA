@@ -3,14 +3,23 @@
 const SIGNALS = {
   volume: 'volume',
   amplification: 'amplification',
+  syn_flood: 'syn_flood',
   foreign_geo: 'foreign_geo',
 };
 
 const SIGNAL_LABEL = {
   volume: 'рост объёма',
   amplification: 'амплификация',
+  syn_flood: 'SYN-флуд',
   foreign_geo: 'зарубежный трафик',
 };
+
+const SIGNAL_ORDER = [
+  SIGNALS.volume,
+  SIGNALS.amplification,
+  SIGNALS.syn_flood,
+  SIGNALS.foreign_geo,
+];
 
 const AMPLIFIER_PORTS = [53, 123, 1900, 11211, 389, 161, 19, 111, 3702, 5683, 137];
 const AMPLIFIER_PORT_SET = new Set(AMPLIFIER_PORTS);
@@ -39,6 +48,14 @@ const AMP_PKT_MIN = 800;
 // кбит/с. При 200 Мбит/с без пола не видно атаку, забившую мелкий канал.
 const AMP_BPS_MIN = 20e6;
 
+// SYN-флуд — по пакетам голого SYN, не по uniq рукопожатий.
+// 2000 п/с на NetFlow (rate=1); на sFlow пол поднимает число проб (≥30 строк).
+const TCP_FLOOD_PPS_MIN = 2000;
+const TCP_FLOOD_PKT_MAX = 100;
+const TCP_FLOOD_ROWS_MIN = 30;
+const TCP_SCAN_ROWS_MIN = 200;
+const TCP_CLASS_KEYS = ['syn_only', 'ack_only', 'rst', 'established', 'data'];
+
 const GEO_SHARE_GROWTH_MIN = 3;
 const GEO_VOLUME_GROWTH_MIN = 4;
 const GEO_SHARE_MIN = 0.2;
@@ -59,6 +76,52 @@ function share(part, whole) {
   const p = num(part);
   if (!(w > 0) || p == null) return null;
   return Math.max(0, Math.min(1, p / w));
+}
+
+function classField(row, prefix, suffix) {
+  const snake = `${prefix}_${suffix}`;
+  const camel = snake.replace(/_([a-z])/g, (_, ch) => ch.toUpperCase());
+  return num(row?.[snake] ?? row?.[camel]) || 0;
+}
+
+function tcpClassMetrics(row = {}, prefix = 'syn_only') {
+  const bytes = classField(row, prefix, 'bytes');
+  const packets = classField(row, prefix, 'packets');
+  const rows = classField(row, prefix, 'rows');
+  return {
+    bytes,
+    packets,
+    rows,
+    pps: packets / 60,
+    bps: bytes * 8 / 60,
+    avgPkt: packets > 0 ? bytes / packets : 0,
+  };
+}
+
+function synFloodThresholdPps(samplingRate) {
+  const rate = num(samplingRate) > 0 ? num(samplingRate) : 1;
+  return Math.max(TCP_FLOOD_PPS_MIN, TCP_FLOOD_ROWS_MIN * rate / 60);
+}
+
+function isSynFloodHit(row = {}, options = {}) {
+  const m = tcpClassMetrics(row, 'syn_only');
+  const pktMax = num(options.pktMax) ?? TCP_FLOOD_PKT_MAX;
+  const rowsMin = num(options.rowsMin) ?? TCP_FLOOD_ROWS_MIN;
+  if (m.rows < rowsMin) return false;
+  if (!(m.avgPkt > 0 && m.avgPkt < pktMax)) return false;
+  const rate = row.sampling_rate ?? row.samplingRate;
+  return m.pps >= synFloodThresholdPps(rate);
+}
+
+function synFloodStillGoing(row = {}, options = {}) {
+  return isSynFloodHit(row, options);
+}
+
+function isTcpScan(row = {}) {
+  if (isSynFloodHit(row)) return false;
+  const m = tcpClassMetrics(row, 'syn_only');
+  const attempts = num(row.syn_attempts ?? row.synAttempts) || 0;
+  return m.rows >= TCP_SCAN_ROWS_MIN || attempts >= TCP_SCAN_ROWS_MIN;
 }
 
 function ampMetrics(row = {}) {
@@ -197,6 +260,17 @@ function objectSignalKey(scope, scopeId, signal = SIGNALS.volume) {
 module.exports = {
   SIGNALS,
   SIGNAL_LABEL,
+  SIGNAL_ORDER,
+  TCP_FLOOD_PPS_MIN,
+  TCP_FLOOD_PKT_MAX,
+  TCP_FLOOD_ROWS_MIN,
+  TCP_SCAN_ROWS_MIN,
+  TCP_CLASS_KEYS,
+  tcpClassMetrics,
+  synFloodThresholdPps,
+  isSynFloodHit,
+  synFloodStillGoing,
+  isTcpScan,
   AMPLIFIER_PORTS,
   AMPLIFIER_PORT_SET,
   AMPLIFIER_PORT_LABEL,

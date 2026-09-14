@@ -711,20 +711,65 @@ describe('detection-telegram', () => {
     assert.doesNotMatch(text, /10\.0\.0\.8:80/);
   });
 
-  it('шапка SYN-флуда — попытки и ответы', () => {
+  // 81050, 11.09 19:29 UTC на nta: 134 905 856 пакетов голого SYN по 72 Б с
+  // 2 057 адресов, 98.8% на :22 трёх серверов. В ту же минуту шла закачка,
+  // поэтому топ IP и порт по байтам — чужие, и брать их в шапку нельзя.
+  it('шапка SYN-флуда: объём, откуда, куда и норма клиента', () => {
     const text = formatAlertMessage({
-      name: 'Hostland',
+      name: 'Когнитивные машины',
       scope: 'client',
-      scopeId: '83106',
-      minute: '2026-09-01 16:49:00',
+      scopeId: '81050',
+      minute: '2026-09-11 19:29:00',
       threshold: 1.6,
-      byProto: { all: { bps: 2e9, syn_attempts: 12000, answer_pct: 4 } },
-      verdict: { kind: 'syn_flood' },
+      byProto: {
+        all: {
+          bps: 17.56e9,
+          pps: 587792384 / 60,
+          syn_only_packets: 134905856,
+          syn_only_bytes: 9671344128,
+          syn_only_rows: 2059,
+          sampling_rate: 32768,
+        },
+      },
+      verdict: { kind: 'syn_flood', hourCeiling: 27.7e9, hourRatio: 0.63 },
+      investigate: {
+        victim: { ip: '5.39.222.140', port: 443, protoLabel: 'TCP', share: 0.091 },
+        source24: [{ net24: '143.204.233.0/24', asn: 16509, asnName: 'AMAZON-02', share: 0.07, ips: 6 }],
+        destPort: { count: 240, top: [{ port: 443, share: 0.091, ips: 11 }] },
+        syn: {
+          packets: 134905856,
+          srcIps: 2057,
+          srcNets: 2057,
+          srcAsns: 619,
+          dstIps: 25,
+          portCount: 10,
+          dest: [
+            { ip: '5.39.222.138', port: 22, packets: 52232192, share: 0.387 },
+            { ip: '5.39.218.156', port: 22, packets: 45481984, share: 0.337 },
+          ],
+          ports: [{ port: 22, packets: 133300224, ips: 3, share: 0.988 }],
+          source24: [{ net24: '150.241.92.0/24', asn: 198550, packets: 131072, ips: 1, share: 0.001 }],
+        },
+      },
     });
     assert.match(text, /АТАКА · SYN-флуд/);
-    assert.match(text, /SYN-попыток 12 тыс\. · ответов 4%/);
-    assert.match(text, /Куда: на сеть клиента/);
-    assert.match(text, /SYN-защита \/ лимит на сеть клиента/);
+    assert.match(text, /Голого SYN <b>2\.25 млн п\/с<\/b> · <b>1\.29 Гбит\/с<\/b>/);
+    assert.match(text, /пакеты по 72 Б · 2\s057 источников · 2\s057 сетей \/24 · 619 AS/);
+    assert.match(text, /Куда \(SYN\), топ 2 из 25 адресов:/);
+    assert.match(text, /5\.39\.222\.138:22 — 39% SYN/);
+    assert.match(text, /На порт :22 — 99% SYN/);
+    assert.match(text, /Это 23% всех пакетов клиента\./);
+    assert.match(text, /Объём клиента сейчас 17\.6 Гбит\/с, обычно 27\.7 Гбит\/с — ниже нормы\./);
+    assert.match(text, /SYN-защита на 5\.39\.222\.138:22/);
+    // Закачка на :443 в ту же минуту не должна попасть ни в цель, ни в футер.
+    assert.doesNotMatch(text, /5\.39\.222\.140/);
+    assert.doesNotMatch(text, /443/);
+    assert.doesNotMatch(text, /AMAZON/);
+    // Топ сети по 0.1% — шум, их не печатаем.
+    assert.doesNotMatch(text, /150\.241\.92\.0/);
+    assert.match(text, /‼ голый SYN: 2\.25 млн п\/с · 72 Б · 2\s059 стр\./);
+    assert.doesNotMatch(text, /‼ попытки/);
+    assert.doesNotMatch(text, /SYN-попыток/);
   });
 
   it('шапка зарубежного трафика — доля, норма и страны', () => {
@@ -982,6 +1027,13 @@ describe('detection-telegram', () => {
     assert.equal(snap.all.syn_attempts, 9);
     assert.equal(snap.all.answer_pct, 10);
     assert.equal(snap.tcp.syn_attempts, 9);
+    const withSyn = snapshotByProto({
+      byProto: {
+        all: { syn_only_packets: 120000, syn_only_bytes: 8640000, syn_only_rows: 2059, sampling_rate: 32768 },
+      },
+    });
+    assert.equal(withSyn.all.syn_only_packets, 120000);
+    assert.equal(withSyn.all.sampling_rate, 32768);
     assert.equal(snap.udp.port_entropy, 3);
   });
 
