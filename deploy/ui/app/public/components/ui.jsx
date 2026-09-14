@@ -365,6 +365,7 @@ function DataTable({
   footerNote,
   fitColumnWidths,
   pinnedRows,        // rows rendered after the page, outside sorting and paging
+  horizontalScrollControls = false,
 }) {
   const [sort, setSort] = useState(initialSort || null);
   const [page, setPage] = useState(1);
@@ -373,6 +374,8 @@ function DataTable({
   const [colWidths, setColWidths] = useState(() => Object.fromEntries(
     columns.map((c) => [c.key, Number(c.width) || 160]),
   ));
+  const [scrollState, setScrollState] = useState({ canLeft: false, canRight: false });
+  const tableWrapRef = useRef(null);
   const resizeRef = useRef(null);
   const userResizedColsRef = useRef(new Set());
   const colKeysSig = columns.map((c) => c.key).join('\0');
@@ -491,6 +494,157 @@ function DataTable({
       + (rowActions ? actionsColumnWidth : 0)
     : null;
 
+  const updateScrollState = useCallback(() => {
+    const el = tableWrapRef.current;
+    if (!el) return;
+    const { scrollLeft, scrollWidth, clientWidth } = el;
+    setScrollState({
+      canLeft: scrollLeft > 2,
+      canRight: scrollLeft + clientWidth < scrollWidth - 2,
+    });
+  }, []);
+
+  useEffect(() => {
+    if (!horizontalScrollControls) return undefined;
+    const el = tableWrapRef.current;
+    if (!el) return undefined;
+    updateScrollState();
+    el.addEventListener('scroll', updateScrollState, { passive: true });
+    const ro = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(updateScrollState) : null;
+    ro?.observe(el);
+    return () => {
+      el.removeEventListener('scroll', updateScrollState);
+      ro?.disconnect();
+    };
+  }, [horizontalScrollControls, updateScrollState, colKeysSig, rowFitSig, resizableTableWidth, colWidths]);
+
+  const scrollTable = (direction) => {
+    const el = tableWrapRef.current;
+    if (!el) return;
+    const delta = Math.round(el.clientWidth * 0.75) * (direction === 'left' ? -1 : 1);
+    el.scrollBy({ left: delta, behavior: 'smooth' });
+  };
+
+  const tableWrap = (
+    <div className="table-wrap" ref={horizontalScrollControls ? tableWrapRef : null}>
+      <table
+        className={`table${resizableColumns ? ' table--resizable' : ''}`}
+        style={resizableColumns ? { width: `${resizableTableWidth}px`, minWidth: '100%' } : undefined}
+      >
+        {resizableColumns && (
+          <colgroup>
+            {selectable && <col style={{ width: 36 }} />}
+            {visibleCols.map((c) => <col key={c.key} style={{ width: columnWidth(c) }} />)}
+            {rowActions && <col style={{ width: actionsColumnWidth }} />}
+          </colgroup>
+        )}
+        <thead>
+          <tr>
+            {selectable && (
+              <th style={{width: 36}}><Checkbox checked={allSelected} indeterminate={!allSelected && someSelected} onChange={toggleAll} /></th>
+            )}
+            {visibleCols.map((c) => {
+              const isSorted = sort?.key === c.key;
+              return (
+                <th
+                  key={c.key}
+                  style={{width: resizableColumns ? columnWidth(c) : c.width, textAlign: c.align || 'left'}}
+                  className={[isSorted ? 'is-sorted' : '', c.headerClassName].filter(Boolean).join(' ') || undefined}
+                  onClick={c.sortable !== false ? () => toggleSort(c.key) : null}
+                  data-sort={c.sortable === false ? 'none' : 'yes'}
+                  data-col-key={c.key}
+                >
+                  <span style={{display: 'inline-flex', alignItems: 'center', gap: 4, cursor: c.sortable === false ? 'default' : 'pointer'}}>
+                    {c.title}
+                    {c.sortable !== false && (
+                      <span className="sort">
+                        {isSorted
+                          ? <Icon name={sort.dir === 'asc' ? 'sortAsc' : 'sortDesc'} size={11} fill="currentColor" stroke={0} />
+                          : <Icon name="caret" size={10} />}
+                      </span>
+                    )}
+                  </span>
+                  {resizableColumns && c.resizable !== false && (
+                    <span
+                      className="col-resize"
+                      role="separator"
+                      aria-orientation="vertical"
+                      aria-label={`Изменить ширину столбца «${c.title}»`}
+                      title="Перетащите для изменения ширины · двойной клик — сброс"
+                      onMouseDown={(e) => startColumnResize(e, c)}
+                      onClick={(e) => e.stopPropagation()}
+                      onDoubleClick={(e) => resetColumnWidth(e, c)}
+                    />
+                  )}
+                </th>
+              );
+            })}
+            {rowActions && <th className="actions" style={{ textAlign: actionsColumnAlign }}>Действия</th>}
+          </tr>
+        </thead>
+        <tbody onMouseLeave={onRowMouseLeave ? () => onRowMouseLeave() : null}>
+          {pageRows.length === 0 ? (
+            <tr><td colSpan={visibleCols.length + (selectable ? 1 : 0) + (rowActions ? 1 : 0)}>
+              <Empty title={emptyTitle} desc={emptyDesc} />
+            </td></tr>
+          ) : pageRows.map((row) => {
+            const isSel = selectable && selected?.has(row[rowKey]);
+            return (
+              <tr
+                key={row[rowKey]}
+                className={[isSel ? 'is-selected' : '', getRowClassName?.(row)].filter(Boolean).join(' ')}
+                onClick={onRowClick ? () => onRowClick(row) : null}
+                onMouseEnter={onRowMouseEnter ? () => onRowMouseEnter(row) : null}
+                style={onRowClick ? {cursor: 'pointer'} : null}
+              >
+                {selectable && (
+                  <td onClick={(e) => e.stopPropagation()}>
+                    <Checkbox checked={isSel} onChange={() => {
+                      const next = new Set(selected || []);
+                      if (isSel) next.delete(row[rowKey]); else next.add(row[rowKey]);
+                      onSelectChange && onSelectChange(next);
+                    }} />
+                  </td>
+                )}
+                {visibleCols.map((c) => (
+                  <td
+                    key={c.key}
+                    className={[c.num ? 'num' : '', c.cellClassName].filter(Boolean).join(' ') || undefined}
+                    style={{textAlign: c.align || 'left'}}
+                  >
+                    {c.render ? c.render(row) : row[c.key]}
+                  </td>
+                ))}
+                {rowActions && <td className="actions" onClick={(e) => e.stopPropagation()}>{rowActions(row)}</td>}
+              </tr>
+            );
+          })}
+          {(pinnedRows || []).map((row) => (
+            <tr
+              key={`pinned-${row[rowKey]}`}
+              className={['is-pinned', getRowClassName?.(row)].filter(Boolean).join(' ')}
+              onClick={onRowClick ? () => onRowClick(row) : null}
+              onMouseEnter={onRowMouseEnter ? () => onRowMouseEnter(row) : null}
+              style={onRowClick ? { cursor: 'pointer' } : null}
+            >
+              {selectable && <td />}
+              {visibleCols.map((c) => (
+                <td
+                  key={c.key}
+                  className={[c.num ? 'num' : '', c.cellClassName].filter(Boolean).join(' ') || undefined}
+                  style={{ textAlign: c.align || 'left' }}
+                >
+                  {c.render ? c.render(row) : row[c.key]}
+                </td>
+              ))}
+              {rowActions && <td className="actions" />}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+
   return (
     <div>
       {toolbar && (
@@ -530,123 +684,33 @@ function DataTable({
           </div>
         </div>
       )}
-      <div className="table-wrap">
-        <table
-          className={`table${resizableColumns ? ' table--resizable' : ''}`}
-          style={resizableColumns ? { width: `${resizableTableWidth}px`, minWidth: '100%' } : undefined}
-        >
-          {resizableColumns && (
-            <colgroup>
-              {selectable && <col style={{ width: 36 }} />}
-              {visibleCols.map((c) => <col key={c.key} style={{ width: columnWidth(c) }} />)}
-              {rowActions && <col style={{ width: actionsColumnWidth }} />}
-            </colgroup>
+      {horizontalScrollControls ? (
+        <div className="table-scroll-host">
+          {scrollState.canLeft && (
+            <button
+              type="button"
+              className="table-scroll-btn table-scroll-btn--left"
+              title="Прокрутить влево"
+              aria-label="Прокрутить таблицу влево"
+              onClick={() => scrollTable('left')}
+            >
+              <Icon name="chevL" size={16} />
+            </button>
           )}
-          <thead>
-            <tr>
-              {selectable && (
-                <th style={{width: 36}}><Checkbox checked={allSelected} indeterminate={!allSelected && someSelected} onChange={toggleAll} /></th>
-              )}
-              {visibleCols.map((c) => {
-                const isSorted = sort?.key === c.key;
-                return (
-                  <th
-                    key={c.key}
-                    style={{width: resizableColumns ? columnWidth(c) : c.width, textAlign: c.align || 'left'}}
-                    className={[isSorted ? 'is-sorted' : '', c.headerClassName].filter(Boolean).join(' ') || undefined}
-                    onClick={c.sortable !== false ? () => toggleSort(c.key) : null}
-                    data-sort={c.sortable === false ? 'none' : 'yes'}
-                    data-col-key={c.key}
-                  >
-                    <span style={{display: 'inline-flex', alignItems: 'center', gap: 4, cursor: c.sortable === false ? 'default' : 'pointer'}}>
-                      {c.title}
-                      {c.sortable !== false && (
-                        <span className="sort">
-                          {isSorted
-                            ? <Icon name={sort.dir === 'asc' ? 'sortAsc' : 'sortDesc'} size={11} fill="currentColor" stroke={0} />
-                            : <Icon name="caret" size={10} />}
-                        </span>
-                      )}
-                    </span>
-                    {resizableColumns && c.resizable !== false && (
-                      <span
-                        className="col-resize"
-                        role="separator"
-                        aria-orientation="vertical"
-                        aria-label={`Изменить ширину столбца «${c.title}»`}
-                        title="Перетащите для изменения ширины · двойной клик — сброс"
-                        onMouseDown={(e) => startColumnResize(e, c)}
-                        onClick={(e) => e.stopPropagation()}
-                        onDoubleClick={(e) => resetColumnWidth(e, c)}
-                      />
-                    )}
-                  </th>
-                );
-              })}
-              {rowActions && <th className="actions" style={{ textAlign: actionsColumnAlign }}>Действия</th>}
-            </tr>
-          </thead>
-          <tbody onMouseLeave={onRowMouseLeave ? () => onRowMouseLeave() : null}>
-            {pageRows.length === 0 ? (
-              <tr><td colSpan={visibleCols.length + (selectable ? 1 : 0) + (rowActions ? 1 : 0)}>
-                <Empty title={emptyTitle} desc={emptyDesc} />
-              </td></tr>
-            ) : pageRows.map((row) => {
-              const isSel = selectable && selected?.has(row[rowKey]);
-              return (
-                <tr
-                  key={row[rowKey]}
-                  className={[isSel ? 'is-selected' : '', getRowClassName?.(row)].filter(Boolean).join(' ')}
-                  onClick={onRowClick ? () => onRowClick(row) : null}
-                  onMouseEnter={onRowMouseEnter ? () => onRowMouseEnter(row) : null}
-                  style={onRowClick ? {cursor: 'pointer'} : null}
-                >
-                  {selectable && (
-                    <td onClick={(e) => e.stopPropagation()}>
-                      <Checkbox checked={isSel} onChange={() => {
-                        const next = new Set(selected || []);
-                        if (isSel) next.delete(row[rowKey]); else next.add(row[rowKey]);
-                        onSelectChange && onSelectChange(next);
-                      }} />
-                    </td>
-                  )}
-                  {visibleCols.map((c) => (
-                    <td
-                      key={c.key}
-                      className={[c.num ? 'num' : '', c.cellClassName].filter(Boolean).join(' ') || undefined}
-                      style={{textAlign: c.align || 'left'}}
-                    >
-                      {c.render ? c.render(row) : row[c.key]}
-                    </td>
-                  ))}
-                  {rowActions && <td className="actions" onClick={(e) => e.stopPropagation()}>{rowActions(row)}</td>}
-                </tr>
-              );
-            })}
-            {(pinnedRows || []).map((row) => (
-              <tr
-                key={`pinned-${row[rowKey]}`}
-                className={['is-pinned', getRowClassName?.(row)].filter(Boolean).join(' ')}
-                onClick={onRowClick ? () => onRowClick(row) : null}
-                onMouseEnter={onRowMouseEnter ? () => onRowMouseEnter(row) : null}
-                style={onRowClick ? { cursor: 'pointer' } : null}
-              >
-                {selectable && <td />}
-                {visibleCols.map((c) => (
-                  <td
-                    key={c.key}
-                    className={[c.num ? 'num' : '', c.cellClassName].filter(Boolean).join(' ') || undefined}
-                    style={{ textAlign: c.align || 'left' }}
-                  >
-                    {c.render ? c.render(row) : row[c.key]}
-                  </td>
-                ))}
-                {rowActions && <td className="actions" />}
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
+          {tableWrap}
+          {scrollState.canRight && (
+            <button
+              type="button"
+              className="table-scroll-btn table-scroll-btn--right"
+              title="Прокрутить вправо"
+              aria-label="Прокрутить таблицу вправо"
+              onClick={() => scrollTable('right')}
+            >
+              <Icon name="chevR" size={16} />
+            </button>
+          )}
+        </div>
+      ) : tableWrap}
       <div className="table-foot">
         <div className="table-foot__row">
           <div>

@@ -2377,6 +2377,7 @@ function ExplorerGroupCell({
   onAddFilter,
   showColorSwatch,
   color,
+  onExpand,
 }) {
   const text = displayValue == null || displayValue === '' ? '—' : String(displayValue);
 
@@ -2386,6 +2387,20 @@ function ExplorerGroupCell({
         <span className="explorer-dim-cell__swatch" style={{ background: color }} aria-hidden="true" />
       )}
       <div className="explorer-dim-cell__main">
+        {onExpand && (
+          <button
+            type="button"
+            className="icon-btn explorer-dim-cell__expand"
+            title="Подробнее"
+            aria-label="Подробнее"
+            onClick={(e) => {
+              e.stopPropagation();
+              onExpand();
+            }}
+          >
+            <Icon name="expand" size={14} />
+          </button>
+        )}
         <button
           type="button"
           className="explorer-dim-cell__filter"
@@ -2406,6 +2421,132 @@ function ExplorerGroupCell({
   );
 }
 
+function ExplorerDetailItem({ label, value, mono, copyText }) {
+  const handleCopy = async (e) => {
+    e.stopPropagation();
+    if (copyText == null || copyText === '') return;
+    try {
+      await copyTextToClipboard(copyText);
+      pushToast({ kind: 'success', title: 'Скопировано' });
+    } catch (err) {
+      pushToast({ kind: 'error', title: 'Не удалось скопировать', desc: err.message });
+    }
+  };
+
+  return (
+    <div className="explorer-detail-item">
+      <dt>{label}</dt>
+      <dd className={mono ? 'mono' : undefined}>
+        <span className="explorer-detail-item__value">{value ?? '—'}</span>
+        {copyText != null && copyText !== '' && (
+          <button
+            type="button"
+            className="icon-btn explorer-detail-item__copy"
+            title="Копировать"
+            aria-label="Копировать"
+            onClick={handleCopy}
+          >
+            <Icon name="copy" size={14} />
+          </button>
+        )}
+      </dd>
+    </div>
+  );
+}
+
+function explorerRowDimensionDetail(row, groupToken, valueIdx, dimensionById) {
+  const dimId = explorerGroupFieldId(groupToken);
+  const isAsn = dimId.endsWith('_asn');
+  const isAsPath = dimensionById[dimId]?.kind === 'as_path';
+  const isIp = dimId.endsWith('ip') || dimId.endsWith('_mac');
+  const raw = row.rawValues?.[valueIdx] ?? row.values[valueIdx];
+  let displayValue = row.values[valueIdx] ?? '—';
+  if (isAsn) displayValue = explorerAsnDisplayValue(row, valueIdx);
+  else if (isAsPath && raw != null && raw !== '') displayValue = String(raw);
+  const copyText = raw != null && String(raw).length > 24 ? String(raw) : null;
+  return {
+    label: explorerGroupLabel(groupToken, dimensionById),
+    value: displayValue,
+    mono: isAsPath || isIp,
+    copyText,
+  };
+}
+
+function ExplorerResultDetailModal({
+  open,
+  onClose,
+  row,
+  groupBy,
+  dimensionById,
+  metric,
+  metricLabel,
+  meta,
+  onFocusRow,
+  onExcludeRow,
+  chartSeriesIds,
+  onToggleDynamicsSeries,
+  hasMaskedIpGroup,
+}) {
+  if (!row) return null;
+
+  const dimensionItems = groupBy.map((groupToken, valueIdx) => (
+    explorerRowDimensionDetail(row, groupToken, valueIdx, dimensionById)
+  ));
+  const metricItems = [
+    { label: metricLabel, value: formatMetric(row.metric, metric), mono: true },
+    { label: `Доля · ${metricLabel}`, value: `${Number(row.pct || 0).toFixed(2)}%`, mono: true },
+    ...EXPLORER_RESULT_METRIC_COLUMNS.map((col) => ({
+      label: col.title,
+      value: col.render.length > 1 ? col.render(row, meta) : col.render(row),
+      mono: true,
+    })),
+  ];
+  const subtitle = dimensionItems[0]?.value != null
+    ? String(dimensionItems[0].value).slice(0, 160)
+    : undefined;
+
+  return (
+    <Modal
+      open={open}
+      onClose={onClose}
+      title="Детали строки"
+      subtitle={subtitle}
+      size="lg"
+      footer={(
+        <div className="explorer-detail-modal__foot">
+          <ExplorerRowActions
+            row={row}
+            onFocus={onFocusRow}
+            onExclude={hasMaskedIpGroup ? null : onExcludeRow}
+            chartSeriesIds={chartSeriesIds}
+            onToggleDynamicsSeries={onToggleDynamicsSeries}
+          />
+          <Button kind="ghost" onClick={onClose}>Закрыть</Button>
+        </div>
+      )}
+    >
+      <div className="explorer-detail-modal">
+        <section className="explorer-detail-section">
+          <h4 className="explorer-detail-section__title">Группировка</h4>
+          <dl className="explorer-detail-grid">
+            {dimensionItems.map((item) => (
+              <ExplorerDetailItem key={item.label} {...item} />
+            ))}
+          </dl>
+        </section>
+        <section className="explorer-detail-section">
+          <h4 className="explorer-detail-section__title">Метрики</h4>
+          <dl className="explorer-detail-grid">
+            {metricItems.map((item) => (
+              <ExplorerDetailItem key={item.label} {...item} />
+            ))}
+          </dl>
+        </section>
+      </div>
+    </Modal>
+  );
+}
+
 function buildExplorerResultColumns({
   groupBy,
   dimensions,
@@ -2421,6 +2562,7 @@ function buildExplorerResultColumns({
   onToggleDynamicsSeries,
   showOthersOnChart = false,
   onToggleOthersOnChart,
+  onOpenDetails,
 }) {
   const visibleDimensionIds = groupBy;
   const hasMaskedIpGroup = groupBy.some((token) => {
@@ -2487,6 +2629,7 @@ function buildExplorerResultColumns({
             onAddFilter={() => onAddFilter(dimId, filterVal.value, filterVal.label, mask)}
             showColorSwatch={showColorSwatch}
             color={r.color}
+            onExpand={colIdx === 0 && onOpenDetails ? () => onOpenDetails(r) : undefined}
           />
         );
       },
@@ -2668,7 +2811,8 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
   const [savedFilters, setSavedFilters] = useState(() => (cabinetMode ? [] : DEFAULT_EXPLORER_PRESETS));
   const [lastApplied, setLastApplied] = useState(() => loadLastAppliedExplorerQuery(cabinetMode));
   const [exporting, setExporting] = useState(false);
-  const [showAllResultColumns, setShowAllResultColumns] = useState(true);
+  const [showAllResultColumns, setShowAllResultColumns] = useState(false);
+  const [detailRow, setDetailRow] = useState(null);
   const [visualLimit, setVisualLimit] = useState(EXPLORER_DEFAULT_VISUAL_LIMIT);
   const [dynamicsSeriesIds, setDynamicsSeriesIds] = useState(() => new Set());
   const [hoveredSeriesId, setHoveredSeriesId] = useState(null);
@@ -3666,6 +3810,19 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
     setFocusedSeriesId((prev) => (prev === row.id ? null : row.id));
   };
 
+  const openResultDetail = useCallback((row) => {
+    if (row?.isOthers) return;
+    setDetailRow(row);
+  }, []);
+
+  const closeResultDetail = useCallback(() => {
+    setDetailRow(null);
+  }, []);
+
+  useEffect(() => {
+    setDetailRow(null);
+  }, [queryVersion]);
+
   const requestFetchLimit = (nextLimit, nextVisual) => {
     const target = resolveExplorerFetchLimit(nextLimit, explorerMaxFetchLimit);
     const visual = nextVisual === 'all' ? 'all' : target;
@@ -3722,7 +3879,16 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
     onToggleDynamicsSeries: toggleDynamicsSeries,
     showOthersOnChart,
     onToggleOthersOnChart: toggleOthersOnChart,
-  }), [appliedGroupBy, dimensions, dimensionById, appliedMetricLabel, appliedMetric, meta, showAllResultColumns, addFilterFromCell, focusRow, excludeRow, toggleDynamicsSeries, dynamicsSeriesIds, showOthersOnChart]);
+    onOpenDetails: openResultDetail,
+  }), [appliedGroupBy, dimensions, dimensionById, appliedMetricLabel, appliedMetric, meta, showAllResultColumns, addFilterFromCell, focusRow, excludeRow, toggleDynamicsSeries, dynamicsSeriesIds, showOthersOnChart, openResultDetail]);
+
+  const hasMaskedIpGroup = useMemo(
+    () => appliedGroupBy.some((token) => {
+      const mask = explorerGroupMask(token);
+      return mask != null && mask !== EXPLORER_GROUP_MASK_DEFAULT;
+    }),
+    [appliedGroupBy],
+  );
 
   const fitExplorerResultColumns = useCallback((columns, tableRows, pinnedRows) => (
     fitExplorerTableColumnWidths(columns, tableRows, pinnedRows, {
@@ -4092,6 +4258,7 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
                           )}
                           columns={resultTableColumns}
                           fitColumnWidths={fitExplorerResultColumns}
+                          horizontalScrollControls
                         />
                       </div>
                     )}
@@ -4112,6 +4279,22 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
         metricLabel={metricLabel}
         editing={editingSaved}
         onSave={saveCurrentQuery}
+      />
+
+      <ExplorerResultDetailModal
+        open={!!detailRow}
+        onClose={closeResultDetail}
+        row={detailRow}
+        groupBy={appliedGroupBy}
+        dimensionById={dimensionById}
+        metric={appliedMetric}
+        metricLabel={appliedMetricLabel}
+        meta={meta}
+        onFocusRow={focusRow}
+        onExcludeRow={excludeRow}
+        chartSeriesIds={dynamicsSeriesIds}
+        onToggleDynamicsSeries={toggleDynamicsSeries}
+        hasMaskedIpGroup={hasMaskedIpGroup}
       />
 
       <SaveObservationModal
