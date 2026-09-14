@@ -338,11 +338,60 @@ function buildRoutesWhere(filters = {}) {
   return { where, params };
 }
 
+/**
+ * Since the next-hop migration the snapshot keeps one row per announce
+ * (prefix + BGP next hop), so a prefix legitimately repeats. Older installs
+ * that have not applied deploy/clickhouse/migrate_bgp_next_hop.sql still have
+ * one row per prefix and no next_hop column.
+ */
+let routesHasNextHopPromise = null;
+
+async function routesHaveNextHop() {
+  if (!routesHasNextHopPromise) {
+    routesHasNextHopPromise = query(`
+      SELECT count() AS c
+      FROM system.columns
+      WHERE database = {db:String} AND table = {table:String} AND name = 'next_hop'
+    `, { db: config.database, table: BGP_ROUTES_TABLE }, { name: 'bmp/routes-next-hop-col' })
+      .then(({ rows }) => Number(rows[0]?.c) > 0)
+      .catch(() => false);
+  }
+  return routesHasNextHopPromise;
+}
+
+/**
+ * active_paths counts the peers announcing one (prefix, next hop) pair, so it
+ * no longer answers "how many peers announce this prefix". Sum it back per
+ * prefix for the page rows only: a window over the whole snapshot would sort
+ * millions of rows for a 50-row page.
+ */
+async function attachPrefixPathTotals(rows) {
+  const prefixes = [...new Set(rows.map((r) => String(r.prefix)).filter(Boolean))];
+  if (!prefixes.length) return rows;
+  const { rows: totals } = await query(`
+    SELECT prefix, sum(active_paths) AS prefix_paths, count() AS prefix_next_hops
+    FROM ${tableRef(BGP_ROUTES_TABLE)}
+    WHERE prefix IN {prefixes:Array(String)}
+    GROUP BY prefix
+  `, { prefixes }, { name: 'bmp/routes-prefix-paths' });
+  const byPrefix = new Map(totals.map((r) => [String(r.prefix), r]));
+  return rows.map((row) => {
+    const t = byPrefix.get(String(row.prefix));
+    return {
+      ...row,
+      prefix_paths: Number(t?.prefix_paths) || Number(row.active_paths) || 0,
+      prefix_next_hops: Number(t?.prefix_next_hops) || 1,
+    };
+  });
+}
+
 async function getBmpRoutes(filters = {}) {
   const limit = parseLimit(filters.limit, 50, MAX_ROUTES);
   const offset = parseOffset(filters.offset);
   const { where, params } = buildRoutesWhere(filters);
   const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
+  const withNextHop = await routesHaveNextHop();
+  const nextHopSql = withNextHop ? 'next_hop,' : "'' AS next_hop,";
 
   const [{ rows }, countRes] = await Promise.all([
     query(`
@@ -351,6 +400,7 @@ async function getBmpRoutes(filters = {}) {
         family,
         origin_asn,
         peer_asn,
+        ${nextHopSql}
         active_paths,
         toString(last_ts) AS last_ts,
         source,
@@ -368,16 +418,20 @@ async function getBmpRoutes(filters = {}) {
     `, params, { name: 'bmp/routes-count' }),
   ]);
 
-  const enriched = await enrichAsnFields(rows, ['origin_asn', 'peer_asn']);
+  const withTotals = withNextHop ? await attachPrefixPathTotals(rows) : rows;
+  const enriched = await enrichAsnFields(withTotals, ['origin_asn', 'peer_asn']);
   const total = Number(countRes.rows[0]?.c) || 0;
   return {
     routes: enriched,
     limit,
     offset,
     total,
-    hasMore: offset + enriched.length < total,
+    hasNextHop: withNextHop,
     source: BGP_ROUTES_TABLE,
-    note: 'Активные префиксы из периодического снимка BMP (bgp-origin-refresh).',
+    hasMore: offset + enriched.length < total,
+    note: withNextHop
+      ? 'Активные анонсы из периодического снимка BMP (bgp-origin-refresh): строка на префикс и BGP next hop.'
+      : 'Активные префиксы из периодического снимка BMP (bgp-origin-refresh).',
   };
 }
 

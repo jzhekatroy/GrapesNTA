@@ -165,7 +165,7 @@ function BmpHealthTab({ summary, peers, routers, loading }) {
 }
 
 function BmpRoutesTab({
-  routes, total, offset, limit, q, family, loading, note,
+  routes, total, offset, limit, q, family, loading, note, hasNextHop,
   onQChange, onFamilyChange, onSearch, onPageChange, onOpenEvents,
 }) {
   const cols = useMemo(() => [
@@ -203,14 +203,32 @@ function BmpRoutesTab({
       render: (r) => r.peer_asn_label || (r.peer_asn ? `AS${r.peer_asn}` : '—'),
       sortAccessor: (r) => Number(r.peer_asn) || 0,
     },
+    ...(hasNextHop ? [{
+      key: 'next_hop',
+      title: 'Next hop',
+      width: 160,
+      render: (r) => <span className="mono">{r.next_hop || '—'}</span>,
+      sortAccessor: (r) => String(r.next_hop || ''),
+    }] : []),
     {
       key: 'active_paths',
-      title: 'Paths',
+      // One row is one announce, so active_paths counts the peers behind this
+      // next hop; prefix_paths is the old per-prefix total.
+      title: hasNextHop ? 'Пиров' : 'Paths',
       width: 80,
       align: 'right',
       num: true,
       sortAccessor: (r) => Number(r.active_paths) || 0,
     },
+    ...(hasNextHop ? [{
+      key: 'prefix_paths',
+      title: 'Всего у префикса',
+      width: 140,
+      align: 'right',
+      num: true,
+      render: (r) => `${Number(r.prefix_paths) || 0} / ${Number(r.prefix_next_hops) || 1} hop`,
+      sortAccessor: (r) => Number(r.prefix_paths) || 0,
+    }] : []),
     {
       key: 'last_ts',
       title: 'Обновлён',
@@ -218,7 +236,7 @@ function BmpRoutesTab({
       render: (r) => fmtBmpTime(r.last_ts),
       sortAccessor: (r) => String(r.last_ts || ''),
     },
-  ], [onOpenEvents]);
+  ], [onOpenEvents, hasNextHop]);
 
   return (
     <div className="col" style={{ gap: 12 }}>
@@ -259,7 +277,7 @@ function BmpRoutesTab({
           <DataTable
             rows={(routes || []).map((r, i) => ({
               ...r,
-              id: `${r.prefix}|${r.origin_asn}|${r.peer_asn}|${i}`,
+              id: `${r.prefix}|${r.next_hop || ''}|${r.origin_asn}|${r.peer_asn}|${i}`,
             }))}
             columns={cols}
             rowKey="id"
@@ -614,6 +632,7 @@ function PageBmp() {
   const [routes, setRoutes] = useState([]);
   const [routesTotal, setRoutesTotal] = useState(0);
   const [routesNote, setRoutesNote] = useState('');
+  const [routesHasNextHop, setRoutesHasNextHop] = useState(false);
   const [routeQ, setRouteQ] = useState('');
   const [routeFamily, setRouteFamily] = useState('');
   const [routeLimit, setRouteLimit] = useState(50);
@@ -654,6 +673,7 @@ function PageBmp() {
     setRoutes(body.routes || []);
     setRoutesTotal(Number(body.total) || 0);
     setRoutesNote(body.note || '');
+    setRoutesHasNextHop(Boolean(body.hasNextHop));
     setRouteLimit(Number(body.limit) || limit);
     setRouteOffset(Number(body.offset) || 0);
   }, [routeQ, routeFamily, routeLimit, routeOffset]);
@@ -780,6 +800,7 @@ function PageBmp() {
           family={routeFamily}
           loading={loading}
           note={routesNote}
+          hasNextHop={routesHasNextHop}
           onQChange={setRouteQ}
           onFamilyChange={(v) => {
             setRouteFamily(v);
