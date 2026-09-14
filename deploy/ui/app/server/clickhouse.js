@@ -231,9 +231,77 @@ function flowsRawTableRef() {
   return `${qIdent(config.database)}.${qIdent(config.flowsRawTable)}`;
 }
 
+/** Cached physical column names on flows_raw (null until first refresh). */
+let flowsRawColumnNames = null;
+let flowsRawSchemaReady = null;
+
+async function refreshFlowsRawColumnNames() {
+  const { rows } = await query(`
+    SELECT name
+    FROM system.columns
+    WHERE database = {db:String}
+      AND table = {table:String}
+  `, {
+    db: config.database,
+    table: config.flowsRawTable,
+  }, { name: 'clickhouse/flows-raw-columns' });
+  flowsRawColumnNames = new Set((rows || []).map((r) => String(r.name)));
+  return flowsRawColumnNames;
+}
+
+async function ensureFlowsRawAsPathColumns() {
+  const srcName = config.flowColumns.srcAsPath || 'src_as_path';
+  const dstName = config.flowColumns.dstAsPath || 'dst_as_path';
+  let cols = flowsRawColumnNames || await refreshFlowsRawColumnNames();
+  const alterParts = [];
+  if (!cols.has(srcName)) {
+    alterParts.push(`ADD COLUMN IF NOT EXISTS ${qIdent(srcName)} Array(UInt32) DEFAULT [] AFTER ${col('dstAsn')}`);
+  }
+  if (!cols.has(dstName)) {
+    alterParts.push(`ADD COLUMN IF NOT EXISTS ${qIdent(dstName)} Array(UInt32) DEFAULT [] AFTER ${qIdent(srcName)}`);
+  }
+  if (!alterParts.length) return { ok: true, added: false };
+
+  try {
+    await executeCommand(
+      `ALTER TABLE ${flowsRawTableRef()} ${alterParts.join(', ')}`,
+      {},
+      { name: 'clickhouse/flows-raw-as-path' },
+    );
+    cols = await refreshFlowsRawColumnNames();
+    return { ok: cols.has(srcName) && cols.has(dstName), added: true };
+  } catch (err) {
+    logVerbose(
+      'ClickHouse',
+      `flows_raw AS path columns missing; auto-migrate failed: ${err?.message || err}`,
+    );
+    return { ok: false, added: false, error: err?.message || String(err) };
+  }
+}
+
+async function ensureFlowsRawSchema() {
+  if (!flowsRawSchemaReady) {
+    flowsRawSchemaReady = (async () => {
+      try {
+        await ensureFlowsRawAsPathColumns();
+        await refreshFlowsRawColumnNames();
+      } catch (err) {
+        flowsRawSchemaReady = null;
+        logVerbose(
+          'ClickHouse',
+          `flows_raw schema sync skipped: ${err?.message || err}`,
+        );
+      }
+    })();
+  }
+  return flowsRawSchemaReady;
+}
+
 function flowCol(key) {
   const name = config.flowColumns[key];
-  return name ? qIdent(name) : null;
+  if (!name) return null;
+  if (flowsRawColumnNames && !flowsRawColumnNames.has(name)) return null;
+  return qIdent(name);
 }
 
 function dashboardTableRef() {
@@ -811,6 +879,8 @@ module.exports = {
   userPermissionsTableRef,
   insertRows,
   executeCommand,
+  ensureFlowsRawSchema,
+  refreshFlowsRawColumnNames,
   col,
   colOpt,
   getConfig,

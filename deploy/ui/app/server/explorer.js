@@ -17,6 +17,7 @@ const {
   snmpAgentsCurrentRef,
   escapeSqlString,
   query,
+  ensureFlowsRawSchema,
 } = require('./clickhouse');
 const { protocolChartColor } = require('./protocol-colors');
 const { getVlanNameMap, vlanLabel } = require('./net-l2-vlans');
@@ -2652,6 +2653,7 @@ async function explorerFlowsPeakPath({
 }
 
 async function explorerFlows(body = {}, options = {}) {
+  await ensureFlowsRawSchema();
   const q = normalizeExplorerQuery(body, options);
   const { groups, dims } = resolveExplorerGroupState(
     q.groupBy,
@@ -2975,6 +2977,7 @@ async function explorerFlows(body = {}, options = {}) {
 }
 
 async function explorerSummary(body = {}, options = {}) {
+  await ensureFlowsRawSchema();
   const q = normalizeExplorerQuery(body, options);
   const dims = explorerDimensionsForOptions(options);
   const scaled = explorerScaledFlowExprs('f');

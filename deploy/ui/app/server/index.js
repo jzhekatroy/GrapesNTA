@@ -4,7 +4,7 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const express = require('express');
-const { ping, query, getConfig } = require('./clickhouse');
+const { ping, query, getConfig, ensureFlowsRawSchema } = require('./clickhouse');
 const { logApiIncoming, logApiDone, logApiError, getLogConfig } = require('./logger');
 const { runWithRequestContext, getRequestContext } = require('./request-context');
 const { recordFailedRequest, listFailedRequests } = require('./failed-requests');
@@ -1088,6 +1088,15 @@ app.post('/api/dashboard/layout/reset', async (req, res) => {
     res.json({ ok: true, data: result.layout, updatedAt: result.updatedAt });
   } catch (err) {
     res.status(err.statusCode || 400).json({ error: err.message });
+  }
+});
+
+app.use('/api/explorer', async (req, res, next) => {
+  try {
+    await ensureFlowsRawSchema();
+    next();
+  } catch (err) {
+    res.status(503).json({ error: err.message || 'ClickHouse schema unavailable' });
   }
 });
 
@@ -2739,6 +2748,13 @@ app.listen(PORT, () => {
   ping(true).then((s) => {
     if (s.ok) {
       console.log(`ClickHouse ${s.version} @ ${getConfig().url}`);
+      ensureFlowsRawSchema()
+        .then(() => {
+          console.log('flows_raw schema ready (AS path columns).');
+        })
+        .catch((err) => {
+          console.warn(`flows_raw AS path schema check failed: ${err.message}`);
+        });
       ensureUsersTable()
         .then(async (result) => {
           if (result.bootstrapped) {
