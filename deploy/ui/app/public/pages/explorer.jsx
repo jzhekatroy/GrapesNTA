@@ -539,6 +539,7 @@ function buildExplorerMetricColumnDefs(meta) {
 }
 
 const EXPLORER_TABLE_CELL_PAD = 28;
+const EXPLORER_TABLE_HEADER_EXTRA = 56;
 const EXPLORER_TABLE_MONO_CHAR = 7.4;
 const EXPLORER_TABLE_TEXT_CHAR = 8.2;
 const EXPLORER_TABLE_DIM_EXTRA = 36;
@@ -547,6 +548,13 @@ function measureExplorerTableText(text, { mono = false, pad = EXPLORER_TABLE_CEL
   const sample = String(text ?? '');
   const charW = mono ? EXPLORER_TABLE_MONO_CHAR : EXPLORER_TABLE_TEXT_CHAR;
   return Math.ceil(sample.length * charW) + pad;
+}
+
+function measureExplorerTableHeader(text, { mono = false } = {}) {
+  return measureExplorerTableText(text, {
+    mono,
+    pad: EXPLORER_TABLE_CELL_PAD + EXPLORER_TABLE_HEADER_EXTRA,
+  });
 }
 
 function fitExplorerTableColumnWidths(columns, rows, pinnedRows, { meta, metric, groupBy }) {
@@ -599,7 +607,9 @@ function fitExplorerTableColumnWidths(columns, rows, pinnedRows, { meta, metric,
       }
     }
 
-    widths[col.key] = Math.max(minW, Math.min(maxW, contentW));
+    const fittedContent = Math.max(minW, Math.min(maxW, contentW));
+    const headerMin = measureExplorerTableHeader(col.title);
+    widths[col.key] = Math.max(fittedContent, headerMin);
   });
 
   return widths;
@@ -3733,6 +3743,10 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
     metric: appliedMetric,
     groupBy: appliedGroupBy,
   }), [visibleResults, summary, meta, appliedMetric, appliedGroupBy]);
+  const resultTablePinnedRows = useMemo(
+    () => (othersRow ? [othersRow] : null),
+    [othersRow],
+  );
   const othersChartAvailable = Boolean(othersRow);
   const isRefreshingData = refreshing;
   const appliedThresholds = activeQuery?.thresholds || [];
@@ -4059,7 +4073,7 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
                           onRowClick={handleSeriesRowClick}
                           onRowMouseEnter={handleSeriesRowHover}
                           onRowMouseLeave={handleSeriesRowHoverEnd}
-                          pinnedRows={othersRow ? [othersRow] : null}
+                          pinnedRows={resultTablePinnedRows}
                           pageSize={Math.max(resolveExplorerVisualCount(visualLimit, results.length), 1)}
                           initialSort={{ key: appliedDefaultSortKey, dir: 'desc' }}
                           emptyTitle={source === 'loading' ? 'Выполняем запрос…' : 'Нет данных'}

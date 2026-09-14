@@ -338,6 +338,8 @@ const OverflowText = React.forwardRef(function OverflowText({
   );
 });
 
+const DATATABLE_RESIZE_MAX_WIDTH = 2400;
+
 /* =================== DataTable =================== */
 function DataTable({
   rows,
@@ -372,7 +374,12 @@ function DataTable({
     columns.map((c) => [c.key, Number(c.width) || 160]),
   ));
   const resizeRef = useRef(null);
+  const userResizedColsRef = useRef(new Set());
   const colKeysSig = columns.map((c) => c.key).join('\0');
+  const colFitSig = useMemo(
+    () => columns.map((c) => `${c.key}\t${c.title}\t${c.minWidth ?? ''}\t${c.maxWidth ?? ''}`).join('\0'),
+    [columns],
+  );
   const rowFitSig = useMemo(() => {
     const all = [...(rows || []), ...(pinnedRows || [])];
     if (!all.length) return '0';
@@ -380,6 +387,7 @@ function DataTable({
   }, [rows, pinnedRows, rowKey]);
 
   useEffect(() => {
+    userResizedColsRef.current = new Set();
     setColVis((prev) => Object.fromEntries(
       columns.map((c) => [c.key, prev[c.key] !== undefined ? prev[c.key] : true]),
     ));
@@ -395,12 +403,14 @@ function DataTable({
     setColWidths((prev) => {
       const next = { ...prev };
       columns.forEach((c) => {
-        if (fitted[c.key] != null) next[c.key] = fitted[c.key];
+        if (fitted[c.key] != null && !userResizedColsRef.current.has(c.key)) {
+          next[c.key] = fitted[c.key];
+        }
       });
       return next;
     });
     return undefined;
-  }, [colKeysSig, rowFitSig, fitColumnWidths, columns, rows, pinnedRows]);
+  }, [colKeysSig, colFitSig, rowFitSig, fitColumnWidths]);
 
   useEffect(() => () => {
     const drag = resizeRef.current;
@@ -448,6 +458,7 @@ function DataTable({
   const resetColumnWidth = (e, c) => {
     e.preventDefault();
     e.stopPropagation();
+    userResizedColsRef.current.delete(c.key);
     setColWidths((prev) => ({ ...prev, [c.key]: Number(c.width) || 160 }));
   };
   const startColumnResize = (e, c) => {
@@ -457,9 +468,8 @@ function DataTable({
     const startX = e.clientX;
     const startWidth = columnWidth(c);
     const minWidth = Number(c.minWidth) || 72;
-    const maxWidth = Number(c.maxWidth) || 800;
     const onMove = (ev) => {
-      const next = Math.max(minWidth, Math.min(maxWidth, startWidth + ev.clientX - startX));
+      const next = Math.max(minWidth, Math.min(DATATABLE_RESIZE_MAX_WIDTH, startWidth + ev.clientX - startX));
       setColWidths((prev) => ({ ...prev, [c.key]: Math.round(next) }));
     };
     const onUp = () => {
@@ -468,6 +478,7 @@ function DataTable({
       document.body.style.cursor = '';
       document.body.style.userSelect = '';
       resizeRef.current = null;
+      userResizedColsRef.current.add(c.key);
     };
     resizeRef.current = { onMove, onUp };
     document.body.style.cursor = 'col-resize';
