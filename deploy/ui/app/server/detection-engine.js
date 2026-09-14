@@ -388,7 +388,10 @@ async function loadScopeFlags(scope, minuteTs) {
       sumIf(e.bytes, e.toward AND ${dataPkts}) AS data_bytes,
       sumIf(e.packets, e.toward AND ${dataPkts}) AS data_packets,
       countIf(e.toward AND ${dataPkts}) AS data_rows,
-      minIf(e.sampling_rate, e.toward AND e.sampling_rate > 0) AS sampling_rate
+      -- Доминирующий по пакетам rate, а не min: на nta в flows_raw пять разных
+      -- частот (500…65536), и min отдавал минуте 500 у объекта, чей трафик
+      -- почти весь приходит через sFlow 1:32768.
+      toUInt64(ifNull(topKWeightedIf(1)(e.sampling_rate, e.packets, e.toward AND e.sampling_rate > 0)[1], 1)) AS sampling_rate
     FROM (
       SELECT
         ${towardId} AS scope_id,

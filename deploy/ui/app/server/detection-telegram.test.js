@@ -961,6 +961,37 @@ describe('detection-telegram', () => {
     assert.equal(picked.length, 0);
   });
 
+  it('идущий SYN-флуд без активного события всё равно открывает алерт', () => {
+    const flood = (minute) => ({
+      minute,
+      scope: 'client',
+      scope_id: '81050',
+      proto: 'all',
+      growth_bps: 0.8,
+      syn_only_packets: 266_772_480,
+      syn_only_bytes: 266_772_480 * 72,
+      syn_only_rows: 4484,
+      established_packets: 12_000_000,
+      data_packets: 11_912_448,
+      sampling_rate: 4096,
+    });
+    const current = flood('2026-09-11 19:29:00');
+    const picked = pickAlertCandidates([current], new Map([['client|81050', [
+      flood('2026-09-11 19:28:00'),
+      flood('2026-09-11 19:27:00'),
+    ]]]), 1.6, {
+      grouped: new Map([['client|81050', { byProto: { all: current, tcp: current } }]]),
+      settings: { ampEnabled: false, geoEnabled: false },
+    });
+    assert.deepEqual(picked.map((c) => c.signal), ['syn_flood']);
+    const again = pickAlertCandidates([current], new Map(), 1.6, {
+      grouped: new Map([['client|81050', { byProto: { all: current } }]]),
+      settings: { ampEnabled: false, geoEnabled: false },
+      activeKeys: new Set(['client|81050|syn_flood']),
+    });
+    assert.equal(again.length, 0);
+  });
+
   it('нормализация не закрывает, пока объём выше алерта', () => {
     const history = [
       { minute: '2026-09-01 19:45:00', growth_bps: 1.1, growth_pps: 1.0, bps: 9.4e9 },

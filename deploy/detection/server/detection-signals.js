@@ -49,10 +49,20 @@ const AMP_PKT_MIN = 800;
 const AMP_BPS_MIN = 20e6;
 
 // SYN-флуд — по пакетам голого SYN, не по uniq рукопожатий.
-// 2000 п/с на NetFlow (rate=1); на sFlow пол поднимает число проб (≥30 строк).
-const TCP_FLOOD_PPS_MIN = 2000;
+// Пороги абсолютные и не привязаны к sampling_rate: прежний пол
+// max(2000, 30 * rate / 60) сокращался ровно в «30 проб за минуту», потому что
+// сами пакеты уже масштабированы (pps = строки * rate / 60). На nta 14.09 это
+// открыло 11 событий на фоновом скане хостеров.
+// Замер за 12 ч по 217 258 клиенто-минутам: голого SYN нигде не больше 110 тыс.
+// п/с, а доля от TCP-классов при заметном объёме — не больше 2.6%. Эталон 81050
+// (11.09 19:29) — 4.45 млн п/с и 92% TCP. Новое правило даёт ноль ложных и
+// проходит эталон с девятикратным запасом; мелкий флуд сознательно пропускаем.
+const TCP_FLOOD_PPS_MIN = 500_000;
+const TCP_FLOOD_SHARE_MIN = 0.5;
 const TCP_FLOOD_PKT_MAX = 100;
-const TCP_FLOOD_ROWS_MIN = 30;
+// Страховка от одиночной строки-артефакта. На sFlow 500 тыс. п/с — это сотни
+// проб, так что порог работает только на NetFlow, где rate=1.
+const TCP_FLOOD_ROWS_MIN = 5;
 const TCP_SCAN_ROWS_MIN = 200;
 const TCP_CLASS_KEYS = ['syn_only', 'ack_only', 'rst', 'established', 'data'];
 
@@ -98,19 +108,29 @@ function tcpClassMetrics(row = {}, prefix = 'syn_only') {
   };
 }
 
-function synFloodThresholdPps(samplingRate) {
-  const rate = num(samplingRate) > 0 ? num(samplingRate) : 1;
-  return Math.max(TCP_FLOOD_PPS_MIN, TCP_FLOOD_ROWS_MIN * rate / 60);
+// Доля голого SYN среди TCP-пакетов минуты. Знаменатель собираем из классов
+// той же строки, а не из строки proto='tcp': классы считаются только по TCP и
+// есть в любой строке минуты, поэтому признак не зависит от того, какой срез
+// протокола пришёл. Классы слегка пересекаются (SYN+ACK+PSH попадает и в
+// established, и в data) — знаменатель чуть завышен, значит доля занижена.
+function synFloodShare(row = {}) {
+  const syn = tcpClassMetrics(row, 'syn_only').packets;
+  const total = TCP_CLASS_KEYS
+    .reduce((sum, key) => sum + tcpClassMetrics(row, key).packets, 0);
+  return share(syn, total);
 }
 
 function isSynFloodHit(row = {}, options = {}) {
   const m = tcpClassMetrics(row, 'syn_only');
   const pktMax = num(options.pktMax) ?? TCP_FLOOD_PKT_MAX;
   const rowsMin = num(options.rowsMin) ?? TCP_FLOOD_ROWS_MIN;
+  const ppsMin = num(options.ppsMin) ?? TCP_FLOOD_PPS_MIN;
+  const shareMin = num(options.shareMin) ?? TCP_FLOOD_SHARE_MIN;
   if (m.rows < rowsMin) return false;
   if (!(m.avgPkt > 0 && m.avgPkt < pktMax)) return false;
-  const rate = row.sampling_rate ?? row.samplingRate;
-  return m.pps >= synFloodThresholdPps(rate);
+  if (m.pps < ppsMin) return false;
+  const synShare = synFloodShare(row);
+  return synShare != null && synShare >= shareMin;
 }
 
 function synFloodStillGoing(row = {}, options = {}) {
@@ -262,12 +282,13 @@ module.exports = {
   SIGNAL_LABEL,
   SIGNAL_ORDER,
   TCP_FLOOD_PPS_MIN,
+  TCP_FLOOD_SHARE_MIN,
   TCP_FLOOD_PKT_MAX,
   TCP_FLOOD_ROWS_MIN,
   TCP_SCAN_ROWS_MIN,
   TCP_CLASS_KEYS,
   tcpClassMetrics,
-  synFloodThresholdPps,
+  synFloodShare,
   isSynFloodHit,
   synFloodStillGoing,
   isTcpScan,

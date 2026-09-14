@@ -8,13 +8,39 @@ const {
   evaluateForeignGeo,
   isSynFloodHit,
   isTcpScan,
-  synFloodThresholdPps,
+  synFloodShare,
   SIGNALS,
 } = require('./detection-signals');
 const {
   pickAlertCandidates,
   pickNormalizeCandidates,
 } = require('./detection-telegram');
+
+// 81050, 11.09 19:29 UTC: эталонный флуд, цифры сняты с flows_raw.
+function synFloodRow(extra = {}) {
+  return {
+    syn_only_packets: 266_772_480,
+    syn_only_bytes: 266_772_480 * 72,
+    syn_only_rows: 4484,
+    established_packets: 12_000_000,
+    data_packets: 11_912_448,
+    sampling_rate: 4096,
+    ...extra,
+  };
+}
+
+// 81611, 14.09 08:01 UTC: пик фонового скана за 12 часов.
+function backgroundScanRow(extra = {}) {
+  return {
+    syn_only_packets: 110_319 * 60,
+    syn_only_bytes: 110_319 * 60 * 86,
+    syn_only_rows: 72,
+    data_packets: 250_000_000,
+    established_packets: 8_000_000,
+    sampling_rate: 65536,
+    ...extra,
+  };
+}
 
 describe('detection-signals', () => {
   it('101443: share 0.179, 40 источников, 906 Б → амплификация', () => {
@@ -301,16 +327,35 @@ describe('detection-signals', () => {
     assert.equal(picked.some((c) => c.signal === SIGNALS.amplification), false);
   });
 
-  it('81050: голый SYN выше порога sFlow → SYN-флуд', () => {
+  // 81050, 11.09 19:29 UTC на nta, посчитано по flows_raw: голый SYN 4484
+  // строки / 266 772 480 пакетов по 72 Б = 4.45 млн п/с при TCP клиента
+  // 290 684 928 пакетов, то есть 92% TCP.
+  it('81050: голый SYN 4.45 млн п/с и 92% TCP → SYN-флуд', () => {
+    assert.equal(isSynFloodHit(synFloodRow()), true);
+    assert.ok(synFloodShare(synFloodRow()) > 0.9);
+  });
+
+  // 81611, 14.09 08:01 UTC: 110 тыс. п/с голого SYN — максимум за 12 часов по
+  // всем 217 258 клиенто-минутам, и это всего 2.5% TCP. Входящий фоновый скан
+  // хостера, из-за которого прежний порог открыл 11 ложных событий.
+  it('81611: фоновый скан хостера не считается SYN-флудом', () => {
+    const row = backgroundScanRow();
+    assert.equal(isSynFloodHit(row), false);
+    assert.ok(synFloodShare(row) < 0.03);
+  });
+
+  it('голый SYN доминирует, но объёма мало — не флуд', () => {
     assert.equal(isSynFloodHit({
-      syn_only_packets: 2248431 * 60,
-      syn_only_bytes: 2248431 * 60 * 72,
-      syn_only_rows: 2059,
-      sampling_rate: 32768,
-    }), true);
-    assert.ok(synFloodThresholdPps(32768) > 16000);
-    assert.equal(synFloodThresholdPps(65536), 32768);
-    assert.equal(synFloodThresholdPps(1), 2000);
+      syn_only_packets: 120_000 * 60, syn_only_bytes: 120_000 * 60 * 72,
+      syn_only_rows: 110, data_packets: 1000,
+    }), false);
+  });
+
+  it('объём есть, но голый SYN тонет в живом TCP — не флуд', () => {
+    assert.equal(isSynFloodHit({
+      ...synFloodRow(),
+      data_packets: 266_772_480 * 4,
+    }), false);
   });
 
   it('188.143.242: 190 п/с голого SYN — скан, не флуд', () => {
@@ -350,15 +395,49 @@ describe('detection-signals', () => {
   });
 
   it('SYN-флуд открывается без роста объёма', () => {
-    const all = {
+    const all = synFloodRow({
       scope: 'client', scope_id: '81050', proto: 'all', growth_bps: 0.37,
-      syn_only_packets: 2248431 * 60,
-      syn_only_bytes: 2248431 * 60 * 72,
-      syn_only_rows: 2059,
-      sampling_rate: 32768,
-    };
+    });
     const picked = pickAlertCandidates([all], new Map(), 1.6, {
       grouped: new Map([['client|81050', { byProto: { all } }]]),
+      settings: { ampEnabled: false, geoEnabled: false },
+    });
+    assert.deepEqual(picked.map((c) => c.signal), [SIGNALS.syn_flood]);
+  });
+
+  it('фоновый скан хостера не открывает алерт', () => {
+    const all = backgroundScanRow({
+      scope: 'client', scope_id: '81611', proto: 'all', growth_bps: 0.8,
+    });
+    const picked = pickAlertCandidates([all], new Map(), 1.6, {
+      grouped: new Map([['client|81611', { byProto: { all, tcp: all } }]]),
+      settings: { ampEnabled: false, geoEnabled: false },
+    });
+    assert.equal(picked.some((c) => c.signal === SIGNALS.syn_flood), false);
+  });
+
+  it('SYN-флуд: прошлые минуты без syn_only не наследуют текущий TCP', () => {
+    const current = synFloodRow({
+      scope: 'client', scope_id: '81050', proto: 'all', growth_bps: 0.8,
+    });
+    const prev = { minute: '2026-09-11 19:28:00', scope: 'client', scope_id: '81050', proto: 'all', growth_bps: 0.8 };
+    const picked = pickAlertCandidates([current], new Map([['client|81050', [prev]]]), 1.6, {
+      grouped: new Map([['client|81050', { byProto: { all: current, tcp: current } }]]),
+      settings: { ampEnabled: false, geoEnabled: false },
+    });
+    assert.deepEqual(picked.map((c) => c.signal), [SIGNALS.syn_flood]);
+  });
+
+  it('SYN-флуд открывается, даже если голый SYN шёл уже несколько минут', () => {
+    const flood = (minute) => synFloodRow({
+      minute, scope: 'client', scope_id: '81050', proto: 'all', growth_bps: 0.8,
+    });
+    const current = flood('2026-09-11 19:29:00');
+    const picked = pickAlertCandidates([current], new Map([['client|81050', [
+      flood('2026-09-11 19:28:00'),
+      flood('2026-09-11 19:27:00'),
+    ]]]), 1.6, {
+      grouped: new Map([['client|81050', { byProto: { all: current } }]]),
       settings: { ampEnabled: false, geoEnabled: false },
     });
     assert.deepEqual(picked.map((c) => c.signal), [SIGNALS.syn_flood]);
