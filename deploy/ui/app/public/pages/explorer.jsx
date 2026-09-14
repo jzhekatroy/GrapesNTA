@@ -3939,7 +3939,7 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
   const idleState = !hasAppliedQuery && source !== 'loading';
 
   return (
-    <div className="main__container" style={{ maxWidth: 1820, padding: 0 }}>
+    <div className="main__container" style={{ padding: 0 }}>
       <div className="page-head" style={{ padding: '0 4px' }}>
         <div>
           <h1>Разбор трафика</h1>
