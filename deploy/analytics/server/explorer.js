@@ -535,6 +535,16 @@ function parseExplorerAsPathHops(value) {
   return { hops };
 }
 
+function explorerAsPathOriginCol(side) {
+  return side === 'dst' ? col('dstAsn') : col('srcAsn');
+}
+
+/** Match AS in path; when path is empty (pre-BGP backfill), fall back to origin ASN. */
+function explorerAsPathHopMatchClause(pathExpr, side, pathMatchSql, originMatchSql, negate = false) {
+  const combined = `(${pathMatchSql} OR (empty(${pathExpr}) AND (${originMatchSql})))`;
+  return negate ? `NOT ${combined}` : combined;
+}
+
 function formatExplorerAsPathRawValue(hops) {
   if (!Array.isArray(hops) || !hops.length) return '';
   return hops.join(' ');
@@ -1941,13 +1951,15 @@ async function buildExplorerFilterClauses(filters, dims, params) {
         continue;
       }
       const pathExpr = `f.${pathCol}`;
-      const asnNameLookup = (param) => `(SELECT groupArray(asn) FROM (
+      const originAsnCol = explorerAsPathOriginCol(dim.side);
+      const asnNameUnion = (param) => `(
         SELECT asn FROM ${asnNames}
         WHERE positionCaseInsensitive(name, trim(BOTH '%' FROM {${param}:String})) > 0
         UNION ALL
         SELECT asn FROM ${asnRegistry}
         WHERE positionCaseInsensitive(name, trim(BOTH '%' FROM {${param}:String})) > 0
-      ))`;
+      )`;
+      const asnNameLookup = (param) => `(SELECT groupArray(asn) FROM ${asnNameUnion(param)} AS _asn_u)`;
 
       if (op === '=' || op === '!=') {
         const parsed = parseExplorerAsPathHops(f.value);
@@ -1971,18 +1983,30 @@ async function buildExplorerFilterClauses(filters, dims, params) {
         if (asnNums.length && asnNums.every((n) => n != null)) {
           const paramName = `filter_${idx++}`;
           params[paramName] = asnNums;
-          const fn = op === 'not_in'
-            ? `NOT hasAny(${pathExpr}, {${paramName}:Array(UInt32)})`
-            : `hasAny(${pathExpr}, {${paramName}:Array(UInt32)})`;
-          addClause(fn);
+          const pathMatch = `hasAny(${pathExpr}, {${paramName}:Array(UInt32)})`;
+          const originMatch = `f.${originAsnCol} IN {${paramName}:Array(UInt32)}`;
+          addClause(explorerAsPathHopMatchClause(
+            pathExpr,
+            dim.side,
+            pathMatch,
+            originMatch,
+            op === 'not_in',
+          ));
           continue;
         }
         const paramName = `filter_${idx++}`;
         params[paramName] = `%${String(f.value ?? '').trim()}%`;
         const lookup = asnNameLookup(paramName);
-        addClause(op === 'not_in'
-          ? `NOT hasAny(${pathExpr}, ${lookup})`
-          : `hasAny(${pathExpr}, ${lookup})`);
+        const union = asnNameUnion(paramName);
+        const pathMatch = `hasAny(${pathExpr}, ${lookup})`;
+        const originMatch = `f.${originAsnCol} IN ${union}`;
+        addClause(explorerAsPathHopMatchClause(
+          pathExpr,
+          dim.side,
+          pathMatch,
+          originMatch,
+          op === 'not_in',
+        ));
         continue;
       }
 
@@ -1991,9 +2015,15 @@ async function buildExplorerFilterClauses(filters, dims, params) {
         if (asnNum != null) {
           const paramName = `filter_${idx++}`;
           params[paramName] = asnNum;
-          addClause(op === 'not_contains'
-            ? `NOT has(${pathExpr}, {${paramName}:UInt32})`
-            : `has(${pathExpr}, {${paramName}:UInt32})`);
+          const pathMatch = `has(${pathExpr}, {${paramName}:UInt32})`;
+          const originMatch = `f.${originAsnCol} = {${paramName}:UInt32}`;
+          addClause(explorerAsPathHopMatchClause(
+            pathExpr,
+            dim.side,
+            pathMatch,
+            originMatch,
+            op === 'not_contains',
+          ));
           continue;
         }
         const trimmed = String(f.value ?? '').trim();
@@ -2004,9 +2034,16 @@ async function buildExplorerFilterClauses(filters, dims, params) {
         const paramName = `filter_${idx++}`;
         params[paramName] = `%${trimmed}%`;
         const lookup = asnNameLookup(paramName);
-        addClause(op === 'not_contains'
-          ? `NOT hasAny(${pathExpr}, ${lookup})`
-          : `hasAny(${pathExpr}, ${lookup})`);
+        const union = asnNameUnion(paramName);
+        const pathMatch = `hasAny(${pathExpr}, ${lookup})`;
+        const originMatch = `f.${originAsnCol} IN ${union}`;
+        addClause(explorerAsPathHopMatchClause(
+          pathExpr,
+          dim.side,
+          pathMatch,
+          originMatch,
+          op === 'not_contains',
+        ));
         continue;
       }
 

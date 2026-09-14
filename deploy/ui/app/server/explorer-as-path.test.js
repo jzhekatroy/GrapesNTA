@@ -20,24 +20,30 @@ const WINDOW = {
 };
 
 describe('explorer AS path filters', () => {
-  it('builds has() for dst_as_path contains numeric ASN', async () => {
+  it('builds has() with origin fallback for dst_as_path contains numeric ASN', async () => {
     const spec = await explorerFlows({
       ...WINDOW,
       groupBy: ['src_ip'],
       filters: [{ field: 'dst_as_path', op: 'contains', value: '1299' }],
     });
-    assert.match(spec.sql, /has\(f\.`dst_as_path`, \{filter_0:UInt32\}\)/);
+    assert.match(
+      spec.sql,
+      /\(has\(f\.`dst_as_path`, \{filter_0:UInt32\}\) OR \(empty\(f\.`dst_as_path`\) AND \(f\.`\w+` = \{filter_0:UInt32\}\)\)\)/,
+    );
     assert.equal(spec.params.filter_0, 1299);
     assert.doesNotMatch(spec.sql, /LIKE.*dst_as_path/i);
   });
 
-  it('builds hasAny() for src_as_path in list', async () => {
+  it('builds hasAny() with origin fallback for src_as_path in list', async () => {
     const spec = await explorerFlows({
       ...WINDOW,
       groupBy: ['src_ip'],
       filters: [{ field: 'src_as_path', op: 'in', value: '1299, 174' }],
     });
-    assert.match(spec.sql, /hasAny\(f\.`src_as_path`, \{filter_0:Array\(UInt32\)\}\)/);
+    assert.match(
+      spec.sql,
+      /\(hasAny\(f\.`src_as_path`, \{filter_0:Array\(UInt32\)\}\) OR \(empty\(f\.`src_as_path`\) AND \(f\.`\w+` IN \{filter_0:Array\(UInt32\)\}\)\)\)/,
+    );
     assert.deepEqual(spec.params.filter_0, [1299, 174]);
   });
 

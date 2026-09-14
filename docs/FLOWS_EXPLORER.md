@@ -42,6 +42,10 @@ ingest (сосед первый, origin последний). Это **не** т�
 `flows_raw`. На окне до ~1 часа это обычно нормально; на более длинном периоде
 группировка по AS path заметно тяжелее, чем по origin ASN.
 
+Если BGP path ещё не записан в ingest (пустой массив), фильтры `contains` /
+`in` по AS path дополнительно сопоставляют origin ASN (`src_asn` / `dst_asn`),
+чтобы не терять трафик до полного backfill path.
+
 ## API Defaults
 
 - `from_utc` и `to_utc` обязательны.
