@@ -9,6 +9,10 @@ const {
   DEFAULT_STREAK,
   DEFAULT_NORMALIZE_STREAK,
   DEFAULT_TELEGRAM_API_URL,
+  DEFAULT_MIN_CLIENT_SHARE_PCT,
+  normalizeMinSharePct,
+  parasiticClientShare,
+  shouldSkipTelegramForShare,
   shortErrorMsg,
   normalizeTelegramApiUrl,
   normalizeTelegramProxyUrl,
@@ -48,6 +52,53 @@ describe('detection-telegram', () => {
     assert.equal(DEFAULT_STREAK, 3);
     assert.equal(DEFAULT_NORMALIZE_STREAK, 3);
     assert.equal(DEFAULT_TELEGRAM_API_URL, 'https://api.telegram.org');
+    assert.equal(DEFAULT_MIN_CLIENT_SHARE_PCT, 10);
+  });
+
+  it('доля паразита: амплификация 1% клиента не идёт в Telegram, в историю — да', () => {
+    const byProto = {
+      all: { bps: 10.7e9, bytes: 10.7e9 * 60 / 8 },
+      udp: {
+        bps: 86.2e6 / 0.04,
+        bytes: (86.2e6 / 0.04) * 60 / 8,
+        amp_bytes: 86.2e6 * 60 / 8,
+        amp_packets: (86.2e6 * 60 / 8) / 1096,
+        amp_srcs: 14,
+      },
+    };
+    const share = parasiticClientShare('amplification', { byProto });
+    assert.ok(share != null && share < 0.02 && share > 0.005);
+    assert.equal(shouldSkipTelegramForShare(['amplification'], { byProto }, { ampMinSharePct: 10 }), true);
+    assert.equal(shouldSkipTelegramForShare(['amplification'], { byProto }, { ampMinSharePct: 0.5 }), false);
+    assert.equal(shouldSkipTelegramForShare(['amplification'], { byProto }, { ampMinSharePct: 0 }), false);
+  });
+
+  it('доля паразита: если любой вектор выше порога — Telegram шлём', () => {
+    const byProto = {
+      all: { bps: 10.7e9, growth_bps: 2.2, bytes: 10.7e9 * 60 / 8 },
+      udp: {
+        bytes: 2e9 * 60 / 8,
+        amp_bytes: 86.2e6 * 60 / 8,
+        amp_packets: (86.2e6 * 60 / 8) / 1096,
+        amp_srcs: 14,
+      },
+    };
+    assert.equal(shouldSkipTelegramForShare(['amplification'], { byProto }, {
+      ampMinSharePct: 10,
+      volumeMinSharePct: 10,
+    }), true);
+    assert.equal(shouldSkipTelegramForShare(['amplification', 'volume'], { byProto }, {
+      ampMinSharePct: 10,
+      volumeMinSharePct: 10,
+    }), false);
+  });
+
+  it('доля паразита: без замера не глушим', () => {
+    assert.equal(normalizeMinSharePct(-1), 10);
+    assert.equal(normalizeMinSharePct(250), 100);
+    assert.equal(shouldSkipTelegramForShare(['amplification'], { byProto: { all: { bps: 1e9 } } }, {
+      ampMinSharePct: 10,
+    }), false);
   });
 
   it('нормализует URL локального Bot API', () => {
@@ -1090,6 +1141,24 @@ describe('detection-telegram', () => {
     });
     assert.equal(event.alertByProto.all.topCountries, 'RU:0.6,UZ:0.12');
     assert.equal(event.signal, 'foreign_geo');
+    assert.equal(event.telegramSkip, '');
+  });
+
+  it('mapEventRow сохраняет telegramSkip из снимка', () => {
+    const event = mapEventRow({
+      event_id: 'client|79305|amplification|2026-09-14 16:11:00',
+      scope: 'client',
+      scope_id: '79305',
+      signal: 'amplification',
+      status: 'active',
+      alert_minute: '2026-09-14 16:11:00',
+      threshold: 1.6,
+      alert_json: JSON.stringify({
+        all: { bps: 10.7e9 },
+        telegramSkip: 'below_client_share',
+      }),
+    });
+    assert.equal(event.telegramSkip, 'below_client_share');
   });
 
   it('buildDetectionEventsCsv содержит фазы alert и normalize', () => {

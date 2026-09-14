@@ -53,6 +53,8 @@ const DEFAULT_ALERT_KIND = 'all';
 const DEFAULT_STREAK = 3;
 const DEFAULT_NORMALIZE_STREAK = 3;
 const DEFAULT_TELEGRAM_API_URL = 'https://api.telegram.org';
+const DEFAULT_MIN_CLIENT_SHARE_PCT = 10;
+const TELEGRAM_SKIP_BELOW_SHARE = 'below_client_share';
 const MAX_STREAK = 60;
 const ALERT_SCOPES = new Set(['all', 'client', 'net']);
 const ALERT_SCOPE_LABEL = { all: 'всё', client: 'абоненты', net: 'сети' };
@@ -137,6 +139,10 @@ const DEFAULT_SETTINGS = {
   geo_streak: 1,
   amp_normalize_streak: DEFAULT_NORMALIZE_STREAK,
   geo_normalize_streak: DEFAULT_NORMALIZE_STREAK,
+  volume_min_share_pct: DEFAULT_MIN_CLIENT_SHARE_PCT,
+  amp_min_share_pct: DEFAULT_MIN_CLIENT_SHARE_PCT,
+  geo_min_share_pct: DEFAULT_MIN_CLIENT_SHARE_PCT,
+  syn_min_share_pct: DEFAULT_MIN_CLIENT_SHARE_PCT,
 };
 
 let ensurePromise = null;
@@ -189,6 +195,71 @@ function normalizeStreak(value, fallback = DEFAULT_STREAK) {
   const n = Number(value);
   if (!Number.isFinite(n) || n < 1) return fallback;
   return Math.min(MAX_STREAK, Math.round(n));
+}
+
+function normalizeMinSharePct(value, fallback = DEFAULT_MIN_CLIENT_SHARE_PCT) {
+  if (value === undefined || value === null || value === '') return fallback;
+  const n = Number(value);
+  if (!Number.isFinite(n) || n < 0) return fallback;
+  return Math.min(100, Math.round(n * 10) / 10);
+}
+
+function parseMinSharePct(value, label) {
+  if (value === undefined || value === null || value === '') return null;
+  const n = Number(value);
+  if (!Number.isFinite(n) || n < 0 || n > 100) {
+    throw apiError(`${label}: число от 0 до 100`);
+  }
+  return normalizeMinSharePct(n, 0);
+}
+
+function minSharePctForSignal(settings = {}, signal = SIGNALS.volume) {
+  if (signal === SIGNALS.amplification) return normalizeMinSharePct(settings.ampMinSharePct ?? settings.amp_min_share_pct);
+  if (signal === SIGNALS.foreign_geo) return normalizeMinSharePct(settings.geoMinSharePct ?? settings.geo_min_share_pct);
+  if (signal === SIGNALS.syn_flood) return normalizeMinSharePct(settings.synMinSharePct ?? settings.syn_min_share_pct);
+  return normalizeMinSharePct(settings.volumeMinSharePct ?? settings.volume_min_share_pct);
+}
+
+// Доля паразитного среза от всего трафика клиента. null — замера нет, алерт
+// не глушим: лучше лишнее сообщение, чем пропущенная атака.
+function parasiticClientShare(signal, { byProto } = {}) {
+  const all = byProto?.all || {};
+  const allBps = Number(all.bps) || 0;
+  if (signal === SIGNALS.amplification) {
+    const udp = ampRowFor({ proto: 'all', udpRow: byProto?.udp }, { byProto });
+    const amp = ampMetrics(udp || {});
+    if (!(amp.bps > 0) || !(allBps > 0)) return null;
+    return amp.bps / allBps;
+  }
+  if (signal === SIGNALS.foreign_geo) {
+    const geo = evaluateForeignGeo(all);
+    if (geo.share != null) return geo.share;
+    if (geo.bps > 0 && allBps > 0) return geo.bps / allBps;
+    return null;
+  }
+  if (signal === SIGNALS.syn_flood) {
+    const tcp = byProto?.tcp || {};
+    const pick = tcpClassMetrics(tcp, 'syn_only').pps > tcpClassMetrics(all, 'syn_only').pps ? tcp : all;
+    const syn = tcpClassMetrics(pick, 'syn_only');
+    if (syn.bps > 0 && allBps > 0) return syn.bps / allBps;
+    const allPps = Number(all.pps) || 0;
+    if (syn.pps > 0 && allPps > 0) return syn.pps / allPps;
+    return null;
+  }
+  const growth = finiteGrowth(all.growth_bps ?? all.growthBps);
+  if (growth > 1) return Math.min(1, Math.max(0, 1 - 1 / growth));
+  return null;
+}
+
+function shouldSkipTelegramForShare(signals, ctx, settings = {}) {
+  const list = Array.isArray(signals) && signals.length ? signals : [SIGNALS.volume];
+  return list.every((signal) => {
+    const minPct = minSharePctForSignal(settings, signal);
+    if (!(minPct > 0)) return false;
+    const share = parasiticClientShare(signal, ctx);
+    if (share == null) return false;
+    return (share * 100) < minPct;
+  });
 }
 
 function normalizeTelegramApiUrl(value, fallback = DEFAULT_TELEGRAM_API_URL) {
@@ -348,6 +419,10 @@ function mapSettings(row = {}) {
     geoStreak: normalizeStreak(row.geo_streak, 1),
     ampNormalizeStreak: normalizeStreak(row.amp_normalize_streak, DEFAULT_NORMALIZE_STREAK),
     geoNormalizeStreak: normalizeStreak(row.geo_normalize_streak, DEFAULT_NORMALIZE_STREAK),
+    volumeMinSharePct: normalizeMinSharePct(row.volume_min_share_pct ?? row.volumeMinSharePct),
+    ampMinSharePct: normalizeMinSharePct(row.amp_min_share_pct ?? row.ampMinSharePct),
+    geoMinSharePct: normalizeMinSharePct(row.geo_min_share_pct ?? row.geoMinSharePct),
+    synMinSharePct: normalizeMinSharePct(row.syn_min_share_pct ?? row.synMinSharePct),
   };
 }
 
@@ -1461,7 +1536,11 @@ async function ensureDetectionTelegramTables() {
           ADD COLUMN IF NOT EXISTS amp_streak UInt16 DEFAULT 1,
           ADD COLUMN IF NOT EXISTS geo_streak UInt16 DEFAULT 1,
           ADD COLUMN IF NOT EXISTS amp_normalize_streak UInt16 DEFAULT ${DEFAULT_NORMALIZE_STREAK},
-          ADD COLUMN IF NOT EXISTS geo_normalize_streak UInt16 DEFAULT ${DEFAULT_NORMALIZE_STREAK}
+          ADD COLUMN IF NOT EXISTS geo_normalize_streak UInt16 DEFAULT ${DEFAULT_NORMALIZE_STREAK},
+          ADD COLUMN IF NOT EXISTS volume_min_share_pct Float64 DEFAULT ${DEFAULT_MIN_CLIENT_SHARE_PCT},
+          ADD COLUMN IF NOT EXISTS amp_min_share_pct Float64 DEFAULT ${DEFAULT_MIN_CLIENT_SHARE_PCT},
+          ADD COLUMN IF NOT EXISTS geo_min_share_pct Float64 DEFAULT ${DEFAULT_MIN_CLIENT_SHARE_PCT},
+          ADD COLUMN IF NOT EXISTS syn_min_share_pct Float64 DEFAULT ${DEFAULT_MIN_CLIENT_SHARE_PCT}
       `, {}, { name: 'detection/telegram-ensure-columns' });
 
       await executeCommand(`
@@ -1511,6 +1590,10 @@ async function ensureDetectionTelegramTables() {
           geo_streak UInt16,
           amp_normalize_streak UInt16,
           geo_normalize_streak UInt16,
+          volume_min_share_pct Float64,
+          amp_min_share_pct Float64,
+          geo_min_share_pct Float64,
+          syn_min_share_pct Float64,
           updated_at DateTime('UTC')
         )
         AS SELECT
@@ -1531,6 +1614,10 @@ async function ensureDetectionTelegramTables() {
           geo_streak,
           amp_normalize_streak,
           geo_normalize_streak,
+          volume_min_share_pct,
+          amp_min_share_pct,
+          geo_min_share_pct,
+          syn_min_share_pct,
           updated_at_latest AS updated_at
         FROM
         (
@@ -1552,6 +1639,10 @@ async function ensureDetectionTelegramTables() {
             argMax(geo_streak, updated_at) AS geo_streak,
             argMax(amp_normalize_streak, updated_at) AS amp_normalize_streak,
             argMax(geo_normalize_streak, updated_at) AS geo_normalize_streak,
+            argMax(volume_min_share_pct, updated_at) AS volume_min_share_pct,
+            argMax(amp_min_share_pct, updated_at) AS amp_min_share_pct,
+            argMax(geo_min_share_pct, updated_at) AS geo_min_share_pct,
+            argMax(syn_min_share_pct, updated_at) AS syn_min_share_pct,
             max(updated_at) AS updated_at_latest
           FROM ${settingsTableRef()}
           GROUP BY settings_id
@@ -1569,7 +1660,8 @@ async function getCurrentSettingsRaw() {
   await ensureDetectionTelegramTables();
   const { rows } = await query(`
     SELECT bot_token, chat_id, growth_threshold, alert_scope, alert_kind, streak, normalize_streak, api_url, proxy_url, enabled,
-           amp_enabled, geo_enabled, amp_streak, geo_streak, amp_normalize_streak, geo_normalize_streak, updated_at
+           amp_enabled, geo_enabled, amp_streak, geo_streak, amp_normalize_streak, geo_normalize_streak,
+           volume_min_share_pct, amp_min_share_pct, geo_min_share_pct, syn_min_share_pct, updated_at
     FROM ${settingsViewRef()}
     WHERE settings_id = {id:String}
     LIMIT 1
@@ -1629,6 +1721,22 @@ async function saveDetectionTelegramSettings(payload = {}) {
     payload.geoNormalizeStreak ?? payload.geo_normalize_streak ?? base.geo_normalize_streak,
     DEFAULT_NORMALIZE_STREAK,
   );
+  const volumeMinSharePct = parseMinSharePct(
+    payload.volumeMinSharePct ?? payload.volume_min_share_pct,
+    'Рост объёма, мин. доля',
+  ) ?? normalizeMinSharePct(base.volume_min_share_pct);
+  const ampMinSharePct = parseMinSharePct(
+    payload.ampMinSharePct ?? payload.amp_min_share_pct,
+    'Амплификация, мин. доля',
+  ) ?? normalizeMinSharePct(base.amp_min_share_pct);
+  const geoMinSharePct = parseMinSharePct(
+    payload.geoMinSharePct ?? payload.geo_min_share_pct,
+    'Заграница, мин. доля',
+  ) ?? normalizeMinSharePct(base.geo_min_share_pct);
+  const synMinSharePct = parseMinSharePct(
+    payload.synMinSharePct ?? payload.syn_min_share_pct,
+    'SYN-флуд, мин. доля',
+  ) ?? normalizeMinSharePct(base.syn_min_share_pct);
   if (enabled && (!botToken || !chatId)) {
     throw apiError('Укажите токен бота и id группы перед включением Telegram');
   }
@@ -1651,6 +1759,10 @@ async function saveDetectionTelegramSettings(payload = {}) {
     geo_streak: geoStreak,
     amp_normalize_streak: ampNormalizeStreak,
     geo_normalize_streak: geoNormalizeStreak,
+    volume_min_share_pct: volumeMinSharePct,
+    amp_min_share_pct: ampMinSharePct,
+    geo_min_share_pct: geoMinSharePct,
+    syn_min_share_pct: synMinSharePct,
   }], { name: 'detection/telegram-settings-save' });
 
   return getDetectionTelegramSettings();
@@ -1897,6 +2009,7 @@ function mapEventRow(row) {
     investigate: alertSnapshot.investigate || null,
     alertText: storedOrFormattedAlertText(row, alertSnapshot),
     normalizeText: storedOrFormattedNormalizeText(row, normalizeSnapshot),
+    telegramSkip: String(alertSnapshot.telegramSkip || ''),
   };
 }
 
@@ -1907,6 +2020,7 @@ function persistAlertSnapshot(metrics, extras = {}) {
     investigate: extras.investigate || null,
     binding: extras.binding || null,
     telegramText: String(extras.telegramText || ''),
+    telegramSkip: String(extras.telegramSkip || ''),
   };
 }
 
@@ -1915,6 +2029,7 @@ function persistActiveAlertSnapshot(active) {
     verdict: active?.verdict,
     investigate: active?.investigate,
     telegramText: active?.alertText,
+    telegramSkip: active?.telegramSkip,
   });
 }
 
@@ -2228,11 +2343,13 @@ async function processDetectionAlerts({ minute, rows, nameByKey }) {
       binding,
       signals,
     });
+    const skipShare = shouldSkipTelegramForShare(signals, { byProto, verdict, investigate }, settings);
     const snapshot = persistAlertSnapshot(snapshotByProto(group, row), {
       verdict,
       investigate,
       binding,
       telegramText: text,
+      telegramSkip: skipShare ? TELEGRAM_SKIP_BELOW_SHARE : '',
     });
     for (const candidate of candidates) {
       const signal = candidate.signal || SIGNALS.volume;
@@ -2254,7 +2371,10 @@ async function processDetectionAlerts({ minute, rows, nameByKey }) {
       });
       opened += 1;
     }
-    const tg = await maybeSendTelegram(text, matchesAlertKind(attack, settings.alertKind) ? tgCfg : null);
+    const tg = await maybeSendTelegram(
+      text,
+      (!skipShare && matchesAlertKind(attack, settings.alertKind)) ? tgCfg : null,
+    );
     if (tg.sent) sent += 1;
     if (tg.error) errors.push({ key: objectId, message: tg.error });
   }
@@ -2290,7 +2410,11 @@ async function processDetectionAlerts({ minute, rows, nameByKey }) {
       signal: active.signal || SIGNALS.volume,
     });
     closed += 1;
-    const tg = await maybeSendTelegram(text, matchesAlertKind(true, settings.alertKind) ? tgCfg : null);
+    const skipShare = String(active.telegramSkip || '') === TELEGRAM_SKIP_BELOW_SHARE;
+    const tg = await maybeSendTelegram(
+      text,
+      (!skipShare && matchesAlertKind(true, settings.alertKind)) ? tgCfg : null,
+    );
     if (tg.sent) sent += 1;
     if (tg.error) errors.push({ key, message: tg.error });
   }
@@ -2415,6 +2539,12 @@ module.exports = {
   DEFAULT_STREAK,
   DEFAULT_NORMALIZE_STREAK,
   DEFAULT_TELEGRAM_API_URL,
+  DEFAULT_MIN_CLIENT_SHARE_PCT,
+  TELEGRAM_SKIP_BELOW_SHARE,
+  normalizeMinSharePct,
+  parasiticClientShare,
+  shouldSkipTelegramForShare,
+  minSharePctForSignal,
   shortErrorMsg,
   normalizeTelegramApiUrl,
   normalizeTelegramProxyUrl,

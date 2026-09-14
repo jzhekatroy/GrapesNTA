@@ -5647,6 +5647,25 @@ body.explorer-chip-dragging * {
 .table td.num .detection-stack__line {
   justify-content: flex-end;
 }
+.table-wrap--telegram-vectors {
+  border-radius: 8px;
+}
+.table--telegram-vectors th,
+.table--telegram-vectors td {
+  padding: 8px 12px;
+}
+.table--telegram-vectors th.num,
+.table--telegram-vectors td.num {
+  text-align: right;
+}
+.table--telegram-vectors td.num .input {
+  width: 72px;
+  text-align: right;
+}
+.table--telegram-vectors td:first-child {
+  font: var(--pv-text-body-2);
+  color: var(--fg-primary);
+}
 .detection-event-mark {
   display: inline-block;
   width: 10px;

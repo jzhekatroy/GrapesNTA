@@ -34,7 +34,17 @@ const TELEGRAM_DEFAULTS = {
   proxyUrl: '',
   proxySet: false,
   tokenSet: false,
+  volumeMinSharePct: 10,
+  ampMinSharePct: 10,
+  synMinSharePct: 10,
+  geoMinSharePct: 10,
 };
+const TELEGRAM_VECTORS = [
+  { id: 'volume', label: 'Рост объёма', shareKey: 'volumeMinSharePct', enableKey: null, streakKey: 'streak', streakFallback: 3 },
+  { id: 'amplification', label: 'Амплификация', shareKey: 'ampMinSharePct', enableKey: 'ampEnabled', streakKey: 'ampStreak', streakFallback: 1 },
+  { id: 'syn_flood', label: 'SYN-флуд', shareKey: 'synMinSharePct', enableKey: null, streakKey: null, streakFallback: 1 },
+  { id: 'foreign_geo', label: 'Заграница', shareKey: 'geoMinSharePct', enableKey: 'geoEnabled', streakKey: 'geoStreak', streakFallback: 1 },
+];
 const CHART_PERIODS = [
   { id: '1h', hours: 1, label: '1ч', title: '1 час' },
   { id: '6h', hours: 6, label: '6ч', title: '6 часов' },
@@ -669,6 +679,10 @@ function PageDetection() {
         geoEnabled: telegram?.geoEnabled !== false,
         ampStreak: telegram?.ampStreak ?? 1,
         geoStreak: telegram?.geoStreak ?? 1,
+        volumeMinSharePct: telegram?.volumeMinSharePct ?? 10,
+        ampMinSharePct: telegram?.ampMinSharePct ?? 10,
+        synMinSharePct: telegram?.synMinSharePct ?? 10,
+        geoMinSharePct: telegram?.geoMinSharePct ?? 10,
       };
       if (botToken.trim()) payload.botToken = botToken.trim();
       const data = await ApiClient.saveDetectionTelegramSettings(payload);
@@ -730,7 +744,7 @@ function PageDetection() {
       {pageTab === 'telegram' && (
       <Card
         title="Telegram"
-        subtitle="Алерт — X значений подряд выше порога (строка «общее»). Нормализация — Y значений подряд ниже. Повторный алерт — только после нормализации. Если api.telegram.org с nta не открывается — укажите SOCKS5 прокси. API URL меняйте только если есть своё зеркало Bot API."
+        subtitle="Алерт — X значений подряд выше порога (строка «общее»). Нормализация — Y значений подряд ниже. Повторный алерт — только после нормализации. Доля ниже порога вектора — только в историю, в Telegram нет. Если api.telegram.org с nta не открывается — укажите SOCKS5 прокси. API URL меняйте только если есть своё зеркало Bot API."
       >
         <div className="col" style={{ gap: 10, font: 'var(--pv-text-body-3)' }}>
           {telegramForbidden ? (
@@ -826,18 +840,6 @@ function PageDetection() {
                     <option value="peak">Всплески</option>
                   </select>
                 </label>
-                <label className="col" style={{ gap: 4, minWidth: 160 }}>
-                  <span>Подряд выше порога</span>
-                  <input
-                    className="input"
-                    type="number"
-                    min="1"
-                    max="60"
-                    step="1"
-                    value={telegram?.streak ?? 3}
-                    onChange={(e) => setTelegram(patchTelegram(telegram, { streak: Number(e.target.value) }))}
-                  />
-                </label>
                 <label className="col" style={{ gap: 4, minWidth: 180 }}>
                   <span>Подряд ниже порога</span>
                   <input
@@ -850,44 +852,81 @@ function PageDetection() {
                     onChange={(e) => setTelegram(patchTelegram(telegram, { normalizeStreak: Number(e.target.value) }))}
                   />
                 </label>
-                <label className="row" style={{ gap: 8, alignItems: 'center', minWidth: 180 }}>
-                  <input
-                    type="checkbox"
-                    checked={telegram?.ampEnabled !== false}
-                    onChange={(e) => setTelegram(patchTelegram(telegram, { ampEnabled: e.target.checked }))}
-                  />
-                  <span>Амплификация</span>
-                </label>
-                <label className="col" style={{ gap: 4, minWidth: 140 }}>
-                  <span>Амп. подряд</span>
-                  <input
-                    className="input"
-                    type="number"
-                    min="1"
-                    max="60"
-                    value={telegram?.ampStreak ?? 1}
-                    onChange={(e) => setTelegram(patchTelegram(telegram, { ampStreak: Number(e.target.value) }))}
-                  />
-                </label>
-                <label className="row" style={{ gap: 8, alignItems: 'center', minWidth: 180 }}>
-                  <input
-                    type="checkbox"
-                    checked={telegram?.geoEnabled !== false}
-                    onChange={(e) => setTelegram(patchTelegram(telegram, { geoEnabled: e.target.checked }))}
-                  />
-                  <span>Зарубежный трафик</span>
-                </label>
-                <label className="col" style={{ gap: 4, minWidth: 140 }}>
-                  <span>Гео подряд</span>
-                  <input
-                    className="input"
-                    type="number"
-                    min="1"
-                    max="60"
-                    value={telegram?.geoStreak ?? 1}
-                    onChange={(e) => setTelegram(patchTelegram(telegram, { geoStreak: Number(e.target.value) }))}
-                  />
-                </label>
+              </div>
+              <div className="table-wrap table-wrap--telegram-vectors">
+                <table className="table table--telegram-vectors">
+                  <thead>
+                    <tr>
+                      <th>Вектор</th>
+                      <th>В Telegram</th>
+                      <th className="num">Подряд</th>
+                      <th className="num">Мин. доля клиента, %</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {TELEGRAM_VECTORS.map((vector) => {
+                      const share = telegram?.[vector.shareKey] ?? 10;
+                      const streak = vector.streakKey
+                        ? (telegram?.[vector.streakKey] ?? vector.streakFallback)
+                        : vector.streakFallback;
+                      return (
+                        <tr key={vector.id}>
+                          <td>{vector.label}</td>
+                          <td>
+                            {vector.enableKey ? (
+                              <label className="row" style={{ gap: 8, alignItems: 'center' }}>
+                                <input
+                                  type="checkbox"
+                                  checked={telegram?.[vector.enableKey] !== false}
+                                  onChange={(e) => setTelegram(patchTelegram(telegram, {
+                                    [vector.enableKey]: e.target.checked,
+                                  }))}
+                                />
+                                <span>следить</span>
+                              </label>
+                            ) : (
+                              <span style={{ color: 'var(--fg-muted)' }}>всегда</span>
+                            )}
+                          </td>
+                          <td className="num">
+                            {vector.streakKey ? (
+                              <input
+                                className="input"
+                                type="number"
+                                min="1"
+                                max="60"
+                                step="1"
+                                value={streak}
+                                onChange={(e) => setTelegram(patchTelegram(telegram, {
+                                  [vector.streakKey]: Number(e.target.value),
+                                }))}
+                              />
+                            ) : (
+                              <span style={{ color: 'var(--fg-muted)' }}>{streak}</span>
+                            )}
+                          </td>
+                          <td className="num">
+                            <input
+                              className="input"
+                              type="number"
+                              min="0"
+                              max="100"
+                              step="1"
+                              value={share}
+                              onChange={(e) => setTelegram(patchTelegram(telegram, {
+                                [vector.shareKey]: e.target.value === '' ? '' : Number(e.target.value),
+                              }))}
+                              title="Ниже доли — только история, в Telegram нет. 0 — слать всегда."
+                            />
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+              <div style={{ color: 'var(--fg-muted)', font: 'var(--pv-text-body-3)' }}>
+                Если паразитный трафик ниже доли от всего трафика клиента — событие пишется в историю, в Telegram не уходит. 0 — слать всегда.
               </div>
               <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
                 <Button size="sm" disabled={telegramBusy} onClick={saveTelegram}>Сохранить</Button>
