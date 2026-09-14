@@ -2,9 +2,11 @@
 """
 Rebuild BGP prefix -> origin ASN lookup from bmp_route_events.
 
-The output table is default.bgp_prefix_origin_current and the generated
-dictionary is default.bgp_origin_asn_dict (IP_TRIE). This lets traffic queries
-map flow IPs to BGP origin ASN quickly:
+The output table is default.bgp_prefix_origin_current (one row per live
+announce: prefix + BGP next hop + path) and the generated dictionary is
+default.bgp_origin_asn_dict (IP_TRIE, one origin per prefix via
+bgp_prefix_origin_dict_src). This lets traffic queries map flow IPs to BGP
+origin ASN quickly:
 
     flows_raw.dst_addr -> bgp_origin_asn_dict -> origin_asn -> asn_registry_enriched
 
@@ -297,6 +299,22 @@ def build_rebuild_query(args: argparse.Namespace, family: int) -> str:
         as_path_inner = ""
         as_path_mid = ""
         as_path_outer = ""
+    include_next_hop = getattr(args, "include_next_hop", False)
+    if include_next_hop:
+        hop_inner = ",\n            argMax(next_hop, ts) AS peer_last_next_hop"
+        hop_mid = """,
+        ifNull(if(
+            family = 4,
+            nullIf(IPv4NumToString(reinterpretAsUInt32(reverse(substring(peer_last_next_hop, 1, 4)))), '0.0.0.0'),
+            nullIf(IPv6NumToString(peer_last_next_hop), '::')
+        ), '') AS next_hop"""
+        hop_outer = ",\n    next_hop"
+        hop_group = ",\n        peer_last_next_hop"
+    else:
+        hop_inner = ""
+        hop_mid = ""
+        hop_outer = ""
+        hop_group = ""
     return f"""
 INSERT INTO {args.staging_table}
 SELECT
@@ -311,7 +329,7 @@ SELECT
     active_paths,
     last_ts,
     'bmp_route_events' AS source,
-    now() AS snapshot_ts{as_path_outer}
+    now() AS snapshot_ts{as_path_outer}{hop_outer}
 FROM
 (
     SELECT
@@ -329,7 +347,7 @@ FROM
             peer_last_ts,
             peer_last_event = 'announce' AND peer_last_origin_asn != 0
         ) AS peer_asn,
-        maxIf(peer_last_ts, peer_last_event = 'announce') AS last_ts{as_path_mid}
+        maxIf(peer_last_ts, peer_last_event = 'announce') AS last_ts{as_path_mid}{hop_mid}
     FROM
     (
         SELECT
@@ -341,7 +359,7 @@ FROM
             argMax(event_type, ts) AS peer_last_event,
             argMax(origin_asn, ts) AS peer_last_origin_asn,
             argMax(peer_asn, ts) AS peer_last_peer_asn,
-            max(ts) AS peer_last_ts{as_path_inner}
+            max(ts) AS peer_last_ts{as_path_inner}{hop_inner}
         FROM {args.route_events_table}
         WHERE ts >= now() - INTERVAL {args.lookback_days} DAY
           AND family = {family}
@@ -356,7 +374,7 @@ FROM
     GROUP BY
         family,
         prefix_bin,
-        prefix_len
+        prefix_len{hop_group}
 )
 WHERE active_paths > 0 AND origin_asn != 0
 SETTINGS
@@ -561,10 +579,15 @@ WHERE ts >= now() - INTERVAL {args.lookback_days} DAY
     log_info(f"current_table rows={existing_rows}")
 
     args.include_as_path = table_has_column(base, args.staging_table, "as_path")
+    args.include_next_hop = table_has_column(base, args.staging_table, "next_hop")
     if args.include_as_path:
-        log_info("staging has as_path; snapshot will keep the freshest announce path")
+        log_info("staging has as_path; snapshot keeps the path of each live announce")
     else:
         log_info("staging has no as_path column; origin-only snapshot")
+    if args.include_next_hop:
+        log_info("staging has next_hop; one row per prefix and BGP next hop")
+    else:
+        log_info("staging has no next_hop; one path per prefix (freshest announce)")
 
     ch_run_query(base, f"TRUNCATE TABLE IF EXISTS {args.staging_table}")
     for family in (4, 6):
@@ -608,12 +631,53 @@ FROM {args.staging_table}
                 f"drop_pct={drop_pct:.2f} max_prefix_drop_pct={args.max_prefix_drop_pct:g}"
             )
 
-    swap_dictionary = None if args.skip_dictionary_create else args.dictionary
+    force_dict_view = False
+    if args.include_next_hop and args.dictionary_source_table in (
+        "bgp_prefix_origin_current",
+        f"{args.dictionary_source_database}.bgp_prefix_origin_current",
+    ):
+        # Point the IP_TRIE dict at a one-row-per-prefix view before swap:
+        # after next_hop the table has several announces per prefix, and a
+        # reload from the raw table would fail.
+        view = f"{args.dictionary_source_database}.bgp_prefix_origin_dict_src"
+        ch_run_query(
+            base,
+            f"""
+CREATE OR REPLACE VIEW {view} AS
+SELECT
+    prefix,
+    any(origin_asn) AS origin_asn,
+    any(peer_asn) AS peer_asn,
+    max(active_paths) AS active_paths,
+    any(source) AS source,
+    max(snapshot_ts) AS snapshot_ts
+FROM {args.table}
+GROUP BY prefix
+""",
+        )
+        args.dictionary_source_table = "bgp_prefix_origin_dict_src"
+        force_dict_view = True
+        log_info(f"dictionary source collapsed to one origin per prefix via {view}")
+
+    swap_dictionary = None if args.skip_dictionary_create and not force_dict_view else args.dictionary
     ch_swap_tables(base, args.table, args.staging_table, swap_dictionary)
     log_info(f"swapped target_table={args.table} rows={rows}")
 
     if not args.skip_dictionary_create:
         ch_create_or_replace_dictionary(base, args)
+    elif force_dict_view:
+        # The dictionary must be repointed even under --skip-dictionary-create:
+        # its old SOURCE table now holds several rows per prefix. Soft-fail so
+        # endpoints that reject dictionary DDL still finish the rebuild.
+        try:
+            ch_create_or_replace_dictionary(base, args)
+        except RuntimeError as exc:
+            log_info(
+                "warning: could not repoint the dictionary to "
+                f"{args.dictionary_source_table}; point it there by hand, "
+                "otherwise it reloads from a table with duplicate prefixes.\n"
+                f"details: {exc}"
+            )
 
     ch_run_query(base, f"SYSTEM RELOAD DICTIONARY {args.dictionary}")
     log_info(f"done rows={rows}")

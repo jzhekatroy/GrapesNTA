@@ -494,3 +494,76 @@ func TestAttachClientsByPrefixAndPort(t *testing.T) {
 		t.Fatalf("prefix must win over port: src=%q", row3.SrcClient)
 	}
 }
+
+func TestPickASPathPrefersMatchingNextHop(t *testing.T) {
+	viaHE := bgpRoute{
+		NextHop: netip.MustParseAddr("198.51.100.1"),
+		ASN:     9123,
+		ASPath:  []uint32{6939, 12389, 9123},
+	}
+	direct := bgpRoute{
+		NextHop: netip.MustParseAddr("203.0.113.1"),
+		ASN:     9123,
+		ASPath:  []uint32{9123},
+	}
+	path, asn := pickASPath([]bgpRoute{viaHE, direct}, netip.MustParseAddr("198.51.100.1"))
+	if asn != 9123 || !sameASPath(path, viaHE.ASPath) {
+		t.Fatalf("matched hop path = %v asn=%d, want HE path", path, asn)
+	}
+	path, _ = pickASPath([]bgpRoute{viaHE, direct}, netip.Addr{})
+	if !sameASPath(path, direct.ASPath) {
+		t.Fatalf("no hop must pick shortest path, got %v", path)
+	}
+	path, _ = pickASPath([]bgpRoute{viaHE, direct}, netip.MustParseAddr("192.0.2.1"))
+	if !sameASPath(path, direct.ASPath) {
+		t.Fatalf("unknown hop must fall back to shortest, got %v", path)
+	}
+	mapped := netip.MustParseAddr("::ffff:198.51.100.1")
+	path, _ = pickASPath([]bgpRoute{viaHE, direct}, mapped)
+	if !sameASPath(path, viaHE.ASPath) {
+		t.Fatalf("IPv4-mapped hop must match IPv4 announce, got %v", path)
+	}
+}
+
+func TestInsertRouteKeepsAllNextHops(t *testing.T) {
+	st := &classifierState{bgp4: newIPTrie()}
+	p := netip.MustParsePrefix("185.26.122.0/24")
+	st.bgp4.insertRoute(p.Masked(), 9123, bgpRoute{
+		NextHop: netip.MustParseAddr("198.51.100.1"),
+		ASN:     9123,
+		ASPath:  []uint32{6939, 12389, 9123},
+	})
+	st.bgp4.insertRoute(p.Masked(), 9123, bgpRoute{
+		NextHop: netip.MustParseAddr("203.0.113.1"),
+		ASN:     9123,
+		ASPath:  []uint32{9123},
+	})
+	got := st.classifyHop(netip.MustParseAddr("185.26.122.10"), 0, netip.MustParseAddr("198.51.100.1"))
+	if !sameASPath(got.ASPath, []uint32{6939, 12389, 9123}) {
+		t.Fatalf("path with matching hop = %v", got.ASPath)
+	}
+	got = st.classify(netip.MustParseAddr("185.26.122.10"), 0)
+	if !sameASPath(got.ASPath, []uint32{9123}) {
+		t.Fatalf("default classify must use shortest path, got %v", got.ASPath)
+	}
+}
+
+func TestParseSnapshotNextHop(t *testing.T) {
+	if got := parseSnapshotNextHop("198.51.100.1"); got.String() != "198.51.100.1" {
+		t.Fatalf("got %v", got)
+	}
+	if got := parseSnapshotNextHop("0.0.0.0"); got.IsValid() {
+		t.Fatalf("zero hop must be empty, got %v", got)
+	}
+	if got := parseSnapshotNextHop(""); got.IsValid() {
+		t.Fatalf("empty hop must be empty, got %v", got)
+	}
+	if got := parseSnapshotNextHop("::ffff:198.51.100.1"); got.String() != "198.51.100.1" {
+		t.Fatalf("mapped hop must unmap, got %v", got)
+	}
+	var raw [16]byte
+	copy(raw[:4], []byte{198, 51, 100, 1})
+	if got := AddrFromFixed16(raw, 4); got.String() != "198.51.100.1" {
+		t.Fatalf("AddrFromFixed16 = %v", got)
+	}
+}

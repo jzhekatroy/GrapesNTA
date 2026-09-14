@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/binary"
 	"net"
+	"net/netip"
 	"sync/atomic"
 	"time"
 
@@ -19,6 +20,7 @@ const (
 	sflowSampleCounterExp = 4
 	sflowFlowRawHeader   = 1
 	sflowFlowExtSwitch   = 1001
+	sflowFlowExtRouter   = 1002
 	sflowHeaderEthernet  = 1
 
 	maxSFlowSamples = 4096
@@ -211,13 +213,15 @@ func parseFlowSample(
 		return nil
 	}
 
-	// Extended-switch VLANs (incoming/outgoing 802.1Q) if the sample carries an
-	// ext-switch record. It precedes the raw-header record in every observed
-	// exporter, so a single forward pass captures it before the packet row is
-	// built. Falls back to the inner 802.1Q tag when absent (see below).
+	// Two passes: ext-switch / ext-router may follow the raw header, so the
+	// first walk collects them and the second builds the packet row.
+	type sflowRecord struct {
+		kind uint32
+		body []byte
+	}
+	recs := make([]sflowRecord, 0, boundedCap(numRecords, maxSFlowRecords))
 	var extInVLAN, extOutVLAN uint16
-
-	rows := make([]flowingest.FlowRow, 0, boundedCap(numRecords, maxSFlowRecords))
+	var nextHop netip.Addr
 	for i := uint32(0); i < numRecords; i++ {
 		if len(b) < off+8 {
 			if m != nil {
@@ -236,32 +240,38 @@ func parseFlowSample(
 		}
 		recordBody := b[off : off+recordLen]
 		off += recordLen
-
-		switch recordType & 0xFFF {
+		kind := recordType & 0xFFF
+		switch kind {
 		case sflowFlowExtSwitch:
 			if in, out, ok := parseExtSwitch(recordBody); ok {
 				extInVLAN, extOutVLAN = in, out
 			}
-			continue
+		case sflowFlowExtRouter:
+			if hop, ok := parseExtRouter(recordBody); ok {
+				nextHop = hop
+			}
 		case sflowFlowRawHeader:
-			row, kind := flowRowFromRawHeader(recordBody, receivedAt, sourceID, sampler, samplingRate, inIf, outIf, extInVLAN, extOutVLAN, classifier, seq)
-			switch kind {
-			case ethParseOK:
-				if m != nil {
-					m.recordsParsed.Add(1)
-				}
-				rows = append(rows, row)
-			case ethParseNonIP:
-				if m != nil {
-					m.nonIPSkipped.Add(1)
-				}
-			default:
-				if m != nil {
-					m.parseErrors.Add(1)
-				}
+			recs = append(recs, sflowRecord{kind: kind, body: recordBody})
+		}
+	}
+
+	rows := make([]flowingest.FlowRow, 0, len(recs))
+	for _, rec := range recs {
+		row, kind := flowRowFromRawHeader(rec.body, receivedAt, sourceID, sampler, samplingRate, inIf, outIf, extInVLAN, extOutVLAN, nextHop, classifier, seq)
+		switch kind {
+		case ethParseOK:
+			if m != nil {
+				m.recordsParsed.Add(1)
+			}
+			rows = append(rows, row)
+		case ethParseNonIP:
+			if m != nil {
+				m.nonIPSkipped.Add(1)
 			}
 		default:
-			continue
+			if m != nil {
+				m.parseErrors.Add(1)
+			}
 		}
 	}
 	return rows
@@ -270,6 +280,45 @@ func parseFlowSample(
 // parseExtSwitch decodes an sFlow extended-switch flow record: incoming VLAN,
 // incoming priority, outgoing VLAN, outgoing priority (each u32). Returns the
 // two VLAN ids (low 12 bits) and false if the record is truncated.
+// parseExtRouter decodes sFlow extended-router: nexthop address type,
+// nexthop, src mask, dst mask. Returns the nexthop and false if truncated
+// or unspecified.
+func parseExtRouter(b []byte) (netip.Addr, bool) {
+	if len(b) < 4 {
+		return netip.Addr{}, false
+	}
+	addrType := binary.BigEndian.Uint32(b[0:4])
+	switch addrType {
+	case 1:
+		if len(b) < 8 {
+			return netip.Addr{}, false
+		}
+		var a [4]byte
+		copy(a[:], b[4:8])
+		addr := netip.AddrFrom4(a)
+		if !addr.IsValid() || addr.IsUnspecified() {
+			return netip.Addr{}, false
+		}
+		return addr, true
+	case 2:
+		if len(b) < 20 {
+			return netip.Addr{}, false
+		}
+		var a [16]byte
+		copy(a[:], b[4:20])
+		addr := netip.AddrFrom16(a)
+		if addr.Is4In6() {
+			addr = addr.Unmap()
+		}
+		if !addr.IsValid() || addr.IsUnspecified() {
+			return netip.Addr{}, false
+		}
+		return addr, true
+	default:
+		return netip.Addr{}, false
+	}
+}
+
 func parseExtSwitch(b []byte) (inVLAN, outVLAN uint16, ok bool) {
 	if len(b) < 16 {
 		return 0, 0, false
@@ -313,6 +362,7 @@ func flowRowFromRawHeader(
 	samplingRate uint64,
 	inIf, outIf uint32,
 	extInVLAN, extOutVLAN uint16,
+	nextHop netip.Addr,
 	classifier *flowingest.TrafficClassifier,
 	seq *uint32,
 ) (flowingest.FlowRow, ethParseKind) {
@@ -376,8 +426,8 @@ func flowRowFromRawHeader(
 		IPTos:           pkt.tos,
 	}
 	if classifier != nil {
-		srcClass, dstClass, direction := classifier.ClassifyPair(
-			pkt.srcIP, pkt.dstIP, pkt.ipVersion, srcVLAN, extOutVLAN,
+		srcClass, dstClass, direction := classifier.ClassifyPairWithNextHop(
+			pkt.srcIP, pkt.dstIP, pkt.ipVersion, srcVLAN, extOutVLAN, nextHop,
 		)
 		if d, ok := classifier.PortDirection(sampler, inIf, outIf); ok {
 			direction = d

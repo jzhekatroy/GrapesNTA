@@ -8,8 +8,9 @@ CREATE TABLE IF NOT EXISTS default.bgp_prefix_origin_current
     `last_ts` DateTime64(6, 'UTC'),
     `source` LowCardinality(String),
     `snapshot_ts` DateTime,
-    `as_path` Array(UInt32) DEFAULT []
+    `as_path` Array(UInt32) DEFAULT [],
+    `next_hop` String DEFAULT ''
 )
 ENGINE = MergeTree
-ORDER BY (family, prefix)
+ORDER BY (family, prefix, next_hop)
 SETTINGS index_granularity = 8192;

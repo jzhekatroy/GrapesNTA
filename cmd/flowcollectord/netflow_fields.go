@@ -20,6 +20,7 @@ const (
 	nfIPV4_NEXT_HOP                = 15
 	nfSRC_AS                       = 16
 	nfDST_AS                       = 17
+	nfBGP_IPV4_NEXT_HOP            = 18
 	nfLAST_SWITCHED                = 21
 	nfFIRST_SWITCHED               = 22
 	nfPOST_OCTET_DELTA             = 23
@@ -39,6 +40,7 @@ const (
 	nfDST_VLAN                     = 59
 	nfIP_PROTOCOL_VERSION          = 60
 	nfIPV6_NEXT_HOP                = 62
+	nfBGP_IPV6_NEXT_HOP            = 63
 	nfIN_DST_MAC                   = 80
 	nfOUT_SRC_MAC                  = 81
 	nfOCTET_TOTAL_COUNT            = 85

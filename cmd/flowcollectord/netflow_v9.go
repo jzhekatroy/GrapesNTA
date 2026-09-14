@@ -232,6 +232,9 @@ type nfDecoded struct {
 	absStart                    time.Time
 	samplerID                   uint32
 	sampleRate                  uint64
+	nextHop                     [16]byte
+	hasNextHop                  bool
+	nextHopVer                  uint8
 }
 
 func (p *nfParser) decodeDataRecords(
@@ -329,8 +332,13 @@ func (p *nfParser) decodeDataRecords(
 			IPTos:           rec.tos,
 		}
 		if p.classifier != nil {
-			srcClass, dstClass, direction := p.classifier.ClassifyPair(
+			hopVer := rec.nextHopVer
+			if hopVer == 0 {
+				hopVer = ipVer
+			}
+			srcClass, dstClass, direction := p.classifier.ClassifyPairWithNextHop(
 				rec.src, rec.dst, ipVer, rec.srcVLAN, rec.dstVLAN,
+				flowingest.AddrFromFixed16(rec.nextHop, hopVer),
 			)
 			if d, ok := p.classifier.PortDirection(exporter, rec.inIf, rec.outIf); ok {
 				direction = d
@@ -428,6 +436,16 @@ func applyNFField(out *nfDecoded, f nfField, val []byte) {
 		if out.ipVer == 0 {
 			out.ipVer = 4
 		}
+	case nfBGP_IPV4_NEXT_HOP:
+		if copyIPv4(&out.nextHop, val) {
+			out.hasNextHop = true
+			out.nextHopVer = 4
+		}
+	case nfIPV4_NEXT_HOP:
+		if !out.hasNextHop && copyIPv4(&out.nextHop, val) {
+			out.hasNextHop = true
+			out.nextHopVer = 4
+		}
 	case nfIPV6_SRC_ADDR:
 		out.hasSrc = copyIPv6(&out.src, val)
 		if out.ipVer == 0 {
@@ -437,6 +455,16 @@ func applyNFField(out *nfDecoded, f nfField, val []byte) {
 		out.hasDst = copyIPv6(&out.dst, val)
 		if out.ipVer == 0 {
 			out.ipVer = 6
+		}
+	case nfBGP_IPV6_NEXT_HOP:
+		if copyIPv6(&out.nextHop, val) {
+			out.hasNextHop = true
+			out.nextHopVer = 6
+		}
+	case nfIPV6_NEXT_HOP:
+		if !out.hasNextHop && copyIPv6(&out.nextHop, val) {
+			out.hasNextHop = true
+			out.nextHopVer = 6
 		}
 	case nfL4_SRC_PORT:
 		out.srcPort = uint32(readNFUint(val))

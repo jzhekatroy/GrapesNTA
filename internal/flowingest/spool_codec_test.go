@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"testing"
 	"time"
@@ -393,7 +394,7 @@ func flowRowsEqual(t *testing.T, want, got FlowRow) {
 	want.TimeFlowStartNs, got.TimeFlowStartNs = time.Time{}, time.Time{}
 	want.SrcASPath, got.SrcASPath = nil, nil
 	want.DstASPath, got.DstASPath = nil, nil
-	if want != got {
+	if !reflect.DeepEqual(want, got) {
 		t.Fatalf("row mismatch:\n want=%+v\n got =%+v", want, got)
 	}
 }

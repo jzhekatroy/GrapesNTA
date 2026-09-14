@@ -135,6 +135,17 @@ type prefixClass struct {
 	Role        string
 	EntityID    string
 	DisplayName string
+	// Routes are all live BMP announces for this prefix. Empty when the
+	// node came from iptoasn / L3 catalog (no path) or from tests that
+	// set ASN/ASPath directly.
+	Routes []bgpRoute
+}
+
+// bgpRoute is one BMP announce: the path of one peer, keyed by BGP next hop.
+type bgpRoute struct {
+	NextHop netip.Addr
+	ASN     uint32
+	ASPath  []uint32
 }
 
 type EndpointClass struct {
@@ -436,28 +447,30 @@ func (tc *TrafficClassifier) loadPortSides(ctx context.Context, st *classifierSt
 }
 
 func (tc *TrafficClassifier) loadBGP(ctx context.Context, st *classifierState) (int, error) {
-	rows, err := tc.conn.Query(ctx, "SELECT prefix, origin_asn, as_path FROM "+tc.cfg.Tables.BGPOrigins)
-	withPath := err == nil
+	rows, withHop, withPath, err := tc.queryBGPOrigins(ctx)
 	if err != nil {
-		rows, err = tc.conn.Query(ctx, "SELECT prefix, origin_asn FROM "+tc.cfg.Tables.BGPOrigins)
-		if err != nil {
-			return 0, fmt.Errorf("load BGP origins: %w", err)
-		}
-		tc.log.Warn("BGP origin table has no as_path; paths empty until migrate", "table", tc.cfg.Tables.BGPOrigins)
+		return 0, err
 	}
 	defer rows.Close()
 	intern := make(map[string][]uint32)
 	n := 0
 	for rows.Next() {
-		var prefix string
+		var prefix, hop string
 		var asn uint32
 		var path []uint32
-		if withPath {
+		switch {
+		case withHop && withPath:
+			if err := rows.Scan(&prefix, &asn, &path, &hop); err != nil {
+				return n, err
+			}
+		case withPath:
 			if err := rows.Scan(&prefix, &asn, &path); err != nil {
 				return n, err
 			}
-		} else if err := rows.Scan(&prefix, &asn); err != nil {
-			return n, err
+		default:
+			if err := rows.Scan(&prefix, &asn); err != nil {
+				return n, err
+			}
 		}
 		p, err := netip.ParsePrefix(strings.TrimSpace(prefix))
 		if err != nil || !p.IsValid() || asn == 0 {
@@ -468,15 +481,38 @@ func (tc *TrafficClassifier) loadBGP(ctx context.Context, st *classifierState) (
 			// unmatched remote IPs as the default route's transit ASN.
 			continue
 		}
-		pc := prefixClass{ASN: asn, ASPath: internASPath(intern, path)}
+		route := bgpRoute{
+			NextHop: parseSnapshotNextHop(hop),
+			ASN:     asn,
+			ASPath:  internASPath(intern, path),
+		}
 		if p.Addr().Is4() {
-			st.bgp4.Insert(p.Masked(), pc)
+			st.bgp4.insertRoute(p.Masked(), asn, route)
 		} else {
-			st.bgp6.Insert(p.Masked(), pc)
+			st.bgp6.insertRoute(p.Masked(), asn, route)
 		}
 		n++
 	}
 	return n, rows.Err()
+}
+
+func (tc *TrafficClassifier) queryBGPOrigins(ctx context.Context) (chdriver.Rows, bool, bool, error) {
+	table := tc.cfg.Tables.BGPOrigins
+	rows, err := tc.conn.Query(ctx, "SELECT prefix, origin_asn, as_path, next_hop FROM "+table)
+	if err == nil {
+		return rows, true, true, nil
+	}
+	rows, err = tc.conn.Query(ctx, "SELECT prefix, origin_asn, as_path FROM "+table)
+	if err == nil {
+		tc.log.Warn("BGP origin table has no next_hop; path picked by length until migrate", "table", table)
+		return rows, false, true, nil
+	}
+	rows, err = tc.conn.Query(ctx, "SELECT prefix, origin_asn FROM "+table)
+	if err != nil {
+		return nil, false, false, fmt.Errorf("load BGP origins: %w", err)
+	}
+	tc.log.Warn("BGP origin table has no as_path; paths empty until migrate", "table", table)
+	return rows, false, false, nil
 }
 
 func (tc *TrafficClassifier) loadIPASNPrefixes(ctx context.Context, st *classifierState) (int, error) {
@@ -726,6 +762,34 @@ func (tc *TrafficClassifier) ClassifyPair(src, dst [16]byte, ipVersion uint8, sr
 	return srcClass, dstClass, direction
 }
 
+// ClassifyPairWithNextHop is ClassifyPair plus the flow's BGP/IP next hop.
+// Destination path is the BMP announce whose next hop matches; source path
+// has no reverse next hop in the flow, so it falls back to the shortest
+// announce. A missing or unmatched hop also uses that fallback — same idea
+// as Akvorado ("any other next hop"), except we pick the shortest path
+// instead of an arbitrary row.
+func (tc *TrafficClassifier) ClassifyPairWithNextHop(src, dst [16]byte, ipVersion uint8, srcVLAN, dstVLAN uint16, dstNextHop netip.Addr) (EndpointClass, EndpointClass, string) {
+	if tc == nil {
+		return EndpointClass{Scope: "unknown", Source: "unknown"}, EndpointClass{Scope: "unknown", Source: "unknown"}, "unknown"
+	}
+	st := tc.state.Load()
+	if st == nil {
+		return EndpointClass{Scope: "unknown", Source: "unknown"}, EndpointClass{Scope: "unknown", Source: "unknown"}, "unknown"
+	}
+	srcAddr, okSrc := addrFromFlow(src, ipVersion)
+	dstAddr, okDst := addrFromFlow(dst, ipVersion)
+	if !okSrc || !okDst {
+		return EndpointClass{Scope: "unknown", Source: "unknown"}, EndpointClass{Scope: "unknown", Source: "unknown"}, "unknown"
+	}
+	srcClass := st.classifyHop(srcAddr, srcVLAN, netip.Addr{})
+	dstClass := st.classifyHop(dstAddr, dstVLAN, dstNextHop)
+	direction := DeriveDirection(srcClass, dstClass, st.unknownNetworks)
+	if direction == DirectionUnknown {
+		tc.networksUnclassified.Add(1)
+	}
+	return srcClass, dstClass, direction
+}
+
 // DirectionMode reports the active direction model.
 func (tc *TrafficClassifier) DirectionMode() string {
 	if tc == nil {
@@ -776,8 +840,22 @@ func (tc *TrafficClassifier) PortDirection(sampler [16]byte, inIf, outIf uint32)
 }
 
 func (st *classifierState) classify(addr netip.Addr, vlan uint16) EndpointClass {
+	return st.classifyHop(addr, vlan, netip.Addr{})
+}
+
+func (st *classifierState) classifyHop(addr netip.Addr, vlan uint16, nextHop netip.Addr) EndpointClass {
 	origin := st.lookupOrigin(addr)
 	asn := origin.ASN
+	path := origin.ASPath
+	if len(origin.Routes) > 0 {
+		picked, routeASN := pickASPath(origin.Routes, nextHop)
+		if picked != nil {
+			path = picked
+		}
+		if routeASN != 0 {
+			asn = routeASN
+		}
+	}
 	att := st.lookupAttachment(vlan)
 	if p, ok := st.lookupL3Prefix(addr); ok {
 		if p.ASN != 0 {
@@ -787,7 +865,7 @@ func (st *classifierState) classify(addr netip.Addr, vlan uint16) EndpointClass 
 		scope := scopeFromRole(role)
 		return EndpointClass{
 			ASN:         asn,
-			ASPath:      origin.ASPath,
+			ASPath:      path,
 			Role:        role,
 			Entity:      p.EntityID,
 			DisplayName: p.DisplayName,
@@ -802,7 +880,7 @@ func (st *classifierState) classify(addr netip.Addr, vlan uint16) EndpointClass 
 	}
 	return EndpointClass{
 		ASN:         asn,
-		ASPath:      origin.ASPath,
+		ASPath:      path,
 		Role:        "remote",
 		Entity:      "",
 		Source:      "fallback",
@@ -947,6 +1025,16 @@ func isLocalOrCustomerRole(role string) bool {
 	}
 }
 
+// AddrFromFixed16 turns a flows_raw-style 16-byte address into netip.Addr.
+// IPv4 lives in the first four bytes. Invalid or unspecified becomes zero.
+func AddrFromFixed16(raw [16]byte, ipVersion uint8) netip.Addr {
+	addr, ok := addrFromFlow(raw, ipVersion)
+	if !ok {
+		return netip.Addr{}
+	}
+	return canonHop(addr)
+}
+
 func addrFromFlow(raw [16]byte, ipVersion uint8) (netip.Addr, bool) {
 	switch ipVersion {
 	case 4:
@@ -975,6 +1063,41 @@ func (t *ipTrie) Insert(prefix netip.Prefix, value prefixClass) {
 	if t == nil || !prefix.IsValid() {
 		return
 	}
+	n := t.node(prefix)
+	if n == nil {
+		return
+	}
+	v := value
+	n.value = &v
+}
+
+func (t *ipTrie) insertRoute(prefix netip.Prefix, asn uint32, route bgpRoute) {
+	if t == nil || !prefix.IsValid() {
+		return
+	}
+	n := t.node(prefix)
+	if n == nil {
+		return
+	}
+	route.NextHop = canonHop(route.NextHop)
+	if n.value == nil {
+		n.value = &prefixClass{ASN: asn, Routes: []bgpRoute{route}}
+		n.value.ASPath, _ = pickASPath(n.value.Routes, netip.Addr{})
+		return
+	}
+	if n.value.ASN == 0 {
+		n.value.ASN = asn
+	}
+	for _, existing := range n.value.Routes {
+		if existing.NextHop == route.NextHop && sameASPath(existing.ASPath, route.ASPath) {
+			return
+		}
+	}
+	n.value.Routes = append(n.value.Routes, route)
+	n.value.ASPath, _ = pickASPath(n.value.Routes, netip.Addr{})
+}
+
+func (t *ipTrie) node(prefix netip.Prefix) *ipTrieNode {
 	n := t.root
 	addr := prefix.Addr()
 	bits := prefix.Bits()
@@ -985,8 +1108,7 @@ func (t *ipTrie) Insert(prefix netip.Prefix, value prefixClass) {
 		}
 		n = n.child[bit]
 	}
-	v := value
-	n.value = &v
+	return n
 }
 
 func (t *ipTrie) Lookup(addr netip.Addr) (prefixClass, bool) {
@@ -1025,6 +1147,94 @@ func trieBit(addr netip.Addr, pos int) int {
 	}
 	a := addr.As16()
 	return int((a[pos/8] >> uint(7-pos%8)) & 1)
+}
+
+func parseSnapshotNextHop(s string) netip.Addr {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return netip.Addr{}
+	}
+	addr, err := netip.ParseAddr(s)
+	if err != nil {
+		return netip.Addr{}
+	}
+	return canonHop(addr)
+}
+
+func canonHop(addr netip.Addr) netip.Addr {
+	if !addr.IsValid() {
+		return netip.Addr{}
+	}
+	if addr.Is4In6() {
+		addr = addr.Unmap()
+	}
+	if addr.IsUnspecified() {
+		return netip.Addr{}
+	}
+	return addr
+}
+
+func pickASPath(routes []bgpRoute, nextHop netip.Addr) ([]uint32, uint32) {
+	if len(routes) == 0 {
+		return nil, 0
+	}
+	nextHop = canonHop(nextHop)
+	if nextHop.IsValid() {
+		var hit []bgpRoute
+		for _, r := range routes {
+			if canonHop(r.NextHop) == nextHop {
+				hit = append(hit, r)
+			}
+		}
+		if len(hit) > 0 {
+			best := shortestRoute(hit)
+			return best.ASPath, best.ASN
+		}
+	}
+	best := shortestRoute(routes)
+	return best.ASPath, best.ASN
+}
+
+func shortestRoute(routes []bgpRoute) bgpRoute {
+	best := routes[0]
+	for _, r := range routes[1:] {
+		if len(r.ASPath) < len(best.ASPath) {
+			best = r
+			continue
+		}
+		if len(r.ASPath) > len(best.ASPath) {
+			continue
+		}
+		if asPathLess(r.ASPath, best.ASPath) {
+			best = r
+		}
+	}
+	return best
+}
+
+func asPathLess(a, b []uint32) bool {
+	n := len(a)
+	if len(b) < n {
+		n = len(b)
+	}
+	for i := 0; i < n; i++ {
+		if a[i] != b[i] {
+			return a[i] < b[i]
+		}
+	}
+	return len(a) < len(b)
+}
+
+func sameASPath(a, b []uint32) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func internASPath(intern map[string][]uint32, path []uint32) []uint32 {

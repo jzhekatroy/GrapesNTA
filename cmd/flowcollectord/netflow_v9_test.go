@@ -585,3 +585,20 @@ func TestFlowStartTimeWrap(t *testing.T) {
 		t.Fatalf("got %s want %s", got, want)
 	}
 }
+
+func TestApplyNFFieldPrefersBGPNextHop(t *testing.T) {
+	var out nfDecoded
+	applyNFField(&out, nfField{Type: nfIPV4_NEXT_HOP, Length: 4}, net.ParseIP("192.0.2.1").To4())
+	applyNFField(&out, nfField{Type: nfBGP_IPV4_NEXT_HOP, Length: 4}, net.ParseIP("198.51.100.1").To4())
+	hop := flowingest.AddrFromFixed16(out.nextHop, out.nextHopVer)
+	if hop.String() != "198.51.100.1" {
+		t.Fatalf("bgp hop must win, got %v ver=%d", hop, out.nextHopVer)
+	}
+	var late nfDecoded
+	applyNFField(&late, nfField{Type: nfBGP_IPV4_NEXT_HOP, Length: 4}, net.ParseIP("198.51.100.1").To4())
+	applyNFField(&late, nfField{Type: nfIPV4_NEXT_HOP, Length: 4}, net.ParseIP("192.0.2.1").To4())
+	hop = flowingest.AddrFromFixed16(late.nextHop, late.nextHopVer)
+	if hop.String() != "198.51.100.1" {
+		t.Fatalf("ip hop must not overwrite bgp hop, got %v", hop)
+	}
+}

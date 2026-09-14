@@ -337,3 +337,29 @@ func TestParseSFlowV5KeepsSNMPIfIndex(t *testing.T) {
 		t.Fatalf("expanded out_if=%d want 0 for a non-ifIndex format", rows[0].OutIf)
 	}
 }
+
+func TestParseExtRouterIPv4(t *testing.T) {
+	var rec [8]byte
+	binary.BigEndian.PutUint32(rec[0:4], 1)
+	copy(rec[4:8], net.ParseIP("198.51.100.1").To4())
+	got, ok := parseExtRouter(rec[:])
+	if !ok || got.String() != "198.51.100.1" {
+		t.Fatalf("got %v ok=%v", got, ok)
+	}
+	var zero [8]byte
+	binary.BigEndian.PutUint32(zero[0:4], 1)
+	if hop, ok := parseExtRouter(zero[:]); ok {
+		t.Fatalf("unspecified hop must be empty, got %v", hop)
+	}
+}
+
+func TestParseExtRouterIPv6Mapped(t *testing.T) {
+	var rec [20]byte
+	binary.BigEndian.PutUint32(rec[0:4], 2)
+	rec[14], rec[15] = 0xff, 0xff
+	copy(rec[16:20], net.ParseIP("198.51.100.1").To4())
+	got, ok := parseExtRouter(rec[:])
+	if !ok || got.String() != "198.51.100.1" {
+		t.Fatalf("mapped IPv6 hop must unmap, got %v ok=%v", got, ok)
+	}
+}
