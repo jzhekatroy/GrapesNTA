@@ -309,6 +309,8 @@ describe('detection-signals', () => {
       sampling_rate: 32768,
     }), true);
     assert.ok(synFloodThresholdPps(32768) > 16000);
+    assert.equal(synFloodThresholdPps(65536), 32768);
+    assert.equal(synFloodThresholdPps(1), 2000);
   });
 
   it('188.143.242: 190 п/с голого SYN — скан, не флуд', () => {

@@ -325,7 +325,9 @@ async function loadScopeFlags(scope, minuteTs) {
   const srcPort = col('srcPort');
   const dstPort = col('dstPort');
   const tcpFlags = flowCol('tcpFlags') || '`tcp_flags`';
-  const samplingRateCol = flowCol('samplingRate');
+  // Как tcp_flags: колонка уже в flows_raw. Env не обязателен — иначе на nta
+  // минутка писала sampling_rate=1 при сырье 65536, и порог падал до 2000 п/с.
+  const samplingRateCol = flowCol('samplingRate') || '`sampling_rate`';
   const tcp = `e.proto = 6`;
   const synSet = `bitAnd(e.tcp_flags, 2) > 0`;
   const ackSet = `bitAnd(e.tcp_flags, 16) > 0`;
