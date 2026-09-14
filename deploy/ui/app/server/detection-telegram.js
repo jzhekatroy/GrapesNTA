@@ -394,7 +394,10 @@ function isSignalHot(signal, row, group, threshold) {
     return udp ? isAmplificationHit(udp) : false;
   }
   if (signal === SIGNALS.syn_flood) {
-    return isSynFloodHit(row) || isSynFloodHit(group?.byProto?.tcp || {});
+    // Только поля самой минуты. group.tcp — текущий тик: если подставить его
+    // в историю, вчерашние строки без syn_only выглядят горячими, серия
+    // «уже идёт» и алерт не открывается (waiting_streak на nta 14.09).
+    return isSynFloodHit(row) || isSynFloodHit(row.tcpRow || {});
   }
   if (signal === SIGNALS.foreign_geo) {
     if (String(row?.scope || group?.scope || '') !== 'client') return false;
@@ -1339,9 +1342,14 @@ function pickAlertCandidates(allRows, previousByKey, threshold, options = {}) {
       if (activeKeys.has(signalKey) || (signal === SIGNALS.volume && activeKeys.has(objectId))) continue;
       const history = [row, ...prev];
       const hot = (item) => isSignalHot(signal, item, group, t);
+      // SYN: дубли режет activeKeys, а не «минута до тоже горячая». Иначе флуд,
+      // который шёл до выкладки, навсегда остаётся без события — rising edge
+      // уже потерян, активной записи нет.
       const ready = signal === SIGNALS.volume
         ? shouldSendAlert(history, t, options.streak ?? cfg.streak, enabledAtMs)
-        : shouldSendSignal(history, hot, cfg.streak, enabledAtMs);
+        : signal === SIGNALS.syn_flood
+          ? hot(row)
+          : shouldSendSignal(history, hot, cfg.streak, enabledAtMs);
       if (!ready) continue;
       out.push({
         row,
@@ -1393,7 +1401,7 @@ function pickNormalizeCandidates(allRows, previousByKey, threshold, options = {}
             return !isAmplificationHit(udp) && !ampStillGoing(udp);
           }
           if (activeSignal === SIGNALS.syn_flood) {
-            return !isSynFloodHit(item) && !isSynFloodHit(group?.byProto?.tcp || {})
+            return !isSynFloodHit(item) && !isSynFloodHit(item.tcpRow || {})
               && !synFloodStillGoing(item);
           }
           return !isSignalHot(activeSignal, item, group, t);
@@ -1767,7 +1775,8 @@ async function loadPreviousAllRows(minute, keys, limit = DEFAULT_STREAK) {
   const { rows } = await query(`
     SELECT scope, scope_id, proto, minute, growth_bps, growth_pps, bps, bytes,
            amp_bytes, amp_packets, amp_srcs, growth_amp,
-           foreign_bytes, foreign_srcs, top_countries, growth_foreign_bps, growth_foreign_share
+           foreign_bytes, foreign_srcs, top_countries, growth_foreign_bps, growth_foreign_share,
+           syn_only_bytes, syn_only_packets, syn_only_rows, sampling_rate
     FROM (
       SELECT
         scope,
@@ -1787,6 +1796,10 @@ async function loadPreviousAllRows(minute, keys, limit = DEFAULT_STREAK) {
         top_countries,
         growth_foreign_bps,
         growth_foreign_share,
+        syn_only_bytes,
+        syn_only_packets,
+        syn_only_rows,
+        sampling_rate,
         row_number() OVER (PARTITION BY scope, scope_id, proto ORDER BY minute DESC) AS rn
       FROM ${tableRef()} FINAL
       WHERE proto IN ('all', 'udp')
