@@ -229,9 +229,9 @@ analytics не делят каталог данных», а не 404 без об
 
 | Утверждение в документе | Как в коде |
 |---|---|
-| native scope (VLAN/ASN/направление/…) читает готовые агрегаты `traffic_*` | native-путь идёт в `explorerTimeseries` → `flows_raw`; агрегаты `traffic_*` не используются вовсе |
+| native scope (VLAN/ASN/направление/…) читает готовые агрегаты `traffic_*` | реализовано точечно: два шаблона с `dataSource: traffic_direction` / `vlan_trend` читают `traffic_dashboard_1m` / `traffic_vlan_1m`; остальной native-путь — Explorer → `flows_raw` |
 | «прямой авто-poll `flows_raw` для live запрещён» | и воркер, и preview читают `flows_raw` |
-| native tier определяется набором полей (`NATIVE_FILTER_FIELDS`) | константа объявлена и экспортируется, но в `classifyScope` не используется: native только при полном отсутствии фильтров и группировки |
+| native tier определяется набором полей (`NATIVE_FILTER_FIELDS`) | `NATIVE_FILTER_FIELDS` по-прежнему не участвует в `classifyScope`; native dashboard определяется `widget.dataSource`, Explorer-native — при отсутствии фильтров и groupBy |
 | concurrency воркера 2 | в коде и в compose — 1 |
 | backfill 24h через `OBSERVATION_ROLLUP_BACKFILL_HOURS` | переменная называется `OBSERVATION_ROLLUP_MAX_BEHIND_HOURS`, и это не backfill, а предел отставания |
 | catch-up «до 15 минут за проход» | в коде по умолчанию 60, в compose переопределено на 15 |

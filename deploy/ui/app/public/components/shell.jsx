@@ -2401,7 +2401,7 @@ Object.assign(window, {
   TIME_RANGE_OPTIONS, TIMEZONE_PRESETS, TRAFFIC_DIRECTIONS, defaultDirectionsEnabled,
   defaultCustomPeriod, formatCustomPeriodLabel, validateCustomPeriod, validateExplorerCustomPeriod, explorerRangeLimitDays, timeRangePresetMs, EXPLORER_MAX_RANGE_DAYS, timeRangeLabel, timeRangeChipLabel, TIME_RANGE_CHIP_LABELS, yesterdayCustomPeriod, isYesterdayPeriod,
   toDatetimeLocalValue, dnsBucketSecondsFromMode, explorerGranularityBucketSeconds,
-  collectorFilterLabel, directionSummaryLabel, TimezoneSelector,
+  collectorFilterLabel, directionSummaryLabel, TimezoneSelector, CollectorFilter,
   parseAppHash, parseJsonSearchParam, parseDirectionsParam, applyTopTalkersUrlGlobals,
   parseTopTalkersPageParams, readTopTalkersPageParamsFromHash, buildTopTalkersShareUrl,
   METRICS,

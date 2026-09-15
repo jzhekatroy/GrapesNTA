@@ -42,6 +42,11 @@ const {
 } = require('./observation-schedule');
 const { getSmtpSettings, sendSmtpMail } = require('./smtp-settings');
 const { renderChartPng } = require('./report-chart-png');
+const {
+  trafficBandwidthSeries,
+  vlanDistributionTimeseries,
+  normalizeVlanIdList,
+} = require('./queries');
 
 const ARTIFACTS_DIR = path.join(__dirname, 'data', 'observation_runs');
 const CHART_IMAGE_FILE = 'chart.png';
@@ -92,6 +97,8 @@ const NATIVE_FILTER_FIELDS = new Set([
 const LOOKBACKS = new Set(['15m', '30m', '1h', '6h', '24h', '7d']);
 const REFRESH_SECS = new Set([300, 900]);
 const WIDGET_TYPES = new Set(['timeseries_bps', 'top_table']);
+const WIDGET_DATA_SOURCES = new Set(['explorer', 'traffic_direction', 'vlan_trend']);
+const NATIVE_UPLINK_DIRECTIONS = ['in', 'out'];
 
 function ensureDir(filePath) {
   const dir = path.dirname(filePath);
@@ -147,6 +154,45 @@ function normalizeFilters(filters) {
   }).filter(Boolean);
 }
 
+function widgetDataSource(w) {
+  const ds = String(w?.dataSource || 'explorer').trim();
+  return WIDGET_DATA_SOURCES.has(ds) ? ds : 'explorer';
+}
+
+function isNativeAggregateWidget(w) {
+  return w?.type === 'timeseries_bps'
+    && (widgetDataSource(w) === 'traffic_direction' || widgetDataSource(w) === 'vlan_trend');
+}
+
+function observationUsesNativeAggregate(widgets = []) {
+  return (widgets || []).some(isNativeAggregateWidget);
+}
+
+function normalizeNativeScope(raw, dataSource) {
+  if (dataSource !== 'traffic_direction' && dataSource !== 'vlan_trend') return undefined;
+  const scope = raw && typeof raw === 'object' ? raw : {};
+  const collectorFilter = Array.isArray(scope.collectorFilter)
+    ? scope.collectorFilter.map((v) => String(v).trim()).filter(Boolean)
+    : (scope.collectorId ? [String(scope.collectorId).trim()].filter(Boolean) : []);
+  const out = { collectorFilter };
+  if (dataSource === 'vlan_trend') {
+    out.vlanIds = normalizeVlanIdList(scope.vlanIds);
+  }
+  return out;
+}
+
+function nativeScopeCollectorId(nativeScope) {
+  const items = nativeScope?.collectorFilter;
+  if (!Array.isArray(items) || !items.length) return null;
+  return items.join(',');
+}
+
+function resolveNativeCollectorId(widget, body = {}) {
+  return nativeScopeCollectorId(widget?.nativeScope)
+    || normalizePreviewCollectorFilter(body)
+    || null;
+}
+
 function normalizeWidgets(widgets) {
   if (!Array.isArray(widgets) || !widgets.length) {
     return [
@@ -154,18 +200,25 @@ function normalizeWidgets(widgets) {
       { id: 'w-asn', type: 'top_table', metric: 'bps', groupBy: ['src_asn'], limit: TOP_ROWS_LIMIT },
     ];
   }
-  return widgets.map((w, i) => ({
-    id: w.id || `w-${i}`,
-    type: WIDGET_TYPES.has(w.type) ? w.type : 'top_table',
-    metric: w.metric || 'bps',
-    groupBy: Array.isArray(w.groupBy) ? w.groupBy.map(String) : [],
-    // Лимиты не настраиваются пользователем — держим единые значения.
-    limit: w.type === 'timeseries_bps' ? null : TOP_ROWS_LIMIT,
-    seriesLimit: w.type === 'timeseries_bps' ? CHART_SERIES_LIMIT : undefined,
-    chartStyle: w.type === 'timeseries_bps'
-      ? (w.chartStyle === 'stack' ? 'stack' : 'lines')
-      : undefined,
-  }));
+  return widgets.map((w, i) => {
+    const dataSource = w.type === 'timeseries_bps' ? widgetDataSource(w) : undefined;
+    return {
+      id: w.id || `w-${i}`,
+      type: WIDGET_TYPES.has(w.type) ? w.type : 'top_table',
+      metric: w.metric || 'bps',
+      groupBy: Array.isArray(w.groupBy) ? w.groupBy.map(String) : [],
+      // Лимиты не настраиваются пользователем — держим единые значения.
+      limit: w.type === 'timeseries_bps' ? null : TOP_ROWS_LIMIT,
+      seriesLimit: w.type === 'timeseries_bps' ? CHART_SERIES_LIMIT : undefined,
+      chartStyle: w.type === 'timeseries_bps'
+        ? (w.chartStyle === 'stack' ? 'stack' : 'lines')
+        : undefined,
+      dataSource,
+      nativeScope: isNativeAggregateWidget({ ...w, dataSource })
+        ? normalizeNativeScope(w.nativeScope, dataSource)
+        : undefined,
+    };
+  });
 }
 
 function collectWidgetGroupFields(widgets = []) {
@@ -188,6 +241,20 @@ function collectWidgetGroupFields(widgets = []) {
  * Empty filters + empty groupBy → total traffic from traffic_* (no materialize).
  */
 function classifyScope(filters, widgets = []) {
+  if (observationUsesNativeAggregate(widgets)) {
+    const chart = (widgets || []).find(isNativeAggregateWidget);
+    const ds = widgetDataSource(chart);
+    const label = ds === 'vlan_trend'
+      ? 'traffic_vlan_1m (Top-5 VLAN + «Прочие»)'
+      : 'traffic_dashboard_1m (in/out)';
+    return {
+      tier: 'native',
+      materializeRequired: false,
+      reason: `Нативный график dashboard: ${label}`,
+      dataSource: ds,
+    };
+  }
+
   const list = normalizeFilters(filters);
   const groupFields = collectWidgetGroupFields(widgets);
   const fields = [...new Set([
@@ -199,7 +266,7 @@ function classifyScope(filters, widgets = []) {
     return {
       tier: 'native',
       materializeRequired: false,
-      reason: 'Нет фильтров и группировок — общий трафик (native агрегаты)',
+      reason: 'Нет фильтров и группировок — общий трафик (Explorer / flows_raw)',
     };
   }
   return {
@@ -685,6 +752,96 @@ function resolvePreviewWindow(obs, body = {}) {
     return { range: 'custom', from: String(body.from), to: String(body.to) };
   }
   return lookbackWindow(body.lookback || obs.lookback, previewWindowEndMs(obs));
+}
+
+/** Optional live override; saved scope lives in widget.nativeScope.collectorFilter. */
+function normalizePreviewCollectorFilter(body = {}) {
+  const raw = body.collectorFilter ?? body.collectorId ?? null;
+  if (!raw) return null;
+  if (Array.isArray(raw)) {
+    const items = raw.map((v) => String(v).trim()).filter(Boolean);
+    return items.length ? items.join(',') : null;
+  }
+  const s = String(raw).trim();
+  return s || null;
+}
+
+function windowToNativeTrafficQuery(window) {
+  if (window?.from && window?.to) {
+    return { range: 'custom', from: window.from, to: window.to };
+  }
+  return { range: window?.range || '1h' };
+}
+
+async function previewNativeTrafficDirection(widget, window, { collectorId } = {}) {
+  const q = windowToNativeTrafficQuery(window);
+  const bundle = trafficBandwidthSeries({
+    ...q,
+    directions: NATIVE_UPLINK_DIRECTIONS,
+    collectorId,
+  });
+  const { rows } = await query(bundle.sql, bundle.params, { name: 'observations/native-direction' });
+  const chart = bundle.map(rows);
+  return {
+    id: widget.id,
+    type: widget.type,
+    mode: 'grouped',
+    dataSource: 'traffic_direction',
+    groupBy: ['direction'],
+    source: 'traffic_dashboard_1m',
+    status: 'ok',
+    series: chart.points,
+    points: chart.points,
+    lines: chart.lines,
+    rows: [],
+    warning: null,
+  };
+}
+
+async function previewNativeVlanTrend(widget, window, { collectorId, vlanIds } = {}) {
+  const selectedVlans = normalizeVlanIdList(vlanIds);
+  if (!selectedVlans.length) {
+    return {
+      id: widget.id,
+      type: widget.type,
+      mode: 'grouped',
+      dataSource: 'vlan_trend',
+      groupBy: ['vlan'],
+      source: 'traffic_vlan_1m',
+      status: 'error',
+      series: [],
+      points: [],
+      lines: [],
+      rows: [],
+      warning: 'Выберите VLAN в настройках наблюдения.',
+    };
+  }
+  const q = windowToNativeTrafficQuery(window);
+  const bundle = vlanDistributionTimeseries({
+    ...q,
+    directions: NATIVE_UPLINK_DIRECTIONS,
+    collectorId,
+    vlanIds: selectedVlans,
+  });
+  const { rows } = await query(bundle.sql, bundle.params, { name: 'observations/native-vlan' });
+  const chart = await bundle.map(rows);
+  const lines = chart.lines.map((ln) => (
+    ln.key === 'other' ? { ...ln, label: OTHER_LABEL, color: OTHER_COLOR } : ln
+  ));
+  return {
+    id: widget.id,
+    type: widget.type,
+    mode: 'grouped',
+    dataSource: 'vlan_trend',
+    groupBy: ['vlan'],
+    source: 'traffic_vlan_1m',
+    status: 'ok',
+    series: chart.points,
+    points: chart.points,
+    lines,
+    rows: [],
+    warning: null,
+  };
 }
 
 function reportWindow(obs, now = new Date()) {
@@ -1335,10 +1492,21 @@ async function previewObservation(id, userId, body = {}) {
   const widgets = [];
   let cachedTop = null;
   const useRollup = Boolean(obs.materialize?.enabled);
-
   for (const w of obs.widgets) {
     try {
       if (w.type === 'timeseries_bps') {
+        if (isNativeAggregateWidget(w)) {
+          const collectorId = resolveNativeCollectorId(w, body);
+          const nativeWidget = w.dataSource === 'vlan_trend'
+            ? await previewNativeVlanTrend(w, window, {
+              collectorId,
+              vlanIds: w.nativeScope?.vlanIds,
+            })
+            : await previewNativeTrafficDirection(w, window, { collectorId });
+          widgets.push(nativeWidget);
+          continue;
+        }
+
         const groupBy = observationChartGroupBy(obs, w);
         if (groupBy.length) {
           if (!useRollup) {
@@ -2391,6 +2559,38 @@ async function patchMaterializeStatus(id, patch) {
 function observationPresets() {
   return [
     {
+      id: 'preset-uplink-direction',
+      name: 'Входящий/исходящий трафик',
+      description: '',
+      filters: [],
+      widgets: [
+        {
+          id: 'w-direction',
+          type: 'timeseries_bps',
+          metric: 'bps',
+          groupBy: [],
+          dataSource: 'traffic_direction',
+        },
+      ],
+      lookback: '1h',
+    },
+    {
+      id: 'preset-vlan-trend',
+      name: 'Трафик по VLAN',
+      description: 'Выбранные VLAN по traffic_vlan_1m. Коллектор и VLAN задаются в настройках.',
+      filters: [],
+      widgets: [
+        {
+          id: 'w-vlan',
+          type: 'timeseries_bps',
+          metric: 'bps',
+          groupBy: [],
+          dataSource: 'vlan_trend',
+        },
+      ],
+      lookback: '1h',
+    },
+    {
       id: 'preset-vlan',
       name: 'VLAN overview',
       filters: [{ field: 'vlan', op: '=', value: '100' }],
@@ -2451,6 +2651,7 @@ function observationsConfig() {
     lookbacks: ['30m', '1h', '6h', '24h', '7d'],
     refreshSecs: [...REFRESH_SECS],
     widgetTypes: [...WIDGET_TYPES],
+    widgetDataSources: [...WIDGET_DATA_SOURCES],
     nativeFilterFields: [...NATIVE_FILTER_FIELDS],
     presets: observationPresets(),
     schema: explorerSchema(),
@@ -2532,6 +2733,17 @@ async function getObservationAnalyticsDiagnostics() {
 
 module.exports = {
   classifyScope,
+  normalizeWidgets,
+  widgetDataSource,
+  isNativeAggregateWidget,
+  observationUsesNativeAggregate,
+  normalizeNativeScope,
+  nativeScopeCollectorId,
+  resolveNativeCollectorId,
+  normalizePreviewCollectorFilter,
+  windowToNativeTrafficQuery,
+  WIDGET_DATA_SOURCES,
+  NATIVE_UPLINK_DIRECTIONS,
   ensureObservationsStore,
   listObservations,
   getObservation,

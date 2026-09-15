@@ -810,7 +810,15 @@ const ApiClient = (() => {
   }
 
   async function previewObservation(id, payload = {}) {
-    return requestJson(`/api/observations/${encodeURIComponent(id)}/preview`, { method: 'POST', body: payload });
+    const body = { ...payload };
+    if (body.collectorFilter != null) {
+      const items = Array.isArray(body.collectorFilter)
+        ? body.collectorFilter.map((v) => String(v).trim()).filter(Boolean)
+        : [String(body.collectorFilter).trim()].filter(Boolean);
+      if (items.length) body.collectorFilter = items;
+      else delete body.collectorFilter;
+    }
+    return requestJson(`/api/observations/${encodeURIComponent(id)}/preview`, { method: 'POST', body });
   }
 
   async function runObservationReport(id) {

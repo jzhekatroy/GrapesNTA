@@ -281,6 +281,217 @@ function groupByFromWidgets(widgets) {
   return top ? top.groupBy.map(String) : ['src_asn'];
 }
 
+function chartWidgetDataSource(widgets) {
+  const chart = (widgets || []).find((w) => w.type === 'timeseries_bps');
+  return chart?.dataSource || 'explorer';
+}
+
+function isNativeAggregateObservation(item) {
+  const ds = chartWidgetDataSource(item?.widgets);
+  return ds === 'traffic_direction' || ds === 'vlan_trend';
+}
+
+function hasTopTableWidget(widgets) {
+  return (widgets || []).some((w) => w.type === 'top_table');
+}
+
+function chartWidgetFrom(widgets) {
+  return (widgets || []).find((w) => w.type === 'timeseries_bps') || null;
+}
+
+function chartWidgetNativeScope(widgets) {
+  const chart = chartWidgetFrom(widgets);
+  return chart?.nativeScope || { collectorFilter: [], vlanIds: [] };
+}
+
+function widgetsWithNativeScope(widgets, nativeScope) {
+  return (widgets || []).map((w) => (
+    w.type === 'timeseries_bps' && isNativeAggregateObservation({ widgets: [w] })
+      ? { ...w, nativeScope }
+      : w
+  ));
+}
+
+function nativeAggregateSummary(item, collectors = [], locations = []) {
+  const ds = chartWidgetDataSource(item?.widgets);
+  if (ds !== 'traffic_direction' && ds !== 'vlan_trend') return null;
+  const scope = chartWidgetNativeScope(item?.widgets);
+  const parts = [];
+  if (typeof collectorFilterLabel === 'function') {
+    parts.push(`Коллектор: ${collectorFilterLabel(scope.collectorFilter, collectors, locations)}`);
+  }
+  if (ds === 'vlan_trend') {
+    if (scope.vlanIds?.length) {
+      parts.push(`VLAN: ${scope.vlanIds.join(', ')}`);
+    } else {
+      parts.push('VLAN не выбраны');
+    }
+  }
+  return parts.length ? parts.join(' · ') : null;
+}
+
+function NativeScopeSettings({
+  dataSource,
+  nativeScope,
+  onChange,
+  disabled = false,
+}) {
+  const [vlanRows, setVlanRows] = useState([]);
+  const [vlanLoading, setVlanLoading] = useState(false);
+  const [vlanSearch, setVlanSearch] = useState('');
+  const [manualVlan, setManualVlan] = useState('');
+  const selectedVlanIds = useMemo(
+    () => new Set((nativeScope?.vlanIds || []).map((v) => Number(v))),
+    [nativeScope?.vlanIds],
+  );
+
+  useEffect(() => {
+    if (dataSource !== 'vlan_trend') return undefined;
+    let cancelled = false;
+    setVlanLoading(true);
+    Promise.all([
+      ApiClient.loadRefVlans(),
+      ApiClient.loadRefVlansSeen({ hours: 24 * 7, limit: 500 }),
+    ])
+      .then(([namedR, seenR]) => {
+        if (cancelled) return;
+        const byId = new Map();
+        for (const row of [...(namedR.rows || []), ...(seenR.rows || [])]) {
+          const id = Number(row.vlanId);
+          if (!Number.isInteger(id) || id <= 0) continue;
+          if (!byId.has(id)) {
+            byId.set(id, {
+              vlanId: id,
+              label: row.displayName ? `${id} · ${row.displayName}` : String(id),
+            });
+          }
+        }
+        setVlanRows([...byId.values()].sort((a, b) => a.vlanId - b.vlanId));
+      })
+      .catch(() => {
+        if (!cancelled) setVlanRows([]);
+      })
+      .finally(() => {
+        if (!cancelled) setVlanLoading(false);
+      });
+    return () => { cancelled = true; };
+  }, [dataSource]);
+
+  const filteredVlanRows = useMemo(() => {
+    const q = vlanSearch.trim().toLowerCase();
+    if (!q) return vlanRows;
+    return vlanRows.filter((row) => (
+      String(row.vlanId).includes(q) || row.label.toLowerCase().includes(q)
+    ));
+  }, [vlanRows, vlanSearch]);
+
+  const patchScope = (patch) => onChange({ ...nativeScope, ...patch });
+
+  const toggleVlan = (vlanId) => {
+    const id = Number(vlanId);
+    if (!Number.isInteger(id) || id <= 0) return;
+    const next = new Set(selectedVlanIds);
+    if (next.has(id)) next.delete(id);
+    else next.add(id);
+    patchScope({ vlanIds: [...next].sort((a, b) => a - b) });
+  };
+
+  const addManualVlan = () => {
+    const id = Number(String(manualVlan || '').trim());
+    if (!Number.isInteger(id) || id <= 0 || id > 4094) return;
+    const next = new Set(selectedVlanIds);
+    next.add(id);
+    patchScope({ vlanIds: [...next].sort((a, b) => a - b) });
+    setManualVlan('');
+  };
+
+  return (
+    <div className="col" style={{ gap: 12 }}>
+      <div className="col" style={{ gap: 6 }}>
+        <span>Коллектор</span>
+        {typeof CollectorFilter === 'function' ? (
+          <CollectorFilter
+            embedded
+            collectorFilter={nativeScope?.collectorFilter || []}
+            onCollectorFilterChange={(next) => patchScope({ collectorFilter: next })}
+          />
+        ) : (
+          <div style={{ color: 'var(--fg-secondary)', font: 'var(--pv-text-body-3)' }}>
+            Компонент фильтра коллектора недоступен
+          </div>
+        )}
+      </div>
+      {dataSource === 'vlan_trend' && (
+        <div className="col" style={{ gap: 8 }}>
+          <span>VLAN</span>
+          <input
+            className="input"
+            placeholder="Поиск VLAN"
+            value={vlanSearch}
+            disabled={disabled}
+            onChange={(e) => setVlanSearch(e.target.value)}
+          />
+          <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
+            <input
+              className="input"
+              style={{ width: 120 }}
+              placeholder="ID VLAN"
+              value={manualVlan}
+              disabled={disabled}
+              onChange={(e) => setManualVlan(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  e.preventDefault();
+                  addManualVlan();
+                }
+              }}
+            />
+            <button type="button" className="btn" disabled={disabled} onClick={addManualVlan}>
+              Добавить
+            </button>
+          </div>
+          {selectedVlanIds.size > 0 && (
+            <div style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-secondary)' }}>
+              Выбрано: {[...selectedVlanIds].sort((a, b) => a - b).join(', ')}
+            </div>
+          )}
+          <div
+            className="col"
+            style={{
+              gap: 2,
+              maxHeight: 220,
+              overflowY: 'auto',
+              border: '1px solid var(--bd-soft)',
+              borderRadius: 8,
+              padding: 8,
+            }}
+          >
+            {vlanLoading && (
+              <div style={{ color: 'var(--fg-secondary)', font: 'var(--pv-text-body-3)' }}>Загрузка VLAN…</div>
+            )}
+            {!vlanLoading && !filteredVlanRows.length && (
+              <div style={{ color: 'var(--fg-secondary)', font: 'var(--pv-text-body-3)' }}>
+                VLAN не найдены — добавьте ID вручную
+              </div>
+            )}
+            {filteredVlanRows.map((row) => (
+              <label key={row.vlanId} className="row" style={{ gap: 8, alignItems: 'center' }}>
+                <input
+                  type="checkbox"
+                  checked={selectedVlanIds.has(row.vlanId)}
+                  disabled={disabled}
+                  onChange={() => toggleVlan(row.vlanId)}
+                />
+                <span className="mono">{row.label}</span>
+              </label>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 const FILTER_LOGIC_EXPR = {
   and: 'AND',
   or: 'OR',
@@ -679,6 +890,9 @@ function ObservationLiveTile({
   onRunReport,
   onLookbackChange,
   onChartStyleChange,
+  isNativeAggregate,
+  collectors,
+  locations,
 }) {
   const [preview, setPreview] = useState(null);
   const [error, setError] = useState('');
@@ -691,7 +905,9 @@ function ObservationLiveTile({
   const [zoomStack, setZoomStack] = useState([]);
   const [runs, setRuns] = useState([]);
   const [runsError, setRunsError] = useState('');
-  const [expandedTab, setExpandedTab] = useState('top'); // top | reports
+  const [expandedTab, setExpandedTab] = useState(() => (
+    hasTopTableWidget(item.widgets) ? 'top' : 'reports'
+  )); // top | reports
   const [focusKey, setFocusKey] = useState(null);
   const customRangeRef = useRef(null);
   const displayTimezone = typeof getDisplayTimezone === 'function' ? getDisplayTimezone() : undefined;
@@ -706,6 +922,7 @@ function ObservationLiveTile({
     setCustomRange(null);
     setZoomStack([]);
     setFocusKey(null);
+    if (!hasTopTableWidget(item.widgets)) setExpandedTab('reports');
   }, [item.id, item.lookback, item.widgets]);
 
   const previewPayload = useMemo(() => (
@@ -835,6 +1052,10 @@ function ObservationLiveTile({
     : null;
   const topGroupBy = groupByFromWidgets(item.widgets);
   const topLabel = topGroupBy.map((g) => groupLabel(g, groupOptions)).join(' × ');
+  const nativeSummary = isNativeAggregate
+    ? nativeAggregateSummary(item, collectors, locations)
+    : null;
+  const showTopTab = hasTopTableWidget(item.widgets);
   const chartH = expanded ? 320 : 200;
   const periodLabel = observationPeriodLabel(lookback, customRange);
   const canResetZoom = Boolean(customRange || zoomStack.length);
@@ -867,27 +1088,33 @@ function ObservationLiveTile({
         <div style={{ flex: 1, minWidth: 160 }}>
           <div className="obs-tile__title">{item.name}</div>
           {item.description ? <div className="obs-tile__desc">{item.description}</div> : null}
-          <button
-            type="button"
-            className="obs-tile__filter-link"
-            onClick={openInExplorer}
-            title="Открыть в разборе трафика"
-          >
-            <span className="obs-tile__filter-scope">
-              <span className="obs-tile__filter-scope-label">Фильтры:</span>
-              {' '}
-              <span className="obs-tile__filter-link-text">
-                {renderFilterSummary(item.filters || [], filterFields)}
-              </span>
-            </span>
-            {topLabel ? (
-              <span className="obs-tile__filter-scope obs-tile__filter-scope--group">
-                <span className="obs-tile__filter-scope-label">Группировка:</span>
+          {isNativeAggregate && verboseMeta && nativeSummary ? (
+            <div className="obs-tile__filter-scope" style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-secondary)' }}>
+              {nativeSummary}
+            </div>
+          ) : !isNativeAggregate ? (
+            <button
+              type="button"
+              className="obs-tile__filter-link"
+              onClick={openInExplorer}
+              title="Открыть в разборе трафика"
+            >
+              <span className="obs-tile__filter-scope">
+                <span className="obs-tile__filter-scope-label">Фильтры:</span>
                 {' '}
-                <span className="obs-tile__filter-link-text">{topLabel}</span>
+                <span className="obs-tile__filter-link-text">
+                  {renderFilterSummary(item.filters || [], filterFields)}
+                </span>
               </span>
-            ) : null}
-          </button>
+              {topLabel ? (
+                <span className="obs-tile__filter-scope obs-tile__filter-scope--group">
+                  <span className="obs-tile__filter-scope-label">Группировка:</span>
+                  {' '}
+                  <span className="obs-tile__filter-link-text">{topLabel}</span>
+                </span>
+              ) : null}
+            </button>
+          ) : null}
         </div>
         <div className="obs-tile__tools">
           <button
@@ -1006,15 +1233,17 @@ function ObservationLiveTile({
       {expanded && (
         <div style={{ marginTop: 4, borderTop: '1px solid var(--bd-soft)', paddingTop: 12 }}>
           <div className="seg" style={{ width: 'fit-content', marginBottom: 10 }}>
-            <button type="button" className={expandedTab === 'top' ? 'is-active' : ''} onClick={() => setExpandedTab('top')}>
-              Топ
-            </button>
+            {showTopTab && (
+              <button type="button" className={expandedTab === 'top' ? 'is-active' : ''} onClick={() => setExpandedTab('top')}>
+                Топ
+              </button>
+            )}
             <button type="button" className={expandedTab === 'reports' ? 'is-active' : ''} onClick={() => setExpandedTab('reports')}>
               Отчёты
             </button>
           </div>
 
-          {expandedTab === 'top' && (
+          {expandedTab === 'top' && showTopTab && (
             <>
               <div style={{ font: 'var(--pv-text-body-2-bold)', marginBottom: 8 }}>
                 Разбивка: топ по {topLabel} (бит/с за {periodLabel})
@@ -1161,6 +1390,10 @@ function PageObservations({ onNavigate }) {
   const [settings, setSettings] = useState(null);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
+  const [createMenuOpen, setCreateMenuOpen] = useState(false);
+  const [collectors, setCollectors] = useState([]);
+  const [locations, setLocations] = useState([]);
+  const createMenuRef = useRef(null);
 
   const settingsItem = useMemo(
     () => items.find((x) => x.id === settingsItemId) || null,
@@ -1168,6 +1401,20 @@ function PageObservations({ onNavigate }) {
   );
 
   const filterFields = config?.schema?.filterFields || [];
+  const nativePresets = useMemo(() => {
+    const presets = config?.presets || [];
+    return presets.filter((p) => p.id === 'preset-uplink-direction' || p.id === 'preset-vlan-trend');
+  }, [config?.presets]);
+
+  useEffect(() => {
+    if (!createMenuOpen) return undefined;
+    const onPointerDown = (e) => {
+      if (createMenuRef.current?.contains(e.target)) return;
+      setCreateMenuOpen(false);
+    };
+    document.addEventListener('mousedown', onPointerDown);
+    return () => document.removeEventListener('mousedown', onPointerDown);
+  }, [createMenuOpen]);
   // Все измерения схемы, а не только «топовые»: разрез приходит из разбора
   // трафика и может содержать любое поле, иначе подпись падает до сырого id.
   const groupOptions = useMemo(() => {
@@ -1183,6 +1430,23 @@ function PageObservations({ onNavigate }) {
     setConfig(cfg);
     setItems(list);
     return list;
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    ApiClient.loadDashboardCollectors()
+      .then(({ collectors: collectorRows, locations: locationRows }) => {
+        if (cancelled) return;
+        setCollectors(collectorRows || []);
+        setLocations(locationRows || []);
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setCollectors([]);
+          setLocations([]);
+        }
+      });
+    return () => { cancelled = true; };
   }, []);
 
   useEffect(() => {
@@ -1241,6 +1505,13 @@ function PageObservations({ onNavigate }) {
     if (settingsItem?.canEdit === false) {
       setError('Нет прав на изменение этого наблюдения');
       return;
+    }
+    if (settingsIsNative && chartWidgetDataSource(settings.widgets) === 'vlan_trend') {
+      const scope = chartWidgetNativeScope(settings.widgets);
+      if (!scope.vlanIds?.length) {
+        setError('Выберите хотя бы один VLAN');
+        return;
+      }
     }
     setBusy(true);
     setError('');
@@ -1335,6 +1606,34 @@ function PageObservations({ onNavigate }) {
   const settingsGroupBy = groupByFromWidgets(settings?.widgets);
   const settingsChartStyle = observationChartStyleFromWidgets(settings?.widgets);
   const settingsGroupSummary = formatGroupSummary(settingsGroupBy, groupOptions);
+  const settingsIsNative = settingsItem ? isNativeAggregateObservation(settingsItem) : false;
+  const settingsNativeDataSource = chartWidgetDataSource(settings?.widgets || settingsItem?.widgets);
+  const settingsNativeScope = chartWidgetNativeScope(settings?.widgets);
+
+  const createFromPreset = async (presetId) => {
+    if (!canWriteObservations) return;
+    const preset = (config?.presets || []).find((p) => p.id === presetId);
+    if (!preset) return;
+    setCreateMenuOpen(false);
+    setBusy(true);
+    setError('');
+    try {
+      const created = await ApiClient.createObservation({
+        name: preset.name,
+        description: '',
+        filters: preset.filters || [],
+        widgets: preset.widgets,
+        lookback: preset.lookback || '1h',
+      });
+      const item = created?.data || created;
+      await reload();
+      if (item?.id) openSettings(item);
+    } catch (e) {
+      setError(e.message || 'Не удалось создать наблюдение');
+    } finally {
+      setBusy(false);
+    }
+  };
 
   if (settings && settingsItem) {
     return (
@@ -1367,7 +1666,7 @@ function PageObservations({ onNavigate }) {
                 </div>
               ) : null}
             </div>
-            {canWrite && (
+            {canWrite && !settingsIsNative && (
               <button
                 type="button"
                 className="btn"
@@ -1387,6 +1686,17 @@ function PageObservations({ onNavigate }) {
                   : 'Скопировать фильтры в разбор трафика'}
               </button>
             )}
+            {settingsIsNative && (
+              <NativeScopeSettings
+                dataSource={settingsNativeDataSource}
+                nativeScope={settingsNativeScope}
+                disabled={!canWriteObservations || settingsItem.canEdit === false}
+                onChange={(nextScope) => setSettings({
+                  ...settings,
+                  widgets: widgetsWithNativeScope(settings.widgets, nextScope),
+                })}
+              />
+            )}
             <label className="col" style={{ gap: 4 }}>
               <span>Название</span>
               <input className="input" value={settings.name} onChange={(e) => setSettings({ ...settings, name: e.target.value })} />
@@ -1399,21 +1709,25 @@ function PageObservations({ onNavigate }) {
                 onChange={(e) => setSettings({ ...settings, description: e.target.value })}
               />
             </label>
-            <label className="row" style={{ gap: 8, alignItems: 'center' }}>
-              <input
-                type="checkbox"
-                checked={!!settings.materialize?.enabled}
-                onChange={(e) => setSettings({
-                  ...settings,
-                  materialize: { ...(settings.materialize || {}), enabled: e.target.checked },
-                })}
-              />
-              Подготовка данных (rollup раз в 5 минут)
-            </label>
-            <div style={{ marginLeft: 24, color: 'var(--fg-muted)', font: 'var(--pv-text-body-3)' }}>
-              Без неё график и таблица топа по группировке пустые. Каждая подготовка — постоянная нагрузка на ClickHouse.
-              Счёт с момента включения, прошлые сутки не пересчитываются.
-            </div>
+            {!settingsIsNative && (
+              <>
+                <label className="row" style={{ gap: 8, alignItems: 'center' }}>
+                  <input
+                    type="checkbox"
+                    checked={!!settings.materialize?.enabled}
+                    onChange={(e) => setSettings({
+                      ...settings,
+                      materialize: { ...(settings.materialize || {}), enabled: e.target.checked },
+                    })}
+                  />
+                  Подготовка данных (rollup раз в 5 минут)
+                </label>
+                <div style={{ marginLeft: 24, color: 'var(--fg-muted)', font: 'var(--pv-text-body-3)' }}>
+                  Без неё график и таблица топа по группировке пустые. Каждая подготовка — постоянная нагрузка на ClickHouse.
+                  Счёт с момента включения, прошлые сутки не пересчитываются.
+                </div>
+              </>
+            )}
             {settingsGroupBy.length > 0 && (
               <div className="col" style={{ gap: 6 }}>
                 <span>Тип графика</span>
@@ -1570,13 +1884,55 @@ function PageObservations({ onNavigate }) {
           <h1>Наблюдения</h1>
         </div>
         {canWrite && (
-          <button
-            type="button"
-            className="btn btn--primary"
-            onClick={() => startComposeInExplorer(onNavigate, { mode: 'new' })}
-          >
-            + Новое
-          </button>
+          <div ref={createMenuRef} style={{ position: 'relative' }}>
+            <button
+              type="button"
+              className="btn btn--primary"
+              aria-expanded={createMenuOpen}
+              onClick={() => setCreateMenuOpen((v) => !v)}
+            >
+              + Новое
+            </button>
+            {createMenuOpen && (
+              <div
+                className="time-filter__menu"
+                style={{
+                  position: 'absolute',
+                  top: 'calc(100% + 6px)',
+                  right: 0,
+                  left: 'auto',
+                  minWidth: 280,
+                  maxWidth: 'calc(100vw - 16px)',
+                  zIndex: 1200,
+                }}
+                role="menu"
+              >
+                {nativePresets.map((preset) => (
+                  <button
+                    key={preset.id}
+                    type="button"
+                    role="menuitem"
+                    className="time-filter__option"
+                    disabled={busy}
+                    onClick={() => createFromPreset(preset.id)}
+                  >
+                    <span>{preset.name}</span>
+                  </button>
+                ))}
+                <button
+                  type="button"
+                  role="menuitem"
+                  className="time-filter__option"
+                  onClick={() => {
+                    setCreateMenuOpen(false);
+                    startComposeInExplorer(onNavigate, { mode: 'new' });
+                  }}
+                >
+                  Из разбора трафика…
+                </button>
+              </div>
+            )}
+          </div>
         )}
       </div>
       <div className="col" style={{ gap: 16, padding: '0 0 24px' }}>
@@ -1634,6 +1990,9 @@ function PageObservations({ onNavigate }) {
                 onRunReport={() => ApiClient.runObservationReport(item.id)
                   .then(() => pushToast?.({ kind: 'success', title: 'Отчёт сформирован' }))
                   .catch((e) => setError(e.message))}
+                isNativeAggregate={isNativeAggregateObservation(item)}
+                collectors={collectors}
+                locations={locations}
               />
             ))}
           </div>

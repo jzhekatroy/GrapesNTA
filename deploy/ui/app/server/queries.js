@@ -1127,8 +1127,20 @@ function vlanDistribution({ range = '24h', from, to, directions, collectorId, at
   };
 }
 
+function normalizeVlanIdList(vlanIds) {
+  if (vlanIds == null) return [];
+  const raw = Array.isArray(vlanIds) ? vlanIds : String(vlanIds).split(/[,\s]+/);
+  return [...new Set(
+    raw
+      .map((v) => Number(String(v).trim()))
+      .filter((n) => Number.isInteger(n) && n > 0 && n <= 4094),
+  )].sort((a, b) => a - b);
+}
+
 /** VLAN trend: top-N VLANs + Other per time bucket from traffic_vlan_1m. */
-function vlanDistributionTimeseries({ range = '24h', from, to, directions, collectorId, attachmentType } = {}) {
+function vlanDistributionTimeseries({
+  range = '24h', from, to, directions, collectorId, attachmentType, vlanIds,
+} = {}) {
   const collectorScope = parseCollectorScopes(collectorId);
   const windowSpec = resolveTrafficWindow({ range, from, to });
   const { bucketExpr, bucketSeconds } = categoryBucketFromWindowMode(windowSpec.mode);
@@ -1138,19 +1150,23 @@ function vlanDistributionTimeseries({ range = '24h', from, to, directions, colle
   const scope = sourcesScopeSql(collectorScope);
   const params = mergeCollectorParams(windowSpec.params, collectorScope);
   const attachmentSql = vlanAttachmentFilterSql(attachmentType, params);
+  const selectedVlans = normalizeVlanIdList(vlanIds);
+  if (selectedVlans.length) params.vlan_ids = selectedVlans;
+  const vlanScopeSql = selectedVlans.length
+    ? ' AND vlan_id IN {vlan_ids:Array(UInt32)}'
+    : '';
   const filter = `
         ${scope}
         AND minute >= ts_from
         AND minute < ts_to
         AND vlan_id != 0
-        AND direction IN (${dirsSql})${attachmentSql}`;
+        AND direction IN (${dirsSql})${attachmentSql}${vlanScopeSql}`;
   const cteHead = windowSpec.cteHead.trim().replace(/,\s*$/, '');
 
-  return {
-    sql: `
-      WITH
-        ${cteHead},
-        ${bucketSeconds} AS bucket_seconds,
+  const categoryKeyExpr = selectedVlans.length
+    ? 'toString(p.vlan_id)'
+    : `if(p.vlan_id IN (SELECT vlan_id FROM top_vlans), toString(p.vlan_id), 'other')`;
+  const topVlansCte = selectedVlans.length ? '' : `
         top_vlans AS (
           SELECT
             vlan_id
@@ -1162,27 +1178,33 @@ function vlanDistributionTimeseries({ range = '24h', from, to, directions, colle
           GROUP BY vlan_id
           ORDER BY sum(bytes) DESC
           LIMIT ${CATEGORY_TREND_TOP_N}
+        ),`;
+
+  return {
+    sql: `
+      WITH
+        ${cteHead},
+        ${bucketSeconds} AS bucket_seconds,${topVlansCte}
+        sliced AS (
+          SELECT
+            ${bucketExpr} AS bucket,
+            ${categoryKeyExpr} AS category_key,
+            sum(p.bytes) AS slice_bytes
+          FROM ${vlanTable} AS p
+          INNER JOIN ${sourcesTable} AS s
+            ON p.source_id = s.source_id
+          WHERE
+            ${filter}
+          GROUP BY
+            bucket,
+            category_key
         )
       SELECT
         bucket,
         toUnixTimestamp(bucket) AS bucket_ts,
         category_key,
         round(sum(slice_bytes) * 8 / bucket_seconds / 1e9, 3) AS gbps
-      FROM
-      (
-        SELECT
-          ${bucketExpr} AS bucket,
-          if(p.vlan_id IN (SELECT vlan_id FROM top_vlans), toString(p.vlan_id), 'other') AS category_key,
-          sum(p.bytes) AS slice_bytes
-        FROM ${vlanTable} AS p
-        INNER JOIN ${sourcesTable} AS s
-          ON p.source_id = s.source_id
-        WHERE
-          ${filter}
-        GROUP BY
-          bucket,
-          category_key
-      )
+      FROM sliced
       WHERE ${closedChartBucketSql('bucket', 'bucket_seconds')}
       GROUP BY
         bucket,
@@ -2513,6 +2535,7 @@ module.exports = {
   serviceDistributionTimeseries,
   vlanDistribution,
   vlanDistributionTimeseries,
+  normalizeVlanIdList,
   vlanTopTable,
   normalizeVlanDirections,
   otherPortsTop20,

@@ -20,10 +20,24 @@
 
 | Scope | Live / Report |
 |---|---|
-| native (нет фильтров и groupBy) | общий трафик через Explorer (`flows_raw`) |
+| native Explorer (нет фильтров и groupBy, `dataSource: explorer`) | общий трафик через Explorer (`flows_raw`) |
+| native dashboard (`dataSource: traffic_direction` \| `vlan_trend`) | `traffic_dashboard_1m` / `traffic_vlan_1m` через `trafficBandwidthSeries()` и `vlanDistributionTimeseries()` |
 | иначе | только после materialize → `observation_rollups_5m` |
 
-Готовые агрегаты `traffic_*` в наблюдениях **пока не используются**. UI не запускает rollup — это делает контейнер `grapes-analytics` / `grapes-worker`.
+### Нативные шаблоны dashboard
+
+Два отдельных наблюдения (пресеты в `observationPresets()`):
+
+- **Входящий/исходящий трафик** — линии `in`/`out` из `traffic_dashboard_1m`
+- **Трафик по VLAN** — Top-5 VLAN + «Прочие» из `traffic_vlan_1m`
+
+Поле виджета `timeseries_bps.dataSource`: `explorer` (по умолчанию), `traffic_direction`, `vlan_trend`.
+
+Для нативных шаблонов **materialize отключён** (персональный rollup не создаётся). Коллектор и список VLAN (для VLAN-шаблона) сохраняются в `widget.nativeScope` и используются и в live, и в отчётах. При создании из пресета сразу открываются настройки наблюдения. «Аплинк» — UI-название фильтра коллектора; один коллектор может суммировать несколько `source_id` с `include_in_total`.
+
+Ось времени: direction-график использует время начала flow (`traffic_dashboard_1m`), VLAN — время приёма (`traffic_vlan_1m`).
+
+UI не запускает rollup для Explorer-наблюдений — это делает контейнер `grapes-analytics` / `grapes-worker`.
 
 ## Analytics worker
 
@@ -79,7 +93,7 @@ DDL: `deploy/clickhouse/observations_store.sql`, `deploy/clickhouse/app_smtp_set
 
 ## Виджеты
 
-- `timeseries_bps`
+- `timeseries_bps` (+ опционально `dataSource` для dashboard-агрегатов)
 - `top_table`
 
 ## API
