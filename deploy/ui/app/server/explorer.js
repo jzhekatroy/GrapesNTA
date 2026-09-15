@@ -550,6 +550,19 @@ function formatExplorerAsPathRawValue(hops) {
   return hops.join(' ');
 }
 
+// ClickHouse Array(UInt32) becomes "1299,3356" in JS; the table stores "1299 3356".
+function explorerCanonicalGroupValue(dim, raw) {
+  if (dim && (dim.kind === 'as_path' || dim.filterType === 'as_path')) {
+    const hops = parseExplorerAsPathRaw(raw);
+    return hops.length ? formatExplorerAsPathRawValue(hops) : '—';
+  }
+  return String(raw ?? '—') || '—';
+}
+
+function explorerClickhouseGroupKey(groups, dims, row) {
+  return groups.map((g, idx) => explorerCanonicalGroupValue(dims[g], row?.[`g${idx}`])).join('|');
+}
+
 function formatExplorerAsPathDisplayLabel(hops, nameMap) {
   if (!Array.isArray(hops) || !hops.length) return '—';
   return hops.map((asn) => {
@@ -3187,7 +3200,7 @@ async function explorerResultSeries(body = {}, flowRows = [], options = {}) {
     async map(rows) {
       const seriesByRow = Object.fromEntries(flowRows.map((row) => [row.id, []]));
       for (const r of rows) {
-        const groupKey = groups.map((_, idx) => String(r[`g${idx}`] ?? '—') || '—').join('|');
+        const groupKey = explorerClickhouseGroupKey(groups, dims, r);
         const row = flowRows.find((item) => explorerFlowRowMatchesGroupKey(item, groupKey));
         if (!row) continue;
         seriesByRow[row.id].push({
@@ -3412,10 +3425,10 @@ async function explorerGroupedTimeseries(body = {}) {
     async map(rows) {
       const totalsByKey = new Map();
       for (const r of rows) {
-        const key = groups.map((_, idx) => String(r[`g${idx}`] ?? '—') || '—').join('|');
+        const key = explorerClickhouseGroupKey(groups, dims, r);
         if (!totalsByKey.has(key)) {
           totalsByKey.set(key, {
-            rawValues: groups.map((_, idx) => String(r[`g${idx}`] ?? '—') || '—'),
+            rawValues: groups.map((g, idx) => explorerCanonicalGroupValue(dims[g], r[`g${idx}`])),
             bytes: Number(r.series_bytes) || 0,
             packets: Number(r.series_packets) || 0,
             flows: Number(r.series_flows) || 0,
@@ -3444,7 +3457,7 @@ async function explorerGroupedTimeseries(body = {}) {
       const seriesByRow = Object.fromEntries(flowRows.map((row) => [row.id, []]));
       const idByKey = explorerFlowRowIdByGroupKey(flowRows);
       for (const r of rows) {
-        const groupKey = groups.map((_, idx) => String(r[`g${idx}`] ?? '—') || '—').join('|');
+        const groupKey = explorerClickhouseGroupKey(groups, dims, r);
         const rowId = idByKey.get(groupKey);
         if (!rowId) continue;
         seriesByRow[rowId].push({
@@ -4151,6 +4164,7 @@ module.exports = {
   parseExplorerAsPathHops,
   formatExplorerAsPathRawValue,
   formatExplorerAsPathDisplayLabel,
+  explorerClickhouseGroupKey,
   asnExplorerDisplayLabel,
   lookupAsnDisplayNames,
   explorerEntityDisplayLabel,

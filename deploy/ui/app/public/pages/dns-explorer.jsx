@@ -186,7 +186,10 @@ function parseDnsLogicPrefix(line) {
 function serializeDnsExplorerFilterDsl({ timeRange, customPeriod, filters }) {
   const lines = [];
   if (timeRange === 'custom' && customPeriod?.from && customPeriod?.to) {
-    lines.push(`time between "${customPeriod.from}" and "${customPeriod.to}"`);
+    const period = typeof normalizeCustomPeriod === 'function'
+      ? normalizeCustomPeriod(customPeriod)
+      : customPeriod;
+    lines.push(`time between "${period.from || customPeriod.from}" and "${period.to || customPeriod.to}"`);
   } else {
     lines.push(`time range ${timeRange}`);
   }
@@ -253,7 +256,9 @@ function parseDnsExplorerFilterDsl(text, schema = null) {
         const betweenMatch = rawLine.match(/^time\s+between\s+"([^"]+)"\s+and\s+"([^"]+)"/i);
         if (betweenMatch) {
           timeRange = 'custom';
-          customPeriod = { from: betweenMatch[1], to: betweenMatch[2] };
+          customPeriod = typeof normalizeCustomPeriod === 'function'
+            ? normalizeCustomPeriod({ from: betweenMatch[1], to: betweenMatch[2] })
+            : { from: betweenMatch[1], to: betweenMatch[2] };
           const err = validateDnsExplorerCustomPeriod(customPeriod, 'custom');
           if (err) parseError(lineNum, err);
           continue;
