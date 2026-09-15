@@ -764,12 +764,31 @@ function formatCustomPeriodLabel({ from, to }) {
   return `${fd}.${fmo} ${fh}:${fmi} — ${td}.${toParts[2]} ${th}:${tmi}`;
 }
 
+function normalizeCustomPeriodValue(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  if (/[zZ]$/.test(raw) || /[+-]\d{2}:\d{2}$/.test(raw)) {
+    const ms = new Date(raw).getTime();
+    if (!Number.isFinite(ms)) return '';
+    return msToDatetimeLocalValue(ms, getDisplayTimezone());
+  }
+  const m = raw.match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})(?::\d{2})?$/);
+  if (!m) return '';
+  return `${m[1]}-${m[2]}-${m[3]}T${m[4]}:${m[5]}`;
+}
+
+function normalizeCustomPeriod(period) {
+  return {
+    from: normalizeCustomPeriodValue(period?.from),
+    to: normalizeCustomPeriodValue(period?.to),
+  };
+}
+
 function validateCustomPeriod({ from, to }) {
   if (!from || !to) return 'Укажите начало и конец периода';
-  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(from) || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(to)) {
-    return 'Некорректная дата';
-  }
-  if (from >= to) return 'Начало должно быть раньше конца';
+  const norm = normalizeCustomPeriod({ from, to });
+  if (!norm.from || !norm.to) return 'Некорректная дата';
+  if (norm.from >= norm.to) return 'Начало должно быть раньше конца';
   return null;
 }
 
@@ -790,10 +809,11 @@ function timeRangePresetMs(rangeId) {
 
 function validateExplorerCustomPeriod({ from, to }, timeRange = '1h', maxRangeDays = EXPLORER_MAX_RANGE_DAYS, periodOptions = {}) {
   if (timeRange !== 'custom') return null;
-  const err = validateCustomPeriod({ from, to });
+  const norm = normalizeCustomPeriod({ from, to });
+  const err = validateCustomPeriod(norm);
   if (err) return err;
-  const fromMs = new Date(from).getTime();
-  const toMs = new Date(to).getTime();
+  const fromMs = new Date(norm.from).getTime();
+  const toMs = new Date(norm.to).getTime();
   if (!Number.isFinite(fromMs) || !Number.isFinite(toMs)) return 'Некорректная дата';
   const limitDays = explorerRangeLimitDays(maxRangeDays);
   const limitMs = Number(periodOptions.maxRangeMs) > 0
@@ -2399,7 +2419,7 @@ Object.assign(window, {
   Sidebar, Header, NAV, CABINET_NAV, CABINET_PAGE_IDS, PAGE_TITLES, setPageTitles, GrapesGlyph,
   isCabinetMode, isImpersonating, ImpersonationBanner,
   TIME_RANGE_OPTIONS, TIMEZONE_PRESETS, TRAFFIC_DIRECTIONS, defaultDirectionsEnabled,
-  defaultCustomPeriod, formatCustomPeriodLabel, validateCustomPeriod, validateExplorerCustomPeriod, explorerRangeLimitDays, timeRangePresetMs, EXPLORER_MAX_RANGE_DAYS, timeRangeLabel, timeRangeChipLabel, TIME_RANGE_CHIP_LABELS, yesterdayCustomPeriod, isYesterdayPeriod,
+  defaultCustomPeriod, formatCustomPeriodLabel, normalizeCustomPeriodValue, normalizeCustomPeriod, validateCustomPeriod, validateExplorerCustomPeriod, explorerRangeLimitDays, timeRangePresetMs, EXPLORER_MAX_RANGE_DAYS, timeRangeLabel, timeRangeChipLabel, TIME_RANGE_CHIP_LABELS, yesterdayCustomPeriod, isYesterdayPeriod,
   toDatetimeLocalValue, dnsBucketSecondsFromMode, explorerGranularityBucketSeconds,
   collectorFilterLabel, directionSummaryLabel, TimezoneSelector,
   parseAppHash, parseJsonSearchParam, parseDirectionsParam, applyTopTalkersUrlGlobals,

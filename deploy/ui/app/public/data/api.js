@@ -1059,11 +1059,21 @@ const ApiClient = (() => {
     return cabinetMode ? '/api/cabinet/explorer/snapshots' : '/api/explorer/snapshots';
   }
 
+  function snapshotPeriodToDisplay(from, to) {
+    const convert = typeof dataDatetimeLocalToDisplay === 'function'
+      ? dataDatetimeLocalToDisplay
+      : (typeof normalizeCustomPeriodValue === 'function' ? normalizeCustomPeriodValue : (value) => value);
+    return {
+      from: convert(from),
+      to: convert(to),
+    };
+  }
+
   function mapExplorerSharedSnapshot(data) {
     const q = data?.query || {};
     const timeRange = q.range === 'custom' ? 'custom' : (q.range || '1h');
     const customPeriod = timeRange === 'custom'
-      ? { from: q.from, to: q.to }
+      ? snapshotPeriodToDisplay(q.from, q.to)
       : null;
     const payload = data?.payload || {};
     return {
@@ -1093,7 +1103,7 @@ const ApiClient = (() => {
     const q = data?.query || {};
     const timeRange = q.range === 'custom' ? 'custom' : (q.range || '24h');
     const customPeriod = timeRange === 'custom'
-      ? { from: q.from, to: q.to }
+      ? snapshotPeriodToDisplay(q.from, q.to)
       : null;
     const payload = data?.payload || {};
     const collectorFilter = q.collectorId

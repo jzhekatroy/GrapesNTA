@@ -9,6 +9,8 @@ const {
   parseExplorerAsPathHops,
   formatExplorerAsPathRawValue,
   formatExplorerAsPathDisplayLabel,
+  explorerClickhouseGroupKey,
+  explorerDimensions,
 } = require('./explorer');
 
 const WINDOW = {
@@ -110,6 +112,51 @@ describe('explorer AS path filters', () => {
     assert.match(spec.sql, /f\.`src_as_path` = \{series_g_0:Array\(UInt32\)\}/);
     assert.deepEqual(spec.params.series_g_0, [6939, 12389]);
   });
+
+  it('пришивает точки динамики к строке, когда ClickHouse отдал массив hop', async () => {
+    const spec = await explorerResultSeries({
+      ...WINDOW,
+      groupBy: ['src_asn', 'dst_as_path', 'dst_asn'],
+      filters: [],
+    }, [
+      {
+        id: 'r1',
+        rawValues: ['AS15169', '1299 3356', 'AS13335'],
+        values: ['AS15169 Google', 'AS1299 Telia → AS3356 Level3', 'AS13335 Cloudflare'],
+      },
+    ]);
+    const out = await spec.map([
+      {
+        g0: 'AS15169',
+        g1: [1299, 3356],
+        g2: 'AS13335',
+        bucket: '2026-08-14 04:40:00',
+        bucket_ts: 1723610400,
+        bytes: 1000,
+        packets: 10,
+        flows: 1,
+        bps: 8000,
+        pps: 1,
+        fps: 1,
+      },
+      {
+        g0: 'AS15169',
+        g1: '1299,3356',
+        g2: 'AS13335',
+        bucket: '2026-08-14 04:41:00',
+        bucket_ts: 1723610460,
+        bytes: 2000,
+        packets: 20,
+        flows: 1,
+        bps: 16000,
+        pps: 2,
+        fps: 1,
+      },
+    ]);
+    assert.equal(out.seriesByRow.r1.length, 2);
+    assert.equal(out.seriesByRow.r1[0].bps, 8000);
+    assert.equal(out.seriesByRow.r1[1].bps, 16000);
+  });
 });
 
 describe('explorer AS path helpers', () => {
@@ -134,5 +181,28 @@ describe('explorer AS path helpers', () => {
     assert.deepEqual(parseExplorerAsPathRaw([6939, 12389]), [6939, 12389]);
     assert.deepEqual(parseExplorerAsPathRaw('6939 12389'), [6939, 12389]);
     assert.deepEqual(parseExplorerAsPathRaw('—'), []);
+  });
+
+  it('нормализует AS path из массива и из строки с запятыми к одному ключу', () => {
+    const dims = explorerDimensions();
+    const groups = ['src_asn', 'dst_as_path', 'dst_asn'];
+    const fromArray = explorerClickhouseGroupKey(groups, dims, {
+      g0: 'AS15169',
+      g1: [1299, 3356],
+      g2: 'AS13335',
+    });
+    const fromComma = explorerClickhouseGroupKey(groups, dims, {
+      g0: 'AS15169',
+      g1: '1299,3356',
+      g2: 'AS13335',
+    });
+    const fromSpaces = explorerClickhouseGroupKey(groups, dims, {
+      g0: 'AS15169',
+      g1: '1299 3356',
+      g2: 'AS13335',
+    });
+    assert.equal(fromArray, 'AS15169|1299 3356|AS13335');
+    assert.equal(fromComma, fromArray);
+    assert.equal(fromSpaces, fromArray);
   });
 });

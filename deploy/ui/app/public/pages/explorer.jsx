@@ -1100,8 +1100,13 @@ function migrateExplorerSnapshot(snapshot) {
       ? snapshot.thresholds.map((t) => api.thresholdDraftFromApi?.(t) || t)
       : cloneExplorerThresholdsList(snapshot.thresholds);
   }
+  let customPeriod = rest.customPeriod;
+  if (rest.timeRange === 'custom' && customPeriod && typeof normalizeCustomPeriod === 'function') {
+    customPeriod = normalizeCustomPeriod(customPeriod);
+  }
   return {
     ...rest,
+    customPeriod,
     filters: normalizeExplorerFiltersList(filters),
     thresholds,
   };
@@ -1404,7 +1409,10 @@ function serializeExplorerFilterDsl({
 }) {
   const lines = [];
   if (timeRange === 'custom' && customPeriod?.from && customPeriod?.to) {
-    lines.push(`time between "${customPeriod.from}" and "${customPeriod.to}"`);
+    const period = typeof normalizeCustomPeriod === 'function'
+      ? normalizeCustomPeriod(customPeriod)
+      : customPeriod;
+    lines.push(`time between "${period.from || customPeriod.from}" and "${period.to || customPeriod.to}"`);
   } else {
     lines.push(`time range ${timeRange}`);
   }
@@ -1542,7 +1550,9 @@ function parseExplorerFilterDsl(text, schema = null) {
         const betweenMatch = rawLine.match(/^time\s+between\s+"([^"]+)"\s+and\s+"([^"]+)"/i);
         if (betweenMatch) {
           timeRange = 'custom';
-          customPeriod = { from: betweenMatch[1], to: betweenMatch[2] };
+          customPeriod = typeof normalizeCustomPeriod === 'function'
+            ? normalizeCustomPeriod({ from: betweenMatch[1], to: betweenMatch[2] })
+            : { from: betweenMatch[1], to: betweenMatch[2] };
           const err = validateExplorerCustomPeriod(customPeriod, 'custom', schema?.maxRangeDays);
           if (err) parseError(lineNum, err);
           continue;
