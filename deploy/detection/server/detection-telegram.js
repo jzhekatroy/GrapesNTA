@@ -2,7 +2,7 @@
 
 const { query, executeCommand, insertRows, config } = require('./clickhouse');
 const { tableRef, ensureDetectionTables } = require('./detection-schema');
-const { formatCh, parseUtc } = require('./detection-core');
+const { formatCh, parseUtc, MINUTE } = require('./detection-core');
 const {
   KINDS,
   KIND_LABEL,
@@ -56,6 +56,7 @@ const DEFAULT_TELEGRAM_API_URL = 'https://api.telegram.org';
 const DEFAULT_MIN_CLIENT_SHARE_PCT = 10;
 const TELEGRAM_SKIP_BELOW_SHARE = 'below_client_share';
 const MAX_STREAK = 60;
+const PREV_ROWS_GAP_MINUTES = 15;
 const ALERT_SCOPES = new Set(['all', 'client', 'net']);
 const ALERT_SCOPE_LABEL = { all: 'всё', client: 'абоненты', net: 'сети' };
 const ALERT_KINDS = new Set(['all', 'attack', 'peak']);
@@ -1879,11 +1880,47 @@ async function sendTestTelegramMessage() {
   );
 }
 
+function previousRowsLookbackMinutes(take) {
+  return normalizeStreak(take) + 1 + PREV_ROWS_GAP_MINUTES;
+}
+
+function previousRowsScopeFilter(keys) {
+  const byScope = new Map();
+  for (const key of keys || []) {
+    const scope = String(key.scope || '').trim();
+    const scopeId = String(key.scopeId ?? key.scope_id ?? '').trim();
+    if (!scope || !scopeId) continue;
+    const ids = byScope.get(scope) || [];
+    ids.push(scopeId);
+    byScope.set(scope, ids);
+  }
+  const params = {};
+  const parts = [];
+  let i = 0;
+  for (const [scope, ids] of byScope) {
+    const scopeParam = `scope_${i}`;
+    const idsParam = `ids_${i}`;
+    parts.push(`(scope = {${scopeParam}:String} AND scope_id IN {${idsParam}:Array(String)})`);
+    params[scopeParam] = scope;
+    params[idsParam] = [...new Set(ids)];
+    i += 1;
+  }
+  return {
+    sql: parts.length ? `(${parts.join(' OR ')})` : '0',
+    params,
+  };
+}
+
 async function loadPreviousAllRows(minute, keys, limit = DEFAULT_STREAK) {
   if (!keys.length) return new Map();
   await ensureDetectionTables();
   const take = normalizeStreak(limit);
+  const beforeTs = parseUtc(minute);
+  if (!Number.isFinite(beforeTs)) return new Map();
+  const fromTs = beforeTs - previousRowsLookbackMinutes(take) * MINUTE;
   const keySet = new Set(keys.map((k) => objectKey(k.scope, k.scopeId)));
+  const scopeFilter = previousRowsScopeFilter(keys);
+  if (scopeFilter.sql === '0') return new Map();
   const { rows } = await query(`
     SELECT scope, scope_id, proto, minute, growth_bps, growth_pps, bps, bytes,
            amp_bytes, amp_packets, amp_srcs, growth_amp,
@@ -1915,11 +1952,18 @@ async function loadPreviousAllRows(minute, keys, limit = DEFAULT_STREAK) {
         row_number() OVER (PARTITION BY scope, scope_id, proto ORDER BY minute DESC) AS rn
       FROM ${tableRef()} FINAL
       WHERE proto IN ('all', 'udp')
+        AND minute >= ${utcDateTime('from')}
         AND minute < ${utcDateTime('before')}
+        AND ${scopeFilter.sql}
     )
     WHERE rn <= {take:UInt16}
     ORDER BY minute DESC
-  `, { before: formatCh(parseUtc(minute)), take }, { name: 'detection/telegram-prev-rows' });
+  `, {
+    from: formatCh(fromTs),
+    before: formatCh(beforeTs),
+    take,
+    ...scopeFilter.params,
+  }, { name: 'detection/telegram-prev-rows' });
 
   const merged = new Map();
   for (const r of rows) {
@@ -2538,6 +2582,9 @@ module.exports = {
   DEFAULT_ALERT_KIND,
   DEFAULT_STREAK,
   DEFAULT_NORMALIZE_STREAK,
+  PREV_ROWS_GAP_MINUTES,
+  previousRowsLookbackMinutes,
+  previousRowsScopeFilter,
   DEFAULT_TELEGRAM_API_URL,
   DEFAULT_MIN_CLIENT_SHARE_PCT,
   TELEGRAM_SKIP_BELOW_SHARE,

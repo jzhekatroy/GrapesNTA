@@ -640,12 +640,17 @@ async function loadPortMetrics(scope, minuteTs) {
   return map;
 }
 
+const BASELINE_CACHE_MS = 6 * 60 * 60 * 1000;
+
+function isBaselineCacheFresh(cache, now = Date.now(), ttlMs = BASELINE_CACHE_MS) {
+  return Boolean(cache?.map?.size) && (now - Number(cache.at || 0)) < ttlMs;
+}
+
 let clientBaselineCache = { at: 0, map: new Map() };
+let netBaselineCache = { at: 0, map: new Map() };
 
 async function loadClientBaselines() {
-  if (Date.now() - clientBaselineCache.at < 6 * 60 * 60 * 1000 && clientBaselineCache.map.size) {
-    return clientBaselineCache.map;
-  }
+  if (isBaselineCacheFresh(clientBaselineCache)) return clientBaselineCache.map;
   const q = BASELINE_QUANTILE;
   const days = BASELINE_DAYS;
   const map = new Map();
@@ -669,6 +674,7 @@ async function loadClientBaselines() {
 }
 
 async function loadNetBaselines(beforeTs) {
+  if (isBaselineCacheFresh(netBaselineCache)) return netBaselineCache.map;
   const q = BASELINE_QUANTILE;
   const days = BASELINE_DAYS;
   const map = new Map();
@@ -695,6 +701,7 @@ async function loadNetBaselines(beforeTs) {
       ampBps: Number(r.amp_bps_p95 || 0) || null,
     });
   }
+  netBaselineCache = { at: Date.now(), map };
   return map;
 }
 
@@ -1149,4 +1156,6 @@ module.exports = {
   loadHistory,
   lastClosedMinute,
   HISTORY_METRICS,
+  BASELINE_CACHE_MS,
+  isBaselineCacheFresh,
 };

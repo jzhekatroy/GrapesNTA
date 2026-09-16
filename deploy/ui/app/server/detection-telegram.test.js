@@ -33,6 +33,9 @@ const {
   mapEventRow,
   formatNormalizeMessage,
   snapshotByProto,
+  PREV_ROWS_GAP_MINUTES,
+  previousRowsLookbackMinutes,
+  previousRowsScopeFilter,
 } = require('./detection-telegram');
 const { emptyInvestigate } = require('./detection-investigate');
 
@@ -1191,5 +1194,30 @@ describe('detection-telegram', () => {
     assert.match(csv, /,all,/);
     assert.match(csv, /,tcp,/);
     assert.match(csv, /,udp,/);
+  });
+
+  it('окно прошлых строк: streak + rising edge + запас на дыры', () => {
+    assert.equal(previousRowsLookbackMinutes(3), 3 + 1 + PREV_ROWS_GAP_MINUTES);
+    assert.equal(previousRowsLookbackMinutes(1), 1 + 1 + PREV_ROWS_GAP_MINUTES);
+    assert.equal(previousRowsLookbackMinutes(60), 60 + 1 + PREV_ROWS_GAP_MINUTES);
+    assert.equal(previousRowsLookbackMinutes(100), 60 + 1 + PREV_ROWS_GAP_MINUTES);
+  });
+
+  it('фильтр прошлых строк режет по scope и уникальным id', () => {
+    const empty = previousRowsScopeFilter([]);
+    assert.equal(empty.sql, '0');
+
+    const mixed = previousRowsScopeFilter([
+      { scope: 'client', scopeId: '100' },
+      { scope: 'client', scope_id: '100' },
+      { scope: 'net', scopeId: '10.0.0.0/24' },
+      { scope: '', scopeId: 'skip' },
+    ]);
+    assert.match(mixed.sql, /scope = \{scope_0:String\} AND scope_id IN \{ids_0:Array\(String\)\}/);
+    assert.match(mixed.sql, /scope = \{scope_1:String\} AND scope_id IN \{ids_1:Array\(String\)\}/);
+    assert.equal(mixed.params.scope_0, 'client');
+    assert.deepEqual(mixed.params.ids_0, ['100']);
+    assert.equal(mixed.params.scope_1, 'net');
+    assert.deepEqual(mixed.params.ids_1, ['10.0.0.0/24']);
   });
 });
