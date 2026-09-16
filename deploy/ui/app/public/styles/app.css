@@ -5705,6 +5705,50 @@ body.explorer-chip-dragging * {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+.detection-attack-vol {
+  font: var(--pv-text-body-2-bold);
+  color: var(--fg-primary);
+  white-space: nowrap;
+}
+.detection-attack-share {
+  font: var(--pv-text-body-2-bold);
+  color: var(--st-critical);
+  white-space: nowrap;
+}
+.detection-attack-share--peak {
+  color: var(--st-warning);
+}
+.detection-attack-banner {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 20px;
+  margin-bottom: 14px;
+  padding: 12px 14px;
+  border-radius: 8px;
+  background: var(--st-critical-bg);
+  border: 1px solid var(--bd-default);
+}
+.detection-attack-banner--peak {
+  background: var(--st-warning-bg);
+}
+.detection-attack-banner__item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 120px;
+}
+.detection-attack-banner__label {
+  font: var(--pv-text-caption, var(--pv-text-body-3));
+  color: var(--fg-secondary);
+}
+.detection-attack-banner__value {
+  font: var(--pv-text-body-2-bold);
+  color: var(--fg-primary);
+}
+.detection-attack-banner__value--muted {
+  color: var(--fg-secondary);
+  font: var(--pv-text-body-2);
+}
 .detection-notify-text {
   margin: 0;
   padding: 14px 16px;

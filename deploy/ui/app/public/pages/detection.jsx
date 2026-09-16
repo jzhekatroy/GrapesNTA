@@ -185,6 +185,75 @@ function formatPps(value) {
   return formatRate(value, ['п/с', 'тыс. п/с', 'млн п/с', 'млрд п/с']);
 }
 
+function eventAttackBps(event) {
+  const n = Number(event?.alertByProto?.all?.bps);
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+function eventHourUsual(event) {
+  const v = event?.verdict || {};
+  const n = Number(v.hourCeiling ?? v.hourP95);
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+function eventHourRatio(event) {
+  const r = Number(event?.verdict?.hourRatio);
+  if (Number.isFinite(r) && r > 0) return r;
+  const bps = eventAttackBps(event);
+  const usual = eventHourUsual(event);
+  if (bps != null && usual) return bps / usual;
+  return null;
+}
+
+function formatHourShare(ratio) {
+  if (ratio == null || !Number.isFinite(ratio) || ratio <= 0) return '—';
+  const pct = ratio * 100;
+  const digits = pct >= 10 ? 0 : 1;
+  return `${pct.toLocaleString('ru-RU', { minimumFractionDigits: digits, maximumFractionDigits: digits })}%`;
+}
+
+function isPeakEvent(event) {
+  return event?.verdict?.kind === 'benign_peak' || event?.status === 'peak';
+}
+
+function attackLoadTitle(event) {
+  const bps = eventAttackBps(event);
+  const ratio = eventHourRatio(event);
+  const usual = eventHourUsual(event);
+  return [
+    bps != null ? `атака ${formatBps(bps)}` : null,
+    ratio != null ? `×${ratio.toFixed(2)} к норме часа` : null,
+    usual != null ? `норма ${formatBps(usual)}` : null,
+  ].filter(Boolean).join(' · ');
+}
+
+function AttackLoadBanner({ event }) {
+  if (!event) return null;
+  const bps = eventAttackBps(event);
+  const ratio = eventHourRatio(event);
+  const usual = eventHourUsual(event);
+  if (bps == null && ratio == null) return null;
+  const peak = isPeakEvent(event);
+  return (
+    <div className={`detection-attack-banner${peak ? ' detection-attack-banner--peak' : ''}`}>
+      <div className="detection-attack-banner__item">
+        <div className="detection-attack-banner__label">Объём атаки</div>
+        <div className="detection-attack-banner__value">{bps == null ? '—' : formatBps(bps)}</div>
+      </div>
+      <div className="detection-attack-banner__item">
+        <div className="detection-attack-banner__label">От нормы часа</div>
+        <div className="detection-attack-banner__value">{ratio == null ? '—' : formatHourShare(ratio)}</div>
+      </div>
+      {usual != null && (
+        <div className="detection-attack-banner__item">
+          <div className="detection-attack-banner__label">Норма часа</div>
+          <div className="detection-attack-banner__value detection-attack-banner__value--muted">{formatBps(usual)}</div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function objectKind(row) {
   return String(row?.scope || '').toLowerCase() === 'net' ? 'net' : 'client';
 }
@@ -229,7 +298,7 @@ function notifyHeadline(row) {
 }
 
 function EventNotifyModal({ event, onClose }) {
-  const peak = event?.verdict?.kind === 'benign_peak' || event?.status === 'peak';
+  const peak = isPeakEvent(event);
   return (
     <Modal
       open={!!event}
@@ -239,6 +308,7 @@ function EventNotifyModal({ event, onClose }) {
       subtitle={event ? `${event.name || event.scopeId}${peak ? ' · обычный пик' : ''}` : ''}
       footer={<Button kind="ghost" onClick={onClose}>Закрыть</Button>}
     >
+      <AttackLoadBanner event={event} />
       {event?.alertText ? (
         <pre className="detection-notify-text">{event.alertText}</pre>
       ) : (
@@ -1124,6 +1194,38 @@ function PageDetection() {
                     {r.name || r.scopeId}
                   </span>
                 ),
+              },
+              {
+                key: 'attackVol',
+                title: 'Объём атаки',
+                width: 140,
+                sortAccessor: (r) => eventAttackBps(r) ?? -1,
+                render: (r) => {
+                  const bps = eventAttackBps(r);
+                  return (
+                    <span className="detection-attack-vol" title={attackLoadTitle(r)}>
+                      {bps == null ? '—' : formatBps(bps)}
+                    </span>
+                  );
+                },
+              },
+              {
+                key: 'attackShare',
+                title: 'От нормы',
+                width: 110,
+                sortAccessor: (r) => eventHourRatio(r) ?? -1,
+                render: (r) => {
+                  const ratio = eventHourRatio(r);
+                  const peak = isPeakEvent(r);
+                  return (
+                    <span
+                      className={`detection-attack-share${peak ? ' detection-attack-share--peak' : ''}`}
+                      title={attackLoadTitle(r)}
+                    >
+                      {ratio == null ? '—' : formatHourShare(ratio)}
+                    </span>
+                  );
+                },
               },
               {
                 key: 'kind',
