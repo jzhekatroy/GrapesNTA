@@ -22,6 +22,8 @@ const {
   isAboveGrowthThreshold,
   shouldSendAlert,
   shouldSendNormalize,
+  shouldNormalizeQuiet,
+  shouldSendSignal,
   matchesAlertScope,
   matchesAlertKind,
   isAlertAttack,
@@ -1059,6 +1061,72 @@ describe('detection-telegram', () => {
       { minute: '2026-09-01 17:11:00', growth_bps: 1.3, bps: 3e9 },
       { minute: '2026-09-01 17:10:00', growth_bps: 0.9, bps: 2e9 },
     ], 1.6, 3, { alertBps: 5.8e9 }), true);
+    assert.equal(shouldSendNormalize([
+      { minute: '2026-09-16 01:42:00', growth_bps: 0.13, bps: 1.42e9 },
+      { minute: '2026-09-16 01:41:00', growth_bps: 0.14, bps: 1.45e9 },
+      { minute: '2026-09-16 01:40:00', growth_bps: 0.15, bps: 1.60e9 },
+    ], 1.6, 3, { alertBps: 2.745e9, hourP95: 0.104e9 }), true);
+  });
+
+  it('SYN: три тихие минуты закрывают без rising edge', () => {
+    const quiet = (minute) => ({
+      minute,
+      scope: 'client',
+      scope_id: '72966',
+      proto: 'all',
+      growth_bps: 0.26,
+      syn_only_packets: 5188 * 60,
+      syn_only_bytes: 5188 * 60 * 72,
+      syn_only_rows: 8,
+      established_packets: 80_000_000,
+      data_packets: 70_000_000,
+    });
+    const flood = (minute) => ({
+      minute,
+      scope: 'client',
+      scope_id: '72966',
+      proto: 'all',
+      growth_bps: 0.8,
+      syn_only_packets: 266_772_480,
+      syn_only_bytes: 266_772_480 * 72,
+      syn_only_rows: 4484,
+      established_packets: 12_000_000,
+      data_packets: 11_912_448,
+      sampling_rate: 4096,
+    });
+    const isQuiet = (item) => !item.syn_only_packets || item.syn_only_packets / 60 < 500_000;
+    assert.equal(shouldNormalizeQuiet([quiet('12:11'), quiet('12:10')], isQuiet, 3), false);
+    assert.equal(shouldNormalizeQuiet([
+      quiet('12:11'), quiet('12:10'), quiet('12:09'),
+    ], isQuiet, 3), true);
+    assert.equal(shouldSendSignal([
+      quiet('12:11'), quiet('12:10'), quiet('12:09'), quiet('12:08'),
+    ], isQuiet, 3), false);
+
+    const current = quiet('2026-09-16 01:42:00');
+    const picked = pickNormalizeCandidates([current], new Map([
+      ['client|72966', [quiet('2026-09-16 01:41:00'), quiet('2026-09-16 01:40:00'), quiet('2026-09-16 01:39:00')]],
+    ]), 1.6, {
+      streak: 3,
+      activeByKey: new Map([
+        ['client|72966|syn_flood', {
+          id: 'e-syn',
+          scope: 'client',
+          scopeId: '72966',
+          signal: 'syn_flood',
+        }],
+      ]),
+    });
+    assert.equal(picked.length, 1);
+    assert.equal(picked[0].signal, 'syn_flood');
+
+    const stillHot = pickNormalizeCandidates([flood('2026-09-16 01:42:00')], new Map(), 1.6, {
+      streak: 3,
+      activeByKey: new Map([
+        ['client|72966|syn_flood', { id: 'e-syn', scope: 'client', scopeId: '72966', signal: 'syn_flood' }],
+      ]),
+    });
+    assert.equal(stillHot.length, 0);
   });
 
   it('нормализация только для активного события', () => {

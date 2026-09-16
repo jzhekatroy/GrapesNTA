@@ -38,6 +38,10 @@ const DOWNLOAD_SRC_IPS_MAX = 2;
 const VICTIM_ACTION_SHARE_MIN = 0.15;
 const AMP_DEST_ACTION_SHARE = 0.5;
 const NORMALIZE_BPS_KEEP = 0.85;
+// hourP95 из снимка алерта. Если он на порядок меньше самого алерта, это не
+// «обычный час», а заниженная норма — 85783 висел 5 суток на 1.4 Гбит при
+// замороженных 104 Мбит. Такой p95 не держит событие.
+const NORMALIZE_HOUR_MIN_SHARE = 0.15;
 
 function num(value) {
   const n = Number(value);
@@ -409,7 +413,8 @@ function volumeStillHigh(currentBps, alertBps, hourP95) {
   const p95 = num(hourP95);
   if (cur == null) return false;
   if (alert > 0 && cur > alert * NORMALIZE_BPS_KEEP) return true;
-  if (p95 > 0 && cur > p95 * 1.25) return true;
+  const hourUsable = p95 > 0 && !(alert > 0 && p95 < alert * NORMALIZE_HOUR_MIN_SHARE);
+  if (hourUsable && cur > p95 * 1.25) return true;
   return false;
 }
 

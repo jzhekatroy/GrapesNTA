@@ -111,6 +111,10 @@ describe('detection-classify', () => {
   it('объём не сел — нормализацию держим', () => {
     assert.equal(volumeStillHigh(9.4e9, 6.9e9, 3e9), true);
     assert.equal(volumeStillHigh(0.64e9, 5.8e9, 0.84e9), false);
+    // 85783: 1.4 Гбит при алерте 2.75 и замороженных 104 Мбит — не держать.
+    assert.equal(volumeStillHigh(1.42e9, 2.745e9, 0.104e9), false);
+    // Час соразмерен алерту и объём ещё выше часа — держим.
+    assert.equal(volumeStillHigh(3e9, 8e9, 2e9), true);
   });
 
   it('Митигатор Клауд с amp-метриками → амплификация в один сервер', () => {

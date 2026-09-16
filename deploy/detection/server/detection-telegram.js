@@ -543,6 +543,17 @@ function shouldSendNormalize(historyNewestFirst, threshold, streak = DEFAULT_NOR
   return true;
 }
 
+// Нормализация сигнала: N тихих минут подряд. Без rising edge — иначе SYN,
+// который кончился до выкладки или пока воркер стоял, висит навсегда:
+// все минуты в окне уже тихие, фронта нет. 72966 так висел 1.7 суток.
+function shouldNormalizeQuiet(historyNewestFirst, isQuietFn, streak = DEFAULT_NORMALIZE_STREAK) {
+  const need = normalizeStreak(streak, DEFAULT_NORMALIZE_STREAK);
+  const history = Array.isArray(historyNewestFirst) ? historyNewestFirst : [];
+  if (!history.length || !isQuietFn(history[0])) return false;
+  if (history.length < need) return false;
+  return history.slice(0, need).every((row) => isQuietFn(row));
+}
+
 function objectKey(scope, scopeId, signal) {
   if (signal) return objectSignalKey(scope, scopeId, signal);
   return `${scope}|${scopeId}`;
@@ -1465,23 +1476,26 @@ function pickNormalizeCandidates(allRows, previousByKey, threshold, options = {}
       if (activeSignal !== signal && !(signal === SIGNALS.volume && !active.signal)) continue;
       const cfg = signalSettings(settings, activeSignal);
       const t = Number(active.threshold) || resolveGrowthThreshold(row.scope, row.scope_id, threshold, options.thresholdByKey);
+      const quiet = (item) => {
+        if (activeSignal === SIGNALS.amplification) {
+          const udp = ampRowFor(item, group);
+          if (!udp) return true;
+          return !isAmplificationHit(udp) && !ampStillGoing(udp);
+        }
+        if (activeSignal === SIGNALS.syn_flood) {
+          return !isSynFloodHit(item) && !isSynFloodHit(item.tcpRow || {})
+            && !synFloodStillGoing(item);
+        }
+        return !isSignalHot(activeSignal, item, group, t);
+      };
       const ready = activeSignal === SIGNALS.volume
         ? shouldSendNormalize(history, t, options.streak ?? cfg.normalizeStreak, {
           alertBps: active.alertByProto?.all?.bps ?? active.alertBps,
           hourP95: active.verdict?.hourP95,
         })
-        : shouldSendSignal(history, (item) => {
-          if (activeSignal === SIGNALS.amplification) {
-            const udp = ampRowFor(item, group);
-            if (!udp) return true;
-            return !isAmplificationHit(udp) && !ampStillGoing(udp);
-          }
-          if (activeSignal === SIGNALS.syn_flood) {
-            return !isSynFloodHit(item) && !isSynFloodHit(item.tcpRow || {})
-              && !synFloodStillGoing(item);
-          }
-          return !isSignalHot(activeSignal, item, group, t);
-        }, cfg.normalizeStreak);
+        : activeSignal === SIGNALS.syn_flood
+          ? shouldNormalizeQuiet(history, quiet, cfg.normalizeStreak)
+          : shouldSendSignal(history, quiet, cfg.normalizeStreak);
       if (!ready) continue;
       out.push({ row, key: objectId, signalKey, signal: activeSignal, active });
     }
@@ -2609,6 +2623,7 @@ module.exports = {
   isAboveGrowthThreshold,
   shouldSendAlert,
   shouldSendNormalize,
+  shouldNormalizeQuiet,
   matchesAlertScope,
   matchesAlertKind,
   isAlertAttack,
