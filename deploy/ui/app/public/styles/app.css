@@ -2605,6 +2605,16 @@ body.explorer-chip-dragging * {
   display: flex; align-items: center; justify-content: space-between; gap: 12px;
   margin-bottom: 14px;
 }
+.card__head:has(.card__head-meta) {
+  flex-wrap: wrap;
+}
+.card__head-meta {
+  flex: 1 1 100%;
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  min-width: 0;
+}
 .card__title { font: var(--pv-text-h4); color: var(--fg-primary); }
 .card__sub { font: var(--pv-text-body-3); color: var(--fg-secondary); }
 .card__tools { display: flex; align-items: center; gap: 8px; margin-left: auto; }
@@ -3537,7 +3547,11 @@ body.explorer-chip-dragging * {
   padding: 14px 14px 12px;
   border-bottom: 1px solid var(--bd-soft);
 }
-.card--explorer-results .card__head > div:first-child {
+.card--explorer-results .card__head > .card__head-meta {
+  flex: 1 1 100%;
+  max-width: 100%;
+}
+.card--explorer-results .card__head-main {
   flex: 1 1 280px;
   min-width: 0;
 }
@@ -3924,12 +3938,70 @@ body.explorer-chip-dragging * {
   min-width: 0;
 }
 
-.explorer-refreshing-data {
+.explorer-query-elapsed {
+  font: var(--pv-text-body-3);
+  font-variant-numeric: tabular-nums;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  color: #606E8C;
+  letter-spacing: 0.04em;
+  user-select: none;
+  pointer-events: none;
+}
+
+.card:has(.explorer-query-elapsed) .widget-load-badge {
+  display: none;
+}
+
+.explorer-query-status {
   padding: 40px;
   text-align: center;
-  color: var(--fg-secondary);
+}
+
+.explorer-query-status__label {
+  appearance: none;
+  background: none;
+  border: none;
+  padding: 0;
+  margin: 0;
   font: var(--pv-text-body-2);
+  color: var(--fg-secondary);
+  cursor: pointer;
   animation: explorer-refreshing-pulse 2.5s ease-in-out infinite;
+}
+
+.explorer-query-status__label:hover {
+  color: var(--fg-primary);
+}
+
+.explorer-query-status__timer {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows var(--pv-dur-slow) var(--pv-ease-out);
+}
+
+.explorer-query-status__timer.is-expanded {
+  grid-template-rows: 1fr;
+}
+
+.explorer-query-status__timer-inner {
+  overflow: hidden;
+  min-height: 0;
+}
+
+.explorer-query-status__timer-value {
+  display: block;
+  padding-top: 8px;
+  font: var(--pv-text-body-3);
+  font-variant-numeric: tabular-nums;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  color: var(--fg-muted);
+  letter-spacing: 0.04em;
+  opacity: 0;
+  transition: opacity var(--pv-dur-slow) var(--pv-ease-out);
+}
+
+.explorer-query-status__timer.is-expanded .explorer-query-status__timer-value {
+  opacity: 1;
 }
 
 @keyframes explorer-refreshing-pulse {

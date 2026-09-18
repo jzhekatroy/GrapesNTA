@@ -16,14 +16,18 @@ function WidgetLoadBadge({ loadMs, serverMs }) {
   );
 }
 
-function Card({ title, subtitle, tools, children, className = '', pad = '', style, loadMs, serverMs }) {
+function Card({ title, subtitle, tools, children, className = '', pad = '', style, loadMs, serverMs, headerBadge }) {
+  const hasHead = title || tools || headerBadge;
   return (
     <div className={`card ${pad === 'sm' ? 'card--pad-sm' : pad === '0' ? 'card--pad-0' : ''} ${className}`} style={style}>
       <WidgetLoadBadge loadMs={loadMs} serverMs={serverMs} />
-      {(title || tools) && (
+      {hasHead && (
         <div className="card__head">
+          {headerBadge && (
+            <div className="card__head-meta">{headerBadge}</div>
+          )}
           {title && (
-            <div>
+            <div className="card__head-main">
               <div className="card__title">{title}</div>
               {subtitle && <div className="card__sub" style={{marginTop: 2}}>{subtitle}</div>}
             </div>

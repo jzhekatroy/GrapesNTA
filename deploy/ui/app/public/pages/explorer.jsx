@@ -2831,8 +2831,13 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
     () => explorerDefaultShowOthersOnChart(restoreExplorerVis(urlState?.vis)),
   );
   const [refreshing, setRefreshing] = useState(false);
+  const [queryStartedAt, setQueryStartedAt] = useState(null);
+  const [queryTimerExpanded, setQueryTimerExpanded] = useState(false);
+  const [lastQueryElapsedMs, setLastQueryElapsedMs] = useState(null);
   const [periodZoomStack, setPeriodZoomStack] = useState([]);
   const periodRef = React.useRef({ timeRange, customPeriod });
+  const queryStartedAtRef = React.useRef(null);
+  const queryTimerSeenRef = React.useRef(false);
   const dynamicsQueryVersionRef = React.useRef(queryVersion);
   const dynamicsVisualLimitRef = React.useRef(visualLimit);
   const skipDynamicsDefaultRef = React.useRef(false);
@@ -3086,10 +3091,33 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
   const appliedTimeRange = activeQuery?.timeRange ?? timeRange;
   const appliedCustomPeriod = activeQuery?.customPeriod ?? customPeriod;
 
+  const toggleQueryTimerExpanded = () => {
+    setQueryTimerExpanded((expanded) => {
+      const next = !expanded;
+      if (next) queryTimerSeenRef.current = true;
+      return next;
+    });
+  };
+
+  const finalizeQueryElapsed = () => {
+    if (queryTimerSeenRef.current && queryStartedAtRef.current != null) {
+      setLastQueryElapsedMs(performance.now() - queryStartedAtRef.current);
+    } else {
+      setLastQueryElapsedMs(null);
+    }
+    queryStartedAtRef.current = null;
+    setQueryStartedAt(null);
+  };
+
   useEffect(() => {
     if (!hasAppliedQuery || !appliedSnapshot || queryVersion === 0) return undefined;
     let cancelled = false;
     const isRefresh = rows.length > 0;
+    const startedAt = performance.now();
+    queryStartedAtRef.current = startedAt;
+    queryTimerSeenRef.current = queryTimerExpanded;
+    setLastQueryElapsedMs(null);
+    setQueryStartedAt(startedAt);
     if (isRefresh) setRefreshing(true);
     else {
       setSource('loading');
@@ -3161,11 +3189,13 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
       setServerMs(r.serverMs ?? null);
       setSnapshotId(r.snapshotId || null);
       setRefreshing(false);
+      finalizeQueryElapsed();
     }).catch((err) => {
       if (cancelled) return;
       setSource('error');
       setError(err.message || ApiClient.LOAD_FAILED);
       setRefreshing(false);
+      finalizeQueryElapsed();
     });
     return () => { cancelled = true; };
   }, [queryVersion, hasAppliedQuery, appliedSnapshot, fetchLimit]);
@@ -4117,12 +4147,21 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
             {appliedGroupBy.length === 0 && (
               source === 'loading' || isRefreshingData ? (
                 <Card title="Базовые значения" pad="sm">
-                  <div style={{ padding: 32, textAlign: 'center', color: 'var(--fg-secondary)' }}>
-                    Выполняем запрос…
-                  </div>
+                  <ExplorerQueryStatus
+                    label={isRefreshingData ? 'Обновление данных' : 'Выполняем запрос…'}
+                    startedAt={queryStartedAt}
+                    expanded={queryTimerExpanded}
+                    onToggleExpanded={toggleQueryTimerExpanded}
+                  />
                 </Card>
               ) : source === 'error' ? (
-                <Card title="Базовые значения" pad="sm">
+                <Card
+                  title="Базовые значения"
+                  pad="sm"
+                  headerBadge={lastQueryElapsedMs != null ? (
+                    <ExplorerQueryElapsedBadge elapsedMs={lastQueryElapsedMs} />
+                  ) : null}
+                >
                   <div style={{ padding: 32, textAlign: 'center', color: 'var(--st-critical)' }}>
                     {error || ApiClient.LOAD_FAILED}
                   </div>
@@ -4133,6 +4172,9 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
                   subtitle={`${timeRangeLabel(appliedTimeRange, appliedCustomPeriod)} · ${meta?.dataTable || 'flows_raw'}`}
                   loadMs={loadMs}
                   serverMs={serverMs}
+                  headerBadge={lastQueryElapsedMs != null ? (
+                    <ExplorerQueryElapsedBadge elapsedMs={lastQueryElapsedMs} />
+                  ) : null}
                 >
                   <ExplorerTotalChart
                     points={timeseries}
@@ -4182,9 +4224,19 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
               );
 
               const analysisBody = isRefreshingData ? (
-                <ExplorerRefreshingData />
+                <ExplorerQueryStatus
+                  label="Обновление данных"
+                  startedAt={queryStartedAt}
+                  expanded={queryTimerExpanded}
+                  onToggleExpanded={toggleQueryTimerExpanded}
+                />
               ) : source === 'loading' && !results.length ? (
-                <div style={{ padding: 40, textAlign: 'center', color: 'var(--fg-secondary)' }}>Выполняем запрос…</div>
+                <ExplorerQueryStatus
+                  label="Выполняем запрос…"
+                  startedAt={queryStartedAt}
+                  expanded={queryTimerExpanded}
+                  onToggleExpanded={toggleQueryTimerExpanded}
+                />
               ) : source === 'error' && !results.length ? (
                 <div style={{ padding: 40, textAlign: 'center', color: 'var(--st-critical)' }}>{error || ApiClient.LOAD_FAILED}</div>
               ) : thresholdEmptyState ? (
@@ -4206,6 +4258,9 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
                     loadMs={loadMs}
                     serverMs={serverMs}
                     pad="0"
+                    headerBadge={(!isRefreshingData && source !== 'loading' && lastQueryElapsedMs != null) ? (
+                      <ExplorerQueryElapsedBadge elapsedMs={lastQueryElapsedMs} />
+                    ) : null}
                     tools={(
                       <div className="explorer-results-tools">
                         {analysisToolbar}
@@ -4323,9 +4378,61 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
   );
 }
 
-function ExplorerRefreshingData() {
+function formatExplorerQueryElapsed(ms) {
+  const totalMs = Math.max(0, Math.floor(ms));
+  const minutes = Math.floor(totalMs / 60000);
+  const seconds = Math.floor((totalMs % 60000) / 1000);
+  const millis = totalMs % 1000;
+  return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}:${String(millis).padStart(3, '0')}`;
+}
+
+function ExplorerQueryElapsedBadge({ elapsedMs }) {
+  if (elapsedMs == null) return null;
   return (
-    <div className="explorer-refreshing-data">Обновление данных</div>
+    <span className="explorer-query-elapsed">{formatExplorerQueryElapsed(elapsedMs)}</span>
+  );
+}
+
+function ExplorerQueryStatus({
+  label,
+  startedAt,
+  expanded = false,
+  onToggleExpanded,
+}) {
+  const [elapsed, setElapsed] = React.useState(0);
+
+  React.useEffect(() => {
+    if (startedAt == null) {
+      setElapsed(0);
+      return undefined;
+    }
+    let raf = 0;
+    const tick = () => {
+      setElapsed(performance.now() - startedAt);
+      raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [startedAt]);
+
+  return (
+    <div className="explorer-query-status">
+      <button
+        type="button"
+        className="explorer-query-status__label"
+        onClick={onToggleExpanded}
+        aria-expanded={expanded}
+      >
+        {label}
+      </button>
+      <div className={`explorer-query-status__timer${expanded ? ' is-expanded' : ''}`}>
+        <div className="explorer-query-status__timer-inner">
+          <span className="explorer-query-status__timer-value" aria-live="polite">
+            {formatExplorerQueryElapsed(elapsed)}
+          </span>
+        </div>
+      </div>
+    </div>
   );
 }
 
