@@ -117,6 +117,31 @@ async function minuteWritten(minuteTs) {
   return Number(rows[0]?.n || 0) > 0;
 }
 
+function smallerClientId(a, b) {
+  const na = Number(a);
+  const nb = Number(b);
+  if (Number.isFinite(na) && Number.isFinite(nb) && na !== nb) return na < nb;
+  return String(a) < String(b);
+}
+
+function dedupeClientsByDisplayName(rows) {
+  const byName = new Map();
+  for (const row of rows || []) {
+    const id = String(row.client_id || '').trim();
+    if (!id) continue;
+    const name = String(row.display_name || '').trim();
+    if (!name) {
+      byName.set(`__id:${id}`, row);
+      continue;
+    }
+    const prev = byName.get(name);
+    if (!prev || smallerClientId(id, String(prev.client_id))) {
+      byName.set(name, row);
+    }
+  }
+  return [...byName.values()];
+}
+
 async function loadObjects() {
   const { rows: clients } = await query(`
     SELECT client_id, display_name
@@ -147,7 +172,7 @@ async function loadObjects() {
   const { rows: nets } = await query(netSql, {}, { name: 'detection/objects-nets' });
 
   return [
-    ...clients.map((r) => ({
+    ...dedupeClientsByDisplayName(clients).map((r) => ({
       scope: 'client',
       scopeId: String(r.client_id),
       name: String(r.display_name || r.client_id),
@@ -1158,4 +1183,5 @@ module.exports = {
   HISTORY_METRICS,
   BASELINE_CACHE_MS,
   isBaselineCacheFresh,
+  dedupeClientsByDisplayName,
 };

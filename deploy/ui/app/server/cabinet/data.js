@@ -70,10 +70,22 @@ const HOUR_RETENTION_HOURS = 180 * 24;
 const DAY_RETENTION_HOURS = 730 * 24;
 const AUTO_HOUR_MAX_HOURS = 40 * 24;
 const FIVE_MINUTE_BUCKET_SECONDS = 300;
+const CLOSED_BUCKET_BOUNDARY = 'now() - INTERVAL 30 SECOND';
+
+function closedFiveMinuteBucketSql(bucketExpr, boundaryExpr = CLOSED_BUCKET_BOUNDARY) {
+  return `${bucketExpr} + toIntervalSecond(${FIVE_MINUTE_BUCKET_SECONDS}) < ${boundaryExpr}`;
+}
+
+function bucketSecondsForGranularity(granularity) {
+  if (granularity === '5m') return FIVE_MINUTE_BUCKET_SECONDS;
+  if (granularity === 'minute') return 60;
+  if (granularity === 'hour') return 3600;
+  return 86400;
+}
 
 function parseGranularity(raw) {
   const value = String(raw || 'auto').trim().toLowerCase();
-  if (['auto', 'minute', '5m', 'hour', 'day'].includes(value)) return value;
+  if (['auto', 'minute', 'hour', 'day'].includes(value)) return value;
   return 'auto';
 }
 
@@ -95,14 +107,6 @@ function resolveOverviewGranularity(range, requested) {
       throw err;
     }
     return 'minute';
-  }
-  if (requestedGranularity === '5m') {
-    if (spanHours > MINUTE_RETENTION_HOURS) {
-      const err = new Error('5-минутная детализация доступна не глубже 14 суток');
-      err.statusCode = 400;
-      throw err;
-    }
-    return '5m';
   }
   if (requestedGranularity === 'day') {
     if (spanHours > DAY_RETENTION_HOURS) {
@@ -133,17 +137,6 @@ function overviewTableForGranularity(granularity) {
   return { table: 'traffic_client_1h', bucketColumn: 'hour' };
 }
 
-function overviewSeriesBoundarySql(range) {
-  if (range.mode === 'absolute') {
-    return { sql: parseDataDatetimeSql('to'), params: { from: range.from, to: range.to } };
-  }
-  return { sql: 'now() - INTERVAL 30 SECOND', params: {} };
-}
-
-function closedOverviewBucketSql(bucketColumn, bucketSeconds, boundarySql) {
-  return `${bucketColumn} + toIntervalSecond(${bucketSeconds}) < ${boundarySql}`;
-}
-
 async function lastCompleteBucket(table, bucketColumn, clientId) {
   const { rows } = await query(
     `SELECT ${formatDataDatetimeSql(`max(${bucketColumn})`)} AS data_until FROM default.${table} WHERE client_id = {clientId:String}`,
@@ -159,31 +152,30 @@ async function overviewSeries(clientId, queryParams = {}) {
   const granularity = resolveOverviewGranularity(range, queryParams.granularity);
   const { table, bucketColumn } = overviewTableForGranularity(granularity);
   const filter = timeFilterSql(bucketColumn, range);
-  const boundary = overviewSeriesBoundarySql(range);
   const seriesSql = granularity === '5m'
     ? `
       SELECT
-        ${formatDataDatetimeSql('bucket')} AS bucket,
-        toUnixTimestamp(bucket) AS bucket_ts,
+        toUnixTimestamp(inner_bucket) AS bucket_ts,
+        ${formatDataDatetimeSql('inner_bucket')} AS bucket,
         direction,
-        bytes,
-        packets,
-        flows_count
+        sum(bytes) AS bytes,
+        sum(packets) AS packets,
+        sum(flows_count) AS flows_count
       FROM
       (
         SELECT
-          toStartOfInterval(${bucketColumn}, INTERVAL 5 MINUTE) AS bucket,
+          toStartOfInterval(minute, INTERVAL 5 MINUTE) AS inner_bucket,
           direction,
-          sum(bytes) AS bytes,
-          sum(packets) AS packets,
-          sum(flows_count) AS flows_count
+          bytes,
+          packets,
+          flows_count
         FROM default.${table}
         WHERE client_id = {clientId:String}
           AND (${filter.sql})
-        GROUP BY bucket, direction
       )
-      WHERE ${closedOverviewBucketSql('bucket', FIVE_MINUTE_BUCKET_SECONDS, boundary.sql)}
-      ORDER BY bucket ASC, direction ASC
+      WHERE ${closedFiveMinuteBucketSql('inner_bucket')}
+      GROUP BY inner_bucket, direction
+      ORDER BY inner_bucket ASC, direction ASC
     `
     : `
       SELECT
@@ -201,7 +193,7 @@ async function overviewSeries(clientId, queryParams = {}) {
     `;
   const [{ rows, elapsedMs }, dataUntil] = await Promise.all([query(
     seriesSql,
-    { clientId, ...filter.params, ...boundary.params },
+    { clientId, ...filter.params },
     { name: 'cabinet/overview-series' },
   ), lastCompleteBucket(table, bucketColumn, clientId)]);
 
@@ -237,7 +229,7 @@ async function overviewSeries(clientId, queryParams = {}) {
 
 function statsGranularityForRange(range) {
   const spanHours = rangeSpanHours(range);
-  if (spanHours <= MINUTE_RETENTION_HOURS) return 'minute';
+  if (spanHours <= MINUTE_RETENTION_HOURS) return '5m';
   if (spanHours <= HOUR_RETENTION_HOURS) return 'hour';
   return 'day';
 }
@@ -264,8 +256,36 @@ async function overviewStats(clientId, queryParams = {}) {
   const granularity = statsGranularityForRange(range);
   const { table, bucketColumn } = overviewTableForGranularity(granularity);
   const filter = timeFilterSql(bucketColumn, range);
-  const bucketSeconds = granularity === 'minute' ? 60 : granularity === 'hour' ? 3600 : 86400;
+  const bucketSeconds = bucketSecondsForGranularity(granularity);
   const windowSeconds = Math.max(1, rangeSpanHours(range) * 3600);
+  const bucketInnerSql = granularity === '5m'
+    ? `
+        SELECT
+          toStartOfInterval(minute, INTERVAL 5 MINUTE) AS bucket,
+          direction,
+          sum(bytes) AS bucket_bytes,
+          sum(packets) AS bucket_packets
+        FROM default.${table}
+        WHERE client_id = {clientId:String}
+          AND (${filter.sql})
+          AND direction IN ('in', 'out')
+        GROUP BY bucket, direction
+      `
+    : `
+        SELECT
+          ${bucketColumn} AS bucket,
+          direction,
+          sum(bytes) AS bucket_bytes,
+          sum(packets) AS bucket_packets
+        FROM default.${table}
+        WHERE client_id = {clientId:String}
+          AND (${filter.sql})
+          AND direction IN ('in', 'out')
+        GROUP BY bucket, direction
+      `;
+  const closedBucketFilter = granularity === '5m'
+    ? `WHERE ${closedFiveMinuteBucketSql('bucket')}`
+    : '';
   const [{ rows, elapsedMs }, dataUntil] = await Promise.all([query(
     `
       SELECT
@@ -278,17 +298,9 @@ async function overviewStats(clientId, queryParams = {}) {
         sum(bucket_packets) AS total_packets
       FROM
       (
-        SELECT
-          ${bucketColumn} AS bucket,
-          direction,
-          sum(bytes) AS bucket_bytes,
-          sum(packets) AS bucket_packets
-        FROM default.${table}
-        WHERE client_id = {clientId:String}
-          AND (${filter.sql})
-          AND direction IN ('in', 'out')
-        GROUP BY bucket, direction
+        ${bucketInnerSql}
       )
+      ${closedBucketFilter}
       GROUP BY direction
       ORDER BY direction ASC
     `,

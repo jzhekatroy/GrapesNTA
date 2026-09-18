@@ -420,8 +420,19 @@ async function investigateIncident({ scope, scopeId, minute }) {
     dest AS (
       SELECT groupArray(tuple(ip, net24, port, proto, byte_sum)) AS rows
       FROM (
-        SELECT dst_ip AS ip, dst24 AS net24, dst_port AS port, proto, sum(bytes) AS byte_sum
-        FROM ev GROUP BY ip, net24, port, proto ORDER BY byte_sum DESC LIMIT 8
+        SELECT
+          ip,
+          any(net24) AS net24,
+          argMax(port, byte_sum) AS port,
+          argMax(proto, byte_sum) AS proto,
+          sum(byte_sum) AS byte_sum
+        FROM (
+          SELECT dst_ip AS ip, dst24 AS net24, dst_port AS port, proto, sum(bytes) AS byte_sum
+          FROM ev GROUP BY ip, net24, port, proto
+        )
+        GROUP BY ip
+        ORDER BY byte_sum DESC
+        LIMIT 8
       )
     ),
     dest24 AS (

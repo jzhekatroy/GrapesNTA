@@ -31,6 +31,28 @@ describe('detection-classify', () => {
     assert.equal(isAttackKind(refined.kind), true);
   });
 
+  it('WEST CALL: UDP в один IP на сотнях портов — volumetric, не ковёр', () => {
+    const first = classifyFromMetrics({
+      all: { bps: 30.8e9, port_entropy: 8.4, avg_packet_bytes: 1446 },
+      tcp: { bps: 3.1e9, port_entropy: 2.1 },
+      udp: { bps: 26.3e9, port_entropy: 8.9 },
+    }, { p95: 8e9, p999: 9e9, recentMedian: 7e9 });
+    assert.equal(first.kind, KINDS.carpet);
+    const investigate = {
+      victim: { ip: '195.209.212.16', port: 38749, proto: 17, protoLabel: 'UDP', share: 0.86, net24: '195.209.212.0/24' },
+      destPort: { count: 584, top: [{ port: 443, share: 0.1 }, { port: 38749, share: 0.009 }] },
+      l4src: [{ port: 38749, proto: 17, share: 0.01 }],
+    };
+    const refined = refineClassification(first, investigate);
+    assert.equal(refined.kind, KINDS.volumetric);
+    assert.equal(
+      actionFor(refined, investigate),
+      'резать входящий UDP на 195.209.212.16',
+    );
+    assert.doesNotMatch(actionFor(refined, investigate), /фильтр по сети/);
+    assert.doesNotMatch(actionFor(refined, investigate), /443/);
+  });
+
   it('Belcloud: объём ×30 и UDP → carpet, топ IP 0.2% подтверждает', () => {
     const byProto = {
       all: { bps: 5.91e9, port_entropy: 10.05 },
@@ -444,7 +466,7 @@ describe('detection-classify', () => {
     assert.equal(isAttackKind(first.kind), true);
     assert.equal(actionFor(first, {
       victim: { ip: '5.39.222.138', port: 22, protoLabel: 'TCP', share: 0.4 },
-    }), 'SYN-защита на 5.39.222.138:22');
+    }), 'SYN-защита на 5.39.222.138 22');
     const refined = refineClassification(first, {
       victim: { ip: '5.39.222.138', port: 22, protoLabel: 'TCP', share: 0.39 },
       source24: [{ net24: '185.220.101.0/24', share: 0.08, ips: 40 }],
@@ -500,7 +522,7 @@ describe('detection-classify', () => {
     assert.equal(formatVictim(null), '—');
     assert.match(formatVictim({
       ip: '185.26.122.4', net24: '185.26.122.0/24', port: 443, protoLabel: 'UDP', share: 0.994,
-    }), /185\.26\.122\.4:443/);
+    }), /185\.26\.122\.4 443/);
     assert.equal(formatSwitchPort(null), '—');
     assert.match(formatSwitchPort({
       switchIp: '172.18.19.165', ifName: 'port-channel2', ifAlias: 'imaqliq.9236', share: 1,

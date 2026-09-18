@@ -317,8 +317,8 @@ function formatRecentFlowTs(ts, displayTimezone) {
 }
 
 function OverviewFlowEndpoint({ flow }) {
-  const srcPort = Number(flow.srcPort) > 0 ? `:${flow.srcPort}` : '';
-  const dstPort = Number(flow.dstPort) > 0 ? `:${flow.dstPort}` : '';
+  const srcPort = Number(flow.srcPort) > 0 ? String(flow.srcPort) : '';
+  const dstPort = Number(flow.dstPort) > 0 ? String(flow.dstPort) : '';
   const srcLabel = flow.srcLabel && flow.srcLabel !== flow.srcIp ? flow.srcLabel : '';
   const dstLabel = flow.dstLabel && flow.dstLabel !== flow.dstIp ? flow.dstLabel : '';
   return (

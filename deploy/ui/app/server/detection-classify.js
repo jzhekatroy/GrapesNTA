@@ -30,7 +30,7 @@ const KIND_LABEL = {
 const HOUR_RATIO_PEAK = 1.3;
 const ENTROPY_MIXED = 3;
 const ENTROPY_FOCUSED = 1.5;
-const TOP_DST_VOLUMETRIC = 0.8;
+const TOP_DST_VOLUMETRIC = 0.15;
 const TOP_DST_CARPET = 0.08;
 const UDP_DOMINANT = 0.6;
 const DOWNLOAD_SRC_SHARE_MIN = 0.5;
@@ -245,8 +245,7 @@ function refineClassification(verdict, investigate) {
   if (next.kind === KINDS.syn_flood) {
     const synTop = Array.isArray(investigate?.syn?.dest) ? investigate.syn.dest[0] : null;
     if (synTop?.ip) {
-      const port = synTop.port ? `:${synTop.port}` : '';
-      next.reason = `${synTop.ip}${port} ${(num(synTop.share) * 100).toFixed(0)}% SYN · ${next.reason || ''}`.trim();
+      next.reason = `${formatHostPort(synTop.ip, synTop.port)} ${(num(synTop.share) * 100).toFixed(0)}% SYN · ${next.reason || ''}`.trim();
     }
     next.needsInvestigate = true;
     return next;
@@ -296,13 +295,23 @@ function formatSwitchPort(port) {
   return `${sw}${name}${alias}${pct}`.trim() || '—';
 }
 
+function formatPort(port) {
+  const n = Number(port);
+  return Number.isFinite(n) && n !== 0 ? String(n) : '';
+}
+
+function formatHostPort(ip, port) {
+  const host = String(ip || '');
+  const p = formatPort(port);
+  return p ? `${host} ${p}` : host;
+}
+
 function formatVictim(victim) {
   if (!victim?.ip) return '—';
   const proto = victim.protoLabel || victim.proto || '';
-  const port = victim.port != null ? `:${victim.port}` : '';
   const net = victim.net24 ? ` · ${victim.net24}` : '';
   const pct = victim.share != null ? ` (${(victim.share * 100).toFixed(1)}%)` : '';
-  return `${proto} ${victim.ip}${port}${net}${pct}`.trim();
+  return `${proto} ${formatHostPort(victim.ip, victim.port)}${net}${pct}`.trim();
 }
 
 function shortAsnName(name) {
@@ -349,8 +358,24 @@ function isUsableVictim(victim) {
   const label = String(victim.protoLabel || '').toUpperCase();
   if (Number.isFinite(proto) && proto !== 6 && proto !== 17) return false;
   if (label && label !== 'TCP' && label !== 'UDP') return false;
-  if (num(victim.port) === 0) return false;
   return true;
+}
+
+function attackProtoLabel(victim, investigate) {
+  const fromVictim = String(victim?.protoLabel || '').toUpperCase();
+  if (fromVictim === 'UDP' || Number(victim?.proto) === 17) return 'UDP';
+  if (fromVictim === 'TCP' || Number(victim?.proto) === 6) return 'TCP';
+  const l4 = topL4(investigate);
+  if (l4ProtoNum(l4) === 17) return 'UDP';
+  if (l4ProtoNum(l4) === 6) return 'TCP';
+  return victim?.protoLabel || 'трафик';
+}
+
+function focusedDestPort(investigate, victim) {
+  const count = num(investigate?.destPort?.count);
+  if (count != null && count > 1) return null;
+  const port = num(victim?.port);
+  return port != null && port > 0 ? port : null;
 }
 
 function actionFor(verdict, investigate) {
@@ -362,9 +387,9 @@ function actionFor(verdict, investigate) {
     return 'разбор минуты не удался — смотреть вручную';
   }
   if (kind === KINDS.volumetric && isUsableVictim(victim)) {
-    const proto = victim.protoLabel || 'трафик';
-    const port = victim.port != null ? `:${victim.port}` : '';
-    return `резать ${proto} на ${victim.ip}${port}`;
+    const proto = attackProtoLabel(victim, investigate);
+    const port = focusedDestPort(investigate, victim);
+    return `резать входящий ${proto} на ${formatHostPort(victim.ip, port)}`;
   }
   if (kind === KINDS.carpet) {
     const l4 = formatL4Sources(investigate?.l4src);
@@ -377,12 +402,10 @@ function actionFor(verdict, investigate) {
     // быть сервером, на который просто шла закачка.
     const synTop = Array.isArray(investigate?.syn?.dest) ? investigate.syn.dest[0] : null;
     if (synTop?.ip && num(synTop.share) >= VICTIM_ACTION_SHARE_MIN) {
-      const port = synTop.port ? `:${synTop.port}` : '';
-      return `SYN-защита на ${synTop.ip}${port}`;
+      return `SYN-защита на ${formatHostPort(synTop.ip, synTop.port)}`;
     }
     if (isUsableVictim(victim)) {
-      const port = victim.port != null ? `:${victim.port}` : '';
-      return `SYN-защита на ${victim.ip}${port}`;
+      return `SYN-защита на ${formatHostPort(victim.ip, focusedDestPort(investigate, victim) ?? victim.port)}`;
     }
     return 'SYN-защита / лимит на сеть клиента';
   }
@@ -430,6 +453,8 @@ module.exports = {
   isLegitimatePeak,
   isAttackKind,
   formatSwitchPort,
+  formatPort,
+  formatHostPort,
   formatVictim,
   formatSourceNets,
   formatAsnLabel,

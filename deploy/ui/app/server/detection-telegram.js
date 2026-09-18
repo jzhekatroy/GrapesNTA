@@ -781,6 +781,15 @@ const HEADLINE_KIND = {
   [KINDS.syn_flood]: 'SYN-флуд',
 };
 
+function formatGrowthPair(byProto, verdict) {
+  const growth14 = finiteGrowth(byProto?.all?.growth_bps ?? byProto?.all?.growthBps);
+  const hour = Number(verdict?.hourRatio);
+  const parts = [];
+  if (growth14 != null) parts.push(`×${Number(growth14).toFixed(2)} к 14д p999`);
+  if (Number.isFinite(hour) && hour > 0) parts.push(`×${hour.toFixed(2)} к часу`);
+  return parts.join(' · ');
+}
+
 function formatAlertHeadline(verdict, signals = []) {
   const verdictKind = verdict?.kind || '';
   const head = (emoji, text) => `${emoji} <b>${escapeHtml(text)}</b>`;
@@ -858,10 +867,21 @@ function protoLabel(victim, tcp, udp, all) {
   return '';
 }
 
+function formatAlertPort(port) {
+  const n = Number(port);
+  return Number.isFinite(n) && n !== 0 ? String(n) : '';
+}
+
+function formatAlertHostPort(ip, port) {
+  const host = String(ip || '');
+  const p = formatAlertPort(port);
+  return p ? `${host} ${p}` : host;
+}
+
 function formatServiceOn(investigate) {
   const label = downloadPeakLabel(investigate);
   const [proto, port] = String(label || '').split('/');
-  if (port && port !== '?') return `${proto} на :${port}`;
+  if (port && port !== '?') return `${proto} на ${port}`;
   return proto || '';
 }
 
@@ -878,10 +898,17 @@ function sourceBps(src, allBps) {
   return allBps;
 }
 
-function formatVictimDest(victim) {
-  const port = victim.port != null && Number(victim.port) !== 0 ? `:${victim.port}` : '';
+function victimDisplayPort(victim, investigate) {
+  const count = Number(investigate?.destPort?.count);
+  if (Number.isFinite(count) && count > 1) return null;
+  return formatAlertPort(victim?.port) || null;
+}
+
+function formatVictimDest(victim, investigate) {
+  const port = victimDisplayPort(victim, investigate);
+  const host = formatAlertHostPort(victim.ip, port);
   const parts = [formatSharePct(victim.share), victim.net24].filter(Boolean);
-  return `${victim.ip}${port}${parts.length ? ` — ${parts.join(' · ')}` : ''}`;
+  return `${host}${parts.length ? ` — ${parts.join(' · ')}` : ''}`;
 }
 
 function formatDestLines(investigate, mode) {
@@ -892,13 +919,13 @@ function formatDestLines(investigate, mode) {
   if (mode === 'syn') {
     const victim = investigate?.victim;
     if (isUsableVictim(victim)) {
-      return ['Куда:', escapeHtml(`   ${formatVictimDest(victim)}`)];
+      return ['Куда:', escapeHtml(`   ${formatVictimDest(victim, investigate)}`)];
     }
     return ['Куда: на сеть клиента'];
   }
   const victim = investigate?.victim;
   if (!isUsableVictim(victim)) return [];
-  return ['Куда:', escapeHtml(`   ${formatVictimDest(victim)}`)];
+  return ['Куда:', escapeHtml(`   ${formatVictimDest(victim, investigate)}`)];
 }
 
 function ampSrcPortRows(investigate) {
@@ -923,7 +950,7 @@ function formatColonPorts(rows, { withProto = false, limit = 5 } = {}) {
   return list.map((row) => {
     const proto = withProto ? l4ProtoName(row) : '';
     const share = row.share != null ? ` ${formatSharePct(row.share)}` : '';
-    return `:${row.port}${proto ? ` ${proto}` : ''}${share}`;
+    return `${row.port}${proto ? ` ${proto}` : ''}${share}`;
   }).join(' · ');
 }
 
@@ -949,13 +976,13 @@ function ampPortCameFrom(investigate) {
   if (top.length) {
     const listed = top.map((row) => {
       const share = row.share != null ? ` ${formatSharePct(row.share)}` : '';
-      return `:${row.port}${share}`;
+      return `${row.port}${share}`;
     });
     return `С ${listed.join(' · ')} пришло`;
   }
   const ports = amplifierPortsFromL4(investigate?.l4src);
   if (!ports.length) return 'С портов усилителей пришло';
-  return `С ${ports.map((port) => `:${port}`).join(' · ')} пришло`;
+  return `С ${ports.map((port) => `${port}`).join(' · ')} пришло`;
 }
 
 function ruAddresses(count) {
@@ -998,11 +1025,11 @@ function formatAttackPortLines(portInfo) {
   const count = Number(portInfo?.count);
   if (!top.length && !(count > 0)) return [];
   if (count === 1 || (top.length === 1 && !(count > 1))) {
-    return [escapeHtml(`На порт :${top[0]?.port ?? 0}`)];
+    return [escapeHtml(`На порт ${top[0]?.port ?? 0}`)];
   }
   const listed = top.map((row) => {
     const share = row.share != null ? ` ${formatSharePct(row.share)}` : '';
-    return `:${row.port}${share}`;
+    return `${row.port}${share}`;
   });
   if (Number.isFinite(count) && count > 5) {
     return [
@@ -1113,8 +1140,8 @@ function formatVolumetricHighlight({ all, tcp, udp, hourUsual, verdict, investig
   const victim = investigate?.victim;
   const lines = [];
   if (isUsableVictim(victim)) {
-    const port = victim.port != null && Number(victim.port) !== 0 ? `:${victim.port}` : '';
-    lines.push(`На ${escapeHtml(`${victim.ip}${port}`)} пришло <b>${escapeHtml(formatBpsMsg(allBps))}</b>`);
+    const port = victimDisplayPort(victim, investigate);
+    lines.push(`На ${escapeHtml(formatAlertHostPort(victim.ip, port))} пришло <b>${escapeHtml(formatBpsMsg(allBps))}</b>`);
   } else {
     lines.push(`Пришло <b>${escapeHtml(formatBpsMsg(allBps))}</b>`);
   }
@@ -1168,8 +1195,7 @@ function formatSynDestLines(syn) {
     ? `Куда (SYN), топ ${rows.length} из ${ruAddresses(syn.dstIps)}:`
     : 'Куда (SYN):'];
   for (const row of rows) {
-    const port = row.port ? `:${row.port}` : '';
-    lines.push(escapeHtml(`   ${row.ip}${port} — ${formatSharePct(row.share)} SYN`));
+    lines.push(escapeHtml(`   ${formatAlertHostPort(row.ip, row.port)} — ${formatSharePct(row.share)} SYN`));
   }
   return lines;
 }
@@ -1178,14 +1204,14 @@ function formatSynPortLine(syn) {
   const top = (Array.isArray(syn.ports) ? syn.ports : []).filter((row) => row?.port).slice(0, 3);
   if (!top.length) return '';
   if (top.length === 1 || Number(top[0].share) >= 0.9) {
-    return `На порт :${top[0].port} — ${formatSharePct(top[0].share)} SYN`;
+    return `На порт ${top[0].port} — ${formatSharePct(top[0].share)} SYN`;
   }
   // Разбор отдаёт только верхушку пар «адрес + порт», поэтому при широком
   // веере доли по портам занижены — тогда даём разброс без процентов.
   if (syn.truncated) {
-    return `На ${ruPorts(syn.portCount)}, топ ${top.map((row) => `:${row.port}`).join(' · ')}`;
+    return `На ${ruPorts(syn.portCount)}, топ ${top.map((row) => `${row.port}`).join(' · ')}`;
   }
-  return `На порты ${top.map((row) => `:${row.port} ${formatSharePct(row.share)}`).join(' · ')}`;
+  return `На порты ${top.map((row) => `${row.port} ${formatSharePct(row.share)}`).join(' · ')}`;
 }
 
 function formatSynHighlight({ all, tcp, hourUsual, verdict, investigate }) {
@@ -1344,11 +1370,13 @@ function formatAlertMessage({
   const object = scope === 'net'
     ? `Сеть /24: <b>${escapeHtml(name && name !== scopeId ? `${name} (${scopeId})` : scopeId)}</b>`
     : `Клиент: <b>${escapeHtml(name || scopeId)}</b> (${escapeHtml(scopeId)})`;
+  const growthPair = formatGrowthPair(byProto, verdict);
   const blocks = [
     [
       title,
       object,
       `Минута: ${escapeHtml(formatMinuteMsk(minute))}`,
+      growthPair ? escapeHtml(growthPair) : '',
     ],
     [...highlights, reasonLine],
     [`<b>Что делать:</b> ${escapeHtml(actionFor(verdict, investigate))}`],
