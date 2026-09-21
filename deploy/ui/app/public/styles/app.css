@@ -2240,6 +2240,11 @@ body.explorer-chip-dragging * {
   -webkit-appearance: none;
   margin: 0;
 }
+/* Конец суток задаётся как 24:00 — минуты у него выключены. */
+.time-filter__time-part:disabled {
+  color: var(--fg-muted);
+  cursor: not-allowed;
+}
 .time-filter__time-sep {
   color: var(--fg-muted);
   font: var(--pv-text-body-2);

@@ -129,6 +129,7 @@ const PAGE_CHUNKS_MANIFEST = {
   core: {
     scripts: [
       '/data/protocol-colors.js',
+      '/data/period-range.js',
       '/data/mock-fixtures.js',
       '/data/logger.js',
       '/data/api.js',

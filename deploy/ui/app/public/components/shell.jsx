@@ -620,32 +620,37 @@ function defaultCustomPeriod() {
   };
 }
 
+// Арифметика границ периода живёт в /data/period-range.js — её покрывают тесты
+// server/period-range.test.js, которые в браузер не тянутся.
+const periodRangeApi = () => (typeof window !== 'undefined' && window.PeriodRange) || {};
+
 function parseDatetimeLocalParts(value) {
-  const m = String(value || '').match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})$/);
-  if (!m) return null;
-  return { y: Number(m[1]), mo: Number(m[2]), d: Number(m[3]), h: Number(m[4]), mi: Number(m[5]) };
+  return periodRangeApi().parseParts(value);
 }
 
 function formatDatetimeLocalParts(parts) {
-  const pad = (n) => String(n).padStart(2, '0');
-  return `${parts.y}-${pad(parts.mo)}-${pad(parts.d)}T${pad(parts.h)}:${pad(parts.mi)}`;
-}
-
-function datePartKey(parts) {
-  const pad = (n) => String(n).padStart(2, '0');
-  return `${parts.y}-${pad(parts.mo)}-${pad(parts.d)}`;
-}
-
-function compareDateParts(a, b) {
-  if (a.y !== b.y) return a.y - b.y;
-  if (a.mo !== b.mo) return a.mo - b.mo;
-  return a.d - b.d;
+  return periodRangeApi().formatParts(parts);
 }
 
 function addDaysToDateParts(parts, deltaDays) {
-  const dt = new Date(Date.UTC(parts.y, parts.mo - 1, parts.d + deltaDays));
-  return { y: dt.getUTCFullYear(), mo: dt.getUTCMonth() + 1, d: dt.getUTCDate() };
+  return periodRangeApi().addDays(parts, deltaDays);
 }
+
+// Хранимый конец периода — первая невключённая минута; человеку полночь
+// показывается как 24:00 предыдущих суток.
+function periodEndDisplayParts(value) {
+  return periodRangeApi().endDisplayParts(value);
+}
+
+function periodEndStoredValue(display) {
+  return periodRangeApi().endStoredValue(display);
+}
+
+function wholeDayCustomPeriod(dayParts) {
+  return periodRangeApi().wholeDayPeriod(dayParts);
+}
+
+const END_OF_DAY_HOUR = 24;
 
 function weekdayMondayFirst(y, mo, d) {
   const jsDay = new Date(Date.UTC(y, mo - 1, d)).getUTCDay();
@@ -690,31 +695,20 @@ function viewMonthFromPeriod(period) {
   return { year: now.y, month: now.mo };
 }
 
+// Открывая календарь, показываем уже применённое время: обнуление заставляло
+// набирать часы заново после каждого открытия.
 function pickerOpenDraft(period) {
-  const fromParts = parseDatetimeLocalParts(period?.from);
-  const toParts = parseDatetimeLocalParts(period?.to);
-  if (!fromParts || !toParts) {
-    const today = parseDatetimeLocalParts(msToDatetimeLocalValue(Date.now(), getDisplayTimezone()));
-    if (!today) return defaultCustomPeriod();
-    return {
-      from: formatDatetimeLocalParts({ ...today, h: 0, mi: 0 }),
-      to: formatDatetimeLocalParts({ ...today, h: 0, mi: 0 }),
-    };
-  }
-  return {
-    from: formatDatetimeLocalParts({ ...fromParts, h: 0, mi: 0 }),
-    to: formatDatetimeLocalParts({ ...toParts, h: 0, mi: 0 }),
-  };
+  const norm = normalizeCustomPeriod(period);
+  if (norm.from && norm.to && norm.from < norm.to) return norm;
+  const today = parseDatetimeLocalParts(msToDatetimeLocalValue(Date.now(), getDisplayTimezone()));
+  if (!today) return defaultCustomPeriod();
+  return wholeDayCustomPeriod(today);
 }
 
 function yesterdayCustomPeriod() {
   const today = parseDatetimeLocalParts(msToDatetimeLocalValue(Date.now(), getDisplayTimezone()));
   if (!today) return defaultCustomPeriod();
-  const yday = addDaysToDateParts(today, -1);
-  return {
-    from: formatDatetimeLocalParts({ ...yday, h: 0, mi: 0 }),
-    to: formatDatetimeLocalParts({ ...yday, h: 23, mi: 59 }),
-  };
+  return periodRangeApi().yesterdayPeriod(today);
 }
 
 function isYesterdayPeriod(period) {
@@ -722,46 +716,18 @@ function isYesterdayPeriod(period) {
   return period?.from === expected.from && period?.to === expected.to;
 }
 
+// Пустую строку отдаёт как null: пока поле перенабирают, оно должно уметь
+// побыть пустым, иначе ведущий ноль не стереть.
 function clampTimePart(value, max) {
-  const n = Number(value);
-  if (!Number.isFinite(n)) return 0;
-  return Math.min(max, Math.max(0, Math.floor(n)));
+  return periodRangeApi().clampTimePart(value, max);
 }
 
 function calendarDayRangeState(day, fromParts, toParts) {
-  if (!fromParts || !toParts) {
-    return { inRange: false, isStart: false, isEnd: false, isMiddle: false };
-  }
-  const key = datePartKey(day);
-  let start = fromParts;
-  let end = toParts;
-  if (compareDateParts(end, start) < 0) {
-    start = toParts;
-    end = fromParts;
-  }
-  const startKey = datePartKey(start);
-  const endKey = datePartKey(end);
-  const inRange = key >= startKey && key <= endKey;
-  const isStart = key === startKey;
-  const isEnd = key === endKey;
-  return {
-    inRange,
-    isStart,
-    isEnd,
-    isMiddle: inRange && !isStart && !isEnd,
-  };
+  return periodRangeApi().dayRangeState(day, fromParts, toParts);
 }
 
-function formatCustomPeriodLabel({ from, to }) {
-  const fromParts = String(from || '').match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/);
-  const toParts = String(to || '').match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/);
-  if (!fromParts || !toParts) return 'Свой период';
-  const [, fy, fmo, fd, fh, fmi] = fromParts;
-  const [, , , td, th, tmi] = toParts;
-  if (`${fy}-${fmo}-${fd}` === `${toParts[1]}-${toParts[2]}-${td}`) {
-    return `${fd}.${fmo} ${fh}:${fmi}–${th}:${tmi}`;
-  }
-  return `${fd}.${fmo} ${fh}:${fmi} — ${td}.${toParts[2]} ${th}:${tmi}`;
+function formatCustomPeriodLabel(period) {
+  return periodRangeApi().formatPeriodLabel(normalizeCustomPeriod(period));
 }
 
 function normalizeCustomPeriodValue(value) {
@@ -1256,33 +1222,61 @@ function timeFilterMenuPositionChanged(prev, next) {
     || prev.availableHeight !== next.availableHeight;
 }
 
-function PeriodTimeField({ label, hour, minute, onHourChange, onMinuteChange, hourId, minuteId }) {
+// Пока поле правят, оно держит свой черновик. Управляемый input, который на
+// каждый ввод нормализовал значение, не давал стереть ведущий ноль: пустая
+// строка тут же превращалась обратно в 0.
+function TimePartInput({ id, ariaLabel, value, max, disabled = false, onCommit }) {
+  const [draft, setDraft] = useState(null);
+  const shown = draft === null ? String(value) : draft;
+  return (
+    <input
+      id={id}
+      type="number"
+      className="time-filter__time-part"
+      min={0}
+      max={max}
+      value={shown}
+      disabled={disabled}
+      aria-label={ariaLabel}
+      onChange={(e) => {
+        const raw = e.target.value;
+        setDraft(raw);
+        const next = clampTimePart(raw, max);
+        if (next !== null) onCommit(next);
+      }}
+      onBlur={(e) => {
+        const next = clampTimePart(e.target.value, max);
+        setDraft(null);
+        onCommit(next === null ? value : next);
+      }}
+    />
+  );
+}
+
+function PeriodTimeField({
+  label, hour, minute, onHourChange, onMinuteChange, hourId, minuteId, maxHour = 23,
+}) {
+  // 24:00 — это конец суток, минут у него не бывает.
+  const endOfDay = hour >= END_OF_DAY_HOUR;
   return (
     <div className="time-filter__time-field">
       <span className="time-filter__time-label">{label}</span>
       <div className="time-filter__time-inputs">
-        <input
+        <TimePartInput
           id={hourId}
-          type="number"
-          className="time-filter__time-part"
-          min={0}
-          max={23}
+          ariaLabel={`${label}, часы`}
           value={hour}
-          aria-label={`${label}, часы`}
-          onChange={(e) => onHourChange(clampTimePart(e.target.value, 23))}
-          onBlur={(e) => onHourChange(clampTimePart(e.target.value, 23))}
+          max={maxHour}
+          onCommit={onHourChange}
         />
         <span className="time-filter__time-sep" aria-hidden="true">:</span>
-        <input
+        <TimePartInput
           id={minuteId}
-          type="number"
-          className="time-filter__time-part"
-          min={0}
+          ariaLabel={`${label}, минуты`}
+          value={endOfDay ? 0 : minute}
           max={59}
-          value={minute}
-          aria-label={`${label}, минуты`}
-          onChange={(e) => onMinuteChange(clampTimePart(e.target.value, 59))}
-          onBlur={(e) => onMinuteChange(clampTimePart(e.target.value, 59))}
+          disabled={endOfDay}
+          onCommit={onMinuteChange}
         />
       </div>
     </div>
@@ -1303,35 +1297,26 @@ function CustomPeriodCalendar({
   minuteToId,
 }) {
   const fromParts = parseDatetimeLocalParts(draftPeriod.from);
-  const toParts = parseDatetimeLocalParts(draftPeriod.to);
+  const toParts = periodEndDisplayParts(draftPeriod.to);
   const selectionTimesRef = useRef(null);
+  const [hoverDay, setHoverDay] = useState(null);
   const monthCells = useMemo(
     () => buildCalendarMonthGrid(viewMonth.year, viewMonth.month),
     [viewMonth.year, viewMonth.month],
   );
 
   useEffect(() => {
-    if (!rangeAnchor) selectionTimesRef.current = null;
+    if (!rangeAnchor) {
+      selectionTimesRef.current = null;
+      setHoverDay(null);
+    }
   }, [rangeAnchor]);
 
-  const buildRangePeriod = (startDay, endDay, fromTime, toTime) => {
-    let start = startDay;
-    let end = endDay;
-    if (compareDateParts(end, start) < 0) {
-      start = endDay;
-      end = startDay;
-    }
-    return {
-      from: formatDatetimeLocalParts({ ...start, h: fromTime.h, mi: fromTime.mi }),
-      to: formatDatetimeLocalParts({ ...end, h: toTime.h, mi: toTime.mi }),
-    };
-  };
+  const buildRangePeriod = (startDay, endDay, fromTime, toTime) => (
+    periodRangeApi().buildRangePeriod(startDay, endDay, fromTime, toTime)
+  );
 
-  const applyPreviewRange = (hoverDay) => {
-    if (!rangeAnchor || !selectionTimesRef.current) return;
-    const { from: fromTime, to: toTime } = selectionTimesRef.current;
-    onDraftChange(buildRangePeriod(rangeAnchor, hoverDay, fromTime, toTime));
-  };
+  const preview = rangeAnchor && hoverDay ? periodRangeApi().orderDays(rangeAnchor, hoverDay) : null;
 
   const shiftMonth = (delta) => {
     onViewMonthChange((prev) => {
@@ -1349,28 +1334,28 @@ function CustomPeriodCalendar({
     });
   };
 
+  // Клик по календарю берёт сутки целиком — именно этого ждут, выбирая одну
+  // дату. Сузить период можно полями времени под сеткой.
+  const wholeDayTimes = () => ({ from: { h: 0, mi: 0 }, to: { h: END_OF_DAY_HOUR, mi: 0 } });
+
   const handleDayClick = (day) => {
-    const fp = fromParts || { h: 0, mi: 0 };
-    const tp = toParts || { h: 0, mi: 0 };
     if (!rangeAnchor) {
-      selectionTimesRef.current = { from: { h: fp.h, mi: fp.mi }, to: { h: tp.h, mi: tp.mi } };
+      selectionTimesRef.current = wholeDayTimes();
       onRangeAnchorChange(day);
       onDraftChange(buildRangePeriod(day, day, selectionTimesRef.current.from, selectionTimesRef.current.to));
       return;
     }
-    const times = selectionTimesRef.current || { from: { h: fp.h, mi: fp.mi }, to: { h: tp.h, mi: tp.mi } };
+    const times = selectionTimesRef.current || wholeDayTimes();
     onRangeAnchorChange(null);
     selectionTimesRef.current = null;
+    setHoverDay(null);
     onDraftChange(buildRangePeriod(rangeAnchor, day, times.from, times.to));
-  };
-
-  const handleDayHover = (day) => {
-    applyPreviewRange(day);
   };
 
   const updateFromTime = (h, mi) => {
     const base = fromParts || parseDatetimeLocalParts(msToDatetimeLocalValue(Date.now(), getDisplayTimezone()));
     if (!base) return;
+    if (selectionTimesRef.current) selectionTimesRef.current.from = { h, mi };
     onDraftChange((prev) => ({
       ...prev,
       from: formatDatetimeLocalParts({ ...base, h, mi }),
@@ -1380,9 +1365,12 @@ function CustomPeriodCalendar({
   const updateToTime = (h, mi) => {
     const base = toParts || fromParts || parseDatetimeLocalParts(msToDatetimeLocalValue(Date.now(), getDisplayTimezone()));
     if (!base) return;
+    const hour = Math.min(END_OF_DAY_HOUR, Math.max(0, h));
+    const minute = hour >= END_OF_DAY_HOUR ? 0 : mi;
+    if (selectionTimesRef.current) selectionTimesRef.current.to = { h: hour, mi: minute };
     onDraftChange((prev) => ({
       ...prev,
-      to: formatDatetimeLocalParts({ ...base, h, mi }),
+      to: periodEndStoredValue({ ...base, h: hour, mi: minute }),
     }));
   };
 
@@ -1409,9 +1397,15 @@ function CustomPeriodCalendar({
         className={`time-filter__calendar-grid${rangeAnchor ? ' time-filter__calendar-grid--selecting' : ''}`}
         role="grid"
         aria-label="Календарь"
+        onMouseLeave={() => setHoverDay(null)}
       >
         {monthCells.map((day) => {
-          const range = calendarDayRangeState(day, fromParts, toParts);
+          // Пока тянут диапазон, наведение только подсвечивает: менять сам
+          // период мышью нельзя, иначе «Выбрать» применял последний день,
+          // над которым прошёл курсор, а не тот, по которому кликнули.
+          const range = preview
+            ? calendarDayRangeState(day, preview.start, preview.end)
+            : calendarDayRangeState(day, fromParts, toParts);
           const cls = [
             'time-filter__calendar-day',
             day.outside && 'is-outside',
@@ -1430,7 +1424,7 @@ function CustomPeriodCalendar({
               className={cls}
               aria-pressed={range.inRange}
               onClick={() => handleDayClick(day)}
-              onMouseEnter={() => handleDayHover(day)}
+              onMouseEnter={() => setHoverDay(day)}
             >
               <span className="time-filter__calendar-day-label">{day.d}</span>
             </button>
@@ -1449,12 +1443,13 @@ function CustomPeriodCalendar({
         />
         <PeriodTimeField
           label="Время до"
-          hour={toParts?.h ?? 0}
+          hour={toParts?.h ?? END_OF_DAY_HOUR}
           minute={toParts?.mi ?? 0}
           hourId={hourToId}
           minuteId={minuteToId}
+          maxHour={END_OF_DAY_HOUR}
           onHourChange={(h) => updateToTime(h, toParts?.mi ?? 0)}
-          onMinuteChange={(mi) => updateToTime(toParts?.h ?? 0, mi)}
+          onMinuteChange={(mi) => updateToTime(toParts?.h ?? END_OF_DAY_HOUR, mi)}
         />
       </div>
       {periodError && <div className="time-filter__custom-error" role="alert">{periodError}</div>}
