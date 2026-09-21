@@ -256,6 +256,108 @@ def build_peer_down_clause(args: argparse.Namespace) -> str:
           )"""
 
 
+def table_exists(base: Sequence[str], table: str) -> bool:
+    db, name = split_table_name(table)
+    return (
+        ch_run_int(
+            base,
+            "SELECT count() FROM system.tables "
+            f"WHERE database = {sql_string(db)} AND name = {sql_string(name)}",
+        )
+        > 0
+    )
+
+
+def build_state_seed_query(args: argparse.Namespace) -> str:
+    """One-time fill of the state table from the raw event history.
+
+    bmp_route_state_mv only sees events inserted after it was created, so a
+    fresh state table knows nothing about prefixes announced earlier. Seeding
+    costs one pass over the lookback window — the same work the old rebuild did
+    on every single run.
+    """
+    return f"""
+INSERT INTO {args.state_table}
+(ts, router_addr, peer_addr, peer_asn, event_type, family, prefix, prefix_len,
+ next_hop, origin_asn, as_path)
+SELECT
+    max(ts) AS ts,
+    router_addr,
+    peer_addr,
+    argMax(peer_asn, ts) AS peer_asn,
+    argMax(event_type, ts) AS event_type,
+    family,
+    prefix,
+    prefix_len,
+    argMax(next_hop, ts) AS next_hop,
+    argMax(origin_asn, ts) AS origin_asn,
+    argMax(as_path, ts) AS as_path
+FROM {args.route_events_table}
+WHERE ts >= now() - INTERVAL {args.lookback_days} DAY
+  AND prefix_len > 0
+GROUP BY
+    family,
+    prefix,
+    prefix_len,
+    router_addr,
+    peer_addr
+SETTINGS
+    max_memory_usage = {args.max_memory_usage},
+    max_bytes_before_external_group_by = {args.max_bytes_before_external_group_by},
+    max_threads = {args.max_threads},
+    group_by_two_level_threshold_bytes = 50000000
+"""
+
+
+def state_needs_seed(base: Sequence[str], args: argparse.Namespace) -> bool:
+    """True while the state table does not reach back to the lookback horizon.
+
+    Checking for an empty table is not enough: bmp_route_state_mv starts filling
+    the moment it is created, so by the first rebuild the table already holds a
+    few minutes of events and would silently produce a snapshot missing every
+    prefix that was last announced earlier.
+
+    The horizon is clamped to the oldest raw event so a young install, whose feed
+    is younger than the lookback window, is not reseeded on every run.
+    """
+    verdict = ch_run_scalar(
+        base,
+        f"""
+SELECT if(
+    (SELECT count() FROM {args.state_table}) = 0,
+    1,
+    toDateTime((SELECT min(ts) FROM {args.state_table})) > (
+        greatest(
+            now() - INTERVAL {args.lookback_days} DAY,
+            toDateTime((SELECT min(ts) FROM {args.route_events_table}))
+        ) + INTERVAL 1 HOUR
+    )
+)
+""",
+    )
+    return verdict.strip() == "1"
+
+
+def resolve_stage1_table(base: Sequence[str], args: argparse.Namespace) -> str:
+    """Pick the cheapest source that still holds every live announce.
+
+    The state table carries one row per (router, peer, prefix) instead of every
+    event ever seen for it — on a 14-day window that is under 8M rows against
+    460M, so the rebuild reads roughly sixty times less.
+    """
+    if not args.state_table or not table_exists(base, args.state_table):
+        log_info(f"state table {args.state_table} missing; reading raw events")
+        return args.route_events_table
+    if state_needs_seed(base, args):
+        log_info(f"state table {args.state_table} lacks history; seeding from raw events")
+        ch_run_query(base, build_state_seed_query(args))
+    rows = ch_run_int(base, f"SELECT count() FROM {args.state_table}")
+    log_info(f"state table {args.state_table} rows={rows}")
+    if rows == 0:
+        return args.route_events_table
+    return args.state_table
+
+
 def table_has_column(base: Sequence[str], table: str, column: str) -> bool:
     db, name = split_table_name(table)
     return (
@@ -277,6 +379,9 @@ def build_rebuild_query(args: argparse.Namespace, family: int) -> str:
     # straight to the prefix would let a single peer's withdraw hide a prefix
     # that a dozen other peers still announce — internet churn produces such
     # withdraws constantly, so the lookup silently lost ~28k live prefixes.
+    #
+    # The source is normally bmp_route_state, which already holds one row per
+    # key; argMax still runs because ReplacingMergeTree only collapses on merge.
     #
     # Stage 2 keeps a prefix when at least one peer still announces it, and
     # takes origin ASN from the freshest such announce. active_paths now
@@ -360,7 +465,7 @@ FROM
             argMax(origin_asn, ts) AS peer_last_origin_asn,
             argMax(peer_asn, ts) AS peer_last_peer_asn,
             max(ts) AS peer_last_ts{as_path_inner}{hop_inner}
-        FROM {args.route_events_table}
+        FROM {args.stage1_table}
         WHERE ts >= now() - INTERVAL {args.lookback_days} DAY
           AND family = {family}
           AND prefix_len > 0{build_peer_down_clause(args)}
@@ -405,6 +510,12 @@ def main() -> int:
     p.add_argument(
         "--route-events-table",
         default=env("BGPORIGIN_ROUTE_EVENTS_TABLE", "default.bmp_route_events"),
+    )
+    p.add_argument(
+        "--state-table",
+        default=env("BGPORIGIN_STATE_TABLE", "default.bmp_route_state"),
+        help="Latest-event-per-(router, peer, prefix) table kept by "
+        "bmp_route_state_mv. Falls back to the raw event table when absent.",
     )
     p.add_argument(
         "--peers-table",
@@ -552,6 +663,14 @@ FROM (
         if len(peers) == 2:
             log_info(f"peer_state up={peers[0]} down={peers[1]} (down peers skipped)")
 
+    existing_rows = ch_run_int(base, f"SELECT count() FROM {args.table}")
+    log_info(f"current_table rows={existing_rows}")
+
+    args.stage1_table = resolve_stage1_table(base, args)
+
+    # Probe whatever the rebuild is about to read. Counting the raw event table
+    # instead costs a 460M-row scan per run, which outweighs the rebuild itself
+    # once the state table is in play.
     source = ch_run_tsv_row(
         base,
         f"""
@@ -561,22 +680,19 @@ SELECT
     countIf(event_type = 'withdraw'),
     toString(min(ts)),
     toString(max(ts))
-FROM {args.route_events_table}
+FROM {args.stage1_table}
 WHERE ts >= now() - INTERVAL {args.lookback_days} DAY
 """,
     )
     if len(source) == 5:
         log_info(
             "source_window "
-            f"events={source[0]} announces={source[1]} withdraws={source[2]} "
+            f"rows={source[0]} announces={source[1]} withdraws={source[2]} "
             f"first_ts={source[3]} last_ts={source[4]}"
         )
         if source[0] == "0":
             log_info("no BMP route events in lookback window; skip rebuild")
             return 0
-
-    existing_rows = ch_run_int(base, f"SELECT count() FROM {args.table}")
-    log_info(f"current_table rows={existing_rows}")
 
     args.include_as_path = table_has_column(base, args.staging_table, "as_path")
     args.include_next_hop = table_has_column(base, args.staging_table, "next_hop")

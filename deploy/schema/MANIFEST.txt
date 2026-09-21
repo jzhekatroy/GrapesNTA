@@ -16,6 +16,8 @@
 30_bmp/04_bgp_prefix_origin_current.sql
 30_bmp/05_bgp_prefix_origin_current_staging.sql
 30_bmp/06_bgp_origin_asn_dict.sql
+30_bmp/07_bmp_route_state.sql
+30_bmp/08_bmp_route_state_mv.sql
 40_enrichment/01_geo_prefix_country.sql
 40_enrichment/02_geo_prefix_country_staging.sql
 40_enrichment/03_geo_country_dict.sql
