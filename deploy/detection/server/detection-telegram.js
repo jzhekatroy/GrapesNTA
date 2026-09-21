@@ -838,7 +838,20 @@ function formatTimesHigher(ratio) {
 function formatSharePct(share) {
   const n = Number(share) * 100;
   if (!Number.isFinite(n)) return '';
+  // 177 Мбит/с внутри 40 Гбит/с — это 0.4%, а округление до целого печатало «0%»
+  // и выглядело как «доли нет вовсе».
+  if (n > 0 && n < 0.1) return '<0.1%';
   return n < 1 ? `${n.toFixed(1)}%` : `${n.toFixed(0)}%`;
+}
+
+// Биллинг отдаёт полное имя и короткое в скобках: «Общество с ограниченной
+// ответственностью "Сторм Нетворкс" [ООО "Сторм Нетворкс" ]». В шапку берём
+// короткое — полное занимает всю строку превью в Telegram.
+function shortClientName(name) {
+  const raw = String(name ?? '').trim();
+  const match = raw.match(/\[([^\]]+)\]\s*$/);
+  const short = match ? match[1].trim() : '';
+  return short && short.length < raw.length ? short : raw;
 }
 
 function formatClientVolume(all, hourUsual, verdict) {
@@ -911,11 +924,55 @@ function formatVictimDest(victim, investigate) {
   return `${host}${parts.length ? ` — ${parts.join(' · ')}` : ''}`;
 }
 
+// Кто бьёт. Адресов в ковровой атаке тысячи, поэтому именуем сети /24, а сами
+// адреса даём только числом — списком IP шапку не прочитать.
+const SOURCE_NET_MIN_SHARE = 0.02;
+
+function formatAttackSourceLines(investigate) {
+  const nets = (Array.isArray(investigate?.source24) ? investigate.source24 : [])
+    .filter((row) => row?.net24 && Number(row.share) >= SOURCE_NET_MIN_SHARE)
+    .slice(0, 3);
+  const totals = investigate?.sources || {};
+  const scale = [];
+  if (Number(totals.ipCount) > 0) scale.push(ruAddresses(totals.ipCount));
+  if (Number(totals.net24Count) > 1) scale.push(`${formatNumMsg(totals.net24Count, 0)} сетей /24`);
+  if (!nets.length && !scale.length) return [];
+  const lines = [escapeHtml(`Откуда: ${scale.length ? scale.join(' · ') : 'сети ниже'}`)];
+  for (const row of nets) {
+    const bits = [formatSharePct(row.share)];
+    if (row.ips != null) bits.push(ruAddresses(row.ips));
+    const asn = formatAsnLabel(row.asn, row.asnName || row.asName).trim();
+    if (asn) bits.push(asn);
+    lines.push(escapeHtml(`   ${row.net24} — ${bits.filter(Boolean).join(' · ')}`));
+  }
+  return lines;
+}
+
+// Ковровая атака бьёт не в сервер, а в диапазон: называем сети /24 и размах,
+// иначе «по сети клиента» не говорит, что именно закрывать.
+function formatSpreadDestLines(investigate) {
+  const nets = (Array.isArray(investigate?.dest24) ? investigate.dest24 : [])
+    .filter((row) => row?.net24)
+    .slice(0, 3);
+  if (!nets.length) return ['Куда: по сети клиента, не один сервер'];
+  const totals = investigate?.sources || {};
+  const scale = [];
+  if (Number(totals.dstIpCount) > 0) scale.push(ruAddresses(totals.dstIpCount));
+  if (Number(totals.dstNetCount) > 1) scale.push(`${formatNumMsg(totals.dstNetCount, 0)} сетей /24`);
+  const lines = [escapeHtml(`Куда: по сети клиента, не один сервер${scale.length ? ` — ${scale.join(' · ')}` : ''}`)];
+  for (const row of nets) {
+    const bits = [formatSharePct(row.share)];
+    if (row.ips != null) bits.push(ruAddresses(row.ips));
+    lines.push(escapeHtml(`   ${row.net24} — ${bits.filter(Boolean).join(' · ')}`));
+  }
+  return lines;
+}
+
 function formatDestLines(investigate, mode) {
   if (investigate?.error) {
     return [`Куда: — (разбор не удался: ${escapeHtml(shortErrorMsg(investigate.error))})`];
   }
-  if (mode === 'carpet') return ['Куда: по сети клиента, не один сервер'];
+  if (mode === 'carpet') return formatSpreadDestLines(investigate);
   if (mode === 'syn') {
     const victim = investigate?.victim;
     if (isUsableVictim(victim)) {
@@ -1042,7 +1099,7 @@ function formatAttackPortLines(portInfo) {
 
 function formatAmpDestIpLine(row) {
   const parts = [];
-  if (row.share != null) parts.push(`${(Number(row.share) * 100).toFixed(0)}%`);
+  if (row.share != null) parts.push(formatSharePct(row.share));
   const bps = row.bps != null ? row.bps : (row.gbit != null ? Number(row.gbit) * 1e9 : null);
   if (bps != null && bps > 0) parts.push(formatBpsMsg(bps));
   return escapeHtml(`   ${row.ip} — ${parts.join(' · ')}`);
@@ -1056,7 +1113,7 @@ function formatAmpDestLines(investigate) {
   const lines = ['Куда (UDP/усилители):', 'Топ 5 сетей'];
   for (const row of rows) {
     const parts = [];
-    if (row.share != null) parts.push(`${(Number(row.share) * 100).toFixed(0)}%`);
+    if (row.share != null) parts.push(formatSharePct(row.share));
     if (row.ips != null) parts.push(ruAddresses(row.ips));
     const bps = row.bps != null ? row.bps : (row.gbit != null ? Number(row.gbit) * 1e9 : null);
     if (bps != null && bps > 0) parts.push(formatBpsMsg(bps));
@@ -1089,9 +1146,9 @@ function formatAmpHighlight({ amp, udp, all, hourUsual, verdict, investigate }) 
   const details = [who, pkt].filter(Boolean);
   if (details.length) lines.push(`   ${escapeHtml(details.join(' · '))}`);
   const shares = [];
-  if (amp.share != null) shares.push(`${(amp.share * 100).toFixed(0)}% его UDP`);
+  if (amp.share != null) shares.push(`${formatSharePct(amp.share)} его UDP`);
   if (Number(all.bps) > 0) {
-    shares.push(`${((amp.bps / Number(all.bps)) * 100).toFixed(0)}% всего трафика клиента`);
+    shares.push(`${formatSharePct(amp.bps / Number(all.bps))} всего трафика клиента`);
   }
   if (shares.length) lines.push(escapeHtml(`   это ${shares.join(' и ')}`));
   lines.push(...formatAmpDestLines(investigate));
@@ -1146,9 +1203,10 @@ function formatVolumetricHighlight({ all, tcp, udp, hourUsual, verdict, investig
     lines.push(`Пришло <b>${escapeHtml(formatBpsMsg(allBps))}</b>`);
   }
   const bits = [protoLabel(victim, tcp, udp, all)];
-  if (victim?.share != null) bits.push(`топ IP ${formatSharePct(victim.share)}`);
+  if (victim?.share != null) bits.push(`топ IP ${formatSharePct(victim.share)} трафика клиента`);
   const details = bits.filter(Boolean);
   if (details.length) lines.push(`   ${escapeHtml(details.join(' · '))}`);
+  lines.push(...formatAttackSourceLines(investigate));
   lines.push(...formatDestLines(investigate, 'victim'));
   if (!isUsableVictim(victim) || Number(investigate?.destPort?.count) > 1) {
     lines.push(...formatAttackPortLines(investigate?.destPort));
@@ -1168,8 +1226,9 @@ function formatCarpetHighlight({ all, tcp, udp, hourUsual, verdict, investigate 
   ];
   const bits = ['размазано'];
   const share = investigate?.victim?.share;
-  if (share != null) bits.push(`топ IP ${formatSharePct(share)}`);
+  if (share != null) bits.push(`топ IP ${formatSharePct(share)} трафика клиента`);
   lines.push(`   ${escapeHtml(bits.join(' · '))}`);
+  lines.push(...formatAttackSourceLines(investigate));
   lines.push(...formatDestLines(investigate, 'carpet'));
   lines.push(...formatAttackPortLines(investigate?.destPort));
   const volume = formatClientVolume(all, hourUsual, verdict);
@@ -1290,6 +1349,7 @@ function formatGenericHighlight({ all, tcp, udp, hourUsual, verdict, investigate
     Number(udp.bps) > 0 ? `UDP ${formatBpsMsg(udp.bps)}` : '',
   ].filter(Boolean);
   if (split.length) lines.push(`   ${escapeHtml(split.join(' · '))}`);
+  lines.push(...formatAttackSourceLines(investigate));
   lines.push(...formatDestLines(investigate, 'victim'));
   const volume = formatClientVolume(all, hourUsual, verdict);
   if (volume) lines.push(escapeHtml(volume));
@@ -1318,7 +1378,9 @@ function formatAlertHighlights({ byProto, verdict, investigate, hourUsual, signa
   } else {
     lines.push(...formatGenericHighlight({ all, tcp, udp, hourUsual, verdict, investigate }));
   }
-  return { lines, ampShown: showAmp };
+  // Сети источников попали в шапку — повторять их в футере незачем.
+  const sourceShown = lines.some((line) => /^(Откуда:|С сети )/.test(line));
+  return { lines, ampShown: showAmp, sourceShown };
 }
 
 function formatAlertMessage({
@@ -1347,7 +1409,7 @@ function formatAlertMessage({
   const markupLine = markup
     ? (binding?.bindMode === 'ports' ? `Порт: ${markup}` : `IP: ${markup}`)
     : '';
-  const { lines: highlights, ampShown } = formatAlertHighlights({
+  const { lines: highlights, ampShown, sourceShown } = formatAlertHighlights({
     byProto,
     verdict,
     investigate,
@@ -1360,16 +1422,17 @@ function formatAlertMessage({
   // почти нет: у 81050 туда попадала чужая закачка. Откуда и куда бьёт SYN,
   // уже сказано в шапке числом источников и целями по пакетам.
   const synFlood = verdict?.kind === KINDS.syn_flood;
-  const sourceNets = synFlood ? '—' : formatSourceNets(investigate?.source24);
+  const sourceNets = synFlood || sourceShown ? '—' : formatSourceNets(investigate?.source24);
   const hidePeakPorts = isLegitimatePeak(verdict);
   // У пика нет строк с маркерами, поэтому причина — единственное объяснение;
   // у атаки она дословно повторяет то, что уже разложено по строкам выше.
   const reasonLine = verdict?.kind === KINDS.benign_peak && verdict?.reason
     ? `Почему: ${verdict.reason}`
     : '';
+  const shortName = shortClientName(name);
   const object = scope === 'net'
-    ? `Сеть /24: <b>${escapeHtml(name && name !== scopeId ? `${name} (${scopeId})` : scopeId)}</b>`
-    : `Клиент: <b>${escapeHtml(name || scopeId)}</b> (${escapeHtml(scopeId)})`;
+    ? `Сеть /24: <b>${escapeHtml(shortName && shortName !== scopeId ? `${shortName} (${scopeId})` : scopeId)}</b>`
+    : `Клиент: <b>${escapeHtml(shortName || scopeId)}</b> (${escapeHtml(scopeId)})`;
   const growthPair = formatGrowthPair(byProto, verdict);
   const blocks = [
     [

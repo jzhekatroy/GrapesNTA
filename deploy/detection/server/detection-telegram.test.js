@@ -893,6 +893,86 @@ describe('detection-telegram', () => {
     assert.match(text, /SC 82% · KZ 8% · RU 5%/);
   });
 
+  // 95558, 21.09 10:05 UTC: 177 Мбит/с усилителей внутри 40.6 Гбит/с клиента
+  // печатались как «0% всего трафика клиента», а имя занимало всю строку превью.
+  it('шапка: короткое имя клиента и доля меньше процента', () => {
+    const ampBytes = 177e6 * 60 / 8;
+    const text = formatAlertMessage({
+      name: 'Общество с ограниченной ответственностью "Сторм Нетворкс" [ООО "Сторм Нетворкс" ]',
+      scope: 'client',
+      scopeId: '95558',
+      minute: '2026-09-21 10:05:00',
+      threshold: 1.6,
+      byProto: {
+        all: { bps: 40.6e9, bytes: 40.6e9 * 60 / 8 },
+        udp: {
+          bps: 4.1e9, bytes: 4.1e9 * 60 / 8,
+          amp_bytes: ampBytes, amp_packets: ampBytes / 1125, amp_srcs: 13,
+        },
+      },
+      verdict: { kind: 'amplification', reason: 'амплификация', hourRatio: 0.7, hourCeiling: 58e9 },
+      investigate: { ampSrcPort: { count: 1, top: [{ port: 53, share: 1 }] } },
+    });
+    assert.match(text, /Клиент: <b>ООО "Сторм Нетворкс"<\/b> \(95558\)/);
+    assert.doesNotMatch(text, /Общество с ограниченной/);
+    assert.match(text, /это 4% его UDP и 0\.4% всего трафика клиента/);
+    assert.doesNotMatch(text, /и 0% всего трафика/);
+  });
+
+  it('шапка объёмной атаки: кто бьёт — сети, адреса и AS', () => {
+    const text = formatAlertMessage({
+      name: 'Hostland',
+      scope: 'client',
+      scopeId: '83106',
+      minute: '2026-09-21 16:49:00',
+      threshold: 1.6,
+      byProto: { all: { bps: 5.8e9, growth_bps: 2.45 } },
+      verdict: { kind: 'volumetric', reason: 'топ IP 99.4%', hourRatio: 1.57 },
+      investigate: {
+        victim: { ip: '185.26.122.4', port: 443, protoLabel: 'UDP', share: 0.994, net24: '185.26.122.0/24' },
+        sources: { ipCount: 1840, net24Count: 612, dstIpCount: 3, dstNetCount: 1 },
+        source24: [
+          { net24: '154.85.88.0/24', asn: 139057, asnName: 'ELD-AS-AP - Edgenext Legend Dynasty Pte. Ltd.', share: 0.41, ips: 37 },
+          { net24: '45.12.30.0/24', asn: 3462, share: 0.12, ips: 9 },
+          { net24: '5.5.5.0/24', share: 0.004, ips: 1 },
+        ],
+        destPort: { count: 1, top: [{ port: 443, share: 0.99 }] },
+      },
+    });
+    assert.match(text, /Откуда: 1\s840 адресов · 612 сетей \/24/);
+    assert.match(text, /154\.85\.88\.0\/24 — 41% · 37 адресов · AS139057 Edgenext Legend Dynasty/);
+    assert.match(text, /45\.12\.30\.0\/24 — 12% · 9 адресов · AS3462/);
+    assert.match(text, /топ IP 99% трафика клиента/);
+    // Сети-крохи и дубль в футере только зашумляют шапку.
+    assert.doesNotMatch(text, /5\.5\.5\.0\/24/);
+    assert.doesNotMatch(text, /Откуда сети:/);
+  });
+
+  it('ковровая атака называет подсети цели, а не только «по сети клиента»', () => {
+    const text = formatAlertMessage({
+      name: 'TestNet',
+      scope: 'net',
+      scopeId: '10.0.0.0/24',
+      minute: '2026-09-21 10:00:00',
+      threshold: 1.6,
+      byProto: { all: { bps: 5.9e9 }, udp: { bps: 5.8e9 }, tcp: { bps: 80e6 } },
+      verdict: { kind: 'carpet', hourRatio: 7, hourCeiling: 840e6 },
+      investigate: {
+        victim: { ip: '10.0.0.8', port: 80, protoLabel: 'UDP', share: 0.002, net24: '10.0.0.0/24' },
+        sources: { ipCount: 9100, net24Count: 3400, dstIpCount: 512, dstNetCount: 6 },
+        dest24: [
+          { net24: '10.0.0.0/24', ips: 240, share: 0.52 },
+          { net24: '10.0.1.0/24', ips: 180, share: 0.31 },
+        ],
+        destPort: { count: 3, top: [{ port: 80, share: 0.4 }] },
+      },
+    });
+    assert.match(text, /Куда: по сети клиента, не один сервер — 512 адресов · 6 сетей \/24/);
+    assert.match(text, /10\.0\.0\.0\/24 — 52% · 240 адресов/);
+    assert.match(text, /10\.0\.1\.0\/24 — 31% · 180 адресов/);
+    assert.match(text, /Откуда: 9\s100 адресов · 3\s400 сетей \/24/);
+  });
+
   it('formatAlertMessage для абонента по порту пишет коммутатор', () => {
     const text = formatAlertMessage({
       name: 'КИНГ-ОНЛАЙН',
