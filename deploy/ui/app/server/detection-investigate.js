@@ -415,23 +415,26 @@ async function investigateIncident({ scope, scopeId, minute }) {
 
   // groupArray lives inside each CTE, not around it: 24.8 inlines WITH
   // and otherwise treats sum(bytes) as nested inside the outer aggregate.
+  // Never write `sum(byte_sum) AS byte_sum`: the analyzer inlines the inner
+  // `sum(bytes) AS byte_sum` and then sees an aggregate inside an aggregate
+  // (ILLEGAL_AGGREGATION). Inner/outer aliases must differ.
   const { rows } = await query(`
     WITH ev AS (${ev}),
     dest AS (
-      SELECT groupArray(tuple(ip, net24, port, proto, byte_sum)) AS rows
+      SELECT groupArray(tuple(ip, net24, port, proto, ip_bytes)) AS rows
       FROM (
         SELECT
           ip,
           any(net24) AS net24,
-          argMax(port, byte_sum) AS port,
-          argMax(proto, byte_sum) AS proto,
-          sum(byte_sum) AS byte_sum
+          argMax(port, pair_bytes) AS port,
+          argMax(proto, pair_bytes) AS proto,
+          sum(pair_bytes) AS ip_bytes
         FROM (
-          SELECT dst_ip AS ip, dst24 AS net24, dst_port AS port, proto, sum(bytes) AS byte_sum
+          SELECT dst_ip AS ip, dst24 AS net24, dst_port AS port, proto, sum(bytes) AS pair_bytes
           FROM ev GROUP BY ip, net24, port, proto
         )
         GROUP BY ip
-        ORDER BY byte_sum DESC
+        ORDER BY ip_bytes DESC
         LIMIT 8
       )
     ),
@@ -500,7 +503,7 @@ async function investigateIncident({ scope, scopeId, minute }) {
         dst_ip AS ip,
         dst_port AS port,
         sum(packets) AS packet_sum,
-        sum(bytes) AS byte_sum,
+        sum(bytes) AS pair_bytes,
         uniqState(src_ip) AS src_ip_st,
         uniqState(src24) AS src_net_st,
         uniqState(src_asn) AS src_asn_st
@@ -511,7 +514,7 @@ async function investigateIncident({ scope, scopeId, minute }) {
     syn AS (
       SELECT tuple(
         sum(packet_sum),
-        sum(byte_sum),
+        sum(pair_bytes),
         uniqMerge(src_ip_st),
         uniqMerge(src_net_st),
         uniqMerge(src_asn_st),
