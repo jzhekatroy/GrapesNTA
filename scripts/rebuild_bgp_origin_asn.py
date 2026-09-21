@@ -276,22 +276,24 @@ def build_state_seed_query(args: argparse.Namespace) -> str:
     costs one pass over the lookback window — the same work the old rebuild did
     on every single run.
     """
+    # Aliases must not reuse source column names: `max(ts) AS ts` shadows the
+    # column, and ClickHouse then reads WHERE ts >= ... as an aggregate.
     return f"""
 INSERT INTO {args.state_table}
 (ts, router_addr, peer_addr, peer_asn, event_type, family, prefix, prefix_len,
  next_hop, origin_asn, as_path)
 SELECT
-    max(ts) AS ts,
+    max(ts) AS last_ts,
     router_addr,
     peer_addr,
-    argMax(peer_asn, ts) AS peer_asn,
-    argMax(event_type, ts) AS event_type,
+    argMax(peer_asn, ts) AS last_peer_asn,
+    argMax(event_type, ts) AS last_event_type,
     family,
     prefix,
     prefix_len,
-    argMax(next_hop, ts) AS next_hop,
-    argMax(origin_asn, ts) AS origin_asn,
-    argMax(as_path, ts) AS as_path
+    argMax(next_hop, ts) AS last_next_hop,
+    argMax(origin_asn, ts) AS last_origin_asn,
+    argMax(as_path, ts) AS last_as_path
 FROM {args.route_events_table}
 WHERE ts >= now() - INTERVAL {args.lookback_days} DAY
   AND prefix_len > 0
@@ -317,22 +319,32 @@ def state_needs_seed(base: Sequence[str], args: argparse.Namespace) -> bool:
     few minutes of events and would silently produce a snapshot missing every
     prefix that was last announced earlier.
 
+    Depth is checked per address family, and a family present in the live feed
+    but absent from the state counts as missing. A seed that died halfway leaves
+    exactly that shape — one family deep, the other minutes old — and a global
+    min(ts) would call it complete.
+
     The horizon is clamped to the oldest raw event so a young install, whose feed
     is younger than the lookback window, is not reseeded on every run.
     """
     verdict = ch_run_scalar(
         base,
         f"""
-SELECT if(
-    (SELECT count() FROM {args.state_table}) = 0,
-    1,
-    toDateTime((SELECT min(ts) FROM {args.state_table})) > (
-        greatest(
+SELECT
+    (SELECT count() FROM {args.state_table}) = 0
+    OR (
+        SELECT count() FROM (
+            SELECT min(ts) AS fam_min FROM {args.state_table} GROUP BY family
+        )
+        WHERE toDateTime(fam_min) > greatest(
             now() - INTERVAL {args.lookback_days} DAY,
             toDateTime((SELECT min(ts) FROM {args.route_events_table}))
         ) + INTERVAL 1 HOUR
-    )
-)
+    ) > 0
+    OR (
+        SELECT uniqExact(family) FROM {args.route_events_table}
+        WHERE ts >= now() - INTERVAL 1 HOUR AND prefix_len > 0
+    ) > (SELECT uniqExact(family) FROM {args.state_table})
 """,
     )
     return verdict.strip() == "1"
