@@ -10,9 +10,23 @@ import sys
 import time
 from datetime import datetime, timezone
 
+
+def _env_interval(name: str, default: int) -> int:
+    raw = (os.environ.get(name) or "").strip()
+    if not raw.isdigit() or int(raw) <= 0:
+        return default
+    return int(raw)
+
+
+# rebuild_bgp_origin_asn.py re-aggregates the whole BGPORIGIN_LOOKBACK_DAYS window
+# of bmp_route_events on every run: at a 14-day lookback that is 460M events and
+# ~9 min, i.e. longer than the old 300s interval, so the job ran back to back and
+# ate a quarter of all ClickHouse work while moving a few hundred prefixes a run.
+BGP_ORIGIN_INTERVAL_SEC = _env_interval("BGPORIGIN_REFRESH_INTERVAL_SEC", 1800)
+
 JOBS = [
     # (name, script, interval_sec, lock_path)
-    ("bgp-origin", "/app/bin/cron-bgp-origin.sh", 300, "/tmp/bgp-origin.lock"),
+    ("bgp-origin", "/app/bin/cron-bgp-origin.sh", BGP_ORIGIN_INTERVAL_SEC, "/tmp/bgp-origin.lock"),
     ("geoloaderd", "/app/bin/cron-geoloaderd.sh", 86400, "/tmp/enrichment-heavy.lock"),
     ("asn-names", "/app/bin/cron-asn-names.sh", 604800, "/tmp/asn-names.lock"),
     # Shares the heavy lock with geoloaderd: both download large external files.
@@ -172,8 +186,8 @@ def main() -> int:
                 os.environ.setdefault(k, v)
 
     last_run = {name: 0.0 for name, *_ in JOBS}
-    # bgp-origin: first tick ~1 min after start.
-    last_run["bgp-origin"] = time.time() - 240
+    # bgp-origin: first tick ~1 min after start, whatever the configured interval.
+    last_run["bgp-origin"] = time.time() - (BGP_ORIGIN_INTERVAL_SEC - 60)
     last_run["snmp-iface-sync"] = 0.0
     # Heavy RIR/Cymru jobs: run immediately only when the target table is empty
     # (fresh install). Otherwise wait a full interval so a restart does not
