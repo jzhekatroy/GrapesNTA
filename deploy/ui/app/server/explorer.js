@@ -3088,6 +3088,53 @@ async function explorerSummary(body = {}, options = {}) {
   };
 }
 
+// Возвращает null, если строка таблицы заведомо не может совпасть ни с одним флоу:
+// тогда запрос по ней не нужен.
+function explorerSeriesGroupCondition(g, dim, rawValue, paramName, params) {
+  const raw = String(rawValue ?? '');
+  if (dim.filterType === 'tcp_flags') {
+    const { mask } = parseTcpFlagsFilterValue(raw);
+    params[paramName] = mask;
+    return `${dim.filterExpr} = {${paramName}:UInt8}`;
+  }
+  if ((EXPLORER_ENTITY_SERIES_DIMS.has(g) || g === 'cabinet_client') && dim.groupKeyExpr) {
+    if (raw === '—' || raw === '') {
+      return `(${dim.groupKeyExpr} = '' OR ${dim.groupKeyExpr} = '—')`;
+    }
+    params[paramName] = raw;
+    return `${dim.groupKeyExpr} = {${paramName}:String}`;
+  }
+  if (dim.filterType === 'as_path' && dim.groupKeyExpr) {
+    const hops = parseExplorerAsPathRaw(rawValue);
+    if (!hops.length) return `empty(${dim.groupKeyExpr})`;
+    params[paramName] = hops;
+    return `${dim.groupKeyExpr} = {${paramName}:Array(UInt32)}`;
+  }
+  if (dim.filterType === 'asn' && dim.filterExpr) {
+    const asn = parseExplorerAsnNumber(raw);
+    if (asn == null) return null;
+    params[paramName] = asn;
+    return `${dim.filterExpr} = {${paramName}:UInt32}`;
+  }
+  if (dim.filterType === 'mac' && dim.filterExpr) {
+    const normalized = normalizeMacValue(raw);
+    if (!normalized) return null;
+    params[paramName] = config.macStorage === 'uint64' ? normalized : macHexValue(normalized);
+    return buildMacFilterClause(dim.filterExpr, '=', paramName, { normalized });
+  }
+  params[paramName] = raw;
+  return `toString(${dim.expr}) = {${paramName}:String}`;
+}
+
+function explorerEmptyResultSeries(flowRows) {
+  const seriesByRow = Object.fromEntries(flowRows.map((row) => [row.id, []]));
+  return {
+    params: {},
+    meta: { kind: 'result-series' },
+    async map() { return { seriesByRow }; },
+  };
+}
+
 async function explorerResultSeries(body = {}, flowRows = [], options = {}) {
   const q = normalizeExplorerQuery(body, options);
   if (!flowRows.length) {
@@ -3128,43 +3175,23 @@ async function explorerResultSeries(body = {}, flowRows = [], options = {}) {
   if (entitySeriesMatch) {
     whereClauses.push(entitySeriesMatch);
   } else {
-    const groupMatchParts = flowRows.map((row) => {
-      const conds = groups.map((g, gi) => {
+    const groupMatchParts = [];
+    for (const row of flowRows) {
+      const conds = [];
+      for (let gi = 0; gi < groups.length; gi += 1) {
+        const g = groups[gi];
         const paramName = `series_g_${idxRef.i++}`;
-        const dim = dims[g];
-        const raw = String(row.rawValues?.[gi] ?? row.values?.[gi] ?? '');
-        if (dim.filterType === 'tcp_flags') {
-          const { mask } = parseTcpFlagsFilterValue(raw);
-          scopedParams[paramName] = mask;
-          return `${dim.filterExpr} = {${paramName}:UInt8}`;
+        const rawValue = row.rawValues?.[gi] ?? row.values?.[gi] ?? '';
+        const cond = explorerSeriesGroupCondition(g, dims[g], rawValue, paramName, scopedParams);
+        if (cond == null) {
+          conds.length = 0;
+          break;
         }
-        if (EXPLORER_ENTITY_SERIES_DIMS.has(g) && dim.groupKeyExpr) {
-          if (raw === '—' || raw === '') {
-            return `(${dim.groupKeyExpr} = '' OR ${dim.groupKeyExpr} = '—')`;
-          }
-          scopedParams[paramName] = raw;
-          return `${dim.groupKeyExpr} = {${paramName}:String}`;
-        }
-        if (g === 'cabinet_client' && dim.groupKeyExpr) {
-          if (raw === '—' || raw === '') {
-            return `(${dim.groupKeyExpr} = '' OR ${dim.groupKeyExpr} = '—')`;
-          }
-          scopedParams[paramName] = raw;
-          return `${dim.groupKeyExpr} = {${paramName}:String}`;
-        }
-        if (dim.filterType === 'as_path' && dim.groupKeyExpr) {
-          const hops = parseExplorerAsPathRaw(row.rawValues?.[gi] ?? raw);
-          if (!hops.length) {
-            return `empty(${dim.groupKeyExpr})`;
-          }
-          scopedParams[paramName] = hops;
-          return `${dim.groupKeyExpr} = {${paramName}:Array(UInt32)}`;
-        }
-        scopedParams[paramName] = raw;
-        return `toString(${dim.expr}) = {${paramName}:String}`;
-      });
-      return `(${conds.join(' AND ')})`;
-    });
+        conds.push(cond);
+      }
+      if (conds.length) groupMatchParts.push(`(${conds.join(' AND ')})`);
+    }
+    if (!groupMatchParts.length) return explorerEmptyResultSeries(flowRows);
     whereClauses.push(`(${groupMatchParts.join(' OR ')})`);
   }
 
