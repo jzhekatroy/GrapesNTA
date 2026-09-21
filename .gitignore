@@ -8,3 +8,7 @@
 # UI runtime secrets (bootstrapped on server)
 deploy/ui/.env
 deploy/ui/data/
+
+# Пишется контейнером воркера прямо в рабочее дерево стенда
+deploy/worker/logs/
+__pycache__/
