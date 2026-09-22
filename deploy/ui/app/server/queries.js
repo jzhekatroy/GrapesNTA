@@ -1657,6 +1657,18 @@ function flowSamplerIpExpr(samplerCol) {
 }
 
 /**
+ * Inverse of flowSamplerIpExpr: SNMP inventory switch_ip text -> stored bytes.
+ * Lets a query match sampler_address as stored instead of formatting every row.
+ */
+function samplerKeyFromIpExpr(ipCol) {
+  return `if(
+        isIPv4String(${ipCol}),
+        toFixedString(reverse(reinterpretAsFixedString(toUInt32(toIPv4(${ipCol})))), 16),
+        toFixedString(IPv6StringToNum(${ipCol}), 16)
+      )`;
+}
+
+/**
  * sFlow interface field -> plain ifIndex.
  * Only format 0 (two high bits = 0) carries a single ifIndex in the low 30 bits;
  * other formats (discard reason / multiple interfaces) decode to 0.
@@ -2554,6 +2566,7 @@ module.exports = {
   anchoredNowSql,
   flowIpExpr,
   flowSamplerIpExpr,
+  samplerKeyFromIpExpr,
   sflowIfIndexExpr,
   flowMacExpr,
   protoLabelSql,

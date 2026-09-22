@@ -26,6 +26,7 @@ const {
   probeTrafficWindowBounds,
   flowIpExpr,
   flowSamplerIpExpr,
+  samplerKeyFromIpExpr,
   sflowIfIndexExpr,
   flowMacExpr,
   protoLabelSql,
@@ -1029,6 +1030,15 @@ function explorerDimensions() {
     // optional for other consumers, but Explorer runs as ui_read and must not
     // depend on dictGet grants / dictionary SOURCE credentials.
     const ifacesRef = netInterfacesCurrentRef();
+    // Filtering by port label through the JOIN re-evaluates the SNMP match for
+    // every flow row in the window. The inventory holds a few thousand ports, so
+    // resolving the label to its (sampler, ifIndex) pairs up front lets the scan
+    // compare stored columns and drop the JOIN.
+    const ifPairFilter = (ifCol, labelCol) => ({
+      labelCol,
+      keyExpr: `(f.${samplerCol}, ${sflowIfIndexExpr(`f.${ifCol}`)})`,
+      pairsFrom: `SELECT ${samplerKeyFromIpExpr('switch_ip')}, if_index FROM ${ifacesRef}`,
+    });
     // Both if_name and if_alias reuse one JOIN per side: identical joinSql strings
     // are deduplicated downstream, so grouping by name + alias stays single-join.
     if (inIfCol) {
@@ -1049,6 +1059,7 @@ function explorerDimensions() {
         filterExpr: `ifNull(nullIf(snmp_in.if_name, ''), '')`,
         valueHint: 'ifName, alias или ifIndex',
         joinSql: inJoinSql,
+        pairFilter: ifPairFilter(inIfCol, 'if_name'),
         groupKeyExpr: `f.${inIfCol}`,
         labelJoin: {
           needsSampler: true,
@@ -1065,6 +1076,7 @@ function explorerDimensions() {
         filterExpr: `ifNull(nullIf(snmp_in.if_alias, ''), '')`,
         valueHint: 'Описание порта из SNMP',
         joinSql: inJoinSql,
+        pairFilter: ifPairFilter(inIfCol, 'if_alias'),
         groupKeyExpr: `f.${inIfCol}`,
         labelJoin: {
           needsSampler: true,
@@ -1091,6 +1103,7 @@ function explorerDimensions() {
         filterExpr: `ifNull(nullIf(snmp_out.if_name, ''), '')`,
         valueHint: 'ifName, alias или ifIndex',
         joinSql: outJoinSql,
+        pairFilter: ifPairFilter(outIfCol, 'if_name'),
         groupKeyExpr: `f.${outIfCol}`,
         labelJoin: {
           needsSampler: true,
@@ -1107,6 +1120,7 @@ function explorerDimensions() {
         filterExpr: `ifNull(nullIf(snmp_out.if_alias, ''), '')`,
         valueHint: 'Описание порта из SNMP',
         joinSql: outJoinSql,
+        pairFilter: ifPairFilter(outIfCol, 'if_alias'),
         groupKeyExpr: `f.${outIfCol}`,
         labelJoin: {
           needsSampler: true,
@@ -1807,6 +1821,42 @@ function buildMacFilterClause(macCol, op, paramName, { normalized, hexValues, co
   return `${macCol} = unhex({${paramName}:String})`;
 }
 
+/**
+ * Port name/alias filter expressed against stored columns: the SNMP inventory
+ * yields the (sampler, ifIndex) pairs carrying that label and the scan matches
+ * those, instead of joining the inventory onto every flow row.
+ *
+ * Returns null when the JOIN is still required — an empty label must also match
+ * ports absent from the inventory, which the pair set cannot represent.
+ */
+function buildIfPairFilterSql(pairFilter, op, values, rawValue, params, paramName) {
+  const { labelCol, keyExpr, pairsFrom } = pairFilter;
+  const single = String(rawValue ?? '').trim();
+  let match;
+  let negate;
+
+  if (op === 'in' || op === 'not_in') {
+    if (!values.length || values.some((v) => !String(v ?? '').trim())) return null;
+    params[paramName] = values;
+    match = `${labelCol} IN {${paramName}:Array(String)}`;
+    negate = op === 'not_in';
+  } else if (op === 'contains' || op === 'not_contains') {
+    if (!single) return null;
+    params[paramName] = single;
+    match = `positionCaseInsensitive(${labelCol}, {${paramName}:String}) > 0`;
+    negate = op === 'not_contains';
+  } else if (op === '=' || op === '!=' || op === '<>') {
+    if (!single) return null;
+    params[paramName] = single;
+    match = `${labelCol} = {${paramName}:String}`;
+    negate = op !== '=';
+  } else {
+    return null;
+  }
+
+  return `${keyExpr} ${negate ? 'NOT IN' : 'IN'} (${pairsFrom} WHERE ${match})`;
+}
+
 async function buildExplorerFilterClauses(filters, dims, params) {
   const joins = new Set();
   let idx = 0;
@@ -1848,6 +1898,18 @@ async function buildExplorerFilterClauses(filters, dims, params) {
 
     const dim = dims[f.field];
     if (!dim) continue;
+
+    if (dim.pairFilter) {
+      const pairName = `filter_${idx}`;
+      const pairSql = buildIfPairFilterSql(dim.pairFilter, op, values, f.value, params, pairName);
+      if (pairSql) {
+        idx += 1;
+        addClause(pairSql);
+        continue;
+      }
+      delete params[pairName];
+    }
+
     // Filters that reference joined aliases (snmp_in / ps_src / …) must pull joinSql in.
     if (dim.joinSql) joins.add(dim.joinSql);
 
