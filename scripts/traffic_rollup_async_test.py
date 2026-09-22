@@ -7,9 +7,13 @@ import argparse
 from traffic_rollup_async import (
     CATCHUP_LAG_BUCKETS,
     JobState,
+    catchup_window_buckets,
     complete_raw_until,
+    defer_until,
     is_epoch_timestamp,
+    is_retryable_queue_error,
     lag_buckets,
+    mark_deferred,
     truncate_bucket,
 )
 from traffic_rollup_jobs import sorted_jobs
@@ -87,6 +91,40 @@ class PassOneWindow(unittest.TestCase):
         job = self._minute_job()
         until = datetime(2026, 9, 5, 20, 55, tzinfo=timezone.utc)
         self.assertEqual(lag_buckets(job, {}, self._args(until)), 0)
+
+
+class CatchupWindow(unittest.TestCase):
+    def test_minute_budget_stays_a_quarter_hour(self):
+        self.assertEqual(catchup_window_buckets("minute", 15), 15)
+
+    def test_hour_budget_is_one_hour_not_fifteen(self):
+        self.assertEqual(catchup_window_buckets("hour", 15), 1)
+
+    def test_two_hours_only_when_the_budget_covers_them(self):
+        self.assertEqual(catchup_window_buckets("hour", 120), 2)
+        self.assertEqual(catchup_window_buckets("hour", 24 * 60), 2)
+
+    def test_day_budget_is_one_day(self):
+        self.assertEqual(catchup_window_buckets("day", 15), 1)
+
+
+class RetryableTimeout(unittest.TestCase):
+    def test_server_timeout_is_retryable(self):
+        msg = "curl: (22) The requested URL returned error: 500 Code: 159. DB::Exception: Timeout exceeded"
+        self.assertTrue(is_retryable_queue_error(msg))
+
+    def test_hard_error_is_not_retryable(self):
+        self.assertFalse(is_retryable_queue_error("Code: 47. Unknown expression identifier"))
+
+    def test_defer_marker_holds_for_five_minutes(self):
+        now = datetime(2026, 9, 22, 10, 0, tzinfo=timezone.utc)
+        note = mark_deferred("Timeout exceeded", now)
+        state = JobState(last_bucket=now, status="deferred", last_error=note)
+        self.assertEqual(
+            defer_until(state),
+            datetime(2026, 9, 22, 10, 5, tzinfo=timezone.utc),
+        )
+        self.assertIsNone(defer_until(JobState(last_bucket=now, status="error", last_error=note)))
 
 
 if __name__ == "__main__":

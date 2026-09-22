@@ -124,6 +124,26 @@ QUEUE_MIN_BUDGET_SEC = {"minute": 20, "hour": 60, "day": 60}
 # Lag above which the fair pass switches a job from one bucket to a full range.
 # Two buckets of slack keeps a steady tick on cheap single-bucket queries.
 CATCHUP_LAG_BUCKETS = 2
+# A job that did not finish keeps its cursor and sits out, so the next ticks
+# can move the other hour/day vitrines instead of repeating the same query.
+DEFER_COOLDOWN_SEC = 300
+
+
+def catchup_window_buckets(bucket_kind: str, max_range_buckets: int) -> int:
+    """Buckets one catch-up INSERT may cover.
+
+    ``max_range_buckets`` is a budget for minute jobs (default 15 minutes).
+    Applying that same count to coarser buckets turns it into 15 hours or 15
+    days of raw flows, which does not finish before the query timeout and is
+    then retried unchanged. An hour job takes one hour, two at most when the
+    budget itself is at least two hours. A day job takes one day.
+    """
+    n = max(1, int(max_range_buckets or 1))
+    if bucket_kind == "hour":
+        return max(1, min(2, n // 60 or 1))
+    if bucket_kind == "day":
+        return 1
+    return n
 
 
 class JobDeferred(Exception):
@@ -135,6 +155,7 @@ class JobState:
     last_bucket: Optional[datetime]
     status: str
     last_error: str
+    updated_at: Optional[datetime] = None
 
 
 class ClickHouseClient:
@@ -155,12 +176,20 @@ class ClickHouseClient:
         return cmd
 
     def query(self, sql: str, *, display: Optional[str] = None) -> str:
+        # The HTTP shim reads this and sets both curl --max-time and
+        # max_execution_time. Native clickhouse-client ignores it. Without the
+        # override the shim keeps the server query alive for 180s after the
+        # tick's own deadline has already killed the caller.
+        env = os.environ.copy()
+        if self.timeout_s:
+            env["CLICKHOUSE_HTTP_MAX_TIME"] = str(int(self.timeout_s))
         try:
             proc = subprocess.run(
                 self.base + ["--query", sql],
                 capture_output=True,
                 text=True,
                 timeout=self.timeout_s,
+                env=env,
             )
         except subprocess.TimeoutExpired:
             # The caller runs under a flock held for the whole cron tick, so a
@@ -173,7 +202,13 @@ class ClickHouseClient:
             ) from None
         if proc.returncode != 0:
             shown = display if display is not None else sql
-            err = (proc.stderr or proc.stdout or "").strip()
+            # curl -f puts "HTTP 500" on stderr and, with --fail-with-body, the
+            # ClickHouse exception on stdout. Keep both: the status line alone
+            # hides TIMEOUT_EXCEEDED and the job is then stored as a hard error.
+            err = (proc.stderr or "").strip()
+            out = (proc.stdout or "").strip()
+            if out and out not in err:
+                err = f"{err}\n{out}" if err else out
             raise RuntimeError(
                 f"clickhouse query failed (exit {proc.returncode})\n"
                 f"query: {shown[:800]}{'...' if len(shown) > 800 else ''}\n"
@@ -266,7 +301,7 @@ def save_state(
     rows_written: int,
     duration_ms: int,
 ) -> None:
-    err = last_error.replace("'", "''")
+    err = " ".join(last_error.split()).replace("'", "''")
     sql = (
         "INSERT INTO default.traffic_rollup_state "
         "(job, last_bucket, status, last_error, rows_written, duration_ms, updated_at) "
@@ -692,9 +727,34 @@ def is_retryable_queue_error(msg: str) -> bool:
     text = (msg or "").lower()
     return (
         "timed out" in text
+        or "timeout exceeded" in text
+        or "timeout_exceeded" in text
+        or "code: 159" in text
         or "pending mutations" in text
         or "cannot read system.mutations" in text
     )
+
+
+def mark_deferred(msg: str, now: Optional[datetime] = None) -> str:
+    until = (now or utc_now()) + timedelta(seconds=DEFER_COOLDOWN_SEC)
+    flat = " ".join((msg or "").split())
+    # The timestamp uses T so the following error text can be split on spaces.
+    stamp = until.strftime("%Y-%m-%dT%H:%M:%S")
+    return f"defer-until={stamp} {flat}"[:500]
+
+
+def defer_until(state: Optional[JobState]) -> Optional[datetime]:
+    if state is None or state.status != "deferred":
+        return None
+    key = "defer-until="
+    pos = (state.last_error or "").find(key)
+    if pos < 0:
+        return None
+    raw = state.last_error[pos + len(key):].split(" ", 1)[0]
+    try:
+        return parse_utc_dt(raw)
+    except ValueError:
+        return None
 
 
 def remaining_budget_s(started: float, wall_sec: int) -> float:
@@ -1110,8 +1170,9 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=int(env("TRAFFIC_ROLLUP_MAX_RANGE_BUCKETS", "15") or "15"),
         help=(
-            "catch-up window size for a lagging job in one INSERT; "
-            "SELECT already groups by bucket so N minutes is one query"
+            "catch-up budget for a lagging minute job, in minutes (default 15). "
+            "Hour jobs take one hour per INSERT, day jobs one day; the same "
+            "count is not applied to those coarser buckets"
         ),
     )
     parser.add_argument(
@@ -2069,19 +2130,39 @@ def live_job_step(
         return "defer"
     except Exception as exc:
         msg = str(exc)
+        if is_retryable_queue_error(msg):
+            # Remember the pause. Otherwise the next tick picks this same job
+            # first — it is the most behind — and the other vitrines never run.
+            note = mark_deferred(msg)
+            logger.info(
+                "job=%s action=defer reason=query_timeout bucket=%s err=%s",
+                job.job_id,
+                fmt_dt(bucket_start),
+                note,
+            )
+            prev = state.last_bucket if state and state.last_bucket else subtract_bucket(
+                bucket_start, job.bucket_kind
+            )
+            try:
+                save_state(ch, job.job_id, prev, "deferred", note, 0, 0)
+            except Exception as save_exc:
+                logger.error(
+                    "job=%s failed to persist defer state: %s",
+                    job.job_id,
+                    save_exc,
+                )
+            states[job.job_id] = JobState(
+                last_bucket=prev,
+                status="deferred",
+                last_error=note,
+            )
+            return "defer"
         logger.error(
             "job=%s bucket=%s status=error err=%s",
             job.job_id,
             fmt_dt(bucket_start),
             msg,
         )
-        if "timed out" in msg.lower():
-            logger.info(
-                "job=%s action=defer reason=query_timeout bucket=%s",
-                job.job_id,
-                fmt_dt(bucket_start),
-            )
-            return "defer"
         prev = state.last_bucket if state and state.last_bucket else subtract_bucket(
             bucket_start, job.bucket_kind
         )
@@ -2129,6 +2210,9 @@ def _live_lag_seconds(
     if job.job_id in blocked:
         return 0.0
     state = states.get(job.job_id)
+    held = defer_until(state)
+    if held is not None and utc_now() < held:
+        return 0.0
     job_until = safe_until_for_job(job, args)
     try:
         bucket_start = next_bucket(
@@ -2391,9 +2475,10 @@ def run_live(args: argparse.Namespace, logger: logging.Logger) -> int:
                 best = job
         if best is None:
             break
-        result = _step(best, max_range)
+        window = catchup_window_buckets(best.bucket_kind, max_range)
+        result = _step(best, window)
         if result == "rewound":
-            result = _step(best, max_range)
+            result = _step(best, window)
         if result == "ok":
             ok_count += 1
         elif result == "skip":

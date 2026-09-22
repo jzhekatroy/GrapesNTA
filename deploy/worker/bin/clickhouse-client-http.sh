@@ -73,7 +73,10 @@ if [ -n "$DATABASE" ]; then
   URL="${URL}&database=$(printf %s "$DATABASE" | sed 's/ /%20/g')"
 fi
 
-curl -sS -f --max-time "$MAX_TIME" --user "${USER}:${PASSWORD}" \
+# --fail-with-body keeps the HTTP status failure (exit 22) but also writes
+# the ClickHouse exception. Plain -f drops that body, so a 180s server
+# timeout arrives as "error: 500" with no reason.
+curl -sS --fail-with-body --max-time "$MAX_TIME" --user "${USER}:${PASSWORD}" \
   -X POST "$URL" --data-binary @"$BODY"
 # Ensure trailing newline like clickhouse-client
 echo
