@@ -23,14 +23,22 @@ CH() { sudo -n docker exec -i grapes-clickhouse clickhouse-client "$@"; }
 # у коллектора есть задержка экспорта, и последние минуты неполные.
 # toString даёт 'YYYY-MM-DD hh:mm:ss' — ровно тот вид, что приходит из интерфейса.
 # Разделитель — перевод строки: в самих значениях есть пробел.
-FROM=$(CH -q "
-  WITH toStartOfMinute(max(time_received_ns)) - INTERVAL ${LAG_MINUTES} MINUTE AS t_to
-  SELECT toString(toDateTime(t_to) - INTERVAL ${WINDOW_HOURS} HOUR)
-  FROM ${BENCH_TIME_TABLE:-default.flows_raw} WHERE date >= today() - 1")
-TO=$(CH -q "
-  WITH toStartOfMinute(max(time_received_ns)) - INTERVAL ${LAG_MINUTES} MINUTE AS t_to
-  SELECT toString(toDateTime(t_to))
-  FROM ${BENCH_TIME_TABLE:-default.flows_raw} WHERE date >= today() - 1")
+# Окно можно задать вручную: при сравнении раскладок периоды у старой и новой
+# таблиц не пересекаются, поэтому один и тот же интервал взять неоткуда — берутся
+# сопоставимые по объёму, но разные по времени.
+if [ -n "${BENCH_FROM:-}" ] && [ -n "${BENCH_TO:-}" ]; then
+  FROM=$BENCH_FROM
+  TO=$BENCH_TO
+else
+  FROM=$(CH -q "
+    WITH toStartOfMinute(max(time_received_ns)) - INTERVAL ${LAG_MINUTES} MINUTE AS t_to
+    SELECT toString(toDateTime(t_to) - INTERVAL ${WINDOW_HOURS} HOUR)
+    FROM ${BENCH_TIME_TABLE:-default.flows_raw} WHERE date >= today() - 1")
+  TO=$(CH -q "
+    WITH toStartOfMinute(max(time_received_ns)) - INTERVAL ${LAG_MINUTES} MINUTE AS t_to
+    SELECT toString(toDateTime(t_to))
+    FROM ${BENCH_TIME_TABLE:-default.flows_raw} WHERE date >= today() - 1")
+fi
 
 if [ -z "$FROM" ] || [ -z "$TO" ]; then echo "не удалось определить окно замера"; exit 1; fi
 

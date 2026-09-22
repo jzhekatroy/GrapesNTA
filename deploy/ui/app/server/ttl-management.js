@@ -380,8 +380,22 @@ async function updateTtlTable(id, days, { roleId } = {}) {
   const resolved = resolveTtlExpr(meta, entry.ttlColumn, entry.defaultDays, table, columnTypes);
   const ttlExpr = buildTtlExpression(resolved.exprBase, ttlDays);
 
+  // MODIFY TTL по умолчанию тянет за собой MATERIALIZE TTL: ClickHouse
+  // перезаписывает каждую существующую часть таблицы. На сырых потоках это
+  // двадцать миллиардов строк и несколько часов, в течение которых диск занят
+  // целиком, запросы разбора трафика замедляются в разы, а следующий ALTER по
+  // этой таблице упирается в таймаут блокировки. Один такой случай на стенде
+  // остановил сборку сводок и обнаружение атак.
+  //
+  // Перезапись нужна только при сокращении срока: тогда админ ждёт, что место
+  // освободится сразу. При продлении она не удаляет ни одной строки и является
+  // чистой потерей, поэтому новый срок просто записывается в описание таблицы,
+  // а к существующим частям применится при очередном слиянии.
+  const shortening = Number.isFinite(resolved.days) && ttlDays < resolved.days;
+  const settings = shortening ? '' : ' SETTINGS materialize_ttl_after_modify = 0';
+
   const { elapsedMs } = await executeCommand(
-    `ALTER TABLE ${tableRef(table)} MODIFY TTL ${ttlExpr}`,
+    `ALTER TABLE ${tableRef(table)} MODIFY TTL ${ttlExpr}${settings}`,
     {},
     { name: 'admin/ttl-update' },
   );
@@ -393,6 +407,7 @@ async function updateTtlTable(id, days, { roleId } = {}) {
     ttlColumn: resolved.column,
     ttlDays,
     ttlExpression: ttlExpr,
+    materialized: shortening,
     meta: { elapsedMs },
   };
 }
