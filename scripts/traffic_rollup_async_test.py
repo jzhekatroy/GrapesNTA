@@ -10,10 +10,13 @@ from traffic_rollup_async import (
     catchup_window_buckets,
     complete_raw_until,
     defer_until,
+    flows_raw_enabled_max_minute,
     is_epoch_timestamp,
     is_retryable_queue_error,
     lag_buckets,
     mark_deferred,
+    raw_max_received,
+    recent_five_minute_filter,
     truncate_bucket,
 )
 from traffic_rollup_jobs import sorted_jobs
@@ -125,6 +128,62 @@ class RetryableTimeout(unittest.TestCase):
             datetime(2026, 9, 22, 10, 5, tzinfo=timezone.utc),
         )
         self.assertIsNone(defer_until(JobState(last_bucket=now, status="error", last_error=note)))
+
+
+class RecordingClickHouse:
+    """Отдаёт заранее заданные ответы и запоминает запросы."""
+
+    def __init__(self, answers):
+        self.answers = list(answers)
+        self.queries = []
+
+    def query(self, sql, display=None):
+        self.queries.append(sql)
+        return self.answers.pop(0) if self.answers else ""
+
+
+class FreshnessProbeWindow(unittest.TestCase):
+    def test_recent_filter_sits_on_the_sort_key(self):
+        sql = recent_five_minute_filter(30)
+        self.assertIn("toStartOfFiveMinutes(time_received_ns) >=", sql)
+        self.assertIn("INTERVAL 30 MINUTE", sql)
+
+    def test_recent_filter_never_narrower_than_one_granule(self):
+        self.assertIn("INTERVAL 5 MINUTE", recent_five_minute_filter(1))
+
+    def test_live_collector_answers_from_the_narrow_window(self):
+        ch = RecordingClickHouse(["2026-09-22 14:46:25"])
+        got = raw_max_received(ch)
+        self.assertEqual(got, datetime(2026, 9, 22, 14, 46, 25, tzinfo=timezone.utc))
+        self.assertEqual(len(ch.queries), 1)
+        self.assertIn("toStartOfFiveMinutes", ch.queries[0])
+
+    def test_silent_collector_falls_back_to_the_wide_scan(self):
+        ch = RecordingClickHouse(["1970-01-01 00:00:00", "2026-09-20 03:11:00"])
+        got = raw_max_received(ch)
+        self.assertEqual(got, datetime(2026, 9, 20, 3, 11, tzinfo=timezone.utc))
+        self.assertEqual(len(ch.queries), 2)
+        self.assertNotIn("toStartOfFiveMinutes", ch.queries[1])
+
+    def test_empty_table_stays_none(self):
+        ch = RecordingClickHouse(["", ""])
+        self.assertIsNone(raw_max_received(ch))
+        self.assertEqual(len(ch.queries), 2)
+
+    def test_enabled_sources_probe_uses_the_same_window(self):
+        ch = RecordingClickHouse(["2026-09-22 14:46:00"])
+        got = flows_raw_enabled_max_minute(ch)
+        self.assertEqual(got, datetime(2026, 9, 22, 14, 46, tzinfo=timezone.utc))
+        self.assertEqual(len(ch.queries), 1)
+        self.assertIn("toStartOfFiveMinutes", ch.queries[0])
+        self.assertIn("net_flow_sources_enabled", ch.queries[0])
+
+    def test_enabled_sources_probe_falls_back(self):
+        ch = RecordingClickHouse(["1970-01-01 00:00:00", "2026-09-20 03:11:00"])
+        got = flows_raw_enabled_max_minute(ch)
+        self.assertEqual(got, datetime(2026, 9, 20, 3, 11, tzinfo=timezone.utc))
+        self.assertEqual(len(ch.queries), 2)
+        self.assertIn("net_flow_sources_enabled", ch.queries[1])
 
 
 if __name__ == "__main__":

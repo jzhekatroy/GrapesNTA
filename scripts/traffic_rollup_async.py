@@ -328,9 +328,27 @@ def is_epoch_timestamp(raw: str) -> bool:
     return not text or text.startswith("1970-01-01")
 
 
+# Свежесть потоков проверяется дважды в минуту, поэтому сначала пробуем узкое
+# окно. Ключ сортировки flows_raw начинается с toStartOfFiveMinutes(
+# time_received_ns), так что условие на это выражение отсекает гранулы и запрос
+# читает десятки миллионов строк вместо миллиарда. Когда коллектор молчал
+# дольше окна, узкий запрос вернёт пусто и вызывающий код повторит прежним
+# широким запросом.
+RAW_MAX_RECENT_WINDOW_MINUTES = 30
+
+
+def recent_five_minute_filter(minutes: int) -> str:
+    window = max(int(minutes), 5)
+    return (
+        "toStartOfFiveMinutes(time_received_ns) >= "
+        f"toStartOfFiveMinutes(now() - INTERVAL {window} MINUTE)"
+    )
+
+
 def raw_max_received(
     ch: ClickHouseClient,
     lookback_days: int = 14,
+    recent_window_minutes: int = RAW_MAX_RECENT_WINDOW_MINUTES,
 ) -> Optional[datetime]:
     """Latest time_received_ns, ignoring an empty recent window.
 
@@ -340,12 +358,24 @@ def raw_max_received(
     rolled up while the collector spool was still draining.
     """
     days = max(int(lookback_days), 1)
-    raw = ch.query(
-        "SELECT formatDateTime(max(time_received_ns), '%F %T', 'UTC') "
-        f"FROM {FLOWS_RAW_LIVE_TABLE} "
-        f"WHERE date >= today() - {days}",
-        display="flows_raw max received",
-    ).strip()
+
+    def probe(extra_filter: str, display: str) -> str:
+        where = f"date >= today() - {days}"
+        if extra_filter:
+            where = f"{where} AND {extra_filter}"
+        return ch.query(
+            "SELECT formatDateTime(max(time_received_ns), '%F %T', 'UTC') "
+            f"FROM {FLOWS_RAW_LIVE_TABLE} "
+            f"WHERE {where}",
+            display=display,
+        ).strip()
+
+    raw = probe(
+        recent_five_minute_filter(recent_window_minutes),
+        "flows_raw max received (recent window)",
+    )
+    if is_epoch_timestamp(raw):
+        raw = probe("", "flows_raw max received")
     if is_epoch_timestamp(raw):
         return None
     try:
@@ -1062,13 +1092,25 @@ def flows_raw_enabled_max_minute(
     cache_key = "enabled_max_minute"
     if cache is not None and cache_key in cache:
         return cache[cache_key]
-    raw = ch.query(
-        "SELECT formatDateTime(toStartOfMinute(max(time_received_ns)), '%F %T', 'UTC') "
-        f"FROM {FLOWS_RAW_LIVE_TABLE} "
-        "WHERE date >= today() - 14 "
-        "AND source_id IN (SELECT source_id FROM default.net_flow_sources_enabled)",
-        display="flows_raw enabled max minute",
-    ).strip()
+
+    def probe(extra_filter: str, display: str) -> str:
+        where = "date >= today() - 14"
+        if extra_filter:
+            where = f"{where} AND {extra_filter}"
+        return ch.query(
+            "SELECT formatDateTime(toStartOfMinute(max(time_received_ns)), '%F %T', 'UTC') "
+            f"FROM {FLOWS_RAW_LIVE_TABLE} "
+            f"WHERE {where} "
+            "AND source_id IN (SELECT source_id FROM default.net_flow_sources_enabled)",
+            display=display,
+        ).strip()
+
+    raw = probe(
+        recent_five_minute_filter(RAW_MAX_RECENT_WINDOW_MINUTES),
+        "flows_raw enabled max minute (recent window)",
+    )
+    if is_epoch_timestamp(raw):
+        raw = probe("", "flows_raw enabled max minute")
     result: Optional[datetime] = None
     if raw and not is_epoch_timestamp(raw):
         try:
