@@ -100,10 +100,9 @@ describe('explorer cabinet client helpers', () => {
     const expr = cabinetClientGroupKeyExpr('f');
     assert.match(expr, /f\.src_client != ''/);
     assert.match(expr, /f\.dst_client != ''/);
-    assert.match(expr, /cabinet_client_prefix_rules/);
+    assert.match(expr, /net_client_prefix_dict/);
     assert.match(expr, /cabinet_client_port_keys/);
     assert.match(expr, /cabinet_client_port_values/);
-    assert.match(expr, /arrayFirst/);
     assert.doesNotMatch(expr, /\betype\b/);
     assert.doesNotMatch(expr, /SELECT p\.client_id/);
     assert.match(expr, /f\.`SrcAddr`/);
@@ -117,15 +116,41 @@ describe('explorer cabinet client helpers', () => {
     assert.doesNotMatch(expr, /arrayFirst\(x -> \(x\.2 =/);
   });
 
-  it('cabinetClientGroupKeyExpr skips the prefix fallback when nobody is bound by networks', () => {
+  it('cabinetClientGroupKeyExpr looks up networks in the prefix dictionary', () => {
     const expr = cabinetClientGroupKeyExpr('f');
-    assert.match(expr, /if\(empty\(cabinet_client_prefix_rules\), '',/);
+    // На 19 тысячах привязок перебор каталога не выполнялся вовсе: запрос
+    // требовал больше памяти, чем разрешено. Ни arrayFirst, ни построчного
+    // isIPAddressInRange в ключе группировки быть не должно.
+    assert.doesNotMatch(expr, /arrayFirst/);
+    assert.doesNotMatch(expr, /isIPAddressInRange/);
+    assert.match(expr, /dictGetOrDefault\('default\.net_client_prefix_dict', 'client_id'/);
+  });
+
+  it('prefix lookup keys IPv4 and IPv6 separately from the stored 16 bytes', () => {
+    const expr = cabinetClientGroupKeyExpr('f');
+    // У IPv4 значимы только первые четыре байта, остальные нули: по этому
+    // признаку и выбирается ключ, иначе словарь ищет по чужому семейству.
+    assert.match(expr, /substring\(f\.`SrcAddr`, 5\) = unhex\('000000000000000000000000'\)/);
+    assert.match(expr, /toIPv4\(reinterpretAsUInt32\(reverse\(substring\(f\.`SrcAddr`, 1, 4\)\)\)\)/);
+    assert.match(expr, /tuple\(f\.`SrcAddr`\)/);
+    // Адрес уходит в словарь как есть: превращение в строку на каждой строке
+    // потока было отдельной статьёй расходов. Проверяется только участок до
+    // привязок по портам — там адрес коммутатора в строку превращать надо.
+    const prefixPart = expr.slice(0, expr.indexOf('transform('));
+    assert.doesNotMatch(prefixPart, /IPv6NumToString/);
+    assert.doesNotMatch(prefixPart, /toString\(/);
+  });
+
+  it('prefix rules no longer travel with the query as an array', () => {
+    const head = 'ts_from, ts_to,';
+    const next = appendCabinetClientCatalogToCteHead(head, ['cabinet_client']);
+    assert.doesNotMatch(next, /cabinet_client_prefix_rules/);
+    assert.doesNotMatch(next, /net_client_prefixes_enabled/);
   });
 
   it('appendCabinetClientCatalogToCteHead injects catalog arrays for grouping', () => {
     const head = 'ts_from, ts_to,';
     const next = appendCabinetClientCatalogToCteHead(head, ['cabinet_client']);
-    assert.match(next, /cabinet_client_prefix_rules/);
     assert.match(next, /cabinet_client_port_keys/);
     assert.match(next, /cabinet_client_port_values/);
     assert.equal(appendCabinetClientCatalogToCteHead(head, ['src_ip']), head);

@@ -72,6 +72,7 @@
 50_net/42_net_client_prefixes_enabled.sql
 50_net/43_net_client_ports.sql
 50_net/44_net_client_ports_enabled.sql
+50_net/45_net_client_prefix_dict.sql
 60_traffic/01_traffic_rollup_state.sql
 60_traffic/02_traffic_dashboard_1m.sql
 60_traffic/03_traffic_dashboard_1h.sql

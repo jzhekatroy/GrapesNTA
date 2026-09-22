@@ -1,4 +1,6 @@
-const { col, flowCol, query, netInterfacesCurrentRef } = require('./clickhouse');
+const {
+  col, flowCol, query, netInterfacesCurrentRef, config, escapeSqlString,
+} = require('./clickhouse');
 const { flowSamplerIpExpr, sflowIfIndexExpr } = require('./queries');
 const { asStringArray, buildClientSearchWhere } = require('./client-search');
 const { explorerFilterUsesField } = require('../public/data/explorer-filter-tree.js');
@@ -59,6 +61,9 @@ function explorerFlowRefs(flowAlias = 'f') {
   return {
     srcIpExpr: flowIpRangeExpr(flowAlias, srcIpCol),
     dstIpExpr: flowIpRangeExpr(flowAlias, dstIpCol),
+    // Словарю нужен адрес как он лежит в журнале, без превращения в строку.
+    srcIpRawExpr: `${flowAlias}.${srcIpCol}`,
+    dstIpRawExpr: `${flowAlias}.${dstIpCol}`,
     samplerIpExpr: samplerCol ? flowSamplerIpExpr(`${flowAlias}.${samplerCol}`) : null,
     inIfExpr: inIfCol ? sflowIfIndexExpr(`${flowAlias}.${inIfCol}`) : null,
     outIfExpr: outIfCol ? sflowIfIndexExpr(`${flowAlias}.${outIfCol}`) : null,
@@ -231,7 +236,6 @@ async function buildCabinetClientFilterSql(ids, op, params, flowAlias = 'f') {
   return negOps.has(String(op || '').toLowerCase()) ? `NOT (${inner})` : inner;
 }
 
-const CABINET_CLIENT_PREFIX_RULES = 'cabinet_client_prefix_rules';
 const CABINET_CLIENT_PORT_KEYS = 'cabinet_client_port_keys';
 const CABINET_CLIENT_PORT_VALUES = 'cabinet_client_port_values';
 
@@ -253,13 +257,9 @@ function cabinetClientPortCatalogSelect(column) {
       ))`;
 }
 
+// Привязки по сетям в каталог не попадают: их ищет словарь net_client_prefix_dict.
 function cabinetClientCatalogCteLines() {
   return `
-      (SELECT groupArray(tuple(p.client_id, p.prefix))
-       FROM ${PREFIXES_ENABLED} AS p
-       INNER JOIN ${CLIENTS_ENABLED} AS c
-         ON c.client_id = p.client_id AND c.bind_mode = 'prefixes'
-      ) AS ${CABINET_CLIENT_PREFIX_RULES},
       ${cabinetClientPortCatalogSelect('port_key')} AS ${CABINET_CLIENT_PORT_KEYS},
       ${cabinetClientPortCatalogSelect('client_id')} AS ${CABINET_CLIENT_PORT_VALUES}`;
 }
@@ -278,13 +278,23 @@ function explorerWindowSpecWithCabinetClientCatalog(windowSpec, groups = []) {
 }
 
 // Привязки по сетям коллектор проставляет ещё при приёме, в src_client и
-// dst_client, поэтому перебор правил нужен только как подстраховка для данных,
-// записанных до появления привязки. Пустой каталог — обычное дело, и тогда
-// проверка empty отсекает перебор целиком: на стенде ключ группировки
-// ускоряется с 5.7 с до 3.2 с на окне в 25 минут.
-function cabinetClientPrefixLookupFromRules(ipExpr, rulesVar) {
-  const lookup = `nullIf(tupleElement(arrayFirst(x -> isIPAddressInRange(${ipExpr}, x.2), ${rulesVar}), 1), '')`;
-  return `if(empty(${rulesVar}), '', ${lookup})`;
+// dst_client, поэтому поиск по сетям нужен как подстраховка для данных,
+// записанных до появления привязки. Подстраховка всё равно считается на каждой
+// строке окна, поэтому её цена важна: перебор каталога через arrayFirst на
+// 19 тысячах привязок запрашивал 54 ГиБ памяти и запрос не выполнялся вовсе,
+// а словарь отдаёт то же окно на 36 миллионов строк за 3.4 секунды.
+//
+// Адрес в журнале лежит как 16 байт, и у IPv4 значимы только первые четыре,
+// остальные нули. Ключи двух семейств различаются, поэтому и обращений два —
+// так же, как в поиске страны по адресу.
+function cabinetClientPrefixLookupFromDict(rawIpExpr) {
+  if (!rawIpExpr) return `''`;
+  const dict = escapeSqlString(config.clientPrefixDict);
+  const lookup = (keyExpr) => `dictGetOrDefault('${dict}', 'client_id', tuple(${keyExpr}), '')`;
+  const isIpv4 = `length(${rawIpExpr}) = 16`
+    + ` AND substring(${rawIpExpr}, 5) = unhex('000000000000000000000000')`;
+  const ipv4Key = `toIPv4(reinterpretAsUInt32(reverse(substring(${rawIpExpr}, 1, 4))))`;
+  return `if(${isIpv4}, ${lookup(ipv4Key)}, ${lookup(rawIpExpr)})`;
 }
 
 function cabinetClientPortLookupFromRules(samplerIpExpr, ifExpr) {
@@ -299,8 +309,8 @@ function cabinetClientPortLookupFromRules(samplerIpExpr, ifExpr) {
 
 function cabinetClientGroupKeyExpr(flowAlias = 'f') {
   const refs = explorerFlowRefs(flowAlias);
-  const prefixSrc = cabinetClientPrefixLookupFromRules(refs.srcIpExpr, CABINET_CLIENT_PREFIX_RULES);
-  const prefixDst = cabinetClientPrefixLookupFromRules(refs.dstIpExpr, CABINET_CLIENT_PREFIX_RULES);
+  const prefixSrc = cabinetClientPrefixLookupFromDict(refs.srcIpRawExpr);
+  const prefixDst = cabinetClientPrefixLookupFromDict(refs.dstIpRawExpr);
   const portIn = cabinetClientPortLookupFromRules(refs.samplerIpExpr, refs.inIfExpr);
   const portOut = cabinetClientPortLookupFromRules(refs.samplerIpExpr, refs.outIfExpr);
 
@@ -513,7 +523,6 @@ module.exports = {
   appendCabinetClientCatalogToCteHead,
   buildCabinetClientSearchWhere,
   explorerWindowSpecWithCabinetClientCatalog,
-  CABINET_CLIENT_PREFIX_RULES,
   CABINET_CLIENT_PORT_KEYS,
   CABINET_CLIENT_PORT_VALUES,
 };
