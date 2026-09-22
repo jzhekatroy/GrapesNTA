@@ -457,7 +457,8 @@ def flows_raw_enabled_min_bucket(
             f"SELECT 1 FROM {FLOWS_RAW_TABLE} "
             f"WHERE date = toDate('{day_s}') "
             "AND source_id IN (SELECT source_id FROM default.net_flow_sources_enabled) "
-            "LIMIT 1",
+            "LIMIT 1 "
+            "SETTINGS max_rows_to_read = 0",
             display=f"probe flows_raw {day_s} for {job.job_id}",
         )
         if not hit.strip():
@@ -468,7 +469,8 @@ def flows_raw_enabled_min_bucket(
             f"WHERE date = toDate('{day_s}') "
             "AND source_id IN (SELECT source_id FROM default.net_flow_sources_enabled) "
             "ORDER BY time_received_ns ASC "
-            "LIMIT 1",
+            "LIMIT 1 "
+            "SETTINGS max_rows_to_read = 0",
             display=f"first flows_raw minute {day_s} for {job.job_id}",
         )
         if first.strip():

@@ -296,8 +296,10 @@ def do_check():
     # клиенту останется медленной, и это надо знать заранее.
     prefixes, _ = try_ch(f"SELECT count() FROM {DB}.net_client_prefixes_enabled")
     if prefixes is not None:
-        note = "" if int(prefixes) < 100 else "  ← много, группировка по клиенту будет медленной"
-        print(f"клиентов привязано по сетям: {prefixes}{note}")
+        print(f"привязок по сетям: {prefixes}")
+        if int(prefixes) >= 100:
+            print("  их ищет словарь, а не перебор; проверьте его: "
+                  "bash scripts/check-client-prefix-dict.sh")
 
     print("\nвсё готово к миграции" if ok else "\nмигрировать пока нельзя")
     return 0 if ok else 1
@@ -352,13 +354,22 @@ def main():
             return 0
         parsed = parse_ddl(live_ddl())
         exec_sql(build_wrapper(parsed))
+        print(f"обёртка {WRAP} создана поверх {LIVE}")
         # Сверяем на закрытом вчерашнем дне, а не на всей таблице: коллектор
         # пишет непрерывно, и два подсчёта подряд по живым данным всегда разойдутся.
+        # Предел чтения у пользователя интерфейса бывает 100 миллионов строк,
+        # а сутки на установке — больше. Сверка тогда не выполняется, но сама
+        # обёртка уже создана, и это не повод её откатывать.
         probe = ("SELECT count(), sum(bytes), sum(packets) FROM {t} "
-                 "WHERE date = today() - 1 FORMAT TSV")
-        a = ch(probe.format(t=f"{DB}.{LIVE}"), fmt=None)
-        b = ch(probe.format(t=f"{DB}.{WRAP}"), fmt=None)
-        print(f"обёртка {WRAP} создана поверх {LIVE}")
+                 "WHERE date = today() - 1 "
+                 "SETTINGS max_rows_to_read = 0 FORMAT TSV")
+        try:
+            a = ch(probe.format(t=f"{DB}.{LIVE}"), fmt=None)
+            b = ch(probe.format(t=f"{DB}.{WRAP}"), fmt=None)
+        except RuntimeError as e:
+            print(f"сверить вчерашний день не удалось: {e}")
+            print("обёртка при этом создана, читателей можно переводить")
+            return 0
         print(f"за вчера строк/байт/пакетов:")
         print(f"  через таблицу: {a}")
         print(f"  через обёртку: {b}")
