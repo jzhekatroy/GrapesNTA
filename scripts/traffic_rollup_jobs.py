@@ -13,6 +13,15 @@ from typing import List, Optional, Sequence
 DEFAULT_FLOWS_RAW_TABLE = "default.flows_raw"
 FLOWS_RAW_TABLE = os.environ.get("TRAFFIC_ROLLUP_FLOWS_TABLE", "").strip() or DEFAULT_FLOWS_RAW_TABLE
 
+# А вот свежесть поступления данных проверяется всегда по физической таблице,
+# в которую пишет коллектор, и обёрткой её подменять нельзя. Запрос вида
+# max(time_received_ns) на обычной таблице берётся из метаданных частей и
+# отвечает мгновенно, а через обёртку эта оптимизация отключается и запрос
+# читает колонку целиком: на стенде это 56 секунд против 0.7 при том, что
+# смысл проверки — «насколько отстал коллектор», то есть речь именно о той
+# таблице, в которую он пишет.
+FLOWS_RAW_LIVE_TABLE = os.environ.get("TRAFFIC_ROLLUP_FLOWS_LIVE_TABLE", "").strip() or DEFAULT_FLOWS_RAW_TABLE
+
 
 @dataclass(frozen=True)
 class RollupJob:

@@ -17,9 +17,15 @@
 Колонки, набор индексов, TTL и настройки читаются с живой таблицы, а не берутся
 из репозитория: на разных установках они отличаются.
 
+Порядок такой, чтобы читатели не оставались без данных ни на минуту. Обёртка
+создаётся первой: её регулярное выражение сейчас совпадает только с текущей
+таблицей, поэтому читатели переводятся на неё заранее и ничего не замечают.
+Подмена делается уже после, и обёртка мгновенно накрывает обе таблицы.
+
 Использование:
     migrate-flows-layout.py            # показать, что будет сделано
-    migrate-flows-layout.py --apply    # выполнить
+    migrate-flows-layout.py --wrapper  # только обёртка, до переключения читателей
+    migrate-flows-layout.py --apply    # новая таблица и подмена
     migrate-flows-layout.py --rollback # вернуть как было
 """
 
@@ -179,6 +185,7 @@ def do_rollback():
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--apply", action="store_true", help="выполнить, а не показать")
+    ap.add_argument("--wrapper", action="store_true", help="создать только обёртку")
     ap.add_argument("--rollback", action="store_true", help="вернуть как было")
     args = ap.parse_args()
 
@@ -188,6 +195,27 @@ def main():
     if not table_exists(LIVE):
         print(f"таблицы {DB}.{LIVE} нет")
         return 1
+
+    if args.wrapper:
+        if table_exists(WRAP):
+            print(f"обёртка {DB}.{WRAP} уже есть")
+            return 0
+        parsed = parse_ddl(live_ddl())
+        exec_sql(build_wrapper(parsed))
+        # Сверяем на закрытом вчерашнем дне, а не на всей таблице: коллектор
+        # пишет непрерывно, и два подсчёта подряд по живым данным всегда разойдутся.
+        probe = ("SELECT count(), sum(bytes), sum(packets) FROM {t} "
+                 "WHERE date = today() - 1 FORMAT TSV")
+        a = ch(probe.format(t=f"{DB}.{LIVE}"), fmt=None)
+        b = ch(probe.format(t=f"{DB}.{WRAP}"), fmt=None)
+        print(f"обёртка {WRAP} создана поверх {LIVE}")
+        print(f"за вчера строк/байт/пакетов:")
+        print(f"  через таблицу: {a}")
+        print(f"  через обёртку: {b}")
+        print(f"  {'совпадает' if a == b else 'РАСХОДИТСЯ'}")
+        print(f"\nтеперь можно переводить читателей: CLICKHOUSE_FLOWS_RAW_TABLE={WRAP}")
+        return 0 if a == b else 1
+
     if table_exists(OLD):
         print(f"таблица {DB}.{OLD} уже существует — миграция, похоже, уже сделана")
         return 1
@@ -221,8 +249,11 @@ def main():
     print(f"  {LIVE} -> {OLD}, {NEXT} -> {LIVE}")
 
     print("=== 3. обёртка ===")
-    exec_sql(create_wrap)
-    print(f"  {WRAP} создана поверх {LIVE} и {OLD}")
+    if table_exists(WRAP):
+        print(f"  {WRAP} уже была создана заранее — теперь накрывает обе таблицы")
+    else:
+        exec_sql(create_wrap)
+        print(f"  {WRAP} создана поверх {LIVE} и {OLD}")
 
     print("\nстрок в таблицах сразу после подмены:")
     for t, n in counts().items():

@@ -38,7 +38,12 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 if SCRIPT_DIR not in sys.path:
     sys.path.insert(0, SCRIPT_DIR)
 
-from traffic_rollup_jobs import FLOWS_RAW_TABLE, RollupJob, sorted_jobs
+from traffic_rollup_jobs import (
+    FLOWS_RAW_LIVE_TABLE,
+    FLOWS_RAW_TABLE,
+    RollupJob,
+    sorted_jobs,
+)
 
 
 def env(name: str, default: Optional[str] = None) -> Optional[str]:
@@ -302,7 +307,7 @@ def raw_max_received(
     days = max(int(lookback_days), 1)
     raw = ch.query(
         "SELECT formatDateTime(max(time_received_ns), '%F %T', 'UTC') "
-        f"FROM {FLOWS_RAW_TABLE} "
+        f"FROM {FLOWS_RAW_LIVE_TABLE} "
         f"WHERE date >= today() - {days}",
         display="flows_raw max received",
     ).strip()
@@ -997,7 +1002,7 @@ def flows_raw_enabled_max_minute(
         return cache[cache_key]
     raw = ch.query(
         "SELECT formatDateTime(toStartOfMinute(max(time_received_ns)), '%F %T', 'UTC') "
-        f"FROM {FLOWS_RAW_TABLE} "
+        f"FROM {FLOWS_RAW_LIVE_TABLE} "
         "WHERE date >= today() - 14 "
         "AND source_id IN (SELECT source_id FROM default.net_flow_sources_enabled)",
         display="flows_raw enabled max minute",
