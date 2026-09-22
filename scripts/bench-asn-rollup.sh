@@ -5,9 +5,13 @@ set -uo pipefail
 
 CH() { sudo -n docker exec -i grapes-clickhouse clickhouse-client "$@"; }
 
+# В переходный период смены раскладки история живёт в двух таблицах, и сырой
+# журнал за прошлые сутки виден только через обёртку.
+RAW=${RAW_TABLE:-default.flows_raw}
+
 echo "=== свежесть ==="
 CH -q "
-SELECT 'flows_raw' AS t, toString(max(time_received_ns)) AS last_point FROM default.flows_raw
+SELECT '${RAW}' AS t, toString(max(time_received_ns)) AS last_point FROM ${RAW}
   WHERE date >= today() - 1
 UNION ALL SELECT 'asn_pair_1m', toString(max(minute)) FROM default.traffic_asn_pair_1m
 UNION ALL SELECT 'asn_pair_1h', toString(max(hour)) FROM default.traffic_asn_pair_1h
@@ -17,8 +21,8 @@ echo
 echo "=== сходятся ли цифры за позавчерашние сутки ==="
 CH -q "
 WITH toStartOfDay(now() - INTERVAL 2 DAY) AS d0, d0 + INTERVAL 1 DAY AS d1
-SELECT 'flows_raw' AS src, formatReadableSize(sum(bytes)) AS total
-FROM default.flows_raw
+SELECT '${RAW}' AS src, formatReadableSize(sum(bytes)) AS total
+FROM ${RAW}
 WHERE date >= toDate(d0) - 1 AND date <= toDate(d1)
   AND time_received_ns >= d0 AND time_received_ns < d1
 UNION ALL
@@ -43,7 +47,7 @@ echo "=== топ 25 пар ASN за сутки ==="
 bench "raw" "
   WITH toStartOfDay(now() - INTERVAL 2 DAY) AS d0, d0 + INTERVAL 1 DAY AS d1
   SELECT src_asn, dst_asn, sum(bytes) AS b
-  FROM default.flows_raw
+  FROM ${RAW}
   PREWHERE date >= toDate(d0) - 1 AND date <= toDate(d1)
   WHERE time_received_ns >= d0 AND time_received_ns < d1
   GROUP BY src_asn, dst_asn ORDER BY b DESC LIMIT 25"
@@ -59,7 +63,7 @@ echo "=== динамика по одному ASN за сутки, 5-минутн
 bench "raw_series" "
   WITH toStartOfDay(now() - INTERVAL 2 DAY) AS d0, d0 + INTERVAL 1 DAY AS d1
   SELECT toStartOfInterval(time_received_ns, INTERVAL 300 SECOND) AS b, sum(bytes)
-  FROM default.flows_raw
+  FROM ${RAW}
   PREWHERE date >= toDate(d0) - 1 AND date <= toDate(d1)
   WHERE time_received_ns >= d0 AND time_received_ns < d1 AND src_asn = 13238
   GROUP BY b ORDER BY b"
