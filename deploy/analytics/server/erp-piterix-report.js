@@ -346,7 +346,23 @@ function buildPortRows(active, catalog, category) {
       rows.push({ ...row, ...known, verdict: VERDICT.yes });
     }
   }
-  return rows;
+  return noteSiblingBoundPort(rows);
+}
+
+// An account with no switch of its own is still the same customer when another
+// account of that name was bound. Say so, instead of looking like the customer
+// has no port at all. Only a row that actually bound (verdict «да») counts.
+function noteSiblingBoundPort(rows) {
+  const boundNames = new Set();
+  for (const row of rows) {
+    if (row.verdict === VERDICT.yes && row.client_name) boundNames.add(row.client_name);
+  }
+  if (!boundNames.size) return rows;
+  return rows.map((row) => {
+    if (row.reason !== REASON.no_port || !row.client_name) return row;
+    if (!boundNames.has(row.client_name)) return row;
+    return { ...row, reason: REASON.no_port_sibling };
+  });
 }
 
 function buildPrefixRows(active, l3Index, category, { l3Known = true } = {}) {

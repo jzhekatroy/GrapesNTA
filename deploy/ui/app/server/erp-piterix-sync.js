@@ -32,6 +32,7 @@ function sourceTagFor(categoryId) {
 const REASON = {
   inactive: 'неактивный',
   no_port: 'в ERP нет порта коммутатора',
+  no_port_sibling: 'в этом ЛС порта нет, у клиента есть другой ЛС с размеченным портом',
   no_ip: 'в ERP нет текущего IP',
   switch_unknown: 'порт есть, этого коммутатора нет у нас',
   ifindex_unknown: 'коммутатор есть, такого ifIndex нет',

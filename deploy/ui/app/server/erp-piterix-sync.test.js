@@ -124,6 +124,38 @@ test('clientsToDisable снимает только пропавших из ERP',
   assert.deepEqual(clientsToDisable(['1', '2', '3'], ['2', '3']), ['1']);
 });
 
+test('ЛС без порта отмечает, что у того же клиента другой ЛС уже размечен', () => {
+  const { buildReportRows } = require('./erp-piterix-report');
+  const catalog = {
+    agents: new Map([['172.18.19.28', { display_name: 'sw' }]]),
+    ifaces: new Set(['172.18.19.28:10']),
+    ifaceRows: new Map([['172.18.19.28:10', { if_name: 'Eth1', if_alias: '', if_speed_bps: 1e9 }]]),
+  };
+  const active = {
+    int_status: 1,
+    block: { is_blocked: false },
+    name: 'ООО РЕКОНН',
+  };
+  const rows = buildReportRows({
+    clients: [
+      { ...active, basic_account: 106306, ips: [{ switch: { host: '172.18.19.28', port: 10 } }] },
+      { ...active, basic_account: 106307, ips: [{ ip: '10.0.0.1' }] },
+      {
+        ...active,
+        name: 'Другой клиент',
+        basic_account: 1,
+        ips: [{ ip: '10.0.0.2' }],
+      },
+    ],
+    catalog,
+    bindMode: 'ports',
+  });
+  const byAccount = Object.fromEntries(rows.map((row) => [row.account, row.reason]));
+  assert.equal(byAccount['106306'], '');
+  assert.equal(byAccount['106307'], REASON.no_port_sibling);
+  assert.equal(byAccount['1'], REASON.no_port);
+});
+
 test('portsToDisable снимает старый порт и порты отключённого ЛС', () => {
   const { portsToDisable } = require('./erp-piterix-sync');
   const dropped = portsToDisable(
