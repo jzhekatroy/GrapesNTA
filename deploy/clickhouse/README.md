@@ -18,6 +18,7 @@ This directory keeps **ops against a database**, not CREATE TABLE:
 | `apply_net_snmp_interfaces_dict.sh` | Dictionary SOURCE credentials |
 | `migrate_*.sql`, `migrate_*.sh` | One-off ALTERs for existing installs. Idempotent ones that UI/worker need go into `../schema/ensure.list` and run on `./deploy/deploy.sh schema` / `ui` / `full`. |
 | `flows_raw_*.sql` | Column adds for older `flows_raw` |
+| `migrate_flows_raw_zstd.sh` | One-off: recompress an existing `flows_raw` to ZSTD. Not part of `deploy.sh` |
 | `detach_traffic_mvs.sql` | Drop leftover sync MVs |
 | `cleanup_old_classification.sql` | One-time drop of pre-analytics objects |
 | `register_sel_collector.sql`, `monitor_sel_collector.sql` | SEL collector seed/ops |
