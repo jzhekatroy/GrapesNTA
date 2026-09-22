@@ -47,7 +47,7 @@ test('overviewStats returns UI units for in/out and reports its source granulari
   assert.deepEqual(result.data.avg.in, { bps: 4000, pps: 40 });
   assert.deepEqual(result.data.volume.in, { gb: 2.5, tb: 0.0025, packets: 1234 });
   assert.deepEqual(result.data.max.out, { bps: 0, pps: 0 });
-  assert.equal(result.meta.granularity, 'minute');
+  assert.equal(result.meta.granularity, '5m');
   assert.equal(result.meta.dataUntil, '2026-08-18 12:34:00');
 
   const statsCall = calls.find((call) => call.opts?.name === 'cabinet/overview-stats');
@@ -56,8 +56,12 @@ test('overviewStats returns UI units for in/out and reports its source granulari
   assert.match(statsCall.sql, /max\(bucket_bytes \* 8/);
   assert.match(untilCall.sql, /formatDateTime\(/);
   assert.equal(statsCall.params.clientId, 'client:real');
-  assert.equal(statsCall.params.bucketSeconds, 60);
+  // Минутные строки собираются в пятиминутки, поэтому пик считается на 300 с.
+  assert.equal(statsCall.params.bucketSeconds, 300);
   assert.equal(statsCall.params.windowSeconds, 6 * 3600);
+  // Незакрытая пятиминутка занизила бы пик, её нужно отбрасывать.
+  assert.match(statsCall.sql, /toStartOfInterval\(minute, INTERVAL 5 MINUTE\)/);
+  assert.match(statsCall.sql, /toIntervalSecond\(300\) < now\(\) - INTERVAL 30 SECOND/);
 });
 
 test('overviewStats uses hourly buckets after minute retention', async () => {
