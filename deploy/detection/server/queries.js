@@ -1838,11 +1838,15 @@ function recentFlows(limit = 20, directions, collectorId) {
     `f.${packets} AS packets`,
   ].filter(Boolean);
 
+  // Время нельзя класть в PREWHERE: обёртка Merge его там не принимает,
+  // и список последних потоков падает, пока читатели смотрят в flows_all.
+  // Дата в PREWHERE остаётся — по ней обёртка по-прежнему отсекает партиции.
   const prewhereClauses = [
     'f.date >= today()',
+  ];
+  const whereClauses = [
     `f.${t} >= now() - INTERVAL ${RECENT_FLOWS_LOOKBACK_MINUTES} MINUTE`,
   ];
-  const whereClauses = [];
   if (directionCol) whereClauses.push(`f.${directionCol} IN (${dirsSql})`);
   if (sourceIdCol) {
     whereClauses.push(`f.${sourceIdCol} IN (SELECT source_id FROM enabled_sources)`);
