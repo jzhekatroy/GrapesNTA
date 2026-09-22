@@ -117,6 +117,11 @@ describe('explorer cabinet client helpers', () => {
     assert.doesNotMatch(expr, /arrayFirst\(x -> \(x\.2 =/);
   });
 
+  it('cabinetClientGroupKeyExpr skips the prefix fallback when nobody is bound by networks', () => {
+    const expr = cabinetClientGroupKeyExpr('f');
+    assert.match(expr, /if\(empty\(cabinet_client_prefix_rules\), '',/);
+  });
+
   it('appendCabinetClientCatalogToCteHead injects catalog arrays for grouping', () => {
     const head = 'ts_from, ts_to,';
     const next = appendCabinetClientCatalogToCteHead(head, ['cabinet_client']);
