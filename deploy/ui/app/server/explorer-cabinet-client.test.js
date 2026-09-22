@@ -101,19 +101,40 @@ describe('explorer cabinet client helpers', () => {
     assert.match(expr, /f\.src_client != ''/);
     assert.match(expr, /f\.dst_client != ''/);
     assert.match(expr, /cabinet_client_prefix_rules/);
-    assert.match(expr, /cabinet_client_port_rules/);
+    assert.match(expr, /cabinet_client_port_keys/);
+    assert.match(expr, /cabinet_client_port_values/);
     assert.match(expr, /arrayFirst/);
     assert.doesNotMatch(expr, /\betype\b/);
     assert.doesNotMatch(expr, /SELECT p\.client_id/);
     assert.match(expr, /f\.`SrcAddr`/);
   });
 
+  it('cabinetClientGroupKeyExpr looks up ports by hash, not by scanning rules', () => {
+    const expr = cabinetClientGroupKeyExpr('f');
+    assert.match(expr, /transform\(/);
+    // Перебор массива правил на каждой строке — источник таймаутов,
+    // для привязок по портам его быть не должно.
+    assert.doesNotMatch(expr, /arrayFirst\(x -> \(x\.2 =/);
+  });
+
   it('appendCabinetClientCatalogToCteHead injects catalog arrays for grouping', () => {
     const head = 'ts_from, ts_to,';
     const next = appendCabinetClientCatalogToCteHead(head, ['cabinet_client']);
     assert.match(next, /cabinet_client_prefix_rules/);
-    assert.match(next, /cabinet_client_port_rules/);
+    assert.match(next, /cabinet_client_port_keys/);
+    assert.match(next, /cabinet_client_port_values/);
     assert.equal(appendCabinetClientCatalogToCteHead(head, ['src_ip']), head);
+  });
+
+  it('port catalog arrays are built from the same grouped and ordered rows', () => {
+    const head = 'ts_from, ts_to,';
+    const next = appendCabinetClientCatalogToCteHead(head, ['cabinet_client']);
+    const keysPart = next.slice(next.indexOf('groupArray(port_key)'));
+    const valuesPart = next.slice(next.indexOf('groupArray(client_id)'));
+    for (const part of [keysPart, valuesPart]) {
+      assert.match(part, /GROUP BY port_key/);
+      assert.match(part, /ORDER BY port_key/);
+    }
   });
 });
 

@@ -232,7 +232,26 @@ async function buildCabinetClientFilterSql(ids, op, params, flowAlias = 'f') {
 }
 
 const CABINET_CLIENT_PREFIX_RULES = 'cabinet_client_prefix_rules';
-const CABINET_CLIENT_PORT_RULES = 'cabinet_client_port_rules';
+const CABINET_CLIENT_PORT_KEYS = 'cabinet_client_port_keys';
+const CABINET_CLIENT_PORT_VALUES = 'cabinet_client_port_values';
+
+// Привязки по портам отдаются двумя согласованными массивами, чтобы поиск
+// клиента шёл через transform, то есть по хешу. Массив кортежей пришлось бы
+// перебирать целиком на каждой строке потока, а это десятки секунд на окно.
+// Ключи сгруппированы и упорядочены одинаково в обеих выборках, поэтому
+// массивы совпадают позиция в позицию.
+function cabinetClientPortCatalogSelect(column) {
+  return `(SELECT groupArray(${column}) FROM (
+         SELECT
+           concat(p.switch_ip, '|', toString(p.if_index)) AS port_key,
+           min(p.client_id) AS client_id
+         FROM ${PORTS_ENABLED} AS p
+         INNER JOIN ${CLIENTS_ENABLED} AS c
+           ON c.client_id = p.client_id AND c.bind_mode = 'ports'
+         GROUP BY port_key
+         ORDER BY port_key
+      ))`;
+}
 
 function cabinetClientCatalogCteLines() {
   return `
@@ -241,11 +260,8 @@ function cabinetClientCatalogCteLines() {
        INNER JOIN ${CLIENTS_ENABLED} AS c
          ON c.client_id = p.client_id AND c.bind_mode = 'prefixes'
       ) AS ${CABINET_CLIENT_PREFIX_RULES},
-      (SELECT groupArray(tuple(p.client_id, p.switch_ip, p.if_index))
-       FROM ${PORTS_ENABLED} AS p
-       INNER JOIN ${CLIENTS_ENABLED} AS c
-         ON c.client_id = p.client_id AND c.bind_mode = 'ports'
-      ) AS ${CABINET_CLIENT_PORT_RULES}`;
+      ${cabinetClientPortCatalogSelect('port_key')} AS ${CABINET_CLIENT_PORT_KEYS},
+      ${cabinetClientPortCatalogSelect('client_id')} AS ${CABINET_CLIENT_PORT_VALUES}`;
 }
 
 function appendCabinetClientCatalogToCteHead(cteHead, groups = []) {
@@ -265,17 +281,22 @@ function cabinetClientPrefixLookupFromRules(ipExpr, rulesVar) {
   return `nullIf(tupleElement(arrayFirst(x -> isIPAddressInRange(${ipExpr}, x.2), ${rulesVar}), 1), '')`;
 }
 
-function cabinetClientPortLookupFromRules(samplerIpExpr, ifExpr, rulesVar) {
+function cabinetClientPortLookupFromRules(samplerIpExpr, ifExpr) {
   if (!samplerIpExpr || !ifExpr) return `''`;
-  return `nullIf(tupleElement(arrayFirst(x -> (x.2 = ${samplerIpExpr}) AND (x.3 = ${ifExpr}), ${rulesVar}), 1), '')`;
+  return `transform(
+        concat(${samplerIpExpr}, '|', toString(${ifExpr})),
+        ${CABINET_CLIENT_PORT_KEYS},
+        ${CABINET_CLIENT_PORT_VALUES},
+        ''
+      )`;
 }
 
 function cabinetClientGroupKeyExpr(flowAlias = 'f') {
   const refs = explorerFlowRefs(flowAlias);
   const prefixSrc = cabinetClientPrefixLookupFromRules(refs.srcIpExpr, CABINET_CLIENT_PREFIX_RULES);
   const prefixDst = cabinetClientPrefixLookupFromRules(refs.dstIpExpr, CABINET_CLIENT_PREFIX_RULES);
-  const portIn = cabinetClientPortLookupFromRules(refs.samplerIpExpr, refs.inIfExpr, CABINET_CLIENT_PORT_RULES);
-  const portOut = cabinetClientPortLookupFromRules(refs.samplerIpExpr, refs.outIfExpr, CABINET_CLIENT_PORT_RULES);
+  const portIn = cabinetClientPortLookupFromRules(refs.samplerIpExpr, refs.inIfExpr);
+  const portOut = cabinetClientPortLookupFromRules(refs.samplerIpExpr, refs.outIfExpr);
 
   return `multiIf(
     ${refs.srcClientExpr} != '', ${refs.srcClientExpr},
@@ -487,5 +508,6 @@ module.exports = {
   buildCabinetClientSearchWhere,
   explorerWindowSpecWithCabinetClientCatalog,
   CABINET_CLIENT_PREFIX_RULES,
-  CABINET_CLIENT_PORT_RULES,
+  CABINET_CLIENT_PORT_KEYS,
+  CABINET_CLIENT_PORT_VALUES,
 };
