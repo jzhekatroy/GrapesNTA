@@ -1,25 +1,46 @@
+-- Сырые потоки.
+--
+-- Раскладка подчинена тому, как таблицу читают. Почти каждый запрос разбора
+-- трафика — это «окно по времени плюс фильтр по коммутатору и порту», поэтому
+-- ключ сортировки начинается с пятиминутного отрезка времени, затем идут адрес
+-- экспортёра и номера портов. За счёт этого, во-первых, работает отсечение
+-- гранул по таким фильтрам, во-вторых, одинаковые значения ложатся подряд и
+-- сжимаются в десятки раз: при сортировке только по времени номер порта был
+-- размазан по всему файлу и сжимался всего вдвое.
+--
+-- Последним в ключе стоит само time_received_ns. Индекс по нему не строится
+-- (см. PRIMARY KEY), но внутри каждой группы время снова идёт по возрастанию,
+-- и DoubleDelta на колонке времени работает так же хорошо, как раньше. Без
+-- этого пересортировка раздула бы колонку времени примерно втрое.
+--
+-- Время хранится с точностью до секунды. Экспортёры доли секунды не отдают,
+-- обнаружение атак работает минутными окнами, а хранение долей секунды после
+-- пересортировки обходится втрое дороже.
+--
+-- Сжатие LZ4, а не ZSTD: узкое место на разборе трафика процессорное, и время
+-- распаковки важнее лишних процентов места.
 CREATE TABLE IF NOT EXISTS default.flows_raw
 (
     `date` Date,
-    `time_inserted_ns` DateTime64(3) CODEC(DoubleDelta, ZSTD(1)),
-    `time_received_ns` DateTime64(9) CODEC(DoubleDelta, ZSTD(1)),
-    `time_flow_start_ns` DateTime64(3) CODEC(DoubleDelta, ZSTD(1)),
+    `time_inserted_ns` DateTime CODEC(DoubleDelta, LZ4),
+    `time_received_ns` DateTime CODEC(DoubleDelta, LZ4),
+    `time_flow_start_ns` DateTime CODEC(DoubleDelta, LZ4),
     `sequence_num` UInt32,
     `sampling_rate` UInt64,
     `sampler_address` FixedString(16),
     `src_addr` FixedString(16),
     `dst_addr` FixedString(16),
     `etype` UInt32,
-    `proto` UInt32 CODEC(T64, ZSTD(1)),
-    `src_port` UInt32 CODEC(T64, ZSTD(1)),
-    `dst_port` UInt32 CODEC(T64, ZSTD(1)),
-    `src_vlan` UInt16 CODEC(T64, ZSTD(1)),
-    `dst_vlan` UInt16 CODEC(T64, ZSTD(1)),
+    `proto` UInt32 CODEC(T64, LZ4),
+    `src_port` UInt32 CODEC(T64, LZ4),
+    `dst_port` UInt32 CODEC(T64, LZ4),
+    `src_vlan` UInt16 CODEC(T64, LZ4),
+    `dst_vlan` UInt16 CODEC(T64, LZ4),
     `vlan_id` UInt32,
-    `bytes` UInt64 CODEC(T64, ZSTD(1)),
-    `packets` UInt64 CODEC(T64, ZSTD(1)),
-    `src_asn` UInt32 DEFAULT 0 CODEC(T64, ZSTD(1)),
-    `dst_asn` UInt32 DEFAULT 0 CODEC(T64, ZSTD(1)),
+    `bytes` UInt64 CODEC(T64, LZ4),
+    `packets` UInt64 CODEC(T64, LZ4),
+    `src_asn` UInt32 DEFAULT 0 CODEC(T64, LZ4),
+    `dst_asn` UInt32 DEFAULT 0 CODEC(T64, LZ4),
     `src_as_path` Array(UInt32) DEFAULT [],
     `dst_as_path` Array(UInt32) DEFAULT [],
     `direction` LowCardinality(String) DEFAULT 'unknown',
@@ -70,6 +91,10 @@ CREATE TABLE IF NOT EXISTS default.flows_raw
 )
 ENGINE = MergeTree
 PARTITION BY date
-ORDER BY time_received_ns
+-- Разреженный индекс строится только по первым четырём колонкам: добавлять в
+-- него само время смысла нет, оно уже задано пятиминутным отрезком, а размер
+-- индекса вырос бы заметно.
+PRIMARY KEY (toStartOfFiveMinutes(time_received_ns), sampler_address, in_if, out_if)
+ORDER BY (toStartOfFiveMinutes(time_received_ns), sampler_address, in_if, out_if, time_received_ns)
 TTL date + toIntervalDay(4)
 SETTINGS index_granularity = 8192, max_bytes_to_merge_at_max_space_in_pool = 8589934592;

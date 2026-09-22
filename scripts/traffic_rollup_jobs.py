@@ -2,8 +2,16 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import os
+from dataclasses import dataclass, replace
 from typing import List, Optional, Sequence
+
+# Таблица сырых потоков. Обычно default.flows_raw, но на время смены раскладки
+# читателей переводят на обёртку поверх новой и старой таблиц. Сводкам это нужно
+# не меньше, чем интерфейсу: их курсор отстаёт от реального времени на несколько
+# минут, и без обёртки минуты до момента подмены искались бы в пустой таблице.
+DEFAULT_FLOWS_RAW_TABLE = "default.flows_raw"
+FLOWS_RAW_TABLE = os.environ.get("TRAFFIC_ROLLUP_FLOWS_TABLE", "").strip() or DEFAULT_FLOWS_RAW_TABLE
 
 
 @dataclass(frozen=True)
@@ -1323,7 +1331,26 @@ def jobs_by_id() -> dict:
     return {job.job_id: job for job in JOBS}
 
 
+def _retarget_flows_raw(job: RollupJob) -> RollupJob:
+    """Подставляет настроенное имя таблицы сырых потоков в задание.
+
+    Имя встречается и в source_table, и внутри самих SELECT, поэтому меняется
+    в обоих местах разом — иначе задание читало бы одну таблицу, а проверки
+    вокруг него считали бы другую.
+    """
+    if FLOWS_RAW_TABLE == DEFAULT_FLOWS_RAW_TABLE:
+        return job
+    sub = lambda s: s.replace(DEFAULT_FLOWS_RAW_TABLE, FLOWS_RAW_TABLE) if s else s  # noqa: E731
+    return replace(
+        job,
+        source_table=sub(job.source_table),
+        select_sql=sub(job.select_sql),
+        pre_delete_sql=sub(job.pre_delete_sql),
+    )
+
+
 def sorted_jobs(selected: Optional[Sequence[str]] = None) -> List[RollupJob]:
     wanted = set(selected) if selected else None
     out = [job for job in JOBS if wanted is None or job.job_id in wanted]
+    out = [_retarget_flows_raw(job) for job in out]
     return sorted(out, key=lambda j: (j.priority, j.job_id))

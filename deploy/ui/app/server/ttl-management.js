@@ -20,7 +20,10 @@ const TTL_CATALOG = [
   {
     id: 'flows_raw',
     label: 'Сырые потоки',
-    table: () => config.flowsRawTable,
+    // Физическая таблица, а не та, из которой читаем: в переходный период
+    // смены раскладки чтение идёт через обёртку Merge, которая MODIFY TTL
+    // отклоняет («Engine Merge doesn't support TTL clause»).
+    table: () => config.flowsRawWriteTable,
     ttlColumn: 'time_received_ns',
     defaultDays: 5,
     heavy: true,

@@ -38,7 +38,7 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 if SCRIPT_DIR not in sys.path:
     sys.path.insert(0, SCRIPT_DIR)
 
-from traffic_rollup_jobs import RollupJob, sorted_jobs
+from traffic_rollup_jobs import FLOWS_RAW_TABLE, RollupJob, sorted_jobs
 
 
 def env(name: str, default: Optional[str] = None) -> Optional[str]:
@@ -302,7 +302,7 @@ def raw_max_received(
     days = max(int(lookback_days), 1)
     raw = ch.query(
         "SELECT formatDateTime(max(time_received_ns), '%F %T', 'UTC') "
-        "FROM default.flows_raw "
+        f"FROM {FLOWS_RAW_TABLE} "
         f"WHERE date >= today() - {days}",
         display="flows_raw max received",
     ).strip()
@@ -437,7 +437,7 @@ def flows_raw_enabled_min_bucket(
     Jumping to midnight of that day would grind empty morning hours on a
     fresh stand that started sFlow at noon.
     """
-    if job.source_table != "default.flows_raw":
+    if job.source_table != FLOWS_RAW_TABLE:
         return None
     cache_key = f"{job.bucket_kind}:{lookback_days}"
     if cache is not None and cache_key in cache:
@@ -449,7 +449,7 @@ def flows_raw_enabled_min_bucket(
         day = today - timedelta(days=offset)
         day_s = day.strftime("%Y-%m-%d")
         hit = ch.query(
-            "SELECT 1 FROM default.flows_raw "
+            f"SELECT 1 FROM {FLOWS_RAW_TABLE} "
             f"WHERE date = toDate('{day_s}') "
             "AND source_id IN (SELECT source_id FROM default.net_flow_sources_enabled) "
             "LIMIT 1",
@@ -459,7 +459,7 @@ def flows_raw_enabled_min_bucket(
             continue
         first = ch.query(
             "SELECT formatDateTime(toStartOfMinute(time_received_ns), '%F %T', 'UTC') "
-            "FROM default.flows_raw "
+            f"FROM {FLOWS_RAW_TABLE} "
             f"WHERE date = toDate('{day_s}') "
             "AND source_id IN (SELECT source_id FROM default.net_flow_sources_enabled) "
             "ORDER BY time_received_ns ASC "
@@ -497,7 +497,7 @@ def skip_forward_stale_bucket(
     raw_min_cache: Optional[Dict[str, Optional[datetime]]] = None,
 ) -> datetime:
     """Jump rollup state forward when it trails real flows_raw data."""
-    if job.source_table != "default.flows_raw":
+    if job.source_table != FLOWS_RAW_TABLE:
         return bucket_start
     # Live edge: do not probe. The old 2-day guard skipped the same-day empty
     # prefix (sFlow started at 09:17, cursor walked 00:00..06:17 UTC).
@@ -591,7 +591,7 @@ def build_time_filter(job: RollupJob, start: datetime, end: datetime) -> str:
         base = f"({primary}) AND ({guard})"
     else:
         base = primary
-    if job.source_table == "default.flows_raw":
+    if job.source_table == FLOWS_RAW_TABLE:
         # Self-protection: only aggregate sources registered and enabled in the
         # catalog. A retired/legacy source (e.g. xdp-default) set enabled=0 then
         # disappears from rollups automatically, without manual cleanup. Jobs that
@@ -635,7 +635,7 @@ def count_source_rows(
     job: RollupJob,
     time_filter: str,
 ) -> Optional[int]:
-    if job.source_table != "default.flows_raw":
+    if job.source_table != FLOWS_RAW_TABLE:
         return None
     sql = f"SELECT count() FROM {job.source_table} WHERE {time_filter}"
     try:
@@ -997,7 +997,7 @@ def flows_raw_enabled_max_minute(
         return cache[cache_key]
     raw = ch.query(
         "SELECT formatDateTime(toStartOfMinute(max(time_received_ns)), '%F %T', 'UTC') "
-        "FROM default.flows_raw "
+        f"FROM {FLOWS_RAW_TABLE} "
         "WHERE date >= today() - 14 "
         "AND source_id IN (SELECT source_id FROM default.net_flow_sources_enabled)",
         display="flows_raw enabled max minute",
@@ -1032,7 +1032,7 @@ def rewind_if_dest_lags_raw(
     while last_bucket keeps skipping safe_lag. Re-open dest.max so those
     minutes are aggregated again (writes are idempotent).
     """
-    if job.source_table != "default.flows_raw":
+    if job.source_table != FLOWS_RAW_TABLE:
         return bucket_start
     dest_max = dest_max_bucket(ch, job)
     if dest_max is None:
