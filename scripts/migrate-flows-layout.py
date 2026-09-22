@@ -22,7 +22,11 @@
 таблицей, поэтому читатели переводятся на неё заранее и ничего не замечают.
 Подмена делается уже после, и обёртка мгновенно накрывает обе таблицы.
 
+База берётся из deploy/ui/.env, поэтому скрипт одинаково работает и когда
+ClickHouse стоит рядом в контейнере, и когда она вынесена на отдельный сервер.
+
 Использование:
+    migrate-flows-layout.py --check    # проверить, можно ли мигрировать
     migrate-flows-layout.py            # показать, что будет сделано
     migrate-flows-layout.py --wrapper  # только обёртка, до переключения читателей
     migrate-flows-layout.py --apply    # новая таблица и подмена
@@ -214,6 +218,91 @@ def counts():
     return out
 
 
+def do_check():
+    """Всё, что стоит посмотреть до миграции, одной командой.
+
+    Собрано здесь, потому что база бывает на отдельном сервере: собирать к ней
+    запросы руками неудобно, а пропустить незавершённую перезапись нельзя —
+    она занимает диск на часы и не даст сделать подмену.
+    """
+    ok = True
+
+    def try_ch(sql, fmt="TSVRaw"):
+        """Часть системных таблиц закрыта от пользователя интерфейса.
+
+        Возвращает значение и ошибку: проверку, которая упёрлась в права,
+        нельзя молча считать пройденной — о ней надо сказать.
+        """
+        try:
+            return ch(sql, fmt=fmt), None
+        except RuntimeError as e:
+            text = str(e)
+            return None, "нет прав" if "ACCESS_DENIED" in text else text
+
+    version = ch("SELECT version()")
+    print(f"связь с базой есть, ClickHouse {version}")
+
+    if not table_exists(LIVE):
+        print(f"таблицы {DB}.{LIVE} нет — проверьте CLICKHOUSE_FLOWS_RAW_TABLE")
+        return 1
+
+    engine_full = ch(
+        f"SELECT ifNull(any(engine_full), '') FROM system.tables "
+        f"WHERE database='{DB}' AND name='{LIVE}'"
+    )
+    m = re.search(r"TTL (.+?)(?: SETTINGS |$)", engine_full)
+    print(f"таблица {DB}.{LIVE} на месте, срок хранения: "
+          f"{m.group(1).strip() if m else 'не задан'}")
+
+    size, err = try_ch(
+        f"SELECT ifNull(sum(rows), 0), formatReadableSize(ifNull(sum(bytes_on_disk), 0)) "
+        f"FROM system.parts WHERE database='{DB}' AND table='{LIVE}' AND active",
+        fmt="TSV",
+    )
+    if size:
+        rows, on_disk = size.split("\t")
+        print(f"строк: {rows}, на диске: {on_disk}")
+    else:
+        print(f"размер таблицы посмотреть не удалось ({err}) — не помеха")
+
+    mutations, err = try_ch(
+        f"SELECT mutation_id, substring(command, 1, 70), parts_to_do "
+        f"FROM system.mutations WHERE database='{DB}' AND table='{LIVE}' AND NOT is_done",
+        fmt="TSV",
+    )
+    if err:
+        print(f"\nНЕЗАВЕРШЁННЫЕ ПЕРЕЗАПИСИ ПРОВЕРИТЬ НЕ УДАЛОСЬ ({err}).")
+        print("  Пропускать эту проверку нельзя: перезапись занимает диск на")
+        print("  часы и не даст сделать подмену. Выполните под административным")
+        print("  пользователем базы:")
+        print(f"  SELECT mutation_id, command FROM system.mutations")
+        print(f"  WHERE database='{DB}' AND table='{LIVE}' AND NOT is_done;")
+        ok = False
+    elif mutations:
+        print("\nНЕЗАВЕРШЁННАЯ ПЕРЕЗАПИСЬ — мигрировать нельзя, сначала снять:")
+        for line in mutations.splitlines():
+            print(f"  {line}")
+        print(f"  KILL MUTATION WHERE database='{DB}' AND table='{LIVE}' "
+              f"AND mutation_id='<из строки выше>'")
+        ok = False
+    else:
+        print("незавершённых перезаписей нет")
+
+    for name, what in ((OLD, "прежняя таблица"), (WRAP, "обёртка")):
+        if table_exists(name):
+            print(f"{what} {DB}.{name} уже существует")
+
+    # Клиенты, привязанные по сетям: при большом их числе группировка по
+    # клиенту останется медленной, и это надо знать заранее.
+    prefixes, _ = try_ch(f"SELECT count() FROM {DB}.net_client_prefixes_enabled")
+    if prefixes is not None:
+        note = "" if int(prefixes) < 100 else "  ← много, группировка по клиенту будет медленной"
+        print(f"клиентов привязано по сетям: {prefixes}{note}")
+
+    print("\nвсё готово к миграции" if ok else "\nмигрировать пока нельзя")
+    return 0 if ok else 1
+
+
 def do_rollback():
     if not table_exists(OLD):
         print(f"нечего откатывать: таблицы {OLD} нет")
@@ -231,6 +320,7 @@ def do_rollback():
 
 def main():
     ap = argparse.ArgumentParser()
+    ap.add_argument("--check", action="store_true", help="проверить готовность к миграции")
     ap.add_argument("--apply", action="store_true", help="выполнить, а не показать")
     ap.add_argument("--wrapper", action="store_true", help="создать только обёртку")
     ap.add_argument("--rollback", action="store_true", help="вернуть как было")
@@ -245,6 +335,9 @@ def main():
         print(f"мигрировать надо физическую таблицу, а не обёртку {WRAP}.")
         print("укажите её явно: CLICKHOUSE_FLOWS_RAW_WRITE_TABLE=flows_raw")
         return 1
+
+    if args.check:
+        return do_check()
 
     if args.rollback:
         return do_rollback()
