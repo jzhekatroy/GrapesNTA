@@ -30,12 +30,58 @@
 """
 
 import argparse
+import os
 import re
-import subprocess
 import sys
+import urllib.error
+import urllib.request
+from pathlib import Path
 
-DB = "default"
-LIVE = "flows_raw"      # имя, в которое пишет коллектор и которое читают сервисы
+REPO_ROOT = Path(__file__).resolve().parent.parent
+UI_ENV = Path(os.environ.get("UI_ENV") or REPO_ROOT / "deploy" / "ui" / ".env")
+
+
+def read_env_file(path):
+    """Читает KEY=VALUE из .env так же, как это делает ensure-live.sh."""
+    values = {}
+    if not path.is_file():
+        return values
+    for raw in path.read_text(errors="replace").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        values[key.strip()] = value
+    return values
+
+
+ENV = read_env_file(UI_ENV)
+
+
+def setting(*names, default=""):
+    """Переменная окружения важнее файла: так удобно переопределять на ходу."""
+    for name in names:
+        value = os.environ.get(name) or ENV.get(name)
+        if value:
+            return value.strip()
+    return default
+
+
+# База данных бывает не на той же машине, что сервисы: на части установок
+# ClickHouse стоит отдельным сервером. Поэтому обращение идёт по HTTP с
+# реквизитами из deploy/ui/.env, а не через docker exec в локальный контейнер.
+CH_URL = setting("CH_URL", "CLICKHOUSE_URL", default="http://127.0.0.1:8123")
+CH_USER = setting("CH_USER", "CLICKHOUSE_WRITE_USER", "CLICKHOUSE_USER", default="default")
+CH_PASS = setting("CH_PASS", "CLICKHOUSE_WRITE_PASSWORD", "CLICKHOUSE_PASSWORD")
+
+DB = setting("CLICKHOUSE_DATABASE", default="default")
+# Мигрируется физическая таблица. Если читателей уже перевели на обёртку, имя
+# для записи остаётся физическим — его и берём в первую очередь.
+LIVE = setting("CLICKHOUSE_FLOWS_RAW_WRITE_TABLE", "CLICKHOUSE_FLOWS_RAW_TABLE",
+               default="flows_raw")
 OLD = "flows_v1"        # куда уезжает прежняя таблица
 NEXT = "flows_raw_next"  # временное имя новой таблицы до подмены
 WRAP = "flows_all"      # обёртка на время переходного периода
@@ -57,27 +103,28 @@ RETYPE = {
 }
 
 
+def post(sql, timeout=900):
+    url = f"{CH_URL.rstrip('/')}/?max_execution_time={timeout}"
+    req = urllib.request.Request(
+        url,
+        data=sql.encode(),
+        headers={"X-ClickHouse-User": CH_USER, "X-ClickHouse-Key": CH_PASS},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout + 60) as resp:
+            return resp.read().decode(errors="replace").strip()
+    except urllib.error.HTTPError as e:
+        raise RuntimeError(e.read().decode(errors="replace").strip()[:400]) from None
+    except urllib.error.URLError as e:
+        raise RuntimeError(f"{CH_URL} недоступна: {e.reason}") from None
+
+
 def ch(sql, fmt="TSVRaw", timeout=900):
-    cmd = [
-        "docker", "exec", "-i", "grapes-clickhouse", "clickhouse-client",
-        "--max_execution_time", str(timeout), "-q",
-        sql if fmt is None else f"{sql} FORMAT {fmt}",
-    ]
-    r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout + 60)
-    if r.returncode != 0:
-        raise RuntimeError((r.stderr or r.stdout).strip()[:400])
-    return r.stdout.strip()
+    return post(sql if fmt is None else f"{sql} FORMAT {fmt}", timeout)
 
 
 def exec_sql(sql, timeout=900):
-    cmd = [
-        "docker", "exec", "-i", "grapes-clickhouse", "clickhouse-client",
-        "--max_execution_time", str(timeout), "-q", sql,
-    ]
-    r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout + 60)
-    if r.returncode != 0:
-        raise RuntimeError((r.stderr or r.stdout).strip()[:400])
-    return r.stdout.strip()
+    return post(sql, timeout)
 
 
 def table_exists(name):
@@ -188,6 +235,16 @@ def main():
     ap.add_argument("--wrapper", action="store_true", help="создать только обёртку")
     ap.add_argument("--rollback", action="store_true", help="вернуть как было")
     args = ap.parse_args()
+
+    print(f"база: {CH_URL} как {CH_USER}, таблица {DB}.{LIVE}")
+    if UI_ENV.is_file():
+        print(f"реквизиты из {UI_ENV}")
+    print()
+
+    if LIVE == WRAP:
+        print(f"мигрировать надо физическую таблицу, а не обёртку {WRAP}.")
+        print("укажите её явно: CLICKHOUSE_FLOWS_RAW_WRITE_TABLE=flows_raw")
+        return 1
 
     if args.rollback:
         return do_rollback()
