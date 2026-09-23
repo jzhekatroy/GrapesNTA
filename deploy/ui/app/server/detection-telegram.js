@@ -10,6 +10,7 @@ const {
   ENTROPY_FOCUSED,
   classifyFromMetrics,
   refineClassification,
+  isTargetFocus,
   isAttackKind,
   isLegitimatePeak,
   downloadPeakLabel,
@@ -20,7 +21,7 @@ const {
   actionFor,
   volumeStillHigh,
 } = require('./detection-classify');
-const { loadHourEnvelope, loadClientBinding, formatClientMarkup, investigateIncident, emptyInvestigate } = require('./detection-investigate');
+const { loadHourEnvelope, loadClientBinding, formatClientMarkup, investigateIncident, attachTargetFocus, emptyInvestigate } = require('./detection-investigate');
 const { loadThresholdMap, resolveGrowthThreshold, hasGrowthOverride } = require('./detection-thresholds');
 const {
   SIGNALS,
@@ -533,6 +534,33 @@ function shouldSendAlert(historyNewestFirst, threshold, streak = DEFAULT_STREAK,
   return false;
 }
 
+// Серия из нескольких минут открывается на последней, а атака часто уже
+// схлынула. Вердикт и цель берём по минуте с самым большим ростом bps.
+function heaviestHotMinute(historyNewestFirst, threshold, streak = DEFAULT_STREAK) {
+  const need = normalizeStreak(streak);
+  const history = (Array.isArray(historyNewestFirst) ? historyNewestFirst : []).slice(0, need);
+  let best = null;
+  let bestGrowth = null;
+  for (const row of history) {
+    if (!isAboveGrowthThreshold(row, threshold)) continue;
+    const growth = finiteGrowth(row?.growth_bps ?? row?.growthBps);
+    const better = !best
+      || (growth != null && (bestGrowth == null || growth > bestGrowth))
+      || (growth === bestGrowth && Number(row?.bps) > Number(best?.bps));
+    if (better) {
+      best = row;
+      bestGrowth = growth;
+    }
+  }
+  return best;
+}
+
+function sameMinute(left, right) {
+  const a = parseUtc(left);
+  const b = parseUtc(right);
+  return Number.isFinite(a) && a === b;
+}
+
 function shouldSendNormalize(historyNewestFirst, threshold, streak = DEFAULT_NORMALIZE_STREAK, options = {}) {
   const need = normalizeStreak(streak, DEFAULT_NORMALIZE_STREAK);
   const history = Array.isArray(historyNewestFirst) ? historyNewestFirst : [];
@@ -683,6 +711,11 @@ function formatNumMsg(value, digits = 0) {
   return n.toLocaleString('ru-RU', { maximumFractionDigits: digits, minimumFractionDigits: digits });
 }
 
+function formatNullableNum(value, digits = 0) {
+  if (value == null || value === '') return '—';
+  return formatNumMsg(value, digits);
+}
+
 function formatMinuteMsk(minute) {
   const ts = parseUtc(minute);
   if (!Number.isFinite(ts)) return String(minute || '—');
@@ -739,10 +772,10 @@ function formatProtoBlock(proto, row, flags = new Set()) {
     lines.push(`  не зашли: ${formatPctMsg(row.half_open_reply_pct)}`);
     if (isTcpScan(row)) lines.push('  SYN-скан: много потоков, мало пакетов');
   }
-  lines.push(at('port_entropy', `энтропия портов вх.: ${formatNumMsg(row.port_entropy, 2)}`));
-  lines.push(at('port_entropy_out', `энтропия портов исх.: ${formatNumMsg(row.port_entropy_out, 2)}`));
-  lines.push(at('ports_per_ip', `макс. портов/IP вх.: ${formatNumMsg(row.ports_per_ip, 0)}`));
-  lines.push(at('ports_per_ip_out', `макс. портов/IP исх.: ${formatNumMsg(row.ports_per_ip_out, 0)}`));
+  lines.push(at('port_entropy', `энтропия портов вх.: ${formatNullableNum(row.port_entropy, 2)}`));
+  lines.push(at('port_entropy_out', `энтропия портов исх.: ${formatNullableNum(row.port_entropy_out, 2)}`));
+  lines.push(at('ports_per_ip', `макс. портов/IP вх.: ${formatNullableNum(row.ports_per_ip, 0)}`));
+  lines.push(at('ports_per_ip_out', `макс. портов/IP исх.: ${formatNullableNum(row.ports_per_ip_out, 0)}`));
   lines.push(at('avg_packet_bytes', `средний пакет: ${formatNumMsg(row.avg_packet_bytes, 0)} Б`));
   lines.push(at('cv_percent', `CV: ${row.cv_percent == null ? '—' : `${formatNumMsg(row.cv_percent, 1)}%`}`));
   // Строки ниже есть не у каждой минуты: без трафика с портов усилителей и без
@@ -1380,7 +1413,26 @@ function formatAlertHighlights({ byProto, verdict, investigate, hourUsual, signa
   }
   // Сети источников попали в шапку — повторять их в футере незачем.
   const sourceShown = lines.some((line) => /^(Откуда:|С сети )/.test(line));
+  lines.push(...formatFocusLines(investigate));
   return { lines, ampShown: showAmp, sourceShown };
+}
+
+function formatFocusLines(investigate) {
+  const list = Array.isArray(investigate?.focuses) && investigate.focuses.length
+    ? investigate.focuses
+    : (investigate?.focus ? [investigate.focus] : []);
+  return list.filter((focus) => isTargetFocus(focus)).map((focus) => {
+    const growth = focus.fresh || !(Number(focus.growth) > 0)
+      ? 'раньше почти не было'
+      : `×${Number(focus.growth).toFixed(1)} к своему часу`;
+    return escapeHtml(
+      `Цель ${focus.protoLabel}: ${formatAlertHostPort(focus.ip, focus.port)} — ${formatBpsMsg(focus.bps)}`
+      + ` · пакет ${formatNumMsg(focus.avgPkt, 0)} Б`
+      + ` · ${ruSources(focus.srcs)}`
+      + ` · ${growth}`
+      + ` · ${formatSharePct(focus.share)} ${focus.protoLabel}`,
+    );
+  });
 }
 
 function formatAlertMessage({
@@ -2095,6 +2147,25 @@ async function loadPreviousAllRows(minute, keys, limit = DEFAULT_STREAK) {
   return map;
 }
 
+async function loadMinuteByProto(scope, scopeId, minute) {
+  const minuteCh = formatCh(parseUtc(minute));
+  if (!minuteCh) return null;
+  const { rows } = await query(`
+    SELECT *
+    FROM ${tableRef()} FINAL
+    WHERE scope = {scope:String}
+      AND scope_id = {scopeId:String}
+      AND minute = ${utcDateTime('m')}
+  `, {
+    scope: String(scope),
+    scopeId: String(scopeId),
+    m: minuteCh,
+  }, { name: 'detection/minute-by-proto' });
+  const byProto = {};
+  for (const row of rows) byProto[String(row.proto)] = row;
+  return byProto.all ? byProto : null;
+}
+
 function utcDateTime(param) {
   return `toDateTime({${param}:String}, 'UTC')`;
 }
@@ -2170,6 +2241,7 @@ function persistAlertSnapshot(metrics, extras = {}) {
     binding: extras.binding || null,
     telegramText: String(extras.telegramText || ''),
     telegramSkip: String(extras.telegramSkip || ''),
+    focusMinute: String(extras.focusMinute || ''),
   };
 }
 
@@ -2448,8 +2520,24 @@ async function processDetectionAlerts({ minute, rows, nameByKey }) {
     const objectId = objectKey(row.scope, row.scope_id);
     const group = grouped.get(objectId);
     const name = nameByKey?.get(objectId) || row.scope_id;
-    const byProto = group?.byProto || { all: row };
     const signals = candidates.map((c) => c.signal || SIGNALS.volume);
+    let byProto = group?.byProto || { all: row };
+    let focusMinute = minute;
+    if (signals.length && signals.every((signal) => signal === SIGNALS.volume)) {
+      const history = [row, ...(previousByKey.get(objectId) || [])];
+      const heavy = heaviestHotMinute(history, objectThreshold, candidates[0].streak || settings.streak);
+      if (heavy && !sameMinute(heavy.minute, minute)) {
+        try {
+          const loaded = await loadMinuteByProto(row.scope, row.scope_id, heavy.minute);
+          if (loaded) {
+            byProto = loaded;
+            focusMinute = formatCh(parseUtc(heavy.minute));
+          }
+        } catch (err) {
+          errors.push({ key: objectId, message: `heavy-minute: ${err.message}` });
+        }
+      }
+    }
     let hour = { p95: null, p999: null };
     let investigate = emptyInvestigate();
     let binding = null;
@@ -2461,15 +2549,21 @@ async function processDetectionAlerts({ minute, rows, nameByKey }) {
       }
     }
     try {
-      hour = await loadHourEnvelope({ scope: row.scope, scopeId: row.scope_id, minute });
+      hour = await loadHourEnvelope({ scope: row.scope, scopeId: row.scope_id, minute: focusMinute });
     } catch (err) {
       errors.push({ key: objectId, message: `hour: ${err.message}` });
     }
     let verdict = classifyFromMetrics(byProto, hour);
-    if (verdict.needsInvestigate || signals.includes(SIGNALS.amplification)
+    if (verdict.needsInvestigate || verdict.kind === KINDS.benign_peak
+      || signals.includes(SIGNALS.amplification)
       || signals.includes(SIGNALS.syn_flood) || signals.includes(SIGNALS.foreign_geo)) {
       try {
-        investigate = await investigateIncident({ scope: row.scope, scopeId: row.scope_id, minute });
+        investigate = await investigateIncident({ scope: row.scope, scopeId: row.scope_id, minute: focusMinute });
+        investigate = await attachTargetFocus(investigate, {
+          scope: row.scope,
+          scopeId: row.scope_id,
+          minute: focusMinute,
+        });
         verdict = refineClassification(verdict, investigate);
       } catch (err) {
         errors.push({ key: objectId, message: `investigate: ${err.message}` });
@@ -2481,7 +2575,7 @@ async function processDetectionAlerts({ minute, rows, nameByKey }) {
       name,
       scope: row.scope,
       scopeId: row.scope_id,
-      minute,
+      minute: focusMinute,
       threshold: objectThreshold,
       thresholdIsCustom,
       streak: candidates[0].streak || settings.streak,
@@ -2493,12 +2587,13 @@ async function processDetectionAlerts({ minute, rows, nameByKey }) {
       signals,
     });
     const skipShare = shouldSkipTelegramForShare(signals, { byProto, verdict, investigate }, settings);
-    const snapshot = persistAlertSnapshot(snapshotByProto(group, row), {
+    const snapshot = persistAlertSnapshot(snapshotByProto({ byProto }, byProto.all || row), {
       verdict,
       investigate,
       binding,
       telegramText: text,
       telegramSkip: skipShare ? TELEGRAM_SKIP_BELOW_SHARE : '',
+      focusMinute: focusMinute !== minute ? focusMinute : '',
     });
     for (const candidate of candidates) {
       const signal = candidate.signal || SIGNALS.volume;
@@ -2619,6 +2714,7 @@ async function rebuildDetectionEventAlert({ scope, scopeId, minute, sendTelegram
   const byProto = byProtoFromSnapshot(snapshot);
   if (!byProto.all) throw apiError(`у ${eventId} нет снимка метрик`);
   const settings = await getDetectionTelegramSettings();
+  const minuteForFacts = snapshot.focusMinute || minuteCh;
   let hour = { p95: null, p999: null };
   let investigate = emptyInvestigate();
   let binding = snapshot.binding || null;
@@ -2630,12 +2726,17 @@ async function rebuildDetectionEventAlert({ scope, scopeId, minute, sendTelegram
     }
   }
   try {
-    hour = await loadHourEnvelope({ scope: row.scope, scopeId: row.scope_id, minute: minuteCh });
+    hour = await loadHourEnvelope({ scope: row.scope, scopeId: row.scope_id, minute: minuteForFacts });
   } catch { /* keep empty envelope */ }
   let verdict = classifyFromMetrics(byProto, hour);
-  if (verdict.needsInvestigate) {
+  if (verdict.needsInvestigate || verdict.kind === KINDS.benign_peak) {
     try {
-      investigate = await investigateIncident({ scope: row.scope, scopeId: row.scope_id, minute: minuteCh });
+      investigate = await investigateIncident({ scope: row.scope, scopeId: row.scope_id, minute: minuteForFacts });
+      investigate = await attachTargetFocus(investigate, {
+        scope: row.scope,
+        scopeId: row.scope_id,
+        minute: minuteForFacts,
+      });
       verdict = refineClassification(verdict, investigate);
     } catch (err) {
       investigate = { ...emptyInvestigate(), error: err.message };
@@ -2645,7 +2746,7 @@ async function rebuildDetectionEventAlert({ scope, scopeId, minute, sendTelegram
     name: row.name || row.scope_id,
     scope: row.scope,
     scopeId: row.scope_id,
-    minute: minuteCh,
+    minute: minuteForFacts,
     threshold: Number(row.threshold) || settings.growthThreshold,
     streak: settings.streak,
     alertScope: settings.alertScope,
@@ -2654,7 +2755,13 @@ async function rebuildDetectionEventAlert({ scope, scopeId, minute, sendTelegram
     investigate,
     binding,
   });
-  const next = persistAlertSnapshot(snapshot, { verdict, investigate, binding, telegramText: text });
+  const next = persistAlertSnapshot(snapshot, {
+    verdict,
+    investigate,
+    binding,
+    telegramText: text,
+    focusMinute: snapshot.focusMinute || '',
+  });
   await insertDetectionEvent({
     event_id: row.event_id,
     scope: row.scope,
@@ -2713,6 +2820,7 @@ module.exports = {
   sendTelegramMessage,
   isAboveGrowthThreshold,
   shouldSendAlert,
+  heaviestHotMinute,
   shouldSendNormalize,
   shouldNormalizeQuiet,
   matchesAlertScope,

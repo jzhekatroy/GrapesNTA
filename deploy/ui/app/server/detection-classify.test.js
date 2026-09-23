@@ -6,6 +6,7 @@ const {
   KINDS,
   classifyFromMetrics,
   refineClassification,
+  isTargetFocus,
   isAttackKind,
   isLegitimatePeak,
   actionFor,
@@ -527,5 +528,57 @@ describe('detection-classify', () => {
     assert.match(formatSwitchPort({
       switchIp: '172.18.19.165', ifName: 'port-channel2', ifAlias: 'imaqliq.9236', share: 1,
     }), /port-channel2/);
+  });
+
+  it('цель внутри клиента, которой раньше не было, превращает смешанный пик в атаку', () => {
+    const first = classifyFromMetrics({
+      all: { bps: 1.63e9, port_entropy: 3.37 },
+      tcp: { bps: 0.7e9, port_entropy: 1.34 },
+      udp: { bps: 0.93e9, port_entropy: 3.63 },
+    }, { p95: 1.4e9, p999: 2e9, recentMedian: 1e9 });
+    assert.equal(first.kind, KINDS.benign_peak);
+    const refined = refineClassification(first, {
+      victim: { share: 0.24, ip: '195.18.27.62' },
+      focus: {
+        protoLabel: 'UDP',
+        ip: '80.242.59.107',
+        port: 2302,
+        srcs: 393,
+        share: 0.41,
+        fresh: true,
+      },
+    });
+    assert.equal(refined.kind, KINDS.volumetric);
+    assert.match(refined.reason, /80\.242\.59\.107/);
+    assert.equal(isAttackKind(refined.kind), true);
+  });
+
+  it('адрес, выросший вместе с клиентом, атакой не становится', () => {
+    const first = classifyFromMetrics({
+      all: { bps: 1.2e9, port_entropy: 4.2 },
+      udp: { bps: 0.5e9, port_entropy: 4.5 },
+    }, { p95: 2e9, p999: 3e9, recentMedian: 1e9 });
+    assert.equal(first.kind, KINDS.benign_peak);
+    const refined = refineClassification(first, {
+      victim: { share: 0.1 },
+      focus: {
+        protoLabel: 'UDP', ip: '1.2.3.4', port: 443, srcs: 40, share: 0.4, growth: 1.4,
+      },
+    });
+    assert.equal(refined.kind, KINDS.benign_peak);
+    assert.equal(isTargetFocus({ share: 0.4, srcs: 40, growth: 1.4 }), false);
+  });
+
+  it('SYN-флуд не подменяется целью по байтам', () => {
+    const refined = refineClassification(
+      { kind: KINDS.syn_flood, reason: 'голый SYN' },
+      {
+        focus: {
+          protoLabel: 'UDP', ip: '80.242.59.107', port: 2302, srcs: 393, share: 0.41, fresh: true,
+        },
+        syn: { dest: [{ ip: '195.18.27.62', port: 199, share: 0.99 }] },
+      },
+    );
+    assert.equal(refined.kind, KINDS.syn_flood);
   });
 });

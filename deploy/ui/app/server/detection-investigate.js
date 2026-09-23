@@ -1,8 +1,9 @@
 'use strict';
 
-const { query, flowsRawTableRef, netInterfacesCurrentRef, clientsViewRef, col, flowCol, asnNamesTableRef } = require('./clickhouse');
+const { query, config, flowsRawTableRef, netInterfacesCurrentRef, clientsViewRef, col, flowCol, asnNamesTableRef } = require('./clickhouse');
 const { flowIpExpr, flowSamplerIpExpr, sflowIfIndexExpr, primarySourceIdsSql, primaryClientSourceSql } = require('./queries');
 const { AMPLIFIER_PORTS } = require('./detection-signals');
+const { isTargetFocus, TARGET_SHARE_MIN, TARGET_SRCS_MIN } = require('./detection-classify');
 const {
   formatCh, parseUtc, BASELINE_DAYS, BASELINE_QUARANTINE_MINUTES, EXPORT_LAG, MINUTE,
 } = require('./detection-core');
@@ -55,6 +56,9 @@ function emptyInvestigate() {
     destPort: { count: 0, top: [] },
     syn: emptySyn(),
     l4src: [],
+    targets: [],
+    focus: null,
+    focuses: [],
     switchIn: null,
     switchOut: null,
   };
@@ -91,12 +95,56 @@ function mapShareRow(row, extra = {}, totalBytes = 0) {
   };
 }
 
+// Минуты уже открытой атаки не входят в медиану последнего часа: иначе
+// сама атака поднимает «норму» и следующая минута выглядит обычной.
+// Берём только события, начавшиеся в этом часе, и не длиннее 3 часов —
+// зависшее событие недельной давности норму не стирает. Обычные пики
+// (status = peak) не трогаем: это уровень клиента, а не атака.
+function attackRangesSql() {
+  const cutoff = `${utcDateTime('minute')} - INTERVAL {quarantine:UInt16} MINUTE`;
+  return `
+    (
+      SELECT ifNull(groupArray(tuple(alert_minute, range_end)), [])
+      FROM (
+        SELECT
+          alert_minute,
+          least(
+            if(status = 'active', ${utcDateTime('minute')}, ifNull(normalize_minute, alert_minute)),
+            alert_minute + toIntervalHour(3)
+          ) AS range_end
+        FROM (
+          SELECT
+            alert_minute,
+            argMax(status, updated_at) AS status,
+            argMax(normalize_minute, updated_at) AS normalize_minute
+          FROM ${config.database}.app_detection_events
+          WHERE scope = {scope:String}
+            AND scope_id = {scopeId:String}
+            AND alert_minute >= ${cutoff}
+            AND alert_minute < ${utcDateTime('minute')}
+          GROUP BY event_id, alert_minute
+        )
+        WHERE status IN ('active', 'normalized')
+      )
+    )
+  `;
+}
+
+function recentMedianSql(valueExpr) {
+  const cutoff = `${utcDateTime('minute')} - INTERVAL {quarantine:UInt16} MINUTE`;
+  return `quantileExactIf(0.5)(${valueExpr}, minute >= ${cutoff} AND NOT arrayExists(
+    r -> minute >= tupleElement(r, 1) AND minute <= tupleElement(r, 2),
+    attack_ranges
+  ))`;
+}
+
 async function loadHourEnvelope({ scope, scopeId, minute }) {
   const minuteTs = parseUtc(minute);
   if (!Number.isFinite(minuteTs) || !scopeId) {
     return { p95: null, p999: null, recentMedian: null };
   }
   const params = {
+    scope: scope === 'client' ? 'client' : 'net',
     scopeId: String(scopeId),
     minute: formatCh(minuteTs),
     days: BASELINE_DAYS,
@@ -112,10 +160,11 @@ async function loadHourEnvelope({ scope, scopeId, minute }) {
   });
   if (scope === 'client') {
     const { rows } = await query(`
+      WITH ${attackRangesSql()} AS attack_ranges
       SELECT
         quantileExactIf(0.95)(bytes * 8 / 60, minute < ${cutoff}) AS p95,
         quantileExactIf(0.999)(bytes * 8 / 60, minute < ${cutoff}) AS p999,
-        quantileExactIf(0.5)(bytes * 8 / 60, minute >= ${cutoff}) AS recent_median
+        ${recentMedianSql('bytes * 8 / 60')} AS recent_median
       FROM default.traffic_client_1m
       WHERE client_id = {scopeId:String}
         AND direction = 'in'
@@ -128,10 +177,11 @@ async function loadHourEnvelope({ scope, scopeId, minute }) {
     return envelope(rows);
   }
   const { rows } = await query(`
+    WITH ${attackRangesSql()} AS attack_ranges
     SELECT
       quantileExactIf(0.95)(bps, minute < ${cutoff}) AS p95,
       quantileExactIf(0.999)(bps, minute < ${cutoff}) AS p999,
-      quantileExactIf(0.5)(bps, minute >= ${cutoff}) AS recent_median
+      ${recentMedianSql('bps')} AS recent_median
     FROM ${tableRef()}
     WHERE scope = 'net'
       AND scope_id = {scopeId:String}
@@ -438,6 +488,32 @@ async function investigateIncident({ scope, scopeId, minute }) {
         LIMIT 8
       )
     ),
+    proto_bytes AS (
+      SELECT groupArray(tuple(proto, byte_sum)) AS rows
+      FROM (
+        SELECT proto, sum(bytes) AS byte_sum
+        FROM ev
+        WHERE proto IN (6, 17)
+        GROUP BY proto
+      )
+    ),
+    proto_focus AS (
+      SELECT groupArray(tuple(proto, ip, port, byte_sum, packet_sum, srcs)) AS rows
+      FROM (
+        SELECT
+          proto,
+          dst_ip AS ip,
+          dst_port AS port,
+          sum(bytes) AS byte_sum,
+          sum(packets) AS packet_sum,
+          uniqExact(src_ip) AS srcs
+        FROM ev
+        WHERE proto IN (6, 17)
+        GROUP BY proto, ip, port
+        ORDER BY byte_sum DESC
+        LIMIT 1 BY proto
+      )
+    ),
     dest24 AS (
       SELECT groupArray(tuple(net24, byte_sum, ips)) AS rows
       FROM (
@@ -608,6 +684,8 @@ async function investigateIncident({ scope, scopeId, minute }) {
       (SELECT dst_ips FROM totals) AS dst_ips,
       (SELECT dst_nets FROM totals) AS dst_nets,
       (SELECT rows FROM dest) AS dests,
+      (SELECT rows FROM proto_focus) AS proto_focus,
+      (SELECT rows FROM proto_bytes) AS proto_bytes,
       (SELECT rows FROM dest24) AS dest24s,
       (SELECT rows FROM amp_dest24) AS amp_dest24s,
       (SELECT rows FROM amp_dest_ip) AS amp_dest_ips,
@@ -724,9 +802,111 @@ async function investigateIncident({ scope, scopeId, minute }) {
       { port: Number(t[0] || 0), proto: Number(t[1] || 0), protoLabel: protoLabel(t[1]) },
       total,
     )),
+    targets: mapProtoTargets(asTuples(row.proto_focus), asTuples(row.proto_bytes)),
+    focus: null,
+    focuses: [],
     switchIn: mapSwitch(ins[0] ? switchTuple(ins[0]) : null, total),
     switchOut: mapSwitch(outs[0] ? switchTuple(outs[0]) : null, total),
   };
+}
+
+function mapProtoTargets(focusRows, byteRows) {
+  const totals = new Map();
+  for (const row of byteRows) totals.set(Number(row[0]), Number(row[1] || 0));
+  return focusRows.map((row) => {
+    const proto = Number(row[0] || 0);
+    const bytes = Number(row[3] || 0);
+    const packets = Number(row[4] || 0);
+    const whole = totals.get(proto) || 0;
+    return {
+      proto,
+      protoLabel: protoLabel(proto),
+      ip: String(row[1] || ''),
+      port: Number(row[2] || 0),
+      bytes,
+      packets,
+      bps: (bytes * 8) / 60,
+      avgPkt: packets > 0 ? bytes / packets : 0,
+      srcs: Number(row[5] || 0),
+      share: whole > 0 ? bytes / whole : 0,
+    };
+  }).filter((row) => row.ip);
+}
+
+// Медиана этого адреса и порта за час до минуты. Считаем только когда адрес
+// уже выглядит целью: доля протокола и число источников прошли порог.
+async function loadTargetMedianBps({ scope, scopeId, minute, ip, proto, port }) {
+  const minuteTs = parseUtc(minute);
+  if (!Number.isFinite(minuteTs) || !ip) return { medianBps: null, minutes: 0 };
+  const dstIp = flowIpExpr(`f.${col('dstIp')}`);
+  const params = {
+    scope: String(scope || 'client'),
+    scopeId: String(scopeId),
+    ip: String(ip),
+    proto: Number(proto),
+    port: Number(port),
+    from: formatCh(minuteTs - 60 * MINUTE),
+    to: formatCh(minuteTs),
+    until: formatCh(minuteTs + EXPORT_LAG),
+  };
+  const { rows } = await query(`
+    SELECT quantileExact(0.5)(bps) AS med, count() AS n
+    FROM (
+      SELECT toStartOfMinute(f.time_flow_start_ns) AS mi, sum(f.${col('bytes')}) * 8 / 60 AS bps
+      FROM ${flowsRawTableRef()} AS f
+      PREWHERE if({scope:String} = 'client', f.dst_client = {scopeId:String}, 1)
+      WHERE f.date >= toDate(${utcDateTime64('from')}) - 1
+        AND f.date <= toDate(${utcDateTime64('until')})
+        AND f.time_flow_start_ns >= ${utcDateTime64('from')}
+        AND f.time_flow_start_ns < ${utcDateTime64('to')}
+        AND f.${col('time')} >= ${utcDateTime64('from')}
+        AND f.${col('time')} < ${utcDateTime64('until')}
+        AND ${primarySourceIdsSql('f')}
+        AND ${towardPred()}
+        AND ${dstIp} = {ip:String}
+        AND f.${col('proto')} = {proto:UInt8}
+        AND f.${col('dstPort')} = {port:UInt16}
+      GROUP BY mi
+    )
+  `, params, { name: 'detection/target-median', clickhouse_settings: CHEAP, requestTimeoutMs: 35000 });
+  const minutes = Number(rows[0]?.n || 0);
+  const med = Number(rows[0]?.med);
+  return {
+    medianBps: Number.isFinite(med) && med > 0 ? med : null,
+    minutes,
+  };
+}
+
+async function attachTargetFocus(investigate, { scope, scopeId, minute } = {}) {
+  const next = investigate || emptyInvestigate();
+  const candidates = (Array.isArray(next.targets) ? next.targets : [])
+    .filter((row) => Number(row.share) >= TARGET_SHARE_MIN && Number(row.srcs) >= TARGET_SRCS_MIN && Number(row.bps) > 0);
+  const hits = [];
+  for (const target of candidates) {
+    try {
+      const { medianBps, minutes } = await loadTargetMedianBps({
+        scope,
+        scopeId,
+        minute,
+        ip: target.ip,
+        proto: target.proto,
+        port: target.port,
+      });
+      const fresh = minutes === 0 || !(medianBps > 0);
+      const focus = {
+        ...target,
+        fresh,
+        growth: !fresh ? target.bps / medianBps : null,
+      };
+      if (isTargetFocus(focus)) hits.push(focus);
+    } catch {
+      // Нет базы по адресу — цель не повышаем до атаки, алерт не роняем.
+    }
+  }
+  hits.sort((a, b) => b.bps - a.bps);
+  next.focus = hits[0] || null;
+  next.focuses = hits;
+  return next;
 }
 
 module.exports = {
@@ -735,6 +915,7 @@ module.exports = {
   loadClientBinding,
   formatClientMarkup,
   investigateIncident,
+  attachTargetFocus,
   emptyInvestigate,
   emptyBinding,
 };

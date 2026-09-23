@@ -13,5 +13,8 @@ describe('detection-investigate SQL', () => {
     assert.doesNotMatch(src, /sum\(\s*byte_sum\s*\)\s+AS\s+byte_sum/);
     assert.match(src, /sum\(\s*pair_bytes\s*\)\s+AS\s+ip_bytes/);
     assert.match(src, /sum\(bytes\) AS pair_bytes/);
+    assert.match(src, /LIMIT 1 BY proto/);
+    assert.match(src, /status IN \('active', 'normalized'\)/);
+    assert.doesNotMatch(src, /status != 'peak'/);
   });
 });

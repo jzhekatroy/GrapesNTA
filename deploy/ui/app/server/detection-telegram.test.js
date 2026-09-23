@@ -21,6 +21,7 @@ const {
   telegramMethodUrl,
   isAboveGrowthThreshold,
   shouldSendAlert,
+  heaviestHotMinute,
   shouldSendNormalize,
   shouldNormalizeQuiet,
   shouldSendSignal,
@@ -1408,5 +1409,68 @@ describe('detection-telegram', () => {
     assert.deepEqual(mixed.params.ids_0, ['100']);
     assert.equal(mixed.params.scope_1, 'net');
     assert.deepEqual(mixed.params.ids_1, ['10.0.0.0/24']);
+  });
+
+  it('серия судится по минуте с самым большим ростом, не по последней', () => {
+    const history = [
+      { minute: '2026-09-22 16:23:00', growth_bps: 1.35, growth_pps: 1.77, bps: 1.3e9 },
+      { minute: '2026-09-22 16:22:00', growth_bps: 4.1, growth_pps: 1.35, bps: 3.8e9 },
+      { minute: '2026-09-22 16:21:00', growth_bps: 6.02, growth_pps: 1.5, bps: 5.7e9 },
+      { minute: '2026-09-22 16:20:00', growth_bps: 0.92, growth_pps: 0.96, bps: 0.8e9 },
+    ];
+    assert.equal(heaviestHotMinute(history, 1.6, 3).minute, '2026-09-22 16:21:00');
+  });
+
+  it('пустая энтропия и порты на IP печатаются прочерком, ноль энтропии остаётся нулём', () => {
+    const text = formatAlertMessage({
+      name: '82035',
+      scope: 'client',
+      scopeId: '82035',
+      minute: '2026-09-22 16:27:00',
+      threshold: 1.6,
+      byProto: {
+        all: { bps: 1.63e9, growth_bps: 1.73 },
+        udp: {
+          bps: 928e6,
+          growth_bps: 1.68,
+          port_entropy: 0,
+          port_entropy_out: null,
+          ports_per_ip: 10,
+          ports_per_ip_out: null,
+        },
+      },
+      verdict: { kind: 'benign_peak', reason: 'объём в пределах часа' },
+    });
+    assert.match(text, /энтропия портов вх\.: 0,00/);
+    assert.match(text, /энтропия портов исх\.: —/);
+    assert.match(text, /макс\. портов\/IP вх\.: 10/);
+    assert.match(text, /макс\. портов\/IP исх\.: —/);
+  });
+
+  it('в шапке есть цель, которая выросла к своему часу', () => {
+    const focus = {
+      protoLabel: 'UDP',
+      ip: '80.242.59.107',
+      port: 2302,
+      bps: 380e6,
+      avgPkt: 119,
+      srcs: 393,
+      share: 0.41,
+      fresh: true,
+    };
+    const text = formatAlertMessage({
+      name: '82035',
+      scope: 'client',
+      scopeId: '82035',
+      minute: '2026-09-22 16:27:00',
+      threshold: 1.6,
+      byProto: { all: { bps: 1.63e9, growth_bps: 1.73 }, udp: { bps: 928e6 } },
+      verdict: { kind: 'syn_flood', reason: 'голый SYN' },
+      investigate: { focus, focuses: [focus], syn: { dest: [{ ip: '195.18.27.62', port: 199, share: 0.99 }] } },
+    });
+    assert.match(text, /Цель UDP: 80\.242\.59\.107 2302/);
+    assert.match(text, /393 источника/);
+    assert.match(text, /раньше почти не было/);
+    assert.match(text, /119 Б/);
   });
 });

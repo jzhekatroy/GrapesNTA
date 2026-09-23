@@ -36,6 +36,13 @@ const UDP_DOMINANT = 0.6;
 const DOWNLOAD_SRC_SHARE_MIN = 0.5;
 const DOWNLOAD_SRC_IPS_MAX = 2;
 const VICTIM_ACTION_SHARE_MIN = 0.15;
+// Цель внутри клиента: один адрес держит заметную долю своего протокола,
+// источников много (это не закачка с одного места) и к своему прошлому часу
+// он вырос сильно. Иначе обычный сервер клиента, который всегда так грузит,
+// становился бы атакой на каждом всплеске всего клиента.
+const TARGET_SHARE_MIN = 0.15;
+const TARGET_GROWTH_MIN = 3;
+const TARGET_SRCS_MIN = 10;
 const AMP_DEST_ACTION_SHARE = 0.5;
 const NORMALIZE_BPS_KEEP = 0.85;
 // hourP95 из снимка алерта. Если он на порядок меньше самого алерта, это не
@@ -225,6 +232,14 @@ function isLegitimatePeak(verdict = {}) {
     && /пик загрузки/.test(String(verdict.reason || ''));
 }
 
+function isTargetFocus(focus) {
+  if (!focus || typeof focus !== 'object') return false;
+  if (!(num(focus.share) >= TARGET_SHARE_MIN)) return false;
+  if (!(num(focus.srcs) >= TARGET_SRCS_MIN)) return false;
+  if (focus.fresh === true) return true;
+  return num(focus.growth) >= TARGET_GROWTH_MIN;
+}
+
 function refineClassification(verdict, investigate) {
   const next = { ...(verdict || {}) };
   const topShare = num(investigate?.victim?.share);
@@ -258,6 +273,16 @@ function refineClassification(verdict, investigate) {
       + (srcShare != null ? ` · /24 ${(srcShare * 100).toFixed(0)}%` : '')
       + (topShare != null ? ` · топ IP ${(topShare * 100).toFixed(1)}%` : '');
     next.needsInvestigate = false;
+    return next;
+  }
+  if (next.kind === KINDS.benign_peak && isTargetFocus(investigate?.focus)) {
+    const focus = investigate.focus;
+    const label = [focus.protoLabel, focus.port].filter((part) => part != null && part !== '').join('/');
+    next.kind = KINDS.volumetric;
+    next.reason = `цель ${label} ${focus.ip || ''} · ${focus.srcs} источников · ${next.reason || ''}`
+      .replace(/\s+/g, ' ')
+      .trim();
+    next.needsInvestigate = true;
     return next;
   }
   if (topShare != null && topShare >= TOP_DST_VOLUMETRIC) {
@@ -448,6 +473,9 @@ module.exports = {
   ENTROPY_FOCUSED,
   classifyFromMetrics,
   refineClassification,
+  isTargetFocus,
+  TARGET_SHARE_MIN,
+  TARGET_SRCS_MIN,
   isDownloadPeak,
   downloadPeakLabel,
   isLegitimatePeak,
