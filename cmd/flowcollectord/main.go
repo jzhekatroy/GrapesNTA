@@ -131,11 +131,15 @@ func main() {
 
 	var listeners []*udpListener
 	if cfg.SFlowEnabled {
+		sp := &sflowParser{sourceID: cfg.SFlowSourceID, classifier: classifier}
+		if cfg.SFlowDropEgressDuplicates {
+			sp.ingress = newSFlowIngressPorts()
+		}
 		listeners = append(listeners, newUDPListener(
 			log, "sflow", cfg.SFlowListen, cfg.SFlowSourceID,
 			cfg.UDPReadBuffer, cfg.UDPReaders, cfg.UDPWorkers, cfg.UDPQueueSize,
 			cfg.CHBatchSize, cfg.CHFlushInterval, delivery, exclusions,
-			&sflowParser{sourceID: cfg.SFlowSourceID, classifier: classifier},
+			sp,
 		))
 	}
 	if cfg.NetFlowEnabled {

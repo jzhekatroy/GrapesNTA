@@ -25,10 +25,12 @@ type sflowParser struct {
 	sourceID   string
 	classifier *flowingest.TrafficClassifier
 	metrics    sflowMetrics
+	// ingress is nil when egress duplicates are kept.
+	ingress *sflowIngressPorts
 }
 
 func (p *sflowParser) parse(d udpDatagram) []flowingest.FlowRow {
-	return parseSFlowV5(d.b, d.receivedAt, p.sourceID, p.classifier, nil, &p.metrics)
+	return parseSFlowV5(d.b, d.receivedAt, p.sourceID, p.classifier, nil, &p.metrics, p.ingress)
 }
 
 func (p *sflowParser) logMetrics(log *slog.Logger) {
@@ -43,6 +45,9 @@ func (p *sflowParser) logMetrics(log *slog.Logger) {
 		"counter_skipped", p.metrics.counterSkipped.Load(),
 		"parse_errors", p.metrics.parseErrors.Load(),
 		"unknown_samples", p.metrics.unknownSamples.Load(),
+		"ingress_samples", p.metrics.ingressSamples.Load(),
+		"egress_samples", p.metrics.egressSamples.Load(),
+		"egress_dropped", p.metrics.egressDropped.Load(),
 		"udp_queue_drops", p.metrics.udpQueueDrops.Load(),
 	)
 }

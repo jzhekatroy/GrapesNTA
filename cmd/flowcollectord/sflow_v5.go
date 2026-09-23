@@ -38,8 +38,13 @@ type sflowMetrics struct {
 	parseErrors     atomic.Uint64
 	unknownSamples  atomic.Uint64
 	udpQueueDrops   atomic.Uint64
+	ingressSamples  atomic.Uint64
+	egressSamples   atomic.Uint64
+	egressDropped   atomic.Uint64
 }
 
+// parseSFlowV5 decodes one datagram. ingress, when non-nil, drops egress
+// copies of packets whose input port already samples ingress.
 func parseSFlowV5(
 	b []byte,
 	receivedAt time.Time,
@@ -47,6 +52,7 @@ func parseSFlowV5(
 	classifier *flowingest.TrafficClassifier,
 	seq *uint32,
 	m *sflowMetrics,
+	ingress *sflowIngressPorts,
 ) []flowingest.FlowRow {
 	if m != nil {
 		m.datagrams.Add(1)
@@ -137,12 +143,12 @@ func parseSFlowV5(
 			if m != nil {
 				m.flowSamples.Add(1)
 			}
-			rows = append(rows, parseFlowSample(sampleBody, false, receivedAt, sourceID, sampler, classifier, seq, m)...)
+			rows = append(rows, parseFlowSample(sampleBody, false, receivedAt, sourceID, sampler, classifier, seq, m, ingress)...)
 		case sflowSampleFlowExp:
 			if m != nil {
 				m.flowSamples.Add(1)
 			}
-			rows = append(rows, parseFlowSample(sampleBody, true, receivedAt, sourceID, sampler, classifier, seq, m)...)
+			rows = append(rows, parseFlowSample(sampleBody, true, receivedAt, sourceID, sampler, classifier, seq, m, ingress)...)
 		case sflowSampleCounter, sflowSampleCounterExp:
 			if m != nil {
 				m.counterSkipped.Add(1)
@@ -165,6 +171,7 @@ func parseFlowSample(
 	classifier *flowingest.TrafficClassifier,
 	seq *uint32,
 	m *sflowMetrics,
+	ingress *sflowIngressPorts,
 ) []flowingest.FlowRow {
 	minLen := 32
 	if expanded {
@@ -180,12 +187,15 @@ func parseFlowSample(
 	var samplingRate uint64
 	var numRecords uint32
 	var inIf, outIf uint32
+	var dsType, dsIndex uint32
 	var off int
 	if expanded {
 		// expanded flow sample:
 		// sequence_number, source_id_type, source_id_index, sampling_rate,
 		// sample_pool, drops, input_format, input_value, output_format,
 		// output_value, records_count
+		dsType = binary.BigEndian.Uint32(b[4:8])
+		dsIndex = binary.BigEndian.Uint32(b[8:12])
 		samplingRate = uint64(binary.BigEndian.Uint32(b[12:16]))
 		// input/output interface each encoded as (format u32, value u32); the
 		// value is the SNMP ifIndex of the physical switch port.
@@ -197,6 +207,9 @@ func parseFlowSample(
 		// flow sample:
 		// sequence_number, source_id, sampling_rate, sample_pool, drops,
 		// input, output, records_count
+		sourceIDField := binary.BigEndian.Uint32(b[4:8])
+		dsType = sourceIDField >> 24
+		dsIndex = sourceIDField & 0xFFFFFF
 		samplingRate = uint64(binary.BigEndian.Uint32(b[8:12]))
 		inIf = sflowIfIndexPacked(binary.BigEndian.Uint32(b[20:24]))
 		outIf = sflowIfIndexPacked(binary.BigEndian.Uint32(b[24:28]))
@@ -205,6 +218,24 @@ func parseFlowSample(
 	}
 	if samplingRate == 0 {
 		samplingRate = 1
+	}
+
+	switch sflowSampleSideOf(dsType, dsIndex, inIf, outIf) {
+	case sflowSideIngress:
+		if m != nil {
+			m.ingressSamples.Add(1)
+		}
+		ingress.mark(sampler, inIf, receivedAt)
+	case sflowSideEgress:
+		if m != nil {
+			m.egressSamples.Add(1)
+		}
+		if ingress.samplesIngress(sampler, inIf, receivedAt) {
+			if m != nil {
+				m.egressDropped.Add(1)
+			}
+			return nil
+		}
 	}
 	if numRecords > maxSFlowRecords {
 		if m != nil {

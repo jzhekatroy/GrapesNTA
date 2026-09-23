@@ -128,7 +128,7 @@ func TestParseSFlowV5PreScale(t *testing.T) {
 	var seq uint32
 	var m sflowMetrics
 	now := time.Date(2026, 6, 5, 12, 0, 0, 0, time.UTC)
-	rows := parseSFlowV5(dgram, now, "sflow-default", nil, &seq, &m)
+	rows := parseSFlowV5(dgram, now, "sflow-default", nil, &seq, &m, nil)
 	if len(rows) != 1 {
 		t.Fatalf("rows=%d want 1 metrics=%+v", len(rows), m)
 	}
@@ -164,7 +164,7 @@ func TestParseSFlowV5ExpandedPreScale(t *testing.T) {
 	var seq uint32
 	var m sflowMetrics
 	now := time.Date(2026, 6, 5, 12, 0, 0, 0, time.UTC)
-	rows := parseSFlowV5(dgram, now, "sflow-default", nil, &seq, &m)
+	rows := parseSFlowV5(dgram, now, "sflow-default", nil, &seq, &m, nil)
 	if len(rows) != 1 {
 		t.Fatalf("rows=%d want 1 metrics=%+v", len(rows), m)
 	}
@@ -229,7 +229,7 @@ func TestParseSFlowCountsARPAsNonIPNotError(t *testing.T) {
 	binary.BigEndian.PutUint16(arp[12:14], 0x0806)
 	dgram := buildTestSFlowDatagram(t, arp, 1000)
 	var m sflowMetrics
-	rows := parseSFlowV5(dgram, time.Now().UTC(), "sflow-default", nil, nil, &m)
+	rows := parseSFlowV5(dgram, time.Now().UTC(), "sflow-default", nil, nil, &m, nil)
 	if len(rows) != 0 {
 		t.Fatalf("rows=%d want 0", len(rows))
 	}
@@ -264,7 +264,7 @@ func TestParseSFlowSkipsCounterSample(t *testing.T) {
 	dgram = append(dgram, counterBody...)
 
 	var m sflowMetrics
-	rows := parseSFlowV5(dgram, time.Now(), "sflow-default", nil, nil, &m)
+	rows := parseSFlowV5(dgram, time.Now(), "sflow-default", nil, nil, &m, nil)
 	if len(rows) != 0 {
 		t.Fatalf("rows=%d want 0", len(rows))
 	}
@@ -307,7 +307,7 @@ func TestParseSFlowV5KeepsSNMPIfIndex(t *testing.T) {
 
 	// Non-expanded sample: the format lives in the two high bits.
 	dgram := buildTestSFlowDatagramWithIfaces(t, frame, 1000, 3013, 1<<30|7)
-	rows := parseSFlowV5(dgram, now, "sflow-default", nil, &seq, &m)
+	rows := parseSFlowV5(dgram, now, "sflow-default", nil, &seq, &m, nil)
 	if len(rows) != 1 {
 		t.Fatalf("rows=%d want 1 metrics=%+v", len(rows), m)
 	}
@@ -320,7 +320,7 @@ func TestParseSFlowV5KeepsSNMPIfIndex(t *testing.T) {
 
 	// Expanded sample: format and value are separate fields.
 	dgram = buildTestExpandedSFlowDatagramWithIfaces(t, frame, 1000, 0, 3013, 0, 3025)
-	rows = parseSFlowV5(dgram, now, "sflow-default", nil, &seq, &m)
+	rows = parseSFlowV5(dgram, now, "sflow-default", nil, &seq, &m, nil)
 	if len(rows) != 1 {
 		t.Fatalf("expanded rows=%d want 1 metrics=%+v", len(rows), m)
 	}
@@ -329,7 +329,7 @@ func TestParseSFlowV5KeepsSNMPIfIndex(t *testing.T) {
 	}
 
 	dgram = buildTestExpandedSFlowDatagramWithIfaces(t, frame, 1000, 0, 3013, 1, 3025)
-	rows = parseSFlowV5(dgram, now, "sflow-default", nil, &seq, &m)
+	rows = parseSFlowV5(dgram, now, "sflow-default", nil, &seq, &m, nil)
 	if len(rows) != 1 {
 		t.Fatalf("expanded rows=%d want 1 metrics=%+v", len(rows), m)
 	}

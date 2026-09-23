@@ -14,6 +14,7 @@ type config struct {
 	SFlowEnabled  bool
 	SFlowListen   string
 	SFlowSourceID string
+	SFlowDropEgressDuplicates bool
 
 	NetFlowEnabled       bool
 	NetFlowListen        string
@@ -63,6 +64,7 @@ func loadConfig() config {
 	sflowEnabled := flag.Bool("sflow-enabled", envBool("FC_SFLOW_ENABLED", true), "enable sFlow v5 UDP listener")
 	sflowListen := flag.String("sflow-listen", envString("FC_SFLOW_LISTEN", "0.0.0.0:6343"), "sFlow v5 UDP listen address")
 	sflowSourceID := flag.String("sflow-source-id", envString("FC_SFLOW_SOURCE_ID", "sflow-default"), "source_id written to flows_raw")
+	sflowDropEgress := flag.Bool("sflow-drop-egress-duplicates", envBool("FC_SFLOW_DROP_EGRESS_DUPLICATES", true), "drop sFlow egress samples whose input port also samples ingress (same packet counted twice)")
 
 	netflowEnabled := flag.Bool("netflow-enabled", envBool("FC_NETFLOW_ENABLED", false), "enable NetFlow v9 UDP listener")
 	netflowListen := flag.String("netflow-listen", envString("FC_NETFLOW_LISTEN", "0.0.0.0:2055"), "NetFlow v9 UDP listen address")
@@ -118,6 +120,7 @@ func loadConfig() config {
 		SFlowEnabled:         *sflowEnabled,
 		SFlowListen:          strings.TrimSpace(*sflowListen),
 		SFlowSourceID:        strings.TrimSpace(*sflowSourceID),
+		SFlowDropEgressDuplicates: *sflowDropEgress,
 		NetFlowEnabled:       *netflowEnabled,
 		NetFlowListen:        strings.TrimSpace(*netflowListen),
 		NetFlowSourceID:      strings.TrimSpace(*netflowSourceID),
