@@ -6,6 +6,7 @@ Docker service for **periodic CH aggregates** (minute-scale):
 - Traffic dashboard/direction/… rollups (Python, every minute)
 - ASN talkers/pairs rollups (Python, every 5 minutes)
 - ERP PiterIX client sync (Node, nightly at 03:15)
+- Прореживание старых суток flows_raw (Python, каждые 30 минут; по умолчанию выключено, настройки на странице «Сроки хранения»)
 
 Replaces host `grapes-analytics` + `traffic-rollups.timer` + `traffic-talkers-rollups.timer`
 + `erp-piterix-sync.timer`.

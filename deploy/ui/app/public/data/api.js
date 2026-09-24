@@ -2029,6 +2029,17 @@ const ApiClient = (() => {
     return body;
   }
 
+  async function loadFlowStorage() {
+    return requestJson('/api/admin/flow-storage');
+  }
+
+  async function saveFlowStorage(settings) {
+    return requestJson('/api/admin/flow-storage', {
+      method: 'PUT',
+      body: settings,
+    });
+  }
+
   async function loadDirectionSettings() {
     try {
       const body = await requestJson('/api/refs/direction-settings');
@@ -3130,6 +3141,8 @@ const ApiClient = (() => {
     loadBmpChurn,
     loadBmpFlap,
     loadTtl,
+    loadFlowStorage,
+    saveFlowStorage,
     loadAudit,
     reportAuditPage,
     updateTtl,

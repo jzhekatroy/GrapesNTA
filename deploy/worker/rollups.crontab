@@ -7,3 +7,7 @@
 # ERP PiterIX full sync — nightly (replaces host erp-piterix-sync.timer).
 # Container TZ is Europe/Moscow, so this is 03:15 MSK as the UI promises.
 15 3 * * * flock -n /tmp/erp-piterix-sync.lock /app/bin/cron-erp-sync.sh
+
+# Прореживание старых суток flows_raw. Окно и включение — в настройках
+# (страница «Сроки хранения»), по умолчанию выключено.
+*/30 * * * * flock -n /tmp/flow-thinning.lock /app/bin/cron-flow-thinning.sh

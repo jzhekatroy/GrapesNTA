@@ -198,6 +198,7 @@ const {
   getBmpFlap,
 } = require('./bmp');
 const { listTtlTables, updateTtlTable } = require('./ttl-management');
+const { getFlowStorage, saveFlowStorage } = require('./flow-storage');
 const {
   ensureUsersTable,
   listUsers,
@@ -1975,6 +1976,26 @@ app.put('/api/admin/ttl/:id', async (req, res) => {
   try {
     const result = await updateTtlTable(req.params.id, req.body?.days, {
       roleId: req.user?.roleId,
+    });
+    res.json(result);
+  } catch (err) {
+    sendApiError(res, err, err.statusCode || 502);
+  }
+});
+
+app.get('/api/admin/flow-storage', async (_req, res) => {
+  try {
+    res.json(await getFlowStorage());
+  } catch (err) {
+    sendApiError(res, err, err.statusCode || 502);
+  }
+});
+
+app.put('/api/admin/flow-storage', async (req, res) => {
+  try {
+    const result = await saveFlowStorage(req.body, {
+      roleId: req.user?.roleId,
+      actor: req.user?.username,
     });
     res.json(result);
   } catch (err) {

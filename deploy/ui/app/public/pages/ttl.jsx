@@ -42,6 +42,178 @@ function TtlDiskBar({ disk }) {
   );
 }
 
+const FLOW_MODES = [
+  ['off', 'Выключено'],
+  ['dry_run', 'Проверка без изменений'],
+  ['on', 'Включено'],
+];
+
+const FLOW_STATUS = {
+  dry_run: 'проверка',
+  running: 'идёт',
+  done: 'готово',
+  failed: 'ошибка',
+  skipped: 'пропущено',
+  waiting: 'ждёт',
+};
+
+function flowFieldStyle() {
+  return { display: 'grid', gap: 6 };
+}
+
+function flowLabelStyle() {
+  return { font: 'var(--pv-text-body-3)', color: 'var(--fg-secondary)' };
+}
+
+function FlowStoragePanel({ canWrite, onReady }) {
+  const [data, setData] = useState(null);
+  const [form, setForm] = useState(null);
+  const [totalDays, setTotalDays] = useState('');
+  const [error, setError] = useState('');
+  const [saving, setSaving] = useState(false);
+
+  const load = useCallback(async () => {
+    try {
+      const body = await ApiClient.loadFlowStorage();
+      setData(body);
+      setForm(body.settings);
+      if (onReady) onReady();
+      setTotalDays(body.flows?.ttlDays == null ? '' : String(body.flows.ttlDays));
+      setError('');
+    } catch (err) {
+      setError(err.message || ApiClient.LOAD_FAILED);
+    }
+  }, []);
+
+  useEffect(() => { load(); }, [load]);
+
+  const save = async () => {
+    if (!form) return;
+    const days = Number(totalDays);
+    if (!Number.isInteger(days) || days < 1) {
+      setError('Укажите, сколько суток хранить всего');
+      return;
+    }
+    setSaving(true);
+    setError('');
+    try {
+      if (days !== data?.flows?.ttlDays) {
+        await ApiClient.updateTtl('flows_raw', days);
+      }
+      if (data?.schemaReady) {
+        await ApiClient.saveFlowStorage({
+          ...form,
+          xdpThresholdBytes: Math.round(Number(form.xdpThresholdBytes) / 1000) * 1000,
+        });
+      }
+      await load();
+      pushToast({ kind: 'success', title: 'Хранение потоков сохранено' });
+    } catch (err) {
+      setError(err.message || ApiClient.LOAD_FAILED);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const forecast = data?.forecast;
+  const forecastText = !forecast ? '' : (
+    forecast.thinnedBytes == null
+      ? 'Сколько займут прореженные сутки — не замерено для этой частоты и порога.'
+      : `Точные сутки ${fmtBytes(forecast.exactBytes)}, прореженные ${fmtBytes(forecast.thinnedBytes)}. `
+        + `За ${forecast.exactDays + forecast.warmDays} сут. выйдет около ${fmtBytes(forecast.totalBytes)}. `
+        + (forecast.fits == null ? '' : (forecast.fits ? 'Места хватит.' : 'На выбранный срок места не хватит.'))
+  );
+
+  return (
+    <Card pad="sm" style={{ marginBottom: 16 }}>
+      <div style={{ display: 'grid', gap: 14 }}>
+        <div>
+          <div style={{ font: 'var(--pv-text-body-2-bold)', color: 'var(--fg-primary)' }}>Хранение потоков</div>
+          <div style={{ marginTop: 4, font: 'var(--pv-text-body-3)', color: 'var(--fg-secondary)' }}>
+            Свежие сутки хранятся точно. Более старые сутки xdpflowd прореживаются ночью: мелкие потоки
+            оставляются выборочно, суммы трафика сохраняются. NetFlow и sFlow не прореживаются и лежат точно весь срок.
+          </div>
+        </div>
+
+        {!data ? (
+          <div style={{ color: 'var(--fg-secondary)' }}>{error || 'Загрузка…'}</div>
+        ) : (
+          <>
+            {!data.schemaReady && (
+              <div style={{ font: 'var(--pv-text-body-3)', color: 'var(--st-warning)' }}>
+                Таблицы настроек ещё не созданы. После выкладки схемы здесь появятся режим и журнал.
+              </div>
+            )}
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 12 }}>
+              <label style={flowFieldStyle()}>
+                <span style={flowLabelStyle()}>Режим</span>
+                <select className="input" value={form.mode} disabled={!canWrite || saving || !data.schemaReady}
+                  onChange={(e) => setForm({ ...form, mode: e.target.value })}>
+                  {FLOW_MODES.map(([id, label]) => <option key={id} value={id}>{label}</option>)}
+                </select>
+              </label>
+              <label style={flowFieldStyle()}>
+                <span style={flowLabelStyle()}>Точно, суток</span>
+                <input className="input" type="number" min="1" max="3650" value={form.hotDays}
+                  disabled={!canWrite || saving || !data.schemaReady}
+                  onChange={(e) => setForm({ ...form, hotDays: Number(e.target.value) })} />
+              </label>
+              <label style={flowFieldStyle()}>
+                <span style={flowLabelStyle()}>Всего, суток</span>
+                <input className="input" type="number" min="1" max="3650" value={totalDays}
+                  disabled={!canWrite || saving}
+                  onChange={(e) => setTotalDays(e.target.value)} />
+              </label>
+              <label style={flowFieldStyle()}>
+                <span style={flowLabelStyle()}>Запуск</span>
+                <input className="input" type="time" value={form.runAt} disabled={!canWrite || saving || !data.schemaReady}
+                  onChange={(e) => setForm({ ...form, runAt: e.target.value })} />
+              </label>
+              <label style={flowFieldStyle()}>
+                <span style={flowLabelStyle()}>xdpflowd, частота</span>
+                <select className="input" value={form.xdpRate} disabled={!canWrite || saving || !data.schemaReady}
+                  onChange={(e) => setForm({ ...form, xdpRate: Number(e.target.value) })}>
+                  {(data.rates || []).map((rate) => <option key={rate} value={rate}>1:{rate}</option>)}
+                </select>
+              </label>
+              <label style={flowFieldStyle()}>
+                <span style={flowLabelStyle()}>xdpflowd, порог, КБ</span>
+                <input className="input" type="number" min="1" value={Math.round(Number(form.xdpThresholdBytes) / 1000)}
+                  disabled={!canWrite || saving || !data.schemaReady}
+                  onChange={(e) => setForm({ ...form, xdpThresholdBytes: Number(e.target.value) * 1000 })} />
+              </label>
+            </div>
+            <div style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-secondary)' }}>
+              Тёплых суток: {forecast ? forecast.warmDays : '—'}. {forecast?.note || ''}
+              {forecastText ? ` ${forecastText}` : ''}
+            </div>
+            {Array.isArray(data.log) && data.log.length > 0 && (
+              <div style={{ display: 'grid', gap: 6 }}>
+                {data.log.map((row) => (
+                  <div key={row.day} className="row" style={{ gap: 12, font: 'var(--pv-text-body-3)' }}>
+                    <span className="mono">{row.day}</span>
+                    <span>{FLOW_STATUS[row.status] || row.status}</span>
+                    <span className="mono">{fmtBytes(row.bytesBefore)} → {row.bytesAfter ? fmtBytes(row.bytesAfter) : '—'}</span>
+                    {row.message ? <span style={{ color: 'var(--fg-secondary)' }}>{row.message}</span> : null}
+                  </div>
+                ))}
+              </div>
+            )}
+          </>
+        )}
+        {error && data && (
+          <div style={{ color: 'var(--st-critical)', font: 'var(--pv-text-body-3)' }}>{error}</div>
+        )}
+        {canWrite && data && (
+          <div>
+            <Button kind="primary" onClick={save} disabled={saving}>{saving ? 'Сохранение…' : 'Сохранить'}</Button>
+          </div>
+        )}
+      </div>
+    </Card>
+  );
+}
+
 function PageTTL() {
   const canWrite = AuthAccess.canWritePage('ttl');
   const [rows, setRows] = useState([]);
@@ -49,6 +221,7 @@ function PageTTL() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [editing, setEditing] = useState(null);
+  const [flowPanelOk, setFlowPanelOk] = useState(false);
 
   const loadAll = useCallback(async () => {
     setLoading(true);
@@ -148,6 +321,8 @@ function PageTTL() {
         </div>
       </Card>
 
+      <FlowStoragePanel canWrite={canWrite} onReady={() => setFlowPanelOk(true)} />
+
       {loading ? (
         <Card pad="sm">
           <div style={{ padding: 32, textAlign: 'center', color: 'var(--fg-secondary)' }}>Загрузка…</div>
@@ -156,7 +331,7 @@ function PageTTL() {
         <Empty icon="db" title="Не удалось загрузить" desc={error} action={<Button kind="primary" icon="refresh" onClick={loadAll}>Повторить</Button>} />
       ) : (
         <DataTable
-          rows={rows}
+          rows={flowPanelOk ? rows.filter((r) => r.id !== 'flows_raw') : rows}
           columns={cols}
           rowKey="id"
           pageSize={15}

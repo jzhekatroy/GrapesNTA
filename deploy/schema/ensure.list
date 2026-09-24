@@ -11,3 +11,5 @@ deploy/schema/80_rbac/05_app_audit_log.sql
 deploy/schema/80_rbac/06_app_erp_sync_settings.sql
 deploy/schema/80_rbac/07_erp_piterix_sync_log.sql
 deploy/schema/50_net/45_net_client_prefix_dict.sql
+deploy/schema/10_flows/02_app_flow_storage_settings.sql
+deploy/schema/10_flows/03_flow_thinning_log.sql

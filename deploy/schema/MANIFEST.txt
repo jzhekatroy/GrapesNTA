@@ -1,4 +1,6 @@
 10_flows/01_flows_raw.sql
+10_flows/02_app_flow_storage_settings.sql
+10_flows/03_flow_thinning_log.sql
 20_dns/01_dns_log.sql
 20_dns/02_dns_answers.sql
 20_dns/03_dns_activity_5m.sql

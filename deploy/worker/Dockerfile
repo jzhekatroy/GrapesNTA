@@ -34,7 +34,7 @@ COPY deploy/analytics/package.json /app/analytics/
 COPY deploy/analytics/server /app/analytics/server
 # CLI must sit next to analytics/server so require('../server/erp-piterix-run') resolves.
 COPY deploy/analytics/scripts /app/analytics/scripts
-COPY scripts/traffic_rollup_async.py scripts/traffic_rollup_jobs.py /app/scripts/
+COPY scripts/traffic_rollup_async.py scripts/traffic_rollup_jobs.py scripts/flow_thinning.py /app/scripts/
 COPY deploy/worker/bin /app/bin
 COPY deploy/worker/rollups.crontab /etc/grapesnta/rollups.crontab
 COPY deploy/worker/entrypoint.sh /app/entrypoint.sh
