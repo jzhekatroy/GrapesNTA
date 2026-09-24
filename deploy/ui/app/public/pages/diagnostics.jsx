@@ -79,8 +79,15 @@ function ProblemsBanner({ problems, okText }) {
       </div>
     );
   }
+  const hasCritical = problems.some((p) => p.level === 'critical');
   return (
     <div className="col" style={{ gap: 8 }}>
+      <div style={{
+        font: 'var(--pv-text-body-2-bold)',
+        color: hasCritical ? 'var(--st-critical)' : 'var(--st-warning)',
+      }}>
+        {hasCritical ? 'Есть ошибки' : 'Есть проблемы'} ({problems.length})
+      </div>
       {problems.map((p) => {
         const bg = p.level === 'critical'
           ? 'var(--st-critical-bg)'
@@ -614,7 +621,11 @@ function WorkerPanel({ data, loading, onReload }) {
             </div>
             <div className="row" style={{ justifyContent: 'space-between' }}>
               <span style={{ color: 'var(--fg-muted)' }}>Проблемы</span>
-              <span className="mono">
+              <span className="mono" style={{
+                color: summary.criticalCount > 0
+                  ? 'var(--st-critical)'
+                  : (summary.problemCount > 0 ? 'var(--st-warning)' : 'inherit'),
+              }}>
                 {summary.criticalCount || 0} crit / {summary.problemCount || 0} всего
               </span>
             </div>

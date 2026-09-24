@@ -73,6 +73,12 @@ function toIsoLoose(value) {
   return `${s.replace(' ', 'T')}Z`;
 }
 
+function formatLag(ageSec) {
+  const sec = Math.max(0, Math.round(Number(ageSec) || 0));
+  if (sec >= 2 * 3600) return `${Math.round(sec / 3600)} ч`;
+  return `${Math.round(sec / 60)} мин`;
+}
+
 function problem(level, code, message, meta = {}) {
   return { level, code, message, ...meta };
 }
@@ -356,11 +362,10 @@ function buildProblems({ worker, jobs, trafficRows, trafficError }) {
         { job: r.job },
       ));
     } else if (r.status === 'deferred') {
-      const hours = Math.max(1, Math.round((r.bucketLagSec || 0) / 3600));
       problems.push(problem(
         'warning',
         'traffic_job_deferred',
-        `Traffic «${r.job}»: запись не успела и повтор отложен, данные отстают примерно на ${hours} ч`,
+        `Traffic «${r.job}»: запись не успела и повтор отложен, данные отстают примерно на ${formatLag(r.bucketLagSec)}`,
         { job: r.job, bucketLagSec: r.bucketLagSec },
       ));
     } else if (r.stale) {
@@ -371,10 +376,9 @@ function buildProblems({ worker, jobs, trafficRows, trafficError }) {
       const ageSec = staleRun
         ? r.updateAgeSec
         : (r.bucketLagSec ?? r.updateAgeSec ?? 0);
-      const ageMin = Math.round(ageSec / 60);
       const msg = staleRun
-        ? `Traffic «${r.job}»: давно не обновлялся (~${ageMin} мин)`
-        : `Traffic «${r.job}»: last_bucket отстаёт (~${ageMin} мин)`;
+        ? `Traffic «${r.job}»: давно не обновлялся (~${formatLag(ageSec)})`
+        : `Traffic «${r.job}»: данные отстают примерно на ${formatLag(ageSec)}`;
       problems.push(problem(
         'warning',
         'traffic_job_stale',
