@@ -109,7 +109,7 @@ async function tableExists(name) {
       WHERE database = {db:String} AND name = {table:String}
     `,
     { db: config.database, table: name },
-    { name: 'admin/flow-storage-exists' },
+    { name: 'admin/flow-storage-exists', useWrite: true },
   );
   return Number(rows[0]?.n) > 0;
 }
@@ -123,7 +123,7 @@ async function loadSettingsRow() {
       LIMIT 1
     `,
     {},
-    { name: 'admin/flow-storage-settings' },
+    { name: 'admin/flow-storage-settings', useWrite: true },
   );
   return rows[0] || null;
 }
@@ -145,7 +145,7 @@ async function loadLog() {
       LIMIT 10
     `,
     {},
-    { name: 'admin/flow-storage-log' },
+    { name: 'admin/flow-storage-log', useWrite: true },
   );
   return rows.map((row) => ({
     day: row.day,
@@ -197,7 +197,7 @@ async function loadFlows() {
         LIMIT 1
       `,
       { db: config.database, table },
-      { name: 'admin/flow-storage-ttl' },
+      { name: 'admin/flow-storage-ttl', useWrite: true },
     ),
     query(
       `
@@ -210,7 +210,7 @@ async function loadFlows() {
         LIMIT 1
       `,
       { db: config.database, table },
-      { name: 'admin/flow-storage-day' },
+      { name: 'admin/flow-storage-day', useWrite: true },
     ),
     loadDisk(),
   ]);
@@ -241,7 +241,7 @@ async function averagedThinnedBytes() {
       )
     `,
     {},
-    { name: 'admin/flow-storage-avg' },
+    { name: 'admin/flow-storage-avg', useWrite: true },
   );
   return Number(rows[0]?.bytes) || 0;
 }
