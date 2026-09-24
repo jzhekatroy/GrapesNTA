@@ -5,6 +5,7 @@ Docker service for **periodic CH aggregates** (minute-scale):
 - Observations rollup + scheduled reports (Node, long-running)
 - Traffic dashboard/direction/… rollups (Python, every minute)
 - ASN talkers/pairs rollups (Python, every 5 minutes)
+- Cabinet client×country / client×service rollups (Python, every 5 minutes, own 4-minute budget)
 - ERP PiterIX client sync (Node, nightly at 03:15)
 - Прореживание старых суток flows_raw (Python, каждые 30 минут; по умолчанию выключено, настройки на странице «Сроки хранения»)
 
