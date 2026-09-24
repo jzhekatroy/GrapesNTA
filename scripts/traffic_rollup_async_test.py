@@ -8,6 +8,7 @@ from traffic_rollup_async import (
     CATCHUP_LAG_BUCKETS,
     JobState,
     catchup_window_buckets,
+    coarse_budget_short,
     complete_raw_until,
     defer_until,
     flows_raw_enabled_max_minute,
@@ -20,6 +21,19 @@ from traffic_rollup_async import (
     truncate_bucket,
 )
 from traffic_rollup_jobs import sorted_jobs
+
+
+class CoarseBudget(unittest.TestCase):
+    def test_three_seconds_is_not_enough_for_an_hour(self):
+        self.assertTrue(coarse_budget_short("hour", 3))
+        self.assertTrue(coarse_budget_short("day", 3))
+
+    def test_a_full_attempt_is_enough(self):
+        self.assertFalse(coarse_budget_short("hour", 15))
+        self.assertFalse(coarse_budget_short("hour", 27))
+
+    def test_minute_jobs_are_not_held_to_the_hour_budget(self):
+        self.assertFalse(coarse_budget_short("minute", 3))
 
 
 class CatchupGates(unittest.TestCase):

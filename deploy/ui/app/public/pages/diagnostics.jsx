@@ -785,7 +785,7 @@ function WorkerPanel({ data, loading, onReload }) {
         <div style={{ marginBottom: 8, color: 'var(--fg-secondary)', font: 'var(--pv-text-body-3)' }}>
           Без legacy IP talker/pair. Включая клиентские витрины кабинета
           (<span className="mono">traffic_client_*</span>, <span className="mono">dns_client_domain_1h</span>).
-          Для 1h/1d смотри «обновлён» — бакет вчерашнего дня днём нормален.
+          Час старше 6 часов и сутки старше 40 часов — отставание, даже если задача только что обновлялась.
         </div>
         {data?.trafficRollups?.error && (
           <div style={{ marginBottom: 8, color: 'var(--st-critical)', font: 'var(--pv-text-body-3)' }}>
@@ -807,7 +807,7 @@ function WorkerPanel({ data, loading, onReload }) {
             </thead>
             <tbody>
               {traffic.map((r) => (
-                <tr key={r.job} style={{ background: r.stale || r.status === 'failed' ? 'var(--st-warning-bg)' : 'transparent' }}>
+                <tr key={r.job} style={{ background: r.stale || r.status === 'failed' || r.status === 'error' || r.status === 'deferred' ? 'var(--st-warning-bg)' : 'transparent' }}>
                   <td style={{ padding: 6 }} className="mono">{r.job}</td>
                   <td style={{ padding: 6 }}>
                     <StatusIndicator

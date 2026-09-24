@@ -121,12 +121,23 @@ HARD_KILL_RESERVE_SEC = 8
 # hour from flows_raw) and then mark the request error. Live already defers
 # on timeout; the queue must do the same and not begin a query it cannot finish.
 QUEUE_MIN_BUDGET_SEC = {"minute": 20, "hour": 60, "day": 60}
+# A live tick is 45s and the minute jobs run first. An hour read of flows_raw
+# (client×service) finishes in 15–25s, so it fits in what is left — but the
+# loop then starts the next hour with 3s on the clock. That timeout used to
+# pause the job for five minutes, so catch-up was one hour per five minutes.
+# Do not start an hour/day job, and do not pause it, when less than this remains.
+LIVE_COARSE_MIN_BUDGET_SEC = {"hour": 15, "day": 15}
 # Lag above which the fair pass switches a job from one bucket to a full range.
 # Two buckets of slack keeps a steady tick on cheap single-bucket queries.
 CATCHUP_LAG_BUCKETS = 2
 # A job that did not finish keeps its cursor and sits out, so the next ticks
 # can move the other hour/day vitrines instead of repeating the same query.
 DEFER_COOLDOWN_SEC = 300
+
+
+def coarse_budget_short(bucket_kind: str, remaining_s: float) -> bool:
+    need = LIVE_COARSE_MIN_BUDGET_SEC.get(bucket_kind)
+    return need is not None and remaining_s < need
 
 
 def catchup_window_buckets(bucket_kind: str, max_range_buckets: int) -> int:
@@ -2173,6 +2184,16 @@ def live_job_step(
     except Exception as exc:
         msg = str(exc)
         if is_retryable_queue_error(msg):
+            if coarse_budget_short(job.bucket_kind, ch.timeout_s or 0):
+                # The tick was already over. Pausing for five minutes freezes a
+                # job that finishes on the next tick, when the minute is fresh.
+                logger.info(
+                    "job=%s action=stop reason=short_budget timeout_s=%s bucket=%s",
+                    job.job_id,
+                    ch.timeout_s,
+                    fmt_dt(bucket_start),
+                )
+                return "wall"
             # Remember the pause. Otherwise the next tick picks this same job
             # first — it is the most behind — and the other vitrines never run.
             note = mark_deferred(msg)
@@ -2516,6 +2537,15 @@ def run_live(args: argparse.Namespace, logger: logging.Logger) -> int:
                 best_lag = lag
                 best = job
         if best is None:
+            break
+        left = remaining_budget_s(started, wall_sec)
+        if coarse_budget_short(best.bucket_kind, left):
+            logger.info(
+                "action=stop reason=short_budget job=%s need_s=%s left_s=%.0f",
+                best.job_id,
+                LIVE_COARSE_MIN_BUDGET_SEC.get(best.bucket_kind),
+                left,
+            )
             break
         window = catchup_window_buckets(best.bucket_kind, max_range)
         result = _step(best, window)

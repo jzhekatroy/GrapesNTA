@@ -85,8 +85,22 @@ function trafficStaleUpdateSec(jobName) {
 
 function trafficBucketLagWarnSec(jobName) {
   if (jobName.endsWith('_1d')) return 40 * 3600; // yesterday bucket is normal until next day run
-  if (jobName.endsWith('_1h')) return 2 * 3600;
+  // A closed hour sits about two hours behind the clock. Six hours means the
+  // job is not keeping up, which a fresh updated_at used to hide.
+  if (jobName.endsWith('_1h')) return 6 * 3600;
   return TRAFFIC_1M_LAG_WARN_SEC;
+}
+
+function classifyTrafficJob(jobName, status, bucketLagSec, updateAgeSec) {
+  const failed = status === 'failed' || status === 'error';
+  const deferred = status === 'deferred';
+  const lagWarnSec = trafficBucketLagWarnSec(jobName);
+  const updateWarnSec = trafficStaleUpdateSec(jobName);
+  const staleRun = updateAgeSec != null && updateAgeSec > updateWarnSec;
+  const staleBucket = bucketLagSec != null && bucketLagSec > lagWarnSec;
+  // A deferred job has its own warning. Counting it as stale too doubles it.
+  const stale = !failed && !deferred && (staleRun || staleBucket);
+  return { failed, deferred, stale, lagWarnSec, updateWarnSec };
 }
 
 async function loadTrafficRollupState() {
@@ -113,15 +127,7 @@ async function loadTrafficRollupState() {
         const bucketLagSec = ageSecFrom(lastBucket, now);
         const updateAgeSec = ageSecFrom(updatedAt, now);
         const status = String(r.status || '');
-        const lagWarnSec = trafficBucketLagWarnSec(jobName);
-        const updateWarnSec = trafficStaleUpdateSec(jobName);
-        const failed = status === 'failed' || status === 'error';
-        // Prefer "did the job run recently?" over raw bucket age (1d/1h buckets lag by design).
-        const staleRun = updateAgeSec != null && updateAgeSec > updateWarnSec;
-        const staleBucket = jobName.endsWith('_1m')
-          && bucketLagSec != null
-          && bucketLagSec > lagWarnSec;
-        const stale = !failed && (staleRun || staleBucket);
+        const classified = classifyTrafficJob(jobName, status, bucketLagSec, updateAgeSec);
         return {
           job: jobName,
           lastBucket,
@@ -132,15 +138,16 @@ async function loadTrafficRollupState() {
           updatedAt,
           bucketLagSec,
           updateAgeSec,
-          stale,
-          lagWarnSec,
+          stale: classified.stale,
+          lagWarnSec: classified.lagWarnSec,
         };
       });
 
     const order = new Map(ACTIVE_TRAFFIC_JOBS.map((j, i) => [j, i]));
     mapped.sort((a, b) => {
-      const ra = a.status === 'failed' || a.status === 'error' || a.stale ? 0 : 1;
-      const rb = b.status === 'failed' || b.status === 'error' || b.stale ? 0 : 1;
+      const bad = (row) => row.status === 'failed' || row.status === 'error' || row.status === 'deferred' || row.stale;
+      const ra = bad(a) ? 0 : 1;
+      const rb = bad(b) ? 0 : 1;
       if (ra !== rb) return ra - rb;
       return (order.get(a.job) ?? 999) - (order.get(b.job) ?? 999);
     });
@@ -348,6 +355,14 @@ function buildProblems({ worker, jobs, trafficRows, trafficError }) {
         `Traffic rollup «${r.job}»: status=${r.status}${r.lastError ? ` — ${r.lastError}` : ''}`,
         { job: r.job },
       ));
+    } else if (r.status === 'deferred') {
+      const hours = Math.max(1, Math.round((r.bucketLagSec || 0) / 3600));
+      problems.push(problem(
+        'warning',
+        'traffic_job_deferred',
+        `Traffic «${r.job}»: запись не успела и повтор отложен, данные отстают примерно на ${hours} ч`,
+        { job: r.job, bucketLagSec: r.bucketLagSec },
+      ));
     } else if (r.stale) {
       // Prefer the metric that actually crossed the threshold — updateAgeSec can be
       // ~3m (talkers cron */5) while last_bucket lag is what made the job stale.
@@ -453,4 +468,5 @@ async function getWorkerDiagnostics() {
 
 module.exports = {
   getWorkerDiagnostics,
+  classifyTrafficJob,
 };
