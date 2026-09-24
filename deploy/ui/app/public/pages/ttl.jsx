@@ -43,32 +43,44 @@ function TtlDiskBar({ disk }) {
 }
 
 const FLOW_MODES = [
-  ['off', 'Выключено'],
-  ['dry_run', 'Проверка без изменений'],
-  ['on', 'Включено'],
+  { id: 'off', label: 'Выключено', hint: 'Все сутки хранятся без сжатия.' },
+  { id: 'dry_run', label: 'Только расчёт', hint: 'Ночью считается, сколько места освободится. Данные не меняются.' },
+  { id: 'on', label: 'Включено', hint: 'Ночью старые сутки сжимаются.' },
 ];
 
 const FLOW_STATUS = {
-  dry_run: 'проверка',
-  running: 'идёт',
-  done: 'готово',
+  dry_run: 'расчёт',
+  running: 'выполняется',
+  done: 'сжато',
   failed: 'ошибка',
   skipped: 'пропущено',
-  waiting: 'ждёт',
+  waiting: 'ожидание',
 };
 
-function flowFieldStyle() {
-  return { display: 'grid', gap: 6 };
+const FLOW_FIELD = { display: 'grid', gap: 6, alignContent: 'start' };
+const FLOW_LABEL = { font: 'var(--pv-text-body-3)', color: 'var(--fg-secondary)' };
+const FLOW_HINT = { font: 'var(--pv-text-body-3)', color: 'var(--fg-muted)' };
+const FLOW_SECTION = { font: 'var(--pv-text-body-2-bold)', color: 'var(--fg-primary)' };
+
+function onlyDigits(value) {
+  return String(value ?? '').replace(/\D+/g, '').slice(0, 6);
 }
 
-function flowLabelStyle() {
-  return { font: 'var(--pv-text-body-3)', color: 'var(--fg-secondary)' };
+function FlowStat({ label, value, tone }) {
+  return (
+    <div className="row" style={{ justifyContent: 'space-between', gap: 12, font: 'var(--pv-text-body-3)' }}>
+      <span style={{ color: 'var(--fg-secondary)' }}>{label}</span>
+      <span className="mono" style={{ color: tone || 'var(--fg-primary)', textAlign: 'right' }}>{value}</span>
+    </div>
+  );
 }
 
 function FlowStoragePanel({ canWrite, onReady }) {
   const [data, setData] = useState(null);
   const [form, setForm] = useState(null);
   const [totalDays, setTotalDays] = useState('');
+  const [hotDays, setHotDays] = useState('');
+  const [thresholdKb, setThresholdKb] = useState('');
   const [error, setError] = useState('');
   const [saving, setSaving] = useState(false);
 
@@ -77,9 +89,11 @@ function FlowStoragePanel({ canWrite, onReady }) {
       const body = await ApiClient.loadFlowStorage();
       setData(body);
       setForm(body.settings);
-      if (onReady) onReady();
+      setHotDays(String(body.settings?.hotDays ?? ''));
+      setThresholdKb(String(Math.round(Number(body.settings?.xdpThresholdBytes || 0) / 1000)));
       setTotalDays(body.flows?.ttlDays == null ? '' : String(body.flows.ttlDays));
       setError('');
+      if (onReady) onReady();
     } catch (err) {
       setError(err.message || ApiClient.LOAD_FAILED);
     }
@@ -89,25 +103,40 @@ function FlowStoragePanel({ canWrite, onReady }) {
 
   const save = async () => {
     if (!form) return;
-    const days = Number(totalDays);
-    if (!Number.isInteger(days) || days < 1) {
-      setError('Укажите, сколько суток хранить всего');
+    const total = Number(totalDays);
+    const hot = Number(hotDays);
+    const kb = Number(thresholdKb);
+    if (!Number.isInteger(total) || total < 1) {
+      setError('Укажите срок хранения в сутках');
+      return;
+    }
+    if (!Number.isInteger(hot) || hot < 1 || hot >= total) {
+      setError('Срок без сжатия должен быть от 1 суток и меньше общего срока');
+      return;
+    }
+    if (!Number.isInteger(kb) || kb < 1) {
+      setError('Укажите размер мелкого потока в КБ, не меньше 1');
+      return;
+    }
+    if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(String(form.runAt || ''))) {
+      setError('Время запуска — в формате ЧЧ:ММ');
       return;
     }
     setSaving(true);
     setError('');
     try {
-      if (days !== data?.flows?.ttlDays) {
-        await ApiClient.updateTtl('flows_raw', days);
+      if (total !== data?.flows?.ttlDays) {
+        await ApiClient.updateTtl('flows_raw', total);
       }
       if (data?.schemaReady) {
         await ApiClient.saveFlowStorage({
           ...form,
-          xdpThresholdBytes: Math.round(Number(form.xdpThresholdBytes) / 1000) * 1000,
+          hotDays: hot,
+          xdpThresholdBytes: kb * 1000,
         });
       }
       await load();
-      pushToast({ kind: 'success', title: 'Хранение потоков сохранено' });
+      pushToast({ kind: 'success', title: 'Настройки хранения сохранены' });
     } catch (err) {
       setError(err.message || ApiClient.LOAD_FAILED);
     } finally {
@@ -115,92 +144,153 @@ function FlowStoragePanel({ canWrite, onReady }) {
     }
   };
 
+  const disabled = !canWrite || saving || !data?.schemaReady;
   const forecast = data?.forecast;
-  const forecastText = !forecast ? '' : (
-    forecast.thinnedBytes == null
-      ? 'Сколько займут прореженные сутки — не замерено для этой частоты и порога.'
-      : `Точные сутки ${fmtBytes(forecast.exactBytes)}, прореженные ${fmtBytes(forecast.thinnedBytes)}. `
-        + `За ${forecast.exactDays + forecast.warmDays} сут. выйдет около ${fmtBytes(forecast.totalBytes)}. `
-        + (forecast.fits == null ? '' : (forecast.fits ? 'Места хватит.' : 'На выбранный срок места не хватит.'))
-  );
+  const mode = FLOW_MODES.find((m) => m.id === form?.mode) || FLOW_MODES[0];
+  const fitsTone = forecast?.fits === false ? 'var(--st-critical)' : (forecast?.fits ? 'var(--st-success)' : undefined);
 
   return (
     <Card pad="sm" style={{ marginBottom: 16 }}>
-      <div style={{ display: 'grid', gap: 14 }}>
+      <div style={{ display: 'grid', gap: 16 }}>
         <div>
-          <div style={{ font: 'var(--pv-text-body-2-bold)', color: 'var(--fg-primary)' }}>Хранение потоков</div>
-          <div style={{ marginTop: 4, font: 'var(--pv-text-body-3)', color: 'var(--fg-secondary)' }}>
-            Свежие сутки хранятся точно. Более старые сутки xdpflowd прореживаются ночью: мелкие потоки
-            оставляются выборочно, суммы трафика сохраняются. NetFlow и sFlow не прореживаются и лежат точно весь срок.
+          <div style={FLOW_SECTION}>Хранение сырых потоков</div>
+          <div style={{ ...FLOW_HINT, marginTop: 4, maxWidth: 820 }}>
+            Свежие сутки хранятся полностью. В старых сутках мелкие потоки xdpflowd сохраняются выборочно,
+            с пересчётом объёма, поэтому итоги трафика не меняются. NetFlow и sFlow не сжимаются.
           </div>
         </div>
 
         {!data ? (
-          <div style={{ color: 'var(--fg-secondary)' }}>{error || 'Загрузка…'}</div>
+          <div style={{ color: error ? 'var(--st-critical)' : 'var(--fg-secondary)', font: 'var(--pv-text-body-3)' }}>
+            {error || 'Загрузка…'}
+          </div>
         ) : (
           <>
             {!data.schemaReady && (
               <div style={{ font: 'var(--pv-text-body-3)', color: 'var(--st-warning)' }}>
-                Таблицы настроек ещё не созданы. После выкладки схемы здесь появятся режим и журнал.
+                Таблицы настроек не созданы: выложите схему базы, затем настройки станут доступны.
               </div>
             )}
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 12 }}>
-              <label style={flowFieldStyle()}>
-                <span style={flowLabelStyle()}>Режим</span>
-                <select className="input" value={form.mode} disabled={!canWrite || saving || !data.schemaReady}
-                  onChange={(e) => setForm({ ...form, mode: e.target.value })}>
-                  {FLOW_MODES.map(([id, label]) => <option key={id} value={id}>{label}</option>)}
-                </select>
-              </label>
-              <label style={flowFieldStyle()}>
-                <span style={flowLabelStyle()}>Точно, суток</span>
-                <input className="input" type="number" min="1" max="3650" value={form.hotDays}
-                  disabled={!canWrite || saving || !data.schemaReady}
-                  onChange={(e) => setForm({ ...form, hotDays: Number(e.target.value) })} />
-              </label>
-              <label style={flowFieldStyle()}>
-                <span style={flowLabelStyle()}>Всего, суток</span>
-                <input className="input" type="number" min="1" max="3650" value={totalDays}
-                  disabled={!canWrite || saving}
-                  onChange={(e) => setTotalDays(e.target.value)} />
-              </label>
-              <label style={flowFieldStyle()}>
-                <span style={flowLabelStyle()}>Запуск</span>
-                <input className="input" type="time" value={form.runAt} disabled={!canWrite || saving || !data.schemaReady}
-                  onChange={(e) => setForm({ ...form, runAt: e.target.value })} />
-              </label>
-              <label style={flowFieldStyle()}>
-                <span style={flowLabelStyle()}>xdpflowd, частота</span>
-                <select className="input" value={form.xdpRate} disabled={!canWrite || saving || !data.schemaReady}
-                  onChange={(e) => setForm({ ...form, xdpRate: Number(e.target.value) })}>
-                  {(data.rates || []).map((rate) => <option key={rate} value={rate}>1:{rate}</option>)}
-                </select>
-              </label>
-              <label style={flowFieldStyle()}>
-                <span style={flowLabelStyle()}>xdpflowd, порог, КБ</span>
-                <input className="input" type="number" min="1" value={Math.round(Number(form.xdpThresholdBytes) / 1000)}
-                  disabled={!canWrite || saving || !data.schemaReady}
-                  onChange={(e) => setForm({ ...form, xdpThresholdBytes: Number(e.target.value) * 1000 })} />
-              </label>
+
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: 24 }}>
+              <div style={{ display: 'grid', gap: 14, alignContent: 'start' }}>
+                <label style={FLOW_FIELD}>
+                  <span style={FLOW_LABEL}>Сжатие старых суток</span>
+                  <select className="input" value={form.mode} disabled={disabled}
+                    onChange={(e) => setForm({ ...form, mode: e.target.value })}>
+                    {FLOW_MODES.map((m) => <option key={m.id} value={m.id}>{m.label}</option>)}
+                  </select>
+                  <span style={FLOW_HINT}>{mode.hint}</span>
+                </label>
+
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+                  <label style={FLOW_FIELD}>
+                    <span style={FLOW_LABEL}>Срок хранения, сутки</span>
+                    <input className="input mono" type="text" inputMode="numeric" value={totalDays}
+                      disabled={!canWrite || saving}
+                      onChange={(e) => setTotalDays(onlyDigits(e.target.value))} />
+                  </label>
+                  <label style={FLOW_FIELD}>
+                    <span style={FLOW_LABEL}>Из них без сжатия, сутки</span>
+                    <input className="input mono" type="text" inputMode="numeric" value={hotDays}
+                      disabled={disabled}
+                      onChange={(e) => setHotDays(onlyDigits(e.target.value))} />
+                  </label>
+                </div>
+                <span style={{ ...FLOW_HINT, marginTop: -8 }}>Текущие сутки всегда хранятся без сжатия.</span>
+
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+                  <label style={FLOW_FIELD}>
+                    <span style={FLOW_LABEL}>Мелкий поток — меньше, КБ</span>
+                    <input className="input mono" type="text" inputMode="numeric" value={thresholdKb}
+                      disabled={disabled}
+                      onChange={(e) => setThresholdKb(onlyDigits(e.target.value))} />
+                  </label>
+                  <label style={FLOW_FIELD}>
+                    <span style={FLOW_LABEL}>Из мелких сохранять</span>
+                    <select className="input" value={form.xdpRate} disabled={disabled}
+                      onChange={(e) => setForm({ ...form, xdpRate: Number(e.target.value) })}>
+                      {(data.rates || []).map((rate) => <option key={rate} value={rate}>1 из {rate}</option>)}
+                    </select>
+                  </label>
+                </div>
+
+                <label style={{ ...FLOW_FIELD, maxWidth: 160 }}>
+                  <span style={FLOW_LABEL}>Ночной запуск</span>
+                  <input className="input mono" type="text" inputMode="numeric" placeholder="ЧЧ:ММ" maxLength={5}
+                    value={form.runAt} disabled={disabled}
+                    onChange={(e) => setForm({ ...form, runAt: e.target.value.replace(/[^\d:]/g, '').slice(0, 5) })} />
+                </label>
+              </div>
+
+              <div style={{ display: 'grid', gap: 10, alignContent: 'start' }}>
+                <div style={FLOW_LABEL}>Прогноз по текущим настройкам</div>
+                {forecast ? (
+                  <>
+                    <FlowStat label="Сутки без сжатия" value={fmtBytes(forecast.exactBytes)} />
+                    <FlowStat
+                      label="Сжатые сутки"
+                      value={forecast.thinnedBytes == null ? 'нет замера' : `≈ ${fmtBytes(forecast.thinnedBytes)}`}
+                    />
+                    <FlowStat
+                      label={`Всего за ${forecast.exactDays + forecast.warmDays} сут.`}
+                      value={forecast.totalBytes == null ? '—' : `≈ ${fmtBytes(forecast.totalBytes)}`}
+                    />
+                    <FlowStat
+                      label="Доступно на диске"
+                      value={forecast.roomBytes == null ? '—' : fmtBytes(forecast.roomBytes)}
+                    />
+                    <FlowStat
+                      label="Итог"
+                      tone={fitsTone}
+                      value={forecast.fits == null ? '—' : (forecast.fits ? 'места хватает' : 'места не хватает')}
+                    />
+                    <div style={{ ...FLOW_HINT, marginTop: 4 }}>
+                      Точность: {forecast.measured ? forecast.note : 'для этих параметров не измерялась'}.
+                    </div>
+                  </>
+                ) : (
+                  <div style={FLOW_HINT}>Нет данных для прогноза.</div>
+                )}
+              </div>
             </div>
-            <div style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-secondary)' }}>
-              Тёплых суток: {forecast ? forecast.warmDays : '—'}. {forecast?.note || ''}
-              {forecastText ? ` ${forecastText}` : ''}
-            </div>
+
             {Array.isArray(data.log) && data.log.length > 0 && (
               <div style={{ display: 'grid', gap: 6 }}>
-                {data.log.map((row) => (
-                  <div key={row.day} className="row" style={{ gap: 12, font: 'var(--pv-text-body-3)' }}>
-                    <span className="mono">{row.day}</span>
-                    <span>{FLOW_STATUS[row.status] || row.status}</span>
-                    <span className="mono">{fmtBytes(row.bytesBefore)} → {row.bytesAfter ? fmtBytes(row.bytesAfter) : '—'}</span>
-                    {row.message ? <span style={{ color: 'var(--fg-secondary)' }}>{row.message}</span> : null}
-                  </div>
-                ))}
+                <div style={FLOW_LABEL}>Последние запуски</div>
+                <table style={{ width: '100%', borderCollapse: 'collapse', font: 'var(--pv-text-body-3)' }}>
+                  <thead>
+                    <tr style={{ color: 'var(--fg-muted)', textAlign: 'left' }}>
+                      <th style={{ padding: '4px 8px 4px 0', fontWeight: 'normal' }}>Сутки</th>
+                      <th style={{ padding: '4px 8px', fontWeight: 'normal' }}>Статус</th>
+                      <th style={{ padding: '4px 8px', fontWeight: 'normal', textAlign: 'right' }}>Было</th>
+                      <th style={{ padding: '4px 8px', fontWeight: 'normal', textAlign: 'right' }}>Стало</th>
+                      <th style={{ padding: '4px 0 4px 8px', fontWeight: 'normal' }}>Комментарий</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {data.log.map((row) => (
+                      <tr key={row.day} style={{ borderTop: '1px solid var(--bd-soft)' }}>
+                        <td className="mono" style={{ padding: '6px 8px 6px 0' }}>{row.day}</td>
+                        <td style={{ padding: '6px 8px', color: row.status === 'failed' ? 'var(--st-critical)' : 'inherit' }}>
+                          {FLOW_STATUS[row.status] || row.status}
+                        </td>
+                        <td className="mono" style={{ padding: '6px 8px', textAlign: 'right' }}>
+                          {row.bytesBefore ? fmtBytes(row.bytesBefore) : '—'}
+                        </td>
+                        <td className="mono" style={{ padding: '6px 8px', textAlign: 'right' }}>
+                          {row.bytesAfter ? fmtBytes(row.bytesAfter) : '—'}
+                        </td>
+                        <td style={{ padding: '6px 0 6px 8px', color: 'var(--fg-secondary)' }}>{row.message || ''}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
               </div>
             )}
           </>
         )}
+
         {error && data && (
           <div style={{ color: 'var(--st-critical)', font: 'var(--pv-text-body-3)' }}>{error}</div>
         )}

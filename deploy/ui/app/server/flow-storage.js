@@ -19,7 +19,7 @@ const MAX_DAYS = 3650;
 // 151 ГиБ стали 4.5 ГиБ, суммы за сутки разошлись на 0.002%.
 const MEASURED_SHRINK = { '64:100000': 34 };
 const MEASURED_NOTE = {
-  '64:100000': 'замер 24 сентября: суммы за сутки ±0,002%, за 5 минут у крупных абонентов до 0,5%',
+  '64:100000': 'суммы за сутки ±0,002%, за 5 минут у крупных абонентов до 0,5% (замер 24.09.2026)',
 };
 
 const DEFAULTS = {
@@ -258,6 +258,7 @@ function withForecast(settings, flows, averagedBytes) {
   const room = flows.disk ? flows.disk.freeBytes + flows.totalBytes : null;
   return {
     ...forecast,
+    roomBytes: room,
     fits: forecast.totalBytes == null || room == null ? null : forecast.totalBytes <= room,
   };
 }
