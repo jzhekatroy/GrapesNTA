@@ -7,7 +7,7 @@
 CREATE TABLE IF NOT EXISTS default.app_flow_storage_settings
 (
     `settings_id` String DEFAULT 'global',
-    -- off: ничего не делать; dry_run: только посчитать и записать в журнал; on: прореживать.
+    -- off: ничего не делать; on: прореживать.
     `mode` LowCardinality(String) DEFAULT 'off',
     -- Сколько полных суток до текущих хранить без прореживания.
     `hot_days` UInt16 DEFAULT 1,

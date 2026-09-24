@@ -48,7 +48,7 @@ LOG_TABLE = "default.flow_thinning_log"
 SOURCES_VIEW = "default.net_flow_sources_enabled"
 
 RATES = (4, 16, 64, 256)
-MODES = ("off", "dry_run", "on")
+MODES = ("off", "on")
 MIN_THRESHOLD_BYTES = 1000
 WINDOW_HOURS = 3
 MUTATION_MAX_AGE = timedelta(hours=3)
@@ -116,8 +116,12 @@ def parse_settings(row: Optional[dict]) -> Tuple[Settings, str]:
     if not row:
         return base, ""
     try:
+        mode = str(row.get("mode") or base.mode)
+        # Режим «только расчёт» убран: старые настройки ведут себя как выключено.
+        if mode == "dry_run":
+            mode = "off"
         s = Settings(
-            mode=str(row.get("mode") or base.mode),
+            mode=mode,
             hot_days=int(row.get("hot_days", base.hot_days)),
             xdp_rate=int(row.get("xdp_rate", base.xdp_rate)),
             xdp_threshold_bytes=int(row.get("xdp_threshold_bytes", base.xdp_threshold_bytes)),
@@ -164,11 +168,9 @@ def ttl_days_from_ddl(ddl: str) -> Optional[int]:
     return None
 
 
-def taken_statuses(mode: str) -> Tuple[str, ...]:
-    # running и done не берутся никогда: второй проход снова умножил бы потоки.
-    # dry_run не мешает включению, но в режиме проверки сутки не считаются дважды.
-    base = ("running", "done", "skipped")
-    return base + ("dry_run",) if mode == "dry_run" else base
+# running и done не берутся никогда: второй проход снова умножил бы потоки.
+# Старый статус dry_run сутки не блокирует.
+TAKEN_STATUSES = ("running", "done", "skipped")
 
 
 def day_candidates(
@@ -177,10 +179,9 @@ def day_candidates(
     hot_days: int,
     ttl_days: Optional[int],
     latest: Dict[date, LogRow],
-    mode: str,
 ) -> List[date]:
     last_warm = today_utc - timedelta(days=hot_days + 1)
-    taken = taken_statuses(mode)
+    taken = TAKEN_STATUSES
     out = []
     for day in partitions:
         if day > last_warm:
@@ -260,13 +261,6 @@ def thinning_sql(
         f"DELETE IN PARTITION {part} WHERE {cond} AND {KEEP_HASH} % {r} != 0 "
         "SETTINGS mutations_sync = 0"
     )
-
-
-def estimate_after(rows_before: int, bytes_before: int, eligible: int, rate: int) -> Tuple[int, int]:
-    rows_after = rows_before - eligible + eligible // max(1, rate)
-    if rows_before <= 0:
-        return rows_after, 0
-    return rows_after, int(bytes_before * rows_after / rows_before)
 
 
 class Thinner:
@@ -525,7 +519,7 @@ class Thinner:
 
         today_utc = now_utc.date()
         parts = {p.day: p for p in self.partitions()}
-        days = day_candidates(parts, today_utc, settings.hot_days, self.ttl_days(), latest, settings.mode)
+        days = day_candidates(parts, today_utc, settings.hot_days, self.ttl_days(), latest)
         if not days:
             self.log.info("no days to thin")
             return 0
@@ -562,16 +556,6 @@ class Thinner:
         if eligible == 0:
             self.write_log(replace(base, status="skipped",
                                      message="нечего прореживать: все потоки уже прорежены или крупные"))
-            return 0
-
-        if settings.mode == "dry_run":
-            rows_after, bytes_after = estimate_after(part.rows, part.bytes_on_disk, eligible, settings.xdp_rate)
-            self.write_log(
-                replace(base, status="dry_run", message="проверка: данные не изменены, объём после — оценка"),
-                rows_after=rows_after,
-                bytes_after=bytes_after,
-                finished_at=now_utc.strftime("%Y-%m-%d %H:%M:%S"),
-            )
             return 0
 
         sql = thinning_sql(self.table, day, sources, settings.xdp_rate, settings.xdp_threshold_bytes)

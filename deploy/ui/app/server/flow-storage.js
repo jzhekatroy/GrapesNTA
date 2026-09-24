@@ -11,7 +11,7 @@ const SETTINGS_TABLE = 'app_flow_storage_settings';
 const LOG_TABLE = 'flow_thinning_log';
 const ADMIN_ROLE_ID = 'Administrator';
 const RATES = [4, 16, 64, 256];
-const MODES = ['off', 'dry_run', 'on'];
+const MODES = ['off', 'on'];
 const MIN_THRESHOLD_BYTES = 1000;
 const MAX_DAYS = 3650;
 
@@ -63,7 +63,7 @@ function validateSettings(body = {}) {
   const xdpThresholdBytes = Number(body.xdpThresholdBytes);
   const runAt = String(body.runAt ?? '').trim();
   if (!MODES.includes(mode)) {
-    return { error: 'Режим: выключено, проверка или включено' };
+    return { error: 'Режим: выключено или включено' };
   }
   if (!Number.isInteger(hotDays) || hotDays < 1 || hotDays > MAX_DAYS) {
     return { error: `Точный срок — целое число дней от 1 до ${MAX_DAYS}` };
@@ -91,7 +91,7 @@ function assertAdministrator(roleId) {
 function mapSettings(row) {
   if (!row) return { ...DEFAULTS, updatedAt: null, updatedBy: '' };
   return {
-    mode: MODES.includes(row.mode) ? row.mode : DEFAULTS.mode,
+    mode: row.mode === 'dry_run' || !MODES.includes(row.mode) ? DEFAULTS.mode : row.mode,
     hotDays: Number(row.hot_days) || DEFAULTS.hotDays,
     xdpRate: Number(row.xdp_rate) || DEFAULTS.xdpRate,
     xdpThresholdBytes: Number(row.xdp_threshold_bytes) || DEFAULTS.xdpThresholdBytes,

@@ -13,11 +13,11 @@ CREATE TABLE IF NOT EXISTS default.flow_thinning_log
     `rate` UInt16,
     `threshold_bytes` UInt64,
     `mode` LowCardinality(String),
-    -- dry_run | running | done | failed | skipped
+    -- waiting | running | done | failed | skipped
     `status` LowCardinality(String),
     `rows_before` UInt64 DEFAULT 0,
     `bytes_before` UInt64 DEFAULT 0,
-    -- Для dry_run — расчёт, для done — факт.
+    -- Для done — факт после мутации.
     `rows_after` UInt64 DEFAULT 0,
     `bytes_after` UInt64 DEFAULT 0,
     `eligible_rows` UInt64 DEFAULT 0,

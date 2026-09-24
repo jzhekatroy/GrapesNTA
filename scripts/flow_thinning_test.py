@@ -9,7 +9,6 @@ from flow_thinning import (
     Settings,
     Thinner,
     day_candidates,
-    estimate_after,
     in_window,
     parse_settings,
     rollups_ready,
@@ -46,6 +45,14 @@ class SettingsParsing(unittest.TestCase):
             self.assertEqual(s.mode, "off", row)
             self.assertTrue(problem, row)
 
+    def test_legacy_dry_run_is_off(self):
+        s, problem = parse_settings({
+            "mode": "dry_run", "hot_days": 1, "xdp_rate": 64,
+            "xdp_threshold_bytes": 100000, "run_at": "04:30",
+        })
+        self.assertEqual(problem, "")
+        self.assertEqual(s.mode, "off")
+
 
 class Window(unittest.TestCase):
     def test_inside_and_outside(self):
@@ -70,12 +77,12 @@ class Days(unittest.TestCase):
         self.assertIsNone(ttl_days_from_ddl("MergeTree ORDER BY x"))
 
     def test_hot_days_kept_and_oldest_first(self):
-        got = day_candidates(self.parts, self.today, 1, None, {}, "on")
+        got = day_candidates(self.parts, self.today, 1, None, {})
         self.assertEqual(got[0], date(2026, 9, 18))
         self.assertEqual(got[-1], date(2026, 9, 22))
 
     def test_day_expiring_today_is_skipped(self):
-        got = day_candidates(self.parts, self.today, 1, 4, {}, "on")
+        got = day_candidates(self.parts, self.today, 1, 4, {})
         self.assertEqual(got, [date(2026, 9, 21), date(2026, 9, 22)])
 
     def test_done_and_running_are_never_retaken(self):
@@ -83,7 +90,7 @@ class Days(unittest.TestCase):
             date(2026, 9, 21): LogRow(day=date(2026, 9, 21), status="done"),
             date(2026, 9, 22): LogRow(day=date(2026, 9, 22), status="running"),
         }
-        got = day_candidates(self.parts, self.today, 1, 4, latest, "on")
+        got = day_candidates(self.parts, self.today, 1, 4, latest)
         self.assertEqual(got, [])
 
     def test_failed_and_waiting_are_retried(self):
@@ -91,13 +98,12 @@ class Days(unittest.TestCase):
             date(2026, 9, 21): LogRow(day=date(2026, 9, 21), status="failed"),
             date(2026, 9, 22): LogRow(day=date(2026, 9, 22), status="waiting"),
         }
-        got = day_candidates(self.parts, self.today, 1, 4, latest, "on")
+        got = day_candidates(self.parts, self.today, 1, 4, latest)
         self.assertEqual(got, [date(2026, 9, 21), date(2026, 9, 22)])
 
-    def test_dry_run_does_not_block_on(self):
+    def test_old_dry_run_log_does_not_block(self):
         latest = {date(2026, 9, 22): LogRow(day=date(2026, 9, 22), status="dry_run")}
-        self.assertEqual(day_candidates(self.parts, self.today, 1, 4, latest, "dry_run"), [date(2026, 9, 21)])
-        self.assertEqual(day_candidates(self.parts, self.today, 1, 4, latest, "on"),
+        self.assertEqual(day_candidates(self.parts, self.today, 1, 4, latest),
                          [date(2026, 9, 21), date(2026, 9, 22)])
 
 
@@ -149,10 +155,6 @@ class Sql(unittest.TestCase):
     def test_source_id_is_quoted(self):
         sql = thinning_sql("t", date(2026, 9, 23), ["a'b"], 64, 1000)
         self.assertIn("'a\\'b'", sql)
-
-    def test_estimate(self):
-        self.assertEqual(estimate_after(1000, 10000, 640, 64), (370, 3700))
-
 
 class FakeClickHouse:
     """Отвечает по подписи запроса (display) и запоминает изменяющие запросы."""
@@ -249,11 +251,11 @@ class Run(unittest.TestCase):
         self.assertEqual(logged[-1]["status"], "running")
         self.assertEqual(logged[-1]["mutation_id"], "mutation_7.txt")
 
-    def test_dry_run_changes_nothing(self):
+    def test_legacy_dry_run_setting_is_off(self):
         ch = FakeClickHouse(base_answers(mode="dry_run"))
-        self.thinner(ch).run(NOW, LOCAL)
+        self.assertEqual(self.thinner(ch).run(NOW, LOCAL), 0)
         self.assertEqual(self.alters(ch), [])
-        self.assertEqual(ch.logged()[-1]["status"], "dry_run")
+        self.assertEqual(ch.logged(), [])
 
     def test_off_and_outside_window_do_nothing(self):
         ch = FakeClickHouse(base_answers(mode="off"))
