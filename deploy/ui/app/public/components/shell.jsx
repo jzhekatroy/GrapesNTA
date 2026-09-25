@@ -56,7 +56,7 @@ const NAV = [
           { id: 'audit', label: 'Журнал аудита', icon: 'clock' },
           { id: 'clients', label: 'Клиенты', icon: 'users' },
           { id: 'smtp', label: 'Почта (SMTP)', icon: 'export' },
-          { id: 'ttl', label: 'Сроки хранения', icon: 'clock' },
+          { id: 'ttl', label: 'Хранение данных', icon: 'clock' },
         ],
       },
     ],

@@ -34,6 +34,52 @@ function measuredNote(rate, thresholdBytes) {
   return MEASURED_NOTE[`${Number(rate)}:${Number(thresholdBytes)}`] || 'не замерено';
 }
 
+function flowDayKey(value) {
+  const day = String(value || '').replace(/'/g, '').slice(0, 10);
+  return /^\d{4}-\d{2}-\d{2}$/.test(day) ? day : '';
+}
+
+function flowDayAge(day, today) {
+  const from = flowDayKey(day);
+  const to = flowDayKey(today);
+  if (!from || !to) return null;
+  const utc = (iso) => {
+    const [year, month, date] = iso.split('-').map(Number);
+    return Date.UTC(year, month - 1, date);
+  };
+  return Math.round((utc(to) - utc(from)) / 86400000);
+}
+
+// Сутки старше hotDays полных дней уже можно сжимать. Сегодняшние и более
+// свежие хранятся целиком: при hotDays = 1 это сегодня и вчера.
+function describeFlowDay(day, log, { today, hotDays } = {}) {
+  const status = String(log?.status || '');
+  const message = String(log?.message || '');
+  if (status === 'done') return { state: 'done', error: '', note: '' };
+  if (status === 'running') return { state: 'running', error: '', note: '' };
+  if (status === 'failed') return { state: 'failed', error: message || 'Не удалось сжать', note: '' };
+  if (status === 'waiting' || status === 'skipped') return { state: status, error: '', note: message };
+  const age = flowDayAge(day, today);
+  const hot = Math.max(0, Number(hotDays) || 0);
+  if (age != null && age <= hot) return { state: 'full', error: '', note: '' };
+  return { state: 'pending', error: '', note: '' };
+}
+
+function buildFlowDays(parts, log, options) {
+  const byDay = new Map((log || []).map((row) => [flowDayKey(row.day), row]));
+  return (parts || []).map((part) => {
+    const day = flowDayKey(part.day);
+    const entry = byDay.get(day);
+    return {
+      day,
+      rows: Number(part.rows) || 0,
+      bytes: Number(part.bytes) || 0,
+      bytesBefore: Number(entry?.bytesBefore) || 0,
+      ...describeFlowDay(day, entry, options),
+    };
+  }).filter((row) => row.day);
+}
+
 function forecastStorage({ exactBytes = 0, ttlDays = 0, hotDays = 1, rate, thresholdBytes, averagedBytes = 0 } = {}) {
   const kept = Math.max(0, Number(ttlDays) || 0);
   const exactDays = Math.min(kept, Math.max(0, Number(hotDays) || 0) + 1);
@@ -142,7 +188,6 @@ async function loadLog() {
         LIMIT 1 BY day
       )
       ORDER BY day DESC
-      LIMIT 10
     `,
     {},
     { name: 'admin/flow-storage-log', useWrite: true },
@@ -186,9 +231,37 @@ async function loadDisk() {
   }
 }
 
+async function loadPartitions(table) {
+  const { rows } = await query(
+    `
+      SELECT partition AS day, sum(rows) AS rows, sum(bytes_on_disk) AS bytes
+      FROM system.parts
+      WHERE active AND database = {db:String} AND table = {table:String}
+      GROUP BY partition
+      ORDER BY partition DESC
+    `,
+    { db: config.database, table },
+    { name: 'admin/flow-storage-days', useWrite: true },
+  );
+  return rows.map((row) => ({
+    day: row.day,
+    rows: Number(row.rows) || 0,
+    bytes: Number(row.bytes) || 0,
+  }));
+}
+
+async function loadToday() {
+  const { rows } = await query(
+    `SELECT toString(toDate(now(), 'UTC')) AS today`,
+    {},
+    { name: 'admin/flow-storage-today', useWrite: true },
+  );
+  return rows[0]?.today || '';
+}
+
 async function loadFlows() {
   const table = config.flowsRawWriteTable;
-  const [meta, parts, disk] = await Promise.all([
+  const [meta, parts, disk, partitions, today] = await Promise.all([
     query(
       `
         SELECT engine_full, total_bytes
@@ -213,6 +286,8 @@ async function loadFlows() {
       { name: 'admin/flow-storage-day', useWrite: true },
     ),
     loadDisk(),
+    loadPartitions(table),
+    loadToday(),
   ]);
   const engine = String(meta.rows[0]?.engine_full || '');
   const ttlMatch = engine.match(/toIntervalDay\((\d+)\)/i) || engine.match(/INTERVAL\s+(\d+)\s+DAY/i);
@@ -223,6 +298,8 @@ async function loadFlows() {
     exactBytes: Number(parts.rows[0]?.bytes) || 0,
     exactDay: parts.rows[0]?.partition || null,
     disk,
+    partitions,
+    today,
   };
 }
 
@@ -281,6 +358,7 @@ async function getFlowStorage() {
     flows,
     forecast: withForecast(settings, flows, averagedBytes),
     log,
+    days: buildFlowDays(flows.partitions, log, { today: flows.today, hotDays: settings.hotDays }),
     untouched: 'NetFlow и sFlow не прореживаются и хранятся точно весь срок',
   };
 }
@@ -326,6 +404,8 @@ module.exports = {
   DEFAULTS,
   measuredNote,
   forecastStorage,
+  describeFlowDay,
+  buildFlowDays,
   validateSettings,
   getFlowStorage,
   saveFlowStorage,

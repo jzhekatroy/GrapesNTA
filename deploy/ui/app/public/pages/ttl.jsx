@@ -47,19 +47,9 @@ const FLOW_MODES = [
   { id: 'on', label: 'Включено', hint: 'Ночью старые сутки сжимаются.' },
 ];
 
-const FLOW_STATUS = {
-  dry_run: 'расчёт',
-  running: 'выполняется',
-  done: 'сжато',
-  failed: 'ошибка',
-  skipped: 'пропущено',
-  waiting: 'ожидание',
-};
-
 const FLOW_FIELD = { display: 'grid', gap: 6, alignContent: 'start' };
 const FLOW_LABEL = { font: 'var(--pv-text-body-3)', color: 'var(--fg-secondary)' };
 const FLOW_HINT = { font: 'var(--pv-text-body-3)', color: 'var(--fg-muted)' };
-const FLOW_SECTION = { font: 'var(--pv-text-body-2-bold)', color: 'var(--fg-primary)' };
 
 function onlyDigits(value) {
   return String(value ?? '').replace(/\D+/g, '').slice(0, 6);
@@ -74,7 +64,66 @@ function FlowStat({ label, value, tone }) {
   );
 }
 
-function FlowStoragePanel({ canWrite, onReady }) {
+const FLOW_DAY = {
+  done: 'Сжаты',
+  running: 'Сжимаются',
+  failed: 'Ошибка',
+  waiting: 'Ожидание',
+  skipped: 'Пропущены',
+  full: 'Целиком',
+  pending: 'Ещё нет',
+};
+
+function flowDayComment(row) {
+  if (row.state === 'failed') return row.error || '';
+  if (row.state === 'done' && row.bytesBefore) return `было ${fmtBytes(row.bytesBefore)}`;
+  return row.note || '';
+}
+
+function FlowDays({ days }) {
+  const rows = Array.isArray(days) ? days : [];
+  return (
+    <Card pad="sm">
+      <div style={{ display: 'grid', gap: 10 }}>
+        <div style={FLOW_LABEL}>Сутки на диске</div>
+        {rows.length === 0 ? (
+          <div style={FLOW_HINT}>Суток сырых потоков нет.</div>
+        ) : (
+          <table style={{ width: '100%', borderCollapse: 'collapse', font: 'var(--pv-text-body-3)' }}>
+            <thead>
+              <tr style={{ color: 'var(--fg-muted)', textAlign: 'left' }}>
+                <th style={{ padding: '4px 8px 4px 0', fontWeight: 'normal' }}>Сутки</th>
+                <th style={{ padding: '4px 8px', fontWeight: 'normal', textAlign: 'right' }}>Объём</th>
+                <th style={{ padding: '4px 8px', fontWeight: 'normal' }}>Сжатие</th>
+                <th style={{ padding: '4px 0 4px 8px', fontWeight: 'normal' }}>Комментарий</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((row) => {
+                const failed = row.state === 'failed';
+                const comment = flowDayComment(row);
+                return (
+                  <tr key={row.day} style={{ borderTop: '1px solid var(--bd-soft)' }}>
+                    <td className="mono" style={{ padding: '6px 8px 6px 0' }}>{row.day}</td>
+                    <td className="mono" style={{ padding: '6px 8px', textAlign: 'right' }}>{fmtBytes(row.bytes)}</td>
+                    <td style={{ padding: '6px 8px', color: failed ? 'var(--st-critical)' : 'var(--fg-primary)' }}>
+                      {FLOW_DAY[row.state] || row.state}
+                    </td>
+                    <td style={{ padding: '6px 0 6px 8px', color: failed ? 'var(--st-critical)' : 'var(--fg-secondary)' }}>
+                      {comment}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        )}
+      </div>
+    </Card>
+  );
+}
+
+function FlowStoragePanel({ canWrite }) {
   const [data, setData] = useState(null);
   const [form, setForm] = useState(null);
   const [totalDays, setTotalDays] = useState('');
@@ -92,7 +141,6 @@ function FlowStoragePanel({ canWrite, onReady }) {
       setThresholdKb(String(Math.round(Number(body.settings?.xdpThresholdBytes || 0) / 1000)));
       setTotalDays(body.flows?.ttlDays == null ? '' : String(body.flows.ttlDays));
       setError('');
-      if (onReady) onReady();
     } catch (err) {
       setError(err.message || ApiClient.LOAD_FAILED);
     }
@@ -149,14 +197,12 @@ function FlowStoragePanel({ canWrite, onReady }) {
   const fitsTone = forecast?.fits === false ? 'var(--st-critical)' : (forecast?.fits ? 'var(--st-success)' : undefined);
 
   return (
+    <>
     <Card pad="sm" style={{ marginBottom: 16 }}>
       <div style={{ display: 'grid', gap: 16 }}>
-        <div>
-          <div style={FLOW_SECTION}>Хранение сырых потоков</div>
-          <div style={{ ...FLOW_HINT, marginTop: 4, maxWidth: 820 }}>
-            Свежие сутки хранятся полностью. В старых сутках мелкие потоки xdpflowd сохраняются выборочно,
-            с пересчётом объёма, поэтому итоги трафика не меняются. NetFlow и sFlow не сжимаются.
-          </div>
+        <div style={{ ...FLOW_HINT, maxWidth: 820 }}>
+          Свежие сутки хранятся полностью. В старых сутках мелкие потоки xdpflowd сохраняются выборочно,
+          с пересчётом объёма, поэтому итоги трафика не меняются. NetFlow и sFlow не сжимаются.
         </div>
 
         {!data ? (
@@ -253,40 +299,6 @@ function FlowStoragePanel({ canWrite, onReady }) {
                 )}
               </div>
             </div>
-
-            {Array.isArray(data.log) && data.log.length > 0 && (
-              <div style={{ display: 'grid', gap: 6 }}>
-                <div style={FLOW_LABEL}>Последние запуски</div>
-                <table style={{ width: '100%', borderCollapse: 'collapse', font: 'var(--pv-text-body-3)' }}>
-                  <thead>
-                    <tr style={{ color: 'var(--fg-muted)', textAlign: 'left' }}>
-                      <th style={{ padding: '4px 8px 4px 0', fontWeight: 'normal' }}>Сутки</th>
-                      <th style={{ padding: '4px 8px', fontWeight: 'normal' }}>Статус</th>
-                      <th style={{ padding: '4px 8px', fontWeight: 'normal', textAlign: 'right' }}>Было</th>
-                      <th style={{ padding: '4px 8px', fontWeight: 'normal', textAlign: 'right' }}>Стало</th>
-                      <th style={{ padding: '4px 0 4px 8px', fontWeight: 'normal' }}>Комментарий</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {data.log.map((row) => (
-                      <tr key={row.day} style={{ borderTop: '1px solid var(--bd-soft)' }}>
-                        <td className="mono" style={{ padding: '6px 8px 6px 0' }}>{row.day}</td>
-                        <td style={{ padding: '6px 8px', color: row.status === 'failed' ? 'var(--st-critical)' : 'inherit' }}>
-                          {FLOW_STATUS[row.status] || row.status}
-                        </td>
-                        <td className="mono" style={{ padding: '6px 8px', textAlign: 'right' }}>
-                          {row.bytesBefore ? fmtBytes(row.bytesBefore) : '—'}
-                        </td>
-                        <td className="mono" style={{ padding: '6px 8px', textAlign: 'right' }}>
-                          {row.bytesAfter ? fmtBytes(row.bytesAfter) : '—'}
-                        </td>
-                        <td style={{ padding: '6px 0 6px 8px', color: 'var(--fg-secondary)' }}>{row.message || ''}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            )}
           </>
         )}
 
@@ -300,17 +312,20 @@ function FlowStoragePanel({ canWrite, onReady }) {
         )}
       </div>
     </Card>
+    {data && <FlowDays days={data.days} />}
+    </>
   );
 }
 
 function PageTTL() {
   const canWrite = AuthAccess.canWritePage('ttl');
+  const [tab, setTab] = useState('tables');
   const [rows, setRows] = useState([]);
   const [disk, setDisk] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [editing, setEditing] = useState(null);
-  const [flowPanelOk, setFlowPanelOk] = useState(false);
+  const [flowRevision, setFlowRevision] = useState(0);
 
   const loadAll = useCallback(async () => {
     setLoading(true);
@@ -392,15 +407,25 @@ function PageTTL() {
     <div className="main__container">
       <div className="page-head">
         <div>
-          <h1>Сроки хранения</h1>
+          <h1>Хранение данных</h1>
           <TtlDiskBar disk={disk} />
-          <p>Сроки хранения таблиц ClickHouse. Изменения применяются через ALTER TABLE … MODIFY TTL.</p>
         </div>
         <div className="row page-head__actions" style={{ gap: 8 }}>
-          <Button kind="ghost" icon="refresh" onClick={loadAll} disabled={loading}>Обновить</Button>
+          <Button kind="ghost" icon="refresh" onClick={() => { loadAll(); setFlowRevision((n) => n + 1); }} disabled={loading}>Обновить</Button>
         </div>
       </div>
 
+      <div className="seg" role="tablist" aria-label="Разделы хранения" style={{ marginBottom: 16 }}>
+        <button type="button" role="tab" aria-selected={tab === 'tables'} className={tab === 'tables' ? 'is-active' : ''} onClick={() => setTab('tables')}>
+          Сроки таблиц
+        </button>
+        <button type="button" role="tab" aria-selected={tab === 'flows'} className={tab === 'flows' ? 'is-active' : ''} onClick={() => setTab('flows')}>
+          Хранение сырых потоков
+        </button>
+      </div>
+
+      {tab === 'flows' ? <FlowStoragePanel key={flowRevision} canWrite={canWrite} /> : (
+      <>
       <Card pad="sm" style={{ marginBottom: 16, borderColor: 'var(--st-warning)40' }}>
         <div className="row" style={{ gap: 10, alignItems: 'flex-start' }}>
           <Icon name="alert" size={18} style={{ color: 'var(--st-warning)', flexShrink: 0, marginTop: 2 }} />
@@ -410,8 +435,6 @@ function PageTTL() {
         </div>
       </Card>
 
-      <FlowStoragePanel canWrite={canWrite} onReady={() => setFlowPanelOk(true)} />
-
       {loading ? (
         <Card pad="sm">
           <div style={{ padding: 32, textAlign: 'center', color: 'var(--fg-secondary)' }}>Загрузка…</div>
@@ -420,7 +443,7 @@ function PageTTL() {
         <Empty icon="db" title="Не удалось загрузить" desc={error} action={<Button kind="primary" icon="refresh" onClick={loadAll}>Повторить</Button>} />
       ) : (
         <DataTable
-          rows={flowPanelOk ? rows.filter((r) => r.id !== 'flows_raw') : rows}
+          rows={rows.filter((r) => r.id !== 'flows_raw')}
           columns={cols}
           rowKey="id"
           pageSize={15}
@@ -434,6 +457,8 @@ function PageTTL() {
             </div>
           ) : null}
         />
+      )}
+      </>
       )}
 
       <TtlEditModal

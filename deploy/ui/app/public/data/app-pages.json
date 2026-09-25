@@ -25,5 +25,5 @@
   { "id": "clients", "title": "Клиенты", "section": "Администрирование" },
   { "id": "smtp", "title": "Почта (SMTP)", "section": "Администрирование" },
   { "id": "diagnostics", "title": "Диагностика", "section": "Администрирование", "hidden": true },
-  { "id": "ttl", "title": "Сроки хранения", "section": "Администрирование" }
+  { "id": "ttl", "title": "Хранение данных", "section": "Администрирование" }
 ]

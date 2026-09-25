@@ -24,6 +24,17 @@ test('defaults and presets pass, the rest is rejected', () => {
   assert.match(validateSettings({ mode: 'on', hotDays: 1, xdpRate: 64, xdpThresholdBytes: 100000, runAt: '4:30' }).error, /Время/);
 });
 
+test('a day is full while it is fresh, compressed after success, and shows the failure', () => {
+  const { describeFlowDay } = require('./flow-storage');
+  assert.equal(describeFlowDay('2026-09-24', null, { today: '2026-09-25', hotDays: 1 }).state, 'full');
+  assert.equal(describeFlowDay('2026-09-25', null, { today: '2026-09-25', hotDays: 1 }).state, 'full');
+  assert.equal(describeFlowDay('2026-09-23', { status: 'done' }, { today: '2026-09-25', hotDays: 1 }).state, 'done');
+  const failed = describeFlowDay('2026-09-22', { status: 'failed', message: 'мало места' }, { today: '2026-09-25', hotDays: 1 });
+  assert.equal(failed.state, 'failed');
+  assert.equal(failed.error, 'мало места');
+  assert.equal(describeFlowDay('2026-09-22', null, { today: '2026-09-25', hotDays: 1 }).state, 'pending');
+});
+
 test('forecast uses the measured shrink and falls back to the log', () => {
   const measured = forecastStorage({
     exactBytes: 151 * 1024 ** 3, ttlDays: 10, hotDays: 1, rate: 64, thresholdBytes: 100000,
