@@ -388,17 +388,35 @@ async function updateTtlTable(id, days, { roleId } = {}) {
   // остановил сборку сводок и обнаружение атак.
   //
   // Перезапись нужна только при сокращении срока: тогда админ ждёт, что место
-  // освободится сразу. При продлении она не удаляет ни одной строки и является
-  // чистой потерей, поэтому новый срок просто записывается в описание таблицы,
-  // а к существующим частям применится при очередном слиянии.
+  // освободится сразу. При продлении данные не переписываются.
+  //
+  // Но каждая часть хранит свою дату удаления, посчитанную по старому сроку, и
+  // слияние выбрасывает часть целиком, как только эта дата прошла, не глядя на
+  // новый срок. Поэтому при продлении даты частей пересчитываются мутацией
+  // MATERIALIZE TTL с materialize_ttl_recalculate_only = 1: она читает только
+  // колонку срока и данные не трогает.
   const shortening = Number.isFinite(resolved.days) && ttlDays < resolved.days;
   const settings = shortening ? '' : ' SETTINGS materialize_ttl_after_modify = 0';
 
-  const { elapsedMs } = await executeCommand(
+  const started = Date.now();
+  await executeCommand(
     `ALTER TABLE ${tableRef(table)} MODIFY TTL ${ttlExpr}${settings}`,
     {},
     { name: 'admin/ttl-update' },
   );
+  if (!shortening) {
+    await executeCommand(
+      `ALTER TABLE ${tableRef(table)} MODIFY SETTING materialize_ttl_recalculate_only = 1`,
+      {},
+      { name: 'admin/ttl-recalculate-setting' },
+    );
+    await executeCommand(
+      `ALTER TABLE ${tableRef(table)} MATERIALIZE TTL SETTINGS mutations_sync = 0`,
+      {},
+      { name: 'admin/ttl-recalculate' },
+    );
+  }
+  const elapsedMs = Date.now() - started;
 
   return {
     ok: true,
