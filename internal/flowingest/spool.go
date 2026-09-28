@@ -642,6 +642,31 @@ func readNextFrame(segDir string, cp consumerCheckpoint) (next consumerCheckpoin
 	return next, rows, nil
 }
 
+// spoolInsertMaxRows caps one INSERT when the drainer coalesces backlog frames.
+// Live frames are small (ch-batch-size), so replaying them one INSERT each
+// creates a part per ~2k rows and cannot outrun ingest.
+const spoolInsertMaxRows = 32000
+
+// readFrameBatch reads the frame at cp and appends following complete frames of
+// the same segment (bounded by the writer tip) until maxRows. A frame that would
+// overflow maxRows, or any read error after the first frame, ends the batch; the
+// drainer re-reads from the returned checkpoint.
+func readFrameBatch(segDir string, cp consumerCheckpoint, tipSeg uint64, tipOff int64, maxRows int) (consumerCheckpoint, []FlowRow, error) {
+	next, rows, err := readNextFrame(segDir, cp)
+	if err != nil {
+		return cp, nil, err
+	}
+	for len(rows) < maxRows && (next.Segment < tipSeg || next.Offset < tipOff) {
+		after, more, err := readNextFrame(segDir, next)
+		if err != nil || len(rows)+len(more) > maxRows {
+			break
+		}
+		rows = append(rows, more...)
+		next = after
+	}
+	return next, rows, nil
+}
+
 // resyncToNextMagic scans forward from cp.Offset+1 looking for the next valid
 // frame header magic in the current segment, capped at the writer's tip to
 // avoid racing partial appends. On miss inside a closed/older segment it rolls
@@ -886,7 +911,8 @@ func (p *SpoolPipeline) runPipeline() {
 	p.acked = cp
 	p.checkpointMu.Unlock()
 
-	jobs := make(chan spoolJob, p.nWorkers*32)
+	// Jobs may carry up to spoolInsertMaxRows; keep read-ahead short to bound memory.
+	jobs := make(chan spoolJob, p.nWorkers*2)
 	completions := make(chan spoolCompletion, p.nWorkers*32)
 
 	var workerWG sync.WaitGroup
@@ -1039,7 +1065,7 @@ func (p *SpoolPipeline) drainerLoop(jobs chan<- spoolJob) {
 			}
 		}
 
-		nextCP, rows, err := readNextFrame(p.writer.segDir, readHead)
+		nextCP, rows, err := readFrameBatch(p.writer.segDir, readHead, tipSeg, tipOff, spoolInsertMaxRows)
 		if err != nil {
 			if errors.Is(err, io.EOF) {
 				if readHead.Segment < tipSeg {

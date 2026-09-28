@@ -97,7 +97,41 @@ function prefixToNetSql(prefixExpr) {
   )`;
 }
 
+const CLOSED_MINUTE_LAG_MS = 4 * 60 * 1000;
+
+// Запас как в lastClosedMinute: toStartOfMinute(now - 4 минуты). Если сводка
+// ушла вперёд этого запаса, берём его, а не отказываемся от дешёвой минуты.
+function clampClosedMinute(ts, now = Date.now()) {
+  if (!Number.isFinite(ts) || ts <= 0) return null;
+  const limit = now - CLOSED_MINUTE_LAG_MS;
+  const closed = limit - (limit % 60000);
+  const minute = Math.min(ts, closed);
+  return minute > 0 ? minute : null;
+}
+
+// Ключ traffic_client_1m начинается с client_id, поэтому max(minute) читает всю
+// таблицу (~550 млн строк на каждый тик). Последнюю записанную минуту знает
+// состояние свёртки; строки за неё подтверждаем пробой с LIMIT 1.
+async function rolledClientMinute() {
+  const { rows } = await query(`
+    SELECT toString(argMax(last_bucket, updated_at)) AS m
+    FROM default.traffic_rollup_state
+    WHERE job = 'traffic_client_1m'
+  `, {}, { name: 'detection/client-rollup-state' });
+  const minute = clampClosedMinute(parseUtc(rows?.[0]?.m));
+  if (!minute) return null;
+  const { rows: hit } = await query(`
+    SELECT 1 AS ok
+    FROM default.traffic_client_1m
+    WHERE direction = 'in' AND minute = ${utcDateTime('m')}
+    LIMIT 1
+  `, { m: formatCh(minute) }, { name: 'detection/client-minute-exists' });
+  return hit?.length ? minute : null;
+}
+
 async function lastClosedMinute() {
+  const rolled = await rolledClientMinute();
+  if (rolled) return rolled;
   const { rows } = await query(`
     SELECT max(minute) AS m
     FROM default.traffic_client_1m
@@ -1180,6 +1214,7 @@ module.exports = {
   loadLatest,
   loadHistory,
   lastClosedMinute,
+  clampClosedMinute,
   HISTORY_METRICS,
   BASELINE_CACHE_MS,
   isBaselineCacheFresh,

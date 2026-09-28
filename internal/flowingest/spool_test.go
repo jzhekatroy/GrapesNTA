@@ -248,6 +248,80 @@ func TestResyncRespectsTipCeiling(t *testing.T) {
 	}
 }
 
+func writeFramesSegment(t *testing.T, segDir string, id uint64, frameRows []int, tail []byte) []int64 {
+	t.Helper()
+	var seg bytes.Buffer
+	var ends []int64
+	for i, n := range frameRows {
+		rows := make([]FlowRow, n)
+		for j := range rows {
+			rows[j] = FlowRow{Bytes: uint64(i + 1), Packets: 1}
+		}
+		payload, err := encodeFramePayload(rows)
+		if err != nil {
+			t.Fatal(err)
+		}
+		seg.Write(buildFrame(uint64(i+1), spoolFrameVersionGob, payload))
+		ends = append(ends, int64(seg.Len()))
+	}
+	seg.Write(tail)
+	if err := os.WriteFile(filepath.Join(segDir, fmt.Sprintf("%016d.seg", id)), seg.Bytes(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return ends
+}
+
+func TestReadFrameBatchCoalescesUpToMaxRows(t *testing.T) {
+	segDir := t.TempDir()
+	ends := writeFramesSegment(t, segDir, 3, []int{4, 4, 4, 4}, nil)
+	start := consumerCheckpoint{Segment: 3}
+
+	next, rows, err := readFrameBatch(segDir, start, 4, 0, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 8 || next.Offset != ends[1] {
+		t.Fatalf("want 2 frames (8 rows) ending at %d, got %d rows next=%v", ends[1], len(rows), next)
+	}
+
+	next, rows, err = readFrameBatch(segDir, next, 4, 0, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 8 || next.Offset != ends[3] || rows[0].Bytes != 3 {
+		t.Fatalf("second batch should resume at frame 3: rows=%d next=%v first=%d", len(rows), next, rows[0].Bytes)
+	}
+}
+
+func TestReadFrameBatchStopsAtWriterTip(t *testing.T) {
+	segDir := t.TempDir()
+	ends := writeFramesSegment(t, segDir, 5, []int{3, 3, 3}, nil)
+
+	next, rows, err := readFrameBatch(segDir, consumerCheckpoint{Segment: 5}, 5, ends[1], 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 6 || next.Offset != ends[1] {
+		t.Fatalf("must not read past tip %d: rows=%d next=%v", ends[1], len(rows), next)
+	}
+}
+
+func TestReadFrameBatchLeavesCorruptFrameForDrainer(t *testing.T) {
+	segDir := t.TempDir()
+	ends := writeFramesSegment(t, segDir, 2, []int{2, 2}, bytes.Repeat([]byte{0xAB}, 64))
+
+	next, rows, err := readFrameBatch(segDir, consumerCheckpoint{Segment: 2}, 3, 0, 100)
+	if err != nil {
+		t.Fatalf("error after first frame must end the batch, got %v", err)
+	}
+	if len(rows) != 4 || next.Offset != ends[1] {
+		t.Fatalf("want both good frames before garbage: rows=%d next=%v", len(rows), next)
+	}
+	if _, _, err := readFrameBatch(segDir, next, 3, 0, 100); err == nil {
+		t.Fatal("corrupt frame at batch start must surface to drainer")
+	}
+}
+
 // TestLoadCheckpointCorruptJSONRecovers verifies that a partially-written or
 // hand-edited consumer.json does not crash-loop the pipeline. The bad file
 // must be quarantined and the loader must return a safe default. Regression

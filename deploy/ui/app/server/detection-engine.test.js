@@ -2,7 +2,26 @@
 
 const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
-const { BASELINE_CACHE_MS, isBaselineCacheFresh, dedupeClientsByDisplayName } = require('./detection-engine');
+const { BASELINE_CACHE_MS, isBaselineCacheFresh, dedupeClientsByDisplayName, clampClosedMinute } = require('./detection-engine');
+
+describe('detection-engine closed minute', () => {
+  const now = Date.parse('2026-09-28T13:23:40Z');
+
+  it('оставляет минуту, которая уже старше запаса', () => {
+    const ts = Date.parse('2026-09-28T13:10:00Z');
+    assert.equal(clampClosedMinute(ts, now), ts);
+  });
+
+  it('обрезает минуту моложе четырёх минут до начала закрытой минуты', () => {
+    const ts = Date.parse('2026-09-28T13:23:00Z');
+    assert.equal(clampClosedMinute(ts, now), Date.parse('2026-09-28T13:19:00Z'));
+  });
+
+  it('пустую минуту не берёт', () => {
+    assert.equal(clampClosedMinute(0, now), null);
+    assert.equal(clampClosedMinute(NaN, now), null);
+  });
+});
 
 describe('detection-engine baselines cache', () => {
   it('кэш живой только при данных внутри TTL', () => {

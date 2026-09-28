@@ -11,6 +11,7 @@ from traffic_rollup_async import (
     coarse_budget_short,
     complete_raw_until,
     defer_until,
+    first_occupied_minute,
     flows_raw_enabled_max_minute,
     is_epoch_timestamp,
     is_retryable_queue_error,
@@ -172,12 +173,18 @@ class FreshnessProbeWindow(unittest.TestCase):
         self.assertEqual(len(ch.queries), 1)
         self.assertIn("toStartOfFiveMinutes", ch.queries[0])
 
-    def test_silent_collector_falls_back_to_the_wide_scan(self):
-        ch = RecordingClickHouse(["1970-01-01 00:00:00", "2026-09-20 03:11:00"])
+    def test_lagging_raw_reads_only_the_newest_bucket(self):
+        ch = RecordingClickHouse(
+            ["1970-01-01 00:00:00", "2026-09-20 03:10:00", "2026-09-20 03:11:00"]
+        )
         got = raw_max_received(ch)
         self.assertEqual(got, datetime(2026, 9, 20, 3, 11, tzinfo=timezone.utc))
-        self.assertEqual(len(ch.queries), 2)
-        self.assertNotIn("toStartOfFiveMinutes", ch.queries[1])
+        self.assertEqual(len(ch.queries), 3)
+        self.assertIn("ORDER BY b DESC LIMIT 1", ch.queries[1])
+        self.assertIn(
+            "toStartOfFiveMinutes(time_received_ns) = toDateTime('2026-09-20 03:10:00', 'UTC')",
+            ch.queries[2],
+        )
 
     def test_empty_table_stays_none(self):
         ch = RecordingClickHouse(["", ""])
@@ -192,12 +199,56 @@ class FreshnessProbeWindow(unittest.TestCase):
         self.assertIn("toStartOfFiveMinutes", ch.queries[0])
         self.assertIn("net_flow_sources_enabled", ch.queries[0])
 
-    def test_enabled_sources_probe_falls_back(self):
-        ch = RecordingClickHouse(["1970-01-01 00:00:00", "2026-09-20 03:11:00"])
+    def test_enabled_sources_probe_falls_back_to_the_newest_bucket(self):
+        ch = RecordingClickHouse(
+            ["1970-01-01 00:00:00", "2026-09-20 03:10:00", "2026-09-20 03:11:00"]
+        )
         got = flows_raw_enabled_max_minute(ch)
         self.assertEqual(got, datetime(2026, 9, 20, 3, 11, tzinfo=timezone.utc))
-        self.assertEqual(len(ch.queries), 2)
+        self.assertEqual(len(ch.queries), 3)
         self.assertIn("net_flow_sources_enabled", ch.queries[1])
+        self.assertIn("net_flow_sources_enabled", ch.queries[2])
+
+    def test_enabled_sources_probe_empty_stays_none(self):
+        ch = RecordingClickHouse(["1970-01-01 00:00:00", ""])
+        self.assertIsNone(flows_raw_enabled_max_minute(ch))
+        self.assertEqual(len(ch.queries), 2)
+
+
+class EdgeClickHouse:
+    """Отвечает на пробы `time_received_ns < edge` по заданной первой строке."""
+
+    def __init__(self, first_row):
+        self.first_row = first_row
+        self.queries = []
+
+    def query(self, sql, display=None):
+        self.queries.append(sql)
+        edge = sql.split("time_received_ns < toDateTime('", 1)[1][:19]
+        edge_dt = datetime.strptime(edge, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+        return "1" if self.first_row is not None and self.first_row < edge_dt else ""
+
+
+class FirstOccupiedMinute(unittest.TestCase):
+    day = datetime(2026, 9, 21, tzinfo=timezone.utc)
+
+    def test_finds_the_first_minute_with_cheap_probes(self):
+        first = datetime(2026, 9, 21, 0, 57, 42, tzinfo=timezone.utc)
+        ch = EdgeClickHouse(first)
+        got = first_occupied_minute(ch, self.day, "date = toDate('2026-09-21')", display="t")
+        self.assertEqual(got, datetime(2026, 9, 21, 0, 57, tzinfo=timezone.utc))
+        self.assertLessEqual(len(ch.queries), 14)
+        self.assertTrue(all("LIMIT 1" in q and "ORDER BY" not in q for q in ch.queries))
+
+    def test_local_date_partition_may_start_the_previous_utc_day(self):
+        first = datetime(2026, 9, 20, 21, 0, 5, tzinfo=timezone.utc)
+        got = first_occupied_minute(EdgeClickHouse(first), self.day, "1", display="t")
+        self.assertEqual(got, datetime(2026, 9, 20, 21, 0, tzinfo=timezone.utc))
+
+    def test_empty_partition_is_none(self):
+        ch = EdgeClickHouse(None)
+        self.assertIsNone(first_occupied_minute(ch, self.day, "1", display="t"))
+        self.assertEqual(len(ch.queries), 1)
 
 
 if __name__ == "__main__":

@@ -343,8 +343,10 @@ def is_epoch_timestamp(raw: str) -> bool:
 # окно. Ключ сортировки flows_raw начинается с toStartOfFiveMinutes(
 # time_received_ns), так что условие на это выражение отсекает гранулы и запрос
 # читает десятки миллионов строк вместо миллиарда. Когда коллектор молчал
-# дольше окна, узкий запрос вернёт пусто и вызывающий код повторит прежним
-# широким запросом.
+# дольше окна или буфер коллектора досылает отставание, узкий запрос вернёт
+# пусто. Тогда самый новый пятиминутный интервал находится чтением по ключу
+# (ORDER BY ... DESC LIMIT 1, единицы миллионов строк), и максимум ищется
+# только внутри него. Широкий запрос за 14 дней читал ~16 млрд строк на вызов.
 RAW_MAX_RECENT_WINDOW_MINUTES = 30
 
 
@@ -354,6 +356,19 @@ def recent_five_minute_filter(minutes: int) -> str:
         "toStartOfFiveMinutes(time_received_ns) >= "
         f"toStartOfFiveMinutes(now() - INTERVAL {window} MINUTE)"
     )
+
+
+def newest_five_minute_filter(ch: ClickHouseClient, where: str, display: str) -> Optional[str]:
+    """Filter on the newest occupied five-minute bucket, or None when empty."""
+    raw = ch.query(
+        "SELECT formatDateTime(b, '%F %T', 'UTC') FROM ("
+        f"SELECT toStartOfFiveMinutes(time_received_ns) AS b FROM {FLOWS_RAW_LIVE_TABLE} "
+        f"WHERE {where} ORDER BY b DESC LIMIT 1)",
+        display=display,
+    ).strip()
+    if is_epoch_timestamp(raw):
+        return None
+    return f"toStartOfFiveMinutes(time_received_ns) = toDateTime('{raw[:19]}', 'UTC')"
 
 
 def raw_max_received(
@@ -368,16 +383,13 @@ def raw_max_received(
     ~56-year lag and skipped every tick, so already-landed buckets never
     rolled up while the collector spool was still draining.
     """
-    days = max(int(lookback_days), 1)
+    base = f"date >= today() - {max(int(lookback_days), 1)}"
 
-    def probe(extra_filter: str, display: str) -> str:
-        where = f"date >= today() - {days}"
-        if extra_filter:
-            where = f"{where} AND {extra_filter}"
+    def probe(bucket_filter: str, display: str) -> str:
         return ch.query(
             "SELECT formatDateTime(max(time_received_ns), '%F %T', 'UTC') "
             f"FROM {FLOWS_RAW_LIVE_TABLE} "
-            f"WHERE {where}",
+            f"WHERE {base} AND {bucket_filter}",
             display=display,
         ).strip()
 
@@ -386,7 +398,8 @@ def raw_max_received(
         "flows_raw max received (recent window)",
     )
     if is_epoch_timestamp(raw):
-        raw = probe("", "flows_raw max received")
+        newest = newest_five_minute_filter(ch, base, "flows_raw newest five-minute bucket")
+        raw = probe(newest, "flows_raw max received (newest bucket)") if newest else ""
     if is_epoch_timestamp(raw):
         return None
     try:
@@ -504,6 +517,48 @@ def bootstrap_bucket(
     return truncate_bucket(utc_now() - timedelta(days=lookback), job.bucket_kind)
 
 
+def first_occupied_minute(
+    ch: ClickHouseClient,
+    day: datetime,
+    where: str,
+    *,
+    display: str,
+) -> Optional[datetime]:
+    """First minute with rows in the date partition of `day`.
+
+    ORDER BY time_received_ns LIMIT 1 cannot read in key order through the
+    flows_all Merge table (flows_v1 and flows_raw have different sort keys) and
+    scanned the whole day, ~5.5 billion rows. A `time_received_ns < edge`
+    LIMIT 1 probe prunes granules in both tables, so a binary search costs a
+    dozen cheap probes. The span covers the neighbouring days because `date`
+    is the server-local date while `day` is UTC midnight.
+    """
+    lo = day - timedelta(days=1)
+    lo_m, hi_m = 0, 3 * 24 * 60
+
+    def any_before(minutes: int) -> bool:
+        edge = fmt_dt(lo + timedelta(minutes=minutes))
+        return bool(
+            ch.query(
+                f"SELECT 1 FROM {FLOWS_RAW_TABLE} "
+                f"WHERE {where} AND time_received_ns < toDateTime('{edge}', 'UTC') "
+                "LIMIT 1 "
+                "SETTINGS max_rows_to_read = 0",
+                display=display,
+            ).strip()
+        )
+
+    if not any_before(hi_m):
+        return None
+    while hi_m - lo_m > 1:
+        mid = (lo_m + hi_m) // 2
+        if any_before(mid):
+            hi_m = mid
+        else:
+            lo_m = mid
+    return lo + timedelta(minutes=lo_m)
+
+
 def flows_raw_enabled_min_bucket(
     ch: ClickHouseClient,
     job: RollupJob,
@@ -514,9 +569,9 @@ def flows_raw_enabled_min_bucket(
     """Earliest occupied bucket in flows_raw for enabled sources.
 
     Finds the first occupied date partition with LIMIT 1, then the first
-    time_received_ns in that partition (ORDER BY matches the table key).
-    Jumping to midnight of that day would grind empty morning hours on a
-    fresh stand that started sFlow at noon.
+    minute in that partition (first_occupied_minute). Jumping to midnight of
+    that day would grind empty morning hours on a fresh stand that started
+    sFlow at noon.
     """
     if job.source_table != FLOWS_RAW_TABLE:
         return None
@@ -539,20 +594,14 @@ def flows_raw_enabled_min_bucket(
         )
         if not hit.strip():
             continue
-        first = ch.query(
-            "SELECT formatDateTime(toStartOfMinute(time_received_ns), '%F %T', 'UTC') "
-            f"FROM {FLOWS_RAW_TABLE} "
-            f"WHERE date = toDate('{day_s}') "
-            "AND source_id IN (SELECT source_id FROM default.net_flow_sources_enabled) "
-            "ORDER BY time_received_ns ASC "
-            "LIMIT 1 "
-            "SETTINGS max_rows_to_read = 0",
+        first = first_occupied_minute(
+            ch,
+            day,
+            f"date = toDate('{day_s}') "
+            "AND source_id IN (SELECT source_id FROM default.net_flow_sources_enabled)",
             display=f"first flows_raw minute {day_s} for {job.job_id}",
         )
-        if first.strip():
-            result = truncate_bucket(parse_utc_dt(first.strip()), job.bucket_kind)
-        else:
-            result = truncate_bucket(day, job.bucket_kind)
+        result = truncate_bucket(first or day, job.bucket_kind)
         break
     if cache is not None:
         cache[cache_key] = result
@@ -1104,15 +1153,16 @@ def flows_raw_enabled_max_minute(
     if cache is not None and cache_key in cache:
         return cache[cache_key]
 
-    def probe(extra_filter: str, display: str) -> str:
-        where = "date >= today() - 14"
-        if extra_filter:
-            where = f"{where} AND {extra_filter}"
+    base = (
+        "date >= today() - 14 "
+        "AND source_id IN (SELECT source_id FROM default.net_flow_sources_enabled)"
+    )
+
+    def probe(bucket_filter: str, display: str) -> str:
         return ch.query(
             "SELECT formatDateTime(toStartOfMinute(max(time_received_ns)), '%F %T', 'UTC') "
             f"FROM {FLOWS_RAW_LIVE_TABLE} "
-            f"WHERE {where} "
-            "AND source_id IN (SELECT source_id FROM default.net_flow_sources_enabled)",
+            f"WHERE {base} AND {bucket_filter}",
             display=display,
         ).strip()
 
@@ -1121,7 +1171,8 @@ def flows_raw_enabled_max_minute(
         "flows_raw enabled max minute (recent window)",
     )
     if is_epoch_timestamp(raw):
-        raw = probe("", "flows_raw enabled max minute")
+        newest = newest_five_minute_filter(ch, base, "flows_raw enabled newest five-minute bucket")
+        raw = probe(newest, "flows_raw enabled max minute (newest bucket)") if newest else ""
     result: Optional[datetime] = None
     if raw and not is_epoch_timestamp(raw):
         try:
