@@ -160,6 +160,16 @@ function ampMetrics(row = {}) {
   };
 }
 
+// Кратность к норме часа. Если в строке нет growth_amp (нормы ещё нет),
+// решает пол по Мбит/с: лучше лишний алерт, чем пропуск в первые дни.
+function ampAboveHour(row = {}, options = {}) {
+  const ratioMin = options.hourRatio == null ? 2 : num(options.hourRatio);
+  if (!(ratioMin > 0)) return true;
+  const growth = num(row.growth_amp ?? row.growthAmp);
+  if (growth == null) return true;
+  return growth >= ratioMin;
+}
+
 function isAmplificationHit(row = {}, options = {}) {
   const m = ampMetrics(row);
   const srcsMin = num(options.srcsMin) ?? AMP_SRCS_MIN;
@@ -167,7 +177,8 @@ function isAmplificationHit(row = {}, options = {}) {
   const bpsMin = num(options.bpsMin) ?? AMP_BPS_MIN;
   return m.srcs >= srcsMin
     && m.avgPkt >= pktMin
-    && m.bps >= bpsMin;
+    && m.bps >= bpsMin
+    && ampAboveHour(row, options);
 }
 
 // Упор нормализации: крупные ответы с усилителей ещё идут, даже если доля
@@ -176,7 +187,7 @@ function ampStillGoing(row = {}, options = {}) {
   const m = ampMetrics(row);
   const pktMin = num(options.pktMin) ?? AMP_PKT_MIN;
   const bpsMin = num(options.bpsMin) ?? AMP_BPS_MIN;
-  return m.bps >= bpsMin && m.avgPkt >= pktMin;
+  return m.bps >= bpsMin && m.avgPkt >= pktMin && ampAboveHour(row, options);
 }
 
 function amplifierPortsFromL4(list) {

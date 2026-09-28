@@ -121,7 +121,10 @@ function classifyFromMetrics(byProto = {}, hour = {}) {
   const syn = synTcp.pps > synAll.pps ? synTcp : synAll;
   const scan = isTcpScan(all) || isTcpScan(tcp);
   const amp = ampMetrics(udp);
-  const ampHit = isAmplificationHit(udp);
+  const ampHit = isAmplificationHit(udp, {
+    bpsMin: hour.ampMinBps,
+    hourRatio: hour.ampHourRatio,
+  });
   const geo = evaluateForeignGeo(all, hour.foreign || {});
   const reasons = [];
 

@@ -61,7 +61,7 @@ describe('detection-telegram', () => {
     assert.equal(DEFAULT_MIN_CLIENT_SHARE_PCT, 10);
   });
 
-  it('доля паразита: амплификация 1% клиента не идёт в Telegram, в историю — да', () => {
+  it('доля паразита: отражение больше не глушится долей клиента', () => {
     const byProto = {
       all: { bps: 10.7e9, bytes: 10.7e9 * 60 / 8 },
       udp: {
@@ -74,7 +74,7 @@ describe('detection-telegram', () => {
     };
     const share = parasiticClientShare('amplification', { byProto });
     assert.ok(share != null && share < 0.02 && share > 0.005);
-    assert.equal(shouldSkipTelegramForShare(['amplification'], { byProto }, { ampMinSharePct: 10 }), true);
+    assert.equal(shouldSkipTelegramForShare(['amplification'], { byProto }, { ampMinSharePct: 10 }), false);
     assert.equal(shouldSkipTelegramForShare(['amplification'], { byProto }, { ampMinSharePct: 0.5 }), false);
     assert.equal(shouldSkipTelegramForShare(['amplification'], { byProto }, { ampMinSharePct: 0 }), false);
   });
@@ -92,7 +92,7 @@ describe('detection-telegram', () => {
     assert.equal(shouldSkipTelegramForShare(['amplification'], { byProto }, {
       ampMinSharePct: 10,
       volumeMinSharePct: 10,
-    }), true);
+    }), false);
     assert.equal(shouldSkipTelegramForShare(['amplification', 'volume'], { byProto }, {
       ampMinSharePct: 10,
       volumeMinSharePct: 10,

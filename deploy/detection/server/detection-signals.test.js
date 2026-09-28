@@ -89,6 +89,26 @@ describe('detection-signals', () => {
     }), true);
   });
 
+  it('норма часа ×1.1 при пороге ×2 → не амплификация', () => {
+    const ampBytes = 80e6 * 60 / 8;
+    assert.equal(isAmplificationHit({
+      amp_bytes: ampBytes,
+      amp_packets: Math.round(ampBytes / 1400),
+      amp_srcs: 20,
+      growth_amp: 1.1,
+    }, { hourRatio: 2 }), false);
+  });
+
+  it('норма часа ×6 при пороге ×2 → амплификация', () => {
+    const ampBytes = 80e6 * 60 / 8;
+    assert.equal(isAmplificationHit({
+      amp_bytes: ampBytes,
+      amp_packets: Math.round(ampBytes / 1400),
+      amp_srcs: 20,
+      growth_amp: 6,
+    }, { hourRatio: 2 }), true);
+  });
+
   it('мелкий DNS-сервер: весь UDP с порта 53, но 9 кбит/с → не амплификация', () => {
     const ampBytes = 9e3 * 60 / 8;
     assert.equal(isAmplificationHit({

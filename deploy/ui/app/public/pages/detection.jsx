@@ -20,6 +20,7 @@ const PAGE_TABS = [
   { id: 'table', label: 'Таблица' },
   { id: 'active', label: 'Активные' },
   { id: 'history', label: 'История' },
+  { id: 'thresholds', label: 'Пороги' },
   { id: 'telegram', label: 'Telegram' },
 ];
 const TELEGRAM_DEFAULTS = {
@@ -38,6 +39,8 @@ const TELEGRAM_DEFAULTS = {
   ampMinSharePct: 10,
   synMinSharePct: 10,
   geoMinSharePct: 10,
+  ampHourRatio: 2,
+  ampMinMbit: 20,
 };
 const TELEGRAM_VECTORS = [
   { id: 'volume', label: 'Рост объёма', shareKey: 'volumeMinSharePct', enableKey: null, streakKey: 'streak', streakFallback: 3 },
@@ -753,12 +756,14 @@ function PageDetection() {
         ampMinSharePct: telegram?.ampMinSharePct ?? 10,
         synMinSharePct: telegram?.synMinSharePct ?? 10,
         geoMinSharePct: telegram?.geoMinSharePct ?? 10,
+        ampHourRatio: telegram?.ampHourRatio ?? 2,
+        ampMinMbit: telegram?.ampMinMbit ?? 20,
       };
       if (botToken.trim()) payload.botToken = botToken.trim();
       const data = await ApiClient.saveDetectionTelegramSettings(payload);
       setTelegram(data);
       setBotToken('');
-      pushToast?.({ kind: 'success', title: 'Telegram сохранён' });
+      pushToast?.({ kind: 'success', title: pageTab === 'thresholds' ? 'Пороги сохранены' : 'Telegram сохранён' });
     } catch (e) {
       setTelegramError(e.message);
     } finally {
@@ -976,18 +981,22 @@ function PageDetection() {
                             )}
                           </td>
                           <td className="num">
-                            <input
-                              className="input"
-                              type="number"
-                              min="0"
-                              max="100"
-                              step="1"
-                              value={share}
-                              onChange={(e) => setTelegram(patchTelegram(telegram, {
-                                [vector.shareKey]: e.target.value === '' ? '' : Number(e.target.value),
-                              }))}
-                              title="Ниже доли — только история, в Telegram нет. 0 — слать всегда."
-                            />
+                            {vector.id === 'amplification' ? (
+                              <span style={{ color: 'var(--fg-muted)' }}>вкладка «Пороги»</span>
+                            ) : (
+                              <input
+                                className="input"
+                                type="number"
+                                min="0"
+                                max="100"
+                                step="1"
+                                value={share}
+                                onChange={(e) => setTelegram(patchTelegram(telegram, {
+                                  [vector.shareKey]: e.target.value === '' ? '' : Number(e.target.value),
+                                }))}
+                                title="Ниже доли — только история, в Telegram нет. 0 — слать всегда."
+                              />
+                            )}
                           </td>
                         </tr>
                       );
@@ -1007,6 +1016,81 @@ function PageDetection() {
                 >
                   Тестовое сообщение
                 </Button>
+              </div>
+            </>
+          )}
+        </div>
+      </Card>
+      )}
+
+      {pageTab === 'thresholds' && (
+      <Card
+        title="Отражение"
+        subtitle="Срабатывает, когда трафик с портов усилителей не ниже минимума и не меньше заданной кратности к обычному уровню этого клиента в тот же час (будни и выходные отдельно). Доля от всего трафика клиента не используется."
+      >
+        <div className="col" style={{ gap: 10, font: 'var(--pv-text-body-3)' }}>
+          {telegramForbidden ? (
+            <div style={{ color: 'var(--fg-secondary)' }}>
+              Настройки порогов доступны только администратору.
+            </div>
+          ) : !telegram && !telegramError ? (
+            <div style={{ color: 'var(--fg-muted)' }}>Загрузка настроек…</div>
+          ) : (
+            <>
+              {telegramError && (
+                <div style={{ color: 'var(--st-critical)' }}>{telegramError}</div>
+              )}
+              <label className="row" style={{ gap: 8, alignItems: 'center' }}>
+                <input
+                  type="checkbox"
+                  checked={telegram?.ampEnabled !== false}
+                  onChange={(e) => setTelegram(patchTelegram(telegram, { ampEnabled: e.target.checked }))}
+                />
+                Следить за отражением
+              </label>
+              <div className="row" style={{ gap: 12, flexWrap: 'wrap' }}>
+                <label className="col" style={{ gap: 4, minWidth: 180 }}>
+                  <span>Кратность к норме часа</span>
+                  <input
+                    className="input"
+                    type="number"
+                    min="1"
+                    max="100"
+                    step="0.1"
+                    value={telegram?.ampHourRatio ?? 2}
+                    onChange={(e) => setTelegram(patchTelegram(telegram, { ampHourRatio: Number(e.target.value) }))}
+                  />
+                </label>
+                <label className="col" style={{ gap: 4, minWidth: 180 }}>
+                  <span>Минимум, Мбит/с</span>
+                  <input
+                    className="input"
+                    type="number"
+                    min="1"
+                    max="100000"
+                    step="1"
+                    value={telegram?.ampMinMbit ?? 20}
+                    onChange={(e) => setTelegram(patchTelegram(telegram, { ampMinMbit: Number(e.target.value) }))}
+                  />
+                </label>
+                <label className="col" style={{ gap: 4, minWidth: 160 }}>
+                  <span>Минут подряд</span>
+                  <input
+                    className="input"
+                    type="number"
+                    min="1"
+                    max="60"
+                    step="1"
+                    value={telegram?.ampStreak ?? 1}
+                    onChange={(e) => setTelegram(patchTelegram(telegram, { ampStreak: Number(e.target.value) }))}
+                  />
+                </label>
+              </div>
+              <div style={{ color: 'var(--fg-muted)' }}>
+                Если за этот час ещё нет нормы, решает только минимум. Порты усилителей: DNS 53, NTP 123, SSDP 1900 и остальные из списка детекции.
+              </div>
+              <div className="row" style={{ gap: 8 }}>
+                <Button size="sm" disabled={telegramBusy} onClick={saveTelegram}>Сохранить</Button>
               </div>
             </>
           )}
