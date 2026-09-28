@@ -62,12 +62,16 @@ function describeFlowDay(day, log, { today, hotDays } = {}) {
   const age = flowDayAge(day, today);
   const hot = Math.max(0, Number(hotDays) || 0);
   if (age != null && age <= hot) return { state: 'full', error: '', note: '' };
-  return { state: 'pending', error: '', note: '' };
+  return {
+    state: 'pending',
+    error: '',
+    note: 'Ночная задача не дошла до сжатия. В следующее окно возьмём сами, начиная с самых старых.',
+  };
 }
 
 function buildFlowDays(parts, log, options) {
   const byDay = new Map((log || []).map((row) => [flowDayKey(row.day), row]));
-  return (parts || []).map((part) => {
+  const rows = (parts || []).map((part) => {
     const day = flowDayKey(part.day);
     const entry = byDay.get(day);
     return {
@@ -78,6 +82,20 @@ function buildFlowDays(parts, log, options) {
       ...describeFlowDay(day, entry, options),
     };
   }).filter((row) => row.day);
+  const oldestPending = rows
+    .filter((row) => row.state === 'pending')
+    .map((row) => row.day)
+    .sort()[0];
+  if (options?.mode === 'off') {
+    return rows.map((row) => (
+      row.state === 'pending' ? { ...row, note: 'Сжатие выключено.' } : row
+    ));
+  }
+  return rows.map((row) => (
+    row.state === 'pending' && row.day !== oldestPending
+      ? { ...row, note: 'За ночь сжимаются одни сутки, сначала более старые.' }
+      : row
+  ));
 }
 
 function forecastStorage({ exactBytes = 0, ttlDays = 0, hotDays = 1, rate, thresholdBytes, averagedBytes = 0 } = {}) {
@@ -358,7 +376,11 @@ async function getFlowStorage() {
     flows,
     forecast: withForecast(settings, flows, averagedBytes),
     log,
-    days: buildFlowDays(flows.partitions, log, { today: flows.today, hotDays: settings.hotDays }),
+    days: buildFlowDays(flows.partitions, log, {
+      today: flows.today,
+      hotDays: settings.hotDays,
+      mode: settings.mode,
+    }),
     untouched: 'NetFlow и sFlow не прореживаются и хранятся точно весь срок',
   };
 }

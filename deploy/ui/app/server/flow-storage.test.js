@@ -32,7 +32,27 @@ test('a day is full while it is fresh, compressed after success, and shows the f
   const failed = describeFlowDay('2026-09-22', { status: 'failed', message: 'мало места' }, { today: '2026-09-25', hotDays: 1 });
   assert.equal(failed.state, 'failed');
   assert.equal(failed.error, 'мало места');
-  assert.equal(describeFlowDay('2026-09-22', null, { today: '2026-09-25', hotDays: 1 }).state, 'pending');
+  const pending = describeFlowDay('2026-09-22', null, { today: '2026-09-25', hotDays: 1 });
+  assert.equal(pending.state, 'pending');
+  assert.match(pending.note, /не дошла до сжатия/);
+});
+
+test('pending days explain why they were not compressed', () => {
+  const { buildFlowDays } = require('./flow-storage');
+  const parts = [
+    { day: '2026-09-25', rows: 1, bytes: 1 },
+    { day: '2026-09-26', rows: 1, bytes: 1 },
+    { day: '2026-09-27', rows: 1, bytes: 1 },
+  ];
+  const days = buildFlowDays(parts, [], { today: '2026-09-28', hotDays: 1, mode: 'on' });
+  const byDay = Object.fromEntries(days.map((row) => [row.day, row]));
+  assert.equal(byDay['2026-09-27'].state, 'full');
+  assert.equal(byDay['2026-09-27'].note, '');
+  assert.match(byDay['2026-09-25'].note, /не дошла до сжатия/);
+  assert.match(byDay['2026-09-26'].note, /сначала более старые/);
+
+  const off = buildFlowDays(parts, [], { today: '2026-09-28', hotDays: 1, mode: 'off' });
+  assert.equal(off.find((row) => row.day === '2026-09-25').note, 'Сжатие выключено.');
 });
 
 test('forecast uses the measured shrink and falls back to the log', () => {
