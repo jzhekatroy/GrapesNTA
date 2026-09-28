@@ -887,13 +887,18 @@ function shortClientName(name) {
   return short && short.length < raw.length ? short : raw;
 }
 
+function formatBelowPeak(ratio) {
+  if (ratio < 1) return 'ниже нормы';
+  return `рост ×${ratio.toFixed(2).replace('.', ',')}, до порога пика ×${String(HOUR_RATIO_PEAK).replace('.', ',')} не дошло`;
+}
+
 function formatClientVolume(all, hourUsual, verdict) {
   const bps = Number(all.bps);
   if (!(bps > 0) || !(hourUsual > 0)) return '';
   const ratio = Number(verdict?.hourRatio);
   const shown = Number.isFinite(ratio) && ratio > 0 ? ratio : bps / hourUsual;
   if (shown < HOUR_RATIO_PEAK) {
-    return `Объём клиента сейчас ${formatBpsMsg(bps)}, обычно ${formatBpsMsg(hourUsual)} — ниже нормы.`;
+    return `Объём клиента сейчас ${formatBpsMsg(bps)}, обычно ${formatBpsMsg(hourUsual)} — ${formatBelowPeak(shown)}.`;
   }
   return `Объём клиента сейчас ${formatBpsMsg(bps)}, обычно ${formatBpsMsg(hourUsual)} — ${formatTimesHigher(shown)}.`;
 }
@@ -944,8 +949,14 @@ function sourceBps(src, allBps) {
   return allBps;
 }
 
+function victimShapeFor(victim, investigate) {
+  const shape = investigate?.victimShape;
+  return shape?.ip && shape.ip === victim?.ip ? shape : null;
+}
+
 function victimDisplayPort(victim, investigate) {
-  const count = Number(investigate?.destPort?.count);
+  const shape = victimShapeFor(victim, investigate);
+  const count = Number(shape ? shape.dstPorts : investigate?.destPort?.count);
   if (Number.isFinite(count) && count > 1) return null;
   return formatAlertPort(victim?.port) || null;
 }
@@ -961,14 +972,31 @@ function formatVictimDest(victim, investigate) {
 // адреса даём только числом — списком IP шапку не прочитать.
 const SOURCE_NET_MIN_SHARE = 0.02;
 
-function formatAttackSourceLines(investigate) {
+function ruSessions(count) {
+  const n = Number(count);
+  if (!Number.isFinite(n) || n < 0) return '';
+  const k = n % 100;
+  const d = n % 10;
+  if (k >= 11 && k <= 14) return `${formatNumMsg(n, 0)} сеансов`;
+  if (d === 1) return `${formatNumMsg(n, 0)} сеанс`;
+  if (d >= 2 && d <= 4) return `${formatNumMsg(n, 0)} сеанса`;
+  return `${formatNumMsg(n, 0)} сеансов`;
+}
+
+function formatAttackSourceLines(investigate, shape = null) {
   const nets = (Array.isArray(investigate?.source24) ? investigate.source24 : [])
     .filter((row) => row?.net24 && Number(row.share) >= SOURCE_NET_MIN_SHARE)
     .slice(0, 3);
   const totals = investigate?.sources || {};
   const scale = [];
-  if (Number(totals.ipCount) > 0) scale.push(ruAddresses(totals.ipCount));
-  if (Number(totals.net24Count) > 1) scale.push(`${formatNumMsg(totals.net24Count, 0)} сетей /24`);
+  if (shape) {
+    if (Number(shape.srcs) > 0) scale.push(ruSources(shape.srcs));
+    if (Number(shape.sessions) > 0) scale.push(ruSessions(shape.sessions));
+    if (Number(shape.sessions) > 3) scale.push(`3 крупнейших — ${formatSharePct(shape.topShare)}`);
+  } else {
+    if (Number(totals.ipCount) > 0) scale.push(ruAddresses(totals.ipCount));
+    if (Number(totals.net24Count) > 1) scale.push(`${formatNumMsg(totals.net24Count, 0)} сетей /24`);
+  }
   if (!nets.length && !scale.length) return [];
   const lines = [escapeHtml(`Откуда: ${scale.length ? scale.join(' · ') : 'сети ниже'}`)];
   for (const row of nets) {
@@ -1191,7 +1219,7 @@ function formatAmpHighlight({ amp, udp, all, hourUsual, verdict, investigate }) 
     const shown = Number.isFinite(ratio) ? ratio : Number(all.bps) / hourUsual;
     if (shown < HOUR_RATIO_PEAK) {
       lines.push(escapeHtml(
-        `Объём клиента сейчас ${formatBpsMsg(all.bps)}, обычно ${formatBpsMsg(hourUsual)} — ниже нормы.`,
+        `Объём клиента сейчас ${formatBpsMsg(all.bps)}, обычно ${formatBpsMsg(hourUsual)} — ${formatBelowPeak(shown)}.`,
       ));
     }
   }
@@ -1239,9 +1267,12 @@ function formatVolumetricHighlight({ all, tcp, udp, hourUsual, verdict, investig
   if (victim?.share != null) bits.push(`топ IP ${formatSharePct(victim.share)} трафика клиента`);
   const details = bits.filter(Boolean);
   if (details.length) lines.push(`   ${escapeHtml(details.join(' · '))}`);
-  lines.push(...formatAttackSourceLines(investigate));
+  const shape = isUsableVictim(victim) ? victimShapeFor(victim, investigate) : null;
+  lines.push(...formatAttackSourceLines(investigate, shape));
   lines.push(...formatDestLines(investigate, 'victim'));
-  if (!isUsableVictim(victim) || Number(investigate?.destPort?.count) > 1) {
+  if (shape) {
+    if (Number(shape.dstPorts) > 1) lines.push(escapeHtml(`На ${ruPorts(shape.dstPorts)} этого адреса`));
+  } else if (!isUsableVictim(victim) || Number(investigate?.destPort?.count) > 1) {
     lines.push(...formatAttackPortLines(investigate?.destPort));
   }
   const volume = formatClientVolume(all, hourUsual, verdict);
@@ -2564,7 +2595,7 @@ async function processDetectionAlerts({ minute, rows, nameByKey }) {
           scopeId: row.scope_id,
           minute: focusMinute,
         });
-        verdict = refineClassification(verdict, investigate);
+        verdict = refineClassification(verdict, investigate, { scope: row.scope });
       } catch (err) {
         errors.push({ key: objectId, message: `investigate: ${err.message}` });
         investigate = { ...emptyInvestigate(), error: err.message };
@@ -2737,7 +2768,7 @@ async function rebuildDetectionEventAlert({ scope, scopeId, minute, sendTelegram
         scopeId: row.scope_id,
         minute: minuteForFacts,
       });
-      verdict = refineClassification(verdict, investigate);
+      verdict = refineClassification(verdict, investigate, { scope: row.scope });
     } catch (err) {
       investigate = { ...emptyInvestigate(), error: err.message };
     }

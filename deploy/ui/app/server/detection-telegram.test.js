@@ -1473,4 +1473,31 @@ describe('detection-telegram', () => {
     assert.match(text, /раньше почти не было/);
     assert.match(text, /119 Б/);
   });
+
+  it('«в один сервер»: источники и порты по самому адресу, рост ×1,23 не «ниже нормы»', () => {
+    const text = formatAlertMessage({
+      name: '176.116.255.0/24',
+      scope: 'net',
+      scopeId: '176.116.255.0/24',
+      minute: '2026-09-25 16:47:00',
+      threshold: 1.6,
+      byProto: { all: { bps: 416.4e6, growth_bps: 1.18 }, udp: { bps: 261.1e6 }, tcp: { bps: 155.2e6 } },
+      verdict: { kind: 'volumetric', reason: 'топ IP 58.5%', hourRatio: 1.233, hourCeiling: 337.7e6 },
+      investigate: {
+        victim: { ip: '176.116.255.95', port: 53286, protoLabel: 'UDP', share: 0.5846, net24: '176.116.255.0/24' },
+        victimShape: {
+          ip: '176.116.255.95', clientId: '115628', sessions: 69, srcs: 65, dstPorts: 2, topShare: 0.91,
+        },
+        sources: { ipCount: 2598, net24Count: 2124, dstIpCount: 256, dstNetCount: 1 },
+        source24: [{ net24: '92.244.240.0/24', asn: 6856, share: 0.3446, ips: 1 }],
+        destPort: { count: 8126, top: [{ port: 53286, share: 0.5846 }] },
+      },
+    });
+    assert.match(text, /Откуда: 65 источников · 69 сеансов · 3 крупнейших — 91%/);
+    assert.match(text, /На 2 порта этого адреса/);
+    assert.doesNotMatch(text, /2\s598 адресов/);
+    assert.doesNotMatch(text, /8\s126 портов/);
+    assert.match(text, /рост ×1,23, до порога пика ×1,3 не дошло/);
+    assert.doesNotMatch(text, /ниже нормы/);
+  });
 });

@@ -43,6 +43,15 @@ const VICTIM_ACTION_SHARE_MIN = 0.15;
 const TARGET_SHARE_MIN = 0.15;
 const TARGET_GROWTH_MIN = 3;
 const TARGET_SRCS_MIN = 10;
+// Загрузка сеансами: три самых толстых сеанса несут почти весь трафик адреса,
+// пакеты крупные, а локальный порт эфемерный. Флуд с подменой адресов и
+// портов так не выглядит, флуд мелкими пакетами отсекается размером пакета.
+const SESSION_TOP_SHARE_MIN = 0.8;
+const SESSION_AVG_PKT_MIN = 500;
+const SESSION_LOCAL_PORT_MIN = 1024;
+// Сеть /24 из адресов разных абонентов — не один сервер: адрес внутри неё
+// разбирает детекция самого абонента по его норме.
+const NET_CLIENTS_MIN = 2;
 const AMP_DEST_ACTION_SHARE = 0.5;
 const NORMALIZE_BPS_KEEP = 0.85;
 // hourP95 из снимка алерта. Если он на порядок меньше самого алерта, это не
@@ -227,6 +236,38 @@ function isDownloadPeak(verdict = {}, investigate = {}) {
   return hasNarrowSource(investigate, verdict);
 }
 
+function sessionDownload(investigate = {}) {
+  const shape = investigate?.victimShape;
+  const victim = investigate?.victim;
+  if (!shape || !victim?.ip || shape.ip !== victim.ip) return null;
+  if (!(num(victim.share) >= TOP_DST_VOLUMETRIC)) return null;
+  const focus = investigate?.focus;
+  if (isTargetFocus(focus) && focus.ip !== victim.ip) return null;
+  if (!(num(shape.topShare) >= SESSION_TOP_SHARE_MIN)) return null;
+  if (!(num(shape.avgPkt) >= SESSION_AVG_PKT_MIN)) return null;
+  if (!(num(victim.port) >= SESSION_LOCAL_PORT_MIN)) return null;
+  return shape;
+}
+
+function clientInNet(investigate, ip, context = {}) {
+  if (context.scope !== 'net' || !ip) return '';
+  if (!(num(investigate?.sources?.dstClientCount) >= NET_CLIENTS_MIN)) return '';
+  const candidates = [investigate?.victimShape, investigate?.focus, ...(investigate?.focuses || [])];
+  const hit = candidates.find((row) => row?.ip === ip && row?.clientId);
+  return hit ? String(hit.clientId) : '';
+}
+
+function handOffToClient(next, investigate, ip, context) {
+  const clientId = clientInNet(investigate, ip, context);
+  if (!clientId) return next;
+  return {
+    ...next,
+    kind: KINDS.benign_peak,
+    reason: `адрес ${ip} — абонент ${clientId}, разбор по абоненту · ${next.reason || ''}`.trim(),
+    needsInvestigate: false,
+  };
+}
+
 function isLegitimatePeak(verdict = {}) {
   return verdict.kind === KINDS.benign_peak
     && /пик загрузки/.test(String(verdict.reason || ''));
@@ -240,7 +281,7 @@ function isTargetFocus(focus) {
   return num(focus.growth) >= TARGET_GROWTH_MIN;
 }
 
-function refineClassification(verdict, investigate) {
+function refineClassification(verdict, investigate, context = {}) {
   const next = { ...(verdict || {}) };
   const topShare = num(investigate?.victim?.share);
   const ratio = num(next.hourRatio);
@@ -275,6 +316,16 @@ function refineClassification(verdict, investigate) {
     next.needsInvestigate = false;
     return next;
   }
+  const session = sessionDownload(investigate);
+  if (session) {
+    next.kind = KINDS.benign_peak;
+    const top = Math.min(3, session.sessions);
+    next.reason = `пик загрузки · ${top === 1 ? '1 сеанс даёт' : `${top} сеанса дают`} `
+      + `${(session.topShare * 100).toFixed(0)}% адреса · ${downloadPeakLabel(investigate)}`
+      + (topShare != null ? ` · топ IP ${(topShare * 100).toFixed(1)}%` : '');
+    next.needsInvestigate = false;
+    return next;
+  }
   if (next.kind === KINDS.benign_peak && isTargetFocus(investigate?.focus)) {
     const focus = investigate.focus;
     const label = [focus.protoLabel, focus.port].filter((part) => part != null && part !== '').join('/');
@@ -283,11 +334,13 @@ function refineClassification(verdict, investigate) {
       .replace(/\s+/g, ' ')
       .trim();
     next.needsInvestigate = true;
-    return next;
+    return handOffToClient(next, investigate, focus.ip, context);
   }
   if (topShare != null && topShare >= TOP_DST_VOLUMETRIC) {
     next.kind = KINDS.volumetric;
     next.reason = `топ IP ${(topShare * 100).toFixed(1)}% · ${next.reason || ''}`.trim();
+    next.needsInvestigate = true;
+    return handOffToClient(next, investigate, investigate?.victim?.ip, context);
   } else if (
     topShare != null
     && topShare < TOP_DST_CARPET
@@ -477,6 +530,7 @@ module.exports = {
   TARGET_SHARE_MIN,
   TARGET_SRCS_MIN,
   isDownloadPeak,
+  sessionDownload,
   downloadPeakLabel,
   isLegitimatePeak,
   isAttackKind,

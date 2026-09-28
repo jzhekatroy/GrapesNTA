@@ -17,4 +17,26 @@ describe('detection-investigate SQL', () => {
     assert.match(src, /status IN \('active', 'normalized'\)/);
     assert.doesNotMatch(src, /status != 'peak'/);
   });
+
+  it('форма адреса отдаётся массивом: пустой скалярный кортеж ClickHouse не переваривает', () => {
+    assert.match(src, /victim_flow AS \(\s*SELECT groupArray\(tuple\(/);
+    assert.match(src, /sum\(flow_bytes\) AS ip_bytes/);
+  });
+});
+
+describe('mapVictimShape', () => {
+  const { mapVictimShape } = require('./detection-investigate');
+
+  it('считает долю трёх крупнейших сеансов и средний пакет', () => {
+    const shape = mapVictimShape(['176.116.255.95', '115628', 1000, 2, 69, 65, 67, 2, 910]);
+    assert.equal(shape.clientId, '115628');
+    assert.equal(shape.avgPkt, 500);
+    assert.equal(shape.sessions, 69);
+    assert.equal(shape.topShare, 0.91);
+  });
+
+  it('пустая минута — формы нет', () => {
+    assert.equal(mapVictimShape(undefined), null);
+    assert.equal(mapVictimShape(['', '', 0]), null);
+  });
 });

@@ -582,3 +582,87 @@ describe('detection-classify', () => {
     assert.equal(refined.kind, KINDS.syn_flood);
   });
 });
+
+// 176.116.255.0/24, 25.09.2026 19:47 МСК: на 176.116.255.95 (абонент 115628)
+// два толстых UDP-сеанса с 92.244.240.209 и 95.26.93.154, 58% сети.
+function incident95(shape = {}, sources = {}) {
+  return {
+    victim: { ip: '176.116.255.95', net24: '176.116.255.0/24', port: 53286, proto: 17, protoLabel: 'UDP', share: 0.5846 },
+    victimShape: {
+      ip: '176.116.255.95', clientId: '115628', bytes: 1825563352, packets: 2341800, avgPkt: 780,
+      sessions: 69, srcs: 65, srcPorts: 67, dstPorts: 2, topShare: 0.91, ...shape,
+    },
+    sources: { ipCount: 2598, net24Count: 2124, dstIpCount: 256, dstNetCount: 1, dstClientCount: 180, ...sources },
+    source24: [
+      { net24: '92.244.240.0/24', asn: 6856, ips: 1, share: 0.3446 },
+      { net24: '95.26.93.0/24', asn: 8402, ips: 2, share: 0.1548 },
+    ],
+    l4src: [{ port: 2314, proto: 17, share: 0.3446 }, { port: 443, proto: 6, share: 0.2143 }],
+    destPort: { count: 8126, top: [{ port: 53286, share: 0.5846 }] },
+  };
+}
+
+function metrics95() {
+  return classifyFromMetrics({
+    all: { bps: 416.4e6, port_entropy: 2.14, avg_packet_bytes: 913.5, syn_attempts: 3798, answer_pct: 33.6 },
+    tcp: { bps: 155.2e6, port_entropy: 4.21, avg_packet_bytes: 1285 },
+    udp: { bps: 261.1e6, port_entropy: 0.445, avg_packet_bytes: 779.6 },
+  }, { p95: 232.4e6, p999: 337.7e6 });
+}
+
+describe('загрузка сеансами и сети из многих абонентов', () => {
+  it('176.116.255.95: два толстых UDP-сеанса — пик загрузки, не атака', () => {
+    const first = metrics95();
+    assert.equal(first.kind, KINDS.volumetric);
+    const refined = refineClassification(first, incident95(), { scope: 'net' });
+    assert.equal(refined.kind, KINDS.benign_peak);
+    assert.match(refined.reason, /пик загрузки · 3 сеанса дают 91% адреса/);
+    assert.equal(isLegitimatePeak(refined), true);
+    assert.equal(isAttackKind(refined.kind), false);
+  });
+
+  it('тот же адрес, но трафик размазан по сеансам — остаётся атакой в абонентской области', () => {
+    const refined = refineClassification(metrics95(), incident95({ topShare: 0.2 }), { scope: 'client' });
+    assert.equal(refined.kind, KINDS.volumetric);
+  });
+
+  it('несколько сеансов мелкими пакетами — не загрузка', () => {
+    const refined = refineClassification(metrics95(), incident95({ avgPkt: 120 }), { scope: 'client' });
+    assert.equal(refined.kind, KINDS.volumetric);
+  });
+
+  it('флуд на служебный порт несколькими сеансами — не загрузка', () => {
+    const investigate = incident95();
+    investigate.victim = { ...investigate.victim, port: 53 };
+    const refined = refineClassification(metrics95(), investigate, { scope: 'client' });
+    assert.equal(refined.kind, KINDS.volumetric);
+  });
+
+  it('сеть из многих абонентов: адрес абонента уходит в разбор по абоненту', () => {
+    const refined = refineClassification(metrics95(), incident95({ topShare: 0.2 }), { scope: 'net' });
+    assert.equal(refined.kind, KINDS.benign_peak);
+    assert.match(refined.reason, /адрес 176\.116\.255\.95 — абонент 115628, разбор по абоненту/);
+  });
+
+  it('сеть одного абонента: «в один сервер» остаётся', () => {
+    const refined = refineClassification(
+      metrics95(),
+      incident95({ topShare: 0.2 }, { dstClientCount: 1 }),
+      { scope: 'net' },
+    );
+    assert.equal(refined.kind, KINDS.volumetric);
+  });
+
+  it('загрузка на одном адресе не гасит ковёр по сети', () => {
+    const first = classifyFromMetrics({
+      all: { bps: 2e9, port_entropy: 8, avg_packet_bytes: 200 },
+      tcp: { bps: 10e6 },
+      udp: { bps: 1.9e9, port_entropy: 8 },
+    }, { p95: 50e6, p999: 50e6 });
+    const investigate = incident95();
+    investigate.victim = { ...investigate.victim, share: 0.02 };
+    investigate.source24 = [{ net24: '45.95.201.0/24', share: 0.05, ips: 40 }];
+    const refined = refineClassification(first, investigate, { scope: 'net' });
+    assert.equal(refined.kind, KINDS.carpet);
+  });
+});
