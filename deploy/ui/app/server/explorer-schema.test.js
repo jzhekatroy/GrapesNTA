@@ -141,6 +141,19 @@ describe('explorer schema field naming', () => {
     assert.doesNotMatch(expr, /cabinet_client_id/);
   });
 
+  it('exposes collector as a group dimension and keeps a single filter field', () => {
+    const schema = explorerSchema();
+    const dimension = schema.dimensions.find((d) => d.id === 'collector');
+    assert.ok(dimension);
+    assert.equal(dimension.groupable, true);
+    assert.equal(dimension.group, MY_NETWORK_CATALOG);
+    assert.ok(schema.dimensionGroups[MY_NETWORK_CATALOG].includes('collector'));
+    assert.equal(explorerFieldMatchesQuery(dimension, 'аплинк'), true);
+    const filters = schema.filterFields.filter((f) => f.id === 'collector');
+    assert.equal(filters.length, 1);
+    assert.equal(schema.dimensions.filter((d) => d.id === 'collector').length, 1);
+  });
+
   it('labels operator direction separately from client direction', () => {
     const schema = explorerSchema();
     const direction = schema.filterFields.find((f) => f.id === 'direction');

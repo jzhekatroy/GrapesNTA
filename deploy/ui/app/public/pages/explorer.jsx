@@ -372,6 +372,15 @@ function explorerRowFilterValue(row, dimId, valueIdx, dimensionById) {
       label: label && String(label) !== String(raw) ? label : null,
     };
   }
+  if (fieldId === 'collector') {
+    const raw = row.rawValues?.[valueIdx] ?? row.values[valueIdx];
+    const label = row.values[valueIdx];
+    const value = raw === '—' ? '' : raw;
+    return {
+      value,
+      label: label && String(label) !== String(value) ? label : null,
+    };
+  }
   const raw = row.rawValues?.[valueIdx] ?? row.values[valueIdx];
   return { value: raw, label: null };
 }
@@ -3508,11 +3517,6 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
   }, []);
 
   const openSaveAsObservation = () => {
-    const { validThresholds } = resolveExplorerThresholdPayload(thresholds, schema);
-    if (!filters?.length && !validThresholds.length) {
-      pushToast({ kind: 'error', title: 'Нужен фильтр или порог', desc: 'Добавьте хотя бы одно условие или порог, затем «Добавить в наблюдения».' });
-      return;
-    }
     setShowObservationSave(true);
   };
 

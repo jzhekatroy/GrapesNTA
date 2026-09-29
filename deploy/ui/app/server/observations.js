@@ -13,6 +13,8 @@ const {
   lookupAsnDisplayNames,
   explorerEntityDisplayLabel,
   lookupEntityDisplayNames,
+  explorerCollectorDisplayLabel,
+  lookupCollectorDisplayNames,
   buildSummaryFromFlowRows: summaryFromExplorerFlowRows,
 } = require('./explorer');
 const {
@@ -394,9 +396,16 @@ function isObservationOwner(item, userId) {
   return owner === uid;
 }
 
+/** Shared observations are a common board: any signed-in writer may change them. */
+function canMutateObservation(item, userId) {
+  if (!item || !String(userId || '').trim()) return false;
+  if (item.isShared) return true;
+  return isObservationOwner(item, userId);
+}
+
 function assertObservationOwner(existing, userId) {
   if (!existing) return false;
-  if (isObservationOwner(existing, userId)) return true;
+  if (canMutateObservation(existing, userId)) return true;
   const err = new Error('Нет прав на изменение этого наблюдения');
   err.status = 403;
   throw err;
@@ -529,7 +538,7 @@ async function withMeta(item, allItems = null, userId = null) {
     ...item,
     report,
     scope,
-    canEdit: userId ? isObservationOwner(item, userId) : undefined,
+    canEdit: userId ? canMutateObservation(item, userId) : undefined,
     quotas: {
       maxMaterialize: MATERIALIZE_LIMIT_ENABLED ? MAX_MATERIALIZE : null,
       activeMaterialize: active,
@@ -972,6 +981,38 @@ async function enrichEntityLabelsInRows(rows, groupBy = []) {
   });
 }
 
+function collectorGroupIndexes(groupBy = []) {
+  return groupBy
+    .map((g, i) => (g === 'collector' ? i : -1))
+    .filter((i) => i >= 0);
+}
+
+/** Rollup хранит collector_id; в UI показываем display_name из справочника. */
+async function enrichCollectorLabelsInRows(rows, groupBy = []) {
+  const indexes = collectorGroupIndexes(groupBy);
+  if (!indexes.length || !rows?.length) return rows || [];
+
+  const ids = new Set();
+  for (const row of rows) {
+    for (const idx of indexes) {
+      const id = String(row.rawValues?.[idx] ?? row.values?.[idx] ?? '').trim();
+      if (id && id !== '—') ids.add(id);
+    }
+  }
+  const nameMap = await lookupCollectorDisplayNames([...ids]);
+  return rows.map((row) => {
+    const rawValues = Array.isArray(row.rawValues)
+      ? [...row.rawValues]
+      : [...(row.values || [])];
+    const values = Array.isArray(row.values) ? [...row.values] : [...rawValues];
+    for (const idx of indexes) {
+      const id = String(rawValues[idx] ?? values[idx] ?? '').trim();
+      values[idx] = explorerCollectorDisplayLabel(id, nameMap.get(id) || '');
+    }
+    return { ...row, values, rawValues };
+  });
+}
+
 function tcpFlagsGroupIndexes(groupBy = []) {
   return groupBy
     .map((g, i) => (g === 'tcp_flags' ? i : -1))
@@ -1146,7 +1187,8 @@ async function readRollupTop(observationId, window, { limit = TOP_ROWS_LIMIT, gr
     });
     const withAsn = await enrichAsnLabelsInRows(mapped, groupBy);
     const withEntity = await enrichEntityLabelsInRows(withAsn, groupBy);
-    return { rows: enrichTcpFlagsLabelsInRows(withEntity, groupBy), totals, windowSeconds };
+    const withCollector = await enrichCollectorLabelsInRows(withEntity, groupBy);
+    return { rows: enrichTcpFlagsLabelsInRows(withCollector, groupBy), totals, windowSeconds };
   } catch (err) {
     return { rows: [], error: err.message };
   }

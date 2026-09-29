@@ -13,6 +13,7 @@ const {
   entitiesViewRef,
   l2VlansViewRef,
   sourcesTableRef,
+  collectorsViewRef,
   netInterfacesCurrentRef,
   snmpAgentsCurrentRef,
   escapeSqlString,
@@ -194,6 +195,12 @@ const EXPLORER_DIM_META = {
     label: 'Префикс / CIDR',
     group: EXPLORER_GROUP.MY_NETWORK,
     aliases: ['cidr', 'префикс', 'сеть', 'prefix', 'own'],
+  },
+  collector: {
+    label: 'Коллектор / Collector',
+    group: EXPLORER_GROUP.MY_NETWORK,
+    hiddenFromFilters: true,
+    aliases: ['аплинк', 'uplink', 'коллектор', 'collector'],
   },
   src_entity: {
     label: 'Оператор источника / Source owner',
@@ -607,6 +614,52 @@ function explorerEntityDisplayLabel(entityId, displayName) {
   return id;
 }
 
+function explorerCollectorDisplayLabel(collectorId, displayName) {
+  return explorerEntityDisplayLabel(collectorId, displayName);
+}
+
+async function lookupCollectorDisplayNames(collectorIds = []) {
+  const ids = [...new Set(
+    (Array.isArray(collectorIds) ? collectorIds : [])
+      .map((v) => String(v || '').trim())
+      .filter((v) => v && v !== '—'),
+  )];
+  const byId = new Map();
+  if (!ids.length) return byId;
+  try {
+    const { rows } = await query(`
+      SELECT collector_id, display_name
+      FROM ${collectorsViewRef()}
+      WHERE collector_id IN {ids:Array(String)}
+    `, { ids }, { name: 'explorer/collector-names' });
+    for (const r of rows || []) {
+      const id = String(r.collector_id || '').trim();
+      const name = String(r.display_name || '').trim();
+      if (id && name) byId.set(id, name);
+    }
+  } catch {
+    // Keep raw collector_id labels when the catalog is unavailable.
+  }
+  return byId;
+}
+
+/** collector_id is not on the flow; resolve it once from the source catalog. */
+function explorerCollectorIdExpr(flowAlias = 'f') {
+  const sourceIdCol = flowCol('sourceId');
+  if (!sourceIdCol) return null;
+  return `ifNull((
+    SELECT mapFromArrays(
+      arrayMap(t -> tupleElement(t, 1), pairs),
+      arrayMap(t -> tupleElement(t, 2), pairs)
+    )
+    FROM (
+      SELECT groupArray(tuple(source_id, collector_id)) AS pairs
+      FROM ${sourcesTableRef()}
+      WHERE source_id != '' AND collector_id != ''
+    )
+  )[toString(${flowAlias}.${sourceIdCol})], '')`;
+}
+
 function matchesExplorerAs0Search(search) {
   const s = String(search || '').trim().toLowerCase();
   if (!s) return true;
@@ -963,6 +1016,20 @@ function explorerDimensions() {
         labelFromKey: (k) => `toString(${k})`,
       };
     }
+  }
+
+  const collectorIdExpr = explorerCollectorIdExpr('f');
+  if (collectorIdExpr) {
+    dims.collector = {
+      label: 'Коллектор',
+      group: EXPLORER_GROUP.MY_NETWORK,
+      kind: 'collector',
+      filterType: 'string',
+      expr: collectorIdExpr,
+      filterExpr: collectorIdExpr,
+      groupKeyExpr: collectorIdExpr,
+      labelFromKey: (k) => `toString(${k})`,
+    };
   }
 
   const srcEntityCol = flowCol('srcEntity');
@@ -2317,6 +2384,9 @@ function mapExplorerFlowRows(
     const cabinetClientGroupIndexes = groups
       .map((g, i) => (g === 'cabinet_client' ? i : -1))
       .filter((i) => i >= 0);
+    const collectorGroupIndexes = groups
+      .map((g, i) => (g === 'collector' ? i : -1))
+      .filter((i) => i >= 0);
     const asnNums = new Set();
     if (asnGroupIndexes.length) {
       for (const r of rows) {
@@ -2359,6 +2429,18 @@ function mapExplorerFlowRows(
     }
     const cabinetClientNameMap = cabinetClientGroupIndexes.length
       ? await lookupCabinetClientDisplayNames([...cabinetClientIds])
+      : null;
+    const collectorIds = new Set();
+    if (collectorGroupIndexes.length) {
+      for (const r of rows) {
+        for (const idx of collectorGroupIndexes) {
+          const id = String(r[`g${idx}`] ?? '').trim();
+          if (id && id !== '—') collectorIds.add(id);
+        }
+      }
+    }
+    const collectorNameMap = collectorGroupIndexes.length
+      ? await lookupCollectorDisplayNames([...collectorIds])
       : null;
     return rows.map((r, i) => {
       const rawValues = groups.map((_, idx) => String(r[`g${idx}`] ?? '—') || '—');
@@ -2404,6 +2486,16 @@ function mapExplorerFlowRows(
             continue;
           }
           values[idx] = explorerCabinetClientDisplayLabel(id, cabinetClientNameMap.get(id) || '');
+        }
+      }
+      if (collectorNameMap) {
+        for (const idx of collectorGroupIndexes) {
+          const id = String(rawValues[idx] || '').trim();
+          if (!id || id === '—') {
+            values[idx] = '—';
+            continue;
+          }
+          values[idx] = explorerCollectorDisplayLabel(id, collectorNameMap.get(id) || '');
         }
       }
       for (const idx of tcpGroupIndexes) {
@@ -3132,7 +3224,7 @@ async function explorerResultSeries(body = {}, flowRows = [], options = {}) {
           scopedParams[paramName] = raw;
           return `${dim.groupKeyExpr} = {${paramName}:String}`;
         }
-        if (g === 'cabinet_client' && dim.groupKeyExpr) {
+        if ((g === 'cabinet_client' || g === 'collector') && dim.groupKeyExpr) {
           if (raw === '—' || raw === '') {
             return `(${dim.groupKeyExpr} = '' OR ${dim.groupKeyExpr} = '—')`;
           }

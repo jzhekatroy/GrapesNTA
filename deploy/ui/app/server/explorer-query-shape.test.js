@@ -55,6 +55,19 @@ describe('explorer query shape', () => {
     assert.deepEqual(spec.params.series_ids, ['isp:pin', 'isp:arbital']);
   });
 
+  it('groups flows by collector id resolved from the source catalog', async () => {
+    const spec = await explorerFlows({
+      ...WINDOW,
+      groupBy: ['collector'],
+    });
+    assert.match(spec.sql, /net_flow_sources_enabled/);
+    assert.match(spec.sql, /mapFromArrays/);
+    assert.match(spec.sql, /collector_id/);
+    assert.match(spec.sql, /f\.`source_id`/);
+    assert.equal(spec.meta.groupBy[0].id, 'collector');
+    assert.match(spec.meta.groupBy[0].label, /Коллектор/);
+  });
+
   it('groups IPv4 by prefix when groupBy is src_ip/24', async () => {
     const spec = await explorerFlows({
       ...WINDOW,
