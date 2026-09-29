@@ -1,0 +1,14 @@
+[Unit]
+Description=Move empty ClickHouse parts left by a power loss
+DefaultDependencies=no
+After=local-fs.target
+Before=docker.service clickhouse-server.service
+
+[Service]
+Type=oneshot
+# Docker install: CH_DATA=/data/clickhouse
+Environment=CH_DATA=/var/lib/clickhouse
+ExecStart=/usr/local/sbin/clickhouse-quarantine-empty-parts.sh
+
+[Install]
+WantedBy=docker.service clickhouse-server.service

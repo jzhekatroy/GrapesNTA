@@ -1,0 +1,12 @@
+<!--
+  Put into /etc/clickhouse-server/config.d/ (Docker: /data/clickhouse-config/config.d/).
+  After a power loss flows_raw had ~300 empty parts (one insert per second per
+  writer, not yet fsynced). With the default limit of 100 the table refuses to
+  attach and no data is written until someone intervenes. Broken parts are
+  moved to detached/ as broken-on-start_*, nothing is deleted.
+-->
+<clickhouse>
+    <merge_tree>
+        <max_suspicious_broken_parts>5000</max_suspicious_broken_parts>
+    </merge_tree>
+</clickhouse>
