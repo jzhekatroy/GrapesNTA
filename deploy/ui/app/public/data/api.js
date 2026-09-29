@@ -838,6 +838,10 @@ const ApiClient = (() => {
     return requestJson(`/api/observations/${encodeURIComponent(id)}/cancel`, { method: 'POST', body: {} });
   }
 
+  async function retryObservationMaterialize(id) {
+    return requestJson(`/api/observations/${encodeURIComponent(id)}/retry`, { method: 'POST', body: {} });
+  }
+
   function observationRunArtifactUrl(observationId, runId, file = 'report.html') {
     const q = new URLSearchParams({ file: String(file || 'report.html') });
     return `/api/observations/${encodeURIComponent(observationId)}/runs/${encodeURIComponent(runId)}/artifact?${q}`;
@@ -3050,6 +3054,7 @@ const ApiClient = (() => {
     loadObservationRuns,
     duplicateObservation,
     cancelObservationMaterialize,
+    retryObservationMaterialize,
     observationRunArtifactUrl,
     loadSmtpSettings,
     saveSmtpSettings,

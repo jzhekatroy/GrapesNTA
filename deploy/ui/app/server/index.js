@@ -51,6 +51,7 @@ const {
   duplicateObservation,
   cancelMaterialize,
   queueMaterialize,
+  retryMaterialize,
   previewObservation,
   runObservationReport,
   listRuns,
@@ -1527,6 +1528,19 @@ app.post('/api/observations/:id/materialize', async (req, res) => {
       occupants: err.occupants || undefined,
       quotas: err.quotas || undefined,
     });
+  }
+});
+
+app.post('/api/observations/:id/retry', async (req, res) => {
+  try {
+    const data = await retryMaterialize(req.params.id, req.user.id);
+    if (!data) {
+      res.status(404).json({ error: 'Наблюдение не найдено' });
+      return;
+    }
+    res.json({ ok: true, data });
+  } catch (err) {
+    res.status(err.status || 400).json({ error: err.message });
   }
 });
 

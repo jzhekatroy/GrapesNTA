@@ -520,7 +520,8 @@ async function withMeta(item, allItems = null, userId = null) {
     const mw = materializeWarning(active);
     if (mw) warnings.push(mw);
   }
-  if (item.materialize?.lastError) {
+  const materializeIssue = materializeIssueOf(item);
+  if (item.materialize?.lastError && !materializeIssue) {
     warnings.push(`Ошибка подготовки данных: ${item.materialize.lastError}`);
   }
   const report = {
@@ -546,7 +547,24 @@ async function withMeta(item, allItems = null, userId = null) {
       occupants: materializeOccupants(all),
     },
     warnings,
+    materializeIssue,
     backfillProgress: backfillProgress(item.materialize),
+  };
+}
+
+const STOPPED_ERROR_PREFIX = /^остановлено после \d+ ошибок:\s*/i;
+
+/** Rollup error the tile can explain and offer to retry; null when healthy. */
+function materializeIssueOf(item) {
+  const mat = item?.materialize || {};
+  if (mat.status !== 'error') return null;
+  const stopped = !mat.enabled;
+  return {
+    reason: String(mat.lastError || '').replace(STOPPED_ERROR_PREFIX, '') || 'неизвестная ошибка',
+    failCount: Number(mat.failCount) || 0,
+    maxFailCount: MAX_FAIL_COUNT,
+    stopped,
+    nextAttemptAt: stopped ? null : (mat.nextAttemptAt || null),
   };
 }
 
@@ -658,6 +676,34 @@ async function cancelMaterialize(id, userId) {
     next.materialize.cancelRequested = false;
     next.materialize.enabled = false;
   }
+  await upsertObservation(next);
+  return withMeta(next, items.map((row) => (row.id === id ? next : row)), userId);
+}
+
+async function retryMaterialize(id, userId) {
+  const items = await loadAllObservations();
+  const existing = items.find((row) => row.id === id);
+  if (!assertObservationOwner(existing, userId)) return null;
+  if (existing.materialize?.status !== 'error') {
+    const err = new Error('Наблюдение не в ошибке — повторять нечего.');
+    err.status = 400;
+    throw err;
+  }
+  const next = {
+    ...existing,
+    materialize: {
+      ...(existing.materialize || {}),
+      enabled: true,
+      status: 'queued',
+      failCount: 0,
+      nextAttemptAt: null,
+      runningStartedAt: null,
+      cancelRequested: false,
+      lastError: null,
+    },
+    live: { ...(existing.live || {}), enabled: true },
+    updatedAt: new Date().toISOString(),
+  };
   await upsertObservation(next);
   return withMeta(next, items.map((row) => (row.id === id ? next : row)), userId);
 }
@@ -1511,9 +1557,7 @@ async function previewObservationWithThresholds(obs, window) {
 
 function rollupEmptyWarning(obs) {
   const st = obs.materialize?.status || 'queued';
-  if (st === 'error') {
-    return `Rollup ошибка: ${obs.materialize?.lastError || 'неизвестно'}`;
-  }
+  if (st === 'error') return null;
   if (st === 'queued' || st === 'running' || st === 'lagging') {
     const lag = Number(obs.materialize?.lagSeconds);
     if (Number.isFinite(lag) && lag > 120) {
@@ -2795,6 +2839,7 @@ module.exports = {
   duplicateObservation,
   cancelMaterialize,
   queueMaterialize,
+  retryMaterialize,
   previewObservation,
   runObservationReport,
   listRuns,

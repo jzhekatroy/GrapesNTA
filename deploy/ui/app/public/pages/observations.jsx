@@ -804,33 +804,90 @@ function ObservationChartStats({ points, lines, mode = 'total' }) {
   );
 }
 
-function ObservationSeriesFocus({ lines, focusKey, onFocus }) {
+function observationSeriesCountLabel(count) {
+  const n10 = count % 10;
+  const n100 = count % 100;
+  if (n10 === 1 && n100 !== 11) return 'серия';
+  if (n10 >= 2 && n10 <= 4 && (n100 < 12 || n100 > 14)) return 'серии';
+  return 'серий';
+}
+
+function ObservationSeriesFocus({ lines, focusKeys, onToggle, onClear }) {
   if (!lines?.length || lines.length < 2) return null;
+  const selected = new Set(focusKeys || []);
+  const filtering = selected.size > 0;
   return (
     <div className="obs-tile__legend" role="group" aria-label="Серии графика">
       <button
         type="button"
-        className={`obs-tile__chip${focusKey == null ? ' is-active' : ''}`}
-        onClick={() => onFocus(null)}
+        className={`obs-tile__chip${!filtering ? ' is-active' : ''}`}
+        aria-pressed={!filtering}
+        onClick={onClear}
       >
         Все
       </button>
       {lines.map((ln) => {
-        const solo = focusKey === ln.key;
-        const dim = focusKey != null && !solo;
+        const on = selected.has(ln.key);
+        const dim = filtering && !on;
         return (
           <button
             key={ln.key}
             type="button"
-            className={`obs-tile__chip${solo ? ' is-solo' : ''}${dim ? ' is-off' : ''}`}
-            title={solo ? 'Показать все серии' : `Только ${ln.label || ln.key}`}
-            onClick={() => onFocus(solo ? null : ln.key)}
+            className={`obs-tile__chip${on ? ' is-solo' : ''}${dim ? ' is-off' : ''}`}
+            aria-pressed={on}
+            title={on ? 'Убрать из выбора' : 'Добавить к выбранным'}
+            onClick={() => onToggle(ln.key)}
           >
             <span className="obs-tile__chip-swatch" style={{ background: ln.color || 'var(--fg-muted)' }} />
             <span className="obs-tile__chip-label">{ln.label || ln.key}</span>
           </button>
         );
       })}
+    </div>
+  );
+}
+
+function formatObservationAttemptTime(iso, timeZone) {
+  const at = new Date(iso);
+  if (!Number.isFinite(at.getTime())) return '';
+  const opts = { hour: '2-digit', minute: '2-digit' };
+  if (timeZone) opts.timeZone = timeZone;
+  const dayKey = (d) => d.toLocaleDateString('ru-RU', timeZone ? { timeZone } : undefined);
+  const time = at.toLocaleTimeString('ru-RU', opts);
+  if (dayKey(at) === dayKey(new Date())) return time;
+  const date = at.toLocaleDateString('ru-RU', { day: 'numeric', month: 'short', ...(timeZone ? { timeZone } : {}) });
+  return `${date}, ${time}`;
+}
+
+function ObservationMaterializeIssue({ issue, displayTimezone, onRetry }) {
+  const [busy, setBusy] = useState(false);
+  const nextAt = issue.nextAttemptAt
+    ? formatObservationAttemptTime(issue.nextAttemptAt, displayTimezone)
+    : '';
+  let status;
+  if (issue.stopped) {
+    status = `Остановлено после ${issue.maxFailCount} ошибок, само не продолжит.`;
+  } else if (nextAt) {
+    status = `Ошибок подряд: ${issue.failCount} из ${issue.maxFailCount}. Следующая попытка в ${nextAt}.`;
+  } else {
+    status = `Ошибок подряд: ${issue.failCount} из ${issue.maxFailCount}. Повтор на ближайшем цикле.`;
+  }
+  const retry = () => {
+    if (!onRetry || busy) return;
+    setBusy(true);
+    Promise.resolve(onRetry()).finally(() => setBusy(false));
+  };
+  return (
+    <div className="obs-tile__issue" role="alert">
+      <div className="obs-tile__issue-text">
+        <div className="obs-tile__issue-title">Данные не считаются: {issue.reason}</div>
+        <div className="obs-tile__issue-status">{status}</div>
+      </div>
+      {onRetry && (
+        <button type="button" className="btn btn--sm" disabled={busy} onClick={retry}>
+          {busy ? 'Запуск…' : 'Повторить сейчас'}
+        </button>
+      )}
     </div>
   );
 }
@@ -887,6 +944,7 @@ function ObservationLiveTile({
   onSettings,
   onDelete,
   onCancel,
+  onRetry,
   onRunReport,
   onLookbackChange,
   onChartStyleChange,
@@ -908,7 +966,7 @@ function ObservationLiveTile({
   const [expandedTab, setExpandedTab] = useState(() => (
     hasTopTableWidget(item.widgets) ? 'top' : 'reports'
   )); // top | reports
-  const [focusKey, setFocusKey] = useState(null);
+  const [focusKeys, setFocusKeys] = useState([]);
   const customRangeRef = useRef(null);
   const displayTimezone = typeof getDisplayTimezone === 'function' ? getDisplayTimezone() : undefined;
 
@@ -921,7 +979,7 @@ function ObservationLiveTile({
     setChartStyle(observationChartStyleFromWidgets(item.widgets));
     setCustomRange(null);
     setZoomStack([]);
-    setFocusKey(null);
+    setFocusKeys([]);
     if (!hasTopTableWidget(item.widgets)) setExpandedTab('reports');
   }, [item.id, item.lookback, item.widgets]);
 
@@ -1043,13 +1101,25 @@ function ObservationLiveTile({
   const lines = chartWidget?.lines || [];
   const lineKeys = lines.map((ln) => ln.key).join('\0');
   useEffect(() => {
-    if (focusKey && !lines.some((ln) => ln.key === focusKey)) setFocusKey(null);
-  }, [focusKey, lineKeys]);
-  const visibleLines = focusKey ? lines.filter((ln) => ln.key === focusKey) : lines;
+    setFocusKeys((prev) => {
+      if (!prev.length) return prev;
+      const allowed = new Set(lines.map((ln) => ln.key));
+      const next = prev.filter((key) => allowed.has(key));
+      return next.length === prev.length ? prev : next;
+    });
+  }, [lineKeys]);
+  const focusSet = useMemo(() => new Set(focusKeys), [focusKeys]);
+  const visibleLines = focusSet.size ? lines.filter((ln) => focusSet.has(ln.key)) : lines;
   const chartStackMode = observationChartStyleToStackMode(chartStyle);
-  const focusLabel = focusKey
-    ? (lines.find((ln) => ln.key === focusKey)?.label || focusKey)
+  const focusLabel = focusSet.size
+    ? lines.filter((ln) => focusSet.has(ln.key)).map((ln) => ln.label || ln.key).join(', ')
     : null;
+
+  const toggleFocusKey = (key) => {
+    setFocusKeys((prev) => (
+      prev.includes(key) ? prev.filter((item) => item !== key) : [...prev, key]
+    ));
+  };
   const topGroupBy = groupByFromWidgets(item.widgets);
   const topLabel = topGroupBy.map((g) => groupLabel(g, groupOptions)).join(' × ');
   const nativeSummary = isNativeAggregate
@@ -1077,7 +1147,7 @@ function ObservationLiveTile({
   else if (refreshing) footerMeta = 'обновление…';
   else if (verboseMeta) {
     footerMeta = chartMode === 'grouped'
-      ? `${focusLabel ? `1 серия · ${focusLabel}` : `${lines.length} серий`} · ${points.length} точек · ${periodLabel}${customRange ? ' · zoom' : ''}`
+      ? `${focusLabel ? `${focusKeys.length} ${observationSeriesCountLabel(focusKeys.length)} · ${focusLabel}` : `${lines.length} серий`} · ${points.length} точек · ${periodLabel}${customRange ? ' · zoom' : ''}`
       : `${points.length} точек · ${periodLabel}${customRange ? ' · zoom' : ''}`;
     if (updatedAt) footerMeta += ` · ${updatedAt.toLocaleTimeString('ru-RU')}`;
   }
@@ -1166,6 +1236,13 @@ function ObservationLiveTile({
       {error && (
         <div style={{ color: 'var(--st-critical)', font: 'var(--pv-text-body-3)' }}>{error}</div>
       )}
+      {item.materializeIssue && (
+        <ObservationMaterializeIssue
+          issue={item.materializeIssue}
+          displayTimezone={displayTimezone}
+          onRetry={canEdit ? onRetry : null}
+        />
+      )}
       {(item.warnings || []).map((w) => (
         <div key={w} style={{ color: 'var(--fg-warning)', font: 'var(--pv-text-body-3)' }}>{w}</div>
       ))}
@@ -1194,8 +1271,9 @@ function ObservationLiveTile({
       {chartMode === 'grouped' && (
         <ObservationSeriesFocus
           lines={lines}
-          focusKey={focusKey}
-          onFocus={setFocusKey}
+          focusKeys={focusKeys}
+          onToggle={toggleFocusKey}
+          onClear={() => setFocusKeys([])}
         />
       )}
       {!!points.length && (
@@ -1265,7 +1343,7 @@ function ObservationLiveTile({
                     {topRowsWithOther.map((r) => {
                       const rowKey = r.key || r.id;
                       const onChart = lines.some((ln) => ln.key === rowKey);
-                      const isFocus = focusKey != null && rowKey === focusKey;
+                      const isFocus = focusSet.has(rowKey);
                       return (
                         <tr
                           key={rowKey}
@@ -1274,8 +1352,8 @@ function ObservationLiveTile({
                             onChart ? 'obs-tile__row--pick' : '',
                             isFocus ? 'obs-tile__row--focus' : '',
                           ].filter(Boolean).join(' ') || undefined}
-                          title={onChart ? (isFocus ? 'Показать все серии' : 'Показать только эту серию') : undefined}
-                          onClick={onChart ? () => setFocusKey(isFocus ? null : rowKey) : undefined}
+                          title={onChart ? (isFocus ? 'Убрать из выбора' : 'Добавить к выбранным') : undefined}
+                          onClick={onChart ? () => toggleFocusKey(rowKey) : undefined}
                         >
                           {(r.values || []).map((v, i) => (
                             <td key={i} style={{ padding: 4 }} className="mono">{v}</td>
@@ -1984,6 +2062,10 @@ function PageObservations({ onNavigate }) {
                 onCancel={() => ApiClient.cancelObservationMaterialize(item.id)
                   .then(() => reload())
                   .then(() => pushToast?.({ kind: 'success', title: 'Подготовка отменена' }))
+                  .catch((e) => setError(e.message))}
+                onRetry={() => ApiClient.retryObservationMaterialize(item.id)
+                  .then(() => reload())
+                  .then(() => pushToast?.({ kind: 'success', title: 'Перезапущено', desc: 'Воркер возьмёт наблюдение в течение минуты' }))
                   .catch((e) => setError(e.message))}
                 onLookbackChange={changeTileLookback}
                 onChartStyleChange={changeTileChartStyle}

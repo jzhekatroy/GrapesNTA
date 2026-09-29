@@ -7094,6 +7094,28 @@ html.modal-open #root {
   gap: 8px;
   margin-left: auto;
 }
+.obs-tile__issue {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 10px;
+  border: 1px solid var(--st-critical);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--st-critical) 8%, transparent);
+}
+.obs-tile__issue-text {
+  flex: 1;
+  min-width: 0;
+}
+.obs-tile__issue-title {
+  color: var(--st-critical);
+  font: var(--pv-text-body-3-bold);
+  overflow-wrap: anywhere;
+}
+.obs-tile__issue-status {
+  color: var(--fg-secondary);
+  font: var(--pv-text-body-3);
+}
 .obs-tile__legend {
   display: flex;
   flex-wrap: wrap;
