@@ -173,18 +173,15 @@ class FreshnessProbeWindow(unittest.TestCase):
         self.assertEqual(len(ch.queries), 1)
         self.assertIn("toStartOfFiveMinutes", ch.queries[0])
 
-    def test_lagging_raw_reads_only_the_newest_bucket(self):
+    def test_lagging_raw_reads_only_the_latest_partition(self):
         ch = RecordingClickHouse(
-            ["1970-01-01 00:00:00", "2026-09-20 03:10:00", "2026-09-20 03:11:00"]
+            ["1970-01-01 00:00:00", "2026-09-20 03:11:00"]
         )
         got = raw_max_received(ch)
         self.assertEqual(got, datetime(2026, 9, 20, 3, 11, tzinfo=timezone.utc))
-        self.assertEqual(len(ch.queries), 3)
-        self.assertIn("ORDER BY b DESC LIMIT 1", ch.queries[1])
-        self.assertIn(
-            "toStartOfFiveMinutes(time_received_ns) = toDateTime('2026-09-20 03:10:00', 'UTC')",
-            ch.queries[2],
-        )
+        self.assertEqual(len(ch.queries), 2)
+        self.assertIn("SELECT max(date)", ch.queries[1])
+        self.assertIn("max(time_received_ns)", ch.queries[1])
 
     def test_empty_table_stays_none(self):
         ch = RecordingClickHouse(["", ""])
@@ -199,20 +196,20 @@ class FreshnessProbeWindow(unittest.TestCase):
         self.assertIn("toStartOfFiveMinutes", ch.queries[0])
         self.assertIn("net_flow_sources_enabled", ch.queries[0])
 
-    def test_enabled_sources_probe_falls_back_to_the_newest_bucket(self):
+    def test_enabled_sources_probe_falls_back_to_today_partition(self):
         ch = RecordingClickHouse(
-            ["1970-01-01 00:00:00", "2026-09-20 03:10:00", "2026-09-20 03:11:00"]
+            ["1970-01-01 00:00:00", "2026-09-20 03:11:00"]
         )
         got = flows_raw_enabled_max_minute(ch)
         self.assertEqual(got, datetime(2026, 9, 20, 3, 11, tzinfo=timezone.utc))
-        self.assertEqual(len(ch.queries), 3)
+        self.assertEqual(len(ch.queries), 2)
+        self.assertIn("date = today() - 0", ch.queries[1])
         self.assertIn("net_flow_sources_enabled", ch.queries[1])
-        self.assertIn("net_flow_sources_enabled", ch.queries[2])
 
     def test_enabled_sources_probe_empty_stays_none(self):
-        ch = RecordingClickHouse(["1970-01-01 00:00:00", ""])
+        ch = RecordingClickHouse(["1970-01-01 00:00:00"] + [""] * 15)
         self.assertIsNone(flows_raw_enabled_max_minute(ch))
-        self.assertEqual(len(ch.queries), 2)
+        self.assertEqual(len(ch.queries), 16)
 
 
 class EdgeClickHouse:

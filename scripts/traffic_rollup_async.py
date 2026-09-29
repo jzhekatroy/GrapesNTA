@@ -344,9 +344,9 @@ def is_epoch_timestamp(raw: str) -> bool:
 # time_received_ns), так что условие на это выражение отсекает гранулы и запрос
 # читает десятки миллионов строк вместо миллиарда. Когда коллектор молчал
 # дольше окна или буфер коллектора досылает отставание, узкий запрос вернёт
-# пусто. Тогда самый новый пятиминутный интервал находится чтением по ключу
-# (ORDER BY ... DESC LIMIT 1, единицы миллионов строк), и максимум ищется
-# только внутри него. Широкий запрос за 14 дней читал ~16 млрд строк на вызов.
+# пусто. Тогда максимум берётся только из последней партиции: обратный
+# проход по всей таблице читает сотни миллионов строк и упирается в
+# max_rows_to_read, после чего тик роллапа падает и график не двигается.
 RAW_MAX_RECENT_WINDOW_MINUTES = 30
 
 
@@ -356,19 +356,6 @@ def recent_five_minute_filter(minutes: int) -> str:
         "toStartOfFiveMinutes(time_received_ns) >= "
         f"toStartOfFiveMinutes(now() - INTERVAL {window} MINUTE)"
     )
-
-
-def newest_five_minute_filter(ch: ClickHouseClient, where: str, display: str) -> Optional[str]:
-    """Filter on the newest occupied five-minute bucket, or None when empty."""
-    raw = ch.query(
-        "SELECT formatDateTime(b, '%F %T', 'UTC') FROM ("
-        f"SELECT toStartOfFiveMinutes(time_received_ns) AS b FROM {FLOWS_RAW_LIVE_TABLE} "
-        f"WHERE {where} ORDER BY b DESC LIMIT 1)",
-        display=display,
-    ).strip()
-    if is_epoch_timestamp(raw):
-        return None
-    return f"toStartOfFiveMinutes(time_received_ns) = toDateTime('{raw[:19]}', 'UTC')"
 
 
 def raw_max_received(
@@ -398,8 +385,16 @@ def raw_max_received(
         "flows_raw max received (recent window)",
     )
     if is_epoch_timestamp(raw):
-        newest = newest_five_minute_filter(ch, base, "flows_raw newest five-minute bucket")
-        raw = probe(newest, "flows_raw max received (newest bucket)") if newest else ""
+        # Обратный проход по всей таблице читает сотни миллионов строк и
+        # упирается в max_rows_to_read (у ui_admin это 100 млн). Тик тогда
+        # падает, и график стоит. max(date) берётся из списка партиций,
+        # дальше агрегат только по одной партиции.
+        raw = ch.query(
+            "SELECT formatDateTime(max(time_received_ns), '%F %T', 'UTC') "
+            f"FROM {FLOWS_RAW_LIVE_TABLE} "
+            f"WHERE date = (SELECT max(date) FROM {FLOWS_RAW_LIVE_TABLE} WHERE {base})",
+            display="flows_raw max received (latest partition)",
+        ).strip()
     if is_epoch_timestamp(raw):
         return None
     try:
@@ -1171,8 +1166,18 @@ def flows_raw_enabled_max_minute(
         "flows_raw enabled max minute (recent window)",
     )
     if is_epoch_timestamp(raw):
-        newest = newest_five_minute_filter(ch, base, "flows_raw enabled newest five-minute bucket")
-        raw = probe(newest, "flows_raw enabled max minute (newest bucket)") if newest else ""
+        # Тот же предел строк: фильтр по source_id не даёт взять max(date)
+        # из метаданных, поэтому идём по одной партиции, с сегодня назад.
+        source = "source_id IN (SELECT source_id FROM default.net_flow_sources_enabled)"
+        for ago in range(0, 15):
+            raw = ch.query(
+                "SELECT formatDateTime(toStartOfMinute(max(time_received_ns)), '%F %T', 'UTC') "
+                f"FROM {FLOWS_RAW_LIVE_TABLE} "
+                f"WHERE date = today() - {ago} AND {source}",
+                display=f"flows_raw enabled max minute (day -{ago})",
+            ).strip()
+            if not is_epoch_timestamp(raw):
+                break
     result: Optional[datetime] = None
     if raw and not is_epoch_timestamp(raw):
         try:
