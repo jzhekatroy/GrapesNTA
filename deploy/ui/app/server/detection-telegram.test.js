@@ -32,6 +32,7 @@ const {
   normalizeAlertKind,
   pickAlertCandidates,
   pickNormalizeCandidates,
+  pickSilentNormalizeCandidates,
   formatAlertMessage,
   mapEventRow,
   formatNormalizeMessage,
@@ -1484,6 +1485,40 @@ describe('detection-telegram', () => {
     assert.match(text, /393 источника/);
     assert.match(text, /раньше почти не было/);
     assert.match(text, /119 Б/);
+  });
+
+  // Зеркало, 08.09: тихий абонент ниже 20 Мбит/с не пишется в минутную
+  // таблицу, и событие висело три недели.
+  it('замолчавший объект закрывается после N тихих тиков', () => {
+    const active = {
+      id: 'client|69201|2026-09-08 08:10:00', scope: 'client', scopeId: '69201',
+      signal: 'volume', alertMinute: '2026-09-08 08:10:00',
+    };
+    const activeByKey = new Map([['client|69201', active], ['client|69201|volume', active]]);
+    const ticks = new Map();
+    const opts = { settings: { normalizeStreak: 3 }, ticks };
+    const empty = new Set();
+    assert.equal(pickSilentNormalizeCandidates(activeByKey, empty, '2026-09-29 05:00:00', opts).length, 0);
+    assert.equal(pickSilentNormalizeCandidates(activeByKey, empty, '2026-09-29 05:01:00', opts).length, 0);
+    const out = pickSilentNormalizeCandidates(activeByKey, empty, '2026-09-29 05:02:00', opts);
+    assert.equal(out.length, 1);
+    assert.equal(out[0].active.id, active.id);
+    assert.equal(out[0].telegram, false);
+  });
+
+  it('объект снова в таблице — счёт тихих тиков сбрасывается', () => {
+    const active = {
+      id: 'e1', scope: 'client', scopeId: '1', signal: 'volume', alertMinute: '2026-09-29 04:50:00',
+    };
+    const activeByKey = new Map([['client|1', active]]);
+    const ticks = new Map();
+    const opts = { settings: { normalizeStreak: 2 }, ticks };
+    pickSilentNormalizeCandidates(activeByKey, new Set(), '2026-09-29 05:00:00', opts);
+    pickSilentNormalizeCandidates(activeByKey, new Set(['client|1']), '2026-09-29 05:01:00', opts);
+    assert.equal(pickSilentNormalizeCandidates(activeByKey, new Set(), '2026-09-29 05:02:00', opts).length, 0);
+    const out = pickSilentNormalizeCandidates(activeByKey, new Set(), '2026-09-29 05:03:00', opts);
+    assert.equal(out.length, 1);
+    assert.equal(out[0].telegram, true);
   });
 
   it('«в один сервер»: источники и порты по самому адресу, рост ×1,23 не «ниже нормы»', () => {

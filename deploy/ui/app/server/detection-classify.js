@@ -35,6 +35,14 @@ const TOP_DST_CARPET = 0.08;
 const UDP_DOMINANT = 0.6;
 const DOWNLOAD_SRC_SHARE_MIN = 0.5;
 const DOWNLOAD_SRC_IPS_MAX = 2;
+// Закачка с нескольких CDN сразу: главная /24 держит меньше половины, и
+// hasNarrowSource её не видит, а у абонента с одним адресом топ IP всегда
+// около 100%. Зеркало 22–29.09: 94 из 97 всплесков до 2.4 Гбит — TCP с 80/443,
+// пакет 1270–1518 Б, 1–121 источник. У флудов стенда источников от 185.
+const WEB_DOWNLOAD_PORTS = new Set([80, 443]);
+const WEB_DOWNLOAD_SHARE_MIN = 0.8;
+const WEB_DOWNLOAD_PKT_MIN = 1000;
+const WEB_DOWNLOAD_SRCS_MAX = 200;
 const VICTIM_ACTION_SHARE_MIN = 0.15;
 // Цель внутри клиента: один адрес держит заметную долю своего протокола,
 // источников много (это не закачка с одного места) и к своему прошлому часу
@@ -271,6 +279,23 @@ function handOffToClient(next, investigate, ip, context) {
   };
 }
 
+function webDownloadShare(investigate) {
+  const rows = Array.isArray(investigate?.l4src) ? investigate.l4src : [];
+  return rows.reduce((sum, row) => (
+    l4ProtoNum(row) === 6 && WEB_DOWNLOAD_PORTS.has(Number(row.port))
+      ? sum + (num(row.share) || 0)
+      : sum
+  ), 0);
+}
+
+function isWebDownload(verdict = {}, investigate = {}) {
+  if (verdict.kind === KINDS.amplification || verdict.kind === KINDS.syn_flood) return false;
+  const srcs = num(investigate?.sources?.ipCount);
+  if (!(srcs > 0) || srcs >= WEB_DOWNLOAD_SRCS_MAX) return false;
+  if (!(num(verdict.avgPkt) >= WEB_DOWNLOAD_PKT_MIN)) return false;
+  return webDownloadShare(investigate) >= WEB_DOWNLOAD_SHARE_MIN;
+}
+
 function isLegitimatePeak(verdict = {}) {
   return verdict.kind === KINDS.benign_peak
     && /пик загрузки/.test(String(verdict.reason || ''));
@@ -325,6 +350,14 @@ function refineClassification(verdict, investigate, context = {}) {
     const top = Math.min(3, session.sessions);
     next.reason = `пик загрузки · ${top === 1 ? '1 сеанс даёт' : `${top} сеанса дают`} `
       + `${(session.topShare * 100).toFixed(0)}% адреса · ${downloadPeakLabel(investigate)}`
+      + (topShare != null ? ` · топ IP ${(topShare * 100).toFixed(1)}%` : '');
+    next.needsInvestigate = false;
+    return next;
+  }
+  if (isWebDownload(next, investigate)) {
+    next.kind = KINDS.benign_peak;
+    next.reason = `пик загрузки · TCP 80/443 ${(webDownloadShare(investigate) * 100).toFixed(0)}%`
+      + ` · ${investigate.sources.ipCount} источников`
       + (topShare != null ? ` · топ IP ${(topShare * 100).toFixed(1)}%` : '');
     next.needsInvestigate = false;
     return next;
@@ -533,6 +566,7 @@ module.exports = {
   TARGET_SHARE_MIN,
   TARGET_SRCS_MIN,
   isDownloadPeak,
+  isWebDownload,
   sessionDownload,
   downloadPeakLabel,
   isLegitimatePeak,

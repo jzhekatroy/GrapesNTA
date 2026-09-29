@@ -1748,6 +1748,56 @@ function pickNormalizeCandidates(allRows, previousByKey, threshold, options = {}
   return out;
 }
 
+// Объект ниже MIN_BPS не пишется в минутную таблицу, и pickNormalizeCandidates
+// его не видит: на зеркале 73 события 08.09 висели три недели у тихих абонентов.
+// Отсутствие строки в обработанном тике — тихая минута. Счёт в памяти, а не по
+// дырам в таблице: простой воркера тишиной не считается.
+const silentTicksByEvent = new Map();
+const SILENT_TELEGRAM_MAX_AGE_MS = 24 * 60 * MINUTE;
+
+function pickSilentNormalizeCandidates(activeByKey, presentKeys, minute, options = {}) {
+  const settings = options.settings || {};
+  const ticks = options.ticks instanceof Map ? options.ticks : silentTicksByEvent;
+  const skipIds = options.skipIds instanceof Set ? options.skipIds : new Set();
+  const seen = new Set();
+  const out = [];
+  for (const active of activeByKey.values()) {
+    const id = active?.id;
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    const objectId = objectKey(active.scope, active.scopeId);
+    if (presentKeys.has(objectId)) {
+      ticks.delete(id);
+      continue;
+    }
+    const count = (ticks.get(id) || 0) + 1;
+    ticks.set(id, count);
+    if (skipIds.has(id)) continue;
+    const cfg = signalSettings(settings, active.signal || SIGNALS.volume);
+    if (count < cfg.normalizeStreak) continue;
+    ticks.delete(id);
+    const alertTs = parseUtc(active.alertMinute);
+    const nowTs = parseUtc(minute);
+    out.push({
+      row: {
+        scope: active.scope, scope_id: active.scopeId, proto: 'all', minute,
+        bps: 0, pps: 0, bytes: 0, packets: 0, growth_bps: 0, growth_pps: 0,
+      },
+      key: objectId,
+      signalKey: objectSignalKey(active.scope, active.scopeId, active.signal || SIGNALS.volume),
+      signal: active.signal || SIGNALS.volume,
+      active,
+      silent: true,
+      telegram: Number.isFinite(alertTs) && Number.isFinite(nowTs)
+        && nowTs - alertTs <= SILENT_TELEGRAM_MAX_AGE_MS,
+    });
+  }
+  for (const id of ticks.keys()) {
+    if (!seen.has(id)) ticks.delete(id);
+  }
+  return out;
+}
+
 function groupRowsByObject(rows) {
   const map = new Map();
   for (const row of rows) {
@@ -2641,6 +2691,15 @@ async function processDetectionAlerts({ minute, rows, nameByKey }) {
     thresholdByKey,
     streak: settings.normalizeStreak,
   });
+  const presentKeys = new Set(rows
+    .filter((r) => String(r.proto) === 'all')
+    .map((r) => objectKey(r.scope, r.scope_id)));
+  if (presentKeys.size) {
+    normalizeCandidates.push(...pickSilentNormalizeCandidates(activeByKey, presentKeys, minute, {
+      settings,
+      skipIds: new Set(normalizeCandidates.map((c) => c.active?.id).filter(Boolean)),
+    }));
+  }
 
   if (!alertCandidates.length && !normalizeCandidates.length) {
     return {
@@ -2780,7 +2839,7 @@ async function processDetectionAlerts({ minute, rows, nameByKey }) {
     if (tg.error) errors.push({ key: objectId, message: tg.error });
   }
 
-  for (const { row, key, active } of normalizeCandidates) {
+  for (const { row, key, active, silent, telegram } of normalizeCandidates) {
     const group = grouped.get(key);
     const name = nameByKey?.get(key) || active.name || row.scope_id;
     const text = formatNormalizeMessage({
@@ -2812,9 +2871,10 @@ async function processDetectionAlerts({ minute, rows, nameByKey }) {
     });
     closed += 1;
     const skipShare = String(active.telegramSkip || '') === TELEGRAM_SKIP_BELOW_SHARE;
+    const skipStale = silent && !telegram;
     const tg = await maybeSendTelegram(
       text,
-      (!skipShare && matchesAlertKind(true, settings.alertKind)) ? tgCfg : null,
+      (!skipShare && !skipStale && matchesAlertKind(true, settings.alertKind)) ? tgCfg : null,
     );
     if (tg.sent) sent += 1;
     if (tg.error) errors.push({ key, message: tg.error });
@@ -2993,6 +3053,7 @@ module.exports = {
   normalizeAlertKind,
   pickAlertCandidates,
   pickNormalizeCandidates,
+  pickSilentNormalizeCandidates,
   shouldSendSignal,
   SIGNALS,
   formatAlertMessage,

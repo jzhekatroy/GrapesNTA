@@ -278,6 +278,38 @@ describe('detection-classify', () => {
     assert.equal(actionFor(refined, { victim: { ip: '188.143.152.77', port: 49986 } }), 'пик загрузки, фильтр не нужен');
   });
 
+  it('56320: HTTPS с 23 IP нескольких CDN в один адрес → пик загрузки', () => {
+    const first = classifyFromMetrics({
+      all: { bps: 2.19e9, port_entropy: 2.1, syn_attempts: 40, answer_pct: 90, avg_packet_bytes: 1512 },
+      tcp: { bps: 2.19e9, avg_packet_bytes: 1512 },
+      udp: { bps: 0 },
+    }, { p95: 300e6, p999: 300e6 });
+    const refined = refineClassification(first, {
+      victim: { ip: '188.143.200.10', port: 51522, protoLabel: 'TCP', share: 1 },
+      source24: [{ net24: '87.250.247.0/24', share: 0.46, ips: 4 }],
+      sources: { ipCount: 23 },
+      l4src: [{ port: 443, proto: 6, share: 0.7 }, { port: 80, proto: 6, share: 0.3 }],
+    });
+    assert.equal(refined.kind, KINDS.benign_peak);
+    assert.match(refined.reason, /пик загрузки · TCP 80\/443 100% · 23 источников/);
+    assert.equal(isAttackKind(refined.kind), false);
+  });
+
+  it('82800: TCP/80–443 с 1530 IP мелким пакетом не считается закачкой', () => {
+    const first = classifyFromMetrics({
+      all: { bps: 25.7e9, port_entropy: 2.1, avg_packet_bytes: 995 },
+      tcp: { bps: 24.4e9, avg_packet_bytes: 995 },
+      udp: { bps: 1.3e9 },
+    }, { p95: 3e9, p999: 3e9 });
+    const refined = refineClassification(first, {
+      victim: { ip: '5.188.1.1', port: 880, protoLabel: 'TCP', share: 0.3 },
+      source24: [{ net24: '1.2.3.0/24', share: 0.09, ips: 88 }],
+      sources: { ipCount: 1530 },
+      l4src: [{ port: 443, proto: 6, share: 0.84 }],
+    });
+    assert.equal(refined.kind, KINDS.volumetric);
+  });
+
   it('76998: QUIC UDP/443 с Akamai на эфемерный порт → пик загрузки', () => {
     const first = classifyFromMetrics({
       all: { bps: 23.8e6, port_entropy: 0.77, syn_attempts: 37, answer_pct: 21.6, avg_packet_bytes: 1479 },
