@@ -86,15 +86,7 @@ systemctl enable --now clickhouse-server
 
 Порты по умолчанию: HTTP **8123**, native **9000**. Свои (как на текущем стенде `6123`/`6124`) — `http_port` / `tcp_port` в `ports.xml`.
 
-Старт после отключения питания. Без этого `flows_raw` может не подключиться из‑за сотен пустых кусков, и запись встаёт до ручного вмешательства:
-
-```bash
-cp deploy/clickhouse/broken_parts.xml /etc/clickhouse-server/config.d/   # Docker: /data/clickhouse-config/config.d/
-install -m 755 deploy/clickhouse/quarantine-empty-parts.sh /usr/local/sbin/clickhouse-quarantine-empty-parts.sh
-cp deploy/systemd/clickhouse-quarantine-empty-parts.service /etc/systemd/system/
-# Docker: в юните Environment=CH_DATA=/data/clickhouse
-systemctl daemon-reload && systemctl enable clickhouse-quarantine-empty-parts.service
-```
+Старт после отключения питания. Без этого `flows_raw` может не подключиться из‑за сотен пустых кусков, и запись встаёт до ручного вмешательства. На хосте с локальным ClickHouse это ставит любой `./deploy/deploy.sh` (`deploy/clickhouse/install-powerloss-guard.sh`): `config.d/broken_parts.xml` и служба, которая до старта ClickHouse уносит полностью пустые куски. Перезапуск ClickHouse для этого не нужен — настройка читается при следующем старте.
 
 ```bash
 systemctl restart clickhouse-server

@@ -24,7 +24,7 @@ This directory keeps **ops against a database**, not CREATE TABLE:
 | `register_sel_collector.sql`, `monitor_sel_collector.sql` | SEL collector seed/ops |
 | `dns_servers_1h_backfill.sh` | History backfill, not schema |
 | `local_networks_dict.xml` | ClickHouse server config snippet |
-| `broken_parts.xml`, `quarantine-empty-parts.sh` | Server start after a power loss; see `docs/INSTALL.md` §3.1 |
+| `broken_parts.xml`, `quarantine-empty-parts.sh`, `install-powerloss-guard.sh` | Power-loss start. `deploy.sh` installs this on every deploy when ClickHouse is local |
 | `bootstrap_users.sql` | CREATE USER + GRANT for a fresh install (replace passwords) |
 | `seed_net_client_example.sql` | Example rows, not DDL |
 

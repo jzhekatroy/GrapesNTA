@@ -21,6 +21,7 @@
 #   ./deploy/deploy.sh full            # schema + worker + enrichment + ui + detection
 #   ./deploy/deploy.sh all             # worker + enrichment
 #   ./deploy/deploy.sh schema          # only apply idempotent ClickHouse ensures
+# Any deploy also installs the ClickHouse power-loss guard when ClickHouse is local.
 #   ./deploy/deploy.sh pull            # only git pull
 #   ./deploy/deploy.sh status          # containers + repo head
 #   ./deploy/deploy.sh logs [svc]      # follow logs (worker|enrichment|ui|detection|all)
@@ -454,6 +455,7 @@ case "${ACTION}" in
     else
       log "skip git pull (--no-pull)"
     fi
+    bash "${REPO_ROOT}/deploy/clickhouse/install-powerloss-guard.sh"
     if [[ "${SEL_SCHEMA}" -eq 1 || "${SEL_UI}" -eq 1 ]]; then
       ensure_clickhouse_schema
     fi
