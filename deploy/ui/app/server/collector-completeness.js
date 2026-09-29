@@ -144,12 +144,10 @@ async function fetchCollectorCompleteness() {
         })}
       FROM ${table}
       WHERE ts >= now64(3) - INTERVAL {fetch_span:UInt32} MINUTE
-        AND ts <  now64(3) - INTERVAL {lag_minutes:UInt32} MINUTE
       GROUP BY source_id
     `,
     {
       fetch_span: fetchSpan,
-      lag_minutes: settings.lagMinutes,
     },
     { name: 'collectors/completeness' },
   );

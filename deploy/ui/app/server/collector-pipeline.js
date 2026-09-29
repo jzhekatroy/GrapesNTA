@@ -3,9 +3,10 @@
 const { query, collectorHealthSnapshotsTableRef } = require('./clickhouse');
 
 const LAG_MINUTES = 2;
-/** L: лаг формирования flow — смещение seen_window назад относительно acked_window,
- *  чтобы пакеты успели пройти map → spool → ClickHouse до сравнения полноты. */
-const ACK_OFFSET_MINUTES = 5;
+/** L: смещение seen_window назад относительно acked_window. xdpflowd подтверждает пакеты
+ *  в ClickHouse в ту же минуту, а любой сдвиг сравнивает разные минуты трафика и даёт
+ *  ложные провалы до 92–96% на 30-минутном окне. */
+const ACK_OFFSET_MINUTES = 0;
 const HISTORY_WINDOW_MINUTES = 1440;
 const HISTORY_BUCKET_SECONDS = 900;
 const COMPLETENESS_GREEN_PCT = 99;
@@ -544,6 +545,53 @@ const META_COLUMNS_SQL = `
   max(ts) AS window_to
 `;
 
+function windowsForRange(ackOffsetMinutes) {
+  const ackStart = "fromUnixTimestamp64Milli({from_ms:Int64}, 'UTC')";
+  const ackEnd = "fromUnixTimestamp64Milli({to_ms:Int64}, 'UTC')";
+  const seenStart = `${ackStart} - INTERVAL ${ackOffsetMinutes} MINUTE`;
+  const seenEnd = `${ackEnd} - INTERVAL ${ackOffsetMinutes} MINUTE`;
+  return { ackStart, ackEnd, seenStart, seenEnd };
+}
+
+/** Counters are max-min per window, so a restart inside a long range undercounts. */
+const DETAIL_RANGE_MAX_MS = 24 * 3600000;
+
+function parseDetailRange(fromRaw, toRaw, nowMs = Date.now()) {
+  if (fromRaw == null || fromRaw === '' || toRaw == null || toRaw === '') return null;
+  const fromMs = Math.round(Number(fromRaw));
+  const toMs = Math.min(Math.round(Number(toRaw)), nowMs);
+  if (!Number.isFinite(fromMs) || !Number.isFinite(toMs) || toMs - fromMs < 10 * 60000) {
+    throw apiError('Некорректный период');
+  }
+  if (toMs - fromMs > DETAIL_RANGE_MAX_MS) throw apiError('Подробный расчёт доступен для периода до 24 часов');
+  return { fromMs, toMs };
+}
+
+async function fetchSnapshotRowForRange(sourceId, range, timing) {
+  const table = collectorHealthSnapshotsTableRef();
+  const { rows, elapsedMs } = await query(
+    `
+      SELECT
+        source_id,
+        ${META_COLUMNS_SQL},
+        ${buildCompletenessDeltaSql(windowsForRange(timing.ackOffsetMinutes))}
+      FROM ${table}
+      WHERE source_id = {source_id:String}
+        AND ts >= fromUnixTimestamp64Milli({from_ms:Int64}, 'UTC') - INTERVAL {offset_minutes:UInt32} MINUTE
+        AND ts <  fromUnixTimestamp64Milli({to_ms:Int64}, 'UTC')
+      GROUP BY source_id
+    `,
+    {
+      source_id: sourceId,
+      from_ms: range.fromMs,
+      to_ms: range.toMs,
+      offset_minutes: timing.ackOffsetMinutes + 5,
+    },
+    { name: 'collectors/completeness/detail-range' },
+  );
+  return { row: rows[0] || null, elapsedMs };
+}
+
 async function fetchSnapshotRow(sourceId, windowMinutes, timing = resolveCompletenessTiming(windowMinutes)) {
   const table = collectorHealthSnapshotsTableRef();
   const windows = windowsRelativeToNow(timing.windowMinutes, timing.lagMinutes, timing.ackOffsetMinutes);
@@ -601,13 +649,20 @@ function buildDetailFromRow(row, timing) {
   };
 }
 
-async function fetchCompletenessDetail(sourceIdRaw, windowMinutes) {
+async function fetchCompletenessDetail(sourceIdRaw, windowMinutes, rangeRaw = {}) {
   const sourceId = parseSourceId(sourceIdRaw);
-  const timing = resolveCompletenessTiming(windowMinutes);
-  const { row, elapsedMs } = await fetchSnapshotRow(sourceId, windowMinutes, timing);
+  const range = parseDetailRange(rangeRaw.from, rangeRaw.to);
+  const timing = range
+    ? resolveCompletenessTiming(Math.round((range.toMs - range.fromMs) / 60000))
+    : resolveCompletenessTiming(windowMinutes);
+  const { row, elapsedMs } = range
+    ? await fetchSnapshotRowForRange(sourceId, range, timing)
+    : await fetchSnapshotRow(sourceId, windowMinutes, timing);
   const detail = buildDetailFromRow(row, timing);
   return {
     sourceId,
+    fromMs: range ? range.fromMs : null,
+    toMs: range ? range.toMs : null,
     windowMinutes: timing.windowMinutes,
     lagMinutes: timing.lagMinutes,
     ackOffsetMinutes: timing.ackOffsetMinutes,
@@ -702,6 +757,7 @@ module.exports = {
   buildLossBreakdown,
   buildVerdict,
   buildDetailFromRow,
+  parseDetailRange,
   fetchCompletenessDetail,
   fetchCompletenessHistory,
   META_COLUMNS_SQL,

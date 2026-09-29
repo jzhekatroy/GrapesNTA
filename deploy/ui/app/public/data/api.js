@@ -2225,13 +2225,28 @@ const ApiClient = (() => {
     return s ? `?${s}` : '';
   }
 
-  async function loadCompletenessDetail(sourceId, window = '30m') {
+  async function loadCollectorTimeline(sourceId, fromMs, toMs) {
     const health = await checkHealth();
     if (!health.connected) {
       return { source: 'error', data: null, error: LOAD_FAILED };
     }
     try {
-      const body = await getJson(`/api/collectors/completeness/detail${pipelineQueryString(sourceId, window)}`, {
+      const q = new URLSearchParams({ sourceId, from: String(fromMs), to: String(toMs) });
+      const body = await getJson(`/api/collectors/timeline?${q}`, { widget: 'collectors/timeline' });
+      return { source: 'clickhouse', data: body };
+    } catch (err) {
+      return { source: 'error', data: null, error: err.message || LOAD_FAILED };
+    }
+  }
+
+  async function loadCompletenessDetail(sourceId, window = '30m', range = null) {
+    const health = await checkHealth();
+    if (!health.connected) {
+      return { source: 'error', data: null, error: LOAD_FAILED };
+    }
+    try {
+      const rangeQs = range ? `&from=${range.fromMs}&to=${range.toMs}` : '';
+      const body = await getJson(`/api/collectors/completeness/detail${pipelineQueryString(sourceId, window)}${rangeQs}`, {
         widget: 'collectors/completeness/detail',
       });
       return { source: 'clickhouse', data: body };
@@ -3132,6 +3147,7 @@ const ApiClient = (() => {
     loadCollectorCompleteness,
     loadCompletenessDetail,
     loadCompletenessHistory,
+    loadCollectorTimeline,
     loadBmpSummary,
     loadBmpPeers,
     loadBmpRouters,

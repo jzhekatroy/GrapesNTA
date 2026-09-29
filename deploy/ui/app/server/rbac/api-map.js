@@ -31,7 +31,8 @@ function getResourceForPath(path, method) {
     || p.startsWith('/api/refs/snmp-agents')) return 'collectors';
   if (p.startsWith('/api/collectors/overview')
     || p.startsWith('/api/collectors/discovered')
-    || p.startsWith('/api/collectors/completeness')) return 'collectors';
+    || p.startsWith('/api/collectors/completeness')
+    || p.startsWith('/api/collectors/timeline')) return 'collectors';
   if (p.startsWith('/api/collectors/status')) return 'collector-status';
   if (p.startsWith('/api/bmp/')) return 'bmp';
   if (p.startsWith('/api/refs/entities') || p.startsWith('/api/refs/net-entities')) return 'entities';

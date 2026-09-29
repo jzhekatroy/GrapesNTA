@@ -136,8 +136,13 @@ function ExporterStatusCell({ completeness, isLive, flowsPerMin }) {
 
 function CompletenessPctCell({ completeness, onOpen }) {
   const c = completeness;
-  const label = c?.measurable ? 'Подробнее о полноте сбора' : (c?.tooltip || 'Полнота не измеряется');
-  const content = !c || !c.measurable ? (
+  const disconnected = c?.exporterStatus === 'no_connection';
+  const label = disconnected
+    ? 'Коллектор не присылает снимки дольше 3 минут — процент за окно неактуален'
+    : c?.measurable
+      ? `Полнота за ${c.windowMinutes || 30} мин: доля пакетов, дошедших до ClickHouse`
+      : (c?.tooltip || 'Полнота не измеряется');
+  const content = !c || !c.measurable || disconnected || c.completenessPct == null ? (
     <span className="completeness-pct-muted">—</span>
   ) : (
     <span className={`completeness-pct-value mono ${COMPLETENESS_TONE_CLASS[c.tone] || 'completeness-pct-muted'}`}>

@@ -187,6 +187,7 @@ const { fetchCollectorStatus } = require('./collector-status');
 const { fetchCollectorOverview, fetchDiscoveredSources } = require('./collector-overview');
 const { fetchCollectorCompleteness, settings: completenessSettings } = require('./collector-completeness');
 const { fetchCompletenessDetail, fetchCompletenessHistory } = require('./collector-pipeline');
+const { fetchCollectorTimeline } = require('./collector-timeline');
 const {
   getBmpSummary,
   getBmpPeers,
@@ -2559,7 +2560,10 @@ app.get('/api/collectors/completeness', async (_req, res) => {
 
 app.get('/api/collectors/completeness/detail', async (req, res) => {
   try {
-    const result = await fetchCompletenessDetail(req.query?.sourceId, completenessSettings.windowMinutes);
+    const result = await fetchCompletenessDetail(req.query?.sourceId, completenessSettings.windowMinutes, {
+      from: req.query?.from,
+      to: req.query?.to,
+    });
     res.json(result);
   } catch (err) {
     res.status(err.statusCode === 400 ? 400 : 502).json({ error: err.message });
@@ -2569,6 +2573,15 @@ app.get('/api/collectors/completeness/detail', async (req, res) => {
 app.get('/api/collectors/completeness/history', async (req, res) => {
   try {
     const result = await fetchCompletenessHistory(req.query?.sourceId);
+    res.json(result);
+  } catch (err) {
+    res.status(err.statusCode === 400 ? 400 : 502).json({ error: err.message });
+  }
+});
+
+app.get('/api/collectors/timeline', async (req, res) => {
+  try {
+    const result = await fetchCollectorTimeline(req.query?.sourceId, req.query?.from, req.query?.to);
     res.json(result);
   } catch (err) {
     res.status(err.statusCode === 400 ? 400 : 502).json({ error: err.message });
