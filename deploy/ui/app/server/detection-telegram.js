@@ -68,7 +68,7 @@ const SNAPSHOT_FIELDS = [
   'syn_attempts', 'syn_answered', 'syn_in_flows', 'syn_half_open', 'syn_half_open_reply',
   'answer_pct', 'half_open_pct', 'half_open_reply_pct',
   'port_entropy', 'port_entropy_out', 'ports_per_ip', 'ports_per_ip_out',
-  'amp_bytes', 'amp_packets', 'amp_srcs', 'growth_amp',
+  'amp_bytes', 'amp_packets', 'amp_srcs', 'growth_amp', 'growth_syn',
   'foreign_bytes', 'foreign_srcs', 'top_countries',
   'growth_foreign_bps', 'growth_foreign_share',
   'syn_only_bytes', 'syn_only_packets', 'syn_only_rows',
@@ -101,6 +101,7 @@ const SNAPSHOT_CAMEL = {
   amp_packets: 'ampPackets',
   amp_srcs: 'ampSrcs',
   growth_amp: 'growthAmp',
+  growth_syn: 'growthSyn',
   foreign_bytes: 'foreignBytes',
   foreign_srcs: 'foreignSrcs',
   top_countries: 'topCountries',
@@ -126,6 +127,9 @@ const SNAPSHOT_CAMEL = {
 
 const DEFAULT_AMP_HOUR_RATIO = 2;
 const DEFAULT_AMP_MIN_MBIT = 20;
+const DEFAULT_SYN_HOUR_RATIO = 10;
+const DEFAULT_SYN_MIN_KPPS = 200;
+const DEFAULT_SYN_PKT_MAX = 100;
 
 const DEFAULT_SETTINGS = {
   bot_token: '',
@@ -150,6 +154,10 @@ const DEFAULT_SETTINGS = {
   syn_min_share_pct: DEFAULT_MIN_CLIENT_SHARE_PCT,
   amp_hour_ratio: DEFAULT_AMP_HOUR_RATIO,
   amp_min_mbit: DEFAULT_AMP_MIN_MBIT,
+  syn_enabled: 1,
+  syn_hour_ratio: DEFAULT_SYN_HOUR_RATIO,
+  syn_min_kpps: DEFAULT_SYN_MIN_KPPS,
+  syn_pkt_max: DEFAULT_SYN_PKT_MAX,
 };
 
 let ensurePromise = null;
@@ -216,6 +224,24 @@ function normalizeAmpMinMbit(value, fallback = DEFAULT_AMP_MIN_MBIT) {
   return Math.min(100000, Math.round(n * 10) / 10);
 }
 
+function normalizeSynHourRatio(value, fallback = DEFAULT_SYN_HOUR_RATIO) {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n <= 0) return fallback;
+  return Math.min(1000, Math.round(n * 10) / 10);
+}
+
+function normalizeSynMinKpps(value, fallback = DEFAULT_SYN_MIN_KPPS) {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n <= 0) return fallback;
+  return Math.min(100000, Math.round(n));
+}
+
+function normalizeSynPktMax(value, fallback = DEFAULT_SYN_PKT_MAX) {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n < 40) return fallback;
+  return Math.min(1500, Math.round(n));
+}
+
 function normalizeMinSharePct(value, fallback = DEFAULT_MIN_CLIENT_SHARE_PCT) {
   if (value === undefined || value === null || value === '') return fallback;
   const n = Number(value);
@@ -273,8 +299,8 @@ function parasiticClientShare(signal, { byProto } = {}) {
 function shouldSkipTelegramForShare(signals, ctx, settings = {}) {
   const list = Array.isArray(signals) && signals.length ? signals : [SIGNALS.volume];
   return list.every((signal) => {
-    // Отражение режется кратностью к своему часу, не долей от всего клиента.
-    if (signal === SIGNALS.amplification) return false;
+    // Отражение и SYN режутся кратностью к своему часу, не долей от всего клиента.
+    if (signal === SIGNALS.amplification || signal === SIGNALS.syn_flood) return false;
     const minPct = minSharePctForSignal(settings, signal);
     if (!(minPct > 0)) return false;
     const share = parasiticClientShare(signal, ctx);
@@ -446,6 +472,10 @@ function mapSettings(row = {}) {
     synMinSharePct: normalizeMinSharePct(row.syn_min_share_pct ?? row.synMinSharePct),
     ampHourRatio: normalizeAmpHourRatio(row.amp_hour_ratio ?? row.ampHourRatio),
     ampMinMbit: normalizeAmpMinMbit(row.amp_min_mbit ?? row.ampMinMbit),
+    synEnabled: Number(row.syn_enabled ?? 1) === 1,
+    synHourRatio: normalizeSynHourRatio(row.syn_hour_ratio ?? row.synHourRatio),
+    synMinKpps: normalizeSynMinKpps(row.syn_min_kpps ?? row.synMinKpps),
+    synPktMax: normalizeSynPktMax(row.syn_pkt_max ?? row.synPktMax),
   };
 }
 
@@ -454,6 +484,19 @@ function ampOptions(settings = {}) {
     bpsMin: normalizeAmpMinMbit(settings.ampMinMbit) * 1e6,
     hourRatio: normalizeAmpHourRatio(settings.ampHourRatio),
   };
+}
+
+function synOptions(settings = {}) {
+  return {
+    ppsMin: normalizeSynMinKpps(settings.synMinKpps) * 1e3,
+    hourRatio: normalizeSynHourRatio(settings.synHourRatio),
+    pktMax: normalizeSynPktMax(settings.synPktMax),
+  };
+}
+
+function isSynHot(row, settings = {}) {
+  const syn = synOptions(settings);
+  return isSynFloodHit(row || {}, syn) || isSynFloodHit(row?.tcpRow || {}, syn);
 }
 
 function signalSettings(settings = {}, signal = SIGNALS.volume) {
@@ -473,7 +516,7 @@ function signalSettings(settings = {}, signal = SIGNALS.volume) {
   }
   if (signal === SIGNALS.syn_flood) {
     return {
-      enabled: true,
+      enabled: settings.synEnabled !== false,
       streak: 1,
       normalizeStreak: normalizeStreak(settings.normalizeStreak, DEFAULT_NORMALIZE_STREAK),
     };
@@ -502,7 +545,7 @@ function isSignalHot(signal, row, group, threshold, settings = {}) {
     // Только поля самой минуты. group.tcp — текущий тик: если подставить его
     // в историю, вчерашние строки без syn_only выглядят горячими, серия
     // «уже идёт» и алерт не открывается (waiting_streak на nta 14.09).
-    return isSynFloodHit(row) || isSynFloodHit(row.tcpRow || {});
+    return isSynHot(row, settings);
   }
   if (signal === SIGNALS.foreign_geo) {
     if (String(row?.scope || group?.scope || '') !== 'client') return false;
@@ -1686,8 +1729,7 @@ function pickNormalizeCandidates(allRows, previousByKey, threshold, options = {}
           return !isAmplificationHit(udp, amp) && !ampStillGoing(udp, amp);
         }
         if (activeSignal === SIGNALS.syn_flood) {
-          return !isSynFloodHit(item) && !isSynFloodHit(item.tcpRow || {})
-            && !synFloodStillGoing(item);
+          return !isSynHot(item, settings) && !synFloodStillGoing(item, synOptions(settings));
         }
         return !isSignalHot(activeSignal, item, group, t, settings);
       };
@@ -1760,7 +1802,11 @@ async function ensureDetectionTelegramTables() {
           ADD COLUMN IF NOT EXISTS geo_min_share_pct Float64 DEFAULT ${DEFAULT_MIN_CLIENT_SHARE_PCT},
           ADD COLUMN IF NOT EXISTS syn_min_share_pct Float64 DEFAULT ${DEFAULT_MIN_CLIENT_SHARE_PCT},
           ADD COLUMN IF NOT EXISTS amp_hour_ratio Float64 DEFAULT ${DEFAULT_AMP_HOUR_RATIO},
-          ADD COLUMN IF NOT EXISTS amp_min_mbit Float64 DEFAULT ${DEFAULT_AMP_MIN_MBIT}
+          ADD COLUMN IF NOT EXISTS amp_min_mbit Float64 DEFAULT ${DEFAULT_AMP_MIN_MBIT},
+          ADD COLUMN IF NOT EXISTS syn_enabled UInt8 DEFAULT 1,
+          ADD COLUMN IF NOT EXISTS syn_hour_ratio Float64 DEFAULT ${DEFAULT_SYN_HOUR_RATIO},
+          ADD COLUMN IF NOT EXISTS syn_min_kpps Float64 DEFAULT ${DEFAULT_SYN_MIN_KPPS},
+          ADD COLUMN IF NOT EXISTS syn_pkt_max Float64 DEFAULT ${DEFAULT_SYN_PKT_MAX}
       `, {}, { name: 'detection/telegram-ensure-columns' });
 
       await executeCommand(`
@@ -1816,6 +1862,10 @@ async function ensureDetectionTelegramTables() {
           syn_min_share_pct Float64,
           amp_hour_ratio Float64,
           amp_min_mbit Float64,
+          syn_enabled UInt8,
+          syn_hour_ratio Float64,
+          syn_min_kpps Float64,
+          syn_pkt_max Float64,
           updated_at DateTime('UTC')
         )
         AS SELECT
@@ -1842,6 +1892,10 @@ async function ensureDetectionTelegramTables() {
           syn_min_share_pct,
           amp_hour_ratio,
           amp_min_mbit,
+          syn_enabled,
+          syn_hour_ratio,
+          syn_min_kpps,
+          syn_pkt_max,
           updated_at_latest AS updated_at
         FROM
         (
@@ -1869,6 +1923,10 @@ async function ensureDetectionTelegramTables() {
             argMax(syn_min_share_pct, updated_at) AS syn_min_share_pct,
             argMax(amp_hour_ratio, updated_at) AS amp_hour_ratio,
             argMax(amp_min_mbit, updated_at) AS amp_min_mbit,
+            argMax(syn_enabled, updated_at) AS syn_enabled,
+            argMax(syn_hour_ratio, updated_at) AS syn_hour_ratio,
+            argMax(syn_min_kpps, updated_at) AS syn_min_kpps,
+            argMax(syn_pkt_max, updated_at) AS syn_pkt_max,
             max(updated_at) AS updated_at_latest
           FROM ${settingsTableRef()}
           GROUP BY settings_id
@@ -1888,7 +1946,8 @@ async function getCurrentSettingsRaw() {
     SELECT bot_token, chat_id, growth_threshold, alert_scope, alert_kind, streak, normalize_streak, api_url, proxy_url, enabled,
            amp_enabled, geo_enabled, amp_streak, geo_streak, amp_normalize_streak, geo_normalize_streak,
            volume_min_share_pct, amp_min_share_pct, geo_min_share_pct, syn_min_share_pct,
-           amp_hour_ratio, amp_min_mbit, updated_at
+           amp_hour_ratio, amp_min_mbit,
+           syn_enabled, syn_hour_ratio, syn_min_kpps, syn_pkt_max, updated_at
     FROM ${settingsViewRef()}
     WHERE settings_id = {id:String}
     LIMIT 1
@@ -1970,6 +2029,16 @@ async function saveDetectionTelegramSettings(payload = {}) {
   const ampMinMbit = normalizeAmpMinMbit(
     payload.ampMinMbit ?? payload.amp_min_mbit ?? base.amp_min_mbit,
   );
+  const synEnabled = boolInt(payload.synEnabled ?? payload.syn_enabled, Number(base.syn_enabled ?? 1) === 1 ? 1 : 0);
+  const synHourRatio = normalizeSynHourRatio(
+    payload.synHourRatio ?? payload.syn_hour_ratio ?? base.syn_hour_ratio,
+  );
+  const synMinKpps = normalizeSynMinKpps(
+    payload.synMinKpps ?? payload.syn_min_kpps ?? base.syn_min_kpps,
+  );
+  const synPktMax = normalizeSynPktMax(
+    payload.synPktMax ?? payload.syn_pkt_max ?? base.syn_pkt_max,
+  );
   if (enabled && (!botToken || !chatId)) {
     throw apiError('Укажите токен бота и id группы перед включением Telegram');
   }
@@ -1998,6 +2067,10 @@ async function saveDetectionTelegramSettings(payload = {}) {
     syn_min_share_pct: synMinSharePct,
     amp_hour_ratio: ampHourRatio,
     amp_min_mbit: ampMinMbit,
+    syn_enabled: synEnabled,
+    syn_hour_ratio: synHourRatio,
+    syn_min_kpps: synMinKpps,
+    syn_pkt_max: synPktMax,
   }], { name: 'detection/telegram-settings-save' });
 
   return getDetectionTelegramSettings();
@@ -2159,7 +2232,7 @@ async function loadPreviousAllRows(minute, keys, limit = DEFAULT_STREAK) {
     SELECT scope, scope_id, proto, minute, growth_bps, growth_pps, bps, bytes,
            amp_bytes, amp_packets, amp_srcs, growth_amp,
            foreign_bytes, foreign_srcs, top_countries, growth_foreign_bps, growth_foreign_share,
-           syn_only_bytes, syn_only_packets, syn_only_rows, sampling_rate
+           syn_only_bytes, syn_only_packets, syn_only_rows, growth_syn, sampling_rate
     FROM (
       SELECT
         scope,
@@ -2182,6 +2255,7 @@ async function loadPreviousAllRows(minute, keys, limit = DEFAULT_STREAK) {
         syn_only_bytes,
         syn_only_packets,
         syn_only_rows,
+        growth_syn,
         sampling_rate,
         row_number() OVER (PARTITION BY scope, scope_id, proto ORDER BY minute DESC) AS rn
       FROM ${tableRef()} FINAL
@@ -2634,6 +2708,7 @@ async function processDetectionAlerts({ minute, rows, nameByKey }) {
       ...hour,
       ampMinBps: ampOptions(settings).bpsMin,
       ampHourRatio: ampOptions(settings).hourRatio,
+      syn: synOptions(settings),
     };
     let verdict = classifyFromMetrics(byProto, hour);
     if (verdict.needsInvestigate || verdict.kind === KINDS.benign_peak
@@ -2814,6 +2889,7 @@ async function rebuildDetectionEventAlert({ scope, scopeId, minute, sendTelegram
     ...hour,
     ampMinBps: ampOptions(settings).bpsMin,
     ampHourRatio: ampOptions(settings).hourRatio,
+    syn: synOptions(settings),
   };
   let verdict = classifyFromMetrics(byProto, hour);
   if (verdict.needsInvestigate || verdict.kind === KINDS.benign_peak) {

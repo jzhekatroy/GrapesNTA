@@ -41,11 +41,15 @@ const TELEGRAM_DEFAULTS = {
   geoMinSharePct: 10,
   ampHourRatio: 2,
   ampMinMbit: 20,
+  synEnabled: true,
+  synHourRatio: 10,
+  synMinKpps: 200,
+  synPktMax: 100,
 };
 const TELEGRAM_VECTORS = [
   { id: 'volume', label: 'Рост объёма', shareKey: 'volumeMinSharePct', enableKey: null, streakKey: 'streak', streakFallback: 3 },
   { id: 'amplification', label: 'Амплификация', shareKey: 'ampMinSharePct', enableKey: 'ampEnabled', streakKey: 'ampStreak', streakFallback: 1 },
-  { id: 'syn_flood', label: 'SYN-флуд', shareKey: 'synMinSharePct', enableKey: null, streakKey: null, streakFallback: 1 },
+  { id: 'syn_flood', label: 'SYN-флуд', shareKey: 'synMinSharePct', enableKey: 'synEnabled', streakKey: null, streakFallback: 1 },
   { id: 'foreign_geo', label: 'Заграница', shareKey: 'geoMinSharePct', enableKey: 'geoEnabled', streakKey: 'geoStreak', streakFallback: 1 },
 ];
 const CHART_PERIODS = [
@@ -758,6 +762,10 @@ function PageDetection() {
         geoMinSharePct: telegram?.geoMinSharePct ?? 10,
         ampHourRatio: telegram?.ampHourRatio ?? 2,
         ampMinMbit: telegram?.ampMinMbit ?? 20,
+        synEnabled: telegram?.synEnabled !== false,
+        synHourRatio: telegram?.synHourRatio ?? 10,
+        synMinKpps: telegram?.synMinKpps ?? 200,
+        synPktMax: telegram?.synPktMax ?? 100,
       };
       if (botToken.trim()) payload.botToken = botToken.trim();
       const data = await ApiClient.saveDetectionTelegramSettings(payload);
@@ -981,7 +989,7 @@ function PageDetection() {
                             )}
                           </td>
                           <td className="num">
-                            {vector.id === 'amplification' ? (
+                            {vector.id === 'amplification' || vector.id === 'syn_flood' ? (
                               <span style={{ color: 'var(--fg-muted)' }}>вкладка «Пороги»</span>
                             ) : (
                               <input
@@ -1094,6 +1102,68 @@ function PageDetection() {
               </div>
             </>
           )}
+        </div>
+      </Card>
+      )}
+
+      {pageTab === 'thresholds' && !telegramForbidden && telegram && (
+      <Card
+        title="SYN-флуд"
+        subtitle="Считаются пакеты голого SYN (без ACK) к клиенту. Срабатывает, когда их не меньше минимума и не меньше заданной кратности к обычному уровню этого клиента в тот же час (будни и выходные отдельно). Доля от TCP и от всего трафика клиента не используется."
+      >
+        <div className="col" style={{ gap: 10, font: 'var(--pv-text-body-3)' }}>
+          <label className="row" style={{ gap: 8, alignItems: 'center' }}>
+            <input
+              type="checkbox"
+              checked={telegram?.synEnabled !== false}
+              onChange={(e) => setTelegram(patchTelegram(telegram, { synEnabled: e.target.checked }))}
+            />
+            Следить за SYN-флудом
+          </label>
+          <div className="row" style={{ gap: 12, flexWrap: 'wrap' }}>
+            <label className="col" style={{ gap: 4, minWidth: 180 }}>
+              <span>Кратность к норме часа</span>
+              <input
+                className="input"
+                type="number"
+                min="1"
+                max="1000"
+                step="0.5"
+                value={telegram?.synHourRatio ?? 10}
+                onChange={(e) => setTelegram(patchTelegram(telegram, { synHourRatio: Number(e.target.value) }))}
+              />
+            </label>
+            <label className="col" style={{ gap: 4, minWidth: 180 }}>
+              <span>Минимум, тыс. п/с</span>
+              <input
+                className="input"
+                type="number"
+                min="1"
+                max="100000"
+                step="10"
+                value={telegram?.synMinKpps ?? 200}
+                onChange={(e) => setTelegram(patchTelegram(telegram, { synMinKpps: Number(e.target.value) }))}
+              />
+            </label>
+            <label className="col" style={{ gap: 4, minWidth: 180 }}>
+              <span>Средний пакет до, байт</span>
+              <input
+                className="input"
+                type="number"
+                min="40"
+                max="1500"
+                step="1"
+                value={telegram?.synPktMax ?? 100}
+                onChange={(e) => setTelegram(patchTelegram(telegram, { synPktMax: Number(e.target.value) }))}
+              />
+            </label>
+          </div>
+          <div style={{ color: 'var(--fg-muted)' }}>
+            Если за этот час ещё нет нормы, решает только минимум. Алерт открывается с первой горячей минуты; закрытие — по «Подряд ниже порога» с вкладки Telegram.
+          </div>
+          <div className="row" style={{ gap: 8 }}>
+            <Button size="sm" disabled={telegramBusy} onClick={saveTelegram}>Сохранить</Button>
+          </div>
         </div>
       </Card>
       )}

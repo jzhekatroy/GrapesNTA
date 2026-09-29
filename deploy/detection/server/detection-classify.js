@@ -106,7 +106,7 @@ function classifyFromMetrics(byProto = {}, hour = {}) {
   const ratio = hourRatio(all.bps, ceiling);
   const synAttempts = num(all.syn_attempts ?? all.synAttempts) || 0;
   const answerPct = num(all.answer_pct ?? all.answerPct);
-  const synHit = isSynFloodHit(all) || isSynFloodHit(tcp);
+  const synHit = isSynFloodHit(all, hour.syn) || isSynFloodHit(tcp, hour.syn);
   const synAll = tcpClassMetrics(all, 'syn_only');
   const synTcp = tcpClassMetrics(tcp, 'syn_only');
   const syn = synTcp.pps > synAll.pps ? synTcp : synAll;

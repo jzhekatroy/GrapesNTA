@@ -707,7 +707,7 @@ function isBaselineCacheFresh(cache, now = Date.now(), ttlMs = BASELINE_CACHE_MS
 
 let clientBaselineCache = { at: 0, map: new Map() };
 let netBaselineCache = { at: 0, map: new Map() };
-let ampHourCache = { at: 0, map: new Map() };
+let hourSignalCache = { at: 0, map: new Map() };
 
 function mskHourKey(scope, scopeId, minuteValue) {
   const ts = typeof minuteValue === 'number' ? minuteValue : parseUtc(minuteValue);
@@ -716,14 +716,16 @@ function mskHourKey(scope, scopeId, minuteValue) {
   return `${scope}|${scopeId}|${d.getUTCHours()}|${weekend}`;
 }
 
-function isAmpHourCacheFresh(now = Date.now()) {
-  // Пустая карта тоже норма: на зеркале почти нет трафика усилителей.
+function isHourSignalCacheFresh(now = Date.now()) {
+  // Пустая карта тоже норма: на зеркале почти нет трафика усилителей и SYN.
   // Иначе запрос нормы часа повторялся бы каждую минуту.
-  return ampHourCache.at > 0 && (now - ampHourCache.at) < BASELINE_CACHE_MS;
+  return hourSignalCache.at > 0 && (now - hourSignalCache.at) < BASELINE_CACHE_MS;
 }
 
-async function loadAmpHourBaselines() {
-  if (isAmpHourCacheFresh()) return ampHourCache.map;
+// Норма часа для отражения (UDP с портов усилителей) и голого SYN: p95 за
+// тот же час по Москве, будни и выходные отдельно.
+async function loadHourSignalBaselines() {
+  if (isHourSignalCacheFresh()) return hourSignalCache.map;
   const days = BASELINE_DAYS;
   const { rows } = await query(`
     SELECT
@@ -731,22 +733,28 @@ async function loadAmpHourBaselines() {
       scope_id,
       toHour(toTimeZone(minute, 'Europe/Moscow')) AS h,
       toUInt8(toDayOfWeek(toTimeZone(minute, 'Europe/Moscow')) >= 6) AS we,
-      count() AS n,
-      quantileExact(0.95)(amp_bytes * 8 / 60) AS p95
+      countIf(proto = 'udp') AS n_udp,
+      quantileExactIf(0.95)(amp_bytes * 8 / 60, proto = 'udp') AS amp_p95,
+      countIf(proto = 'all') AS n_all,
+      quantileExactIf(0.95)(syn_only_packets / 60, proto = 'all') AS syn_p95
     FROM ${tableRef()}
-    WHERE proto = 'udp'
+    WHERE proto IN ('udp', 'all')
       AND minute >= now('UTC') - INTERVAL {days:UInt16} DAY
       AND minute < now('UTC') - INTERVAL 60 MINUTE
     GROUP BY scope, scope_id, h, we
-    HAVING count() >= 60
-  `, { days }, { name: 'detection/amp-hour-baseline', clickhouse_settings: HEAVY, requestTimeoutMs: 180000 });
+    HAVING n_udp >= 60 OR n_all >= 60
+  `, { days }, { name: 'detection/hour-signal-baseline', clickhouse_settings: HEAVY, requestTimeoutMs: 180000 });
   const map = new Map();
   for (const r of rows) {
-    const p95 = Number(r.p95) || 0;
-    if (!(p95 > 0)) continue;
-    map.set(`${r.scope}|${r.scope_id}|${Number(r.h)}|${Number(r.we) ? 1 : 0}`, p95);
+    const ampBps = Number(r.n_udp) >= 60 ? Number(r.amp_p95) || 0 : 0;
+    const synPps = Number(r.n_all) >= 60 ? Number(r.syn_p95) || 0 : 0;
+    if (!(ampBps > 0) && !(synPps > 0)) continue;
+    map.set(`${r.scope}|${r.scope_id}|${Number(r.h)}|${Number(r.we) ? 1 : 0}`, {
+      ampBps: ampBps > 0 ? ampBps : null,
+      synPps: synPps > 0 ? synPps : null,
+    });
   }
-  ampHourCache = { at: Date.now(), map };
+  hourSignalCache = { at: Date.now(), map };
   return map;
 }
 
@@ -893,6 +901,7 @@ function toInsertRow(object, proto, raw, baseline) {
     amp_packets: m.ampPackets,
     amp_srcs: m.ampSrcs,
     growth_amp: proto === 'udp' ? growthRatio(m.ampBytes * 8 / 60, baseline?.ampHourBps) : null,
+    growth_syn: proto !== 'udp' ? growthRatio(m.synOnlyPackets / 60, baseline?.synHourPps) : null,
     foreign_bytes: m.foreignBytes,
     foreign_srcs: m.foreignSrcs,
     top_countries: m.topCountries,
@@ -947,7 +956,7 @@ async function tick() {
     clients: objects.filter((o) => o.scope === 'client').length,
     nets: objects.filter((o) => o.scope === 'net').length,
   });
-  const [clientVol, clientFlags, netFlags, clientPorts, netPorts, baselines, foreignEnvelopes, ampHours] = await Promise.all([
+  const [clientVol, clientFlags, netFlags, clientPorts, netPorts, baselines, foreignEnvelopes, hourSignals] = await Promise.all([
     loadClientVolume(closed),
     loadScopeFlags('client', closed),
     loadScopeFlags('net', closed),
@@ -955,7 +964,7 @@ async function tick() {
     loadPortMetrics('net', closed),
     loadBaselines(closed),
     loadForeignEnvelopes(closed),
-    loadAmpHourBaselines(),
+    loadHourSignalBaselines(),
   ]);
   for (const [clientId, env] of foreignEnvelopes) {
     const key = `client|${clientId}|all`;
@@ -999,14 +1008,14 @@ async function tick() {
         packets: proto === 'all' ? allPackets : flags.packets,
       };
       const base = baselines.get(`${object.scope}|${object.scopeId}|${proto}`) || null;
-      const ampHourBps = proto === 'udp'
-        ? ampHours.get(mskHourKey(object.scope, object.scopeId, minute))
-        : null;
+      const hour = hourSignals.get(mskHourKey(object.scope, object.scopeId, minute)) || null;
+      const ampHourBps = proto === 'udp' ? hour?.ampBps ?? null : null;
+      const synHourPps = proto !== 'udp' ? hour?.synPps ?? null : null;
       rows.push(toInsertRow(
         object,
         proto,
         raw,
-        base || ampHourBps ? { ...(base || {}), ampHourBps } : null,
+        base || ampHourBps || synHourPps ? { ...(base || {}), ampHourBps, synHourPps } : null,
       ));
     }
   }

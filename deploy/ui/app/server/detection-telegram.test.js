@@ -79,6 +79,18 @@ describe('detection-telegram', () => {
     assert.equal(shouldSkipTelegramForShare(['amplification'], { byProto }, { ampMinSharePct: 0 }), false);
   });
 
+  // 80249: 2 млн п/с голого SYN по 70 Б — около 1.1 Гбит/с из 27, то есть 4%.
+  it('доля паразита: SYN-флуд тоже не глушится долей клиента', () => {
+    const synPackets = 2e6 * 60;
+    const byProto = {
+      all: {
+        bps: 27e9, bytes: 27e9 * 60 / 8,
+        syn_only_packets: synPackets, syn_only_bytes: synPackets * 70,
+      },
+    };
+    assert.equal(shouldSkipTelegramForShare(['syn_flood'], { byProto }, { synMinSharePct: 10 }), false);
+  });
+
   it('доля паразита: если любой вектор выше порога — Telegram шлём', () => {
     const byProto = {
       all: { bps: 10.7e9, growth_bps: 2.2, bytes: 10.7e9 * 60 / 8 },

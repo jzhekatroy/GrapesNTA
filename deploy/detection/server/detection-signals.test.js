@@ -371,11 +371,29 @@ describe('detection-signals', () => {
     }), false);
   });
 
-  it('объём есть, но голый SYN тонет в живом TCP — не флуд', () => {
+  // 80249, 18.09 на sFlow-стенде: 2.28 млн п/с голого SYN при доле 0.47 от
+  // TCP и норме часа ~77 тыс. — прежнее правило по доле волну пропустило.
+  it('голый SYN тонет в живом TCP, но ×30 к норме часа → флуд', () => {
     assert.equal(isSynFloodHit({
       ...synFloodRow(),
       data_packets: 266_772_480 * 4,
-    }), false);
+      growth_syn: 30,
+    }), true);
+  });
+
+  it('много голого SYN, но это обычный уровень часа → не флуд', () => {
+    assert.equal(isSynFloodHit({ ...synFloodRow(), growth_syn: 1.4 }), false);
+  });
+
+  it('кратность и минимум берутся из настроек', () => {
+    const row = {
+      syn_only_packets: 250_000 * 60, syn_only_bytes: 250_000 * 60 * 62,
+      syn_only_rows: 900, growth_syn: 12,
+    };
+    assert.equal(isSynFloodHit(row), true);
+    assert.equal(isSynFloodHit(row, { hourRatio: 20 }), false);
+    assert.equal(isSynFloodHit(row, { ppsMin: 300_000 }), false);
+    assert.equal(isSynFloodHit(row, { pktMax: 60 }), false);
   });
 
   it('188.143.242: 190 п/с голого SYN — скан, не флуд', () => {

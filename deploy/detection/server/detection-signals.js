@@ -57,12 +57,16 @@ const AMP_BPS_MIN = 20e6;
 // п/с, а доля от TCP-классов при заметном объёме — не больше 2.6%. Эталон 81050
 // (11.09 19:29) — 4.45 млн п/с и 92% TCP. Новое правило даёт ноль ложных и
 // проходит эталон с девятикратным запасом; мелкий флуд сознательно пропускаем.
-const TCP_FLOOD_PPS_MIN = 500_000;
-const TCP_FLOOD_SHARE_MIN = 0.5;
+// Замер 12–28.09 на sFlow-стенде: доля от TCP прятала атаки на крупных
+// клиентах (80249: волны ×30 к своему часу при доле 0.24–0.47), а 500 тыс.
+// пропускали флуд на мелких (82035: 449 тыс. при норме 5 тыс.). Поэтому
+// решают кратность к норме часа (×10) и пол 200 тыс.; доля от TCP не нужна.
+const TCP_FLOOD_PPS_MIN = 200_000;
+const TCP_FLOOD_HOUR_RATIO = 10;
 const TCP_FLOOD_PKT_MAX = 100;
-// Страховка от одиночной строки-артефакта. На sFlow 500 тыс. п/с — это сотни
-// проб, так что порог работает только на NetFlow, где rate=1.
-const TCP_FLOOD_ROWS_MIN = 5;
+// Страховка от одиночной строки-артефакта. На sFlow 200 тыс. п/с — это сотни
+// проб при rate 32768, так что порог работает в основном на NetFlow.
+const TCP_FLOOD_ROWS_MIN = 50;
 const TCP_SCAN_ROWS_MIN = 200;
 const TCP_CLASS_KEYS = ['syn_only', 'ack_only', 'rst', 'established', 'data'];
 
@@ -120,17 +124,24 @@ function synFloodShare(row = {}) {
   return share(syn, total);
 }
 
+// Как у отражения: без growth_syn (нормы часа ещё нет) решает пол по п/с.
+function synAboveHour(row = {}, options = {}) {
+  const ratioMin = options.hourRatio == null ? TCP_FLOOD_HOUR_RATIO : num(options.hourRatio);
+  if (!(ratioMin > 0)) return true;
+  const growth = num(row.growth_syn ?? row.growthSyn);
+  if (growth == null) return true;
+  return growth >= ratioMin;
+}
+
 function isSynFloodHit(row = {}, options = {}) {
   const m = tcpClassMetrics(row, 'syn_only');
   const pktMax = num(options.pktMax) ?? TCP_FLOOD_PKT_MAX;
   const rowsMin = num(options.rowsMin) ?? TCP_FLOOD_ROWS_MIN;
   const ppsMin = num(options.ppsMin) ?? TCP_FLOOD_PPS_MIN;
-  const shareMin = num(options.shareMin) ?? TCP_FLOOD_SHARE_MIN;
   if (m.rows < rowsMin) return false;
   if (!(m.avgPkt > 0 && m.avgPkt < pktMax)) return false;
   if (m.pps < ppsMin) return false;
-  const synShare = synFloodShare(row);
-  return synShare != null && synShare >= shareMin;
+  return synAboveHour(row, options);
 }
 
 function synFloodStillGoing(row = {}, options = {}) {
@@ -293,7 +304,7 @@ module.exports = {
   SIGNAL_LABEL,
   SIGNAL_ORDER,
   TCP_FLOOD_PPS_MIN,
-  TCP_FLOOD_SHARE_MIN,
+  TCP_FLOOD_HOUR_RATIO,
   TCP_FLOOD_PKT_MAX,
   TCP_FLOOD_ROWS_MIN,
   TCP_SCAN_ROWS_MIN,
