@@ -5,6 +5,7 @@ const SIGNALS = {
   amplification: 'amplification',
   syn_flood: 'syn_flood',
   foreign_geo: 'foreign_geo',
+  net_spike: 'net_spike',
 };
 
 const SIGNAL_LABEL = {
@@ -12,6 +13,7 @@ const SIGNAL_LABEL = {
   amplification: 'амплификация',
   syn_flood: 'SYN-флуд',
   foreign_geo: 'зарубежный трафик',
+  net_spike: 'всплеск в сети /24',
 };
 
 const SIGNAL_ORDER = [
@@ -19,6 +21,7 @@ const SIGNAL_ORDER = [
   SIGNALS.amplification,
   SIGNALS.syn_flood,
   SIGNALS.foreign_geo,
+  SIGNALS.net_spike,
 ];
 
 const AMPLIFIER_PORTS = [53, 123, 1900, 11211, 389, 161, 19, 111, 3702, 5683, 137];
@@ -68,6 +71,14 @@ const TCP_FLOOD_PKT_MAX = 100;
 // проб при rate 32768, так что порог работает в основном на NetFlow.
 const TCP_FLOOD_ROWS_MIN = 50;
 const TCP_SCAN_ROWS_MIN = 200;
+// Флуд в одну цель ниже пола: 101443 01.10 12:00 МСК — 137–151 тыс. п/с голого
+// SYN с одного адреса на 109.232.248.252:80, ×62 к норме часа, ответов 0.8%.
+// Скан даёт те же мелкие пакеты и молчание, но каждая проба — новая пара
+// адрес:порт (54556 29.09: 84 пробы на 84 пары, 71766 30.09: 93 на 93), а у флуда
+// 125 проб легли в 1–2 пары. Прогон 29.09–01.10 по PiterIX: кроме 101443 — ноль.
+const TCP_FOCUS_PPS_MIN = 50_000;
+const TCP_FOCUS_ANSWER_MAX = 5;
+const TCP_FOCUS_TARGETS_SHARE = 0.2;
 const TCP_CLASS_KEYS = ['syn_only', 'ack_only', 'rst', 'established', 'data'];
 
 const GEO_SHARE_GROWTH_MIN = 3;
@@ -79,6 +90,26 @@ const GEO_SHARE_MIN = 0.2;
 // спокойных минут 07.09: при 200 Мбит/с признак не срабатывает ни разу, при
 // 20 — 4 клиенто-минуты, при 10 — уже 26.
 const GEO_BPS_MIN = 20e6;
+
+// Сеть /24 внутри клиента на портах. Удар в один сервер у крупного клиента
+// тонет в его объёме: 81050 30.09 03:24 — 37.8 Гбит/с в одну /24 при фоне
+// ~46 Гбит/с, рост всего клиента ×1.0, а самой /24 ×708 к её норме. Пол 1 Гбит/с
+// держит шум sFlow: ниже него у /24 единицы проб в минуту.
+const NET_ALERT_MIN_BPS = Number(process.env.DETECTION_NET_MIN_BPS) || 1e9;
+const NET_GROWTH_MIN = 4;
+// Такой рост не бывает обычным пиком, поэтому серию не ждём: 71747 29.09
+// (×531) длился две минуты и при серии из трёх уходил без события.
+const NET_GROWTH_STRONG = 20;
+const NET_STREAK = 2;
+// Удар по /24 часто идёт импульсами по минуте с паузами: 81050 30.09 — 37.8,
+// 40.0, 36.7, 33.4 Гбит/с в 03:24, 03:32, 03:37, 03:46 и тишина между ними.
+// При трёх тихих минутах это пять событий на одну атаку.
+const NET_NORMALIZE_STREAK = 10;
+// Закачка в одну /24 — TCP крупными пакетами. Прогон 29–30.09 по PiterIX:
+// 12 из 33 срабатываний были такими (TCP 94–100%, пакет 1325–1518 Б,
+// 1–126 источников), у атак — UDP или TCP пакетами ~100 Б.
+const NET_DOWNLOAD_TCP_SHARE = 0.9;
+const NET_DOWNLOAD_PKT_MIN = 1000;
 
 function num(value) {
   const n = Number(value);
@@ -133,6 +164,18 @@ function synAboveHour(row = {}, options = {}) {
   return growth >= ratioMin;
 }
 
+// Без нормы часа, ответов или числа целей ветка молчит: решает только пол.
+function isFocusedSynFlood(row, m, options = {}) {
+  if (m.pps < TCP_FOCUS_PPS_MIN) return false;
+  const growth = num(row.growth_syn ?? row.growthSyn);
+  const ratioMin = num(options.hourRatio) ?? TCP_FLOOD_HOUR_RATIO;
+  if (growth == null || !(growth >= Math.max(ratioMin, TCP_FLOOD_HOUR_RATIO))) return false;
+  const answer = num(row.answer_pct ?? row.answerPct);
+  if (answer == null || answer >= TCP_FOCUS_ANSWER_MAX) return false;
+  const targets = classField(row, 'syn_only', 'targets');
+  return targets > 0 && targets <= m.rows * TCP_FOCUS_TARGETS_SHARE;
+}
+
 function isSynFloodHit(row = {}, options = {}) {
   const m = tcpClassMetrics(row, 'syn_only');
   const pktMax = num(options.pktMax) ?? TCP_FLOOD_PKT_MAX;
@@ -140,8 +183,8 @@ function isSynFloodHit(row = {}, options = {}) {
   const ppsMin = num(options.ppsMin) ?? TCP_FLOOD_PPS_MIN;
   if (m.rows < rowsMin) return false;
   if (!(m.avgPkt > 0 && m.avgPkt < pktMax)) return false;
-  if (m.pps < ppsMin) return false;
-  return synAboveHour(row, options);
+  if (m.pps >= ppsMin) return synAboveHour(row, options);
+  return isFocusedSynFlood(row, m, options);
 }
 
 function synFloodStillGoing(row = {}, options = {}) {
@@ -295,6 +338,61 @@ function isForeignGeoHit(row, envelope, options) {
   return evaluateForeignGeo(row, envelope, options).hit;
 }
 
+// Список горячих сетей: «95.129.234.0/24:37750000000:708.5,…».
+function parseNetList(raw) {
+  const text = String(raw || '').trim();
+  if (!text) return [];
+  return text.split(',').map((part) => {
+    const [net, bps, growth] = part.split(':');
+    if (!net) return null;
+    return { net, bps: num(bps) || 0, growth: num(growth) };
+  }).filter(Boolean);
+}
+
+function netSpikeMetrics(row = {}) {
+  const growthBps = num(row.net_growth_bps ?? row.netGrowthBps);
+  const growthPps = num(row.net_growth_pps ?? row.netGrowthPps);
+  const growths = [growthBps, growthPps].filter((g) => g != null);
+  const bps = num(row.net_bps ?? row.netBps) || 0;
+  const pps = num(row.net_pps ?? row.netPps) || 0;
+  const tcpBps = num(row.net_tcp_bps ?? row.netTcpBps) || 0;
+  return {
+    net: String(row.net_top ?? row.netTop ?? ''),
+    bps,
+    pps,
+    usualBps: num(row.net_usual_bps ?? row.netUsualBps) || 0,
+    usualPps: num(row.net_usual_pps ?? row.netUsualPps) || 0,
+    udpBps: num(row.net_udp_bps ?? row.netUdpBps) || 0,
+    tcpBps,
+    tcpShare: share(tcpBps, bps),
+    avgPkt: pps > 0 ? bps / 8 / pps : 0,
+    growthBps,
+    growthPps,
+    growth: growths.length ? Math.max(...growths) : null,
+    list: parseNetList(row.net_list ?? row.netList),
+  };
+}
+
+function isNetDownloadShape(m) {
+  return m.tcpShare != null && m.tcpShare >= NET_DOWNLOAD_TCP_SHARE && m.avgPkt >= NET_DOWNLOAD_PKT_MIN;
+}
+
+function isNetSpikeHit(row = {}, options = {}) {
+  const m = netSpikeMetrics(row);
+  const bpsMin = num(options.bpsMin) ?? NET_ALERT_MIN_BPS;
+  const growthMin = num(options.growthMin) ?? NET_GROWTH_MIN;
+  return Boolean(m.net)
+    && m.bps >= bpsMin
+    && m.growth != null
+    && m.growth >= growthMin
+    && !isNetDownloadShape(m);
+}
+
+function isNetSpikeStrong(row = {}, options = {}) {
+  const strong = num(options.growthStrong) ?? NET_GROWTH_STRONG;
+  return isNetSpikeHit(row, options) && netSpikeMetrics(row).growth >= strong;
+}
+
 function objectSignalKey(scope, scopeId, signal = SIGNALS.volume) {
   return `${scope}|${scopeId}|${signal || SIGNALS.volume}`;
 }
@@ -304,6 +402,8 @@ module.exports = {
   SIGNAL_LABEL,
   SIGNAL_ORDER,
   TCP_FLOOD_PPS_MIN,
+  TCP_FOCUS_PPS_MIN,
+  TCP_FOCUS_ANSWER_MAX,
   TCP_FLOOD_HOUR_RATIO,
   TCP_FLOOD_PKT_MAX,
   TCP_FLOOD_ROWS_MIN,
@@ -335,5 +435,14 @@ module.exports = {
   foreignMetrics,
   evaluateForeignGeo,
   isForeignGeoHit,
+  NET_ALERT_MIN_BPS,
+  NET_GROWTH_MIN,
+  NET_GROWTH_STRONG,
+  NET_STREAK,
+  NET_NORMALIZE_STREAK,
+  parseNetList,
+  netSpikeMetrics,
+  isNetSpikeHit,
+  isNetSpikeStrong,
   objectSignalKey,
 };

@@ -49,6 +49,13 @@ const config = {
   database: env('CLICKHOUSE_DATABASE', 'default'),
   table: env('CLICKHOUSE_FLOWS_TABLE', 'flows'),
   flowsRawTable: env('CLICKHOUSE_FLOWS_RAW_TABLE', 'flows_raw'),
+  // Таблица, в которую пишет коллектор и которой принадлежит схема. Совпадает с
+  // предыдущей, кроме переходного периода смены раскладки: тогда чтение идёт
+  // через обёртку Merge поверх новой и старой таблиц, а ALTER должен попадать в
+  // физическую таблицу — обёртка ADD COLUMN молча принимает, но читать такую
+  // колонку потом нельзя.
+  flowsRawWriteTable: env('CLICKHOUSE_FLOWS_RAW_WRITE_TABLE', '')
+    || env('CLICKHOUSE_FLOWS_RAW_TABLE', 'flows_raw'),
   dashboardTable: env('CLICKHOUSE_DASHBOARD_TABLE', 'traffic_dashboard_1m'),
   dashboardHourTable: env('CLICKHOUSE_DASHBOARD_HOUR_TABLE', 'traffic_dashboard_1h'),
   dashboardDayTable: env('CLICKHOUSE_DASHBOARD_DAY_TABLE', 'traffic_dashboard_1d'),
@@ -82,6 +89,7 @@ const config = {
   interfaceRolesEffectiveTable: env('CLICKHOUSE_INTERFACE_ROLES_EFFECTIVE_TABLE', 'net_interface_roles_effective'),
   interfaceRolesEffectiveView: env('CLICKHOUSE_INTERFACE_ROLES_EFFECTIVE_VIEW', 'net_interface_roles_effective_current'),
   geoCountryDict: env('CLICKHOUSE_GEO_COUNTRY_DICT', 'default.geo_country_dict'),
+  clientPrefixDict: env('CLICKHOUSE_CLIENT_PREFIX_DICT', 'default.net_client_prefix_dict'),
   locationsView: env('CLICKHOUSE_LOCATIONS_VIEW', 'net_locations_enabled'),
   locationsTable: env('CLICKHOUSE_LOCATIONS_TABLE', 'net_locations'),
   dnsLogTable: env('CLICKHOUSE_DNS_LOG_TABLE', 'dns_log'),
@@ -155,6 +163,8 @@ const config = {
     outIf: envOpt('CH_COL_OUT_IF', 'out_if'),
     tcpFlags: envOpt('CH_COL_TCP_FLAGS', 'tcp_flags'),
     ipTtl: envOpt('CH_COL_IP_TTL', 'ip_ttl'),
+    srcAsPath: envOpt('CH_COL_SRC_AS_PATH', 'src_as_path'),
+    dstAsPath: envOpt('CH_COL_DST_AS_PATH', 'dst_as_path'),
   },
   /** MAC column storage: fixedstring (FixedString(6)) or uint64 (Akvorado SrcMAC/DstMAC). */
   macStorage: (() => {
@@ -229,9 +239,98 @@ function flowsRawTableRef() {
   return `${qIdent(config.database)}.${qIdent(config.flowsRawTable)}`;
 }
 
+/** Физическая таблица потоков: сюда идут ALTER, отсюда читается схема. */
+function flowsRawWriteTableRef() {
+  return `${qIdent(config.database)}.${qIdent(config.flowsRawWriteTable)}`;
+}
+
+/** Cached physical column names on flows_raw (null until first refresh). */
+let flowsRawColumnNames = null;
+let flowsRawSchemaReady = null;
+
+async function fetchColumnNames(table, queryName) {
+  const { rows } = await query(`
+    SELECT name
+    FROM system.columns
+    WHERE database = {db:String}
+      AND table = {table:String}
+  `, {
+    db: config.database,
+    table,
+  }, { name: queryName });
+  return new Set((rows || []).map((r) => String(r.name)));
+}
+
+async function refreshFlowsRawColumnNames() {
+  flowsRawColumnNames = await fetchColumnNames(
+    config.flowsRawTable,
+    'clickhouse/flows-raw-columns',
+  );
+  return flowsRawColumnNames;
+}
+
+async function ensureFlowsRawAsPathColumns() {
+  const srcName = config.flowColumns.srcAsPath || 'src_as_path';
+  const dstName = config.flowColumns.dstAsPath || 'dst_as_path';
+  // Наличие колонок проверяем на физической таблице, а не на той, что читаем:
+  // в переходный период чтение идёт через обёртку Merge, а она принимает
+  // ADD COLUMN, не передавая его вниз, и потом падает на чтении такой колонки.
+  const writeCols = await fetchColumnNames(
+    config.flowsRawWriteTable,
+    'clickhouse/flows-raw-write-columns',
+  );
+  const alterParts = [];
+  if (!writeCols.has(srcName)) {
+    alterParts.push(`ADD COLUMN IF NOT EXISTS ${qIdent(srcName)} Array(UInt32) DEFAULT [] AFTER ${col('dstAsn')}`);
+  }
+  if (!writeCols.has(dstName)) {
+    alterParts.push(`ADD COLUMN IF NOT EXISTS ${qIdent(dstName)} Array(UInt32) DEFAULT [] AFTER ${qIdent(srcName)}`);
+  }
+  if (!alterParts.length) {
+    const cols = flowsRawColumnNames || await refreshFlowsRawColumnNames();
+    return { ok: cols.has(srcName) && cols.has(dstName), added: false };
+  }
+
+  try {
+    await executeCommand(
+      `ALTER TABLE ${flowsRawWriteTableRef()} ${alterParts.join(', ')}`,
+      {},
+      { name: 'clickhouse/flows-raw-as-path' },
+    );
+    const cols = await refreshFlowsRawColumnNames();
+    return { ok: cols.has(srcName) && cols.has(dstName), added: true };
+  } catch (err) {
+    logVerbose(
+      'ClickHouse',
+      `flows_raw AS path columns missing; auto-migrate failed: ${err?.message || err}`,
+    );
+    return { ok: false, added: false, error: err?.message || String(err) };
+  }
+}
+
+async function ensureFlowsRawSchema() {
+  if (!flowsRawSchemaReady) {
+    flowsRawSchemaReady = (async () => {
+      try {
+        await ensureFlowsRawAsPathColumns();
+        await refreshFlowsRawColumnNames();
+      } catch (err) {
+        flowsRawSchemaReady = null;
+        logVerbose(
+          'ClickHouse',
+          `flows_raw schema sync skipped: ${err?.message || err}`,
+        );
+      }
+    })();
+  }
+  return flowsRawSchemaReady;
+}
+
 function flowCol(key) {
   const name = config.flowColumns[key];
-  return name ? qIdent(name) : null;
+  if (!name) return null;
+  if (flowsRawColumnNames && !flowsRawColumnNames.has(name)) return null;
+  return qIdent(name);
 }
 
 function dashboardTableRef() {
@@ -647,6 +746,7 @@ function getConfig() {
     database: config.database,
     table: config.table,
     flowsRawTable: config.flowsRawTable,
+    flowsRawWriteTable: config.flowsRawWriteTable,
     dashboardTable: config.dashboardTable,
     dashboardHourTable: config.dashboardHourTable,
     dashboardDayTable: config.dashboardDayTable,
@@ -682,6 +782,7 @@ function getConfig() {
     netInterfacesCurrent: config.netInterfacesCurrent,
     netInterfacesDict: config.netInterfacesDict,
     geoCountryDict: config.geoCountryDict,
+    clientPrefixDict: config.clientPrefixDict,
     collectorHealthSnapshotsTable: config.collectorHealthSnapshotsTable,
     locationsTable: config.locationsTable,
     locationsView: config.locationsView,
@@ -744,6 +845,7 @@ module.exports = {
   query,
   tableRef,
   flowsRawTableRef,
+  flowsRawWriteTableRef,
   flowCol,
   dashboardTableRef,
   dashboardHourTableRef,
@@ -809,6 +911,8 @@ module.exports = {
   userPermissionsTableRef,
   insertRows,
   executeCommand,
+  ensureFlowsRawSchema,
+  refreshFlowsRawColumnNames,
   col,
   colOpt,
   getConfig,

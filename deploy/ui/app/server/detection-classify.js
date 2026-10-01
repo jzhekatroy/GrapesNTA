@@ -9,6 +9,9 @@ const {
   isSynFloodHit,
   isTcpScan,
   tcpClassMetrics,
+  TCP_FOCUS_PPS_MIN,
+  TCP_FOCUS_ANSWER_MAX,
+  TCP_FLOOD_PKT_MAX,
 } = require('./detection-signals');
 
 const KINDS = {
@@ -62,6 +65,9 @@ const SESSION_LOCAL_PORT_MIN = 1024;
 const NET_CLIENTS_MIN = 2;
 const AMP_DEST_ACTION_SHARE = 0.5;
 const NORMALIZE_BPS_KEEP = 0.85;
+// Голый SYN по пакетам собран в одну пару адрес:порт — флуд, даже если сигнал
+// SYN не сработал (нет нормы часа или числа целей в строке минуты).
+const SYN_FOCUS_SHARE_MIN = 0.5;
 // hourP95 из снимка алерта. Если он на порядок меньше самого алерта, это не
 // «обычный час», а заниженная норма — 85783 висел 5 суток на 1.4 Гбит при
 // замороженных 104 Мбит. Такой p95 не держит событие.
@@ -309,6 +315,17 @@ function isTargetFocus(focus) {
   return num(focus.growth) >= TARGET_GROWTH_MIN;
 }
 
+function synPacketFocus(verdict = {}, investigate = {}) {
+  const syn = investigate?.syn;
+  if (!(num(syn?.pps) >= TCP_FOCUS_PPS_MIN)) return null;
+  if (!(num(syn.avgPkt) > 0 && num(syn.avgPkt) < TCP_FLOOD_PKT_MAX)) return null;
+  const answer = num(verdict.answerPct);
+  if (answer != null && answer >= TCP_FOCUS_ANSWER_MAX) return null;
+  const top = Array.isArray(syn.dest) ? syn.dest[0] : null;
+  if (!top?.ip || !(num(top.share) >= SYN_FOCUS_SHARE_MIN)) return null;
+  return top;
+}
+
 function refineClassification(verdict, investigate, context = {}) {
   const next = { ...(verdict || {}) };
   const topShare = num(investigate?.victim?.share);
@@ -331,6 +348,20 @@ function refineClassification(verdict, investigate, context = {}) {
     if (synTop?.ip) {
       next.reason = `${formatHostPort(synTop.ip, synTop.port)} ${(num(synTop.share) * 100).toFixed(0)}% SYN · ${next.reason || ''}`.trim();
     }
+    next.needsInvestigate = true;
+    return next;
+  }
+  // Доли «топ IP» ниже считаются по байтам. У 101443 01.10 12:00 МСК байты были
+  // ниже нормы, топ по ним держала закачка из Yandex.Cloud на 185.191.34.125, а
+  // рост пакетов дали 137 тыс. п/с голого SYN в 109.232.248.252:80.
+  const synTop = synPacketFocus(next, investigate);
+  if (synTop) {
+    next.kind = KINDS.syn_flood;
+    next.reason = [
+      `${formatHostPort(synTop.ip, synTop.port)} ${(num(synTop.share) * 100).toFixed(0)}% SYN`,
+      `голый SYN ${formatSynPps(investigate.syn.pps)}`,
+      next.reason,
+    ].filter(Boolean).join(' · ');
     next.needsInvestigate = true;
     return next;
   }

@@ -3,23 +3,35 @@
 const {
   query,
   insertRows,
+  executeCommand,
   col,
   flowCol,
   flowsRawTableRef,
   l3PrefixesViewRef,
   clientsViewRef,
+  asnRegistryEnrichedTableRef,
   config,
 } = require('./clickhouse');
 const { flowIpExpr, primarySourceIdsSql, primaryClientSourceSql } = require('./queries');
-const { TABLE, tableRef, ensureDetectionTables, PROTOS } = require('./detection-schema');
+const {
+  TABLE,
+  tableRef,
+  NET_MINUTE_TABLE,
+  netMinuteTableRef,
+  netHourTableRef,
+  ensureDetectionTables,
+  PROTOS,
+} = require('./detection-schema');
 const { processDetectionAlerts } = require('./detection-telegram');
-const { AMPLIFIER_PORTS } = require('./detection-signals');
+const { AMPLIFIER_PORTS, isNetSpikeHit } = require('./detection-signals');
 const { loadForeignEnvelopes } = require('./detection-investigate');
 const {
   MINUTE,
   EXPORT_LAG,
   BASELINE_DAYS,
   BASELINE_QUANTILE,
+  BASELINE_P95_CAP,
+  BASELINE_RECENT_CAP,
   MIN_BPS,
   parseUtc,
   formatCh,
@@ -79,6 +91,34 @@ function flowCountryExpr(ipCol) {
     dictGetString('${dict}', 'cc', tuple(toIPv4(reinterpretAsUInt32(reverse(substring(${ipCol}, 1, 4)))))),
     dictGetString('${dict}', 'cc', tuple(toIPv6(IPv6NumToString(${ipCol}))))
   )`;
+}
+
+// RIR пишет страну того, кому выдан блок, а не того, кто его анонсирует: блоки,
+// сданные в аренду российским сетям, числятся за PL, SC, CY. Источник из AS,
+// зарегистрированного в России, считаем российским.
+function srcCountrySql(ipCol, asnCol) {
+  const byPrefix = `trimBoth(${flowCountryExpr(ipCol)})`;
+  if (!asnCol) return byPrefix;
+  return `if(${asnCol} IN (SELECT asn FROM ${asnRegistryEnrichedTableRef()} WHERE cc = 'RU'), 'RU', ${byPrefix})`;
+}
+
+const ASN_REGISTRY_CHECK_MS = 60 * 60 * 1000;
+const asnRegistryState = { at: 0, ok: false };
+
+async function asnRegistryAvailable() {
+  if (Date.now() - asnRegistryState.at < ASN_REGISTRY_CHECK_MS) return asnRegistryState.ok;
+  try {
+    const { rows } = await query(`
+      SELECT count() AS n
+      FROM system.tables
+      WHERE database = {db:String} AND name = {table:String}
+    `, { db: config.database, table: config.asnRegistryEnrichedTable }, { name: 'detection/asn-registry-check' });
+    asnRegistryState.ok = Number(rows[0]?.n) > 0;
+  } catch {
+    asnRegistryState.ok = false;
+  }
+  asnRegistryState.at = Date.now();
+  return asnRegistryState.ok;
 }
 
 function netFromIpSql(ipExpr) {
@@ -178,7 +218,7 @@ function dedupeClientsByDisplayName(rows) {
 
 async function loadObjects() {
   const { rows: clients } = await query(`
-    SELECT client_id, display_name
+    SELECT client_id, display_name, bind_mode
     FROM ${clientsViewRef()}
   `, {}, { name: 'detection/objects-clients' });
 
@@ -210,6 +250,7 @@ async function loadObjects() {
       scope: 'client',
       scopeId: String(r.client_id),
       name: String(r.display_name || r.client_id),
+      bindMode: String(r.bind_mode || ''),
     })),
     ...nets.map((r) => ({
       scope: 'net',
@@ -234,6 +275,7 @@ function emptyRaw() {
     synOnlyBytes: 0,
     synOnlyPackets: 0,
     synOnlyRows: 0,
+    synOnlyTargets: 0,
     ackOnlyBytes: 0,
     ackOnlyPackets: 0,
     ackOnlyRows: 0,
@@ -276,6 +318,7 @@ function applyTcpHandshake(target, tcp) {
     synOnlyBytes: tcp.synOnlyBytes,
     synOnlyPackets: tcp.synOnlyPackets,
     synOnlyRows: tcp.synOnlyRows,
+    synOnlyTargets: tcp.synOnlyTargets,
     ackOnlyBytes: tcp.ackOnlyBytes,
     ackOnlyPackets: tcp.ackOnlyPackets,
     ackOnlyRows: tcp.ackOnlyRows,
@@ -311,6 +354,7 @@ function mapFlagRow(row) {
     synOnlyBytes: Number(row.syn_only_bytes || 0),
     synOnlyPackets: Number(row.syn_only_packets || 0),
     synOnlyRows: Number(row.syn_only_rows || 0),
+    synOnlyTargets: Number(row.syn_only_targets || 0),
     ackOnlyBytes: Number(row.ack_only_bytes || 0),
     ackOnlyPackets: Number(row.ack_only_packets || 0),
     ackOnlyRows: Number(row.ack_only_rows || 0),
@@ -435,6 +479,7 @@ async function loadScopeFlags(scope, minuteTs) {
       sumIf(e.bytes, e.toward AND ${synOnly}) AS syn_only_bytes,
       sumIf(e.packets, e.toward AND ${synOnly}) AS syn_only_packets,
       countIf(e.toward AND ${synOnly}) AS syn_only_rows,
+      uniqExactIf((tupleElement(e.sess, 2), tupleElement(e.sess, 4)), e.toward AND ${synOnly}) AS syn_only_targets,
       sumIf(e.bytes, e.toward AND ${ackOnly}) AS ack_only_bytes,
       sumIf(e.packets, e.toward AND ${ackOnly}) AS ack_only_packets,
       countIf(e.toward AND ${ackOnly}) AS ack_only_rows,
@@ -508,7 +553,11 @@ async function loadPortMetrics(scope, minuteTs) {
   const srcAddrCol = col('srcIp');
   const dstAddr = dstIpSql();
   const srcAddr = srcIpSql();
-  const srcCountry = flowCountryExpr(`f.${srcAddrCol}`);
+  const srcAsnCol = col('srcAsn');
+  const srcCountry = srcCountrySql(
+    `f.${srcAddrCol}`,
+    srcAsnCol && await asnRegistryAvailable() ? `f.${srcAsnCol}` : '',
+  );
   const ampPorts = AMPLIFIER_PORTS.join(', ');
   const { from, to, until } = minuteBounds(minuteTs);
   const { towardId, fromId } = scopeSides(scope);
@@ -528,7 +577,7 @@ async function loadPortMetrics(scope, minuteTs) {
           ${srcAddr} AS src_ip,
           f.${packetsCol} AS packets,
           f.${bytesCol} AS bytes,
-          trimBoth(${srcCountry}) AS src_cc
+          ${srcCountry} AS src_cc
         FROM ${flowsRawTableRef()} AS f
         WHERE ${timeFilter}
           AND f.${protoCol} IN (6, 17)
@@ -544,7 +593,7 @@ async function loadPortMetrics(scope, minuteTs) {
           ${srcAddr} AS src_ip,
           f.${packetsCol} AS packets,
           f.${bytesCol} AS bytes,
-          trimBoth(${srcCountry}) AS src_cc
+          ${srcCountry} AS src_cc
         FROM ${flowsRawTableRef()} AS f
         WHERE ${timeFilter}
           AND f.${protoCol} IN (6, 17)
@@ -699,6 +748,345 @@ async function loadPortMetrics(scope, minuteTs) {
   return map;
 }
 
+// Сети /24 внутри клиентов на портах. У клиента на IX за портом тысячи адресов,
+// и удар в один сервер тонет в общем объёме, поэтому каждую /24 за портом
+// сравниваем с её собственной нормой. Клиенты с разметкой по IP уже разложены
+// на сети в scope 'net', их не трогаем.
+const HOUR = 60 * MINUTE;
+const NET_USUAL_FLOOR_BPS = 20e6;
+const NET_USUAL_FLOOR_PPS = 5000;
+// Пока сводок меньше суток, норма сети — это случайный час, а не её обычный
+// уровень, и признак молчит.
+const NET_COVERAGE_MIN_HOURS = 24;
+const NET_RECENT_MINUTES = 60;
+const NET_LIST_MAX = 3;
+const NET_NORM_YOUNG_CACHE_MS = 10 * MINUTE;
+const NET_NORM_YOUNG_HOURS = 48;
+
+function portClientIds(objects) {
+  return (objects || [])
+    .filter((o) => o.scope === 'client' && o.bindMode === 'ports')
+    .map((o) => o.scopeId);
+}
+
+function clientNetMinuteSql() {
+  const bytesCol = col('bytes');
+  const packetsCol = col('packets');
+  const protoCol = col('proto');
+  return `
+    SELECT
+      f.dst_client AS client_id,
+      ${netFromIpSql(dstIpSql())} AS net,
+      sum(f.${bytesCol}) AS bytes,
+      sum(f.${packetsCol}) AS packets,
+      sumIf(f.${bytesCol}, f.${protoCol} = 17) AS udp_bytes,
+      sumIf(f.${bytesCol}, f.${protoCol} = 6) AS tcp_bytes
+    FROM ${flowsRawTableRef()} AS f
+    WHERE ${minuteFilterSql()}
+      AND f.dst_client IN {clients:Array(String)}
+    GROUP BY client_id, net
+    HAVING net != '' AND bytes * 8 / 60 >= {minBps:Float64}
+  `;
+}
+
+async function loadClientNets(minuteTs, clients) {
+  if (!clients.length) return [];
+  const started = Date.now();
+  const { rows } = await query(clientNetMinuteSql(), {
+    ...minuteBounds(minuteTs),
+    clients,
+    minBps: MIN_BPS,
+  }, { name: 'detection/client-nets', clickhouse_settings: HEAVY, requestTimeoutMs: 180000 });
+  logDetection('client-nets done', { ms: Date.now() - started, clients: clients.length, nets: rows.length });
+  return rows;
+}
+
+// Сводка часа считается прямо по сырью: так же заполняются прошлые дни, когда
+// минутной таблицы сетей ещё не было.
+function clientNetHourSql() {
+  const bytesCol = col('bytes');
+  const packetsCol = col('packets');
+  return `
+    INSERT INTO ${netHourTableRef()} (hour, client_id, net, minutes, bps_max, bps_p95, pps_max, pps_p95)
+    SELECT
+      toDateTime({hour:String}, 'UTC') AS hour,
+      client_id,
+      net,
+      toUInt16(count()) AS minutes,
+      max(bps) AS bps_max,
+      quantileExact(0.95)(bps) AS bps_p95,
+      max(pps) AS pps_max,
+      quantileExact(0.95)(pps) AS pps_p95
+    FROM (
+      SELECT
+        f.dst_client AS client_id,
+        ${netFromIpSql(dstIpSql())} AS net,
+        toStartOfMinute(f.time_flow_start_ns) AS m,
+        sum(f.${bytesCol}) * 8 / 60 AS bps,
+        sum(f.${packetsCol}) / 60 AS pps
+      FROM ${flowsRawTableRef()} AS f
+      WHERE ${minuteFilterSql()}
+        AND f.dst_client IN {clients:Array(String)}
+      GROUP BY client_id, net, m
+    )
+    WHERE net != ''
+    GROUP BY client_id, net
+    HAVING bps_max >= {minBps:Float64}
+    SETTINGS max_execution_time = 600, max_bytes_before_external_group_by = 4000000000
+  `;
+}
+
+function hourBounds(hourTs) {
+  return {
+    hour: formatCh(hourTs),
+    from: formatCh(hourTs),
+    to: formatCh(hourTs + HOUR),
+    until: formatCh(hourTs + HOUR + EXPORT_LAG + MINUTE),
+  };
+}
+
+function floorHour(ts) {
+  return ts - (ts % HOUR);
+}
+
+// Свежий час ищем сверху вниз: после выкладки сначала заполняются последние
+// сутки, и признак включается через минуты, а не через сутки.
+function nextMissingHour(lastHourTs, oldestHourTs, done) {
+  for (let ts = lastHourTs; ts >= oldestHourTs; ts -= HOUR) {
+    if (!done.has(ts)) return ts;
+  }
+  return null;
+}
+
+const netHourState = { done: new Set(), loaded: false, rawFromTs: null };
+let lastPortClients = [];
+
+async function loadNetHourState() {
+  const days = BASELINE_DAYS;
+  const { rows } = await query(`
+    SELECT DISTINCT toString(hour) AS h
+    FROM ${netHourTableRef()}
+    WHERE hour >= now('UTC') - INTERVAL {days:UInt16} DAY
+  `, { days }, { name: 'detection/net-hours-done' });
+  const { rows: raw } = await query(`
+    SELECT toString(min(f.date)) AS d
+    FROM ${flowsRawTableRef()} AS f
+  `, {}, { name: 'detection/net-raw-from' });
+  netHourState.done = new Set(rows.map((r) => parseUtc(r.h)).filter(Number.isFinite));
+  const rawFrom = parseUtc(`${raw?.[0]?.d || ''} 00:00:00`);
+  netHourState.rawFromTs = Number.isFinite(rawFrom) && rawFrom > 0 ? rawFrom : null;
+  netHourState.loaded = true;
+}
+
+async function maintainNetHours(closedTs, clients = lastPortClients) {
+  if (!clients.length || !closedTs) return null;
+  if (!netHourState.loaded) await loadNetHourState();
+  const lastHour = floorHour(closedTs) - HOUR;
+  // Первый день сырья обычно обрезан TTL посередине — его часы занизили бы норму.
+  const rawEdge = netHourState.rawFromTs ? netHourState.rawFromTs + 24 * HOUR : 0;
+  const oldest = Math.max(lastHour - BASELINE_DAYS * 24 * HOUR, rawEdge);
+  const hourTs = nextMissingHour(lastHour, oldest, netHourState.done);
+  if (hourTs == null) return null;
+  const started = Date.now();
+  await executeCommand(clientNetHourSql(), {
+    ...hourBounds(hourTs),
+    clients,
+    minBps: MIN_BPS,
+  }, { name: 'detection/net-hour-summary' });
+  netHourState.done.add(hourTs);
+  const out = { hour: formatCh(hourTs), ms: Date.now() - started };
+  logDetection('net-hour', out);
+  return out;
+}
+
+async function maintainNetHoursSafe(closedTs) {
+  try {
+    return await maintainNetHours(closedTs);
+  } catch (err) {
+    logDetection('net-hour error', { message: err.message });
+    return null;
+  }
+}
+
+let netNormCache = { at: 0, map: new Map(), hours: 0 };
+
+function netNormCacheTtl(hours) {
+  return hours >= NET_NORM_YOUNG_HOURS ? BASELINE_CACHE_MS : NET_NORM_YOUNG_CACHE_MS;
+}
+
+async function loadNetNorms(beforeTs, now = Date.now()) {
+  if (netNormCache.at > 0 && now - netNormCache.at < netNormCacheTtl(netNormCache.hours)) {
+    return netNormCache;
+  }
+  const params = { days: BASELINE_DAYS, before: formatCh(beforeTs) };
+  const window = `
+    hour >= ${utcDateTime('before')} - INTERVAL {days:UInt16} DAY
+    AND hour <= ${utcDateTime('before')} - INTERVAL 120 MINUTE
+  `;
+  const [{ rows }, { rows: cover }] = await Promise.all([
+    query(`
+      SELECT
+        client_id,
+        net,
+        quantileExact(0.99)(bps_max) AS bps_peak,
+        quantileExact(0.95)(bps_p95) AS bps_typ,
+        quantileExact(0.99)(pps_max) AS pps_peak,
+        quantileExact(0.95)(pps_p95) AS pps_typ
+      FROM ${netHourTableRef()}
+      WHERE ${window}
+      GROUP BY client_id, net
+    `, params, { name: 'detection/net-norms', clickhouse_settings: HEAVY, requestTimeoutMs: 180000 }),
+    query(`
+      SELECT uniqExact(hour) AS hours
+      FROM ${netHourTableRef()}
+      WHERE ${window}
+    `, params, { name: 'detection/net-norm-hours' }),
+  ]);
+  const map = new Map();
+  for (const r of rows) {
+    map.set(`${r.client_id}|${r.net}`, {
+      bpsPeak: Number(r.bps_peak || 0),
+      bpsTyp: Number(r.bps_typ || 0),
+      ppsPeak: Number(r.pps_peak || 0),
+      ppsTyp: Number(r.pps_typ || 0),
+    });
+  }
+  netNormCache = { at: now, map, hours: Number(cover?.[0]?.hours || 0) };
+  logDetection('net-norms', { nets: map.size, hours: netNormCache.hours });
+  return netNormCache;
+}
+
+async function loadNetRecent(beforeTs) {
+  const { rows } = await query(`
+    SELECT
+      client_id,
+      net,
+      median(bytes) * 8 / 60 AS bps,
+      median(packets) / 60 AS pps
+    FROM ${netMinuteTableRef()}
+    WHERE minute >= ${utcDateTime('from')} AND minute < ${utcDateTime('before')}
+    GROUP BY client_id, net
+  `, {
+    from: formatCh(beforeTs - NET_RECENT_MINUTES * MINUTE),
+    before: formatCh(beforeTs),
+  }, { name: 'detection/net-recent' });
+  return new Map(rows.map((r) => [`${r.client_id}|${r.net}`, {
+    bps: Number(r.bps || 0),
+    pps: Number(r.pps || 0),
+  }]));
+}
+
+// Та же логика, что у нормы клиента: пик за две недели, но не выше p95×4,
+// чтобы прошлая атака не стала нормой, и не ниже медианы последнего часа ×1.6,
+// чтобы растущая сеть не читалась атакой.
+function netUsual(peak, typ, recent, floor) {
+  const p = Number(peak) || 0;
+  const t = Number(typ) || 0;
+  const history = p > 0 && t > 0 ? Math.min(p, t * BASELINE_P95_CAP) : p;
+  const local = (Number(recent) || 0) * BASELINE_RECENT_CAP;
+  return Math.max(history, local, floor);
+}
+
+function netFieldsFor(item) {
+  return {
+    net_top: item.net,
+    net_bps: item.bps,
+    net_pps: item.pps,
+    net_usual_bps: item.usualBps,
+    net_usual_pps: item.usualPps,
+    net_growth_bps: item.growthBps,
+    net_growth_pps: item.growthPps,
+    net_udp_bps: item.udpBps,
+    net_tcp_bps: item.tcpBps,
+  };
+}
+
+function netItemGrowth(item) {
+  return Math.max(Number(item.growthBps) || 0, Number(item.growthPps) || 0);
+}
+
+// На клиента — одна самая выросшая горячая сеть и короткий список остальных.
+function summarizeClientNets(rows, { norms = new Map(), recent = new Map(), mature = false } = {}) {
+  const byClient = new Map();
+  for (const r of rows || []) {
+    const clientId = String(r.client_id);
+    const net = String(r.net);
+    const key = `${clientId}|${net}`;
+    const norm = norms.get(key);
+    const rec = recent.get(key);
+    const bps = Number(r.bytes || 0) * 8 / 60;
+    const pps = Number(r.packets || 0) / 60;
+    const usualBps = netUsual(norm?.bpsPeak, norm?.bpsTyp, rec?.bps, NET_USUAL_FLOOR_BPS);
+    const usualPps = netUsual(norm?.ppsPeak, norm?.ppsTyp, rec?.pps, NET_USUAL_FLOOR_PPS);
+    const item = {
+      net,
+      bps,
+      pps,
+      usualBps,
+      usualPps,
+      growthBps: mature ? bps / usualBps : null,
+      growthPps: mature ? pps / usualPps : null,
+      udpBps: Number(r.udp_bytes || 0) * 8 / 60,
+      tcpBps: Number(r.tcp_bytes || 0) * 8 / 60,
+    };
+    if (!isNetSpikeHit(netFieldsFor(item))) continue;
+    const list = byClient.get(clientId) || [];
+    list.push(item);
+    byClient.set(clientId, list);
+  }
+  const out = new Map();
+  for (const [clientId, list] of byClient) {
+    list.sort((a, b) => netItemGrowth(b) - netItemGrowth(a) || b.bps - a.bps);
+    out.set(clientId, {
+      ...netFieldsFor(list[0]),
+      net_list: list.slice(0, NET_LIST_MAX)
+        .map((item) => `${item.net}:${Math.round(item.bps)}:${netItemGrowth(item).toFixed(1)}`)
+        .join(','),
+    });
+  }
+  return out;
+}
+
+async function loadClientNetState(minuteTs, clients) {
+  if (!clients.length) return { rows: [], fields: new Map() };
+  try {
+    const [rows, norms, recent] = await Promise.all([
+      loadClientNets(minuteTs, clients),
+      loadNetNorms(minuteTs),
+      loadNetRecent(minuteTs),
+    ]);
+    const mature = norms.hours >= NET_COVERAGE_MIN_HOURS;
+    const fields = summarizeClientNets(rows, { norms: norms.map, recent, mature });
+    logDetection('client-nets', { nets: rows.length, hot: fields.size, mature, hours: norms.hours });
+    return { rows, fields };
+  } catch (err) {
+    // Сети — добавка к детекции клиента: их сбой не должен ронять минуту.
+    logDetection('client-nets error', { message: err.message });
+    return { rows: [], fields: new Map() };
+  }
+}
+
+async function insertClientNetRows(minute, rows) {
+  if (!rows.length) return;
+  const values = rows.map((r) => ({
+    minute,
+    client_id: String(r.client_id),
+    net: String(r.net),
+    bytes: Number(r.bytes || 0),
+    packets: Number(r.packets || 0),
+    udp_bytes: Number(r.udp_bytes || 0),
+    tcp_bytes: Number(r.tcp_bytes || 0),
+  }));
+  try {
+    const chunk = 10000;
+    for (let i = 0; i < values.length; i += chunk) {
+      await insertRows(NET_MINUTE_TABLE, values.slice(i, i + chunk), { name: 'detection/insert-net-minute' });
+    }
+  } catch (err) {
+    logDetection('insert-net-minute error', { message: err.message });
+  }
+}
+
 const BASELINE_CACHE_MS = 6 * 60 * 60 * 1000;
 
 function isBaselineCacheFresh(cache, now = Date.now(), ttlMs = BASELINE_CACHE_MS) {
@@ -841,6 +1229,7 @@ function toInsertRow(object, proto, raw, baseline) {
       syn_only_bytes: 0,
       syn_only_packets: 0,
       syn_only_rows: 0,
+      syn_only_targets: 0,
       ack_only_bytes: 0,
       ack_only_packets: 0,
       ack_only_rows: 0,
@@ -866,6 +1255,7 @@ function toInsertRow(object, proto, raw, baseline) {
       syn_only_bytes: m.synOnlyBytes,
       syn_only_packets: m.synOnlyPackets,
       syn_only_rows: m.synOnlyRows,
+      syn_only_targets: m.synOnlyTargets,
       ack_only_bytes: m.ackOnlyBytes,
       ack_only_packets: m.ackOnlyPackets,
       ack_only_rows: m.ackOnlyRows,
@@ -928,7 +1318,8 @@ async function tick() {
   const minute = formatCh(closed);
   if (closed <= lastProcessedMinute) {
     logDetection('skip', { reason: 'processed', minute });
-    return { skipped: 'processed', minute };
+    const netHour = await maintainNetHoursSafe(closed);
+    return { skipped: 'processed', minute, ...(netHour ? { netHour } : {}) };
   }
   if (await minuteWritten(closed)) {
     const { rows: written } = await query(`
@@ -947,16 +1338,30 @@ async function tick() {
       withAttempts: Number(stats.with_attempts || 0),
       maxAttempts: Number(stats.max_attempts || 0),
     });
-    return { skipped: 'done', minute, ...stats };
+    const netHour = await maintainNetHoursSafe(closed);
+    return { skipped: 'done', minute, ...stats, ...(netHour ? { netHour } : {}) };
   }
 
   const objects = await loadObjects();
+  const portClients = portClientIds(objects);
+  lastPortClients = portClients;
   logDetection('objects', {
     minute,
     clients: objects.filter((o) => o.scope === 'client').length,
+    portClients: portClients.length,
     nets: objects.filter((o) => o.scope === 'net').length,
   });
-  const [clientVol, clientFlags, netFlags, clientPorts, netPorts, baselines, foreignEnvelopes, hourSignals] = await Promise.all([
+  const [
+    clientVol,
+    clientFlags,
+    netFlags,
+    clientPorts,
+    netPorts,
+    baselines,
+    foreignEnvelopes,
+    hourSignals,
+    clientNets,
+  ] = await Promise.all([
     loadClientVolume(closed),
     loadScopeFlags('client', closed),
     loadScopeFlags('net', closed),
@@ -965,6 +1370,7 @@ async function tick() {
     loadBaselines(closed),
     loadForeignEnvelopes(closed),
     loadHourSignalBaselines(),
+    loadClientNetState(closed, portClients),
   ]);
   for (const [clientId, env] of foreignEnvelopes) {
     const key = `client|${clientId}|all`;
@@ -1011,12 +1417,16 @@ async function tick() {
       const hour = hourSignals.get(mskHourKey(object.scope, object.scopeId, minute)) || null;
       const ampHourBps = proto === 'udp' ? hour?.ampBps ?? null : null;
       const synHourPps = proto !== 'udp' ? hour?.synPps ?? null : null;
-      rows.push(toInsertRow(
+      const row = toInsertRow(
         object,
         proto,
         raw,
         base || ampHourBps || synHourPps ? { ...(base || {}), ampHourBps, synHourPps } : null,
-      ));
+      );
+      const netFields = proto === 'all' && object.scope === 'client'
+        ? clientNets.fields.get(object.scopeId)
+        : null;
+      rows.push(netFields ? { ...row, ...netFields } : row);
     }
   }
 
@@ -1024,6 +1434,7 @@ async function tick() {
   for (let i = 0; i < rows.length; i += chunk) {
     await insertRows(TABLE, rows.slice(i, i + chunk), { name: 'detection/insert-anomaly' });
   }
+  await insertClientNetRows(minute, clientNets.rows);
   lastProcessedMinute = closed;
 
   const nameByKey = new Map(objects.map((o) => [`${o.scope}|${o.scopeId}`, o.name]));
@@ -1044,6 +1455,8 @@ async function tick() {
     skippedBelowMinBps,
     minBpsMbit: Math.round(MIN_BPS / 1e6),
     flagRows: clientFlags.size + netFlags.size,
+    clientNets: clientNets.rows.length,
+    clientNetsHot: clientNets.fields.size,
     matchedFlags,
     insertedWithAttempts: insertedAttempts,
     maxAttempts: rows.reduce((m, r) => Math.max(m, r.syn_attempts), 0),
@@ -1089,6 +1502,7 @@ async function loadLatest() {
       a.syn_only_bytes,
       a.syn_only_packets,
       a.syn_only_rows,
+      a.syn_only_targets,
       a.ack_only_bytes,
       a.ack_only_packets,
       a.ack_only_rows,
@@ -1136,6 +1550,7 @@ async function loadLatest() {
       synOnlyBytes: Number(r.syn_only_bytes || 0),
       synOnlyPackets: Number(r.syn_only_packets || 0),
       synOnlyRows: Number(r.syn_only_rows || 0),
+      synOnlyTargets: Number(r.syn_only_targets || 0),
       ackOnlyBytes: Number(r.ack_only_bytes || 0),
       ackOnlyPackets: Number(r.ack_only_packets || 0),
       ackOnlyRows: Number(r.ack_only_rows || 0),
@@ -1270,8 +1685,19 @@ module.exports = {
   loadLatest,
   loadHistory,
   lastClosedMinute,
+  clampClosedMinute,
   HISTORY_METRICS,
   BASELINE_CACHE_MS,
   isBaselineCacheFresh,
   dedupeClientsByDisplayName,
+  portClientIds,
+  clientNetMinuteSql,
+  clientNetHourSql,
+  hourBounds,
+  minuteBounds,
+  loadScopeFlags,
+  nextMissingHour,
+  netUsual,
+  summarizeClientNets,
+  srcCountrySql,
 };

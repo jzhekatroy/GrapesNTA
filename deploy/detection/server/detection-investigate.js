@@ -59,6 +59,7 @@ function emptyInvestigate() {
     targets: [],
     focus: null,
     focuses: [],
+    victimShape: null,
     switchIn: null,
     switchOut: null,
   };
@@ -361,7 +362,8 @@ function evCte() {
       ${tcpFlags} AS tcp_flags,
       ${switchIp} AS switch_ip,
       ${inIdx} AS in_idx,
-      ${outIdx} AS out_idx
+      ${outIdx} AS out_idx,
+      f.dst_client AS dst_client
     FROM ${flowsRawTableRef()} AS f
     PREWHERE ${prewhere}
     WHERE ${timeFilterSql()} AND ${towardPred()}
@@ -498,7 +500,7 @@ async function investigateIncident({ scope, scopeId, minute }) {
       )
     ),
     proto_focus AS (
-      SELECT groupArray(tuple(proto, ip, port, byte_sum, packet_sum, srcs)) AS rows
+      SELECT groupArray(tuple(proto, ip, port, byte_sum, packet_sum, srcs, focus_client)) AS rows
       FROM (
         SELECT
           proto,
@@ -506,12 +508,47 @@ async function investigateIncident({ scope, scopeId, minute }) {
           dst_port AS port,
           sum(bytes) AS byte_sum,
           sum(packets) AS packet_sum,
-          uniqExact(src_ip) AS srcs
+          uniqExact(src_ip) AS srcs,
+          any(dst_client) AS focus_client
         FROM ev
         WHERE proto IN (6, 17)
         GROUP BY proto, ip, port
         ORDER BY byte_sum DESC
         LIMIT 1 BY proto
+      )
+    ),
+    -- Форма трафика на самый нагруженный адрес: сеанс здесь — пятёрка
+    -- (источник, порты, протокол). Загрузку держат несколько толстых сеансов,
+    -- флуд размазан по сотням источников и портов.
+    victim_flow AS (
+      SELECT groupArray(tuple(ip, ip_client, ip_bytes, ip_packets, sessions, srcs, src_ports, dst_ports, top_bytes)) AS rows
+      FROM (
+        SELECT
+          ip,
+          any(flow_client) AS ip_client,
+          sum(flow_bytes) AS ip_bytes,
+          sum(flow_packets) AS ip_packets,
+          count() AS sessions,
+          uniqExact(flow_src) AS srcs,
+          uniqExact(flow_src_port) AS src_ports,
+          uniqExact(flow_dst_port) AS dst_ports,
+          arraySum(arraySlice(arrayReverseSort(groupArray(flow_bytes)), 1, 3)) AS top_bytes
+        FROM (
+          SELECT
+            dst_ip AS ip,
+            src_ip AS flow_src,
+            src_port AS flow_src_port,
+            dst_port AS flow_dst_port,
+            proto,
+            any(dst_client) AS flow_client,
+            sum(bytes) AS flow_bytes,
+            sum(packets) AS flow_packets
+          FROM ev
+          GROUP BY ip, flow_src, flow_src_port, flow_dst_port, proto
+        )
+        GROUP BY ip
+        ORDER BY ip_bytes DESC
+        LIMIT 1
       )
     ),
     dest24 AS (
@@ -674,7 +711,8 @@ async function investigateIncident({ scope, scopeId, minute }) {
         uniqExact(src_ip) AS src_ips,
         uniqExact(src24) AS src_nets,
         uniqExact(dst_ip) AS dst_ips,
-        uniqExact(dst24) AS dst_nets
+        uniqExact(dst24) AS dst_nets,
+        uniqExactIf(dst_client, dst_client != '') AS dst_clients
       FROM ev
     )
     SELECT
@@ -683,6 +721,8 @@ async function investigateIncident({ scope, scopeId, minute }) {
       (SELECT src_nets FROM totals) AS src_nets,
       (SELECT dst_ips FROM totals) AS dst_ips,
       (SELECT dst_nets FROM totals) AS dst_nets,
+      (SELECT dst_clients FROM totals) AS dst_clients,
+      (SELECT rows FROM victim_flow) AS victim_flows,
       (SELECT rows FROM dest) AS dests,
       (SELECT rows FROM proto_focus) AS proto_focus,
       (SELECT rows FROM proto_bytes) AS proto_bytes,
@@ -781,6 +821,7 @@ async function investigateIncident({ scope, scopeId, minute }) {
       net24Count: Number(row.src_nets || 0),
       dstIpCount: Number(row.dst_ips || 0),
       dstNetCount: Number(row.dst_nets || 0),
+      dstClientCount: Number(row.dst_clients || 0),
       top: srcips.map((t) => mapShareRow(
         { bytes: t[3], gbit: toGbit(t[3]) },
         { ip: String(t[0] || ''), net24: String(t[1] || ''), asn: Number(t[2] || 0) || null },
@@ -805,6 +846,7 @@ async function investigateIncident({ scope, scopeId, minute }) {
     targets: mapProtoTargets(asTuples(row.proto_focus), asTuples(row.proto_bytes)),
     focus: null,
     focuses: [],
+    victimShape: mapVictimShape(asTuples(row.victim_flows)[0]),
     switchIn: mapSwitch(ins[0] ? switchTuple(ins[0]) : null, total),
     switchOut: mapSwitch(outs[0] ? switchTuple(outs[0]) : null, total),
   };
@@ -828,9 +870,30 @@ function mapProtoTargets(focusRows, byteRows) {
       bps: (bytes * 8) / 60,
       avgPkt: packets > 0 ? bytes / packets : 0,
       srcs: Number(row[5] || 0),
+      clientId: String(row[6] || ''),
       share: whole > 0 ? bytes / whole : 0,
     };
   }).filter((row) => row.ip);
+}
+
+function mapVictimShape(raw) {
+  const t = Array.isArray(raw) ? raw : Object.values(raw || {});
+  const ip = String(t[0] || '');
+  const bytes = Number(t[2] || 0);
+  if (!ip || !(bytes > 0)) return null;
+  const packets = Number(t[3] || 0);
+  return {
+    ip,
+    clientId: String(t[1] || ''),
+    bytes,
+    packets,
+    avgPkt: packets > 0 ? bytes / packets : 0,
+    sessions: Number(t[4] || 0),
+    srcs: Number(t[5] || 0),
+    srcPorts: Number(t[6] || 0),
+    dstPorts: Number(t[7] || 0),
+    topShare: Number(t[8] || 0) / bytes,
+  };
 }
 
 // Медиана этого адреса и порта за час до минуты. Считаем только когда адрес
@@ -916,6 +979,7 @@ module.exports = {
   formatClientMarkup,
   investigateIncident,
   attachTargetFocus,
+  mapVictimShape,
   emptyInvestigate,
   emptyBinding,
 };

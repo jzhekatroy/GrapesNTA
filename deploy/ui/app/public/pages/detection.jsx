@@ -15,6 +15,7 @@ const SIGNAL_LABEL = {
   volume: 'объём',
   amplification: 'амплификация',
   foreign_geo: 'заграница',
+  net_spike: 'сеть /24',
 };
 const PAGE_TABS = [
   { id: 'table', label: 'Таблица' },

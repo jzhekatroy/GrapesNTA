@@ -4,11 +4,61 @@ const { executeCommand, query, config } = require('./clickhouse');
 
 const DB = () => config.database || 'default';
 const TABLE = 'traffic_client_anomaly_1m';
+const NET_MINUTE_TABLE = 'traffic_client_net_1m';
+const NET_HOUR_TABLE = 'traffic_client_net_1h';
 const PROTOS = ['all', 'tcp', 'udp'];
 
 function tableRef() {
   return `${DB()}.${TABLE}`;
 }
+
+function netMinuteTableRef() {
+  return `${DB()}.${NET_MINUTE_TABLE}`;
+}
+
+function netHourTableRef() {
+  return `${DB()}.${NET_HOUR_TABLE}`;
+}
+
+// Минуты сетей /24 клиентов на портах нужны только для медианы последнего часа
+// и разбора свежих инцидентов, поэтому живут двое суток. Норму за две недели
+// держат часовые сводки: на PiterIX это ~27 тыс. строк в час против ~8 тыс.
+// в минуту, и запрос нормы не упирается в память.
+const NET_MINUTE_CREATE_SQL = `
+CREATE TABLE IF NOT EXISTS ${DB()}.${NET_MINUTE_TABLE}
+(
+  minute DateTime('UTC'),
+  client_id String,
+  net String,
+  bytes UInt64 DEFAULT 0,
+  packets UInt64 DEFAULT 0,
+  udp_bytes UInt64 DEFAULT 0,
+  tcp_bytes UInt64 DEFAULT 0
+)
+ENGINE = ReplacingMergeTree
+PARTITION BY toYYYYMMDD(minute)
+ORDER BY (minute, client_id, net)
+TTL minute + toIntervalDay(2)
+SETTINGS ttl_only_drop_parts = 1
+`;
+
+const NET_HOUR_CREATE_SQL = `
+CREATE TABLE IF NOT EXISTS ${DB()}.${NET_HOUR_TABLE}
+(
+  hour DateTime('UTC'),
+  client_id String,
+  net String,
+  minutes UInt16 DEFAULT 0,
+  bps_max Float64 DEFAULT 0,
+  bps_p95 Float64 DEFAULT 0,
+  pps_max Float64 DEFAULT 0,
+  pps_p95 Float64 DEFAULT 0
+)
+ENGINE = ReplacingMergeTree
+PARTITION BY toYYYYMM(hour)
+ORDER BY (client_id, net, hour)
+TTL hour + toIntervalDay(16)
+`;
 
 const CREATE_SQL = `
 CREATE TABLE IF NOT EXISTS ${DB()}.${TABLE}
@@ -49,6 +99,7 @@ CREATE TABLE IF NOT EXISTS ${DB()}.${TABLE}
   syn_only_bytes UInt64 DEFAULT 0,
   syn_only_packets UInt64 DEFAULT 0,
   syn_only_rows UInt64 DEFAULT 0,
+  syn_only_targets UInt64 DEFAULT 0,
   growth_syn Nullable(Float64),
   ack_only_bytes UInt64 DEFAULT 0,
   ack_only_packets UInt64 DEFAULT 0,
@@ -62,7 +113,17 @@ CREATE TABLE IF NOT EXISTS ${DB()}.${TABLE}
   data_bytes UInt64 DEFAULT 0,
   data_packets UInt64 DEFAULT 0,
   data_rows UInt64 DEFAULT 0,
-  sampling_rate UInt64 DEFAULT 1
+  sampling_rate UInt64 DEFAULT 1,
+  net_top String DEFAULT '',
+  net_bps Float64 DEFAULT 0,
+  net_pps Float64 DEFAULT 0,
+  net_usual_bps Float64 DEFAULT 0,
+  net_usual_pps Float64 DEFAULT 0,
+  net_growth_bps Nullable(Float64),
+  net_growth_pps Nullable(Float64),
+  net_udp_bps Float64 DEFAULT 0,
+  net_tcp_bps Float64 DEFAULT 0,
+  net_list String DEFAULT ''
 )
 ENGINE = ReplacingMergeTree
 PARTITION BY toYYYYMMDD(minute)
@@ -87,6 +148,7 @@ const ADD_COLUMNS = [
   { name: 'syn_only_bytes', type: 'UInt64 DEFAULT 0' },
   { name: 'syn_only_packets', type: 'UInt64 DEFAULT 0' },
   { name: 'syn_only_rows', type: 'UInt64 DEFAULT 0' },
+  { name: 'syn_only_targets', type: 'UInt64 DEFAULT 0' },
   { name: 'growth_syn', type: 'Nullable(Float64)' },
   { name: 'ack_only_bytes', type: 'UInt64 DEFAULT 0' },
   { name: 'ack_only_packets', type: 'UInt64 DEFAULT 0' },
@@ -101,6 +163,16 @@ const ADD_COLUMNS = [
   { name: 'data_packets', type: 'UInt64 DEFAULT 0' },
   { name: 'data_rows', type: 'UInt64 DEFAULT 0' },
   { name: 'sampling_rate', type: 'UInt64 DEFAULT 1' },
+  { name: 'net_top', type: 'String DEFAULT \'\'' },
+  { name: 'net_bps', type: 'Float64 DEFAULT 0' },
+  { name: 'net_pps', type: 'Float64 DEFAULT 0' },
+  { name: 'net_usual_bps', type: 'Float64 DEFAULT 0' },
+  { name: 'net_usual_pps', type: 'Float64 DEFAULT 0' },
+  { name: 'net_growth_bps', type: 'Nullable(Float64)' },
+  { name: 'net_growth_pps', type: 'Nullable(Float64)' },
+  { name: 'net_udp_bps', type: 'Float64 DEFAULT 0' },
+  { name: 'net_tcp_bps', type: 'Float64 DEFAULT 0' },
+  { name: 'net_list', type: 'String DEFAULT \'\'' },
 ];
 
 let ensurePromise = null;
@@ -108,6 +180,18 @@ let ensurePromise = null;
 async function ensureDetectionTables() {
   if (!ensurePromise) {
     ensurePromise = (async () => {
+      const { rows: tables } = await query(`
+        SELECT name
+        FROM system.tables
+        WHERE database = {db:String} AND name IN {names:Array(String)}
+      `, { db: DB(), names: [NET_MINUTE_TABLE, NET_HOUR_TABLE] }, { name: 'detection/net-tables' });
+      const present = new Set(tables.map((r) => String(r.name)));
+      if (!present.has(NET_MINUTE_TABLE)) {
+        await executeCommand(NET_MINUTE_CREATE_SQL, {}, { name: 'detection/create-net-minute' });
+      }
+      if (!present.has(NET_HOUR_TABLE)) {
+        await executeCommand(NET_HOUR_CREATE_SQL, {}, { name: 'detection/create-net-hour' });
+      }
       const { rows: cols } = await query(`
         SELECT name
         FROM system.columns
@@ -147,6 +231,10 @@ async function ensureDetectionTables() {
 module.exports = {
   TABLE,
   tableRef,
+  NET_MINUTE_TABLE,
+  NET_HOUR_TABLE,
+  netMinuteTableRef,
+  netHourTableRef,
   ensureDetectionTables,
   PROTOS,
 };

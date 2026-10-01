@@ -98,6 +98,7 @@ function minuteMetrics(raw = {}) {
     synOnlyBytes: Number(raw.synOnlyBytes || 0),
     synOnlyPackets: Number(raw.synOnlyPackets || 0),
     synOnlyRows: Number(raw.synOnlyRows || 0),
+    synOnlyTargets: Number(raw.synOnlyTargets || 0),
     ackOnlyBytes: Number(raw.ackOnlyBytes || 0),
     ackOnlyPackets: Number(raw.ackOnlyPackets || 0),
     ackOnlyRows: Number(raw.ackOnlyRows || 0),

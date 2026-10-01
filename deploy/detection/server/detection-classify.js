@@ -9,6 +9,9 @@ const {
   isSynFloodHit,
   isTcpScan,
   tcpClassMetrics,
+  TCP_FOCUS_PPS_MIN,
+  TCP_FOCUS_ANSWER_MAX,
+  TCP_FLOOD_PKT_MAX,
 } = require('./detection-signals');
 
 const KINDS = {
@@ -51,8 +54,20 @@ const VICTIM_ACTION_SHARE_MIN = 0.15;
 const TARGET_SHARE_MIN = 0.15;
 const TARGET_GROWTH_MIN = 3;
 const TARGET_SRCS_MIN = 10;
+// Загрузка сеансами: три самых толстых сеанса несут почти весь трафик адреса,
+// пакеты крупные, а локальный порт эфемерный. Флуд с подменой адресов и
+// портов так не выглядит, флуд мелкими пакетами отсекается размером пакета.
+const SESSION_TOP_SHARE_MIN = 0.8;
+const SESSION_AVG_PKT_MIN = 500;
+const SESSION_LOCAL_PORT_MIN = 1024;
+// Сеть /24 из адресов разных абонентов — не один сервер: адрес внутри неё
+// разбирает детекция самого абонента по его норме.
+const NET_CLIENTS_MIN = 2;
 const AMP_DEST_ACTION_SHARE = 0.5;
 const NORMALIZE_BPS_KEEP = 0.85;
+// Голый SYN по пакетам собран в одну пару адрес:порт — флуд, даже если сигнал
+// SYN не сработал (нет нормы часа или числа целей в строке минуты).
+const SYN_FOCUS_SHARE_MIN = 0.5;
 // hourP95 из снимка алерта. Если он на порядок меньше самого алерта, это не
 // «обычный час», а заниженная норма — 85783 висел 5 суток на 1.4 Гбит при
 // замороженных 104 Мбит. Такой p95 не держит событие.
@@ -238,6 +253,38 @@ function isDownloadPeak(verdict = {}, investigate = {}) {
   return hasNarrowSource(investigate, verdict);
 }
 
+function sessionDownload(investigate = {}) {
+  const shape = investigate?.victimShape;
+  const victim = investigate?.victim;
+  if (!shape || !victim?.ip || shape.ip !== victim.ip) return null;
+  if (!(num(victim.share) >= TOP_DST_VOLUMETRIC)) return null;
+  const focus = investigate?.focus;
+  if (isTargetFocus(focus) && focus.ip !== victim.ip) return null;
+  if (!(num(shape.topShare) >= SESSION_TOP_SHARE_MIN)) return null;
+  if (!(num(shape.avgPkt) >= SESSION_AVG_PKT_MIN)) return null;
+  if (!(num(victim.port) >= SESSION_LOCAL_PORT_MIN)) return null;
+  return shape;
+}
+
+function clientInNet(investigate, ip, context = {}) {
+  if (context.scope !== 'net' || !ip) return '';
+  if (!(num(investigate?.sources?.dstClientCount) >= NET_CLIENTS_MIN)) return '';
+  const candidates = [investigate?.victimShape, investigate?.focus, ...(investigate?.focuses || [])];
+  const hit = candidates.find((row) => row?.ip === ip && row?.clientId);
+  return hit ? String(hit.clientId) : '';
+}
+
+function handOffToClient(next, investigate, ip, context) {
+  const clientId = clientInNet(investigate, ip, context);
+  if (!clientId) return next;
+  return {
+    ...next,
+    kind: KINDS.benign_peak,
+    reason: `адрес ${ip} — абонент ${clientId}, разбор по абоненту · ${next.reason || ''}`.trim(),
+    needsInvestigate: false,
+  };
+}
+
 function webDownloadShare(investigate) {
   const rows = Array.isArray(investigate?.l4src) ? investigate.l4src : [];
   return rows.reduce((sum, row) => (
@@ -268,7 +315,18 @@ function isTargetFocus(focus) {
   return num(focus.growth) >= TARGET_GROWTH_MIN;
 }
 
-function refineClassification(verdict, investigate) {
+function synPacketFocus(verdict = {}, investigate = {}) {
+  const syn = investigate?.syn;
+  if (!(num(syn?.pps) >= TCP_FOCUS_PPS_MIN)) return null;
+  if (!(num(syn.avgPkt) > 0 && num(syn.avgPkt) < TCP_FLOOD_PKT_MAX)) return null;
+  const answer = num(verdict.answerPct);
+  if (answer != null && answer >= TCP_FOCUS_ANSWER_MAX) return null;
+  const top = Array.isArray(syn.dest) ? syn.dest[0] : null;
+  if (!top?.ip || !(num(top.share) >= SYN_FOCUS_SHARE_MIN)) return null;
+  return top;
+}
+
+function refineClassification(verdict, investigate, context = {}) {
   const next = { ...(verdict || {}) };
   const topShare = num(investigate?.victim?.share);
   const ratio = num(next.hourRatio);
@@ -293,12 +351,36 @@ function refineClassification(verdict, investigate) {
     next.needsInvestigate = true;
     return next;
   }
+  // Доли «топ IP» ниже считаются по байтам. У 101443 01.10 12:00 МСК байты были
+  // ниже нормы, топ по ним держала закачка из Yandex.Cloud на 185.191.34.125, а
+  // рост пакетов дали 137 тыс. п/с голого SYN в 109.232.248.252:80.
+  const synTop = synPacketFocus(next, investigate);
+  if (synTop) {
+    next.kind = KINDS.syn_flood;
+    next.reason = [
+      `${formatHostPort(synTop.ip, synTop.port)} ${(num(synTop.share) * 100).toFixed(0)}% SYN`,
+      `голый SYN ${formatSynPps(investigate.syn.pps)}`,
+      next.reason,
+    ].filter(Boolean).join(' · ');
+    next.needsInvestigate = true;
+    return next;
+  }
   if (isDownloadPeak(next, investigate)) {
     next.kind = KINDS.benign_peak;
     const src = Array.isArray(investigate?.source24) ? investigate.source24[0] : null;
     const srcShare = num(src?.share);
     next.reason = `пик загрузки · узкий источник · ${downloadPeakLabel(investigate)}`
       + (srcShare != null ? ` · /24 ${(srcShare * 100).toFixed(0)}%` : '')
+      + (topShare != null ? ` · топ IP ${(topShare * 100).toFixed(1)}%` : '');
+    next.needsInvestigate = false;
+    return next;
+  }
+  const session = sessionDownload(investigate);
+  if (session) {
+    next.kind = KINDS.benign_peak;
+    const top = Math.min(3, session.sessions);
+    next.reason = `пик загрузки · ${top === 1 ? '1 сеанс даёт' : `${top} сеанса дают`} `
+      + `${(session.topShare * 100).toFixed(0)}% адреса · ${downloadPeakLabel(investigate)}`
       + (topShare != null ? ` · топ IP ${(topShare * 100).toFixed(1)}%` : '');
     next.needsInvestigate = false;
     return next;
@@ -319,11 +401,13 @@ function refineClassification(verdict, investigate) {
       .replace(/\s+/g, ' ')
       .trim();
     next.needsInvestigate = true;
-    return next;
+    return handOffToClient(next, investigate, focus.ip, context);
   }
   if (topShare != null && topShare >= TOP_DST_VOLUMETRIC) {
     next.kind = KINDS.volumetric;
     next.reason = `топ IP ${(topShare * 100).toFixed(1)}% · ${next.reason || ''}`.trim();
+    next.needsInvestigate = true;
+    return handOffToClient(next, investigate, investigate?.victim?.ip, context);
   } else if (
     topShare != null
     && topShare < TOP_DST_CARPET
@@ -514,6 +598,7 @@ module.exports = {
   TARGET_SRCS_MIN,
   isDownloadPeak,
   isWebDownload,
+  sessionDownload,
   downloadPeakLabel,
   isLegitimatePeak,
   isAttackKind,

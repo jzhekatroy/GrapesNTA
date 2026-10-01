@@ -5,9 +5,7 @@ const { tableRef, ensureDetectionTables } = require('./detection-schema');
 const { formatCh, parseUtc, MINUTE } = require('./detection-core');
 const {
   KINDS,
-  KIND_LABEL,
   HOUR_RATIO_PEAK,
-  ENTROPY_FOCUSED,
   classifyFromMetrics,
   refineClassification,
   isTargetFocus,
@@ -16,32 +14,30 @@ const {
   downloadPeakLabel,
   formatSwitchPort,
   formatAsnLabel,
-  formatSourceNets,
   isUsableVictim,
-  actionFor,
   volumeStillHigh,
 } = require('./detection-classify');
 const { loadHourEnvelope, loadClientBinding, formatClientMarkup, investigateIncident, attachTargetFocus, emptyInvestigate } = require('./detection-investigate');
 const { loadThresholdMap, resolveGrowthThreshold, hasGrowthOverride } = require('./detection-thresholds');
 const {
   SIGNALS,
-  SIGNAL_LABEL,
   SIGNAL_ORDER,
-  AMP_PKT_MIN,
   isAmplificationHit,
   ampStillGoing,
   ampMetrics,
-  foreignMetrics,
   evaluateForeignGeo,
   formatTopCountries,
   amplifierPortsFromL4,
   amplifierLabel,
-  AMPLIFIER_PORT_LABEL,
   objectSignalKey,
   isSynFloodHit,
   synFloodStillGoing,
-  isTcpScan,
   tcpClassMetrics,
+  NET_STREAK,
+  NET_NORMALIZE_STREAK,
+  netSpikeMetrics,
+  isNetSpikeHit,
+  isNetSpikeStrong,
 } = require('./detection-signals');
 
 const SETTINGS_TABLE = 'app_detection_telegram';
@@ -59,9 +55,7 @@ const TELEGRAM_SKIP_BELOW_SHARE = 'below_client_share';
 const MAX_STREAK = 60;
 const PREV_ROWS_GAP_MINUTES = 15;
 const ALERT_SCOPES = new Set(['all', 'client', 'net']);
-const ALERT_SCOPE_LABEL = { all: 'всё', client: 'абоненты', net: 'сети' };
 const ALERT_KINDS = new Set(['all', 'attack', 'peak']);
-const PROTO_LABEL = { all: 'общее', tcp: 'TCP', udp: 'UDP' };
 const SNAPSHOT_FIELDS = [
   'bps', 'pps', 'growth_bps', 'growth_pps', 'bytes', 'packets',
   'avg_packet_bytes', 'cv_percent',
@@ -71,15 +65,17 @@ const SNAPSHOT_FIELDS = [
   'amp_bytes', 'amp_packets', 'amp_srcs', 'growth_amp', 'growth_syn',
   'foreign_bytes', 'foreign_srcs', 'top_countries',
   'growth_foreign_bps', 'growth_foreign_share',
-  'syn_only_bytes', 'syn_only_packets', 'syn_only_rows',
+  'syn_only_bytes', 'syn_only_packets', 'syn_only_rows', 'syn_only_targets',
   'ack_only_bytes', 'ack_only_packets', 'ack_only_rows',
   'rst_bytes', 'rst_packets', 'rst_rows',
   'established_bytes', 'established_packets', 'established_rows',
   'data_bytes', 'data_packets', 'data_rows',
   'sampling_rate',
+  'net_top', 'net_bps', 'net_pps', 'net_usual_bps', 'net_usual_pps',
+  'net_growth_bps', 'net_growth_pps', 'net_udp_bps', 'net_tcp_bps', 'net_list',
 ];
 // Список стран — строка вида RU:0.60,UZ:0.12; числовое приведение убило бы её.
-const SNAPSHOT_STRING_FIELDS = new Set(['top_countries']);
+const SNAPSHOT_STRING_FIELDS = new Set(['top_countries', 'net_top', 'net_list']);
 const SNAPSHOT_CAMEL = {
   growth_bps: 'growthBps',
   growth_pps: 'growthPps',
@@ -110,6 +106,7 @@ const SNAPSHOT_CAMEL = {
   syn_only_bytes: 'synOnlyBytes',
   syn_only_packets: 'synOnlyPackets',
   syn_only_rows: 'synOnlyRows',
+  syn_only_targets: 'synOnlyTargets',
   ack_only_bytes: 'ackOnlyBytes',
   ack_only_packets: 'ackOnlyPackets',
   ack_only_rows: 'ackOnlyRows',
@@ -123,6 +120,16 @@ const SNAPSHOT_CAMEL = {
   data_packets: 'dataPackets',
   data_rows: 'dataRows',
   sampling_rate: 'samplingRate',
+  net_top: 'netTop',
+  net_bps: 'netBps',
+  net_pps: 'netPps',
+  net_usual_bps: 'netUsualBps',
+  net_usual_pps: 'netUsualPps',
+  net_growth_bps: 'netGrowthBps',
+  net_growth_pps: 'netGrowthPps',
+  net_udp_bps: 'netUdpBps',
+  net_tcp_bps: 'netTcpBps',
+  net_list: 'netList',
 };
 
 const DEFAULT_AMP_HOUR_RATIO = 2;
@@ -299,8 +306,11 @@ function parasiticClientShare(signal, { byProto } = {}) {
 function shouldSkipTelegramForShare(signals, ctx, settings = {}) {
   const list = Array.isArray(signals) && signals.length ? signals : [SIGNALS.volume];
   return list.every((signal) => {
-    // Отражение и SYN режутся кратностью к своему часу, не долей от всего клиента.
-    if (signal === SIGNALS.amplification || signal === SIGNALS.syn_flood) return false;
+    // Отражение, SYN и сеть /24 режутся кратностью к своей норме, не долей от
+    // всего клиента: у сети внутри крупного клиента доля по определению мала.
+    if (signal === SIGNALS.amplification || signal === SIGNALS.syn_flood || signal === SIGNALS.net_spike) {
+      return false;
+    }
     const minPct = minSharePctForSignal(settings, signal);
     if (!(minPct > 0)) return false;
     const share = parasiticClientShare(signal, ctx);
@@ -521,6 +531,13 @@ function signalSettings(settings = {}, signal = SIGNALS.volume) {
       normalizeStreak: normalizeStreak(settings.normalizeStreak, DEFAULT_NORMALIZE_STREAK),
     };
   }
+  if (signal === SIGNALS.net_spike) {
+    return {
+      enabled: process.env.DETECTION_NET_SPIKE !== '0',
+      streak: NET_STREAK,
+      normalizeStreak: NET_NORMALIZE_STREAK,
+    };
+  }
   return {
     enabled: true,
     streak: normalizeStreak(settings.streak, DEFAULT_STREAK),
@@ -557,7 +574,19 @@ function isSignalHot(signal, row, group, threshold, settings = {}) {
     if (!isAboveGrowthThreshold(row, threshold)) return false;
     return evaluateForeignGeo(row).hit;
   }
+  if (signal === SIGNALS.net_spike) {
+    return String(row?.scope || group?.scope || '') === 'client' && isNetSpikeHit(row);
+  }
   return isAboveGrowthThreshold(row, threshold);
+}
+
+// Сеть /24 открывается серией из двух минут, а рост ×20 — сразу: так короткий
+// удар не уходит без события. Повтор того же удара режет activeKeys.
+function shouldSendNetSpike(historyNewestFirst, isHotFn, streak, enabledAtMs) {
+  const history = Array.isArray(historyNewestFirst) ? historyNewestFirst : [];
+  if (shouldSendSignal(history, isHotFn, streak, enabledAtMs)) return true;
+  if (!isNetSpikeStrong(history[0])) return false;
+  return !history[1] || !isHotFn(history[1]);
 }
 
 function shouldSendSignal(historyNewestFirst, isHotFn, streak = DEFAULT_STREAK, enabledAtMs) {
@@ -758,16 +787,6 @@ function formatPpsMsg(value) {
   return formatRateMsg(value, ['п/с', 'тыс. п/с', 'млн п/с', 'млрд п/с']);
 }
 
-function formatGrowthMsg(value) {
-  const n = finiteGrowth(value);
-  return n == null ? 'пусто' : `×${n.toFixed(2)}`;
-}
-
-function formatPctMsg(value) {
-  const n = finiteGrowth(value);
-  return n == null ? '—' : `${n.toFixed(1)}%`;
-}
-
 // A ClickHouse exception carries the whole failing expression; pasted whole it
 // buried the rest of the alert. The event row keeps the full text.
 function shortErrorMsg(value, limit = 120) {
@@ -782,92 +801,29 @@ function formatNumMsg(value, digits = 0) {
   return n.toLocaleString('ru-RU', { maximumFractionDigits: digits, minimumFractionDigits: digits });
 }
 
-function formatNullableNum(value, digits = 0) {
-  if (value == null || value === '') return '—';
-  return formatNumMsg(value, digits);
-}
-
-function formatMinuteMsk(minute) {
+function mskParts(minute) {
   const ts = parseUtc(minute);
-  if (!Number.isFinite(ts)) return String(minute || '—');
-  return `${new Date(ts).toLocaleString('ru-RU', { timeZone: 'Europe/Moscow' })} МСК`;
+  if (!Number.isFinite(ts)) return null;
+  const parts = new Intl.DateTimeFormat('ru-RU', {
+    timeZone: 'Europe/Moscow',
+    day: '2-digit',
+    month: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hourCycle: 'h23',
+  }).formatToParts(new Date(ts));
+  const get = (type) => parts.find((p) => p.type === type)?.value || '';
+  return { date: `${get('day')}.${get('month')}`, time: `${get('hour')}:${get('minute')}` };
 }
 
-// Какие метрики строки вышли за рамки. Пороги те же, что у классификатора,
-// иначе пометка в сообщении расходилась бы с вердиктом.
-function outOfRangeFields(proto, row, { verdict, threshold } = {}) {
-  const flags = new Set();
-  if (!row) return flags;
-  const t = Number(threshold) > 0 ? Number(threshold) : DEFAULT_GROWTH_THRESHOLD;
-  const growthBps = finiteGrowth(row.growth_bps);
-  const growthPps = finiteGrowth(row.growth_pps);
-  if (growthBps != null && growthBps >= t) flags.add('growth_bps');
-  if (growthPps != null && growthPps >= t) flags.add('growth_pps');
-  const ratio = Number(verdict?.hourRatio);
-  if (proto === 'all' && Number.isFinite(ratio) && ratio >= HOUR_RATIO_PEAK) flags.add('bps');
-  const entropy = Number(row.port_entropy);
-  if (Number.isFinite(entropy) && entropy < ENTROPY_FOCUSED) flags.add('port_entropy');
-  if (isSynFloodHit(row)) flags.add('syn_only');
-  if (Number(row.avg_packet_bytes) >= AMP_PKT_MIN) flags.add('avg_packet_bytes');
-  if (proto === 'udp' && isAmplificationHit(row)) flags.add('amp');
-  if (proto === 'all' && evaluateForeignGeo(row).hit) flags.add('foreign');
-  return flags;
+function formatAlertTime(minute) {
+  const p = mskParts(minute);
+  return p ? `${p.date} ${p.time} МСК` : String(minute || '—');
 }
 
-function formatProtoBlock(proto, row, flags = new Set()) {
-  const title = `<b>${escapeHtml(PROTO_LABEL[proto] || proto)}</b>`;
-  if (!row) return `${title}\n  нет данных`;
-  // Вышедшее за рамки помечаем на месте, чтобы не искать его глазами в списке.
-  const at = (field, text) => `${flags.has(field) ? '‼' : ' '} ${text}`;
-  const lines = [
-    title,
-    at('bps', `bps: ${formatBpsMsg(row.bps)}`),
-    at('pps', `pps: ${formatPpsMsg(row.pps)}`),
-    at('growth_bps', `рост bps: ${formatGrowthMsg(row.growth_bps)}`),
-    at('growth_pps', `рост pps: ${formatGrowthMsg(row.growth_pps)}`),
-  ];
-  if (proto === 'udp') {
-    lines.push('  попытки / ответ / полуоткрытые / не зашли: —');
-  } else {
-    const syn = tcpClassMetrics(row, 'syn_only');
-    if (syn.packets > 0) {
-      lines.push(at('syn_only', `голый SYN: ${formatPpsMsg(syn.pps)} · ${formatNumMsg(syn.avgPkt, 0)} Б · ${formatNumMsg(syn.rows, 0)} стр.`));
-    }
-    const ack = tcpClassMetrics(row, 'ack_only');
-    if (ack.packets > 0 && ack.avgPkt < 120) {
-      lines.push(`  голый ACK: ${formatPpsMsg(ack.pps)} · ${formatNumMsg(ack.avgPkt, 0)} Б`);
-    }
-    lines.push(`  попытки: ${formatNumMsg(row.syn_attempts, 0)}`);
-    lines.push(`  ответ: ${formatPctMsg(row.answer_pct)}`);
-    lines.push(`  полуоткрытые: ${formatPctMsg(row.half_open_pct)}`);
-    lines.push(`  не зашли: ${formatPctMsg(row.half_open_reply_pct)}`);
-    if (isTcpScan(row)) lines.push('  SYN-скан: много потоков, мало пакетов');
-  }
-  lines.push(at('port_entropy', `энтропия портов вх.: ${formatNullableNum(row.port_entropy, 2)}`));
-  lines.push(at('port_entropy_out', `энтропия портов исх.: ${formatNullableNum(row.port_entropy_out, 2)}`));
-  lines.push(at('ports_per_ip', `макс. портов/IP вх.: ${formatNullableNum(row.ports_per_ip, 0)}`));
-  lines.push(at('ports_per_ip_out', `макс. портов/IP исх.: ${formatNullableNum(row.ports_per_ip_out, 0)}`));
-  lines.push(at('avg_packet_bytes', `средний пакет: ${formatNumMsg(row.avg_packet_bytes, 0)} Б`));
-  lines.push(at('cv_percent', `CV: ${row.cv_percent == null ? '—' : `${formatNumMsg(row.cv_percent, 1)}%`}`));
-  // Строки ниже есть не у каждой минуты: без трафика с портов усилителей и без
-  // зарубежных источников это были бы нули в каждом сообщении.
-  const amp = proto === 'udp' ? ampMetrics(row) : null;
-  if (amp && amp.bytes > 0) {
-    lines.push(at('amp', `с портов усилителей: ${formatBpsMsg(amp.bps)}`
-      + ` · доля ${amp.share == null ? '—' : `${(amp.share * 100).toFixed(0)}%`}`
-      + ` · ${formatNumMsg(amp.srcs, 0)} источников`
-      + ` · пакет ${formatNumMsg(amp.avgPkt, 0)} Б`));
-  }
-  const geo = proto === 'all' ? foreignMetrics(row) : null;
-  if (geo && geo.bytes > 0) {
-    lines.push(at('foreign', `заграница: ${formatBpsMsg(geo.bps)}`
-      + ` · доля ${geo.share == null ? '—' : `${(geo.share * 100).toFixed(0)}%`}`
-      + ` · ${formatNumMsg(geo.srcs, 0)} источников`
-      + ` · рост доли ${formatGrowthMsg(row.growth_foreign_share ?? row.growthForeignShare)}`));
-    const countries = formatTopCountries(geo.top);
-    if (countries) lines.push(`  страны: ${escapeHtml(countries)}`);
-  }
-  return lines.join('\n');
+function formatClockMsk(minute) {
+  const p = mskParts(minute);
+  return p ? p.time : '—';
 }
 
 function isAlertAttack(verdict, signals = []) {
@@ -876,47 +832,8 @@ function isAlertAttack(verdict, signals = []) {
   if (list.includes(SIGNALS.amplification)) return true;
   if (list.includes(SIGNALS.syn_flood) && !isLegitimatePeak(verdict)) return true;
   if (list.includes(SIGNALS.foreign_geo) && !isLegitimatePeak(verdict)) return true;
+  if (list.includes(SIGNALS.net_spike) && !isLegitimatePeak(verdict)) return true;
   return false;
-}
-
-const HEADLINE_KIND = {
-  [KINDS.volumetric]: 'в один сервер',
-  [KINDS.carpet]: 'по сети',
-  [KINDS.syn_flood]: 'SYN-флуд',
-};
-
-function formatGrowthPair(byProto, verdict) {
-  const growth14 = finiteGrowth(byProto?.all?.growth_bps ?? byProto?.all?.growthBps);
-  const hour = Number(verdict?.hourRatio);
-  const parts = [];
-  if (growth14 != null) parts.push(`×${Number(growth14).toFixed(2)} к 14д p999`);
-  if (Number.isFinite(hour) && hour > 0) parts.push(`×${hour.toFixed(2)} к часу`);
-  return parts.join(' · ');
-}
-
-function formatAlertHeadline(verdict, signals = []) {
-  const verdictKind = verdict?.kind || '';
-  const head = (emoji, text) => `${emoji} <b>${escapeHtml(text)}</b>`;
-  if (verdictKind === KINDS.amplification) {
-    const fromAmp = (Array.isArray(verdict?.ampSrcPort?.top) ? verdict.ampSrcPort.top : [])
-      .map((row) => ({ port: row.port, proto: 17 }));
-    const ports = amplifierPortsFromL4(fromAmp.length ? fromAmp : verdict?.l4src);
-    const extra = amplifierLabel(ports);
-    return head('🔴', `АТАКА · ${KIND_LABEL.amplification}${extra ? ` ${extra}` : ''}`);
-  }
-  if (isAttackKind(verdictKind)) {
-    return head('🔴', `АТАКА · ${HEADLINE_KIND[verdictKind] || KIND_LABEL[verdictKind] || verdictKind}`);
-  }
-  if (signals.includes(SIGNALS.foreign_geo) && verdictKind === KINDS.benign_peak && !isLegitimatePeak(verdict)) {
-    return head('🔴', `АТАКА · ${SIGNAL_LABEL.foreign_geo}`);
-  }
-  if (verdictKind === KINDS.benign_peak) {
-    if (isLegitimatePeak(verdict)) {
-      return head('🟡', 'ПИК НАГРУЗКИ · легитимная загрузка');
-    }
-    return head('🟡', 'ПИК НАГРУЗКИ · похоже на легитимный всплеск');
-  }
-  return head('🔴', 'Детекция: рост выше порога');
 }
 
 function ruRazWord(n) {
@@ -929,14 +846,18 @@ function ruRazWord(n) {
   return 'раз';
 }
 
-function formatTimesHigher(ratio) {
+// «в 62 раза», «в 21 раз», «в 2,4 раза»: до десяти — с десятыми, иначе ×2.38
+// и ×2.0 читались бы одинаково.
+function formatTimes(ratio) {
   const n = Number(ratio);
-  if (!Number.isFinite(n) || n < HOUR_RATIO_PEAK) return '';
-  if (n >= 2) {
-    const rounded = Math.round(n);
-    return `в ${rounded} ${ruRazWord(rounded)} выше`;
-  }
-  return `в ${n.toFixed(1).replace('.', ',')} раза выше`;
+  if (!Number.isFinite(n) || n <= 0) return '';
+  const rounded = n >= 10 ? Math.round(n) : Math.round(n * 10) / 10;
+  if (Number.isInteger(rounded)) return `${rounded} ${ruRazWord(rounded)}`;
+  return `${String(rounded).replace('.', ',')} раза`;
+}
+
+function biggerThanUsual(ratio, suffix = '') {
+  return `<b>В ${escapeHtml(formatTimes(ratio))} больше обычного${escapeHtml(suffix)}:</b>`;
 }
 
 function formatSharePct(share) {
@@ -956,17 +877,6 @@ function shortClientName(name) {
   const match = raw.match(/\[([^\]]+)\]\s*$/);
   const short = match ? match[1].trim() : '';
   return short && short.length < raw.length ? short : raw;
-}
-
-function formatClientVolume(all, hourUsual, verdict) {
-  const bps = Number(all.bps);
-  if (!(bps > 0) || !(hourUsual > 0)) return '';
-  const ratio = Number(verdict?.hourRatio);
-  const shown = Number.isFinite(ratio) && ratio > 0 ? ratio : bps / hourUsual;
-  if (shown < HOUR_RATIO_PEAK) {
-    return `Объём клиента сейчас ${formatBpsMsg(bps)}, обычно ${formatBpsMsg(hourUsual)} — ниже нормы.`;
-  }
-  return `Объём клиента сейчас ${formatBpsMsg(bps)}, обычно ${formatBpsMsg(hourUsual)} — ${formatTimesHigher(shown)}.`;
 }
 
 function protoLabel(victim, tcp, udp, all) {
@@ -989,16 +899,17 @@ function formatAlertPort(port) {
   return Number.isFinite(n) && n !== 0 ? String(n) : '';
 }
 
-function formatAlertHostPort(ip, port) {
+function formatHostPort(ip, port) {
   const host = String(ip || '');
   const p = formatAlertPort(port);
-  return p ? `${host} ${p}` : host;
+  if (!p) return host;
+  return host.includes(':') ? `[${host}]:${p}` : `${host}:${p}`;
 }
 
 function formatServiceOn(investigate) {
   const label = downloadPeakLabel(investigate);
   const [proto, port] = String(label || '').split('/');
-  if (port && port !== '?') return `${proto} на ${port}`;
+  if (port && port !== '?' && port !== '0') return `${proto} на ${port}`;
   return proto || '';
 }
 
@@ -1007,41 +918,67 @@ function topSource(investigate) {
   return row?.net24 ? row : null;
 }
 
-function sourceBps(src, allBps) {
-  if (Number(src?.bps) > 0) return Number(src.bps);
-  if (src?.gbit != null && Number(src.gbit) > 0) return Number(src.gbit) * 1e9;
-  const share = Number(src?.share);
-  if (Number.isFinite(share) && allBps > 0) return share * allBps;
-  return allBps;
+function victimShapeFor(victim, investigate) {
+  const shape = investigate?.victimShape;
+  return shape?.ip && shape.ip === victim?.ip ? shape : null;
 }
 
 function victimDisplayPort(victim, investigate) {
-  const count = Number(investigate?.destPort?.count);
+  const shape = victimShapeFor(victim, investigate);
+  const count = Number(shape ? shape.dstPorts : investigate?.destPort?.count);
   if (Number.isFinite(count) && count > 1) return null;
   return formatAlertPort(victim?.port) || null;
 }
 
-function formatVictimDest(victim, investigate) {
-  const port = victimDisplayPort(victim, investigate);
-  const host = formatAlertHostPort(victim.ip, port);
-  const parts = [formatSharePct(victim.share), victim.net24].filter(Boolean);
-  return `${host}${parts.length ? ` — ${parts.join(' · ')}` : ''}`;
+function ruCount(count, [one, few, many]) {
+  const n = Number(count);
+  if (!Number.isFinite(n) || n < 0) return '';
+  const k = n % 100;
+  const d = n % 10;
+  const word = (k >= 11 && k <= 14) ? many : (d === 1 ? one : (d >= 2 && d <= 4 ? few : many));
+  return `${formatNumMsg(n, 0)} ${word}`;
+}
+
+function ruAddresses(count) {
+  return ruCount(count, ['адрес', 'адреса', 'адресов']);
+}
+
+function ruSources(count) {
+  return ruCount(count, ['источник', 'источника', 'источников']);
+}
+
+function ruPorts(count) {
+  return ruCount(count, ['порт', 'порта', 'портов']);
+}
+
+function ruNets24(count) {
+  return `${ruCount(count, ["сеть", "сети", "сетей"])} /24`;
+}
+
+function ruSessions(count) {
+  return ruCount(count, ['сеанс', 'сеанса', 'сеансов']);
 }
 
 // Кто бьёт. Адресов в ковровой атаке тысячи, поэтому именуем сети /24, а сами
 // адреса даём только числом — списком IP шапку не прочитать.
 const SOURCE_NET_MIN_SHARE = 0.02;
 
-function formatAttackSourceLines(investigate) {
+function formatAttackSourceLines(investigate, shape = null) {
   const nets = (Array.isArray(investigate?.source24) ? investigate.source24 : [])
     .filter((row) => row?.net24 && Number(row.share) >= SOURCE_NET_MIN_SHARE)
     .slice(0, 3);
   const totals = investigate?.sources || {};
   const scale = [];
-  if (Number(totals.ipCount) > 0) scale.push(ruAddresses(totals.ipCount));
-  if (Number(totals.net24Count) > 1) scale.push(`${formatNumMsg(totals.net24Count, 0)} сетей /24`);
+  if (shape) {
+    if (Number(shape.srcs) > 0) scale.push(ruAddresses(shape.srcs));
+    if (Number(shape.sessions) > 0) scale.push(ruSessions(shape.sessions));
+    if (Number(shape.sessions) > 3) scale.push(`3 крупнейших — ${formatSharePct(shape.topShare)}`);
+  } else {
+    if (Number(totals.ipCount) > 0) scale.push(ruAddresses(totals.ipCount));
+    if (Number(totals.net24Count) > 1) scale.push(ruNets24(totals.net24Count));
+  }
   if (!nets.length && !scale.length) return [];
-  const lines = [escapeHtml(`Откуда: ${scale.length ? scale.join(' · ') : 'сети ниже'}`)];
+  const lines = [escapeHtml(`Источники: ${scale.length ? scale.join(' · ') : 'сети ниже'}`)];
   for (const row of nets) {
     const bits = [formatSharePct(row.share)];
     if (row.ips != null) bits.push(ruAddresses(row.ips));
@@ -1052,440 +989,15 @@ function formatAttackSourceLines(investigate) {
   return lines;
 }
 
-// Ковровая атака бьёт не в сервер, а в диапазон: называем сети /24 и размах,
-// иначе «по сети клиента» не говорит, что именно закрывать.
-function formatSpreadDestLines(investigate) {
-  const nets = (Array.isArray(investigate?.dest24) ? investigate.dest24 : [])
-    .filter((row) => row?.net24)
-    .slice(0, 3);
-  if (!nets.length) return ['Куда: по сети клиента, не один сервер'];
-  const totals = investigate?.sources || {};
-  const scale = [];
-  if (Number(totals.dstIpCount) > 0) scale.push(ruAddresses(totals.dstIpCount));
-  if (Number(totals.dstNetCount) > 1) scale.push(`${formatNumMsg(totals.dstNetCount, 0)} сетей /24`);
-  const lines = [escapeHtml(`Куда: по сети клиента, не один сервер${scale.length ? ` — ${scale.join(' · ')}` : ''}`)];
-  for (const row of nets) {
-    const bits = [formatSharePct(row.share)];
-    if (row.ips != null) bits.push(ruAddresses(row.ips));
-    lines.push(escapeHtml(`   ${row.net24} — ${bits.filter(Boolean).join(' · ')}`));
-  }
-  return lines;
-}
-
-function formatDestLines(investigate, mode) {
-  if (investigate?.error) {
-    return [`Куда: — (разбор не удался: ${escapeHtml(shortErrorMsg(investigate.error))})`];
-  }
-  if (mode === 'carpet') return formatSpreadDestLines(investigate);
-  if (mode === 'syn') {
-    const victim = investigate?.victim;
-    if (isUsableVictim(victim)) {
-      return ['Куда:', escapeHtml(`   ${formatVictimDest(victim, investigate)}`)];
-    }
-    return ['Куда: на сеть клиента'];
-  }
-  const victim = investigate?.victim;
-  if (!isUsableVictim(victim)) return [];
-  return ['Куда:', escapeHtml(`   ${formatVictimDest(victim, investigate)}`)];
-}
-
 function ampSrcPortRows(investigate) {
   return (Array.isArray(investigate?.ampSrcPort?.top) ? investigate.ampSrcPort.top : [])
     .filter((row) => row && Number.isFinite(Number(row.port)))
     .slice(0, 5);
 }
 
-function l4ProtoName(row) {
-  const n = Number(row?.proto);
-  if (n === 17) return 'UDP';
-  if (n === 6) return 'TCP';
-  const label = String(row?.protoLabel || '').toUpperCase();
-  return label === 'UDP' || label === 'TCP' ? label : '';
-}
-
-function formatColonPorts(rows, { withProto = false, limit = 5 } = {}) {
-  const list = (Array.isArray(rows) ? rows : [])
-    .filter((row) => row && Number.isFinite(Number(row.port)))
-    .slice(0, limit);
-  if (!list.length) return '';
-  return list.map((row) => {
-    const proto = withProto ? l4ProtoName(row) : '';
-    const share = row.share != null ? ` ${formatSharePct(row.share)}` : '';
-    return `${row.port}${proto ? ` ${proto}` : ''}${share}`;
-  }).join(' · ');
-}
-
-function footerPortLines(investigate, { ampShown, hidePeak, synShown }) {
-  if (hidePeak) return [];
-  // При SYN-флуде оба среза считаются по байтам всей минуты, а байты у голого
-  // SYN почти нулевые: в футер попала бы чужая закачка. Порты атаки уже в шапке.
-  if (synShown) return [];
-  const from = ampShown
-    ? formatColonPorts(investigate?.ampSrcPort?.top)
-    : formatColonPorts(investigate?.l4src, { withProto: true });
-  const to = ampShown
-    ? formatColonPorts(investigate?.ampDestPort?.top)
-    : formatColonPorts(investigate?.destPort?.top);
-  return [
-    from ? `Откуда порты: ${escapeHtml(from)}` : '',
-    to ? `Там порты: ${escapeHtml(to)}` : '',
-  ].filter(Boolean);
-}
-
-function ampPortCameFrom(investigate) {
-  const top = ampSrcPortRows(investigate);
-  if (top.length) {
-    const listed = top.map((row) => {
-      const share = row.share != null ? ` ${formatSharePct(row.share)}` : '';
-      return `${row.port}${share}`;
-    });
-    return `С ${listed.join(' · ')} пришло`;
-  }
-  const ports = amplifierPortsFromL4(investigate?.l4src);
-  if (!ports.length) return 'С портов усилителей пришло';
-  return `С ${ports.map((port) => `${port}`).join(' · ')} пришло`;
-}
-
-function ruAddresses(count) {
-  const n = Number(count);
-  if (!Number.isFinite(n) || n < 0) return '';
-  const k = n % 100;
-  const d = n % 10;
-  if (k >= 11 && k <= 14) return `${formatNumMsg(n, 0)} адресов`;
-  if (d === 1) return `${formatNumMsg(n, 0)} адрес`;
-  if (d >= 2 && d <= 4) return `${formatNumMsg(n, 0)} адреса`;
-  return `${formatNumMsg(n, 0)} адресов`;
-}
-
-function ruSources(count) {
-  const n = Number(count);
-  if (!Number.isFinite(n) || n < 0) return '';
-  const k = n % 100;
-  const d = n % 10;
-  if (k >= 11 && k <= 14) return `${formatNumMsg(n, 0)} источников`;
-  if (d === 1) return `${formatNumMsg(n, 0)} источник`;
-  if (d >= 2 && d <= 4) return `${formatNumMsg(n, 0)} источника`;
-  return `${formatNumMsg(n, 0)} источников`;
-}
-
-function ruPorts(count) {
-  const n = Number(count);
-  if (!Number.isFinite(n) || n < 0) return '';
-  const k = n % 100;
-  const d = n % 10;
-  if (k >= 11 && k <= 14) return `${formatNumMsg(n, 0)} портов`;
-  if (d === 1) return `${formatNumMsg(n, 0)} порт`;
-  if (d >= 2 && d <= 4) return `${formatNumMsg(n, 0)} порта`;
-  return `${formatNumMsg(n, 0)} портов`;
-}
-
-function formatAttackPortLines(portInfo) {
-  const top = (Array.isArray(portInfo?.top) ? portInfo.top : [])
-    .filter((row) => row && Number.isFinite(Number(row.port)))
-    .slice(0, 5);
-  const count = Number(portInfo?.count);
-  if (!top.length && !(count > 0)) return [];
-  if (count === 1 || (top.length === 1 && !(count > 1))) {
-    return [escapeHtml(`На порт ${top[0]?.port ?? 0}`)];
-  }
-  const listed = top.map((row) => {
-    const share = row.share != null ? ` ${formatSharePct(row.share)}` : '';
-    return `${row.port}${share}`;
-  });
-  if (Number.isFinite(count) && count > 5) {
-    return [
-      escapeHtml(`На ${ruPorts(count)}`),
-      listed.length ? escapeHtml(`   топ ${listed.join(' · ')}`) : '',
-    ].filter(Boolean);
-  }
-  return [escapeHtml(`На порты ${listed.join(' · ')}`)];
-}
-
-function formatAmpDestIpLine(row) {
-  const parts = [];
-  if (row.share != null) parts.push(formatSharePct(row.share));
-  const bps = row.bps != null ? row.bps : (row.gbit != null ? Number(row.gbit) * 1e9 : null);
-  if (bps != null && bps > 0) parts.push(formatBpsMsg(bps));
-  return escapeHtml(`   ${row.ip} — ${parts.join(' · ')}`);
-}
-
-function formatAmpDestLines(investigate) {
-  const rows = (Array.isArray(investigate?.ampDest24) ? investigate.ampDest24 : [])
-    .filter((row) => row?.net24)
-    .slice(0, 5);
-  if (!rows.length) return ['Куда: по сети клиента, не один сервер'];
-  const lines = ['Куда (UDP/усилители):', 'Топ 5 сетей'];
-  for (const row of rows) {
-    const parts = [];
-    if (row.share != null) parts.push(formatSharePct(row.share));
-    if (row.ips != null) parts.push(ruAddresses(row.ips));
-    const bps = row.bps != null ? row.bps : (row.gbit != null ? Number(row.gbit) * 1e9 : null);
-    if (bps != null && bps > 0) parts.push(formatBpsMsg(bps));
-    lines.push(escapeHtml(`   ${row.net24} — ${parts.join(' · ')}`));
-  }
-  const ips = (Array.isArray(investigate?.ampDestIp) ? investigate.ampDestIp : [])
-    .filter((row) => row?.ip)
-    .slice(0, 5);
-  if (ips.length) {
-    lines.push('Топ 5 IP');
-    for (const row of ips) lines.push(formatAmpDestIpLine(row));
-  }
-  return lines;
-}
-
-function formatAmpHighlight({ amp, udp, all, hourUsual, verdict, investigate }) {
-  const srcPorts = ampSrcPortRows(investigate);
-  const ports = srcPorts.length
-    ? srcPorts.map((row) => Number(row.port))
-    : amplifierPortsFromL4(investigate?.l4src);
-  const lines = [
-    `🔴 ${escapeHtml(ampPortCameFrom(investigate))} <b>${escapeHtml(formatBpsMsg(amp.bps))}</b>`,
-  ];
-  const who = amp.srcs > 0
-    ? (ports.length === 1 && ports[0] === 53
-      ? `${formatNumMsg(amp.srcs, 0)} чужих резолверов`
-      : `${formatNumMsg(amp.srcs, 0)} чужих источников`)
-    : '';
-  const pkt = amp.avgPkt > 0 ? `ответы по ~${formatNumMsg(amp.avgPkt, 0)} байт` : '';
-  const details = [who, pkt].filter(Boolean);
-  if (details.length) lines.push(`   ${escapeHtml(details.join(' · '))}`);
-  const shares = [];
-  if (amp.share != null) shares.push(`${formatSharePct(amp.share)} его UDP`);
-  if (Number(all.bps) > 0) {
-    shares.push(`${formatSharePct(amp.bps / Number(all.bps))} всего трафика клиента`);
-  }
-  if (shares.length) lines.push(escapeHtml(`   это ${shares.join(' и ')}`));
-  lines.push(...formatAmpDestLines(investigate));
-  lines.push(...formatAttackPortLines(investigate?.ampDestPort));
-  const ratio = Number(verdict?.hourRatio);
-  if (hourUsual > 0 && Number(all.bps) > 0) {
-    const shown = Number.isFinite(ratio) ? ratio : Number(all.bps) / hourUsual;
-    if (shown < HOUR_RATIO_PEAK) {
-      lines.push(escapeHtml(
-        `Объём клиента сейчас ${formatBpsMsg(all.bps)}, обычно ${formatBpsMsg(hourUsual)} — ниже нормы.`,
-      ));
-    }
-  }
-  return lines;
-}
-
-function formatDownloadHighlight({ all, hourUsual, verdict, investigate }) {
-  const src = topSource(investigate);
-  const allBps = Number(all.bps) || 0;
-  const lines = [];
-  if (src) {
-    const asn = formatAsnLabel(src.asn, src.asnName || src.asName).trim();
-    const asPart = asn ? ` (${asn})` : '';
-    lines.push(`С сети ${escapeHtml(src.net24)}${escapeHtml(asPart)} пришло <b>${escapeHtml(formatBpsMsg(sourceBps(src, allBps)))}</b>`);
-    const details = [];
-    if (src.ips != null) details.push(ruAddresses(src.ips));
-    const service = formatServiceOn(investigate);
-    if (service) details.push(service);
-    if (details.length) lines.push(`   ${escapeHtml(details.join(' · '))}`);
-    if (src.share != null) {
-      lines.push(escapeHtml(`   это ${formatSharePct(src.share)} трафика клиента`));
-    }
-  } else {
-    lines.push(`Пришло <b>${escapeHtml(formatBpsMsg(allBps))}</b>`);
-    const service = formatServiceOn(investigate);
-    if (service) lines.push(`   ${escapeHtml(service)}`);
-  }
-  lines.push(...formatDestLines(investigate, 'victim'));
-  const volume = formatClientVolume(all, hourUsual, verdict);
-  if (volume) lines.push(escapeHtml(volume));
-  return lines;
-}
-
-function formatVolumetricHighlight({ all, tcp, udp, hourUsual, verdict, investigate }) {
-  const allBps = Number(all.bps) || 0;
-  const victim = investigate?.victim;
-  const lines = [];
-  if (isUsableVictim(victim)) {
-    const port = victimDisplayPort(victim, investigate);
-    lines.push(`На ${escapeHtml(formatAlertHostPort(victim.ip, port))} пришло <b>${escapeHtml(formatBpsMsg(allBps))}</b>`);
-  } else {
-    lines.push(`Пришло <b>${escapeHtml(formatBpsMsg(allBps))}</b>`);
-  }
-  const bits = [protoLabel(victim, tcp, udp, all)];
-  if (victim?.share != null) bits.push(`топ IP ${formatSharePct(victim.share)} трафика клиента`);
-  const details = bits.filter(Boolean);
-  if (details.length) lines.push(`   ${escapeHtml(details.join(' · '))}`);
-  lines.push(...formatAttackSourceLines(investigate));
-  lines.push(...formatDestLines(investigate, 'victim'));
-  if (!isUsableVictim(victim) || Number(investigate?.destPort?.count) > 1) {
-    lines.push(...formatAttackPortLines(investigate?.destPort));
-  }
-  const volume = formatClientVolume(all, hourUsual, verdict);
-  if (volume) lines.push(escapeHtml(volume));
-  return lines;
-}
-
-function formatCarpetHighlight({ all, tcp, udp, hourUsual, verdict, investigate }) {
-  const allBps = Number(all.bps) || 0;
-  const proto = protoLabel(null, tcp, udp, all);
-  const lines = [
-    proto
-      ? `Пришло <b>${escapeHtml(formatBpsMsg(allBps))}</b> ${escapeHtml(proto)}`
-      : `Пришло <b>${escapeHtml(formatBpsMsg(allBps))}</b>`,
-  ];
-  const bits = ['размазано'];
-  const share = investigate?.victim?.share;
-  if (share != null) bits.push(`топ IP ${formatSharePct(share)} трафика клиента`);
-  lines.push(`   ${escapeHtml(bits.join(' · '))}`);
-  lines.push(...formatAttackSourceLines(investigate));
-  lines.push(...formatDestLines(investigate, 'carpet'));
-  lines.push(...formatAttackPortLines(investigate?.destPort));
-  const volume = formatClientVolume(all, hourUsual, verdict);
-  if (volume) lines.push(escapeHtml(volume));
-  return lines;
-}
-
-// Откуда: у SYN-флуда важны не имена сетей (их тысячи и адреса подделаны), а
-// сам разброс — сколько источников и из скольких сетей бьёт.
-function formatSynSourceLine(syn) {
-  const bits = [];
-  if (syn.avgPkt > 0) bits.push(`пакеты по ${formatNumMsg(syn.avgPkt, 0)} Б`);
-  if (syn.srcIps > 0) bits.push(ruSources(syn.srcIps));
-  if (syn.srcNets > 1) bits.push(`${formatNumMsg(syn.srcNets, 0)} сетей /24`);
-  if (syn.srcAsns > 1) bits.push(`${formatNumMsg(syn.srcAsns, 0)} AS`);
-  return bits.length ? `   ${bits.join(' · ')}` : '';
-}
-
-function formatSynDestLines(syn) {
-  const rows = (Array.isArray(syn.dest) ? syn.dest : []).filter((row) => row?.ip).slice(0, 3);
-  if (!rows.length) return [];
-  const lines = [syn.dstIps > rows.length
-    ? `Куда (SYN), топ ${rows.length} из ${ruAddresses(syn.dstIps)}:`
-    : 'Куда (SYN):'];
-  for (const row of rows) {
-    lines.push(escapeHtml(`   ${formatAlertHostPort(row.ip, row.port)} — ${formatSharePct(row.share)} SYN`));
-  }
-  return lines;
-}
-
-function formatSynPortLine(syn) {
-  const top = (Array.isArray(syn.ports) ? syn.ports : []).filter((row) => row?.port).slice(0, 3);
-  if (!top.length) return '';
-  if (top.length === 1 || Number(top[0].share) >= 0.9) {
-    return `На порт ${top[0].port} — ${formatSharePct(top[0].share)} SYN`;
-  }
-  // Разбор отдаёт только верхушку пар «адрес + порт», поэтому при широком
-  // веере доли по портам занижены — тогда даём разброс без процентов.
-  if (syn.truncated) {
-    return `На ${ruPorts(syn.portCount)}, топ ${top.map((row) => `${row.port}`).join(' · ')}`;
-  }
-  return `На порты ${top.map((row) => `${row.port} ${formatSharePct(row.share)}`).join(' · ')}`;
-}
-
-function formatSynHighlight({ all, tcp, hourUsual, verdict, investigate }) {
-  const fromRow = tcpClassMetrics(
-    tcpClassMetrics(tcp, 'syn_only').pps > tcpClassMetrics(all, 'syn_only').pps ? tcp : all,
-    'syn_only',
-  );
-  const detail = investigate?.syn;
-  // Разбор считает голый SYN по тем же флагам, но без сэмплирования минутки:
-  // п/с и байты берём из минутки, адреса и порты — из разбора.
-  const syn = {
-    pps: fromRow.pps > 0 ? fromRow.pps : Number(detail?.pps) || 0,
-    bps: fromRow.bps > 0 ? fromRow.bps : Number(detail?.bps) || 0,
-    avgPkt: fromRow.avgPkt > 0 ? fromRow.avgPkt : Number(detail?.avgPkt) || 0,
-    srcIps: Number(detail?.srcIps) || 0,
-    srcNets: Number(detail?.srcNets) || 0,
-    srcAsns: Number(detail?.srcAsns) || 0,
-    dstIps: Number(detail?.dstIps) || 0,
-    portCount: Number(detail?.portCount) || 0,
-    truncated: Boolean(detail?.truncated),
-    dest: detail?.dest || [],
-    ports: detail?.ports || [],
-  };
-  const volume = [
-    syn.pps > 0 ? formatPpsMsg(syn.pps) : '',
-    syn.bps > 0 ? formatBpsMsg(syn.bps) : '',
-  ].filter(Boolean).map((value) => `<b>${escapeHtml(value)}</b>`);
-  const lines = [];
-  lines.push(volume.length
-    ? `🔴 Голого SYN ${volume.join(' · ')}`
-    : '🔴 Голый SYN');
-  const source = formatSynSourceLine(syn);
-  if (source) lines.push(escapeHtml(source));
-  const dest = formatSynDestLines(syn);
-  if (dest.length) {
-    lines.push(...dest);
-    const port = formatSynPortLine(syn);
-    if (port) lines.push(escapeHtml(port));
-  } else {
-    lines.push(...formatDestLines(investigate, 'syn'));
-    lines.push(...formatAttackPortLines(investigate?.destPort));
-  }
-  const share = Number(all?.pps) > 0 ? syn.pps / Number(all.pps) : null;
-  if (share != null && share > 0) {
-    lines.push(escapeHtml(`Это ${formatSharePct(share)} всех пакетов клиента.`));
-  }
-  const clientVolume = formatClientVolume(all, hourUsual, verdict);
-  if (clientVolume) lines.push(escapeHtml(clientVolume));
-  return lines;
-}
-
-function formatForeignHighlight({ all }) {
-  const geo = evaluateForeignGeo(all);
-  const lines = [];
-  const sharePct = geo.share != null ? formatSharePct(geo.share) : '';
-  if (sharePct && geo.bps > 0) {
-    lines.push(`Заграница ${escapeHtml(sharePct)} · <b>${escapeHtml(formatBpsMsg(geo.bps))}</b>`);
-  } else if (sharePct) {
-    lines.push(escapeHtml(`Заграница ${sharePct}`));
-  } else if (geo.bps > 0) {
-    lines.push(`Заграница <b>${escapeHtml(formatBpsMsg(geo.bps))}</b>`);
-  }
-  const usual = [];
-  if (geo.shareNorm != null) usual.push(`обычно ${(geo.shareNorm * 100).toFixed(0)}%`);
-  if (geo.shareGrowth != null) usual.push(`сейчас ×${Number(geo.shareGrowth).toFixed(1)}`);
-  if (usual.length) lines.push(`   ${escapeHtml(usual.join(' · '))}`);
-  const countries = formatTopCountries(geo.top);
-  if (countries) lines.push(`   ${escapeHtml(countries)}`);
-  return lines;
-}
-
-function formatGenericHighlight({ all, tcp, udp, hourUsual, verdict, investigate }) {
-  const lines = [`Пришло <b>${escapeHtml(formatBpsMsg(all.bps))}</b>`];
-  const split = [
-    Number(tcp.bps) > 0 ? `TCP ${formatBpsMsg(tcp.bps)}` : '',
-    Number(udp.bps) > 0 ? `UDP ${formatBpsMsg(udp.bps)}` : '',
-  ].filter(Boolean);
-  if (split.length) lines.push(`   ${escapeHtml(split.join(' · '))}`);
-  lines.push(...formatAttackSourceLines(investigate));
-  lines.push(...formatDestLines(investigate, 'victim'));
-  const volume = formatClientVolume(all, hourUsual, verdict);
-  if (volume) lines.push(escapeHtml(volume));
-  return lines;
-}
-
-function formatAlertHighlights({ byProto, verdict, investigate, hourUsual, signals = [] }) {
-  const all = byProto?.all || {};
-  const udp = byProto?.udp || {};
-  const tcp = byProto?.tcp || {};
-  const amp = ampMetrics(udp);
-  const showAmp = verdict?.kind === KINDS.amplification || (amp.bps >= 50e6 && amp.share != null);
-  const lines = [];
-  if (verdict?.kind === KINDS.syn_flood) {
-    lines.push(...formatSynHighlight({ all, tcp, hourUsual, verdict, investigate }));
-  } else if (showAmp && amp.bps > 0) {
-    lines.push(...formatAmpHighlight({ amp, udp, all, hourUsual, verdict, investigate }));
-  } else if (isLegitimatePeak(verdict)) {
-    lines.push(...formatDownloadHighlight({ all, hourUsual, verdict, investigate }));
-  } else if (verdict?.kind === KINDS.volumetric) {
-    lines.push(...formatVolumetricHighlight({ all, tcp, udp, hourUsual, verdict, investigate }));
-  } else if (verdict?.kind === KINDS.carpet) {
-    lines.push(...formatCarpetHighlight({ all, tcp, udp, hourUsual, verdict, investigate }));
-  } else if (signals.includes(SIGNALS.foreign_geo)) {
-    lines.push(...formatForeignHighlight({ all }));
-  } else {
-    lines.push(...formatGenericHighlight({ all, tcp, udp, hourUsual, verdict, investigate }));
-  }
-  // Сети источников попали в шапку — повторять их в футере незачем.
-  const sourceShown = lines.some((line) => /^(Откуда:|С сети )/.test(line));
-  lines.push(...formatFocusLines(investigate));
-  return { lines, ampShown: showAmp, sourceShown };
+function ampPortsFor(investigate) {
+  const rows = ampSrcPortRows(investigate);
+  return rows.length ? rows.map((row) => Number(row.port)) : amplifierPortsFromL4(investigate?.l4src);
 }
 
 function formatFocusLines(investigate) {
@@ -1497,7 +1009,7 @@ function formatFocusLines(investigate) {
       ? 'раньше почти не было'
       : `×${Number(focus.growth).toFixed(1)} к своему часу`;
     return escapeHtml(
-      `Цель ${focus.protoLabel}: ${formatAlertHostPort(focus.ip, focus.port)} — ${formatBpsMsg(focus.bps)}`
+      `Цель ${focus.protoLabel}: ${formatHostPort(focus.ip, focus.port)} — ${formatBpsMsg(focus.bps)}`
       + ` · пакет ${formatNumMsg(focus.avgPkt, 0)} Б`
       + ` · ${ruSources(focus.srcs)}`
       + ` · ${growth}`
@@ -1506,82 +1018,409 @@ function formatFocusLines(investigate) {
   });
 }
 
+function formatNetGrowth(growth) {
+  const g = Number(growth);
+  if (!Number.isFinite(g)) return '';
+  return `×${g >= 10 ? Math.round(g) : g.toFixed(1)}`;
+}
+
+function formatSynRate(pps) {
+  if (!(Number(pps) > 0)) return '0 SYN/с';
+  return formatPpsMsg(pps).replace(/п\/с$/, 'SYN/с');
+}
+
+// Минутка считает голый SYN с сэмплированием и без адресов, разбор — точно, но
+// только по верхушке: п/с и размер пакета берём из минутки, адреса и цели — из разбора.
+function synDetail(byProto, investigate) {
+  const all = byProto?.all || {};
+  const tcp = byProto?.tcp || {};
+  const row = tcpClassMetrics(tcp, 'syn_only').pps > tcpClassMetrics(all, 'syn_only').pps ? tcp : all;
+  const fromRow = tcpClassMetrics(row, 'syn_only');
+  const detail = investigate?.syn;
+  return {
+    pps: fromRow.pps > 0 ? fromRow.pps : Number(detail?.pps) || 0,
+    avgPkt: fromRow.avgPkt > 0 ? fromRow.avgPkt : Number(detail?.avgPkt) || 0,
+    growth: finiteGrowth(row.growth_syn ?? row.growthSyn ?? all.growth_syn ?? all.growthSyn),
+    srcIps: Number(detail?.srcIps) || 0,
+    srcNets: Number(detail?.srcNets) || 0,
+    srcAsns: Number(detail?.srcAsns) || 0,
+    dstIps: Number(detail?.dstIps) || 0,
+    dest: (Array.isArray(detail?.dest) ? detail.dest : []).filter((d) => d?.ip),
+  };
+}
+
+function netProtoLabel(net) {
+  if (!(net.bps > 0)) return '';
+  if (net.tcpShare != null && net.tcpShare >= 0.6) return 'TCP';
+  if (net.udpBps / net.bps >= 0.6) return 'UDP';
+  return '';
+}
+
+function withProtoPrefix(proto, text) {
+  return proto ? `${proto}-${text}` : `${text.charAt(0).toUpperCase()}${text.slice(1)}`;
+}
+
+// Вид алерта решает, какие строки показать: заголовок, размер и цель
+// считаются по одному и тому же виду, иначе шапка спорит с телом.
+function alertMode(verdict, signals, attack) {
+  const kind = verdict?.kind || '';
+  if (kind === KINDS.amplification) return 'amp';
+  if (kind === KINDS.syn_flood) return 'syn';
+  if (attack && signals.includes(SIGNALS.net_spike)) return 'net';
+  if (kind === KINDS.volumetric) return 'volumetric';
+  if (kind === KINDS.carpet) return 'carpet';
+  if (attack && signals.includes(SIGNALS.amplification)) return 'amp';
+  if (attack && signals.includes(SIGNALS.syn_flood)) return 'syn';
+  if (attack && signals.includes(SIGNALS.foreign_geo)) return 'geo';
+  if (kind === KINDS.benign_peak) return 'peak';
+  return attack ? 'generic' : 'unknown';
+}
+
+function alertTitle(mode, { byProto, investigate, verdict }) {
+  const all = byProto?.all || {};
+  const proto = protoLabel(investigate?.victim, byProto?.tcp || {}, byProto?.udp || {}, all);
+  if (mode === 'amp') {
+    const fromAmp = (Array.isArray(verdict?.ampSrcPort?.top) ? verdict.ampSrcPort.top : [])
+      .map((row) => ({ port: row.port, proto: 17 }));
+    const ports = fromAmp.length ? amplifierPortsFromL4(fromAmp) : ampPortsFor(investigate);
+    // Все отражатели перечислены в строке «Отражатели»; в заголовке — два главных.
+    const label = amplifierLabel(ports.slice(0, 2));
+    return `Амплификация${label ? ` ${label}` : ''}${ports.length > 2 ? ' и др.' : ''}`;
+  }
+  if (mode === 'syn') return 'SYN-флуд';
+  if (mode === 'net') return withProtoPrefix(netProtoLabel(netSpikeMetrics(all)), 'флуд в сеть /24');
+  if (mode === 'volumetric') return withProtoPrefix(proto, 'флуд в один сервер');
+  if (mode === 'carpet') return withProtoPrefix(proto, 'флуд по сети');
+  if (mode === 'geo') return 'Всплеск трафика из-за рубежа';
+  if (mode === 'peak') return 'Пик трафика, не атака';
+  return 'Рост трафика выше порога';
+}
+
+function formatAlertWho(scope, scopeId, name) {
+  const shortName = shortClientName(name);
+  const named = shortName && shortName !== scopeId ? shortName : '';
+  if (scope === 'net') {
+    return `сеть <b>${escapeHtml(scopeId)}</b>${named ? ` · ${escapeHtml(named)}` : ''}`;
+  }
+  return `${named ? `<b>${escapeHtml(named)}</b> · ` : ''}ID <b>${escapeHtml(scopeId)}</b>`;
+}
+
+// Меньше ×1.05 — шум замера, «в 1,0 раза больше» читать незачем.
+const VOLUME_RATIO_SHOWN = 1.05;
+
+function hourUsualOf(verdict) {
+  return Number(verdict?.hourCeiling || verdict?.hourP95 || 0);
+}
+
+function volumeRatio(all, verdict) {
+  const bps = Number(all?.bps);
+  const ratio = Number(verdict?.hourRatio);
+  if (Number.isFinite(ratio) && ratio > 0) return ratio;
+  const usual = hourUsualOf(verdict);
+  return bps > 0 && usual > 0 ? bps / usual : null;
+}
+
+function formatVolumeSize(all, verdict) {
+  const bps = Number(all?.bps) || 0;
+  const pps = Number(all?.pps) || 0;
+  const usual = hourUsualOf(verdict);
+  const ratio = volumeRatio(all, verdict);
+  const usualText = usual > 0 ? `, обычно ${escapeHtml(formatBpsMsg(usual))}` : '';
+  if (ratio != null && ratio >= VOLUME_RATIO_SHOWN) {
+    return `${biggerThanUsual(ratio)} ${escapeHtml(formatBpsMsg(bps))}${usualText}`;
+  }
+  // Алерт мог открыться по пакетам при прежних байтах: без этой строки
+  // «объём как обычно» спорит с красной шапкой.
+  const growthPps = finiteGrowth(all?.growth_pps ?? all?.growthPps);
+  if (growthPps != null && growthPps >= HOUR_RATIO_PEAK && pps > 0) {
+    return `${biggerThanUsual(growthPps, ' по пакетам')} ${escapeHtml(formatPpsMsg(pps))}, обычно до ~${escapeHtml(formatPpsMsg(pps / growthPps))}`;
+  }
+  if (ratio != null) {
+    const level = ratio < 1 ? 'ниже обычного' : 'на уровне обычного';
+    return `Объём <b>${escapeHtml(formatBpsMsg(bps))}</b> — ${level}${usual > 0 ? ` (${escapeHtml(formatBpsMsg(usual))})` : ''}`;
+  }
+  // Нормы часа нет — сравниваем с 14-дневным p999, это потолок, а не среднее.
+  const growthBps = finiteGrowth(all?.growth_bps ?? all?.growthBps);
+  if (growthBps != null && growthBps >= HOUR_RATIO_PEAK && bps > 0) {
+    return `${biggerThanUsual(growthBps)} ${escapeHtml(formatBpsMsg(bps))}, обычно до ~${escapeHtml(formatBpsMsg(bps / growthBps))}`;
+  }
+  return `Объём <b>${escapeHtml(formatBpsMsg(bps))}</b>`;
+}
+
+function formatSizeLine(mode, { byProto, verdict, syn }) {
+  const all = byProto?.all || {};
+  const udp = byProto?.udp || {};
+  if (mode === 'syn' && syn.pps > 0) {
+    if (syn.growth != null && syn.growth >= HOUR_RATIO_PEAK) {
+      return `${biggerThanUsual(syn.growth)} ${escapeHtml(formatSynRate(syn.pps))}, обычно ~${escapeHtml(formatSynRate(syn.pps / syn.growth))}`;
+    }
+    return `Голый SYN: <b>${escapeHtml(formatSynRate(syn.pps))}</b>`;
+  }
+  if (mode === 'net') {
+    const net = netSpikeMetrics(all);
+    if (net.net) {
+      const byPps = net.growthPps != null && (net.growthBps == null || net.growthPps > net.growthBps);
+      const now = byPps ? formatPpsMsg(net.pps) : formatBpsMsg(net.bps);
+      const usual = byPps ? net.usualPps : net.usualBps;
+      const where = ` в ${net.net}`;
+      if (usual > 0 && net.growth != null) {
+        const usualText = byPps ? formatPpsMsg(usual) : formatBpsMsg(usual);
+        return `${biggerThanUsual(net.growth)} ${escapeHtml(`${now}${where}`)}, обычно ${escapeHtml(usualText)}`;
+      }
+      return `<b>${escapeHtml(now)}</b>${escapeHtml(where)}, раньше почти не было`;
+    }
+  }
+  if (mode === 'amp') {
+    const amp = ampMetrics(udp);
+    if (amp.bps > 0) {
+      const growth = finiteGrowth(udp.growth_amp ?? udp.growthAmp ?? all.growth_amp);
+      if (growth != null && growth >= HOUR_RATIO_PEAK) {
+        return `${biggerThanUsual(growth)} ${escapeHtml(formatBpsMsg(amp.bps))} ответов усилителей, обычно ~${escapeHtml(formatBpsMsg(amp.bps / growth))}`;
+      }
+      const share = amp.share != null ? ` — ${formatSharePct(amp.share)} UDP клиента` : '';
+      return `Ответы усилителей: <b>${escapeHtml(formatBpsMsg(amp.bps))}</b>${escapeHtml(share)}`;
+    }
+  }
+  if (mode === 'geo') {
+    const geo = evaluateForeignGeo(all);
+    if (geo.share != null) {
+      const now = `${formatSharePct(geo.share)} трафика${geo.bps > 0 ? ` (${formatBpsMsg(geo.bps)})` : ''}`;
+      if (geo.shareGrowth != null && geo.shareNorm != null && geo.shareGrowth >= HOUR_RATIO_PEAK) {
+        return `<b>Доля из-за рубежа в ${escapeHtml(formatTimes(geo.shareGrowth))} больше обычного:</b> ${escapeHtml(now)}, обычно ${escapeHtml(formatSharePct(geo.shareNorm))}`;
+      }
+      return `Из-за рубежа: <b>${escapeHtml(now)}</b>`;
+    }
+  }
+  return formatVolumeSize(all, verdict);
+}
+
+function formatVictimTarget(investigate, { proto, of }) {
+  const victim = investigate?.victim;
+  if (!isUsableVictim(victim)) return [];
+  const port = victimDisplayPort(victim, investigate);
+  const shape = victimShapeFor(victim, investigate);
+  const bits = [];
+  if (victim.share != null) bits.push(`${formatSharePct(victim.share)} трафика ${of}`);
+  if (shape && Number(shape.dstPorts) > 1) bits.push(`на ${ruPorts(shape.dstPorts)}`);
+  return [
+    `Цель: <b>${escapeHtml(formatHostPort(victim.ip, port))}</b>${proto ? ` (${escapeHtml(proto)})` : ''}`
+      + (bits.length ? ` — ${escapeHtml(bits.join(' · '))}` : ''),
+  ];
+}
+
+function formatSynTarget(syn, investigate, verdict, byProto) {
+  const lines = [];
+  const top = syn.dest[0];
+  if (top && Number(top.share) >= 0.5) {
+    lines.push(`Цель: <b>${escapeHtml(formatHostPort(top.ip, top.port))}</b> — ${escapeHtml(formatSharePct(top.share))} атаки`);
+  } else if (top) {
+    const many = syn.dstIps > 1 ? `${ruAddresses(syn.dstIps)}, ` : '';
+    lines.push(escapeHtml(`Цели: ${many}больше всего ${formatHostPort(top.ip, top.port)} — ${formatSharePct(top.share)}`));
+  } else if (isUsableVictim(investigate?.victim)) {
+    lines.push(`Цель: <b>${escapeHtml(investigate.victim.ip)}</b>`);
+  } else {
+    lines.push('Цель: сеть клиента');
+  }
+  const src = [];
+  if (syn.srcIps > 0) src.push(ruAddresses(syn.srcIps));
+  if (syn.srcNets > 1) src.push(ruNets24(syn.srcNets));
+  if (syn.srcAsns > 1) src.push(`${formatNumMsg(syn.srcAsns, 0)} AS`);
+  if (src.length) lines.push(escapeHtml(`Источники: ${src.join(' · ')}`));
+  const answer = finiteGrowth(byProto?.tcp?.answer_pct ?? byProto?.all?.answer_pct ?? verdict?.answerPct);
+  if (answer != null) {
+    const pct = answer > 0 && answer < 1 ? answer.toFixed(1).replace('.', ',') : answer.toFixed(0);
+    lines.push(escapeHtml(`Сервер ответил на ${pct}% запросов`));
+  }
+  return lines;
+}
+
+function formatAmpTarget(investigate, byProto) {
+  const lines = [];
+  const ips = (Array.isArray(investigate?.ampDestIp) ? investigate.ampDestIp : []).filter((row) => row?.ip);
+  const nets = (Array.isArray(investigate?.ampDest24) ? investigate.ampDest24 : [])
+    .filter((row) => row?.net24 && Number(row.share) >= SOURCE_NET_MIN_SHARE);
+  if (ips[0] && Number(ips[0].share) >= 0.5) {
+    lines.push(`Цель: <b>${escapeHtml(ips[0].ip)}</b> — ${escapeHtml(formatSharePct(ips[0].share))} ответов`);
+  } else if (nets.length) {
+    const listed = nets.slice(0, 3).map((row) => `${row.net24} ${formatSharePct(row.share)}`.trim());
+    lines.push(escapeHtml(`Цель: сеть клиента — ${listed.join(' · ')}`));
+  }
+  const amp = ampMetrics(byProto?.udp || {});
+  const ports = ampPortsFor(investigate);
+  const bits = [];
+  if (amp.srcs > 0) bits.push(ruAddresses(amp.srcs));
+  if (ports.length) bits.push(`${ports.length > 1 ? 'порты' : 'порт'} ${ports.join(', ')}`);
+  if (amp.avgPkt > 0) bits.push(`ответы по ~${formatNumMsg(amp.avgPkt, 0)} Б`);
+  if (bits.length) lines.push(escapeHtml(`Отражатели: ${bits.join(' · ')}`));
+  return lines;
+}
+
+function formatPeakReason(investigate, verdict, byProto) {
+  if (isLegitimatePeak(verdict)) {
+    const src = topSource(investigate);
+    const service = formatServiceOn(investigate);
+    const bits = [];
+    if (src) {
+      const asn = formatAsnLabel(src.asn, src.asnName || src.asName).trim();
+      bits.push(`с ${src.net24}${asn ? ` (${asn})` : ''}`);
+    }
+    if (service) bits.push(service);
+    if (src?.share != null) bits.push(`${formatSharePct(src.share)} трафика`);
+    return [escapeHtml(`Почему не атака: похоже на загрузку${bits.length ? ` — ${bits.join(' · ')}` : ''}`)];
+  }
+  const lines = [];
+  if (verdict?.reason) lines.push(escapeHtml(`Почему не атака: ${verdict.reason}`));
+  lines.push(...formatVictimTarget(investigate, { proto: protoLabel(investigate?.victim, byProto?.tcp, byProto?.udp, byProto?.all), of: 'клиента' }));
+  return lines;
+}
+
+function formatNetExtra(byProto, verdict) {
+  const all = byProto?.all || {};
+  const lines = [];
+  const net = netSpikeMetrics(all);
+  const more = net.list.filter((item) => item.net !== net.net);
+  if (more.length) {
+    lines.push(escapeHtml(`Ещё сети: ${more
+      .map((item) => `${item.net} — ${formatBpsMsg(item.bps)} ${formatNetGrowth(item.growth)}`.trim())
+      .join('; ')}`));
+  }
+  const bps = Number(all.bps) || 0;
+  const ratio = volumeRatio(all, verdict);
+  if (bps > 0 && ratio != null) {
+    const note = ratio < HOUR_RATIO_PEAK
+      ? 'на общем объёме удар почти не заметен'
+      : `в ${formatTimes(ratio)} больше обычного`;
+    lines.push(escapeHtml(`Весь клиент: ${formatBpsMsg(bps)} — ${note}`));
+  }
+  return lines;
+}
+
+function formatTargetLines(mode, ctx) {
+  const { byProto, verdict, investigate, syn } = ctx;
+  if (investigate?.error && mode !== 'syn') {
+    return [`Цель: не удалось разобрать (${escapeHtml(shortErrorMsg(investigate.error))})`];
+  }
+  const all = byProto?.all || {};
+  const proto = protoLabel(investigate?.victim, byProto?.tcp || {}, byProto?.udp || {}, all);
+  if (mode === 'syn') return formatSynTarget(syn, investigate, verdict, byProto);
+  if (mode === 'amp') return formatAmpTarget(investigate, byProto);
+  if (mode === 'peak') return formatPeakReason(investigate, verdict, byProto);
+  const lines = [];
+  if (mode === 'carpet') {
+    const totals = investigate?.sources || {};
+    const scale = [];
+    if (Number(totals.dstIpCount) > 0) scale.push(ruAddresses(totals.dstIpCount));
+    if (Number(totals.dstNetCount) > 1) scale.push(ruNets24(totals.dstNetCount));
+    lines.push(escapeHtml(`Цель: сеть клиента, не один сервер${scale.length ? ` — ${scale.join(' · ')}` : ''}`));
+    for (const row of (Array.isArray(investigate?.dest24) ? investigate.dest24 : []).filter((r) => r?.net24).slice(0, 3)) {
+      lines.push(escapeHtml(`   ${row.net24} — ${formatSharePct(row.share)}`));
+    }
+  } else {
+    lines.push(...formatVictimTarget(investigate, { proto, of: mode === 'net' ? 'сети' : 'клиента' }));
+  }
+  if (mode === 'geo') {
+    const countries = formatTopCountries(evaluateForeignGeo(all).top);
+    if (countries) lines.push(escapeHtml(`Страны: ${countries}`));
+  }
+  const victim = investigate?.victim;
+  const shape = mode !== 'carpet' && isUsableVictim(victim) ? victimShapeFor(victim, investigate) : null;
+  lines.push(...formatAttackSourceLines(investigate, shape));
+  if (mode === 'net') lines.push(...formatNetExtra(byProto, verdict));
+  if (mode === 'volumetric' || mode === 'generic') lines.push(...formatFocusLines(investigate));
+  return lines;
+}
+
+function formatMetricsLines(mode, { byProto, verdict, investigate, binding, scope, signals, syn }) {
+  const all = byProto?.all || {};
+  const tcp = byProto?.tcp || {};
+  const udp = byProto?.udp || {};
+  const lines = ['Метрики минуты'];
+  const bps = Number(all.bps) || 0;
+  const pps = Number(all.pps) || 0;
+  const usual = hourUsualOf(verdict);
+  const growthPps = finiteGrowth(all.growth_pps ?? all.growthPps);
+  const total = [
+    `${formatBpsMsg(bps)}${usual > 0 ? ` (обычно ${formatBpsMsg(usual)})` : ''}`,
+    pps > 0
+      ? `${formatPpsMsg(pps)}${growthPps != null && growthPps >= HOUR_RATIO_PEAK ? ` (×${growthPps.toFixed(1).replace('.', ',')})` : ''}`
+      : '',
+  ].filter(Boolean);
+  lines.push(escapeHtml(`Весь трафик${scope === 'net' ? '' : ' клиента'}: ${total.join(' · ')}`));
+  const split = [];
+  if (bps > 0 && Number(tcp.bps) > 0) split.push(`TCP ${formatSharePct(Number(tcp.bps) / bps)}`);
+  if (bps > 0 && Number(udp.bps) > 0) split.push(`UDP ${formatSharePct(Number(udp.bps) / bps)}`);
+  if (Number(all.avg_packet_bytes) > 0) split.push(`средний пакет ${formatNumMsg(all.avg_packet_bytes, 0)} Б`);
+  if (split.length) lines.push(escapeHtml(split.join(' · ')));
+  if (mode === 'syn' && syn.pps > 0) {
+    const bits = [];
+    if (syn.avgPkt > 0) bits.push(`пакет ${formatNumMsg(syn.avgPkt, 0)} Б`);
+    const halfOpen = finiteGrowth(tcp.half_open_pct ?? all.half_open_pct);
+    if (halfOpen != null) bits.push(`полуоткрытых ${halfOpen.toFixed(0)}%`);
+    if (bits.length) lines.push(escapeHtml(`SYN: ${bits.join(' · ')}`));
+  }
+  const amp = ampMetrics(udp);
+  if (mode !== 'amp' && amp.bytes > 0 && signals.includes(SIGNALS.amplification)) {
+    lines.push(escapeHtml(`С портов усилителей: ${formatBpsMsg(amp.bps)}${amp.share != null ? ` · ${formatSharePct(amp.share)} UDP` : ''}`));
+  }
+  if (mode !== 'geo' && signals.includes(SIGNALS.foreign_geo)) {
+    const geo = evaluateForeignGeo(all);
+    if (geo.share != null) {
+      const countries = formatTopCountries(geo.top);
+      lines.push(escapeHtml(`Из-за рубежа: ${formatSharePct(geo.share)}${countries ? ` · ${countries}` : ''}`));
+    }
+  }
+  const switchIn = formatSwitchPort(investigate?.switchIn);
+  const switchOut = formatSwitchPort(investigate?.switchOut);
+  const sw = [
+    switchIn !== '—' ? `Вход: ${switchIn}` : '',
+    switchOut !== '—' ? `выход: ${switchOut}` : '',
+  ].filter(Boolean);
+  if (sw.length) lines.push(escapeHtml(sw.join(' · ')));
+  // Префикс сети уже стоит в шапке, поэтому разметка нужна только абонентам.
+  const markup = scope === 'client' ? formatClientMarkup(binding) : '';
+  if (markup) lines.push(escapeHtml(`${binding?.bindMode === 'ports' ? 'Порт' : 'IP'} клиента: ${markup}`));
+  return lines;
+}
+
 function formatAlertMessage({
   name,
   scope,
   scopeId,
   minute,
-  threshold,
-  thresholdIsCustom = false,
-  streak = DEFAULT_STREAK,
-  alertScope = DEFAULT_ALERT_SCOPE,
+  startMinute = null,
   byProto,
   verdict,
   investigate,
   binding,
   signals,
+  repeat = null,
 }) {
   const signalList = Array.isArray(signals) && signals.length ? signals : [SIGNALS.volume];
-  const title = formatAlertHeadline({
-    ...verdict,
-    l4src: investigate?.l4src,
-    ampSrcPort: investigate?.ampSrcPort,
-  }, signalList);
-  // Префикс сети уже стоит в шапке, поэтому разметка нужна только абонентам.
-  const markup = scope === 'client' ? formatClientMarkup(binding) : '';
-  const markupLine = markup
-    ? (binding?.bindMode === 'ports' ? `Порт: ${markup}` : `IP: ${markup}`)
-    : '';
-  const { lines: highlights, ampShown, sourceShown } = formatAlertHighlights({
+  const attack = isAlertAttack(verdict, signalList);
+  const mode = alertMode(verdict, signalList, attack);
+  const ctx = {
     byProto,
     verdict,
     investigate,
-    hourUsual: Number(verdict?.hourCeiling || verdict?.hourP95 || 0),
+    binding,
+    scope,
     signals: signalList,
+    syn: synDetail(byProto, investigate),
+  };
+  const title = alertTitle(mode, {
+    byProto,
+    investigate,
+    verdict: { ...verdict, ampSrcPort: investigate?.ampSrcPort },
   });
-  const switchIn = formatSwitchPort(investigate?.switchIn);
-  const switchOut = formatSwitchPort(investigate?.switchOut);
-  // Сети и порты футера считаются по байтам всей минуты, а у голого SYN байтов
-  // почти нет: у 81050 туда попадала чужая закачка. Откуда и куда бьёт SYN,
-  // уже сказано в шапке числом источников и целями по пакетам.
-  const synFlood = verdict?.kind === KINDS.syn_flood;
-  const sourceNets = synFlood || sourceShown ? '—' : formatSourceNets(investigate?.source24);
-  const hidePeakPorts = isLegitimatePeak(verdict);
-  // У пика нет строк с маркерами, поэтому причина — единственное объяснение;
-  // у атаки она дословно повторяет то, что уже разложено по строкам выше.
-  const reasonLine = verdict?.kind === KINDS.benign_peak && verdict?.reason
-    ? `Почему: ${verdict.reason}`
-    : '';
-  const shortName = shortClientName(name);
-  const object = scope === 'net'
-    ? `Сеть /24: <b>${escapeHtml(shortName && shortName !== scopeId ? `${shortName} (${scopeId})` : scopeId)}</b>`
-    : `Клиент: <b>${escapeHtml(shortName || scopeId)}</b> (${escapeHtml(scopeId)})`;
-  const growthPair = formatGrowthPair(byProto, verdict);
   const blocks = [
     [
-      title,
-      object,
-      `Минута: ${escapeHtml(formatMinuteMsk(minute))}`,
-      growthPair ? escapeHtml(growthPair) : '',
+      `${attack ? '🔴' : '🟡'} <b>${escapeHtml(title)}</b> · ${formatAlertWho(scope, scopeId, name)}`,
+      `Начало: <b>${escapeHtml(formatAlertTime(startMinute || minute))}</b>`,
+      repeat ? formatRepeatHtml(repeat, scope, minute) : '',
+      formatSizeLine(mode, ctx),
     ],
-    [...highlights, reasonLine],
-    [`<b>Что делать:</b> ${escapeHtml(actionFor(verdict, investigate))}`],
-    [
-      sourceNets !== '—' ? `Откуда сети: ${escapeHtml(sourceNets)}` : '',
-      ...footerPortLines(investigate, { ampShown, hidePeak: hidePeakPorts, synShown: synFlood }),
-      switchIn !== '—' ? `Коммутатор вход: ${escapeHtml(switchIn)}` : '',
-      switchOut !== '—' ? `Коммутатор выход: ${escapeHtml(switchOut)}` : '',
-      markupLine ? escapeHtml(markupLine) : '',
-      escapeHtml(`Порог ×${Number(threshold).toFixed(2)}${thresholdIsCustom ? ' (индивидуальный)' : ''}`
-        + ` · стабильно ${normalizeStreak(streak)} знач.`
-        + ` · рассылка: ${ALERT_SCOPE_LABEL[normalizeAlertScope(alertScope)] || 'всё'}`),
-    ],
-    ['<b>Метрики за минуту</b>'],
-    ...['all', 'tcp', 'udp'].map((proto) => [formatProtoBlock(
-      proto,
-      byProto?.[proto],
-      outOfRangeFields(proto, byProto?.[proto], { verdict, threshold }),
-    )]),
+    formatTargetLines(mode, ctx),
+    formatMetricsLines(mode, ctx),
   ];
   return blocks
     .map((block) => block.filter(Boolean).join('\n'))
@@ -1589,36 +1428,109 @@ function formatAlertMessage({
     .join('\n\n');
 }
 
+function formatDuration(minutes) {
+  const m = Math.max(1, Math.round(minutes));
+  if (m < 60) return `${m} мин`;
+  const h = Math.floor(m / 60);
+  const rest = m % 60;
+  return rest ? `${h} ч ${rest} мин` : `${h} ч`;
+}
+
+function attackTargetText(mode, byProto, investigate) {
+  if (mode === 'syn') {
+    const top = synDetail(byProto, investigate).dest[0];
+    if (top && Number(top.share) >= 0.5) return formatHostPort(top.ip, top.port);
+  }
+  if (mode === 'amp') {
+    const ip = (Array.isArray(investigate?.ampDestIp) ? investigate.ampDestIp : [])[0];
+    if (ip?.ip && Number(ip.share) >= 0.5) return ip.ip;
+  }
+  if (mode === 'net') {
+    const net = netSpikeMetrics(byProto?.all || {});
+    if (net.net) return net.net;
+  }
+  const victim = investigate?.victim;
+  if (mode !== 'carpet' && isUsableVictim(victim)) {
+    return formatHostPort(victim.ip, victimDisplayPort(victim, investigate));
+  }
+  return '';
+}
+
+// «В начале» и «сейчас» меряем одним и тем же: у SYN-флуда после атаки байты
+// клиента не падают, падает голый SYN — его и показываем, даже нулём.
+function headlineRate(mode, byProto, investigate) {
+  if (mode === 'syn') return formatSynRate(synDetail(byProto, investigate).pps);
+  if (mode === 'amp') return `${formatBpsMsg(ampMetrics(byProto?.udp || {}).bps)} ответов усилителей`;
+  const bps = Number(byProto?.all?.bps);
+  return bps > 0 ? formatBpsMsg(bps) : '';
+}
+
+// Нормализация приходит после streak спокойных минут: конец атаки — первая из них.
 function formatNormalizeMessage({
   name,
   scope,
   scopeId,
   minute,
   alertMinute,
-  threshold,
+  startMinute = null,
   streak = DEFAULT_NORMALIZE_STREAK,
   byProto,
+  alertByProto = null,
+  verdict = null,
+  investigate = null,
+  signals = null,
 }) {
-  const blocks = [
-    [
-      '🟢 <b>НОРМА · трафик вернулся к обычному</b>',
-      scope === 'net'
-        ? `Сеть /24: <b>${escapeHtml(name && name !== scopeId ? `${name} (${scopeId})` : scopeId)}</b>`
-        : `Клиент: <b>${escapeHtml(name || scopeId)}</b> (${escapeHtml(scopeId)})`,
-      `Алерт был: ${escapeHtml(formatMinuteMsk(alertMinute))}`,
-      `Нормализация: ${escapeHtml(formatMinuteMsk(minute))}`,
-    ],
-    [
-      escapeHtml(`Порог ×${Number(threshold).toFixed(2)}`
-        + ` · ниже нормы ${normalizeStreak(streak, DEFAULT_NORMALIZE_STREAK)} знач. подряд`),
-    ],
-    ['<b>Метрики за минуту</b>'],
-    ...['all', 'tcp', 'udp'].map((proto) => [formatProtoBlock(proto, byProto?.[proto])]),
-  ];
-  return blocks
-    .map((block) => block.filter(Boolean).join('\n'))
-    .filter(Boolean)
-    .join('\n\n');
+  const signalList = Array.isArray(signals) && signals.length ? signals : [SIGNALS.volume];
+  const from = startMinute || alertMinute;
+  const fromTs = parseUtc(from);
+  const nowTs = parseUtc(minute);
+  const quiet = normalizeStreak(streak, DEFAULT_NORMALIZE_STREAK);
+  const endTs = Number.isFinite(fromTs) && Number.isFinite(nowTs)
+    ? Math.max(fromTs + MINUTE, nowTs - (quiet - 1) * MINUTE)
+    : NaN;
+  const lines = [`🟢 <b>Атака закончилась</b> · ${formatAlertWho(scope, scopeId, name)}`];
+  const opened = alertByProto?.all ? alertByProto : null;
+  if (verdict || opened) {
+    const mode = alertMode(verdict, signalList, true);
+    const title = alertTitle(mode, {
+      byProto: opened || byProto,
+      investigate,
+      verdict: { ...verdict, ampSrcPort: investigate?.ampSrcPort },
+    });
+    const target = attackTargetText(mode, opened || byProto, investigate);
+    lines.push(escapeHtml(`${title}${target ? ` на ${target}` : ''}`));
+    if (Number.isFinite(endTs)) {
+      lines.push(`Длилась <b>${escapeHtml(formatDuration((endTs - fromTs) / MINUTE))}</b>: `
+        + `${escapeHtml(formatClockMsk(from))}–${escapeHtml(formatClockMsk(endTs))} МСК`);
+    }
+    const before = opened ? headlineRate(mode, opened, investigate) : '';
+    const now = headlineRate(mode, byProto, null);
+    const rates = [before ? `в начале ${before}` : '', now ? `сейчас ${now}` : ''].filter(Boolean).join(' · ');
+    if (rates) lines.push(escapeHtml(`${rates.charAt(0).toUpperCase()}${rates.slice(1)}`));
+  } else {
+    if (Number.isFinite(endTs)) {
+      lines.push(`Началась ${escapeHtml(formatAlertTime(from))}, закончилась ${escapeHtml(formatClockMsk(endTs))} МСК`);
+    }
+    const bps = Number(byProto?.all?.bps);
+    if (bps > 0) lines.push(escapeHtml(`Сейчас ${formatBpsMsg(bps)}`));
+  }
+  return lines.filter(Boolean).join('\n');
+}
+
+// Начало атаки — первая из подряд идущих горячих минут: открываемся по серии,
+// а клиенту важно, когда удар пошёл, а не когда набралась серия.
+function alertStartMinute(history, hot) {
+  let start = null;
+  let prevTs = null;
+  for (const item of history) {
+    const ts = parseUtc(item?.minute);
+    if (!Number.isFinite(ts)) break;
+    if (prevTs != null && prevTs - ts > MINUTE) break;
+    if (!hot(item)) break;
+    start = item.minute;
+    prevTs = ts;
+  }
+  return start;
 }
 
 function pickAlertCandidates(allRows, previousByKey, threshold, options = {}) {
@@ -1646,11 +1558,16 @@ function pickAlertCandidates(allRows, previousByKey, threshold, options = {}) {
       // SYN: дубли режет activeKeys, а не «минута до тоже горячая». Иначе флуд,
       // который шёл до выкладки, навсегда остаётся без события — rising edge
       // уже потерян, активной записи нет.
-      const ready = signal === SIGNALS.volume
-        ? shouldSendAlert(history, t, options.streak ?? cfg.streak, enabledAtMs)
-        : signal === SIGNALS.syn_flood
-          ? hot(row)
-          : shouldSendSignal(history, hot, cfg.streak, enabledAtMs);
+      let ready;
+      if (signal === SIGNALS.volume) {
+        ready = shouldSendAlert(history, t, options.streak ?? cfg.streak, enabledAtMs);
+      } else if (signal === SIGNALS.syn_flood) {
+        ready = hot(row);
+      } else if (signal === SIGNALS.net_spike) {
+        ready = shouldSendNetSpike(history, hot, cfg.streak, enabledAtMs);
+      } else {
+        ready = shouldSendSignal(history, hot, cfg.streak, enabledAtMs);
+      }
       if (!ready) continue;
       out.push({
         row,
@@ -1661,10 +1578,26 @@ function pickAlertCandidates(allRows, previousByKey, threshold, options = {}) {
         threshold: t,
         thresholdIsCustom: hasGrowthOverride(row.scope, row.scope_id, options.thresholdByKey),
         streak: signal === SIGNALS.volume ? (options.streak ?? cfg.streak) : cfg.streak,
+        startMinute: alertStartMinute(history, hot) || row.minute,
       });
     }
   }
   return out;
+}
+
+// Чужая география — признак той же аномалии, что всплеск или атака. Отдельное
+// событие на неё дало бы вторую запись и вторую телеграмму о нормализации, поэтому
+// его не заводим, если по объекту другое событие открывается сейчас или уже открыто.
+function dropDuplicateGeo(candidates, activeByKey = new Map()) {
+  const hasOther = candidates.some((c) => (c.signal || SIGNALS.volume) !== SIGNALS.foreign_geo);
+  return candidates.filter((c) => {
+    if (c.signal !== SIGNALS.foreign_geo) return true;
+    if (hasOther) return false;
+    const { scope, scope_id: scopeId } = c.row;
+    return !SIGNAL_ORDER.some((signal) => signal !== SIGNALS.foreign_geo
+      && (activeByKey.has(objectSignalKey(scope, scopeId, signal))
+        || (signal === SIGNALS.volume && activeByKey.has(objectKey(scope, scopeId)))));
+  });
 }
 
 function pickNormalizeCandidates(allRows, previousByKey, threshold, options = {}) {
@@ -1702,14 +1635,17 @@ function pickNormalizeCandidates(allRows, previousByKey, threshold, options = {}
         }
         return !isSignalHot(activeSignal, item, group, t, settings);
       };
-      const ready = activeSignal === SIGNALS.volume
-        ? shouldSendNormalize(history, t, options.streak ?? cfg.normalizeStreak, {
+      let ready;
+      if (activeSignal === SIGNALS.volume) {
+        ready = shouldSendNormalize(history, t, options.streak ?? cfg.normalizeStreak, {
           alertBps: active.alertByProto?.all?.bps ?? active.alertBps,
           hourP95: active.verdict?.hourP95,
-        })
-        : activeSignal === SIGNALS.syn_flood
-          ? shouldNormalizeQuiet(history, quiet, cfg.normalizeStreak)
-          : shouldSendSignal(history, quiet, cfg.normalizeStreak);
+        });
+      } else if (activeSignal === SIGNALS.syn_flood || activeSignal === SIGNALS.net_spike) {
+        ready = shouldNormalizeQuiet(history, quiet, cfg.normalizeStreak);
+      } else {
+        ready = shouldSendSignal(history, quiet, cfg.normalizeStreak);
+      }
       if (!ready) continue;
       out.push({ row, key: objectId, signalKey, signal: activeSignal, active });
     }
@@ -2251,7 +2187,8 @@ async function loadPreviousAllRows(minute, keys, limit = DEFAULT_STREAK) {
     SELECT scope, scope_id, proto, minute, growth_bps, growth_pps, bps, bytes,
            amp_bytes, amp_packets, amp_srcs, growth_amp,
            foreign_bytes, foreign_srcs, top_countries, growth_foreign_bps, growth_foreign_share,
-           syn_only_bytes, syn_only_packets, syn_only_rows, growth_syn, sampling_rate
+           syn_only_bytes, syn_only_packets, syn_only_rows, syn_only_targets, answer_pct, growth_syn, sampling_rate,
+           net_top, net_bps, net_pps, net_usual_bps, net_growth_bps, net_growth_pps
     FROM (
       SELECT
         scope,
@@ -2274,8 +2211,16 @@ async function loadPreviousAllRows(minute, keys, limit = DEFAULT_STREAK) {
         syn_only_bytes,
         syn_only_packets,
         syn_only_rows,
+        syn_only_targets,
+        answer_pct,
         growth_syn,
         sampling_rate,
+        net_top,
+        net_bps,
+        net_pps,
+        net_usual_bps,
+        net_growth_bps,
+        net_growth_pps,
         row_number() OVER (PARTITION BY scope, scope_id, proto ORDER BY minute DESC) AS rn
       FROM ${tableRef()} FINAL
       WHERE proto IN ('all', 'udp')
@@ -2357,15 +2302,16 @@ function storedOrFormattedAlertText(row, alertSnapshot) {
     scope: String(row.scope || ''),
     scopeId: String(row.scope_id || ''),
     minute: row.alert_minute,
-    threshold: Number(row.threshold) || DEFAULT_GROWTH_THRESHOLD,
+    startMinute: alertSnapshot.startMinute || null,
     byProto: byProtoFromSnapshot(alertSnapshot),
     verdict: alertSnapshot.verdict,
     investigate: alertSnapshot.investigate,
     binding: alertSnapshot.binding,
+    signals: [String(row.signal || SIGNALS.volume)],
   });
 }
 
-function storedOrFormattedNormalizeText(row, normalizeSnapshot) {
+function storedOrFormattedNormalizeText(row, normalizeSnapshot, alertSnapshot = {}) {
   const stored = String(normalizeSnapshot.telegramText || '').trim();
   if (stored) return stored;
   if (!normalizeSnapshot?.all) return '';
@@ -2375,8 +2321,12 @@ function storedOrFormattedNormalizeText(row, normalizeSnapshot) {
     scopeId: String(row.scope_id || ''),
     minute: row.normalize_minute,
     alertMinute: row.alert_minute,
-    threshold: Number(row.threshold) || DEFAULT_GROWTH_THRESHOLD,
+    startMinute: alertSnapshot.startMinute || null,
     byProto: byProtoFromSnapshot(normalizeSnapshot),
+    alertByProto: byProtoFromSnapshot(alertSnapshot),
+    verdict: alertSnapshot.verdict || null,
+    investigate: alertSnapshot.investigate || null,
+    signals: [String(row.signal || SIGNALS.volume)],
   });
 }
 
@@ -2391,6 +2341,7 @@ function mapEventRow(row) {
     name: String(row.name || row.scope_id || ''),
     status: String(row.status || ''),
     alertMinute: row.alert_minute || null,
+    startMinute: alertSnapshot.startMinute || null,
     normalizeMinute: row.normalize_minute || null,
     threshold: Number(row.threshold) || DEFAULT_GROWTH_THRESHOLD,
     alertByProto: mapSnapshotToUi(alertSnapshot),
@@ -2398,7 +2349,7 @@ function mapEventRow(row) {
     verdict: alertSnapshot.verdict || null,
     investigate: alertSnapshot.investigate || null,
     alertText: storedOrFormattedAlertText(row, alertSnapshot),
-    normalizeText: storedOrFormattedNormalizeText(row, normalizeSnapshot),
+    normalizeText: storedOrFormattedNormalizeText(row, normalizeSnapshot, alertSnapshot),
     telegramSkip: String(alertSnapshot.telegramSkip || ''),
   };
 }
@@ -2412,6 +2363,7 @@ function persistAlertSnapshot(metrics, extras = {}) {
     telegramText: String(extras.telegramText || ''),
     telegramSkip: String(extras.telegramSkip || ''),
     focusMinute: String(extras.focusMinute || ''),
+    startMinute: String(extras.startMinute || ''),
   };
 }
 
@@ -2421,7 +2373,16 @@ function persistActiveAlertSnapshot(active) {
     investigate: active?.investigate,
     telegramText: active?.alertText,
     telegramSkip: active?.telegramSkip,
+    startMinute: active?.startMinute,
   });
+}
+
+function earliestStartMinute(candidates, minute) {
+  let best = minute;
+  for (const c of candidates) {
+    if (c?.startMinute && parseUtc(c.startMinute) < parseUtc(best)) best = c.startMinute;
+  }
+  return formatCh(parseUtc(best));
 }
 
 async function loadActiveEventsByKey() {
@@ -2454,6 +2415,78 @@ async function loadActiveEventsByKey() {
     if (signal === SIGNALS.volume) map.set(objectKey(event.scope, event.scopeId), event);
   }
   return map;
+}
+
+const REPEAT_WINDOW_MS = 24 * 3600 * 1000;
+
+// Атаки объекта за сутки до minute: одна запись на минуту открытия, сколько бы
+// сигналов её ни открыли. Снимок разбираем здесь: JSON-функции на сервере падают
+// по памяти на больших alert_json.
+async function loadRecentAttacks({ scope, scopeId, minute }) {
+  const to = formatCh(parseUtc(minute));
+  const from = formatCh(parseUtc(minute) - REPEAT_WINDOW_MS);
+  const { rows } = await query(`
+    SELECT ev_minute, ev_status, ev_json
+    FROM (
+      SELECT
+        event_id,
+        argMax(status, updated_at) AS ev_status,
+        argMax(alert_minute, updated_at) AS ev_minute,
+        argMax(alert_json, updated_at) AS ev_json
+      FROM ${eventsTableRef()}
+      WHERE scope = {scope:String}
+        AND scope_id = {scopeId:String}
+        AND alert_minute >= ${utcDateTime('from')}
+        AND alert_minute < ${utcDateTime('to')}
+      GROUP BY event_id
+    )
+    WHERE ev_status IN ('active', 'normalized')
+    ORDER BY ev_minute
+  `, { scope: String(scope), scopeId: String(scopeId), from, to }, { name: 'detection/events-recent-attacks' });
+  const byMinute = new Map();
+  for (const r of rows) {
+    const key = formatCh(parseUtc(r.ev_minute));
+    let victimIp = '';
+    try {
+      victimIp = String(JSON.parse(r.ev_json || '{}')?.investigate?.victim?.ip || '');
+    } catch {
+      victimIp = '';
+    }
+    const prev = byMinute.get(key);
+    if (!prev || (!prev.victimIp && victimIp)) byMinute.set(key, { minute: key, victimIp });
+  }
+  return [...byMinute.values()];
+}
+
+// Номер атаки за сутки: по тому же адресу, если он уже был целью, иначе по объекту.
+function summarizeRepeat(prior, victimIp = '') {
+  const list = Array.isArray(prior) ? prior.filter((p) => p?.minute) : [];
+  if (!list.length) return null;
+  const sameIp = victimIp ? list.filter((p) => p.victimIp === victimIp) : [];
+  const pool = sameIp.length ? sameIp : list;
+  return {
+    nth: pool.length + 1,
+    target: sameIp.length ? victimIp : '',
+    lastMinute: pool[pool.length - 1].minute,
+  };
+}
+
+function formatRepeatLine(repeat, scope, minute) {
+  if (!repeat) return '';
+  const target = repeat.target || (scope === 'net' ? 'эту сеть' : 'этого клиента');
+  const last = new Date(parseUtc(repeat.lastMinute));
+  const now = new Date(parseUtc(minute));
+  const day = (d) => d.toLocaleDateString('ru-RU', { timeZone: 'Europe/Moscow' });
+  const time = last.toLocaleTimeString('ru-RU', { timeZone: 'Europe/Moscow', hour: '2-digit', minute: '2-digit' });
+  const when = day(last) === day(now)
+    ? time
+    : `${last.toLocaleDateString('ru-RU', { timeZone: 'Europe/Moscow', day: '2-digit', month: '2-digit' })} ${time}`;
+  return `Повтор: ${repeat.nth}-я атака за сутки на ${target}, прошлая в ${when} МСК`;
+}
+
+function formatRepeatHtml(repeat, scope, minute) {
+  const text = escapeHtml(formatRepeatLine(repeat, scope, minute));
+  return text.replace(/^Повтор: (\d+-я атака за сутки)/, "Повтор: <b>$1</b>");
 }
 
 async function insertDetectionEvent(row) {
@@ -2600,6 +2633,53 @@ async function maybeSendTelegram(text, cfg) {
   }
 }
 
+function netSpikeByProto(net) {
+  const bytes = net.bps * 60 / 8;
+  const packets = net.pps * 60;
+  return {
+    all: {
+      proto: 'all',
+      bps: net.bps,
+      pps: net.pps,
+      bytes,
+      packets,
+      avg_packet_bytes: packets > 0 ? bytes / packets : 0,
+    },
+    tcp: { proto: 'tcp', bps: net.tcpBps },
+    udp: { proto: 'udp', bps: net.udpBps },
+  };
+}
+
+// Отражение и SYN уже доказаны по клиенту целиком, их вердикт не трогаем.
+// Иначе форму и цель ищем в самой /24: по клиенту целиком удар не виден.
+function isNetFocus(net, verdict) {
+  return Boolean(net?.net)
+    && verdict?.kind !== KINDS.amplification
+    && verdict?.kind !== KINDS.syn_flood;
+}
+
+function netSpikeVerdict(net, hour = {}) {
+  return classifyFromMetrics(netSpikeByProto(net), {
+    ...hour,
+    p95: net.usualBps,
+    p999: net.usualBps,
+    recentMedian: null,
+  });
+}
+
+// Строки про объём клиента и пару «к 14д / к часу» считают по клиенту, поэтому
+// его норму возвращаем; кратность сети уже стоит в строке «Сеть /24».
+function withClientVolume(verdict, clientVerdict = {}) {
+  return {
+    ...verdict,
+    hourP95: clientVerdict.hourP95 ?? null,
+    hourP999: clientVerdict.hourP999 ?? null,
+    hourCeiling: clientVerdict.hourCeiling ?? null,
+    hourRatio: clientVerdict.hourRatio ?? null,
+    netHourRatio: verdict?.hourRatio ?? null,
+  };
+}
+
 async function processDetectionAlerts({ minute, rows, nameByKey }) {
   await ensureDetectionTelegramTables();
   const raw = await getCurrentSettingsRaw();
@@ -2641,6 +2721,7 @@ async function processDetectionAlerts({ minute, rows, nameByKey }) {
     settings.geoStreak,
     settings.ampNormalizeStreak,
     settings.geoNormalizeStreak,
+    NET_NORMALIZE_STREAK,
   );
   const previousByKey = await loadPreviousAllRows(minute, watchKeys, take);
   const pickOpts = {
@@ -2695,7 +2776,9 @@ async function processDetectionAlerts({ minute, rows, nameByKey }) {
   }
 
   for (const candidates of alertGroups.values()) {
-    const { row, threshold: objectThreshold, thresholdIsCustom } = candidates[0];
+    const eventCandidates = dropDuplicateGeo(candidates, activeByKey);
+    if (!eventCandidates.length) continue;
+    const { row, threshold: objectThreshold } = candidates[0];
     const objectId = objectKey(row.scope, row.scope_id);
     const group = grouped.get(objectId);
     const name = nameByKey?.get(objectId) || row.scope_id;
@@ -2739,32 +2822,44 @@ async function processDetectionAlerts({ minute, rows, nameByKey }) {
       syn: synOptions(settings),
     };
     let verdict = classifyFromMetrics(byProto, hour);
-    if (verdict.needsInvestigate || verdict.kind === KINDS.benign_peak
+    const clientVerdict = verdict;
+    const net = signals.includes(SIGNALS.net_spike) ? netSpikeMetrics(byProto.all || row) : null;
+    const netFocus = isNetFocus(net, verdict);
+    if (netFocus) verdict = netSpikeVerdict(net, hour);
+    const target = netFocus
+      ? { scope: 'net', scopeId: net.net }
+      : { scope: row.scope, scopeId: row.scope_id };
+    if (verdict.needsInvestigate || verdict.kind === KINDS.benign_peak || netFocus
       || signals.includes(SIGNALS.amplification)
       || signals.includes(SIGNALS.syn_flood) || signals.includes(SIGNALS.foreign_geo)) {
       try {
-        investigate = await investigateIncident({ scope: row.scope, scopeId: row.scope_id, minute: focusMinute });
-        investigate = await attachTargetFocus(investigate, {
-          scope: row.scope,
-          scopeId: row.scope_id,
-          minute: focusMinute,
-        });
-        verdict = refineClassification(verdict, investigate);
+        investigate = await investigateIncident({ ...target, minute: focusMinute });
+        investigate = await attachTargetFocus(investigate, { ...target, minute: focusMinute });
+        verdict = refineClassification(verdict, investigate, { scope: target.scope });
       } catch (err) {
         errors.push({ key: objectId, message: `investigate: ${err.message}` });
         investigate = { ...emptyInvestigate(), error: err.message };
       }
     }
+    if (netFocus) verdict = withClientVolume(verdict, clientVerdict);
     const attack = isAlertAttack(verdict, signals);
+    let repeat = null;
+    if (attack) {
+      try {
+        const prior = await loadRecentAttacks({ scope: row.scope, scopeId: row.scope_id, minute });
+        repeat = summarizeRepeat(prior, String(investigate?.victim?.ip || ''));
+      } catch (err) {
+        errors.push({ key: objectId, message: `repeat: ${err.message}` });
+      }
+    }
+    const startMinute = earliestStartMinute(eventCandidates, minute);
     const text = formatAlertMessage({
       name,
       scope: row.scope,
       scopeId: row.scope_id,
+      repeat,
       minute: focusMinute,
-      threshold: objectThreshold,
-      thresholdIsCustom,
-      streak: candidates[0].streak || settings.streak,
-      alertScope: settings.alertScope,
+      startMinute,
       byProto,
       verdict,
       investigate,
@@ -2779,8 +2874,9 @@ async function processDetectionAlerts({ minute, rows, nameByKey }) {
       telegramText: text,
       telegramSkip: skipShare ? TELEGRAM_SKIP_BELOW_SHARE : '',
       focusMinute: focusMinute !== minute ? focusMinute : '',
+      startMinute,
     });
-    for (const candidate of candidates) {
+    for (const candidate of eventCandidates) {
       const signal = candidate.signal || SIGNALS.volume;
       const eventId = signal === SIGNALS.volume
         ? `${objectId}|${minute}`
@@ -2817,9 +2913,13 @@ async function processDetectionAlerts({ minute, rows, nameByKey }) {
       scopeId: active.scopeId,
       minute,
       alertMinute: active.alertMinute,
-      threshold: active.threshold || settings.growthThreshold,
+      startMinute: active.startMinute,
       streak: settings.normalizeStreak,
       byProto: group?.byProto || { all: row },
+      alertByProto: byProtoFromSnapshot(uiByProtoToSnapshot(active.alertByProto)),
+      verdict: active.verdict,
+      investigate: active.investigate,
+      signals: [active.signal || SIGNALS.volume],
     });
     const snapshot = {
       ...snapshotByProto(group, row),
@@ -2929,7 +3029,7 @@ async function rebuildDetectionEventAlert({ scope, scopeId, minute, sendTelegram
         scopeId: row.scope_id,
         minute: minuteForFacts,
       });
-      verdict = refineClassification(verdict, investigate);
+      verdict = refineClassification(verdict, investigate, { scope: row.scope });
     } catch (err) {
       investigate = { ...emptyInvestigate(), error: err.message };
     }
@@ -2939,13 +3039,12 @@ async function rebuildDetectionEventAlert({ scope, scopeId, minute, sendTelegram
     scope: row.scope,
     scopeId: row.scope_id,
     minute: minuteForFacts,
-    threshold: Number(row.threshold) || settings.growthThreshold,
-    streak: settings.streak,
-    alertScope: settings.alertScope,
+    startMinute: snapshot.startMinute || null,
     byProto,
     verdict,
     investigate,
     binding,
+    signals: [row.signal || SIGNALS.volume],
   });
   const next = persistAlertSnapshot(snapshot, {
     verdict,
@@ -2953,6 +3052,7 @@ async function rebuildDetectionEventAlert({ scope, scopeId, minute, sendTelegram
     binding,
     telegramText: text,
     focusMinute: snapshot.focusMinute || '',
+    startMinute: snapshot.startMinute || '',
   });
   await insertDetectionEvent({
     event_id: row.event_id,
@@ -3024,6 +3124,14 @@ module.exports = {
   pickNormalizeCandidates,
   pickSilentNormalizeCandidates,
   shouldSendSignal,
+  shouldSendNetSpike,
+  isNetFocus,
+  netSpikeVerdict,
+  withClientVolume,
+  dropDuplicateGeo,
+  loadRecentAttacks,
+  summarizeRepeat,
+  formatRepeatLine,
   SIGNALS,
   formatAlertMessage,
   formatNormalizeMessage,
