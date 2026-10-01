@@ -52,6 +52,7 @@ function emptyInvestigate() {
     ampDest24: [],
     ampDestIp: [],
     ampDestPort: { count: 0, top: [] },
+    ampSrcIp: [],
     ampSrcPort: { count: 0, top: [] },
     destPort: { count: 0, top: [] },
     syn: emptySyn(),
@@ -296,15 +297,25 @@ function formatClientMarkup(binding) {
   return '';
 }
 
-function towardPred() {
-  const dstIp = flowIpExpr(`f.${col('dstIp')}`);
-  return `
-    if(
-      {scope:String} = 'client',
-      f.dst_client = {scopeId:String},
-      ${net24Sql(dstIp)} = {scopeId:String}
-    )
-  `;
+// Срез цели. Для клиента — колонка dst_client, по ней есть skip-индекс.
+// Для /24 — тот же клиент плюс диапазон адресов: if() с обеими ветками
+// ClickHouse считает всегда, а isIPAddressInRange на строке «81953» падает.
+// Байтный диапазон не строит IP каждой строки всего стенда.
+function netRangePred() {
+  const ipCol = `f.${col('dstIp')}`;
+  const etype = flowCol('etype');
+  const base = `IPv4StringToNum(replaceRegexpOne({scopeId:String}, '/24$', ''))`;
+  const addr = `reinterpretAsUInt32(reverse(substring(${ipCol}, 1, 4)))`;
+  const family = etype ? `f.${etype} = 2048 AND ` : '';
+  return `${family}${addr} BETWEEN ${base} AND ${base} + 255`;
+}
+
+function slicePred(scope, clientId) {
+  if (scope === 'net') {
+    const range = netRangePred();
+    return clientId ? `f.dst_client = {clientId:String} AND ${range}` : range;
+  }
+  return `f.dst_client = {scopeId:String}`;
 }
 
 function minuteBounds(minuteTs) {
@@ -328,7 +339,7 @@ function timeFilterSql() {
   `;
 }
 
-function evCte() {
+function evCte(scope, clientId) {
   const srcIp = flowIpExpr(`f.${col('srcIp')}`);
   const dstIp = flowIpExpr(`f.${col('dstIp')}`);
   const protoCol = `f.${col('proto')}`;
@@ -344,9 +355,7 @@ function evCte() {
   const switchIp = flowSamplerIpExpr(`f.${samplerCol}`);
   const inIdx = sflowIfIndexExpr(`f.${inIfCol}`);
   const outIdx = sflowIfIndexExpr(`f.${outIfCol}`);
-  const prewhere = `
-    if({scope:String} = 'client', f.dst_client = {scopeId:String}, 1)
-  `;
+  const pred = slicePred(scope, clientId);
   return `
     SELECT
       ${srcIp} AS src_ip,
@@ -365,8 +374,8 @@ function evCte() {
       ${outIdx} AS out_idx,
       f.dst_client AS dst_client
     FROM ${flowsRawTableRef()} AS f
-    PREWHERE ${prewhere}
-    WHERE ${timeFilterSql()} AND ${towardPred()}
+    PREWHERE ${pred}
+    WHERE ${timeFilterSql()} AND ${pred}
   `;
 }
 
@@ -449,20 +458,23 @@ function mapSwitch(row, total) {
 }
 
 /**
- * One PREWHERE on dst_client (or /24), same minute window as detection.
- * Aggregations run on the already-narrow slice — not 8 full-minute scans.
+ * One PREWHERE on dst_client, and for a /24 also on that address range.
+ * Aggregations run on the already-narrow slice — not a full-minute scan.
  */
-async function investigateIncident({ scope, scopeId, minute }) {
+async function investigateIncident({ scope, scopeId, minute, clientId } = {}) {
   const minuteTs = parseUtc(minute);
   if (!Number.isFinite(minuteTs)) return emptyInvestigate();
   const bounds = minuteBounds(minuteTs);
+  const scopeName = String(scope || 'client');
+  const ownerId = String(clientId || '');
   const params = {
-    scope: String(scope || 'client'),
+    scope: scopeName,
     scopeId: String(scopeId),
     ...bounds,
   };
+  if (ownerId) params.clientId = ownerId;
   const opts = { name: 'detection/investigate', clickhouse_settings: CHEAP, requestTimeoutMs: 35000 };
-  const ev = evCte();
+  const ev = evCte(scopeName, ownerId);
   const ifaces = netInterfacesCurrentRef();
 
   // groupArray lives inside each CTE, not around it: 24.8 inlines WITH
@@ -585,6 +597,16 @@ async function investigateIncident({ scope, scopeId, minute }) {
       FROM (
         SELECT dst_port AS port, sum(bytes) AS byte_sum, uniqExact(dst_ip) AS ips
         FROM amp_ev GROUP BY port ORDER BY byte_sum DESC LIMIT 5
+      )
+    ),
+    amp_src_ip AS (
+      SELECT groupArray(tuple(ip, byte_sum, port)) AS rows
+      FROM (
+        SELECT src_ip AS ip, sum(bytes) AS byte_sum, argMax(src_port, bytes) AS port
+        FROM amp_ev
+        GROUP BY ip
+        ORDER BY byte_sum DESC
+        LIMIT 5
       )
     ),
     amp_src_port AS (
@@ -731,6 +753,7 @@ async function investigateIncident({ scope, scopeId, minute }) {
       (SELECT rows FROM amp_dest_ip) AS amp_dest_ips,
       (SELECT byte_sum FROM amp_tot) AS amp_bytes,
       (SELECT rows FROM amp_dest_port) AS amp_dest_ports,
+      (SELECT rows FROM amp_src_ip) AS amp_src_ips,
       (SELECT rows FROM amp_src_port) AS amp_src_ports,
       (SELECT n FROM amp_port_n) AS amp_port_count,
       (SELECT n FROM amp_src_port_n) AS amp_src_port_count,
@@ -813,6 +836,17 @@ async function investigateIncident({ scope, scopeId, minute }) {
       };
     }),
     ampDestPort: mapDestPorts(asTuples(row.amp_dest_ports), row.amp_port_count, Number(row.amp_bytes || 0)),
+    ampSrcIp: asTuples(row.amp_src_ips).filter((t) => t[0]).map((t) => {
+      const bytes = Number(t[1] || 0);
+      const ampTotal = Number(row.amp_bytes || 0);
+      return {
+        ip: String(t[0]),
+        port: Number(t[2] || 0),
+        bytes,
+        bps: bytes * 8 / 60,
+        share: ampTotal > 0 ? bytes / ampTotal : 0,
+      };
+    }),
     ampSrcPort: mapDestPorts(asTuples(row.amp_src_ports), row.amp_src_port_count, Number(row.amp_bytes || 0)),
     destPort: mapDestPorts(asTuples(row.dest_ports), row.dest_port_count, total),
     syn: mapSyn(row.syn, asTuples),
@@ -898,12 +932,14 @@ function mapVictimShape(raw) {
 
 // Медиана этого адреса и порта за час до минуты. Считаем только когда адрес
 // уже выглядит целью: доля протокола и число источников прошли порог.
-async function loadTargetMedianBps({ scope, scopeId, minute, ip, proto, port }) {
+async function loadTargetMedianBps({ scope, scopeId, minute, ip, proto, port, clientId }) {
   const minuteTs = parseUtc(minute);
   if (!Number.isFinite(minuteTs) || !ip) return { medianBps: null, minutes: 0 };
   const dstIp = flowIpExpr(`f.${col('dstIp')}`);
+  const scopeName = String(scope || 'client');
+  const ownerId = String(clientId || '');
   const params = {
-    scope: String(scope || 'client'),
+    scope: scopeName,
     scopeId: String(scopeId),
     ip: String(ip),
     proto: Number(proto),
@@ -912,12 +948,14 @@ async function loadTargetMedianBps({ scope, scopeId, minute, ip, proto, port }) 
     to: formatCh(minuteTs),
     until: formatCh(minuteTs + EXPORT_LAG),
   };
+  if (ownerId) params.clientId = ownerId;
+  const pred = slicePred(scopeName, ownerId);
   const { rows } = await query(`
     SELECT quantileExact(0.5)(bps) AS med, count() AS n
     FROM (
       SELECT toStartOfMinute(f.time_flow_start_ns) AS mi, sum(f.${col('bytes')}) * 8 / 60 AS bps
       FROM ${flowsRawTableRef()} AS f
-      PREWHERE if({scope:String} = 'client', f.dst_client = {scopeId:String}, 1)
+      PREWHERE ${pred}
       WHERE f.date >= toDate(${utcDateTime64('from')}) - 1
         AND f.date <= toDate(${utcDateTime64('until')})
         AND f.time_flow_start_ns >= ${utcDateTime64('from')}
@@ -925,7 +963,7 @@ async function loadTargetMedianBps({ scope, scopeId, minute, ip, proto, port }) 
         AND f.${col('time')} >= ${utcDateTime64('from')}
         AND f.${col('time')} < ${utcDateTime64('until')}
         AND ${primarySourceIdsSql('f')}
-        AND ${towardPred()}
+        AND ${pred}
         AND ${dstIp} = {ip:String}
         AND f.${col('proto')} = {proto:UInt8}
         AND f.${col('dstPort')} = {port:UInt16}
@@ -940,7 +978,7 @@ async function loadTargetMedianBps({ scope, scopeId, minute, ip, proto, port }) 
   };
 }
 
-async function attachTargetFocus(investigate, { scope, scopeId, minute } = {}) {
+async function attachTargetFocus(investigate, { scope, scopeId, minute, clientId } = {}) {
   const next = investigate || emptyInvestigate();
   const candidates = (Array.isArray(next.targets) ? next.targets : [])
     .filter((row) => Number(row.share) >= TARGET_SHARE_MIN && Number(row.srcs) >= TARGET_SRCS_MIN && Number(row.bps) > 0);
@@ -954,6 +992,7 @@ async function attachTargetFocus(investigate, { scope, scopeId, minute } = {}) {
         ip: target.ip,
         proto: target.proto,
         port: target.port,
+        clientId,
       });
       const fresh = minutes === 0 || !(medianBps > 0);
       const focus = {

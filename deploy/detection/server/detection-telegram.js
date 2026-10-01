@@ -869,6 +869,15 @@ function formatSharePct(share) {
   return n < 1 ? `${n.toFixed(1)}%` : `${n.toFixed(0)}%`;
 }
 
+// В списке из пяти строк доли около 2% нельзя схлопывать в одно «2%».
+function formatFineShare(share) {
+  const n = Number(share) * 100;
+  if (!Number.isFinite(n) || n <= 0) return '';
+  if (n < 0.1) return '<0,1%';
+  if (n < 10) return `${n.toFixed(1).replace('.', ',')}%`;
+  return `${Math.round(n)}%`;
+}
+
 // Биллинг отдаёт полное имя и короткое в скобках: «Общество с ограниченной
 // ответственностью "Сторм Нетворкс" [ООО "Сторм Нетворкс" ]». В шапку берём
 // короткое — полное занимает всю строку превью в Telegram.
@@ -1234,24 +1243,63 @@ function formatSynTarget(syn, investigate, verdict, byProto) {
   return lines;
 }
 
+function ampSourcePortRows(investigate) {
+  const rows = ampSrcPortRows(investigate);
+  if (rows.length) return rows.slice(0, 5);
+  return amplifierPortsFromL4(investigate?.l4src).slice(0, 5).map((port) => ({ port }));
+}
+
 function formatAmpTarget(investigate, byProto) {
   const lines = [];
-  const ips = (Array.isArray(investigate?.ampDestIp) ? investigate.ampDestIp : []).filter((row) => row?.ip);
+  const amp = ampMetrics(byProto?.udp || {});
+  const ips = (Array.isArray(investigate?.ampDestIp) ? investigate.ampDestIp : [])
+    .filter((row) => row?.ip)
+    .slice(0, 5);
   const nets = (Array.isArray(investigate?.ampDest24) ? investigate.ampDest24 : [])
     .filter((row) => row?.net24 && Number(row.share) >= SOURCE_NET_MIN_SHARE);
-  if (ips[0] && Number(ips[0].share) >= 0.5) {
-    lines.push(`Цель: <b>${escapeHtml(ips[0].ip)}</b> — ${escapeHtml(formatSharePct(ips[0].share))} ответов`);
-  } else if (nets.length) {
-    const listed = nets.slice(0, 3).map((row) => `${row.net24} ${formatSharePct(row.share)}`.trim());
-    lines.push(escapeHtml(`Цель: сеть клиента — ${listed.join(' · ')}`));
+  const destPorts = (Array.isArray(investigate?.ampDestPort?.top) ? investigate.ampDestPort.top : [])
+    .filter((row) => Number(row?.port) > 0)
+    .slice(0, 5);
+  const srcIps = (Array.isArray(investigate?.ampSrcIp) ? investigate.ampSrcIp : [])
+    .filter((row) => row?.ip)
+    .slice(0, 5);
+  const srcPorts = ampSourcePortRows(investigate);
+
+  if (nets.length || ips.length) {
+    const where = nets.slice(0, 3).map((row) => {
+      const share = Number(row.share);
+      const pct = share > 0 && share < 0.995 ? ` ${formatFineShare(share)}` : '';
+      return `${row.net24}${pct}`;
+    });
+    const destCount = nets.reduce((sum, row) => sum + (Number(row.ips) || 0), 0);
+    const head = [
+      destCount > 0 ? ruAddresses(destCount) : '',
+      where.length ? `в ${where.join(' · ')}` : '',
+    ].filter(Boolean).join(' ');
+    lines.push(escapeHtml(`Куда: ${head || 'сеть клиента'}`));
+    for (const row of ips) lines.push(escapeHtml(`   ${row.ip} — ${formatFineShare(row.share)}`));
   }
-  const amp = ampMetrics(byProto?.udp || {});
-  const ports = ampPortsFor(investigate);
-  const bits = [];
-  if (amp.srcs > 0) bits.push(ruAddresses(amp.srcs));
-  if (ports.length) bits.push(`${ports.length > 1 ? 'порты' : 'порт'} ${ports.join(', ')}`);
-  if (amp.avgPkt > 0) bits.push(`ответы по ~${formatNumMsg(amp.avgPkt, 0)} Б`);
-  if (bits.length) lines.push(escapeHtml(`Отражатели: ${bits.join(' · ')}`));
+
+  const destPortCount = Number(investigate?.ampDestPort?.count) || destPorts.length;
+  if (destPortCount > 0) {
+    lines.push(escapeHtml(`Порты назначения: ${destPortCount}`));
+    for (const row of destPorts) lines.push(escapeHtml(`   ${row.port} — ${formatFineShare(row.share)}`));
+  }
+
+  const srcBits = [];
+  if (amp.srcs > 0) srcBits.push(ruCount(amp.srcs, ['отражатель', 'отражателя', 'отражателей']));
+  if (amp.avgPkt > 0) srcBits.push(`ответы по ~${formatNumMsg(amp.avgPkt, 0)} Б`);
+  if (srcBits.length || srcIps.length || srcPorts.length) {
+    lines.push(escapeHtml(`Откуда: ${srcBits.join(' · ') || 'отражатели'}`));
+    for (const row of srcIps) {
+      const port = Number(row.port) > 0 ? ` · порт ${row.port}` : '';
+      lines.push(escapeHtml(`   ${row.ip} — ${formatFineShare(row.share)}${port}`));
+    }
+    for (const row of srcPorts) {
+      const share = formatFineShare(row.share);
+      lines.push(escapeHtml(`   порт ${row.port}${share ? ` — ${share}` : ''}`));
+    }
+  }
   return lines;
 }
 
@@ -2827,7 +2875,7 @@ async function processDetectionAlerts({ minute, rows, nameByKey }) {
     const netFocus = isNetFocus(net, verdict);
     if (netFocus) verdict = netSpikeVerdict(net, hour);
     const target = netFocus
-      ? { scope: 'net', scopeId: net.net }
+      ? { scope: 'net', scopeId: net.net, clientId: String(row.scope_id) }
       : { scope: row.scope, scopeId: row.scope_id };
     if (verdict.needsInvestigate || verdict.kind === KINDS.benign_peak || netFocus
       || signals.includes(SIGNALS.amplification)

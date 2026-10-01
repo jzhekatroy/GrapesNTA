@@ -18,6 +18,13 @@ describe('detection-investigate SQL', () => {
     assert.doesNotMatch(src, /status != 'peak'/);
   });
 
+  it('удар в /24 читает клиента и диапазон адресов, а не всю минуту', () => {
+    assert.match(src, /f\.dst_client = \{clientId:String\} AND/);
+    assert.match(src, /BETWEEN/);
+    assert.match(src, /IPv4StringToNum\(replaceRegexpOne\(\{scopeId:String\}, '\/24\$', ''\)\)/);
+    assert.doesNotMatch(src, /PREWHERE if\(\{scope:String\} = 'client'/);
+  });
+
   it('форма адреса отдаётся массивом: пустой скалярный кортеж ClickHouse не переваривает', () => {
     assert.match(src, /victim_flow AS \(\s*SELECT groupArray\(tuple\(/);
     assert.match(src, /sum\(flow_bytes\) AS ip_bytes/);
