@@ -61,6 +61,7 @@ const config = {
   dashboardDayTable: env('CLICKHOUSE_DASHBOARD_DAY_TABLE', 'traffic_dashboard_1d'),
   protocolTable: env('CLICKHOUSE_PROTOCOL_TABLE', 'traffic_protocol_1m'),
   serviceTable: env('CLICKHOUSE_SERVICE_TABLE', 'traffic_service_1m'),
+  serviceHourTable: env('CLICKHOUSE_SERVICE_HOUR_TABLE', 'traffic_service_1h'),
   unknownPortTable: env('CLICKHOUSE_UNKNOWN_PORT_TABLE', 'traffic_unknown_port_1m'),
   countryTable: env('CLICKHOUSE_COUNTRY_TABLE', 'traffic_country_1m'),
   talkerTable: env('CLICKHOUSE_TALKER_TABLE', 'traffic_asn_1m'),
@@ -487,6 +488,10 @@ function serviceTableRef() {
   return `${qIdent(config.database)}.${qIdent(config.serviceTable)}`;
 }
 
+function serviceHourTableRef() {
+  return `${qIdent(config.database)}.${qIdent(config.serviceHourTable)}`;
+}
+
 function unknownPortTableRef() {
   return `${qIdent(config.database)}.${qIdent(config.unknownPortTable)}`;
 }
@@ -753,6 +758,7 @@ function getConfig() {
     dashboardDayTable: config.dashboardDayTable,
     protocolTable: config.protocolTable,
     serviceTable: config.serviceTable,
+    serviceHourTable: config.serviceHourTable,
     unknownPortTable: config.unknownPortTable,
     countryTable: config.countryTable,
     talkerTable: config.talkerTable,
@@ -853,6 +859,7 @@ module.exports = {
   dashboardDayTableRef,
   protocolTableRef,
   serviceTableRef,
+  serviceHourTableRef,
   unknownPortTableRef,
   countryTableRef,
   talkerTableRef,

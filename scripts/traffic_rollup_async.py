@@ -1444,6 +1444,7 @@ DEFAULT_BACKFILL_JOBS = [
     "traffic_asn_1m",
     "traffic_asn_pair_1m",
     "traffic_dashboard_1h",
+    "traffic_service_1h",
     "traffic_client_1h",
     "traffic_client_country_1h",
     "traffic_client_service_1h",

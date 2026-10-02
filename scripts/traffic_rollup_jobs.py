@@ -793,6 +793,47 @@ GROUP BY hour, source_id
         pre_delete_sql="ALTER TABLE default.traffic_dashboard_1h DELETE WHERE hour = {bucket_dt}",
     ),
     RollupJob(
+        job_id="traffic_service_1h",
+        dest_table="default.traffic_service_1h",
+        bucket_kind="hour",
+        time_column="minute",
+        source_table="default.traffic_service_1m",
+        priority=205,
+        depends_on=("traffic_service_1m",),
+        # Sum the minute service rows. Re-reading flows_raw would repeat the
+        # port-dictionary joins; an hour of traffic_service_1m is already grouped.
+        select_sql="""
+SELECT
+    toStartOfHour(minute) AS hour,
+    source_id,
+    direction,
+    proto,
+    transport,
+    service_side,
+    service_port,
+    service_code,
+    service_name,
+    category,
+    sum(bytes) AS bytes,
+    sum(packets) AS packets,
+    sum(flows_count) AS flows_count
+FROM default.traffic_service_1m
+WHERE {time_filter}
+GROUP BY
+    hour,
+    source_id,
+    direction,
+    proto,
+    transport,
+    service_side,
+    service_port,
+    service_code,
+    service_name,
+    category
+""",
+        pre_delete_sql="ALTER TABLE default.traffic_service_1h DELETE WHERE hour = {bucket_dt}",
+    ),
+    RollupJob(
         job_id="traffic_asn_1h",
         dest_table="default.traffic_asn_1h",
         bucket_kind="hour",

@@ -9,6 +9,7 @@ const {
   dashboardDayTableRef,
   protocolTableRef,
   serviceTableRef,
+  serviceHourTableRef,
   unknownPortTableRef,
   countryTableRef,
   talkerTableRef,
@@ -615,20 +616,64 @@ function resolveServiceWindow({ range = '24h', from, to } = {}) {
   };
 }
 
-/** L7 service distribution by bytes from traffic_service_1m. */
+function serviceUsesHourRollup({ range = '24h', from, to } = {}) {
+  if (range === '24h' || MEDIUM_RANGE_INTERVALS[range] || EXTENDED_RANGE_INTERVALS[range]) return true;
+  if (range === 'custom') return customRangeDurationMs(from, to) >= ONE_DAY_MS;
+  return false;
+}
+
+function serviceHourBoundsCte() {
+  return `
+    (SELECT max(hour) FROM ${serviceHourTableRef()}) AS rolled_hour,
+    toStartOfHour(ts_from + INTERVAL 1 HOUR - INTERVAL 1 SECOND) AS hour_from,
+    toStartOfHour(ts_to) AS hour_to,
+    if(rolled_hour IS NULL, ts_from, rolled_hour + INTERVAL 1 HOUR) AS rolled_end`;
+}
+
+function serviceFactFrom(useHour) {
+  if (!useHour) return `${serviceTableRef()} AS t`;
+  const cols = 'source_id, direction, service_code, service_name, category, bytes, packets, flows_count';
+  return `(
+    SELECT ${cols}, hour AS bucket_time
+    FROM ${serviceHourTableRef()}
+    WHERE hour >= hour_from AND hour < hour_to AND hour < rolled_end
+    UNION ALL
+    SELECT ${cols}, toStartOfHour(minute) AS bucket_time
+    FROM ${serviceTableRef()}
+    WHERE minute >= ts_from AND minute < hour_from
+    UNION ALL
+    SELECT ${cols}, toStartOfHour(minute) AS bucket_time
+    FROM ${serviceTableRef()}
+    WHERE minute >= greatest(hour_from, rolled_end) AND minute < ts_to
+  ) AS t`;
+}
+
+function serviceFactFilter(useHour, scope, dirsSql) {
+  const time = useHour ? '' : `
+        AND minute >= ts_from
+        AND minute < ts_to`;
+  return `
+        ${scope}${time}
+        AND direction IN (${dirsSql})`;
+}
+
+function serviceCteHead(windowSpec, useHour) {
+  let cteHead = windowSpec.cteHead.trim().replace(/,\s*$/, '');
+  if (useHour) cteHead += `,${serviceHourBoundsCte()}`;
+  return cteHead;
+}
+
+/** L7 service distribution. Windows of 24h and longer read traffic_service_1h. */
 function serviceDistribution({ range = '24h', from, to, directions, collectorId } = {}) {
   const collectorScope = parseCollectorScopes(collectorId);
   const windowSpec = resolveServiceWindow({ range, from, to });
-  const serviceTable = serviceTableRef();
+  const useHour = serviceUsesHourRollup({ range, from, to });
+  const serviceFrom = serviceFactFrom(useHour);
   const sourcesTable = sourcesTableRef();
   const dirsSql = protocolDirectionsInSql(directions);
   const scope = sourcesScopeSql(collectorScope, 'src');
-  const filter = `
-        ${scope}
-        AND minute >= ts_from
-        AND minute < ts_to
-        AND direction IN (${dirsSql})`;
-  const cteHead = windowSpec.cteHead.trim().replace(/,\s*$/, '');
+  const filter = serviceFactFilter(useHour, scope, dirsSql);
+  const cteHead = serviceCteHead(windowSpec, useHour);
 
   return {
     sql: `
@@ -654,7 +699,7 @@ function serviceDistribution({ range = '24h', from, to, directions, collectorId 
           sum(t.bytes) AS slice_bytes,
           sum(t.packets) AS slice_packets,
           sum(t.flows_count) AS slice_flows
-        FROM ${serviceTable} AS t
+        FROM ${serviceFrom}
         INNER JOIN ${sourcesTable} AS src
           ON t.source_id = src.source_id
         WHERE
@@ -664,7 +709,7 @@ function serviceDistribution({ range = '24h', from, to, directions, collectorId 
       CROSS JOIN
       (
         SELECT sum(t.bytes) AS total_bytes
-        FROM ${serviceTable} AS t
+        FROM ${serviceFrom}
         INNER JOIN ${sourcesTable} AS src
           ON t.source_id = src.source_id
         WHERE
@@ -934,18 +979,17 @@ function protocolDistributionTimeseries({ range = '24h', from, to, directions, c
 function serviceDistributionTimeseries({ range = '24h', from, to, directions, collectorId } = {}) {
   const collectorScope = parseCollectorScopes(collectorId);
   const windowSpec = resolveServiceWindow({ range, from, to });
+  const useHour = serviceUsesHourRollup({ range, from, to });
   const mode = resolveServiceWindowMode({ range, from, to });
-  const { bucketExpr, bucketSeconds } = categoryBucketFromWindowMode(mode);
-  const serviceTable = serviceTableRef();
+  const { bucketExpr, bucketSeconds } = useHour
+    ? { bucketExpr: 't.bucket_time', bucketSeconds: 3600 }
+    : categoryBucketFromWindowMode(mode);
+  const serviceFrom = serviceFactFrom(useHour);
   const sourcesTable = sourcesTableRef();
   const dirsSql = protocolDirectionsInSql(directions);
   const scope = sourcesScopeSql(collectorScope, 'src');
-  const filter = `
-        ${scope}
-        AND minute >= ts_from
-        AND minute < ts_to
-        AND direction IN (${dirsSql})`;
-  const cteHead = windowSpec.cteHead.trim().replace(/,\s*$/, '');
+  const filter = serviceFactFilter(useHour, scope, dirsSql);
+  const cteHead = serviceCteHead(windowSpec, useHour);
 
   return {
     sql: `
@@ -957,7 +1001,7 @@ function serviceDistributionTimeseries({ range = '24h', from, to, directions, co
             if(t.service_code = 'unknown', 'other', t.service_code) AS service_code,
             if(t.service_code = 'unknown', 'Other', argMax(t.service_name, t.bytes)) AS service_name,
             sum(t.bytes) AS total_bytes
-          FROM ${serviceTable} AS t
+          FROM ${serviceFrom}
           INNER JOIN ${sourcesTable} AS src
             ON t.source_id = src.source_id
           WHERE
@@ -986,7 +1030,7 @@ function serviceDistributionTimeseries({ range = '24h', from, to, directions, co
             'other'
           ) AS category_key,
           sum(t.bytes) AS slice_bytes
-        FROM ${serviceTable} AS t
+        FROM ${serviceFrom}
         INNER JOIN ${sourcesTable} AS src
           ON t.source_id = src.source_id
         WHERE

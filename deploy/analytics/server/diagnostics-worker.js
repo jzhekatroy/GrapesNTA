@@ -40,6 +40,7 @@ const ACTIVE_TRAFFIC_JOBS = [
   'traffic_service_1m',
   'traffic_unknown_port_1m',
   'traffic_dashboard_1h',
+  'traffic_service_1h',
   'traffic_client_1h',
   'traffic_client_country_1h',
   'traffic_client_service_1h',
