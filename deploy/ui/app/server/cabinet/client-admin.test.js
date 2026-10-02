@@ -103,6 +103,24 @@ test('clientSource marks ERP clients by id prefix', () => {
   assert.equal(isErpClientId('client:demo'), false);
 });
 
+test('getClientAdmin считает пользователей одного клиента и не тянет весь список', async () => {
+  resetCalls();
+  const { getClientAdmin } = require('./client-admin');
+  queryResults.push(
+    { rows: [{ client_id: 'client:demo', display_name: 'Demo', comment: '', bind_mode: 'prefixes', enabled: 1 }] },
+    { rows: [{ count: 3 }] },
+    { rows: [{ count: 0 }] },
+    { rows: [{ count: 2 }] },
+  );
+  const row = await getClientAdmin('client:demo');
+  assert.equal(row.prefixCount, 3);
+  assert.equal(row.userCount, 2);
+  const names = calls.map((c) => c.opts?.name);
+  assert.ok(!names.includes('cabinet/clients-list'), names.join(', '));
+  const users = calls.find((c) => c.opts?.name === 'cabinet/client-user-count');
+  assert.equal(users.params.clientId, 'client:demo');
+});
+
 test('updateClient keeps ERP displayName from catalog', async () => {
   resetCalls();
   queryResults.push(

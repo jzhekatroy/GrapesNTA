@@ -196,6 +196,7 @@ function createChClient(username, password, requestTimeoutMs = config.requestTim
     password,
     database: config.database,
     request_timeout: requestTimeoutMs,
+    compression: { response: true },
     clickhouse_settings: settings,
   });
 }

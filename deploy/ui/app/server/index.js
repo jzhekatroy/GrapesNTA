@@ -4,6 +4,7 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const express = require('express');
+const compression = require('compression');
 const { ping, query, getConfig, ensureFlowsRawSchema } = require('./clickhouse');
 const { logApiIncoming, logApiDone, logApiError, getLogConfig } = require('./logger');
 const { runWithRequestContext, getRequestContext } = require('./request-context');
@@ -265,6 +266,7 @@ const TRUST_PROXY = envBool('TRUST_PROXY', false);
 
 if (TRUST_PROXY) app.set('trust proxy', 1);
 
+app.use(compression());
 app.use(express.json({ limit: '256kb' }));
 
 app.use((req, res, next) => {

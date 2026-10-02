@@ -360,15 +360,33 @@ async function listClients() {
   return { data: rows.map(mapClientRow), meta: { elapsedMs, rows: rows.length } };
 }
 
+async function countActiveUsers(clientId) {
+  const { rows } = await query(
+    `
+      SELECT count() AS count
+      FROM (
+        SELECT
+          argMax(client_id, updated_at) AS client_id,
+          argMax(is_active, updated_at) AS is_active
+        FROM ${config.database}.${config.usersTable}
+        GROUP BY id
+      )
+      WHERE client_id = {clientId:String} AND is_active = 1
+    `,
+    { clientId: String(clientId) },
+    { name: 'cabinet/client-user-count' },
+  );
+  return Number(rows[0]?.count) || 0;
+}
+
 async function getClientAdmin(clientId, { useWrite = false } = {}) {
   const row = await fetchLatestClient(clientId, { useWrite });
   if (!row) return null;
-  const [prefixCount, portCount, list] = await Promise.all([
+  const [prefixCount, portCount, userCount] = await Promise.all([
     countEnabledPrefixes(clientId),
     countEnabledPorts(clientId),
-    listClients(),
+    countActiveUsers(clientId),
   ]);
-  const userCount = (list.data.find((c) => c.clientId === String(clientId)) || {}).userCount || 0;
   return mapClientRow({
     ...row,
     prefix_count: prefixCount,
