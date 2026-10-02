@@ -1382,7 +1382,7 @@ describe('detection-telegram', () => {
     assert.equal(heaviestHotMinute(history, 1.6, 3).minute, '2026-09-22 16:21:00');
   });
 
-  it('служебные метрики минуты (энтропия, порты на IP) в алерт не попадают', () => {
+  it('метрики минуты: энтропия портов и CV пакета по всему трафику, порты на IP — нет', () => {
     const text = formatAlertMessage({
       name: '82035',
       scope: 'client',
@@ -1390,7 +1390,7 @@ describe('detection-telegram', () => {
       minute: '2026-09-22 16:27:00',
       threshold: 1.6,
       byProto: {
-        all: { bps: 1.63e9, growth_bps: 1.73 },
+        all: { bps: 1.63e9, growth_bps: 1.73, port_entropy: 7.775, cv_percent: 50.3 },
         udp: {
           bps: 928e6,
           growth_bps: 1.68,
@@ -1402,8 +1402,8 @@ describe('detection-telegram', () => {
       },
       verdict: { kind: 'benign_peak', reason: 'объём в пределах часа' },
     });
-    assert.doesNotMatch(text, /энтропия|портов\/IP|CV:/);
-    assert.match(text, /Метрики минуты\nВесь трафик клиента: 1\.63 Гбит\/с\nUDP 57%$/);
+    assert.doesNotMatch(text, /портов\/IP|CV:/);
+    assert.match(text, /Метрики минуты\nВесь трафик клиента: 1\.63 Гбит\/с\nUDP 57%\nЭнтропия портов 7,78 бит · CV пакета 50%$/);
   });
 
   it('в шапке есть цель, которая выросла к своему часу', () => {

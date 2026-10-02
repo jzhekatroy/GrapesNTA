@@ -1399,6 +1399,12 @@ function formatMetricsLines(mode, { byProto, verdict, investigate, binding, scop
   if (bps > 0 && Number(udp.bps) > 0) split.push(`UDP ${formatSharePct(Number(udp.bps) / bps)}`);
   if (Number(all.avg_packet_bytes) > 0) split.push(`средний пакет ${formatNumMsg(all.avg_packet_bytes, 0)} Б`);
   if (split.length) lines.push(escapeHtml(split.join(' · ')));
+  const shape = [];
+  const entropy = finiteGrowth(all.port_entropy ?? all.portEntropy);
+  if (entropy != null) shape.push(`Энтропия портов ${entropy.toFixed(2).replace('.', ',')} бит`);
+  const cv = finiteGrowth(all.cv_percent ?? all.cvPercent);
+  if (cv != null && cv > 0) shape.push(`CV пакета ${cv.toFixed(0)}%`);
+  if (shape.length) lines.push(escapeHtml(shape.join(' · ')));
   if (mode === 'syn' && syn.pps > 0) {
     const bits = [];
     if (syn.avgPkt > 0) bits.push(`пакет ${formatNumMsg(syn.avgPkt, 0)} Б`);
