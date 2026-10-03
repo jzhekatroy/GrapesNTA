@@ -7,14 +7,14 @@
 
 CREATE OR REPLACE VIEW default.net_isp_prefix_dict_src AS
 SELECT
-    prefix,
-    min(entity_id) AS entity_id
-FROM default.net_l3_prefixes_enabled
-WHERE family = 4
-  AND role = 'provider_public'
-  AND prefix != ''
-  AND entity_id != ''
-GROUP BY prefix;
+    p.prefix AS prefix,
+    min(p.entity_id) AS entity_id
+FROM default.net_l3_prefixes_enabled AS p
+WHERE p.family = 4
+  AND p.role = 'provider_public'
+  AND p.prefix != ''
+  AND p.entity_id != ''
+GROUP BY p.prefix;
 
 -- Срок жизни короткий: новые префиксы подхватываются без SYSTEM RELOAD,
 -- которого у пользователя интерфейса нет.
