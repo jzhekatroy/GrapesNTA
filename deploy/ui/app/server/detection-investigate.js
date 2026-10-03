@@ -1,6 +1,6 @@
 'use strict';
 
-const { query, config, flowsRawTableRef, netInterfacesCurrentRef, clientsViewRef, col, flowCol, asnNamesTableRef } = require('./clickhouse');
+const { query, config, flowsRawTableRef, netInterfacesCurrentRef, clientsViewRef, l3PrefixesViewRef, col, flowCol, asnNamesTableRef, ispPrefixLookupSql } = require('./clickhouse');
 const { flowIpExpr, flowSamplerIpExpr, sflowIfIndexExpr, primarySourceIdsSql, primaryClientSourceSql } = require('./queries');
 const { AMPLIFIER_PORTS } = require('./detection-signals');
 const { isTargetFocus, TARGET_SHARE_MIN, TARGET_SRCS_MIN } = require('./detection-classify');
@@ -146,7 +146,7 @@ async function loadHourEnvelope({ scope, scopeId, minute }) {
     return { p95: null, p999: null, recentMedian: null };
   }
   const params = {
-    scope: scope === 'client' ? 'client' : 'net',
+    scope: scope === 'client' || scope === 'provider' ? scope : 'net',
     scopeId: String(scopeId),
     minute: formatCh(minuteTs),
     days: BASELINE_DAYS,
@@ -185,7 +185,7 @@ async function loadHourEnvelope({ scope, scopeId, minute }) {
       quantileExactIf(0.999)(bps, minute < ${cutoff}) AS p999,
       ${recentMedianSql('bps')} AS recent_median
     FROM ${tableRef()}
-    WHERE scope = 'net'
+    WHERE scope = {scope:String}
       AND scope_id = {scopeId:String}
       AND proto = 'all'
       AND minute >= ${utcDateTime('minute')} - INTERVAL {days:UInt16} DAY
@@ -283,6 +283,27 @@ async function loadClientBinding(scopeId) {
   }
 }
 
+async function loadProviderBinding(entityId) {
+  const id = String(entityId || '');
+  if (!id) return emptyBinding();
+  try {
+    const { rows } = await query(`
+      SELECT prefix
+      FROM ${l3PrefixesViewRef()}
+      WHERE family = 4 AND role = 'provider_public' AND entity_id = {id:String}
+      ORDER BY prefix
+      LIMIT 6
+    `, { id }, { name: 'detection/provider-prefixes', requestTimeoutMs: 8000 });
+    return {
+      bindMode: 'prefixes',
+      prefixes: rows.map((p) => String(p.prefix || '')).filter(Boolean),
+      ports: [],
+    };
+  } catch {
+    return emptyBinding();
+  }
+}
+
 function formatClientMarkup(binding) {
   if (!binding) return '';
   if (binding.bindMode === 'ports' && binding.ports?.length) {
@@ -310,10 +331,16 @@ function netRangePred() {
   return `${family}${addr} BETWEEN ${base} AND ${base} + 255`;
 }
 
-function slicePred(scope, clientId) {
+function slicePred(scope, clientId, parentScope) {
   if (scope === 'net') {
     const range = netRangePred();
+    if (parentScope === 'provider' && clientId) {
+      return `${ispPrefixLookupSql(`f.${col('dstIp')}`)} = {clientId:String} AND ${range}`;
+    }
     return clientId ? `f.dst_client = {clientId:String} AND ${range}` : range;
+  }
+  if (scope === 'provider') {
+    return `${ispPrefixLookupSql(`f.${col('dstIp')}`)} = {scopeId:String}`;
   }
   return `f.dst_client = {scopeId:String}`;
 }
@@ -339,7 +366,7 @@ function timeFilterSql() {
   `;
 }
 
-function evCte(scope, clientId) {
+function evCte(scope, clientId, parentScope) {
   const srcIp = flowIpExpr(`f.${col('srcIp')}`);
   const dstIp = flowIpExpr(`f.${col('dstIp')}`);
   const protoCol = `f.${col('proto')}`;
@@ -355,7 +382,7 @@ function evCte(scope, clientId) {
   const switchIp = flowSamplerIpExpr(`f.${samplerCol}`);
   const inIdx = sflowIfIndexExpr(`f.${inIfCol}`);
   const outIdx = sflowIfIndexExpr(`f.${outIfCol}`);
-  const pred = slicePred(scope, clientId);
+  const pred = slicePred(scope, clientId, parentScope);
   return `
     SELECT
       ${srcIp} AS src_ip,
@@ -461,7 +488,7 @@ function mapSwitch(row, total) {
  * One PREWHERE on dst_client, and for a /24 also on that address range.
  * Aggregations run on the already-narrow slice — not a full-minute scan.
  */
-async function investigateIncident({ scope, scopeId, minute, clientId } = {}) {
+async function investigateIncident({ scope, scopeId, minute, clientId, parentScope } = {}) {
   const minuteTs = parseUtc(minute);
   if (!Number.isFinite(minuteTs)) return emptyInvestigate();
   const bounds = minuteBounds(minuteTs);
@@ -474,7 +501,7 @@ async function investigateIncident({ scope, scopeId, minute, clientId } = {}) {
   };
   if (ownerId) params.clientId = ownerId;
   const opts = { name: 'detection/investigate', clickhouse_settings: CHEAP, requestTimeoutMs: 35000 };
-  const ev = evCte(scopeName, ownerId);
+  const ev = evCte(scopeName, ownerId, parentScope);
   const ifaces = netInterfacesCurrentRef();
 
   // groupArray lives inside each CTE, not around it: 24.8 inlines WITH
@@ -932,7 +959,7 @@ function mapVictimShape(raw) {
 
 // Медиана этого адреса и порта за час до минуты. Считаем только когда адрес
 // уже выглядит целью: доля протокола и число источников прошли порог.
-async function loadTargetMedianBps({ scope, scopeId, minute, ip, proto, port, clientId }) {
+async function loadTargetMedianBps({ scope, scopeId, minute, ip, proto, port, clientId, parentScope }) {
   const minuteTs = parseUtc(minute);
   if (!Number.isFinite(minuteTs) || !ip) return { medianBps: null, minutes: 0 };
   const dstIp = flowIpExpr(`f.${col('dstIp')}`);
@@ -949,7 +976,7 @@ async function loadTargetMedianBps({ scope, scopeId, minute, ip, proto, port, cl
     until: formatCh(minuteTs + EXPORT_LAG),
   };
   if (ownerId) params.clientId = ownerId;
-  const pred = slicePred(scopeName, ownerId);
+  const pred = slicePred(scopeName, ownerId, parentScope);
   const { rows } = await query(`
     SELECT quantileExact(0.5)(bps) AS med, count() AS n
     FROM (
@@ -978,7 +1005,7 @@ async function loadTargetMedianBps({ scope, scopeId, minute, ip, proto, port, cl
   };
 }
 
-async function attachTargetFocus(investigate, { scope, scopeId, minute, clientId } = {}) {
+async function attachTargetFocus(investigate, { scope, scopeId, minute, clientId, parentScope } = {}) {
   const next = investigate || emptyInvestigate();
   const candidates = (Array.isArray(next.targets) ? next.targets : [])
     .filter((row) => Number(row.share) >= TARGET_SHARE_MIN && Number(row.srcs) >= TARGET_SRCS_MIN && Number(row.bps) > 0);
@@ -993,6 +1020,7 @@ async function attachTargetFocus(investigate, { scope, scopeId, minute, clientId
         proto: target.proto,
         port: target.port,
         clientId,
+        parentScope,
       });
       const fresh = minutes === 0 || !(medianBps > 0);
       const focus = {
@@ -1015,7 +1043,9 @@ module.exports = {
   loadHourEnvelope,
   loadForeignEnvelopes,
   loadClientBinding,
+  loadProviderBinding,
   formatClientMarkup,
+  slicePred,
   investigateIncident,
   attachTargetFocus,
   mapVictimShape,

@@ -537,6 +537,11 @@ function actionFor(verdict, investigate) {
     return `резать входящий ${proto} на ${formatHostPort(victim.ip, port)}`;
   }
   if (kind === KINDS.carpet) {
+    const portCount = num(investigate?.destPort?.count) || 0;
+    const topShare = num(investigate?.destPort?.top?.[0]?.share) || 0;
+    if (portCount > 8 || (portCount > 1 && topShare < 0.2)) {
+      return 'резать входящий UDP на префиксы клиента, порты случайные — по порту не резать';
+    }
     const l4 = formatL4Sources(investigate?.l4src);
     return l4 !== '—'
       ? `фильтр по сети клиента, вход ${l4}`

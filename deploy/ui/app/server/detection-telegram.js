@@ -17,7 +17,7 @@ const {
   isUsableVictim,
   volumeStillHigh,
 } = require('./detection-classify');
-const { loadHourEnvelope, loadClientBinding, formatClientMarkup, investigateIncident, attachTargetFocus, emptyInvestigate } = require('./detection-investigate');
+const { loadHourEnvelope, loadClientBinding, loadProviderBinding, formatClientMarkup, investigateIncident, attachTargetFocus, emptyInvestigate } = require('./detection-investigate');
 const { loadThresholdMap, resolveGrowthThreshold, hasGrowthOverride } = require('./detection-thresholds');
 const {
   SIGNALS,
@@ -49,6 +49,8 @@ const DEFAULT_ALERT_SCOPE = 'all';
 const DEFAULT_ALERT_KIND = 'all';
 const DEFAULT_STREAK = 3;
 const DEFAULT_NORMALIZE_STREAK = 3;
+const DEFAULT_VOLUME_WINDOW = 6;
+const DEFAULT_VOLUME_QUIET = 10;
 const DEFAULT_TELEGRAM_API_URL = 'https://api.telegram.org';
 const DEFAULT_MIN_CLIENT_SHARE_PCT = 10;
 const TELEGRAM_SKIP_BELOW_SHARE = 'below_client_share';
@@ -146,6 +148,8 @@ const DEFAULT_SETTINGS = {
   alert_kind: DEFAULT_ALERT_KIND,
   streak: DEFAULT_STREAK,
   normalize_streak: DEFAULT_NORMALIZE_STREAK,
+  volume_hot_window: DEFAULT_VOLUME_WINDOW,
+  volume_quiet_streak: DEFAULT_VOLUME_QUIET,
   api_url: DEFAULT_TELEGRAM_API_URL,
   proxy_url: '',
   enabled: 0,
@@ -460,6 +464,8 @@ function mapSettings(row = {}) {
     alertKind: normalizeAlertKind(row.alert_kind),
     streak: normalizeStreak(row.streak),
     normalizeStreak: normalizeStreak(row.normalize_streak, DEFAULT_NORMALIZE_STREAK),
+    volumeWindow: normalizeStreak(row.volume_hot_window, DEFAULT_VOLUME_WINDOW),
+    volumeQuiet: normalizeStreak(row.volume_quiet_streak, DEFAULT_VOLUME_QUIET),
     apiUrl: (() => {
       try {
         return normalizeTelegramApiUrl(row.api_url);
@@ -538,10 +544,18 @@ function signalSettings(settings = {}, signal = SIGNALS.volume) {
       normalizeStreak: NET_NORMALIZE_STREAK,
     };
   }
+  const streak = normalizeStreak(settings.streak, DEFAULT_STREAK);
+  const window = settings.volumeWindow != null || settings.volume_hot_window != null
+    ? normalizeStreak(settings.volumeWindow ?? settings.volume_hot_window, DEFAULT_VOLUME_WINDOW)
+    : streak;
+  const quiet = settings.volumeQuiet != null || settings.volume_quiet_streak != null
+    ? normalizeStreak(settings.volumeQuiet ?? settings.volume_quiet_streak, DEFAULT_VOLUME_QUIET)
+    : normalizeStreak(settings.normalizeStreak, DEFAULT_NORMALIZE_STREAK);
   return {
     enabled: true,
-    streak: normalizeStreak(settings.streak, DEFAULT_STREAK),
-    normalizeStreak: normalizeStreak(settings.normalizeStreak, DEFAULT_NORMALIZE_STREAK),
+    streak,
+    window: Math.max(streak, window),
+    normalizeStreak: quiet,
   };
 }
 
@@ -575,7 +589,8 @@ function isSignalHot(signal, row, group, threshold, settings = {}) {
     return evaluateForeignGeo(row).hit;
   }
   if (signal === SIGNALS.net_spike) {
-    return String(row?.scope || group?.scope || '') === 'client' && isNetSpikeHit(row);
+    const scope = String(row?.scope || group?.scope || '');
+    return (scope === 'client' || scope === 'provider') && isNetSpikeHit(row);
   }
   return isAboveGrowthThreshold(row, threshold);
 }
@@ -617,28 +632,76 @@ function isAboveGrowthThreshold(row, threshold) {
   return (gBps != null && gBps >= t) || (gPps != null && gPps >= t);
 }
 
-function shouldSendAlert(historyNewestFirst, threshold, streak = DEFAULT_STREAK, enabledAtMs) {
-  const need = normalizeStreak(streak);
+function rowsInWindow(historyNewestFirst, windowSize) {
+  const history = Array.isArray(historyNewestFirst) ? historyNewestFirst : [];
+  const win = normalizeStreak(windowSize);
+  if (!history.length) return [];
+  const newest = parseUtc(history[0]?.minute);
+  if (!Number.isFinite(newest)) return history.slice(0, win);
+  const from = newest - (win - 1) * MINUTE;
+  const out = [];
+  for (const row of history) {
+    const ts = parseUtc(row?.minute);
+    if (!Number.isFinite(ts) || ts < from) break;
+    out.push(row);
+  }
+  return out;
+}
+
+function windowQualifies(historyNewestFirst, threshold, need, windowSize) {
   const history = Array.isArray(historyNewestFirst) ? historyNewestFirst : [];
   if (!history.length || !isAboveGrowthThreshold(history[0], threshold)) return false;
-  if (history.length < need) return false;
-  const window = history.slice(0, need);
-  if (!window.every((row) => isAboveGrowthThreshold(row, threshold))) return false;
-  const before = history[need];
-  if (!before) return true;
-  if (!isAboveGrowthThreshold(before, threshold)) return true;
+  let hot = 0;
+  for (const row of rowsInWindow(history, windowSize)) {
+    if (isAboveGrowthThreshold(row, threshold)) hot += 1;
+  }
+  return hot >= need;
+}
+
+function shouldSendAlert(historyNewestFirst, threshold, streak = DEFAULT_STREAK, enabledAtMs, windowSize) {
+  const need = normalizeStreak(streak);
+  const win = normalizeStreak(windowSize, need);
+  const history = Array.isArray(historyNewestFirst) ? historyNewestFirst : [];
+  if (win <= need) {
+    if (!history.length || !isAboveGrowthThreshold(history[0], threshold)) return false;
+    if (history.length < need) return false;
+    const slice = history.slice(0, need);
+    if (!slice.every((row) => isAboveGrowthThreshold(row, threshold))) return false;
+    const before = history[need];
+    if (!before) return true;
+    if (!isAboveGrowthThreshold(before, threshold)) return true;
+    if (enabledAtMs) {
+      const beforeTs = parseUtc(before.minute);
+      if (Number.isFinite(beforeTs) && beforeTs < enabledAtMs) return true;
+    }
+    return false;
+  }
+  if (!windowQualifies(history, threshold, need, win)) return false;
+  // Фронт сравниваем с прошлой горячей минутой: тихая минута между импульсами
+  // не должна открывать атаку заново.
+  const prevHot = history.findIndex((row, i) => i > 0 && isAboveGrowthThreshold(row, threshold));
+  if (prevHot < 0) return true;
+  const prev = history.slice(prevHot);
+  const newestTs = parseUtc(history[0]?.minute);
+  const prevTs = parseUtc(prev[0]?.minute);
+  if (Number.isFinite(newestTs) && Number.isFinite(prevTs) && newestTs - prevTs > win * MINUTE) return true;
+  if (!windowQualifies(prev, threshold, need, win)) return true;
   if (enabledAtMs) {
-    const beforeTs = parseUtc(before.minute);
-    if (Number.isFinite(beforeTs) && beforeTs < enabledAtMs) return true;
+    const oldest = rowsInWindow(prev, win).at(-1);
+    const oldestTs = parseUtc(oldest?.minute);
+    if (Number.isFinite(oldestTs) && oldestTs < enabledAtMs) return true;
   }
   return false;
 }
 
 // Серия из нескольких минут открывается на последней, а атака часто уже
 // схлынула. Вердикт и цель берём по минуте с самым большим ростом bps.
-function heaviestHotMinute(historyNewestFirst, threshold, streak = DEFAULT_STREAK) {
+function heaviestHotMinute(historyNewestFirst, threshold, streak = DEFAULT_STREAK, windowSize) {
   const need = normalizeStreak(streak);
-  const history = (Array.isArray(historyNewestFirst) ? historyNewestFirst : []).slice(0, need);
+  const win = normalizeStreak(windowSize, need);
+  const history = win > need
+    ? rowsInWindow(historyNewestFirst, win)
+    : (Array.isArray(historyNewestFirst) ? historyNewestFirst : []).slice(0, need);
   let best = null;
   let bestGrowth = null;
   for (const row of history) {
@@ -1105,11 +1168,19 @@ function alertTitle(mode, { byProto, investigate, verdict }) {
   return 'Рост трафика выше порога';
 }
 
+function providerLabel(scopeId, name) {
+  const raw = String(name || scopeId || '').trim().replace(/^isp:/i, '');
+  return raw || String(scopeId || '').replace(/^isp:/i, '');
+}
+
 function formatAlertWho(scope, scopeId, name) {
   const shortName = shortClientName(name);
   const named = shortName && shortName !== scopeId ? shortName : '';
   if (scope === 'net') {
     return `сеть <b>${escapeHtml(scopeId)}</b>${named ? ` · ${escapeHtml(named)}` : ''}`;
+  }
+  if (scope === 'provider') {
+    return `провайдер <b>${escapeHtml(providerLabel(scopeId, named || name))}</b>`;
   }
   return `${named ? `<b>${escapeHtml(named)}</b> · ` : ''}ID <b>${escapeHtml(scopeId)}</b>`;
 }
@@ -1322,7 +1393,7 @@ function formatPeakReason(investigate, verdict, byProto) {
   return lines;
 }
 
-function formatNetExtra(byProto, verdict) {
+function formatNetExtra(byProto, verdict, scope) {
   const all = byProto?.all || {};
   const lines = [];
   const net = netSpikeMetrics(all);
@@ -1338,13 +1409,43 @@ function formatNetExtra(byProto, verdict) {
     const note = ratio < HOUR_RATIO_PEAK
       ? 'на общем объёме удар почти не заметен'
       : `в ${formatTimes(ratio)} больше обычного`;
-    lines.push(escapeHtml(`Весь клиент: ${formatBpsMsg(bps)} — ${note}`));
+    const who = scope === 'provider' ? 'Весь провайдер' : 'Весь клиент';
+    lines.push(escapeHtml(`${who}: ${formatBpsMsg(bps)} — ${note}`));
   }
   return lines;
 }
 
+function formatCutLine({ byProto, investigate, binding, scope, scopeId, mode, verdict }) {
+  if (mode === 'amp' || mode === 'syn' || mode === 'geo') return '';
+  if (scope !== 'provider' && mode !== 'carpet') return '';
+  if (mode === 'peak' && isLegitimatePeak(verdict)) return '';
+  const all = byProto?.all || {};
+  const udp = byProto?.udp || {};
+  const bps = Number(all.bps) || 0;
+  const udpShare = bps > 0 ? Number(udp.bps || 0) / bps : 0;
+  if (udpShare < 0.6) return '';
+  const pkt = Math.round(Number(all.avg_packet_bytes ?? all.avgPacketBytes) || 0);
+  const portCount = Number(investigate?.destPort?.count) || 0;
+  const topPort = investigate?.destPort?.top?.[0];
+  const topShare = Number(topPort?.share) || 0;
+  const scattered = portCount > 8 || (portCount > 1 && topShare < 0.2);
+  const prefixes = (Array.isArray(binding?.prefixes) ? binding.prefixes : [])
+    .map((prefix) => String(prefix || '').trim())
+    .filter(Boolean)
+    .slice(0, 6);
+  let where = 'на сеть клиента';
+  if (prefixes.length) where = `на ${prefixes.join(', ')}`;
+  else if (scope === 'provider') where = 'на сети провайдера';
+  else if (scope === 'net' && scopeId) where = `на ${scopeId}`;
+  const size = pkt > 0 ? `, пакет около ${pkt} Б` : '';
+  let ports = '';
+  if (scattered) ports = '. Порты случайные, по порту не резать';
+  else if (topPort && Number(topPort.port) > 0 && topShare >= 0.5) ports = `, порт ${topPort.port}`;
+  return `Резать: входящий UDP${size}, ${where}${ports}`;
+}
+
 function formatTargetLines(mode, ctx) {
-  const { byProto, verdict, investigate, syn } = ctx;
+  const { byProto, verdict, investigate, syn, scope } = ctx;
   if (investigate?.error && mode !== 'syn') {
     return [`Цель: не удалось разобрать (${escapeHtml(shortErrorMsg(investigate.error))})`];
   }
@@ -1359,7 +1460,8 @@ function formatTargetLines(mode, ctx) {
     const scale = [];
     if (Number(totals.dstIpCount) > 0) scale.push(ruAddresses(totals.dstIpCount));
     if (Number(totals.dstNetCount) > 1) scale.push(ruNets24(totals.dstNetCount));
-    lines.push(escapeHtml(`Цель: сеть клиента, не один сервер${scale.length ? ` — ${scale.join(' · ')}` : ''}`));
+    const of = scope === 'provider' ? 'сети провайдера' : 'сеть клиента';
+    lines.push(escapeHtml(`Цель: ${of}, не один сервер${scale.length ? ` — ${scale.join(' · ')}` : ''}`));
     for (const row of (Array.isArray(investigate?.dest24) ? investigate.dest24 : []).filter((r) => r?.net24).slice(0, 3)) {
       lines.push(escapeHtml(`   ${row.net24} — ${formatSharePct(row.share)}`));
     }
@@ -1373,8 +1475,10 @@ function formatTargetLines(mode, ctx) {
   const victim = investigate?.victim;
   const shape = mode !== 'carpet' && isUsableVictim(victim) ? victimShapeFor(victim, investigate) : null;
   lines.push(...formatAttackSourceLines(investigate, shape));
-  if (mode === 'net') lines.push(...formatNetExtra(byProto, verdict));
+  if (mode === 'net') lines.push(...formatNetExtra(byProto, verdict, scope));
   if (mode === 'volumetric' || mode === 'generic') lines.push(...formatFocusLines(investigate));
+  const cut = formatCutLine({ ...ctx, mode });
+  if (cut) lines.push(escapeHtml(cut));
   return lines;
 }
 
@@ -1393,7 +1497,8 @@ function formatMetricsLines(mode, { byProto, verdict, investigate, binding, scop
       ? `${formatPpsMsg(pps)}${growthPps != null && growthPps >= HOUR_RATIO_PEAK ? ` (×${growthPps.toFixed(1).replace('.', ',')})` : ''}`
       : '',
   ].filter(Boolean);
-  lines.push(escapeHtml(`Весь трафик${scope === 'net' ? '' : ' клиента'}: ${total.join(' · ')}`));
+  const trafficWho = scope === 'net' ? '' : scope === 'provider' ? ' провайдера' : ' клиента';
+  lines.push(escapeHtml(`Весь трафик${trafficWho}: ${total.join(' · ')}`));
   const split = [];
   if (bps > 0 && Number(tcp.bps) > 0) split.push(`TCP ${formatSharePct(Number(tcp.bps) / bps)}`);
   if (bps > 0 && Number(udp.bps) > 0) split.push(`UDP ${formatSharePct(Number(udp.bps) / bps)}`);
@@ -1431,8 +1536,13 @@ function formatMetricsLines(mode, { byProto, verdict, investigate, binding, scop
   ].filter(Boolean);
   if (sw.length) lines.push(escapeHtml(sw.join(' · ')));
   // Префикс сети уже стоит в шапке, поэтому разметка нужна только абонентам.
-  const markup = scope === 'client' ? formatClientMarkup(binding) : '';
-  if (markup) lines.push(escapeHtml(`${binding?.bindMode === 'ports' ? 'Порт' : 'IP'} клиента: ${markup}`));
+  const markup = scope === 'client' || scope === 'provider' ? formatClientMarkup(binding) : '';
+  if (markup) {
+    const label = scope === 'provider'
+      ? 'Сети'
+      : `${binding?.bindMode === 'ports' ? 'Порт' : 'IP'} клиента`;
+    lines.push(escapeHtml(`${label}: ${markup}`));
+  }
   return lines;
 }
 
@@ -1458,6 +1568,7 @@ function formatAlertMessage({
     investigate,
     binding,
     scope,
+    scopeId,
     signals: signalList,
     syn: synDetail(byProto, investigate),
   };
@@ -1571,18 +1682,22 @@ function formatNormalizeMessage({
   return lines.filter(Boolean).join('\n');
 }
 
-// Начало атаки — первая из подряд идущих горячих минут: открываемся по серии,
-// а клиенту важно, когда удар пошёл, а не когда набралась серия.
-function alertStartMinute(history, hot) {
+// Начало атаки — первая горячая минута цепочки. Для объёма пауза внутри окна
+// цепочку не рвёт: импульс 1 через 1 иначе сбрасывал бы начало на последний всплеск.
+function alertStartMinute(history, hot, windowMinutes) {
+  const allow = Math.max(1, Number(windowMinutes) || 1);
   let start = null;
-  let prevTs = null;
+  let prevHotTs = null;
   for (const item of history) {
     const ts = parseUtc(item?.minute);
     if (!Number.isFinite(ts)) break;
-    if (prevTs != null && prevTs - ts > MINUTE) break;
-    if (!hot(item)) break;
+    if (!hot(item)) {
+      if (allow <= 1) break;
+      continue;
+    }
+    if (prevHotTs != null && prevHotTs - ts > allow * MINUTE) break;
     start = item.minute;
-    prevTs = ts;
+    prevHotTs = ts;
   }
   return start;
 }
@@ -1612,9 +1727,10 @@ function pickAlertCandidates(allRows, previousByKey, threshold, options = {}) {
       // SYN: дубли режет activeKeys, а не «минута до тоже горячая». Иначе флуд,
       // который шёл до выкладки, навсегда остаётся без события — rising edge
       // уже потерян, активной записи нет.
+      const volumeWindow = signal === SIGNALS.volume && cfg.window > cfg.streak ? cfg.window : 1;
       let ready;
       if (signal === SIGNALS.volume) {
-        ready = shouldSendAlert(history, t, options.streak ?? cfg.streak, enabledAtMs);
+        ready = shouldSendAlert(history, t, options.streak ?? cfg.streak, enabledAtMs, cfg.window);
       } else if (signal === SIGNALS.syn_flood) {
         ready = hot(row);
       } else if (signal === SIGNALS.net_spike) {
@@ -1632,7 +1748,8 @@ function pickAlertCandidates(allRows, previousByKey, threshold, options = {}) {
         threshold: t,
         thresholdIsCustom: hasGrowthOverride(row.scope, row.scope_id, options.thresholdByKey),
         streak: signal === SIGNALS.volume ? (options.streak ?? cfg.streak) : cfg.streak,
-        startMinute: alertStartMinute(history, hot) || row.minute,
+        window: signal === SIGNALS.volume ? cfg.window : null,
+        startMinute: alertStartMinute(history, hot, volumeWindow) || row.minute,
       });
     }
   }
@@ -1691,7 +1808,7 @@ function pickNormalizeCandidates(allRows, previousByKey, threshold, options = {}
       };
       let ready;
       if (activeSignal === SIGNALS.volume) {
-        ready = shouldSendNormalize(history, t, options.streak ?? cfg.normalizeStreak, {
+        ready = shouldSendNormalize(history, t, cfg.normalizeStreak, {
           alertBps: active.alertByProto?.all?.bps ?? active.alertBps,
           hourP95: active.verdict?.hourP95,
         });
@@ -1815,7 +1932,9 @@ async function ensureDetectionTelegramTables() {
           ADD COLUMN IF NOT EXISTS syn_enabled UInt8 DEFAULT 1,
           ADD COLUMN IF NOT EXISTS syn_hour_ratio Float64 DEFAULT ${DEFAULT_SYN_HOUR_RATIO},
           ADD COLUMN IF NOT EXISTS syn_min_kpps Float64 DEFAULT ${DEFAULT_SYN_MIN_KPPS},
-          ADD COLUMN IF NOT EXISTS syn_pkt_max Float64 DEFAULT ${DEFAULT_SYN_PKT_MAX}
+          ADD COLUMN IF NOT EXISTS syn_pkt_max Float64 DEFAULT ${DEFAULT_SYN_PKT_MAX},
+          ADD COLUMN IF NOT EXISTS volume_hot_window UInt16 DEFAULT ${DEFAULT_VOLUME_WINDOW},
+          ADD COLUMN IF NOT EXISTS volume_quiet_streak UInt16 DEFAULT ${DEFAULT_VOLUME_QUIET}
       `, {}, { name: 'detection/telegram-ensure-columns' });
 
       await executeCommand(`
@@ -1875,6 +1994,8 @@ async function ensureDetectionTelegramTables() {
           syn_hour_ratio Float64,
           syn_min_kpps Float64,
           syn_pkt_max Float64,
+          volume_hot_window UInt16,
+          volume_quiet_streak UInt16,
           updated_at DateTime('UTC')
         )
         AS SELECT
@@ -1905,6 +2026,8 @@ async function ensureDetectionTelegramTables() {
           syn_hour_ratio,
           syn_min_kpps,
           syn_pkt_max,
+          volume_hot_window,
+          volume_quiet_streak,
           updated_at_latest AS updated_at
         FROM
         (
@@ -1936,6 +2059,8 @@ async function ensureDetectionTelegramTables() {
             argMax(syn_hour_ratio, updated_at) AS syn_hour_ratio,
             argMax(syn_min_kpps, updated_at) AS syn_min_kpps,
             argMax(syn_pkt_max, updated_at) AS syn_pkt_max,
+            argMax(volume_hot_window, updated_at) AS volume_hot_window,
+            argMax(volume_quiet_streak, updated_at) AS volume_quiet_streak,
             max(updated_at) AS updated_at_latest
           FROM ${settingsTableRef()}
           GROUP BY settings_id
@@ -1956,7 +2081,8 @@ async function getCurrentSettingsRaw() {
            amp_enabled, geo_enabled, amp_streak, geo_streak, amp_normalize_streak, geo_normalize_streak,
            volume_min_share_pct, amp_min_share_pct, geo_min_share_pct, syn_min_share_pct,
            amp_hour_ratio, amp_min_mbit,
-           syn_enabled, syn_hour_ratio, syn_min_kpps, syn_pkt_max, updated_at
+           syn_enabled, syn_hour_ratio, syn_min_kpps, syn_pkt_max,
+           volume_hot_window, volume_quiet_streak, updated_at
     FROM ${settingsViewRef()}
     WHERE settings_id = {id:String}
     LIMIT 1
@@ -2048,6 +2174,16 @@ async function saveDetectionTelegramSettings(payload = {}) {
   const synPktMax = normalizeSynPktMax(
     payload.synPktMax ?? payload.syn_pkt_max ?? base.syn_pkt_max,
   );
+  const volumeWindowRaw = Number(payload.volumeWindow ?? payload.volume_hot_window ?? base.volume_hot_window ?? DEFAULT_VOLUME_WINDOW);
+  if (!Number.isFinite(volumeWindowRaw) || volumeWindowRaw < 1 || volumeWindowRaw > MAX_STREAK) {
+    throw apiError(`Окно объёма: целое от 1 до ${MAX_STREAK}`);
+  }
+  const volumeWindow = Math.max(streak, normalizeStreak(volumeWindowRaw, DEFAULT_VOLUME_WINDOW));
+  const volumeQuietRaw = Number(payload.volumeQuiet ?? payload.volume_quiet_streak ?? base.volume_quiet_streak ?? DEFAULT_VOLUME_QUIET);
+  if (!Number.isFinite(volumeQuietRaw) || volumeQuietRaw < 1 || volumeQuietRaw > MAX_STREAK) {
+    throw apiError(`Тихих минут для закрытия объёма: целое от 1 до ${MAX_STREAK}`);
+  }
+  const volumeQuiet = normalizeStreak(volumeQuietRaw, DEFAULT_VOLUME_QUIET);
   if (enabled && (!botToken || !chatId)) {
     throw apiError('Укажите токен бота и id группы перед включением Telegram');
   }
@@ -2080,6 +2216,8 @@ async function saveDetectionTelegramSettings(payload = {}) {
     syn_hour_ratio: synHourRatio,
     syn_min_kpps: synMinKpps,
     syn_pkt_max: synPktMax,
+    volume_hot_window: volumeWindow,
+    volume_quiet_streak: volumeQuiet,
   }], { name: 'detection/telegram-settings-save' });
 
   return getDetectionTelegramSettings();
@@ -2768,9 +2906,12 @@ async function processDetectionAlerts({ minute, rows, nameByKey }) {
     watchKeys.push({ scope: row.scope, scopeId: row.scope_id });
   }
 
+  const volumeCfg = signalSettings(settings, SIGNALS.volume);
   const take = Math.max(
     settings.streak,
     settings.normalizeStreak,
+    volumeCfg.window + 1,
+    volumeCfg.normalizeStreak,
     settings.ampStreak,
     settings.geoStreak,
     settings.ampNormalizeStreak,
@@ -2841,7 +2982,12 @@ async function processDetectionAlerts({ minute, rows, nameByKey }) {
     let focusMinute = minute;
     if (signals.length && signals.every((signal) => signal === SIGNALS.volume)) {
       const history = [row, ...(previousByKey.get(objectId) || [])];
-      const heavy = heaviestHotMinute(history, objectThreshold, candidates[0].streak || settings.streak);
+      const heavy = heaviestHotMinute(
+        history,
+        objectThreshold,
+        candidates[0].streak || settings.streak,
+        candidates[0].window || volumeCfg.window,
+      );
       if (heavy && !sameMinute(heavy.minute, minute)) {
         try {
           const loaded = await loadMinuteByProto(row.scope, row.scope_id, heavy.minute);
@@ -2857,9 +3003,11 @@ async function processDetectionAlerts({ minute, rows, nameByKey }) {
     let hour = { p95: null, p999: null };
     let investigate = emptyInvestigate();
     let binding = null;
-    if (row.scope === 'client') {
+    if (row.scope === 'client' || row.scope === 'provider') {
       try {
-        binding = await loadClientBinding(row.scope_id);
+        binding = row.scope === 'provider'
+          ? await loadProviderBinding(row.scope_id)
+          : await loadClientBinding(row.scope_id);
       } catch (err) {
         errors.push({ key: objectId, message: `binding: ${err.message}` });
       }
@@ -2881,7 +3029,7 @@ async function processDetectionAlerts({ minute, rows, nameByKey }) {
     const netFocus = isNetFocus(net, verdict);
     if (netFocus) verdict = netSpikeVerdict(net, hour);
     const target = netFocus
-      ? { scope: 'net', scopeId: net.net, clientId: String(row.scope_id) }
+      ? { scope: 'net', scopeId: net.net, clientId: String(row.scope_id), parentScope: row.scope }
       : { scope: row.scope, scopeId: row.scope_id };
     if (verdict.needsInvestigate || verdict.kind === KINDS.benign_peak || netFocus
       || signals.includes(SIGNALS.amplification)
@@ -2968,7 +3116,7 @@ async function processDetectionAlerts({ minute, rows, nameByKey }) {
       minute,
       alertMinute: active.alertMinute,
       startMinute: active.startMinute,
-      streak: settings.normalizeStreak,
+      streak: signalSettings(settings, active.signal || SIGNALS.volume).normalizeStreak,
       byProto: group?.byProto || { all: row },
       alertByProto: byProtoFromSnapshot(uiByProtoToSnapshot(active.alertByProto)),
       verdict: active.verdict,
@@ -3058,9 +3206,11 @@ async function rebuildDetectionEventAlert({ scope, scopeId, minute, sendTelegram
   let hour = { p95: null, p999: null };
   let investigate = emptyInvestigate();
   let binding = snapshot.binding || null;
-  if (row.scope === 'client') {
+  if (row.scope === 'client' || row.scope === 'provider') {
     try {
-      binding = await loadClientBinding(row.scope_id);
+      binding = row.scope === 'provider'
+        ? await loadProviderBinding(row.scope_id)
+        : await loadClientBinding(row.scope_id);
     } catch {
       binding = snapshot.binding || null;
     }
@@ -3188,6 +3338,9 @@ module.exports = {
   formatRepeatLine,
   SIGNALS,
   formatAlertMessage,
+  formatCutLine,
+  alertStartMinute,
+  signalSettings,
   formatNormalizeMessage,
   snapshotByProto,
   mapEventRow,

@@ -91,6 +91,7 @@ const config = {
   interfaceRolesEffectiveView: env('CLICKHOUSE_INTERFACE_ROLES_EFFECTIVE_VIEW', 'net_interface_roles_effective_current'),
   geoCountryDict: env('CLICKHOUSE_GEO_COUNTRY_DICT', 'default.geo_country_dict'),
   clientPrefixDict: env('CLICKHOUSE_CLIENT_PREFIX_DICT', 'default.net_client_prefix_dict'),
+  ispPrefixDict: env('CLICKHOUSE_ISP_PREFIX_DICT', 'default.net_isp_prefix_dict'),
   locationsView: env('CLICKHOUSE_LOCATIONS_VIEW', 'net_locations_enabled'),
   locationsTable: env('CLICKHOUSE_LOCATIONS_TABLE', 'net_locations'),
   dnsLogTable: env('CLICKHOUSE_DNS_LOG_TABLE', 'dns_log'),
@@ -790,6 +791,7 @@ function getConfig() {
     netInterfacesDict: config.netInterfacesDict,
     geoCountryDict: config.geoCountryDict,
     clientPrefixDict: config.clientPrefixDict,
+    ispPrefixDict: config.ispPrefixDict,
     collectorHealthSnapshotsTable: config.collectorHealthSnapshotsTable,
     locationsTable: config.locationsTable,
     locationsView: config.locationsView,
@@ -807,6 +809,22 @@ function getConfig() {
 
 function escapeSqlString(value) {
   return String(value || '').replace(/'/g, "''");
+}
+
+// Провайдер ШПД по адресу потока. IPv4 лежит в первых четырёх байтах, etype 2048.
+// IPv6 в словарь не входит: префиксы provider_public заведены как family=4.
+function ispPrefixLookupSql(rawIpExpr) {
+  if (!rawIpExpr) return `''`;
+  const dict = escapeSqlString(config.ispPrefixDict || 'default.net_isp_prefix_dict');
+  const alias = rawIpExpr.includes('.') ? `${rawIpExpr.split('.')[0]}.` : '';
+  const etype = flowCol('etype');
+  const ipv4Key = `toIPv4(reinterpretAsUInt32(reverse(substring(${rawIpExpr}, 1, 4))))`;
+  const lookup = `dictGetOrDefault('${dict}', 'entity_id', tuple(${ipv4Key}), '')`;
+  if (!etype) {
+    const isIpv4 = `length(${rawIpExpr}) = 16 AND substring(${rawIpExpr}, 5) = unhex('000000000000000000000000')`;
+    return `if(${isIpv4}, ${lookup}, '')`;
+  }
+  return `if(${alias}${etype} = 2048, ${lookup}, '')`;
 }
 
 function parseDataDatetimeSql(paramName) {
@@ -925,6 +943,7 @@ module.exports = {
   colOpt,
   getConfig,
   escapeSqlString,
+  ispPrefixLookupSql,
   parseDataDatetimeSql,
   formatDataDatetimeSql,
   formatDateTime64,

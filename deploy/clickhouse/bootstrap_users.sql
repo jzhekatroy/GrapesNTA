@@ -47,6 +47,7 @@ GRANT SELECT ON system.dictionaries TO ui_read;
 GRANT dictGet ON default.geo_country_dict TO ui_read;
 GRANT dictGet ON default.bgp_origin_asn_dict TO ui_read;
 GRANT dictGet ON default.net_interfaces_dict TO ui_read;
+GRANT dictGet ON default.net_isp_prefix_dict TO ui_read;
 
 GRANT SELECT, INSERT, CREATE TABLE, ALTER TABLE, DROP TABLE, ALTER DELETE, TRUNCATE ON default.* TO ui_admin;
 GRANT CREATE DICTIONARY, DROP DICTIONARY ON default.* TO ui_admin;
@@ -55,3 +56,4 @@ GRANT SELECT ON system.* TO ui_admin;
 GRANT dictGet ON default.geo_country_dict TO ui_admin;
 GRANT dictGet ON default.bgp_origin_asn_dict TO ui_admin;
 GRANT dictGet ON default.net_interfaces_dict TO ui_admin;
+GRANT dictGet ON default.net_isp_prefix_dict TO ui_admin;

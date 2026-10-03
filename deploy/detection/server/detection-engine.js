@@ -11,6 +11,7 @@ const {
   clientsViewRef,
   asnRegistryEnrichedTableRef,
   config,
+  ispPrefixLookupSql,
 } = require('./clickhouse');
 const { flowIpExpr, primarySourceIdsSql, primaryClientSourceSql } = require('./queries');
 const {
@@ -216,34 +217,95 @@ function dedupeClientsByDisplayName(rows) {
   return [...byName.values()];
 }
 
+const ISP_DICT_CHECK_MS = 10 * 60 * 1000;
+const ispDictState = { at: 0, ok: false };
+
+async function ispDictAvailable() {
+  if (Date.now() - ispDictState.at < ISP_DICT_CHECK_MS) return ispDictState.ok;
+  try {
+    const name = String(config.ispPrefixDict || 'default.net_isp_prefix_dict').split('.').pop();
+    const { rows } = await query(`
+      SELECT count() AS n
+      FROM system.dictionaries
+      WHERE name = {name:String}
+    `, { name }, { name: 'detection/isp-dict-check' });
+    ispDictState.ok = Number(rows[0]?.n) > 0;
+  } catch {
+    ispDictState.ok = false;
+  }
+  ispDictState.at = Date.now();
+  return ispDictState.ok;
+}
+
+// Сети /24 из L3. Префиксы провайдера целиком смотрит scope provider, поэтому
+// их первую /24 из объектов убираем только когда словарь уже есть: иначе
+// выкладка кода раньше схемы оставила бы эти сети без присмотра.
+function netObjectsSql({ clientPrefixes = false, excludeProviders = false } = {}) {
+  const role = excludeProviders ? ` AND role != 'provider_public'` : '';
+  if (!clientPrefixes) {
+    return `
+      SELECT DISTINCT ${prefixToNetSql('prefix')} AS net
+      FROM ${l3PrefixesViewRef()}
+      WHERE family = 4 AND ${prefixToNetSql('prefix')} != ''${role}
+    `;
+  }
+  return `
+    SELECT DISTINCT net FROM (
+      SELECT ${prefixToNetSql('prefix')} AS net
+      FROM ${l3PrefixesViewRef()}
+      WHERE family = 4${role}
+      UNION ALL
+      SELECT ${prefixToNetSql('prefix')} AS net
+      FROM default.net_client_prefixes_enabled
+    )
+    WHERE net != ''
+  `;
+}
+
+async function loadProviders() {
+  try {
+    const { rows } = await query(`
+      SELECT entity_id, max(display_name) AS display_name
+      FROM ${l3PrefixesViewRef()}
+      WHERE family = 4 AND role = 'provider_public' AND entity_id != ''
+      GROUP BY entity_id
+    `, {}, { name: 'detection/objects-providers' });
+    return rows.map((r) => {
+      const id = String(r.entity_id);
+      const display = String(r.display_name || '').trim();
+      return {
+        scope: 'provider',
+        scopeId: id,
+        name: display || id,
+        bindMode: 'prefixes',
+      };
+    });
+  } catch (err) {
+    logDetection('providers skipped', { message: err.message });
+    return [];
+  }
+}
+
 async function loadObjects() {
   const { rows: clients } = await query(`
     SELECT client_id, display_name, bind_mode
     FROM ${clientsViewRef()}
   `, {}, { name: 'detection/objects-clients' });
 
-  let netSql = `
-    SELECT DISTINCT ${prefixToNetSql('prefix')} AS net
-    FROM ${l3PrefixesViewRef()}
-    WHERE family = 4 AND ${prefixToNetSql('prefix')} != ''
-  `;
+  const ispOk = await ispDictAvailable();
+  let clientPrefixes = false;
   try {
     await query('SELECT 1 FROM default.net_client_prefixes_enabled LIMIT 1', {}, { name: 'detection/prefixes-probe' });
-    netSql = `
-      SELECT DISTINCT net FROM (
-        SELECT ${prefixToNetSql('prefix')} AS net
-        FROM ${l3PrefixesViewRef()}
-        WHERE family = 4
-        UNION ALL
-        SELECT ${prefixToNetSql('prefix')} AS net
-        FROM default.net_client_prefixes_enabled
-      )
-      WHERE net != ''
-    `;
+    clientPrefixes = true;
   } catch {
     // справочник клиентских префиксов может отсутствовать
   }
-  const { rows: nets } = await query(netSql, {}, { name: 'detection/objects-nets' });
+  const { rows: nets } = await query(
+    netObjectsSql({ clientPrefixes, excludeProviders: ispOk }),
+    {},
+    { name: 'detection/objects-nets' },
+  );
+  const providers = ispOk ? await loadProviders() : [];
 
   return [
     ...dedupeClientsByDisplayName(clients).map((r) => ({
@@ -257,6 +319,7 @@ async function loadObjects() {
       scopeId: String(r.net),
       name: String(r.net),
     })),
+    ...providers,
   ];
 }
 
@@ -393,6 +456,12 @@ async function loadClientVolume(minuteTs) {
 function scopeSides(scope) {
   if (scope === 'client') {
     return { towardId: 'f.dst_client', fromId: 'f.src_client' };
+  }
+  if (scope === 'provider') {
+    return {
+      towardId: ispPrefixLookupSql(`f.${col('dstIp')}`),
+      fromId: ispPrefixLookupSql(`f.${col('srcIp')}`),
+    };
   }
   return { towardId: netFromIpSql(dstIpSql()), fromId: netFromIpSql(srcIpSql()) };
 }
@@ -755,6 +824,9 @@ async function loadPortMetrics(scope, minuteTs) {
 const HOUR = 60 * MINUTE;
 const NET_USUAL_FLOOR_BPS = 20e6;
 const NET_USUAL_FLOOR_PPS = 5000;
+// У нового провайдера нет p999. Пол в 1 Гбит/с даёт рост в первый день,
+// когда удар уже десятки гигабит. Если норма уже есть, пол не подставляем.
+const PROVIDER_BASELINE_FLOOR_BPS = 1e9;
 // Пока сводок меньше суток, норма сети — это случайный час, а не её обычный
 // уровень, и признак молчит.
 const NET_COVERAGE_MIN_HOURS = 24;
@@ -836,6 +908,75 @@ function clientNetHourSql() {
   `;
 }
 
+function providerIdSql() {
+  return ispPrefixLookupSql(`f.${col('dstIp')}`);
+}
+
+function providerNetMinuteSql() {
+  const bytesCol = col('bytes');
+  const packetsCol = col('packets');
+  const protoCol = col('proto');
+  const id = providerIdSql();
+  return `
+    SELECT
+      ${id} AS client_id,
+      ${netFromIpSql(dstIpSql())} AS net,
+      sum(f.${bytesCol}) AS bytes,
+      sum(f.${packetsCol}) AS packets,
+      sumIf(f.${bytesCol}, f.${protoCol} = 17) AS udp_bytes,
+      sumIf(f.${bytesCol}, f.${protoCol} = 6) AS tcp_bytes
+    FROM ${flowsRawTableRef()} AS f
+    WHERE ${minuteFilterSql()}
+      AND ${id} != ''
+    GROUP BY client_id, net
+    HAVING net != '' AND bytes * 8 / 60 >= {minBps:Float64}
+  `;
+}
+
+function providerNetHourSql() {
+  const bytesCol = col('bytes');
+  const packetsCol = col('packets');
+  const id = providerIdSql();
+  return `
+    INSERT INTO ${netHourTableRef()} (hour, client_id, net, minutes, bps_max, bps_p95, pps_max, pps_p95)
+    SELECT
+      toDateTime({hour:String}, 'UTC') AS hour,
+      client_id,
+      net,
+      toUInt16(count()) AS minutes,
+      max(bps) AS bps_max,
+      quantileExact(0.95)(bps) AS bps_p95,
+      max(pps) AS pps_max,
+      quantileExact(0.95)(pps) AS pps_p95
+    FROM (
+      SELECT
+        ${id} AS client_id,
+        ${netFromIpSql(dstIpSql())} AS net,
+        toStartOfMinute(f.time_flow_start_ns) AS m,
+        sum(f.${bytesCol}) * 8 / 60 AS bps,
+        sum(f.${packetsCol}) / 60 AS pps
+      FROM ${flowsRawTableRef()} AS f
+      WHERE ${minuteFilterSql()}
+        AND ${id} != ''
+      GROUP BY client_id, net, m
+    )
+    WHERE net != ''
+    GROUP BY client_id, net
+    HAVING bps_max >= {minBps:Float64}
+    SETTINGS max_execution_time = 600, max_bytes_before_external_group_by = 4000000000
+  `;
+}
+
+async function loadProviderNets(minuteTs) {
+  const started = Date.now();
+  const { rows } = await query(providerNetMinuteSql(), {
+    ...minuteBounds(minuteTs),
+    minBps: MIN_BPS,
+  }, { name: 'detection/provider-nets', clickhouse_settings: HEAVY, requestTimeoutMs: 180000 });
+  logDetection('provider-nets done', { ms: Date.now() - started, nets: rows.length });
+  return rows;
+}
+
 function hourBounds(hourTs) {
   return {
     hour: formatCh(hourTs),
@@ -858,45 +999,80 @@ function nextMissingHour(lastHourTs, oldestHourTs, done) {
   return null;
 }
 
-const netHourState = { done: new Set(), loaded: false, rawFromTs: null };
+// Часы клиентов и провайдеров учитываются раздельно: провайдер появился позже,
+// и его прошлые часы нужно досчитать, хотя у клиентов они уже есть.
+const netHourState = { done: new Set(), providerDone: new Set(), loaded: false, providersKey: '', rawFromTs: null };
 let lastPortClients = [];
+let lastProviderIds = [];
 
-async function loadNetHourState() {
+async function loadNetHourState(providers = []) {
   const days = BASELINE_DAYS;
   const { rows } = await query(`
-    SELECT DISTINCT toString(hour) AS h
+    SELECT toString(hour) AS h, max(client_id IN {providers:Array(String)}) AS is_provider,
+           min(client_id IN {providers:Array(String)}) AS only_provider
     FROM ${netHourTableRef()}
     WHERE hour >= now('UTC') - INTERVAL {days:UInt16} DAY
-  `, { days }, { name: 'detection/net-hours-done' });
+    GROUP BY hour
+  `, { days, providers }, { name: 'detection/net-hours-done' });
   const { rows: raw } = await query(`
     SELECT toString(min(f.date)) AS d
     FROM ${flowsRawTableRef()} AS f
   `, {}, { name: 'detection/net-raw-from' });
-  netHourState.done = new Set(rows.map((r) => parseUtc(r.h)).filter(Number.isFinite));
+  netHourState.done = new Set(rows
+    .filter((r) => Number(r.only_provider) !== 1)
+    .map((r) => parseUtc(r.h))
+    .filter(Number.isFinite));
+  netHourState.providerDone = new Set(rows
+    .filter((r) => Number(r.is_provider) === 1)
+    .map((r) => parseUtc(r.h))
+    .filter(Number.isFinite));
   const rawFrom = parseUtc(`${raw?.[0]?.d || ''} 00:00:00`);
   netHourState.rawFromTs = Number.isFinite(rawFrom) && rawFrom > 0 ? rawFrom : null;
+  netHourState.providersKey = providers.join(',');
   netHourState.loaded = true;
 }
 
-async function maintainNetHours(closedTs, clients = lastPortClients) {
-  if (!clients.length || !closedTs) return null;
-  if (!netHourState.loaded) await loadNetHourState();
+async function maintainNetHours(closedTs, clients = lastPortClients, providers = lastProviderIds) {
+  if ((!clients.length && !providers.length) || !closedTs) return null;
+  if (!netHourState.loaded || netHourState.providersKey !== providers.join(',')) {
+    await loadNetHourState(providers);
+  }
   const lastHour = floorHour(closedTs) - HOUR;
   // Первый день сырья обычно обрезан TTL посередине — его часы занизили бы норму.
   const rawEdge = netHourState.rawFromTs ? netHourState.rawFromTs + 24 * HOUR : 0;
   const oldest = Math.max(lastHour - BASELINE_DAYS * 24 * HOUR, rawEdge);
-  const hourTs = nextMissingHour(lastHour, oldest, netHourState.done);
-  if (hourTs == null) return null;
   const started = Date.now();
-  await executeCommand(clientNetHourSql(), {
-    ...hourBounds(hourTs),
-    clients,
-    minBps: MIN_BPS,
-  }, { name: 'detection/net-hour-summary' });
-  netHourState.done.add(hourTs);
-  const out = { hour: formatCh(hourTs), ms: Date.now() - started };
+  const out = {};
+  const clientHour = clients.length ? nextMissingHour(lastHour, oldest, netHourState.done) : null;
+  if (clientHour != null) {
+    await executeCommand(clientNetHourSql(), {
+      ...hourBounds(clientHour),
+      clients,
+      minBps: MIN_BPS,
+    }, { name: 'detection/net-hour-summary' });
+    netHourState.done.add(clientHour);
+    out.hour = formatCh(clientHour);
+  }
+  const providerHour = providers.length ? nextMissingHour(lastHour, oldest, netHourState.providerDone) : null;
+  if (providerHour != null) {
+    await executeCommand(providerNetHourSql(), {
+      ...hourBounds(providerHour),
+      minBps: MIN_BPS,
+    }, { name: 'detection/provider-net-hour' });
+    netHourState.providerDone.add(providerHour);
+    out.providerHour = formatCh(providerHour);
+    // Норма сетей кешируется на часы; провайдер досчитывается позже клиентов,
+    // поэтому кеш сбрасываем на каждые сутки его новых сводок.
+    if (netHourState.providerDone.size % NET_COVERAGE_MIN_HOURS === 0) netNormCache.at = 0;
+  }
+  if (clientHour == null && providerHour == null) return null;
+  out.ms = Date.now() - started;
   logDetection('net-hour', out);
   return out;
+}
+
+function providerNetHours() {
+  return netHourState.providerDone.size;
 }
 
 async function maintainNetHoursSafe(closedTs) {
@@ -1064,6 +1240,35 @@ async function loadClientNetState(minuteTs, clients) {
     logDetection('client-nets error', { message: err.message });
     return { rows: [], fields: new Map() };
   }
+}
+
+async function loadProviderNetState(minuteTs, providers) {
+  if (!providers.length) return { rows: [], fields: new Map() };
+  try {
+    const [rows, norms, recent] = await Promise.all([
+      loadProviderNets(minuteTs),
+      loadNetNorms(minuteTs),
+      loadNetRecent(minuteTs),
+    ]);
+    // Сутки своих сводок, а не общей таблицы: иначе обычная занятая /24
+    // провайдера без нормы читалась бы ударом.
+    const hours = providerNetHours();
+    const mature = hours >= NET_COVERAGE_MIN_HOURS;
+    const fields = summarizeClientNets(rows, { norms: norms.map, recent, mature });
+    logDetection('provider-nets', { nets: rows.length, hot: fields.size, mature, hours });
+    return { rows, fields };
+  } catch (err) {
+    logDetection('provider-nets error', { message: err.message });
+    return { rows: [], fields: new Map() };
+  }
+}
+
+function emptyScopeMap(scope, minuteTs, loader) {
+  if (scope !== 'provider') return loader(scope, minuteTs);
+  return loader(scope, minuteTs).catch((err) => {
+    logDetection(`provider ${loader.name || 'query'} skipped`, { message: err.message });
+    return new Map();
+  });
 }
 
 async function insertClientNetRows(minute, rows) {
@@ -1344,33 +1549,42 @@ async function tick() {
 
   const objects = await loadObjects();
   const portClients = portClientIds(objects);
+  const providerIds = objects.filter((o) => o.scope === 'provider').map((o) => o.scopeId);
   lastPortClients = portClients;
+  lastProviderIds = providerIds;
   logDetection('objects', {
     minute,
     clients: objects.filter((o) => o.scope === 'client').length,
     portClients: portClients.length,
+    providers: providerIds.length,
     nets: objects.filter((o) => o.scope === 'net').length,
   });
   const [
     clientVol,
     clientFlags,
     netFlags,
+    providerFlags,
     clientPorts,
     netPorts,
+    providerPorts,
     baselines,
     foreignEnvelopes,
     hourSignals,
     clientNets,
+    providerNets,
   ] = await Promise.all([
     loadClientVolume(closed),
     loadScopeFlags('client', closed),
     loadScopeFlags('net', closed),
+    providerIds.length ? emptyScopeMap('provider', closed, loadScopeFlags) : new Map(),
     loadPortMetrics('client', closed),
     loadPortMetrics('net', closed),
+    providerIds.length ? emptyScopeMap('provider', closed, loadPortMetrics) : new Map(),
     loadBaselines(closed),
     loadForeignEnvelopes(closed),
     loadHourSignalBaselines(),
     loadClientNetState(closed, portClients),
+    loadProviderNetState(closed, providerIds),
   ]);
   for (const [clientId, env] of foreignEnvelopes) {
     const key = `client|${clientId}|all`;
@@ -1387,8 +1601,12 @@ async function tick() {
   const rows = [];
   let skippedBelowMinBps = 0;
   for (const object of objects) {
-    const flagMap = object.scope === 'client' ? clientFlags : netFlags;
-    const portMap = object.scope === 'client' ? clientPorts : netPorts;
+    const flagMap = object.scope === 'client' ? clientFlags
+      : object.scope === 'provider' ? providerFlags
+        : netFlags;
+    const portMap = object.scope === 'client' ? clientPorts
+      : object.scope === 'provider' ? providerPorts
+        : netPorts;
     const bucket = flagMap.get(object.scopeId) || emptyProtoBucket();
     if (flagMap.has(object.scopeId)) {
       matchedFlags += 1;
@@ -1417,14 +1635,14 @@ async function tick() {
       const hour = hourSignals.get(mskHourKey(object.scope, object.scopeId, minute)) || null;
       const ampHourBps = proto === 'udp' ? hour?.ampBps ?? null : null;
       const synHourPps = proto !== 'udp' ? hour?.synPps ?? null : null;
-      const row = toInsertRow(
-        object,
-        proto,
-        raw,
-        base || ampHourBps || synHourPps ? { ...(base || {}), ampHourBps, synHourPps } : null,
-      );
-      const netFields = proto === 'all' && object.scope === 'client'
-        ? clientNets.fields.get(object.scopeId)
+      let baseline = base || ampHourBps || synHourPps ? { ...(base || {}), ampHourBps, synHourPps } : null;
+      if (object.scope === 'provider' && proto === 'all' && !(Number(base?.bps) > 0)) {
+        baseline = { ...(baseline || {}), bps: PROVIDER_BASELINE_FLOOR_BPS };
+      }
+      const row = toInsertRow(object, proto, raw, baseline);
+      const netState = object.scope === 'provider' ? providerNets : clientNets;
+      const netFields = proto === 'all' && (object.scope === 'client' || object.scope === 'provider')
+        ? netState.fields.get(object.scopeId)
         : null;
       rows.push(netFields ? { ...row, ...netFields } : row);
     }
@@ -1434,7 +1652,7 @@ async function tick() {
   for (let i = 0; i < rows.length; i += chunk) {
     await insertRows(TABLE, rows.slice(i, i + chunk), { name: 'detection/insert-anomaly' });
   }
-  await insertClientNetRows(minute, clientNets.rows);
+  await insertClientNetRows(minute, [...clientNets.rows, ...providerNets.rows]);
   lastProcessedMinute = closed;
 
   const nameByKey = new Map(objects.map((o) => [`${o.scope}|${o.scopeId}`, o.name]));
@@ -1450,13 +1668,16 @@ async function tick() {
   const out = {
     minute,
     clients: objects.filter((o) => o.scope === 'client').length,
+    providers: providerIds.length,
     nets: objects.filter((o) => o.scope === 'net').length,
     rows: rows.length,
     skippedBelowMinBps,
     minBpsMbit: Math.round(MIN_BPS / 1e6),
-    flagRows: clientFlags.size + netFlags.size,
+    flagRows: clientFlags.size + netFlags.size + providerFlags.size,
     clientNets: clientNets.rows.length,
     clientNetsHot: clientNets.fields.size,
+    providerNets: providerNets.rows.length,
+    providerNetsHot: providerNets.fields.size,
     matchedFlags,
     insertedWithAttempts: insertedAttempts,
     maxAttempts: rows.reduce((m, r) => Math.max(m, r.syn_attempts), 0),
@@ -1693,6 +1914,10 @@ module.exports = {
   portClientIds,
   clientNetMinuteSql,
   clientNetHourSql,
+  providerNetMinuteSql,
+  providerNetHourSql,
+  netObjectsSql,
+  PROVIDER_BASELINE_FLOOR_BPS,
   hourBounds,
   minuteBounds,
   loadScopeFlags,

@@ -32,6 +32,8 @@ const TELEGRAM_DEFAULTS = {
   alertKind: 'all',
   streak: 3,
   normalizeStreak: 3,
+  volumeWindow: 6,
+  volumeQuiet: 10,
   apiUrl: 'https://api.telegram.org',
   proxyUrl: '',
   proxySet: false,
@@ -751,6 +753,8 @@ function PageDetection() {
         alertKind: telegram?.alertKind || 'all',
         streak: telegram?.streak ?? 3,
         normalizeStreak: telegram?.normalizeStreak ?? 3,
+        volumeWindow: telegram?.volumeWindow ?? 6,
+        volumeQuiet: telegram?.volumeQuiet ?? 10,
         apiUrl: telegram?.apiUrl || 'https://api.telegram.org',
         proxyUrl: telegram?.proxyUrl || '',
         ampEnabled: telegram?.ampEnabled !== false,
@@ -934,8 +938,37 @@ function PageDetection() {
                     step="1"
                     value={telegram?.normalizeStreak ?? 3}
                     onChange={(e) => setTelegram(patchTelegram(telegram, { normalizeStreak: Number(e.target.value) }))}
+                    title="Для отражения, SYN и заграницы. Объём закрывается по своему полю."
                   />
                 </label>
+                <label className="col" style={{ gap: 4, minWidth: 180 }}>
+                  <span>Объём: окно, мин</span>
+                  <input
+                    className="input"
+                    type="number"
+                    min="1"
+                    max="60"
+                    step="1"
+                    value={telegram?.volumeWindow ?? 6}
+                    onChange={(e) => setTelegram(patchTelegram(telegram, { volumeWindow: Number(e.target.value) }))}
+                    title="Алерт по объёму открывается, когда за это окно набралось «Подряд» горячих минут, не обязательно подряд."
+                  />
+                </label>
+                <label className="col" style={{ gap: 4, minWidth: 180 }}>
+                  <span>Объём: тихих минут до закрытия</span>
+                  <input
+                    className="input"
+                    type="number"
+                    min="1"
+                    max="60"
+                    step="1"
+                    value={telegram?.volumeQuiet ?? 10}
+                    onChange={(e) => setTelegram(patchTelegram(telegram, { volumeQuiet: Number(e.target.value) }))}
+                  />
+                </label>
+              </div>
+              <div style={{ color: 'var(--fg-muted)', font: 'var(--pv-text-body-3)' }}>
+                Объём: алерт открывается на N горячих минутах из окна (N — «Подряд» в строке «Рост объёма»), так импульсная атака 1 минута через 1–2 не теряется. Закрывается после указанного числа тихих минут подряд.
               </div>
               <div className="table-wrap table-wrap--telegram-vectors">
                 <table className="table table--telegram-vectors">
@@ -1343,7 +1376,7 @@ function PageDetection() {
                 render: (r) => (
                   <span>
                     <Badge tone={r.scope === 'client' ? 'neutral' : 'info'}>
-                      {r.scope === 'client' ? 'абонент' : 'сеть /24'}
+                      {r.scope === 'client' ? 'абонент' : r.scope === 'provider' ? 'провайдер' : 'сеть /24'}
                     </Badge>
                     {' '}
                     {r.name || r.scopeId}
@@ -1569,7 +1602,7 @@ function PageDetection() {
               render: (r) => (
                 <span>
                   <Badge tone={r.scope === 'client' ? 'neutral' : 'info'}>
-                    {r.scope === 'client' ? 'абонент' : 'сеть /24'}
+                    {r.scope === 'client' ? 'абонент' : r.scope === 'provider' ? 'провайдер' : 'сеть /24'}
                   </Badge>
                   {' '}
                   {r.name}

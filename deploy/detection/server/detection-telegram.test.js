@@ -34,6 +34,9 @@ const {
   pickNormalizeCandidates,
   pickSilentNormalizeCandidates,
   formatAlertMessage,
+  formatCutLine,
+  alertStartMinute,
+  signalSettings,
   mapEventRow,
   formatNormalizeMessage,
   snapshotByProto,
@@ -244,6 +247,111 @@ describe('detection-telegram', () => {
     assert.equal(shouldSendAlert(history, 1.6, 3, enabledAt), true);
     const enabledEarlier = Date.parse('2026-09-01T11:00:00Z');
     assert.equal(shouldSendAlert(history, 1.6, 3, enabledEarlier), false);
+  });
+
+  // ШПД 03.10: удар 1 минута через 1–2 тихих, три горячих подряд не набиралось.
+  it('окно объёма: 3 горячих из 6 минут открывают импульсную атаку', () => {
+    const impulses = [
+      above('2026-10-03 12:16:00'),
+      below('2026-10-03 12:15:00'),
+      above('2026-10-03 12:14:00'),
+      below('2026-10-03 12:13:00'),
+      below('2026-10-03 12:12:00'),
+      above('2026-10-03 12:11:00'),
+      below('2026-10-03 12:10:00'),
+    ];
+    assert.equal(shouldSendAlert(impulses, 1.6, 3), false);
+    assert.equal(shouldSendAlert(impulses, 1.6, 3, undefined, 6), true);
+    const next = [above('2026-10-03 12:18:00'), below('2026-10-03 12:17:00'), ...impulses];
+    assert.equal(shouldSendAlert(next, 1.6, 3, undefined, 6), false);
+    assert.equal(shouldSendAlert(impulses.slice(0, 5), 1.6, 3, undefined, 3), false);
+  });
+
+  it('окно объёма: начало атаки — первый импульс, а не последний', () => {
+    const history = [
+      above('2026-10-03 12:16:00'),
+      below('2026-10-03 12:15:00'),
+      above('2026-10-03 12:14:00'),
+      below('2026-10-03 12:13:00'),
+      above('2026-10-03 12:12:00'),
+      below('2026-10-03 12:11:00'),
+      below('2026-10-03 12:10:00'),
+      below('2026-10-03 12:09:00'),
+      below('2026-10-03 12:08:00'),
+      below('2026-10-03 12:07:00'),
+      below('2026-10-03 12:06:00'),
+      above('2026-10-03 12:05:00'),
+    ];
+    const hot = (row) => row.growth_bps >= 1.6;
+    assert.equal(alertStartMinute(history, hot, 6), '2026-10-03 12:12:00');
+    assert.equal(alertStartMinute(history, hot, 1), '2026-10-03 12:16:00');
+  });
+
+  it('настройки объёма: окно 6 и 10 тихих минут, у SYN прежняя тишина', () => {
+    const settings = { streak: 3, normalizeStreak: 3, volumeWindow: 6, volumeQuiet: 10 };
+    const volume = signalSettings(settings, 'volume');
+    assert.equal(volume.streak, 3);
+    assert.equal(volume.window, 6);
+    assert.equal(volume.normalizeStreak, 10);
+    assert.equal(signalSettings(settings, 'syn_flood').normalizeStreak, 3);
+    assert.equal(signalSettings({ streak: 3 }, 'volume').window, 3);
+  });
+
+  it('строка «Резать» у провайдера: UDP, пакет, префиксы, порты случайные', () => {
+    const line = formatCutLine({
+      mode: 'carpet',
+      scope: 'provider',
+      scopeId: 'isp:verolayn',
+      byProto: { all: { bps: 29.6e9, avg_packet_bytes: 1250 }, udp: { bps: 29.5e9 } },
+      investigate: { destPort: { count: 50000, top: [{ port: 41234, share: 0.005 }] } },
+      binding: { prefixes: ['91.151.176.0/20'] },
+      verdict: { kind: 'carpet' },
+    });
+    assert.equal(line, 'Резать: входящий UDP, пакет около 1250 Б, на 91.151.176.0/20. Порты случайные, по порту не резать');
+    const onePort = formatCutLine({
+      mode: 'carpet',
+      scope: 'provider',
+      byProto: { all: { bps: 10e9, avg_packet_bytes: 1100 }, udp: { bps: 10e9 } },
+      investigate: { destPort: { count: 2, top: [{ port: 443, share: 0.9 }] } },
+      binding: { prefixes: [] },
+    });
+    assert.equal(onePort, 'Резать: входящий UDP, пакет около 1100 Б, на сети провайдера, порт 443');
+    assert.equal(formatCutLine({
+      mode: 'volumetric',
+      scope: 'client',
+      byProto: { all: { bps: 1e9 }, udp: { bps: 1e9 } },
+    }), '');
+    assert.equal(formatCutLine({
+      mode: 'carpet',
+      scope: 'provider',
+      byProto: { all: { bps: 10e9 }, udp: { bps: 1e9 } },
+    }), '');
+  });
+
+  it('шапка провайдера без isp: и строка «Резать» в алерте', () => {
+    const text = formatAlertMessage({
+      name: 'isp:verolayn',
+      scope: 'provider',
+      scopeId: 'isp:verolayn',
+      minute: '2026-10-03 12:12:00',
+      byProto: {
+        all: { bps: 29.6e9, avg_packet_bytes: 1250, growth_bps: 29.6 },
+        udp: { bps: 29.5e9 },
+        tcp: { bps: 0.1e9 },
+      },
+      verdict: { kind: 'carpet', hourRatio: 29.6, hourCeiling: 1e9 },
+      investigate: {
+        sources: { dstIpCount: 4096, dstNetCount: 16 },
+        destPort: { count: 50000, top: [{ port: 41234, share: 0.005 }] },
+      },
+      binding: { bindMode: 'prefixes', prefixes: ['91.151.176.0/20'], ports: [] },
+      signals: ['volume'],
+    });
+    assert.match(text, /^🔴 <b>UDP-флуд по сети<\/b> · провайдер <b>verolayn<\/b>/);
+    assert.match(text, /Цель: сети провайдера, не один сервер/);
+    assert.match(text, /Резать: входящий UDP, пакет около 1250 Б, на 91\.151\.176\.0\/20\. Порты случайные, по порту не резать/);
+    assert.match(text, /Весь трафик провайдера: /);
+    assert.match(text, /Сети: 91\.151\.176\.0\/20/);
   });
 
   it('pickAlertCandidates только proto all и выбранный scope', () => {
