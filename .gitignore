@@ -4,6 +4,7 @@
 .env
 .env.*
 .clickhouse.env
+deploy/clickhouse/bootstrap_users.local.sql
 
 # UI runtime secrets (bootstrapped on server)
 deploy/ui/.env

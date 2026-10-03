@@ -1,9 +1,10 @@
 -- Bootstrap ClickHouse users for a fresh GrapesNTA install.
 -- Run as a user with GRANT OPTION (default / develop), AFTER ./deploy/schema/apply.sh.
 --
--- Replace the three passwords, then:
+-- Stand passwords: copy this file to bootstrap_users.local.sql (gitignored)
+-- and edit IDENTIFIED BY there. Do not commit real passwords into this template.
 --   clickhouse-client --host HOST --port 9000 --user default --password '...' \
---     --multiquery < deploy/clickhouse/bootstrap_users.sql
+--     --multiquery < deploy/clickhouse/bootstrap_users.local.sql
 --
 -- Overflow mode MUST stay 'throw'. Never use 'break' — it silently truncates
 -- aggregates and looks like a successful query.

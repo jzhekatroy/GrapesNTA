@@ -109,8 +109,31 @@ git_pull() {
   [[ "${EUID}" -eq 0 ]] && home="$(getent passwd root | cut -d: -f6)"
   [[ -n "${home}" ]] || home=/root
 
+  # Stands keep local edits in tracked files (most often real CH passwords in
+  # bootstrap_users.sql). Those must not block a fast-forward. Untracked
+  # secrets (.env) stay put — they are not stashed.
+  local stashed=0
+  if ! git diff --quiet --ignore-submodules -- \
+    || ! git diff --cached --quiet --ignore-submodules --; then
+    log "stash local tracked changes so pull can fast-forward"
+    git status --porcelain --untracked-files=no || true
+    HOME="${home}" git stash push -m "deploy.sh: local before pull ${before}" >/dev/null
+    stashed=1
+  fi
+
   if ! HOME="${home}" GIT_TERMINAL_PROMPT=0 git pull --ff-only origin "${branch}"; then
+    if [[ "${stashed}" -eq 1 ]]; then
+      HOME="${home}" git stash pop >/dev/null || true
+    fi
     die "git pull не прошёл (HOME=${home}). Запускайте из root-шелла напрямую: cd ${REPO_ROOT} && ./deploy/deploy.sh …  (без sudo). Собрать текущее дерево без обновления: $0 --no-pull …"
+  fi
+
+  if [[ "${stashed}" -eq 1 ]]; then
+    if HOME="${home}" git stash pop; then
+      log "restored local changes after pull"
+    else
+      log "WARNING: stash pop конфликтует. Стек цел: git stash list. Разберите и git stash pop вручную."
+    fi
   fi
 
   after="$(git rev-parse --short HEAD)"
