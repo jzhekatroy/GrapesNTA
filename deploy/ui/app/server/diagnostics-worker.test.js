@@ -25,5 +25,8 @@ test('a deferred job is reported on its own, not as a silent ok', () => {
 
 test('yesterday is normal for a day job, four days is not', () => {
   assert.equal(classifyTrafficJob('traffic_dashboard_1d', 'ok', 33 * HOUR, 10 * HOUR).stale, false);
+  // ШПД 04.10 19:10 МСК: вчерашний день закрыт в 00:05, до начала дня 40 ч.
+  assert.equal(classifyTrafficJob('traffic_dashboard_1d', 'ok', 40 * HOUR, 16 * HOUR).stale, false);
+  assert.equal(classifyTrafficJob('traffic_client_service_1d', 'ok', 49 * HOUR, 23 * HOUR).stale, false);
   assert.equal(classifyTrafficJob('traffic_client_service_1d', 'ok', 100 * HOUR, 10 * 60).stale, true);
 });

@@ -91,7 +91,9 @@ function trafficStaleUpdateSec(jobName) {
 }
 
 function trafficBucketLagWarnSec(jobName) {
-  if (jobName.endsWith('_1d')) return 40 * 3600; // yesterday bucket is normal until next day run
+  // Вчерашний день закрывается ночью (00:05–01:10) и до следующего прогона
+  // отстоит от его начала до 49 ч. С порогом 40 ч предупреждение шло каждый день с 16:00.
+  if (jobName.endsWith('_1d')) return 50 * 3600;
   // A closed hour sits about two hours behind the clock. Six hours means the
   // job is not keeping up, which a fresh updated_at used to hide.
   if (jobName.endsWith('_1h')) return 6 * 3600;
