@@ -23,7 +23,7 @@ const {
   ensureDetectionTables,
   PROTOS,
 } = require('./detection-schema');
-const { processDetectionAlerts } = require('./detection-telegram');
+const { processDetectionAlerts, EVENTS_TABLE } = require('./detection-telegram');
 const { AMPLIFIER_PORTS, isNetSpikeHit, SYN_SUSTAINED_PPS } = require('./detection-signals');
 const { loadForeignEnvelopes } = require('./detection-investigate');
 const {
@@ -1300,6 +1300,44 @@ function isBaselineCacheFresh(cache, now = Date.now(), ttlMs = BASELINE_CACHE_MS
 
 let clientBaselineCache = { at: 0, map: new Map() };
 let netBaselineCache = { at: 0, map: new Map() };
+
+// Норма — p99.9 за 14 дней, а у провайдеров история пока около двух суток,
+// и p99.9 — это три старшие минуты. Перезапуск воркера во время атаки
+// (ШПД 04.10 18:56 МСК) вписал её в норму: у verolayn 0.53 → 25 Гбит/с, рост
+// под атакой упал до ×0.6, события «нормализовались». Поэтому свежие часы
+// в норму не берём, а окна событий детекции вырезаем с запасом до начала:
+// атаку замечают не с первой минуты.
+const BASELINE_LAG_HOURS = 6;
+const BASELINE_EVENT_BEFORE_HOURS = 6;
+const BASELINE_EVENT_AFTER_HOURS = 1;
+
+function baselineAttackWindowsCte(days) {
+  return `attack_windows AS (
+    SELECT
+      scope,
+      scope_id,
+      groupArray((
+        alert_minute - INTERVAL ${BASELINE_EVENT_BEFORE_HOURS} HOUR,
+        ifNull(normalize_minute, now('UTC')) + INTERVAL ${BASELINE_EVENT_AFTER_HOURS} HOUR
+      )) AS windows
+    FROM ${config.database}.${EVENTS_TABLE} FINAL
+    WHERE alert_minute >= now('UTC') - INTERVAL ${Number(days) + 1} DAY
+    GROUP BY scope, scope_id
+  )`;
+}
+
+function outsideAttackWindowsSql(minuteExpr) {
+  return `NOT arrayExists(w -> ${minuteExpr} >= w.1 AND ${minuteExpr} <= w.2, aw.windows)`;
+}
+
+async function queryBaseline(withWindows, withoutWindows, params, opts) {
+  try {
+    return await query(withWindows, params, opts);
+  } catch (err) {
+    logDetection('baseline without attack windows', { name: opts.name, message: err.message });
+    return query(withoutWindows, params, opts);
+  }
+}
 let hourSignalCache = { at: 0, map: new Map() };
 
 function mskHourKey(scope, scopeId, minuteValue) {
@@ -1360,18 +1398,26 @@ async function loadClientBaselines() {
   const q = BASELINE_QUANTILE;
   const days = BASELINE_DAYS;
   const map = new Map();
-  const { rows: clients } = await query(`
+  const clientSql = (windows) => `
+    ${windows ? `WITH ${baselineAttackWindowsCte(days)}` : ''}
     SELECT
-      client_id AS scope_id,
-      quantileExact(${q})(bytes * 8 / 60) AS bps,
-      quantileExact(${q})(packets / 60) AS pps
-    FROM default.traffic_client_1m
-    WHERE direction = 'in'
-      AND minute >= now('UTC') - INTERVAL {days:UInt16} DAY
-      AND minute < now('UTC')
+      c.client_id AS scope_id,
+      quantileExact(${q})(c.bytes * 8 / 60) AS bps,
+      quantileExact(${q})(c.packets / 60) AS pps
+    FROM default.traffic_client_1m AS c
+    ${windows ? `LEFT JOIN attack_windows AS aw ON aw.scope = 'client' AND aw.scope_id = c.client_id` : ''}
+    WHERE c.direction = 'in'
+      AND c.minute >= now('UTC') - INTERVAL {days:UInt16} DAY
+      AND c.minute < now('UTC') - INTERVAL ${BASELINE_LAG_HOURS} HOUR
       AND ${primaryClientSourceSql()}
-    GROUP BY client_id
-  `, { days }, { name: 'detection/baseline-clients', clickhouse_settings: HEAVY, requestTimeoutMs: 180000 });
+      ${windows ? `AND ${outsideAttackWindowsSql('c.minute')}` : ''}
+    GROUP BY c.client_id
+  `;
+  const { rows: clients } = await queryBaseline(clientSql(true), clientSql(false), { days }, {
+    name: 'detection/baseline-clients',
+    clickhouse_settings: HEAVY,
+    requestTimeoutMs: 180000,
+  });
   for (const r of clients) {
     map.set(`client|${r.scope_id}|all`, { bps: Number(r.bps || 0), pps: Number(r.pps || 0) });
   }
@@ -1384,21 +1430,28 @@ async function loadNetBaselines(beforeTs) {
   const q = BASELINE_QUANTILE;
   const days = BASELINE_DAYS;
   const map = new Map();
-  const { rows: nets } = await query(`
+  const netSql = (windows) => `
+    ${windows ? `WITH ${baselineAttackWindowsCte(days)}` : ''}
     SELECT
-      scope,
-      scope_id,
-      proto,
-      quantileExact(${q})(bps) AS bps_p999,
-      quantileExact(0.95)(bps) AS bps_p95,
-      quantileExact(${q})(pps) AS pps_p999,
-      quantileExact(0.95)(pps) AS pps_p95,
-      quantileExact(0.95)(amp_bytes * 8 / 60) AS amp_bps_p95
-    FROM ${tableRef()}
-    WHERE minute >= now('UTC') - INTERVAL {days:UInt16} DAY
-      AND minute < ${utcDateTime('before')}
-    GROUP BY scope, scope_id, proto
-  `, { days, before: formatCh(beforeTs) }, { name: 'detection/baseline-anomaly' });
+      a.scope AS scope,
+      a.scope_id AS scope_id,
+      a.proto AS proto,
+      quantileExact(${q})(a.bps) AS bps_p999,
+      quantileExact(0.95)(a.bps) AS bps_p95,
+      quantileExact(${q})(a.pps) AS pps_p999,
+      quantileExact(0.95)(a.pps) AS pps_p95,
+      quantileExact(0.95)(a.amp_bytes * 8 / 60) AS amp_bps_p95
+    FROM ${tableRef()} AS a
+    ${windows ? 'LEFT JOIN attack_windows AS aw ON aw.scope = a.scope AND aw.scope_id = a.scope_id' : ''}
+    WHERE a.minute >= now('UTC') - INTERVAL {days:UInt16} DAY
+      AND a.minute < least(${utcDateTime('before')}, now('UTC') - INTERVAL ${BASELINE_LAG_HOURS} HOUR)
+      ${windows ? `AND ${outsideAttackWindowsSql('a.minute')}` : ''}
+    GROUP BY a.scope, a.scope_id, a.proto
+  `;
+  const { rows: nets } = await queryBaseline(netSql(true), netSql(false), {
+    days,
+    before: formatCh(beforeTs),
+  }, { name: 'detection/baseline-anomaly' });
   for (const r of nets) {
     const usePeak = String(r.proto) === 'all';
     map.set(`${r.scope}|${r.scope_id}|${r.proto}`, {
@@ -1960,6 +2013,7 @@ module.exports = {
   clampClosedMinute,
   pendingMinutes,
   CATCHUP_MAX_MINUTES,
+  loadBaselines,
   HISTORY_METRICS,
   BASELINE_CACHE_MS,
   isBaselineCacheFresh,
