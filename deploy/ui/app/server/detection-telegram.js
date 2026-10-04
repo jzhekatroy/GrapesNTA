@@ -1112,27 +1112,27 @@ function packetClassMoved(prev, next) {
   return bytes < low * (1 - PKT_CLASS_MARGIN) || bytes > high * (1 + PKT_CLASS_MARGIN);
 }
 
-function protoExcessBps(row) {
-  const bps = Number(row?.bps) || 0;
-  const growth = finiteGrowth(row?.growth_bps ?? row?.growthBps);
-  if (!(bps > 0) || growth == null || !(growth > 0)) return null;
-  return Math.max(0, bps - bps / growth);
+function protoGrowth(row) {
+  if (!(Number(row?.bps) > 0)) return null;
+  return finiteGrowth(row?.growth_bps ?? row?.growthBps);
 }
 
 // Протокол атаки — тот, что вырос. Доля во всём трафике клиента врёт, когда
 // у клиента свой большой фон: 81050 живёт на 12–15 Гбит/с TCP, и UDP-флуд
 // в 95.129.234.0/24 читался то «UDP», то «смешанным» от силы импульса.
+// Норма UDP за час атаки уже поднята прошлыми импульсами, поэтому слабый
+// импульс растёт лишь в 1.4×: сравниваем рост протоколов между собой.
+const PROTO_GROWTH_MIN = 1.2;
+const PROTO_GROWTH_LEAD = 1.3;
+
 function attackProtoRow(byProto) {
   const udp = byProto?.udp;
   const tcp = byProto?.tcp;
-  const udpExcess = protoExcessBps(udp);
-  const tcpExcess = protoExcessBps(tcp);
-  if (udpExcess == null || tcpExcess == null) return null;
-  const total = udpExcess + tcpExcess;
-  const allBps = Number(byProto?.all?.bps) || (Number(udp?.bps) || 0) + (Number(tcp?.bps) || 0);
-  if (!(total > 0) || total < allBps * 0.2) return null;
-  if (udpExcess / total >= 0.8) return { proto: 'udp', row: udp };
-  if (tcpExcess / total >= 0.8) return { proto: 'tcp', row: tcp };
+  const udpGrowth = protoGrowth(udp);
+  const tcpGrowth = protoGrowth(tcp);
+  if (udpGrowth == null || tcpGrowth == null) return null;
+  if (udpGrowth >= PROTO_GROWTH_MIN && udpGrowth >= tcpGrowth * PROTO_GROWTH_LEAD) return { proto: 'udp', row: udp };
+  if (tcpGrowth >= PROTO_GROWTH_MIN && tcpGrowth >= udpGrowth * PROTO_GROWTH_LEAD) return { proto: 'tcp', row: tcp };
   return null;
 }
 
