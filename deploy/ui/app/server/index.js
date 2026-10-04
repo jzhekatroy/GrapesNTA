@@ -458,6 +458,10 @@ async function requireSession(req, res, next) {
 
 async function runNamed(builder, { label = 'other', name } = {}) {
   const spec = await builder();
+  // Мини-графики без строк для сопоставления (все значения «—») запроса не имеют.
+  if (!spec.sql) {
+    return { data: await spec.map([]), meta: { elapsedMs: 0, rows: 0, ...(spec.meta || {}) } };
+  }
   const { rows, elapsedMs } = await query(spec.sql, spec.params || {}, {
     label,
     name,

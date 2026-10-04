@@ -63,6 +63,9 @@ const {
 
 async function runNamed(builder, { name } = {}) {
   const spec = await builder();
+  if (!spec.sql) {
+    return { data: await spec.map([]), meta: { elapsedMs: 0, rows: 0, ...(spec.meta || {}) } };
+  }
   const { rows, elapsedMs } = await query(spec.sql, spec.params || {}, {
     name,
     clickhouse_settings: spec.clickhouse_settings,
