@@ -1517,6 +1517,38 @@ function toInsertRow(object, proto, raw, baseline) {
 // и minuteWritten() навсегда вернёт false. Помним её здесь, чтобы не зациклиться.
 let lastProcessedMinute = 0;
 
+const MINUTE_MS = 60 * 1000;
+const CATCHUP_MAX_MINUTES = 10;
+
+// Под нагрузкой свёртка закрывает минуты пачками (ШПД 04.10: 15:42–15:46 UTC
+// одним заходом), и последняя закрытая минута перескакивает через остальные.
+// Без догона серия для алерта не набирается. Догоняем не дальше окна: минуты
+// старше дали бы в Telegram алерты о прошлом. После перезапуска воркера, когда
+// за окно ничего не записано, берём только последнюю минуту.
+function pendingMinutes(closedTs, lastDoneTs, max = CATCHUP_MAX_MINUTES) {
+  if (!Number.isFinite(closedTs) || closedTs <= 0) return [];
+  if (!Number.isFinite(lastDoneTs) || lastDoneTs <= 0 || lastDoneTs >= closedTs) return [closedTs];
+  const windowFrom = closedTs - (max - 1) * MINUTE_MS;
+  const out = [];
+  for (let ts = Math.max(lastDoneTs + MINUTE_MS, windowFrom); ts <= closedTs; ts += MINUTE_MS) out.push(ts);
+  return out;
+}
+
+async function lastWrittenMinute(closedTs, max = CATCHUP_MAX_MINUTES) {
+  const { rows } = await query(`
+    SELECT toString(max(minute)) AS m, count() AS n
+    FROM ${tableRef()}
+    WHERE minute >= ${utcDateTime('from')}
+      AND minute <= ${utcDateTime('to')}
+  `, {
+    from: formatCh(closedTs - max * MINUTE_MS),
+    to: formatCh(closedTs),
+  }, { name: 'detection/last-written-minute' });
+  if (!Number(rows[0]?.n)) return null;
+  const ts = parseUtc(rows[0]?.m);
+  return Number.isFinite(ts) && ts > 0 ? ts : null;
+}
+
 async function tick() {
   await ensureDetectionTables();
   const closed = await lastClosedMinute();
@@ -1551,7 +1583,22 @@ async function tick() {
     return { skipped: 'done', minute, ...stats, ...(netHour ? { netHour } : {}) };
   }
 
+  const written = await lastWrittenMinute(closed);
+  const minutes = pendingMinutes(closed, Math.max(written || 0, lastProcessedMinute));
+  if (minutes.length > 1) {
+    logDetection('catch-up', { from: formatCh(minutes[0]), to: minute, minutes: minutes.length });
+  }
   const objects = await loadObjects();
+  let out = null;
+  for (const ts of minutes) {
+    out = await processMinute(ts, objects);
+  }
+  if (minutes.length > 1) out.caughtUp = minutes.slice(0, -1).map(formatCh);
+  return out;
+}
+
+async function processMinute(closed, objects) {
+  const minute = formatCh(closed);
   const portClients = portClientIds(objects);
   const providerIds = objects.filter((o) => o.scope === 'provider').map((o) => o.scopeId);
   lastPortClients = portClients;
@@ -1911,6 +1958,8 @@ module.exports = {
   loadHistory,
   lastClosedMinute,
   clampClosedMinute,
+  pendingMinutes,
+  CATCHUP_MAX_MINUTES,
   HISTORY_METRICS,
   BASELINE_CACHE_MS,
   isBaselineCacheFresh,

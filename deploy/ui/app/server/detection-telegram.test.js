@@ -278,6 +278,22 @@ describe('detection-telegram', () => {
     assert.equal(shouldSendAlert(impulses.slice(0, 5), 1.6, 3, undefined, 3), false);
   });
 
+  it('окно объёма: воркер под атакой пишет не каждую минуту — серия по времени', () => {
+    const sparse = [
+      above('2026-10-04 15:46:00'),
+      above('2026-10-04 15:41:00'),
+      below('2026-10-04 15:38:00'),
+      below('2026-10-04 15:37:00'),
+    ];
+    assert.equal(shouldSendAlert(sparse, 1.6, 3, undefined, 6), true);
+    const next = [above('2026-10-04 15:47:00'), ...sparse];
+    assert.equal(shouldSendAlert(next, 1.6, 3, undefined, 6), false);
+    const close = [above('2026-10-04 15:42:00'), above('2026-10-04 15:41:00'), below('2026-10-04 15:38:00')];
+    assert.equal(shouldSendAlert(close, 1.6, 3, undefined, 6), false);
+    const mixed = [above('2026-10-04 15:46:00'), below('2026-10-04 15:43:00'), above('2026-10-04 15:41:00')];
+    assert.equal(shouldSendAlert(mixed, 1.6, 3, undefined, 6), false);
+  });
+
   it('окно объёма: начало атаки — первый импульс, а не последний', () => {
     const history = [
       above('2026-10-03 12:16:00'),

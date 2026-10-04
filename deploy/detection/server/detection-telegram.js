@@ -658,11 +658,24 @@ function rowsInWindow(historyNewestFirst, windowSize) {
 function windowQualifies(historyNewestFirst, threshold, need, windowSize) {
   const history = Array.isArray(historyNewestFirst) ? historyNewestFirst : [];
   if (!history.length || !isAboveGrowthThreshold(history[0], threshold)) return false;
+  const rows = rowsInWindow(history, windowSize);
   let hot = 0;
-  for (const row of rowsInWindow(history, windowSize)) {
+  for (const row of rows) {
     if (isAboveGrowthThreshold(row, threshold)) hot += 1;
   }
-  return hot >= need;
+  if (hot >= need) return true;
+  return sparseWindowQualifies(rows, hot, need);
+}
+
+// Под атакой воркер не успевает и пишет минуту из нескольких (ШПД 04.10 15:41
+// и 15:46 UTC), три строки в окне не набираются. Пропуск — не тишина: если все
+// записанные минуты окна горячие и тянутся на серию, серия есть.
+function sparseWindowQualifies(rows, hot, need) {
+  if (rows.length < 2 || hot < rows.length) return false;
+  const newest = parseUtc(rows[0]?.minute);
+  const oldest = parseUtc(rows.at(-1)?.minute);
+  if (!Number.isFinite(newest) || !Number.isFinite(oldest)) return false;
+  return newest - oldest >= (need - 1) * MINUTE;
 }
 
 function shouldSendAlert(historyNewestFirst, threshold, streak = DEFAULT_STREAK, enabledAtMs, windowSize) {

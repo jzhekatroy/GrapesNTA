@@ -2,7 +2,38 @@
 
 const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
-const { BASELINE_CACHE_MS, isBaselineCacheFresh, dedupeClientsByDisplayName, clampClosedMinute } = require('./detection-engine');
+const {
+  BASELINE_CACHE_MS,
+  isBaselineCacheFresh,
+  dedupeClientsByDisplayName,
+  clampClosedMinute,
+  pendingMinutes,
+} = require('./detection-engine');
+
+describe('detection-engine catch-up', () => {
+  const at = (hm) => Date.parse(`2026-10-04T${hm}:00Z`);
+  const fmt = (list) => list.map((ts) => new Date(ts).toISOString().slice(11, 16));
+
+  it('свёртка закрыла пачку минут — считаем каждую по порядку (ШПД 04.10)', () => {
+    assert.deepEqual(fmt(pendingMinutes(at('15:41'), at('15:38'))), ['15:39', '15:40', '15:41']);
+    assert.deepEqual(fmt(pendingMinutes(at('15:46'), at('15:41'))), ['15:42', '15:43', '15:44', '15:45', '15:46']);
+  });
+
+  it('обычный тик — одна минута', () => {
+    assert.deepEqual(fmt(pendingMinutes(at('15:30'), at('15:29'))), ['15:30']);
+  });
+
+  it('отставание больше окна — догоняем только последние 10 минут', () => {
+    assert.deepEqual(fmt(pendingMinutes(at('16:00'), at('15:49'))), [
+      '15:51', '15:52', '15:53', '15:54', '15:55', '15:56', '15:57', '15:58', '15:59', '16:00',
+    ]);
+  });
+
+  it('без записанных минут в окне (перезапуск воркера) — только последняя', () => {
+    assert.deepEqual(fmt(pendingMinutes(at('16:00'), null)), ['16:00']);
+    assert.deepEqual(fmt(pendingMinutes(at('16:00'), 0)), ['16:00']);
+  });
+});
 
 describe('detection-engine closed minute', () => {
   const now = Date.parse('2026-09-28T13:23:40Z');
