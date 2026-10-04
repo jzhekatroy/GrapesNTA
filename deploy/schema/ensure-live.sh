@@ -130,6 +130,35 @@ if [[ "$granted" -eq 0 ]] && command -v clickhouse-client >/dev/null 2>&1; then
     echo "grant via clickhouse-client failed" >&2
   fi
 fi
+dictget_works() {
+  local user="$1" pass="$2"
+  [[ -n "$user" ]] || return 1
+  local body http code
+  body="$(mktemp)"
+  http="$(mktemp)"
+  if ! curl -sS -o "$body" -w '%{http_code}' --user "${user}:${pass}" \
+    "${CH_URL%/}/" \
+    --data-binary "SELECT dictGetOrDefault('default.net_isp_prefix_dict', 'entity_id', tuple(toIPv4('176.123.128.10')), '')" >"$http"; then
+    rm -f "$body" "$http"
+    return 1
+  fi
+  code="$(cat "$http")"
+  rm -f "$body" "$http"
+  [[ "$code" == "200" ]]
+}
+
+if [[ "$granted" -eq 0 ]]; then
+  read_user="${CLICKHOUSE_READ_USER:-}"
+  read_pass="${CLICKHOUSE_READ_PASSWORD:-}"
+  if [[ -z "$read_user" ]]; then
+    read_user="$(env_value "${UI_ENV}" CLICKHOUSE_READ_USER)"
+    read_pass="$(env_value "${UI_ENV}" CLICKHOUSE_READ_PASSWORD)"
+  fi
+  if dictget_works "$read_user" "$read_pass"; then
+    echo "ensure grants: ${read_user} уже читает словарь провайдеров, GRANT повторно не нужен"
+    granted=1
+  fi
+fi
 if [[ "$granted" -eq 0 ]]; then
   echo "ERROR: грант dictGet не выдан. ui_admin не может раздавать права, а другой пользователь базы в deploy/ui/.env не задан (нужен CLICKHOUSE_USER=default)." >&2
   exit 1
