@@ -223,6 +223,29 @@ function formatHourShare(ratio) {
   return `${pct.toLocaleString('ru-RU', { minimumFractionDigits: digits, maximumFractionDigits: digits })}%`;
 }
 
+function formatMskTime(value) {
+  if (!value) return '—';
+  const raw = String(value);
+  const date = new Date(raw.includes('T') ? raw : `${raw.replace(' ', 'T')}Z`);
+  if (Number.isNaN(date.getTime())) return raw;
+  return date.toLocaleTimeString('ru-RU', { timeZone: 'Europe/Moscow', hour: '2-digit', minute: '2-digit' });
+}
+
+function liveStateView(live) {
+  if (!live) return { tone: 'neutral', label: 'нет данных', lines: [] };
+  const lines = [];
+  if (live.lastHotMinute) {
+    lines.push(`удар ${formatMskTime(live.lastHotMinute)}: ${formatBps(live.lastHotBps)}`);
+  }
+  lines.push(`сейчас ${formatBps(live.lastBps)}${live.lastGrowth != null ? ` (${formatGrowth(live.lastGrowth)})` : ''}`);
+  lines.push(`пик ${formatBps(live.peakBps)} в ${formatMskTime(live.peakMinute)}`);
+  if (live.normalizeStreak) lines.push(`тихих минут ${live.quietStreak} из ${live.normalizeStreak}`);
+  if (live.lagMin != null) lines.push(`данные на ${formatMskTime(live.lastMinute)}, отставание ${live.lagMin} мин`);
+  if (live.state === 'ongoing') return { tone: 'critical', label: 'идёт', lines };
+  if (live.state === 'fading') return { tone: 'warning', label: 'затихает', lines };
+  return { tone: 'neutral', label: '—', lines };
+}
+
 function isPeakEvent(event) {
   return event?.verdict?.kind === 'benign_peak' || event?.status === 'peak';
 }
@@ -1396,6 +1419,23 @@ function PageDetection() {
                   </span>
                 ),
               },
+              ...(pageTab === 'active' ? [{
+                key: 'live',
+                title: 'Сейчас',
+                width: 260,
+                sortAccessor: (r) => (r.live?.state === 'ongoing' ? 2 : r.live?.state === 'fading' ? 1 : 0),
+                render: (r) => {
+                  const view = liveStateView(r.live);
+                  return (
+                    <div title={view.lines.join('\n')}>
+                      <Badge tone={view.tone}>{view.label}</Badge>
+                      {view.lines.map((line) => (
+                        <div key={line} style={{ fontSize: 12, color: 'var(--fg-muted)' }}>{line}</div>
+                      ))}
+                    </div>
+                  );
+                },
+              }] : []),
               {
                 key: 'attackVol',
                 title: 'Объём атаки',

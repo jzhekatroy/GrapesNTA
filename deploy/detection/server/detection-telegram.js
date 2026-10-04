@@ -3072,7 +3072,101 @@ async function loadDetectionEvents({ status = 'active', limit = 200, from, to, k
     ORDER BY if(status = 'active', alert_minute, if(status = 'peak', alert_minute, normalize_minute)) DESC
     LIMIT {take:UInt16}
   `, params, { name: 'detection/events-list' });
-  return rows.map(mapEventRow);
+  const events = rows.map(mapEventRow);
+  if (wanted === 'active') await attachLiveState(events);
+  return events;
+}
+
+const LIVE_ONGOING_GAP_MINUTES = 3;
+const LIVE_LOOKBACK_MS = 24 * 60 * MINUTE;
+
+// Состояние открытого события по минутам детектора после срабатывания: в карточке
+// без него видно только минуту алерта, и не понять, идёт атака или затихла
+// (ШПД 04.10: импульсы по 55 Гбит/с раз в 2–3 минуты, события висели часами).
+function liveEventState(rowsAsc, { alertMinute, threshold, signal, normalizeStreak: need, nowTs = Date.now() } = {}) {
+  const alertTs = parseUtc(alertMinute);
+  const rows = (rowsAsc || []).filter((r) => {
+    const ts = parseUtc(r.minute);
+    return Number.isFinite(ts) && (!Number.isFinite(alertTs) || ts >= alertTs);
+  });
+  if (!rows.length) return null;
+  const t = Number(threshold) || DEFAULT_GROWTH_THRESHOLD;
+  const hot = (r) => isAboveGrowthThreshold(r, t);
+  let peak = null;
+  let lastHot = null;
+  let hotMinutes = 0;
+  for (const r of rows) {
+    if (!peak || Number(r.bps) > Number(peak.bps)) peak = r;
+    if (hot(r)) {
+      hotMinutes += 1;
+      lastHot = r;
+    }
+  }
+  let quietStreak = 0;
+  for (let i = rows.length - 1; i >= 0 && !hot(rows[i]); i -= 1) quietStreak += 1;
+  const last = rows[rows.length - 1];
+  const lastTs = parseUtc(last.minute);
+  const lastHotTs = lastHot ? parseUtc(lastHot.minute) : null;
+  const sinceHotMin = lastHotTs != null ? Math.round((lastTs - lastHotTs) / MINUTE) : null;
+  const volumeLike = !signal || signal === SIGNALS.volume || signal === SIGNALS.net_spike;
+  let state = null;
+  if (volumeLike) {
+    state = sinceHotMin != null && sinceHotMin <= LIVE_ONGOING_GAP_MINUTES ? 'ongoing' : 'fading';
+  }
+  return {
+    state,
+    lastMinute: last.minute,
+    lastBps: Number(last.bps) || 0,
+    lastGrowth: finiteGrowth(last.growth_bps),
+    lastHotMinute: lastHot ? lastHot.minute : null,
+    lastHotBps: lastHot ? Number(lastHot.bps) || 0 : null,
+    sinceHotMin,
+    peakBps: Number(peak.bps) || 0,
+    peakMinute: peak.minute,
+    hotMinutes,
+    quietStreak,
+    normalizeStreak: need || null,
+    lagMin: Number.isFinite(lastTs) ? Math.max(0, Math.round((nowTs - lastTs) / MINUTE)) : null,
+  };
+}
+
+async function attachLiveState(events) {
+  if (!events.length) return;
+  try {
+    const nowTs = Date.now();
+    const alertTimes = events.map((e) => parseUtc(e.alertMinute)).filter(Number.isFinite);
+    if (!alertTimes.length) return;
+    const fromTs = Math.max(Math.min(...alertTimes), nowTs - LIVE_LOOKBACK_MS);
+    const scopeFilter = previousRowsScopeFilter(events.map((e) => ({ scope: e.scope, scopeId: e.scopeId })));
+    if (scopeFilter.sql === '0') return;
+    const { rows } = await query(`
+      SELECT scope, scope_id, toString(minute) AS m, bps, growth_bps, growth_pps
+      FROM ${tableRef()}
+      WHERE proto = 'all'
+        AND minute >= ${utcDateTime('from')}
+        AND ${scopeFilter.sql}
+      ORDER BY minute
+    `, { from: formatCh(fromTs), ...scopeFilter.params }, { name: 'detection/events-live' });
+    const byKey = new Map();
+    for (const r of rows) {
+      const key = objectKey(r.scope, r.scope_id);
+      const list = byKey.get(key) || [];
+      list.push({ minute: r.m, bps: r.bps, growth_bps: r.growth_bps, growth_pps: r.growth_pps });
+      byKey.set(key, list);
+    }
+    const settings = await getDetectionTelegramSettings();
+    for (const event of events) {
+      event.live = liveEventState(byKey.get(objectKey(event.scope, event.scopeId)), {
+        alertMinute: event.alertMinute,
+        threshold: event.threshold,
+        signal: event.signal,
+        normalizeStreak: signalSettings(settings, event.signal).normalizeStreak,
+        nowTs,
+      });
+    }
+  } catch (err) {
+    console.warn(new Date().toISOString(), 'detection events live state skipped', err.message);
+  }
 }
 
 function csvEscape(value) {
@@ -3852,6 +3946,7 @@ module.exports = {
   DEFAULT_NORMALIZE_STREAK,
   PREV_ROWS_GAP_MINUTES,
   previousRowsLookbackMinutes,
+  liveEventState,
   previousRowsScopeFilter,
   DEFAULT_TELEGRAM_API_URL,
   DEFAULT_MIN_CLIENT_SHARE_PCT,

@@ -51,8 +51,47 @@ const {
   PREV_ROWS_GAP_MINUTES,
   previousRowsLookbackMinutes,
   previousRowsScopeFilter,
+  liveEventState,
 } = require('./detection-telegram');
 const { emptyInvestigate } = require('./detection-investigate');
+
+describe('актуальное состояние открытого события', () => {
+  const pulse = (hm, gbps, growth) => ({ minute: `2026-10-04 ${hm}:00`, bps: gbps * 1e9, growth_bps: growth });
+  const opts = { alertMinute: '2026-10-04 16:19:00', threshold: 1.6, signal: 'volume', normalizeStreak: 10 };
+
+  // verolayn, ШПД 04.10: удары раз в 2–3 минуты, между ними тишина.
+  it('импульсы — атака идёт, видно последний удар и пик', () => {
+    const rows = [
+      pulse('16:18', 0.14, 0.3),
+      pulse('16:19', 11.34, 21.3),
+      pulse('16:20', 0.13, 0.2),
+      pulse('16:21', 10.66, 20),
+      pulse('16:22', 0.27, 0.5),
+      pulse('16:23', 0.12, 0.2),
+    ];
+    const live = liveEventState(rows, { ...opts, nowTs: Date.parse('2026-10-04T16:29:00Z') });
+    assert.equal(live.state, 'ongoing');
+    assert.equal(live.lastHotMinute, '2026-10-04 16:21:00');
+    assert.equal(live.sinceHotMin, 2);
+    assert.equal(live.quietStreak, 2);
+    assert.equal(live.peakMinute, '2026-10-04 16:19:00');
+    assert.equal(live.hotMinutes, 2);
+    assert.equal(live.lagMin, 6);
+    assert.equal(live.normalizeStreak, 10);
+  });
+
+  it('тишина дольше трёх минут — затихает, счёт тихих минут до закрытия', () => {
+    const rows = ['16:19', '16:20', '16:21', '16:22', '16:23', '16:24', '16:25']
+      .map((hm, i) => pulse(hm, i === 0 ? 11 : 0.2, i === 0 ? 21 : 0.3));
+    const live = liveEventState(rows, opts);
+    assert.equal(live.state, 'fading');
+    assert.equal(live.quietStreak, 6);
+  });
+
+  it('строк после срабатывания нет — состояния нет', () => {
+    assert.equal(liveEventState([pulse('16:10', 1, 1)], opts), null);
+  });
+});
 
 function above(minute) {
   return { minute, growth_bps: 2.0, growth_pps: 0.5 };
