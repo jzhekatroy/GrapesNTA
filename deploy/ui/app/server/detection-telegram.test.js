@@ -1778,4 +1778,28 @@ describe('detection-telegram', () => {
     assert.equal(peak.bps, 14e9);
     assert.equal(peak.minute, '2026-10-03 12:12:00');
   });
+
+  it('вектор по выросшему протоколу, а не по фону клиента', () => {
+    // 81050, 04.10: фон 12–15 Гбит/с TCP, UDP-флуд в 95.129.234.0/24 импульсами.
+    const minute = (udpBps, udpGrowth, udpPkt, tcpBps, allPkt) => vectorSnapshot({
+      byProto: {
+        all: { bps: udpBps + tcpBps, avg_packet_bytes: allPkt },
+        udp: { bps: udpBps, growth_bps: udpGrowth, avg_packet_bytes: udpPkt },
+        tcp: { bps: tcpBps, growth_bps: 1.05, avg_packet_bytes: 600 },
+      },
+      verdict: { kind: 'volumetric' },
+    });
+    const open = minute(13.9e9, 40, 1032, 11.0e9, 801);
+    const strong = minute(19.8e9, 60, 1024, 11.7e9, 820);
+    const weak = minute(8.9e9, 25, 889, 12.5e9, 721);
+    const faint = minute(11.1e9, 30, 744, 11.6e9, 686);
+    assert.equal(open.proto, 'udp');
+    assert.equal(open.pkt, 'large');
+    assert.equal(vectorChanged(open, strong), false);
+    assert.equal(vectorChanged(open, weak), false);
+    assert.equal(faint.pkt, 'mid');
+    assert.equal(vectorChanged(open, faint), false);
+    const small = minute(11e9, 30, 150, 11.6e9, 300);
+    assert.equal(vectorChanged(open, small), true);
+  });
 });

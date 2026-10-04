@@ -1098,6 +1098,44 @@ function packetClass(bytes) {
   return 'large';
 }
 
+const PKT_CLASS_EDGES = { small: [0, 200], mid: [200, 800], large: [800, Infinity] };
+const PKT_CLASS_MARGIN = 0.12;
+
+// Класс пакета меняется, только когда размер ушёл от границы с запасом:
+// 889 и 744 Б одного флуда не должны перекидывать «от 800» ↔ «200–800».
+function packetClassMoved(prev, next) {
+  if (!prev?.pkt || !next?.pkt || prev.pkt === next.pkt) return false;
+  const bytes = Number(next.pktBytes);
+  const edges = PKT_CLASS_EDGES[prev.pkt];
+  if (!(bytes > 0) || !edges) return true;
+  const [low, high] = edges;
+  return bytes < low * (1 - PKT_CLASS_MARGIN) || bytes > high * (1 + PKT_CLASS_MARGIN);
+}
+
+function protoExcessBps(row) {
+  const bps = Number(row?.bps) || 0;
+  const growth = finiteGrowth(row?.growth_bps ?? row?.growthBps);
+  if (!(bps > 0) || growth == null || !(growth > 0)) return null;
+  return Math.max(0, bps - bps / growth);
+}
+
+// Протокол атаки — тот, что вырос. Доля во всём трафике клиента врёт, когда
+// у клиента свой большой фон: 81050 живёт на 12–15 Гбит/с TCP, и UDP-флуд
+// в 95.129.234.0/24 читался то «UDP», то «смешанным» от силы импульса.
+function attackProtoRow(byProto) {
+  const udp = byProto?.udp;
+  const tcp = byProto?.tcp;
+  const udpExcess = protoExcessBps(udp);
+  const tcpExcess = protoExcessBps(tcp);
+  if (udpExcess == null || tcpExcess == null) return null;
+  const total = udpExcess + tcpExcess;
+  const allBps = Number(byProto?.all?.bps) || (Number(udp?.bps) || 0) + (Number(tcp?.bps) || 0);
+  if (!(total > 0) || total < allBps * 0.2) return null;
+  if (udpExcess / total >= 0.8) return { proto: 'udp', row: udp };
+  if (tcpExcess / total >= 0.8) return { proto: 'tcp', row: tcp };
+  return null;
+}
+
 function portSignature(investigate) {
   const dest = investigate?.destPort;
   const top = Array.isArray(dest?.top) ? dest.top[0] : null;
@@ -1137,14 +1175,19 @@ function vectorSnapshot({ byProto, investigate, verdict } = {}) {
   const bps = Number(all.bps) || 0;
   const udp = Number(byProto?.udp?.bps) || 0;
   const tcp = Number(byProto?.tcp?.bps) || 0;
+  const grown = attackProtoRow(byProto);
   let proto = 'mix';
-  if (bps > 0 && udp / bps >= 0.6) proto = 'udp';
+  if (grown) proto = grown.proto;
+  else if (bps > 0 && udp / bps >= 0.6) proto = 'udp';
   else if (bps > 0 && tcp / bps >= 0.6) proto = 'tcp';
+  const pktRow = grown?.row || all;
+  const pktBytes = Number(pktRow.avg_packet_bytes ?? pktRow.avgPacketBytes) || 0;
   const asns = asnSignature(investigate);
   const topAsn = investigate?.sources?.asns?.[0];
   return {
     proto,
-    pkt: packetClass(all.avg_packet_bytes ?? all.avgPacketBytes),
+    pkt: packetClass(pktBytes),
+    pktBytes: Math.round(pktBytes),
     ports: portSignature(investigate),
     prefixes: prefixSignature(investigate),
     asns,
@@ -1172,7 +1215,7 @@ function vectorChanged(prev, next) {
   if (!prev || !next) return false;
   const differ = (key) => prev[key] && next[key] && prev[key] !== next[key];
   if (differ('kind') && next.kind !== 'benign_peak' && prev.kind !== 'benign_peak') return true;
-  return Boolean(differ('proto') || differ('pkt') || differ('ports') || differ('prefixes') || differ('asns'));
+  return Boolean(differ('proto') || packetClassMoved(prev, next) || differ('ports') || differ('prefixes') || differ('asns'));
 }
 
 function vectorLabel(vector) {
@@ -3245,7 +3288,7 @@ async function followOpenAttacks({
     const cheap = vectorSnapshot({ byProto: group.byProto });
     const cheapChanged = hotNow && Boolean(
       (track.vector?.proto && cheap.proto && track.vector.proto !== cheap.proto)
-      || (track.vector?.pkt && cheap.pkt && track.vector.pkt !== cheap.pkt),
+      || packetClassMoved(track.vector, cheap),
     );
     const lookDue = notifyGapOpen(track.lastLookMinute || track.lastNotifyMinute, minute);
     const gapOk = notifyGapOpen(track.lastNotifyMinute, minute);
@@ -3266,7 +3309,7 @@ async function followOpenAttacks({
         errors.push({ key, message: `track-vector: ${err.message}` });
       }
     } else if (!settings.vectorNotify && cheapChanged) {
-      track = rememberVector(track, { ...track.vector, proto: cheap.proto, pkt: cheap.pkt });
+      track = rememberVector(track, { ...track.vector, proto: cheap.proto, pkt: cheap.pkt, pktBytes: cheap.pktBytes });
       track.pendingVector = false;
     }
     let notified = false;
