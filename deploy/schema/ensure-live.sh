@@ -67,10 +67,70 @@ if [[ ${#grant_files[@]} -eq 0 ]]; then
   exit 0
 fi
 
-# Пустой CLICKHOUSE_USER значит, что схема и гранты идут одним пользователем.
-if [[ -z "${GRANT_USER:-}" ]]; then
-  GRANT_USER="${CH_USER}"
-  GRANT_PASS="${CH_PASS}"
+# ui_admin словарь создаёт, но dictGet раздать не может (нет GRANT OPTION).
+# Ищем пользователя вроде default: сначала CLICKHOUSE_USER, потом учётки
+# загрузчиков, которые на стенде как раз от администратора базы.
+env_value() {
+  local file="$1" key="$2"
+  [[ -f "$file" ]] || return 0
+  bash -c 'set +u; set -a; . "$1" >/dev/null 2>&1; set +a; printf %s "${!2-}"' bash "$file" "$key" 2>/dev/null || true
+}
+
+try_grant() {
+  local user="$1" pass="$2" from="$3"
+  [[ -n "$user" ]] || return 1
+  case "$user" in
+    ui_admin|ui_read|collector_write) return 1 ;;
+  esac
+  local mark="${user}@${from}"
+  case " ${tried_grants} " in
+    *" ${mark} "*) return 1 ;;
+  esac
+  tried_grants="${tried_grants} ${mark}"
+  echo "ensure grants ClickHouse ${CH_URL} as ${user} (${from})"
+  if CH_USER="$user" CH_PASS="$pass" bash "${HTTP_APPLY}" "${grant_files[@]}"; then
+    return 0
+  fi
+  echo "grant as ${user} failed" >&2
+  return 1
+}
+
+tried_grants=""
+granted=0
+if try_grant "${GRANT_USER:-}" "${GRANT_PASS:-}" "deploy/ui/.env"; then
+  granted=1
 fi
-echo "ensure grants ClickHouse ${CH_URL} as ${GRANT_USER}"
-CH_USER="${GRANT_USER}" CH_PASS="${GRANT_PASS}" bash "${HTTP_APPLY}" "${grant_files[@]}"
+if [[ "$granted" -eq 0 ]]; then
+  enrich_env="${REPO_ROOT}/deploy/enrichment/.env"
+  worker_env="${REPO_ROOT}/deploy/worker/.env"
+  legacy_env="${REPO_ROOT}/../grapes/ui/.env"
+  [[ -f /opt/grapes/ui/.env ]] && legacy_env=/opt/grapes/ui/.env
+  for spec in \
+    "${enrich_env}|GEOLOADERD_CH_USER|GEOLOADERD_CH_PASSWORD" \
+    "${enrich_env}|SNMP_SYNC_CH_USER|SNMP_SYNC_CH_PASSWORD" \
+    "${enrich_env}|BGPORIGIN_DICT_SOURCE_USER|BGPORIGIN_DICT_SOURCE_PASSWORD" \
+    "${worker_env}|CLICKHOUSE_USER|CLICKHOUSE_PASSWORD" \
+    "${legacy_env}|CLICKHOUSE_USER|CLICKHOUSE_PASSWORD"
+  do
+    file="${spec%%|*}"
+    rest="${spec#*|}"
+    ukey="${rest%%|*}"
+    pkey="${rest#*|}"
+    if try_grant "$(env_value "$file" "$ukey")" "$(env_value "$file" "$pkey")" "$file"; then
+      granted=1
+      break
+    fi
+  done
+fi
+if [[ "$granted" -eq 0 ]] && command -v clickhouse-client >/dev/null 2>&1; then
+  echo "ensure grants via local clickhouse-client as default"
+  if clickhouse-client --user default --multiquery < <(cat "${grant_files[@]}"); then
+    granted=1
+  else
+    echo "grant via clickhouse-client failed" >&2
+  fi
+fi
+if [[ "$granted" -eq 0 ]]; then
+  echo "ERROR: грант dictGet не выдан. ui_admin не может раздавать права, а другой пользователь базы в deploy/ui/.env не задан (нужен CLICKHOUSE_USER=default)." >&2
+  exit 1
+fi
