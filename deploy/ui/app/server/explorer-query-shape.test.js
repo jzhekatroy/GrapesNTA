@@ -17,6 +17,18 @@ const WINDOW = {
 };
 
 describe('explorer query shape', () => {
+  it('l3_owner читает владельца из потока, а не перебирает префиксы', async () => {
+    const spec = await explorerFlows({
+      ...WINDOW,
+      groupBy: ['proto'],
+      filters: [{ field: 'l3_owner', op: '=', value: 'isp:pin' }],
+    });
+    assert.match(spec.sql, /f\.`src_entity` = \{l3_owner_0:String\}/);
+    assert.match(spec.sql, /OR f\.`dst_entity` = \{l3_owner_0:String\}/);
+    assert.equal(spec.params.l3_owner_0, 'isp:pin');
+    assert.doesNotMatch(spec.sql, /isIPAddressInRange/);
+  });
+
   it('filters direction as a raw column and aggregates once', async () => {
     const spec = await explorerFlows({
       ...WINDOW,

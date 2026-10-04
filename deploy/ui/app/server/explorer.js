@@ -1727,6 +1727,24 @@ function buildPrefixRangeClause(prefixes, params, idxRef) {
   return parts.length === 1 ? parts[0] : `(${parts.join(' OR ')})`;
 }
 
+// Владелец уже записан в поток при приёме. Повторный перебор префиксов
+// через isIPAddressInRange на src и dst для 6 часов не успевает за таймаут
+// клиента (pin, 04.10: 38 с против 6 с по колонкам, расхождений нет).
+function l3OwnerColumnClause(entityIds, op, params, idxRef) {
+  const src = flowCol('srcEntity');
+  const dst = flowCol('dstEntity');
+  const ids = (entityIds || []).map((id) => String(id || '').trim()).filter(Boolean);
+  if (!src || !dst || !ids.length) return null;
+  const paramName = `l3_owner_${idxRef.i++}`;
+  const neg = op === '!=' || op === '<>' || op === 'not_in';
+  const many = ids.length > 1 || op === 'in' || op === 'not_in';
+  const match = many
+    ? `(f.${src} IN {${paramName}:Array(String)} OR f.${dst} IN {${paramName}:Array(String)})`
+    : `(f.${src} = {${paramName}:String} OR f.${dst} = {${paramName}:String})`;
+  params[paramName] = many ? ids : ids[0];
+  return neg ? `NOT ${match}` : match;
+}
+
 async function buildEntityPrefixFilter(field, value, params, idxRef) {
   if (field === 'l3_owner') {
     const entityId = String(value ?? '').trim();
@@ -1984,6 +2002,16 @@ async function buildExplorerFilterClauses(filters, dims, params) {
     if (dim.joinSql) joins.add(dim.joinSql);
 
     if (dim.filterType === 'l3_owner' || dim.filterType === 'own_network') {
+      if (f.field === 'l3_owner') {
+        const columnOps = new Set(['=', '!=', '<>', 'in', 'not_in']);
+        if (!op || columnOps.has(op)) {
+          const clause = l3OwnerColumnClause(values, op || '=', params, idxRef);
+          if (clause) {
+            addClause(clause);
+            continue;
+          }
+        }
+      }
       addClause(await buildEntityPrefixFilter(f.field, f.value, params, idxRef));
       continue;
     }
