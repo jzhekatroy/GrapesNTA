@@ -1997,9 +1997,28 @@ function pickAlertCandidates(allRows, previousByKey, threshold, options = {}) {
 // Чужая география — признак той же аномалии, что всплеск или атака. Отдельное
 // событие на неё дало бы вторую запись и вторую телеграмму о нормализации, поэтому
 // его не заводим, если по объекту другое событие открывается сейчас или уже открыто.
+// Рост объёма и удар в одну /24 — одна объёмная атака на объект: второе
+// событие по ней дежурному не нужно (71747, 04.10 09:50 и 09:54 МСК).
+function volumetricTwinActive(scope, scopeId, signal, activeByKey) {
+  if (signal === SIGNALS.volume) {
+    return activeByKey.has(objectSignalKey(scope, scopeId, SIGNALS.net_spike));
+  }
+  if (signal === SIGNALS.net_spike) {
+    return activeByKey.has(objectSignalKey(scope, scopeId, SIGNALS.volume))
+      || activeByKey.has(objectKey(scope, scopeId));
+  }
+  return false;
+}
+
 function dropDuplicateGeo(candidates, activeByKey = new Map()) {
   const hasOther = candidates.some((c) => (c.signal || SIGNALS.volume) !== SIGNALS.foreign_geo);
+  const hasNetSpike = candidates.some((c) => c.signal === SIGNALS.net_spike);
   return candidates.filter((c) => {
+    const signal = c.signal || SIGNALS.volume;
+    if (signal === SIGNALS.volume || signal === SIGNALS.net_spike) {
+      if (signal === SIGNALS.volume && hasNetSpike) return false;
+      return !volumetricTwinActive(c.row?.scope, c.row?.scope_id, signal, activeByKey);
+    }
     if (c.signal !== SIGNALS.foreign_geo) return true;
     if (hasOther) return false;
     const { scope, scope_id: scopeId } = c.row;

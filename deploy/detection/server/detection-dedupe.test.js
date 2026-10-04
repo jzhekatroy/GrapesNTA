@@ -33,6 +33,33 @@ describe('одно событие на одну аномалию', () => {
   });
 });
 
+describe('одна объёмная атака — одно событие', () => {
+  // 71747, 04.10: удар в 37.230.162.0/24 открыт в 09:50, рост объёма — в 09:54.
+  const row71747 = { scope: 'client', scope_id: '71747', proto: 'all', bps: 53.46e9 };
+  const c = (signal) => ({ row: row71747, signal, key: `client|71747|${signal}`, objectKey: 'client|71747' });
+
+  it('рост объёма при открытом ударе в /24 молчит', () => {
+    const active = new Map([['client|71747|net_spike', { id: 'client|71747|net_spike|2026-10-04 06:50:00' }]]);
+    assert.equal(dropDuplicateGeo([c(SIGNALS.volume)], active).length, 0);
+  });
+
+  it('удар в /24 при открытом росте объёма молчит', () => {
+    const active = new Map([['client|71747', { id: 'client|71747|2026-10-04 06:50:00' }]]);
+    assert.equal(dropDuplicateGeo([c(SIGNALS.net_spike)], active).length, 0);
+  });
+
+  it('в одну минуту остаётся удар в /24', () => {
+    const out = dropDuplicateGeo([c(SIGNALS.volume), c(SIGNALS.net_spike)], new Map());
+    assert.deepEqual(out.map((x) => x.signal), [SIGNALS.net_spike]);
+  });
+
+  it('SYN и амплификация открываются отдельно', () => {
+    const active = new Map([['client|71747|net_spike', { id: 'x' }]]);
+    const out = dropDuplicateGeo([c(SIGNALS.syn_flood), c(SIGNALS.amplification)], active);
+    assert.deepEqual(out.map((x) => x.signal), [SIGNALS.syn_flood, SIGNALS.amplification]);
+  });
+});
+
 describe('повтор атаки', () => {
   // 57469: 30.09 18:20, 18:30, 18:39 МСК — UDP на 185.97.252.138:7219, снова в 21:46.
   const prior57469 = [
