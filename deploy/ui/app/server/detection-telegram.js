@@ -632,6 +632,16 @@ function finiteGrowth(value) {
   return Number.isFinite(n) ? n : null;
 }
 
+// growth_bps — это «факт / норма». Лишнее — всё, что выше нормы:
+// 15.4 Гбит/с при росте ×8.58 значит норма 1.8 и лишних 13.6.
+function trafficAboveBaseline(bps, growth) {
+  const total = Number(bps);
+  const ratio = finiteGrowth(growth);
+  if (!(total > 0) || !(ratio > 0)) return { baselineBps: null, excessBps: null };
+  const baselineBps = total / ratio;
+  return { baselineBps, excessBps: Math.max(0, total - baselineBps) };
+}
+
 function isAboveGrowthThreshold(row, threshold) {
   const gBps = finiteGrowth(row?.growth_bps ?? row?.growthBps);
   const gPps = finiteGrowth(row?.growth_pps ?? row?.growthPps);
@@ -3113,13 +3123,19 @@ function liveEventState(rowsAsc, { alertMinute, threshold, signal, normalizeStre
   if (volumeLike) {
     state = sinceHotMin != null && sinceHotMin <= LIVE_ONGOING_GAP_MINUTES ? 'ongoing' : 'fading';
   }
+  const nowSplit = trafficAboveBaseline(last.bps, last.growth_bps);
+  const hotSplit = lastHot ? trafficAboveBaseline(lastHot.bps, lastHot.growth_bps) : { baselineBps: null, excessBps: null };
   return {
     state,
     lastMinute: last.minute,
     lastBps: Number(last.bps) || 0,
     lastGrowth: finiteGrowth(last.growth_bps),
+    lastBaselineBps: nowSplit.baselineBps,
+    lastExcessBps: nowSplit.excessBps,
     lastHotMinute: lastHot ? lastHot.minute : null,
     lastHotBps: lastHot ? Number(lastHot.bps) || 0 : null,
+    lastHotBaselineBps: hotSplit.baselineBps,
+    lastHotExcessBps: hotSplit.excessBps,
     sinceHotMin,
     peakBps: Number(peak.bps) || 0,
     peakMinute: peak.minute,

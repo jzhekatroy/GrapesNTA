@@ -232,18 +232,32 @@ function formatMskTime(value) {
 }
 
 function liveStateView(live) {
-  if (!live) return { tone: 'neutral', label: 'нет данных', lines: [] };
+  if (!live) return { tone: 'neutral', label: 'нет данных', headline: null, lines: [], title: '' };
+  const excess = live.lastHotExcessBps;
+  const headline = excess != null
+    ? `${formatBps(excess)} лишнего`
+    : (live.lastHotBps != null ? formatBps(live.lastHotBps) : null);
   const lines = [];
-  if (live.lastHotMinute) {
-    lines.push(`удар ${formatMskTime(live.lastHotMinute)}: ${formatBps(live.lastHotBps)}`);
+  if (live.lastHotBaselineBps != null) {
+    lines.push(`всего ${formatBps(live.lastHotBps)}, норма ${formatBps(live.lastHotBaselineBps)}`);
   }
-  lines.push(`сейчас ${formatBps(live.lastBps)}${live.lastGrowth != null ? ` (${formatGrowth(live.lastGrowth)})` : ''}`);
-  lines.push(`пик ${formatBps(live.peakBps)} в ${formatMskTime(live.peakMinute)}`);
-  if (live.normalizeStreak) lines.push(`тихих минут ${live.quietStreak} из ${live.normalizeStreak}`);
-  if (live.lagMin != null) lines.push(`данные на ${formatMskTime(live.lastMinute)}, отставание ${live.lagMin} мин`);
-  if (live.state === 'ongoing') return { tone: 'critical', label: 'идёт', lines };
-  if (live.state === 'fading') return { tone: 'warning', label: 'затихает', lines };
-  return { tone: 'neutral', label: '—', lines };
+  const title = [
+    live.lastHotMinute ? `удар ${formatMskTime(live.lastHotMinute)}` : null,
+    live.peakBps ? `пик ${formatBps(live.peakBps)} в ${formatMskTime(live.peakMinute)}` : null,
+    live.normalizeStreak ? `тихих минут ${live.quietStreak} из ${live.normalizeStreak}` : null,
+    live.lagMin != null ? `данные на ${formatMskTime(live.lastMinute)}` : null,
+  ].filter(Boolean).join('\n');
+  if (live.state === 'ongoing') return { tone: 'critical', label: 'атака', headline, lines, title };
+  if (live.state === 'fading') {
+    return {
+      tone: 'warning',
+      label: 'затихает',
+      headline: excess != null ? `было ${formatBps(excess)} лишнего` : headline,
+      lines,
+      title,
+    };
+  }
+  return { tone: 'neutral', label: '—', headline: null, lines: [], title };
 }
 
 function isPeakEvent(event) {
@@ -1423,12 +1437,15 @@ function PageDetection() {
                 key: 'live',
                 title: 'Сейчас',
                 width: 260,
-                sortAccessor: (r) => (r.live?.state === 'ongoing' ? 2 : r.live?.state === 'fading' ? 1 : 0),
+                sortAccessor: (r) => r.live?.lastHotExcessBps || 0,
                 render: (r) => {
                   const view = liveStateView(r.live);
                   return (
-                    <div title={view.lines.join('\n')}>
+                    <div title={view.title}>
                       <Badge tone={view.tone}>{view.label}</Badge>
+                      {view.headline && (
+                        <div style={{ fontWeight: 600 }}>{view.headline}</div>
+                      )}
                       {view.lines.map((line) => (
                         <div key={line} style={{ fontSize: 12, color: 'var(--fg-muted)' }}>{line}</div>
                       ))}

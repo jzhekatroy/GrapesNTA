@@ -78,6 +78,9 @@ describe('актуальное состояние открытого событ�
     assert.equal(live.hotMinutes, 2);
     assert.equal(live.lagMin, 6);
     assert.equal(live.normalizeStreak, 10);
+    // 10.66 Гбит/с при росте ×20: норма 0.533, лишних 10.127.
+    assert.ok(Math.abs(live.lastHotExcessBps - 10.66e9 * (1 - 1 / 20)) < 1);
+    assert.ok(Math.abs(live.lastHotBaselineBps - 10.66e9 / 20) < 1);
   });
 
   it('тишина дольше трёх минут — затихает, счёт тихих минут до закрытия', () => {
