@@ -7,6 +7,7 @@ const {
   ampStillGoing,
   evaluateForeignGeo,
   isSynFloodHit,
+  synFloodStillGoing,
   isTcpScan,
   synFloodShare,
   SIGNALS,
@@ -383,6 +384,27 @@ describe('detection-signals', () => {
 
   it('много голого SYN, но это обычный уровень часа → не флуд', () => {
     assert.equal(isSynFloodHit({ ...synFloodRow(), growth_syn: 1.4 }), false);
+  });
+
+  // Яндекс 3–4.10: ~1.4 млн п/с голого SYN держится всю ночь, а кратность к часу
+  // падает с ×16 до ×4 на границе часа. Новый алерт из этого не открываем,
+  // уже открытый не закрываем.
+  it('миллион SYN/с держит открытый алерт, но не открывает новый', () => {
+    const yandex = {
+      syn_only_packets: 1_400_000 * 60,
+      syn_only_bytes: 1_400_000 * 60 * 84,
+      syn_only_rows: 1200,
+      growth_syn: 1.4,
+    };
+    assert.equal(isSynFloodHit(yandex), false);
+    assert.equal(synFloodStillGoing(yandex), true);
+    assert.equal(synFloodStillGoing({ ...yandex, growth_syn: 4 }), true);
+    assert.equal(synFloodStillGoing({
+      syn_only_packets: 5188 * 60,
+      syn_only_bytes: 5188 * 60 * 72,
+      syn_only_rows: 8,
+      growth_syn: 1.2,
+    }), false);
   });
 
   it('кратность и минимум берутся из настроек', () => {

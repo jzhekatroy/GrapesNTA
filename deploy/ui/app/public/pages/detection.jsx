@@ -48,6 +48,7 @@ const TELEGRAM_DEFAULTS = {
   synHourRatio: 10,
   synMinKpps: 200,
   synPktMax: 100,
+  vectorNotify: true,
 };
 const TELEGRAM_VECTORS = [
   { id: 'volume', label: 'Рост объёма', shareKey: 'volumeMinSharePct', enableKey: null, streakKey: 'streak', streakFallback: 3 },
@@ -771,6 +772,7 @@ function PageDetection() {
         synHourRatio: telegram?.synHourRatio ?? 10,
         synMinKpps: telegram?.synMinKpps ?? 200,
         synPktMax: telegram?.synPktMax ?? 100,
+        vectorNotify: telegram?.vectorNotify !== false,
       };
       if (botToken.trim()) payload.botToken = botToken.trim();
       const data = await ApiClient.saveDetectionTelegramSettings(payload);
@@ -969,6 +971,17 @@ function PageDetection() {
               </div>
               <div style={{ color: 'var(--fg-muted)', font: 'var(--pv-text-body-3)' }}>
                 Объём: алерт открывается на N горячих минутах из окна (N — «Подряд» в строке «Рост объёма»), так импульсная атака 1 минута через 1–2 не теряется. Закрывается после указанного числа тихих минут подряд.
+              </div>
+              <label className="row" style={{ gap: 8, alignItems: 'center' }}>
+                <input
+                  type="checkbox"
+                  checked={telegram?.vectorNotify !== false}
+                  onChange={(e) => setTelegram(patchTelegram(telegram, { vectorNotify: e.target.checked }))}
+                />
+                <span>Оповещать о смене вектора атаки</span>
+              </label>
+              <div style={{ color: 'var(--fg-muted)', font: 'var(--pv-text-body-3)' }}>
+                Пока атака открыта — сообщение, если меняются протокол, размер пакета, порты, префиксы или операторы источников. Не чаще раза в 10 минут. Рост скорости вдвое приходит и с выключенной галочкой.
               </div>
               <div className="table-wrap table-wrap--telegram-vectors">
                 <table className="table table--telegram-vectors">

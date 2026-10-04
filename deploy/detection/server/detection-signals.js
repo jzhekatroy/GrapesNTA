@@ -65,6 +65,9 @@ const AMP_BPS_MIN = 20e6;
 // пропускали флуд на мелких (82035: 449 тыс. при норме 5 тыс.). Поэтому
 // решают кратность к норме часа (×10) и пол 200 тыс.; доля от TCP не нужна.
 const TCP_FLOOD_PPS_MIN = 200_000;
+// Пока голый SYN держится около миллиона пакетов/с, атака ещё идёт, даже если
+// норма этого часа уже раздута самим флудом и кратность упала ниже ×10.
+const SYN_SUSTAINED_PPS = 1_000_000;
 const TCP_FLOOD_HOUR_RATIO = 10;
 const TCP_FLOOD_PKT_MAX = 100;
 // Страховка от одиночной строки-артефакта. На sFlow 200 тыс. п/с — это сотни
@@ -188,7 +191,13 @@ function isSynFloodHit(row = {}, options = {}) {
 }
 
 function synFloodStillGoing(row = {}, options = {}) {
-  return isSynFloodHit(row, options);
+  if (isSynFloodHit(row, options)) return true;
+  const m = tcpClassMetrics(row, 'syn_only');
+  const pktMax = num(options.pktMax) ?? TCP_FLOOD_PKT_MAX;
+  const rowsMin = num(options.rowsMin) ?? TCP_FLOOD_ROWS_MIN;
+  if (m.rows < rowsMin) return false;
+  if (!(m.avgPkt > 0 && m.avgPkt < pktMax)) return false;
+  return m.pps >= SYN_SUSTAINED_PPS;
 }
 
 function isTcpScan(row = {}) {
@@ -402,6 +411,7 @@ module.exports = {
   SIGNAL_LABEL,
   SIGNAL_ORDER,
   TCP_FLOOD_PPS_MIN,
+  SYN_SUSTAINED_PPS,
   TCP_FOCUS_PPS_MIN,
   TCP_FOCUS_ANSWER_MAX,
   TCP_FLOOD_HOUR_RATIO,

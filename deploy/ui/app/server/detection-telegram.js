@@ -139,6 +139,8 @@ const DEFAULT_AMP_MIN_MBIT = 20;
 const DEFAULT_SYN_HOUR_RATIO = 10;
 const DEFAULT_SYN_MIN_KPPS = 200;
 const DEFAULT_SYN_PKT_MAX = 100;
+const VECTOR_NOTIFY_GAP_MINUTES = 10;
+const PEAK_GROWTH_RATIO = 2;
 
 const DEFAULT_SETTINGS = {
   bot_token: '',
@@ -169,6 +171,7 @@ const DEFAULT_SETTINGS = {
   syn_hour_ratio: DEFAULT_SYN_HOUR_RATIO,
   syn_min_kpps: DEFAULT_SYN_MIN_KPPS,
   syn_pkt_max: DEFAULT_SYN_PKT_MAX,
+  vector_notify: 1,
 };
 
 let ensurePromise = null;
@@ -451,7 +454,10 @@ async function telegramFetch(url, init, proxyUrl) {
 function matchesAlertScope(row, alertScope) {
   const scope = normalizeAlertScope(alertScope);
   if (scope === 'all') return true;
-  return String(row?.scope || '') === scope;
+  const rowScope = String(row?.scope || '');
+  // Провайдер — та же сеть, только целиком: «Рассылка по сетям» его не отсекает.
+  if (scope === 'net' && rowScope === 'provider') return true;
+  return rowScope === scope;
 }
 
 function mapSettings(row = {}) {
@@ -492,6 +498,7 @@ function mapSettings(row = {}) {
     synHourRatio: normalizeSynHourRatio(row.syn_hour_ratio ?? row.synHourRatio),
     synMinKpps: normalizeSynMinKpps(row.syn_min_kpps ?? row.synMinKpps),
     synPktMax: normalizeSynPktMax(row.syn_pkt_max ?? row.synPktMax),
+    vectorNotify: Number(row.vector_notify ?? row.vectorNotify ?? 1) === 1,
   };
 }
 
@@ -1061,6 +1068,175 @@ function formatAttackSourceLines(investigate, shape = null) {
   return lines;
 }
 
+function formatSourceOperatorLines(investigate) {
+  const asns = (Array.isArray(investigate?.sources?.asns) ? investigate.sources.asns : [])
+    .filter((row) => Number(row?.asn) > 0 && Number(row.share) > 0)
+    .slice(0, 5);
+  const countries = (Array.isArray(investigate?.sources?.countries) ? investigate.sources.countries : [])
+    .filter((row) => row?.cc && Number(row.share) > 0)
+    .slice(0, 5);
+  const lines = [];
+  if (asns.length) {
+    const text = asns.map((row) => {
+      const name = formatAsnLabel(row.asn, row.asnName || row.asName).trim();
+      return `${name} — ${formatSharePct(row.share)}`;
+    }).join(' · ');
+    lines.push(escapeHtml(`Откуда операторы: ${text}`));
+  }
+  if (countries.length) {
+    const text = countries.map((row) => `${row.cc} ${formatSharePct(row.share)}`).join(' · ');
+    lines.push(escapeHtml(`Страны источников: ${text}`));
+  }
+  return lines;
+}
+
+function packetClass(bytes) {
+  const n = Number(bytes) || 0;
+  if (!(n > 0)) return '';
+  if (n < 200) return 'small';
+  if (n < 800) return 'mid';
+  return 'large';
+}
+
+function portSignature(investigate) {
+  const dest = investigate?.destPort;
+  const top = Array.isArray(dest?.top) ? dest.top[0] : null;
+  const count = Number(dest?.count) || 0;
+  const share = Number(top?.share) || 0;
+  if (count > 8 || (count > 1 && share > 0 && share < 0.2)) return 'scatter';
+  if (top && share >= 0.5 && Number(top.port) > 0) return `port:${Number(top.port)}`;
+  return '';
+}
+
+// Между «явно один» и «явно размазано» оставлен зазор с пустым значением: пустое
+// поле со сменой не сравнивается, поэтому доля, гуляющая у границы, не шлёт
+// «вектор сменился» каждые 10 минут.
+function dominantSignature(rows, keyOf, { focus = 0.5, spread = 0.25 } = {}) {
+  const list = Array.isArray(rows) ? rows.filter((row) => keyOf(row)) : [];
+  if (!list.length) return '';
+  const share = Number(list[0].share) || 0;
+  if (share >= focus) return String(keyOf(list[0]));
+  if (share < spread) return 'spread';
+  return '';
+}
+
+function prefixSignature(investigate) {
+  return dominantSignature(investigate?.dest24, (row) => row?.net24);
+}
+
+function asnSignature(investigate) {
+  return dominantSignature(
+    investigate?.sources?.asns,
+    (row) => (Number(row?.asn) > 0 ? row.asn : ''),
+    { focus: 0.4, spread: 0.2 },
+  );
+}
+
+function vectorSnapshot({ byProto, investigate, verdict } = {}) {
+  const all = byProto?.all || {};
+  const bps = Number(all.bps) || 0;
+  const udp = Number(byProto?.udp?.bps) || 0;
+  const tcp = Number(byProto?.tcp?.bps) || 0;
+  let proto = 'mix';
+  if (bps > 0 && udp / bps >= 0.6) proto = 'udp';
+  else if (bps > 0 && tcp / bps >= 0.6) proto = 'tcp';
+  const asns = asnSignature(investigate);
+  const topAsn = investigate?.sources?.asns?.[0];
+  return {
+    proto,
+    pkt: packetClass(all.avg_packet_bytes ?? all.avgPacketBytes),
+    ports: portSignature(investigate),
+    prefixes: prefixSignature(investigate),
+    asns,
+    asnName: asns && asns !== 'spread' ? String(topAsn?.asnName || '') : '',
+    kind: String(verdict?.kind || ''),
+  };
+}
+
+function vectorDiffLines(prev, next) {
+  if (!prev || !next) return [];
+  const differ = (key) => prev[key] && next[key] && prev[key] !== next[key];
+  const lines = [];
+  const before = vectorLabel(prev);
+  if (before && before !== vectorLabel(next)) lines.push(`Было: ${before}`);
+  const asnText = (v) => (v.asns === 'spread'
+    ? 'разбросаны по многим операторам'
+    : `в основном AS${v.asns}${v.asnName ? ` ${v.asnName}` : ''}`);
+  if (differ('asns')) lines.push(`Источники: были ${asnText(prev)} → теперь ${asnText(next)}`);
+  const netText = (v) => (v.prefixes === 'spread' ? 'по многим /24' : `в основном ${v.prefixes}`);
+  if (differ('prefixes')) lines.push(`Цель: была ${netText(prev)} → теперь ${netText(next)}`);
+  return lines;
+}
+
+function vectorChanged(prev, next) {
+  if (!prev || !next) return false;
+  const differ = (key) => prev[key] && next[key] && prev[key] !== next[key];
+  if (differ('kind') && next.kind !== 'benign_peak' && prev.kind !== 'benign_peak') return true;
+  return Boolean(differ('proto') || differ('pkt') || differ('ports') || differ('prefixes') || differ('asns'));
+}
+
+function vectorLabel(vector) {
+  if (!vector) return '';
+  const proto = vector.proto === 'udp' ? 'UDP' : vector.proto === 'tcp' ? 'TCP' : vector.proto === 'mix' ? 'смешанный' : '';
+  const pkt = vector.pkt === 'small'
+    ? 'пакет до 200 Б'
+    : vector.pkt === 'mid'
+      ? 'пакет 200–800 Б'
+      : vector.pkt === 'large'
+        ? 'пакет от 800 Б'
+        : '';
+  const ports = vector.ports === 'scatter'
+    ? 'порты случайные'
+    : String(vector.ports || '').startsWith('port:')
+      ? `порт ${String(vector.ports).slice(5)}`
+      : '';
+  return [proto, pkt, ports].filter(Boolean).join(', ');
+}
+
+function signalRate(signal, row, group) {
+  if (signal === SIGNALS.syn_flood) {
+    const packets = Number(row?.syn_only_packets ?? row?.synOnlyPackets) || 0;
+    return { bps: 0, pps: packets / 60, unit: 'pps' };
+  }
+  if (signal === SIGNALS.amplification) {
+    const udp = ampRowFor(row, group) || {};
+    const bytes = Number(udp.amp_bytes ?? udp.ampBytes) || 0;
+    return { bps: bytes * 8 / 60, pps: 0, unit: 'amp' };
+  }
+  return {
+    bps: Number(row?.bps) || 0,
+    pps: Number(row?.pps) || 0,
+    unit: 'bps',
+  };
+}
+
+function bumpPeak(peak, rate, minute) {
+  const prev = peak || { bps: 0, pps: 0, minute: '' };
+  const next = { bps: Number(prev.bps) || 0, pps: Number(prev.pps) || 0, minute: prev.minute || '' };
+  const better = rate.unit === 'pps'
+    ? rate.pps > next.pps
+    : rate.unit === 'amp'
+      ? rate.bps > next.bps
+      : rate.bps > next.bps;
+  if (!better) return next;
+  return { bps: rate.bps, pps: rate.pps, minute };
+}
+
+function rateDoubled(track, rate) {
+  if (!track) return false;
+  if (rate.unit === 'pps') {
+    return Number(track.lastReportPps) > 0 && rate.pps >= Number(track.lastReportPps) * PEAK_GROWTH_RATIO;
+  }
+  return Number(track.lastReportBps) > 0 && rate.bps >= Number(track.lastReportBps) * PEAK_GROWTH_RATIO;
+}
+
+function notifyGapOpen(lastMinute, minute) {
+  const prev = parseUtc(lastMinute);
+  const now = parseUtc(minute);
+  if (!Number.isFinite(prev) || !Number.isFinite(now)) return true;
+  return now - prev >= VECTOR_NOTIFY_GAP_MINUTES * MINUTE;
+}
+
 function ampSrcPortRows(investigate) {
   return (Array.isArray(investigate?.ampSrcPort?.top) ? investigate.ampSrcPort.top : [])
     .filter((row) => row && Number.isFinite(Number(row.port)))
@@ -1475,6 +1651,7 @@ function formatTargetLines(mode, ctx) {
   const victim = investigate?.victim;
   const shape = mode !== 'carpet' && isUsableVictim(victim) ? victimShapeFor(victim, investigate) : null;
   lines.push(...formatAttackSourceLines(investigate, shape));
+  lines.push(...formatSourceOperatorLines(investigate));
   if (mode === 'net') lines.push(...formatNetExtra(byProto, verdict, scope));
   if (mode === 'volumetric' || mode === 'generic') lines.push(...formatFocusLines(investigate));
   const cut = formatCutLine({ ...ctx, mode });
@@ -1631,6 +1808,57 @@ function headlineRate(mode, byProto, investigate) {
 }
 
 // Нормализация приходит после streak спокойных минут: конец атаки — первая из них.
+function formatRateNow(rate) {
+  if (!rate) return '';
+  if (rate.unit === 'pps') return rate.pps > 0 ? formatPpsMsg(rate.pps) : '';
+  const bits = [];
+  if (rate.bps > 0) bits.push(formatBpsMsg(rate.bps));
+  if (rate.unit !== 'amp' && rate.pps > 0) bits.push(formatPpsMsg(rate.pps));
+  return bits.join(', ');
+}
+
+function formatVectorChangeMessage({
+  name,
+  scope,
+  scopeId,
+  byProto,
+  verdict,
+  investigate,
+  binding,
+  signals,
+  rate,
+  previous,
+}) {
+  const signalList = Array.isArray(signals) && signals.length ? signals : [SIGNALS.volume];
+  const mode = alertMode(verdict, signalList, true);
+  const current = vectorSnapshot({ byProto, investigate, verdict });
+  const label = vectorLabel(current);
+  const diff = vectorDiffLines(previous, current);
+  const now = formatRateNow(rate);
+  const cut = formatCutLine({ byProto, investigate, binding, scope, scopeId, mode, verdict });
+  // Источники считаются по байтам всего среза: для SYN и отражения это чужой
+  // живой трафик клиента, а не атакующие.
+  const sources = mode === 'syn' || mode === 'amp'
+    ? []
+    : [...formatSourceOperatorLines(investigate), ...formatAttackSourceLines(investigate)];
+  return [
+    `🟠 <b>Вектор сменился</b> · ${formatAlertWho(scope, scopeId, name)}`,
+    label ? escapeHtml(label) : '',
+    ...diff.map((line) => escapeHtml(line)),
+    now ? escapeHtml(`Сейчас ${now}`) : '',
+    cut ? escapeHtml(cut) : '',
+    ...sources,
+  ].filter(Boolean).join('\n');
+}
+
+function formatPeakGrewMessage({ name, scope, scopeId, rate }) {
+  const now = formatRateNow(rate);
+  return [
+    `🟠 <b>Атака растёт</b> · ${formatAlertWho(scope, scopeId, name)}`,
+    escapeHtml(`Растёт: ${now || '—'}`),
+  ].join('\n');
+}
+
 function formatNormalizeMessage({
   name,
   scope,
@@ -1644,6 +1872,7 @@ function formatNormalizeMessage({
   verdict = null,
   investigate = null,
   signals = null,
+  track = null,
 }) {
   const signalList = Array.isArray(signals) && signals.length ? signals : [SIGNALS.volume];
   const from = startMinute || alertMinute;
@@ -1672,6 +1901,15 @@ function formatNormalizeMessage({
     const now = headlineRate(mode, byProto, null);
     const rates = [before ? `в начале ${before}` : '', now ? `сейчас ${now}` : ''].filter(Boolean).join(' · ');
     if (rates) lines.push(escapeHtml(`${rates.charAt(0).toUpperCase()}${rates.slice(1)}`));
+    const peakBits = [];
+    if (Number(track?.peak?.bps) > 0) peakBits.push(formatBpsMsg(track.peak.bps));
+    if (Number(track?.peak?.pps) > 0) peakBits.push(formatPpsMsg(track.peak.pps));
+    if (peakBits.length) {
+      const when = track.peak.minute ? ` в ${formatClockMsk(track.peak.minute)} МСК` : '';
+      lines.push(escapeHtml(`Пик: ${peakBits.join(', ')}${when}`));
+    }
+    const vectors = (Array.isArray(track?.vectors) ? track.vectors : []).filter(Boolean);
+    if (vectors.length) lines.push(escapeHtml(`Векторы: ${vectors.join(' → ')}`));
   } else {
     if (Number.isFinite(endTs)) {
       lines.push(`Началась ${escapeHtml(formatAlertTime(from))}, закончилась ${escapeHtml(formatClockMsk(endTs))} МСК`);
@@ -1934,7 +2172,8 @@ async function ensureDetectionTelegramTables() {
           ADD COLUMN IF NOT EXISTS syn_min_kpps Float64 DEFAULT ${DEFAULT_SYN_MIN_KPPS},
           ADD COLUMN IF NOT EXISTS syn_pkt_max Float64 DEFAULT ${DEFAULT_SYN_PKT_MAX},
           ADD COLUMN IF NOT EXISTS volume_hot_window UInt16 DEFAULT ${DEFAULT_VOLUME_WINDOW},
-          ADD COLUMN IF NOT EXISTS volume_quiet_streak UInt16 DEFAULT ${DEFAULT_VOLUME_QUIET}
+          ADD COLUMN IF NOT EXISTS volume_quiet_streak UInt16 DEFAULT ${DEFAULT_VOLUME_QUIET},
+          ADD COLUMN IF NOT EXISTS vector_notify UInt8 DEFAULT 1
       `, {}, { name: 'detection/telegram-ensure-columns' });
 
       await executeCommand(`
@@ -1996,6 +2235,7 @@ async function ensureDetectionTelegramTables() {
           syn_pkt_max Float64,
           volume_hot_window UInt16,
           volume_quiet_streak UInt16,
+          vector_notify UInt8,
           updated_at DateTime('UTC')
         )
         AS SELECT
@@ -2028,6 +2268,7 @@ async function ensureDetectionTelegramTables() {
           syn_pkt_max,
           volume_hot_window,
           volume_quiet_streak,
+          vector_notify,
           updated_at_latest AS updated_at
         FROM
         (
@@ -2061,6 +2302,7 @@ async function ensureDetectionTelegramTables() {
             argMax(syn_pkt_max, updated_at) AS syn_pkt_max,
             argMax(volume_hot_window, updated_at) AS volume_hot_window,
             argMax(volume_quiet_streak, updated_at) AS volume_quiet_streak,
+            argMax(vector_notify, updated_at) AS vector_notify,
             max(updated_at) AS updated_at_latest
           FROM ${settingsTableRef()}
           GROUP BY settings_id
@@ -2082,7 +2324,7 @@ async function getCurrentSettingsRaw() {
            volume_min_share_pct, amp_min_share_pct, geo_min_share_pct, syn_min_share_pct,
            amp_hour_ratio, amp_min_mbit,
            syn_enabled, syn_hour_ratio, syn_min_kpps, syn_pkt_max,
-           volume_hot_window, volume_quiet_streak, updated_at
+           volume_hot_window, volume_quiet_streak, vector_notify, updated_at
     FROM ${settingsViewRef()}
     WHERE settings_id = {id:String}
     LIMIT 1
@@ -2184,6 +2426,10 @@ async function saveDetectionTelegramSettings(payload = {}) {
     throw apiError(`Тихих минут для закрытия объёма: целое от 1 до ${MAX_STREAK}`);
   }
   const volumeQuiet = normalizeStreak(volumeQuietRaw, DEFAULT_VOLUME_QUIET);
+  const vectorNotify = boolInt(
+    payload.vectorNotify ?? payload.vector_notify,
+    Number(base.vector_notify ?? 1) === 1 ? 1 : 0,
+  );
   if (enabled && (!botToken || !chatId)) {
     throw apiError('Укажите токен бота и id группы перед включением Telegram');
   }
@@ -2218,6 +2464,7 @@ async function saveDetectionTelegramSettings(payload = {}) {
     syn_pkt_max: synPktMax,
     volume_hot_window: volumeWindow,
     volume_quiet_streak: volumeQuiet,
+    vector_notify: vectorNotify,
   }], { name: 'detection/telegram-settings-save' });
 
   return getDetectionTelegramSettings();
@@ -2543,6 +2790,9 @@ function mapEventRow(row) {
     alertText: storedOrFormattedAlertText(row, alertSnapshot),
     normalizeText: storedOrFormattedNormalizeText(row, normalizeSnapshot, alertSnapshot),
     telegramSkip: String(alertSnapshot.telegramSkip || ''),
+    track: alertSnapshot.track || null,
+    binding: alertSnapshot.binding || null,
+    focusMinute: alertSnapshot.focusMinute || '',
   };
 }
 
@@ -2556,6 +2806,7 @@ function persistAlertSnapshot(metrics, extras = {}) {
     telegramSkip: String(extras.telegramSkip || ''),
     focusMinute: String(extras.focusMinute || ''),
     startMinute: String(extras.startMinute || ''),
+    track: Object.prototype.hasOwnProperty.call(extras, 'track') ? (extras.track || null) : (metrics?.track || null),
   };
 }
 
@@ -2564,8 +2815,11 @@ function persistActiveAlertSnapshot(active) {
     verdict: active?.verdict,
     investigate: active?.investigate,
     telegramText: active?.alertText,
+    binding: active?.binding,
     telegramSkip: active?.telegramSkip,
+    focusMinute: active?.focusMinute,
     startMinute: active?.startMinute,
+    track: active?.track || null,
   });
 }
 
@@ -2872,6 +3126,209 @@ function withClientVolume(verdict, clientVerdict = {}) {
   };
 }
 
+function openTrack(signal, row, group, byProto, investigate, verdict, minute) {
+  const rate = signalRate(signal, row, group);
+  const vector = vectorSnapshot({ byProto, investigate, verdict });
+  return {
+    vector,
+    toldVector: vector,
+    vectors: [vectorLabel(vector)].filter(Boolean),
+    peak: { bps: rate.bps, pps: rate.pps, minute },
+    lastReportBps: rate.bps,
+    lastReportPps: rate.pps,
+    lastNotifyMinute: minute,
+    lastLookMinute: minute,
+    pendingVector: false,
+  };
+}
+
+async function saveActiveTrack(event, track) {
+  await insertDetectionEvent({
+    event_id: event.id,
+    scope: event.scope,
+    scope_id: event.scopeId,
+    name: event.name,
+    status: 'active',
+    alert_minute: event.alertMinute,
+    normalize_minute: null,
+    alert_json: JSON.stringify(persistActiveAlertSnapshot({ ...event, track })),
+    normalize_json: '',
+    threshold: event.threshold,
+    signal: event.signal || SIGNALS.volume,
+  });
+}
+
+function rememberVector(track, nextVector) {
+  const label = vectorLabel(nextVector);
+  const vectors = Array.isArray(track.vectors) ? track.vectors.slice() : [];
+  if (label && !vectors.includes(label)) vectors.push(label);
+  return { ...track, vector: nextVector, vectors };
+}
+
+// Пока атака открыта: пик для сообщения о закрытии, рост вдвое и смена вектора.
+// Полный разбор минуты — только если протокол или размер пакета уже другие,
+// прошло 10 минут, или пора отправить отложенную смену.
+async function followOpenAttacks({
+  minute, rows, grouped, activeByKey, nameByKey, settings, tgCfg, skipIds, thresholdByKey,
+}) {
+  const seen = new Set();
+  let sent = 0;
+  let updated = 0;
+  const errors = [];
+  const present = grouped instanceof Map ? grouped : groupRowsByObject(rows || []);
+  for (const event of activeByKey.values()) {
+    if (!event?.id || seen.has(event.id)) continue;
+    seen.add(event.id);
+    if (skipIds?.has(event.id)) continue;
+    if (event.status && event.status !== 'active') continue;
+    const key = objectKey(event.scope, event.scopeId);
+    const group = present.get(key);
+    const row = group?.byProto?.all;
+    if (!row) continue;
+    const signal = event.signal || SIGNALS.volume;
+    const rate = signalRate(signal, row, group);
+    // Минута между импульсами — это фон провайдера, а не новый вектор.
+    const threshold = resolveGrowthThreshold(event.scope, event.scopeId, settings.growthThreshold, thresholdByKey);
+    const hotNow = isSignalHot(signal, row, group, threshold, settings)
+      || (signal === SIGNALS.syn_flood && synFloodStillGoing(row, synOptions(settings)));
+    // Открытие не ушло в Telegram из-за малой доли — продолжения тоже не шлём.
+    const tgFollow = String(event.telegramSkip || '') !== TELEGRAM_SKIP_BELOW_SHARE
+      && matchesAlertKind(true, settings.alertKind) ? tgCfg : null;
+    let track = event.track;
+    if (!track) {
+      let investigate = event.investigate || null;
+      if (settings.vectorNotify) {
+        try {
+          investigate = await investigateIncident({ scope: event.scope, scopeId: event.scopeId, minute });
+          investigate = await attachTargetFocus(investigate, { scope: event.scope, scopeId: event.scopeId, minute });
+        } catch (err) {
+          errors.push({ key, message: `track-prime: ${err.message}` });
+          investigate = event.investigate || null;
+        }
+      }
+      try {
+        await saveActiveTrack(event, openTrack(signal, row, group, group.byProto, investigate, event.verdict, minute));
+        updated += 1;
+      } catch (err) {
+        errors.push({ key, message: `track-save: ${err.message}` });
+      }
+      continue;
+    }
+    const peakBefore = `${track.peak?.bps || 0}|${track.peak?.pps || 0}|${track.peak?.minute || ''}`;
+    const vectorsBefore = (track.vectors || []).join('|');
+    const lookBefore = track.lastLookMinute || '';
+    track = {
+      ...track,
+      peak: bumpPeak(track.peak, rate, minute),
+      vectors: Array.isArray(track.vectors) ? track.vectors.slice() : [],
+      vector: { ...(track.vector || {}) },
+    };
+    const cheap = vectorSnapshot({ byProto: group.byProto });
+    const cheapChanged = hotNow && Boolean(
+      (track.vector?.proto && cheap.proto && track.vector.proto !== cheap.proto)
+      || (track.vector?.pkt && cheap.pkt && track.vector.pkt !== cheap.pkt),
+    );
+    const lookDue = notifyGapOpen(track.lastLookMinute || track.lastNotifyMinute, minute);
+    const gapOk = notifyGapOpen(track.lastNotifyMinute, minute);
+    let investigated = null;
+    const wantInvestigate = hotNow && settings.vectorNotify && (
+      cheapChanged || lookDue || (track.pendingVector && gapOk)
+    );
+    if (wantInvestigate) {
+      try {
+        investigated = await investigateIncident({ scope: event.scope, scopeId: event.scopeId, minute });
+        investigated = await attachTargetFocus(investigated, { scope: event.scope, scopeId: event.scopeId, minute });
+        const nextVector = vectorSnapshot({ byProto: group.byProto, investigate: investigated, verdict: event.verdict });
+        if (vectorChanged(track.vector, nextVector)) {
+          track = { ...rememberVector(track, nextVector), pendingVector: true };
+        }
+        track.lastLookMinute = minute;
+      } catch (err) {
+        errors.push({ key, message: `track-vector: ${err.message}` });
+      }
+    } else if (!settings.vectorNotify && cheapChanged) {
+      track = rememberVector(track, { ...track.vector, proto: cheap.proto, pkt: cheap.pkt });
+      track.pendingVector = false;
+    }
+    let notified = false;
+    const toldVector = event.track?.vector;
+    const currentVector = investigated
+      ? vectorSnapshot({ byProto: group.byProto, investigate: investigated, verdict: event.verdict })
+      : null;
+    if (investigated && track.pendingVector && !vectorChanged(toldVector, currentVector)) {
+      track = { ...track, pendingVector: false, vector: currentVector };
+    }
+    if (settings.vectorNotify && track.pendingVector && gapOk && investigated) {
+      let binding = null;
+      if (event.scope === 'client' || event.scope === 'provider') {
+        try {
+          binding = event.scope === 'provider'
+            ? await loadProviderBinding(event.scopeId)
+            : await loadClientBinding(event.scopeId);
+        } catch (err) {
+          errors.push({ key, message: `track-binding: ${err.message}` });
+        }
+      }
+      const text = formatVectorChangeMessage({
+        name: nameByKey?.get(key) || event.name,
+        scope: event.scope,
+        scopeId: event.scopeId,
+        byProto: group.byProto,
+        verdict: event.verdict,
+        investigate: investigated,
+        binding,
+        signals: [signal],
+        rate,
+        previous: track.toldVector || toldVector,
+      });
+      const tg = await maybeSendTelegram(text, tgFollow);
+      if (tg.sent) sent += 1;
+      if (tg.error) errors.push({ key, message: tg.error });
+      track = {
+        ...track,
+        toldVector: currentVector,
+        pendingVector: false,
+        lastReportBps: rate.bps,
+        lastReportPps: rate.pps,
+        lastNotifyMinute: minute,
+      };
+      notified = true;
+    } else if (gapOk && rateDoubled(track, rate)) {
+      const text = formatPeakGrewMessage({
+        name: nameByKey?.get(key) || event.name,
+        scope: event.scope,
+        scopeId: event.scopeId,
+        rate,
+      });
+      const tg = await maybeSendTelegram(text, tgFollow);
+      if (tg.sent) sent += 1;
+      if (tg.error) errors.push({ key, message: tg.error });
+      track = {
+        ...track,
+        lastReportBps: rate.bps,
+        lastReportPps: rate.pps,
+        lastNotifyMinute: minute,
+      };
+      notified = true;
+    }
+    const peakAfter = `${track.peak?.bps || 0}|${track.peak?.pps || 0}|${track.peak?.minute || ''}`;
+    const vectorsAfter = (track.vectors || []).join('|');
+    const dirty = notified
+      || peakAfter !== peakBefore
+      || vectorsAfter !== vectorsBefore
+      || (track.lastLookMinute || '') !== lookBefore
+      || Boolean(track.pendingVector) !== Boolean(event.track?.pendingVector);
+    if (!dirty) continue;
+    try {
+      await saveActiveTrack(event, track);
+      updated += 1;
+    } catch (err) {
+      errors.push({ key, message: `track-save: ${err.message}` });
+    }
+  }
+  return { sent, updated, errors };
+}
+
 async function processDetectionAlerts({ minute, rows, nameByKey }) {
   await ensureDetectionTelegramTables();
   const raw = await getCurrentSettingsRaw();
@@ -2946,21 +3403,11 @@ async function processDetectionAlerts({ minute, rows, nameByKey }) {
     }));
   }
 
-  if (!alertCandidates.length && !normalizeCandidates.length) {
-    return {
-      skipped: above.length ? 'waiting_streak' : (activeByKey.size ? 'waiting_normalize' : 'none_above'),
-      sent: 0,
-      above: above.length,
-      active: activeByKey.size,
-      streak: settings.streak,
-      normalizeStreak: settings.normalizeStreak,
-    };
-  }
-
   let sent = 0;
   let opened = 0;
   let closed = 0;
   const errors = [];
+  const touchedIds = new Set();
 
   const alertGroups = new Map();
   for (const candidate of alertCandidates) {
@@ -3083,6 +3530,9 @@ async function processDetectionAlerts({ minute, rows, nameByKey }) {
       const eventId = signal === SIGNALS.volume
         ? `${objectId}|${minute}`
         : `${objectId}|${signal}|${minute}`;
+      const stored = attack
+        ? { ...snapshot, track: openTrack(signal, byProto.all || row, group, byProto, investigate, verdict, focusMinute) }
+        : snapshot;
       await insertDetectionEvent({
         event_id: eventId,
         scope: row.scope,
@@ -3091,11 +3541,12 @@ async function processDetectionAlerts({ minute, rows, nameByKey }) {
         status: attack ? 'active' : 'peak',
         alert_minute: minute,
         normalize_minute: attack ? null : minute,
-        alert_json: JSON.stringify(snapshot),
+        alert_json: JSON.stringify(stored),
         normalize_json: '',
         threshold: objectThreshold,
         signal,
       });
+      touchedIds.add(eventId);
       opened += 1;
     }
     const tg = await maybeSendTelegram(
@@ -3122,6 +3573,7 @@ async function processDetectionAlerts({ minute, rows, nameByKey }) {
       verdict: active.verdict,
       investigate: active.investigate,
       signals: [active.signal || SIGNALS.volume],
+      track: active.track,
     });
     const snapshot = {
       ...snapshotByProto(group, row),
@@ -3140,6 +3592,7 @@ async function processDetectionAlerts({ minute, rows, nameByKey }) {
       threshold: active.threshold || settings.growthThreshold,
       signal: active.signal || SIGNALS.volume,
     });
+    touchedIds.add(active.id);
     closed += 1;
     const skipShare = String(active.telegramSkip || '') === TELEGRAM_SKIP_BELOW_SHARE;
     const skipStale = silent && !telegram;
@@ -3151,10 +3604,42 @@ async function processDetectionAlerts({ minute, rows, nameByKey }) {
     if (tg.error) errors.push({ key, message: tg.error });
   }
 
+  let follow = { sent: 0, updated: 0, errors: [] };
+  try {
+    follow = await followOpenAttacks({
+      minute,
+      rows,
+      grouped,
+      activeByKey,
+      nameByKey,
+      settings,
+      tgCfg,
+      skipIds: touchedIds,
+      thresholdByKey,
+    });
+  } catch (err) {
+    errors.push({ key: 'follow', message: err.message });
+  }
+  sent += follow.sent || 0;
+  if (follow.errors?.length) errors.push(...follow.errors);
+
+  if (!opened && !closed && !follow.updated && !follow.sent) {
+    return {
+      skipped: above.length ? 'waiting_streak' : (activeByKey.size ? 'waiting_normalize' : 'none_above'),
+      sent: 0,
+      above: above.length,
+      active: activeByKey.size,
+      streak: settings.streak,
+      normalizeStreak: settings.normalizeStreak,
+      updates: 0,
+    };
+  }
+
   return {
     sent,
     opened,
     closed,
+    updates: follow.updated || 0,
     alerts: alertCandidates.length,
     normalized: normalizeCandidates.length,
     telegram: tgCfg ? 'on' : 'disabled',
@@ -3339,6 +3824,15 @@ module.exports = {
   SIGNALS,
   formatAlertMessage,
   formatCutLine,
+  formatVectorChangeMessage,
+  formatPeakGrewMessage,
+  formatSourceOperatorLines,
+  vectorSnapshot,
+  vectorChanged,
+  vectorLabel,
+  rateDoubled,
+  bumpPeak,
+  mapSettings,
   alertStartMinute,
   signalSettings,
   formatNormalizeMessage,

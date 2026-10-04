@@ -35,6 +35,14 @@ const {
   pickSilentNormalizeCandidates,
   formatAlertMessage,
   formatCutLine,
+  formatVectorChangeMessage,
+  formatPeakGrewMessage,
+  formatSourceOperatorLines,
+  vectorSnapshot,
+  vectorChanged,
+  rateDoubled,
+  bumpPeak,
+  mapSettings,
   alertStartMinute,
   signalSettings,
   mapEventRow,
@@ -175,6 +183,9 @@ describe('detection-telegram', () => {
     assert.equal(matchesAlertScope(net, 'client'), false);
     assert.equal(matchesAlertScope(net, 'net'), true);
     assert.equal(matchesAlertScope(client, 'net'), false);
+    // ШПД, 03.10: рассылка «по сетям» отсекала провайдера с 88 Гбит/с.
+    assert.equal(matchesAlertScope({ scope: 'provider' }, 'net'), true);
+    assert.equal(matchesAlertScope({ scope: 'provider' }, 'client'), false);
   });
 
   it('рассылка: атаки / всплески / всё, в историю пишем всё', () => {
@@ -1609,5 +1620,162 @@ describe('detection-telegram', () => {
     // ×1.23 к часу — рост, хоть и ниже порога пика.
     assert.match(text, /<b>В 1,2 раза больше обычного:<\/b> 416 Мбит\/с, обычно 338 Мбит\/с/);
     assert.doesNotMatch(text, /ниже/);
+  });
+
+  it('оповещение о смене вектора включено, если колонки ещё нет', () => {
+    assert.equal(mapSettings({}).vectorNotify, true);
+    assert.equal(mapSettings({ vector_notify: 0 }).vectorNotify, false);
+    assert.equal(mapSettings({ vectorNotify: false }).vectorNotify, false);
+  });
+
+  it('в атаке видны операторы и страны источников', () => {
+    const investigate = {
+      victim: { ip: '176.123.128.10', port: 0, protoLabel: 'UDP', share: 0.02 },
+      sources: {
+        ipCount: 559,
+        net24Count: 424,
+        asns: [
+          { asn: 8193, asnName: 'BRM-AS', share: 0.411 },
+          { asn: 28885, asnName: 'OMANTEL-NAP-AS', share: 0.117 },
+        ],
+        countries: [{ cc: 'BR', share: 0.41 }, { cc: 'OM', share: 0.12 }],
+      },
+      destPort: { count: 40, top: [{ port: 443, share: 0.04 }] },
+    };
+    const lines = formatSourceOperatorLines(investigate).join('\n');
+    assert.match(lines, /AS8193 BRM-AS — 41%/);
+    assert.match(lines, /Страны источников: BR 41% · OM 12%/);
+    const text = formatAlertMessage({
+      name: 'metrobit',
+      scope: 'provider',
+      scopeId: 'isp:metrobit',
+      minute: '2026-10-03 12:12:00',
+      byProto: {
+        all: { bps: 14e9, pps: 1.4e6, avg_packet_bytes: 1250 },
+        udp: { bps: 13.5e9 },
+        tcp: { bps: 0.5e9 },
+      },
+      verdict: { kind: 'carpet' },
+      investigate,
+      signals: ['volume'],
+    });
+    assert.match(text, /AS8193 BRM-AS/);
+    assert.match(text, /Страны источников: BR 41%/);
+  });
+
+  it('смена вектора: подпись, скорость и строка «Резать»', () => {
+    const byProto = {
+      all: { bps: 88.2e9, pps: 8.79e6, avg_packet_bytes: 1250 },
+      udp: { bps: 88.2e9 },
+    };
+    const investigate = {
+      destPort: { count: 20, top: [{ port: 443, share: 0.05 }] },
+      sources: { asns: [{ asn: 8193, asnName: 'BRM-AS', share: 0.41 }] },
+    };
+    const text = formatVectorChangeMessage({
+      name: 'metrobit',
+      scope: 'provider',
+      scopeId: 'isp:metrobit',
+      byProto,
+      verdict: { kind: 'carpet' },
+      investigate,
+      binding: { prefixes: ['176.123.128.0/19'] },
+      signals: ['volume'],
+      rate: { bps: 88.2e9, pps: 8.79e6, unit: 'bps' },
+    });
+    assert.match(text, /Вектор сменился/);
+    assert.match(text, /UDP, пакет от 800 Б, порты случайные/);
+    assert.match(text, /Сейчас 88\.2 Гбит\/с, 8\.79 млн п\/с/);
+    assert.match(text, /Резать: входящий UDP/);
+    assert.match(text, /AS8193 BRM-AS/);
+
+    // ШПД, 03.10 16:11: подпись та же, сменились операторы — пишем было → стало.
+    const told = formatVectorChangeMessage({
+      name: 'metrobit',
+      scope: 'provider',
+      scopeId: 'isp:metrobit',
+      byProto,
+      verdict: { kind: 'carpet' },
+      investigate,
+      signals: ['volume'],
+      rate: { bps: 17.5e9, pps: 1.75e6, unit: 'bps' },
+      previous: { proto: 'udp', pkt: 'large', ports: 'scatter', asns: 'spread' },
+    });
+    assert.match(told, /Источники: были разбросаны по многим операторам → теперь в основном AS8193 BRM-AS/);
+    assert.doesNotMatch(told, /Было:/);
+  });
+
+  it('рост вдвое — короткое сообщение со скоростью и пакетами', () => {
+    const text = formatPeakGrewMessage({
+      name: 'metrobit',
+      scope: 'provider',
+      scopeId: 'isp:metrobit',
+      rate: { bps: 88.2e9, pps: 8.79e6, unit: 'bps' },
+    });
+    assert.match(text, /Атака растёт/);
+    assert.match(text, /Растёт: 88\.2 Гбит\/с, 8\.79 млн п\/с/);
+    assert.equal(rateDoubled({ lastReportBps: 7e9, lastReportPps: 1 }, { bps: 14e9, pps: 1, unit: 'bps' }), true);
+    assert.equal(rateDoubled({ lastReportBps: 7e9, lastReportPps: 1 }, { bps: 10e9, pps: 1, unit: 'bps' }), false);
+  });
+
+  it('закрытие пишет пик и все векторы', () => {
+    const text = formatNormalizeMessage({
+      name: 'metrobit',
+      scope: 'provider',
+      scopeId: 'isp:metrobit',
+      minute: '2026-10-03 14:25:00',
+      alertMinute: '2026-10-03 12:12:00',
+      startMinute: '2026-10-03 12:10:00',
+      streak: 10,
+      byProto: { all: { bps: 2e9, pps: 2e5 } },
+      alertByProto: { all: { bps: 14e9, pps: 1.4e6 } },
+      verdict: { kind: 'carpet' },
+      signals: ['volume'],
+      track: {
+        peak: { bps: 88.2e9, pps: 8.79e6, minute: '2026-10-03 12:49:00' },
+        vectors: ['UDP, пакет от 800 Б, порты случайные', 'TCP, пакет до 200 Б, порт 443'],
+      },
+    });
+    assert.match(text, /Пик: 88\.2 Гбит\/с, 8\.79 млн п\/с в 15:49 МСК/);
+    assert.match(text, /Векторы: UDP, пакет от 800 Б, порты случайные → TCP, пакет до 200 Б, порт 443/);
+  });
+
+  it('вектор сравнивает только заполненные поля', () => {
+    const udp = vectorSnapshot({
+      byProto: {
+        all: { bps: 10e9, avg_packet_bytes: 1250 },
+        udp: { bps: 10e9 },
+      },
+      investigate: { destPort: { count: 30, top: [{ port: 80, share: 0.02 }] } },
+      verdict: { kind: 'carpet' },
+    });
+    const tcp = vectorSnapshot({
+      byProto: {
+        all: { bps: 10e9, avg_packet_bytes: 80 },
+        tcp: { bps: 10e9 },
+      },
+      investigate: { destPort: { count: 1, top: [{ port: 443, share: 0.9 }] } },
+      verdict: { kind: 'syn_flood' },
+    });
+    assert.equal(vectorChanged(udp, tcp), true);
+    assert.equal(vectorChanged(udp, { ...udp, pkt: 'large' }), false);
+    assert.equal(vectorChanged({ ...udp, asns: '' }, { ...udp, asns: '8193' }), false);
+    // Доля у границы не даёт значения и не шлёт «вектор сменился».
+    const edge = (share) => vectorSnapshot({
+      byProto: { all: { bps: 10e9, avg_packet_bytes: 1250 }, udp: { bps: 10e9 } },
+      investigate: {
+        dest24: [{ net24: '176.123.140.0/24', share }],
+        sources: { asns: [{ asn: 8193, share }] },
+      },
+    });
+    assert.equal(edge(0.1).prefixes, 'spread');
+    assert.equal(edge(0.35).prefixes, '');
+    assert.equal(edge(0.6).prefixes, '176.123.140.0/24');
+    assert.equal(edge(0.41).asns, '8193');
+    assert.equal(edge(0.3).asns, '');
+    assert.equal(vectorChanged(edge(0.41), edge(0.3)), false);
+    const peak = bumpPeak({ bps: 7e9, pps: 1, minute: '2026-10-03 12:11:00' }, { bps: 14e9, pps: 2, unit: 'bps' }, '2026-10-03 12:12:00');
+    assert.equal(peak.bps, 14e9);
+    assert.equal(peak.minute, '2026-10-03 12:12:00');
   });
 });

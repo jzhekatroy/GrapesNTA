@@ -24,7 +24,7 @@ const {
   PROTOS,
 } = require('./detection-schema');
 const { processDetectionAlerts } = require('./detection-telegram');
-const { AMPLIFIER_PORTS, isNetSpikeHit } = require('./detection-signals');
+const { AMPLIFIER_PORTS, isNetSpikeHit, SYN_SUSTAINED_PPS } = require('./detection-signals');
 const { loadForeignEnvelopes } = require('./detection-investigate');
 const {
   MINUTE,
@@ -1329,7 +1329,8 @@ async function loadHourSignalBaselines() {
       countIf(proto = 'udp') AS n_udp,
       quantileExactIf(0.95)(amp_bytes * 8 / 60, proto = 'udp') AS amp_p95,
       countIf(proto = 'all') AS n_all,
-      quantileExactIf(0.95)(syn_only_packets / 60, proto = 'all') AS syn_p95
+      countIf(proto = 'all' AND syn_only_packets / 60 < ${SYN_SUSTAINED_PPS}) AS n_syn_quiet,
+      quantileExactIf(0.95)(syn_only_packets / 60, proto = 'all' AND syn_only_packets / 60 < ${SYN_SUSTAINED_PPS}) AS syn_p95
     FROM ${tableRef()}
     WHERE proto IN ('udp', 'all')
       AND minute >= now('UTC') - INTERVAL {days:UInt16} DAY
@@ -1340,7 +1341,10 @@ async function loadHourSignalBaselines() {
   const map = new Map();
   for (const r of rows) {
     const ampBps = Number(r.n_udp) >= 60 ? Number(r.amp_p95) || 0 : 0;
-    const synPps = Number(r.n_all) >= 60 ? Number(r.syn_p95) || 0 : 0;
+    // Минуты от миллиона SYN/с в норму не входят: иначе долгий флуд сам становится
+    // «обычным» уровнем часа и алерт гаснет при смене часа. Если спокойных минут
+    // мало, нормы нет — решает абсолютный пол.
+    const synPps = Number(r.n_all) >= 60 && Number(r.n_syn_quiet) >= 30 ? Number(r.syn_p95) || 0 : 0;
     if (!(ampBps > 0) && !(synPps > 0)) continue;
     map.set(`${r.scope}|${r.scope_id}|${Number(r.h)}|${Number(r.we) ? 1 : 0}`, {
       ampBps: ampBps > 0 ? ampBps : null,

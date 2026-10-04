@@ -47,7 +47,7 @@ function emptyInvestigate() {
   return {
     victim: null,
     dest24: [],
-    sources: { ipCount: 0, net24Count: 0, top: [] },
+    sources: { ipCount: 0, net24Count: 0, top: [], asns: [], countries: [] },
     source24: [],
     ampDest24: [],
     ampDestIp: [],
@@ -715,6 +715,44 @@ async function investigateIncident({ scope, scopeId, minute, clientId, parentSco
         FROM ev GROUP BY ip, net24, asn ORDER BY byte_sum DESC LIMIT 5
       )
     ),
+    src_asn_top AS (
+      SELECT groupArray(tuple(asn, byte_sum, asn_name)) AS rows
+      FROM (
+        SELECT
+          s.asn AS asn,
+          s.byte_sum AS byte_sum,
+          ifNull(nullIf(n.name, ''), '') AS asn_name
+        FROM (
+          SELECT src_asn AS asn, sum(bytes) AS byte_sum
+          FROM ev
+          WHERE src_asn != 0
+          GROUP BY asn
+          ORDER BY byte_sum DESC
+          LIMIT 5
+        ) AS s
+        LEFT JOIN ${asnNamesTableRef()} AS n ON n.asn = s.asn
+      )
+    ),
+    src_cc AS (
+      SELECT groupArray(tuple(cc, byte_sum)) AS rows
+      FROM (
+        SELECT cc, sum(bytes) AS byte_sum
+        FROM (
+          SELECT
+            if(
+              isIPv4String(src_ip),
+              dictGetOrDefault('${String(config.geoCountryDict || 'default.geo_country_dict').replace(/'/g, '')}', 'cc', tuple(toIPv4OrZero(src_ip)), ''),
+              ''
+            ) AS cc,
+            bytes
+          FROM ev
+        )
+        WHERE cc != ''
+        GROUP BY cc
+        ORDER BY byte_sum DESC
+        LIMIT 5
+      )
+    ),
     l4 AS (
       SELECT groupArray(tuple(port, proto, byte_sum)) AS rows
       FROM (
@@ -789,6 +827,8 @@ async function investigateIncident({ scope, scopeId, minute, clientId, parentSco
       (SELECT row FROM syn) AS syn,
       (SELECT rows FROM src24) AS src24s,
       (SELECT rows FROM srcip) AS srcips,
+      (SELECT rows FROM src_asn_top) AS src_asns,
+      (SELECT rows FROM src_cc) AS src_ccs,
       (SELECT rows FROM l4) AS l4s,
       (SELECT rows FROM sw_in) AS ins,
       (SELECT rows FROM sw_out) AS outs
@@ -886,6 +926,16 @@ async function investigateIncident({ scope, scopeId, minute, clientId, parentSco
       top: srcips.map((t) => mapShareRow(
         { bytes: t[3], gbit: toGbit(t[3]) },
         { ip: String(t[0] || ''), net24: String(t[1] || ''), asn: Number(t[2] || 0) || null },
+        total,
+      )),
+      asns: asTuples(row.src_asns).filter((t) => Number(t[0]) > 0).map((t) => mapShareRow(
+        { bytes: t[1], gbit: toGbit(t[1]) },
+        { asn: Number(t[0]), asnName: String(t[2] || '') },
+        total,
+      )),
+      countries: asTuples(row.src_ccs).filter((t) => t[0]).map((t) => mapShareRow(
+        { bytes: t[1], gbit: toGbit(t[1]) },
+        { cc: String(t[0] || '').toUpperCase() },
         total,
       )),
     },
