@@ -685,6 +685,37 @@ describe('загрузка сеансами и сети из многих або
     assert.equal(refined.kind, KINDS.volumetric);
   });
 
+  it('pin: мусорный UDP размазан по источникам — атака, хотя объём к часу ниже ×1.8', () => {
+    const first = classifyFromMetrics({
+      all: { bps: 25.3e9, port_entropy: 8.01 },
+      udp: { bps: 19.2e9, port_entropy: 8.01 },
+    }, { p95: 17.8e9, p999: 17.8e9 });
+    assert.equal(first.kind, KINDS.benign_peak);
+    const refined = refineClassification(first, {
+      junk: { share: 19.09 / 25.3, topSrcShare: 0.012, hotSrcs: 243 },
+    });
+    assert.equal(refined.kind, KINDS.carpet);
+    assert.equal(isAttackKind(refined.kind), true);
+    assert.match(refined.reason, /мусорный UDP 75%/);
+    assert.match(refined.reason, /243 источников/);
+    assert.doesNotMatch(refined.reason, /нет явных признаков/);
+  });
+
+  it('один толстый источник не открывает pin как атаку', () => {
+    const first = classifyFromMetrics({
+      all: { bps: 25.3e9, port_entropy: 8.01 },
+      udp: { bps: 19.2e9, port_entropy: 8.01 },
+    }, { p95: 17.8e9, p999: 17.8e9 });
+    const quiet = refineClassification(first, {
+      junk: { share: 0.11, topSrcShare: 0.76, hotSrcs: 12 },
+    });
+    assert.equal(quiet.kind, KINDS.benign_peak);
+    const thin = refineClassification(first, {
+      junk: { share: 0.98, topSrcShare: 0.01, hotSrcs: 12 },
+    });
+    assert.equal(thin.kind, KINDS.benign_peak);
+  });
+
   it('загрузка на одном адресе не гасит ковёр по сети', () => {
     const first = classifyFromMetrics({
       all: { bps: 2e9, port_entropy: 8, avg_packet_bytes: 200 },

@@ -393,6 +393,26 @@ function refineClassification(verdict, investigate, context = {}) {
     next.needsInvestigate = false;
     return next;
   }
+  // pin 04.10: весь объём ×1.6 к часу, порог ковра ×1.8, и удар записывался
+  // пиком. Мусорный UDP при этом 75–98% входящего и размазан: 243 источника
+  // от 10 Мбит/с, крупнейший 1%. Спокойный пик pin 29.09 — 76% с одного адреса
+  // и 12 таких источников, он остаётся пиком.
+  const junk = investigate?.junk;
+  const junkShare = num(junk?.share);
+  const junkTop = num(junk?.topSrcShare);
+  const junkSrcs = num(junk?.hotSrcs);
+  if (next.kind === KINDS.benign_peak
+    && junkShare >= 0.5
+    && junkTop != null && junkTop < 0.3
+    && junkSrcs >= 50) {
+    next.kind = KINDS.carpet;
+    const rest = String(next.reason || '').replace(/^нет явных признаков атаки\s*·\s*/, '');
+    next.reason = `мусорный UDP ${(junkShare * 100).toFixed(0)}% входящего · ${junkSrcs} источников${rest ? ` · ${rest}` : ''}`
+      .replace(/\s+/g, ' ')
+      .trim();
+    next.needsInvestigate = true;
+    return next;
+  }
   if (next.kind === KINDS.benign_peak && isTargetFocus(investigate?.focus)) {
     const focus = investigate.focus;
     const label = [focus.protoLabel, focus.port].filter((part) => part != null && part !== '').join('/');

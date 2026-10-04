@@ -15,19 +15,42 @@ describe('detection-investigate SQL', () => {
     assert.match(src, /sum\(bytes\) AS pair_bytes/);
     assert.match(src, /LIMIT 1 BY proto/);
     assert.match(src, /status IN \('active', 'normalized'\)/);
+    assert.match(src, /isIPAddressInRange/);
+    assert.match(src, /countIf\(src_bps >= 10000000\) AS hot_srcs/);
+    assert.match(src, /role = 'provider_public'/);
     assert.doesNotMatch(src, /status != 'peak'/);
-  });
-
-  it('удар в /24 читает клиента и диапазон адресов, а не всю минуту', () => {
-    assert.match(src, /f\.dst_client = \{clientId:String\} AND/);
-    assert.match(src, /BETWEEN/);
-    assert.match(src, /IPv4StringToNum\(replaceRegexpOne\(\{scopeId:String\}, '\/24\$', ''\)\)/);
-    assert.doesNotMatch(src, /PREWHERE if\(\{scope:String\} = 'client'/);
   });
 
   it('форма адреса отдаётся массивом: пустой скалярный кортеж ClickHouse не переваривает', () => {
     assert.match(src, /victim_flow AS \(\s*SELECT groupArray\(tuple\(/);
     assert.match(src, /sum\(flow_bytes\) AS ip_bytes/);
+  });
+});
+
+describe('срез топ ASN', () => {
+  const { chooseAsnSlice } = require('./detection-investigate');
+
+  it('крупный UDP почти на весь удар — топ по лишнему, не по всему входящему', () => {
+    const slice = chooseAsnSlice({
+      allBytes: 11.09e9 * 60 / 8,
+      junkBytes: 10.99e9 * 60 / 8,
+      junkCount: 68,
+      allCount: 80,
+    });
+    assert.equal(slice.kind, 'excess');
+    assert.equal(slice.asnCount, 68);
+    assert.ok(slice.share > 0.9);
+  });
+
+  it('мелкий UDP — топ по всему входящему', () => {
+    const slice = chooseAsnSlice({
+      allBytes: 2e9 * 60 / 8,
+      junkBytes: 0.2e9 * 60 / 8,
+      junkCount: 4,
+      allCount: 30,
+    });
+    assert.equal(slice.kind, 'all');
+    assert.equal(slice.asnCount, 30);
   });
 });
 

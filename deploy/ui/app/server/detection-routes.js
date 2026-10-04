@@ -10,6 +10,7 @@ const {
   exportDetectionEventsCsv,
 } = require('./detection-telegram');
 const { listObjectThresholds, saveObjectThreshold } = require('./detection-thresholds');
+const { loadExcessAsnTop } = require('./detection-investigate');
 
 function sendError(res, err) {
   const status = Number(err.statusCode) || 500;
@@ -46,6 +47,22 @@ function createDetectionRouter() {
           hours: req.query.hours,
           from: req.query.from,
           to: req.query.to,
+        }),
+      });
+    } catch (err) {
+      sendError(res, err);
+    }
+  });
+
+  router.get('/events/asn', async (req, res) => {
+    try {
+      res.json({
+        data: await loadExcessAsnTop({
+          scope: req.query.scope,
+          scopeId: req.query.scopeId || req.query.scope_id,
+          minute: req.query.minute,
+          clientId: req.query.clientId || req.query.client_id,
+          parentScope: req.query.parentScope || req.query.parent_scope,
         }),
       });
     } catch (err) {

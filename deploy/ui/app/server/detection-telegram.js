@@ -17,7 +17,7 @@ const {
   isUsableVictim,
   volumeStillHigh,
 } = require('./detection-classify');
-const { loadHourEnvelope, loadClientBinding, loadProviderBinding, formatClientMarkup, investigateIncident, attachTargetFocus, emptyInvestigate } = require('./detection-investigate');
+const { loadHourEnvelope, loadClientBinding, loadProviderBinding, formatClientMarkup, investigateIncident, attachTargetFocus, emptyInvestigate, loadExcessAsnTop } = require('./detection-investigate');
 const { loadThresholdMap, resolveGrowthThreshold, hasGrowthOverride } = require('./detection-thresholds');
 const {
   SIGNALS,
@@ -3669,6 +3669,22 @@ async function processDetectionAlerts({ minute, rows, nameByKey }) {
       try {
         investigate = await investigateIncident({ ...target, minute: focusMinute });
         investigate = await attachTargetFocus(investigate, { ...target, minute: focusMinute });
+        if (verdict.kind === KINDS.benign_peak && (target.scope === 'provider' || target.scope === 'client')) {
+          try {
+            const junk = await loadExcessAsnTop({ ...target, minute: focusMinute });
+            investigate = {
+              ...investigate,
+              junk: {
+                share: junk.share,
+                junkBps: junk.junkBps,
+                topSrcShare: junk.topSrcShare,
+                hotSrcs: junk.hotSrcs,
+              },
+            };
+          } catch (err) {
+            errors.push({ key: objectId, message: `junk: ${err.message}` });
+          }
+        }
         verdict = refineClassification(verdict, investigate, { scope: target.scope });
       } catch (err) {
         errors.push({ key: objectId, message: `investigate: ${err.message}` });
@@ -3903,6 +3919,22 @@ async function rebuildDetectionEventAlert({ scope, scopeId, minute, sendTelegram
         scopeId: row.scope_id,
         minute: minuteForFacts,
       });
+      if (verdict.kind === KINDS.benign_peak && (row.scope === 'provider' || row.scope === 'client')) {
+        const junk = await loadExcessAsnTop({
+          scope: row.scope,
+          scopeId: row.scope_id,
+          minute: minuteForFacts,
+        });
+        investigate = {
+          ...investigate,
+          junk: {
+            share: junk.share,
+            junkBps: junk.junkBps,
+            topSrcShare: junk.topSrcShare,
+            hotSrcs: junk.hotSrcs,
+          },
+        };
+      }
       verdict = refineClassification(verdict, investigate, { scope: row.scope });
     } catch (err) {
       investigate = { ...emptyInvestigate(), error: err.message };

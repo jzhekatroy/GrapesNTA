@@ -1089,6 +1089,227 @@ async function attachTargetFocus(investigate, { scope, scopeId, minute, clientId
   return next;
 }
 
+// Порты обычного UDP: QUIC, IPsec, WireGuard, STUN, OpenVPN, веб и звонки.
+// Всё остальное крупное UDP со случайных высоких портов — лишний срез атаки.
+const EXCESS_UDP_PORTS = [443, 4500, 51820, 51821, 3478, 3479, 3480, 3481, 1194, 8443, 19302, 19305];
+const EXCESS_MIN_BPS = 1e9;
+const EXCESS_MIN_SHARE = 0.4;
+
+function scaledBytesSql() {
+  const bytes = `f.${col('bytes')}`;
+  const sampling = flowCol('samplingRate');
+  if (!sampling) return bytes;
+  return `${bytes} * greatest(f.${sampling}, 1)`;
+}
+
+function excessUdpSql() {
+  const proto = `f.${col('proto')}`;
+  const src = `f.${col('srcPort')}`;
+  const dst = `f.${col('dstPort')}`;
+  const bytes = `f.${col('bytes')}`;
+  const packets = `f.${col('packets')}`;
+  const ports = EXCESS_UDP_PORTS.join(', ');
+  return `${proto} = 17
+    AND ${src} >= 1024 AND ${dst} >= 1024
+    AND ${src} NOT IN (${ports})
+    AND ${dst} NOT IN (${ports})
+    AND ${packets} > 0
+    AND intDiv(${bytes}, ${packets}) BETWEEN 1000 AND 1499`;
+}
+
+function chooseAsnSlice({ allBytes, junkBytes, junkCount, allCount } = {}) {
+  const all = Number(allBytes) || 0;
+  const junk = Number(junkBytes) || 0;
+  const share = all > 0 ? junk / all : 0;
+  const junkBps = junk * 8 / 60;
+  const excess = junkBps >= EXCESS_MIN_BPS && share >= EXCESS_MIN_SHARE;
+  const bytes = excess ? junk : all;
+  return {
+    kind: excess ? 'excess' : 'all',
+    bps: bytes * 8 / 60,
+    share,
+    asnCount: excess ? Number(junkCount) || 0 : Number(allCount) || 0,
+  };
+}
+
+function mapTupleRows(value) {
+  const list = Array.isArray(value) ? value : [];
+  return list.map((item) => (Array.isArray(item) ? item : Object.values(item || {})));
+}
+
+function mapAsnTop(value, totalBytes) {
+  return mapTupleRows(value).map((t) => {
+    const bytes = Number(t[1] || 0);
+    return {
+      asn: Number(t[0] || 0),
+      asnName: String(t[2] || ''),
+      bps: bytes * 8 / 60,
+      share: totalBytes > 0 ? bytes / totalBytes : 0,
+    };
+  }).filter((row) => row.asn > 0 && row.bps > 0);
+}
+
+function mapNetTop(value, totalBytes) {
+  return mapTupleRows(value).map((t) => {
+    const bytes = Number(t[1] || 0);
+    return {
+      prefix: String(t[0] || ''),
+      bps: bytes * 8 / 60,
+      share: totalBytes > 0 ? bytes / totalBytes : 0,
+      ips: Number(t[2] || 0),
+    };
+  }).filter((row) => row.prefix && row.bps > 0);
+}
+
+function asnTopCte(name, bytesExpr) {
+  return `
+    ${name} AS (
+      SELECT groupArray(tuple(asn, byte_sum, asn_name)) AS rows
+      FROM (
+        SELECT
+          s.asn AS asn,
+          s.byte_sum AS byte_sum,
+          ifNull(nullIf(n.name, ''), '') AS asn_name
+        FROM (
+          SELECT asn, ${bytesExpr} AS byte_sum
+          FROM by_asn
+          WHERE ${bytesExpr} > 0 AND asn != 0
+          ORDER BY byte_sum DESC
+          LIMIT 8
+        ) AS s
+        LEFT JOIN ${asnNamesTableRef()} AS n ON n.asn = s.asn
+      )
+    )`;
+}
+
+// Куда свёрнуто в префикс оператора (у aykonet это /20, не россыпь /24).
+// Более узкий префикс идёт первым, чтобы arrayFirst взял его.
+function destNetSql(scope) {
+  const dstIp = flowIpExpr(`f.${col('dstIp')}`);
+  const net24 = net24Sql(dstIp);
+  if (scope !== 'provider' && scope !== 'client') return net24;
+  return `if(
+    length((SELECT ps FROM prefs)) = 0,
+    ${net24},
+    ifNull(nullIf(arrayFirst(p -> isIPAddressInRange(${dstIp}, p), (SELECT ps FROM prefs)), ''), ${net24})
+  )`;
+}
+
+function prefixPrefsCte(scope) {
+  if (scope !== 'provider' && scope !== 'client') {
+    return `prefs AS (SELECT CAST([] AS Array(String)) AS ps)`;
+  }
+  const role = scope === 'provider' ? `AND role = 'provider_public'` : '';
+  return `
+    prefs AS (
+      SELECT groupArray(prefix) AS ps
+      FROM (
+        SELECT prefix
+        FROM ${l3PrefixesViewRef()}
+        WHERE family = 4
+          AND entity_id = {scopeId:String}
+          AND prefix != ''
+          ${role}
+        ORDER BY toUInt8(splitByChar('/', prefix)[2]) DESC
+        LIMIT 32
+      )
+    )`;
+}
+
+// Текущий срез источников на минуте удара. Если крупный UDP без известных
+// портов занимает удар, топ считается по нему, а не по всему входящему.
+async function loadExcessAsnTop({ scope, scopeId, minute, clientId, parentScope } = {}) {
+  const minuteTs = parseUtc(minute);
+  if (!Number.isFinite(minuteTs)) {
+    const err = new Error('Нужна минута среза');
+    err.statusCode = 400;
+    throw err;
+  }
+  const scopeName = String(scope || '');
+  if (!['client', 'provider', 'net'].includes(scopeName) || !String(scopeId || '')) {
+    const err = new Error('Нужны scope и scopeId');
+    err.statusCode = 400;
+    throw err;
+  }
+  const ownerId = String(clientId || '');
+  const params = { scope: scopeName, scopeId: String(scopeId), ...minuteBounds(minuteTs) };
+  if (ownerId) params.clientId = ownerId;
+  const pred = slicePred(scopeName, ownerId, parentScope);
+  const srcAsn = col('srcAsn') ? `f.${col('srcAsn')}` : '0';
+  const dstIp = flowIpExpr(`f.${col('dstIp')}`);
+  const srcIp = flowIpExpr(`f.${col('srcIp')}`);
+  const opts = { name: 'detection/event-asn', clickhouse_settings: CHEAP, requestTimeoutMs: 35000 };
+  const { rows } = await query(`
+    WITH ${prefixPrefsCte(scopeName)},
+    ev AS (
+      SELECT
+        ${srcAsn} AS asn,
+        ${scaledBytesSql()} AS bytes,
+        ${excessUdpSql()} AS junk,
+        ${destNetSql(scopeName)} AS dst_net,
+        ${dstIp} AS dst_ip,
+        ${srcIp} AS src_ip
+      FROM ${flowsRawTableRef()} AS f
+      PREWHERE ${pred}
+      WHERE ${timeFilterSql()} AND ${pred}
+    ),
+    by_asn AS (
+      SELECT asn, sum(bytes) AS all_bytes, sumIf(bytes, junk) AS junk_bytes
+      FROM ev
+      GROUP BY asn
+    ),
+    ${asnTopCte('junk_top', 'junk_bytes')},
+    net_top AS (
+      SELECT groupArray(tuple(dst_net, byte_sum, ips)) AS rows
+      FROM (
+        SELECT dst_net, sum(bytes) AS byte_sum, uniqExact(dst_ip) AS ips
+        FROM ev
+        WHERE junk AND dst_net != ''
+        GROUP BY dst_net
+        ORDER BY byte_sum DESC
+        LIMIT 8
+      )
+    ),
+    src_stat AS (
+      SELECT
+        max(src_bps) AS top_bps,
+        sum(src_bps) AS junk_src_bps,
+        countIf(src_bps >= 10000000) AS hot_srcs
+      FROM (
+        SELECT sumIf(bytes, junk) * 8 / 60 AS src_bps
+        FROM ev
+        WHERE junk
+        GROUP BY src_ip
+      )
+    )
+    SELECT
+      (SELECT sum(all_bytes) FROM by_asn) AS total_all,
+      (SELECT sum(junk_bytes) FROM by_asn) AS total_junk,
+      (SELECT uniqExactIf(asn, junk_bytes > 0 AND asn != 0) FROM by_asn) AS junk_asns,
+      (SELECT rows FROM junk_top) AS junk_top,
+      (SELECT rows FROM net_top) AS net_top,
+      (SELECT top_bps FROM src_stat) AS top_src_bps,
+      (SELECT junk_src_bps FROM src_stat) AS junk_src_bps,
+      (SELECT hot_srcs FROM src_stat) AS hot_srcs
+  `, params, opts);
+  const row = rows[0] || {};
+  const allBytes = Number(row.total_all) || 0;
+  const junkBytes = Number(row.total_junk) || 0;
+  const junkSrcBps = Number(row.junk_src_bps) || 0;
+  const topSrcBps = Number(row.top_src_bps) || 0;
+  return {
+    minute: formatCh(minuteTs),
+    inboundBps: allBytes * 8 / 60,
+    junkBps: junkBytes * 8 / 60,
+    share: allBytes > 0 ? junkBytes / allBytes : 0,
+    asnCount: Number(row.junk_asns) || 0,
+    asns: mapAsnTop(row.junk_top, junkBytes),
+    networks: mapNetTop(row.net_top, junkBytes),
+    topSrcShare: junkSrcBps > 0 ? topSrcBps / junkSrcBps : null,
+    hotSrcs: Number(row.hot_srcs) || 0,
+  };
+}
+
 module.exports = {
   loadHourEnvelope,
   loadForeignEnvelopes,
@@ -1101,4 +1322,6 @@ module.exports = {
   mapVictimShape,
   emptyInvestigate,
   emptyBinding,
+  chooseAsnSlice,
+  loadExcessAsnTop,
 };

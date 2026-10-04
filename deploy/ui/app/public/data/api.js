@@ -930,6 +930,17 @@ const ApiClient = (() => {
     return body.data;
   }
 
+  async function loadDetectionEventAsn({ scope, scopeId, minute, clientId, parentScope } = {}) {
+    const params = new URLSearchParams();
+    params.set('scope', scope || '');
+    params.set('scopeId', scopeId || '');
+    params.set('minute', minute || '');
+    if (clientId) params.set('clientId', clientId);
+    if (parentScope) params.set('parentScope', parentScope);
+    const body = await requestJson(`/api/detection/events/asn?${params}`);
+    return body.data;
+  }
+
   async function loadDetectionEvents({ status = 'active', limit = 200, from, to, kind } = {}) {
     const params = new URLSearchParams();
     params.set('status', status);
@@ -3071,6 +3082,7 @@ const ApiClient = (() => {
     testDetectionTelegramSettings,
     loadDetectionThresholds,
     saveDetectionThreshold,
+    loadDetectionEventAsn,
     loadDetectionEvents,
     exportDetectionEventsCsv,
     dashboardOtherPorts,

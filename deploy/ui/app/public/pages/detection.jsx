@@ -345,6 +345,72 @@ function notifyHeadline(row) {
   return text.split('\n').find((line) => line.trim()) || '';
 }
 
+function formatAsnShare(share) {
+  const pct = Number(share) * 100;
+  if (!Number.isFinite(pct) || pct <= 0) return '';
+  const digits = pct >= 10 ? 0 : 1;
+  return `${pct.toLocaleString('ru-RU', { maximumFractionDigits: digits })}%`;
+}
+
+function JunkRows({ rows, labelOf }) {
+  if (!rows?.length) return null;
+  return rows.map((row) => (
+    <div key={labelOf(row)} style={{ display: 'flex', gap: 8, fontSize: 13 }}>
+      <span style={{ flex: 1 }}>{labelOf(row)}</span>
+      <span>{formatBps(row.bps)}</span>
+      <span style={{ width: 48, textAlign: 'right', color: 'var(--fg-muted)' }}>{formatAsnShare(row.share)}</span>
+    </div>
+  ));
+}
+
+function EventAsnTop({ event }) {
+  const minute = event?.live?.lastHotMinute || event?.alertMinute || '';
+  const [data, setData] = useState(null);
+  const [error, setError] = useState('');
+  const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    if (!event?.scope || !event?.scopeId || !minute) {
+      setData(null);
+      return undefined;
+    }
+    let cancelled = false;
+    setBusy(true);
+    setError('');
+    setData(null);
+    ApiClient.loadDetectionEventAsn({ scope: event.scope, scopeId: event.scopeId, minute })
+      .then((row) => { if (!cancelled) setData(row); })
+      .catch((err) => { if (!cancelled) setError(err.message || 'Не удалось посчитать мусорный UDP'); })
+      .finally(() => { if (!cancelled) setBusy(false); });
+    return () => { cancelled = true; };
+  }, [event?.id, event?.scope, event?.scopeId, minute]);
+  const share = data ? formatAsnShare(data.share) : '';
+  return (
+    <div style={{ margin: '8px 0 14px' }}>
+      <div style={{ fontWeight: 600, marginBottom: 4 }}>
+        {busy ? 'Считаю мусорный UDP…' : 'Мусорный UDP'}
+      </div>
+      {error ? <div style={{ color: 'var(--st-critical)' }}>{error}</div> : null}
+      {data ? (
+        <div style={{ fontSize: 13, marginBottom: 8 }}>
+          {share || '0%'} входящего
+          {' · '}
+          {formatBps(data.junkBps)} из {formatBps(data.inboundBps)}
+          {' · '}
+          {formatMskTime(data.minute)}
+          {data.asnCount ? ` · ${data.asnCount} ASN` : ''}
+        </div>
+      ) : null}
+      {data?.asns?.length ? <div style={{ fontSize: 12, color: 'var(--fg-muted)', marginBottom: 4 }}>Откуда</div> : null}
+      <JunkRows rows={data?.asns} labelOf={(row) => `AS${row.asn}${row.asnName ? ` ${row.asnName}` : ''}`} />
+      {data?.networks?.length ? <div style={{ fontSize: 12, color: 'var(--fg-muted)', margin: '8px 0 4px' }}>Куда</div> : null}
+      <JunkRows
+        rows={data?.networks}
+        labelOf={(row) => `${row.prefix}${row.ips ? ` · ${row.ips} адр.` : ''}`}
+      />
+    </div>
+  );
+}
+
 function EventNotifyModal({ event, onClose }) {
   const peak = isPeakEvent(event);
   return (
@@ -357,6 +423,7 @@ function EventNotifyModal({ event, onClose }) {
       footer={<Button kind="ghost" onClick={onClose}>Закрыть</Button>}
     >
       <AttackLoadBanner event={event} />
+      {event ? <EventAsnTop event={event} /> : null}
       {event?.alertText ? (
         <pre className="detection-notify-text">{event.alertText}</pre>
       ) : (
