@@ -406,7 +406,8 @@ function refineClassification(verdict, investigate, context = {}) {
     && junkTop != null && junkTop < 0.3
     && junkSrcs >= 50) {
     next.kind = KINDS.carpet;
-    const rest = String(next.reason || '').replace(/^нет явных признаков атаки\s*·\s*/, '');
+    const rest = String(next.reason || '')
+      .replace(/^(нет явных признаков атаки|объём в пределах часа, форма смешанная)\s*·\s*/, '');
     next.reason = `мусорный UDP ${(junkShare * 100).toFixed(0)}% входящего · ${junkSrcs} источников${rest ? ` · ${rest}` : ''}`
       .replace(/\s+/g, ' ')
       .trim();

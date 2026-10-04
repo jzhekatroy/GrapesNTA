@@ -1240,6 +1240,53 @@ describe('detection-telegram', () => {
     assert.match(text, /\nНачало: <b>01\.09 15:08 МСК<\/b>\n/);
   });
 
+  it('pin: идущая серия, уже записанная пиком, пересматривается один раз', () => {
+    const row = {
+      minute: '2026-10-03 12:18:00',
+      scope: 'provider',
+      scope_id: 'isp:pin',
+      proto: 'all',
+      bps: 25e9,
+      growth_bps: 1.8,
+    };
+    const prev = new Map([['provider|isp:pin', [
+      below('2026-10-03 12:17:00'),
+      above('2026-10-03 12:16:00'),
+      below('2026-10-03 12:15:00'),
+      above('2026-10-03 12:14:00'),
+      below('2026-10-03 12:13:00'),
+      above('2026-10-03 12:11:00'),
+    ]]]);
+    const grouped = new Map([['provider|isp:pin', {
+      byProto: { all: row, udp: { bps: 19e9 } },
+    }]]);
+    const peaks = new Map([['provider|isp:pin', {
+      id: 'provider|isp:pin|2026-10-03 12:11:00',
+      alertMinute: '2026-10-03 12:11:00',
+      startMinute: '2026-10-03 12:11:00',
+    }]]);
+    const opts = {
+      streak: 3,
+      settings: { streak: 3, volumeWindow: 6 },
+      grouped,
+      peaksByKey: peaks,
+      peakUpgradeChecked: new Set(),
+    };
+    const [picked] = pickAlertCandidates([row], prev, 1.6, opts);
+    assert.equal(picked.upgradePeak.id, 'provider|isp:pin|2026-10-03 12:11:00');
+    assert.equal(picked.startMinute, '2026-10-03 12:11:00');
+    opts.peakUpgradeChecked.add('provider|isp:pin');
+    assert.equal(pickAlertCandidates([row], prev, 1.6, opts).length, 0);
+    const quietUdp = new Map([['provider|isp:pin', {
+      byProto: { all: row, udp: { bps: 1e9 } },
+    }]]);
+    assert.equal(pickAlertCandidates([row], prev, 1.6, {
+      ...opts,
+      grouped: quietUdp,
+      peakUpgradeChecked: new Set(),
+    }).length, 0);
+  });
+
   it('активный объект не получает повторный алерт', () => {
     const rows = [
       { scope: 'net', scope_id: '10.0.0.0/24', proto: 'all', growth_bps: 2, growth_pps: 0.1 },

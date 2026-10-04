@@ -2006,6 +2006,20 @@ function alertStartMinute(history, hot, windowMinutes) {
   return start;
 }
 
+function udpShareOf(group, row) {
+  const allBps = Number(group?.byProto?.all?.bps ?? row?.bps);
+  const udpBps = Number(group?.byProto?.udp?.bps);
+  if (!(allBps > 0) || !Number.isFinite(udpBps)) return null;
+  return udpBps / allBps;
+}
+
+function shouldReopenPeak(history, threshold, streak, windowSize, udpShare) {
+  const need = normalizeStreak(streak);
+  const win = normalizeStreak(windowSize, need);
+  if (!windowQualifies(history, threshold, need, win)) return false;
+  return udpShare != null && udpShare >= PEAK_UPGRADE_UDP_SHARE;
+}
+
 function pickAlertCandidates(allRows, previousByKey, threshold, options = {}) {
   const settings = options.settings || {};
   const enabledAtMs = options.enabledAtMs;
@@ -2042,6 +2056,23 @@ function pickAlertCandidates(allRows, previousByKey, threshold, options = {}) {
       } else {
         ready = shouldSendSignal(history, hot, cfg.streak, enabledAtMs);
       }
+      let upgradePeak = null;
+      // pin 04.10: серия уже открыта пиком (×1.6 < ×1.8), импульс 1 через 1
+      // окно не рвёт, и новый фронт не наступает. Тот же пик пересматриваем
+      // один раз, пока UDP ещё доминирует.
+      if (!ready && signal === SIGNALS.volume) {
+        const peaks = options.peaksByKey instanceof Map ? options.peaksByKey : null;
+        const checked = options.peakUpgradeChecked instanceof Set ? options.peakUpgradeChecked : null;
+        const peak = peaks?.get(objectId);
+        const scope = String(row.scope || '');
+        const udpShare = udpShareOf(group, row);
+        if (peak && checked && !checked.has(objectId)
+          && (scope === 'provider' || scope === 'client')
+          && shouldReopenPeak(history, t, options.streak ?? cfg.streak, cfg.window, udpShare)) {
+          ready = true;
+          upgradePeak = peak;
+        }
+      }
       if (!ready) continue;
       out.push({
         row,
@@ -2053,7 +2084,8 @@ function pickAlertCandidates(allRows, previousByKey, threshold, options = {}) {
         thresholdIsCustom: hasGrowthOverride(row.scope, row.scope_id, options.thresholdByKey),
         streak: signal === SIGNALS.volume ? (options.streak ?? cfg.streak) : cfg.streak,
         window: signal === SIGNALS.volume ? cfg.window : null,
-        startMinute: alertStartMinute(history, hot, volumeWindow) || row.minute,
+        startMinute: upgradePeak?.startMinute || alertStartMinute(history, hot, volumeWindow) || row.minute,
+        upgradePeak,
       });
     }
   }
@@ -2153,6 +2185,11 @@ function pickNormalizeCandidates(allRows, previousByKey, threshold, options = {}
 // дырам в таблице: простой воркера тишиной не считается.
 const silentTicksByEvent = new Map();
 const SILENT_TELEGRAM_MAX_AGE_MS = 24 * 60 * MINUTE;
+// Уже проверенный пик, который мусорным UDP не оказался. Иначе каждый тик
+// продолжающейся серии снова читал бы сырые потоки.
+const peakUpgradeChecked = new Set();
+const PEAK_UPGRADE_UDP_SHARE = 0.5;
+const PEAK_LOOKBACK_MS = 6 * 60 * MINUTE;
 
 function pickSilentNormalizeCandidates(activeByKey, presentKeys, minute, options = {}) {
   const settings = options.settings || {};
@@ -2948,6 +2985,42 @@ async function loadActiveEventsByKey() {
   return map;
 }
 
+async function loadLatestOpenPeaks() {
+  const from = formatCh(Date.now() - PEAK_LOOKBACK_MS);
+  const { rows } = await query(`
+    SELECT event_id, scope, scope_id, name, status, signal, alert_minute, normalize_minute, alert_json, threshold
+    FROM (
+      SELECT
+        e.event_id AS event_id,
+        argMax(e.scope, e.updated_at) AS scope,
+        argMax(e.scope_id, e.updated_at) AS scope_id,
+        argMax(e.name, e.updated_at) AS name,
+        argMax(e.status, e.updated_at) AS status,
+        argMax(e.signal, e.updated_at) AS signal,
+        argMax(e.alert_minute, e.updated_at) AS alert_minute,
+        argMax(e.normalize_minute, e.updated_at) AS normalize_minute,
+        argMax(e.alert_json, e.updated_at) AS alert_json,
+        argMax(e.threshold, e.updated_at) AS threshold
+      FROM ${eventsTableRef()} AS e
+      WHERE e.alert_minute >= ${utcDateTime('from')}
+        AND e.scope IN ('provider', 'client')
+      GROUP BY e.event_id
+    )
+    WHERE status = 'peak'
+      AND (signal = '' OR signal = '${SIGNALS.volume}')
+    ORDER BY alert_minute DESC
+  `, { from }, { name: 'detection/events-open-peaks' });
+  const map = new Map();
+  for (const row of rows) {
+    const event = mapEventRow({ ...row, normalize_json: '' });
+    if (event.signal && event.signal !== SIGNALS.volume) continue;
+    const key = objectKey(event.scope, event.scopeId);
+    const prev = map.get(key);
+    if (!prev || parseUtc(event.alertMinute) > parseUtc(prev.alertMinute)) map.set(key, event);
+  }
+  return map;
+}
+
 const REPEAT_WINDOW_MS = 24 * 3600 * 1000;
 
 // Атаки объекта за сутки до minute: одна запись на минуту открытия, сколько бы
@@ -3561,6 +3634,13 @@ async function processDetectionAlerts({ minute, rows, nameByKey }) {
     NET_NORMALIZE_STREAK,
   );
   const previousByKey = await loadPreviousAllRows(minute, watchKeys, take);
+  let peaksByKey = new Map();
+  try {
+    peaksByKey = await loadLatestOpenPeaks();
+  } catch (err) {
+    peaksByKey = new Map();
+    peaksByKey.loadError = err;
+  }
   const pickOpts = {
     settings,
     grouped,
@@ -3569,6 +3649,8 @@ async function processDetectionAlerts({ minute, rows, nameByKey }) {
     activeKeys: new Set(activeByKey.keys()),
     thresholdByKey,
     streak: settings.streak,
+    peaksByKey,
+    peakUpgradeChecked,
   };
   const alertCandidates = pickAlertCandidates(allRows, previousByKey, settings.growthThreshold, pickOpts);
   const normalizeCandidates = pickNormalizeCandidates(allRows, previousByKey, settings.growthThreshold, {
@@ -3592,6 +3674,9 @@ async function processDetectionAlerts({ minute, rows, nameByKey }) {
   let opened = 0;
   let closed = 0;
   const errors = [];
+  if (peaksByKey.loadError) {
+    errors.push({ key: 'peaks', message: `peaks: ${peaksByKey.loadError.message}` });
+  }
   const touchedIds = new Set();
 
   const alertGroups = new Map();
@@ -3726,11 +3811,20 @@ async function processDetectionAlerts({ minute, rows, nameByKey }) {
       focusMinute: focusMinute !== minute ? focusMinute : '',
       startMinute,
     });
+    let wrote = false;
     for (const candidate of eventCandidates) {
       const signal = candidate.signal || SIGNALS.volume;
-      const eventId = signal === SIGNALS.volume
-        ? `${objectId}|${minute}`
-        : `${objectId}|${signal}|${minute}`;
+      if (candidate.upgradePeak && !attack) {
+        if (investigate?.junk) peakUpgradeChecked.add(objectId);
+        continue;
+      }
+      const keptMinute = candidate.upgradePeak?.alertMinute
+        ? formatCh(parseUtc(candidate.upgradePeak.alertMinute))
+        : minute;
+      const eventId = candidate.upgradePeak?.id
+        || (signal === SIGNALS.volume
+          ? `${objectId}|${minute}`
+          : `${objectId}|${signal}|${minute}`);
       const stored = attack
         ? { ...snapshot, track: openTrack(signal, byProto.all || row, group, byProto, investigate, verdict, focusMinute) }
         : snapshot;
@@ -3740,8 +3834,8 @@ async function processDetectionAlerts({ minute, rows, nameByKey }) {
         scope_id: row.scope_id,
         name,
         status: attack ? 'active' : 'peak',
-        alert_minute: minute,
-        normalize_minute: attack ? null : minute,
+        alert_minute: keptMinute,
+        normalize_minute: attack ? null : keptMinute,
         alert_json: JSON.stringify(stored),
         normalize_json: '',
         threshold: objectThreshold,
@@ -3749,7 +3843,9 @@ async function processDetectionAlerts({ minute, rows, nameByKey }) {
       });
       touchedIds.add(eventId);
       opened += 1;
+      wrote = true;
     }
+    if (!wrote) continue;
     const tg = await maybeSendTelegram(
       text,
       (!skipShare && matchesAlertKind(attack, settings.alertKind)) ? tgCfg : null,
