@@ -19,6 +19,11 @@ if [[ -z "${CH_URL:-}" || -z "${CH_USER:-}" ]]; then
   CH_URL="${CH_URL:-${CLICKHOUSE_URL:-}}"
   CH_USER="${CH_USER:-${CLICKHOUSE_WRITE_USER:-${CLICKHOUSE_USER:-}}}"
   CH_PASS="${CH_PASS:-${CLICKHOUSE_WRITE_PASSWORD:-${CLICKHOUSE_PASSWORD:-}}}"
+  # GRANT может выдать только пользователь с GRANT OPTION.
+  # На стенде это CLICKHOUSE_USER (обычно default), а не ui_admin:
+  # ui_admin словарь создаёт, но право dictGet раздать не может.
+  GRANT_USER="${CLICKHOUSE_USER:-}"
+  GRANT_PASS="${CLICKHOUSE_PASSWORD:-}"
 fi
 
 export CH_URL CH_USER CH_PASS
@@ -44,4 +49,28 @@ if [[ ${#files[@]} -eq 0 ]]; then
   exit 0
 fi
 
-exec bash "${HTTP_APPLY}" --ignore-unknown-table "${files[@]}"
+grant_files=()
+schema_files=()
+for f in "${files[@]}"; do
+  if [[ "$(basename "$f")" == grant_*.sql ]]; then
+    grant_files+=("$f")
+  else
+    schema_files+=("$f")
+  fi
+done
+
+if [[ ${#schema_files[@]} -gt 0 ]]; then
+  bash "${HTTP_APPLY}" --ignore-unknown-table "${schema_files[@]}"
+fi
+
+if [[ ${#grant_files[@]} -eq 0 ]]; then
+  exit 0
+fi
+
+# Пустой CLICKHOUSE_USER значит, что схема и гранты идут одним пользователем.
+if [[ -z "${GRANT_USER:-}" ]]; then
+  GRANT_USER="${CH_USER}"
+  GRANT_PASS="${CH_PASS}"
+fi
+echo "ensure grants ClickHouse ${CH_URL} as ${GRANT_USER}"
+CH_USER="${GRANT_USER}" CH_PASS="${GRANT_PASS}" bash "${HTTP_APPLY}" "${grant_files[@]}"
