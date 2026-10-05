@@ -52,6 +52,12 @@ const {
   previousRowsLookbackMinutes,
   previousRowsScopeFilter,
   liveEventState,
+  markHourHot,
+  HOUR_GATE_RATIO,
+  parentProviderOf,
+  parseCidr,
+  concurrentAttacksLine,
+  TELEGRAM_SKIP_PARENT_ACTIVE,
 } = require('./detection-telegram');
 const { emptyInvestigate } = require('./detection-investigate');
 
@@ -1906,5 +1912,91 @@ describe('detection-telegram', () => {
     assert.equal(vectorChanged(open, faint), false);
     const small = minute(11e9, 30, 150, 11.6e9, 300);
     assert.equal(vectorChanged(open, small), true);
+  });
+});
+
+describe('порог по норме часа', () => {
+  // Повтор атаки ШПД 05.10 утром: pin 31.8, 27.5 и 37.5 Гбит/с при росте
+  // к дневному потолку ×1.09–1.28. Утренняя норма pin около 4.8 Гбит/с.
+  const replay = () => [
+    { scope: 'provider', scope_id: 'isp:pin', minute: '2026-10-05 04:17:00', bps: 37.48e9, growth_bps: 1.28 },
+    { scope: 'provider', scope_id: 'isp:pin', minute: '2026-10-05 04:16:00', bps: 27.53e9, growth_bps: 0.94 },
+    { scope: 'provider', scope_id: 'isp:pin', minute: '2026-10-05 04:15:00', bps: 31.76e9, growth_bps: 1.09 },
+    { scope: 'provider', scope_id: 'isp:pin', minute: '2026-10-05 04:14:00', bps: 3.37e9, growth_bps: 0.12 },
+  ];
+  const norm = () => 4.8e9;
+
+  it('без нормы часа серия pin не набирается', () => {
+    assert.equal(shouldSendAlert(replay(), 1.6, 3, null, 6), false);
+  });
+
+  it('UDP-объём втрое выше нормы часа открывает серию', () => {
+    const history = replay();
+    markHourHot(history, 0.89, norm);
+    assert.deepEqual(history.map((r) => r.hour_hot === true), [true, true, true, false]);
+    assert.equal(shouldSendAlert(history, 1.6, 3, null, 6), true);
+  });
+
+  it('без UDP или без нормы часа минуты не помечаются', () => {
+    const tcp = replay();
+    markHourHot(tcp, 0.12, norm);
+    assert.equal(tcp.some((r) => r.hour_hot), false);
+    const unknown = replay();
+    markHourHot(unknown, 0.89, () => null);
+    assert.equal(unknown.some((r) => r.hour_hot), false);
+    const net = replay().map((r) => ({ ...r, scope: 'net' }));
+    markHourHot(net, 0.89, norm);
+    assert.equal(net.some((r) => r.hour_hot), false);
+  });
+
+  it('объём ниже ×3 к норме часа не горячий', () => {
+    const history = replay();
+    markHourHot(history, 0.89, () => 13e9);
+    assert.equal(history.some((r) => r.hour_hot), false);
+    assert.equal(HOUR_GATE_RATIO, 3);
+  });
+});
+
+describe('одна атака — одно сообщение', () => {
+  // Префиксы провайдеров ШПД и сети /24, открытые на повторе 05.10.
+  const prefixes = [
+    { ...parseCidr('176.116.240.0/20'), entityId: 'isp:aykonet' },
+    { ...parseCidr('176.123.128.0/19'), entityId: 'isp:metrobit' },
+    { ...parseCidr('91.151.176.0/20'), entityId: 'isp:verolayn' },
+    { ...parseCidr('188.143.128.0/17'), entityId: 'isp:pin' },
+  ];
+
+  it('сеть /24 находит своего провайдера', () => {
+    assert.equal(parentProviderOf('91.151.189.0/24', prefixes), 'isp:verolayn');
+    assert.equal(parentProviderOf('176.116.249.0/24', prefixes), 'isp:aykonet');
+    assert.equal(parentProviderOf('176.123.129.0/24', prefixes), 'isp:metrobit');
+    assert.equal(parentProviderOf('95.215.3.0/24', prefixes), null);
+  });
+
+  it('самый узкий префикс выигрывает', () => {
+    const nested = [...prefixes, { ...parseCidr('91.151.188.0/22'), entityId: 'isp:inner' }];
+    assert.equal(parentProviderOf('91.151.189.0/24', nested), 'isp:inner');
+  });
+
+  it('строка о соседних атаках берёт только последние 15 минут', () => {
+    const active = new Map([
+      ['provider|isp:verolayn', { scope: 'provider', scopeId: 'isp:verolayn', name: 'isp:verolayn', alertMinute: '2026-10-05 04:15:00' }],
+      ['net|91.151.182.0/24', { scope: 'net', scopeId: '91.151.182.0/24', name: '91.151.182.0/24', alertMinute: '2026-10-05 04:17:00' }],
+      ['client|1', { scope: 'client', scopeId: '1', name: 'Старый', alertMinute: '2026-10-05 03:00:00' }],
+    ]);
+    const opened = new Map([
+      ['provider|isp:metrobit', { scope: 'provider', scopeId: 'isp:metrobit', name: 'isp:metrobit', minute: '2026-10-05 04:16:00' }],
+    ]);
+    const line = concurrentAttacksLine('provider|isp:aykonet', '2026-10-05 04:17:00', active, opened);
+    assert.match(line, /ещё атакованы/);
+    assert.match(line, /07:15/);
+    assert.match(line, /07:16/);
+    assert.doesNotMatch(line, /91\.151\.182/);
+    assert.doesNotMatch(line, /Старый/);
+    assert.equal(concurrentAttacksLine('provider|isp:aykonet', '2026-10-05 04:17:00', new Map(), new Map()), '');
+  });
+
+  it('у события есть отдельная причина молчания', () => {
+    assert.equal(TELEGRAM_SKIP_PARENT_ACTIVE, 'parent_attack_active');
   });
 });

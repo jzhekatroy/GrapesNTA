@@ -1516,6 +1516,140 @@ function FailedRequestsPanel({ data, loading, onReload, page, onPageChange }) {
   );
 }
 
+function replayStatusText(data) {
+  if (!data || data.status === 'idle') return '';
+  if (data.stopping) return 'Останавливается после текущей минуты. Уже записанное останется.';
+  if (data.status === 'running' && data.copiedSteps === 0 && !data.cursorFrom) {
+    return 'Считаю потоки в выбранном периоде.';
+  }
+  const step = `${data.copiedSteps || 0} из ${data.totalSteps || 0}`;
+  if (data.status === 'running') {
+    const src = data.cursorFrom ? ` Сейчас источник ${data.cursorFrom}` : '';
+    const asNow = data.playingFrom ? `, пишется как ${data.playingFrom}` : '';
+    return `Идёт повтор: ${step}.${src}${asNow}.`;
+  }
+  if (data.status === 'stopped') return `Остановлен на ${step}. Уже записанные минуты остаются.`;
+  if (data.status === 'done') {
+    const rows = data.sourceRows != null ? `, потоков ${Number(data.sourceRows).toLocaleString('ru-RU')}` : '';
+    return `Готово: ${step}${rows}.`;
+  }
+  if (data.status === 'error') return data.error || 'Повтор остановился с ошибкой';
+  return '';
+}
+
+function TrafficReplayPanel() {
+  const [fromInput, setFromInput] = useState('');
+  const [toInput, setToInput] = useState('');
+  const [replay, setReplay] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState('');
+
+  const refresh = useCallback(() => {
+    return ApiClient.loadTrafficReplay()
+      .then((data) => setReplay(data))
+      .catch((e) => setErr(e.message || String(e)));
+  }, []);
+
+  useEffect(() => {
+    refresh();
+  }, [refresh]);
+
+  const running = replay?.status === 'running';
+
+  useEffect(() => {
+    if (!running) return undefined;
+    const t = setInterval(() => { refresh(); }, 2000);
+    return () => clearInterval(t);
+  }, [running, refresh]);
+
+  const onStart = async () => {
+    if (!fromInput || !toInput) {
+      setErr('Укажите начало и конец периода');
+      return;
+    }
+    const from = fromInput.replace('T', ' ');
+    const to = toInput.replace('T', ' ');
+    const ok = window.confirm(
+      'Повторить трафик этого периода?\n\n'
+      + `${from} → ${to} (московское время)\n\n`
+      + 'Каждая минута источника будет записана ещё раз в текущее время, в том же темпе.\n'
+      + 'Живой трафик с коллектора при этом не останавливается.\n'
+      + 'После остановки уже записанные минуты остаются.',
+    );
+    if (!ok) return;
+    setBusy(true);
+    setErr('');
+    try {
+      const data = await ApiClient.startTrafficReplay({ from, to });
+      setReplay(data);
+    } catch (e) {
+      setErr(e.message || String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const onStop = async () => {
+    setBusy(true);
+    setErr('');
+    try {
+      const data = await ApiClient.stopTrafficReplay();
+      setReplay(data);
+    } catch (e) {
+      setErr(e.message || String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const text = replayStatusText(replay);
+
+  return (
+    <Card title="Повторить трафик">
+      <div className="col" style={{ gap: 12, font: 'var(--pv-text-body-3)' }}>
+        <div style={{ color: 'var(--fg-secondary)' }}>
+          Копия выбранного периода пишется в сырые потоки так, будто эти минуты
+          наступают сейчас. Темп один в один: десять минут атаки длятся десять минут.
+          Период не длиннее 6 часов, время московское. Детектор сам не останавливается.
+        </div>
+        <div style={{ color: 'var(--fg-secondary)' }}>
+          Детектор сравнивает трафик с нормой того часа, в который идёт повтор.
+          Вечерняя атака, повторённая утром, выглядит в несколько раз сильнее, чем была.
+          Чтобы проверить тот же вердикт, запускайте повтор в тот же час суток.
+        </div>
+        <div className="row" style={{ gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+          <label className="row" style={{ gap: 6, alignItems: 'center' }}>
+            <span style={{ color: 'var(--fg-secondary)' }}>С</span>
+            <input
+              type="datetime-local"
+              value={fromInput}
+              onChange={(e) => setFromInput(e.target.value)}
+              disabled={running || busy}
+            />
+          </label>
+          <label className="row" style={{ gap: 6, alignItems: 'center' }}>
+            <span style={{ color: 'var(--fg-secondary)' }}>по</span>
+            <input
+              type="datetime-local"
+              value={toInput}
+              onChange={(e) => setToInput(e.target.value)}
+              disabled={running || busy}
+            />
+          </label>
+          <button type="button" className="btn btn--primary" onClick={onStart} disabled={running || busy}>
+            Начать
+          </button>
+          <button type="button" className="btn" onClick={onStop} disabled={!running || busy}>
+            Остановить
+          </button>
+        </div>
+        {text && <div>{text}</div>}
+        {err && <div style={{ color: 'var(--st-critical)' }}>{err}</div>}
+      </div>
+    </Card>
+  );
+}
+
 function PageDiagnostics() {
   const [tab, setTab] = useState(() => sessionStorage.getItem('grapes-diagnostics-tab') || 'worker');
   const [workerData, setWorkerData] = useState(null);
@@ -1543,7 +1677,7 @@ function PageDiagnostics() {
   }, []);
 
   const reload = useCallback((opts = { initial: false }) => {
-    if (tab === 'erp' || tab === 'detection') {
+    if (tab === 'erp' || tab === 'detection' || tab === 'replay') {
       setLoading(false);
       setError('');
       return;
@@ -1628,6 +1762,13 @@ function PageDiagnostics() {
           </button>
           <button
             type="button"
+            className={tab === 'replay' ? 'seg__item seg__item--active' : 'seg__item'}
+            onClick={() => { sessionStorage.setItem('grapes-diagnostics-tab', 'replay'); setTab('replay'); }}
+          >
+            Повтор трафика
+          </button>
+          <button
+            type="button"
             className={tab === 'snapshots' ? 'seg__item seg__item--active' : 'seg__item'}
             onClick={() => setTab('snapshots')}
           >
@@ -1678,6 +1819,7 @@ function PageDiagnostics() {
         />
       )}
       {tab === 'detection' && <PageDetection />}
+      {tab === 'replay' && <TrafficReplayPanel />}
       {tab === 'snapshots' && (
         <AnalysisSnapshotsPanel
           data={snapshotsData}

@@ -1,6 +1,6 @@
 'use strict';
 
-const { query, executeCommand, insertRows, config } = require('./clickhouse');
+const { query, executeCommand, insertRows, config, l3PrefixesViewRef } = require('./clickhouse');
 const { tableRef, ensureDetectionTables } = require('./detection-schema');
 const { formatCh, parseUtc, MINUTE } = require('./detection-core');
 const {
@@ -54,6 +54,7 @@ const DEFAULT_VOLUME_QUIET = 10;
 const DEFAULT_TELEGRAM_API_URL = 'https://api.telegram.org';
 const DEFAULT_MIN_CLIENT_SHARE_PCT = 10;
 const TELEGRAM_SKIP_BELOW_SHARE = 'below_client_share';
+const TELEGRAM_SKIP_PARENT_ACTIVE = 'parent_attack_active';
 const MAX_STREAK = 60;
 const PREV_ROWS_GAP_MINUTES = 15;
 const ALERT_SCOPES = new Set(['all', 'client', 'net']);
@@ -643,6 +644,7 @@ function trafficAboveBaseline(bps, growth) {
 }
 
 function isAboveGrowthThreshold(row, threshold) {
+  if (row?.hour_hot === true) return true;
   const gBps = finiteGrowth(row?.growth_bps ?? row?.growthBps);
   const gPps = finiteGrowth(row?.growth_pps ?? row?.growthPps);
   const t = Number(threshold) || DEFAULT_GROWTH_THRESHOLD;
@@ -2011,6 +2013,25 @@ function udpShareOf(group, row) {
   const udpBps = Number(group?.byProto?.udp?.bps);
   if (!(allBps > 0) || !Number.isFinite(udpBps)) return null;
   return udpBps / allBps;
+}
+
+// Рост считается к потолку за все часы, а у крупного провайдера утро в 2–3
+// раза тише вечера: утренний удар 20 Гбит/с по pin даёт ×1.3 и проходит
+// незамеченным. Минута UDP-объекта горячая и тогда, когда объём втрое выше
+// p95 своего часа. Замер за 7 дней до 05.10: только атака ШПД 04.10, ни
+// одного клиента; при ×2 добавлялся клиент на 150 Мбит/с.
+const HOUR_GATE_RATIO = 3;
+const HOUR_GATE_UDP_SHARE = 0.6;
+
+function markHourHot(rows, udpShare, norm) {
+  if (typeof norm !== 'function' || udpShare == null || udpShare < HOUR_GATE_UDP_SHARE) return;
+  for (const row of rows) {
+    const scope = String(row?.scope || '');
+    if (scope !== 'client' && scope !== 'provider') continue;
+    const usual = Number(norm(scope, row.scope_id, row.minute));
+    const bps = Number(row?.bps);
+    if (usual > 0 && bps >= HOUR_GATE_RATIO * usual) row.hour_hot = true;
+  }
 }
 
 function shouldReopenPeak(history, threshold, streak, windowSize, udpShare) {
@@ -3449,8 +3470,9 @@ async function followOpenAttacks({
     const threshold = resolveGrowthThreshold(event.scope, event.scopeId, settings.growthThreshold, thresholdByKey);
     const hotNow = isSignalHot(signal, row, group, threshold, settings)
       || (signal === SIGNALS.syn_flood && synFloodStillGoing(row, synOptions(settings)));
-    // Открытие не ушло в Telegram из-за малой доли — продолжения тоже не шлём.
-    const tgFollow = String(event.telegramSkip || '') !== TELEGRAM_SKIP_BELOW_SHARE
+    // Открытие не ушло в Telegram (малая доля, сеть внутри атакованного
+    // провайдера) — продолжения тоже не шлём.
+    const tgFollow = !String(event.telegramSkip || '')
       && matchesAlertKind(true, settings.alertKind) ? tgCfg : null;
     let track = event.track;
     if (!track) {
@@ -3587,7 +3609,89 @@ async function followOpenAttacks({
   return { sent, updated, errors };
 }
 
-async function processDetectionAlerts({ minute, rows, nameByKey }) {
+function ipv4ToInt(ip) {
+  const parts = String(ip || '').split('.');
+  if (parts.length !== 4) return null;
+  let n = 0;
+  for (const part of parts) {
+    const v = Number(part);
+    if (!Number.isInteger(v) || v < 0 || v > 255) return null;
+    n = n * 256 + v;
+  }
+  return n;
+}
+
+function parseCidr(cidr) {
+  const [ip, bitsRaw] = String(cidr || '').split('/');
+  const base = ipv4ToInt(ip);
+  const bits = Number(bitsRaw);
+  if (base == null || !Number.isInteger(bits) || bits < 0 || bits > 32) return null;
+  const size = 2 ** (32 - bits);
+  return { from: base - (base % size), to: base - (base % size) + size - 1, bits };
+}
+
+// Самый узкий провайдерский префикс, в котором лежит сеть /24.
+function parentProviderOf(net, prefixes) {
+  const range = parseCidr(net);
+  if (!range || !Array.isArray(prefixes)) return null;
+  let best = null;
+  for (const p of prefixes) {
+    if (p.from <= range.from && p.to >= range.to && (!best || p.bits > best.bits)) best = p;
+  }
+  return best ? best.entityId : null;
+}
+
+const PROVIDER_PREFIX_CACHE_MS = 10 * 60 * 1000;
+let providerPrefixCache = { at: 0, list: [] };
+
+async function loadProviderPrefixes() {
+  if (providerPrefixCache.at && Date.now() - providerPrefixCache.at < PROVIDER_PREFIX_CACHE_MS) {
+    return providerPrefixCache.list;
+  }
+  const { rows } = await query(`
+    SELECT DISTINCT prefix, entity_id
+    FROM ${l3PrefixesViewRef()}
+    WHERE family = 4 AND role = 'provider_public' AND entity_id != '' AND prefix != ''
+  `, {}, { name: 'detection/provider-prefixes' });
+  const list = [];
+  for (const r of rows) {
+    const range = parseCidr(r.prefix);
+    if (range) list.push({ ...range, entityId: String(r.entity_id) });
+  }
+  providerPrefixCache = { at: Date.now(), list };
+  return list;
+}
+
+// Одна атака на ШПД 05.10 дала девять сообщений за три минуты: три провайдера
+// и шесть их сетей /24. Сеть внутри провайдера, по которому атака уже открыта,
+// пишется в историю молча — её видно в «Куда» сообщения провайдера.
+const CONCURRENT_ATTACK_MINUTES = 15;
+
+function concurrentAttacksLine(selfKey, minute, activeByKey, openedNow) {
+  const nowTs = parseUtc(minute);
+  if (!Number.isFinite(nowTs)) return '';
+  const seen = new Set([selfKey]);
+  const items = [];
+  const push = (key, scope, scopeId, name, at) => {
+    if (seen.has(key) || (scope !== 'provider' && scope !== 'client')) return;
+    const ts = parseUtc(at);
+    if (!Number.isFinite(ts) || nowTs - ts > CONCURRENT_ATTACK_MINUTES * MINUTE || ts > nowTs) return;
+    seen.add(key);
+    const label = scope === 'provider' ? providerLabel(scopeId, name) : (name || scopeId);
+    items.push({ ts, text: `${label} с ${formatClockMsk(at)}` });
+  };
+  for (const event of activeByKey.values()) {
+    push(objectKey(event.scope, event.scopeId), event.scope, event.scopeId, event.name, event.startMinute || event.alertMinute);
+  }
+  for (const [key, item] of openedNow) push(key, item.scope, item.scopeId, item.name, item.minute);
+  if (!items.length) return '';
+  items.sort((a, b) => a.ts - b.ts);
+  return `За последние ${CONCURRENT_ATTACK_MINUTES} минут ещё атакованы: ${escapeHtml(items.map((i) => i.text).join(' · '))}`;
+}
+
+const SCOPE_OPEN_ORDER = { provider: 0, client: 1, net: 2 };
+
+async function processDetectionAlerts({ minute, rows, nameByKey, hourBpsNorm }) {
   await ensureDetectionTelegramTables();
   const raw = await getCurrentSettingsRaw();
   const settings = mapSettings(raw || DEFAULT_SETTINGS);
@@ -3600,6 +3704,13 @@ async function processDetectionAlerts({ minute, rows, nameByKey }) {
 
   const allRows = rows.filter((r) => String(r.proto) === 'all' && matchesAlertScope(r, settings.alertScope));
   const grouped = groupRowsByObject(rows);
+  const udpShareByKey = new Map();
+  for (const row of allRows) {
+    const key = objectKey(row.scope, row.scope_id);
+    const share = udpShareOf(grouped.get(key), row);
+    udpShareByKey.set(key, share);
+    markHourHot([row], share, hourBpsNorm);
+  }
   const activeByKey = await loadActiveEventsByKey();
   const thresholdByKey = await loadThresholdMap();
   const above = allRows.filter((r) => {
@@ -3634,6 +3745,7 @@ async function processDetectionAlerts({ minute, rows, nameByKey }) {
     NET_NORMALIZE_STREAK,
   );
   const previousByKey = await loadPreviousAllRows(minute, watchKeys, take);
+  for (const [key, list] of previousByKey) markHourHot(list, udpShareByKey.get(key), hourBpsNorm);
   let peaksByKey = new Map();
   try {
     peaksByKey = await loadLatestOpenPeaks();
@@ -3687,7 +3799,13 @@ async function processDetectionAlerts({ minute, rows, nameByKey }) {
     alertGroups.set(groupKey, list);
   }
 
-  for (const candidates of alertGroups.values()) {
+  const orderedGroups = [...alertGroups.values()].sort((a, b) => (
+    (SCOPE_OPEN_ORDER[a[0]?.row?.scope] ?? 3) - (SCOPE_OPEN_ORDER[b[0]?.row?.scope] ?? 3)
+  ));
+  const openedNow = new Map();
+  let providerPrefixes = null;
+
+  for (const candidates of orderedGroups) {
     const eventCandidates = dropDuplicateGeo(candidates, activeByKey);
     if (!eventCandidates.length) continue;
     const { row, threshold: objectThreshold } = candidates[0];
@@ -3788,7 +3906,7 @@ async function processDetectionAlerts({ minute, rows, nameByKey }) {
       }
     }
     const startMinute = earliestStartMinute(eventCandidates, minute);
-    const text = formatAlertMessage({
+    let text = formatAlertMessage({
       name,
       scope: row.scope,
       scopeId: row.scope_id,
@@ -3801,13 +3919,28 @@ async function processDetectionAlerts({ minute, rows, nameByKey }) {
       binding,
       signals,
     });
+    if (attack && (row.scope === 'provider' || row.scope === 'client')) {
+      const line = concurrentAttacksLine(objectId, minute, activeByKey, openedNow);
+      if (line) text = `${text}\n${line}`;
+    }
+    let skipParent = false;
+    if (attack && row.scope === 'net') {
+      try {
+        if (!providerPrefixes) providerPrefixes = await loadProviderPrefixes();
+        const parent = parentProviderOf(row.scope_id, providerPrefixes);
+        const parentKey = parent ? objectKey('provider', parent) : '';
+        skipParent = Boolean(parentKey) && (activeByKey.has(parentKey) || openedNow.has(parentKey));
+      } catch (err) {
+        errors.push({ key: objectId, message: `parent: ${err.message}` });
+      }
+    }
     const skipShare = shouldSkipTelegramForShare(signals, { byProto, verdict, investigate }, settings);
     const snapshot = persistAlertSnapshot(snapshotByProto({ byProto }, byProto.all || row), {
       verdict,
       investigate,
       binding,
       telegramText: text,
-      telegramSkip: skipShare ? TELEGRAM_SKIP_BELOW_SHARE : '',
+      telegramSkip: skipShare ? TELEGRAM_SKIP_BELOW_SHARE : (skipParent ? TELEGRAM_SKIP_PARENT_ACTIVE : ''),
       focusMinute: focusMinute !== minute ? focusMinute : '',
       startMinute,
     });
@@ -3846,9 +3979,12 @@ async function processDetectionAlerts({ minute, rows, nameByKey }) {
       wrote = true;
     }
     if (!wrote) continue;
+    if (attack) {
+      openedNow.set(objectId, { scope: row.scope, scopeId: row.scope_id, name, minute: startMinute || minute });
+    }
     const tg = await maybeSendTelegram(
       text,
-      (!skipShare && matchesAlertKind(attack, settings.alertKind)) ? tgCfg : null,
+      (!skipShare && !skipParent && matchesAlertKind(attack, settings.alertKind)) ? tgCfg : null,
     );
     if (tg.sent) sent += 1;
     if (tg.error) errors.push({ key: objectId, message: tg.error });
@@ -3891,7 +4027,7 @@ async function processDetectionAlerts({ minute, rows, nameByKey }) {
     });
     touchedIds.add(active.id);
     closed += 1;
-    const skipShare = String(active.telegramSkip || '') === TELEGRAM_SKIP_BELOW_SHARE;
+    const skipShare = Boolean(String(active.telegramSkip || ''));
     const skipStale = silent && !telegram;
     const tg = await maybeSendTelegram(
       text,
@@ -4115,6 +4251,12 @@ module.exports = {
   sendTelegramMessage,
   isAboveGrowthThreshold,
   shouldSendAlert,
+  markHourHot,
+  HOUR_GATE_RATIO,
+  parentProviderOf,
+  parseCidr,
+  concurrentAttacksLine,
+  TELEGRAM_SKIP_PARENT_ACTIVE,
   heaviestHotMinute,
   shouldSendNormalize,
   shouldNormalizeQuiet,

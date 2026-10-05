@@ -75,6 +75,11 @@ const {
 } = require('./diagnostics-worker-gaps');
 const { getEnrichmentDiagnostics } = require('./diagnostics-enrichment');
 const { getSnmpDiagnostics } = require('./diagnostics-snmp');
+const {
+  startTrafficReplay,
+  stopTrafficReplay,
+  trafficReplayStatus,
+} = require('./traffic-replay');
 const { getBuildInfo, formatBuildInfoLogLine } = require('./build-info');
 const { createSessionStore } = require('./sessions');
 const {
@@ -1408,6 +1413,24 @@ app.post('/api/diagnostics/worker/backfill/cancel', async (_req, res) => {
   } catch (err) {
     res.status(err.status || 500).json({ error: err.message });
   }
+});
+
+app.get('/api/diagnostics/traffic-replay', (_req, res) => {
+  res.json({ data: trafficReplayStatus() });
+});
+
+app.post('/api/diagnostics/traffic-replay', async (req, res) => {
+  try {
+    const body = req.body || {};
+    const data = startTrafficReplay(body.from, body.to);
+    res.status(201).json({ data });
+  } catch (err) {
+    res.status(err.status || 500).json({ error: err.message });
+  }
+});
+
+app.post('/api/diagnostics/traffic-replay/stop', (_req, res) => {
+  res.json({ data: stopTrafficReplay() });
 });
 
 app.get('/api/diagnostics/enrichment', async (_req, res) => {

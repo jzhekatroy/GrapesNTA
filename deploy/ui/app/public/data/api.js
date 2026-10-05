@@ -718,6 +718,29 @@ const ApiClient = (() => {
     return body.data || body;
   }
 
+  async function loadTrafficReplay() {
+    const body = await getJson('/api/diagnostics/traffic-replay', {
+      widget: 'diagnostics/traffic-replay',
+    });
+    return body.data || body;
+  }
+
+  async function startTrafficReplay(payload) {
+    const body = await requestJson('/api/diagnostics/traffic-replay', {
+      method: 'POST',
+      body: payload,
+    });
+    return body.data || body;
+  }
+
+  async function stopTrafficReplay() {
+    const body = await requestJson('/api/diagnostics/traffic-replay/stop', {
+      method: 'POST',
+      body: {},
+    });
+    return body.data || body;
+  }
+
   async function loadEnrichmentDiagnostics() {
     const body = await getJson('/api/diagnostics/enrichment', {
       widget: 'diagnostics/enrichment',
@@ -3048,6 +3071,9 @@ const ApiClient = (() => {
     loadWorkerBackfillQueue,
     enqueueWorkerBackfill,
     cancelWorkerBackfill,
+    loadTrafficReplay,
+    startTrafficReplay,
+    stopTrafficReplay,
     loadEnrichmentDiagnostics,
     loadSnmpDiagnostics,
     loadAnalysisSnapshotsDiagnostics,

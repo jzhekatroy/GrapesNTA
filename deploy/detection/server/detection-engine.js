@@ -1311,6 +1311,13 @@ const BASELINE_LAG_HOURS = 6;
 const BASELINE_EVENT_BEFORE_HOURS = 6;
 const BASELINE_EVENT_AFTER_HOURS = 1;
 
+// Пик закрывается в минуту открытия, и окно выше кончается через час после
+// него. Серия идёт дольше: у pin 04.10 последний пик 19:19, импульсы до 20:41,
+// и хвост ×1.7–2.0 поднял норму с 15 до 29 Гбит/с — повтор атаки уже не
+// набирал ×1.6. Горячие минуты в пределах этих часов после пика в норму не идут.
+const BASELINE_PEAK_TAIL_HOURS = 6;
+const BASELINE_PEAK_TAIL_GROWTH = 1.6;
+
 function baselineAttackWindowsCte(days) {
   return `attack_windows AS (
     SELECT
@@ -1319,7 +1326,8 @@ function baselineAttackWindowsCte(days) {
       groupArray((
         alert_minute - INTERVAL ${BASELINE_EVENT_BEFORE_HOURS} HOUR,
         ifNull(normalize_minute, now('UTC')) + INTERVAL ${BASELINE_EVENT_AFTER_HOURS} HOUR
-      )) AS windows
+      )) AS windows,
+      groupArrayIf(alert_minute, status = 'peak') AS peaks
     FROM ${config.database}.${EVENTS_TABLE} FINAL
     WHERE alert_minute >= now('UTC') - INTERVAL ${Number(days) + 1} DAY
     GROUP BY scope, scope_id
@@ -1328,6 +1336,13 @@ function baselineAttackWindowsCte(days) {
 
 function outsideAttackWindowsSql(minuteExpr) {
   return `NOT arrayExists(w -> ${minuteExpr} >= w.1 AND ${minuteExpr} <= w.2, aw.windows)`;
+}
+
+function outsidePeakTailSql(minuteExpr, growthExpr) {
+  return `NOT (ifNull(${growthExpr}, 0) >= ${BASELINE_PEAK_TAIL_GROWTH} AND arrayExists(
+    p -> ${minuteExpr} >= p AND ${minuteExpr} <= p + INTERVAL ${BASELINE_PEAK_TAIL_HOURS} HOUR,
+    aw.peaks
+  ))`;
 }
 
 async function queryBaseline(withWindows, withoutWindows, params, opts) {
@@ -1353,29 +1368,45 @@ function isHourSignalCacheFresh(now = Date.now()) {
   return hourSignalCache.at > 0 && (now - hourSignalCache.at) < BASELINE_CACHE_MS;
 }
 
-// Норма часа для отражения (UDP с портов усилителей) и голого SYN: p95 за
-// тот же час по Москве, будни и выходные отдельно.
+function hourBpsCond(windows) {
+  const base = `a.proto = 'all' AND a.scope IN ('client', 'provider')`;
+  if (!windows) return base;
+  return `${base} AND ${outsideAttackWindowsSql('a.minute')} AND ${outsidePeakTailSql('a.minute', 'a.growth_bps')}`;
+}
+
+// Норма часа для отражения (UDP с портов усилителей), голого SYN и объёма:
+// p95 за тот же час по Москве, будни и выходные отдельно. В норму объёма
+// окна атак не входят, иначе вчерашний удар становится уровнем часа.
 async function loadHourSignalBaselines() {
   if (isHourSignalCacheFresh()) return hourSignalCache.map;
   const days = BASELINE_DAYS;
-  const { rows } = await query(`
+  const hourSql = (windows) => `
+    ${windows ? `WITH ${baselineAttackWindowsCte(days)}` : ''}
     SELECT
-      scope,
-      scope_id,
-      toHour(toTimeZone(minute, 'Europe/Moscow')) AS h,
-      toUInt8(toDayOfWeek(toTimeZone(minute, 'Europe/Moscow')) >= 6) AS we,
-      countIf(proto = 'udp') AS n_udp,
-      quantileExactIf(0.95)(amp_bytes * 8 / 60, proto = 'udp') AS amp_p95,
-      countIf(proto = 'all') AS n_all,
-      countIf(proto = 'all' AND syn_only_packets / 60 < ${SYN_SUSTAINED_PPS}) AS n_syn_quiet,
-      quantileExactIf(0.95)(syn_only_packets / 60, proto = 'all' AND syn_only_packets / 60 < ${SYN_SUSTAINED_PPS}) AS syn_p95
-    FROM ${tableRef()}
-    WHERE proto IN ('udp', 'all')
-      AND minute >= now('UTC') - INTERVAL {days:UInt16} DAY
-      AND minute < now('UTC') - INTERVAL 60 MINUTE
+      a.scope AS scope,
+      a.scope_id AS scope_id,
+      toHour(toTimeZone(a.minute, 'Europe/Moscow')) AS h,
+      toUInt8(toDayOfWeek(toTimeZone(a.minute, 'Europe/Moscow')) >= 6) AS we,
+      countIf(a.proto = 'udp') AS n_udp,
+      quantileExactIf(0.95)(a.amp_bytes * 8 / 60, a.proto = 'udp') AS amp_p95,
+      countIf(a.proto = 'all') AS n_all,
+      countIf(a.proto = 'all' AND a.syn_only_packets / 60 < ${SYN_SUSTAINED_PPS}) AS n_syn_quiet,
+      quantileExactIf(0.95)(a.syn_only_packets / 60, a.proto = 'all' AND a.syn_only_packets / 60 < ${SYN_SUSTAINED_PPS}) AS syn_p95,
+      countIf(${hourBpsCond(windows)}) AS n_bps,
+      quantileExactIf(0.95)(a.bps, ${hourBpsCond(windows)}) AS bps_p95
+    FROM ${tableRef()} AS a
+    ${windows ? 'LEFT JOIN attack_windows AS aw ON aw.scope = a.scope AND aw.scope_id = a.scope_id' : ''}
+    WHERE a.proto IN ('udp', 'all')
+      AND a.minute >= now('UTC') - INTERVAL {days:UInt16} DAY
+      AND a.minute < now('UTC') - INTERVAL 60 MINUTE
     GROUP BY scope, scope_id, h, we
     HAVING n_udp >= 60 OR n_all >= 60
-  `, { days }, { name: 'detection/hour-signal-baseline', clickhouse_settings: HEAVY, requestTimeoutMs: 180000 });
+  `;
+  const { rows } = await queryBaseline(hourSql(true), hourSql(false), { days }, {
+    name: 'detection/hour-signal-baseline',
+    clickhouse_settings: HEAVY,
+    requestTimeoutMs: 180000,
+  });
   const map = new Map();
   for (const r of rows) {
     const ampBps = Number(r.n_udp) >= 60 ? Number(r.amp_p95) || 0 : 0;
@@ -1383,10 +1414,13 @@ async function loadHourSignalBaselines() {
     // «обычным» уровнем часа и алерт гаснет при смене часа. Если спокойных минут
     // мало, нормы нет — решает абсолютный пол.
     const synPps = Number(r.n_all) >= 60 && Number(r.n_syn_quiet) >= 30 ? Number(r.syn_p95) || 0 : 0;
-    if (!(ampBps > 0) && !(synPps > 0)) continue;
+    const scoped = r.scope === 'client' || r.scope === 'provider';
+    const bpsP95 = scoped && Number(r.n_bps) >= 60 ? Number(r.bps_p95) || 0 : 0;
+    if (!(ampBps > 0) && !(synPps > 0) && !(bpsP95 > 0)) continue;
     map.set(`${r.scope}|${r.scope_id}|${Number(r.h)}|${Number(r.we) ? 1 : 0}`, {
       ampBps: ampBps > 0 ? ampBps : null,
       synPps: synPps > 0 ? synPps : null,
+      bpsP95: bpsP95 > 0 ? bpsP95 : null,
     });
   }
   hourSignalCache = { at: Date.now(), map };
@@ -1445,7 +1479,7 @@ async function loadNetBaselines(beforeTs) {
     ${windows ? 'LEFT JOIN attack_windows AS aw ON aw.scope = a.scope AND aw.scope_id = a.scope_id' : ''}
     WHERE a.minute >= now('UTC') - INTERVAL {days:UInt16} DAY
       AND a.minute < least(${utcDateTime('before')}, now('UTC') - INTERVAL ${BASELINE_LAG_HOURS} HOUR)
-      ${windows ? `AND ${outsideAttackWindowsSql('a.minute')}` : ''}
+      ${windows ? `AND ${outsideAttackWindowsSql('a.minute')} AND ${outsidePeakTailSql('a.minute', 'a.growth_bps')}` : ''}
     GROUP BY a.scope, a.scope_id, a.proto
   `;
   const { rows: nets } = await queryBaseline(netSql(true), netSql(false), {
@@ -1762,7 +1796,8 @@ async function processMinute(closed, objects) {
   const nameByKey = new Map(objects.map((o) => [`${o.scope}|${o.scopeId}`, o.name]));
   let telegram = { sent: 0 };
   try {
-    telegram = await processDetectionAlerts({ minute, rows, nameByKey });
+    const hourBpsNorm = (scope, scopeId, at) => hourSignals.get(mskHourKey(scope, scopeId, at))?.bpsP95 ?? null;
+    telegram = await processDetectionAlerts({ minute, rows, nameByKey, hourBpsNorm });
     logDetection('telegram', telegram);
   } catch (err) {
     logDetection('telegram error', { message: err.message });
@@ -2014,6 +2049,7 @@ module.exports = {
   pendingMinutes,
   CATCHUP_MAX_MINUTES,
   loadBaselines,
+  loadHourSignalBaselines,
   HISTORY_METRICS,
   BASELINE_CACHE_MS,
   isBaselineCacheFresh,
