@@ -60,6 +60,7 @@ const {
   TELEGRAM_SKIP_PARENT_ACTIVE,
   isAttackMinute,
   attackPeakBps,
+  isStrongUdpMinute,
 } = require('./detection-telegram');
 const { emptyInvestigate } = require('./detection-investigate');
 
@@ -2027,5 +2028,49 @@ describe('хвост атаки ниже доли пика', () => {
   it('verolayn закрывается, хотя рост живого трафика выше порога', () => {
     assert.equal(shouldSendNormalize(tail, t, 10, { alertBps: 26.6e9, peakBps: attackPeakBps(event) }), true);
     assert.equal(shouldSendNormalize(tail, t, 10, { alertBps: 26.6e9 }), false);
+  });
+});
+
+describe('сильная UDP-минута открывает атаку сразу', () => {
+  const opts = (row, udpBps, extra = {}) => ({
+    streak: 3,
+    settings: { streak: 3, volumeWindow: 6, ampEnabled: false, geoEnabled: false },
+    grouped: new Map([[`${row.scope}|${row.scope_id}`, { byProto: { all: row, udp: { bps: udpBps } } }]]),
+    ...extra,
+  });
+  // aykonet 04.10 18:41 МСК: 23 Гбит/с, ×6.5, UDP 98%; события не было.
+  const aykonet = {
+    scope: 'provider', scope_id: 'isp:aykonet', proto: 'all',
+    minute: '2026-10-04 15:41:00', bps: 22962394269.47, growth_bps: 6.476,
+  };
+  // 66543 03.10: ×9113, но всего 109 Мбит/с.
+  const small = {
+    scope: 'client', scope_id: '66543', proto: 'all',
+    minute: '2026-10-03 12:14:00', bps: 108675240.53, growth_bps: 9112.97,
+  };
+
+  it('aykonet открывается на первой минуте', () => {
+    const [picked] = pickAlertCandidates([aykonet], new Map(), 1.6, opts(aykonet, 22493200128));
+    assert.equal(picked.key, 'provider|isp:aykonet');
+    assert.equal(picked.upgradePeak, null);
+  });
+
+  it('меньше 1 Гбит/с, мало UDP или порог объекта выше — ждём серию', () => {
+    assert.equal(pickAlertCandidates([small], new Map(), 1.6, opts(small, 108675224.53)).length, 0);
+    assert.equal(pickAlertCandidates([aykonet], new Map(), 1.6, opts(aykonet, 5e9)).length, 0);
+    assert.equal(pickAlertCandidates([aykonet], new Map(), 1.6, opts(aykonet, 22493200128, {
+      thresholdByKey: new Map([['provider|isp:aykonet', 8]]),
+    })).length, 0);
+    const net = { ...aykonet, scope: 'net', scope_id: '91.151.189.0/24' };
+    assert.equal(isStrongUdpMinute(net, 0.98), false);
+  });
+
+  it('открытый пик пересматривается, отбракованный — нет', () => {
+    const peak = { id: 'provider|isp:aykonet|2026-10-04 15:30:00', alertMinute: '2026-10-04 15:30:00' };
+    const extra = { peaksByKey: new Map([['provider|isp:aykonet', peak]]), peakUpgradeChecked: new Set() };
+    const [picked] = pickAlertCandidates([aykonet], new Map(), 1.6, opts(aykonet, 22493200128, extra));
+    assert.equal(picked.upgradePeak.id, peak.id);
+    extra.peakUpgradeChecked.add('provider|isp:aykonet');
+    assert.equal(pickAlertCandidates([aykonet], new Map(), 1.6, opts(aykonet, 22493200128, extra)).length, 0);
   });
 });

@@ -1293,7 +1293,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--safety-lag-minutes",
         type=int,
-        default=int(env("TRAFFIC_ROLLUP_SAFETY_LAG_MINUTES", "5") or "5"),
+        default=int(env("TRAFFIC_ROLLUP_SAFETY_LAG_MINUTES", "4") or "4"),
     )
     parser.add_argument(
         "--max-raw-lag-seconds",

@@ -2054,6 +2054,21 @@ function markHourHot(rows, udpShare, norm) {
   }
 }
 
+// Три горячие минуты из шести — это 3–5 минут ожидания, а удар по ШПД виден
+// с первой. Замер за 7 дней до 05.10: на ШПД 12 атак и 6 прочих эпизодов
+// (среди них непомеченная атака aykonet 04.10), на PiterIX 7 атак и 4 эпизода
+// у клиентов, атакованных в те же дни. Без порога 1 Гбит/с прочих сотни.
+const STRONG_MINUTE_GROWTH = 5;
+const STRONG_MINUTE_MIN_BPS = 1e9;
+const STRONG_MINUTE_UDP_SHARE = 0.6;
+
+function isStrongUdpMinute(row, udpShare) {
+  const scope = String(row?.scope || '');
+  if (scope !== 'client' && scope !== 'provider') return false;
+  if (udpShare == null || udpShare < STRONG_MINUTE_UDP_SHARE) return false;
+  return Number(row?.bps) >= STRONG_MINUTE_MIN_BPS && Number(row?.growth_bps) >= STRONG_MINUTE_GROWTH;
+}
+
 function shouldReopenPeak(history, threshold, streak, windowSize, udpShare) {
   const need = normalizeStreak(streak);
   const win = normalizeStreak(windowSize, need);
@@ -2112,6 +2127,10 @@ function pickAlertCandidates(allRows, previousByKey, threshold, options = {}) {
           && shouldReopenPeak(history, t, options.streak ?? cfg.streak, cfg.window, udpShare)) {
           ready = true;
           upgradePeak = peak;
+        } else if (isStrongUdpMinute(row, udpShare) && isAboveGrowthThreshold(row, t)
+          && !(peak && checked?.has(objectId))) {
+          ready = true;
+          upgradePeak = peak || null;
         }
       }
       if (!ready) continue;
@@ -4282,6 +4301,7 @@ module.exports = {
   TELEGRAM_SKIP_PARENT_ACTIVE,
   isAttackMinute,
   attackPeakBps,
+  isStrongUdpMinute,
   heaviestHotMinute,
   shouldSendNormalize,
   shouldNormalizeQuiet,
