@@ -20,6 +20,12 @@ const DEFAULT_ADMIN = {
 };
 const PASSWORD_MIN_LENGTH = 12;
 const BCRYPT_ROUNDS = 12;
+const SUPPORTED_LOCALES = new Set(['ru', 'en']);
+
+function normalizeLocale(value) {
+  const locale = String(value ?? '').trim().toLowerCase();
+  return SUPPORTED_LOCALES.has(locale) ? locale : '';
+}
 
 function clickhouseDateTime(date = new Date()) {
   return date.toISOString().slice(0, 19).replace('T', ' ');
@@ -34,6 +40,7 @@ function publicUser(row) {
     forcePasswordChange: Number(row.force_password_change) === 1,
     active: row.is_active === undefined ? true : Number(row.is_active) === 1,
     clientId: String(row.client_id ?? row.clientId ?? ''),
+    locale: normalizeLocale(row.locale),
     createdAt: row.created_at ?? null,
     updatedAt: row.updated_at ?? null,
     passwordChangedAt: row.password_changed_at ?? null,
@@ -104,6 +111,7 @@ function latestUsersCte() {
         force_password_change,
         is_active,
         client_id,
+        locale,
         created_at,
         updated_at,
         password_changed_at,
@@ -129,6 +137,7 @@ function baseUserSelect(where = '') {
       force_password_change,
       is_active,
       client_id,
+      locale,
       created_at,
       updated_at,
       password_changed_at
@@ -187,6 +196,7 @@ async function ensureUsersTable() {
         force_password_change UInt8 DEFAULT 0,
         is_active UInt8 DEFAULT 1,
         client_id String DEFAULT '',
+        locale String DEFAULT '',
         created_at DateTime64(3) DEFAULT now64(3),
         updated_at DateTime64(3) DEFAULT now64(3),
         password_changed_at Nullable(DateTime64(3)) DEFAULT NULL
@@ -213,6 +223,11 @@ async function ensureUsersTable() {
     {},
     { name: 'users/add-client-id' },
   );
+  await executeCommand(
+    `ALTER TABLE ${usersTableRef()} ADD COLUMN IF NOT EXISTS locale String DEFAULT ''`,
+    {},
+    { name: 'users/add-locale' },
+  );
 
   const { rows } = await query(
     `SELECT count() AS count FROM ${usersTableRef()}`,
@@ -232,6 +247,7 @@ async function ensureUsersTable() {
     force_password_change: 1,
     is_active: 1,
     client_id: '',
+    locale: '',
     created_at: now,
     updated_at: now,
     password_changed_at: now,
@@ -378,6 +394,7 @@ async function createUser(body) {
     force_password_change: validation.forcePasswordChange ? 1 : 0,
     is_active: validation.active === undefined ? 1 : (validation.active ? 1 : 0),
     client_id: validation.clientId || '',
+    locale: '',
     created_at: now,
     updated_at: now,
     password_changed_at: now,
@@ -418,6 +435,7 @@ async function updateUser(id, body) {
       ? (validation.active ? 1 : 0)
       : (existing.active ? 1 : 0),
     client_id: clientIdRaw !== undefined ? validation.clientId : (existing.clientId || ''),
+    locale: existing.locale || '',
     created_at: existing.createdAt,
     updated_at: clickhouseDateTime(),
     password_changed_at: existing.passwordChangedAt ?? null,
@@ -512,6 +530,7 @@ async function changeUserPassword(id, password, { clearForce = false, forcePassw
     force_password_change: forceFlag,
     is_active: existing.active ? 1 : 0,
     client_id: existing.clientId || '',
+    locale: existing.locale || '',
     created_at: existing.createdAt,
     updated_at: now,
     password_changed_at: now,
@@ -571,6 +590,7 @@ async function updateOwnProfile(id, body = {}) {
     force_password_change: existing.forcePasswordChange ? 1 : 0,
     is_active: existing.active ? 1 : 0,
     client_id: existing.clientId || '',
+    locale: existing.locale || '',
     created_at: existing.createdAt,
     updated_at: clickhouseDateTime(),
     password_changed_at: existing.passwordChangedAt ?? null,
@@ -578,6 +598,47 @@ async function updateOwnProfile(id, body = {}) {
 
   const { elapsedMs } = await insertRows(config.usersTable, [record], {
     name: 'users/update-own-profile',
+  });
+  return { data: publicUser(record), meta: { elapsedMs } };
+}
+
+async function updateOwnLocale(id, locale) {
+  const normalized = normalizeLocale(locale);
+  if (!normalized) {
+    const err = new Error('Недопустимый язык');
+    err.statusCode = 400;
+    throw err;
+  }
+
+  const existing = await getUserById(id);
+  if (!existing) {
+    const err = new Error('Пользователь не найден');
+    err.statusCode = 404;
+    throw err;
+  }
+
+  if (existing.locale === normalized) {
+    const { passwordHash, ...data } = existing;
+    return { data };
+  }
+
+  const record = {
+    id: existing.id,
+    username: existing.username,
+    full_name: existing.fullName,
+    password_hash: existing.passwordHash,
+    role_id: existing.roleId || LEGACY_DEFAULT_ROLE_ID,
+    force_password_change: existing.forcePasswordChange ? 1 : 0,
+    is_active: existing.active ? 1 : 0,
+    client_id: existing.clientId || '',
+    locale: normalized,
+    created_at: existing.createdAt,
+    updated_at: clickhouseDateTime(),
+    password_changed_at: existing.passwordChangedAt ?? null,
+  };
+
+  const { elapsedMs } = await insertRows(config.usersTable, [record], {
+    name: 'users/update-own-locale',
   });
   return { data: publicUser(record), meta: { elapsedMs } };
 }
@@ -615,6 +676,7 @@ module.exports = {
   DEFAULT_ROLE_ID: LEGACY_DEFAULT_ROLE_ID,
   PASSWORD_MIN_LENGTH,
   ensureUsersTable,
+  normalizeLocale,
   listUsers,
   getUserById,
   getUserByUsername,
@@ -624,6 +686,7 @@ module.exports = {
   changeUserPassword,
   resetUserPassword,
   updateOwnProfile,
+  updateOwnLocale,
   generatePassword,
   verifyCredentials,
   userPermissions,

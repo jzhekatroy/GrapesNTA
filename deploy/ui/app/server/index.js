@@ -216,6 +216,7 @@ const {
   deleteUser,
   changeUserPassword,
   resetUserPassword,
+  updateOwnLocale,
   verifyCredentials,
   hasPermission,
 } = require('./users');
@@ -377,6 +378,7 @@ async function sessionUserPayload(user, sessionRecord = null) {
     forcePasswordChange: user.forcePasswordChange,
     active: user.active !== false,
     clientId: user.clientId || '',
+    locale: user.locale || '',
     updatedAt: user.updatedAt ?? null,
     permissions,
     effectivePermissions,
@@ -419,6 +421,7 @@ function sendApiError(res, err, fallbackStatus = 502) {
 }
 
 function forcedPasswordRouteAllowed(req) {
+  if (req.method === 'PATCH' && req.path === '/auth/locale') return true;
   if (req.method !== 'POST') return false;
   const userPassword = req.path.match(/^\/users\/([^/]+)\/password$/);
   if (userPassword) {
@@ -687,6 +690,16 @@ app.use('/api', requireSession);
 app.use('/api', apiResourceGuard);
 app.use('/api', cabinetIsolationGuard);
 app.use('/api', createAuditMiddleware());
+
+app.patch('/api/auth/locale', async (req, res) => {
+  try {
+    const result = await updateOwnLocale(req.user.id, req.body?.locale);
+    const session = sessions.get(req.sessionId);
+    res.json({ user: await sessionUserPayload(result.data, session) });
+  } catch (err) {
+    sendApiError(res, err);
+  }
+});
 
 app.post('/api/audit/page', async (req, res) => {
   try {

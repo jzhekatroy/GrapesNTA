@@ -12,6 +12,7 @@ const { getResourceForPath, isResourceGuardExempt } = require('../rbac/api-map')
 test('client allowlist permits cabinet and auth, denies operator APIs', () => {
   assert.equal(pathAllowedForClient('/api/cabinet/overview/series'), true);
   assert.equal(pathAllowedForClient('/api/auth/me'), true);
+  assert.equal(pathAllowedForClient('/api/auth/locale'), true);
   assert.equal(pathAllowedForClient('/api/auth/stop-impersonation'), true);
   assert.equal(pathAllowedForClient('/api/audit/page'), true);
   assert.equal(pathAllowedForClient('/api/users/abc/password'), true);
@@ -176,6 +177,50 @@ test('impersonation guard blocks mutating cabinet calls', async () => {
   });
   assert.equal(result.res.statusCode, 403);
   assert.match(result.res.body.error, /только чтение/i);
+});
+
+test('impersonation guard allows the operator locale update', async () => {
+  const sessions = new Map();
+  const now = Date.now();
+  sessions.set('s1', {
+    userId: 'admin',
+    expiresAt: now + 60_000,
+    impersonation: buildImpersonationSession({
+      clientId: 'client:real',
+      clientDisplayName: 'Real',
+      auditId: 'a1',
+      now,
+    }),
+  });
+  const guard = createCabinetGuard({
+    sessions,
+    getEnabledClientFn: async (clientId) => ({
+      clientId,
+      displayName: clientId,
+      comment: '',
+      bindMode: 'prefixes',
+    }),
+  });
+
+  const result = await new Promise((resolve) => {
+    const req = {
+      sessionId: 's1',
+      user: { id: 'admin', roleId: 'Administrator', clientId: '', username: 'admin' },
+      baseUrl: '/api',
+      path: '/auth/locale',
+      method: 'PATCH',
+      query: {},
+      body: { locale: 'en' },
+    };
+    const res = {
+      statusCode: 200,
+      status(code) { this.statusCode = code; return this; },
+      json(payload) { this.body = payload; resolve({ res }); },
+    };
+    guard(req, res, () => resolve({ next: true, req }));
+  });
+  assert.equal(result.next, true);
+  assert.equal(result.req.body.locale, 'en');
 });
 
 test('impersonation guard allows read-only cabinet explorer POSTs', async () => {

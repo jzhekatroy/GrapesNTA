@@ -205,6 +205,14 @@ const ApiClient = (() => {
     return body.user;
   }
 
+  async function updateLocale(locale) {
+    const body = await requestJson('/api/auth/locale', {
+      method: 'PATCH',
+      body: { locale },
+    });
+    return body.user;
+  }
+
   async function loadUsers() {
     const body = await requestJson('/api/users');
     return body.data || [];
@@ -2990,6 +2998,7 @@ const ApiClient = (() => {
     login,
     logout,
     loadCurrentUser,
+    updateLocale,
     loadUsers,
     loadUsersForClient,
     createUser,

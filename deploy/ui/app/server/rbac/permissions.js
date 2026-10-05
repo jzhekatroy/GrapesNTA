@@ -415,6 +415,7 @@ async function assignUserRole(userId, roleId) {
     password_hash: existing.passwordHash,
     role_id: role.id,
     force_password_change: existing.forcePasswordChange ? 1 : 0,
+    locale: existing.locale || '',
     created_at: existing.createdAt,
     updated_at: now,
     password_changed_at: existing.passwordChangedAt ?? null,

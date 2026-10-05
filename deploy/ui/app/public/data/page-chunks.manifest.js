@@ -134,6 +134,7 @@ const PAGE_CHUNKS_MANIFEST = {
       '/data/logger.js',
       '/data/api.js',
       '/data/auth-access.js',
+      '/data/locale.js',
       '/data/app-pages.js',
       '/data/page-chunks.manifest.js',
       '/data/page-chunks.js',

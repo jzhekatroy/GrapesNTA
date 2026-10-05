@@ -615,6 +615,22 @@ a.nav-item--active:visited { color: var(--fg-primary); }
 .time-pill__sep { color: var(--fg-muted); }
 .time-pill__range { color: var(--fg-secondary); font-variant-numeric: tabular-nums; }
 .time-pill--tz { min-width: 92px; justify-content: center; }
+.time-pill--locale { min-width: 64px; justify-content: center; gap: 4px; padding: 0 10px; }
+.locale-filter { position: relative; }
+.locale-filter--auth {
+  position: absolute;
+  top: 6px;
+  right: 50px;
+  z-index: 1;
+}
+.locale-filter--auth .time-pill--locale { height: 38px; }
+.locale-filter__menu--portal {
+  padding: 6px;
+  background: var(--bg-surface-2);
+  border: 1px solid var(--bd-default);
+  border-radius: 12px;
+  box-shadow: var(--pv-shadow-popover);
+}
 
 .period-select {
   display: inline-flex;

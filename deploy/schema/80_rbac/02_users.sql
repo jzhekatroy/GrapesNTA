@@ -8,7 +8,8 @@ CREATE TABLE IF NOT EXISTS default.users
     `force_password_change` UInt8 DEFAULT 0,
     `created_at` DateTime64(3) DEFAULT now64(3),
     `updated_at` DateTime64(3) DEFAULT now64(3),
-    `password_changed_at` Nullable(DateTime64(3)) DEFAULT NULL
+    `password_changed_at` Nullable(DateTime64(3)) DEFAULT NULL,
+    `locale` String DEFAULT ''
 )
 ENGINE = MergeTree
 ORDER BY id

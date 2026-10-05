@@ -118,6 +118,7 @@ function createCabinetGuard({ sessions, getEnabledClientFn = getEnabledClient })
       if (context.readOnly && isMutatingMethod(req.method)) {
         const allowedWrite = apiPath === '/api/auth/stop-impersonation'
           || apiPath === '/api/auth/logout'
+          || apiPath === '/api/auth/locale'
           || apiPath === '/api/audit/page'
           || isReadOnlyCabinetPost(apiPath);
         if (!allowedWrite) {

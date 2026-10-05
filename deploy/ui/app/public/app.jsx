@@ -65,6 +65,9 @@ function App() {
   const [hashRoute, setHashRoute] = useState(() => location.hash || '');
   const [collapsed, setCollapsed] = useState(false);
   const [theme, setTheme] = useState(() => localStorage.getItem('grapes-theme') || 'dark');
+  const [locale, setLocale] = useState(() => GrapesLocale.resolveDisplayLocale({
+    pending: GrapesLocale.readPendingLocale(),
+  }));
   const [timeRange, setTimeRange] = useState('24h');
   const [customPeriod, setCustomPeriod] = useState(defaultCustomPeriod);
   const [periodZoomStack, setPeriodZoomStack] = useState([]);
@@ -142,6 +145,43 @@ function App() {
   useEffect(() => {
     AuthAccess.setEffectiveWritePermissions(auth.user?.effectiveWritePermissions || null);
   }, [auth.user]);
+
+  useEffect(() => {
+    document.documentElement.lang = locale || 'ru';
+  }, [locale]);
+
+  useEffect(() => {
+    if (auth.loading) return undefined;
+    const accountLocale = GrapesLocale.normalizeLocale(auth.user?.locale);
+    if (accountLocale) {
+      GrapesLocale.clearPendingLocale();
+      setLocale(accountLocale);
+      return undefined;
+    }
+    const pending = GrapesLocale.readPendingLocale();
+    if (!auth.user) {
+      setLocale(pending || GrapesLocale.detectBrowserLocale());
+      return undefined;
+    }
+    if (!pending) {
+      setLocale(GrapesLocale.detectBrowserLocale());
+      return undefined;
+    }
+    let cancelled = false;
+    ApiClient.updateLocale(pending)
+      .then((user) => {
+        if (cancelled) return;
+        GrapesLocale.clearPendingLocale();
+        setLocale(pending);
+        setAuth((prev) => ({ ...prev, user }));
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        setLocale(pending);
+        pushToast({ kind: 'error', title: 'Не удалось сохранить язык', desc: err.message });
+      });
+    return () => { cancelled = true; };
+  }, [auth.loading, auth.user?.id, auth.user?.locale]);
 
   useEffect(() => {
     const root = document.documentElement;
@@ -380,6 +420,23 @@ function App() {
   };
   const handleRefresh = useCallback(() => setRefreshKey((k) => k + 1), []);
   const toggleTheme = useCallback(() => setTheme(t => t === 'dark' ? 'light' : 'dark'), []);
+  const handleLocaleChange = useCallback(async (next) => {
+    const normalized = GrapesLocale.normalizeLocale(next);
+    if (!normalized || normalized === locale) return;
+    const previous = locale;
+    setLocale(normalized);
+    if (!authRef.current.user) {
+      GrapesLocale.writePendingLocale(normalized);
+      return;
+    }
+    try {
+      const user = await ApiClient.updateLocale(normalized);
+      setAuth((prev) => ({ ...prev, user }));
+    } catch (err) {
+      setLocale(previous);
+      pushToast({ kind: 'error', title: 'Не удалось сохранить язык', desc: err.message });
+    }
+  }, [locale]);
 
   const handleTimeRangeChange = useCallback((next) => {
     setPeriodZoomStack([]);
@@ -444,15 +501,15 @@ function App() {
   }, [auth.user, registryReady, page]);
 
   if (auth.loading || !registryReady) {
-    return <AuthFrame title="Grapes NTA" subtitle="Проверяем сессию..." theme={theme} onToggleTheme={toggleTheme} />;
+    return <AuthFrame title="Grapes NTA" subtitle="Проверяем сессию..." theme={theme} onToggleTheme={toggleTheme} locale={locale} onLocaleChange={handleLocaleChange} />;
   }
 
   if (!auth.user) {
-    return <LoginScreen onLogin={handleLogin} theme={theme} onToggleTheme={toggleTheme} />;
+    return <LoginScreen onLogin={handleLogin} theme={theme} onToggleTheme={toggleTheme} locale={locale} onLocaleChange={handleLocaleChange} />;
   }
 
   if (auth.user.forcePasswordChange) {
-    return <ForcePasswordChangeScreen user={auth.user} onDone={reloadCurrentUser} onLogout={handleLogout} theme={theme} onToggleTheme={toggleTheme} />;
+    return <ForcePasswordChangeScreen user={auth.user} onDone={reloadCurrentUser} onLogout={handleLogout} theme={theme} onToggleTheme={toggleTheme} locale={locale} onLocaleChange={handleLocaleChange} />;
   }
 
   let pageEl;
@@ -700,6 +757,8 @@ function App() {
         displayTimezone={displayTimezone}
         timezonePref={timezonePref}
         onTimezonePrefChange={handleTimezonePrefChange}
+        locale={locale}
+        onLocaleChange={handleLocaleChange}
         cabinetMode={cabinetMode}
         clientDisplayName={clientDisplayName}
         onStopImpersonation={handleStopImpersonation}
@@ -712,10 +771,13 @@ function App() {
   );
 }
 
-function AuthFrame({ title, subtitle, children, theme, onToggleTheme }) {
+function AuthFrame({ title, subtitle, children, theme, onToggleTheme, locale, onLocaleChange }) {
   return (
     <div className="auth-screen">
       <Card className="auth-card">
+        {onLocaleChange && (
+          <LanguageSelector locale={locale} onLocaleChange={onLocaleChange} variant="auth" />
+        )}
         {onToggleTheme && (
           <button
             type="button"
@@ -754,7 +816,7 @@ async function offerBrowserPasswordSave(username, password) {
   }
 }
 
-function LoginScreen({ onLogin, theme, onToggleTheme }) {
+function LoginScreen({ onLogin, theme, onToggleTheme, locale, onLocaleChange }) {
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
@@ -783,7 +845,7 @@ function LoginScreen({ onLogin, theme, onToggleTheme }) {
   };
 
   return (
-    <AuthFrame title="Вход в Grapes NTA" subtitle="Используйте локальную учётную запись" theme={theme} onToggleTheme={onToggleTheme}>
+    <AuthFrame title="Вход в Grapes NTA" subtitle="Используйте локальную учётную запись" theme={theme} onToggleTheme={onToggleTheme} locale={locale} onLocaleChange={onLocaleChange}>
       <form
         className="col"
         style={{gap: 14}}
@@ -835,7 +897,7 @@ function LoginScreen({ onLogin, theme, onToggleTheme }) {
   );
 }
 
-function ForcePasswordChangeScreen({ user, onDone, onLogout, theme, onToggleTheme }) {
+function ForcePasswordChangeScreen({ user, onDone, onLogout, theme, onToggleTheme, locale, onLocaleChange }) {
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState('');
@@ -857,7 +919,7 @@ function ForcePasswordChangeScreen({ user, onDone, onLogout, theme, onToggleThem
   };
 
   return (
-    <AuthFrame title="Смена пароля" subtitle={`Первый вход: ${user.username}`} theme={theme} onToggleTheme={onToggleTheme}>
+    <AuthFrame title="Смена пароля" subtitle={`Первый вход: ${user.username}`} theme={theme} onToggleTheme={onToggleTheme} locale={locale} onLocaleChange={onLocaleChange}>
       <form className="col" style={{gap: 14}} onSubmit={submit} autoComplete="on" method="post">
         <div className="field">
           <label htmlFor="login-new-password">Новый пароль</label>

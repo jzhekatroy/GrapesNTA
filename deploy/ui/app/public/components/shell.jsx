@@ -480,7 +480,7 @@ function UserAccountMenu({ currentUser, pageTitles, hiddenPageIds }) {
   );
 }
 
-function Header({ current, onNavigate, onToggleSidebar, currentUser, onLogout, onRefresh, theme, onToggleTheme, timeRange, onTimeRangeChange, customPeriod, onCustomPeriodChange, chartZoomDepth, onChartZoomReset, directions, onDirectionsChange, collectorFilter, onCollectorFilterChange, pageTitles, hiddenPageIds, displayTimezone, timezonePref, onTimezonePrefChange, cabinetMode, clientDisplayName, onStopImpersonation }) {
+function Header({ current, onNavigate, onToggleSidebar, currentUser, onLogout, onRefresh, theme, onToggleTheme, timeRange, onTimeRangeChange, customPeriod, onCustomPeriodChange, chartZoomDepth, onChartZoomReset, directions, onDirectionsChange, collectorFilter, onCollectorFilterChange, pageTitles, hiddenPageIds, displayTimezone, timezonePref, onTimezonePrefChange, locale, onLocaleChange, cabinetMode, clientDisplayName, onStopImpersonation }) {
   const titles = pageTitles || PAGE_TITLES || {};
   const meta = titles[current] || titles.dashboard || { title: current, section: '' };
   const hidePageFilters = cabinetMode
@@ -537,6 +537,7 @@ function Header({ current, onNavigate, onToggleSidebar, currentUser, onLogout, o
           )}
         </div>
         <span className="hr-v" />
+        <LanguageSelector locale={locale} onLocaleChange={onLocaleChange} />
         <TimezoneSelector
           displayTimezone={displayTimezone}
           timezonePref={timezonePref}
@@ -1083,6 +1084,88 @@ function PortalTooltip({ label, children }) {
         document.body,
       )}
     </>
+  );
+}
+
+function LanguageSelector({ locale, onLocaleChange, variant }) {
+  const [open, setOpen] = useState(false);
+  const [menuStyle, setMenuStyle] = useState(null);
+  const rootRef = useRef(null);
+  const menuRef = useRef(null);
+  const options = GrapesLocale.LOCALES;
+  const current = options.find((item) => item.id === locale) || options[0];
+
+  useLayoutEffect(() => {
+    if (!open) {
+      setMenuStyle(null);
+      return undefined;
+    }
+    const anchor = rootRef.current;
+    if (!anchor) return undefined;
+    const updatePosition = () => {
+      setMenuStyle(computeFixedDropdownStyle(anchor, { minWidth: 160, align: 'right' }));
+    };
+    updatePosition();
+    window.addEventListener('resize', updatePosition);
+    window.addEventListener('scroll', updatePosition, true);
+    return () => {
+      window.removeEventListener('resize', updatePosition);
+      window.removeEventListener('scroll', updatePosition, true);
+    };
+  }, [open]);
+
+  useEffect(() => {
+    if (!open) return undefined;
+    const onPointerDown = (e) => {
+      if (rootRef.current?.contains(e.target) || menuRef.current?.contains(e.target)) return;
+      setOpen(false);
+    };
+    document.addEventListener('mousedown', onPointerDown);
+    return () => document.removeEventListener('mousedown', onPointerDown);
+  }, [open]);
+
+  const select = (id) => {
+    setOpen(false);
+    if (id !== locale) onLocaleChange?.(id);
+  };
+
+  return (
+    <div className={`locale-filter${variant === 'auth' ? ' locale-filter--auth' : ''}`} ref={rootRef}>
+      <button
+        type="button"
+        className="time-pill time-pill--locale"
+        title="Язык интерфейса"
+        aria-label="Язык интерфейса"
+        aria-expanded={open}
+        aria-haspopup="menu"
+        onClick={() => setOpen((v) => !v)}
+      >
+        <span className="time-pill__range">{current.short}</span>
+        <Icon name="chevD" size={14} />
+      </button>
+      {open && menuStyle && ReactDOM.createPortal(
+        <div
+          ref={menuRef}
+          className="time-filter__menu locale-filter__menu locale-filter__menu--portal"
+          style={menuStyle}
+          role="menu"
+        >
+          {options.map((item) => (
+            <button
+              key={item.id}
+              type="button"
+              role="menuitemradio"
+              aria-checked={item.id === current.id}
+              className={`time-filter__option ${item.id === current.id ? 'is-active' : ''}`}
+              onClick={() => select(item.id)}
+            >
+              {item.label}
+            </button>
+          ))}
+        </div>,
+        document.body,
+      )}
+    </div>
   );
 }
 
@@ -2416,7 +2499,7 @@ Object.assign(window, {
   TIME_RANGE_OPTIONS, TIMEZONE_PRESETS, TRAFFIC_DIRECTIONS, defaultDirectionsEnabled,
   defaultCustomPeriod, formatCustomPeriodLabel, normalizeCustomPeriodValue, normalizeCustomPeriod, validateCustomPeriod, validateExplorerCustomPeriod, explorerRangeLimitDays, timeRangePresetMs, EXPLORER_MAX_RANGE_DAYS, timeRangeLabel, timeRangeChipLabel, TIME_RANGE_CHIP_LABELS, yesterdayCustomPeriod, isYesterdayPeriod,
   toDatetimeLocalValue, dnsBucketSecondsFromMode, explorerGranularityBucketSeconds,
-  collectorFilterLabel, directionSummaryLabel, TimezoneSelector, CollectorFilter,
+  collectorFilterLabel, directionSummaryLabel, LanguageSelector, TimezoneSelector, CollectorFilter,
   parseAppHash, parseJsonSearchParam, parseDirectionsParam, applyTopTalkersUrlGlobals,
   parseTopTalkersPageParams, readTopTalkersPageParamsFromHash, buildTopTalkersShareUrl,
   METRICS,
