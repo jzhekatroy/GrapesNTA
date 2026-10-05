@@ -41,17 +41,6 @@ function buildCabinetClientSearchWhere(search, params) {
   });
 }
 
-function flowIpRangeExpr(flowAlias, ipColName) {
-  const ipRef = `${flowAlias}.${ipColName}`;
-  // FixedString(16) IPv4 layout — no etype column inside scalar subqueries.
-  return `if(
-    length(${ipRef}) = 16
-      AND substring(${ipRef}, 5) = unhex('000000000000000000000000'),
-    toString(toIPv4(reinterpretAsUInt32(reverse(substring(${ipRef}, 1, 4))))),
-    IPv6NumToString(${ipRef})
-  )`;
-}
-
 function explorerFlowRefs(flowAlias = 'f') {
   const srcIpCol = col('srcIp');
   const dstIpCol = col('dstIp');
@@ -59,8 +48,6 @@ function explorerFlowRefs(flowAlias = 'f') {
   const inIfCol = flowCol('inIf');
   const outIfCol = flowCol('outIf');
   return {
-    srcIpExpr: flowIpRangeExpr(flowAlias, srcIpCol),
-    dstIpExpr: flowIpRangeExpr(flowAlias, dstIpCol),
     // Словарю нужен адрес как он лежит в журнале, без превращения в строку.
     srcIpRawExpr: `${flowAlias}.${srcIpCol}`,
     dstIpRawExpr: `${flowAlias}.${dstIpCol}`,
@@ -70,36 +57,6 @@ function explorerFlowRefs(flowAlias = 'f') {
     srcClientExpr: `${flowAlias}.src_client`,
     dstClientExpr: `${flowAlias}.dst_client`,
   };
-}
-
-function buildPrefixMatchClause(prefixes, refs, params, idxRef) {
-  if (!prefixes.length) return null;
-  const parts = prefixes.map((prefix) => {
-    const paramName = `cabinet_client_prefix_${idxRef.i++}`;
-    params[paramName] = prefix;
-    return `(isIPAddressInRange(${refs.srcIpExpr}, {${paramName}:String}) OR isIPAddressInRange(${refs.dstIpExpr}, {${paramName}:String}))`;
-  });
-  return parts.length === 1 ? parts[0] : `(${parts.join(' OR ')})`;
-}
-
-function buildPortMatchClause(ports, refs, params, idxRef) {
-  if (!ports.length || !refs.samplerIpExpr) return null;
-  const parts = ports.map((port) => {
-    const switchParam = `cabinet_client_switch_${idxRef.i++}`;
-    const ifParam = `cabinet_client_if_${idxRef.i++}`;
-    params[switchParam] = port.switchIp;
-    params[ifParam] = Number(port.ifIndex) || 0;
-    const inMatch = refs.inIfExpr
-      ? `(${refs.samplerIpExpr} = {${switchParam}:String} AND ${refs.inIfExpr} = {${ifParam}:UInt32})`
-      : null;
-    const outMatch = refs.outIfExpr
-      ? `(${refs.samplerIpExpr} = {${switchParam}:String} AND ${refs.outIfExpr} = {${ifParam}:UInt32})`
-      : null;
-    if (inMatch && outMatch) return `(${inMatch} OR ${outMatch})`;
-    return inMatch || outMatch;
-  }).filter(Boolean);
-  if (!parts.length) return null;
-  return parts.length === 1 ? parts[0] : `(${parts.join(' OR ')})`;
 }
 
 function buildTaggedClientClause(clientId, refs, params, idxRef) {
@@ -136,7 +93,7 @@ async function fetchLatestClientRow(clientId) {
   return rows[0] || null;
 }
 
-async function getCabinetClientBinding(clientId, { requireEnabled = true } = {}) {
+async function getCabinetClientBinding(clientId, { requireEnabled = true, withRules = true } = {}) {
   const id = String(clientId ?? '').trim();
   if (!id) throw cabinetClientHttpError('Укажите client_id');
 
@@ -164,6 +121,18 @@ async function getCabinetClientBinding(clientId, { requireEnabled = true } = {})
   const bindMode = String(row.bind_mode || '');
   let prefixes = [];
   let ports = [];
+
+  // Фильтр обозревателя читает src_client/dst_client и правила не разворачивает.
+  if (!withRules) {
+    return {
+      clientId: id,
+      displayName: String(row.display_name || id),
+      bindMode,
+      enabled: Boolean(rows[0]),
+      prefixes,
+      ports,
+    };
+  }
 
   if (bindMode === 'prefixes') {
     const prefixRes = await query(
@@ -202,20 +171,14 @@ async function getCabinetClientBinding(clientId, { requireEnabled = true } = {})
   };
 }
 
+// Приём уже пишет клиента в src_client и dst_client: сначала по сети, если пусто —
+// по порту. Перебор префиксов через isIPAddressInRange на 6 часах сырых потоков
+// не успевает за таймаут страницы (один префикс — 27 с, восемь — 2 мин), а у
+// клиента с сотнями сетей текст запроса не влезает в ClickHouse.
 async function buildCabinetClientMatchSql(clientId, params, idxRef, flowAlias = 'f') {
-  const binding = await getCabinetClientBinding(clientId);
+  const binding = await getCabinetClientBinding(clientId, { withRules: false });
   const refs = explorerFlowRefs(flowAlias);
-  const parts = [buildTaggedClientClause(binding.clientId, refs, params, idxRef)];
-
-  if (binding.bindMode === 'prefixes') {
-    const prefixClause = buildPrefixMatchClause(binding.prefixes, refs, params, idxRef);
-    if (prefixClause) parts.push(prefixClause);
-  } else if (binding.bindMode === 'ports') {
-    const portClause = buildPortMatchClause(binding.ports, refs, params, idxRef);
-    if (portClause) parts.push(portClause);
-  }
-
-  return parts.length === 1 ? parts[0] : `(${parts.join(' OR ')})`;
+  return buildTaggedClientClause(binding.clientId, refs, params, idxRef);
 }
 
 async function buildCabinetClientFilterSql(ids, op, params, flowAlias = 'f') {
@@ -226,14 +189,21 @@ async function buildCabinetClientFilterSql(ids, op, params, flowAlias = 'f') {
   )];
   if (!clientIds.length) return null;
 
-  const idxRef = { i: 0 };
-  const matchParts = [];
   for (const clientId of clientIds) {
-    matchParts.push(await buildCabinetClientMatchSql(clientId, params, idxRef, flowAlias));
+    await getCabinetClientBinding(clientId, { withRules: false });
   }
-  const inner = matchParts.length === 1 ? matchParts[0] : `(${matchParts.join(' OR ')})`;
-  const negOps = new Set(['!=', 'not_in']);
-  return negOps.has(String(op || '').toLowerCase()) ? `NOT (${inner})` : inner;
+
+  const refs = explorerFlowRefs(flowAlias);
+  let paramSeq = 0;
+  while (params[`cabinet_client_ids_${paramSeq}`] != null) paramSeq += 1;
+  const paramName = `cabinet_client_ids_${paramSeq}`;
+  const many = clientIds.length > 1 || op === 'in' || op === 'not_in';
+  const match = many
+    ? `(${refs.srcClientExpr} IN {${paramName}:Array(String)} OR ${refs.dstClientExpr} IN {${paramName}:Array(String)})`
+    : `(${refs.srcClientExpr} = {${paramName}:String} OR ${refs.dstClientExpr} = {${paramName}:String})`;
+  params[paramName] = many ? clientIds : clientIds[0];
+  const negOps = new Set(['!=', '<>', 'not_in']);
+  return negOps.has(String(op || '').toLowerCase()) ? `NOT ${match}` : match;
 }
 
 const CABINET_CLIENT_PORT_KEYS = 'cabinet_client_port_keys';

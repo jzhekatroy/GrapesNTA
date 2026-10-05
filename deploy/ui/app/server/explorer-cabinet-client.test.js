@@ -173,46 +173,43 @@ describe('cabinet client SQL builders', () => {
     queryResults.length = 0;
   });
 
-  it('buildCabinetClientMatchSql combines tag and port branches', async () => {
+  it('buildCabinetClientMatchSql reads the client stamped at ingest', async () => {
     queueQuery('cabinet-client-binding', [{
       client_id: '69862',
       display_name: 'Бегет',
       bind_mode: 'ports',
       enabled: 1,
     }]);
-    queueQuery('cabinet-client-ports', [{
-      switch_ip: '10.0.0.1',
-      if_index: 24,
-    }]);
 
     const params = {};
     const sql = await buildCabinetClientMatchSql('69862', params, { i: 0 }, 'f');
     assert.match(sql, /f\.src_client = \{cabinet_client_src_/);
     assert.match(sql, /f\.dst_client = \{cabinet_client_dst_/);
-    assert.match(sql, /cabinet_client_switch_/);
-    assert.match(sql, /cabinet_client_if_/);
+    assert.equal(params.cabinet_client_src_0, '69862');
+    assert.equal(params.cabinet_client_dst_1, '69862');
+    assert.doesNotMatch(sql, /isIPAddressInRange|cabinet_client_switch_|cabinet_client_if_/);
   });
 
-  it('buildCabinetClientFilterSql supports in and not_in', async () => {
+  it('buildCabinetClientFilterSql reads client columns, including in and not_in', async () => {
     queueQuery('cabinet-client-binding', [{
       client_id: '69862',
       display_name: 'Бегет',
       bind_mode: 'prefixes',
       enabled: 1,
     }]);
-    queueQuery('cabinet-client-prefixes', [{ prefix: '10.0.0.0/24' }]);
     queueQuery('cabinet-client-binding', [{
       client_id: '37859',
       display_name: 'Other',
       bind_mode: 'prefixes',
       enabled: 1,
     }]);
-    queueQuery('cabinet-client-prefixes', [{ prefix: '192.168.0.0/24' }]);
 
     const params = {};
     const inSql = await buildCabinetClientFilterSql(['69862', '37859'], 'in', params, 'f');
-    assert.match(inSql, /OR/);
-    assert.match(inSql, /isIPAddressInRange/);
+    assert.match(inSql, /f\.src_client IN \{cabinet_client_ids_0:Array\(String\)\}/);
+    assert.match(inSql, /f\.dst_client IN \{cabinet_client_ids_0:Array\(String\)\}/);
+    assert.deepEqual(params.cabinet_client_ids_0, ['69862', '37859']);
+    assert.doesNotMatch(inSql, /isIPAddressInRange/);
 
     queueQuery('cabinet-client-binding', [{
       client_id: '69862',
@@ -220,9 +217,12 @@ describe('cabinet client SQL builders', () => {
       bind_mode: 'prefixes',
       enabled: 1,
     }]);
-    queueQuery('cabinet-client-prefixes', [{ prefix: '10.0.0.0/24' }]);
-    const notSql = await buildCabinetClientFilterSql(['69862'], '!=', params, 'f');
+    const notParams = {};
+    const notSql = await buildCabinetClientFilterSql(['69862'], '!=', notParams, 'f');
     assert.match(notSql, /^NOT \(/);
+    assert.match(notSql, /f\.src_client = \{cabinet_client_ids_0:String\}/);
+    assert.equal(notParams.cabinet_client_ids_0, '69862');
+    assert.doesNotMatch(notSql, /isIPAddressInRange/);
   });
 
   it('getCabinetClientBinding rejects missing client', async () => {
