@@ -737,7 +737,7 @@ function ChartHoverTip({
   translucentToggle = false,
   children,
 }) {
-  const [translucent, setTranslucent] = useState(false);
+  const [translucent, setTranslucent] = useState(true);
   const isTranslucent = translucentToggle && translucent;
   const surfaceStyle = translucentToggle
     ? (isTranslucent
