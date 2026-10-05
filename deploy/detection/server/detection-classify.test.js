@@ -310,6 +310,21 @@ describe('detection-classify', () => {
     assert.equal(refined.kind, KINDS.volumetric);
   });
 
+  it('verolayn 05.10: 0.92 Гбит/с, UDP 14%, топ IP 55% — не атака', () => {
+    const first = classifyFromMetrics({
+      all: { bps: 924e6, port_entropy: 4.2 },
+      tcp: { bps: 792e6 },
+      udp: { bps: 129e6 },
+    }, { p95: 367e6, p999: 367e6 });
+    assert.equal(first.kind, KINDS.benign_peak);
+    assert.match(first.reason, /^нет явных признаков атаки/);
+    const refined = refineClassification(first, {
+      victim: { ip: '91.151.188.194', port: 20021, protoLabel: 'UDP', share: 0.546 },
+    });
+    assert.equal(refined.kind, KINDS.benign_peak);
+    assert.equal(isAttackKind(refined.kind), false);
+  });
+
   it('76998: QUIC UDP/443 с Akamai на эфемерный порт → пик загрузки', () => {
     const first = classifyFromMetrics({
       all: { bps: 23.8e6, port_entropy: 0.77, syn_attempts: 37, answer_pct: 21.6, avg_packet_bytes: 1479 },

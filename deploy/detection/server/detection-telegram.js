@@ -775,6 +775,12 @@ function isAttackMinute(row, threshold, peakBps) {
   return Number(row?.bps) >= peak * ATTACK_TAIL_PEAK_SHARE;
 }
 
+function belowAttackTail(bps, peakBps) {
+  const peak = Number(peakBps);
+  if (!(peak > 0)) return false;
+  return Number(bps) < peak * ATTACK_TAIL_PEAK_SHARE;
+}
+
 function shouldSendNormalize(historyNewestFirst, threshold, streak = DEFAULT_NORMALIZE_STREAK, options = {}) {
   const need = normalizeStreak(streak, DEFAULT_NORMALIZE_STREAK);
   const history = Array.isArray(historyNewestFirst) ? historyNewestFirst : [];
@@ -782,7 +788,11 @@ function shouldSendNormalize(historyNewestFirst, threshold, streak = DEFAULT_NOR
   if (!history.length || hot(history[0])) return false;
   if (history.length < need) return false;
   if (!history.slice(0, need).every((row) => !hot(row))) return false;
-  if (volumeStillHigh(history[0]?.bps, options.alertBps, options.hourP95)) return false;
+  // Хвост ниже 10% пика — это уже не атака, даже если он выше собственной
+  // отметки открытия и заниженной нормы часа. Иначе verolayn после 26.6 Гбит/с
+  // зависает на 0.9 Гбит/с.
+  if (!belowAttackTail(history[0]?.bps, options.peakBps)
+    && volumeStillHigh(history[0]?.bps, options.alertBps, options.hourP95)) return false;
   return true;
 }
 
@@ -2105,6 +2115,10 @@ function pickAlertCandidates(allRows, previousByKey, threshold, options = {}) {
       let ready;
       if (signal === SIGNALS.volume) {
         ready = shouldSendAlert(history, t, options.streak ?? cfg.streak, enabledAtMs, cfg.window);
+        const recentPeak = options.recentPeakByKey instanceof Map
+          ? options.recentPeakByKey.get(objectId)
+          : null;
+        if (ready && belowAttackTail(row.bps, recentPeak)) ready = false;
       } else if (signal === SIGNALS.syn_flood) {
         ready = hot(row);
       } else if (signal === SIGNALS.net_spike) {
@@ -2223,10 +2237,14 @@ function pickNormalizeCandidates(allRows, previousByKey, threshold, options = {}
       };
       let ready;
       if (activeSignal === SIGNALS.volume) {
+        const recentPeak = options.recentPeakByKey instanceof Map
+          ? options.recentPeakByKey.get(objectId)
+          : 0;
+        const ownPeak = attackPeakBps(active) || 0;
         ready = shouldSendNormalize(history, t, cfg.normalizeStreak, {
           alertBps: active.alertByProto?.all?.bps ?? active.alertBps,
           hourP95: active.verdict?.hourP95,
-          peakBps: attackPeakBps(active),
+          peakBps: Math.max(ownPeak, recentPeak || 0) || null,
         });
       } else if (activeSignal === SIGNALS.syn_flood || activeSignal === SIGNALS.net_spike) {
         ready = shouldNormalizeQuiet(history, quiet, cfg.normalizeStreak);
@@ -3082,6 +3100,57 @@ async function loadLatestOpenPeaks() {
   return map;
 }
 
+// Пик закрытой атаки ещё 6 часов не даёт её хвосту открыться заново.
+// verolayn 05.10: ковёр 26.6 Гбит/с закрылся, и 0.9 Гбит/с тут же стали новым событием.
+const TAIL_ATTACK_LOOKBACK_MS = 6 * 60 * 60 * 1000;
+
+async function loadRecentAttackPeaks(minute, keys) {
+  const map = new Map();
+  if (!keys?.length) return map;
+  const minuteTs = parseUtc(minute);
+  if (!Number.isFinite(minuteTs)) return map;
+  const scopeFilter = previousRowsScopeFilter(keys);
+  if (scopeFilter.sql === '0') return map;
+  const from = formatCh(minuteTs - TAIL_ATTACK_LOOKBACK_MS);
+  const { rows } = await query(`
+    SELECT scope, scope_id, alert_json
+    FROM (
+      SELECT
+        event_id,
+        argMax(scope, updated_at) AS scope,
+        argMax(scope_id, updated_at) AS scope_id,
+        argMax(status, updated_at) AS status,
+        argMax(signal, updated_at) AS signal,
+        argMax(normalize_minute, updated_at) AS norm_minute,
+        argMax(alert_json, updated_at) AS alert_json
+      FROM ${eventsTableRef()}
+      WHERE alert_minute >= ${utcDateTime('from')}
+        AND ${scopeFilter.sql}
+      GROUP BY event_id
+    )
+    WHERE status = 'normalized'
+      AND (signal = '' OR signal = '${SIGNALS.volume}')
+      AND norm_minute >= ${utcDateTime('from')}
+  `, { from, ...scopeFilter.params }, { name: 'detection/events-recent-peaks' });
+  for (const row of rows) {
+    let snapshot = {};
+    try {
+      snapshot = JSON.parse(row.alert_json || '{}');
+    } catch {
+      snapshot = {};
+    }
+    const peak = attackPeakBps({
+      track: snapshot.track,
+      alertByProto: { all: snapshot.all },
+      alertBps: snapshot.all?.bps,
+    });
+    if (!(peak > 0)) continue;
+    const key = objectKey(row.scope, row.scope_id);
+    if (peak > (map.get(key) || 0)) map.set(key, peak);
+  }
+  return map;
+}
+
 const REPEAT_WINDOW_MS = 24 * 3600 * 1000;
 
 // Атаки объекта за сутки до minute: одна запись на минуту открытия, сколько бы
@@ -3795,6 +3864,13 @@ async function processDetectionAlerts({ minute, rows, nameByKey, hourBpsNorm }) 
     peaksByKey = new Map();
     peaksByKey.loadError = err;
   }
+  let recentPeakByKey = new Map();
+  try {
+    recentPeakByKey = await loadRecentAttackPeaks(minute, watchKeys);
+  } catch (err) {
+    recentPeakByKey = new Map();
+    recentPeakByKey.loadError = err;
+  }
   const pickOpts = {
     settings,
     grouped,
@@ -3805,6 +3881,7 @@ async function processDetectionAlerts({ minute, rows, nameByKey, hourBpsNorm }) 
     streak: settings.streak,
     peaksByKey,
     peakUpgradeChecked,
+    recentPeakByKey,
   };
   const alertCandidates = pickAlertCandidates(allRows, previousByKey, settings.growthThreshold, pickOpts);
   const normalizeCandidates = pickNormalizeCandidates(allRows, previousByKey, settings.growthThreshold, {
@@ -3813,6 +3890,7 @@ async function processDetectionAlerts({ minute, rows, nameByKey, hourBpsNorm }) 
     activeByKey,
     thresholdByKey,
     streak: settings.normalizeStreak,
+    recentPeakByKey,
   });
   const presentKeys = new Set(rows
     .filter((r) => String(r.proto) === 'all')
@@ -3830,6 +3908,9 @@ async function processDetectionAlerts({ minute, rows, nameByKey, hourBpsNorm }) 
   const errors = [];
   if (peaksByKey.loadError) {
     errors.push({ key: 'peaks', message: `peaks: ${peaksByKey.loadError.message}` });
+  }
+  if (recentPeakByKey.loadError) {
+    errors.push({ key: 'recent-peaks', message: `recent-peaks: ${recentPeakByKey.loadError.message}` });
   }
   const touchedIds = new Set();
 

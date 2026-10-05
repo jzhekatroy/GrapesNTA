@@ -2074,3 +2074,50 @@ describe('сильная UDP-минута открывает атаку сраз
     assert.equal(pickAlertCandidates([aykonet], new Map(), 1.6, opts(aykonet, 22493200128, extra)).length, 0);
   });
 });
+
+describe('хвост закрытой атаки не открывается заново', () => {
+  const minute = (hm, bps, growth) => ({
+    scope: 'provider', scope_id: 'isp:verolayn', proto: 'all',
+    minute: `2026-10-05 ${hm}:00`, bps, growth_bps: growth,
+  });
+  // 09:01–09:05 МСК: три горячие минуты из шести, все около 0.9 Гбит/с.
+  const current = minute('06:05', 0.917e9, 1.72);
+  const prev = new Map([['provider|isp:verolayn', [
+    minute('06:04', 0.676e9, 1.27),
+    minute('06:03', 0.924e9, 1.73),
+    minute('06:02', 0.784e9, 1.47),
+    minute('06:01', 0.902e9, 1.69),
+    minute('06:00', 0.713e9, 1.34),
+  ]]]);
+
+  it('0.9 Гбит/с после пика 26.6 Гбит/с не открывает объём', () => {
+    const open = pickAlertCandidates([current], prev, 1.6, { streak: 3, settings: { streak: 3, volumeWindow: 6 } });
+    assert.equal(open.length, 1);
+    const held = pickAlertCandidates([current], prev, 1.6, {
+      streak: 3,
+      settings: { streak: 3, volumeWindow: 6 },
+      recentPeakByKey: new Map([['provider|isp:verolayn', 26.6e9]]),
+    });
+    assert.equal(held.length, 0);
+  });
+
+  it('уже открытый хвост закрывается по пику прошлой атаки', () => {
+    const tail = [current, ...prev.get('provider|isp:verolayn')];
+    const active = new Map([['provider|isp:verolayn', {
+      id: 'provider|isp:verolayn|2026-10-05 06:05:00',
+      signal: 'volume',
+      scope: 'provider',
+      scopeId: 'isp:verolayn',
+      alertByProto: { all: { bps: 0.924e9 } },
+      verdict: { hourP95: 367e6 },
+      track: { peak: { bps: 1.22e9 } },
+    }]]);
+    const opts = {
+      settings: { volumeQuiet: 5 },
+      activeByKey: active,
+      recentPeakByKey: new Map([['provider|isp:verolayn', 26.6e9]]),
+    };
+    assert.equal(pickNormalizeCandidates(tail, prev, 1.6, opts).length, 1);
+    assert.equal(pickNormalizeCandidates(tail, prev, 1.6, { ...opts, recentPeakByKey: new Map() }).length, 0);
+  });
+});
