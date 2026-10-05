@@ -756,12 +756,32 @@ function sameMinute(left, right) {
   return Number.isFinite(a) && a === b;
 }
 
+// Атака кончилась, а живой трафик объекта ходит около слабой нормы: verolayn
+// 05.10 после удара 26.6 Гбит/с держал 0.5–0.9 Гбит/с TCP ×1.0–1.8, событие
+// не закрывалось и прислало «вектор сменился» на UDP → TCP. Минута ниже этой
+// доли пика атаки продолжением не считается.
+const ATTACK_TAIL_PEAK_SHARE = 0.1;
+
+function attackPeakBps(event) {
+  const tracked = Number(event?.track?.peak?.bps);
+  const opened = Number(event?.alertByProto?.all?.bps ?? event?.alertBps);
+  return Math.max(tracked > 0 ? tracked : 0, opened > 0 ? opened : 0) || null;
+}
+
+function isAttackMinute(row, threshold, peakBps) {
+  if (!isAboveGrowthThreshold(row, threshold)) return false;
+  const peak = Number(peakBps);
+  if (!(peak > 0)) return true;
+  return Number(row?.bps) >= peak * ATTACK_TAIL_PEAK_SHARE;
+}
+
 function shouldSendNormalize(historyNewestFirst, threshold, streak = DEFAULT_NORMALIZE_STREAK, options = {}) {
   const need = normalizeStreak(streak, DEFAULT_NORMALIZE_STREAK);
   const history = Array.isArray(historyNewestFirst) ? historyNewestFirst : [];
-  if (!history.length || isAboveGrowthThreshold(history[0], threshold)) return false;
+  const hot = (row) => isAttackMinute(row, threshold, options.peakBps);
+  if (!history.length || hot(history[0])) return false;
   if (history.length < need) return false;
-  if (!history.slice(0, need).every((row) => !isAboveGrowthThreshold(row, threshold))) return false;
+  if (!history.slice(0, need).every((row) => !hot(row))) return false;
   if (volumeStillHigh(history[0]?.bps, options.alertBps, options.hourP95)) return false;
   return true;
 }
@@ -2187,6 +2207,7 @@ function pickNormalizeCandidates(allRows, previousByKey, threshold, options = {}
         ready = shouldSendNormalize(history, t, cfg.normalizeStreak, {
           alertBps: active.alertByProto?.all?.bps ?? active.alertBps,
           hourP95: active.verdict?.hourP95,
+          peakBps: attackPeakBps(active),
         });
       } else if (activeSignal === SIGNALS.syn_flood || activeSignal === SIGNALS.net_spike) {
         ready = shouldNormalizeQuiet(history, quiet, cfg.normalizeStreak);
@@ -3468,8 +3489,10 @@ async function followOpenAttacks({
     const rate = signalRate(signal, row, group);
     // Минута между импульсами — это фон провайдера, а не новый вектор.
     const threshold = resolveGrowthThreshold(event.scope, event.scopeId, settings.growthThreshold, thresholdByKey);
-    const hotNow = isSignalHot(signal, row, group, threshold, settings)
-      || (signal === SIGNALS.syn_flood && synFloodStillGoing(row, synOptions(settings)));
+    const hotNow = signal === SIGNALS.volume
+      ? isAttackMinute(row, threshold, attackPeakBps(event))
+      : (isSignalHot(signal, row, group, threshold, settings)
+        || (signal === SIGNALS.syn_flood && synFloodStillGoing(row, synOptions(settings))));
     // Открытие не ушло в Telegram (малая доля, сеть внутри атакованного
     // провайдера) — продолжения тоже не шлём.
     const tgFollow = !String(event.telegramSkip || '')
@@ -4257,6 +4280,8 @@ module.exports = {
   parseCidr,
   concurrentAttacksLine,
   TELEGRAM_SKIP_PARENT_ACTIVE,
+  isAttackMinute,
+  attackPeakBps,
   heaviestHotMinute,
   shouldSendNormalize,
   shouldNormalizeQuiet,

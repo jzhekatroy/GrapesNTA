@@ -58,6 +58,8 @@ const {
   parseCidr,
   concurrentAttacksLine,
   TELEGRAM_SKIP_PARENT_ACTIVE,
+  isAttackMinute,
+  attackPeakBps,
 } = require('./detection-telegram');
 const { emptyInvestigate } = require('./detection-investigate');
 
@@ -1998,5 +2000,32 @@ describe('одна атака — одно сообщение', () => {
 
   it('у события есть отдельная причина молчания', () => {
     assert.equal(TELEGRAM_SKIP_PARENT_ACTIVE, 'parent_attack_active');
+  });
+});
+
+describe('хвост атаки ниже доли пика', () => {
+  const t = 1.6;
+  const at = (hm, bps, growth) => ({ minute: `2026-10-05 05:${hm}:00`, bps, growth_bps: growth, proto: 'all' });
+  // verolayn 05.10: удар 26.6 Гбит/с, после него живой TCP около слабой нормы 0.53 Гбит/с.
+  const tail = [
+    at('52', 0.942e9, 1.76), at('51', 0.605e9, 1.13), at('50', 0.864e9, 1.62),
+    at('49', 0.508e9, 0.95), at('48', 0.766e9, 1.44), at('47', 0.594e9, 1.11),
+    at('46', 0.81e9, 1.52), at('45', 0.532e9, 1.0), at('44', 0.788e9, 1.48),
+    at('43', 0.45e9, 0.84),
+  ];
+  const event = { alertByProto: { all: { bps: 26.6e9 } }, track: { peak: { bps: 26.6e9 } } };
+
+  it('минута ×1.76 при 3% пика не продолжает атаку', () => {
+    assert.equal(isAttackMinute(tail[0], t, attackPeakBps(event)), false);
+    assert.equal(isAttackMinute(at('31', 16.5e9, 30.96), t, attackPeakBps(event)), true);
+  });
+
+  it('без пика остаётся прежний порог роста', () => {
+    assert.equal(isAttackMinute(tail[0], t, null), true);
+  });
+
+  it('verolayn закрывается, хотя рост живого трафика выше порога', () => {
+    assert.equal(shouldSendNormalize(tail, t, 10, { alertBps: 26.6e9, peakBps: attackPeakBps(event) }), true);
+    assert.equal(shouldSendNormalize(tail, t, 10, { alertBps: 26.6e9 }), false);
   });
 });
