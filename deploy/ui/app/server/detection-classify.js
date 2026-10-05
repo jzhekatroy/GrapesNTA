@@ -34,11 +34,12 @@ const HOUR_RATIO_PEAK = 1.3;
 const ENTROPY_MIXED = 3;
 const ENTROPY_FOCUSED = 1.5;
 const TOP_DST_VOLUMETRIC = 0.15;
-// «Нет явных признаков» и один адрес с долей от 15% — ещё не атака: у
-// провайдера крупный сервер часто держит половину спокойной минуты.
-// verolayn 05.10 после ковра 26.6 Гбит/с: 0.92 Гбит/с, UDP 14%, топ IP 55%,
-// ×2.5 к норме часа, и событие зависло. Флуд без формы протокола (82800,
-// 25.7 Гбит/с, ×8) этот порог проходит.
+// Формы атаки нет, а один адрес держит от 15% — ещё не атака: у провайдера
+// крупный сервер часто держит половину спокойной минуты. verolayn 05.10 после
+// ковра 26.6 Гбит/с: 0.92 Гбит/с, UDP 14%, топ IP 55%, ×2.5 к норме часа.
+// master-ayti 05.10: 254 Мбит/с, ×1.2, топ IP 41% — отдача с двух адресов
+// iqdata.center. Флуд без формы протокола (82800, 25.7 Гбит/с, ×8) этот
+// порог проходит.
 const TOP_DST_PLAIN_RATIO = 3;
 const TOP_DST_CARPET = 0.08;
 const UDP_DOMINANT = 0.6;
@@ -433,7 +434,7 @@ function refineClassification(verdict, investigate, context = {}) {
   const plainMild = next.kind === KINDS.benign_peak
     && ratio != null
     && ratio < TOP_DST_PLAIN_RATIO
-    && /^нет явных признаков атаки/.test(String(next.reason || ''));
+    && /^(нет явных признаков атаки|объём в пределах часа, форма смешанная)/.test(String(next.reason || ''));
   if (topShare != null && topShare >= TOP_DST_VOLUMETRIC && !plainMild) {
     next.kind = KINDS.volumetric;
     next.reason = `топ IP ${(topShare * 100).toFixed(1)}% · ${next.reason || ''}`.trim();

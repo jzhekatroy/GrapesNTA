@@ -325,6 +325,30 @@ describe('detection-classify', () => {
     assert.equal(isAttackKind(refined.kind), false);
   });
 
+  it('master-ayti 05.10: 254 Мбит/с, ×1.2, топ IP 41% — пик, не TCP-флуд', () => {
+    const first = classifyFromMetrics({
+      all: { bps: 254.3e6, port_entropy: 6.86 },
+      tcp: { bps: 137e6 },
+      udp: { bps: 7.6e6 },
+    }, { p95: 151.8e6, p999: 212.8e6 });
+    assert.equal(first.kind, KINDS.benign_peak);
+    assert.match(first.reason, /^объём в пределах часа, форма смешанная/);
+    const refined = refineClassification(first, {
+      victim: { ip: '91.244.162.130', protoLabel: 'TCP', share: 0.412 },
+    });
+    assert.equal(refined.kind, KINDS.benign_peak);
+  });
+
+  it('net 188.143.205.0/24 29.09: 1.2 Гбит/с, ×9.4, топ IP 97% — остаётся атакой', () => {
+    const refined = refineClassification({
+      kind: KINDS.benign_peak,
+      reason: 'нет явных признаков атаки · объём ×9.37 к норме часа',
+      hourRatio: 9.37,
+      udpShare: 0,
+    }, { victim: { ip: '188.143.205.10', share: 0.968 } });
+    assert.equal(refined.kind, KINDS.volumetric);
+  });
+
   it('76998: QUIC UDP/443 с Akamai на эфемерный порт → пик загрузки', () => {
     const first = classifyFromMetrics({
       all: { bps: 23.8e6, port_entropy: 0.77, syn_attempts: 37, answer_pct: 21.6, avg_packet_bytes: 1479 },
