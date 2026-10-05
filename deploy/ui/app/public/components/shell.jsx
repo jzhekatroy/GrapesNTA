@@ -5,63 +5,88 @@ const { useState, useEffect, useLayoutEffect, useRef, useMemo } = React;
 const NAV = [
   {
     id: 'overview',
-    section: 'Главное',
     items: [
-      { id: 'dashboard', label: 'Обзор', icon: 'dashboard' },
-      { id: 'observations', label: 'Наблюдения', icon: 'query' },
-      { id: 'dns', label: 'DNS', icon: 'globe' },
+      { id: 'dashboard', icon: 'dashboard' },
+      { id: 'observations', icon: 'query' },
+      { id: 'dns', icon: 'globe' },
     ],
   },
   {
     id: 'traffic',
-    section: 'Анализ трафика',
     items: [
-      { id: 'explorer', label: 'Разбор трафика', icon: 'explorer' },
-      { id: 'dns-explorer', label: 'Разбор DNS', icon: 'search' },
-      { id: 'top', label: 'Топ ASN', icon: 'top' },
+      { id: 'explorer', icon: 'explorer' },
+      { id: 'dns-explorer', icon: 'search' },
+      { id: 'top', icon: 'top' },
     ],
   },
   {
     id: 'settings',
-    section: 'Настройка',
     icon: 'sliders',
     groups: [
       {
         id: 'data',
-        section: 'Сбор данных',
         icon: 'collectors',
         items: [
-          { id: 'collectors', label: 'Коллекторы', icon: 'collectors' },
-          { id: 'snmp', label: 'SNMP', icon: 'network' },
-          { id: 'bmp', label: 'BMP / BGP', icon: 'router' },
+          { id: 'collectors', icon: 'collectors' },
+          { id: 'snmp', icon: 'network' },
+          { id: 'bmp', icon: 'router' },
         ],
       },
       {
         id: 'netmodel',
-        section: 'Модель сети',
         icon: 'refs',
         items: [
-          { id: 'traffic-classification', label: 'Классификация трафика', icon: 'filter' },
-          { id: 'cidr', label: 'Моя сеть', icon: 'cidr' },
-          { id: 'dns-resolvers', label: 'DNS-резолверы', icon: 'db' },
-          { id: 'interface-roles', label: 'Порты оборудования', icon: 'link' },
-          { id: 'port-services', label: 'Сервисы и порты приложений', icon: 'flow' },
+          { id: 'traffic-classification', icon: 'filter' },
+          { id: 'cidr', icon: 'cidr' },
+          { id: 'dns-resolvers', icon: 'db' },
+          { id: 'interface-roles', icon: 'link' },
+          { id: 'port-services', icon: 'flow' },
         ],
       },
       {
         id: 'admin',
-        section: 'Администрирование',
         items: [
-          { id: 'users', label: 'Пользователи и права', icon: 'shield' },
-          { id: 'audit', label: 'Журнал аудита', icon: 'clock' },
-          { id: 'clients', label: 'Клиенты', icon: 'users' },
-          { id: 'smtp', label: 'Почта (SMTP)', icon: 'export' },
-          { id: 'ttl', label: 'Хранение данных', icon: 'clock' },
+          { id: 'users', icon: 'shield' },
+          { id: 'audit', icon: 'clock' },
+          { id: 'clients', icon: 'users' },
+          { id: 'smtp', icon: 'export' },
+          { id: 'ttl', icon: 'clock' },
         ],
       },
     ],
   },
 ];
+
+function t(key, params) {
+  return GrapesI18n.t(key, params);
+}
+
+function navSectionTitle(sectionId) {
+  return t(`nav.section.${sectionId}`);
+}
+
+function navItemTitle(itemId) {
+  return t(`nav.item.${itemId}`);
+}
+
+function withNavLabels(sec) {
+  if (sec.groups) {
+    return {
+      ...sec,
+      section: navSectionTitle(sec.id),
+      groups: sec.groups.map((grp) => ({
+        ...grp,
+        section: navSectionTitle(grp.id),
+        items: (grp.items || []).map((it) => ({ ...it, label: navItemTitle(it.id) })),
+      })),
+    };
+  }
+  return {
+    ...sec,
+    section: navSectionTitle(sec.id),
+    items: (sec.items || []).map((it) => ({ ...it, label: navItemTitle(it.id) })),
+  };
+}
 
 const CABINET_NAV = [
   {
@@ -150,10 +175,13 @@ function filterNav(nav, effectivePermissions) {
 }
 
 /* =============== Sidebar =============== */
-function Sidebar({ current, onNavigate, collapsed, effectivePermissions, cabinetMode, clientDisplayName }) {
+function Sidebar({ current, onNavigate, collapsed, effectivePermissions, cabinetMode, clientDisplayName, locale }) {
   const visibleNav = useMemo(
-    () => (cabinetMode ? CABINET_NAV : filterNav(NAV, effectivePermissions)),
-    [cabinetMode, effectivePermissions],
+    () => {
+      const raw = cabinetMode ? CABINET_NAV : filterNav(NAV, effectivePermissions);
+      return cabinetMode ? raw : raw.map(withNavLabels);
+    },
+    [cabinetMode, effectivePermissions, locale],
   );
   const [openSections, setOpenSections] = useState(() => {
     const o = {};
@@ -211,11 +239,11 @@ function Sidebar({ current, onNavigate, collapsed, effectivePermissions, cabinet
         type="button"
         className={`sidebar__footer${collapsed ? ' sidebar__footer--collapsed' : ''}`}
         onClick={() => onNavigate('__toggle')}
-        aria-label={collapsed ? 'Развернуть меню' : 'Свернуть меню'}
+        aria-label={collapsed ? t('nav.sidebar.expand') : t('nav.sidebar.collapse')}
       >
         <Icon name="chevL" size={16} />
         <span className="sidebar__footer-label">
-          {collapsed ? 'Развернуть меню' : 'Свернуть меню'}
+          {collapsed ? t('nav.sidebar.expand') : t('nav.sidebar.collapse')}
         </span>
       </button>
     </aside>
@@ -358,17 +386,20 @@ function formatUserDateTime(value) {
   if (!value) return '—';
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return String(value);
-  return date.toLocaleString('ru-RU', { dateStyle: 'short', timeStyle: 'short' });
+  return date.toLocaleString(GrapesI18n.intlLocale(), { dateStyle: 'short', timeStyle: 'short' });
 }
 
-function UserAccountMenu({ currentUser, pageTitles, hiddenPageIds }) {
+function UserAccountMenu({ currentUser, pageTitles, hiddenPageIds, locale }) {
   const [open, setOpen] = useState(false);
   const [menuStyle, setMenuStyle] = useState(null);
   const rootRef = useRef(null);
   const menuRef = useRef(null);
   const titles = pageTitles || PAGE_TITLES || {};
-  const displayName = currentUser?.fullName || currentUser?.username || 'Пользователь';
-  const displayRole = currentUser?.role?.displayName || currentUser?.roleId || 'Пользователь';
+  const displayName = currentUser?.fullName || currentUser?.username || t('user.fallbackName');
+  const displayRole = GrapesI18n.localizedRoleDisplay(
+    currentUser?.roleId,
+    currentUser?.role?.displayName || currentUser?.roleId,
+  );
   const initials = displayName.trim().slice(0, 1).toUpperCase() || 'U';
 
   const allowedPages = useMemo(() => {
@@ -377,16 +408,16 @@ function UserAccountMenu({ currentUser, pageTitles, hiddenPageIds }) {
     if (!perms) return [];
     return Object.entries(perms)
       .filter(([id, allowed]) => allowed && !hidden.has(id))
-      .map(([id]) => ({
-        id,
-        title: titles[id]?.title || id,
-        section: titles[id]?.section || '',
-      }))
-      .sort((a, b) => (
-        a.section.localeCompare(b.section, 'ru')
-        || a.title.localeCompare(b.title, 'ru')
-      ));
-  }, [currentUser, pageTitles, hiddenPageIds]);
+      .map(([id]) => {
+        const meta = GrapesI18n.localizedPageMeta(id, titles[id]);
+        return { id, title: meta.title || id, section: meta.section || '' };
+      })
+      .sort((a, b) => {
+        const coll = GrapesI18n.getLocale() === 'en' ? 'en' : 'ru';
+        return a.section.localeCompare(b.section, coll)
+          || a.title.localeCompare(b.title, coll);
+      });
+  }, [currentUser, pageTitles, hiddenPageIds, locale]);
 
   useLayoutEffect(() => {
     if (!open) {
@@ -429,7 +460,7 @@ function UserAccountMenu({ currentUser, pageTitles, hiddenPageIds }) {
         <span className="user-menu__username">{currentUser?.username}</span>
       </div>
       <div className="time-filter__divider" />
-      <div className="time-filter__heading">Разрешённые разделы</div>
+      <div className="time-filter__heading">{t('user.allowedSections')}</div>
       <div className="user-menu__pages">
         {allowedPages.length ? allowedPages.map((page) => (
           <div key={page.id} className="user-menu__page">
@@ -437,12 +468,12 @@ function UserAccountMenu({ currentUser, pageTitles, hiddenPageIds }) {
             <span className="user-menu__page-section">{page.section}</span>
           </div>
         )) : (
-          <div className="user-menu__empty">Нет доступных разделов</div>
+          <div className="user-menu__empty">{t('user.noSections')}</div>
         )}
       </div>
       <div className="time-filter__divider" />
       <div className="user-menu__meta-row">
-        <span className="user-menu__meta-label">Последняя смена пароля</span>
+        <span className="user-menu__meta-label">{t('user.lastPasswordChange')}</span>
         <span className="user-menu__meta-value">{formatUserDateTime(currentUser?.updatedAt)}</span>
       </div>
     </>
@@ -455,7 +486,7 @@ function UserAccountMenu({ currentUser, pageTitles, hiddenPageIds }) {
         className="user-chip"
         onClick={() => setOpen((v) => !v)}
         aria-expanded={open}
-        title={currentUser?.username || 'Профиль'}
+        title={currentUser?.username || t('user.profile')}
       >
         <span className="user-chip__avatar user-chip__avatar--text">{initials}</span>
         <div className="user-chip__meta">
@@ -470,7 +501,7 @@ function UserAccountMenu({ currentUser, pageTitles, hiddenPageIds }) {
           className="user-menu__dropdown user-menu__dropdown--portal"
           style={menuStyle}
           role="dialog"
-          aria-label="Профиль пользователя"
+          aria-label={t('user.profileDialog')}
         >
           {dropdownBody}
         </div>,
@@ -482,7 +513,7 @@ function UserAccountMenu({ currentUser, pageTitles, hiddenPageIds }) {
 
 function Header({ current, onNavigate, onToggleSidebar, currentUser, onLogout, onRefresh, theme, onToggleTheme, timeRange, onTimeRangeChange, customPeriod, onCustomPeriodChange, chartZoomDepth, onChartZoomReset, directions, onDirectionsChange, collectorFilter, onCollectorFilterChange, pageTitles, hiddenPageIds, displayTimezone, timezonePref, onTimezonePrefChange, locale, onLocaleChange, cabinetMode, clientDisplayName, onStopImpersonation }) {
   const titles = pageTitles || PAGE_TITLES || {};
-  const meta = titles[current] || titles.dashboard || { title: current, section: '' };
+  const meta = GrapesI18n.localizedPageMeta(current, titles[current] || titles.dashboard || { title: current, section: '' });
   const hidePageFilters = cabinetMode
     ? (current === 'explorer' || current === 'cabinet-settings')
     : PAGES_WITHOUT_HEADER_FILTERS.has(current);
@@ -521,6 +552,7 @@ function Header({ current, onNavigate, onToggleSidebar, currentUser, onLogout, o
                 customPeriod={customPeriod}
                 onCustomPeriodChange={onCustomPeriodChange}
                 maxRangeDays={cabinetMode && current === 'dashboard' ? 730 : null}
+                locale={locale}
               />
             </>
           )}
@@ -543,27 +575,27 @@ function Header({ current, onNavigate, onToggleSidebar, currentUser, onLogout, o
           timezonePref={timezonePref}
           onTimezonePrefChange={onTimezonePrefChange}
         />
-        <PortalTooltip label="Обновить">
-          <button className="icon-btn" title="Обновить" onClick={onRefresh}>
+        <PortalTooltip label={t('chrome.refresh')}>
+          <button className="icon-btn" title={t('chrome.refresh')} onClick={onRefresh}>
             <Icon name="refresh" size={18} />
           </button>
         </PortalTooltip>
-        <PortalTooltip label={theme === 'dark' ? 'Светлая тема' : 'Тёмная тема'}>
+        <PortalTooltip label={theme === 'dark' ? t('chrome.themeLight') : t('chrome.themeDark')}>
           <button
             className="icon-btn"
-            title={theme === 'dark' ? 'Светлая тема' : 'Тёмная тема'}
+            title={theme === 'dark' ? t('chrome.themeLight') : t('chrome.themeDark')}
             onClick={onToggleTheme}
           >
             <Icon name={theme === 'dark' ? 'sun' : 'moon'} size={18} />
           </button>
         </PortalTooltip>
         <span className="hr-v" />
-        <UserAccountMenu currentUser={currentUser} pageTitles={pageTitles} hiddenPageIds={hiddenPageIds} />
+        <UserAccountMenu currentUser={currentUser} pageTitles={pageTitles} hiddenPageIds={hiddenPageIds} locale={locale} />
         {isImpersonating(currentUser) && onStopImpersonation && (
           <Button kind="ghost" size="sm" onClick={onStopImpersonation}>Выйти из кабинета</Button>
         )}
-        <PortalTooltip label="Выйти">
-          <button className="icon-btn" title="Выйти" onClick={onLogout}>
+        <PortalTooltip label={t('chrome.logout')}>
+          <button className="icon-btn" title={t('chrome.logout')} onClick={onLogout}>
             <Icon name="logOut" size={18} />
           </button>
         </PortalTooltip>
@@ -572,39 +604,39 @@ function Header({ current, onNavigate, onToggleSidebar, currentUser, onLogout, o
   );
 }
 
-const TIME_RANGE_OPTIONS = [
-  { id: '30m', label: '30 минут' },
-  { id: '1h', label: '1 час' },
-  { id: '3h', label: '3 часа' },
-  { id: '6h', label: '6 часов' },
-  { id: '12h', label: '12 часов' },
-  { id: '24h', label: '24 часа' },
-  { id: '2d', label: '2 дня' },
-  { id: '7d', label: '7 дней' },
-  { id: '14d', label: '14 дней' },
-  { id: '30d', label: '30 дней' },
-  { id: 'yesterday', label: 'Вчера' },
+const TIME_RANGE_OPTION_IDS = [
+  '30m', '1h', '3h', '6h', '12h', '24h', '2d', '7d', '14d', '30d', 'yesterday',
 ];
 
-const CALENDAR_WEEKDAY_LABELS = ['П', 'В', 'С', 'Ч', 'П', 'С', 'В'];
-const CALENDAR_MONTH_NAMES = [
-  'январь', 'февраль', 'март', 'апрель', 'май', 'июнь',
-  'июль', 'август', 'сентябрь', 'октябрь', 'ноябрь', 'декабрь',
-];
+function getTimeRangeOptions() {
+  return TIME_RANGE_OPTION_IDS.map((id) => ({ id, label: t(`period.${id}`) }));
+}
+
+function calendarWeekdayLabels() {
+  return [0, 1, 2, 3, 4, 5, 6].map((idx) => t(`calendar.weekday.${idx}`));
+}
+
+function calendarMonthName(month) {
+  return t(`calendar.month.${month}`);
+}
 
 const TIME_FILTER_PANEL_WIDTH = 440;
 
-const TRAFFIC_DIRECTIONS = [
-  { id: 'total', label: 'Всего', color: '#7E92F8' },
-  { id: 'incoming', label: 'Входящий', color: '#51D16D' },
-  { id: 'outgoing', label: 'Исходящий', color: '#6972F0' },
-  { id: 'transit', label: 'Транзит', color: '#F0B400' },
-  { id: 'internal', label: 'Внутренний', color: '#A4ADFF' },
-  { id: 'unclassified', label: 'Неразмеченный', color: '#7F7F9D' },
+const TRAFFIC_DIRECTION_SPECS = [
+  { id: 'total', color: '#7E92F8' },
+  { id: 'incoming', color: '#51D16D' },
+  { id: 'outgoing', color: '#6972F0' },
+  { id: 'transit', color: '#F0B400' },
+  { id: 'internal', color: '#A4ADFF' },
+  { id: 'unclassified', color: '#7F7F9D' },
 ];
 
+function getTrafficDirections() {
+  return TRAFFIC_DIRECTION_SPECS.map((d) => ({ ...d, label: t(`direction.${d.id}`) }));
+}
+
 function defaultDirectionsEnabled() {
-  return Object.fromEntries(TRAFFIC_DIRECTIONS.map((d) => [d.id, true]));
+  return Object.fromEntries(TRAFFIC_DIRECTION_SPECS.map((d) => [d.id, true]));
 }
 
 function toDatetimeLocalValue(date) {
@@ -686,7 +718,7 @@ function buildCalendarMonthGrid(year, month) {
 }
 
 function formatCalendarMonthTitle(year, month) {
-  return `${CALENDAR_MONTH_NAMES[month - 1]} ${year} г.`;
+  return `${calendarMonthName(month)} ${year}${t('period.monthSuffix')}`;
 }
 
 function viewMonthFromPeriod(period) {
@@ -752,10 +784,10 @@ function normalizeCustomPeriod(period) {
 }
 
 function validateCustomPeriod({ from, to }) {
-  if (!from || !to) return 'Укажите начало и конец периода';
+  if (!from || !to) return t('period.err.required');
   const norm = normalizeCustomPeriod({ from, to });
-  if (!norm.from || !norm.to) return 'Некорректная дата';
-  if (norm.from >= norm.to) return 'Начало должно быть раньше конца';
+  if (!norm.from || !norm.to) return t('period.err.invalid');
+  if (norm.from >= norm.to) return t('period.err.order');
   return null;
 }
 
@@ -781,12 +813,12 @@ function validateExplorerCustomPeriod({ from, to }, timeRange = '1h', maxRangeDa
   if (err) return err;
   const fromMs = new Date(norm.from).getTime();
   const toMs = new Date(norm.to).getTime();
-  if (!Number.isFinite(fromMs) || !Number.isFinite(toMs)) return 'Некорректная дата';
+  if (!Number.isFinite(fromMs) || !Number.isFinite(toMs)) return t('period.err.invalid');
   const limitDays = explorerRangeLimitDays(maxRangeDays);
   const limitMs = Number(periodOptions.maxRangeMs) > 0
     ? Number(periodOptions.maxRangeMs)
     : limitDays * 86400000;
-  const overMsg = periodOptions.rangeErrorMessage || `Период не может превышать ${limitDays} дней`;
+  const overMsg = periodOptions.rangeErrorMessage || t('period.err.maxDays', { days: limitDays });
   if (toMs - fromMs > limitMs) {
     return overMsg;
   }
@@ -804,47 +836,44 @@ function explorerGranularityBucketSeconds(granularity) {
 
 function timeRangeLabel(timeRange, customPeriod) {
   if (timeRange === 'custom') return formatCustomPeriodLabel(customPeriod);
-  return TIME_RANGE_OPTIONS.find((o) => o.id === timeRange)?.label || '1 час';
+  return t(`period.${timeRange}`) || t('period.1h');
 }
-
-const TIME_RANGE_CHIP_LABELS = {
-  '30m': '30м',
-  '1h': '1ч',
-  '3h': '3ч',
-  '6h': '6ч',
-  '12h': '12ч',
-  '24h': '24ч',
-  '2d': '2д',
-  '7d': '7д',
-  '14d': '14д',
-  '30d': '30д',
-};
 
 function timeRangeChipLabel(timeRange, customPeriod) {
   if (timeRange === 'custom') return formatCustomPeriodLabel(customPeriod);
-  return TIME_RANGE_CHIP_LABELS[timeRange] || timeRangeLabel(timeRange, customPeriod);
+  const chipKey = `period.chip.${timeRange}`;
+  if (GrapesI18n.has(chipKey)) return t(chipKey);
+  return timeRangeLabel(timeRange, customPeriod);
 }
 
-const TIMEZONE_PRESETS = [
-  { id: 'auto', label: 'Авто — пояс браузера' },
-  { id: 'Europe/Moscow', label: 'Москва' },
-  { id: 'Europe/Kaliningrad', label: 'Калининград' },
-  { id: 'Europe/Samara', label: 'Самара' },
-  { id: 'Asia/Yekaterinburg', label: 'Екатеринбург' },
-  { id: 'Asia/Omsk', label: 'Омск' },
-  { id: 'Asia/Krasnoyarsk', label: 'Красноярск' },
-  { id: 'Asia/Irkutsk', label: 'Иркутск' },
-  { id: 'Asia/Yakutsk', label: 'Якутск' },
-  { id: 'Asia/Vladivostok', label: 'Владивосток' },
-  { id: 'UTC', label: 'UTC' },
+const TIMEZONE_PRESET_IDS = [
+  'auto',
+  'Europe/Moscow',
+  'Europe/Kaliningrad',
+  'Europe/Samara',
+  'Asia/Yekaterinburg',
+  'Asia/Omsk',
+  'Asia/Krasnoyarsk',
+  'Asia/Irkutsk',
+  'Asia/Yakutsk',
+  'Asia/Vladivostok',
+  'UTC',
 ];
 
+function getTimezonePresets() {
+  return TIMEZONE_PRESET_IDS.map((id) => ({
+    id,
+    label: GrapesI18n.timezonePresetLabel(id),
+  }));
+}
+
 function directionSummaryLabel(directions) {
-  const enabled = TRAFFIC_DIRECTIONS.filter((d) => directions[d.id]);
-  if (enabled.length === TRAFFIC_DIRECTIONS.length) return 'Все направления';
-  if (enabled.length === 0) return 'Нет направлений';
+  const dirs = getTrafficDirections();
+  const enabled = dirs.filter((d) => directions[d.id]);
+  if (enabled.length === dirs.length) return t('directions.all');
+  if (enabled.length === 0) return t('directions.none');
   if (enabled.length === 1) return enabled[0].label;
-  return `${enabled.length} из ${TRAFFIC_DIRECTIONS.length}`;
+  return t('directions.countOf', { n: enabled.length, total: dirs.length });
 }
 
 const NO_LOCATION_KEY = '__none__';
@@ -998,7 +1027,7 @@ function toggleCollectorSelection(selected, group, item) {
 
 function collectorFilterLabel(collectorFilter, collectors, locations) {
   const items = collectorFilter || [];
-  if (!items.length) return 'Все коллекторы';
+  if (!items.length) return t('collectors.all');
   if (items.length === 1) return scopeTokenLabel(items[0], collectors, locations);
   return `${items.length} выбрано`;
 }
@@ -1134,8 +1163,8 @@ function LanguageSelector({ locale, onLocaleChange, variant }) {
       <button
         type="button"
         className="time-pill time-pill--locale"
-        title="Язык интерфейса"
-        aria-label="Язык интерфейса"
+        title={t('chrome.language')}
+        aria-label={t('chrome.language')}
         aria-expanded={open}
         aria-haspopup="menu"
         onClick={() => setOpen((v) => !v)}
@@ -1239,9 +1268,9 @@ function TimezoneSelector({ displayTimezone, timezonePref, onTimezonePrefChange 
         >
           <div className="time-filter__section timezone-filter__section">
             <div className="timezone-filter__hint">
-              Данные ClickHouse: {formatTimezoneShortLabel(getDataTimezone())} · отображение ниже
+              {t('tz.dataHint', { tz: formatTimezoneShortLabel(getDataTimezone()) })}
             </div>
-            {TIMEZONE_PRESETS.map((preset) => {
+            {getTimezonePresets().map((preset) => {
               const isAuto = preset.id === 'auto';
               const selected = isAuto ? mode === 'auto' : mode === 'manual' && activeManual === preset.id;
               const subtitle = isAuto ? formatTimezoneLongLabel(browserTimezone) : formatTimezoneShortLabel(preset.id);
@@ -1347,7 +1376,7 @@ function PeriodTimeField({
       <div className="time-filter__time-inputs">
         <TimePartInput
           id={hourId}
-          ariaLabel={`${label}, часы`}
+          ariaLabel={t('period.hourAria', { label })}
           value={hour}
           max={maxHour}
           onCommit={onHourChange}
@@ -1460,26 +1489,26 @@ function CustomPeriodCalendar({
   return (
     <div className="time-filter__calendar-pane">
       <div className="time-filter__calendar-header">
-        <button type="button" className="time-filter__calendar-nav" onClick={() => shiftMonth(-1)} aria-label="Предыдущий месяц">
+        <button type="button" className="time-filter__calendar-nav" onClick={() => shiftMonth(-1)} aria-label={t('period.prevMonth')}>
           <Icon name="chevL" size={14} />
         </button>
         <div className="time-filter__calendar-title">
           <span>{formatCalendarMonthTitle(viewMonth.year, viewMonth.month)}</span>
           <Icon name="calendar" size={14} className="time-filter__calendar-title-icon" />
         </div>
-        <button type="button" className="time-filter__calendar-nav" onClick={() => shiftMonth(1)} aria-label="Следующий месяц">
+        <button type="button" className="time-filter__calendar-nav" onClick={() => shiftMonth(1)} aria-label={t('period.nextMonth')}>
           <Icon name="chevR" size={14} />
         </button>
       </div>
       <div className="time-filter__calendar-weekdays" aria-hidden="true">
-        {CALENDAR_WEEKDAY_LABELS.map((label, idx) => (
+        {calendarWeekdayLabels().map((label, idx) => (
           <span key={`${label}-${idx}`} className="time-filter__calendar-weekday">{label}</span>
         ))}
       </div>
       <div
         className={`time-filter__calendar-grid${rangeAnchor ? ' time-filter__calendar-grid--selecting' : ''}`}
         role="grid"
-        aria-label="Календарь"
+        aria-label={t('period.calendar')}
         onMouseLeave={() => setHoverDay(null)}
       >
         {monthCells.map((day) => {
@@ -1516,7 +1545,7 @@ function CustomPeriodCalendar({
       </div>
       <div className="time-filter__time-row">
         <PeriodTimeField
-          label="Время от"
+          label={t('period.timeFrom')}
           hour={fromParts?.h ?? 0}
           minute={fromParts?.mi ?? 0}
           hourId={hourFromId}
@@ -1525,7 +1554,7 @@ function CustomPeriodCalendar({
           onMinuteChange={(mi) => updateFromTime(fromParts?.h ?? 0, mi)}
         />
         <PeriodTimeField
-          label="Время до"
+          label={t('period.timeTo')}
           hour={toParts?.h ?? END_OF_DAY_HOUR}
           minute={toParts?.mi ?? 0}
           hourId={hourToId}
@@ -1542,7 +1571,7 @@ function CustomPeriodCalendar({
 
 function TimeFilter({
   timeRange, onTimeRangeChange, customPeriod, onCustomPeriodChange,
-  variant = 'header', maxRangeDays = null, appearance = 'default',
+  variant = 'header', maxRangeDays = null, appearance = 'default', locale,
 }) {
   const isExplorer = variant === 'explorer';
   const [open, setOpen] = useState(false);
@@ -1564,12 +1593,13 @@ function TimeFilter({
   const rangeLabel = timeRangeLabel(timeRange, customPeriod);
   const presetOptions = useMemo(() => {
     const limitMs = Number(maxRangeDays) > 0 ? Number(maxRangeDays) * 86400000 : null;
-    if (!limitMs) return TIME_RANGE_OPTIONS;
-    return TIME_RANGE_OPTIONS.filter((o) => {
+    const options = getTimeRangeOptions();
+    if (!limitMs) return options;
+    return options.filter((o) => {
       const presetMs = timeRangePresetMs(o.id);
       return presetMs == null || presetMs <= limitMs;
     });
-  }, [maxRangeDays]);
+  }, [maxRangeDays, locale]);
 
   useEffect(() => {
     if (!open) return;
@@ -1700,7 +1730,7 @@ function TimeFilter({
       ref={menuRef}
       className={`time-filter__menu time-filter__menu--fixed time-filter__menu--panel${needsScroll ? ' time-filter__menu--scrollable' : ''}${isExplorer ? ' time-filter__menu--explorer' : ''}`}
       role="dialog"
-      aria-label="Выбор периода"
+      aria-label={t('period.dialogLabel')}
       style={menuStyle}
     >
       <div ref={panelRef} className="time-filter__panel">
@@ -1750,10 +1780,10 @@ function TimeFilter({
           />
           <div className="time-filter__custom-actions">
             <Button kind="ghost" size="sm" type="button" className="time-filter__cancel-btn" onClick={() => setOpen(false)}>
-              Отменить
+              {t('period.cancel')}
             </Button>
             <Button kind="primary" size="sm" type="button" onClick={applyCustomPeriod}>
-              Выбрать
+              {t('period.apply')}
             </Button>
           </div>
         </div>
@@ -1801,9 +1831,10 @@ function DirectionFilter({ directions, onDirectionsChange, embedded = false, for
   const addRef = useRef(null);
   const menuRef = useRef(null);
 
-  const enabledDirections = TRAFFIC_DIRECTIONS.filter((d) => directions[d.id]);
+  const trafficDirections = getTrafficDirections();
+  const enabledDirections = trafficDirections.filter((d) => directions[d.id]);
   const enabledCount = enabledDirections.length;
-  const allEnabled = enabledCount === TRAFFIC_DIRECTIONS.length;
+  const allEnabled = enabledCount === trafficDirections.length;
   const summary = (formatSummary || directionSummaryLabel)(directions);
 
   const toggleDirection = (id) => {
@@ -1811,7 +1842,7 @@ function DirectionFilter({ directions, onDirectionsChange, embedded = false, for
   };
 
   const setAllDirections = (on) => {
-    onDirectionsChange(Object.fromEntries(TRAFFIC_DIRECTIONS.map((d) => [d.id, on])));
+    onDirectionsChange(Object.fromEntries(trafficDirections.map((d) => [d.id, on])));
   };
 
   const removeDirection = (id) => {
@@ -1875,17 +1906,17 @@ function DirectionFilter({ directions, onDirectionsChange, embedded = false, for
       role="menu"
     >
       <div className="time-filter__heading">
-        <span>Направления</span>
+        <span>{t('directions.heading')}</span>
         <button
           type="button"
           className="time-filter__link"
           onClick={() => setAllDirections(!allEnabled)}
         >
-          {allEnabled ? 'Снять все' : 'Выбрать все'}
+          {allEnabled ? t('directions.clearAll') : t('directions.selectAll')}
         </button>
       </div>
       <div className="time-filter__section time-filter__section--directions">
-        {TRAFFIC_DIRECTIONS.map((d) => {
+        {trafficDirections.map((d) => {
           const on = !!directions[d.id];
           return (
             <label key={d.id} className={`direction-option ${on ? 'is-on' : ''}`}>
@@ -1917,9 +1948,9 @@ function DirectionFilter({ directions, onDirectionsChange, embedded = false, for
         aria-disabled={allEnabled}
         onClick={() => !allEnabled && pickAllDirections()}
       >
-        Все
+        {t('directions.allShort')}
       </div>
-      {TRAFFIC_DIRECTIONS.map((d) => {
+      {trafficDirections.map((d) => {
         const selected = !!directions[d.id];
         return (
           <div
@@ -1943,11 +1974,11 @@ function DirectionFilter({ directions, onDirectionsChange, embedded = false, for
         <div className="direction-filter__chips">
           {allEnabled ? (
             <span className="badge badge--info direction-chip">
-              <span className="direction-chip__label">Все</span>
+              <span className="direction-chip__label">{t('directions.allShort')}</span>
               <button
                 type="button"
                 className="direction-chip__remove"
-                title="Снять все направления"
+                title={t('directions.removeAllTitle')}
                 onClick={() => setAllDirections(false)}
               >
                 <Icon name="x" size={10} stroke={2.5} />
@@ -1960,7 +1991,7 @@ function DirectionFilter({ directions, onDirectionsChange, embedded = false, for
                 <button
                   type="button"
                   className="direction-chip__remove"
-                  title={`Убрать ${d.label}`}
+                  title={t('directions.removeTitle', { label: d.label })}
                   onClick={() => removeDirection(d.id)}
                 >
                   <Icon name="x" size={10} stroke={2.5} />
@@ -1969,7 +2000,7 @@ function DirectionFilter({ directions, onDirectionsChange, embedded = false, for
             ))
           )}
           {enabledCount === 0 && (
-            <span className="direction-filter__empty-hint">Нет направлений</span>
+            <span className="direction-filter__empty-hint">{t('directions.none')}</span>
           )}
           <div className="direction-filter__add" ref={addRef}>
             <Button
@@ -1980,7 +2011,7 @@ function DirectionFilter({ directions, onDirectionsChange, embedded = false, for
               aria-expanded={open}
               onClick={() => setOpen((v) => !v)}
             >
-              Направление
+              {t('directions.add')}
             </Button>
           </div>
         </div>
@@ -1996,10 +2027,10 @@ function DirectionFilter({ directions, onDirectionsChange, embedded = false, for
         className="direction-pill"
         onClick={() => setOpen((v) => !v)}
         aria-expanded={open}
-        title="Фильтр по направлениям трафика"
+        title={t('directions.filterTitle')}
       >
         <span className="direction-pill__chips" aria-hidden="true">
-          {TRAFFIC_DIRECTIONS.map((d) => (
+          {trafficDirections.map((d) => (
             <span
               key={d.id}
               className={`direction-pill__chip ${directions[d.id] ? 'is-on' : ''}`}
@@ -2092,7 +2123,7 @@ function CollectorFilter({ collectorFilter, onCollectorFilterChange, embedded = 
         onClick={() => applySelection([])}
       >
         <input type="checkbox" checked={!collectorFilter?.length} readOnly tabIndex={-1} />
-        Все коллекторы
+        {t('collectors.all')}
       </button>
       {grouped.map((group) => {
         const locationSelected = isLocationSelected(selected, group);
@@ -2137,7 +2168,7 @@ function CollectorFilter({ collectorFilter, onCollectorFilterChange, embedded = 
         className={embedded ? 'input' : 'collector-pill'}
         onClick={() => setOpen((v) => !v)}
         aria-expanded={open}
-        title="Фильтр по коллектору"
+        title={t('collectors.filterTitle')}
         style={embedded ? {
           minWidth: 0,
           flex: 1,
@@ -2209,7 +2240,7 @@ function parseDirectionsParam(value) {
   if (!value) return null;
   const ids = new Set(value.split(',').map((s) => s.trim()).filter(Boolean));
   if (!ids.size) return null;
-  return Object.fromEntries(TRAFFIC_DIRECTIONS.map((d) => [d.id, ids.has(d.id)]));
+  return Object.fromEntries(TRAFFIC_DIRECTION_SPECS.map((d) => [d.id, ids.has(d.id)]));
 }
 
 function applyTopTalkersUrlGlobals(params) {
@@ -2280,8 +2311,8 @@ function buildTopTalkersShareUrl({
     params.set('from', customPeriod.from);
     params.set('to', customPeriod.to);
   }
-  const enabledDirs = TRAFFIC_DIRECTIONS.filter((d) => directions?.[d.id]).map((d) => d.id);
-  if (enabledDirs.length && enabledDirs.length < TRAFFIC_DIRECTIONS.length) {
+  const enabledDirs = TRAFFIC_DIRECTION_SPECS.filter((d) => directions?.[d.id]).map((d) => d.id);
+  if (enabledDirs.length && enabledDirs.length < TRAFFIC_DIRECTION_SPECS.length) {
     params.set('dirs', enabledDirs.join(','));
   }
   if (collectorFilter?.length) params.set('collectors', collectorFilter.join(','));
@@ -2496,8 +2527,8 @@ function setPageTitles(map) {
 Object.assign(window, {
   Sidebar, Header, NAV, CABINET_NAV, CABINET_PAGE_IDS, PAGE_TITLES, setPageTitles, GrapesGlyph,
   isCabinetMode, isImpersonating, ImpersonationBanner,
-  TIME_RANGE_OPTIONS, TIMEZONE_PRESETS, TRAFFIC_DIRECTIONS, defaultDirectionsEnabled,
-  defaultCustomPeriod, formatCustomPeriodLabel, normalizeCustomPeriodValue, normalizeCustomPeriod, validateCustomPeriod, validateExplorerCustomPeriod, explorerRangeLimitDays, timeRangePresetMs, EXPLORER_MAX_RANGE_DAYS, timeRangeLabel, timeRangeChipLabel, TIME_RANGE_CHIP_LABELS, yesterdayCustomPeriod, isYesterdayPeriod,
+  TRAFFIC_DIRECTION_SPECS, defaultDirectionsEnabled,
+  defaultCustomPeriod, formatCustomPeriodLabel, normalizeCustomPeriodValue, normalizeCustomPeriod, validateCustomPeriod, validateExplorerCustomPeriod, explorerRangeLimitDays, timeRangePresetMs, EXPLORER_MAX_RANGE_DAYS, timeRangeLabel, timeRangeChipLabel, yesterdayCustomPeriod, isYesterdayPeriod,
   toDatetimeLocalValue, dnsBucketSecondsFromMode, explorerGranularityBucketSeconds,
   collectorFilterLabel, directionSummaryLabel, LanguageSelector, TimezoneSelector, CollectorFilter,
   parseAppHash, parseJsonSearchParam, parseDirectionsParam, applyTopTalkersUrlGlobals,
@@ -2506,4 +2537,17 @@ Object.assign(window, {
   parseExplorerPageParams, readExplorerPageParamsFromHash, applyExplorerUrlGlobals, buildExplorerShareUrl, buildExplorerSnapshotShareUrl,
   parseDnsExplorerPageParams, readDnsExplorerPageParamsFromHash, applyDnsExplorerUrlGlobals,
   buildDnsExplorerDraftUrl, buildDnsExplorerShareUrl, buildDnsExplorerSnapshotShareUrl,
+});
+
+Object.defineProperty(window, 'TRAFFIC_DIRECTIONS', {
+  enumerable: true,
+  get: getTrafficDirections,
+});
+Object.defineProperty(window, 'TIME_RANGE_OPTIONS', {
+  enumerable: true,
+  get: getTimeRangeOptions,
+});
+Object.defineProperty(window, 'TIMEZONE_PRESETS', {
+  enumerable: true,
+  get: getTimezonePresets,
 });

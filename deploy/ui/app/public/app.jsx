@@ -68,6 +68,7 @@ function App() {
   const [locale, setLocale] = useState(() => GrapesLocale.resolveDisplayLocale({
     pending: GrapesLocale.readPendingLocale(),
   }));
+  GrapesI18n.setLocale(locale);
   const [timeRange, setTimeRange] = useState('24h');
   const [customPeriod, setCustomPeriod] = useState(defaultCustomPeriod);
   const [periodZoomStack, setPeriodZoomStack] = useState([]);
@@ -717,7 +718,7 @@ function App() {
   }
 
   return (
-    <div className="app" data-collapsed={collapsed} data-cabinet={cabinetMode ? '1' : '0'} data-screen-label={`Grapes NTA · ${pageTitles[page]?.title || page}`}>
+    <div className="app" data-collapsed={collapsed} data-cabinet={cabinetMode ? '1' : '0'} data-screen-label={`Grapes NTA · ${GrapesI18n.localizedPageMeta(page, pageTitles[page]).title || page}`}>
       {isImpersonating(auth.user) && (
         <ImpersonationBanner
           cabinet={auth.user.cabinet}
@@ -732,6 +733,7 @@ function App() {
         effectivePermissions={auth.user?.effectivePermissions}
         cabinetMode={cabinetMode}
         clientDisplayName={clientDisplayName}
+        locale={locale}
       />
       <Header
         current={page}

@@ -402,8 +402,11 @@ function setDisplayTimezonePreference(pref) {
 let displayTimezonePref = loadTimezonePreference();
 
 function formatTimezoneShortLabel(timeZone = getDisplayTimezone()) {
+  const intlLoc = (typeof GrapesI18n !== 'undefined' && GrapesI18n.intlLocale)
+    ? GrapesI18n.intlLocale()
+    : 'ru-RU';
   try {
-    const parts = new Intl.DateTimeFormat('ru-RU', {
+    const parts = new Intl.DateTimeFormat(intlLoc, {
       timeZone,
       timeZoneName: 'shortOffset',
     }).formatToParts(new Date());
@@ -416,8 +419,11 @@ function formatTimezoneShortLabel(timeZone = getDisplayTimezone()) {
 }
 
 function formatTimezoneLongLabel(timeZone = getDisplayTimezone()) {
+  const intlLoc = (typeof GrapesI18n !== 'undefined' && GrapesI18n.intlLocale)
+    ? GrapesI18n.intlLocale()
+    : 'ru-RU';
   try {
-    const parts = new Intl.DateTimeFormat('ru-RU', {
+    const parts = new Intl.DateTimeFormat(intlLoc, {
       timeZone,
       timeZoneName: 'longGeneric',
     }).formatToParts(new Date());
