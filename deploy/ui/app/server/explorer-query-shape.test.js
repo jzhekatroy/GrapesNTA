@@ -91,6 +91,63 @@ describe('explorer query shape', () => {
     assert.match(spec.meta.groupBy[0].label, /\/24/);
   });
 
+  it('compares an exact source IP as stored bytes', async () => {
+    const spec = await explorerFlows({
+      ...WINDOW,
+      groupBy: ['proto'],
+      filters: [{ field: 'src_ip', op: '=', value: '0.0.0.0' }],
+    });
+    assert.match(spec.sql, /toFixedString\(unhex\(\{filter_0:String\}\), 16\)/);
+    assert.match(spec.sql, /\{filter_0_etype:UInt32\}/);
+    assert.equal(spec.params.filter_0, '00000000000000000000000000000000');
+    assert.equal(spec.params.filter_0_etype, 2048);
+    assert.doesNotMatch(spec.sql, /toString\(toIPv4\(reinterpretAsUInt32\(reverse\(substring\(f\.`[^`]+`, 1, 4\)\)\)\)\) = \{filter_0:String\}/);
+  });
+
+  it('keeps IPv4 0.0.0.0 distinct from IPv6 ::', async () => {
+    const spec = await explorerFlows({
+      ...WINDOW,
+      groupBy: ['proto'],
+      filters: [{ field: 'dst_ip', op: '=', value: '::' }],
+    });
+    assert.equal(spec.params.filter_0, '00000000000000000000000000000000');
+    assert.equal(spec.params.filter_0_etype, 0x86DD);
+  });
+
+  it('compares a list of exact IPs without formatting each row', async () => {
+    const spec = await explorerFlows({
+      ...WINDOW,
+      groupBy: ['proto'],
+      filters: [{ field: 'src_ip', op: 'in', value: '8.8.8.8, 2001:db8::1' }],
+    });
+    assert.equal(spec.params.filter_0_0, `08080808${'0'.repeat(24)}`);
+    assert.equal(spec.params.filter_0_0_etype, 2048);
+    assert.equal(spec.params.filter_0_1, '20010db8000000000000000000000001');
+    assert.equal(spec.params.filter_0_1_etype, 0x86DD);
+    assert.match(spec.sql, / OR /);
+  });
+
+  it('negates an exact IP match', async () => {
+    const spec = await explorerFlows({
+      ...WINDOW,
+      groupBy: ['proto'],
+      filters: [{ field: 'src_ip', op: '!=', value: '0.0.0.0' }],
+    });
+    assert.match(spec.sql, /NOT \(f\.`[^`]+` = toFixedString\(unhex\(\{filter_0:String\}\), 16\)/);
+    assert.equal(spec.params.filter_0_etype, 2048);
+  });
+
+  it('keeps a CIDR filter as a range check', async () => {
+    const spec = await explorerFlows({
+      ...WINDOW,
+      groupBy: ['proto'],
+      filters: [{ field: 'src_ip', op: 'cidr', value: '10.0.0.0/8' }],
+    });
+    assert.match(spec.sql, /isIPAddressInRange\(/);
+    assert.equal(spec.params.filter_0, '10.0.0.0/8');
+    assert.doesNotMatch(spec.sql, /toFixedString\(unhex/);
+  });
+
   it('omits unique IP sketches from the default summary', async () => {
     const spec = await explorerSummary({
       ...WINDOW,

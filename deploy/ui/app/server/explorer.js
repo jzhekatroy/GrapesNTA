@@ -1,5 +1,6 @@
 const fs = require('fs');
 const path = require('path');
+const net = require('net');
 const {
   col,
   colOpt,
@@ -923,6 +924,8 @@ function explorerDimensions() {
   const dims = {
     src_ip: {
       label: 'Source IP', group: 'IP', kind: 'ip', expr: srcIpExpr, filterType: 'ip', filterExpr: srcIpExpr,
+      filterAddrExpr: `f.${t.srcIp}`,
+      filterEtypeExpr: etypeExpr,
       groupKeyExpr: `f.${t.srcIp}`,
       labelFromKey: ipLabelFromKey,
       maskable: true,
@@ -932,6 +935,8 @@ function explorerDimensions() {
     },
     dst_ip: {
       label: 'Destination IP', group: 'IP', kind: 'ip', expr: dstIpExpr, filterType: 'ip', filterExpr: dstIpExpr,
+      filterAddrExpr: `f.${t.dstIp}`,
+      filterEtypeExpr: etypeExpr,
       groupKeyExpr: `f.${t.dstIp}`,
       labelFromKey: ipLabelFromKey,
       maskable: true,
@@ -1695,6 +1700,68 @@ function protoNameToNumber(name) {
   return map[key] ?? null;
 }
 
+const FLOW_IPV4_ETYPE = 2048;
+const FLOW_IPV6_ETYPE = 0x86DD;
+
+// Адрес в flows_raw лежит как FixedString(16): IPv4 — в первых 4 байтах,
+// остальные нули, etype 2048. Перевод каждой строки в текст перед сравнением
+// на PiterIX занимал 39 с за 6 часов, прямое сравнение тех же байт — 13 с.
+function storedFlowIp(value) {
+  const text = String(value ?? '').trim();
+  if (net.isIP(text) === 4) {
+    const hex = text.split('.').map((part) => Number(part).toString(16).padStart(2, '0')).join('');
+    return { hex: `${hex}${'0'.repeat(24)}`, etype: FLOW_IPV4_ETYPE };
+  }
+  if (net.isIP(text) === 6) {
+    const hex = ipv6ToBytesHex(text);
+    if (!hex) return null;
+    return { hex, etype: FLOW_IPV6_ETYPE };
+  }
+  return null;
+}
+
+function ipv6ToBytesHex(ip) {
+  let text = String(ip).toLowerCase();
+  const zone = text.indexOf('%');
+  if (zone >= 0) text = text.slice(0, zone);
+  const mapped = text.match(/^(.*:)(\d{1,3}(?:\.\d{1,3}){3})$/);
+  if (mapped) {
+    const octets = mapped[2].split('.').map((part) => Number(part));
+    if (octets.some((n) => !Number.isInteger(n) || n > 255)) return null;
+    const tail = octets.map((n) => n.toString(16).padStart(2, '0'));
+    text = `${mapped[1]}${tail[0]}${tail[1]}:${tail[2]}${tail[3]}`;
+  }
+  const sides = text.split('::');
+  if (sides.length > 2) return null;
+  const head = sides[0] ? sides[0].split(':') : [];
+  const tail = sides.length === 2 ? (sides[1] ? sides[1].split(':') : []) : [];
+  if (sides.length === 1 && head.length !== 8) return null;
+  const missing = 8 - head.length - tail.length;
+  if (missing < 0) return null;
+  const groups = [...head, ...Array(missing).fill('0'), ...tail];
+  if (groups.length !== 8) return null;
+  let hex = '';
+  for (const group of groups) {
+    if (!/^[0-9a-f]{1,4}$/.test(group)) return null;
+    hex += group.padStart(4, '0');
+  }
+  return hex.length === 32 ? hex : null;
+}
+
+function exactIpFilterClause(addrExpr, etypeExpr, op, values, params, paramName) {
+  const stored = values.map(storedFlowIp);
+  if (!stored.length || stored.some((item) => !item)) return null;
+  const negate = op === '!=' || op === '<>' || op === 'not_in';
+  const pieces = stored.map((item, i) => {
+    const key = stored.length === 1 ? paramName : `${paramName}_${i}`;
+    params[key] = item.hex;
+    params[`${key}_etype`] = item.etype;
+    return `(${addrExpr} = toFixedString(unhex({${key}:String}), 16) AND ${etypeExpr} = {${key}_etype:UInt32})`;
+  });
+  const match = pieces.length === 1 ? pieces[0] : `(${pieces.join(' OR ')})`;
+  return negate ? `NOT ${match}` : match;
+}
+
 function parseFilterValues(value) {
   if (Array.isArray(value)) return value.map((v) => String(v).trim()).filter(Boolean);
   const s = String(value ?? '').trim();
@@ -2270,6 +2337,20 @@ async function buildExplorerFilterClauses(filters, dims, params) {
         params[paramName] = String(f.value ?? '').trim();
         addClause(`isIPAddressInRange(${expr}, {${paramName}:String})`);
         continue;
+      }
+      if (dim.filterAddrExpr && dim.filterEtypeExpr && ['=', '!=', '<>', 'in', 'not_in'].includes(op)) {
+        const exact = exactIpFilterClause(
+          dim.filterAddrExpr,
+          dim.filterEtypeExpr,
+          op,
+          values,
+          params,
+          paramName,
+        );
+        if (exact) {
+          addClause(exact);
+          continue;
+        }
       }
       if (op === 'in') {
         params[paramName] = values;

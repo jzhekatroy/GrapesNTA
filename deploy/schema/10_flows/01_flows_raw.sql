@@ -85,6 +85,12 @@ CREATE TABLE IF NOT EXISTS default.flows_raw
     INDEX idx_obs_dst_vlan dst_vlan TYPE set(0) GRANULARITY 4,
     INDEX idx_obs_src_port src_port TYPE bloom_filter(0.01) GRANULARITY 4,
     INDEX idx_obs_dst_port dst_port TYPE bloom_filter(0.01) GRANULARITY 4,
+    -- Адрес не входит в ключ сортировки. Точный фильтр (src_ip = …) без индекса
+    -- читает всё окно: на PiterIX за 6 часов сравнение 16 байт заняло 13 с.
+    -- Bloom отсекает гранулы, где адреса нет. Уже созданная таблица этот
+    -- индекс не получит: описание ниже действует на новую установку.
+    INDEX idx_obs_src_addr src_addr TYPE bloom_filter(0.01) GRANULARITY 4,
+    INDEX idx_obs_dst_addr dst_addr TYPE bloom_filter(0.01) GRANULARITY 4,
     -- Cabinet lookups are "this client on either side", i.e. an OR over both
     -- columns. Per-column indexes cannot decide such an OR on their own, so both
     -- columns live in one set index that evaluates the whole expression.
