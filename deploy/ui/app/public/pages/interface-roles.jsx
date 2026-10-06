@@ -47,6 +47,11 @@ function filterSwitchPorts(rows, { aliasQ, nameQ }) {
   });
 }
 
+function portMarkingLabel(row) {
+  const name = String(row?.ifName || '').trim();
+  return name || String(row?.ifIndex ?? '');
+}
+
 function SwitchListScreen({ switches, loading, loadError, onOpenSwitch }) {
   const rows = useMemo(() => switches.map((s) => ({
     ...s,
@@ -188,8 +193,26 @@ function SwitchPortsScreen({
     }
   };
 
-  const bulkClear = async () => {
+  const deletePortMarking = async (ifIndex, row) => {
+    if (!canWrite) return;
+    const label = portMarkingLabel(row ?? { ifIndex });
+    if (!window.confirm(`Удалить разметку порта ${label}?`)) return;
+    setSaving(true);
+    try {
+      await ApiClient.deleteInterfaceRole({ switchIp, ifIndex });
+      pushToast({ kind: 'success', title: 'Разметка снята' });
+      onReload();
+    } catch (err) {
+      pushToast({ kind: 'error', title: 'Не удалось удалить', desc: err.message });
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const bulkDeleteSelected = async () => {
     if (!canWrite || !selected.size) return;
+    const n = selected.size;
+    if (!window.confirm(`Удалить разметку у ${n} портов?`)) return;
     setSaving(true);
     try {
       const items = [...selected].map((ifIndex) => ({ switchIp, ifIndex }));
@@ -198,7 +221,7 @@ function SwitchPortsScreen({
       setSelected(new Set());
       onReload();
     } catch (err) {
-      pushToast({ kind: 'error', title: 'Не удалось снять', desc: err.message });
+      pushToast({ kind: 'error', title: 'Не удалось удалить', desc: err.message });
     } finally {
       setSaving(false);
     }
@@ -267,7 +290,6 @@ function SwitchPortsScreen({
         <div className="ir-bulk-panel__actions row">
           <Button kind="primary" size="sm" disabled={saving} onClick={() => bulkApply('internal')}>Наша сторона</Button>
           <Button kind="primary" size="sm" disabled={saving} onClick={() => bulkApply('external')}>Внешняя сторона</Button>
-          <Button kind="ghost" size="sm" disabled={saving} onClick={bulkClear}>Снять разметку</Button>
           <Button kind="ghost" size="sm" disabled={saving} onClick={() => setSelected(new Set())}>Сбросить выбор</Button>
           {selected.size < filteredPorts.length && (
             <Button kind="ghost" size="sm" disabled={saving || !filteredPorts.length} onClick={selectAllFiltered}>
@@ -278,7 +300,7 @@ function SwitchPortsScreen({
       </div>
     ) : (
       <div className="ir-bulk-hint">
-        <p>Отметьте порты галочками слева в таблице, чтобы изменить сторону сразу у нескольких.</p>
+        <p>Отметьте порты галочками слева в таблице — над таблицей появится «Удалить разметку у выбранных», можно также задать сторону пакетно.</p>
         <Button kind="ghost" size="sm" disabled={saving || !filteredPorts.length} onClick={selectAllFiltered}>
           Выбрать все отфильтрованные ({filteredPorts.length})
         </Button>
@@ -328,6 +350,38 @@ function SwitchPortsScreen({
             selectable={canWrite}
             selected={selected}
             onSelectChange={setSelected}
+            toolbar={canWrite ? {
+              left: selected.size > 0 ? (
+                <div className="row" style={{ gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+                  <Button
+                    kind="danger"
+                    size="sm"
+                    icon="trash"
+                    disabled={saving}
+                    onClick={bulkDeleteSelected}
+                  >
+                    {saving ? 'Удаление…' : `Удалить разметку у выбранных (${selected.size})`}
+                  </Button>
+                  <Button kind="ghost" size="sm" disabled={saving} onClick={() => setSelected(new Set())}>
+                    Снять выбор
+                  </Button>
+                </div>
+              ) : null,
+            } : undefined}
+            actionsColumnWidth={150}
+            rowActions={canWrite ? (r) => (
+              <Button
+                size="sm"
+                kind="ghost"
+                disabled={saving}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  deletePortMarking(r.ifIndex, r);
+                }}
+              >
+                Удалить разметку
+              </Button>
+            ) : null}
           />
         )}
       </Card>
