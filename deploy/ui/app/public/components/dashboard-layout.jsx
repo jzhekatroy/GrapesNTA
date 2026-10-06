@@ -22,34 +22,38 @@ const STACK_ID_PATTERN = /^stack-[vh]-[a-z0-9]+$/;
 const LEGACY_V1_COMPOSITE_IDS = new Set(['traffic-stats', 'traffic-chart-row']);
 
 const OPERATOR_WIDGET_REGISTRY = {
-  'stat-max': { label: 'Максимально', allowedW: [4, 6, 12], minH: 1, maxH: 1 },
-  'stat-avg': { label: 'Среднее', allowedW: [4, 6, 12], minH: 1, maxH: 1 },
-  'stat-volume': { label: 'Объём', allowedW: [4, 6, 12], minH: 1, maxH: 1 },
-  'traffic-chart': { label: 'График трафика', allowedW: [6, 7, 8, 12], minH: 1, maxH: 6 },
-  'distribution-protocols': { label: 'Протоколы', allowedW: [4, 5, 6, 12], minH: 1, maxH: 2 },
-  'distribution-services': { label: 'Сервисы', allowedW: [4, 5, 6, 12], minH: 1, maxH: 2 },
-  vlan: { label: 'VLAN', allowedW: [4, 5, 6, 7, 8, 9, 10, 11, 12], minH: 1, maxH: 2 },
-  'top-talkers': { label: 'Топ ASN', allowedW: [6, 7, 8, 12], minH: 2, maxH: 3 },
-  countries: { label: 'География', allowedW: [4, 5, 6, 12], minH: 2, maxH: 3 },
-  'recent-flows': { label: 'Последние потоки', allowedW: [4, 5, 6, 7, 8, 9, 10, 11, 12], minH: 1, maxH: 2 },
+  'stat-max': { labelKey: 'dashboard.widget.stat-max', allowedW: [4, 6, 12], minH: 1, maxH: 1 },
+  'stat-avg': { labelKey: 'dashboard.widget.stat-avg', allowedW: [4, 6, 12], minH: 1, maxH: 1 },
+  'stat-volume': { labelKey: 'dashboard.widget.stat-volume', allowedW: [4, 6, 12], minH: 1, maxH: 1 },
+  'traffic-chart': { labelKey: 'dashboard.widget.traffic-chart', allowedW: [6, 7, 8, 12], minH: 1, maxH: 6 },
+  'distribution-protocols': { labelKey: 'dashboard.widget.distribution-protocols', allowedW: [4, 5, 6, 12], minH: 1, maxH: 2 },
+  'distribution-services': { labelKey: 'dashboard.widget.distribution-services', allowedW: [4, 5, 6, 12], minH: 1, maxH: 2 },
+  vlan: { labelKey: 'dashboard.widget.vlan', allowedW: [4, 5, 6, 7, 8, 9, 10, 11, 12], minH: 1, maxH: 2 },
+  'top-talkers': { labelKey: 'dashboard.widget.top-talkers', allowedW: [6, 7, 8, 12], minH: 2, maxH: 3 },
+  countries: { labelKey: 'dashboard.widget.countries', allowedW: [4, 5, 6, 12], minH: 2, maxH: 3 },
+  'recent-flows': { labelKey: 'dashboard.widget.recent-flows', allowedW: [4, 5, 6, 7, 8, 9, 10, 11, 12], minH: 1, maxH: 2 },
 };
 
 const STACK_WIDGET_TEMPLATES = {
   'stack-v': {
-    label: 'Вертикальный стек',
+    labelKey: 'dashboard.stack.vertical',
     direction: 'vertical',
     allowedW: [4, 5, 6, 7, 8, 9, 10, 11, 12],
     minH: 2,
     maxH: 8,
   },
   'stack-h': {
-    label: 'Горизонтальный стек',
+    labelKey: 'dashboard.stack.horizontal',
     direction: 'horizontal',
     allowedW: [6, 7, 8, 9, 10, 11, 12],
     minH: 1,
     maxH: 3,
   },
 };
+
+function layoutT(key, params) {
+  return GrapesI18n.t(key, params);
+}
 
 const CONTENT_WIDGET_IDS = Object.keys(OPERATOR_WIDGET_REGISTRY);
 
@@ -128,10 +132,17 @@ function getTopLevelWidgets(widgets) {
 }
 
 function getDashboardWidgetMeta(widget) {
+  let meta;
   if (isStackWidget(widget)) {
-    return STACK_WIDGET_TEMPLATES[widget.direction === 'horizontal' ? 'stack-h' : 'stack-v'];
+    meta = STACK_WIDGET_TEMPLATES[widget.direction === 'horizontal' ? 'stack-h' : 'stack-v'];
+  } else {
+    meta = OPERATOR_WIDGET_REGISTRY[widget.id];
   }
-  return OPERATOR_WIDGET_REGISTRY[widget.id];
+  if (!meta) return null;
+  return {
+    ...meta,
+    label: layoutT(meta.labelKey),
+  };
 }
 
 function getStackChildWidgets(widgets, stack) {
@@ -151,7 +162,7 @@ function isEmptyStack(widgets, stack) {
 
 function stackContentsLabel(widgets, stack) {
   const children = getStackChildWidgets(widgets, stack);
-  if (!children.length) return 'Пустой стек';
+  if (!children.length) return layoutT('dashboard.stack.empty');
   const order = Array.isArray(stack.childIds) ? stack.childIds : [];
   return [...children]
     .sort((a, b) => {
@@ -1428,7 +1439,7 @@ function hiddenWidgetCaption(widgets, widget) {
   const stack = (widgets || []).find((item) => item.id === widget.parentStack);
   if (!stack) return '';
   const stackLabel = getDashboardWidgetMeta(stack)?.label || stack.id;
-  return `В стеке «${stackLabel}»`;
+  return layoutT('dashboard.stack.inStack', { name: stackLabel });
 }
 
 function DashboardHiddenWidgetsMenu({ widgets, onRestore, onDragStart, editMode }) {
@@ -1474,18 +1485,18 @@ function DashboardHiddenWidgetsMenu({ widgets, onRestore, onDragStart, editMode 
         icon="eyeOff"
         iconRight="chevD"
         onClick={() => setOpen((value) => !value)}
-        title="Скрытые карточки"
+        title={layoutT('dashboard.layout.hiddenCards')}
       >
-        Скрытые
+        {layoutT('dashboard.layout.hidden')}
         {hidden.length ? (
           <span className="dashboard-hidden-menu__count">{hidden.length}</span>
         ) : null}
       </Button>
       {open ? (
         <div className="dashboard-hidden-menu__dropdown" role="menu">
-          <div className="dashboard-hidden-menu__title">Скрытые карточки</div>
+          <div className="dashboard-hidden-menu__title">{layoutT('dashboard.layout.hiddenCards')}</div>
           {hidden.length ? (
-            <div className="dashboard-hidden-menu__hint">Перетащите на дашборд, чтобы разместить</div>
+            <div className="dashboard-hidden-menu__hint">{layoutT('dashboard.layout.dragToDashboard')}</div>
           ) : null}
           {hidden.length ? hidden.map((widget) => {
             const meta = getDashboardWidgetMeta(widget);
@@ -1499,7 +1510,7 @@ function DashboardHiddenWidgetsMenu({ widgets, onRestore, onDragStart, editMode 
                 <button
                   type="button"
                   className="dashboard-hidden-menu__item-drag"
-                  title="Перетащите на дашборд"
+                  title={layoutT('dashboard.layout.dragToDashboardTitle')}
                   onMouseDown={handleDragMouseDown(widget.id)}
                 >
                   <Icon name="drag" size={14} />
@@ -1516,12 +1527,12 @@ function DashboardHiddenWidgetsMenu({ widgets, onRestore, onDragStart, editMode 
                   onClick={() => onRestore(widget.id)}
                 >
                   <Icon name="eye" size={14} />
-                  Вернуть
+                  {layoutT('dashboard.layout.restore')}
                 </button>
               </div>
             );
           }) : (
-            <div className="dashboard-hidden-menu__empty">Нет скрытых карточек</div>
+            <div className="dashboard-hidden-menu__empty">{layoutT('dashboard.layout.noHidden')}</div>
           )}
         </div>
       ) : null}
@@ -1546,10 +1557,10 @@ function DashboardLayoutToolbar({
 
   const saveLabel = {
     idle: '',
-    pending: 'Сохранение…',
-    saving: 'Сохранение…',
-    saved: 'Сохранено',
-    error: 'Ошибка сохранения',
+    pending: layoutT('dashboard.layout.saving'),
+    saving: layoutT('dashboard.layout.saving'),
+    saved: layoutT('dashboard.layout.saved'),
+    error: layoutT('dashboard.layout.saveError'),
   }[saveState] || '';
 
   return (
@@ -1567,13 +1578,13 @@ function DashboardLayoutToolbar({
             onRestore={(widgetId) => onRestoreWidget?.(widgetId)}
             onDragStart={(widgetId, event) => onHiddenWidgetDragStart?.(widgetId, event)}
           />
-          <Button kind="ghost" size="sm" onClick={onAddVerticalStack}>Вертикальный стек</Button>
-          <Button kind="ghost" size="sm" onClick={onAddHorizontalStack}>Горизонтальный стек</Button>
-          <Button kind="ghost" size="sm" onClick={onReset}>Сбросить</Button>
-          <Button kind="primary" size="sm" onClick={() => onToggleEdit(false)}>Готово</Button>
+          <Button kind="ghost" size="sm" onClick={onAddVerticalStack}>{layoutT('dashboard.stack.vertical')}</Button>
+          <Button kind="ghost" size="sm" onClick={onAddHorizontalStack}>{layoutT('dashboard.stack.horizontal')}</Button>
+          <Button kind="ghost" size="sm" onClick={onReset}>{layoutT('dashboard.layout.reset')}</Button>
+          <Button kind="primary" size="sm" onClick={() => onToggleEdit(false)}>{layoutT('dashboard.layout.done')}</Button>
         </>
       ) : (
-        <Button kind="ghost" size="sm" icon="sliders" onClick={() => onToggleEdit(true)}>Настроить</Button>
+        <Button kind="ghost" size="sm" icon="sliders" onClick={() => onToggleEdit(true)}>{layoutT('dashboard.customize')}</Button>
       )}
     </div>
   );
@@ -1594,8 +1605,8 @@ function DashboardWidgetChrome({
 
   const meta = getDashboardWidgetMeta(widget);
   const hideTitle = emptyStack
-    ? 'Удалить пустой стек'
-    : (widget.visible ? 'Скрыть виджет' : 'Показать виджет');
+    ? layoutT('dashboard.layout.deleteEmptyStack')
+    : (widget.visible ? layoutT('dashboard.layout.hideWidget') : layoutT('dashboard.layout.showWidget'));
 
   return (
     <div className={`dashboard-widget-chrome${widget.visible ? '' : ' is-hidden'}${inStack ? ' dashboard-widget-chrome--in-stack' : ''}`}>
@@ -1603,7 +1614,7 @@ function DashboardWidgetChrome({
         {onDragHandleMouseDown ? (
           <div
             className="dashboard-widget-chrome__handle"
-            title="Перетащите для изменения порядка"
+            title={layoutT('dashboard.layout.dragReorder')}
             onMouseDown={onDragHandleMouseDown}
           >
             <Icon name="drag" />
@@ -1623,7 +1634,7 @@ function DashboardWidgetChrome({
             <button
               type="button"
               className="dashboard-widget-chrome__extract"
-              title="Извлечь из стека"
+              title={layoutT('dashboard.layout.extractFromStack')}
               onClick={onExtractFromStack}
             >
               <Icon name="arrowURight" />
@@ -1665,7 +1676,7 @@ function DashboardStack({
           {renderChild(child, { inStack: true, stack })}
         </div>
       )) : (
-        editMode ? <div className="dashboard-stack__empty">Перетащите виджеты сюда</div> : null
+        editMode ? <div className="dashboard-stack__empty">{layoutT('dashboard.stack.drop')}</div> : null
       )}
     </div>
   );
@@ -2185,7 +2196,7 @@ function DashboardGrid({
               className="dashboard-widget__resize-w"
               role="separator"
               aria-orientation="vertical"
-              aria-label="Изменить ширину слева"
+              aria-label={layoutT('dashboard.layout.resizeWidthLeft')}
               onMouseDown={onResizeWidthMouseDown(widget, 'west')}
             />
           ) : null}
@@ -2194,7 +2205,7 @@ function DashboardGrid({
               className="dashboard-widget__resize-e"
               role="separator"
               aria-orientation="vertical"
-              aria-label="Изменить ширину справа"
+              aria-label={layoutT('dashboard.layout.resizeWidthRight')}
               onMouseDown={onResizeWidthMouseDown(widget, 'east')}
             />
           ) : null}
@@ -2204,14 +2215,14 @@ function DashboardGrid({
                 className="dashboard-widget__resize-n"
                 role="separator"
                 aria-orientation="horizontal"
-                aria-label="Изменить высоту сверху"
+                aria-label={layoutT('dashboard.layout.resizeHeightTop')}
                 onMouseDown={onResizeHeightMouseDown(widget, 'north')}
               />
               <div
                 className="dashboard-widget__resize-s"
                 role="separator"
                 aria-orientation="horizontal"
-                aria-label="Изменить высоту снизу"
+                aria-label={layoutT('dashboard.layout.resizeHeightBottom')}
                 onMouseDown={onResizeHeightMouseDown(widget, 'south')}
               />
             </>
@@ -2272,14 +2283,14 @@ function DashboardGrid({
               className="dashboard-widget__resize-w"
               role="separator"
               aria-orientation="vertical"
-              aria-label="Изменить ширину слева"
+              aria-label={layoutT('dashboard.layout.resizeWidthLeft')}
               onMouseDown={onResizeWidthMouseDown(widget, 'west')}
             />
             <div
               className="dashboard-widget__resize-e"
               role="separator"
               aria-orientation="vertical"
-              aria-label="Изменить ширину справа"
+              aria-label={layoutT('dashboard.layout.resizeWidthRight')}
               onMouseDown={onResizeWidthMouseDown(widget, 'east')}
             />
           </>
@@ -2290,14 +2301,14 @@ function DashboardGrid({
               className="dashboard-widget__resize-n"
               role="separator"
               aria-orientation="horizontal"
-              aria-label="Изменить высоту сверху"
+              aria-label={layoutT('dashboard.layout.resizeHeightTop')}
               onMouseDown={onResizeHeightMouseDown(widget, 'north')}
             />
             <div
               className="dashboard-widget__resize-s"
               role="separator"
               aria-orientation="horizontal"
-              aria-label="Изменить высоту снизу"
+              aria-label={layoutT('dashboard.layout.resizeHeightBottom')}
               onMouseDown={onResizeHeightMouseDown(widget, 'south')}
             />
           </>

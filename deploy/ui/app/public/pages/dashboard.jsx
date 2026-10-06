@@ -2,7 +2,9 @@
 
 const CHART_REFRESH_MS = 60_000;
 const DASHBOARD_TALKERS_LIMIT = 7;
-const LOAD_FAILED = 'Не удалось загрузить';
+function dashT(key, params) {
+  return GrapesI18n.t(key, params);
+}
 const DEFAULT_TREND_SPLIT = 0.5;
 const TREND_SPLIT_MIN = 0.35;
 const TREND_SPLIT_MAX = 0.65;
@@ -16,26 +18,26 @@ function clampTrendSplit(value) {
 function DataLoadState({ children, style }) {
   return (
     <div className="other-ports-table__state" style={style}>
-      {children || LOAD_FAILED}
+      {children || dashT('dashboard.loadFailed')}
     </div>
   );
 }
 
-const COUNTRY_BASIS_LABELS = {
-  ip: 'Страна IP',
-  asn: 'Страна ASN (реестр)',
+const COUNTRY_BASIS_KEYS = {
+  ip: 'dashboard.geo.ipCountry',
+  asn: 'dashboard.geo.asnCountry',
 };
 
 const TRAFFIC_STAT_TILES = [
-  { id: 'max', label: 'Максимально', mode: 'rate' },
-  { id: 'avg', label: 'Среднее', mode: 'rate' },
-  { id: 'volume', label: 'Объём', mode: 'volume' },
+  { id: 'max', labelKey: 'dashboard.stat.max', mode: 'rate' },
+  { id: 'avg', labelKey: 'dashboard.stat.avg', mode: 'rate' },
+  { id: 'volume', labelKey: 'dashboard.stat.volume', mode: 'volume' },
 ];
 
 const STAT_WIDGET_DEFS = {
-  'stat-max': { tileId: 'max', label: 'Максимально', mode: 'rate' },
-  'stat-avg': { tileId: 'avg', label: 'Среднее', mode: 'rate' },
-  'stat-volume': { tileId: 'volume', label: 'Объём', mode: 'volume' },
+  'stat-max': { tileId: 'max', labelKey: 'dashboard.stat.max', mode: 'rate' },
+  'stat-avg': { tileId: 'avg', labelKey: 'dashboard.stat.avg', mode: 'rate' },
+  'stat-volume': { tileId: 'volume', labelKey: 'dashboard.stat.volume', mode: 'volume' },
 };
 
 const CHART_BUNDLE_WIDGET_IDS = ['traffic-chart', 'distribution-protocols', 'distribution-services'];
@@ -271,7 +273,7 @@ function OperatorDashboard({
     }
     return next;
   });
-  const trendRangeHint = onChartRangeSelect ? ' · выделите диапазон на графике' : '';
+  const trendRangeHint = onChartRangeSelect ? dashT('dashboard.chart.selectRangeSuffix') : '';
   const statDirectionDefs = TRAFFIC_DIRECTIONS
     .filter((direction) => directions?.[direction.id])
     .map((direction) => ({ ...direction, enabled: true }));
@@ -290,7 +292,7 @@ function OperatorDashboard({
           onChange('share');
         }}
       >
-        Доля
+        {dashT('dashboard.share')}
       </button>
       <button
         type="button"
@@ -301,7 +303,7 @@ function OperatorDashboard({
           onChange('trend');
         }}
       >
-        Динамика
+        {dashT('dashboard.trend')}
       </button>
     </div>
   );
@@ -312,7 +314,7 @@ function OperatorDashboard({
         <Card><DataLoadState /></Card>
       ) : (
         <OverviewTrafficStatTile
-          label={STAT_WIDGET_DEFS['stat-max'].label}
+          label={dashT(STAT_WIDGET_DEFS['stat-max'].labelKey)}
           mode={STAT_WIDGET_DEFS['stat-max'].mode}
           stats={trafficStats?.[STAT_WIDGET_DEFS['stat-max'].tileId] || {}}
           directionDefs={statDirectionDefs}
@@ -326,7 +328,7 @@ function OperatorDashboard({
         <Card><DataLoadState /></Card>
       ) : (
         <OverviewTrafficStatTile
-          label={STAT_WIDGET_DEFS['stat-avg'].label}
+          label={dashT(STAT_WIDGET_DEFS['stat-avg'].labelKey)}
           mode={STAT_WIDGET_DEFS['stat-avg'].mode}
           stats={trafficStats?.[STAT_WIDGET_DEFS['stat-avg'].tileId] || {}}
           directionDefs={statDirectionDefs}
@@ -340,7 +342,7 @@ function OperatorDashboard({
         <Card><DataLoadState /></Card>
       ) : (
         <OverviewTrafficStatTile
-          label={STAT_WIDGET_DEFS['stat-volume'].label}
+          label={dashT(STAT_WIDGET_DEFS['stat-volume'].labelKey)}
           mode={STAT_WIDGET_DEFS['stat-volume'].mode}
           stats={trafficStats?.[STAT_WIDGET_DEFS['stat-volume'].tileId] || {}}
           directionDefs={statDirectionDefs}
@@ -351,7 +353,7 @@ function OperatorDashboard({
     ),
     'traffic-chart': () => (
       <OverviewTrafficChartCard
-        title="Полоса пропускания и pps"
+        title={dashT('dashboard.chart.title')}
         points={chartPoints}
         lines={chartLines}
         ppsLines={chartLines}
@@ -374,14 +376,14 @@ function OperatorDashboard({
     'distribution-protocols': () => (
       <Card pad="sm">
         <div className="distribution-card__head">
-          <div className="distribution-card__title">Протоколы</div>
+          <div className="distribution-card__title">{dashT('dashboard.protocols')}</div>
           {distributionModeToggle(protocolsMode, onProtocolsModeChange)}
         </div>
         <OverviewDistributionPane
-          title="Протоколы"
+          title={dashT('dashboard.protocols')}
           subtitle={protocolsMode === 'share'
-            ? `L4 по объёму · ${periodLabel}`
-            : `Top 5 L4 · ${periodLabel}${trendRangeHint}`}
+            ? dashT('dashboard.dist.l4ByVolume', { period: periodLabel })
+            : `${dashT('dashboard.dist.top5L4', { period: periodLabel })}${trendRangeHint}`}
           mode={protocolsMode}
           items={protocols}
           trend={protocolTrend}
@@ -400,14 +402,14 @@ function OperatorDashboard({
     'distribution-services': () => (
       <Card pad="sm">
         <div className="distribution-card__head">
-          <div className="distribution-card__title">Сервисы</div>
+          <div className="distribution-card__title">{dashT('dashboard.services')}</div>
           {distributionModeToggle(servicesMode, onServicesModeChange)}
         </div>
         <OverviewDistributionPane
-          title="Сервисы"
+          title={dashT('dashboard.services')}
           subtitle={servicesMode === 'share'
-            ? `L7 по объёму · ${periodLabel}`
-            : `Top 5 L7 · ${periodLabel}${trendRangeHint}`}
+            ? dashT('dashboard.dist.l7ByVolume', { period: periodLabel })
+            : `${dashT('dashboard.dist.top5L7', { period: periodLabel })}${trendRangeHint}`}
           mode={servicesMode}
           items={services}
           trend={serviceTrend}
@@ -493,8 +495,8 @@ function OperatorDashboard({
     <div className="main__container">
       <div className="page-head">
         <div>
-          <h1>Сводка по сети</h1>
-          <p>Живой обзор трафика, потоков и состояния инфраструктуры.</p>
+          <h1>{dashT('dashboard.title')}</h1>
+          <p>{dashT('dashboard.subtitle')}</p>
         </div>
         {editMode ? null : layoutToolbar()}
       </div>
@@ -829,7 +831,7 @@ function RecentFlowsCard({ enabled = true, directions, directionsKey, collectorF
       loadMs={loadMs}
       serverMs={serverMs}
       displayTimezone={displayTimezone}
-      emptyLabel="Нет потоков для выбранного направления"
+      emptyLabel={dashT('dashboard.flows.emptyDirection')}
     />
   );
 }
@@ -899,14 +901,14 @@ function TopTalkersCard({
   return (
     <Card
       className="card--top-talkers"
-      title="Топ ASN"
+      title={dashT('dashboard.topAsn')}
       subtitle={subtitle}
       loadMs={loadMs}
       serverMs={serverMs}
       tools={
         <div className="top-talkers-tools">
-          <div className="seg seg--compact" role="tablist" aria-label="Группировка топ ASN">
-            {TOP_TALKERS_TABS.map((tab) => (
+          <div className="seg seg--compact" role="tablist" aria-label={dashT('dashboard.talkers.groupAria')}>
+            {getTopTalkersTabs().map((tab) => (
               <button
                 key={tab.id}
                 type="button"
@@ -919,7 +921,7 @@ function TopTalkersCard({
               </button>
             ))}
           </div>
-          <Button kind="ghost" size="sm" iconRight="arrowURight" onClick={() => onNavigate('top')}>Все</Button>
+          <Button kind="ghost" size="sm" iconRight="arrowURight" onClick={() => onNavigate('top')}>{dashT('dashboard.all')}</Button>
         </div>
       }
       pad="0"
@@ -928,25 +930,25 @@ function TopTalkersCard({
         <thead>
           <tr>
             <th className="talker-col-rank">#</th>
-            <th className="talker-col-endpoint">{isPair ? 'Пара ASN' : 'ASN'}</th>
-            <th className={`talker-row__geo talker-col-geo${isPair ? ' talker-row__geo--pair' : ''}`}>Страна</th>
-            <th className="num talker-col-volume">Объём</th>
+            <th className="talker-col-endpoint">{isPair ? dashT('dashboard.talkers.asnPair') : dashT('dashboard.talkers.asn')}</th>
+            <th className={`talker-row__geo talker-col-geo${isPair ? ' talker-row__geo--pair' : ''}`}>{dashT('dashboard.talkers.country')}</th>
+            <th className="num talker-col-volume">{dashT('dashboard.talkers.volume')}</th>
           </tr>
         </thead>
         <tbody>
           {talkersSource === 'loading' && (
             <tr>
-              <td colSpan={colSpan} className="talker-table-state">Загрузка…</td>
+              <td colSpan={colSpan} className="talker-table-state">{dashT('dashboard.loading')}</td>
             </tr>
           )}
           {talkersSource === 'error' && (
             <tr>
-              <td colSpan={colSpan} className="talker-table-state">{LOAD_FAILED}</td>
+              <td colSpan={colSpan} className="talker-table-state">{dashT('dashboard.loadFailed')}</td>
             </tr>
           )}
           {hasData && rows.length === 0 && (
             <tr>
-              <td colSpan={colSpan} className="talker-table-state">Нет данных за выбранный период</td>
+              <td colSpan={colSpan} className="talker-table-state">{dashT('dashboard.noDataPeriod')}</td>
             </tr>
           )}
           {hasData && rows.map((t, i) => {
@@ -1044,7 +1046,7 @@ function CountryHeatmapCard({
   const onlyInternal = enabledFlow.length === 1 && enabledFlow[0].id === 'internal';
   const showInternalHint = onlyInternal && mapSide === 'remote';
 
-  const basisLabel = COUNTRY_BASIS_LABELS[countryBasis] || countryBasis;
+  const basisLabel = dashT(COUNTRY_BASIS_KEYS[countryBasis] || countryBasis);
 
   useEffect(() => {
     if (!enabled) return undefined;
@@ -1076,7 +1078,7 @@ function CountryHeatmapCard({
   const countryListKey = `${directionsKey}|${countryBasis}|${mapSide}|${timeRange}|${customPeriod?.from}|${customPeriod?.to}|${collectorFilterKey || ''}`;
   return (
     <OverviewCountryCard
-      title="География источников"
+      title={dashT('dashboard.geo.title')}
       subtitle={`${periodLabel} · ${basisLabel}`}
       rows={countryRows}
       colorMetric={colorMetric}
@@ -1088,7 +1090,7 @@ function CountryHeatmapCard({
       listKey={countryListKey}
       extraTools={
         <>
-          <div className="seg seg--compact" title="Метод определения страны">
+          <div className="seg seg--compact" title={dashT('dashboard.geo.countryMethodTitle')}>
             <button
               type="button"
               className={countryBasis === 'ip' ? 'is-active' : ''}
@@ -1104,7 +1106,7 @@ function CountryHeatmapCard({
               ASN
             </button>
           </div>
-          <div className="seg seg--compact" title="Сторона flow на карте">
+          <div className="seg seg--compact" title={dashT('dashboard.geo.flowSideTitle')}>
             <button
               type="button"
               className={mapSide === 'remote' ? 'is-active' : ''}
@@ -1131,7 +1133,7 @@ function CountryHeatmapCard({
       }
       notice={showInternalHint ? (
         <div className="country-heatmap-hint">
-          Для internal используйте src или dst
+          {dashT('dashboard.geo.internalHint')}
         </div>
       ) : null}
     />
@@ -1268,7 +1270,7 @@ function DashboardChartRow({ distributionMode, trendSplit, onTrendSplitChange, c
         aria-valuenow={Math.round(trendSplit * 100)}
         aria-valuemin={Math.round(TREND_SPLIT_MIN * 100)}
         aria-valuemax={Math.round(TREND_SPLIT_MAX * 100)}
-        aria-label="Изменить ширину карточек"
+        aria-label={dashT('dashboard.layout.changeCardWidth')}
         tabIndex={isTrend ? 0 : -1}
         onMouseDown={onSplitterMouseDown}
       />
@@ -1335,23 +1337,23 @@ function VlanDistributionCard({
   return (
     <Card pad="sm">
       <div className="distribution-card__head">
-        <div className="distribution-card__title">VLAN</div>
+        <div className="distribution-card__title">{dashT('dashboard.vlan.cardTitle')}</div>
         <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
           {onNavigate && (
-            <Button kind="ghost" size="sm" onClick={() => onNavigate('vlan')}>Моя сеть · VLAN</Button>
+            <Button kind="ghost" size="sm" onClick={() => onNavigate('vlan')}>{dashT('dashboard.vlan.myNetwork')}</Button>
           )}
           <div className="seg distribution-card__switch">
-            <button type="button" className={mode === 'share' ? 'is-active' : ''} onClick={() => setMode('share')}>Доля</button>
-            <button type="button" className={mode === 'trend' ? 'is-active' : ''} onClick={() => setMode('trend')}>Динамика</button>
+            <button type="button" className={mode === 'share' ? 'is-active' : ''} onClick={() => setMode('share')}>{dashT('dashboard.share')}</button>
+            <button type="button" className={mode === 'trend' ? 'is-active' : ''} onClick={() => setMode('trend')}>{dashT('dashboard.trend')}</button>
           </div>
         </div>
       </div>
       <div className={`distribution-split distribution-split--solo${mode === 'trend' ? ' distribution-split--solo-trend' : ''}`}>
         <OverviewDistributionPane
-          title="Top VLAN по объёму"
+          title={dashT('dashboard.vlan.title')}
           subtitle={mode === 'share'
-            ? `По объёму · ${periodLabel}`
-            : `Top 5 VLAN · ${periodLabel}${onChartRangeSelect ? ' · выделите диапазон на графике' : ''}`}
+            ? dashT('dashboard.dist.vlanByVolume', { period: periodLabel })
+            : `${dashT('dashboard.dist.top5Vlan', { period: periodLabel })}${onChartRangeSelect ? dashT('dashboard.chart.selectRangeSuffix') : ''}`}
           mode={mode}
           items={share.items}
           trend={trend}
@@ -1371,17 +1373,12 @@ function VlanDistributionCard({
   );
 }
 
-const PORT_SIDE_LABELS = {
-  src: 'Источник',
-  dst: 'Назначение',
-  source: 'Источник',
-  destination: 'Назначение',
-};
-
 function formatPortSide(side) {
   if (!side) return '—';
   const key = String(side).toLowerCase();
-  return PORT_SIDE_LABELS[key] || side;
+  if (key === 'src' || key === 'source') return dashT('dashboard.talkers.source');
+  if (key === 'dst' || key === 'destination') return dashT('dashboard.talkers.destination');
+  return side;
 }
 
 function OtherPortsModal({ open, onClose, timeRange, customPeriod, directions, collectorFilter, periodLabel }) {
@@ -1416,28 +1413,28 @@ function OtherPortsModal({ open, onClose, timeRange, customPeriod, directions, c
       open={open}
       onClose={onClose}
       size="lg"
-      title="ТОП 20 остальных портов"
-      subtitle={`Внутри Other · ${periodLabel}${status === 'error' ? ` · ${LOAD_FAILED}` : ''}`}
+      title={dashT('dashboard.otherPorts.title')}
+      subtitle={`${dashT('dashboard.otherPorts.subtitle', { period: periodLabel })}${status === 'error' ? ` · ${dashT('dashboard.loadFailed')}` : ''}`}
     >
       <div className="other-ports-modal__body">
         {status === 'loading' ? (
-          <div className="other-ports-table__state">Загрузка…</div>
+          <div className="other-ports-table__state">{dashT('dashboard.loading')}</div>
         ) : status === 'error' ? (
-          <div className="other-ports-table__state">{LOAD_FAILED}</div>
+          <div className="other-ports-table__state">{dashT('dashboard.loadFailed')}</div>
         ) : rows.length === 0 ? (
-          <div className="other-ports-table__state">Нет данных за выбранный период</div>
+          <div className="other-ports-table__state">{dashT('dashboard.noDataPeriod')}</div>
         ) : (
           <table className="other-ports-table other-ports-table--compact">
             <thead>
               <tr>
-                <th>Транспорт</th>
-                <th className="num">Порт</th>
-                <th>Сторона</th>
-                <th className="num">% в Other</th>
-                <th className="num">Гбит/с</th>
-                <th className="num">ГБ</th>
-                <th className="num">Пакеты</th>
-                <th className="num">Потоки</th>
+                <th>{dashT('dashboard.otherPorts.transport')}</th>
+                <th className="num">{dashT('dashboard.otherPorts.port')}</th>
+                <th>{dashT('dashboard.otherPorts.side')}</th>
+                <th className="num">{dashT('dashboard.otherPorts.percentInOther')}</th>
+                <th className="num">{dashT('dashboard.otherPorts.gbps')}</th>
+                <th className="num">{dashT('dashboard.otherPorts.gb')}</th>
+                <th className="num">{dashT('dashboard.otherPorts.packets')}</th>
+                <th className="num">{dashT('dashboard.otherPorts.flows')}</th>
               </tr>
             </thead>
             <tbody>

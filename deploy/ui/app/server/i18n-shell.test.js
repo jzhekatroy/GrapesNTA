@@ -52,3 +52,14 @@ test('GrapesI18n подставляет параметры и fallback на ru',
   GrapesI18n.setLocale('en');
   assert.equal(GrapesI18n.localizedPageMeta('dashboard', { title: 'Обзор', section: 'Главное' }).title, 'Overview');
 });
+
+test('английские подписи дашборда совпадают с требованиями', () => {
+  const en = loadLocaleMessages('en');
+  assert.equal(en['dashboard.title'], 'Network summary');
+  assert.equal(en['dashboard.chart.title'], 'Bandwidth and PPS');
+  assert.equal(en['dashboard.chart.selectRange'], 'Select a range on the chart');
+  assert.equal(en['dashboard.stack.horizontal'], 'Horizontal stack');
+  assert.equal(en['dashboard.stack.drop'], 'Drag widgets here');
+  assert.equal(en['dashboard.geo.asnCountry'], 'ASN Country (Registry)');
+  assert.equal(en['dashboard.otherPorts.title'], 'Top 20 other ports');
+});

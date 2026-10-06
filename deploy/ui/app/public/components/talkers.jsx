@@ -1,16 +1,21 @@
 /* Shared top-talkers helpers and table cells (dashboard + full page) */
 
-const TOP_TALKERS_TABS = [
-  { id: 'src', label: 'Источники' },
-  { id: 'dst', label: 'Назначения' },
-  { id: 'pair', label: 'Пары' },
-];
+const TOP_TALKERS_TAB_IDS = ['src', 'dst', 'pair'];
+
+function getTopTalkersTabs() {
+  return TOP_TALKERS_TAB_IDS.map((id) => ({
+    id,
+    label: GrapesI18n.t(`dashboard.talkers.${id}`),
+  }));
+}
+
+const TOP_TALKERS_TABS = TOP_TALKERS_TAB_IDS.map((id) => ({ id, label: id }));
 
 const TALKER_PAIR_ARROW = ' → ';
 
 function talkerGeoDisplay(code) {
   const c = String(code || '').trim();
-  if (!c || c === '??') return 'Неизвестно';
+  if (!c || c === '??') return GrapesI18n.t('dashboard.talkers.unknown');
   return countryFlagEmoji(c);
 }
 
@@ -30,7 +35,7 @@ function talkerAsNameDisplay(asName, asn, fallback) {
   const name = String(asName || '').trim();
   if (name && !isPseudoAsName(name)) return name;
   const n = Number(asn);
-  if (Number.isFinite(n) && n === 0) return 'Без ASN';
+  if (Number.isFinite(n) && n === 0) return GrapesI18n.t('dashboard.talkers.noAsn');
   if (Number.isFinite(n) && n > 0) return `AS${n}`;
   const fb = String(fallback || '').trim();
   return fb || '—';
@@ -160,7 +165,7 @@ function TalkerMainPairGeoCell({ row }) {
   const src = pairGeoPart(row.srcAsCountry || row.srcCountry);
   const dst = pairGeoPart(row.dstAsCountry || row.dstCountry);
   if (src.label === '?' && dst.label === '?') {
-    return <span className="talker-main-cell__geo">Неизвестно</span>;
+    return <span className="talker-main-cell__geo">{GrapesI18n.t('dashboard.talkers.unknown')}</span>;
   }
   return (
     <span className="talker-main-cell__geo talker-main-cell__geo--pair" title={`${src.title} → ${dst.title}`}>
@@ -195,24 +200,24 @@ function TalkerRowDetail({ row, isPair, periodLabel, directionFilterLabel, meta 
   if (isPair) {
     return (
       <div className="talker-detail-pair">
-        <TalkerDetailSection title="Источник">
-          <TalkerDetailItem label="ASN" value={`${talkerAsNameDisplay(row.srcAsName, row.srcAsn)} / ${formatTalkerAsn({ asn: row.srcAsn })}`} />
-          <TalkerDetailItem label="Страна ASN" value={row.srcAsCountry ? talkerGeoDisplay(row.srcAsCountry) : 'Неизвестно'} />
+        <TalkerDetailSection title={GrapesI18n.t('dashboard.talkers.source')}>
+          <TalkerDetailItem label={GrapesI18n.t('dashboard.talkers.asn')} value={`${talkerAsNameDisplay(row.srcAsName, row.srcAsn)} / ${formatTalkerAsn({ asn: row.srcAsn })}`} />
+          <TalkerDetailItem label={GrapesI18n.t('dashboard.talkers.asnCountry')} value={row.srcAsCountry ? talkerGeoDisplay(row.srcAsCountry) : GrapesI18n.t('dashboard.talkers.unknown')} />
         </TalkerDetailSection>
-        <TalkerDetailSection title="Назначение">
-          <TalkerDetailItem label="ASN" value={`${talkerAsNameDisplay(row.dstAsName, row.dstAsn)} / ${formatTalkerAsn({ asn: row.dstAsn })}`} />
-          <TalkerDetailItem label="Страна ASN" value={row.dstAsCountry ? talkerGeoDisplay(row.dstAsCountry) : 'Неизвестно'} />
+        <TalkerDetailSection title={GrapesI18n.t('dashboard.talkers.destination')}>
+          <TalkerDetailItem label={GrapesI18n.t('dashboard.talkers.asn')} value={`${talkerAsNameDisplay(row.dstAsName, row.dstAsn)} / ${formatTalkerAsn({ asn: row.dstAsn })}`} />
+          <TalkerDetailItem label={GrapesI18n.t('dashboard.talkers.asnCountry')} value={row.dstAsCountry ? talkerGeoDisplay(row.dstAsCountry) : GrapesI18n.t('dashboard.talkers.unknown')} />
         </TalkerDetailSection>
-        <TalkerDetailSection title="Трафик">
-          <TalkerDetailItem label="Объём" value={fmtVolumeSize(row.trafficGb, row.trafficTb)} />
-          <TalkerDetailItem label="Байты" value={fmtNum(row.totalBytes)} />
-          <TalkerDetailItem label="Средняя скорость" value={<TalkerBandwidthText gbps={row.avgGbps} />} />
-          <TalkerDetailItem label="Средний PPS" value={fmtNum(row.avgPps)} />
+        <TalkerDetailSection title={GrapesI18n.t('dashboard.talkers.traffic')}>
+          <TalkerDetailItem label={GrapesI18n.t('dashboard.talkers.volume')} value={fmtVolumeSize(row.trafficGb, row.trafficTb)} />
+          <TalkerDetailItem label="Bytes" value={fmtNum(row.totalBytes)} />
+          <TalkerDetailItem label={GrapesI18n.t('dashboard.talkers.avgRate')} value={<TalkerBandwidthText gbps={row.avgGbps} />} />
+          <TalkerDetailItem label={GrapesI18n.t('dashboard.talkers.avgPps')} value={fmtNum(row.avgPps)} />
           <TalkerDetailItem label="Flows" value={fmtNum(row.flowCount)} />
           <TalkerDetailItem label="Source IDs" value={talkerListJoin(row.sourceIds)} />
           <TalkerDetailItem label="Directions" value={talkerListJoin(row.directions)} />
-          <TalkerDetailItem label="Фильтр направления" value={directionFilterLabel} />
-          <TalkerDetailItem label="Период" value={periodNote} />
+          <TalkerDetailItem label={GrapesI18n.t('dashboard.talkers.directionFilter')} value={directionFilterLabel} />
+          <TalkerDetailItem label={GrapesI18n.t('dashboard.talkers.period')} value={periodNote} />
         </TalkerDetailSection>
       </div>
     );
@@ -220,19 +225,19 @@ function TalkerRowDetail({ row, isPair, periodLabel, directionFilterLabel, meta 
 
   return (
     <dl className="talker-detail-grid">
-      <TalkerDetailItem label="ASN" value={talkerAsNameDisplay(row.asName, row.asn)} />
-      <TalkerDetailItem label="Номер ASN" value={formatTalkerAsn(row)} />
-      <TalkerDetailItem label="Страна ASN" value={talkerGeoDisplay(row.asCountry || row.countryCode)} />
-      <TalkerDetailItem label="Объём" value={fmtVolumeSize(row.trafficGb, row.trafficTb)} />
-      <TalkerDetailItem label="Байты" value={fmtNum(row.totalBytes)} />
-      <TalkerDetailItem label="Средняя скорость" value={<TalkerBandwidthText gbps={row.avgGbps} />} />
-      <TalkerDetailItem label="Средний PPS" value={fmtNum(row.avgPps)} />
+      <TalkerDetailItem label={GrapesI18n.t('dashboard.talkers.asn')} value={talkerAsNameDisplay(row.asName, row.asn)} />
+      <TalkerDetailItem label={GrapesI18n.t('dashboard.talkers.asnNumber')} value={formatTalkerAsn(row)} />
+      <TalkerDetailItem label={GrapesI18n.t('dashboard.talkers.asnCountry')} value={talkerGeoDisplay(row.asCountry || row.countryCode)} />
+      <TalkerDetailItem label={GrapesI18n.t('dashboard.talkers.volume')} value={fmtVolumeSize(row.trafficGb, row.trafficTb)} />
+      <TalkerDetailItem label="Bytes" value={fmtNum(row.totalBytes)} />
+      <TalkerDetailItem label={GrapesI18n.t('dashboard.talkers.avgRate')} value={<TalkerBandwidthText gbps={row.avgGbps} />} />
+      <TalkerDetailItem label={GrapesI18n.t('dashboard.talkers.avgPps')} value={fmtNum(row.avgPps)} />
       <TalkerDetailItem label="Flows" value={fmtNum(row.flowCount)} />
       <TalkerDetailItem label="Source IDs" value={talkerListJoin(row.sourceIds)} />
       <TalkerDetailItem label="Directions" value={talkerListJoin(row.directions)} />
-      <TalkerDetailItem label="Фильтр направления" value={directionFilterLabel} />
-      <TalkerDetailItem label="Сторона" value={row.endpointSide || row.group} />
-      <TalkerDetailItem label="Период" value={periodNote} />
+      <TalkerDetailItem label={GrapesI18n.t('dashboard.talkers.directionFilter')} value={directionFilterLabel} />
+      <TalkerDetailItem label={GrapesI18n.t('dashboard.talkers.side')} value={row.endpointSide || row.group} />
+      <TalkerDetailItem label={GrapesI18n.t('dashboard.talkers.period')} value={periodNote} />
     </dl>
   );
 }
@@ -277,7 +282,7 @@ function talkerSearchText(row, isPair) {
 
 function talkerSourceLabel(source) {
   if (source === 'clickhouse') return 'ClickHouse';
-  if (source === 'loading') return 'Загрузка…';
+  if (source === 'loading') return GrapesI18n.t('dashboard.loading');
   if (source === 'error') return 'Ошибка';
   return '—';
 }
@@ -371,6 +376,7 @@ function exportTopTalkersCsv({
 
 Object.assign(window, {
   TOP_TALKERS_TABS,
+  getTopTalkersTabs,
   talkerGeoDisplay,
   formatTalkerAsn,
   talkerAsNameDisplay,

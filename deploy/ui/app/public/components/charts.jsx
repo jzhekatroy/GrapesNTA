@@ -1229,7 +1229,7 @@ function DualChart({
           })}
           {isStack && hoverStack && stackMode === 'sum' && (
             <div className="dual-chart__tip-row dual-chart__tip-row--total">
-              <span className="dual-chart__tip-label">Итого</span>
+              <span className="dual-chart__tip-label">{GrapesI18n.t('dashboard.chart.total')}</span>
               <span className="dual-chart__tip-val mono">{valueFormatter(hoverStack.total)}</span>
             </div>
           )}
@@ -1245,7 +1245,7 @@ function DualChart({
           {!isStack && sortLinesForTip(activePpsLines).map((ln) => (
             <div key={`pps-${ln.key}`} className="dual-chart__tip-row" style={{ opacity: seriesHighlightOpacity(ln.key) }}>
               <span className="dual-chart__tip-swatch" style={{ background: ln.color }} />
-              <span className="dual-chart__tip-label">{ln.label}, п/с</span>
+              <span className="dual-chart__tip-label">{ln.label}{GrapesI18n.t('dashboard.chart.ppsLineSuffix')}</span>
               <span className="dual-chart__tip-val mono">{ppsFormatter(seriesPpsValue(hoverPoint, ln.key))}</span>
             </div>
           ))}
@@ -1524,7 +1524,7 @@ function CategoryTrendChart({
               type="button"
               className={`chart-legend__item category-trend__legend-item${off ? ' is-off' : ''}`}
               aria-pressed={!off}
-              title={off ? 'Показать на графике' : 'Скрыть с графика'}
+              title={off ? GrapesI18n.t('dashboard.chart.legend.show') : GrapesI18n.t('dashboard.chart.legend.hide')}
               onClick={() => toggleLine(ln.key)}
             >
               <span
@@ -1799,7 +1799,7 @@ function TimeSeriesSparkChart({
           {hoverPoint.bytes != null && (
             <div className="dual-chart__tip-row">
               <span className="dual-chart__tip-swatch" style={{ background: 'transparent' }} />
-              <span className="dual-chart__tip-label">Объём</span>
+              <span className="dual-chart__tip-label">{GrapesI18n.t('dashboard.geo.tooltip.volume')}</span>
               <span className="dual-chart__tip-val mono">{fmtBytes(hoverPoint.bytes)}</span>
             </div>
           )}
@@ -1901,12 +1901,12 @@ function donutCenterTraffic(items) {
     const tb = totalGb / 1000;
     return {
       label: tb >= 100 ? String(Math.round(tb)) : tb >= 10 ? tb.toFixed(0) : tb.toFixed(1),
-      sub: 'ТБ',
+      sub: GrapesI18n.t('dashboard.donut.tb'),
     };
   }
-  if (totalGb >= 1) return { label: totalGb.toFixed(1), sub: 'ГБ' };
-  if (totalGb > 0) return { label: totalGb.toFixed(2), sub: 'ГБ' };
-  return { label: '0', sub: 'ГБ' };
+  if (totalGb >= 1) return { label: totalGb.toFixed(1), sub: GrapesI18n.t('dashboard.donut.gb') };
+  if (totalGb > 0) return { label: totalGb.toFixed(2), sub: GrapesI18n.t('dashboard.donut.gb') };
+  return { label: '0', sub: GrapesI18n.t('dashboard.donut.gb') };
 }
 
 function donutCenterTrafficGb(items) {
@@ -2293,8 +2293,15 @@ function countryFlagEmoji(code) {
   );
 }
 
+function geoFeatureDisplayName(properties) {
+  if (!properties) return '';
+  const loc = GrapesI18n.getLocale();
+  if (loc === 'en') return properties.NAME || properties.NAME_RU || properties.name || '';
+  return properties.NAME_RU || properties.NAME || properties.name || '';
+}
+
 function countryDisplayName(code, nameByCode) {
-  if (code === '??') return 'Неизвестно';
+  if (code === '??') return GrapesI18n.t('dashboard.geo.unknown');
   return nameByCode?.[code] || code || '—';
 }
 
@@ -2337,23 +2344,23 @@ function countryMapTooltipContent(hover) {
         {countryFlagEmoji(hover.code)} {hover.name}
       </div>
       <div className="country-choropleth__tooltip-row">
-        <span>Объём</span>
+        <span>{GrapesI18n.t('dashboard.geo.tooltip.volume')}</span>
         <span className="mono">{fmtVolumeSize(row.trafficGb)}</span>
       </div>
       <div className="country-choropleth__tooltip-row">
-        <span>Доля</span>
+        <span>{GrapesI18n.t('dashboard.geo.tooltip.share')}</span>
         <span className="mono">{sharePercent.toFixed(2)}%</span>
       </div>
       <div className="country-choropleth__tooltip-row">
-        <span>Средняя скорость</span>
+        <span>{GrapesI18n.t('dashboard.geo.tooltip.avgRate')}</span>
         <span className="mono">{avgGbps.toFixed(3)} Gbps</span>
       </div>
       <div className="country-choropleth__tooltip-row">
-        <span>Пакеты</span>
+        <span>{GrapesI18n.t('dashboard.geo.tooltip.packets')}</span>
         <span className="mono">{fmtNum(packetCount)}</span>
       </div>
       <div className="country-choropleth__tooltip-row">
-        <span>Потоки</span>
+        <span>{GrapesI18n.t('dashboard.geo.tooltip.flows')}</span>
         <span className="mono">{fmtNum(flowCount)}</span>
       </div>
     </>
@@ -2395,6 +2402,7 @@ function CountryChoropleth({
   const interactive = large;
   const totalGb = useMemo(() => countryTotalTrafficGb(rows), [rows]);
   const [themeTick, setThemeTick] = useState(0);
+  const mapLocale = GrapesI18n.getLocale();
 
   useEffect(() => {
     const syncPalette = () => setThemeTick((tick) => tick + 1);
@@ -2438,7 +2446,7 @@ function CountryChoropleth({
     for (const feature of geo.features) {
       const code = geoFeatureCode(feature.properties);
       if (!code) continue;
-      nameByCode[code] = feature.properties?.NAME_RU || feature.properties?.NAME || code;
+      nameByCode[code] = geoFeatureDisplayName(feature.properties) || code;
       const row = dataByCode[code];
       list.push({
         code,
@@ -2450,7 +2458,7 @@ function CountryChoropleth({
     }
     list.nameByCode = nameByCode;
     return list;
-  }, [geo, dataByCode, mapPalette, colorMetric]);
+  }, [geo, dataByCode, mapPalette, colorMetric, mapLocale]);
 
   const mapPointFromClient = useCallback((clientX, clientY) => {
     const svg = svgRef.current;
@@ -2570,8 +2578,8 @@ function CountryChoropleth({
             <button
               type="button"
               className="country-choropleth__zoom-btn"
-              title="Открыть крупно"
-              aria-label="Открыть крупно"
+              title={GrapesI18n.t('dashboard.geo.mapExpand')}
+              aria-label={GrapesI18n.t('dashboard.geo.mapExpand')}
               onMouseDown={(e) => e.stopPropagation()}
               onClick={onExpand}
             >
@@ -2583,8 +2591,8 @@ function CountryChoropleth({
           <button
             type="button"
             className="country-choropleth__zoom-btn"
-            title="Приблизить"
-            aria-label="Приблизить"
+            title={GrapesI18n.t('dashboard.geo.zoomIn')}
+            aria-label={GrapesI18n.t('dashboard.geo.zoomIn')}
             onMouseDown={(e) => e.stopPropagation()}
             onClick={() => zoomControl(1.25)}
           >
@@ -2593,8 +2601,8 @@ function CountryChoropleth({
           <button
             type="button"
             className="country-choropleth__zoom-btn"
-            title="Отдалить"
-            aria-label="Отдалить"
+            title={GrapesI18n.t('dashboard.geo.zoomOut')}
+            aria-label={GrapesI18n.t('dashboard.geo.zoomOut')}
             onMouseDown={(e) => e.stopPropagation()}
             onClick={() => zoomControl(0.8)}
           >
@@ -2603,8 +2611,8 @@ function CountryChoropleth({
           <button
             type="button"
             className="country-choropleth__zoom-btn"
-            title="Сбросить масштаб"
-            aria-label="Сбросить масштаб"
+            title={GrapesI18n.t('dashboard.geo.resetZoom')}
+            aria-label={GrapesI18n.t('dashboard.geo.resetZoom')}
             disabled={!canPan}
             onMouseDown={(e) => e.stopPropagation()}
             onClick={resetView}
@@ -2620,7 +2628,7 @@ function CountryChoropleth({
           viewBox={`0 0 ${w} ${h}`}
           className="country-choropleth__svg"
           role="img"
-          aria-label="Тепловая карта стран"
+          aria-label={GrapesI18n.t('dashboard.geo.heatmapAria')}
         >
           <defs>
             <pattern
@@ -2688,7 +2696,7 @@ function CountryChoropleth({
         ))}
         <span className="country-choropleth__legend-tier">
           <span className="country-choropleth__legend-swatch country-choropleth__legend-swatch--unknown" />
-          Неизвестно
+          {GrapesI18n.t('dashboard.geo.unknown')}
           {unknownRow && (
             <span className="country-choropleth__legend-unknown-meta mono">
               · {unknownRow.sharePercent.toFixed(2)}% · {fmtVolumeSize(unknownRow.trafficGb)}
@@ -2723,7 +2731,7 @@ function countryRankListBuild(rows, geoFeatures, colorMetric = 'share') {
     const sharePercent = row ? Number(row.sharePercent) || 0 : 0;
     items.push({
       code,
-      label: feature.properties?.NAME_RU || feature.properties?.NAME || code,
+      label: geoFeatureDisplayName(feature.properties) || code,
       flag: countryFlagEmoji(code),
       sharePercent,
       trafficGb: row ? Number(row.trafficGb) || 0 : 0,
@@ -2734,7 +2742,7 @@ function countryRankListBuild(rows, geoFeatures, colorMetric = 'share') {
     const row = dataByCode['??'];
     items.push({
       code: '??',
-      label: 'Неизвестно',
+      label: GrapesI18n.t('dashboard.geo.unknown'),
       flag: countryFlagEmoji('??'),
       sharePercent: Number(row.sharePercent) || 0,
       trafficGb: Number(row.trafficGb) || 0,
@@ -2747,6 +2755,20 @@ function countryRankListBuild(rows, geoFeatures, colorMetric = 'share') {
 }
 
 const COUNTRY_RANK_COLLAPSED = 5;
+
+function countryRankMoreCountriesLabel(count) {
+  const n = Number(count) || 0;
+  if (GrapesI18n.getLocale() === 'en') {
+    const key = n === 1 ? 'dashboard.geo.moreCountriesOne' : 'dashboard.geo.moreCountriesMany';
+    return GrapesI18n.t(key, { count: n });
+  }
+  const mod10 = n % 10;
+  const mod100 = n % 100;
+  let key = 'dashboard.geo.moreCountriesMany';
+  if (mod10 === 1 && mod100 !== 11) key = 'dashboard.geo.moreCountriesOne';
+  else if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) key = 'dashboard.geo.moreCountriesFew';
+  return GrapesI18n.t(key, { count: n });
+}
 
 function CountryRankList({ rows = [], listKey = '', colorMetric = 'share' }) {
   const [expanded, setExpanded] = useState(false);
@@ -2783,7 +2805,7 @@ function CountryRankList({ rows = [], listKey = '', colorMetric = 'share' }) {
         trafficGb: Number(r.trafficGb) || 0,
       }))
       .sort((a, b) => countryRankListSort(a, b, colorMetric));
-  }, [rows, geo, colorMetric]);
+  }, [rows, geo, colorMetric, GrapesI18n.getLocale()]);
 
   if (!allItems.length) return null;
 
@@ -2832,7 +2854,7 @@ function CountryRankList({ rows = [], listKey = '', colorMetric = 'share' }) {
           onClick={() => setExpanded((v) => !v)}
         >
           <Icon name={expanded ? 'chevU' : 'chevD'} size={14} />
-          <span>{expanded ? 'Свернуть' : `Ещё ${hiddenCount} ${hiddenCount === 1 ? 'страна' : hiddenCount < 5 ? 'страны' : 'стран'}`}</span>
+          <span>{expanded ? GrapesI18n.t('dashboard.geo.collapseCountries') : countryRankMoreCountriesLabel(hiddenCount)}</span>
         </button>
       )}
     </div>
@@ -2975,21 +2997,23 @@ function Sankey({
 }
 
 /* ============== Format helpers ============== */
+const BYTE_UNIT_KEYS = ['unit.byte', 'unit.kb', 'unit.mb', 'unit.gb', 'unit.tb', 'unit.pb'];
+const BIT_RATE_UNIT_KEYS = ['unit.bps', 'unit.kbps', 'unit.mbps', 'unit.gbps', 'unit.tbps', 'unit.pbps'];
+
 function fmtBytes(b) {
   if (b == null) return '—';
-  const units = ['Б', 'КБ', 'МБ', 'ГБ', 'ТБ', 'ПБ'];
-  let i = 0; let v = b;
-  while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
-  return `${v.toFixed(v < 10 ? 1 : 0)} ${units[i]}`;
+  let i = 0;
+  let v = b;
+  while (v >= 1024 && i < BYTE_UNIT_KEYS.length - 1) { v /= 1024; i++; }
+  return `${v.toFixed(v < 10 ? 1 : 0)} ${GrapesI18n.t(BYTE_UNIT_KEYS[i])}`;
 }
 function fmtBits(bps) {
   if (bps == null) return '—';
-  const units = ['бит/с', 'Кбит/с', 'Мбит/с', 'Гбит/с', 'Тбит/с', 'Пбит/с'];
   let i = 0;
   let v = Math.abs(Number(bps)) || 0;
   const sign = Number(bps) < 0 ? '-' : '';
-  while (v >= 1000 && i < units.length - 1) { v /= 1000; i++; }
-  return `${sign}${v.toFixed(v < 10 ? 2 : v < 100 ? 1 : 0)} ${units[i]}`;
+  while (v >= 1000 && i < BIT_RATE_UNIT_KEYS.length - 1) { v /= 1000; i++; }
+  return `${sign}${v.toFixed(v < 10 ? 2 : v < 100 ? 1 : 0)} ${GrapesI18n.t(BIT_RATE_UNIT_KEYS[i])}`;
 }
 /** Compact Y-axis labels so "0.57 Тбит/с" fits in the left pad. */
 function fmtBitsAxis(bps) {
@@ -3005,17 +3029,17 @@ function fmtBitsAxis(bps) {
 }
 function fmtNum(n) {
   if (n == null) return '—';
-  if (n >= 1e9) return (n / 1e9).toFixed(1) + ' млрд';
-  if (n >= 1e6) return (n / 1e6).toFixed(1) + ' млн';
-  if (n >= 1e3) return (n / 1e3).toFixed(1) + ' тыс';
+  if (n >= 1e9) return `${(n / 1e9).toFixed(1)} ${GrapesI18n.t('unit.billion')}`;
+  if (n >= 1e6) return `${(n / 1e6).toFixed(1)} ${GrapesI18n.t('unit.million')}`;
+  if (n >= 1e3) return `${(n / 1e3).toFixed(1)} ${GrapesI18n.t('unit.thousand')}`;
   return String(Math.round(n));
 }
 
 function formatMetric(v, metric) {
   if (metric === 'bps') return fmtBits(v);
   if (metric === 'volume') return fmtBytes(v);
-  if (metric === 'pps') return `${fmtNum(v)} п/с`;
-  if (metric === 'fps') return `${fmtNum(v)} потоков/сек`;
+  if (metric === 'pps') return `${fmtNum(v)} ${GrapesI18n.t('unit.pps')}`;
+  if (metric === 'fps') return `${fmtNum(v)} ${GrapesI18n.t('unit.flowsPerSec')}`;
   return fmtNum(v);
 }
 

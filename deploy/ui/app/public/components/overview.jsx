@@ -1,11 +1,13 @@
 /* Shared, data-only overview widgets for operator and client dashboards. */
 
-const OVERVIEW_LOAD_FAILED = 'Не удалось загрузить';
+function overviewT(key, params) {
+  return GrapesI18n.t(key, params);
+}
 
 function OverviewDataState({ children, style, error, status }) {
   const message = status === 403
-    ? 'Недостаточно прав'
-    : (children || error || OVERVIEW_LOAD_FAILED);
+    ? overviewT('dashboard.insufficientRights')
+    : (children || error || overviewT('dashboard.loadFailed'));
   return (
     <div className="other-ports-table__state" style={style}>
       {message}
@@ -17,8 +19,8 @@ function OverviewEmptyState({ children }) {
   return (
     <Empty
       icon="info"
-      title="Нет данных"
-      desc={children || 'За выбранный период данных пока нет. Для нового клиента история начинается с момента подключения.'}
+      title={overviewT('dashboard.noData')}
+      desc={children || overviewT('dashboard.noDataDesc')}
     />
   );
 }
@@ -90,8 +92,8 @@ function OverviewTrafficChartCard({
       tools={allowPps ? (
         <>
           <div className="seg">
-            <button className={mode === 'bw' ? 'is-active' : ''} onClick={() => onModeChange?.('bw')}>Полоса</button>
-            <button className={mode === 'pps' ? 'is-active' : ''} onClick={() => onModeChange?.('pps')}>pps</button>
+            <button className={mode === 'bw' ? 'is-active' : ''} onClick={() => onModeChange?.('bw')}>{overviewT('dashboard.chart.bandwidth')}</button>
+            <button className={mode === 'pps' ? 'is-active' : ''} onClick={() => onModeChange?.('pps')}>{overviewT('dashboard.chart.pps')}</button>
           </div>
           <Button kind="ghost" size="sm" icon="zoom" />
           <Button kind="ghost" size="sm" icon="more" />
@@ -102,12 +104,12 @@ function OverviewTrafficChartCard({
         <div className="chart-range-hint">
           {onRangeSelect ? (
             <>
-              <Icon name="info" size={12} /> Выделите диапазон на графике
+              <Icon name="info" size={12} /> {overviewT('dashboard.chart.selectRange')}
             </>
           ) : null}
           {showRefreshHint ? (
             <span>
-              {onRangeSelect ? ' · авто-обновление каждую минуту' : 'Авто-обновление каждую минуту'}
+              {onRangeSelect ? overviewT('dashboard.chart.autoRefreshWithHint') : overviewT('dashboard.chart.autoRefresh')}
             </span>
           ) : null}
         </div>
@@ -143,14 +145,14 @@ function OverviewTrafficChartCard({
               type="button"
               className={`chart-legend__item${off ? ' is-off' : ''}`}
               aria-pressed={!off}
-              title={off ? 'Показать на графике' : 'Скрыть с графика'}
+              title={off ? overviewT('dashboard.chart.legend.show') : overviewT('dashboard.chart.legend.hide')}
               onClick={() => onToggleLine?.(key)}
             >
               <span
                 className="chart-legend__swatch"
                 style={{ width: 12, height: line.key === 'total' ? 3 : 2, background: line.color, opacity: off ? 0.35 : 1 }}
               />
-              {line.label}, {mode === 'pps' ? 'пакеты/с' : 'бит/с'}
+              {line.label}, {mode === 'pps' ? overviewT('dashboard.chart.legend.packetsPerSec') : overviewT('dashboard.chart.legend.bitsPerSec')}
             </button>
           );
         })}
@@ -206,7 +208,7 @@ function OverviewDistributionPane({
   } else if (mode === 'share') {
     content = <Donut data={items || []} centerLabel={center.label} centerSub={center.sub} size={150} thickness={20} onOtherClick={onOtherClick} />;
   } else if (loading) {
-    content = <div className="distribution-pane__loading">Загрузка…</div>;
+    content = <div className="distribution-pane__loading">{overviewT('dashboard.loading')}</div>;
   } else {
     content = (
       <CategoryTrendChart
@@ -235,7 +237,7 @@ function OverviewDistributionPane({
 }
 
 function OverviewCountryCard({
-  title = 'География источников',
+  title = overviewT('dashboard.geo.title'),
   subtitle,
   rows,
   colorMetric,
@@ -291,7 +293,7 @@ function OverviewCountryCard({
         )}
         {otherRow && (
           <div className="chart-data-until">
-            Прочее · {Number(otherRow.sharePercent || 0).toFixed(2)}% · {fmtVolumeSize(otherRow.trafficGb || 0)}
+            {overviewT('dashboard.other')} · {Number(otherRow.sharePercent || 0).toFixed(2)}% · {fmtVolumeSize(otherRow.trafficGb || 0)}
           </div>
         )}
         {footer}
@@ -408,33 +410,34 @@ function OverviewRecentFlowsCard({
   serverMs,
   cabinetMode = false,
   displayTimezone,
-  emptyLabel = 'Нет последних потоков',
+  emptyLabel,
 }) {
+  const resolvedEmptyLabel = emptyLabel ?? overviewT('dashboard.flows.noRecent');
   const colSpan = cabinetMode ? 7 : 6;
   return (
-    <Card className="card--recent-flows" title="Последние потоки" subtitle={subtitle} loadMs={loadMs} serverMs={serverMs} pad="0">
+    <Card className="card--recent-flows" title={overviewT('dashboard.flows.title')} subtitle={subtitle} loadMs={loadMs} serverMs={serverMs} pad="0">
       <table className={`table table--recent-flows${cabinetMode ? ' table--recent-flows--cabinet' : ''}`} style={{ borderRadius: 0 }}>
         <thead>
           <tr>
-            <th className="recent-flows__time-col">Время</th>
-            {cabinetMode && <th className="recent-flows__direction-col">Направление</th>}
-            <th className="recent-flows__flow-col">Поток</th>
-            <th className="recent-flows__meta-col">{cabinetMode ? 'Страны' : 'VLAN / GEO'}</th>
-            <th className="recent-flows__proto-col">Proto</th>
-            <th className="recent-flows__bytes-col">Объём</th>
-            <th className="recent-flows__asn-col">ASN</th>
+            <th className="recent-flows__time-col">{overviewT('dashboard.flows.time')}</th>
+            {cabinetMode && <th className="recent-flows__direction-col">{overviewT('dashboard.flows.direction')}</th>}
+            <th className="recent-flows__flow-col">{overviewT('dashboard.flows.flow')}</th>
+            <th className="recent-flows__meta-col">{cabinetMode ? overviewT('dashboard.flows.countries') : overviewT('dashboard.flows.vlanGeo')}</th>
+            <th className="recent-flows__proto-col">{overviewT('dashboard.flows.proto')}</th>
+            <th className="recent-flows__bytes-col">{overviewT('dashboard.flows.volume')}</th>
+            <th className="recent-flows__asn-col">{overviewT('dashboard.flows.asn')}</th>
           </tr>
         </thead>
         <tbody>
-          {source === 'loading' && <tr><td colSpan={colSpan} className="talker-table-state">Загрузка…</td></tr>}
+          {source === 'loading' && <tr><td colSpan={colSpan} className="talker-table-state">{overviewT('dashboard.loading')}</td></tr>}
           {source === 'error' && (
             <tr>
               <td colSpan={colSpan} className="talker-table-state">
-                {status === 403 ? 'Недостаточно прав' : (error || OVERVIEW_LOAD_FAILED)}
+                {status === 403 ? overviewT('dashboard.insufficientRights') : (error || overviewT('dashboard.loadFailed'))}
               </td>
             </tr>
           )}
-          {source === 'clickhouse' && !(rows || []).length && <tr><td colSpan={colSpan} className="talker-table-state">{emptyLabel}</td></tr>}
+          {source === 'clickhouse' && !(rows || []).length && <tr><td colSpan={colSpan} className="talker-table-state">{resolvedEmptyLabel}</td></tr>}
           {source === 'clickhouse' && (rows || []).map((flow, index) => (
             <tr key={`${flow.ts}-${flow.srcIp}-${flow.dstIp}-${index}`}>
               <td className="recent-flows__time mono" title={flow.ts}>{formatRecentFlowTs(flow.ts, displayTimezone)}</td>
@@ -452,7 +455,7 @@ function OverviewRecentFlowsCard({
                 )}
               </td>
               <td><RecentFlowProtoBadge proto={flow.proto} /></td>
-              <td className="recent-flows__bytes num"><div>{fmtBytes(flow.bytes)}</div><small>{fmtNum(flow.pkts)} пак.</small></td>
+              <td className="recent-flows__bytes num"><div>{fmtBytes(flow.bytes)}</div><small>{fmtNum(flow.pkts)} {overviewT('dashboard.flows.packets')}</small></td>
               <td className="recent-flows__asn-cell">
                 <RecentFlowAsnCell srcAsn={flow.srcAsn} dstAsn={flow.dstAsn} srcAsName={flow.srcAsName} dstAsName={flow.dstAsName} />
               </td>
