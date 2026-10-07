@@ -222,14 +222,65 @@ function formatAxisBps(v) {
   return formatBps(v);
 }
 
+function normalizeObservationChartMetric(metric) {
+  const key = String(metric || 'bps').trim();
+  return ['bps', 'volume', 'pps', 'fps', 'flows'].includes(key) ? key : 'bps';
+}
+
+function observationMetricFromWidgets(widgets) {
+  const chart = chartWidgetFrom(widgets);
+  return normalizeObservationChartMetric(chart?.metric);
+}
+
+function observationTableMetricFromWidgets(widgets) {
+  const top = (widgets || []).find((w) => w.type === 'top_table');
+  return normalizeObservationChartMetric(top?.metric || chartWidgetFrom(widgets)?.metric);
+}
+
+function observationMetricAxisUnit(metric) {
+  if (typeof metricAxisUnit === 'function') return metricAxisUnit(metric);
+  if (metric === 'pps') return 'п/с';
+  if (metric === 'fps') return 'потоков/сек';
+  if (metric === 'volume') return 'байт';
+  if (metric === 'flows') return 'потоков';
+  return 'бит/с';
+}
+
+function observationMetricValueLabel(metric) {
+  switch (normalizeObservationChartMetric(metric)) {
+    case 'pps': return 'Пакеты/с';
+    case 'fps': return 'Потоки/с';
+    case 'volume': return 'Объём';
+    case 'flows': return 'Потоки';
+    default: return 'Средняя бит/с';
+  }
+}
+
+function formatObservationMetric(v, metric) {
+  if (typeof formatMetric === 'function') return formatMetric(v, metric);
+  if (metric === 'pps') return `${v} п/с`;
+  return formatBps(v);
+}
+
+function formatObservationMetricAxis(v, metric) {
+  if (typeof formatMetricAxis === 'function') return formatMetricAxis(v, metric);
+  if (metric === 'bps') return formatAxisBps(v);
+  return formatObservationMetric(v, metric);
+}
+
+function observationPointValue(p) {
+  if (p?.value != null && Number.isFinite(Number(p.value))) return Number(p.value);
+  return Number(p?.bps) || 0;
+}
+
 /** Aggregate series values for the observation chart stats strip. */
-function chartSeriesStats(points, lines, mode = 'total') {
+function chartSeriesStats(points, lines, mode = 'total', metric = 'bps') {
   if (!points?.length) return null;
   const values = points.map((p) => {
     if (mode === 'grouped' && lines?.length) {
       return lines.reduce((sum, ln) => sum + (Number(p[ln.key]) || 0), 0);
     }
-    return Number(p.bps) || 0;
+    return observationPointValue(p);
   });
   const min = Math.min(...values);
   const max = Math.max(...values);
@@ -674,6 +725,7 @@ function ObservationChart({
   mode = 'total',
   stackMode,
   height = 160,
+  metric = 'bps',
   onRangeSelect,
   displayTimezone,
   bucketSeconds = 300,
@@ -683,6 +735,10 @@ function ObservationChart({
   skipTrailingGaps = false,
   tipTranslucent = true,
 }) {
+  const chartMetric = normalizeObservationChartMetric(metric);
+  const axisUnit = observationMetricAxisUnit(chartMetric);
+  const valueFmt = (v) => formatObservationMetric(v, chartMetric);
+  const axisFmt = (v) => formatObservationMetricAxis(v, chartMetric);
   if (!points?.length) {
     return (
       <div style={{
@@ -715,8 +771,8 @@ function ObservationChart({
         height={height}
         mode="bw"
         gapAsZero={stackMode === 'sum'}
-        valueFormatter={formatBps}
-        axisFormatter={formatAxisBps}
+        valueFormatter={valueFmt}
+        axisFormatter={axisFmt}
         onRangeSelect={onRangeSelect}
         bucketSeconds={bucketSeconds}
         displayTimezone={displayTimezone}
@@ -725,8 +781,8 @@ function ObservationChart({
         skipLeadingGaps={skipLeadingGaps}
         skipTrailingGaps={skipTrailingGaps}
         tipTranslucent={tipTranslucent}
-        tipUnitLabel="бит/с"
-        yAxisUnit="бит/с"
+        tipUnitLabel={axisUnit}
+        yAxisUnit={axisUnit}
         yAxisTitlePad={36}
       />
     );
@@ -734,6 +790,7 @@ function ObservationChart({
 
   const chartPoints = points.map((p) => ({
     ...p,
+    value: observationPointValue(p),
     bps: Number(p.bps) || 0,
     bucket: p.bucket || p.t,
     t: p.t || p.bucket,
@@ -743,9 +800,10 @@ function ObservationChart({
       <TimeSeriesSparkChart
         points={chartPoints}
         height={height}
-        valueKey="bps"
-        formatValue={formatBps}
-        axisFormatter={formatAxisBps}
+        valueKey="value"
+        valueLabel={observationMetricValueLabel(chartMetric)}
+        formatValue={valueFmt}
+        axisFormatter={axisFmt}
         onRangeSelect={onRangeSelect}
         bucketSeconds={bucketSeconds}
         displayTimezone={displayTimezone}
@@ -754,7 +812,7 @@ function ObservationChart({
         skipLeadingGaps={skipLeadingGaps}
         skipTrailingGaps={skipTrailingGaps}
         tipTranslucent={tipTranslucent}
-        yAxisUnit="бит/с"
+        yAxisUnit={axisUnit}
         yAxisTitlePad={36}
       />
     );
@@ -763,16 +821,18 @@ function ObservationChart({
     <AreaChart
       data={chartPoints.map((p) => ({
         t: shortBucketLabel(p.bucket || p.t, displayTimezone),
-        v: p.bps,
+        v: observationPointValue(p),
       }))}
       height={height}
-      units="бит/с"
+      units={axisUnit}
     />
   );
 }
 
-function ObservationChartStats({ points, lines, mode = 'total' }) {
-  const stats = chartSeriesStats(points, lines, mode);
+function ObservationChartStats({ points, lines, mode = 'total', metric = 'bps' }) {
+  const chartMetric = normalizeObservationChartMetric(metric);
+  const valueFmt = (v) => formatObservationMetric(v, chartMetric);
+  const stats = chartSeriesStats(points, lines, mode, chartMetric);
   if (!stats) return null;
   return (
     <div
@@ -786,13 +846,13 @@ function ObservationChartStats({ points, lines, mode = 'total' }) {
       }}
     >
       <span title="Среднее по точкам окна">
-        avg <span className="mono" style={{ color: 'var(--fg-primary)' }}>{formatBps(stats.avg)}</span>
+        avg <span className="mono" style={{ color: 'var(--fg-primary)' }}>{valueFmt(stats.avg)}</span>
       </span>
       <span title="Минимум за окно">
-        min <span className="mono" style={{ color: 'var(--fg-primary)' }}>{formatBps(stats.min)}</span>
+        min <span className="mono" style={{ color: 'var(--fg-primary)' }}>{valueFmt(stats.min)}</span>
       </span>
       <span title="Максимум за окно">
-        max <span className="mono" style={{ color: 'var(--fg-primary)' }}>{formatBps(stats.max)}</span>
+        max <span className="mono" style={{ color: 'var(--fg-primary)' }}>{valueFmt(stats.max)}</span>
       </span>
       <span title="Последняя точка относительно пика окна">
         now/max{' '}
@@ -1120,6 +1180,9 @@ function ObservationLiveTile({
       prev.includes(key) ? prev.filter((item) => item !== key) : [...prev, key]
     ));
   };
+  const chartMetric = observationMetricFromWidgets(item.widgets);
+  const tableMetric = observationTableMetricFromWidgets(item.widgets);
+  const tableMetricUnit = observationMetricAxisUnit(tableMetric);
   const topGroupBy = groupByFromWidgets(item.widgets);
   const topLabel = topGroupBy.map((g) => groupLabel(g, groupOptions)).join(' × ');
   const nativeSummary = isNativeAggregate
@@ -1259,6 +1322,7 @@ function ObservationLiveTile({
           mode={chartMode}
           stackMode={chartMode === 'grouped' ? chartStackMode : undefined}
           height={chartH}
+          metric={isNativeAggregate ? 'bps' : chartMetric}
           onRangeSelect={points.length > 1 ? handleChartRangeSelect : undefined}
           displayTimezone={displayTimezone}
           bucketSeconds={300}
@@ -1277,7 +1341,12 @@ function ObservationLiveTile({
         />
       )}
       {!!points.length && (
-        <ObservationChartStats points={points} lines={visibleLines} mode={chartMode} />
+        <ObservationChartStats
+          points={points}
+          lines={visibleLines}
+          mode={chartMode}
+          metric={isNativeAggregate ? 'bps' : chartMetric}
+        />
       )}
 
       <div className="obs-tile__footer">
@@ -1324,7 +1393,7 @@ function ObservationLiveTile({
           {expandedTab === 'top' && showTopTab && (
             <>
               <div style={{ font: 'var(--pv-text-body-2-bold)', marginBottom: 8 }}>
-                Разбивка: топ по {topLabel} (бит/с за {periodLabel})
+                Разбивка: топ по {topLabel} ({tableMetricUnit} за {periodLabel})
               </div>
               {Array.isArray(topWidget?.rows) && topWidget.rows.length > 0 ? (
                 <table style={{ width: '100%', borderCollapse: 'collapse', font: 'var(--pv-text-body-3)' }}>
@@ -1335,7 +1404,7 @@ function ObservationLiveTile({
                           {groupLabel(g, groupOptions)}
                         </th>
                       ))}
-                      <th style={{ textAlign: 'right', padding: 4 }}>бит/с</th>
+                      <th style={{ textAlign: 'right', padding: 4 }}>{tableMetricUnit}</th>
                       <th style={{ textAlign: 'right', padding: 4 }}>%</th>
                     </tr>
                   </thead>
@@ -1358,7 +1427,9 @@ function ObservationLiveTile({
                           {(r.values || []).map((v, i) => (
                             <td key={i} style={{ padding: 4 }} className="mono">{v}</td>
                           ))}
-                          <td style={{ padding: 4, textAlign: 'right' }} className="mono">{formatBps(r.metric)}</td>
+                          <td style={{ padding: 4, textAlign: 'right' }} className="mono">
+                            {formatObservationMetric(r.metric, tableMetric)}
+                          </td>
                           <td style={{ padding: 4, textAlign: 'right' }} className="mono">
                             {r.pct != null && Number.isFinite(Number(r.pct))
                               ? `${Number(r.pct).toFixed(1)}%`

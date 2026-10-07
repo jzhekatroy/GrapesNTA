@@ -1084,7 +1084,72 @@ function enrichTcpFlagsLabelsInRows(rows, groupBy = []) {
   });
 }
 
-async function readRollupTimeseries(observationId, window) {
+const OBSERVATION_CHART_METRICS = new Set(['bps', 'volume', 'pps', 'fps', 'flows']);
+
+function normalizeObservationChartMetric(metric) {
+  const key = String(metric || 'bps').trim();
+  return OBSERVATION_CHART_METRICS.has(key) ? key : 'bps';
+}
+
+function observationMetricSortField(metricKey) {
+  switch (normalizeObservationChartMetric(metricKey)) {
+    case 'pps': return 'packets';
+    case 'fps':
+    case 'flows': return 'flows';
+    case 'volume':
+    case 'bps':
+    default: return 'bytes';
+  }
+}
+
+function observationRollupBucketRate(row, metricKey, bucketSec = ROLLUP_BUCKET_SEC) {
+  const bytes = Number(row?.bytes) || 0;
+  const packets = Number(row?.packets) || 0;
+  const flows = Number(row?.flows) || 0;
+  const sec = Math.max(1, Number(bucketSec) || ROLLUP_BUCKET_SEC);
+  switch (normalizeObservationChartMetric(metricKey)) {
+    case 'volume': return bytes;
+    case 'pps': return Math.round(packets / sec);
+    case 'fps': return Math.round((flows / sec) * 100) / 100;
+    case 'flows': return flows;
+    default: return Math.round((bytes * 8) / sec);
+  }
+}
+
+function observationWindowAverage(row, metricKey, windowSeconds) {
+  const bytes = Number(row?.bytes) || 0;
+  const packets = Number(row?.packets) || 0;
+  const flows = Number(row?.flows) || 0;
+  const ws = Math.max(1, Number(windowSeconds) || ROLLUP_BUCKET_SEC);
+  switch (normalizeObservationChartMetric(metricKey)) {
+    case 'volume': return bytes;
+    case 'pps': return Math.round(packets / ws);
+    case 'fps': return Math.round((flows / ws) * 100) / 100;
+    case 'flows': return flows;
+    default: return Math.round((bytes * 8) / ws);
+  }
+}
+
+function observationRowSortAmount(row, metricKey) {
+  const field = observationMetricSortField(metricKey);
+  return Number(row?.[field]) || 0;
+}
+
+function observationTotalsSortAmount(totals, metricKey) {
+  if (!totals) return 0;
+  return Number(totals[observationMetricSortField(metricKey)]) || 0;
+}
+
+function rollupTopOrderColumn(metricKey) {
+  switch (normalizeObservationChartMetric(metricKey)) {
+    case 'pps': return 'packets';
+    case 'fps':
+    case 'flows': return 'flows';
+    default: return 'bytes';
+  }
+}
+
+async function readRollupTimeseries(observationId, window, metricKey = 'bps') {
   try {
     // Totals only — rows with empty dims. Do not sum grouped dims (would double-count).
     const { rows } = await query(`
@@ -1106,18 +1171,23 @@ async function readRollupTimeseries(observationId, window) {
       from: window.from,
       to: window.to,
     }, { name: 'observations/rollup-ts' });
+    const metric = normalizeObservationChartMetric(metricKey);
     const points = rows.map((r) => {
       const bytes = Number(r.bytes) || 0;
+      const packets = Number(r.packets) || 0;
+      const flows = Number(r.flows) || 0;
       const ts = Number(r.bucket_ts);
       const bucketMs = Number.isFinite(ts) && ts > 0 ? ts * 1000 : null;
+      const sample = { bytes, packets, flows };
       return {
         t: r.minute,
         bucket: r.minute,
         bucketMs,
         bytes,
         bps: Math.round((bytes * 8) / ROLLUP_BUCKET_SEC),
-        packets: Number(r.packets) || 0,
-        flows: Number(r.flows) || 0,
+        packets,
+        flows,
+        value: observationRollupBucketRate(sample, metric, ROLLUP_BUCKET_SEC),
       };
     });
     return { points };
@@ -1146,43 +1216,55 @@ async function readRollupPeriodTotals(observationId, window) {
     }, { name: 'observations/rollup-period-totals' });
     const row = rows?.[0];
     const bytes = Number(row?.bytes) || 0;
-    if (!bytes) return null;
-    return {
-      bytes,
-      packets: Number(row?.packets) || 0,
-      flows: Number(row?.flows) || 0,
-    };
+    const packets = Number(row?.packets) || 0;
+    const flows = Number(row?.flows) || 0;
+    if (!bytes && !packets && !flows) return null;
+    return { bytes, packets, flows };
   } catch {
     return null;
   }
 }
 
 /** Rows beyond the stored top-N collapse into one "Прочие" row (total minus shown). */
-function appendOtherRow(rows, totals, windowSeconds) {
-  if (!totals?.bytes || !rows.length) return rows;
+function appendOtherRow(rows, totals, windowSeconds, metricKey = 'bps') {
+  const metric = normalizeObservationChartMetric(metricKey);
+  const totalSort = observationTotalsSortAmount(totals, metric);
+  if (!totalSort || !rows.length) return rows;
+  const shownSort = rows.reduce((s, r) => s + observationRowSortAmount(r, metric), 0);
+  const restSort = totalSort - shownSort;
+  if (restSort <= 0 || restSort / totalSort < 0.0001) return rows;
   const shownBytes = rows.reduce((s, r) => s + (Number(r.bytes) || 0), 0);
   const restBytes = totals.bytes - shownBytes;
-  if (restBytes <= 0 || restBytes / totals.bytes < 0.0001) return rows;
+  const restPackets = Math.max(0, totals.packets - rows.reduce((s, r) => s + (Number(r.packets) || 0), 0));
+  const restFlows = Math.max(0, totals.flows - rows.reduce((s, r) => s + (Number(r.flows) || 0), 0));
   const groupCount = rows[0].values?.length || 1;
   const values = Array.from({ length: groupCount }, (_, i) => (i === 0 ? OTHER_LABEL : ''));
+  const restRow = { bytes: restBytes, packets: restPackets, flows: restFlows };
+  const avg = observationWindowAverage(restRow, metric, windowSeconds);
   return [...rows, {
     id: 'rollup-other',
     key: OTHER_KEY,
     isOther: true,
     values,
     rawValues: [...values],
-    metric: Math.round((restBytes * 8) / windowSeconds),
-    avgBps: Math.round((restBytes * 8) / windowSeconds),
-    pct: Math.round((restBytes * 10000) / totals.bytes) / 100,
+    metric: avg,
+    avgBps: Math.round((restBytes * 8) / Math.max(1, windowSeconds)),
+    pct: Math.round((restSort * 10000) / totalSort) / 100,
     bytes: restBytes,
-    packets: Math.max(0, totals.packets - rows.reduce((s, r) => s + (Number(r.packets) || 0), 0)),
-    flows: Math.max(0, totals.flows - rows.reduce((s, r) => s + (Number(r.flows) || 0), 0)),
+    packets: restPackets,
+    flows: restFlows,
     color: OTHER_COLOR,
   }];
 }
 
-async function readRollupTop(observationId, window, { limit = TOP_ROWS_LIMIT, groupBy = [] } = {}) {
+async function readRollupTop(observationId, window, {
+  limit = TOP_ROWS_LIMIT,
+  groupBy = [],
+  metric: metricKey = 'bps',
+} = {}) {
   try {
+    const metric = normalizeObservationChartMetric(metricKey);
+    const orderCol = rollupTopOrderColumn(metric);
     const windowSeconds = Math.max(
       60,
       Math.round((new Date(window.to) - new Date(window.from)) / 1000) || 3600,
@@ -1201,7 +1283,7 @@ async function readRollupTop(observationId, window, { limit = TOP_ROWS_LIMIT, gr
         AND minute < ${parseDataDatetimeSql('to')}
         AND ${rollupGroupedRowSql()}
       GROUP BY ${rollupDimColumns(dimCount).join(', ')}
-      ORDER BY bytes DESC
+      ORDER BY ${orderCol} DESC
       LIMIT {limit:UInt32}
     `, {
       id: observationId,
@@ -1211,23 +1293,28 @@ async function readRollupTop(observationId, window, { limit = TOP_ROWS_LIMIT, gr
     }, { name: 'observations/rollup-top' });
 
     const totals = await readRollupPeriodTotals(observationId, window);
-    const shownBytes = rows.reduce((s, r) => s + (Number(r.bytes) || 0), 0);
+    const shownSort = rows.reduce((s, r) => s + observationRowSortAmount(r, metric), 0);
     // Share is against the whole filtered traffic, not just the rows we display.
-    const pctBase = totals?.bytes || shownBytes || 1;
+    const pctBase = observationTotalsSortAmount(totals, metric) || shownSort || 1;
     const mapped = rows.map((r, i) => {
       const bytes = Number(r.bytes) || 0;
+      const packets = Number(r.packets) || 0;
+      const flows = Number(r.flows) || 0;
       const values = rollupDimColumns(dimCount).map((c) => String(r[c] ?? ''));
+      const sortAmount = observationRowSortAmount(r, metric);
+      const rowSample = { bytes, packets, flows };
+      const avg = observationWindowAverage(rowSample, metric, windowSeconds);
       return {
         id: `rollup-${dimKeyFromRow(r, dimCount)}`,
         key: dimKeyFromRow(r, dimCount),
         values,
         rawValues: [...values],
-        metric: Math.round((bytes * 8) / windowSeconds),
+        metric: avg,
         avgBps: Math.round((bytes * 8) / windowSeconds),
-        pct: Math.round((bytes * 10000) / pctBase) / 100,
+        pct: Math.round((sortAmount * 10000) / pctBase) / 100,
         bytes,
-        packets: Number(r.packets) || 0,
-        flows: Number(r.flows) || 0,
+        packets,
+        flows,
         color: protocolChartColor(i),
       };
     });
@@ -1240,8 +1327,13 @@ async function readRollupTop(observationId, window, { limit = TOP_ROWS_LIMIT, gr
   }
 }
 
-async function readRollupGroupedTimeseries(observationId, window, { seriesLimit = 8, groupBy = [] } = {}) {
-  const top = await readRollupTop(observationId, window, { limit: seriesLimit, groupBy });
+async function readRollupGroupedTimeseries(observationId, window, {
+  seriesLimit = 8,
+  groupBy = [],
+  metric: metricKey = 'bps',
+} = {}) {
+  const metric = normalizeObservationChartMetric(metricKey);
+  const top = await readRollupTop(observationId, window, { limit: seriesLimit, groupBy, metric });
   if (!top.rows.length) {
     return {
       points: [],
@@ -1255,7 +1347,7 @@ async function readRollupGroupedTimeseries(observationId, window, { seriesLimit 
   const dimCount = Math.min(Math.max(groupBy.length || 1, 1), ROLLUP_DIM_COUNT);
 
   try {
-    const totalSeries = await readRollupTimeseries(observationId, window);
+    const totalSeries = await readRollupTimeseries(observationId, window, metric);
     const { rows } = await query(`
       SELECT
         minute,
@@ -1291,12 +1383,14 @@ async function readRollupGroupedTimeseries(observationId, window, { seriesLimit 
         bucketMap.set(minute, { t: minute, bucket: minute, bucketMs });
       }
       const bytes = Number(r.bytes) || 0;
-      bucketMap.get(minute)[key] = Math.round((bytes * 8) / ROLLUP_BUCKET_SEC);
+      const packets = Number(r.packets) || 0;
+      const flows = Number(r.flows) || 0;
+      bucketMap.get(minute)[key] = observationRollupBucketRate({ bytes, packets, flows }, metric, ROLLUP_BUCKET_SEC);
     }
 
     const totalByBucket = new Map();
     for (const p of totalSeries.points || []) {
-      totalByBucket.set(p.t, Number(p.bps) || 0);
+      totalByBucket.set(p.t, Number(p.value) || 0);
       if (!bucketMap.has(p.t)) bucketMap.set(p.t, { t: p.t, bucket: p.t, bucketMs: p.bucketMs ?? null });
     }
 
@@ -1323,7 +1417,12 @@ async function readRollupGroupedTimeseries(observationId, window, { seriesLimit 
       lines.push({ key: OTHER_KEY, label: OTHER_LABEL, color: OTHER_COLOR, isOther: true });
     }
 
-    const topRows = appendOtherRow(top.rows, top.totals, top.windowSeconds || ROLLUP_BUCKET_SEC);
+    const topRows = appendOtherRow(
+      top.rows,
+      top.totals,
+      top.windowSeconds || ROLLUP_BUCKET_SEC,
+      metric,
+    );
     return {
       points,
       lines,
@@ -1395,8 +1494,13 @@ async function fetchThresholdTopRows(obs, window, { groupBy, limit, metric = 'bp
   };
 }
 
-async function fetchThresholdGroupedTimeseries(obs, window, { groupBy, seriesLimit }) {
-  const top = await fetchThresholdTopRows(obs, window, { groupBy, limit: seriesLimit });
+async function fetchThresholdGroupedTimeseries(obs, window, {
+  groupBy,
+  seriesLimit,
+  metric: metricKey = 'bps',
+}) {
+  const metric = normalizeObservationChartMetric(metricKey);
+  const top = await fetchThresholdTopRows(obs, window, { groupBy, limit: seriesLimit, metric });
   if (!top.rows.length) {
     return {
       points: [],
@@ -1414,7 +1518,7 @@ async function fetchThresholdGroupedTimeseries(obs, window, { groupBy, seriesLim
     to: window.to,
     filters: obs.filters,
     thresholds: obs.thresholds,
-    metric: 'bps',
+    metric,
     groupBy,
     granularity: '5m',
   };
@@ -1429,7 +1533,7 @@ async function fetchThresholdGroupedTimeseries(obs, window, { groupBy, seriesLim
       if (!bucketMap.has(bucket)) {
         bucketMap.set(bucket, { t: bucket, bucket, bucketMs: pt.bucketMs ?? null });
       }
-      bucketMap.get(bucket)[row.key] = Number(pt.bps ?? pt.value) || 0;
+      bucketMap.get(bucket)[row.key] = Number(pt.value) || 0;
     }
   }
   const points = [...bucketMap.values()].sort((a, b) => String(a.bucket).localeCompare(String(b.bucket)));
@@ -1455,10 +1559,15 @@ async function previewObservationWithThresholds(obs, window) {
   for (const w of obs.widgets) {
     try {
       if (w.type === 'timeseries_bps') {
+        const chartMetric = normalizeObservationChartMetric(w.metric);
         const groupBy = observationChartGroupBy(obs, w);
         if (groupBy.length) {
           const seriesLimit = observationSeriesLimit(obs, w);
-          const data = await fetchThresholdGroupedTimeseries(obs, window, { groupBy, seriesLimit });
+          const data = await fetchThresholdGroupedTimeseries(obs, window, {
+            groupBy,
+            seriesLimit,
+            metric: chartMetric,
+          });
           widgets.push({
             id: w.id,
             type: w.type,
@@ -1479,6 +1588,7 @@ async function previewObservationWithThresholds(obs, window) {
               requested: seriesLimit,
               totals: data.totals,
               windowSeconds: data.windowSeconds,
+              metric: chartMetric,
             };
           }
           continue;
@@ -1486,7 +1596,7 @@ async function previewObservationWithThresholds(obs, window) {
 
         const bundle = await explorerTimeseries({
           ...window,
-          metric: 'bps',
+          metric: chartMetric,
           filters: obs.filters,
           thresholds: obs.thresholds,
           granularity: '5m',
@@ -1500,12 +1610,14 @@ async function previewObservationWithThresholds(obs, window) {
           source: 'flows_raw',
           status: 'ok',
           series,
+          points: series,
           warning: null,
         });
         continue;
       }
 
       if (w.type === 'top_table') {
+        const tableMetric = normalizeObservationChartMetric(w.metric);
         const groupBy = w.groupBy?.length ? w.groupBy : ['src_asn'];
         const wantRows = TOP_ROWS_LIMIT;
         const cachedRows = Array.isArray(cachedTop?.rows)
@@ -1527,7 +1639,11 @@ async function previewObservationWithThresholds(obs, window) {
           });
           continue;
         }
-        const data = await fetchThresholdTopRows(obs, window, { groupBy, limit: wantRows });
+        const data = await fetchThresholdTopRows(obs, window, {
+          groupBy,
+          limit: wantRows,
+          metric: tableMetric,
+        });
         widgets.push({
           id: w.id,
           type: w.type,
@@ -1581,6 +1697,7 @@ async function previewObservation(id, userId, body = {}) {
   for (const w of obs.widgets) {
     try {
       if (w.type === 'timeseries_bps') {
+        const chartMetric = normalizeObservationChartMetric(w.metric);
         if (isNativeAggregateWidget(w)) {
           const collectorId = resolveNativeCollectorId(w, body);
           const nativeWidget = w.dataSource === 'vlan_trend'
@@ -1612,7 +1729,11 @@ async function previewObservation(id, userId, body = {}) {
             continue;
           }
           const seriesLimit = observationSeriesLimit(obs, w);
-          const data = await readRollupGroupedTimeseries(obs.id, window, { seriesLimit, groupBy });
+          const data = await readRollupGroupedTimeseries(obs.id, window, {
+            seriesLimit,
+            groupBy,
+            metric: chartMetric,
+          });
           widgets.push({
             id: w.id,
             type: w.type,
@@ -1634,13 +1755,14 @@ async function previewObservation(id, userId, body = {}) {
               requested: seriesLimit,
               totals: data.totals || null,
               windowSeconds: data.windowSeconds || ROLLUP_BUCKET_SEC,
+              metric: chartMetric,
             };
           }
           continue;
         }
 
         if (useRollup) {
-          const data = await readRollupTimeseries(obs.id, window);
+          const data = await readRollupTimeseries(obs.id, window, chartMetric);
           widgets.push({
             id: w.id,
             type: w.type,
@@ -1664,7 +1786,7 @@ async function previewObservation(id, userId, body = {}) {
         } else {
           const bundle = await explorerTimeseries({
             ...window,
-            metric: 'bps',
+            metric: chartMetric,
             filters: obs.filters,
             granularity: '5m',
           });
@@ -1677,6 +1799,7 @@ async function previewObservation(id, userId, body = {}) {
             source: 'explorer/native',
             status: 'ok',
             series,
+            points: series,
             warning: null,
           });
         }
@@ -1684,6 +1807,7 @@ async function previewObservation(id, userId, body = {}) {
       }
 
       if (w.type === 'top_table') {
+        const tableMetric = normalizeObservationChartMetric(w.metric);
         const groupBy = w.groupBy?.length ? w.groupBy : ['src_asn'];
         const wantRows = TOP_ROWS_LIMIT;
         const cachedRows = Array.isArray(cachedTop?.rows)
@@ -1704,7 +1828,12 @@ async function previewObservation(id, userId, body = {}) {
             type: w.type,
             source: useRollup ? ROLLUP_TABLE : 'none',
             status: 'ok',
-            rows: appendOtherRow(shown, cachedTop.totals, cachedTop.windowSeconds || ROLLUP_BUCKET_SEC),
+            rows: appendOtherRow(
+              shown,
+              cachedTop.totals,
+              cachedTop.windowSeconds || ROLLUP_BUCKET_SEC,
+              cachedTop.metric || tableMetric,
+            ),
             groupBy,
             warning: cachedTop.rows.length ? null : (useRollup ? rollupEmptyWarning(obs) : null),
           });
@@ -1722,13 +1851,18 @@ async function previewObservation(id, userId, body = {}) {
           });
           continue;
         }
-        const data = await readRollupTop(obs.id, window, { limit: wantRows, groupBy });
+        const data = await readRollupTop(obs.id, window, { limit: wantRows, groupBy, metric: tableMetric });
         widgets.push({
           id: w.id,
           type: w.type,
           source: ROLLUP_TABLE,
           status: data.rows.length ? 'ok' : (obs.materialize.status || 'queued'),
-          rows: appendOtherRow(data.rows, data.totals, data.windowSeconds || ROLLUP_BUCKET_SEC),
+          rows: appendOtherRow(
+            data.rows,
+            data.totals,
+            data.windowSeconds || ROLLUP_BUCKET_SEC,
+            tableMetric,
+          ),
           groupBy,
           warning: data.rows.length ? null : rollupEmptyWarning(obs),
           error: data.error || undefined,
@@ -2869,4 +3003,7 @@ module.exports = {
   STUCK_SEC,
   MAX_FAIL_COUNT,
   resolveObservationBackfill,
+  normalizeObservationChartMetric,
+  observationRollupBucketRate,
+  observationWindowAverage,
 };
