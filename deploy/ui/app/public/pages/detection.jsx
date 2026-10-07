@@ -51,10 +51,10 @@ const TELEGRAM_DEFAULTS = {
   vectorNotify: true,
 };
 const TELEGRAM_VECTORS = [
-  { id: 'volume', label: 'Рост объёма', shareKey: 'volumeMinSharePct', enableKey: null, streakKey: 'streak', streakFallback: 3 },
-  { id: 'amplification', label: 'Амплификация', shareKey: 'ampMinSharePct', enableKey: 'ampEnabled', streakKey: 'ampStreak', streakFallback: 1 },
-  { id: 'syn_flood', label: 'SYN-флуд', shareKey: 'synMinSharePct', enableKey: 'synEnabled', streakKey: null, streakFallback: 1 },
-  { id: 'foreign_geo', label: 'Заграница', shareKey: 'geoMinSharePct', enableKey: 'geoEnabled', streakKey: 'geoStreak', streakFallback: 1 },
+  { id: 'volume', label: 'Рост объёма', shareKey: 'volumeMinSharePct' },
+  { id: 'amplification', label: 'Амплификация', shareKey: 'ampMinSharePct' },
+  { id: 'syn_flood', label: 'SYN-флуд', shareKey: 'synMinSharePct' },
+  { id: 'foreign_geo', label: 'Заграница', shareKey: 'geoMinSharePct' },
 ];
 const CHART_PERIODS = [
   { id: '1h', hours: 1, label: '1ч', title: '1 час' },
@@ -908,7 +908,7 @@ function PageDetection() {
     }
   };
 
-  // Админ правит общий порог на вкладке Telegram — берём его значение сразу,
+  // Общий порог правится на вкладке «Пороги» — берём его значение сразу,
   // не дожидаясь перезагрузки списка исключений.
   const globalThreshold = Number(telegram?.growthThreshold ?? thresholdGlobal) || 1.6;
 
@@ -938,7 +938,7 @@ function PageDetection() {
       {pageTab === 'telegram' && (
       <Card
         title="Telegram"
-        subtitle="Алерт — X значений подряд выше порога (строка «общее»). Нормализация — Y значений подряд ниже. Повторный алерт — только после нормализации. Доля ниже порога вектора — только в историю, в Telegram нет. Если api.telegram.org с nta не открывается — укажите SOCKS5 прокси. API URL меняйте только если есть своё зеркало Bot API."
+        subtitle="Куда слать сообщения. Порог, окно и число горячих минут — на вкладке «Пороги»: это обнаружение, а не отправка. Ниже доли паразитного трафика событие пишется в историю и в Telegram не уходит. Если api.telegram.org с nta не открывается — укажите SOCKS5 прокси. API URL меняйте только если есть своё зеркало Bot API."
       >
         <div className="col" style={{ gap: 10, font: 'var(--pv-text-body-3)' }}>
           {telegramForbidden ? (
@@ -999,17 +999,6 @@ function PageDetection() {
                     placeholder="-100…"
                   />
                 </label>
-                <label className="col" style={{ gap: 4, minWidth: 120 }}>
-                  <span>Порог общий</span>
-                  <input
-                    className="input"
-                    type="number"
-                    step="0.1"
-                    min="0.1"
-                    value={telegram?.growthThreshold ?? 1.6}
-                    onChange={(e) => setTelegram(patchTelegram(telegram, { growthThreshold: Number(e.target.value) }))}
-                  />
-                </label>
                 <label className="col" style={{ gap: 4, minWidth: 160 }}>
                   <span>Рассылка по</span>
                   <select
@@ -1034,47 +1023,6 @@ function PageDetection() {
                     <option value="peak">Всплески</option>
                   </select>
                 </label>
-                <label className="col" style={{ gap: 4, minWidth: 180 }}>
-                  <span>Подряд ниже порога</span>
-                  <input
-                    className="input"
-                    type="number"
-                    min="1"
-                    max="60"
-                    step="1"
-                    value={telegram?.normalizeStreak ?? 3}
-                    onChange={(e) => setTelegram(patchTelegram(telegram, { normalizeStreak: Number(e.target.value) }))}
-                    title="Для отражения, SYN и заграницы. Объём закрывается по своему полю."
-                  />
-                </label>
-                <label className="col" style={{ gap: 4, minWidth: 180 }}>
-                  <span>Объём: окно, мин</span>
-                  <input
-                    className="input"
-                    type="number"
-                    min="1"
-                    max="60"
-                    step="1"
-                    value={telegram?.volumeWindow ?? 6}
-                    onChange={(e) => setTelegram(patchTelegram(telegram, { volumeWindow: Number(e.target.value) }))}
-                    title="Алерт по объёму открывается, когда за это окно набралось «Подряд» горячих минут, не обязательно подряд."
-                  />
-                </label>
-                <label className="col" style={{ gap: 4, minWidth: 180 }}>
-                  <span>Объём: тихих минут до закрытия</span>
-                  <input
-                    className="input"
-                    type="number"
-                    min="1"
-                    max="60"
-                    step="1"
-                    value={telegram?.volumeQuiet ?? 10}
-                    onChange={(e) => setTelegram(patchTelegram(telegram, { volumeQuiet: Number(e.target.value) }))}
-                  />
-                </label>
-              </div>
-              <div style={{ color: 'var(--fg-muted)', font: 'var(--pv-text-body-3)' }}>
-                Объём: алерт открывается на N горячих минутах из окна (N — «Подряд» в строке «Рост объёма»), так импульсная атака 1 минута через 1–2 не теряется. Закрывается после указанного числа тихих минут подряд.
               </div>
               <label className="row" style={{ gap: 8, alignItems: 'center' }}>
                 <input
@@ -1092,56 +1040,18 @@ function PageDetection() {
                   <thead>
                     <tr>
                       <th>Вектор</th>
-                      <th>В Telegram</th>
-                      <th className="num">Подряд</th>
                       <th className="num">Мин. доля клиента, %</th>
                     </tr>
                   </thead>
                   <tbody>
                     {TELEGRAM_VECTORS.map((vector) => {
                       const share = telegram?.[vector.shareKey] ?? 10;
-                      const streak = vector.streakKey
-                        ? (telegram?.[vector.streakKey] ?? vector.streakFallback)
-                        : vector.streakFallback;
                       return (
                         <tr key={vector.id}>
                           <td>{vector.label}</td>
-                          <td>
-                            {vector.enableKey ? (
-                              <label className="row" style={{ gap: 8, alignItems: 'center' }}>
-                                <input
-                                  type="checkbox"
-                                  checked={telegram?.[vector.enableKey] !== false}
-                                  onChange={(e) => setTelegram(patchTelegram(telegram, {
-                                    [vector.enableKey]: e.target.checked,
-                                  }))}
-                                />
-                                <span>следить</span>
-                              </label>
-                            ) : (
-                              <span style={{ color: 'var(--fg-muted)' }}>всегда</span>
-                            )}
-                          </td>
-                          <td className="num">
-                            {vector.streakKey ? (
-                              <input
-                                className="input"
-                                type="number"
-                                min="1"
-                                max="60"
-                                step="1"
-                                value={streak}
-                                onChange={(e) => setTelegram(patchTelegram(telegram, {
-                                  [vector.streakKey]: Number(e.target.value),
-                                }))}
-                              />
-                            ) : (
-                              <span style={{ color: 'var(--fg-muted)' }}>{streak}</span>
-                            )}
-                          </td>
                           <td className="num">
                             {vector.id === 'amplification' || vector.id === 'syn_flood' ? (
-                              <span style={{ color: 'var(--fg-muted)' }}>вкладка «Пороги»</span>
+                              <span style={{ color: 'var(--fg-muted)' }}>не используется</span>
                             ) : (
                               <input
                                 className="input"
@@ -1175,6 +1085,100 @@ function PageDetection() {
                 >
                   Тестовое сообщение
                 </Button>
+              </div>
+            </>
+          )}
+        </div>
+      </Card>
+      )}
+
+      {pageTab === 'thresholds' && (
+      <Card
+        title="Рост объёма"
+        subtitle="Событие открывается, когда за окно набралось нужное число горячих минут. Горячая минута — рост не ниже общего порога, минуты не обязаны идти подряд. Закрывается после тихих минут подряд. Это обнаружение: в Telegram уходит отдельно, по вкладке «Telegram»."
+      >
+        <div className="col" style={{ gap: 10, font: 'var(--pv-text-body-3)' }}>
+          {telegramForbidden ? (
+            <div style={{ color: 'var(--fg-secondary)' }}>
+              Настройки порогов доступны только администратору.
+            </div>
+          ) : !telegram && !telegramError ? (
+            <div style={{ color: 'var(--fg-muted)' }}>Загрузка настроек…</div>
+          ) : (
+            <>
+              {telegramError && (
+                <div style={{ color: 'var(--st-critical)' }}>{telegramError}</div>
+              )}
+              <div className="row" style={{ gap: 12, flexWrap: 'wrap' }}>
+                <label className="col" style={{ gap: 4, minWidth: 140 }}>
+                  <span>Порог общий</span>
+                  <input
+                    className="input"
+                    type="number"
+                    step="0.1"
+                    min="0.1"
+                    value={telegram?.growthThreshold ?? 1.6}
+                    onChange={(e) => setTelegram(patchTelegram(telegram, { growthThreshold: Number(e.target.value) }))}
+                  />
+                </label>
+                <label className="col" style={{ gap: 4, minWidth: 160 }}>
+                  <span>Горячих минут</span>
+                  <input
+                    className="input"
+                    type="number"
+                    min="1"
+                    max="60"
+                    step="1"
+                    value={telegram?.streak ?? 3}
+                    onChange={(e) => setTelegram(patchTelegram(telegram, { streak: Number(e.target.value) }))}
+                    title="Сколько горячих минут нужно набрать в окне, чтобы открыть событие."
+                  />
+                </label>
+                <label className="col" style={{ gap: 4, minWidth: 140 }}>
+                  <span>Окно, мин</span>
+                  <input
+                    className="input"
+                    type="number"
+                    min="1"
+                    max="60"
+                    step="1"
+                    value={telegram?.volumeWindow ?? 6}
+                    onChange={(e) => setTelegram(patchTelegram(telegram, { volumeWindow: Number(e.target.value) }))}
+                    title="За сколько минут считать горячие. Например, 3 горячие за 10 минут."
+                  />
+                </label>
+                <label className="col" style={{ gap: 4, minWidth: 200 }}>
+                  <span>Тихих минут до закрытия</span>
+                  <input
+                    className="input"
+                    type="number"
+                    min="1"
+                    max="60"
+                    step="1"
+                    value={telegram?.volumeQuiet ?? 10}
+                    onChange={(e) => setTelegram(patchTelegram(telegram, { volumeQuiet: Number(e.target.value) }))}
+                    title="Событие по объёму закрывается после стольких тихих минут подряд."
+                  />
+                </label>
+                <label className="col" style={{ gap: 4, minWidth: 220 }}>
+                  <span>Минут ниже порога</span>
+                  <input
+                    className="input"
+                    type="number"
+                    min="1"
+                    max="60"
+                    step="1"
+                    value={telegram?.normalizeStreak ?? 3}
+                    onChange={(e) => setTelegram(patchTelegram(telegram, { normalizeStreak: Number(e.target.value) }))}
+                    title="Закрытие отражения, SYN и заграницы. Объём закрывается полем «Тихих минут до закрытия»."
+                  />
+                </label>
+              </div>
+              <div style={{ color: 'var(--fg-muted)' }}>
+                Импульсная атака не теряется: горячие минуты считаются внутри окна, а не строго подряд. «Минут ниже порога» закрывает отражение, SYN и заграницу.
+              </div>
+              <div className="row" style={{ gap: 8 }}>
+                <Button size="sm" disabled={telegramBusy} onClick={saveTelegram}>Сохранить</Button>
               </div>
             </>
           )}
@@ -1310,7 +1314,45 @@ function PageDetection() {
             </label>
           </div>
           <div style={{ color: 'var(--fg-muted)' }}>
-            Если за этот час ещё нет нормы, решает только минимум. Алерт открывается с первой горячей минуты; закрытие — по «Подряд ниже порога» с вкладки Telegram.
+            Если за этот час ещё нет нормы, решает только минимум. Событие открывается с первой горячей минуты; закрытие — по полю «Минут ниже порога» в блоке «Рост объёма».
+          </div>
+          <div className="row" style={{ gap: 8 }}>
+            <Button size="sm" disabled={telegramBusy} onClick={saveTelegram}>Сохранить</Button>
+          </div>
+        </div>
+      </Card>
+      )}
+
+      {pageTab === 'thresholds' && !telegramForbidden && telegram && (
+      <Card
+        title="Заграница"
+        subtitle="Срабатывает у абонента, когда растёт доля трафика из-за рубежа и объём выше общего порога. Доля, ниже которой сообщение не уходит в Telegram, задаётся на вкладке «Telegram»."
+      >
+        <div className="col" style={{ gap: 10, font: 'var(--pv-text-body-3)' }}>
+          <label className="row" style={{ gap: 8, alignItems: 'center' }}>
+            <input
+              type="checkbox"
+              checked={telegram?.geoEnabled !== false}
+              onChange={(e) => setTelegram(patchTelegram(telegram, { geoEnabled: e.target.checked }))}
+            />
+            Следить за заграницей
+          </label>
+          <div className="row" style={{ gap: 12, flexWrap: 'wrap' }}>
+            <label className="col" style={{ gap: 4, minWidth: 160 }}>
+              <span>Минут подряд</span>
+              <input
+                className="input"
+                type="number"
+                min="1"
+                max="60"
+                step="1"
+                value={telegram?.geoStreak ?? 1}
+                onChange={(e) => setTelegram(patchTelegram(telegram, { geoStreak: Number(e.target.value) }))}
+              />
+            </label>
+          </div>
+          <div style={{ color: 'var(--fg-muted)' }}>
+            Закрытие — по полю «Минут ниже порога» в блоке «Рост объёма».
           </div>
           <div className="row" style={{ gap: 8 }}>
             <Button size="sm" disabled={telegramBusy} onClick={saveTelegram}>Сохранить</Button>
