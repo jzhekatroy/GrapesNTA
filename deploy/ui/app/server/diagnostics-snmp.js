@@ -85,8 +85,10 @@ async function loadJobStatus() {
 
 async function loadAgentStats() {
   try {
-    // net_snmp_agents_current is already aggregated (argMax). Wrapping those
-    // columns in max()/countIf() inlines as nested aggregates and ClickHouse rejects it.
+    // ui_read has the analyzer on. max(last_ok_at) AS last_ok_at is rewritten
+    // into a nested aggregate (ILLEGAL_AGGREGATION). The alias must not reuse
+    // the column name. The current view is also already an argMax, so this
+    // reads the table with FINAL instead.
     const { rows } = await query(`
       SELECT
         count() AS total,
@@ -98,8 +100,8 @@ async function loadAgentStats() {
         countIf(snmp_enabled = 1 AND last_poll_status = 'timeout') AS timeout,
         countIf(snmp_enabled = 1 AND last_poll_status = 'auth_error') AS auth_error,
         countIf(snmp_enabled = 1 AND last_poll_status IN ('error', 'config_error')) AS error,
-        max(last_poll_at) AS last_poll_at,
-        max(last_ok_at) AS last_ok_at,
+        max(last_poll_at) AS last_poll_max,
+        max(last_ok_at) AS last_ok_max,
         countIf(snmp_enabled = 1 AND last_ok_at = toDateTime(0, 'UTC')) AS never_ok
       FROM ${config.database}.net_snmp_agents FINAL
     `, {}, { name: 'diagnostics/snmp-agents' });
@@ -114,8 +116,8 @@ async function loadAgentStats() {
       timeout: Number(r.timeout) || 0,
       authError: Number(r.auth_error) || 0,
       error: Number(r.error) || 0,
-      lastPollAt: toIsoLoose(r.last_poll_at),
-      lastOkAt: epochToNull(toIsoLoose(r.last_ok_at)),
+      lastPollAt: toIsoLoose(r.last_poll_max),
+      lastOkAt: epochToNull(toIsoLoose(r.last_ok_max)),
       neverOk: Number(r.never_ok) || 0,
       errorMessage: null,
     };

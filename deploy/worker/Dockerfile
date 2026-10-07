@@ -32,6 +32,8 @@ RUN groupadd --gid 1001 app \
 COPY --from=deps /app/analytics/node_modules /app/analytics/node_modules
 COPY deploy/analytics/package.json /app/analytics/
 COPY deploy/analytics/server /app/analytics/server
+# analytics/server/explorer-group-mask.js re-exports the shared browser module.
+COPY deploy/ui/app/public/data/explorer-group-mask.js /app/ui/app/public/data/explorer-group-mask.js
 # CLI must sit next to analytics/server so require('../server/erp-piterix-run') resolves.
 COPY deploy/analytics/scripts /app/analytics/scripts
 COPY scripts/traffic_rollup_async.py scripts/traffic_rollup_jobs.py scripts/flow_thinning.py /app/scripts/
