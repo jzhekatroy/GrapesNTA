@@ -115,6 +115,8 @@
     'chrome.themeDark': 'Dark theme',
     'chrome.logout': 'Log out',
     'chrome.language': 'Interface language',
+    'chrome.resetZoom': 'Reset zoom',
+    'chrome.resetZoomTitle': 'Return to previous period',
 
     'tz.auto': 'Auto — browser time zone',
     'tz.moscow': 'Moscow',

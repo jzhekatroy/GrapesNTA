@@ -560,11 +560,11 @@ function Header({ current, onNavigate, onToggleSidebar, currentUser, onLogout, o
             <button
               type="button"
               className="time-pill time-pill--reset"
-              title="Вернуть предыдущий период"
+              title={t('chrome.resetZoomTitle')}
               onClick={onChartZoomReset}
             >
               <Icon name="zoom" size={14} />
-              <span>Сброс zoom</span>
+              <span>{t('chrome.resetZoom')}</span>
             </button>
           )}
         </div>

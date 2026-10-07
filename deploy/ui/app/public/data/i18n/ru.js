@@ -115,6 +115,8 @@
     'chrome.themeDark': 'Тёмная тема',
     'chrome.logout': 'Выйти',
     'chrome.language': 'Язык интерфейса',
+    'chrome.resetZoom': 'Сброс zoom',
+    'chrome.resetZoomTitle': 'Вернуть предыдущий период',
 
     'tz.auto': 'Авто — пояс браузера',
     'tz.moscow': 'Москва',
