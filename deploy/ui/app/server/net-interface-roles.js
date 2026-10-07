@@ -644,6 +644,28 @@ async function deleteInterfaceRole(body = {}, { updatedBy = '' } = {}) {
  * Её читают отчёты и (на следующем этапе) коллектор — чтобы не тянуть
  * правила и regex в горячий путь обработки потоков.
  */
+function parseInterfaceRoleEntries(body = {}) {
+  return Array.isArray(body?.interfaces) && body.interfaces.length
+    ? body.interfaces
+    : [body];
+}
+
+/** Снимок порта для аудита (сторона/стык до изменения). */
+async function fetchInterfacePortForAudit(switchIp, ifIndex) {
+  const ip = String(switchIp || '').trim();
+  const index = Number(ifIndex);
+  if (!net.isIP(ip) || !Number.isInteger(index) || index <= 0) return null;
+
+  const spec = listInterfaceRoles(ip);
+  const { rows } = await query(
+    spec.sql,
+    spec.params,
+    { name: 'refs/interface-role-audit-snapshot' },
+  );
+  const ports = spec.map(rows);
+  return ports.find((p) => p.ifIndex === index) || null;
+}
+
 async function materializeEffectiveRoles() {
   const [rules, settings] = await Promise.all([fetchActiveRules(), fetchDirectionSettings()]);
   const parts = effectiveSqlParts(rules, settings);
@@ -785,4 +807,6 @@ module.exports = {
   deleteInterfaceRole,
   materializeEffectiveRoles,
   getInterfaceRoleSummary,
+  parseInterfaceRoleEntries,
+  fetchInterfacePortForAudit,
 };

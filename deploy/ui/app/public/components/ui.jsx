@@ -365,6 +365,9 @@ function DataTable({
   onRowMouseLeave,
   getRowClassName,
   pageSize = 10,
+  page: controlledPage,
+  onPageChange,
+  totalRows,
   dense,
   footerNote,
   fitColumnWidths,
@@ -372,7 +375,10 @@ function DataTable({
   horizontalScrollControls = false,
 }) {
   const [sort, setSort] = useState(initialSort || null);
-  const [page, setPage] = useState(1);
+  const [internalPage, setInternalPage] = useState(1);
+  const serverPaged = typeof onPageChange === 'function';
+  const page = serverPaged ? (controlledPage ?? 1) : internalPage;
+  const setPage = serverPaged ? onPageChange : setInternalPage;
   const [colVis, setColVis] = useState(() => Object.fromEntries(columns.map(c => [c.key, true])));
   const [colMenu, setColMenu] = useState(false);
   const [colWidths, setColWidths] = useState(() => Object.fromEntries(
@@ -441,10 +447,16 @@ function DataTable({
     });
   }, [rows, sort, columns]);
 
-  const totalPages = Math.max(1, Math.ceil(sorted.length / pageSize));
-  const pageRows = useMemo(() => sorted.slice((page - 1) * pageSize, page * pageSize), [sorted, page, pageSize]);
+  const rowCount = serverPaged && totalRows != null ? totalRows : sorted.length;
+  const totalPages = Math.max(1, Math.ceil(rowCount / pageSize));
+  const pageRows = useMemo(() => {
+    if (serverPaged) return sorted;
+    return sorted.slice((page - 1) * pageSize, page * pageSize);
+  }, [sorted, page, pageSize, serverPaged]);
 
-  useEffect(() => { if (page > totalPages) setPage(totalPages); }, [totalPages]);
+  useEffect(() => {
+    if (!serverPaged && page > totalPages) setInternalPage(totalPages);
+  }, [totalPages, page, serverPaged]);
 
   const toggleSort = (key) => {
     setSort((s) => !s || s.key !== key ? { key, dir: 'asc' } : s.dir === 'asc' ? { key, dir: 'desc' } : null);
@@ -719,8 +731,8 @@ function DataTable({
         <div className="table-foot__row">
           <div>
             {selectable && selected?.size > 0
-              ? <span>Выбрано: <b style={{color: 'var(--fg-primary)'}}>{selected.size}</b> из {sorted.length}</span>
-              : <span>{sorted.length} {pluralRu(sorted.length, 'запись', 'записи', 'записей')}</span>
+              ? <span>Выбрано: <b style={{color: 'var(--fg-primary)'}}>{selected.size}</b> из {rowCount}</span>
+              : <span>{rowCount} {pluralRu(rowCount, 'запись', 'записи', 'записей')}</span>
             }
           </div>
           <Pagination page={page} totalPages={totalPages} onChange={setPage} />

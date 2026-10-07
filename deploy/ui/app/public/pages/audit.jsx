@@ -15,6 +15,8 @@ const KIND_OPTIONS = [
   { id: 'write', label: 'Изменение' },
 ];
 
+const AUDIT_PAGE_SIZE = 25;
+
 const RESULT_OPTIONS = [
   { id: 'all', label: 'Все результаты' },
   { id: 'ok', label: 'ok' },
@@ -95,6 +97,124 @@ function auditObjectLabel(row) {
   return '—';
 }
 
+function parseAuditDetail(detail) {
+  if (detail == null || detail === '') return null;
+  const text = String(detail).trim();
+  if (!text) return null;
+  if (text.startsWith('{') || text.startsWith('[')) {
+    try {
+      return JSON.parse(text);
+    } catch {
+      return { legacyText: text };
+    }
+  }
+  return { legacyText: text };
+}
+
+function auditRequestForRow(row) {
+  const parsed = parseAuditDetail(row.detail);
+  if (parsed?.request) return parsed.request;
+  if (row.method && row.path) {
+    return { method: row.method, path: row.path };
+  }
+  return null;
+}
+
+function auditBodyFallbackSummary(body) {
+  if (!body || typeof body !== 'object') return '';
+  const parts = [];
+  if (body.resolverId || body.resolver_id) {
+    parts.push(`резолвер ${body.resolverId || body.resolver_id}`);
+  }
+  if (body.enabled !== undefined) {
+    parts.push(`состояние → ${body.enabled === 1 || body.enabled === true ? 'вкл' : 'выкл'}`);
+  }
+  if (body.switchIp || body.switch_ip) {
+    const ip = body.switchIp || body.switch_ip;
+    const idx = body.ifIndex ?? body.if_index;
+    parts.push(`порт ${ip}${idx != null ? `:${idx}` : ''}`);
+  }
+  if (body.boundary) parts.push(`сторона → ${body.boundary}`);
+  if (Array.isArray(body.interfaces) && body.interfaces.length) {
+    parts.push(`${body.interfaces.length} порт(ов)`);
+  }
+  return parts.join('; ');
+}
+
+function auditChangesSummary(row, { maxItems = 3 } = {}) {
+  const parsed = parseAuditDetail(row.detail);
+  if (parsed?.changes?.length) {
+    const parts = parsed.changes.slice(0, maxItems).map(
+      (c) => `${c.label}: ${c.from} → ${c.to}`,
+    );
+    if (parsed.changes.length > maxItems) {
+      parts.push(`… ещё ${parsed.changes.length - maxItems}`);
+    }
+    return parts.join('; ');
+  }
+  const request = auditRequestForRow(row);
+  const bodySummary = auditBodyFallbackSummary(request?.body);
+  if (bodySummary) return bodySummary;
+  if (parsed?.legacyText) return parsed.legacyText;
+  return '';
+}
+
+function formatAuditRequestBlock(request) {
+  if (!request) return '';
+  const lines = [`${request.method || 'GET'} ${request.path || ''}`.trim()];
+  if (request.body && Object.keys(request.body).length) {
+    lines.push(JSON.stringify(request.body, null, 2));
+  }
+  return lines.join('\n\n');
+}
+
+function AuditChangesList({ changes }) {
+  if (!changes?.length) return null;
+  return (
+    <div className="col" style={{ gap: 6 }}>
+      <strong>Изменения</strong>
+      <ul style={{ margin: 0, paddingLeft: 18, display: 'flex', flexDirection: 'column', gap: 4 }}>
+        {changes.map((c) => (
+          <li key={`${c.field}-${c.label}-${c.from}-${c.to}`}>
+            <span style={{ font: 'var(--pv-text-body-2-bold)' }}>{c.label}</span>
+            {': '}
+            <span className="mono">{c.from}</span>
+            {' → '}
+            <span className="mono">{c.to}</span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+function AuditRequestBlock({ request }) {
+  if (!request) return null;
+  const text = formatAuditRequestBlock(request);
+  return (
+    <div className="col" style={{ gap: 6 }}>
+      <strong>Запрос</strong>
+      <pre
+        className="mono"
+        style={{
+          margin: 0,
+          padding: 10,
+          borderRadius: 8,
+          background: 'var(--bg-surface-3)',
+          border: '1px solid var(--bd-default)',
+          whiteSpace: 'pre-wrap',
+          wordBreak: 'break-word',
+          font: 'var(--pv-text-body-3)',
+          maxHeight: 280,
+          overflow: 'auto',
+        }}
+      >
+        {text}
+      </pre>
+    </div>
+  );
+}
+
 function auditResultLabel(result) {
   if (result === 'ok') return 'ок';
   if (result === 'fail') return 'ошибка';
@@ -118,9 +238,7 @@ function normalizeClientIp(ip) {
 
 function auditFilterIp(raw) {
   const s = String(raw || '').trim();
-  if (!s) return undefined;
-  if (s.includes(':')) return s;
-  return `::ffff:${s}`;
+  return s || undefined;
 }
 
 function auditExportFields(row, displayTimezone) {
@@ -131,6 +249,7 @@ function auditExportFields(row, displayTimezone) {
     ip: normalizeClientIp(row.ip),
     action: auditActionLabel(row),
     object: auditObjectLabel(row),
+    changes: auditChangesSummary(row, { maxItems: 20 }),
     result: auditResultLabel(row.result),
     method: row.method || '',
     path: row.path || '',
@@ -158,16 +277,17 @@ function downloadBlob(filename, parts, mimeType) {
 
 function buildAuditCsv(rows, displayTimezone) {
   const headers = [
-    'Время', 'Кто', 'Роль', 'IP', 'Действие', 'Объект', 'Результат',
-    'Метод', 'Путь', 'Детали', 'User-Agent',
+    'Время', 'Кто', 'Роль', 'IP', 'Действие', 'Объект', 'Изменения', 'Результат',
+    'Метод', 'Путь', 'Запрос', 'User-Agent',
   ];
   const lines = [
     headers.map(csvEscape).join(','),
     ...rows.map((row) => {
       const f = auditExportFields(row, displayTimezone);
+      const reqText = formatAuditRequestBlock(auditRequestForRow(row));
       return [
-        f.time, f.actor, f.role, f.ip, f.action, f.object, f.result,
-        f.method, f.path, f.detail, f.userAgent,
+        f.time, f.actor, f.role, f.ip, f.action, f.object, f.changes, f.result,
+        f.method, f.path, reqText, f.userAgent,
       ].map(csvEscape).join(',');
     }),
   ];
@@ -190,10 +310,11 @@ function buildAuditTxt(rows, displayTimezone, { periodLabel, total }) {
       `  IP: ${f.ip || '—'}`,
       `  Действие: ${f.action}`,
       `  Объект: ${f.object}`,
+      ...(f.changes ? [`  Изменения: ${f.changes}`] : []),
       `  Результат: ${f.result}`,
-      ...(f.method ? [`  Метод: ${f.method}`] : []),
-      ...(f.path ? [`  Путь: ${f.path}`] : []),
-      ...(f.detail ? [`  Детали: ${f.detail}`] : []),
+      ...(formatAuditRequestBlock(auditRequestForRow(row))
+        ? [`  Запрос:\n${formatAuditRequestBlock(auditRequestForRow(row)).split('\n').map((line) => `    ${line}`).join('\n')}`]
+        : []),
       ...(f.userAgent ? [`  User-Agent: ${f.userAgent}`] : []),
     ].join('\n');
   });
@@ -220,29 +341,59 @@ async function fetchAllAuditRows(filters) {
 function PageAudit({ currentUser, displayTimezone }) {
   const canAccess = !!currentUser?.effectivePermissions?.audit;
   const [period, setPeriod] = useState('7d');
-  const [userQuery, setUserQuery] = useState('');
+  const [userId, setUserId] = useState('');
+  const [pageId, setPageId] = useState('');
   const [ipQuery, setIpQuery] = useState('');
   const [kind, setKind] = useState('all');
   const [resultFilter, setResultFilter] = useState('all');
+  const [users, setUsers] = useState([]);
+  const [appPages, setAppPages] = useState([]);
   const [rows, setRows] = useState([]);
   const [total, setTotal] = useState(0);
+  const [page, setPage] = useState(1);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [selected, setSelected] = useState(null);
   const [refreshKey, setRefreshKey] = useState(0);
   const [exporting, setExporting] = useState(false);
 
+  const pageOptions = useMemo(() => {
+    return [...appPages].sort((a, b) => {
+      const sec = String(a.section || '').localeCompare(String(b.section || ''), 'ru');
+      if (sec !== 0) return sec;
+      return String(a.title || '').localeCompare(String(b.title || ''), 'ru');
+    });
+  }, [appPages]);
+
+  const userOptions = useMemo(() => {
+    return [...users].sort((a, b) => String(a.fullName || '').localeCompare(String(b.fullName || ''), 'ru'));
+  }, [users]);
+
+  useEffect(() => {
+    if (!canAccess) return undefined;
+    let cancelled = false;
+    Promise.all([ApiClient.loadUsers(), AppPages.load()])
+      .then(([userList, pages]) => {
+        if (cancelled) return;
+        setUsers(userList || []);
+        setAppPages(pages || []);
+      })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [canAccess]);
+
   const currentFilters = useCallback(() => {
     const range = periodRange(period);
     return {
       from: range.from,
       to: range.to,
-      q: userQuery.trim() || undefined,
+      userId: userId || undefined,
+      pageId: pageId || undefined,
       ip: auditFilterIp(ipQuery),
       kind: kind === 'all' ? undefined : kind,
       result: resultFilter === 'all' ? undefined : resultFilter,
     };
-  }, [period, userQuery, ipQuery, kind, resultFilter]);
+  }, [period, userId, pageId, ipQuery, kind, resultFilter]);
 
   const periodLabel = useMemo(
     () => (PERIOD_PRESETS.find((p) => p.id === period) || PERIOD_PRESETS[1]).label,
@@ -263,12 +414,13 @@ function PageAudit({ currentUser, displayTimezone }) {
       const res = await ApiClient.loadAudit({
         from: range.from,
         to: range.to,
-        q: userQuery.trim() || undefined,
+        userId: userId || undefined,
+        pageId: pageId || undefined,
         ip: auditFilterIp(ipQuery),
         kind: kind === 'all' ? undefined : kind,
         result: resultFilter === 'all' ? undefined : resultFilter,
-        limit: 100,
-        offset: 0,
+        limit: AUDIT_PAGE_SIZE,
+        offset: (page - 1) * AUDIT_PAGE_SIZE,
       });
       setRows(res.data || []);
       setTotal(res.meta?.total ?? (res.data || []).length);
@@ -279,7 +431,12 @@ function PageAudit({ currentUser, displayTimezone }) {
     } finally {
       setLoading(false);
     }
-  }, [canAccess, period, userQuery, ipQuery, kind, resultFilter, refreshKey]);
+  }, [canAccess, period, userId, pageId, ipQuery, kind, resultFilter, page, refreshKey]);
+
+  const applyFilters = () => {
+    setPage(1);
+    setRefreshKey((k) => k + 1);
+  };
 
   useEffect(() => { loadAll(); }, [loadAll]);
 
@@ -351,8 +508,22 @@ function PageAudit({ currentUser, displayTimezone }) {
     {
       key: 'object',
       title: 'Объект',
-      width: 200,
+      width: 180,
       render: (r) => auditObjectLabel(r),
+    },
+    {
+      key: 'changes',
+      title: 'Изменения',
+      width: 280,
+      render: (r) => {
+        const summary = auditChangesSummary(r);
+        if (!summary) return '—';
+        return (
+          <span className="overflow-text" title={summary} style={{ font: 'var(--pv-text-body-3)' }}>
+            {summary}
+          </span>
+        );
+      },
     },
     {
       key: 'result',
@@ -398,20 +569,29 @@ function PageAudit({ currentUser, displayTimezone }) {
         <div className="row" style={{ gap: 12, flexWrap: 'wrap', alignItems: 'flex-end' }}>
           <label className="col" style={{ gap: 4 }}>
             <span style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-secondary)' }}>Период</span>
-            <select className="input" value={period} onChange={(e) => setPeriod(e.target.value)}>
+            <select className="input" value={period} onChange={(e) => { setPeriod(e.target.value); setPage(1); }}>
               {PERIOD_PRESETS.map((p) => (
                 <option key={p.id} value={p.id}>{p.label}</option>
               ))}
             </select>
           </label>
-          <label className="col" style={{ gap: 4, minWidth: 160 }}>
+          <label className="col" style={{ gap: 4, minWidth: 200 }}>
             <span style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-secondary)' }}>Пользователь</span>
-            <input
-              className="input"
-              placeholder="логин или ФИО"
-              value={userQuery}
-              onChange={(e) => setUserQuery(e.target.value)}
-            />
+            <select className="input" value={userId} onChange={(e) => { setUserId(e.target.value); setPage(1); }}>
+              <option value="">Все пользователи</option>
+              {userOptions.map((u) => (
+                <option key={u.id} value={u.id}>{u.fullName} ({u.username})</option>
+              ))}
+            </select>
+          </label>
+          <label className="col" style={{ gap: 4, minWidth: 200 }}>
+            <span style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-secondary)' }}>Страница</span>
+            <select className="input" value={pageId} onChange={(e) => { setPageId(e.target.value); setPage(1); }}>
+              <option value="">Все страницы</option>
+              {pageOptions.map((p) => (
+                <option key={p.id} value={p.id}>{p.title}</option>
+              ))}
+            </select>
           </label>
           <label className="col" style={{ gap: 4, minWidth: 140 }}>
             <span style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-secondary)' }}>IP</span>
@@ -419,12 +599,12 @@ function PageAudit({ currentUser, displayTimezone }) {
               className="input"
               placeholder="185.x.x.x"
               value={ipQuery}
-              onChange={(e) => setIpQuery(e.target.value)}
+              onChange={(e) => { setIpQuery(e.target.value); setPage(1); }}
             />
           </label>
           <label className="col" style={{ gap: 4 }}>
             <span style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-secondary)' }}>Тип</span>
-            <select className="input" value={kind} onChange={(e) => setKind(e.target.value)}>
+            <select className="input" value={kind} onChange={(e) => { setKind(e.target.value); setPage(1); }}>
               {KIND_OPTIONS.map((o) => (
                 <option key={o.id} value={o.id}>{o.label}</option>
               ))}
@@ -432,13 +612,13 @@ function PageAudit({ currentUser, displayTimezone }) {
           </label>
           <label className="col" style={{ gap: 4 }}>
             <span style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-secondary)' }}>Результат</span>
-            <select className="input" value={resultFilter} onChange={(e) => setResultFilter(e.target.value)}>
+            <select className="input" value={resultFilter} onChange={(e) => { setResultFilter(e.target.value); setPage(1); }}>
               {RESULT_OPTIONS.map((o) => (
                 <option key={o.id} value={o.id}>{o.label}</option>
               ))}
             </select>
           </label>
-          <Button kind="primary" onClick={() => setRefreshKey((k) => k + 1)} disabled={loading || !canAccess}>
+          <Button kind="primary" onClick={applyFilters} disabled={loading || !canAccess}>
             Применить
           </Button>
         </div>
@@ -464,16 +644,14 @@ function PageAudit({ currentUser, displayTimezone }) {
             rows={rows}
             columns={cols}
             rowKey="id"
-            pageSize={25}
+            pageSize={AUDIT_PAGE_SIZE}
+            page={page}
+            totalRows={total}
+            onPageChange={setPage}
             onRowClick={(r) => setSelected(r)}
             emptyTitle="За период записей нет"
             emptyDesc="Измените фильтры или период."
           />
-          {total > rows.length && (
-            <div style={{ marginTop: 8, font: 'var(--pv-text-body-3)', color: 'var(--fg-secondary)' }}>
-              Показано {rows.length} из {total} записей
-            </div>
-          )}
         </>
       )}
 
@@ -483,27 +661,27 @@ function PageAudit({ currentUser, displayTimezone }) {
         title="Событие аудита"
         subtitle={selected ? fmtAuditDateTime(selected.eventAt, displayTimezone) : ''}
       >
-        {selected && (
-          <div className="col" style={{ gap: 12, font: 'var(--pv-text-body-3)' }}>
-            <div><strong>Действие:</strong> {auditActionLabel(selected)}</div>
-            <div><strong>Кто:</strong> {selected.actorUsername || '—'}{selected.actorRole ? ` (${selected.actorRole})` : ''}</div>
-            <div><strong>IP:</strong> <span className="mono">{normalizeClientIp(selected.ip) || '—'}</span></div>
-            <div><strong>Объект:</strong> {auditObjectLabel(selected)}</div>
-            <div><strong>Результат:</strong> <span style={auditResultStyle(selected.result)}>{auditResultLabel(selected.result)}</span></div>
-            {selected.path && (
-              <div><strong>Путь:</strong> <span className="mono">{selected.path}</span></div>
-            )}
-            {selected.method && (
-              <div><strong>Метод:</strong> <span className="mono">{selected.method}</span></div>
-            )}
-            {selected.detail && (
-              <div><strong>Детали:</strong> {selected.detail}</div>
-            )}
-            {selected.userAgent && (
-              <div><strong>User-Agent:</strong> <span style={{ wordBreak: 'break-word' }}>{selected.userAgent}</span></div>
-            )}
-          </div>
-        )}
+        {selected && (() => {
+          const parsed = parseAuditDetail(selected.detail);
+          const request = auditRequestForRow(selected);
+          return (
+            <div className="col" style={{ gap: 12, font: 'var(--pv-text-body-3)' }}>
+              <div><strong>Действие:</strong> {auditActionLabel(selected)}</div>
+              <div><strong>Кто:</strong> {selected.actorUsername || '—'}{selected.actorRole ? ` (${selected.actorRole})` : ''}</div>
+              <div><strong>IP:</strong> <span className="mono">{normalizeClientIp(selected.ip) || '—'}</span></div>
+              <div><strong>Объект:</strong> {auditObjectLabel(selected)}</div>
+              <div><strong>Результат:</strong> <span style={auditResultStyle(selected.result)}>{auditResultLabel(selected.result)}</span></div>
+              <AuditChangesList changes={parsed?.changes} />
+              {parsed?.legacyText && !parsed?.changes?.length && (
+                <div><strong>Детали:</strong> {parsed.legacyText}</div>
+              )}
+              <AuditRequestBlock request={request} />
+              {selected.userAgent && (
+                <div><strong>User-Agent:</strong> <span style={{ wordBreak: 'break-word' }}>{selected.userAgent}</span></div>
+              )}
+            </div>
+          );
+        })()}
       </SidePanel>
     </div>
   );

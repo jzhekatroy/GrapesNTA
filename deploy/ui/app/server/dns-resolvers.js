@@ -280,6 +280,8 @@ module.exports = {
   saveDnsResolver,
   setDnsResolverEnabled,
   deleteDnsResolver,
+  fetchLatestDnsResolver,
+  parseResolverKey,
   parseCidr,
   validateDnsResolverPayload,
 };

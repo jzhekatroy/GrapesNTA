@@ -2045,12 +2045,16 @@ const ApiClient = (() => {
     return { data: body.data || [], disk: body.disk || null };
   }
 
-  async function loadAudit({ from, to, q, ip, kind, result, limit, offset } = {}) {
+  async function loadAudit({
+    from, to, q, ip, pageId, userId, kind, result, limit, offset,
+  } = {}) {
     const params = new URLSearchParams();
     if (from) params.set('from', from);
     if (to) params.set('to', to);
     if (q) params.set('q', q);
     if (ip) params.set('ip', ip);
+    if (pageId) params.set('pageId', pageId);
+    if (userId) params.set('userId', userId);
     if (kind) params.set('kind', kind);
     if (result) params.set('result', result);
     if (limit != null) params.set('limit', String(limit));

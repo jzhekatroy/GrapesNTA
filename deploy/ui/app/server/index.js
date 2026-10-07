@@ -722,6 +722,8 @@ app.get('/api/audit', async (req, res) => {
       to: req.query.to,
       q: req.query.q,
       ip: req.query.ip,
+      pageId: req.query.pageId,
+      userId: req.query.userId,
       kind: req.query.kind,
       result: req.query.result,
       limit: req.query.limit,
