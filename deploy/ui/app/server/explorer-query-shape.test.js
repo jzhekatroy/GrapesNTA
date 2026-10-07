@@ -148,6 +148,25 @@ describe('explorer query shape', () => {
     assert.doesNotMatch(spec.sql, /toFixedString\(unhex/);
   });
 
+  it('кладёт сумму всех групп в окно таблицы, до отсечения лимитом', async () => {
+    const spec = await explorerFlows({
+      ...WINDOW,
+      groupBy: ['src_port'],
+      filters: [{ field: 'direction', op: '=', value: 'in' }],
+    });
+    assert.match(spec.sql, /sum\(a\.bytes\) OVER \(\) AS total_bytes/);
+    assert.match(spec.sql, /sum\(a\.packets\) OVER \(\) AS total_packets/);
+    assert.match(spec.sql, /sum\(a\.flows\) OVER \(\) AS total_flows/);
+    spec.meta.flowTotals = null;
+    await spec.map([{
+      g0: '443', total_bytes: '1000', total_packets: '10', total_flows: '2',
+      bytes: 400, packets: 4, flows: 1, metric_value: 1, pct: 40, avg_bps: 1,
+    }]);
+    assert.equal(spec.meta.flowTotals.totalBytes, 1000);
+    assert.equal(spec.meta.flowTotals.totalPackets, 10);
+    assert.equal(spec.meta.flowTotals.totalFlows, 2);
+  });
+
   it('omits unique IP sketches from the default summary', async () => {
     const spec = await explorerSummary({
       ...WINDOW,

@@ -2,7 +2,7 @@
 
 const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
-const { explorerResultSeries } = require('./explorer');
+const { explorerResultSeries, explorerTrafficChart } = require('./explorer');
 
 const WINDOW = {
   range: 'custom',
@@ -64,5 +64,42 @@ describe('explorer result series drill-down', () => {
     assert.equal(spec.params.series_g_1, 174);
     assert.equal(spec.params.series_g_0, undefined);
     assert.equal((spec.sql.match(/f\.`SrcAS` = \{series_g_\d+:UInt32\}/g) || []).length, 1);
+  });
+});
+
+describe('explorer traffic chart', () => {
+  it('считает общий ряд и ряды строк одним проходом, без отбора только выбранных портов', async () => {
+    const spec = await explorerTrafficChart({
+      ...WINDOW,
+      groupBy: ['src_port'],
+      filters: [{ field: 'direction', op: '=', value: 'in' }],
+    }, [
+      { id: 'r1', rawValues: ['443'], values: ['443'] },
+      { id: 'r2', rawValues: ['80'], values: ['80'] },
+    ]);
+    assert.match(spec.sql, /f\.`direction` = \{filter_0:String\}/);
+    assert.match(spec.sql, /sumIf\(/);
+    assert.match(spec.sql, /GROUP BY bucket/);
+    assert.doesNotMatch(spec.sql, /GROUP BY bucket,/);
+    const out = await spec.map([{
+      bucket: '2026-08-14 04:40:00',
+      bucket_ts: 1780000000,
+      bytes: 1000,
+      packets: 10,
+      flows: 2,
+      bps: 100,
+      metric_value: 100,
+      s0_bytes: 400,
+      s0_packets: 4,
+      s0_flows: 1,
+      s1_bytes: 0,
+      s1_packets: 0,
+      s1_flows: 0,
+    }]);
+    assert.equal(out.timeseries.length, 1);
+    assert.equal(out.timeseries[0].bytes, 1000);
+    assert.equal(out.seriesByRow.r1.length, 1);
+    assert.equal(out.seriesByRow.r1[0].bytes, 400);
+    assert.equal(out.seriesByRow.r2.length, 0);
   });
 });

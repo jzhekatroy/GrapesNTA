@@ -2968,6 +2968,35 @@ async function explorerFlowsPeakPath({
   });
 }
 
+// Окно считается до LIMIT, поэтому первая строка несёт сумму по всем группам,
+// а не только по показанным. Нужна для итога и строки «Прочие» без второго прохода.
+function rememberExplorerFlowTotals(meta, rows) {
+  if (meta.pctScope === 'candidate_subset') return;
+  const row = rows?.[0];
+  if (!row || row.total_bytes == null || row.total_bytes === '') return;
+  meta.flowTotals = {
+    totalBytes: Number(row.total_bytes) || 0,
+    totalPackets: Number(row.total_packets) || 0,
+    totalFlows: Number(row.total_flows) || 0,
+  };
+}
+
+function summaryFromFlowTotals(totals, windowSeconds = 0) {
+  const totalBytes = Number(totals?.totalBytes) || 0;
+  const ws = Number(windowSeconds) || 0;
+  return {
+    totalBytes,
+    totalPackets: Number(totals?.totalPackets) || 0,
+    totalFlows: Number(totals?.totalFlows) || 0,
+    avgBps: ws > 0 ? Math.round(totalBytes * 8 / ws) : 0,
+    uniqSrc: null,
+    uniqDst: null,
+    inBytes: null,
+    outBytes: null,
+    topProtocols: [],
+  };
+}
+
 async function explorerFlows(body = {}, options = {}) {
   await ensureFlowsRawSchema();
   const q = normalizeExplorerQuery(body, options);
@@ -3074,7 +3103,10 @@ async function explorerFlows(body = {}, options = {}) {
         sum(${scaled.bytes}) AS bytes,
         round(sum(${scaled.bytes}) * 8 / window_seconds, 0) AS avg_bps,
         sum(${scaled.packets}) AS packets,
-        sum(${scaled.flowWeight}) AS flows${thresholdExtras}${uniqSrcExtra}
+        sum(${scaled.flowWeight}) AS flows,
+        sum(sum(${scaled.bytes})) OVER () AS total_bytes,
+        sum(sum(${scaled.packets})) OVER () AS total_packets,
+        sum(sum(${scaled.flowWeight})) OVER () AS total_flows${thresholdExtras}${uniqSrcExtra}
       FROM ${flowsRawTableRef()} AS f
       ${joinSql}
       PREWHERE f.date >= toDate(ts_from) - 1
@@ -3090,6 +3122,7 @@ async function explorerFlows(body = {}, options = {}) {
       groups,
       clickhouse_settings: EXPLORER_CH_SETTINGS,
       async map(rows) {
+        rememberExplorerFlowTotals(meta, rows);
         return mapExplorerFlowRows(
           groups, rows, windowSeconds, vlanGroupIndexes, asnGroupIndexes, tcpGroupIndexes, asPathGroupIndexes,
         );
@@ -3237,6 +3270,13 @@ async function explorerFlows(body = {}, options = {}) {
         round(a.bytes / nullIf(a.flows, 0), 2) AS avg_flow_size`
     : '';
 
+  const plainTotalsSql = useCandidatePrefetch
+    ? ''
+    : `,
+        sum(a.bytes) OVER () AS total_bytes,
+        sum(a.packets) OVER () AS total_packets,
+        sum(a.flows) OVER () AS total_flows`;
+
   const innerSql = plan.mayCollapse
     ? `
       WITH
@@ -3249,7 +3289,10 @@ async function explorerFlows(body = {}, options = {}) {
         sum(a.bytes) AS bytes,
         round(sum(a.bytes) * 8 / window_seconds, 0) AS avg_bps,
         sum(a.packets) AS packets,
-        sum(a.flows) AS flows${twoPhaseThresholdExtras}
+        sum(a.flows) AS flows,
+        sum(sum(a.bytes)) OVER () AS total_bytes,
+        sum(sum(a.packets)) OVER () AS total_packets,
+        sum(sum(a.flows)) OVER () AS total_flows${twoPhaseThresholdExtras}
       FROM (
         ${plainInnerAgg}
       ) AS a
@@ -3269,7 +3312,7 @@ async function explorerFlows(body = {}, options = {}) {
         a.bytes AS bytes,
         round(a.bytes * 8 / window_seconds, 0) AS avg_bps,
         a.packets AS packets,
-        a.flows AS flows${twoPhaseThresholdExtrasPlain}
+        a.flows AS flows${plainTotalsSql}${twoPhaseThresholdExtrasPlain}
       FROM inner_agg AS a
       ${uniqueLabelJoins.join('\n      ')}
     `;
@@ -3285,6 +3328,7 @@ async function explorerFlows(body = {}, options = {}) {
     requestTimeoutMs: heavyTimeoutMs,
     orderBy,
     async map(rows) {
+      rememberExplorerFlowTotals(meta, rows);
       return mapExplorerFlowRows(
         groups, rows, windowSeconds, vlanGroupIndexes, asnGroupIndexes, tcpGroupIndexes, asPathGroupIndexes,
       );
@@ -3531,6 +3575,132 @@ function explorerFlowRowIdByGroupKey(flowRows) {
     if (rawKey !== labelKey) idByKey.set(rawKey, row.id);
   }
   return idByKey;
+}
+
+function explorerSeriesMatchers(groups, dims, flowRows, params) {
+  const matched = [];
+  let paramIndex = 0;
+  for (const row of flowRows) {
+    const conds = [];
+    for (let gi = 0; gi < groups.length; gi += 1) {
+      const g = groups[gi];
+      const paramName = `series_g_${paramIndex}`;
+      paramIndex += 1;
+      const rawValue = row.rawValues?.[gi] ?? row.values?.[gi] ?? '';
+      const cond = explorerSeriesGroupCondition(g, dims[g], rawValue, paramName, params);
+      if (cond == null) {
+        conds.length = 0;
+        break;
+      }
+      conds.push(cond);
+    }
+    if (conds.length) matched.push({ row, cond: conds.join(' AND ') });
+  }
+  return matched;
+}
+
+// Общий график и графики выбранных групп — один проход по потокам.
+// sum() даёт весь отфильтрованный трафик, sumIf — только строку таблицы.
+async function explorerTrafficChart(body = {}, flowRows = [], options = {}) {
+  const q = normalizeExplorerQuery(body, options);
+  const { groups, dims } = resolveExplorerGroupState(
+    q.groupBy,
+    explorerDimensionsForOptions(options),
+  );
+  const scaled = explorerScaledFlowExprs('f');
+  const gran = resolveExplorerGranularity(q);
+  let windowSpec = explorerResolveTrafficWindow(body, q);
+  windowSpec = explorerWindowSpecWithCabinetClientCatalog(windowSpec, groups);
+  const params = { ...windowSpec.params };
+  const { filterSql, joins: filterJoins } = await buildExplorerFilterClauses(q.filters, dims, params);
+  const joinSql = collectExplorerJoins(groups, dims, filterJoins);
+  const t = col('time');
+  const whereClauses = [`f.${t} >= ts_from`, `f.${t} < ts_to`];
+  if (filterSql) whereClauses.push(filterSql);
+  const scopedParams = applyExplorerScope(whereClauses, params, q);
+  const matched = groups.length ? explorerSeriesMatchers(groups, dims, flowRows, scopedParams) : [];
+  const bucketExpr = explorerBucketExpr(`f.${t}`, gran.key, gran.seconds);
+  const metricExpr = {
+    bps: `round(sum(${scaled.bytes}) * 8 / ${gran.seconds}, 0)`,
+    volume: `sum(${scaled.bytes})`,
+    pps: `round(sum(${scaled.packets}) / ${gran.seconds}, 0)`,
+    fps: `round(sum(${scaled.flowWeight}) / ${gran.seconds}, 2)`,
+    flows: `sum(${scaled.flowWeight})`,
+    uniq_src: `uniqCombined(f.${col('srcIp')})`,
+  }[q.metric] || `round(sum(${scaled.bytes}) * 8 / ${gran.seconds}, 0)`;
+  const seriesSelect = matched.map((item, i) => `
+        sumIf(${scaled.bytes}, ${item.cond}) AS s${i}_bytes,
+        sumIf(${scaled.packets}, ${item.cond}) AS s${i}_packets,
+        sumIf(${scaled.flowWeight}, ${item.cond}) AS s${i}_flows`).join(',');
+  const windowSeconds = explorerResolvedWindowSeconds(body, q);
+  const requestTimeoutMs = explorerHeavyRequestTimeoutMs(windowSeconds, false);
+
+  return {
+    sql: `
+      WITH
+        ${windowSpec.cteHead}
+        dateDiff('second', ts_from, ts_to) AS window_seconds
+      SELECT
+        ${explorerBucketSelect(bucketExpr)},
+        sum(${scaled.bytes}) AS bytes,
+        sum(${scaled.packets}) AS packets,
+        sum(${scaled.flowWeight}) AS flows,
+        round(sum(${scaled.bytes}) * 8 / ${gran.seconds}, 0) AS bps,
+        ${metricExpr} AS metric_value${seriesSelect ? `,${seriesSelect}` : ''}
+      FROM ${flowsRawTableRef()} AS f
+      ${joinSql}
+      PREWHERE f.date >= toDate(ts_from) - 1
+        AND f.date <= toDate(ts_to)
+      WHERE ${whereClauses.join('\n        AND ')}
+      GROUP BY bucket
+      ORDER BY bucket
+    `,
+    params: scopedParams,
+    clickhouse_settings: {
+      ...EXPLORER_CH_SETTINGS,
+      max_execution_time: String(explorerHeavyMaxExecutionSec(requestTimeoutMs)),
+    },
+    requestTimeoutMs,
+    meta: { kind: 'traffic-chart', metric: q.metric, granularity: gran.key },
+    async map(rows) {
+      const seriesByRow = Object.fromEntries(flowRows.map((row) => [row.id, []]));
+      const timeseries = [];
+      for (const r of rows) {
+        const point = {
+          bucket: r.bucket,
+          bucketMs: explorerBucketMs(r),
+          bytes: Number(r.bytes) || 0,
+          packets: Number(r.packets) || 0,
+          flows: Number(r.flows) || 0,
+          bps: Number(r.bps) || 0,
+          value: Number(r.metric_value) || 0,
+        };
+        timeseries.push(point);
+        matched.forEach((item, i) => {
+          const bytes = Number(r[`s${i}_bytes`]) || 0;
+          const packets = Number(r[`s${i}_packets`]) || 0;
+          const flows = Number(r[`s${i}_flows`]) || 0;
+          if (!(bytes > 0 || packets > 0 || flows > 0)) return;
+          const sec = gran.seconds || 1;
+          const sample = {
+            bytes,
+            packets,
+            flows,
+            bps: Math.round(bytes * 8 / sec),
+            pps: Math.round(packets / sec),
+            fps: Math.round((flows / sec) * 100) / 100,
+          };
+          seriesByRow[item.row.id].push({
+            bucket: r.bucket,
+            bucketMs: point.bucketMs,
+            ...sample,
+            value: explorerSeriesMetricValue(sample, q.metric),
+          });
+        });
+      }
+      return { seriesByRow, timeseries };
+    },
+  };
 }
 
 function explorerSeriesMetricValue(row, metricKey) {
@@ -3901,42 +4071,77 @@ async function explorerQuery(body = {}, options = {}) {
   return { flowsSpec, summarySpec, timeseriesSpec, breakdownSpecs, q, queryBody };
 }
 
-/** Two CH reads at a time: flows+summary, then series+timeseries. */
+// С группировкой хватает двух проходов: таблица (итог — из её окна) и один
+// график, в котором общий ряд и ряды строк считаются вместе.
 async function executeExplorerQueryBundle(bundle, queryBody, runNamed, namePrefix = 'explorer') {
   const queryOptions = bundle?.q?.cabinetClientId
     ? { cabinetClientId: bundle.q.cabinetClientId }
     : {};
-  const [flowsResult, summaryResult] = await Promise.all([
-    bundle.flowsSpec
-      ? runNamed(() => Promise.resolve(bundle.flowsSpec), { name: `${namePrefix}/flows` })
-      : null,
-    bundle.summarySpec
-      ? runNamed(() => Promise.resolve(bundle.summarySpec), { name: `${namePrefix}/summary` })
-      : null,
-  ]);
-  const seriesRows = (flowsResult?.data || []).slice(0, EXPLORER_MAX_SERIES_ROWS);
-  const [resultSeriesResult, timeseriesResult] = await Promise.all([
-    seriesRows.length
-      ? runNamed(
-        () => explorerResultSeries(queryBody, seriesRows, queryOptions),
-        { name: `${namePrefix}/result-series` },
-      )
-      : null,
-    bundle.timeseriesSpec
-      ? runNamed(() => Promise.resolve(bundle.timeseriesSpec), { name: `${namePrefix}/timeseries` })
-      : null,
-  ]);
+  const flowsResult = bundle.flowsSpec
+    ? await runNamed(() => Promise.resolve(bundle.flowsSpec), { name: `${namePrefix}/flows` })
+    : null;
+  const flowRows = flowsResult?.data || [];
+  const hasThresholds = Array.isArray(flowsResult?.meta?.thresholds) && flowsResult.meta.thresholds.length > 0;
+  const totals = flowsResult?.meta?.flowTotals;
+  const fullTotals = Boolean(
+    totals
+    && !hasThresholds
+    && flowsResult?.meta?.pctScope !== 'candidate_subset'
+    && !flowsResult?.meta?.peakMode
+  );
+  let summaryData = null;
+  if (bundle.summarySpec) {
+    if (hasThresholds && bundle.flowsSpec) {
+      summaryData = summaryFromExplorerFlowRows(flowRows, flowsResult?.meta?.windowSeconds);
+    } else if (fullTotals) {
+      summaryData = summaryFromFlowTotals(totals, flowsResult.meta.windowSeconds);
+    } else if (bundle.flowsSpec && !flowRows.length && !flowsResult?.meta?.peakMode
+      && flowsResult?.meta?.pctScope !== 'candidate_subset') {
+      summaryData = summaryFromFlowTotals(null, flowsResult?.meta?.windowSeconds);
+    } else {
+      const summaryResult = await runNamed(
+        () => Promise.resolve(bundle.summarySpec),
+        { name: `${namePrefix}/summary` },
+      );
+      summaryData = summaryResult?.data || null;
+    }
+  }
+  const seriesRows = flowRows.slice(0, EXPLORER_MAX_SERIES_ROWS);
+  let resultSeriesResult = null;
+  let timeseriesResult = null;
+  if (seriesRows.length && bundle.timeseriesSpec) {
+    const chart = await runNamed(
+      () => explorerTrafficChart(queryBody, seriesRows, queryOptions),
+      { name: `${namePrefix}/traffic-chart` },
+    );
+    resultSeriesResult = {
+      data: { seriesByRow: chart.data?.seriesByRow || {} },
+      meta: chart.meta,
+    };
+    timeseriesResult = {
+      data: chart.data?.timeseries || [],
+      meta: { kind: 'timeseries', granularity: chart.meta?.granularity },
+    };
+  } else {
+    const [seriesResult, timesResult] = await Promise.all([
+      seriesRows.length
+        ? runNamed(
+          () => explorerResultSeries(queryBody, seriesRows, queryOptions),
+          { name: `${namePrefix}/result-series` },
+        )
+        : null,
+      bundle.timeseriesSpec
+        ? runNamed(() => Promise.resolve(bundle.timeseriesSpec), { name: `${namePrefix}/timeseries` })
+        : null,
+    ]);
+    resultSeriesResult = seriesResult;
+    timeseriesResult = timesResult;
+  }
   const breakdownResults = {};
   for (const item of bundle.breakdownSpecs || []) {
     breakdownResults[item.dim] = (
       await runNamed(() => Promise.resolve(item.spec), { name: `${namePrefix}/breakdown/${item.dim}` })
     ).data;
-  }
-  const flowRows = flowsResult?.data || [];
-  const hasThresholds = Array.isArray(flowsResult?.meta?.thresholds) && flowsResult.meta.thresholds.length > 0;
-  let summaryData = summaryResult?.data || null;
-  if (hasThresholds && bundle.flowsSpec) {
-    summaryData = summaryFromExplorerFlowRows(flowRows, flowsResult?.meta?.windowSeconds);
   }
   return {
     flowsResult,
@@ -4440,6 +4645,7 @@ module.exports = {
   explorerSummary,
   explorerTimeseries,
   explorerResultSeries,
+  explorerTrafficChart,
   explorerGroupedTimeseries,
   explorerBreakdown,
   explorerQuery,
