@@ -26,17 +26,25 @@ describe('explorer schema field naming', () => {
     assert.equal(switchIp?.label, 'Оборудование — источник потоков / Flow-exporting device');
   });
 
-  it('exposes IPv4 mask settings only for groupable source and destination IPs', () => {
+  it('exposes IPv4 CIDR and port bucket mask settings for address fields', () => {
     const schema = explorerSchema();
     for (const id of ['src_ip', 'dst_ip']) {
       const field = schema.dimensions.find((d) => d.id === id);
       assert.equal(field?.maskable, true);
+      assert.equal(field?.maskKind, 'cidr');
       assert.equal(field?.maskMin, 1);
       assert.equal(field?.maskMax, 32);
       assert.equal(field?.maskDefault, 32);
     }
+    for (const id of ['src_port', 'dst_port']) {
+      const field = schema.dimensions.find((d) => d.id === id);
+      assert.equal(field?.maskable, true);
+      assert.equal(field?.maskKind, 'bucket');
+      assert.deepEqual(field?.maskSteps, [1, 10, 100, 1000]);
+      assert.equal(field?.maskMax, 65535);
+      assert.equal(field?.maskDefault, 1);
+    }
     assert.equal(schema.dimensions.find((d) => d.id === 'switch_ip')?.maskable, undefined);
-    assert.equal(schema.dimensions.find((d) => d.id === 'src_port')?.maskable, undefined);
   });
 
   it('hides duplicate fields from pickers but keeps them in dimensions registry', () => {

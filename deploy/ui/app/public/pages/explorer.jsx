@@ -83,55 +83,77 @@ const EXPLORER_MAX_FETCH_LIMIT = 10000;
 const EXPLORER_MAX_CHART_SERIES = 100;
 const EXPLORER_CHART_HEIGHT = 196;
 const EXPLORER_VIS_DEFAULT = 'stack';
-const EXPLORER_MASKABLE_GROUPS = new Set(['src_ip', 'dst_ip']);
-const EXPLORER_GROUP_MASK_DEFAULT = 32;
+function explorerGroupMaskLib() {
+  return (typeof window !== 'undefined' && window.ExplorerGroupMask) || {};
+}
 
 function parseExplorerGroupToken(token) {
-  const raw = String(token ?? '').trim();
-  const slash = raw.indexOf('/');
-  const candidateId = slash < 0 ? raw : raw.slice(0, slash);
-  if (!EXPLORER_MASKABLE_GROUPS.has(candidateId)) return { id: raw, mask: null };
-  const value = slash < 0 ? EXPLORER_GROUP_MASK_DEFAULT : Number(raw.slice(slash + 1).trim());
-  const mask = Number.isInteger(value) && value >= 1 && value <= 32
-    ? value
-    : EXPLORER_GROUP_MASK_DEFAULT;
-  return { id: candidateId, mask };
+  return explorerGroupMaskLib().parseExplorerGroupToken?.(token)
+    ?? { id: String(token ?? '').trim(), mask: null };
 }
 
 function explorerGroupFieldId(token) {
-  return parseExplorerGroupToken(token).id;
+  return explorerGroupMaskLib().explorerGroupFieldId?.(token) ?? parseExplorerGroupToken(token).id;
 }
 
 function explorerGroupMask(token) {
-  return parseExplorerGroupToken(token).mask;
+  return explorerGroupMaskLib().explorerGroupMask?.(token) ?? parseExplorerGroupToken(token).mask;
 }
 
 function formatExplorerGroupToken(id, mask) {
-  const fieldId = String(id ?? '').trim();
-  if (!EXPLORER_MASKABLE_GROUPS.has(fieldId)) return fieldId;
-  const value = Number(String(mask ?? '').trim());
-  const normalized = Number.isInteger(value) && value >= 1 && value <= 32
-    ? value
-    : EXPLORER_GROUP_MASK_DEFAULT;
-  return normalized === EXPLORER_GROUP_MASK_DEFAULT ? fieldId : `${fieldId}/${normalized}`;
+  const fn = explorerGroupMaskLib().formatExplorerGroupToken;
+  if (fn) return fn(id, mask);
+  return String(id ?? '').trim();
 }
 
 function normalizeExplorerGroupTokens(list) {
-  const result = [];
-  const seen = new Set();
-  for (const token of Array.isArray(list) ? list : []) {
-    const { id, mask } = parseExplorerGroupToken(token);
-    if (!id || seen.has(id)) continue;
-    seen.add(id);
-    result.push(formatExplorerGroupToken(id, mask));
-  }
-  return result;
+  const fn = explorerGroupMaskLib().normalizeExplorerGroupTokens;
+  if (fn) return fn(list);
+  return [];
+}
+
+function isCoarseExplorerGroupToken(token, dimensionById) {
+  const fn = explorerGroupMaskLib().isCoarseExplorerGroupToken;
+  if (fn) return fn(token, dimensionById);
+  return false;
 }
 
 function explorerGroupLabel(token, dimensionById) {
   const { id, mask } = parseExplorerGroupToken(token);
-  const label = dimensionById[id]?.label || id;
-  return mask != null && mask !== EXPLORER_GROUP_MASK_DEFAULT ? `${label} /${mask}` : label;
+  const dim = dimensionById[id];
+  const label = dim?.label || id;
+  const def = dim?.maskDefault ?? (dim?.maskKind === 'bucket' ? 1 : 32);
+  if (mask == null) return label;
+  if (dim?.maskKind === 'bucket') {
+    return mask > def ? `${label} /${mask}` : label;
+  }
+  return mask < def ? `${label} /${mask}` : label;
+}
+
+function explorerPortBucketStepLabel(step) {
+  if (step === 1) return 'порт';
+  if (step === 10) return 'десятки';
+  if (step === 100) return 'сотни';
+  if (step === 1000) return 'тысячи';
+  return `×${step}`;
+}
+
+const EXPLORER_PORT_BUCKET_CUSTOM = '__custom__';
+
+function explorerGroupCellFilterValue(groupToken, dimId, valueIdx, row, dimensionById) {
+  const display = row.values[valueIdx];
+  if (!isCoarseExplorerGroupToken(groupToken, dimensionById)) {
+    return explorerRowFilterValue(row, dimId, valueIdx, dimensionById);
+  }
+  const dim = dimensionById[dimId];
+  if (dim?.maskKind === 'bucket') {
+    const parsed = explorerGroupMaskLib().explorerBucketFilterFromDisplay?.(display);
+    if (parsed) return { value: parsed.value, label: null };
+  }
+  if (dim?.maskKind === 'cidr') {
+    return { value: display, label: null };
+  }
+  return explorerRowFilterValue(row, dimId, valueIdx, dimensionById);
 }
 
 const VIS_TYPES = [
@@ -2504,7 +2526,7 @@ function ExplorerResultDetailModal({
   onExcludeRow,
   chartSeriesIds,
   onToggleDynamicsSeries,
-  hasMaskedIpGroup,
+  hasCoarseGroup,
 }) {
   if (!row) return null;
 
@@ -2536,7 +2558,7 @@ function ExplorerResultDetailModal({
           <ExplorerRowActions
             row={row}
             onFocus={onFocusRow}
-            onExclude={hasMaskedIpGroup ? null : onExcludeRow}
+            onExclude={hasCoarseGroup ? null : onExcludeRow}
             chartSeriesIds={chartSeriesIds}
             onToggleDynamicsSeries={onToggleDynamicsSeries}
           />
@@ -2584,14 +2606,10 @@ function buildExplorerResultColumns({
   onOpenDetails,
 }) {
   const visibleDimensionIds = groupBy;
-  const hasMaskedIpGroup = groupBy.some((token) => {
-    const mask = explorerGroupMask(token);
-    return mask != null && mask !== EXPLORER_GROUP_MASK_DEFAULT;
-  });
+  const hasCoarseGroup = groupBy.some((token) => isCoarseExplorerGroupToken(token, dimensionById));
 
   const groupCols = visibleDimensionIds.map((groupToken, colIdx) => {
     const dimId = explorerGroupFieldId(groupToken);
-    const mask = explorerGroupMask(groupToken);
     const valueIdx = groupBy.indexOf(groupToken);
     const hasValue = valueIdx >= 0;
     const isAsn = dimId.endsWith('_asn');
@@ -2628,10 +2646,8 @@ function buildExplorerResultColumns({
             )
             : <span style={{ color: 'var(--fg-secondary)' }}>—</span>;
         }
-        const filterVal = mask != null && mask !== EXPLORER_GROUP_MASK_DEFAULT
-          ? { value: r.values[valueIdx], label: null }
-          : explorerRowFilterValue(r, dimId, valueIdx, dimensionById);
-        const monoClass = dimId.endsWith('ip') || dimId.endsWith('_mac') ? 'mono' : '';
+        const filterVal = explorerGroupCellFilterValue(groupToken, dimId, valueIdx, r, dimensionById);
+        const monoClass = dimId.endsWith('ip') || dimId.endsWith('_mac') || dimId.endsWith('_port') ? 'mono' : '';
         const isTcpFlags = dimId === 'tcp_flags';
         const rawTooltip = isTcpFlags && r.rawValues?.[valueIdx] != null
           ? ` · raw ${r.rawValues[valueIdx]}`
@@ -2645,7 +2661,7 @@ function buildExplorerResultColumns({
             displayValue={displayValue}
             monoClass={isAsPath ? `${monoClass} mono`.trim() : monoClass}
             filterTitle={`Добавить в фильтры${rawTooltip}`}
-            onAddFilter={() => onAddFilter(dimId, filterVal.value, filterVal.label, mask)}
+            onAddFilter={() => onAddFilter(dimId, filterVal.value, filterVal.label, groupToken)}
             showColorSwatch={showColorSwatch}
             color={r.color}
             onExpand={colIdx === 0 && onOpenDetails ? () => onOpenDetails(r) : undefined}
@@ -2702,7 +2718,7 @@ function buildExplorerResultColumns({
       <ExplorerRowActions
         row={r}
         onFocus={onFocusRow}
-        onExclude={hasMaskedIpGroup ? null : onExcludeRow}
+        onExclude={hasCoarseGroup ? null : onExcludeRow}
         chartSeriesIds={chartSeriesIds}
         onToggleDynamicsSeries={onToggleDynamicsSeries}
       />
@@ -3743,16 +3759,28 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
     }
   };
 
-  const addFilterFromCell = (field, value, label, groupMask = null) => {
+  const addFilterFromCell = (field, value, label, groupToken = null) => {
     const meta = filterFieldMeta(schema, field);
-    const op = groupMask != null && groupMask !== EXPLORER_GROUP_MASK_DEFAULT
-      ? 'cidr'
-      : meta?.type === 'tcp_flags' ? 'eq' : '=';
+    const dim = dimensionById[field];
+    let op = meta?.type === 'tcp_flags' ? 'eq' : '=';
+    let filterValue = value;
+    if (groupToken && isCoarseExplorerGroupToken(groupToken, dimensionById)) {
+      if (dim?.maskKind === 'cidr') {
+        op = 'cidr';
+      } else if (dim?.maskKind === 'bucket') {
+        const parsed = explorerGroupMaskLib().explorerBucketFilterFromDisplay?.(value)
+          ?? (String(value).includes(',') ? { op: 'between', value: String(value) } : null);
+        if (parsed) {
+          op = 'between';
+          filterValue = parsed.value;
+        }
+      }
+    }
     setFilters((prev) => [...prev, {
       id: Date.now() + Math.random(),
       field,
       op,
-      value,
+      value: filterValue,
       label: label || null,
       logic: 'and',
     }]);
@@ -3784,15 +3812,17 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
       ...filters,
       ...appliedGroupBy.map((groupToken, idx) => {
         const field = explorerGroupFieldId(groupToken);
-        const mask = explorerGroupMask(groupToken);
-        const filterVal = mask != null && mask !== EXPLORER_GROUP_MASK_DEFAULT
-          ? { value: row.values[idx], label: null }
-          : explorerRowFilterValue(row, groupToken, idx, dimensionById);
-        const isTcpFlags = field === 'tcp_flags' || dimensionById[field]?.kind === 'tcp_flags';
+        const dim = dimensionById[field];
+        const filterVal = explorerGroupCellFilterValue(groupToken, field, idx, row, dimensionById);
+        const isTcpFlags = field === 'tcp_flags' || dim?.kind === 'tcp_flags';
+        const coarse = isCoarseExplorerGroupToken(groupToken, dimensionById);
+        let op = isTcpFlags ? 'eq' : '=';
+        if (coarse && dim?.maskKind === 'cidr') op = 'cidr';
+        else if (coarse && dim?.maskKind === 'bucket') op = 'between';
         return {
           id: Date.now() + idx + Math.random(),
           field,
-          op: mask != null && mask !== EXPLORER_GROUP_MASK_DEFAULT ? 'cidr' : isTcpFlags ? 'eq' : '=',
+          op,
           value: filterVal.value,
           label: filterVal.label,
           logic: 'and',
@@ -3926,12 +3956,9 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
     onOpenDetails: openResultDetail,
   }), [appliedGroupBy, dimensions, dimensionById, appliedMetricLabel, appliedMetric, meta, showAllResultColumns, addFilterFromCell, focusRow, excludeRow, toggleDynamicsSeries, dynamicsSeriesIds, showOthersOnChart, openResultDetail]);
 
-  const hasMaskedIpGroup = useMemo(
-    () => appliedGroupBy.some((token) => {
-      const mask = explorerGroupMask(token);
-      return mask != null && mask !== EXPLORER_GROUP_MASK_DEFAULT;
-    }),
-    [appliedGroupBy],
+  const hasCoarseGroup = useMemo(
+    () => appliedGroupBy.some((token) => isCoarseExplorerGroupToken(token, dimensionById)),
+    [appliedGroupBy, dimensionById],
   );
 
   const fitExplorerResultColumns = useCallback((columns, tableRows, pinnedRows) => (
@@ -4363,7 +4390,7 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
         onExcludeRow={excludeRow}
         chartSeriesIds={dynamicsSeriesIds}
         onToggleDynamicsSeries={toggleDynamicsSeries}
-        hasMaskedIpGroup={hasMaskedIpGroup}
+        hasCoarseGroup={hasCoarseGroup}
       />
 
       <SaveObservationModal
@@ -4583,7 +4610,7 @@ function ExplorerRowActions({
       <button
         type="button"
         className="badge explorer-row-actions__btn"
-        title={onExclude ? 'Исключить значения строки из выборки' : 'Исключение недоступно для группировки по IP-сети'}
+        title={onExclude ? 'Исключить значения строки из выборки' : 'Исключение недоступно для укрупнённой группировки'}
         disabled={!onExclude}
         onClick={() => onExclude?.(row)}
       >
@@ -4612,12 +4639,20 @@ function BuilderControl({ label, children }) {
 
 function ExplorerGroupChip({ token, dimension, onChange, onRemove }) {
   const { id, mask } = parseExplorerGroupToken(token);
-  const defaultMask = dimension?.maskDefault || EXPLORER_GROUP_MASK_DEFAULT;
-  const [draftMask, setDraftMask] = useState(String(mask ?? defaultMask));
+  const isBucket = dimension?.maskKind === 'bucket';
+  const defaultMask = dimension?.maskDefault ?? (isBucket ? 1 : 32);
+  const bucketPresets = dimension?.maskSteps || [1, 10, 100, 1000];
+  const bucketMax = dimension?.maskMax || 65535;
+  const currentMask = mask ?? defaultMask;
+  const isPresetStep = bucketPresets.includes(currentMask);
+  const [customBucket, setCustomBucket] = useState(isBucket && !isPresetStep && currentMask !== defaultMask);
+  const [draftMask, setDraftMask] = useState(String(currentMask));
 
   useEffect(() => {
-    setDraftMask(String(mask ?? defaultMask));
-  }, [mask, defaultMask]);
+    const next = mask ?? defaultMask;
+    setDraftMask(String(next));
+    setCustomBucket(isBucket && !bucketPresets.includes(next) && next !== defaultMask);
+  }, [mask, defaultMask, isBucket, bucketPresets]);
 
   const commitMask = (rawValue = draftMask) => {
     const nextToken = formatExplorerGroupToken(id, rawValue);
@@ -4626,7 +4661,7 @@ function ExplorerGroupChip({ token, dimension, onChange, onRemove }) {
     if (nextToken !== token) onChange?.(nextToken);
   };
 
-  const handleMaskChange = (rawValue) => {
+  const handleCidrMaskChange = (rawValue) => {
     setDraftMask(rawValue);
     const trimmed = String(rawValue ?? '').trim();
     if (!/^\d{1,2}$/.test(trimmed)) return;
@@ -4634,10 +4669,65 @@ function ExplorerGroupChip({ token, dimension, onChange, onRemove }) {
     if (num >= 1 && num <= 32) commitMask(trimmed);
   };
 
+  const handleCustomBucketChange = (rawValue) => {
+    setDraftMask(rawValue);
+    const trimmed = String(rawValue ?? '').trim();
+    if (!/^\d{1,5}$/.test(trimmed)) return;
+    const num = Number(trimmed);
+    if (num >= 2 && num <= bucketMax) commitMask(trimmed);
+  };
+
+  const handleBucketPresetChange = (rawValue) => {
+    if (rawValue === EXPLORER_PORT_BUCKET_CUSTOM) {
+      setCustomBucket(true);
+      if (isPresetStep) setDraftMask('500');
+      return;
+    }
+    setCustomBucket(false);
+    commitMask(rawValue);
+  };
+
   return (
     <span className="explorer-query-chip explorer-group-chip">
       <span className="explorer-query-chip__label">{dimension?.label || id}</span>
-      {dimension?.maskable && (
+      {dimension?.maskable && isBucket && !customBucket && (
+        <>
+          <span className="explorer-group-chip__sep" aria-hidden="true">/</span>
+          <select
+            className="input mono explorer-group-mask-input"
+            aria-label={`Шаг группировки для ${dimension.label || id}`}
+            value={String(currentMask)}
+            onChange={(e) => handleBucketPresetChange(e.target.value)}
+          >
+            {bucketPresets.map((step) => (
+              <option key={step} value={String(step)}>
+                {explorerPortBucketStepLabel(step)}
+              </option>
+            ))}
+            <option value={EXPLORER_PORT_BUCKET_CUSTOM}>своё…</option>
+          </select>
+        </>
+      )}
+      {dimension?.maskable && isBucket && customBucket && (
+        <>
+          <span className="explorer-group-chip__sep" aria-hidden="true">/</span>
+          <input
+            className="input mono explorer-group-mask-input explorer-group-mask-input--port-step"
+            type="number"
+            min={2}
+            max={bucketMax}
+            step="1"
+            aria-label={`Произвольный шаг группировки для ${dimension.label || id}`}
+            value={draftMask}
+            onChange={(e) => handleCustomBucketChange(e.target.value)}
+            onBlur={() => commitMask()}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') e.currentTarget.blur();
+            }}
+          />
+        </>
+      )}
+      {dimension?.maskable && !isBucket && (
         <>
           <span className="explorer-group-chip__sep" aria-hidden="true">/</span>
           <input
@@ -4648,7 +4738,7 @@ function ExplorerGroupChip({ token, dimension, onChange, onRemove }) {
             step="1"
             aria-label={`Маска для ${dimension.label || id}`}
             value={draftMask}
-            onChange={(e) => handleMaskChange(e.target.value)}
+            onChange={(e) => handleCidrMaskChange(e.target.value)}
             onBlur={() => commitMask()}
             onKeyDown={(e) => {
               if (e.key === 'Enter') e.currentTarget.blur();

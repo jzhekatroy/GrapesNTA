@@ -2,8 +2,20 @@
 
 (function explorerGroupDslModule() {
   const EXPLORER_GROUP_DSL_MAX = 4;
-  const EXPLORER_MASKABLE_GROUPS = new Set(['src_ip', 'dst_ip']);
-  const EXPLORER_GROUP_MASK_DEFAULT = 32;
+
+  function groupMaskApi() {
+    if (typeof window !== 'undefined' && window.ExplorerGroupMask) {
+      return window.ExplorerGroupMask;
+    }
+    if (typeof module !== 'undefined' && module.exports) {
+      try {
+        return require('./explorer-group-mask.js');
+      } catch {
+        return {};
+      }
+    }
+    return {};
+  }
 
   function explorerFieldSearchApi() {
     if (typeof window !== 'undefined' && window.ExplorerFieldSearch) {
@@ -19,42 +31,20 @@
     return {};
   }
 
-  function validExplorerGroupMask(mask) {
-    const value = typeof mask === 'number' ? mask : Number(String(mask ?? '').trim());
-    return Number.isInteger(value) && value >= 1 && value <= 32
-      ? value
-      : EXPLORER_GROUP_MASK_DEFAULT;
-  }
-
   function parseExplorerGroupToken(token) {
-    const raw = String(token ?? '').trim();
-    const slash = raw.indexOf('/');
-    const candidateId = slash < 0 ? raw : raw.slice(0, slash);
-    if (!EXPLORER_MASKABLE_GROUPS.has(candidateId)) return { id: raw, mask: null };
-
-    const mask = slash < 0
-      ? EXPLORER_GROUP_MASK_DEFAULT
-      : validExplorerGroupMask(raw.slice(slash + 1));
-    return { id: candidateId, mask };
+    return groupMaskApi().parseExplorerGroupToken?.(token) ?? { id: String(token ?? '').trim(), mask: null };
   }
 
   function formatExplorerGroupToken(id, mask) {
-    const fieldId = String(id ?? '').trim();
-    if (!EXPLORER_MASKABLE_GROUPS.has(fieldId)) return fieldId;
-    const normalizedMask = validExplorerGroupMask(mask);
-    return normalizedMask === EXPLORER_GROUP_MASK_DEFAULT ? fieldId : `${fieldId}/${normalizedMask}`;
+    const fn = groupMaskApi().formatExplorerGroupToken;
+    if (fn) return fn(id, mask);
+    return String(id ?? '').trim();
   }
 
   function normalizeExplorerGroupTokens(list) {
-    const normalized = [];
-    const seen = new Set();
-    for (const token of Array.isArray(list) ? list : []) {
-      const parsed = parseExplorerGroupToken(token);
-      if (!parsed.id || seen.has(parsed.id)) continue;
-      seen.add(parsed.id);
-      normalized.push(formatExplorerGroupToken(parsed.id, parsed.mask));
-    }
-    return normalized;
+    const fn = groupMaskApi().normalizeExplorerGroupTokens;
+    if (fn) return fn(list);
+    return [];
   }
 
   function groupableDimensions(dimensions) {
@@ -161,21 +151,49 @@
     return /^g(?:r(?:o(?:u(?:p(?:\s*(?:b(?:y?)?)?)?)?)?)?)?$/i.test(lower);
   }
 
-  function groupByMaskSuggestions(fragment, header, prefix, lineSuggestion) {
+  function bucketStepHint(step) {
+    if (step === 10) return 'десятки портов';
+    if (step === 100) return 'сотни портов';
+    if (step === 1000) return 'тысячи портов';
+    return `диапазон /${step}`;
+  }
+
+  function groupByMaskSuggestions(fragment, header, prefix, lineSuggestion, dimensions) {
     const suggestions = [];
     const trimmed = fragment.trim();
     if (!trimmed || trimmed.includes('/')) return suggestions;
     const { id } = parseExplorerGroupToken(trimmed);
-    if (!EXPLORER_MASKABLE_GROUPS.has(id)) return suggestions;
-    [24, 16, 8, 32].forEach((maskValue) => {
-      const token = formatExplorerGroupToken(id, maskValue);
-      const insertBody = prefix ? `${prefix}${token}, ` : `${token}, `;
-      suggestions.push(lineSuggestion(
-        `${id}/${maskValue}`,
-        `${header}${insertBody}`,
-        maskValue === 32 ? 'хост /32' : `сеть /${maskValue}`,
-      ));
-    });
+    const spec = groupMaskApi().getExplorerGroupScaleSpec?.(id);
+    if (!spec) return suggestions;
+
+    const dim = groupableDimensions(dimensions).find((d) => d.id === id);
+    const steps = dim?.maskSteps || spec.steps || [];
+    const def = dim?.maskDefault ?? spec.default;
+
+    if (spec.kind === 'cidr') {
+      [24, 16, 8, 32].forEach((maskValue) => {
+        const token = formatExplorerGroupToken(id, maskValue);
+        const insertBody = prefix ? `${prefix}${token}, ` : `${token}, `;
+        suggestions.push(lineSuggestion(
+          `${id}/${maskValue}`,
+          `${header}${insertBody}`,
+          maskValue === def ? 'хост /32' : `сеть /${maskValue}`,
+        ));
+      });
+      return suggestions;
+    }
+
+    if (spec.kind === 'bucket') {
+      steps.filter((step) => step !== def).forEach((step) => {
+        const token = formatExplorerGroupToken(id, step);
+        const insertBody = prefix ? `${prefix}${token}, ` : `${token}, `;
+        suggestions.push(lineSuggestion(
+          `${id}/${step}`,
+          `${header}${insertBody}`,
+          bucketStepHint(step),
+        ));
+      });
+    }
     return suggestions;
   }
 
@@ -191,7 +209,7 @@
       const needle = fragment.trim().toLowerCase();
       const suggestions = [];
 
-      groupByMaskSuggestions(fragment, header, prefix, lineSuggestion)
+      groupByMaskSuggestions(fragment, header, prefix, lineSuggestion, dimensions)
         .forEach((item) => suggestions.push(item));
 
       dims
@@ -255,6 +273,10 @@
     isExplorerGroupByDslContext,
     buildExplorerGroupByDslSuggestions,
     normalizeExplorerGroupTokens,
+    parseExplorerGroupToken,
+    formatExplorerGroupToken,
+    explorerGroupFieldId: (token) => groupMaskApi().explorerGroupFieldId?.(token) ?? parseExplorerGroupToken(token).id,
+    explorerGroupMask: (token) => groupMaskApi().explorerGroupMask?.(token) ?? parseExplorerGroupToken(token).mask,
   };
 
   if (typeof module !== 'undefined' && module.exports) {

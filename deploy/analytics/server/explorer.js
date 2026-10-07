@@ -909,6 +909,7 @@ function explorerDimensions() {
       groupKeyExpr: `f.${t.srcIp}`,
       labelFromKey: ipLabelFromKey,
       maskable: true,
+      maskKind: 'cidr',
       maskMin: 1,
       maskMax: 32,
       maskDefault: 32,
@@ -918,6 +919,7 @@ function explorerDimensions() {
       groupKeyExpr: `f.${t.dstIp}`,
       labelFromKey: ipLabelFromKey,
       maskable: true,
+      maskKind: 'cidr',
       maskMin: 1,
       maskMax: 32,
       maskDefault: 32,
@@ -926,11 +928,23 @@ function explorerDimensions() {
       label: 'Source Port', group: 'IP', kind: 'number', expr: `toString(f.${t.srcPort})`, filterType: 'number', filterExpr: `f.${t.srcPort}`,
       groupKeyExpr: `f.${t.srcPort}`,
       labelFromKey: (k) => `toString(${k})`,
+      maskable: true,
+      maskKind: 'bucket',
+      maskSteps: [1, 10, 100, 1000],
+      maskMin: 1,
+      maskMax: 65535,
+      maskDefault: 1,
     },
     dst_port: {
       label: 'Destination Port', group: 'IP', kind: 'number', expr: `toString(f.${t.dstPort})`, filterType: 'number', filterExpr: `f.${t.dstPort}`,
       groupKeyExpr: `f.${t.dstPort}`,
       labelFromKey: (k) => `toString(${k})`,
+      maskable: true,
+      maskKind: 'bucket',
+      maskSteps: [1, 10, 100, 1000],
+      maskMin: 1,
+      maskMax: 65535,
+      maskDefault: 1,
     },
     proto: {
       label: 'Протокол', group: 'IP', kind: 'enum', expr: protoLabelSql(`f.${t.proto}`), filterType: 'enum', filterExpr: protoLabelSql(`f.${t.proto}`), rawExpr: `f.${t.proto}`,
@@ -1445,6 +1459,8 @@ function explorerSchema(options = {}) {
       ...(options.cabinet && d.valueOptions ? { valueOptions: d.valueOptions } : {}),
       ...(d.maskable ? {
         maskable: true,
+        maskKind: d.maskKind,
+        maskSteps: d.maskSteps,
         maskMin: d.maskMin,
         maskMax: d.maskMax,
         maskDefault: d.maskDefault,
@@ -1609,6 +1625,14 @@ function explorerIpPrefixSql(ipExpr, mask, etypeExpr) {
   return `if(${isIpv4}, concat(${network}, '/${prefixLen}'), IPv6NumToString(${ipExpr}))`;
 }
 
+function explorerPortBucketStartSql(portExpr, step) {
+  return `intDiv(${portExpr}, ${step}) * ${step}`;
+}
+
+function explorerPortBucketLabelFromKeySql(keyExpr, step) {
+  return `concat(toString(${keyExpr}), '-', toString(least(${keyExpr} + ${step} - 1, 65535)))`;
+}
+
 function applyExplorerGroupMasks(groupBy, dims) {
   const etypeCol = flowCol('etype');
   const etypeExpr = etypeCol ? `f.${etypeCol}` : null;
@@ -1618,19 +1642,37 @@ function applyExplorerGroupMasks(groupBy, dims) {
     const { id, mask } = parseExplorerGroupToken(token);
     const dim = dims[id];
     if (!dim || dim.virtual) continue;
-    if (dim.maskable && mask && mask < 32 && dim.groupKeyExpr) {
-      const prefixSql = explorerIpPrefixSql(dim.groupKeyExpr, mask, etypeExpr);
-      outDims[token] = {
-        ...dim,
-        expr: prefixSql,
-        groupKeyExpr: prefixSql,
-        labelFromKey: (k) => `toString(${k})`,
-        label: `${dim.label} /${mask}`,
-      };
-      groups.push(token);
-    } else {
-      groups.push(id);
+    if (dim.maskable && mask != null && dim.groupKeyExpr) {
+      const maskKind = dim.maskKind || 'cidr';
+      const maskDefault = dim.maskDefault ?? (maskKind === 'bucket' ? 1 : 32);
+      if (maskKind === 'bucket' && mask > maskDefault) {
+        const step = mask;
+        const bucketKey = explorerPortBucketStartSql(dim.groupKeyExpr, step);
+        outDims[token] = {
+          ...dim,
+          expr: explorerPortBucketLabelFromKeySql(bucketKey, step),
+          groupKeyExpr: bucketKey,
+          labelFromKey: (k) => explorerPortBucketLabelFromKeySql(k, step),
+          label: `${dim.label} /${step}`,
+          bucketStep: step,
+        };
+        groups.push(token);
+        continue;
+      }
+      if (maskKind === 'cidr' && mask < maskDefault) {
+        const prefixSql = explorerIpPrefixSql(dim.groupKeyExpr, mask, etypeExpr);
+        outDims[token] = {
+          ...dim,
+          expr: prefixSql,
+          groupKeyExpr: prefixSql,
+          labelFromKey: (k) => `toString(${k})`,
+          label: `${dim.label} /${mask}`,
+        };
+        groups.push(token);
+        continue;
+      }
     }
+    groups.push(id);
   }
   return { groups, dims: outDims };
 }

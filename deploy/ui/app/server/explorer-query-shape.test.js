@@ -91,6 +91,27 @@ describe('explorer query shape', () => {
     assert.match(spec.meta.groupBy[0].label, /\/24/);
   });
 
+  it('groups destination ports by hundreds when groupBy is dst_port/100', async () => {
+    const spec = await explorerFlows({
+      ...WINDOW,
+      groupBy: ['dst_port/100'],
+    });
+    assert.match(spec.sql, /intDiv\(/);
+    assert.match(spec.sql, /65535/);
+    assert.doesNotMatch(spec.sql, /IPv4CIDRToRange\(/);
+    assert.equal(spec.meta.groupBy[0].id, 'dst_port/100');
+    assert.match(spec.meta.groupBy[0].label, /\/100/);
+  });
+
+  it('groups source ports by a custom bucket width', async () => {
+    const spec = await explorerFlows({
+      ...WINDOW,
+      groupBy: ['src_port/512'],
+    });
+    assert.match(spec.sql, /intDiv\(.+512\) \* 512/);
+    assert.equal(spec.meta.groupBy[0].id, 'src_port/512');
+  });
+
   it('compares an exact source IP as stored bytes', async () => {
     const spec = await explorerFlows({
       ...WINDOW,

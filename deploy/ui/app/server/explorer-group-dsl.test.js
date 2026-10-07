@@ -6,8 +6,10 @@ const assert = require('node:assert/strict');
 const G = require('../public/data/explorer-group-dsl.js');
 
 const dimensions = [
-  { id: 'src_ip', label: 'IP источника / Source IP', groupable: true, maskable: true },
-  { id: 'dst_ip', label: 'IP назначения / Destination IP', groupable: true, maskable: true },
+  { id: 'src_ip', label: 'IP источника / Source IP', groupable: true, maskable: true, maskKind: 'cidr', maskDefault: 32 },
+  { id: 'dst_ip', label: 'IP назначения / Destination IP', groupable: true, maskable: true, maskKind: 'cidr', maskDefault: 32 },
+  { id: 'src_port', label: 'Порт источника / Source port', groupable: true, maskable: true, maskKind: 'bucket', maskSteps: [1, 10, 100, 1000], maskDefault: 1 },
+  { id: 'dst_port', label: 'Порт назначения / Destination port', groupable: true, maskable: true, maskKind: 'bucket', maskSteps: [1, 10, 100, 1000], maskDefault: 1 },
   { id: 'src_asn', label: 'ASN источника / Source ASN', groupable: true },
   { id: 'dst_asn', label: 'ASN назначения / Destination ASN', groupable: true },
   { id: 'proto', label: 'Протокол / Protocol', groupable: true },
@@ -45,6 +47,17 @@ describe('Explorer group-by DSL', () => {
     assert.deepEqual(
       G.parseExplorerGroupByDslLine('group by src_ip/24, ASN назначения', dimensions),
       ['src_ip/24', 'dst_asn'],
+    );
+  });
+
+  it('parses port bucket steps', () => {
+    assert.deepEqual(
+      G.parseExplorerGroupByDslLine('group by src_port/10, dst_port/100', dimensions),
+      ['src_port/10', 'dst_port/100'],
+    );
+    assert.deepEqual(
+      G.parseExplorerGroupByDslLine('group by src_port/1000, dst_port/512', dimensions),
+      ['src_port/1000', 'dst_port/512'],
     );
   });
 
@@ -116,6 +129,13 @@ describe('Explorer group-by DSL', () => {
     const suggestions = G.buildExplorerGroupByDslSuggestions('group by src', '', dimensions);
     assert.ok(suggestions.some((item) => item.insert.includes('src_ip')));
     assert.ok(suggestions.some((item) => item.label.includes('Source IP') || item.label === 'src_ip'));
+  });
+
+  it('builds port bucket step suggestions', () => {
+    const suggestions = G.buildExplorerGroupByDslSuggestions('group by src_port', '', dimensions);
+    assert.ok(suggestions.some((item) => item.insert.includes('src_port/10')));
+    assert.ok(suggestions.some((item) => item.insert.includes('src_port/100')));
+    assert.ok(suggestions.some((item) => item.insert.includes('src_port/1000')));
   });
 
   it('builds dimension suggestions on full group by line', () => {

@@ -30,6 +30,7 @@ const PAGE_CHUNKS_MANIFEST = {
       scripts: [
         '/data/explorer-thresholds.js',
         '/data/explorer-field-search.js',
+        '/data/explorer-group-mask.js',
         '/data/explorer-group-dsl.js',
         '/data/explorer-filter-tree.js',
         '/pages/explorer.jsx',

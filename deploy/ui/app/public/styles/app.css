@@ -1406,15 +1406,35 @@ a.nav-item--active:visited { color: var(--fg-primary); }
 }
 
 .explorer-metric-group-chips .explorer-group-mask-input {
-  width: 34px;
   height: 20px !important;
   min-height: 20px !important;
   max-height: 20px !important;
-  padding: 0 4px;
   font-size: 11px;
-  text-align: center;
   border-radius: 6px;
   flex: none;
+}
+
+.explorer-metric-group-chips input.explorer-group-mask-input {
+  width: 34px;
+  padding: 0 4px;
+  text-align: center;
+}
+
+.explorer-metric-group-chips input.explorer-group-mask-input--port-step {
+  width: 4.25rem;
+  min-width: 4.25rem;
+  max-width: 4.25rem;
+  padding: 0 5px;
+  box-sizing: border-box;
+}
+
+.explorer-metric-group-chips select.explorer-group-mask-input {
+  width: auto;
+  min-width: 4.75rem;
+  max-width: 7.5rem;
+  padding: 0 1.25rem 0 6px;
+  text-align: left;
+  text-overflow: ellipsis;
 }
 
 .explorer-filter-edit-popover,
