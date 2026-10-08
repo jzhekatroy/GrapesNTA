@@ -21,6 +21,21 @@ describe('detection-investigate SQL', () => {
     assert.doesNotMatch(src, /status != 'peak'/);
   });
 
+  it('норма часа вырезает окна атак из p95 и из медианы, не только события этого часа', () => {
+    assert.match(src, /HOUR_ENVELOPE_BEFORE_HOURS = 6/);
+    assert.match(src, /HOUR_ENVELOPE_AFTER_HOURS = 1/);
+    assert.match(src, /HOUR_ENVELOPE_ACTIVE_CAP_HOURS = 6/);
+    assert.match(src, /alert_minute - INTERVAL \$\{HOUR_ENVELOPE_BEFORE_HOURS\} HOUR AS range_start/);
+    assert.match(src, /ifNull\(normalize_minute, alert_minute\) \+ INTERVAL \$\{HOUR_ENVELOPE_AFTER_HOURS\} HOUR/);
+    assert.match(src, /INTERVAL \{days:UInt16\} DAY - INTERVAL 1 DAY/);
+    assert.match(src, /AS history_ranges/);
+    assert.match(src, /tuple\(alert_minute, range_end\)/);
+    assert.match(src, /AS recent_ranges/);
+    assert.match(src, /minute < \$\{cutoff\} AND \$\{outsideAttackRangesSql\('minute', 'history_ranges'\)\}/);
+    assert.match(src, /minute >= \$\{cutoff\} AND \$\{outsideAttackRangesSql\('minute', 'recent_ranges'\)\}/);
+    assert.doesNotMatch(src, /alert_minute >= \$\{cutoff\}/);
+  });
+
   it('форма адреса отдаётся массивом: пустой скалярный кортеж ClickHouse не переваривает', () => {
     assert.match(src, /victim_flow AS \(\s*SELECT groupArray\(tuple\(/);
     assert.match(src, /sum\(flow_bytes\) AS ip_bytes/);

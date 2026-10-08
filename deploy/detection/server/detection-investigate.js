@@ -97,47 +97,70 @@ function mapShareRow(row, extra = {}, totalBytes = 0) {
   };
 }
 
-// Минуты уже открытой атаки не входят в медиану последнего часа: иначе
-// сама атака поднимает «норму» и следующая минута выглядит обычной.
-// Берём только события, начавшиеся в этом часе, и не длиннее 3 часов —
-// зависшее событие недельной давности норму не стирает. Обычные пики
-// (status = peak) не трогаем: это уровень клиента, а не атака.
-function attackRangesSql() {
-  const cutoff = `${utcDateTime('minute')} - INTERVAL {quarantine:UInt16} MINUTE`;
+// Окно как у нормы клиента: 6 ч до открытия (атаку замечают не с первой
+// минуты) и час после закрытия. Эти минуты не входят ни в p95/p99.9 за
+// 14 дней, ни в медиану последнего часа. Иначе атака длиннее карантина
+// сама становится нормой часа, и повтор не набирает ×1.8.
+// Пики (status = peak) не трогаем: это уровень клиента, а не атака.
+// Активное без конца держим не дольше 6 часов — зависшее событие
+// недельной давности норму часа не стирает.
+const HOUR_ENVELOPE_BEFORE_HOURS = 6;
+const HOUR_ENVELOPE_AFTER_HOURS = 1;
+const HOUR_ENVELOPE_ACTIVE_CAP_HOURS = 6;
+
+function attackRangesCte() {
+  const lookback = `${utcDateTime('minute')} - INTERVAL {days:UInt16} DAY - INTERVAL 1 DAY`;
+  // history — p95/p99.9: с запасом до открытия, как норма клиента.
+  // recent — медиана последнего часа: только сама атака. Запас в 6 часов
+  // стёр бы обычный уровень клиента в том же часе.
   return `
-    (
-      SELECT ifNull(groupArray(tuple(alert_minute, range_end)), [])
+    event_windows AS (
+      SELECT
+        alert_minute,
+        alert_minute - INTERVAL ${HOUR_ENVELOPE_BEFORE_HOURS} HOUR AS range_start,
+        if(
+          status = 'active',
+          least(
+            ${utcDateTime('minute')},
+            alert_minute + toIntervalHour(${HOUR_ENVELOPE_ACTIVE_CAP_HOURS})
+          ),
+          ifNull(normalize_minute, alert_minute) + INTERVAL ${HOUR_ENVELOPE_AFTER_HOURS} HOUR
+        ) AS range_end
       FROM (
         SELECT
           alert_minute,
-          least(
-            if(status = 'active', ${utcDateTime('minute')}, ifNull(normalize_minute, alert_minute)),
-            alert_minute + toIntervalHour(3)
-          ) AS range_end
-        FROM (
-          SELECT
-            alert_minute,
-            argMax(status, updated_at) AS status,
-            argMax(normalize_minute, updated_at) AS normalize_minute
-          FROM ${config.database}.app_detection_events
-          WHERE scope = {scope:String}
-            AND scope_id = {scopeId:String}
-            AND alert_minute >= ${cutoff}
-            AND alert_minute < ${utcDateTime('minute')}
-          GROUP BY event_id, alert_minute
-        )
-        WHERE status IN ('active', 'normalized')
+          argMax(status, updated_at) AS status,
+          argMax(normalize_minute, updated_at) AS normalize_minute
+        FROM ${config.database}.app_detection_events
+        WHERE scope = {scope:String}
+          AND scope_id = {scopeId:String}
+          AND alert_minute >= ${lookback}
+          AND alert_minute < ${utcDateTime('minute')}
+        GROUP BY event_id, alert_minute
       )
-    )
+      WHERE status IN ('active', 'normalized')
+    ),
+    (
+      SELECT ifNull(groupArray(tuple(range_start, range_end)), [])
+      FROM event_windows
+    ) AS history_ranges,
+    (
+      SELECT ifNull(groupArray(tuple(alert_minute, range_end)), [])
+      FROM event_windows
+    ) AS recent_ranges
   `;
+}
+
+function outsideAttackRangesSql(minuteExpr, rangesName) {
+  return `NOT arrayExists(
+    r -> ${minuteExpr} >= tupleElement(r, 1) AND ${minuteExpr} <= tupleElement(r, 2),
+    ${rangesName}
+  )`;
 }
 
 function recentMedianSql(valueExpr) {
   const cutoff = `${utcDateTime('minute')} - INTERVAL {quarantine:UInt16} MINUTE`;
-  return `quantileExactIf(0.5)(${valueExpr}, minute >= ${cutoff} AND NOT arrayExists(
-    r -> minute >= tupleElement(r, 1) AND minute <= tupleElement(r, 2),
-    attack_ranges
-  ))`;
+  return `quantileExactIf(0.5)(${valueExpr}, minute >= ${cutoff} AND ${outsideAttackRangesSql('minute', 'recent_ranges')})`;
 }
 
 async function loadHourEnvelope({ scope, scopeId, minute }) {
@@ -162,10 +185,10 @@ async function loadHourEnvelope({ scope, scopeId, minute }) {
   });
   if (scope === 'client') {
     const { rows } = await query(`
-      WITH ${attackRangesSql()} AS attack_ranges
+      WITH ${attackRangesCte()}
       SELECT
-        quantileExactIf(0.95)(bytes * 8 / 60, minute < ${cutoff}) AS p95,
-        quantileExactIf(0.999)(bytes * 8 / 60, minute < ${cutoff}) AS p999,
+        quantileExactIf(0.95)(bytes * 8 / 60, minute < ${cutoff} AND ${outsideAttackRangesSql('minute', 'history_ranges')}) AS p95,
+        quantileExactIf(0.999)(bytes * 8 / 60, minute < ${cutoff} AND ${outsideAttackRangesSql('minute', 'history_ranges')}) AS p999,
         ${recentMedianSql('bytes * 8 / 60')} AS recent_median
       FROM default.traffic_client_1m
       WHERE client_id = {scopeId:String}
@@ -179,10 +202,10 @@ async function loadHourEnvelope({ scope, scopeId, minute }) {
     return envelope(rows);
   }
   const { rows } = await query(`
-    WITH ${attackRangesSql()} AS attack_ranges
+    WITH ${attackRangesCte()}
     SELECT
-      quantileExactIf(0.95)(bps, minute < ${cutoff}) AS p95,
-      quantileExactIf(0.999)(bps, minute < ${cutoff}) AS p999,
+      quantileExactIf(0.95)(bps, minute < ${cutoff} AND ${outsideAttackRangesSql('minute', 'history_ranges')}) AS p95,
+      quantileExactIf(0.999)(bps, minute < ${cutoff} AND ${outsideAttackRangesSql('minute', 'history_ranges')}) AS p999,
       ${recentMedianSql('bps')} AS recent_median
     FROM ${tableRef()}
     WHERE scope = {scope:String}
