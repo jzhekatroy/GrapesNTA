@@ -337,6 +337,21 @@ function chartWidgetDataSource(widgets) {
   return chart?.dataSource || 'explorer';
 }
 
+/** Содержимое widgets для синхронизации lookback/стиля без сброса фильтра серий. */
+function observationWidgetsTileSyncSignature(widgets) {
+  const style = observationChartStyleFromWidgets(widgets);
+  const hasTop = hasTopTableWidget(widgets) ? '1' : '0';
+  return `${style}\0${hasTop}`;
+}
+
+/** Смена разреза графика — фильтр чипов серий нужно обнулить. */
+function observationSeriesFocusResetSignature(widgets) {
+  const groupBy = groupByFromWidgets(widgets).join('|');
+  const metric = observationMetricFromWidgets(widgets);
+  const dataSource = chartWidgetDataSource(widgets);
+  return `${groupBy}\0${metric}\0${dataSource}`;
+}
+
 function isNativeAggregateObservation(item) {
   const ds = chartWidgetDataSource(item?.widgets);
   return ds === 'traffic_direction' || ds === 'vlan_trend';
@@ -1085,6 +1100,8 @@ function ObservationLiveTile({
   const [focusKeys, setFocusKeys] = useState([]);
   const customRangeRef = useRef(null);
   const displayTimezone = typeof getDisplayTimezone === 'function' ? getDisplayTimezone() : undefined;
+  const widgetsTileSyncSignature = observationWidgetsTileSyncSignature(item.widgets);
+  const seriesFocusResetSignature = observationSeriesFocusResetSignature(item.widgets);
 
   useEffect(() => {
     customRangeRef.current = customRange;
@@ -1095,9 +1112,12 @@ function ObservationLiveTile({
     setChartStyle(observationChartStyleFromWidgets(item.widgets));
     setCustomRange(null);
     setZoomStack([]);
-    setFocusKeys([]);
     if (!hasTopTableWidget(item.widgets)) setExpandedTab('reports');
-  }, [item.id, item.lookback, item.widgets]);
+  }, [item.id, item.lookback, widgetsTileSyncSignature]);
+
+  useEffect(() => {
+    setFocusKeys([]);
+  }, [item.id, seriesFocusResetSignature]);
 
   const previewPayload = useMemo(() => (
     customRange?.from && customRange?.to
