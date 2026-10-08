@@ -263,6 +263,29 @@ function diffDnsResolverSnapshot(snapshot, body, changes, { toggle = false } = {
   }
 }
 
+function auditSwitchTitle(switchIp, displayName) {
+  const ip = String(switchIp || '').trim();
+  const name = String(displayName || '').trim();
+  return name ? `${ip} (${name})` : ip;
+}
+
+function diffInterfaceRoleSwitchVisibility(beforeState, changes, limit = 25) {
+  const isHide = !!beforeState.isHide;
+  const entries = beforeState.entries || [];
+  let added = 0;
+  for (const snap of entries) {
+    if (added >= limit) break;
+    const title = auditSwitchTitle(snap.switchIp, snap.displayName);
+    pushChange(changes, {
+      field: String(snap.switchIp || ''),
+      label: `Коммутатор ${title}`,
+      from: snap.hidden === 1 ? 'скрыт из списка' : 'в списке',
+      to: isHide ? 'скрыт из списка' : 'в списке',
+    });
+    added += 1;
+  }
+}
+
 function diffInterfaceRoleEntries(beforeState, body, changes, limit = 30) {
   const { parseInterfaceRoleEntries } = require('./net-interface-roles');
   const entries = parseInterfaceRoleEntries(body);
@@ -336,7 +359,9 @@ function shouldCaptureAuditBeforeState(method, apiPath) {
   return p === '/api/refs/dns-resolvers/toggle'
     || p === '/api/refs/dns-resolvers'
     || p === '/api/refs/interface-roles'
-    || p === '/api/refs/interface-roles/delete';
+    || p === '/api/refs/interface-roles/delete'
+    || p === '/api/refs/interface-roles/switches/delete'
+    || p === '/api/refs/interface-roles/switches/restore';
 }
 
 function recordUserCreateFields(body, changes) {
@@ -399,6 +424,23 @@ async function captureAuditBeforeState(req, apiPath) {
       return {
         kind: 'interfaceRoles',
         isDelete: apiPath.endsWith('/delete'),
+        entries: snapshots,
+      };
+    }
+
+    if ((apiPath === '/api/refs/interface-roles/switches/delete'
+      || apiPath === '/api/refs/interface-roles/switches/restore')
+      && method === 'POST') {
+      const { parseSwitchEntries, fetchInterfaceRoleSwitchForAudit } = require('./net-interface-roles');
+      const entries = parseSwitchEntries(req.body || {});
+      const snapshots = [];
+      for (const entry of entries.slice(0, 25)) {
+        const snap = await fetchInterfaceRoleSwitchForAudit(entry.switchIp);
+        if (snap) snapshots.push(snap);
+      }
+      return {
+        kind: 'interfaceRoleSwitchVisibility',
+        isHide: apiPath.endsWith('/delete'),
         entries: snapshots,
       };
     }
@@ -489,6 +531,8 @@ function buildMutatingAuditDetail(req, apiPath, action, beforeState) {
     diffDnsResolverSnapshot(beforeState.snapshot, body, changes, { toggle: !!beforeState.toggle });
   } else if (beforeState?.kind === 'interfaceRoles') {
     diffInterfaceRoleEntries(beforeState, body, changes);
+  } else if (beforeState?.kind === 'interfaceRoleSwitchVisibility') {
+    diffInterfaceRoleSwitchVisibility(beforeState, changes);
   } else if (apiPath === '/api/refs/dns-resolvers' && method === 'POST') {
     recordDnsResolverCreate(body, changes);
   }
@@ -687,6 +731,9 @@ function resolveObjectFromPath(apiPath, method) {
   }
   if (p === '/api/refs/interface-roles/rebuild') {
     return { objectId: '', objectLabel: 'Пересчёт портов' };
+  }
+  if (p === '/api/refs/interface-roles/switches/delete' || p === '/api/refs/interface-roles/switches/restore') {
+    return { objectId: '', objectLabel: 'Коммутатор (порты оборудования)' };
   }
 
   match = p.match(/^\/api\/refs\/([^/?]+)/);

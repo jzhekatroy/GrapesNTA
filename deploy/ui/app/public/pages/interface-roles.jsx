@@ -1,6 +1,6 @@
 /* Порты оборудования — MVP: ручная разметка стороны порта (наш / внешний). */
 
-const { useCallback, useEffect, useMemo, useState } = React;
+const { useCallback, useEffect, useMemo, useRef, useState } = React;
 
 function useDebouncedValue(value, delay = 300) {
   const [debounced, setDebounced] = useState(value);
@@ -52,12 +52,99 @@ function portMarkingLabel(row) {
   return name || String(row?.ifIndex ?? '');
 }
 
-function SwitchListScreen({ switches, loading, loadError, onOpenSwitch }) {
+function switchListLabel(row) {
+  const name = String(row?.displayName || '').trim();
+  return name || String(row?.switchIp ?? '');
+}
+
+function fmtHiddenSwitchAt(value) {
+  if (!value) return '—';
+  const d = new Date(value);
+  return Number.isNaN(d.getTime()) ? '—' : d.toLocaleString('ru-RU');
+}
+
+function SwitchListScreen({
+  switches,
+  hiddenSwitches,
+  loading,
+  loadError,
+  canWrite,
+  onOpenSwitch,
+  onReload,
+}) {
+  const [selected, setSelected] = useState(() => new Set());
+  const [saving, setSaving] = useState(false);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const menuRef = useRef(null);
+
   const rows = useMemo(() => switches.map((s) => ({
     ...s,
     id: s.switchIp,
     status: computeSwitchStatus(s),
   })), [switches]);
+
+  useEffect(() => {
+    setSelected(new Set());
+  }, [switches]);
+
+  useEffect(() => {
+    if (!menuOpen) return undefined;
+    const onDoc = (e) => {
+      if (menuRef.current && !menuRef.current.contains(e.target)) setMenuOpen(false);
+    };
+    document.addEventListener('mousedown', onDoc);
+    return () => document.removeEventListener('mousedown', onDoc);
+  }, [menuOpen]);
+
+  const hideSwitch = async (row) => {
+    if (!canWrite) return;
+    const label = switchListLabel(row);
+    if (!window.confirm(`Удалить коммутатор ${label}?`)) return;
+    setSaving(true);
+    try {
+      await ApiClient.hideInterfaceRoleSwitches({ switchIp: row.switchIp });
+      pushToast({ kind: 'success', title: 'Коммутатор удалён из списка' });
+      setMenuOpen(false);
+      onReload();
+    } catch (err) {
+      pushToast({ kind: 'error', title: 'Не удалось удалить', desc: err.message });
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const bulkHideSelected = async () => {
+    if (!canWrite || !selected.size) return;
+    const n = selected.size;
+    if (!window.confirm(`Удалить ${n} ${n === 1 ? 'коммутатор' : n < 5 ? 'коммутатора' : 'коммутаторов'} из списка?`)) return;
+    setSaving(true);
+    try {
+      const items = [...selected].map((switchIp) => ({ switchIp }));
+      await ApiClient.hideInterfaceRoleSwitches({ switches: items });
+      pushToast({ kind: 'success', title: `Удалено из списка: ${items.length}` });
+      setSelected(new Set());
+      setMenuOpen(false);
+      onReload();
+    } catch (err) {
+      pushToast({ kind: 'error', title: 'Не удалось удалить', desc: err.message });
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const restoreSwitch = async (row) => {
+    if (!canWrite) return;
+    setSaving(true);
+    try {
+      await ApiClient.restoreInterfaceRoleSwitches({ switchIp: row.switchIp });
+      pushToast({ kind: 'success', title: 'Коммутатор восстановлен' });
+      onReload();
+    } catch (err) {
+      pushToast({ kind: 'error', title: 'Не удалось восстановить', desc: err.message });
+    } finally {
+      setSaving(false);
+    }
+  };
 
   const columns = [
     {
@@ -98,6 +185,53 @@ function SwitchListScreen({ switches, loading, loadError, onOpenSwitch }) {
       subtitle="Нажмите на строку, чтобы открыть порты коммутатора и разметить их вручную или пакетно."
     >
       {loadError && <div className="form-error" style={{ marginBottom: 12 }}>{loadError}</div>}
+      {canWrite && (
+        <div className="row" style={{ justifyContent: 'flex-end', marginBottom: 12 }}>
+          <div className="ir-hidden-switches" ref={menuRef}>
+            <Button
+              kind="ghost"
+              size="sm"
+              disabled={loading || saving}
+              onClick={() => setMenuOpen((open) => !open)}
+            >
+              Удалённые коммутаторы{hiddenSwitches.length ? ` (${hiddenSwitches.length})` : ''}
+            </Button>
+            {menuOpen && (
+              <div className="ir-hidden-switches__menu" role="menu">
+                {hiddenSwitches.length === 0 ? (
+                  <p className="ir-hidden-switches__empty">Нет удалённых</p>
+                ) : (
+                  <ul className="ir-hidden-switches__list">
+                    {hiddenSwitches.map((row) => (
+                      <li key={row.switchIp} className="ir-hidden-switches__item">
+                        <div className="ir-hidden-switches__meta">
+                          <div className="mono">{row.switchIp}</div>
+                          {row.displayName && (
+                            <div style={{ color: 'var(--fg-secondary)', font: 'var(--pv-text-body-3)' }}>
+                              {row.displayName}
+                            </div>
+                          )}
+                          <div style={{ color: 'var(--fg-muted)', font: 'var(--pv-text-body-3)', marginTop: 4 }}>
+                            Удалён: {fmtHiddenSwitchAt(row.hiddenAt)}
+                          </div>
+                        </div>
+                        <Button
+                          size="sm"
+                          kind="primary"
+                          disabled={saving}
+                          onClick={() => restoreSwitch(row)}
+                        >
+                          Восстановить
+                        </Button>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
       {!loading && rows.length > 0 && (
         <p className="ir-list-hint">
           Клик по коммутатору открывает список его портов: там можно задать сторону «наша» или «внешняя»
@@ -116,6 +250,41 @@ function SwitchListScreen({ switches, loading, loadError, onOpenSwitch }) {
           emptyTitle="Нет коммутаторов в каталоге SNMP"
           emptyDesc="Сначала опросите устройства на странице SNMP."
           onRowClick={(r) => onOpenSwitch(r.switchIp)}
+          selectable={canWrite}
+          selected={selected}
+          onSelectChange={setSelected}
+          toolbar={canWrite ? {
+            left: selected.size > 0 ? (
+              <div className="row" style={{ gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+                <Button
+                  kind="danger"
+                  size="sm"
+                  icon="trash"
+                  disabled={saving}
+                  onClick={bulkHideSelected}
+                >
+                  {saving ? 'Удаление…' : `Удалить выбранные (${selected.size})`}
+                </Button>
+                <Button kind="ghost" size="sm" disabled={saving} onClick={() => setSelected(new Set())}>
+                  Снять выбор
+                </Button>
+              </div>
+            ) : null,
+          } : undefined}
+          actionsColumnWidth={130}
+          rowActions={canWrite ? (r) => (
+            <Button
+              size="sm"
+              kind="ghost"
+              disabled={saving}
+              onClick={(e) => {
+                e.stopPropagation();
+                hideSwitch(r);
+              }}
+            >
+              Удалить
+            </Button>
+          ) : null}
         />
       )}
     </Card>
@@ -394,6 +563,7 @@ function PageInterfaceRoles({ onNavigate }) {
   const [switchIp, setSwitchIp] = useState(() => readInterfaceRolesHashParams().switchIp || '');
   const [refreshKey, setRefreshKey] = useState(0);
   const [switches, setSwitches] = useState([]);
+  const [hiddenSwitches, setHiddenSwitches] = useState([]);
   const [ports, setPorts] = useState([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState('');
@@ -432,14 +602,25 @@ function PageInterfaceRoles({ onNavigate }) {
         ]);
         if (cancelled) return;
         if (portsR.source === 'error') {
-          setLoadError(portsR.error || ApiClient.LOAD_FAILED);
-          setPorts([]);
+          if (/скрыт/i.test(portsR.error || '')) {
+            location.hash = 'interface-roles';
+            setSwitchIp('');
+            setPorts([]);
+            setLoadError('');
+          } else {
+            setLoadError(portsR.error || ApiClient.LOAD_FAILED);
+            setPorts([]);
+          }
         } else {
           setPorts(portsR.rows);
         }
         setSwitches(swR.source === 'error' ? [] : swR.rows);
+        setHiddenSwitches([]);
       } else {
-        const swR = await ApiClient.loadInterfaceRoleSwitches();
+        const [swR, hidR] = await Promise.all([
+          ApiClient.loadInterfaceRoleSwitches(),
+          ApiClient.loadHiddenInterfaceRoleSwitches(),
+        ]);
         if (cancelled) return;
         if (swR.source === 'error') {
           setLoadError(swR.error || ApiClient.LOAD_FAILED);
@@ -447,6 +628,7 @@ function PageInterfaceRoles({ onNavigate }) {
         } else {
           setSwitches(swR.rows);
         }
+        setHiddenSwitches(hidR.source === 'error' ? [] : hidR.rows);
         setPorts([]);
       }
       setLoading(false);
@@ -481,9 +663,12 @@ function PageInterfaceRoles({ onNavigate }) {
           </div>
           <SwitchListScreen
             switches={switches}
+            hiddenSwitches={hiddenSwitches}
             loading={loading}
             loadError={loadError}
+            canWrite={canWrite}
             onOpenSwitch={openSwitch}
+            onReload={reload}
           />
         </>
       )}

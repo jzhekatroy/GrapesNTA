@@ -5,6 +5,8 @@ const { parseLookbackHours, DEFAULT_LOOKBACK_HOURS, MAX_LOOKBACK_HOURS } = requi
 const {
   portDirectionSql,
   listInterfaceRoleSwitches,
+  listHiddenInterfaceRoleSwitches,
+  parseSwitchEntries,
   saveInterfaceRole,
   mapSettingsRow,
   normalizeUnknownNetworks,
@@ -22,7 +24,40 @@ test('api-map maps interface-roles refs endpoints', () => {
   assert.equal(getResourceForPath('/api/refs/interface-role-rules/preview', 'POST'), 'interface-roles');
   assert.equal(getResourceForPath('/api/refs/interface-roles/summary'), 'interface-roles');
   assert.equal(getResourceForPath('/api/refs/interface-roles/switches'), 'interface-roles');
+  assert.equal(getResourceForPath('/api/refs/interface-roles/switches/hidden'), 'interface-roles');
+  assert.equal(getResourceForPath('/api/refs/interface-roles/switches/delete', 'POST'), 'interface-roles');
+  assert.equal(getResourceForPath('/api/refs/interface-roles/switches/restore', 'POST'), 'interface-roles');
   assert.equal(getResourceForPath('/api/refs/interface-roles/172.18.1.1'), 'interface-roles');
+});
+
+test('parseSwitchEntries accepts one switch or switches array', () => {
+  assert.deepEqual(parseSwitchEntries({ switchIp: '10.0.0.1' }), [{ switchIp: '10.0.0.1' }]);
+  assert.deepEqual(
+    parseSwitchEntries({ switches: [{ switchIp: '10.0.0.2' }, { switch_ip: '10.0.0.3' }] }),
+    [{ switchIp: '10.0.0.2' }, { switchIp: '10.0.0.3' }],
+  );
+  assert.throws(() => parseSwitchEntries({}), (err) => err.message === 'Укажите коммутатор');
+});
+
+test('listInterfaceRoleSwitches omits switches hidden from UI list', () => {
+  const spec = listInterfaceRoleSwitches();
+  assert.match(spec.sql, /coalesce\(h\.hidden, 0\) = 0/);
+});
+
+test('listHiddenInterfaceRoleSwitches maps hidden rows', () => {
+  const spec = listHiddenInterfaceRoleSwitches();
+  const mapped = spec.map([{
+    switch_ip: '172.18.19.66',
+    display_name: 'sw-core',
+    updated_by: 'admin',
+    updated_at: '2026-10-08 10:00:00',
+  }]);
+  assert.deepEqual(mapped[0], {
+    switchIp: '172.18.19.66',
+    displayName: 'sw-core',
+    hiddenAt: '2026-10-08 10:00:00',
+    updatedBy: 'admin',
+  });
 });
 
 test('api-map normalizes paths stripped by /api mount', () => {

@@ -89,6 +89,8 @@ const config = {
   interfaceRolesView: env('CLICKHOUSE_INTERFACE_ROLES_VIEW', 'net_interface_roles_current'),
   interfaceRolesEffectiveTable: env('CLICKHOUSE_INTERFACE_ROLES_EFFECTIVE_TABLE', 'net_interface_roles_effective'),
   interfaceRolesEffectiveView: env('CLICKHOUSE_INTERFACE_ROLES_EFFECTIVE_VIEW', 'net_interface_roles_effective_current'),
+  interfaceRoleSwitchesHiddenTable: env('CLICKHOUSE_INTERFACE_ROLE_SWITCHES_HIDDEN_TABLE', 'net_interface_role_switches_hidden'),
+  interfaceRoleSwitchesHiddenView: env('CLICKHOUSE_INTERFACE_ROLE_SWITCHES_HIDDEN_VIEW', 'net_interface_role_switches_hidden_current'),
   geoCountryDict: env('CLICKHOUSE_GEO_COUNTRY_DICT', 'default.geo_country_dict'),
   clientPrefixDict: env('CLICKHOUSE_CLIENT_PREFIX_DICT', 'default.net_client_prefix_dict'),
   ispPrefixDict: env('CLICKHOUSE_ISP_PREFIX_DICT', 'default.net_isp_prefix_dict'),
@@ -422,6 +424,14 @@ function interfaceRolesEffectiveTableRef() {
 
 function interfaceRolesEffectiveViewRef() {
   return `${qIdent(config.database)}.${qIdent(config.interfaceRolesEffectiveView)}`;
+}
+
+function interfaceRoleSwitchesHiddenTableRef() {
+  return `${qIdent(config.database)}.${qIdent(config.interfaceRoleSwitchesHiddenTable)}`;
+}
+
+function interfaceRoleSwitchesHiddenViewRef() {
+  return `${qIdent(config.database)}.${qIdent(config.interfaceRoleSwitchesHiddenView)}`;
 }
 
 function netInterfacesDictRef() {
@@ -904,6 +914,8 @@ module.exports = {
   interfaceRolesViewRef,
   interfaceRolesEffectiveTableRef,
   interfaceRolesEffectiveViewRef,
+  interfaceRoleSwitchesHiddenTableRef,
+  interfaceRoleSwitchesHiddenViewRef,
   locationsViewRef,
   locationsTableRef,
   collectorHealthViewRef,

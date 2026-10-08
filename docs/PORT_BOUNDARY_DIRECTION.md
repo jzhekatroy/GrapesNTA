@@ -209,10 +209,16 @@ SNMP-поллер, и значения затирались бы при кажд
 | POST | `/api/refs/interface-role-rules/delete` | удалить правило |
 | POST | `/api/refs/interface-role-rules/preview` | какие порты попадут под правило |
 | GET | `/api/refs/interface-roles/summary` | сводка покрытия разметкой |
+| GET | `/api/refs/interface-roles/switches` | коммутаторы в списке UI (без скрытых) |
+| GET | `/api/refs/interface-roles/switches/hidden` | скрытые из списка коммутаторы |
+| POST | `/api/refs/interface-roles/switches/delete` | скрыть коммутатор(ы) из списка UI (`{ switchIp }` или `{ switches: [...] }`) |
+| POST | `/api/refs/interface-roles/switches/restore` | вернуть коммутатор(ы) в список |
 | GET | `/api/refs/interface-roles/:ip` | порты коммутатора с разметкой |
 | POST | `/api/refs/interface-roles` | ручная разметка порта (или списка портов) |
-| POST | `/api/refs/interface-roles/delete` | снять ручную разметку |
+| POST | `/api/refs/interface-roles/delete` | снять ручную разметку порта (SNMP-каталог и строка коммутатора не удаляются) |
 | POST | `/api/refs/interface-roles/rebuild` | пересчитать эффективную разметку |
+
+Скрытие коммутатора на `#interface-roles` пишет в `net_interface_role_switches_hidden` и не равно снятию разметки портов и не равно удалению SNMP-агента (`DELETE /api/refs/snmp-agents/:ip`).
 
 Диагностика (`deploy/ui/app/server/direction-audit.js`):
 

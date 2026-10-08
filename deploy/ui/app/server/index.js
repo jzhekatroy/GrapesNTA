@@ -173,10 +173,14 @@ const {
   previewInterfaceRoleRule,
   listInterfaceRoles,
   listInterfaceRoleSwitches,
+  listHiddenInterfaceRoleSwitches,
+  hideInterfaceRoleSwitches,
+  restoreInterfaceRoleSwitches,
   saveInterfaceRole,
   deleteInterfaceRole,
   materializeEffectiveRoles,
   getInterfaceRoleSummary,
+  isInterfaceRoleSwitchHidden,
 } = require('./net-interface-roles');
 const {
   getInterfaceFieldCoverage,
@@ -2503,8 +2507,38 @@ app.get('/api/refs/interface-roles/switches', async (_req, res) => {
   }
 });
 
+app.get('/api/refs/interface-roles/switches/hidden', async (_req, res) => {
+  try {
+    res.json(await runNamed(() => listHiddenInterfaceRoleSwitches(), { name: 'refs/interface-roles-switches-hidden' }));
+  } catch (err) {
+    sendApiError(res, err);
+  }
+});
+
+app.post('/api/refs/interface-roles/switches/delete', async (req, res) => {
+  try {
+    const meta = await hideInterfaceRoleSwitches(req.body || {}, { updatedBy: req.user?.id || '' });
+    res.json({ ok: true, meta });
+  } catch (err) {
+    sendApiError(res, err);
+  }
+});
+
+app.post('/api/refs/interface-roles/switches/restore', async (req, res) => {
+  try {
+    const meta = await restoreInterfaceRoleSwitches(req.body || {}, { updatedBy: req.user?.id || '' });
+    res.json({ ok: true, meta });
+  } catch (err) {
+    sendApiError(res, err);
+  }
+});
+
 app.get('/api/refs/interface-roles/:ip', async (req, res) => {
   try {
+    if (await isInterfaceRoleSwitchHidden(req.params.ip)) {
+      res.status(404).json({ error: 'Коммутатор скрыт из списка «Порты оборудования»' });
+      return;
+    }
     res.json(await runNamed(
       () => listInterfaceRoles(req.params.ip),
       { name: 'refs/interface-roles' },

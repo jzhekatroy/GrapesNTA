@@ -11,6 +11,8 @@ const {
   interfaceRolesViewRef,
   interfaceRolesEffectiveTableRef,
   interfaceRolesEffectiveViewRef,
+  interfaceRoleSwitchesHiddenTableRef,
+  interfaceRoleSwitchesHiddenViewRef,
   clientsViewRef,
   clientPortsViewRef,
 } = require('./clickhouse');
@@ -580,6 +582,140 @@ function parseInterfaceKey(entry) {
   return { switchIp, ifIndex };
 }
 
+function parseSwitchKey(entry) {
+  const switchIp = String(entry?.switchIp ?? entry?.switch_ip ?? '').trim();
+  if (!net.isIP(switchIp)) throw apiError('Некорректный IP коммутатора');
+  return { switchIp };
+}
+
+function parseSwitchEntries(body = {}) {
+  let raw;
+  if (Array.isArray(body?.switches) && body.switches.length) {
+    raw = body.switches;
+  } else if (body?.switchIp != null || body?.switch_ip != null) {
+    raw = [body];
+  } else {
+    raw = [];
+  }
+  if (!raw.length) throw apiError('Укажите коммутатор');
+  return raw.map((entry) => parseSwitchKey(entry));
+}
+
+async function fetchSwitchDisplayNames(switchIps) {
+  const ips = [...new Set(switchIps.map((ip) => String(ip || '').trim()).filter((ip) => net.isIP(ip)))];
+  const labels = new Map();
+  if (!ips.length) return labels;
+  const { rows } = await query(
+    `
+      SELECT
+        i.switch_ip AS switch_ip,
+        any(a.display_name) AS display_name
+      FROM ${netInterfacesCurrentRef()} AS i
+      LEFT JOIN ${snmpAgentsCurrentRef()} AS a
+        ON a.switch_ip = i.switch_ip
+      WHERE i.switch_ip IN {switch_ips:Array(String)}
+      GROUP BY i.switch_ip
+    `,
+    { switch_ips: ips },
+    { name: 'refs/interface-role-switch-labels' },
+  );
+  for (const r of rows) {
+    labels.set(String(r.switch_ip ?? ''), String(r.display_name ?? ''));
+  }
+  return labels;
+}
+
+async function assertSwitchesInCatalog(switchIps) {
+  const ips = [...new Set(switchIps)];
+  const { rows } = await query(
+    `
+      SELECT DISTINCT switch_ip
+      FROM ${netInterfacesCurrentRef()}
+      WHERE switch_ip IN {switch_ips:Array(String)}
+    `,
+    { switch_ips: ips },
+    { name: 'refs/interface-role-switch-catalog' },
+  );
+  const found = new Set(rows.map((r) => String(r.switch_ip ?? '')));
+  const missing = ips.filter((ip) => !found.has(ip));
+  if (missing.length) {
+    throw apiError(`Коммутатор «${missing[0]}» не найден в каталоге SNMP`, 404);
+  }
+}
+
+/** Скрыть коммутатор(ы) из списка «Порты оборудования» (не трогая разметку портов). */
+async function hideInterfaceRoleSwitches(body = {}, { updatedBy = '' } = {}) {
+  const entries = parseSwitchEntries(body);
+  const switchIps = entries.map((e) => e.switchIp);
+  await assertSwitchesInCatalog(switchIps);
+  const author = String(updatedBy || '').slice(0, 128);
+  const labels = await fetchSwitchDisplayNames(switchIps);
+  const records = switchIps.map((switchIp) => ({
+    switch_ip: switchIp,
+    display_name: labels.get(switchIp) || '',
+    hidden: 1,
+    updated_by: author,
+  }));
+  const { elapsedMs } = await insertRows(config.interfaceRoleSwitchesHiddenTable, records, {
+    name: 'refs/interface-role-switch-hide',
+  });
+  return { elapsedMs, switches: records.length };
+}
+
+/** Вернуть коммутатор(ы) в список «Порты оборудования». */
+async function restoreInterfaceRoleSwitches(body = {}, { updatedBy = '' } = {}) {
+  const entries = parseSwitchEntries(body);
+  const switchIps = entries.map((e) => e.switchIp);
+  const author = String(updatedBy || '').slice(0, 128);
+  const labels = await fetchSwitchDisplayNames(switchIps);
+  const records = switchIps.map((switchIp) => ({
+    switch_ip: switchIp,
+    display_name: labels.get(switchIp) || '',
+    hidden: 0,
+    updated_by: author,
+  }));
+  const { elapsedMs } = await insertRows(config.interfaceRoleSwitchesHiddenTable, records, {
+    name: 'refs/interface-role-switch-restore',
+  });
+  return { elapsedMs, switches: records.length };
+}
+
+/** Снимок коммутатора для аудита (видимость в списке). */
+async function fetchInterfaceRoleSwitchForAudit(switchIp) {
+  const ip = String(switchIp || '').trim();
+  if (!net.isIP(ip)) return null;
+  try {
+    const { rows } = await query(
+      `
+        SELECT switch_ip, display_name, hidden, updated_by, updated_at
+        FROM ${interfaceRoleSwitchesHiddenViewRef()}
+        WHERE switch_ip = {switch_ip:String}
+        LIMIT 1
+      `,
+      { switch_ip: ip },
+      { name: 'refs/interface-role-switch-audit' },
+    );
+    const r = rows[0];
+    if (!r) {
+      return { switchIp: ip, displayName: '', hidden: 0 };
+    }
+    return {
+      switchIp: ip,
+      displayName: String(r.display_name ?? ''),
+      hidden: Number(r.hidden) === 1 ? 1 : 0,
+      updatedBy: String(r.updated_by ?? ''),
+      updatedAt: r.updated_at ?? null,
+    };
+  } catch {
+    return { switchIp: ip, displayName: '', hidden: 0 };
+  }
+}
+
+async function isInterfaceRoleSwitchHidden(switchIp) {
+  const snap = await fetchInterfaceRoleSwitchForAudit(switchIp);
+  return snap?.hidden === 1;
+}
+
 /** Ручная разметка одного или нескольких портов; перекрывает правила. */
 async function saveInterfaceRole(body = {}, { updatedBy = '' } = {}) {
   const entries = Array.isArray(body?.interfaces) && body.interfaces.length
@@ -711,6 +847,9 @@ function listInterfaceRoleSwitches() {
         ON e.switch_ip = i.switch_ip AND e.if_index = i.if_index
       LEFT JOIN ${snmpAgentsCurrentRef()} AS a
         ON a.switch_ip = i.switch_ip
+      LEFT JOIN ${interfaceRoleSwitchesHiddenViewRef()} AS h
+        ON h.switch_ip = i.switch_ip
+      WHERE coalesce(h.hidden, 0) = 0
       GROUP BY i.switch_ip
       ORDER BY unmarked DESC, i.switch_ip
     `,
@@ -723,6 +862,31 @@ function listInterfaceRoleSwitches() {
         portsWithAlias: Number(r.ports_with_alias) || 0,
         marked: Number(r.marked) || 0,
         unmarked: Number(r.unmarked) || 0,
+      }));
+    },
+  };
+}
+
+/** Коммутаторы, скрытые из списка «Порты оборудования». */
+function listHiddenInterfaceRoleSwitches() {
+  return {
+    sql: `
+      SELECT
+        switch_ip,
+        display_name,
+        updated_by,
+        updated_at
+      FROM ${interfaceRoleSwitchesHiddenViewRef()}
+      WHERE hidden = 1
+      ORDER BY updated_at DESC, switch_ip
+    `,
+    params: {},
+    map(rows) {
+      return rows.map((r) => ({
+        switchIp: String(r.switch_ip ?? ''),
+        displayName: String(r.display_name ?? ''),
+        hiddenAt: r.updated_at ?? null,
+        updatedBy: String(r.updated_by ?? ''),
       }));
     },
   };
@@ -803,10 +967,16 @@ module.exports = {
   previewInterfaceRoleRule,
   listInterfaceRoles,
   listInterfaceRoleSwitches,
+  listHiddenInterfaceRoleSwitches,
+  hideInterfaceRoleSwitches,
+  restoreInterfaceRoleSwitches,
   saveInterfaceRole,
   deleteInterfaceRole,
   materializeEffectiveRoles,
   getInterfaceRoleSummary,
   parseInterfaceRoleEntries,
+  parseSwitchEntries,
   fetchInterfacePortForAudit,
+  fetchInterfaceRoleSwitchForAudit,
+  isInterfaceRoleSwitchHidden,
 };

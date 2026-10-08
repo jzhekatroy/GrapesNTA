@@ -7397,6 +7397,49 @@ html.modal-open #root {
   color: var(--fg-secondary);
   font: var(--pv-text-body-3);
 }
+.ir-hidden-switches {
+  position: relative;
+}
+.ir-hidden-switches__menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 40;
+  min-width: 320px;
+  max-width: min(420px, 92vw);
+  max-height: 360px;
+  overflow: auto;
+  padding: 8px;
+  border-radius: 10px;
+  border: 1px solid var(--bd-default);
+  background: var(--bg-surface-2);
+  box-shadow: var(--pv-shadow-popover);
+}
+.ir-hidden-switches__empty {
+  margin: 8px 10px;
+  color: var(--fg-secondary);
+  font: var(--pv-text-body-3);
+}
+.ir-hidden-switches__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.ir-hidden-switches__item {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px;
+  border-radius: 8px;
+}
+.ir-hidden-switches__item + .ir-hidden-switches__item {
+  border-top: 1px solid var(--bd-default);
+}
+.ir-hidden-switches__meta {
+  flex: 1 1 auto;
+  min-width: 0;
+}
 .ir-status-badge--not_started { }
 .ir-status-badge--partial { }
 .ir-status-badge--done { }

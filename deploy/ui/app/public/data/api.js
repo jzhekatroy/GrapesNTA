@@ -2164,6 +2164,27 @@ const ApiClient = (() => {
     }
   }
 
+  async function loadHiddenInterfaceRoleSwitches() {
+    try {
+      const body = await getJson('/api/refs/interface-roles/switches/hidden', { widget: 'refs/interface-roles-switches-hidden' });
+      return {
+        source: 'clickhouse',
+        rows: Array.isArray(body.data) ? body.data : [],
+        meta: body.meta || null,
+      };
+    } catch (err) {
+      return { source: 'error', rows: [], error: err.message || LOAD_FAILED };
+    }
+  }
+
+  async function hideInterfaceRoleSwitches(payload) {
+    return requestJson('/api/refs/interface-roles/switches/delete', { method: 'POST', body: payload });
+  }
+
+  async function restoreInterfaceRoleSwitches(payload) {
+    return requestJson('/api/refs/interface-roles/switches/restore', { method: 'POST', body: payload });
+  }
+
   async function loadInterfaceRolesForSwitch(switchIp) {
     try {
       const body = await getJson(
@@ -3236,6 +3257,9 @@ const ApiClient = (() => {
     previewInterfaceRoleRule,
     loadInterfaceRoleSummary,
     loadInterfaceRoleSwitches,
+    loadHiddenInterfaceRoleSwitches,
+    hideInterfaceRoleSwitches,
+    restoreInterfaceRoleSwitches,
     loadInterfaceRolesForSwitch,
     saveInterfaceRole,
     deleteInterfaceRole,
