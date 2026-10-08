@@ -8,6 +8,7 @@ const {
   flowCol,
   flowsRawTableRef,
   l3PrefixesViewRef,
+  entitiesViewRef,
   clientsViewRef,
   asnRegistryEnrichedTableRef,
   config,
@@ -262,6 +263,34 @@ function netObjectsSql({ clientPrefixes = false, excludeProviders = false } = {}
   `;
 }
 
+// Название берём из справочника владельцев. На префиксе оно часто пустое,
+// и тогда в алерт и таблицу попадал entity_id (isp:verolayn → verolayn).
+function providerDisplayName(entityId, entityName, prefixName) {
+  const name = String(entityName || '').trim() || String(prefixName || '').trim();
+  if (name) return name;
+  return String(entityId || '').trim().replace(/^isp:/i, '');
+}
+
+async function loadEntityDisplayNames(entityIds) {
+  const ids = [...new Set((entityIds || []).map((id) => String(id || '').trim()).filter(Boolean))];
+  const names = new Map();
+  if (!ids.length) return names;
+  try {
+    const { rows } = await query(`
+      SELECT entity_id, display_name
+      FROM ${entitiesViewRef()}
+      WHERE entity_id IN {ids:Array(String)}
+    `, { ids }, { name: 'detection/entity-names' });
+    for (const row of rows) {
+      const name = String(row.display_name || '').trim();
+      if (name) names.set(String(row.entity_id), name);
+    }
+  } catch (err) {
+    logDetection('entity names skipped', { message: err.message });
+  }
+  return names;
+}
+
 async function loadProviders() {
   try {
     const { rows } = await query(`
@@ -270,13 +299,13 @@ async function loadProviders() {
       WHERE family = 4 AND role = 'provider_public' AND entity_id != ''
       GROUP BY entity_id
     `, {}, { name: 'detection/objects-providers' });
+    const names = await loadEntityDisplayNames(rows.map((r) => r.entity_id));
     return rows.map((r) => {
       const id = String(r.entity_id);
-      const display = String(r.display_name || '').trim();
       return {
         scope: 'provider',
         scopeId: id,
-        name: display || id,
+        name: providerDisplayName(id, names.get(id), r.display_name),
         bindMode: 'prefixes',
       };
     });
@@ -1882,13 +1911,19 @@ async function loadLatest() {
     WHERE a.minute = ${utcDateTime('m')}
   `, { m: minute }, { name: 'detection/latest-rows' });
 
+  const providerNames = await loadEntityDisplayNames(
+    rows.filter((r) => r.scope === 'provider').map((r) => r.scope_id),
+  );
+
   return {
     minute,
     items: rows.map((r) => ({
       scope: r.scope,
       scopeId: r.scope_id,
       proto: r.proto || 'all',
-      name: r.name,
+      name: r.scope === 'provider'
+        ? providerDisplayName(r.scope_id, providerNames.get(String(r.scope_id)), '')
+        : r.name,
       bps: Number(r.bps || 0),
       pps: Number(r.pps || 0),
       growthBps: r.growth_bps == null ? null : Number(r.growth_bps),
@@ -2054,6 +2089,7 @@ module.exports = {
   BASELINE_CACHE_MS,
   isBaselineCacheFresh,
   dedupeClientsByDisplayName,
+  providerDisplayName,
   portClientIds,
   clientNetMinuteSql,
   clientNetHourSql,

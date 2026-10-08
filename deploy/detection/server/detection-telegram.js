@@ -1,6 +1,6 @@
 'use strict';
 
-const { query, executeCommand, insertRows, config, l3PrefixesViewRef } = require('./clickhouse');
+const { query, executeCommand, insertRows, config, l3PrefixesViewRef, entitiesViewRef } = require('./clickhouse');
 const { tableRef, ensureDetectionTables } = require('./detection-schema');
 const { formatCh, parseUtc, MINUTE } = require('./detection-core');
 const {
@@ -3286,8 +3286,52 @@ async function loadDetectionEvents({ status = 'active', limit = 200, from, to, k
     LIMIT {take:UInt16}
   `, params, { name: 'detection/events-list' });
   const events = rows.map(mapEventRow);
+  await applyProviderCatalogNames(events);
   if (wanted === 'active') await attachLiveState(events);
   return events;
+}
+
+// Уже отправленный текст алерта хранит имя на момент открытия. Если тогда
+// подставился entity_id, в карточке показываем название из справочника.
+async function applyProviderCatalogNames(events) {
+  const ids = [...new Set(
+    (events || []).filter((event) => event.scope === 'provider').map((event) => event.scopeId),
+  )];
+  if (!ids.length) return;
+  let names;
+  try {
+    const { rows } = await query(`
+      SELECT entity_id, display_name
+      FROM ${entitiesViewRef()}
+      WHERE entity_id IN {ids:Array(String)}
+    `, { ids }, { name: 'detection/event-entity-names' });
+    names = new Map();
+    for (const row of rows) {
+      const name = String(row.display_name || '').trim();
+      if (name) names.set(String(row.entity_id), name);
+    }
+  } catch {
+    return;
+  }
+  for (const event of events) {
+    const display = names.get(event.scopeId);
+    if (!display || display === event.name) continue;
+    const previous = String(event.name || '');
+    event.name = display;
+    const safe = escapeHtml(display);
+    const olds = new Set([
+      previous,
+      event.scopeId,
+      String(event.scopeId || '').replace(/^isp:/i, ''),
+    ].filter((value) => value && value !== display));
+    const swap = (text) => {
+      let out = String(text || '');
+      for (const old of olds) out = out.split(`<b>${escapeHtml(old)}</b>`).join(`<b>${safe}</b>`);
+      return out;
+    };
+    event.alertText = swap(event.alertText);
+    event.normalizeText = swap(event.normalizeText);
+  }
 }
 
 const LIVE_ONGOING_GAP_MINUTES = 3;

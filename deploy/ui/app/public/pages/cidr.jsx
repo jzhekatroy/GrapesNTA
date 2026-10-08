@@ -168,12 +168,7 @@ function PageCIDR({ embedded = false, refreshKey: parentRefreshKey = 0, onReload
       sortAccessor: (r) => r.entityName || r.entityId,
       render: (r) => (
         <div>
-          <div style={{ font: 'var(--pv-text-body-2-bold)' }}>{r.entityName || '—'}</div>
-          {r.entityId && (
-            <div className="mono" style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-secondary)', marginTop: 2 }}>
-              {r.entityId}
-            </div>
-          )}
+          <div style={{ font: 'var(--pv-text-body-2-bold)' }}>{r.entityName || r.entityId || '—'}</div>
         </div>
       ),
     },
@@ -476,7 +471,7 @@ function L3PrefixFormModal({ open, row, isNew, entities, onClose, onSaved }) {
             <option value="">— выберите —</option>
             {entities.map((e) => (
               <option key={e.entityId} value={e.entityId}>
-                {e.displayName} ({e.entityId})
+                {e.displayName || e.entityId}
               </option>
             ))}
           </select>

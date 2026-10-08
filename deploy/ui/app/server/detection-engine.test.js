@@ -6,6 +6,7 @@ const {
   BASELINE_CACHE_MS,
   isBaselineCacheFresh,
   dedupeClientsByDisplayName,
+  providerDisplayName,
   clampClosedMinute,
   pendingMinutes,
 } = require('./detection-engine');
@@ -85,5 +86,14 @@ describe('detection-engine client dedupe', () => {
       { client_id: '11', display_name: '  ' },
     ]);
     assert.equal(rows.length, 2);
+  });
+});
+
+describe('detection-engine provider name', () => {
+  it('берёт название из справочника, а не entity id', () => {
+    assert.equal(providerDisplayName('isp:verolayn', 'Веролайн', ''), 'Веролайн');
+    assert.equal(providerDisplayName('isp:pin', '', 'ПИН'), 'ПИН');
+    assert.equal(providerDisplayName('isp:verolayn', 'Веролайн', 'префикс'), 'Веролайн');
+    assert.equal(providerDisplayName('isp:verolayn', '', ''), 'verolayn');
   });
 });
