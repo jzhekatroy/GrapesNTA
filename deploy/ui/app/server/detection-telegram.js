@@ -65,7 +65,7 @@ const SNAPSHOT_FIELDS = [
   'syn_attempts', 'syn_answered', 'syn_in_flows', 'syn_half_open', 'syn_half_open_reply',
   'answer_pct', 'half_open_pct', 'half_open_reply_pct',
   'port_entropy', 'port_entropy_out', 'ports_per_ip', 'ports_per_ip_out',
-  'amp_bytes', 'amp_packets', 'amp_srcs', 'growth_amp', 'growth_syn',
+  'amp_bytes', 'amp_packets', 'amp_srcs', 'amp_top_share', 'growth_amp', 'growth_syn',
   'foreign_bytes', 'foreign_srcs', 'top_countries',
   'growth_foreign_bps', 'growth_foreign_share',
   'syn_only_bytes', 'syn_only_packets', 'syn_only_rows', 'syn_only_targets',
@@ -99,6 +99,7 @@ const SNAPSHOT_CAMEL = {
   amp_bytes: 'ampBytes',
   amp_packets: 'ampPackets',
   amp_srcs: 'ampSrcs',
+  amp_top_share: 'ampTopShare',
   growth_amp: 'growthAmp',
   growth_syn: 'growthSyn',
   foreign_bytes: 'foreignBytes',
@@ -2825,7 +2826,7 @@ async function loadPreviousAllRows(minute, keys, limit = DEFAULT_STREAK) {
   if (scopeFilter.sql === '0') return new Map();
   const { rows } = await query(`
     SELECT scope, scope_id, proto, minute, growth_bps, growth_pps, bps, bytes,
-           amp_bytes, amp_packets, amp_srcs, growth_amp,
+           amp_bytes, amp_packets, amp_srcs, amp_top_share, growth_amp,
            foreign_bytes, foreign_srcs, top_countries, growth_foreign_bps, growth_foreign_share,
            syn_only_bytes, syn_only_packets, syn_only_rows, syn_only_targets, answer_pct, growth_syn, sampling_rate,
            net_top, net_bps, net_pps, net_usual_bps, net_growth_bps, net_growth_pps
@@ -2842,6 +2843,7 @@ async function loadPreviousAllRows(minute, keys, limit = DEFAULT_STREAK) {
         amp_bytes,
         amp_packets,
         amp_srcs,
+        amp_top_share,
         growth_amp,
         foreign_bytes,
         foreign_srcs,

@@ -43,6 +43,10 @@ const AMPLIFIER_PORT_LABEL = {
 const AMP_SHARE_MIN = 0.15;
 const AMP_SRCS_MIN = 10;
 const AMP_PKT_MIN = 800;
+// Один адрес с половиной байт или больше — это один поток с порта усилителя,
+// а не отражение. На ШПД 29.09–08.10 все 32 срабатывания были такими.
+// Порог только у открытия: уже идущую атаку ampStillGoing не закрывает.
+const AMP_TOP_SHARE_MAX = 0.5;
 // Отбор: число отражателей, размер пакета и пол по Мбит. Доля от всего UDP
 // клиента не гейтит — у 81953 днём amp 150 Мбит при своём UDP ~1.1 Гбит это
 // ~13%, и дежурный терял активное событие. Пол нужен против мелких серверов,
@@ -233,7 +237,13 @@ function ampAboveHour(row = {}, options = {}) {
   return growth >= ratioMin;
 }
 
+function ampTopShare(row = {}) {
+  return num(row.amp_top_share ?? row.ampTopShare);
+}
+
 function isAmplificationHit(row = {}, options = {}) {
+  const top = ampTopShare(row);
+  if (top != null && top >= AMP_TOP_SHARE_MAX) return false;
   const m = ampMetrics(row);
   const srcsMin = num(options.srcsMin) ?? AMP_SRCS_MIN;
   const pktMin = num(options.pktMin) ?? AMP_PKT_MIN;
@@ -431,6 +441,7 @@ module.exports = {
   AMP_SRCS_MIN,
   AMP_PKT_MIN,
   AMP_BPS_MIN,
+  AMP_TOP_SHARE_MAX,
   GEO_SHARE_GROWTH_MIN,
   GEO_VOLUME_GROWTH_MIN,
   GEO_SHARE_MIN,

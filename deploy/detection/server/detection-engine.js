@@ -750,16 +750,30 @@ async function loadPortMetrics(scope, minuteTs) {
         FROM per_ip
         GROUP BY scope_id, proto
       ),
+      amp_src AS (
+        SELECT
+          scope_id,
+          src_ip,
+          sum(bytes) AS src_bytes,
+          sum(packets) AS src_packets
+        FROM ev
+        WHERE proto = 'udp' AND side = 1 AND src_port IN (${ampPorts})
+        GROUP BY scope_id, src_ip
+      ),
       amp AS (
         SELECT
           scope_id,
-          proto,
-          sumIf(bytes, side = 1 AND src_port IN (${ampPorts})) AS amp_bytes,
-          sumIf(packets, side = 1 AND src_port IN (${ampPorts})) AS amp_packets,
-          uniqExactIf(src_ip, side = 1 AND src_port IN (${ampPorts})) AS amp_srcs
-        FROM ev
-        WHERE proto = 'udp'
-        GROUP BY scope_id, proto
+          'udp' AS proto,
+          sum(src_bytes) AS amp_bytes,
+          sum(src_packets) AS amp_packets,
+          count() AS amp_srcs,
+          if(
+            sum(src_bytes) > 0,
+            toFloat64(max(src_bytes)) / toFloat64(sum(src_bytes)),
+            0
+          ) AS amp_top_share
+        FROM amp_src
+        GROUP BY scope_id
       ),
       geo_cc AS (
         SELECT
@@ -808,6 +822,7 @@ async function loadPortMetrics(scope, minuteTs) {
       if(s.proto = 'udp', a.amp_bytes, 0) AS amp_bytes,
       if(s.proto = 'udp', a.amp_packets, 0) AS amp_packets,
       if(s.proto = 'udp', a.amp_srcs, 0) AS amp_srcs,
+      if(s.proto = 'udp', a.amp_top_share, 0) AS amp_top_share,
       if(s.proto = 'all', g.foreign_bytes, 0) AS foreign_bytes,
       if(s.proto = 'all', g.foreign_srcs, 0) AS foreign_srcs,
       if(s.proto = 'all', gt.top_countries, '') AS top_countries
@@ -832,6 +847,7 @@ async function loadPortMetrics(scope, minuteTs) {
       ampBytes: Number(r.amp_bytes || 0),
       ampPackets: Number(r.amp_packets || 0),
       ampSrcs: Number(r.amp_srcs || 0),
+      ampTopShare: Number(r.amp_top_share || 0),
       foreignBytes: Number(r.foreign_bytes || 0),
       foreignSrcs: Number(r.foreign_srcs || 0),
       topCountries: String(r.top_countries || ''),
@@ -1615,6 +1631,7 @@ function toInsertRow(object, proto, raw, baseline) {
     amp_bytes: m.ampBytes,
     amp_packets: m.ampPackets,
     amp_srcs: m.ampSrcs,
+    amp_top_share: m.ampTopShare,
     growth_amp: proto === 'udp' ? growthRatio(m.ampBytes * 8 / 60, baseline?.ampHourBps) : null,
     growth_syn: proto !== 'udp' ? growthRatio(m.synOnlyPackets / 60, baseline?.synHourPps) : null,
     foreign_bytes: m.foreignBytes,

@@ -92,6 +92,7 @@ function minuteMetrics(raw = {}) {
     ampBytes: Number(raw.ampBytes || 0),
     ampPackets: Number(raw.ampPackets || 0),
     ampSrcs: Number(raw.ampSrcs || 0),
+    ampTopShare: Number(raw.ampTopShare || 0),
     foreignBytes: Number(raw.foreignBytes || 0),
     foreignSrcs: Number(raw.foreignSrcs || 0),
     topCountries: String(raw.topCountries || ''),

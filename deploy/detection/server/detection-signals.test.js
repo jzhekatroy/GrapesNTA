@@ -80,6 +80,64 @@ describe('detection-signals', () => {
     }), true);
   });
 
+  it('101443: крупнейший адрес 20% — амплификация', () => {
+    assert.equal(isAmplificationHit({
+      bytes: 20.5e9,
+      amp_bytes: 3.683e9,
+      amp_packets: 4_065_536,
+      amp_srcs: 40,
+      amp_top_share: 0.2,
+    }), true);
+  });
+
+  it('81050: крупнейший адрес 15% — амплификация', () => {
+    assert.equal(isAmplificationHit({
+      bytes: 35.3e9,
+      amp_bytes: 12.12 * 1024 ** 3,
+      amp_packets: Math.round(12.12 * 1024 ** 3 / 1505),
+      amp_srcs: 119,
+      amp_top_share: 0.15,
+    }), true);
+  });
+
+  it('81953: крупнейший адрес 25% — амплификация', () => {
+    const ampBytes = 150e6 * 60 / 8;
+    assert.equal(isAmplificationHit({
+      bytes: ampBytes / 0.13,
+      amp_bytes: ampBytes,
+      amp_packets: Math.round(ampBytes / 1400),
+      amp_srcs: 12,
+      amp_top_share: 0.25,
+    }), true);
+  });
+
+  it('ПИН 13:43: один адрес 98% не открывает амплификацию', () => {
+    const ampBytes = 45.9e6 * 60 / 8;
+    const row = {
+      bytes: ampBytes / 0.002,
+      amp_bytes: ampBytes,
+      amp_packets: Math.round(ampBytes / 860),
+      amp_srcs: 978,
+      growth_amp: 15.5,
+      amp_top_share: 0.98,
+    };
+    assert.equal(isAmplificationHit(row, { hourRatio: 2 }), false);
+    assert.equal(ampStillGoing(row, { hourRatio: 2 }), true);
+  });
+
+  it('ровно 50% на одном адресе не открывает, 49% открывает', () => {
+    const ampBytes = 80e6 * 60 / 8;
+    const base = {
+      amp_bytes: ampBytes,
+      amp_packets: Math.round(ampBytes / 1400),
+      amp_srcs: 20,
+      growth_amp: 6,
+    };
+    assert.equal(isAmplificationHit({ ...base, amp_top_share: 0.5 }, { hourRatio: 2 }), false);
+    assert.equal(isAmplificationHit({ ...base, amp_top_share: 0.49 }, { hourRatio: 2 }), true);
+    assert.equal(ampStillGoing({ ...base, amp_top_share: 0.98 }, { hourRatio: 2 }), true);
+  });
+
   it('мелкий клиент: 30 Мбит/с отражателей и 20 источников → амплификация', () => {
     const ampBytes = 30e6 * 60 / 8;
     assert.equal(isAmplificationHit({
