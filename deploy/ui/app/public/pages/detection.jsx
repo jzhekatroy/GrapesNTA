@@ -411,6 +411,148 @@ function EventAsnTop({ event }) {
   );
 }
 
+function ipMarkupEligible(row) {
+  if (row?.scope === 'provider' || row?.scope === 'net') return true;
+  if (row?.scope !== 'client') return false;
+  return row.binding?.bindMode !== 'ports';
+}
+
+function downloadText(filename, text) {
+  const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = filename;
+  link.click();
+  URL.revokeObjectURL(url);
+}
+
+function FlowspecReportModal({ event, onClose }) {
+  const minute = event?.live?.lastHotMinute || '';
+  const [data, setData] = useState(null);
+  const [error, setError] = useState('');
+  const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    if (!event?.scope || !event?.scopeId || !minute) {
+      setData(null);
+      return undefined;
+    }
+    let cancelled = false;
+    setBusy(true);
+    setError('');
+    setData(null);
+    ApiClient.loadDetectionFlowspecReport({ scope: event.scope, scopeId: event.scopeId, minute })
+      .then((row) => { if (!cancelled) setData(row); })
+      .catch((err) => { if (!cancelled) setError(err.message || 'Не удалось собрать отчёт'); })
+      .finally(() => { if (!cancelled) setBusy(false); });
+    return () => { cancelled = true; };
+  }, [event?.id, event?.scope, event?.scopeId, minute]);
+  const fileById = (id) => (data?.files || []).find((file) => file.id === id);
+  const save = (id) => {
+    const file = fileById(id);
+    if (file?.text) downloadText(file.filename, file.text);
+  };
+  return (
+    <Modal
+      open={!!event}
+      onClose={onClose}
+      size="lg"
+      title="Отчёт фильтра"
+      subtitle={event ? `${event.name || event.scopeId} · ${minute ? formatMskTime(minute) : 'нет минуты'} МСК` : ''}
+      footer={<Button kind="ghost" onClick={onClose}>Закрыть</Button>}
+    >
+      {!minute ? (
+        <div>Нет горячей минуты. Отчёт считается по последней минуте, которая ещё выше порога.</div>
+      ) : null}
+      {busy ? <div>Считаю по текущей минуте…</div> : null}
+      {error ? <div style={{ color: 'var(--st-critical)' }}>{error}</div> : null}
+      {data ? (
+        <div style={{ display: 'grid', gap: 16 }}>
+          <div style={{ fontSize: 13 }}>
+            Входящий этой минуты {formatBps(data.attackBps)}
+            {' · '}
+            UDP с пакетом {data.band.lo}–{data.band.hi} Б: {formatAsnShare(data.bigShare) || '0%'} ({formatBps(data.bigBps)})
+            {' · '}
+            обычный трафик — тихая минута {formatMskTime(data.baselineMinute)} МСК
+            {data.destinations?.length ? ` · назначение ${data.destinations.join(', ')}` : ''}
+            {data.baselineHot ? ' · тихая минута тоже тяжёлая, норма может быть завышена' : ''}
+          </div>
+          <div>
+            <div style={{ fontWeight: 600, marginBottom: 6 }}>Вариант 1. По признакам пакета</div>
+            <div style={{ fontSize: 13, color: 'var(--fg-muted)', marginBottom: 8 }}>
+              Диапазон пакета {data.band.lo}–{data.band.hi} Б взят из минуты атаки
+              {data.band.fallback ? ' (превышения не нашлось, взят вчерашний 1000–1500)' : ` — покрывает ${formatAsnShare(data.band.cover)} лишнего UDP`}.
+              {' '}Если ставить лимит, от обычного ×5 выходит {formatNum(data.rateHintMbps, 0)} Мбит/с.
+              В файле обе строки then закомментированы.
+            </div>
+            <div style={{ display: 'flex', gap: 12, fontSize: 12, color: 'var(--fg-muted)', marginBottom: 4 }}>
+              <span style={{ flex: 1 }}>Условие</span>
+              <span style={{ width: 150, textAlign: 'right' }}>Поймает минуты</span>
+              <span style={{ width: 120, textAlign: 'right' }}>Тихая минута</span>
+              <span style={{ width: 88 }} />
+            </div>
+            {data.packet.map((row) => (
+              <div key={row.id} style={{ display: 'flex', gap: 12, alignItems: 'center', marginBottom: 6, fontSize: 13 }}>
+                <span style={{ flex: 1 }}>{row.label}</span>
+                <span style={{ width: 150, textAlign: 'right' }}>{formatAsnShare(row.attackShare) || '0%'} · {formatBps(row.attackBps)}</span>
+                <span style={{ width: 120, textAlign: 'right', color: 'var(--fg-muted)' }}>{formatBps(row.baselineBps)}</span>
+                <Button size="sm" kind="ghost" onClick={() => save(row.id)}>Скачать</Button>
+              </div>
+            ))}
+            <div style={{ fontSize: 12, color: 'var(--fg-muted)', margin: '10px 0 4px' }}>
+              UDP по размеру пакета: атака / тихие минуты
+            </div>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: '2px 12px', fontSize: 12 }}>
+              {data.lengths.map((bin) => (
+                <span
+                  key={bin.label}
+                  style={{ fontWeight: bin.inBand ? 600 : 400, color: bin.inBand ? 'inherit' : 'var(--fg-muted)' }}
+                >
+                  {bin.label}: {formatBps(bin.bps)} / {formatBps(bin.quietBps)}
+                </span>
+              ))}
+            </div>
+          </div>
+          <div>
+            <div style={{ fontWeight: 600, marginBottom: 6 }}>Вариант 2. По сетям источника</div>
+            <div style={{ fontSize: 13, color: 'var(--fg-muted)', marginBottom: 8 }}>
+              Считается по UDP с пакетом {data.band.lo}–{data.band.hi} Б этой минуты. Файл — правила Juniper, одно на сеть.
+            </div>
+            {data.nets.map((net) => (
+              <div key={net.mask} style={{ marginBottom: 10 }}>
+                <div style={{ fontSize: 13, marginBottom: 4 }}>
+                  /{net.mask}: всего {formatNum(net.total, 0)}
+                  {net.truncated ? ' · список обрезан' : ''}
+                </div>
+                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                  {net.cuts.map((cut) => (
+                    <Button key={cut.id} size="sm" onClick={() => save(cut.id)} title={cut.complete ? '' : 'Списка не хватило на эту долю'}>
+                      {cut.ratio}% · {formatNum(cut.rules, 0)}{cut.prefixes > cut.rules ? ` из ${formatNum(cut.prefixes, 0)}` : ''} правил · обычно {formatBps(cut.baselineBps)}
+                    </Button>
+                  ))}
+                </div>
+              </div>
+            ))}
+            {data.nets.find((net) => net.mask === 24)?.preview?.length ? (
+              <div style={{ marginTop: 8 }}>
+                <div style={{ fontSize: 12, color: 'var(--fg-muted)', marginBottom: 4 }}>Первые сети /24</div>
+                {data.nets.find((net) => net.mask === 24).preview.map((row) => (
+                  <div key={row.prefix} style={{ display: 'flex', gap: 8, fontSize: 13 }}>
+                    <span style={{ flex: 1 }}>{row.prefix}</span>
+                    <span style={{ width: 56, textAlign: 'right' }}>{formatAsnShare(row.share)}</span>
+                    <span style={{ width: 88, textAlign: 'right', color: 'var(--fg-muted)' }}>накопл. {formatAsnShare(row.cum)}</span>
+                    <span style={{ width: 110, textAlign: 'right' }}>{formatBps(row.baselineBps)}</span>
+                  </div>
+                ))}
+              </div>
+            ) : null}
+          </div>
+        </div>
+      ) : null}
+    </Modal>
+  );
+}
+
 function EventNotifyModal({ event, onClose }) {
   const peak = isPeakEvent(event);
   return (
@@ -617,6 +759,7 @@ function PageDetection() {
   const [historyKind, setHistoryKind] = useState('all');
   const [eventsExporting, setEventsExporting] = useState(false);
   const [messageEvent, setMessageEvent] = useState(null);
+  const [flowspecEvent, setFlowspecEvent] = useState(null);
   const [thresholdByKey, setThresholdByKey] = useState({});
   const [thresholdBusyKey, setThresholdBusyKey] = useState('');
   const [thresholdGlobal, setThresholdGlobal] = useState(1.6);
@@ -1543,6 +1686,30 @@ function PageDetection() {
                 ),
               },
               ...(pageTab === 'active' ? [{
+                key: 'flowspec',
+                title: 'Фильтр',
+                width: 110,
+                sortable: false,
+                render: (r) => {
+                  if (!ipMarkupEligible(r)) {
+                    return <span style={{ color: 'var(--fg-muted)' }} title="Сеть размечена портом">порт</span>;
+                  }
+                  const minute = r.live?.lastHotMinute;
+                  return (
+                    <Button
+                      size="sm"
+                      disabled={!minute}
+                      title={minute ? `Отчёт по минуте ${formatMskTime(minute)} МСК` : 'Нет горячей минуты'}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setFlowspecEvent(r);
+                      }}
+                    >
+                      Отчёт
+                    </Button>
+                  );
+                },
+              }, {
                 key: 'live',
                 title: 'Сейчас',
                 width: 260,
@@ -1704,6 +1871,7 @@ function PageDetection() {
       )}
 
       <EventNotifyModal event={messageEvent} onClose={() => setMessageEvent(null)} />
+      <FlowspecReportModal event={flowspecEvent} onClose={() => setFlowspecEvent(null)} />
 
       {pageTab === 'table' && (
       <Card
