@@ -4651,8 +4651,7 @@ function ExplorerGroupChip({ token, dimension, onChange, onRemove }) {
   useEffect(() => {
     const next = mask ?? defaultMask;
     setDraftMask(String(next));
-    setCustomBucket(isBucket && !bucketPresets.includes(next) && next !== defaultMask);
-  }, [mask, defaultMask, isBucket, bucketPresets]);
+  }, [mask, defaultMask]);
 
   const commitMask = (rawValue = draftMask) => {
     const nextToken = formatExplorerGroupToken(id, rawValue);
@@ -4669,12 +4668,18 @@ function ExplorerGroupChip({ token, dimension, onChange, onRemove }) {
     if (num >= 1 && num <= 32) commitMask(trimmed);
   };
 
+  const commitCustomBucket = (rawValue = draftMask) => {
+    const trimmed = String(rawValue ?? '').trim();
+    const num = Number(trimmed);
+    if (!Number.isInteger(num) || num < 2 || num > bucketMax) {
+      setDraftMask(String(currentMask));
+      return;
+    }
+    commitMask(String(num));
+  };
+
   const handleCustomBucketChange = (rawValue) => {
     setDraftMask(rawValue);
-    const trimmed = String(rawValue ?? '').trim();
-    if (!/^\d{1,5}$/.test(trimmed)) return;
-    const num = Number(trimmed);
-    if (num >= 2 && num <= bucketMax) commitMask(trimmed);
   };
 
   const handleBucketPresetChange = (rawValue) => {
@@ -4720,7 +4725,7 @@ function ExplorerGroupChip({ token, dimension, onChange, onRemove }) {
             aria-label={`Произвольный шаг группировки для ${dimension.label || id}`}
             value={draftMask}
             onChange={(e) => handleCustomBucketChange(e.target.value)}
-            onBlur={() => commitMask()}
+            onBlur={() => commitCustomBucket()}
             onKeyDown={(e) => {
               if (e.key === 'Enter') e.currentTarget.blur();
             }}
