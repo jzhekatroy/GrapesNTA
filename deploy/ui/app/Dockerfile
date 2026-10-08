@@ -13,7 +13,10 @@ ARG BUILD_DATE
 ENV NODE_ENV=production \
     PORT=3000
 
-RUN addgroup -g 1001 -S app && adduser -u 1001 -S -G app app
+RUN addgroup -g 1001 -S app && adduser -u 1001 -S -G app app \
+  && apk add --no-cache libcap \
+  && setcap 'cap_net_bind_service=+ep' "$(readlink -f /usr/local/bin/node)" \
+  && apk del libcap
 
 COPY --from=deps /app/node_modules ./node_modules
 COPY package.json ./
