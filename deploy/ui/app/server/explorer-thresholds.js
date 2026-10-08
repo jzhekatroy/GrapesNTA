@@ -353,24 +353,34 @@ function describeThresholds(thresholds) {
   return list.map(describeThresholdForReport).join(' · ');
 }
 
-function serializeObservationFiltersEnvelope(filters, thresholds) {
+function normalizeObservationExplorerQuery(raw) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  return raw;
+}
+
+function serializeObservationFiltersEnvelope(filters, thresholds, explorerQuery = null) {
   const filterList = Array.isArray(filters) ? filters : [];
   const thr = normalizeExplorerThresholds(thresholds);
-  if (!thr.length) return filterList;
-  return { filters: filterList, thresholds: thr };
+  const query = normalizeObservationExplorerQuery(explorerQuery);
+  if (!thr.length && !query) return filterList;
+  const out = { filters: filterList };
+  if (thr.length) out.thresholds = thr;
+  if (query) out.explorerQuery = query;
+  return out;
 }
 
 function parseObservationFiltersEnvelope(raw) {
   if (Array.isArray(raw)) {
-    return { filters: raw, thresholds: [] };
+    return { filters: raw, thresholds: [], explorerQuery: null };
   }
   if (raw && typeof raw === 'object') {
     return {
       filters: Array.isArray(raw.filters) ? raw.filters : [],
       thresholds: normalizeExplorerThresholds(raw.thresholds),
+      explorerQuery: normalizeObservationExplorerQuery(raw.explorerQuery),
     };
   }
-  return { filters: [], thresholds: [] };
+  return { filters: [], thresholds: [], explorerQuery: null };
 }
 
 module.exports = {
@@ -402,4 +412,5 @@ module.exports = {
   describeThresholds,
   serializeObservationFiltersEnvelope,
   parseObservationFiltersEnvelope,
+  normalizeObservationExplorerQuery,
 };

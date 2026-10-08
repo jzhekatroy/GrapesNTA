@@ -197,6 +197,16 @@ describe('observation filters envelope', () => {
     assert.ok(Array.isArray(raw));
     assert.equal(raw.length, 1);
   });
+
+  it('round-trips explorerQuery with filters only envelope', () => {
+    const query = { timeRange: '3h', metric: 'pps', groupBy: ['src_ip', 'dst_ip'] };
+    const raw = serializeObservationFiltersEnvelope([{ field: 'proto', op: '=', value: 'UDP' }], [], query);
+    assert.ok(raw && typeof raw === 'object' && !Array.isArray(raw));
+    const parsed = parseObservationFiltersEnvelope(raw);
+    assert.equal(parsed.filters.length, 1);
+    assert.equal(parsed.explorerQuery.timeRange, '3h');
+    assert.equal(parsed.explorerQuery.metric, 'pps');
+  });
 });
 
 describe('normalizeExplorerQuery thresholds', () => {

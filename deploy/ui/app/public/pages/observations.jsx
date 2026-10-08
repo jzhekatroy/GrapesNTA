@@ -664,10 +664,54 @@ function nextTileDelayMs(windowTo) {
   return Math.max(TILE_RETRY_MS, waitMs);
 }
 
+function observationVisFromChartStyle(chartStyle) {
+  return normalizeObservationChartStyle(chartStyle) === 'stack' ? 'stack' : 'lines';
+}
+
+function observationExplorerQueryFallback(item) {
+  const groupBy = groupByFromWidgets(item?.widgets);
+  return {
+    timeRange: normalizeObservationLookback(item?.lookback || '1h'),
+    customPeriod: null,
+    filters: Array.isArray(item?.filters) ? item.filters : [],
+    thresholds: Array.isArray(item?.thresholds) ? item.thresholds : [],
+    metric: observationMetricFromWidgets(item?.widgets),
+    groupBy,
+    vis: observationVisFromChartStyle(observationChartStyleFromWidgets(item?.widgets)),
+    limit: 25,
+  };
+}
+
+function observationExplorerQueryForCompose(item, { customRange } = {}) {
+  const base = (item?.explorerQuery && typeof item.explorerQuery === 'object')
+    ? { ...item.explorerQuery }
+    : observationExplorerQueryFallback(item);
+  if (customRange?.from && customRange?.to) {
+    return {
+      ...base,
+      timeRange: 'custom',
+      customPeriod: { from: customRange.from, to: customRange.to },
+    };
+  }
+  return base;
+}
+
+function observationExplorerQueryWithLookback(explorerQuery, lookback, item = null) {
+  const base = (explorerQuery && typeof explorerQuery === 'object')
+    ? { ...explorerQuery }
+    : (item ? observationExplorerQueryFallback(item) : {});
+  return {
+    ...base,
+    timeRange: normalizeObservationLookback(lookback || '1h'),
+    customPeriod: null,
+  };
+}
+
 function startComposeInExplorer(onNavigate, {
   mode = null,
   editId = null,
   name = '',
+  explorerQuery = null,
   filters = null,
   thresholds = null,
   groupBy = null,
@@ -675,16 +719,28 @@ function startComposeInExplorer(onNavigate, {
 } = {}) {
   const resolvedEditId = editId || null;
   const resolvedMode = mode || (resolvedEditId ? 'edit' : 'new');
+  const resolvedQuery = explorerQuery || (
+    Array.isArray(filters)
+      ? {
+        filters,
+        thresholds: Array.isArray(thresholds) ? thresholds : [],
+        groupBy: Array.isArray(groupBy) && groupBy.length ? groupBy : ['src_asn'],
+        timeRange: lookback || '1h',
+        customPeriod: null,
+        metric: 'bps',
+        vis: 'stack',
+        limit: 25,
+      }
+      : null
+  );
   try {
     sessionStorage.setItem(COMPOSE_KEY, JSON.stringify({
       active: true,
       mode: resolvedMode,
       editId: resolvedMode === 'edit' ? resolvedEditId : null,
       name: name || '',
-      filters: Array.isArray(filters) ? filters : null,
-      thresholds: Array.isArray(thresholds) ? thresholds : null,
-      groupBy: Array.isArray(groupBy) ? groupBy : null,
-      lookback: lookback || null,
+      explorerQuery: resolvedQuery,
+      autoRun: Boolean(resolvedQuery),
       startedAt: Date.now(),
     }));
   } catch {
@@ -1198,10 +1254,7 @@ function ObservationLiveTile({
     mode: canEdit ? 'edit' : 'new',
     editId: canEdit ? item.id : null,
     name: item.name || '',
-    filters: item.filters || [],
-    thresholds: item.thresholds || [],
-    groupBy: topGroupBy.length ? topGroupBy : null,
-    lookback: lookback || item.lookback || null,
+    explorerQuery: observationExplorerQueryForCompose(item, { customRange }),
   });
 
   const verboseMeta = DashboardLog?.isVerbose?.() === true;
@@ -1645,6 +1698,7 @@ function PageObservations({ onNavigate }) {
       },
       filters: item.filters,
       thresholds: item.thresholds || [],
+      explorerQuery: item.explorerQuery || null,
     });
     setError('');
   };
@@ -1676,6 +1730,7 @@ function PageObservations({ onNavigate }) {
         report: settings.report,
         filters: settings.filters,
         thresholds: settings.thresholds || [],
+        explorerQuery: settings.explorerQuery ?? settingsItem.explorerQuery ?? null,
       });
       await reload();
       setSettingsItemId(null);
@@ -1711,9 +1766,21 @@ function PageObservations({ onNavigate }) {
 
   const changeTileLookback = async (id, lookback) => {
     let current = null;
+    let nextExplorerQuery = observationExplorerQueryWithLookback(null, lookback);
     setItems((prev) => {
       current = prev.find((row) => row.id === id) || null;
-      return prev.map((row) => (row.id === id ? { ...row, lookback } : row));
+      if (current) {
+        nextExplorerQuery = observationExplorerQueryWithLookback(
+          current.explorerQuery,
+          lookback,
+          current,
+        );
+      }
+      return prev.map((row) => (
+        row.id === id
+          ? { ...row, lookback, explorerQuery: nextExplorerQuery }
+          : row
+      ));
     });
     if (!canWriteObservations || !current?.canEdit) return;
     try {
@@ -1721,6 +1788,7 @@ function PageObservations({ onNavigate }) {
       await ApiClient.updateObservation(id, {
         ...current,
         lookback,
+        explorerQuery: nextExplorerQuery,
         materialize: { ...(current.materialize || {}), enabled: Boolean(current.materialize?.enabled) },
       });
     } catch (e) {
@@ -1824,10 +1892,14 @@ function PageObservations({ onNavigate }) {
                   mode: settingsItem.canEdit ? 'edit' : 'new',
                   editId: settingsItem.canEdit ? settingsItem.id : null,
                   name: settingsItem.name || settings.name,
-                  filters: settings.filters || settingsItem.filters || [],
-                  thresholds: settings.thresholds || settingsItem.thresholds || [],
-                  groupBy: settingsGroupBy.length ? settingsGroupBy : null,
-                  lookback: settings.lookback || settingsItem.lookback || null,
+                  explorerQuery: observationExplorerQueryForCompose({
+                    ...settingsItem,
+                    filters: settings.filters || settingsItem.filters || [],
+                    thresholds: settings.thresholds || settingsItem.thresholds || [],
+                    lookback: settings.lookback || settingsItem.lookback || null,
+                    widgets: settings.widgets || settingsItem.widgets,
+                    explorerQuery: settings.explorerQuery ?? settingsItem.explorerQuery,
+                  }),
                 })}
               >
                 {settingsItem.canEdit

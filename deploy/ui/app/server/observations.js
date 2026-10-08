@@ -19,6 +19,7 @@ const {
 } = require('./explorer');
 const {
   normalizeExplorerThresholds,
+  normalizeObservationExplorerQuery,
   explorerThresholdsActive,
   describeThresholds,
 } = require('./explorer-thresholds');
@@ -464,6 +465,11 @@ function normalizeObservation(raw = {}, { userId, existing = null } = {}) {
   const reportRaw = raw.report != null ? raw.report : (existing?.report || {});
   const schedule = normalizeSchedule(reportRaw, existing?.report || {});
 
+  const explorerQueryRaw = raw.explorerQuery != null
+    ? raw.explorerQuery
+    : existing?.explorerQuery;
+  const explorerQuery = normalizeObservationExplorerQuery(explorerQueryRaw);
+
   return {
     id: existing?.id || raw.id || newId('obs'),
     name: String(raw.name ?? existing?.name ?? 'Без названия').trim() || 'Без названия',
@@ -474,6 +480,7 @@ function normalizeObservation(raw = {}, { userId, existing = null } = {}) {
     isShared: true,
     filters,
     thresholds,
+    explorerQuery,
     lookback,
     widgets,
     layout: normalizeLayout(raw, existing),

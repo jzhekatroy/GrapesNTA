@@ -75,6 +75,32 @@ function isObservationComposeEdit(draft) {
   if (draft.mode === 'edit') return Boolean(draft.editId);
   return Boolean(draft.editId);
 }
+
+const OBSERVATION_TILE_LOOKBACKS = new Set(['15m', '30m', '1h', '6h', '24h', '7d']);
+
+function observationTileLookbackFromExplorer(timeRange, modalLookback = '1h') {
+  if (timeRange === '15m') return '30m';
+  if (OBSERVATION_TILE_LOOKBACKS.has(timeRange)) return timeRange;
+  return modalLookback || '1h';
+}
+
+function composeExplorerQueryDraft(draft) {
+  if (!draft?.active) return null;
+  if (draft.explorerQuery && typeof draft.explorerQuery === 'object') {
+    return migrateExplorerSnapshot(draft.explorerQuery);
+  }
+  if (!Array.isArray(draft.filters)) return null;
+  return migrateExplorerSnapshot({
+    filters: draft.filters,
+    thresholds: draft.thresholds || [],
+    groupBy: draft.groupBy?.length ? draft.groupBy : ['src_ip', 'dst_ip'],
+    metric: 'bps',
+    timeRange: draft.lookback || '1h',
+    customPeriod: null,
+    limit: EXPLORER_DEFAULT_FETCH_LIMIT,
+    vis: EXPLORER_VIS_DEFAULT,
+  });
+}
 const EXPLORER_DEFAULT_FETCH_LIMIT = 25;
 const EXPLORER_ON_DEMAND_FETCH_LIMITS = [50, 100];
 const EXPLORER_PRESET_VISUAL_LIMITS = [5, 10, 25, ...EXPLORER_ON_DEMAND_FETCH_LIMITS];
@@ -1352,6 +1378,46 @@ function restoreExplorerDraftFromSnapshot(snapshot, setters, { filterMode, setFi
     }));
   }
   return migrated;
+}
+
+function runExplorerSnapshotAsAppliedQuery(snapshot, handlers) {
+  const migrated = migrateExplorerSnapshot(snapshot);
+  if (!migrated) return false;
+  restoreExplorerDraftFromSnapshot(migrated, handlers.querySetters, handlers.draftRestoreOpts);
+  const queryKey = buildExplorerQueryKey(migrated);
+  const cached = loadExplorerResultCache(queryKey, handlers.cabinetMode);
+  const cachedGroupBy = normalizeExplorerGroupTokens(cached?.snapshot?.groupBy);
+  const snapshotGroupBy = normalizeExplorerGroupTokens(migrated.groupBy);
+  if (cached && JSON.stringify(cachedGroupBy) === JSON.stringify(snapshotGroupBy)) {
+    hydrateExplorerFromCachedEntry({
+      ...cached,
+      snapshot: { ...cached.snapshot, vis: normalizeExplorerVis(migrated.vis ?? cached.snapshot?.vis) },
+    }, { ...handlers.cacheHydrateHandlers, queryVersion: handlers.queryVersion ?? 0 });
+    return true;
+  }
+  const nextAppliedSnapshot = buildExplorerQuerySnapshot({
+    ...migrated,
+    limit: EXPLORER_DEFAULT_FETCH_LIMIT,
+    fetchLimit: EXPLORER_DEFAULT_FETCH_LIMIT,
+    visualLimit: EXPLORER_DEFAULT_VISUAL_LIMIT,
+    dynamicsSeriesIds: [],
+  });
+  handlers.setMetric(migrated.metric || 'bps');
+  handlers.setGroupBy(normalizeExplorerGroupTokens(migrated.groupBy || []));
+  handlers.setFetchLimit(EXPLORER_DEFAULT_FETCH_LIMIT);
+  handlers.setVis(normalizeExplorerVis(migrated.vis));
+  handlers.setVisualLimit(EXPLORER_DEFAULT_VISUAL_LIMIT);
+  handlers.setLimit(EXPLORER_DEFAULT_VISUAL_LIMIT);
+  handlers.skipDynamicsDefaultRef.current = false;
+  handlers.setDynamicsSeriesIds(new Set());
+  handlers.setShowOthersOnChart?.(explorerDefaultShowOthersOnChart(migrated.vis));
+  handlers.setAppliedSnapshot(nextAppliedSnapshot);
+  if (typeof handlers.replaceExplorerUrl === 'function') {
+    handlers.replaceExplorerUrl(nextAppliedSnapshot);
+  }
+  handlers.setHasAppliedQuery(true);
+  handlers.setQueryVersion((v) => v + 1);
+  return true;
 }
 
 function parseLogicOnlyLine(line) {
@@ -2811,17 +2877,23 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
   }, []);
   const [schema, setSchema] = useState(null);
   const [observationCompose, setObservationCompose] = useState(() => readObservationComposeDraft());
-  const composeFilters = Array.isArray(observationCompose?.filters)
-    ? observationCompose.filters
-    : null;
-  const composeGroupBy = Array.isArray(observationCompose?.groupBy) && observationCompose.groupBy.length
-    ? observationCompose.groupBy
-    : null;
-  const composeLookback = observationCompose?.lookback || null;
-  const composeThresholds = Array.isArray(observationCompose?.thresholds)
-    ? observationCompose.thresholds
-    : null;
-  const [metric, setMetric] = useState(urlState?.metric || 'bps');
+  const initialComposeQuery = useMemo(
+    () => composeExplorerQueryDraft(readObservationComposeDraft()),
+    [],
+  );
+  const composeFilters = initialComposeQuery?.filters?.length
+    ? initialComposeQuery.filters
+    : (Array.isArray(observationCompose?.filters) ? observationCompose.filters : null);
+  const composeGroupBy = initialComposeQuery?.groupBy?.length
+    ? initialComposeQuery.groupBy
+    : (Array.isArray(observationCompose?.groupBy) && observationCompose.groupBy.length
+      ? observationCompose.groupBy
+      : null);
+  const composeLookback = initialComposeQuery?.timeRange || observationCompose?.lookback || null;
+  const composeThresholds = initialComposeQuery?.thresholds?.length
+    ? initialComposeQuery.thresholds
+    : (Array.isArray(observationCompose?.thresholds) ? observationCompose.thresholds : null);
+  const [metric, setMetric] = useState(urlState?.metric || initialComposeQuery?.metric || 'bps');
   const [groupBy, setGroupBy] = useState(
     normalizeExplorerGroupTokens(composeGroupBy
       || urlState?.groupBy
@@ -2844,9 +2916,17 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
   });
   const [limit, setLimit] = useState(urlState?.limit || EXPLORER_DEFAULT_FETCH_LIMIT);
   const [fetchLimit, setFetchLimit] = useState(EXPLORER_DEFAULT_FETCH_LIMIT);
-  const [vis, setVis] = useState(() => restoreExplorerVis(urlState?.vis));
-  const [timeRange, setTimeRange] = useState(composeLookback || urlGlobals.timeRange || '1h');
-  const [customPeriod, setCustomPeriod] = useState(urlGlobals.customPeriod || defaultCustomPeriod());
+  const [vis, setVis] = useState(() => restoreExplorerVis(
+    initialComposeQuery?.vis ?? urlState?.vis,
+  ));
+  const [timeRange, setTimeRange] = useState(
+    initialComposeQuery?.timeRange || composeLookback || urlGlobals.timeRange || '1h',
+  );
+  const [customPeriod, setCustomPeriod] = useState(
+    initialComposeQuery?.timeRange === 'custom' && initialComposeQuery?.customPeriod
+      ? initialComposeQuery.customPeriod
+      : (urlGlobals.customPeriod || defaultCustomPeriod()),
+  );
   const [filterMode, setFilterMode] = useState('graphic');
   const [filterText, setFilterText] = useState('');
   const [filterTextError, setFilterTextError] = useState(null);
@@ -2897,6 +2977,7 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
   const dynamicsVisualLimitRef = React.useRef(visualLimit);
   const skipDynamicsDefaultRef = React.useRef(false);
   const mountRestoreDoneRef = React.useRef(false);
+  const composeAutoRunSnapshotRef = React.useRef(null);
 
   useEffect(() => {
     window.__GRAPES_CABINET_EXPLORER__ = cabinetMode;
@@ -2990,18 +3071,15 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
       return () => { cancelled = true; };
     }
 
-    // Prefer observation filters when opened via «Изменить фильтры в Explorer».
-    if (composeFilters) {
-      restoreExplorerDraftFromSnapshot({
-        filters: composeFilters,
-        groupBy: composeGroupBy || groupBy,
-        metric,
-        timeRange: composeLookback || timeRange,
-        customPeriod,
-        limit,
-        vis,
-      }, querySetters, draftRestoreOpts);
+    // Prefer observation query when opened from «Наблюдения → разбор трафика».
+    const composeDraft = readObservationComposeDraft();
+    const composeQuery = composeDraft?.active ? composeExplorerQueryDraft(composeDraft) : null;
+    if (composeQuery) {
+      restoreExplorerDraftFromSnapshot(composeQuery, querySetters, draftRestoreOpts);
       setFilterPanel(true);
+      if (composeDraft?.autoRun) {
+        composeAutoRunSnapshotRef.current = composeQuery;
+      }
       return;
     }
 
@@ -3369,6 +3447,32 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
     window.history.replaceState(window.history.state, '', url);
   };
 
+  useEffect(() => {
+    const snapshot = composeAutoRunSnapshotRef.current;
+    if (!snapshot) return;
+    composeAutoRunSnapshotRef.current = null;
+    runExplorerSnapshotAsAppliedQuery(snapshot, {
+      querySetters,
+      draftRestoreOpts,
+      cabinetMode,
+      cacheHydrateHandlers,
+      queryVersion: 0,
+      setMetric,
+      setGroupBy,
+      setFetchLimit,
+      setVis,
+      setVisualLimit,
+      setLimit,
+      setDynamicsSeriesIds,
+      setShowOthersOnChart,
+      setAppliedSnapshot,
+      setHasAppliedQuery,
+      setQueryVersion,
+      skipDynamicsDefaultRef,
+      replaceExplorerUrl,
+    });
+  }, []);
+
   const runQuery = () => {
     let snapshot = buildExplorerQuerySnapshot({
       timeRange, customPeriod, filters, thresholds, metric, groupBy, limit, vis,
@@ -3569,6 +3673,20 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
   const saveAsObservation = async ({ name, lookback, materializeEnabled, reportEnabled, reportPeriod, topGroup }) => {
     const nextFilters = normalizeExplorerFiltersList(filters || []);
     const { validThresholds } = resolveExplorerThresholdPayload(thresholds, schema);
+    const explorerQuerySnapshot = buildExplorerQuerySnapshot({
+      timeRange,
+      customPeriod,
+      filters: nextFilters,
+      thresholds: validThresholds,
+      metric,
+      groupBy,
+      limit,
+      vis,
+      fetchLimit,
+      visualLimit,
+      dynamicsSeriesIds: [...dynamicsSeriesIds],
+    });
+    const tileLookback = observationTileLookbackFromExplorer(timeRange, lookback || '1h');
 
     // Rollup наблюдений хранит только dim0/dim1 — глубже двух измерений разрез
     // не доедет до графика, поэтому режем здесь, а не молча теряем в воркере.
@@ -3605,6 +3723,8 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
           await ApiClient.updateObservation(id, {
             ...existing,
             name: (name || '').trim() || existing.name,
+            lookback: tileLookback,
+            explorerQuery: explorerQuerySnapshot,
             filters: nextFilters,
             thresholds: validThresholds,
             widgets: [
@@ -3637,7 +3757,8 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
         const payload = {
           name: (name || '').trim() || `Наблюдение · ${metricLabel}`,
           description: '',
-          lookback: lookback || '1h',
+          lookback: tileLookback,
+          explorerQuery: explorerQuerySnapshot,
           filters: nextFilters,
           thresholds: validThresholds,
           widgets: [
