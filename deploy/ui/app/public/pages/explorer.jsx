@@ -2411,6 +2411,35 @@ function FilterValueInput({
   );
 }
 
+function ExplorerCellFilterConfirmModal({ open, onClose, pending, onConfirm }) {
+  if (!pending) return null;
+  const valueText = pending.displayValue == null || pending.displayValue === ''
+    ? '—'
+    : String(pending.displayValue);
+
+  return (
+    <Modal
+      open={open}
+      onClose={onClose}
+      title="Запустить анализ?"
+      subtitle={pending.fieldLabel}
+      footer={(
+        <>
+          <Button kind="ghost" onClick={onClose}>Отмена</Button>
+          <Button kind="primary" onClick={onConfirm}>Запустить</Button>
+        </>
+      )}
+    >
+      <p style={{ margin: 0, color: 'var(--fg-secondary)' }}>
+        Значение будет добавлено в фильтры, и анализ выполнится заново.
+      </p>
+      <p className="mono" style={{ margin: '12px 0 0', font: 'var(--pv-text-body-2-bold)', wordBreak: 'break-word' }}>
+        {valueText}
+      </p>
+    </Modal>
+  );
+}
+
 function ExplorerGroupCell({
   displayValue,
   monoClass,
@@ -2660,8 +2689,8 @@ function buildExplorerResultColumns({
           <ExplorerGroupCell
             displayValue={displayValue}
             monoClass={isAsPath ? `${monoClass} mono`.trim() : monoClass}
-            filterTitle={`Добавить в фильтры${rawTooltip}`}
-            onAddFilter={() => onAddFilter(dimId, filterVal.value, filterVal.label, groupToken)}
+            filterTitle={`Добавить в фильтры и запустить анализ${rawTooltip}`}
+            onAddFilter={() => onAddFilter(dimId, filterVal.value, filterVal.label, groupToken, displayValue)}
             showColorSwatch={showColorSwatch}
             color={r.color}
             onExpand={colIdx === 0 && onOpenDetails ? () => onOpenDetails(r) : undefined}
@@ -2848,6 +2877,7 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
   const [exporting, setExporting] = useState(false);
   const [showAllResultColumns, setShowAllResultColumns] = useState(false);
   const [detailRow, setDetailRow] = useState(null);
+  const [cellFilterConfirm, setCellFilterConfirm] = useState(null);
   const [visualLimit, setVisualLimit] = useState(EXPLORER_DEFAULT_VISUAL_LIMIT);
   const [dynamicsSeriesIds, setDynamicsSeriesIds] = useState(() => new Set());
   const [hoveredSeriesId, setHoveredSeriesId] = useState(null);
@@ -3759,7 +3789,7 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
     }
   };
 
-  const addFilterFromCell = (field, value, label, groupToken = null) => {
+  const applyFilterFromCell = useCallback((field, value, label, groupToken = null) => {
     const meta = filterFieldMeta(schema, field);
     const dim = dimensionById[field];
     let op = meta?.type === 'tcp_flags' ? 'eq' : '=';
@@ -3785,7 +3815,36 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
       logic: 'and',
     }]);
     if (hasAppliedQuery) runQuery();
-  };
+  }, [schema, dimensionById, hasAppliedQuery, runQuery]);
+
+  const requestAddFilterFromCell = useCallback((field, value, label, groupToken = null, displayValue = null) => {
+    if (hasAppliedQuery) {
+      const fieldMeta = filterFieldMeta(schema, field);
+      setCellFilterConfirm({
+        field,
+        value,
+        label,
+        groupToken,
+        fieldLabel: groupToken
+          ? explorerGroupLabel(groupToken, dimensionById)
+          : (fieldMeta?.label || field),
+        displayValue: displayValue ?? label ?? value,
+      });
+      return;
+    }
+    applyFilterFromCell(field, value, label, groupToken);
+  }, [hasAppliedQuery, schema, dimensionById, applyFilterFromCell]);
+
+  const closeCellFilterConfirm = useCallback(() => {
+    setCellFilterConfirm(null);
+  }, []);
+
+  const confirmCellFilter = useCallback(() => {
+    if (!cellFilterConfirm) return;
+    const { field, value, label, groupToken } = cellFilterConfirm;
+    setCellFilterConfirm(null);
+    applyFilterFromCell(field, value, label, groupToken);
+  }, [cellFilterConfirm, applyFilterFromCell]);
 
   const applyFiltersAndRun = (nextFilters, toastTitle, toastDesc) => {
     setFilters(nextFilters);
@@ -3946,7 +4005,7 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
     metric: appliedMetric,
     meta,
     showAllMetrics: showAllResultColumns,
-    onAddFilter: addFilterFromCell,
+    onAddFilter: requestAddFilterFromCell,
     onFocusRow: focusRow,
     onExcludeRow: excludeRow,
     chartSeriesIds: dynamicsSeriesIds,
@@ -3954,7 +4013,7 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
     showOthersOnChart,
     onToggleOthersOnChart: toggleOthersOnChart,
     onOpenDetails: openResultDetail,
-  }), [appliedGroupBy, dimensions, dimensionById, appliedMetricLabel, appliedMetric, meta, showAllResultColumns, addFilterFromCell, focusRow, excludeRow, toggleDynamicsSeries, dynamicsSeriesIds, showOthersOnChart, openResultDetail]);
+  }), [appliedGroupBy, dimensions, dimensionById, appliedMetricLabel, appliedMetric, meta, showAllResultColumns, requestAddFilterFromCell, focusRow, excludeRow, toggleDynamicsSeries, dynamicsSeriesIds, showOthersOnChart, openResultDetail]);
 
   const hasCoarseGroup = useMemo(
     () => appliedGroupBy.some((token) => isCoarseExplorerGroupToken(token, dimensionById)),
@@ -4375,6 +4434,13 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
         metricLabel={metricLabel}
         editing={editingSaved}
         onSave={saveCurrentQuery}
+      />
+
+      <ExplorerCellFilterConfirmModal
+        open={!!cellFilterConfirm}
+        onClose={closeCellFilterConfirm}
+        pending={cellFilterConfirm}
+        onConfirm={confirmCellFilter}
       />
 
       <ExplorerResultDetailModal
