@@ -11,7 +11,7 @@ const {
 } = require('./detection-telegram');
 const { listObjectThresholds, saveObjectThreshold } = require('./detection-thresholds');
 const { loadExcessAsnTop } = require('./detection-investigate');
-const { loadFlowspecReport } = require('./detection-flowspec-report');
+const { loadFlowspecReport, loadFlowspecBundle } = require('./detection-flowspec-report');
 
 function sendError(res, err) {
   const status = Number(err.statusCode) || 500;
@@ -65,6 +65,16 @@ function createDetectionRouter() {
           clientId: req.query.clientId || req.query.client_id,
           parentScope: req.query.parentScope || req.query.parent_scope,
         }),
+      });
+    } catch (err) {
+      sendError(res, err);
+    }
+  });
+
+  router.post('/events/flowspec-bundle', async (req, res) => {
+    try {
+      res.json({
+        data: await loadFlowspecBundle(req.body?.targets),
       });
     } catch (err) {
       sendError(res, err);

@@ -4,6 +4,7 @@ const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
 const {
   buildFlowspecReport,
+  buildFlowspecBundleText,
   choosePacketBand,
   takeUntil,
   rateLimitHintMbps,
@@ -73,6 +74,37 @@ describe('текст правил', () => {
     assert.equal(report.nets.find((net) => net.mask === 24).total, 3);
     assert.equal(report.nets.find((net) => net.mask === 16).cuts.find((cut) => cut.ratio === 50).prefixes, 1);
     assert.equal(report.nets.find((net) => net.mask === 16).cuts.find((cut) => cut.ratio === 80).prefixes, 2);
+  });
+
+  it('склеивает провайдера и сеть в один файл и оставляет сбой отдельной строкой', () => {
+    const net = buildFlowspecReport({
+      scopeId: '188.143.205.0/24',
+      minute: '2026-10-08 10:43:00',
+      baselineMinute: '2026-10-08 10:20:00',
+      destinations: ['188.143.205.0/24'],
+      row: {
+        atk_all: 1000,
+        atk_big: 900,
+        atk_src: 900,
+        base_src: 10,
+        n16: 1,
+        n24: 1,
+        rows16: [['188.143.0.0/16', 900, 0]],
+        rows24: [['10.0.0.0/24', 900, 0]],
+      },
+    });
+    const text = buildFlowspecBundleText([
+      { name: 'ПИН', scope: 'provider', scopeId: 'isp:pin', report },
+      { name: '188.143.205.0/24', scope: 'net', scopeId: '188.143.205.0/24', report: net },
+      { name: '91.151.190.0/24', scope: 'net', scopeId: '91.151.190.0/24', error: 'нет минуты' },
+    ]);
+    assert.match(text, /Объектов в файле: 2 из 3/);
+    assert.match(text, /провайдер ПИН/);
+    assert.match(text, /сеть 188.143.205.0\/24/);
+    assert.match(text, /Не собран: нет минуты/);
+    assert.match(text, /match destination 91.151.176.0\/20/);
+    assert.match(text, /match destination 188.143.205.0\/24/);
+    assert.match(text, /# set routing-options flow route .* then discard/);
   });
 
   it('подсказка лимита считается от нормы ×5 и округляется', () => {

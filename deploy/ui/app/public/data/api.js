@@ -981,6 +981,14 @@ const ApiClient = (() => {
     return body.data;
   }
 
+  async function loadDetectionFlowspecBundle(targets) {
+    const body = await requestJson('/api/detection/events/flowspec-bundle', {
+      method: 'POST',
+      body: { targets },
+    });
+    return body.data;
+  }
+
   async function loadDetectionEvents({ status = 'active', limit = 200, from, to, kind } = {}) {
     const params = new URLSearchParams();
     params.set('status', status);
@@ -3153,6 +3161,7 @@ const ApiClient = (() => {
     saveDetectionThreshold,
     loadDetectionEventAsn,
     loadDetectionFlowspecReport,
+    loadDetectionFlowspecBundle,
     loadDetectionEvents,
     exportDetectionEventsCsv,
     dashboardOtherPorts,

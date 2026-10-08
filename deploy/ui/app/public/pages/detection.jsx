@@ -427,6 +427,90 @@ function downloadText(filename, text) {
   URL.revokeObjectURL(url);
 }
 
+function flowspecBundleTargets(events) {
+  return (events || [])
+    .filter((row) => (
+      (row.scope === 'provider' || row.scope === 'net')
+      && row.live?.lastHotMinute
+      && !isPeakEvent(row)
+    ))
+    .map((row) => ({
+      scope: row.scope,
+      scopeId: row.scopeId,
+      minute: row.live.lastHotMinute,
+      name: row.name || row.scopeId,
+    }));
+}
+
+function FlowspecBundleModal({ targets, onClose }) {
+  const [data, setData] = useState(null);
+  const [error, setError] = useState('');
+  const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    if (!targets?.length) {
+      setData(null);
+      return undefined;
+    }
+    let cancelled = false;
+    setBusy(true);
+    setError('');
+    setData(null);
+    ApiClient.loadDetectionFlowspecBundle(targets)
+      .then((row) => { if (!cancelled) setData(row); })
+      .catch((err) => { if (!cancelled) setError(err.message || 'Не удалось собрать отчёт'); })
+      .finally(() => { if (!cancelled) setBusy(false); });
+    return () => { cancelled = true; };
+  }, [targets]);
+  const save = () => {
+    if (data?.text) downloadText(data.filename || 'flowspec-all.txt', data.text);
+  };
+  return (
+    <Modal
+      open={!!targets}
+      onClose={onClose}
+      size="lg"
+      title="Отчёт по всем атакам"
+      subtitle={targets?.length ? `${targets.length} провайдеров и сетей, у каждой своя горячая минута` : ''}
+      footer={(
+        <>
+          <Button kind="ghost" onClick={onClose}>Закрыть</Button>
+          <Button disabled={!data?.text} onClick={save}>Скачать всё</Button>
+        </>
+      )}
+    >
+      {busy ? <div>Считаю правила по горячим минутам. Это несколько запросов, подождите.</div> : null}
+      {error ? <div style={{ color: 'var(--st-critical)' }}>{error}</div> : null}
+      {data?.items?.length ? (
+        <div style={{ display: 'grid', gap: 8 }}>
+          <div style={{ fontSize: 13 }}>
+            Собрано {data.ready} из {data.items.length}. В файле оба варианта: по пакету и по сетям источника.
+          </div>
+          {data.items.map((row) => (
+            <div key={`${row.scope}|${row.scopeId}`} style={{ fontSize: 13 }}>
+              <div>
+                {row.scope === 'provider' ? 'Провайдер' : 'Сеть'}
+                {' '}
+                {row.name || row.scopeId}
+                {row.minute ? ` · ${formatMskTime(row.minute)} МСК` : ''}
+              </div>
+              {row.error ? (
+                <div style={{ color: 'var(--st-critical)' }}>{row.error}</div>
+              ) : (
+                <div style={{ color: 'var(--fg-muted)' }}>
+                  {formatBps(row.attackBps)}
+                  {row.band ? ` · пакет ${row.band.lo}–${row.band.hi} Б` : ''}
+                  {row.destinations?.length ? ` · ${row.destinations.join(', ')}` : ''}
+                  {row.baselineHot ? ' · тихая минута тяжёлая' : ''}
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      ) : null}
+    </Modal>
+  );
+}
+
 function FlowspecReportModal({ event, onClose }) {
   const minute = event?.live?.lastHotMinute || '';
   const [data, setData] = useState(null);
@@ -760,6 +844,7 @@ function PageDetection() {
   const [eventsExporting, setEventsExporting] = useState(false);
   const [messageEvent, setMessageEvent] = useState(null);
   const [flowspecEvent, setFlowspecEvent] = useState(null);
+  const [flowspecBundle, setFlowspecBundle] = useState(null);
   const [thresholdByKey, setThresholdByKey] = useState({});
   const [thresholdBusyKey, setThresholdBusyKey] = useState('');
   const [thresholdGlobal, setThresholdGlobal] = useState(1.6);
@@ -1641,13 +1726,23 @@ function PageDetection() {
                 </>
               )}
               {pageTab === 'active' && (
-                <Button
-                  size="sm"
-                  disabled={eventsBusy}
-                  onClick={() => reloadEvents('active')}
-                >
-                  Обновить
-                </Button>
+                <>
+                  <Button
+                    size="sm"
+                    disabled={eventsBusy || !flowspecBundleTargets(events).length}
+                    title="Один файл по всем провайдерам и сетям /24 с горячей минутой"
+                    onClick={() => setFlowspecBundle(flowspecBundleTargets(events))}
+                  >
+                    Отчёт по всем
+                  </Button>
+                  <Button
+                    size="sm"
+                    disabled={eventsBusy}
+                    onClick={() => reloadEvents('active')}
+                  >
+                    Обновить
+                  </Button>
+                </>
               )}
             </div>
           )}
@@ -1872,6 +1967,7 @@ function PageDetection() {
 
       <EventNotifyModal event={messageEvent} onClose={() => setMessageEvent(null)} />
       <FlowspecReportModal event={flowspecEvent} onClose={() => setFlowspecEvent(null)} />
+      <FlowspecBundleModal targets={flowspecBundle} onClose={() => setFlowspecBundle(null)} />
 
       {pageTab === 'table' && (
       <Card
