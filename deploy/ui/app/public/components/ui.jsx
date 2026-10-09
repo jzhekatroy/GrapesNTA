@@ -1,7 +1,7 @@
 /* Shared UI primitives: Card, Button, Badge, Status, Checkbox, Mini bar,
    Modal, SidePanel, Toast stack, Empty state, DataTable. */
 
-const { useState, useEffect, useMemo, useRef, useCallback } = React;
+const { useState, useEffect, useLayoutEffect, useMemo, useRef, useCallback } = React;
 
 /* =================== Card =================== */
 function WidgetLoadBadge({ loadMs, serverMs }) {
@@ -373,6 +373,7 @@ function DataTable({
   fitColumnWidths,
   pinnedRows,        // rows rendered after the page, outside sorting and paging
   horizontalScrollControls = false,
+  pinBottomChrome = false,
 }) {
   const [sort, setSort] = useState(initialSort || null);
   const [internalPage, setInternalPage] = useState(1);
@@ -385,8 +386,16 @@ function DataTable({
     columns.map((c) => [c.key, Number(c.width) || 160]),
   ));
   const [scrollState, setScrollState] = useState({ canLeft: false, canRight: false });
+  const [bottomChromeVisible, setBottomChromeVisible] = useState(false);
   const tableWrapRef = useRef(null);
+  const bottomChromeRef = useRef(null);
+  const xRailRef = useRef(null);
+  const xRailInnerRef = useRef(null);
+  const rootRef = useRef(null);
   const resizeRef = useRef(null);
+  const scrollSyncLockRef = useRef(null);
+  const scrollStateRafRef = useRef(0);
+  const chromeLayoutRafRef = useRef(0);
   const userResizedColsRef = useRef(new Set());
   const colKeysSig = columns.map((c) => c.key).join('\0');
   const colFitSig = useMemo(
@@ -511,13 +520,44 @@ function DataTable({
     : null;
 
   const updateScrollState = useCallback(() => {
-    const el = tableWrapRef.current;
-    if (!el) return;
-    const { scrollLeft, scrollWidth, clientWidth } = el;
-    setScrollState({
-      canLeft: scrollLeft > 2,
-      canRight: scrollLeft + clientWidth < scrollWidth - 2,
+    cancelAnimationFrame(scrollStateRafRef.current);
+    scrollStateRafRef.current = requestAnimationFrame(() => {
+      const el = tableWrapRef.current;
+      if (!el) return;
+      const { scrollLeft, scrollWidth, clientWidth } = el;
+      const canScrollX = scrollWidth > clientWidth + 2;
+      setScrollState({
+        canLeft: scrollLeft > 2,
+        canRight: scrollLeft + clientWidth < scrollWidth - 2,
+      });
+      xRailRef.current?.classList.toggle('is-empty', !canScrollX);
     });
+  }, []);
+
+  const syncRailScrollLeftFromWrap = useCallback(() => {
+    const wrap = tableWrapRef.current;
+    const rail = xRailRef.current;
+    if (!wrap || !rail) return;
+    const wrapMax = wrap.scrollWidth - wrap.clientWidth;
+    const railMax = rail.scrollWidth - rail.clientWidth;
+    if (wrapMax <= 0 || railMax <= 0) {
+      rail.scrollLeft = 0;
+      return;
+    }
+    rail.scrollLeft = (wrap.scrollLeft / wrapMax) * railMax;
+  }, []);
+
+  const syncWrapScrollLeftFromRail = useCallback(() => {
+    const wrap = tableWrapRef.current;
+    const rail = xRailRef.current;
+    if (!wrap || !rail) return;
+    const wrapMax = wrap.scrollWidth - wrap.clientWidth;
+    const railMax = rail.scrollWidth - rail.clientWidth;
+    if (wrapMax <= 0 || railMax <= 0) {
+      wrap.scrollLeft = 0;
+      return;
+    }
+    wrap.scrollLeft = (rail.scrollLeft / railMax) * wrapMax;
   }, []);
 
   useEffect(() => {
@@ -534,6 +574,140 @@ function DataTable({
     };
   }, [horizontalScrollControls, updateScrollState, colKeysSig, rowFitSig, resizableTableWidth, colWidths]);
 
+  const syncXRailWidth = useCallback(() => {
+    const wrap = tableWrapRef.current;
+    const inner = xRailInnerRef.current;
+    if (!wrap || !inner) return;
+    inner.style.width = `${wrap.scrollWidth}px`;
+    inner.style.height = '1px';
+    syncRailScrollLeftFromWrap();
+  }, [syncRailScrollLeftFromWrap]);
+
+  const syncFixedChromeLayout = useCallback(() => {
+    const chrome = bottomChromeRef.current;
+    if (!chrome || !pinBottomChrome) return;
+    const wrap = tableWrapRef.current;
+    const box = wrap?.getBoundingClientRect();
+    if (box && box.width > 0) {
+      chrome.style.left = `${box.left}px`;
+      chrome.style.width = `${box.width}px`;
+    } else {
+      const main = document.querySelector('.main');
+      if (!main) return;
+      const rect = main.getBoundingClientRect();
+      chrome.style.left = `${rect.left}px`;
+      chrome.style.width = `${rect.width}px`;
+    }
+    const h = chrome.offsetHeight;
+    if (rootRef.current) {
+      rootRef.current.style.paddingBottom = bottomChromeVisible && h ? `${h}px` : '';
+    }
+    syncRailScrollLeftFromWrap();
+  }, [pinBottomChrome, bottomChromeVisible, syncRailScrollLeftFromWrap]);
+
+  useLayoutEffect(() => {
+    if (!pinBottomChrome) return undefined;
+    syncXRailWidth();
+    syncFixedChromeLayout();
+    return undefined;
+  }, [
+    pinBottomChrome,
+    bottomChromeVisible,
+    syncXRailWidth,
+    syncFixedChromeLayout,
+    pageRows.length,
+    footerNote,
+    rowCount,
+    page,
+    totalPages,
+  ]);
+
+  useEffect(() => {
+    if (!pinBottomChrome) return undefined;
+    const wrap = tableWrapRef.current;
+    const rail = xRailRef.current;
+    if (!wrap) return undefined;
+
+    const releaseScrollSyncLock = () => {
+      requestAnimationFrame(() => {
+        scrollSyncLockRef.current = null;
+      });
+    };
+
+    const onWrapScroll = () => {
+      if (scrollSyncLockRef.current === 'rail') return;
+      scrollSyncLockRef.current = 'wrap';
+      syncRailScrollLeftFromWrap();
+      releaseScrollSyncLock();
+      updateScrollState();
+    };
+    const onRailScroll = () => {
+      if (!rail || scrollSyncLockRef.current === 'wrap') return;
+      scrollSyncLockRef.current = 'rail';
+      syncWrapScrollLeftFromRail();
+      releaseScrollSyncLock();
+      updateScrollState();
+    };
+
+    wrap.addEventListener('scroll', onWrapScroll, { passive: true });
+    rail?.addEventListener('scroll', onRailScroll, { passive: true });
+
+    const chrome = bottomChromeRef.current;
+    const ro = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(() => {
+      syncXRailWidth();
+      syncFixedChromeLayout();
+      updateScrollState();
+    }) : null;
+    ro?.observe(wrap);
+    if (chrome) ro?.observe(chrome);
+
+    const main = document.querySelector('.main');
+    const onLayout = () => {
+      cancelAnimationFrame(chromeLayoutRafRef.current);
+      chromeLayoutRafRef.current = requestAnimationFrame(() => {
+        syncXRailWidth();
+        syncFixedChromeLayout();
+      });
+    };
+    window.addEventListener('resize', onLayout);
+    main?.addEventListener('scroll', onLayout, { passive: true });
+    const app = document.querySelector('.app');
+    const mo = app ? new MutationObserver(onLayout) : null;
+    if (app) mo?.observe(app, { attributes: true, attributeFilter: ['data-collapsed'] });
+
+    const anchor = rootRef.current?.closest('.explorer-results-table');
+    const io = (anchor && main && typeof IntersectionObserver !== 'undefined')
+      ? new IntersectionObserver(([entry]) => {
+        setBottomChromeVisible(Boolean(entry?.isIntersecting));
+      }, { root: main, threshold: 0 })
+      : null;
+    if (anchor) io?.observe(anchor);
+    else setBottomChromeVisible(true);
+
+    return () => {
+      wrap.removeEventListener('scroll', onWrapScroll);
+      rail?.removeEventListener('scroll', onRailScroll);
+      ro?.disconnect();
+      window.removeEventListener('resize', onLayout);
+      main?.removeEventListener('scroll', onLayout);
+      mo?.disconnect();
+      io?.disconnect();
+      if (rootRef.current) rootRef.current.style.paddingBottom = '';
+    };
+  }, [
+    pinBottomChrome,
+    syncXRailWidth,
+    syncFixedChromeLayout,
+    syncRailScrollLeftFromWrap,
+    syncWrapScrollLeftFromRail,
+    updateScrollState,
+    colKeysSig,
+    rowFitSig,
+    resizableTableWidth,
+    colWidths,
+    pageRows.length,
+  ]);
+
   const scrollTable = (direction) => {
     const el = tableWrapRef.current;
     if (!el) return;
@@ -541,8 +715,13 @@ function DataTable({
     el.scrollBy({ left: delta, behavior: 'smooth' });
   };
 
+  const tableWrapClass = [
+    'table-wrap',
+    pinBottomChrome && horizontalScrollControls ? 'table-wrap--xscroll-mirror' : '',
+  ].filter(Boolean).join(' ');
+
   const tableWrap = (
-    <div className="table-wrap" ref={horizontalScrollControls ? tableWrapRef : null}>
+    <div className={tableWrapClass} ref={horizontalScrollControls ? tableWrapRef : null}>
       <table
         className={`table${resizableColumns ? ' table--resizable' : ''}`}
         style={resizableColumns ? { width: `${resizableTableWidth}px`, minWidth: '100%' } : undefined}
@@ -661,8 +840,23 @@ function DataTable({
     </div>
   );
 
+  const tableFoot = (
+    <div className="table-foot">
+      <div className="table-foot__row">
+        <div>
+          {selectable && selected?.size > 0
+            ? <span>Выбрано: <b style={{color: 'var(--fg-primary)'}}>{selected.size}</b> из {rowCount}</span>
+            : <span>{rowCount} {pluralRu(rowCount, 'запись', 'записи', 'записей')}</span>
+          }
+        </div>
+        <Pagination page={page} totalPages={totalPages} onChange={setPage} />
+      </div>
+      {footerNote && <div className="table-foot__row table-foot__meta">{footerNote}</div>}
+    </div>
+  );
+
   return (
-    <div>
+    <div ref={rootRef}>
       {toolbar && (
         <div className="table-toolbar">
           {toolbar.left}
@@ -727,18 +921,25 @@ function DataTable({
           )}
         </div>
       ) : tableWrap}
-      <div className="table-foot">
-        <div className="table-foot__row">
-          <div>
-            {selectable && selected?.size > 0
-              ? <span>Выбрано: <b style={{color: 'var(--fg-primary)'}}>{selected.size}</b> из {rowCount}</span>
-              : <span>{rowCount} {pluralRu(rowCount, 'запись', 'записи', 'записей')}</span>
-            }
-          </div>
-          <Pagination page={page} totalPages={totalPages} onChange={setPage} />
-        </div>
-        {footerNote && <div className="table-foot__row table-foot__meta">{footerNote}</div>}
-      </div>
+      {pinBottomChrome && ReactDOM.createPortal(
+        <div
+          ref={bottomChromeRef}
+          className={[
+            'table-bottom-chrome',
+            'table-bottom-chrome--explorer-fixed',
+            bottomChromeVisible ? 'is-visible' : '',
+          ].filter(Boolean).join(' ')}
+        >
+          {horizontalScrollControls && (
+            <div className="table-xscroll-rail" ref={xRailRef} aria-hidden="true">
+              <div className="table-xscroll-rail__inner" ref={xRailInnerRef} />
+            </div>
+          )}
+          {tableFoot}
+        </div>,
+        document.body,
+      )}
+      {!pinBottomChrome && tableFoot}
     </div>
   );
 }

@@ -3927,6 +3927,68 @@ body.explorer-chip-dragging * {
   min-width: 0;
 }
 
+/* Разбор трафика: липкий низ (ползунок + пагинация), прокрутка страницы как раньше. */
+.card--explorer-results:not(.dns-explorer-results) {
+  contain: none;
+}
+.card--explorer-results:not(.dns-explorer-results) .table-wrap--xscroll-mirror {
+  scrollbar-width: none;
+  scroll-behavior: auto;
+}
+.card--explorer-results:not(.dns-explorer-results) .table-wrap--xscroll-mirror::-webkit-scrollbar {
+  height: 0;
+}
+.table-bottom-chrome--explorer-fixed {
+  position: fixed;
+  bottom: 0;
+  z-index: 35;
+  box-sizing: border-box;
+  visibility: hidden;
+  pointer-events: none;
+  opacity: 0;
+  transform: translateY(10px);
+  background: var(--bg-surface);
+  border-top: 1px solid var(--bd-soft);
+  box-shadow: 0 -12px 28px -14px rgba(0, 0, 0, 0.45);
+  transition:
+    opacity var(--pv-dur-slow) var(--pv-ease-out),
+    transform var(--pv-dur-slow) var(--pv-ease-out),
+    visibility 0s linear var(--pv-dur-slow);
+}
+.table-bottom-chrome--explorer-fixed.is-visible {
+  visibility: visible;
+  pointer-events: auto;
+  opacity: 1;
+  transform: translateY(0);
+  transition:
+    opacity var(--pv-dur-slow) var(--pv-ease-out),
+    transform var(--pv-dur-slow) var(--pv-ease-out),
+    visibility 0s linear 0s;
+}
+[data-theme="light"] .table-bottom-chrome--explorer-fixed {
+  box-shadow: 0 -10px 24px -12px rgba(15, 23, 42, 0.12);
+}
+.table-bottom-chrome--explorer-fixed .table-foot {
+  border-top: none;
+  background: var(--bg-surface);
+}
+.table-bottom-chrome--explorer-fixed .table-xscroll-rail {
+  overflow-x: auto;
+  overflow-y: hidden;
+  height: 14px;
+  border-bottom: 1px solid var(--bd-soft);
+  background: var(--bg-surface);
+  overscroll-behavior-x: contain;
+  scroll-behavior: auto;
+}
+.table-bottom-chrome--explorer-fixed .table-xscroll-rail__inner {
+  height: 1px;
+  pointer-events: none;
+}
+.table-bottom-chrome--explorer-fixed .table-xscroll-rail.is-empty {
+  display: none;
+}
+
 /* Explorer Flows — столбчатая визуализация */
 .explorer-bars__row {
   min-width: 0;

@@ -4498,6 +4498,7 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
                             showOthers={showOthersOnChart}
                           />
                         </div>
+                        <div className={`explorer-results-table${visibleResults.length > 10 ? ' explorer-results-table--pin-chrome' : ''}`}>
                         <DataTable
                           rows={visibleResults}
                           rowKey="id"
@@ -4535,7 +4536,9 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
                           columns={resultTableColumns}
                           fitColumnWidths={fitExplorerResultColumns}
                           horizontalScrollControls
+                          pinBottomChrome={visibleResults.length > 10}
                         />
+                        </div>
                       </div>
                     )}
                   </Card>
