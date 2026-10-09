@@ -433,6 +433,28 @@ function isCarpetHit(udpRow, hourUsualBps) {
   return bps * (growth - 1) / growth >= CARPET_HOUR_SHARE * usual;
 }
 
+// Открытый ковром инцидент держится, пока UDP выше ×1.3 к норме: ботнет по
+// СКАЙНЭТ 09.10 проваливается на 1–3 минуты до ×0.6 и снова бьёт 9–14 Гбит/с,
+// а по порогу открытия событие закрывалось посреди атаки. Замер за 7 дней на
+// PiterIX: 67 событий → 60, атаки СКАЙНЭТ и ИСКРАТЕЛЕКОМ склеились, на ШПД
+// без изменений. При ×1.2 шум мелких клиентов тянул хвост на 14 минут.
+const CARPET_HOLD_GROWTH_DEFAULT = 1.3;
+
+function carpetHoldGrowth() {
+  const raw = process.env.DETECTION_CARPET_HOLD_GROWTH;
+  if (raw == null || String(raw).trim() === '') return CARPET_HOLD_GROWTH_DEFAULT;
+  const ratio = Number(raw);
+  if (!Number.isFinite(ratio) || ratio <= 1 || ratio > CARPET_UDP_GROWTH) return CARPET_HOLD_GROWTH_DEFAULT;
+  return ratio;
+}
+
+function isCarpetHolding(udpRow) {
+  const growth = num(udpRow?.growth_bps ?? udpRow?.growthBps);
+  const entropy = num(udpRow?.port_entropy ?? udpRow?.portEntropy);
+  return growth != null && growth >= carpetHoldGrowth()
+    && entropy != null && entropy >= CARPET_ENTROPY_MIN;
+}
+
 function objectSignalKey(scope, scopeId, signal = SIGNALS.volume) {
   return `${scope}|${scopeId}|${signal || SIGNALS.volume}`;
 }
@@ -490,5 +512,8 @@ module.exports = {
   CARPET_ENTROPY_MIN,
   CARPET_HOUR_SHARE,
   isCarpetHit,
+  CARPET_HOLD_GROWTH_DEFAULT,
+  carpetHoldGrowth,
+  isCarpetHolding,
   objectSignalKey,
 };

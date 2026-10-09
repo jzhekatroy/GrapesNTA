@@ -2,6 +2,7 @@
 
 const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
+const { carpetHoldGrowth, isCarpetHolding } = require('./detection-signals');
 const {
   DEFAULT_GROWTH_THRESHOLD,
   DEFAULT_ALERT_SCOPE,
@@ -2082,6 +2083,52 @@ describe('UDP-ковёр открывает событие объёма', () => 
     const opts = { alertBps: 37.83e9, hourP95: 23.8e9, peakBps: 43.12e9 };
     assert.equal(shouldSendNormalize(quiet, 1.6, 10, opts), false);
     assert.equal(shouldSendNormalize(quiet, 1.6, 10, { ...opts, carpetOnly: true }), true);
+  });
+
+  it('ковёр держит событие, пока UDP выше ×1.3 к норме', () => {
+    const history = (udpGrowth) => Array.from({ length: 10 }, (_, i) => ({
+      scope: 'client', scope_id: '71761', proto: 'all',
+      minute: `2026-10-09 12:${String(30 - i).padStart(2, '0')}:00`, bps: 35e9, growth_bps: 0.9,
+      udpRow: { proto: 'udp', bps: 7.63e9 * udpGrowth(i), growth_bps: udpGrowth(i), port_entropy: 7.5 },
+    }));
+    const opts = { alertBps: 37.83e9, hourP95: 23.8e9, peakBps: 43.12e9, carpetOnly: true };
+    const dip = history((i) => (i === 4 ? 1.4 : 0.7));
+    assert.equal(shouldSendNormalize(dip, 1.6, 10, opts), false);
+    assert.equal(shouldSendNormalize(history(() => 1.25), 1.6, 10, opts), true);
+    const lowEntropy = history((i) => (i === 4 ? 1.4 : 0.7));
+    lowEntropy[4].udpRow.port_entropy = 3;
+    assert.equal(shouldSendNormalize(lowEntropy, 1.6, 10, opts), true);
+  });
+
+  it('у текущей минуты строка UDP берётся из группы тика', () => {
+    const quiet = Array.from({ length: 10 }, (_, i) => ({
+      scope: 'client', scope_id: '71761', proto: 'all',
+      minute: `2026-10-09 12:${String(30 - i).padStart(2, '0')}:00`, bps: 35e9, growth_bps: 0.9,
+    }));
+    const current = { proto: 'udp', bps: 11e9, growth_bps: 1.45, port_entropy: 7.9 };
+    const udpRowOf = (item) => item?.udpRow || (item === quiet[0] ? current : null);
+    assert.equal(shouldSendNormalize(quiet, 1.6, 10, { carpetOnly: true, udpRowOf }), false);
+    assert.equal(shouldSendNormalize(quiet, 1.6, 10, { carpetOnly: true }), true);
+  });
+
+  it('порог удержания ковра берётся из DETECTION_CARPET_HOLD_GROWTH', () => {
+    const saved = process.env.DETECTION_CARPET_HOLD_GROWTH;
+    try {
+      delete process.env.DETECTION_CARPET_HOLD_GROWTH;
+      assert.equal(carpetHoldGrowth(), 1.3);
+      process.env.DETECTION_CARPET_HOLD_GROWTH = '1.2';
+      assert.equal(carpetHoldGrowth(), 1.2);
+      assert.equal(isCarpetHolding({ growth_bps: 1.25, port_entropy: 7 }), true);
+      for (const bad of ['1', '0.9', '1.7', 'abc']) {
+        process.env.DETECTION_CARPET_HOLD_GROWTH = bad;
+        assert.equal(carpetHoldGrowth(), 1.3);
+      }
+      assert.equal(isCarpetHolding({ growth_bps: 1.25, port_entropy: 7 }), false);
+      assert.equal(isCarpetHolding(null), false);
+    } finally {
+      if (saved === undefined) delete process.env.DETECTION_CARPET_HOLD_GROWTH;
+      else process.env.DETECTION_CARPET_HOLD_GROWTH = saved;
+    }
   });
 
   it('алерт ковра не режется долей роста всего трафика', () => {

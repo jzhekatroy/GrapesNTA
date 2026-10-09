@@ -39,6 +39,7 @@ const {
   isNetSpikeHit,
   isNetSpikeStrong,
   isCarpetHit,
+  isCarpetHolding,
 } = require('./detection-signals');
 
 const SETTINGS_TABLE = 'app_detection_telegram';
@@ -793,7 +794,9 @@ function belowAttackTail(bps, peakBps) {
 function shouldSendNormalize(historyNewestFirst, threshold, streak = DEFAULT_NORMALIZE_STREAK, options = {}) {
   const need = normalizeStreak(streak, DEFAULT_NORMALIZE_STREAK);
   const history = Array.isArray(historyNewestFirst) ? historyNewestFirst : [];
-  const hot = (row) => isAttackMinute(row, threshold, options.peakBps);
+  const udpRowOf = typeof options.udpRowOf === 'function' ? options.udpRowOf : (row) => row?.udpRow;
+  const hot = (row) => isAttackMinute(row, threshold, options.peakBps)
+    || (options.carpetOnly === true && isCarpetHolding(udpRowOf(row)));
   if (!history.length || hot(history[0])) return false;
   if (history.length < need) return false;
   if (!history.slice(0, need).every((row) => !hot(row))) return false;
@@ -2316,6 +2319,7 @@ function pickNormalizeCandidates(allRows, previousByKey, threshold, options = {}
           hourP95: active.verdict?.hourP95,
           peakBps: Math.max(ownPeak, recentPeak || 0) || null,
           carpetOnly: active.verdict?.carpetOnly === true,
+          udpRowOf: (item) => item?.udpRow || (item === row ? group.byProto?.udp : null),
         });
       } else if (activeSignal === SIGNALS.syn_flood || activeSignal === SIGNALS.net_spike) {
         ready = shouldNormalizeQuiet(history, quiet, cfg.normalizeStreak);
