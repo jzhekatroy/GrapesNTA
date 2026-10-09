@@ -2886,59 +2886,138 @@ Object.assign(window, {
   CountryRankList,
 });
 
-/* ============== Sankey (simple, 2 columns) ============== */
+/* ============== Sankey (N columns) ============== */
 function sankeyTruncateLabel(label, maxLen = 28) {
   const text = String(label ?? '');
   return text.length > maxLen ? `${text.slice(0, maxLen - 1)}…` : text;
 }
 
+function buildSankeyLayout({
+  columns,
+  links,
+  height,
+  minBarHeight,
+}) {
+  const colCount = columns.length;
+  const colW = 12;
+  const w = Math.max(600, 280 + colCount * 80);
+  const nodeTotalsByCol = columns.map(() => ({}));
+
+  links.forEach((l) => {
+    const sc = l.sourceCol ?? 0;
+    const tc = l.targetCol ?? sc + 1;
+    if (sc < 0 || tc >= colCount || tc !== sc + 1) return;
+    const v = Number(l.value) || 0;
+    if (v <= 0) return;
+    nodeTotalsByCol[sc][l.from] = (nodeTotalsByCol[sc][l.from] || 0) + v;
+    nodeTotalsByCol[tc][l.to] = (nodeTotalsByCol[tc][l.to] || 0) + v;
+  });
+
+  const colSums = nodeTotalsByCol.map((totals) => (
+    Object.values(totals).reduce((a, b) => a + b, 0) || 1
+  ));
+
+  const maxNodes = Math.max(...columns.map((col, ci) => {
+    const ids = new Set([...col.map((n) => n.id), ...Object.keys(nodeTotalsByCol[ci])]);
+    return ids.size;
+  }), 1);
+  const gap = maxNodes > 40 ? 1 : maxNodes > 20 ? 2 : maxNodes > 10 ? 4 : 6;
+  const h = Math.max(height, maxNodes * minBarHeight + Math.max(0, maxNodes - 1) * gap);
+
+  const colX = (colIdx) => {
+    if (colCount <= 1) return 0;
+    return (colIdx / (colCount - 1)) * (w - colW);
+  };
+
+  const positionsByCol = [];
+  columns.forEach((colNodes, colIdx) => {
+    const totals = nodeTotalsByCol[colIdx];
+    const sum = colSums[colIdx] || Object.values(totals).reduce((a, b) => a + b, 0) || 1;
+    const byId = new Map(colNodes.map((n) => [n.id, n]));
+    Object.keys(totals).forEach((id) => {
+      if (!byId.has(id)) {
+        byId.set(id, { id, label: id, color: 'var(--fg-muted)' });
+      }
+    });
+    const sorted = [...byId.values()].sort((a, b) => (totals[b.id] || 0) - (totals[a.id] || 0));
+    const flowArea = Math.max(h - gap * Math.max(sorted.length - 1, 0), 1);
+    let y = 0;
+    const pos = {};
+    sorted.forEach((node) => {
+      const ny = ((totals[node.id] || 0) / sum) * flowArea;
+      pos[node.id] = { y, h: ny, node, x: colX(colIdx), colIdx };
+      y += ny + gap;
+    });
+    positionsByCol.push({ pos, sorted, sum, flowArea });
+  });
+
+  const linkPaths = [];
+  const cursors = columns.map((_, colIdx) => {
+    const cur = {};
+    (positionsByCol[colIdx]?.sorted || []).forEach((n) => {
+      cur[n.id] = positionsByCol[colIdx].pos[n.id].y;
+    });
+    return cur;
+  });
+
+  links.forEach((l, linkIdx) => {
+    const sc = l.sourceCol ?? 0;
+    const tc = l.targetCol ?? sc + 1;
+    if (tc !== sc + 1) return;
+    const left = positionsByCol[sc];
+    const right = positionsByCol[tc];
+    if (!left || !right) return;
+    const lp = left.pos[l.from];
+    const rp = right.pos[l.to];
+    if (!lp || !rp) return;
+    const v = Number(l.value) || 0;
+    if (v <= 0) return;
+    const lh = (v / left.sum) * left.flowArea;
+    const rh = (v / right.sum) * right.flowArea;
+    const y0 = cursors[sc][l.from];
+    cursors[sc][l.from] += lh;
+    const y1 = cursors[tc][l.to];
+    cursors[tc][l.to] += rh;
+    const x0 = lp.x + colW;
+    const x1 = rp.x;
+    const mid = (x0 + x1) / 2;
+    const path = `M ${x0} ${y0} C ${mid} ${y0}, ${mid} ${y1}, ${x1} ${y1} L ${x1} ${y1 + rh} C ${mid} ${y1 + rh}, ${mid} ${y0 + lh}, ${x0} ${y0 + lh} Z`;
+    linkPaths.push({ key: `link-${linkIdx}`, path, color: lp.node.color || 'var(--fg-muted)' });
+  });
+
+  return { w, h, colW, positionsByCol, linkPaths, colX };
+}
+
 function Sankey({
+  columns: columnsProp,
   left,
   right,
-  links,
+  links = [],
+  columnTitles,
   height = 240,
   maxHeight = 720,
   minBarHeight = 6,
+  onNodeClick,
 }) {
-  // left/right: [{ id, label, color }]; links: [{ from, to, value }]
-  const w = 600;
-  const colW = 12;
-  const totalL = {};
-  const totalR = {};
-  links.forEach((l) => {
-    totalL[l.from] = (totalL[l.from] || 0) + l.value;
-    totalR[l.to] = (totalR[l.to] || 0) + l.value;
+  const columns = columnsProp ?? (left && right ? [left, right] : []);
+  if (!Array.isArray(columns) || columns.length < 2) return null;
+
+  const normalizedLinks = (links || []).map((l, i) => ({
+    ...l,
+    sourceCol: l.sourceCol ?? 0,
+    targetCol: l.targetCol ?? 1,
+    key: l.key ?? `l-${i}`,
+  }));
+
+  const { w, h, colW, positionsByCol, linkPaths, colX } = buildSankeyLayout({
+    columns,
+    links: normalizedLinks,
+    height,
+    minBarHeight,
   });
-  const sumL = Object.values(totalL).reduce((a, b) => a + b, 0) || 1;
-  const sumR = Object.values(totalR).reduce((a, b) => a + b, 0) || 1;
-  const leftSorted = [...left].sort((a, b) => (totalL[b.id] || 0) - (totalL[a.id] || 0));
-  const rightSorted = [...right].sort((a, b) => (totalR[b.id] || 0) - (totalR[a.id] || 0));
-  const maxNodes = Math.max(leftSorted.length, rightSorted.length, 1);
-  const gap = maxNodes > 40 ? 1 : maxNodes > 20 ? 2 : maxNodes > 10 ? 4 : 6;
-  const minBar = minBarHeight;
-  const drawableH = Math.max(height, maxNodes * minBar + Math.max(0, maxNodes - 1) * gap);
-  const h = drawableH;
-  const flowAreaL = Math.max(h - gap * Math.max(leftSorted.length - 1, 0), 1);
-  const flowAreaR = Math.max(h - gap * Math.max(rightSorted.length - 1, 0), 1);
-  let yL = 0;
-  let yR = 0;
-  const leftPos = {};
-  leftSorted.forEach((n) => {
-    const ny = (totalL[n.id] || 0) / sumL * flowAreaL;
-    leftPos[n.id] = { y: yL, h: ny, node: n };
-    yL += ny + gap;
-  });
-  const rightPos = {};
-  rightSorted.forEach((n) => {
-    const ny = (totalR[n.id] || 0) / sumR * flowAreaR;
-    rightPos[n.id] = { y: yR, h: ny, node: n };
-    yR += ny + gap;
-  });
-  const lCur = {};
-  const rCur = {};
-  leftSorted.forEach((n) => { lCur[n.id] = leftPos[n.id].y; });
-  rightSorted.forEach((n) => { rCur[n.id] = rightPos[n.id].y; });
+
   const labelFor = (node, barH) => (barH >= 12 ? sankeyTruncateLabel(node.label) : '');
+  const colCount = columns.length;
 
   return (
     <div
@@ -2946,51 +3025,71 @@ function Sankey({
       style={{
         maxHeight: `min(70vh, ${maxHeight}px)`,
         overflowY: 'auto',
-        overflowX: 'hidden',
+        overflowX: 'auto',
         paddingRight: 2,
       }}
     >
-      <svg viewBox={`0 0 ${w} ${h}`} style={{ width: '100%', height: h, display: 'block', minHeight: h }}>
-        {leftSorted.map((n) => (
-          <g key={n.id}>
-            <rect x={0} y={leftPos[n.id].y} width={colW} height={leftPos[n.id].h} fill={n.color} rx="2">
-              <title>{n.label}</title>
-            </rect>
-            {labelFor(n, leftPos[n.id].h) && (
-              <text x={colW + 6} y={leftPos[n.id].y + leftPos[n.id].h / 2 + 4} fontSize="11" fill="var(--fg-primary)" fontFamily="Mulish" fontWeight="600">
-                {labelFor(n, leftPos[n.id].h)}
-              </text>
-            )}
-          </g>
+      <svg viewBox={`0 0 ${w} ${h + (columnTitles?.length ? 18 : 0)}`} style={{ width: '100%', height: h + (columnTitles?.length ? 18 : 0), display: 'block', minHeight: h }}>
+        {columnTitles?.map((title, colIdx) => (
+          <text
+            key={`title-${colIdx}`}
+            x={colX(colIdx) + colW / 2}
+            y={12}
+            textAnchor={colIdx === 0 ? 'start' : colIdx === colCount - 1 ? 'end' : 'middle'}
+            fontSize="10"
+            fill="var(--fg-secondary)"
+            fontFamily="Mulish"
+            fontWeight="600"
+          >
+            {sankeyTruncateLabel(title, 36)}
+          </text>
         ))}
-        {rightSorted.map((n) => (
-          <g key={n.id}>
-            <rect x={w - colW} y={rightPos[n.id].y} width={colW} height={rightPos[n.id].h} fill={n.color} rx="2">
-              <title>{n.label}</title>
-            </rect>
-            {labelFor(n, rightPos[n.id].h) && (
-              <text x={w - colW - 6} y={rightPos[n.id].y + rightPos[n.id].h / 2 + 4} textAnchor="end" fontSize="11" fill="var(--fg-primary)" fontFamily="Mulish" fontWeight="600">
-                {labelFor(n, rightPos[n.id].h)}
-              </text>
-            )}
-          </g>
-        ))}
-        {links.map((l, i) => {
-          const lp = leftPos[l.from];
-          const rp = rightPos[l.to];
-          if (!lp || !rp) return null;
-          const lh = (l.value / sumL) * flowAreaL;
-          const rh = (l.value / sumR) * flowAreaR;
-          const y0 = lCur[l.from];
-          lCur[l.from] += lh;
-          const y1 = rCur[l.to];
-          rCur[l.to] += rh;
-          const x0 = colW;
-          const x1 = w - colW;
-          const mid = (x0 + x1) / 2;
-          const path = `M ${x0} ${y0} C ${mid} ${y0}, ${mid} ${y1}, ${x1} ${y1} L ${x1} ${y1 + rh} C ${mid} ${y1 + rh}, ${mid} ${y0 + lh}, ${x0} ${y0 + lh} Z`;
-          return <path key={i} d={path} fill={lp.node.color} opacity="0.32" />;
-        })}
+        <g transform={columnTitles?.length ? 'translate(0, 18)' : undefined}>
+          {linkPaths.map((l) => (
+            <path key={l.key} d={l.path} fill={l.color} opacity="0.32" />
+          ))}
+          {positionsByCol.map(({ pos, sorted }, colIdx) => (
+            sorted.map((n) => {
+              const p = pos[n.id];
+              if (!p) return null;
+              const isFirst = colIdx === 0;
+              const isLast = colIdx === colCount - 1;
+              const titleText = n.title ?? n.label;
+              const clickable = typeof onNodeClick === 'function' && n.meta;
+              return (
+                <g key={`${colIdx}-${n.id}`}>
+                  <rect
+                    x={p.x}
+                    y={p.y}
+                    width={colW}
+                    height={p.h}
+                    fill={n.color || 'var(--fg-muted)'}
+                    rx="2"
+                    style={clickable ? { cursor: 'pointer' } : undefined}
+                    onClick={clickable ? () => onNodeClick(n.meta) : undefined}
+                  >
+                    <title>{titleText}</title>
+                  </rect>
+                  {labelFor(n, p.h) && (
+                    <text
+                      x={isFirst ? p.x + colW + 6 : isLast ? p.x - 6 : p.x + colW + 6}
+                      y={p.y + p.h / 2 + 4}
+                      textAnchor={isLast ? 'end' : 'start'}
+                      fontSize="11"
+                      fill="var(--fg-primary)"
+                      fontFamily="Mulish"
+                      fontWeight="600"
+                      style={clickable ? { cursor: 'pointer' } : undefined}
+                      onClick={clickable ? () => onNodeClick(n.meta) : undefined}
+                    >
+                      {labelFor(n, p.h)}
+                    </text>
+                  )}
+                </g>
+              );
+            })
+          ))}
+        </g>
       </svg>
     </div>
   );

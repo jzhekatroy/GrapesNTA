@@ -2343,7 +2343,6 @@ function parseExplorerPageParams(params) {
     contribution: 'stack',
     donut: 'stack',
     bars: 'stack',
-    sankey: 'stack',
     relations: 'stack',
   };
   const normalizedVis = EXPLORER_VIS_IDS.has(vis)

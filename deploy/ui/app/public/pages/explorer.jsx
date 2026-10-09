@@ -185,6 +185,7 @@ function explorerGroupCellFilterValue(groupToken, dimId, valueIdx, row, dimensio
 const VIS_TYPES = [
   { id: 'stack', label: 'Стек (сумма)', icon: 'layers', hint: 'Площади друг на друге, верхняя кромка = сумма выбранных серий' },
   { id: 'stackShare', label: 'Стек (доли)', icon: 'stackShare', hint: 'Тот же стек, нормализован к 100%' },
+  { id: 'sankey', label: 'Sankey', icon: 'sankey', hint: 'Потоки между измерениями группировки по выбранной метрике' },
   { id: 'data', label: 'Данные', icon: 'menu', hint: 'График динамики и детальная таблица' },
 ];
 
@@ -192,6 +193,10 @@ const EXPLORER_DYNAMICS_VIS = new Set(['data', 'stack', 'stackShare']);
 
 function isExplorerDynamicsVis(vis) {
   return EXPLORER_DYNAMICS_VIS.has(normalizeExplorerVis(vis));
+}
+
+function isExplorerSankeyVis(vis) {
+  return normalizeExplorerVis(vis) === 'sankey';
 }
 
 function explorerVisToStackMode(vis) {
@@ -217,7 +222,6 @@ const EXPLORER_VIS_LEGACY_MAP = {
   contribution: 'stack',
   donut: 'stack',
   bars: 'stack',
-  sankey: 'stack',
   relations: 'stack',
 };
 
@@ -228,10 +232,12 @@ function normalizeExplorerVis(vis) {
   return EXPLORER_VIS_DEFAULT;
 }
 
-/** Persist stack/share; map leftover default vis=data to stack sum. */
+/** Persist known analysis modes; legacy aliases map to current ids. */
 function restoreExplorerVis(vis) {
-  const id = normalizeExplorerVis(vis);
-  return id === 'stackShare' ? 'stackShare' : EXPLORER_VIS_DEFAULT;
+  const raw = String(vis || '').trim();
+  if (EXPLORER_VIS_LEGACY_MAP[raw]) return EXPLORER_VIS_LEGACY_MAP[raw];
+  if (VIS_TYPES.some((v) => v.id === raw)) return raw;
+  return EXPLORER_VIS_DEFAULT;
 }
 
 function resolveExplorerVisualCount(visualLimit, total) {
@@ -295,6 +301,102 @@ function explorerRowLabel(row) {
   return (row?.values || []).map((val, idx) => (
     row.asnMeta?.[idx] ? explorerAsnDisplayValue(row, idx, val) : (val ?? '—')
   )).join(' → ');
+}
+
+function buildExplorerSankeyGraph({
+  rows,
+  groupBy,
+  dimensionById,
+  metric,
+  metricLabel,
+}) {
+  const columnTitles = (groupBy || []).map((t) => explorerGroupLabel(t, dimensionById));
+  if (!groupBy?.length || groupBy.length < 2) {
+    return { ready: false, columns: [], links: [], columnTitles };
+  }
+  const dataRows = (rows || []).filter((r) => !r.isOthers);
+  const nodeMaps = groupBy.map(() => new Map());
+  const linkAgg = new Map();
+
+  const ensureNode = (colIdx, row, valueIdx) => {
+    const token = groupBy[colIdx];
+    const dimId = explorerGroupFieldId(token);
+    const raw = String(row.rawValues?.[valueIdx] ?? row.values?.[valueIdx] ?? '—');
+    const display = row.values?.[valueIdx] ?? '—';
+    const id = `${colIdx}:${raw}`;
+    let node = nodeMaps[colIdx].get(id);
+    if (!node) {
+      const filterVal = explorerGroupCellFilterValue(token, dimId, valueIdx, row, dimensionById);
+      node = {
+        id,
+        label: String(display),
+        color: row.color || '#7381f4',
+        flowTotal: 0,
+        colIdx,
+        meta: {
+          field: dimId,
+          value: filterVal.value,
+          label: filterVal.label,
+          groupToken: token,
+          displayValue: String(display),
+        },
+      };
+      nodeMaps[colIdx].set(id, node);
+    }
+    return id;
+  };
+
+  dataRows.forEach((row) => {
+    const weight = Number(row.metric) || 0;
+    if (weight <= 0) return;
+    const ids = groupBy.map((_, i) => ensureNode(i, row, i));
+    for (let i = 1; i < ids.length; i += 1) {
+      const from = ids[i - 1];
+      const to = ids[i];
+      const key = `${i - 1}\0${from}\0${to}`;
+      linkAgg.set(key, (linkAgg.get(key) || 0) + weight);
+    }
+  });
+
+  const links = [];
+  linkAgg.forEach((value, key) => {
+    const [sc, from, to] = key.split('\0');
+    links.push({
+      from,
+      to,
+      value,
+      sourceCol: Number(sc),
+      targetCol: Number(sc) + 1,
+    });
+  });
+
+  links.forEach((l) => {
+    const fromNode = nodeMaps[l.sourceCol]?.get(l.from);
+    const toNode = nodeMaps[l.targetCol]?.get(l.to);
+    if (fromNode) fromNode.flowTotal += l.value;
+    if (toNode) toNode.flowTotal += l.value;
+  });
+
+  const columns = nodeMaps.map((m) => [...m.values()].map((n) => {
+    const dimTitle = explorerGroupLabel(groupBy[n.colIdx], dimensionById);
+    const flowStr = typeof formatMetric === 'function'
+      ? formatMetric(n.flowTotal, metric)
+      : String(n.flowTotal);
+    return {
+      id: n.id,
+      label: n.label,
+      color: n.color,
+      title: `${dimTitle}: ${n.label} · ${flowStr}${metricLabel ? ` (${metricLabel})` : ''}`,
+      meta: n.meta,
+    };
+  }));
+
+  return {
+    ready: links.length > 0 && columns.some((c) => c.length),
+    columns,
+    links,
+    columnTitles,
+  };
 }
 
 function parseExplorerAsnNumber(value) {
@@ -4427,7 +4529,7 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
                     >
                       {showAllResultColumns ? 'Скрыть поля' : 'Все поля'}
                     </Button>
-                    {isExplorerDynamicsVis(vis) && (
+                    {(isExplorerDynamicsVis(vis) || isExplorerSankeyVis(vis)) && (
                       <Button kind="ghost" size="sm" icon="download" onClick={exportCsv} disabled={!hasAppliedQuery || !results.length || exporting}>CSV</Button>
                     )}
                   </div>
@@ -4465,7 +4567,9 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
                   <Card
                     className="card--explorer-results"
                     title="Результаты"
-                    subtitle="График динамики и таблица: серии по селектору «Показать», отдельные строки — «Показать» / «Скрыть с графика»"
+                    subtitle={isExplorerSankeyVis(vis)
+                      ? 'Sankey по строкам в пределах «Показать»; таблица — те же строки'
+                      : 'График динамики и таблица: серии по селектору «Показать», отдельные строки — «Показать» / «Скрыть с графика»'}
                     loadMs={loadMs}
                     serverMs={serverMs}
                     pad="0"
@@ -4481,22 +4585,33 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
                     {analysisBody || (
                       <div className="explorer-results-layout">
                         <div className="explorer-results-chart">
-                          <DynamicsChartExplorer
-                            active={isExplorerDynamicsVis(vis)}
-                            stackMode={explorerVisToStackMode(vis)}
-                            results={results}
-                            metric={appliedMetric}
-                            metricLabel={appliedMetricLabel}
-                            resultSeries={resultSeries}
-                            displayTimezone={displayTimezone}
-                            chartLongRange={isLongChartRange(appliedTimeRange, appliedCustomPeriod)}
-                            selectedSeriesIds={dynamicsSeriesIds}
-                            highlightKey={chartHighlightKey}
-                            onRangeSelect={applyExplorerChartRangeZoom}
-                            bucketSeconds={explorerGranularityBucketSeconds(meta?.granularity)}
-                            totalPoints={othersChartAvailable ? timeseries : null}
-                            showOthers={showOthersOnChart}
-                          />
+                          {isExplorerSankeyVis(vis) ? (
+                            <SankeyChartExplorer
+                              rows={visibleResults}
+                              groupBy={appliedGroupBy}
+                              dimensionById={dimensionById}
+                              metric={appliedMetric}
+                              metricLabel={appliedMetricLabel}
+                              onNodeFilter={requestAddFilterFromCell}
+                            />
+                          ) : (
+                            <DynamicsChartExplorer
+                              active={isExplorerDynamicsVis(vis)}
+                              stackMode={explorerVisToStackMode(vis)}
+                              results={results}
+                              metric={appliedMetric}
+                              metricLabel={appliedMetricLabel}
+                              resultSeries={resultSeries}
+                              displayTimezone={displayTimezone}
+                              chartLongRange={isLongChartRange(appliedTimeRange, appliedCustomPeriod)}
+                              selectedSeriesIds={dynamicsSeriesIds}
+                              highlightKey={chartHighlightKey}
+                              onRangeSelect={applyExplorerChartRangeZoom}
+                              bucketSeconds={explorerGranularityBucketSeconds(meta?.granularity)}
+                              totalPoints={othersChartAvailable ? timeseries : null}
+                              showOthers={showOthersOnChart}
+                            />
+                          )}
                         </div>
                         <div className={`explorer-results-table${visibleResults.length > 10 ? ' explorer-results-table--pin-chrome' : ''}`}>
                         <DataTable
@@ -7640,6 +7755,57 @@ function ExplorerTotalChart({
       </div>
       <div style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-muted)' }}>
         Ось Y — {metricLabel || metric} по всем потокам, соответствующим фильтрам, в каждом временном интервале.
+      </div>
+    </div>
+  );
+}
+
+function SankeyChartExplorer({
+  rows,
+  groupBy,
+  dimensionById,
+  metric,
+  metricLabel,
+  onNodeFilter,
+}) {
+  const graph = buildExplorerSankeyGraph({
+    rows,
+    groupBy,
+    dimensionById,
+    metric,
+    metricLabel,
+  });
+
+  if (!groupBy?.length || groupBy.length < 2) {
+    return (
+      <div className="explorer-lines__empty">
+        Добавьте вторую группировку, чтобы построить Sankey (например, IP источника и IP назначения).
+      </div>
+    );
+  }
+
+  if (!graph.ready) {
+    return (
+      <div className="explorer-lines__empty">
+        Нет данных для Sankey среди показанных строк. Расширьте лимит «Показать» или ослабьте фильтры.
+      </div>
+    );
+  }
+
+  return (
+    <div className="explorer-lines col" style={{ gap: 8 }}>
+      <Sankey
+        columns={graph.columns}
+        links={graph.links}
+        columnTitles={graph.columnTitles}
+        height={Math.max(EXPLORER_CHART_HEIGHT, 280)}
+        onNodeClick={(meta) => {
+          if (!meta) return;
+          onNodeFilter?.(meta.field, meta.value, meta.label, meta.groupToken, meta.displayValue);
+        }}
+      />
+      <div style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-muted)' }}>
+        Толщина потока — {metricLabel || metric} за период. Клик по узлу открывает добавление фильтра по этому значению.
       </div>
     </div>
   );
