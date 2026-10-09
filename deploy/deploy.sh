@@ -188,24 +188,28 @@ ensure_ui_env() {
 }
 
 ensure_detection_env() {
-  if [[ -f "${DETECTION_DIR}/.env" ]]; then
-    return 0
+  if [[ ! -f "${DETECTION_DIR}/.env" ]]; then
+    if [[ -f "${UI_DIR}/.env" ]]; then
+      log "bootstrap ${DETECTION_DIR}/.env from ${UI_DIR}/.env"
+      cp "${UI_DIR}/.env" "${DETECTION_DIR}/.env"
+      chmod 600 "${DETECTION_DIR}/.env"
+    elif [[ -f "${UI_LEGACY_ENV}" ]]; then
+      log "bootstrap ${DETECTION_DIR}/.env from ${UI_LEGACY_ENV}"
+      cp "${UI_LEGACY_ENV}" "${DETECTION_DIR}/.env"
+      chmod 600 "${DETECTION_DIR}/.env"
+    elif [[ -f "${DETECTION_DIR}/env.example" ]]; then
+      die "missing ${DETECTION_DIR}/.env — copy from env.example (or from ${UI_DIR}/.env) and fill secrets"
+    else
+      die "missing ${DETECTION_DIR}/.env"
+    fi
+    if ! grep -q '^DETECTION_TICK_SEC=' "${DETECTION_DIR}/.env" 2>/dev/null; then
+      printf '\nDETECTION_TICK_SEC=20\n' >> "${DETECTION_DIR}/.env"
+    fi
   fi
-  if [[ -f "${UI_DIR}/.env" ]]; then
-    log "bootstrap ${DETECTION_DIR}/.env from ${UI_DIR}/.env"
-    cp "${UI_DIR}/.env" "${DETECTION_DIR}/.env"
-    chmod 600 "${DETECTION_DIR}/.env"
-  elif [[ -f "${UI_LEGACY_ENV}" ]]; then
-    log "bootstrap ${DETECTION_DIR}/.env from ${UI_LEGACY_ENV}"
-    cp "${UI_LEGACY_ENV}" "${DETECTION_DIR}/.env"
-    chmod 600 "${DETECTION_DIR}/.env"
-  elif [[ -f "${DETECTION_DIR}/env.example" ]]; then
-    die "missing ${DETECTION_DIR}/.env — copy from env.example (or from ${UI_DIR}/.env) and fill secrets"
-  else
-    die "missing ${DETECTION_DIR}/.env"
-  fi
-  if ! grep -q '^DETECTION_TICK_SEC=' "${DETECTION_DIR}/.env" 2>/dev/null; then
-    printf '\nDETECTION_TICK_SEC=20\n' >> "${DETECTION_DIR}/.env"
+  # Существующий .env не переписываем: дописываем только отсутствующий запас,
+  # чтобы ШПД остался на 4, а PiterIX со своим значением не сбросился.
+  if ! grep -q '^DETECTION_CLOSED_MINUTE_LAG_MINUTES=' "${DETECTION_DIR}/.env" 2>/dev/null; then
+    printf '\nDETECTION_CLOSED_MINUTE_LAG_MINUTES=4\n' >> "${DETECTION_DIR}/.env"
   fi
 }
 

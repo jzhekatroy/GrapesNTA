@@ -145,13 +145,22 @@ function prefixToNetSql(prefixExpr) {
   )`;
 }
 
-const CLOSED_MINUTE_LAG_MS = 4 * 60 * 1000;
+// Сколько минут минута считается ещё открытой. Совпадает со сводкой
+// (TRAFFIC_ROLLUP_SAFETY_LAG_MINUTES): минуту задерживает больший из двух.
+// Пустое или нецелое значение, меньше 1 и больше 30 — запас по умолчанию.
+function closedMinuteLagMinutes() {
+  const raw = process.env.DETECTION_CLOSED_MINUTE_LAG_MINUTES;
+  if (raw == null || String(raw).trim() === '') return 4;
+  const minutes = Number(raw);
+  if (!Number.isInteger(minutes) || minutes < 1 || minutes > 30) return 4;
+  return minutes;
+}
 
-// Запас как в lastClosedMinute: toStartOfMinute(now - 4 минуты). Если сводка
-// ушла вперёд этого запаса, берём его, а не отказываемся от дешёвой минуты.
+// Запас: toStartOfMinute(now - closedMinuteLagMinutes). Если сводка ушла
+// вперёд этого запаса, берём его, а не отказываемся от дешёвой минуты.
 function clampClosedMinute(ts, now = Date.now()) {
   if (!Number.isFinite(ts) || ts <= 0) return null;
-  const limit = now - CLOSED_MINUTE_LAG_MS;
+  const limit = now - closedMinuteLagMinutes() * 60 * 1000;
   const closed = limit - (limit % 60000);
   const minute = Math.min(ts, closed);
   return minute > 0 ? minute : null;
@@ -184,7 +193,7 @@ async function lastClosedMinute() {
     SELECT max(minute) AS m
     FROM default.traffic_client_1m
     WHERE direction = 'in'
-      AND minute <= toStartOfMinute(now('UTC') - INTERVAL 4 MINUTE)
+      AND minute <= toStartOfMinute(now('UTC') - INTERVAL ${closedMinuteLagMinutes()} MINUTE)
   `, {}, { name: 'detection/last-closed-minute' });
   const ts = parseUtc(rows?.[0]?.m);
   return Number.isFinite(ts) && ts > 0 ? ts : null;
@@ -2128,6 +2137,7 @@ module.exports = {
   loadLatest,
   loadHistory,
   lastClosedMinute,
+  closedMinuteLagMinutes,
   clampClosedMinute,
   pendingMinutes,
   CATCHUP_MAX_MINUTES,

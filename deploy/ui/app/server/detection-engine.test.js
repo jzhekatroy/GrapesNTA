@@ -7,6 +7,7 @@ const {
   isBaselineCacheFresh,
   dedupeClientsByDisplayName,
   providerDisplayName,
+  closedMinuteLagMinutes,
   clampClosedMinute,
   pendingMinutes,
 } = require('./detection-engine');
@@ -38,15 +39,46 @@ describe('detection-engine catch-up', () => {
 
 describe('detection-engine closed minute', () => {
   const now = Date.parse('2026-09-28T13:23:40Z');
+  const saved = process.env.DETECTION_CLOSED_MINUTE_LAG_MINUTES;
+  const restore = () => {
+    if (saved === undefined) delete process.env.DETECTION_CLOSED_MINUTE_LAG_MINUTES;
+    else process.env.DETECTION_CLOSED_MINUTE_LAG_MINUTES = saved;
+  };
 
   it('оставляет минуту, которая уже старше запаса', () => {
-    const ts = Date.parse('2026-09-28T13:10:00Z');
-    assert.equal(clampClosedMinute(ts, now), ts);
+    delete process.env.DETECTION_CLOSED_MINUTE_LAG_MINUTES;
+    try {
+      const ts = Date.parse('2026-09-28T13:10:00Z');
+      assert.equal(clampClosedMinute(ts, now), ts);
+    } finally {
+      restore();
+    }
   });
 
-  it('обрезает минуту моложе четырёх минут до начала закрытой минуты', () => {
-    const ts = Date.parse('2026-09-28T13:23:00Z');
-    assert.equal(clampClosedMinute(ts, now), Date.parse('2026-09-28T13:19:00Z'));
+  it('по умолчанию обрезает минуту моложе четырёх минут', () => {
+    delete process.env.DETECTION_CLOSED_MINUTE_LAG_MINUTES;
+    try {
+      assert.equal(closedMinuteLagMinutes(), 4);
+      const ts = Date.parse('2026-09-28T13:23:00Z');
+      assert.equal(clampClosedMinute(ts, now), Date.parse('2026-09-28T13:19:00Z'));
+    } finally {
+      restore();
+    }
+  });
+
+  it('берёт запас из DETECTION_CLOSED_MINUTE_LAG_MINUTES', () => {
+    try {
+      process.env.DETECTION_CLOSED_MINUTE_LAG_MINUTES = '2';
+      assert.equal(closedMinuteLagMinutes(), 2);
+      const ts = Date.parse('2026-09-28T13:23:00Z');
+      assert.equal(clampClosedMinute(ts, now), Date.parse('2026-09-28T13:21:00Z'));
+      process.env.DETECTION_CLOSED_MINUTE_LAG_MINUTES = '0';
+      assert.equal(closedMinuteLagMinutes(), 4);
+      process.env.DETECTION_CLOSED_MINUTE_LAG_MINUTES = 'abc';
+      assert.equal(closedMinuteLagMinutes(), 4);
+    } finally {
+      restore();
+    }
   });
 
   it('пустую минуту не берёт', () => {
