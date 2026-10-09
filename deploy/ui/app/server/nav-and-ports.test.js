@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { getResourceForPath } = require('./rbac/api-map');
+const { getResourceForPath, isMutatingRequest } = require('./rbac/api-map');
 const { parseLookbackHours, DEFAULT_LOOKBACK_HOURS, MAX_LOOKBACK_HOURS } = require('./direction-audit');
 const {
   portDirectionSql,
@@ -64,6 +64,22 @@ test('api-map normalizes paths stripped by /api mount', () => {
   assert.equal(getResourceForPath('/dashboard/traffic-stats'), 'dashboard');
   assert.equal(getResourceForPath('/clients/foo/impersonate', 'POST'), 'clients');
   assert.equal(getResourceForPath('/users'), 'users');
+});
+
+test('api-map treats observation preview POST as read-only', () => {
+  assert.equal(isMutatingRequest('/api/observations/abc/preview', 'POST'), false);
+  assert.equal(isMutatingRequest('/observations/abc/preview', 'POST'), false);
+  assert.equal(isMutatingRequest('/api/observations', 'POST'), true);
+  assert.equal(isMutatingRequest('/api/observations/abc/run', 'POST'), true);
+});
+
+test('api-map treats explorer read POSTs as non-mutating', () => {
+  assert.equal(isMutatingRequest('/api/explorer/query', 'POST'), false);
+  assert.equal(isMutatingRequest('/explorer/query', 'POST'), false);
+  assert.equal(isMutatingRequest('/api/explorer/flows', 'POST'), false);
+  assert.equal(isMutatingRequest('/api/explorer/export', 'POST'), false);
+  assert.equal(isMutatingRequest('/api/explorer/saved-filters', 'POST'), true);
+  assert.equal(isMutatingRequest('/api/explorer/snapshots/x/share', 'POST'), true);
 });
 
 test('api-map maps direction diagnostics before generic diagnostics', () => {

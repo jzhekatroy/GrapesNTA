@@ -68,12 +68,25 @@ function isResourceGuardExempt(path) {
   return false;
 }
 
+/** POST handlers that only read data — require page access, not write. */
+const READ_ONLY_POST_PATHS = [
+  /^\/api\/users\/[^/]+\/password(-reset)?$/,
+  /^\/api\/observations\/[^/]+\/preview$/,
+  /^\/api\/explorer\/query$/,
+  /^\/api\/explorer\/flows$/,
+  /^\/api\/explorer\/export$/,
+];
+
+function isReadOnlyPost(path) {
+  const p = normalizeApiPath(path);
+  return READ_ONLY_POST_PATHS.some((re) => re.test(p));
+}
+
 function isMutatingRequest(path, method) {
   const m = String(method || 'GET').toUpperCase();
   if (m === 'GET' || m === 'HEAD' || m === 'OPTIONS') return false;
 
-  const p = normalizeApiPath(path);
-  if (m === 'POST' && /^\/api\/users\/[^/]+\/password(-reset)?$/.test(p)) return false;
+  if (m === 'POST' && isReadOnlyPost(path)) return false;
 
   return true;
 }
