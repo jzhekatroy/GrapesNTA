@@ -795,8 +795,9 @@ function shouldSendNormalize(historyNewestFirst, threshold, streak = DEFAULT_NOR
   const need = normalizeStreak(streak, DEFAULT_NORMALIZE_STREAK);
   const history = Array.isArray(historyNewestFirst) ? historyNewestFirst : [];
   const udpRowOf = typeof options.udpRowOf === 'function' ? options.udpRowOf : (row) => row?.udpRow;
+  const hourNormOf = typeof options.hourNormOf === 'function' ? options.hourNormOf : () => null;
   const hot = (row) => isAttackMinute(row, threshold, options.peakBps)
-    || (options.carpetOnly === true && isCarpetHolding(udpRowOf(row)));
+    || (options.carpetOnly === true && isCarpetHolding(udpRowOf(row), hourNormOf(row)));
   if (!history.length || hot(history[0])) return false;
   if (history.length < need) return false;
   if (!history.slice(0, need).every((row) => !hot(row))) return false;
@@ -2320,6 +2321,9 @@ function pickNormalizeCandidates(allRows, previousByKey, threshold, options = {}
           peakBps: Math.max(ownPeak, recentPeak || 0) || null,
           carpetOnly: active.verdict?.carpetOnly === true,
           udpRowOf: (item) => item?.udpRow || (item === row ? group.byProto?.udp : null),
+          hourNormOf: typeof options.hourBpsNorm === 'function'
+            ? (item) => options.hourBpsNorm(row.scope, row.scope_id, item.minute)
+            : null,
         });
       } else if (activeSignal === SIGNALS.syn_flood || activeSignal === SIGNALS.net_spike) {
         ready = shouldNormalizeQuiet(history, quiet, cfg.normalizeStreak);
@@ -4035,6 +4039,7 @@ async function processDetectionAlerts({ minute, rows, nameByKey, hourBpsNorm }) 
     thresholdByKey,
     streak: settings.normalizeStreak,
     recentPeakByKey,
+    hourBpsNorm,
   });
   const presentKeys = new Set(rows
     .filter((r) => String(r.proto) === 'all')

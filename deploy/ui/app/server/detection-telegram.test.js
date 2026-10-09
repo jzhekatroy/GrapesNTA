@@ -2091,9 +2091,12 @@ describe('UDP-ковёр открывает событие объёма', () => 
       minute: `2026-10-09 12:${String(30 - i).padStart(2, '0')}:00`, bps: 35e9, growth_bps: 0.9,
       udpRow: { proto: 'udp', bps: 7.63e9 * udpGrowth(i), growth_bps: udpGrowth(i), port_entropy: 7.5 },
     }));
-    const opts = { alertBps: 37.83e9, hourP95: 23.8e9, peakBps: 43.12e9, carpetOnly: true };
+    const opts = {
+      alertBps: 37.83e9, hourP95: 23.8e9, peakBps: 43.12e9, carpetOnly: true, hourNormOf: () => 35e9,
+    };
     const dip = history((i) => (i === 4 ? 1.4 : 0.7));
     assert.equal(shouldSendNormalize(dip, 1.6, 10, opts), false);
+    assert.equal(shouldSendNormalize(dip, 1.6, 10, { ...opts, hourNormOf: () => null }), true);
     assert.equal(shouldSendNormalize(history(() => 1.25), 1.6, 10, opts), true);
     const lowEntropy = history((i) => (i === 4 ? 1.4 : 0.7));
     lowEntropy[4].udpRow.port_entropy = 3;
@@ -2107,8 +2110,16 @@ describe('UDP-ковёр открывает событие объёма', () => 
     }));
     const current = { proto: 'udp', bps: 11e9, growth_bps: 1.45, port_entropy: 7.9 };
     const udpRowOf = (item) => item?.udpRow || (item === quiet[0] ? current : null);
-    assert.equal(shouldSendNormalize(quiet, 1.6, 10, { carpetOnly: true, udpRowOf }), false);
-    assert.equal(shouldSendNormalize(quiet, 1.6, 10, { carpetOnly: true }), true);
+    const hourNormOf = () => 35e9;
+    assert.equal(shouldSendNormalize(quiet, 1.6, 10, { carpetOnly: true, udpRowOf, hourNormOf }), false);
+    assert.equal(shouldSendNormalize(quiet, 1.6, 10, { carpetOnly: true, hourNormOf }), true);
+  });
+
+  it('при норме UDP около нуля удержанию нужен объём от 5% нормы часа', () => {
+    const udp = { bps: 30e6, growth_bps: 50, port_entropy: 7 };
+    assert.equal(isCarpetHolding(udp, 2e9), false);
+    assert.equal(isCarpetHolding(udp, 0.5e9), true);
+    assert.equal(isCarpetHolding(udp, null), false);
   });
 
   it('порог удержания ковра берётся из DETECTION_CARPET_HOLD_GROWTH', () => {
@@ -2118,12 +2129,13 @@ describe('UDP-ковёр открывает событие объёма', () => 
       assert.equal(carpetHoldGrowth(), 1.3);
       process.env.DETECTION_CARPET_HOLD_GROWTH = '1.2';
       assert.equal(carpetHoldGrowth(), 1.2);
-      assert.equal(isCarpetHolding({ growth_bps: 1.25, port_entropy: 7 }), true);
+      const udp = { bps: 10e9, growth_bps: 1.25, port_entropy: 7 };
+      assert.equal(isCarpetHolding(udp, 35e9), true);
       for (const bad of ['1', '0.9', '1.7', 'abc']) {
         process.env.DETECTION_CARPET_HOLD_GROWTH = bad;
         assert.equal(carpetHoldGrowth(), 1.3);
       }
-      assert.equal(isCarpetHolding({ growth_bps: 1.25, port_entropy: 7 }), false);
+      assert.equal(isCarpetHolding(udp, 35e9), false);
       assert.equal(isCarpetHolding(null), false);
     } finally {
       if (saved === undefined) delete process.env.DETECTION_CARPET_HOLD_GROWTH;

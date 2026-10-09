@@ -12,6 +12,7 @@ const {
   pendingMinutes,
   netBaselineSql,
   BASELINE_UDP_MEDIAN_CAP,
+  BASELINE_UDP_MEDIAN_MIN_BPS,
 } = require('./detection-engine');
 
 describe('detection-engine net baseline', () => {
@@ -21,7 +22,12 @@ describe('detection-engine net baseline', () => {
     assert.match(sql, /udp_hour_median AS \(/);
     assert.match(sql, /quantileExact\(0\.5\)\(bps\) AS med/);
     assert.match(sql, /LEFT JOIN udp_hour_median AS um ON um\.scope = a\.scope/);
-    assert.match(sql, /a\.proto != 'udp' OR \(NOT has\(cm\.minutes, a\.minute\) AND \(um\.med <= 0 OR a\.bps <= 1\.6 \* um\.med\)\)/);
+    assert.match(sql, /a\.proto != 'udp' OR \(NOT has\(cm\.minutes, a\.minute\) AND \(um\.med < 20000000 OR a\.bps <= 1\.6 \* um\.med\)\)/);
+  });
+
+  it('час с медианой UDP ниже 20 Мбит/с не чистится (ШПД, игры и VPN)', () => {
+    assert.equal(BASELINE_UDP_MEDIAN_MIN_BPS, 20e6);
+    assert.doesNotMatch(netBaselineSql(true, 14), /um\.med <= 0/);
   });
 
   it('запасной запрос без окон медиану не читает', () => {

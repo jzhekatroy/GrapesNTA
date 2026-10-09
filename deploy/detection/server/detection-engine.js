@@ -1422,6 +1422,10 @@ function outsideCarpetSql(minuteExpr) {
 // минут: в норму UDP не идут минуты выше BASELINE_UDP_MEDIAN_CAP × медианы.
 // На чистых днях p95 UDP выше медианы примерно в 1.3 раза.
 const BASELINE_UDP_MEDIAN_CAP = 1.6;
+// Час с медианой ниже 20 Мбит/с не чистим: у абонента с UDP «то есть, то нет»
+// (игры, VPN) медиана около нуля, и отсечка выкидывала весь обычный трафик.
+// На ШПД норма 304 клиентов падала ниже 10% (163 → 0 Мбит/с), у 44 росла.
+const BASELINE_UDP_MEDIAN_MIN_BPS = 20e6;
 
 const MSK_HOUR_SQL = (minuteExpr) => `toHour(toTimeZone(${minuteExpr}, 'Europe/Moscow'))`;
 const MSK_WEEKEND_SQL = (minuteExpr) => `toUInt8(toDayOfWeek(toTimeZone(${minuteExpr}, 'Europe/Moscow')) >= 6)`;
@@ -1448,7 +1452,7 @@ function udpHourMedianJoinSql() {
 }
 
 function belowUdpSurgeSql() {
-  return `(um.med <= 0 OR a.bps <= ${BASELINE_UDP_MEDIAN_CAP} * um.med)`;
+  return `(um.med < ${BASELINE_UDP_MEDIAN_MIN_BPS} OR a.bps <= ${BASELINE_UDP_MEDIAN_CAP} * um.med)`;
 }
 
 function outsideAttackWindowsSql(minuteExpr) {
@@ -2188,6 +2192,7 @@ module.exports = {
   loadBaselines,
   netBaselineSql,
   BASELINE_UDP_MEDIAN_CAP,
+  BASELINE_UDP_MEDIAN_MIN_BPS,
   loadHourSignalBaselines,
   HISTORY_METRICS,
   BASELINE_CACHE_MS,

@@ -438,7 +438,11 @@ function isCarpetHit(udpRow, hourUsualBps) {
 // а по порогу открытия событие закрывалось посреди атаки. Замер за 7 дней на
 // PiterIX: 67 событий → 60, атаки СКАЙНЭТ и ИСКРАТЕЛЕКОМ склеились, на ШПД
 // без изменений. При ×1.2 шум мелких клиентов тянул хвост на 14 минут.
+// Лишний UDP держит событие, только если он не меньше 5% нормы часа всего
+// трафика: при норме UDP около нуля ×1.3 выполняется всегда. При 10% вечерняя
+// атака на СКАЙНЭТ 06.10 рвалась на два события с часовой дырой.
 const CARPET_HOLD_GROWTH_DEFAULT = 1.3;
+const CARPET_HOLD_HOUR_SHARE = 0.05;
 
 function carpetHoldGrowth() {
   const raw = process.env.DETECTION_CARPET_HOLD_GROWTH;
@@ -448,11 +452,15 @@ function carpetHoldGrowth() {
   return ratio;
 }
 
-function isCarpetHolding(udpRow) {
+function isCarpetHolding(udpRow, hourUsualBps) {
   const growth = num(udpRow?.growth_bps ?? udpRow?.growthBps);
   const entropy = num(udpRow?.port_entropy ?? udpRow?.portEntropy);
-  return growth != null && growth >= carpetHoldGrowth()
-    && entropy != null && entropy >= CARPET_ENTROPY_MIN;
+  const bps = num(udpRow?.bps);
+  const usual = num(hourUsualBps);
+  if (growth == null || growth < carpetHoldGrowth()) return false;
+  if (entropy == null || entropy < CARPET_ENTROPY_MIN) return false;
+  if (!(bps > 0) || !(usual > 0)) return false;
+  return bps * (growth - 1) / growth >= CARPET_HOLD_HOUR_SHARE * usual;
 }
 
 function objectSignalKey(scope, scopeId, signal = SIGNALS.volume) {
@@ -513,6 +521,7 @@ module.exports = {
   CARPET_HOUR_SHARE,
   isCarpetHit,
   CARPET_HOLD_GROWTH_DEFAULT,
+  CARPET_HOLD_HOUR_SHARE,
   carpetHoldGrowth,
   isCarpetHolding,
   objectSignalKey,
