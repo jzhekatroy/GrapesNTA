@@ -25,7 +25,13 @@ const {
   PROTOS,
 } = require('./detection-schema');
 const { processDetectionAlerts, EVENTS_TABLE } = require('./detection-telegram');
-const { AMPLIFIER_PORTS, isNetSpikeHit, SYN_SUSTAINED_PPS } = require('./detection-signals');
+const {
+  AMPLIFIER_PORTS,
+  isNetSpikeHit,
+  SYN_SUSTAINED_PPS,
+  CARPET_UDP_GROWTH,
+  CARPET_ENTROPY_MIN,
+} = require('./detection-signals');
 const { loadForeignEnvelopes } = require('./detection-investigate');
 const {
   MINUTE,
@@ -1379,6 +1385,27 @@ function baselineAttackWindowsCte(days) {
   )`;
 }
 
+// Флуд без события сам становится нормой: у СКАЙНЭТ за 6–8.10 норма UDP
+// выросла 7.4 → 11.1 Гбит/с, норма полудня 19.7 → 31.7. Минуты, где UDP
+// ковром (рост от ×1.6 и энтропия от 6), в норму часа и норму UDP не идут.
+// У неатакованных объектов таких минут меньше 0.5%.
+function baselineCarpetMinutesCte(days) {
+  return `carpet_minutes AS (
+    SELECT scope, scope_id, groupArray(minute) AS minutes
+    FROM ${tableRef()}
+    WHERE proto = 'udp'
+      AND scope IN ('client', 'provider')
+      AND minute >= now('UTC') - INTERVAL ${Number(days) + 1} DAY
+      AND growth_bps >= ${CARPET_UDP_GROWTH}
+      AND port_entropy >= ${CARPET_ENTROPY_MIN}
+    GROUP BY scope, scope_id
+  )`;
+}
+
+function outsideCarpetSql(minuteExpr) {
+  return `NOT has(cm.minutes, ${minuteExpr})`;
+}
+
 function outsideAttackWindowsSql(minuteExpr) {
   return `NOT arrayExists(w -> ${minuteExpr} >= w.1 AND ${minuteExpr} <= w.2, aw.windows)`;
 }
@@ -1416,7 +1443,8 @@ function isHourSignalCacheFresh(now = Date.now()) {
 function hourBpsCond(windows) {
   const base = `a.proto = 'all' AND a.scope IN ('client', 'provider')`;
   if (!windows) return base;
-  return `${base} AND ${outsideAttackWindowsSql('a.minute')} AND ${outsidePeakTailSql('a.minute', 'a.growth_bps')}`;
+  return `${base} AND ${outsideAttackWindowsSql('a.minute')} AND ${outsidePeakTailSql('a.minute', 'a.growth_bps')}`
+    + ` AND ${outsideCarpetSql('a.minute')}`;
 }
 
 // Норма часа для отражения (UDP с портов усилителей), голого SYN и объёма:
@@ -1426,7 +1454,7 @@ async function loadHourSignalBaselines() {
   if (isHourSignalCacheFresh()) return hourSignalCache.map;
   const days = BASELINE_DAYS;
   const hourSql = (windows) => `
-    ${windows ? `WITH ${baselineAttackWindowsCte(days)}` : ''}
+    ${windows ? `WITH ${baselineAttackWindowsCte(days)}, ${baselineCarpetMinutesCte(days)}` : ''}
     SELECT
       a.scope AS scope,
       a.scope_id AS scope_id,
@@ -1441,6 +1469,7 @@ async function loadHourSignalBaselines() {
       quantileExactIf(0.95)(a.bps, ${hourBpsCond(windows)}) AS bps_p95
     FROM ${tableRef()} AS a
     ${windows ? 'LEFT JOIN attack_windows AS aw ON aw.scope = a.scope AND aw.scope_id = a.scope_id' : ''}
+    ${windows ? 'LEFT JOIN carpet_minutes AS cm ON cm.scope = a.scope AND cm.scope_id = a.scope_id' : ''}
     WHERE a.proto IN ('udp', 'all')
       AND a.minute >= now('UTC') - INTERVAL {days:UInt16} DAY
       AND a.minute < now('UTC') - INTERVAL 60 MINUTE
@@ -1510,7 +1539,7 @@ async function loadNetBaselines(beforeTs) {
   const days = BASELINE_DAYS;
   const map = new Map();
   const netSql = (windows) => `
-    ${windows ? `WITH ${baselineAttackWindowsCte(days)}` : ''}
+    ${windows ? `WITH ${baselineAttackWindowsCte(days)}, ${baselineCarpetMinutesCte(days)}` : ''}
     SELECT
       a.scope AS scope,
       a.scope_id AS scope_id,
@@ -1522,9 +1551,11 @@ async function loadNetBaselines(beforeTs) {
       quantileExact(0.95)(a.amp_bytes * 8 / 60) AS amp_bps_p95
     FROM ${tableRef()} AS a
     ${windows ? 'LEFT JOIN attack_windows AS aw ON aw.scope = a.scope AND aw.scope_id = a.scope_id' : ''}
+    ${windows ? 'LEFT JOIN carpet_minutes AS cm ON cm.scope = a.scope AND cm.scope_id = a.scope_id' : ''}
     WHERE a.minute >= now('UTC') - INTERVAL {days:UInt16} DAY
       AND a.minute < least(${utcDateTime('before')}, now('UTC') - INTERVAL ${BASELINE_LAG_HOURS} HOUR)
       ${windows ? `AND ${outsideAttackWindowsSql('a.minute')} AND ${outsidePeakTailSql('a.minute', 'a.growth_bps')}` : ''}
+      ${windows ? `AND (a.proto != 'udp' OR ${outsideCarpetSql('a.minute')})` : ''}
     GROUP BY a.scope, a.scope_id, a.proto
   `;
   const { rows: nets } = await queryBaseline(netSql(true), netSql(false), {

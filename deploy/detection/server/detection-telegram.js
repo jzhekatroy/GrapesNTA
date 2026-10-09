@@ -38,6 +38,7 @@ const {
   netSpikeMetrics,
   isNetSpikeHit,
   isNetSpikeStrong,
+  isCarpetHit,
 } = require('./detection-signals');
 
 const SETTINGS_TABLE = 'app_detection_telegram';
@@ -283,9 +284,16 @@ function minSharePctForSignal(settings = {}, signal = SIGNALS.volume) {
 
 // Доля паразитного среза от всего трафика клиента. null — замера нет, алерт
 // не глушим: лучше лишнее сообщение, чем пропущенная атака.
-function parasiticClientShare(signal, { byProto } = {}) {
+function parasiticClientShare(signal, { byProto, verdict } = {}) {
   const all = byProto?.all || {};
   const allBps = Number(all.bps) || 0;
+  // Ковёр поверх фона: весь трафик ×1.0–1.1, и доля роста объёма около нуля,
+  // а лишний UDP у СКАЙНЭТ — 40–60% минуты.
+  if (signal === SIGNALS.volume && verdict?.carpetOnly === true) {
+    const udp = byProto?.udp || {};
+    const { excessBps } = trafficAboveBaseline(udp.bps, udp.growth_bps ?? udp.growthBps);
+    if (excessBps > 0 && allBps > 0) return Math.min(1, excessBps / allBps);
+  }
   if (signal === SIGNALS.amplification) {
     const udp = ampRowFor({ proto: 'all', udpRow: byProto?.udp }, { byProto });
     const amp = ampMetrics(udp || {});
@@ -594,7 +602,7 @@ function isSignalHot(signal, row, group, threshold, settings = {}) {
     // внутренний трафик к ночи проседает быстрее. Поэтому географию считаем
     // только на растущем объёме. Амплификацию так гейтить нельзя: у 95558
     // 3.7 Гбит/с с портов усилителей шли при росте объёма ×0.59.
-    if (!isAboveGrowthThreshold(row, threshold)) return false;
+    if (!isAboveGrowthThreshold({ ...row, carpet_hot: false }, threshold)) return false;
     return evaluateForeignGeo(row).hit;
   }
   if (signal === SIGNALS.net_spike) {
@@ -645,7 +653,7 @@ function trafficAboveBaseline(bps, growth) {
 }
 
 function isAboveGrowthThreshold(row, threshold) {
-  if (row?.hour_hot === true) return true;
+  if (row?.hour_hot === true || row?.carpet_hot === true) return true;
   const gBps = finiteGrowth(row?.growth_bps ?? row?.growthBps);
   const gPps = finiteGrowth(row?.growth_pps ?? row?.growthPps);
   const t = Number(threshold) || DEFAULT_GROWTH_THRESHOLD;
@@ -792,6 +800,7 @@ function shouldSendNormalize(historyNewestFirst, threshold, streak = DEFAULT_NOR
   // Хвост ниже 10% пика — это уже не атака, даже если он выше собственной
   // отметки открытия и заниженной нормы часа. Иначе verolayn после 26.6 Гбит/с
   // зависает на 0.9 Гбит/с.
+  if (options.carpetOnly) return true;
   if (!belowAttackTail(history[0]?.bps, options.peakBps)
     && volumeStillHigh(history[0]?.bps, options.alertBps, options.hourP95)) return false;
   return true;
@@ -2065,6 +2074,57 @@ function markHourHot(rows, udpShare, norm) {
   }
 }
 
+// Строка 'all' горячая, если UDP той же минуты — ковёр. Открывает то же
+// событие объёма, что и рост всего трафика: второго алерта на атаку нет.
+function markCarpetHot(rows, norm, udpRowOf = (row) => row?.udpRow) {
+  if (typeof norm !== 'function') return;
+  for (const row of rows) {
+    const scope = String(row?.scope || '');
+    if (scope !== 'client' && scope !== 'provider') continue;
+    if (isCarpetHit(udpRowOf(row), norm(scope, row.scope_id, row.minute))) row.carpet_hot = true;
+  }
+}
+
+// Самая тяжёлая минута ковра в окне открытия. У текущей минуты строка UDP
+// лежит в группе тика, у прошлых — в udpRow.
+function heaviestCarpetUdp(historyNewestFirst, windowSize, currentUdp) {
+  let best = null;
+  rowsInWindow(historyNewestFirst, windowSize).forEach((row, i) => {
+    if (row?.carpet_hot !== true) return;
+    const udp = row.udpRow || (i === 0 ? currentUdp : null);
+    if (udp && (!best || Number(udp.bps) > Number(best.bps))) best = udp;
+  });
+  return best;
+}
+
+// Весь трафик в окне открытия ни разу не перешёл порог объёма: событие держит
+// только ковёр. У СКАЙНЭТ фон 30–40 Гбит/с выше минуты открытия, и проверка
+// «объём ещё высокий» не закрыла бы его после атаки.
+function openedByCarpetOnly(historyNewestFirst, windowSize, threshold) {
+  const rows = rowsInWindow(historyNewestFirst, windowSize);
+  return rows.some((row) => row?.carpet_hot === true)
+    && rows.every((row) => !isAboveGrowthThreshold({ ...row, carpet_hot: false }, threshold));
+}
+
+// Событие открыл UDP-ковёр, а весь трафик в пределах часа: классификатор
+// по объёму видит «обычный пик». Форма UDP важнее объёма.
+function carpetVerdict(verdict, udpRow) {
+  if (verdict?.kind !== KINDS.benign_peak) return verdict;
+  const growth = finiteGrowth(udpRow?.growth_bps ?? udpRow?.growthBps);
+  const entropy = Number(udpRow?.port_entropy ?? udpRow?.portEntropy);
+  const parts = ['UDP-ковёр'];
+  if (growth != null) parts.push(`UDP ×${growth.toFixed(1)} к норме`);
+  if (Number.isFinite(entropy)) parts.push(`энтропия портов ${entropy.toFixed(1)}`);
+  const rest = String(verdict.reason || '')
+    .replace(/^(нет явных признаков атаки|объём в пределах часа, форма смешанная|нет концентрации)\s*·?\s*/, '');
+  return {
+    ...verdict,
+    kind: KINDS.carpet,
+    reason: [parts.join(' · '), rest].filter(Boolean).join(' · '),
+    needsInvestigate: true,
+  };
+}
+
 // Три горячие минуты из шести — это 3–5 минут ожидания, а удар по ШПД виден
 // с первой. Замер за 7 дней до 05.10: на ШПД 12 атак и 6 прочих эпизодов
 // (среди них непомеченная атака aykonet 04.10), на PiterIX 7 атак и 4 эпизода
@@ -2246,6 +2306,7 @@ function pickNormalizeCandidates(allRows, previousByKey, threshold, options = {}
           alertBps: active.alertByProto?.all?.bps ?? active.alertBps,
           hourP95: active.verdict?.hourP95,
           peakBps: Math.max(ownPeak, recentPeak || 0) || null,
+          carpetOnly: active.verdict?.carpetOnly === true,
         });
       } else if (activeSignal === SIGNALS.syn_flood || activeSignal === SIGNALS.net_spike) {
         ready = shouldNormalizeQuiet(history, quiet, cfg.normalizeStreak);
@@ -2829,7 +2890,7 @@ async function loadPreviousAllRows(minute, keys, limit = DEFAULT_STREAK) {
            amp_bytes, amp_packets, amp_srcs, amp_top_share, growth_amp,
            foreign_bytes, foreign_srcs, top_countries, growth_foreign_bps, growth_foreign_share,
            syn_only_bytes, syn_only_packets, syn_only_rows, syn_only_targets, answer_pct, growth_syn, sampling_rate,
-           net_top, net_bps, net_pps, net_usual_bps, net_growth_bps, net_growth_pps
+           net_top, net_bps, net_pps, net_usual_bps, net_growth_bps, net_growth_pps, port_entropy
     FROM (
       SELECT
         scope,
@@ -2863,6 +2924,7 @@ async function loadPreviousAllRows(minute, keys, limit = DEFAULT_STREAK) {
         net_usual_bps,
         net_growth_bps,
         net_growth_pps,
+        port_entropy,
         row_number() OVER (PARTITION BY scope, scope_id, proto ORDER BY minute DESC) AS rn
       FROM ${tableRef()} FINAL
       WHERE proto IN ('all', 'udp')
@@ -3405,23 +3467,31 @@ async function attachLiveState(events) {
     const scopeFilter = previousRowsScopeFilter(events.map((e) => ({ scope: e.scope, scopeId: e.scopeId })));
     if (scopeFilter.sql === '0') return;
     const { rows } = await query(`
-      SELECT scope, scope_id, toString(minute) AS m, bps, growth_bps, growth_pps
+      SELECT scope, scope_id, proto, toString(minute) AS m, bps, growth_bps, growth_pps, port_entropy
       FROM ${tableRef()}
-      WHERE proto = 'all'
+      WHERE proto IN ('all', 'udp')
         AND minute >= ${utcDateTime('from')}
         AND ${scopeFilter.sql}
       ORDER BY minute
     `, { from: formatCh(fromTs), ...scopeFilter.params }, { name: 'detection/events-live' });
     const byKey = new Map();
+    const udpByMinute = new Map();
     for (const r of rows) {
       const key = objectKey(r.scope, r.scope_id);
+      if (String(r.proto) === 'udp') {
+        udpByMinute.set(`${key}|${r.m}`, r);
+        continue;
+      }
       const list = byKey.get(key) || [];
-      list.push({ minute: r.m, bps: r.bps, growth_bps: r.growth_bps, growth_pps: r.growth_pps });
+      list.push({ scope: r.scope, scope_id: r.scope_id, minute: r.m, bps: r.bps, growth_bps: r.growth_bps, growth_pps: r.growth_pps });
       byKey.set(key, list);
     }
     const settings = await getDetectionTelegramSettings();
     for (const event of events) {
-      event.live = liveEventState(byKey.get(objectKey(event.scope, event.scopeId)), {
+      const key = objectKey(event.scope, event.scopeId);
+      const hourUsual = Number(event.verdict?.hourP95) || null;
+      markCarpetHot(byKey.get(key) || [], () => hourUsual, (row) => udpByMinute.get(`${key}|${row.minute}`));
+      event.live = liveEventState(byKey.get(key), {
         alertMinute: event.alertMinute,
         threshold: event.threshold,
         signal: event.signal,
@@ -3867,6 +3937,7 @@ async function processDetectionAlerts({ minute, rows, nameByKey, hourBpsNorm }) 
     const share = udpShareOf(grouped.get(key), row);
     udpShareByKey.set(key, share);
     markHourHot([row], share, hourBpsNorm);
+    markCarpetHot([row], hourBpsNorm, () => grouped.get(key)?.byProto?.udp);
   }
   const activeByKey = await loadActiveEventsByKey();
   const thresholdByKey = await loadThresholdMap();
@@ -3902,7 +3973,10 @@ async function processDetectionAlerts({ minute, rows, nameByKey, hourBpsNorm }) 
     NET_NORMALIZE_STREAK,
   );
   const previousByKey = await loadPreviousAllRows(minute, watchKeys, take);
-  for (const [key, list] of previousByKey) markHourHot(list, udpShareByKey.get(key), hourBpsNorm);
+  for (const [key, list] of previousByKey) {
+    markHourHot(list, udpShareByKey.get(key), hourBpsNorm);
+    markCarpetHot(list, hourBpsNorm);
+  }
   let peaksByKey = new Map();
   try {
     peaksByKey = await loadLatestOpenPeaks();
@@ -4064,6 +4138,15 @@ async function processDetectionAlerts({ minute, rows, nameByKey, hourBpsNorm }) 
       }
     }
     if (netFocus) verdict = withClientVolume(verdict, clientVerdict);
+    if (!netFocus && signals.includes(SIGNALS.volume)) {
+      const history = [row, ...(previousByKey.get(objectId) || [])];
+      const win = candidates[0].window || volumeCfg.window;
+      const carpetUdp = heaviestCarpetUdp(history, win, group?.byProto?.udp);
+      if (carpetUdp) {
+        verdict = carpetVerdict(verdict, carpetUdp);
+        if (openedByCarpetOnly(history, win, objectThreshold)) verdict = { ...verdict, carpetOnly: true };
+      }
+    }
     const attack = isAlertAttack(verdict, signals);
     let repeat = null;
     if (attack) {
@@ -4421,6 +4504,10 @@ module.exports = {
   isAboveGrowthThreshold,
   shouldSendAlert,
   markHourHot,
+  markCarpetHot,
+  carpetVerdict,
+  heaviestCarpetUdp,
+  openedByCarpetOnly,
   HOUR_GATE_RATIO,
   parentProviderOf,
   parseCidr,

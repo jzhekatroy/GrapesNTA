@@ -53,6 +53,10 @@ const {
   previousRowsScopeFilter,
   liveEventState,
   markHourHot,
+  markCarpetHot,
+  carpetVerdict,
+  heaviestCarpetUdp,
+  openedByCarpetOnly,
   HOUR_GATE_RATIO,
   parentProviderOf,
   parseCidr,
@@ -1957,6 +1961,105 @@ describe('порог по норме часа', () => {
     markHourHot(history, 0.89, () => 13e9);
     assert.equal(history.some((r) => r.hour_hot), false);
     assert.equal(HOUR_GATE_RATIO, 3);
+  });
+});
+
+describe('UDP-ковёр открывает событие объёма', () => {
+  // СКАЙНЭТ 07.10 11:02–11:06 МСК: весь трафик ×0.4–1.0 к потолку, UDP ×0.9–3.5
+  // к своей норме, энтропия портов 7–7.8. Норма 11 часа без минут ковра 23.8 Гбит/с.
+  const udp = (minute, bps, growth, entropy) => ({
+    scope: 'client', scope_id: '71761', proto: 'udp', minute, bps, growth_bps: growth, port_entropy: entropy,
+  });
+  const skynet = () => [
+    ['2026-10-07 08:06:00', 37.83e9, 0.87, udp('2026-10-07 08:06:00', 23.84e9, 3.06, 7.12)],
+    ['2026-10-07 08:05:00', 43.12e9, 1.0, udp('2026-10-07 08:05:00', 27.36e9, 3.51, 7.08)],
+    ['2026-10-07 08:04:00', 37.96e9, 0.88, udp('2026-10-07 08:04:00', 23.43e9, 3.01, 7.01)],
+    ['2026-10-07 08:03:00', 24.0e9, 0.55, udp('2026-10-07 08:03:00', 13.23e9, 1.7, 7.25)],
+    ['2026-10-07 08:02:00', 16.5e9, 0.38, udp('2026-10-07 08:02:00', 7.0e9, 0.9, 7.78)],
+  ].map(([minute, bps, growth, udpRow]) => ({
+    scope: 'client', scope_id: '71761', proto: 'all', minute, bps, growth_bps: growth, udpRow,
+  }));
+  const norm = () => 23.8e9;
+
+  it('без ковра серия СКАЙНЭТ не набирается', () => {
+    assert.equal(shouldSendAlert(skynet(), 1.6, 3, null, 10), false);
+  });
+
+  it('три минуты ковра из десяти открывают серию', () => {
+    const history = skynet();
+    markCarpetHot(history, norm);
+    assert.deepEqual(history.map((r) => r.carpet_hot === true), [true, true, true, false, false]);
+    assert.equal(shouldSendAlert(history, 1.6, 3, null, 10), true);
+  });
+
+  it('WireGuard ВапТак ×32 к норме UDP, но в один порт — не ковёр', () => {
+    const rows = [{
+      scope: 'client', scope_id: '71815', minute: '2026-10-05 06:01:00', bps: 0.7e9, growth_bps: 1.1,
+      udpRow: { bps: 0.628e9, growth_bps: 32, port_entropy: 0 },
+    }];
+    markCarpetHot(rows, () => 0.3e9);
+    assert.equal(rows[0].carpet_hot, undefined);
+  });
+
+  it('без нормы часа, у сети /24 и при малом лишнем UDP минута не горит', () => {
+    const noNorm = skynet();
+    markCarpetHot(noNorm, () => null);
+    assert.equal(noNorm.some((r) => r.carpet_hot), false);
+    const net = skynet().map((r) => ({ ...r, scope: 'net' }));
+    markCarpetHot(net, norm);
+    assert.equal(net.some((r) => r.carpet_hot), false);
+    const big = skynet();
+    markCarpetHot(big, () => 80e9);
+    assert.equal(big.some((r) => r.carpet_hot), false);
+  });
+
+  it('ковёр держит событие открытым, пока весь трафик ниже порога', () => {
+    const history = skynet();
+    markCarpetHot(history, norm);
+    assert.equal(isAttackMinute(history[0], 1.6, 43.12e9), true);
+    assert.equal(isAboveGrowthThreshold(history[3], 1.6), false);
+  });
+
+  it('событие, открытое ковром, не подписывается обычным пиком', () => {
+    const history = skynet();
+    markCarpetHot(history, norm);
+    const best = heaviestCarpetUdp(history, 10, null);
+    assert.equal(best.bps, 27.36e9);
+    const verdict = carpetVerdict({ kind: 'benign_peak', reason: 'объём в пределах часа, форма смешанная · UDP 63%' }, best);
+    assert.equal(verdict.kind, 'carpet');
+    assert.match(verdict.reason, /^UDP-ковёр · UDP ×3\.5 к норме · энтропия портов 7\.1 · UDP 63%$/);
+    const amp = { kind: 'amplification', reason: 'амплификация' };
+    assert.equal(carpetVerdict(amp, best), amp);
+  });
+
+  it('открытие только ковром отличается от открытия ростом объёма', () => {
+    const history = skynet();
+    markCarpetHot(history, norm);
+    assert.equal(openedByCarpetOnly(history, 10, 1.6), true);
+    const volume = skynet();
+    volume[1].growth_bps = 1.7;
+    markCarpetHot(volume, norm);
+    assert.equal(openedByCarpetOnly(volume, 10, 1.6), false);
+  });
+
+  it('после ковра событие закрывается, хотя фон СКАЙНЭТ выше минуты открытия', () => {
+    const quiet = Array.from({ length: 10 }, (_, i) => ({
+      scope: 'client', scope_id: '71761', proto: 'all',
+      minute: `2026-10-07 08:${String(30 - i).padStart(2, '0')}:00`, bps: 35e9, growth_bps: 0.9,
+    }));
+    const opts = { alertBps: 37.83e9, hourP95: 23.8e9, peakBps: 43.12e9 };
+    assert.equal(shouldSendNormalize(quiet, 1.6, 10, opts), false);
+    assert.equal(shouldSendNormalize(quiet, 1.6, 10, { ...opts, carpetOnly: true }), true);
+  });
+
+  it('алерт ковра не режется долей роста всего трафика', () => {
+    const byProto = {
+      all: { bps: 43.12e9, growth_bps: 1.05 },
+      udp: { bps: 27.36e9, growth_bps: 3.51 },
+    };
+    const settings = { volumeMinSharePct: 10 };
+    assert.equal(shouldSkipTelegramForShare(['volume'], { byProto, verdict: {} }, settings), true);
+    assert.equal(shouldSkipTelegramForShare(['volume'], { byProto, verdict: { carpetOnly: true } }, settings), false);
   });
 });
 

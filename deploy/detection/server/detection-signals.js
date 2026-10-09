@@ -412,6 +412,27 @@ function isNetSpikeStrong(row = {}, options = {}) {
   return isNetSpikeHit(row, options) && netSpikeMetrics(row).growth >= strong;
 }
 
+// UDP-ковёр поверх большого фона: весь трафик не дотягивает до ×1.6, а UDP
+// растёт к своей норме и размазан по портам. СКАЙНЭТ 6–8.10: UDP ×2–5.4
+// до 42 Гбит/с при всём трафике ×0.8–1.5. Замер за 7 дней: PiterIX 16 эпизодов
+// у 4 клиентов, ШПД 6 у ПИН и двух клиентов. VPN-туннели (WireGuard, L2TP)
+// и удар в один порт держат энтропию 0–3. Лишний UDP меряется к норме часа
+// всего трафика: у мелких абонентов рост UDP ×1.6 — это сотни Мбит/с шума.
+const CARPET_UDP_GROWTH = 1.6;
+const CARPET_ENTROPY_MIN = 6;
+const CARPET_HOUR_SHARE = 0.25;
+
+function isCarpetHit(udpRow, hourUsualBps) {
+  const growth = num(udpRow?.growth_bps ?? udpRow?.growthBps);
+  const entropy = num(udpRow?.port_entropy ?? udpRow?.portEntropy);
+  const bps = num(udpRow?.bps);
+  const usual = num(hourUsualBps);
+  if (growth == null || growth < CARPET_UDP_GROWTH) return false;
+  if (entropy == null || entropy < CARPET_ENTROPY_MIN) return false;
+  if (!(bps > 0) || !(usual > 0)) return false;
+  return bps * (growth - 1) / growth >= CARPET_HOUR_SHARE * usual;
+}
+
 function objectSignalKey(scope, scopeId, signal = SIGNALS.volume) {
   return `${scope}|${scopeId}|${signal || SIGNALS.volume}`;
 }
@@ -465,5 +486,9 @@ module.exports = {
   netSpikeMetrics,
   isNetSpikeHit,
   isNetSpikeStrong,
+  CARPET_UDP_GROWTH,
+  CARPET_ENTROPY_MIN,
+  CARPET_HOUR_SHARE,
+  isCarpetHit,
   objectSignalKey,
 };
