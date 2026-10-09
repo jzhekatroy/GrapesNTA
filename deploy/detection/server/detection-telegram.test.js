@@ -51,6 +51,7 @@ const {
   PREV_ROWS_GAP_MINUTES,
   previousRowsLookbackMinutes,
   previousRowsScopeFilter,
+  recentAttackPeaksSql,
   liveEventState,
   markHourHot,
   markCarpetHot,
@@ -1607,6 +1608,13 @@ describe('detection-telegram', () => {
     assert.deepEqual(mixed.params.ids_0, ['100']);
     assert.equal(mixed.params.scope_1, 'net');
     assert.deepEqual(mixed.params.ids_1, ['10.0.0.0/24']);
+  });
+
+  it('пики недавних атак фильтруют объект по колонкам, а не по argMax', () => {
+    const sql = recentAttackPeaksSql(previousRowsScopeFilter([{ scope: 'client', scopeId: '116691' }]).sql);
+    assert.doesNotMatch(sql, /AS scope\b|AS scope_id\b/);
+    assert.match(sql, /GROUP BY event_id, scope, scope_id/);
+    assert.match(sql, /scope = \{scope_0:String\}/);
   });
 
   it('серия судится по минуте с самым большим ростом, не по последней', () => {

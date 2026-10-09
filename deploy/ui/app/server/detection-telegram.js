@@ -3168,6 +3168,31 @@ async function loadLatestOpenPeaks() {
 // verolayn 05.10: ковёр 26.6 Гбит/с закрылся, и 0.9 Гбит/с тут же стали новым событием.
 const TAIL_ATTACK_LOOKBACK_MS = 6 * 60 * 60 * 1000;
 
+// Фильтр объектов читает scope и scope_id: под псевдонимом argMax(scope) AS scope
+// ClickHouse 24.8 на новом PiterIX отвергает запрос, и хвост не охранялся.
+function recentAttackPeaksSql(scopeFilterSql) {
+  return `
+    SELECT scope, scope_id, alert_json
+    FROM (
+      SELECT
+        event_id,
+        scope,
+        scope_id,
+        argMax(status, updated_at) AS status,
+        argMax(signal, updated_at) AS signal,
+        argMax(normalize_minute, updated_at) AS norm_minute,
+        argMax(alert_json, updated_at) AS alert_json
+      FROM ${eventsTableRef()}
+      WHERE alert_minute >= ${utcDateTime('from')}
+        AND ${scopeFilterSql}
+      GROUP BY event_id, scope, scope_id
+    )
+    WHERE status = 'normalized'
+      AND (signal = '' OR signal = '${SIGNALS.volume}')
+      AND norm_minute >= ${utcDateTime('from')}
+  `;
+}
+
 async function loadRecentAttackPeaks(minute, keys) {
   const map = new Map();
   if (!keys?.length) return map;
@@ -3176,26 +3201,8 @@ async function loadRecentAttackPeaks(minute, keys) {
   const scopeFilter = previousRowsScopeFilter(keys);
   if (scopeFilter.sql === '0') return map;
   const from = formatCh(minuteTs - TAIL_ATTACK_LOOKBACK_MS);
-  const { rows } = await query(`
-    SELECT scope, scope_id, alert_json
-    FROM (
-      SELECT
-        event_id,
-        argMax(scope, updated_at) AS scope,
-        argMax(scope_id, updated_at) AS scope_id,
-        argMax(status, updated_at) AS status,
-        argMax(signal, updated_at) AS signal,
-        argMax(normalize_minute, updated_at) AS norm_minute,
-        argMax(alert_json, updated_at) AS alert_json
-      FROM ${eventsTableRef()}
-      WHERE alert_minute >= ${utcDateTime('from')}
-        AND ${scopeFilter.sql}
-      GROUP BY event_id
-    )
-    WHERE status = 'normalized'
-      AND (signal = '' OR signal = '${SIGNALS.volume}')
-      AND norm_minute >= ${utcDateTime('from')}
-  `, { from, ...scopeFilter.params }, { name: 'detection/events-recent-peaks' });
+  const { rows } = await query(recentAttackPeaksSql(scopeFilter.sql),
+    { from, ...scopeFilter.params }, { name: 'detection/events-recent-peaks' });
   for (const row of rows) {
     let snapshot = {};
     try {
@@ -4480,6 +4487,7 @@ module.exports = {
   previousRowsLookbackMinutes,
   liveEventState,
   previousRowsScopeFilter,
+  recentAttackPeaksSql,
   DEFAULT_TELEGRAM_API_URL,
   DEFAULT_MIN_CLIENT_SHARE_PCT,
   TELEGRAM_SKIP_BELOW_SHARE,
