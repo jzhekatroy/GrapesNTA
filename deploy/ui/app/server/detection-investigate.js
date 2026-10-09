@@ -389,7 +389,7 @@ function timeFilterSql() {
   `;
 }
 
-function evCte(scope, clientId, parentScope) {
+function evCte(scope, clientId, parentScope, proto) {
   const srcIp = flowIpExpr(`f.${col('srcIp')}`);
   const dstIp = flowIpExpr(`f.${col('dstIp')}`);
   const protoCol = `f.${col('proto')}`;
@@ -425,7 +425,7 @@ function evCte(scope, clientId, parentScope) {
       f.dst_client AS dst_client
     FROM ${flowsRawTableRef()} AS f
     PREWHERE ${pred}
-    WHERE ${timeFilterSql()} AND ${pred}
+    WHERE ${timeFilterSql()} AND ${pred}${proto ? ` AND ${protoCol} = {proto:UInt8}` : ''}
   `;
 }
 
@@ -511,7 +511,9 @@ function mapSwitch(row, total) {
  * One PREWHERE on dst_client, and for a /24 also on that address range.
  * Aggregations run on the already-narrow slice — not a full-minute scan.
  */
-async function investigateIncident({ scope, scopeId, minute, clientId, parentScope } = {}) {
+// proto сужает разбор до одного протокола: у ковра поверх обычного TCP иначе
+// в источники попадает легитимная закачка (СКАЙНЭТ 09.10: CDNvideo вместо ботнета).
+async function investigateIncident({ scope, scopeId, minute, clientId, parentScope, proto } = {}) {
   const minuteTs = parseUtc(minute);
   if (!Number.isFinite(minuteTs)) return emptyInvestigate();
   const bounds = minuteBounds(minuteTs);
@@ -523,8 +525,10 @@ async function investigateIncident({ scope, scopeId, minute, clientId, parentSco
     ...bounds,
   };
   if (ownerId) params.clientId = ownerId;
+  const protoNum = Number(proto) || 0;
+  if (protoNum) params.proto = protoNum;
   const opts = { name: 'detection/investigate', clickhouse_settings: CHEAP, requestTimeoutMs: 35000 };
-  const ev = evCte(scopeName, ownerId, parentScope);
+  const ev = evCte(scopeName, ownerId, parentScope, protoNum);
   const ifaces = netInterfacesCurrentRef();
 
   // groupArray lives inside each CTE, not around it: 24.8 inlines WITH

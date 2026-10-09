@@ -437,6 +437,30 @@ describe('detection-telegram', () => {
     assert.match(text, /Сети: 91\.151\.176\.0\/20/);
   });
 
+  it('ковёр поверх TCP-фона подписан UDP и меряется по UDP', () => {
+    // СКАЙНЭТ 09.10 13:19 МСК: TCP 54% — обычный фон, атака — UDP ×1.7.
+    const text = formatAlertMessage({
+      name: 'ООО "СКАЙНЭТ"',
+      scope: 'client',
+      scopeId: '71761',
+      minute: '2026-10-09 10:19:00',
+      byProto: {
+        all: { bps: 28.8e9, growth_bps: 0.64 },
+        tcp: { bps: 15.5e9 },
+        udp: { bps: 13.3e9, growth_bps: 1.68 },
+      },
+      verdict: { kind: 'carpet', carpetOnly: true, hourRatio: 0.88, hourCeiling: 32.7e9 },
+      investigate: {
+        victim: { ip: '88.201.175.1', port: 443, protoLabel: 'TCP', share: 0.01 },
+        sources: { dstIpCount: 1542, dstNetCount: 552 },
+      },
+      signals: ['volume'],
+    });
+    assert.match(text, /^🔴 <b>UDP-флуд по сети<\/b>/);
+    assert.match(text, /<b>В 1,7 раза больше обычного по UDP:<\/b> 13\.3 Гбит\/с, обычно ~7\.92 Гбит\/с/);
+    assert.doesNotMatch(text, /ниже обычного/);
+  });
+
   it('pickAlertCandidates только proto all и выбранный scope', () => {
     const rows = [
       { scope: 'net', scope_id: '10.0.0.0/24', proto: 'all', growth_bps: 2, growth_pps: 0.1 },

@@ -1446,7 +1446,7 @@ function alertTitle(mode, { byProto, investigate, verdict }) {
   if (mode === 'syn') return 'SYN-флуд';
   if (mode === 'net') return withProtoPrefix(netProtoLabel(netSpikeMetrics(all)), 'флуд в сеть /24');
   if (mode === 'volumetric') return withProtoPrefix(proto, 'флуд в один сервер');
-  if (mode === 'carpet') return withProtoPrefix(proto, 'флуд по сети');
+  if (mode === 'carpet') return withProtoPrefix(verdict?.carpetOnly ? 'UDP' : proto, 'флуд по сети');
   if (mode === 'geo') return 'Всплеск трафика из-за рубежа';
   if (mode === 'peak') return 'Пик трафика, не атака';
   return 'Рост трафика выше порога';
@@ -1554,6 +1554,15 @@ function formatSizeLine(mode, { byProto, verdict, syn }) {
       }
       return `Из-за рубежа: <b>${escapeHtml(now)}</b>`;
     }
+  }
+  // Ковёр поверх фона: весь трафик «ниже обычного», а атака видна только в UDP.
+  if (verdict?.carpetOnly && (mode === 'carpet' || mode === 'volumetric')) {
+    const udpBps = Number(udp.bps) || 0;
+    const growth = finiteGrowth(udp.growth_bps ?? udp.growthBps);
+    if (udpBps > 0 && growth != null && growth >= VOLUME_RATIO_SHOWN) {
+      return `${biggerThanUsual(growth, ' по UDP')} ${escapeHtml(formatBpsMsg(udpBps))}, обычно ~${escapeHtml(formatBpsMsg(udpBps / growth))}`;
+    }
+    if (udpBps > 0) return `UDP: <b>${escapeHtml(formatBpsMsg(udpBps))}</b>`;
   }
   return formatVolumeSize(all, verdict);
 }
@@ -3713,7 +3722,9 @@ async function followOpenAttacks({
       let investigate = event.investigate || null;
       if (settings.vectorNotify) {
         try {
-          investigate = await investigateIncident({ scope: event.scope, scopeId: event.scopeId, minute });
+          investigate = await investigateIncident({
+            scope: event.scope, scopeId: event.scopeId, minute, proto: event.verdict?.carpetOnly ? 17 : 0,
+          });
           investigate = await attachTargetFocus(investigate, { scope: event.scope, scopeId: event.scopeId, minute });
         } catch (err) {
           errors.push({ key, message: `track-prime: ${err.message}` });
@@ -3750,7 +3761,9 @@ async function followOpenAttacks({
     );
     if (wantInvestigate) {
       try {
-        investigated = await investigateIncident({ scope: event.scope, scopeId: event.scopeId, minute });
+        investigated = await investigateIncident({
+          scope: event.scope, scopeId: event.scopeId, minute, proto: event.verdict?.carpetOnly ? 17 : 0,
+        });
         investigated = await attachTargetFocus(investigated, { scope: event.scope, scopeId: event.scopeId, minute });
         const nextVector = vectorSnapshot({ byProto: group.byProto, investigate: investigated, verdict: event.verdict });
         if (vectorChanged(track.vector, nextVector)) {
@@ -4116,11 +4129,19 @@ async function processDetectionAlerts({ minute, rows, nameByKey, hourBpsNorm }) 
     const target = netFocus
       ? { scope: 'net', scopeId: net.net, clientId: String(row.scope_id), parentScope: row.scope }
       : { scope: row.scope, scopeId: row.scope_id };
-    if (verdict.needsInvestigate || verdict.kind === KINDS.benign_peak || netFocus
+    let carpetUdp = null;
+    let carpetOnly = false;
+    if (!netFocus && signals.includes(SIGNALS.volume)) {
+      const history = [row, ...(previousByKey.get(objectId) || [])];
+      const win = candidates[0].window || volumeCfg.window;
+      carpetUdp = heaviestCarpetUdp(history, win, group?.byProto?.udp);
+      carpetOnly = Boolean(carpetUdp) && openedByCarpetOnly(history, win, objectThreshold);
+    }
+    if (verdict.needsInvestigate || verdict.kind === KINDS.benign_peak || netFocus || carpetOnly
       || signals.includes(SIGNALS.amplification)
       || signals.includes(SIGNALS.syn_flood) || signals.includes(SIGNALS.foreign_geo)) {
       try {
-        investigate = await investigateIncident({ ...target, minute: focusMinute });
+        investigate = await investigateIncident({ ...target, minute: focusMinute, proto: carpetOnly ? 17 : 0 });
         investigate = await attachTargetFocus(investigate, { ...target, minute: focusMinute });
         if (verdict.kind === KINDS.benign_peak && (target.scope === 'provider' || target.scope === 'client')) {
           try {
@@ -4145,15 +4166,8 @@ async function processDetectionAlerts({ minute, rows, nameByKey, hourBpsNorm }) 
       }
     }
     if (netFocus) verdict = withClientVolume(verdict, clientVerdict);
-    if (!netFocus && signals.includes(SIGNALS.volume)) {
-      const history = [row, ...(previousByKey.get(objectId) || [])];
-      const win = candidates[0].window || volumeCfg.window;
-      const carpetUdp = heaviestCarpetUdp(history, win, group?.byProto?.udp);
-      if (carpetUdp) {
-        verdict = carpetVerdict(verdict, carpetUdp);
-        if (openedByCarpetOnly(history, win, objectThreshold)) verdict = { ...verdict, carpetOnly: true };
-      }
-    }
+    if (carpetUdp) verdict = carpetVerdict(verdict, carpetUdp);
+    if (carpetOnly) verdict = { ...verdict, carpetOnly: true };
     const attack = isAlertAttack(verdict, signals);
     let repeat = null;
     if (attack) {
@@ -4402,9 +4416,12 @@ async function rebuildDetectionEventAlert({ scope, scopeId, minute, sendTelegram
     syn: synOptions(settings),
   };
   let verdict = classifyFromMetrics(byProto, hour);
-  if (verdict.needsInvestigate || verdict.kind === KINDS.benign_peak) {
+  const carpetOnly = snapshot.verdict?.carpetOnly === true;
+  if (verdict.needsInvestigate || verdict.kind === KINDS.benign_peak || carpetOnly) {
     try {
-      investigate = await investigateIncident({ scope: row.scope, scopeId: row.scope_id, minute: minuteForFacts });
+      investigate = await investigateIncident({
+        scope: row.scope, scopeId: row.scope_id, minute: minuteForFacts, proto: carpetOnly ? 17 : 0,
+      });
       investigate = await attachTargetFocus(investigate, {
         scope: row.scope,
         scopeId: row.scope_id,
@@ -4431,6 +4448,7 @@ async function rebuildDetectionEventAlert({ scope, scopeId, minute, sendTelegram
       investigate = { ...emptyInvestigate(), error: err.message };
     }
   }
+  if (carpetOnly) verdict = { ...carpetVerdict(verdict, byProto.udp), carpetOnly: true };
   const text = formatAlertMessage({
     name: row.name || row.scope_id,
     scope: row.scope,
