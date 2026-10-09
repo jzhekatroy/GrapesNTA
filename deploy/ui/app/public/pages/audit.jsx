@@ -12,6 +12,7 @@ const KIND_OPTIONS = [
   { id: 'login_fail', label: 'Отказ входа' },
   { id: 'logout', label: 'Выход' },
   { id: 'page', label: 'Страница' },
+  { id: 'query', label: 'Запрос' },
   { id: 'write', label: 'Изменение' },
 ];
 
@@ -20,6 +21,8 @@ const AUDIT_PAGE_SIZE = 25;
 const RESULT_OPTIONS = [
   { id: 'all', label: 'Все результаты' },
   { id: 'ok', label: 'ok' },
+  { id: 'timeout', label: 'timeout' },
+  { id: 'oom', label: 'oom' },
   { id: 'fail', label: 'fail' },
   { id: 'denied', label: 'denied' },
 ];
@@ -37,6 +40,7 @@ const ACTION_LABELS = {
   impersonate_start: 'Вход в кабинет',
   impersonate_end: 'Выход из кабинета',
   page_view: 'Страница',
+  explorer_query: 'Запрос',
   api_write: 'Изменение',
 };
 
@@ -141,8 +145,20 @@ function auditBodyFallbackSummary(body) {
   return parts.join('; ');
 }
 
+function auditExplorerDetail(parsed) {
+  return parsed?.explorer && typeof parsed.explorer === 'object' ? parsed.explorer : null;
+}
+
 function auditChangesSummary(row, { maxItems = 3 } = {}) {
   const parsed = parseAuditDetail(row.detail);
+  const explorer = auditExplorerDetail(parsed);
+  if (explorer || row.action === 'explorer_query') {
+    const parts = [];
+    if (explorer?.elapsedMs != null) parts.push(`${explorer.elapsedMs} мс`);
+    const firstLine = String(explorer?.filtersText || '').split('\n').find((line) => line.trim());
+    if (firstLine) parts.push(firstLine.trim());
+    return parts.join(' · ');
+  }
   if (parsed?.changes?.length) {
     const parts = parsed.changes.slice(0, maxItems).map(
       (c) => `${c.label}: ${c.from} → ${c.to}`,
@@ -188,27 +204,73 @@ function AuditChangesList({ changes }) {
   );
 }
 
+function auditDetailPreStyle() {
+  return {
+    margin: 0,
+    padding: 10,
+    borderRadius: 8,
+    background: 'var(--bg-surface-3)',
+    border: '1px solid var(--bd-default)',
+    whiteSpace: 'pre-wrap',
+    wordBreak: 'break-word',
+    font: 'var(--pv-text-body-3)',
+    maxHeight: 280,
+    overflow: 'auto',
+  };
+}
+
+function AuditExplorerDetailBlock({ detail }) {
+  if (!detail) return null;
+  const queries = Array.isArray(detail.queries) ? detail.queries : [];
+  const sqlBlocks = queries.map((q, index) => {
+    const header = [
+      q.name || `query ${index + 1}`,
+      q.elapsedMs != null ? `${q.elapsedMs} мс` : null,
+      q.error ? 'ошибка' : null,
+    ].filter(Boolean).join(' · ');
+    const body = q.sql || q.error || '—';
+    return `${header}\n${body}`;
+  }).join('\n\n—\n\n');
+
+  return (
+    <div className="col" style={{ gap: 10 }}>
+      {detail.elapsedMs != null && (
+        <div><strong>Время выполнения:</strong> {detail.elapsedMs} мс</div>
+      )}
+      {detail.filtersText && (
+        <div className="col" style={{ gap: 6 }}>
+          <strong>Фильтры</strong>
+          <pre className="mono" style={auditDetailPreStyle()}>{detail.filtersText}</pre>
+        </div>
+      )}
+      {sqlBlocks && (
+        <div className="col" style={{ gap: 6 }}>
+          <strong>SQL</strong>
+          <pre className="mono" style={auditDetailPreStyle()}>{sqlBlocks}</pre>
+        </div>
+      )}
+      {detail.error && (
+        <div className="col" style={{ gap: 6 }}>
+          <strong>Ошибка</strong>
+          <pre
+            className="mono"
+            style={{ ...auditDetailPreStyle(), color: 'var(--st-critical)' }}
+          >
+            {detail.error}
+          </pre>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function AuditRequestBlock({ request }) {
   if (!request) return null;
   const text = formatAuditRequestBlock(request);
   return (
     <div className="col" style={{ gap: 6 }}>
-      <strong>Запрос</strong>
-      <pre
-        className="mono"
-        style={{
-          margin: 0,
-          padding: 10,
-          borderRadius: 8,
-          background: 'var(--bg-surface-3)',
-          border: '1px solid var(--bd-default)',
-          whiteSpace: 'pre-wrap',
-          wordBreak: 'break-word',
-          font: 'var(--pv-text-body-3)',
-          maxHeight: 280,
-          overflow: 'auto',
-        }}
-      >
+      <strong>HTTP-запрос</strong>
+      <pre className="mono" style={auditDetailPreStyle()}>
         {text}
       </pre>
     </div>
@@ -217,13 +279,15 @@ function AuditRequestBlock({ request }) {
 
 function auditResultLabel(result) {
   if (result === 'ok') return 'ок';
+  if (result === 'timeout') return 'timeout';
+  if (result === 'oom') return 'OOM';
   if (result === 'fail') return 'ошибка';
   if (result === 'denied') return 'отказ';
   return result || '—';
 }
 
 function auditResultStyle(result) {
-  if (result === 'fail' || result === 'denied') {
+  if (result === 'fail' || result === 'denied' || result === 'timeout' || result === 'oom') {
     return { color: 'var(--st-critical)', font: 'var(--pv-text-body-2-bold)' };
   }
   return { color: 'var(--fg-primary)' };
@@ -663,7 +727,10 @@ function PageAudit({ currentUser, displayTimezone }) {
       >
         {selected && (() => {
           const parsed = parseAuditDetail(selected.detail);
-          const request = auditRequestForRow(selected);
+          const explorerDetail = auditExplorerDetail(parsed);
+          const request = selected.action === 'explorer_query' || explorerDetail
+            ? null
+            : auditRequestForRow(selected);
           return (
             <div className="col" style={{ gap: 12, font: 'var(--pv-text-body-3)' }}>
               <div><strong>Действие:</strong> {auditActionLabel(selected)}</div>
@@ -672,9 +739,10 @@ function PageAudit({ currentUser, displayTimezone }) {
               <div><strong>Объект:</strong> {auditObjectLabel(selected)}</div>
               <div><strong>Результат:</strong> <span style={auditResultStyle(selected.result)}>{auditResultLabel(selected.result)}</span></div>
               <AuditChangesList changes={parsed?.changes} />
-              {parsed?.legacyText && !parsed?.changes?.length && (
+              {parsed?.legacyText && !parsed?.changes?.length && !explorerDetail && (
                 <div><strong>Детали:</strong> {parsed.legacyText}</div>
               )}
+              <AuditExplorerDetailBlock detail={explorerDetail} />
               <AuditRequestBlock request={request} />
               {selected.userAgent && (
                 <div><strong>User-Agent:</strong> <span style={{ wordBreak: 'break-word' }}>{selected.userAgent}</span></div>

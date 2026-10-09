@@ -29,6 +29,7 @@ const KIND_ACTIONS = {
   login_fail: ['login_fail'],
   logout: ['logout'],
   page: ['page_view'],
+  query: ['explorer_query'],
   write: [...WRITE_ACTIONS],
 };
 
@@ -759,6 +760,7 @@ function isAuditWriteExempt(apiPath) {
   if (p === '/api/health') return true;
   if (p.startsWith('/api/auth/')) return true;
   if (p === '/api/audit/page') return true;
+  if (p === '/api/explorer/query' || p === '/api/cabinet/explorer/query') return true;
   if (/^\/api\/users\/[^/]+\/password$/.test(p)) return true;
   if (/^\/api\/users\/[^/]+\/password-reset$/.test(p)) return true;
   if (/^\/api\/clients\/[^/]+\/impersonate$/.test(p)) return true;

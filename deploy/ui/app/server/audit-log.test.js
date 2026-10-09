@@ -89,6 +89,9 @@ test('shouldAuditMutatingRequest skips exempt and GET paths', () => {
   assert.equal(shouldAuditMutatingRequest('POST', '/api/users/u1/password'), false);
   assert.equal(shouldAuditMutatingRequest('POST', '/api/users'), true);
   assert.equal(isAuditWriteExempt('/api/clients/demo/impersonate'), true);
+  assert.equal(isAuditWriteExempt('/api/explorer/query'), true);
+  assert.equal(isAuditWriteExempt('/api/cabinet/explorer/query'), true);
+  assert.equal(shouldAuditMutatingRequest('POST', '/api/explorer/query'), false);
 });
 
 test('writeAuditEvent inserts sanitized row', async () => {

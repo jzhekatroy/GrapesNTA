@@ -25,6 +25,8 @@ const {
   listRecentImpersonationEvents,
 } = require('./impersonation-audit');
 const { writeImpersonateAuditEvent } = require('../audit-log');
+const { enableAuditQueryCapture } = require('../request-context');
+const { writeExplorerQueryAudit } = require('../explorer-query-audit');
 const {
   listClients,
   getClientAdmin,
@@ -206,10 +208,11 @@ function createCabinetRouter({ sessions }) {
   });
 
   router.post('/explorer/query', async (req, res) => {
+    const body = req.body || {};
+    const started = Date.now();
+    enableAuditQueryCapture();
     try {
       const clientId = requireScopedClientId(req.cabinet);
-      const body = req.body || {};
-      const started = Date.now();
       const bundle = await cabinetExplorerQuery(clientId, body);
       const queryBody = bundle.queryBody || body;
       const {
@@ -250,8 +253,19 @@ function createCabinetRouter({ sessions }) {
         responseBody.meta.snapshotId = stored.id;
         responseBody.meta.snapshotExpiresAt = stored.expiresAt;
       }
+      writeExplorerQueryAudit(req, req.sessionId, {
+        body: queryBody,
+        elapsedMs,
+        error: null,
+      }).catch(() => {});
       res.json(responseBody);
     } catch (err) {
+      const elapsedMs = Date.now() - started;
+      writeExplorerQueryAudit(req, req.sessionId, {
+        body,
+        elapsedMs,
+        error: err,
+      }).catch(() => {});
       sendError(res, err, err.statusCode || 400);
     }
   });

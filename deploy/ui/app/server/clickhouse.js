@@ -1,6 +1,6 @@
 const { createClient } = require('@clickhouse/client');
 const { logVerbose, logSqlStart, logSqlDone, logSqlError } = require('./logger');
-const { setFailedSql } = require('./request-context');
+const { setFailedSql, pushAuditQuery } = require('./request-context');
 const { inlineClickHouseParams } = require('./clickhouse-sql-inline');
 
 function env(name, fallback = '') {
@@ -656,6 +656,15 @@ function sqlLogName(options = {}) {
   return options.label === 'chart' ? 'dashboard/traffic' : 'query';
 }
 
+function recordAuditQuery({ name, sql, params, elapsedMs, error }) {
+  pushAuditQuery({
+    name,
+    elapsedMs,
+    sql: inlineClickHouseParams(sql, params),
+    error: error || null,
+  });
+}
+
 async function query(sql, params = {}, options = {}) {
   const name = sqlLogName(options);
   const started = Date.now();
@@ -684,15 +693,18 @@ async function query(sql, params = {}, options = {}) {
     const rows = await result.json();
     const elapsedMs = Date.now() - started;
     logSqlDone(name, rows.length, elapsedMs, { logText: config.logSql });
+    recordAuditQuery({ name, sql, params, elapsedMs, error: null });
     return { rows, elapsedMs };
   } catch (err) {
     const elapsedMs = Date.now() - started;
     logSqlError(name, err, elapsedMs);
+    const errorMessage = err?.message || String(err);
+    recordAuditQuery({ name, sql, params, elapsedMs, error: errorMessage });
     setFailedSql({
       name,
       sql,
       params,
-      error: err?.message || String(err),
+      error: errorMessage,
       elapsedMs,
       sqlInlined: inlineClickHouseParams(sql, params),
     });

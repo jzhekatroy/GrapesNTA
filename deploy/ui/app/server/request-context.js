@@ -25,8 +25,35 @@ function setFailedSql(details) {
   };
 }
 
+function enableAuditQueryCapture() {
+  const ctx = getRequestContext();
+  if (!ctx) return;
+  ctx.captureAuditQueries = true;
+  if (!Array.isArray(ctx.auditQueries)) ctx.auditQueries = [];
+}
+
+function pushAuditQuery(entry) {
+  const ctx = getRequestContext();
+  if (!ctx?.captureAuditQueries) return;
+  if (!Array.isArray(ctx.auditQueries)) ctx.auditQueries = [];
+  ctx.auditQueries.push({
+    name: entry?.name || '',
+    elapsedMs: entry?.elapsedMs ?? null,
+    sql: entry?.sql || '',
+    error: entry?.error || null,
+  });
+}
+
+function getAuditQueries() {
+  const ctx = getRequestContext();
+  return Array.isArray(ctx?.auditQueries) ? ctx.auditQueries : [];
+}
+
 module.exports = {
   getRequestContext,
   runWithRequestContext,
   setFailedSql,
+  enableAuditQueryCapture,
+  pushAuditQuery,
+  getAuditQueries,
 };

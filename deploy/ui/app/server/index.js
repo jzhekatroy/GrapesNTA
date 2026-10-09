@@ -7,7 +7,8 @@ const express = require('express');
 const compression = require('compression');
 const { ping, query, getConfig, ensureFlowsRawSchema } = require('./clickhouse');
 const { logApiIncoming, logApiDone, logApiError, getLogConfig } = require('./logger');
-const { runWithRequestContext, getRequestContext } = require('./request-context');
+const { runWithRequestContext, getRequestContext, enableAuditQueryCapture } = require('./request-context');
+const { writeExplorerQueryAudit } = require('./explorer-query-audit');
 const { recordFailedRequest, listFailedRequests } = require('./failed-requests');
 const {
   trafficBandwidthSeries,
@@ -282,7 +283,7 @@ app.use(express.json({ limit: '256kb' }));
 app.use((req, res, next) => {
   if (!req.path.startsWith('/api/')) return next();
 
-  runWithRequestContext({ failedSql: null }, () => {
+  runWithRequestContext({ failedSql: null, auditQueries: [], captureAuditQueries: false }, () => {
     const started = Date.now();
     const route = req.originalUrl || req.url;
     logApiIncoming(req);
@@ -1156,9 +1157,10 @@ app.get('/api/explorer/entities', async (req, res) => {
 });
 
 app.post('/api/explorer/query', async (req, res) => {
+  const body = req.body || {};
+  const started = Date.now();
+  enableAuditQueryCapture();
   try {
-    const body = req.body || {};
-    const started = Date.now();
     const bundle = await explorerQuery(body);
     const queryBody = bundle.queryBody || body;
     const {
@@ -1196,8 +1198,19 @@ app.post('/api/explorer/query', async (req, res) => {
       meta: responseMeta,
       elapsedMs,
     });
+    writeExplorerQueryAudit(req, req.sessionId, {
+      body: queryBody,
+      elapsedMs,
+      error: null,
+    }).catch(() => {});
     res.json(responseBody);
   } catch (err) {
+    const elapsedMs = Date.now() - started;
+    writeExplorerQueryAudit(req, req.sessionId, {
+      body,
+      elapsedMs,
+      error: err,
+    }).catch(() => {});
     res.status(400).json({ error: err.message });
   }
 });
