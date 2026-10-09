@@ -1415,6 +1415,42 @@ function outsideCarpetSql(minuteExpr) {
   return `NOT has(cm.minutes, ${minuteExpr})`;
 }
 
+// Минута ковра меряется ростом к той же норме, которую атаки уже подняли:
+// у «Искрателеком» флуд 26.09–03.10 без события поднял норму UDP до 43 Гбит/с
+// при обычных 6–8, и атака 41–59 Гбит/с 09.10 выглядела ×1.0–1.4. Медиана
+// часа за 14 дней атаку почти не замечает, пока та занимает меньше половины
+// минут: в норму UDP не идут минуты выше BASELINE_UDP_MEDIAN_CAP × медианы.
+// На чистых днях p95 UDP выше медианы примерно в 1.3 раза.
+const BASELINE_UDP_MEDIAN_CAP = 1.6;
+
+const MSK_HOUR_SQL = (minuteExpr) => `toHour(toTimeZone(${minuteExpr}, 'Europe/Moscow'))`;
+const MSK_WEEKEND_SQL = (minuteExpr) => `toUInt8(toDayOfWeek(toTimeZone(${minuteExpr}, 'Europe/Moscow')) >= 6)`;
+
+function baselineUdpHourMedianCte(days) {
+  return `udp_hour_median AS (
+    SELECT
+      scope,
+      scope_id,
+      ${MSK_HOUR_SQL('minute')} AS h,
+      ${MSK_WEEKEND_SQL('minute')} AS we,
+      quantileExact(0.5)(bps) AS med
+    FROM ${tableRef()}
+    WHERE proto = 'udp'
+      AND scope IN ('client', 'provider')
+      AND minute >= now('UTC') - INTERVAL ${Number(days)} DAY
+    GROUP BY scope, scope_id, h, we
+  )`;
+}
+
+function udpHourMedianJoinSql() {
+  return `LEFT JOIN udp_hour_median AS um ON um.scope = a.scope AND um.scope_id = a.scope_id
+      AND um.h = ${MSK_HOUR_SQL('a.minute')} AND um.we = ${MSK_WEEKEND_SQL('a.minute')}`;
+}
+
+function belowUdpSurgeSql() {
+  return `(um.med <= 0 OR a.bps <= ${BASELINE_UDP_MEDIAN_CAP} * um.med)`;
+}
+
 function outsideAttackWindowsSql(minuteExpr) {
   return `NOT arrayExists(w -> ${minuteExpr} >= w.1 AND ${minuteExpr} <= w.2, aw.windows)`;
 }
@@ -1542,13 +1578,13 @@ async function loadClientBaselines() {
   return map;
 }
 
-async function loadNetBaselines(beforeTs) {
-  if (isBaselineCacheFresh(netBaselineCache)) return netBaselineCache.map;
+function netBaselineSql(windows, days = BASELINE_DAYS) {
   const q = BASELINE_QUANTILE;
-  const days = BASELINE_DAYS;
-  const map = new Map();
-  const netSql = (windows) => `
-    ${windows ? `WITH ${baselineAttackWindowsCte(days)}, ${baselineCarpetMinutesCte(days)}` : ''}
+  const ctes = windows
+    ? `WITH ${baselineAttackWindowsCte(days)}, ${baselineCarpetMinutesCte(days)}, ${baselineUdpHourMedianCte(days)}`
+    : '';
+  return `
+    ${ctes}
     SELECT
       a.scope AS scope,
       a.scope_id AS scope_id,
@@ -1561,12 +1597,20 @@ async function loadNetBaselines(beforeTs) {
     FROM ${tableRef()} AS a
     ${windows ? 'LEFT JOIN attack_windows AS aw ON aw.scope = a.scope AND aw.scope_id = a.scope_id' : ''}
     ${windows ? 'LEFT JOIN carpet_minutes AS cm ON cm.scope = a.scope AND cm.scope_id = a.scope_id' : ''}
+    ${windows ? udpHourMedianJoinSql() : ''}
     WHERE a.minute >= now('UTC') - INTERVAL {days:UInt16} DAY
       AND a.minute < least(${utcDateTime('before')}, now('UTC') - INTERVAL ${BASELINE_LAG_HOURS} HOUR)
       ${windows ? `AND ${outsideAttackWindowsSql('a.minute')} AND ${outsidePeakTailSql('a.minute', 'a.growth_bps')}` : ''}
-      ${windows ? `AND (a.proto != 'udp' OR ${outsideCarpetSql('a.minute')})` : ''}
+      ${windows ? `AND (a.proto != 'udp' OR (${outsideCarpetSql('a.minute')} AND ${belowUdpSurgeSql()}))` : ''}
     GROUP BY a.scope, a.scope_id, a.proto
   `;
+}
+
+async function loadNetBaselines(beforeTs) {
+  if (isBaselineCacheFresh(netBaselineCache)) return netBaselineCache.map;
+  const days = BASELINE_DAYS;
+  const map = new Map();
+  const netSql = (windows) => netBaselineSql(windows, days);
   const { rows: nets } = await queryBaseline(netSql(true), netSql(false), {
     days,
     before: formatCh(beforeTs),
@@ -2142,6 +2186,8 @@ module.exports = {
   pendingMinutes,
   CATCHUP_MAX_MINUTES,
   loadBaselines,
+  netBaselineSql,
+  BASELINE_UDP_MEDIAN_CAP,
   loadHourSignalBaselines,
   HISTORY_METRICS,
   BASELINE_CACHE_MS,

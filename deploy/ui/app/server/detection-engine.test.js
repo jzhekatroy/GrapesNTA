@@ -10,7 +10,26 @@ const {
   closedMinuteLagMinutes,
   clampClosedMinute,
   pendingMinutes,
+  netBaselineSql,
+  BASELINE_UDP_MEDIAN_CAP,
 } = require('./detection-engine');
+
+describe('detection-engine net baseline', () => {
+  it('норма UDP без минут выше 1.6 медианы часа (Искрателеком 09.10)', () => {
+    const sql = netBaselineSql(true, 14);
+    assert.equal(BASELINE_UDP_MEDIAN_CAP, 1.6);
+    assert.match(sql, /udp_hour_median AS \(/);
+    assert.match(sql, /quantileExact\(0\.5\)\(bps\) AS med/);
+    assert.match(sql, /LEFT JOIN udp_hour_median AS um ON um\.scope = a\.scope/);
+    assert.match(sql, /a\.proto != 'udp' OR \(NOT has\(cm\.minutes, a\.minute\) AND \(um\.med <= 0 OR a\.bps <= 1\.6 \* um\.med\)\)/);
+  });
+
+  it('запасной запрос без окон медиану не читает', () => {
+    const sql = netBaselineSql(false, 14);
+    assert.doesNotMatch(sql, /udp_hour_median/);
+    assert.doesNotMatch(sql, /um\.med/);
+  });
+});
 
 describe('detection-engine catch-up', () => {
   const at = (hm) => Date.parse(`2026-10-04T${hm}:00Z`);
