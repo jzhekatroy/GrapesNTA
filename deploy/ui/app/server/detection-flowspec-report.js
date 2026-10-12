@@ -1,8 +1,8 @@
 'use strict';
 
-const { query, flowsRawTableRef, l3PrefixesViewRef, col, flowCol } = require('./clickhouse');
+const { query, flowsRawTableRef, l3PrefixesViewRef, col, flowCol, ispPrefixLookupSql } = require('./clickhouse');
 const { flowIpExpr, primarySourceIdsSql } = require('./queries');
-const { slicePred, loadClientBinding } = require('./detection-investigate');
+const { loadClientBinding } = require('./detection-investigate');
 const { formatCh, parseUtc, EXPORT_LAG, MINUTE } = require('./detection-core');
 
 const PREFIX_LIMIT = 8000;
@@ -125,27 +125,35 @@ function bandLabel(band) {
   return `${band.lo}–${band.hi}`;
 }
 
+const HIGH_PORTS = '1024-65535';
+
 function packetOptions(band) {
   const length = `match packet-length ${band.lo}-${band.hi}`;
   return [
     {
       id: 'src',
       label: `UDP, пакет ${bandLabel(band)}, порт источника ≥ 1024`,
-      match: ['match source-port 1024-65535', length],
+      match: [`match source-port ${HIGH_PORTS}`, length],
+      srcPort: HIGH_PORTS,
+      dstPort: null,
       attackKey: 'atk_src',
       baseKey: 'base_src',
     },
     {
       id: 'dst',
       label: `UDP, пакет ${bandLabel(band)}, порт назначения ≥ 1024`,
-      match: ['match destination-port 1024-65535', length],
+      match: [`match destination-port ${HIGH_PORTS}`, length],
+      srcPort: null,
+      dstPort: HIGH_PORTS,
       attackKey: 'atk_dst',
       baseKey: 'base_dst',
     },
     {
       id: 'both',
       label: `UDP, пакет ${bandLabel(band)}, оба порта ≥ 1024`,
-      match: ['match source-port 1024-65535', 'match destination-port 1024-65535', length],
+      match: [`match source-port ${HIGH_PORTS}`, `match destination-port ${HIGH_PORTS}`, length],
+      srcPort: HIGH_PORTS,
+      dstPort: HIGH_PORTS,
       attackKey: 'atk_both',
       baseKey: 'base_both',
     },
@@ -400,28 +408,80 @@ function bounds(minuteTs, prefix) {
   };
 }
 
-async function loadUdpBins(scopeName, scopeId, minuteTs) {
+function net24Num(prefix) {
+  const parts = String(prefix).replace(/\/24$/, '').split('.').map(Number);
+  return ((parts[0] << 24) >>> 0) + (parts[1] << 16) + (parts[2] << 8);
+}
+
+// Поток проставляется ключом каждой аварии, которой он принадлежит: клиент внутри
+// провайдера считается у обоих. Ключ — номер объекта в списке. Принадлежность ищется
+// по массивам, а не условием на каждый объект: иначе цена растёт с числом аварий.
+function objectsSql(objects, params) {
+  const groups = { net: [], client: [], provider: [] };
+  objects.forEach((object, i) => groups[object.scope]?.push({ id: object.scopeId, i }));
+  const ipCol = `f.${col('dstIp')}`;
+  const parts = [];
+  if (groups.net.length) {
+    params.netIds = groups.net.map((g) => net24Num(g.id));
+    params.netKeys = groups.net.map((g) => g.i);
+    const etype = flowCol('etype');
+    const addr = `bitAnd(reinterpretAsUInt32(reverse(substring(${ipCol}, 1, 4))), 4294967040)`;
+    const pos = `indexOf({netIds:Array(UInt32)}, ${addr})`;
+    parts.push({ pos: etype ? `if(f.${etype} = 2048, ${pos}, 0)` : pos, keys: 'netKeys' });
+  }
+  if (groups.client.length) {
+    params.clientIds = groups.client.map((g) => String(g.id));
+    params.clientKeys = groups.client.map((g) => g.i);
+    parts.push({ pos: 'indexOf({clientIds:Array(String)}, f.dst_client)', keys: 'clientKeys' });
+  }
+  if (groups.provider.length) {
+    params.providerIds = groups.provider.map((g) => String(g.id));
+    params.providerKeys = groups.provider.map((g) => g.i);
+    parts.push({ pos: `indexOf({providerIds:Array(String)}, ${ispPrefixLookupSql(ipCol)})`, keys: 'providerKeys' });
+  }
+  return {
+    any: parts.map((p) => `${p.pos} > 0`).join(' OR ') || '0',
+    key: `arrayJoin(arrayFilter(x -> x >= 0, [${parts
+      .map((p) => `if(${p.pos} > 0, toInt32({${p.keys}:Array(Int32)}[${p.pos}]), -1)`)
+      .join(', ')}]))`,
+  };
+}
+
+function memoryLimit(objects) {
+  return objects.length > 1 ? '6000000000' : '4000000000';
+}
+
+function groupByObject(rows) {
+  const out = new Map();
+  for (const row of rows) {
+    const i = Number(row.obj);
+    if (!out.has(i)) out.set(i, []);
+    out.get(i).push(row);
+  }
+  return out;
+}
+
+async function loadUdpBinsMulti(objects, minuteTs) {
   const quietTo = minuteTs - 20 * MINUTE;
   const quietFrom = quietTo - 15 * MINUTE;
   const proto = `f.${col('proto')}`;
   const rawBytes = `f.${col('bytes')}`;
   const packets = `f.${col('packets')}`;
-  const pred = slicePred(scopeName);
   const params = {
-    scope: scopeName,
-    scopeId: String(scopeId),
     ...bounds(minuteTs, 'attack'),
     quietFrom: formatCh(quietFrom),
     quietTo: formatCh(quietTo),
     quietUntil: formatCh(quietTo + EXPORT_LAG),
   };
+  const sel = objectsSql(objects, params);
   const { rows } = await query(`
     SELECT
+      ${sel.key} AS obj,
       formatDateTime(toStartOfMinute(f.time_flow_start_ns), '%Y-%m-%d %H:%i:%S', 'UTC') AS m,
       least(intDiv(if(${packets} > 0, intDiv(${rawBytes}, ${packets}), 0), ${BIN_BYTES}), ${LAST_BIN}) AS bin,
       sum(${scaledBytesSql()}) AS bytes
     FROM ${flowsRawTableRef()} AS f
-    PREWHERE ${pred}
+    PREWHERE ${sel.any}
     WHERE f.date >= toDate(${dt('quietFrom')}) - 1
       AND f.date <= toDate(${dt('attackUntil')})
       AND (
@@ -432,16 +492,194 @@ async function loadUdpBins(scopeName, scopeId, minuteTs) {
         OR (${windowSql('attack')})
       )
       AND ${primarySourceIdsSql('f')}
-      AND ${pred}
       AND ${proto} = 17
       AND ${packets} > 0
-    GROUP BY m, bin
+    GROUP BY obj, m, bin
   `, params, {
     name: 'detection/flowspec-udp-bins',
     requestTimeoutMs: 50000,
-    clickhouse_settings: { max_execution_time: 45, max_memory_usage: '3000000000' },
+    clickhouse_settings: { max_execution_time: 45, max_memory_usage: memoryLimit(objects) },
   });
-  return { rows, attackFrom: params.attackFrom };
+  return { byObj: groupByObject(rows), attackFrom: params.attackFrom };
+}
+
+function prefix16Of(prefix24) {
+  const parts = String(prefix24).split('.');
+  return parts.length === 4 ? `${parts[0]}.${parts[1]}.0.0/16` : '';
+}
+
+function topTuples(rows) {
+  return rows
+    .filter((row) => row.attackBytes > 0)
+    .sort((a, b) => b.attackBytes - a.attackBytes)
+    .map((row) => [row.prefix, row.attackBytes, row.baselineBytes]);
+}
+
+// /16 собираются из /24 здесь, а не вторым проходом по потокам: в сеть /16 идёт и
+// тихий трафик её /24 без атаки, поэтому запрос отдаёт /24 с атакой или с нормой.
+function reportRowFromAggregate(raw = {}) {
+  const list24 = (Array.isArray(raw.rows24) ? raw.rows24 : []).map((item) => {
+    const t = Array.isArray(item) ? item : Object.values(item || {});
+    return { prefix: String(t[0] || ''), attackBytes: Number(t[1] || 0), baselineBytes: Number(t[2] || 0) };
+  }).filter((row) => row.prefix);
+  const by16 = new Map();
+  for (const row of list24) {
+    const prefix = prefix16Of(row.prefix);
+    if (!prefix) continue;
+    const acc = by16.get(prefix) || { prefix, attackBytes: 0, baselineBytes: 0 };
+    acc.attackBytes += row.attackBytes;
+    acc.baselineBytes += row.baselineBytes;
+    by16.set(prefix, acc);
+  }
+  const rows24 = topTuples(list24);
+  const rows16 = topTuples([...by16.values()]);
+  const out = {};
+  for (const key of ['atk_all', 'atk_big', 'base_big', 'atk_src', 'atk_dst', 'atk_both', 'base_src', 'base_dst', 'base_both']) {
+    out[key] = Number(raw[key] || 0);
+  }
+  return {
+    ...out,
+    n16: rows16.length,
+    n24: rows24.length,
+    rows16: rows16.slice(0, PREFIX_LIMIT),
+    rows24: rows24.slice(0, PREFIX_LIMIT),
+  };
+}
+
+function bandSql(plans, pkt) {
+  const arms = plans.map((plan, i) => `obj = ${i}, ${pkt} BETWEEN ${Math.trunc(plan.band.lo)} AND ${Math.trunc(plan.band.hi)}`);
+  return `multiIf(${arms.join(', ')}, 0)`;
+}
+
+function baseSql(plans, baseIndex) {
+  const arms = plans.map((plan, i) => {
+    const j = baseIndex.get(plan.baselineTs);
+    return `obj = ${i}, (f.time_flow_start_ns >= ${dt(`base${j}From`)} AND f.time_flow_start_ns < ${dt(`base${j}To`)})`;
+  });
+  return `multiIf(${arms.join(', ')}, 0)`;
+}
+
+// Один проход по сырым потокам: раньше общий запрос ссылался на свой подзапрос
+// 11 раз, и ClickHouse читал минуту атаки и тихую минуту на каждую ссылку.
+async function loadReportRowsMulti(objects, minuteTs, plans) {
+  const params = { ...bounds(minuteTs, 'attack') };
+  const sel = objectsSql(objects, params);
+  const baseIndex = new Map();
+  for (const plan of plans) {
+    if (baseIndex.has(plan.baselineTs)) continue;
+    const j = baseIndex.size;
+    baseIndex.set(plan.baselineTs, j);
+    Object.assign(params, bounds(plan.baselineTs, `base${j}`));
+  }
+  params.dateFrom = formatCh(Math.min(minuteTs, ...baseIndex.keys()));
+  const baseWindows = [...baseIndex.values()].map((j) => `(${windowSql(`base${j}`)})`);
+  const srcIp = flowIpExpr(`f.${col('srcIp')}`);
+  const proto = `f.${col('proto')}`;
+  const srcPort = `f.${col('srcPort')}`;
+  const dstPort = `f.${col('dstPort')}`;
+  const rawBytes = `f.${col('bytes')}`;
+  const packets = `f.${col('packets')}`;
+  const pkt = `if(${packets} > 0, intDiv(${rawBytes}, ${packets}), 0)`;
+  const { rows } = await query(`
+    SELECT
+      obj,
+      sum(a_all) AS atk_all,
+      sum(a_big) AS atk_big,
+      sum(b_big) AS base_big,
+      sum(a_src) AS atk_src,
+      sum(a_dst) AS atk_dst,
+      sum(a_both) AS atk_both,
+      sum(b_src) AS base_src,
+      sum(b_dst) AS base_dst,
+      sum(b_both) AS base_both,
+      groupArrayIf(tuple(p24, a_big, b_big), p24 != '' AND (a_big > 0 OR b_big > 0)) AS rows24
+    FROM (
+      SELECT
+        obj,
+        p24,
+        sumIf(bytes, is_atk) AS a_all,
+        sumIf(bytes, is_atk AND is_big) AS a_big,
+        sumIf(bytes, is_base AND is_big) AS b_big,
+        sumIf(bytes, is_atk AND is_big AND hi_src) AS a_src,
+        sumIf(bytes, is_atk AND is_big AND hi_dst) AS a_dst,
+        sumIf(bytes, is_atk AND is_big AND hi_src AND hi_dst) AS a_both,
+        sumIf(bytes, is_base AND is_big AND hi_src) AS b_src,
+        sumIf(bytes, is_base AND is_big AND hi_dst) AS b_dst,
+        sumIf(bytes, is_base AND is_big AND hi_src AND hi_dst) AS b_both
+      FROM (
+        SELECT
+          ${sel.key} AS obj,
+          ${scaledBytesSql()} AS bytes,
+          ${proto} = 17 AND ${packets} > 0 AND ${bandSql(plans, pkt)} AS is_big,
+          ${srcPort} >= 1024 AS hi_src,
+          ${dstPort} >= 1024 AS hi_dst,
+          (f.time_flow_start_ns >= ${dt('attackFrom')} AND f.time_flow_start_ns < ${dt('attackTo')}) AS is_atk,
+          ${baseSql(plans, baseIndex)} AS is_base,
+          ${prefixSql(srcIp, 24)} AS p24
+        FROM ${flowsRawTableRef()} AS f
+        PREWHERE ${sel.any}
+        WHERE f.date >= toDate(${dt('dateFrom')}) - 1
+          AND f.date <= toDate(${dt('attackUntil')})
+          AND ((${windowSql('attack')}) OR ${baseWindows.join(' OR ')})
+          AND ${primarySourceIdsSql('f')}
+      )
+      GROUP BY obj, p24
+    )
+    GROUP BY obj
+  `, params, {
+    name: 'detection/flowspec-report',
+    requestTimeoutMs: 70000,
+    clickhouse_settings: { max_execution_time: 60, max_memory_usage: memoryLimit(objects) },
+  });
+  const out = new Map();
+  for (const row of rows) out.set(Number(row.obj), reportRowFromAggregate(row));
+  return out;
+}
+
+// objects: [{ scope, scopeId }] с одной минутой атаки.
+async function loadFlowspecInputs(objects, minuteTs) {
+  if (!objects.length) return [];
+  const bins = await loadUdpBinsMulti(objects, minuteTs);
+  const plans = objects.map((_, i) => {
+    const profile = quietProfile(bins.byObj.get(i) || [], bins.attackFrom);
+    const band = choosePacketBand(profile.attackBins, profile.quietBins);
+    const baselineTs = pickQuietMinute(profile.minutes, band, minuteTs - 60 * MINUTE);
+    return { profile, band, baselineTs };
+  });
+  const rows = await loadReportRowsMulti(objects, minuteTs, plans);
+  return plans.map((plan, i) => ({
+    row: rows.get(i) || reportRowFromAggregate({}),
+    band: plan.band,
+    profile: plan.profile,
+    baselineMinute: formatCh(plan.baselineTs),
+  }));
+}
+
+// Отчёт, который дежурный только что открыл, общий фильтр не пересчитывает.
+const INPUT_CACHE_MS = 10 * MINUTE;
+const INPUT_CACHE_MAX = 300;
+const inputCache = new Map();
+
+function inputCacheKey(scope, scopeId, minute) {
+  return `${scope}|${scopeId}|${minute}`;
+}
+
+function cachedInputs(scope, scopeId, minute, nowTs = Date.now()) {
+  const key = inputCacheKey(scope, scopeId, minute);
+  const hit = inputCache.get(key);
+  if (!hit) return null;
+  if (nowTs - hit.at > INPUT_CACHE_MS) {
+    inputCache.delete(key);
+    return null;
+  }
+  return hit.value;
+}
+
+function storeInputs(scope, scopeId, minute, value, nowTs = Date.now()) {
+  const key = inputCacheKey(scope, scopeId, minute);
+  inputCache.delete(key);
+  inputCache.set(key, { at: nowTs, value });
+  while (inputCache.size > INPUT_CACHE_MAX) inputCache.delete(inputCache.keys().next().value);
 }
 
 async function loadDestinations(scope, scopeId) {
@@ -479,6 +717,7 @@ async function loadDestinations(scope, scopeId) {
   throw fail(400, 'Отчёт только для сети, размеченной по IP');
 }
 
+
 async function loadFlowspecReport({ scope, scopeId, minute } = {}) {
   const scopeName = String(scope || '');
   const id = String(scopeId || '');
@@ -486,90 +725,20 @@ async function loadFlowspecReport({ scope, scopeId, minute } = {}) {
   if (!['client', 'provider', 'net'].includes(scopeName) || !id) throw fail(400, 'Нужны scope и scopeId');
   if (!Number.isFinite(minuteTs)) throw fail(400, 'Нужна текущая минута');
   const destinations = await loadDestinations(scopeName, id);
-  const binData = await loadUdpBins(scopeName, id, minuteTs);
-  const profile = quietProfile(binData.rows, binData.attackFrom);
-  const band = choosePacketBand(profile.attackBins, profile.quietBins);
-  const baselineTs = pickQuietMinute(profile.minutes, band, minuteTs - 60 * MINUTE);
-  const srcIp = flowIpExpr(`f.${col('srcIp')}`);
-  const proto = `f.${col('proto')}`;
-  const srcPort = `f.${col('srcPort')}`;
-  const dstPort = `f.${col('dstPort')}`;
-  const rawBytes = `f.${col('bytes')}`;
-  const packets = `f.${col('packets')}`;
-  const pkt = `if(${packets} > 0, intDiv(${rawBytes}, ${packets}), 0)`;
-  const isBig = `${proto} = 17 AND ${packets} > 0 AND ${pkt} BETWEEN {pktLo:UInt32} AND {pktHi:UInt32}`;
-  const pred = slicePred(scopeName);
-  const params = {
-    scope: scopeName,
-    scopeId: id,
-    pktLo: band.lo,
-    pktHi: band.hi,
-    ...bounds(minuteTs, 'attack'),
-    ...bounds(baselineTs, 'base'),
-  };
-  const { rows } = await query(`
-    WITH ev AS (
-      SELECT
-        ${scaledBytesSql()} AS bytes,
-        ${isBig} AS is_big,
-        ${srcPort} >= 1024 AS hi_src,
-        ${dstPort} >= 1024 AS hi_dst,
-        (f.time_flow_start_ns >= ${dt('attackFrom')} AND f.time_flow_start_ns < ${dt('attackTo')}) AS is_atk,
-        ${prefixSql(srcIp, 16)} AS p16,
-        ${prefixSql(srcIp, 24)} AS p24
-      FROM ${flowsRawTableRef()} AS f
-      PREWHERE ${pred}
-      WHERE f.date >= toDate(${dt('baseFrom')}) - 1
-        AND f.date <= toDate(${dt('attackUntil')})
-        AND (${windowSql('attack')} OR ${windowSql('base')})
-        AND ${primarySourceIdsSql('f')}
-        AND ${pred}
-    ),
-    g16 AS (
-      SELECT p16 AS prefix, sumIf(bytes, is_atk AND is_big) AS atk, sumIf(bytes, NOT is_atk AND is_big) AS base
-      FROM ev
-      WHERE p16 != ''
-      GROUP BY prefix
-      HAVING atk > 0
-    ),
-    g24 AS (
-      SELECT p24 AS prefix, sumIf(bytes, is_atk AND is_big) AS atk, sumIf(bytes, NOT is_atk AND is_big) AS base
-      FROM ev
-      WHERE p24 != ''
-      GROUP BY prefix
-      HAVING atk > 0
-    )
-    SELECT
-      (SELECT sumIf(bytes, is_atk) FROM ev) AS atk_all,
-      (SELECT sumIf(bytes, is_atk AND is_big) FROM ev) AS atk_big,
-      (SELECT sumIf(bytes, NOT is_atk AND is_big) FROM ev) AS base_big,
-      (SELECT sumIf(bytes, is_atk AND is_big AND hi_src) FROM ev) AS atk_src,
-      (SELECT sumIf(bytes, is_atk AND is_big AND hi_dst) FROM ev) AS atk_dst,
-      (SELECT sumIf(bytes, is_atk AND is_big AND hi_src AND hi_dst) FROM ev) AS atk_both,
-      (SELECT sumIf(bytes, NOT is_atk AND is_big AND hi_src) FROM ev) AS base_src,
-      (SELECT sumIf(bytes, NOT is_atk AND is_big AND hi_dst) FROM ev) AS base_dst,
-      (SELECT sumIf(bytes, NOT is_atk AND is_big AND hi_src AND hi_dst) FROM ev) AS base_both,
-      (SELECT count() FROM g16) AS n16,
-      (SELECT count() FROM g24) AS n24,
-      (SELECT groupArray(tuple(prefix, atk, base)) FROM (
-        SELECT prefix, atk, base FROM g16 ORDER BY atk DESC LIMIT ${PREFIX_LIMIT}
-      )) AS rows16,
-      (SELECT groupArray(tuple(prefix, atk, base)) FROM (
-        SELECT prefix, atk, base FROM g24 ORDER BY atk DESC LIMIT ${PREFIX_LIMIT}
-      )) AS rows24
-  `, params, {
-    name: 'detection/flowspec-report',
-    requestTimeoutMs: 70000,
-    clickhouse_settings: { max_execution_time: 60, max_memory_usage: '4000000000' },
-  });
+  const minuteCh = formatCh(minuteTs);
+  let inputs = cachedInputs(scopeName, id, minuteCh);
+  if (!inputs) {
+    [inputs] = await loadFlowspecInputs([{ scope: scopeName, scopeId: id }], minuteTs);
+    storeInputs(scopeName, id, minuteCh, inputs);
+  }
   return buildFlowspecReport({
-    row: rows[0] || {},
+    row: inputs.row,
     destinations,
     scopeId: id,
-    minute: formatCh(minuteTs),
-    baselineMinute: formatCh(baselineTs),
-    band,
-    profile,
+    minute: minuteCh,
+    baselineMinute: inputs.baselineMinute,
+    band: inputs.band,
+    profile: inputs.profile,
   });
 }
 
@@ -580,4 +749,14 @@ module.exports = {
   takeUntil,
   rateLimitHintMbps,
   routeSlug,
+  packetOptions,
+  parseGroups,
+  reportRowFromAggregate,
+  loadDestinations,
+  loadFlowspecInputs,
+  cachedInputs,
+  storeInputs,
+  formatBps,
+  bpsOf,
+  FILE_PREFIX_CAP,
 };

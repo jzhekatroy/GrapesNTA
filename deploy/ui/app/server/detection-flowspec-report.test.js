@@ -8,6 +8,7 @@ const {
   takeUntil,
   rateLimitHintMbps,
   routeSlug,
+  reportRowFromAggregate,
 } = require('./detection-flowspec-report');
 
 describe('срез сетей для FlowSpec', () => {
@@ -110,6 +111,30 @@ describe('диапазон пакета', () => {
     const band = choosePacketBand(zeros(), zeros());
     assert.equal(band.fallback, true);
     assert.equal(band.lo, 1000);
+  });
+});
+
+describe('один проход по потокам', () => {
+  it('/16 собирается из /24, тихая норма /24 без атаки тоже идёт в /16', () => {
+    const row = reportRowFromAggregate({
+      atk_big: '900',
+      rows24: [
+        ['213.230.86.0/24', '500', '0'],
+        ['213.230.87.0/24', '0', '7'],
+        ['84.54.73.0/24', '300', '2'],
+      ],
+    });
+    assert.equal(row.atk_big, 900);
+    assert.equal(row.n24, 2);
+    assert.deepEqual(row.rows24, [['213.230.86.0/24', 500, 0], ['84.54.73.0/24', 300, 2]]);
+    assert.equal(row.n16, 2);
+    assert.deepEqual(row.rows16, [['213.230.0.0/16', 500, 7], ['84.54.0.0/16', 300, 2]]);
+  });
+
+  it('пустой ответ даёт нулевой отчёт', () => {
+    const row = reportRowFromAggregate({});
+    assert.equal(row.atk_all, 0);
+    assert.deepEqual(row.rows16, []);
   });
 });
 

@@ -12,6 +12,7 @@ const {
 const { listObjectThresholds, saveObjectThreshold } = require('./detection-thresholds');
 const { loadExcessAsnTop } = require('./detection-investigate');
 const { loadFlowspecReport } = require('./detection-flowspec-report');
+const { loadFlowspecSummary } = require('./detection-flowspec-summary');
 
 function sendError(res, err) {
   const status = Number(err.statusCode) || 500;
@@ -66,6 +67,14 @@ function createDetectionRouter() {
           parentScope: req.query.parentScope || req.query.parent_scope,
         }),
       });
+    } catch (err) {
+      sendError(res, err);
+    }
+  });
+
+  router.get('/events/flowspec/summary', async (req, res) => {
+    try {
+      res.json({ data: await loadFlowspecSummary({ variant: req.query.variant }) });
     } catch (err) {
       sendError(res, err);
     }

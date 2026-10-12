@@ -553,6 +553,104 @@ function FlowspecReportModal({ event, onClose }) {
   );
 }
 
+const FLOWSPEC_SUMMARY_PACKET = [
+  { id: 'packet-src', label: 'Порт источника ≥ 1024' },
+  { id: 'packet-dst', label: 'Порт назначения ≥ 1024' },
+  { id: 'packet-both', label: 'Оба порта ≥ 1024' },
+];
+
+const SCOPE_SHORT = { client: 'абонент', provider: 'провайдер', net: 'сеть /24' };
+
+function FlowspecSummaryModal({ open, onClose }) {
+  const [busy, setBusy] = useState('');
+  const [error, setError] = useState('');
+  const [data, setData] = useState(null);
+  useEffect(() => {
+    if (!open) {
+      setBusy('');
+      setError('');
+      setData(null);
+    }
+  }, [open]);
+  const build = (variant) => {
+    setBusy(variant);
+    setError('');
+    setData(null);
+    ApiClient.loadDetectionFlowspecSummary({ variant })
+      .then((row) => {
+        setData(row);
+        if (row?.text) downloadText(row.filename, row.text);
+      })
+      .catch((err) => setError(err.message || 'Не удалось собрать общий фильтр'))
+      .finally(() => setBusy(''));
+  };
+  const variantButton = (id, label) => (
+    <Button key={id} size="sm" disabled={!!busy} onClick={() => build(id)}>
+      {busy === id ? 'Собираю…' : label}
+    </Button>
+  );
+  return (
+    <Modal
+      open={open}
+      onClose={onClose}
+      size="lg"
+      title="Общий фильтр"
+      subtitle="Все активные аварии, размеченные по IP, одним файлом без дублей"
+      footer={<Button kind="ghost" onClick={onClose}>Закрыть</Button>}
+    >
+      <div style={{ display: 'grid', gap: 16 }}>
+        <div style={{ fontSize: 13, color: 'var(--fg-muted)' }}>
+          У каждой аварии берётся её последняя горячая минута, как в отчёте по аварии.
+          Аварии с горячей минутой старше 15 минут, без минуты и размеченные портом пропускаются.
+        </div>
+        <div>
+          <div style={{ fontWeight: 600, marginBottom: 6 }}>Вариант 1. По признакам пакета</div>
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+            {FLOWSPEC_SUMMARY_PACKET.map((v) => variantButton(v.id, v.label))}
+          </div>
+        </div>
+        <div>
+          <div style={{ fontWeight: 600, marginBottom: 6 }}>Вариант 2. По сетям источника</div>
+          {[16, 24].map((mask) => (
+            <div key={mask} style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center', marginBottom: 6 }}>
+              <span style={{ width: 36, fontSize: 13 }}>/{mask}</span>
+              {[50, 80, 90].map((ratio) => variantButton(`src${mask}-${ratio}`, `${ratio}%`))}
+            </div>
+          ))}
+        </div>
+        {busy ? <div>Считаю по горячим минутам аварий…</div> : null}
+        {error ? <div style={{ color: 'var(--st-critical)' }}>{error}</div> : null}
+        {data ? (
+          <div style={{ display: 'grid', gap: 8, fontSize: 13 }}>
+            <div>
+              Файл {data.filename} скачан: правил {formatNum(data.rules, 0)}, дублей убрано {formatNum(data.duplicates, 0)}.
+              {' '}
+              <Button size="sm" kind="ghost" onClick={() => downloadText(data.filename, data.text)}>Скачать ещё раз</Button>
+            </div>
+            {data.events.map((ev) => (
+              <div key={`${ev.scope}|${ev.scopeId}`} style={{ display: 'flex', gap: 8 }}>
+                <span style={{ flex: 1 }}>{ev.name || ev.scopeId} · {SCOPE_SHORT[ev.scope] || ev.scope}</span>
+                <span style={{ width: 110, color: 'var(--fg-muted)' }}>{formatMskTime(ev.minute)} МСК</span>
+                <span style={{ width: 200, textAlign: 'right' }}>
+                  правил {formatNum(ev.generated, 0)} · своих {formatNum(ev.kept, 0)} · дублей {formatNum(ev.duplicates, 0)}
+                </span>
+              </div>
+            ))}
+            {data.skipped.length ? (
+              <div style={{ color: 'var(--fg-muted)' }}>
+                Пропущено:
+                {data.skipped.map((s) => (
+                  <div key={`${s.scope}|${s.scopeId}`}>{s.name || s.scopeId} — {s.reason}</div>
+                ))}
+              </div>
+            ) : null}
+          </div>
+        ) : null}
+      </div>
+    </Modal>
+  );
+}
+
 function EventNotifyModal({ event, onClose }) {
   const peak = isPeakEvent(event);
   return (
@@ -760,6 +858,7 @@ function PageDetection() {
   const [eventsExporting, setEventsExporting] = useState(false);
   const [messageEvent, setMessageEvent] = useState(null);
   const [flowspecEvent, setFlowspecEvent] = useState(null);
+  const [flowspecSummaryOpen, setFlowspecSummaryOpen] = useState(false);
   const [thresholdByKey, setThresholdByKey] = useState({});
   const [thresholdBusyKey, setThresholdBusyKey] = useState('');
   const [thresholdGlobal, setThresholdGlobal] = useState(1.6);
@@ -1641,13 +1740,18 @@ function PageDetection() {
                 </>
               )}
               {pageTab === 'active' && (
-                <Button
-                  size="sm"
-                  disabled={eventsBusy}
-                  onClick={() => reloadEvents('active')}
-                >
-                  Обновить
-                </Button>
+                <>
+                  <Button size="sm" onClick={() => setFlowspecSummaryOpen(true)}>
+                    Общий фильтр
+                  </Button>
+                  <Button
+                    size="sm"
+                    disabled={eventsBusy}
+                    onClick={() => reloadEvents('active')}
+                  >
+                    Обновить
+                  </Button>
+                </>
               )}
             </div>
           )}
@@ -1872,6 +1976,7 @@ function PageDetection() {
 
       <EventNotifyModal event={messageEvent} onClose={() => setMessageEvent(null)} />
       <FlowspecReportModal event={flowspecEvent} onClose={() => setFlowspecEvent(null)} />
+      <FlowspecSummaryModal open={flowspecSummaryOpen} onClose={() => setFlowspecSummaryOpen(false)} />
 
       {pageTab === 'table' && (
       <Card
