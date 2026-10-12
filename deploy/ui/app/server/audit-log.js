@@ -11,7 +11,9 @@ const { titlesMap } = require('./rbac/resources');
 const TABLE = process.env.CLICKHOUSE_AUDIT_LOG_TABLE || 'app_audit_log';
 const PAGE_VIEW_DEDUP_MS = 2000;
 
-const WRITE_ACTIONS = new Set([
+const CHART_ACTIONS = ['chart_create', 'chart_update', 'chart_delete'];
+
+const GENERIC_WRITE_ACTIONS = [
   'user_create',
   'user_update',
   'user_delete',
@@ -22,7 +24,9 @@ const WRITE_ACTIONS = new Set([
   'impersonate_start',
   'impersonate_end',
   'api_write',
-]);
+];
+
+const WRITE_ACTIONS = new Set([...GENERIC_WRITE_ACTIONS, ...CHART_ACTIONS]);
 
 const KIND_ACTIONS = {
   login: ['login'],
@@ -30,7 +34,8 @@ const KIND_ACTIONS = {
   logout: ['logout'],
   page: ['page_view'],
   query: ['explorer_query'],
-  write: [...WRITE_ACTIONS],
+  chart: CHART_ACTIONS,
+  write: GENERIC_WRITE_ACTIONS,
 };
 
 const recentPageViews = new Map();
@@ -365,6 +370,103 @@ function shouldCaptureAuditBeforeState(method, apiPath) {
     || p === '/api/refs/interface-roles/switches/restore';
 }
 
+function chartGroupBySummary(widgets) {
+  const list = Array.isArray(widgets) ? widgets : [];
+  const chart = list.find((w) => w?.type === 'timeseries_bps');
+  const top = list.find((w) => w?.type === 'top_table');
+  const groups = [];
+  if (chart?.groupBy?.length) groups.push(...chart.groupBy.map(String));
+  if (top?.groupBy?.length) groups.push(...top.groupBy.map(String));
+  const unique = [...new Set(groups)];
+  return unique.length ? unique.join(', ') : '—';
+}
+
+function chartAuditSnapshot(item) {
+  if (!item) return null;
+  return {
+    id: String(item.id || ''),
+    name: String(item.name || '').trim() || 'Без названия',
+    folder: String(item.folder || '').trim() || '—',
+    lookback: String(item.lookback || '—'),
+    groupBy: chartGroupBySummary(item.widgets),
+    materializeEnabled: Boolean(item.materialize?.enabled),
+  };
+}
+
+function recordChartCreate(body, changes, { duplicateSourceName } = {}) {
+  if (duplicateSourceName) {
+    pushChange(changes, {
+      field: 'duplicate',
+      label: 'Копия графика',
+      from: duplicateSourceName,
+      to: pickBodyField(body, 'name') || `${duplicateSourceName} (копия)`,
+    });
+    return;
+  }
+  const name = pickBodyField(body, 'name');
+  if (name) pushChange(changes, { field: 'name', label: 'Название', from: '—', to: name });
+  const folder = pickBodyField(body, 'folder');
+  if (folder) pushChange(changes, { field: 'folder', label: 'Папка', from: '—', to: folder });
+  const lookback = pickBodyField(body, 'lookback');
+  if (lookback) pushChange(changes, { field: 'lookback', label: 'Окно графика', from: '—', to: lookback });
+  const groupBy = chartGroupBySummary(body?.widgets);
+  if (groupBy !== '—') {
+    pushChange(changes, { field: 'groupBy', label: 'Группировка', from: '—', to: groupBy });
+  }
+  const materialize = body?.materialize?.enabled;
+  if (materialize !== undefined) {
+    pushChange(changes, {
+      field: 'materialize',
+      label: 'Подготовка данных',
+      from: '—',
+      to: materialize ? 'вкл' : 'выкл',
+    });
+  }
+}
+
+function diffChartSnapshot(before, body, changes) {
+  if (!before) return;
+  const nextName = pickBodyField(body, 'name');
+  if (nextName !== undefined && String(nextName) !== String(before.name)) {
+    pushChange(changes, { field: 'name', label: 'Название', from: before.name, to: nextName });
+  }
+  const nextFolder = pickBodyField(body, 'folder');
+  if (nextFolder !== undefined && String(nextFolder) !== String(before.folder)) {
+    pushChange(changes, { field: 'folder', label: 'Папка', from: before.folder, to: nextFolder });
+  }
+  const nextLookback = pickBodyField(body, 'lookback');
+  if (nextLookback !== undefined && String(nextLookback) !== String(before.lookback)) {
+    pushChange(changes, { field: 'lookback', label: 'Окно графика', from: before.lookback, to: nextLookback });
+  }
+  if (body?.widgets != null) {
+    const nextGroupBy = chartGroupBySummary(body.widgets);
+    if (nextGroupBy !== before.groupBy) {
+      pushChange(changes, { field: 'groupBy', label: 'Группировка', from: before.groupBy, to: nextGroupBy });
+    }
+  }
+  if (body?.materialize?.enabled !== undefined) {
+    const nextEnabled = Boolean(body.materialize.enabled);
+    if (nextEnabled !== before.materializeEnabled) {
+      pushChange(changes, {
+        field: 'materialize',
+        label: 'Подготовка данных',
+        from: before.materializeEnabled ? 'вкл' : 'выкл',
+        to: nextEnabled ? 'вкл' : 'выкл',
+      });
+    }
+  }
+}
+
+function recordChartDelete(snapshot, changes) {
+  if (!snapshot) return;
+  pushChange(changes, {
+    field: 'name',
+    label: 'График',
+    from: snapshot.name,
+    to: 'удалён',
+  });
+}
+
 function recordUserCreateFields(body, changes) {
   const fields = [
     ['username', 'Логин'],
@@ -492,6 +594,20 @@ async function captureAuditBeforeState(req, apiPath) {
         },
       };
     }
+
+    match = apiPath.match(/^\/api\/observations\/([^/]+)$/);
+    if (match && (method === 'PUT' || method === 'DELETE')) {
+      const { getObservation } = require('./observations');
+      const item = await getObservation(decodeURIComponent(match[1]), req.user?.id);
+      return item ? { kind: 'chart', snapshot: chartAuditSnapshot(item) } : null;
+    }
+
+    match = apiPath.match(/^\/api\/observations\/([^/]+)\/duplicate$/);
+    if (match && method === 'POST') {
+      const { getObservation } = require('./observations');
+      const item = await getObservation(decodeURIComponent(match[1]), req.user?.id);
+      return item ? { kind: 'chart', duplicateOf: item.id, snapshot: chartAuditSnapshot(item) } : null;
+    }
   } catch {
     return null;
   }
@@ -536,6 +652,14 @@ function buildMutatingAuditDetail(req, apiPath, action, beforeState) {
     diffInterfaceRoleSwitchVisibility(beforeState, changes);
   } else if (apiPath === '/api/refs/dns-resolvers' && method === 'POST') {
     recordDnsResolverCreate(body, changes);
+  } else if (action === 'chart_create' && method === 'POST') {
+    recordChartCreate(body, changes, {
+      duplicateSourceName: beforeState?.duplicateOf ? beforeState.snapshot?.name : undefined,
+    });
+  } else if (action === 'chart_update' && beforeState?.kind === 'chart') {
+    diffChartSnapshot(beforeState.snapshot, body, changes);
+  } else if (action === 'chart_delete' && beforeState?.kind === 'chart') {
+    recordChartDelete(beforeState.snapshot, changes);
   }
 
   const payload = { request };
@@ -702,6 +826,11 @@ function resolveWriteAction(method, apiPath) {
   if (/^\/api\/rbac\/roles$/.test(p) && m === 'POST') return 'role_change';
   if (/^\/api\/rbac\/roles\/[^/]+$/.test(p) && (m === 'PUT' || m === 'DELETE')) return 'role_change';
 
+  if (p === '/api/observations' && m === 'POST') return 'chart_create';
+  if (/^\/api\/observations\/[^/]+$/.test(p) && m === 'PUT') return 'chart_update';
+  if (/^\/api\/observations\/[^/]+$/.test(p) && m === 'DELETE') return 'chart_delete';
+  if (/^\/api\/observations\/[^/]+\/duplicate$/.test(p) && m === 'POST') return 'chart_create';
+
   return 'api_write';
 }
 
@@ -742,7 +871,7 @@ function resolveObjectFromPath(apiPath, method) {
 
   if (p.startsWith('/api/observations')) {
     match = p.match(/^\/api\/observations\/([^/]+)/);
-    return { objectId: match ? decodeURIComponent(match[1]) : '', objectLabel: 'Наблюдение' };
+    return { objectId: match ? decodeURIComponent(match[1]) : '', objectLabel: 'График' };
   }
 
   return { objectId: '', objectLabel: m === 'POST' ? p : '' };
@@ -840,7 +969,12 @@ async function writeMutatingAuditEvent(req, res, sessionId, { beforeState } = {}
 
   const action = resolveWriteAction(req.method, apiPath);
   const resource = getResourceForPath(apiPath, req.method) || '';
-  const { objectId, objectLabel } = resolveObjectFromPath(apiPath, req.method);
+  let { objectId, objectLabel } = resolveObjectFromPath(apiPath, req.method);
+  if (action.startsWith('chart_')) {
+    const body = req.body && typeof req.body === 'object' ? req.body : {};
+    const name = pickBodyField(body, 'name') || beforeState?.snapshot?.name;
+    if (name) objectLabel = String(name);
+  }
   const ctx = auditContextFromReq(req, sessionId);
   const result = auditResultFromStatus(res.statusCode);
   const detail = buildMutatingAuditDetail(req, apiPath, action, beforeState);

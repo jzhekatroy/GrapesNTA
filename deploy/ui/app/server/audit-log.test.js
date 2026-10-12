@@ -80,6 +80,11 @@ test('resolveWriteAction maps known mutation paths', () => {
   assert.equal(resolveWriteAction('POST', '/api/users/u1/password'), 'password_change');
   assert.equal(resolveWriteAction('PUT', '/api/rbac/users/u1/role'), 'role_change');
   assert.equal(resolveWriteAction('POST', '/api/refs/l3-prefixes'), 'api_write');
+  assert.equal(resolveWriteAction('POST', '/api/observations'), 'chart_create');
+  assert.equal(resolveWriteAction('PUT', '/api/observations/obs-1'), 'chart_update');
+  assert.equal(resolveWriteAction('DELETE', '/api/observations/obs-1'), 'chart_delete');
+  assert.equal(resolveWriteAction('POST', '/api/observations/obs-1/duplicate'), 'chart_create');
+  assert.equal(resolveWriteAction('POST', '/api/observations/obs-1/materialize'), 'api_write');
 });
 
 test('shouldAuditMutatingRequest skips exempt and GET paths', () => {
@@ -181,6 +186,66 @@ test('buildMutatingAuditDetail records interface role boundary diff', () => {
   assert.ok(parsed.changes.some(
     (c) => c.label.includes('10.0.0.1:24') && c.from === 'Внешняя' && c.to === 'Наша сторона',
   ));
+});
+
+test('buildMutatingAuditDetail records chart create and update diffs', () => {
+  const createDetail = buildMutatingAuditDetail(
+    {
+      method: 'POST',
+      body: {
+        name: 'UDP flood',
+        lookback: '24h',
+        widgets: [{ type: 'timeseries_bps', groupBy: ['src_ip'] }],
+      },
+    },
+    '/api/observations',
+    'chart_create',
+    null,
+  );
+  const created = JSON.parse(createDetail);
+  assert.ok(created.changes.some((c) => c.label === 'Название' && c.to === 'UDP flood'));
+
+  const updateDetail = buildMutatingAuditDetail(
+    {
+      method: 'PUT',
+      body: { name: 'UDP flood v2', lookback: '1h' },
+    },
+    '/api/observations/obs-1',
+    'chart_update',
+    {
+      kind: 'chart',
+      snapshot: {
+        name: 'UDP flood',
+        folder: 'Мои наблюдения',
+        lookback: '24h',
+        groupBy: 'src_ip',
+        materializeEnabled: false,
+      },
+    },
+  );
+  const updated = JSON.parse(updateDetail);
+  assert.ok(updated.changes.some((c) => c.label === 'Название' && c.from === 'UDP flood' && c.to === 'UDP flood v2'));
+  assert.ok(updated.changes.some((c) => c.label === 'Окно графика' && c.from === '24h' && c.to === '1h'));
+});
+
+test('buildMutatingAuditDetail records chart delete diff', () => {
+  const detail = buildMutatingAuditDetail(
+    { method: 'DELETE', body: {} },
+    '/api/observations/obs-1',
+    'chart_delete',
+    {
+      kind: 'chart',
+      snapshot: {
+        name: 'My chart',
+        folder: '—',
+        lookback: '1h',
+        groupBy: '—',
+        materializeEnabled: false,
+      },
+    },
+  );
+  const parsed = JSON.parse(detail);
+  assert.ok(parsed.changes.some((c) => c.label === 'График' && c.from === 'My chart' && c.to === 'удалён'));
 });
 
 test('buildMutatingAuditDetail stores request and user field diffs', () => {

@@ -13,6 +13,7 @@ const KIND_OPTIONS = [
   { id: 'logout', label: 'Выход' },
   { id: 'page', label: 'Страница' },
   { id: 'query', label: 'Запрос' },
+  { id: 'chart', label: 'График' },
   { id: 'write', label: 'Изменение' },
 ];
 
@@ -41,6 +42,9 @@ const ACTION_LABELS = {
   impersonate_end: 'Выход из кабинета',
   page_view: 'Страница',
   explorer_query: 'Запрос',
+  chart_create: 'График: создан',
+  chart_update: 'График: изменён',
+  chart_delete: 'График: удалён',
   api_write: 'Изменение',
 };
 
