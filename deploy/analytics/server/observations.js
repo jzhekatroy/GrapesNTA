@@ -47,6 +47,7 @@ const {
   vlanDistributionTimeseries,
   normalizeVlanIdList,
 } = require('./queries');
+const { getVlanNameMap, vlanLabel } = require('./net-l2-vlans');
 
 const ARTIFACTS_DIR = path.join(__dirname, 'data', 'observation_runs');
 const CHART_IMAGE_FILE = 'chart.png';
@@ -972,6 +973,43 @@ async function enrichEntityLabelsInRows(rows, groupBy = []) {
   });
 }
 
+function vlanGroupIndexes(groupBy = []) {
+  return groupBy
+    .map((g, i) => (g === 'vlan' ? i : -1))
+    .filter((i) => i >= 0);
+}
+
+/** Rollup хранит vlan id; в UI — как в vlan_trend / explorer (VLAN 0 — отдельно от «VLAN —»). */
+function rollupVlanDisplayLabel(vlanId, nameMap) {
+  const id = Number(vlanId);
+  if (!Number.isFinite(id)) return String(vlanId ?? '—');
+  if (id === 0) {
+    const info = nameMap?.get(0);
+    return info?.displayName ? `VLAN 0 · ${info.displayName}` : 'VLAN 0';
+  }
+  return vlanLabel(id, nameMap);
+}
+
+async function enrichVlanLabelsInRows(rows, groupBy = []) {
+  const indexes = vlanGroupIndexes(groupBy);
+  if (!indexes.length || !rows?.length) return rows || [];
+
+  const nameMap = await getVlanNameMap();
+  return rows.map((row) => {
+    const rawValues = Array.isArray(row.rawValues)
+      ? [...row.rawValues]
+      : [...(row.values || [])];
+    const values = Array.isArray(row.values) ? [...row.values] : [...rawValues];
+    for (const idx of indexes) {
+      const raw = String(rawValues[idx] ?? values[idx] ?? '').trim();
+      if (!raw || raw === '—') continue;
+      if (!/^\d+$/.test(raw)) continue;
+      values[idx] = rollupVlanDisplayLabel(Number(raw), nameMap);
+    }
+    return { ...row, values, rawValues };
+  });
+}
+
 function tcpFlagsGroupIndexes(groupBy = []) {
   return groupBy
     .map((g, i) => (g === 'tcp_flags' ? i : -1))
@@ -1146,7 +1184,8 @@ async function readRollupTop(observationId, window, { limit = TOP_ROWS_LIMIT, gr
     });
     const withAsn = await enrichAsnLabelsInRows(mapped, groupBy);
     const withEntity = await enrichEntityLabelsInRows(withAsn, groupBy);
-    return { rows: enrichTcpFlagsLabelsInRows(withEntity, groupBy), totals, windowSeconds };
+    const withVlan = await enrichVlanLabelsInRows(withEntity, groupBy);
+    return { rows: enrichTcpFlagsLabelsInRows(withVlan, groupBy), totals, windowSeconds };
   } catch (err) {
     return { rows: [], error: err.message };
   }
