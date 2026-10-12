@@ -79,6 +79,13 @@ describe('interface label filters match stored columns', () => {
     assert.doesNotMatch(sql, /IPv6NumToString\(f\.`?sampler_address`?\)/);
   });
 
+  it('compares the raw interface number so the sort key applies', async () => {
+    const sql = await flowsSql([{ field: 'out_if_name', op: '=', value: 'Ethernet1/48' }]);
+    assert.match(sql, /\(f\.`sampler_address`, f\.`out_if`\) IN \(SELECT/);
+    assert.match(sql, /if_index BETWEEN 1 AND 1073741823/);
+    assert.doesNotMatch(sql, /toUInt32OrZero\(toString\(f\.`out_if`\)\)/);
+  });
+
   it('still joins when grouping by the label, only the filter changes', async () => {
     const sql = await flowsSql(
       [{ field: 'in_if_alias', op: '=', value: 'cogent-fv=' }],
@@ -104,5 +111,60 @@ describe('interface label filters match stored columns', () => {
     });
     assert.equal(spec.params.filter_0, 'cogent-fv=');
     assert.equal(spec.params.filter_1, 'in');
+  });
+});
+
+describe('switch_ip filter compares stored sampler bytes', () => {
+  const samplerEq = /f\.`sampler_address` = toFixedString\(reverse\(reinterpretAsFixedString\(toUInt32\(toIPv4\(\{filter_0:String\}\)\)\)\), 16\)/;
+
+  it('uses the stored bytes for an IPv4 address', async () => {
+    const spec = await explorerFlows({
+      ...WINDOW,
+      groupBy: ['src_asn'],
+      filters: [{ field: 'switch_ip', op: '=', value: '172.18.19.55' }],
+    });
+    assert.match(spec.sql, samplerEq);
+    assert.equal(spec.params.filter_0, '172.18.19.55');
+    assert.doesNotMatch(spec.sql, /toString\(if\(\s*length\(f\.`sampler_address`\)/);
+  });
+
+  it('uses IPv6 bytes only for an IPv6 address', async () => {
+    const sql = await flowsSql([{ field: 'switch_ip', op: '=', value: '2001:db8::1' }]);
+    assert.match(sql, /f\.`sampler_address` = toFixedString\(IPv6StringToNum\(\{filter_0:String\}\), 16\)/);
+    assert.doesNotMatch(sql, /toIPv4\(\{filter_0:String\}\)/);
+  });
+
+  it('keeps a non-address on the text path', async () => {
+    const sql = await flowsSql([{ field: 'switch_ip', op: '=', value: 'core-1' }]);
+    assert.match(sql, /toString\(if\(\s*length\(f\.`sampler_address`\)/);
+    assert.doesNotMatch(sql, /toIPv4\(\{filter_0:String\}\)/);
+  });
+
+  it('builds an IN list when every value is an address', async () => {
+    const spec = await explorerFlows({
+      ...WINDOW,
+      groupBy: ['src_asn'],
+      filters: [{ field: 'switch_ip', op: 'in', value: '172.18.19.55, 2001:db8::1' }],
+    });
+    assert.match(spec.sql, /f\.`sampler_address` IN \(toFixedString\(reverse\(reinterpretAsFixedString\(toUInt32\(toIPv4\(\{filter_0_0:String\}\)\)\)\), 16\), toFixedString\(IPv6StringToNum\(\{filter_0_1:String\}\), 16\)\)/);
+    assert.equal(spec.params.filter_0_0, '172.18.19.55');
+    assert.equal(spec.params.filter_0_1, '2001:db8::1');
+  });
+
+  it('falls back when an IN list mixes an address and a name', async () => {
+    const sql = await flowsSql([{ field: 'switch_ip', op: 'in', value: '172.18.19.55, core-1' }]);
+    assert.match(sql, /IN \{filter_0:Array\(String\)\}/);
+    assert.doesNotMatch(sql, /toIPv4\(\{filter_0/);
+  });
+
+  it('negates a real address against the stored bytes', async () => {
+    const sql = await flowsSql([{ field: 'switch_ip', op: '!=', value: '172.18.19.55' }]);
+    assert.match(sql, /f\.`sampler_address` != toFixedString\(reverse\(reinterpretAsFixedString\(toUInt32\(toIPv4\(\{filter_0:String\}\)\)\)\), 16\)/);
+  });
+
+  it('leaves cidr on the range check', async () => {
+    const sql = await flowsSql([{ field: 'switch_ip', op: 'cidr', value: '172.18.19.0/24' }]);
+    assert.match(sql, /isIPAddressInRange\(/);
+    assert.doesNotMatch(sql, /f\.`sampler_address` = toFixedString/);
   });
 });

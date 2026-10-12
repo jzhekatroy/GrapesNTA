@@ -1123,10 +1123,15 @@ function explorerDimensions() {
     // every flow row in the window. The inventory holds a few thousand ports, so
     // resolving the label to its (sampler, ifIndex) pairs up front lets the scan
     // compare stored columns and drop the JOIN.
+    // sflowIfIndexExpr(x) равен x при 1 ≤ x ≤ 2^30−1 и 0 иначе. Индекс 0
+    // и индексы со старшими битами декодер не сопоставляет с инвентарём,
+    // поэтому сырой in_if/out_if против индексов 1..1073741823 — тот же
+    // набор портов, и сравнение попадает в ключ сортировки.
     const ifPairFilter = (ifCol, labelCol) => ({
       labelCol,
-      keyExpr: `(f.${samplerCol}, ${sflowIfIndexExpr(`f.${ifCol}`)})`,
-      pairsFrom: `SELECT ${samplerKeyFromIpExpr('switch_ip')}, if_index FROM ${ifacesRef}`,
+      keyExpr: `(f.${samplerCol}, f.${ifCol})`,
+      pairsFrom: `SELECT ${samplerKeyFromIpExpr('switch_ip')}, toUInt32(if_index) FROM ${ifacesRef}`,
+      indexSql: 'if_index BETWEEN 1 AND 1073741823',
     });
     // Both if_name and if_alias reuse one JOIN per side: identical joinSql strings
     // are deduplicated downstream, so grouping by name + alias stays single-join.
@@ -2018,6 +2023,41 @@ function buildMacFilterClause(macCol, op, paramName, { normalized, hexValues, co
   return `${macCol} = unhex({${paramName}:String})`;
 }
 
+// Коммутатор в ключе сортировки лежит байтами. Текст flowSamplerIpExpr
+// на каждой строке этот ключ не использует. Для настоящего IP сравниваем
+// sampler_address с теми же байтами, что пишет samplerKeyFromIpExpr, и
+// только нужное семейство: if(isIPv4, …, IPv6StringToNum) на IPv4-литерале
+// может вычислить обе ветки. Имя или мусор остаются на текстовом пути.
+function samplerAddressKeyExpr(ipExpr, value) {
+  const family = net.isIP(String(value ?? '').trim());
+  if (family === 4) {
+    return `toFixedString(reverse(reinterpretAsFixedString(toUInt32(toIPv4(${ipExpr})))), 16)`;
+  }
+  if (family === 6) {
+    return `toFixedString(IPv6StringToNum(${ipExpr}), 16)`;
+  }
+  return null;
+}
+
+function switchSamplerByteClause(samplerExpr, op, rawValue, values, params, paramName) {
+  if (op === 'in' || op === 'not_in') {
+    const list = (values || []).map((v) => String(v ?? '').trim()).filter(Boolean);
+    if (!list.length || list.some((v) => !samplerAddressKeyExpr('x', v))) return null;
+    const parts = list.map((value, i) => {
+      const key = `${paramName}_${i}`;
+      params[key] = value;
+      return samplerAddressKeyExpr(`{${key}:String}`, value);
+    });
+    return `${samplerExpr} ${op === 'not_in' ? 'NOT IN' : 'IN'} (${parts.join(', ')})`;
+  }
+  if (op !== '=' && op !== '!=' && op !== '<>') return null;
+  const single = String(rawValue ?? '').trim();
+  const keyExpr = samplerAddressKeyExpr(`{${paramName}:String}`, single);
+  if (!keyExpr) return null;
+  params[paramName] = single;
+  return `${samplerExpr} ${op === '=' ? '=' : '!='} ${keyExpr}`;
+}
+
 /**
  * Port name/alias filter expressed against stored columns: the SNMP inventory
  * yields the (sampler, ifIndex) pairs carrying that label and the scan matches
@@ -2027,7 +2067,7 @@ function buildMacFilterClause(macCol, op, paramName, { normalized, hexValues, co
  * ports absent from the inventory, which the pair set cannot represent.
  */
 function buildIfPairFilterSql(pairFilter, op, values, rawValue, params, paramName) {
-  const { labelCol, keyExpr, pairsFrom } = pairFilter;
+  const { labelCol, keyExpr, pairsFrom, indexSql } = pairFilter;
   const single = String(rawValue ?? '').trim();
   let match;
   let negate;
@@ -2051,7 +2091,8 @@ function buildIfPairFilterSql(pairFilter, op, values, rawValue, params, paramNam
     return null;
   }
 
-  return `${keyExpr} ${negate ? 'NOT IN' : 'IN'} (${pairsFrom} WHERE ${match})`;
+  const where = indexSql ? `(${match}) AND ${indexSql}` : match;
+  return `${keyExpr} ${negate ? 'NOT IN' : 'IN'} (${pairsFrom} WHERE ${where})`;
 }
 
 async function buildExplorerFilterClauses(filters, dims, params) {
@@ -2391,6 +2432,20 @@ async function buildExplorerFilterClauses(filters, dims, params) {
         );
         if (exact) {
           addClause(exact);
+          continue;
+        }
+      }
+      if (dim.filterType === 'switch_ip' && dim.groupKeyExpr) {
+        const byteClause = switchSamplerByteClause(
+          dim.groupKeyExpr,
+          op,
+          f.value,
+          values,
+          params,
+          paramName,
+        );
+        if (byteClause) {
+          addClause(byteClause);
           continue;
         }
       }
