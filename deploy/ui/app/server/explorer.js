@@ -3373,6 +3373,7 @@ async function explorerFlows(body = {}, options = {}) {
         sum(a.bytes) OVER () AS total_bytes,
         sum(a.packets) OVER () AS total_packets,
         sum(a.flows) OVER () AS total_flows`;
+  const seriesKeySql = plan.mayCollapse ? '' : explorerSeriesKeySelect(allKeys, 'a');
 
   const innerSql = plan.mayCollapse
     ? `
@@ -3409,7 +3410,7 @@ async function explorerFlows(body = {}, options = {}) {
         a.bytes AS bytes,
         round(a.bytes * 8 / window_seconds, 0) AS avg_bps,
         a.packets AS packets,
-        a.flows AS flows${plainTotalsSql}${twoPhaseThresholdExtrasPlain}
+        a.flows AS flows${plainTotalsSql}${twoPhaseThresholdExtrasPlain}${seriesKeySql}
       FROM inner_agg AS a
       ${uniqueLabelJoins.join('\n      ')}
     `;
@@ -3426,9 +3427,10 @@ async function explorerFlows(body = {}, options = {}) {
     orderBy,
     async map(rows) {
       rememberExplorerFlowTotals(meta, rows);
-      return mapExplorerFlowRows(
+      const mapped = await mapExplorerFlowRows(
         groups, rows, windowSeconds, vlanGroupIndexes, asnGroupIndexes, tcpGroupIndexes, asPathGroupIndexes,
       );
+      return seriesKeySql ? attachExplorerSeriesKeys(mapped, rows, allKeys.length) : mapped;
     },
   });
 }
@@ -3696,6 +3698,80 @@ function explorerSeriesMatchers(groups, dims, flowRows, params) {
   return matched;
 }
 
+// Ключ передаётся как hex(toString(key)) + toTypeName(key): CAST(unhex(...) AS type)
+// восстанавливает точное значение, а hex безопасно вставлять в SQL литералом.
+const EXPLORER_SERIES_KEY_TYPE_RE = /^[A-Za-z0-9_(), ]+$/;
+
+function explorerSeriesKeySelect(keys, prefix) {
+  return keys.map((k, i) => `,
+        hex(toString(${prefix}.${k.keyAlias})) AS series_key_${i},
+        toTypeName(${prefix}.${k.keyAlias}) AS series_key_type_${i}`).join('');
+}
+
+function attachExplorerSeriesKeys(mappedRows, rows, keyCount) {
+  mappedRows.forEach((row, i) => {
+    const values = [];
+    const types = [];
+    for (let k = 0; k < keyCount; k += 1) {
+      const value = rows[i]?.[`series_key_${k}`];
+      const type = rows[i]?.[`series_key_type_${k}`];
+      if (typeof value !== 'string' || !/^[0-9A-Fa-f]*$/.test(value)) return;
+      if (typeof type !== 'string' || !EXPLORER_SERIES_KEY_TYPE_RE.test(type)) return;
+      values.push(value);
+      types.push(type.replace(/^LowCardinality\((.*)\)$/, '$1'));
+    }
+    // Не перечисляемое: ключи нужны только графику, в JSON ответа не попадают.
+    Object.defineProperty(row, 'seriesKey', { value: { values, types }, enumerable: false });
+  });
+  return mappedRows;
+}
+
+function explorerSeriesKeySig(values) {
+  return values.map((v) => String(v).toUpperCase()).join('|');
+}
+
+/**
+ * Ряды строк таблицы по сырым ключам группировки вместо toString() каждого
+ * измерения в каждом sumIf: transform для одного скалярного ключа, иначе IN по
+ * набору кортежей и поиск строки по hex ключа. null — ключей нет (однофазный
+ * путь, схлопывание интерфейсов), остаётся сравнение подписей.
+ */
+function explorerRawSeriesIndex(groups, dims, flowRows) {
+  if (!flowRows.length) return null;
+  const plan = buildExplorerGroupPlan(groups, dims);
+  if (!plan.useTwoPhase || plan.mayCollapse) return null;
+  const keys = [...plan.uniqueKeys, ...plan.helpers];
+  const types = flowRows[0].seriesKey?.types;
+  if (!types || types.length !== keys.length) return null;
+  const typeSig = types.join('|');
+  if (!flowRows.every((row) => row.seriesKey?.types.join('|') === typeSig)) return null;
+  const cast = (v, i) => `CAST(unhex('${v}') AS ${types[i]})`;
+  const keyExprs = keys.map((k) => k.keyExpr);
+  // Один скалярный ключ: transform заметно быстрее IN по кортежу и сразу даёт
+  // номер строки.
+  if (keyExprs.length === 1 && /^(U?Int\d+|Float\d+|String)$/.test(types[0])) {
+    const ids = flowRows.map((_, i) => i + 1);
+    return {
+      withSql: `transform(${keyExprs[0]}, [${flowRows.map((row) => cast(row.seriesKey.values[0], 0)).join(', ')}], [${ids.join(', ')}], 0) AS series_idx,
+          series_idx > 0 AS series_hit,`,
+      keySelect: ['series_idx AS series_k0'],
+      keyHex: ['toString(series_k0)'],
+      keyAliases: ['series_k0'],
+      rowIndexBySig: new Map(ids.map((id, i) => [String(id), i])),
+    };
+  }
+  const literal = (values) => `tuple(${values.map(cast).join(', ')})`;
+  return {
+    withSql: `tuple(${keyExprs.join(', ')}) IN (${flowRows.map((row) => literal(row.seriesKey.values)).join(', ')}) AS series_hit,`,
+    keySelect: keyExprs.map((expr, i) => (
+      `if(series_hit, ${expr}, defaultValueOfArgumentType(${expr})) AS series_k${i}`
+    )),
+    keyHex: keyExprs.map((_, i) => `hex(toString(series_k${i}))`),
+    keyAliases: keyExprs.map((_, i) => `series_k${i}`),
+    rowIndexBySig: new Map(flowRows.map((row, i) => [explorerSeriesKeySig(row.seriesKey.values), i])),
+  };
+}
+
 // Общий график и графики выбранных групп — один проход по потокам.
 // sum() даёт весь отфильтрованный трафик, sumIf — только строку таблицы.
 async function explorerTrafficChart(body = {}, flowRows = [], options = {}) {
@@ -3710,12 +3786,19 @@ async function explorerTrafficChart(body = {}, flowRows = [], options = {}) {
   windowSpec = explorerWindowSpecWithCabinetClientCatalog(windowSpec, groups);
   const params = { ...windowSpec.params };
   const { filterSql, joins: filterJoins } = await buildExplorerFilterClauses(q.filters, dims, params);
-  const joinSql = collectExplorerJoins(groups, dims, filterJoins);
   const t = col('time');
   const whereClauses = [`f.${t} >= ts_from`, `f.${t} < ts_to`];
   if (filterSql) whereClauses.push(filterSql);
   const scopedParams = applyExplorerScope(whereClauses, params, q);
-  const matched = groups.length ? explorerSeriesMatchers(groups, dims, flowRows, scopedParams) : [];
+  // uniq_src нельзя сложить из рядов — для него остаётся sumIf по подписям.
+  // Одиночный оператор быстрее через отсечение строк в WHERE (buildExplorerEntitySeriesMatch).
+  const entityOnly = groups.length === 1 && EXPLORER_ENTITY_SERIES_DIMS.has(groups[0]);
+  const rawSeries = groups.length && q.metric !== 'uniq_src' && !entityOnly
+    ? explorerRawSeriesIndex(groups, dims, flowRows)
+    : null;
+  const matched = rawSeries
+    ? flowRows.map((row) => ({ row }))
+    : (groups.length ? explorerSeriesMatchers(groups, dims, flowRows, scopedParams) : []);
   const bucketExpr = explorerBucketExpr(`f.${t}`, gran.key, gran.seconds);
   const metricExpr = {
     bps: `round(sum(${scaled.bytes}) * 8 / ${gran.seconds}, 0)`,
@@ -3725,15 +3808,62 @@ async function explorerTrafficChart(body = {}, flowRows = [], options = {}) {
     flows: `sum(${scaled.flowWeight})`,
     uniq_src: `uniqCombined(f.${col('srcIp')})`,
   }[q.metric] || `round(sum(${scaled.bytes}) * 8 / ${gran.seconds}, 0)`;
-  const seriesSelect = matched.map((item, i) => `
+  const windowSeconds = explorerResolvedWindowSeconds(body, q);
+  const requestTimeoutMs = explorerHeavyRequestTimeoutMs(windowSeconds, false);
+  const whereSql = whereClauses.join('\n        AND ');
+
+  let sql;
+  if (rawSeries) {
+    // Ряд строки — группа (bucket, ключи строки) с простыми суммами: 75 sumIf на
+    // каждый поток стоят дороже самого чтения. Итог бакета — сумма групп,
+    // поэтому метрика считается по той же формуле от тех же целых сумм.
+    const outerMetricExpr = {
+      volume: 'sum(s_bytes)',
+      pps: `round(sum(s_packets) / ${gran.seconds}, 0)`,
+      fps: `round(sum(s_flows) / ${gran.seconds}, 2)`,
+      flows: 'sum(s_flows)',
+    }[q.metric] || `round(sum(s_bytes) * 8 / ${gran.seconds}, 0)`;
+    sql = `
+      SELECT
+        bucket,
+        any(bucket_ts) AS bucket_ts,
+        sum(s_bytes) AS bytes,
+        sum(s_packets) AS packets,
+        sum(s_flows) AS flows,
+        round(sum(s_bytes) * 8 / ${gran.seconds}, 0) AS bps,
+        ${outerMetricExpr} AS metric_value,
+        groupArrayIf(
+          tuple([${rawSeries.keyHex.join(', ')}], s_bytes, s_packets, s_flows),
+          series_hit
+        ) AS series
+      FROM (
+        WITH
+          ${windowSpec.cteHead}
+          ${rawSeries.withSql}
+          dateDiff('second', ts_from, ts_to) AS window_seconds
+        SELECT
+          ${explorerBucketSelect(bucketExpr)},
+          series_hit,
+          ${rawSeries.keySelect.join(',\n          ')},
+          sum(${scaled.bytes}) AS s_bytes,
+          sum(${scaled.packets}) AS s_packets,
+          sum(${scaled.flowWeight}) AS s_flows
+        FROM ${flowsRawTableRef()} AS f
+        ${[...filterJoins].join('\n        ')}
+        PREWHERE f.date >= toDate(ts_from) - 1
+          AND f.date <= toDate(ts_to)
+        WHERE ${whereSql}
+        GROUP BY bucket, bucket_ts, series_hit, ${rawSeries.keyAliases.join(', ')}
+      )
+      GROUP BY bucket
+      ORDER BY bucket
+    `;
+  } else {
+    const seriesSelect = matched.map((item, i) => `
         sumIf(${scaled.bytes}, ${item.cond}) AS s${i}_bytes,
         sumIf(${scaled.packets}, ${item.cond}) AS s${i}_packets,
         sumIf(${scaled.flowWeight}, ${item.cond}) AS s${i}_flows`).join(',');
-  const windowSeconds = explorerResolvedWindowSeconds(body, q);
-  const requestTimeoutMs = explorerHeavyRequestTimeoutMs(windowSeconds, false);
-
-  return {
-    sql: `
+    sql = `
       WITH
         ${windowSpec.cteHead}
         dateDiff('second', ts_from, ts_to) AS window_seconds
@@ -3745,13 +3875,17 @@ async function explorerTrafficChart(body = {}, flowRows = [], options = {}) {
         round(sum(${scaled.bytes}) * 8 / ${gran.seconds}, 0) AS bps,
         ${metricExpr} AS metric_value${seriesSelect ? `,${seriesSelect}` : ''}
       FROM ${flowsRawTableRef()} AS f
-      ${joinSql}
+      ${collectExplorerJoins(groups, dims, filterJoins)}
       PREWHERE f.date >= toDate(ts_from) - 1
         AND f.date <= toDate(ts_to)
-      WHERE ${whereClauses.join('\n        AND ')}
+      WHERE ${whereSql}
       GROUP BY bucket
       ORDER BY bucket
-    `,
+    `;
+  }
+
+  return {
+    sql,
     params: scopedParams,
     clickhouse_settings: {
       ...EXPLORER_CH_SETTINGS,
@@ -3763,6 +3897,15 @@ async function explorerTrafficChart(body = {}, flowRows = [], options = {}) {
       const seriesByRow = Object.fromEntries(flowRows.map((row) => [row.id, []]));
       const timeseries = [];
       for (const r of rows) {
+        if (rawSeries) {
+          for (const [keyHex, bytes, packets, flows] of r.series || []) {
+            const i = rawSeries.rowIndexBySig.get(explorerSeriesKeySig(keyHex || []));
+            if (i == null) continue;
+            r[`s${i}_bytes`] = bytes;
+            r[`s${i}_packets`] = packets;
+            r[`s${i}_flows`] = flows;
+          }
+        }
         const point = {
           bucket: r.bucket,
           bucketMs: explorerBucketMs(r),
