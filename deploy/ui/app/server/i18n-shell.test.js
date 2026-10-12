@@ -63,3 +63,35 @@ test('английские подписи дашборда совпадают с
   assert.equal(en['dashboard.geo.asnCountry'], 'ASN Country (Registry)');
   assert.equal(en['dashboard.otherPorts.title'], 'Top 20 other ports');
 });
+
+test('английские подписи наблюдений совпадают с требованиями', () => {
+  const en = loadLocaleMessages('en');
+  assert.equal(en['observations.title'], 'Observations');
+  assert.equal(en['observations.collector'], 'Collector');
+  assert.equal(en['observations.filters'], 'Filters');
+  assert.equal(en['observations.filters.none'], 'no filters');
+  assert.equal(en['observations.materialize.label'], 'Data preparation (rollup every 5 minutes)');
+  assert.equal(en['observations.group'], 'Group');
+  assert.equal(en['observations.prep.active'], 'Data preparation: active {n}');
+  assert.equal(en['observations.expand'], 'Expand');
+  assert.equal(en['observations.collapse'], 'Collapse');
+  assert.equal(en['observations.new'], 'New');
+  assert.equal(en['observations.fromExplorer'], 'From Explorer…');
+  assert.equal(en['observations.preset.uplink'], 'Inbound/Outbound traffic');
+  assert.equal(en['observations.preset.vlan'], 'VLAN Traffic');
+  assert.equal(en['observations.settings'], 'Settings');
+  assert.equal(en['observations.settings.back'], 'Dashboard');
+  assert.equal(en['observations.stats.avgTitle'], 'Average over window points');
+  assert.equal(en['observations.stats.nowMaxTitle'], 'Last point relative to window peak');
+  assert.equal(en['observations.settings.save'], 'Save');
+  assert.equal(en['observations.settings.changeFilters'], 'Change filters in the traffic explorer');
+  assert.equal(en['observations.deleteConfirm'], 'Delete observation?');
+  assert.equal(en['observations.series.add'], 'Add to selected');
+  assert.equal(en['observations.series.remove'], 'Remove from selected');
+  assert.equal(en['observations.chart.lines'], 'Lines');
+  assert.equal(en['observations.chart.linesHint'], 'Overlapping lines by series');
+  assert.equal(en['observations.chart.stack'], 'Stack');
+  assert.equal(en['observations.chart.stackHint'], 'Stacked areas, sum of selected series');
+  assert.equal(en['chart.tip.interval'], 'interval {bucket}');
+  assert.equal(en['chart.tip.from'], '5 min from {time}');
+});

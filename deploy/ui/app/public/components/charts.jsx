@@ -555,18 +555,33 @@ function formatTipPointTime(point, displayTimeZone = getDisplayTimezone(), bucke
   const hour = pickIntlPart(parts, 'hour');
   const minute = pickIntlPart(parts, 'minute');
   const clock = `${day}.${month}.${year} ${hour}:${minute}`;
-  if (Number(bucketSeconds) === 300) return `5 мин с ${clock}`;
+  if (Number(bucketSeconds) === 300) {
+    return (typeof GrapesI18n !== 'undefined' && GrapesI18n.t)
+      ? GrapesI18n.t('chart.tip.from', { time: clock })
+      : `5 мин с ${clock}`;
+  }
   return clock;
 }
 
 function formatTipBucketDuration(bucketSeconds) {
   if (!bucketSeconds || bucketSeconds <= 0) return null;
-  if (bucketSeconds === 60) return '1 мин';
-  if (bucketSeconds === 300) return '5 мин';
-  if (bucketSeconds === 3600) return '1 ч';
-  if (bucketSeconds % 3600 === 0) return `${bucketSeconds / 3600} ч`;
-  if (bucketSeconds % 60 === 0) return `${bucketSeconds / 60} мин`;
-  return `${bucketSeconds} с`;
+  const t = (key, params) => (
+    (typeof GrapesI18n !== 'undefined' && GrapesI18n.t)
+      ? GrapesI18n.t(key, params)
+      : null
+  );
+  if (bucketSeconds === 60) return t('chart.tip.bucket.1min') || '1 мин';
+  if (bucketSeconds === 300) return t('chart.tip.bucket.5min') || '5 мин';
+  if (bucketSeconds === 3600) return t('chart.tip.bucket.1h') || '1 ч';
+  if (bucketSeconds % 3600 === 0) {
+    const n = bucketSeconds / 3600;
+    return t('chart.tip.bucket.hours', { n }) || `${n} ч`;
+  }
+  if (bucketSeconds % 60 === 0) {
+    const n = bucketSeconds / 60;
+    return t('chart.tip.bucket.minutes', { n }) || `${n} мин`;
+  }
+  return t('chart.tip.bucket.seconds', { n: bucketSeconds }) || `${bucketSeconds} с`;
 }
 
 function dataDatetimeLocalToDisplay(value, displayTimeZone = getDisplayTimezone(), dataTimeZone = getDataTimezone()) {
@@ -974,8 +989,13 @@ function DualChart({
   const tipBucket = tipBucketLabel ?? (
     Number(bucketSeconds) === 300 ? null : formatTipBucketDuration(bucketSeconds)
   );
-  const tipMeta = hoverPoint && (tipBucket || tipUnitLabel)
-    ? [tipBucket ? `интервал ${tipBucket}` : null, tipUnitLabel || null].filter(Boolean).join(' · ')
+  const tipIntervalLabel = tipBucket
+    ? ((typeof GrapesI18n !== 'undefined' && GrapesI18n.t)
+      ? GrapesI18n.t('chart.tip.interval', { bucket: tipBucket })
+      : `интервал ${tipBucket}`)
+    : null;
+  const tipMeta = hoverPoint && (tipIntervalLabel || tipUnitLabel)
+    ? [tipIntervalLabel, tipUnitLabel || null].filter(Boolean).join(' · ')
     : null;
   const hoverStack = hoverPoint && isStack
     ? computeChartStackBands(hoverPoint, activeLines, seriesBwValue, stackMode)

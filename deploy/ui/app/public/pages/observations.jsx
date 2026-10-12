@@ -2,23 +2,25 @@
 
 const { useState, useEffect, useCallback, useMemo, useRef } = React;
 
-const LOOKBACK_LABELS = {
+function obsT(key, params) {
+  return GrapesI18n.t(key, params);
+}
+
+const LOOKBACK_LABELS_LEGACY = {
   '15m': '15 минут',
-  '30m': '30 минут',
-  '1h': '1 час',
-  '6h': '6 часов',
-  '24h': '24 часа',
-  '7d': '7 дней',
 };
 
-const LOOKBACK_SHORT = {
-  '15m': '15м',
-  '30m': '30м',
-  '1h': '1ч',
-  '6h': '6ч',
-  '24h': '24ч',
-  '7d': '7д',
-};
+function observationLookbackLabel(v) {
+  const key = `period.${v}`;
+  if (GrapesI18n.has(key)) return obsT(key);
+  return LOOKBACK_LABELS_LEGACY[v] || v;
+}
+
+function observationLookbackChip(v) {
+  const key = `period.chip.${v}`;
+  if (GrapesI18n.has(key)) return obsT(key);
+  return v;
+}
 
 function parseObservationGroupToken(token) {
   const raw = String(token ?? '').trim();
@@ -38,10 +40,45 @@ function normalizeObservationLookback(value) {
   return value === '15m' ? '30m' : (value || '1h');
 }
 
-const OBS_CHART_STYLES = [
-  { id: 'lines', label: 'Линии', icon: 'lineChart', hint: 'Перекрывающиеся линии по сериям' },
-  { id: 'stack', label: 'Стек', icon: 'layers', hint: 'Площади друг на друге, сумма выбранных серий' },
+const OBS_CHART_STYLE_DEFS = [
+  { id: 'lines', labelKey: 'observations.chart.lines', hintKey: 'observations.chart.linesHint', icon: 'lineChart' },
+  { id: 'stack', labelKey: 'observations.chart.stack', hintKey: 'observations.chart.stackHint', icon: 'layers' },
 ];
+
+function observationChartStyles() {
+  return OBS_CHART_STYLE_DEFS.map((style) => ({
+    ...style,
+    label: obsT(style.labelKey),
+    hint: obsT(style.hintKey),
+  }));
+}
+
+function observationPresetLabel(preset) {
+  if (!preset) return '';
+  if (preset.id === 'preset-uplink-direction') return obsT('observations.preset.uplink');
+  if (preset.id === 'preset-vlan-trend') return obsT('observations.preset.vlan');
+  return preset.name || '';
+}
+
+const OBS_CHART_DIRECTION_LINE_KEYS = new Set([
+  'incoming', 'outgoing', 'transit', 'internal', 'unclassified', 'total',
+]);
+
+function observationChartLineLabel(line) {
+  if (!line) return '';
+  const key = String(line.key || '').trim();
+  if (key && OBS_CHART_DIRECTION_LINE_KEYS.has(key) && GrapesI18n.has(`direction.${key}`)) {
+    return obsT(`direction.${key}`);
+  }
+  return line.label || key;
+}
+
+function localizeObservationChartLines(lines) {
+  return (lines || []).map((ln) => ({
+    ...ln,
+    label: observationChartLineLabel(ln),
+  }));
+}
 
 function normalizeObservationChartStyle(value) {
   return value === 'stack' ? 'stack' : 'lines';
@@ -238,27 +275,28 @@ function observationTableMetricFromWidgets(widgets) {
 }
 
 function observationMetricAxisUnit(metric) {
-  if (typeof metricAxisUnit === 'function') return metricAxisUnit(metric);
-  if (metric === 'pps') return 'п/с';
-  if (metric === 'fps') return 'потоков/сек';
-  if (metric === 'volume') return 'байт';
-  if (metric === 'flows') return 'потоков';
-  return 'бит/с';
+  const m = normalizeObservationChartMetric(metric);
+  if (m === 'bps') return obsT('unit.bps');
+  if (m === 'volume') return obsT('unit.bytes');
+  if (m === 'pps') return obsT('unit.pps');
+  if (m === 'fps') return obsT('unit.flowsPerSec');
+  if (m === 'flows') return obsT('unit.flows');
+  return '';
 }
 
 function observationMetricValueLabel(metric) {
   switch (normalizeObservationChartMetric(metric)) {
-    case 'pps': return 'Пакеты/с';
-    case 'fps': return 'Потоки/с';
-    case 'volume': return 'Объём';
-    case 'flows': return 'Потоки';
-    default: return 'Средняя бит/с';
+    case 'pps': return obsT('observations.metric.pps');
+    case 'fps': return obsT('observations.metric.fps');
+    case 'volume': return obsT('observations.metric.volume');
+    case 'flows': return obsT('observations.metric.flows');
+    default: return obsT('observations.metric.avgBps');
   }
 }
 
 function formatObservationMetric(v, metric) {
   if (typeof formatMetric === 'function') return formatMetric(v, metric);
-  if (metric === 'pps') return `${v} п/с`;
+  if (metric === 'pps') return `${v} ${obsT('unit.pps')}`;
   return formatBps(v);
 }
 
@@ -384,7 +422,7 @@ function nativeAggregateSummary(item, collectors = [], locations = []) {
   const scope = chartWidgetNativeScope(item?.widgets);
   const parts = [];
   if (typeof collectorFilterLabel === 'function') {
-    parts.push(`Коллектор: ${collectorFilterLabel(scope.collectorFilter, collectors, locations)}`);
+    parts.push(`${obsT('observations.collector')}: ${collectorFilterLabel(scope.collectorFilter, collectors, locations)}`);
   }
   if (ds === 'vlan_trend') {
     if (scope.vlanIds?.length) {
@@ -474,7 +512,7 @@ function NativeScopeSettings({
   return (
     <div className="col" style={{ gap: 12 }}>
       <div className="col" style={{ gap: 6 }}>
-        <span>Коллектор</span>
+        <span>{obsT('observations.collector')}</span>
         {typeof CollectorFilter === 'function' ? (
           <CollectorFilter
             embedded
@@ -513,7 +551,7 @@ function NativeScopeSettings({
               }}
             />
             <button type="button" className="btn" disabled={disabled} onClick={addManualVlan}>
-              Добавить
+              {obsT('observations.settings.add')}
             </button>
           </div>
           {selectedVlanIds.size > 0 && (
@@ -587,7 +625,7 @@ function formatFilterNodeSummary(f, filterFields, index = 0) {
 
 function formatFilterSummary(filters, filterFields) {
   const list = Array.isArray(filters) ? filters : [];
-  if (!list.length) return 'без фильтров';
+  if (!list.length) return obsT('observations.filters.none');
   return list.map((f, i) => formatFilterNodeSummary(f, filterFields, i)).join(' ');
 }
 
@@ -626,7 +664,7 @@ function renderFilterNodeSummary(f, filterFields, index = 0) {
 
 function renderFilterSummary(filters, filterFields) {
   const list = Array.isArray(filters) ? filters : [];
-  if (!list.length) return 'без фильтров';
+  if (!list.length) return obsT('observations.filters.none');
   return list.map((f, i) => renderFilterNodeSummary(f, filterFields, i));
 }
 
@@ -638,7 +676,7 @@ function formatGroupSummary(groupBy, groupOptions) {
 
 function formatObservationScopeSummary(item, filterFields, groupOptions) {
   const parts = [];
-  parts.push(item.filters?.length ? formatFilterSummary(item.filters, filterFields) : 'без фильтров');
+  parts.push(item.filters?.length ? formatFilterSummary(item.filters, filterFields) : obsT('observations.filters.none'));
   const groupSummary = formatGroupSummary(groupByFromWidgets(item.widgets), groupOptions);
   if (groupSummary) parts.push(`группировка: ${groupSummary}`);
   if (item.thresholds?.length && window.ExplorerThresholds?.formatThresholdChipLabel) {
@@ -785,9 +823,9 @@ function observationPeriodLabel(lookback, customRange) {
     if (typeof formatCustomPeriodLabel === 'function') {
       return formatCustomPeriodLabel(customRange);
     }
-    return 'выбранный период';
+    return obsT('observations.period.selected');
   }
-  return LOOKBACK_LABELS[lookback] || lookback;
+  return observationLookbackLabel(lookback);
 }
 
 function ObservationChart({
@@ -916,16 +954,16 @@ function ObservationChartStats({ points, lines, mode = 'total', metric = 'bps' }
         marginTop: 4,
       }}
     >
-      <span title="Среднее по точкам окна">
+      <span title={obsT('observations.stats.avgTitle')}>
         avg <span className="mono" style={{ color: 'var(--fg-primary)' }}>{valueFmt(stats.avg)}</span>
       </span>
-      <span title="Минимум за окно">
+      <span title={obsT('observations.stats.minTitle')}>
         min <span className="mono" style={{ color: 'var(--fg-primary)' }}>{valueFmt(stats.min)}</span>
       </span>
-      <span title="Максимум за окно">
+      <span title={obsT('observations.stats.maxTitle')}>
         max <span className="mono" style={{ color: 'var(--fg-primary)' }}>{valueFmt(stats.max)}</span>
       </span>
-      <span title="Последняя точка относительно пика окна">
+      <span title={obsT('observations.stats.nowMaxTitle')}>
         now/max{' '}
         <span className="mono" style={{ color: 'var(--fg-primary)' }}>
           {stats.pctOfMax == null ? '—' : `${stats.pctOfMax.toFixed(1)}%`}
@@ -966,7 +1004,7 @@ function ObservationSeriesFocus({ lines, focusKeys, onToggle, onClear }) {
             type="button"
             className={`obs-tile__chip${on ? ' is-solo' : ''}${dim ? ' is-off' : ''}`}
             aria-pressed={on}
-            title={on ? 'Убрать из выбора' : 'Добавить к выбранным'}
+            title={on ? obsT('observations.series.remove') : obsT('observations.series.add')}
             onClick={() => onToggle(ln.key)}
           >
             <span className="obs-tile__chip-swatch" style={{ background: ln.color || 'var(--fg-muted)' }} />
@@ -1032,10 +1070,10 @@ function LookbackPicker({ value, options, onChange }) {
           key={v}
           type="button"
           className={v === value ? 'is-active' : ''}
-          title={LOOKBACK_LABELS[v] || v}
+          title={observationLookbackLabel(v)}
           onClick={() => onChange(v)}
         >
-          {LOOKBACK_SHORT[v] || v}
+          {observationLookbackChip(v)}
         </button>
       ))}
     </div>
@@ -1044,8 +1082,8 @@ function LookbackPicker({ value, options, onChange }) {
 
 function ObservationChartStylePicker({ value, onChange, disabled = false }) {
   return (
-    <div className="seg obs-tile__chart-style" role="group" aria-label="Тип графика">
-      {OBS_CHART_STYLES.map((style) => (
+    <div className="seg obs-tile__chart-style" role="group" aria-label={obsT('observations.settings.chartType')}>
+      {observationChartStyles().map((style) => (
         <button
           key={style.id}
           type="button"
@@ -1234,7 +1272,7 @@ function ObservationLiveTile({
   }, [topWidget]);
   const chartMode = chartWidget?.mode === 'grouped' ? 'grouped' : 'total';
   const points = chartWidget?.points || chartWidget?.series || [];
-  const lines = chartWidget?.lines || [];
+  const lines = localizeObservationChartLines(chartWidget?.lines || []);
   const lineKeys = lines.map((ln) => ln.key).join('\0');
   useEffect(() => {
     setFocusKeys((prev) => {
@@ -1306,7 +1344,7 @@ function ObservationLiveTile({
               title="Открыть в разборе трафика"
             >
               <span className="obs-tile__filter-scope">
-                <span className="obs-tile__filter-scope-label">Фильтры:</span>
+                <span className="obs-tile__filter-scope-label">{obsT('observations.filters')}:</span>
                 {' '}
                 <span className="obs-tile__filter-link-text">
                   {renderFilterSummary(item.filters || [], filterFields)}
@@ -1314,7 +1352,7 @@ function ObservationLiveTile({
               </span>
               {topLabel ? (
                 <span className="obs-tile__filter-scope obs-tile__filter-scope--group">
-                  <span className="obs-tile__filter-scope-label">Группировка:</span>
+                  <span className="obs-tile__filter-scope-label">{obsT('observations.group')}:</span>
                   {' '}
                   <span className="obs-tile__filter-link-text">{topLabel}</span>
                 </span>
@@ -1328,17 +1366,17 @@ function ObservationLiveTile({
             className="obs-tile__expand"
             onClick={onToggleExpand}
             aria-expanded={expanded}
-            title={expanded ? 'Свернуть график и таблицу' : 'Развернуть график и таблицу'}
+            title={expanded ? obsT('observations.collapseTitle') : obsT('observations.expandTitle')}
           >
             <Icon name={expanded ? 'collapse' : 'expand'} size={14} />
-            <span>{expanded ? 'Свернуть' : 'Развернуть'}</span>
+            <span>{expanded ? obsT('observations.collapse') : obsT('observations.expand')}</span>
           </button>
           {canEdit && (
             <button
               type="button"
               className="obs-tile__icon tt"
-              data-tt="Настройки"
-              aria-label="Настройки"
+              data-tt={obsT('observations.settings')}
+              aria-label={obsT('observations.settings')}
               onClick={onSettings}
             >
               <Icon name="sliders" size={15} />
@@ -1359,8 +1397,8 @@ function ObservationLiveTile({
             <button
               type="button"
               className="obs-tile__icon obs-tile__icon--danger tt"
-              data-tt="Удалить"
-              aria-label="Удалить"
+              data-tt={obsT('observations.delete')}
+              aria-label={obsT('observations.delete')}
               onClick={onDelete}
             >
               <Icon name="trash" size={15} />
@@ -1494,7 +1532,7 @@ function ObservationLiveTile({
                             onChart ? 'obs-tile__row--pick' : '',
                             isFocus ? 'obs-tile__row--focus' : '',
                           ].filter(Boolean).join(' ') || undefined}
-                          title={onChart ? (isFocus ? 'Убрать из выбора' : 'Добавить к выбранным') : undefined}
+                          title={onChart ? (isFocus ? obsT('observations.series.remove') : obsT('observations.series.add')) : undefined}
                           onClick={onChart ? () => toggleFocusKey(rowKey) : undefined}
                         >
                           {(r.values || []).map((v, i) => (
@@ -1768,7 +1806,7 @@ function PageObservations({ onNavigate }) {
   };
 
   const removeItem = async (id) => {
-    if (!canWriteObservations || !window.confirm('Удалить наблюдение?')) return;
+    if (!canWriteObservations || !window.confirm(obsT('observations.deleteConfirm'))) return;
     setError('');
     try {
       await ApiClient.deleteObservation(id);
@@ -1856,7 +1894,7 @@ function PageObservations({ onNavigate }) {
     setError('');
     try {
       const created = await ApiClient.createObservation({
-        name: preset.name,
+        name: observationPresetLabel(preset),
         description: '',
         filters: preset.filters || [],
         widgets: preset.widgets,
@@ -1876,9 +1914,9 @@ function PageObservations({ onNavigate }) {
     return (
       <div className="main__container">
         <div className="page-head">
-          <h1>Настройки</h1>
+          <h1>{obsT('observations.settings')}</h1>
           <button type="button" className="btn" onClick={() => { setSettings(null); setSettingsItemId(null); }}>
-            К доске
+            {obsT('observations.settings.back')}
           </button>
         </div>
         <div className="col" style={{ gap: 16, padding: '0 0 24px' }}>
@@ -1889,11 +1927,11 @@ function PageObservations({ onNavigate }) {
           <div className="col" style={{ gap: 12 }}>
             <div className="col" style={{ gap: 4, font: 'var(--pv-text-body-3)', color: 'var(--fg-secondary)' }}>
               <div>
-                Фильтры:{' '}
+                {obsT('observations.filters')}:{' '}
                 {renderFilterSummary(settings.filters, filterFields)}
               </div>
               {settingsGroupSummary ? (
-                <div>Группировка: {settingsGroupSummary}</div>
+                <div>{obsT('observations.group')}: {settingsGroupSummary}</div>
               ) : null}
               {settings.thresholds?.length && window.ExplorerThresholds?.formatThresholdChipLabel ? (
                 <div>
@@ -1923,7 +1961,7 @@ function PageObservations({ onNavigate }) {
                 })}
               >
                 {settingsItem.canEdit
-                  ? 'Изменить фильтры в разборе трафика'
+                  ? obsT('observations.settings.changeFilters')
                   : 'Скопировать фильтры в разбор трафика'}
               </button>
             )}
@@ -1939,11 +1977,11 @@ function PageObservations({ onNavigate }) {
               />
             )}
             <label className="col" style={{ gap: 4 }}>
-              <span>Название</span>
+              <span>{obsT('observations.settings.name')}</span>
               <input className="input" value={settings.name} onChange={(e) => setSettings({ ...settings, name: e.target.value })} />
             </label>
             <label className="col" style={{ gap: 4 }}>
-              <span>Описание</span>
+              <span>{obsT('observations.settings.description')}</span>
               <input
                 className="input"
                 value={settings.description || ''}
@@ -1961,17 +1999,16 @@ function PageObservations({ onNavigate }) {
                       materialize: { ...(settings.materialize || {}), enabled: e.target.checked },
                     })}
                   />
-                  Подготовка данных (rollup раз в 5 минут)
+                  {obsT('observations.materialize.label')}
                 </label>
                 <div style={{ marginLeft: 24, color: 'var(--fg-muted)', font: 'var(--pv-text-body-3)' }}>
-                  Без неё график и таблица топа по группировке пустые. Каждая подготовка — постоянная нагрузка на ClickHouse.
-                  Счёт с момента включения, прошлые сутки не пересчитываются.
+                  {obsT('observations.materialize.hint')}
                 </div>
               </>
             )}
             {settingsGroupBy.length > 0 && (
               <div className="col" style={{ gap: 6 }}>
-                <span>Тип графика</span>
+                <span>{obsT('observations.settings.chartType')}</span>
                 <ObservationChartStylePicker
                   value={settingsChartStyle}
                   onChange={(next) => setSettings({
@@ -1990,7 +2027,7 @@ function PageObservations({ onNavigate }) {
                   report: { ...settings.report, enabled: e.target.checked },
                 })}
               />
-              Отчёт по расписанию
+              {obsT('observations.settings.report')}
             </label>
             {settings.report.enabled && (
               <div className="col" style={{ gap: 8, marginLeft: 24 }}>
@@ -2109,7 +2146,7 @@ function PageObservations({ onNavigate }) {
               </div>
             )}
             <button type="button" className="btn btn--primary" disabled={busy || !canWriteObservations || settingsItem.canEdit === false} onClick={saveSettings}>
-              Сохранить
+              {obsT('observations.settings.save')}
             </button>
           </div>
         </Card>
@@ -2122,7 +2159,7 @@ function PageObservations({ onNavigate }) {
     <div className="main__container">
       <div className="page-head">
         <div>
-          <h1>Наблюдения</h1>
+          <h1>{obsT('observations.title')}</h1>
         </div>
         {canWrite && (
           <div ref={createMenuRef} style={{ position: 'relative' }}>
@@ -2132,7 +2169,7 @@ function PageObservations({ onNavigate }) {
               aria-expanded={createMenuOpen}
               onClick={() => setCreateMenuOpen((v) => !v)}
             >
-              + Новое
+              + {obsT('observations.new')}
             </button>
             {createMenuOpen && (
               <div
@@ -2157,7 +2194,7 @@ function PageObservations({ onNavigate }) {
                     disabled={busy}
                     onClick={() => createFromPreset(preset.id)}
                   >
-                    <span>{preset.name}</span>
+                    <span>{observationPresetLabel(preset)}</span>
                   </button>
                 ))}
                 <button
@@ -2169,7 +2206,7 @@ function PageObservations({ onNavigate }) {
                     startComposeInExplorer(onNavigate, { mode: 'new' });
                   }}
                 >
-                  Из разбора трафика…
+                  {obsT('observations.fromExplorer')}
                 </button>
               </div>
             )}
@@ -2187,8 +2224,11 @@ function PageObservations({ onNavigate }) {
       {items.length > 0 && (
         <div style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-secondary)' }}>
           {items[0]?.quotas?.maxMaterialize
-            ? `Подготовка данных: занято ${items[0]?.quotas?.activeMaterialize ?? 0} из ${items[0].quotas.maxMaterialize}`
-            : `Подготовка данных: активно ${items[0]?.quotas?.activeMaterialize ?? 0}`}
+            ? obsT('observations.prep.quota', {
+              n: items[0]?.quotas?.activeMaterialize ?? 0,
+              max: items[0].quotas.maxMaterialize,
+            })
+            : obsT('observations.prep.active', { n: items[0]?.quotas?.activeMaterialize ?? 0 })}
         </div>
       )}
 
