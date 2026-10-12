@@ -456,7 +456,7 @@ function normalizeObservation(raw = {}, { userId, existing = null } = {}) {
   const schedule = normalizeSchedule(reportRaw, existing?.report || {});
 
   return {
-    id: existing?.id || raw.id || newId('obs'),
+    id: existing?.id || newId('obs'),
     name: String(raw.name ?? existing?.name ?? 'Без названия').trim() || 'Без названия',
     description: String(raw.description ?? existing?.description ?? '').trim(),
     folder: String(raw.folder ?? existing?.folder ?? 'Мои наблюдения').trim() || 'Мои наблюдения',

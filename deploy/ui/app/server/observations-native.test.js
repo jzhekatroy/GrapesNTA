@@ -4,6 +4,7 @@ const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
 const {
   classifyScope,
+  normalizeObservation,
   normalizeWidgets,
   widgetDataSource,
   isNativeAggregateWidget,
@@ -91,6 +92,31 @@ describe('observations native dashboard widgets', () => {
       normalizeNativeScope({ collectorFilter: ['x'] }, 'traffic_direction').collectorFilter,
       ['x'],
     );
+  });
+
+  it('два создания с одинаковыми фильтрами получают разные id', () => {
+    const filters = [{ field: 'vlan', op: '=', value: '100' }];
+    const a = normalizeObservation({ id: 'obs-reuse-me', filters }, { userId: 'u1' });
+    const b = normalizeObservation({ id: 'obs-reuse-me', filters }, { userId: 'u1' });
+    assert.notEqual(a.id, b.id);
+    assert.match(a.id, /^obs-/);
+    assert.match(b.id, /^obs-/);
+  });
+
+  it('update сохраняет id существующего наблюдения', () => {
+    const existing = {
+      id: 'obs-keep-me',
+      name: 'Old',
+      filters: [{ field: 'vlan', op: '=', value: '1' }],
+      widgets: [{ id: 'w-ts', type: 'timeseries_bps', metric: 'bps', groupBy: [] }],
+      materialize: { enabled: false, status: 'idle' },
+      report: { enabled: false },
+      lookback: '1h',
+      createdAt: '2026-01-01T00:00:00.000Z',
+    };
+    const next = normalizeObservation({ name: 'New title' }, { userId: 'u1', existing });
+    assert.equal(next.id, 'obs-keep-me');
+    assert.equal(next.name, 'New title');
   });
 
   it('presets содержат два нативных шаблона', () => {

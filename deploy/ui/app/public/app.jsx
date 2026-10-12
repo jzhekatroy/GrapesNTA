@@ -363,6 +363,21 @@ function App() {
   }, []);
 
   useEffect(() => {
+    if (page === 'explorer') return undefined;
+    try {
+      sessionStorage.removeItem('grapes-observation-compose');
+    } catch {
+      // ignore
+    }
+    try {
+      window.dispatchEvent(new CustomEvent('grapes-observation-compose'));
+    } catch {
+      // ignore
+    }
+    return undefined;
+  }, [page]);
+
+  useEffect(() => {
     if (!auth.user || auth.loading) return undefined;
     const pageId = page;
     const now = Date.now();

@@ -3052,6 +3052,7 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
   const [filterPanel, setFilterPanel] = useState(true);
   const [showSave, setShowSave] = useState(false);
   const [showObservationSave, setShowObservationSave] = useState(false);
+  const [observationSaveMode, setObservationSaveMode] = useState('create');
   const [editingSaved, setEditingSaved] = useState(null);
   const canWriteObservation = !cabinetMode && (AuthAccess.canWritePage('observations') || canWrite);
   const [hasAppliedQuery, setHasAppliedQuery] = useState(false);
@@ -3786,10 +3787,24 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
   }, []);
 
   const openSaveAsObservation = () => {
+    setObservationSaveMode('create');
     setShowObservationSave(true);
   };
 
-  const saveAsObservation = async ({ name, lookback, materializeEnabled, reportEnabled, reportPeriod, topGroup }) => {
+  const openUpdateObservation = () => {
+    setObservationSaveMode('update');
+    setShowObservationSave(true);
+  };
+
+  const saveAsObservation = async ({
+    name,
+    lookback,
+    materializeEnabled,
+    reportEnabled,
+    reportPeriod,
+    topGroup,
+    saveMode = 'create',
+  }) => {
     const nextFilters = normalizeExplorerFiltersList(filters || []);
     const { validThresholds } = resolveExplorerThresholdPayload(thresholds, schema);
     const explorerQuerySnapshot = buildExplorerQuerySnapshot({
@@ -3813,63 +3828,66 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
       ? [...groupBy]
       : [topGroup || 'src_asn']).slice(0, OBSERVATION_MAX_GROUP_BY);
 
+    const buildCreateWidgets = (chartStyle = 'stack') => ([
+      {
+        id: 'w-ts',
+        type: 'timeseries_bps',
+        metric: metric || 'bps',
+        groupBy: chartGroup,
+        chartStyle: chartStyle === 'lines' ? 'lines' : 'stack',
+        seriesLimit: chartStyle === 'lines' ? 8 : 10,
+        limit: null,
+      },
+      {
+        id: 'w-top',
+        type: 'top_table',
+        metric: metric || 'bps',
+        groupBy: chartGroup,
+        limit: chartStyle === 'lines' ? 15 : 100,
+      },
+    ]);
+
     try {
-      const composeDraft = readObservationComposeDraft();
-      const editing = isObservationComposeEdit(composeDraft);
-      let id = editing ? composeDraft.editId : null;
-      let existing = null;
+      let id = null;
       let updated = false;
-      if (id) {
-        try {
-          existing = await ApiClient.loadObservation(id);
-        } catch (err) {
-          if (observationNotFoundError(err)) {
-            id = null;
-          } else {
-            throw err;
+      if (saveMode === 'update') {
+        const composeDraft = readObservationComposeDraft();
+        id = composeDraft?.editId || null;
+        let existing = null;
+        if (id) {
+          try {
+            existing = await ApiClient.loadObservation(id);
+          } catch (err) {
+            if (observationNotFoundError(err)) {
+              id = null;
+            } else {
+              throw err;
+            }
           }
         }
-      }
-      // Shared observations are visible via GET, but only the owner can PUT.
-      // Opening filters from a shared tile must create a personal copy.
-      if (id && existing && existing.canEdit === false) {
-        id = null;
-        existing = null;
-      }
-      if (id && existing) {
-        const existingChartStyle = (existing.widgets || []).find((w) => w.type === 'timeseries_bps')?.chartStyle;
-        try {
-          await ApiClient.updateObservation(id, {
-            ...existing,
-            name: (name || '').trim() || existing.name,
-            lookback: tileLookback,
-            explorerQuery: explorerQuerySnapshot,
-            filters: nextFilters,
-            thresholds: validThresholds,
-            widgets: [
-              {
-                id: 'w-ts',
-                type: 'timeseries_bps',
-                metric: metric || 'bps',
-                groupBy: chartGroup,
-                chartStyle: existingChartStyle === 'lines' ? 'lines' : 'stack',
-                seriesLimit: 8,
-                limit: null,
-              },
-              {
-                id: 'w-top',
-                type: 'top_table',
-                metric: metric || 'bps',
-                groupBy: chartGroup,
-                limit: 15,
-              },
-            ],
-          });
-          pushToast({ kind: 'success', title: 'Фильтры наблюдения обновлены', desc: name || existing.name });
-          updated = true;
-        } catch (err) {
-          if (!observationNotFoundError(err) && !observationCannotEditError(err)) throw err;
+        // Shared observations are visible via GET, but only the owner can PUT.
+        if (id && existing && existing.canEdit === false) {
           id = null;
+          existing = null;
+        }
+        if (id && existing) {
+          const existingChartStyle = (existing.widgets || []).find((w) => w.type === 'timeseries_bps')?.chartStyle;
+          try {
+            await ApiClient.updateObservation(id, {
+              ...existing,
+              name: (name || '').trim() || existing.name,
+              lookback: tileLookback,
+              explorerQuery: explorerQuerySnapshot,
+              filters: nextFilters,
+              thresholds: validThresholds,
+              widgets: buildCreateWidgets(existingChartStyle),
+            });
+            pushToast({ kind: 'success', title: 'Фильтры наблюдения обновлены', desc: name || existing.name });
+            updated = true;
+          } catch (err) {
+            if (!observationNotFoundError(err) && !observationCannotEditError(err)) throw err;
+            id = null;
+          }
         }
       }
       if (!updated) {
@@ -3880,24 +3898,7 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
           explorerQuery: explorerQuerySnapshot,
           filters: nextFilters,
           thresholds: validThresholds,
-          widgets: [
-            {
-              id: 'w-ts',
-              type: 'timeseries_bps',
-              metric: metric || 'bps',
-              groupBy: chartGroup,
-              chartStyle: 'stack',
-              seriesLimit: 10,
-              limit: null,
-            },
-            {
-              id: 'w-top',
-              type: 'top_table',
-              metric: metric || 'bps',
-              groupBy: chartGroup,
-              limit: 100,
-            },
-          ],
+          widgets: buildCreateWidgets('stack'),
           materialize: { enabled: materializeEnabled !== false },
           report: {
             enabled: !!reportEnabled,
@@ -3910,7 +3911,11 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
         };
         const res = await ApiClient.createObservation(payload);
         id = res.data?.id;
-        pushToast({ kind: 'success', title: 'Добавлено в наблюдения', desc: payload.name });
+        pushToast({
+          kind: 'success',
+          title: saveMode === 'update' ? 'Сохранено как новое наблюдение' : 'Добавлено в наблюдения',
+          desc: payload.name,
+        });
       }
       clearObservationCompose();
       setShowObservationSave(false);
@@ -4380,14 +4385,23 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
           >
             <div style={{ flex: 1, minWidth: 220, font: 'var(--pv-text-body-3)' }}>
               {isObservationComposeEdit(observationCompose)
-                ? 'Редактируете фильтры наблюдения. Соберите условия и нажмите «Добавить в наблюдения».'
+                ? 'Редактируете фильтры наблюдения. «Обновить» перезапишет текущую плитку; «Сохранить как новое» создаст отдельный график.'
                 : 'Новое наблюдение: соберите фильтр здесь, затем «Добавить в наблюдения».'}
             </div>
-            {canWriteObservation && (
+            {canWriteObservation && isObservationComposeEdit(observationCompose) ? (
+              <>
+                <Button kind="primary" size="sm" onClick={openUpdateObservation}>
+                  Обновить наблюдение
+                </Button>
+                <Button kind="ghost" size="sm" onClick={openSaveAsObservation}>
+                  Сохранить как новое
+                </Button>
+              </>
+            ) : canWriteObservation ? (
               <Button kind="primary" size="sm" onClick={openSaveAsObservation}>
                 Добавить в наблюдения
               </Button>
-            )}
+            ) : null}
             <Button kind="ghost" size="sm" onClick={clearObservationCompose}>Отмена</Button>
           </div>
         )}
@@ -4449,7 +4463,14 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
             runDisabled={source === 'loading' || refreshing}
             canWrite={canWrite}
             onSave={() => { setEditingSaved(null); setShowSave(true); }}
-            onSaveAsObservation={canWriteObservation ? openSaveAsObservation : null}
+            onSaveAsObservation={canWriteObservation ? (
+              isObservationComposeEdit(observationCompose) ? openUpdateObservation : openSaveAsObservation
+            ) : null}
+            saveAsObservationLabel={
+              isObservationComposeEdit(observationCompose)
+                ? 'Обновить наблюдение'
+                : 'Добавить в наблюдения'
+            }
             onEditSaved={(q) => {
               const payload = migrateExplorerSnapshot(q.query || q);
               applyExplorerQuerySnapshot(payload, querySetters);
@@ -4738,7 +4759,7 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
         groupBy={groupBy}
         dimensionById={dimensionById}
         timeRange={timeRange}
-        editingId={isObservationComposeEdit(observationCompose) ? observationCompose?.editId : null}
+        saveMode={observationSaveMode}
         initialName={observationCompose?.name || ''}
         onSave={saveAsObservation}
       />
@@ -7507,6 +7528,7 @@ function ExplorerFilters({
   canWrite,
   onSave,
   onSaveAsObservation,
+  saveAsObservationLabel = 'Добавить в наблюдения',
   onEditSaved,
   onDeleteSaved,
   thresholds = [],
@@ -7609,7 +7631,7 @@ function ExplorerFilters({
         <Button kind="ghost" size="sm" icon="save" onClick={onSave}>Сохранить</Button>
       )}
       {canWrite && onSaveAsObservation && (
-        <Button kind="primary" size="sm" onClick={onSaveAsObservation}>Добавить в наблюдения</Button>
+        <Button kind="primary" size="sm" onClick={onSaveAsObservation}>{saveAsObservationLabel}</Button>
       )}
       {filterMode === 'graphic' && (
         <span style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-muted)' }}>Ctrl+Enter — применить</span>
@@ -8027,7 +8049,7 @@ function SaveObservationModal({
   groupBy,
   dimensionById,
   timeRange,
-  editingId,
+  saveMode = 'create',
   initialName,
   onSave,
 }) {
@@ -8058,7 +8080,7 @@ function SaveObservationModal({
     setReportPeriod('yesterday');
     setTopGroup(defaultTop);
     setBusy(false);
-  }, [open, editingId, initialName, metricLabel, defaultLookback, defaultTop]);
+  }, [open, saveMode, initialName, metricLabel, defaultLookback, defaultTop]);
 
   const submit = async () => {
     if (!onSave || busy) return;
@@ -8071,6 +8093,7 @@ function SaveObservationModal({
         reportEnabled,
         reportPeriod,
         topGroup,
+        saveMode,
       });
     } finally {
       setBusy(false);
@@ -8086,13 +8109,13 @@ function SaveObservationModal({
     <Modal
       open={open}
       onClose={onClose}
-      title={editingId ? 'Обновить наблюдение' : 'Добавить в наблюдения'}
+      title={saveMode === 'update' ? 'Обновить наблюдение' : 'Добавить в наблюдения'}
       subtitle="Будет график трафика по этим фильтрам и таблица топа."
       footer={(
         <>
           <Button kind="ghost" onClick={onClose}>Отмена</Button>
           <Button kind="primary" disabled={busy} onClick={submit}>
-            {busy ? 'Сохранение…' : (editingId ? 'Обновить' : 'Добавить')}
+            {busy ? 'Сохранение…' : (saveMode === 'update' ? 'Обновить наблюдение' : 'Добавить')}
           </Button>
         </>
       )}
