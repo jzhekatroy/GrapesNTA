@@ -109,6 +109,22 @@ const EXPLORER_MAX_FETCH_LIMIT = 10000;
 const EXPLORER_MAX_CHART_SERIES = 100;
 const EXPLORER_CHART_HEIGHT = 196;
 const EXPLORER_VIS_DEFAULT = 'stack';
+const EXPLORER_TABLE_PAGINATION_MIN_ROWS = 26;
+const EXPLORER_TABLE_PAGE_SIZE_DEFAULT = 25;
+const EXPLORER_TABLE_PAGE_SIZE_OPTIONS = [
+  { value: 10, label: '10' },
+  { value: 25, label: '25' },
+  { value: 50, label: '50' },
+  { value: 'all', label: 'Все' },
+];
+
+function resolveExplorerTablePageSize(choice, visibleCount) {
+  const n = Math.max(visibleCount, 1);
+  if (choice === 'all') return n;
+  const size = Number(choice);
+  if (!Number.isFinite(size) || size <= 0) return Math.min(EXPLORER_TABLE_PAGE_SIZE_DEFAULT, n);
+  return Math.min(size, n);
+}
 function explorerGroupMaskLib() {
   return (typeof window !== 'undefined' && window.ExplorerGroupMask) || {};
 }
@@ -3061,6 +3077,7 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
   const [detailRow, setDetailRow] = useState(null);
   const [cellFilterConfirm, setCellFilterConfirm] = useState(null);
   const [visualLimit, setVisualLimit] = useState(EXPLORER_DEFAULT_VISUAL_LIMIT);
+  const [tablePageSizeChoice, setTablePageSizeChoice] = useState(EXPLORER_TABLE_PAGE_SIZE_DEFAULT);
   const [dynamicsSeriesIds, setDynamicsSeriesIds] = useState(() => new Set());
   const [hoveredSeriesId, setHoveredSeriesId] = useState(null);
   const [focusedSeriesId, setFocusedSeriesId] = useState(null);
@@ -4255,6 +4272,17 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
     () => sliceExplorerVisualRows(results, visualLimit),
     [results, visualLimit],
   );
+  const explorerTablePaginated = visibleResults.length >= EXPLORER_TABLE_PAGINATION_MIN_ROWS;
+  const resolvedExplorerTablePageSize = useMemo(
+    () => (explorerTablePaginated
+      ? resolveExplorerTablePageSize(tablePageSizeChoice, visibleResults.length)
+      : Math.max(visibleResults.length, 1)),
+    [explorerTablePaginated, tablePageSizeChoice, visibleResults.length],
+  );
+
+  useEffect(() => {
+    setTablePageSizeChoice(EXPLORER_TABLE_PAGE_SIZE_DEFAULT);
+  }, [queryVersion, visualLimit]);
   const othersRow = useMemo(() => buildExplorerOthersRow({
     shownRows: visibleResults,
     summary,
@@ -4615,6 +4643,7 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
                         </div>
                         <div className={`explorer-results-table${visibleResults.length > 10 ? ' explorer-results-table--pin-chrome' : ''}`}>
                         <DataTable
+                          key={`${queryVersion}-${visualLimit}-${tablePageSizeChoice}`}
                           rows={visibleResults}
                           rowKey="id"
                           resizableColumns
@@ -4632,7 +4661,10 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
                           onRowMouseEnter={handleSeriesRowHover}
                           onRowMouseLeave={handleSeriesRowHoverEnd}
                           pinnedRows={resultTablePinnedRows}
-                          pageSize={Math.max(resolveExplorerVisualCount(visualLimit, results.length), 1)}
+                          pageSize={resolvedExplorerTablePageSize}
+                          pageSizeOptions={explorerTablePaginated ? EXPLORER_TABLE_PAGE_SIZE_OPTIONS : null}
+                          pageSizeSelectValue={explorerTablePaginated ? tablePageSizeChoice : undefined}
+                          onPageSizeSelectChange={explorerTablePaginated ? setTablePageSizeChoice : undefined}
                           initialSort={{ key: appliedDefaultSortKey, dir: 'desc' }}
                           emptyTitle={source === 'loading' ? 'Выполняем запрос…' : 'Нет данных'}
                           footerNote={(

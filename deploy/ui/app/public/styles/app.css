@@ -6010,6 +6010,27 @@ body.explorer-chip-dragging * {
   width: 100%;
   min-width: 0;
 }
+.table-foot__left {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+.table-foot__pager {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  flex: 0 0 auto;
+}
+.table-foot__page-size {
+  width: 88px;
+  min-width: 88px;
+  height: 32px;
+  padding: 0 10px;
+  font: var(--pv-text-body-3);
+}
+.table-bottom-chrome--explorer-fixed .table-foot__page-size {
+  background: var(--bg-surface);
+}
 .table-foot__meta {
   padding-top: 8px;
   border-top: 1px solid var(--bd-soft);

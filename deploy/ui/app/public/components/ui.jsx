@@ -374,6 +374,9 @@ function DataTable({
   pinnedRows,        // rows rendered after the page, outside sorting and paging
   horizontalScrollControls = false,
   pinBottomChrome = false,
+  pageSizeOptions = null,
+  pageSizeSelectValue,
+  onPageSizeSelectChange,
 }) {
   const [sort, setSort] = useState(initialSort || null);
   const [internalPage, setInternalPage] = useState(1);
@@ -466,6 +469,13 @@ function DataTable({
   useEffect(() => {
     if (!serverPaged && page > totalPages) setInternalPage(totalPages);
   }, [totalPages, page, serverPaged]);
+
+  const pageSizeSig = `${pageSize}`;
+  useEffect(() => {
+    if (serverPaged) return undefined;
+    setInternalPage(1);
+    return undefined;
+  }, [pageSizeSig, serverPaged]);
 
   const toggleSort = (key) => {
     setSort((s) => !s || s.key !== key ? { key, dir: 'asc' } : s.dir === 'asc' ? { key, dir: 'desc' } : null);
@@ -840,16 +850,37 @@ function DataTable({
     </div>
   );
 
+  const showPageSizeSelect = pageSizeOptions?.length > 0 && typeof onPageSizeSelectChange === 'function';
+
   const tableFoot = (
     <div className="table-foot">
       <div className="table-foot__row">
-        <div>
+        <div className="table-foot__left">
           {selectable && selected?.size > 0
             ? <span>Выбрано: <b style={{color: 'var(--fg-primary)'}}>{selected.size}</b> из {rowCount}</span>
             : <span>{rowCount} {pluralRu(rowCount, 'запись', 'записи', 'записей')}</span>
           }
         </div>
-        <Pagination page={page} totalPages={totalPages} onChange={setPage} />
+        <div className="table-foot__pager">
+          {showPageSizeSelect && (
+            <select
+              className="input table-foot__page-size"
+              value={pageSizeSelectValue ?? pageSizeOptions[0]?.value ?? ''}
+              title="Строк на странице"
+              aria-label="Строк на странице"
+              onChange={(e) => {
+                const raw = e.target.value;
+                const next = raw === 'all' ? 'all' : Number(raw);
+                onPageSizeSelectChange(next);
+              }}
+            >
+              {pageSizeOptions.map((opt) => (
+                <option key={String(opt.value)} value={opt.value}>{opt.label}</option>
+              ))}
+            </select>
+          )}
+          <Pagination page={page} totalPages={totalPages} onChange={setPage} />
+        </div>
       </div>
       {footerNote && <div className="table-foot__row table-foot__meta">{footerNote}</div>}
     </div>
