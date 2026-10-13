@@ -3,6 +3,10 @@
 
 const { useState, useEffect, useLayoutEffect, useMemo, useRef, useCallback } = React;
 
+function uiT(key, params) {
+  return typeof GrapesI18n !== 'undefined' && GrapesI18n.t ? GrapesI18n.t(key, params) : key;
+}
+
 /* =================== Card =================== */
 function WidgetLoadBadge({ loadMs, serverMs }) {
   if (loadMs == null || !DashboardLog?.isVerbose?.()) return null;
@@ -153,7 +157,7 @@ function Modal({ open, onClose, title, subtitle, children, footer, size = 'md' }
             <div className="modal__title">{title}</div>
             {subtitle && <div className="modal__sub">{subtitle}</div>}
           </div>
-          <button className="icon-btn" onClick={onClose} aria-label="Закрыть"><Icon name="x" size={18} /></button>
+          <button className="icon-btn" onClick={onClose} aria-label={uiT('modal.close')}><Icon name="x" size={18} /></button>
         </div>
         <div className="modal__body">{children}</div>
         {footer && <div className="modal__foot">{footer}</div>}
@@ -179,7 +183,7 @@ function SidePanel({ open, onClose, title, subtitle, children, footer }) {
             <div className="modal__title">{title}</div>
             {subtitle && <div className="modal__sub">{subtitle}</div>}
           </div>
-          <button className="icon-btn" onClick={onClose} aria-label="Закрыть"><Icon name="x" size={18} /></button>
+          <button className="icon-btn" onClick={onClose} aria-label={uiT('modal.close')}><Icon name="x" size={18} /></button>
         </div>
         <div className="side-panel__body">{children}</div>
         {footer && <div className="side-panel__foot">{footer}</div>}
@@ -353,7 +357,7 @@ function DataTable({
   selected,
   onSelectChange,
   rowKey = 'id',
-  emptyTitle = 'Нет данных',
+  emptyTitle = uiT('table.empty'),
   emptyDesc,
   initialSort,
   toolbar,           // { left, right, search, onSearch }
@@ -774,8 +778,8 @@ function DataTable({
                       className="col-resize"
                       role="separator"
                       aria-orientation="vertical"
-                      aria-label={`Изменить ширину столбца «${c.title}»`}
-                      title="Перетащите для изменения ширины · двойной клик — сброс"
+                      aria-label={uiT('table.resizeColumnAria', { title: c.title })}
+                      title={uiT('table.resizeColumnHint')}
                       onMouseDown={(e) => startColumnResize(e, c)}
                       onClick={(e) => e.stopPropagation()}
                       onDoubleClick={(e) => resetColumnWidth(e, c)}
@@ -784,7 +788,7 @@ function DataTable({
                 </th>
               );
             })}
-            {rowActions && <th className="actions" style={{ textAlign: actionsColumnAlign }}>Действия</th>}
+            {rowActions && <th className="actions" style={{ textAlign: actionsColumnAlign }}>{uiT('table.actions')}</th>}
           </tr>
         </thead>
         <tbody onMouseLeave={onRowMouseLeave ? () => onRowMouseLeave() : null}>
@@ -902,7 +906,7 @@ function DataTable({
               <Icon name="search" size={14} />
               <input
                 className="input input--with-icon"
-                placeholder={toolbar.searchPlaceholder || 'Поиск...'}
+                placeholder={toolbar.searchPlaceholder || uiT('table.search')}
                 value={toolbar.search}
                 onChange={(e) => toolbar.onSearch && toolbar.onSearch(e.target.value)}
               />
@@ -910,7 +914,7 @@ function DataTable({
           )}
           <div style={{marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 8, position: 'relative'}}>
             {toolbar.right}
-            <button className="icon-btn" title="Столбцы" onClick={() => setColMenu((v) => !v)}>
+            <button className="icon-btn" title={uiT('table.columns')} onClick={() => setColMenu((v) => !v)}>
               <Icon name="sliders" size={16} />
             </button>
             {colMenu && (
@@ -919,7 +923,7 @@ function DataTable({
                 background: 'var(--bg-surface-2)', border: '1px solid var(--bd-default)', borderRadius: 10,
                 padding: 6, minWidth: 200, boxShadow: 'var(--pv-shadow-popover)',
               }} onMouseLeave={() => setColMenu(false)}>
-                <div style={{font: 'var(--pv-text-body-3-bold)', color: 'var(--fg-secondary)', textTransform: 'uppercase', letterSpacing: '0.08em', padding: '8px 10px'}}>Столбцы</div>
+                <div style={{font: 'var(--pv-text-body-3-bold)', color: 'var(--fg-secondary)', textTransform: 'uppercase', letterSpacing: '0.08em', padding: '8px 10px'}}>{uiT('table.columns')}</div>
                 {columns.map((c) => (
                   <label key={c.key} style={{display: 'flex', alignItems: 'center', gap: 8, padding: '6px 10px', cursor: 'pointer'}}>
                     <Checkbox checked={!!colVis[c.key]} onChange={(v) => setColVis((s) => ({...s, [c.key]: v}))} />
@@ -937,8 +941,8 @@ function DataTable({
             <button
               type="button"
               className="table-scroll-btn table-scroll-btn--left"
-              title="Прокрутить влево"
-              aria-label="Прокрутить таблицу влево"
+              title={uiT('table.scrollLeft')}
+              aria-label={uiT('table.scrollLeftAria')}
               onClick={() => scrollTable('left')}
             >
               <Icon name="chevL" size={16} />
@@ -949,8 +953,8 @@ function DataTable({
             <button
               type="button"
               className="table-scroll-btn table-scroll-btn--right"
-              title="Прокрутить вправо"
-              aria-label="Прокрутить таблицу вправо"
+              title={uiT('table.scrollRight')}
+              aria-label={uiT('table.scrollRightAria')}
               onClick={() => scrollTable('right')}
             >
               <Icon name="chevR" size={16} />
@@ -1056,7 +1060,7 @@ async function copyTextToClipboard(text) {
   ta.select();
   try {
     const ok = document.execCommand('copy');
-    if (!ok) throw new Error('Копирование не поддерживается в этом браузере');
+    if (!ok) throw new Error(uiT('copy.unsupported'));
   } finally {
     document.body.removeChild(ta);
   }

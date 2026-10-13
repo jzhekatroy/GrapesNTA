@@ -1,5 +1,9 @@
 /* Historical Explorer Flows — расследование flow-событий через явные фильтры */
 
+function explorerT(key, params) {
+  return GrapesI18n.t(key, params);
+}
+
 const DEFAULT_EXPLORER_PRESETS = [
   {
     id: 'udp-talkers',
@@ -115,7 +119,7 @@ const EXPLORER_TABLE_PAGE_SIZE_OPTIONS = [
   { value: 10, label: '10' },
   { value: 25, label: '25' },
   { value: 50, label: '50' },
-  { value: 'all', label: 'Все' },
+  { value: 'all', labelKey: 'explorer.pageSizeAll' },
 ];
 
 function resolveExplorerTablePageSize(choice, visibleCount) {
@@ -173,11 +177,11 @@ function explorerGroupLabel(token, dimensionById) {
 }
 
 function explorerPortBucketStepLabel(step) {
-  if (step === 1) return 'порт';
-  if (step === 10) return 'десятки';
-  if (step === 100) return 'сотни';
-  if (step === 1000) return 'тысячи';
-  return `×${step}`;
+  if (step === 1) return explorerT('explorer.portBucket.port');
+  if (step === 10) return explorerT('explorer.portBucket.tens');
+  if (step === 100) return explorerT('explorer.portBucket.hundreds');
+  if (step === 1000) return explorerT('explorer.portBucket.thousands');
+  return String(step);
 }
 
 const EXPLORER_PORT_BUCKET_CUSTOM = '__custom__';
@@ -199,11 +203,29 @@ function explorerGroupCellFilterValue(groupToken, dimId, valueIdx, row, dimensio
 }
 
 const VIS_TYPES = [
-  { id: 'stack', label: 'Стек (сумма)', icon: 'layers', hint: 'Площади друг на друге, верхняя кромка = сумма выбранных серий' },
-  { id: 'stackShare', label: 'Стек (доли)', icon: 'stackShare', hint: 'Тот же стек, нормализован к 100%' },
-  { id: 'sankey', label: 'Sankey', icon: 'sankey', hint: 'Потоки между измерениями группировки по выбранной метрике' },
-  { id: 'data', label: 'Данные', icon: 'menu', hint: 'График динамики и детальная таблица' },
+  { id: 'stack', labelKey: 'explorer.vis.stack', icon: 'layers', hintKey: 'explorer.vis.stackHint' },
+  { id: 'stackShare', labelKey: 'explorer.vis.stackShare', icon: 'stackShare', hintKey: 'explorer.vis.stackShareHint' },
+  { id: 'sankey', labelKey: 'explorer.vis.sankey', icon: 'sankey', hintKey: 'explorer.vis.sankeyHint' },
+  { id: 'data', labelKey: 'explorer.vis.data', icon: 'menu', hintKey: 'explorer.vis.dataHint' },
 ];
+
+function resolveVisType(v) {
+  return {
+    ...v,
+    label: explorerT(v.labelKey),
+    hint: v.hintKey ? explorerT(v.hintKey) : undefined,
+  };
+}
+
+function resolvedVisTypes() {
+  return VIS_TYPES.map(resolveVisType);
+}
+
+function resolveExplorerTablePageSizeOptions() {
+  return EXPLORER_TABLE_PAGE_SIZE_OPTIONS.map((o) => (
+    o.labelKey ? { ...o, label: explorerT(o.labelKey) } : o
+  ));
+}
 
 const EXPLORER_DYNAMICS_VIS = new Set(['data', 'stack', 'stackShare']);
 
@@ -436,10 +458,10 @@ function explorerAsnDisplayValue(row, valueIdx, fallback) {
 }
 
 function explorerAsPathFilterValueHint(op) {
-  if (op === '=' || op === '!=') {
-    return 'полный путь — напр. 6939 12389 34665';
+  if (op === 'contains' || op === 'not_contains') {
+    return explorerT('explorer.asPathFullHint');
   }
-  return 'AS в пути — напр. 1299 или AS1299';
+  return explorerT('explorer.asPathHint');
 }
 
 function asPathFilterUsesEntityPicker(op) {
@@ -476,7 +498,7 @@ function explorerCabinetClientPeriodOptions(schema) {
   const hours = Number(schema?.maxCabinetClientRangeHours) || 6;
   return {
     recommendedRangeMs: hours * 3600000,
-    rangeWarningMessage: `Фильтр по клиенту считается по сырым потокам: рекомендуется период не более ${hours} часов`,
+    rangeWarningMessage: explorerT('explorer.clientPeriodWarning', { hours }),
   };
 }
 
@@ -571,7 +593,9 @@ const EMPTY_EXPLORER_SUMMARY = {
 };
 
 const EXPLORER_OTHERS_ID = 'row-others';
-const EXPLORER_OTHERS_LABEL = 'Прочие';
+function explorerOthersLabel() {
+  return explorerT('explorer.others');
+}
 const EXPLORER_OTHERS_COLOR = '#9aa0a6';
 
 /** uniq metrics are not additive, so a remainder cannot be derived from them. */
@@ -605,7 +629,8 @@ function buildExplorerOthersRow({ shownRows, summary, meta, metric, groupBy }) {
   rest.flows = Math.max(0, rest.flows);
 
   const windowSeconds = Number(meta?.windowSeconds) || 0;
-  const values = groupBy.map((_, i) => (i === 0 ? EXPLORER_OTHERS_LABEL : ''));
+  const othersLabel = explorerOthersLabel();
+  const values = groupBy.map((_, i) => (i === 0 ? othersLabel : ''));
   return {
     id: EXPLORER_OTHERS_ID,
     isOthers: true,
@@ -623,50 +648,52 @@ function buildExplorerOthersRow({ shownRows, summary, meta, metric, groupBy }) {
   };
 }
 
-const EXPLORER_RESULT_METRIC_COLUMNS = [
-  {
-    key: 'bytes',
-    title: 'Объём',
-    width: 120,
-    sortAccessor: (r) => r.bytes,
-    render: (r) => fmtBytes(r.bytes),
-  },
-  {
-    key: 'avgBps',
-    title: 'Средняя скорость / Average bitrate',
-    width: 140,
-    sortAccessor: (r, meta) => explorerAvgBps(r, meta),
-    render: (r, meta) => fmtBits(explorerAvgBps(r, meta)),
-  },
-  {
-    key: 'pps',
-    title: 'Пакеты/с / Packets per second',
-    width: 120,
-    sortAccessor: (r) => r.pps,
-    render: (r) => formatMetric(r.pps, 'pps'),
-  },
-  {
-    key: 'fps',
-    title: 'Потоки/с / Flows per second',
-    width: 120,
-    sortAccessor: (r) => r.fps,
-    render: (r) => formatMetric(r.fps, 'fps'),
-  },
-  {
-    key: 'flows',
-    title: 'Потоков / Flows',
-    width: 110,
-    sortAccessor: (r) => r.flows,
-    render: (r) => fmtNum(r.flows),
-  },
-  {
-    key: 'packets',
-    title: 'Пакетов / Packets',
-    width: 120,
-    sortAccessor: (r) => r.packets,
-    render: (r) => fmtNum(r.packets),
-  },
-];
+function explorerResultMetricColumns() {
+  return [
+    {
+      key: 'bytes',
+      title: explorerT('explorer.col.volume'),
+      width: 120,
+      sortAccessor: (r) => r.bytes,
+      render: (r) => fmtBytes(r.bytes),
+    },
+    {
+      key: 'avgBps',
+      title: explorerT('explorer.col.avgBps'),
+      width: 140,
+      sortAccessor: (r, meta) => explorerAvgBps(r, meta),
+      render: (r, meta) => fmtBits(explorerAvgBps(r, meta)),
+    },
+    {
+      key: 'pps',
+      title: explorerT('explorer.col.pps'),
+      width: 120,
+      sortAccessor: (r) => r.pps,
+      render: (r) => formatMetric(r.pps, 'pps'),
+    },
+    {
+      key: 'fps',
+      title: explorerT('explorer.col.fps'),
+      width: 120,
+      sortAccessor: (r) => r.fps,
+      render: (r) => formatMetric(r.fps, 'fps'),
+    },
+    {
+      key: 'flows',
+      title: explorerT('explorer.col.flows'),
+      width: 110,
+      sortAccessor: (r) => r.flows,
+      render: (r) => fmtNum(r.flows),
+    },
+    {
+      key: 'packets',
+      title: explorerT('explorer.col.packets'),
+      width: 120,
+      sortAccessor: (r) => r.packets,
+      render: (r) => fmtNum(r.packets),
+    },
+  ];
+}
 
 function enrichExplorerResultRow(row, meta) {
   const windowSeconds = Number(meta?.windowSeconds) || 0;
@@ -696,7 +723,7 @@ function enrichExplorerResultRow(row, meta) {
 }
 
 function buildExplorerMetricColumnDefs(meta) {
-  return EXPLORER_RESULT_METRIC_COLUMNS.map((col) => ({
+  return explorerResultMetricColumns().map((col) => ({
     key: col.key,
     title: col.title,
     align: 'right',
@@ -757,7 +784,7 @@ function fitExplorerTableColumnWidths(columns, rows, pinnedRows, { meta, metric,
       sampleRows.forEach((row) => {
         if (row.isOthers && valueIdx !== 0) return;
         let text = '—';
-        if (row.isOthers) text = EXPLORER_OTHERS_LABEL;
+        if (row.isOthers) text = explorerOthersLabel();
         else if (valueIdx >= 0) text = isAsn ? explorerAsnDisplayValue(row, valueIdx) : row.values[valueIdx];
         contentW = Math.max(contentW, measureExplorerTableText(text, { mono }) + EXPLORER_TABLE_DIM_EXTRA);
       });
@@ -771,7 +798,7 @@ function fitExplorerTableColumnWidths(columns, rows, pinnedRows, { meta, metric,
         contentW = Math.max(contentW, measureExplorerTableText(`${Number(row.pct || 0).toFixed(2)}%`, { mono: true }));
       });
     } else {
-      const metricColDef = EXPLORER_RESULT_METRIC_COLUMNS.find((c) => c.key === col.key);
+      const metricColDef = explorerResultMetricColumns().find((c) => c.key === col.key);
       if (metricColDef) {
         sampleRows.forEach((row) => {
           const rendered = metricColDef.render.length > 1
@@ -820,38 +847,56 @@ const EXPLORER_RESULT_CACHE_KEY = 'explorer.resultCache';
 const EXPLORER_CACHE_TTL_RELATIVE_MS = 15 * 60 * 1000;
 const EXPLORER_CACHE_TTL_CUSTOM_MS = 30 * 60 * 1000;
 const EXPLORER_FILTER_LOGIC_OPTIONS = [
-  { id: 'and', label: 'И', altLabel: 'AND' },
-  { id: 'or', label: 'ИЛИ', altLabel: 'OR' },
-  { id: 'and_not', label: 'И НЕ', altLabel: 'AND NOT' },
-  { id: 'or_not', label: 'ИЛИ НЕ', altLabel: 'OR NOT' },
+  { id: 'and', labelKey: 'explorer.logic.and', altLabel: 'AND' },
+  { id: 'or', labelKey: 'explorer.logic.or', altLabel: 'OR' },
+  { id: 'and_not', labelKey: 'explorer.logic.andNot', altLabel: 'AND NOT' },
+  { id: 'or_not', labelKey: 'explorer.logic.orNot', altLabel: 'OR NOT' },
 ];
 
-const EXPLORER_OP_LABELS = {
-  '=': 'равно',
-  '!=': 'не равно',
-  has_any: 'есть любой из',
-  has_all: 'есть все из',
-  eq: 'равно маске',
-  neq: 'не равно маске',
-  contains: 'содержит',
-  not_contains: 'не содержит',
-  in: 'один из',
-  not_in: 'ни один из',
-  cidr: 'в сети (CIDR)',
-  between: 'между',
-  '>': 'больше',
-  '>=': 'больше или равно',
-  '<': 'меньше',
-  '<=': 'меньше или равно',
+function explorerLogicLabel(opt) {
+  return opt?.labelKey ? explorerT(opt.labelKey) : (opt?.label || '');
+}
+
+const EXPLORER_OP_LABEL_KEYS = {
+  '=': "explorer.op.eq",
+  '!=': "explorer.op.neq",
+  'has_any': "explorer.op.has_any",
+  'has_all': "explorer.op.has_all",
+  'eq': "explorer.op.eqMask",
+  'neq': "explorer.op.neqMask",
+  'contains': "explorer.op.contains",
+  'not_contains': "explorer.op.not_contains",
+  'in': "explorer.op.in",
+  'not_in': "explorer.op.not_in",
+  'cidr': "explorer.op.cidr",
+  'between': "explorer.op.between",
+  '>': "explorer.op.gt",
+  '>=': "explorer.op.gte",
+  '<': "explorer.op.lt",
+  '<=': "explorer.op.lte"
 };
 
 const EXPLORER_OP_CANONICAL = new Set([
-  ...Object.keys(EXPLORER_OP_LABELS),
+  ...Object.keys(EXPLORER_OP_LABEL_KEYS),
   '<>',
 ]);
 
 function explorerOpLabel(op) {
-  return EXPLORER_OP_LABELS[op] || op;
+  const key = EXPLORER_OP_LABEL_KEYS[op];
+  return key ? explorerT(key) : op;
+}
+
+/** Токены операторов в текстовом DSL: id, символы и подписи ru/en из словаря. */
+function explorerOpDslTokens(op) {
+  const tokens = new Set([op]);
+  const labelKey = EXPLORER_OP_LABEL_KEYS[op];
+  if (!labelKey) return [...tokens];
+  const bag = (typeof window !== 'undefined' && window.GrapesI18nMessages) || {};
+  for (const loc of ['ru', 'en']) {
+    const label = bag[loc]?.[labelKey];
+    if (label) tokens.add(label);
+  }
+  return [...tokens];
 }
 
 const EXPLORER_OP_CHIP_LABELS = {
@@ -882,7 +927,7 @@ function formatExplorerFilterValueDisplay(f, schema) {
     const arr = collectorFilterToArray(f.value);
     if (!arr.length) return '…';
     if (arr.length === 1) return arr[0];
-    return `${arr.length} колл.`;
+    return explorerT('explorer.collectorsShort', { n: arr.length });
   }
   if (f.field === 'tcp_flags' || meta?.type === 'tcp_flags') {
     const flags = parseTcpFlagsValue(f.value);
@@ -908,7 +953,7 @@ function formatExplorerThresholdChipLabel(row, schema) {
     return api.formatThresholdChipLabel(row, schemaMetrics);
   }
   const meta = schemaMetrics.find((m) => m.id === row.metric);
-  const metricLabel = meta?.label || row.metric || 'метрика';
+  const metricLabel = meta?.label || row.metric || explorerT('explorer.metricFallback');
   const opMeta = (api.EXPLORER_THRESHOLD_OPS || []).find((o) => o.id === row.op);
   const opLabel = opMeta?.label || row.op || '>';
   const val = String(row.value ?? '').trim();
@@ -951,9 +996,8 @@ function tcpFlagsLabelFromRaw(raw) {
 
 function getExplorerOpTokens() {
   const entries = [];
-  Object.entries(EXPLORER_OP_LABELS).forEach(([op, label]) => {
-    entries.push({ token: op, op });
-    entries.push({ token: label, op });
+  Object.keys(EXPLORER_OP_LABEL_KEYS).forEach((op) => {
+    explorerOpDslTokens(op).forEach((token) => entries.push({ token, op }));
   });
   entries.push({ token: '<>', op: '!=' });
   return entries.sort((a, b) => b.token.length - a.token.length);
@@ -979,15 +1023,17 @@ function resolveExplorerOpToken(token) {
   const key = String(token || '').trim().toLowerCase();
   if (key === '<>') return '!=';
   if (EXPLORER_OP_CANONICAL.has(key)) return key;
-  const fromLabel = Object.entries(EXPLORER_OP_LABELS).find(([, label]) => label.toLowerCase() === key);
-  return fromLabel ? fromLabel[0] : key;
+  for (const op of Object.keys(EXPLORER_OP_LABEL_KEYS)) {
+    if (explorerOpDslTokens(op).some((label) => String(label).toLowerCase() === key)) return op;
+  }
+  return key;
 }
 
 function explorerInterfaceScopeHint(fieldId, switchIpScope) {
   if (fieldId !== 'in_if_name' && fieldId !== 'out_if_name') return '';
   return switchIpScope
-    ? 'Поиск по выбранному коммутатору'
-    : 'Поиск по всем коммутаторам · уточните оборудование';
+    ? explorerT('explorer.switchSearchSelected')
+    : explorerT('explorer.switchSearchAll');
 }
 
 function isExplorerIpLikeValue(value) {
@@ -1008,20 +1054,20 @@ function validateExplorerFilterRows(filters, schema) {
     const fieldLabel = meta?.label || f.field;
 
     if (!valueStr && f.field !== 'direction' && f.field !== 'collector') {
-      warnings.push(`Пустое значение: ${fieldLabel}`);
-      rowErrors[f.id] = 'Укажите значение или удалите условие';
+      warnings.push(explorerT('explorer.validation.emptyValue', { field: fieldLabel }));
+      rowErrors[f.id] = explorerT('explorer.validation.required');
       return false;
     }
 
     const type = meta?.type || meta?.filterType;
     if ((type === 'ip' || type === 'switch_ip' || f.op === 'cidr') && valueStr && !isExplorerIpLikeValue(valueStr)) {
-      const msg = 'Проверьте формат IP или CIDR';
+      const msg = explorerT('explorer.validation.ipFormat');
       warnings.push(`${fieldLabel}: ${msg}`);
       rowErrors[f.id] = msg;
     }
 
     if ((f.field === 'in_if_name' || f.field === 'out_if_name') && /^\d+$/.test(valueStr)) {
-      const msg = 'Похоже на ifIndex, выберите ifName из списка';
+      const msg = explorerT('explorer.validation.ifIndex');
       warnings.push(`${fieldLabel}: ${msg}`);
       rowErrors[f.id] = msg;
     }
@@ -1029,7 +1075,7 @@ function validateExplorerFilterRows(filters, schema) {
     if ((meta?.type || meta?.filterType) === 'tcp_flags') {
       const flags = parseTcpFlagsValue(valueStr);
       if ((f.op === 'has_any' || f.op === 'has_all') && !flags.length) {
-        const msg = 'Выберите хотя бы один TCP-флаг';
+        const msg = explorerT('explorer.validation.tcpFlags');
         warnings.push(`${fieldLabel}: ${msg}`);
         rowErrors[f.id] = msg;
       }
@@ -1212,9 +1258,9 @@ function directionMapToFilterValue(directions) {
 
 function explorerDirectionSummaryLabel(directions) {
   const enabled = TRAFFIC_DIRECTIONS.filter((d) => directions[d.id]);
-  if (enabled.length === TRAFFIC_DIRECTIONS.length) return 'Все направления';
-  if (enabled.length === 0) return 'Нет направлений';
-  return enabled.map((d) => d.label).join(', ');
+  if (enabled.length === TRAFFIC_DIRECTIONS.length) return explorerT('directions.all');
+  if (enabled.length === 0) return explorerT('directions.none');
+  return enabled.map((d) => (typeof GrapesI18n !== 'undefined' && GrapesI18n.t ? GrapesI18n.t(`direction.${d.id}`) : d.label)).join(', ');
 }
 
 function collectorFilterToArray(value) {
@@ -1612,7 +1658,7 @@ function appendExplorerFilterLeafDsl(f, logicLabel, lines) {
 function appendExplorerFilterNodesDsl(nodes, lines) {
   (nodes || []).forEach((node, index) => {
     const logicOpt = EXPLORER_FILTER_LOGIC_OPTIONS.find((o) => o.id === normalizeFilterLogicValue(node.logic));
-    const logicLabel = index === 0 ? '' : `${logicOpt?.label || 'И'} `;
+    const logicLabel = index === 0 ? '' : `${logicOpt ? explorerLogicLabel(logicOpt) : explorerT('explorer.logic.andRu')} `;
     if (explorerFilterTreeApi().isExplorerFilterGroup?.(node)) {
       lines.push(`${logicLabel}(`);
       appendExplorerFilterNodesDsl(node.children, lines);
@@ -1661,7 +1707,7 @@ function parseExplorerFilterDsl(text, schema = null) {
       lineNumbers.push(index + 1);
     }
   });
-  if (!lines.length) throw new Error('Фильтр пуст');
+  if (!lines.length) throw new Error(explorerT('explorer.dsl.empty'));
 
   let timeRange = '1h';
   let customPeriod = defaultCustomPeriod();
@@ -1708,7 +1754,7 @@ function parseExplorerFilterDsl(text, schema = null) {
   };
 
   const parseError = (lineNum, message) => {
-    throw new Error(`Строка ${lineNum}: ${message}`);
+    throw new Error(explorerT('explorer.dsl.parseLine', { n: lineNum, message }));
   };
 
   for (let index = 0; index < lines.length; index += 1) {
@@ -1728,7 +1774,7 @@ function parseExplorerFilterDsl(text, schema = null) {
       }
 
       if (groupDsl.isExplorerGroupByDslLine?.(rawLine)) {
-        if (groupBySeen) parseError(lineNum, 'строка group by указана более одного раза');
+        if (groupBySeen) parseError(lineNum, explorerT('explorer.dsl.groupByDuplicate'));
         groupBySeen = true;
         try {
           groupBy = groupDsl.parseExplorerGroupByDslLine?.(
@@ -1736,29 +1782,29 @@ function parseExplorerFilterDsl(text, schema = null) {
             dimensions,
           );
         } catch (err) {
-          parseError(lineNum, err.message || 'ошибка группировки');
+          parseError(lineNum, err.message || explorerT('explorer.dsl.groupByError'));
         }
         continue;
       }
 
       if (queryDsl.isExplorerMetricDslLine?.(rawLine)) {
-        if (metricSeen) parseError(lineNum, 'строка metric указана более одного раза');
+        if (metricSeen) parseError(lineNum, explorerT('explorer.dsl.metricDuplicate'));
         metricSeen = true;
         try {
           metric = queryDsl.parseExplorerMetricDslLine?.(rawLine, schema);
         } catch (err) {
-          parseError(lineNum, err.message || 'ошибка метрики');
+          parseError(lineNum, err.message || explorerT('explorer.dsl.metricError'));
         }
         continue;
       }
 
       if (queryDsl.isExplorerLimitDslLine?.(rawLine)) {
-        if (limitSeen) parseError(lineNum, 'строка limit указана более одного раза');
+        if (limitSeen) parseError(lineNum, explorerT('explorer.dsl.limitDuplicate'));
         limitSeen = true;
         try {
           limit = queryDsl.parseExplorerLimitDslLine?.(rawLine, schema);
         } catch (err) {
-          parseError(lineNum, err.message || 'ошибка лимита');
+          parseError(lineNum, err.message || explorerT('explorer.dsl.limitError'));
         }
         continue;
       }
@@ -1770,7 +1816,7 @@ function parseExplorerFilterDsl(text, schema = null) {
       }
 
       if (rawLine === ')') {
-        if (!groupStack.length) parseError(lineNum, 'лишняя закрывающая скобка )');
+        if (!groupStack.length) parseError(lineNum, explorerT('explorer.dsl.extraParen'));
         groupStack.pop();
         continue;
       }
@@ -1809,11 +1855,11 @@ function parseExplorerFilterDsl(text, schema = null) {
           const limitDays = explorerRangeLimitDays(schema?.maxRangeDays);
           const presetMs = timeRangePresetMs(timeRange);
           if (presetMs != null && presetMs > limitDays * 86400000) {
-            parseError(lineNum, `Период не может превышать ${limitDays} дней`);
+            parseError(lineNum, explorerT('explorer.dsl.periodMaxDays', { days: limitDays }));
           }
           continue;
         }
-        parseError(lineNum, `неверный формат времени: ${rawLine}`);
+        parseError(lineNum, explorerT('explorer.dsl.badTime', { line: rawLine }));
       }
 
       const { logic: inlineLogic, rest } = parseLogicPrefix(rawLine);
@@ -1824,7 +1870,7 @@ function parseExplorerFilterDsl(text, schema = null) {
       if (systemInMatch) {
         const field = systemInMatch[1].toLowerCase();
         if (!(schema?.filterFields || []).some((item) => item.id === field)) {
-          parseError(lineNum, `поле недоступно: ${field}`);
+          parseError(lineNum, explorerT('explorer.dsl.fieldUnavailable', { field }));
         }
         const value = systemInMatch[3]
           .split(',')
@@ -1843,7 +1889,7 @@ function parseExplorerFilterDsl(text, schema = null) {
       if (systemSimpleMatch) {
         const field = systemSimpleMatch[1].toLowerCase();
         if (!(schema?.filterFields || []).some((item) => item.id === field)) {
-          parseError(lineNum, `поле недоступно: ${field}`);
+          parseError(lineNum, explorerT('explorer.dsl.fieldUnavailable', { field }));
         }
         const value = systemSimpleMatch[3].trim().replace(/^"|"$/g, '');
         pushFilter({
@@ -1931,19 +1977,19 @@ function parseExplorerFilterDsl(text, schema = null) {
       }
       if (simpleHandled) continue;
 
-      parseError(lineNum, `не удалось разобрать строку: ${rawLine}`);
+      parseError(lineNum, explorerT('explorer.dsl.parseFailed', { line: rawLine }));
     } catch (err) {
-      if (/^Строка \d+:/.test(String(err.message || ''))) throw err;
-      parseError(lineNum, err.message || 'ошибка разбора');
+      if (/^(Строка|Line) \d+:/.test(String(err.message || ''))) throw err;
+      parseError(lineNum, err.message || explorerT('explorer.dsl.parseError'));
     }
   }
 
   if (pendingLogic) {
-    throw new Error('После связки условия (И, ИЛИ, И НЕ, ИЛИ НЕ) ожидается фильтр');
+    throw new Error(explorerT('explorer.dsl.logicWithoutFilter'));
   }
 
   if (groupStack.length) {
-    throw new Error('Не закрыта группа условий (ожидается )');
+    throw new Error(explorerT('explorer.dsl.unclosedGroup'));
   }
 
   const periodErr = validateExplorerCustomPeriod(
@@ -2023,8 +2069,8 @@ function getTextareaCaretCoordinates(textarea, pos) {
 
 function explorerLogicAutocompleteEntries() {
   return EXPLORER_FILTER_LOGIC_OPTIONS.flatMap((o) => ([
-    { token: o.label, hint: `${o.altLabel} · logic` },
-    { token: o.altLabel, hint: `${o.label} · связка` },
+    { token: explorerLogicLabel(o), hint: `${o.altLabel} · logic` },
+    { token: o.altLabel, hint: `${explorerLogicLabel(o)}${explorerT('explorer.logicLinkHint')}` },
   ]));
 }
 
@@ -2068,13 +2114,13 @@ function buildExplorerTextSuggestions({ value, cursor, schema, entityItems = [] 
   }
 
   [
-    lineSuggestion('time range', 'time range 1h', 'Период'),
-    lineSuggestion('time between', 'time between "YYYY-MM-DDTHH:mm" and "YYYY-MM-DDTHH:mm"', 'Ручной диапазон'),
-    lineSuggestion('metric', 'metric bps', 'Метрика запроса'),
-    lineSuggestion('limit', 'limit 25', 'Лимит выборки'),
-    lineSuggestion('group by', 'group by src_ip, dst_ip', 'Группировка'),
-    ...(fieldById.direction ? [lineSuggestion('direction', 'direction in (in, out, transit)', 'Направления')] : []),
-    ...(fieldById.collector ? [lineSuggestion('collector', 'collector in ("collector-id")', 'Коллекторы')] : []),
+    lineSuggestion('time range', 'time range 1h', explorerT('explorer.dsl.suggestPeriod')),
+    lineSuggestion('time between', 'time between "YYYY-MM-DDTHH:mm" and "YYYY-MM-DDTHH:mm"', explorerT('explorer.dsl.suggestCustomRange')),
+    lineSuggestion('metric', 'metric bps', explorerT('explorer.dsl.suggestMetric')),
+    lineSuggestion('limit', 'limit 25', explorerT('explorer.dsl.suggestLimit')),
+    lineSuggestion('group by', 'group by src_ip, dst_ip', explorerT('explorer.dsl.suggestGroupBy')),
+    ...(fieldById.direction ? [lineSuggestion('direction', 'direction in (in, out, transit)', explorerT('explorer.dsl.suggestDirections'))] : []),
+    ...(fieldById.collector ? [lineSuggestion('collector', 'collector in ("collector-id")', explorerT('explorer.dsl.suggestCollectors'))] : []),
     ...explorerLogicAutocompleteEntries().map(({ token, hint }) => lineSuggestion(token, `${token} `, hint)),
   ]
     .filter((item) => matchesNeedle(item.label, item.hint))
@@ -2098,21 +2144,21 @@ function buildExplorerTextSuggestions({ value, cursor, schema, entityItems = [] 
 
   if (lowerRest.startsWith('time')) {
     ['30m', '1h', '3h', '6h', '12h', '24h', '7d', '30d'].forEach((range) => {
-      suggestions.push(lineSuggestion(`time range ${range}`, `time range ${range}`, 'Готовый период'));
+      suggestions.push(lineSuggestion(`time range ${range}`, `time range ${range}`, explorerT('explorer.dsl.suggestPresetPeriod')));
     });
-    suggestions.push(lineSuggestion('time between ...', 'time between "YYYY-MM-DDTHH:mm" and "YYYY-MM-DDTHH:mm"', 'Ручной диапазон'));
+    suggestions.push(lineSuggestion('time between ...', 'time between "YYYY-MM-DDTHH:mm" and "YYYY-MM-DDTHH:mm"', explorerT('explorer.dsl.suggestCustomRange')));
   }
 
   if (fieldById.direction && lowerRest.startsWith('direction')) {
     ['total', 'in', 'out', 'transit', 'internal', 'unknown'].forEach((dir) => {
-      suggestions.push(lineSuggestion(dir, `direction in (${dir})`, 'Значение direction'));
+      suggestions.push(lineSuggestion(dir, `direction in (${dir})`, explorerT('explorer.dsl.suggestDirectionValue')));
     });
-    suggestions.push(lineSuggestion('total, in, out', 'direction in (total, in, out)', 'Несколько направлений'));
+    suggestions.push(lineSuggestion('total, in, out', 'direction in (total, in, out)', explorerT('explorer.dsl.suggestMultiDirection')));
   }
 
   if (fieldById.collector && lowerRest.startsWith('collector')) {
-    suggestions.push(lineSuggestion('Все коллекторы', 'collector in (all)', 'Без ограничения по коллекторам'));
-    suggestions.push(lineSuggestion('collector in ("collector-id")', 'collector in ("collector-id")', 'ID коллектора или локации'));
+    suggestions.push(lineSuggestion(explorerT('explorer.dsl.suggestAllCollectors'), 'collector in (all)', explorerT('explorer.dsl.suggestAllCollectorsHint')));
+    suggestions.push(lineSuggestion('collector in ("collector-id")', 'collector in ("collector-id")', explorerT('explorer.dsl.suggestCollectorId')));
   }
 
   if (lowerRest.startsWith('tcp_flags')) {
@@ -2145,7 +2191,7 @@ function buildExplorerTextSuggestions({ value, cursor, schema, entityItems = [] 
       .slice(0, 8)
       .forEach((item) => {
         const v = item.value ?? item.id ?? item.label;
-        suggestions.push(lineSuggestion(String(v), `${logicPrefix}${field} ${resolveExplorerOpToken(op)} ${v}`, item.label || item.hint || 'Значение'));
+        suggestions.push(lineSuggestion(String(v), `${logicPrefix}${field} ${resolveExplorerOpToken(op)} ${v}`, item.label || item.hint || explorerT('explorer.dsl.suggestValue')));
       });
     dedupeExplorerEntityItems(entityItems).slice(0, 8).forEach((item) => {
       const v = item.value ?? item.id;
@@ -2154,7 +2200,7 @@ function buildExplorerTextSuggestions({ value, cursor, schema, entityItems = [] 
       suggestions.push(lineSuggestion(
         String(item.label || v),
         `${logicPrefix}${field} ${resolvedOp} ${formatted}`,
-        item.sublabel || 'Сущность',
+        item.sublabel || explorerT('explorer.dsl.suggestEntity'),
       ));
     });
   }
@@ -2176,10 +2222,10 @@ function summarizeExplorerQuery(snapshot) {
   const leaves = api.flattenExplorerFilters?.(filters) || filters;
   const dirCount = leaves.filter((f) => f.field === 'direction').length;
   const collCount = leaves.filter((f) => f.field === 'collector').length;
-  if (dirCount) parts.push(`${dirCount} напр.`);
-  if (collCount) parts.push(`${collCount} колл.`);
+  if (dirCount) parts.push(explorerT('explorer.dsl.summaryDirections', { n: dirCount }));
+  if (collCount) parts.push(explorerT('explorer.dsl.summaryCollectors', { n: collCount }));
   const otherCount = leaves.filter((f) => f.field !== 'direction' && f.field !== 'collector').length;
-  if (otherCount) parts.push(`${otherCount} усл.`);
+  if (otherCount) parts.push(explorerT('explorer.dsl.summaryConditions', { n: otherCount }));
   return parts.join(' · ');
 }
 
@@ -2261,8 +2307,8 @@ function FilterSearchPicker({
   value,
   onChange,
   buttonLabel,
-  searchPlaceholder = 'Поиск...',
-  emptyLabel = 'Выбрать…',
+  searchPlaceholder = explorerT('explorer.search'),
+  emptyLabel = explorerT('explorer.pick'),
   inputPlaceholder,
   grouped = false,
   allowCustom = false,
@@ -2290,7 +2336,7 @@ function FilterSearchPicker({
   const groups = useMemo(() => {
     if (!grouped) return { '': filtered };
     return filtered.reduce((acc, item) => {
-      const key = item.group || 'Прочее';
+      const key = item.group || explorerT('explorer.group.other');
       acc[key] = acc[key] || [];
       acc[key].push(item);
       return acc;
@@ -2374,7 +2420,7 @@ function FilterSearchPicker({
           {allowCustom && (
             <input
               className="input mono"
-              placeholder={inputPlaceholder || 'Своё значение…'}
+              placeholder={inputPlaceholder || explorerT('explorer.customValue')}
               title={inputPlaceholder || undefined}
               value={value ?? ''}
               onChange={(e) => onChange(e.target.value)}
@@ -2382,7 +2428,7 @@ function FilterSearchPicker({
             />
           )}
           {Object.keys(groups).length === 0 ? (
-            <div style={{ padding: '8px 4px', color: 'var(--fg-secondary)', font: 'var(--pv-text-body-3)' }}>Ничего не найдено</div>
+            <div style={{ padding: '8px 4px', color: 'var(--fg-secondary)', font: 'var(--pv-text-body-3)' }}>{explorerT('explorer.nothingFound')}</div>
           ) : Object.entries(groups).map(([groupName, groupItems]) => (
             <div key={groupName || 'all'} className="explorer-picker-group">
               {grouped && groupName && (
@@ -2512,7 +2558,7 @@ function TcpFlagsFilter({ value, onChange, onClear }) {
           className="time-filter__link"
           onClick={() => setAllFlags(!allSelected)}
         >
-          {allSelected ? 'Снять все' : 'Выбрать все'}
+          {allSelected ? explorerT('explorer.deselectAll') : explorerT('explorer.selectAll')}
         </button>
       </div>
       <div className="time-filter__section time-filter__section--directions">
@@ -2543,7 +2589,7 @@ function TcpFlagsFilter({ value, onChange, onClear }) {
             <button
               type="button"
               className="direction-chip__remove"
-              title={`Убрать ${name}`}
+              title={explorerT('explorer.removeFlag', { name })}
               onClick={() => toggleFlag(name)}
             >
               <Icon name="x" size={10} stroke={2.5} />
@@ -2551,7 +2597,7 @@ function TcpFlagsFilter({ value, onChange, onClear }) {
           </span>
         ))}
         {selected.length === 0 && (
-          <span className="direction-filter__empty-hint">Выберите флаги…</span>
+          <span className="direction-filter__empty-hint">{explorerT('explorer.pickFlags')}</span>
         )}
         <div className="direction-filter__add" ref={addRef}>
           <Button
@@ -2562,11 +2608,11 @@ function TcpFlagsFilter({ value, onChange, onClear }) {
             aria-expanded={open}
             onClick={() => setOpen((v) => !v)}
           >
-            Флаг
+            {explorerT('explorer.flag')}
           </Button>
         </div>
         {selected.length > 0 && onClear && (
-          <Button kind="ghost" size="xs" type="button" onClick={onClear}>Очистить</Button>
+          <Button kind="ghost" size="xs" type="button" onClick={onClear}>{explorerT('explorer.clear')}</Button>
         )}
       </div>
       {embeddedMenu}
@@ -2605,8 +2651,8 @@ function FilterValueInput({
       buttonLabel={value
         ? (meta.valueOptions.find((item) => String(item.value ?? item.id) === String(value))?.label || String(value))
         : undefined}
-      searchPlaceholder="Поиск значения..."
-      emptyLabel="Выбрать значение…"
+      searchPlaceholder={explorerT('explorer.searchValue')}
+      emptyLabel={explorerT('explorer.pickValue')}
       inputPlaceholder={valueHint}
       allowCustom
       mono
@@ -2644,17 +2690,17 @@ function ExplorerCellFilterConfirmModal({ open, onClose, pending, onConfirm }) {
     <Modal
       open={open}
       onClose={onClose}
-      title="Запустить анализ?"
+      title={explorerT('explorer.runAnalysisTitle')}
       subtitle={pending.fieldLabel}
       footer={(
         <>
-          <Button kind="ghost" onClick={onClose}>Отмена</Button>
-          <Button kind="primary" onClick={onConfirm}>Запустить</Button>
+          <Button kind="ghost" onClick={onClose}>{explorerT('explorer.cancel')}</Button>
+          <Button kind="primary" onClick={onConfirm}>{explorerT('explorer.run')}</Button>
         </>
       )}
     >
       <p style={{ margin: 0, color: 'var(--fg-secondary)' }}>
-        Значение будет добавлено в фильтры, и анализ выполнится заново.
+        {explorerT('explorer.cellFilterConfirm')}
       </p>
       <p className="mono" style={{ margin: '12px 0 0', font: 'var(--pv-text-body-2-bold)', wordBreak: 'break-word' }}>
         {valueText}
@@ -2684,8 +2730,8 @@ function ExplorerGroupCell({
           <button
             type="button"
             className="icon-btn explorer-dim-cell__expand"
-            title="Подробнее"
-            aria-label="Подробнее"
+            title={explorerT('explorer.more')}
+            aria-label={explorerT('explorer.more')}
             onClick={(e) => {
               e.stopPropagation();
               onExpand();
@@ -2720,9 +2766,9 @@ function ExplorerDetailItem({ label, value, mono, copyText }) {
     if (copyText == null || copyText === '') return;
     try {
       await copyTextToClipboard(copyText);
-      pushToast({ kind: 'success', title: 'Скопировано' });
+      pushToast({ kind: 'success', title: explorerT('explorer.copied') });
     } catch (err) {
-      pushToast({ kind: 'error', title: 'Не удалось скопировать', desc: err.message });
+      pushToast({ kind: 'error', title: explorerT('explorer.copyFailed'), desc: err.message });
     }
   };
 
@@ -2735,8 +2781,8 @@ function ExplorerDetailItem({ label, value, mono, copyText }) {
           <button
             type="button"
             className="icon-btn explorer-detail-item__copy"
-            title="Копировать"
-            aria-label="Копировать"
+            title={explorerT('explorer.copy')}
+            aria-label={explorerT('explorer.copy')}
             onClick={handleCopy}
           >
             <Icon name="copy" size={14} />
@@ -2787,8 +2833,8 @@ function ExplorerResultDetailModal({
   ));
   const metricItems = [
     { label: metricLabel, value: formatMetric(row.metric, metric), mono: true },
-    { label: `Доля · ${metricLabel}`, value: `${Number(row.pct || 0).toFixed(2)}%`, mono: true },
-    ...EXPLORER_RESULT_METRIC_COLUMNS.map((col) => ({
+    { label: explorerT('explorer.sharePct', { metric: metricLabel }), value: `${Number(row.pct || 0).toFixed(2)}%`, mono: true },
+    ...explorerResultMetricColumns().map((col) => ({
       label: col.title,
       value: col.render.length > 1 ? col.render(row, meta) : col.render(row),
       mono: true,
@@ -2802,7 +2848,7 @@ function ExplorerResultDetailModal({
     <Modal
       open={open}
       onClose={onClose}
-      title="Детали строки"
+      title={explorerT('explorer.rowDetails')}
       subtitle={subtitle}
       size="lg"
       footer={(
@@ -2814,13 +2860,13 @@ function ExplorerResultDetailModal({
             chartSeriesIds={chartSeriesIds}
             onToggleDynamicsSeries={onToggleDynamicsSeries}
           />
-          <Button kind="ghost" onClick={onClose}>Закрыть</Button>
+          <Button kind="ghost" onClick={onClose}>{explorerT('explorer.close')}</Button>
         </div>
       )}
     >
       <div className="explorer-detail-modal">
         <section className="explorer-detail-section">
-          <h4 className="explorer-detail-section__title">Группировка</h4>
+          <h4 className="explorer-detail-section__title">{explorerT('explorer.detailGrouping')}</h4>
           <dl className="explorer-detail-grid">
             {dimensionItems.map((item) => (
               <ExplorerDetailItem key={item.label} {...item} />
@@ -2828,7 +2874,7 @@ function ExplorerResultDetailModal({
           </dl>
         </section>
         <section className="explorer-detail-section">
-          <h4 className="explorer-detail-section__title">Метрики</h4>
+          <h4 className="explorer-detail-section__title">{explorerT('explorer.detailMetrics')}</h4>
           <dl className="explorer-detail-grid">
             {metricItems.map((item) => (
               <ExplorerDetailItem key={item.label} {...item} />
@@ -2890,7 +2936,7 @@ function buildExplorerResultColumns({
               <span
                 className="row"
                 style={{ display: 'flex', alignItems: 'center', gap: 8, color: 'var(--fg-secondary)' }}
-                title="Весь трафик за вычетом показанных строк"
+                title={explorerT('explorer.othersTrafficTitle')}
               >
                 <span style={{ width: 10, height: 10, borderRadius: 3, background: r.color, flexShrink: 0 }} />
                 <span style={{ font: 'var(--pv-text-body-2-bold)' }}>{r.values[valueIdx]}</span>
@@ -2912,7 +2958,7 @@ function buildExplorerResultColumns({
           <ExplorerGroupCell
             displayValue={displayValue}
             monoClass={isAsPath ? `${monoClass} mono`.trim() : monoClass}
-            filterTitle={`Добавить в фильтры и запустить анализ${rawTooltip}`}
+            filterTitle={`${explorerT('explorer.addFilterRun')}${rawTooltip}`}
             onAddFilter={() => onAddFilter(dimId, filterVal.value, filterVal.label, groupToken, displayValue)}
             showColorSwatch={showColorSwatch}
             color={r.color}
@@ -2939,7 +2985,7 @@ function buildExplorerResultColumns({
 
   const pctCol = {
     key: 'pct',
-    title: `Доля · ${metricLabel}`,
+    title: explorerT('explorer.sharePct', { metric: metricLabel }),
     align: 'right',
     width: 88,
     minWidth: 72,
@@ -2953,7 +2999,7 @@ function buildExplorerResultColumns({
 
   const actionsCol = {
     key: 'actions',
-    title: 'Действия',
+    title: explorerT('explorer.actions'),
     width: 248,
     resizable: false,
     sortAccessor: () => '',
@@ -3337,7 +3383,7 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
           applyParsedTextToDraft(filterText);
         } catch (err) {
           setFilterTextError(err.message);
-          pushToast({ kind: 'error', title: 'Ошибка фильтра', desc: err.message });
+          pushToast({ kind: 'error', title: explorerT('explorer.filterError'), desc: err.message });
           return;
         }
       } else {
@@ -3372,7 +3418,7 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
   };
 
   const availableMetrics = useMemo(
-    () => (metrics.length ? metrics : [{ id: 'bps', label: 'Средняя бит/с' }])
+    () => (metrics.length ? metrics : [{ id: 'bps', label: explorerT('explorer.defaultMetricBps') }])
       .filter((m) => !(m.id === 'uniq_src' && groupBy.some((g) => explorerGroupFieldId(g) === 'src_ip'))),
     [metrics, groupBy],
   );
@@ -3558,7 +3604,7 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
     }, cabinetMode);
   }, [vis, visualLimit, dynamicsSeriesKey, hasAppliedQuery, source, cabinetMode]);
 
-  const schemaMetrics = metrics.length ? metrics : [{ id: 'bps', label: 'Средняя бит/с' }];
+  const schemaMetrics = metrics.length ? metrics : [{ id: 'bps', label: explorerT('explorer.defaultMetricBps') }];
   const metricLabel = availableMetrics.find((m) => m.id === metric)?.label || metric;
   const groupLabels = groupBy.map((g) => explorerGroupLabel(g, dimensionById));
   const appliedMetricLabel = schemaMetrics.find((m) => m.id === appliedMetric)?.label || appliedMetric;
@@ -3575,7 +3621,7 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
       maxRangeDays,
     );
     if (periodErr) {
-      pushToast({ kind: 'error', title: 'Неверный период', desc: periodErr });
+      pushToast({ kind: 'error', title: explorerT('explorer.invalidPeriod'), desc: periodErr });
       return;
     }
     setAppliedSnapshot({
@@ -3664,7 +3710,7 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
         };
       } catch (err) {
         setFilterTextError(err.message);
-        pushToast({ kind: 'error', title: 'Ошибка фильтра', desc: err.message });
+        pushToast({ kind: 'error', title: explorerT('explorer.filterError'), desc: err.message });
         return;
       }
     }
@@ -3674,7 +3720,7 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
     if (warnings.length) {
       pushToast({
         kind: 'warning',
-        title: 'Проверьте фильтры',
+        title: explorerT('explorer.checkFilters'),
         desc: warnings.slice(0, 3).join('; ') + (warnings.length > 3 ? ` (+${warnings.length - 3})` : ''),
       });
     } else {
@@ -3689,7 +3735,7 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
       maxRangeDays,
     );
     if (periodErr) {
-      pushToast({ kind: 'error', title: 'Неверный период', desc: periodErr });
+      pushToast({ kind: 'error', title: explorerT('explorer.invalidPeriod'), desc: periodErr });
       return;
     }
     const snapshotUsesCabinetClient = explorerUsesCabinetClient({
@@ -3702,7 +3748,7 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
       if (durationMs != null && durationMs > periodOpts.recommendedRangeMs) {
         pushToast({
           kind: 'warning',
-          title: 'Длинный период',
+          title: explorerT('explorer.longPeriod'),
           desc: periodOpts.rangeWarningMessage,
         });
       }
@@ -3793,7 +3839,7 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
   const restoreLastAppliedToDraft = () => {
     if (!lastApplied) return;
     restoreExplorerDraftFromSnapshot(lastApplied, querySetters, draftRestoreOpts);
-    pushToast({ kind: 'success', title: 'Фильтр загружен', desc: 'Последний применённый фильтр восстановлен в конструктор.' });
+    pushToast({ kind: 'success', title: explorerT('explorer.filterLoaded'), desc: explorerT('explorer.filterLoadedDesc') });
   };
 
   const saveCurrentQuery = async ({ name, description, folder, isShared, id }) => {
@@ -3820,9 +3866,9 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
       }
       const items = await ApiClient.loadExplorerSavedFilters();
       setSavedFilters(mergeExplorerSavedFilters(items));
-      pushToast({ kind: 'success', title: id ? 'Фильтр обновлён' : 'Фильтр сохранён', desc: 'Он доступен в блоке «Сохранённые».' });
+      pushToast({ kind: 'success', title: id ? explorerT('explorer.filterUpdated') : explorerT('explorer.filterSaved'), desc: explorerT('explorer.filterSavedDesc') });
     } catch (err) {
-      pushToast({ kind: 'error', title: 'Не удалось сохранить', desc: err.message });
+      pushToast({ kind: 'error', title: explorerT('explorer.saveFailed'), desc: err.message });
     }
   };
 
@@ -3934,7 +3980,7 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
               thresholds: validThresholds,
               widgets: buildCreateWidgets(existingChartStyle),
             });
-            pushToast({ kind: 'success', title: 'Фильтры наблюдения обновлены', desc: name || existing.name });
+            pushToast({ kind: 'success', title: explorerT('explorer.obsFiltersUpdated'), desc: name || existing.name });
             updated = true;
           } catch (err) {
             if (!observationNotFoundError(err) && !observationCannotEditError(err)) throw err;
@@ -3944,7 +3990,7 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
       }
       if (!updated) {
         const payload = {
-          name: (name || '').trim() || `Наблюдение · ${metricLabel}`,
+          name: (name || '').trim() || explorerT('explorer.observationDefaultName', { metric: metricLabel }),
           description: '',
           lookback: tileLookback,
           explorerQuery: explorerQuerySnapshot,
@@ -3965,7 +4011,7 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
         id = res.data?.id;
         pushToast({
           kind: 'success',
-          title: saveMode === 'update' ? 'Сохранено как новое наблюдение' : 'Добавлено в наблюдения',
+          title: saveMode === 'update' ? explorerT('explorer.obsSavedAsNew') : explorerT('explorer.obsAdded'),
           desc: payload.name,
         });
       }
@@ -3977,20 +4023,20 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
       if (typeof onNavigate === 'function') onNavigate('observations');
       else location.hash = 'observations';
     } catch (err) {
-      pushToast({ kind: 'error', title: 'Не удалось сохранить наблюдение', desc: err.message });
+      pushToast({ kind: 'error', title: explorerT('explorer.obsSaveFailed'), desc: err.message });
     }
   };
 
   const deleteSavedFilter = async (query) => {
     if (isBuiltinExplorerPreset(query)) return;
-    if (!window.confirm(`Удалить сохранённый фильтр «${query.name}»?`)) return;
+    if (!window.confirm(explorerT('explorer.confirmDeleteFilter', { name: query.name }))) return;
     try {
       await ApiClient.deleteExplorerFilter(query.id);
       const items = await ApiClient.loadExplorerSavedFilters();
       setSavedFilters(mergeExplorerSavedFilters(items));
-      pushToast({ kind: 'success', title: 'Фильтр удалён', desc: query.name });
+      pushToast({ kind: 'success', title: explorerT('explorer.filterDeleted'), desc: query.name });
     } catch (err) {
-      pushToast({ kind: 'error', title: 'Не удалось удалить', desc: err.message });
+      pushToast({ kind: 'error', title: explorerT('explorer.deleteFailed'), desc: err.message });
     }
   };
 
@@ -4008,15 +4054,15 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
     });
     try {
       await copyTextToClipboard(url);
-      pushToast({ kind: 'success', title: 'Ссылка скопирована', desc: 'URL содержит параметры фильтра.' });
+      pushToast({ kind: 'success', title: explorerT('explorer.linkCopied'), desc: explorerT('explorer.linkCopiedFilterDesc') });
     } catch (err) {
-      pushToast({ kind: 'error', title: 'Не удалось скопировать', desc: err.message });
+      pushToast({ kind: 'error', title: explorerT('explorer.copyFailed'), desc: err.message });
     }
   };
 
   const copyResultsShareLink = async () => {
     if (!snapshotId) {
-      pushToast({ kind: 'error', title: 'Нет данных для шаринга', desc: 'Сначала выполните запрос.' });
+      pushToast({ kind: 'error', title: explorerT('explorer.noShareData'), desc: explorerT('explorer.noShareDataDesc') });
       return;
     }
     setSharing(true);
@@ -4031,11 +4077,11 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
       }));
       pushToast({
         kind: 'success',
-        title: 'Ссылка скопирована',
-        desc: `Сохранённые результаты доступны до ${formatSnapshotTimestamp(data.expiresAt, displayTimezone)}.`,
+        title: explorerT('explorer.linkCopied'),
+        desc: explorerT('explorer.shareResultsDesc', { time: formatSnapshotTimestamp(data.expiresAt, displayTimezone) }),
       });
     } catch (err) {
-      pushToast({ kind: 'error', title: 'Не удалось создать ссылку', desc: err.message });
+      pushToast({ kind: 'error', title: explorerT('explorer.linkCreateFailed'), desc: err.message });
     } finally {
       setSharing(false);
     }
@@ -4070,17 +4116,17 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
       a.remove();
       URL.revokeObjectURL(url);
       const periodHint = meta?.windowFrom && meta?.windowTo
-        ? `Период таблицы: ${meta.windowFrom} — ${meta.windowTo}.`
-        : 'Обновите запрос для точного совпадения периода.';
+        ? explorerT('explorer.csvPeriodHint', { from: meta.windowFrom, to: meta.windowTo })
+        : explorerT('explorer.csvRefreshHint');
       pushToast({
         kind: 'success',
-        title: 'CSV экспортирован',
+        title: explorerT('explorer.csvExported'),
         desc: meta?.windowFrom && meta?.windowTo
-          ? `Все столбцы, до 10 000 строк. ${periodHint}`
-          : 'Все столбцы, до 10 000 строк.',
+          ? explorerT('explorer.csvDescWithPeriod', { hint: periodHint })
+          : explorerT('explorer.csvDesc'),
       });
     } catch (err) {
-      pushToast({ kind: 'error', title: 'Экспорт не удался', desc: err.message });
+      pushToast({ kind: 'error', title: explorerT('explorer.exportFailed'), desc: err.message });
     } finally {
       setExporting(false);
     }
@@ -4185,7 +4231,7 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
         };
       }),
     ];
-    applyFiltersAndRun(nextFilters, 'Фокус на строке', 'Значения строки добавлены в фильтры.');
+    applyFiltersAndRun(nextFilters, explorerT('explorer.focusRow'), explorerT('explorer.focusRowDesc'));
   };
 
   const excludeRow = (row) => {
@@ -4205,7 +4251,7 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
         };
       }),
     ];
-    applyFiltersAndRun(nextFilters, 'Строка исключена', 'Значения строки добавлены как исключение.');
+    applyFiltersAndRun(nextFilters, explorerT('explorer.excludeRow'), explorerT('explorer.excludeRowDesc'));
   };
 
   const toggleDynamicsSeries = (rowId) => {
@@ -4310,7 +4356,7 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
     showOthersOnChart,
     onToggleOthersOnChart: toggleOthersOnChart,
     onOpenDetails: openResultDetail,
-  }), [appliedGroupBy, dimensions, dimensionById, appliedMetricLabel, appliedMetric, meta, showAllResultColumns, requestAddFilterFromCell, focusRow, excludeRow, toggleDynamicsSeries, dynamicsSeriesIds, showOthersOnChart, openResultDetail]);
+  }), [appliedGroupBy, dimensions, dimensionById, appliedMetricLabel, appliedMetric, meta, showAllResultColumns, requestAddFilterFromCell, focusRow, excludeRow, toggleDynamicsSeries, dynamicsSeriesIds, showOthersOnChart, openResultDetail, typeof GrapesI18n !== 'undefined' ? GrapesI18n.getLocale() : 'ru']);
 
   const hasCoarseGroup = useMemo(
     () => appliedGroupBy.some((token) => isCoarseExplorerGroupToken(token, dimensionById)),
@@ -4380,21 +4426,21 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
     <div className="main__container" style={{ padding: 0 }}>
       <div className="page-head" style={{ padding: '0 4px' }}>
         <div>
-          <h1>Разбор трафика</h1>
-          <p>Historical flow explorer: фильтры по времени, направлению, коллекторам, сущностям, протоколам, VLAN, ASN, L3 и сервисам.</p>
+          <h1>{explorerT('explorer.title')}</h1>
+          <p>{explorerT('explorer.subtitle')}</p>
         </div>
         <div className="row" style={{ gap: 8 }}>
-          <Button kind="ghost" icon="link" onClick={copyFilterShareLink}>Поделиться фильтрами</Button>
+          <Button kind="ghost" icon="link" onClick={copyFilterShareLink}>{explorerT('explorer.shareFilters')}</Button>
           <Button
             kind="ghost"
             icon="copy"
             onClick={copyResultsShareLink}
             disabled={!snapshotId || sharing || !hasAppliedQuery}
           >
-            {sharing ? 'Ссылка…' : 'Поделиться результатами'}
+            {sharing ? explorerT('explorer.shareResultsBusy') : explorerT('explorer.shareResults')}
           </Button>
           <Button kind="ghost" icon="export" onClick={exportCsv} disabled={!hasAppliedQuery || !results.length || exporting}>
-            {exporting ? 'Экспорт…' : 'Экспорт'}
+            {exporting ? explorerT('explorer.exportBusy') : explorerT('explorer.export')}
           </Button>
         </div>
       </div>
@@ -4414,9 +4460,9 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
           }}
         >
           <div style={{ flex: 1, minWidth: 220, font: 'var(--pv-text-body-3)' }}>
-            Просмотр сохранённого снимка результатов
-            {shareMeta?.createdAt ? ` · создан ${formatSnapshotTimestamp(shareMeta.createdAt, displayTimezone)}` : ''}
-            {shareMeta?.expiresAt ? ` · доступен до ${formatSnapshotTimestamp(shareMeta.expiresAt, displayTimezone)}` : ''}
+            {explorerT('explorer.snapshotBanner')}
+            {shareMeta?.createdAt ? explorerT('explorer.snapshotCreated', { time: formatSnapshotTimestamp(shareMeta.createdAt, displayTimezone) }) : ''}
+            {shareMeta?.expiresAt ? explorerT('explorer.snapshotExpires', { time: formatSnapshotTimestamp(shareMeta.expiresAt, displayTimezone) }) : ''}
           </div>
         </div>
       )}
@@ -4437,24 +4483,24 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
           >
             <div style={{ flex: 1, minWidth: 220, font: 'var(--pv-text-body-3)' }}>
               {isObservationComposeEdit(observationCompose)
-                ? 'Редактируете фильтры наблюдения. «Обновить» перезапишет текущую плитку; «Сохранить как новое» создаст отдельный график.'
-                : 'Новое наблюдение: соберите фильтр здесь, затем «Добавить в наблюдения».'}
+                ? explorerT('explorer.obsEditBanner')
+                : explorerT('explorer.obsNewBanner')}
             </div>
             {canWriteObservation && isObservationComposeEdit(observationCompose) ? (
               <>
                 <Button kind="primary" size="sm" onClick={openUpdateObservation}>
-                  Обновить наблюдение
+                  {explorerT('explorer.updateObservation')}
                 </Button>
                 <Button kind="ghost" size="sm" onClick={openSaveAsObservation}>
-                  Сохранить как новое
+                  {explorerT('explorer.saveAsNewObservation')}
                 </Button>
               </>
             ) : canWriteObservation ? (
               <Button kind="primary" size="sm" onClick={openSaveAsObservation}>
-                Добавить в наблюдения
+                {explorerT('explorer.addToObservations')}
               </Button>
             ) : null}
-            <Button kind="ghost" size="sm" onClick={clearObservationCompose}>Отмена</Button>
+            <Button kind="ghost" size="sm" onClick={clearObservationCompose}>{explorerT('explorer.cancel')}</Button>
           </div>
         )}
 
@@ -4462,7 +4508,7 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
           <Card pad="sm">
             <div className="row" style={{ gap: 14, flexWrap: 'wrap', alignItems: 'center' }}>
               <Button kind="ghost" size="sm" icon="filter" onClick={openFilterPanel}>
-                Фильтры
+                {explorerT('explorer.filters')}
                 {filters.length > 0 && <span className="nav-item__badge" style={{ marginLeft: 4 }}>{filters.length}</span>}
               </Button>
               <ExplorerMetricGroupControls
@@ -4520,8 +4566,8 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
             ) : null}
             saveAsObservationLabel={
               isObservationComposeEdit(observationCompose)
-                ? 'Обновить наблюдение'
-                : 'Добавить в наблюдения'
+                ? explorerT('explorer.updateObservation')
+                : explorerT('explorer.addToObservations')
             }
             onEditSaved={(q) => {
               const payload = migrateExplorerSnapshot(q.query || q);
@@ -4551,18 +4597,18 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
         )}
 
         {idleState ? (
-          <Card title="Нет данных" pad="sm">
+          <Card title={explorerT('explorer.noDataTitle')} pad="sm">
             <div style={{ padding: '32px 16px', textAlign: 'center', color: 'var(--fg-secondary)' }}>
-              Задайте период, направление, коллекторы и условия фильтрации, затем нажмите «Применить».
+              {explorerT('explorer.idleHint')}
             </div>
           </Card>
         ) : (
           <>
             {appliedGroupBy.length === 0 && (
               source === 'loading' || isRefreshingData ? (
-                <Card title="Базовые значения" pad="sm">
+                <Card title={explorerT('explorer.basicsTitle')} pad="sm">
                   <ExplorerQueryStatus
-                    label={isRefreshingData ? 'Обновление данных' : 'Выполняем запрос…'}
+                    label={isRefreshingData ? explorerT('explorer.refreshingData') : explorerT('explorer.runningQuery')}
                     startedAt={queryStartedAt}
                     expanded={queryTimerExpanded}
                     onToggleExpanded={toggleQueryTimerExpanded}
@@ -4570,7 +4616,7 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
                 </Card>
               ) : source === 'error' ? (
                 <Card
-                  title="Базовые значения"
+                  title={explorerT('explorer.basicsTitle')}
                   pad="sm"
                   headerBadge={lastQueryElapsedMs != null ? (
                     <ExplorerQueryElapsedBadge elapsedMs={lastQueryElapsedMs} />
@@ -4582,7 +4628,7 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
                 </Card>
               ) : (
                 <Card
-                  title={`Динамика · ${appliedMetricLabel}`}
+                  title={explorerT('explorer.dynamicsTitle', { metric: appliedMetricLabel })}
                   subtitle={`${timeRangeLabel(appliedTimeRange, appliedCustomPeriod)} · ${meta?.dataTable || 'flows_raw'}`}
                   loadMs={loadMs}
                   serverMs={serverMs}
@@ -4628,7 +4674,7 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
                       icon="sliders"
                       onClick={() => setShowAllResultColumns((v) => !v)}
                     >
-                      {showAllResultColumns ? 'Скрыть поля' : 'Все поля'}
+                      {showAllResultColumns ? explorerT('explorer.hideFields') : explorerT('explorer.allFields')}
                     </Button>
                     {(isExplorerDynamicsVis(vis) || isExplorerSankeyVis(vis)) && (
                       <Button kind="ghost" size="sm" icon="download" onClick={exportCsv} disabled={!hasAppliedQuery || !results.length || exporting}>CSV</Button>
@@ -4639,14 +4685,14 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
 
               const analysisBody = isRefreshingData ? (
                 <ExplorerQueryStatus
-                  label="Обновление данных"
+                  label={explorerT('explorer.refreshingData')}
                   startedAt={queryStartedAt}
                   expanded={queryTimerExpanded}
                   onToggleExpanded={toggleQueryTimerExpanded}
                 />
               ) : source === 'loading' && !results.length ? (
                 <ExplorerQueryStatus
-                  label="Выполняем запрос…"
+                  label={explorerT('explorer.runningQuery')}
                   startedAt={queryStartedAt}
                   expanded={queryTimerExpanded}
                   onToggleExpanded={toggleQueryTimerExpanded}
@@ -4655,22 +4701,22 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
                 <div style={{ padding: 40, textAlign: 'center', color: 'var(--st-critical)' }}>{error || ApiClient.LOAD_FAILED}</div>
               ) : thresholdEmptyState ? (
                 <div className="explorer-threshold-empty">
-                  <p>Нет строк, проходящих порог</p>
-                  <Button kind="ghost" size="sm" onClick={clearAllThresholds}>Снять пороги</Button>
+                  <p>{explorerT('explorer.thresholdEmpty')}</p>
+                  <Button kind="ghost" size="sm" onClick={clearAllThresholds}>{explorerT('explorer.clearThresholds')}</Button>
                 </div>
               ) : results.length === 0 ? (
                 <div style={{ padding: 40, textAlign: 'center', color: 'var(--fg-secondary)' }}>
-                  Нет данных для выбранных фильтров. Ослабьте фильтры или расширьте период.
+                  {explorerT('explorer.noDataForFilters')}
                 </div>
               ) : null;
 
               return (
                   <Card
                     className="card--explorer-results"
-                    title="Результаты"
+                    title={explorerT('explorer.resultsTitle')}
                     subtitle={isExplorerSankeyVis(vis)
-                      ? 'Sankey по строкам в пределах «Показать»; таблица — те же строки'
-                      : 'График динамики и таблица: серии по селектору «Показать», отдельные строки — «Показать» / «Скрыть с графика»'}
+                      ? explorerT('explorer.resultsSubSankey')
+                      : explorerT('explorer.resultsSubDefault')}
                     loadMs={loadMs}
                     serverMs={serverMs}
                     pad="0"
@@ -4735,21 +4781,21 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
                           onRowMouseLeave={handleSeriesRowHoverEnd}
                           pinnedRows={resultTablePinnedRows}
                           pageSize={resolvedExplorerTablePageSize}
-                          pageSizeOptions={explorerTablePaginated ? EXPLORER_TABLE_PAGE_SIZE_OPTIONS : null}
+                          pageSizeOptions={explorerTablePaginated ? resolveExplorerTablePageSizeOptions() : null}
                           pageSizeSelectValue={explorerTablePaginated ? tablePageSizeChoice : undefined}
                           onPageSizeSelectChange={explorerTablePaginated ? setTablePageSizeChoice : undefined}
                           initialSort={{ key: appliedDefaultSortKey, dir: 'desc' }}
-                          emptyTitle={source === 'loading' ? 'Выполняем запрос…' : 'Нет данных'}
+                          emptyTitle={source === 'loading' ? explorerT('explorer.runningQuery') : explorerT('explorer.noDataTitle')}
                           footerNote={(
                             <>
                               <span>
-                                Показано {visibleResults.length} из {results.length} загруженных · {meta?.granularity || 'raw'}
-                                {meta?.trafficSampled ? ' · с учётом sampling' : ''}
-                                {meta?.rowsHidden > 0 ? ` · Скрыто порогами: ${meta.rowsHidden}` : ''}
+                                {explorerT('explorer.footerShown', { shown: visibleResults.length, loaded: results.length, granularity: meta?.granularity || 'raw' })}
+                                {meta?.trafficSampled ? explorerT('explorer.footerSampled') : ''}
+                                {meta?.rowsHidden > 0 ? explorerT('explorer.footerHiddenByThreshold', { n: meta.rowsHidden }) : ''}
                               </span>
                               <span>
-                                Запрос выполнен за <b style={{ color: 'var(--fg-primary)' }}>{serverMs ?? '—'} мс</b>
-                                {' · ClickHouse · '}{meta?.dataTable || 'flows_raw'}
+                                {explorerT('explorer.footerQueryTime')}<b style={{ color: 'var(--fg-primary)' }}>{serverMs ?? '—'}{explorerT('explorer.footerQueryTimeMs')}</b>
+                                {explorerT('explorer.footerClickHouse')}{meta?.dataTable || 'flows_raw'}
                               </span>
                             </>
                           )}
@@ -4913,7 +4959,7 @@ function ExplorerVisualLimitControl({
     <div className="explorer-visual-limit">
       <div className="explorer-visual-limit__main row">
         <span className="explorer-visual-limit__summary">
-          Загружено {total} · показано {shown}
+          {explorerT('explorer.loadedShown', { total, shown })}
         </span>
         <div className="seg explorer-visual-limit__seg">
           {instantOptions.map((opt) => (
@@ -4936,7 +4982,7 @@ function ExplorerVisualLimitControl({
                 type="button"
                 className={active ? 'is-active' : ''}
                 disabled={loadingMore}
-                title={loaded ? `Показать top ${opt}` : `Загрузить top ${opt}`}
+                title={loaded ? explorerT('explorer.showTop', { n: opt }) : explorerT('explorer.loadTop', { n: opt })}
                 onClick={() => {
                   if (loaded) onChange(opt);
                   else onRequestFetchLimit?.(opt);
@@ -4953,7 +4999,7 @@ function ExplorerVisualLimitControl({
             className={`explorer-visual-limit__custom${isExplorerCustomLimitActive(value) ? ' is-active' : ''}`}
             value={customDraft}
             placeholder="N"
-            aria-label="Сколько строк показать"
+            aria-label={explorerT('explorer.showRowsAria')}
             disabled={loadingMore}
             onChange={(e) => setCustomDraft(e.target.value)}
             onKeyDown={(e) => {
@@ -4969,11 +5015,11 @@ function ExplorerVisualLimitControl({
             className={value === 'all' ? 'is-active' : ''}
             disabled={loadingMore}
             title={fetchLimit >= allLimit
-              ? 'Показать все загруженные строки'
-              : `Загрузить до ${allLimit} строк`}
+              ? explorerT('explorer.showAllLoaded')
+              : explorerT('explorer.loadUpTo', { n: allLimit })}
             onClick={() => onChange('all')}
           >
-            Все
+            {explorerT('explorer.pageSizeAll')}
           </button>
         </div>
       </div>
@@ -4986,11 +5032,11 @@ function ExplorerChartToggleButton({ onChart, onClick, disabled = false }) {
     <button
       type="button"
       className={`badge explorer-row-actions__btn${onChart ? ' badge--info' : ''}`}
-      title={onChart ? 'Скрыть серию с графика динамики' : 'Показать серию на графике динамики'}
+      title={onChart ? explorerT('explorer.hideFromChart') : explorerT('explorer.showOnChart')}
       disabled={disabled}
       onClick={onClick}
     >
-      <ExplorerActionLabel full={onChart ? 'Скрыть с графика' : 'Показать'} short={onChart ? 'Скрыть' : 'Показать'} />
+      <ExplorerActionLabel full={onChart ? explorerT('explorer.hideFromChartShort') : explorerT('explorer.showShort')} short={onChart ? explorerT('explorer.hideShort') : explorerT('explorer.showShort')} />
     </button>
   );
 }
@@ -5014,25 +5060,25 @@ function ExplorerRowActions({
   const onChart = chartSeriesIds?.has(row.id);
   return (
     <div className="explorer-row-actions row" onClick={(e) => e.stopPropagation()}>
-      <button type="button" className="badge explorer-row-actions__btn" title="Добавить значения строки в фильтр" onClick={() => onFocus?.(row)}>
-        <ExplorerActionLabel full="В фильтр" short="Фильтр" />
+      <button type="button" className="badge explorer-row-actions__btn" title={explorerT('explorer.addRowToFilter')} onClick={() => onFocus?.(row)}>
+        <ExplorerActionLabel full={explorerT('explorer.toFilter')} short={explorerT('explorer.toFilterShort')} />
       </button>
       <button
         type="button"
         className="badge explorer-row-actions__btn"
-        title={onExclude ? 'Исключить значения строки из выборки' : 'Исключение недоступно для укрупнённой группировки'}
+        title={onExclude ? explorerT('explorer.excludeRowTitle') : explorerT('explorer.excludeUnavailable')}
         disabled={!onExclude}
         onClick={() => onExclude?.(row)}
       >
-        <ExplorerActionLabel full="Исключить" short="Искл." />
+        <ExplorerActionLabel full={explorerT('explorer.exclude')} short={explorerT('explorer.excludeShort')} />
       </button>
       <button
         type="button"
         className={`badge explorer-row-actions__btn${onChart ? ' badge--info' : ''}`}
-        title={onChart ? 'Скрыть серию с графика динамики' : 'Показать серию на графике динамики'}
+        title={onChart ? explorerT('explorer.hideFromChart') : explorerT('explorer.showOnChart')}
         onClick={() => onToggleDynamicsSeries?.(row.id)}
       >
-        <ExplorerActionLabel full={onChart ? 'Скрыть с графика' : 'Показать'} short={onChart ? 'Скрыть' : 'Показать'} />
+        <ExplorerActionLabel full={onChart ? explorerT('explorer.hideFromChartShort') : explorerT('explorer.showShort')} short={onChart ? explorerT('explorer.hideShort') : explorerT('explorer.showShort')} />
       </button>
     </div>
   );
@@ -5110,7 +5156,7 @@ function ExplorerGroupChip({ token, dimension, onChange, onRemove }) {
           <span className="explorer-group-chip__sep" aria-hidden="true">/</span>
           <select
             className="input mono explorer-group-mask-input"
-            aria-label={`Шаг группировки для ${dimension.label || id}`}
+            aria-label={explorerT('explorer.groupStepAria', { label: dimension.label || id })}
             value={String(currentMask)}
             onChange={(e) => handleBucketPresetChange(e.target.value)}
           >
@@ -5119,7 +5165,7 @@ function ExplorerGroupChip({ token, dimension, onChange, onRemove }) {
                 {explorerPortBucketStepLabel(step)}
               </option>
             ))}
-            <option value={EXPLORER_PORT_BUCKET_CUSTOM}>своё…</option>
+            <option value={EXPLORER_PORT_BUCKET_CUSTOM}>{explorerT('explorer.groupCustomStep')}</option>
           </select>
         </>
       )}
@@ -5132,7 +5178,7 @@ function ExplorerGroupChip({ token, dimension, onChange, onRemove }) {
             min={2}
             max={bucketMax}
             step="1"
-            aria-label={`Произвольный шаг группировки для ${dimension.label || id}`}
+            aria-label={explorerT('explorer.groupCustomStepAria', { label: dimension.label || id })}
             value={draftMask}
             onChange={(e) => handleCustomBucketChange(e.target.value)}
             onBlur={() => commitCustomBucket()}
@@ -5151,7 +5197,7 @@ function ExplorerGroupChip({ token, dimension, onChange, onRemove }) {
             min={dimension.maskMin || 1}
             max={dimension.maskMax || 32}
             step="1"
-            aria-label={`Маска для ${dimension.label || id}`}
+            aria-label={explorerT('explorer.groupMaskAria', { label: dimension.label || id })}
             value={draftMask}
             onChange={(e) => handleCidrMaskChange(e.target.value)}
             onBlur={() => commitMask()}
@@ -5165,8 +5211,8 @@ function ExplorerGroupChip({ token, dimension, onChange, onRemove }) {
         type="button"
         className="explorer-query-chip__remove"
         onClick={onRemove}
-        aria-label="Удалить измерение"
-        title="Удалить измерение"
+        aria-label={explorerT('explorer.removeDimension')}
+        title={explorerT('explorer.removeDimension')}
       >
         <Icon name="x" size={10} stroke={2.5} />
       </button>
@@ -5178,9 +5224,9 @@ function explorerCatalogConditionCountLabel(count) {
   const n = Number(count) || 0;
   const mod10 = n % 10;
   const mod100 = n % 100;
-  if (mod10 === 1 && mod100 !== 11) return `${n} условие`;
-  if (mod10 >= 2 && mod10 <= 4 && (mod100 < 10 || mod100 >= 20)) return `${n} условия`;
-  return `${n} условий`;
+  if (mod10 === 1 && mod100 !== 11) return explorerT('explorer.conditionOne', { n });
+  if (mod10 >= 2 && mod10 <= 4 && (mod100 < 10 || mod100 >= 20)) return explorerT('explorer.conditionFew', { n });
+  return explorerT('explorer.conditionMany', { n });
 }
 
 function explorerCatalogFieldList(schema, items, { excludeIds = [] } = {}) {
@@ -5207,7 +5253,7 @@ function ExplorerCatalogFieldPickerPanel({
   excludeIds = [],
   selectedIds = [],
   onPick,
-  searchPlaceholder = 'Поиск...',
+  searchPlaceholder = explorerT('explorer.search'),
   useCatalogs = true,
 }) {
   const [q, setQ] = useState('');
@@ -5235,7 +5281,7 @@ function ExplorerCatalogFieldPickerPanel({
   const flatGroups = useMemo(() => {
     const grouped = {};
     visible.forEach((item) => {
-      const key = item.group || 'Прочее';
+      const key = item.group || explorerT('explorer.group.other');
       grouped[key] = grouped[key] || [];
       grouped[key].push(item);
     });
@@ -5264,7 +5310,7 @@ function ExplorerCatalogFieldPickerPanel({
       <span className="explorer-catalog-picker__catalog-main">
         <span className="explorer-catalog-picker__catalog-label">{catalog.label}</span>
         <span className="explorer-catalog-picker__catalog-meta">
-          {explorerCatalogConditionCountLabel(catalog.fields.length)} · нажмите, чтобы раскрыть
+          {explorerCatalogConditionCountLabel(catalog.fields.length)}{explorerT('explorer.catalogExpandSuffix')}
         </span>
       </span>
       <Icon name="chevR" size={14} className="explorer-catalog-picker__catalog-chevron" />
@@ -5299,7 +5345,7 @@ function ExplorerCatalogFieldPickerPanel({
   let body = null;
   if (needle) {
     body = searchResults.length === 0
-      ? <div style={{ padding: '8px 4px', color: 'var(--fg-secondary)', font: 'var(--pv-text-body-3)' }}>Ничего не найдено</div>
+      ? <div style={{ padding: '8px 4px', color: 'var(--fg-secondary)', font: 'var(--pv-text-body-3)' }}>{explorerT('explorer.nothingFound')}</div>
       : searchResults.map((item) => renderFieldButton(item, { catalogLabel: item.group || null }));
   } else if (useCatalogs && catalogs.length > 0) {
     body = activeCatalogEntry ? (
@@ -5315,7 +5361,7 @@ function ExplorerCatalogFieldPickerPanel({
       </>
     ) : (
       <>
-        <div className="explorer-catalog-picker__hint">Выберите категорию — внутри список условий</div>
+        <div className="explorer-catalog-picker__hint">{explorerT('explorer.catalogPickCategory')}</div>
         {catalogs.map((catalog) => renderCatalogButton(catalog))}
       </>
     );
@@ -5387,13 +5433,13 @@ function DimensionPicker({ anchorRef, dimensions, schema, selected, onPick, onCl
       items={dimensions.filter((d) => d.groupable !== false)}
       selectedIds={selected}
       onPick={(item) => onPick(item.id)}
-      searchPlaceholder="Поиск измерения..."
+      searchPlaceholder={explorerT('explorer.searchDimension')}
       useCatalogs={!cabinetMode}
     />
   );
 }
 
-function EntityPicker({ entityType, value, label, onSelect, onClear, placeholder = 'Поиск сущности...', switchIp = '', fullWidth = false }) {
+function EntityPicker({ entityType, value, label, onSelect, onClear, placeholder = explorerT('explorer.searchEntity'), switchIp = '', fullWidth = false }) {
   const rootRef = React.useRef(null);
   const inputRef = React.useRef(null);
   const menuRef = React.useRef(null);
@@ -5507,16 +5553,16 @@ function EntityPicker({ entityType, value, label, onSelect, onClear, placeholder
       onMouseDown={(e) => e.preventDefault()}
     >
       {loading ? (
-        <div className="explorer-entity-picker__empty">Поиск…</div>
+        <div className="explorer-entity-picker__empty">{explorerT('explorer.searching')}</div>
       ) : visibleItems.length === 0 ? (
-        <div className="explorer-entity-picker__empty">Ничего не найдено</div>
+        <div className="explorer-entity-picker__empty">{explorerT('explorer.nothingFound')}</div>
       ) : visibleItems.map((item) => (
         <button
           key={item.id}
           type="button"
           className={`explorer-entity-picker__item${item.disabled ? ' is-disabled' : ''}${item.hasBinding === false ? ' is-weak' : ''}`}
           disabled={Boolean(item.disabled)}
-          title={item.hasBinding === false ? 'Нет CIDR/портов — фильтр сработает только по метке src_client/dst_client' : undefined}
+          title={item.hasBinding === false ? explorerT('explorer.entityNoBinding') : undefined}
           onMouseDown={(e) => {
             if (item.disabled) return;
             e.preventDefault();
@@ -5803,7 +5849,7 @@ function ExplorerFilterTextEditor({ value, onChange, error, schema, filters = []
       {showAutocompleteMenu && menuStyle && ReactDOM.createPortal(
         <div
           role="listbox"
-          aria-label="Подсказки фильтра"
+          aria-label={explorerT('explorer.filterHintsAria')}
           style={{
             ...menuStyle,
             background: 'var(--bg-surface)',
@@ -5814,7 +5860,7 @@ function ExplorerFilterTextEditor({ value, onChange, error, schema, filters = []
           }}
         >
           {entityLoading && visibleSuggestions.length === 0 ? (
-            <div style={{ padding: '8px 10px', color: 'var(--fg-secondary)', font: 'var(--pv-text-body-3)' }}>Поиск…</div>
+            <div style={{ padding: '8px 10px', color: 'var(--fg-secondary)', font: 'var(--pv-text-body-3)' }}>{explorerT('explorer.searching')}</div>
           ) : visibleSuggestions.map((item, index) => {
             const active = index === safeActiveIndex;
             return (
@@ -5865,7 +5911,7 @@ function ExplorerFilterTextEditor({ value, onChange, error, schema, filters = []
         document.body,
       )}
       <div style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-muted)' }}>
-        ↑↓ выбор · Tab вставка · Enter новая строка · Ctrl+Enter применить
+        {explorerT('explorer.filterHintKeys')}
       </div>
     </div>
   );
@@ -5887,7 +5933,7 @@ function ExplorerAddFilterMenu({
       .map((f) => ({
         id: f.id,
         label: f.label,
-        group: f.group || 'Поля',
+        group: f.group || explorerT('explorer.group.fields'),
         hint: f.valueHint || null,
         valueHint: f.valueHint || null,
         aliases: f.aliases || [],
@@ -5934,7 +5980,7 @@ function ExplorerAddFilterMenu({
             <Icon name="plus" size={12} />
           </button>
         ) : (
-          <Button kind="ghost" size="sm" icon="plus" onClick={() => setOpen((v) => !v)}>Условие</Button>
+          <Button kind="ghost" size="sm" icon="plus" onClick={() => setOpen((v) => !v)}>{explorerT('explorer.addCondition')}</Button>
         )}
       </div>
       {open && (
@@ -5944,7 +5990,7 @@ function ExplorerAddFilterMenu({
           schema={schema}
           items={fieldItems}
           onPick={pick}
-          searchPlaceholder="Поиск фильтра..."
+          searchPlaceholder={explorerT('explorer.searchFilter')}
           useCatalogs={!cabinetMode}
         />
       )}
@@ -5954,12 +6000,12 @@ function ExplorerAddFilterMenu({
 
 function ExplorerFilterModeToggle({ filterMode, onFilterModeChange }) {
   return (
-    <div className="seg explorer-filter-mode-toggle" role="group" aria-label="Режим фильтра">
+    <div className="seg explorer-filter-mode-toggle" role="group" aria-label={explorerT('explorer.filterModeAria')}>
       <button
         type="button"
         className={filterMode === 'graphic' ? 'is-active' : ''}
-        title="Графический режим"
-        aria-label="Графический режим"
+        title={explorerT('explorer.filterModeVisual')}
+        aria-label={explorerT('explorer.filterModeVisual')}
         aria-pressed={filterMode === 'graphic'}
         onClick={() => onFilterModeChange('graphic')}
       >
@@ -5968,8 +6014,8 @@ function ExplorerFilterModeToggle({ filterMode, onFilterModeChange }) {
       <button
         type="button"
         className={filterMode === 'text' ? 'is-active' : ''}
-        title="Текстовый режим"
-        aria-label="Текстовый режим"
+        title={explorerT('explorer.filterModeText')}
+        aria-label={explorerT('explorer.filterModeText')}
         aria-pressed={filterMode === 'text'}
         onClick={() => onFilterModeChange('text')}
       >
@@ -5984,9 +6030,9 @@ function ExplorerAnalysisTabs({ value, onChange, compact = false }) {
     <div
       className={`seg explorer-analysis-tabs${compact ? ' explorer-analysis-tabs--compact' : ''}`}
       role="group"
-      aria-label="Тип анализа"
+      aria-label={explorerT('explorer.analysisTypeAria')}
     >
-      {VIS_TYPES.map((v) => (
+      {resolvedVisTypes().map((v) => (
         <button
           key={v.id}
           type="button"
@@ -6067,7 +6113,7 @@ function ExplorerFilterTemplatesMenu({
           onClick={() => setOpen((v) => !v)}
           aria-expanded={open}
         >
-          Шаблоны
+          {explorerT('explorer.templates')}
         </Button>
       </div>
       {open && menuStyle && ReactDOM.createPortal(
@@ -6085,14 +6131,14 @@ function ExplorerFilterTemplatesMenu({
         >
           {lastApplied && (
             <div style={{ marginBottom: 12 }}>
-              <div style={sectionTitleStyle}>Последний применённый</div>
+              <div style={sectionTitleStyle}>{explorerT('explorer.lastApplied')}</div>
               <div className="col" style={{ gap: 6, padding: '8px 10px', background: 'var(--surf-1)', border: '1px solid var(--bd-soft)', borderRadius: 10 }}>
                 <div style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-secondary)' }}>{summarizeExplorerQuery(lastApplied)}</div>
                 <div className="row" style={{ gap: 6, flexWrap: 'wrap' }}>
-                  <Button kind="ghost" size="xs" icon="play" onClick={() => { onApplyLastApplied?.(); setOpen(false); }} disabled={runDisabled}>Применить</Button>
-                  <Button kind="ghost" size="xs" icon="filter" onClick={() => { onRestoreLastApplied?.(); setOpen(false); }}>В конструктор</Button>
+                  <Button kind="ghost" size="xs" icon="play" onClick={() => { onApplyLastApplied?.(); setOpen(false); }} disabled={runDisabled}>{explorerT('explorer.apply')}</Button>
+                  <Button kind="ghost" size="xs" icon="filter" onClick={() => { onRestoreLastApplied?.(); setOpen(false); }}>{explorerT('explorer.toBuilder')}</Button>
                   {canWrite && (
-                    <Button kind="ghost" size="xs" icon="save" onClick={() => { onSaveLastApplied?.(); setOpen(false); }}>Сохранить</Button>
+                    <Button kind="ghost" size="xs" icon="save" onClick={() => { onSaveLastApplied?.(); setOpen(false); }}>{explorerT('explorer.save')}</Button>
                   )}
                 </div>
               </div>
@@ -6100,7 +6146,7 @@ function ExplorerFilterTemplatesMenu({
           )}
 
           <div style={{ marginBottom: 12 }}>
-            <div style={sectionTitleStyle}>Быстрые фильтры</div>
+            <div style={sectionTitleStyle}>{explorerT('explorer.quickFilters')}</div>
             <div className="col" style={{ gap: 2 }}>
               {EXPLORER_QUICK_FILTERS.map((q) => (
                 <button
@@ -6130,10 +6176,10 @@ function ExplorerFilterTemplatesMenu({
           </div>
 
           <div>
-            <div style={sectionTitleStyle}>Сохранённые</div>
+            <div style={sectionTitleStyle}>{explorerT('explorer.saved')}</div>
             <div className="col" style={{ gap: 4 }}>
               {savedQueries.length === 0 ? (
-                <div style={{ padding: '8px 4px', color: 'var(--fg-muted)', font: 'var(--pv-text-body-3)' }}>Нет сохранённых шаблонов</div>
+                <div style={{ padding: '8px 4px', color: 'var(--fg-muted)', font: 'var(--pv-text-body-3)' }}>{explorerT('explorer.noSavedTemplates')}</div>
               ) : savedQueries.map((q) => {
                 const builtin = isBuiltinExplorerPreset(q);
                 return (
@@ -6173,7 +6219,7 @@ function ExplorerFilterTemplatesMenu({
                         <button
                           type="button"
                           className="icon-btn tt"
-                          data-tt="Редактировать"
+                          data-tt={explorerT('explorer.edit')}
                           style={{ width: 28, height: 28, flexShrink: 0 }}
                           onClick={(e) => {
                             e.stopPropagation();
@@ -6186,7 +6232,7 @@ function ExplorerFilterTemplatesMenu({
                         <button
                           type="button"
                           className="icon-btn tt"
-                          data-tt="Удалить фильтр"
+                          data-tt={explorerT('explorer.deleteFilter')}
                           style={{ width: 28, height: 28, flexShrink: 0 }}
                           onClick={(e) => {
                             e.stopPropagation();
@@ -6241,8 +6287,8 @@ function ExplorerQueryChip({
           type="button"
           className="explorer-query-chip__remove"
           onClick={(e) => { e.stopPropagation(); onRemove(e); }}
-          aria-label="Удалить"
-          title="Удалить"
+          aria-label={explorerT('explorer.remove')}
+          title={explorerT('explorer.remove')}
         >
           <Icon name="x" size={10} stroke={2.5} />
         </button>
@@ -6870,7 +6916,7 @@ function ExplorerLogicChip({ value, onChange }) {
     <>
       <span ref={anchorRef}>
         <button type="button" className="explorer-query-chip explorer-logic-chip" onClick={() => setOpen((v) => !v)}>
-          {current.label}
+          {explorerLogicLabel(current)}
           <Icon name="chevD" size={10} />
         </button>
       </span>
@@ -6886,7 +6932,7 @@ function ExplorerLogicChip({ value, onChange }) {
                 setOpen(false);
               }}
             >
-              {opt.label}
+              {explorerLogicLabel(opt)}
             </div>
           ))}
         </div>
@@ -6925,7 +6971,7 @@ function ExplorerMetricGroupControls({
       <ExplorerMetricChipPicker metrics={availableMetrics} value={metric} onChange={setMetric} />
       {showGroupBy && (
         <>
-          <span className="explorer-chip-row__sep">группировать по</span>
+          <span className="explorer-chip-row__sep">{explorerT('explorer.groupByLabel')}</span>
           {previewGroupBy.map((token) => {
             const id = explorerGroupFieldId(token);
             const originalIndex = groupBy.findIndex((item) => explorerGroupFieldId(item) === id);
@@ -6942,7 +6988,7 @@ function ExplorerMetricGroupControls({
                   <span
                     className={`explorer-draggable-chip${isPhantom ? ' is-dragging explorer-chip-drag-source-hidden' : ''}`}
                     data-explorer-list-item={originalIndex}
-                    title="Перетащить"
+                    title={explorerT('explorer.drag')}
                     onPointerDown={(event) => startDrag(originalIndex, event, {
                       label: dimensionById[id]?.label || id,
                       variant: 'chip',
@@ -7011,7 +7057,7 @@ function ExplorerFilterEditPopover({
     <ExplorerPopoverMenu anchorRef={anchorRef} open={open} onClose={onClose} minWidth={300} maxHeight={420}>
       <div className="explorer-filter-edit-popover">
         <div className="explorer-filter-edit-popover__row">
-          <div className="explorer-filter-edit-popover__label">Поле</div>
+          <div className="explorer-filter-edit-popover__label">{explorerT('explorer.field')}</div>
           {isSpecialField ? (
             <ExplorerFilterEditControl>
               <div className="explorer-filter-edit-popover__static">{meta?.label || filter.field}</div>
@@ -7031,8 +7077,8 @@ function ExplorerFilterEditPopover({
                     op: nextOps.includes(filter.op) ? filter.op : defaultOp,
                   });
                 }}
-                searchPlaceholder="Поиск поля..."
-                emptyLabel="Поле…"
+                searchPlaceholder={explorerT('explorer.searchField')}
+                emptyLabel={explorerT('explorer.fieldPlaceholder')}
                 grouped
                 fullWidth
               />
@@ -7040,7 +7086,7 @@ function ExplorerFilterEditPopover({
           )}
         </div>
         <div className="explorer-filter-edit-popover__row">
-          <div className="explorer-filter-edit-popover__label">Оператор</div>
+          <div className="explorer-filter-edit-popover__label">{explorerT('explorer.operator')}</div>
           <ExplorerFilterEditControl>
             <select
               className="input"
@@ -7052,7 +7098,7 @@ function ExplorerFilterEditPopover({
           </ExplorerFilterEditControl>
         </div>
         <div className="explorer-filter-edit-popover__row">
-          <div className="explorer-filter-edit-popover__label">Значение</div>
+          <div className="explorer-filter-edit-popover__label">{explorerT('explorer.value')}</div>
           <ExplorerFilterEditControl>
             {filter.field === 'direction' ? (
               <DirectionFilter
@@ -7123,7 +7169,7 @@ function ExplorerFilterChipItem({
       ref={anchorRef}
       className={`explorer-draggable-chip${dragging ? ' is-dragging explorer-chip-drag-source-hidden' : ''}`}
       data-explorer-filter-item={filter.id}
-      title="Перетащить"
+      title={explorerT('explorer.drag')}
       onPointerDown={(event) => {
         if (!onDragStart) return;
         onDragStart(event);
@@ -7274,7 +7320,7 @@ function ExplorerFilterChipList({
                 <span
                   className={`explorer-filter-group-wrap${isPhantom ? ' is-dragging explorer-chip-drag-source-hidden' : ''}`}
                   data-explorer-filter-item={node.id}
-                  title="Перетащить группу"
+                  title={explorerT('explorer.dragGroup')}
                   onPointerDown={(event) => {
                     if (shouldSkipExplorerGroupWrapDrag(event)) return;
                     startDrag(node.id, event, {
@@ -7308,8 +7354,8 @@ function ExplorerFilterChipList({
                     <button
                       type="button"
                       className="explorer-filter-group__remove icon-btn"
-                      title="Удалить группу"
-                      aria-label="Удалить группу"
+                      title={explorerT('explorer.removeGroup')}
+                      aria-label={explorerT('explorer.removeGroup')}
                       onClick={() => {
                         removeNode(node.id);
                         if (editingFilterId && (node.children || []).some((child) => child.id === editingFilterId)) {
@@ -7390,7 +7436,7 @@ function ExplorerConditionChipsRow({
   const rowErrors = Object.values(filterRowErrors).filter(Boolean);
 
   return (
-    <ExplorerChipRow label="Условия" errors={rowErrors}>
+    <ExplorerChipRow label={explorerT('explorer.conditions')} errors={rowErrors}>
       <ExplorerFilterChipList
         rootFilters={filters}
         setRootFilters={setFilters}
@@ -7414,7 +7460,7 @@ function ExplorerConditionChipsRow({
           cabinetMode={cabinetMode}
           onPickField={onPickField}
         />
-        <Button kind="ghost" size="sm" onClick={onAddGroup}>Группа</Button>
+        <Button kind="ghost" size="sm" onClick={onAddGroup}>{explorerT('explorer.addGroup')}</Button>
       </div>
       <ExplorerChipDragOverlay overlay={overlay} />
     </ExplorerChipRow>
@@ -7461,7 +7507,7 @@ function ExplorerThresholdChipsRow({
       {peakWarning && (
         <div className="explorer-threshold-warning" role="status" style={{ marginBottom: 4 }}>{peakWarning}</div>
       )}
-      <ExplorerChipRow label="Пороги">
+      <ExplorerChipRow label={explorerT('explorer.thresholds')}>
         {thresholds.map((row) => (
           <ExplorerThresholdChipItem
             key={row.id}
@@ -7501,14 +7547,14 @@ function ExplorerThresholdRow({
     <div className="explorer-threshold-row">
       <div className="explorer-threshold-row__main">
         {showPeak && (
-          <div className="seg explorer-threshold-row__agg" role="group" aria-label="Режим порога">
+          <div className="seg explorer-threshold-row__agg" role="group" aria-label={explorerT('explorer.thresholdModeAria')}>
             <button
               type="button"
               className={(row.aggregate || 'avg') === 'avg' ? 'is-active' : ''}
               aria-pressed={(row.aggregate || 'avg') === 'avg'}
               onClick={() => onChange({ aggregate: 'avg' })}
             >
-              средняя
+              {explorerT('explorer.thresholdAvg')}
             </button>
             <button
               type="button"
@@ -7516,7 +7562,7 @@ function ExplorerThresholdRow({
               aria-pressed={row.aggregate === 'peak'}
               onClick={() => onChange({ aggregate: 'peak' })}
             >
-              пик
+              {explorerT('explorer.thresholdPeak')}
             </button>
           </div>
         )}
@@ -7541,7 +7587,7 @@ function ExplorerThresholdRow({
           </select>
         )}
         {!compact && onRemove && (
-        <button type="button" className="icon-btn explorer-filter-row__remove" onClick={onRemove} title="Удалить порог">
+        <button type="button" className="icon-btn explorer-filter-row__remove" onClick={onRemove} title={explorerT('explorer.removeThreshold')}>
           <Icon name="x" size={10} stroke={2.5} />
         </button>
         )}
@@ -7580,7 +7626,7 @@ function ExplorerFilters({
   canWrite,
   onSave,
   onSaveAsObservation,
-  saveAsObservationLabel = 'Добавить в наблюдения',
+  saveAsObservationLabel = explorerT('explorer.addToObservations'),
   onEditSaved,
   onDeleteSaved,
   thresholds = [],
@@ -7675,18 +7721,18 @@ function ExplorerFilters({
           setFilters([...filters, { field: 'src_ip', op: '=', value: '', logic: 'and', ...filter, id }]);
         }}
       />
-      <Button kind="ghost" size="sm" icon="x" onClick={onClearFilters}>Очистить фильтры</Button>
+      <Button kind="ghost" size="sm" icon="x" onClick={onClearFilters}>{explorerT('explorer.clearFilters')}</Button>
       <Button kind="ghost" size="sm" icon="play" onClick={onRun} disabled={runDisabled}>
-        {runDisabled ? 'Загрузка…' : 'Применить'}
+        {runDisabled ? explorerT('explorer.loading') : explorerT('explorer.apply')}
       </Button>
       {canWrite && (
-        <Button kind="ghost" size="sm" icon="save" onClick={onSave}>Сохранить</Button>
+        <Button kind="ghost" size="sm" icon="save" onClick={onSave}>{explorerT('explorer.save')}</Button>
       )}
       {canWrite && onSaveAsObservation && (
         <Button kind="primary" size="sm" onClick={onSaveAsObservation}>{saveAsObservationLabel}</Button>
       )}
       {filterMode === 'graphic' && (
-        <span style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-muted)' }}>Ctrl+Enter — применить</span>
+        <span style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-muted)' }}>{explorerT('explorer.ctrlEnterApply')}</span>
       )}
     </div>
   );
@@ -7696,10 +7742,10 @@ function ExplorerFilters({
     <Card pad="sm" className="explorer-filters-panel">
       <div className="row" style={{ justifyContent: 'space-between', marginBottom: 12 }}>
         <div className="row" style={{ gap: 8, alignItems: 'center' }}>
-          <div style={{ font: 'var(--pv-text-h4)' }}>Фильтры</div>
+          <div style={{ font: 'var(--pv-text-h4)' }}>{explorerT('explorer.filters')}</div>
           <ExplorerFilterModeToggle filterMode={filterMode} onFilterModeChange={onFilterModeChange} />
         </div>
-        <button className="icon-btn" onClick={onCollapse} title="Свернуть панель"><Icon name="chevL" size={14} /></button>
+        <button className="icon-btn" onClick={onCollapse} title={explorerT('explorer.collapsePanel')}><Icon name="chevL" size={14} /></button>
       </div>
 
       {filterMode === 'graphic' ? (
@@ -7714,11 +7760,11 @@ function ExplorerFilters({
               font: 'var(--pv-text-body-3)',
             }}
             >
-              {cabinetClientWarning}. Для суток и дольше удобнее кабинет клиента.
+              {cabinetClientWarning}{explorerT('explorer.cabinetClientWarningSuffix')}
             </div>
           )}
 
-          <ExplorerChipRow label="Период" mandatory>
+          <ExplorerChipRow label={explorerT('explorer.period')} mandatory>
             <TimeFilter
               variant="explorer"
               appearance="chip"
@@ -7732,16 +7778,16 @@ function ExplorerFilters({
               <button
                 type="button"
                 className="time-pill time-pill--reset"
-                title="Вернуть предыдущий период"
+                title={explorerT('explorer.resetZoomTitle')}
                 onClick={onChartZoomReset}
               >
                 <Icon name="zoom" size={14} />
-                <span>Сброс zoom</span>
+                <span>{explorerT('explorer.resetZoom')}</span>
               </button>
             )}
           </ExplorerChipRow>
 
-          <ExplorerChipRow label="Метрика">
+          <ExplorerChipRow label={explorerT('explorer.metric')}>
             <ExplorerMetricGroupControls
               metric={metric}
               setMetric={setMetric}
@@ -7781,7 +7827,7 @@ function ExplorerFilters({
         </div>
       ) : (
         <div className="col explorer-filters-panel__body explorer-filters-panel__body--chips" style={{ marginBottom: 12 }}>
-          <ExplorerChipRow label="Метрика">
+          <ExplorerChipRow label={explorerT('explorer.metric')}>
             <ExplorerMetricChipPicker
               metrics={availableMetrics}
               value={metric}
@@ -7837,7 +7883,7 @@ function ExplorerTotalChart({
   if (chartPoints.length < 2) {
     return (
       <div className="explorer-lines__empty">
-        Недостаточно временных точек для динамики. Расширьте период или выберите другую метрику.
+        {explorerT('explorer.chart.notEnoughPoints')}
       </div>
     );
   }
@@ -7860,7 +7906,7 @@ function ExplorerTotalChart({
         />
       </div>
       <div style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-muted)' }}>
-        Ось Y — {metricLabel || metric} по всем потокам, соответствующим фильтрам, в каждом временном интервале.
+        {explorerT('explorer.chart.yTotal', { metric: metricLabel || metric })}
       </div>
     </div>
   );
@@ -7885,7 +7931,7 @@ function SankeyChartExplorer({
   if (!groupBy?.length || groupBy.length < 2) {
     return (
       <div className="explorer-lines__empty">
-        Добавьте вторую группировку, чтобы построить Sankey (например, IP источника и IP назначения).
+        {explorerT('explorer.chart.sankeyNeedGroup')}
       </div>
     );
   }
@@ -7893,7 +7939,7 @@ function SankeyChartExplorer({
   if (!graph.ready) {
     return (
       <div className="explorer-lines__empty">
-        Нет данных для Sankey среди показанных строк. Расширьте лимит «Показать» или ослабьте фильтры.
+        {explorerT('explorer.chart.sankeyNoData')}
       </div>
     );
   }
@@ -7911,7 +7957,7 @@ function SankeyChartExplorer({
         }}
       />
       <div style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-muted)' }}>
-        Толщина потока — {metricLabel || metric} за период. Клик по узлу открывает добавление фильтра по этому значению.
+        {explorerT('explorer.chart.sankeyFlow', { metric: metricLabel || metric })}
       </div>
     </div>
   );
@@ -7982,7 +8028,7 @@ function DynamicsChartExplorer({
     }
   }
   if (showOthers && hasOthers) {
-    lines.push({ key: EXPLORER_OTHERS_ID, label: EXPLORER_OTHERS_LABEL, color: EXPLORER_OTHERS_COLOR });
+    lines.push({ key: EXPLORER_OTHERS_ID, label: explorerOthersLabel(), color: EXPLORER_OTHERS_COLOR });
   }
 
   const points = [...pointsByBucket.values()]
@@ -8004,17 +8050,17 @@ function DynamicsChartExplorer({
     ? (v) => formatChartSharePercent(v)
     : (v) => formatMetricAxis(v, metric);
   const chartCaption = stackMode === 'sum'
-    ? 'Верхняя кромка = сумма выбранных серий в каждом временном интервале.'
+    ? explorerT('explorer.chart.stackTop')
     : stackMode === 'share'
-      ? 'Доли выбранных серий, нормализованные к 100%. Абсолютный объём виден только в подсказке.'
-      : `Ось Y — ${metricLabel || metric} в каждом временном интервале, не сумма за весь период.`;
+      ? explorerT('explorer.chart.stackShareCaption')
+      : explorerT('explorer.chart.yPerBucket', { metric: metricLabel || metric });
 
   return (
     <div className="explorer-lines col" style={{ gap: 12 }}>
       <div style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-muted)' }}>
         {selectedIds.length
-          ? `На графике ${selectedIds.length} серий. Управляйте сериями кнопками «Показать» / «Скрыть с графика» в таблице.`
-          : 'Нет серий на графике. Включите строки кнопкой «Показать» в таблице «Результаты».'}
+          ? explorerT('explorer.chart.seriesCount', { n: selectedIds.length })
+          : explorerT('explorer.chart.noSeries')}
       </div>
       {chartPoints.length > 1 && lines.length ? (
         <>
@@ -8040,7 +8086,7 @@ function DynamicsChartExplorer({
             {chartCaption}
             {onRangeSelect && (
               <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, marginLeft: 8 }}>
-                <Icon name="info" size={12} /> Выделите диапазон на графике
+                <Icon name="info" size={12} /> {explorerT('explorer.chart.selectRange')}
               </span>
             )}
           </div>
@@ -8048,8 +8094,8 @@ function DynamicsChartExplorer({
       ) : (
         <div className="explorer-lines__empty">
           {selectedIds.length
-            ? 'Недостаточно временных точек для динамики. Расширьте период или выберите другую метрику.'
-            : 'Включите серии в таблице «Результаты», чтобы добавить их на график.'}
+            ? explorerT('explorer.chart.notEnoughPoints')
+            : explorerT('explorer.chart.enableSeries')}
         </div>
       )}
     </div>
@@ -8067,8 +8113,8 @@ function explorerAvgBps(row, meta) {
 function formatMetric(v, metric) {
   if (metric === 'bps') return fmtBits(v);
   if (metric === 'volume') return fmtBytes(v);
-  if (metric === 'pps') return `${fmtNum(v)} п/с`;
-  if (metric === 'fps') return `${fmtNum(v)} потоков/сек`;
+  if (metric === 'pps') return `${fmtNum(v)} ${explorerT('unit.pps')}`;
+  if (metric === 'fps') return `${fmtNum(v)} ${explorerT('unit.flowsPerSec')}`;
   return fmtNum(v);
 }
 
@@ -8086,10 +8132,10 @@ function formatMetricAxis(v, metric) {
 }
 
 function metricAxisUnit(metric) {
-  if (metric === 'bps') return 'бит/с';
-  if (metric === 'volume') return 'байт';
-  if (metric === 'pps') return 'п/с';
-  if (metric === 'fps') return 'потоков/сек';
+  if (metric === 'bps') return explorerT('unit.bps');
+  if (metric === 'volume') return explorerT('unit.bytes');
+  if (metric === 'pps') return explorerT('unit.pps');
+  if (metric === 'fps') return explorerT('unit.flowsPerSec');
   return '';
 }
 
@@ -8125,7 +8171,7 @@ function SaveObservationModal({
 
   useEffect(() => {
     if (!open) return;
-    setName(initialName || `Наблюдение · ${metricLabel}`);
+    setName(initialName || explorerT('explorer.observationDefaultName', { metric: metricLabel }));
     setLookback(defaultLookback);
     setMaterializeEnabled(true);
     setReportEnabled(false);
@@ -8161,13 +8207,13 @@ function SaveObservationModal({
     <Modal
       open={open}
       onClose={onClose}
-      title={saveMode === 'update' ? 'Обновить наблюдение' : 'Добавить в наблюдения'}
-      subtitle="Будет график трафика по этим фильтрам и таблица топа."
+      title={saveMode === 'update' ? explorerT('explorer.obsModalUpdateTitle') : explorerT('explorer.obsModalAddTitle')}
+      subtitle={explorerT('explorer.obsModalSubtitle')}
       footer={(
         <>
-          <Button kind="ghost" onClick={onClose}>Отмена</Button>
+          <Button kind="ghost" onClick={onClose}>{explorerT('explorer.cancel')}</Button>
           <Button kind="primary" disabled={busy} onClick={submit}>
-            {busy ? 'Сохранение…' : (saveMode === 'update' ? 'Обновить наблюдение' : 'Добавить')}
+            {busy ? explorerT('explorer.saving') : (saveMode === 'update' ? explorerT('explorer.obsModalUpdateTitle') : explorerT('explorer.addToObservations'))}
           </Button>
         </>
       )}
@@ -8175,30 +8221,30 @@ function SaveObservationModal({
       <div className="col" style={{ gap: 12 }}>
         <Card pad="sm" style={{ background: 'var(--surf-1)' }}>
           <div className="field-static field-static--compact col" style={{ gap: 4 }}>
-            <div>Фильтры: {filterSummary || 'нет'}</div>
+            <div>{explorerT('explorer.filtersLabel')} {filterSummary || explorerT('explorer.none')}</div>
             {effectiveGroupSummary ? (
-              <div>Группировка: {effectiveGroupSummary}</div>
+              <div>{explorerT('explorer.groupingLabel')} {effectiveGroupSummary}</div>
             ) : null}
           </div>
         </Card>
         <div className="field">
-          <label>Название</label>
+          <label>{explorerT('explorer.name')}</label>
           <input className="input" value={name} onChange={(e) => setName(e.target.value)} autoFocus />
         </div>
         <div className="row" style={{ gap: 12, flexWrap: 'wrap' }}>
           <div className="field" style={{ flex: '1 1 140px', minWidth: 140 }}>
-            <label>Окно графика</label>
+            <label>{explorerT('explorer.chartWindow')}</label>
             <select className="input" value={lookback} onChange={(e) => setLookback(e.target.value)}>
-              <option value="30m">30 минут</option>
-              <option value="1h">1 час</option>
-              <option value="6h">6 часов</option>
-              <option value="24h">24 часа</option>
-              <option value="7d">7 дней</option>
+              <option value="30m">{explorerT('explorer.lookback30m')}</option>
+              <option value="1h">{explorerT('explorer.lookback1h')}</option>
+              <option value="6h">{explorerT('explorer.lookback6h')}</option>
+              <option value="24h">{explorerT('explorer.lookback24h')}</option>
+              <option value="7d">{explorerT('explorer.lookback7d')}</option>
             </select>
           </div>
           {!groupSummary && (
             <div className="field" style={{ flex: '1 1 160px', minWidth: 160 }}>
-              <label>Топ по полю</label>
+              <label>{explorerT('explorer.topByField')}</label>
               <select className="input" value={topGroup} onChange={(e) => setTopGroup(e.target.value)}>
                 {['src_asn', 'dst_asn', 'src_ip', 'dst_ip', 'vlan', 'proto', 'src_country', 'dst_country'].map((id) => (
                   <option key={id} value={id}>{dimensionById?.[id]?.label || id}</option>
@@ -8209,12 +8255,12 @@ function SaveObservationModal({
         </div>
         {(groupBy || []).length > OBSERVATION_MAX_GROUP_BY && (
           <div style={{ color: 'var(--fg-warning)', font: 'var(--pv-text-body-3)' }}>
-            Наблюдение сохранит первые {OBSERVATION_MAX_GROUP_BY} измерения разреза:
+            {explorerT('explorer.obsSliceWarning', { n: OBSERVATION_MAX_GROUP_BY })}
             {' '}
             {(groupBy || []).slice(0, OBSERVATION_MAX_GROUP_BY)
               .map((g) => explorerGroupLabel(g, dimensionById || {}))
               .join(' × ')}
-            . Остальные останутся только в разборе трафика.
+            {explorerT('explorer.obsSliceRest')}
           </div>
         )}
         <label className="row" style={{ gap: 8, alignItems: 'center' }}>
@@ -8223,22 +8269,21 @@ function SaveObservationModal({
             checked={materializeEnabled}
             onChange={(e) => setMaterializeEnabled(e.target.checked)}
           />
-          Подготовка данных (rollup раз в 5 минут)
+          {explorerT('explorer.materialize')}
         </label>
         <div style={{ marginLeft: 24, color: 'var(--fg-muted)', font: 'var(--pv-text-body-3)' }}>
-          Без неё плитка будет пустой: график и топ по группировке считаются из подготовленных данных.
-          Счёт с момента создания, прошлые сутки не пересчитываются.
+          {explorerT('explorer.materializeHint')}
         </div>
         <label className="row" style={{ gap: 8, alignItems: 'center' }}>
           <input type="checkbox" checked={reportEnabled} onChange={(e) => setReportEnabled(e.target.checked)} />
-          Ежедневный отчёт
+          {explorerT('explorer.dailyReport')}
         </label>
         {reportEnabled && (
           <label className="row" style={{ gap: 8, alignItems: 'center', marginLeft: 24 }}>
-            за период
+            {explorerT('explorer.forPeriod')}
             <select className="input" style={{ width: 160 }} value={reportPeriod} onChange={(e) => setReportPeriod(e.target.value)}>
-              <option value="yesterday">вчера</option>
-              <option value="last_24h">последние 24 часа</option>
+              <option value="yesterday">{explorerT('explorer.reportYesterday')}</option>
+              <option value="last_24h">{explorerT('explorer.reportLast24h')}</option>
             </select>
           </label>
         )}
@@ -8271,43 +8316,43 @@ function SaveQueryModal({ open, onClose, groupBy, metric, filters, dimensionById
     <Modal
       open={open}
       onClose={onClose}
-      title={editing ? 'Редактировать фильтр' : 'Сохранить фильтр'}
-      subtitle="Фильтр будет доступен на сервере в блоке «Сохранённые»."
+      title={editing ? explorerT('explorer.editFilterTitle') : explorerT('explorer.saveFilterTitle')}
+      subtitle={explorerT('explorer.saveFilterSubtitle')}
       footer={(
         <>
-          <Button kind="ghost" onClick={onClose}>Отмена</Button>
-          <Button kind="primary" icon="save" onClick={submit}>{editing ? 'Обновить' : 'Сохранить'}</Button>
+          <Button kind="ghost" onClick={onClose}>{explorerT('explorer.cancel')}</Button>
+          <Button kind="primary" icon="save" onClick={submit}>{editing ? explorerT('explorer.update') : explorerT('explorer.save')}</Button>
         </>
       )}
     >
       <div className="grid grid--2col">
         <div className="field" style={{ gridColumn: '1 / -1' }}>
-          <label>Название</label>
+          <label>{explorerT('explorer.name')}</label>
           <input className="input" value={name} onChange={(e) => setName(e.target.value)} autoFocus />
         </div>
         <div className="field" style={{ gridColumn: '1 / -1' }}>
-          <label>Описание</label>
+          <label>{explorerT('explorer.description')}</label>
           <textarea className="input" rows="2" style={{ height: 'auto', paddingTop: 10 }} value={description} onChange={(e) => setDescription(e.target.value)} />
         </div>
         <div className="field">
-          <label>Папка</label>
+          <label>{explorerT('explorer.folder')}</label>
           <select className="input" value={folder} onChange={(e) => setFolder(e.target.value)}>
-            <option>Мои фильтры</option>
-            <option>Команда NOC</option>
-            <option>Безопасность</option>
+            <option value="Мои фильтры">{explorerT('explorer.folder.my')}</option>
+            <option value="Команда NOC">{explorerT('explorer.folder.noc')}</option>
+            <option value="Безопасность">{explorerT('explorer.folder.security')}</option>
           </select>
         </div>
         <div className="field">
-          <label>Доступ</label>
+          <label>{explorerT('explorer.access')}</label>
           <label className="row" style={{ gap: 8, marginTop: 8 }}>
             <input type="checkbox" checked={isShared} onChange={(e) => setIsShared(e.target.checked)} />
-            <span>Поделиться с командой</span>
+            <span>{explorerT('explorer.shareWithTeam')}</span>
           </label>
         </div>
         <Card pad="sm" style={{ gridColumn: '1 / -1', background: 'var(--surf-1)' }}>
-          <div>Метрика: <b>{metricLabel}</b></div>
-          <div>Группировка: <b>{groupBy.map((g) => explorerGroupLabel(g, dimensionById)).join(', ')}</b></div>
-          <div>Фильтры: <b>{filters.length || 'нет'}</b></div>
+          <div>{explorerT('explorer.metricLabel')} <b>{metricLabel}</b></div>
+          <div>{explorerT('explorer.groupingLabel')} <b>{groupBy.map((g) => explorerGroupLabel(g, dimensionById)).join(', ')}</b></div>
+          <div>{explorerT('explorer.filtersCountLabel')} <b>{filters.length || explorerT('explorer.none')}</b></div>
         </Card>
       </div>
     </Modal>

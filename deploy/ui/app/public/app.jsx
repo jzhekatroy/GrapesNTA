@@ -554,7 +554,7 @@ function App() {
         pageEl = (
           <LazyPage
             pageId="explorer"
-            key={`${refreshKey}-${displayTimezone}-${hashRoute}-${observationComposeTick}`}
+            key={`${refreshKey}-${displayTimezone}-${hashRoute}-${observationComposeTick}-${locale}`}
             onNavigate={navigate}
             displayTimezone={displayTimezone}
             cabinetMode={cabinetMode}

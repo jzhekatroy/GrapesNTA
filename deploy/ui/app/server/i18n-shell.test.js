@@ -123,6 +123,20 @@ test('английские подписи страницы DNS совпадаю�
   assert.equal(en['dns.rcode.domainNotFound'], 'Domain not found');
 });
 
+test('английские подписи страницы разбора трафика совпадают с требованиями', () => {
+  const en = loadLocaleMessages('en');
+  assert.equal(en['explorer.title'], 'Traffic explorer');
+  assert.equal(en['explorer.shareFilters'], 'Share filters');
+  assert.equal(en['explorer.apply'], 'Apply');
+  assert.equal(en['explorer.others'], 'Other');
+  assert.equal(en['explorer.vis.stack'], 'Stack (sum)');
+  assert.equal(en['explorer.vis.data'], 'Data');
+  assert.equal(en['explorer.chart.selectRange'], 'Select a range on the chart');
+  assert.equal(en['explorer.col.volume'], 'Объём');
+  assert.equal(en['explorer.col.avgBps'], 'Средняя скорость / Average bitrate');
+  assert.equal(en['table.scrollLeft'], 'Scroll left');
+});
+
 test('подпись числа записей в таблице на английском', () => {
   const en = loadLocaleMessages('en');
   assert.equal(en['table.records.one'], '{count} record');
