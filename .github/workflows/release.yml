@@ -1,0 +1,32 @@
+name: release
+
+on:
+  workflow_dispatch:
+    inputs:
+      component:
+        description: Компонент
+        type: choice
+        options: [ui, detection, worker, enrichment, schema, collector]
+      level:
+        description: "minor: 1.0.5 → 1.1.0, major: 1.0.5 → 2.0.0"
+        type: choice
+        options: [minor, major]
+
+permissions:
+  contents: write
+
+jobs:
+  tag:
+    runs-on: ubuntu-latest
+    steps:
+      - name: checkout
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: tag release
+        env:
+          COMPONENT: ${{ inputs.component }}
+          LEVEL: ${{ inputs.level }}
+        run: SHA="$(git rev-parse HEAD)" scripts/tag-component-versions.sh
