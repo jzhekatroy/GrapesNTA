@@ -158,11 +158,10 @@ ensure_app_owned_dir() {
   chown -R 1001:1001 "${dir}" 2>/dev/null || true
 }
 
-# Последняя метка компонента в истории HEAD: detection-2026.10.13.1.
-# Если код новее метки, git добавит хвост: detection-2026.10.13.1-2-gab12cd34.
+# detection-v1.0.2, или detection-v1.0.2+ab12cd34, если файлы компонента новее метки.
 component_version() {
   local name="$1" v
-  v="$(git -C "${REPO_ROOT}" describe --tags --match "${name}-[0-9]*" 2>/dev/null || true)"
+  v="$("${REPO_ROOT}/scripts/component-version.sh" "${name}" 2>/dev/null || true)"
   printf '%s' "${v:-${name}-unknown}"
 }
 
