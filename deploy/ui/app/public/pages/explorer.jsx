@@ -1359,6 +1359,10 @@ function explorerGroupDslApi() {
   return window.ExplorerGroupDsl || {};
 }
 
+function explorerQueryDslApi() {
+  return window.ExplorerQueryDsl || {};
+}
+
 function explorerFilterTreeApi() {
   return window.ExplorerFilterTree || {};
 }
@@ -1665,12 +1669,17 @@ function parseExplorerFilterDsl(text, schema = null) {
   const thresholds = [];
   let groupBy;
   let groupBySeen = false;
+  let metric;
+  let metricSeen = false;
+  let limit;
+  let limitSeen = false;
   let conditionIndex = 0;
   let pendingLogic = null;
   const groupStack = [];
   const schemaMetrics = explorerThresholdApi().thresholdMetricsFromSchema?.(schema) || [];
   const dimensions = schema?.dimensions || [];
   const groupDsl = explorerGroupDslApi();
+  const queryDsl = explorerQueryDslApi();
 
   const currentFilterList = () => (
     groupStack.length ? groupStack[groupStack.length - 1].children : filters
@@ -1728,6 +1737,28 @@ function parseExplorerFilterDsl(text, schema = null) {
           );
         } catch (err) {
           parseError(lineNum, err.message || 'ошибка группировки');
+        }
+        continue;
+      }
+
+      if (queryDsl.isExplorerMetricDslLine?.(rawLine)) {
+        if (metricSeen) parseError(lineNum, 'строка metric указана более одного раза');
+        metricSeen = true;
+        try {
+          metric = queryDsl.parseExplorerMetricDslLine?.(rawLine, schema);
+        } catch (err) {
+          parseError(lineNum, err.message || 'ошибка метрики');
+        }
+        continue;
+      }
+
+      if (queryDsl.isExplorerLimitDslLine?.(rawLine)) {
+        if (limitSeen) parseError(lineNum, 'строка limit указана более одного раза');
+        limitSeen = true;
+        try {
+          limit = queryDsl.parseExplorerLimitDslLine?.(rawLine, schema);
+        } catch (err) {
+          parseError(lineNum, err.message || 'ошибка лимита');
         }
         continue;
       }
@@ -1928,6 +1959,8 @@ function parseExplorerFilterDsl(text, schema = null) {
     filters,
     thresholds,
     ...(groupBy !== undefined ? { groupBy } : {}),
+    ...(metric !== undefined ? { metric } : {}),
+    ...(limit !== undefined ? { limit } : {}),
   };
 }
 
@@ -2030,9 +2063,15 @@ function buildExplorerTextSuggestions({ value, cursor, schema, entityItems = [] 
     ) || [];
   }
 
+  if (/^metric(\s|$)/i.test(trimmed) || /^limit(\s|$)/i.test(trimmed)) {
+    return explorerQueryDslApi().buildExplorerQueryDslSuggestions?.({ line: trimmed, leading, schema }) || [];
+  }
+
   [
     lineSuggestion('time range', 'time range 1h', 'Период'),
     lineSuggestion('time between', 'time between "YYYY-MM-DDTHH:mm" and "YYYY-MM-DDTHH:mm"', 'Ручной диапазон'),
+    lineSuggestion('metric', 'metric bps', 'Метрика запроса'),
+    lineSuggestion('limit', 'limit 25', 'Лимит выборки'),
     lineSuggestion('group by', 'group by src_ip, dst_ip', 'Группировка'),
     ...(fieldById.direction ? [lineSuggestion('direction', 'direction in (in, out, transit)', 'Направления')] : []),
     ...(fieldById.collector ? [lineSuggestion('collector', 'collector in ("collector-id")', 'Коллекторы')] : []),
@@ -3278,6 +3317,14 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
     setFilters(cloneExplorerFilters(parsed.filters));
     setThresholds(cloneExplorerThresholdsList(parsed.thresholds || []));
     setGroupBy(normalizeExplorerGroupTokens(parsed.groupBy || []));
+    if (parsed.metric !== undefined) setMetric(parsed.metric);
+    if (parsed.limit !== undefined) {
+      const resolved = explorerQueryDslApi().resolveExplorerFetchLimit?.(
+        parsed.limit,
+        explorerMaxFetchFromSchema(schema),
+      ) ?? resolveExplorerFetchLimit(parsed.limit, explorerMaxFetchFromSchema(schema));
+      setFetchLimit(resolved);
+    }
     setFilterTextError(null);
     return parsed;
   };
@@ -3599,19 +3646,21 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
     });
     let activeFilters = filters;
     let activeThresholds = thresholds;
+    let parsedFromText;
     if (filterMode === 'text') {
       try {
-        const parsed = applyParsedTextToDraft(filterText);
-        activeFilters = parsed.filters;
-        activeThresholds = parsed.thresholds || [];
-        const activeGroupBy = normalizeExplorerGroupTokens(parsed.groupBy || []);
+        parsedFromText = applyParsedTextToDraft(filterText);
+        activeFilters = parsedFromText.filters;
+        activeThresholds = parsedFromText.thresholds || [];
+        const activeGroupBy = normalizeExplorerGroupTokens(parsedFromText.groupBy || []);
         snapshot = {
           ...snapshot,
-          timeRange: parsed.timeRange,
-          customPeriod: parsed.customPeriod,
-          filters: parsed.filters,
+          timeRange: parsedFromText.timeRange,
+          customPeriod: parsedFromText.customPeriod,
+          filters: parsedFromText.filters,
           thresholds: cloneExplorerThresholdsList(activeThresholds),
           groupBy: activeGroupBy,
+          ...(parsedFromText.metric !== undefined ? { metric: parsedFromText.metric } : {}),
         };
       } catch (err) {
         setFilterTextError(err.message);
@@ -3664,10 +3713,13 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
     skipDynamicsDefaultRef.current = false;
     setDynamicsSeriesIds(new Set());
     setShowOthersOnChart(explorerDefaultShowOthersOnChart(snapshot.vis ?? vis));
+    const queryFetchLimit = parsedFromText?.limit !== undefined
+      ? parsedFromText.limit
+      : EXPLORER_DEFAULT_FETCH_LIMIT;
     const nextAppliedSnapshot = buildExplorerQuerySnapshot({
       ...snapshot,
-      limit: EXPLORER_DEFAULT_FETCH_LIMIT,
-      fetchLimit: EXPLORER_DEFAULT_FETCH_LIMIT,
+      limit: queryFetchLimit,
+      fetchLimit: queryFetchLimit,
       visualLimit: EXPLORER_DEFAULT_VISUAL_LIMIT,
       dynamicsSeriesIds: [],
     });
@@ -3675,7 +3727,7 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
     setAppliedSnapshot(nextAppliedSnapshot);
     replaceExplorerUrl(nextAppliedSnapshot);
     setHasAppliedQuery(true);
-    setFetchLimit(EXPLORER_DEFAULT_FETCH_LIMIT);
+    setFetchLimit(queryFetchLimit);
     setVisualLimit(EXPLORER_DEFAULT_VISUAL_LIMIT);
     setLimit(EXPLORER_DEFAULT_VISUAL_LIMIT);
     setQueryVersion((v) => v + 1);

@@ -32,6 +32,7 @@ const PAGE_CHUNKS_MANIFEST = {
         '/data/explorer-field-search.js',
         '/data/explorer-group-mask.js',
         '/data/explorer-group-dsl.js',
+        '/data/explorer-query-dsl.js',
         '/data/explorer-filter-tree.js',
         '/pages/explorer.jsx',
       ],
