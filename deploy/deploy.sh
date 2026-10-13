@@ -165,6 +165,12 @@ component_version() {
   printf '%s' "${v:-${name}-unknown}"
 }
 
+# Дата коммита, на котором стоит метка версии: 2026-10-13T16:35:21+03:00.
+component_version_date() {
+  local tag="${1%%+*}"
+  git -C "${REPO_ROOT}" log -1 --format=%cI "refs/tags/${tag}" 2>/dev/null || true
+}
+
 compose_up() {
   local dir="$1" name="$2" version="${3:-}"
   need_compose_dir "${dir}" "${name}"
@@ -241,15 +247,17 @@ ui_up() {
     chown -R 1001:1001 "${UI_DATA_DIR}" 2>/dev/null || true
   fi
   need_compose_dir "${UI_DIR}" grapes-nta
-  local version
+  local version version_date
   version="$(component_version ui)"
-  log "rebuild grapes-nta in ${UI_DIR} (data=${UI_DATA_DIR}, version ${version})"
+  version_date="$(component_version_date "${version}")"
+  log "rebuild grapes-nta in ${UI_DIR} (data=${UI_DATA_DIR}, version ${version}${version_date:+ от ${version_date}})"
   if [[ -f "${UI_DIR}/SOURCE.txt" ]]; then
     log "UI source: $(tr '\n' ' ' <"${UI_DIR}/SOURCE.txt")"
   fi
   (
     cd "${UI_DIR}"
-    UI_DATA_DIR="${UI_DATA_DIR}" GRAPES_VERSION="${version}" docker compose up -d --build --remove-orphans
+    UI_DATA_DIR="${UI_DATA_DIR}" GRAPES_VERSION="${version}" GRAPES_VERSION_DATE="${version_date}" \
+      docker compose up -d --build --remove-orphans
   )
   log "grapes-nta is up"
   # brief wait for health
