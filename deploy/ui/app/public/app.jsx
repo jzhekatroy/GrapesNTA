@@ -686,10 +686,11 @@ function App() {
         pageEl = (
           <LazyPage
             pageId="users"
-            key={refreshKey}
+            key={`${refreshKey}-${displayTimezone}`}
             currentUser={auth.user}
             onAuthRefresh={reloadCurrentUser}
             onNavigate={navigate}
+            displayTimezone={displayTimezone}
           />
         );
         break;

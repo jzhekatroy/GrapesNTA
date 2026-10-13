@@ -385,6 +385,7 @@ async function sessionUserPayload(user, sessionRecord = null) {
     clientId: user.clientId || '',
     locale: user.locale || '',
     updatedAt: user.updatedAt ?? null,
+    passwordChangedAt: user.passwordChangedAt ?? null,
     permissions,
     effectivePermissions,
     effectiveWritePermissions,

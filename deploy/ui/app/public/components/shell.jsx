@@ -382,14 +382,32 @@ function NavSection({
 }
 
 /* =============== Header =============== */
-function formatUserDateTime(value) {
-  if (!value) return '—';
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return String(value);
-  return date.toLocaleString(GrapesI18n.intlLocale(), { dateStyle: 'short', timeStyle: 'short' });
+function parseUserTimestampMs(value) {
+  if (value == null || value === '') return null;
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  const text = String(value).trim();
+  if (!text) return null;
+  if (/^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}/.test(text) && !/(?:[zZ]|[+-]\d{2}:?\d{2})$/.test(text)) {
+    const isoLike = text.replace(' ', 'T');
+    const ms = Date.parse(isoLike.endsWith('Z') ? isoLike : `${isoLike}Z`);
+    return Number.isNaN(ms) ? null : ms;
+  }
+  const ms = Date.parse(text);
+  return Number.isNaN(ms) ? null : ms;
 }
 
-function UserAccountMenu({ currentUser, pageTitles, hiddenPageIds, locale }) {
+function formatUserDateTime(value, displayTimezone) {
+  const ms = parseUserTimestampMs(value);
+  if (ms == null) return value ? String(value) : '—';
+  const tz = displayTimezone || (typeof getDisplayTimezone === 'function' ? getDisplayTimezone() : undefined);
+  return new Date(ms).toLocaleString(GrapesI18n.intlLocale(), {
+    dateStyle: 'short',
+    timeStyle: 'short',
+    ...(tz ? { timeZone: tz } : {}),
+  });
+}
+
+function UserAccountMenu({ currentUser, pageTitles, hiddenPageIds, locale, displayTimezone }) {
   const [open, setOpen] = useState(false);
   const [menuStyle, setMenuStyle] = useState(null);
   const rootRef = useRef(null);
@@ -474,7 +492,7 @@ function UserAccountMenu({ currentUser, pageTitles, hiddenPageIds, locale }) {
       <div className="time-filter__divider" />
       <div className="user-menu__meta-row">
         <span className="user-menu__meta-label">{t('user.lastPasswordChange')}</span>
-        <span className="user-menu__meta-value">{formatUserDateTime(currentUser?.updatedAt)}</span>
+        <span className="user-menu__meta-value">{formatUserDateTime(currentUser?.passwordChangedAt, displayTimezone)}</span>
       </div>
     </>
   );
@@ -590,7 +608,7 @@ function Header({ current, onNavigate, onToggleSidebar, currentUser, onLogout, o
           </button>
         </PortalTooltip>
         <span className="hr-v" />
-        <UserAccountMenu currentUser={currentUser} pageTitles={pageTitles} hiddenPageIds={hiddenPageIds} locale={locale} />
+        <UserAccountMenu currentUser={currentUser} pageTitles={pageTitles} hiddenPageIds={hiddenPageIds} locale={locale} displayTimezone={displayTimezone} />
         {isImpersonating(currentUser) && onStopImpersonation && (
           <Button kind="ghost" size="sm" onClick={onStopImpersonation}>Выйти из кабинета</Button>
         )}

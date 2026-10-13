@@ -6,7 +6,7 @@ const OVERRIDE_OPTIONS = [
   { id: 'DENY', label: 'Запретить' },
 ];
 
-function PageUsers({ currentUser, onAuthRefresh, onNavigate }) {
+function PageUsers({ currentUser, onAuthRefresh, onNavigate, displayTimezone }) {
   const [tab, setTab] = useState('users');
   const [rows, setRows] = useState([]);
   const [roles, setRoles] = useState([]);
@@ -128,14 +128,14 @@ function PageUsers({ currentUser, onAuthRefresh, onNavigate }) {
         ? <Badge tone="warning" dot>Требуется</Badge>
         : <Badge tone="success" dot>Не требуется</Badge>
     )},
-    { key: 'createdAt', title: 'Создан', width: 180, render: (u) => formatDateTime(u.createdAt) },
-    { key: 'updatedAt', title: 'Изменён', width: 180, render: (u) => formatDateTime(u.updatedAt) },
+    { key: 'createdAt', title: 'Создан', width: 180, render: (u) => formatDateTime(u.createdAt, displayTimezone) },
+    { key: 'passwordChangedAt', title: 'Пароль изменён', width: 180, render: (u) => formatDateTime(u.passwordChangedAt, displayTimezone) },
   ];
 
   const roleCols = [
     { key: 'name', title: 'Системное имя', width: 200, render: (r) => <code>{r.name}</code> },
     { key: 'displayName', title: 'Отображаемое имя', width: 220, render: (r) => r.displayName },
-    { key: 'updatedAt', title: 'Изменена', width: 180, render: (r) => formatDateTime(r.updatedAt) },
+    { key: 'updatedAt', title: 'Изменена', width: 180, render: (r) => formatDateTime(r.updatedAt, displayTimezone) },
   ];
 
   return (
@@ -244,6 +244,7 @@ function PageUsers({ currentUser, onAuthRefresh, onNavigate }) {
         user={drawerUser}
         roles={roles}
         resources={visibleResources}
+        displayTimezone={displayTimezone}
         onClose={() => setDrawerUser(null)}
         onSaved={async () => {
           await loadAll();
@@ -266,7 +267,7 @@ function PageUsers({ currentUser, onAuthRefresh, onNavigate }) {
   );
 }
 
-function UserDrawer({ user, roles, resources, onClose, onSaved }) {
+function UserDrawer({ user, roles, resources, displayTimezone, onClose, onSaved }) {
   const [roleId, setRoleId] = useState('');
   const [forcePasswordChange, setForcePasswordChange] = useState(false);
   const [overrides, setOverrides] = useState({});
@@ -315,7 +316,7 @@ function UserDrawer({ user, roles, resources, onClose, onSaved }) {
       open={!!user}
       onClose={onClose}
       title={user?.fullName || 'Пользователь'}
-      subtitle={user ? `${user.username} · создан ${formatDateTime(user.createdAt)}` : ''}
+      subtitle={user ? `${user.username} · создан ${formatDateTime(user.createdAt, displayTimezone)}` : ''}
       footer={
         <>
           <Button kind="ghost" onClick={onClose}>Отмена</Button>
@@ -626,11 +627,32 @@ function roleLabel(roleId) {
   return roleId === 'Administrator' ? 'Администратор' : roleId;
 }
 
-function formatDateTime(value) {
-  if (!value) return '—';
-  const d = new Date(value);
-  if (Number.isNaN(d.getTime())) return String(value);
-  return d.toLocaleString('ru-RU', { dateStyle: 'short', timeStyle: 'short' });
+function parseUserTimestampMs(value) {
+  if (value == null || value === '') return null;
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  const text = String(value).trim();
+  if (!text) return null;
+  if (/^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}/.test(text) && !/(?:[zZ]|[+-]\d{2}:?\d{2})$/.test(text)) {
+    const isoLike = text.replace(' ', 'T');
+    const ms = Date.parse(isoLike.endsWith('Z') ? isoLike : `${isoLike}Z`);
+    return Number.isNaN(ms) ? null : ms;
+  }
+  const ms = Date.parse(text);
+  return Number.isNaN(ms) ? null : ms;
+}
+
+function formatDateTime(value, displayTimezone) {
+  const ms = parseUserTimestampMs(value);
+  if (ms == null) return value ? String(value) : '—';
+  const tz = displayTimezone || (typeof getDisplayTimezone === 'function' ? getDisplayTimezone() : undefined);
+  const intlLoc = (typeof GrapesI18n !== 'undefined' && GrapesI18n.intlLocale)
+    ? GrapesI18n.intlLocale()
+    : 'ru-RU';
+  return new Date(ms).toLocaleString(intlLoc, {
+    dateStyle: 'short',
+    timeStyle: 'short',
+    ...(tz ? { timeZone: tz } : {}),
+  });
 }
 
 function randomChar(chars) {
