@@ -132,6 +132,21 @@ test('английские подписи страницы разбора DNS с
   assert.equal(en['dnsExplorer.showAnswers'], 'Show answers');
 });
 
+test('английские подписи страницы Топ ASN совпадают с требованиями', () => {
+  const en = loadLocaleMessages('en');
+  assert.equal(en['dashboard.topAsn'], 'Top ASN');
+  assert.equal(en['topAsn.export'], 'Export');
+  assert.equal(en['topAsn.metric.bps'], 'Average bitrate');
+  assert.equal(en['topAsn.source.error'], 'Error');
+  assert.equal(en['topAsn.barTooltip'], '{label} — {metric}');
+  const GrapesI18n = loadI18n();
+  GrapesI18n.setLocale('en');
+  assert.equal(
+    GrapesI18n.t('topAsn.queryTimeMsSql', { load: 42, server: 10 }),
+    '42 ms (SQL 10 ms)',
+  );
+});
+
 test('английские подписи страницы разбора трафика совпадают с требованиями', () => {
   const en = loadLocaleMessages('en');
   assert.equal(en['explorer.title'], 'Traffic explorer');

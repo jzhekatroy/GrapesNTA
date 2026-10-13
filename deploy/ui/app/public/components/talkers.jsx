@@ -1,5 +1,9 @@
 /* Shared top-talkers helpers and table cells (dashboard + full page) */
 
+function talkersT(key, params) {
+  return GrapesI18n.t(key, params);
+}
+
 const TOP_TALKERS_TAB_IDS = ['src', 'dst', 'pair'];
 
 function getTopTalkersTabs() {
@@ -82,6 +86,23 @@ function talkerListLabel(val) {
 function talkerListJoin(arr) {
   if (!arr?.length) return '—';
   return arr.join(', ');
+}
+
+function talkerDirectionIdLabel(id) {
+  const key = `direction.${String(id || '').trim()}`;
+  return GrapesI18n.has(key) ? talkersT(key) : talkerListLabel(id);
+}
+
+function talkerDirectionsDisplay(arr) {
+  if (!arr?.length) return '—';
+  return arr.map((id) => talkerDirectionIdLabel(id)).join(', ');
+}
+
+function talkerEndpointSideLabel(side) {
+  const s = String(side || '').trim();
+  if (s === 'src') return talkersT('dashboard.talkers.src');
+  if (s === 'dst') return talkersT('dashboard.talkers.dst');
+  return talkerListLabel(s);
 }
 
 function fmtTalkerBandwidth(gbps) {
@@ -210,12 +231,12 @@ function TalkerRowDetail({ row, isPair, periodLabel, directionFilterLabel, meta 
         </TalkerDetailSection>
         <TalkerDetailSection title={GrapesI18n.t('dashboard.talkers.traffic')}>
           <TalkerDetailItem label={GrapesI18n.t('dashboard.talkers.volume')} value={fmtVolumeSize(row.trafficGb, row.trafficTb)} />
-          <TalkerDetailItem label="Bytes" value={fmtNum(row.totalBytes)} />
+          <TalkerDetailItem label={talkersT('topAsn.detail.bytes')} value={fmtNum(row.totalBytes)} />
           <TalkerDetailItem label={GrapesI18n.t('dashboard.talkers.avgRate')} value={<TalkerBandwidthText gbps={row.avgGbps} />} />
           <TalkerDetailItem label={GrapesI18n.t('dashboard.talkers.avgPps')} value={fmtNum(row.avgPps)} />
-          <TalkerDetailItem label="Flows" value={fmtNum(row.flowCount)} />
-          <TalkerDetailItem label="Source IDs" value={talkerListJoin(row.sourceIds)} />
-          <TalkerDetailItem label="Directions" value={talkerListJoin(row.directions)} />
+          <TalkerDetailItem label={talkersT('topAsn.detail.flows')} value={fmtNum(row.flowCount)} />
+          <TalkerDetailItem label={talkersT('topAsn.detail.sourceIds')} value={talkerListJoin(row.sourceIds)} />
+          <TalkerDetailItem label={talkersT('topAsn.detail.directions')} value={talkerDirectionsDisplay(row.directions)} />
           <TalkerDetailItem label={GrapesI18n.t('dashboard.talkers.directionFilter')} value={directionFilterLabel} />
           <TalkerDetailItem label={GrapesI18n.t('dashboard.talkers.period')} value={periodNote} />
         </TalkerDetailSection>
@@ -229,14 +250,14 @@ function TalkerRowDetail({ row, isPair, periodLabel, directionFilterLabel, meta 
       <TalkerDetailItem label={GrapesI18n.t('dashboard.talkers.asnNumber')} value={formatTalkerAsn(row)} />
       <TalkerDetailItem label={GrapesI18n.t('dashboard.talkers.asnCountry')} value={talkerGeoDisplay(row.asCountry || row.countryCode)} />
       <TalkerDetailItem label={GrapesI18n.t('dashboard.talkers.volume')} value={fmtVolumeSize(row.trafficGb, row.trafficTb)} />
-      <TalkerDetailItem label="Bytes" value={fmtNum(row.totalBytes)} />
+      <TalkerDetailItem label={talkersT('topAsn.detail.bytes')} value={fmtNum(row.totalBytes)} />
       <TalkerDetailItem label={GrapesI18n.t('dashboard.talkers.avgRate')} value={<TalkerBandwidthText gbps={row.avgGbps} />} />
       <TalkerDetailItem label={GrapesI18n.t('dashboard.talkers.avgPps')} value={fmtNum(row.avgPps)} />
-      <TalkerDetailItem label="Flows" value={fmtNum(row.flowCount)} />
-      <TalkerDetailItem label="Source IDs" value={talkerListJoin(row.sourceIds)} />
-      <TalkerDetailItem label="Directions" value={talkerListJoin(row.directions)} />
+      <TalkerDetailItem label={talkersT('topAsn.detail.flows')} value={fmtNum(row.flowCount)} />
+      <TalkerDetailItem label={talkersT('topAsn.detail.sourceIds')} value={talkerListJoin(row.sourceIds)} />
+      <TalkerDetailItem label={talkersT('topAsn.detail.directions')} value={talkerDirectionsDisplay(row.directions)} />
       <TalkerDetailItem label={GrapesI18n.t('dashboard.talkers.directionFilter')} value={directionFilterLabel} />
-      <TalkerDetailItem label={GrapesI18n.t('dashboard.talkers.side')} value={row.endpointSide || row.group} />
+      <TalkerDetailItem label={GrapesI18n.t('dashboard.talkers.side')} value={talkerEndpointSideLabel(row.endpointSide || row.group)} />
       <TalkerDetailItem label={GrapesI18n.t('dashboard.talkers.period')} value={periodNote} />
     </dl>
   );
@@ -281,16 +302,16 @@ function talkerSearchText(row, isPair) {
 }
 
 function talkerSourceLabel(source) {
-  if (source === 'clickhouse') return 'ClickHouse';
+  if (source === 'clickhouse') return talkersT('topAsn.source.clickhouse');
   if (source === 'loading') return GrapesI18n.t('dashboard.loading');
-  if (source === 'error') return 'Ошибка';
+  if (source === 'error') return talkersT('topAsn.source.error');
   return '—';
 }
 
 function fmtTalkerLoadMs(loadMs, serverMs) {
   if (loadMs == null) return '—';
-  if (serverMs != null) return `${loadMs} мс (SQL ${serverMs} мс)`;
-  return `${loadMs} мс`;
+  if (serverMs != null) return talkersT('topAsn.queryTimeMsSql', { load: loadMs, server: serverMs });
+  return talkersT('topAsn.queryTimeMs', { load: loadMs });
 }
 
 function csvEscape(value) {
@@ -324,13 +345,33 @@ function exportTopTalkersCsv({
 
   const headers = isPair
     ? [
-      '#', 'Src ASN name', 'Dst ASN name', 'Src ASN', 'Dst ASN',
-      'Src country', 'Dst country',
-      metricLabel, 'Доля %', 'Объём', 'Traffic bytes', 'Avg Gbps', 'Avg PPS', 'Flows',
+      talkersT('topAsn.csv.rank'),
+      talkersT('topAsn.csv.srcAsnName'),
+      talkersT('topAsn.csv.dstAsnName'),
+      talkersT('topAsn.csv.srcAsn'),
+      talkersT('topAsn.csv.dstAsn'),
+      talkersT('topAsn.csv.srcCountry'),
+      talkersT('topAsn.csv.dstCountry'),
+      metricLabel,
+      talkersT('topAsn.csv.sharePct'),
+      talkersT('dashboard.talkers.volume'),
+      talkersT('topAsn.csv.trafficBytes'),
+      talkersT('topAsn.csv.avgGbps'),
+      talkersT('topAsn.csv.avgPps'),
+      talkersT('topAsn.csv.flows'),
     ]
     : [
-      '#', 'ASN name', 'ASN number', 'Country',
-      metricLabel, 'Доля %', 'Объём', 'Traffic bytes', 'Avg Gbps', 'Avg PPS', 'Flows',
+      talkersT('topAsn.csv.rank'),
+      talkersT('topAsn.csv.asnName'),
+      talkersT('topAsn.csv.asnNumber'),
+      talkersT('topAsn.csv.country'),
+      metricLabel,
+      talkersT('topAsn.csv.sharePct'),
+      talkersT('dashboard.talkers.volume'),
+      talkersT('topAsn.csv.trafficBytes'),
+      talkersT('topAsn.csv.avgGbps'),
+      talkersT('topAsn.csv.avgPps'),
+      talkersT('topAsn.csv.flows'),
     ];
 
   const lines = [
