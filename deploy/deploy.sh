@@ -242,13 +242,15 @@ ui_up() {
     chown -R 1001:1001 "${UI_DATA_DIR}" 2>/dev/null || true
   fi
   need_compose_dir "${UI_DIR}" grapes-nta
-  log "rebuild grapes-nta in ${UI_DIR} (data=${UI_DATA_DIR})"
+  local version
+  version="$(component_version ui)"
+  log "rebuild grapes-nta in ${UI_DIR} (data=${UI_DATA_DIR}, version ${version})"
   if [[ -f "${UI_DIR}/SOURCE.txt" ]]; then
     log "UI source: $(tr '\n' ' ' <"${UI_DIR}/SOURCE.txt")"
   fi
   (
     cd "${UI_DIR}"
-    UI_DATA_DIR="${UI_DATA_DIR}" docker compose up -d --build --remove-orphans
+    UI_DATA_DIR="${UI_DATA_DIR}" GRAPES_VERSION="${version}" docker compose up -d --build --remove-orphans
   )
   log "grapes-nta is up"
   # brief wait for health

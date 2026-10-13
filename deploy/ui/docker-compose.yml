@@ -18,6 +18,12 @@ services:
     env_file:
       - path: .env
         required: true
+    environment:
+      GRAPES_VERSION: ${GRAPES_VERSION:-unknown}
+    command:
+      - sh
+      - -c
+      - 'echo "$$(date -u +%Y-%m-%dT%H:%M:%SZ) ui version ${GRAPES_VERSION:-unknown}"; exec node server/index.js'
     volumes:
       - ${UI_DATA_DIR:-/opt/grapes/ui/data}:/app/server/data
     healthcheck:
