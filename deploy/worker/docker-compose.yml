@@ -21,6 +21,12 @@ services:
     # 03:15 MSK, so an unset TZ (= UTC) would fire it at 06:15 MSK.
     environment:
       TZ: ${WORKER_TZ:-Europe/Moscow}
+      GRAPES_VERSION: ${GRAPES_VERSION:-unknown}
+      GRAPES_VERSION_DATE: ${GRAPES_VERSION_DATE:-}
+    command:
+      - sh
+      - -c
+      - 'echo "$$(date -u +%Y-%m-%dT%H:%M:%SZ) worker version ${GRAPES_VERSION:-unknown} dated ${GRAPES_VERSION_DATE:-unknown}"; exec /app/entrypoint.sh'
     volumes:
       - ${WORKER_DATA_DIR:-./data}:/app/analytics/server/data
       - ${WORKER_LOG_DIR:-./logs}:/var/log/grapesnta

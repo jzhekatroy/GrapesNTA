@@ -35,4 +35,4 @@ ENV GRAPES_VERSION=${GRAPES_VERSION}
 
 USER app
 
-CMD ["sh", "-c", "echo \"$(date -u +%Y-%m-%dT%H:%M:%SZ) detection version ${GRAPES_VERSION}\"; exec node server/detection-worker.js loop"]
+CMD ["sh", "-c", "echo \"$(date -u +%Y-%m-%dT%H:%M:%SZ) detection version ${GRAPES_VERSION} dated ${GRAPES_VERSION_DATE:-unknown}\"; exec node server/detection-worker.js loop"]

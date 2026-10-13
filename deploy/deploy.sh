@@ -172,7 +172,7 @@ component_version_date() {
 }
 
 compose_up() {
-  local dir="$1" name="$2" version="${3:-}"
+  local dir="$1" name="$2" version="${3:-}" version_date=""
   need_compose_dir "${dir}" "${name}"
   if [[ "${name}" == "grapes-worker" ]]; then
     ensure_app_owned_dir "${WORKER_DIR}/logs"
@@ -180,10 +180,14 @@ compose_up() {
   elif [[ "${name}" == "grapes-enrichment" ]]; then
     ensure_app_owned_dir "${ENRICH_DIR}/logs"
   fi
-  log "rebuild ${name} in ${dir}${version:+ (version ${version})}"
+  if [[ -n "${version}" ]]; then
+    version_date="$(component_version_date "${version}")"
+  fi
+  log "rebuild ${name} in ${dir}${version:+ (version ${version}${version_date:+ от ${version_date}})}"
   (
     cd "${dir}"
-    GRAPES_VERSION="${version}" docker compose up -d --build --remove-orphans
+    GRAPES_VERSION="${version}" GRAPES_VERSION_DATE="${version_date}" \
+      docker compose up -d --build --remove-orphans
   )
   log "${name} is up"
 }
@@ -233,7 +237,10 @@ ensure_detection_env() {
 ensure_clickhouse_schema() {
   local script="${REPO_ROOT}/deploy/schema/ensure-live.sh"
   [[ -x "${script}" || -f "${script}" ]] || die "missing ${script}"
-  log "ensure ClickHouse schema (from deploy/ui/.env)"
+  local version version_date
+  version="$(component_version schema)"
+  version_date="$(component_version_date "${version}")"
+  log "ensure ClickHouse schema (from deploy/ui/.env, version ${version}${version_date:+ от ${version_date}})"
   bash "${script}"
 }
 
@@ -508,10 +515,10 @@ case "${ACTION}" in
       ensure_clickhouse_schema
     fi
     if [[ "${SEL_WORKER}" -eq 1 ]]; then
-      compose_up "${WORKER_DIR}" grapes-worker
+      compose_up "${WORKER_DIR}" grapes-worker "$(component_version worker)"
     fi
     if [[ "${SEL_ENRICH}" -eq 1 ]]; then
-      compose_up "${ENRICH_DIR}" grapes-enrichment
+      compose_up "${ENRICH_DIR}" grapes-enrichment "$(component_version enrichment)"
     fi
     if [[ "${SEL_DETECTION}" -eq 1 ]]; then
       detection_up
