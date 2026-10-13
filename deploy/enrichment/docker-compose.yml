@@ -17,6 +17,13 @@ services:
         required: true
     restart: always
     network_mode: host
+    environment:
+      GRAPES_VERSION: ${GRAPES_VERSION:-unknown}
+      GRAPES_VERSION_DATE: ${GRAPES_VERSION_DATE:-}
+    command:
+      - sh
+      - -c
+      - 'echo "$$(date -u +%Y-%m-%dT%H:%M:%SZ) enrichment version ${GRAPES_VERSION:-unknown} dated ${GRAPES_VERSION_DATE:-unknown}"; exec /app/entrypoint.sh'
     volumes:
       - ${ENRICHMENT_CACHE_DIR:-geoloaderd-cache}:/var/lib/geoloaderd/cache
       - ${ENRICHMENT_LOG_DIR:-./logs}:/var/log/grapesnta
