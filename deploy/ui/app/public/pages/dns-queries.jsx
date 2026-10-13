@@ -1,16 +1,27 @@
 /* DNS-запросы — анализ DNS-трафика из dns_log */
 
+function dnsT(key, params) {
+  return GrapesI18n.t(key, params);
+}
+
 const DNS_REFRESH_MS = 60_000;
-const LOAD_FAILED = 'Не удалось загрузить';
 const DNS_SHORT_RANGES = new Set(['30m', '1h', '3h', '6h']);
 const SIX_HOURS_MS = 6 * 60 * 60 * 1000;
 
 const DNS_CHART_LINES = [
-  { key: 'qps', label: 'Запросы', color: '#7E92F8' },
-  { key: 'responses_per_sec', label: 'Все ответы', color: '#51D16D', tip: 'Включает успешные ответы, NXDOMAIN и SERVFAIL' },
-  { key: 'nxdomain_per_sec', label: 'Домен не найден', color: '#F0B400', tip: 'Домен не найден (NXDOMAIN)' },
-  { key: 'servfail_per_sec', label: 'Ошибка DNS-сервера', color: '#F06B6B', tip: 'Ошибка DNS-сервера (SERVFAIL)' },
+  { key: 'qps', labelKey: 'dns.chart.line.requests', color: '#7E92F8' },
+  { key: 'responses_per_sec', labelKey: 'dns.chart.line.allAnswers', tipKey: 'dns.chart.line.allAnswersTip', color: '#51D16D' },
+  { key: 'nxdomain_per_sec', labelKey: 'dns.chart.line.domainNotFound', tipKey: 'dns.chart.line.domainNotFoundTip', color: '#F0B400' },
+  { key: 'servfail_per_sec', labelKey: 'dns.chart.line.dnsServerError', tipKey: 'dns.chart.line.dnsServerErrorTip', color: '#F06B6B' },
 ];
+
+function resolveDnsChartLine(ln) {
+  return {
+    ...ln,
+    label: dnsT(ln.labelKey),
+    tip: ln.tipKey ? dnsT(ln.tipKey) : undefined,
+  };
+}
 const DNS_CHART_HEIGHT = 320;
 
 const DNS_TOPS_SPLIT_KEY = 'grapes-dns-tops-split';
@@ -62,9 +73,9 @@ function clampDnsMidSplit(left, mid) {
 function fmtDnsTipValue(n) {
   if (n == null || Number.isNaN(n)) return '—';
   const v = Number(n);
-  if (v >= 1e9) return `${(v / 1e9).toFixed(1)} млрд`;
-  if (v >= 1e6) return `${(v / 1e6).toFixed(1)} млн`;
-  if (v >= 1e3) return `${(v / 1e3).toFixed(1)} тыс`;
+  if (v >= 1e9) return `${(v / 1e9).toFixed(1)} ${dnsT('unit.billion')}`;
+  if (v >= 1e6) return `${(v / 1e6).toFixed(1)} ${dnsT('unit.million')}`;
+  if (v >= 1e3) return `${(v / 1e3).toFixed(1)} ${dnsT('unit.thousand')}`;
   if (v >= 100) return String(Math.round(v));
   if (v >= 1) return v % 1 === 0 ? String(Math.round(v)) : v.toFixed(1);
   return v.toFixed(2);
@@ -101,8 +112,8 @@ function DnsErrorPercent({ value }) {
 }
 
 function dnsEventTypeLabel(eventType) {
-  if (eventType === 'response') return 'Ответ';
-  if (eventType === 'query') return 'Запрос';
+  if (eventType === 'response') return dnsT('dns.eventType.response');
+  if (eventType === 'query') return dnsT('dns.eventType.query');
   return eventType || '—';
 }
 
@@ -110,6 +121,32 @@ function dnsEventTypeTone(eventType) {
   if (eventType === 'response') return 'success';
   if (eventType === 'query') return 'info';
   return 'neutral';
+}
+
+const DNS_RCODE_TECH = {
+  0: 'NOERROR',
+  2: 'SERVFAIL',
+  3: 'NXDOMAIN',
+};
+
+function dnsRcodeTechLabel(rcode) {
+  const n = Number(rcode);
+  return DNS_RCODE_TECH[n] ?? String(rcode ?? '');
+}
+
+function dnsRcodeHumanLabel(rcode) {
+  const n = Number(rcode);
+  if (n === 0) return dnsT('dns.rcode.success');
+  if (n === 2) return dnsT('dns.rcode.dnsServerError');
+  if (n === 3) return dnsT('dns.rcode.domainNotFound');
+  return dnsT('dns.rcode.other');
+}
+
+function dnsRcodeHumanTitle(rcode) {
+  return dnsT('dns.rcode.titleWithTech', {
+    label: dnsRcodeHumanLabel(rcode),
+    tech: dnsRcodeTechLabel(rcode),
+  });
 }
 
 function dnsRcodeTone(label, rcode) {
@@ -129,11 +166,12 @@ function DnsEventTypeBadge({ eventType }) {
   );
 }
 
-function DnsRcodeBadge({ label, rcode, title }) {
-  const text = label || '—';
+function DnsRcodeBadge({ rcode }) {
+  const text = dnsRcodeHumanLabel(rcode);
+  const title = dnsRcodeHumanTitle(rcode);
   return (
-    <span className="dns-recent-badge" title={title || text}>
-      <Badge tone={dnsRcodeTone(label, rcode)}>{text}</Badge>
+    <span className="dns-recent-badge" title={title}>
+      <Badge tone={dnsRcodeTone(text, rcode)}>{text}</Badge>
     </span>
   );
 }
@@ -146,7 +184,7 @@ function DnsIpCell({ ip, resolverLabel, isExternal, onClick, className }) {
           type="button"
           className="link-btn mono dns-recent-ip"
           onClick={onClick}
-          title="Открыть в разборе DNS"
+          title={dnsT('dns.openInExplorer')}
         >
           {ip}
         </button>
@@ -160,7 +198,7 @@ function DnsIpCell({ ip, resolverLabel, isExternal, onClick, className }) {
       ) : null}
       {isExternal ? (
         <span className="dns-ip-cell__badge">
-          <Badge tone="info">внешний</Badge>
+          <Badge tone="info">{dnsT('dns.badge.external')}</Badge>
         </span>
       ) : null}
     </span>
@@ -169,13 +207,13 @@ function DnsIpCell({ ip, resolverLabel, isExternal, onClick, className }) {
 
 function DnsHideResolversToggle({ checked, onChange }) {
   return (
-    <label className="dns-hide-resolvers" title="Резолверы обслуживают много пользователей и обычно занимают верхние строки. Список настраивается вручную.">
+    <label className="dns-hide-resolvers" title={dnsT('dns.hideResolversTitle')}>
       <input
         type="checkbox"
         checked={checked}
         onChange={(e) => onChange(e.target.checked)}
       />
-      <span>Скрыть резолверы из списка</span>
+      <span>{dnsT('dns.hideResolvers')}</span>
     </label>
   );
 }
@@ -191,7 +229,7 @@ function openDnsExplorerDraft({ field, value, timeRange, customPeriod }) {
 function DnsLoadState({ children, style, className }) {
   return (
     <div className={`other-ports-table__state${className ? ` ${className}` : ''}`} style={style}>
-      {children || LOAD_FAILED}
+      {children || dnsT('dashboard.loadFailed')}
     </div>
   );
 }
@@ -199,7 +237,7 @@ function DnsLoadState({ children, style, className }) {
 function DnsEmptyState({ children, style, className }) {
   return (
     <div className={`other-ports-table__state${className ? ` ${className}` : ''}`} style={style}>
-      {children || 'Нет данных за выбранный период'}
+      {children || dnsT('dashboard.noDataPeriod')}
     </div>
   );
 }
@@ -213,7 +251,7 @@ function dnsIsLongPeriod(timeRange, customPeriod) {
 }
 
 function dnsAggregateEmptyMessage() {
-  return 'Нет данных в агрегатах за выбранный период. Возможно, агрегация ещё не выполнена.';
+  return dnsT('dns.emptyAggregate');
 }
 
 function DnsTopsRow({ leftSplit, midSplit, onSplitChange, children }) {
@@ -361,7 +399,7 @@ function DnsTopsRow({ leftSplit, midSplit, onSplitChange, children }) {
         aria-valuenow={Math.round(leftSplit * 100)}
         aria-valuemin={Math.round(DNS_TOPS_SPLIT_MIN * 100)}
         aria-valuemax={Math.round((1 - midSplit - DNS_TOPS_SPLIT_MIN) * 100)}
-        aria-label="Изменить ширину топа клиентов"
+        aria-label={dnsT('dns.splitter.clientsWidth')}
         tabIndex={0}
         onMouseDown={(e) => onSplitterMouseDown(1, e)}
       />
@@ -375,7 +413,7 @@ function DnsTopsRow({ leftSplit, midSplit, onSplitChange, children }) {
         aria-valuenow={Math.round((leftSplit + midSplit) * 100)}
         aria-valuemin={Math.round((leftSplit + DNS_TOPS_SPLIT_MIN) * 100)}
         aria-valuemax={Math.round((1 - DNS_TOPS_SPLIT_MIN) * 100)}
-        aria-label="Изменить ширину топа доменов"
+        aria-label={dnsT('dns.splitter.domainsWidth')}
         tabIndex={0}
         onMouseDown={(e) => onSplitterMouseDown(2, e)}
       />
@@ -411,7 +449,7 @@ function formatDnsTs(ts, displayTimezone = getDisplayTimezone()) {
     ? parseChartBucketMs(text)
     : Date.parse(`${text.replace(' ', 'T')}Z`);
   if (ms == null || !Number.isFinite(ms)) return String(ts);
-  return new Date(ms).toLocaleString('ru-RU', {
+  return new Date(ms).toLocaleString(GrapesI18n.intlLocale(), {
     timeZone: displayTimezone || getDisplayTimezone(),
     day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit',
   });
@@ -576,7 +614,8 @@ function PageDnsQueries({ onNavigate, timeRange, customPeriod, collectorFilter, 
 
   const dnsChartBucketSeconds = dnsBucketSecondsFromMode(activityMeta?.bucketMode);
 
-  const visibleChartLines = DNS_CHART_LINES.filter((ln) => !chartHidden.has(ln.key));
+  const chartLines = DNS_CHART_LINES.map(resolveDnsChartLine);
+  const visibleChartLines = chartLines.filter((ln) => !chartHidden.has(ln.key));
 
   const toggleChartSeries = (key) => {
     setChartHidden((prev) => {
@@ -587,27 +626,27 @@ function PageDnsQueries({ onNavigate, timeRange, customPeriod, collectorFilter, 
     });
   };
 
-  const recentSub = `Последние 50 событий · ${periodLabel}`;
+  const recentSub = dnsT('dns.recentSub', { period: periodLabel });
 
   return (
     <div className="main__container">
       <div className="page-head">
         <div>
-          <h1>DNS</h1>
-          <p>Оперативный обзор DNS-активности, источников, доменов и серверов · {periodLabel}</p>
+          <h1>{dnsT('nav.item.dns')}</h1>
+          <p>{dnsT('dns.subtitle')} · {periodLabel}</p>
         </div>
       </div>
 
       <Card className="dns-chart-card">
         <div className="dns-chart-card__head">
           <div className="dns-chart-card__titles">
-            <div className="dns-chart-card__title">Активность DNS</div>
-            <div className="dns-chart-card__sub">{periodLabel} · запр./с</div>
+            <div className="dns-chart-card__title">{dnsT('dns.chart.title')}</div>
+            <div className="dns-chart-card__sub">{periodLabel} · {dnsT('dns.chart.rateUnit')}</div>
           </div>
           <WidgetLoadBadge loadMs={activityLoadMs} serverMs={activityServerMs} />
         </div>
         <div className="dns-chart-card__legend chart-legend">
-          {DNS_CHART_LINES.map((ln) => {
+          {chartLines.map((ln) => {
             const off = chartHidden.has(ln.key);
             return (
               <button
@@ -615,7 +654,7 @@ function PageDnsQueries({ onNavigate, timeRange, customPeriod, collectorFilter, 
                 type="button"
                 className={`chart-legend__item${off ? ' is-off' : ''}`}
                 aria-pressed={!off}
-                title={ln.tip || (off ? 'Показать на графике' : 'Скрыть с графика')}
+                title={ln.tip || (off ? dnsT('dashboard.chart.legend.show') : dnsT('dashboard.chart.legend.hide'))}
                 onClick={() => toggleChartSeries(ln.key)}
               >
                 <span
@@ -629,9 +668,9 @@ function PageDnsQueries({ onNavigate, timeRange, customPeriod, collectorFilter, 
         </div>
         <div className="dns-chart-card__hint">
           <Icon name="info" size={12} />
-          «Все ответы» включает успешные ответы, NXDOMAIN и SERVFAIL — последние две линии показывают подмножества ответов.
-          {onChartRangeSelect ? ' · Выделите диапазон на графике' : ''}
-          {' · Авто-обновление каждую минуту'}
+          {dnsT('dns.chart.hint')}
+          {onChartRangeSelect ? dnsT('dashboard.chart.selectRangeSuffix') : ''}
+          {dnsT('dashboard.chart.autoRefreshWithHint')}
         </div>
         {activitySource === 'error' ? (
           <DnsLoadState className="dns-chart-card__state" />
@@ -651,7 +690,7 @@ function PageDnsQueries({ onNavigate, timeRange, customPeriod, collectorFilter, 
               displayTimezone={displayTimezone}
               valueFormatter={fmtDnsTipValue}
               axisFormatter={fmtCompact}
-              tipUnitLabel="запр./с"
+              tipUnitLabel={dnsT('dns.chart.rateUnit')}
             />
           </div>
         )}
@@ -665,14 +704,14 @@ function PageDnsQueries({ onNavigate, timeRange, customPeriod, collectorFilter, 
         <Card className="dns-top-card">
           <div className="dns-card-head">
             <div>
-              <div className="dns-card-head__title">Источники запросов</div>
+              <div className="dns-card-head__title">{dnsT('dns.table.querySources')}</div>
               <div className="dns-card-head__sub">{periodLabel}</div>
             </div>
             <WidgetLoadBadge loadMs={topClientsLoadMs} serverMs={topClientsServerMs} />
           </div>
           <div className="dns-top-card__toolbar">
             <DnsHideResolversToggle checked={hideResolvers} onChange={setHideResolvers} />
-            <Button kind="ghost" size="sm" onClick={() => onNavigate?.('dns-resolvers')}>Настроить список</Button>
+            <Button kind="ghost" size="sm" onClick={() => onNavigate?.('dns-resolvers')}>{dnsT('dns.configureList')}</Button>
           </div>
           {topClientsSource === 'error' ? (
             <DnsLoadState />
@@ -691,7 +730,7 @@ function PageDnsQueries({ onNavigate, timeRange, customPeriod, collectorFilter, 
               columns={[
                 {
                   key: 'client',
-                  title: 'IP-адрес',
+                  title: dnsT('dns.col.ipAddress'),
                   render: (row) => (
                     <DnsIpCell
                       ip={row.client}
@@ -706,13 +745,13 @@ function PageDnsQueries({ onNavigate, timeRange, customPeriod, collectorFilter, 
                     />
                   ),
                 },
-                { key: 'queries', title: 'Запросы', align: 'right', num: true, render: (r) => fmtNum(r.queries) },
-                { key: 'uniqueDomains', title: 'Уник. домены', align: 'right', num: true, render: (r) => fmtNum(r.uniqueDomains) },
-                { key: 'nxdomain', title: 'Не найдено', align: 'right', num: true, render: (r) => fmtNum(r.nxdomain) },
-                { key: 'servfail', title: 'Сбои DNS', align: 'right', num: true, render: (r) => fmtNum(r.servfail) },
+                { key: 'queries', title: dnsT('dns.col.queries'), align: 'right', num: true, render: (r) => fmtNum(r.queries) },
+                { key: 'uniqueDomains', title: dnsT('dns.col.uniqueDomains'), align: 'right', num: true, render: (r) => fmtNum(r.uniqueDomains) },
+                { key: 'nxdomain', title: dnsT('dns.col.notFound'), align: 'right', num: true, render: (r) => fmtNum(r.nxdomain) },
+                { key: 'servfail', title: dnsT('dns.col.dnsFailures'), align: 'right', num: true, render: (r) => fmtNum(r.servfail) },
                 {
                   key: 'errorPercent',
-                  title: 'Сбои DNS, %',
+                  title: dnsT('dns.col.dnsFailuresPct'),
                   align: 'right',
                   render: (r) => <DnsErrorPercent value={r.errorPercent} />,
                 },
@@ -726,7 +765,7 @@ function PageDnsQueries({ onNavigate, timeRange, customPeriod, collectorFilter, 
         <Card className="dns-top-card">
           <div className="dns-card-head">
             <div>
-              <div className="dns-card-head__title">Домены</div>
+              <div className="dns-card-head__title">{dnsT('dns.table.domains')}</div>
               <div className="dns-card-head__sub">{periodLabel}</div>
             </div>
             <WidgetLoadBadge loadMs={topDomainsLoadMs} serverMs={topDomainsServerMs} />
@@ -748,7 +787,7 @@ function PageDnsQueries({ onNavigate, timeRange, customPeriod, collectorFilter, 
               columns={[
                 {
                   key: 'queryName',
-                  title: 'Домен',
+                  title: dnsT('dns.col.domain'),
                   render: (row) => (
                     <button
                       type="button"
@@ -759,20 +798,20 @@ function PageDnsQueries({ onNavigate, timeRange, customPeriod, collectorFilter, 
                         timeRange,
                         customPeriod,
                       })}
-                      title="Открыть в разборе DNS"
+                      title={dnsT('dns.openInExplorer')}
                     >
                       {row.queryName}
                     </button>
                   ),
                 },
                 { key: 'qtype', title: 'QTYPE' },
-                { key: 'queries', title: 'Запросы', align: 'right', num: true, render: (r) => fmtNum(r.queries) },
-                { key: 'responses', title: 'Ответы', align: 'right', num: true, render: (r) => fmtNum(r.responses) },
-                { key: 'nxdomain', title: 'Не найдено', align: 'right', num: true, render: (r) => fmtNum(r.nxdomain) },
-                { key: 'servfail', title: 'Сбои DNS', align: 'right', num: true, render: (r) => fmtNum(r.servfail) },
+                { key: 'queries', title: dnsT('dns.col.queries'), align: 'right', num: true, render: (r) => fmtNum(r.queries) },
+                { key: 'responses', title: dnsT('dns.col.responses'), align: 'right', num: true, render: (r) => fmtNum(r.responses) },
+                { key: 'nxdomain', title: dnsT('dns.col.notFound'), align: 'right', num: true, render: (r) => fmtNum(r.nxdomain) },
+                { key: 'servfail', title: dnsT('dns.col.dnsFailures'), align: 'right', num: true, render: (r) => fmtNum(r.servfail) },
                 {
                   key: 'errorPercent',
-                  title: 'Сбои DNS, %',
+                  title: dnsT('dns.col.dnsFailuresPct'),
                   align: 'right',
                   render: (r) => <DnsErrorPercent value={r.errorPercent} />,
                 },
@@ -786,7 +825,7 @@ function PageDnsQueries({ onNavigate, timeRange, customPeriod, collectorFilter, 
         <Card className="dns-top-card">
           <div className="dns-card-head">
             <div>
-              <div className="dns-card-head__title">DNS-серверы</div>
+              <div className="dns-card-head__title">{dnsT('dns.table.dnsServers')}</div>
               <div className="dns-card-head__sub">{periodLabel}</div>
             </div>
             <WidgetLoadBadge loadMs={topServersLoadMs} serverMs={topServersServerMs} />
@@ -808,7 +847,7 @@ function PageDnsQueries({ onNavigate, timeRange, customPeriod, collectorFilter, 
               columns={[
                 {
                   key: 'server',
-                  title: 'IP-адрес',
+                  title: dnsT('dns.col.ipAddress'),
                   render: (row) => (
                     <DnsIpCell
                       ip={row.server}
@@ -823,13 +862,13 @@ function PageDnsQueries({ onNavigate, timeRange, customPeriod, collectorFilter, 
                     />
                   ),
                 },
-                { key: 'queries', title: 'Запросы', align: 'right', num: true, render: (r) => fmtNum(r.queries) },
-                { key: 'responses', title: 'Ответы', align: 'right', num: true, render: (r) => fmtNum(r.responses) },
-                { key: 'nxdomain', title: 'Не найдено', align: 'right', num: true, render: (r) => fmtNum(r.nxdomain) },
-                { key: 'servfail', title: 'Сбои DNS', align: 'right', num: true, render: (r) => fmtNum(r.servfail) },
+                { key: 'queries', title: dnsT('dns.col.queries'), align: 'right', num: true, render: (r) => fmtNum(r.queries) },
+                { key: 'responses', title: dnsT('dns.col.responses'), align: 'right', num: true, render: (r) => fmtNum(r.responses) },
+                { key: 'nxdomain', title: dnsT('dns.col.notFound'), align: 'right', num: true, render: (r) => fmtNum(r.nxdomain) },
+                { key: 'servfail', title: dnsT('dns.col.dnsFailures'), align: 'right', num: true, render: (r) => fmtNum(r.servfail) },
                 {
                   key: 'errorPercent',
-                  title: 'Сбои DNS, %',
+                  title: dnsT('dns.col.dnsFailuresPct'),
                   align: 'right',
                   render: (r) => <DnsErrorPercent value={r.errorPercent} />,
                 },
@@ -844,7 +883,7 @@ function PageDnsQueries({ onNavigate, timeRange, customPeriod, collectorFilter, 
       <Card className="dns-recent-card">
         <div className="dns-card-head">
           <div>
-            <div className="dns-card-head__title">Последние DNS-события</div>
+            <div className="dns-card-head__title">{dnsT('dns.table.recentEvents')}</div>
             <div className="dns-card-head__sub">{recentSub}</div>
           </div>
           <WidgetLoadBadge loadMs={recentLoadMs} serverMs={recentServerMs} />
@@ -862,20 +901,20 @@ function PageDnsQueries({ onNavigate, timeRange, customPeriod, collectorFilter, 
               columns={[
                 {
                   key: 'eventTime',
-                  title: 'Время',
+                  title: dnsT('dns.col.time'),
                   width: 150,
                   render: (r) => <span className="mono dns-recent-time">{formatDnsTs(r.eventTime, displayTimezone)}</span>,
                 },
                 {
                   key: 'eventType',
-                  title: 'Тип',
+                  title: dnsT('dns.col.type'),
                   width: 88,
                   sortable: false,
                   render: (r) => <DnsEventTypeBadge eventType={r.eventType} />,
                 },
                 {
                   key: 'client',
-                  title: 'Клиент',
+                  title: dnsT('dns.col.client'),
                   width: 180,
                   render: (r) => (
                     <DnsIpCell
@@ -887,7 +926,7 @@ function PageDnsQueries({ onNavigate, timeRange, customPeriod, collectorFilter, 
                 },
                 {
                   key: 'server',
-                  title: 'DNS-сервер',
+                  title: dnsT('dns.col.dnsServer'),
                   width: 180,
                   render: (r) => (
                     <DnsIpCell
@@ -899,24 +938,24 @@ function PageDnsQueries({ onNavigate, timeRange, customPeriod, collectorFilter, 
                 },
                 {
                   key: 'queryName',
-                  title: 'Домен',
+                  title: dnsT('dns.col.domain'),
                   render: (r) => (
                     <span className="dns-table-domain dns-recent-domain" title={r.queryName || '—'}>
                       {r.queryName || '—'}
                     </span>
                   ),
                 },
-                { key: 'qtype', title: 'Тип запроса', width: 88 },
+                { key: 'qtype', title: dnsT('dns.col.queryType'), width: 88 },
                 {
                   key: 'rcodeLabel',
-                  title: 'Результат ответа',
+                  title: dnsT('dns.col.responseResult'),
                   width: 140,
                   sortable: false,
-                  render: (r) => <DnsRcodeBadge label={r.rcodeLabel} rcode={r.rcode} title={r.rcodeTitle} />,
+                  render: (r) => <DnsRcodeBadge rcode={r.rcode} />,
                 },
                 {
                   key: 'answers',
-                  title: 'Ответы',
+                  title: dnsT('dns.col.answers'),
                   render: (r) => {
                     const text = formatDnsAnswers(r);
                     return (

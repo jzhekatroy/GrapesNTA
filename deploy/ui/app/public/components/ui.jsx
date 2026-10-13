@@ -857,8 +857,14 @@ function DataTable({
       <div className="table-foot__row">
         <div className="table-foot__left">
           {selectable && selected?.size > 0
-            ? <span>Выбрано: <b style={{color: 'var(--fg-primary)'}}>{selected.size}</b> из {rowCount}</span>
-            : <span>{rowCount} {pluralRu(rowCount, 'запись', 'записи', 'записей')}</span>
+            ? (
+              <span>
+                {typeof GrapesI18n !== 'undefined' && GrapesI18n.t
+                  ? GrapesI18n.t('table.selected', { selected: selected.size, total: rowCount })
+                  : `Выбрано: ${selected.size} из ${rowCount}`}
+              </span>
+            )
+            : <span>{formatTableRecordCount(rowCount)}</span>
           }
         </div>
         <div className="table-foot__pager">
@@ -866,8 +872,8 @@ function DataTable({
             <select
               className="input table-foot__page-size"
               value={pageSizeSelectValue ?? pageSizeOptions[0]?.value ?? ''}
-              title="Строк на странице"
-              aria-label="Строк на странице"
+              title={typeof GrapesI18n !== 'undefined' && GrapesI18n.t ? GrapesI18n.t('table.rowsPerPage') : 'Строк на странице'}
+              aria-label={typeof GrapesI18n !== 'undefined' && GrapesI18n.t ? GrapesI18n.t('table.rowsPerPage') : 'Строк на странице'}
               onChange={(e) => {
                 const raw = e.target.value;
                 const next = raw === 'all' ? 'all' : Number(raw);
@@ -982,6 +988,23 @@ function pluralRu(n, one, few, many) {
   return many;
 }
 
+function formatTableRecordCount(count) {
+  const n = Number(count) || 0;
+  if (typeof GrapesI18n !== 'undefined' && GrapesI18n.t) {
+    if (GrapesI18n.getLocale() === 'en') {
+      return GrapesI18n.t(n === 1 ? 'table.records.one' : 'table.records.many', { count: n });
+    }
+    const word = pluralRu(
+      n,
+      GrapesI18n.t('table.records.oneForm'),
+      GrapesI18n.t('table.records.fewForm'),
+      GrapesI18n.t('table.records.manyForm'),
+    );
+    return `${n} ${word}`;
+  }
+  return `${n} ${pluralRu(n, 'запись', 'записи', 'записей')}`;
+}
+
 function Pagination({ page, totalPages, onChange }) {
   const pages = [];
   for (let i = 1; i <= totalPages; i++) pages.push(i);
@@ -1041,7 +1064,7 @@ async function copyTextToClipboard(text) {
 
 Object.assign(window, {
   Card, Button, Badge, Tag, StatusIndicator, Checkbox, MiniBar, Modal, SidePanel,
-  ToastStack, pushToast, Empty, OverflowText, splitTextMiddle, DataTable, Pagination, pluralRu, WidgetLoadBadge,
+  ToastStack, pushToast, Empty, OverflowText, splitTextMiddle, DataTable, Pagination, pluralRu, formatTableRecordCount, WidgetLoadBadge,
   BuilderControl,
   copyTextToClipboard,
 });

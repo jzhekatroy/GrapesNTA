@@ -95,3 +95,39 @@ test('английские подписи наблюдений совпадаю�
   assert.equal(en['chart.tip.interval'], 'interval {bucket}');
   assert.equal(en['chart.tip.from'], '5 min from {time}');
 });
+
+test('английские подписи страницы DNS совпадают с требованиями', () => {
+  const en = loadLocaleMessages('en');
+  assert.equal(
+    en['dns.subtitle'],
+    'Real-time overview of DNS activity, sources, domains, and servers',
+  );
+  assert.equal(
+    en['dns.chart.hint'],
+    '"All responses" includes successful responses, NXDOMAIN and SERVFAIL - the last two lines show subsets of responses.',
+  );
+  assert.equal(en['dns.chart.line.requests'], 'Requests');
+  assert.equal(en['dns.chart.line.allAnswers'], 'All answers');
+  assert.equal(en['dns.chart.line.domainNotFound'], 'Domain not found');
+  assert.equal(en['dns.chart.line.dnsServerError'], 'DNS Server error');
+  assert.equal(en['dns.table.querySources'], 'Query sources');
+  assert.equal(en['dns.table.domains'], 'Domains');
+  assert.equal(en['dns.table.dnsServers'], 'DNS servers');
+  assert.equal(en['dns.table.recentEvents'], 'Recent DNS events');
+  assert.equal(en['dns.hideResolvers'], 'Hide resolvers from the list');
+  assert.equal(en['dns.configureList'], 'Configure list');
+  assert.equal(en['dns.openInExplorer'], 'Open in DNS explorer');
+  assert.equal(en['dns.chart.rateUnit'], 'req/s');
+  assert.equal(en['dns.rcode.success'], 'Success');
+  assert.equal(en['dns.rcode.dnsServerError'], 'DNS Server error');
+  assert.equal(en['dns.rcode.domainNotFound'], 'Domain not found');
+});
+
+test('подпись числа записей в таблице на английском', () => {
+  const en = loadLocaleMessages('en');
+  assert.equal(en['table.records.one'], '{count} record');
+  assert.equal(en['table.records.many'], '{count} records');
+  const GrapesI18n = loadI18n();
+  GrapesI18n.setLocale('en');
+  assert.equal(GrapesI18n.t('table.records.many', { count: 50 }), '50 records');
+});
