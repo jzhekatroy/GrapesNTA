@@ -123,6 +123,15 @@ test('английские подписи страницы DNS совпадаю�
   assert.equal(en['dns.rcode.domainNotFound'], 'Domain not found');
 });
 
+test('английские подписи страницы разбора DNS совпадают с требованиями', () => {
+  const en = loadLocaleMessages('en');
+  assert.equal(en['dnsExplorer.title'], 'DNS explorer');
+  assert.equal(en['dnsExplorer.metric.queries_per_sec'], 'Queries/s');
+  assert.equal(en['dnsExplorer.field.query_name'], 'Domain');
+  assert.equal(en['dnsExplorer.err.filterEmpty'], 'Filter is empty');
+  assert.equal(en['dnsExplorer.showAnswers'], 'Show answers');
+});
+
 test('английские подписи страницы разбора трафика совпадают с требованиями', () => {
   const en = loadLocaleMessages('en');
   assert.equal(en['explorer.title'], 'Traffic explorer');

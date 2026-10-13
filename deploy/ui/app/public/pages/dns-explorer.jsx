@@ -1,23 +1,51 @@
 /* Разбор DNS — исследование dns_log по образцу Explorer */
 
+function dnsExplorerT(key, params) {
+  return GrapesI18n.t(key, params);
+}
+
+function dnsExplorerLoadFailedMessage(fallback) {
+  return fallback || dnsExplorerT('dashboard.loadFailed');
+}
+
 const DNS_EXPLORER_DEFAULT_METRIC = 'queries_per_sec';
 const DNS_EXPLORER_DEFAULT_LIMIT = 50;
 const DNS_EXPLORER_DEFAULT_VISUAL_LIMIT = 5;
 const DNS_EXPLORER_CHART_HEIGHT = 196;
 
-const DNS_RCODE_OPTIONS = [
-  { value: '0', label: 'Успешно' },
-  { value: '2', label: 'Ошибка DNS-сервера' },
-  { value: '3', label: 'Домен не найден' },
-  { value: 'other', label: 'Другой код' },
+const DNS_RCODE_OPTION_DEFS = [
+  { value: '0', labelKey: 'dns.rcode.success' },
+  { value: '2', labelKey: 'dns.rcode.dnsServerError' },
+  { value: '3', labelKey: 'dns.rcode.domainNotFound' },
+  { value: 'other', labelKey: 'dns.rcode.other' },
 ];
 
+function dnsRcodeOptions() {
+  return DNS_RCODE_OPTION_DEFS.map((o) => ({ ...o, label: dnsExplorerT(o.labelKey) }));
+}
+
+function dnsRcodeDisplayLabel(value) {
+  const str = String(value ?? '');
+  const hit = DNS_RCODE_OPTION_DEFS.find((o) => o.value === str);
+  if (hit) return dnsExplorerT(hit.labelKey);
+  const n = Number(value);
+  if (n === 0) return dnsExplorerT('dns.rcode.success');
+  if (n === 2) return dnsExplorerT('dns.rcode.dnsServerError');
+  if (n === 3) return dnsExplorerT('dns.rcode.domainNotFound');
+  if (Number.isFinite(n)) return dnsExplorerT('dns.rcode.other');
+  return str;
+}
+
 const DNS_EXPLORER_FILTER_LOGIC_OPTIONS = [
-  { id: 'and', label: 'И', altLabel: 'AND' },
-  { id: 'or', label: 'ИЛИ', altLabel: 'OR' },
-  { id: 'and_not', label: 'И НЕ', altLabel: 'AND NOT' },
-  { id: 'or_not', label: 'ИЛИ НЕ', altLabel: 'OR NOT' },
+  { id: 'and', labelKey: 'explorer.logic.and', altLabel: 'AND' },
+  { id: 'or', labelKey: 'explorer.logic.or', altLabel: 'OR' },
+  { id: 'and_not', labelKey: 'explorer.logic.andNot', altLabel: 'AND NOT' },
+  { id: 'or_not', labelKey: 'explorer.logic.orNot', altLabel: 'OR NOT' },
 ];
+
+function dnsExplorerLogicLabel(opt) {
+  return opt?.labelKey ? dnsExplorerT(opt.labelKey) : (opt?.altLabel || '');
+}
 
 const DNS_EXPLORER_TEXT_TIME_RANGES = ['30m', '1h', '3h', '6h', '12h', '24h', '7d'];
 
@@ -26,40 +54,56 @@ const DNS_EXPLORER_SUGGEST_FIELDS = new Set(['query_name', 'client_ip', 'server_
 const DNS_ANSWER_GROUP_IDS = new Set(['answer', 'answer_type']);
 const DNS_QUERY_METRICS = new Set(['queries_per_sec', 'queries_total']);
 
-const DNS_FIELD_OPS = {
-  client_ip: [
-    { id: 'eq', label: 'равно' },
-    { id: 'ne', label: 'не равно' },
-    { id: 'in_cidr', label: 'входит в CIDR' },
-  ],
-  query_name: [
-    { id: 'eq', label: 'равно' },
-    { id: 'contains', label: 'содержит' },
-    { id: 'not_contains', label: 'не содержит' },
-  ],
-  server_ip: [
-    { id: 'eq', label: 'равно' },
-    { id: 'ne', label: 'не равно' },
-    { id: 'in_cidr', label: 'входит в CIDR' },
-  ],
-  qtype: [
-    { id: 'eq', label: 'равно' },
-    { id: 'ne', label: 'не равно' },
-    { id: 'in', label: 'один из' },
-  ],
-  rcode: [
-    { id: 'eq', label: 'равно' },
-    { id: 'ne', label: 'не равно' },
-    { id: 'in', label: 'один из' },
-  ],
-  answer: [
-    { id: 'eq', label: 'равно' },
-    { id: 'ne', label: 'не равно' },
-    { id: 'in_cidr', label: 'входит в CIDR' },
-    { id: 'contains', label: 'содержит' },
-  ],
-  source_id: [{ id: 'in', label: 'один из' }],
+const DNS_OP_LABEL_KEYS = {
+  eq: 'explorer.op.eq',
+  ne: 'dnsExplorer.op.ne',
+  contains: 'explorer.op.contains',
+  not_contains: 'explorer.op.not_contains',
+  in: 'explorer.op.in',
+  in_cidr: 'dnsExplorer.op.in_cidr',
 };
+
+const DNS_FIELD_OP_IDS = {
+  client_ip: ['eq', 'ne', 'in_cidr'],
+  query_name: ['eq', 'contains', 'not_contains'],
+  server_ip: ['eq', 'ne', 'in_cidr'],
+  qtype: ['eq', 'ne', 'in'],
+  rcode: ['eq', 'ne', 'in'],
+  answer: ['eq', 'ne', 'in_cidr', 'contains'],
+  source_id: ['in'],
+};
+
+function dnsExplorerOpLabelForId(op) {
+  const key = DNS_OP_LABEL_KEYS[op];
+  return key ? dnsExplorerT(key) : op;
+}
+
+function dnsFieldOpsFor(field) {
+  const ids = DNS_FIELD_OP_IDS[field] || ['eq'];
+  return ids.map((id) => ({ id, label: dnsExplorerOpLabelForId(id) }));
+}
+
+function dnsExplorerOpDslTokens(op) {
+  const tokens = new Set([op]);
+  const key = DNS_OP_LABEL_KEYS[op];
+  if (!key) return [...tokens];
+  const bag = (typeof window !== 'undefined' && window.GrapesI18nMessages) || {};
+  for (const loc of ['ru', 'en']) {
+    const label = bag[loc]?.[key];
+    if (label) tokens.add(label);
+  }
+  return [...tokens];
+}
+
+function allDnsOpTokenPairs() {
+  const seen = new Map();
+  Object.keys(DNS_OP_LABEL_KEYS).forEach((op) => {
+    dnsExplorerOpDslTokens(op).forEach((token) => {
+      seen.set(String(token).toLowerCase(), op);
+    });
+  });
+  return [...seen.entries()].map(([token, op]) => ({ token, op }));
+}
 
 function normalizeDnsExplorerFilterLogic(logic) {
   const key = String(logic || 'and').trim().toLowerCase();
@@ -81,21 +125,6 @@ function cloneDnsExplorerFilters(filters) {
 
 const DNS_EXPLORER_MAX_RANGE_DAYS = 7;
 
-const DNS_OP_TOKENS = [
-  { token: 'eq', op: 'eq' },
-  { token: 'равно', op: 'eq' },
-  { token: 'ne', op: 'ne' },
-  { token: 'не равно', op: 'ne' },
-  { token: 'contains', op: 'contains' },
-  { token: 'содержит', op: 'contains' },
-  { token: 'not_contains', op: 'not_contains' },
-  { token: 'не содержит', op: 'not_contains' },
-  { token: 'in_cidr', op: 'in_cidr' },
-  { token: 'входит в cidr', op: 'in_cidr' },
-  { token: 'in', op: 'in' },
-  { token: 'один из', op: 'in' },
-];
-
 function ensureDnsFilterIds(filters) {
   return (filters || []).map((f, i) => ({
     ...normalizeDnsExplorerFilter(f),
@@ -104,11 +133,15 @@ function ensureDnsFilterIds(filters) {
 }
 
 function dnsExplorerOpLabel(op) {
-  for (const fieldOps of Object.values(DNS_FIELD_OPS)) {
-    const hit = fieldOps.find((item) => item.id === op);
-    if (hit) return hit.label;
-  }
-  return op;
+  return dnsExplorerOpLabelForId(op);
+}
+
+function dnsExplorerSchemaLabel(kind, id, schemaFallback) {
+  const key = kind === 'metric'
+    ? `dnsExplorer.metric.${id}`
+    : `dnsExplorer.field.${id}`;
+  if (GrapesI18n.has(key)) return dnsExplorerT(key);
+  return schemaFallback || id;
 }
 
 function hasDnsAnswerGrouping(groupBy) {
@@ -127,22 +160,30 @@ function coerceDnsMetricForGrouping(metric, groupBy) {
 function dnsDimensionMatchesQuery(dim, queryText) {
   const q = String(queryText || '').trim().toLowerCase();
   if (!q) return true;
+  const localized = dnsExplorerSchemaLabel('field', dim.id, dim.label);
+  if (String(localized || '').toLowerCase().includes(q)) return true;
   if (String(dim.label || '').toLowerCase().includes(q)) return true;
-  if (dim.id === 'answer' && (q.includes('ответ') || q.includes('адрес'))) return true;
-  if (dim.id === 'answer_type' && q.includes('ответ')) return true;
+  if (dim.id === 'answer' && (q.includes('ответ') || q.includes('адрес') || q.includes('answer') || q.includes('address'))) return true;
+  if (dim.id === 'answer_type' && (q.includes('ответ') || q.includes('answer'))) return true;
   return false;
 }
 
 function resolveDnsOpToken(raw) {
   const key = String(raw || '').trim().toLowerCase();
-  const hit = DNS_OP_TOKENS.find((item) => item.token.toLowerCase() === key);
+  const hit = allDnsOpTokenPairs().find((item) => item.token.toLowerCase() === key);
   return hit?.op || key;
 }
 
 function resolveDnsFieldId(field, schema) {
   const id = String(field || '').trim();
   if (schema?.fields?.some((f) => f.id === id)) return id;
-  throw new Error(`неизвестное поле «${field}»`);
+  const byLabel = schema?.fields?.find((f) => {
+    const localized = dnsExplorerSchemaLabel('field', f.id, f.label);
+    return String(localized || '').toLowerCase() === id.toLowerCase()
+      || String(f.label || '').toLowerCase() === id.toLowerCase();
+  });
+  if (byLabel) return byLabel.id;
+  throw new Error(dnsExplorerT('dnsExplorer.err.unknownField', { field }));
 }
 
 function validateDnsExplorerCustomPeriod(period, timeRange = '24h') {
@@ -150,9 +191,9 @@ function validateDnsExplorerCustomPeriod(period, timeRange = '24h') {
   const err = validateCustomPeriod(period);
   if (err) return err;
   const span = new Date(period.to).getTime() - new Date(period.from).getTime();
-  if (!Number.isFinite(span) || span <= 0) return 'Некорректный пользовательский период';
+  if (!Number.isFinite(span) || span <= 0) return dnsExplorerT('dnsExplorer.err.invalidCustomPeriod');
   if (span > DNS_EXPLORER_MAX_RANGE_DAYS * 86400000) {
-    return `Период не может превышать ${DNS_EXPLORER_MAX_RANGE_DAYS} дней`;
+    return dnsExplorerT('period.err.maxDays', { days: DNS_EXPLORER_MAX_RANGE_DAYS });
   }
   return null;
 }
@@ -195,7 +236,7 @@ function serializeDnsExplorerFilterDsl({ timeRange, customPeriod, filters }) {
   }
   (filters || []).forEach((f, i) => {
     const logicOpt = DNS_EXPLORER_FILTER_LOGIC_OPTIONS.find((o) => o.id === normalizeDnsExplorerFilterLogic(f.logic));
-    const logicLabel = i === 0 ? '' : `${logicOpt?.label || 'И'} `;
+    const logicLabel = i === 0 ? '' : `${dnsExplorerLogicLabel(logicOpt) || dnsExplorerT('explorer.logic.and')} `;
     const quoteVal = (v) => (String(v).includes(' ') ? `"${v}"` : v);
     if (f.op === 'in') {
       const vals = (f.values || []).map(quoteVal).join(', ');
@@ -218,7 +259,7 @@ function parseDnsExplorerFilterDsl(text, schema = null) {
       lineNumbers.push(index + 1);
     }
   });
-  if (!lines.length) throw new Error('Фильтр пуст');
+  if (!lines.length) throw new Error(dnsExplorerT('dnsExplorer.err.filterEmpty'));
 
   let timeRange = '24h';
   let customPeriod = defaultCustomPeriod();
@@ -238,7 +279,9 @@ function parseDnsExplorerFilterDsl(text, schema = null) {
   };
 
   const parseError = (lineNum, message) => {
-    throw new Error(`Строка ${lineNum}: ${message}`);
+    const err = new Error(dnsExplorerT('dnsExplorer.err.parseLine', { line: lineNum, message }));
+    err.dnsExplorerParseLine = true;
+    throw err;
   };
 
   for (let index = 0; index < lines.length; index += 1) {
@@ -268,19 +311,25 @@ function parseDnsExplorerFilterDsl(text, schema = null) {
           timeRange = rangeMatch[1];
           continue;
         }
-        parseError(lineNum, `неверный формат времени: ${rawLine}`);
+        parseError(lineNum, dnsExplorerT('dnsExplorer.err.badTime', { line: rawLine }));
       }
 
       const { logic: inlineLogic, rest } = parseDnsLogicPrefix(rawLine);
       const logic = pendingLogic ?? (filters.length > 0 ? inlineLogic : 'and');
       pendingLogic = null;
 
-      const inMatch = rest.match(/^([\w_]+)\s+(in|один из)\s*\(([^)]+)\)/i);
+      const inOpPattern = allDnsOpTokenPairs()
+        .filter(({ op }) => op === 'in')
+        .map(({ token }) => token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+        .join('|');
+      const inMatch = inOpPattern
+        ? rest.match(new RegExp(`^([\\w_]+)\\s+(?:in|${inOpPattern})\\s*\\(([^)]+)\\)`, 'i'))
+        : rest.match(/^([\w_]+)\s+in\s*\(([^)]+)\)/i);
       if (inMatch) {
         pushFilter({
           field: inMatch[1],
           op: 'in',
-          values: inMatch[3].split(',').map((s) => s.trim().replace(/^"|"$/g, '')).filter(Boolean),
+          values: inMatch[2].split(',').map((s) => s.trim().replace(/^"|"$/g, '')).filter(Boolean),
           logic,
         });
         continue;
@@ -290,7 +339,7 @@ function parseDnsExplorerFilterDsl(text, schema = null) {
       const fieldLead = rest.match(/^([\w_]+)\s+(.+)$/);
       if (fieldLead) {
         const remainder = fieldLead[2].trim();
-        for (const { token, op } of DNS_OP_TOKENS) {
+        for (const { token, op } of allDnsOpTokenPairs()) {
           const opRe = new RegExp(`^${token.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&')}\\s+(.+)$`, 'i');
           const opMatch = remainder.match(opRe);
           if (opMatch) {
@@ -307,15 +356,15 @@ function parseDnsExplorerFilterDsl(text, schema = null) {
       }
       if (simpleHandled) continue;
 
-      parseError(lineNum, `не удалось разобрать строку: ${rawLine}`);
+      parseError(lineNum, dnsExplorerT('dnsExplorer.err.parseFailed', { line: rawLine }));
     } catch (err) {
-      if (/^Строка \d+:/.test(String(err.message || ''))) throw err;
-      parseError(lineNum, err.message || 'ошибка разбора');
+      if (err.dnsExplorerParseLine) throw err;
+      parseError(lineNum, err.message || dnsExplorerT('dnsExplorer.err.parseError'));
     }
   }
 
   if (pendingLogic) {
-    throw new Error('После связки условия (И, ИЛИ, И НЕ, ИЛИ НЕ) ожидается фильтр');
+    throw new Error(dnsExplorerT('dnsExplorer.err.logicWithoutFilter'));
   }
 
   const periodErr = validateDnsExplorerCustomPeriod(
@@ -370,12 +419,12 @@ function DnsDimensionPicker({ anchorRef, dimensions, selected, onPick, onClose }
   if (!menuStyle) return null;
   return ReactDOM.createPortal(
     <div ref={panelRef} style={{ ...menuStyle, background: 'var(--bg-surface)', border: '1px solid var(--bd-default)', borderRadius: 12, boxShadow: 'var(--pv-shadow-popover)', padding: 8 }}>
-      <input className="input" placeholder="Поиск измерения..." value={q} onChange={(e) => setQ(e.target.value)} autoFocus />
+      <input className="input" placeholder={dnsExplorerT('explorer.searchDimension')} value={q} onChange={(e) => setQ(e.target.value)} autoFocus />
       {items.map((d) => {
         const dis = selected.includes(d.id);
         return (
           <div key={d.id} onClick={() => !dis && onPick(d.id)} style={{ padding: '8px 10px', borderRadius: 8, cursor: dis ? 'default' : 'pointer', color: dis ? 'var(--fg-muted)' : 'var(--fg-primary)' }}>
-            {d.label}
+            {dnsExplorerSchemaLabel('field', d.id, d.label)}
           </div>
         );
       })}
@@ -386,12 +435,12 @@ function DnsDimensionPicker({ anchorRef, dimensions, selected, onPick, onClose }
 
 function DnsExplorerFilterModeToggle({ filterMode, onFilterModeChange }) {
   return (
-    <div className="seg explorer-filter-mode-toggle" role="group" aria-label="Режим фильтра">
+    <div className="seg explorer-filter-mode-toggle" role="group" aria-label={dnsExplorerT('explorer.filterModeAria')}>
       <button
         type="button"
         className={filterMode === 'graphic' ? 'is-active' : ''}
-        title="Графический режим"
-        aria-label="Графический режим"
+        title={dnsExplorerT('explorer.filterModeVisual')}
+        aria-label={dnsExplorerT('explorer.filterModeVisual')}
         aria-pressed={filterMode === 'graphic'}
         onClick={() => onFilterModeChange('graphic')}
       >
@@ -400,8 +449,8 @@ function DnsExplorerFilterModeToggle({ filterMode, onFilterModeChange }) {
       <button
         type="button"
         className={filterMode === 'text' ? 'is-active' : ''}
-        title="Текстовый режим"
-        aria-label="Текстовый режим"
+        title={dnsExplorerT('explorer.filterModeText')}
+        aria-label={dnsExplorerT('explorer.filterModeText')}
         aria-pressed={filterMode === 'text'}
         onClick={() => onFilterModeChange('text')}
       >
@@ -432,7 +481,14 @@ function DnsExplorerAddFilterMenu({ schema, onPickField }) {
   const panelRef = React.useRef(null);
   const [menuStyle, setMenuStyle] = useState(null);
   const items = useMemo(
-    () => (schema?.fields || []).filter((f) => !q || f.label.toLowerCase().includes(q.toLowerCase()) || f.id.includes(q.toLowerCase())),
+    () => (schema?.fields || []).filter((f) => {
+      if (!q) return true;
+      const needle = q.toLowerCase();
+      const localized = dnsExplorerFilterLabel(f.id, schema).toLowerCase();
+      return localized.includes(needle)
+        || String(f.label || '').toLowerCase().includes(needle)
+        || f.id.includes(needle);
+    }),
     [schema, q],
   );
 
@@ -463,13 +519,13 @@ function DnsExplorerAddFilterMenu({ schema, onPickField }) {
   return (
     <>
       <div ref={anchorRef}>
-        <Button kind="ghost" size="sm" icon="plus" onClick={() => setOpen((v) => !v)}>Условие</Button>
+        <Button kind="ghost" size="sm" icon="plus" onClick={() => setOpen((v) => !v)}>{dnsExplorerT('explorer.addCondition')}</Button>
       </div>
       {open && menuStyle && ReactDOM.createPortal(
         <div ref={panelRef} style={{ ...menuStyle, background: 'var(--bg-surface)', border: '1px solid var(--bd-default)', borderRadius: 10, boxShadow: 'var(--pv-shadow-popover)', padding: 8 }}>
-          <input className="input" placeholder="Поиск поля..." value={q} onChange={(e) => setQ(e.target.value)} autoFocus style={{ marginBottom: 6 }} />
+          <input className="input" placeholder={dnsExplorerT('explorer.searchField')} value={q} onChange={(e) => setQ(e.target.value)} autoFocus style={{ marginBottom: 6 }} />
           {items.length === 0 ? (
-            <div style={{ padding: '8px 4px', color: 'var(--fg-secondary)', font: 'var(--pv-text-body-3)' }}>Ничего не найдено</div>
+            <div style={{ padding: '8px 4px', color: 'var(--fg-secondary)', font: 'var(--pv-text-body-3)' }}>{dnsExplorerT('explorer.nothingFound')}</div>
           ) : items.map((item) => (
             <button
               key={item.id}
@@ -477,7 +533,7 @@ function DnsExplorerAddFilterMenu({ schema, onPickField }) {
               onClick={() => { onPickField(item.id); setOpen(false); setQ(''); }}
               style={{ all: 'unset', display: 'block', width: '100%', boxSizing: 'border-box', padding: '8px 10px', borderRadius: 8, cursor: 'pointer' }}
             >
-              {item.label}
+              {dnsExplorerSchemaLabel('field', item.id, item.label)}
             </button>
           ))}
         </div>,
@@ -546,8 +602,8 @@ function getDnsTextareaCaretCoordinates(textarea, pos) {
 
 function dnsLogicAutocompleteEntries() {
   return DNS_EXPLORER_FILTER_LOGIC_OPTIONS.flatMap((o) => ([
-    { token: o.label, hint: `${o.altLabel} · связка` },
-    { token: o.altLabel, hint: `${o.label} · logic` },
+    { token: dnsExplorerLogicLabel(o), hint: `${o.altLabel}${dnsExplorerT('explorer.logicLinkHint')}` },
+    { token: o.altLabel, hint: `${dnsExplorerLogicLabel(o)} · logic` },
   ]));
 }
 
@@ -591,8 +647,8 @@ function buildDnsExplorerTextSuggestions({
   );
 
   [
-    lineSuggestion('time range', 'time range 1h', 'Период'),
-    lineSuggestion('time between', 'time between "YYYY-MM-DDTHH:mm" and "YYYY-MM-DDTHH:mm"', 'Ручной диапазон'),
+    lineSuggestion('time range', 'time range 1h', dnsExplorerT('dnsExplorer.dsl.suggestPeriod')),
+    lineSuggestion('time between', 'time between "YYYY-MM-DDTHH:mm" and "YYYY-MM-DDTHH:mm"', dnsExplorerT('dnsExplorer.dsl.suggestCustomRange')),
     ...dnsLogicAutocompleteEntries().map(({ token, hint }) => lineSuggestion(token, `${token} `, hint)),
   ]
     .filter((item) => matchesNeedle(item.label, item.hint))
@@ -607,7 +663,7 @@ function buildDnsExplorerTextSuggestions({
       ))
       .slice(0, 12)
       .forEach((f) => {
-        const defaultOp = DNS_FIELD_OPS[f.id]?.[0]?.id || 'eq';
+        const defaultOp = DNS_FIELD_OP_IDS[f.id]?.[0] || 'eq';
         const display = f.label && f.label !== f.id ? f.label : null;
         suggestions.push(lineSuggestion(
           f.id,
@@ -619,9 +675,9 @@ function buildDnsExplorerTextSuggestions({
 
   if (lowerRest.startsWith('time')) {
     DNS_EXPLORER_TEXT_TIME_RANGES.forEach((range) => {
-      suggestions.push(lineSuggestion(`time range ${range}`, `time range ${range}`, 'Готовый период'));
+      suggestions.push(lineSuggestion(`time range ${range}`, `time range ${range}`, dnsExplorerT('dnsExplorer.dsl.suggestPresetPeriod')));
     });
-    suggestions.push(lineSuggestion('time between ...', 'time between "YYYY-MM-DDTHH:mm" and "YYYY-MM-DDTHH:mm"', 'Ручной диапазон'));
+    suggestions.push(lineSuggestion('time between ...', 'time between "YYYY-MM-DDTHH:mm" and "YYYY-MM-DDTHH:mm"', dnsExplorerT('dnsExplorer.dsl.suggestCustomRange')));
   }
 
   const fieldMatch = rest.match(/^([\w_]+)(?:\s+(\S+))?/);
@@ -630,11 +686,11 @@ function buildDnsExplorerTextSuggestions({
   const op = fieldMatch?.[2]?.toLowerCase();
   const meta = dnsFieldMeta(schema, field);
   if (meta && (!op || rest.trim().split(/\s+/).length <= 2)) {
-    (DNS_FIELD_OPS[field] || [{ id: 'eq' }]).forEach((candidate) => {
+    dnsFieldOpsFor(field).forEach((candidate) => {
       suggestions.push(lineSuggestion(
         `${field} ${candidate.id}`,
         `${logicPrefix}${field} ${candidate.id} `,
-        `${meta.label || field} · ${dnsExplorerOpLabel(candidate.id)}`,
+        `${dnsExplorerSchemaLabel('field', field, meta.label)} · ${candidate.label}`,
       ));
     });
   }
@@ -644,7 +700,7 @@ function buildDnsExplorerTextSuggestions({
     const resolvedOp = resolveDnsOpToken(op);
 
     if (field === 'rcode') {
-      DNS_RCODE_OPTIONS
+      dnsRcodeOptions()
         .filter((item) => String(item.value).toLowerCase().includes(fragment)
           || String(item.label).toLowerCase().includes(fragment))
         .slice(0, 8)
@@ -683,7 +739,7 @@ function buildDnsExplorerTextSuggestions({
         const insert = resolvedOp === 'in'
           ? `${logicPrefix}${field} in (${v})`
           : `${logicPrefix}${field} ${resolvedOp} ${v}`;
-        suggestions.push(lineSuggestion(String(v), insert, hint || 'Значение'));
+        suggestions.push(lineSuggestion(String(v), insert, hint || dnsExplorerT('dnsExplorer.dsl.suggestValue')));
       });
   }
 
@@ -916,7 +972,9 @@ function DnsExplorerFilterTextEditor({
         onKeyUp={updateCursor}
         onKeyDown={handleKeyDown}
         onFocus={updateCursor}
-        placeholder={'time range 24h\nquery_name contains example.com\nИ client_ip eq 10.0.0.1'}
+        placeholder={dnsExplorerT('dnsExplorer.dsl.placeholder', {
+          logic: dnsExplorerT('dnsExplorer.dsl.logicSample'),
+        })}
         spellCheck={false}
         style={{ minHeight: 180, resize: 'vertical', fontSize: 12, lineHeight: 1.45 }}
       />
@@ -926,7 +984,7 @@ function DnsExplorerFilterTextEditor({
       {showAutocompleteMenu && menuStyle && ReactDOM.createPortal(
         <div
           role="listbox"
-          aria-label="Подсказки фильтра"
+          aria-label={dnsExplorerT('explorer.filterHintsAria')}
           style={{
             ...menuStyle,
             background: 'var(--bg-surface)',
@@ -937,7 +995,7 @@ function DnsExplorerFilterTextEditor({
           }}
         >
           {suggestLoading && visibleSuggestions.length === 0 ? (
-            <div style={{ padding: '8px 10px', color: 'var(--fg-secondary)', font: 'var(--pv-text-body-3)' }}>Поиск…</div>
+            <div style={{ padding: '8px 10px', color: 'var(--fg-secondary)', font: 'var(--pv-text-body-3)' }}>{dnsExplorerT('explorer.searching')}</div>
           ) : visibleSuggestions.map((item, index) => {
             const active = index === safeActiveIndex;
             return (
@@ -988,7 +1046,7 @@ function DnsExplorerFilterTextEditor({
         document.body,
       )}
       <div style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-muted)' }}>
-        ↑↓ выбор · Tab вставка · Enter новая строка · Ctrl+Enter применить
+        {dnsExplorerT('explorer.filterHintKeys')}
       </div>
     </div>
   );
@@ -1039,7 +1097,7 @@ function DnsExplorerFilters({
       {
         id: `dns-f-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
         field,
-        op: DNS_FIELD_OPS[field]?.[0]?.id || 'eq',
+        op: DNS_FIELD_OP_IDS[field]?.[0] || 'eq',
         value: '',
         logic: 'and',
       },
@@ -1051,15 +1109,15 @@ function DnsExplorerFilters({
       <Card pad="sm" className="explorer-filters-panel">
         <div className="row" style={{ justifyContent: 'space-between', marginBottom: 12 }}>
           <div className="row" style={{ gap: 8, alignItems: 'center' }}>
-            <div style={{ font: 'var(--pv-text-h4)' }}>Фильтры</div>
+            <div style={{ font: 'var(--pv-text-h4)' }}>{dnsExplorerT('explorer.filters')}</div>
             <DnsExplorerFilterModeToggle filterMode={filterMode} onFilterModeChange={onFilterModeChange} />
           </div>
-          <button type="button" className="icon-btn" onClick={onCollapse} title="Свернуть панель"><Icon name="chevL" size={14} /></button>
+          <button type="button" className="icon-btn" onClick={onCollapse} title={dnsExplorerT('explorer.collapsePanel')}><Icon name="chevL" size={14} /></button>
         </div>
 
         {filterMode === 'graphic' ? (
           <div className="col explorer-filters-panel__body" style={{ marginBottom: 12 }}>
-            <DnsExplorerSystemFilterRow title="Период" mandatory>
+            <DnsExplorerSystemFilterRow title={dnsExplorerT('explorer.period')} mandatory>
               <TimeFilter
                 variant="explorer"
                 timeRange={timeRange}
@@ -1068,15 +1126,15 @@ function DnsExplorerFilters({
                 onCustomPeriodChange={onCustomPeriodChange}
               />
               <div style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-muted)' }}>
-                Макс. {DNS_EXPLORER_MAX_RANGE_DAYS} дней
+                {dnsExplorerT('dnsExplorer.maxDays', { days: DNS_EXPLORER_MAX_RANGE_DAYS })}
               </div>
             </DnsExplorerSystemFilterRow>
 
             <div className="explorer-panel-section">
-              <div className="explorer-panel-section__head">Условия</div>
+              <div className="explorer-panel-section__head">{dnsExplorerT('explorer.conditions')}</div>
               {!filters.length && (
                 <div className="explorer-panel-section__empty">
-                  <span>Добавьте при необходимости кнопкой «Условие»</span>
+                  <span>{dnsExplorerT('dnsExplorer.addConditionHint')}</span>
                 </div>
               )}
               {filters.map((row, i) => (
@@ -1100,9 +1158,9 @@ function DnsExplorerFilters({
             </div>
 
             <div className="explorer-filters-actions">
-              <Button kind="ghost" size="sm" icon="x" onClick={onClearFilters}>Очистить фильтры</Button>
-              <Button kind="ghost" size="sm" icon="play" onClick={onRun} disabled={isLoading}>Применить</Button>
-              <span style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-muted)' }}>Ctrl+Enter — применить</span>
+              <Button kind="ghost" size="sm" icon="x" onClick={onClearFilters}>{dnsExplorerT('explorer.clearFilters')}</Button>
+              <Button kind="ghost" size="sm" icon="play" onClick={onRun} disabled={isLoading}>{dnsExplorerT('explorer.apply')}</Button>
+              <span style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-muted)' }}>{dnsExplorerT('explorer.ctrlEnterApply')}</span>
             </div>
           </div>
         ) : (
@@ -1116,8 +1174,8 @@ function DnsExplorerFilters({
               dnsSources={dnsSources}
             />
             <div className="explorer-filters-actions">
-              <Button kind="ghost" size="sm" icon="x" onClick={onClearFilters}>Очистить фильтры</Button>
-              <Button kind="ghost" size="sm" icon="play" onClick={onRun} disabled={isLoading}>Применить</Button>
+              <Button kind="ghost" size="sm" icon="x" onClick={onClearFilters}>{dnsExplorerT('explorer.clearFilters')}</Button>
+              <Button kind="ghost" size="sm" icon="play" onClick={onRun} disabled={isLoading}>{dnsExplorerT('explorer.apply')}</Button>
             </div>
           </div>
         )}
@@ -1127,15 +1185,18 @@ function DnsExplorerFilters({
 }
 
 function dnsExplorerFilterLabel(fieldId, schema) {
-  return schema?.fields?.find((f) => f.id === fieldId)?.label || fieldId;
+  const fallback = schema?.fields?.find((f) => f.id === fieldId)?.label;
+  return dnsExplorerSchemaLabel('field', fieldId, fallback);
 }
 
 function dnsExplorerMetricLabel(metricId, schema) {
-  return schema?.metrics?.find((m) => m.id === metricId)?.label || metricId;
+  const fallback = schema?.metrics?.find((m) => m.id === metricId)?.label;
+  return dnsExplorerSchemaLabel('metric', metricId, fallback);
 }
 
 function dnsExplorerGroupLabel(groupId, schema) {
-  return schema?.groupBy?.find((g) => g.id === groupId)?.label || groupId;
+  const fallback = schema?.groupBy?.find((g) => g.id === groupId)?.label;
+  return dnsExplorerSchemaLabel('field', groupId, fallback);
 }
 
 function buildDnsExplorerPayload({
@@ -1193,7 +1254,7 @@ function DnsExplorerVisualLimitControl({ total, fetchLimit, value, onChange }) {
     <div className="explorer-visual-limit">
       <div className="explorer-visual-limit__main row">
         <span className="explorer-visual-limit__summary">
-          Загружено {total} · показано {shown}
+          {dnsExplorerT('explorer.loadedShown', { total, shown })}
         </span>
         <div className="seg explorer-visual-limit__seg">
           {instantOptions.map((opt) => (
@@ -1212,7 +1273,7 @@ function DnsExplorerVisualLimitControl({ total, fetchLimit, value, onChange }) {
               className={value === 'all' ? 'is-active' : ''}
               onClick={() => onChange('all')}
             >
-              Все
+              {dnsExplorerT('explorer.pageSizeAll')}
             </button>
           )}
         </div>
@@ -1223,18 +1284,14 @@ function DnsExplorerVisualLimitControl({ total, fetchLimit, value, onChange }) {
 
 function dnsExplorerDimDisplayValue(value, fieldId, context = {}) {
   if (fieldId === 'rcode') {
-    const n = Number(value);
-    if (n === 0) return 'Успешно';
-    if (n === 2) return 'Ошибка DNS-сервера';
-    if (n === 3) return 'Домен не найден';
-    if (Number.isFinite(n)) return 'Другой код';
+    return dnsRcodeDisplayLabel(value);
   }
   if (fieldId === 'answer_type') {
-    if (value === 'none' || value === '') return 'без записей';
+    if (value === 'none' || value === '') return dnsExplorerT('dnsExplorer.cell.noRecords');
     return value ?? '—';
   }
   if (fieldId === 'answer') {
-    if (value === '' || value == null) return 'без записей в ответе';
+    if (value === '' || value == null) return dnsExplorerT('dnsExplorer.cell.noAnswerRecords');
     const answerType = context.answerType;
     if (answerType === 'CNAME') return `${value} (CNAME)`;
     return value;
@@ -1272,10 +1329,20 @@ function formatDnsMetric(value, metric, schema) {
   const n = Number(value);
   if (!Number.isFinite(n)) return '—';
   if (dnsExplorerMetricKind(metric, schema) === 'rate') {
-    if (n >= 1e6) return `${(n / 1e6).toFixed(n >= 10e6 ? 0 : 1)} млн/с`;
-    if (n >= 1e3) return `${(n / 1e3).toFixed(n >= 10e3 ? 0 : 1)} тыс/с`;
-    if (n > 0 && n < 10 && !Number.isInteger(n)) return `${n.toFixed(1)}/с`;
-    return `${fmtNum(n)}/с`;
+    if (n >= 1e6) {
+      return dnsExplorerT('dnsExplorer.unit.perSecMillion', {
+        value: (n / 1e6).toFixed(n >= 10e6 ? 0 : 1),
+      });
+    }
+    if (n >= 1e3) {
+      return dnsExplorerT('dnsExplorer.unit.perSecThousand', {
+        value: (n / 1e3).toFixed(n >= 10e3 ? 0 : 1),
+      });
+    }
+    if (n > 0 && n < 10 && !Number.isInteger(n)) {
+      return dnsExplorerT('dnsExplorer.unit.perSec', { value: n.toFixed(1) });
+    }
+    return dnsExplorerT('dnsExplorer.unit.perSec', { value: fmtNum(n) });
   }
   return fmtNum(n);
 }
@@ -1298,7 +1365,7 @@ function dnsMetricAxisUnit(metric, schema) {
 function dnsExplorerTableMetricTitle(metricId, schema) {
   const label = dnsExplorerMetricLabel(metricId, schema);
   if (dnsExplorerMetricKind(metricId, schema) === 'rate') {
-    return `${label} (ср.)`;
+    return dnsExplorerT('dnsExplorer.table.metricAvg', { label });
   }
   return label;
 }
@@ -1308,11 +1375,11 @@ function DnsExplorerChartToggleButton({ onChart, onClick }) {
     <button
       type="button"
       className={`badge explorer-row-actions__btn${onChart ? ' badge--info' : ''}`}
-      title={onChart ? 'Скрыть серию с графика динамики' : 'Показать серию на графике динамики'}
+      title={onChart ? dnsExplorerT('explorer.hideFromChart') : dnsExplorerT('explorer.showOnChart')}
       onClick={onClick}
     >
-      <span className="explorer-row-actions__label explorer-row-actions__label--full">{onChart ? 'Скрыть с графика' : 'Показать'}</span>
-      <span className="explorer-row-actions__label explorer-row-actions__label--short">{onChart ? 'Скрыть' : 'Показать'}</span>
+      <span className="explorer-row-actions__label explorer-row-actions__label--full">{onChart ? dnsExplorerT('explorer.hideFromChartShort') : dnsExplorerT('explorer.showShort')}</span>
+      <span className="explorer-row-actions__label explorer-row-actions__label--short">{onChart ? dnsExplorerT('explorer.hideShort') : dnsExplorerT('explorer.showShort')}</span>
     </button>
   );
 }
@@ -1344,7 +1411,7 @@ function DnsExplorerTotalChart({
   if (chartPoints.length < 2) {
     return (
       <div className="explorer-lines__empty">
-        Недостаточно временных точек для динамики. Расширьте период или выберите другую метрику.
+        {dnsExplorerT('explorer.chart.notEnoughPoints')}
       </div>
     );
   }
@@ -1366,7 +1433,7 @@ function DnsExplorerTotalChart({
         />
       </div>
       <div style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-muted)' }}>
-        Ось Y — {metricLabel || metric} по всем DNS-событиям, соответствующим условиям, в каждом временном интервале.
+        {dnsExplorerT('dnsExplorer.chart.yTotalDns', { metric: metricLabel || metric })}
       </div>
     </div>
   );
@@ -1430,8 +1497,8 @@ function DnsExplorerDynamicsChart({
     <div className="explorer-lines col" style={{ gap: 12 }}>
       <div style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-muted)' }}>
         {selectedIds.length
-          ? `На графике ${selectedIds.length} серий. Управляйте сериями кнопками «Показать» / «Скрыть с графика» в таблице.`
-          : 'Нет серий на графике. Включите строки кнопкой «Показать» в таблице «Результаты».'}
+          ? dnsExplorerT('explorer.chart.seriesCount', { n: selectedIds.length })
+          : dnsExplorerT('explorer.chart.noSeries')}
       </div>
       {chartPoints.length > 1 && lines.length ? (
         <>
@@ -1451,14 +1518,14 @@ function DnsExplorerDynamicsChart({
             />
           </div>
           <div style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-muted)', marginTop: -4 }}>
-            Ось Y — {metricLabel || metric} в каждом временном интервале. В таблице — среднее за период.
+            {dnsExplorerT('dnsExplorer.chart.yPerBucketDns', { metric: metricLabel || metric })}
           </div>
         </>
       ) : (
         <div className="explorer-lines__empty">
           {selectedIds.length
-            ? 'Недостаточно временных точек для динамики. Расширьте период или выберите другую метрику.'
-            : 'Включите серии в таблице «Результаты», чтобы добавить их на график.'}
+            ? dnsExplorerT('explorer.chart.notEnoughPoints')
+            : dnsExplorerT('explorer.chart.enableSeries')}
         </div>
       )}
     </div>
@@ -1474,7 +1541,7 @@ function DnsExplorerFilterRow({
   onRemove,
   dnsSources,
 }) {
-  const ops = DNS_FIELD_OPS[row.field] || [{ id: 'eq', label: 'равно' }];
+  const ops = dnsFieldOpsFor(row.field);
   const [suggestions, setSuggestions] = useState([]);
   const [qtypes, setQtypes] = useState([]);
 
@@ -1520,7 +1587,7 @@ function DnsExplorerFilterRow({
               values: [...e.target.selectedOptions].map((o) => o.value),
             })}
           >
-            {DNS_RCODE_OPTIONS.map((o) => (
+            {dnsRcodeOptions().map((o) => (
               <option key={o.value} value={o.value}>{o.label}</option>
             ))}
           </select>
@@ -1528,8 +1595,8 @@ function DnsExplorerFilterRow({
       }
       return (
         <select className="input" value={row.value || ''} onChange={(e) => onChange({ value: e.target.value })}>
-          <option value="">Выберите…</option>
-          {DNS_RCODE_OPTIONS.map((o) => (
+          <option value="">{dnsExplorerT('dnsExplorer.pickPlaceholder')}</option>
+          {dnsRcodeOptions().map((o) => (
             <option key={o.value} value={o.value}>{o.label}</option>
           ))}
         </select>
@@ -1573,7 +1640,7 @@ function DnsExplorerFilterRow({
           className="input"
           value={row.value || ''}
           onChange={(e) => onChange({ value: e.target.value })}
-          placeholder="Значение"
+          placeholder={dnsExplorerT('explorer.value')}
           list={`dns-explorer-suggest-${row.id}`}
         />
         {suggestions.length > 0 && (
@@ -1595,10 +1662,10 @@ function DnsExplorerFilterRow({
             className="input explorer-filter-row__logic"
             value={normalizeDnsExplorerFilterLogic(row.logic)}
             onChange={(e) => onChange({ logic: e.target.value })}
-            title="Связь с предыдущим условием"
+            title={dnsExplorerT('dnsExplorer.logicLinkWithPrevious')}
           >
             {DNS_EXPLORER_FILTER_LOGIC_OPTIONS.map((opt) => (
-              <option key={opt.id} value={opt.id}>{opt.label}</option>
+              <option key={opt.id} value={opt.id}>{dnsExplorerLogicLabel(opt)}</option>
             ))}
           </select>
         ) : (
@@ -1610,14 +1677,14 @@ function DnsExplorerFilterRow({
             value={row.field}
             onChange={(e) => onChange({
               field: e.target.value,
-              op: DNS_FIELD_OPS[e.target.value]?.[0]?.id || 'eq',
+              op: DNS_FIELD_OP_IDS[e.target.value]?.[0] || 'eq',
               value: '',
               values: undefined,
               logic: row.logic || 'and',
             })}
           >
             {(schema?.fields || []).map((f) => (
-              <option key={f.id} value={f.id}>{f.label}</option>
+              <option key={f.id} value={f.id}>{dnsExplorerFilterLabel(f.id, schema)}</option>
             ))}
           </select>
         </div>
@@ -1629,7 +1696,7 @@ function DnsExplorerFilterRow({
         <div className="explorer-filter-row__value">
           {renderValueInput()}
         </div>
-        <button type="button" className="icon-btn explorer-filter-row__remove" title="Удалить условие" onClick={onRemove}>
+        <button type="button" className="icon-btn explorer-filter-row__remove" title={dnsExplorerT('dnsExplorer.removeCondition')} onClick={onRemove}>
           <Icon name="x" size={10} stroke={2.5} />
         </button>
       </div>
@@ -1680,6 +1747,7 @@ function formatDnsSnapshotTimestamp(value, displayTimezone) {
 }
 
 function PageDnsExplorer({ onNavigate, displayTimezone }) {
+  const i18nLocale = GrapesI18n.getLocale();
   const urlGlobals = useMemo(() => applyDnsExplorerUrlGlobals(parseAppHash().params), []);
   const urlState = useMemo(() => readDnsExplorerPageParamsFromHash?.() || null, []);
   const urlSnapshotToken = urlState?.snapshot || null;
@@ -1739,7 +1807,7 @@ function PageDnsExplorer({ onNavigate, displayTimezone }) {
       if (cancelled) return;
       if (!result.ok) {
         setSource('error');
-        setError(result.message || ApiClient.LOAD_FAILED);
+        setError(dnsExplorerLoadFailedMessage(result.message));
         return;
       }
       hydrateDnsFromSharedSnapshot(result, {
@@ -1768,7 +1836,7 @@ function PageDnsExplorer({ onNavigate, displayTimezone }) {
     }).catch((err) => {
       if (cancelled) return;
       setSource('error');
-      setError(err.message || ApiClient.LOAD_FAILED);
+      setError(dnsExplorerLoadFailedMessage(err.message));
     });
     return () => { cancelled = true; };
   }, []);
@@ -1789,8 +1857,11 @@ function PageDnsExplorer({ onNavigate, displayTimezone }) {
   }, [filterMode]);
 
   const groupDimensions = useMemo(
-    () => (schema?.groupBy || []).map((g) => ({ id: g.id, label: g.label })),
-    [schema],
+    () => (schema?.groupBy || []).map((g) => ({
+      id: g.id,
+      label: dnsExplorerGroupLabel(g.id, schema),
+    })),
+    [schema, i18nLocale],
   );
 
   const applyParsedTextToDraft = (text) => {
@@ -1810,7 +1881,7 @@ function PageDnsExplorer({ onNavigate, displayTimezone }) {
           applyParsedTextToDraft(filterText);
         } catch (err) {
           setFilterTextError(err.message);
-          pushToast?.({ kind: 'error', title: 'Ошибка фильтра', desc: err.message });
+          pushToast?.({ kind: 'error', title: dnsExplorerT('explorer.filterError'), desc: err.message });
           return;
         }
       } else {
@@ -1859,7 +1930,7 @@ function PageDnsExplorer({ onNavigate, displayTimezone }) {
         nextCustomPeriod = parsed.customPeriod;
       } catch (err) {
         setFilterTextError(err.message);
-        pushToast?.({ kind: 'error', title: 'Ошибка фильтра', desc: err.message });
+        pushToast?.({ kind: 'error', title: dnsExplorerT('explorer.filterError'), desc: err.message });
         return;
       }
     }
@@ -1885,7 +1956,7 @@ function PageDnsExplorer({ onNavigate, displayTimezone }) {
     const result = await ApiClient.runDnsExplorerQuery(payload);
     if (!result.ok) {
       setSource('error');
-      setError(result.message || ApiClient.LOAD_FAILED);
+      setError(dnsExplorerLoadFailedMessage(result.message));
       setRows([]);
       setTimeseries([]);
       setResultSeries(null);
@@ -1988,11 +2059,11 @@ function PageDnsExplorer({ onNavigate, displayTimezone }) {
             <button
               type="button"
               className="badge explorer-row-actions__btn"
-              title="Показать ответы для этого домена"
+              title={dnsExplorerT('dnsExplorer.showAnswersTitle')}
               onClick={() => showAnswersForDomain(row.values?.[domainIdx])}
             >
-              <span className="explorer-row-actions__label explorer-row-actions__label--full">Показать ответы</span>
-              <span className="explorer-row-actions__label explorer-row-actions__label--short">Ответы</span>
+              <span className="explorer-row-actions__label explorer-row-actions__label--full">{dnsExplorerT('dnsExplorer.showAnswers')}</span>
+              <span className="explorer-row-actions__label explorer-row-actions__label--short">{dnsExplorerT('dnsExplorer.showAnswersShort')}</span>
             </button>
           )}
           <DnsExplorerChartToggleButton
@@ -2003,7 +2074,7 @@ function PageDnsExplorer({ onNavigate, displayTimezone }) {
       ),
     });
     return cols;
-  }, [appliedSnapshot, schema, chartSeriesIds, filters, filterMode, metric, groupBy, timeRange, customPeriod, collectorFilter]);
+  }, [appliedSnapshot, schema, chartSeriesIds, filters, filterMode, metric, groupBy, timeRange, customPeriod, collectorFilter, i18nLocale]);
 
   const appliedGroupBy = appliedSnapshot?.groupBy || [];
   const hasAppliedAnswerGrouping = hasDnsAnswerGrouping(appliedGroupBy);
@@ -2026,15 +2097,15 @@ function PageDnsExplorer({ onNavigate, displayTimezone }) {
     });
     try {
       await copyTextToClipboard(url);
-      pushToast?.({ kind: 'success', title: 'Ссылка скопирована', desc: 'URL содержит параметры фильтра.' });
+      pushToast?.({ kind: 'success', title: dnsExplorerT('explorer.linkCopied'), desc: dnsExplorerT('explorer.linkCopiedFilterDesc') });
     } catch (err) {
-      pushToast?.({ kind: 'error', title: 'Не удалось скопировать', desc: err.message });
+      pushToast?.({ kind: 'error', title: dnsExplorerT('explorer.copyFailed'), desc: err.message });
     }
   };
 
   const copyResultsShareUrl = async () => {
     if (!snapshotId) {
-      pushToast?.({ kind: 'error', title: 'Нет данных для шаринга', desc: 'Сначала выполните запрос.' });
+      pushToast?.({ kind: 'error', title: dnsExplorerT('explorer.noShareData'), desc: dnsExplorerT('explorer.noShareDataDesc') });
       return;
     }
     setSharing(true);
@@ -2049,11 +2120,13 @@ function PageDnsExplorer({ onNavigate, displayTimezone }) {
       }));
       pushToast?.({
         kind: 'success',
-        title: 'Ссылка скопирована',
-        desc: `Сохранённые результаты доступны до ${formatDnsSnapshotTimestamp(data.expiresAt, displayTimezone)}.`,
+        title: dnsExplorerT('explorer.linkCopied'),
+        desc: dnsExplorerT('explorer.shareResultsDesc', {
+          time: formatDnsSnapshotTimestamp(data.expiresAt, displayTimezone),
+        }),
       });
     } catch (err) {
-      pushToast?.({ kind: 'error', title: 'Не удалось создать ссылку', desc: err.message });
+      pushToast?.({ kind: 'error', title: dnsExplorerT('explorer.linkCreateFailed'), desc: err.message });
     } finally {
       setSharing(false);
     }
@@ -2084,14 +2157,14 @@ function PageDnsExplorer({ onNavigate, displayTimezone }) {
       URL.revokeObjectURL(url);
       pushToast?.({
         kind: 'success',
-        title: 'CSV экспортирован',
-        desc: 'Файл сохранён на ваш компьютер.',
+        title: dnsExplorerT('explorer.csvExported'),
+        desc: dnsExplorerT('dnsExplorer.csvSavedDesc'),
       });
     } catch (err) {
       pushToast?.({
         kind: 'error',
-        title: 'Не удалось экспортировать CSV',
-        desc: err.message || ApiClient.LOAD_FAILED,
+        title: dnsExplorerT('dnsExplorer.exportCsvFailed'),
+        desc: dnsExplorerLoadFailedMessage(err.message),
       });
     } finally {
       setExporting(false);
@@ -2102,16 +2175,16 @@ function PageDnsExplorer({ onNavigate, displayTimezone }) {
     <div className="main__container dns-explorer-page">
       <div className="page-head">
         <div>
-          <h1>Разбор DNS</h1>
-          <p>Исследование DNS-запросов по условиям · {timeRangeLabel(timeRange, customPeriod)}</p>
+          <h1>{dnsExplorerT('dnsExplorer.title')}</h1>
+          <p>{dnsExplorerT('dnsExplorer.subtitle')} · {timeRangeLabel(timeRange, customPeriod)}</p>
         </div>
         <div className="row" style={{ gap: 8 }}>
-          <Button kind="ghost" size="sm" onClick={() => onNavigate?.('dns')}>Вернуться в обзор DNS</Button>
-          <Button kind="ghost" size="sm" icon="link" onClick={copyFilterShareUrl}>Поделиться фильтрами</Button>
+          <Button kind="ghost" size="sm" onClick={() => onNavigate?.('dns')}>{dnsExplorerT('dnsExplorer.backToDnsOverview')}</Button>
+          <Button kind="ghost" size="sm" icon="link" onClick={copyFilterShareUrl}>{dnsExplorerT('explorer.shareFilters')}</Button>
           {hasAppliedQuery && (
             <>
               <Button kind="ghost" size="sm" icon="export" onClick={exportCsv} disabled={exporting}>
-                {exporting ? 'Экспорт…' : 'CSV'}
+                {exporting ? dnsExplorerT('explorer.exportBusy') : 'CSV'}
               </Button>
               <Button
                 kind="ghost"
@@ -2120,7 +2193,7 @@ function PageDnsExplorer({ onNavigate, displayTimezone }) {
                 onClick={copyResultsShareUrl}
                 disabled={!snapshotId || sharing}
               >
-                {sharing ? 'Ссылка…' : 'Поделиться результатами'}
+                {sharing ? dnsExplorerT('explorer.shareResultsBusy') : dnsExplorerT('explorer.shareResults')}
               </Button>
             </>
           )}
@@ -2142,9 +2215,9 @@ function PageDnsExplorer({ onNavigate, displayTimezone }) {
           }}
         >
           <div style={{ flex: 1, minWidth: 220, font: 'var(--pv-text-body-3)' }}>
-            Просмотр сохранённого снимка результатов
-            {shareMeta?.createdAt ? ` · создан ${formatDnsSnapshotTimestamp(shareMeta.createdAt, displayTimezone)}` : ''}
-            {shareMeta?.expiresAt ? ` · доступен до ${formatDnsSnapshotTimestamp(shareMeta.expiresAt, displayTimezone)}` : ''}
+            {dnsExplorerT('explorer.snapshotBanner')}
+            {shareMeta?.createdAt ? dnsExplorerT('explorer.snapshotCreated', { time: formatDnsSnapshotTimestamp(shareMeta.createdAt, displayTimezone) }) : ''}
+            {shareMeta?.expiresAt ? dnsExplorerT('explorer.snapshotExpires', { time: formatDnsSnapshotTimestamp(shareMeta.expiresAt, displayTimezone) }) : ''}
           </div>
         </div>
       )}
@@ -2154,31 +2227,31 @@ function PageDnsExplorer({ onNavigate, displayTimezone }) {
           <div className="row" style={{ gap: 14, flexWrap: 'wrap' }}>
             {!filterPanel && (
               <Button kind="ghost" size="sm" icon="filter" onClick={openFilterPanel}>
-                Фильтры
+                {dnsExplorerT('explorer.filters')}
                 {filters.length > 0 && <span className="nav-item__badge" style={{ marginLeft: 4 }}>{filters.length}</span>}
               </Button>
             )}
-            <BuilderControl label="Метрика">
+            <BuilderControl label={dnsExplorerT('explorer.metric')}>
               <select
                 className="input"
                 style={{ width: 'auto', minWidth: 140 }}
                 value={metric}
                 onChange={(e) => setMetric(e.target.value)}
-                title={hasDnsAnswerGrouping(groupBy) ? 'Метрики по запросам недоступны при группировке по ответу' : undefined}
+                title={hasDnsAnswerGrouping(groupBy) ? dnsExplorerT('dnsExplorer.metricQueryDisabledGroup') : undefined}
               >
                 {(schema?.metrics || []).map((m) => (
                   <option
                     key={m.id}
                     value={m.id}
                     disabled={isDnsQueryMetricDisabled(m.id, groupBy)}
-                    title={isDnsQueryMetricDisabled(m.id, groupBy) ? 'Метрика считает запросы, а у запроса нет ответа' : undefined}
+                    title={isDnsQueryMetricDisabled(m.id, groupBy) ? dnsExplorerT('dnsExplorer.metricQueryDisabledNoAnswer') : undefined}
                   >
-                    {m.label}
+                    {dnsExplorerMetricLabel(m.id, schema)}
                   </option>
                 ))}
               </select>
             </BuilderControl>
-            <BuilderControl label="Группировка">
+            <BuilderControl label={dnsExplorerT('dnsExplorer.grouping')}>
               <div className="row" style={{ gap: 6, flexWrap: 'wrap' }}>
                 {groupBy.map((id) => (
                   <span key={id} className="badge badge--info" style={{ padding: '4px 10px 4px 8px', gap: 6, fontSize: 12 }}>
@@ -2189,7 +2262,7 @@ function PageDnsExplorer({ onNavigate, displayTimezone }) {
                   </span>
                 ))}
                 <div ref={dimAnchorRef}>
-                  <Button kind="ghost" size="xs" icon="plus" onClick={() => setAddingDim((v) => !v)}>Измерение</Button>
+                  <Button kind="ghost" size="xs" icon="plus" onClick={() => setAddingDim((v) => !v)}>{dnsExplorerT('dnsExplorer.dimension')}</Button>
                   {addingDim && (
                     <DnsDimensionPicker
                       anchorRef={dimAnchorRef}
@@ -2212,7 +2285,7 @@ function PageDnsExplorer({ onNavigate, displayTimezone }) {
           </div>
           {hasDnsAnswerGrouping(groupBy) && (
             <div style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-muted)', marginTop: 10 }}>
-              В ответах учитываются только записи A, AAAA и CNAME. MX, TXT, NS и другие типы коллектор не сохраняет.
+              {dnsExplorerT('dnsExplorer.answerTypesHint')}
             </div>
           )}
         </Card>
@@ -2243,18 +2316,18 @@ function PageDnsExplorer({ onNavigate, displayTimezone }) {
 
       {source === 'loading' ? (
         <Card pad="sm">
-          <div className="explorer-refreshing-data">Получение данных</div>
+          <div className="explorer-refreshing-data">{dnsExplorerT('dnsExplorer.fetchingData')}</div>
         </Card>
       ) : !hasAppliedQuery ? (
         <Card pad="sm">
-          <div className="other-ports-table__state">Задайте условия и нажмите «Применить».</div>
+          <div className="other-ports-table__state">{dnsExplorerT('dnsExplorer.idleHint')}</div>
         </Card>
       ) : source === 'error' ? (
         <Card pad="sm"><div className="other-ports-table__state" style={{ color: 'var(--st-critical)' }}>{error}</div></Card>
       ) : (
         appliedGroupBy.length === 0 ? (
           <Card
-            title={`Динамика · ${appliedMetricLabel}`}
+            title={dnsExplorerT('explorer.dynamicsTitle', { metric: appliedMetricLabel })}
             subtitle={`${timeRangeLabel(appliedSnapshot?.timeRange, appliedSnapshot?.customPeriod)} · ${meta?.dataTable || 'dns_log'}`}
             loadMs={loadMs}
             serverMs={serverMs}
@@ -2272,8 +2345,8 @@ function PageDnsExplorer({ onNavigate, displayTimezone }) {
         ) : (
           <Card
             className="card--explorer-results dns-explorer-results"
-            title="Результаты"
-            subtitle="График динамики и таблица: серии по селектору «Показать», отдельные строки — «Показать» / «Скрыть с графика»"
+            title={dnsExplorerT('explorer.resultsTitle')}
+            subtitle={dnsExplorerT('explorer.resultsSubDefault')}
             loadMs={loadMs}
             serverMs={serverMs}
             pad="0"
@@ -2320,10 +2393,12 @@ function PageDnsExplorer({ onNavigate, displayTimezone }) {
                 columns={tableColumns}
                 footerNote={(
                   <span>
-                    Показано {visibleResults.length} из {rows.length} загруженных · {meta?.dataTable || 'dns_log'}
-                    {hasAppliedAnswerGrouping && (
-                      <> · Один ответ может содержать несколько записей, поэтому сумма по строкам больше общего числа ответов</>
-                    )}
+                    {dnsExplorerT('dnsExplorer.footerShown', {
+                      shown: visibleResults.length,
+                      loaded: rows.length,
+                      table: meta?.dataTable || 'dns_log',
+                    })}
+                    {hasAppliedAnswerGrouping && dnsExplorerT('dnsExplorer.footer.multiRecordNote')}
                   </span>
                 )}
               />
