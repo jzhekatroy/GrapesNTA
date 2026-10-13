@@ -1,12 +1,36 @@
 /* Топ ASN — анализ src / dst / pair по автономным системам */
 
-const TOP_DIRECTIONS = [
-  { id: 'src', label: 'Источники', icon: 'arrowU' },
-  { id: 'dst', label: 'Назначения', icon: 'arrowD' },
-  { id: 'pair', label: 'Пары src → dst', icon: 'flow' },
-];
+function topAsnT(key, params) {
+  return GrapesI18n.t(key, params);
+}
 
-const TOP_LOAD_FAILED = 'Не удалось загрузить';
+const TOP_TALKERS_PAGE_METRIC_IDS = ['bps', 'volume', 'pps', 'fps'];
+
+function getTopTalkersPageDirections() {
+  return [
+    { id: 'src', label: topAsnT('dashboard.talkers.src'), icon: 'arrowU' },
+    { id: 'dst', label: topAsnT('dashboard.talkers.dst'), icon: 'arrowD' },
+    { id: 'pair', label: topAsnT('topAsn.direction.pairLong'), icon: 'flow' },
+  ];
+}
+
+function getTopTalkersPageMetrics() {
+  return TOP_TALKERS_PAGE_METRIC_IDS.map((id) => ({
+    id,
+    label: topAsnT(`topAsn.metric.${id}`),
+  }));
+}
+
+function topAsnMetricLabel(metricId) {
+  const hit = getTopTalkersPageMetrics().find((m) => m.id === metricId);
+  return hit?.label || metricId;
+}
+
+function topAsnDirectionLabel(directionId) {
+  const hit = getTopTalkersPageDirections().find((d) => d.id === directionId);
+  return hit?.label || directionId;
+}
+
 const TOP_TALKERS_PAGE_SIZE = 25;
 
 function PageTop({ onNavigate, timeRange, customPeriod, directions, collectorFilter }) {
@@ -34,8 +58,11 @@ function PageTop({ onNavigate, timeRange, customPeriod, directions, collectorFil
   const collectorFilterKey = (collectorFilter || []).join('|');
   const isPair = direction === 'pair';
   const hasData = source === 'clickhouse';
-  const metricLabel = METRICS.find((m) => m.id === metric)?.label || metric;
-  const directionLabel = TOP_DIRECTIONS.find((d) => d.id === direction)?.label || direction;
+  const metricLabel = topAsnMetricLabel(metric);
+  const directionLabel = topAsnDirectionLabel(direction);
+  const pageDirections = getTopTalkersPageDirections();
+  const pageMetrics = getTopTalkersPageMetrics();
+  const queryTimeLabel = fmtTalkerLoadMs(loadMs, serverMs);
 
   useEffect(() => {
     setExpandedKey(null);
@@ -181,9 +208,17 @@ function PageTop({ onNavigate, timeRange, customPeriod, directions, collectorFil
     try {
       await copyTextToClipboard(url);
       history.replaceState(null, '', url);
-      pushToast({ kind: 'success', title: 'Ссылка скопирована', desc: 'URL содержит текущие параметры страницы.' });
+      pushToast({
+        kind: 'success',
+        title: topAsnT('topAsn.linkCopied'),
+        desc: topAsnT('topAsn.linkCopiedDesc'),
+      });
     } catch (err) {
-      pushToast({ kind: 'error', title: 'Не удалось скопировать', desc: err.message });
+      pushToast({
+        kind: 'error',
+        title: topAsnT('explorer.copyFailed'),
+        desc: err.message,
+      });
     }
   };
 
@@ -196,37 +231,41 @@ function PageTop({ onNavigate, timeRange, customPeriod, directions, collectorFil
       metricLabel,
       totalMetric,
     });
-    pushToast({ kind: 'success', title: 'CSV экспортирован', desc: `${filtered.length} строк.` });
+    pushToast({
+      kind: 'success',
+      title: topAsnT('topAsn.csvExported'),
+      desc: topAsnT('topAsn.csvExportedDesc', { n: filtered.length }),
+    });
   };
 
   return (
     <div className="main__container page-top-talkers">
       <div className="page-head">
         <div>
-          <h1>Топ ASN</h1>
+          <h1>{topAsnT('dashboard.topAsn')}</h1>
           <p>{periodLabel} · {directionFilterLabel}</p>
         </div>
         <div className="row page-head__actions">
-          <Button kind="ghost" icon="copy" onClick={copyShareLink}>Поделиться</Button>
-          <Button kind="ghost" icon="export" onClick={exportCsv} disabled={!filtered.length || source === 'loading'}>Экспорт</Button>
-          <Button kind="primary" icon="explorer" onClick={() => onNavigate('explorer')}>Открыть в разборе трафика</Button>
+          <Button kind="ghost" icon="copy" onClick={copyShareLink}>{topAsnT('topAsn.share')}</Button>
+          <Button kind="ghost" icon="export" onClick={exportCsv} disabled={!filtered.length || source === 'loading'}>{topAsnT('topAsn.export')}</Button>
+          <Button kind="primary" icon="explorer" onClick={() => onNavigate('explorer')}>{topAsnT('topAsn.openInExplorer')}</Button>
         </div>
       </div>
 
       <Card pad="sm" className="top-talkers-filters-card" style={{ marginBottom: 16 }}>
         <div className="row top-talkers-filters">
-          <BuilderControl label="Направление">
+          <BuilderControl label={topAsnT('topAsn.filter.direction')}>
             <div className="seg">
-              {TOP_DIRECTIONS.map((d) => (
+              {pageDirections.map((d) => (
                 <button key={d.id} className={direction === d.id ? 'is-active' : ''} onClick={() => setDirection(d.id)}>
                   <Icon name={d.icon} size={11} /> {d.label}
                 </button>
               ))}
             </div>
           </BuilderControl>
-          <BuilderControl label="Метрика">
+          <BuilderControl label={topAsnT('topAsn.filter.metric')}>
             <div className="seg">
-              {METRICS.slice(0, 4).map((m) => (
+              {pageMetrics.map((m) => (
                 <button key={m.id} className={metric === m.id ? 'is-active' : ''} onClick={() => setMetric(m.id)}>{m.label}</button>
               ))}
             </div>
@@ -236,19 +275,19 @@ function PageTop({ onNavigate, timeRange, customPeriod, directions, collectorFil
 
       <div className="top-talkers-panels">
         <Card
-          title={`${directionLabel} — ${metricLabel}`}
-          subtitle={`Топ ${TOP_TALKERS_PAGE_SIZE}+ · ${periodLabel}`}
+          title={topAsnT('topAsn.chart.title', { direction: directionLabel, metric: metricLabel })}
+          subtitle={topAsnT('topAsn.chart.subtitle', { n: TOP_TALKERS_PAGE_SIZE, period: periodLabel })}
           loadMs={loadMs}
           serverMs={serverMs}
         >
           {source === 'loading' && (
-            <div className="talker-table-state">Загрузка…</div>
+            <div className="talker-table-state">{topAsnT('dashboard.loading')}</div>
           )}
           {source === 'error' && (
-            <div className="talker-table-state">{TOP_LOAD_FAILED}</div>
+            <div className="talker-table-state">{topAsnT('dashboard.loadFailed')}</div>
           )}
           {hasData && filtered.length === 0 && (
-            <div className="talker-table-state">Нет данных за выбранный период</div>
+            <div className="talker-table-state">{topAsnT('dashboard.noDataPeriod')}</div>
           )}
           {hasData && filtered.length > 0 && (
             <div className="col" style={{ gap: 10, maxHeight: 540, overflowY: 'auto', paddingRight: 4 }}>
@@ -266,22 +305,25 @@ function PageTop({ onNavigate, timeRange, customPeriod, directions, collectorFil
           )}
         </Card>
 
-        <Card title="Период и источник" subtitle={periodLabel}>
+        <Card title={topAsnT('topAsn.info.title')} subtitle={periodLabel}>
           <div className="col" style={{ gap: 12 }}>
-            <TopInfoRow label="Период" value={periodLabel} />
-            <TopInfoRow label="Фильтр направлений" value={directionFilterLabel} />
-            <TopInfoRow label="Группировка" value={directionLabel} />
-            <TopInfoRow label="Гранулярность" value={meta?.granularity || '—'} />
-            <TopInfoRow label="Источник данных" value={talkerSourceLabel(source)} />
-            <TopInfoRow label="Запрос" value={fmtTalkerLoadMs(loadMs, serverMs)} />
+            <TopInfoRow label={topAsnT('dashboard.talkers.period')} value={periodLabel} />
+            <TopInfoRow label={topAsnT('topAsn.info.directionsFilter')} value={directionFilterLabel} />
+            <TopInfoRow label={topAsnT('topAsn.info.grouping')} value={directionLabel} />
+            <TopInfoRow label={topAsnT('topAsn.info.granularity')} value={meta?.granularity || '—'} />
+            <TopInfoRow label={topAsnT('topAsn.info.dataSource')} value={talkerSourceLabel(source)} />
+            <TopInfoRow label={topAsnT('topAsn.info.query')} value={queryTimeLabel} />
           </div>
         </Card>
       </div>
 
       <Card
         className="card--top-talkers card--top-talkers-full"
-        title="Полная таблица"
-        subtitle={`${directionLabel} · Объём`}
+        title={topAsnT('topAsn.table.full')}
+        subtitle={topAsnT('topAsn.table.subtitle', {
+          direction: directionLabel,
+          volume: topAsnT('dashboard.talkers.volume'),
+        })}
         pad="0"
         loadMs={loadMs}
         serverMs={serverMs}
@@ -290,7 +332,7 @@ function PageTop({ onNavigate, timeRange, customPeriod, directions, collectorFil
             <Icon name="search" size={14} />
             <input
               className="input input--with-icon"
-              placeholder="Найти в топе..."
+              placeholder={topAsnT('topAsn.searchPlaceholder')}
               value={search}
               onChange={(e) => setSearch(e.target.value)}
             />
@@ -302,26 +344,26 @@ function PageTop({ onNavigate, timeRange, customPeriod, directions, collectorFil
           <thead>
             <tr>
               <th className="talker-col-rank">#</th>
-              <th className="talker-col-endpoint">{isPair ? 'Пара ASN' : 'ASN'}</th>
-              <th className={`talker-row__geo talker-col-geo${isPair ? ' talker-row__geo--pair' : ''}`}>Страна</th>
-              <th className="num talker-col-volume">Объём</th>
-              <th className="num talker-col-share">Доля</th>
+              <th className="talker-col-endpoint">{isPair ? topAsnT('dashboard.talkers.asnPair') : topAsnT('dashboard.talkers.asn')}</th>
+              <th className={`talker-row__geo talker-col-geo${isPair ? ' talker-row__geo--pair' : ''}`}>{topAsnT('dashboard.talkers.country')}</th>
+              <th className="num talker-col-volume">{topAsnT('dashboard.talkers.volume')}</th>
+              <th className="num talker-col-share">{topAsnT('topAsn.col.share')}</th>
             </tr>
           </thead>
           <tbody>
             {source === 'loading' && (
               <tr>
-                <td colSpan={colSpan} className="talker-table-state">Загрузка…</td>
+                <td colSpan={colSpan} className="talker-table-state">{topAsnT('dashboard.loading')}</td>
               </tr>
             )}
             {source === 'error' && (
               <tr>
-                <td colSpan={colSpan} className="talker-table-state">{TOP_LOAD_FAILED}</td>
+                <td colSpan={colSpan} className="talker-table-state">{topAsnT('dashboard.loadFailed')}</td>
               </tr>
             )}
             {hasData && filtered.length === 0 && (
               <tr>
-                <td colSpan={colSpan} className="talker-table-state">Нет данных за выбранный период</td>
+                <td colSpan={colSpan} className="talker-table-state">{topAsnT('dashboard.noDataPeriod')}</td>
               </tr>
             )}
             {hasData && filtered.map((row, i) => {
@@ -403,17 +445,20 @@ function PageTop({ onNavigate, timeRange, customPeriod, directions, collectorFil
         </div>
         {hasMore && hasData && (
           <div ref={loadMoreSentinelRef} className="talker-table-state" style={{ padding: '12px 16px' }}>
-            {loadingMore ? 'Загрузка…' : 'Прокрутите для подгрузки'}
+            {loadingMore ? topAsnT('dashboard.loading') : topAsnT('topAsn.scrollToLoad')}
           </div>
         )}
         <div className="table-foot">
           <div className="table-foot__row">
             <span>
               {search
-                ? `Найдено ${filtered.length} из ${rows.length} загруженных`
-                : `Загружено ${rows.length}${hasMore ? '+' : ''}`}
+                ? topAsnT('topAsn.foundOfLoaded', { found: filtered.length, loaded: rows.length })
+                : topAsnT('topAsn.loadedCount', {
+                  n: rows.length,
+                  more: hasMore ? topAsnT('topAsn.loadedMoreSuffix') : '',
+                })}
             </span>
-            <span>Запрос выполнен за <b style={{ color: 'var(--fg-primary)' }}>{fmtTalkerLoadMs(loadMs, serverMs)}</b></span>
+            <span>{topAsnT('topAsn.queryCompleted', { time: queryTimeLabel })}</span>
           </div>
         </div>
       </Card>
@@ -425,15 +470,18 @@ function TopBarRow({ row, i, max, metric, isPair }) {
   const value = talkerMetricValue(row, metric);
   const pct = (value / max) * 100;
   const color = PROTOCOL_CHART_COLORS[i % PROTOCOL_CHART_COLORS.length];
+  const label = talkerBarLabel(row, isPair);
+  const metricText = talkerMetricDisplay(row, metric);
+  const barTitle = topAsnT('topAsn.barTooltip', { label, metric: metricText });
   return (
-    <div className="top-bar-row">
+    <div className="top-bar-row" title={barTitle}>
       <div className="row top-bar-row__head">
         <span className="top-bar-row__rank">{i + 1}</span>
         <span className="top-bar-row__label">
-          {talkerBarLabel(row, isPair)}
+          {label}
         </span>
         <span className="mono top-bar-row__metric">
-          {talkerMetricDisplay(row, metric)}
+          {metricText}
         </span>
       </div>
       <div className="top-bar-row__track">
