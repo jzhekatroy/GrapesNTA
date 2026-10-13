@@ -195,8 +195,42 @@ test('invalid build date values are ignored', () => {
   }), {});
 });
 
+test('GRAPES_VERSION and GRAPES_VERSION_DATE env', () => {
+  const repoRoot = tempRepo('version');
+
+  assert.deepEqual(getBuildInfo({
+    repoRoot,
+    env: {
+      GRAPES_VERSION: 'ui-v1.0.1',
+      GRAPES_VERSION_DATE: '2026-10-13T16:35:21+03:00',
+    },
+  }), {
+    version: 'ui-v1.0.1',
+    versionDate: '2026-10-13T13:35:21.000Z',
+  });
+});
+
+test('unknown GRAPES_VERSION is ignored with its date', () => {
+  const repoRoot = tempRepo('version-unknown');
+
+  for (const GRAPES_VERSION of ['unknown', 'ui-unknown', '']) {
+    assert.deepEqual(getBuildInfo({
+      repoRoot,
+      env: { GRAPES_VERSION, GRAPES_VERSION_DATE: '2026-10-13T16:35:21+03:00' },
+    }), {});
+  }
+});
+
 test('formatBuildInfoLogLine', () => {
   assert.equal(formatBuildInfoLogLine({}), null);
+  assert.equal(
+    formatBuildInfoLogLine({
+      version: 'ui-v1.0.1',
+      versionDate: '2026-10-13T13:35:21.000Z',
+      commit: 'abc1234',
+    }),
+    'Build info: version ui-v1.0.1 (2026-10-13T13:35:21.000Z), commit abc1234',
+  );
   assert.equal(
     formatBuildInfoLogLine({ buildDate: '2026-08-13T19:00:00.000Z' }),
     'Build info: built 2026-08-13T19:00:00.000Z',

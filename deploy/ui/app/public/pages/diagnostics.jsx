@@ -1670,7 +1670,7 @@ function PageDiagnostics() {
     ApiClient.loadBuildInfo()
       .then((data) => {
         if (cancelled) return;
-        if (data?.buildDate || data?.commit) setBuildInfo(data);
+        if (data?.version || data?.buildDate || data?.commit) setBuildInfo(data);
       })
       .catch(() => {});
     return () => { cancelled = true; };
@@ -1838,7 +1838,7 @@ function PageDiagnostics() {
       )}
       {tab === 'erp' && <PageErpPiterix />}
 
-      {buildInfo && (buildInfo.buildDate || buildInfo.commit) && (
+      {buildInfo && (buildInfo.version || buildInfo.buildDate || buildInfo.commit) && (
         <div
           style={{
             marginTop: 8,
@@ -1847,6 +1847,13 @@ function PageDiagnostics() {
             textAlign: 'right',
           }}
         >
+          {buildInfo.version && (
+            <>
+              Версия: <span className="mono">{buildInfo.version}</span>
+              {buildInfo.versionDate && <> от {fmtBuildDate(buildInfo.versionDate)}</>}
+            </>
+          )}
+          {buildInfo.version && (buildInfo.buildDate || buildInfo.commit) && ' · '}
           {buildInfo.buildDate && (
             <>Сборка: {fmtBuildDate(buildInfo.buildDate)}</>
           )}

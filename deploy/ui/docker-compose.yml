@@ -20,6 +20,7 @@ services:
         required: true
     environment:
       GRAPES_VERSION: ${GRAPES_VERSION:-unknown}
+      GRAPES_VERSION_DATE: ${GRAPES_VERSION_DATE:-}
     command:
       - sh
       - -c

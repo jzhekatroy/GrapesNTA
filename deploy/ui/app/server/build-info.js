@@ -121,12 +121,25 @@ function resolveBuildDate(repoRoot, env = process.env) {
   return normalizeBuildDate(readBuildInfoJson(repoRoot).buildDate);
 }
 
+function resolveVersion(env = process.env) {
+  const v = trimValue(env.GRAPES_VERSION);
+  if (!v || v === 'unknown' || v.endsWith('-unknown')) return undefined;
+  return v;
+}
+
 function getBuildInfo(opts = {}) {
   if (cached && !opts.repoRoot && !opts.env) return cached;
 
   const repoRoot = opts.repoRoot || DEFAULT_REPO_ROOT;
   const env = opts.env || process.env;
   const data = {};
+
+  const version = resolveVersion(env);
+  if (version) {
+    data.version = version;
+    const versionDate = normalizeBuildDate(env.GRAPES_VERSION_DATE);
+    if (versionDate) data.versionDate = versionDate;
+  }
 
   const buildDate = resolveBuildDate(repoRoot, env);
   if (buildDate) data.buildDate = buildDate;
@@ -143,8 +156,11 @@ function resetBuildInfoCacheForTests() {
 }
 
 function formatBuildInfoLogLine(info) {
-  if (!info?.buildDate && !info?.commit) return null;
+  if (!info?.version && !info?.buildDate && !info?.commit) return null;
   const parts = [];
+  if (info.version) {
+    parts.push(info.versionDate ? `version ${info.version} (${info.versionDate})` : `version ${info.version}`);
+  }
   if (info.buildDate) parts.push(`built ${info.buildDate}`);
   if (info.commit) parts.push(`commit ${info.commit}`);
   return `Build info: ${parts.join(', ')}`;
