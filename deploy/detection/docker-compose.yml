@@ -11,6 +11,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        GRAPES_VERSION: ${GRAPES_VERSION:-unknown}
     image: grapes-detection:latest
     container_name: grapes-detection
     env_file:

@@ -136,6 +136,10 @@ git_pull() {
     fi
   fi
 
+  if ! HOME="${home}" GIT_TERMINAL_PROMPT=0 git fetch --quiet --tags origin; then
+    log "WARNING: метки версий не подтянулись, версия возьмётся из локальных меток"
+  fi
+
   after="$(git rev-parse --short HEAD)"
   if [[ "${before}" == "${after}" ]]; then
     log "already up to date (${after})"
@@ -154,8 +158,16 @@ ensure_app_owned_dir() {
   chown -R 1001:1001 "${dir}" 2>/dev/null || true
 }
 
+# Последняя метка компонента в истории HEAD: detection-2026.10.13.1.
+# Если код новее метки, git добавит хвост: detection-2026.10.13.1-2-gab12cd34.
+component_version() {
+  local name="$1" v
+  v="$(git -C "${REPO_ROOT}" describe --tags --match "${name}-[0-9]*" 2>/dev/null || true)"
+  printf '%s' "${v:-${name}-unknown}"
+}
+
 compose_up() {
-  local dir="$1" name="$2"
+  local dir="$1" name="$2" version="${3:-}"
   need_compose_dir "${dir}" "${name}"
   if [[ "${name}" == "grapes-worker" ]]; then
     ensure_app_owned_dir "${WORKER_DIR}/logs"
@@ -163,10 +175,10 @@ compose_up() {
   elif [[ "${name}" == "grapes-enrichment" ]]; then
     ensure_app_owned_dir "${ENRICH_DIR}/logs"
   fi
-  log "rebuild ${name} in ${dir}"
+  log "rebuild ${name} in ${dir}${version:+ (version ${version})}"
   (
     cd "${dir}"
-    docker compose up -d --build --remove-orphans
+    GRAPES_VERSION="${version}" docker compose up -d --build --remove-orphans
   )
   log "${name} is up"
 }
@@ -256,7 +268,7 @@ detection_up() {
   [[ -f "${DETECTION_DIR}/server/detection-worker.js" ]] || die "missing ${DETECTION_DIR}/server/detection-worker.js"
   [[ -f "${DETECTION_DIR}/package-lock.json" ]] || die "missing ${DETECTION_DIR}/package-lock.json"
   ensure_detection_env
-  compose_up "${DETECTION_DIR}" grapes-detection
+  compose_up "${DETECTION_DIR}" grapes-detection "$(component_version detection)"
 }
 
 show_repo_line() {

@@ -29,6 +29,10 @@ RUN set -e; \
   && chmod -R a+rX /app \
   && chown -R app:app server/data server/build-info.json
 
+# server/*.js перезаписывает sync-ui-from-ntadmin.sh, поэтому версию печатает CMD.
+ARG GRAPES_VERSION=unknown
+ENV GRAPES_VERSION=${GRAPES_VERSION}
+
 USER app
 
-CMD ["node", "server/detection-worker.js", "loop"]
+CMD ["sh", "-c", "echo \"$(date -u +%Y-%m-%dT%H:%M:%SZ) detection version ${GRAPES_VERSION}\"; exec node server/detection-worker.js loop"]
