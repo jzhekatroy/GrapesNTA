@@ -675,6 +675,18 @@ const ApiClient = (() => {
     return body.data || [];
   }
 
+  async function loadObservationsBoardLayout() {
+    const body = await getJson('/api/observations/board-layout', { widget: 'observations/board-layout' });
+    return {
+      data: body.data || null,
+      updatedAt: body.updatedAt || null,
+    };
+  }
+
+  async function saveObservationsBoardLayout(layout) {
+    return requestJson('/api/observations/board-layout', { method: 'PUT', body: layout });
+  }
+
   async function loadObservationAnalyticsDiagnostics() {
     const body = await getJson('/api/observations/analytics/diagnostics', {
       widget: 'observations/analytics-diagnostics',
@@ -3149,6 +3161,8 @@ const ApiClient = (() => {
     updateExplorerFilter,
     loadObservationsConfig,
     loadObservations,
+    loadObservationsBoardLayout,
+    saveObservationsBoardLayout,
     loadObservationAnalyticsDiagnostics,
     loadWorkerDiagnostics,
     scanWorkerGaps,

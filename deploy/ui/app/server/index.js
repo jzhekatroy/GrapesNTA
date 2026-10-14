@@ -123,6 +123,10 @@ const {
   putLayout: putDashboardLayout,
   resetLayout: resetDashboardLayout,
 } = require('./dashboard-layout');
+const {
+  getLayout: getObservationsBoardLayout,
+  putLayout: putObservationsBoardLayout,
+} = require('./observations-board-layout');
 const { isCabinetScoped } = require('./cabinet/context');
 const {
   listL3Prefixes,
@@ -1330,6 +1334,27 @@ app.get('/api/observations', async (req, res) => {
     res.json({ data: await listObservations(req.user.id) });
   } catch (err) {
     res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/observations/board-layout', async (req, res) => {
+  try {
+    const stored = getObservationsBoardLayout(req.user.id);
+    res.json({
+      data: stored?.layout || null,
+      updatedAt: stored?.updatedAt || null,
+    });
+  } catch (err) {
+    res.status(err.statusCode || 500).json({ error: err.message });
+  }
+});
+
+app.put('/api/observations/board-layout', async (req, res) => {
+  try {
+    const saved = putObservationsBoardLayout(req.user.id, req.body || {});
+    res.json({ ok: true, data: saved.layout, updatedAt: saved.updatedAt });
+  } catch (err) {
+    res.status(err.statusCode || 400).json({ error: err.message });
   }
 });
 

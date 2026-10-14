@@ -12,6 +12,11 @@ function isDashboardLayoutPath(path) {
   return p === '/api/dashboard/layout' || p === '/api/dashboard/layout/reset';
 }
 
+function isObservationsBoardLayoutPath(path) {
+  const p = normalizeApiPath(path);
+  return p === '/api/observations/board-layout';
+}
+
 function getResourceForPath(path, method) {
   const p = normalizeApiPath(path);
 
@@ -98,4 +103,5 @@ module.exports = {
   isResourceGuardExempt,
   isMutatingRequest,
   isDashboardLayoutPath,
+  isObservationsBoardLayoutPath,
 };

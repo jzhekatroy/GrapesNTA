@@ -1,6 +1,10 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { getResourceForPath, isMutatingRequest } = require('./rbac/api-map');
+const {
+  getResourceForPath,
+  isMutatingRequest,
+  isObservationsBoardLayoutPath,
+} = require('./rbac/api-map');
 const { parseLookbackHours, DEFAULT_LOOKBACK_HOURS, MAX_LOOKBACK_HOURS } = require('./direction-audit');
 const {
   portDirectionSql,
@@ -71,6 +75,13 @@ test('api-map treats observation preview POST as read-only', () => {
   assert.equal(isMutatingRequest('/observations/abc/preview', 'POST'), false);
   assert.equal(isMutatingRequest('/api/observations', 'POST'), true);
   assert.equal(isMutatingRequest('/api/observations/abc/run', 'POST'), true);
+});
+
+test('api-map maps observations board layout to observations resource', () => {
+  assert.equal(getResourceForPath('/api/observations/board-layout'), 'observations');
+  assert.equal(getResourceForPath('/observations/board-layout', 'PUT'), 'observations');
+  assert.equal(isObservationsBoardLayoutPath('/api/observations/board-layout'), true);
+  assert.equal(isMutatingRequest('/api/observations/board-layout', 'PUT'), true);
 });
 
 test('api-map treats explorer read POSTs as non-mutating', () => {

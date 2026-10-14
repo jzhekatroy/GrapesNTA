@@ -7319,20 +7319,115 @@ html.modal-open #root {
   gap: 16px;
 }
 
+.observations-board-toolbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.observations-board-toolbar--edit {
+  padding: 8px 12px;
+  border-radius: 10px;
+  background: var(--surf-2);
+  border: 1px solid var(--bd);
+}
+
+.observations-board-toolbar--sticky {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  margin-bottom: 12px;
+}
+
+.observations-board-toolbar__status {
+  font: var(--pv-text-body-3);
+  color: var(--fg-muted);
+  margin-right: 4px;
+}
+
+.observations-board-toolbar__status.is-error {
+  color: var(--st-critical);
+}
+
+.observations-board--edit .obs-tile {
+  outline: 1px dashed color-mix(in srgb, var(--accent) 35%, transparent);
+  outline-offset: 2px;
+}
+
+.observations-board--dragging {
+  user-select: none;
+}
+
+.observations-board--drag-preview .obs-tile-wrap {
+  transition: transform 0.34s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.obs-tile-wrap {
+  min-width: 0;
+}
+
+.obs-tile-wrap--expanded {
+  grid-column: 1 / -1;
+}
+
+.obs-tile-wrap--phantom {
+  pointer-events: none;
+  z-index: 2;
+  transition: transform 0.34s cubic-bezier(0.22, 1, 0.36, 1), opacity 0.24s ease;
+}
+
+.obs-tile-phantom__frame {
+  box-sizing: border-box;
+  min-height: 120px;
+  height: 100%;
+  border: 2px dashed var(--accent);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 12px;
+  color: var(--accent);
+  font: var(--pv-text-body-3);
+  text-align: center;
+  animation: dashboard-phantom-frame-in 0.28s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
 .obs-tile {
   display: flex;
   flex-direction: column;
   gap: 12px;
   min-width: 0;
 }
-.obs-tile--expanded {
-  grid-column: 1 / -1;
-}
 .obs-tile__head {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
   gap: 12px;
+}
+
+.obs-tile__drag-handle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 28px;
+  height: 28px;
+  margin-top: 2px;
+  border-radius: 6px;
+  color: var(--fg-muted);
+  cursor: grab;
+  transition: background var(--pv-dur-fast), color var(--pv-dur-fast);
+}
+
+.obs-tile__drag-handle:hover {
+  background: var(--surf-2);
+  color: var(--fg-primary);
+}
+
+.observations-board--dragging .obs-tile__drag-handle {
+  cursor: grabbing;
 }
 .obs-tile__title {
   font: var(--pv-text-body-2-bold);
