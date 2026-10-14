@@ -397,6 +397,7 @@
     'observations.expandTitle': 'Expand chart and table',
     'observations.collapseTitle': 'Collapse chart and table',
     'observations.new': 'New',
+    // Free to reuse (formerly «New» observation menu items on the observations board).
     'observations.fromExplorer': 'From Explorer…',
     'observations.preset.uplink': 'Inbound/Outbound traffic',
     'observations.preset.vlan': 'VLAN Traffic',
