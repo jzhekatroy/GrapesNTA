@@ -7329,15 +7329,21 @@ html.modal-open #root {
 .observations-board-toolbar--edit {
   padding: 8px 12px;
   border-radius: 10px;
-  background: var(--surf-2);
-  border: 1px solid var(--bd);
+  background: var(--bg-surface-2);
+  border: 1px solid var(--bd-default);
 }
 
 .observations-board-toolbar--sticky {
   position: sticky;
   top: 0;
-  z-index: 5;
+  z-index: 40;
   margin-bottom: 12px;
+  background: var(--bg-canvas);
+  box-shadow: 0 12px 16px -10px var(--bg-canvas);
+}
+
+.observations-board--edit .card:has(.dual-chart:hover) {
+  z-index: auto;
 }
 
 .observations-board-toolbar__status {
