@@ -119,6 +119,43 @@ test('classifyClients в режиме IP размечает по адресу б
   assert.equal(skipped.length, 0);
 });
 
+test('отчёт кладёт несколько MAC клиента в одну ячейку', () => {
+  const { buildReportRows, reportToCsv } = require('./erp-piterix-report');
+  const active = {
+    int_status: 1,
+    block: { is_blocked: false },
+    name: 'Клиент',
+  };
+  const client = {
+    ...active,
+    basic_account: 10,
+    ips: [
+      { ip: '188.143.1.1', mac: 'AA:BB:CC:DD:EE:01', switch: { host: '172.18.19.28', port: 10 } },
+      { ip: '188.143.1.2', mac: 'aa:bb:cc:dd:ee:01', switch: { host: '172.18.19.28', port: 10 } },
+      { ip: '188.143.1.3', mac: 'AA-BB-CC-DD-EE-02', switch: { host: '172.18.19.28', port: 11 } },
+      { ip: '188.143.1.4', mac: null },
+      { ip: '188.143.1.5', mac: '11:22:33:44:55:66' },
+    ],
+    ip_history: [{ ip: '9.9.9.9', mac: '00:11:22:33:44:55' }],
+  };
+  const catalog = {
+    agents: new Map([['172.18.19.28', { display_name: 'sw' }]]),
+    ifaces: new Set(['172.18.19.28:10', '172.18.19.28:11']),
+    ifaceRows: new Map(),
+  };
+  const expected = '11:22:33:44:55:66; aa:bb:cc:dd:ee:01; aa:bb:cc:dd:ee:02';
+  const portRows = buildReportRows({ clients: [client], catalog, bindMode: 'ports' });
+  assert.equal(portRows.length, 2);
+  assert.equal(portRows[0].macs, expected);
+  assert.equal(portRows[1].macs, expected);
+  const prefixRows = buildReportRows({ clients: [client], bindMode: 'prefixes', l3: null });
+  assert.ok(prefixRows.length > 1);
+  assert.ok(prefixRows.every((row) => row.macs === expected));
+  const header = reportToCsv(portRows).split('\n')[0];
+  assert.match(header, /MAC/);
+  assert.match(reportToCsv(portRows), /11:22:33:44:55:66; aa:bb:cc:dd:ee:01; aa:bb:cc:dd:ee:02/);
+});
+
 test('clientsToDisable снимает только пропавших из ERP', () => {
   const { clientsToDisable } = require('./erp-piterix-sync');
   assert.deepEqual(clientsToDisable(['1', '2', '3'], ['2', '3']), ['1']);
