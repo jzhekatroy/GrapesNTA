@@ -533,6 +533,16 @@ function App() {
     pageEl = <PageAccessDenied pageId={page} onNavigate={navigate} />;
   } else {
     switch (page) {
+      case 'monitoring':
+        pageEl = (
+          <LazyPage
+            pageId="monitoring"
+            key={`${refreshKey}-${hashRoute}`}
+            onNavigate={navigate}
+            effectivePermissions={auth.user?.effectivePermissions}
+          />
+        );
+        break;
       case 'dashboard':
         pageEl = (
           <LazyPage

@@ -363,13 +363,37 @@ function JunkRows({ rows, labelOf }) {
   ));
 }
 
-function EventAsnTop({ event }) {
-  const minute = event?.live?.lastHotMinute || event?.alertMinute || '';
+function eventAsnSliceMinute(event) {
+  return event?.live?.lastHotMinute || event?.focusMinute || event?.alertMinute || '';
+}
+
+function EventAsnTop({ event, loadAsn, missingMinuteMessage }) {
+  const minute = eventAsnSliceMinute(event);
   const [data, setData] = useState(null);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
   useEffect(() => {
-    if (!event?.scope || !event?.scopeId || !minute) {
+    if (!event) {
+      setData(null);
+      return undefined;
+    }
+    if (!minute && !loadAsn) {
+      setData(null);
+      setError(missingMinuteMessage || '');
+      return undefined;
+    }
+    if (loadAsn) {
+      let cancelled = false;
+      setBusy(true);
+      setError('');
+      setData(null);
+      Promise.resolve(loadAsn(event))
+        .then((row) => { if (!cancelled) setData(row); })
+        .catch((err) => { if (!cancelled) setError(err.message || 'Не удалось посчитать мусорный UDP'); })
+        .finally(() => { if (!cancelled) setBusy(false); });
+      return () => { cancelled = true; };
+    }
+    if (!event?.scope || !event?.scopeId) {
       setData(null);
       return undefined;
     }
@@ -382,7 +406,7 @@ function EventAsnTop({ event }) {
       .catch((err) => { if (!cancelled) setError(err.message || 'Не удалось посчитать мусорный UDP'); })
       .finally(() => { if (!cancelled) setBusy(false); });
     return () => { cancelled = true; };
-  }, [event?.id, event?.scope, event?.scopeId, minute]);
+  }, [event?.id, event?.scope, event?.scopeId, minute, loadAsn, missingMinuteMessage]);
   const share = data ? formatAsnShare(data.share) : '';
   return (
     <div style={{ margin: '8px 0 14px' }}>
@@ -427,12 +451,31 @@ function downloadText(filename, text) {
   URL.revokeObjectURL(url);
 }
 
-function FlowspecReportModal({ event, onClose }) {
+function FlowspecReportModal({ event, onClose, loadFlowspec }) {
   const minute = event?.live?.lastHotMinute || '';
   const [data, setData] = useState(null);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
   useEffect(() => {
+    if (!event) {
+      setData(null);
+      return undefined;
+    }
+    if (!minute && !loadFlowspec) {
+      setData(null);
+      return undefined;
+    }
+    if (loadFlowspec) {
+      let cancelled = false;
+      setBusy(true);
+      setError('');
+      setData(null);
+      Promise.resolve(loadFlowspec(event))
+        .then((row) => { if (!cancelled) setData(row); })
+        .catch((err) => { if (!cancelled) setError(err.message || 'Не удалось собрать отчёт'); })
+        .finally(() => { if (!cancelled) setBusy(false); });
+      return () => { cancelled = true; };
+    }
     if (!event?.scope || !event?.scopeId || !minute) {
       setData(null);
       return undefined;
@@ -446,7 +489,7 @@ function FlowspecReportModal({ event, onClose }) {
       .catch((err) => { if (!cancelled) setError(err.message || 'Не удалось собрать отчёт'); })
       .finally(() => { if (!cancelled) setBusy(false); });
     return () => { cancelled = true; };
-  }, [event?.id, event?.scope, event?.scopeId, minute]);
+  }, [event?.id, event?.scope, event?.scopeId, minute, loadFlowspec]);
   const fileById = (id) => (data?.files || []).find((file) => file.id === id);
   const save = (id) => {
     const file = fileById(id);
@@ -461,7 +504,7 @@ function FlowspecReportModal({ event, onClose }) {
       subtitle={event ? `${event.name || event.scopeId} · ${minute ? formatMskTime(minute) : 'нет минуты'} МСК` : ''}
       footer={<Button kind="ghost" onClick={onClose}>Закрыть</Button>}
     >
-      {!minute ? (
+      {!minute && !loadFlowspec ? (
         <div>Нет горячей минуты. Отчёт считается по последней минуте, которая ещё выше порога.</div>
       ) : null}
       {busy ? <div>Считаю по текущей минуте…</div> : null}
@@ -2190,4 +2233,21 @@ function PageDetection() {
   );
 }
 
-window.PageDetection = PageDetection;
+Object.assign(window, {
+  PageDetection,
+  AttackLoadBanner,
+  EventAsnTop,
+  FlowspecReportModal,
+  DetectionFormatBps: formatBps,
+  DetectionFormatMskTime: formatMskTime,
+  DetectionFormatVictimCell: formatVictimCell,
+  DetectionFormatSource24Cell: formatSource24Cell,
+  DetectionFormatSwitchCell: formatSwitchCell,
+  DetectionIpMarkupEligible: ipMarkupEligible,
+  DetectionKindLabel: KIND_LABEL,
+  DetectionScopeShort: SCOPE_SHORT,
+  DetectionIsPeakEvent: isPeakEvent,
+  DetectionEventHourRatio: eventHourRatio,
+  DetectionEventHourUsual: eventHourUsual,
+  DetectionFormatHourShare: formatHourShare,
+});

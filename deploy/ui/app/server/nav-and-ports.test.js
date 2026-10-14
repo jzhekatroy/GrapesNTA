@@ -101,6 +101,12 @@ test('api-map maps direction diagnostics before generic diagnostics', () => {
   assert.equal(getResourceForPath('/monitoring/problems'), 'monitoring');
 });
 
+test('api-map maps monitoring endpoints', () => {
+  assert.equal(getResourceForPath('/api/monitoring/attacks'), 'monitoring');
+  assert.equal(getResourceForPath('/api/monitoring/problems'), 'monitoring');
+  assert.equal(getResourceForPath('/api/monitoring/attacks/foo%7Cbar/history'), 'monitoring');
+});
+
 test('parseLookbackHours clamps invalid values', () => {
   assert.equal(parseLookbackHours(undefined), DEFAULT_LOOKBACK_HOURS);
   assert.equal(parseLookbackHours('abc'), DEFAULT_LOOKBACK_HOURS);

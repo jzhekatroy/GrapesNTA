@@ -13,7 +13,7 @@ const PAGE_CHUNKS_MANIFEST = {
   },
   chunks: {
     monitoring: {
-      scripts: ['/pages/monitoring.jsx'],
+      scripts: ['/pages/detection.jsx', '/pages/monitoring.jsx'],
       exports: { default: 'PageMonitoring' },
     },
     dashboard: {

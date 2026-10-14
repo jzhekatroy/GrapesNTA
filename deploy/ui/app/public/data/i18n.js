@@ -1,5 +1,6 @@
 (function (global) {
   const PAGE_SECTION_KEY = {
+    monitoring: 'overview',
     dashboard: 'overview',
     observations: 'overview',
     dns: 'overview',

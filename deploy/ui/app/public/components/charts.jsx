@@ -1287,6 +1287,7 @@ function CategoryTrendChart({
   periodEndMs,
   skipTrailingGaps = false,
   tipTranslucent = false,
+  marks = [],
 }) {
   const wrapRef = useRef(null);
   const dragRef = useRef(null);
@@ -1345,6 +1346,26 @@ function CategoryTrendChart({
     left: `${tipPct}%`,
     transform: tipAlign === 'end' ? 'translateX(calc(-100% - 8px))' : tipAlign === 'start' ? 'translateX(8px)' : 'translateX(-50%)',
   };
+
+  const markLines = useMemo(() => {
+    if (!marks?.length || !timeScale || !chartPoints.length) return [];
+    return marks.map((mark, idx) => {
+      const ms = mark.bucketMs != null ? Number(mark.bucketMs) : parseChartBucketMs(mark.t || mark.minute);
+      if (ms == null || !Number.isFinite(ms)) return null;
+      let bestIdx = 0;
+      let bestDist = Infinity;
+      chartPoints.forEach((pt, i) => {
+        const ptMs = resolvePointEpochMs(pt);
+        if (ptMs == null) return;
+        const dist = Math.abs(ptMs - ms);
+        if (dist < bestDist) {
+          bestDist = dist;
+          bestIdx = i;
+        }
+      });
+      return { key: mark.id || idx, x: x(bestIdx), label: mark.label || '', color: mark.color || 'var(--st-critical)' };
+    }).filter(Boolean);
+  }, [marks, timeScale, chartPoints, x]);
 
   const onChartMouseMove = (e) => {
     if (dragRef.current) {
@@ -1447,7 +1468,7 @@ function CategoryTrendChart({
             const yy = y(vLeft);
             return (
               <g key={i}>
-                <line x1={padL} x2={w - padR} y1={yy} y2={yy} stroke="rgba(255,255,255,0.05)" />
+                <line x1={padL} x2={w - padR} y1={yy} y2={yy} stroke="var(--chart-grid)" />
                 <text x={padL - 6} y={yy + 4} textAnchor="end" fontSize="9" fill="var(--fg-muted)" fontFamily="Mulish">{fmtCompact(vLeft)}</text>
               </g>
             );
@@ -1471,6 +1492,20 @@ function CategoryTrendChart({
               />
             ));
           })}
+          {markLines.map((mk) => (
+            <g key={mk.key} pointerEvents="none">
+              <line
+                x1={mk.x}
+                x2={mk.x}
+                y1={padT}
+                y2={h - padB}
+                stroke={mk.color}
+                strokeWidth="1.5"
+                strokeDasharray="3 3"
+                opacity="0.85"
+              />
+            </g>
+          ))}
           {hoverPoint && (
             <g pointerEvents="none">
               <line
@@ -1478,7 +1513,8 @@ function CategoryTrendChart({
                 x2={x(hoverIdx)}
                 y1={padT}
                 y2={h - padB}
-                stroke="rgba(255,255,255,0.28)"
+                stroke="var(--fg-muted)"
+                strokeOpacity="0.45"
                 strokeWidth="1"
                 strokeDasharray="4 3"
               />
@@ -1492,7 +1528,7 @@ function CategoryTrendChart({
                   cy={y(v)}
                   r="3.5"
                   fill={ln.color}
-                  stroke="#14131F"
+                  stroke="var(--bg-canvas)"
                   strokeWidth="1.5"
                 />
                 );

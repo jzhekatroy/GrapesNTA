@@ -114,6 +114,7 @@ function isImpersonating(user) {
 }
 
 const PAGES_WITHOUT_HEADER_FILTERS = new Set([
+  'monitoring',
   'explorer',
   'dns-explorer',
   'observations',
