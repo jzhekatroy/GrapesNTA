@@ -54,6 +54,11 @@ GRANT SELECT, INSERT, CREATE TABLE, ALTER TABLE, DROP TABLE, ALTER DELETE, TRUNC
 GRANT CREATE DICTIONARY, DROP DICTIONARY ON default.* TO ui_admin;
 GRANT SYSTEM RELOAD DICTIONARY ON *.* TO ui_admin;
 GRANT SELECT ON system.* TO ui_admin;
+-- Явно: страница хранения читает куски и диски. На ClickHouse 24
+-- отсутствие гранта на эти таблицы — ACCESS_DENIED, даже если соседние
+-- system.tables и system.columns открыты.
+GRANT SELECT ON system.parts TO ui_admin;
+GRANT SELECT ON system.disks TO ui_admin;
 GRANT dictGet ON default.geo_country_dict TO ui_admin;
 GRANT dictGet ON default.bgp_origin_asn_dict TO ui_admin;
 GRANT dictGet ON default.net_interfaces_dict TO ui_admin;
