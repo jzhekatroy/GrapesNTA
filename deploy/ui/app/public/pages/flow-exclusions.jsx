@@ -1,52 +1,52 @@
 /* Исключения из статистики — правила net_flow_exclusions (ClickHouse) */
 
+function collectorsT(key, params) {
+  return GrapesI18n.t(key, params);
+}
+
 const CONDITION_TYPES = [
-  { id: 'network', label: 'Сеть' },
-  { id: 'protocol', label: 'Протокол' },
-  { id: 'port', label: 'Порт' },
-  { id: 'vlan', label: 'VLAN' },
-  { id: 'observation', label: 'Точка наблюдения' },
-  { id: 'collector', label: 'Коллектор' },
+  { id: 'network', labelKey: 'collectorsPage.exclusion.condition.network' },
+  { id: 'protocol', labelKey: 'collectorsPage.exclusion.condition.protocol' },
+  { id: 'port', labelKey: 'collectorsPage.exclusion.condition.port' },
+  { id: 'vlan', labelKey: 'collectorsPage.exclusion.condition.vlan' },
+  { id: 'observation', labelKey: 'collectorsPage.exclusion.condition.observation' },
+  { id: 'collector', labelKey: 'collectorsPage.exclusion.condition.collector' },
 ];
 
 const MATCH_SIDES = [
-  { value: 'any', label: 'Любая сторона' },
-  { value: 'src', label: 'Источник' },
-  { value: 'dst', label: 'Назначение' },
+  { value: 'any', labelKey: 'collectorsPage.exclusion.side.any' },
+  { value: 'src', labelKey: 'collectorsPage.exclusion.side.src' },
+  { value: 'dst', labelKey: 'collectorsPage.exclusion.side.dst' },
 ];
 
 const PORT_SIDES = [
-  { value: 'any', label: 'Любая сторона' },
-  { value: 'src', label: 'Источник' },
-  { value: 'dst', label: 'Назначение' },
+  { value: 'any', labelKey: 'collectorsPage.exclusion.side.any' },
+  { value: 'src', labelKey: 'collectorsPage.exclusion.side.src' },
+  { value: 'dst', labelKey: 'collectorsPage.exclusion.side.dst' },
 ];
 
 const PROTO_PRESETS = [
   { value: 6, label: 'TCP' },
   { value: 17, label: 'UDP' },
   { value: 1, label: 'ICMP' },
-  { value: -1, label: 'Другой номер…' },
+  { value: -1, labelKey: 'collectorsPage.exclusion.protoOther' },
 ];
 
 const PROTO_LABELS = { 1: 'ICMP', 6: 'TCP', 17: 'UDP' };
 
-const SAVE_SUCCESS_TITLE = 'Настройки сохранены';
-const SAVE_SUCCESS_DESC = 'Изменения будут автоматически применены в течение 60 секунд.';
+function warningBanner() {
+  return collectorsT('collectorsPage.exclusion.warningBanner');
+}
 
-const WARNING_BANNER = (
-  'Совпавший трафик удаляется — он не попадёт ни в статистику, ни в NetFlow-экспорт. '
-  + 'Уже сохранённые данные не изменятся. Правило начнёт действовать в течение минуты.'
-);
-
-const RULES_INDEPENDENCE_NOTE = (
-  'Правила независимы. Поток отбрасывается, если подошло хотя бы одно из них.'
-);
+function rulesIndependenceNote() {
+  return collectorsT('collectorsPage.exclusion.independenceNote');
+}
 
 function fmtRuleUpdatedAt(value) {
   if (!value) return '—';
   const d = new Date(value);
   if (Number.isNaN(d.getTime())) return String(value);
-  return d.toLocaleString('ru-RU', {
+  return d.toLocaleString(GrapesI18n.intlLocale(), {
     day: '2-digit',
     month: '2-digit',
     year: 'numeric',
@@ -57,16 +57,16 @@ function fmtRuleUpdatedAt(value) {
 
 function parseCidrClient(prefix) {
   const trimmed = String(prefix ?? '').trim();
-  if (!trimmed) return { ok: false, error: 'Префикс должен быть в формате CIDR (например 10.0.0.0/8)' };
+  if (!trimmed) return { ok: false, error: collectorsT('collectorsPage.exclusion.err.cidr') };
   const slash = trimmed.indexOf('/');
-  if (slash < 0) return { ok: false, error: 'Префикс должен быть в формате CIDR (например 10.0.0.0/8)' };
+  if (slash < 0) return { ok: false, error: collectorsT('collectorsPage.exclusion.err.cidr') };
   const ipPart = trimmed.slice(0, slash);
   const mask = Number(trimmed.slice(slash + 1));
   const v4 = /^(\d{1,3}\.){3}\d{1,3}$/.test(ipPart);
   const v6 = ipPart.includes(':');
   if (v4 && mask >= 0 && mask <= 32) return { ok: true, prefix: `${ipPart}/${mask}`, family: 4 };
   if (v6 && mask >= 0 && mask <= 128) return { ok: true, prefix: trimmed, family: 6 };
-  return { ok: false, error: 'Префикс должен быть в формате CIDR (например 10.0.0.0/8)' };
+  return { ok: false, error: collectorsT('collectorsPage.exclusion.err.cidr') };
 }
 
 function isValidSwitchIp(value) {
@@ -102,45 +102,43 @@ function resolvePortTo(condition) {
 
 function formatNetworkPhrase(prefix, matchSide) {
   if (!prefix) return null;
-  if (matchSide === 'src') return `src входит в ${prefix}`;
-  if (matchSide === 'dst') return `dst входит в ${prefix}`;
-  return `src или dst входит в ${prefix}`;
+  if (matchSide === 'src') return collectorsT('collectorsPage.exclusion.phrase.network.src', { prefix });
+  if (matchSide === 'dst') return collectorsT('collectorsPage.exclusion.phrase.network.dst', { prefix });
+  return collectorsT('collectorsPage.exclusion.phrase.network.any', { prefix });
 }
 
 function formatProtocolPhrase(proto) {
   if (!proto || proto <= 0) return null;
   const label = PROTO_LABELS[proto] || String(proto);
-  return `протокол ${label}`;
+  return collectorsT('collectorsPage.exclusion.phrase.protocol', { label });
 }
 
 function formatPortPhrase(portFrom, portTo, portSide) {
   const from = portFrom > 0 ? portFrom : 0;
   const to = portTo > 0 ? portTo : 0;
   if (!from && !to) return null;
-
   const lo = from || to;
   const hi = to || from;
-  const isRange = lo !== hi;
-
-  const sidePrefix = portSide === 'src' ? 'src-' : portSide === 'dst' ? 'dst-' : 'src- или dst-';
-  if (isRange) {
-    return `${sidePrefix}порт в диапазоне ${lo}–${hi}`;
-  }
-  return `${sidePrefix}порт равен ${lo}`;
+  const sideKey = portSide === 'src' ? 'collectorsPage.exclusion.phrase.portSide.src'
+    : portSide === 'dst' ? 'collectorsPage.exclusion.phrase.portSide.dst'
+      : 'collectorsPage.exclusion.phrase.portSide.any';
+  const side = collectorsT(sideKey);
+  if (lo !== hi) return collectorsT('collectorsPage.exclusion.phrase.port.range', { side, from: lo, to: hi });
+  return collectorsT('collectorsPage.exclusion.phrase.port.single', { side, port: lo });
 }
 
 function formatVlanPhrase(vlanId) {
   const id = Number(vlanId);
   if (!id || id <= 0) return null;
-  return `VLAN равен ${id}`;
+  return collectorsT('collectorsPage.exclusion.phrase.vlan', { id });
 }
 
 function formatObservationPhrase(switchIp, ifIndex) {
   const ip = String(switchIp ?? '').trim();
   if (!ip) return null;
   const idx = Number(ifIndex) || 0;
-  if (idx > 0) return `трафик с коммутатора ${ip} порта ${idx}`;
-  return `трафик с коммутатора ${ip}`;
+  if (idx > 0) return collectorsT('collectorsPage.exclusion.phrase.observation.port', { ip, port: idx });
+  return collectorsT('collectorsPage.exclusion.phrase.observation.switch', { ip });
 }
 
 function formatCollectorPhrase(sourceId, flowSources) {
@@ -148,7 +146,7 @@ function formatCollectorPhrase(sourceId, flowSources) {
   if (!id) return null;
   const src = (flowSources || []).find((s) => s.sourceId === id);
   const label = src?.displayName || src?.sourceName || id;
-  return `источник — коллектор ${label}`;
+  return collectorsT('collectorsPage.exclusion.phrase.collector', { label });
 }
 
 function phraseFromCondition(condition, { includeCollector = true, flowSources = [] } = {}) {
@@ -185,9 +183,12 @@ function joinPhrases(phrases, style) {
   if (!phrases.length) return '';
   if (style === 'preview') {
     if (phrases.length === 1) return phrases[0];
-    return `${phrases[0]}, и ${phrases.slice(1).join(', и ')}`;
+    return collectorsT('collectorsPage.exclusion.previewJoinSingle', {
+      first: phrases[0],
+      rest: phrases.slice(1).join(', '),
+    });
   }
-  return phrases.join(' и ');
+  return phrases.join(collectorsT('collectorsPage.exclusion.previewJoinTable'));
 }
 
 function formatRuleCondition(row, flowSources = []) {
@@ -198,8 +199,8 @@ function formatRuleCondition(row, flowSources = []) {
 
 function formatRulePreview(conditions, flowSources = []) {
   const phrases = phrasesFromConditions(conditions, { includeCollector: true, flowSources });
-  if (!phrases.length) return 'Добавьте хотя бы одно условие.';
-  return `Будет отброшен трафик, где ${joinPhrases(phrases, 'preview')}.`;
+  if (!phrases.length) return collectorsT('collectorsPage.exclusion.previewNeedCondition');
+  return collectorsT('collectorsPage.exclusion.previewWillDrop', { phrases: joinPhrases(phrases, 'preview') });
 }
 
 function defaultCondition(type) {
@@ -331,7 +332,7 @@ function conditionsToPayload(conditions, { displayName, comment, ruleId } = {}) 
 
 function validateConditions(conditions) {
   if (!conditions.length) {
-    return 'Добавьте хотя бы одно условие';
+    return collectorsT('collectorsPage.exclusion.err.needCondition');
   }
 
   for (const c of conditions) {
@@ -345,43 +346,43 @@ function validateConditions(conditions) {
         const proto = resolveProto(c);
         if (c.protoMode === -1) {
           if (!Number.isInteger(proto) || proto < 0 || proto > 255) {
-            return 'Некорректный номер протокола (0–255)';
+            return collectorsT('collectorsPage.exclusion.err.protoRange');
           }
         }
-        if (!proto || proto <= 0) return 'Укажите протокол';
+        if (!proto || proto <= 0) return collectorsT('collectorsPage.exclusion.err.protoRequired');
         break;
       }
       case 'port': {
         const fromRaw = c.portFrom === '' ? 0 : Number(c.portFrom);
         const toRaw = c.portTo === '' ? 0 : Number(c.portTo);
-        if (!fromRaw && !toRaw) return 'Укажите порт или диапазон портов';
+        if (!fromRaw && !toRaw) return collectorsT('collectorsPage.exclusion.err.portRequired');
         if (!Number.isInteger(fromRaw) || fromRaw < 0 || fromRaw > 65535
             || !Number.isInteger(toRaw) || toRaw < 0 || toRaw > 65535) {
-          return 'Порт должен быть в пределах 0–65535';
+          return collectorsT('collectorsPage.exclusion.err.portRange');
         }
         const from = fromRaw || toRaw;
         const to = toRaw || fromRaw;
-        if (from > 0 && to > 0 && from > to) return 'Начало диапазона больше конца';
+        if (from > 0 && to > 0 && from > to) return collectorsT('collectorsPage.exclusion.err.portOrder');
         break;
       }
       case 'vlan': {
         const vlanId = Number(c.vlanId);
         if (!Number.isInteger(vlanId) || vlanId <= 0 || vlanId > 65535) {
-          return 'Укажите VLAN ID в пределах 1–65535';
+          return collectorsT('collectorsPage.exclusion.err.vlan');
         }
         break;
       }
       case 'observation': {
         const switchIp = String(c.switchIp || '').trim();
         const ifIndex = c.ifIndex === '' ? 0 : Number(c.ifIndex);
-        if (!switchIp) return 'Укажите IP коммутатора';
-        if (!isValidSwitchIp(switchIp)) return 'Некорректный IP коммутатора';
-        if (ifIndex > 0 && !switchIp) return 'Укажите IP коммутатора для номера порта';
-        if (!Number.isInteger(ifIndex) || ifIndex < 0) return 'Некорректный ifIndex';
+        if (!switchIp) return collectorsT('collectorsPage.exclusion.err.switchIp');
+        if (!isValidSwitchIp(switchIp)) return collectorsT('collectorsPage.exclusion.err.switchIpInvalid');
+        if (ifIndex > 0 && !switchIp) return collectorsT('collectorsPage.exclusion.err.switchIpForPort');
+        if (!Number.isInteger(ifIndex) || ifIndex < 0) return collectorsT('collectorsPage.exclusion.err.ifIndex');
         break;
       }
       case 'collector': {
-        if (!String(c.sourceId || '').trim()) return 'Выберите коллектор';
+        if (!String(c.sourceId || '').trim()) return collectorsT('collectorsPage.exclusion.err.pickCollector');
         break;
       }
       default:
@@ -453,16 +454,16 @@ function PageFlowExclusions({ embedded = false, refreshKey: parentRefreshKey = 0
 
   const handleToggle = async (row) => {
     const next = row.enabled === 1 ? 0 : 1;
-    const label = next === 1 ? 'включить' : 'отключить';
+    const action = next === 1 ? collectorsT('collectorsPage.exclusion.actionEnable') : collectorsT('collectorsPage.exclusion.actionDisable');
     const name = row.displayName || formatRuleCondition(row, flowSources);
-    if (!window.confirm(`${label.charAt(0).toUpperCase() + label.slice(1)} правило «${name}»?`)) return;
+    if (!window.confirm(collectorsT('collectorsPage.exclusion.confirmToggle', { action, name }))) return;
     setTogglingId(row.id);
     try {
       await ApiClient.toggleFlowExclusion({ ruleId: row.ruleId, enabled: next });
-      pushToast({ kind: 'success', title: SAVE_SUCCESS_TITLE, desc: SAVE_SUCCESS_DESC });
+      pushToast({ kind: 'success', title: collectorsT('collectorsPage.saveSuccessTitle'), desc: collectorsT('collectorsPage.saveSuccessDesc') });
       reload();
     } catch (err) {
-      pushToast({ kind: 'error', title: 'Не удалось изменить статус', desc: err.message });
+      pushToast({ kind: 'error', title: collectorsT('collectorsPage.exclusion.toast.statusFailed'), desc: err.message });
     } finally {
       setTogglingId(null);
     }
@@ -470,20 +471,20 @@ function PageFlowExclusions({ embedded = false, refreshKey: parentRefreshKey = 0
 
   const handleDelete = async (row) => {
     const name = row.displayName || formatRuleCondition(row, flowSources);
-    if (!window.confirm(`Удалить правило «${name}» безвозвратно?`)) return;
+    if (!window.confirm(collectorsT('collectorsPage.exclusion.confirmDelete', { name }))) return;
     try {
       await ApiClient.deleteFlowExclusion({ ruleId: row.ruleId });
-      pushToast({ kind: 'success', title: 'Правило удалено', desc: 'Запись удалена из справочника.' });
+      pushToast({ kind: 'success', title: collectorsT('collectorsPage.exclusion.toast.ruleDeleted'), desc: collectorsT('collectorsPage.exclusion.toast.ruleDeletedDesc') });
       reload();
     } catch (err) {
-      pushToast({ kind: 'error', title: 'Не удалось удалить', desc: err.message });
+      pushToast({ kind: 'error', title: collectorsT('collectorsPage.toast.deleteFailed'), desc: err.message });
     }
   };
 
   const cols = [
     {
       key: 'displayName',
-      title: 'Название',
+      title: collectorsT('collectorsPage.col.name'),
       width: 200,
       sortAccessor: (r) => r.displayName || r.ruleId,
       render: (r) => (
@@ -499,7 +500,7 @@ function PageFlowExclusions({ embedded = false, refreshKey: parentRefreshKey = 0
     },
     {
       key: 'condition',
-      title: 'Условие',
+      title: collectorsT('collectorsPage.exclusion.col.condition'),
       width: 360,
       sortAccessor: (r) => formatRuleCondition(r, flowSources),
       render: (r) => (
@@ -510,18 +511,18 @@ function PageFlowExclusions({ embedded = false, refreshKey: parentRefreshKey = 0
     },
     {
       key: 'sourceId',
-      title: 'Область',
+      title: collectorsT('collectorsPage.exclusion.col.scope'),
       width: 160,
       sortAccessor: (r) => r.sourceId || '',
       render: (r) => (
         <span style={{ opacity: r.enabled === 1 ? 1 : 0.55 }}>
-          {r.sourceId ? <span className="mono">{r.sourceId}</span> : 'все коллекторы'}
+          {r.sourceId ? <span className="mono">{r.sourceId}</span> : collectorsT('collectorsPage.exclusion.scopeAllCollectors')}
         </span>
       ),
     },
     {
       key: 'enabled',
-      title: 'Статус',
+      title: collectorsT('collectorsPage.exclusion.col.status'),
       width: 88,
       sortAccessor: (r) => r.enabled,
       render: (r) => (
@@ -534,7 +535,7 @@ function PageFlowExclusions({ embedded = false, refreshKey: parentRefreshKey = 0
     },
     {
       key: 'updatedAt',
-      title: 'Обновлено',
+      title: collectorsT('collectorsPage.col.updated'),
       width: 140,
       sortAccessor: (r) => r.updatedAt,
       render: (r) => (
@@ -550,12 +551,12 @@ function PageFlowExclusions({ embedded = false, refreshKey: parentRefreshKey = 0
       {!embedded && (
         <div className="page-head">
           <div>
-            <h1>Исключения из статистики</h1>
+            <h1>{collectorsT('collectorsPage.exclusion.title')}</h1>
           </div>
           <div className="row" style={{ gap: 8 }}>
-            <Button kind="ghost" icon="refresh" onClick={reload} disabled={loading}>Обновить</Button>
+            <Button kind="ghost" icon="refresh" onClick={reload} disabled={loading}>{collectorsT('chrome.refresh')}</Button>
             <Button kind="primary" icon="plus" onClick={() => setShowAdd(true)} disabled={!!loadError || !canWrite}>
-              Добавить правило
+              {collectorsT('collectorsPage.exclusion.addRule')}
             </Button>
           </div>
         </div>
@@ -564,7 +565,7 @@ function PageFlowExclusions({ embedded = false, refreshKey: parentRefreshKey = 0
       {embedded && (
         <div className="row" style={{ justifyContent: 'flex-end', marginBottom: 12 }}>
           <Button kind="primary" icon="plus" onClick={() => setShowAdd(true)} disabled={!!loadError || !canWrite}>
-            Добавить правило
+            {collectorsT('collectorsPage.exclusion.addRule')}
           </Button>
         </div>
       )}
@@ -574,11 +575,11 @@ function PageFlowExclusions({ embedded = false, refreshKey: parentRefreshKey = 0
           <div style={{ padding: 32, textAlign: 'center', color: 'var(--fg-secondary)' }}>Загрузка…</div>
         </Card>
       ) : loadError ? (
-        <Empty icon="db" title="Не удалось загрузить" desc={loadError} action={<Button kind="primary" icon="refresh" onClick={reload}>Повторить</Button>} />
+        <Empty icon="db" title={collectorsT('collectorsPage.empty.loadFailed')} desc={loadError} action={<Button kind="primary" icon="refresh" onClick={reload}>{collectorsT('collectorsPage.retry')}</Button>} />
       ) : (
         <>
           <p style={{ margin: '0 0 12px', color: 'var(--fg-secondary)', font: 'var(--pv-text-body-3)' }}>
-            {RULES_INDEPENDENCE_NOTE}
+            {rulesIndependenceNote()}
           </p>
           <DataTable
             rows={filtered}
@@ -586,18 +587,18 @@ function PageFlowExclusions({ embedded = false, refreshKey: parentRefreshKey = 0
             rowKey="id"
             pageSize={15}
             onRowClick={canWrite ? (r) => setEditing({ ...r, isNew: false }) : undefined}
-            emptyTitle="Нет правил"
-            emptyDesc="Добавьте правило исключения или уточните поиск."
+            emptyTitle={collectorsT('collectorsPage.exclusion.emptyTitle')}
+            emptyDesc={collectorsT('collectorsPage.exclusion.emptyDesc')}
             toolbar={{
               search,
               onSearch: setSearch,
             }}
             rowActions={canWrite ? (r) => (
               <div className="row" style={{ gap: 4, justifyContent: 'flex-end' }}>
-                <button className="icon-btn tt" data-tt="Редактировать" onClick={(e) => { e.stopPropagation(); setEditing({ ...r, isNew: false }); }}>
+                <button className="icon-btn tt" data-tt={collectorsT('collectorsPage.edit')} onClick={(e) => { e.stopPropagation(); setEditing({ ...r, isNew: false }); }}>
                   <Icon name="edit" size={15} />
                 </button>
-                <button className="icon-btn tt" data-tt="Удалить" onClick={(e) => { e.stopPropagation(); handleDelete(r); }}>
+                <button className="icon-btn tt" data-tt={collectorsT('collectorsPage.delete')} onClick={(e) => { e.stopPropagation(); handleDelete(r); }}>
                   <Icon name="trash" size={15} />
                 </button>
               </div>
@@ -616,7 +617,7 @@ function PageFlowExclusions({ embedded = false, refreshKey: parentRefreshKey = 0
           setShowAdd(false);
           setEditing(null);
           reload();
-          pushToast({ kind: 'success', title: SAVE_SUCCESS_TITLE, desc: SAVE_SUCCESS_DESC });
+          pushToast({ kind: 'success', title: collectorsT('collectorsPage.saveSuccessTitle'), desc: collectorsT('collectorsPage.saveSuccessDesc') });
         }}
       />
     </>
@@ -633,7 +634,7 @@ function RuleEnabledToggle({ enabled, disabled, onChange }) {
       className="l3-enabled-toggle"
       disabled={disabled}
       onClick={(e) => { e.stopPropagation(); onChange(); }}
-      title={enabled ? 'Отключить правило' : 'Включить правило'}
+      title={enabled ? collectorsT('collectorsPage.exclusion.toggleDisable') : collectorsT('collectorsPage.exclusion.toggleEnable')}
       aria-pressed={enabled}
       style={{
         width: 36,
@@ -670,9 +671,7 @@ function ConditionAndSeparator() {
       font: 'var(--pv-text-body-2-bold)',
       padding: '2px 0',
     }}
-    >
-      И
-    </div>
+    >{collectorsT('collectorsPage.exclusion.andSeparator')}</div>
   );
 }
 
@@ -684,7 +683,7 @@ function ConditionCard({ condition, label, onRemove, children }) {
         <button
           type="button"
           className="icon-btn"
-          title="Удалить условие"
+          title={collectorsT('collectorsPage.exclusion.removeCondition')}
           onClick={onRemove}
         >
           <Icon name="x" size={16} />
@@ -715,7 +714,7 @@ function ObservationConditionFields({ condition, onChange, switches }) {
   return (
     <div className="grid grid--2col">
       <div className="field">
-        <label>IP коммутатора</label>
+        <label>{collectorsT('collectorsPage.exclusion.label.switchIp')}</label>
         <input
           className="input mono"
           list={`flow-exclusion-switches-${condition.id}`}
@@ -730,11 +729,11 @@ function ObservationConditionFields({ condition, onChange, switches }) {
         </datalist>
       </div>
       <div className="field">
-        <label>ifIndex порта</label>
+        <label>{collectorsT('collectorsPage.exclusion.label.ifIndex')}</label>
         <input
           className="input mono"
           list={`flow-exclusion-ports-${condition.id}`}
-          placeholder="Необязательно"
+          placeholder={collectorsT('collectorsPage.optional')}
           value={condition.ifIndex}
           onChange={(e) => onChange({ ...condition, ifIndex: e.target.value })}
         />
@@ -832,9 +831,7 @@ function FlowExclusionFormModal({ open, row, isNew, flowSources, onClose, onSave
     }
 
     if (isCollectorOnlyRule(conditions)) {
-      const ok = window.confirm(
-        'Правило содержит только ограничение по коллектору — будет выброшен весь трафик этого коллектора. Продолжить?',
-      );
+      const ok = window.confirm(collectorsT('collectorsPage.exclusion.confirmCollectorOnly'));
       if (!ok) return;
     }
 
@@ -850,7 +847,7 @@ function FlowExclusionFormModal({ open, row, isNew, flowSources, onClose, onSave
       await ApiClient.saveFlowExclusion(payload);
       onSaved();
     } catch (e) {
-      setFormError(e.message || 'Ошибка сохранения');
+      setFormError(e.message || collectorsT('collectorsPage.exclusion.saveError'));
     } finally {
       setSaving(false);
     }
@@ -862,7 +859,7 @@ function FlowExclusionFormModal({ open, row, isNew, flowSources, onClose, onSave
         return (
           <div className="grid grid--2col">
             <div className="field">
-              <label>Префикс (CIDR)</label>
+              <label>{collectorsT('collectorsPage.exclusion.label.prefix')}</label>
               <input
                 className="input mono"
                 placeholder="10.0.0.0/8"
@@ -871,14 +868,14 @@ function FlowExclusionFormModal({ open, row, isNew, flowSources, onClose, onSave
               />
             </div>
             <div className="field">
-              <label>Сторона адреса</label>
+              <label>{collectorsT('collectorsPage.exclusion.label.addressSide')}</label>
               <select
                 className="input"
                 value={condition.matchSide}
                 onChange={(e) => updateCondition(condition.id, { ...condition, matchSide: e.target.value })}
               >
                 {MATCH_SIDES.map((s) => (
-                  <option key={s.value} value={s.value}>{s.label}</option>
+                  <option key={s.value} value={s.value}>{collectorsT(s.labelKey)}</option>
                 ))}
               </select>
             </div>
@@ -888,20 +885,20 @@ function FlowExclusionFormModal({ open, row, isNew, flowSources, onClose, onSave
         return (
           <div className="grid grid--2col">
             <div className="field">
-              <label>Протокол</label>
+              <label>{collectorsT('collectorsPage.exclusion.label.protocol')}</label>
               <select
                 className="input"
                 value={condition.protoMode}
                 onChange={(e) => updateCondition(condition.id, { ...condition, protoMode: Number(e.target.value) })}
               >
                 {PROTO_PRESETS.map((p) => (
-                  <option key={p.value} value={p.value}>{p.label}</option>
+                  <option key={p.value} value={p.value}>{p.labelKey ? collectorsT(p.labelKey) : p.label}</option>
                 ))}
               </select>
             </div>
             {condition.protoMode === -1 && (
               <div className="field">
-                <label>Номер протокола</label>
+                <label>{collectorsT('collectorsPage.exclusion.label.protocolNumber')}</label>
                 <input
                   className="input mono"
                   placeholder="0–255"
@@ -916,7 +913,7 @@ function FlowExclusionFormModal({ open, row, isNew, flowSources, onClose, onSave
         return (
           <div className="grid grid--2col">
             <div className="field">
-              <label>Порт от</label>
+              <label>{collectorsT('collectorsPage.exclusion.label.portFrom')}</label>
               <input
                 className="input mono"
                 placeholder="122"
@@ -925,23 +922,23 @@ function FlowExclusionFormModal({ open, row, isNew, flowSources, onClose, onSave
               />
             </div>
             <div className="field">
-              <label>Порт до</label>
+              <label>{collectorsT('collectorsPage.exclusion.label.portTo')}</label>
               <input
                 className="input mono"
-                placeholder="Необязательно"
+                placeholder={collectorsT('collectorsPage.optional')}
                 value={condition.portTo}
                 onChange={(e) => updateCondition(condition.id, { ...condition, portTo: e.target.value })}
               />
             </div>
             <div className="field" style={{ gridColumn: '1 / -1' }}>
-              <label>Сторона порта</label>
+              <label>{collectorsT('collectorsPage.exclusion.label.portSide')}</label>
               <select
                 className="input"
                 value={condition.portSide}
                 onChange={(e) => updateCondition(condition.id, { ...condition, portSide: e.target.value })}
               >
                 {PORT_SIDES.map((s) => (
-                  <option key={s.value} value={s.value}>{s.label}</option>
+                  <option key={s.value} value={s.value}>{collectorsT(s.labelKey)}</option>
                 ))}
               </select>
             </div>
@@ -950,7 +947,7 @@ function FlowExclusionFormModal({ open, row, isNew, flowSources, onClose, onSave
       case 'vlan':
         return (
           <div className="field">
-            <label>VLAN ID</label>
+            <label>{collectorsT('collectorsPage.exclusion.label.vlanId')}</label>
             <input
               className="input mono"
               placeholder="100"
@@ -970,13 +967,13 @@ function FlowExclusionFormModal({ open, row, isNew, flowSources, onClose, onSave
       case 'collector':
         return (
           <div className="field">
-            <label>Коллектор (source_id)</label>
+            <label>{collectorsT('collectorsPage.exclusion.label.collectorSource')}</label>
             <select
               className="input mono"
               value={condition.sourceId}
               onChange={(e) => updateCondition(condition.id, { ...condition, sourceId: e.target.value })}
             >
-              <option value="">— выберите —</option>
+              <option value="">{collectorsT('collectorsPage.exclusion.selectCollector')}</option>
               {flowSources.map((s) => (
                 <option key={s.sourceId} value={s.sourceId}>
                   {s.displayName || s.sourceName || s.sourceId} ({s.sourceId})
@@ -992,19 +989,19 @@ function FlowExclusionFormModal({ open, row, isNew, flowSources, onClose, onSave
 
   if (!open) return null;
 
-  const conditionLabel = (type) => CONDITION_TYPES.find((t) => t.id === type)?.label || type;
+  const conditionLabel = (type) => { const t = CONDITION_TYPES.find((x) => x.id === type); return t ? collectorsT(t.labelKey) : type; };
 
   return (
     <Modal
       open={open}
       onClose={onClose}
-      title={isNew ? 'Добавить правило' : 'Редактировать правило'}
-      subtitle={isNew ? 'Новое исключение из статистики' : (row?.displayName || formatRuleCondition(row || {}, flowSources))}
+      title={isNew ? collectorsT('collectorsPage.exclusion.modal.add') : collectorsT('collectorsPage.exclusion.modal.edit')}
+      subtitle={isNew ? collectorsT('collectorsPage.exclusion.modal.subtitleNew') : (row?.displayName || formatRuleCondition(row || {}, flowSources))}
       footer={
         <>
-          <Button kind="ghost" onClick={onClose} disabled={saving}>Отмена</Button>
+          <Button kind="ghost" onClick={onClose} disabled={saving}>{collectorsT('collectorsPage.cancel')}</Button>
           <Button kind="primary" icon="save" onClick={handleSave} disabled={!canSave}>
-            {saving ? 'Сохранение…' : 'Сохранить'}
+            {saving ? collectorsT('collectorsPage.saving') : collectorsT('collectorsPage.save')}
           </Button>
         </>
       }
@@ -1017,21 +1014,21 @@ function FlowExclusionFormModal({ open, row, isNew, flowSources, onClose, onSave
 
       <div className="grid grid--2col">
         <div className="field" style={{ gridColumn: '1 / -1' }}>
-          <label>Название</label>
-          <input className="input" placeholder="Служебный DNS мониторинга" value={displayName} onChange={(e) => setDisplayName(e.target.value)} />
+          <label>{collectorsT('collectorsPage.col.name')}</label>
+          <input className="input" placeholder={collectorsT('collectorsPage.exclusion.placeholder.ruleName')} value={displayName} onChange={(e) => setDisplayName(e.target.value)} />
         </div>
         <div className="field" style={{ gridColumn: '1 / -1' }}>
-          <label>Комментарий</label>
-          <input className="input" placeholder="Необязательно" value={comment} onChange={(e) => setComment(e.target.value)} />
+          <label>{collectorsT('collectorsPage.col.comment')}</label>
+          <input className="input" placeholder={collectorsT('collectorsPage.optional')} value={comment} onChange={(e) => setComment(e.target.value)} />
         </div>
       </div>
 
       <div style={{ marginTop: 20 }}>
-        <div style={{ font: 'var(--pv-text-body-2-bold)', marginBottom: 10 }}>Условия</div>
+        <div style={{ font: 'var(--pv-text-body-2-bold)', marginBottom: 10 }}>{collectorsT('collectorsPage.exclusion.conditionsTitle')}</div>
 
         {conditions.length === 0 && (
           <div style={{ color: 'var(--fg-secondary)', font: 'var(--pv-text-body-3)', marginBottom: 12 }}>
-            Условия не заданы. Добавьте хотя бы одно.
+            {collectorsT('collectorsPage.exclusion.noConditions')}
           </div>
         )}
 
@@ -1051,7 +1048,7 @@ function FlowExclusionFormModal({ open, row, isNew, flowSources, onClose, onSave
         {availableTypes.length > 0 && (
           <div ref={addMenuRef} style={{ position: 'relative', marginTop: 14 }}>
             <Button kind="ghost" icon="plus" onClick={() => setAddMenuOpen((v) => !v)}>
-              Добавить условие
+              {collectorsT('collectorsPage.exclusion.addCondition')}
             </Button>
             {addMenuOpen && (
               <div style={{
@@ -1076,7 +1073,7 @@ function FlowExclusionFormModal({ open, row, isNew, flowSources, onClose, onSave
                     style={{ width: '100%', justifyContent: 'flex-start' }}
                     onClick={() => addCondition(t.id)}
                   >
-                    {t.label}
+                    {collectorsT(t.labelKey)}
                   </button>
                 ))}
               </div>
@@ -1108,7 +1105,7 @@ function FlowExclusionFormModal({ open, row, isNew, flowSources, onClose, onSave
         lineHeight: 1.5,
       }}
       >
-        {WARNING_BANNER}
+        {warningBanner()}
       </div>
     </Modal>
   );

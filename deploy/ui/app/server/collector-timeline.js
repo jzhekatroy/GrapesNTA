@@ -95,6 +95,14 @@ function reasonInfo(code) {
   return { code, label: code, hint: '', ...(REASONS[code] || {}) };
 }
 
+function incidentCodeFromCategory(category, aliveDuringGap) {
+  if (category === 'gap') return aliveDuringGap ? 'clickhouse_down' : 'gap';
+  if (category === 'no_input') return 'no_input';
+  if (category === 'write_blocked') return 'write_blocked';
+  if (category === 'loss') return 'loss';
+  return category;
+}
+
 function sqlList(values) {
   return `[${values.map((v) => `'${v}'`).join(', ')}]`;
 }
@@ -425,8 +433,10 @@ function mergeIncidents(intervals, nowMs) {
     .map((inc) => {
       const info = CATEGORY_INFO[inc.category] || CATEGORY_INFO.loss;
       const alive = inc.category === 'gap' && inc.aliveDuringGap;
+      const code = incidentCodeFromCategory(inc.category, alive);
       return {
         category: inc.category,
+        code,
         severity: info.severity,
         title: alive ? 'ClickHouse был недоступен' : info.label,
         hint: alive ? 'коллектор работал, данные ждали в буфере и дошлются позже' : info.hint,
@@ -463,8 +473,16 @@ function clusterIncidents(incidents) {
   return clusters.map((c) => {
     const causes = new Map();
     for (const p of c.parts) {
-      const cur = causes.get(p.title) || { title: p.title, hint: p.hint, severity: p.severity, durationSec: 0, details: [] };
+      const cur = causes.get(p.title) || {
+        title: p.title,
+        hint: p.hint,
+        severity: p.severity,
+        durationSec: 0,
+        details: [],
+        code: p.code,
+      };
       cur.durationSec += p.durationSec;
+      if (!cur.code && p.code) cur.code = p.code;
       for (const d of p.details) if (!cur.details.some((x) => x.code === d.code)) cur.details.push(d);
       causes.set(p.title, cur);
     }
@@ -473,10 +491,11 @@ function clusterIncidents(incidents) {
     const sum = (key) => c.parts.reduce((acc, p) => acc + p[key], 0);
     return {
       severity: main.severity,
+      code: main.code,
       title: main.title,
       hint: main.hint,
       details: main.details,
-      alsoCauses: ordered.slice(1).map(({ title, durationSec }) => ({ title, durationSec })),
+      alsoCauses: ordered.slice(1).map(({ title, durationSec, code }) => ({ title, durationSec, code })),
       startMs: c.startMs,
       endMs: c.endMs,
       durationSec: Math.round((c.endMs - c.startMs) / 1000),

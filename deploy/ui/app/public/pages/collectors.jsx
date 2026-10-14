@@ -1,13 +1,15 @@
 /* Коллекторы — локации, коллекторы и привязка экспортёров потоков */
 
-const SAVE_SUCCESS_TITLE = 'Настройки сохранены';
-const SAVE_SUCCESS_DESC = 'Изменения будут автоматически применены в течение 60 секунд.';
+function collectorsT(key, params) {
+  return GrapesI18n.t(key, params);
+}
+
 const COLLECTORS_TAB_KEY = 'grapes-collectors-tab';
 
-const SOURCE_STATE_LABELS = {
-  assigned: 'Привязан',
-  unassigned: 'Без коллектора',
-  broken_collector_link: 'Коллектор не найден',
+const SOURCE_STATE_KEYS = {
+  assigned: 'collectorsPage.state.assigned',
+  unassigned: 'collectorsPage.state.unassigned',
+  broken_collector_link: 'collectorsPage.state.brokenCollectorLink',
 };
 
 const SOURCE_STATE_TONE = {
@@ -16,10 +18,10 @@ const SOURCE_STATE_TONE = {
   broken_collector_link: 'critical',
 };
 
-const DISCOVERED_STATE_LABELS = {
-  unknown_source: 'Новый экспортёр',
-  broken_collector_link: 'Коллектор не найден',
-  unassigned_online: 'Работает без коллектора',
+const DISCOVERED_STATE_KEYS = {
+  unknown_source: 'collectorsPage.state.unknownSource',
+  broken_collector_link: 'collectorsPage.state.brokenCollectorLink',
+  unassigned_online: 'collectorsPage.state.unassignedOnline',
 };
 
 const DISCOVERED_STATE_TONE = {
@@ -28,10 +30,10 @@ const DISCOVERED_STATE_TONE = {
   unassigned_online: 'warning',
 };
 
-const CATALOG_COLLECTOR_STATE_LABELS = {
-  online: 'Работает',
-  offline: 'Нет данных',
-  empty: 'Без экспортёров',
+const CATALOG_COLLECTOR_STATE_KEYS = {
+  online: 'collectorsPage.state.online',
+  offline: 'collectorsPage.state.offline',
+  empty: 'collectorsPage.state.empty',
 };
 
 const CATALOG_COLLECTOR_STATE_TONE = {
@@ -40,29 +42,47 @@ const CATALOG_COLLECTOR_STATE_TONE = {
   empty: 'idle',
 };
 
+function sourceStateLabel(state) {
+  const key = SOURCE_STATE_KEYS[state];
+  return key ? collectorsT(key) : state;
+}
+
+function discoveredStateLabel(state) {
+  const key = DISCOVERED_STATE_KEYS[state];
+  return key ? collectorsT(key) : state;
+}
+
+function catalogCollectorStateLabel(state) {
+  const key = CATALOG_COLLECTOR_STATE_KEYS[state];
+  return key ? collectorsT(key) : collectorsT('collectorsPage.unknown');
+}
+
 function flowExporterHint() {
-  return 'Экспортёр потоков — source_id / observation domain, откуда приходят NetFlow, sFlow или DNS-записи.';
+  return collectorsT('collectorsPage.hint.flowExporter');
 }
 
 function additionalSourceHint() {
-  return 'Дополнительный источник не входит в «Всего» и детектор. Его можно смотреть только в разборе трафика, фильтр source_id.';
+  return collectorsT('collectorsPage.hint.additionalSource');
 }
 
 function collectorStatusHint(row) {
   if (row.state === 'online') {
-    return `${row.liveSourceCount || 0}/${row.sourceCount || 0} активных за последние 5 минут`;
+    return collectorsT('collectorsPage.hint.collectorOnline', {
+      live: row.liveSourceCount || 0,
+      total: row.sourceCount || 0,
+    });
   }
   if (row.state === 'offline') {
-    return 'Экспортёры привязаны, но live-данных за 5 минут нет';
+    return collectorsT('collectorsPage.hint.collectorOffline');
   }
-  return 'Привяжите хотя бы один экспортёр потоков';
+  return collectorsT('collectorsPage.hint.collectorEmpty');
 }
 
 function CollectorCatalogStateBadge({ state }) {
   return (
     <StatusIndicator
       status={CATALOG_COLLECTOR_STATE_TONE[state] || 'idle'}
-      label={CATALOG_COLLECTOR_STATE_LABELS[state] || 'Неизвестно'}
+      label={catalogCollectorStateLabel(state)}
     />
   );
 }
@@ -92,10 +112,10 @@ function buildLiveSourceMap(overview, discoveredRows = []) {
   return live;
 }
 
-const EXPORTER_STATUS_LABELS = {
-  working: 'работает',
-  no_data: 'нет данных',
-  no_connection: 'нет связи',
+const EXPORTER_STATUS_KEYS = {
+  working: 'collectorsPage.exporter.working',
+  no_data: 'collectorsPage.exporter.noData',
+  no_connection: 'collectorsPage.exporter.noConnection',
 };
 
 const EXPORTER_STATUS_TONE = {
@@ -103,6 +123,11 @@ const EXPORTER_STATUS_TONE = {
   no_data: 'critical',
   no_connection: 'critical',
 };
+
+function exporterStatusLabel(status) {
+  const key = EXPORTER_STATUS_KEYS[status];
+  return key ? collectorsT(key) : status;
+}
 
 const COMPLETENESS_TONE_CLASS = {
   healthy: 'completeness-pct-green',
@@ -123,11 +148,11 @@ function ExporterStatusCell({ completeness, isLive, flowsPerMin }) {
     <div>
       <StatusIndicator
         status={tone}
-        label={EXPORTER_STATUS_LABELS[status] || status}
+        label={exporterStatusLabel(status)}
       />
       {isLive && (
         <div style={{ marginTop: 3, color: 'var(--fg-secondary)', font: 'var(--pv-text-body-3)' }}>
-          {fmtNum(flowsPerMin)} потоков/мин
+          {collectorsT('collectorsPage.flowsPerMin', { n: fmtNum(flowsPerMin) })}
         </div>
       )}
     </div>
@@ -138,10 +163,12 @@ function CompletenessPctCell({ completeness, onOpen }) {
   const c = completeness;
   const disconnected = c?.exporterStatus === 'no_connection';
   const label = disconnected
-    ? 'Коллектор не присылает снимки дольше 3 минут — процент за окно неактуален'
+    ? collectorsT('collectorsPage.hint.completenessStale')
     : c?.measurable
-      ? `Полнота за ${c.windowMinutes || 30} мин: доля пакетов, дошедших до ClickHouse`
-      : (c?.tooltip || 'Полнота не измеряется');
+      ? collectorsT('collectorsPage.hint.completenessMeasurable', { minutes: c.windowMinutes || 30 })
+      : (c?.status === 'na'
+        ? collectorsT('collectorsPage.hint.completenessSflow')
+        : collectorsT('collectorsPage.hint.completenessNotMeasured'));
   const content = !c || !c.measurable || disconnected || c.completenessPct == null ? (
     <span className="completeness-pct-muted">—</span>
   ) : (
@@ -165,16 +192,16 @@ function CompletenessPctCell({ completeness, onOpen }) {
 }
 
 function SourceBindingBadge({ state }) {
-  if (state === 'assigned') return <StatusIndicator status="healthy" label="Привязан" />;
-  if (state === 'broken_collector_link') return <StatusIndicator status="critical" label="Коллектор не найден" />;
-  return <StatusIndicator status="warning" label="Не привязан" />;
+  if (state === 'assigned') return <StatusIndicator status="healthy" label={collectorsT('collectorsPage.state.assigned')} />;
+  if (state === 'broken_collector_link') return <StatusIndicator status="critical" label={collectorsT('collectorsPage.state.brokenCollectorLink')} />;
+  return <StatusIndicator status="warning" label={collectorsT('collectorsPage.state.notBound')} />;
 }
 
 function fmtCatalogUpdatedAt(value) {
   if (!value) return '—';
   const d = new Date(value);
   if (Number.isNaN(d.getTime())) return String(value);
-  return d.toLocaleString('ru-RU', {
+  return d.toLocaleString(GrapesI18n.intlLocale(), {
     day: '2-digit',
     month: '2-digit',
     year: 'numeric',
@@ -207,21 +234,21 @@ function PageCollectors({ onNavigate, effectivePermissions }) {
     <div className="main__container">
       <div className="page-head">
         <div>
-          <h1>Коллекторы</h1>
-          <p>Справочник локаций, коллекторов, экспортёров и исключений из статистики.</p>
+          <h1>{collectorsT('collectorsPage.title')}</h1>
+          <p>{collectorsT('collectorsPage.subtitle')}</p>
         </div>
         <div className="row" style={{ gap: 8 }}>
-          <Button kind="ghost" icon="refresh" onClick={reload}>Обновить</Button>
+          <Button kind="ghost" icon="refresh" onClick={reload}>{collectorsT('chrome.refresh')}</Button>
         </div>
       </div>
 
       <div className="seg" style={{ width: 'fit-content', marginBottom: 16 }}>
-        <button className={tab === 'locations' ? 'is-active' : ''} onClick={() => setTab('locations')}>Локации</button>
-        <button className={tab === 'collectors' ? 'is-active' : ''} onClick={() => setTab('collectors')}>Коллекторы</button>
-        <button className={tab === 'sources' ? 'is-active' : ''} onClick={() => setTab('sources')}>Экспортёры</button>
-        <button className={tab === 'unassigned' ? 'is-active' : ''} onClick={() => setTab('unassigned')}>Непривязанные</button>
+        <button className={tab === 'locations' ? 'is-active' : ''} onClick={() => setTab('locations')}>{collectorsT('collectorsPage.tab.locations')}</button>
+        <button className={tab === 'collectors' ? 'is-active' : ''} onClick={() => setTab('collectors')}>{collectorsT('collectorsPage.tab.collectors')}</button>
+        <button className={tab === 'sources' ? 'is-active' : ''} onClick={() => setTab('sources')}>{collectorsT('collectorsPage.tab.sources')}</button>
+        <button className={tab === 'unassigned' ? 'is-active' : ''} onClick={() => setTab('unassigned')}>{collectorsT('collectorsPage.tab.unassigned')}</button>
         {canExclusions && (
-          <button className={tab === 'exclusions' ? 'is-active' : ''} onClick={() => setTab('exclusions')}>Исключения</button>
+          <button className={tab === 'exclusions' ? 'is-active' : ''} onClick={() => setTab('exclusions')}>{collectorsT('collectorsPage.tab.exclusions')}</button>
         )}
       </div>
 
@@ -285,7 +312,7 @@ function LocationsTab({ refreshKey, onReload }) {
   }, [rows, search]);
 
   const handleDisable = async (row) => {
-    if (!window.confirm(`Отключить локацию «${row.displayName}»?`)) return;
+    if (!window.confirm(collectorsT('collectorsPage.confirm.disableLocation', { name: row.displayName }))) return;
     try {
       await ApiClient.saveLocation({
         locationId: row.locationId,
@@ -295,17 +322,17 @@ function LocationsTab({ refreshKey, onReload }) {
         comment: row.comment,
         enabled: 0,
       });
-      pushToast({ kind: 'success', title: SAVE_SUCCESS_TITLE, desc: SAVE_SUCCESS_DESC });
+      pushToast({ kind: 'success', title: collectorsT('collectorsPage.saveSuccessTitle'), desc: collectorsT('collectorsPage.saveSuccessDesc') });
       onReload();
     } catch (err) {
-      pushToast({ kind: 'error', title: 'Не удалось отключить', desc: err.message });
+      pushToast({ kind: 'error', title: collectorsT('collectorsPage.toast.disableFailed'), desc: err.message });
     }
   };
 
   const cols = [
     {
       key: 'displayName',
-      title: 'Название',
+      title: collectorsT('collectorsPage.col.name'),
       width: 220,
       sortAccessor: (r) => r.displayName,
       render: (r) => (
@@ -314,7 +341,7 @@ function LocationsTab({ refreshKey, onReload }) {
     },
     {
       key: 'locationId',
-      title: 'ID локации',
+      title: collectorsT('collectorsPage.col.locationId'),
       width: 140,
       sortAccessor: (r) => r.locationId,
       render: (r) => (
@@ -323,19 +350,19 @@ function LocationsTab({ refreshKey, onReload }) {
     },
     {
       key: 'city',
-      title: 'Город',
+      title: collectorsT('collectorsPage.col.city'),
       width: 120,
       render: (r) => <span style={{ color: 'var(--fg-secondary)' }}>{r.city || '—'}</span>,
     },
     {
       key: 'country',
-      title: 'Страна',
+      title: collectorsT('collectorsPage.col.country'),
       width: 80,
       render: (r) => <span className="tag">{r.country || '—'}</span>,
     },
     {
       key: 'comment',
-      title: 'Комментарий',
+      title: collectorsT('collectorsPage.col.comment'),
       width: 200,
       render: (r) => (
         <span style={{ color: 'var(--fg-secondary)', font: 'var(--pv-text-body-3)' }}>
@@ -345,7 +372,7 @@ function LocationsTab({ refreshKey, onReload }) {
     },
     {
       key: 'updatedAt',
-      title: 'Изменено',
+      title: collectorsT('collectorsPage.col.updated'),
       width: 150,
       sortAccessor: (r) => r.updatedAt,
       render: (r) => (
@@ -359,21 +386,21 @@ function LocationsTab({ refreshKey, onReload }) {
   if (loading) {
     return (
       <Card pad="sm">
-        <div style={{ padding: 32, textAlign: 'center', color: 'var(--fg-secondary)' }}>Загрузка…</div>
+        <div style={{ padding: 32, textAlign: 'center', color: 'var(--fg-secondary)' }}>{collectorsT('dashboard.loading')}</div>
       </Card>
     );
   }
 
   if (loadError) {
     return (
-      <Empty icon="db" title="Не удалось загрузить" desc={loadError} action={<Button kind="primary" icon="refresh" onClick={onReload}>Повторить</Button>} />
+      <Empty icon="db" title={collectorsT('collectorsPage.empty.loadFailed')} desc={loadError} action={<Button kind="primary" icon="refresh" onClick={onReload}>{collectorsT('collectorsPage.retry')}</Button>} />
     );
   }
 
   return (
     <>
       <div className="row" style={{ justifyContent: 'flex-end', marginBottom: 12 }}>
-        <Button kind="primary" icon="plus" onClick={() => setShowAdd(true)} disabled={!canWrite}>Добавить локацию</Button>
+        <Button kind="primary" icon="plus" onClick={() => setShowAdd(true)} disabled={!canWrite}>{collectorsT('collectorsPage.addLocation')}</Button>
       </div>
       <DataTable
         rows={filtered}
@@ -384,15 +411,15 @@ function LocationsTab({ refreshKey, onReload }) {
         onSelectChange={setSelected}
         pageSize={15}
         onRowClick={canWrite ? (r) => setEditing({ ...r, isNew: false }) : undefined}
-        emptyTitle="Нет активных локаций"
-        emptyDesc="Добавьте локацию перед созданием коллекторов."
+        emptyTitle={collectorsT('collectorsPage.empty.locationsTitle')}
+        emptyDesc={collectorsT('collectorsPage.empty.locationsDesc')}
         toolbar={{ search, onSearch: setSearch }}
         rowActions={canWrite ? (r) => (
           <div className="row" style={{ gap: 4, justifyContent: 'flex-end' }}>
-            <button className="icon-btn tt" data-tt="Редактировать" onClick={(e) => { e.stopPropagation(); setEditing({ ...r, isNew: false }); }}>
+            <button className="icon-btn tt" data-tt={collectorsT('collectorsPage.edit')} onClick={(e) => { e.stopPropagation(); setEditing({ ...r, isNew: false }); }}>
               <Icon name="edit" size={15} />
             </button>
-            <button className="icon-btn tt" data-tt="Отключить" onClick={(e) => { e.stopPropagation(); handleDisable(r); }}>
+            <button className="icon-btn tt" data-tt={collectorsT('collectorsPage.disable')} onClick={(e) => { e.stopPropagation(); handleDisable(r); }}>
               <Icon name="trash" size={15} />
             </button>
           </div>
@@ -407,7 +434,7 @@ function LocationsTab({ refreshKey, onReload }) {
           setShowAdd(false);
           setEditing(null);
           onReload();
-          pushToast({ kind: 'success', title: SAVE_SUCCESS_TITLE, desc: SAVE_SUCCESS_DESC });
+          pushToast({ kind: 'success', title: collectorsT('collectorsPage.saveSuccessTitle'), desc: collectorsT('collectorsPage.saveSuccessDesc') });
         }}
       />
     </>
@@ -500,7 +527,7 @@ function CollectorsTab({ refreshKey, onReload }) {
       setDeleting(row);
       return;
     }
-    if (!window.confirm(`Отключить коллектор «${row.displayName}»?`)) return;
+    if (!window.confirm(collectorsT('collectorsPage.confirm.disableCollector', { name: row.displayName }))) return;
     try {
       await ApiClient.saveCollector({
         collectorId: row.collectorId,
@@ -510,17 +537,17 @@ function CollectorsTab({ refreshKey, onReload }) {
         comment: row.comment,
         enabled: 0,
       });
-      pushToast({ kind: 'success', title: SAVE_SUCCESS_TITLE, desc: SAVE_SUCCESS_DESC });
+      pushToast({ kind: 'success', title: collectorsT('collectorsPage.saveSuccessTitle'), desc: collectorsT('collectorsPage.saveSuccessDesc') });
       onReload();
     } catch (err) {
-      pushToast({ kind: 'error', title: 'Не удалось отключить', desc: err.message });
+      pushToast({ kind: 'error', title: collectorsT('collectorsPage.toast.disableFailed'), desc: err.message });
     }
   };
 
   const cols = useMemo(() => [
     {
       key: 'displayName',
-      title: 'Название',
+      title: collectorsT('collectorsPage.col.name'),
       width: 220,
       sortAccessor: (r) => r.displayName,
       render: (r) => (
@@ -529,7 +556,7 @@ function CollectorsTab({ refreshKey, onReload }) {
     },
     {
       key: 'collectorId',
-      title: 'ID коллектора',
+      title: collectorsT('collectorsPage.col.collectorId'),
       width: 140,
       sortAccessor: (r) => r.collectorId,
       render: (r) => (
@@ -538,7 +565,7 @@ function CollectorsTab({ refreshKey, onReload }) {
     },
     {
       key: 'locationName',
-      title: 'Локация',
+      title: collectorsT('collectorsPage.col.location'),
       width: 200,
       sortAccessor: (r) => r.locationName,
       render: (r) => (
@@ -550,7 +577,7 @@ function CollectorsTab({ refreshKey, onReload }) {
     },
     {
       key: 'hostname',
-      title: 'Имя хоста',
+      title: collectorsT('collectorsPage.col.hostname'),
       width: 160,
       render: (r) => (
         <span className="mono" style={{ color: 'var(--fg-secondary)' }}>{r.hostname || '—'}</span>
@@ -558,7 +585,7 @@ function CollectorsTab({ refreshKey, onReload }) {
     },
     {
       key: 'state',
-      title: 'Состояние',
+      title: collectorsT('collectorsPage.col.state'),
       width: 170,
       render: (r) => (
         <div>
@@ -571,11 +598,11 @@ function CollectorsTab({ refreshKey, onReload }) {
     },
     {
       key: 'boundSources',
-      title: 'Экспортёры потоков',
+      title: collectorsT('collectorsPage.col.flowSources'),
       width: 220,
       render: (r) => {
         const list = r.boundSources || [];
-        if (!list.length) return <span style={{ color: 'var(--fg-secondary)' }}>Не привязаны</span>;
+        if (!list.length) return <span style={{ color: 'var(--fg-secondary)' }}>{collectorsT('collectorsPage.col.notBoundList')}</span>;
         return (
           <div className="row" style={{ gap: 4, flexWrap: 'wrap' }}>
             {list.slice(0, 4).map((s) => (
@@ -588,7 +615,7 @@ function CollectorsTab({ refreshKey, onReload }) {
     },
     {
       key: 'comment',
-      title: 'Комментарий',
+      title: collectorsT('collectorsPage.col.comment'),
       width: 200,
       render: (r) => (
         <span style={{ color: 'var(--fg-secondary)', font: 'var(--pv-text-body-3)' }}>
@@ -598,7 +625,7 @@ function CollectorsTab({ refreshKey, onReload }) {
     },
     {
       key: 'updatedAt',
-      title: 'Изменено',
+      title: collectorsT('collectorsPage.col.updated'),
       width: 150,
       sortAccessor: (r) => r.updatedAt,
       render: (r) => (
@@ -612,28 +639,26 @@ function CollectorsTab({ refreshKey, onReload }) {
   if (loading) {
     return (
       <Card pad="sm">
-        <div style={{ padding: 32, textAlign: 'center', color: 'var(--fg-secondary)' }}>Загрузка…</div>
+        <div style={{ padding: 32, textAlign: 'center', color: 'var(--fg-secondary)' }}>{collectorsT('dashboard.loading')}</div>
       </Card>
     );
   }
 
   if (loadError) {
     return (
-      <Empty icon="db" title="Не удалось загрузить" desc={loadError} action={<Button kind="primary" icon="refresh" onClick={onReload}>Повторить</Button>} />
+      <Empty icon="db" title={collectorsT('collectorsPage.empty.loadFailed')} desc={loadError} action={<Button kind="primary" icon="refresh" onClick={onReload}>{collectorsT('collectorsPage.retry')}</Button>} />
     );
   }
 
   return (
     <>
       <div className="row" style={{ justifyContent: 'flex-end', marginBottom: 12 }}>
-        <Button kind="primary" icon="plus" onClick={() => setShowAdd(true)} disabled={locations.length === 0 || !canWrite}>
-          Добавить коллектор
-        </Button>
+        <Button kind="primary" icon="plus" onClick={() => setShowAdd(true)} disabled={locations.length === 0 || !canWrite}>{collectorsT('collectorsPage.addCollector')}</Button>
       </div>
       {locations.length === 0 && (
         <Card pad="sm" style={{ marginBottom: 12 }}>
           <div style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-secondary)' }}>
-            Сначала добавьте хотя бы одну локацию на вкладке «Локации».
+            {collectorsT('collectorsPage.hint.needLocationFirst')}
           </div>
         </Card>
       )}
@@ -646,17 +671,17 @@ function CollectorsTab({ refreshKey, onReload }) {
         onSelectChange={setSelected}
         pageSize={15}
         onRowClick={canWrite ? (r) => setEditing({ ...r, isNew: false }) : undefined}
-        emptyTitle="Нет активных коллекторов"
-        emptyDesc="Добавьте коллектор и привяжите его к локации. Экспортёры можно привязать сразу в форме."
+        emptyTitle={collectorsT('collectorsPage.empty.collectorsTitle')}
+        emptyDesc={collectorsT('collectorsPage.empty.collectorsDesc')}
         toolbar={{ search, onSearch: setSearch }}
         rowActions={canWrite ? (r) => (
           <div className="row" style={{ gap: 4, justifyContent: 'flex-end' }}>
-            <button className="icon-btn tt" data-tt="Редактировать" onClick={(e) => { e.stopPropagation(); setEditing({ ...r, isNew: false }); }}>
+            <button className="icon-btn tt" data-tt={collectorsT('collectorsPage.edit')} onClick={(e) => { e.stopPropagation(); setEditing({ ...r, isNew: false }); }}>
               <Icon name="edit" size={15} />
             </button>
             <button
               className="icon-btn tt"
-              data-tt={(r.boundSources || []).length ? 'Удалить (с отвязкой экспортёров)' : 'Отключить'}
+              data-tt={(r.boundSources || []).length ? collectorsT('collectorsPage.deleteWithUnbind') : collectorsT('collectorsPage.disable')}
               onClick={(e) => { e.stopPropagation(); handleDisable(r); }}
             >
               <Icon name="trash" size={15} />
@@ -675,7 +700,7 @@ function CollectorsTab({ refreshKey, onReload }) {
           setShowAdd(false);
           setEditing(null);
           onReload();
-          pushToast({ kind: 'success', title: SAVE_SUCCESS_TITLE, desc: SAVE_SUCCESS_DESC });
+          pushToast({ kind: 'success', title: collectorsT('collectorsPage.saveSuccessTitle'), desc: collectorsT('collectorsPage.saveSuccessDesc') });
         }}
       />
       <DeleteCollectorModal
@@ -685,7 +710,7 @@ function CollectorsTab({ refreshKey, onReload }) {
         onDeleted={() => {
           setDeleting(null);
           onReload();
-          pushToast({ kind: 'success', title: 'Коллектор удалён', desc: SAVE_SUCCESS_DESC });
+          pushToast({ kind: 'success', title: collectorsT('collectorsPage.toast.collectorDeleted'), desc: collectorsT('collectorsPage.saveSuccessDesc') });
         }}
       />
     </>
@@ -723,11 +748,11 @@ function LocationFormModal({ open, row, isNew, onClose, onSaved }) {
     const name = displayName.trim();
     const id = locationId.trim().toLowerCase();
     if (isNew && !id) {
-      setFormError('Укажите location_id');
+      setFormError(collectorsT('collectorsPage.err.locationId'));
       return;
     }
     if (!name) {
-      setFormError('Укажите название локации');
+      setFormError(collectorsT('collectorsPage.err.locationName'));
       return;
     }
 
@@ -756,13 +781,13 @@ function LocationFormModal({ open, row, isNew, onClose, onSaved }) {
     <Modal
       open={open}
       onClose={onClose}
-      title={isNew ? 'Добавить локацию' : 'Редактировать локацию'}
-      subtitle={isNew ? 'Новая запись каталога' : row?.locationId}
+      title={isNew ? collectorsT('collectorsPage.modal.addLocation') : collectorsT('collectorsPage.modal.editLocation')}
+      subtitle={isNew ? collectorsT('collectorsPage.catalogNewEntry') : row?.locationId}
       footer={
         <>
-          <Button kind="ghost" onClick={onClose} disabled={saving}>Отмена</Button>
+          <Button kind="ghost" onClick={onClose} disabled={saving}>{collectorsT('collectorsPage.cancel')}</Button>
           <Button kind="primary" icon="save" onClick={handleSave} disabled={saving}>
-            {saving ? 'Сохранение…' : 'Сохранить'}
+            {saving ? collectorsT('collectorsPage.saving') : collectorsT('collectorsPage.save')}
           </Button>
         </>
       }
@@ -775,23 +800,23 @@ function LocationFormModal({ open, row, isNew, onClose, onSaved }) {
       <div className="grid grid--2col">
         {isNew ? (
           <div className="field">
-            <label>ID локации</label>
+            <label>{collectorsT('collectorsPage.col.locationId')}</label>
             <input
               className="input mono"
               placeholder="msk-m9"
               value={locationId}
               onChange={(e) => setLocationId(e.target.value)}
             />
-            <div className="hint">Строчные латинские буквы, цифры и дефис. Не изменяется после создания.</div>
+            <div className="hint">{collectorsT('collectorsPage.idHint')}</div>
           </div>
         ) : (
           <div className="field">
-            <label>ID локации</label>
+            <label>{collectorsT('collectorsPage.col.locationId')}</label>
             <input className="input mono" value={row?.locationId || ''} readOnly disabled />
           </div>
         )}
         <div className="field">
-          <label>Название</label>
+          <label>{collectorsT('collectorsPage.col.name')}</label>
           <input
             className="input"
             placeholder="Москва, ММТС-9"
@@ -800,19 +825,19 @@ function LocationFormModal({ open, row, isNew, onClose, onSaved }) {
           />
         </div>
         <div className="field">
-          <label>Город</label>
+          <label>{collectorsT('collectorsPage.col.city')}</label>
           <input className="input" placeholder="Москва" value={city} onChange={(e) => setCity(e.target.value)} />
         </div>
         <div className="field">
-          <label>Страна</label>
+          <label>{collectorsT('collectorsPage.col.country')}</label>
           <input className="input mono" placeholder="RU" value={country} onChange={(e) => setCountry(e.target.value)} />
         </div>
         <div className="field" style={{ gridColumn: '1 / -1' }}>
-          <label>Комментарий</label>
+          <label>{collectorsT('collectorsPage.col.comment')}</label>
           <textarea
             className="input"
             rows={3}
-            placeholder="Необязательно"
+            placeholder={collectorsT('collectorsPage.optional')}
             value={comment}
             onChange={(e) => setComment(e.target.value)}
           />
@@ -860,13 +885,13 @@ function DeleteCollectorModal({ open, row, onClose, onDeleted }) {
     <Modal
       open={open}
       onClose={onClose}
-      title="Удалить коллектор"
+      title={collectorsT('collectorsPage.modal.deleteCollector')}
       subtitle={row.collectorId}
       footer={
         <>
-          <Button kind="ghost" onClick={onClose} disabled={saving}>Отмена</Button>
+          <Button kind="ghost" onClick={onClose} disabled={saving}>{collectorsT('collectorsPage.cancel')}</Button>
           <Button kind="primary" icon="trash" onClick={handleDelete} disabled={saving || !nameMatches}>
-            {saving ? 'Удаление…' : 'Удалить коллектор'}
+            {saving ? collectorsT('collectorsPage.deleting') : collectorsT('collectorsPage.modal.deleteCollectorBtn')}
           </Button>
         </>
       }
@@ -877,7 +902,7 @@ function DeleteCollectorModal({ open, row, onClose, onDeleted }) {
         </div>
       )}
       <div style={{ marginBottom: 16, padding: '12px 14px', borderRadius: 8, background: 'var(--st-warning-bg)', color: 'var(--st-warning)', font: 'var(--pv-text-body-3)' }}>
-        Коллектор будет отключён. Привязанные экспортёры ({boundSources.length}) станут без коллектора и потребуют новой привязки.
+        {collectorsT('collectorsPage.modal.deleteCollectorWarn', { n: boundSources.length })}
       </div>
       {boundSources.length > 0 && (
         <div className="row" style={{ gap: 4, flexWrap: 'wrap', marginBottom: 16 }}>
@@ -888,7 +913,7 @@ function DeleteCollectorModal({ open, row, onClose, onDeleted }) {
       )}
       <div className="field">
         <label>
-          Введите название коллектора для подтверждения:
+          {collectorsT('collectorsPage.modal.confirmNameLabel')}
           {' '}
           <span style={{ font: 'var(--pv-text-body-2-bold)' }}>{expectedName}</span>
         </label>
@@ -899,7 +924,7 @@ function DeleteCollectorModal({ open, row, onClose, onDeleted }) {
           onChange={(e) => setConfirmName(e.target.value)}
           autoComplete="off"
         />
-        <div className="hint">Удаление возможно только при точном совпадении названия.</div>
+        <div className="hint">{collectorsT('collectorsPage.modal.confirmNameHint')}</div>
       </div>
     </Modal>
   );
@@ -966,15 +991,15 @@ function CollectorFormModal({ open, row, isNew, locations, flowSources, onClose,
     const name = displayName.trim();
     const id = collectorId.trim().toLowerCase();
     if (isNew && !id) {
-      setFormError('Укажите collector_id');
+      setFormError(collectorsT('collectorsPage.err.collectorId'));
       return;
     }
     if (!name) {
-      setFormError('Укажите название коллектора');
+      setFormError(collectorsT('collectorsPage.err.collectorName'));
       return;
     }
     if (!locationId) {
-      setFormError('Выберите локацию');
+      setFormError(collectorsT('collectorsPage.err.pickLocation'));
       return;
     }
 
@@ -993,7 +1018,7 @@ function CollectorFormModal({ open, row, isNew, locations, flowSources, onClose,
       if (body.meta?.bindErrors?.length) {
         pushToast({
           kind: 'warning',
-          title: 'Коллектор сохранён с предупреждениями',
+          title: collectorsT('collectorsPage.toast.savedWithWarnings'),
           desc: body.meta.bindErrors.map((e) => `${e.sourceId}: ${e.error}`).join('; '),
         });
       }
@@ -1011,7 +1036,7 @@ function CollectorFormModal({ open, row, isNew, locations, flowSources, onClose,
 
   const targetCollectorId = isNew ? collectorId : row?.collectorId;
   const sourceCheckboxRows = useMemo(() => selectableSources.map((src) => {
-    let hint = SOURCE_STATE_LABELS[src.state] || src.state;
+    let hint = sourceStateLabel(src.state) || src.state;
     if (src.currentCollectorId && src.currentCollectorId !== targetCollectorId) {
       hint = `→ ${src.currentCollectorName || src.currentCollectorId}`;
     }
@@ -1020,9 +1045,9 @@ function CollectorFormModal({ open, row, isNew, locations, flowSources, onClose,
 
   const modalFooter = useMemo(() => (
     <>
-      <Button kind="ghost" onClick={onClose} disabled={saving}>Отмена</Button>
+      <Button kind="ghost" onClick={onClose} disabled={saving}>{collectorsT('collectorsPage.cancel')}</Button>
       <Button kind="primary" icon="save" onClick={handleSave} disabled={saving}>
-        {saving ? 'Сохранение…' : 'Сохранить'}
+        {saving ? collectorsT('collectorsPage.saving') : collectorsT('collectorsPage.save')}
       </Button>
     </>
   ), [handleSave, onClose, saving]);
@@ -1033,8 +1058,8 @@ function CollectorFormModal({ open, row, isNew, locations, flowSources, onClose,
     <Modal
       open={open}
       onClose={onClose}
-      title={isNew ? 'Добавить коллектор' : 'Редактировать коллектор'}
-      subtitle={isNew ? 'Новая запись каталога' : row?.collectorId}
+      title={isNew ? collectorsT('collectorsPage.modal.addCollector') : collectorsT('collectorsPage.modal.editCollector')}
+      subtitle={isNew ? collectorsT('collectorsPage.catalogNewEntry') : row?.collectorId}
       footer={modalFooter}
     >
       {formError && (
@@ -1045,7 +1070,7 @@ function CollectorFormModal({ open, row, isNew, locations, flowSources, onClose,
       <div className="grid grid--2col">
         {isNew ? (
           <div className="field">
-            <label>ID коллектора</label>
+            <label>{collectorsT('collectorsPage.col.collectorId')}</label>
             <input
               className="input mono"
               placeholder="col-msk-1"
@@ -1054,16 +1079,16 @@ function CollectorFormModal({ open, row, isNew, locations, flowSources, onClose,
               readOnly={Boolean(prefill?.collectorId)}
               disabled={Boolean(prefill?.collectorId)}
             />
-            <div className="hint">Строчные латинские буквы, цифры и дефис. Не изменяется после создания.</div>
+            <div className="hint">{collectorsT('collectorsPage.idHint')}</div>
           </div>
         ) : (
           <div className="field">
-            <label>ID коллектора</label>
+            <label>{collectorsT('collectorsPage.col.collectorId')}</label>
             <input className="input mono" value={row?.collectorId || ''} readOnly disabled />
           </div>
         )}
         <div className="field">
-          <label>Название</label>
+          <label>{collectorsT('collectorsPage.col.name')}</label>
           <input
             className="input"
             placeholder="XDP mirror M9 #1"
@@ -1072,7 +1097,7 @@ function CollectorFormModal({ open, row, isNew, locations, flowSources, onClose,
           />
         </div>
         <div className="field">
-          <label>Локация</label>
+          <label>{collectorsT('collectorsPage.col.location')}</label>
           <select className="input" value={locationId} onChange={(e) => setLocationId(e.target.value)}>
             {locations.map((loc) => (
               <option key={loc.locationId} value={loc.locationId}>
@@ -1082,7 +1107,7 @@ function CollectorFormModal({ open, row, isNew, locations, flowSources, onClose,
           </select>
         </div>
         <div className="field">
-          <label>Имя хоста</label>
+          <label>{collectorsT('collectorsPage.col.hostname')}</label>
           <input
             className="input mono"
             placeholder="col01.example"
@@ -1091,20 +1116,20 @@ function CollectorFormModal({ open, row, isNew, locations, flowSources, onClose,
           />
         </div>
         <div className="field" style={{ gridColumn: '1 / -1' }}>
-          <label>Комментарий</label>
+          <label>{collectorsT('collectorsPage.col.comment')}</label>
           <textarea
             className="input"
             rows={3}
-            placeholder="Необязательно"
+            placeholder={collectorsT('collectorsPage.optional')}
             value={comment}
             onChange={(e) => setComment(e.target.value)}
           />
         </div>
         <div className="field" style={{ gridColumn: '1 / -1' }}>
-          <label>Экспортёры потоков</label>
+          <label>{collectorsT('collectorsPage.col.flowSources')}</label>
           <div className="card" style={{ maxHeight: 180, overflow: 'auto', padding: 8 }}>
             {!selectableSources.length ? (
-              <div style={{ color: 'var(--fg-secondary)', font: 'var(--pv-text-body-3)' }}>Нет экспортёров в каталоге</div>
+              <div style={{ color: 'var(--fg-secondary)', font: 'var(--pv-text-body-3)' }}>{collectorsT('collectorsPage.empty.noCatalogSources')}</div>
             ) : sourceCheckboxRows.map((src) => (
               <CollectorSourceCheckbox
                 key={src.sourceId}
@@ -1115,7 +1140,7 @@ function CollectorFormModal({ open, row, isNew, locations, flowSources, onClose,
               />
             ))}
           </div>
-          <div className="hint">{flowExporterHint()} Выбранные экспортёры будут привязаны к этому коллектору автоматически.</div>
+          <div className="hint">{flowExporterHint()} {collectorsT('collectorsPage.hint.bindSourcesOnSave')}</div>
         </div>
       </div>
     </Modal>
@@ -1126,7 +1151,7 @@ function SourceStateBadge({ state }) {
   return (
     <StatusIndicator
       status={SOURCE_STATE_TONE[state] || 'idle'}
-      label={SOURCE_STATE_LABELS[state] || state}
+      label={sourceStateLabel(state) || state}
     />
   );
 }
@@ -1162,13 +1187,13 @@ function BindSourceModal({ open, source, collectorOptions, onClose, onSaved }) {
     <Modal
       open={open}
       onClose={onClose}
-      title="Привязать к коллектору"
+      title={collectorsT('collectorsPage.modal.bindToCollector')}
       subtitle={source.sourceId}
       footer={
         <>
-          <Button kind="ghost" onClick={onClose} disabled={saving}>Отмена</Button>
+          <Button kind="ghost" onClick={onClose} disabled={saving}>{collectorsT('collectorsPage.cancel')}</Button>
           <Button kind="primary" icon="link" onClick={handleSave} disabled={saving || !collectorId}>
-            {saving ? 'Сохранение…' : 'Привязать'}
+            {saving ? collectorsT('collectorsPage.saving') : collectorsT('collectorsPage.modal.bindSaving')}
           </Button>
         </>
       }
@@ -1179,16 +1204,16 @@ function BindSourceModal({ open, source, collectorOptions, onClose, onSaved }) {
         </div>
       )}
       <div className="field">
-          <label>Коллектор</label>
+          <label>{collectorsT('collectorsPage.col.collector')}</label>
         <select className="input" value={collectorId} onChange={(e) => setCollectorId(e.target.value)}>
-          <option value="">— отвязать —</option>
+          <option value="">{collectorsT('collectorsPage.modal.unbindOption')}</option>
           {collectorOptions.map((opt) => (
             <option key={opt.value} value={opt.value}>{opt.label}</option>
           ))}
         </select>
       </div>
       <div style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-secondary)' }}>
-        Текущее состояние экспортёра: <SourceStateBadge state={source.state} />
+        {collectorsT('collectorsPage.modal.exporterStatePrefix')} <SourceStateBadge state={source.state} />
         {source.currentCollectorName && (
           <span style={{ marginLeft: 8 }}>→ {source.currentCollectorName}</span>
         )}
@@ -1262,34 +1287,34 @@ function FlowSourcesTab({ refreshKey, onReload, onNavigate }) {
     )));
     try {
       await ApiClient.updateFlowSource({ sourceId: row.sourceId, additional });
-      pushToast({ kind: 'success', title: SAVE_SUCCESS_TITLE, desc: SAVE_SUCCESS_DESC });
+      pushToast({ kind: 'success', title: collectorsT('collectorsPage.saveSuccessTitle'), desc: collectorsT('collectorsPage.saveSuccessDesc') });
     } catch (err) {
       setRows(prev);
-      pushToast({ kind: 'error', title: 'Не удалось сохранить', desc: err.message });
+      pushToast({ kind: 'error', title: collectorsT('collectorsPage.toast.saveFailed'), desc: err.message });
     } finally {
       setSavingAdditional(null);
     }
   };
 
   const handleUnbind = async (row) => {
-    if (!window.confirm(`Отвязать экспортёр «${row.sourceId}» от коллектора?`)) return;
+    if (!window.confirm(collectorsT('collectorsPage.confirm.unbindSource', { id: row.sourceId }))) return;
     try {
       await ApiClient.bindFlowSource({ sourceId: row.sourceId, collectorId: '' });
-      pushToast({ kind: 'success', title: 'Экспортёр отвязан', desc: SAVE_SUCCESS_DESC });
+      pushToast({ kind: 'success', title: collectorsT('collectorsPage.toast.sourceUnbound'), desc: collectorsT('collectorsPage.saveSuccessDesc') });
       onReload();
     } catch (err) {
-      pushToast({ kind: 'error', title: 'Не удалось отвязать', desc: err.message });
+      pushToast({ kind: 'error', title: collectorsT('collectorsPage.toast.unbindFailed'), desc: err.message });
     }
   };
 
   const handleDelete = async (row) => {
-    if (!window.confirm(`Удалить экспортёр «${row.sourceId}» из каталога? Live-данные могут снова показать его как непривязанный.`)) return;
+    if (!window.confirm(collectorsT('collectorsPage.confirm.deleteSource', { id: row.sourceId }))) return;
     try {
       await ApiClient.deleteFlowSource({ sourceId: row.sourceId });
-      pushToast({ kind: 'success', title: 'Экспортёр удалён', desc: SAVE_SUCCESS_DESC });
+      pushToast({ kind: 'success', title: collectorsT('collectorsPage.toast.sourceDeleted'), desc: collectorsT('collectorsPage.saveSuccessDesc') });
       onReload();
     } catch (err) {
-      pushToast({ kind: 'error', title: 'Не удалось удалить', desc: err.message });
+      pushToast({ kind: 'error', title: collectorsT('collectorsPage.toast.deleteFailed'), desc: err.message });
     }
   };
 
@@ -1307,20 +1332,20 @@ function FlowSourcesTab({ refreshKey, onReload, onNavigate }) {
   const cols = [
     {
       key: 'sourceId',
-      title: 'ID экспортёра',
+      title: collectorsT('collectorsPage.col.sourceId'),
       width: 160,
       sortAccessor: (r) => r.sourceId,
       render: (r) => <span className="mono" style={{ font: 'var(--pv-text-body-2-bold)' }}>{r.sourceId}</span>,
     },
     {
       key: 'sourceName',
-      title: 'Название',
+      title: collectorsT('collectorsPage.col.name'),
       width: 180,
       render: (r) => r.sourceName || '—',
     },
     {
       key: 'sourceType',
-      title: 'Тип',
+      title: collectorsT('collectorsPage.col.type'),
       width: 100,
       render: (r) => <Badge tone="neutral">{r.sourceType || '—'}</Badge>,
     },
@@ -1328,7 +1353,7 @@ function FlowSourcesTab({ refreshKey, onReload, onNavigate }) {
       key: 'additional',
       title: (
         <span className="tt" data-tt={additionalSourceHint()}>
-          Дополнительный
+          {collectorsT('collectorsPage.col.additional')}
         </span>
       ),
       width: 150,
@@ -1340,14 +1365,14 @@ function FlowSourcesTab({ refreshKey, onReload, onNavigate }) {
             onChange={(v) => handleAdditional(r, v)}
           />
           <span style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-secondary)' }}>
-            {r.additional || r.includeInTotal === false ? 'да' : 'нет'}
+            {r.additional || r.includeInTotal === false ? collectorsT('collectorsPage.yes') : collectorsT('collectorsPage.no')}
           </span>
         </label>
       ),
     },
     {
       key: 'isLive',
-      title: 'Работает',
+      title: collectorsT('collectorsPage.col.working'),
       width: 150,
       render: (r) => (
         <ExporterStatusCell
@@ -1360,8 +1385,8 @@ function FlowSourcesTab({ refreshKey, onReload, onNavigate }) {
     {
       key: 'completeness',
       title: (
-        <span className="tt" data-tt="Нажмите на значение для подробностей">
-          Полнота
+        <span className="tt" data-tt={collectorsT('collectorsPage.hint.completenessClick')}>
+          {collectorsT('collectorsPage.col.completeness')}
         </span>
       ),
       width: 120,
@@ -1377,13 +1402,13 @@ function FlowSourcesTab({ refreshKey, onReload, onNavigate }) {
     },
     {
       key: 'state',
-      title: 'Привязка',
+      title: collectorsT('collectorsPage.col.binding'),
       width: 160,
       render: (r) => <SourceBindingBadge state={r.state} />,
     },
     {
       key: 'currentCollectorName',
-      title: 'Коллектор',
+      title: collectorsT('collectorsPage.col.collector'),
       width: 200,
       render: (r) => (
         <div>
@@ -1399,23 +1424,23 @@ function FlowSourcesTab({ refreshKey, onReload, onNavigate }) {
   if (loading) {
     return (
       <Card pad="sm">
-        <div style={{ padding: 32, textAlign: 'center', color: 'var(--fg-secondary)' }}>Загрузка…</div>
+        <div style={{ padding: 32, textAlign: 'center', color: 'var(--fg-secondary)' }}>{collectorsT('dashboard.loading')}</div>
       </Card>
     );
   }
 
   if (loadError) {
     return (
-      <Empty icon="db" title="Не удалось загрузить" desc={loadError} action={<Button kind="primary" icon="refresh" onClick={onReload}>Повторить</Button>} />
+      <Empty icon="db" title={collectorsT('collectorsPage.empty.loadFailed')} desc={loadError} action={<Button kind="primary" icon="refresh" onClick={onReload}>{collectorsT('collectorsPage.retry')}</Button>} />
     );
   }
 
   return (
     <>
       <Card pad="sm" style={{ marginBottom: 12 }}>
-        <div style={{ font: 'var(--pv-text-body-2-bold)', marginBottom: 4 }}>Дополнительный источник</div>
+        <div style={{ font: 'var(--pv-text-body-2-bold)', marginBottom: 4 }}>{collectorsT('collectorsPage.hint.additionalCardTitle')}</div>
         <div style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-secondary)' }}>
-          {additionalSourceHint()} Основной источник (сейчас sFlow) оставляйте без этой галки.
+          {additionalSourceHint()} {collectorsT('collectorsPage.hint.additionalCardBody')}
         </div>
       </Card>
       <DataTable
@@ -1423,8 +1448,8 @@ function FlowSourcesTab({ refreshKey, onReload, onNavigate }) {
         columns={cols}
         rowKey="id"
         pageSize={15}
-        emptyTitle="Нет экспортёров потоков в каталоге"
-        emptyDesc={`${flowExporterHint()} Новые экспортёры появятся на вкладке «Непривязанные», когда от них придут live-данные.`}
+        emptyTitle={collectorsT('collectorsPage.empty.sourcesTitle')}
+        emptyDesc={`${flowExporterHint()} ${collectorsT('collectorsPage.empty.sourcesDescSuffix')}`}
         toolbar={{ search, onSearch: setSearch }}
         rowActions={(r) => (
           <div className="row" style={{ gap: 4, justifyContent: 'flex-end' }}>
@@ -1436,24 +1461,16 @@ function FlowSourcesTab({ refreshKey, onReload, onNavigate }) {
                 const c = r.completeness || completenessBySource.get(r.sourceId);
                 setDetails({ ...r, completeness: c || null });
               }}
-            >
-              Подробнее
-            </Button>
+            >{collectorsT('collectorsPage.details')}</Button>
             {canWrite && (
               <>
                 {r.state !== 'assigned' && (
-                  <Button size="sm" kind="ghost" icon="link" onClick={(e) => { e.stopPropagation(); setBinding(r); }}>
-                    Привязать
-                  </Button>
+                  <Button size="sm" kind="ghost" icon="link" onClick={(e) => { e.stopPropagation(); setBinding(r); }}>{collectorsT('collectorsPage.bind')}</Button>
                 )}
                 {r.currentCollectorId && (
-                  <Button size="sm" kind="ghost" onClick={(e) => { e.stopPropagation(); handleUnbind(r); }}>
-                    Отвязать
-                  </Button>
+                  <Button size="sm" kind="ghost" onClick={(e) => { e.stopPropagation(); handleUnbind(r); }}>{collectorsT('collectorsPage.unbind')}</Button>
                 )}
-                <Button size="sm" kind="ghost" icon="trash" onClick={(e) => { e.stopPropagation(); handleDelete(r); }}>
-                  Удалить
-                </Button>
+                <Button size="sm" kind="ghost" icon="trash" onClick={(e) => { e.stopPropagation(); handleDelete(r); }}>{collectorsT('collectorsPage.delete')}</Button>
               </>
             )}
           </div>
@@ -1467,7 +1484,7 @@ function FlowSourcesTab({ refreshKey, onReload, onNavigate }) {
         onSaved={() => {
           setBinding(null);
           onReload();
-          pushToast({ kind: 'success', title: SAVE_SUCCESS_TITLE, desc: SAVE_SUCCESS_DESC });
+          pushToast({ kind: 'success', title: collectorsT('collectorsPage.saveSuccessTitle'), desc: collectorsT('collectorsPage.saveSuccessDesc') });
         }}
       />
       <CollectorsCompletenessModal
@@ -1555,12 +1572,12 @@ function UnassignedTab({ refreshKey, onReload }) {
       });
       pushToast({
         kind: 'success',
-        title: SAVE_SUCCESS_TITLE,
-        desc: 'Записан как дополнительный — не в «Всего» и не в детекторе. Галку можно снять на вкладке «Экспортёры».',
+        title: collectorsT('collectorsPage.saveSuccessTitle'),
+        desc: collectorsT('collectorsPage.toast.registerAdditionalDesc'),
       });
       onReload();
     } catch (err) {
-      pushToast({ kind: 'error', title: 'Не удалось зарегистрировать', desc: err.message });
+      pushToast({ kind: 'error', title: collectorsT('collectorsPage.toast.registerFailed'), desc: err.message });
     } finally {
       setRegistering(null);
     }
@@ -1569,7 +1586,7 @@ function UnassignedTab({ refreshKey, onReload }) {
   const collectorCols = [
     {
       key: 'displayName',
-      title: 'Коллектор',
+      title: collectorsT('collectorsPage.col.collector'),
       width: 220,
       render: (r) => (
         <div>
@@ -1580,13 +1597,13 @@ function UnassignedTab({ refreshKey, onReload }) {
     },
     {
       key: 'locationName',
-      title: 'Локация',
+      title: collectorsT('collectorsPage.col.location'),
       width: 180,
       render: (r) => r.locationName || '—',
     },
     {
       key: 'state',
-      title: 'Состояние',
+      title: collectorsT('collectorsPage.col.state'),
       width: 170,
       render: (r) => (
         <div>
@@ -1602,36 +1619,36 @@ function UnassignedTab({ refreshKey, onReload }) {
   const cols = [
     {
       key: 'sourceId',
-      title: 'ID экспортёра',
+      title: collectorsT('collectorsPage.col.sourceId'),
       width: 160,
       render: (r) => <span className="mono" style={{ font: 'var(--pv-text-body-2-bold)' }}>{r.sourceId}</span>,
     },
     {
       key: 'state',
-      title: 'Причина',
+      title: collectorsT('collectorsPage.col.reason'),
       width: 180,
       render: (r) => (
         <StatusIndicator
           status={DISCOVERED_STATE_TONE[r.state] || 'idle'}
-          label={DISCOVERED_STATE_LABELS[r.state] || r.state}
+          label={discoveredStateLabel(r.state) || r.state}
         />
       ),
     },
     {
       key: 'flowsPerMin',
-      title: 'Потоков/мин',
+      title: collectorsT('collectorsPage.col.flowsPerMin'),
       width: 100,
       render: (r) => <span className="mono num">{fmtNum(r.flowsPerMin)}</span>,
     },
     {
       key: 'ageSec',
-      title: 'Давность',
+      title: collectorsT('collectorsPage.col.age'),
       width: 100,
-      render: (r) => (r.ageSec != null ? `${r.ageSec} с` : '—'),
+      render: (r) => (r.ageSec != null ? collectorsT('collectorsPage.ageSec', { n: r.ageSec }) : '—'),
     },
     {
       key: 'currentCollectorName',
-      title: 'Коллектор',
+      title: collectorsT('collectorsPage.col.collector'),
       width: 180,
       render: (r) => r.currentCollectorName || r.currentCollectorId || '—',
     },
@@ -1640,23 +1657,23 @@ function UnassignedTab({ refreshKey, onReload }) {
   if (loading) {
     return (
       <Card pad="sm">
-        <div style={{ padding: 32, textAlign: 'center', color: 'var(--fg-secondary)' }}>Загрузка…</div>
+        <div style={{ padding: 32, textAlign: 'center', color: 'var(--fg-secondary)' }}>{collectorsT('dashboard.loading')}</div>
       </Card>
     );
   }
 
   if (loadError) {
     return (
-      <Empty icon="db" title="Не удалось загрузить" desc={loadError} action={<Button kind="primary" icon="refresh" onClick={onReload}>Повторить</Button>} />
+      <Empty icon="db" title={collectorsT('collectorsPage.empty.loadFailed')} desc={loadError} action={<Button kind="primary" icon="refresh" onClick={onReload}>{collectorsT('collectorsPage.retry')}</Button>} />
     );
   }
 
   return (
     <>
       <Card pad="sm" style={{ marginBottom: 12 }}>
-        <div style={{ font: 'var(--pv-text-body-2-bold)', marginBottom: 4 }}>Что сюда попадает</div>
+        <div style={{ font: 'var(--pv-text-body-2-bold)', marginBottom: 4 }}>{collectorsT('collectorsPage.hint.unassignedIntroTitle')}</div>
         <div style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-secondary)' }}>
-          Коллекторы без экспортёров и live-экспортёры, которые ещё не привязаны к рабочему коллектору.
+          {collectorsT('collectorsPage.hint.unassignedIntroBody')}
         </div>
       </Card>
       <DataTable
@@ -1664,8 +1681,8 @@ function UnassignedTab({ refreshKey, onReload }) {
         columns={collectorCols}
         rowKey="id"
         pageSize={8}
-        emptyTitle="Нет коллекторов без экспортёров"
-        emptyDesc="У всех активных коллекторов есть привязанные экспортёры."
+        emptyTitle={collectorsT('collectorsPage.empty.emptyCollectorsTitle')}
+        emptyDesc={collectorsT('collectorsPage.empty.emptyCollectorsDesc')}
         toolbar={{ search, onSearch: setSearch }}
       />
       <div style={{ height: 16 }} />
@@ -1674,8 +1691,8 @@ function UnassignedTab({ refreshKey, onReload }) {
         columns={cols}
         rowKey="id"
         pageSize={15}
-        emptyTitle="Нет непривязанных экспортёров"
-        emptyDesc="Все live-экспортёры есть в каталоге и привязаны к рабочим коллекторам."
+        emptyTitle={collectorsT('collectorsPage.empty.unassignedTitle')}
+        emptyDesc={collectorsT('collectorsPage.empty.unassignedDesc')}
         toolbar={{ search, onSearch: setSearch }}
         rowActions={canWrite ? (r) => (
           <div className="row" style={{ gap: 4, justifyContent: 'flex-end' }}>
@@ -1685,18 +1702,12 @@ function UnassignedTab({ refreshKey, onReload }) {
                 kind="ghost"
                 disabled={registering === r.sourceId}
                 onClick={(e) => { e.stopPropagation(); handleRegister(r); }}
-              >
-                Зарегистрировать
-              </Button>
+              >{collectorsT('collectorsPage.register')}</Button>
             )}
             {(r.state === 'broken_collector_link' || r.state === 'unassigned_online') && (
               <>
-                <Button size="sm" kind="ghost" icon="link" onClick={(e) => { e.stopPropagation(); setBinding(r); }}>
-                  Привязать
-                </Button>
-                <Button size="sm" kind="ghost" icon="plus" onClick={(e) => { e.stopPropagation(); setCreateFrom(r); }}>
-                  Создать коллектор
-                </Button>
+                <Button size="sm" kind="ghost" icon="link" onClick={(e) => { e.stopPropagation(); setBinding(r); }}>{collectorsT('collectorsPage.bind')}</Button>
+                <Button size="sm" kind="ghost" icon="plus" onClick={(e) => { e.stopPropagation(); setCreateFrom(r); }}>{collectorsT('collectorsPage.createCollector')}</Button>
               </>
             )}
           </div>
@@ -1715,7 +1726,7 @@ function UnassignedTab({ refreshKey, onReload }) {
         onSaved={() => {
           setBinding(null);
           onReload();
-          pushToast({ kind: 'success', title: SAVE_SUCCESS_TITLE, desc: SAVE_SUCCESS_DESC });
+          pushToast({ kind: 'success', title: collectorsT('collectorsPage.saveSuccessTitle'), desc: collectorsT('collectorsPage.saveSuccessDesc') });
         }}
       />
       <CollectorFormModal
@@ -1733,7 +1744,7 @@ function UnassignedTab({ refreshKey, onReload }) {
         onSaved={() => {
           setCreateFrom(null);
           onReload();
-          pushToast({ kind: 'success', title: SAVE_SUCCESS_TITLE, desc: SAVE_SUCCESS_DESC });
+          pushToast({ kind: 'success', title: collectorsT('collectorsPage.saveSuccessTitle'), desc: collectorsT('collectorsPage.saveSuccessDesc') });
         }}
       />
     </>
