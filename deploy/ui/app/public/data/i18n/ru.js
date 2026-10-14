@@ -397,6 +397,7 @@
     'observations.expandTitle': 'Развернуть график и таблицу',
     'observations.collapseTitle': 'Свернуть график и таблицу',
     'observations.new': 'Новое',
+    // Свободны к использованию (ранее пункты меню «Новое» на доске наблюдений).
     'observations.fromExplorer': 'Из разбора трафика…',
     'observations.preset.uplink': 'Входящий/исходящий трафик',
     'observations.preset.vlan': 'Трафик по VLAN',

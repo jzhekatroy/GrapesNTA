@@ -53,13 +53,6 @@ function observationChartStyles() {
   }));
 }
 
-function observationPresetLabel(preset) {
-  if (!preset) return '';
-  if (preset.id === 'preset-uplink-direction') return obsT('observations.preset.uplink');
-  if (preset.id === 'preset-vlan-trend') return obsT('observations.preset.vlan');
-  return preset.name || '';
-}
-
 const OBS_CHART_DIRECTION_LINE_KEYS = new Set([
   'incoming', 'outgoing', 'transit', 'internal', 'unclassified', 'total',
 ]);
@@ -1650,10 +1643,8 @@ function PageObservations({ onNavigate }) {
   const [settings, setSettings] = useState(null);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
-  const [createMenuOpen, setCreateMenuOpen] = useState(false);
   const [collectors, setCollectors] = useState([]);
   const [locations, setLocations] = useState([]);
-  const createMenuRef = useRef(null);
 
   const settingsItem = useMemo(
     () => items.find((x) => x.id === settingsItemId) || null,
@@ -1661,20 +1652,6 @@ function PageObservations({ onNavigate }) {
   );
 
   const filterFields = config?.schema?.filterFields || [];
-  const nativePresets = useMemo(() => {
-    const presets = config?.presets || [];
-    return presets.filter((p) => p.id === 'preset-uplink-direction' || p.id === 'preset-vlan-trend');
-  }, [config?.presets]);
-
-  useEffect(() => {
-    if (!createMenuOpen) return undefined;
-    const onPointerDown = (e) => {
-      if (createMenuRef.current?.contains(e.target)) return;
-      setCreateMenuOpen(false);
-    };
-    document.addEventListener('mousedown', onPointerDown);
-    return () => document.removeEventListener('mousedown', onPointerDown);
-  }, [createMenuOpen]);
   // Все измерения схемы, а не только «топовые»: разрез приходит из разбора
   // трафика и может содержать любое поле, иначе подпись падает до сырого id.
   const groupOptions = useMemo(() => {
@@ -1884,31 +1861,6 @@ function PageObservations({ onNavigate }) {
   const settingsIsNative = settingsItem ? isNativeAggregateObservation(settingsItem) : false;
   const settingsNativeDataSource = chartWidgetDataSource(settings?.widgets || settingsItem?.widgets);
   const settingsNativeScope = chartWidgetNativeScope(settings?.widgets);
-
-  const createFromPreset = async (presetId) => {
-    if (!canWriteObservations) return;
-    const preset = (config?.presets || []).find((p) => p.id === presetId);
-    if (!preset) return;
-    setCreateMenuOpen(false);
-    setBusy(true);
-    setError('');
-    try {
-      const created = await ApiClient.createObservation({
-        name: observationPresetLabel(preset),
-        description: '',
-        filters: preset.filters || [],
-        widgets: preset.widgets,
-        lookback: preset.lookback || '1h',
-      });
-      const item = created?.data || created;
-      await reload();
-      if (item?.id) openSettings(item);
-    } catch (e) {
-      setError(e.message || 'Не удалось создать наблюдение');
-    } finally {
-      setBusy(false);
-    }
-  };
 
   if (settings && settingsItem) {
     return (
@@ -2162,55 +2114,13 @@ function PageObservations({ onNavigate }) {
           <h1>{obsT('observations.title')}</h1>
         </div>
         {canWrite && (
-          <div ref={createMenuRef} style={{ position: 'relative' }}>
-            <button
-              type="button"
-              className="btn btn--primary"
-              aria-expanded={createMenuOpen}
-              onClick={() => setCreateMenuOpen((v) => !v)}
-            >
-              + {obsT('observations.new')}
-            </button>
-            {createMenuOpen && (
-              <div
-                className="time-filter__menu"
-                style={{
-                  position: 'absolute',
-                  top: 'calc(100% + 6px)',
-                  right: 0,
-                  left: 'auto',
-                  minWidth: 280,
-                  maxWidth: 'calc(100vw - 16px)',
-                  zIndex: 1200,
-                }}
-                role="menu"
-              >
-                {nativePresets.map((preset) => (
-                  <button
-                    key={preset.id}
-                    type="button"
-                    role="menuitem"
-                    className="time-filter__option"
-                    disabled={busy}
-                    onClick={() => createFromPreset(preset.id)}
-                  >
-                    <span>{observationPresetLabel(preset)}</span>
-                  </button>
-                ))}
-                <button
-                  type="button"
-                  role="menuitem"
-                  className="time-filter__option"
-                  onClick={() => {
-                    setCreateMenuOpen(false);
-                    startComposeInExplorer(onNavigate, { mode: 'new' });
-                  }}
-                >
-                  {obsT('observations.fromExplorer')}
-                </button>
-              </div>
-            )}
-          </div>
+          <button
+            type="button"
+            className="btn btn--primary"
+            onClick={() => startComposeInExplorer(onNavigate, { mode: 'new' })}
+          >
+            + {obsT('observations.new')}
+          </button>
         )}
       </div>
       <div className="col" style={{ gap: 16, padding: '0 0 24px' }}>
