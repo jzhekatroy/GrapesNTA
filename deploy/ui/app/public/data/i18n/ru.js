@@ -8,6 +8,7 @@
     'nav.section.netmodel': 'Модель сети',
     'nav.section.admin': 'Администрирование',
 
+    'nav.item.monitoring': 'Мониторинг',
     'nav.item.dashboard': 'Обзор',
     'nav.item.observations': 'Наблюдения',
     'nav.item.dns': 'DNS',

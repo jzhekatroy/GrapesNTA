@@ -2102,7 +2102,7 @@ async function loadHistory({ scope, scopeId, proto, metric, hours, from, to } = 
     err.statusCode = 400;
     throw err;
   }
-  if (!['client', 'net'].includes(String(scope || ''))) {
+  if (!['client', 'net', 'provider'].includes(String(scope || ''))) {
     const err = new Error('Неизвестный объект');
     err.statusCode = 400;
     throw err;

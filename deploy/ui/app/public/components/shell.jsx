@@ -6,6 +6,7 @@ const NAV = [
   {
     id: 'overview',
     items: [
+      { id: 'monitoring', icon: 'alert' },
       { id: 'dashboard', icon: 'dashboard' },
       { id: 'observations', icon: 'query' },
       { id: 'dns', icon: 'globe' },
