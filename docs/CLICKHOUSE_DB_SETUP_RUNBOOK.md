@@ -142,6 +142,8 @@ GRANT SELECT, INSERT, CREATE TABLE, ALTER TABLE, DROP TABLE ON default.* TO ui_a
 GRANT CREATE DICTIONARY, DROP DICTIONARY ON default.* TO ui_admin;
 GRANT SYSTEM RELOAD DICTIONARY ON *.* TO ui_admin;
 GRANT SELECT ON system.* TO ui_admin;
+GRANT SELECT ON system.parts TO ui_admin;
+GRANT SELECT ON system.disks TO ui_admin;
 ```
 
 ### Политика лимитов: только `throw`, никогда `break`
