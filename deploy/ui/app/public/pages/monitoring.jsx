@@ -562,14 +562,25 @@ function MonitoringVolumeBanner({ event }) {
   );
 }
 
+/** Минуты детекции/CH в ответе API — UTC wall, как parseUtc на сервере. */
+function parseUtcMinuteMs(value) {
+  if (value == null || value === '') return null;
+  const raw = String(value).trim();
+  if (!raw) return null;
+  const iso = raw.includes('T') ? (raw.endsWith('Z') ? raw : `${raw}Z`) : `${raw.replace(' ', 'T')}Z`;
+  const ms = Date.parse(iso);
+  return Number.isFinite(ms) ? ms : null;
+}
+
 function historyChartPoints(history) {
   return (history?.points || []).map((p) => {
+    const bps = Number(p.bps);
     const baseline = Number(p.baselineBps);
     return {
       t: p.t,
       bucket: p.t,
-      bucketMs: p.bucketMs != null ? Number(p.bucketMs) : parseChartBucketMs(p.t),
-      bps: Number(p.bps) || 0,
+      bucketMs: p.bucketMs != null ? Number(p.bucketMs) : parseUtcMinuteMs(p.t),
+      bps: Number.isFinite(bps) && bps > 0 ? bps : null,
       baselineBps: Number.isFinite(baseline) && baseline > 0 ? baseline : null,
     };
   });
@@ -627,10 +638,14 @@ function MonitoringAttackDetail({ attackId, onBack }) {
   }, []);
 
   const chartPoints = useMemo(() => historyChartPoints(history), [history]);
-  const periodStartMs = parseChartBucketMs(history?.from);
-  const periodEndMs = parseChartBucketMs(history?.to);
+  const periodStartMs = parseUtcMinuteMs(history?.from);
+  const periodEndMs = parseUtcMinuteMs(history?.to);
   const marks = history?.alertMinute
-    ? [{ t: history.alertMinute, label: 'алерт' }]
+    ? [{
+      t: history.alertMinute,
+      bucketMs: parseUtcMinuteMs(history.alertMinute),
+      label: 'алерт',
+    }]
     : [];
 
   const state = liveStateLabel(event || {});
@@ -704,6 +719,7 @@ function MonitoringAttackDetail({ attackId, onBack }) {
                 periodEndMs={periodEndMs}
                 skipTrailingGaps
                 marks={marks}
+                displayTimezone="Europe/Moscow"
               />
             ) : (
               <div className="monitoring-empty">Нет данных для графика</div>
