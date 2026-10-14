@@ -105,6 +105,7 @@ const ENSURE_SQL = [
     account String,
     client_name String,
     services String,
+    macs String DEFAULT '',
     switch_host String,
     inven String,
     if_index UInt32,
@@ -123,6 +124,8 @@ const ENSURE_SQL = [
   PARTITION BY toYYYYMM(started_at)
   ORDER BY (run_id, section, account)
   TTL started_at + toIntervalDay(90)`,
+  // CREATE IF NOT EXISTS не добавляет колонку в уже живую таблицу.
+  `ALTER TABLE default.${REPORT_TABLE} ADD COLUMN IF NOT EXISTS macs String DEFAULT '' AFTER services`,
 ];
 
 const FIELD_MAP = [
@@ -695,7 +698,7 @@ async function listJournal(db, limit = 30) {
 async function getReport(db, runId) {
   await ensureSchema(db);
   return db.query(`
-    SELECT section, category, account, client_name, services,
+    SELECT section, category, account, client_name, services, macs,
            switch_host, inven, if_index, switch_name, if_name, if_alias, speed_mbps,
            prefix, l3_prefix, l3_role, verdict, reason, notes
     FROM default.${REPORT_TABLE}

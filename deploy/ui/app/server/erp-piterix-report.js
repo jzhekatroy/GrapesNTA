@@ -69,6 +69,7 @@ const COLUMNS_HEAD = [
   ['account', 'ЛС'],
   ['client_name', 'Клиент'],
   ['services', 'Услуги'],
+  ['macs', 'MAC'],
 ];
 
 const COLUMNS_PORTS = [
@@ -234,6 +235,30 @@ function clientName(client) {
   return String(client?.name || '').trim();
 }
 
+// Текущие ips[].mac. История не берётся: там MAC почти пустой и это уже не
+// адрес клиента. Один ЛС держит несколько разных MAC, один и тот же MAC часто
+// повторён на нескольких IP — в ячейке он один раз.
+function normalizeMac(value) {
+  const raw = String(value ?? '').trim().toLowerCase();
+  if (!raw) return '';
+  const hex = raw.replace(/[^0-9a-f]/g, '');
+  if (hex.length === 12) return hex.match(/.{2}/g).join(':');
+  return raw;
+}
+
+function clientMacs(client) {
+  const seen = new Set();
+  const out = [];
+  for (const ip of client?.ips || []) {
+    const mac = normalizeMac(ip && ip.mac);
+    if (!mac || seen.has(mac)) continue;
+    seen.add(mac);
+    out.push(mac);
+  }
+  out.sort();
+  return out.join('; ');
+}
+
 function emptyRow(section, category) {
   return {
     section,
@@ -241,6 +266,7 @@ function emptyRow(section, category) {
     account: '',
     client_name: '',
     services: '',
+    macs: '',
     switch_host: '',
     inven: '',
     if_index: 0,
@@ -290,6 +316,7 @@ function buildPortRows(active, catalog, category) {
       account,
       client_name: clientName(client),
       services: formatServices(client),
+      macs: clientMacs(client),
       notes: noAddress,
     };
     const ports = uniquePorts(client);
@@ -385,6 +412,7 @@ function buildPrefixRows(active, l3Index, category, { l3Known = true } = {}) {
       account,
       client_name: clientName(client),
       services: formatServices(client),
+      macs: clientMacs(client),
     };
     const prefixes = uniquePrefixes(client);
     if (!prefixes.length) {
@@ -536,6 +564,7 @@ module.exports = {
   coveringPrefix,
   findNesting,
   formatServices,
+  clientMacs,
   buildReportRows,
   summarizeReport,
   reportToCsv,
