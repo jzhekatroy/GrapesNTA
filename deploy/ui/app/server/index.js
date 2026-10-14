@@ -242,6 +242,7 @@ const {
 } = require('./cabinet/routes');
 const { createErpPiterixRouter } = require('./erp-piterix-routes');
 const { createDetectionRouter } = require('./detection-routes');
+const { createMonitoringRouter } = require('./monitoring-routes');
 const {
   resolveCabinetContext,
   cabinetPayload,
@@ -746,6 +747,7 @@ app.use('/api/cabinet', createCabinetRouter({ sessions }));
 app.use('/api/clients', createClientsRouter({ sessions }));
 app.use('/api/erp-piterix', createErpPiterixRouter());
 app.use('/api/detection', createDetectionRouter());
+app.use('/api/monitoring', createMonitoringRouter());
 
 app.get('/api/dashboard/collectors', async (_req, res) => {
   try {

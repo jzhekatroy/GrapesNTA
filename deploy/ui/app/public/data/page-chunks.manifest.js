@@ -12,6 +12,10 @@ const PAGE_CHUNKS_MANIFEST = {
     detection: 'diagnostics',
   },
   chunks: {
+    monitoring: {
+      scripts: ['/pages/monitoring.jsx'],
+      exports: { default: 'PageMonitoring' },
+    },
     dashboard: {
       scripts: [
         '/components/talkers.jsx',

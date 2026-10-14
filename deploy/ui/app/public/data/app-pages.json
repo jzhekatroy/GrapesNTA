@@ -1,4 +1,5 @@
 [
+  { "id": "monitoring", "title": "Мониторинг", "section": "Главное" },
   { "id": "dashboard", "title": "Обзор", "section": "Главное" },
   { "id": "cabinet-settings", "title": "Настройки", "section": "Кабинет" },
   { "id": "observations", "title": "Наблюдения", "section": "Главное" },
