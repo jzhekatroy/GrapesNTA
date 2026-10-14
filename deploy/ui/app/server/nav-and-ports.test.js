@@ -95,6 +95,10 @@ test('api-map maps direction diagnostics before generic diagnostics', () => {
   assert.equal(getResourceForPath('/api/detection/telegram/test', 'POST'), 'diagnostics');
   assert.equal(getResourceForPath('/api/detection/events'), 'diagnostics');
   assert.equal(getResourceForPath('/api/detection/events/export'), 'diagnostics');
+  assert.equal(getResourceForPath('/api/monitoring/attacks'), 'monitoring');
+  assert.equal(getResourceForPath('/api/monitoring/attacks/abc/history'), 'monitoring');
+  assert.equal(getResourceForPath('/api/monitoring/problems'), 'monitoring');
+  assert.equal(getResourceForPath('/monitoring/problems'), 'monitoring');
 });
 
 test('api-map maps monitoring endpoints', () => {

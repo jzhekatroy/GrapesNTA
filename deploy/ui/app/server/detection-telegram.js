@@ -2348,6 +2348,7 @@ const SILENT_TELEGRAM_MAX_AGE_MS = 24 * 60 * MINUTE;
 const peakUpgradeChecked = new Set();
 const PEAK_UPGRADE_UDP_SHARE = 0.5;
 const PEAK_LOOKBACK_MS = 6 * 60 * MINUTE;
+const MONITORING_PEAK_LOOKBACK_MS = 60 * MINUTE;
 
 function pickSilentNormalizeCandidates(activeByKey, presentKeys, minute, options = {}) {
   const settings = options.settings || {};
@@ -3181,6 +3182,43 @@ async function loadLatestOpenPeaks() {
   return map;
 }
 
+async function loadMonitoringPeaks() {
+  await ensureDetectionTelegramTables();
+  const from = formatCh(Date.now() - MONITORING_PEAK_LOOKBACK_MS);
+  const { rows } = await query(`
+    SELECT event_id, scope, scope_id, name, status, signal, alert_minute, normalize_minute, alert_json, threshold
+    FROM (
+      SELECT
+        e.event_id AS event_id,
+        argMax(e.scope, e.updated_at) AS scope,
+        argMax(e.scope_id, e.updated_at) AS scope_id,
+        argMax(e.name, e.updated_at) AS name,
+        argMax(e.status, e.updated_at) AS status,
+        argMax(e.signal, e.updated_at) AS signal,
+        argMax(e.alert_minute, e.updated_at) AS alert_minute,
+        argMax(e.normalize_minute, e.updated_at) AS normalize_minute,
+        argMax(e.alert_json, e.updated_at) AS alert_json,
+        argMax(e.threshold, e.updated_at) AS threshold
+      FROM ${eventsTableRef()} AS e
+      WHERE e.alert_minute >= ${utcDateTime('from')}
+        AND e.scope IN ('provider', 'client', 'net')
+      GROUP BY e.event_id
+    )
+    WHERE status = 'peak'
+    ORDER BY alert_minute DESC
+  `, { from }, { name: 'detection/monitoring-peaks' });
+  const map = new Map();
+  for (const row of rows) {
+    const event = mapEventRow({ ...row, normalize_json: '' });
+    const key = objectKey(event.scope, event.scopeId, event.signal);
+    const prev = map.get(key);
+    if (!prev || parseUtc(event.alertMinute) > parseUtc(prev.alertMinute)) map.set(key, event);
+  }
+  const events = [...map.values()];
+  await applyProviderCatalogNames(events);
+  return events;
+}
+
 // Пик закрытой атаки ещё 6 часов не даёт её хвосту открыться заново.
 // verolayn 05.10: ковёр 26.6 Гбит/с закрылся, и 0.9 Гбит/с тут же стали новым событием.
 const TAIL_ATTACK_LOOKBACK_MS = 6 * 60 * 60 * 1000;
@@ -3377,6 +3415,17 @@ async function loadDetectionEvents({ status = 'active', limit = 200, from, to, k
   await applyProviderCatalogNames(events);
   if (wanted === 'active') await attachLiveState(events);
   return events;
+}
+
+async function loadDetectionEvent(eventId) {
+  const id = String(eventId || '').trim();
+  if (!id) throw apiError('Не указана атака');
+  const row = await loadDetectionEventRaw(id);
+  if (!row) throw apiError('Атака не найдена', 404);
+  const events = [mapEventRow(row)];
+  await applyProviderCatalogNames(events);
+  if (events[0].status === 'active') await attachLiveState(events);
+  return events[0];
 }
 
 // Уже отправленный текст алерта хранит имя на момент открытия. Если тогда
@@ -4589,6 +4638,9 @@ module.exports = {
   snapshotByProto,
   mapEventRow,
   loadDetectionEvents,
+  loadDetectionEvent,
+  loadMonitoringPeaks,
+  MONITORING_PEAK_LOOKBACK_MS,
   exportDetectionEventsCsv,
   buildDetectionEventsCsv,
   processDetectionAlerts,

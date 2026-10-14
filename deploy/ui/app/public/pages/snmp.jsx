@@ -2,10 +2,18 @@
 
 const { useCallback, useEffect, useMemo, useState } = React;
 
-const SAVE_SUCCESS_TITLE = 'Настройки сохранены';
-const SAVE_SUCCESS_DESC = 'Изменения записаны в ClickHouse.';
 const SFLOW_STALE_DAYS = 7;
 const LAST_OK_STALE_FACTOR = 3;
+
+function snmpT(key, params) {
+  return GrapesI18n.t(key, params);
+}
+
+function snmpBoundaryLabel(value) {
+  const id = String(value || 'unknown');
+  const key = `snmpPage.boundary.${id}`;
+  return GrapesI18n.has(key) ? snmpT(key) : snmpT('snmpPage.boundary.unknown');
+}
 
 function parseCatalogMs(value) {
   if (!value) return null;
@@ -25,7 +33,7 @@ function parseCatalogMs(value) {
 
 function fmtLastOkAt(value, displayTimezone = getDisplayTimezone()) {
   const formatted = fmtCatalogUpdatedAt(value, displayTimezone);
-  if (formatted === '—') return 'не опрашивался';
+  if (formatted === '—') return snmpT('snmpPage.status.neverPolled');
   return formatted;
 }
 
@@ -48,7 +56,7 @@ function lastPollAttemptTitle(agent, displayTimezone = getDisplayTimezone()) {
   if (!agent.snmpEnabled || !agent.lastPollAt) return undefined;
   const formatted = fmtCatalogUpdatedAt(agent.lastPollAt, displayTimezone);
   if (formatted === '—') return undefined;
-  return `Последняя попытка: ${formatted}`;
+  return snmpT('snmpPage.status.lastAttempt', { time: formatted });
 }
 
 async function deleteSnmpAgentFromInventory(switchIp) {
@@ -70,10 +78,17 @@ async function deleteSnmpAgentFromInventory(switchIp) {
 }
 
 function confirmSnmpAgentRemoval(count) {
-  const noun = count === 1
-    ? 'коммутатор'
-    : (count >= 2 && count <= 4 ? 'коммутатора' : 'коммутаторов');
-  return window.confirm(`Удалить ${count} ${noun} из опроса?`);
+  const n = Number(count) || 0;
+  if (GrapesI18n.getLocale() === 'en') {
+    return window.confirm(snmpT(n === 1 ? 'snmpPage.confirmRemoveOne' : 'snmpPage.confirmRemoveMany', { count: n }));
+  }
+  const noun = pluralRu(
+    n,
+    snmpT('snmpPage.noun.switch.one'),
+    snmpT('snmpPage.noun.switch.few'),
+    snmpT('snmpPage.noun.switch.many'),
+  );
+  return window.confirm(snmpT('snmpPage.confirmRemove', { count: n, noun }));
 }
 
 async function deleteSnmpAgentsFromInventory(switchIps) {
@@ -84,7 +99,7 @@ async function deleteSnmpAgentsFromInventory(switchIps) {
   const failed = [];
   switchIps.forEach((switchIp, index) => {
     if (results[index].status === 'fulfilled') deleted.push(switchIp);
-    else failed.push({ switchIp, error: results[index].reason?.message || 'ошибка' });
+    else failed.push({ switchIp, error: results[index].reason?.message || snmpT('snmpPage.error.generic') });
   });
   return { deleted, failed };
 }
@@ -103,7 +118,7 @@ function fmtCatalogUpdatedAt(value, displayTimezone = getDisplayTimezone()) {
     ? parseChartBucketMs(text)
     : Date.parse(`${text.replace(' ', 'T')}Z`);
   if (ms == null || !Number.isFinite(ms) || ms <= 0) return '—';
-  return new Date(ms).toLocaleString('ru-RU', {
+  return new Date(ms).toLocaleString(GrapesI18n.intlLocale(), {
     timeZone: displayTimezone || getDisplayTimezone(),
     day: '2-digit',
     month: '2-digit',
@@ -134,23 +149,23 @@ function PageSnmp({ displayTimezone, canOpenInterfaceRoles }) {
   }, [watchUntil, reload]);
 
   const probeAll = async () => {
-    if (!window.confirm('Включить SNMP и поставить в очередь опрос всех коммутаторов из списка?')) return;
+    if (!window.confirm(snmpT('snmpPage.confirmProbeAll'))) return;
     setProbingAll(true);
     try {
       const res = await ApiClient.requestSnmpProbeAll();
       const accepted = res?.meta?.accepted ?? 0;
       pushToast({
         kind: 'success',
-        title: 'Опрос поставлен в очередь',
+        title: snmpT('snmpPage.toast.probeQueued'),
         desc: accepted
-          ? `Агентов: ${accepted}. Поллер grapes-enrichment берёт до 25/мин. Статусы обновятся сами.`
-          : 'Список пуст.',
+          ? snmpT('snmpPage.toast.probeAllDesc', { accepted })
+          : snmpT('snmpPage.toast.probeAllEmpty'),
       });
       // Watch poller progress for ~3 minutes (timeouts are slow).
       setWatchUntil(Date.now() + 3 * 60 * 1000);
       reload();
     } catch (err) {
-      pushToast({ kind: 'error', title: 'Не удалось поставить опрос', desc: err.message });
+      pushToast({ kind: 'error', title: snmpT('snmpPage.toast.probeFailed'), desc: err.message });
     } finally {
       setProbingAll(false);
     }
@@ -160,16 +175,16 @@ function PageSnmp({ displayTimezone, canOpenInterfaceRoles }) {
     <div className="main__container">
       <div className="page-head">
         <div>
-          <h1>SNMP</h1>
+          <h1>{snmpT('snmpPage.title')}</h1>
           <p>
-            Глобальные настройки SNMP и коммутаторы sFlow из sampler_address.
-            {watchUntil > Date.now() ? ' Следим за очередью опроса…' : ''}
+            {snmpT('snmpPage.subtitle')}
+            {watchUntil > Date.now() ? snmpT('snmpPage.watchQueue') : ''}
           </p>
         </div>
         <div className="row" style={{ gap: 8 }}>
-          <Button kind="ghost" icon="refresh" onClick={reload}>Обновить</Button>
+          <Button kind="ghost" icon="refresh" onClick={reload}>{snmpT('chrome.refresh')}</Button>
           <Button kind="primary" icon="refresh" onClick={probeAll} disabled={!canWrite || probingAll}>
-            {probingAll ? 'Постановка…' : 'Опросить всех'}
+            {probingAll ? snmpT('snmpPage.queuing') : snmpT('snmpPage.probeAll')}
           </Button>
         </div>
       </div>
@@ -199,7 +214,7 @@ function SnmpSettingsCard({ settings, canWrite, onSaved }) {
     setError('');
     try {
       await ApiClient.saveSnmpSettings(form);
-      pushToast({ kind: 'success', title: SAVE_SUCCESS_TITLE, desc: SAVE_SUCCESS_DESC });
+      pushToast({ kind: 'success', title: snmpT('snmpPage.saveSuccessTitle'), desc: snmpT('snmpPage.saveSuccessDesc') });
       onSaved();
     } catch (err) {
       setError(err.message);
@@ -212,9 +227,9 @@ function SnmpSettingsCard({ settings, canWrite, onSaved }) {
     <Card pad="sm" style={{ marginBottom: 16 }}>
       <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
         <div>
-          <div style={{ font: 'var(--pv-text-body-2-bold)' }}>Глобальные настройки SNMP</div>
+          <div style={{ font: 'var(--pv-text-body-2-bold)' }}>{snmpT('snmpPage.settings.title')}</div>
           <div style={{ color: 'var(--fg-secondary)', font: 'var(--pv-text-body-3)' }}>
-            Существующий community не отображается. Пустое поле оставляет его без изменений.
+            {snmpT('snmpPage.settings.hint')}
           </div>
         </div>
         <div className="row" style={{ gap: 16, flexWrap: 'wrap' }}>
@@ -225,7 +240,7 @@ function SnmpSettingsCard({ settings, canWrite, onSaved }) {
               onChange={(e) => set('enabled', e.target.checked)}
               disabled={!canWrite}
             />
-            SNMP включён
+            {snmpT('snmpPage.settings.enabled')}
           </label>
           <label className="row" style={{ gap: 8 }}>
             <input
@@ -234,7 +249,7 @@ function SnmpSettingsCard({ settings, canWrite, onSaved }) {
               onChange={(e) => set('autoEnableNewAgents', e.target.checked)}
               disabled={!canWrite}
             />
-            Автоопрос новых
+            {snmpT('snmpPage.settings.autoEnableNew')}
           </label>
         </div>
       </div>
@@ -246,39 +261,39 @@ function SnmpSettingsCard({ settings, canWrite, onSaved }) {
             className="input"
             type="password"
             autoComplete="new-password"
-            placeholder={settings.hasCommunity ? 'Задан · оставить без изменений' : 'Не задан'}
+            placeholder={settings.hasCommunity ? snmpT('snmpPage.placeholder.communitySet') : snmpT('snmpPage.placeholder.communityUnset')}
             value={form.community}
             onChange={(e) => set('community', e.target.value)}
             disabled={!canWrite}
           />
         </div>
         <div className="field">
-          <label>Порт</label>
+          <label>{snmpT('snmpPage.settings.port')}</label>
           <input className="input" type="number" value={form.port} onChange={(e) => set('port', e.target.value)} disabled={!canWrite} />
         </div>
         <div className="field">
-          <label>Timeout, мс</label>
+          <label>{snmpT('snmpPage.settings.timeoutMs')}</label>
           <input className="input" type="number" value={form.timeoutMs} onChange={(e) => set('timeoutMs', e.target.value)} disabled={!canWrite} />
         </div>
         <div className="field">
-          <label>Повторы</label>
+          <label>{snmpT('snmpPage.settings.retries')}</label>
           <input className="input" type="number" value={form.retries} onChange={(e) => set('retries', e.target.value)} disabled={!canWrite} />
         </div>
         <div className="field">
-          <label>Обнаружение, ч</label>
+          <label>{snmpT('snmpPage.settings.discoverHours')}</label>
           <input className="input" type="number" value={form.discoverLookbackHours} onChange={(e) => set('discoverLookbackHours', e.target.value)} disabled={!canWrite} />
         </div>
         <div className="field">
-          <label>Опрос, сек</label>
+          <label>{snmpT('snmpPage.settings.pollSec')}</label>
           <input className="input" type="number" value={form.refreshIntervalSec} onChange={(e) => set('refreshIntervalSec', e.target.value)} disabled={!canWrite} />
         </div>
         <div className="field">
-          <label>Полный walk, сек</label>
+          <label>{snmpT('snmpPage.settings.fullWalkSec')}</label>
           <input className="input" type="number" value={form.fullWalkIntervalSec} onChange={(e) => set('fullWalkIntervalSec', e.target.value)} disabled={!canWrite} />
         </div>
         <div className="row" style={{ justifyContent: 'flex-end', alignItems: 'flex-end', paddingBottom: 1 }}>
           <Button kind="primary" icon="save" onClick={save} disabled={!canWrite || saving}>
-            {saving ? 'Сохранение…' : 'Сохранить'}
+            {saving ? snmpT('snmpPage.saving') : snmpT('snmpPage.save')}
           </Button>
         </div>
       </div>
@@ -288,14 +303,14 @@ function SnmpSettingsCard({ settings, canWrite, onSaved }) {
 
 function SnmpAgentStatus({ agent, displayTimezone }) {
   const pollTitle = lastPollAttemptTitle(agent, displayTimezone);
-  if (!agent.snmpEnabled) return <StatusIndicator status="idle" label="Отключён" />;
+  if (!agent.snmpEnabled) return <StatusIndicator status="idle" label={snmpT('snmpPage.status.disabled')} />;
   const status = agent.lastPollStatus || 'never';
   const hasCache = !!agent.hasCachedInterfaces || Number(agent.interfaceCount) > 0;
 
   if (status === 'ok') {
     return (
       <div title={pollTitle}>
-        <StatusIndicator status="healthy" label="SNMP работает" />
+        <StatusIndicator status="healthy" label={snmpT('snmpPage.status.ok')} />
       </div>
     );
   }
@@ -304,13 +319,13 @@ function SnmpAgentStatus({ agent, displayTimezone }) {
     if (hasCache) {
       return (
         <div title={pollTitle}>
-          <StatusIndicator status="warning" label="Идёт опрос" />
+          <StatusIndicator status="warning" label={snmpT('snmpPage.status.polling')} />
         </div>
       );
     }
     return (
       <div title={pollTitle}>
-        <StatusIndicator status="warning" label="Ожидает опроса" />
+        <StatusIndicator status="warning" label={snmpT('snmpPage.status.waiting')} />
       </div>
     );
   }
@@ -321,14 +336,14 @@ function SnmpAgentStatus({ agent, displayTimezone }) {
   if (hasCache) {
     return (
       <div title={title}>
-        <StatusIndicator status="warning" label="Недоступен · есть кэш" />
+        <StatusIndicator status="warning" label={snmpT('snmpPage.status.unavailableCache')} />
         {shortErr ? <div className="mono" style={{ color: 'var(--fg-secondary)', font: 'var(--pv-text-body-3)', marginTop: 2 }}>{shortErr}</div> : null}
       </div>
     );
   }
   return (
     <div title={title}>
-      <StatusIndicator status="critical" label={status === 'timeout' ? 'Timeout' : 'Ошибка SNMP'} />
+      <StatusIndicator status="critical" label={status === 'timeout' ? snmpT('snmpPage.status.timeout') : snmpT('snmpPage.status.snmpError')} />
       {shortErr ? <div className="mono" style={{ color: 'var(--fg-secondary)', font: 'var(--pv-text-body-3)', marginTop: 2 }}>{shortErr}</div> : null}
     </div>
   );
@@ -372,7 +387,7 @@ function SnmpAgentModal({
       ApiClient.loadInterfaceRolesForSwitch(agent.switchIp),
     ]).then(([ifRes, rolesRes]) => {
       if (cancelled) return;
-      if (ifRes.source === 'error') setInterfacesError(ifRes.error || ApiClient.LOAD_FAILED);
+      if (ifRes.source === 'error') setInterfacesError(ifRes.error || snmpT('snmpPage.loadFailed'));
       else setInterfaces(ifRes.rows || []);
       const map = {};
       if (rolesRes.source !== 'error') {
@@ -425,7 +440,7 @@ function SnmpAgentModal({
     setError('');
     try {
       await ApiClient.requestSnmpProbe(agent.switchIp);
-      pushToast({ kind: 'success', title: 'Опрос поставлен в очередь', desc: 'Poller выполнит SNMP-опрос.' });
+      pushToast({ kind: 'success', title: snmpT('snmpPage.toast.probeQueued'), desc: snmpT('snmpPage.toast.probeOneDesc') });
       onSaved();
     } catch (err) {
       setError(err.message);
@@ -439,7 +454,7 @@ function SnmpAgentModal({
     setError('');
     try {
       await deleteSnmpAgentFromInventory(agent.switchIp);
-      pushToast({ kind: 'success', title: 'Удалено из опроса', desc: agent.switchIp });
+      pushToast({ kind: 'success', title: snmpT('snmpPage.toast.removedFromPoll'), desc: agent.switchIp });
       onDeleted(agent.switchIp);
     } catch (err) {
       setError(err.message);
@@ -449,17 +464,17 @@ function SnmpAgentModal({
   };
   const interfaceCols = [
     { key: 'ifIndex', title: 'ifIndex', width: 80, render: (r) => <span className="mono">{r.ifIndex}</span> },
-    { key: 'ifName', title: 'Имя', width: 140, render: (r) => <span className="mono">{r.ifName || '—'}</span> },
+    { key: 'ifName', title: snmpT('snmpPage.col.name'), width: 140, render: (r) => <span className="mono">{r.ifName || '—'}</span> },
     { key: 'ifAlias', title: 'Alias', width: 140, render: (r) => r.ifAlias || '—' },
-    { key: 'ifDescr', title: 'Описание', width: 160, render: (r) => r.ifDescr || '—' },
-    { key: 'ifSpeedBps', title: 'Скорость', width: 100, render: (r) => (r.ifSpeedBps ? fmtBits(r.ifSpeedBps) : '—') },
+    { key: 'ifDescr', title: snmpT('snmpPage.col.description'), width: 160, render: (r) => r.ifDescr || '—' },
+    { key: 'ifSpeedBps', title: snmpT('snmpPage.col.speed'), width: 100, render: (r) => (r.ifSpeedBps ? fmtBits(r.ifSpeedBps) : '—') },
     {
       key: 'boundary',
-      title: 'Сторона',
+      title: snmpT('snmpPage.col.side'),
       width: 110,
       render: (r) => (
         <Badge tone={r.boundary === 'unknown' ? 'neutral' : irBoundaryBadgeTone(r.boundary)}>
-          {irBoundaryLabel(r.boundary)}
+          {snmpBoundaryLabel(r.boundary)}
         </Badge>
       ),
     },
@@ -480,15 +495,15 @@ function SnmpAgentModal({
             onClick={remove}
             disabled={!canWrite || saving || probing || deleting}
           >
-            {deleting ? 'Удаление…' : 'Удалить из опроса'}
+            {deleting ? snmpT('snmpPage.deleting') : snmpT('snmpPage.modal.deleteFromPoll')}
           </Button>
           <div className="row" style={{ gap: 8, marginLeft: 'auto' }}>
-            <Button kind="ghost" onClick={onClose} disabled={saving || probing || deleting}>Закрыть</Button>
+            <Button kind="ghost" onClick={onClose} disabled={saving || probing || deleting}>{snmpT('modal.close')}</Button>
             <Button kind="ghost" icon="refresh" onClick={probe} disabled={!canWrite || saving || probing || deleting}>
-              {probing ? 'Постановка…' : 'Опросить'}
+              {probing ? snmpT('snmpPage.queuing') : snmpT('snmpPage.modal.probe')}
             </Button>
             <Button kind="primary" icon="save" onClick={save} disabled={!canWrite || saving || probing || deleting}>
-              {saving ? 'Сохранение…' : 'Сохранить'}
+              {saving ? snmpT('snmpPage.saving') : snmpT('snmpPage.save')}
             </Button>
           </div>
         </div>
@@ -497,28 +512,28 @@ function SnmpAgentModal({
       {error && <div style={{ marginBottom: 12, color: 'var(--st-critical)' }}>{error}</div>}
       <div className="grid grid--2col grid--gap-sm" style={{ marginBottom: 18 }}>
         <div className="field">
-          <label>sysName / название</label>
+          <label>{snmpT('snmpPage.modal.sysNameLabel')}</label>
           <input className="input" value={form.displayName} onChange={(e) => set('displayName', e.target.value)} disabled={!canWrite} />
         </div>
         <div className="field">
           <label>SNMP</label>
           <label className="row" style={{ gap: 8, minHeight: 36 }}>
             <input type="checkbox" checked={form.snmpEnabled} onChange={(e) => set('snmpEnabled', e.target.checked)} disabled={!canWrite} />
-            Опрос устройства включён
+            {snmpT('snmpPage.modal.pollEnabled')}
           </label>
         </div>
         <div className="field">
           <label>Community override</label>
           <label className="row" style={{ gap: 8, marginBottom: 6 }}>
             <input type="checkbox" checked={form.useGlobalCommunity} onChange={(e) => set('useGlobalCommunity', e.target.checked)} disabled={!canWrite} />
-            Использовать глобальный
+            {snmpT('snmpPage.modal.useGlobalCommunity')}
           </label>
           {!form.useGlobalCommunity && (
             <input
               className="input"
               type="password"
               autoComplete="new-password"
-              placeholder={agent.hasCommunityOverride ? 'Задан · оставить без изменений' : 'Новый override'}
+              placeholder={agent.hasCommunityOverride ? snmpT('snmpPage.placeholder.communitySet') : snmpT('snmpPage.placeholder.newOverride')}
               value={form.communityOverride}
               onChange={(e) => set('communityOverride', e.target.value)}
               disabled={!canWrite}
@@ -526,24 +541,24 @@ function SnmpAgentModal({
           )}
         </div>
         <div className="field">
-          <label>Порт override</label>
-          <input className="input" type="number" placeholder="Глобальный" value={form.portOverride} onChange={(e) => set('portOverride', e.target.value)} disabled={!canWrite} />
+          <label>{snmpT('snmpPage.modal.portOverride')}</label>
+          <input className="input" type="number" placeholder={snmpT('snmpPage.placeholder.global')} value={form.portOverride} onChange={(e) => set('portOverride', e.target.value)} disabled={!canWrite} />
         </div>
         <div className="field">
-          <label>Timeout override, мс</label>
-          <input className="input" type="number" placeholder="Глобальный" value={form.timeoutMsOverride} onChange={(e) => set('timeoutMsOverride', e.target.value)} disabled={!canWrite} />
+          <label>{snmpT('snmpPage.modal.timeoutOverride')}</label>
+          <input className="input" type="number" placeholder={snmpT('snmpPage.placeholder.global')} value={form.timeoutMsOverride} onChange={(e) => set('timeoutMsOverride', e.target.value)} disabled={!canWrite} />
         </div>
         <div className="field">
-          <label>Повторы override</label>
-          <input className="input" type="number" placeholder="Глобальные" value={form.retriesOverride} onChange={(e) => set('retriesOverride', e.target.value)} disabled={!canWrite} />
+          <label>{snmpT('snmpPage.modal.retriesOverride')}</label>
+          <input className="input" type="number" placeholder={snmpT('snmpPage.placeholder.globalPlural')} value={form.retriesOverride} onChange={(e) => set('retriesOverride', e.target.value)} disabled={!canWrite} />
         </div>
       </div>
-      <div style={{ font: 'var(--pv-text-body-2-bold)', marginBottom: 8 }}>Интерфейсы</div>
+      <div style={{ font: 'var(--pv-text-body-2-bold)', marginBottom: 8 }}>{snmpT('snmpPage.modal.interfaces')}</div>
       {showInterfaceRolesLink && (
         <div className="row" style={{ justifyContent: 'space-between', marginBottom: 8, flexWrap: 'wrap', gap: 8 }}>
           <label className="row" style={{ gap: 6, font: 'var(--pv-text-body-3)' }}>
             <input type="checkbox" checked={showUnmarkedOnly} onChange={(e) => setShowUnmarkedOnly(e.target.checked)} />
-            Показать неразмеченные
+            {snmpT('snmpPage.modal.showUnmarked')}
           </label>
           <Button
             kind="ghost"
@@ -553,19 +568,19 @@ function SnmpAgentModal({
               location.hash = `interface-roles?switch=${encodeURIComponent(agent.switchIp)}`;
             }}
           >
-            Разметить
+            {snmpT('snmpPage.modal.markRoles')}
           </Button>
         </div>
       )}
       {agent.snmpEnabled && agent.lastPollAt && (
         <div style={{ marginBottom: 8, color: 'var(--fg-secondary)', font: 'var(--pv-text-body-3)' }}>
-          Последняя попытка опроса: {fmtCatalogUpdatedAt(agent.lastPollAt, tz)}
+          {snmpT('snmpPage.modal.lastPollAttempt', { time: fmtCatalogUpdatedAt(agent.lastPollAt, tz) })}
           {agent.lastPollError ? ` · ${agent.lastPollError}` : ''}
         </div>
       )}
       {agent.hasCachedInterfaces && agent.lastPollStatus && agent.lastPollStatus !== 'ok' && (
         <div style={{ marginBottom: 8, color: 'var(--fg-secondary)', font: 'var(--pv-text-body-3)' }}>
-          Показан последний успешный каталог
+          {snmpT('snmpPage.modal.cachedCatalog')}
           {agent.lastOkAt ? ` · ${fmtLastOkAt(agent.lastOkAt, tz)}` : ''}.
         </div>
       )}
@@ -577,8 +592,8 @@ function SnmpAgentModal({
           columns={interfaceCols}
           rowKey="id"
           pageSize={10}
-          emptyTitle="Интерфейсы ещё не получены"
-          emptyDesc="Выполните опрос; таблицу заполнит SNMP poller. При недоступности свитча остаются прошлые данные."
+          emptyTitle={snmpT('snmpPage.interfaces.emptyTitle')}
+          emptyDesc={snmpT('snmpPage.interfaces.emptyDesc')}
         />
       )}
     </Modal>
@@ -616,7 +631,7 @@ function SnmpSwitchesPage({ refreshKey, onReload, displayTimezone, canOpenInterf
       ]);
       if (cancelled) return;
       if (settingsRes.source === 'error' || agentsRes.source === 'error') {
-        setLoadError(settingsRes.error || agentsRes.error || ApiClient.LOAD_FAILED);
+        setLoadError(settingsRes.error || agentsRes.error || snmpT('snmpPage.loadFailed'));
       } else {
         setSettings(settingsRes.data);
         setRows((agentsRes.rows || []).map((row) => ({ ...row, id: row.switchIp })));
@@ -660,19 +675,24 @@ function SnmpSwitchesPage({ refreshKey, onReload, displayTimezone, canOpenInterf
       if (failed.length) {
         pushToast({
           kind: 'error',
-          title: 'Не все удалены',
-          desc: `Удалено: ${deleted.length}, ошибок: ${failed.length}. ${failed[0].switchIp}: ${failed[0].error}`,
+          title: snmpT('snmpPage.toast.partialDelete'),
+          desc: snmpT('snmpPage.toast.partialDeleteDesc', {
+            deleted: deleted.length,
+            failed: failed.length,
+            ip: failed[0].switchIp,
+            error: failed[0].error,
+          }),
         });
       } else {
         pushToast({
           kind: 'success',
-          title: 'Удалено из опроса',
-          desc: deleted.length === 1 ? deleted[0] : `Коммутаторов: ${deleted.length}`,
+          title: snmpT('snmpPage.toast.removedFromPoll'),
+          desc: deleted.length === 1 ? deleted[0] : snmpT('snmpPage.toast.removedCount', { count: deleted.length }),
         });
       }
       if (deleted.length) onReload();
     } catch (err) {
-      pushToast({ kind: 'error', title: 'Не удалось удалить', desc: err.message });
+      pushToast({ kind: 'error', title: snmpT('snmpPage.toast.deleteFailed'), desc: err.message });
     } finally {
       setBulkDeleting(false);
     }
@@ -681,16 +701,16 @@ function SnmpSwitchesPage({ refreshKey, onReload, displayTimezone, canOpenInterf
   const cols = [
     {
       key: 'displayName',
-      title: 'Коммутатор',
+      title: snmpT('snmpPage.col.switch'),
       width: 230,
       render: (r) => {
         const staleDays = sflowStaleDays(r.lastSeenAt);
         return (
           <div>
             <div className="row" style={{ gap: 6, flexWrap: 'wrap' }}>
-              <span style={{ font: 'var(--pv-text-body-2-bold)' }}>{r.displayName || 'Без sysName'}</span>
+              <span style={{ font: 'var(--pv-text-body-2-bold)' }}>{r.displayName || snmpT('snmpPage.noSysName')}</span>
               {r.isNew && <Badge tone="warning">New</Badge>}
-              {staleDays != null && <Badge tone="neutral">нет sFlow {staleDays} дн.</Badge>}
+              {staleDays != null && <Badge tone="neutral">{snmpT('snmpPage.badge.noSflow', { days: staleDays })}</Badge>}
             </div>
             <div className="mono" style={{ color: 'var(--fg-secondary)', font: 'var(--pv-text-body-3)' }}>{r.switchIp}</div>
           </div>
@@ -700,7 +720,7 @@ function SnmpSwitchesPage({ refreshKey, onReload, displayTimezone, canOpenInterf
     { key: 'status', title: 'SNMP', width: 180, render: (r) => <SnmpAgentStatus agent={r} displayTimezone={tz} /> },
     {
       key: 'lastSeenAt',
-      title: 'Последний sFlow',
+      title: snmpT('snmpPage.col.lastSflow'),
       width: 160,
       render: (r) => fmtCatalogUpdatedAt(r.lastSeenAt, tz),
     },
@@ -718,7 +738,7 @@ function SnmpSwitchesPage({ refreshKey, onReload, displayTimezone, canOpenInterf
     },
     {
       key: 'lastOkAt',
-      title: 'Последний успешный опрос',
+      title: snmpT('snmpPage.col.lastOkPoll'),
       width: 180,
       render: (r) => {
         const stale = isLastOkStale(r.lastOkAt, settings?.refreshIntervalSec);
@@ -745,9 +765,9 @@ function SnmpSwitchesPage({ refreshKey, onReload, displayTimezone, canOpenInterf
     };
   }, [rows]);
 
-  if (loading) return <Card pad="sm"><div style={{ padding: 32, textAlign: 'center' }}>Загрузка…</div></Card>;
+  if (loading) return <Card pad="sm"><div style={{ padding: 32, textAlign: 'center' }}>{snmpT('snmpPage.loading')}</div></Card>;
   if (loadError) {
-    return <Empty icon="db" title="Не удалось загрузить" desc={loadError} action={<Button kind="primary" icon="refresh" onClick={onReload}>Повторить</Button>} />;
+    return <Empty icon="db" title={snmpT('snmpPage.loadFailed')} desc={loadError} action={<Button kind="primary" icon="refresh" onClick={onReload}>{snmpT('snmpPage.retry')}</Button>} />;
   }
   const allFailing = statusSummary.enabled > 0
     && statusSummary.ok === 0
@@ -757,17 +777,16 @@ function SnmpSwitchesPage({ refreshKey, onReload, displayTimezone, canOpenInterf
       <SnmpSettingsCard settings={settings} canWrite={canWrite} onSaved={onReload} />
       <Card pad="sm" style={{ marginBottom: 12 }}>
         <div className="row" style={{ gap: 16, flexWrap: 'wrap', font: 'var(--pv-text-body-3)' }}>
-          <span>агентов: <b className="mono">{statusSummary.total}</b></span>
-          <span>включено: <b className="mono">{statusSummary.enabled}</b></span>
+          <span>{snmpT('snmpPage.summary.agents')} <b className="mono">{statusSummary.total}</b></span>
+          <span>{snmpT('snmpPage.summary.enabled')} <b className="mono">{statusSummary.enabled}</b></span>
           <span>ok: <b className="mono">{statusSummary.ok}</b></span>
-          <span>очередь: <b className="mono">{statusSummary.queued}</b></span>
+          <span>{snmpT('snmpPage.summary.queue')} <b className="mono">{statusSummary.queued}</b></span>
           <span>timeout: <b className="mono" style={{ color: statusSummary.timeout ? 'var(--st-critical)' : undefined }}>{statusSummary.timeout}</b></span>
-          <span>auth/error: <b className="mono">{statusSummary.auth + statusSummary.error}</b></span>
+          <span>{snmpT('snmpPage.summary.authError')} <b className="mono">{statusSummary.auth + statusSummary.error}</b></span>
         </div>
         {allFailing ? (
           <div style={{ marginTop: 8, color: 'var(--st-critical)', font: 'var(--pv-text-body-3)' }}>
-            Опросы идут, но свитчи не отвечают (timeout). Проверьте маршрут/ACL с хоста UI/поллера до mgmt-сети (UDP/161).
-            Детали — Диагностика → SNMP.
+            {snmpT('snmpPage.banner.allFailing')}
           </div>
         ) : null}
       </Card>
@@ -787,7 +806,7 @@ function SnmpSwitchesPage({ refreshKey, onReload, displayTimezone, canOpenInterf
               {selected.size > 0 ? (
                 <>
                   <span style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-secondary)' }}>
-                    Выбрано: <b>{selected.size}</b>
+                    {snmpT('snmpPage.selected')} <b>{selected.size}</b>
                   </span>
                   <Button
                     size="sm"
@@ -796,23 +815,23 @@ function SnmpSwitchesPage({ refreshKey, onReload, displayTimezone, canOpenInterf
                     onClick={removeSelected}
                     disabled={bulkDeleting}
                   >
-                    {bulkDeleting ? 'Удаление…' : 'Удалить выбранные'}
+                    {bulkDeleting ? snmpT('snmpPage.deleting') : snmpT('snmpPage.deleteSelected')}
                   </Button>
                   <Button size="sm" kind="ghost" onClick={() => setSelected(new Set())} disabled={bulkDeleting}>
-                    Снять выбор
+                    {snmpT('snmpPage.clearSelection')}
                   </Button>
                 </>
               ) : (
                 <Button size="sm" kind="ghost" onClick={selectStaleSflow} disabled={bulkDeleting}>
-                  Выбрать без sFlow {SFLOW_STALE_DAYS}+ дн.
+                  {snmpT('snmpPage.selectStaleSflow', { days: SFLOW_STALE_DAYS })}
                 </Button>
               )}
             </div>
           ) : null,
         }}
         onRowClick={(r) => setEditing(r)}
-        emptyTitle="Коммутаторы sFlow не обнаружены"
-        emptyDesc="Poller добавит устройства из sampler_address после появления потоков."
+        emptyTitle={snmpT('snmpPage.empty.switchesTitle')}
+        emptyDesc={snmpT('snmpPage.empty.switchesDesc')}
       />
       <SnmpAgentModal
         open={!!editing}
