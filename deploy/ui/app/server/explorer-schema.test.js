@@ -11,7 +11,7 @@ const {
 const ASGEO_CATALOG = 'Автономные системы и страны / AS & countries';
 
 const HIDDEN_PICKER = new Set([
-  'src_network', 'dst_network', 'src_label', 'dst_label', 'vlan_attachment',
+  'src_network', 'dst_network', 'src_label', 'dst_label', 'vlan_attachment', 'src_vlan',
 ]);
 
 const CLIENTS_CATALOG = 'Клиенты / Clients';
@@ -73,6 +73,14 @@ describe('explorer schema field naming', () => {
     const schema = explorerSchema();
     assert.ok(schema.filterFields.some((f) => f.id === 'vlan_name'));
     assert.ok(schema.dimensions.some((d) => d.id === 'vlan_name'));
+  });
+
+  it('VLAN по направлению откатывается на вторую сторону, если она пустая', () => {
+    const dims = explorerDimensions();
+    const expr = dims.vlan?.groupKeyExpr || '';
+    assert.match(expr, /= 'in' AND f\.`?dst_vlan`? != 0, f\.`?dst_vlan`?/);
+    assert.match(expr, /= 'out' AND f\.`?src_vlan`? != 0, f\.`?src_vlan`?/);
+    assert.match(dims.vlan_name?.joinSql || '', /AND f\.`?dst_vlan`? != 0/);
   });
 
   it('hides scope fields from pickers but keeps them in the internal registry', () => {

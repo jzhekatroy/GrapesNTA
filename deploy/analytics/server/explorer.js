@@ -280,13 +280,19 @@ const EXPLORER_DIM_META = {
   },
   src_mac: { label: 'MAC источника / Source MAC', group: EXPLORER_GROUP.L2 },
   dst_mac: { label: 'MAC назначения / Destination MAC', group: EXPLORER_GROUP.L2 },
-  vlan: { label: 'VLAN', group: EXPLORER_GROUP.L2 },
+  vlan: {
+    label: 'VLAN',
+    group: EXPLORER_GROUP.L2,
+    aliases: ['vlan источника', 'source vlan', 'src_vlan'],
+  },
   vlan_name: {
     label: 'Название VLAN / VLAN name',
     group: EXPLORER_GROUP.L2,
     aliases: ['имя vlan', 'vlan name', 'display_name'],
   },
-  src_vlan: { label: 'VLAN источника (raw) / Source VLAN', group: EXPLORER_GROUP.L2 },
+  // На ШПД полностью повторяет «VLAN»: dst_vlan там пустой. Остаётся для
+  // старых сохранённых запросов.
+  src_vlan: { label: 'VLAN источника (raw) / Source VLAN', group: EXPLORER_GROUP.L2, hiddenFromPicker: true },
   vlan_attachment: { hiddenFromPicker: true },
 };
 
@@ -857,16 +863,21 @@ function buildExplorerMetricSpecs(scaled) {
   };
 }
 
+// sFlow на ШПД кладёт VLAN только в src_vlan, dst_vlan всегда 0. Сторона по
+// направлению берётся, только если она не пустая, иначе — вторая.
 function effectiveVlanExpr(prefix = 'f') {
   const directionCol = flowCol('direction');
   const srcVlanCol = flowCol('srcVlan');
   const dstVlanCol = flowCol('dstVlan');
   if (!directionCol || !srcVlanCol || !dstVlanCol) return null;
+  const src = `${prefix}.${srcVlanCol}`;
+  const dst = `${prefix}.${dstVlanCol}`;
+  const dir = `${prefix}.${directionCol}`;
   return `multiIf(`
-    + `${prefix}.${directionCol} = 'out', ${prefix}.${srcVlanCol}, `
-    + `${prefix}.${directionCol} = 'in', ${prefix}.${dstVlanCol}, `
-    + `${prefix}.${srcVlanCol} != 0, ${prefix}.${srcVlanCol}, `
-    + `${prefix}.${dstVlanCol})`;
+    + `${dir} = 'out' AND ${src} != 0, ${src}, `
+    + `${dir} = 'in' AND ${dst} != 0, ${dst}, `
+    + `${src} != 0, ${src}, `
+    + `${dst})`;
 }
 
 function geoCountryExpr(ipExpr, etypeExpr = null) {
