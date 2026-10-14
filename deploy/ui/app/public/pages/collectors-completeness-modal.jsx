@@ -1,30 +1,49 @@
-/* global React, ApiClient, Button, Modal, TimeSeriesSparkChart, fmtCompact,
+/* global React, ApiClient, Button, Modal, TimeSeriesSparkChart, fmtCompact, GrapesI18n,
    getDisplayTimezone, msToDatetimeLocalValue, displayDatetimeLocalToData, parseChartBucketMs */
 
 const { useState, useEffect, useCallback } = React;
+
+function collectorsT(key, params) {
+  return GrapesI18n.t(key, params);
+}
 
 const HOUR_MS = 3600000;
 const DAY_MS = 24 * HOUR_MS;
 const MIN_ZOOM_MS = HOUR_MS;
 
 const PERIOD_PRESETS = [
-  { id: '6h', label: '6 ч', ms: 6 * HOUR_MS },
-  { id: '24h', label: '24 ч', ms: DAY_MS },
-  { id: '7d', label: '7 дней', ms: 7 * DAY_MS },
-  { id: '30d', label: '30 дней', ms: 30 * DAY_MS },
-  { id: '90d', label: '90 дней', ms: 90 * DAY_MS },
+  { id: '6h', labelKey: 'collectorsPage.tl.preset.6h', ms: 6 * HOUR_MS },
+  { id: '24h', labelKey: 'collectorsPage.tl.preset.24h', ms: DAY_MS },
+  { id: '7d', labelKey: 'collectorsPage.tl.preset.7d', ms: 7 * DAY_MS },
+  { id: '30d', labelKey: 'collectorsPage.tl.preset.30d', ms: 30 * DAY_MS },
+  { id: '90d', labelKey: 'collectorsPage.tl.preset.90d', ms: 90 * DAY_MS },
 ];
 
 const CHARTS = [
-  { key: 'completenessPct', label: 'Полнота в ClickHouse', color: '#3FB68B', pct: true, xdp: true },
-  { key: 'phy', label: 'Пришло на сетевую карту', unit: 'пакетов', color: '#8B93A7', xdp: true, stage: 'interface' },
-  { key: 'seen', label: 'Получено коллектором', unit: 'пакетов', color: '#7E92F8', xdp: true },
-  { key: 'input', label: 'Получено коллектором', unit: 'датаграмм', color: '#7E92F8', sflow: true },
-  { key: 'nfRecords', label: 'Отправлено NetFlow', unit: 'потоков', color: '#C084FC', stage: 'netflow' },
-  { key: 'acked', label: 'Учтено в ClickHouse', unit: 'пакетов', color: '#3FB68B', xdp: true },
-  { key: 'written', label: 'Учтено в ClickHouse', unit: 'записей', color: '#3FB68B', sflow: true },
-  { key: 'lag', label: 'Отставание буфера', unit: 'сегментов', color: '#F0B400', lag: true },
+  { key: 'completenessPct', labelKey: 'collectorsPage.tl.chart.completenessPct', color: '#3FB68B', pct: true, xdp: true },
+  { key: 'phy', labelKey: 'collectorsPage.tl.chart.phy', unitKey: 'collectorsPage.tl.unit.packets', color: '#8B93A7', xdp: true, stage: 'interface' },
+  { key: 'seen', labelKey: 'collectorsPage.tl.chart.seen', unitKey: 'collectorsPage.tl.unit.packets', color: '#7E92F8', xdp: true },
+  { key: 'input', labelKey: 'collectorsPage.tl.chart.input', unitKey: 'collectorsPage.tl.unit.datagrams', color: '#7E92F8', sflow: true },
+  { key: 'nfRecords', labelKey: 'collectorsPage.tl.chart.nfRecords', unitKey: 'collectorsPage.tl.unit.flows', color: '#C084FC', stage: 'netflow' },
+  { key: 'acked', labelKey: 'collectorsPage.tl.chart.acked', unitKey: 'collectorsPage.tl.unit.packets', color: '#3FB68B', xdp: true },
+  { key: 'written', labelKey: 'collectorsPage.tl.chart.written', unitKey: 'collectorsPage.tl.unit.records', color: '#3FB68B', sflow: true },
+  { key: 'lag', labelKey: 'collectorsPage.tl.chart.lag', unitKey: 'collectorsPage.tl.unit.segments', color: '#F0B400', lag: true },
 ];
+
+function resolveChart(chart) {
+  return {
+    ...chart,
+    label: collectorsT(chart.labelKey),
+    unit: chart.unitKey ? collectorsT(chart.unitKey) : undefined,
+  };
+}
+
+function incidentText(inc, field) {
+  const code = inc?.code;
+  const key = code ? `collectorsPage.tl.${code}${field === 'hint' ? '.hint' : ''}` : '';
+  if (key && GrapesI18n.has(key)) return collectorsT(key);
+  return field === 'hint' ? (inc?.hint || '') : (inc?.title || '');
+}
 
 function fmtPct(value) {
   if (value == null || Number.isNaN(Number(value))) return '—';
@@ -43,15 +62,15 @@ function fmtSmallPct(value) {
 function fmtCompactCount(value) {
   const n = Number(value);
   if (!Number.isFinite(n)) return '—';
-  if (n >= 1_000_000_000) return `${(n / 1_000_000_000).toFixed(1)} млрд`;
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)} млн`;
-  if (n >= 1_000) return `${(n / 1_000).toFixed(1)} тыс`;
+  if (n >= 1_000_000_000) return `${(n / 1_000_000_000).toFixed(1)} ${collectorsT('unit.billion')}`;
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)} ${collectorsT('unit.million')}`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1)} ${collectorsT('unit.thousand')}`;
   return String(Math.round(n));
 }
 
 function fmtWhen(ms, withYear = false) {
   if (ms == null) return '—';
-  return new Date(ms).toLocaleString('ru-RU', {
+  return new Date(ms).toLocaleString(GrapesI18n.intlLocale(), {
     timeZone: getDisplayTimezone(),
     day: '2-digit',
     month: '2-digit',
@@ -63,13 +82,17 @@ function fmtWhen(ms, withYear = false) {
 
 function fmtDuration(sec) {
   const s = Math.max(0, Math.round(Number(sec) || 0));
-  if (s < 60) return 'меньше минуты';
+  if (s < 60) return collectorsT('collectorsPage.duration.lessThanMinute');
   const days = Math.floor(s / 86400);
   const hours = Math.floor((s % 86400) / 3600);
   const minutes = Math.floor((s % 3600) / 60);
-  if (days > 0) return hours > 0 ? `${days} дн ${hours} ч` : `${days} дн`;
-  if (hours > 0) return minutes > 0 ? `${hours} ч ${minutes} мин` : `${hours} ч`;
-  return `${minutes} мин`;
+  if (days > 0) return hours > 0
+    ? collectorsT('collectorsPage.duration.daysHours', { days, hours })
+    : collectorsT('collectorsPage.duration.days', { days });
+  if (hours > 0) return minutes > 0
+    ? collectorsT('collectorsPage.duration.hoursMinutes', { hours, minutes })
+    : collectorsT('collectorsPage.duration.hours', { hours });
+  return collectorsT('collectorsPage.duration.minutes', { minutes });
 }
 
 function completenessTone(pct) {
@@ -124,7 +147,7 @@ function visibleCharts(timeline) {
     if (chart.stage && !stages.has(chart.stage) && !(Number(summary[chart.key]) > 0)) return false;
     if (chart.lag) return true;
     return true;
-  });
+  }).map(resolveChart);
 }
 
 function PeriodBar({ preset, range, canGoBack, onPreset, onCustom, onBack, busy }) {
@@ -155,21 +178,21 @@ function PeriodBar({ preset, range, canGoBack, onPreset, onCustom, onBack, busy 
             onClick={() => onPreset(p.id)}
             disabled={busy}
           >
-            {p.label}
+            {collectorsT(p.labelKey)}
           </button>
         ))}
       </div>
       <label className="collector-tl-period__field">
-        <span>с</span>
+        <span>{collectorsT('collectorsPage.tl.periodFrom')}</span>
         <input className="input" type="datetime-local" value={from} onChange={(e) => setFrom(e.target.value)} />
       </label>
       <label className="collector-tl-period__field">
-        <span>по</span>
+        <span>{collectorsT('collectorsPage.tl.periodTo')}</span>
         <input className="input" type="datetime-local" value={to} onChange={(e) => setTo(e.target.value)} />
       </label>
-      <Button size="sm" onClick={apply} disabled={busy}>Показать</Button>
+      <Button size="sm" onClick={apply} disabled={busy}>{collectorsT('collectorsPage.tl.show')}</Button>
       {canGoBack && (
-        <Button size="sm" kind="ghost" icon="arrowL" onClick={onBack} disabled={busy}>Назад</Button>
+        <Button size="sm" kind="ghost" icon="arrowL" onClick={onBack} disabled={busy}>{collectorsT('collectorsPage.tl.back')}</Button>
       )}
     </div>
   );
@@ -201,38 +224,54 @@ function PeriodStats({ timeline }) {
 function statSubline(key, s) {
   if (key === 'phy' && s.phyDiscardPct != null) {
     return {
-      text: `отброшено картой ${fmtCompactCount(s.phyDiscards)} (${fmtSmallPct(s.phyDiscardPct)})`,
+      text: collectorsT('collectorsPage.tl.stat.phyDiscard', {
+        count: fmtCompactCount(s.phyDiscards),
+        pct: fmtSmallPct(s.phyDiscardPct),
+      }),
       tone: s.phyDiscards > 0 ? 'completeness-tone-yellow' : '',
     };
   }
   if (key === 'seen' && s.seenPctOfPhy != null) {
-    return { text: `${fmtPct(s.seenPctOfPhy)} от пришедших на карту` };
+    return { text: collectorsT('collectorsPage.tl.stat.seenOfPhy', { pct: fmtPct(s.seenPctOfPhy) }) };
   }
   if (key === 'nfRecords' && s.nfPctOfFlows != null) {
     return {
-      text: `${fmtPct(s.nfPctOfFlows)} потоков коллектора (${fmtCompactCount(s.flowRecords)})`,
+      text: collectorsT('collectorsPage.tl.stat.nfOfFlows', {
+        pct: fmtPct(s.nfPctOfFlows),
+        count: fmtCompactCount(s.flowRecords),
+      }),
       tone: completenessTone(s.nfPctOfFlows),
     };
   }
   if (key === 'acked' && s.completenessPct != null) {
-    return { text: `полнота ${fmtPct(s.completenessPct)} от полученных`, tone: completenessTone(s.completenessPct) };
+    return {
+      text: collectorsT('collectorsPage.tl.stat.completenessOfSeen', { pct: fmtPct(s.completenessPct) }),
+      tone: completenessTone(s.completenessPct),
+    };
   }
   return null;
 }
 
 function IncidentRow({ inc, onZoom }) {
   const also = inc.alsoCauses || [];
+  const title = incidentText(inc, 'title');
+  const hint = incidentText(inc, 'hint');
   return (
     <button type="button" className={`collector-tl-incident collector-tl-incident--${inc.severity}`} onClick={() => onZoom(inc.startMs, inc.endMs)}>
       <div className="collector-tl-incident__head">
-        <b>{inc.title}</b>
-        <span className="collector-tl-incident__when">{fmtWhen(inc.startMs)} — {inc.ongoing ? 'сейчас' : fmtWhen(inc.endMs)}</span>
+        <b>{title}</b>
+        <span className="collector-tl-incident__when">{fmtWhen(inc.startMs)} — {inc.ongoing ? collectorsT('collectorsPage.tl.now') : fmtWhen(inc.endMs)}</span>
         <span className="collector-tl-incident__dur">{fmtDuration(inc.durationSec)}</span>
       </div>
-      {inc.hint && <div className="collector-tl-incident__note">{inc.hint}</div>}
+      {hint && <div className="collector-tl-incident__note">{hint}</div>}
       {also.length > 0 && (
         <div className="collector-tl-incident__note">
-          Также: {also.map((c) => `${c.title.toLowerCase()} (${fmtDuration(c.durationSec)})`).join(', ')}.
+          {collectorsT('collectorsPage.tl.also', {
+            list: also.map((c) => collectorsT('collectorsPage.tl.alsoItem', {
+              title: incidentText(c, 'title').toLowerCase(),
+              duration: fmtDuration(c.durationSec),
+            })).join(', '),
+          })}
         </div>
       )}
     </button>
@@ -242,18 +281,18 @@ function IncidentRow({ inc, onZoom }) {
 function IncidentList({ timeline, onZoom }) {
   const incidents = timeline?.incidents || [];
   if (!incidents.length) {
-    return <div className="collector-tl-fold">Инцидентов не было.</div>;
+    return <div className="collector-tl-fold">{collectorsT('collectorsPage.tl.noIncidents')}</div>;
   }
   return (
     <details className="collector-tl-fold">
-      <summary>Инцидентов: {incidents.length}</summary>
+      <summary>{collectorsT('collectorsPage.tl.incidentCount', { n: incidents.length })}</summary>
       <div className="collector-tl-incidents">
         {incidents.map((inc) => (
           <IncidentRow key={inc.startMs} inc={inc} onZoom={onZoom} />
         ))}
       </div>
       {timeline?.truncated && (
-        <div className="collector-tl-muted">Показана только часть — сузьте период.</div>
+        <div className="collector-tl-muted">{collectorsT('collectorsPage.tl.truncated')}</div>
       )}
     </details>
   );
@@ -286,8 +325,10 @@ function MetricCharts({ timeline, onRange }) {
           <div className="collector-tl-chart-title">
             {chart.label}
             {chart.pct
-              ? ` — за скользящие ${fmtDuration(timeline.completenessSmoothSec || 3600)}`
-              : chart.lag ? `, ${chart.unit}` : `, ${chart.unit}/с`}
+              ? collectorsT('collectorsPage.tl.chartSmoothing', { duration: fmtDuration(timeline.completenessSmoothSec || 3600) })
+              : chart.lag
+                ? collectorsT('collectorsPage.tl.chartLagSuffix', { unit: chart.unit })
+                : collectorsT('collectorsPage.tl.chartRateSuffix', { unit: chart.unit })}
           </div>
           <TimeSeriesSparkChart
             points={points}
@@ -337,7 +378,7 @@ function CollectorsCompletenessModal({ open, source, onClose }) {
       const res = await ApiClient.loadCollectorTimeline(source.sourceId, range.fromMs, range.toMs);
       if (cancelled) return;
       if (res.source === 'error') {
-        setError(res.error || 'Не удалось загрузить историю коллектора');
+        setError(res.error || collectorsT('collectorsPage.tl.loadFailed'));
       } else {
         setTimeline(res.data);
       }
@@ -368,10 +409,10 @@ function CollectorsCompletenessModal({ open, source, onClose }) {
     <Modal
       open={open}
       onClose={onClose}
-      title="Подробнее: работа коллектора"
+      title={collectorsT('collectorsPage.tl.modalTitle')}
       subtitle={range ? `${source.sourceId} · ${fmtWhen(range.fromMs, true)} — ${fmtWhen(range.toMs, true)}` : source.sourceId}
       size="xl"
-      footer={<Button kind="ghost" onClick={onClose}>Закрыть</Button>}
+      footer={<Button kind="ghost" onClick={onClose}>{collectorsT('modal.close')}</Button>}
     >
       <div className="completeness-modal-body">
         <PeriodBar
@@ -385,7 +426,7 @@ function CollectorsCompletenessModal({ open, source, onClose }) {
         />
 
         {error && <div className="form-error">{error}</div>}
-        {loading && !timeline && <div className="collector-tl-muted">Загрузка…</div>}
+        {loading && !timeline && <div className="collector-tl-muted">{collectorsT('dashboard.loading')}</div>}
 
         {timeline && (
           <div className={loading ? 'collector-tl-body collector-tl-body--loading' : 'collector-tl-body'}>
