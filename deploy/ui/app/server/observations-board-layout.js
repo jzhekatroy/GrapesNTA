@@ -11,6 +11,7 @@ const MAX_OBSERVATION_IDS = 500;
 const DEFAULT_LAYOUT = {
   version: LAYOUT_VERSION,
   observationIds: [],
+  hiddenObservationIds: [],
 };
 
 let db = null;
@@ -44,9 +45,13 @@ function validateLayout(layout) {
   }
 
   const observationIds = normalizeObservationIds(layout.observationIds);
+  const orderedIds = new Set(observationIds);
+  const hiddenObservationIds = normalizeObservationIds(layout.hiddenObservationIds)
+    .filter((id) => orderedIds.has(id));
   const normalized = {
     version: LAYOUT_VERSION,
     observationIds,
+    hiddenObservationIds,
   };
 
   const raw = JSON.stringify(normalized);
@@ -60,6 +65,15 @@ function validateLayout(layout) {
     const input = layout.observationIds.map((x) => String(x || '').trim()).filter(Boolean);
     if (input.length !== new Set(input).size) {
       const err = new Error('Дублирующиеся id наблюдений');
+      err.statusCode = 400;
+      throw err;
+    }
+  }
+
+  if (Array.isArray(layout.hiddenObservationIds)) {
+    const input = layout.hiddenObservationIds.map((x) => String(x || '').trim()).filter(Boolean);
+    if (input.length !== new Set(input).size) {
+      const err = new Error('Дублирующиеся id скрытых наблюдений');
       err.statusCode = 400;
       throw err;
     }

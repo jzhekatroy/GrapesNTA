@@ -7350,6 +7350,104 @@ html.modal-open #root {
   color: var(--st-critical);
 }
 
+.observations-hidden-menu {
+  position: relative;
+}
+
+.observations-hidden-menu .btn {
+  gap: 6px;
+}
+
+.observations-hidden-menu__count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+  color: var(--accent);
+  font: var(--pv-text-body-3);
+  line-height: 1;
+}
+
+.observations-hidden-menu__dropdown {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 50;
+  min-width: 280px;
+  max-width: min(360px, calc(100vw - 32px));
+  max-height: min(420px, 70vh);
+  overflow: auto;
+  padding: 8px;
+  background: var(--bg-surface-2);
+  border: 1px solid var(--bd-default);
+  border-radius: 12px;
+  box-shadow: var(--pv-shadow-popover);
+}
+
+.observations-hidden-menu__title {
+  padding: 6px 8px 8px;
+  color: var(--fg-secondary);
+  font: var(--pv-text-body-3);
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
+.observations-hidden-menu__item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 4px;
+  border-radius: 8px;
+  color: var(--fg-primary);
+}
+
+.observations-hidden-menu__item:hover {
+  background: var(--bg-muted);
+}
+
+.observations-hidden-menu__item-label {
+  min-width: 0;
+  flex: 1;
+  padding: 4px;
+  overflow: hidden;
+  color: var(--fg-primary);
+  font: var(--pv-text-body-2);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.observations-hidden-menu__restore {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+  margin: 0;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--fg-secondary);
+  font: var(--pv-text-body-3);
+  cursor: pointer;
+}
+
+.observations-hidden-menu__restore:hover {
+  background: var(--bg-surface-3);
+  color: var(--fg-primary);
+}
+
+.observations-hidden-menu__empty {
+  padding: 16px 8px;
+  color: var(--fg-secondary);
+  font: var(--pv-text-body-3);
+  text-align: center;
+}
+
 .observations-board--edit .obs-tile {
   outline: 1px dashed color-mix(in srgb, var(--accent) 35%, transparent);
   outline-offset: 2px;

@@ -24,8 +24,10 @@ test('validateLayout normalizes observation ids', () => {
   const layout = validateLayout({
     version: 1,
     observationIds: ['  a  ', 'b', ''],
+    hiddenObservationIds: ['b', 'missing'],
   });
   assert.deepEqual(layout.observationIds, ['a', 'b']);
+  assert.deepEqual(layout.hiddenObservationIds, ['b']);
 });
 
 test('validateLayout rejects duplicate ids in input', () => {
@@ -33,10 +35,23 @@ test('validateLayout rejects duplicate ids in input', () => {
     () => validateLayout({ version: 1, observationIds: ['x', 'x'] }),
     /Дублирующиеся/,
   );
+  assert.throws(
+    () => validateLayout({
+      version: 1,
+      observationIds: ['x'],
+      hiddenObservationIds: ['x', 'x'],
+    }),
+    /Дублирующиеся id скрытых/,
+  );
 });
 
 test('validateLayout rejects invalid payload', () => {
   assert.throws(() => validateLayout(null), /Некорректная/);
+});
+
+test('validateLayout keeps legacy layouts visible', () => {
+  const layout = validateLayout({ version: 1, observationIds: ['x'] });
+  assert.deepEqual(layout.hiddenObservationIds, []);
 });
 
 test('normalizeObservationIds caps count and dedupes', () => {
@@ -48,10 +63,15 @@ test('normalizeObservationIds caps count and dedupes', () => {
 test('putLayout and getLayout round-trip per user', () => {
   const dbPath = tempDbPath('roundtrip');
   resetStoreForTests(dbPath);
-  putLayout('user-1', { version: 1, observationIds: ['obs-2', 'obs-1'] });
+  putLayout('user-1', {
+    version: 1,
+    observationIds: ['obs-2', 'obs-1'],
+    hiddenObservationIds: ['obs-1'],
+  });
   const loaded = getLayout('user-1');
   assert.ok(loaded);
   assert.deepEqual(loaded.layout.observationIds, ['obs-2', 'obs-1']);
+  assert.deepEqual(loaded.layout.hiddenObservationIds, ['obs-1']);
   putLayout('user-2', { version: 1, observationIds: ['obs-9'] });
   assert.deepEqual(getLayout('user-2').layout.observationIds, ['obs-9']);
   assert.deepEqual(getLayout('user-1').layout.observationIds, ['obs-2', 'obs-1']);
