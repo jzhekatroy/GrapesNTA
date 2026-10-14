@@ -1,6 +1,8 @@
 /* Observations: live tile board (2 columns). Filters collected in Explorer. */
 
-const { useState, useEffect, useCallback, useMemo, useRef } = React;
+const {
+  useState, useEffect, useLayoutEffect, useCallback, useMemo, useRef,
+} = React;
 
 function obsT(key, params) {
   return GrapesI18n.t(key, params);
@@ -1325,6 +1327,7 @@ function ObservationLiveTile({
     <div
       className={`obs-tile-wrap${expanded ? ' obs-tile-wrap--expanded' : ''}`}
       data-obs-tile-id={item.id}
+      data-obs-flip-id={item.id}
     >
     <Card pad="sm" className={`obs-tile${expanded ? ' obs-tile--expanded' : ''}${editMode ? ' obs-tile--edit' : ''}`}>
       <div className="obs-tile__head">
@@ -1652,7 +1655,7 @@ function fmtDiagTime(iso) {
 }
 
 const OBS_BOARD_DRAG_THRESHOLD_PX = 8;
-const OBS_BOARD_DROP_TARGET_SWITCH_PX = 28;
+const OBS_BOARD_FLIP_TRANSITION = 'transform 0.34s cubic-bezier(0.22, 1, 0.36, 1)';
 
 function compareObservationsDefaultOrder(a, b) {
   const ao = Number(a.layout?.order) || 0;
@@ -1682,129 +1685,97 @@ function mergeObservationBoardOrder(items, savedIds) {
   return [...ordered, ...rest];
 }
 
-function reorderObservationIds(ids, sourceId, targetId, insertAfter) {
-  if (!sourceId || !targetId || sourceId === targetId) return ids;
+function moveObservationIdToIndex(ids, sourceId, targetIndex) {
+  if (!sourceId || !Number.isInteger(targetIndex)) return ids;
+  const sourceIndex = ids.indexOf(sourceId);
+  if (sourceIndex < 0 || sourceIndex === targetIndex) return ids;
   const next = ids.filter((id) => id !== sourceId);
-  const targetIndex = next.indexOf(targetId);
-  if (targetIndex < 0) return ids;
-  const insertIndex = insertAfter ? targetIndex + 1 : targetIndex;
+  const insertIndex = Math.max(0, Math.min(targetIndex, next.length));
   next.splice(insertIndex, 0, sourceId);
   return next;
 }
 
-function obsBoardDropTargetMatches(a, b) {
-  return a && b && a.id === b.id && a.insertAfter === b.insertAfter;
+function readObservationBoardRect(el) {
+  if (!el) return null;
+  const rect = el.getBoundingClientRect();
+  const transform = window.getComputedStyle(el).transform;
+  if (!transform || transform === 'none') return rect;
+  try {
+    const matrix = new DOMMatrixReadOnly(transform);
+    return new DOMRect(
+      rect.left - matrix.e,
+      rect.top - matrix.f,
+      rect.width,
+      rect.height,
+    );
+  } catch {
+    return rect;
+  }
 }
 
-function observationBoardColumnCount(boardEl) {
-  if (!boardEl || typeof window === 'undefined') return 1;
-  const template = window.getComputedStyle(boardEl).gridTemplateColumns;
-  if (!template || template === 'none') return 1;
-  return Math.max(1, template.split(/\s+/).filter(Boolean).length);
+function observationBoardSlots(boardEl) {
+  if (!boardEl) return [];
+  return [...boardEl.querySelectorAll(':scope > .obs-tile-wrap')]
+    .map((el, index) => ({ el, index, rect: readObservationBoardRect(el) }))
+    .filter((slot) => slot.rect);
 }
 
-function observationBoardInsertAfter(rect, clientX, clientY, columnCount, directHit) {
-  if (directHit && columnCount > 1) {
-    return clientX >= rect.left + rect.width / 2;
-  }
-  return clientY >= rect.top + rect.height / 2;
-}
-
-function stabilizeObsBoardDropTarget(next, prev, clientX, clientY, boardEl) {
-  if (!next) return null;
-  if (!prev || obsBoardDropTargetMatches(next, prev)) return next;
-  const el = boardEl?.querySelector(`[data-obs-tile-id="${next.id}"]`);
-  const rect = el?.getBoundingClientRect();
-  if (!rect) return next;
-  if (next.id !== prev.id) {
-    const inset = OBS_BOARD_DROP_TARGET_SWITCH_PX;
-    const inside = clientX >= rect.left + inset
-      && clientX <= rect.right - inset
-      && clientY >= rect.top + inset
-      && clientY <= rect.bottom - inset;
-    return inside ? next : prev;
-  }
-  const buffer = OBS_BOARD_DROP_TARGET_SWITCH_PX;
-  const columnCount = observationBoardColumnCount(boardEl);
-  const directHit = clientX >= rect.left && clientX <= rect.right
-    && clientY >= rect.top && clientY <= rect.bottom;
-  if (directHit && columnCount > 1) {
-    const midX = rect.left + rect.width / 2;
-    if (next.insertAfter && clientX < midX + buffer) return prev;
-    if (!next.insertAfter && clientX > midX - buffer) return prev;
-    return next;
-  }
-  const midY = rect.top + rect.height / 2;
-  if (next.insertAfter && clientY < midY + buffer) return prev;
-  if (!next.insertAfter && clientY > midY - buffer) return prev;
-  return next;
-}
-
-function findObsBoardDropTarget(clientX, clientY, sourceId, boardEl, { phantomRect, lastTarget } = {}) {
-  if (!boardEl) return null;
-  if (phantomRect && lastTarget
-    && clientX >= phantomRect.left && clientX <= phantomRect.right
-    && clientY >= phantomRect.top && clientY <= phantomRect.bottom) {
-    return lastTarget;
-  }
-  const tiles = [...boardEl.querySelectorAll('[data-obs-tile-id]')].filter(
-    (el) => el.getAttribute('data-obs-tile-id') !== sourceId,
-  );
-  if (!tiles.length) return lastTarget || null;
-
-  const columnCount = observationBoardColumnCount(boardEl);
-  const hits = tiles.map((el) => ({
-    el,
-    id: el.getAttribute('data-obs-tile-id'),
-    rect: el.getBoundingClientRect(),
-  }));
-  const direct = hits.find(({ rect }) => (
+function findObservationBoardDropIndex(clientX, clientY, boardEl, fallbackIndex) {
+  const slots = observationBoardSlots(boardEl);
+  if (!slots.length) return fallbackIndex;
+  const direct = slots.find(({ rect }) => (
     clientX >= rect.left && clientX <= rect.right
       && clientY >= rect.top && clientY <= rect.bottom
   ));
-  if (direct) {
-    return {
-      id: direct.id,
-      insertAfter: observationBoardInsertAfter(
-        direct.rect,
-        clientX,
-        clientY,
-        columnCount,
-        true,
-      ),
-    };
-  }
+  if (direct) return direct.index;
 
-  // Как на «Обзоре»: в промежутках не сбрасываем preview, а выбираем
-  // ближайшую карточку в колонке курсора.
-  const columnHits = hits.filter(({ rect }) => clientX >= rect.left && clientX <= rect.right);
-  const candidates = columnHits.length ? columnHits : hits;
+  const columnSlots = slots.filter(({ rect }) => clientX >= rect.left && clientX <= rect.right);
+  const candidates = columnSlots.length ? columnSlots : slots;
   let nearest = null;
   let nearestDistance = Infinity;
-  for (const hit of candidates) {
-    const dx = clientX < hit.rect.left
-      ? hit.rect.left - clientX
-      : (clientX > hit.rect.right ? clientX - hit.rect.right : 0);
-    const dy = clientY < hit.rect.top
-      ? hit.rect.top - clientY
-      : (clientY > hit.rect.bottom ? clientY - hit.rect.bottom : 0);
+  for (const slot of candidates) {
+    const dx = clientX < slot.rect.left
+      ? slot.rect.left - clientX
+      : (clientX > slot.rect.right ? clientX - slot.rect.right : 0);
+    const dy = clientY < slot.rect.top
+      ? slot.rect.top - clientY
+      : (clientY > slot.rect.bottom ? clientY - slot.rect.bottom : 0);
     const distance = Math.hypot(dx, dy);
     if (distance < nearestDistance) {
-      nearest = hit;
+      nearest = slot;
       nearestDistance = distance;
     }
   }
-  if (!nearest) return lastTarget || null;
-  return {
-    id: nearest.id,
-    insertAfter: observationBoardInsertAfter(
-      nearest.rect,
-      clientX,
-      clientY,
-      columnCount,
-      false,
-    ),
-  };
+  return nearest ? nearest.index : fallbackIndex;
+}
+
+function captureObservationBoardFlipRects(boardEl) {
+  const rects = new Map();
+  if (!boardEl) return rects;
+  boardEl.querySelectorAll('[data-obs-flip-id]').forEach((el) => {
+    const id = el.dataset.obsFlipId;
+    if (id) rects.set(id, readObservationBoardRect(el));
+  });
+  return rects;
+}
+
+function runObservationBoardFlipAnimation(boardEl, firstRects) {
+  if (!boardEl || !firstRects?.size) return;
+  boardEl.querySelectorAll('[data-obs-flip-id]').forEach((el) => {
+    const first = firstRects.get(el.dataset.obsFlipId);
+    if (!first) return;
+    const last = readObservationBoardRect(el);
+    if (!last) return;
+    const dx = first.left - last.left;
+    const dy = first.top - last.top;
+    if (Math.abs(dx) < 0.5 && Math.abs(dy) < 0.5) return;
+    el.style.transform = `translate3d(${dx}px, ${dy}px, 0)`;
+    el.style.transition = 'none';
+    requestAnimationFrame(() => {
+      el.style.transition = OBS_BOARD_FLIP_TRANSITION;
+      el.style.transform = '';
+    });
+  });
 }
 
 function ObservationsBoardToolbar({
@@ -1857,11 +1828,14 @@ function ObservationsBoardToolbar({
   );
 }
 
-function ObservationBoardTilePhantom({ title, expanded, height }) {
+function ObservationBoardTilePhantom({
+  id, title, expanded, height,
+}) {
   return (
     <div
       className={`obs-tile-wrap obs-tile-wrap--phantom${expanded ? ' obs-tile-wrap--expanded' : ''}`}
       data-obs-board-phantom="true"
+      data-obs-flip-id={id}
       aria-hidden="true"
       style={height ? { height, minHeight: height } : undefined}
     >
@@ -1899,6 +1873,8 @@ function PageObservations({ onNavigate }) {
   const editBaselineOrderIdsRef = useRef([]);
   const editModeRef = useRef(false);
   const dragPreviewOrderIdsRef = useRef(null);
+  const dragMoveRafRef = useRef(null);
+  const flipFirstRectsRef = useRef(null);
 
   const settingsItem = useMemo(
     () => items.find((x) => x.id === settingsItemId) || null,
@@ -1954,6 +1930,12 @@ function PageObservations({ onNavigate }) {
   useEffect(() => {
     editBaselineOrderIdsRef.current = editBaselineOrderIds;
   }, [editBaselineOrderIds]);
+
+  useLayoutEffect(() => {
+    if (!flipFirstRectsRef.current || !boardRef.current) return;
+    runObservationBoardFlipAnimation(boardRef.current, flipFirstRectsRef.current);
+    flipFirstRectsRef.current = null;
+  }, [dragPreviewOrderIds]);
 
   const enterBoardEditMode = useCallback(() => {
     const ids = [...boardOrderIdsRef.current];
@@ -2039,21 +2021,11 @@ function PageObservations({ onNavigate }) {
     const originX = event.clientX;
     const originY = event.clientY;
     let dragStarted = false;
-    let lastDropTarget = null;
     const baseOrder = [...editDraftOrderIdsRef.current];
+    let lastDropIndex = baseOrder.indexOf(sourceId);
     dragPreviewOrderIdsRef.current = baseOrder;
     const sourceEl = boardRef.current?.querySelector(`[data-obs-tile-id="${sourceId}"]`);
     const sourceRect = sourceEl?.getBoundingClientRect();
-
-    const resolveDropTarget = (ev) => {
-      const phantomEl = boardRef.current?.querySelector('[data-obs-board-phantom="true"]');
-      const phantomRect = phantomEl ? phantomEl.getBoundingClientRect() : null;
-      const raw = findObsBoardDropTarget(ev.clientX, ev.clientY, sourceId, boardRef.current, {
-        phantomRect,
-        lastTarget: lastDropTarget,
-      });
-      return stabilizeObsBoardDropTarget(raw, lastDropTarget, ev.clientX, ev.clientY, boardRef.current);
-    };
 
     const applyPreview = (ev) => {
       if (!dragStarted) {
@@ -2062,31 +2034,44 @@ function PageObservations({ onNavigate }) {
         setDraggingTileId(sourceId);
         setDraggingTileHeight(sourceRect?.height || null);
       }
-      const dropTarget = resolveDropTarget(ev);
-      if (dropTarget) lastDropTarget = dropTarget;
-      if (!dropTarget) {
-        setDragPreviewOrderIds(null);
-        dragPreviewOrderIdsRef.current = baseOrder;
-        return;
-      }
-      const preview = reorderObservationIds(
-        baseOrder,
-        sourceId,
-        dropTarget.id,
-        dropTarget.insertAfter,
+      const dropIndex = findObservationBoardDropIndex(
+        ev.clientX,
+        ev.clientY,
+        boardRef.current,
+        lastDropIndex,
       );
+      if (!Number.isInteger(dropIndex)) return;
+      lastDropIndex = dropIndex;
+      const preview = moveObservationIdToIndex(baseOrder, sourceId, dropIndex);
       if (preview.every((id, i) => id === baseOrder[i])) {
+        if (dragPreviewOrderIdsRef.current !== baseOrder) {
+          flipFirstRectsRef.current = captureObservationBoardFlipRects(boardRef.current);
+        }
         setDragPreviewOrderIds(null);
         dragPreviewOrderIdsRef.current = baseOrder;
         return;
       }
+      const current = dragPreviewOrderIdsRef.current;
+      if (current?.length === preview.length && preview.every((id, i) => id === current[i])) return;
+      flipFirstRectsRef.current = captureObservationBoardFlipRects(boardRef.current);
       dragPreviewOrderIdsRef.current = preview;
       setDragPreviewOrderIds(preview);
     };
 
-    const onMove = (ev) => applyPreview(ev);
+    const onMove = (ev) => {
+      if (dragMoveRafRef.current) return;
+      dragMoveRafRef.current = requestAnimationFrame(() => {
+        dragMoveRafRef.current = null;
+        applyPreview(ev);
+      });
+    };
 
     const onUp = (ev) => {
+      if (dragMoveRafRef.current) {
+        cancelAnimationFrame(dragMoveRafRef.current);
+        dragMoveRafRef.current = null;
+        applyPreview(ev);
+      }
       document.removeEventListener('mousemove', onMove);
       document.removeEventListener('mouseup', onUp);
       document.body.style.cursor = '';
@@ -2631,6 +2616,7 @@ function PageObservations({ onNavigate }) {
                 return (
                   <ObservationBoardTilePhantom
                     key={`phantom-${item.id}`}
+                    id={item.id}
                     title={item.name}
                     expanded={expandedId === item.id}
                     height={draggingTileHeight}

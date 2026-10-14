@@ -7361,6 +7361,7 @@ html.modal-open #root {
 
 .observations-board--drag-preview .obs-tile-wrap {
   transition: transform 0.34s cubic-bezier(0.22, 1, 0.36, 1);
+  will-change: transform;
 }
 
 .obs-tile-wrap {
@@ -7374,7 +7375,10 @@ html.modal-open #root {
 .obs-tile-wrap--phantom {
   pointer-events: none;
   z-index: 2;
-  transition: transform 0.34s cubic-bezier(0.22, 1, 0.36, 1), opacity 0.24s ease;
+  transition:
+    transform 0.34s cubic-bezier(0.22, 1, 0.36, 1),
+    opacity 0.24s ease;
+  will-change: transform;
 }
 
 .obs-tile-phantom__frame {
@@ -7392,6 +7396,17 @@ html.modal-open #root {
   font: var(--pv-text-body-3);
   text-align: center;
   animation: dashboard-phantom-frame-in 0.28s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .observations-board--drag-preview .obs-tile-wrap,
+  .obs-tile-wrap--phantom {
+    transition: none !important;
+  }
+
+  .obs-tile-phantom__frame {
+    animation: none !important;
+  }
 }
 
 .obs-tile {
