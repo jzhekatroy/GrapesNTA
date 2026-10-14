@@ -999,6 +999,40 @@ const ApiClient = (() => {
     return body.data;
   }
 
+  async function loadMonitoringAttacks() {
+    const body = await requestJson('/api/monitoring/attacks');
+    return body.data;
+  }
+
+  async function loadMonitoringProblems() {
+    const body = await requestJson('/api/monitoring/problems');
+    return body.data;
+  }
+
+  async function loadMonitoringAttack(id) {
+    const enc = encodeURIComponent(id || '');
+    const body = await requestJson(`/api/monitoring/attacks/${enc}`);
+    return body.data;
+  }
+
+  async function loadMonitoringAttackHistory(id) {
+    const enc = encodeURIComponent(id || '');
+    const body = await requestJson(`/api/monitoring/attacks/${enc}/history`);
+    return body.data;
+  }
+
+  async function loadMonitoringAttackAsn(id) {
+    const enc = encodeURIComponent(id || '');
+    const body = await requestJson(`/api/monitoring/attacks/${enc}/asn`);
+    return body.data;
+  }
+
+  async function loadMonitoringAttackFlowspec(id) {
+    const enc = encodeURIComponent(id || '');
+    const body = await requestJson(`/api/monitoring/attacks/${enc}/flowspec`);
+    return body.data;
+  }
+
   async function exportDetectionEventsCsv({ status = 'normalized', from, to, limit = 10000, kind } = {}) {
     const params = new URLSearchParams();
     params.set('status', status);
@@ -3163,6 +3197,12 @@ const ApiClient = (() => {
     loadDetectionFlowspecSummary,
     loadDetectionEvents,
     exportDetectionEventsCsv,
+    loadMonitoringAttacks,
+    loadMonitoringProblems,
+    loadMonitoringAttack,
+    loadMonitoringAttackHistory,
+    loadMonitoringAttackAsn,
+    loadMonitoringAttackFlowspec,
     dashboardOtherPorts,
     dashboardCountries,
     loadCountries,

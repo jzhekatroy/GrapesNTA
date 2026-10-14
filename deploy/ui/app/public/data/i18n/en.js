@@ -8,6 +8,7 @@
     'nav.section.netmodel': 'Network model',
     'nav.section.admin': 'Administration',
 
+    'nav.item.monitoring': 'Monitoring',
     'nav.item.dashboard': 'Overview',
     'nav.item.observations': 'Observations',
     'nav.item.dns': 'DNS',
