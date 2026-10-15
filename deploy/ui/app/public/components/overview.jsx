@@ -95,8 +95,6 @@ function OverviewTrafficChartCard({
             <button className={mode === 'bw' ? 'is-active' : ''} onClick={() => onModeChange?.('bw')}>{overviewT('dashboard.chart.bandwidth')}</button>
             <button className={mode === 'pps' ? 'is-active' : ''} onClick={() => onModeChange?.('pps')}>{overviewT('dashboard.chart.pps')}</button>
           </div>
-          <Button kind="ghost" size="sm" icon="zoom" />
-          <Button kind="ghost" size="sm" icon="more" />
         </>
       ) : null}
     >
