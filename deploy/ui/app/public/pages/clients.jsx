@@ -975,12 +975,10 @@ function ClientBindingsTab({ client, canWrite, onSaved }) {
   useEffect(() => { loadBindings(); }, [loadBindings]);
 
   const refreshOptions = useCallback(async (q) => {
-    if (!canWrite) return;
+    if (!canWrite || !isPrefixes) return;
     setOptionsLoading(true);
     try {
-      const res = isPrefixes
-        ? await ApiClient.loadClientPrefixOptions({ q, limit: 30 })
-        : await ApiClient.loadClientPortOptions({ q, limit: 30 });
+      const res = await ApiClient.loadClientPrefixOptions({ q, limit: 30 });
       setOptions(res.data || []);
     } catch (err) {
       setOptions([]);
@@ -990,14 +988,14 @@ function ClientBindingsTab({ client, canWrite, onSaved }) {
   }, [canWrite, isPrefixes]);
 
   useEffect(() => {
-    if (!canWrite) return undefined;
+    if (!canWrite || !isPrefixes) return undefined;
     let cancelled = false;
     const timer = setTimeout(() => {
       if (cancelled) return;
       refreshOptions(selectorQ);
     }, 250);
     return () => { cancelled = true; clearTimeout(timer); };
-  }, [selectorQ, canWrite, refreshOptions, optionsRefreshKey]);
+  }, [selectorQ, canWrite, isPrefixes, refreshOptions, optionsRefreshKey]);
 
   const itemKey = (item) => bindingItemKey(item, isPrefixes);
 
@@ -1177,12 +1175,12 @@ function ClientBindingsTab({ client, canWrite, onSaved }) {
             )}
           </div>
 
-          {canWrite && (
+          {canWrite && isPrefixes && (
             <div className="field">
-              <label>{isPrefixes ? 'Добавить сеть из справочника' : 'Добавить порт из инвентаря'}</label>
+              <label>Добавить сеть из справочника</label>
               <input
                 className="input"
-                placeholder={isPrefixes ? 'Поиск по префиксу…' : 'IP коммутатора, имя или описание…'}
+                placeholder="Поиск по префиксу…"
                 value={selectorQ}
                 onChange={(e) => setSelectorQ(e.target.value)}
               />
@@ -1193,7 +1191,7 @@ function ClientBindingsTab({ client, canWrite, onSaved }) {
               )}
               {!optionsLoading && selectorQ.trim() && filteredOptions.length === 0 && (
                 <div style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-secondary)', marginTop: 6 }}>
-                  {isPrefixes ? 'Сети не найдены.' : 'Порты не найдены.'}
+                  Сети не найдены.
                 </div>
               )}
               {!optionsLoading && filteredOptions.length > 0 && (
@@ -1221,16 +1219,7 @@ function ClientBindingsTab({ client, canWrite, onSaved }) {
                         onClick={() => addItem(opt)}
                       >
                         <div>
-                          {isPrefixes ? (
-                            <div className="mono" style={{ font: 'var(--pv-text-body-2-bold)' }}>{opt.prefix}</div>
-                          ) : (
-                            <>
-                              <div className="mono" style={{ font: 'var(--pv-text-body-2-bold)' }}>{opt.switchIp} · {opt.ifIndex}</div>
-                              <div style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-secondary)' }}>
-                                {[opt.ifName, opt.ifAlias, opt.ifDescr].filter(Boolean).join(' · ') || '—'}
-                              </div>
-                            </>
-                          )}
+                          <div className="mono" style={{ font: 'var(--pv-text-body-2-bold)' }}>{opt.prefix}</div>
                         </div>
                         <div style={{
                           font: 'var(--pv-text-body-3)',
