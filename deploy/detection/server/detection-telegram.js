@@ -4151,7 +4151,7 @@ async function processDetectionAlerts({ minute, rows, nameByKey, hourBpsNorm }) 
       || signals.includes(SIGNALS.syn_flood) || signals.includes(SIGNALS.foreign_geo)) {
       try {
         investigate = await investigateIncident({ ...target, minute: focusMinute, proto: carpetOnly ? 17 : 0 });
-        investigate = await attachTargetFocus(investigate, { ...target, minute: focusMinute });
+        investigate = await attachTargetFocus(investigate, { ...target, minute: focusMinute, withReplies: true });
         if (verdict.kind === KINDS.benign_peak && (target.scope === 'provider' || target.scope === 'client')) {
           try {
             const junk = await loadExcessAsnTop({ ...target, minute: focusMinute });
@@ -4435,6 +4435,7 @@ async function rebuildDetectionEventAlert({ scope, scopeId, minute, sendTelegram
         scope: row.scope,
         scopeId: row.scope_id,
         minute: minuteForFacts,
+        withReplies: true,
       });
       if (verdict.kind === KINDS.benign_peak && (row.scope === 'provider' || row.scope === 'client')) {
         const junk = await loadExcessAsnTop({

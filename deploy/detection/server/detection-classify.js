@@ -67,6 +67,13 @@ const TARGET_SRCS_MIN = 10;
 const SESSION_TOP_SHARE_MIN = 0.8;
 const SESSION_AVG_PKT_MIN = 500;
 const SESSION_LOCAL_PORT_MIN = 1024;
+// Живой TCP-сервис отвечает: на входящий пакет цель шлёт от 0.2 пакета, и это
+// не RST и не SYN-ACK. Прокси 46.161.49.174 (ЦОД 14–15.10) отвечал ×1.42,
+// сервер 70101 (PiterIX 10.10) — ×3.6. TCP-флуды на 95558 (PiterIX 10.10) —
+// ×0.002, и весь ответ RST. Если ответ ушёл мимо коллектора, проверка молчит.
+const REPLY_PKT_RATIO_MIN = 0.2;
+const REPLY_CLEAN_SHARE_MIN = 0.5;
+const REPLY_ROWS_MIN = 20;
 // Сеть /24 из адресов разных абонентов — не один сервер: адрес внутри неё
 // разбирает детекция самого абонента по его норме.
 const NET_CLIENTS_MIN = 2;
@@ -322,6 +329,31 @@ function isTargetFocus(focus) {
   return num(focus.growth) >= TARGET_GROWTH_MIN;
 }
 
+function twoWayReply(investigate, target) {
+  if (!target?.ip || Number(target.proto) !== 6) return null;
+  const reply = investigate?.replies?.[target.ip];
+  if (!reply) return null;
+  const inPackets = num(reply.inPackets);
+  const outPackets = num(reply.outPackets);
+  if (!(num(reply.inRows) >= REPLY_ROWS_MIN) || !(num(reply.outRows) >= REPLY_ROWS_MIN)) return null;
+  if (!(inPackets > 0) || !(outPackets > 0)) return null;
+  const ratio = outPackets / inPackets;
+  const clean = 1 - Math.min(outPackets, num(reply.outBad) || 0) / outPackets;
+  if (ratio < REPLY_PKT_RATIO_MIN || clean < REPLY_CLEAN_SHARE_MIN) return null;
+  return { ratio, clean };
+}
+
+function twoWayPeak(next, target, reply) {
+  return {
+    ...next,
+    kind: KINDS.benign_peak,
+    reason: `пик загрузки · двусторонний обмен · TCP/${target.port} ${target.ip} отвечает ×${reply.ratio.toFixed(2)} пакетов · ${next.reason || ''}`
+      .replace(/\s+/g, ' ')
+      .trim(),
+    needsInvestigate: false,
+  };
+}
+
 function synPacketFocus(verdict = {}, investigate = {}) {
   const syn = investigate?.syn;
   if (!(num(syn?.pps) >= TCP_FOCUS_PPS_MIN)) return null;
@@ -423,6 +455,8 @@ function refineClassification(verdict, investigate, context = {}) {
   }
   if (next.kind === KINDS.benign_peak && isTargetFocus(investigate?.focus)) {
     const focus = investigate.focus;
+    const reply = twoWayReply(investigate, focus);
+    if (reply) return twoWayPeak(next, focus, reply);
     const label = [focus.protoLabel, focus.port].filter((part) => part != null && part !== '').join('/');
     next.kind = KINDS.volumetric;
     next.reason = `цель ${label} ${focus.ip || ''} · ${focus.srcs} источников · ${next.reason || ''}`
@@ -436,6 +470,8 @@ function refineClassification(verdict, investigate, context = {}) {
     && ratio < TOP_DST_PLAIN_RATIO
     && /^(нет явных признаков атаки|объём в пределах часа, форма смешанная)/.test(String(next.reason || ''));
   if (topShare != null && topShare >= TOP_DST_VOLUMETRIC && !plainMild) {
+    const reply = next.kind === KINDS.benign_peak ? twoWayReply(investigate, investigate?.victim) : null;
+    if (reply) return twoWayPeak(next, investigate.victim, reply);
     next.kind = KINDS.volumetric;
     next.reason = `топ IP ${(topShare * 100).toFixed(1)}% · ${next.reason || ''}`.trim();
     next.needsInvestigate = true;
