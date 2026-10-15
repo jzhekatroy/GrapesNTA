@@ -169,3 +169,18 @@ test('подпись числа записей в таблице на англи
   GrapesI18n.setLocale('en');
   assert.equal(GrapesI18n.t('table.records.many', { count: 50 }), '50 records');
 });
+
+test('английские подписи страницы классификации трафика совпадают с требованиями', () => {
+  const en = loadLocaleMessages('en');
+  assert.equal(en['nav.item.traffic-classification'], 'Traffic classification');
+  assert.equal(
+    en['trafficClassification.subtitle'],
+    'How the system determines flow direction: inbound, outbound, transit, internal, or untagged.',
+  );
+  assert.equal(en['trafficClassification.card.direction'], 'Direction detection');
+  assert.equal(en['trafficClassification.directionMode.ports.label'], 'By equipment ports');
+  assert.equal(en['trafficClassification.unknown.foreign.label'], 'Treat as transit');
+  assert.equal(en['trafficClassification.viewUnclassifiedExplorer'], 'View untagged traffic by autonomous systems');
+  assert.equal(en['trafficClassification.saveSuccessTitle'], 'Settings saved');
+  assert.equal(en['trafficClassification.loadFailed'], 'Failed to load');
+});
