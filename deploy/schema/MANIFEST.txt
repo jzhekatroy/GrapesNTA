@@ -76,6 +76,8 @@
 50_net/44_net_client_ports_enabled.sql
 50_net/45_net_client_prefix_dict.sql
 50_net/46_net_isp_prefix_dict.sql
+50_net/47_net_interface_role_switches_hidden.sql
+50_net/48_net_interface_role_switches_hidden_current.sql
 60_traffic/01_traffic_rollup_state.sql
 60_traffic/02_traffic_dashboard_1m.sql
 60_traffic/03_traffic_dashboard_1h.sql
