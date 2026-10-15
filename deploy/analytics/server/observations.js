@@ -663,8 +663,13 @@ async function createObservation(userId, payload = {}, options = {}) {
     throw quotaError(items);
   }
   if (item.materialize.enabled) item.materialize.status = 'queued';
-  await upsertObservation(item);
-  return withMeta(item, [...items, item], userId);
+  if (realm && !observationClientId(item)) {
+    const err = new Error('Не удалось привязать наблюдение к клиенту');
+    err.status = 500;
+    throw err;
+  }
+  const saved = await upsertObservation(item);
+  return withMeta(saved, [...items, saved], userId);
 }
 
 async function updateObservation(id, userId, payload = {}, options = {}) {
@@ -2590,7 +2595,10 @@ ${topSections}
 }
 
 async function runObservationReport(id, userId, options = {}) {
-  const obs = await getObservation(id, userId, options);
+  const stored = await loadObservationById(id);
+  if (!stored) return null;
+  const realmOpts = observationRealmOptions(stored, options);
+  const obs = await getObservation(id, userId, realmOpts);
   if (!obs) return null;
   const startedAt = new Date().toISOString();
   const runId = newId('run');
@@ -2609,7 +2617,12 @@ async function runObservationReport(id, userId, options = {}) {
   let preview;
   let previewError = null;
   try {
-    preview = await previewObservation(id, userId, { from: window.from, to: window.to }, options);
+    preview = await previewObservation(
+      id,
+      userId,
+      { from: window.from, to: window.to },
+      realmOpts,
+    );
   } catch (err) {
     previewError = err.message;
     preview = { widgets: [] };
@@ -2887,8 +2900,10 @@ async function listMaterializeJobs() {
 async function patchMaterializeStatus(id, patch) {
   const item = await loadObservationById(id);
   if (!item) return;
+  const clientId = observationClientId(item);
   item.materialize = { ...item.materialize, ...patch };
   item.updatedAt = new Date().toISOString();
+  if (clientId) item.clientId = clientId;
   await upsertObservation(item);
 }
 

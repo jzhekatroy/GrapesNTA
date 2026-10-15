@@ -663,8 +663,13 @@ async function createObservation(userId, payload = {}, options = {}) {
     throw quotaError(items);
   }
   if (item.materialize.enabled) item.materialize.status = 'queued';
-  await upsertObservation(item);
-  return withMeta(item, [...items, item], userId);
+  if (realm && !observationClientId(item)) {
+    const err = new Error('Не удалось привязать наблюдение к клиенту');
+    err.status = 500;
+    throw err;
+  }
+  const saved = await upsertObservation(item);
+  return withMeta(saved, [...items, saved], userId);
 }
 
 async function updateObservation(id, userId, payload = {}, options = {}) {
@@ -2895,8 +2900,10 @@ async function listMaterializeJobs() {
 async function patchMaterializeStatus(id, patch) {
   const item = await loadObservationById(id);
   if (!item) return;
+  const clientId = observationClientId(item);
   item.materialize = { ...item.materialize, ...patch };
   item.updatedAt = new Date().toISOString();
+  if (clientId) item.clientId = clientId;
   await upsertObservation(item);
 }
 

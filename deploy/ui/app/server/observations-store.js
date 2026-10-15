@@ -361,9 +361,18 @@ async function loadObservationById(id) {
 
 async function upsertObservation(item) {
   await ensureObservationsStore();
-  const row = observationToRow(item, { deleted: 0 });
+  let toSave = item;
+  const incomingClient = String(item?.clientId ?? '').trim();
+  if (!incomingClient && item?.id) {
+    const prev = await loadObservationById(item.id);
+    const prevClient = String(prev?.clientId ?? '').trim();
+    if (prevClient) {
+      toSave = { ...item, clientId: prevClient };
+    }
+  }
+  const row = observationToRow(toSave, { deleted: 0 });
   await insertRows(OBSERVATIONS_TABLE, [row], { name: 'observations/upsert' });
-  return item;
+  return toSave;
 }
 
 async function softDeleteObservation(item) {
@@ -374,13 +383,14 @@ async function softDeleteObservation(item) {
   await executeCommand(`
     INSERT INTO ${config.database}.${OBSERVATIONS_TABLE}
     (
-      id, owner_id, is_shared, name, description, folder, lookback,
+      id, owner_id, client_id, is_shared, name, description, folder, lookback,
       filters_json, widgets_json, live_json, materialize_json, report_json,
       deleted, created_at, updated_at
     )
     SELECT
       id,
       owner_id,
+      client_id,
       is_shared,
       name,
       description,
