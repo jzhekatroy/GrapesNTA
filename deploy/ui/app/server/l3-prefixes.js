@@ -8,6 +8,12 @@ const {
   entitiesViewRef,
 } = require('./clickhouse');
 
+function validationFail(error, code, params) {
+  const out = { ok: false, error, code };
+  if (params) out.params = params;
+  return out;
+}
+
 const ALLOWED_ROLES = new Set([
   'provider_public',
   'internal',
@@ -41,33 +47,33 @@ function mapEntityRow(r) {
 
 function parseCidr(prefix) {
   const trimmed = String(prefix ?? '').trim();
-  if (!trimmed) return { ok: false, error: 'Укажите префикс (CIDR)' };
+  if (!trimmed) return validationFail('Укажите префикс (CIDR)', 'prefixRequired');
 
   const slash = trimmed.indexOf('/');
-  if (slash < 0) return { ok: false, error: 'Префикс должен быть в формате CIDR (например 10.0.0.0/8)' };
+  if (slash < 0) return validationFail('Префикс должен быть в формате CIDR (например 10.0.0.0/8)', 'prefixCidrFormat');
 
   const ipPart = trimmed.slice(0, slash);
   const maskPart = trimmed.slice(slash + 1);
   const mask = Number(maskPart);
 
   if (!/^\d+$/.test(maskPart) || !Number.isInteger(mask)) {
-    return { ok: false, error: 'Некорректная длина маски в CIDR' };
+    return validationFail('Некорректная длина маски в CIDR', 'invalidMaskLength');
   }
 
   const isV4 = net.isIPv4(ipPart);
   const isV6 = net.isIPv6(ipPart);
 
   if (isV4 && !isV6) {
-    if (mask < 0 || mask > 32) return { ok: false, error: 'Для IPv4 маска должна быть от 0 до 32' };
+    if (mask < 0 || mask > 32) return validationFail('Для IPv4 маска должна быть от 0 до 32', 'ipv4MaskRange');
     return { ok: true, prefix: `${ipPart}/${mask}`, family: 4 };
   }
 
   if (isV6) {
-    if (mask < 0 || mask > 128) return { ok: false, error: 'Для IPv6 маска должна быть от 0 до 128' };
+    if (mask < 0 || mask > 128) return validationFail('Для IPv6 маска должна быть от 0 до 128', 'ipv6MaskRange');
     return { ok: true, prefix: `${ipPart}/${mask}`, family: 6 };
   }
 
-  return { ok: false, error: 'Некорректный IP-адрес в префиксе' };
+  return validationFail('Некорректный IP-адрес в префиксе', 'invalidIpInPrefix');
 }
 
 function parsePrefixKey(body) {
@@ -79,7 +85,7 @@ function parsePrefixKey(body) {
     family = parsed.family;
   }
   if (family !== parsed.family) {
-    return { ok: false, error: 'Версия IP не соответствует адресу в префиксе' };
+    return validationFail('Версия IP не соответствует адресу в префиксе', 'familyMismatchPrefix');
   }
 
   return { ok: true, prefix: parsed.prefix, family };
@@ -208,7 +214,7 @@ async function validateL3PrefixPayload(body, { requireActiveFields = true } = {}
   }
 
   if (family !== parsed.family) {
-    return { ok: false, error: 'Версия IP не соответствует адресу в префиксе' };
+    return validationFail('Версия IP не соответствует адресу в префиксе', 'familyMismatchPrefix');
   }
 
   let enabled = Number(body?.enabled);
@@ -218,13 +224,13 @@ async function validateL3PrefixPayload(body, { requireActiveFields = true } = {}
   const role = String(body?.role ?? '').trim();
 
   if (requireActiveFields && enabled === 1) {
-    if (!entityId) return { ok: false, error: 'Выберите владельца сети' };
+    if (!entityId) return validationFail('Выберите владельца сети', 'entityRequired');
     if (!ALLOWED_ROLES.has(role)) {
-      return { ok: false, error: 'Недопустимая роль сети' };
+      return validationFail('Недопустимая роль сети', 'invalidRole');
     }
     const entityIds = await fetchEntityIds();
     if (!entityIds.has(entityId)) {
-      return { ok: false, error: 'Выбранный владелец не найден в справочнике объектов' };
+      return validationFail('Выбранный владелец не найден в справочнике объектов', 'entityNotFound');
     }
   }
 
@@ -248,6 +254,8 @@ async function saveL3Prefix(body) {
   if (!validation.ok) {
     const err = new Error(validation.error);
     err.statusCode = 400;
+    if (validation.code) err.code = validation.code;
+    if (validation.params) err.params = validation.params;
     throw err;
   }
 
@@ -264,6 +272,8 @@ async function setL3PrefixEnabled(body) {
   if (!key.ok) {
     const err = new Error(key.error);
     err.statusCode = 400;
+    if (key.code) err.code = key.code;
+    if (key.params) err.params = key.params;
     throw err;
   }
 
@@ -271,6 +281,7 @@ async function setL3PrefixEnabled(body) {
   if (!latest) {
     const err = new Error('Префикс не найден');
     err.statusCode = 404;
+    err.code = 'prefixNotFound';
     throw err;
   }
 
@@ -283,12 +294,14 @@ async function setL3PrefixEnabled(body) {
     if (!ALLOWED_ROLES.has(latest.role)) {
       const err = new Error('Сначала отредактируйте сеть и выберите допустимую роль');
       err.statusCode = 400;
+      err.code = 'invalidRoleBeforeEnable';
       throw err;
     }
     const entityIds = await fetchEntityIds();
     if (!latest.entityId || !entityIds.has(latest.entityId)) {
       const err = new Error('Выберите действующего владельца сети перед включением');
       err.statusCode = 400;
+      err.code = 'entityRequiredBeforeEnable';
       throw err;
     }
   }
@@ -316,6 +329,8 @@ async function deleteL3Prefix(body) {
   if (!key.ok) {
     const err = new Error(key.error);
     err.statusCode = 400;
+    if (key.code) err.code = key.code;
+    if (key.params) err.params = key.params;
     throw err;
   }
 
@@ -323,6 +338,7 @@ async function deleteL3Prefix(body) {
   if (!latest) {
     const err = new Error('Префикс не найден');
     err.statusCode = 404;
+    err.code = 'prefixNotFound';
     throw err;
   }
 

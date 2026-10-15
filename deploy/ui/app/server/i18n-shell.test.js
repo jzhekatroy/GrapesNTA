@@ -169,3 +169,21 @@ test('подпись числа записей в таблице на англи
   GrapesI18n.setLocale('en');
   assert.equal(GrapesI18n.t('table.records.many', { count: 50 }), '50 records');
 });
+
+test('английские подписи страницы «Моя сеть» совпадают с требованиями', () => {
+  const en = loadLocaleMessages('en');
+  assert.equal(en['network.title'], 'My network');
+  assert.equal(en['network.tab.entities'], 'L3 owners');
+  assert.equal(en['network.tab.cidr'], 'CIDR');
+  assert.equal(en['network.cidr.role.provider_public'], 'Provider public network');
+  assert.equal(
+    en['network.err.entityDuplicate'],
+    'An owner with ID {entityId} already exists',
+  );
+  const GrapesI18n = loadI18n();
+  GrapesI18n.setLocale('en');
+  assert.equal(
+    GrapesI18n.t('network.err.entityDuplicate', { entityId: 'isp:acme' }),
+    'An owner with ID isp:acme already exists',
+  );
+});
