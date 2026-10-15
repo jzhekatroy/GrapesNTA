@@ -5736,6 +5736,16 @@ body.explorer-chip-dragging * {
   width: 100%;
 }
 .input::placeholder { color: var(--fg-muted); }
+.input:disabled,
+.input[readonly] {
+  background: var(--surf-2);
+  color: var(--fg-secondary);
+  cursor: default;
+}
+.input:disabled:focus,
+.input[readonly]:focus {
+  border-color: var(--bd-default);
+}
 .input:focus, .input:focus-within { border-color: var(--bd-focus); }
 .input--with-icon { padding-left: 38px; }
 .input-wrap { position: relative; }
