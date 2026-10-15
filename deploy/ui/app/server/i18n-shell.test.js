@@ -169,3 +169,23 @@ test('подпись числа записей в таблице на англи
   GrapesI18n.setLocale('en');
   assert.equal(GrapesI18n.t('table.records.many', { count: 50 }), '50 records');
 });
+
+test('английские подписи страницы BMP / BGP совпадают с требованиями', () => {
+  const en = loadLocaleMessages('en');
+  assert.equal(en['period.15m'], '15 minutes');
+  assert.equal(en['bmpPage.title'], 'BMP / BGP');
+  assert.equal(en['bmpPage.tab.health'], 'Overview');
+  assert.equal(en['bmpPage.tab.routes'], 'Routes');
+  assert.equal(en['bmpPage.churn.chartTitle'], 'Announce / withdraw dynamics');
+  assert.equal(en['bmpPage.churn.tipUnit'], 'events');
+  const GrapesI18n = loadI18n();
+  GrapesI18n.setLocale('en');
+  assert.equal(
+    GrapesI18n.t('bmpPage.pager.range', { from: 1, to: 25, total: '100' }),
+    '1–25 of 100',
+  );
+  assert.equal(
+    GrapesI18n.t('bmpPage.err.invalidRange', { key: '7d' }),
+    'Invalid range: 7d',
+  );
+});
