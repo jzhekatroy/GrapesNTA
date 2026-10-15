@@ -78,57 +78,95 @@ test('overviewStats uses hourly buckets after minute retention', async () => {
   assert.equal(calls[0].params.bucketSeconds, 3600);
 });
 
-test('overviewRecentFlows scopes raw flows and maps only the cabinet contract', async () => {
+function recentFlowRow(overrides = {}) {
+  return {
+    ts: '2026-08-18 12:34:56.123',
+    src_ip: '192.0.2.1',
+    dst_ip: '198.51.100.2',
+    src_port: '443',
+    dst_port: '52100',
+    proto: 6,
+    bytes: '2048',
+    packets: '12',
+    src_asn: '64500',
+    dst_asn: '64501',
+    src_as_name: 'Source AS',
+    dst_as_name: 'Destination AS',
+    src_country: 'RU',
+    dst_country: 'DE',
+    client_side: 'src',
+    ...overrides,
+  };
+}
+
+const mappedRecentFlow = {
+  ts: '2026-08-18 12:34:56.123',
+  srcIp: '192.0.2.1',
+  dstIp: '198.51.100.2',
+  srcPort: 443,
+  dstPort: 52100,
+  proto: 'TCP',
+  bytes: 2048,
+  pkts: 12,
+  srcAsn: 64500,
+  dstAsn: 64501,
+  srcAsName: 'Source AS',
+  dstAsName: 'Destination AS',
+  srcCountry: 'RU',
+  dstCountry: 'DE',
+  clientSide: 'src',
+};
+
+test('overviewRecentFlows keeps the short window when it already fills the limit', async () => {
   resetCalls();
   queryResults.push({
-    rows: [{
-      ts: '2026-08-18 12:34:56.123',
-      src_ip: '192.0.2.1',
-      dst_ip: '198.51.100.2',
-      src_port: '443',
-      dst_port: '52100',
-      proto: 6,
-      bytes: '2048',
-      packets: '12',
-      src_asn: '64500',
-      dst_asn: '64501',
-      src_as_name: 'Source AS',
-      dst_as_name: 'Destination AS',
-      src_country: 'RU',
-      dst_country: 'DE',
-      client_side: 'src',
-    }],
+    rows: Array.from({ length: 20 }, (_, i) => recentFlowRow({ src_port: String(1000 + i) })),
     elapsedMs: 4,
   });
+
+  const result = await overviewRecentFlows('client:real', { limit: '20' });
+
+  assert.equal(calls.length, 1);
+  assert.equal(result.data.length, 20);
+  assert.equal(result.data[0].srcPort, 1000);
+  assert.equal(result.meta.elapsedMs, 4);
+  assert.equal(result.meta.rows, 20);
+  assert.match(calls[0].sql, /f\.`TimeReceived` >= now\(\) - INTERVAL \{recentMinutes:UInt32\} MINUTE/);
+  assert.match(calls[0].sql, /f\.date >= today\(\) - 1/);
+  assert.match(calls[0].sql, /f\.src_client = \{clientId:String\} OR f\.dst_client = \{clientId:String\}/);
+  assert.equal(calls[0].params.recentMinutes, 15);
+  assert.equal(calls[0].params.limit, 20);
+  assert.equal(calls[0].params.clientId, 'client:real');
+  assert.equal(calls[0].opts.name, 'cabinet/overview-recent-flows');
+});
+
+test('overviewRecentFlows falls back to two days and maps only the cabinet contract', async () => {
+  resetCalls();
+  queryResults.push(
+    { rows: [recentFlowRow({ src_ip: '203.0.113.9' })], elapsedMs: 3 },
+    { rows: [recentFlowRow()], elapsedMs: 4 },
+  );
 
   const result = await overviewRecentFlows('client:real', {
     limit: '500',
     clientId: 'client:other',
   });
 
-  assert.deepEqual(result.data, [{
-    ts: '2026-08-18 12:34:56.123',
-    srcIp: '192.0.2.1',
-    dstIp: '198.51.100.2',
-    srcPort: 443,
-    dstPort: 52100,
-    proto: 'TCP',
-    bytes: 2048,
-    pkts: 12,
-    srcAsn: 64500,
-    dstAsn: 64501,
-    srcAsName: 'Source AS',
-    dstAsName: 'Destination AS',
-    srcCountry: 'RU',
-    dstCountry: 'DE',
-    clientSide: 'src',
-  }]);
-  assert.match(calls[0].sql, /FROM `default`\.`flows_raw` AS f/);
-  assert.match(calls[0].sql, /formatDateTime\(/);
-  assert.match(calls[0].sql, /f\.src_client = \{clientId:String\} OR f\.dst_client = \{clientId:String\}/);
+  assert.equal(calls.length, 2);
+  assert.deepEqual(result.data, [mappedRecentFlow]);
+  assert.equal(result.meta.elapsedMs, 7);
+  assert.match(calls[0].sql, /INTERVAL \{recentMinutes:UInt32\} MINUTE/);
+  assert.doesNotMatch(calls[1].sql, /INTERVAL \{recentMinutes:UInt32\} MINUTE/);
+  assert.match(calls[1].sql, /FROM `default`\.`flows_raw` AS f/);
+  assert.match(calls[1].sql, /formatDateTime\(/);
+  assert.match(calls[1].sql, /f\.date >= today\(\) - 1/);
+  assert.match(calls[1].sql, /f\.src_client = \{clientId:String\} OR f\.dst_client = \{clientId:String\}/);
+  assert.equal(calls[1].opts.name, 'cabinet/overview-recent-flows-full');
   assert.equal(calls[0].params.clientId, 'client:real');
-  assert.equal(calls[0].params.limit, 100);
-  assert.equal(Object.hasOwn(calls[0].params, 'client:other'), false);
+  assert.equal(calls[1].params.clientId, 'client:real');
+  assert.equal(calls[1].params.limit, 100);
+  assert.equal(Object.hasOwn(calls[1].params, 'recentMinutes'), false);
+  assert.equal(Object.hasOwn(calls[1].params, 'client:other'), false);
 });
 
 test('overview routes take clientId from cabinet session context', async () => {
