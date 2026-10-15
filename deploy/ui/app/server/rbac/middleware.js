@@ -4,11 +4,12 @@ const {
   isResourceGuardExempt,
   isMutatingRequest,
   isDashboardLayoutPath,
+  isObservationsBoardLayoutPath,
 } = require('./api-map');
 
 async function checkResourceAccess(req, res, resource) {
   const mutating = isMutatingRequest(req.path, req.method);
-  const personalLayout = isDashboardLayoutPath(req.path);
+  const personalLayout = isDashboardLayoutPath(req.path) || isObservationsBoardLayoutPath(req.path);
   const allowed = mutating && !personalLayout
     ? await canWrite(req.user, resource)
     : await canAccess(req.user, resource);

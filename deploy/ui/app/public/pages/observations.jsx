@@ -1,6 +1,8 @@
 /* Observations: live tile board (2 columns). Filters collected in Explorer. */
 
-const { useState, useEffect, useCallback, useMemo, useRef } = React;
+const {
+  useState, useEffect, useLayoutEffect, useCallback, useMemo, useRef,
+} = React;
 
 function obsT(key, params) {
   return GrapesI18n.t(key, params);
@@ -1113,6 +1115,9 @@ function ObservationLiveTile({
   isNativeAggregate,
   collectors,
   locations,
+  editMode,
+  onDragHandleMouseDown,
+  onHide,
 }) {
   const [preview, setPreview] = useState(null);
   const [error, setError] = useState('');
@@ -1320,8 +1325,22 @@ function ObservationLiveTile({
   }
 
   return (
-    <Card pad="sm" className={`obs-tile${expanded ? ' obs-tile--expanded' : ''}`}>
+    <div
+      className={`obs-tile-wrap${expanded ? ' obs-tile-wrap--expanded' : ''}`}
+      data-obs-tile-id={item.id}
+      data-obs-flip-id={item.id}
+    >
+    <Card pad="sm" className={`obs-tile${expanded ? ' obs-tile--expanded' : ''}${editMode ? ' obs-tile--edit' : ''}`}>
       <div className="obs-tile__head">
+        {editMode && onDragHandleMouseDown ? (
+          <div
+            className="obs-tile__drag-handle"
+            title={obsT('observations.board.dragReorder')}
+            onMouseDown={onDragHandleMouseDown}
+          >
+            <Icon name="drag" size={14} />
+          </div>
+        ) : null}
         <div style={{ flex: 1, minWidth: 160 }}>
           <div className="obs-tile__title">{item.name}</div>
           {item.description ? <div className="obs-tile__desc">{item.description}</div> : null}
@@ -1354,6 +1373,18 @@ function ObservationLiveTile({
           ) : null}
         </div>
         <div className="obs-tile__tools">
+          {editMode && onHide ? (
+            <button
+              type="button"
+              className="obs-tile__icon tt"
+              data-tt={obsT('observations.board.hide')}
+              aria-label={obsT('observations.board.hide')}
+              onClick={onHide}
+            >
+              <Icon name="eyeOff" size={15} />
+            </button>
+          ) : null}
+          {!editMode && (
           <button
             type="button"
             className="obs-tile__expand"
@@ -1364,7 +1395,8 @@ function ObservationLiveTile({
             <Icon name={expanded ? 'collapse' : 'expand'} size={14} />
             <span>{expanded ? obsT('observations.collapse') : obsT('observations.expand')}</span>
           </button>
-          {canEdit && (
+          )}
+          {!editMode && canEdit && (
             <button
               type="button"
               className="obs-tile__icon tt"
@@ -1375,7 +1407,7 @@ function ObservationLiveTile({
               <Icon name="sliders" size={15} />
             </button>
           )}
-          {canEdit && item.materialize?.status === 'running' && onCancel && (
+          {!editMode && canEdit && item.materialize?.status === 'running' && onCancel && (
             <button
               type="button"
               className="obs-tile__icon tt"
@@ -1386,7 +1418,7 @@ function ObservationLiveTile({
               <Icon name="x" size={15} />
             </button>
           )}
-          {canEdit && (
+          {!editMode && canEdit && (
             <button
               type="button"
               className="obs-tile__icon obs-tile__icon--danger tt"
@@ -1621,6 +1653,7 @@ function ObservationLiveTile({
         </div>
       )}
     </Card>
+    </div>
   );
 }
 
@@ -1631,6 +1664,276 @@ function fmtDiagTime(iso) {
   } catch {
     return String(iso);
   }
+}
+
+const OBS_BOARD_DRAG_THRESHOLD_PX = 8;
+const OBS_BOARD_FLIP_TRANSITION = 'transform 0.34s cubic-bezier(0.22, 1, 0.36, 1)';
+
+function compareObservationsDefaultOrder(a, b) {
+  const ao = Number(a.layout?.order) || 0;
+  const bo = Number(b.layout?.order) || 0;
+  if (ao !== bo) return ao - bo;
+  return String(a.name || '').localeCompare(String(b.name || ''), 'ru');
+}
+
+function sortObservationsDefaultOrder(items) {
+  return [...items].sort(compareObservationsDefaultOrder);
+}
+
+function mergeObservationBoardOrder(items, savedIds) {
+  const byId = new Map((items || []).map((item) => [item.id, item]));
+  const ordered = [];
+  const seen = new Set();
+  for (const rawId of savedIds || []) {
+    const id = String(rawId || '').trim();
+    if (!id || seen.has(id)) continue;
+    const item = byId.get(id);
+    if (item) {
+      ordered.push(item);
+      seen.add(id);
+    }
+  }
+  const rest = sortObservationsDefaultOrder((items || []).filter((item) => !seen.has(item.id)));
+  return [...ordered, ...rest];
+}
+
+function moveObservationIdToIndex(ids, sourceId, targetIndex) {
+  if (!sourceId || !Number.isInteger(targetIndex)) return ids;
+  const sourceIndex = ids.indexOf(sourceId);
+  if (sourceIndex < 0 || sourceIndex === targetIndex) return ids;
+  const next = ids.filter((id) => id !== sourceId);
+  const insertIndex = Math.max(0, Math.min(targetIndex, next.length));
+  next.splice(insertIndex, 0, sourceId);
+  return next;
+}
+
+function sameObservationIds(a, b) {
+  return a.length === b.length && a.every((id, index) => id === b[index]);
+}
+
+function readObservationBoardRect(el) {
+  if (!el) return null;
+  const rect = el.getBoundingClientRect();
+  const transform = window.getComputedStyle(el).transform;
+  if (!transform || transform === 'none') return rect;
+  try {
+    const matrix = new DOMMatrixReadOnly(transform);
+    return new DOMRect(
+      rect.left - matrix.e,
+      rect.top - matrix.f,
+      rect.width,
+      rect.height,
+    );
+  } catch {
+    return rect;
+  }
+}
+
+function observationBoardSlots(boardEl) {
+  if (!boardEl) return [];
+  return [...boardEl.querySelectorAll(':scope > .obs-tile-wrap')]
+    .map((el, index) => ({ el, index, rect: readObservationBoardRect(el) }))
+    .filter((slot) => slot.rect);
+}
+
+function findObservationBoardDropIndex(clientX, clientY, boardEl, fallbackIndex) {
+  const slots = observationBoardSlots(boardEl);
+  if (!slots.length) return fallbackIndex;
+  const direct = slots.find(({ rect }) => (
+    clientX >= rect.left && clientX <= rect.right
+      && clientY >= rect.top && clientY <= rect.bottom
+  ));
+  if (direct) return direct.index;
+
+  const columnSlots = slots.filter(({ rect }) => clientX >= rect.left && clientX <= rect.right);
+  const candidates = columnSlots.length ? columnSlots : slots;
+  let nearest = null;
+  let nearestDistance = Infinity;
+  for (const slot of candidates) {
+    const dx = clientX < slot.rect.left
+      ? slot.rect.left - clientX
+      : (clientX > slot.rect.right ? clientX - slot.rect.right : 0);
+    const dy = clientY < slot.rect.top
+      ? slot.rect.top - clientY
+      : (clientY > slot.rect.bottom ? clientY - slot.rect.bottom : 0);
+    const distance = Math.hypot(dx, dy);
+    if (distance < nearestDistance) {
+      nearest = slot;
+      nearestDistance = distance;
+    }
+  }
+  return nearest ? nearest.index : fallbackIndex;
+}
+
+function captureObservationBoardFlipRects(boardEl) {
+  const rects = new Map();
+  if (!boardEl) return rects;
+  boardEl.querySelectorAll('[data-obs-flip-id]').forEach((el) => {
+    const id = el.dataset.obsFlipId;
+    if (id) rects.set(id, readObservationBoardRect(el));
+  });
+  return rects;
+}
+
+function runObservationBoardFlipAnimation(boardEl, firstRects) {
+  if (!boardEl || !firstRects?.size) return;
+  boardEl.querySelectorAll('[data-obs-flip-id]').forEach((el) => {
+    const first = firstRects.get(el.dataset.obsFlipId);
+    if (!first) return;
+    const last = readObservationBoardRect(el);
+    if (!last) return;
+    const dx = first.left - last.left;
+    const dy = first.top - last.top;
+    if (Math.abs(dx) < 0.5 && Math.abs(dy) < 0.5) return;
+    el.style.transform = `translate3d(${dx}px, ${dy}px, 0)`;
+    el.style.transition = 'none';
+    requestAnimationFrame(() => {
+      el.style.transition = OBS_BOARD_FLIP_TRANSITION;
+      el.style.transform = '';
+    });
+  });
+}
+
+function ObservationsHiddenMenu({ items, onRestore, editMode }) {
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef(null);
+
+  useEffect(() => {
+    if (!editMode) setOpen(false);
+  }, [editMode]);
+
+  useEffect(() => {
+    if (!open) return undefined;
+    const onPointerDown = (event) => {
+      if (!rootRef.current?.contains(event.target)) setOpen(false);
+    };
+    const onKeyDown = (event) => {
+      if (event.key === 'Escape') setOpen(false);
+    };
+    document.addEventListener('mousedown', onPointerDown);
+    document.addEventListener('keydown', onKeyDown);
+    return () => {
+      document.removeEventListener('mousedown', onPointerDown);
+      document.removeEventListener('keydown', onKeyDown);
+    };
+  }, [open]);
+
+  if (!editMode) return null;
+
+  return (
+    <div className={`observations-hidden-menu${open ? ' is-open' : ''}`} ref={rootRef}>
+      <button
+        type="button"
+        className="btn btn--sm"
+        onClick={() => setOpen((value) => !value)}
+        title={obsT('observations.board.hiddenCards')}
+      >
+        <Icon name="eyeOff" size={14} />
+        <span>{obsT('observations.board.hidden')}</span>
+        {items.length ? <span className="observations-hidden-menu__count">{items.length}</span> : null}
+        <Icon name="chevD" size={12} />
+      </button>
+      {open ? (
+        <div className="observations-hidden-menu__dropdown" role="menu">
+          <div className="observations-hidden-menu__title">
+            {obsT('observations.board.hiddenCards')}
+          </div>
+          {items.length ? items.map((item) => (
+            <div key={item.id} className="observations-hidden-menu__item" role="menuitem">
+              <span className="observations-hidden-menu__item-label">{item.name || item.id}</span>
+              <button
+                type="button"
+                className="observations-hidden-menu__restore"
+                onClick={() => onRestore(item.id)}
+              >
+                <Icon name="eye" size={14} />
+                {obsT('observations.board.restore')}
+              </button>
+            </div>
+          )) : (
+            <div className="observations-hidden-menu__empty">
+              {obsT('observations.board.noHidden')}
+            </div>
+          )}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function ObservationsBoardToolbar({
+  editMode,
+  saveState,
+  hiddenItems,
+  onCustomize,
+  onRestore,
+  onRevert,
+  onCancel,
+  onDone,
+  className = '',
+}) {
+  const saveLabel = {
+    idle: '',
+    saving: obsT('observations.board.saving'),
+    saved: obsT('observations.board.saved'),
+    error: obsT('observations.board.saveError'),
+  }[saveState] || '';
+
+  return (
+    <div className={`observations-board-toolbar${editMode ? ' observations-board-toolbar--edit' : ''}${className ? ` ${className}` : ''}`}>
+      {saveLabel ? (
+        <span className={`observations-board-toolbar__status${saveState === 'error' ? ' is-error' : ''}`}>
+          {saveLabel}
+        </span>
+      ) : null}
+      {editMode ? (
+        <>
+          <ObservationsHiddenMenu
+            editMode={editMode}
+            items={hiddenItems}
+            onRestore={onRestore}
+          />
+          <button type="button" className="btn btn--sm" onClick={onRevert}>
+            {obsT('observations.board.revert')}
+          </button>
+          <button type="button" className="btn btn--sm" onClick={onCancel}>
+            {obsT('observations.board.cancel')}
+          </button>
+          <button
+            type="button"
+            className="btn btn--sm btn--primary"
+            disabled={saveState === 'saving'}
+            onClick={onDone}
+          >
+            {obsT('observations.board.done')}
+          </button>
+        </>
+      ) : (
+        <button type="button" className="btn btn--sm" onClick={onCustomize}>
+          <Icon name="sliders" size={14} />
+          <span>{obsT('observations.board.customize')}</span>
+        </button>
+      )}
+    </div>
+  );
+}
+
+function ObservationBoardTilePhantom({
+  id, title, expanded, height,
+}) {
+  return (
+    <div
+      className={`obs-tile-wrap obs-tile-wrap--phantom${expanded ? ' obs-tile-wrap--expanded' : ''}`}
+      data-obs-board-phantom="true"
+      data-obs-flip-id={id}
+      aria-hidden="true"
+      style={height ? { height, minHeight: height } : undefined}
+    >
+      <div className="obs-tile-phantom__frame">
+        <span>{title}</span>
+      </div>
+    </div>
+  );
 }
 
 function PageObservations({ onNavigate }) {
@@ -1645,6 +1948,29 @@ function PageObservations({ onNavigate }) {
   const [busy, setBusy] = useState(false);
   const [collectors, setCollectors] = useState([]);
   const [locations, setLocations] = useState([]);
+  const [boardOrderIds, setBoardOrderIds] = useState([]);
+  const [boardHiddenIds, setBoardHiddenIds] = useState([]);
+  const [editMode, setEditMode] = useState(false);
+  const [editDraftOrderIds, setEditDraftOrderIds] = useState([]);
+  const [editBaselineOrderIds, setEditBaselineOrderIds] = useState([]);
+  const [editDraftHiddenIds, setEditDraftHiddenIds] = useState([]);
+  const [editBaselineHiddenIds, setEditBaselineHiddenIds] = useState([]);
+  const [boardSaveStatus, setBoardSaveStatus] = useState('idle');
+  const [draggingTileId, setDraggingTileId] = useState(null);
+  const [draggingTileHeight, setDraggingTileHeight] = useState(null);
+  const [dragPreviewOrderIds, setDragPreviewOrderIds] = useState(null);
+  const boardRef = useRef(null);
+  const boardOrderIdsRef = useRef([]);
+  const confirmedBoardOrderRef = useRef([]);
+  const confirmedBoardHiddenIdsRef = useRef([]);
+  const editDraftOrderIdsRef = useRef([]);
+  const editBaselineOrderIdsRef = useRef([]);
+  const editDraftHiddenIdsRef = useRef([]);
+  const editBaselineHiddenIdsRef = useRef([]);
+  const editModeRef = useRef(false);
+  const dragPreviewOrderIdsRef = useRef(null);
+  const dragMoveRafRef = useRef(null);
+  const flipFirstRectsRef = useRef(null);
 
   const settingsItem = useMemo(
     () => items.find((x) => x.id === settingsItemId) || null,
@@ -1660,14 +1986,293 @@ function PageObservations({ onNavigate }) {
   }, [config]);
 
   const reload = useCallback(async () => {
-    const [cfg, list] = await Promise.all([
+    const [cfg, list, layoutResp] = await Promise.all([
       ApiClient.loadObservationsConfig(),
       ApiClient.loadObservations(),
+      ApiClient.loadObservationsBoardLayout(),
     ]);
     setConfig(cfg);
     setItems(list);
+    const savedIds = layoutResp?.data?.observationIds;
+    const savedHiddenIds = layoutResp?.data?.hiddenObservationIds;
+    const availableIds = new Set(list.map((item) => item.id));
+    if (!editModeRef.current) {
+      setBoardOrderIds((prev) => {
+        const baseIds = Array.isArray(savedIds) ? savedIds : prev;
+        const merged = mergeObservationBoardOrder(list, baseIds.length ? baseIds : prev);
+        const ids = merged.map((item) => item.id);
+        boardOrderIdsRef.current = ids;
+        if (Array.isArray(savedIds)) confirmedBoardOrderRef.current = ids;
+        else if (!prev.length) confirmedBoardOrderRef.current = ids;
+        return ids;
+      });
+      setBoardHiddenIds((prev) => {
+        const source = Array.isArray(savedHiddenIds) ? savedHiddenIds : prev;
+        const ids = source.filter((id) => availableIds.has(id));
+        if (Array.isArray(savedHiddenIds)) confirmedBoardHiddenIdsRef.current = ids;
+        else if (!prev.length) confirmedBoardHiddenIdsRef.current = ids;
+        return ids;
+      });
+    } else {
+      setEditDraftOrderIds((prev) => {
+        const merged = mergeObservationBoardOrder(list, prev);
+        const ids = merged.map((item) => item.id);
+        editDraftOrderIdsRef.current = ids;
+        return ids;
+      });
+      setEditDraftHiddenIds((prev) => {
+        const ids = prev.filter((id) => availableIds.has(id));
+        editDraftHiddenIdsRef.current = ids;
+        return ids;
+      });
+    }
     return list;
   }, []);
+
+  useEffect(() => {
+    editModeRef.current = editMode;
+  }, [editMode]);
+
+  useEffect(() => {
+    editDraftOrderIdsRef.current = editDraftOrderIds;
+  }, [editDraftOrderIds]);
+
+  useEffect(() => {
+    editBaselineOrderIdsRef.current = editBaselineOrderIds;
+  }, [editBaselineOrderIds]);
+
+  useEffect(() => {
+    editDraftHiddenIdsRef.current = editDraftHiddenIds;
+  }, [editDraftHiddenIds]);
+
+  useEffect(() => {
+    editBaselineHiddenIdsRef.current = editBaselineHiddenIds;
+  }, [editBaselineHiddenIds]);
+
+  useLayoutEffect(() => {
+    if (!flipFirstRectsRef.current || !boardRef.current) return;
+    runObservationBoardFlipAnimation(boardRef.current, flipFirstRectsRef.current);
+    flipFirstRectsRef.current = null;
+  }, [dragPreviewOrderIds, editDraftHiddenIds]);
+
+  const enterBoardEditMode = useCallback(() => {
+    const ids = [...boardOrderIdsRef.current];
+    const hiddenIds = [...confirmedBoardHiddenIdsRef.current];
+    editBaselineOrderIdsRef.current = ids;
+    editDraftOrderIdsRef.current = ids;
+    editBaselineHiddenIdsRef.current = hiddenIds;
+    editDraftHiddenIdsRef.current = hiddenIds;
+    setEditBaselineOrderIds(ids);
+    setEditDraftOrderIds(ids);
+    setEditBaselineHiddenIds(hiddenIds);
+    setEditDraftHiddenIds(hiddenIds);
+    setBoardSaveStatus('idle');
+    setEditMode(true);
+    setExpandedId(null);
+    setDragPreviewOrderIds(null);
+    dragPreviewOrderIdsRef.current = null;
+    setDraggingTileId(null);
+    setDraggingTileHeight(null);
+  }, []);
+
+  const revertBoardEditDraft = useCallback(() => {
+    const baseline = [...editBaselineOrderIdsRef.current];
+    const hiddenBaseline = [...editBaselineHiddenIdsRef.current];
+    editDraftOrderIdsRef.current = baseline;
+    editDraftHiddenIdsRef.current = hiddenBaseline;
+    setEditDraftOrderIds(baseline);
+    setEditDraftHiddenIds(hiddenBaseline);
+    setDragPreviewOrderIds(null);
+    dragPreviewOrderIdsRef.current = null;
+    setDraggingTileId(null);
+    setDraggingTileHeight(null);
+    setBoardSaveStatus('idle');
+  }, []);
+
+  const cancelBoardEditMode = useCallback(() => {
+    const confirmed = [...confirmedBoardOrderRef.current];
+    const confirmedHidden = [...confirmedBoardHiddenIdsRef.current];
+    editDraftOrderIdsRef.current = confirmed;
+    editDraftHiddenIdsRef.current = confirmedHidden;
+    setEditDraftOrderIds(confirmed);
+    setEditDraftHiddenIds(confirmedHidden);
+    setEditMode(false);
+    setDragPreviewOrderIds(null);
+    dragPreviewOrderIdsRef.current = null;
+    setDraggingTileId(null);
+    setDraggingTileHeight(null);
+    setBoardSaveStatus('idle');
+  }, []);
+
+  const confirmBoardEditMode = useCallback(async () => {
+    const nextIds = [...editDraftOrderIdsRef.current];
+    const nextHiddenIds = [...editDraftHiddenIdsRef.current];
+    const confirmed = confirmedBoardOrderRef.current;
+    const confirmedHidden = confirmedBoardHiddenIdsRef.current;
+    if (sameObservationIds(nextIds, confirmed) && sameObservationIds(nextHiddenIds, confirmedHidden)) {
+      setEditMode(false);
+      setBoardSaveStatus('idle');
+      return;
+    }
+    setBoardSaveStatus('saving');
+    try {
+      await ApiClient.saveObservationsBoardLayout({
+        version: 1,
+        observationIds: nextIds,
+        hiddenObservationIds: nextHiddenIds,
+      });
+      confirmedBoardOrderRef.current = nextIds;
+      confirmedBoardHiddenIdsRef.current = nextHiddenIds;
+      boardOrderIdsRef.current = nextIds;
+      setBoardOrderIds(nextIds);
+      setBoardHiddenIds(nextHiddenIds);
+      editBaselineOrderIdsRef.current = nextIds;
+      editBaselineHiddenIdsRef.current = nextHiddenIds;
+      setEditBaselineOrderIds(nextIds);
+      setEditBaselineHiddenIds(nextHiddenIds);
+      setBoardSaveStatus('saved');
+      setEditMode(false);
+      setDragPreviewOrderIds(null);
+      dragPreviewOrderIdsRef.current = null;
+      setDraggingTileId(null);
+      setDraggingTileHeight(null);
+    } catch (e) {
+      setBoardSaveStatus('error');
+      setError(e.message || obsT('observations.board.saveError'));
+    }
+  }, []);
+
+  const commitBoardReorder = useCallback((nextIds) => {
+    if (!nextIds?.length) return;
+    const current = editDraftOrderIdsRef.current;
+    if (sameObservationIds(nextIds, current)) return;
+    editDraftOrderIdsRef.current = nextIds;
+    setEditDraftOrderIds(nextIds);
+    setBoardSaveStatus('idle');
+  }, []);
+
+  const hideObservationTile = useCallback((observationId) => {
+    if (!observationId || editDraftHiddenIdsRef.current.includes(observationId)) return;
+    flipFirstRectsRef.current = captureObservationBoardFlipRects(boardRef.current);
+    const next = [...editDraftHiddenIdsRef.current, observationId];
+    editDraftHiddenIdsRef.current = next;
+    setEditDraftHiddenIds(next);
+    setBoardSaveStatus('idle');
+  }, []);
+
+  const restoreObservationTile = useCallback((observationId) => {
+    if (!observationId || !editDraftHiddenIdsRef.current.includes(observationId)) return;
+    flipFirstRectsRef.current = captureObservationBoardFlipRects(boardRef.current);
+    const next = editDraftHiddenIdsRef.current.filter((id) => id !== observationId);
+    editDraftHiddenIdsRef.current = next;
+    setEditDraftHiddenIds(next);
+    setBoardSaveStatus('idle');
+  }, []);
+
+  const onBoardDragHandleMouseDown = useCallback((sourceId) => (event) => {
+    if (!editModeRef.current || event.button !== 0) return;
+    event.preventDefault();
+    const originX = event.clientX;
+    const originY = event.clientY;
+    let dragStarted = false;
+    const baseOrder = [...editDraftOrderIdsRef.current];
+    let lastDropIndex = baseOrder.indexOf(sourceId);
+    dragPreviewOrderIdsRef.current = baseOrder;
+    const sourceEl = boardRef.current?.querySelector(`[data-obs-tile-id="${sourceId}"]`);
+    const sourceRect = sourceEl?.getBoundingClientRect();
+
+    const applyPreview = (ev) => {
+      if (!dragStarted) {
+        if (Math.hypot(ev.clientX - originX, ev.clientY - originY) < OBS_BOARD_DRAG_THRESHOLD_PX) return;
+        dragStarted = true;
+        setDraggingTileId(sourceId);
+        setDraggingTileHeight(sourceRect?.height || null);
+      }
+      const dropIndex = findObservationBoardDropIndex(
+        ev.clientX,
+        ev.clientY,
+        boardRef.current,
+        lastDropIndex,
+      );
+      if (!Number.isInteger(dropIndex)) return;
+      lastDropIndex = dropIndex;
+      const preview = moveObservationIdToIndex(baseOrder, sourceId, dropIndex);
+      if (preview.every((id, i) => id === baseOrder[i])) {
+        if (dragPreviewOrderIdsRef.current !== baseOrder) {
+          flipFirstRectsRef.current = captureObservationBoardFlipRects(boardRef.current);
+        }
+        setDragPreviewOrderIds(null);
+        dragPreviewOrderIdsRef.current = baseOrder;
+        return;
+      }
+      const current = dragPreviewOrderIdsRef.current;
+      if (current?.length === preview.length && preview.every((id, i) => id === current[i])) return;
+      flipFirstRectsRef.current = captureObservationBoardFlipRects(boardRef.current);
+      dragPreviewOrderIdsRef.current = preview;
+      setDragPreviewOrderIds(preview);
+    };
+
+    const onMove = (ev) => {
+      if (dragMoveRafRef.current) return;
+      dragMoveRafRef.current = requestAnimationFrame(() => {
+        dragMoveRafRef.current = null;
+        applyPreview(ev);
+      });
+    };
+
+    const onUp = (ev) => {
+      if (dragMoveRafRef.current) {
+        cancelAnimationFrame(dragMoveRafRef.current);
+        dragMoveRafRef.current = null;
+        applyPreview(ev);
+      }
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+      setDraggingTileId(null);
+      setDraggingTileHeight(null);
+      setDragPreviewOrderIds(null);
+      const preview = dragPreviewOrderIdsRef.current;
+      dragPreviewOrderIdsRef.current = null;
+      if (!dragStarted) return;
+      // Фиксируем ровно тот порядок, который пользователь видел перед drop,
+      // не пересчитывая цель по уже перестроенному DOM.
+      commitBoardReorder(preview || baseOrder);
+    };
+
+    document.body.style.cursor = 'grabbing';
+    document.body.style.userSelect = 'none';
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+  }, [commitBoardReorder]);
+
+  const displayItems = useMemo(() => {
+    const orderIds = editMode
+      ? (dragPreviewOrderIds || editDraftOrderIds)
+      : boardOrderIds;
+    const hiddenIds = new Set(editMode ? editDraftHiddenIds : boardHiddenIds);
+    if (!orderIds?.length) {
+      return sortObservationsDefaultOrder(items).filter((item) => !hiddenIds.has(item.id));
+    }
+    const byId = new Map(items.map((item) => [item.id, item]));
+    return orderIds.map((id) => byId.get(id)).filter((item) => item && !hiddenIds.has(item.id));
+  }, [
+    items,
+    boardOrderIds,
+    boardHiddenIds,
+    editDraftOrderIds,
+    editDraftHiddenIds,
+    dragPreviewOrderIds,
+    editMode,
+  ]);
+
+  const hiddenItems = useMemo(() => {
+    if (!editMode || !editDraftHiddenIds.length) return [];
+    const hidden = new Set(editDraftHiddenIds);
+    return mergeObservationBoardOrder(items, editDraftOrderIds)
+      .filter((item) => hidden.has(item.id));
+  }, [items, editDraftOrderIds, editDraftHiddenIds, editMode]);
 
   useEffect(() => {
     let cancelled = false;
@@ -2107,22 +2712,42 @@ function PageObservations({ onNavigate }) {
     );
   }
 
+  const boardToolbar = (sticky = false) => (
+    items.length > 0 ? (
+      <ObservationsBoardToolbar
+        editMode={editMode}
+        saveState={boardSaveStatus}
+        hiddenItems={hiddenItems}
+        onCustomize={enterBoardEditMode}
+        onRestore={restoreObservationTile}
+        onRevert={revertBoardEditDraft}
+        onCancel={cancelBoardEditMode}
+        onDone={confirmBoardEditMode}
+        className={sticky ? 'observations-board-toolbar--sticky' : ''}
+      />
+    ) : null
+  );
+
   return (
     <div className="main__container">
       <div className="page-head">
         <div>
           <h1>{obsT('observations.title')}</h1>
         </div>
-        {canWrite && (
-          <button
-            type="button"
-            className="btn btn--primary"
-            onClick={() => startComposeInExplorer(onNavigate, { mode: 'new' })}
-          >
-            + {obsT('observations.new')}
-          </button>
-        )}
+        <div className="page-head__tools" style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+          {!editMode ? boardToolbar() : null}
+          {canWrite && !editMode && (
+            <button
+              type="button"
+              className="btn btn--primary"
+              onClick={() => startComposeInExplorer(onNavigate, { mode: 'new' })}
+            >
+              + {obsT('observations.new')}
+            </button>
+          )}
+        </div>
       </div>
+      {editMode ? boardToolbar(true) : null}
       <div className="col" style={{ gap: 16, padding: '0 0 24px' }}>
 
       {error && (
@@ -2150,16 +2775,29 @@ function PageObservations({ onNavigate }) {
         </Card>
       )}
 
-      {items.length > 0 && (() => {
-        const sorted = [...items].sort((a, b) => {
-          const ao = Number(a.layout?.order) || 0;
-          const bo = Number(b.layout?.order) || 0;
-          if (ao !== bo) return ao - bo;
-          return String(a.name || '').localeCompare(String(b.name || ''), 'ru');
-        });
-        return (
-          <div className="observations-board">
-            {sorted.map((item) => (
+      {items.length > 0 && (
+          <div
+            ref={boardRef}
+            className={[
+              'observations-board',
+              editMode ? 'observations-board--edit' : '',
+              draggingTileId ? 'observations-board--dragging' : '',
+              dragPreviewOrderIds ? 'observations-board--drag-preview' : '',
+            ].filter(Boolean).join(' ')}
+          >
+            {displayItems.map((item) => {
+              if (draggingTileId === item.id) {
+                return (
+                  <ObservationBoardTilePhantom
+                    key={`phantom-${item.id}`}
+                    id={item.id}
+                    title={item.name}
+                    expanded={expandedId === item.id}
+                    height={draggingTileHeight}
+                  />
+                );
+              }
+              return (
               <ObservationLiveTile
                 key={item.id}
                 item={item}
@@ -2170,6 +2808,9 @@ function PageObservations({ onNavigate }) {
                 expanded={expandedId === item.id}
                 onToggleExpand={() => setExpandedId((cur) => (cur === item.id ? null : item.id))}
                 canWrite={canWriteObservations}
+                editMode={editMode}
+                onDragHandleMouseDown={onBoardDragHandleMouseDown(item.id)}
+                onHide={() => hideObservationTile(item.id)}
                 onSettings={() => openSettings(item)}
                 onDelete={() => removeItem(item.id)}
                 onCancel={() => ApiClient.cancelObservationMaterialize(item.id)
@@ -2189,10 +2830,10 @@ function PageObservations({ onNavigate }) {
                 collectors={collectors}
                 locations={locations}
               />
-            ))}
+              );
+            })}
           </div>
-        );
-      })()}
+      )}
       </div>
     </div>
   );
