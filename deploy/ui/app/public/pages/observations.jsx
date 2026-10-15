@@ -1105,6 +1105,7 @@ function ObservationLiveTile({
   onToggleExpand,
   onNavigate,
   canWrite,
+  cabinetMode = false,
   onSettings,
   onDelete,
   onCancel,
@@ -1185,7 +1186,7 @@ function ObservationLiveTile({
     function tick(opts = { initial: true }) {
       if (opts.initial) setLoading(true);
       else setRefreshing(true);
-      ApiClient.previewObservation(item.id, previewPayload)
+      ApiClient.previewObservation(item.id, previewPayload, cabinetMode)
         .then((body) => {
           if (cancelled) return;
           const data = body.data || body;
@@ -1209,12 +1210,12 @@ function ObservationLiveTile({
       cancelled = true;
       if (timer) clearTimeout(timer);
     };
-  }, [item.id, previewPayload]);
+  }, [item.id, previewPayload, cabinetMode]);
 
   useEffect(() => {
     if (!expanded) return undefined;
     let cancelled = false;
-    ApiClient.loadObservationRuns(item.id)
+    ApiClient.loadObservationRuns(item.id, cabinetMode)
       .then((rows) => {
         if (!cancelled) {
           setRuns(Array.isArray(rows) ? rows.slice(0, 20) : []);
@@ -1225,7 +1226,7 @@ function ObservationLiveTile({
         if (!cancelled) setRunsError(e.message || 'Не удалось загрузить отчёты');
       });
     return () => { cancelled = true; };
-  }, [expanded, item.id, updatedAt]);
+  }, [expanded, item.id, updatedAt, cabinetMode]);
 
   const changeLookback = (next) => {
     if (!next || next === lookback) return;
@@ -1629,14 +1630,14 @@ function ObservationLiveTile({
                           {run.emailError ? ` (${run.emailError})` : ''}
                         </td>
                         <td style={{ padding: 4 }}>
-                          <a href={ApiClient.observationRunArtifactUrl(item.id, run.id, 'report.html')} target="_blank" rel="noreferrer">сводка</a>
+                          <a href={ApiClient.observationRunArtifactUrl(item.id, run.id, 'report.html', cabinetMode)} target="_blank" rel="noreferrer">сводка</a>
                           {(run.tables || []).map((t) => {
                             const label = t.label
                               || (t.type === 'timeseries_bps' ? 'График' : t.type === 'top_table' ? 'Топ' : t.file);
                             return (
                               <span key={t.file}>
                                 {' · '}
-                                <a href={ApiClient.observationRunArtifactUrl(item.id, run.id, t.file)} target="_blank" rel="noreferrer">
+                                <a href={ApiClient.observationRunArtifactUrl(item.id, run.id, t.file, cabinetMode)} target="_blank" rel="noreferrer">
                                   {label}
                                 </a>
                               </span>
@@ -1936,9 +1937,11 @@ function ObservationBoardTilePhantom({
   );
 }
 
-function PageObservations({ onNavigate }) {
-  const canWriteObservations = AuthAccess.canWritePage('observations');
-  const canWrite = canWriteObservations || AuthAccess.canWritePage('explorer');
+function PageObservations({ onNavigate, cabinetMode = false, readOnly = false }) {
+  const canWriteObservations = cabinetMode
+    ? !readOnly
+    : AuthAccess.canWritePage('observations');
+  const canWrite = canWriteObservations || (!cabinetMode && AuthAccess.canWritePage('explorer'));
   const [config, setConfig] = useState(null);
   const [items, setItems] = useState([]);
   const [expandedId, setExpandedId] = useState(null);
@@ -1987,9 +1990,9 @@ function PageObservations({ onNavigate }) {
 
   const reload = useCallback(async () => {
     const [cfg, list, layoutResp] = await Promise.all([
-      ApiClient.loadObservationsConfig(),
-      ApiClient.loadObservations(),
-      ApiClient.loadObservationsBoardLayout(),
+      ApiClient.loadObservationsConfig(cabinetMode),
+      ApiClient.loadObservations(cabinetMode),
+      ApiClient.loadObservationsBoardLayout(cabinetMode),
     ]);
     setConfig(cfg);
     setItems(list);
@@ -2027,7 +2030,7 @@ function PageObservations({ onNavigate }) {
       });
     }
     return list;
-  }, []);
+  }, [cabinetMode]);
 
   useEffect(() => {
     editModeRef.current = editMode;
@@ -2120,7 +2123,7 @@ function PageObservations({ onNavigate }) {
         version: 1,
         observationIds: nextIds,
         hiddenObservationIds: nextHiddenIds,
-      });
+      }, cabinetMode);
       confirmedBoardOrderRef.current = nextIds;
       confirmedBoardHiddenIdsRef.current = nextHiddenIds;
       boardOrderIdsRef.current = nextIds;
@@ -2140,7 +2143,7 @@ function PageObservations({ onNavigate }) {
       setBoardSaveStatus('error');
       setError(e.message || obsT('observations.board.saveError'));
     }
-  }, []);
+  }, [cabinetMode]);
 
   const commitBoardReorder = useCallback((nextIds) => {
     if (!nextIds?.length) return;
@@ -2275,6 +2278,11 @@ function PageObservations({ onNavigate }) {
   }, [items, editDraftOrderIds, editDraftHiddenIds, editMode]);
 
   useEffect(() => {
+    if (cabinetMode) {
+      setCollectors([]);
+      setLocations([]);
+      return undefined;
+    }
     let cancelled = false;
     ApiClient.loadDashboardCollectors()
       .then(({ collectors: collectorRows, locations: locationRows }) => {
@@ -2289,7 +2297,7 @@ function PageObservations({ onNavigate }) {
         }
       });
     return () => { cancelled = true; };
-  }, []);
+  }, [cabinetMode]);
 
   useEffect(() => {
     reload()
@@ -2304,7 +2312,7 @@ function PageObservations({ onNavigate }) {
         }
       })
       .catch((e) => setError(e.message));
-  }, [reload]);
+  }, [reload, cabinetMode]);
 
   useEffect(() => {
     const t = setInterval(() => {
@@ -2371,7 +2379,7 @@ function PageObservations({ onNavigate }) {
         filters: settings.filters,
         thresholds: settings.thresholds || [],
         explorerQuery: settings.explorerQuery ?? settingsItem.explorerQuery ?? null,
-      });
+      }, cabinetMode);
       await reload();
       setSettingsItemId(null);
       setSettings(null);
@@ -2391,7 +2399,7 @@ function PageObservations({ onNavigate }) {
     if (!canWriteObservations || !window.confirm(obsT('observations.deleteConfirm'))) return;
     setError('');
     try {
-      await ApiClient.deleteObservation(id);
+      await ApiClient.deleteObservation(id, cabinetMode);
       setItems((prev) => prev.filter((row) => row.id !== id));
       if (expandedId === id) setExpandedId(null);
       if (settingsItemId === id) {
@@ -2430,7 +2438,7 @@ function PageObservations({ onNavigate }) {
         lookback,
         explorerQuery: nextExplorerQuery,
         materialize: { ...(current.materialize || {}), enabled: Boolean(current.materialize?.enabled) },
-      });
+      }, cabinetMode);
     } catch (e) {
       setError(e.message);
       await reload();
@@ -2453,7 +2461,7 @@ function PageObservations({ onNavigate }) {
         ...current,
         widgets: observationWidgetsWithChartStyle(current.widgets, chartStyle),
         materialize: { ...(current.materialize || {}), enabled: Boolean(current.materialize?.enabled) },
-      });
+      }, cabinetMode);
     } catch (e) {
       setError(e.message);
       await reload();
@@ -2813,17 +2821,18 @@ function PageObservations({ onNavigate }) {
                 onHide={() => hideObservationTile(item.id)}
                 onSettings={() => openSettings(item)}
                 onDelete={() => removeItem(item.id)}
-                onCancel={() => ApiClient.cancelObservationMaterialize(item.id)
+                cabinetMode={cabinetMode}
+                onCancel={() => ApiClient.cancelObservationMaterialize(item.id, cabinetMode)
                   .then(() => reload())
                   .then(() => pushToast?.({ kind: 'success', title: 'Подготовка отменена' }))
                   .catch((e) => setError(e.message))}
-                onRetry={() => ApiClient.retryObservationMaterialize(item.id)
+                onRetry={() => ApiClient.retryObservationMaterialize(item.id, cabinetMode)
                   .then(() => reload())
                   .then(() => pushToast?.({ kind: 'success', title: 'Перезапущено', desc: 'Воркер возьмёт наблюдение в течение минуты' }))
                   .catch((e) => setError(e.message))}
                 onLookbackChange={changeTileLookback}
                 onChartStyleChange={changeTileChartStyle}
-                onRunReport={() => ApiClient.runObservationReport(item.id)
+                onRunReport={() => ApiClient.runObservationReport(item.id, cabinetMode)
                   .then(() => pushToast?.({ kind: 'success', title: 'Отчёт сформирован' }))
                   .catch((e) => setError(e.message))}
                 isNativeAggregate={isNativeAggregateObservation(item)}

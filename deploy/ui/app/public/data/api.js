@@ -665,26 +665,34 @@ const ApiClient = (() => {
     return requestJson(`/api/explorer/saved-filters/${encodeURIComponent(id)}`, { method: 'PUT', body: payload });
   }
 
-  async function loadObservationsConfig() {
-    const body = await getJson('/api/observations/config', { widget: 'observations/config' });
+  function observationsApiBase(cabinet = false) {
+    return cabinet ? '/api/cabinet/observations' : '/api/observations';
+  }
+
+  async function loadObservationsConfig(cabinet = false) {
+    const base = observationsApiBase(cabinet);
+    const body = await getJson(`${base}/config`, { widget: 'observations/config' });
     return body.data;
   }
 
-  async function loadObservations() {
-    const body = await getJson('/api/observations', { widget: 'observations/list' });
+  async function loadObservations(cabinet = false) {
+    const base = observationsApiBase(cabinet);
+    const body = await getJson(base, { widget: 'observations/list' });
     return body.data || [];
   }
 
-  async function loadObservationsBoardLayout() {
-    const body = await getJson('/api/observations/board-layout', { widget: 'observations/board-layout' });
+  async function loadObservationsBoardLayout(cabinet = false) {
+    const base = observationsApiBase(cabinet);
+    const body = await getJson(`${base}/board-layout`, { widget: 'observations/board-layout' });
     return {
       data: body.data || null,
       updatedAt: body.updatedAt || null,
     };
   }
 
-  async function saveObservationsBoardLayout(layout) {
-    return requestJson('/api/observations/board-layout', { method: 'PUT', body: layout });
+  async function saveObservationsBoardLayout(layout, cabinet = false) {
+    const base = observationsApiBase(cabinet);
+    return requestJson(`${base}/board-layout`, { method: 'PUT', body: layout });
   }
 
   async function loadObservationAnalyticsDiagnostics() {
@@ -831,28 +839,33 @@ const ApiClient = (() => {
     window.location.reload();
   }
 
-  async function loadObservation(id) {
-    const body = await getJson(`/api/observations/${encodeURIComponent(id)}`, { widget: 'observations/get' });
+  async function loadObservation(id, cabinet = false) {
+    const base = observationsApiBase(cabinet);
+    const body = await getJson(`${base}/${encodeURIComponent(id)}`, { widget: 'observations/get' });
     return body.data;
   }
 
-  async function createObservation(payload) {
-    return requestJson('/api/observations', { method: 'POST', body: payload });
+  async function createObservation(payload, cabinet = false) {
+    const base = observationsApiBase(cabinet);
+    return requestJson(base, { method: 'POST', body: payload });
   }
 
-  async function updateObservation(id, payload) {
-    return requestJson(`/api/observations/${encodeURIComponent(id)}`, { method: 'PUT', body: payload });
+  async function updateObservation(id, payload, cabinet = false) {
+    const base = observationsApiBase(cabinet);
+    return requestJson(`${base}/${encodeURIComponent(id)}`, { method: 'PUT', body: payload });
   }
 
-  async function deleteObservation(id) {
-    return requestJson(`/api/observations/${encodeURIComponent(id)}`, { method: 'DELETE' });
+  async function deleteObservation(id, cabinet = false) {
+    const base = observationsApiBase(cabinet);
+    return requestJson(`${base}/${encodeURIComponent(id)}`, { method: 'DELETE' });
   }
 
-  async function materializeObservation(id) {
-    return requestJson(`/api/observations/${encodeURIComponent(id)}/materialize`, { method: 'POST', body: {} });
+  async function materializeObservation(id, cabinet = false) {
+    const base = observationsApiBase(cabinet);
+    return requestJson(`${base}/${encodeURIComponent(id)}/materialize`, { method: 'POST', body: {} });
   }
 
-  async function previewObservation(id, payload = {}) {
+  async function previewObservation(id, payload = {}, cabinet = false) {
     const body = { ...payload };
     if (body.collectorFilter != null) {
       const items = Array.isArray(body.collectorFilter)
@@ -861,33 +874,40 @@ const ApiClient = (() => {
       if (items.length) body.collectorFilter = items;
       else delete body.collectorFilter;
     }
-    return requestJson(`/api/observations/${encodeURIComponent(id)}/preview`, { method: 'POST', body });
+    const base = observationsApiBase(cabinet);
+    return requestJson(`${base}/${encodeURIComponent(id)}/preview`, { method: 'POST', body });
   }
 
-  async function runObservationReport(id) {
-    return requestJson(`/api/observations/${encodeURIComponent(id)}/run`, { method: 'POST', body: {} });
+  async function runObservationReport(id, cabinet = false) {
+    const base = observationsApiBase(cabinet);
+    return requestJson(`${base}/${encodeURIComponent(id)}/run`, { method: 'POST', body: {} });
   }
 
-  async function loadObservationRuns(id) {
-    const body = await getJson(`/api/observations/${encodeURIComponent(id)}/runs`, { widget: 'observations/runs' });
+  async function loadObservationRuns(id, cabinet = false) {
+    const base = observationsApiBase(cabinet);
+    const body = await getJson(`${base}/${encodeURIComponent(id)}/runs`, { widget: 'observations/runs' });
     return body.data || [];
   }
 
-  async function duplicateObservation(id) {
-    return requestJson(`/api/observations/${encodeURIComponent(id)}/duplicate`, { method: 'POST', body: {} });
+  async function duplicateObservation(id, cabinet = false) {
+    const base = observationsApiBase(cabinet);
+    return requestJson(`${base}/${encodeURIComponent(id)}/duplicate`, { method: 'POST', body: {} });
   }
 
-  async function cancelObservationMaterialize(id) {
-    return requestJson(`/api/observations/${encodeURIComponent(id)}/cancel`, { method: 'POST', body: {} });
+  async function cancelObservationMaterialize(id, cabinet = false) {
+    const base = observationsApiBase(cabinet);
+    return requestJson(`${base}/${encodeURIComponent(id)}/cancel`, { method: 'POST', body: {} });
   }
 
-  async function retryObservationMaterialize(id) {
-    return requestJson(`/api/observations/${encodeURIComponent(id)}/retry`, { method: 'POST', body: {} });
+  async function retryObservationMaterialize(id, cabinet = false) {
+    const base = observationsApiBase(cabinet);
+    return requestJson(`${base}/${encodeURIComponent(id)}/retry`, { method: 'POST', body: {} });
   }
 
-  function observationRunArtifactUrl(observationId, runId, file = 'report.html') {
+  function observationRunArtifactUrl(observationId, runId, file = 'report.html', cabinet = false) {
     const q = new URLSearchParams({ file: String(file || 'report.html') });
-    return `/api/observations/${encodeURIComponent(observationId)}/runs/${encodeURIComponent(runId)}/artifact?${q}`;
+    const base = observationsApiBase(cabinet);
+    return `${base}/${encodeURIComponent(observationId)}/runs/${encodeURIComponent(runId)}/artifact?${q}`;
   }
 
   async function loadSmtpSettings() {

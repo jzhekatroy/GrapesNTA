@@ -23,6 +23,7 @@ const CABINET_READONLY_POST_ALLOWLIST = [
   /^\/api\/cabinet\/explorer\/query$/,
   /^\/api\/cabinet\/explorer\/flows$/,
   /^\/api\/cabinet\/explorer\/export$/,
+  /^\/api\/cabinet\/observations\/[^/]+\/preview$/,
 ];
 
 function pathAllowedForClient(path) {

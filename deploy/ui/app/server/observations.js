@@ -16,6 +16,7 @@ const {
   explorerCollectorDisplayLabel,
   lookupCollectorDisplayNames,
   buildSummaryFromFlowRows: summaryFromExplorerFlowRows,
+  validateCabinetExplorerFields,
 } = require('./explorer');
 const {
   normalizeExplorerThresholds,
@@ -97,6 +98,59 @@ const NATIVE_FILTER_FIELDS = new Set([
   'direction', 'collector', 'vlan', 'vlan_attachment',
   'src_asn', 'dst_asn', 'proto', 'src_country', 'dst_country',
 ]);
+
+/** Max lookback window for cabinet observation preview/rollup (7d), wider than interactive explorer. */
+const CABINET_OBSERVATION_MAX_RANGE_MS = 7 * 86400000;
+
+function observationClientId(item) {
+  return String(item?.clientId ?? '').trim();
+}
+
+function realmFromOptions(options = {}) {
+  return String(options.clientId ?? '').trim();
+}
+
+function observationInRealm(item, realmClientId) {
+  return observationClientId(item) === String(realmClientId ?? '').trim();
+}
+
+function filterObservationsByRealm(items, options = {}) {
+  const realm = realmFromOptions(options);
+  return items.filter((item) => observationInRealm(item, realm));
+}
+
+function assertCabinetObservationAcceptable(clientId, payload = {}) {
+  const id = String(clientId || '').trim();
+  if (!id) return;
+  const widgets = normalizeWidgets(payload.widgets || []);
+  if (observationUsesNativeAggregate(widgets)) {
+    const err = new Error('Пресеты dashboard недоступны в кабинете клиента');
+    err.status = 400;
+    throw err;
+  }
+  const groupBy = collectWidgetGroupFields(widgets);
+  validateCabinetExplorerFields({
+    filters: payload.filters,
+    groupBy,
+    thresholds: payload.thresholds,
+  });
+}
+
+function observationExplorerOptions(obs) {
+  const clientId = observationClientId(obs);
+  if (!clientId) return {};
+  return {
+    cabinetClientId: clientId,
+    maxRangeMs: CABINET_OBSERVATION_MAX_RANGE_MS,
+  };
+}
+
+/** Resolve API realm for a stored row (worker/report paths omit explicit clientId). */
+function observationRealmOptions(item, options = {}) {
+  if (Object.prototype.hasOwnProperty.call(options, 'clientId')) return options;
+  const cid = observationClientId(item);
+  return cid ? { ...options, clientId: cid } : options;
+}
 
 const LOOKBACKS = new Set(['15m', '30m', '1h', '6h', '24h', '7d']);
 const REFRESH_SECS = new Set([300, 900]);
@@ -420,7 +474,7 @@ function materializeWarning(activeCount) {
   return null;
 }
 
-function normalizeObservation(raw = {}, { userId, existing = null } = {}) {
+function normalizeObservation(raw = {}, { userId, existing = null, clientId: realmClientId = undefined } = {}) {
   const filters = normalizeFilters(raw.filters != null ? raw.filters : existing?.filters);
   const thresholds = normalizeExplorerThresholds(
     raw.thresholds != null ? raw.thresholds : (existing?.thresholds || []),
@@ -470,6 +524,9 @@ function normalizeObservation(raw = {}, { userId, existing = null } = {}) {
     ? raw.explorerQuery
     : existing?.explorerQuery;
   const explorerQuery = normalizeObservationExplorerQuery(explorerQueryRaw);
+  const clientId = existing?.clientId != null
+    ? String(existing.clientId || '').trim()
+    : String(realmClientId ?? '').trim();
 
   return {
     id: existing?.id || newId('obs'),
@@ -477,6 +534,7 @@ function normalizeObservation(raw = {}, { userId, existing = null } = {}) {
     description: String(raw.description ?? existing?.description ?? '').trim(),
     folder: String(raw.folder ?? existing?.folder ?? 'Мои наблюдения').trim() || 'Мои наблюдения',
     ownerId: existing?.ownerId || userId || 'anonymous',
+    clientId,
     // Наблюдения всегда видны всем; редактировать по-прежнему может владелец.
     isShared: true,
     filters,
@@ -521,7 +579,8 @@ function normalizeObservation(raw = {}, { userId, existing = null } = {}) {
 
 async function withMeta(item, allItems = null, userId = null) {
   const scope = classifyScope(item.filters, item.widgets);
-  const all = allItems || await loadAllObservations();
+  const realmOpts = { clientId: observationClientId(item) };
+  const all = allItems || filterObservationsByRealm(await loadAllObservations(), realmOpts);
   const active = countActiveMaterialize(all);
   const warnings = [];
   if (scope.materializeRequired && item.materialize?.enabled) {
@@ -576,26 +635,28 @@ function materializeIssueOf(item) {
   };
 }
 
-async function listObservations(userId) {
-  const all = await loadAllObservations();
+async function listObservations(userId, options = {}) {
+  const all = filterObservationsByRealm(await loadAllObservations(), options);
   const visible = all.filter((item) => item.isShared
     || !String(item.ownerId || '').trim()
     || isObservationOwner(item, userId));
   return Promise.all(visible.map((item) => withMeta(item, all, userId)));
 }
 
-async function getObservation(id, userId) {
+async function getObservation(id, userId, options = {}) {
   const item = await loadObservationById(id);
-  if (!item) return null;
+  if (!item || !observationInRealm(item, realmFromOptions(options))) return null;
   if (!item.isShared
     && String(item.ownerId || '').trim()
     && !isObservationOwner(item, userId)) return null;
   return withMeta(item, null, userId);
 }
 
-async function createObservation(userId, payload = {}) {
-  const items = await loadAllObservations();
-  const item = normalizeObservation(payload, { userId });
+async function createObservation(userId, payload = {}, options = {}) {
+  const realm = realmFromOptions(options);
+  assertCabinetObservationAcceptable(realm, payload);
+  const items = filterObservationsByRealm(await loadAllObservations(), options);
+  const item = normalizeObservation(payload, { userId, clientId: realm });
   if (MATERIALIZE_LIMIT_ENABLED
     && item.materialize.enabled
     && countActiveMaterialize(items) >= MAX_MATERIALIZE) {
@@ -606,10 +667,16 @@ async function createObservation(userId, payload = {}) {
   return withMeta(item, [...items, item], userId);
 }
 
-async function updateObservation(id, userId, payload = {}) {
-  const items = await loadAllObservations();
+async function updateObservation(id, userId, payload = {}, options = {}) {
+  const items = filterObservationsByRealm(await loadAllObservations(), options);
   const existing = items.find((row) => row.id === id);
   if (!assertObservationOwner(existing, userId)) return null;
+  const realm = realmFromOptions(options);
+  assertCabinetObservationAcceptable(realm, {
+    filters: payload.filters != null ? payload.filters : existing?.filters,
+    widgets: payload.widgets != null ? payload.widgets : existing?.widgets,
+    thresholds: payload.thresholds != null ? payload.thresholds : existing?.thresholds,
+  });
   const next = normalizeObservation(payload, { userId, existing });
   if (MATERIALIZE_LIMIT_ENABLED
     && next.materialize.enabled
@@ -633,8 +700,8 @@ async function updateObservation(id, userId, payload = {}) {
   return withMeta(next, items.map((row) => (row.id === id ? next : row)), userId);
 }
 
-async function duplicateObservation(id, userId) {
-  const existing = await getObservation(id, userId);
+async function duplicateObservation(id, userId, options = {}) {
+  const existing = await getObservation(id, userId, options);
   if (!existing) return null;
   if (!isObservationOwner(existing, userId) && !existing.isShared) return null;
   const copy = normalizeObservation({
@@ -661,13 +728,13 @@ async function duplicateObservation(id, userId) {
     },
     createdAt: undefined,
     updatedAt: undefined,
-  }, { userId });
+  }, { userId, clientId: observationClientId(existing) });
   await upsertObservation(copy);
   return withMeta(copy);
 }
 
-async function cancelMaterialize(id, userId) {
-  const items = await loadAllObservations();
+async function cancelMaterialize(id, userId, options = {}) {
+  const items = filterObservationsByRealm(await loadAllObservations(), options);
   const existing = items.find((row) => row.id === id);
   if (!assertObservationOwner(existing, userId)) return null;
   const next = {
@@ -688,8 +755,8 @@ async function cancelMaterialize(id, userId) {
   return withMeta(next, items.map((row) => (row.id === id ? next : row)), userId);
 }
 
-async function retryMaterialize(id, userId) {
-  const items = await loadAllObservations();
+async function retryMaterialize(id, userId, options = {}) {
+  const items = filterObservationsByRealm(await loadAllObservations(), options);
   const existing = items.find((row) => row.id === id);
   if (!assertObservationOwner(existing, userId)) return null;
   if (existing.materialize?.status !== 'error') {
@@ -716,8 +783,8 @@ async function retryMaterialize(id, userId) {
   return withMeta(next, items.map((row) => (row.id === id ? next : row)), userId);
 }
 
-async function deleteObservation(id, userId) {
-  const item = await getObservation(id, userId);
+async function deleteObservation(id, userId, options = {}) {
+  const item = await getObservation(id, userId, options);
   if (!item) return false;
   assertObservationOwner(item, userId);
   await softDeleteObservation(item);
@@ -729,8 +796,8 @@ async function deleteObservation(id, userId) {
   return true;
 }
 
-async function queueMaterialize(id, userId) {
-  const items = await loadAllObservations();
+async function queueMaterialize(id, userId, options = {}) {
+  const items = filterObservationsByRealm(await loadAllObservations(), options);
   const existing = items.find((row) => row.id === id);
   if (!assertObservationOwner(existing, userId)) return null;
   const scope = classifyScope(existing.filters, existing.widgets);
@@ -1525,7 +1592,8 @@ async function fetchThresholdTopRows(obs, window, { groupBy, limit, metric = 'bp
     includeSummary: false,
     includeTimeseries: false,
   };
-  const spec = await explorerFlows(body);
+  const explorerOpts = observationExplorerOptions(obs);
+  const spec = await explorerFlows(body, explorerOpts);
   const result = await runExplorerSpec(spec);
   const windowSeconds = result.meta?.windowSeconds || Math.max(
     60,
@@ -1568,7 +1636,8 @@ async function fetchThresholdGroupedTimeseries(obs, window, {
     groupBy,
     granularity: '5m',
   };
-  const seriesSpec = await explorerResultSeries(body, top.rows);
+  const explorerOpts = observationExplorerOptions(obs);
+  const seriesSpec = await explorerResultSeries(body, top.rows, explorerOpts);
   const seriesResult = await runExplorerSpec(seriesSpec);
   const seriesByRow = seriesResult.data?.seriesByRow || {};
   const bucketMap = new Map();
@@ -1646,7 +1715,7 @@ async function previewObservationWithThresholds(obs, window) {
           filters: obs.filters,
           thresholds: obs.thresholds,
           granularity: '5m',
-        });
+        }, observationExplorerOptions(obs));
         const { rows } = await query(bundle.sql, bundle.params, { name: 'observations/threshold-ts' });
         const series = await bundle.map(rows);
         widgets.push({
@@ -1730,8 +1799,8 @@ function rollupEmptyWarning(obs) {
   return 'В rollup пока нет точек за выбранное окно.';
 }
 
-async function previewObservation(id, userId, body = {}) {
-  const obs = await getObservation(id, userId);
+async function previewObservation(id, userId, body = {}, options = {}) {
+  const obs = await getObservation(id, userId, options);
   if (!obs) return null;
   const window = resolvePreviewWindow(obs, body);
   if (explorerThresholdsActive(obs.thresholds)) {
@@ -1835,7 +1904,7 @@ async function previewObservation(id, userId, body = {}) {
             metric: chartMetric,
             filters: obs.filters,
             granularity: '5m',
-          });
+          }, observationExplorerOptions(obs));
           const { rows } = await query(bundle.sql, bundle.params, { name: 'observations/preview-ts' });
           const series = await bundle.map(rows);
           widgets.push({
@@ -1931,8 +2000,8 @@ async function previewObservation(id, userId, body = {}) {
   };
 }
 
-async function listRuns(observationId, userId) {
-  const obs = await getObservation(observationId, userId);
+async function listRuns(observationId, userId, options = {}) {
+  const obs = await getObservation(observationId, userId, options);
   if (!obs) return null;
   return loadRunsForObservation(observationId);
 }
@@ -2520,8 +2589,11 @@ ${topSections}
 </body></html>`;
 }
 
-async function runObservationReport(id, userId) {
-  const obs = await getObservation(id, userId);
+async function runObservationReport(id, userId, options = {}) {
+  const stored = await loadObservationById(id);
+  if (!stored) return null;
+  const realmOpts = observationRealmOptions(stored, options);
+  const obs = await getObservation(id, userId, realmOpts);
   if (!obs) return null;
   const startedAt = new Date().toISOString();
   const runId = newId('run');
@@ -2540,7 +2612,12 @@ async function runObservationReport(id, userId) {
   let preview;
   let previewError = null;
   try {
-    preview = await previewObservation(id, userId, { from: window.from, to: window.to });
+    preview = await previewObservation(
+      id,
+      userId,
+      { from: window.from, to: window.to },
+      realmOpts,
+    );
   } catch (err) {
     previewError = err.message;
     preview = { widgets: [] };
@@ -2690,8 +2767,8 @@ async function runObservationReport(id, userId) {
   return run;
 }
 
-async function getRunArtifact(observationId, runId, userId, fileName) {
-  const obs = await getObservation(observationId, userId);
+async function getRunArtifact(observationId, runId, userId, fileName, options = {}) {
+  const obs = await getObservation(observationId, userId, options);
   if (!obs) return null;
   const run = await loadRunById(observationId, runId);
   if (!run) return null;
@@ -2801,6 +2878,7 @@ async function listMaterializeJobs() {
         backfillCursor: mat.backfillCursor || null,
         backfillDone: Boolean(mat.backfillDone),
         filters: o.filters,
+        clientId: observationClientId(o),
         groupBy,
         seriesLimit: Math.min(
           50,
@@ -2908,7 +2986,8 @@ function observationPresets() {
   ];
 }
 
-function observationsConfig() {
+function observationsConfig(options = {}) {
+  const cabinet = Boolean(realmFromOptions(options));
   return {
     maxMaterialize: MATERIALIZE_LIMIT_ENABLED ? MAX_MATERIALIZE : null,
     minIntervalSec: MIN_INTERVAL_SEC,
@@ -2917,10 +2996,11 @@ function observationsConfig() {
     lookbacks: ['30m', '1h', '6h', '24h', '7d'],
     refreshSecs: [...REFRESH_SECS],
     widgetTypes: [...WIDGET_TYPES],
-    widgetDataSources: [...WIDGET_DATA_SOURCES],
+    widgetDataSources: cabinet ? [] : [...WIDGET_DATA_SOURCES],
     nativeFilterFields: [...NATIVE_FILTER_FIELDS],
-    presets: observationPresets(),
-    schema: explorerSchema(),
+    presets: cabinet ? [] : observationPresets(),
+    schema: explorerSchema(cabinet ? { cabinet: true } : {}),
+    cabinetMode: cabinet,
   };
 }
 
@@ -3054,4 +3134,10 @@ module.exports = {
   observationRollupBucketRate,
   observationWindowAverage,
   rollupVlanDisplayLabel,
+  observationClientId,
+  observationInRealm,
+  filterObservationsByRealm,
+  realmFromOptions,
+  observationExplorerOptions,
+  assertCabinetObservationAcceptable,
 };

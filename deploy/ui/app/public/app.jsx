@@ -583,7 +583,15 @@ function App() {
         );
         break;
       case 'observations':
-        pageEl = <LazyPage pageId="observations" key={refreshKey} onNavigate={navigate} />;
+        pageEl = (
+          <LazyPage
+            pageId="observations"
+            key={refreshKey}
+            onNavigate={navigate}
+            cabinetMode={cabinetMode}
+            readOnly={cabinetReadOnly}
+          />
+        );
         break;
       case 'diagnostics':
         pageEl = <LazyPage pageId="diagnostics" key={refreshKey} />;

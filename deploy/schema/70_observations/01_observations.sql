@@ -2,6 +2,7 @@ CREATE TABLE IF NOT EXISTS default.observations
 (
     `id` String,
     `owner_id` String,
+    `client_id` String DEFAULT '',
     `is_shared` UInt8 DEFAULT 0,
     `name` String,
     `description` String DEFAULT '',

@@ -96,13 +96,14 @@ const CABINET_NAV = [
     items: [
       { id: 'dashboard', label: 'Обзор', icon: 'dashboard' },
       { id: 'explorer', label: 'Разбор трафика', icon: 'explorer' },
+      { id: 'observations', label: 'Наблюдения', icon: 'query' },
       { id: 'dns', label: 'DNS', icon: 'globe' },
       { id: 'cabinet-settings', label: 'Настройки', icon: 'sliders' },
     ],
   },
 ];
 
-const CABINET_PAGE_IDS = new Set(['dashboard', 'explorer', 'dns', 'cabinet-settings']);
+const CABINET_PAGE_IDS = new Set(['dashboard', 'explorer', 'dns', 'observations', 'cabinet-settings']);
 
 function isCabinetMode(user) {
   const mode = user?.cabinet?.mode;

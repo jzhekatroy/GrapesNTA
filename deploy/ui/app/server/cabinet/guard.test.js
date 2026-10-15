@@ -270,5 +270,8 @@ test('impersonation guard allows read-only cabinet explorer POSTs', async () => 
 
 test('Client role page resources include cabinet pages only', () => {
   const { CLIENT_PAGE_RESOURCES } = require('./constants');
-  assert.deepEqual([...CLIENT_PAGE_RESOURCES].sort(), ['cabinet-settings', 'dashboard', 'dns', 'explorer']);
+  assert.deepEqual(
+    [...CLIENT_PAGE_RESOURCES].sort(),
+    ['cabinet-settings', 'dashboard', 'dns', 'explorer', 'observations'],
+  );
 });

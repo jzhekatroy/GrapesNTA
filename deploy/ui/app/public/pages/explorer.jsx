@@ -3052,7 +3052,7 @@ function createExplorerApi(cabinetMode) {
     loadSharedSnapshot: (token) => ApiClient.loadExplorerSharedSnapshot(token, true),
     shareSnapshot: (id) => ApiClient.shareExplorerSnapshot(id, true),
     supportsSavedFilters: false,
-    supportsObservations: false,
+    supportsObservations: true,
     maxRangeDays: 6,
   };
 }
@@ -3139,7 +3139,9 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
   const [showObservationSave, setShowObservationSave] = useState(false);
   const [observationSaveMode, setObservationSaveMode] = useState('create');
   const [editingSaved, setEditingSaved] = useState(null);
-  const canWriteObservation = !cabinetMode && (AuthAccess.canWritePage('observations') || canWrite);
+  const canWriteObservation = cabinetMode
+    ? !readOnly
+    : (AuthAccess.canWritePage('observations') || canWrite);
   const [hasAppliedQuery, setHasAppliedQuery] = useState(false);
   const [appliedSnapshot, setAppliedSnapshot] = useState(null);
   const [queryVersion, setQueryVersion] = useState(0);
@@ -3954,7 +3956,7 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
         let existing = null;
         if (id) {
           try {
-            existing = await ApiClient.loadObservation(id);
+            existing = await ApiClient.loadObservation(id, cabinetMode);
           } catch (err) {
             if (observationNotFoundError(err)) {
               id = null;
@@ -3979,7 +3981,7 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
               filters: nextFilters,
               thresholds: validThresholds,
               widgets: buildCreateWidgets(existingChartStyle),
-            });
+            }, cabinetMode);
             pushToast({ kind: 'success', title: explorerT('explorer.obsFiltersUpdated'), desc: name || existing.name });
             updated = true;
           } catch (err) {
@@ -4007,7 +4009,7 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
             emailTo: [],
           },
         };
-        const res = await ApiClient.createObservation(payload);
+        const res = await ApiClient.createObservation(payload, cabinetMode);
         id = res.data?.id;
         pushToast({
           kind: 'success',
@@ -7728,7 +7730,7 @@ function ExplorerFilters({
       {canWrite && (
         <Button kind="ghost" size="sm" icon="save" onClick={onSave}>{explorerT('explorer.save')}</Button>
       )}
-      {canWrite && onSaveAsObservation && (
+      {onSaveAsObservation && (
         <Button kind="primary" size="sm" onClick={onSaveAsObservation}>{saveAsObservationLabel}</Button>
       )}
       {filterMode === 'graphic' && (

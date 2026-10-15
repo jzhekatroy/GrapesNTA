@@ -124,6 +124,7 @@ function rowToObservation(row) {
     description: String(row.description ?? ''),
     folder: String(row.folder ?? ''),
     ownerId: String(row.owner_id ?? ''),
+    clientId: String(row.client_id ?? ''),
     isShared: Number(row.is_shared) === 1,
     filters: envelope.filters,
     thresholds: envelope.thresholds,
@@ -143,6 +144,7 @@ function observationToRow(item, { deleted = 0 } = {}) {
   return {
     id: String(item.id),
     owner_id: String(item.ownerId || ''),
+    client_id: String(item.clientId || ''),
     is_shared: item.isShared ? 1 : 0,
     name: String(item.name || ''),
     description: String(item.description || ''),
@@ -234,6 +236,7 @@ async function ensureObservationsStore() {
         (
           id String,
           owner_id String,
+          client_id String DEFAULT '',
           is_shared UInt8 DEFAULT 0,
           name String,
           description String DEFAULT '',
@@ -282,6 +285,11 @@ async function ensureObservationsStore() {
           ADD COLUMN IF NOT EXISTS email_to String DEFAULT '',
           ADD COLUMN IF NOT EXISTS email_error String DEFAULT ''
       `, {}, { name: 'observations/ensure-runs-email' }).catch(() => {});
+
+      await executeCommand(`
+        ALTER TABLE ${config.database}.${OBSERVATIONS_TABLE}
+          ADD COLUMN IF NOT EXISTS client_id String DEFAULT ''
+      `, {}, { name: 'observations/ensure-client-id' }).catch(() => {});
 
       await migrateFromJsonIfEmpty();
     })().catch((err) => {

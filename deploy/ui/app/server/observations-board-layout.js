@@ -110,8 +110,16 @@ function parseStoredLayout(row) {
   return validateLayout(parsed);
 }
 
-function getLayout(userId) {
-  const id = String(userId || '').trim();
+function layoutStorageKey(userId, clientId = '') {
+  const uid = String(userId || '').trim();
+  const cid = String(clientId || '').trim();
+  if (!uid) return '';
+  if (!cid) return uid;
+  return `cabinet:${cid}:u:${uid}`;
+}
+
+function getLayout(userId, clientId = '') {
+  const id = layoutStorageKey(userId, clientId);
   if (!id) return null;
   ensureStore();
   const row = db.prepare(
@@ -126,8 +134,8 @@ function getLayout(userId) {
   };
 }
 
-function putLayout(userId, layout) {
-  const id = String(userId || '').trim();
+function putLayout(userId, layout, clientId = '') {
+  const id = layoutStorageKey(userId, clientId);
   if (!id) {
     const err = new Error('userId обязателен');
     err.statusCode = 400;
@@ -159,6 +167,7 @@ module.exports = {
   DEFAULT_LAYOUT,
   validateLayout,
   normalizeObservationIds,
+  layoutStorageKey,
   getLayout,
   putLayout,
   resetStoreForTests,

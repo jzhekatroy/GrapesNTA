@@ -1,3 +1,4 @@
+const fs = require('fs');
 const express = require('express');
 const { query } = require('../clickhouse');
 const { canWrite } = require('../rbac/permissions');
@@ -62,6 +63,26 @@ const {
   buildExplorerStoredQuery,
   buildExplorerStoredPayload,
 } = require('../analysis-snapshots');
+const {
+  observationsConfig,
+  listObservations,
+  createObservation,
+  getObservation,
+  updateObservation,
+  deleteObservation,
+  duplicateObservation,
+  cancelMaterialize,
+  queueMaterialize,
+  retryMaterialize,
+  previewObservation,
+  runObservationReport,
+  listRuns,
+  getRunArtifact,
+} = require('../observations');
+const {
+  getLayout: getObservationsBoardLayout,
+  putLayout: putObservationsBoardLayout,
+} = require('../observations-board-layout');
 
 async function runNamed(builder, { name } = {}) {
   const spec = await builder();
@@ -81,6 +102,10 @@ async function runNamed(builder, { name } = {}) {
 
 function sendError(res, err, fallback = 502) {
   res.status(err.statusCode || fallback).json({ error: err.message });
+}
+
+function cabinetObservationRealm(req) {
+  return { clientId: requireScopedClientId(req.cabinet) };
 }
 
 function createCabinetRouter({ sessions }) {
@@ -195,6 +220,232 @@ function createCabinetRouter({ sessions }) {
       res.json(result);
     } catch (err) {
       sendError(res, err);
+    }
+  });
+
+  router.get('/observations/config', async (req, res) => {
+    try {
+      const realm = cabinetObservationRealm(req);
+      res.json({ data: observationsConfig(realm) });
+    } catch (err) {
+      sendError(res, err, err.statusCode || 500);
+    }
+  });
+
+  router.get('/observations', async (req, res) => {
+    try {
+      const realm = cabinetObservationRealm(req);
+      res.json({ data: await listObservations(req.user.id, realm) });
+    } catch (err) {
+      sendError(res, err, 500);
+    }
+  });
+
+  router.get('/observations/board-layout', async (req, res) => {
+    try {
+      const realm = cabinetObservationRealm(req);
+      const stored = getObservationsBoardLayout(req.user.id, realm.clientId);
+      res.json({
+        data: stored?.layout || null,
+        updatedAt: stored?.updatedAt || null,
+      });
+    } catch (err) {
+      sendError(res, err, err.statusCode || 500);
+    }
+  });
+
+  router.put('/observations/board-layout', async (req, res) => {
+    try {
+      const realm = cabinetObservationRealm(req);
+      const saved = putObservationsBoardLayout(req.user.id, req.body || {}, realm.clientId);
+      res.json({ ok: true, data: saved.layout, updatedAt: saved.updatedAt });
+    } catch (err) {
+      sendError(res, err, err.statusCode || 400);
+    }
+  });
+
+  router.post('/observations', async (req, res) => {
+    try {
+      const realm = cabinetObservationRealm(req);
+      const data = await createObservation(req.user.id, req.body || {}, realm);
+      res.json({ ok: true, data });
+    } catch (err) {
+      res.status(err.status || 400).json({
+        error: err.message,
+        occupants: err.occupants || undefined,
+        quotas: err.quotas || undefined,
+      });
+    }
+  });
+
+  router.get('/observations/:id', async (req, res) => {
+    try {
+      const realm = cabinetObservationRealm(req);
+      const data = await getObservation(req.params.id, req.user.id, realm);
+      if (!data) {
+        res.status(404).json({ error: 'Наблюдение не найдено' });
+        return;
+      }
+      res.json({ data });
+    } catch (err) {
+      sendError(res, err, 500);
+    }
+  });
+
+  router.put('/observations/:id', async (req, res) => {
+    try {
+      const realm = cabinetObservationRealm(req);
+      const data = await updateObservation(req.params.id, req.user.id, req.body || {}, realm);
+      if (!data) {
+        res.status(404).json({ error: 'Наблюдение не найдено' });
+        return;
+      }
+      res.json({ ok: true, data });
+    } catch (err) {
+      res.status(err.status || 400).json({
+        error: err.message,
+        occupants: err.occupants || undefined,
+        quotas: err.quotas || undefined,
+      });
+    }
+  });
+
+  router.delete('/observations/:id', async (req, res) => {
+    try {
+      const realm = cabinetObservationRealm(req);
+      const ok = await deleteObservation(req.params.id, req.user.id, realm);
+      if (!ok) {
+        res.status(404).json({ error: 'Наблюдение не найдено' });
+        return;
+      }
+      res.json({ ok: true });
+    } catch (err) {
+      sendError(res, err, err.statusCode || 400);
+    }
+  });
+
+  router.post('/observations/:id/duplicate', async (req, res) => {
+    try {
+      const realm = cabinetObservationRealm(req);
+      const data = await duplicateObservation(req.params.id, req.user.id, realm);
+      if (!data) {
+        res.status(404).json({ error: 'Наблюдение не найдено' });
+        return;
+      }
+      res.json({ ok: true, data });
+    } catch (err) {
+      sendError(res, err, err.statusCode || 400);
+    }
+  });
+
+  router.post('/observations/:id/cancel', async (req, res) => {
+    try {
+      const realm = cabinetObservationRealm(req);
+      const data = await cancelMaterialize(req.params.id, req.user.id, realm);
+      if (!data) {
+        res.status(404).json({ error: 'Наблюдение не найдено' });
+        return;
+      }
+      res.json({ ok: true, data });
+    } catch (err) {
+      sendError(res, err, err.statusCode || 400);
+    }
+  });
+
+  router.post('/observations/:id/materialize', async (req, res) => {
+    try {
+      const realm = cabinetObservationRealm(req);
+      const data = await queueMaterialize(req.params.id, req.user.id, realm);
+      if (!data) {
+        res.status(404).json({ error: 'Наблюдение не найдено' });
+        return;
+      }
+      res.json({ ok: true, data });
+    } catch (err) {
+      res.status(err.status || 400).json({
+        error: err.message,
+        occupants: err.occupants || undefined,
+        quotas: err.quotas || undefined,
+      });
+    }
+  });
+
+  router.post('/observations/:id/retry', async (req, res) => {
+    try {
+      const realm = cabinetObservationRealm(req);
+      const data = await retryMaterialize(req.params.id, req.user.id, realm);
+      if (!data) {
+        res.status(404).json({ error: 'Наблюдение не найдено' });
+        return;
+      }
+      res.json({ ok: true, data });
+    } catch (err) {
+      sendError(res, err, err.statusCode || 400);
+    }
+  });
+
+  router.post('/observations/:id/preview', async (req, res) => {
+    try {
+      const realm = cabinetObservationRealm(req);
+      const data = await previewObservation(req.params.id, req.user.id, req.body || {}, realm);
+      if (!data) {
+        res.status(404).json({ error: 'Наблюдение не найдено' });
+        return;
+      }
+      res.json({ data });
+    } catch (err) {
+      sendError(res, err, 502);
+    }
+  });
+
+  router.post('/observations/:id/run', async (req, res) => {
+    try {
+      const realm = cabinetObservationRealm(req);
+      const data = await runObservationReport(req.params.id, req.user.id, realm);
+      if (!data) {
+        res.status(404).json({ error: 'Наблюдение не найдено' });
+        return;
+      }
+      res.json({ ok: true, data });
+    } catch (err) {
+      sendError(res, err, 502);
+    }
+  });
+
+  router.get('/observations/:id/runs', async (req, res) => {
+    try {
+      const realm = cabinetObservationRealm(req);
+      const data = await listRuns(req.params.id, req.user.id, realm);
+      if (!data) {
+        res.status(404).json({ error: 'Наблюдение не найдено' });
+        return;
+      }
+      res.json({ data });
+    } catch (err) {
+      sendError(res, err, 500);
+    }
+  });
+
+  router.get('/observations/:id/runs/:runId/artifact', async (req, res) => {
+    try {
+      const realm = cabinetObservationRealm(req);
+      const file = req.query.file || 'report.html';
+      const artifact = await getRunArtifact(
+        req.params.id,
+        req.params.runId,
+        req.user.id,
+        file,
+        realm,
+      );
+      if (!artifact) {
+        res.status(404).json({ error: 'Артефакт не найден' });
+        return;
+      }
+      res.setHeader('Content-Type', artifact.contentType);
+      res.setHeader('Content-Disposition', `inline; filename="${artifact.fileName}"`);
+      fs.createReadStream(artifact.path).pipe(res);
+    } catch (err) {
+      sendError(res, err, err.status || 500);
     }
   });
 

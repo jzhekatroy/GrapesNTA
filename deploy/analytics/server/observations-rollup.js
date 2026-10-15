@@ -35,6 +35,7 @@ const {
   ROLLUP_DIM_COUNT,
   STUCK_SEC,
   MAX_FAIL_COUNT,
+  observationExplorerOptions,
 } = require('./observations');
 const {
   loadObservationById,
@@ -43,7 +44,7 @@ const {
 const {
   explorerTimeseries,
   explorerGroupedTimeseries,
-  explorerDimensions,
+  explorerDimensionsForOptions,
 } = require('./explorer');
 const { explorerGroupFieldId } = require('./explorer-group-mask');
 
@@ -311,8 +312,9 @@ function widenForRecheck(job, from) {
  * опаснее ошибки: dim0 заполнился бы вторым измерением, а UI подписал бы его
  * первым. Поэтому проверяем разрез до запроса.
  */
-function assertKnownGroupBy(groupBy) {
-  const known = new Set(Object.keys(explorerDimensions()));
+function assertKnownGroupBy(groupBy, job = {}) {
+  const explorerOpts = observationExplorerOptions({ clientId: job.clientId });
+  const known = new Set(Object.keys(explorerDimensionsForOptions(explorerOpts)));
   const unknown = groupBy.filter((g) => !known.has(explorerGroupFieldId(g)));
   if (unknown.length) {
     throw new Error(`Неизвестное измерение разреза: ${unknown.join(', ')}`);
@@ -324,8 +326,9 @@ async function catchupGrouped(job, window, seriesLimit) {
     ? job.groupBy.filter(Boolean).slice(0, ROLLUP_DIM_COUNT)
     : [];
   if (!groupBy.length) return { groupedPoints: 0, values: [] };
-  assertKnownGroupBy(groupBy);
+  assertKnownGroupBy(groupBy, job);
 
+  const explorerOpts = observationExplorerOptions({ clientId: job.clientId });
   const groupedBundle = await explorerGroupedTimeseries({
     ...window,
     metric: 'bps',
@@ -333,7 +336,7 @@ async function catchupGrouped(job, window, seriesLimit) {
     limit: seriesLimit,
     offset: 0,
     granularity: GRANULARITY,
-  });
+  }, explorerOpts);
   const { rows: groupedRaw } = await query(groupedBundle.sql, groupedBundle.params, {
     name: `observations/rollup-grouped-${job.id}`,
   });
@@ -427,7 +430,8 @@ async function materializeWindow(job, from, to) {
     granularity: GRANULARITY,
   };
 
-  const totalBundle = await explorerTimeseries(window);
+  const explorerOpts = observationExplorerOptions({ clientId: job.clientId });
+  const totalBundle = await explorerTimeseries(window, explorerOpts);
   const { rows: totalRaw } = await query(totalBundle.sql, totalBundle.params, {
     name: `observations/rollup-total-${job.id}`,
   });

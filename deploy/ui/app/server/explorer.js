@@ -2565,9 +2565,11 @@ function normalizeExplorerQuery(body = {}, options = {}) {
   const to = body.to;
   const filters = normalizeFilterList(body.filters);
   validateExplorerWindow({ range, from, to }, {
-    maxRangeMs: options.cabinetClientId
-      ? CABINET_EXPLORER_MAX_RANGE_MS
-      : EXPLORER_MAX_RANGE_MS,
+    maxRangeMs: Number(options.maxRangeMs) > 0
+      ? Number(options.maxRangeMs)
+      : (options.cabinetClientId
+        ? CABINET_EXPLORER_MAX_RANGE_MS
+        : EXPLORER_MAX_RANGE_MS),
   });
 
   const collectorRaw = options.cabinetClientId
@@ -3968,9 +3970,13 @@ function explorerSeriesMetricValue(row, metricKey) {
  * Top-N groupBy + per-bucket series in one flows_raw scan (for observation rollup).
  * Prefers raw group keys when available (same two-phase idea as explorerFlows).
  */
-async function explorerGroupedTimeseries(body = {}) {
-  const q = normalizeExplorerQuery(body);
-  const { groups, dims } = resolveExplorerGroupState(q.groupBy);
+async function explorerGroupedTimeseries(body = {}, options = {}) {
+  if (options.cabinetClientId) validateCabinetExplorerFields(body);
+  const q = normalizeExplorerQuery(body, options);
+  const { groups, dims } = resolveExplorerGroupState(
+    q.groupBy,
+    explorerDimensionsForOptions(options),
+  );
   if (!groups.length) throw new Error('Выберите хотя бы одну группировку');
 
   const metricKey = q.metric;
@@ -4891,6 +4897,7 @@ function summaryFromExplorerFlowRows(rows, windowSeconds = 3600) {
 module.exports = {
   explorerSchema,
   explorerDimensions,
+  explorerDimensionsForOptions,
   explorerFieldMatchesQuery,
   explorerFlows,
   explorerSummary,
@@ -4928,4 +4935,6 @@ module.exports = {
   summaryFromExplorerFlowRows,
   buildSummaryFromFlowRows: summaryFromExplorerFlowRows,
   combineExplorerFilterSql,
+  validateCabinetExplorerFields,
+  CABINET_EXPLORER_FIELD_IDS,
 };

@@ -1,5 +1,6 @@
 const fs = require('fs');
 const path = require('path');
+const net = require('net');
 const {
   col,
   colOpt,
@@ -27,6 +28,7 @@ const {
   probeTrafficWindowBounds,
   flowIpExpr,
   flowSamplerIpExpr,
+  samplerKeyFromIpExpr,
   sflowIfIndexExpr,
   flowMacExpr,
   protoLabelSql,
@@ -77,7 +79,7 @@ const {
   isExplorerFilterGroup,
   normalizeExplorerFilterTree,
   explorerFilterUsesField,
-} = require('./explorer-filter-tree.js');
+} = require('../public/data/explorer-filter-tree.js');
 
 const EXPLORER_MAX_EXPORT_ROWS = 10000;
 const EXPLORER_MAX_LIMIT = EXPLORER_MAX_EXPORT_ROWS;
@@ -563,6 +565,19 @@ function formatExplorerAsPathRawValue(hops) {
   return hops.join(' ');
 }
 
+// ClickHouse Array(UInt32) becomes "1299,3356" in JS; the table stores "1299 3356".
+function explorerCanonicalGroupValue(dim, raw) {
+  if (dim && (dim.kind === 'as_path' || dim.filterType === 'as_path')) {
+    const hops = parseExplorerAsPathRaw(raw);
+    return hops.length ? formatExplorerAsPathRawValue(hops) : '—';
+  }
+  return String(raw ?? '—') || '—';
+}
+
+function explorerClickhouseGroupKey(groups, dims, row) {
+  return groups.map((g, idx) => explorerCanonicalGroupValue(dims[g], row?.[`g${idx}`])).join('|');
+}
+
 function formatExplorerAsPathDisplayLabel(hops, nameMap) {
   if (!Array.isArray(hops) || !hops.length) return '—';
   return hops.map((asn) => {
@@ -649,7 +664,10 @@ async function lookupCollectorDisplayNames(collectorIds = []) {
   return byId;
 }
 
-/** collector_id is not on the flow; resolve it once from the source catalog. */
+/**
+ * collector_id is not on the flow. Resolve it once from the source catalog
+ * (one row per source_id) and group by that id. Names are applied in JS.
+ */
 function explorerCollectorIdExpr(flowAlias = 'f') {
   const sourceIdCol = flowCol('sourceId');
   if (!sourceIdCol) return null;
@@ -917,6 +935,8 @@ function explorerDimensions() {
   const dims = {
     src_ip: {
       label: 'Source IP', group: 'IP', kind: 'ip', expr: srcIpExpr, filterType: 'ip', filterExpr: srcIpExpr,
+      filterAddrExpr: `f.${t.srcIp}`,
+      filterEtypeExpr: etypeExpr,
       groupKeyExpr: `f.${t.srcIp}`,
       labelFromKey: ipLabelFromKey,
       maskable: true,
@@ -927,6 +947,8 @@ function explorerDimensions() {
     },
     dst_ip: {
       label: 'Destination IP', group: 'IP', kind: 'ip', expr: dstIpExpr, filterType: 'ip', filterExpr: dstIpExpr,
+      filterAddrExpr: `f.${t.dstIp}`,
+      filterEtypeExpr: etypeExpr,
       groupKeyExpr: `f.${t.dstIp}`,
       labelFromKey: ipLabelFromKey,
       maskable: true,
@@ -1108,6 +1130,20 @@ function explorerDimensions() {
     // optional for other consumers, but Explorer runs as ui_read and must not
     // depend on dictGet grants / dictionary SOURCE credentials.
     const ifacesRef = netInterfacesCurrentRef();
+    // Filtering by port label through the JOIN re-evaluates the SNMP match for
+    // every flow row in the window. The inventory holds a few thousand ports, so
+    // resolving the label to its (sampler, ifIndex) pairs up front lets the scan
+    // compare stored columns and drop the JOIN.
+    // sflowIfIndexExpr(x) равен x при 1 ≤ x ≤ 2^30−1 и 0 иначе. Индекс 0
+    // и индексы со старшими битами декодер не сопоставляет с инвентарём,
+    // поэтому сырой in_if/out_if против индексов 1..1073741823 — тот же
+    // набор портов, и сравнение попадает в ключ сортировки.
+    const ifPairFilter = (ifCol, labelCol) => ({
+      labelCol,
+      keyExpr: `(f.${samplerCol}, f.${ifCol})`,
+      pairsFrom: `SELECT ${samplerKeyFromIpExpr('switch_ip')}, toUInt32(if_index) FROM ${ifacesRef}`,
+      indexSql: 'if_index BETWEEN 1 AND 1073741823',
+    });
     // Both if_name and if_alias reuse one JOIN per side: identical joinSql strings
     // are deduplicated downstream, so grouping by name + alias stays single-join.
     if (inIfCol) {
@@ -1128,6 +1164,7 @@ function explorerDimensions() {
         filterExpr: `ifNull(nullIf(snmp_in.if_name, ''), '')`,
         valueHint: 'ifName, alias или ifIndex',
         joinSql: inJoinSql,
+        pairFilter: ifPairFilter(inIfCol, 'if_name'),
         groupKeyExpr: `f.${inIfCol}`,
         labelJoin: {
           needsSampler: true,
@@ -1144,6 +1181,7 @@ function explorerDimensions() {
         filterExpr: `ifNull(nullIf(snmp_in.if_alias, ''), '')`,
         valueHint: 'Описание порта из SNMP',
         joinSql: inJoinSql,
+        pairFilter: ifPairFilter(inIfCol, 'if_alias'),
         groupKeyExpr: `f.${inIfCol}`,
         labelJoin: {
           needsSampler: true,
@@ -1170,6 +1208,7 @@ function explorerDimensions() {
         filterExpr: `ifNull(nullIf(snmp_out.if_name, ''), '')`,
         valueHint: 'ifName, alias или ifIndex',
         joinSql: outJoinSql,
+        pairFilter: ifPairFilter(outIfCol, 'if_name'),
         groupKeyExpr: `f.${outIfCol}`,
         labelJoin: {
           needsSampler: true,
@@ -1186,6 +1225,7 @@ function explorerDimensions() {
         filterExpr: `ifNull(nullIf(snmp_out.if_alias, ''), '')`,
         valueHint: 'Описание порта из SNMP',
         joinSql: outJoinSql,
+        pairFilter: ifPairFilter(outIfCol, 'if_alias'),
         groupKeyExpr: `f.${outIfCol}`,
         labelJoin: {
           needsSampler: true,
@@ -1453,7 +1493,7 @@ function explorerSchema(options = {}) {
     ops: ['in', 'not_in', '=', '!='],
     valueHint: 'ID коллектора или loc:location-id',
     entityType: null,
-    aliases: ['коллекторы'],
+    aliases: ['коллекторы', 'аплинк', 'uplink', 'collector'],
   };
   const dimensions = Object.entries(dims)
     .filter(([, d]) => !d.virtual)
@@ -1718,6 +1758,68 @@ function protoNameToNumber(name) {
   return map[key] ?? null;
 }
 
+const FLOW_IPV4_ETYPE = 2048;
+const FLOW_IPV6_ETYPE = 0x86DD;
+
+// Адрес в flows_raw лежит как FixedString(16): IPv4 — в первых 4 байтах,
+// остальные нули, etype 2048. Перевод каждой строки в текст перед сравнением
+// на PiterIX занимал 39 с за 6 часов, прямое сравнение тех же байт — 13 с.
+function storedFlowIp(value) {
+  const text = String(value ?? '').trim();
+  if (net.isIP(text) === 4) {
+    const hex = text.split('.').map((part) => Number(part).toString(16).padStart(2, '0')).join('');
+    return { hex: `${hex}${'0'.repeat(24)}`, etype: FLOW_IPV4_ETYPE };
+  }
+  if (net.isIP(text) === 6) {
+    const hex = ipv6ToBytesHex(text);
+    if (!hex) return null;
+    return { hex, etype: FLOW_IPV6_ETYPE };
+  }
+  return null;
+}
+
+function ipv6ToBytesHex(ip) {
+  let text = String(ip).toLowerCase();
+  const zone = text.indexOf('%');
+  if (zone >= 0) text = text.slice(0, zone);
+  const mapped = text.match(/^(.*:)(\d{1,3}(?:\.\d{1,3}){3})$/);
+  if (mapped) {
+    const octets = mapped[2].split('.').map((part) => Number(part));
+    if (octets.some((n) => !Number.isInteger(n) || n > 255)) return null;
+    const tail = octets.map((n) => n.toString(16).padStart(2, '0'));
+    text = `${mapped[1]}${tail[0]}${tail[1]}:${tail[2]}${tail[3]}`;
+  }
+  const sides = text.split('::');
+  if (sides.length > 2) return null;
+  const head = sides[0] ? sides[0].split(':') : [];
+  const tail = sides.length === 2 ? (sides[1] ? sides[1].split(':') : []) : [];
+  if (sides.length === 1 && head.length !== 8) return null;
+  const missing = 8 - head.length - tail.length;
+  if (missing < 0) return null;
+  const groups = [...head, ...Array(missing).fill('0'), ...tail];
+  if (groups.length !== 8) return null;
+  let hex = '';
+  for (const group of groups) {
+    if (!/^[0-9a-f]{1,4}$/.test(group)) return null;
+    hex += group.padStart(4, '0');
+  }
+  return hex.length === 32 ? hex : null;
+}
+
+function exactIpFilterClause(addrExpr, etypeExpr, op, values, params, paramName) {
+  const stored = values.map(storedFlowIp);
+  if (!stored.length || stored.some((item) => !item)) return null;
+  const negate = op === '!=' || op === '<>' || op === 'not_in';
+  const pieces = stored.map((item, i) => {
+    const key = stored.length === 1 ? paramName : `${paramName}_${i}`;
+    params[key] = item.hex;
+    params[`${key}_etype`] = item.etype;
+    return `(${addrExpr} = toFixedString(unhex({${key}:String}), 16) AND ${etypeExpr} = {${key}_etype:UInt32})`;
+  });
+  const match = pieces.length === 1 ? pieces[0] : `(${pieces.join(' OR ')})`;
+  return negate ? `NOT ${match}` : match;
+}
+
 function parseFilterValues(value) {
   if (Array.isArray(value)) return value.map((v) => String(v).trim()).filter(Boolean);
   const s = String(value ?? '').trim();
@@ -1748,6 +1850,24 @@ function buildPrefixRangeClause(prefixes, params, idxRef) {
     return `(isIPAddressInRange(${srcIpExpr}, {${paramName}:String}) OR isIPAddressInRange(${dstIpExpr}, {${paramName}:String}))`;
   });
   return parts.length === 1 ? parts[0] : `(${parts.join(' OR ')})`;
+}
+
+// Владелец уже записан в поток при приёме. Повторный перебор префиксов
+// через isIPAddressInRange на src и dst для 6 часов не успевает за таймаут
+// клиента (pin, 04.10: 38 с против 6 с по колонкам, расхождений нет).
+function l3OwnerColumnClause(entityIds, op, params, idxRef) {
+  const src = flowCol('srcEntity');
+  const dst = flowCol('dstEntity');
+  const ids = (entityIds || []).map((id) => String(id || '').trim()).filter(Boolean);
+  if (!src || !dst || !ids.length) return null;
+  const paramName = `l3_owner_${idxRef.i++}`;
+  const neg = op === '!=' || op === '<>' || op === 'not_in';
+  const many = ids.length > 1 || op === 'in' || op === 'not_in';
+  const match = many
+    ? `(f.${src} IN {${paramName}:Array(String)} OR f.${dst} IN {${paramName}:Array(String)})`
+    : `(f.${src} = {${paramName}:String} OR f.${dst} = {${paramName}:String})`;
+  params[paramName] = many ? ids : ids[0];
+  return neg ? `NOT ${match}` : match;
 }
 
 async function buildEntityPrefixFilter(field, value, params, idxRef) {
@@ -1914,6 +2034,78 @@ function buildMacFilterClause(macCol, op, paramName, { normalized, hexValues, co
   return `${macCol} = unhex({${paramName}:String})`;
 }
 
+// Коммутатор в ключе сортировки лежит байтами. Текст flowSamplerIpExpr
+// на каждой строке этот ключ не использует. Для настоящего IP сравниваем
+// sampler_address с теми же байтами, что пишет samplerKeyFromIpExpr, и
+// только нужное семейство: if(isIPv4, …, IPv6StringToNum) на IPv4-литерале
+// может вычислить обе ветки. Имя или мусор остаются на текстовом пути.
+function samplerAddressKeyExpr(ipExpr, value) {
+  const family = net.isIP(String(value ?? '').trim());
+  if (family === 4) {
+    return `toFixedString(reverse(reinterpretAsFixedString(toUInt32(toIPv4(${ipExpr})))), 16)`;
+  }
+  if (family === 6) {
+    return `toFixedString(IPv6StringToNum(${ipExpr}), 16)`;
+  }
+  return null;
+}
+
+function switchSamplerByteClause(samplerExpr, op, rawValue, values, params, paramName) {
+  if (op === 'in' || op === 'not_in') {
+    const list = (values || []).map((v) => String(v ?? '').trim()).filter(Boolean);
+    if (!list.length || list.some((v) => !samplerAddressKeyExpr('x', v))) return null;
+    const parts = list.map((value, i) => {
+      const key = `${paramName}_${i}`;
+      params[key] = value;
+      return samplerAddressKeyExpr(`{${key}:String}`, value);
+    });
+    return `${samplerExpr} ${op === 'not_in' ? 'NOT IN' : 'IN'} (${parts.join(', ')})`;
+  }
+  if (op !== '=' && op !== '!=' && op !== '<>') return null;
+  const single = String(rawValue ?? '').trim();
+  const keyExpr = samplerAddressKeyExpr(`{${paramName}:String}`, single);
+  if (!keyExpr) return null;
+  params[paramName] = single;
+  return `${samplerExpr} ${op === '=' ? '=' : '!='} ${keyExpr}`;
+}
+
+/**
+ * Port name/alias filter expressed against stored columns: the SNMP inventory
+ * yields the (sampler, ifIndex) pairs carrying that label and the scan matches
+ * those, instead of joining the inventory onto every flow row.
+ *
+ * Returns null when the JOIN is still required — an empty label must also match
+ * ports absent from the inventory, which the pair set cannot represent.
+ */
+function buildIfPairFilterSql(pairFilter, op, values, rawValue, params, paramName) {
+  const { labelCol, keyExpr, pairsFrom, indexSql } = pairFilter;
+  const single = String(rawValue ?? '').trim();
+  let match;
+  let negate;
+
+  if (op === 'in' || op === 'not_in') {
+    if (!values.length || values.some((v) => !String(v ?? '').trim())) return null;
+    params[paramName] = values;
+    match = `${labelCol} IN {${paramName}:Array(String)}`;
+    negate = op === 'not_in';
+  } else if (op === 'contains' || op === 'not_contains') {
+    if (!single) return null;
+    params[paramName] = single;
+    match = `positionCaseInsensitive(${labelCol}, {${paramName}:String}) > 0`;
+    negate = op === 'not_contains';
+  } else if (op === '=' || op === '!=' || op === '<>') {
+    if (!single) return null;
+    params[paramName] = single;
+    match = `${labelCol} = {${paramName}:String}`;
+    negate = op !== '=';
+  } else {
+    return null;
+  }
+
+  const where = indexSql ? `(${match}) AND ${indexSql}` : match;
+  return `${keyExpr} ${negate ? 'NOT IN' : 'IN'} (${pairsFrom} WHERE ${where})`;
+}
+
 async function buildExplorerFilterClauses(filters, dims, params) {
   const joins = new Set();
   let idx = 0;
@@ -1955,10 +2147,32 @@ async function buildExplorerFilterClauses(filters, dims, params) {
 
     const dim = dims[f.field];
     if (!dim) continue;
+
+    if (dim.pairFilter) {
+      const pairName = `filter_${idx}`;
+      const pairSql = buildIfPairFilterSql(dim.pairFilter, op, values, f.value, params, pairName);
+      if (pairSql) {
+        idx += 1;
+        addClause(pairSql);
+        continue;
+      }
+      delete params[pairName];
+    }
+
     // Filters that reference joined aliases (snmp_in / ps_src / …) must pull joinSql in.
     if (dim.joinSql) joins.add(dim.joinSql);
 
     if (dim.filterType === 'l3_owner' || dim.filterType === 'own_network') {
+      if (f.field === 'l3_owner') {
+        const columnOps = new Set(['=', '!=', '<>', 'in', 'not_in']);
+        if (!op || columnOps.has(op)) {
+          const clause = l3OwnerColumnClause(values, op || '=', params, idxRef);
+          if (clause) {
+            addClause(clause);
+            continue;
+          }
+        }
+      }
       addClause(await buildEntityPrefixFilter(f.field, f.value, params, idxRef));
       continue;
     }
@@ -2218,6 +2432,34 @@ async function buildExplorerFilterClauses(filters, dims, params) {
         addClause(`isIPAddressInRange(${expr}, {${paramName}:String})`);
         continue;
       }
+      if (dim.filterAddrExpr && dim.filterEtypeExpr && ['=', '!=', '<>', 'in', 'not_in'].includes(op)) {
+        const exact = exactIpFilterClause(
+          dim.filterAddrExpr,
+          dim.filterEtypeExpr,
+          op,
+          values,
+          params,
+          paramName,
+        );
+        if (exact) {
+          addClause(exact);
+          continue;
+        }
+      }
+      if (dim.filterType === 'switch_ip' && dim.groupKeyExpr) {
+        const byteClause = switchSamplerByteClause(
+          dim.groupKeyExpr,
+          op,
+          f.value,
+          values,
+          params,
+          paramName,
+        );
+        if (byteClause) {
+          addClause(byteClause);
+          continue;
+        }
+      }
       if (op === 'in') {
         params[paramName] = values;
         addClause(`${expr} IN {${paramName}:Array(String)}`);
@@ -2323,9 +2565,11 @@ function normalizeExplorerQuery(body = {}, options = {}) {
   const to = body.to;
   const filters = normalizeFilterList(body.filters);
   validateExplorerWindow({ range, from, to }, {
-    maxRangeMs: options.cabinetClientId
-      ? CABINET_EXPLORER_MAX_RANGE_MS
-      : EXPLORER_MAX_RANGE_MS,
+    maxRangeMs: Number(options.maxRangeMs) > 0
+      ? Number(options.maxRangeMs)
+      : (options.cabinetClientId
+        ? CABINET_EXPLORER_MAX_RANGE_MS
+        : EXPLORER_MAX_RANGE_MS),
   });
 
   const collectorRaw = options.cabinetClientId
@@ -2834,6 +3078,35 @@ async function explorerFlowsPeakPath({
   });
 }
 
+// Окно считается до LIMIT, поэтому первая строка несёт сумму по всем группам,
+// а не только по показанным. Нужна для итога и строки «Прочие» без второго прохода.
+function rememberExplorerFlowTotals(meta, rows) {
+  if (meta.pctScope === 'candidate_subset') return;
+  const row = rows?.[0];
+  if (!row || row.total_bytes == null || row.total_bytes === '') return;
+  meta.flowTotals = {
+    totalBytes: Number(row.total_bytes) || 0,
+    totalPackets: Number(row.total_packets) || 0,
+    totalFlows: Number(row.total_flows) || 0,
+  };
+}
+
+function summaryFromFlowTotals(totals, windowSeconds = 0) {
+  const totalBytes = Number(totals?.totalBytes) || 0;
+  const ws = Number(windowSeconds) || 0;
+  return {
+    totalBytes,
+    totalPackets: Number(totals?.totalPackets) || 0,
+    totalFlows: Number(totals?.totalFlows) || 0,
+    avgBps: ws > 0 ? Math.round(totalBytes * 8 / ws) : 0,
+    uniqSrc: null,
+    uniqDst: null,
+    inBytes: null,
+    outBytes: null,
+    topProtocols: [],
+  };
+}
+
 async function explorerFlows(body = {}, options = {}) {
   await ensureFlowsRawSchema();
   const q = normalizeExplorerQuery(body, options);
@@ -2940,7 +3213,10 @@ async function explorerFlows(body = {}, options = {}) {
         sum(${scaled.bytes}) AS bytes,
         round(sum(${scaled.bytes}) * 8 / window_seconds, 0) AS avg_bps,
         sum(${scaled.packets}) AS packets,
-        sum(${scaled.flowWeight}) AS flows${thresholdExtras}${uniqSrcExtra}
+        sum(${scaled.flowWeight}) AS flows,
+        sum(sum(${scaled.bytes})) OVER () AS total_bytes,
+        sum(sum(${scaled.packets})) OVER () AS total_packets,
+        sum(sum(${scaled.flowWeight})) OVER () AS total_flows${thresholdExtras}${uniqSrcExtra}
       FROM ${flowsRawTableRef()} AS f
       ${joinSql}
       PREWHERE f.date >= toDate(ts_from) - 1
@@ -2956,6 +3232,7 @@ async function explorerFlows(body = {}, options = {}) {
       groups,
       clickhouse_settings: EXPLORER_CH_SETTINGS,
       async map(rows) {
+        rememberExplorerFlowTotals(meta, rows);
         return mapExplorerFlowRows(
           groups, rows, windowSeconds, vlanGroupIndexes, asnGroupIndexes, tcpGroupIndexes, asPathGroupIndexes,
         );
@@ -3103,6 +3380,14 @@ async function explorerFlows(body = {}, options = {}) {
         round(a.bytes / nullIf(a.flows, 0), 2) AS avg_flow_size`
     : '';
 
+  const plainTotalsSql = useCandidatePrefetch
+    ? ''
+    : `,
+        sum(a.bytes) OVER () AS total_bytes,
+        sum(a.packets) OVER () AS total_packets,
+        sum(a.flows) OVER () AS total_flows`;
+  const seriesKeySql = plan.mayCollapse ? '' : explorerSeriesKeySelect(allKeys, 'a');
+
   const innerSql = plan.mayCollapse
     ? `
       WITH
@@ -3115,7 +3400,10 @@ async function explorerFlows(body = {}, options = {}) {
         sum(a.bytes) AS bytes,
         round(sum(a.bytes) * 8 / window_seconds, 0) AS avg_bps,
         sum(a.packets) AS packets,
-        sum(a.flows) AS flows${twoPhaseThresholdExtras}
+        sum(a.flows) AS flows,
+        sum(sum(a.bytes)) OVER () AS total_bytes,
+        sum(sum(a.packets)) OVER () AS total_packets,
+        sum(sum(a.flows)) OVER () AS total_flows${twoPhaseThresholdExtras}
       FROM (
         ${plainInnerAgg}
       ) AS a
@@ -3135,7 +3423,7 @@ async function explorerFlows(body = {}, options = {}) {
         a.bytes AS bytes,
         round(a.bytes * 8 / window_seconds, 0) AS avg_bps,
         a.packets AS packets,
-        a.flows AS flows${twoPhaseThresholdExtrasPlain}
+        a.flows AS flows${plainTotalsSql}${twoPhaseThresholdExtrasPlain}${seriesKeySql}
       FROM inner_agg AS a
       ${uniqueLabelJoins.join('\n      ')}
     `;
@@ -3151,9 +3439,11 @@ async function explorerFlows(body = {}, options = {}) {
     requestTimeoutMs: heavyTimeoutMs,
     orderBy,
     async map(rows) {
-      return mapExplorerFlowRows(
+      rememberExplorerFlowTotals(meta, rows);
+      const mapped = await mapExplorerFlowRows(
         groups, rows, windowSeconds, vlanGroupIndexes, asnGroupIndexes, tcpGroupIndexes, asPathGroupIndexes,
       );
+      return seriesKeySql ? attachExplorerSeriesKeys(mapped, rows, allKeys.length) : mapped;
     },
   });
 }
@@ -3220,6 +3510,53 @@ async function explorerSummary(body = {}, options = {}) {
   };
 }
 
+// Возвращает null, если строка таблицы заведомо не может совпасть ни с одним флоу:
+// тогда запрос по ней не нужен.
+function explorerSeriesGroupCondition(g, dim, rawValue, paramName, params) {
+  const raw = String(rawValue ?? '');
+  if (dim.filterType === 'tcp_flags') {
+    const { mask } = parseTcpFlagsFilterValue(raw);
+    params[paramName] = mask;
+    return `${dim.filterExpr} = {${paramName}:UInt8}`;
+  }
+  if ((EXPLORER_ENTITY_SERIES_DIMS.has(g) || g === 'cabinet_client' || g === 'collector') && dim.groupKeyExpr) {
+    if (raw === '—' || raw === '') {
+      return `(${dim.groupKeyExpr} = '' OR ${dim.groupKeyExpr} = '—')`;
+    }
+    params[paramName] = raw;
+    return `${dim.groupKeyExpr} = {${paramName}:String}`;
+  }
+  if (dim.filterType === 'as_path' && dim.groupKeyExpr) {
+    const hops = parseExplorerAsPathRaw(rawValue);
+    if (!hops.length) return `empty(${dim.groupKeyExpr})`;
+    params[paramName] = hops;
+    return `${dim.groupKeyExpr} = {${paramName}:Array(UInt32)}`;
+  }
+  if (dim.filterType === 'asn' && dim.filterExpr) {
+    const asn = parseExplorerAsnNumber(raw);
+    if (asn == null) return null;
+    params[paramName] = asn;
+    return `${dim.filterExpr} = {${paramName}:UInt32}`;
+  }
+  if (dim.filterType === 'mac' && dim.filterExpr) {
+    const normalized = normalizeMacValue(raw);
+    if (!normalized) return null;
+    params[paramName] = config.macStorage === 'uint64' ? normalized : macHexValue(normalized);
+    return buildMacFilterClause(dim.filterExpr, '=', paramName, { normalized });
+  }
+  params[paramName] = raw;
+  return `toString(${dim.expr}) = {${paramName}:String}`;
+}
+
+function explorerEmptyResultSeries(flowRows) {
+  const seriesByRow = Object.fromEntries(flowRows.map((row) => [row.id, []]));
+  return {
+    params: {},
+    meta: { kind: 'result-series' },
+    async map() { return { seriesByRow }; },
+  };
+}
+
 async function explorerResultSeries(body = {}, flowRows = [], options = {}) {
   const q = normalizeExplorerQuery(body, options);
   if (!flowRows.length) {
@@ -3260,43 +3597,23 @@ async function explorerResultSeries(body = {}, flowRows = [], options = {}) {
   if (entitySeriesMatch) {
     whereClauses.push(entitySeriesMatch);
   } else {
-    const groupMatchParts = flowRows.map((row) => {
-      const conds = groups.map((g, gi) => {
+    const groupMatchParts = [];
+    for (const row of flowRows) {
+      const conds = [];
+      for (let gi = 0; gi < groups.length; gi += 1) {
+        const g = groups[gi];
         const paramName = `series_g_${idxRef.i++}`;
-        const dim = dims[g];
-        const raw = String(row.rawValues?.[gi] ?? row.values?.[gi] ?? '');
-        if (dim.filterType === 'tcp_flags') {
-          const { mask } = parseTcpFlagsFilterValue(raw);
-          scopedParams[paramName] = mask;
-          return `${dim.filterExpr} = {${paramName}:UInt8}`;
+        const rawValue = row.rawValues?.[gi] ?? row.values?.[gi] ?? '';
+        const cond = explorerSeriesGroupCondition(g, dims[g], rawValue, paramName, scopedParams);
+        if (cond == null) {
+          conds.length = 0;
+          break;
         }
-        if (EXPLORER_ENTITY_SERIES_DIMS.has(g) && dim.groupKeyExpr) {
-          if (raw === '—' || raw === '') {
-            return `(${dim.groupKeyExpr} = '' OR ${dim.groupKeyExpr} = '—')`;
-          }
-          scopedParams[paramName] = raw;
-          return `${dim.groupKeyExpr} = {${paramName}:String}`;
-        }
-        if ((g === 'cabinet_client' || g === 'collector') && dim.groupKeyExpr) {
-          if (raw === '—' || raw === '') {
-            return `(${dim.groupKeyExpr} = '' OR ${dim.groupKeyExpr} = '—')`;
-          }
-          scopedParams[paramName] = raw;
-          return `${dim.groupKeyExpr} = {${paramName}:String}`;
-        }
-        if (dim.filterType === 'as_path' && dim.groupKeyExpr) {
-          const hops = parseExplorerAsPathRaw(row.rawValues?.[gi] ?? raw);
-          if (!hops.length) {
-            return `empty(${dim.groupKeyExpr})`;
-          }
-          scopedParams[paramName] = hops;
-          return `${dim.groupKeyExpr} = {${paramName}:Array(UInt32)}`;
-        }
-        scopedParams[paramName] = raw;
-        return `toString(${dim.expr}) = {${paramName}:String}`;
-      });
-      return `(${conds.join(' AND ')})`;
-    });
+        conds.push(cond);
+      }
+      if (conds.length) groupMatchParts.push(`(${conds.join(' AND ')})`);
+    }
+    if (!groupMatchParts.length) return explorerEmptyResultSeries(flowRows);
     whereClauses.push(`(${groupMatchParts.join(' OR ')})`);
   }
 
@@ -3332,7 +3649,7 @@ async function explorerResultSeries(body = {}, flowRows = [], options = {}) {
     async map(rows) {
       const seriesByRow = Object.fromEntries(flowRows.map((row) => [row.id, []]));
       for (const r of rows) {
-        const groupKey = groups.map((_, idx) => String(r[`g${idx}`] ?? '—') || '—').join('|');
+        const groupKey = explorerClickhouseGroupKey(groups, dims, r);
         const row = flowRows.find((item) => explorerFlowRowMatchesGroupKey(item, groupKey));
         if (!row) continue;
         seriesByRow[row.id].push({
@@ -3372,6 +3689,273 @@ function explorerFlowRowIdByGroupKey(flowRows) {
   return idByKey;
 }
 
+function explorerSeriesMatchers(groups, dims, flowRows, params) {
+  const matched = [];
+  let paramIndex = 0;
+  for (const row of flowRows) {
+    const conds = [];
+    for (let gi = 0; gi < groups.length; gi += 1) {
+      const g = groups[gi];
+      const paramName = `series_g_${paramIndex}`;
+      paramIndex += 1;
+      const rawValue = row.rawValues?.[gi] ?? row.values?.[gi] ?? '';
+      const cond = explorerSeriesGroupCondition(g, dims[g], rawValue, paramName, params);
+      if (cond == null) {
+        conds.length = 0;
+        break;
+      }
+      conds.push(cond);
+    }
+    if (conds.length) matched.push({ row, cond: conds.join(' AND ') });
+  }
+  return matched;
+}
+
+// Ключ передаётся как hex(toString(key)) + toTypeName(key): CAST(unhex(...) AS type)
+// восстанавливает точное значение, а hex безопасно вставлять в SQL литералом.
+const EXPLORER_SERIES_KEY_TYPE_RE = /^[A-Za-z0-9_(), ]+$/;
+
+function explorerSeriesKeySelect(keys, prefix) {
+  return keys.map((k, i) => `,
+        hex(toString(${prefix}.${k.keyAlias})) AS series_key_${i},
+        toTypeName(${prefix}.${k.keyAlias}) AS series_key_type_${i}`).join('');
+}
+
+function attachExplorerSeriesKeys(mappedRows, rows, keyCount) {
+  mappedRows.forEach((row, i) => {
+    const values = [];
+    const types = [];
+    for (let k = 0; k < keyCount; k += 1) {
+      const value = rows[i]?.[`series_key_${k}`];
+      const type = rows[i]?.[`series_key_type_${k}`];
+      if (typeof value !== 'string' || !/^[0-9A-Fa-f]*$/.test(value)) return;
+      if (typeof type !== 'string' || !EXPLORER_SERIES_KEY_TYPE_RE.test(type)) return;
+      values.push(value);
+      types.push(type.replace(/^LowCardinality\((.*)\)$/, '$1'));
+    }
+    // Не перечисляемое: ключи нужны только графику, в JSON ответа не попадают.
+    Object.defineProperty(row, 'seriesKey', { value: { values, types }, enumerable: false });
+  });
+  return mappedRows;
+}
+
+function explorerSeriesKeySig(values) {
+  return values.map((v) => String(v).toUpperCase()).join('|');
+}
+
+/**
+ * Ряды строк таблицы по сырым ключам группировки вместо toString() каждого
+ * измерения в каждом sumIf: transform для одного скалярного ключа, иначе IN по
+ * набору кортежей и поиск строки по hex ключа. null — ключей нет (однофазный
+ * путь, схлопывание интерфейсов), остаётся сравнение подписей.
+ */
+function explorerRawSeriesIndex(groups, dims, flowRows) {
+  if (!flowRows.length) return null;
+  const plan = buildExplorerGroupPlan(groups, dims);
+  if (!plan.useTwoPhase || plan.mayCollapse) return null;
+  const keys = [...plan.uniqueKeys, ...plan.helpers];
+  const types = flowRows[0].seriesKey?.types;
+  if (!types || types.length !== keys.length) return null;
+  const typeSig = types.join('|');
+  if (!flowRows.every((row) => row.seriesKey?.types.join('|') === typeSig)) return null;
+  const cast = (v, i) => `CAST(unhex('${v}') AS ${types[i]})`;
+  const keyExprs = keys.map((k) => k.keyExpr);
+  // Один скалярный ключ: transform заметно быстрее IN по кортежу и сразу даёт
+  // номер строки.
+  if (keyExprs.length === 1 && /^(U?Int\d+|Float\d+|String)$/.test(types[0])) {
+    const ids = flowRows.map((_, i) => i + 1);
+    return {
+      withSql: `transform(${keyExprs[0]}, [${flowRows.map((row) => cast(row.seriesKey.values[0], 0)).join(', ')}], [${ids.join(', ')}], 0) AS series_idx,
+          series_idx > 0 AS series_hit,`,
+      keySelect: ['series_idx AS series_k0'],
+      keyHex: ['toString(series_k0)'],
+      keyAliases: ['series_k0'],
+      rowIndexBySig: new Map(ids.map((id, i) => [String(id), i])),
+    };
+  }
+  const literal = (values) => `tuple(${values.map(cast).join(', ')})`;
+  return {
+    withSql: `tuple(${keyExprs.join(', ')}) IN (${flowRows.map((row) => literal(row.seriesKey.values)).join(', ')}) AS series_hit,`,
+    keySelect: keyExprs.map((expr, i) => (
+      `if(series_hit, ${expr}, defaultValueOfArgumentType(${expr})) AS series_k${i}`
+    )),
+    keyHex: keyExprs.map((_, i) => `hex(toString(series_k${i}))`),
+    keyAliases: keyExprs.map((_, i) => `series_k${i}`),
+    rowIndexBySig: new Map(flowRows.map((row, i) => [explorerSeriesKeySig(row.seriesKey.values), i])),
+  };
+}
+
+// Общий график и графики выбранных групп — один проход по потокам.
+// sum() даёт весь отфильтрованный трафик, sumIf — только строку таблицы.
+async function explorerTrafficChart(body = {}, flowRows = [], options = {}) {
+  const q = normalizeExplorerQuery(body, options);
+  const { groups, dims } = resolveExplorerGroupState(
+    q.groupBy,
+    explorerDimensionsForOptions(options),
+  );
+  const scaled = explorerScaledFlowExprs('f');
+  const gran = resolveExplorerGranularity(q);
+  let windowSpec = explorerResolveTrafficWindow(body, q);
+  windowSpec = explorerWindowSpecWithCabinetClientCatalog(windowSpec, groups);
+  const params = { ...windowSpec.params };
+  const { filterSql, joins: filterJoins } = await buildExplorerFilterClauses(q.filters, dims, params);
+  const t = col('time');
+  const whereClauses = [`f.${t} >= ts_from`, `f.${t} < ts_to`];
+  if (filterSql) whereClauses.push(filterSql);
+  const scopedParams = applyExplorerScope(whereClauses, params, q);
+  // uniq_src нельзя сложить из рядов — для него остаётся sumIf по подписям.
+  // Одиночный оператор быстрее через отсечение строк в WHERE (buildExplorerEntitySeriesMatch).
+  const entityOnly = groups.length === 1 && EXPLORER_ENTITY_SERIES_DIMS.has(groups[0]);
+  const rawSeries = groups.length && q.metric !== 'uniq_src' && !entityOnly
+    ? explorerRawSeriesIndex(groups, dims, flowRows)
+    : null;
+  const matched = rawSeries
+    ? flowRows.map((row) => ({ row }))
+    : (groups.length ? explorerSeriesMatchers(groups, dims, flowRows, scopedParams) : []);
+  const bucketExpr = explorerBucketExpr(`f.${t}`, gran.key, gran.seconds);
+  const metricExpr = {
+    bps: `round(sum(${scaled.bytes}) * 8 / ${gran.seconds}, 0)`,
+    volume: `sum(${scaled.bytes})`,
+    pps: `round(sum(${scaled.packets}) / ${gran.seconds}, 0)`,
+    fps: `round(sum(${scaled.flowWeight}) / ${gran.seconds}, 2)`,
+    flows: `sum(${scaled.flowWeight})`,
+    uniq_src: `uniqCombined(f.${col('srcIp')})`,
+  }[q.metric] || `round(sum(${scaled.bytes}) * 8 / ${gran.seconds}, 0)`;
+  const windowSeconds = explorerResolvedWindowSeconds(body, q);
+  const requestTimeoutMs = explorerHeavyRequestTimeoutMs(windowSeconds, false);
+  const whereSql = whereClauses.join('\n        AND ');
+
+  let sql;
+  if (rawSeries) {
+    // Ряд строки — группа (bucket, ключи строки) с простыми суммами: 75 sumIf на
+    // каждый поток стоят дороже самого чтения. Итог бакета — сумма групп,
+    // поэтому метрика считается по той же формуле от тех же целых сумм.
+    const outerMetricExpr = {
+      volume: 'sum(s_bytes)',
+      pps: `round(sum(s_packets) / ${gran.seconds}, 0)`,
+      fps: `round(sum(s_flows) / ${gran.seconds}, 2)`,
+      flows: 'sum(s_flows)',
+    }[q.metric] || `round(sum(s_bytes) * 8 / ${gran.seconds}, 0)`;
+    sql = `
+      SELECT
+        bucket,
+        any(bucket_ts) AS bucket_ts,
+        sum(s_bytes) AS bytes,
+        sum(s_packets) AS packets,
+        sum(s_flows) AS flows,
+        round(sum(s_bytes) * 8 / ${gran.seconds}, 0) AS bps,
+        ${outerMetricExpr} AS metric_value,
+        groupArrayIf(
+          tuple([${rawSeries.keyHex.join(', ')}], s_bytes, s_packets, s_flows),
+          series_hit
+        ) AS series
+      FROM (
+        WITH
+          ${windowSpec.cteHead}
+          ${rawSeries.withSql}
+          dateDiff('second', ts_from, ts_to) AS window_seconds
+        SELECT
+          ${explorerBucketSelect(bucketExpr)},
+          series_hit,
+          ${rawSeries.keySelect.join(',\n          ')},
+          sum(${scaled.bytes}) AS s_bytes,
+          sum(${scaled.packets}) AS s_packets,
+          sum(${scaled.flowWeight}) AS s_flows
+        FROM ${flowsRawTableRef()} AS f
+        ${[...filterJoins].join('\n        ')}
+        PREWHERE f.date >= toDate(ts_from) - 1
+          AND f.date <= toDate(ts_to)
+        WHERE ${whereSql}
+        GROUP BY bucket, bucket_ts, series_hit, ${rawSeries.keyAliases.join(', ')}
+      )
+      GROUP BY bucket
+      ORDER BY bucket
+    `;
+  } else {
+    const seriesSelect = matched.map((item, i) => `
+        sumIf(${scaled.bytes}, ${item.cond}) AS s${i}_bytes,
+        sumIf(${scaled.packets}, ${item.cond}) AS s${i}_packets,
+        sumIf(${scaled.flowWeight}, ${item.cond}) AS s${i}_flows`).join(',');
+    sql = `
+      WITH
+        ${windowSpec.cteHead}
+        dateDiff('second', ts_from, ts_to) AS window_seconds
+      SELECT
+        ${explorerBucketSelect(bucketExpr)},
+        sum(${scaled.bytes}) AS bytes,
+        sum(${scaled.packets}) AS packets,
+        sum(${scaled.flowWeight}) AS flows,
+        round(sum(${scaled.bytes}) * 8 / ${gran.seconds}, 0) AS bps,
+        ${metricExpr} AS metric_value${seriesSelect ? `,${seriesSelect}` : ''}
+      FROM ${flowsRawTableRef()} AS f
+      ${collectExplorerJoins(groups, dims, filterJoins)}
+      PREWHERE f.date >= toDate(ts_from) - 1
+        AND f.date <= toDate(ts_to)
+      WHERE ${whereSql}
+      GROUP BY bucket
+      ORDER BY bucket
+    `;
+  }
+
+  return {
+    sql,
+    params: scopedParams,
+    clickhouse_settings: {
+      ...EXPLORER_CH_SETTINGS,
+      max_execution_time: String(explorerHeavyMaxExecutionSec(requestTimeoutMs)),
+    },
+    requestTimeoutMs,
+    meta: { kind: 'traffic-chart', metric: q.metric, granularity: gran.key },
+    async map(rows) {
+      const seriesByRow = Object.fromEntries(flowRows.map((row) => [row.id, []]));
+      const timeseries = [];
+      for (const r of rows) {
+        if (rawSeries) {
+          for (const [keyHex, bytes, packets, flows] of r.series || []) {
+            const i = rawSeries.rowIndexBySig.get(explorerSeriesKeySig(keyHex || []));
+            if (i == null) continue;
+            r[`s${i}_bytes`] = bytes;
+            r[`s${i}_packets`] = packets;
+            r[`s${i}_flows`] = flows;
+          }
+        }
+        const point = {
+          bucket: r.bucket,
+          bucketMs: explorerBucketMs(r),
+          bytes: Number(r.bytes) || 0,
+          packets: Number(r.packets) || 0,
+          flows: Number(r.flows) || 0,
+          bps: Number(r.bps) || 0,
+          value: Number(r.metric_value) || 0,
+        };
+        timeseries.push(point);
+        matched.forEach((item, i) => {
+          const bytes = Number(r[`s${i}_bytes`]) || 0;
+          const packets = Number(r[`s${i}_packets`]) || 0;
+          const flows = Number(r[`s${i}_flows`]) || 0;
+          if (!(bytes > 0 || packets > 0 || flows > 0)) return;
+          const sec = gran.seconds || 1;
+          const sample = {
+            bytes,
+            packets,
+            flows,
+            bps: Math.round(bytes * 8 / sec),
+            pps: Math.round(packets / sec),
+            fps: Math.round((flows / sec) * 100) / 100,
+          };
+          seriesByRow[item.row.id].push({
+            bucket: r.bucket,
+            bucketMs: point.bucketMs,
+            ...sample,
+            value: explorerSeriesMetricValue(sample, q.metric),
+          });
+        });
+      }
+      return { seriesByRow, timeseries };
+    },
+  };
+}
+
 function explorerSeriesMetricValue(row, metricKey) {
   switch (metricKey) {
     case 'volume': return Number(row.bytes) || 0;
@@ -3386,9 +3970,13 @@ function explorerSeriesMetricValue(row, metricKey) {
  * Top-N groupBy + per-bucket series in one flows_raw scan (for observation rollup).
  * Prefers raw group keys when available (same two-phase idea as explorerFlows).
  */
-async function explorerGroupedTimeseries(body = {}) {
-  const q = normalizeExplorerQuery(body);
-  const { groups, dims } = resolveExplorerGroupState(q.groupBy);
+async function explorerGroupedTimeseries(body = {}, options = {}) {
+  if (options.cabinetClientId) validateCabinetExplorerFields(body);
+  const q = normalizeExplorerQuery(body, options);
+  const { groups, dims } = resolveExplorerGroupState(
+    q.groupBy,
+    explorerDimensionsForOptions(options),
+  );
   if (!groups.length) throw new Error('Выберите хотя бы одну группировку');
 
   const metricKey = q.metric;
@@ -3557,10 +4145,10 @@ async function explorerGroupedTimeseries(body = {}) {
     async map(rows) {
       const totalsByKey = new Map();
       for (const r of rows) {
-        const key = groups.map((_, idx) => String(r[`g${idx}`] ?? '—') || '—').join('|');
+        const key = explorerClickhouseGroupKey(groups, dims, r);
         if (!totalsByKey.has(key)) {
           totalsByKey.set(key, {
-            rawValues: groups.map((_, idx) => String(r[`g${idx}`] ?? '—') || '—'),
+            rawValues: groups.map((g, idx) => explorerCanonicalGroupValue(dims[g], r[`g${idx}`])),
             bytes: Number(r.series_bytes) || 0,
             packets: Number(r.series_packets) || 0,
             flows: Number(r.series_flows) || 0,
@@ -3589,7 +4177,7 @@ async function explorerGroupedTimeseries(body = {}) {
       const seriesByRow = Object.fromEntries(flowRows.map((row) => [row.id, []]));
       const idByKey = explorerFlowRowIdByGroupKey(flowRows);
       for (const r of rows) {
-        const groupKey = groups.map((_, idx) => String(r[`g${idx}`] ?? '—') || '—').join('|');
+        const groupKey = explorerClickhouseGroupKey(groups, dims, r);
         const rowId = idByKey.get(groupKey);
         if (!rowId) continue;
         seriesByRow[rowId].push({
@@ -3740,42 +4328,77 @@ async function explorerQuery(body = {}, options = {}) {
   return { flowsSpec, summarySpec, timeseriesSpec, breakdownSpecs, q, queryBody };
 }
 
-/** Two CH reads at a time: flows+summary, then series+timeseries. */
+// С группировкой хватает двух проходов: таблица (итог — из её окна) и один
+// график, в котором общий ряд и ряды строк считаются вместе.
 async function executeExplorerQueryBundle(bundle, queryBody, runNamed, namePrefix = 'explorer') {
   const queryOptions = bundle?.q?.cabinetClientId
     ? { cabinetClientId: bundle.q.cabinetClientId }
     : {};
-  const [flowsResult, summaryResult] = await Promise.all([
-    bundle.flowsSpec
-      ? runNamed(() => Promise.resolve(bundle.flowsSpec), { name: `${namePrefix}/flows` })
-      : null,
-    bundle.summarySpec
-      ? runNamed(() => Promise.resolve(bundle.summarySpec), { name: `${namePrefix}/summary` })
-      : null,
-  ]);
-  const seriesRows = (flowsResult?.data || []).slice(0, EXPLORER_MAX_SERIES_ROWS);
-  const [resultSeriesResult, timeseriesResult] = await Promise.all([
-    seriesRows.length
-      ? runNamed(
-        () => explorerResultSeries(queryBody, seriesRows, queryOptions),
-        { name: `${namePrefix}/result-series` },
-      )
-      : null,
-    bundle.timeseriesSpec
-      ? runNamed(() => Promise.resolve(bundle.timeseriesSpec), { name: `${namePrefix}/timeseries` })
-      : null,
-  ]);
+  const flowsResult = bundle.flowsSpec
+    ? await runNamed(() => Promise.resolve(bundle.flowsSpec), { name: `${namePrefix}/flows` })
+    : null;
+  const flowRows = flowsResult?.data || [];
+  const hasThresholds = Array.isArray(flowsResult?.meta?.thresholds) && flowsResult.meta.thresholds.length > 0;
+  const totals = flowsResult?.meta?.flowTotals;
+  const fullTotals = Boolean(
+    totals
+    && !hasThresholds
+    && flowsResult?.meta?.pctScope !== 'candidate_subset'
+    && !flowsResult?.meta?.peakMode
+  );
+  let summaryData = null;
+  if (bundle.summarySpec) {
+    if (hasThresholds && bundle.flowsSpec) {
+      summaryData = summaryFromExplorerFlowRows(flowRows, flowsResult?.meta?.windowSeconds);
+    } else if (fullTotals) {
+      summaryData = summaryFromFlowTotals(totals, flowsResult.meta.windowSeconds);
+    } else if (bundle.flowsSpec && !flowRows.length && !flowsResult?.meta?.peakMode
+      && flowsResult?.meta?.pctScope !== 'candidate_subset') {
+      summaryData = summaryFromFlowTotals(null, flowsResult?.meta?.windowSeconds);
+    } else {
+      const summaryResult = await runNamed(
+        () => Promise.resolve(bundle.summarySpec),
+        { name: `${namePrefix}/summary` },
+      );
+      summaryData = summaryResult?.data || null;
+    }
+  }
+  const seriesRows = flowRows.slice(0, EXPLORER_MAX_SERIES_ROWS);
+  let resultSeriesResult = null;
+  let timeseriesResult = null;
+  if (seriesRows.length && bundle.timeseriesSpec) {
+    const chart = await runNamed(
+      () => explorerTrafficChart(queryBody, seriesRows, queryOptions),
+      { name: `${namePrefix}/traffic-chart` },
+    );
+    resultSeriesResult = {
+      data: { seriesByRow: chart.data?.seriesByRow || {} },
+      meta: chart.meta,
+    };
+    timeseriesResult = {
+      data: chart.data?.timeseries || [],
+      meta: { kind: 'timeseries', granularity: chart.meta?.granularity },
+    };
+  } else {
+    const [seriesResult, timesResult] = await Promise.all([
+      seriesRows.length
+        ? runNamed(
+          () => explorerResultSeries(queryBody, seriesRows, queryOptions),
+          { name: `${namePrefix}/result-series` },
+        )
+        : null,
+      bundle.timeseriesSpec
+        ? runNamed(() => Promise.resolve(bundle.timeseriesSpec), { name: `${namePrefix}/timeseries` })
+        : null,
+    ]);
+    resultSeriesResult = seriesResult;
+    timeseriesResult = timesResult;
+  }
   const breakdownResults = {};
   for (const item of bundle.breakdownSpecs || []) {
     breakdownResults[item.dim] = (
       await runNamed(() => Promise.resolve(item.spec), { name: `${namePrefix}/breakdown/${item.dim}` })
     ).data;
-  }
-  const flowRows = flowsResult?.data || [];
-  const hasThresholds = Array.isArray(flowsResult?.meta?.thresholds) && flowsResult.meta.thresholds.length > 0;
-  let summaryData = summaryResult?.data || null;
-  if (hasThresholds && bundle.flowsSpec) {
-    summaryData = summaryFromExplorerFlowRows(flowRows, flowsResult?.meta?.windowSeconds);
   }
   return {
     flowsResult,
@@ -4274,11 +4897,13 @@ function summaryFromExplorerFlowRows(rows, windowSeconds = 3600) {
 module.exports = {
   explorerSchema,
   explorerDimensions,
+  explorerDimensionsForOptions,
   explorerFieldMatchesQuery,
   explorerFlows,
   explorerSummary,
   explorerTimeseries,
   explorerResultSeries,
+  explorerTrafficChart,
   explorerGroupedTimeseries,
   explorerBreakdown,
   explorerQuery,
@@ -4296,10 +4921,13 @@ module.exports = {
   parseExplorerAsPathHops,
   formatExplorerAsPathRawValue,
   formatExplorerAsPathDisplayLabel,
+  explorerClickhouseGroupKey,
   asnExplorerDisplayLabel,
   lookupAsnDisplayNames,
   explorerEntityDisplayLabel,
   lookupEntityDisplayNames,
+  explorerCollectorDisplayLabel,
+  lookupCollectorDisplayNames,
   EXPLORER_MAX_LIMIT,
   EXPLORER_MAX_EXPORT_ROWS,
   EXPLORER_MAX_SERIES_ROWS,
@@ -4307,4 +4935,6 @@ module.exports = {
   summaryFromExplorerFlowRows,
   buildSummaryFromFlowRows: summaryFromExplorerFlowRows,
   combineExplorerFilterSql,
+  validateCabinetExplorerFields,
+  CABINET_EXPLORER_FIELD_IDS,
 };

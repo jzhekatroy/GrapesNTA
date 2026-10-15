@@ -15,7 +15,7 @@ const CLIENT_API_ALLOWLIST = [
 ];
 
 /** Page resources the Client role may see in the future UI menu. */
-const CLIENT_PAGE_RESOURCES = new Set(['dashboard', 'explorer', 'dns', 'cabinet-settings']);
+const CLIENT_PAGE_RESOURCES = new Set(['dashboard', 'explorer', 'dns', 'observations', 'cabinet-settings']);
 
 module.exports = {
   CLIENT_ROLE_ID,

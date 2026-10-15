@@ -13,10 +13,14 @@ const {
   lookupAsnDisplayNames,
   explorerEntityDisplayLabel,
   lookupEntityDisplayNames,
+  explorerCollectorDisplayLabel,
+  lookupCollectorDisplayNames,
   buildSummaryFromFlowRows: summaryFromExplorerFlowRows,
+  validateCabinetExplorerFields,
 } = require('./explorer');
 const {
   normalizeExplorerThresholds,
+  normalizeObservationExplorerQuery,
   explorerThresholdsActive,
   describeThresholds,
 } = require('./explorer-thresholds');
@@ -94,6 +98,59 @@ const NATIVE_FILTER_FIELDS = new Set([
   'direction', 'collector', 'vlan', 'vlan_attachment',
   'src_asn', 'dst_asn', 'proto', 'src_country', 'dst_country',
 ]);
+
+/** Max lookback window for cabinet observation preview/rollup (7d), wider than interactive explorer. */
+const CABINET_OBSERVATION_MAX_RANGE_MS = 7 * 86400000;
+
+function observationClientId(item) {
+  return String(item?.clientId ?? '').trim();
+}
+
+function realmFromOptions(options = {}) {
+  return String(options.clientId ?? '').trim();
+}
+
+function observationInRealm(item, realmClientId) {
+  return observationClientId(item) === String(realmClientId ?? '').trim();
+}
+
+function filterObservationsByRealm(items, options = {}) {
+  const realm = realmFromOptions(options);
+  return items.filter((item) => observationInRealm(item, realm));
+}
+
+function assertCabinetObservationAcceptable(clientId, payload = {}) {
+  const id = String(clientId || '').trim();
+  if (!id) return;
+  const widgets = normalizeWidgets(payload.widgets || []);
+  if (observationUsesNativeAggregate(widgets)) {
+    const err = new Error('Пресеты dashboard недоступны в кабинете клиента');
+    err.status = 400;
+    throw err;
+  }
+  const groupBy = collectWidgetGroupFields(widgets);
+  validateCabinetExplorerFields({
+    filters: payload.filters,
+    groupBy,
+    thresholds: payload.thresholds,
+  });
+}
+
+function observationExplorerOptions(obs) {
+  const clientId = observationClientId(obs);
+  if (!clientId) return {};
+  return {
+    cabinetClientId: clientId,
+    maxRangeMs: CABINET_OBSERVATION_MAX_RANGE_MS,
+  };
+}
+
+/** Resolve API realm for a stored row (worker/report paths omit explicit clientId). */
+function observationRealmOptions(item, options = {}) {
+  if (Object.prototype.hasOwnProperty.call(options, 'clientId')) return options;
+  const cid = observationClientId(item);
+  return cid ? { ...options, clientId: cid } : options;
+}
 
 const LOOKBACKS = new Set(['15m', '30m', '1h', '6h', '24h', '7d']);
 const REFRESH_SECS = new Set([300, 900]);
@@ -395,9 +452,16 @@ function isObservationOwner(item, userId) {
   return owner === uid;
 }
 
+/** Shared observations are a common board: any signed-in writer may change them. */
+function canMutateObservation(item, userId) {
+  if (!item || !String(userId || '').trim()) return false;
+  if (item.isShared) return true;
+  return isObservationOwner(item, userId);
+}
+
 function assertObservationOwner(existing, userId) {
   if (!existing) return false;
-  if (isObservationOwner(existing, userId)) return true;
+  if (canMutateObservation(existing, userId)) return true;
   const err = new Error('Нет прав на изменение этого наблюдения');
   err.status = 403;
   throw err;
@@ -410,7 +474,7 @@ function materializeWarning(activeCount) {
   return null;
 }
 
-function normalizeObservation(raw = {}, { userId, existing = null } = {}) {
+function normalizeObservation(raw = {}, { userId, existing = null, clientId: realmClientId = undefined } = {}) {
   const filters = normalizeFilters(raw.filters != null ? raw.filters : existing?.filters);
   const thresholds = normalizeExplorerThresholds(
     raw.thresholds != null ? raw.thresholds : (existing?.thresholds || []),
@@ -456,16 +520,26 @@ function normalizeObservation(raw = {}, { userId, existing = null } = {}) {
   const reportRaw = raw.report != null ? raw.report : (existing?.report || {});
   const schedule = normalizeSchedule(reportRaw, existing?.report || {});
 
+  const explorerQueryRaw = raw.explorerQuery != null
+    ? raw.explorerQuery
+    : existing?.explorerQuery;
+  const explorerQuery = normalizeObservationExplorerQuery(explorerQueryRaw);
+  const clientId = existing?.clientId != null
+    ? String(existing.clientId || '').trim()
+    : String(realmClientId ?? '').trim();
+
   return {
     id: existing?.id || newId('obs'),
     name: String(raw.name ?? existing?.name ?? 'Без названия').trim() || 'Без названия',
     description: String(raw.description ?? existing?.description ?? '').trim(),
     folder: String(raw.folder ?? existing?.folder ?? 'Мои наблюдения').trim() || 'Мои наблюдения',
     ownerId: existing?.ownerId || userId || 'anonymous',
+    clientId,
     // Наблюдения всегда видны всем; редактировать по-прежнему может владелец.
     isShared: true,
     filters,
     thresholds,
+    explorerQuery,
     lookback,
     widgets,
     layout: normalizeLayout(raw, existing),
@@ -505,14 +579,16 @@ function normalizeObservation(raw = {}, { userId, existing = null } = {}) {
 
 async function withMeta(item, allItems = null, userId = null) {
   const scope = classifyScope(item.filters, item.widgets);
-  const all = allItems || await loadAllObservations();
+  const realmOpts = { clientId: observationClientId(item) };
+  const all = allItems || filterObservationsByRealm(await loadAllObservations(), realmOpts);
   const active = countActiveMaterialize(all);
   const warnings = [];
   if (scope.materializeRequired && item.materialize?.enabled) {
     const mw = materializeWarning(active);
     if (mw) warnings.push(mw);
   }
-  if (item.materialize?.lastError) {
+  const materializeIssue = materializeIssueOf(item);
+  if (item.materialize?.lastError && !materializeIssue) {
     warnings.push(`Ошибка подготовки данных: ${item.materialize.lastError}`);
   }
   const report = {
@@ -530,7 +606,7 @@ async function withMeta(item, allItems = null, userId = null) {
     ...item,
     report,
     scope,
-    canEdit: userId ? isObservationOwner(item, userId) : undefined,
+    canEdit: userId ? canMutateObservation(item, userId) : undefined,
     quotas: {
       maxMaterialize: MATERIALIZE_LIMIT_ENABLED ? MAX_MATERIALIZE : null,
       activeMaterialize: active,
@@ -538,30 +614,49 @@ async function withMeta(item, allItems = null, userId = null) {
       occupants: materializeOccupants(all),
     },
     warnings,
+    materializeIssue,
     backfillProgress: backfillProgress(item.materialize),
   };
 }
 
-async function listObservations(userId) {
-  const all = await loadAllObservations();
+const STOPPED_ERROR_PREFIX = /^остановлено после \d+ ошибок:\s*/i;
+
+/** Rollup error the tile can explain and offer to retry; null when healthy. */
+function materializeIssueOf(item) {
+  const mat = item?.materialize || {};
+  if (mat.status !== 'error') return null;
+  const stopped = !mat.enabled;
+  return {
+    reason: String(mat.lastError || '').replace(STOPPED_ERROR_PREFIX, '') || 'неизвестная ошибка',
+    failCount: Number(mat.failCount) || 0,
+    maxFailCount: MAX_FAIL_COUNT,
+    stopped,
+    nextAttemptAt: stopped ? null : (mat.nextAttemptAt || null),
+  };
+}
+
+async function listObservations(userId, options = {}) {
+  const all = filterObservationsByRealm(await loadAllObservations(), options);
   const visible = all.filter((item) => item.isShared
     || !String(item.ownerId || '').trim()
     || isObservationOwner(item, userId));
   return Promise.all(visible.map((item) => withMeta(item, all, userId)));
 }
 
-async function getObservation(id, userId) {
+async function getObservation(id, userId, options = {}) {
   const item = await loadObservationById(id);
-  if (!item) return null;
+  if (!item || !observationInRealm(item, realmFromOptions(options))) return null;
   if (!item.isShared
     && String(item.ownerId || '').trim()
     && !isObservationOwner(item, userId)) return null;
   return withMeta(item, null, userId);
 }
 
-async function createObservation(userId, payload = {}) {
-  const items = await loadAllObservations();
-  const item = normalizeObservation(payload, { userId });
+async function createObservation(userId, payload = {}, options = {}) {
+  const realm = realmFromOptions(options);
+  assertCabinetObservationAcceptable(realm, payload);
+  const items = filterObservationsByRealm(await loadAllObservations(), options);
+  const item = normalizeObservation(payload, { userId, clientId: realm });
   if (MATERIALIZE_LIMIT_ENABLED
     && item.materialize.enabled
     && countActiveMaterialize(items) >= MAX_MATERIALIZE) {
@@ -572,10 +667,16 @@ async function createObservation(userId, payload = {}) {
   return withMeta(item, [...items, item], userId);
 }
 
-async function updateObservation(id, userId, payload = {}) {
-  const items = await loadAllObservations();
+async function updateObservation(id, userId, payload = {}, options = {}) {
+  const items = filterObservationsByRealm(await loadAllObservations(), options);
   const existing = items.find((row) => row.id === id);
   if (!assertObservationOwner(existing, userId)) return null;
+  const realm = realmFromOptions(options);
+  assertCabinetObservationAcceptable(realm, {
+    filters: payload.filters != null ? payload.filters : existing?.filters,
+    widgets: payload.widgets != null ? payload.widgets : existing?.widgets,
+    thresholds: payload.thresholds != null ? payload.thresholds : existing?.thresholds,
+  });
   const next = normalizeObservation(payload, { userId, existing });
   if (MATERIALIZE_LIMIT_ENABLED
     && next.materialize.enabled
@@ -599,8 +700,8 @@ async function updateObservation(id, userId, payload = {}) {
   return withMeta(next, items.map((row) => (row.id === id ? next : row)), userId);
 }
 
-async function duplicateObservation(id, userId) {
-  const existing = await getObservation(id, userId);
+async function duplicateObservation(id, userId, options = {}) {
+  const existing = await getObservation(id, userId, options);
   if (!existing) return null;
   if (!isObservationOwner(existing, userId) && !existing.isShared) return null;
   const copy = normalizeObservation({
@@ -627,13 +728,13 @@ async function duplicateObservation(id, userId) {
     },
     createdAt: undefined,
     updatedAt: undefined,
-  }, { userId });
+  }, { userId, clientId: observationClientId(existing) });
   await upsertObservation(copy);
   return withMeta(copy);
 }
 
-async function cancelMaterialize(id, userId) {
-  const items = await loadAllObservations();
+async function cancelMaterialize(id, userId, options = {}) {
+  const items = filterObservationsByRealm(await loadAllObservations(), options);
   const existing = items.find((row) => row.id === id);
   if (!assertObservationOwner(existing, userId)) return null;
   const next = {
@@ -654,8 +755,36 @@ async function cancelMaterialize(id, userId) {
   return withMeta(next, items.map((row) => (row.id === id ? next : row)), userId);
 }
 
-async function deleteObservation(id, userId) {
-  const item = await getObservation(id, userId);
+async function retryMaterialize(id, userId, options = {}) {
+  const items = filterObservationsByRealm(await loadAllObservations(), options);
+  const existing = items.find((row) => row.id === id);
+  if (!assertObservationOwner(existing, userId)) return null;
+  if (existing.materialize?.status !== 'error') {
+    const err = new Error('Наблюдение не в ошибке — повторять нечего.');
+    err.status = 400;
+    throw err;
+  }
+  const next = {
+    ...existing,
+    materialize: {
+      ...(existing.materialize || {}),
+      enabled: true,
+      status: 'queued',
+      failCount: 0,
+      nextAttemptAt: null,
+      runningStartedAt: null,
+      cancelRequested: false,
+      lastError: null,
+    },
+    live: { ...(existing.live || {}), enabled: true },
+    updatedAt: new Date().toISOString(),
+  };
+  await upsertObservation(next);
+  return withMeta(next, items.map((row) => (row.id === id ? next : row)), userId);
+}
+
+async function deleteObservation(id, userId, options = {}) {
+  const item = await getObservation(id, userId, options);
   if (!item) return false;
   assertObservationOwner(item, userId);
   await softDeleteObservation(item);
@@ -667,8 +796,8 @@ async function deleteObservation(id, userId) {
   return true;
 }
 
-async function queueMaterialize(id, userId) {
-  const items = await loadAllObservations();
+async function queueMaterialize(id, userId, options = {}) {
+  const items = filterObservationsByRealm(await loadAllObservations(), options);
   const existing = items.find((row) => row.id === id);
   if (!assertObservationOwner(existing, userId)) return null;
   const scope = classifyScope(existing.filters, existing.widgets);
@@ -973,6 +1102,38 @@ async function enrichEntityLabelsInRows(rows, groupBy = []) {
   });
 }
 
+function collectorGroupIndexes(groupBy = []) {
+  return groupBy
+    .map((g, i) => (g === 'collector' ? i : -1))
+    .filter((i) => i >= 0);
+}
+
+/** Rollup хранит collector_id; в UI показываем display_name из справочника. */
+async function enrichCollectorLabelsInRows(rows, groupBy = []) {
+  const indexes = collectorGroupIndexes(groupBy);
+  if (!indexes.length || !rows?.length) return rows || [];
+
+  const ids = new Set();
+  for (const row of rows) {
+    for (const idx of indexes) {
+      const id = String(row.rawValues?.[idx] ?? row.values?.[idx] ?? '').trim();
+      if (id && id !== '—') ids.add(id);
+    }
+  }
+  const nameMap = await lookupCollectorDisplayNames([...ids]);
+  return rows.map((row) => {
+    const rawValues = Array.isArray(row.rawValues)
+      ? [...row.rawValues]
+      : [...(row.values || [])];
+    const values = Array.isArray(row.values) ? [...row.values] : [...rawValues];
+    for (const idx of indexes) {
+      const id = String(rawValues[idx] ?? values[idx] ?? '').trim();
+      values[idx] = explorerCollectorDisplayLabel(id, nameMap.get(id) || '');
+    }
+    return { ...row, values, rawValues };
+  });
+}
+
 function vlanGroupIndexes(groupBy = []) {
   return groupBy
     .map((g, i) => (g === 'vlan' ? i : -1))
@@ -1035,7 +1196,72 @@ function enrichTcpFlagsLabelsInRows(rows, groupBy = []) {
   });
 }
 
-async function readRollupTimeseries(observationId, window) {
+const OBSERVATION_CHART_METRICS = new Set(['bps', 'volume', 'pps', 'fps', 'flows']);
+
+function normalizeObservationChartMetric(metric) {
+  const key = String(metric || 'bps').trim();
+  return OBSERVATION_CHART_METRICS.has(key) ? key : 'bps';
+}
+
+function observationMetricSortField(metricKey) {
+  switch (normalizeObservationChartMetric(metricKey)) {
+    case 'pps': return 'packets';
+    case 'fps':
+    case 'flows': return 'flows';
+    case 'volume':
+    case 'bps':
+    default: return 'bytes';
+  }
+}
+
+function observationRollupBucketRate(row, metricKey, bucketSec = ROLLUP_BUCKET_SEC) {
+  const bytes = Number(row?.bytes) || 0;
+  const packets = Number(row?.packets) || 0;
+  const flows = Number(row?.flows) || 0;
+  const sec = Math.max(1, Number(bucketSec) || ROLLUP_BUCKET_SEC);
+  switch (normalizeObservationChartMetric(metricKey)) {
+    case 'volume': return bytes;
+    case 'pps': return Math.round(packets / sec);
+    case 'fps': return Math.round((flows / sec) * 100) / 100;
+    case 'flows': return flows;
+    default: return Math.round((bytes * 8) / sec);
+  }
+}
+
+function observationWindowAverage(row, metricKey, windowSeconds) {
+  const bytes = Number(row?.bytes) || 0;
+  const packets = Number(row?.packets) || 0;
+  const flows = Number(row?.flows) || 0;
+  const ws = Math.max(1, Number(windowSeconds) || ROLLUP_BUCKET_SEC);
+  switch (normalizeObservationChartMetric(metricKey)) {
+    case 'volume': return bytes;
+    case 'pps': return Math.round(packets / ws);
+    case 'fps': return Math.round((flows / ws) * 100) / 100;
+    case 'flows': return flows;
+    default: return Math.round((bytes * 8) / ws);
+  }
+}
+
+function observationRowSortAmount(row, metricKey) {
+  const field = observationMetricSortField(metricKey);
+  return Number(row?.[field]) || 0;
+}
+
+function observationTotalsSortAmount(totals, metricKey) {
+  if (!totals) return 0;
+  return Number(totals[observationMetricSortField(metricKey)]) || 0;
+}
+
+function rollupTopOrderColumn(metricKey) {
+  switch (normalizeObservationChartMetric(metricKey)) {
+    case 'pps': return 'packets';
+    case 'fps':
+    case 'flows': return 'flows';
+    default: return 'bytes';
+  }
+}
+
+async function readRollupTimeseries(observationId, window, metricKey = 'bps') {
   try {
     // Totals only — rows with empty dims. Do not sum grouped dims (would double-count).
     const { rows } = await query(`
@@ -1057,18 +1283,23 @@ async function readRollupTimeseries(observationId, window) {
       from: window.from,
       to: window.to,
     }, { name: 'observations/rollup-ts' });
+    const metric = normalizeObservationChartMetric(metricKey);
     const points = rows.map((r) => {
       const bytes = Number(r.bytes) || 0;
+      const packets = Number(r.packets) || 0;
+      const flows = Number(r.flows) || 0;
       const ts = Number(r.bucket_ts);
       const bucketMs = Number.isFinite(ts) && ts > 0 ? ts * 1000 : null;
+      const sample = { bytes, packets, flows };
       return {
         t: r.minute,
         bucket: r.minute,
         bucketMs,
         bytes,
         bps: Math.round((bytes * 8) / ROLLUP_BUCKET_SEC),
-        packets: Number(r.packets) || 0,
-        flows: Number(r.flows) || 0,
+        packets,
+        flows,
+        value: observationRollupBucketRate(sample, metric, ROLLUP_BUCKET_SEC),
       };
     });
     return { points };
@@ -1097,43 +1328,55 @@ async function readRollupPeriodTotals(observationId, window) {
     }, { name: 'observations/rollup-period-totals' });
     const row = rows?.[0];
     const bytes = Number(row?.bytes) || 0;
-    if (!bytes) return null;
-    return {
-      bytes,
-      packets: Number(row?.packets) || 0,
-      flows: Number(row?.flows) || 0,
-    };
+    const packets = Number(row?.packets) || 0;
+    const flows = Number(row?.flows) || 0;
+    if (!bytes && !packets && !flows) return null;
+    return { bytes, packets, flows };
   } catch {
     return null;
   }
 }
 
 /** Rows beyond the stored top-N collapse into one "Прочие" row (total minus shown). */
-function appendOtherRow(rows, totals, windowSeconds) {
-  if (!totals?.bytes || !rows.length) return rows;
+function appendOtherRow(rows, totals, windowSeconds, metricKey = 'bps') {
+  const metric = normalizeObservationChartMetric(metricKey);
+  const totalSort = observationTotalsSortAmount(totals, metric);
+  if (!totalSort || !rows.length) return rows;
+  const shownSort = rows.reduce((s, r) => s + observationRowSortAmount(r, metric), 0);
+  const restSort = totalSort - shownSort;
+  if (restSort <= 0 || restSort / totalSort < 0.0001) return rows;
   const shownBytes = rows.reduce((s, r) => s + (Number(r.bytes) || 0), 0);
   const restBytes = totals.bytes - shownBytes;
-  if (restBytes <= 0 || restBytes / totals.bytes < 0.0001) return rows;
+  const restPackets = Math.max(0, totals.packets - rows.reduce((s, r) => s + (Number(r.packets) || 0), 0));
+  const restFlows = Math.max(0, totals.flows - rows.reduce((s, r) => s + (Number(r.flows) || 0), 0));
   const groupCount = rows[0].values?.length || 1;
   const values = Array.from({ length: groupCount }, (_, i) => (i === 0 ? OTHER_LABEL : ''));
+  const restRow = { bytes: restBytes, packets: restPackets, flows: restFlows };
+  const avg = observationWindowAverage(restRow, metric, windowSeconds);
   return [...rows, {
     id: 'rollup-other',
     key: OTHER_KEY,
     isOther: true,
     values,
     rawValues: [...values],
-    metric: Math.round((restBytes * 8) / windowSeconds),
-    avgBps: Math.round((restBytes * 8) / windowSeconds),
-    pct: Math.round((restBytes * 10000) / totals.bytes) / 100,
+    metric: avg,
+    avgBps: Math.round((restBytes * 8) / Math.max(1, windowSeconds)),
+    pct: Math.round((restSort * 10000) / totalSort) / 100,
     bytes: restBytes,
-    packets: Math.max(0, totals.packets - rows.reduce((s, r) => s + (Number(r.packets) || 0), 0)),
-    flows: Math.max(0, totals.flows - rows.reduce((s, r) => s + (Number(r.flows) || 0), 0)),
+    packets: restPackets,
+    flows: restFlows,
     color: OTHER_COLOR,
   }];
 }
 
-async function readRollupTop(observationId, window, { limit = TOP_ROWS_LIMIT, groupBy = [] } = {}) {
+async function readRollupTop(observationId, window, {
+  limit = TOP_ROWS_LIMIT,
+  groupBy = [],
+  metric: metricKey = 'bps',
+} = {}) {
   try {
+    const metric = normalizeObservationChartMetric(metricKey);
+    const orderCol = rollupTopOrderColumn(metric);
     const windowSeconds = Math.max(
       60,
       Math.round((new Date(window.to) - new Date(window.from)) / 1000) || 3600,
@@ -1152,7 +1395,7 @@ async function readRollupTop(observationId, window, { limit = TOP_ROWS_LIMIT, gr
         AND minute < ${parseDataDatetimeSql('to')}
         AND ${rollupGroupedRowSql()}
       GROUP BY ${rollupDimColumns(dimCount).join(', ')}
-      ORDER BY bytes DESC
+      ORDER BY ${orderCol} DESC
       LIMIT {limit:UInt32}
     `, {
       id: observationId,
@@ -1162,37 +1405,48 @@ async function readRollupTop(observationId, window, { limit = TOP_ROWS_LIMIT, gr
     }, { name: 'observations/rollup-top' });
 
     const totals = await readRollupPeriodTotals(observationId, window);
-    const shownBytes = rows.reduce((s, r) => s + (Number(r.bytes) || 0), 0);
+    const shownSort = rows.reduce((s, r) => s + observationRowSortAmount(r, metric), 0);
     // Share is against the whole filtered traffic, not just the rows we display.
-    const pctBase = totals?.bytes || shownBytes || 1;
+    const pctBase = observationTotalsSortAmount(totals, metric) || shownSort || 1;
     const mapped = rows.map((r, i) => {
       const bytes = Number(r.bytes) || 0;
+      const packets = Number(r.packets) || 0;
+      const flows = Number(r.flows) || 0;
       const values = rollupDimColumns(dimCount).map((c) => String(r[c] ?? ''));
+      const sortAmount = observationRowSortAmount(r, metric);
+      const rowSample = { bytes, packets, flows };
+      const avg = observationWindowAverage(rowSample, metric, windowSeconds);
       return {
         id: `rollup-${dimKeyFromRow(r, dimCount)}`,
         key: dimKeyFromRow(r, dimCount),
         values,
         rawValues: [...values],
-        metric: Math.round((bytes * 8) / windowSeconds),
+        metric: avg,
         avgBps: Math.round((bytes * 8) / windowSeconds),
-        pct: Math.round((bytes * 10000) / pctBase) / 100,
+        pct: Math.round((sortAmount * 10000) / pctBase) / 100,
         bytes,
-        packets: Number(r.packets) || 0,
-        flows: Number(r.flows) || 0,
+        packets,
+        flows,
         color: protocolChartColor(i),
       };
     });
     const withAsn = await enrichAsnLabelsInRows(mapped, groupBy);
     const withEntity = await enrichEntityLabelsInRows(withAsn, groupBy);
-    const withVlan = await enrichVlanLabelsInRows(withEntity, groupBy);
+    const withCollector = await enrichCollectorLabelsInRows(withEntity, groupBy);
+    const withVlan = await enrichVlanLabelsInRows(withCollector, groupBy);
     return { rows: enrichTcpFlagsLabelsInRows(withVlan, groupBy), totals, windowSeconds };
   } catch (err) {
     return { rows: [], error: err.message };
   }
 }
 
-async function readRollupGroupedTimeseries(observationId, window, { seriesLimit = 8, groupBy = [] } = {}) {
-  const top = await readRollupTop(observationId, window, { limit: seriesLimit, groupBy });
+async function readRollupGroupedTimeseries(observationId, window, {
+  seriesLimit = 8,
+  groupBy = [],
+  metric: metricKey = 'bps',
+} = {}) {
+  const metric = normalizeObservationChartMetric(metricKey);
+  const top = await readRollupTop(observationId, window, { limit: seriesLimit, groupBy, metric });
   if (!top.rows.length) {
     return {
       points: [],
@@ -1206,7 +1460,7 @@ async function readRollupGroupedTimeseries(observationId, window, { seriesLimit 
   const dimCount = Math.min(Math.max(groupBy.length || 1, 1), ROLLUP_DIM_COUNT);
 
   try {
-    const totalSeries = await readRollupTimeseries(observationId, window);
+    const totalSeries = await readRollupTimeseries(observationId, window, metric);
     const { rows } = await query(`
       SELECT
         minute,
@@ -1242,12 +1496,14 @@ async function readRollupGroupedTimeseries(observationId, window, { seriesLimit 
         bucketMap.set(minute, { t: minute, bucket: minute, bucketMs });
       }
       const bytes = Number(r.bytes) || 0;
-      bucketMap.get(minute)[key] = Math.round((bytes * 8) / ROLLUP_BUCKET_SEC);
+      const packets = Number(r.packets) || 0;
+      const flows = Number(r.flows) || 0;
+      bucketMap.get(minute)[key] = observationRollupBucketRate({ bytes, packets, flows }, metric, ROLLUP_BUCKET_SEC);
     }
 
     const totalByBucket = new Map();
     for (const p of totalSeries.points || []) {
-      totalByBucket.set(p.t, Number(p.bps) || 0);
+      totalByBucket.set(p.t, Number(p.value) || 0);
       if (!bucketMap.has(p.t)) bucketMap.set(p.t, { t: p.t, bucket: p.t, bucketMs: p.bucketMs ?? null });
     }
 
@@ -1274,7 +1530,12 @@ async function readRollupGroupedTimeseries(observationId, window, { seriesLimit 
       lines.push({ key: OTHER_KEY, label: OTHER_LABEL, color: OTHER_COLOR, isOther: true });
     }
 
-    const topRows = appendOtherRow(top.rows, top.totals, top.windowSeconds || ROLLUP_BUCKET_SEC);
+    const topRows = appendOtherRow(
+      top.rows,
+      top.totals,
+      top.windowSeconds || ROLLUP_BUCKET_SEC,
+      metric,
+    );
     return {
       points,
       lines,
@@ -1331,7 +1592,8 @@ async function fetchThresholdTopRows(obs, window, { groupBy, limit, metric = 'bp
     includeSummary: false,
     includeTimeseries: false,
   };
-  const spec = await explorerFlows(body);
+  const explorerOpts = observationExplorerOptions(obs);
+  const spec = await explorerFlows(body, explorerOpts);
   const result = await runExplorerSpec(spec);
   const windowSeconds = result.meta?.windowSeconds || Math.max(
     60,
@@ -1346,8 +1608,13 @@ async function fetchThresholdTopRows(obs, window, { groupBy, limit, metric = 'bp
   };
 }
 
-async function fetchThresholdGroupedTimeseries(obs, window, { groupBy, seriesLimit }) {
-  const top = await fetchThresholdTopRows(obs, window, { groupBy, limit: seriesLimit });
+async function fetchThresholdGroupedTimeseries(obs, window, {
+  groupBy,
+  seriesLimit,
+  metric: metricKey = 'bps',
+}) {
+  const metric = normalizeObservationChartMetric(metricKey);
+  const top = await fetchThresholdTopRows(obs, window, { groupBy, limit: seriesLimit, metric });
   if (!top.rows.length) {
     return {
       points: [],
@@ -1365,11 +1632,12 @@ async function fetchThresholdGroupedTimeseries(obs, window, { groupBy, seriesLim
     to: window.to,
     filters: obs.filters,
     thresholds: obs.thresholds,
-    metric: 'bps',
+    metric,
     groupBy,
     granularity: '5m',
   };
-  const seriesSpec = await explorerResultSeries(body, top.rows);
+  const explorerOpts = observationExplorerOptions(obs);
+  const seriesSpec = await explorerResultSeries(body, top.rows, explorerOpts);
   const seriesResult = await runExplorerSpec(seriesSpec);
   const seriesByRow = seriesResult.data?.seriesByRow || {};
   const bucketMap = new Map();
@@ -1380,7 +1648,7 @@ async function fetchThresholdGroupedTimeseries(obs, window, { groupBy, seriesLim
       if (!bucketMap.has(bucket)) {
         bucketMap.set(bucket, { t: bucket, bucket, bucketMs: pt.bucketMs ?? null });
       }
-      bucketMap.get(bucket)[row.key] = Number(pt.bps ?? pt.value) || 0;
+      bucketMap.get(bucket)[row.key] = Number(pt.value) || 0;
     }
   }
   const points = [...bucketMap.values()].sort((a, b) => String(a.bucket).localeCompare(String(b.bucket)));
@@ -1406,10 +1674,15 @@ async function previewObservationWithThresholds(obs, window) {
   for (const w of obs.widgets) {
     try {
       if (w.type === 'timeseries_bps') {
+        const chartMetric = normalizeObservationChartMetric(w.metric);
         const groupBy = observationChartGroupBy(obs, w);
         if (groupBy.length) {
           const seriesLimit = observationSeriesLimit(obs, w);
-          const data = await fetchThresholdGroupedTimeseries(obs, window, { groupBy, seriesLimit });
+          const data = await fetchThresholdGroupedTimeseries(obs, window, {
+            groupBy,
+            seriesLimit,
+            metric: chartMetric,
+          });
           widgets.push({
             id: w.id,
             type: w.type,
@@ -1430,6 +1703,7 @@ async function previewObservationWithThresholds(obs, window) {
               requested: seriesLimit,
               totals: data.totals,
               windowSeconds: data.windowSeconds,
+              metric: chartMetric,
             };
           }
           continue;
@@ -1437,11 +1711,11 @@ async function previewObservationWithThresholds(obs, window) {
 
         const bundle = await explorerTimeseries({
           ...window,
-          metric: 'bps',
+          metric: chartMetric,
           filters: obs.filters,
           thresholds: obs.thresholds,
           granularity: '5m',
-        });
+        }, observationExplorerOptions(obs));
         const { rows } = await query(bundle.sql, bundle.params, { name: 'observations/threshold-ts' });
         const series = await bundle.map(rows);
         widgets.push({
@@ -1451,12 +1725,14 @@ async function previewObservationWithThresholds(obs, window) {
           source: 'flows_raw',
           status: 'ok',
           series,
+          points: series,
           warning: null,
         });
         continue;
       }
 
       if (w.type === 'top_table') {
+        const tableMetric = normalizeObservationChartMetric(w.metric);
         const groupBy = w.groupBy?.length ? w.groupBy : ['src_asn'];
         const wantRows = TOP_ROWS_LIMIT;
         const cachedRows = Array.isArray(cachedTop?.rows)
@@ -1478,7 +1754,11 @@ async function previewObservationWithThresholds(obs, window) {
           });
           continue;
         }
-        const data = await fetchThresholdTopRows(obs, window, { groupBy, limit: wantRows });
+        const data = await fetchThresholdTopRows(obs, window, {
+          groupBy,
+          limit: wantRows,
+          metric: tableMetric,
+        });
         widgets.push({
           id: w.id,
           type: w.type,
@@ -1508,9 +1788,7 @@ async function previewObservationWithThresholds(obs, window) {
 
 function rollupEmptyWarning(obs) {
   const st = obs.materialize?.status || 'queued';
-  if (st === 'error') {
-    return `Rollup ошибка: ${obs.materialize?.lastError || 'неизвестно'}`;
-  }
+  if (st === 'error') return null;
   if (st === 'queued' || st === 'running' || st === 'lagging') {
     const lag = Number(obs.materialize?.lagSeconds);
     if (Number.isFinite(lag) && lag > 120) {
@@ -1521,8 +1799,8 @@ function rollupEmptyWarning(obs) {
   return 'В rollup пока нет точек за выбранное окно.';
 }
 
-async function previewObservation(id, userId, body = {}) {
-  const obs = await getObservation(id, userId);
+async function previewObservation(id, userId, body = {}, options = {}) {
+  const obs = await getObservation(id, userId, options);
   if (!obs) return null;
   const window = resolvePreviewWindow(obs, body);
   if (explorerThresholdsActive(obs.thresholds)) {
@@ -1534,6 +1812,7 @@ async function previewObservation(id, userId, body = {}) {
   for (const w of obs.widgets) {
     try {
       if (w.type === 'timeseries_bps') {
+        const chartMetric = normalizeObservationChartMetric(w.metric);
         if (isNativeAggregateWidget(w)) {
           const collectorId = resolveNativeCollectorId(w, body);
           const nativeWidget = w.dataSource === 'vlan_trend'
@@ -1565,7 +1844,11 @@ async function previewObservation(id, userId, body = {}) {
             continue;
           }
           const seriesLimit = observationSeriesLimit(obs, w);
-          const data = await readRollupGroupedTimeseries(obs.id, window, { seriesLimit, groupBy });
+          const data = await readRollupGroupedTimeseries(obs.id, window, {
+            seriesLimit,
+            groupBy,
+            metric: chartMetric,
+          });
           widgets.push({
             id: w.id,
             type: w.type,
@@ -1587,13 +1870,14 @@ async function previewObservation(id, userId, body = {}) {
               requested: seriesLimit,
               totals: data.totals || null,
               windowSeconds: data.windowSeconds || ROLLUP_BUCKET_SEC,
+              metric: chartMetric,
             };
           }
           continue;
         }
 
         if (useRollup) {
-          const data = await readRollupTimeseries(obs.id, window);
+          const data = await readRollupTimeseries(obs.id, window, chartMetric);
           widgets.push({
             id: w.id,
             type: w.type,
@@ -1617,10 +1901,10 @@ async function previewObservation(id, userId, body = {}) {
         } else {
           const bundle = await explorerTimeseries({
             ...window,
-            metric: 'bps',
+            metric: chartMetric,
             filters: obs.filters,
             granularity: '5m',
-          });
+          }, observationExplorerOptions(obs));
           const { rows } = await query(bundle.sql, bundle.params, { name: 'observations/preview-ts' });
           const series = await bundle.map(rows);
           widgets.push({
@@ -1630,6 +1914,7 @@ async function previewObservation(id, userId, body = {}) {
             source: 'explorer/native',
             status: 'ok',
             series,
+            points: series,
             warning: null,
           });
         }
@@ -1637,6 +1922,7 @@ async function previewObservation(id, userId, body = {}) {
       }
 
       if (w.type === 'top_table') {
+        const tableMetric = normalizeObservationChartMetric(w.metric);
         const groupBy = w.groupBy?.length ? w.groupBy : ['src_asn'];
         const wantRows = TOP_ROWS_LIMIT;
         const cachedRows = Array.isArray(cachedTop?.rows)
@@ -1657,7 +1943,12 @@ async function previewObservation(id, userId, body = {}) {
             type: w.type,
             source: useRollup ? ROLLUP_TABLE : 'none',
             status: 'ok',
-            rows: appendOtherRow(shown, cachedTop.totals, cachedTop.windowSeconds || ROLLUP_BUCKET_SEC),
+            rows: appendOtherRow(
+              shown,
+              cachedTop.totals,
+              cachedTop.windowSeconds || ROLLUP_BUCKET_SEC,
+              cachedTop.metric || tableMetric,
+            ),
             groupBy,
             warning: cachedTop.rows.length ? null : (useRollup ? rollupEmptyWarning(obs) : null),
           });
@@ -1675,13 +1966,18 @@ async function previewObservation(id, userId, body = {}) {
           });
           continue;
         }
-        const data = await readRollupTop(obs.id, window, { limit: wantRows, groupBy });
+        const data = await readRollupTop(obs.id, window, { limit: wantRows, groupBy, metric: tableMetric });
         widgets.push({
           id: w.id,
           type: w.type,
           source: ROLLUP_TABLE,
           status: data.rows.length ? 'ok' : (obs.materialize.status || 'queued'),
-          rows: appendOtherRow(data.rows, data.totals, data.windowSeconds || ROLLUP_BUCKET_SEC),
+          rows: appendOtherRow(
+            data.rows,
+            data.totals,
+            data.windowSeconds || ROLLUP_BUCKET_SEC,
+            tableMetric,
+          ),
           groupBy,
           warning: data.rows.length ? null : rollupEmptyWarning(obs),
           error: data.error || undefined,
@@ -1704,8 +2000,8 @@ async function previewObservation(id, userId, body = {}) {
   };
 }
 
-async function listRuns(observationId, userId) {
-  const obs = await getObservation(observationId, userId);
+async function listRuns(observationId, userId, options = {}) {
+  const obs = await getObservation(observationId, userId, options);
   if (!obs) return null;
   return loadRunsForObservation(observationId);
 }
@@ -2293,8 +2589,8 @@ ${topSections}
 </body></html>`;
 }
 
-async function runObservationReport(id, userId) {
-  const obs = await getObservation(id, userId);
+async function runObservationReport(id, userId, options = {}) {
+  const obs = await getObservation(id, userId, options);
   if (!obs) return null;
   const startedAt = new Date().toISOString();
   const runId = newId('run');
@@ -2313,7 +2609,7 @@ async function runObservationReport(id, userId) {
   let preview;
   let previewError = null;
   try {
-    preview = await previewObservation(id, userId, { from: window.from, to: window.to });
+    preview = await previewObservation(id, userId, { from: window.from, to: window.to }, options);
   } catch (err) {
     previewError = err.message;
     preview = { widgets: [] };
@@ -2463,8 +2759,8 @@ async function runObservationReport(id, userId) {
   return run;
 }
 
-async function getRunArtifact(observationId, runId, userId, fileName) {
-  const obs = await getObservation(observationId, userId);
+async function getRunArtifact(observationId, runId, userId, fileName, options = {}) {
+  const obs = await getObservation(observationId, userId, options);
   if (!obs) return null;
   const run = await loadRunById(observationId, runId);
   if (!run) return null;
@@ -2574,6 +2870,7 @@ async function listMaterializeJobs() {
         backfillCursor: mat.backfillCursor || null,
         backfillDone: Boolean(mat.backfillDone),
         filters: o.filters,
+        clientId: observationClientId(o),
         groupBy,
         seriesLimit: Math.min(
           50,
@@ -2616,7 +2913,7 @@ function observationPresets() {
     {
       id: 'preset-vlan-trend',
       name: 'Трафик по VLAN',
-      description: 'Выбранные VLAN по traffic_vlan_1m. Коллектор и VLAN задаются в настройках.',
+      description: '',
       filters: [],
       widgets: [
         {
@@ -2681,7 +2978,8 @@ function observationPresets() {
   ];
 }
 
-function observationsConfig() {
+function observationsConfig(options = {}) {
+  const cabinet = Boolean(realmFromOptions(options));
   return {
     maxMaterialize: MATERIALIZE_LIMIT_ENABLED ? MAX_MATERIALIZE : null,
     minIntervalSec: MIN_INTERVAL_SEC,
@@ -2690,10 +2988,11 @@ function observationsConfig() {
     lookbacks: ['30m', '1h', '6h', '24h', '7d'],
     refreshSecs: [...REFRESH_SECS],
     widgetTypes: [...WIDGET_TYPES],
-    widgetDataSources: [...WIDGET_DATA_SOURCES],
+    widgetDataSources: cabinet ? [] : [...WIDGET_DATA_SOURCES],
     nativeFilterFields: [...NATIVE_FILTER_FIELDS],
-    presets: observationPresets(),
-    schema: explorerSchema(),
+    presets: cabinet ? [] : observationPresets(),
+    schema: explorerSchema(cabinet ? { cabinet: true } : {}),
+    cabinetMode: cabinet,
   };
 }
 
@@ -2772,6 +3071,7 @@ async function getObservationAnalyticsDiagnostics() {
 
 module.exports = {
   classifyScope,
+  normalizeObservation,
   normalizeWidgets,
   widgetDataSource,
   isNativeAggregateWidget,
@@ -2792,6 +3092,7 @@ module.exports = {
   duplicateObservation,
   cancelMaterialize,
   queueMaterialize,
+  retryMaterialize,
   previewObservation,
   runObservationReport,
   listRuns,
@@ -2821,4 +3122,14 @@ module.exports = {
   STUCK_SEC,
   MAX_FAIL_COUNT,
   resolveObservationBackfill,
+  normalizeObservationChartMetric,
+  observationRollupBucketRate,
+  observationWindowAverage,
+  rollupVlanDisplayLabel,
+  observationClientId,
+  observationInRealm,
+  filterObservationsByRealm,
+  realmFromOptions,
+  observationExplorerOptions,
+  assertCabinetObservationAcceptable,
 };
