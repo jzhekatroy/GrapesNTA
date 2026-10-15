@@ -64,6 +64,7 @@ const PAGE_CHUNKS_MANIFEST = {
     },
     network: {
       scripts: [
+        '/pages/network-i18n.js',
         '/pages/cidr.jsx',
         '/pages/vlan.jsx',
         '/pages/entities.jsx',

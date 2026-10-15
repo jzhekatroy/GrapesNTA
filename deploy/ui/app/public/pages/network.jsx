@@ -2,9 +2,9 @@
 
 const NETWORK_TAB_KEY = 'grapes-network-tab';
 const NETWORK_TABS = [
-  { id: 'entities', label: 'Владельцы L3', perm: 'entities' },
-  { id: 'cidr', label: 'CIDR', perm: 'cidr' },
-  { id: 'vlan', label: 'VLAN', perm: 'vlan' },
+  { id: 'entities', labelKey: 'network.tab.entities', perm: 'entities' },
+  { id: 'cidr', labelKey: 'network.tab.cidr', perm: 'cidr' },
+  { id: 'vlan', labelKey: 'network.tab.vlan', perm: 'vlan' },
 ];
 
 function canAccessNetworkTab(effectivePermissions, perm) {
@@ -43,8 +43,8 @@ function PageNetwork({ effectivePermissions, initialTab }) {
       <div className="main__container">
         <Empty
           icon="cidr"
-          title="Нет доступа"
-          desc="Нет прав ни на одну вкладку раздела «Моя сеть»."
+          title={networkT('network.noAccess.title')}
+          desc={networkT('network.noAccess.desc')}
         />
       </div>
     );
@@ -54,11 +54,11 @@ function PageNetwork({ effectivePermissions, initialTab }) {
     <div className="main__container">
       <div className="page-head">
         <div>
-          <h1>Моя сеть</h1>
-          <p>Владельцы L3, собственные сети (CIDR) и справочник VLAN.</p>
+          <h1>{networkT('network.title')}</h1>
+          <p>{networkT('network.subtitle')}</p>
         </div>
         <div className="row" style={{ gap: 8 }}>
-          <Button kind="ghost" icon="refresh" onClick={reload}>Обновить</Button>
+          <Button kind="ghost" icon="refresh" onClick={reload}>{networkT('chrome.refresh')}</Button>
         </div>
       </div>
 
@@ -70,7 +70,7 @@ function PageNetwork({ effectivePermissions, initialTab }) {
             className={tab === t.id ? 'is-active' : ''}
             onClick={() => setTab(t.id)}
           >
-            {t.label}
+            {networkT(t.labelKey)}
           </button>
         ))}
       </div>

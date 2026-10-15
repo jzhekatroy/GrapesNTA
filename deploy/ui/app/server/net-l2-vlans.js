@@ -9,6 +9,12 @@ const {
   entitiesViewRef,
 } = require('./clickhouse');
 
+function validationFail(error, code, params) {
+  const out = { ok: false, error, code };
+  if (params) out.params = params;
+  return out;
+}
+
 const VLAN_MIN = 1;
 const VLAN_MAX = 4094;
 
@@ -60,7 +66,11 @@ function mapVlanAdminRow(r) {
 function parseVlanId(value) {
   const n = Number(value);
   if (!Number.isInteger(n) || n < VLAN_MIN || n > VLAN_MAX) {
-    return { ok: false, error: `VLAN ID должен быть числом от ${VLAN_MIN} до ${VLAN_MAX}` };
+    return validationFail(
+      `VLAN ID должен быть числом от ${VLAN_MIN} до ${VLAN_MAX}`,
+      'vlanIdRange',
+      { min: VLAN_MIN, max: VLAN_MAX },
+    );
   }
   return { ok: true, vlanId: n };
 }
@@ -183,11 +193,11 @@ async function validateVlanPayload(body, { requireActiveFields = true } = {}) {
   if (!BOUNDARY_TYPES.has(boundary)) boundary = 'unknown';
 
   if (requireActiveFields && enabled === 1) {
-    if (!displayName) return { ok: false, error: 'Укажите название VLAN' };
+    if (!displayName) return validationFail('Укажите название VLAN', 'vlanDisplayNameRequired');
     if (entityId) {
       const entityIds = await fetchEntityIds();
       if (!entityIds.has(entityId)) {
-        return { ok: false, error: 'Выбранный владелец не найден в справочнике объектов' };
+        return validationFail('Выбранный владелец не найден в справочнике объектов', 'entityNotFound');
       }
     }
   }
@@ -212,6 +222,8 @@ async function saveVlan(body) {
   if (!validation.ok) {
     const err = new Error(validation.error);
     err.statusCode = 400;
+    if (validation.code) err.code = validation.code;
+    if (validation.params) err.params = validation.params;
     throw err;
   }
 
@@ -229,6 +241,8 @@ async function setVlanEnabled(body) {
   if (!parsed.ok) {
     const err = new Error(parsed.error);
     err.statusCode = 400;
+    if (parsed.code) err.code = parsed.code;
+    if (parsed.params) err.params = parsed.params;
     throw err;
   }
 
@@ -236,6 +250,7 @@ async function setVlanEnabled(body) {
   if (!latest) {
     const err = new Error('VLAN не найден');
     err.statusCode = 404;
+    err.code = 'vlanNotFound';
     throw err;
   }
 
@@ -268,6 +283,8 @@ async function deleteVlan(body) {
   if (!parsed.ok) {
     const err = new Error(parsed.error);
     err.statusCode = 400;
+    if (parsed.code) err.code = parsed.code;
+    if (parsed.params) err.params = parsed.params;
     throw err;
   }
 
