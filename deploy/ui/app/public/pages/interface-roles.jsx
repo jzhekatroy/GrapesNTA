@@ -2,6 +2,61 @@
 
 const { useCallback, useEffect, useMemo, useRef, useState } = React;
 
+function interfaceRolesT(key, params) {
+  return GrapesI18n.t(key, params);
+}
+
+function interfaceRolesPortNoun(n) {
+  const count = Number(n) || 0;
+  if (GrapesI18n.getLocale() === 'en') {
+    return count === 1
+      ? interfaceRolesT('interfaceRolesPage.noun.port.one')
+      : interfaceRolesT('interfaceRolesPage.noun.port.many');
+  }
+  return pluralRu(
+    count,
+    interfaceRolesT('interfaceRolesPage.noun.port.one'),
+    interfaceRolesT('interfaceRolesPage.noun.port.few'),
+    interfaceRolesT('interfaceRolesPage.noun.port.many'),
+  );
+}
+
+function confirmHideSwitch(label) {
+  return window.confirm(interfaceRolesT('interfaceRolesPage.confirm.hideSwitch', { label }));
+}
+
+function confirmHideSwitches(count) {
+  const n = Number(count) || 0;
+  if (GrapesI18n.getLocale() === 'en') {
+    return window.confirm(interfaceRolesT(
+      n === 1 ? 'interfaceRolesPage.confirm.hideSwitchesOne' : 'interfaceRolesPage.confirm.hideSwitchesMany',
+      { count: n },
+    ));
+  }
+  const noun = pluralRu(
+    n,
+    interfaceRolesT('interfaceRolesPage.noun.switch.one'),
+    interfaceRolesT('interfaceRolesPage.noun.switch.few'),
+    interfaceRolesT('interfaceRolesPage.noun.switch.many'),
+  );
+  return window.confirm(interfaceRolesT('interfaceRolesPage.confirm.hideSwitches', { count: n, noun }));
+}
+
+function confirmClearPortMarking(label) {
+  return window.confirm(interfaceRolesT('interfaceRolesPage.confirm.clearPortMarking', { label }));
+}
+
+function confirmClearPortsMarking(count) {
+  const n = Number(count) || 0;
+  if (GrapesI18n.getLocale() === 'en') {
+    return window.confirm(interfaceRolesT(
+      n === 1 ? 'interfaceRolesPage.confirm.clearPortsMarkingOne' : 'interfaceRolesPage.confirm.clearPortsMarkingMany',
+      { count: n },
+    ));
+  }
+  return window.confirm(interfaceRolesT('interfaceRolesPage.confirm.clearPortsMarkingMany', { count: n }));
+}
+
 function useDebouncedValue(value, delay = 300) {
   const [debounced, setDebounced] = useState(value);
   useEffect(() => {
@@ -28,7 +83,7 @@ function computeSwitchStatus({ marked, portsWithAlias }) {
 }
 
 function switchStatusLabel(status) {
-  return IR_SWITCH_STATUS_LABELS[status] || status;
+  return irSwitchStatusLabel(status);
 }
 
 function switchStatusTone(status) {
@@ -60,7 +115,7 @@ function switchListLabel(row) {
 function fmtHiddenSwitchAt(value) {
   if (!value) return '—';
   const d = new Date(value);
-  return Number.isNaN(d.getTime()) ? '—' : d.toLocaleString('ru-RU');
+  return Number.isNaN(d.getTime()) ? '—' : d.toLocaleString(GrapesI18n.intlLocale());
 }
 
 function SwitchListScreen({
@@ -99,15 +154,15 @@ function SwitchListScreen({
   const hideSwitch = async (row) => {
     if (!canWrite) return;
     const label = switchListLabel(row);
-    if (!window.confirm(`Удалить коммутатор ${label}?`)) return;
+    if (!confirmHideSwitch(label)) return;
     setSaving(true);
     try {
       await ApiClient.hideInterfaceRoleSwitches({ switchIp: row.switchIp });
-      pushToast({ kind: 'success', title: 'Коммутатор удалён из списка' });
+      pushToast({ kind: 'success', title: interfaceRolesT('interfaceRolesPage.toast.switchHidden') });
       setMenuOpen(false);
       onReload();
     } catch (err) {
-      pushToast({ kind: 'error', title: 'Не удалось удалить', desc: err.message });
+      pushToast({ kind: 'error', title: interfaceRolesT('interfaceRolesPage.toast.deleteFailed'), desc: err.message });
     } finally {
       setSaving(false);
     }
@@ -116,17 +171,20 @@ function SwitchListScreen({
   const bulkHideSelected = async () => {
     if (!canWrite || !selected.size) return;
     const n = selected.size;
-    if (!window.confirm(`Удалить ${n} ${n === 1 ? 'коммутатор' : n < 5 ? 'коммутатора' : 'коммутаторов'} из списка?`)) return;
+    if (!confirmHideSwitches(n)) return;
     setSaving(true);
     try {
       const items = [...selected].map((switchIp) => ({ switchIp }));
       await ApiClient.hideInterfaceRoleSwitches({ switches: items });
-      pushToast({ kind: 'success', title: `Удалено из списка: ${items.length}` });
+      pushToast({
+        kind: 'success',
+        title: interfaceRolesT('interfaceRolesPage.toast.removedFromList', { count: items.length }),
+      });
       setSelected(new Set());
       setMenuOpen(false);
       onReload();
     } catch (err) {
-      pushToast({ kind: 'error', title: 'Не удалось удалить', desc: err.message });
+      pushToast({ kind: 'error', title: interfaceRolesT('interfaceRolesPage.toast.deleteFailed'), desc: err.message });
     } finally {
       setSaving(false);
     }
@@ -137,10 +195,10 @@ function SwitchListScreen({
     setSaving(true);
     try {
       await ApiClient.restoreInterfaceRoleSwitches({ switchIp: row.switchIp });
-      pushToast({ kind: 'success', title: 'Коммутатор восстановлен' });
+      pushToast({ kind: 'success', title: interfaceRolesT('interfaceRolesPage.toast.switchRestored') });
       onReload();
     } catch (err) {
-      pushToast({ kind: 'error', title: 'Не удалось восстановить', desc: err.message });
+      pushToast({ kind: 'error', title: interfaceRolesT('interfaceRolesPage.toast.restoreFailed'), desc: err.message });
     } finally {
       setSaving(false);
     }
@@ -149,7 +207,7 @@ function SwitchListScreen({
   const columns = [
     {
       key: 'switchIp',
-      title: 'Коммутатор',
+      title: interfaceRolesT('interfaceRolesPage.col.switch'),
       width: 220,
       sortAccessor: (r) => r.switchIp,
       render: (r) => (
@@ -161,13 +219,41 @@ function SwitchListScreen({
         </div>
       ),
     },
-    { key: 'ports', title: 'Портов', width: 80, num: true, sortAccessor: (r) => r.ports, render: (r) => <span className="mono">{r.ports}</span> },
-    { key: 'portsWithAlias', title: 'С алиасом', width: 100, num: true, sortAccessor: (r) => r.portsWithAlias, render: (r) => <span className="mono">{r.portsWithAlias}</span> },
-    { key: 'marked', title: 'Размечено', width: 100, num: true, sortAccessor: (r) => r.marked, render: (r) => <span className="mono">{r.marked}</span> },
-    { key: 'unmarked', title: 'Не размечено', width: 110, num: true, sortAccessor: (r) => r.unmarked, render: (r) => <span className="mono">{r.unmarked}</span> },
+    {
+      key: 'ports',
+      title: interfaceRolesT('interfaceRolesPage.col.ports'),
+      width: 80,
+      num: true,
+      sortAccessor: (r) => r.ports,
+      render: (r) => <span className="mono">{r.ports}</span>,
+    },
+    {
+      key: 'portsWithAlias',
+      title: interfaceRolesT('interfaceRolesPage.col.withAlias'),
+      width: 100,
+      num: true,
+      sortAccessor: (r) => r.portsWithAlias,
+      render: (r) => <span className="mono">{r.portsWithAlias}</span>,
+    },
+    {
+      key: 'marked',
+      title: interfaceRolesT('interfaceRolesPage.col.marked'),
+      width: 100,
+      num: true,
+      sortAccessor: (r) => r.marked,
+      render: (r) => <span className="mono">{r.marked}</span>,
+    },
+    {
+      key: 'unmarked',
+      title: interfaceRolesT('interfaceRolesPage.col.unmarked'),
+      width: 110,
+      num: true,
+      sortAccessor: (r) => r.unmarked,
+      render: (r) => <span className="mono">{r.unmarked}</span>,
+    },
     {
       key: 'status',
-      title: 'Статус',
+      title: interfaceRolesT('interfaceRolesPage.col.status'),
       width: 120,
       sortAccessor: (r) => r.status,
       render: (r) => (
@@ -181,8 +267,8 @@ function SwitchListScreen({
   return (
     <Card
       pad="sm"
-      title="Коммутаторы"
-      subtitle="Нажмите на строку, чтобы открыть порты коммутатора и разметить их вручную или пакетно."
+      title={interfaceRolesT('interfaceRolesPage.card.switchesTitle')}
+      subtitle={interfaceRolesT('interfaceRolesPage.card.switchesSubtitle')}
     >
       {loadError && <div className="form-error" style={{ marginBottom: 12 }}>{loadError}</div>}
       {canWrite && (
@@ -194,12 +280,14 @@ function SwitchListScreen({
               disabled={loading || saving}
               onClick={() => setMenuOpen((open) => !open)}
             >
-              Удалённые коммутаторы{hiddenSwitches.length ? ` (${hiddenSwitches.length})` : ''}
+              {hiddenSwitches.length
+                ? interfaceRolesT('interfaceRolesPage.hiddenSwitchesCount', { count: hiddenSwitches.length })
+                : interfaceRolesT('interfaceRolesPage.hiddenSwitches')}
             </Button>
             {menuOpen && (
               <div className="ir-hidden-switches__menu" role="menu">
                 {hiddenSwitches.length === 0 ? (
-                  <p className="ir-hidden-switches__empty">Нет удалённых</p>
+                  <p className="ir-hidden-switches__empty">{interfaceRolesT('interfaceRolesPage.noHidden')}</p>
                 ) : (
                   <ul className="ir-hidden-switches__list">
                     {hiddenSwitches.map((row) => (
@@ -212,7 +300,7 @@ function SwitchListScreen({
                             </div>
                           )}
                           <div style={{ color: 'var(--fg-muted)', font: 'var(--pv-text-body-3)', marginTop: 4 }}>
-                            Удалён: {fmtHiddenSwitchAt(row.hiddenAt)}
+                            {interfaceRolesT('interfaceRolesPage.hiddenAt', { time: fmtHiddenSwitchAt(row.hiddenAt) })}
                           </div>
                         </div>
                         <Button
@@ -221,7 +309,7 @@ function SwitchListScreen({
                           disabled={saving}
                           onClick={() => restoreSwitch(row)}
                         >
-                          Восстановить
+                          {interfaceRolesT('interfaceRolesPage.restore')}
                         </Button>
                       </li>
                     ))}
@@ -234,12 +322,13 @@ function SwitchListScreen({
       )}
       {!loading && rows.length > 0 && (
         <p className="ir-list-hint">
-          Клик по коммутатору открывает список его портов: там можно задать сторону «наша» или «внешняя»
-          для каждого порта или сразу для группы по фильтру.
+          {interfaceRolesT('interfaceRolesPage.listHint')}
         </p>
       )}
       {loading ? (
-        <div style={{ padding: 24, textAlign: 'center', color: 'var(--fg-secondary)' }}>Загрузка…</div>
+        <div style={{ padding: 24, textAlign: 'center', color: 'var(--fg-secondary)' }}>
+          {interfaceRolesT('dashboard.loading')}
+        </div>
       ) : (
         <DataTable
           rows={rows}
@@ -247,8 +336,8 @@ function SwitchListScreen({
           rowKey="id"
           pageSize={20}
           initialSort={{ key: 'unmarked', dir: 'desc' }}
-          emptyTitle="Нет коммутаторов в каталоге SNMP"
-          emptyDesc="Сначала опросите устройства на странице SNMP."
+          emptyTitle={interfaceRolesT('interfaceRolesPage.empty.switchesTitle')}
+          emptyDesc={interfaceRolesT('interfaceRolesPage.empty.switchesDesc')}
           onRowClick={(r) => onOpenSwitch(r.switchIp)}
           selectable={canWrite}
           selected={selected}
@@ -263,10 +352,12 @@ function SwitchListScreen({
                   disabled={saving}
                   onClick={bulkHideSelected}
                 >
-                  {saving ? 'Удаление…' : `Удалить выбранные (${selected.size})`}
+                  {saving
+                    ? interfaceRolesT('interfaceRolesPage.deleting')
+                    : interfaceRolesT('interfaceRolesPage.deleteSelected', { count: selected.size })}
                 </Button>
                 <Button kind="ghost" size="sm" disabled={saving} onClick={() => setSelected(new Set())}>
-                  Снять выбор
+                  {interfaceRolesT('snmpPage.clearSelection')}
                 </Button>
               </div>
             ) : null,
@@ -282,7 +373,7 @@ function SwitchListScreen({
                 hideSwitch(r);
               }}
             >
-              Удалить
+              {interfaceRolesT('interfaceRolesPage.delete')}
             </Button>
           ) : null}
         />
@@ -333,14 +424,14 @@ function SwitchPortsScreen({
     try {
       if (boundary === 'unknown' || boundary === '') {
         await ApiClient.deleteInterfaceRole({ switchIp, ifIndex });
-        pushToast({ kind: 'success', title: 'Разметка снята' });
+        pushToast({ kind: 'success', title: interfaceRolesT('interfaceRolesPage.toast.markingCleared') });
       } else {
         await ApiClient.saveInterfaceRole({ switchIp, ifIndex, boundary, connectivity: '' });
-        pushToast({ kind: 'success', title: 'Разметка сохранена' });
+        pushToast({ kind: 'success', title: interfaceRolesT('interfaceRolesPage.toast.markingSaved') });
       }
       onReload();
     } catch (err) {
-      pushToast({ kind: 'error', title: 'Не удалось сохранить', desc: err.message });
+      pushToast({ kind: 'error', title: interfaceRolesT('interfaceRolesPage.toast.saveFailed'), desc: err.message });
     } finally {
       setSaving(false);
     }
@@ -352,11 +443,14 @@ function SwitchPortsScreen({
     try {
       const items = [...selected].map((ifIndex) => ({ switchIp, ifIndex, boundary, connectivity: '' }));
       await ApiClient.saveInterfaceRole({ interfaces: items });
-      pushToast({ kind: 'success', title: `Размечено портов: ${items.length}` });
+      pushToast({
+        kind: 'success',
+        title: interfaceRolesT('interfaceRolesPage.toast.portsMarked', { count: items.length }),
+      });
       setSelected(new Set());
       onReload();
     } catch (err) {
-      pushToast({ kind: 'error', title: 'Не удалось сохранить', desc: err.message });
+      pushToast({ kind: 'error', title: interfaceRolesT('interfaceRolesPage.toast.saveFailed'), desc: err.message });
     } finally {
       setSaving(false);
     }
@@ -365,14 +459,14 @@ function SwitchPortsScreen({
   const deletePortMarking = async (ifIndex, row) => {
     if (!canWrite) return;
     const label = portMarkingLabel(row ?? { ifIndex });
-    if (!window.confirm(`Удалить разметку порта ${label}?`)) return;
+    if (!confirmClearPortMarking(label)) return;
     setSaving(true);
     try {
       await ApiClient.deleteInterfaceRole({ switchIp, ifIndex });
-      pushToast({ kind: 'success', title: 'Разметка снята' });
+      pushToast({ kind: 'success', title: interfaceRolesT('interfaceRolesPage.toast.markingCleared') });
       onReload();
     } catch (err) {
-      pushToast({ kind: 'error', title: 'Не удалось удалить', desc: err.message });
+      pushToast({ kind: 'error', title: interfaceRolesT('interfaceRolesPage.toast.deleteFailed'), desc: err.message });
     } finally {
       setSaving(false);
     }
@@ -381,29 +475,57 @@ function SwitchPortsScreen({
   const bulkDeleteSelected = async () => {
     if (!canWrite || !selected.size) return;
     const n = selected.size;
-    if (!window.confirm(`Удалить разметку у ${n} портов?`)) return;
+    if (!confirmClearPortsMarking(n)) return;
     setSaving(true);
     try {
       const items = [...selected].map((ifIndex) => ({ switchIp, ifIndex }));
       await ApiClient.deleteInterfaceRole({ interfaces: items });
-      pushToast({ kind: 'success', title: `Снята разметка: ${items.length}` });
+      pushToast({
+        kind: 'success',
+        title: interfaceRolesT('interfaceRolesPage.toast.clearedCount', { count: items.length }),
+      });
       setSelected(new Set());
       onReload();
     } catch (err) {
-      pushToast({ kind: 'error', title: 'Не удалось удалить', desc: err.message });
+      pushToast({ kind: 'error', title: interfaceRolesT('interfaceRolesPage.toast.deleteFailed'), desc: err.message });
     } finally {
       setSaving(false);
     }
   };
 
   const columns = [
-    { key: 'ifIndex', title: 'ifIndex', width: 80, render: (r) => <span className="mono">{r.ifIndex}</span> },
-    { key: 'ifName', title: 'Имя', width: 140, render: (r) => <span className="mono">{r.ifName || '—'}</span> },
-    { key: 'ifAlias', title: 'Алиас', width: 160, render: (r) => r.ifAlias || '—' },
-    { key: 'speedMbps', title: 'Скорость', width: 90, num: true, render: (r) => <span className="mono">{r.speedMbps ? `${r.speedMbps} Мбит/с` : '—'}</span> },
+    {
+      key: 'ifIndex',
+      title: interfaceRolesT('interfaceRolesPage.col.ifIndex'),
+      width: 80,
+      render: (r) => <span className="mono">{r.ifIndex}</span>,
+    },
+    {
+      key: 'ifName',
+      title: interfaceRolesT('interfaceRolesPage.col.name'),
+      width: 140,
+      render: (r) => <span className="mono">{r.ifName || '—'}</span>,
+    },
+    {
+      key: 'ifAlias',
+      title: interfaceRolesT('interfaceRolesPage.col.alias'),
+      width: 160,
+      render: (r) => r.ifAlias || '—',
+    },
+    {
+      key: 'speedMbps',
+      title: interfaceRolesT('interfaceRolesPage.col.speed'),
+      width: 90,
+      num: true,
+      render: (r) => (
+        <span className="mono">
+          {r.speedMbps ? interfaceRolesT('interfaceRolesPage.speedMbps', { speed: r.speedMbps }) : '—'}
+        </span>
+      ),
+    },
     {
       key: 'boundary',
-      title: 'Сторона',
+      title: interfaceRolesT('interfaceRolesPage.col.side'),
       width: 160,
       render: (r) => {
         if (!canWrite) {
@@ -431,12 +553,12 @@ function SwitchPortsScreen({
     },
     {
       key: 'boundarySource',
-      title: 'Откуда',
+      title: interfaceRolesT('interfaceRolesPage.col.source'),
       width: 140,
       render: (r) => {
         if (r.boundarySource === 'client') {
           return (
-            <span title={r.clientId ? `ЛС ${r.clientId}` : ''}>
+            <span title={r.clientId ? interfaceRolesT('interfaceRolesPage.source.clientTitle', { clientId: r.clientId }) : ''}>
               <Badge tone="info">{irSourceLabel('client')}</Badge>
             </span>
           );
@@ -451,27 +573,34 @@ function SwitchPortsScreen({
     selected.size > 0 ? (
       <div className="ir-bulk-panel">
         <div className="ir-bulk-panel__head">
-          <span className="ir-bulk-panel__title">Массовое изменение</span>
+          <span className="ir-bulk-panel__title">{interfaceRolesT('interfaceRolesPage.bulk.title')}</span>
           <span className="ir-bulk-panel__count">
-            Выбрано: <b>{selected.size}</b> {selected.size === 1 ? 'порт' : selected.size < 5 ? 'порта' : 'портов'}
+            {interfaceRolesT('interfaceRolesPage.bulk.selected', { count: selected.size })}{' '}
+            {interfaceRolesPortNoun(selected.size)}
           </span>
         </div>
         <div className="ir-bulk-panel__actions row">
-          <Button kind="primary" size="sm" disabled={saving} onClick={() => bulkApply('internal')}>Наша сторона</Button>
-          <Button kind="primary" size="sm" disabled={saving} onClick={() => bulkApply('external')}>Внешняя сторона</Button>
-          <Button kind="ghost" size="sm" disabled={saving} onClick={() => setSelected(new Set())}>Сбросить выбор</Button>
+          <Button kind="primary" size="sm" disabled={saving} onClick={() => bulkApply('internal')}>
+            {interfaceRolesT('interfaceRolesPage.bulk.internal')}
+          </Button>
+          <Button kind="primary" size="sm" disabled={saving} onClick={() => bulkApply('external')}>
+            {interfaceRolesT('interfaceRolesPage.bulk.external')}
+          </Button>
+          <Button kind="ghost" size="sm" disabled={saving} onClick={() => setSelected(new Set())}>
+            {interfaceRolesT('interfaceRolesPage.bulk.resetSelection')}
+          </Button>
           {selected.size < filteredPorts.length && (
             <Button kind="ghost" size="sm" disabled={saving || !filteredPorts.length} onClick={selectAllFiltered}>
-              Добавить все отфильтрованные ({filteredPorts.length})
+              {interfaceRolesT('interfaceRolesPage.bulk.addAllFiltered', { count: filteredPorts.length })}
             </Button>
           )}
         </div>
       </div>
     ) : (
       <div className="ir-bulk-hint">
-        <p>Отметьте порты галочками слева в таблице — над таблицей появится «Удалить разметку у выбранных», можно также задать сторону пакетно.</p>
+        <p>{interfaceRolesT('interfaceRolesPage.bulk.hint')}</p>
         <Button kind="ghost" size="sm" disabled={saving || !filteredPorts.length} onClick={selectAllFiltered}>
-          Выбрать все отфильтрованные ({filteredPorts.length})
+          {interfaceRolesT('interfaceRolesPage.bulk.selectAllFiltered', { count: filteredPorts.length })}
         </Button>
       </div>
     )
@@ -481,33 +610,53 @@ function SwitchPortsScreen({
     <div>
       <div className="page-head" style={{ marginBottom: 16 }}>
         <div>
-          <Button kind="ghost" size="sm" icon="chevL" onClick={onBack} style={{ marginBottom: 8 }}>К списку</Button>
+          <Button kind="ghost" size="sm" icon="chevL" onClick={onBack} style={{ marginBottom: 8 }}>
+            {interfaceRolesT('interfaceRolesPage.backToList')}
+          </Button>
           <h1 style={{ margin: 0 }}>{displayName || switchIp}</h1>
           <p className="mono" style={{ color: 'var(--fg-secondary)', marginTop: 4 }}>{switchIp}</p>
           <p style={{ color: 'var(--fg-secondary)', font: 'var(--pv-text-body-3)', marginTop: 8 }}>
-            Всего {summary.total} · размечено {summary.marked} · не размечено {summary.unmarked}
+            {interfaceRolesT('interfaceRolesPage.summary', {
+              total: summary.total,
+              marked: summary.marked,
+              unmarked: summary.unmarked,
+            })}
           </p>
         </div>
-        <Button kind="ghost" icon="refresh" onClick={onReload} disabled={loading || saving}>Обновить</Button>
+        <Button kind="ghost" icon="refresh" onClick={onReload} disabled={loading || saving}>
+          {interfaceRolesT('chrome.refresh')}
+        </Button>
       </div>
 
-      <Card pad="sm" title="Порты">
+      <Card pad="sm" title={interfaceRolesT('interfaceRolesPage.card.portsTitle')}>
         {loadError && <div className="form-error" style={{ marginBottom: 12 }}>{loadError}</div>}
         <div className="row ir-port-filters" style={{ gap: 12, flexWrap: 'wrap', marginBottom: 12 }}>
           <div className="field" style={{ margin: 0 }}>
-            <label>Алиас содержит</label>
-            <input className="input" value={aliasQ} onChange={(e) => setAliasQ(e.target.value)} placeholder="mgmt, yandex…" />
+            <label>{interfaceRolesT('interfaceRolesPage.filter.aliasLabel')}</label>
+            <input
+              className="input"
+              value={aliasQ}
+              onChange={(e) => setAliasQ(e.target.value)}
+              placeholder={interfaceRolesT('interfaceRolesPage.filter.aliasPlaceholder')}
+            />
           </div>
           <div className="field" style={{ margin: 0 }}>
-            <label>Имя содержит</label>
-            <input className="input" value={nameQ} onChange={(e) => setNameQ(e.target.value)} placeholder="Ethernet…" />
+            <label>{interfaceRolesT('interfaceRolesPage.filter.nameLabel')}</label>
+            <input
+              className="input"
+              value={nameQ}
+              onChange={(e) => setNameQ(e.target.value)}
+              placeholder={interfaceRolesT('interfaceRolesPage.filter.namePlaceholder')}
+            />
           </div>
         </div>
 
         {bulkPanel}
 
         {loading ? (
-          <div style={{ padding: 24, textAlign: 'center', color: 'var(--fg-secondary)' }}>Загрузка…</div>
+          <div style={{ padding: 24, textAlign: 'center', color: 'var(--fg-secondary)' }}>
+            {interfaceRolesT('dashboard.loading')}
+          </div>
         ) : (
           <DataTable
             rows={filteredPorts.map((r) => ({ ...r, id: r.ifIndex }))}
@@ -515,7 +664,7 @@ function SwitchPortsScreen({
             rowKey="id"
             pageSize={25}
             initialSort={{ key: 'ifIndex', dir: 'asc' }}
-            emptyTitle="Нет портов по фильтру"
+            emptyTitle={interfaceRolesT('interfaceRolesPage.empty.portsFilter')}
             selectable={canWrite}
             selected={selected}
             onSelectChange={setSelected}
@@ -529,10 +678,12 @@ function SwitchPortsScreen({
                     disabled={saving}
                     onClick={bulkDeleteSelected}
                   >
-                    {saving ? 'Удаление…' : `Удалить разметку у выбранных (${selected.size})`}
+                    {saving
+                      ? interfaceRolesT('interfaceRolesPage.deleting')
+                      : interfaceRolesT('interfaceRolesPage.deleteSelectedMarking', { count: selected.size })}
                   </Button>
                   <Button kind="ghost" size="sm" disabled={saving} onClick={() => setSelected(new Set())}>
-                    Снять выбор
+                    {interfaceRolesT('snmpPage.clearSelection')}
                   </Button>
                 </div>
               ) : null,
@@ -548,7 +699,7 @@ function SwitchPortsScreen({
                   deletePortMarking(r.ifIndex, r);
                 }}
               >
-                Удалить разметку
+                {interfaceRolesT('interfaceRolesPage.deleteMarking')}
               </Button>
             ) : null}
           />
@@ -608,7 +759,7 @@ function PageInterfaceRoles({ onNavigate }) {
             setPorts([]);
             setLoadError('');
           } else {
-            setLoadError(portsR.error || ApiClient.LOAD_FAILED);
+            setLoadError(portsR.error || interfaceRolesT('interfaceRolesPage.loadFailed'));
             setPorts([]);
           }
         } else {
@@ -623,7 +774,7 @@ function PageInterfaceRoles({ onNavigate }) {
         ]);
         if (cancelled) return;
         if (swR.source === 'error') {
-          setLoadError(swR.error || ApiClient.LOAD_FAILED);
+          setLoadError(swR.error || interfaceRolesT('interfaceRolesPage.loadFailed'));
           setSwitches([]);
         } else {
           setSwitches(swR.rows);
@@ -647,19 +798,20 @@ function PageInterfaceRoles({ onNavigate }) {
         <>
           <div className="page-head">
             <div>
-              <h1>Порты оборудования</h1>
+              <h1>{interfaceRolesT('interfaceRolesPage.title')}</h1>
               <p>
-                Ручная разметка стороны порта для определения направления трафика.
-                Выберите коммутатор в таблице ниже — откроется детальный список его портов.
+                {interfaceRolesT('interfaceRolesPage.introLead')}
                 {' '}
-                Режим «по портам» настраивается на странице{' '}
+                {interfaceRolesT('interfaceRolesPage.introPortsMode')}{' '}
                 <button type="button" className="link-btn" onClick={() => { location.hash = 'traffic-classification'; }}>
-                  Классификация трафика
+                  {interfaceRolesT('nav.item.traffic-classification')}
                 </button>
                 .
               </p>
             </div>
-            <Button kind="ghost" icon="refresh" onClick={reload} disabled={loading}>Обновить</Button>
+            <Button kind="ghost" icon="refresh" onClick={reload} disabled={loading}>
+              {interfaceRolesT('chrome.refresh')}
+            </Button>
           </div>
           <SwitchListScreen
             switches={switches}
