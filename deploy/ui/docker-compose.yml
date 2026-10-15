@@ -11,6 +11,7 @@ services:
     build:
       context: ./app
       dockerfile: Dockerfile
+      network: host
     image: grapes-nta:latest
     container_name: grapes-nta
     restart: unless-stopped
