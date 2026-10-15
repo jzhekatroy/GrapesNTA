@@ -8,7 +8,7 @@ const {
   cabinetExplorerFlows,
   cabinetExplorerExportCsv,
 } = require('./explorer');
-const { explorerSchema } = require('../explorer');
+const { explorerSchema, explorerFlows, EXPLORER_MAX_EXPORT_ROWS } = require('../explorer');
 
 const CABINET_FIELDS = new Set([
   'src_ip', 'dst_ip', 'src_port', 'dst_port',
@@ -110,6 +110,33 @@ test('operator schema publishes its own range limit so the UI can follow it', ()
   const schema = explorerSchema();
   assert.equal(schema.maxRangeDays, 365);
   assert.ok(schema.maxRangeDays > cabinetExplorerSchema().maxRangeDays);
+});
+
+test('cabinet explorer export keeps the requested window and does not use the recent-flows shortcut', async () => {
+  const body = {
+    groupBy: ['dst_asn'],
+    range: 'custom',
+    from: '2026-08-18 10:00:00',
+    to: '2026-08-18 16:00:00',
+    limit: EXPLORER_MAX_EXPORT_ROWS,
+    offset: 0,
+    includeSummary: false,
+    includeTimeseries: false,
+  };
+  const exported = await explorerFlows(body, {
+    cabinetClientId: 'client:mine',
+    maxLimit: EXPLORER_MAX_EXPORT_ROWS,
+  });
+
+  assert.equal(exported.params.limit, EXPLORER_MAX_EXPORT_ROWS);
+  assert.equal(exported.params.from, '2026-08-18 10:00:00');
+  assert.equal(exported.params.to, '2026-08-18 16:00:00');
+  assert.doesNotMatch(exported.sql, /INTERVAL 15 MINUTE/);
+  assert.doesNotMatch(exported.sql, /recentMinutes/);
+  assert.match(exported.sql, /f\.`TimeReceived` >= ts_from/);
+  assert.match(exported.sql, /f\.`TimeReceived` < ts_to/);
+  assert.match(exported.sql, /f\.src_client = \{cabinet_client_id:String\}/);
+  assert.equal(exported.params.cabinet_client_id, 'client:mine');
 });
 
 test('cabinet explorer schema excludes cabinet_client field', () => {

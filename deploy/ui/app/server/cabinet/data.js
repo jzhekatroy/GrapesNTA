@@ -357,10 +357,12 @@ function geoCountrySql(ipExpr, etypeExpr) {
   )), ''), '??')`;
 }
 
-async function overviewRecentFlows(clientId, queryParams = {}) {
-  const limit = Math.min(Math.max(Number(queryParams.limit) || 20, 1), 100);
+// 20 самых свежих строк за двое суток лежат внутри последних 15 минут, если
+// за эти 15 минут строк уже не меньше лимита. Иначе читаем двое суток, как раньше.
+const RECENT_FLOWS_FAST_MINUTES = 15;
+
+function recentFlowsSql(time, fast) {
   const table = flowsRawTableRef();
-  const time = col('time');
   const bytes = col('bytes');
   const packets = col('packets');
   const srcIp = col('srcIp');
@@ -375,9 +377,10 @@ async function overviewRecentFlows(clientId, queryParams = {}) {
   const dstCountry = geoCountrySql(`f.${dstIp}`, etype ? `f.${etype}` : null);
   const asnNames = asnNamesTableRef();
   const asnRegistry = asnRegistryEnrichedTableRef();
-
-  const { rows, elapsedMs } = await query(
-    `
+  const fastWindow = fast
+    ? `AND f.${time} >= now() - INTERVAL {recentMinutes:UInt32} MINUTE`
+    : '';
+  return `
       SELECT
         recent.*,
         coalesce(nullIf(src_name.name, ''), nullIf(src_registry.name, concat('AS', toString(recent.src_asn))), '') AS src_as_name,
@@ -404,6 +407,7 @@ async function overviewRecentFlows(clientId, queryParams = {}) {
           ) AS client_side
         FROM ${table} AS f
         PREWHERE f.date >= today() - 1
+          ${fastWindow}
         WHERE (f.src_client = {clientId:String} OR f.dst_client = {clientId:String})
         ORDER BY f.${time} DESC
         LIMIT {limit:UInt32}
@@ -413,29 +417,48 @@ async function overviewRecentFlows(clientId, queryParams = {}) {
       LEFT JOIN ${asnRegistry} AS src_registry ON src_registry.asn = recent.src_asn AND recent.src_asn > 0
       LEFT JOIN ${asnRegistry} AS dst_registry ON dst_registry.asn = recent.dst_asn AND recent.dst_asn > 0
       ORDER BY recent.ts DESC
-    `,
-    { clientId, limit },
+    `;
+}
+
+function mapRecentFlowRow(row) {
+  return {
+    ts: row.ts,
+    srcIp: String(row.src_ip || ''),
+    dstIp: String(row.dst_ip || ''),
+    srcPort: Number(row.src_port) || 0,
+    dstPort: Number(row.dst_port) || 0,
+    proto: protoLabel(row.proto),
+    bytes: Number(row.bytes) || 0,
+    pkts: Number(row.packets) || 0,
+    srcAsn: Number(row.src_asn) || 0,
+    dstAsn: Number(row.dst_asn) || 0,
+    srcAsName: String(row.src_as_name || '').trim(),
+    dstAsName: String(row.dst_as_name || '').trim(),
+    srcCountry: String(row.src_country || '').trim(),
+    dstCountry: String(row.dst_country || '').trim(),
+    clientSide: String(row.client_side || ''),
+  };
+}
+
+async function overviewRecentFlows(clientId, queryParams = {}) {
+  const limit = Math.min(Math.max(Number(queryParams.limit) || 20, 1), 100);
+  const time = col('time');
+  const fast = await query(
+    recentFlowsSql(time, true),
+    { clientId, limit, recentMinutes: RECENT_FLOWS_FAST_MINUTES },
     { name: 'cabinet/overview-recent-flows' },
   );
-
+  const full = fast.rows.length >= limit
+    ? null
+    : await query(
+      recentFlowsSql(time, false),
+      { clientId, limit },
+      { name: 'cabinet/overview-recent-flows-full' },
+    );
+  const rows = full ? full.rows : fast.rows;
+  const elapsedMs = (Number(fast.elapsedMs) || 0) + (full ? Number(full.elapsedMs) || 0 : 0);
   return {
-    data: rows.map((row) => ({
-      ts: row.ts,
-      srcIp: String(row.src_ip || ''),
-      dstIp: String(row.dst_ip || ''),
-      srcPort: Number(row.src_port) || 0,
-      dstPort: Number(row.dst_port) || 0,
-      proto: protoLabel(row.proto),
-      bytes: Number(row.bytes) || 0,
-      pkts: Number(row.packets) || 0,
-      srcAsn: Number(row.src_asn) || 0,
-      dstAsn: Number(row.dst_asn) || 0,
-      srcAsName: String(row.src_as_name || '').trim(),
-      dstAsName: String(row.dst_as_name || '').trim(),
-      srcCountry: String(row.src_country || '').trim(),
-      dstCountry: String(row.dst_country || '').trim(),
-      clientSide: String(row.client_side || ''),
-    })),
+    data: rows.map(mapRecentFlowRow),
     meta: { elapsedMs, rows: rows.length },
   };
 }
