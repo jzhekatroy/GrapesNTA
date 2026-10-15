@@ -60,6 +60,7 @@ function emptyInvestigate() {
     targets: [],
     focus: null,
     focuses: [],
+    replies: {},
     victimShape: null,
     switchIn: null,
     switchOut: null,
@@ -1082,7 +1083,7 @@ async function loadTargetMedianBps({ scope, scopeId, minute, ip, proto, port, cl
   };
 }
 
-async function attachTargetFocus(investigate, { scope, scopeId, minute, clientId, parentScope } = {}) {
+async function attachTargetFocus(investigate, { scope, scopeId, minute, clientId, parentScope, withReplies = false } = {}) {
   const next = investigate || emptyInvestigate();
   const candidates = (Array.isArray(next.targets) ? next.targets : [])
     .filter((row) => Number(row.share) >= TARGET_SHARE_MIN && Number(row.srcs) >= TARGET_SRCS_MIN && Number(row.bps) > 0);
@@ -1113,7 +1114,63 @@ async function attachTargetFocus(investigate, { scope, scopeId, minute, clientId
   hits.sort((a, b) => b.bps - a.bps);
   next.focus = hits[0] || null;
   next.focuses = hits;
+  next.replies = {};
+  if (!withReplies) return next;
+  const victim = Number(next.victim?.share) >= TARGET_SHARE_MIN ? next.victim : null;
+  const replyIps = new Set([next.focus, victim]
+    .filter((row) => row?.ip && Number(row.proto) === 6)
+    .map((row) => row.ip));
+  for (const ip of replyIps) {
+    try {
+      const reply = await loadTargetReply({ scope, scopeId, minute, ip, clientId, parentScope });
+      if (reply) next.replies[ip] = reply;
+    } catch {
+      // Без обратного трафика цель остаётся как есть.
+    }
+  }
   return next;
+}
+
+// Обратный TCP адреса за ту же минуту: сколько пакетов он отправил в ответ
+// и сколько из них RST или голый SYN-ACK. Срез по адресу, не по /24: ответ
+// идёт из сети наружу, и предикат цели по dst его не видит.
+async function loadTargetReply({ scope, scopeId, minute, ip, clientId, parentScope }) {
+  const minuteTs = parseUtc(minute);
+  if (!Number.isFinite(minuteTs) || !ip) return null;
+  const srcIp = flowIpExpr(`f.${col('srcIp')}`);
+  const dstIp = flowIpExpr(`f.${col('dstIp')}`);
+  const bytes = `f.${col('bytes')}`;
+  const packets = `f.${col('packets')}`;
+  const flags = `f.${flowCol('tcpFlags') || '`tcp_flags`'}`;
+  const owner = scope === 'client'
+    ? String(scopeId || '')
+    : (scope === 'net' && parentScope !== 'provider' ? String(clientId || '') : '');
+  const params = { ip: String(ip), ...minuteBounds(minuteTs) };
+  if (owner) params.owner = owner;
+  const ownerPred = owner ? 'AND (f.src_client = {owner:String} OR f.dst_client = {owner:String})' : '';
+  const { rows } = await query(`
+    SELECT
+      countIf(${dstIp} = {ip:String}) AS in_rows,
+      sumIf(${packets}, ${dstIp} = {ip:String}) AS in_packets,
+      countIf(${srcIp} = {ip:String}) AS out_rows,
+      sumIf(${packets}, ${srcIp} = {ip:String}) AS out_packets,
+      sumIf(${packets}, ${srcIp} = {ip:String} AND (
+        bitAnd(${flags}, 4) = 4 OR (bitAnd(${flags}, 2) = 2 AND ${bytes} <= ${packets} * 80)
+      )) AS out_bad
+    FROM ${flowsRawTableRef()} AS f
+    WHERE ${timeFilterSql()}
+      AND f.${col('proto')} = 6
+      ${ownerPred}
+      AND (${dstIp} = {ip:String} OR ${srcIp} = {ip:String})
+  `, params, { name: 'detection/target-reply', clickhouse_settings: CHEAP, requestTimeoutMs: 35000 });
+  const row = rows[0] || {};
+  return {
+    inRows: Number(row.in_rows || 0),
+    inPackets: Number(row.in_packets || 0),
+    outRows: Number(row.out_rows || 0),
+    outPackets: Number(row.out_packets || 0),
+    outBad: Number(row.out_bad || 0),
+  };
 }
 
 // Порты обычного UDP: QUIC, IPsec, WireGuard, STUN, OpenVPN, веб и звонки.
@@ -1346,6 +1403,7 @@ module.exports = {
   slicePred,
   investigateIncident,
   attachTargetFocus,
+  loadTargetReply,
   mapVictimShape,
   emptyInvestigate,
   emptyBinding,

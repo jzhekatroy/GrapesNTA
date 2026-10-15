@@ -768,3 +768,92 @@ describe('загрузка сеансами и сети из многих або
     assert.equal(refined.kind, KINDS.carpet);
   });
 });
+
+// ЦОД, 46.161.49.0/24: на 46.161.49.174 прокси (TCP/10808), вход и выход почти
+// равны. 15.10 07:06 UTC открылось «целью» как атака, ответ ×1.37 пакетов.
+function proxy174() {
+  return classifyFromMetrics({
+    all: { bps: 636.86e6, avg_packet_bytes: 759, answer_pct: 100, port_entropy: 3.68 },
+    tcp: { bps: 633.13e6, avg_packet_bytes: 760 },
+    udp: { bps: 1.33e6, port_entropy: 0 },
+  }, { p95: 177.05e6, p999: 415.25e6 });
+}
+
+function proxyFocus() {
+  return {
+    ip: '46.161.49.174', proto: 6, protoLabel: 'TCP', port: 10808, srcs: 71, share: 0.6, fresh: true,
+  };
+}
+
+const REPLY_174_0706 = {
+  inRows: 481, inPackets: 3940352, outRows: 660, outPackets: 5406720, outBad: 573440,
+};
+
+describe('двусторонний обмен: цель отвечает обычным TCP', () => {
+  it('46.161.49.174 15.10 07:06: прокси с ответом ×1.37 — пик, не атака', () => {
+    const first = proxy174();
+    assert.equal(first.kind, KINDS.benign_peak);
+    const refined = refineClassification(first, {
+      victim: { ip: '46.161.49.174', proto: 6, port: 10808, share: 0.6 },
+      focus: proxyFocus(),
+      replies: { '46.161.49.174': REPLY_174_0706 },
+    }, { scope: 'net' });
+    assert.equal(refined.kind, KINDS.benign_peak);
+    assert.match(refined.reason, /двусторонний обмен · TCP\/10808 46\.161\.49\.174 отвечает ×1\.37 пакетов/);
+    assert.equal(isLegitimatePeak(refined), true);
+    assert.equal(isAttackKind(refined.kind), false);
+  });
+
+  it('без данных об ответе цель остаётся атакой, как раньше', () => {
+    const refined = refineClassification(proxy174(), { focus: proxyFocus() }, { scope: 'net' });
+    assert.equal(refined.kind, KINDS.volumetric);
+    assert.match(refined.reason, /цель TCP\/10808 46\.161\.49\.174/);
+  });
+
+  it('SYN-флуд 14.10 23:10: ответ ×1.47, но это SYN-ACK — пиком не становится', () => {
+    const refined = refineClassification(proxy174(), {
+      focus: proxyFocus(),
+      replies: {
+        '46.161.49.174': { inRows: 414, inPackets: 3391488, outRows: 608, outPackets: 4980736, outBad: 4972544 },
+      },
+    }, { scope: 'net' });
+    assert.equal(refined.kind, KINDS.volumetric);
+  });
+
+  it('95558 10.10 10:31 (PiterIX): TCP-флуд, цель не ответила ни пакетом — атака', () => {
+    const refined = refineClassification(proxy174(), {
+      focus: { ...proxyFocus(), ip: '115.126.104.18', port: 80, srcs: 20 },
+      replies: { '115.126.104.18': { inRows: 239, inPackets: 13238272, outRows: 0, outPackets: 0, outBad: 0 } },
+    }, { scope: 'client' });
+    assert.equal(refined.kind, KINDS.volumetric);
+  });
+
+  it('UDP-цель проверкой ответа не гасится', () => {
+    const refined = refineClassification(proxy174(), {
+      focus: { ...proxyFocus(), proto: 17, protoLabel: 'UDP' },
+      replies: { '46.161.49.174': REPLY_174_0706 },
+    }, { scope: 'net' });
+    assert.equal(refined.kind, KINDS.volumetric);
+  });
+
+  // Минута 14.10 21:51 UTC (1.32 Гбит/с, топ IP 91.7%) к норме часа 14 МСК
+  // до прокси (p95 152 Мбит/с, p999 252 Мбит/с): рост ×5.2, ветка «топ IP».
+  it('46.161.49.174 21:51 к норме до прокси: «топ IP» с ответом ×1.22 — пик', () => {
+    const first = classifyFromMetrics({
+      all: { bps: 1321.4e6, avg_packet_bytes: 880, answer_pct: 48 },
+      tcp: { bps: 1287.8e6 },
+      udp: { bps: 0.16e6, port_entropy: 0 },
+    }, { p95: 152.26e6, p999: 252.42e6 });
+    assert.equal(first.kind, KINDS.benign_peak);
+    const victim = { ip: '46.161.49.174', proto: 6, port: 10808, share: 0.917 };
+    assert.equal(refineClassification(first, { victim }, { scope: 'net' }).kind, KINDS.volumetric);
+    const refined = refineClassification(first, {
+      victim,
+      replies: {
+        '46.161.49.174': { inRows: 829, inPackets: 6791168, outRows: 1009, outPackets: 8265728, outBad: 196608 },
+      },
+    }, { scope: 'net' });
+    assert.equal(refined.kind, KINDS.benign_peak);
+    assert.match(refined.reason, /отвечает ×1\.22 пакетов/);
+  });
+});
