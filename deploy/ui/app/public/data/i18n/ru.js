@@ -28,9 +28,16 @@
     'nav.item.clients': 'Клиенты',
     'nav.item.smtp': 'Почта (SMTP)',
     'nav.item.ttl': 'Хранение данных',
+    'nav.item.cabinet-settings': 'Настройки',
 
     'nav.sidebar.collapse': 'Свернуть меню',
     'nav.sidebar.expand': 'Развернуть меню',
+
+    'accessDenied.title': 'Доступ запрещён',
+    'accessDenied.desc': 'У вас нет прав для доступа к данной странице.',
+    'accessDenied.toOverview': 'К обзору',
+    'accessDenied.requestedSection': 'Запрошенный раздел: {title}',
+    'accessDenied.fallbackPage': 'страница',
 
     'directions.all': 'Все направления',
     'directions.heading': 'Направления',
