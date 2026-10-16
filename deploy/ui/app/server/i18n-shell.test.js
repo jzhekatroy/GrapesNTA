@@ -96,6 +96,17 @@ test('английские подписи наблюдений совпадаю�
   assert.equal(en['chart.tip.from'], '5 min from {time}');
 });
 
+test('английские подписи страницы DNS-резолверы совпадают с требованиями', () => {
+  const en = loadLocaleMessages('en');
+  assert.equal(
+    en['dnsResolvers.subtitle'],
+    'Directory for badges on the DNS queries page: operator, subscriber, and public resolvers.',
+  );
+  assert.equal(en['dnsResolvers.role.resolver'], 'Operator resolver');
+  assert.equal(en['dnsResolvers.confirm.delete'], 'Delete resolver {prefix} permanently?');
+  assert.equal(en['dnsResolvers.err.prefixRequired'], 'Enter a prefix (CIDR)');
+});
+
 test('английские подписи страницы DNS совпадают с требованиями', () => {
   const en = loadLocaleMessages('en');
   assert.equal(
