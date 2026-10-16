@@ -1,52 +1,39 @@
 /* Журнал аудита — Администрирование (только Administrator). */
 
 const PERIOD_PRESETS = [
-  { id: '24h', label: '24 ч', hours: 24 },
-  { id: '7d', label: '7 дн', hours: 24 * 7 },
-  { id: '30d', label: '30 дн', hours: 24 * 30 },
+  { id: '24h', hours: 24 },
+  { id: '7d', hours: 24 * 7 },
+  { id: '30d', hours: 24 * 30 },
 ];
 
-const KIND_OPTIONS = [
-  { id: 'all', label: 'Все типы' },
-  { id: 'login', label: 'Вход' },
-  { id: 'login_fail', label: 'Отказ входа' },
-  { id: 'logout', label: 'Выход' },
-  { id: 'page', label: 'Страница' },
-  { id: 'query', label: 'Запрос' },
-  { id: 'chart', label: 'График' },
-  { id: 'write', label: 'Изменение' },
-];
+const KIND_OPTIONS = ['all', 'login', 'login_fail', 'logout', 'page', 'query', 'chart', 'write'];
 
 const AUDIT_PAGE_SIZE = 25;
 
-const RESULT_OPTIONS = [
-  { id: 'all', label: 'Все результаты' },
-  { id: 'ok', label: 'ok' },
-  { id: 'timeout', label: 'timeout' },
-  { id: 'oom', label: 'oom' },
-  { id: 'fail', label: 'fail' },
-  { id: 'denied', label: 'denied' },
-];
+const RESULT_OPTIONS = ['all', 'ok', 'timeout', 'oom', 'fail', 'denied'];
 
-const ACTION_LABELS = {
-  login: 'Вход',
-  login_fail: 'Отказ входа',
-  logout: 'Выход',
-  password_change: 'Смена пароля',
-  user_create: 'Пользователь: создан',
-  user_update: 'Пользователь: изменён',
-  user_delete: 'Пользователь: удалён',
-  role_change: 'Смена роли',
-  permissions_change: 'Смена прав',
-  impersonate_start: 'Вход в кабинет',
-  impersonate_end: 'Выход из кабинета',
-  page_view: 'Страница',
-  explorer_query: 'Запрос',
-  chart_create: 'График: создан',
-  chart_update: 'График: изменён',
-  chart_delete: 'График: удалён',
-  api_write: 'Изменение',
-};
+function auditT(key, params) {
+  return GrapesI18n.t(key, params);
+}
+
+function auditClientError(key) {
+  return `i18n:${key}`;
+}
+
+function auditErrorText(error) {
+  if (typeof error === 'string' && error.startsWith('i18n:')) return auditT(error.slice(5));
+  return error || '';
+}
+
+function auditRoleLabel(roleId) {
+  const id = String(roleId || '').trim();
+  if (!id) return '';
+  return GrapesI18n.localizedRoleDisplay(id, id);
+}
+
+function auditPageTitle(page) {
+  return GrapesI18n.localizedPageMeta(page.id, page).title || page.title || page.id;
+}
 
 function parseAuditEventMs(value) {
   if (value == null || value === '') return null;
@@ -71,7 +58,7 @@ function fmtAuditDateTime(value, displayTimezone) {
   if (typeof formatTipPointTime === 'function') {
     return formatTipPointTime({ bucketMs: ms }, displayTimezone);
   }
-  return new Date(ms).toLocaleString('ru-RU', {
+  return new Date(ms).toLocaleString(GrapesI18n.intlLocale(), {
     day: '2-digit',
     month: '2-digit',
     year: 'numeric',
@@ -89,18 +76,103 @@ function periodRange(presetId) {
 }
 
 function auditActionLabel(row) {
-  const mapped = ACTION_LABELS[row.action];
-  if (mapped) return mapped;
+  const actionKey = row.action ? `auditPage.action.${row.action}` : '';
+  if (actionKey && GrapesI18n.has(actionKey)) return auditT(actionKey);
   if (row.action === 'api_write' || row.method) {
-    const resource = row.resource ? ` (${row.resource})` : '';
-    return `Изменение${resource}`;
+    if (row.resource) return auditT('auditPage.action.writeResource', { resource: row.resource });
+    return auditT('auditPage.action.api_write');
   }
-  if (row.method && row.path) return `Изменение · ${row.method} ${row.path}`;
+  if (row.method && row.path) {
+    return auditT('auditPage.action.writeMethod', { method: row.method, path: row.path });
+  }
   return row.action || '—';
 }
 
+const AUDIT_PAGE_TITLE_TO_ID = {
+  'Мониторинг': 'monitoring',
+  'Обзор': 'dashboard',
+  'Настройки': 'cabinet-settings',
+  'Наблюдения': 'observations',
+  'DNS': 'dns',
+  'Разбор трафика': 'explorer',
+  'Разбор DNS': 'dns-explorer',
+  'Топ ASN': 'top',
+  'Коллекторы': 'collectors',
+  'Исключения из статистики': 'flow-exclusions',
+  'SNMP': 'snmp',
+  'BMP / BGP': 'bmp',
+  'Классификация трафика': 'traffic-classification',
+  'Моя сеть': 'cidr',
+  'Владельцы L3': 'entities',
+  'VLAN': 'vlan',
+  'DNS-резолверы': 'dns-resolvers',
+  'Порты оборудования': 'interface-roles',
+  'Сервисы и порты приложений': 'port-services',
+  'Роутеры и экспортёры': 'routers',
+  'Внешние базы данных': 'databases',
+  'Другие справочники': 'other',
+  'Пользователи и права': 'users',
+  'Журнал аудита': 'audit',
+  'Клиенты': 'clients',
+  'Почта (SMTP)': 'smtp',
+  'Диагностика': 'diagnostics',
+  'Хранение данных': 'ttl',
+};
+
+const AUDIT_OBJECT_LABEL_KEYS = {
+  'DNS-резолвер': 'auditPage.object.dnsResolver',
+  'Порт оборудования': 'auditPage.object.interfacePort',
+  'Пересчёт портов': 'auditPage.object.portsRebuild',
+  'Коммутатор (порты оборудования)': 'auditPage.object.switchPorts',
+  'График': 'auditPage.kind.chart',
+  'Разбор трафика': 'nav.item.explorer',
+  'net-entities': 'auditPage.object.page.entities',
+  'vlans': 'auditPage.object.page.vlan',
+  'port-services': 'nav.item.port-services',
+  'locations': 'auditPage.object.locations',
+  'collectors': 'nav.item.collectors',
+  'flow-sources': 'auditPage.object.flowSources',
+  'snmp-settings': 'auditPage.object.snmpSettings',
+  'snmp-agents': 'auditPage.object.snmpAgents',
+  'direction-settings': 'nav.item.traffic-classification',
+  'interface-role-rules': 'auditPage.object.interfaceRoleRules',
+  'l3-prefixes': 'nav.item.cidr',
+  'flow-exclusions': 'collectorsPage.exclusion.title',
+  'dns-resolvers': 'nav.item.dns-resolvers',
+};
+
+function auditPageObjectTitle(pageId) {
+  if (!pageId) return '';
+  const navKey = `nav.item.${pageId}`;
+  if (GrapesI18n.has(navKey)) return auditT(navKey);
+  const pageKey = `auditPage.object.page.${pageId}`;
+  if (GrapesI18n.has(pageKey)) return auditT(pageKey);
+  return '';
+}
+
+function auditStoredObjectLabel(stored) {
+  const labelKey = AUDIT_OBJECT_LABEL_KEYS[stored];
+  if (labelKey && GrapesI18n.has(labelKey)) return auditT(labelKey);
+  return '';
+}
+
 function auditObjectLabel(row) {
-  if (row.objectLabel) return row.objectLabel;
+  if (row.action === 'page_view') {
+    const byId = auditPageObjectTitle(row.objectId || row.resource);
+    if (byId) return byId;
+    const byTitle = auditPageObjectTitle(AUDIT_PAGE_TITLE_TO_ID[String(row.objectLabel || '').trim()]);
+    if (byTitle) return byTitle;
+  }
+  if (row.action === 'explorer_query') {
+    const byId = auditPageObjectTitle(row.resource || 'explorer');
+    if (byId) return byId;
+  }
+  const stored = String(row.objectLabel || '').trim();
+  if (stored) {
+    const known = auditStoredObjectLabel(stored);
+    if (known) return known;
+    return stored;
+  }
   if (row.objectId) return row.objectId;
   return '—';
 }
@@ -132,19 +204,23 @@ function auditBodyFallbackSummary(body) {
   if (!body || typeof body !== 'object') return '';
   const parts = [];
   if (body.resolverId || body.resolver_id) {
-    parts.push(`резолвер ${body.resolverId || body.resolver_id}`);
+    parts.push(auditT('auditPage.body.resolver', { id: body.resolverId || body.resolver_id }));
   }
   if (body.enabled !== undefined) {
-    parts.push(`состояние → ${body.enabled === 1 || body.enabled === true ? 'вкл' : 'выкл'}`);
+    const state = body.enabled === 1 || body.enabled === true
+      ? auditT('auditPage.enabled.on')
+      : auditT('auditPage.enabled.off');
+    parts.push(auditT('auditPage.body.state', { state }));
   }
   if (body.switchIp || body.switch_ip) {
     const ip = body.switchIp || body.switch_ip;
     const idx = body.ifIndex ?? body.if_index;
-    parts.push(`порт ${ip}${idx != null ? `:${idx}` : ''}`);
+    const endpoint = idx != null ? `${ip}:${idx}` : String(ip);
+    parts.push(auditT('auditPage.body.port', { endpoint }));
   }
-  if (body.boundary) parts.push(`сторона → ${body.boundary}`);
+  if (body.boundary) parts.push(auditT('auditPage.body.side', { boundary: body.boundary }));
   if (Array.isArray(body.interfaces) && body.interfaces.length) {
-    parts.push(`${body.interfaces.length} порт(ов)`);
+    parts.push(auditT('auditPage.body.ports', { count: body.interfaces.length }));
   }
   return parts.join('; ');
 }
@@ -158,7 +234,7 @@ function auditChangesSummary(row, { maxItems = 3 } = {}) {
   const explorer = auditExplorerDetail(parsed);
   if (explorer || row.action === 'explorer_query') {
     const parts = [];
-    if (explorer?.elapsedMs != null) parts.push(`${explorer.elapsedMs} мс`);
+    if (explorer?.elapsedMs != null) parts.push(auditT('auditPage.unit.ms', { ms: explorer.elapsedMs }));
     const firstLine = String(explorer?.filtersText || '').split('\n').find((line) => line.trim());
     if (firstLine) parts.push(firstLine.trim());
     return parts.join(' · ');
@@ -168,7 +244,7 @@ function auditChangesSummary(row, { maxItems = 3 } = {}) {
       (c) => `${c.label}: ${c.from} → ${c.to}`,
     );
     if (parsed.changes.length > maxItems) {
-      parts.push(`… ещё ${parsed.changes.length - maxItems}`);
+      parts.push(auditT('auditPage.changes.more', { count: parsed.changes.length - maxItems }));
     }
     return parts.join('; ');
   }
@@ -192,7 +268,7 @@ function AuditChangesList({ changes }) {
   if (!changes?.length) return null;
   return (
     <div className="col" style={{ gap: 6 }}>
-      <strong>Изменения</strong>
+      <strong>{auditT('auditPage.detail.changes')}</strong>
       <ul style={{ margin: 0, paddingLeft: 18, display: 'flex', flexDirection: 'column', gap: 4 }}>
         {changes.map((c) => (
           <li key={`${c.field}-${c.label}-${c.from}-${c.to}`}>
@@ -228,9 +304,9 @@ function AuditExplorerDetailBlock({ detail }) {
   const queries = Array.isArray(detail.queries) ? detail.queries : [];
   const sqlBlocks = queries.map((q, index) => {
     const header = [
-      q.name || `query ${index + 1}`,
-      q.elapsedMs != null ? `${q.elapsedMs} мс` : null,
-      q.error ? 'ошибка' : null,
+      q.name || auditT('auditPage.detail.queryName', { n: index + 1 }),
+      q.elapsedMs != null ? auditT('auditPage.unit.ms', { ms: q.elapsedMs }) : null,
+      q.error ? auditT('auditPage.detail.queryError') : null,
     ].filter(Boolean).join(' · ');
     const body = q.sql || q.error || '—';
     return `${header}\n${body}`;
@@ -239,23 +315,23 @@ function AuditExplorerDetailBlock({ detail }) {
   return (
     <div className="col" style={{ gap: 10 }}>
       {detail.elapsedMs != null && (
-        <div><strong>Время выполнения:</strong> {detail.elapsedMs} мс</div>
+        <div><strong>{auditT('auditPage.detail.elapsed')}</strong> {auditT('auditPage.unit.ms', { ms: detail.elapsedMs })}</div>
       )}
       {detail.filtersText && (
         <div className="col" style={{ gap: 6 }}>
-          <strong>Фильтры</strong>
+          <strong>{auditT('auditPage.detail.filters')}</strong>
           <pre className="mono" style={auditDetailPreStyle()}>{detail.filtersText}</pre>
         </div>
       )}
       {sqlBlocks && (
         <div className="col" style={{ gap: 6 }}>
-          <strong>SQL</strong>
+          <strong>{auditT('auditPage.detail.sql')}</strong>
           <pre className="mono" style={auditDetailPreStyle()}>{sqlBlocks}</pre>
         </div>
       )}
       {detail.error && (
         <div className="col" style={{ gap: 6 }}>
-          <strong>Ошибка</strong>
+          <strong>{auditT('auditPage.detail.error')}</strong>
           <pre
             className="mono"
             style={{ ...auditDetailPreStyle(), color: 'var(--st-critical)' }}
@@ -273,7 +349,7 @@ function AuditRequestBlock({ request }) {
   const text = formatAuditRequestBlock(request);
   return (
     <div className="col" style={{ gap: 6 }}>
-      <strong>HTTP-запрос</strong>
+      <strong>{auditT('auditPage.detail.http')}</strong>
       <pre className="mono" style={auditDetailPreStyle()}>
         {text}
       </pre>
@@ -282,11 +358,8 @@ function AuditRequestBlock({ request }) {
 }
 
 function auditResultLabel(result) {
-  if (result === 'ok') return 'ок';
-  if (result === 'timeout') return 'timeout';
-  if (result === 'oom') return 'OOM';
-  if (result === 'fail') return 'ошибка';
-  if (result === 'denied') return 'отказ';
+  const key = result ? `auditPage.result.${result}` : '';
+  if (key && GrapesI18n.has(key)) return auditT(key);
   return result || '—';
 }
 
@@ -313,7 +386,7 @@ function auditExportFields(row, displayTimezone) {
   return {
     time: fmtAuditDateTime(row.eventAt, displayTimezone),
     actor: row.actorUsername || '',
-    role: row.actorRole || '',
+    role: auditRoleLabel(row.actorRole),
     ip: normalizeClientIp(row.ip),
     action: auditActionLabel(row),
     object: auditObjectLabel(row),
@@ -345,9 +418,9 @@ function downloadBlob(filename, parts, mimeType) {
 
 function buildAuditCsv(rows, displayTimezone) {
   const headers = [
-    'Время', 'Кто', 'Роль', 'IP', 'Действие', 'Объект', 'Изменения', 'Результат',
-    'Метод', 'Путь', 'Запрос', 'User-Agent',
-  ];
+    'time', 'actor', 'role', 'ip', 'action', 'object', 'changes', 'result',
+    'method', 'path', 'request', 'userAgent',
+  ].map((id) => auditT(`auditPage.col.${id}`));
   const lines = [
     headers.map(csvEscape).join(','),
     ...rows.map((row) => {
@@ -364,26 +437,32 @@ function buildAuditCsv(rows, displayTimezone) {
 
 function buildAuditTxt(rows, displayTimezone, { periodLabel, total }) {
   const header = [
-    'Журнал аудита Grapes NTA',
-    `Экспорт: ${new Date().toLocaleString('ru-RU')}`,
-    `Период: ${periodLabel}`,
-    `Записей: ${rows.length}${total > rows.length ? ` (в выборке ${total})` : ''}`,
+    auditT('auditPage.export.docTitle'),
+    auditT('auditPage.export.exportedAt', { time: new Date().toLocaleString(GrapesI18n.intlLocale()) }),
+    auditT('auditPage.export.period', { period: periodLabel }),
+    total > rows.length
+      ? auditT('auditPage.export.recordsOf', { count: rows.length, total })
+      : auditT('auditPage.export.records', { count: rows.length }),
     '',
   ];
   const blocks = rows.map((row, index) => {
     const f = auditExportFields(row, displayTimezone);
+    const actor = f.actor || '—';
+    const requestText = formatAuditRequestBlock(auditRequestForRow(row));
     return [
       `[${index + 1}] ${f.time}`,
-      `  Кто: ${f.actor || '—'}${f.role ? ` (${f.role})` : ''}`,
-      `  IP: ${f.ip || '—'}`,
-      `  Действие: ${f.action}`,
-      `  Объект: ${f.object}`,
-      ...(f.changes ? [`  Изменения: ${f.changes}`] : []),
-      `  Результат: ${f.result}`,
-      ...(formatAuditRequestBlock(auditRequestForRow(row))
-        ? [`  Запрос:\n${formatAuditRequestBlock(auditRequestForRow(row)).split('\n').map((line) => `    ${line}`).join('\n')}`]
+      `  ${f.role
+        ? auditT('auditPage.export.whoRole', { actor, role: f.role })
+        : auditT('auditPage.export.who', { actor })}`,
+      `  ${auditT('auditPage.export.ip', { ip: f.ip || '—' })}`,
+      `  ${auditT('auditPage.export.action', { action: f.action })}`,
+      `  ${auditT('auditPage.export.object', { object: f.object })}`,
+      ...(f.changes ? [`  ${auditT('auditPage.export.changes', { changes: f.changes })}`] : []),
+      `  ${auditT('auditPage.export.result', { result: f.result })}`,
+      ...(requestText
+        ? [`  ${auditT('auditPage.export.request')}\n${requestText.split('\n').map((line) => `    ${line}`).join('\n')}`]
         : []),
-      ...(f.userAgent ? [`  User-Agent: ${f.userAgent}`] : []),
+      ...(f.userAgent ? [`  ${auditT('auditPage.export.userAgent', { userAgent: f.userAgent })}`] : []),
     ].join('\n');
   });
   return [...header, ...blocks].join('\n');
@@ -425,17 +504,22 @@ function PageAudit({ currentUser, displayTimezone }) {
   const [refreshKey, setRefreshKey] = useState(0);
   const [exporting, setExporting] = useState(false);
 
+  const locale = GrapesI18n.getLocale();
+  const sortLocale = locale === 'en' ? 'en' : 'ru';
+
   const pageOptions = useMemo(() => {
     return [...appPages].sort((a, b) => {
-      const sec = String(a.section || '').localeCompare(String(b.section || ''), 'ru');
+      const aMeta = GrapesI18n.localizedPageMeta(a.id, a);
+      const bMeta = GrapesI18n.localizedPageMeta(b.id, b);
+      const sec = String(aMeta.section || '').localeCompare(String(bMeta.section || ''), sortLocale);
       if (sec !== 0) return sec;
-      return String(a.title || '').localeCompare(String(b.title || ''), 'ru');
+      return String(aMeta.title || '').localeCompare(String(bMeta.title || ''), sortLocale);
     });
-  }, [appPages]);
+  }, [appPages, sortLocale]);
 
   const userOptions = useMemo(() => {
-    return [...users].sort((a, b) => String(a.fullName || '').localeCompare(String(b.fullName || ''), 'ru'));
-  }, [users]);
+    return [...users].sort((a, b) => String(a.fullName || '').localeCompare(String(b.fullName || ''), sortLocale));
+  }, [users, sortLocale]);
 
   useEffect(() => {
     if (!canAccess) return undefined;
@@ -463,15 +547,13 @@ function PageAudit({ currentUser, displayTimezone }) {
     };
   }, [period, userId, pageId, ipQuery, kind, resultFilter]);
 
-  const periodLabel = useMemo(
-    () => (PERIOD_PRESETS.find((p) => p.id === period) || PERIOD_PRESETS[1]).label,
-    [period],
-  );
+  const periodPreset = PERIOD_PRESETS.find((p) => p.id === period) || PERIOD_PRESETS[1];
+  const periodLabel = auditT(`auditPage.period.${periodPreset.id}`);
 
   const loadAll = useCallback(async () => {
     if (!canAccess) {
       setLoading(false);
-      setError('Журнал аудита доступен только администратору.');
+      setError(auditClientError('auditPage.adminOnly'));
       setRows([]);
       return;
     }
@@ -493,7 +575,7 @@ function PageAudit({ currentUser, displayTimezone }) {
       setRows(res.data || []);
       setTotal(res.meta?.total ?? (res.data || []).length);
     } catch (err) {
-      setError(err.message || ApiClient.LOAD_FAILED);
+      setError(err.message || auditClientError('auditPage.loadFailed'));
       setRows([]);
       setTotal(0);
     } finally {
@@ -514,7 +596,11 @@ function PageAudit({ currentUser, displayTimezone }) {
     try {
       const { rows: exportRows, total: exportTotal } = await fetchAllAuditRows(currentFilters());
       if (!exportRows.length) {
-        pushToast?.({ kind: 'warning', title: 'Нечего экспортировать', desc: 'За выбранный период записей нет.' });
+        pushToast?.({
+          kind: 'warning',
+          title: auditT('auditPage.export.nothingTitle'),
+          desc: auditT('auditPage.export.nothingDesc'),
+        });
         return;
       }
       const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
@@ -533,11 +619,15 @@ function PageAudit({ currentUser, displayTimezone }) {
       }
       pushToast?.({
         kind: 'success',
-        title: format === 'csv' ? 'CSV экспортирован' : 'TXT экспортирован',
-        desc: `${exportRows.length} записей.`,
+        title: auditT(format === 'csv' ? 'auditPage.export.csvDone' : 'auditPage.export.txtDone'),
+        desc: auditT('auditPage.export.count', { count: exportRows.length }),
       });
     } catch (err) {
-      pushToast?.({ kind: 'error', title: 'Не удалось экспортировать', desc: err.message || ApiClient.LOAD_FAILED });
+      pushToast?.({
+        kind: 'error',
+        title: auditT('auditPage.export.failed'),
+        desc: err.message || auditT('auditPage.loadFailed'),
+      });
     } finally {
       setExporting(false);
     }
@@ -546,14 +636,14 @@ function PageAudit({ currentUser, displayTimezone }) {
   const cols = [
     {
       key: 'eventAt',
-      title: 'Время',
+      title: auditT('auditPage.col.time'),
       width: 150,
       sortAccessor: (r) => r.eventAt,
       render: (r) => fmtAuditDateTime(r.eventAt, displayTimezone),
     },
     {
       key: 'actorUsername',
-      title: 'Кто',
+      title: auditT('auditPage.col.actor'),
       width: 140,
       render: (r) => (
         <span style={{ font: 'var(--pv-text-body-2-bold)' }}>
@@ -563,25 +653,25 @@ function PageAudit({ currentUser, displayTimezone }) {
     },
     {
       key: 'ip',
-      title: 'IP',
+      title: auditT('auditPage.col.ip'),
       width: 130,
       render: (r) => <span className="mono">{normalizeClientIp(r.ip) || '—'}</span>,
     },
     {
       key: 'action',
-      title: 'Действие',
+      title: auditT('auditPage.col.action'),
       width: 180,
       render: (r) => auditActionLabel(r),
     },
     {
       key: 'object',
-      title: 'Объект',
+      title: auditT('auditPage.col.object'),
       width: 180,
       render: (r) => auditObjectLabel(r),
     },
     {
       key: 'changes',
-      title: 'Изменения',
+      title: auditT('auditPage.col.changes'),
       width: 280,
       render: (r) => {
         const summary = auditChangesSummary(r);
@@ -595,7 +685,7 @@ function PageAudit({ currentUser, displayTimezone }) {
     },
     {
       key: 'result',
-      title: 'Результат',
+      title: auditT('auditPage.col.result'),
       width: 90,
       render: (r) => (
         <span style={auditResultStyle(r.result)}>{auditResultLabel(r.result)}</span>
@@ -607,8 +697,8 @@ function PageAudit({ currentUser, displayTimezone }) {
     <div className="main__container">
       <div className="page-head">
         <div>
-          <h1>Журнал аудита</h1>
-          <p>Входы, переходы по разделам и изменения в системе. Доступно только администратору.</p>
+          <h1>{auditT('auditPage.title')}</h1>
+          <p>{auditT('auditPage.subtitle')}</p>
         </div>
         <div className="row" style={{ gap: 8 }}>
           <Button
@@ -617,7 +707,7 @@ function PageAudit({ currentUser, displayTimezone }) {
             onClick={() => exportLogs('csv')}
             disabled={loading || exporting || !canAccess}
           >
-            CSV
+            {auditT('auditPage.export.csv')}
           </Button>
           <Button
             kind="ghost"
@@ -625,10 +715,10 @@ function PageAudit({ currentUser, displayTimezone }) {
             onClick={() => exportLogs('txt')}
             disabled={loading || exporting || !canAccess}
           >
-            TXT
+            {auditT('auditPage.export.txt')}
           </Button>
           <Button kind="ghost" icon="refresh" onClick={() => setRefreshKey((k) => k + 1)} disabled={loading || exporting}>
-            Обновить
+            {auditT('chrome.refresh')}
           </Button>
         </div>
       </div>
@@ -636,58 +726,58 @@ function PageAudit({ currentUser, displayTimezone }) {
       <Card pad="sm" style={{ marginBottom: 16 }}>
         <div className="row" style={{ gap: 12, flexWrap: 'wrap', alignItems: 'flex-end' }}>
           <label className="col" style={{ gap: 4 }}>
-            <span style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-secondary)' }}>Период</span>
+            <span style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-secondary)' }}>{auditT('auditPage.filter.period')}</span>
             <select className="input" value={period} onChange={(e) => { setPeriod(e.target.value); setPage(1); }}>
               {PERIOD_PRESETS.map((p) => (
-                <option key={p.id} value={p.id}>{p.label}</option>
+                <option key={p.id} value={p.id}>{auditT(`auditPage.period.${p.id}`)}</option>
               ))}
             </select>
           </label>
           <label className="col" style={{ gap: 4, minWidth: 200 }}>
-            <span style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-secondary)' }}>Пользователь</span>
+            <span style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-secondary)' }}>{auditT('auditPage.filter.user')}</span>
             <select className="input" value={userId} onChange={(e) => { setUserId(e.target.value); setPage(1); }}>
-              <option value="">Все пользователи</option>
+              <option value="">{auditT('auditPage.filter.allUsers')}</option>
               {userOptions.map((u) => (
                 <option key={u.id} value={u.id}>{u.fullName} ({u.username})</option>
               ))}
             </select>
           </label>
           <label className="col" style={{ gap: 4, minWidth: 200 }}>
-            <span style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-secondary)' }}>Страница</span>
+            <span style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-secondary)' }}>{auditT('auditPage.filter.page')}</span>
             <select className="input" value={pageId} onChange={(e) => { setPageId(e.target.value); setPage(1); }}>
-              <option value="">Все страницы</option>
+              <option value="">{auditT('auditPage.filter.allPages')}</option>
               {pageOptions.map((p) => (
-                <option key={p.id} value={p.id}>{p.title}</option>
+                <option key={p.id} value={p.id}>{auditPageTitle(p)}</option>
               ))}
             </select>
           </label>
           <label className="col" style={{ gap: 4, minWidth: 140 }}>
-            <span style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-secondary)' }}>IP</span>
+            <span style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-secondary)' }}>{auditT('auditPage.filter.ip')}</span>
             <input
               className="input"
-              placeholder="185.x.x.x"
+              placeholder={auditT('auditPage.filter.ipPlaceholder')}
               value={ipQuery}
               onChange={(e) => { setIpQuery(e.target.value); setPage(1); }}
             />
           </label>
           <label className="col" style={{ gap: 4 }}>
-            <span style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-secondary)' }}>Тип</span>
+            <span style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-secondary)' }}>{auditT('auditPage.filter.kind')}</span>
             <select className="input" value={kind} onChange={(e) => { setKind(e.target.value); setPage(1); }}>
-              {KIND_OPTIONS.map((o) => (
-                <option key={o.id} value={o.id}>{o.label}</option>
+              {KIND_OPTIONS.map((id) => (
+                <option key={id} value={id}>{auditT(`auditPage.kind.${id}`)}</option>
               ))}
             </select>
           </label>
           <label className="col" style={{ gap: 4 }}>
-            <span style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-secondary)' }}>Результат</span>
+            <span style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-secondary)' }}>{auditT('auditPage.filter.result')}</span>
             <select className="input" value={resultFilter} onChange={(e) => { setResultFilter(e.target.value); setPage(1); }}>
-              {RESULT_OPTIONS.map((o) => (
-                <option key={o.id} value={o.id}>{o.label}</option>
+              {RESULT_OPTIONS.map((id) => (
+                <option key={id} value={id}>{auditT(`auditPage.result.${id}`)}</option>
               ))}
             </select>
           </label>
           <Button kind="primary" onClick={applyFilters} disabled={loading || !canAccess}>
-            Применить
+            {auditT('auditPage.apply')}
           </Button>
         </div>
       </Card>
@@ -695,16 +785,16 @@ function PageAudit({ currentUser, displayTimezone }) {
       {!canAccess ? (
         <Card>
           <div style={{ color: 'var(--fg-secondary)', font: 'var(--pv-text-body-3)' }}>
-            Журнал аудита доступен только администратору.
+            {auditT('auditPage.adminOnly')}
           </div>
         </Card>
       ) : error ? (
         <Card>
-          <div style={{ color: 'var(--st-critical)' }}>{error}</div>
+          <div style={{ color: 'var(--st-critical)' }}>{auditErrorText(error)}</div>
         </Card>
       ) : loading ? (
         <Card pad="sm">
-          <div style={{ padding: 32, textAlign: 'center', color: 'var(--fg-secondary)' }}>Загрузка…</div>
+          <div style={{ padding: 32, textAlign: 'center', color: 'var(--fg-secondary)' }}>{auditT('auditPage.loading')}</div>
         </Card>
       ) : (
         <>
@@ -717,8 +807,8 @@ function PageAudit({ currentUser, displayTimezone }) {
             totalRows={total}
             onPageChange={setPage}
             onRowClick={(r) => setSelected(r)}
-            emptyTitle="За период записей нет"
-            emptyDesc="Измените фильтры или период."
+            emptyTitle={auditT('auditPage.emptyTitle')}
+            emptyDesc={auditT('auditPage.emptyDesc')}
           />
         </>
       )}
@@ -726,7 +816,7 @@ function PageAudit({ currentUser, displayTimezone }) {
       <SidePanel
         open={!!selected}
         onClose={() => setSelected(null)}
-        title="Событие аудита"
+        title={auditT('auditPage.detail.title')}
         subtitle={selected ? fmtAuditDateTime(selected.eventAt, displayTimezone) : ''}
       >
         {selected && (() => {
@@ -737,19 +827,19 @@ function PageAudit({ currentUser, displayTimezone }) {
             : auditRequestForRow(selected);
           return (
             <div className="col" style={{ gap: 12, font: 'var(--pv-text-body-3)' }}>
-              <div><strong>Действие:</strong> {auditActionLabel(selected)}</div>
-              <div><strong>Кто:</strong> {selected.actorUsername || '—'}{selected.actorRole ? ` (${selected.actorRole})` : ''}</div>
-              <div><strong>IP:</strong> <span className="mono">{normalizeClientIp(selected.ip) || '—'}</span></div>
-              <div><strong>Объект:</strong> {auditObjectLabel(selected)}</div>
-              <div><strong>Результат:</strong> <span style={auditResultStyle(selected.result)}>{auditResultLabel(selected.result)}</span></div>
+              <div><strong>{auditT('auditPage.detail.action')}</strong> {auditActionLabel(selected)}</div>
+              <div><strong>{auditT('auditPage.detail.actor')}</strong> {selected.actorUsername || '—'}{selected.actorRole ? ` (${auditRoleLabel(selected.actorRole)})` : ''}</div>
+              <div><strong>{auditT('auditPage.detail.ip')}</strong> <span className="mono">{normalizeClientIp(selected.ip) || '—'}</span></div>
+              <div><strong>{auditT('auditPage.detail.object')}</strong> {auditObjectLabel(selected)}</div>
+              <div><strong>{auditT('auditPage.detail.result')}</strong> <span style={auditResultStyle(selected.result)}>{auditResultLabel(selected.result)}</span></div>
               <AuditChangesList changes={parsed?.changes} />
               {parsed?.legacyText && !parsed?.changes?.length && !explorerDetail && (
-                <div><strong>Детали:</strong> {parsed.legacyText}</div>
+                <div><strong>{auditT('auditPage.detail.legacy')}</strong> {parsed.legacyText}</div>
               )}
               <AuditExplorerDetailBlock detail={explorerDetail} />
               <AuditRequestBlock request={request} />
               {selected.userAgent && (
-                <div><strong>User-Agent:</strong> <span style={{ wordBreak: 'break-word' }}>{selected.userAgent}</span></div>
+                <div><strong>{auditT('auditPage.detail.userAgent')}</strong> <span style={{ wordBreak: 'break-word' }}>{selected.userAgent}</span></div>
               )}
             </div>
           );

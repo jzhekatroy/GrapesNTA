@@ -161,6 +161,28 @@ test('английские подписи страницы разбора тра
   assert.equal(en['table.scrollLeft'], 'Scroll left');
 });
 
+test('английские подписи журнала аудита совпадают с требованиями', () => {
+  const en = loadLocaleMessages('en');
+  assert.equal(en['auditPage.title'], 'Audit log');
+  assert.equal(en['auditPage.apply'], 'Apply');
+  assert.equal(en['auditPage.adminOnly'], 'The audit log is available to administrators only.');
+  assert.equal(en['auditPage.emptyTitle'], 'No records for this period');
+  assert.equal(en['auditPage.kind.login_fail'], 'Sign-in denied');
+  assert.equal(en['auditPage.action.user_delete'], 'User: deleted');
+  assert.equal(en['auditPage.result.denied'], 'Denied');
+  assert.equal(en['auditPage.export.nothingTitle'], 'Nothing to export');
+  assert.equal(en['auditPage.detail.elapsed'], 'Elapsed:');
+  assert.equal(en['auditPage.changes.more'], '… {count} more');
+  assert.equal(en['auditPage.unit.ms'], '{ms} ms');
+  assert.equal(en['auditPage.object.dnsResolver'], 'DNS resolver');
+  assert.equal(en['auditPage.object.page.entities'], 'L3 owners');
+  const GrapesI18n = loadI18n();
+  GrapesI18n.setLocale('en');
+  assert.equal(GrapesI18n.t('auditPage.export.count', { count: 3 }), '3 records.');
+  GrapesI18n.setLocale('ru');
+  assert.equal(GrapesI18n.t('auditPage.export.count', { count: 3 }), '3 записей.');
+});
+
 test('подпись числа записей в таблице на английском', () => {
   const en = loadLocaleMessages('en');
   assert.equal(en['table.records.one'], '{count} record');
