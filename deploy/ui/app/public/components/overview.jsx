@@ -162,9 +162,9 @@ function OverviewTrafficChartCard({
 
 function OverviewDirectionToggle({ value, onChange }) {
   return (
-    <div className="seg seg--compact" title="Направление трафика">
-      <button type="button" className={value === 'in' ? 'is-active' : ''} onClick={() => onChange?.('in')}>К вам</button>
-      <button type="button" className={value === 'out' ? 'is-active' : ''} onClick={() => onChange?.('out')}>От вас</button>
+    <div className="seg seg--compact" title={overviewT('cabinet.direction.trafficTitle')}>
+      <button type="button" className={value === 'in' ? 'is-active' : ''} onClick={() => onChange?.('in')}>{overviewT('cabinet.direction.toYou')}</button>
+      <button type="button" className={value === 'out' ? 'is-active' : ''} onClick={() => onChange?.('out')}>{overviewT('cabinet.direction.fromYou')}</button>
     </div>
   );
 }
@@ -264,7 +264,7 @@ function OverviewCountryCard({
         tools={
           <div className="country-heatmap-tools row">
             {extraTools}
-            <div className="seg seg--compact" title="Метрика заливки карты">
+            <div className="seg seg--compact" title={overviewT('dashboard.geo.fillMetricTitle')}>
               <button type="button" className={colorMetric === 'share' ? 'is-active' : ''} onClick={() => onColorMetricChange?.('share')}>%</button>
               <button type="button" className={colorMetric === 'volume' ? 'is-active' : ''} onClick={() => onColorMetricChange?.('volume')}>Gb</button>
             </div>
@@ -451,7 +451,13 @@ function OverviewRecentFlowsCard({
               <td className="recent-flows__time mono" title={flow.ts}>{formatRecentFlowTs(flow.ts, displayTimezone)}</td>
               {cabinetMode && (
                 <td className="recent-flows__direction-col">
-                  <Badge tone="info">{flow.clientSide === 'dst' ? 'К вам' : flow.clientSide === 'both' ? 'Внутри' : 'От вас'}</Badge>
+                  <Badge tone="info">
+                    {flow.clientSide === 'dst'
+                      ? overviewT('cabinet.direction.toYou')
+                      : flow.clientSide === 'both'
+                        ? overviewT('cabinet.direction.internal')
+                        : overviewT('cabinet.direction.fromYou')}
+                  </Badge>
                 </td>
               )}
               <td className="recent-flows__flow-col"><OverviewFlowEndpoint flow={flow} /></td>
