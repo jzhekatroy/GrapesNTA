@@ -28,9 +28,16 @@
     'nav.item.clients': 'Clients',
     'nav.item.smtp': 'Email (SMTP)',
     'nav.item.ttl': 'Data storage',
+    'nav.item.cabinet-settings': 'Settings',
 
     'nav.sidebar.collapse': 'Collapse menu',
     'nav.sidebar.expand': 'Expand menu',
+
+    'accessDenied.title': 'Access denied',
+    'accessDenied.desc': 'You do not have permission to access this page.',
+    'accessDenied.toOverview': 'Go to overview',
+    'accessDenied.requestedSection': 'Requested section: {title}',
+    'accessDenied.fallbackPage': 'page',
 
     'directions.all': 'All directions',
     'directions.heading': 'Directions',
