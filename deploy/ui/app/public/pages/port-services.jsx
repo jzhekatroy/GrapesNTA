@@ -1,5 +1,9 @@
 /* Сервисы / порты — справочник port_services (ClickHouse) */
 
+function portServicesT(key, params) {
+  return GrapesI18n.t(key, params);
+}
+
 const TRANSPORTS = [
   { value: 'tcp', label: 'TCP' },
   { value: 'udp', label: 'UDP' },
@@ -8,15 +12,54 @@ const TRANSPORTS = [
   { value: 'icmpv6', label: 'ICMPv6' },
 ];
 
-const PORT_MODES = [
-  { value: 'single', label: 'Один порт' },
-  { value: 'range', label: 'Диапазон' },
-];
+function portServicePortModes() {
+  return [
+    { value: 'single', label: portServicesT('portServicesPage.portMode.single') },
+    { value: 'range', label: portServicesT('portServicesPage.portMode.range') },
+  ];
+}
 
 const COMMON_CATEGORIES = ['web', 'dns', 'voip', 'database', 'mail', 'vpn', 'management', 'p2p', 'games', 'video'];
 
-const SAVE_SUCCESS_TITLE = 'Настройки сохранены';
-const SAVE_SUCCESS_DESC = 'Изменения будут автоматически применены в течение 60 секунд.';
+const PORT_SERVICES_SERVER_ERROR_MAP = {
+  'Укажите начало и конец диапазона': 'portServicesPage.err.rangeBothRequired',
+  'Укажите начало диапазона в пределах 0–65535': 'portServicesPage.err.rangeFrom',
+  'Укажите конец диапазона в пределах 0–65535': 'portServicesPage.err.rangeTo',
+  'Начало диапазона не может быть больше конца': 'portServicesPage.err.rangeOrder',
+  'Укажите порт в диапазоне 0–65535': 'portServicesPage.err.portRange',
+  'Выберите транспортный протокол': 'portServicesPage.err.transportRequired',
+  'Укажите код сервиса': 'portServicesPage.err.serviceCodeRequired',
+  'Код сервиса: только латиница нижнего регистра, цифры и _': 'portServicesPage.err.serviceCodeFormat',
+  'Укажите название сервиса': 'portServicesPage.err.serviceNameRequired',
+  'Укажите категорию': 'portServicesPage.err.categoryRequired',
+  'Запись не найдена или уже отключена': 'portServicesPage.err.notFound',
+  'Не указан транспорт': 'portServicesPage.err.transportNotSpecified',
+  'Не указан диапазон портов': 'portServicesPage.err.portRangeNotSpecified',
+  'Нечего добавлять: все стандартные сервисы уже есть или конфликтуют с вашими правилами.': 'portServicesPage.seed.messageNothingToAdd',
+};
+
+const PORT_SERVICES_OVERLAP_RE = /^Диапазон пересекается с существующим правилом: ([^/]+)\/(\S+) (.+)\. Измените диапазон или отключите старое правило\.$/;
+const PORT_SERVICES_SEED_INSERTED_RE = /^Добавлено (\d+) стандартных сервисов\. Существующие правила не изменены\.$/;
+
+function localizePortServiceServerError(message) {
+  const msg = String(message || '').trim();
+  if (!msg) return '';
+  const key = PORT_SERVICES_SERVER_ERROR_MAP[msg];
+  if (key) return portServicesT(key);
+  const overlapMatch = msg.match(PORT_SERVICES_OVERLAP_RE);
+  if (overlapMatch) {
+    return portServicesT('portServicesPage.err.overlap', {
+      transport: overlapMatch[1],
+      portLabel: overlapMatch[2],
+      name: overlapMatch[3],
+    });
+  }
+  const insertedMatch = msg.match(PORT_SERVICES_SEED_INSERTED_RE);
+  if (insertedMatch) {
+    return portServicesT('portServicesPage.seed.messageInserted', { count: insertedMatch[1] });
+  }
+  return msg;
+}
 
 const SERVICE_CODE_RE = /^[a-z0-9_]+$/;
 
@@ -28,7 +71,7 @@ function fmtPortServiceUpdatedAt(value) {
   if (!value) return '—';
   const d = new Date(value);
   if (Number.isNaN(d.getTime())) return String(value);
-  return d.toLocaleString('ru-RU', {
+  return d.toLocaleString(GrapesI18n.intlLocale(), {
     day: '2-digit',
     month: '2-digit',
     year: 'numeric',
@@ -60,7 +103,7 @@ function CategoryCombobox({ value, onChange, options }) {
       <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
         <input
           className="input"
-          placeholder="Новая категория"
+          placeholder={portServicesT('portServicesPage.category.newPlaceholder')}
           value={value}
           onChange={(e) => onChange(e.target.value)}
           autoFocus
@@ -75,7 +118,7 @@ function CategoryCombobox({ value, onChange, options }) {
               onChange(items[0] || '');
             }}
           >
-            Выбрать из списка
+            {portServicesT('portServicesPage.category.pickFromList')}
           </button>
         )}
       </div>
@@ -98,11 +141,11 @@ function CategoryCombobox({ value, onChange, options }) {
         onChange(next);
       }}
     >
-      <option value="" disabled>Выберите категорию</option>
+      <option value="" disabled>{portServicesT('portServicesPage.category.selectPlaceholder')}</option>
       {items.map((c) => (
         <option key={c} value={c}>{c}</option>
       ))}
-      <option value={CATEGORY_NEW}>+ Новая категория…</option>
+      <option value={CATEGORY_NEW}>{portServicesT('portServicesPage.category.newOption')}</option>
     </select>
   );
 }
@@ -135,7 +178,7 @@ function PagePortServices() {
       });
       if (cancelled) return;
       if (res.source === 'error') {
-        setLoadError(ApiClient.LOAD_FAILED);
+        setLoadError(portServicesT('portServicesPage.loadFailed'));
         setRows([]);
       } else {
         setRows((res.rows || []).map((r) => ({ ...r, id: portServiceRowKey(r) })));
@@ -152,31 +195,42 @@ function PagePortServices() {
 
   const handleDisable = async (row) => {
     const label = `${row.transport}/${row.portLabel}`;
-    if (!window.confirm(`Отключить правило «${label} → ${row.serviceName}»?`)) return;
+    if (!window.confirm(portServicesT('portServicesPage.confirm.disable', {
+      label,
+      serviceName: row.serviceName,
+    }))) return;
     try {
       await ApiClient.disablePortService({
         transport: row.transport,
         portFrom: row.portFrom,
         portTo: row.portTo,
       });
-      pushToast({ kind: 'success', title: SAVE_SUCCESS_TITLE, desc: SAVE_SUCCESS_DESC });
+      pushToast({
+        kind: 'success',
+        title: portServicesT('portServicesPage.saveSuccessTitle'),
+        desc: portServicesT('portServicesPage.saveSuccessDesc'),
+      });
       reload();
     } catch (err) {
-      pushToast({ kind: 'error', title: 'Не удалось отключить', desc: err.message });
+      pushToast({
+        kind: 'error',
+        title: portServicesT('portServicesPage.disableFailed'),
+        desc: localizePortServiceServerError(err.message),
+      });
     }
   };
 
   const cols = [
     {
       key: 'transport',
-      title: 'Транспорт',
+      title: portServicesT('portServicesPage.col.transport'),
       width: 90,
       sortAccessor: (r) => r.transport,
       render: (r) => <span className="tag">{r.transport}</span>,
     },
     {
       key: 'portLabel',
-      title: 'Порт / диапазон',
+      title: portServicesT('portServicesPage.col.portRange'),
       width: 120,
       sortAccessor: (r) => r.portFrom,
       render: (r) => (
@@ -185,14 +239,14 @@ function PagePortServices() {
     },
     {
       key: 'serviceCode',
-      title: 'Код сервиса',
+      title: portServicesT('portServicesPage.col.serviceCode'),
       width: 120,
       sortAccessor: (r) => r.serviceCode,
       render: (r) => <span className="mono">{r.serviceCode}</span>,
     },
     {
       key: 'serviceName',
-      title: 'Название',
+      title: portServicesT('portServicesPage.col.serviceName'),
       width: 160,
       sortAccessor: (r) => r.serviceName,
       render: (r) => (
@@ -201,14 +255,14 @@ function PagePortServices() {
     },
     {
       key: 'category',
-      title: 'Категория',
+      title: portServicesT('portServicesPage.col.category'),
       width: 100,
       sortAccessor: (r) => r.category,
       render: (r) => <span className="tag">{r.category || '—'}</span>,
     },
     {
       key: 'description',
-      title: 'Описание',
+      title: portServicesT('portServicesPage.col.description'),
       width: 200,
       render: (r) => (
         <span style={{ color: 'var(--fg-secondary)', font: 'var(--pv-text-body-3)' }}>
@@ -218,7 +272,7 @@ function PagePortServices() {
     },
     {
       key: 'updatedAt',
-      title: 'Обновлено',
+      title: portServicesT('portServicesPage.col.updatedAt'),
       width: 150,
       sortAccessor: (r) => r.updatedAt,
       render: (r) => (
@@ -233,44 +287,44 @@ function PagePortServices() {
     <div className="main__container">
       <div className="page-head">
         <div>
-          <h1>Сервисы и порты приложений</h1>
-          <p>Соответствия портов и диапазонов сервисам для классификации трафика в отчётах.</p>
+          <h1>{portServicesT('portServicesPage.title')}</h1>
+          <p>{portServicesT('portServicesPage.subtitle')}</p>
         </div>
         <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
-          <Button kind="ghost" icon="refresh" onClick={reload} disabled={loading}>Обновить</Button>
+          <Button kind="ghost" icon="refresh" onClick={reload} disabled={loading}>{portServicesT('chrome.refresh')}</Button>
           <Button
             kind="ghost"
             onClick={() => setShowSeedDefaults(true)}
             disabled={!!loadError || !canWrite}
           >
-            Добавить стандартные
+            {portServicesT('portServicesPage.addDefaults')}
           </Button>
-          <Button kind="primary" icon="plus" onClick={() => setShowAdd(true)} disabled={!!loadError || !canWrite}>Добавить сервис</Button>
+          <Button kind="primary" icon="plus" onClick={() => setShowAdd(true)} disabled={!!loadError || !canWrite}>{portServicesT('portServicesPage.addService')}</Button>
         </div>
       </div>
 
       <div className="row" style={{ gap: 8, marginBottom: 16, flexWrap: 'wrap' }}>
         <div className="field" style={{ margin: 0, minWidth: 140 }}>
-          <label style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-secondary)' }}>Транспорт</label>
+          <label style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-secondary)' }}>{portServicesT('portServicesPage.filter.transport')}</label>
           <select
             className="input"
             value={transportFilter}
             onChange={(e) => setTransportFilter(e.target.value)}
           >
-            <option value="">Все</option>
+            <option value="">{portServicesT('portServicesPage.filter.all')}</option>
             {TRANSPORTS.map((t) => (
               <option key={t.value} value={t.value}>{t.label}</option>
             ))}
           </select>
         </div>
         <div className="field" style={{ margin: 0, minWidth: 140 }}>
-          <label style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-secondary)' }}>Категория</label>
+          <label style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-secondary)' }}>{portServicesT('portServicesPage.filter.category')}</label>
           <select
             className="input"
             value={categoryFilter}
             onChange={(e) => setCategoryFilter(e.target.value)}
           >
-            <option value="">Все</option>
+            <option value="">{portServicesT('portServicesPage.filter.all')}</option>
             {categoryOptions.map((c) => (
               <option key={c} value={c}>{c}</option>
             ))}
@@ -280,10 +334,10 @@ function PagePortServices() {
 
       {loading ? (
         <Card pad="sm">
-          <div style={{ padding: 32, textAlign: 'center', color: 'var(--fg-secondary)' }}>Загрузка…</div>
+          <div style={{ padding: 32, textAlign: 'center', color: 'var(--fg-secondary)' }}>{portServicesT('portServicesPage.loading')}</div>
         </Card>
       ) : loadError ? (
-        <Empty icon="db" title="Не удалось загрузить" desc={loadError} action={<Button kind="primary" icon="refresh" onClick={reload}>Повторить</Button>} />
+        <Empty icon="db" title={portServicesT('portServicesPage.loadFailed')} desc={loadError} action={<Button kind="primary" icon="refresh" onClick={reload}>{portServicesT('portServicesPage.retry')}</Button>} />
       ) : (
         <DataTable
           rows={rows}
@@ -294,19 +348,19 @@ function PagePortServices() {
           onSelectChange={setSelected}
           pageSize={15}
           onRowClick={canWrite ? (r) => setEditing({ ...r, isNew: false }) : undefined}
-          emptyTitle="Нет активных правил"
-          emptyDesc="Добавьте соответствие порта сервису или уточните фильтры."
+          emptyTitle={portServicesT('portServicesPage.emptyTitle')}
+          emptyDesc={portServicesT('portServicesPage.emptyDesc')}
           toolbar={{
             search,
             onSearch: setSearch,
-            searchPlaceholder: 'Порт, код, название, категория…',
+            searchPlaceholder: portServicesT('portServicesPage.searchPlaceholder'),
           }}
           rowActions={canWrite ? (r) => (
             <div className="row" style={{ gap: 4, justifyContent: 'flex-end' }}>
-              <button className="icon-btn tt" data-tt="Редактировать" onClick={(e) => { e.stopPropagation(); setEditing({ ...r, isNew: false }); }}>
+              <button className="icon-btn tt" data-tt={portServicesT('portServicesPage.tt.edit')} onClick={(e) => { e.stopPropagation(); setEditing({ ...r, isNew: false }); }}>
                 <Icon name="edit" size={15} />
               </button>
-              <button className="icon-btn tt" data-tt="Отключить" onClick={(e) => { e.stopPropagation(); handleDisable(r); }}>
+              <button className="icon-btn tt" data-tt={portServicesT('portServicesPage.tt.disable')} onClick={(e) => { e.stopPropagation(); handleDisable(r); }}>
                 <Icon name="trash" size={15} />
               </button>
             </div>
@@ -324,7 +378,11 @@ function PagePortServices() {
           setShowAdd(false);
           setEditing(null);
           reload();
-          pushToast({ kind: 'success', title: SAVE_SUCCESS_TITLE, desc: SAVE_SUCCESS_DESC });
+          pushToast({
+            kind: 'success',
+            title: portServicesT('portServicesPage.saveSuccessTitle'),
+            desc: portServicesT('portServicesPage.saveSuccessDesc'),
+          });
         }}
       />
 
@@ -357,7 +415,10 @@ function SeedDefaultsModal({ open, onClose, onDone }) {
         const data = await ApiClient.previewPortServiceDefaults();
         if (!cancelled) setPreview(data);
       } catch (err) {
-        if (!cancelled) setError(err.message || 'Не удалось загрузить превью');
+        if (!cancelled) {
+          setError(localizePortServiceServerError(err.message)
+            || portServicesT('portServicesPage.seed.previewLoadFailed'));
+        }
       } finally {
         if (!cancelled) setLoading(false);
       }
@@ -378,12 +439,16 @@ function SeedDefaultsModal({ open, onClose, onDone }) {
       const meta = body.meta || body;
       pushToast({
         kind: 'success',
-        title: meta.inserted > 0 ? `Добавлено: ${meta.inserted}` : 'Нечего добавлять',
-        desc: meta.message || SAVE_SUCCESS_DESC,
+        title: meta.inserted > 0
+          ? portServicesT('portServicesPage.toast.addedCount', { count: meta.inserted })
+          : portServicesT('portServicesPage.toast.nothingToAdd'),
+        desc: localizePortServiceServerError(meta.message)
+          || portServicesT('portServicesPage.saveSuccessDesc'),
       });
       onDone();
     } catch (err) {
-      setError(err.message || 'Не удалось добавить стандартные сервисы');
+      setError(localizePortServiceServerError(err.message)
+        || portServicesT('portServicesPage.seed.applyFailed'));
     } finally {
       setApplying(false);
     }
@@ -393,51 +458,54 @@ function SeedDefaultsModal({ open, onClose, onDone }) {
     <Modal
       open={open}
       onClose={applying ? () => {} : onClose}
-      title="Стандартные сервисы"
-      subtitle="Добавятся только отсутствующие соответствия. Ваши правила не перезаписываются."
+      title={portServicesT('portServicesPage.seed.title')}
+      subtitle={portServicesT('portServicesPage.seed.subtitle')}
       size="lg"
       footer={(
         <div className="row" style={{ gap: 8, justifyContent: 'flex-end' }}>
-          <Button kind="ghost" onClick={onClose} disabled={applying}>Отмена</Button>
+          <Button kind="ghost" onClick={onClose} disabled={applying}>{portServicesT('portServicesPage.seed.cancel')}</Button>
           <Button kind="primary" onClick={handleApply} disabled={!canApply || applying}>
-            {applying ? 'Добавление…' : `Добавить${toAdd.length ? ` (${toAdd.length})` : ''}`}
+            {applying
+              ? portServicesT('portServicesPage.seed.adding')
+              : (toAdd.length
+                ? portServicesT('portServicesPage.seed.addCount', { count: toAdd.length })
+                : portServicesT('portServicesPage.seed.add'))}
           </Button>
         </div>
       )}
     >
       {loading ? (
-        <div style={{ padding: 16, color: 'var(--fg-secondary)' }}>Сверяем со справочником…</div>
+        <div style={{ padding: 16, color: 'var(--fg-secondary)' }}>{portServicesT('portServicesPage.seed.matching')}</div>
       ) : error ? (
         <div style={{ color: 'var(--danger, #c44)' }}>{error}</div>
       ) : (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
           <div style={{ font: 'var(--pv-text-body-2)', color: 'var(--fg-secondary)' }}>
-            В наборе {preview?.totalDefaults ?? 0} стандартных правил
-            (HTTP/HTTPS, DNS, SSH, mail, БД и др.).
+            {portServicesT('portServicesPage.seed.summary', { total: preview?.totalDefaults ?? 0 })}
           </div>
           <div className="row" style={{ gap: 12, flexWrap: 'wrap' }}>
-            <span className="tag">Будет добавлено: {counts.toAdd ?? 0}</span>
-            <span className="tag">Уже есть: {counts.skippedExisting ?? 0}</span>
+            <span className="tag">{portServicesT('portServicesPage.seed.tag.toAdd', { count: counts.toAdd ?? 0 })}</span>
+            <span className="tag">{portServicesT('portServicesPage.seed.tag.existing', { count: counts.skippedExisting ?? 0 })}</span>
             {(counts.skippedDisabled ?? 0) > 0 && (
-              <span className="tag">Пропущено (отключены вами): {counts.skippedDisabled}</span>
+              <span className="tag">{portServicesT('portServicesPage.seed.tag.skippedDisabled', { count: counts.skippedDisabled })}</span>
             )}
             {(counts.skippedOverlap ?? 0) > 0 && (
-              <span className="tag">Пропущено (пересечение): {counts.skippedOverlap}</span>
+              <span className="tag">{portServicesT('portServicesPage.seed.tag.skippedOverlap', { count: counts.skippedOverlap })}</span>
             )}
           </div>
           {toAdd.length === 0 ? (
             <div style={{ padding: '8px 0', color: 'var(--fg-secondary)' }}>
-              Нечего добавлять — все стандартные ключи уже учтены или конфликтуют с вашими правилами.
+              {portServicesT('portServicesPage.seed.nothingToAdd')}
             </div>
           ) : (
             <div style={{ maxHeight: 280, overflow: 'auto', border: '1px solid var(--border)', borderRadius: 8 }}>
               <table style={{ width: '100%', borderCollapse: 'collapse', font: 'var(--pv-text-body-3)' }}>
                 <thead>
                   <tr style={{ textAlign: 'left', color: 'var(--fg-secondary)' }}>
-                    <th style={{ padding: '8px 10px' }}>Транспорт</th>
-                    <th style={{ padding: '8px 10px' }}>Порт</th>
-                    <th style={{ padding: '8px 10px' }}>Сервис</th>
-                    <th style={{ padding: '8px 10px' }}>Категория</th>
+                    <th style={{ padding: '8px 10px' }}>{portServicesT('portServicesPage.seed.previewCol.transport')}</th>
+                    <th style={{ padding: '8px 10px' }}>{portServicesT('portServicesPage.seed.previewCol.port')}</th>
+                    <th style={{ padding: '8px 10px' }}>{portServicesT('portServicesPage.seed.previewCol.service')}</th>
+                    <th style={{ padding: '8px 10px' }}>{portServicesT('portServicesPage.seed.previewCol.category')}</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -455,7 +523,7 @@ function SeedDefaultsModal({ open, onClose, onDone }) {
           )}
           {(counts.skippedDisabled > 0 || counts.skippedOverlap > 0) && (
             <div style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-secondary)' }}>
-              Отключённые вами правила и пересечения с активными диапазонами не восстанавливаются и не меняются.
+              {portServicesT('portServicesPage.seed.footerNote')}
             </div>
           )}
         </div>
@@ -512,35 +580,35 @@ function PortServiceFormModal({ open, row, isNew, categoryOptions, onClose, onSa
 
   const validateClient = () => {
     if (!TRANSPORTS.some((t) => t.value === transport)) {
-      return 'Выберите транспортный протокол';
+      return portServicesT('portServicesPage.err.transportRequired');
     }
     if (portMode === 'single') {
-      if (String(port).trim() === '') return 'Укажите порт';
+      if (String(port).trim() === '') return portServicesT('portServicesPage.err.portRequired');
       const p = Number(port);
       if (!Number.isInteger(p) || p < 0 || p > 65535) {
-        return 'Укажите порт в диапазоне 0–65535';
+        return portServicesT('portServicesPage.err.portRange');
       }
     } else {
       if (String(portFrom).trim() === '' || String(portTo).trim() === '') {
-        return 'Укажите начало и конец диапазона';
+        return portServicesT('portServicesPage.err.rangeBothRequired');
       }
       const from = Number(portFrom);
       const to = Number(portTo);
       if (!Number.isInteger(from) || from < 0 || from > 65535) {
-        return 'Укажите начало диапазона в пределах 0–65535';
+        return portServicesT('portServicesPage.err.rangeFrom');
       }
       if (!Number.isInteger(to) || to < 0 || to > 65535) {
-        return 'Укажите конец диапазона в пределах 0–65535';
+        return portServicesT('portServicesPage.err.rangeTo');
       }
-      if (from > to) return 'Начало диапазона не может быть больше конца';
+      if (from > to) return portServicesT('portServicesPage.err.rangeOrder');
     }
     const code = serviceCode.trim().toLowerCase();
-    if (!code) return 'Укажите код сервиса';
+    if (!code) return portServicesT('portServicesPage.err.serviceCodeRequired');
     if (!SERVICE_CODE_RE.test(code)) {
-      return 'Код сервиса: только латиница нижнего регистра, цифры и _';
+      return portServicesT('portServicesPage.err.serviceCodeFormat');
     }
-    if (!serviceName.trim()) return 'Укажите название сервиса';
-    if (!category.trim()) return 'Укажите категорию';
+    if (!serviceName.trim()) return portServicesT('portServicesPage.err.serviceNameRequired');
+    if (!category.trim()) return portServicesT('portServicesPage.err.categoryRequired');
     return '';
   };
 
@@ -582,7 +650,7 @@ function PortServiceFormModal({ open, row, isNew, categoryOptions, onClose, onSa
       await ApiClient.savePortService(payload);
       onSaved();
     } catch (err) {
-      setFormError(err.message);
+      setFormError(localizePortServiceServerError(err.message));
     } finally {
       setSaving(false);
     }
@@ -594,17 +662,19 @@ function PortServiceFormModal({ open, row, isNew, categoryOptions, onClose, onSa
     ? `${row.transport}/${row.portLabel}`
     : null;
 
+  const portModes = portServicePortModes();
+
   return (
     <Modal
       open={open}
       onClose={onClose}
-      title={isNew ? 'Добавить сервис' : 'Редактировать сервис'}
-      subtitle={isNew ? 'Новое правило port → service' : keyLabel}
+      title={isNew ? portServicesT('portServicesPage.form.addTitle') : portServicesT('portServicesPage.form.editTitle')}
+      subtitle={isNew ? portServicesT('portServicesPage.form.addSubtitle') : keyLabel}
       footer={
         <>
-          <Button kind="ghost" onClick={onClose} disabled={saving}>Отмена</Button>
+          <Button kind="ghost" onClick={onClose} disabled={saving}>{portServicesT('portServicesPage.form.cancel')}</Button>
           <Button kind="primary" icon="save" onClick={handleSave} disabled={saving}>
-            {saving ? 'Сохранение…' : 'Сохранить'}
+            {saving ? portServicesT('portServicesPage.form.saving') : portServicesT('portServicesPage.form.save')}
           </Button>
         </>
       }
@@ -616,7 +686,7 @@ function PortServiceFormModal({ open, row, isNew, categoryOptions, onClose, onSa
       )}
       <div className="grid grid--2col grid--gap-sm">
         <div className="field">
-          <label>Транспорт</label>
+          <label>{portServicesT('portServicesPage.form.transport')}</label>
           <select className="input" value={transport} onChange={(e) => setTransport(e.target.value)}>
             {TRANSPORTS.map((t) => (
               <option key={t.value} value={t.value}>{t.label}</option>
@@ -624,7 +694,7 @@ function PortServiceFormModal({ open, row, isNew, categoryOptions, onClose, onSa
           </select>
         </div>
         <div className="field">
-          <label>Режим порта</label>
+          <label>{portServicesT('portServicesPage.form.portMode')}</label>
           <select
             className="input"
             value={portMode}
@@ -639,14 +709,14 @@ function PortServiceFormModal({ open, row, isNew, categoryOptions, onClose, onSa
               }
             }}
           >
-            {PORT_MODES.map((m) => (
+            {portModes.map((m) => (
               <option key={m.value} value={m.value}>{m.label}</option>
             ))}
           </select>
         </div>
         {portMode === 'single' ? (
           <div className="field" style={{ gridColumn: '1 / -1' }}>
-            <label>Порт</label>
+            <label>{portServicesT('portServicesPage.form.port')}</label>
             <input
               className="input mono"
               type="number"
@@ -660,7 +730,7 @@ function PortServiceFormModal({ open, row, isNew, categoryOptions, onClose, onSa
         ) : (
           <>
             <div className="field">
-              <label>Порт от</label>
+              <label>{portServicesT('portServicesPage.form.portFrom')}</label>
               <input
                 className="input mono"
                 type="number"
@@ -672,7 +742,7 @@ function PortServiceFormModal({ open, row, isNew, categoryOptions, onClose, onSa
               />
             </div>
             <div className="field">
-              <label>Порт до</label>
+              <label>{portServicesT('portServicesPage.form.portTo')}</label>
               <input
                 className="input mono"
                 type="number"
@@ -686,7 +756,7 @@ function PortServiceFormModal({ open, row, isNew, categoryOptions, onClose, onSa
           </>
         )}
         <div className="field">
-          <label>Код сервиса</label>
+          <label>{portServicesT('portServicesPage.form.serviceCode')}</label>
           <input
             className="input mono"
             placeholder="https"
@@ -695,7 +765,7 @@ function PortServiceFormModal({ open, row, isNew, categoryOptions, onClose, onSa
           />
         </div>
         <div className="field">
-          <label>Название</label>
+          <label>{portServicesT('portServicesPage.form.serviceName')}</label>
           <input
             className="input"
             placeholder="HTTPS"
@@ -704,7 +774,7 @@ function PortServiceFormModal({ open, row, isNew, categoryOptions, onClose, onSa
           />
         </div>
         <div className="field">
-          <label>Категория</label>
+          <label>{portServicesT('portServicesPage.form.category')}</label>
           <CategoryCombobox
             key={open ? (isNew ? 'new' : `${row?.transport}-${row?.portFrom}-${row?.portTo}`) : 'closed'}
             value={category}
@@ -713,10 +783,10 @@ function PortServiceFormModal({ open, row, isNew, categoryOptions, onClose, onSa
           />
         </div>
         <div className="field" style={{ gridColumn: '1 / -1' }}>
-          <label>Описание</label>
+          <label>{portServicesT('portServicesPage.form.description')}</label>
           <input
             className="input"
-            placeholder="Необязательно"
+            placeholder={portServicesT('portServicesPage.form.descriptionOptional')}
             value={description}
             onChange={(e) => setDescription(e.target.value)}
           />
@@ -726,4 +796,4 @@ function PortServiceFormModal({ open, row, isNew, categoryOptions, onClose, onSa
   );
 }
 
-Object.assign(window, { PagePortServices, TRANSPORTS, PORT_MODES });
+Object.assign(window, { PagePortServices, TRANSPORTS, portServicePortModes, localizePortServiceServerError });
