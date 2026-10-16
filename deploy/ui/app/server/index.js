@@ -583,7 +583,10 @@ app.post('/api/auth/login', async (req, res) => {
         objectLabel: username,
         result: 'fail',
       }).catch(() => {});
-      res.status(401).json({ error: 'Вход с паролем не сработал. Попробуйте еще раз, пожалуйста' });
+      res.status(401).json({
+        error: 'Вход с паролем не сработал. Попробуйте еще раз, пожалуйста',
+        code: 'invalid_credentials',
+      });
       return;
     }
     const sessionId = createSession(user);
