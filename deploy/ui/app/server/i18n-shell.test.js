@@ -169,3 +169,18 @@ test('подпись числа записей в таблице на англи
   GrapesI18n.setLocale('en');
   assert.equal(GrapesI18n.t('table.records.many', { count: 50 }), '50 records');
 });
+
+test('английские подписи страницы сервисов и портов совпадают с требованиями', () => {
+  const en = loadLocaleMessages('en');
+  assert.equal(en['portServicesPage.title'], 'Applications services and ports');
+  assert.equal(en['portServicesPage.addService'], 'Add service');
+  assert.equal(en['portServicesPage.emptyTitle'], 'No active rules');
+  assert.equal(en['portServicesPage.tt.disable'], 'Disable');
+  assert.equal(en['portServicesPage.err.overlap'], 'Range overlaps an existing rule: {transport}/{portLabel} {name}. Change the range or disable the existing rule.');
+  const GrapesI18n = loadI18n();
+  GrapesI18n.setLocale('en');
+  assert.equal(
+    GrapesI18n.t('portServicesPage.toast.addedCount', { count: 3 }),
+    'Added: 3',
+  );
+});
