@@ -161,6 +161,21 @@ test('английские подписи страницы разбора тра
   assert.equal(en['table.scrollLeft'], 'Scroll left');
 });
 
+test('английские подписи страницы Почта (SMTP) совпадают с требованиями', () => {
+  const en = loadLocaleMessages('en');
+  assert.equal(en['smtpPage.title'], 'Email (SMTP)');
+  assert.equal(en['smtpPage.save'], 'Save SMTP');
+  assert.equal(en['smtpPage.toast.saved'], 'SMTP saved');
+  assert.equal(en['smtpPage.toast.testSent'], 'Test message sent');
+  assert.equal(en['smtpPage.err.portRange'], 'Port: expected an integer from {min} to {max}');
+  const GrapesI18n = loadI18n();
+  GrapesI18n.setLocale('en');
+  assert.equal(
+    GrapesI18n.t('smtpPage.err.portRange', { min: 1, max: 65535 }),
+    'Port: expected an integer from 1 to 65535',
+  );
+});
+
 test('подпись числа записей в таблице на английском', () => {
   const en = loadLocaleMessages('en');
   assert.equal(en['table.records.one'], '{count} record');
