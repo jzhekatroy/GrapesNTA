@@ -161,6 +161,41 @@ test('английские подписи страницы разбора тра
   assert.equal(en['table.scrollLeft'], 'Scroll left');
 });
 
+test('английские подписи страницы Клиенты совпадают с требованиями', () => {
+  const en = loadLocaleMessages('en');
+  assert.equal(en['clientsPage.title'], 'Clients');
+  assert.equal(en['clientsPage.add'], 'Add client');
+  assert.equal(en['clientsPage.tab.audit'], 'Sign-in log');
+  assert.equal(en['clientsPage.col.bindMode'], 'Binding method');
+  assert.equal(en['clientsPage.bindMode.prefixes'], 'By networks (CIDR)');
+  assert.equal(en['clientsPage.bindMode.ports'], 'By interface ports');
+  assert.equal(en['clientsPage.action.openCabinet'], 'Open cabinet');
+  assert.equal(en['clientsPage.err.nameRequired'], 'Enter the client name');
+  assert.equal(en['clientsPage.bindings.dnsTitle'], 'DNS limitation');
+  assert.equal(en['clientsPage.bindings.free'], 'Available');
+  assert.equal(en['clientsPage.users.err.password'], 'Password must be at least 12 characters');
+  assert.equal(en['clientsPage.users.resetTip'], 'Reset password');
+  assert.equal(en['clientsPage.audit.col.reason'], 'End reason');
+  assert.equal(en['clientsPage.reason.timeout'], 'Session expired (30 min)');
+  assert.equal(en['clientsPage.session.active'], 'Active');
+  const GrapesI18n = loadI18n();
+  GrapesI18n.setLocale('en');
+  assert.equal(
+    GrapesI18n.t('clientsPage.confirm.enable', { name: 'Acme' }),
+    'Enable client "Acme"?',
+  );
+  assert.equal(GrapesI18n.t('clientsPage.duration.h', { h: 1, m: 2 }), '1 h 2 min');
+  assert.equal(
+    GrapesI18n.t('clientsPage.users.copyText', { username: 'ivanov', password: 'secret' }),
+    'Login: ivanov\nPassword: secret',
+  );
+  GrapesI18n.setLocale('ru');
+  assert.equal(
+    GrapesI18n.t('clientsPage.toast.impersonateDesc', { name: 'Ромашка' }),
+    'Открыт кабинет «Ромашка» (только просмотр).',
+  );
+});
+
 test('подпись числа записей в таблице на английском', () => {
   const en = loadLocaleMessages('en');
   assert.equal(en['table.records.one'], '{count} record');
