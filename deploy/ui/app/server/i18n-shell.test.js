@@ -169,3 +169,23 @@ test('подпись числа записей в таблице на англи
   GrapesI18n.setLocale('en');
   assert.equal(GrapesI18n.t('table.records.many', { count: 50 }), '50 records');
 });
+
+test('английские подписи страницы пользователей совпадают с требованиями', () => {
+  const en = loadLocaleMessages('en');
+  assert.equal(en['usersPage.title'], 'Users and access rights');
+  assert.equal(en['usersPage.tab.users'], 'Users');
+  assert.equal(en['usersPage.override.inherit'], 'Inherit');
+  assert.equal(en['usersPage.confirm.deleteUser'], 'Delete user {username}?');
+  assert.equal(en['nav.item.entities'], 'L3 owners');
+  assert.equal(en['nav.section.cabinet'], 'Cabinet');
+  const GrapesI18n = loadI18n();
+  GrapesI18n.setLocale('en');
+  assert.equal(
+    GrapesI18n.localizedPageMeta('vlan', { title: 'VLAN', section: 'Модель сети' }).title,
+    'VLAN',
+  );
+  assert.equal(
+    GrapesI18n.localizedPageMeta('cabinet-settings', { title: 'Настройки', section: 'Кабинет' }).section,
+    'Cabinet',
+  );
+});
