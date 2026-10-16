@@ -92,12 +92,12 @@ function withNavLabels(sec) {
 const CABINET_NAV = [
   {
     id: 'cabinet',
-    section: 'Кабинет',
+    section: '',
     items: [
-      { id: 'dashboard', label: 'Обзор', icon: 'dashboard' },
-      { id: 'explorer', label: 'Разбор трафика', icon: 'explorer' },
-      { id: 'dns', label: 'DNS', icon: 'globe' },
-      { id: 'cabinet-settings', label: 'Настройки', icon: 'sliders' },
+      { id: 'dashboard', label: '', icon: 'dashboard' },
+      { id: 'explorer', label: '', icon: 'explorer' },
+      { id: 'dns', label: '', icon: 'globe' },
+      { id: 'cabinet-settings', label: '', icon: 'sliders' },
     ],
   },
 ];
@@ -181,7 +181,7 @@ function Sidebar({ current, onNavigate, collapsed, effectivePermissions, cabinet
   const visibleNav = useMemo(
     () => {
       const raw = cabinetMode ? CABINET_NAV : filterNav(NAV, effectivePermissions);
-      return cabinetMode ? raw : raw.map(withNavLabels);
+      return raw.map(withNavLabels);
     },
     [cabinetMode, effectivePermissions, locale],
   );
@@ -217,9 +217,9 @@ function Sidebar({ current, onNavigate, collapsed, effectivePermissions, cabinet
           <GrapesGlyph size={18} />
         </div>
         <div className="sidebar__wordmark">
-          <span className="sidebar__wordmark-name">{cabinetMode ? (clientDisplayName || 'кабинет') : 'grapes'}</span>
+          <span className="sidebar__wordmark-name">{cabinetMode ? (clientDisplayName || t('cabinet.wordmarkSuffix')) : 'grapes'}</span>
           {!cabinetMode && <span className="sidebar__wordmark-dot">.</span>}
-          <small>{cabinetMode ? 'кабинет' : 'NTA'}</small>
+          <small>{cabinetMode ? t('cabinet.wordmarkSuffix') : 'NTA'}</small>
         </div>
       </div>
       <nav className="sidebar__nav">
@@ -539,10 +539,10 @@ function Header({ current, onNavigate, onToggleSidebar, currentUser, onLogout, o
     : PAGES_WITHOUT_HEADER_FILTERS.has(current);
   const hideDirectionFilter = current === 'dns' || cabinetMode;
   const hideCollectorFilter = cabinetMode;
-  const sectionLabel = cabinetMode ? (clientDisplayName || 'Кабинет клиента') : meta.section;
+  const sectionLabel = cabinetMode ? (clientDisplayName || t('cabinet.clientPortalFallback')) : meta.section;
   return (
     <header className="header">
-      <button className="icon-btn" onClick={onToggleSidebar} title="Меню">
+      <button className="icon-btn" onClick={onToggleSidebar} title={t('chrome.menu')}>
         <Icon name="menu" size={20} />
       </button>
       <div className="header__breadcrumb">
@@ -612,7 +612,7 @@ function Header({ current, onNavigate, onToggleSidebar, currentUser, onLogout, o
         <span className="hr-v" />
         <UserAccountMenu currentUser={currentUser} pageTitles={pageTitles} hiddenPageIds={hiddenPageIds} locale={locale} displayTimezone={displayTimezone} />
         {isImpersonating(currentUser) && onStopImpersonation && (
-          <Button kind="ghost" size="sm" onClick={onStopImpersonation}>Выйти из кабинета</Button>
+          <Button kind="ghost" size="sm" onClick={onStopImpersonation}>{t('cabinet.exit')}</Button>
         )}
         <PortalTooltip label={t('chrome.logout')}>
           <button className="icon-btn" title={t('chrome.logout')} onClick={onLogout}>
@@ -2496,7 +2496,7 @@ function ImpersonationBanner({ cabinet, onStop, onRefreshUser }) {
   const [now, setNow] = useState(Date.now());
   const expiresAt = Number(cabinet?.impersonation?.expiresAt) || 0;
   const startedAt = cabinet?.impersonation?.startedAt;
-  const clientName = cabinet?.clientDisplayName || cabinet?.clientId || 'клиент';
+  const clientName = cabinet?.clientDisplayName || cabinet?.clientId || t('cabinet.fallbackClientName');
 
   useEffect(() => {
     const timer = setInterval(() => setNow(Date.now()), 1000);
@@ -2518,7 +2518,7 @@ function ImpersonationBanner({ cabinet, onStop, onRefreshUser }) {
   const mins = Math.floor(remainingMs / 60000);
   const secs = Math.floor((remainingMs % 60000) / 1000);
   const timerLabel = `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
-  const bannerText = `Просмотр кабинета «${clientName}» · только чтение · осталось ${timerLabel}`;
+  const bannerText = t('cabinet.impersonation.banner', { name: clientName, time: timerLabel });
 
   return (
     <div className="impersonation-banner" role="status">
@@ -2529,11 +2529,11 @@ function ImpersonationBanner({ cabinet, onStop, onRefreshUser }) {
         </span>
         {startedAt && (
           <span className="impersonation-banner__meta">
-            с {formatUserDateTime(startedAt)}
+            {t('cabinet.impersonation.since', { time: formatUserDateTime(startedAt) })}
           </span>
         )}
       </div>
-      <Button kind="primary" size="sm" onClick={onStop}>Выйти из кабинета</Button>
+      <Button kind="primary" size="sm" onClick={onStop}>{t('cabinet.exit')}</Button>
     </div>
   );
 }
