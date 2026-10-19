@@ -201,6 +201,94 @@ test('английские подписи страницы BMP / BGP совпа�
   );
 });
 
+test('английские подписи страницы Почта (SMTP) совпадают с требованиями', () => {
+  const en = loadLocaleMessages('en');
+  assert.equal(en['smtpPage.title'], 'Email (SMTP)');
+  assert.equal(en['smtpPage.save'], 'Save SMTP');
+  assert.equal(en['smtpPage.toast.saved'], 'SMTP saved');
+  assert.equal(en['smtpPage.toast.testSent'], 'Test message sent');
+  assert.equal(en['smtpPage.err.portRange'], 'Port: expected an integer from {min} to {max}');
+  const GrapesI18n = loadI18n();
+  GrapesI18n.setLocale('en');
+  assert.equal(
+    GrapesI18n.t('smtpPage.err.portRange', { min: 1, max: 65535 }),
+    'Port: expected an integer from 1 to 65535',
+  );
+});
+test('английские подписи страницы Клиенты совпадают с требованиями', () => {
+  const en = loadLocaleMessages('en');
+  assert.equal(en['clientsPage.title'], 'Clients');
+  assert.equal(en['clientsPage.add'], 'Add client');
+  assert.equal(en['clientsPage.tab.audit'], 'Sign-in log');
+  assert.equal(en['clientsPage.col.bindMode'], 'Binding method');
+  assert.equal(en['clientsPage.bindMode.prefixes'], 'By networks (CIDR)');
+  assert.equal(en['clientsPage.bindMode.ports'], 'By interface ports');
+  assert.equal(en['clientsPage.action.openCabinet'], 'Open cabinet');
+  assert.equal(en['clientsPage.err.nameRequired'], 'Enter the client name');
+  assert.equal(en['clientsPage.bindings.dnsTitle'], 'DNS limitation');
+  assert.equal(en['clientsPage.bindings.free'], 'Available');
+  assert.equal(en['clientsPage.users.err.password'], 'Password must be at least 12 characters');
+  assert.equal(en['clientsPage.users.resetTip'], 'Reset password');
+  assert.equal(en['clientsPage.audit.col.reason'], 'End reason');
+  assert.equal(en['clientsPage.reason.timeout'], 'Session expired (30 min)');
+  assert.equal(en['clientsPage.session.active'], 'Active');
+  const GrapesI18n = loadI18n();
+  GrapesI18n.setLocale('en');
+  assert.equal(
+    GrapesI18n.t('clientsPage.confirm.enable', { name: 'Acme' }),
+    'Enable client "Acme"?',
+  );
+  assert.equal(GrapesI18n.t('clientsPage.duration.h', { h: 1, m: 2 }), '1 h 2 min');
+  assert.equal(
+    GrapesI18n.t('clientsPage.users.copyText', { username: 'ivanov', password: 'secret' }),
+    'Login: ivanov\nPassword: secret',
+  );
+  GrapesI18n.setLocale('ru');
+  assert.equal(
+    GrapesI18n.t('clientsPage.toast.impersonateDesc', { name: 'Ромашка' }),
+    'Открыт кабинет «Ромашка» (только просмотр).',
+  );
+});
+test('английские подписи журнала аудита совпадают с требованиями', () => {
+  const en = loadLocaleMessages('en');
+  assert.equal(en['auditPage.title'], 'Audit log');
+  assert.equal(en['auditPage.apply'], 'Apply');
+  assert.equal(en['auditPage.adminOnly'], 'The audit log is available to administrators only.');
+  assert.equal(en['auditPage.emptyTitle'], 'No records for this period');
+  assert.equal(en['auditPage.kind.login_fail'], 'Sign-in denied');
+  assert.equal(en['auditPage.action.user_delete'], 'User: deleted');
+  assert.equal(en['auditPage.result.denied'], 'Denied');
+  assert.equal(en['auditPage.export.nothingTitle'], 'Nothing to export');
+  assert.equal(en['auditPage.detail.elapsed'], 'Elapsed:');
+  assert.equal(en['auditPage.changes.more'], '… {count} more');
+  assert.equal(en['auditPage.unit.ms'], '{ms} ms');
+  assert.equal(en['auditPage.object.dnsResolver'], 'DNS resolver');
+  assert.equal(en['auditPage.object.page.entities'], 'L3 owners');
+  const GrapesI18n = loadI18n();
+  GrapesI18n.setLocale('en');
+  assert.equal(GrapesI18n.t('auditPage.export.count', { count: 3 }), '3 records.');
+  GrapesI18n.setLocale('ru');
+  assert.equal(GrapesI18n.t('auditPage.export.count', { count: 3 }), '3 записей.');
+});
+test('английские подписи страницы пользователей совпадают с требованиями', () => {
+  const en = loadLocaleMessages('en');
+  assert.equal(en['usersPage.title'], 'Users and access rights');
+  assert.equal(en['usersPage.tab.users'], 'Users');
+  assert.equal(en['usersPage.override.inherit'], 'Inherit');
+  assert.equal(en['usersPage.confirm.deleteUser'], 'Delete user {username}?');
+  assert.equal(en['nav.item.entities'], 'L3 owners');
+  assert.equal(en['nav.section.cabinet'], 'Cabinet');
+  const GrapesI18n = loadI18n();
+  GrapesI18n.setLocale('en');
+  assert.equal(
+    GrapesI18n.localizedPageMeta('vlan', { title: 'VLAN', section: 'Модель сети' }).title,
+    'VLAN',
+  );
+  assert.equal(
+    GrapesI18n.localizedPageMeta('cabinet-settings', { title: 'Настройки', section: 'Кабинет' }).section,
+    'Cabinet',
+  );
+});
 test('английские подписи страницы сервисов и портов совпадают с требованиями', () => {
   const en = loadLocaleMessages('en');
   assert.equal(en['portServicesPage.title'], 'Applications services and ports');
@@ -214,4 +302,35 @@ test('английские подписи страницы сервисов и �
     GrapesI18n.t('portServicesPage.toast.addedCount', { count: 3 }),
     'Added: 3',
   );
+});
+test('английские подписи страницы «Моя сеть» совпадают с требованиями', () => {
+  const en = loadLocaleMessages('en');
+  assert.equal(en['network.title'], 'My network');
+  assert.equal(en['network.tab.entities'], 'L3 owners');
+  assert.equal(en['network.tab.cidr'], 'CIDR');
+  assert.equal(en['network.cidr.role.provider_public'], 'Provider public network');
+  assert.equal(
+    en['network.err.entityDuplicate'],
+    'An owner with ID {entityId} already exists',
+  );
+  const GrapesI18n = loadI18n();
+  GrapesI18n.setLocale('en');
+  assert.equal(
+    GrapesI18n.t('network.err.entityDuplicate', { entityId: 'isp:acme' }),
+    'An owner with ID isp:acme already exists',
+  );
+});
+test('английские подписи страницы классификации трафика совпадают с требованиями', () => {
+  const en = loadLocaleMessages('en');
+  assert.equal(en['nav.item.traffic-classification'], 'Traffic classification');
+  assert.equal(
+    en['trafficClassification.subtitle'],
+    'How the system determines flow direction: inbound, outbound, transit, internal, or untagged.',
+  );
+  assert.equal(en['trafficClassification.card.direction'], 'Direction detection');
+  assert.equal(en['trafficClassification.directionMode.ports.label'], 'By equipment ports');
+  assert.equal(en['trafficClassification.unknown.foreign.label'], 'Treat as transit');
+  assert.equal(en['trafficClassification.viewUnclassifiedExplorer'], 'View untagged traffic by autonomous systems');
+  assert.equal(en['trafficClassification.saveSuccessTitle'], 'Settings saved');
+  assert.equal(en['trafficClassification.loadFailed'], 'Failed to load');
 });

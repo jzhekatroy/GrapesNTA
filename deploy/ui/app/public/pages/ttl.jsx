@@ -1,6 +1,46 @@
 /* Управление TTL — сроки хранения таблиц ClickHouse */
 
-const HEAVY_WARNING = 'MODIFY TTL на больших таблицах запускает мутацию и может упереться в память сервера. Меняйте по одной таблице, желательно вне пиковой нагрузки.';
+function ttlT(key, params) {
+  return GrapesI18n.t(key, params);
+}
+
+function ttlCatalogLabel(id, fallback) {
+  const key = `ttlPage.catalog.${id}`;
+  return GrapesI18n.has(key) ? ttlT(key) : fallback;
+}
+
+const FLOW_MODE_IDS = ['off', 'on'];
+
+function flowModeLabel(id) {
+  return ttlT(`ttlPage.flow.mode.${id}.label`);
+}
+
+function flowModeHint(id) {
+  return ttlT(`ttlPage.flow.mode.${id}.hint`);
+}
+
+function flowDayStateLabel(state) {
+  const key = `ttlPage.flowDays.state.${state}`;
+  return GrapesI18n.has(key) ? ttlT(key) : state;
+}
+
+function flowDayComment(row) {
+  if (row.state === 'failed') {
+    if (row.error) return row.error;
+    return ttlT('ttlPage.flowDays.note.compressFailed');
+  }
+  if (row.state === 'done' && row.bytesBefore) {
+    return ttlT('ttlPage.flowDays.wasBytes', { bytes: fmtBytes(row.bytesBefore) });
+  }
+  if (row.noteCode && GrapesI18n.has(`ttlPage.flowDays.note.${row.noteCode}`)) {
+    return ttlT(`ttlPage.flowDays.note.${row.noteCode}`);
+  }
+  return row.note || '';
+}
+
+function loadFailedMessage(err) {
+  return err?.message || ttlT('ttlPage.loadFailed');
+}
 
 function diskBarTone(usedPct) {
   const pct = Number(usedPct);
@@ -21,16 +61,20 @@ function TtlDiskBar({ disk }) {
 
   return (
     <div className="ttl-disk">
-      <div className="ttl-disk__caption">Занятость диска</div>
+      <div className="ttl-disk__caption">{ttlT('ttlPage.disk.caption')}</div>
       <div
         className={`ttl-disk-bar ttl-disk-bar--${tone}`}
         role="progressbar"
-        aria-label="Занятость диска ClickHouse"
+        aria-label={ttlT('ttlPage.disk.aria')}
         aria-valuemin={0}
         aria-valuemax={100}
         aria-valuenow={Math.round(usedPct)}
         aria-valuetext={label}
-        title={`Занято ${usedPct.toFixed(1)}% · всего ${totalLabel} · свободно ${freeLabel}`}
+        title={ttlT('ttlPage.disk.tooltip', {
+          pct: usedPct.toFixed(1),
+          total: totalLabel,
+          free: freeLabel,
+        })}
       >
         <div className="ttl-disk-bar__crit-zone" aria-hidden="true" />
         <div className="ttl-disk-bar__fill" style={{ width: `${usedPct}%` }} />
@@ -41,11 +85,6 @@ function TtlDiskBar({ disk }) {
     </div>
   );
 }
-
-const FLOW_MODES = [
-  { id: 'off', label: 'Выключено', hint: 'Все сутки хранятся без сжатия.' },
-  { id: 'on', label: 'Включено', hint: 'Ночью старые сутки сжимаются.' },
-];
 
 const FLOW_FIELD = { display: 'grid', gap: 6, alignContent: 'start' };
 const FLOW_LABEL = { font: 'var(--pv-text-body-3)', color: 'var(--fg-secondary)' };
@@ -64,38 +103,22 @@ function FlowStat({ label, value, tone }) {
   );
 }
 
-const FLOW_DAY = {
-  done: 'Сжаты',
-  running: 'Сжимаются',
-  failed: 'Ошибка',
-  waiting: 'Ожидание',
-  skipped: 'Пропущены',
-  full: 'Целиком',
-  pending: 'Ещё нет',
-};
-
-function flowDayComment(row) {
-  if (row.state === 'failed') return row.error || '';
-  if (row.state === 'done' && row.bytesBefore) return `было ${fmtBytes(row.bytesBefore)}`;
-  return row.note || '';
-}
-
 function FlowDays({ days }) {
   const rows = Array.isArray(days) ? days : [];
   return (
     <Card pad="sm">
       <div style={{ display: 'grid', gap: 10 }}>
-        <div style={FLOW_LABEL}>Сутки на диске</div>
+        <div style={FLOW_LABEL}>{ttlT('ttlPage.flowDays.title')}</div>
         {rows.length === 0 ? (
-          <div style={FLOW_HINT}>Суток сырых потоков нет.</div>
+          <div style={FLOW_HINT}>{ttlT('ttlPage.flowDays.empty')}</div>
         ) : (
           <table style={{ width: '100%', borderCollapse: 'collapse', font: 'var(--pv-text-body-3)' }}>
             <thead>
               <tr style={{ color: 'var(--fg-muted)', textAlign: 'left' }}>
-                <th style={{ padding: '4px 8px 4px 0', fontWeight: 'normal' }}>Сутки</th>
-                <th style={{ padding: '4px 8px', fontWeight: 'normal', textAlign: 'right' }}>Объём</th>
-                <th style={{ padding: '4px 8px', fontWeight: 'normal' }}>Сжатие</th>
-                <th style={{ padding: '4px 0 4px 8px', fontWeight: 'normal' }}>Комментарий</th>
+                <th style={{ padding: '4px 8px 4px 0', fontWeight: 'normal' }}>{ttlT('ttlPage.flowDays.col.day')}</th>
+                <th style={{ padding: '4px 8px', fontWeight: 'normal', textAlign: 'right' }}>{ttlT('ttlPage.flowDays.col.volume')}</th>
+                <th style={{ padding: '4px 8px', fontWeight: 'normal' }}>{ttlT('ttlPage.flowDays.col.compression')}</th>
+                <th style={{ padding: '4px 0 4px 8px', fontWeight: 'normal' }}>{ttlT('ttlPage.flowDays.col.comment')}</th>
               </tr>
             </thead>
             <tbody>
@@ -107,7 +130,7 @@ function FlowDays({ days }) {
                     <td className="mono" style={{ padding: '6px 8px 6px 0' }}>{row.day}</td>
                     <td className="mono" style={{ padding: '6px 8px', textAlign: 'right' }}>{fmtBytes(row.bytes)}</td>
                     <td style={{ padding: '6px 8px', color: failed ? 'var(--st-critical)' : 'var(--fg-primary)' }}>
-                      {FLOW_DAY[row.state] || row.state}
+                      {flowDayStateLabel(row.state)}
                     </td>
                     <td style={{ padding: '6px 0 6px 8px', color: failed ? 'var(--st-critical)' : 'var(--fg-secondary)' }}>
                       {comment}
@@ -142,7 +165,7 @@ function FlowStoragePanel({ canWrite }) {
       setTotalDays(body.flows?.ttlDays == null ? '' : String(body.flows.ttlDays));
       setError('');
     } catch (err) {
-      setError(err.message || ApiClient.LOAD_FAILED);
+      setError(loadFailedMessage(err));
     }
   }, []);
 
@@ -154,19 +177,19 @@ function FlowStoragePanel({ canWrite }) {
     const hot = Number(hotDays);
     const kb = Number(thresholdKb);
     if (!Number.isInteger(total) || total < 1) {
-      setError('Укажите срок хранения в сутках');
+      setError(ttlT('ttlPage.flow.err.retention'));
       return;
     }
     if (!Number.isInteger(hot) || hot < 1 || hot >= total) {
-      setError('Срок без сжатия должен быть от 1 суток и меньше общего срока');
+      setError(ttlT('ttlPage.flow.err.hotDays'));
       return;
     }
     if (!Number.isInteger(kb) || kb < 1) {
-      setError('Укажите размер мелкого потока в КБ, не меньше 1');
+      setError(ttlT('ttlPage.flow.err.threshold'));
       return;
     }
     if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(String(form.runAt || ''))) {
-      setError('Время запуска — в формате ЧЧ:ММ');
+      setError(ttlT('ttlPage.flow.err.runAt'));
       return;
     }
     setSaving(true);
@@ -183,9 +206,9 @@ function FlowStoragePanel({ canWrite }) {
         });
       }
       await load();
-      pushToast({ kind: 'success', title: 'Настройки хранения сохранены' });
+      pushToast({ kind: 'success', title: ttlT('ttlPage.flow.toast.saved') });
     } catch (err) {
-      setError(err.message || ApiClient.LOAD_FAILED);
+      setError(loadFailedMessage(err));
     } finally {
       setSaving(false);
     }
@@ -193,7 +216,7 @@ function FlowStoragePanel({ canWrite }) {
 
   const disabled = !canWrite || saving || !data?.schemaReady;
   const forecast = data?.forecast;
-  const mode = FLOW_MODES.find((m) => m.id === form?.mode) || FLOW_MODES[0];
+  const modeId = form?.mode === 'on' ? 'on' : 'off';
   const fitsTone = forecast?.fits === false ? 'var(--st-critical)' : (forecast?.fits ? 'var(--st-success)' : undefined);
 
   return (
@@ -201,101 +224,113 @@ function FlowStoragePanel({ canWrite }) {
     <Card pad="sm" style={{ marginBottom: 16 }}>
       <div style={{ display: 'grid', gap: 16 }}>
         <div style={{ ...FLOW_HINT, maxWidth: 820 }}>
-          Свежие сутки хранятся полностью. В старых сутках мелкие потоки xdpflowd сохраняются выборочно,
-          с пересчётом объёма, поэтому итоги трафика не меняются. NetFlow и sFlow не сжимаются.
+          {ttlT('ttlPage.flow.intro')}
         </div>
 
         {!data ? (
           <div style={{ color: error ? 'var(--st-critical)' : 'var(--fg-secondary)', font: 'var(--pv-text-body-3)' }}>
-            {error || 'Загрузка…'}
+            {error || ttlT('ttlPage.loading')}
           </div>
         ) : (
           <>
             {!data.schemaReady && (
               <div style={{ font: 'var(--pv-text-body-3)', color: 'var(--st-warning)' }}>
-                Таблицы настроек не созданы: выложите схему базы, затем настройки станут доступны.
+                {ttlT('ttlPage.flow.schemaNotReady')}
               </div>
             )}
 
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: 24 }}>
               <div style={{ display: 'grid', gap: 14, alignContent: 'start' }}>
                 <label style={FLOW_FIELD}>
-                  <span style={FLOW_LABEL}>Сжатие старых суток</span>
+                  <span style={FLOW_LABEL}>{ttlT('ttlPage.flow.compressionLabel')}</span>
                   <select className="input" value={form.mode} disabled={disabled}
                     onChange={(e) => setForm({ ...form, mode: e.target.value })}>
-                    {FLOW_MODES.map((m) => <option key={m.id} value={m.id}>{m.label}</option>)}
+                    {FLOW_MODE_IDS.map((id) => (
+                      <option key={id} value={id}>{flowModeLabel(id)}</option>
+                    ))}
                   </select>
-                  <span style={FLOW_HINT}>{mode.hint}</span>
+                  <span style={FLOW_HINT}>{flowModeHint(modeId)}</span>
                 </label>
 
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
                   <label style={FLOW_FIELD}>
-                    <span style={FLOW_LABEL}>Срок хранения, сутки</span>
+                    <span style={FLOW_LABEL}>{ttlT('ttlPage.flow.retentionDays')}</span>
                     <input className="input mono" type="text" inputMode="numeric" value={totalDays}
                       disabled={!canWrite || saving}
                       onChange={(e) => setTotalDays(onlyDigits(e.target.value))} />
                   </label>
                   <label style={FLOW_FIELD}>
-                    <span style={FLOW_LABEL}>Из них без сжатия, сутки</span>
+                    <span style={FLOW_LABEL}>{ttlT('ttlPage.flow.hotDays')}</span>
                     <input className="input mono" type="text" inputMode="numeric" value={hotDays}
                       disabled={disabled}
                       onChange={(e) => setHotDays(onlyDigits(e.target.value))} />
                   </label>
                 </div>
-                <span style={{ ...FLOW_HINT, marginTop: -8 }}>Текущие сутки всегда хранятся без сжатия.</span>
+                <span style={{ ...FLOW_HINT, marginTop: -8 }}>{ttlT('ttlPage.flow.hotHint')}</span>
 
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
                   <label style={FLOW_FIELD}>
-                    <span style={FLOW_LABEL}>Мелкий поток — меньше, КБ</span>
+                    <span style={FLOW_LABEL}>{ttlT('ttlPage.flow.thresholdKb')}</span>
                     <input className="input mono" type="text" inputMode="numeric" value={thresholdKb}
                       disabled={disabled}
                       onChange={(e) => setThresholdKb(onlyDigits(e.target.value))} />
                   </label>
                   <label style={FLOW_FIELD}>
-                    <span style={FLOW_LABEL}>Из мелких сохранять</span>
+                    <span style={FLOW_LABEL}>{ttlT('ttlPage.flow.keepRate')}</span>
                     <select className="input" value={form.xdpRate} disabled={disabled}
                       onChange={(e) => setForm({ ...form, xdpRate: Number(e.target.value) })}>
-                      {(data.rates || []).map((rate) => <option key={rate} value={rate}>1 из {rate}</option>)}
+                      {(data.rates || []).map((rate) => (
+                        <option key={rate} value={rate}>{ttlT('ttlPage.flow.rateOption', { rate })}</option>
+                      ))}
                     </select>
                   </label>
                 </div>
 
                 <label style={{ ...FLOW_FIELD, maxWidth: 160 }}>
-                  <span style={FLOW_LABEL}>Ночной запуск</span>
-                  <input className="input mono" type="text" inputMode="numeric" placeholder="ЧЧ:ММ" maxLength={5}
+                  <span style={FLOW_LABEL}>{ttlT('ttlPage.flow.nightRun')}</span>
+                  <input className="input mono" type="text" inputMode="numeric" placeholder={ttlT('ttlPage.flow.runAtPlaceholder')} maxLength={5}
                     value={form.runAt} disabled={disabled}
                     onChange={(e) => setForm({ ...form, runAt: e.target.value.replace(/[^\d:]/g, '').slice(0, 5) })} />
                 </label>
               </div>
 
               <div style={{ display: 'grid', gap: 10, alignContent: 'start' }}>
-                <div style={FLOW_LABEL}>Прогноз по текущим настройкам</div>
+                <div style={FLOW_LABEL}>{ttlT('ttlPage.flow.forecast.title')}</div>
                 {forecast ? (
                   <>
-                    <FlowStat label="Сутки без сжатия" value={fmtBytes(forecast.exactBytes)} />
+                    <FlowStat label={ttlT('ttlPage.flow.forecast.exactDays')} value={fmtBytes(forecast.exactBytes)} />
                     <FlowStat
-                      label="Сжатые сутки"
-                      value={forecast.thinnedBytes == null ? 'нет замера' : `≈ ${fmtBytes(forecast.thinnedBytes)}`}
+                      label={ttlT('ttlPage.flow.forecast.thinnedDays')}
+                      value={forecast.thinnedBytes == null
+                        ? ttlT('ttlPage.flow.forecast.noMeasure')
+                        : ttlT('ttlPage.flow.forecast.approx', { value: fmtBytes(forecast.thinnedBytes) })}
                     />
                     <FlowStat
-                      label={`Всего за ${forecast.exactDays + forecast.warmDays} сут.`}
-                      value={forecast.totalBytes == null ? '—' : `≈ ${fmtBytes(forecast.totalBytes)}`}
+                      label={ttlT('ttlPage.flow.forecast.totalForDays', { days: forecast.exactDays + forecast.warmDays })}
+                      value={forecast.totalBytes == null
+                        ? '—'
+                        : ttlT('ttlPage.flow.forecast.approx', { value: fmtBytes(forecast.totalBytes) })}
                     />
                     <FlowStat
-                      label="Доступно на диске"
+                      label={ttlT('ttlPage.flow.forecast.room')}
                       value={forecast.roomBytes == null ? '—' : fmtBytes(forecast.roomBytes)}
                     />
                     <FlowStat
-                      label="Итог"
+                      label={ttlT('ttlPage.flow.forecast.outcome')}
                       tone={fitsTone}
-                      value={forecast.fits == null ? '—' : (forecast.fits ? 'места хватает' : 'места не хватает')}
+                      value={forecast.fits == null
+                        ? '—'
+                        : (forecast.fits ? ttlT('ttlPage.flow.forecast.fits') : ttlT('ttlPage.flow.forecast.notFits'))}
                     />
                     <div style={{ ...FLOW_HINT, marginTop: 4 }}>
-                      Точность: {forecast.measured ? forecast.note : 'для этих параметров не измерялась'}.
+                      {ttlT('ttlPage.flow.forecast.accuracyPrefix')}{' '}
+                      {forecast.measured
+                        ? ttlT('ttlPage.flow.forecast.accuracyMeasured')
+                        : ttlT('ttlPage.flow.forecast.accuracyNotMeasured')}.
                     </div>
                   </>
                 ) : (
-                  <div style={FLOW_HINT}>Нет данных для прогноза.</div>
+                  <div style={FLOW_HINT}>{ttlT('ttlPage.flow.forecast.noData')}</div>
                 )}
               </div>
             </div>
@@ -307,7 +342,9 @@ function FlowStoragePanel({ canWrite }) {
         )}
         {canWrite && data && (
           <div>
-            <Button kind="primary" onClick={save} disabled={saving}>{saving ? 'Сохранение…' : 'Сохранить'}</Button>
+            <Button kind="primary" onClick={save} disabled={saving}>
+              {saving ? ttlT('ttlPage.flow.saving') : ttlT('ttlPage.flow.save')}
+            </Button>
           </div>
         )}
       </div>
@@ -336,7 +373,7 @@ function PageTTL() {
       setRows((data || []).map((r) => ({ ...r, id: r.id })));
       setDisk(Array.isArray(result) ? null : (result?.disk || null));
     } catch (err) {
-      setError(err.message || ApiClient.LOAD_FAILED);
+      setError(loadFailedMessage(err));
       setRows([]);
       setDisk(null);
     } finally {
@@ -349,14 +386,16 @@ function PageTTL() {
   const cols = [
     {
       key: 'label',
-      title: 'Данные',
+      title: ttlT('ttlPage.col.data'),
       width: 220,
       render: (r) => (
         <div>
-          <div style={{ font: 'var(--pv-text-body-2-bold)', color: 'var(--fg-primary)' }}>{r.label}</div>
+          <div style={{ font: 'var(--pv-text-body-2-bold)', color: 'var(--fg-primary)' }}>
+            {ttlCatalogLabel(r.id, r.label)}
+          </div>
           {r.heavy && (
             <div style={{ marginTop: 4 }}>
-              <Badge tone="warning">Тяжёлая</Badge>
+              <Badge tone="warning">{ttlT('ttlPage.badge.heavy')}</Badge>
             </div>
           )}
         </div>
@@ -364,13 +403,13 @@ function PageTTL() {
     },
     {
       key: 'table',
-      title: 'Таблица',
+      title: ttlT('ttlPage.col.table'),
       width: 200,
       render: (r) => <span className="mono" style={{ font: 'var(--pv-text-body-2)' }}>{r.table}</span>,
     },
     {
       key: 'ttlDays',
-      title: 'TTL (дн)',
+      title: ttlT('ttlPage.col.ttlDays'),
       width: 100,
       num: true,
       align: 'right',
@@ -381,7 +420,7 @@ function PageTTL() {
     },
     {
       key: 'totalBytes',
-      title: 'Объём',
+      title: ttlT('ttlPage.col.volume'),
       width: 120,
       num: true,
       align: 'right',
@@ -392,7 +431,7 @@ function PageTTL() {
     },
     {
       key: 'ttlExpression',
-      title: 'Выражение TTL',
+      title: ttlT('ttlPage.col.ttlExpression'),
       width: 280,
       sortable: false,
       render: (r) => (
@@ -407,20 +446,22 @@ function PageTTL() {
     <div className="main__container">
       <div className="page-head">
         <div>
-          <h1>Хранение данных</h1>
+          <h1>{ttlT('ttlPage.title')}</h1>
           <TtlDiskBar disk={disk} />
         </div>
         <div className="row page-head__actions" style={{ gap: 8 }}>
-          <Button kind="ghost" icon="refresh" onClick={() => { loadAll(); setFlowRevision((n) => n + 1); }} disabled={loading}>Обновить</Button>
+          <Button kind="ghost" icon="refresh" onClick={() => { loadAll(); setFlowRevision((n) => n + 1); }} disabled={loading}>
+            {ttlT('chrome.refresh')}
+          </Button>
         </div>
       </div>
 
-      <div className="seg" role="tablist" aria-label="Разделы хранения" style={{ marginBottom: 16 }}>
+      <div className="seg" role="tablist" aria-label={ttlT('ttlPage.tabListAria')} style={{ marginBottom: 16 }}>
         <button type="button" role="tab" aria-selected={tab === 'tables'} className={tab === 'tables' ? 'is-active' : ''} onClick={() => setTab('tables')}>
-          Сроки таблиц
+          {ttlT('ttlPage.tab.tables')}
         </button>
         <button type="button" role="tab" aria-selected={tab === 'flows'} className={tab === 'flows' ? 'is-active' : ''} onClick={() => setTab('flows')}>
-          Хранение сырых потоков
+          {ttlT('ttlPage.tab.flows')}
         </button>
       </div>
 
@@ -430,29 +471,34 @@ function PageTTL() {
         <div className="row" style={{ gap: 10, alignItems: 'flex-start' }}>
           <Icon name="alert" size={18} style={{ color: 'var(--st-warning)', flexShrink: 0, marginTop: 2 }} />
           <div style={{ font: 'var(--pv-text-body-2)', color: 'var(--fg-secondary)' }}>
-            {HEAVY_WARNING}
+            {ttlT('ttlPage.heavyWarning')}
           </div>
         </div>
       </Card>
 
       {loading ? (
         <Card pad="sm">
-          <div style={{ padding: 32, textAlign: 'center', color: 'var(--fg-secondary)' }}>Загрузка…</div>
+          <div style={{ padding: 32, textAlign: 'center', color: 'var(--fg-secondary)' }}>{ttlT('ttlPage.loading')}</div>
         </Card>
       ) : error ? (
-        <Empty icon="db" title="Не удалось загрузить" desc={error} action={<Button kind="primary" icon="refresh" onClick={loadAll}>Повторить</Button>} />
+        <Empty
+          icon="db"
+          title={ttlT('ttlPage.loadFailed')}
+          desc={error}
+          action={<Button kind="primary" icon="refresh" onClick={loadAll}>{ttlT('ttlPage.retry')}</Button>}
+        />
       ) : (
         <DataTable
           rows={rows.filter((r) => r.id !== 'flows_raw')}
           columns={cols}
           rowKey="id"
           pageSize={15}
-          emptyTitle="Нет таблиц"
-          emptyDesc="Каталог TTL пуст или ClickHouse недоступен."
+          emptyTitle={ttlT('ttlPage.empty.tablesTitle')}
+          emptyDesc={ttlT('ttlPage.empty.tablesDesc')}
           rowActions={canWrite ? (r) => (
             <div className="row" style={{ gap: 4, justifyContent: 'flex-end' }}>
               <Button size="sm" kind="ghost" icon="edit" onClick={(e) => { e.stopPropagation(); setEditing(r); }}>
-                Изменить
+                {ttlT('ttlPage.edit')}
               </Button>
             </div>
           ) : null}
@@ -468,7 +514,11 @@ function PageTTL() {
         onSaved={() => {
           setEditing(null);
           loadAll();
-          pushToast({ kind: 'success', title: 'TTL обновлён', desc: 'Изменение отправлено в ClickHouse.' });
+          pushToast({
+            kind: 'success',
+            title: ttlT('ttlPage.toast.ttlUpdated'),
+            desc: ttlT('ttlPage.toast.ttlUpdatedDesc'),
+          });
         }}
       />
     </div>
@@ -491,7 +541,7 @@ function TtlEditModal({ open, row, onClose, onSaved }) {
     if (!row) return;
     const value = Number(days);
     if (!Number.isInteger(value) || value < 1) {
-      setError('Укажите целое число дней (не меньше 1)');
+      setError(ttlT('ttlPage.modal.err.days'));
       return;
     }
     setSaving(true);
@@ -500,36 +550,42 @@ function TtlEditModal({ open, row, onClose, onSaved }) {
       await ApiClient.updateTtl(row.id, value);
       onSaved();
     } catch (err) {
-      setError(err.message || ApiClient.LOAD_FAILED);
+      setError(loadFailedMessage(err));
       setSaving(false);
     }
   };
 
   if (!row) return null;
 
+  const rowLabel = ttlCatalogLabel(row.id, row.label);
+
   return (
     <Modal
       open={open}
       onClose={onClose}
-      title="Изменить TTL"
-      subtitle={`${row.label} · ${row.table}`}
+      title={ttlT('ttlPage.modal.title')}
+      subtitle={`${rowLabel} · ${row.table}`}
       footer={(
         <div className="row" style={{ gap: 8, justifyContent: 'flex-end', width: '100%' }}>
-          <Button kind="ghost" onClick={onClose} disabled={saving}>Отмена</Button>
+          <Button kind="ghost" onClick={onClose} disabled={saving}>{ttlT('ttlPage.modal.cancel')}</Button>
           <Button kind="primary" onClick={handleSave} disabled={saving}>
-            {saving ? 'Применение…' : `Применить к ${row.table}`}
+            {saving ? ttlT('ttlPage.modal.applying') : ttlT('ttlPage.modal.applyTo', { table: row.table })}
           </Button>
         </div>
       )}
     >
       <div style={{ display: 'grid', gap: 16 }}>
         <div>
-          <div style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-secondary)', marginBottom: 6 }}>Текущий срок</div>
-          <div className="mono" style={{ font: 'var(--pv-text-body-2-bold)' }}>{row.ttlDays} дн</div>
+          <div style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-secondary)', marginBottom: 6 }}>
+            {ttlT('ttlPage.modal.currentTerm')}
+          </div>
+          <div className="mono" style={{ font: 'var(--pv-text-body-2-bold)' }}>
+            {ttlT('ttlPage.modal.daysShort', { count: row.ttlDays })}
+          </div>
         </div>
 
         <label style={{ display: 'grid', gap: 6 }}>
-          <span style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-secondary)' }}>Новый срок (дней)</span>
+          <span style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-secondary)' }}>{ttlT('ttlPage.modal.newTerm')}</span>
           <input
             className="input"
             type="number"
@@ -545,7 +601,7 @@ function TtlEditModal({ open, row, onClose, onSaved }) {
           <Card pad="sm" style={{ borderColor: 'var(--st-warning)40' }}>
             <div className="row" style={{ gap: 8, alignItems: 'flex-start' }}>
               <Icon name="alert" size={16} style={{ color: 'var(--st-warning)', flexShrink: 0, marginTop: 2 }} />
-              <div style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-secondary)' }}>{HEAVY_WARNING}</div>
+              <div style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-secondary)' }}>{ttlT('ttlPage.heavyWarning')}</div>
             </div>
           </Card>
         )}

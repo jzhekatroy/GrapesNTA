@@ -55,17 +55,26 @@ function flowDayAge(day, today) {
 function describeFlowDay(day, log, { today, hotDays } = {}) {
   const status = String(log?.status || '');
   const message = String(log?.message || '');
-  if (status === 'done') return { state: 'done', error: '', note: '' };
-  if (status === 'running') return { state: 'running', error: '', note: '' };
-  if (status === 'failed') return { state: 'failed', error: message || 'Не удалось сжать', note: '' };
-  if (status === 'waiting' || status === 'skipped') return { state: status, error: '', note: message };
+  if (status === 'done') return { state: 'done', error: '', note: '', noteCode: '' };
+  if (status === 'running') return { state: 'running', error: '', note: '', noteCode: '' };
+  if (status === 'failed') {
+    if (message) return { state: 'failed', error: message, note: '', noteCode: '' };
+    return {
+      state: 'failed',
+      error: 'Не удалось сжать',
+      note: '',
+      noteCode: 'compressFailed',
+    };
+  }
+  if (status === 'waiting' || status === 'skipped') return { state: status, error: '', note: message, noteCode: '' };
   const age = flowDayAge(day, today);
   const hot = Math.max(0, Number(hotDays) || 0);
-  if (age != null && age <= hot) return { state: 'full', error: '', note: '' };
+  if (age != null && age <= hot) return { state: 'full', error: '', note: '', noteCode: '' };
   return {
     state: 'pending',
     error: '',
     note: 'Ночная задача не дошла до сжатия. В следующее окно возьмём сами, начиная с самых старых.',
+    noteCode: 'notReached',
   };
 }
 
@@ -88,12 +97,18 @@ function buildFlowDays(parts, log, options) {
     .sort()[0];
   if (options?.mode === 'off') {
     return rows.map((row) => (
-      row.state === 'pending' ? { ...row, note: 'Сжатие выключено.' } : row
+      row.state === 'pending'
+        ? { ...row, note: 'Сжатие выключено.', noteCode: 'compressionOff' }
+        : row
     ));
   }
   return rows.map((row) => (
     row.state === 'pending' && row.day !== oldestPending
-      ? { ...row, note: 'За ночь сжимаются одни сутки, сначала более старые.' }
+      ? {
+        ...row,
+        note: 'За ночь сжимаются одни сутки, сначала более старые.',
+        noteCode: 'olderFirst',
+      }
       : row
   ));
 }
