@@ -29,6 +29,7 @@
     'nav.item.versions': 'Версии',
     'nav.item.clients': 'Клиенты',
     'nav.item.smtp': 'Почта (SMTP)',
+    'nav.item.diagnostics': 'Диагностика',
     'nav.item.ttl': 'Хранение данных',
     'nav.item.cabinet-settings': 'Настройки',
 
