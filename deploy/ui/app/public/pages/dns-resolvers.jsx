@@ -1,15 +1,52 @@
 /* DNS-резолверы — справочник для классификации адресов на странице DNS-запросов */
 
-const DNS_RESOLVER_ROLES = [
-  { value: 'resolver', label: 'Резолвер оператора' },
-  { value: 'client', label: 'Резолвер абонента' },
-  { value: 'public', label: 'Публичный резолвер' },
-];
+function dnsResolversT(key, params) {
+  return GrapesI18n.t(key, params);
+}
 
-const DNS_RESOLVER_ROLE_LABELS = Object.fromEntries(DNS_RESOLVER_ROLES.map((r) => [r.value, r.label]));
+const DNS_RESOLVER_ROLE_VALUES = ['resolver', 'client', 'public'];
 
-const SAVE_SUCCESS_TITLE = 'Настройки сохранены';
-const SAVE_SUCCESS_DESC = 'Изменения будут автоматически применены в течение 60 секунд.';
+const DNS_RESOLVER_API_ERROR_KEYS = {
+  'Укажите префикс (CIDR)': 'dnsResolvers.err.prefixRequired',
+  'Префикс должен быть в формате CIDR': 'dnsResolvers.err.prefixCidrFormat',
+  'Префикс должен быть в формате CIDR (например 8.8.8.8/32)': 'dnsResolvers.err.prefixCidrFormatExample',
+  'Некорректная длина маски в CIDR': 'dnsResolvers.err.maskLengthInvalid',
+  'Для IPv4 маска должна быть от 0 до 32': 'dnsResolvers.err.ipv4MaskRange',
+  'Для IPv6 маска должна быть от 0 до 128': 'dnsResolvers.err.ipv6MaskRange',
+  'Некорректный IP-адрес в префиксе': 'dnsResolvers.err.ipInvalid',
+  'Некорректный CIDR или маска': 'dnsResolvers.err.cidrInvalid',
+  'Не указан идентификатор резолвера': 'dnsResolvers.err.resolverIdRequired',
+  'Версия IP не соответствует адресу': 'dnsResolvers.err.ipFamilyMismatch',
+  'Версия IP не соответствует адресу в префиксе': 'dnsResolvers.err.ipFamilyMismatchPrefix',
+  'Префикс нельзя изменить': 'dnsResolvers.err.prefixImmutable',
+  'Выберите роль': 'dnsResolvers.err.roleRequired',
+  'Недопустимая роль резолвера': 'dnsResolvers.err.roleInvalid',
+  'Резолвер не найден': 'dnsResolvers.err.notFound',
+  'Сначала отредактируйте резолвер и выберите допустимую роль': 'dnsResolvers.err.fixRoleBeforeEnable',
+  'Ошибка сохранения': 'dnsResolvers.err.saveFailed',
+};
+
+function localizeDnsResolverApiError(message) {
+  const trimmed = String(message ?? '').trim();
+  const key = DNS_RESOLVER_API_ERROR_KEYS[trimmed];
+  return key ? dnsResolversT(key) : trimmed;
+}
+
+function dnsResolverRoleLabel(role) {
+  const key = `dnsResolvers.role.${role}`;
+  return GrapesI18n.has(key) ? dnsResolversT(key) : role;
+}
+
+function dnsResolverRolesForSelect() {
+  return DNS_RESOLVER_ROLE_VALUES.map((value) => ({
+    value,
+    label: dnsResolverRoleLabel(value),
+  }));
+}
+
+function isKnownDnsResolverRole(role) {
+  return DNS_RESOLVER_ROLE_VALUES.includes(role);
+}
 
 function dnsResolverRowKey(row) {
   return row.resolverId;
@@ -17,23 +54,23 @@ function dnsResolverRowKey(row) {
 
 function parseCidrClient(prefix) {
   const trimmed = String(prefix ?? '').trim();
-  if (!trimmed) return { ok: false, error: 'Укажите префикс (CIDR)' };
+  if (!trimmed) return { ok: false, errorKey: 'dnsResolvers.err.prefixRequired' };
   const slash = trimmed.indexOf('/');
-  if (slash < 0) return { ok: false, error: 'Префикс должен быть в формате CIDR' };
+  if (slash < 0) return { ok: false, errorKey: 'dnsResolvers.err.prefixCidrFormat' };
   const ipPart = trimmed.slice(0, slash);
   const mask = Number(trimmed.slice(slash + 1));
   const v4 = /^(\d{1,3}\.){3}\d{1,3}$/.test(ipPart);
   const v6 = ipPart.includes(':');
   if (v4 && mask >= 0 && mask <= 32) return { ok: true, prefix: `${ipPart}/${mask}`, family: 4 };
   if (v6 && mask >= 0 && mask <= 128) return { ok: true, prefix: trimmed, family: 6 };
-  return { ok: false, error: 'Некорректный CIDR или маска' };
+  return { ok: false, errorKey: 'dnsResolvers.err.cidrInvalid' };
 }
 
 function fmtDnsResolverUpdatedAt(value) {
   if (!value) return '—';
   const d = new Date(value);
   if (Number.isNaN(d.getTime())) return String(value);
-  return d.toLocaleString('ru-RU', {
+  return d.toLocaleString(GrapesI18n.intlLocale(), {
     day: '2-digit',
     month: '2-digit',
     year: 'numeric',
@@ -44,9 +81,10 @@ function fmtDnsResolverUpdatedAt(value) {
 
 function PageDnsResolvers() {
   const canWrite = AuthAccess.canWritePage('dns-resolvers');
+  const i18nLocale = GrapesI18n.getLocale();
   const [rows, setRows] = useState([]);
   const [loading, setLoading] = useState(true);
-  const [loadError, setLoadError] = useState(null);
+  const [loadError, setLoadError] = useState(false);
   const [search, setSearch] = useState('');
   const [selected, setSelected] = useState(new Set());
   const [editing, setEditing] = useState(null);
@@ -60,11 +98,11 @@ function PageDnsResolvers() {
     let cancelled = false;
     (async () => {
       setLoading(true);
-      setLoadError(null);
+      setLoadError(false);
       const res = await ApiClient.loadDnsResolvers();
       if (cancelled) return;
       if (res.source === 'error') {
-        setLoadError(ApiClient.LOAD_FAILED);
+        setLoadError(true);
         setRows([]);
       } else {
         setRows((res.rows || []).map((r) => ({ ...r, id: dnsResolverRowKey(r) })));
@@ -78,7 +116,7 @@ function PageDnsResolvers() {
     if (!search) return rows;
     const s = search.toLowerCase();
     return rows.filter((r) => {
-      const roleLabel = DNS_RESOLVER_ROLE_LABELS[r.role] || r.role;
+      const roleLabel = dnsResolverRoleLabel(r.role);
       return (
         r.prefix.toLowerCase().includes(s)
         || (r.displayName || '').toLowerCase().includes(s)
@@ -86,39 +124,55 @@ function PageDnsResolvers() {
         || roleLabel.toLowerCase().includes(s)
       );
     });
-  }, [rows, search]);
+  }, [rows, search, i18nLocale]);
 
   const handleToggle = async (row) => {
     const next = row.enabled === 1 ? 0 : 1;
-    const label = next === 1 ? 'включить' : 'отключить';
-    if (!window.confirm(`${label.charAt(0).toUpperCase() + label.slice(1)} резолвер ${row.prefix}?`)) return;
+    const confirmKey = next === 1 ? 'dnsResolvers.confirm.enable' : 'dnsResolvers.confirm.disable';
+    if (!window.confirm(dnsResolversT(confirmKey, { prefix: row.prefix }))) return;
     setTogglingId(row.id);
     try {
       await ApiClient.toggleDnsResolver({ resolverId: row.resolverId, enabled: next });
-      pushToast({ kind: 'success', title: SAVE_SUCCESS_TITLE, desc: SAVE_SUCCESS_DESC });
+      pushToast({
+        kind: 'success',
+        title: dnsResolversT('dnsResolvers.saveSuccessTitle'),
+        desc: dnsResolversT('dnsResolvers.saveSuccessDesc'),
+      });
       reload();
     } catch (err) {
-      pushToast({ kind: 'error', title: 'Не удалось изменить статус', desc: err.message });
+      pushToast({
+        kind: 'error',
+        title: dnsResolversT('dnsResolvers.toast.toggleFailed'),
+        desc: localizeDnsResolverApiError(err.message),
+      });
     } finally {
       setTogglingId(null);
     }
   };
 
   const handleDelete = async (row) => {
-    if (!window.confirm(`Удалить резолвер ${row.prefix} безвозвратно?`)) return;
+    if (!window.confirm(dnsResolversT('dnsResolvers.confirm.delete', { prefix: row.prefix }))) return;
     try {
       await ApiClient.deleteDnsResolver({ resolverId: row.resolverId });
-      pushToast({ kind: 'success', title: 'Резолвер удалён', desc: 'Запись удалена из справочника.' });
+      pushToast({
+        kind: 'success',
+        title: dnsResolversT('dnsResolvers.toast.deletedTitle'),
+        desc: dnsResolversT('dnsResolvers.toast.deletedDesc'),
+      });
       reload();
     } catch (err) {
-      pushToast({ kind: 'error', title: 'Не удалось удалить', desc: err.message });
+      pushToast({
+        kind: 'error',
+        title: dnsResolversT('dnsResolvers.toast.deleteFailed'),
+        desc: localizeDnsResolverApiError(err.message),
+      });
     }
   };
 
-  const cols = [
+  const cols = useMemo(() => [
     {
       key: 'prefix',
-      title: 'Префикс',
+      title: dnsResolversT('dnsResolvers.col.prefix'),
       width: 220,
       sortAccessor: (r) => r.prefix,
       render: (r) => (
@@ -130,7 +184,7 @@ function PageDnsResolvers() {
     },
     {
       key: 'enabled',
-      title: 'Активен',
+      title: dnsResolversT('dnsResolvers.col.enabled'),
       width: 88,
       sortAccessor: (r) => r.enabled,
       render: (r) => (
@@ -149,24 +203,24 @@ function PageDnsResolvers() {
     },
     {
       key: 'role',
-      title: 'Роль',
+      title: dnsResolversT('dnsResolvers.col.role'),
       width: 180,
-      sortAccessor: (r) => DNS_RESOLVER_ROLE_LABELS[r.role] || r.role,
+      sortAccessor: (r) => dnsResolverRoleLabel(r.role),
       render: (r) => (
         <span style={{ color: 'var(--fg-secondary)' }}>
-          {DNS_RESOLVER_ROLE_LABELS[r.role] || r.role}
+          {dnsResolverRoleLabel(r.role)}
         </span>
       ),
     },
     {
       key: 'displayName',
-      title: 'Отображаемое имя',
+      title: dnsResolversT('dnsResolvers.col.displayName'),
       width: 180,
       render: (r) => r.displayName || <span style={{ color: 'var(--fg-secondary)' }}>—</span>,
     },
     {
       key: 'comment',
-      title: 'Комментарий',
+      title: dnsResolversT('dnsResolvers.col.comment'),
       width: 180,
       render: (r) => (
         <span style={{ color: 'var(--fg-secondary)', font: 'var(--pv-text-body-3)' }}>
@@ -176,13 +230,13 @@ function PageDnsResolvers() {
     },
     {
       key: 'source',
-      title: 'Источник',
+      title: dnsResolversT('dnsResolvers.col.source'),
       width: 90,
       render: (r) => <span className="tag">{r.source || '—'}</span>,
     },
     {
       key: 'updatedAt',
-      title: 'Обновлено',
+      title: dnsResolversT('dnsResolvers.col.updatedAt'),
       width: 140,
       sortAccessor: (r) => r.updatedAt,
       render: (r) => (
@@ -191,27 +245,32 @@ function PageDnsResolvers() {
         </span>
       ),
     },
-  ];
+  ], [canWrite, togglingId, i18nLocale]);
 
   return (
     <div className="main__container">
       <div className="page-head">
         <div>
-          <h1>DNS-резолверы</h1>
-          <p>Справочник для бейджей на странице DNS-запросов: резолверы оператора, абонентов и публичные DNS.</p>
+          <h1>{dnsResolversT('nav.item.dns-resolvers')}</h1>
+          <p>{dnsResolversT('dnsResolvers.subtitle')}</p>
         </div>
         <div className="row" style={{ gap: 8 }}>
-          <Button kind="ghost" icon="refresh" onClick={reload} disabled={loading}>Обновить</Button>
-          <Button kind="primary" icon="plus" onClick={() => setShowAdd(true)} disabled={!!loadError || !canWrite}>Добавить резолвер</Button>
+          <Button kind="ghost" icon="refresh" onClick={reload} disabled={loading}>{dnsResolversT('chrome.refresh')}</Button>
+          <Button kind="primary" icon="plus" onClick={() => setShowAdd(true)} disabled={!!loadError || !canWrite}>{dnsResolversT('dnsResolvers.addResolver')}</Button>
         </div>
       </div>
 
       {loading ? (
         <Card pad="sm">
-          <div style={{ padding: 32, textAlign: 'center', color: 'var(--fg-secondary)' }}>Загрузка…</div>
+          <div style={{ padding: 32, textAlign: 'center', color: 'var(--fg-secondary)' }}>{dnsResolversT('dnsResolvers.loading')}</div>
         </Card>
       ) : loadError ? (
-        <Empty icon="db" title="Не удалось загрузить" desc={loadError} action={<Button kind="primary" icon="refresh" onClick={reload}>Повторить</Button>} />
+        <Empty
+          icon="db"
+          title={dnsResolversT('dnsResolvers.loadFailed')}
+          desc={dnsResolversT('dnsResolvers.loadFailed')}
+          action={<Button kind="primary" icon="refresh" onClick={reload}>{dnsResolversT('dnsResolvers.retry')}</Button>}
+        />
       ) : (
         <DataTable
           rows={filtered}
@@ -222,18 +281,18 @@ function PageDnsResolvers() {
           onSelectChange={setSelected}
           pageSize={15}
           onRowClick={canWrite ? (r) => setEditing({ ...r, isNew: false }) : undefined}
-          emptyTitle="Нет резолверов"
-          emptyDesc="Добавьте префикс или уточните поиск."
+          emptyTitle={dnsResolversT('dnsResolvers.emptyTitle')}
+          emptyDesc={dnsResolversT('dnsResolvers.emptyDesc')}
           toolbar={{
             search,
             onSearch: setSearch,
           }}
           rowActions={canWrite ? (r) => (
             <div className="row" style={{ gap: 4, justifyContent: 'flex-end' }}>
-              <button className="icon-btn tt" data-tt="Редактировать" onClick={(e) => { e.stopPropagation(); setEditing({ ...r, isNew: false }); }}>
+              <button className="icon-btn tt" data-tt={dnsResolversT('dnsResolvers.action.edit')} onClick={(e) => { e.stopPropagation(); setEditing({ ...r, isNew: false }); }}>
                 <Icon name="edit" size={15} />
               </button>
-              <button className="icon-btn tt" data-tt="Удалить" onClick={(e) => { e.stopPropagation(); handleDelete(r); }}>
+              <button className="icon-btn tt" data-tt={dnsResolversT('dnsResolvers.action.delete')} onClick={(e) => { e.stopPropagation(); handleDelete(r); }}>
                 <Icon name="trash" size={15} />
               </button>
             </div>
@@ -250,7 +309,11 @@ function PageDnsResolvers() {
           setShowAdd(false);
           setEditing(null);
           reload();
-          pushToast({ kind: 'success', title: SAVE_SUCCESS_TITLE, desc: SAVE_SUCCESS_DESC });
+          pushToast({
+            kind: 'success',
+            title: dnsResolversT('dnsResolvers.saveSuccessTitle'),
+            desc: dnsResolversT('dnsResolvers.saveSuccessDesc'),
+          });
         }}
       />
     </div>
@@ -258,13 +321,16 @@ function PageDnsResolvers() {
 }
 
 function DnsResolverEnabledToggle({ enabled, disabled, onChange }) {
+  const title = enabled
+    ? dnsResolversT('dnsResolvers.toggle.disable')
+    : dnsResolversT('dnsResolvers.toggle.enable');
   return (
     <button
       type="button"
       className="l3-enabled-toggle"
       disabled={disabled}
       onClick={(e) => { e.stopPropagation(); onChange(); }}
-      title={enabled ? 'Отключить' : 'Включить'}
+      title={title}
       aria-pressed={enabled}
       style={{
         width: 36,
@@ -294,9 +360,11 @@ function DnsResolverEnabledToggle({ enabled, disabled, onChange }) {
 }
 
 function DnsResolverFormModal({ open, row, isNew, onClose, onSaved }) {
+  const i18nLocale = GrapesI18n.getLocale();
+  const roleOptions = useMemo(() => dnsResolverRolesForSelect(), [i18nLocale]);
   const [prefix, setPrefix] = useState('');
   const [family, setFamily] = useState(4);
-  const [role, setRole] = useState(DNS_RESOLVER_ROLES[0].value);
+  const [role, setRole] = useState(DNS_RESOLVER_ROLE_VALUES[0]);
   const [displayName, setDisplayName] = useState('');
   const [comment, setComment] = useState('');
   const [saving, setSaving] = useState(false);
@@ -307,13 +375,13 @@ function DnsResolverFormModal({ open, row, isNew, onClose, onSaved }) {
     if (isNew) {
       setPrefix('');
       setFamily(4);
-      setRole(DNS_RESOLVER_ROLES[0].value);
+      setRole(DNS_RESOLVER_ROLE_VALUES[0]);
       setDisplayName('');
       setComment('');
     } else if (row) {
       setPrefix(row.prefix);
       setFamily(row.family);
-      setRole(DNS_RESOLVER_ROLE_LABELS[row.role] ? row.role : DNS_RESOLVER_ROLES[0].value);
+      setRole(isKnownDnsResolverRole(row.role) ? row.role : DNS_RESOLVER_ROLE_VALUES[0]);
       setDisplayName(row.displayName || '');
       setComment(row.comment || '');
     }
@@ -330,10 +398,10 @@ function DnsResolverFormModal({ open, row, isNew, onClose, onSaved }) {
 
   const validate = () => {
     const parsed = parseCidrClient(prefix);
-    if (!parsed.ok) return parsed.error;
-    if (isNew && parsed.family !== family) return 'Версия IP не соответствует адресу';
-    if (!isNew && parsed.prefix !== row.prefix) return 'Префикс нельзя изменить';
-    if (!DNS_RESOLVER_ROLE_LABELS[role]) return 'Выберите роль';
+    if (!parsed.ok) return dnsResolversT(parsed.errorKey);
+    if (isNew && parsed.family !== family) return dnsResolversT('dnsResolvers.err.ipFamilyMismatch');
+    if (!isNew && parsed.prefix !== row.prefix) return dnsResolversT('dnsResolvers.err.prefixImmutable');
+    if (!isKnownDnsResolverRole(role)) return dnsResolversT('dnsResolvers.err.roleRequired');
     return '';
   };
 
@@ -358,7 +426,7 @@ function DnsResolverFormModal({ open, row, isNew, onClose, onSaved }) {
       });
       onSaved();
     } catch (e) {
-      setFormError(e.message || 'Ошибка сохранения');
+      setFormError(localizeDnsResolverApiError(e.message) || dnsResolversT('dnsResolvers.err.saveFailed'));
     } finally {
       setSaving(false);
     }
@@ -370,13 +438,13 @@ function DnsResolverFormModal({ open, row, isNew, onClose, onSaved }) {
     <Modal
       open={open}
       onClose={onClose}
-      title={isNew ? 'Добавить резолвер' : 'Редактировать резолвер'}
-      subtitle={isNew ? 'Новая запись справочника' : row?.prefix}
+      title={isNew ? dnsResolversT('dnsResolvers.modal.addTitle') : dnsResolversT('dnsResolvers.modal.editTitle')}
+      subtitle={isNew ? dnsResolversT('dnsResolvers.modal.newSubtitle') : row?.prefix}
       footer={
         <>
-          <Button kind="ghost" onClick={onClose} disabled={saving}>Отмена</Button>
+          <Button kind="ghost" onClick={onClose} disabled={saving}>{dnsResolversT('dnsResolvers.cancel')}</Button>
           <Button kind="primary" icon="save" onClick={handleSave} disabled={saving}>
-            {saving ? 'Сохранение…' : 'Сохранить'}
+            {saving ? dnsResolversT('dnsResolvers.saving') : dnsResolversT('dnsResolvers.save')}
           </Button>
         </>
       }
@@ -388,7 +456,7 @@ function DnsResolverFormModal({ open, row, isNew, onClose, onSaved }) {
       )}
       <div className="grid grid--2col">
         <div className="field" style={{ gridColumn: '1 / -1' }}>
-          <label>Префикс (CIDR)</label>
+          <label>{dnsResolversT('dnsResolvers.modal.prefixLabel')}</label>
           <input
             className="input mono"
             placeholder="8.8.8.8/32"
@@ -399,28 +467,28 @@ function DnsResolverFormModal({ open, row, isNew, onClose, onSaved }) {
           />
         </div>
         <div className="field">
-          <label>Версия IP</label>
+          <label>{dnsResolversT('dnsResolvers.modal.ipVersion')}</label>
           <input className="input" value={`IPv${family}`} readOnly disabled />
         </div>
         <div className="field">
-          <label>Роль</label>
+          <label>{dnsResolversT('dnsResolvers.col.role')}</label>
           <select className="input" value={role} onChange={(e) => setRole(e.target.value)}>
-            {DNS_RESOLVER_ROLES.map((r) => (
+            {roleOptions.map((r) => (
               <option key={r.value} value={r.value}>{r.label}</option>
             ))}
           </select>
         </div>
         <div className="field" style={{ gridColumn: '1 / -1' }}>
-          <label>Отображаемое имя</label>
-          <input className="input" placeholder="Необязательно" value={displayName} onChange={(e) => setDisplayName(e.target.value)} />
+          <label>{dnsResolversT('dnsResolvers.col.displayName')}</label>
+          <input className="input" placeholder={dnsResolversT('dnsResolvers.modal.optional')} value={displayName} onChange={(e) => setDisplayName(e.target.value)} />
         </div>
         <div className="field" style={{ gridColumn: '1 / -1' }}>
-          <label>Комментарий</label>
-          <input className="input" placeholder="Необязательно" value={comment} onChange={(e) => setComment(e.target.value)} />
+          <label>{dnsResolversT('dnsResolvers.col.comment')}</label>
+          <input className="input" placeholder={dnsResolversT('dnsResolvers.modal.optional')} value={comment} onChange={(e) => setComment(e.target.value)} />
         </div>
       </div>
     </Modal>
   );
 }
 
-Object.assign(window, { PageDnsResolvers, DNS_RESOLVER_ROLES });
+Object.assign(window, { PageDnsResolvers, DNS_RESOLVER_ROLES: DNS_RESOLVER_ROLE_VALUES });
