@@ -453,8 +453,9 @@ function UserAccountMenu({
   const menuVersionLine = useMemo(() => {
     if (cabinetMode) return null;
     const raw = buildInfo?.version;
-    if (!raw || !VersionsFormat) return null;
-    const { display } = VersionsFormat.parseComponentVersion(raw);
+    const vf = typeof window !== 'undefined' ? window.VersionsFormat : null;
+    if (!raw || !vf) return null;
+    const { display } = vf.parseComponentVersion(raw);
     if (!display) return null;
     const date = buildInfo?.versionDate
       ? formatUserDateTime(buildInfo.versionDate, displayTimezone, { dateOnly: true })
