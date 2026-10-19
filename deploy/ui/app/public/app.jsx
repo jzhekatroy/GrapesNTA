@@ -2,6 +2,29 @@
 
 const THEME_TRANSITION_MS = 350;
 
+function t(key, params) {
+  return GrapesI18n.t(key, params);
+}
+
+const LOGIN_ERROR_I18N = {
+  invalid_credentials: 'auth.login.invalidCredentials',
+  client_disabled: 'auth.login.clientDisabled',
+  account_disabled: 'auth.login.accountDisabled',
+  client_unbound: 'auth.login.clientUnbound',
+};
+
+function loginErrorMessage(err) {
+  const code = err?.body?.code;
+  const key = code && LOGIN_ERROR_I18N[code];
+  if (key) return t(key);
+  const msg = String(err?.message || '');
+  if (err?.status === 401 && msg.includes('Вход с паролем')) return t('auth.login.invalidCredentials');
+  if (err?.status === 403 && msg.includes('приостановлен')) return t('auth.login.clientDisabled');
+  if (msg === 'Учётная запись отключена') return t('auth.login.accountDisabled');
+  if (msg.includes('не привязана к клиенту')) return t('auth.login.clientUnbound');
+  return msg || t('auth.login.failed');
+}
+
 function LazyPage({ pageId, exportName, fallback, ...props }) {
   const [ready, setReady] = useState(() => PageChunks.isLoaded(pageId));
   const [error, setError] = useState(null);
@@ -517,7 +540,7 @@ function App() {
   }, [auth.user, registryReady, page]);
 
   if (auth.loading || !registryReady) {
-    return <AuthFrame title="Grapes NTA" subtitle="Проверяем сессию..." theme={theme} onToggleTheme={toggleTheme} locale={locale} onLocaleChange={handleLocaleChange} />;
+    return <AuthFrame title={t('auth.appTitle')} subtitle={t('auth.sessionChecking')} theme={theme} onToggleTheme={toggleTheme} locale={locale} onLocaleChange={handleLocaleChange} />;
   }
 
   if (!auth.user) {
@@ -810,7 +833,7 @@ function AuthFrame({ title, subtitle, children, theme, onToggleTheme, locale, on
           <button
             type="button"
             className="auth-card__theme icon-btn tt"
-            data-tt={theme === 'dark' ? 'Светлая тема' : 'Тёмная тема'}
+            data-tt={theme === 'dark' ? t('chrome.themeLight') : t('chrome.themeDark')}
             onClick={onToggleTheme}
           >
             <Icon name={theme === 'dark' ? 'sun' : 'moon'} size={18} />
@@ -862,10 +885,10 @@ function LoginScreen({ onLogin, theme, onToggleTheme, locale, onLocaleChange }) 
       onLogin(result.user);
     } catch (err) {
       const suspended = err.status === 403
-        && (String(err.message || '').toLowerCase().includes('приостановлен')
-          || err.body?.code === 'client_disabled');
+        && (err.body?.code === 'client_disabled'
+          || String(err.message || '').toLowerCase().includes('приостановлен'));
       setErrorKind(suspended ? 'suspended' : 'default');
-      setError(err.message || 'Не удалось войти');
+      setError(loginErrorMessage(err));
       if (suspended) setPassword('');
     } finally {
       setSaving(false);
@@ -873,7 +896,7 @@ function LoginScreen({ onLogin, theme, onToggleTheme, locale, onLocaleChange }) 
   };
 
   return (
-    <AuthFrame title="Вход в Grapes NTA" subtitle="Используйте локальную учётную запись" theme={theme} onToggleTheme={onToggleTheme} locale={locale} onLocaleChange={onLocaleChange}>
+    <AuthFrame title={t('auth.login.title')} subtitle={t('auth.login.subtitle')} theme={theme} onToggleTheme={onToggleTheme} locale={locale} onLocaleChange={onLocaleChange}>
       <form
         className="col"
         style={{gap: 14}}
@@ -883,7 +906,7 @@ function LoginScreen({ onLogin, theme, onToggleTheme, locale, onLocaleChange }) 
         action="/api/auth/login"
       >
         <div className="field">
-          <label htmlFor="login-username">Имя пользователя</label>
+          <label htmlFor="login-username">{t('auth.login.username')}</label>
           <input
             id="login-username"
             className="input"
@@ -896,7 +919,7 @@ function LoginScreen({ onLogin, theme, onToggleTheme, locale, onLocaleChange }) 
           />
         </div>
         <div className="field">
-          <label htmlFor="login-password">Пароль</label>
+          <label htmlFor="login-password">{t('auth.login.password')}</label>
           <input
             id="login-password"
             className="input"
@@ -918,7 +941,7 @@ function LoginScreen({ onLogin, theme, onToggleTheme, locale, onLocaleChange }) 
           </div>
         )}
         <Button kind="primary" type="submit" disabled={saving || !username || !password}>
-          {saving ? 'Вход...' : 'Войти'}
+          {saving ? t('auth.login.submitting') : t('auth.login.submit')}
         </Button>
       </form>
     </AuthFrame>
@@ -937,20 +960,20 @@ function ForcePasswordChangeScreen({ user, onDone, onLogout, theme, onToggleThem
     setSaving(true);
     try {
       await ApiClient.changeUserPassword(user.id, { password });
-      pushToast({ kind: 'success', title: 'Пароль изменён' });
+      pushToast({ kind: 'success', title: t('auth.passwordChange.toastSuccess') });
       await onDone();
     } catch (err) {
-      setError(err.message || 'Не удалось изменить пароль');
+      setError(err.message || t('auth.passwordChange.failed'));
     } finally {
       setSaving(false);
     }
   };
 
   return (
-    <AuthFrame title="Смена пароля" subtitle={`Первый вход: ${user.username}`} theme={theme} onToggleTheme={onToggleTheme} locale={locale} onLocaleChange={onLocaleChange}>
+    <AuthFrame title={t('auth.passwordChange.title')} subtitle={t('auth.passwordChange.subtitleFirstLogin', { username: user.username })} theme={theme} onToggleTheme={onToggleTheme} locale={locale} onLocaleChange={onLocaleChange}>
       <form className="col" style={{gap: 14}} onSubmit={submit} autoComplete="on" method="post">
         <div className="field">
-          <label htmlFor="login-new-password">Новый пароль</label>
+          <label htmlFor="login-new-password">{t('auth.passwordChange.newPassword')}</label>
           <div className="row" style={{gap: 8}}>
             <input
               id="login-new-password"
@@ -960,19 +983,19 @@ function ForcePasswordChangeScreen({ user, onDone, onLogout, theme, onToggleThem
               autoComplete="new-password"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
-              placeholder="Минимум 12 символов"
+              placeholder={t('auth.passwordChange.minLengthPlaceholder')}
               autoFocus
             />
             <Button kind="ghost" onClick={() => setShowPassword((v) => !v)}>
-              {showPassword ? 'Скрыть' : 'Показать'}
+              {showPassword ? t('auth.passwordChange.hide') : t('auth.passwordChange.show')}
             </Button>
           </div>
         </div>
         {error && <div className="form-error">{error}</div>}
         <div className="row" style={{justifyContent: 'space-between'}}>
-          <Button kind="ghost" onClick={onLogout}>Выйти</Button>
+          <Button kind="ghost" onClick={onLogout}>{t('chrome.logout')}</Button>
           <Button kind="primary" type="submit" disabled={saving || password.length < 12}>
-            {saving ? 'Сохранение...' : 'Сменить пароль'}
+            {saving ? t('auth.passwordChange.saving') : t('auth.passwordChange.submit')}
           </Button>
         </div>
       </form>
