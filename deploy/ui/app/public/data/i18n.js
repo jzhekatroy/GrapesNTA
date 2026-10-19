@@ -19,6 +19,7 @@
     vlan: 'netmodel',
     users: 'admin',
     audit: 'admin',
+    versions: 'admin',
     clients: 'admin',
     smtp: 'admin',
     ttl: 'admin',
