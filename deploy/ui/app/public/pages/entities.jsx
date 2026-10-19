@@ -1,15 +1,12 @@
 /* Владельцы L3 — справочник net_entities (ClickHouse) */
 
 const ENTITY_TYPES = [
-  { value: 'isp', label: 'Провайдер' },
-  { value: 'customer', label: 'Клиент' },
-  { value: 'internal', label: 'Внутренний объект' },
+  { value: 'isp', labelKey: 'network.entities.type.isp' },
+  { value: 'customer', labelKey: 'network.entities.type.customer' },
+  { value: 'internal', labelKey: 'network.entities.type.internal' },
 ];
 
-const ENTITY_TYPE_LABELS = Object.fromEntries(ENTITY_TYPES.map((t) => [t.value, t.label]));
-
-const SAVE_SUCCESS_TITLE = 'Настройки сохранены';
-const SAVE_SUCCESS_DESC = 'Изменения будут автоматически применены в течение 60 секунд.';
+const ENTITY_TYPE_VALUES = new Set(ENTITY_TYPES.map((t) => t.value));
 
 const CYRILLIC_TO_LATIN = {
   а: 'a', б: 'b', в: 'v', г: 'g', д: 'd', е: 'e', ё: 'e', ж: 'zh', з: 'z',
@@ -45,31 +42,17 @@ function buildEntitySlug(displayName) {
 }
 
 function previewEntityId(ownerType, displayName) {
-  const prefix = String(ownerType ?? '').trim();
-  if (!ENTITY_TYPE_LABELS[prefix]) return '';
+  if (!ENTITY_TYPE_VALUES.has(ownerType)) return '';
   const slug = buildEntitySlug(displayName);
   if (!slug) return '';
-  return `${prefix}:${slug}`;
+  return `${ownerType}:${slug}`;
 }
 
 function ownerTypeFromEntityId(entityId) {
   const idx = String(entityId).indexOf(':');
   if (idx < 0) return null;
   const prefix = entityId.slice(0, idx);
-  return ENTITY_TYPE_LABELS[prefix] ? prefix : null;
-}
-
-function fmtEntityUpdatedAt(value) {
-  if (!value) return '—';
-  const d = new Date(value);
-  if (Number.isNaN(d.getTime())) return String(value);
-  return d.toLocaleString('ru-RU', {
-    day: '2-digit',
-    month: '2-digit',
-    year: 'numeric',
-    hour: '2-digit',
-    minute: '2-digit',
-  });
+  return ENTITY_TYPE_VALUES.has(prefix) ? prefix : null;
 }
 
 function PageEntities({ embedded = false, refreshKey: parentRefreshKey = 0, onReload } = {}) {
@@ -119,7 +102,7 @@ function PageEntities({ embedded = false, refreshKey: parentRefreshKey = 0, onRe
   }, [rows, search]);
 
   const handleDisable = async (row) => {
-    if (!window.confirm(`Отключить владельца «${row.displayName}»?`)) return;
+    if (!window.confirm(networkT('network.entities.disableConfirm', { name: row.displayName }))) return;
     try {
       await ApiClient.saveNetEntity({
         entityId: row.entityId,
@@ -127,21 +110,29 @@ function PageEntities({ embedded = false, refreshKey: parentRefreshKey = 0, onRe
         comment: row.comment,
         enabled: 0,
       });
-      pushToast({ kind: 'success', title: SAVE_SUCCESS_TITLE, desc: SAVE_SUCCESS_DESC });
+      pushToast({
+        kind: 'success',
+        title: networkT('network.saveSuccess.title'),
+        desc: networkT('network.saveSuccess.desc'),
+      });
       reload();
     } catch (err) {
-      pushToast({ kind: 'error', title: 'Не удалось отключить', desc: err.message });
+      pushToast({
+        kind: 'error',
+        title: networkT('network.entities.disableFailed'),
+        desc: formatNetworkApiError(err),
+      });
     }
   };
 
   const cols = [
     {
       key: 'displayName',
-      title: 'Название',
+      title: networkT('network.col.name'),
       width: 220,
       sortAccessor: (r) => r.displayName,
       render: (r) => (
-        <span style={{ font: 'var(--pv-text-body-2-bold)' }}>{r.displayName || '—'}</span>
+        <span style={{ font: 'var(--pv-text-body-2-bold)' }}>{r.displayName || networkEmDash()}</span>
       ),
     },
     {
@@ -155,28 +146,28 @@ function PageEntities({ embedded = false, refreshKey: parentRefreshKey = 0, onRe
     },
     {
       key: 'comment',
-      title: 'Комментарий',
+      title: networkT('network.col.comment'),
       width: 220,
       render: (r) => (
         <span style={{ color: 'var(--fg-secondary)', font: 'var(--pv-text-body-3)' }}>
-          {r.comment || '—'}
+          {r.comment || networkEmDash()}
         </span>
       ),
     },
     {
       key: 'source',
-      title: 'Источник',
+      title: networkT('network.col.source'),
       width: 90,
-      render: (r) => <span className="tag">{r.source || '—'}</span>,
+      render: (r) => <span className="tag">{networkSourceLabel(r.source)}</span>,
     },
     {
       key: 'updatedAt',
-      title: 'Дата изменения',
+      title: networkT('network.col.changedAt'),
       width: 150,
       sortAccessor: (r) => r.updatedAt,
       render: (r) => (
         <span style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-secondary)' }}>
-          {fmtEntityUpdatedAt(r.updatedAt)}
+          {fmtNetworkDateTime(r.updatedAt)}
         </span>
       ),
     },
@@ -187,28 +178,37 @@ function PageEntities({ embedded = false, refreshKey: parentRefreshKey = 0, onRe
       {!embedded && (
         <div className="page-head">
           <div>
-            <h1>Владельцы L3</h1>
-            <p>Справочник владельцев сетей для L3-префиксов и классификации. Идентификатор entity_id задаётся один раз при создании.</p>
+            <h1>{networkT('network.entities.title')}</h1>
+            <p>{networkT('network.entities.subtitle')}</p>
           </div>
           <div className="row" style={{ gap: 8 }}>
-            <Button kind="ghost" icon="refresh" onClick={reload} disabled={loading}>Обновить</Button>
-            <Button kind="primary" icon="plus" onClick={() => setShowAdd(true)} disabled={!!loadError || !canWrite}>Добавить владельца</Button>
+            <Button kind="ghost" icon="refresh" onClick={reload} disabled={loading}>{networkT('chrome.refresh')}</Button>
+            <Button kind="primary" icon="plus" onClick={() => setShowAdd(true)} disabled={!!loadError || !canWrite}>
+              {networkT('network.entities.add')}
+            </Button>
           </div>
         </div>
       )}
 
       {embedded && (
         <div className="row" style={{ justifyContent: 'flex-end', marginBottom: 12 }}>
-          <Button kind="primary" icon="plus" onClick={() => setShowAdd(true)} disabled={!!loadError || !canWrite}>Добавить владельца</Button>
+          <Button kind="primary" icon="plus" onClick={() => setShowAdd(true)} disabled={!!loadError || !canWrite}>
+            {networkT('network.entities.add')}
+          </Button>
         </div>
       )}
 
       {loading ? (
         <Card pad="sm">
-          <div style={{ padding: 32, textAlign: 'center', color: 'var(--fg-secondary)' }}>Загрузка…</div>
+          <div style={{ padding: 32, textAlign: 'center', color: 'var(--fg-secondary)' }}>{networkT('dashboard.loading')}</div>
         </Card>
       ) : loadError ? (
-        <Empty icon="db" title="Не удалось загрузить" desc={loadError} action={<Button kind="primary" icon="refresh" onClick={reload}>Повторить</Button>} />
+        <Empty
+          icon="db"
+          title={networkT('dashboard.loadFailed')}
+          desc={resolveNetworkLoadError(loadError)}
+          action={<Button kind="primary" icon="refresh" onClick={reload}>{networkT('network.retry')}</Button>}
+        />
       ) : (
         <DataTable
           rows={filtered}
@@ -219,18 +219,18 @@ function PageEntities({ embedded = false, refreshKey: parentRefreshKey = 0, onRe
           onSelectChange={setSelected}
           pageSize={15}
           onRowClick={canWrite ? (r) => setEditing({ ...r, isNew: false }) : undefined}
-          emptyTitle="Нет активных владельцев"
-          emptyDesc="Добавьте владельца или уточните поиск."
+          emptyTitle={networkT('network.entities.empty.title')}
+          emptyDesc={networkT('network.entities.empty.desc')}
           toolbar={{
             search,
             onSearch: setSearch,
           }}
           rowActions={canWrite ? (r) => (
             <div className="row" style={{ gap: 4, justifyContent: 'flex-end' }}>
-              <button className="icon-btn tt" data-tt="Редактировать" onClick={(e) => { e.stopPropagation(); setEditing({ ...r, isNew: false }); }}>
+              <button className="icon-btn tt" data-tt={networkT('network.editTip')} onClick={(e) => { e.stopPropagation(); setEditing({ ...r, isNew: false }); }}>
                 <Icon name="edit" size={15} />
               </button>
-              <button className="icon-btn tt" data-tt="Отключить" onClick={(e) => { e.stopPropagation(); handleDisable(r); }}>
+              <button className="icon-btn tt" data-tt={networkT('network.disableTip')} onClick={(e) => { e.stopPropagation(); handleDisable(r); }}>
                 <Icon name="trash" size={15} />
               </button>
             </div>
@@ -247,7 +247,11 @@ function PageEntities({ embedded = false, refreshKey: parentRefreshKey = 0, onRe
           setShowAdd(false);
           setEditing(null);
           reload();
-          pushToast({ kind: 'success', title: SAVE_SUCCESS_TITLE, desc: SAVE_SUCCESS_DESC });
+          pushToast({
+            kind: 'success',
+            title: networkT('network.saveSuccess.title'),
+            desc: networkT('network.saveSuccess.desc'),
+          });
         }}
       />
     </>
@@ -284,15 +288,15 @@ function EntityFormModal({ open, row, isNew, onClose, onSaved }) {
   const handleSave = async () => {
     const name = displayName.trim();
     if (!name) {
-      setFormError('Укажите название владельца');
+      setFormError(networkT('network.err.displayNameRequired'));
       return;
     }
-    if (isNew && !ENTITY_TYPE_LABELS[ownerType]) {
-      setFormError('Выберите тип владельца');
+    if (isNew && !ENTITY_TYPE_VALUES.has(ownerType)) {
+      setFormError(networkT('network.err.ownerTypeRequired'));
       return;
     }
     if (isNew && !entityIdPreview) {
-      setFormError('Не удалось сформировать идентификатор из названия');
+      setFormError(networkT('network.err.slugFromNameFailed'));
       return;
     }
 
@@ -308,7 +312,7 @@ function EntityFormModal({ open, row, isNew, onClose, onSaved }) {
       });
       onSaved();
     } catch (err) {
-      setFormError(err.message);
+      setFormError(formatNetworkApiError(err));
     } finally {
       setSaving(false);
     }
@@ -320,13 +324,13 @@ function EntityFormModal({ open, row, isNew, onClose, onSaved }) {
     <Modal
       open={open}
       onClose={onClose}
-      title={isNew ? 'Добавить владельца' : 'Редактировать владельца'}
-      subtitle={isNew ? 'Новая запись справочника' : row?.entityId}
+      title={isNew ? networkT('network.entities.modal.add') : networkT('network.entities.modal.edit')}
+      subtitle={isNew ? networkT('network.entities.modal.subtitleNew') : row?.entityId}
       footer={
         <>
-          <Button kind="ghost" onClick={onClose} disabled={saving}>Отмена</Button>
+          <Button kind="ghost" onClick={onClose} disabled={saving}>{networkT('network.cancel')}</Button>
           <Button kind="primary" icon="save" onClick={handleSave} disabled={saving}>
-            {saving ? 'Сохранение…' : 'Сохранить'}
+            {saving ? networkT('network.saving') : networkT('network.save')}
           </Button>
         </>
       }
@@ -344,26 +348,26 @@ function EntityFormModal({ open, row, isNew, onClose, onSaved }) {
           </div>
         )}
         <div className="field">
-          <label>Название</label>
+          <label>{networkT('network.entities.field.name')}</label>
           <input
             className="input"
-            placeholder="ПИН, Клиент А, Офис…"
+            placeholder={networkT('network.entities.placeholder.name')}
             value={displayName}
             onChange={(e) => setDisplayName(e.target.value)}
           />
         </div>
         <div className="field">
-          <label>Тип владельца</label>
+          <label>{networkT('network.entities.field.ownerType')}</label>
           {isNew ? (
             <select className="input" value={ownerType} onChange={(e) => setOwnerType(e.target.value)}>
               {ENTITY_TYPES.map((t) => (
-                <option key={t.value} value={t.value}>{t.label}</option>
+                <option key={t.value} value={t.value}>{networkT(t.labelKey)}</option>
               ))}
             </select>
           ) : (
             <input
               className="input"
-              value={ENTITY_TYPE_LABELS[ownerTypeReadonly] || '—'}
+              value={entityTypeLabel(ownerTypeReadonly)}
               readOnly
               disabled
             />
@@ -371,15 +375,15 @@ function EntityFormModal({ open, row, isNew, onClose, onSaved }) {
         </div>
         {isNew && entityIdPreview && (
           <div className="field">
-            <label>Будет создан ID</label>
+            <label>{networkT('network.entities.field.idPreview')}</label>
             <input className="input mono" value={entityIdPreview} readOnly disabled />
           </div>
         )}
         <div className="field">
-          <label>Комментарий</label>
+          <label>{networkT('network.col.comment')}</label>
           <input
             className="input"
-            placeholder="Необязательно"
+            placeholder={networkT('network.optional')}
             value={comment}
             onChange={(e) => setComment(e.target.value)}
           />

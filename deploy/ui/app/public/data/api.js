@@ -1551,6 +1551,13 @@ const ApiClient = (() => {
     };
   }
 
+  function throwRefApiError(body, status) {
+    const err = new Error(body.error || `HTTP ${status}`);
+    if (body.code) err.code = body.code;
+    if (body.params) err.params = body.params;
+    throw err;
+  }
+
   async function saveL3Prefix(payload) {
     const res = await fetch('/api/refs/l3-prefixes', {
       method: 'POST',
@@ -1560,7 +1567,7 @@ const ApiClient = (() => {
       body: JSON.stringify(payload),
     });
     const body = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
+    if (!res.ok) throwRefApiError(body, res.status);
     return body;
   }
 
@@ -1573,7 +1580,7 @@ const ApiClient = (() => {
       body: JSON.stringify({ prefix, family, enabled }),
     });
     const body = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
+    if (!res.ok) throwRefApiError(body, res.status);
     return body;
   }
 
@@ -1586,7 +1593,7 @@ const ApiClient = (() => {
       body: JSON.stringify({ prefix, family }),
     });
     const body = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
+    if (!res.ok) throwRefApiError(body, res.status);
     return body;
   }
 
@@ -1735,7 +1742,7 @@ const ApiClient = (() => {
       body: JSON.stringify(payload),
     });
     const body = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
+    if (!res.ok) throwRefApiError(body, res.status);
     return body;
   }
 
@@ -1847,7 +1854,7 @@ const ApiClient = (() => {
       body: JSON.stringify(payload),
     });
     const body = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
+    if (!res.ok) throwRefApiError(body, res.status);
     return body;
   }
 
@@ -1860,7 +1867,7 @@ const ApiClient = (() => {
       body: JSON.stringify(payload),
     });
     const body = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
+    if (!res.ok) throwRefApiError(body, res.status);
     return body;
   }
 
@@ -1873,7 +1880,7 @@ const ApiClient = (() => {
       body: JSON.stringify(payload),
     });
     const body = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
+    if (!res.ok) throwRefApiError(body, res.status);
     return body;
   }
 

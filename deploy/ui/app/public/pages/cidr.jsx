@@ -1,46 +1,42 @@
 /* Собственные сети (CIDR) — L3-префиксы из ClickHouse */
 
 const L3_ROLES = [
-  { value: 'provider_public', label: 'Публичная сеть провайдера' },
-  { value: 'internal', label: 'Внутренняя сеть провайдера' },
-  { value: 'customer_allocated', label: 'Сеть клиента из нашего пула' },
-  { value: 'customer_transit', label: 'Транзитная сеть клиента' },
-  { value: 'remote', label: 'Чужая / внешняя сеть' },
+  { value: 'provider_public', labelKey: 'network.cidr.role.provider_public' },
+  { value: 'internal', labelKey: 'network.cidr.role.internal' },
+  { value: 'customer_allocated', labelKey: 'network.cidr.role.customer_allocated' },
+  { value: 'customer_transit', labelKey: 'network.cidr.role.customer_transit' },
+  { value: 'remote', labelKey: 'network.cidr.role.remote' },
 ];
 
-const L3_ROLE_LABELS = Object.fromEntries(L3_ROLES.map((r) => [r.value, r.label]));
-
-const SAVE_SUCCESS_TITLE = 'Настройки сохранены';
-const SAVE_SUCCESS_DESC = 'Изменения будут автоматически применены в течение 60 секунд.';
+const L3_ROLE_VALUES = new Set(L3_ROLES.map((r) => r.value));
 
 function l3RowKey(row) {
   return `${row.family}:${row.prefix}`;
 }
 
+function networkErrMessage(code) {
+  return networkT(`network.err.${code}`);
+}
+
 function parseCidrClient(prefix) {
   const trimmed = String(prefix ?? '').trim();
-  if (!trimmed) return { ok: false, error: 'Укажите префикс (CIDR)' };
+  if (!trimmed) return { ok: false, code: 'prefixRequired' };
   const slash = trimmed.indexOf('/');
-  if (slash < 0) return { ok: false, error: 'Префикс должен быть в формате CIDR' };
+  if (slash < 0) return { ok: false, code: 'prefixCidrFormatShort' };
   const ipPart = trimmed.slice(0, slash);
   const mask = Number(trimmed.slice(slash + 1));
   const v4 = /^(\d{1,3}\.){3}\d{1,3}$/.test(ipPart);
   const v6 = ipPart.includes(':');
   if (v4 && mask >= 0 && mask <= 32) return { ok: true, prefix: `${ipPart}/${mask}`, family: 4 };
   if (v6 && mask >= 0 && mask <= 128) return { ok: true, prefix: trimmed, family: 6 };
-  return { ok: false, error: 'Некорректный CIDR или маска' };
+  return { ok: false, code: 'invalidCidrMask' };
 }
 
-function fmtL3UpdatedAt(value) {
-  if (!value) return '—';
-  const d = new Date(value);
-  if (Number.isNaN(d.getTime())) return String(value);
-  return d.toLocaleString('ru-RU', {
-    day: '2-digit',
-    month: '2-digit',
-    year: 'numeric',
-    hour: '2-digit',
-    minute: '2-digit',
+function comingSoonToast(titleKey) {
+  pushToast({
+    kind: 'info',
+    title: networkT(titleKey),
+    desc: networkT('network.comingSoon.desc'),
   });
 }
 
@@ -90,7 +86,7 @@ function PageCIDR({ embedded = false, refreshKey: parentRefreshKey = 0, onReload
     if (!search) return rows;
     const s = search.toLowerCase();
     return rows.filter((r) => {
-      const roleLabel = L3_ROLE_LABELS[r.role] || r.role;
+      const roleLabel = l3RoleLabel(r.role);
       return (
         r.prefix.toLowerCase().includes(s)
         || (r.entityName || '').toLowerCase().includes(s)
@@ -104,35 +100,51 @@ function PageCIDR({ embedded = false, refreshKey: parentRefreshKey = 0, onReload
 
   const handleToggle = async (row) => {
     const next = row.enabled === 1 ? 0 : 1;
-    const label = next === 1 ? 'включить' : 'отключить';
-    if (!window.confirm(`${label.charAt(0).toUpperCase() + label.slice(1)} сеть ${row.prefix}?`)) return;
+    const confirmKey = next === 1 ? 'network.cidr.confirmEnable' : 'network.cidr.confirmDisable';
+    if (!window.confirm(networkT(confirmKey, { prefix: row.prefix }))) return;
     setTogglingId(row.id);
     try {
       await ApiClient.toggleL3Prefix({ prefix: row.prefix, family: row.family, enabled: next });
-      pushToast({ kind: 'success', title: SAVE_SUCCESS_TITLE, desc: SAVE_SUCCESS_DESC });
+      pushToast({
+        kind: 'success',
+        title: networkT('network.saveSuccess.title'),
+        desc: networkT('network.saveSuccess.desc'),
+      });
       reload();
     } catch (err) {
-      pushToast({ kind: 'error', title: 'Не удалось изменить статус', desc: err.message });
+      pushToast({
+        kind: 'error',
+        title: networkT('network.cidr.toggleFailed'),
+        desc: formatNetworkApiError(err),
+      });
     } finally {
       setTogglingId(null);
     }
   };
 
   const handleDelete = async (row) => {
-    if (!window.confirm(`Удалить сеть ${row.prefix} безвозвратно? Все версии записи будут удалены из ClickHouse.`)) return;
+    if (!window.confirm(networkT('network.cidr.confirmDelete', { prefix: row.prefix }))) return;
     try {
       await ApiClient.deleteL3Prefix({ prefix: row.prefix, family: row.family });
-      pushToast({ kind: 'success', title: 'Сеть удалена', desc: 'Префикс удалён из справочника.' });
+      pushToast({
+        kind: 'success',
+        title: networkT('network.cidr.deleted.title'),
+        desc: networkT('network.cidr.deleted.desc'),
+      });
       reload();
     } catch (err) {
-      pushToast({ kind: 'error', title: 'Не удалось удалить', desc: err.message });
+      pushToast({
+        kind: 'error',
+        title: networkT('network.cidr.deleteFailed'),
+        desc: formatNetworkApiError(err),
+      });
     }
   };
 
   const cols = [
     {
       key: 'prefix',
-      title: 'Префикс',
+      title: networkT('network.cidr.col.prefix'),
       width: 220,
       sortAccessor: (r) => r.prefix,
       render: (r) => (
@@ -144,7 +156,7 @@ function PageCIDR({ embedded = false, refreshKey: parentRefreshKey = 0, onReload
     },
     {
       key: 'enabled',
-      title: 'Активна',
+      title: networkT('network.cidr.col.active'),
       width: 88,
       sortAccessor: (r) => r.enabled,
       render: (r) => (
@@ -157,62 +169,62 @@ function PageCIDR({ embedded = false, refreshKey: parentRefreshKey = 0, onReload
     },
     {
       key: 'family',
-      title: 'IP',
+      title: networkT('network.cidr.col.ip'),
       width: 72,
       render: (r) => <span className="tag">IPv{r.family}</span>,
     },
     {
       key: 'entity',
-      title: 'Владелец',
+      title: networkT('network.cidr.col.owner'),
       width: 220,
       sortAccessor: (r) => r.entityName || r.entityId,
       render: (r) => (
         <div>
-          <div style={{ font: 'var(--pv-text-body-2-bold)' }}>{r.entityName || r.entityId || '—'}</div>
+          <div style={{ font: 'var(--pv-text-body-2-bold)' }}>{r.entityName || r.entityId || networkEmDash()}</div>
         </div>
       ),
     },
     {
       key: 'role',
-      title: 'Роль',
+      title: networkT('network.cidr.col.role'),
       width: 200,
-      sortAccessor: (r) => L3_ROLE_LABELS[r.role] || r.role,
+      sortAccessor: (r) => l3RoleLabel(r.role),
       render: (r) => (
         <span style={{ color: 'var(--fg-secondary)' }}>
-          {L3_ROLE_LABELS[r.role] || r.role}
+          {l3RoleLabel(r.role)}
         </span>
       ),
     },
     {
       key: 'displayName',
-      title: 'Отображаемое имя',
+      title: networkT('network.cidr.col.displayName'),
       width: 160,
-      render: (r) => r.displayName || <span style={{ color: 'var(--fg-secondary)' }}>—</span>,
+      render: (r) => r.displayName || <span style={{ color: 'var(--fg-secondary)' }}>{networkEmDash()}</span>,
     },
     {
       key: 'comment',
-      title: 'Комментарий',
+      title: networkT('network.col.comment'),
       width: 180,
       render: (r) => (
         <span style={{ color: 'var(--fg-secondary)', font: 'var(--pv-text-body-3)' }}>
-          {r.comment || '—'}
+          {r.comment || networkEmDash()}
         </span>
       ),
     },
     {
       key: 'source',
-      title: 'Источник',
+      title: networkT('network.col.source'),
       width: 90,
-      render: (r) => <span className="tag">{r.source || '—'}</span>,
+      render: (r) => <span className="tag">{networkSourceLabel(r.source)}</span>,
     },
     {
       key: 'updatedAt',
-      title: 'Обновлено',
+      title: networkT('network.col.updated'),
       width: 140,
       sortAccessor: (r) => r.updatedAt,
       render: (r) => (
         <span style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-secondary)' }}>
-          {fmtL3UpdatedAt(r.updatedAt)}
+          {fmtNetworkDateTime(r.updatedAt)}
         </span>
       ),
     },
@@ -223,32 +235,73 @@ function PageCIDR({ embedded = false, refreshKey: parentRefreshKey = 0, onReload
       {!embedded && (
         <div className="page-head">
           <div>
-            <h1>Собственные сети (CIDR)</h1>
-            <p>L3-префиксы для классификации трафика: владелец сети и роль адресов. Изменения применяются автоматически (~60 с).</p>
+            <h1>{networkT('network.cidr.title')}</h1>
+            <p>{networkT('network.cidr.subtitle')}</p>
           </div>
           <div className="row" style={{ gap: 8 }}>
-            <Button kind="ghost" icon="upload" disabled title="В разработке" onClick={() => pushToast({ kind: 'info', title: 'Импорт CSV', desc: 'Функция в разработке.' })}>Импорт из CSV</Button>
-            <Button kind="ghost" icon="export" disabled title="В разработке" onClick={() => pushToast({ kind: 'info', title: 'Экспорт', desc: 'Функция в разработке.' })}>Экспорт</Button>
-            <Button kind="ghost" icon="refresh" onClick={reload} disabled={loading}>Обновить</Button>
-            <Button kind="primary" icon="plus" onClick={() => setShowAdd(true)} disabled={!!loadError || !canWrite}>Добавить сеть</Button>
+            <Button
+              kind="ghost"
+              icon="upload"
+              disabled
+              title={networkT('network.comingSoon')}
+              onClick={() => comingSoonToast('network.cidr.importToast.title')}
+            >
+              {networkT('network.cidr.importCsv')}
+            </Button>
+            <Button
+              kind="ghost"
+              icon="export"
+              disabled
+              title={networkT('network.comingSoon')}
+              onClick={() => comingSoonToast('network.cidr.exportToast.title')}
+            >
+              {networkT('network.cidr.export')}
+            </Button>
+            <Button kind="ghost" icon="refresh" onClick={reload} disabled={loading}>{networkT('chrome.refresh')}</Button>
+            <Button kind="primary" icon="plus" onClick={() => setShowAdd(true)} disabled={!!loadError || !canWrite}>
+              {networkT('network.cidr.add')}
+            </Button>
           </div>
         </div>
       )}
 
       {embedded && (
         <div className="row" style={{ justifyContent: 'flex-end', marginBottom: 12, gap: 8 }}>
-          <Button kind="ghost" icon="upload" disabled title="В разработке" onClick={() => pushToast({ kind: 'info', title: 'Импорт CSV', desc: 'Функция в разработке.' })}>Импорт из CSV</Button>
-          <Button kind="ghost" icon="export" disabled title="В разработке" onClick={() => pushToast({ kind: 'info', title: 'Экспорт', desc: 'Функция в разработке.' })}>Экспорт</Button>
-          <Button kind="primary" icon="plus" onClick={() => setShowAdd(true)} disabled={!!loadError || !canWrite}>Добавить сеть</Button>
+          <Button
+            kind="ghost"
+            icon="upload"
+            disabled
+            title={networkT('network.comingSoon')}
+            onClick={() => comingSoonToast('network.cidr.importToast.title')}
+          >
+            {networkT('network.cidr.importCsv')}
+          </Button>
+          <Button
+            kind="ghost"
+            icon="export"
+            disabled
+            title={networkT('network.comingSoon')}
+            onClick={() => comingSoonToast('network.cidr.exportToast.title')}
+          >
+            {networkT('network.cidr.export')}
+          </Button>
+          <Button kind="primary" icon="plus" onClick={() => setShowAdd(true)} disabled={!!loadError || !canWrite}>
+            {networkT('network.cidr.add')}
+          </Button>
         </div>
       )}
 
       {loading ? (
         <Card pad="sm">
-          <div style={{ padding: 32, textAlign: 'center', color: 'var(--fg-secondary)' }}>Загрузка…</div>
+          <div style={{ padding: 32, textAlign: 'center', color: 'var(--fg-secondary)' }}>{networkT('dashboard.loading')}</div>
         </Card>
       ) : loadError ? (
-        <Empty icon="db" title="Не удалось загрузить" desc={loadError} action={<Button kind="primary" icon="refresh" onClick={reload}>Повторить</Button>} />
+        <Empty
+          icon="db"
+          title={networkT('dashboard.loadFailed')}
+          desc={resolveNetworkLoadError(loadError)}
+          action={<Button kind="primary" icon="refresh" onClick={reload}>{networkT('network.retry')}</Button>}
+        />
       ) : (
         <DataTable
           rows={filtered}
@@ -259,26 +312,33 @@ function PageCIDR({ embedded = false, refreshKey: parentRefreshKey = 0, onReload
           onSelectChange={setSelected}
           pageSize={15}
           onRowClick={canWrite ? (r) => setEditing({ ...r, isNew: false }) : undefined}
-          emptyTitle="Нет сетей"
-          emptyDesc="Добавьте L3-префикс или уточните поиск."
+          emptyTitle={networkT('network.cidr.empty.title')}
+          emptyDesc={networkT('network.cidr.empty.desc')}
           toolbar={{
             search,
             onSearch: setSearch,
             left: selected.size > 0 ? (
               <div className="row" style={{ gap: 8 }}>
                 <span style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-secondary)' }}>
-                  Выбрано: <b style={{ color: 'var(--fg-primary)' }}>{selected.size}</b>
+                  {networkT('network.cidr.selectedCount', { n: selected.size })}
                 </span>
-                <Button size="sm" kind="ghost" disabled onClick={() => pushToast({ kind: 'info', title: 'Bulk edit', desc: 'Функция в разработке.' })}>Bulk edit</Button>
+                <Button
+                  size="sm"
+                  kind="ghost"
+                  disabled
+                  onClick={() => pushToast({ kind: 'info', title: networkT('network.cidr.bulkEdit'), desc: networkT('network.comingSoon.desc') })}
+                >
+                  {networkT('network.cidr.bulkEdit')}
+                </Button>
               </div>
             ) : null,
           }}
           rowActions={canWrite ? (r) => (
             <div className="row" style={{ gap: 4, justifyContent: 'flex-end' }}>
-              <button className="icon-btn tt" data-tt="Редактировать" onClick={(e) => { e.stopPropagation(); setEditing({ ...r, isNew: false }); }}>
+              <button className="icon-btn tt" data-tt={networkT('network.editTip')} onClick={(e) => { e.stopPropagation(); setEditing({ ...r, isNew: false }); }}>
                 <Icon name="edit" size={15} />
               </button>
-              <button className="icon-btn tt" data-tt="Удалить" onClick={(e) => { e.stopPropagation(); handleDelete(r); }}>
+              <button className="icon-btn tt" data-tt={networkT('network.deleteTip')} onClick={(e) => { e.stopPropagation(); handleDelete(r); }}>
                 <Icon name="trash" size={15} />
               </button>
             </div>
@@ -296,7 +356,11 @@ function PageCIDR({ embedded = false, refreshKey: parentRefreshKey = 0, onReload
           setShowAdd(false);
           setEditing(null);
           reload();
-          pushToast({ kind: 'success', title: SAVE_SUCCESS_TITLE, desc: SAVE_SUCCESS_DESC });
+          pushToast({
+            kind: 'success',
+            title: networkT('network.saveSuccess.title'),
+            desc: networkT('network.saveSuccess.desc'),
+          });
         }}
       />
     </>
@@ -313,7 +377,7 @@ function L3EnabledToggle({ enabled, disabled, onChange }) {
       className="l3-enabled-toggle"
       disabled={disabled}
       onClick={(e) => { e.stopPropagation(); onChange(); }}
-      title={enabled ? 'Отключить сеть' : 'Включить сеть'}
+      title={enabled ? networkT('network.cidr.toggleDisable') : networkT('network.cidr.toggleEnable')}
       aria-pressed={enabled}
       style={{
         width: 36,
@@ -365,7 +429,7 @@ function L3PrefixFormModal({ open, row, isNew, entities, onClose, onSaved }) {
       setPrefix(row.prefix);
       setFamily(row.family);
       setEntityId(row.entityId || '');
-      setRole(L3_ROLE_LABELS[row.role] ? row.role : L3_ROLES[0].value);
+      setRole(L3_ROLE_VALUES.has(row.role) ? row.role : L3_ROLES[0].value);
       setDisplayName(row.displayName || '');
       setComment(row.comment || '');
     }
@@ -382,13 +446,13 @@ function L3PrefixFormModal({ open, row, isNew, entities, onClose, onSaved }) {
 
   const validate = () => {
     const parsed = parseCidrClient(prefix);
-    if (!parsed.ok) return parsed.error;
-    if (isNew && parsed.family !== family) return 'Версия IP не соответствует адресу';
+    if (!parsed.ok) return networkErrMessage(parsed.code);
+    if (isNew && parsed.family !== family) return networkErrMessage('familyMismatch');
     if (!isNew && (parsed.prefix !== row.prefix || parsed.family !== row.family)) {
-      return 'Префикс нельзя изменить';
+      return networkErrMessage('prefixImmutable');
     }
-    if (!entityId) return 'Выберите владельца сети';
-    if (!L3_ROLE_LABELS[role]) return 'Выберите роль сети';
+    if (!entityId) return networkErrMessage('entityRequired');
+    if (!L3_ROLE_VALUES.has(role)) return networkErrMessage('roleRequired');
     return '';
   };
 
@@ -413,7 +477,7 @@ function L3PrefixFormModal({ open, row, isNew, entities, onClose, onSaved }) {
       });
       onSaved();
     } catch (e) {
-      setFormError(e.message || 'Ошибка сохранения');
+      setFormError(formatNetworkApiError(e));
     } finally {
       setSaving(false);
     }
@@ -425,13 +489,13 @@ function L3PrefixFormModal({ open, row, isNew, entities, onClose, onSaved }) {
     <Modal
       open={open}
       onClose={onClose}
-      title={isNew ? 'Добавить сеть' : 'Редактировать сеть'}
-      subtitle={isNew ? 'Новый L3-префикс' : row?.prefix}
+      title={isNew ? networkT('network.cidr.modal.add') : networkT('network.cidr.modal.edit')}
+      subtitle={isNew ? networkT('network.cidr.modal.subtitleNew') : row?.prefix}
       footer={
         <>
-          <Button kind="ghost" onClick={onClose} disabled={saving}>Отмена</Button>
+          <Button kind="ghost" onClick={onClose} disabled={saving}>{networkT('network.cancel')}</Button>
           <Button kind="primary" icon="save" onClick={handleSave} disabled={saving}>
-            {saving ? 'Сохранение…' : 'Сохранить'}
+            {saving ? networkT('network.saving') : networkT('network.save')}
           </Button>
         </>
       }
@@ -443,7 +507,7 @@ function L3PrefixFormModal({ open, row, isNew, entities, onClose, onSaved }) {
       )}
       <div className="grid grid--2col">
         <div className="field" style={{ gridColumn: '1 / -1' }}>
-          <label>Префикс (CIDR)</label>
+          <label>{networkT('network.cidr.field.prefix')}</label>
           <input
             className="input mono"
             placeholder="188.143.128.0/17"
@@ -454,21 +518,21 @@ function L3PrefixFormModal({ open, row, isNew, entities, onClose, onSaved }) {
           />
         </div>
         <div className="field">
-          <label>Версия IP</label>
+          <label>{networkT('network.cidr.field.ipVersion')}</label>
           <input className="input" value={`IPv${family}`} readOnly disabled />
         </div>
         <div className="field">
-          <label>Роль сети</label>
+          <label>{networkT('network.cidr.field.role')}</label>
           <select className="input" value={role} onChange={(e) => setRole(e.target.value)}>
             {L3_ROLES.map((r) => (
-              <option key={r.value} value={r.value}>{r.label}</option>
+              <option key={r.value} value={r.value}>{networkT(r.labelKey)}</option>
             ))}
           </select>
         </div>
         <div className="field" style={{ gridColumn: '1 / -1' }}>
-          <label>Владелец сети</label>
+          <label>{networkT('network.cidr.field.owner')}</label>
           <select className="input" value={entityId} onChange={(e) => setEntityId(e.target.value)}>
-            <option value="">— выберите —</option>
+            <option value="">{networkT('network.cidr.selectOwner')}</option>
             {entities.map((e) => (
               <option key={e.entityId} value={e.entityId}>
                 {e.displayName || e.entityId}
@@ -477,12 +541,12 @@ function L3PrefixFormModal({ open, row, isNew, entities, onClose, onSaved }) {
           </select>
         </div>
         <div className="field" style={{ gridColumn: '1 / -1' }}>
-          <label>Отображаемое имя</label>
-          <input className="input" placeholder="Необязательно" value={displayName} onChange={(e) => setDisplayName(e.target.value)} />
+          <label>{networkT('network.cidr.col.displayName')}</label>
+          <input className="input" placeholder={networkT('network.optional')} value={displayName} onChange={(e) => setDisplayName(e.target.value)} />
         </div>
         <div className="field" style={{ gridColumn: '1 / -1' }}>
-          <label>Комментарий</label>
-          <input className="input" placeholder="Необязательно" value={comment} onChange={(e) => setComment(e.target.value)} />
+          <label>{networkT('network.col.comment')}</label>
+          <input className="input" placeholder={networkT('network.optional')} value={comment} onChange={(e) => setComment(e.target.value)} />
         </div>
       </div>
     </Modal>
