@@ -2,23 +2,49 @@
 
 const { useCallback, useEffect, useState } = React;
 
-const DIRECTION_MODE_OPTIONS = [
-  {
-    value: 'prefixes',
-    label: 'По сетям',
-    hint: 'Направление выводится из справочника L3-префиксов (собственные сети).',
-  },
-  {
-    value: 'ports',
-    label: 'По портам',
-    hint: 'Направление — по стороне входного и выходного интерфейса. Требует разметки на «Порты оборудования» и поддержки коллектора.',
-  },
-];
+const DIRECTION_MODE_VALUES = ['prefixes', 'ports'];
+const UNKNOWN_NETWORK_VALUES = ['foreign', 'unclassified'];
 
-const UNKNOWN_NETWORK_HINTS = {
-  foreign: 'Удобно, пока справочник неполон. Но если своя сеть не внесена в справочник, её трафик попадёт в транзит, и это ничем не будет заметно.',
-  unclassified: 'Транзитом считается только трафик между сетями, явно описанными в справочнике. Пробелы в разметке видны сразу.',
-};
+function trafficClassificationT(key, params) {
+  return GrapesI18n.t(key, params);
+}
+
+function directionModeOptions() {
+  return DIRECTION_MODE_VALUES.map((value) => ({
+    value,
+    label: trafficClassificationT(`trafficClassification.directionMode.${value}.label`),
+    hint: trafficClassificationT(`trafficClassification.directionMode.${value}.hint`),
+  }));
+}
+
+function unknownNetworkOptions(allowedValues) {
+  const values = Array.isArray(allowedValues) && allowedValues.length
+    ? allowedValues
+    : UNKNOWN_NETWORK_VALUES;
+  return values.map((value) => ({
+    value,
+    label: GrapesI18n.has(`trafficClassification.unknown.${value}.label`)
+      ? trafficClassificationT(`trafficClassification.unknown.${value}.label`)
+      : value,
+    hint: GrapesI18n.has(`trafficClassification.unknown.${value}.hint`)
+      ? trafficClassificationT(`trafficClassification.unknown.${value}.hint`)
+      : '',
+  }));
+}
+
+function mapTrafficClassificationError(message) {
+  const msg = String(message || '').trim();
+  if (!msg || msg === ApiClient.LOAD_FAILED || msg === 'Не удалось загрузить') {
+    return trafficClassificationT('trafficClassification.loadFailed');
+  }
+  if (msg === 'Неизвестный режим определения направления') {
+    return trafficClassificationT('trafficClassification.err.unknownDirectionMode');
+  }
+  if (msg === 'Недопустимое значение unknownNetworks') {
+    return trafficClassificationT('trafficClassification.err.invalidUnknownNetworks');
+  }
+  return msg;
+}
 
 function openUnclassifiedTrafficExplorer() {
   const url = buildExplorerShareUrl({
@@ -32,9 +58,24 @@ function openUnclassifiedTrafficExplorer() {
   location.hash = url.slice(url.indexOf('#') + 1);
 }
 
-function ChoiceGroup({ name, value, options, disabled, onChange }) {
+function PortsMarkupHint() {
+  const pageLabel = trafficClassificationT('nav.item.interface-roles');
+  const template = trafficClassificationT('trafficClassification.portsMarkupHint', { page: '{page}' });
+  const parts = template.split('{page}');
   return (
-    <div className="tc-choice-list" role="radiogroup" aria-label={name}>
+    <p className="field-hint" style={{ marginTop: 12 }}>
+      {parts[0]}
+      <button type="button" className="link-btn" onClick={() => { location.hash = 'interface-roles'; }}>
+        {pageLabel}
+      </button>
+      {parts[1] ?? ''}
+    </p>
+  );
+}
+
+function ChoiceGroup({ name, ariaLabel, value, options, disabled, onChange }) {
+  return (
+    <div className="tc-choice-list" role="radiogroup" aria-label={ariaLabel || name}>
       {options.map((opt) => {
         const id = `${name}-${opt.value}`;
         const checked = value === opt.value;
@@ -84,7 +125,7 @@ function PageTrafficClassification() {
       const res = await ApiClient.loadDirectionSettings();
       if (cancelled) return;
       if (res.source === 'error') {
-        setLoadError(res.error || ApiClient.LOAD_FAILED);
+        setLoadError(mapTrafficClassificationError(res.error));
         setSettings(null);
         setForm(null);
       } else {
@@ -99,16 +140,8 @@ function PageTrafficClassification() {
     return () => { cancelled = true; };
   }, [refreshKey]);
 
-  const unknownOptions = (settings?.options?.unknownNetworks || ['foreign', 'unclassified']).map((value) => ({
-    value,
-    label: settings?.options?.unknownNetworkLabels?.[value] || value,
-    hint: UNKNOWN_NETWORK_HINTS[value] || '',
-  }));
-
-  const directionOptions = DIRECTION_MODE_OPTIONS.map((opt) => ({
-    ...opt,
-    label: IR_DIRECTION_MODE_LABELS[opt.value] || opt.label,
-  }));
+  const unknownOptions = unknownNetworkOptions(settings?.options?.unknownNetworks);
+  const directionOptions = directionModeOptions();
 
   const save = async () => {
     if (!form) return;
@@ -119,10 +152,10 @@ function PageTrafficClassification() {
         directionMode: form.directionMode,
         unknownNetworks: form.unknownNetworks,
       });
-      pushToast({ kind: 'success', title: 'Настройки сохранены' });
+      pushToast({ kind: 'success', title: trafficClassificationT('trafficClassification.saveSuccessTitle') });
       reload();
     } catch (err) {
-      setSaveError(err.message);
+      setSaveError(mapTrafficClassificationError(err.message));
     } finally {
       setSaving(false);
     }
@@ -132,13 +165,11 @@ function PageTrafficClassification() {
     <div className="main__container">
       <div className="page-head">
         <div>
-          <h1>Классификация трафика</h1>
-          <p>
-            Как система определяет направление потоков: входящий, исходящий, транзит, внутренний или неразмеченный.
-          </p>
+          <h1>{trafficClassificationT('nav.item.traffic-classification')}</h1>
+          <p>{trafficClassificationT('trafficClassification.subtitle')}</p>
         </div>
         <Button kind="ghost" icon="refresh" onClick={reload} disabled={loading || saving}>
-          Обновить
+          {trafficClassificationT('chrome.refresh')}
         </Button>
       </div>
 
@@ -147,33 +178,29 @@ function PageTrafficClassification() {
 
       {loading && !form ? (
         <Card pad="sm">
-          <div style={{ padding: 28, textAlign: 'center', color: 'var(--fg-secondary)' }}>Загрузка…</div>
+          <div style={{ padding: 28, textAlign: 'center', color: 'var(--fg-secondary)' }}>
+            {trafficClassificationT('trafficClassification.loading')}
+          </div>
         </Card>
       ) : form && (
         <div className="col" style={{ gap: 16 }}>
-          <Card pad="sm" title="Определение направления">
+          <Card pad="sm" title={trafficClassificationT('trafficClassification.card.direction')}>
             <ChoiceGroup
               name="directionMode"
+              ariaLabel={trafficClassificationT('trafficClassification.card.direction')}
               value={form.directionMode}
               options={directionOptions}
               disabled={!canWrite}
               onChange={(directionMode) => setForm((prev) => ({ ...prev, directionMode }))}
             />
-            {form.directionMode === 'ports' && (
-              <p className="field-hint" style={{ marginTop: 12 }}>
-                Разметка портов — на странице{' '}
-                <button type="button" className="link-btn" onClick={() => { location.hash = 'interface-roles'; }}>
-                  Порты оборудования
-                </button>
-                .
-              </p>
-            )}
+            {form.directionMode === 'ports' && <PortsMarkupHint />}
           </Card>
 
           {form.directionMode === 'prefixes' && (
-            <Card pad="sm" title="Трафик между неизвестными сетями">
+            <Card pad="sm" title={trafficClassificationT('trafficClassification.card.unknownNetworks')}>
               <ChoiceGroup
                 name="unknownNetworks"
+                ariaLabel={trafficClassificationT('trafficClassification.card.unknownNetworks')}
                 value={form.unknownNetworks}
                 options={unknownOptions}
                 disabled={!canWrite}
@@ -181,11 +208,11 @@ function PageTrafficClassification() {
               />
               <div className="tc-impact">
                 <button type="button" className="link-btn" onClick={openUnclassifiedTrafficExplorer}>
-                  Посмотреть неразмеченный трафик по автономным системам
+                  {trafficClassificationT('trafficClassification.viewUnclassifiedExplorer')}
                 </button>
               </div>
               <p className="field-hint" style={{ marginTop: 8 }}>
-                Правило применяется к новому трафику в течение ~60 секунд. Уже сохранённые данные не пересчитываются.
+                {trafficClassificationT('trafficClassification.applyRuleHint')}
               </p>
             </Card>
           )}
@@ -193,7 +220,9 @@ function PageTrafficClassification() {
           {canWrite && (
             <div>
               <Button kind="primary" icon="save" onClick={save} disabled={saving || loading}>
-                {saving ? 'Сохранение…' : 'Сохранить'}
+                {saving
+                  ? trafficClassificationT('trafficClassification.saving')
+                  : trafficClassificationT('trafficClassification.save')}
               </Button>
             </div>
           )}
