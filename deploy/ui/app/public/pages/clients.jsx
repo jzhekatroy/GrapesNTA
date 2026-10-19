@@ -1,22 +1,22 @@
 /* Клиенты — администрирование личных кабинетов */
 
-const CLIENT_BIND_MODES = [
-  { value: 'prefixes', label: 'По сетям (CIDR)' },
-  { value: 'ports', label: 'По портам интерфейсов' },
-];
-
-const BIND_MODE_LABELS = Object.fromEntries(CLIENT_BIND_MODES.map((m) => [m.value, m.label]));
+const CLIENT_BIND_MODE_VALUES = ['prefixes', 'ports'];
 const MAX_CLIENT_USERS = 5;
-const SAVE_SUCCESS_TITLE = 'Настройки сохранены';
-const SAVE_SUCCESS_DESC = 'Изменения будут автоматически применены в течение 60 секунд.';
 
-const IMPERSONATION_REASON_LABELS = {
-  impersonate: 'Вход в кабинет',
-  stop: 'Ручной выход',
-  timeout: 'Истёк сеанс (30 мин)',
-  logout: 'Выход из системы',
-  orphaned: 'Сеанс прерван перезапуском',
-};
+function clientsT(key, params) {
+  return GrapesI18n.t(key, params);
+}
+
+function bindModeLabel(mode) {
+  const key = `clientsPage.bindMode.${mode}`;
+  return GrapesI18n.has(key) ? clientsT(key) : String(mode || '');
+}
+
+function impersonationReasonLabel(reason) {
+  if (!reason) return '';
+  const key = `clientsPage.reason.${reason}`;
+  return GrapesI18n.has(key) ? clientsT(key) : String(reason);
+}
 
 const CYRILLIC_TO_LATIN = {
   а: 'a', б: 'b', в: 'v', г: 'g', д: 'd', е: 'e', ё: 'e', ж: 'zh', з: 'z',
@@ -61,7 +61,7 @@ function fmtDateTime(value) {
   if (!value) return '—';
   const d = new Date(value);
   if (Number.isNaN(d.getTime())) return String(value);
-  return d.toLocaleString('ru-RU', {
+  return d.toLocaleString(GrapesI18n.intlLocale(), {
     day: '2-digit',
     month: '2-digit',
     year: 'numeric',
@@ -76,9 +76,9 @@ function fmtDuration(ms) {
   const h = Math.floor(totalSec / 3600);
   const m = Math.floor((totalSec % 3600) / 60);
   const s = totalSec % 60;
-  if (h > 0) return `${h} ч ${m} мин`;
-  if (m > 0) return `${m} мин ${s} с`;
-  return `${s} с`;
+  if (h > 0) return clientsT('clientsPage.duration.h', { h, m });
+  if (m > 0) return clientsT('clientsPage.duration.m', { m, s });
+  return clientsT('clientsPage.duration.s', { s });
 }
 
 function randomChar(chars) {
@@ -114,7 +114,9 @@ function bindCountLabel(row) {
 }
 
 function bindCountTitle(row) {
-  return row.bindMode === 'ports' ? 'Портов' : 'Сетей';
+  return row.bindMode === 'ports'
+    ? clientsT('clientsPage.bindCount.ports')
+    : clientsT('clientsPage.bindCount.networks');
 }
 
 function parseIpv4SearchTerm(raw) {
@@ -158,7 +160,7 @@ function clientRowMatchesSearch(row, raw) {
     row.displayName,
     row.clientId,
     row.comment,
-    BIND_MODE_LABELS[row.bindMode],
+    bindModeLabel(row.bindMode),
     row.bindMode,
     ...(asBindingList(row.bindingPreview)),
     row.bindingSearch || '',
@@ -224,12 +226,12 @@ function groupImpersonationSessions(events) {
 
 function sessionStatusBadge(session) {
   if (session.status === 'active') {
-    return <Badge tone="success" dot>Активен</Badge>;
+    return <Badge tone="success" dot>{clientsT('clientsPage.session.active')}</Badge>;
   }
   if (session.status === 'orphaned') {
-    return <Badge tone="warning" dot>Незакрытый</Badge>;
+    return <Badge tone="warning" dot>{clientsT('clientsPage.session.orphaned')}</Badge>;
   }
-  return <Badge tone="neutral">Завершён</Badge>;
+  return <Badge tone="neutral">{clientsT('clientsPage.session.completed')}</Badge>;
 }
 
 function PageClients({ onAuthRefresh, onNavigate }) {
@@ -250,7 +252,7 @@ function PageClients({ onAuthRefresh, onNavigate }) {
   useEffect(() => {
     if (!canWrite) {
       setLoading(false);
-      setLoadError('Недостаточно прав для просмотра клиентов');
+      setLoadError(clientsT('clientsPage.forbidden'));
       setRows([]);
       return undefined;
     }
@@ -299,8 +301,8 @@ function PageClients({ onAuthRefresh, onNavigate }) {
   const handleToggleEnabled = async (row) => {
     if (!canWrite) return;
     const next = !row.enabled;
-    const label = next ? 'включить' : 'выключить';
-    if (!window.confirm(`${label.charAt(0).toUpperCase() + label.slice(1)} клиента «${row.displayName}»?`)) return;
+    const confirmKey = next ? 'clientsPage.confirm.enable' : 'clientsPage.confirm.disable';
+    if (!window.confirm(clientsT(confirmKey, { name: row.displayName }))) return;
     setTogglingId(row.clientId);
     try {
       const res = await ApiClient.updateClient(row.clientId, {
@@ -311,9 +313,9 @@ function PageClients({ onAuthRefresh, onNavigate }) {
       });
       const updated = res.data || { ...row, enabled: next };
       patchRow(row.clientId, updated);
-      pushToast({ kind: 'success', title: SAVE_SUCCESS_TITLE, desc: SAVE_SUCCESS_DESC });
+      pushToast({ kind: 'success', title: clientsT('clientsPage.saveSuccessTitle'), desc: clientsT('clientsPage.saveSuccessDesc') });
     } catch (err) {
-      pushToast({ kind: 'error', title: 'Не удалось изменить состояние', desc: err.message });
+      pushToast({ kind: 'error', title: clientsT('clientsPage.toast.stateFailed'), desc: err.message });
     } finally {
       setTogglingId(null);
     }
@@ -323,18 +325,22 @@ function PageClients({ onAuthRefresh, onNavigate }) {
     if (!canWrite || !row.enabled) return;
     try {
       await ApiClient.impersonateClient(row.clientId);
-      pushToast({ kind: 'success', title: 'Вход в кабинет', desc: `Открыт кабинет «${row.displayName}» (только просмотр).` });
+      pushToast({
+        kind: 'success',
+        title: clientsT('clientsPage.toast.impersonateTitle'),
+        desc: clientsT('clientsPage.toast.impersonateDesc', { name: row.displayName }),
+      });
       if (onAuthRefresh) await onAuthRefresh();
       if (onNavigate) onNavigate('dashboard');
       else location.hash = 'dashboard';
     } catch (err) {
       const title = err.status === 409
-        ? 'Вход уже выполнен'
+        ? clientsT('clientsPage.toast.impersonate409')
         : err.status === 404
-          ? 'Клиент недоступен'
+          ? clientsT('clientsPage.toast.impersonate404')
           : err.status === 403
-            ? 'Вход запрещён'
-            : 'Не удалось войти в кабинет';
+            ? clientsT('clientsPage.toast.impersonate403')
+            : clientsT('clientsPage.toast.impersonateFailed');
       pushToast({ kind: 'error', title, desc: err.message });
     }
   };
@@ -348,7 +354,7 @@ function PageClients({ onAuthRefresh, onNavigate }) {
     const normalized = { ...client, clientId, id: clientId };
     setRows((prev) => {
       const idx = prev.findIndex((r) => r.clientId === clientId);
-      if (idx < 0) return [...prev, normalized].sort((a, b) => String(a.displayName).localeCompare(String(b.displayName), 'ru'));
+      if (idx < 0) return [...prev, normalized].sort((a, b) => String(a.displayName).localeCompare(String(b.displayName), GrapesI18n.intlLocale()));
       const copy = [...prev];
       copy[idx] = { ...copy[idx], ...normalized };
       return copy;
@@ -361,7 +367,7 @@ function PageClients({ onAuthRefresh, onNavigate }) {
   const cols = [
     {
       key: 'displayName',
-      title: 'Название',
+      title: clientsT('clientsPage.col.name'),
       width: 220,
       sortAccessor: (r) => r.displayName,
       render: (r) => (
@@ -372,7 +378,7 @@ function PageClients({ onAuthRefresh, onNavigate }) {
     },
     {
       key: 'clientId',
-      title: 'Идентификатор',
+      title: clientsT('clientsPage.col.id'),
       width: 200,
       sortAccessor: (r) => r.clientId,
       render: (r) => (
@@ -383,18 +389,18 @@ function PageClients({ onAuthRefresh, onNavigate }) {
     },
     {
       key: 'bindMode',
-      title: 'Способ привязки',
+      title: clientsT('clientsPage.col.bindMode'),
       width: 180,
-      sortAccessor: (r) => BIND_MODE_LABELS[r.bindMode] || r.bindMode,
+      sortAccessor: (r) => bindModeLabel(r.bindMode) || r.bindMode,
       render: (r) => (
         <span style={{ color: 'var(--fg-secondary)', opacity: r.enabled ? 1 : 0.55 }}>
-          {BIND_MODE_LABELS[r.bindMode] || r.bindMode || '—'}
+          {bindModeLabel(r.bindMode) || r.bindMode || '—'}
         </span>
       ),
     },
     {
       key: 'bindings',
-      title: 'Привязки',
+      title: clientsT('clientsPage.col.bindings'),
       width: 280,
       sortAccessor: (r) => (asBindingList(r.bindingPreview)[0] || bindCountLabel(r)),
       render: (r) => {
@@ -420,7 +426,7 @@ function PageClients({ onAuthRefresh, onNavigate }) {
     },
     {
       key: 'bindCount',
-      title: 'Сетей / портов',
+      title: clientsT('clientsPage.col.bindCount'),
       width: 120,
       num: true,
       align: 'right',
@@ -433,7 +439,7 @@ function PageClients({ onAuthRefresh, onNavigate }) {
     },
     {
       key: 'userCount',
-      title: 'Учёток',
+      title: clientsT('clientsPage.col.accounts'),
       width: 90,
       num: true,
       align: 'right',
@@ -444,18 +450,18 @@ function PageClients({ onAuthRefresh, onNavigate }) {
     },
     {
       key: 'enabled',
-      title: 'Состояние',
+      title: clientsT('clientsPage.col.state'),
       width: 110,
       sortAccessor: (r) => (r.enabled ? 1 : 0),
       render: (r) => (
         r.enabled
-          ? <Badge tone="success" dot>Включён</Badge>
-          : <Badge tone="neutral">Выключен</Badge>
+          ? <Badge tone="success" dot>{clientsT('clientsPage.state.enabled')}</Badge>
+          : <Badge tone="neutral">{clientsT('clientsPage.state.disabled')}</Badge>
       ),
     },
     {
       key: 'updatedAt',
-      title: 'Изменён',
+      title: clientsT('clientsPage.col.updated'),
       width: 150,
       sortAccessor: (r) => r.updatedAt,
       render: (r) => (
@@ -470,32 +476,32 @@ function PageClients({ onAuthRefresh, onNavigate }) {
     <div className="main__container">
       <div className="page-head">
         <div>
-          <h1>Клиенты</h1>
-          <p>Справочник клиентских кабинетов: привязка по сетям или портам. В поиске — название, IP/CIDR, свитч и ifName, несколько слов через пробел.</p>
+          <h1>{clientsT('clientsPage.title')}</h1>
+          <p>{clientsT('clientsPage.subtitle')}</p>
         </div>
         <div className="row" style={{ gap: 8 }}>
-          <Button kind="ghost" icon="refresh" onClick={reload} disabled={loading || !canWrite}>Обновить</Button>
+          <Button kind="ghost" icon="refresh" onClick={reload} disabled={loading || !canWrite}>{clientsT('clientsPage.refresh')}</Button>
           {pageTab === 'clients' && (
             <Button kind="primary" icon="plus" onClick={() => setShowCreate(true)} disabled={!!loadError || !canWrite}>
-              Добавить клиента
+              {clientsT('clientsPage.add')}
             </Button>
           )}
         </div>
       </div>
 
       <div className="row" style={{ gap: 8, marginBottom: 16 }}>
-        <Button kind={pageTab === 'clients' ? 'primary' : 'ghost'} onClick={() => setPageTab('clients')}>Клиенты</Button>
-        <Button kind={pageTab === 'audit' ? 'primary' : 'ghost'} onClick={() => setPageTab('audit')}>Журнал входов</Button>
+        <Button kind={pageTab === 'clients' ? 'primary' : 'ghost'} onClick={() => setPageTab('clients')}>{clientsT('clientsPage.tab.clients')}</Button>
+        <Button kind={pageTab === 'audit' ? 'primary' : 'ghost'} onClick={() => setPageTab('audit')}>{clientsT('clientsPage.tab.audit')}</Button>
       </div>
 
       {pageTab === 'audit' ? (
         <ImpersonationAuditPanel canWrite={canWrite} />
       ) : loading ? (
         <Card pad="sm">
-          <div style={{ padding: 32, textAlign: 'center', color: 'var(--fg-secondary)' }}>Загрузка…</div>
+          <div style={{ padding: 32, textAlign: 'center', color: 'var(--fg-secondary)' }}>{clientsT('clientsPage.loading')}</div>
         </Card>
       ) : loadError ? (
-        <Empty icon="db" title="Не удалось загрузить" desc={loadError} action={canWrite ? <Button kind="primary" icon="refresh" onClick={reload}>Повторить</Button> : null} />
+        <Empty icon="db" title={clientsT('clientsPage.loadFailed')} desc={loadError} action={canWrite ? <Button kind="primary" icon="refresh" onClick={reload}>{clientsT('clientsPage.retry')}</Button> : null} />
       ) : (
         <DataTable
           rows={filtered}
@@ -507,27 +513,27 @@ function PageClients({ onAuthRefresh, onNavigate }) {
           pageSize={15}
           onRowClick={canWrite ? (r) => setDrawerClient({ ...r }) : undefined}
           getRowClassName={(r) => (r.enabled ? '' : 'is-disabled')}
-          emptyTitle="Клиенты не найдены"
-          emptyDesc="Создайте клиента или уточните поиск."
+          emptyTitle={clientsT('clientsPage.empty.title')}
+          emptyDesc={clientsT('clientsPage.empty.desc')}
           toolbar={{
             search,
             onSearch: setSearch,
-            searchPlaceholder: 'Название, IP, CIDR, свитч, PortChannel32…',
+            searchPlaceholder: clientsT('clientsPage.searchPlaceholder'),
             searchMaxWidth: 420,
           }}
           rowActions={canWrite ? (r) => (
             <div className="row" style={{ gap: 4, justifyContent: 'flex-end' }}>
               {r.enabled && (
-                <button className="icon-btn tt" data-tt="Войти в кабинет" onClick={(e) => { e.stopPropagation(); handleImpersonate(r); }}>
+                <button className="icon-btn tt" data-tt={clientsT('clientsPage.action.openCabinet')} onClick={(e) => { e.stopPropagation(); handleImpersonate(r); }}>
                   <Icon name="eye" size={15} />
                 </button>
               )}
-              <button className="icon-btn tt" data-tt="Карточка клиента" onClick={(e) => { e.stopPropagation(); setDrawerClient({ ...r }); }}>
+              <button className="icon-btn tt" data-tt={clientsT('clientsPage.action.card')} onClick={(e) => { e.stopPropagation(); setDrawerClient({ ...r }); }}>
                 <Icon name="edit" size={15} />
               </button>
               <button
                 className="icon-btn tt"
-                data-tt={r.enabled ? 'Выключить' : 'Включить'}
+                data-tt={r.enabled ? clientsT('clientsPage.action.disable') : clientsT('clientsPage.action.enable')}
                 disabled={togglingId === r.clientId}
                 onClick={(e) => { e.stopPropagation(); handleToggleEnabled(r); }}
               >
@@ -544,7 +550,7 @@ function PageClients({ onAuthRefresh, onNavigate }) {
         onCreated={(client) => {
           setShowCreate(false);
           handleClientSaved(client);
-          pushToast({ kind: 'success', title: 'Клиент создан', desc: SAVE_SUCCESS_DESC });
+          pushToast({ kind: 'success', title: clientsT('clientsPage.toast.created'), desc: clientsT('clientsPage.saveSuccessDesc') });
         }}
       />
 
@@ -562,7 +568,7 @@ function PageClients({ onAuthRefresh, onNavigate }) {
 
 function ClientCreateModal({ open, onClose, onCreated }) {
   const [displayName, setDisplayName] = useState('');
-  const [bindMode, setBindMode] = useState(CLIENT_BIND_MODES[0].value);
+  const [bindMode, setBindMode] = useState(CLIENT_BIND_MODE_VALUES[0]);
   const [comment, setComment] = useState('');
   const [saving, setSaving] = useState(false);
   const [formError, setFormError] = useState('');
@@ -572,7 +578,7 @@ function ClientCreateModal({ open, onClose, onCreated }) {
   useEffect(() => {
     if (!open) return;
     setDisplayName('');
-    setBindMode(CLIENT_BIND_MODES[0].value);
+    setBindMode(CLIENT_BIND_MODE_VALUES[0]);
     setComment('');
     setFormError('');
   }, [open]);
@@ -580,11 +586,11 @@ function ClientCreateModal({ open, onClose, onCreated }) {
   const handleSave = async () => {
     const name = displayName.trim();
     if (!name) {
-      setFormError('Укажите название клиента');
+      setFormError(clientsT('clientsPage.err.nameRequired'));
       return;
     }
     if (!clientIdPreview) {
-      setFormError('Не удалось сформировать идентификатор из названия');
+      setFormError(clientsT('clientsPage.err.idFailed'));
       return;
     }
     setSaving(true);
@@ -618,13 +624,13 @@ function ClientCreateModal({ open, onClose, onCreated }) {
     <Modal
       open={open}
       onClose={onClose}
-      title="Добавить клиента"
-      subtitle="Новая запись справочника клиентов"
+      title={clientsT('clientsPage.create.title')}
+      subtitle={clientsT('clientsPage.create.subtitle')}
       footer={
         <>
-          <Button kind="ghost" onClick={onClose} disabled={saving}>Отмена</Button>
+          <Button kind="ghost" onClick={onClose} disabled={saving}>{clientsT('clientsPage.cancel')}</Button>
           <Button kind="primary" icon="plus" onClick={handleSave} disabled={saving}>
-            {saving ? 'Создание…' : 'Создать'}
+            {saving ? clientsT('clientsPage.creating') : clientsT('clientsPage.create.submit')}
           </Button>
         </>
       }
@@ -636,36 +642,36 @@ function ClientCreateModal({ open, onClose, onCreated }) {
       )}
       <div className="grid grid--1col">
         <div className="field">
-          <label>Название</label>
+          <label>{clientsT('clientsPage.field.name')}</label>
           <input
             className="input"
-            placeholder="ООО Ромашка, Филиал №3…"
+            placeholder={clientsT('clientsPage.create.namePlaceholder')}
             value={displayName}
             onChange={(e) => setDisplayName(e.target.value)}
           />
         </div>
         {clientIdPreview && (
           <div className="field">
-            <label>Будет создан ID</label>
+            <label>{clientsT('clientsPage.create.idPreview')}</label>
             <input className="input mono" value={clientIdPreview} readOnly disabled />
           </div>
         )}
         <div className="field">
-          <label>Способ привязки</label>
+          <label>{clientsT('clientsPage.field.bindMode')}</label>
           <select className="input" value={bindMode} onChange={(e) => setBindMode(e.target.value)}>
-            {CLIENT_BIND_MODES.map((m) => (
-              <option key={m.value} value={m.value}>{m.label}</option>
+            {CLIENT_BIND_MODE_VALUES.map((value) => (
+              <option key={value} value={value}>{bindModeLabel(value)}</option>
             ))}
           </select>
           <div style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-secondary)', marginTop: 6 }}>
-            Выбирается один раз: либо сети, либо порты. Сменить способ можно только когда список другого типа пуст.
+            {clientsT('clientsPage.create.bindHint')}
           </div>
         </div>
         <div className="field">
-          <label>Комментарий</label>
+          <label>{clientsT('clientsPage.field.comment')}</label>
           <input
             className="input"
-            placeholder="Необязательно"
+            placeholder={clientsT('clientsPage.optional')}
             value={comment}
             onChange={(e) => setComment(e.target.value)}
           />
@@ -696,7 +702,7 @@ function ClientDrawer({ client, canWrite, onClose, onSaved, onImpersonate, onUse
     if (!client || !canWrite) return;
     const name = displayName.trim();
     if (!name) {
-      setError('Укажите название клиента');
+      setError(clientsT('clientsPage.err.nameRequired'));
       return;
     }
     setSaving(true);
@@ -712,7 +718,7 @@ function ClientDrawer({ client, canWrite, onClose, onSaved, onImpersonate, onUse
       }
       const res = await ApiClient.updateClient(client.clientId, payload);
       onSaved(res.data || { ...client, displayName: isErpClientId(client.clientId) ? client.displayName : name, comment, enabled });
-      pushToast({ kind: 'success', title: SAVE_SUCCESS_TITLE, desc: SAVE_SUCCESS_DESC });
+      pushToast({ kind: 'success', title: clientsT('clientsPage.saveSuccessTitle'), desc: clientsT('clientsPage.saveSuccessDesc') });
     } catch (err) {
       setError(err.message);
     } finally {
@@ -721,10 +727,10 @@ function ClientDrawer({ client, canWrite, onClose, onSaved, onImpersonate, onUse
   };
 
   const tabs = [
-    { id: 'general', label: 'Общие', icon: 'info' },
-    { id: 'bindings', label: 'Привязка', icon: 'link' },
-    { id: 'users', label: 'Учётные записи', icon: 'users' },
-    { id: 'audit', label: 'Журнал входов', icon: 'clock' },
+    { id: 'general', label: clientsT('clientsPage.tab.general'), icon: 'info' },
+    { id: 'bindings', label: clientsT('clientsPage.tab.bindings'), icon: 'link' },
+    { id: 'users', label: clientsT('clientsPage.tab.users'), icon: 'users' },
+    { id: 'audit', label: clientsT('clientsPage.tab.audit'), icon: 'clock' },
   ];
 
   return (
@@ -733,23 +739,23 @@ function ClientDrawer({ client, canWrite, onClose, onSaved, onImpersonate, onUse
       onClose={onClose}
       title={(
         <span className="row" style={{ gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-          <span>{client?.displayName || 'Клиент'}</span>
+          <span>{client?.displayName || clientsT('clientsPage.drawer.fallback')}</span>
           {client && isErpClientId(client.clientId) && <Badge tone="neutral">ERP</Badge>}
         </span>
       )}
-      subtitle={client ? `${client.clientId} · ${BIND_MODE_LABELS[client.bindMode] || client.bindMode}` : ''}
+      subtitle={client ? `${client.clientId} · ${bindModeLabel(client.bindMode) || client.bindMode}` : ''}
       footer={
         tab === 'general' ? (
           <>
-            <Button kind="ghost" onClick={onClose}>Закрыть</Button>
+            <Button kind="ghost" onClick={onClose}>{clientsT('clientsPage.close')}</Button>
             {canWrite && (
               <Button kind="primary" icon="save" onClick={saveGeneral} disabled={saving}>
-                {saving ? 'Сохранение…' : 'Сохранить'}
+                {saving ? clientsT('clientsPage.saving') : clientsT('clientsPage.save')}
               </Button>
             )}
           </>
         ) : (
-          <Button kind="ghost" onClick={onClose}>Закрыть</Button>
+          <Button kind="ghost" onClick={onClose}>{clientsT('clientsPage.close')}</Button>
         )
       }
     >
@@ -828,11 +834,11 @@ function ClientGeneralTab({
   return (
     <div className="col" style={{ gap: 14 }}>
       <div className="field">
-        <label>Идентификатор</label>
+        <label>{clientsT('clientsPage.col.id')}</label>
         <input className="input mono" value={client.clientId} readOnly disabled />
       </div>
       <div className="field">
-        <label>Название</label>
+        <label>{clientsT('clientsPage.field.name')}</label>
         <input
           className="input"
           value={displayName}
@@ -842,12 +848,12 @@ function ClientGeneralTab({
         />
         {erpClient && (
           <div style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-secondary)', marginTop: 6 }}>
-            Название задаётся из ERP PiterIX и обновляется при синхронизации.
+            {clientsT('clientsPage.general.erpNameHint')}
           </div>
         )}
       </div>
       <div className="field">
-        <label>Комментарий</label>
+        <label>{clientsT('clientsPage.field.comment')}</label>
         <input
           className="input"
           value={comment}
@@ -856,24 +862,24 @@ function ClientGeneralTab({
         />
       </div>
       <div className="field">
-        <label>Способ привязки</label>
-        <input className="input" value={BIND_MODE_LABELS[client.bindMode] || client.bindMode} readOnly disabled />
+        <label>{clientsT('clientsPage.field.bindMode')}</label>
+        <input className="input" value={bindModeLabel(client.bindMode) || client.bindMode} readOnly disabled />
         <div style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-secondary)', marginTop: 6 }}>
-          Задаётся при создании. Для смены способа сначала удалите все записи другого типа.
+          {clientsT('clientsPage.general.bindHint')}
         </div>
       </div>
       <SwitchField
-        label="Клиент включён"
-        hint="Выключенный клиент не может войти в кабинет и скрывается из списков входа."
+        label={clientsT('clientsPage.general.enabled')}
+        hint={clientsT('clientsPage.general.enabledHint')}
         checked={enabled}
         onChange={onEnabledChange}
         disabled={!canWrite}
       />
       {canWrite && enabled && (
         <div>
-          <Button kind="primary" icon="eye" onClick={onImpersonate}>Войти в кабинет</Button>
+          <Button kind="primary" icon="eye" onClick={onImpersonate}>{clientsT('clientsPage.action.openCabinet')}</Button>
           <div style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-secondary)', marginTop: 8 }}>
-            Просмотр кабинета глазами клиента без пароля. Сеанс только для чтения, до 30 минут.
+            {clientsT('clientsPage.general.impersonateHint')}
           </div>
         </div>
       )}
@@ -881,9 +887,6 @@ function ClientGeneralTab({
     </div>
   );
 }
-
-const BINDING_ADDED_TITLE = 'Привязка сохранена';
-const BINDING_REMOVED_TITLE = 'Привязка снята';
 
 function bindingOptionKey(opt, isPrefixes) {
   return isPrefixes
@@ -905,7 +908,7 @@ function resolveBindingOptionStatus(opt, items, client, isPrefixes) {
       conflict: false,
       assignedHere: true,
       selectable: false,
-      label: 'У этого клиента',
+      label: clientsT('clientsPage.bindings.assignedHere'),
     };
   }
   if (opt.ownerClientId && opt.ownerClientId !== client.clientId && !opt.available) {
@@ -913,14 +916,14 @@ function resolveBindingOptionStatus(opt, items, client, isPrefixes) {
       conflict: true,
       assignedHere: false,
       selectable: false,
-      label: `Занято: ${opt.ownerDisplayName || opt.ownerClientId}`,
+      label: clientsT('clientsPage.bindings.taken', { owner: opt.ownerDisplayName || opt.ownerClientId }),
     };
   }
   return {
     conflict: false,
     assignedHere: false,
     selectable: true,
-    label: 'Свободно',
+    label: clientsT('clientsPage.bindings.free'),
   };
 }
 
@@ -1031,13 +1034,13 @@ function ClientBindingsTab({ client, canWrite, onSaved }) {
         pushToast({
           kind: 'success',
           title: successToast.title,
-          desc: successToast.desc || SAVE_SUCCESS_DESC,
+          desc: successToast.desc || clientsT('clientsPage.saveSuccessDesc'),
         });
       }
       return saved;
     } catch (err) {
       setError(err.message);
-      pushToast({ kind: 'error', title: 'Не удалось сохранить привязку', desc: err.message });
+      pushToast({ kind: 'error', title: clientsT('clientsPage.bindings.saveFailed'), desc: err.message });
       throw err;
     } finally {
       setSaving(false);
@@ -1051,10 +1054,15 @@ function ClientBindingsTab({ client, canWrite, onSaved }) {
     if (!option.available && option.ownerClientId && option.ownerClientId !== client.clientId) {
       pushToast({
         kind: 'error',
-        title: 'Конфликт закрепления',
+        title: clientsT('clientsPage.bindings.conflictTitle'),
         desc: isPrefixes
-          ? `Сеть ${option.prefix} закреплена за клиентом ${option.ownerDisplayName || option.ownerClientId}`
-          : `Порт закреплён за клиентом ${option.ownerDisplayName || option.ownerClientId}`,
+          ? clientsT('clientsPage.bindings.conflictPrefix', {
+            prefix: option.prefix,
+            owner: option.ownerDisplayName || option.ownerClientId,
+          })
+          : clientsT('clientsPage.bindings.conflictPort', {
+            owner: option.ownerDisplayName || option.ownerClientId,
+          }),
       });
       return;
     }
@@ -1080,10 +1088,14 @@ function ClientBindingsTab({ client, canWrite, onSaved }) {
     try {
       await persistBindings(nextItems, {
         successToast: {
-          title: BINDING_ADDED_TITLE,
+          title: clientsT('clientsPage.bindings.addedTitle'),
           desc: isPrefixes
-            ? `Сеть ${option.prefix} закреплена за «${client.displayName}».`
-            : `Порт ${option.switchIp} · ifIndex ${option.ifIndex} закреплён за «${client.displayName}».`,
+            ? clientsT('clientsPage.bindings.addedPrefix', { prefix: option.prefix, name: client.displayName })
+            : clientsT('clientsPage.bindings.addedPort', {
+              ip: option.switchIp,
+              ifIndex: option.ifIndex,
+              name: client.displayName,
+            }),
         },
       });
     } catch {
@@ -1107,10 +1119,14 @@ function ClientBindingsTab({ client, canWrite, onSaved }) {
     try {
       await persistBindings(nextItems, {
         successToast: {
-          title: BINDING_REMOVED_TITLE,
+          title: clientsT('clientsPage.bindings.removedTitle'),
           desc: isPrefixes
-            ? `Сеть ${removed.prefix} отвязана от «${client.displayName}».`
-            : `Порт ${removed.switchIp} · ifIndex ${removed.ifIndex} отвязан от «${client.displayName}».`,
+            ? clientsT('clientsPage.bindings.removedPrefix', { prefix: removed.prefix, name: client.displayName })
+            : clientsT('clientsPage.bindings.removedPort', {
+              ip: removed.switchIp,
+              ifIndex: removed.ifIndex,
+              name: client.displayName,
+            }),
         },
       });
     } catch {
@@ -1125,24 +1141,24 @@ function ClientBindingsTab({ client, canWrite, onSaved }) {
     <div className="col" style={{ gap: 14 }}>
       {!isPrefixes && (
         <Card pad="sm" style={{ background: 'var(--st-warning-bg)', border: '1px solid var(--st-warning)' }}>
-          <div style={{ font: 'var(--pv-text-body-2-bold)', color: 'var(--st-warning)', marginBottom: 4 }}>Ограничение DNS</div>
+          <div style={{ font: 'var(--pv-text-body-2-bold)', color: 'var(--st-warning)', marginBottom: 4 }}>{clientsT('clientsPage.bindings.dnsTitle')}</div>
           <div style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-secondary)' }}>
-            Клиент, заданный только портами, не увидит своих DNS-запросов: в DNS-логе нет ни портов, ни VLAN, привязка возможна только по адресам.
+            {clientsT('clientsPage.bindings.dnsDesc')}
           </div>
         </Card>
       )}
 
       {loading ? (
-        <div style={{ color: 'var(--fg-secondary)' }}>Загрузка…</div>
+        <div style={{ color: 'var(--fg-secondary)' }}>{clientsT('clientsPage.loading')}</div>
       ) : (
         <>
           <div>
             <div style={{ font: 'var(--pv-text-body-2-bold)', marginBottom: 8 }}>
-              {isPrefixes ? 'Сети клиента' : 'Порты клиента'}
+              {isPrefixes ? clientsT('clientsPage.bindings.networksTitle') : clientsT('clientsPage.bindings.portsTitle')}
             </div>
             {items.length === 0 ? (
               <div style={{ color: 'var(--fg-secondary)', font: 'var(--pv-text-body-3)' }}>
-                {isPrefixes ? 'Сети не назначены.' : 'Порты не назначены.'}
+                {isPrefixes ? clientsT('clientsPage.bindings.networksEmpty') : clientsT('clientsPage.bindings.portsEmpty')}
               </div>
             ) : (
               <div className="col" style={{ gap: 8 }}>
@@ -1158,13 +1174,13 @@ function ClientBindingsTab({ client, canWrite, onSaved }) {
                           </>
                         ) : (
                           <>
-                            <div className="mono" style={{ font: 'var(--pv-text-body-2-bold)' }}>{it.switchIp} · ifIndex {it.ifIndex}</div>
+                            <div className="mono" style={{ font: 'var(--pv-text-body-2-bold)' }}>{clientsT('clientsPage.bindings.portLine', { ip: it.switchIp, ifIndex: it.ifIndex })}</div>
                             <div style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-secondary)' }}>{it.comment || '—'}</div>
                           </>
                         )}
                       </div>
                       {canWrite && (
-                        <button type="button" className="icon-btn tt" data-tt="Убрать" onClick={() => removeItem(key)} disabled={saving}>
+                        <button type="button" className="icon-btn tt" data-tt={clientsT('clientsPage.bindings.remove')} onClick={() => removeItem(key)} disabled={saving}>
                           <Icon name="trash" size={15} />
                         </button>
                       )}
@@ -1177,21 +1193,21 @@ function ClientBindingsTab({ client, canWrite, onSaved }) {
 
           {canWrite && isPrefixes && (
             <div className="field">
-              <label>Добавить сеть из справочника</label>
+              <label>{clientsT('clientsPage.bindings.addLabel')}</label>
               <input
                 className="input"
-                placeholder="Поиск по префиксу…"
+                placeholder={clientsT('clientsPage.bindings.searchPlaceholder')}
                 value={selectorQ}
                 onChange={(e) => setSelectorQ(e.target.value)}
               />
               {optionsLoading && (
                 <div style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-secondary)', marginTop: 6 }}>
-                  {saving ? 'Сохранение…' : 'Поиск…'}
+                  {saving ? clientsT('clientsPage.saving') : clientsT('clientsPage.bindings.searching')}
                 </div>
               )}
               {!optionsLoading && selectorQ.trim() && filteredOptions.length === 0 && (
                 <div style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-secondary)', marginTop: 6 }}>
-                  Сети не найдены.
+                  {clientsT('clientsPage.bindings.notFound')}
                 </div>
               )}
               {!optionsLoading && filteredOptions.length > 0 && (
@@ -1239,7 +1255,7 @@ function ClientBindingsTab({ client, canWrite, onSaved }) {
 
           {canWrite && saving && (
             <div style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-secondary)' }}>
-              Сохранение привязки…
+              {clientsT('clientsPage.bindings.saving')}
             </div>
           )}
         </>
@@ -1290,11 +1306,14 @@ function ClientUsersTab({ client, canWrite, onChanged }) {
         username: user.username,
         active: !user.active,
       });
-      pushToast({ kind: 'success', title: user.active ? 'Учётная запись отключена' : 'Учётная запись включена' });
+      pushToast({
+        kind: 'success',
+        title: user.active ? clientsT('clientsPage.users.disabled') : clientsT('clientsPage.users.enabled'),
+      });
       await loadUsers();
       if (onChanged) onChanged();
     } catch (err) {
-      pushToast({ kind: 'error', title: 'Не удалось изменить состояние', desc: err.message });
+      pushToast({ kind: 'error', title: clientsT('clientsPage.toast.stateFailed'), desc: err.message });
     } finally {
       setTogglingId(null);
     }
@@ -1306,29 +1325,29 @@ function ClientUsersTab({ client, canWrite, onChanged }) {
     <div className="col" style={{ gap: 14 }}>
       <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center', gap: 12 }}>
         <div style={{ font: 'var(--pv-text-body-2-bold)' }}>
-          Использовано {meta.used ?? users.length} из {meta.limit ?? MAX_CLIENT_USERS}
+          {clientsT('clientsPage.users.used', { used: meta.used ?? users.length, limit: meta.limit ?? MAX_CLIENT_USERS })}
         </div>
         {canWrite && (
           <Button
             kind="primary"
             icon="users"
             disabled={atLimit}
-            onClick={() => { setCreateOpen(true); setCreatedPassword(null); }}
+            onClick={() => setCreateOpen(true)}
           >
-            Создать учётную запись
+            {clientsT('clientsPage.users.create')}
           </Button>
         )}
       </div>
       {atLimit && (
         <div style={{ font: 'var(--pv-text-body-3)', color: 'var(--st-warning)' }}>
-          Достигнут лимит учётных записей для клиента (не более {meta.limit ?? MAX_CLIENT_USERS}).
+          {clientsT('clientsPage.users.limit', { limit: meta.limit ?? MAX_CLIENT_USERS })}
         </div>
       )}
 
       {loading ? (
-        <div style={{ color: 'var(--fg-secondary)' }}>Загрузка…</div>
+        <div style={{ color: 'var(--fg-secondary)' }}>{clientsT('clientsPage.loading')}</div>
       ) : users.length === 0 ? (
-        <div style={{ color: 'var(--fg-secondary)', font: 'var(--pv-text-body-3)' }}>Учётные записи не созданы.</div>
+        <div style={{ color: 'var(--fg-secondary)', font: 'var(--pv-text-body-3)' }}>{clientsT('clientsPage.users.empty')}</div>
       ) : (
         <div className="col" style={{ gap: 10 }}>
           {users.map((u) => (
@@ -1339,23 +1358,23 @@ function ClientUsersTab({ client, canWrite, onChanged }) {
                   <div style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-secondary)' }}>{u.username}</div>
                   <div className="row" style={{ gap: 8, marginTop: 8, flexWrap: 'wrap' }}>
                     {u.active
-                      ? <Badge tone="success" dot>Активна</Badge>
-                      : <Badge tone="neutral">Отключена</Badge>}
-                    {u.forcePasswordChange && <Badge tone="warning" dot>Требуется смена пароля</Badge>}
+                      ? <Badge tone="success" dot>{clientsT('clientsPage.users.active')}</Badge>
+                      : <Badge tone="neutral">{clientsT('clientsPage.users.inactive')}</Badge>}
+                    {u.forcePasswordChange && <Badge tone="warning" dot>{clientsT('clientsPage.users.passwordChange')}</Badge>}
                   </div>
                   <div style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-secondary)', marginTop: 8 }}>
-                    Изменена: {fmtDateTime(u.updatedAt)}
-                    {u.passwordChangedAt ? ` · пароль: ${fmtDateTime(u.passwordChangedAt)}` : ''}
+                    {clientsT('clientsPage.users.updated', { time: fmtDateTime(u.updatedAt) })}
+                    {u.passwordChangedAt ? clientsT('clientsPage.users.passwordAt', { time: fmtDateTime(u.passwordChangedAt) }) : ''}
                   </div>
                 </div>
                 {canWrite && (
                   <div className="row" style={{ gap: 4 }}>
-                    <button className="icon-btn tt" data-tt="Сбросить пароль" onClick={() => setPasswordFor(u)}>
+                    <button className="icon-btn tt" data-tt={clientsT('clientsPage.users.resetTip')} onClick={() => setPasswordFor(u)}>
                       <Icon name="key" size={15} />
                     </button>
                     <button
                       className="icon-btn tt"
-                      data-tt={u.active ? 'Отключить' : 'Включить'}
+                      data-tt={u.active ? clientsT('clientsPage.users.disableTip') : clientsT('clientsPage.users.enableTip')}
                       disabled={togglingId === u.id}
                       onClick={() => toggleActive(u)}
                     >
@@ -1423,9 +1442,9 @@ function ClientUserCreateModal({ open, client, onClose, onCreated }) {
 
   const submit = async () => {
     setError('');
-    if (!fullName.trim()) { setError('Укажите ФИО'); return; }
-    if (!username.trim()) { setError('Укажите username'); return; }
-    if (password.length < 12) { setError('Пароль должен быть не короче 12 символов'); return; }
+    if (!fullName.trim()) { setError(clientsT('clientsPage.users.err.fullName')); return; }
+    if (!username.trim()) { setError(clientsT('clientsPage.users.err.username')); return; }
+    if (password.length < 12) { setError(clientsT('clientsPage.users.err.password')); return; }
     setSaving(true);
     try {
       const user = await ApiClient.createUser({
@@ -1436,10 +1455,10 @@ function ClientUserCreateModal({ open, client, onClose, onCreated }) {
         clientId: client.clientId,
         forcePasswordChange,
       });
-      pushToast({ kind: 'success', title: 'Учётная запись создана' });
+      pushToast({ kind: 'success', title: clientsT('clientsPage.users.created') });
       onCreated({ user, password, username: username.trim(), fullName: fullName.trim() });
     } catch (err) {
-      setError(err.message || 'Не удалось создать учётную запись');
+      setError(err.message || clientsT('clientsPage.users.createFailed'));
     } finally {
       setSaving(false);
     }
@@ -1449,28 +1468,28 @@ function ClientUserCreateModal({ open, client, onClose, onCreated }) {
     <Modal
       open={open}
       onClose={onClose}
-      title="Создать учётную запись"
-      subtitle={`Клиент: ${client?.displayName || client?.clientId}`}
+      title={clientsT('clientsPage.users.createTitle')}
+      subtitle={clientsT('clientsPage.users.createSubtitle', { name: client?.displayName || client?.clientId })}
       footer={
         <>
-          <Button kind="ghost" onClick={onClose}>Отмена</Button>
+          <Button kind="ghost" onClick={onClose}>{clientsT('clientsPage.cancel')}</Button>
           <Button kind="primary" icon="users" onClick={submit} disabled={saving}>
-            {saving ? 'Создание…' : 'Создать'}
+            {saving ? clientsT('clientsPage.creating') : clientsT('clientsPage.create.submit')}
           </Button>
         </>
       }
     >
       <div className="col" style={{ gap: 14 }}>
         <div className="field">
-          <label>ФИО</label>
-          <input className="input" value={fullName} onChange={(e) => setFullName(e.target.value)} placeholder="Иван Иванов" />
+          <label>{clientsT('clientsPage.users.fullName')}</label>
+          <input className="input" value={fullName} onChange={(e) => setFullName(e.target.value)} placeholder={clientsT('clientsPage.users.fullNamePlaceholder')} />
         </div>
         <div className="field">
-          <label>Username</label>
-          <input className="input" value={username} onChange={(e) => setUsername(e.target.value)} placeholder="ivanov" />
+          <label>{clientsT('clientsPage.users.username')}</label>
+          <input className="input" value={username} onChange={(e) => setUsername(e.target.value)} placeholder={clientsT('clientsPage.users.usernamePlaceholder')} />
         </div>
         <div className="field">
-          <label>Пароль</label>
+          <label>{clientsT('clientsPage.users.password')}</label>
           <div className="row" style={{ gap: 8 }}>
             <input
               className="input"
@@ -1478,18 +1497,22 @@ function ClientUserCreateModal({ open, client, onClose, onCreated }) {
               value={password}
               onChange={(e) => setPassword(e.target.value)}
             />
-            <Button kind="ghost" onClick={() => setPassword(generatePassword())}>Сгенерировать</Button>
-            <Button kind="ghost" onClick={() => setShowPassword((v) => !v)}>{showPassword ? 'Скрыть' : 'Показать'}</Button>
+            <Button kind="ghost" onClick={() => setPassword(generatePassword())}>{clientsT('clientsPage.users.generate')}</Button>
+            <Button kind="ghost" onClick={() => setShowPassword((v) => !v)}>{showPassword ? clientsT('clientsPage.users.hide') : clientsT('clientsPage.users.show')}</Button>
           </div>
         </div>
         <SwitchField
-          label="Требовать смену пароля при входе"
-          hint="Пользователь сменит пароль сразу после первого входа с выданным паролем."
+          label={clientsT('clientsPage.users.forceChange')}
+          hint={clientsT('clientsPage.users.forceChangeHint')}
           checked={forcePasswordChange}
           onChange={setForcePasswordChange}
         />
         <div style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-secondary)' }}>
-          Роль <b>Client</b> и клиент <span className="mono">{client?.clientId}</span> назначаются автоматически.
+          {clientsT('clientsPage.users.roleAutoBefore')}
+          <b>{GrapesI18n.t('role.Client')}</b>
+          {clientsT('clientsPage.users.roleAutoMid')}
+          <span className="mono">{client?.clientId}</span>
+          {clientsT('clientsPage.users.roleAutoAfter')}
         </div>
         {error && <div className="form-error">{error}</div>}
       </div>
@@ -1512,11 +1535,11 @@ function ClientUserPasswordResetModal({ user, onClose, onReset }) {
 
   const submit = async () => {
     setError('');
-    if (password.length < 12) { setError('Пароль должен быть не короче 12 символов'); return; }
+    if (password.length < 12) { setError(clientsT('clientsPage.users.err.password')); return; }
     setSaving(true);
     try {
       const body = await ApiClient.resetUserPassword(user.id, { password });
-      pushToast({ kind: 'success', title: 'Пароль сброшен' });
+      pushToast({ kind: 'success', title: clientsT('clientsPage.users.passwordReset') });
       onClose();
       if (onReset) {
         await onReset({
@@ -1527,7 +1550,7 @@ function ClientUserPasswordResetModal({ user, onClose, onReset }) {
         });
       }
     } catch (err) {
-      setError(err.message || 'Не удалось сбросить пароль');
+      setError(err.message || clientsT('clientsPage.users.resetFailed'));
     } finally {
       setSaving(false);
     }
@@ -1537,32 +1560,32 @@ function ClientUserPasswordResetModal({ user, onClose, onReset }) {
     <Modal
       open={!!user}
       onClose={onClose}
-      title="Сбросить пароль"
+      title={clientsT('clientsPage.users.resetTitle')}
       subtitle={user ? `${user.fullName} · ${user.username}` : ''}
       footer={
         <>
-          <Button kind="ghost" onClick={onClose}>Отмена</Button>
-          <Button kind="primary" icon="key" onClick={submit} disabled={saving}>{saving ? 'Сброс…' : 'Сбросить пароль'}</Button>
+          <Button kind="ghost" onClick={onClose}>{clientsT('clientsPage.cancel')}</Button>
+          <Button kind="primary" icon="key" onClick={submit} disabled={saving}>{saving ? clientsT('clientsPage.users.resetting') : clientsT('clientsPage.users.resetSubmit')}</Button>
         </>
       }
     >
       <div className="field">
-        <label>Новый пароль</label>
+        <label>{clientsT('clientsPage.users.newPassword')}</label>
         <div className="row" style={{ gap: 8 }}>
           <input className="input" type={showPassword ? 'text' : 'password'} value={password} onChange={(e) => setPassword(e.target.value)} />
-          <Button kind="ghost" onClick={() => setPassword(generatePassword())}>Сгенерировать</Button>
-          <Button kind="ghost" onClick={() => setShowPassword((v) => !v)}>{showPassword ? 'Скрыть' : 'Показать'}</Button>
+          <Button kind="ghost" onClick={() => setPassword(generatePassword())}>{clientsT('clientsPage.users.generate')}</Button>
+          <Button kind="ghost" onClick={() => setShowPassword((v) => !v)}>{showPassword ? clientsT('clientsPage.users.hide') : clientsT('clientsPage.users.show')}</Button>
         </div>
       </div>
       <SwitchField
-        label="Требовать смену пароля при входе"
-        hint="После сброса клиент должен задать новый пароль при первом входе."
+        label={clientsT('clientsPage.users.forceChange')}
+        hint={clientsT('clientsPage.users.resetForceHint')}
         checked
         disabled
         onChange={() => {}}
       />
       <div style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-secondary)', marginTop: 12 }}>
-        Передайте логин и пароль клиенту любым удобным способом. По почте система их не отправляет.
+        {clientsT('clientsPage.users.handoff')}
       </div>
       {error && <div className="form-error" style={{ marginTop: 12 }}>{error}</div>}
     </Modal>
@@ -1573,16 +1596,18 @@ function ClientUserPasswordRevealModal({ result, onClose }) {
   if (!result) return null;
 
   const copyCredentials = async () => {
-    const text = `Логин: ${result.username}\nПароль: ${result.password}`;
+    const text = clientsT('clientsPage.users.copyText', { username: result.username, password: result.password });
     try {
       await copyTextToClipboard(text);
-      pushToast({ kind: 'success', title: 'Скопировано' });
+      pushToast({ kind: 'success', title: clientsT('clientsPage.users.copied') });
     } catch (err) {
-      pushToast({ kind: 'error', title: 'Не удалось скопировать', desc: err.message || '' });
+      pushToast({ kind: 'error', title: clientsT('clientsPage.users.copyFailed'), desc: err.message || '' });
     }
   };
 
-  const title = result.mode === 'reset' ? 'Пароль сброшен' : 'Пароль создан';
+  const title = result.mode === 'reset'
+    ? clientsT('clientsPage.users.passwordReset')
+    : clientsT('clientsPage.users.passwordCreated');
 
   return (
     <Modal
@@ -1592,20 +1617,20 @@ function ClientUserPasswordRevealModal({ result, onClose }) {
       subtitle={`${result.fullName} · ${result.username}`}
       footer={(
         <>
-          <Button kind="ghost" icon="copy" onClick={copyCredentials}>Скопировать</Button>
-          <Button kind="primary" onClick={onClose}>Понятно</Button>
+          <Button kind="ghost" icon="copy" onClick={copyCredentials}>{clientsT('clientsPage.users.copy')}</Button>
+          <Button kind="primary" onClick={onClose}>{clientsT('clientsPage.users.gotIt')}</Button>
         </>
       )}
     >
       <div style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-secondary)', marginBottom: 12 }}>
-        Пароль больше не будет показан. Если потеряли — сбросьте снова.
+        {clientsT('clientsPage.users.revealHint')}
       </div>
       <div className="field">
-        <label>Логин</label>
+        <label>{clientsT('clientsPage.users.login')}</label>
         <input className="input mono" value={result.username} readOnly onFocus={(e) => e.target.select()} />
       </div>
       <div className="field">
-        <label>Пароль</label>
+        <label>{clientsT('clientsPage.users.password')}</label>
         <input className="input mono" value={result.password} readOnly onFocus={(e) => e.target.select()} />
       </div>
     </Modal>
@@ -1621,7 +1646,7 @@ function ImpersonationAuditPanel({ canWrite, clientId, compact = false }) {
   useEffect(() => {
     if (!canWrite) {
       setEvents([]);
-      setError('Недостаточно прав');
+      setError(clientsT('clientsPage.audit.forbidden'));
       return undefined;
     }
     let cancelled = false;
@@ -1653,7 +1678,7 @@ function ImpersonationAuditPanel({ canWrite, clientId, compact = false }) {
   const cols = [
     {
       key: 'actor',
-      title: 'Оператор',
+      title: clientsT('clientsPage.audit.col.operator'),
       width: 160,
       render: (s) => (
         <div>
@@ -1663,7 +1688,7 @@ function ImpersonationAuditPanel({ canWrite, clientId, compact = false }) {
     },
     ...(!clientId ? [{
       key: 'client',
-      title: 'Клиент',
+      title: clientsT('clientsPage.audit.col.client'),
       width: 200,
       render: (s) => (
         <div>
@@ -1674,41 +1699,41 @@ function ImpersonationAuditPanel({ canWrite, clientId, compact = false }) {
     }] : []),
     {
       key: 'started',
-      title: 'Вход',
+      title: clientsT('clientsPage.audit.col.signIn'),
       width: 150,
       sortAccessor: (s) => s.start?.eventAt,
       render: (s) => fmtDateTime(s.start?.eventAt),
     },
     {
       key: 'ended',
-      title: 'Выход',
+      title: clientsT('clientsPage.audit.col.signOut'),
       width: 150,
       sortAccessor: (s) => s.end?.eventAt,
       render: (s) => fmtDateTime(s.end?.eventAt),
     },
     {
       key: 'duration',
-      title: 'Длительность',
+      title: clientsT('clientsPage.audit.col.duration'),
       width: 120,
       sortAccessor: (s) => s.durationMs,
       render: (s) => fmtDuration(s.durationMs),
     },
     {
       key: 'status',
-      title: 'Состояние',
+      title: clientsT('clientsPage.col.state'),
       width: 130,
       render: (s) => sessionStatusBadge(s),
     },
     {
       key: 'reason',
-      title: 'Причина завершения',
+      title: clientsT('clientsPage.audit.col.reason'),
       width: 180,
       render: (s) => (
         <span style={{ color: 'var(--fg-secondary)', font: 'var(--pv-text-body-3)' }}>
           {s.end
-            ? (IMPERSONATION_REASON_LABELS[s.endReason] || s.endReason || '—')
+            ? (impersonationReasonLabel(s.endReason) || '—')
             : s.orphaned
-              ? IMPERSONATION_REASON_LABELS.orphaned
+              ? impersonationReasonLabel('orphaned')
               : '—'}
         </span>
       ),
@@ -1716,16 +1741,16 @@ function ImpersonationAuditPanel({ canWrite, clientId, compact = false }) {
   ];
 
   if (loading) {
-    return <div style={{ color: 'var(--fg-secondary)' }}>Загрузка журнала…</div>;
+    return <div style={{ color: 'var(--fg-secondary)' }}>{clientsT('clientsPage.audit.loading')}</div>;
   }
 
   if (error) {
     return (
       <Empty
         icon="db"
-        title="Не удалось загрузить журнал"
+        title={clientsT('clientsPage.audit.loadFailed')}
         desc={error}
-        action={canWrite ? <Button kind="primary" icon="refresh" onClick={() => setRefreshKey((k) => k + 1)}>Повторить</Button> : null}
+        action={canWrite ? <Button kind="primary" icon="refresh" onClick={() => setRefreshKey((k) => k + 1)}>{clientsT('clientsPage.retry')}</Button> : null}
       />
     );
   }
@@ -1735,9 +1760,9 @@ function ImpersonationAuditPanel({ canWrite, clientId, compact = false }) {
       {!compact && (
         <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
           <div style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-secondary)' }}>
-            История входов администратора в кабинеты клиентов. Сеансы собираются по идентификатору сессии.
+            {clientsT('clientsPage.audit.hint')}
           </div>
-          <Button kind="ghost" icon="refresh" onClick={() => setRefreshKey((k) => k + 1)}>Обновить</Button>
+          <Button kind="ghost" icon="refresh" onClick={() => setRefreshKey((k) => k + 1)}>{clientsT('clientsPage.refresh')}</Button>
         </div>
       )}
       <DataTable
@@ -1745,8 +1770,8 @@ function ImpersonationAuditPanel({ canWrite, clientId, compact = false }) {
         columns={cols}
         rowKey="sessionAuditId"
         pageSize={compact ? 8 : 15}
-        emptyTitle="Записей нет"
-        emptyDesc={clientId ? 'Для этого клиента входов администратора пока не было.' : 'Входы администратора в кабинеты клиентов пока не выполнялись.'}
+        emptyTitle={clientsT('clientsPage.audit.empty')}
+        emptyDesc={clientId ? clientsT('clientsPage.audit.emptyClient') : clientsT('clientsPage.audit.emptyAll')}
         dense={compact}
       />
     </div>

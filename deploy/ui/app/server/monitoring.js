@@ -123,26 +123,76 @@ function componentTitle(id) {
   return COMPONENTS.find((item) => item.id === id)?.title || id;
 }
 
-function makeProblem(component, code, { level, title, message, since, objectId }) {
+function minsFromMessage(message) {
+  const text = String(message || '');
+  const paren = text.match(/\((\d+)\s*мин\)/);
+  if (paren) return Number(paren[1]);
+  const ago = text.match(/(\d+)\s*мин\s+назад/);
+  if (ago) return Number(ago[1]);
+  const running = text.match(/уже\s+(\d+)\s*мин/);
+  if (running) return Number(running[1]);
+  return null;
+}
+
+function quotedNameFromMessage(message) {
+  const match = String(message || '').match(/«([^»]+)»/);
+  return match ? match[1] : null;
+}
+
+function deriveI18nParams(component, item, objectId, message) {
+  const params = {};
+  const object = objectId ? String(objectId) : '';
+  if (object) {
+    params.objectId = object;
+    params.label = object;
+    params.job = object;
+  }
+  if (item && typeof item === 'object') {
+    if (item.job) params.job = String(item.job);
+    if (item.observationId) params.observationId = String(item.observationId);
+    if (item.collectorId) params.collectorId = String(item.collectorId);
+    if (item.sourceId) params.sourceId = String(item.sourceId);
+    if (item.heartbeatAgeSec != null) params.heartbeatAgeSec = item.heartbeatAgeSec;
+    if (item.lagSeconds != null) params.lagSeconds = item.lagSeconds;
+    if (item.bucketLagSec != null) params.bucketLagSec = item.bucketLagSec;
+    if (item.updateAgeSec != null) params.updateAgeSec = item.updateAgeSec;
+    if (item.exitCode != null) params.exitCode = item.exitCode;
+  }
+  const mins = minsFromMessage(message);
+  if (mins != null) params.mins = mins;
+  const quoted = quotedNameFromMessage(message);
+  if (quoted) params.name = quoted;
+  if (component) params.component = component;
+  params.detail = cleanText(message, 500);
+  return params;
+}
+
+function makeProblem(component, code, { level, title, message, since, objectId, i18nParams }) {
   const link = COMPONENT_LINK[component] || { link: null, diagnosticsTab: null };
+  const object = objectId ? String(objectId) : '';
   return {
     id: problemId(component, code, objectId),
     component,
+    code,
+    objectId: object,
     level,
     title: cleanText(title, 120),
     message: cleanText(message),
     since: since || null,
     link: link.link,
     diagnosticsTab: link.diagnosticsTab,
+    i18nParams: i18nParams || undefined,
   };
 }
 
 function checkFailed(component, error) {
+  const message = shortPublicError(error);
   return makeProblem(component, 'check_failed', {
     level: 'critical',
     title: `Не удалось проверить ${componentTitle(component)}`,
-    message: shortPublicError(error),
+    message,
     objectId: '',
+    i18nParams: deriveI18nParams(component, null, '', message),
   });
 }
 
@@ -176,12 +226,14 @@ function snmpSince(item, job) {
 
 function mapExisting(component, item, now, since) {
   const objectId = item.observationId || item.job || item.sourceId || item.collectorId || '';
+  const message = item.message || '';
   return makeProblem(component, item.code || 'unknown', {
     level: item.level === 'critical' ? 'critical' : 'warning',
-    title: CODE_TITLE[item.code] || item.message,
-    message: item.message,
+    title: CODE_TITLE[item.code] || message,
+    message,
     since,
     objectId,
+    i18nParams: deriveI18nParams(component, item, objectId, message),
   });
 }
 
@@ -198,6 +250,7 @@ function collectorProblems(collectors, lastMinutes) {
         message: 'Ни один источник коллектора не виден в окне живых потоков (5 минут).',
         since: latestIso(sources.map((source) => minuteOf(lastMinutes, source.sourceId))),
         objectId: collector.collectorId,
+        i18nParams: { name, collector: name },
       }));
       continue;
     }
@@ -211,6 +264,7 @@ function collectorProblems(collectors, lastMinutes) {
         message: `Источник коллектора ${name} не виден в окне живых потоков (5 минут).`,
         since: minuteOf(lastMinutes, source.sourceId),
         objectId: source.sourceId,
+        i18nParams: { source: sourceName, collector: name },
       }));
     }
   }
@@ -223,6 +277,7 @@ function detectionProblems(minute, now) {
       level: 'critical',
       title: CODE_TITLE.detection_empty,
       message: 'За последние сутки детекция не записала ни одной минуты.',
+      i18nParams: {},
     })];
   }
   const lagMs = now - minute.ts;
@@ -233,15 +288,18 @@ function detectionProblems(minute, now) {
     title: CODE_TITLE.detection_stale,
     message: `Новых минут детекции нет уже ${lagMin} мин.`,
     since: minute.iso,
+    i18nParams: { lagMin, mins: lagMin },
   })];
 }
 
 function clickhouseProblems(pingOk, error) {
   if (pingOk) return [];
+  const message = cleanText(error, 180) || 'ClickHouse не отвечает';
   return [makeProblem('clickhouse', 'clickhouse_down', {
     level: 'critical',
     title: CODE_TITLE.clickhouse_down,
-    message: cleanText(error, 180) || 'ClickHouse не отвечает',
+    message,
+    i18nParams: { detail: message },
   })];
 }
 

@@ -5,6 +5,12 @@ const {
   entitiesViewRef,
 } = require('./clickhouse');
 
+function validationFail(error, code, params) {
+  const out = { ok: false, error, code };
+  if (params) out.params = params;
+  return out;
+}
+
 const ENTITY_TYPES = new Set(['isp', 'customer', 'internal']);
 
 const ENTITY_TYPE_LABELS = {
@@ -49,17 +55,17 @@ function buildEntitySlug(displayName) {
 function buildEntityId(ownerType, displayName) {
   const prefix = String(ownerType ?? '').trim();
   if (!ENTITY_TYPES.has(prefix)) {
-    return { ok: false, error: 'Выберите тип владельца' };
+    return validationFail('Выберите тип владельца', 'ownerTypeRequired');
   }
 
   const slug = buildEntitySlug(displayName);
   if (!slug) {
-    return { ok: false, error: 'Не удалось сформировать идентификатор из названия' };
+    return validationFail('Не удалось сформировать идентификатор из названия', 'slugFromNameFailed');
   }
 
   const entityId = `${prefix}:${slug}`;
   if (!/^(isp|customer|internal):[a-z0-9]+(?:-[a-z0-9]+)*$/.test(entityId)) {
-    return { ok: false, error: 'Сформированный entity_id не соответствует формату prefix:slug' };
+    return validationFail('Сформированный entity_id не соответствует формату prefix:slug', 'entityIdFormatInvalid');
   }
 
   return { ok: true, entityId };
@@ -118,7 +124,7 @@ function listNetEntitiesAdmin() {
 
 async function validateNetEntityPayload(body, { isNew } = {}) {
   const displayName = String(body?.displayName ?? body?.display_name ?? '').trim();
-  if (!displayName) return { ok: false, error: 'Укажите название владельца' };
+  if (!displayName) return validationFail('Укажите название владельца', 'displayNameRequired');
 
   let enabled = Number(body?.enabled);
   if (enabled !== 0 && enabled !== 1) enabled = 1;
@@ -130,7 +136,11 @@ async function validateNetEntityPayload(body, { isNew } = {}) {
 
     const activeIds = await fetchActiveEntityIds();
     if (activeIds.has(built.entityId)) {
-      return { ok: false, error: `Владелец с идентификатором ${built.entityId} уже существует` };
+      return validationFail(
+        `Владелец с идентификатором ${built.entityId} уже существует`,
+        'entityDuplicate',
+        { entityId: built.entityId },
+      );
     }
 
     return {
@@ -146,21 +156,21 @@ async function validateNetEntityPayload(body, { isNew } = {}) {
   }
 
   const entityId = String(body?.entityId ?? body?.entity_id ?? '').trim();
-  if (!entityId) return { ok: false, error: 'Не указан entity_id' };
+  if (!entityId) return validationFail('Не указан entity_id', 'entityIdMissing');
 
   const ownerType = ownerTypeFromEntityId(entityId);
   if (!ownerType) {
-    return { ok: false, error: 'Некорректный entity_id' };
+    return validationFail('Некорректный entity_id', 'entityIdInvalid');
   }
 
   const activeIds = await fetchActiveEntityIds();
   if (enabled === 1 && !activeIds.has(entityId)) {
-    return { ok: false, error: 'Владелец не найден или уже отключён' };
+    return validationFail('Владелец не найден или уже отключён', 'entityNotFoundOrDisabled');
   }
 
   if (enabled === 0) {
     if (!activeIds.has(entityId)) {
-      return { ok: false, error: 'Владелец не найден или уже отключён' };
+      return validationFail('Владелец не найден или уже отключён', 'entityNotFoundOrDisabled');
     }
   }
 
@@ -184,6 +194,8 @@ async function saveNetEntity(body) {
   if (!validation.ok) {
     const err = new Error(validation.error);
     err.statusCode = 400;
+    if (validation.code) err.code = validation.code;
+    if (validation.params) err.params = validation.params;
     throw err;
   }
 

@@ -1,18 +1,20 @@
-/* Пользователи и права доступа */
+/* Users and access rights */
 
 function usersT(key, params) {
   return GrapesI18n.t(key, params);
 }
 
+function usersOverrideOptions() {
+  return [
+    { id: 'INHERIT', label: usersT('usersPage.override.inherit') },
+    { id: 'ALLOW', label: usersT('usersPage.override.allow') },
+    { id: 'DENY', label: usersT('usersPage.override.deny') },
+  ];
+}
+
 function usersRbacPageMeta(page) {
   return GrapesI18n.localizedPageMeta(page.id, page);
 }
-
-const OVERRIDE_OPTIONS = [
-  { id: 'INHERIT', label: 'Наследовать' },
-  { id: 'ALLOW', label: 'Разрешить' },
-  { id: 'DENY', label: 'Запретить' },
-];
 
 function PageUsers({ currentUser, onAuthRefresh, onNavigate, displayTimezone }) {
   const [tab, setTab] = useState('users');
@@ -45,7 +47,7 @@ function PageUsers({ currentUser, onAuthRefresh, onNavigate, displayTimezone }) 
       setRoles(roleList);
       setResources(pageList);
     } catch (err) {
-      setError(err.message || ApiClient.LOAD_FAILED);
+      setError(err.message || usersT('usersPage.loadFailed'));
     } finally {
       setLoading(false);
     }
@@ -70,48 +72,48 @@ function PageUsers({ currentUser, onAuthRefresh, onNavigate, displayTimezone }) 
   const saveUser = async (payload) => {
     if (formState?.mode === 'edit') {
       await ApiClient.updateUser(formState.user.id, payload);
-      pushToast({ kind: 'success', title: 'Пользователь обновлён' });
+      pushToast({ kind: 'success', title: usersT('usersPage.toast.userUpdated') });
     } else {
       await ApiClient.createUser(payload);
-      pushToast({ kind: 'success', title: 'Пользователь создан' });
+      pushToast({ kind: 'success', title: usersT('usersPage.toast.userCreated') });
     }
     setFormState(null);
     await loadAll();
   };
 
   const deleteBlockedReason = (user) => {
-    if (user.roleId === 'Administrator') return 'Нельзя удалить учётную запись администратора';
-    if (rows.length <= 1) return 'Нельзя удалить последнего пользователя в системе';
+    if (user.roleId === 'Administrator') return usersT('usersPage.err.deleteAdmin');
+    if (rows.length <= 1) return usersT('usersPage.err.deleteLastUser');
     return null;
   };
 
   const deleteUser = async (user) => {
     const blocked = deleteBlockedReason(user);
     if (blocked) {
-      pushToast({ kind: 'error', title: 'Удаление недоступно', desc: blocked });
+      pushToast({ kind: 'error', title: usersT('usersPage.toast.deleteBlocked'), desc: blocked });
       return;
     }
-    const ok = window.confirm(`Удалить пользователя ${user.username}?`);
+    const ok = window.confirm(usersT('usersPage.confirm.deleteUser', { username: user.username }));
     if (!ok) return;
     try {
       await ApiClient.deleteUser(user.id);
-      pushToast({ kind: 'success', title: 'Пользователь удалён' });
+      pushToast({ kind: 'success', title: usersT('usersPage.toast.userDeleted') });
       if (drawerUser?.id === user.id) setDrawerUser(null);
       await loadAll();
     } catch (err) {
-      pushToast({ kind: 'error', title: 'Не удалось удалить', desc: err.message });
+      pushToast({ kind: 'error', title: usersT('usersPage.toast.deleteFailed'), desc: err.message });
     }
   };
 
   const changePassword = async (user, password) => {
     await ApiClient.changeUserPassword(user.id, { password });
-    pushToast({ kind: 'success', title: 'Пароль изменён' });
+    pushToast({ kind: 'success', title: usersT('usersPage.toast.passwordChanged') });
     setPasswordFor(null);
     await loadAll();
   };
 
   const userCols = [
-    { key: 'fullName', title: 'Пользователь', width: 300, render: (u) => (
+    { key: 'fullName', title: usersT('usersPage.col.user'), width: 300, render: (u) => (
       <div className="row" style={{gap: 10}}>
         <div style={{
           width: 36, height: 36, borderRadius: 999,
@@ -126,44 +128,43 @@ function PageUsers({ currentUser, onAuthRefresh, onNavigate, displayTimezone }) 
         </div>
       </div>
     )},
-    { key: 'roleId', title: 'Роль', width: 170, render: (u) => (
+    { key: 'roleId', title: usersT('usersPage.col.role'), width: 170, render: (u) => (
       <Badge tone={u.roleId === 'Administrator' ? 'critical' : 'neutral'}>
-        {roleMap[u.roleId]?.displayName || roleLabel(u.roleId)}
+        {GrapesI18n.localizedRoleDisplay(u.roleId, roleMap[u.roleId]?.displayName)}
       </Badge>
     )},
-    { key: 'forcePasswordChange', title: 'Смена пароля', width: 170, render: (u) => (
+    { key: 'forcePasswordChange', title: usersT('usersPage.col.forcePasswordChange'), width: 170, render: (u) => (
       u.forcePasswordChange
-        ? <Badge tone="warning" dot>Требуется</Badge>
-        : <Badge tone="success" dot>Не требуется</Badge>
+        ? <Badge tone="warning" dot>{usersT('usersPage.badge.required')}</Badge>
+        : <Badge tone="success" dot>{usersT('usersPage.badge.notRequired')}</Badge>
     )},
-    { key: 'createdAt', title: 'Создан', width: 180, render: (u) => formatDateTime(u.createdAt, displayTimezone) },
-    { key: 'passwordChangedAt', title: 'Пароль изменён', width: 180, render: (u) => formatDateTime(u.passwordChangedAt, displayTimezone) },
+    { key: 'createdAt', title: usersT('usersPage.col.createdAt'), width: 180, render: (u) => formatDateTime(u.createdAt, displayTimezone) },
+    { key: 'passwordChangedAt', title: usersT('usersPage.col.passwordChangedAt'), width: 180, render: (u) => formatDateTime(u.passwordChangedAt, displayTimezone) },
   ];
 
   const roleCols = [
-    { key: 'name', title: 'Системное имя', width: 200, render: (r) => <code>{r.name}</code> },
-    { key: 'displayName', title: 'Отображаемое имя', width: 220, render: (r) => r.displayName },
-    { key: 'updatedAt', title: 'Изменена', width: 180, render: (r) => formatDateTime(r.updatedAt, displayTimezone) },
+    { key: 'name', title: usersT('usersPage.col.roleName'), width: 200, render: (r) => <code>{r.name}</code> },
+    { key: 'displayName', title: usersT('usersPage.col.roleDisplayName'), width: 220, render: (r) => r.displayName },
+    { key: 'updatedAt', title: usersT('usersPage.col.roleUpdatedAt'), width: 180, render: (r) => formatDateTime(r.updatedAt, displayTimezone) },
   ];
 
   return (
     <div className="main__container">
       <div className="page-head">
         <div>
-          <h1>Пользователи и права доступа</h1>
+          <h1>{usersT('usersPage.title')}</h1>
           <p>
-            Локальные учётные записи, роли и индивидуальные переопределения доступа к страницам.
+            {usersT('usersPage.subtitle')}
             {canDiagnostics && (
               <>
-                {' '}
-                Состояние системы можно узнать из{' '}
+                {usersT('usersPage.subtitleDiagnosticsPrefix')}
                 <button
                   type="button"
                   className="link-btn"
                   style={{ color: 'var(--fg-secondary)', font: 'var(--pv-text-body-3)' }}
                   onClick={() => (onNavigate ? onNavigate('diagnostics') : (location.hash = 'diagnostics'))}
                 >
-                  диагностики
+                  {usersT('usersPage.diagnostics')}
                 </button>
                 .
               </>
@@ -171,19 +172,19 @@ function PageUsers({ currentUser, onAuthRefresh, onNavigate, displayTimezone }) 
           </p>
         </div>
         <div className="row" style={{gap: 8}}>
-          <Button kind="ghost" icon="refresh" onClick={loadAll} disabled={loading}>Обновить</Button>
+          <Button kind="ghost" icon="refresh" onClick={loadAll} disabled={loading}>{usersT('chrome.refresh')}</Button>
           {tab === 'users' && canWrite && (
-            <Button kind="primary" icon="users" onClick={() => setFormState({ mode: 'create' })}>Добавить пользователя</Button>
+            <Button kind="primary" icon="users" onClick={() => setFormState({ mode: 'create' })}>{usersT('usersPage.addUser')}</Button>
           )}
           {tab === 'roles' && canWrite && (
-            <Button kind="primary" icon="key" onClick={() => setRoleFormOpen(true)}>Создать роль</Button>
+            <Button kind="primary" icon="key" onClick={() => setRoleFormOpen(true)}>{usersT('usersPage.createRole')}</Button>
           )}
         </div>
       </div>
 
       <div className="row" style={{gap: 8, marginBottom: 16}}>
-        <Button kind={tab === 'users' ? 'primary' : 'ghost'} onClick={() => setTab('users')}>Пользователи</Button>
-        <Button kind={tab === 'roles' ? 'primary' : 'ghost'} onClick={() => setTab('roles')}>Роли</Button>
+        <Button kind={tab === 'users' ? 'primary' : 'ghost'} onClick={() => setTab('users')}>{usersT('usersPage.tab.users')}</Button>
+        <Button kind={tab === 'roles' ? 'primary' : 'ghost'} onClick={() => setTab('roles')}>{usersT('usersPage.tab.roles')}</Button>
       </div>
 
       {error && (
@@ -200,26 +201,28 @@ function PageUsers({ currentUser, onAuthRefresh, onNavigate, displayTimezone }) 
           rowKey="id"
           pageSize={10}
           onRowClick={canWrite ? (u) => setDrawerUser(u) : undefined}
-          emptyTitle={loading ? 'Загрузка...' : 'Пользователи не найдены'}
-          emptyDesc={loading ? 'Получаем список пользователей.' : 'Создайте пользователя через форму.'}
+          emptyTitle={loading ? usersT('usersPage.empty.loadingTitle') : usersT('usersPage.empty.usersTitle')}
+          emptyDesc={loading ? usersT('usersPage.empty.usersLoadingDesc') : usersT('usersPage.empty.usersDesc')}
           toolbar={{
             search,
             onSearch: setSearch,
             left: (
               <select className="input" style={{maxWidth: 220}} value={roleFilter} onChange={(e) => setRoleFilter(e.target.value)}>
-                <option value="all">Все роли</option>
-                {roles.map((r) => <option key={r.id} value={r.id}>{r.displayName}</option>)}
+                <option value="all">{usersT('usersPage.filter.allRoles')}</option>
+                {roles.map((r) => (
+                  <option key={r.id} value={r.id}>{GrapesI18n.localizedRoleDisplay(r.id, r.displayName)}</option>
+                ))}
               </select>
             ),
           }}
           rowActions={(u) => canWrite ? (
             <div className="row" style={{gap: 4, justifyContent: 'flex-end'}}>
               {canChangePassword && (
-                <button className="icon-btn tt" data-tt="Сменить пароль" onClick={(e) => { e.stopPropagation(); setPasswordFor(u); }}><Icon name="key" size={15} /></button>
+                <button className="icon-btn tt" data-tt={usersT('usersPage.tt.changePassword')} onClick={(e) => { e.stopPropagation(); setPasswordFor(u); }}><Icon name="key" size={15} /></button>
               )}
-              <button className="icon-btn tt" data-tt="Редактировать" onClick={(e) => { e.stopPropagation(); setFormState({ mode: 'edit', user: u }); }}><Icon name="edit" size={15} /></button>
+              <button className="icon-btn tt" data-tt={usersT('usersPage.tt.edit')} onClick={(e) => { e.stopPropagation(); setFormState({ mode: 'edit', user: u }); }}><Icon name="edit" size={15} /></button>
               {!deleteBlockedReason(u) && (
-                <button className="icon-btn tt" data-tt="Удалить" onClick={(e) => { e.stopPropagation(); deleteUser(u); }}><Icon name="trash" size={15} /></button>
+                <button className="icon-btn tt" data-tt={usersT('usersPage.tt.delete')} onClick={(e) => { e.stopPropagation(); deleteUser(u); }}><Icon name="trash" size={15} /></button>
               )}
             </div>
           ) : null}
@@ -232,8 +235,8 @@ function PageUsers({ currentUser, onAuthRefresh, onNavigate, displayTimezone }) 
           rowKey="id"
           pageSize={10}
           onRowClick={canWrite ? (r) => setDrawerRole(r) : undefined}
-          emptyTitle={loading ? 'Загрузка...' : 'Роли не найдены'}
-          emptyDesc="Создайте роль для настройки доступа к страницам."
+          emptyTitle={loading ? usersT('usersPage.empty.loadingTitle') : usersT('usersPage.empty.rolesTitle')}
+          emptyDesc={usersT('usersPage.empty.rolesDesc')}
         />
       )}
 
@@ -309,27 +312,32 @@ function UserDrawer({ user, roles, resources, displayTimezone, onClose, onSaved 
         });
       }
       await ApiClient.saveUserPermissions(user.id, overrides);
-      pushToast({ kind: 'success', title: 'Права пользователя сохранены' });
+      pushToast({ kind: 'success', title: usersT('usersPage.toast.permissionsSaved') });
       await onSaved();
       onClose();
     } catch (err) {
-      setError(err.message || 'Не удалось сохранить');
+      setError(err.message || usersT('usersPage.err.saveFailed'));
     } finally {
       setSaving(false);
     }
   };
 
+  const overrideOptions = usersOverrideOptions();
+
   return (
     <SidePanel
       open={!!user}
       onClose={onClose}
-      title={user?.fullName || 'Пользователь'}
-      subtitle={user ? `${user.username} · создан ${formatDateTime(user.createdAt, displayTimezone)}` : ''}
+      title={user?.fullName || usersT('user.fallbackName')}
+      subtitle={user ? usersT('usersPage.drawer.userSubtitle', {
+        username: user.username,
+        time: formatDateTime(user.createdAt, displayTimezone),
+      }) : ''}
       footer={
         <>
-          <Button kind="ghost" onClick={onClose}>Отмена</Button>
+          <Button kind="ghost" onClick={onClose}>{usersT('usersPage.cancel')}</Button>
           <Button kind="primary" icon="save" onClick={save} disabled={saving || loading}>
-            {saving ? 'Сохранение...' : 'Сохранить'}
+            {saving ? usersT('usersPage.saving') : usersT('usersPage.save')}
           </Button>
         </>
       }
@@ -337,39 +345,44 @@ function UserDrawer({ user, roles, resources, displayTimezone, onClose, onSaved 
       {user && (
         <div className="col" style={{gap: 16}}>
           <div className="field">
-            <label>Роль</label>
+            <label>{usersT('usersPage.label.role')}</label>
             <select className="input" value={roleId} onChange={(e) => setRoleId(e.target.value)}>
-              {roles.map((r) => <option key={r.id} value={r.id}>{r.displayName}</option>)}
+              {roles.map((r) => (
+                <option key={r.id} value={r.id}>{GrapesI18n.localizedRoleDisplay(r.id, r.displayName)}</option>
+              ))}
             </select>
           </div>
           <SwitchField
-            label="Требовать смену пароля при входе"
-            hint="При следующем входе пользователь увидит только экран смены пароля."
+            label={usersT('usersPage.forcePasswordChange.label')}
+            hint={usersT('usersPage.forcePasswordChange.hintDrawer')}
             checked={forcePasswordChange}
             onChange={setForcePasswordChange}
           />
           <div>
-            <div style={{font: 'var(--pv-text-body-2-bold)', marginBottom: 8}}>Доступ к страницам</div>
+            <div style={{font: 'var(--pv-text-body-2-bold)', marginBottom: 8}}>{usersT('usersPage.pageAccess')}</div>
             {loading ? (
-              <div style={{color: 'var(--fg-secondary)'}}>Загрузка...</div>
+              <div style={{color: 'var(--fg-secondary)'}}>{usersT('usersPage.loading')}</div>
             ) : (
               <div className="col" style={{gap: 8}}>
-                {resources.map((page) => (
-                  <div key={page.id} className="row" style={{justifyContent: 'space-between', gap: 12}}>
-                    <div>
-                      <div style={{font: 'var(--pv-text-body-2-bold)'}}>{page.title}</div>
-                      <div style={{font: 'var(--pv-text-body-3)', color: 'var(--fg-secondary)'}}>{page.section}</div>
+                {resources.map((page) => {
+                  const meta = usersRbacPageMeta(page);
+                  return (
+                    <div key={page.id} className="row" style={{justifyContent: 'space-between', gap: 12}}>
+                      <div>
+                        <div style={{font: 'var(--pv-text-body-2-bold)'}}>{meta.title}</div>
+                        <div style={{font: 'var(--pv-text-body-3)', color: 'var(--fg-secondary)'}}>{meta.section}</div>
+                      </div>
+                      <select
+                        className="input"
+                        style={{maxWidth: 160}}
+                        value={overrides[page.id] || 'INHERIT'}
+                        onChange={(e) => setOverrides((s) => ({ ...s, [page.id]: e.target.value }))}
+                      >
+                        {overrideOptions.map((o) => <option key={o.id} value={o.id}>{o.label}</option>)}
+                      </select>
                     </div>
-                    <select
-                      className="input"
-                      style={{maxWidth: 160}}
-                      value={overrides[page.id] || 'INHERIT'}
-                      onChange={(e) => setOverrides((s) => ({ ...s, [page.id]: e.target.value }))}
-                    >
-                      {OVERRIDE_OPTIONS.map((o) => <option key={o.id} value={o.id}>{o.label}</option>)}
-                    </select>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             )}
           </div>
@@ -434,11 +447,11 @@ function RoleDrawer({ role, resources, onClose, onSaved, onDeleted }) {
         permissions,
         writePermissions,
       });
-      pushToast({ kind: 'success', title: 'Роль сохранена' });
+      pushToast({ kind: 'success', title: usersT('usersPage.toast.roleSaved') });
       await onSaved();
       onClose();
     } catch (err) {
-      setError(err.message || 'Не удалось сохранить');
+      setError(err.message || usersT('usersPage.err.saveFailed'));
     } finally {
       setSaving(false);
     }
@@ -446,14 +459,14 @@ function RoleDrawer({ role, resources, onClose, onSaved, onDeleted }) {
 
   const remove = async () => {
     if (!role || isStandard) return;
-    const ok = window.confirm(`Удалить роль ${role.displayName}?`);
+    const ok = window.confirm(usersT('usersPage.confirm.deleteRole', { name: role.displayName }));
     if (!ok) return;
     try {
       await ApiClient.deleteRole(role.id);
-      pushToast({ kind: 'success', title: 'Роль удалена' });
+      pushToast({ kind: 'success', title: usersT('usersPage.toast.roleDeleted') });
       onDeleted();
     } catch (err) {
-      pushToast({ kind: 'error', title: 'Не удалось удалить роль', desc: err.message });
+      pushToast({ kind: 'error', title: usersT('usersPage.toast.roleDeleteFailed'), desc: err.message });
     }
   };
 
@@ -461,17 +474,17 @@ function RoleDrawer({ role, resources, onClose, onSaved, onDeleted }) {
     <SidePanel
       open={!!role}
       onClose={onClose}
-      title={role?.displayName || 'Роль'}
-      subtitle={role ? `Системное имя: ${role.name}` : ''}
+      title={role?.displayName || usersT('usersPage.drawer.roleTitleFallback')}
+      subtitle={role ? usersT('usersPage.drawer.roleSubtitle', { name: role.name }) : ''}
       footer={
         <>
           {!isStandard && (
-            <Button kind="ghost" onClick={remove}>Удалить</Button>
+            <Button kind="ghost" onClick={remove}>{usersT('usersPage.delete')}</Button>
           )}
           <span style={{flex: 1}} />
-          <Button kind="ghost" onClick={onClose}>Отмена</Button>
+          <Button kind="ghost" onClick={onClose}>{usersT('usersPage.cancel')}</Button>
           <Button kind="primary" icon="save" onClick={save} disabled={saving || loading}>
-            {saving ? 'Сохранение...' : 'Сохранить'}
+            {saving ? usersT('usersPage.saving') : usersT('usersPage.save')}
           </Button>
         </>
       }
@@ -479,11 +492,11 @@ function RoleDrawer({ role, resources, onClose, onSaved, onDeleted }) {
       {role && (
         <div className="col" style={{gap: 16}}>
           <div className="field">
-            <label>Системное имя</label>
+            <label>{usersT('usersPage.label.systemName')}</label>
             <input className="input" value={role.name} disabled />
           </div>
           <div className="field">
-            <label>Отображаемое имя</label>
+            <label>{usersT('usersPage.label.displayName')}</label>
             <input className="input" value={displayName} onChange={(e) => setDisplayName(e.target.value)} />
           </div>
           <div className="field">
@@ -508,19 +521,20 @@ function RoleDrawer({ role, resources, onClose, onSaved, onDeleted }) {
             </div>
           </div>
           <div>
-            <div style={{font: 'var(--pv-text-body-2-bold)', marginBottom: 8}}>Доступ к страницам</div>
+            <div style={{font: 'var(--pv-text-body-2-bold)', marginBottom: 8}}>{usersT('usersPage.pageAccess')}</div>
             {loading ? (
-              <div style={{color: 'var(--fg-secondary)'}}>Загрузка...</div>
+              <div style={{color: 'var(--fg-secondary)'}}>{usersT('usersPage.loading')}</div>
             ) : (
               <div className="col" style={{gap: 8}}>
                 {resources.map((page) => {
                   const hasAccess = !!permissions[page.id];
                   const canWrite = !!writePermissions[page.id];
+                  const meta = usersRbacPageMeta(page);
                   return (
                     <div key={page.id} className="row" style={{justifyContent: 'space-between', gap: 12, alignItems: 'center'}}>
                       <div>
-                        <div style={{font: 'var(--pv-text-body-2-bold)'}}>{page.title}</div>
-                        <div style={{font: 'var(--pv-text-body-3)', color: 'var(--fg-secondary)'}}>{page.section}</div>
+                        <div style={{font: 'var(--pv-text-body-2-bold)'}}>{meta.title}</div>
+                        <div style={{font: 'var(--pv-text-body-3)', color: 'var(--fg-secondary)'}}>{meta.section}</div>
                       </div>
                       <div className="row" style={{gap: 16, flexShrink: 0}}>
                         <label className="row" style={{gap: 6, cursor: 'pointer', font: 'var(--pv-text-body-3)'}}>
@@ -528,7 +542,7 @@ function RoleDrawer({ role, resources, onClose, onSaved, onDeleted }) {
                             checked={hasAccess}
                             onChange={(v) => setAccess(page.id, v)}
                           />
-                          <span>Просмотр</span>
+                          <span>{usersT('usersPage.access.view')}</span>
                         </label>
                         <label className="row" style={{gap: 6, cursor: hasAccess ? 'pointer' : 'not-allowed', font: 'var(--pv-text-body-3)', opacity: hasAccess ? 1 : 0.45}}>
                           <Checkbox
@@ -536,7 +550,7 @@ function RoleDrawer({ role, resources, onClose, onSaved, onDeleted }) {
                             disabled={!hasAccess}
                             onChange={(v) => setWritePermissions((s) => ({ ...s, [page.id]: v }))}
                           />
-                          <span>Изменение</span>
+                          <span>{usersT('usersPage.access.write')}</span>
                         </label>
                       </div>
                     </div>
@@ -567,15 +581,15 @@ function RoleFormModal({ open, onClose, onCreated }) {
 
   const submit = async () => {
     setError('');
-    if (!name.trim()) { setError('Укажите системное имя'); return; }
-    if (!displayName.trim()) { setError('Укажите отображаемое имя'); return; }
+    if (!name.trim()) { setError(usersT('usersPage.err.roleNameRequired')); return; }
+    if (!displayName.trim()) { setError(usersT('usersPage.err.roleDisplayNameRequired')); return; }
     setSaving(true);
     try {
       const role = await ApiClient.createRole({ name: name.trim(), displayName: displayName.trim() });
-      pushToast({ kind: 'success', title: 'Роль создана' });
+      pushToast({ kind: 'success', title: usersT('usersPage.toast.roleCreated') });
       onCreated(role);
     } catch (err) {
-      setError(err.message || 'Не удалось создать роль');
+      setError(err.message || usersT('usersPage.err.roleCreateFailed'));
     } finally {
       setSaving(false);
     }
@@ -585,23 +599,23 @@ function RoleFormModal({ open, onClose, onCreated }) {
     <Modal
       open={open}
       onClose={onClose}
-      title="Создать роль"
-      subtitle="Новой роли по умолчанию разрешён доступ ко всем страницам"
+      title={usersT('usersPage.roleModal.title')}
+      subtitle={usersT('usersPage.roleModal.subtitle')}
       footer={
         <>
-          <Button kind="ghost" onClick={onClose}>Отмена</Button>
-          <Button kind="primary" onClick={submit} disabled={saving}>{saving ? 'Создание...' : 'Создать'}</Button>
+          <Button kind="ghost" onClick={onClose}>{usersT('usersPage.cancel')}</Button>
+          <Button kind="primary" onClick={submit} disabled={saving}>{saving ? usersT('usersPage.creating') : usersT('usersPage.create')}</Button>
         </>
       }
     >
       <div className="col" style={{gap: 14}}>
         <div className="field">
-          <label>Системное имя</label>
-          <input className="input" value={name} onChange={(e) => setName(e.target.value)} placeholder="Analyst" />
+          <label>{usersT('usersPage.label.systemName')}</label>
+          <input className="input" value={name} onChange={(e) => setName(e.target.value)} placeholder={usersT('usersPage.roleModal.placeholder.name')} />
         </div>
         <div className="field">
-          <label>Отображаемое имя</label>
-          <input className="input" value={displayName} onChange={(e) => setDisplayName(e.target.value)} placeholder="Аналитик" />
+          <label>{usersT('usersPage.label.displayName')}</label>
+          <input className="input" value={displayName} onChange={(e) => setDisplayName(e.target.value)} placeholder={usersT('usersPage.roleModal.placeholder.displayName')} />
         </div>
         {error && <div className="form-error">{error}</div>}
       </div>
@@ -667,10 +681,6 @@ function avatarBg(id) {
 
 function userInitial(user) {
   return (user.fullName || user.username || '?').trim().slice(0, 1).toUpperCase();
-}
-
-function roleLabel(roleId) {
-  return roleId === 'Administrator' ? 'Администратор' : roleId;
 }
 
 function parseUserTimestampMs(value) {
@@ -750,9 +760,9 @@ function UserFormModal({ state, roles, onClose, onSubmit }) {
 
   const submit = async () => {
     setError('');
-    if (!fullName.trim()) { setError('Укажите ФИО'); return; }
-    if (!username.trim()) { setError('Укажите username'); return; }
-    if (!isEdit && password.length < 12) { setError('Пароль должен быть не короче 12 символов'); return; }
+    if (!fullName.trim()) { setError(usersT('usersPage.err.fullNameRequired')); return; }
+    if (!username.trim()) { setError(usersT('usersPage.err.usernameRequired')); return; }
+    if (!isEdit && password.length < 12) { setError(usersT('usersPage.err.passwordMinLength')); return; }
     setSaving(true);
     try {
       await onSubmit({
@@ -761,7 +771,7 @@ function UserFormModal({ state, roles, onClose, onSubmit }) {
         ...(isEdit ? {} : { password, roleId, forcePasswordChange }),
       });
     } catch (err) {
-      setError(err.message || 'Не удалось сохранить пользователя');
+      setError(err.message || usersT('usersPage.err.userSaveFailed'));
     } finally {
       setSaving(false);
     }
@@ -771,52 +781,54 @@ function UserFormModal({ state, roles, onClose, onSubmit }) {
     <Modal
       open={open}
       onClose={onClose}
-      title={isEdit ? 'Редактировать пользователя' : 'Пригласить пользователя'}
-      subtitle={isEdit ? 'ФИО и username. Роль и права — в карточке пользователя.' : 'Создание локальной учётной записи'}
+      title={isEdit ? usersT('usersPage.userModal.editTitle') : usersT('usersPage.userModal.inviteTitle')}
+      subtitle={isEdit ? usersT('usersPage.userModal.editSubtitle') : usersT('usersPage.userModal.createSubtitle')}
       footer={
         <>
-          <Button kind="ghost" onClick={onClose}>Отмена</Button>
+          <Button kind="ghost" onClick={onClose}>{usersT('usersPage.cancel')}</Button>
           <Button kind="primary" icon={isEdit ? 'save' : 'users'} onClick={submit} disabled={saving}>
-            {saving ? 'Сохранение...' : isEdit ? 'Сохранить' : 'Создать'}
+            {saving ? usersT('usersPage.saving') : (isEdit ? usersT('usersPage.save') : usersT('usersPage.create'))}
           </Button>
         </>
       }
     >
       <div className="grid grid--2col">
         <div className="field" style={{gridColumn: '1 / -1'}}>
-          <label>ФИО</label>
-          <input className="input" value={fullName} onChange={(e) => setFullName(e.target.value)} placeholder="Иван Иванов" />
+          <label>{usersT('usersPage.label.fullName')}</label>
+          <input className="input" value={fullName} onChange={(e) => setFullName(e.target.value)} placeholder={usersT('usersPage.userModal.placeholder.fullName')} />
         </div>
         <div className="field" style={{gridColumn: '1 / -1'}}>
-          <label>Username</label>
-          <input className="input" value={username} onChange={(e) => setUsername(e.target.value)} placeholder="ivanov" />
+          <label>{usersT('usersPage.label.username')}</label>
+          <input className="input" value={username} onChange={(e) => setUsername(e.target.value)} placeholder={usersT('usersPage.userModal.placeholder.username')} />
         </div>
         {!isEdit && (
           <>
             <div className="field" style={{gridColumn: '1 / -1'}}>
-              <label>Пароль</label>
+              <label>{usersT('usersPage.label.password')}</label>
               <div className="row" style={{gap: 8}}>
                 <input
                   className="input"
                   type={showPassword ? 'text' : 'password'}
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
-                  placeholder="Минимум 12 символов"
+                  placeholder={usersT('usersPage.passwordPlaceholder')}
                 />
-                <Button kind="ghost" onClick={() => setPassword(generatePassword())}>Сгенерировать пароль</Button>
-                <Button kind="ghost" onClick={() => setShowPassword((v) => !v)}>{showPassword ? 'Скрыть' : 'Показать'}</Button>
+                <Button kind="ghost" onClick={() => setPassword(generatePassword())}>{usersT('usersPage.generatePassword')}</Button>
+                <Button kind="ghost" onClick={() => setShowPassword((v) => !v)}>{showPassword ? usersT('usersPage.hidePassword') : usersT('usersPage.showPassword')}</Button>
               </div>
             </div>
             <div className="field" style={{gridColumn: '1 / -1'}}>
-              <label>Роль</label>
+              <label>{usersT('usersPage.label.role')}</label>
               <select className="input" value={roleId} onChange={(e) => setRoleId(e.target.value)}>
-                {roles.map((r) => <option key={r.id} value={r.id}>{r.displayName}</option>)}
+                {roles.map((r) => (
+                  <option key={r.id} value={r.id}>{GrapesI18n.localizedRoleDisplay(r.id, r.displayName)}</option>
+                ))}
               </select>
             </div>
             <div style={{gridColumn: '1 / -1'}}>
               <SwitchField
-                label="Требовать смену пароля при входе"
-                hint="Пользователь сменит пароль сразу после первого входа с выданным паролем."
+                label={usersT('usersPage.forcePasswordChange.label')}
+                hint={usersT('usersPage.forcePasswordChange.hintCreate')}
                 checked={forcePasswordChange}
                 onChange={setForcePasswordChange}
               />
@@ -844,12 +856,12 @@ function ChangePasswordModal({ user, onClose, onSubmit }) {
 
   const submit = async () => {
     setError('');
-    if (password.length < 12) { setError('Пароль должен быть не короче 12 символов'); return; }
+    if (password.length < 12) { setError(usersT('usersPage.err.passwordMinLength')); return; }
     setSaving(true);
     try {
       await onSubmit(user, password);
     } catch (err) {
-      setError(err.message || 'Не удалось изменить пароль');
+      setError(err.message || usersT('usersPage.err.changePwdFailed'));
     } finally {
       setSaving(false);
     }
@@ -859,27 +871,27 @@ function ChangePasswordModal({ user, onClose, onSubmit }) {
     <Modal
       open={!!user}
       onClose={onClose}
-      title="Сменить пароль"
+      title={usersT('usersPage.changePwd.title')}
       subtitle={user ? `${user.fullName} · ${user.username}` : ''}
       footer={
         <>
-          <Button kind="ghost" onClick={onClose}>Отмена</Button>
-          <Button kind="primary" icon="key" onClick={submit} disabled={saving}>{saving ? 'Сохранение...' : 'Сменить пароль'}</Button>
+          <Button kind="ghost" onClick={onClose}>{usersT('usersPage.cancel')}</Button>
+          <Button kind="primary" icon="key" onClick={submit} disabled={saving}>{saving ? usersT('usersPage.saving') : usersT('usersPage.changePwd.submit')}</Button>
         </>
       }
     >
       <div className="field">
-        <label>Новый пароль</label>
+        <label>{usersT('usersPage.changePwd.newPassword')}</label>
         <div className="row" style={{gap: 8}}>
           <input
             className="input"
             type={showPassword ? 'text' : 'password'}
             value={password}
             onChange={(e) => setPassword(e.target.value)}
-            placeholder="Минимум 12 символов"
+            placeholder={usersT('usersPage.passwordPlaceholder')}
           />
-          <Button kind="ghost" onClick={() => setPassword(generatePassword())}>Сгенерировать пароль</Button>
-          <Button kind="ghost" onClick={() => setShowPassword((v) => !v)}>{showPassword ? 'Скрыть' : 'Показать'}</Button>
+          <Button kind="ghost" onClick={() => setPassword(generatePassword())}>{usersT('usersPage.generatePassword')}</Button>
+          <Button kind="ghost" onClick={() => setShowPassword((v) => !v)}>{showPassword ? usersT('usersPage.hidePassword') : usersT('usersPage.showPassword')}</Button>
         </div>
       </div>
       {error && <div className="form-error" style={{marginTop: 12}}>{error}</div>}

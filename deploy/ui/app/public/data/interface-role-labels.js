@@ -1,11 +1,5 @@
 /* Подписи для разметки портов оборудования (§2.11 ТЗ). */
 
-const IR_BOUNDARY_LABELS = {
-  unknown: 'Не размечено',
-  internal: 'Наша сторона',
-  external: 'Внешняя',
-};
-
 const IR_CONNECTIVITY_LABELS = {
   '': 'Не задан',
   customer: 'Клиент',
@@ -16,13 +10,6 @@ const IR_CONNECTIVITY_LABELS = {
   core: 'Ядро',
   cgnat: 'CGNAT',
   mgmt: 'Управление',
-};
-
-const IR_SOURCE_LABELS = {
-  manual: 'Вручную',
-  client: 'Из биллинга',
-  rule: 'Правило',
-  default: 'По умолчанию',
 };
 
 const IR_DIRECTION_LABELS = {
@@ -49,24 +36,52 @@ const IR_MATCH_FIELD_LABELS = {
   name: 'Имя порта',
 };
 
-const IR_SWITCH_STATUS_LABELS = {
-  not_started: 'Не начато',
-  partial: 'Частично',
-  done: 'Готово',
-};
+function irLabelT(key, params) {
+  if (typeof GrapesI18n !== 'undefined' && GrapesI18n.t) {
+    return GrapesI18n.t(key, params);
+  }
+  return key;
+}
 
 function irBoundaryLabel(value) {
-  return IR_BOUNDARY_LABELS[String(value || 'unknown')] || IR_BOUNDARY_LABELS.unknown;
+  const id = String(value || 'unknown');
+  const key = `interfaceRolesPage.boundary.${id}`;
+  if (typeof GrapesI18n !== 'undefined' && GrapesI18n.has(key)) {
+    return irLabelT(key);
+  }
+  const fallback = { unknown: 'Не размечено', internal: 'Наша сторона', external: 'Внешняя' };
+  return fallback[id] || fallback.unknown;
+}
+
+function irSourceLabel(value) {
+  const id = String(value || 'default');
+  const key = `interfaceRolesPage.source.${id}`;
+  if (typeof GrapesI18n !== 'undefined' && GrapesI18n.has(key)) {
+    return irLabelT(key);
+  }
+  const fallback = {
+    manual: 'Вручную',
+    client: 'Из биллинга',
+    rule: 'Правило',
+    default: 'По умолчанию',
+  };
+  return fallback[id] || String(value || '');
+}
+
+function irSwitchStatusLabel(status) {
+  const id = String(status || '');
+  const key = `interfaceRolesPage.switchStatus.${id}`;
+  if (typeof GrapesI18n !== 'undefined' && GrapesI18n.has(key)) {
+    return irLabelT(key);
+  }
+  const fallback = { not_started: 'Не начато', partial: 'Частично', done: 'Готово' };
+  return fallback[id] || status;
 }
 
 function irConnectivityLabel(value) {
   const key = String(value ?? '');
   if (key in IR_CONNECTIVITY_LABELS) return IR_CONNECTIVITY_LABELS[key];
   return key || IR_CONNECTIVITY_LABELS[''];
-}
-
-function irSourceLabel(value) {
-  return IR_SOURCE_LABELS[String(value || 'default')] || String(value || '');
 }
 
 function irDirectionLabel(value) {
@@ -85,6 +100,26 @@ function irSuggestedBoundaryLabel(value) {
   return '';
 }
 
+/** @deprecated use irBoundaryLabel; kept for callers reading raw maps */
+const IR_BOUNDARY_LABELS = {
+  unknown: 'Не размечено',
+  internal: 'Наша сторона',
+  external: 'Внешняя',
+};
+
+const IR_SOURCE_LABELS = {
+  manual: 'Вручную',
+  client: 'Из биллинга',
+  rule: 'Правило',
+  default: 'По умолчанию',
+};
+
+const IR_SWITCH_STATUS_LABELS = {
+  not_started: 'Не начато',
+  partial: 'Частично',
+  done: 'Готово',
+};
+
 Object.assign(window, {
   IR_BOUNDARY_LABELS,
   IR_CONNECTIVITY_LABELS,
@@ -97,6 +132,7 @@ Object.assign(window, {
   irBoundaryLabel,
   irConnectivityLabel,
   irSourceLabel,
+  irSwitchStatusLabel,
   irDirectionLabel,
   irBoundaryBadgeTone,
   irSuggestedBoundaryLabel,

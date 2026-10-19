@@ -3386,9 +3386,9 @@ function explorerSeriesMetricValue(row, metricKey) {
  * Top-N groupBy + per-bucket series in one flows_raw scan (for observation rollup).
  * Prefers raw group keys when available (same two-phase idea as explorerFlows).
  */
-async function explorerGroupedTimeseries(body = {}) {
-  const q = normalizeExplorerQuery(body);
-  const { groups, dims } = resolveExplorerGroupState(q.groupBy);
+async function explorerGroupedTimeseries(body = {}, options = {}) {
+  const q = normalizeExplorerQuery(body, options);
+  const { groups, dims } = resolveExplorerGroupState(q.groupBy, explorerDimensionsForOptions(options));
   if (!groups.length) throw new Error('Выберите хотя бы одну группировку');
 
   const metricKey = q.metric;
@@ -4274,6 +4274,7 @@ function summaryFromExplorerFlowRows(rows, windowSeconds = 3600) {
 module.exports = {
   explorerSchema,
   explorerDimensions,
+  explorerDimensionsForOptions,
   explorerFieldMatchesQuery,
   explorerFlows,
   explorerSummary,

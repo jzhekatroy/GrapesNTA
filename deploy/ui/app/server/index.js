@@ -430,6 +430,7 @@ function sendApiError(res, err, fallbackStatus = 502) {
   const status = err.statusCode || fallbackStatus;
   const body = { error: err.message };
   if (err.code) body.code = err.code;
+  if (err.params) body.params = err.params;
   res.status(status).json(body);
 }
 
@@ -2188,8 +2189,7 @@ app.post('/api/refs/net-entities', async (req, res) => {
     const { elapsedMs, entityId } = await saveNetEntity(req.body || {});
     res.json({ ok: true, meta: { elapsedMs, entityId } });
   } catch (err) {
-    const status = err.statusCode === 400 ? 400 : 502;
-    res.status(status).json({ error: err.message });
+    sendApiError(res, err, 502);
   }
 });
 
@@ -2221,8 +2221,7 @@ app.post('/api/refs/vlans', async (req, res) => {
     const { elapsedMs, vlanId } = await saveVlan(req.body || {});
     res.json({ ok: true, meta: { elapsedMs, vlanId } });
   } catch (err) {
-    const status = err.statusCode === 400 ? 400 : err.statusCode === 404 ? 404 : 502;
-    res.status(status).json({ error: err.message });
+    sendApiError(res, err, 502);
   }
 });
 
@@ -2231,8 +2230,7 @@ app.post('/api/refs/vlans/enabled', async (req, res) => {
     const meta = await setVlanEnabled(req.body || {});
     res.json({ ok: true, meta });
   } catch (err) {
-    const status = err.statusCode === 400 ? 400 : err.statusCode === 404 ? 404 : 502;
-    res.status(status).json({ error: err.message });
+    sendApiError(res, err, 502);
   }
 });
 
@@ -2241,8 +2239,7 @@ app.post('/api/refs/vlans/delete', async (req, res) => {
     const meta = await deleteVlan(req.body || {});
     res.json({ ok: true, meta });
   } catch (err) {
-    const status = err.statusCode === 400 ? 400 : err.statusCode === 404 ? 404 : 502;
-    res.status(status).json({ error: err.message });
+    sendApiError(res, err, 502);
   }
 });
 
@@ -2813,8 +2810,7 @@ app.post('/api/refs/l3-prefixes', async (req, res) => {
     const { elapsedMs } = await saveL3Prefix(req.body || {});
     res.json({ ok: true, meta: { elapsedMs } });
   } catch (err) {
-    const status = err.statusCode === 400 ? 400 : 502;
-    res.status(status).json({ error: err.message });
+    sendApiError(res, err, 502);
   }
 });
 
@@ -2833,8 +2829,7 @@ app.post('/api/refs/l3-prefixes/toggle', async (req, res) => {
     const { elapsedMs, enabled } = await setL3PrefixEnabled(req.body || {});
     res.json({ ok: true, enabled, meta: { elapsedMs } });
   } catch (err) {
-    const status = err.statusCode === 400 ? 400 : err.statusCode === 404 ? 404 : 502;
-    res.status(status).json({ error: err.message });
+    sendApiError(res, err, 502);
   }
 });
 
@@ -2853,8 +2848,7 @@ app.delete('/api/refs/l3-prefixes', async (req, res) => {
     const { elapsedMs } = await deleteL3Prefix(req.body || {});
     res.json({ ok: true, meta: { elapsedMs } });
   } catch (err) {
-    const status = err.statusCode === 400 ? 400 : err.statusCode === 404 ? 404 : 502;
-    res.status(status).json({ error: err.message });
+    sendApiError(res, err, 502);
   }
 });
 
