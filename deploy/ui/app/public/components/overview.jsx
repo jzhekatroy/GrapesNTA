@@ -162,9 +162,9 @@ function OverviewTrafficChartCard({
 
 function OverviewDirectionToggle({ value, onChange }) {
   return (
-    <div className="seg seg--compact" title="Направление трафика">
-      <button type="button" className={value === 'in' ? 'is-active' : ''} onClick={() => onChange?.('in')}>К вам</button>
-      <button type="button" className={value === 'out' ? 'is-active' : ''} onClick={() => onChange?.('out')}>От вас</button>
+    <div className="seg seg--compact" title={overviewT('cabinet.direction.trafficTitle')}>
+      <button type="button" className={value === 'in' ? 'is-active' : ''} onClick={() => onChange?.('in')}>{overviewT('cabinet.direction.toYou')}</button>
+      <button type="button" className={value === 'out' ? 'is-active' : ''} onClick={() => onChange?.('out')}>{overviewT('cabinet.direction.fromYou')}</button>
     </div>
   );
 }
@@ -264,7 +264,7 @@ function OverviewCountryCard({
         tools={
           <div className="country-heatmap-tools row">
             {extraTools}
-            <div className="seg seg--compact" title="Метрика заливки карты">
+            <div className="seg seg--compact" title={overviewT('dashboard.geo.fillMetricTitle')}>
               <button type="button" className={colorMetric === 'share' ? 'is-active' : ''} onClick={() => onColorMetricChange?.('share')}>%</button>
               <button type="button" className={colorMetric === 'volume' ? 'is-active' : ''} onClick={() => onColorMetricChange?.('volume')}>Gb</button>
             </div>
@@ -414,19 +414,29 @@ function OverviewRecentFlowsCard({
   const colSpan = cabinetMode ? 7 : 6;
   return (
     <Card className="card--recent-flows" title={overviewT('dashboard.flows.title')} subtitle={subtitle} loadMs={loadMs} serverMs={serverMs} pad="0">
-      <table className={`table table--recent-flows${cabinetMode ? ' table--recent-flows--cabinet' : ''}`} style={{ borderRadius: 0 }}>
-        <thead>
-          <tr>
-            <th className="recent-flows__time-col">{overviewT('dashboard.flows.time')}</th>
-            {cabinetMode && <th className="recent-flows__direction-col">{overviewT('dashboard.flows.direction')}</th>}
-            <th className="recent-flows__flow-col">{overviewT('dashboard.flows.flow')}</th>
-            <th className="recent-flows__meta-col">{cabinetMode ? overviewT('dashboard.flows.countries') : overviewT('dashboard.flows.vlanGeo')}</th>
-            <th className="recent-flows__proto-col">{overviewT('dashboard.flows.proto')}</th>
-            <th className="recent-flows__bytes-col">{overviewT('dashboard.flows.volume')}</th>
-            <th className="recent-flows__asn-col">{overviewT('dashboard.flows.asn')}</th>
-          </tr>
-        </thead>
-        <tbody>
+      <div className="recent-flows-scroll">
+        <table className={`table table--recent-flows${cabinetMode ? ' table--recent-flows--cabinet' : ''}`} style={{ borderRadius: 0 }}>
+          <colgroup>
+            <col className="recent-flows__time-col" />
+            {cabinetMode && <col className="recent-flows__direction-col" />}
+            <col className="recent-flows__flow-col" />
+            <col className="recent-flows__meta-col" />
+            <col className="recent-flows__proto-col" />
+            <col className="recent-flows__bytes-col" />
+            <col className="recent-flows__asn-col" />
+          </colgroup>
+          <thead>
+            <tr>
+              <th className="recent-flows__time-col">{overviewT('dashboard.flows.time')}</th>
+              {cabinetMode && <th className="recent-flows__direction-col">{overviewT('dashboard.flows.direction')}</th>}
+              <th className="recent-flows__flow-col">{overviewT('dashboard.flows.flow')}</th>
+              <th className="recent-flows__meta-col">{cabinetMode ? overviewT('dashboard.flows.countries') : overviewT('dashboard.flows.vlanGeo')}</th>
+              <th className="recent-flows__proto-col">{overviewT('dashboard.flows.proto')}</th>
+              <th className="recent-flows__bytes-col">{overviewT('dashboard.flows.volume')}</th>
+              <th className="recent-flows__asn-col">{overviewT('dashboard.flows.asn')}</th>
+            </tr>
+          </thead>
+          <tbody>
           {source === 'loading' && <tr><td colSpan={colSpan} className="talker-table-state">{overviewT('dashboard.loading')}</td></tr>}
           {source === 'error' && (
             <tr>
@@ -441,11 +451,17 @@ function OverviewRecentFlowsCard({
               <td className="recent-flows__time mono" title={flow.ts}>{formatRecentFlowTs(flow.ts, displayTimezone)}</td>
               {cabinetMode && (
                 <td className="recent-flows__direction-col">
-                  <Badge tone="info">{flow.clientSide === 'dst' ? 'К вам' : flow.clientSide === 'both' ? 'Внутри' : 'От вас'}</Badge>
+                  <Badge tone="info">
+                    {flow.clientSide === 'dst'
+                      ? overviewT('cabinet.direction.toYou')
+                      : flow.clientSide === 'both'
+                        ? overviewT('cabinet.direction.internal')
+                        : overviewT('cabinet.direction.fromYou')}
+                  </Badge>
                 </td>
               )}
               <td className="recent-flows__flow-col"><OverviewFlowEndpoint flow={flow} /></td>
-              <td>
+              <td className="recent-flows__meta-col">
                 {cabinetMode ? (
                   <span className="recent-flow-meta__geo">{countryShort(flow.srcCountry, flow.srcIp)} → {countryShort(flow.dstCountry, flow.dstIp)}</span>
                 ) : (
@@ -459,8 +475,9 @@ function OverviewRecentFlowsCard({
               </td>
             </tr>
           ))}
-        </tbody>
-      </table>
+          </tbody>
+        </table>
+      </div>
     </Card>
   );
 }
