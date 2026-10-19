@@ -1,11 +1,19 @@
 /* Общие компоненты и утилиты личного кабинета клиента */
 
-const CABINET_DNS_EMPTY_HINT = 'DNS-данные могут быть неполными: при перегрузке коллектора часть запросов не попадает в журнал. Нулевая активность не всегда означает, что запросов не было — признак потерь будет добавлен позже.';
+function cabinetT(key, params) {
+  return GrapesI18n.t(key, params);
+}
 
-const CABINET_DIRECTION_LABELS = {
-  in: 'Входящий',
-  out: 'Исходящий',
-};
+function cabinetDnsEmptyHint() {
+  return cabinetT('cabinet.dns.emptyHint');
+}
+
+function cabinetDirectionLabels() {
+  return {
+    in: cabinetT('cabinet.direction.incoming'),
+    out: cabinetT('cabinet.direction.outgoing'),
+  };
+}
 
 function cabinetGranularityBucketSeconds(granularity) {
   const map = { minute: 60, '5m': 300, hour: 3600, day: 86400 };
@@ -48,8 +56,8 @@ function cabinetSeriesToChart(data, meta) {
   return {
     points,
     lines: [
-      { key: 'in', label: 'К вам', color: '#51D16D' },
-      { key: 'out', label: 'От вас', color: '#6972F0' },
+      { key: 'in', label: cabinetT('cabinet.direction.toYou'), color: '#51D16D' },
+      { key: 'out', label: cabinetT('cabinet.direction.fromYou'), color: '#6972F0' },
     ],
     bucketSeconds,
   };
@@ -126,15 +134,15 @@ function formatCabinetServiceLabel(row) {
   const port = Number(row?.servicePort) || 0;
   const transport = row?.transport || 'tcp';
   if (!port) return row?.serviceCode || '—';
-  if (row?.portOwner === 'local') return `${transport}/${port}, ваш порт`;
-  if (row?.portOwner === 'remote') return `${transport}/${port}, порт удалённой стороны`;
+  if (row?.portOwner === 'local') return `${transport}/${port}, ${cabinetT('cabinet.service.localPort')}`;
+  if (row?.portOwner === 'remote') return `${transport}/${port}, ${cabinetT('cabinet.service.remotePort')}`;
   return `${transport}/${port}`;
 }
 
 function formatCabinetDomainLabel(row) {
   const domain = String(row?.domain || '');
-  if (row?.folded || domain === 'other') return 'Прочие домены (свёрнутый хвост)';
-  if (domain === 'unknown') return 'Неразобранные имена';
+  if (row?.folded || domain === 'other') return cabinetT('cabinet.domain.otherFolded');
+  if (domain === 'unknown') return cabinetT('cabinet.domain.unknown');
   return domain || '—';
 }
 
@@ -180,17 +188,17 @@ function openCabinetExplorer(onNavigate, {
 function CabinetLoadState({ children, style }) {
   return (
     <div className="other-ports-table__state" style={style}>
-      {children || (typeof ApiClient !== 'undefined' ? ApiClient.LOAD_FAILED : 'Не удалось загрузить')}
+      {children || (typeof ApiClient !== 'undefined' ? ApiClient.LOAD_FAILED : cabinetT('dashboard.loadFailed'))}
     </div>
   );
 }
 
 function CabinetEmptyState({ children, style, titleHint }) {
-  const defaultDesc = 'За выбранный период данных пока нет. Для нового клиента агрегаты начинают заполняться с момента подключения.';
+  const defaultDesc = cabinetT('cabinet.empty.defaultDesc');
   return (
     <Empty
       icon="info"
-      title="Нет данных"
+      title={cabinetT('dashboard.noData')}
       titleHint={titleHint}
       desc={children ?? (titleHint ? null : defaultDesc)}
     />
@@ -200,14 +208,15 @@ function CabinetEmptyState({ children, style, titleHint }) {
 function CabinetErrorState({ error, style }) {
   return (
     <div className="other-ports-table__state" style={{ color: 'var(--st-critical)', ...style }}>
-      {error || (typeof ApiClient !== 'undefined' ? ApiClient.LOAD_FAILED : 'Не удалось загрузить')}
+      {error || (typeof ApiClient !== 'undefined' ? ApiClient.LOAD_FAILED : cabinetT('dashboard.loadFailed'))}
     </div>
   );
 }
 
 Object.assign(window, {
-  CABINET_DNS_EMPTY_HINT,
-  CABINET_DIRECTION_LABELS,
+  cabinetT,
+  cabinetDnsEmptyHint,
+  cabinetDirectionLabels,
   CabinetLoadState,
   CabinetEmptyState,
   CabinetErrorState,

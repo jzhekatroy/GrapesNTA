@@ -20,6 +20,7 @@
     clients: 'admin',
     smtp: 'admin',
     ttl: 'admin',
+    'cabinet-settings': 'cabinet',
   };
 
   const NAV_SECTION_IDS = {
