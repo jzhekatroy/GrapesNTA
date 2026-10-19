@@ -35,6 +35,12 @@ test('a day is full while it is fresh, compressed after success, and shows the f
   const pending = describeFlowDay('2026-09-22', null, { today: '2026-09-25', hotDays: 1 });
   assert.equal(pending.state, 'pending');
   assert.match(pending.note, /не дошла до сжатия/);
+  assert.equal(pending.noteCode, 'notReached');
+
+  const failedDefault = describeFlowDay('2026-09-22', { status: 'failed' }, { today: '2026-09-25', hotDays: 1 });
+  assert.equal(failedDefault.noteCode, 'compressFailed');
+  const failedMsg = describeFlowDay('2026-09-22', { status: 'failed', message: 'мало места' }, { today: '2026-09-25', hotDays: 1 });
+  assert.equal(failedMsg.noteCode, '');
 });
 
 test('pending days explain why they were not compressed', () => {
@@ -49,10 +55,14 @@ test('pending days explain why they were not compressed', () => {
   assert.equal(byDay['2026-09-27'].state, 'full');
   assert.equal(byDay['2026-09-27'].note, '');
   assert.match(byDay['2026-09-25'].note, /не дошла до сжатия/);
+  assert.equal(byDay['2026-09-25'].noteCode, 'notReached');
   assert.match(byDay['2026-09-26'].note, /сначала более старые/);
+  assert.equal(byDay['2026-09-26'].noteCode, 'olderFirst');
 
   const off = buildFlowDays(parts, [], { today: '2026-09-28', hotDays: 1, mode: 'off' });
-  assert.equal(off.find((row) => row.day === '2026-09-25').note, 'Сжатие выключено.');
+  const offRow = off.find((row) => row.day === '2026-09-25');
+  assert.equal(offRow.note, 'Сжатие выключено.');
+  assert.equal(offRow.noteCode, 'compressionOff');
 });
 
 test('forecast uses the measured shrink and falls back to the log', () => {
