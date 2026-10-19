@@ -109,24 +109,24 @@ function PageCabinetDns({ timeRange, customPeriod, displayTimezone }) {
     <div className="main__container">
       <div className="page-head">
         <div>
-          <h1>DNS</h1>
+          <h1>{cabinetT('nav.item.dns')}</h1>
           <p>
             {selectedDomain
-              ? `Запросы по домену ${detailTitle}`
-              : `Топ доменов по регистрируемому имени · ${periodLabel}`}
+              ? cabinetT('cabinet.dns.subtitle.detail', { domain: detailTitle })
+              : cabinetT('cabinet.dns.subtitle.top', { period: periodLabel })}
           </p>
         </div>
         {selectedDomain && (
           <Button kind="ghost" icon="arrowL" onClick={() => setSelectedDomain(null)}>
-            К топу доменов
+            {cabinetT('cabinet.dns.backToTop')}
           </Button>
         )}
       </div>
 
       {!selectedDomain ? (
         <Card
-          title="Топ доменов"
-          subtitle={`Глубина витрины до ${CABINET_DNS_TOP_MAX_DAYS} суток · ${periodLabel}`}
+          title={cabinetT('cabinet.dns.topTitle')}
+          subtitle={cabinetT('cabinet.dns.topSubtitle', { days: CABINET_DNS_TOP_MAX_DAYS, period: periodLabel })}
           loadMs={domainsState.loadMs}
           serverMs={domainsState.serverMs}
           tools={sourceOptions.length > 1 ? (
@@ -134,9 +134,9 @@ function PageCabinetDns({ timeRange, customPeriod, displayTimezone }) {
               className="input input--sm"
               value={sourceId}
               onChange={(e) => setSourceId(e.target.value)}
-              title="Точка наблюдения"
+              title={cabinetT('cabinet.dns.observationPoint')}
             >
-              <option value="">Все источники</option>
+              <option value="">{cabinetT('cabinet.dns.allSources')}</option>
               {sourceOptions.map((src) => (
                 <option key={src.id || src.sourceId} value={src.id || src.sourceId}>
                   {src.label || src.name || src.sourceId || src.id}
@@ -146,14 +146,14 @@ function PageCabinetDns({ timeRange, customPeriod, displayTimezone }) {
           ) : null}
         >
           <p style={{ color: 'var(--fg-secondary)', font: 'var(--pv-text-caption-1)', marginTop: 0 }}>
-            В таблице — регистрируемые домены, а не каждое полное имя запроса.
+            {cabinetT('cabinet.dns.topHint')}
           </p>
           {domainsState.source === 'loading' ? (
             <div className="skeleton" style={{ height: 240 }} />
           ) : domainsState.source === 'error' ? (
             <CabinetErrorState error={domainsState.error} />
           ) : !domainsState.data.length ? (
-            <CabinetEmptyState titleHint={CABINET_DNS_EMPTY_HINT} />
+            <CabinetEmptyState titleHint={cabinetDnsEmptyHint()} />
           ) : (
             <DataTable
               rows={domainsState.data}
@@ -164,7 +164,7 @@ function PageCabinetDns({ timeRange, customPeriod, displayTimezone }) {
               columns={[
                 {
                   key: 'domain',
-                  title: 'Домен',
+                  title: cabinetT('cabinet.dns.col.domain'),
                   render: (row) => {
                     const label = formatCabinetDomainLabel(row);
                     const clickable = !row.folded && row.domain !== 'other' && row.domain !== 'unknown';
@@ -178,10 +178,10 @@ function PageCabinetDns({ timeRange, customPeriod, displayTimezone }) {
                     );
                   },
                 },
-                { key: 'queries', title: 'Запросы', align: 'right', num: true, render: (r) => fmtNum(r.queries) },
-                { key: 'responses', title: 'Ответы', align: 'right', num: true, render: (r) => fmtNum(r.responses) },
-                { key: 'nxdomain', title: 'Не найдено', align: 'right', num: true, render: (r) => fmtNum(r.nxdomain) },
-                { key: 'servfail', title: 'Сбои DNS', align: 'right', num: true, render: (r) => fmtNum(r.servfail) },
+                { key: 'queries', title: cabinetT('cabinet.dns.col.queries'), align: 'right', num: true, render: (r) => fmtNum(r.queries) },
+                { key: 'responses', title: cabinetT('cabinet.dns.col.responses'), align: 'right', num: true, render: (r) => fmtNum(r.responses) },
+                { key: 'nxdomain', title: cabinetT('cabinet.dns.col.nxdomain'), align: 'right', num: true, render: (r) => fmtNum(r.nxdomain) },
+                { key: 'servfail', title: cabinetT('cabinet.dns.col.servfail'), align: 'right', num: true, render: (r) => fmtNum(r.servfail) },
               ]}
             />
           )}
@@ -189,7 +189,7 @@ function PageCabinetDns({ timeRange, customPeriod, displayTimezone }) {
       ) : (
         <Card
           title={detailTitle}
-          subtitle={`Сырой журнал до ${CABINET_DNS_DETAIL_MAX_DAYS} суток · ${periodLabel}`}
+          subtitle={cabinetT('cabinet.dns.detailSubtitle', { days: CABINET_DNS_DETAIL_MAX_DAYS, period: periodLabel })}
           loadMs={queriesState.loadMs}
           serverMs={queriesState.serverMs}
           tools={(
@@ -197,24 +197,27 @@ function PageCabinetDns({ timeRange, customPeriod, displayTimezone }) {
               className="input input--sm"
               value={String(queryLimit)}
               onChange={(e) => setQueryLimit(Number(e.target.value) || 100)}
-              title="Число строк"
+              title={cabinetT('cabinet.dns.rowLimit')}
             >
               {CABINET_DNS_QUERY_LIMITS.map((n) => (
-                <option key={n} value={n}>{n} строк</option>
+                <option key={n} value={n}>{cabinetT('cabinet.dns.rowLimitOption', { n })}</option>
               ))}
             </select>
           )}
         >
           <p style={{ color: 'var(--fg-secondary)', font: 'var(--pv-text-caption-1)', marginTop: 0 }}>
-            Список читается из сырого журнала (до {CABINET_DNS_DETAIL_MAX_DAYS} суток), тогда как топ доменов
-            {' '}строится по витрине (до {CABINET_DNS_TOP_MAX_DAYS} суток). Показаны последние {queryLimit} записей.
+            {cabinetT('cabinet.dns.detailHint', {
+              detailDays: CABINET_DNS_DETAIL_MAX_DAYS,
+              topDays: CABINET_DNS_TOP_MAX_DAYS,
+              limit: queryLimit,
+            })}
           </p>
           {queriesState.source === 'loading' ? (
             <div className="skeleton" style={{ height: 240 }} />
           ) : queriesState.source === 'error' ? (
             <CabinetErrorState error={queriesState.error} />
           ) : !queriesState.data.length ? (
-            <CabinetEmptyState>За выбранный период запросов по этому домену нет.</CabinetEmptyState>
+            <CabinetEmptyState>{cabinetT('cabinet.dns.emptyDomain')}</CabinetEmptyState>
           ) : (
             <DataTable
               rows={queriesState.data}
@@ -225,16 +228,16 @@ function PageCabinetDns({ timeRange, customPeriod, displayTimezone }) {
               columns={[
                 {
                   key: 'ts',
-                  title: 'Время',
+                  title: cabinetT('cabinet.dns.col.time'),
                   render: (row) => formatDataTimestamp(row.ts, displayTimezone || getDisplayTimezone()),
                 },
-                { key: 'clientIp', title: 'Клиент', mono: true },
-                { key: 'serverIp', title: 'Сервер', mono: true },
-                { key: 'queryName', title: 'Имя', render: (r) => r.queryName || '—' },
-                { key: 'qtype', title: 'Тип' },
+                { key: 'clientIp', title: cabinetT('cabinet.dns.col.client'), mono: true },
+                { key: 'serverIp', title: cabinetT('cabinet.dns.col.server'), mono: true },
+                { key: 'queryName', title: cabinetT('cabinet.dns.col.name'), render: (r) => r.queryName || '—' },
+                { key: 'qtype', title: cabinetT('cabinet.dns.col.type') },
                 {
                   key: 'rcode',
-                  title: 'Код',
+                  title: cabinetT('cabinet.dns.col.code'),
                   render: (r) => (
                     <Badge tone={Number(r.rcode) === 0 ? 'success' : Number(r.rcode) === 3 ? 'warning' : 'critical'}>
                       {dnsRcodeLabel(r.rcode)}
@@ -243,14 +246,14 @@ function PageCabinetDns({ timeRange, customPeriod, displayTimezone }) {
                 },
                 {
                   key: 'isResponse',
-                  title: 'Событие',
+                  title: cabinetT('cabinet.dns.col.event'),
                   render: (r) => (
                     <Badge tone={r.isResponse ? 'success' : 'info'}>
-                      {r.isResponse ? 'Ответ' : 'Запрос'}
+                      {r.isResponse ? cabinetT('cabinet.dns.event.response') : cabinetT('cabinet.dns.event.query')}
                     </Badge>
                   ),
                 },
-                { key: 'transport', title: 'Транспорт' },
+                { key: 'transport', title: cabinetT('cabinet.dns.col.transport') },
               ]}
             />
           )}
