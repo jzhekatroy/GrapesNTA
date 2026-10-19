@@ -15,6 +15,8 @@
     'dns-resolvers': 'netmodel',
     'interface-roles': 'netmodel',
     'port-services': 'netmodel',
+    entities: 'netmodel',
+    vlan: 'netmodel',
     users: 'admin',
     audit: 'admin',
     clients: 'admin',
@@ -30,6 +32,7 @@
     data: 'data',
     netmodel: 'netmodel',
     admin: 'admin',
+    cabinet: 'cabinet',
   };
 
   const TZ_PRESET_LABEL_KEY = {
