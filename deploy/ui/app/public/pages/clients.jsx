@@ -474,6 +474,9 @@ function PageClients({ onAuthRefresh, onNavigate }) {
 
   return (
     <div className="main__container">
+      <div style={{ fontSize: 48, color: '#d0021b', fontWeight: 800, letterSpacing: 2 }}>
+        HELLO WORLD — ветка v.revenko-test
+      </div>
       <div className="page-head">
         <div>
           <h1>{clientsT('clientsPage.title')}</h1>
