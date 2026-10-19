@@ -82,6 +82,7 @@ const {
   trafficReplayStatus,
 } = require('./traffic-replay');
 const { getBuildInfo, formatBuildInfoLogLine } = require('./build-info');
+const { readComponentVersions, componentVersionsPayload } = require('./component-versions');
 const { createSessionStore } = require('./sessions');
 const {
   dnsSources,
@@ -1524,6 +1525,20 @@ app.get('/api/diagnostics/analysis-snapshots', async (_req, res) => {
 
 app.get('/api/diagnostics/build-info', (_req, res) => {
   res.json({ data: getBuildInfo() });
+});
+
+app.get('/api/diagnostics/versions', (_req, res) => {
+  try {
+    res.set('Cache-Control', 'no-store');
+    res.json({
+      data: componentVersionsPayload({
+        recorded: readComponentVersions(),
+        buildInfo: getBuildInfo(),
+      }),
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 app.get('/api/diagnostics/failed-requests', async (req, res) => {
