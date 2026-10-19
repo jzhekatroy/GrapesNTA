@@ -3,14 +3,14 @@ const { useState, useEffect, useCallback, useMemo, useRef } = React;
 const REFRESH_MS = 30_000;
 const PEAKS_STORAGE_KEY = 'grapes-monitoring-show-peaks';
 const COMPONENT_ORDER = ['collectors', 'detection', 'worker', 'clickhouse', 'enrichment', 'snmp'];
-const OK_TITLE = {
-  collectors: 'Коллекторы',
-  detection: 'детекция',
-  worker: 'Worker',
-  clickhouse: 'ClickHouse',
-  enrichment: 'Обогащение',
-  snmp: 'SNMP',
-};
+
+function monT(key, params) {
+  return GrapesI18n.t(key, params);
+}
+
+function intlLoc() {
+  return GrapesI18n.intlLocale();
+}
 
 function formatBps(value) {
   return window.DetectionFormatBps?.(value) ?? String(value ?? '—');
@@ -25,7 +25,7 @@ function formatMskTimeFull(value) {
   const raw = String(value);
   const date = new Date(raw.includes('T') ? raw : `${raw.replace(' ', 'T')}Z`);
   if (Number.isNaN(date.getTime())) return raw;
-  return date.toLocaleString('ru-RU', {
+  return date.toLocaleString(intlLoc(), {
     timeZone: 'Europe/Moscow',
     day: '2-digit',
     month: '2-digit',
@@ -62,24 +62,73 @@ function sortAttackRows(rows) {
 }
 
 function scopeLabel(scope) {
+  const key = `monitoring.scope.${scope}`;
+  if (GrapesI18n.has(key)) return monT(key);
   return window.DetectionScopeShort?.[scope] || scope || '—';
 }
 
 function kindLabel(kind) {
+  const key = `monitoring.kind.${kind}`;
+  if (GrapesI18n.has(key)) return monT(key);
   return window.DetectionKindLabel?.[kind] || kind || '—';
+}
+
+function componentDisplayTitle(compId, comp) {
+  const key = `monitoring.component.${compId}`;
+  if (GrapesI18n.has(key)) return monT(key);
+  return comp?.title || compId;
+}
+
+function problemCode(problem) {
+  if (problem?.code) return problem.code;
+  const parts = String(problem?.id || '').split(':');
+  return parts[1] || 'unknown';
+}
+
+function monitoringProblemParams(problem) {
+  const params = { ...(problem?.i18nParams || {}) };
+  params.component = componentDisplayTitle(problem.component, { id: problem.component });
+  if (params.label == null && problem.objectId) params.label = problem.objectId;
+  if (params.job == null && params.label) params.job = params.label;
+  if (params.name == null && params.label) params.name = params.label;
+  if (params.detail == null && problem.message) params.detail = problem.message;
+  if (params.lagMin == null && params.mins != null) params.lagMin = params.mins;
+  return params;
+}
+
+function localizedMonitoringProblemTitle(problem) {
+  const code = problemCode(problem);
+  const key = `monitoring.problem.${code}.title`;
+  if (!GrapesI18n.has(key)) return problem.title;
+  return monT(key, monitoringProblemParams(problem));
+}
+
+function localizedMonitoringProblemMessage(problem) {
+  const code = problemCode(problem);
+  const key = `monitoring.problem.${code}.message`;
+  if (!GrapesI18n.has(key)) return problem.message;
+  return monT(key, monitoringProblemParams(problem));
 }
 
 function liveStateLabel(row) {
   const st = row?.live?.state;
-  if (st === 'ongoing') return { text: 'идёт', tone: 'critical' };
-  if (st === 'fading') return { text: 'затихает', tone: 'warning' };
-  return { text: 'нет данных', tone: 'neutral' };
+  if (st === 'ongoing') {
+    return { code: 'ongoing', text: monT('monitoring.state.ongoing'), tone: 'critical' };
+  }
+  if (st === 'fading') {
+    return { code: 'fading', text: monT('monitoring.state.fading'), tone: 'warning' };
+  }
+  return { code: 'nodata', text: monT('monitoring.state.nodata'), tone: 'neutral' };
 }
 
 function formatHourRatio(row) {
   const ratio = window.DetectionEventHourRatio?.(row);
   if (ratio == null || !Number.isFinite(ratio) || ratio <= 0) return null;
-  return `×${ratio.toLocaleString('ru-RU', { minimumFractionDigits: 1, maximumFractionDigits: 1 })} к норме часа`;
+  const formatted = ratio.toLocaleString(intlLoc(), {
+    minimumFractionDigits: 1,
+    maximumFractionDigits: 1,
+  });
+  return monT('monitoring.hourRatio', { ratio: formatted });
 }
 
 function durationMinutesFrom(startMinute) {
@@ -96,7 +145,7 @@ function formatSinceDuration(since) {
   const start = new Date(since);
   if (Number.isNaN(start.getTime())) return '';
   const mins = Math.max(1, Math.round((Date.now() - start.getTime()) / 60_000));
-  return `с ${formatMskTime(since)} (${mins} мин)`;
+  return monT('monitoring.since', { time: formatMskTime(since), mins });
 }
 
 function readShowPeaks() {
@@ -145,7 +194,7 @@ function useMonitoringPoll(fetchFn, enabled) {
       setError('');
       setLastOkAt(Date.now());
     } catch (err) {
-      setError(err.message || 'Ошибка запроса');
+      setError(err.message || monT('monitoring.requestError'));
     }
   }, [fetchFn]);
 
@@ -184,12 +233,18 @@ function RefreshAge({ lastOkAt }) {
     const t = setInterval(() => bump((n) => n + 1), 5000);
     return () => clearInterval(t);
   }, []);
-  if (!lastOkAt) return <span className="monitoring-refresh-age monitoring-refresh-age--warn">обновление…</span>;
+  if (!lastOkAt) {
+    return (
+      <span className="monitoring-refresh-age monitoring-refresh-age--warn">
+        {monT('monitoring.refresh.pending')}
+      </span>
+    );
+  }
   const sec = Math.max(0, Math.round((Date.now() - lastOkAt) / 1000));
   const stale = sec > 60;
   return (
     <span className={`monitoring-refresh-age${stale ? ' monitoring-refresh-age--warn' : ''}`}>
-      обновлено {sec} с назад
+      {monT('monitoring.refresh.ago', { sec })}
     </span>
   );
 }
@@ -208,25 +263,35 @@ function MonitoringHeader({
 
   return (
     <div className="monitoring-header">
-      <h1 className="monitoring-header__title">Мониторинг</h1>
+      <h1 className="monitoring-header__title">{monT('monitoring.title')}</h1>
       <div className="monitoring-header__stats">
         <span className={attackCount > 0 ? 'monitoring-stat monitoring-stat--critical' : 'monitoring-stat monitoring-stat--muted'}>
-          {attackCount > 0 ? `${attackCount} атак` : 'атак нет'}
+          {attackCount > 0
+            ? monT('monitoring.attacks.count', { n: attackCount })
+            : monT('monitoring.attacks.none')}
         </span>
         {problemsFailed ? (
-          <span className="monitoring-stat monitoring-stat--critical">? критичных · ? предупреждений</span>
+          <span className="monitoring-stat monitoring-stat--critical">
+            {monT('monitoring.problems.unknown')}
+          </span>
         ) : systemOk ? (
-          <span className="monitoring-stat monitoring-stat--ok">система в порядке</span>
+          <span className="monitoring-stat monitoring-stat--ok">{monT('monitoring.systemOk')}</span>
         ) : (
           <>
             {criticalCount > 0 && (
               <span className="monitoring-stat monitoring-stat--critical">
-                {criticalCount} {criticalCount === 1 ? 'критичная проблема' : 'критичных'}
+                {criticalCount}{' '}
+                {criticalCount === 1
+                  ? monT('monitoring.critical.one')
+                  : monT('monitoring.critical.many')}
               </span>
             )}
             {warningCount > 0 && (
               <span className="monitoring-stat monitoring-stat--warning">
-                {warningCount} {warningCount === 1 ? 'предупреждение' : 'предупреждения'}
+                {warningCount}{' '}
+                {warningCount === 1
+                  ? monT('monitoring.warning.one')
+                  : monT('monitoring.warning.many')}
               </span>
             )}
           </>
@@ -235,7 +300,7 @@ function MonitoringHeader({
       <div className="monitoring-header__meta">
         {detectionMinute ? (
           <span className={stale ? 'monitoring-detection-meta monitoring-detection-meta--stale' : 'monitoring-detection-meta'}>
-            данные детекции на {formatMskTime(detectionMinute)} МСК
+            {monT('monitoring.detectionMeta', { time: formatMskTime(detectionMinute) })}
           </span>
         ) : null}
         <RefreshAge lastOkAt={lastOkAt} />
@@ -251,20 +316,29 @@ function AttackCard({ row, muted, onOpen }) {
   const alertBps = Number(row?.alertByProto?.all?.bps);
   let volumeLine = null;
   if (excess != null && Number.isFinite(Number(excess))) {
-    volumeLine = state.text === 'затихает'
-      ? `было ${formatBps(excess)} лишнего`
-      : `${formatBps(excess)} лишнего`;
+    const bps = formatBps(excess);
+    volumeLine = state.code === 'fading'
+      ? monT('monitoring.volume.wasExcess', { bps })
+      : monT('monitoring.volume.excess', { bps });
   } else if (Number.isFinite(alertBps) && alertBps > 0) {
-    volumeLine = `${formatBps(alertBps)} в момент срабатывания`;
+    volumeLine = monT('monitoring.volume.atAlert', { bps: formatBps(alertBps) });
   }
   const peakLine = row?.live?.peakBps
-    ? `пик ${formatBps(row.live.peakBps)} в ${formatMskTime(row.live.peakMinute)}`
+    ? monT('monitoring.peak.at', {
+      bps: formatBps(row.live.peakBps),
+      time: formatMskTime(row.live.peakMinute),
+    })
     : null;
   const start = row?.startMinute || row?.alertMinute;
   const dur = durationMinutesFrom(start);
-  const durLine = dur != null && state.text === 'идёт' ? `идёт ${dur} мин` : null;
-  const quietLine = state.text === 'затихает' && row?.live?.normalizeStreak
-    ? `тихо ${row.live.quietStreak ?? 0} из ${row.live.normalizeStreak} мин`
+  const durLine = dur != null && state.code === 'ongoing'
+    ? monT('monitoring.duration.ongoing', { mins: dur })
+    : null;
+  const quietLine = state.code === 'fading' && row?.live?.normalizeStreak
+    ? monT('monitoring.quiet', {
+      quiet: row.live.quietStreak ?? 0,
+      total: row.live.normalizeStreak,
+    })
     : null;
   const victim = window.DetectionFormatVictimCell?.(row.investigate) || '—';
   const sw = window.DetectionFormatSwitchCell?.(row.investigate) || '—';
@@ -292,7 +366,7 @@ function AttackCard({ row, muted, onOpen }) {
         {[ratio, durLine, peakLine, quietLine].filter(Boolean).join(' · ')}
       </div>
       <div className="monitoring-attack-card__foot">
-        куда {victim} · вход {sw}
+        {monT('monitoring.foot', { victim, sw })}
       </div>
     </button>
   );
@@ -303,29 +377,31 @@ function AttacksEmpty({ meta }) {
     if (meta.detectionEmpty) {
       return (
         <div className="monitoring-empty monitoring-empty--warn">
-          Атак не видно, но детекция за сутки не записала ни одной минуты — список может быть неполным
+          {monT('monitoring.empty.staleNoMinutes')}
         </div>
       );
     }
     if (meta.detectionLagSec == null) {
       return (
         <div className="monitoring-empty monitoring-empty--warn">
-          Атак не видно, но свежесть детекции неизвестна — список может быть неполным
+          {monT('monitoring.empty.staleUnknownFreshness')}
         </div>
       );
     }
     const mins = Math.max(1, Math.round(Number(meta.detectionLagSec) / 60));
     return (
       <div className="monitoring-empty monitoring-empty--warn">
-        {`Атак не видно, но детекция отстала на ${mins} мин — список может быть неполным`}
+        {monT('monitoring.empty.staleLag', { mins })}
       </div>
     );
   }
   return (
     <div className="monitoring-empty">
-      <div>Атак нет</div>
+      <div>{monT('monitoring.empty.noAttacks')}</div>
       {meta?.detectionMinute ? (
-        <div className="monitoring-empty__hint">данные на {formatMskTime(meta.detectionMinute)} МСК</div>
+        <div className="monitoring-empty__hint">
+          {monT('monitoring.empty.dataHint', { time: formatMskTime(meta.detectionMinute) })}
+        </div>
       ) : null}
     </div>
   );
@@ -347,28 +423,28 @@ function ProblemsPanel({ components, problems, perms, onNavigate, failed }) {
     const list = (components || [])
       .filter((c) => c.status === 'ok')
       .sort((a, b) => COMPONENT_ORDER.indexOf(a.id) - COMPONENT_ORDER.indexOf(b.id))
-      .map((c) => OK_TITLE[c.id] || c.title || c.id);
+      .map((c) => componentDisplayTitle(c.id, c));
     return list;
   }, [components]);
 
   if (failed) {
     return (
       <div className="monitoring-problems">
-        <div className="monitoring-problems__title">Проблемы системы</div>
-        <div className="monitoring-problems-fail">Не удалось проверить систему</div>
+        <div className="monitoring-problems__title">{monT('monitoring.problems.title')}</div>
+        <div className="monitoring-problems-fail">{monT('monitoring.checkFailed')}</div>
       </div>
     );
   }
 
   return (
     <div className="monitoring-problems">
-      <div className="monitoring-problems__title">Проблемы системы</div>
+      <div className="monitoring-problems__title">{monT('monitoring.problems.title')}</div>
       <div className="monitoring-problems__list">
         {COMPONENT_ORDER.map((compId) => {
           const comp = (components || []).find((c) => c.id === compId);
           const rows = byComponent[compId] || [];
           if (!rows.length) return null;
-          const title = comp?.title || compId;
+          const title = componentDisplayTitle(compId, comp);
           const isOpen = expanded[compId];
           const visible = isOpen ? rows : rows.slice(0, 2);
           const hiddenCount = rows.length - visible.length;
@@ -381,8 +457,8 @@ function ProblemsPanel({ components, problems, perms, onNavigate, failed }) {
                   <div key={p.id} className="monitoring-problem-row">
                     <span className={`monitoring-problem-row__dot monitoring-problem-row__dot--${p.level || 'warning'}`} />
                     <div className="monitoring-problem-row__body">
-                      <div className="monitoring-problem-row__title">{p.title}</div>
-                      <div className="monitoring-problem-row__msg">{p.message}</div>
+                      <div className="monitoring-problem-row__title">{localizedMonitoringProblemTitle(p)}</div>
+                      <div className="monitoring-problem-row__msg">{localizedMonitoringProblemMessage(p)}</div>
                       {p.since ? (
                         <div className="monitoring-problem-row__since">{formatSinceDuration(p.since)}</div>
                       ) : null}
@@ -391,7 +467,7 @@ function ProblemsPanel({ components, problems, perms, onNavigate, failed }) {
                       <button
                         type="button"
                         className="monitoring-problem-row__link"
-                        aria-label="Перейти"
+                        aria-label={monT('monitoring.problems.navigate')}
                         onClick={() => navigateProblem(onNavigate, p)}
                       >
                         →
@@ -406,7 +482,7 @@ function ProblemsPanel({ components, problems, perms, onNavigate, failed }) {
                   className="monitoring-problems__more"
                   onClick={() => setExpanded((e) => ({ ...e, [compId]: true }))}
                 >
-                  ещё {hiddenCount}
+                  {monT('monitoring.problems.more', { n: hiddenCount })}
                 </button>
               ) : null}
             </div>
@@ -414,7 +490,9 @@ function ProblemsPanel({ components, problems, perms, onNavigate, failed }) {
         })}
       </div>
       {okNames.length ? (
-        <div className="monitoring-problems__ok">В порядке: {okNames.join(', ')}</div>
+        <div className="monitoring-problems__ok">
+          {monT('monitoring.problems.okLine', { names: okNames.join(', ') })}
+        </div>
       ) : null}
     </div>
   );
@@ -481,15 +559,15 @@ function MonitoringListView({ onNavigate, effectivePermissions }) {
         lastOkAt={lastOkAt}
       />
       {problemsFailed ? (
-        <div className="monitoring-banner monitoring-banner--critical">Не удалось проверить систему</div>
+        <div className="monitoring-banner monitoring-banner--critical">{monT('monitoring.checkFailed')}</div>
       ) : null}
       <div className="monitoring-grid">
         <section className="monitoring-attacks">
           <div className="monitoring-attacks__head">
-            <span className="monitoring-attacks__title">Активные атаки</span>
+            <span className="monitoring-attacks__title">{monT('monitoring.activeAttacks')}</span>
             <label className="monitoring-peaks-toggle">
               <Checkbox checked={showPeaks} onChange={togglePeaks} />
-              <span>Показать пики</span>
+              <span>{monT('monitoring.showPeaks')}</span>
             </label>
           </div>
           {peaksError ? (
@@ -535,24 +613,24 @@ function MonitoringVolumeBanner({ event }) {
   return (
     <div className="detection-attack-banner">
       <div className="detection-attack-banner__item">
-        <div className="detection-attack-banner__label">Лишнее сейчас</div>
+        <div className="detection-attack-banner__label">{monT('monitoring.banner.excessNow')}</div>
         <div className="detection-attack-banner__value">
           {excess != null ? formatBps(excess) : '—'}
         </div>
       </div>
       <div className="detection-attack-banner__item">
-        <div className="detection-attack-banner__label">Пик</div>
+        <div className="detection-attack-banner__label">{monT('monitoring.banner.peak')}</div>
         <div className="detection-attack-banner__value">
           {peak != null ? formatBps(peak) : '—'}
         </div>
       </div>
       <div className="detection-attack-banner__item">
-        <div className="detection-attack-banner__label">От нормы часа</div>
+        <div className="detection-attack-banner__label">{monT('monitoring.banner.vsHourNorm')}</div>
         <div className="detection-attack-banner__value">{fmtRatio || '—'}</div>
       </div>
       {usual != null && (
         <div className="detection-attack-banner__item">
-          <div className="detection-attack-banner__label">Норма часа</div>
+          <div className="detection-attack-banner__label">{monT('monitoring.banner.hourNorm')}</div>
           <div className="detection-attack-banner__value detection-attack-banner__value--muted">
             {formatBps(usual)}
           </div>
@@ -603,7 +681,7 @@ function MonitoringAttackDetail({ attackId, onBack }) {
       const hist = await ApiClient.loadMonitoringAttackHistory(attackId);
       setHistory(hist);
     } catch (err) {
-      setError(err.message || 'Не удалось загрузить атаку');
+      setError(err.message || monT('monitoring.loadAttackFailed'));
     }
   }, [attackId]);
 
@@ -644,7 +722,7 @@ function MonitoringAttackDetail({ attackId, onBack }) {
     ? [{
       t: history.alertMinute,
       bucketMs: parseUtcMinuteMs(history.alertMinute),
-      label: 'алерт',
+      label: monT('monitoring.chart.alertMark'),
     }]
     : [];
 
@@ -669,7 +747,7 @@ function MonitoringAttackDetail({ attackId, onBack }) {
   if (error && !event) {
     return (
       <div className="main__container monitoring-page">
-        <Button kind="ghost" onClick={onBack}>← Мониторинг</Button>
+        <Button kind="ghost" onClick={onBack}>{monT('monitoring.back')}</Button>
         <div className="monitoring-banner monitoring-banner--critical">{error}</div>
       </div>
     );
@@ -678,7 +756,7 @@ function MonitoringAttackDetail({ attackId, onBack }) {
   return (
     <div className="main__container monitoring-page monitoring-page--detail">
       <div className="monitoring-detail__nav">
-        <Button kind="ghost" onClick={onBack}>← Мониторинг</Button>
+        <Button kind="ghost" onClick={onBack}>{monT('monitoring.back')}</Button>
         {lastOkRef.current ? (
           <RefreshAge lastOkAt={lastOkRef.current} />
         ) : null}
@@ -695,23 +773,28 @@ function MonitoringAttackDetail({ attackId, onBack }) {
               </Badge>
             </div>
             <div className="monitoring-detail__times">
-              {event.startMinute ? `Началась ${formatMskTimeFull(event.startMinute)}` : null}
-              {event.alertMinute ? ` · сработала ${formatMskTimeFull(event.alertMinute)}` : null}
+              {event.startMinute ? monT('monitoring.detail.started', { time: formatMskTimeFull(event.startMinute) }) : null}
+              {event.alertMinute ? (
+                <>
+                  {' · '}
+                  {monT('monitoring.detail.alertFired', { time: formatMskTimeFull(event.alertMinute) })}
+                </>
+              ) : null}
             </div>
             {finished && finishMinute ? (
               <div className="monitoring-detail-finished">
-                Атака завершена · {formatMskTimeFull(finishMinute)}
+                {monT('monitoring.attackFinished', { time: formatMskTimeFull(finishMinute) })}
               </div>
             ) : null}
           </div>
           <MonitoringVolumeBanner event={event} />
-          <Card title="Трафик и норма">
+          <Card title={monT('monitoring.chart.title')}>
             {chartPoints.length ? (
               <CategoryTrendChart
                 points={chartPoints}
                 lines={[
-                  { key: 'bps', label: 'Трафик', color: '#7E92F8' },
-                  { key: 'baselineBps', label: 'Норма', color: 'var(--fg-muted)' },
+                  { key: 'bps', label: monT('monitoring.chart.traffic'), color: '#7E92F8' },
+                  { key: 'baselineBps', label: monT('monitoring.chart.baseline'), color: 'var(--fg-muted)' },
                 ]}
                 height={220}
                 bucketSeconds={60}
@@ -722,35 +805,48 @@ function MonitoringAttackDetail({ attackId, onBack }) {
                 displayTimezone="Europe/Moscow"
               />
             ) : (
-              <div className="monitoring-empty">Нет данных для графика</div>
+              <div className="monitoring-empty">{monT('monitoring.chart.noData')}</div>
             )}
           </Card>
-          <Card title="Направление">
+          <Card title={monT('monitoring.direction.title')}>
             <div className="monitoring-detail-inv">
-              <div><span className="monitoring-detail-inv__label">Куда</span> {window.DetectionFormatVictimCell?.(event.investigate)}</div>
-              <div><span className="monitoring-detail-inv__label">Откуда</span> {window.DetectionFormatSource24Cell?.(event.investigate)}</div>
-              <div><span className="monitoring-detail-inv__label">Вход</span> {window.DetectionFormatSwitchCell?.(event.investigate)}</div>
+              <div>
+                <span className="monitoring-detail-inv__label">{monT('monitoring.direction.to')}</span>
+                {' '}
+                {window.DetectionFormatVictimCell?.(event.investigate)}
+              </div>
+              <div>
+                <span className="monitoring-detail-inv__label">{monT('monitoring.direction.from')}</span>
+                {' '}
+                {window.DetectionFormatSource24Cell?.(event.investigate)}
+              </div>
+              <div>
+                <span className="monitoring-detail-inv__label">{monT('monitoring.direction.ingress')}</span>
+                {' '}
+                {window.DetectionFormatSwitchCell?.(event.investigate)}
+              </div>
             </div>
           </Card>
-          <Card title="Мусорный UDP">
+          <Card title={monT('monitoring.garbageUdp')}>
             <EventAsnTop
               event={event}
               loadAsn={loadAsn}
-              missingMinuteMessage="Нет минуты среза"
+              missingMinuteMessage={monT('monitoring.missingSliceMinute')}
+              showHeading={false}
             />
           </Card>
           {flowspecEligible ? (
             <div className="row" style={{ gap: 8 }}>
-              <Button onClick={() => setFlowspecOpen(true)}>Отчёт для фильтра</Button>
+              <Button onClick={() => setFlowspecOpen(true)}>{monT('monitoring.flowspecReport')}</Button>
             </div>
           ) : null}
           {event.alertText ? (
-            <Card title="Текст срабатывания">
+            <Card title={monT('monitoring.alertText')}>
               <pre className="detection-notify-text">{event.alertText}</pre>
             </Card>
           ) : null}
           {event.normalizeText ? (
-            <Card title="Нормализация">
+            <Card title={monT('monitoring.normalizeText')}>
               <pre className="detection-notify-text">{event.normalizeText}</pre>
             </Card>
           ) : null}
@@ -761,7 +857,7 @@ function MonitoringAttackDetail({ attackId, onBack }) {
           />
         </>
       ) : (
-        <div className="monitoring-empty">Загрузка…</div>
+        <div className="monitoring-empty">{monT('monitoring.loading')}</div>
       )}
     </div>
   );

@@ -189,7 +189,10 @@ function formatRate(value, units) {
 }
 
 function formatBps(value) {
-  return formatRate(value, ['бит/с', 'Кбит/с', 'Мбит/с', 'Гбит/с', 'Тбит/с']);
+  const units = ['unit.bps', 'unit.kbps', 'unit.mbps', 'unit.gbps', 'unit.tbps'].map(
+    (key) => GrapesI18n.t(key),
+  );
+  return formatRate(value, units);
 }
 
 function formatPps(value) {
@@ -345,11 +348,19 @@ function notifyHeadline(row) {
   return text.split('\n').find((line) => line.trim()) || '';
 }
 
+function detT(key, params) {
+  return GrapesI18n.t(key, params);
+}
+
+function detIntlLocale() {
+  return GrapesI18n.intlLocale();
+}
+
 function formatAsnShare(share) {
   const pct = Number(share) * 100;
   if (!Number.isFinite(pct) || pct <= 0) return '';
   const digits = pct >= 10 ? 0 : 1;
-  return `${pct.toLocaleString('ru-RU', { maximumFractionDigits: digits })}%`;
+  return `${pct.toLocaleString(detIntlLocale(), { maximumFractionDigits: digits })}%`;
 }
 
 function JunkRows({ rows, labelOf }) {
@@ -367,7 +378,7 @@ function eventAsnSliceMinute(event) {
   return event?.live?.lastHotMinute || event?.focusMinute || event?.alertMinute || '';
 }
 
-function EventAsnTop({ event, loadAsn, missingMinuteMessage }) {
+function EventAsnTop({ event, loadAsn, missingMinuteMessage, showHeading = true }) {
   const minute = eventAsnSliceMinute(event);
   const [data, setData] = useState(null);
   const [error, setError] = useState('');
@@ -389,7 +400,7 @@ function EventAsnTop({ event, loadAsn, missingMinuteMessage }) {
       setData(null);
       Promise.resolve(loadAsn(event))
         .then((row) => { if (!cancelled) setData(row); })
-        .catch((err) => { if (!cancelled) setError(err.message || 'Не удалось посчитать мусорный UDP'); })
+        .catch((err) => { if (!cancelled) setError(err.message || detT('detection.garbageUdp.loadFailed')); })
         .finally(() => { if (!cancelled) setBusy(false); });
       return () => { cancelled = true; };
     }
@@ -403,33 +414,49 @@ function EventAsnTop({ event, loadAsn, missingMinuteMessage }) {
     setData(null);
     ApiClient.loadDetectionEventAsn({ scope: event.scope, scopeId: event.scopeId, minute })
       .then((row) => { if (!cancelled) setData(row); })
-      .catch((err) => { if (!cancelled) setError(err.message || 'Не удалось посчитать мусорный UDP'); })
+      .catch((err) => { if (!cancelled) setError(err.message || detT('detection.garbageUdp.loadFailed')); })
       .finally(() => { if (!cancelled) setBusy(false); });
     return () => { cancelled = true; };
   }, [event?.id, event?.scope, event?.scopeId, minute, loadAsn, missingMinuteMessage]);
   const share = data ? formatAsnShare(data.share) : '';
+  const shareText = share || '0%';
   return (
-    <div style={{ margin: '8px 0 14px' }}>
-      <div style={{ fontWeight: 600, marginBottom: 4 }}>
-        {busy ? 'Считаю мусорный UDP…' : 'Мусорный UDP'}
-      </div>
+    <div style={{ margin: showHeading ? '8px 0 14px' : '0 0 14px' }}>
+      {showHeading || busy ? (
+        <div style={{ fontWeight: 600, marginBottom: 4 }}>
+          {busy ? detT('detection.garbageUdp.busy') : detT('detection.garbageUdp.title')}
+        </div>
+      ) : null}
       {error ? <div style={{ color: 'var(--st-critical)' }}>{error}</div> : null}
       {data ? (
         <div style={{ fontSize: 13, marginBottom: 8 }}>
-          {share || '0%'} входящего
-          {' · '}
-          {formatBps(data.junkBps)} из {formatBps(data.inboundBps)}
-          {' · '}
-          {formatMskTime(data.minute)}
-          {data.asnCount ? ` · ${data.asnCount} ASN` : ''}
+          {[
+            detT('detection.garbageUdp.inboundShare', { share: shareText }),
+            detT('detection.garbageUdp.ofTotal', {
+              junk: formatBps(data.junkBps),
+              inbound: formatBps(data.inboundBps),
+            }),
+            formatMskTime(data.minute),
+            data.asnCount ? detT('detection.garbageUdp.asnCount', { n: data.asnCount }) : null,
+          ].filter(Boolean).join(' · ')}
         </div>
       ) : null}
-      {data?.asns?.length ? <div style={{ fontSize: 12, color: 'var(--fg-muted)', marginBottom: 4 }}>Откуда</div> : null}
+      {data?.asns?.length ? (
+        <div style={{ fontSize: 12, color: 'var(--fg-muted)', marginBottom: 4 }}>
+          {detT('detection.garbageUdp.from')}
+        </div>
+      ) : null}
       <JunkRows rows={data?.asns} labelOf={(row) => `AS${row.asn}${row.asnName ? ` ${row.asnName}` : ''}`} />
-      {data?.networks?.length ? <div style={{ fontSize: 12, color: 'var(--fg-muted)', margin: '8px 0 4px' }}>Куда</div> : null}
+      {data?.networks?.length ? (
+        <div style={{ fontSize: 12, color: 'var(--fg-muted)', margin: '8px 0 4px' }}>
+          {detT('detection.garbageUdp.to')}
+        </div>
+      ) : null}
       <JunkRows
         rows={data?.networks}
-        labelOf={(row) => `${row.prefix}${row.ips ? ` · ${row.ips} адр.` : ''}`}
+        labelOf={(row) => (
+          `${row.prefix}${row.ips ? ` · ${detT('detection.garbageUdp.addresses', { n: row.ips })}` : ''}`
+        )}
       />
     </div>
   );
