@@ -649,11 +649,13 @@ async function verifyCredentials(username, password) {
   if (!user.active) {
     const err = new Error('Учётная запись отключена');
     err.statusCode = 403;
+    err.code = 'account_disabled';
     throw err;
   }
   if (user.roleId === CLIENT_ROLE_ID && !user.clientId) {
     const err = new Error('Учётная запись клиента не привязана к клиенту');
     err.statusCode = 403;
+    err.code = 'client_unbound';
     throw err;
   }
   const ok = await bcrypt.compare(String(password ?? ''), user.passwordHash);
