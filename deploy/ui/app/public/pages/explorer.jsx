@@ -40,6 +40,20 @@ const DEFAULT_EXPLORER_PRESETS = [
 const EXPLORER_DEFAULT_VISUAL_LIMIT = 5;
 /** Rollup наблюдений хранит четыре измерения разреза (dim0…dim3). */
 const OBSERVATION_MAX_GROUP_BY = 4;
+const OBSERVATION_SECTION_STORAGE_KEY = 'grapes-observations-section';
+
+function pickObservationCreateSectionId(sections) {
+  const editSections = (sections || []).filter((s) => s.level === 'edit');
+  if (!editSections.length) return null;
+  let stored = null;
+  try {
+    stored = localStorage.getItem(OBSERVATION_SECTION_STORAGE_KEY);
+  } catch {
+    stored = null;
+  }
+  if (stored && editSections.some((s) => s.id === stored)) return stored;
+  return editSections[0].id;
+}
 const OBSERVATION_COMPOSE_KEY = 'grapes-observation-compose';
 const OBSERVATION_COMPOSE_CHANGED_EVENT = 'grapes-observation-compose';
 
@@ -3139,7 +3153,13 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
   const [showObservationSave, setShowObservationSave] = useState(false);
   const [observationSaveMode, setObservationSaveMode] = useState('create');
   const [editingSaved, setEditingSaved] = useState(null);
+  const [observationSections, setObservationSections] = useState([]);
+  const observationEditSections = useMemo(
+    () => observationSections.filter((s) => s.level === 'edit'),
+    [observationSections],
+  );
   const canWriteObservation = !cabinetMode && (AuthAccess.canWritePage('observations') || canWrite);
+  const canCreateObservation = canWriteObservation && observationEditSections.length > 0;
   const [hasAppliedQuery, setHasAppliedQuery] = useState(false);
   const [appliedSnapshot, setAppliedSnapshot] = useState(null);
   const [queryVersion, setQueryVersion] = useState(0);
@@ -3187,6 +3207,15 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
   useEffect(() => {
     window.__GRAPES_CABINET_EXPLORER__ = cabinetMode;
     return () => { window.__GRAPES_CABINET_EXPLORER__ = false; };
+  }, [cabinetMode]);
+
+  useEffect(() => {
+    if (cabinetMode || !AuthAccess.canWritePage('observations')) return undefined;
+    let cancelled = false;
+    ApiClient.loadObservationSections()
+      .then((list) => { if (!cancelled) setObservationSections(list || []); })
+      .catch(() => { if (!cancelled) setObservationSections([]); });
+    return () => { cancelled = true; };
   }, [cabinetMode]);
 
   useEffect(() => {
@@ -3989,10 +4018,16 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
         }
       }
       if (!updated) {
+        const sectionId = pickObservationCreateSectionId(observationSections);
+        if (!sectionId) {
+          pushToast({ kind: 'error', title: explorerT('explorer.obsSaveFailed'), desc: explorerT('observations.section.empty') });
+          return;
+        }
         const payload = {
           name: (name || '').trim() || explorerT('explorer.observationDefaultName', { metric: metricLabel }),
           description: '',
           lookback: tileLookback,
+          sectionId,
           explorerQuery: explorerQuerySnapshot,
           filters: nextFilters,
           thresholds: validThresholds,
@@ -4495,7 +4530,7 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
                   {explorerT('explorer.saveAsNewObservation')}
                 </Button>
               </>
-            ) : canWriteObservation ? (
+            ) : canCreateObservation ? (
               <Button kind="primary" size="sm" onClick={openSaveAsObservation}>
                 {explorerT('explorer.addToObservations')}
               </Button>
@@ -4561,7 +4596,7 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
             runDisabled={source === 'loading' || refreshing}
             canWrite={canWrite}
             onSave={() => { setEditingSaved(null); setShowSave(true); }}
-            onSaveAsObservation={canWriteObservation ? (
+            onSaveAsObservation={canCreateObservation ? (
               isObservationComposeEdit(observationCompose) ? openUpdateObservation : openSaveAsObservation
             ) : null}
             saveAsObservationLabel={

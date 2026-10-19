@@ -336,6 +336,7 @@ function groupLabel(token, options) {
 
 const COMPOSE_KEY = 'grapes-observation-compose';
 const OPEN_KEY = 'grapes-observation-open';
+const SECTION_STORAGE_KEY = 'grapes-observations-section';
 const COMPOSE_CHANGED_EVENT = 'grapes-observation-compose';
 
 function readObservationComposeDraft() {
@@ -1118,6 +1119,7 @@ function ObservationLiveTile({
   editMode,
   onDragHandleMouseDown,
   onHide,
+  onDuplicate,
 }) {
   const [preview, setPreview] = useState(null);
   const [error, setError] = useState('');
@@ -1395,6 +1397,17 @@ function ObservationLiveTile({
             <Icon name={expanded ? 'collapse' : 'expand'} size={14} />
             <span>{expanded ? obsT('observations.collapse') : obsT('observations.expand')}</span>
           </button>
+          )}
+          {!editMode && canEdit && onDuplicate && (
+            <button
+              type="button"
+              className="obs-tile__icon tt"
+              data-tt={obsT('observations.section.copy')}
+              aria-label={obsT('observations.section.copy')}
+              onClick={onDuplicate}
+            >
+              <Icon name="copy" size={15} />
+            </button>
           )}
           {!editMode && canEdit && (
             <button
@@ -1940,6 +1953,9 @@ function PageObservations({ onNavigate }) {
   const canWriteObservations = AuthAccess.canWritePage('observations');
   const canWrite = canWriteObservations || AuthAccess.canWritePage('explorer');
   const [config, setConfig] = useState(null);
+  const [sections, setSections] = useState([]);
+  const [activeSectionId, setActiveSectionId] = useState(null);
+  const [copyDialog, setCopyDialog] = useState(null);
   const [items, setItems] = useState([]);
   const [expandedId, setExpandedId] = useState(null);
   const [settingsItemId, setSettingsItemId] = useState(null);
@@ -1986,13 +2002,15 @@ function PageObservations({ onNavigate }) {
   }, [config]);
 
   const reload = useCallback(async () => {
-    const [cfg, list, layoutResp] = await Promise.all([
+    const [cfg, list, layoutResp, sectionList] = await Promise.all([
       ApiClient.loadObservationsConfig(),
       ApiClient.loadObservations(),
       ApiClient.loadObservationsBoardLayout(),
+      ApiClient.loadObservationSections(),
     ]);
     setConfig(cfg);
     setItems(list);
+    setSections(sectionList || []);
     const savedIds = layoutResp?.data?.observationIds;
     const savedHiddenIds = layoutResp?.data?.hiddenObservationIds;
     const availableIds = new Set(list.map((item) => item.id));
@@ -2247,18 +2265,33 @@ function PageObservations({ onNavigate }) {
     document.addEventListener('mouseup', onUp);
   }, [commitBoardReorder]);
 
+  const activeSection = useMemo(
+    () => sections.find((s) => s.id === activeSectionId) || null,
+    [sections, activeSectionId],
+  );
+  const sectionCanEdit = activeSection?.level === 'edit';
+  const editableSections = useMemo(
+    () => sections.filter((s) => s.level === 'edit'),
+    [sections],
+  );
+
+  const sectionItems = useMemo(() => {
+    if (!activeSectionId) return items;
+    return items.filter((item) => (item.sectionId || 'general') === activeSectionId);
+  }, [items, activeSectionId]);
+
   const displayItems = useMemo(() => {
     const orderIds = editMode
       ? (dragPreviewOrderIds || editDraftOrderIds)
       : boardOrderIds;
     const hiddenIds = new Set(editMode ? editDraftHiddenIds : boardHiddenIds);
     if (!orderIds?.length) {
-      return sortObservationsDefaultOrder(items).filter((item) => !hiddenIds.has(item.id));
+      return sortObservationsDefaultOrder(sectionItems).filter((item) => !hiddenIds.has(item.id));
     }
-    const byId = new Map(items.map((item) => [item.id, item]));
+    const byId = new Map(sectionItems.map((item) => [item.id, item]));
     return orderIds.map((id) => byId.get(id)).filter((item) => item && !hiddenIds.has(item.id));
   }, [
-    items,
+    sectionItems,
     boardOrderIds,
     boardHiddenIds,
     editDraftOrderIds,
@@ -2307,6 +2340,70 @@ function PageObservations({ onNavigate }) {
   }, [reload]);
 
   useEffect(() => {
+    if (!sections.length) return;
+    if (activeSectionId && sections.some((s) => s.id === activeSectionId)) return;
+    const fromUrl = (typeof parseAppHash === 'function' ? parseAppHash() : { params: new URLSearchParams() })
+      .params?.get('section');
+    let stored = null;
+    try {
+      stored = localStorage.getItem(SECTION_STORAGE_KEY);
+    } catch {
+      stored = null;
+    }
+    let pick = fromUrl || stored || sections[0].id;
+    if (!sections.some((s) => s.id === pick)) pick = sections[0].id;
+    if (fromUrl && fromUrl !== pick) {
+      pushToast?.({
+        kind: 'info',
+        title: obsT('observations.section.unavailable', { title: sections.find((s) => s.id === pick)?.title || pick }),
+      });
+    }
+    setActiveSectionId(pick);
+    try {
+      localStorage.setItem(SECTION_STORAGE_KEY, pick);
+    } catch {
+      // ignore
+    }
+  }, [sections, activeSectionId]);
+
+  const selectSection = useCallback((sectionId) => {
+    setActiveSectionId(sectionId);
+    try {
+      localStorage.setItem(SECTION_STORAGE_KEY, sectionId);
+    } catch {
+      // ignore
+    }
+    const qs = sectionId ? `?section=${encodeURIComponent(sectionId)}` : '';
+    if (typeof onNavigate === 'function') {
+      location.hash = `observations${qs}`;
+    } else {
+      location.hash = `observations${qs}`;
+    }
+  }, [onNavigate]);
+
+  const runDuplicate = useCallback(async (observationId, targetSectionId) => {
+    setError('');
+    try {
+      await ApiClient.duplicateObservation(observationId, targetSectionId ? { sectionId: targetSectionId } : {});
+      setCopyDialog(null);
+      await reload();
+      pushToast?.({ kind: 'success', title: obsT('observations.section.copy') });
+    } catch (e) {
+      setError(e.message);
+    }
+  }, [reload]);
+
+  const requestDuplicate = useCallback((item) => {
+    if (!item?.canEdit && !sectionCanEdit) {
+      const editable = editableSections;
+      if (!editable.length) return;
+      setCopyDialog({ observationId: item.id, sectionId: editable[0]?.id || 'general' });
+      return;
+    }
+    runDuplicate(item.id, null);
+  }, [sectionCanEdit, editableSections, runDuplicate]);
+
+  useEffect(() => {
     const t = setInterval(() => {
       reload().catch((e) => setError(e.message));
     }, MIN_REFRESH_SEC * 1000);
@@ -2339,12 +2436,13 @@ function PageObservations({ onNavigate }) {
       filters: item.filters,
       thresholds: item.thresholds || [],
       explorerQuery: item.explorerQuery || null,
+      sectionId: item.sectionId || 'general',
     });
     setError('');
   };
 
   const saveSettings = async () => {
-    if (!canWriteObservations || !settingsItemId || !settings) return;
+    if (!settingsCanEdit || !settingsItemId || !settings) return;
     if (settingsItem?.canEdit === false) {
       setError('Нет прав на изменение этого наблюдения');
       return;
@@ -2371,6 +2469,7 @@ function PageObservations({ onNavigate }) {
         filters: settings.filters,
         thresholds: settings.thresholds || [],
         explorerQuery: settings.explorerQuery ?? settingsItem.explorerQuery ?? null,
+        sectionId: settings.sectionId,
       });
       await reload();
       setSettingsItemId(null);
@@ -2388,7 +2487,7 @@ function PageObservations({ onNavigate }) {
   };
 
   const removeItem = async (id) => {
-    if (!canWriteObservations || !window.confirm(obsT('observations.deleteConfirm'))) return;
+    if (!sectionCanEdit || !window.confirm(obsT('observations.deleteConfirm'))) return;
     setError('');
     try {
       await ApiClient.deleteObservation(id);
@@ -2422,7 +2521,7 @@ function PageObservations({ onNavigate }) {
           : row
       ));
     });
-    if (!canWriteObservations || !current?.canEdit) return;
+    if (!current?.canEdit) return;
     try {
       // Смена периода не должна выключать подготовку данных.
       await ApiClient.updateObservation(id, {
@@ -2447,7 +2546,7 @@ function PageObservations({ onNavigate }) {
           : row
       ));
     });
-    if (!canWriteObservations || !current?.canEdit) return;
+    if (!current?.canEdit) return;
     try {
       await ApiClient.updateObservation(id, {
         ...current,
@@ -2466,6 +2565,7 @@ function PageObservations({ onNavigate }) {
   const settingsIsNative = settingsItem ? isNativeAggregateObservation(settingsItem) : false;
   const settingsNativeDataSource = chartWidgetDataSource(settings?.widgets || settingsItem?.widgets);
   const settingsNativeScope = chartWidgetNativeScope(settings?.widgets);
+  const settingsCanEdit = Boolean(settingsItem?.canEdit);
 
   if (settings && settingsItem) {
     return (
@@ -2526,7 +2626,7 @@ function PageObservations({ onNavigate }) {
               <NativeScopeSettings
                 dataSource={settingsNativeDataSource}
                 nativeScope={settingsNativeScope}
-                disabled={!canWriteObservations || settingsItem.canEdit === false}
+                disabled={!settingsCanEdit}
                 onChange={(nextScope) => setSettings({
                   ...settings,
                   widgets: widgetsWithNativeScope(settings.widgets, nextScope),
@@ -2702,7 +2802,20 @@ function PageObservations({ onNavigate }) {
                 </label>
               </div>
             )}
-            <button type="button" className="btn btn--primary" disabled={busy || !canWriteObservations || settingsItem.canEdit === false} onClick={saveSettings}>
+            <label className="col" style={{ gap: 4 }}>
+              <span>{obsT('observations.section.field')}</span>
+              <select
+                className="input"
+                value={settings.sectionId || 'general'}
+                disabled={!settingsCanEdit}
+                onChange={(e) => setSettings({ ...settings, sectionId: e.target.value })}
+              >
+                {editableSections.map((s) => (
+                  <option key={s.id} value={s.id}>{s.title}</option>
+                ))}
+              </select>
+            </label>
+            <button type="button" className="btn btn--primary" disabled={busy || !settingsCanEdit} onClick={saveSettings}>
               {obsT('observations.settings.save')}
             </button>
           </div>
@@ -2713,7 +2826,7 @@ function PageObservations({ onNavigate }) {
   }
 
   const boardToolbar = (sticky = false) => (
-    items.length > 0 ? (
+    sectionItems.length > 0 && sectionCanEdit ? (
       <ObservationsBoardToolbar
         editMode={editMode}
         saveState={boardSaveStatus}
@@ -2733,10 +2846,32 @@ function PageObservations({ onNavigate }) {
       <div className="page-head">
         <div>
           <h1>{obsT('observations.title')}</h1>
+          {sections.length > 1 ? (
+            <div className="row" style={{ gap: 8, marginTop: 12, flexWrap: 'wrap' }}>
+              {sections.map((sec) => (
+                <button
+                  key={sec.id}
+                  type="button"
+                  className={`btn btn--sm ${sec.id === activeSectionId ? 'btn--primary' : 'btn--ghost'}`}
+                  onClick={() => selectSection(sec.id)}
+                >
+                  {sec.title} {sec.count}
+                  {sec.level === 'view' ? (
+                    <Icon
+                      name="eye"
+                      size={13}
+                      style={{ marginLeft: 6, opacity: 0.55, verticalAlign: 'middle' }}
+                      title={obsT('observations.section.viewOnly')}
+                    />
+                  ) : null}
+                </button>
+              ))}
+            </div>
+          ) : null}
         </div>
         <div className="page-head__tools" style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
           {!editMode ? boardToolbar() : null}
-          {canWrite && !editMode && (
+          {sectionCanEdit && !editMode && (
             <button
               type="button"
               className="btn btn--primary"
@@ -2756,26 +2891,28 @@ function PageObservations({ onNavigate }) {
         </div>
       )}
 
-      {items.length > 0 && (
+      {sectionItems.length > 0 && (
         <div style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-secondary)' }}>
-          {items[0]?.quotas?.maxMaterialize
+          {sectionItems[0]?.quotas?.maxMaterialize
             ? obsT('observations.prep.quota', {
-              n: items[0]?.quotas?.activeMaterialize ?? 0,
-              max: items[0].quotas.maxMaterialize,
+              n: sectionItems[0]?.quotas?.activeMaterialize ?? 0,
+              max: sectionItems[0].quotas.maxMaterialize,
             })
-            : obsT('observations.prep.active', { n: items[0]?.quotas?.activeMaterialize ?? 0 })}
+            : obsT('observations.prep.active', { n: sectionItems[0]?.quotas?.activeMaterialize ?? 0 })}
         </div>
       )}
 
-      {!items.length && (
+      {!sectionItems.length && (
         <Card>
           <div style={{ color: 'var(--fg-secondary)' }}>
-            Пока пусто. Нажмите «+ Новое» — соберите фильтр в разборе трафика и «Добавить в наблюдения».
+            {sections.length
+              ? obsT('observations.section.empty')
+              : 'Пока пусто. Нажмите «+ Новое» — соберите фильтр в разборе трафика и «Добавить в наблюдения».'}
           </div>
         </Card>
       )}
 
-      {items.length > 0 && (
+      {sectionItems.length > 0 && (
           <div
             ref={boardRef}
             className={[
@@ -2807,11 +2944,12 @@ function PageObservations({ onNavigate }) {
                 lookbackOptions={config?.lookbacks || LOOKBACK_OPTIONS}
                 expanded={expandedId === item.id}
                 onToggleExpand={() => setExpandedId((cur) => (cur === item.id ? null : item.id))}
-                canWrite={canWriteObservations}
-                editMode={editMode}
+                canWrite={sectionCanEdit}
+                editMode={editMode && sectionCanEdit}
                 onDragHandleMouseDown={onBoardDragHandleMouseDown(item.id)}
                 onHide={() => hideObservationTile(item.id)}
                 onSettings={() => openSettings(item)}
+                onDuplicate={() => requestDuplicate(item)}
                 onDelete={() => removeItem(item.id)}
                 onCancel={() => ApiClient.cancelObservationMaterialize(item.id)
                   .then(() => reload())
@@ -2834,6 +2972,35 @@ function PageObservations({ onNavigate }) {
             })}
           </div>
       )}
+      {copyDialog ? (
+        <div className="modal-backdrop" role="presentation" onClick={() => setCopyDialog(null)}>
+          <div className="modal" role="dialog" onClick={(e) => e.stopPropagation()}>
+            <h2 style={{ marginTop: 0 }}>{obsT('observations.section.copyTitle')}</h2>
+            <label className="col" style={{ gap: 4, marginBottom: 16 }}>
+              <span>{obsT('observations.section.copyTarget')}</span>
+              <select
+                className="input"
+                value={copyDialog.sectionId}
+                onChange={(e) => setCopyDialog({ ...copyDialog, sectionId: e.target.value })}
+              >
+                {editableSections.map((s) => (
+                  <option key={s.id} value={s.id}>{s.title}</option>
+                ))}
+              </select>
+            </label>
+            <div className="row" style={{ gap: 8, justifyContent: 'flex-end' }}>
+              <button type="button" className="btn" onClick={() => setCopyDialog(null)}>{obsT('observations.board.cancel')}</button>
+              <button
+                type="button"
+                className="btn btn--primary"
+                onClick={() => runDuplicate(copyDialog.observationId, copyDialog.sectionId)}
+              >
+                {obsT('observations.section.copyConfirm')}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
       </div>
     </div>
   );

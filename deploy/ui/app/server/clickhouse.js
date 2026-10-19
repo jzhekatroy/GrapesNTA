@@ -123,6 +123,9 @@ const config = {
   rolesTable: env('CLICKHOUSE_ROLES_TABLE', 'roles'),
   rolePermissionsTable: env('CLICKHOUSE_ROLE_PERMISSIONS_TABLE', 'role_permissions'),
   userPermissionsTable: env('CLICKHOUSE_USER_PERMISSIONS_TABLE', 'user_permissions'),
+  observationSectionsTable: env('CLICKHOUSE_OBSERVATION_SECTIONS_TABLE', 'app_observation_sections'),
+  observationSectionRolesTable: env('CLICKHOUSE_OBSERVATION_SECTION_ROLES_TABLE', 'app_observation_section_roles'),
+  observationSectionMapTable: env('CLICKHOUSE_OBSERVATION_SECTION_MAP_TABLE', 'app_observation_section_map'),
   collectorHealthView: envOpt('CLICKHOUSE_COLLECTOR_HEALTH_VIEW', null),
   collectorHealthSnapshotsTable: env('CLICKHOUSE_COLLECTOR_HEALTH_SNAPSHOTS_TABLE', 'collector_health_snapshots'),
   requestTimeoutMs: envInt('CLICKHOUSE_REQUEST_TIMEOUT_MS', 30000),
@@ -603,6 +606,18 @@ function userPermissionsTableRef() {
   return `${qIdent(config.database)}.${qIdent(config.userPermissionsTable)}`;
 }
 
+function observationSectionsTableRef() {
+  return `${qIdent(config.database)}.${qIdent(config.observationSectionsTable)}`;
+}
+
+function observationSectionRolesTableRef() {
+  return `${qIdent(config.database)}.${qIdent(config.observationSectionRolesTable)}`;
+}
+
+function observationSectionMapTableRef() {
+  return `${qIdent(config.database)}.${qIdent(config.observationSectionMapTable)}`;
+}
+
 function col(key) {
   return qIdent(config.columns[key]);
 }
@@ -823,6 +838,9 @@ function getConfig() {
     rolesTable: config.rolesTable,
     rolePermissionsTable: config.rolePermissionsTable,
     userPermissionsTable: config.userPermissionsTable,
+    observationSectionsTable: config.observationSectionsTable,
+    observationSectionRolesTable: config.observationSectionRolesTable,
+    observationSectionMapTable: config.observationSectionMapTable,
     logSql: config.logSql,
     dataTimezone: config.dataTimezone,
     columns: { ...config.columns },
@@ -959,6 +977,9 @@ module.exports = {
   rolesTableRef,
   rolePermissionsTableRef,
   userPermissionsTableRef,
+  observationSectionsTableRef,
+  observationSectionRolesTableRef,
+  observationSectionMapTableRef,
   insertRows,
   executeCommand,
   ensureFlowsRawSchema,

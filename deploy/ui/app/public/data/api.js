@@ -687,6 +687,32 @@ const ApiClient = (() => {
     return requestJson('/api/observations/board-layout', { method: 'PUT', body: layout });
   }
 
+  async function loadObservationSections() {
+    const body = await getJson('/api/observations/sections', { widget: 'observations/sections' });
+    return body.data || [];
+  }
+
+  async function loadObservationSectionsAdmin() {
+    const body = await getJson('/api/observation-sections', { widget: 'observation-sections/list' });
+    return body.data || [];
+  }
+
+  async function createObservationSection(title) {
+    return requestJson('/api/observation-sections', { method: 'POST', body: { title } });
+  }
+
+  async function updateObservationSection(id, payload) {
+    return requestJson(`/api/observation-sections/${encodeURIComponent(id)}`, { method: 'PUT', body: payload });
+  }
+
+  async function reorderObservationSections(ids) {
+    return requestJson('/api/observation-sections/order', { method: 'PUT', body: { ids } });
+  }
+
+  async function deleteObservationSection(id) {
+    return requestJson(`/api/observation-sections/${encodeURIComponent(id)}`, { method: 'DELETE' });
+  }
+
   async function loadObservationAnalyticsDiagnostics() {
     const body = await getJson('/api/observations/analytics/diagnostics', {
       widget: 'observations/analytics-diagnostics',
@@ -873,8 +899,8 @@ const ApiClient = (() => {
     return body.data || [];
   }
 
-  async function duplicateObservation(id) {
-    return requestJson(`/api/observations/${encodeURIComponent(id)}/duplicate`, { method: 'POST', body: {} });
+  async function duplicateObservation(id, payload = {}) {
+    return requestJson(`/api/observations/${encodeURIComponent(id)}/duplicate`, { method: 'POST', body: payload });
   }
 
   async function cancelObservationMaterialize(id) {
@@ -3170,6 +3196,12 @@ const ApiClient = (() => {
     loadObservations,
     loadObservationsBoardLayout,
     saveObservationsBoardLayout,
+    loadObservationSections,
+    loadObservationSectionsAdmin,
+    createObservationSection,
+    updateObservationSection,
+    reorderObservationSections,
+    deleteObservationSection,
     loadObservationAnalyticsDiagnostics,
     loadWorkerDiagnostics,
     scanWorkerGaps,

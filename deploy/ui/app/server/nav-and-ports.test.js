@@ -84,6 +84,13 @@ test('api-map maps observations board layout to observations resource', () => {
   assert.equal(isMutatingRequest('/api/observations/board-layout', 'PUT'), true);
 });
 
+test('api-map maps observation sections admin to users resource', () => {
+  assert.equal(getResourceForPath('/api/observations/sections'), 'observations');
+  assert.equal(getResourceForPath('/api/observation-sections'), 'users');
+  assert.equal(getResourceForPath('/api/observation-sections/order', 'PUT'), 'users');
+  assert.equal(getResourceForPath('/api/observation-sections/support', 'PUT'), 'users');
+});
+
 test('api-map treats explorer read POSTs as non-mutating', () => {
   assert.equal(isMutatingRequest('/api/explorer/query', 'POST'), false);
   assert.equal(isMutatingRequest('/explorer/query', 'POST'), false);

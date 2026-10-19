@@ -22,6 +22,7 @@ function getResourceForPath(path, method) {
 
   if (p.startsWith('/api/explorer/')) return 'explorer';
   if (p.startsWith('/api/dns-explorer/')) return 'dns-explorer';
+  if (p.startsWith('/api/observation-sections')) return 'users';
   if (p.startsWith('/api/observations')) return 'observations';
   if (p.startsWith('/api/settings/smtp')) return 'diagnostics';
   if (p.startsWith('/api/dashboard/')) return 'dashboard';

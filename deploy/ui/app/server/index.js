@@ -236,7 +236,17 @@ const {
   buildEffectiveWritePermissions,
   loadRole,
   userPermissions,
+  canWrite,
 } = require('./rbac/permissions');
+const {
+  ensureObservationSections,
+  listSectionsForUser,
+  listSectionsAdmin,
+  createSection,
+  updateSection,
+  reorderSections,
+  deleteSection,
+} = require('./observation-sections');
 const { apiResourceGuard } = require('./rbac/middleware');
 const { createRbacRouter } = require('./rbac/routes');
 const { createCabinetGuard } = require('./cabinet/guard');
@@ -1336,7 +1346,15 @@ app.get('/api/observations/config', async (_req, res) => {
 
 app.get('/api/observations', async (req, res) => {
   try {
-    res.json({ data: await listObservations(req.user.id) });
+    res.json({ data: await listObservations(req.user) });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/observations/sections', async (req, res) => {
+  try {
+    res.json({ data: await listSectionsForUser(req.user) });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -1365,7 +1383,7 @@ app.put('/api/observations/board-layout', async (req, res) => {
 
 app.post('/api/observations', async (req, res) => {
   try {
-    const data = await createObservation(req.user.id, req.body || {});
+    const data = await createObservation(req.user, req.body || {});
     res.json({ ok: true, data });
   } catch (err) {
     res.status(err.status || 400).json({
@@ -1555,7 +1573,7 @@ app.get('/api/diagnostics/failed-requests', async (req, res) => {
 
 app.get('/api/observations/:id', async (req, res) => {
   try {
-    const data = await getObservation(req.params.id, req.user.id);
+    const data = await getObservation(req.params.id, req.user);
     if (!data) {
       res.status(404).json({ error: 'Наблюдение не найдено' });
       return;
@@ -1568,7 +1586,7 @@ app.get('/api/observations/:id', async (req, res) => {
 
 app.put('/api/observations/:id', async (req, res) => {
   try {
-    const data = await updateObservation(req.params.id, req.user.id, req.body || {});
+    const data = await updateObservation(req.params.id, req.user, req.body || {});
     if (!data) {
       res.status(404).json({ error: 'Наблюдение не найдено' });
       return;
@@ -1585,7 +1603,7 @@ app.put('/api/observations/:id', async (req, res) => {
 
 app.delete('/api/observations/:id', async (req, res) => {
   try {
-    const ok = await deleteObservation(req.params.id, req.user.id);
+    const ok = await deleteObservation(req.params.id, req.user);
     if (!ok) {
       res.status(404).json({ error: 'Наблюдение не найдено' });
       return;
@@ -1598,7 +1616,7 @@ app.delete('/api/observations/:id', async (req, res) => {
 
 app.post('/api/observations/:id/duplicate', async (req, res) => {
   try {
-    const data = await duplicateObservation(req.params.id, req.user.id);
+    const data = await duplicateObservation(req.params.id, req.user, req.body || {});
     if (!data) {
       res.status(404).json({ error: 'Наблюдение не найдено' });
       return;
@@ -1611,7 +1629,7 @@ app.post('/api/observations/:id/duplicate', async (req, res) => {
 
 app.post('/api/observations/:id/cancel', async (req, res) => {
   try {
-    const data = await cancelMaterialize(req.params.id, req.user.id);
+    const data = await cancelMaterialize(req.params.id, req.user);
     if (!data) {
       res.status(404).json({ error: 'Наблюдение не найдено' });
       return;
@@ -1624,7 +1642,7 @@ app.post('/api/observations/:id/cancel', async (req, res) => {
 
 app.post('/api/observations/:id/materialize', async (req, res) => {
   try {
-    const data = await queueMaterialize(req.params.id, req.user.id);
+    const data = await queueMaterialize(req.params.id, req.user);
     if (!data) {
       res.status(404).json({ error: 'Наблюдение не найдено' });
       return;
@@ -1641,7 +1659,7 @@ app.post('/api/observations/:id/materialize', async (req, res) => {
 
 app.post('/api/observations/:id/retry', async (req, res) => {
   try {
-    const data = await retryMaterialize(req.params.id, req.user.id);
+    const data = await retryMaterialize(req.params.id, req.user);
     if (!data) {
       res.status(404).json({ error: 'Наблюдение не найдено' });
       return;
@@ -1654,7 +1672,7 @@ app.post('/api/observations/:id/retry', async (req, res) => {
 
 app.post('/api/observations/:id/preview', async (req, res) => {
   try {
-    const data = await previewObservation(req.params.id, req.user.id, req.body || {});
+    const data = await previewObservation(req.params.id, req.user, req.body || {});
     if (!data) {
       res.status(404).json({ error: 'Наблюдение не найдено' });
       return;
@@ -1667,7 +1685,7 @@ app.post('/api/observations/:id/preview', async (req, res) => {
 
 app.post('/api/observations/:id/run', async (req, res) => {
   try {
-    const data = await runObservationReport(req.params.id, req.user.id);
+    const data = await runObservationReport(req.params.id, req.user);
     if (!data) {
       res.status(404).json({ error: 'Наблюдение не найдено' });
       return;
@@ -1680,7 +1698,7 @@ app.post('/api/observations/:id/run', async (req, res) => {
 
 app.get('/api/observations/:id/runs', async (req, res) => {
   try {
-    const data = await listRuns(req.params.id, req.user.id);
+    const data = await listRuns(req.params.id, req.user);
     if (!data) {
       res.status(404).json({ error: 'Наблюдение не найдено' });
       return;
@@ -1694,7 +1712,7 @@ app.get('/api/observations/:id/runs', async (req, res) => {
 app.get('/api/observations/:id/runs/:runId/artifact', async (req, res) => {
   try {
     const file = req.query.file || 'report.html';
-    const artifact = await getRunArtifact(req.params.id, req.params.runId, req.user.id, file);
+    const artifact = await getRunArtifact(req.params.id, req.params.runId, req.user, file);
     if (!artifact) {
       res.status(404).json({ error: 'Артефакт не найден' });
       return;
@@ -1704,6 +1722,66 @@ app.get('/api/observations/:id/runs/:runId/artifact', async (req, res) => {
     fs.createReadStream(artifact.path).pipe(res);
   } catch (err) {
     res.status(err.status || 500).json({ error: err.message });
+  }
+});
+
+async function requireUsersWrite(req, res, next) {
+  try {
+    if (!(await canWrite(req.user, 'users'))) {
+      res.status(403).json({ error: 'Недостаточно прав' });
+      return;
+    }
+    next();
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+}
+
+app.get('/api/observation-sections', requireUsersWrite, async (req, res) => {
+  try {
+    res.json({ data: await listSectionsAdmin() });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/observation-sections', requireUsersWrite, async (req, res) => {
+  try {
+    const data = await createSection(req.body?.title);
+    res.status(201).json({ ok: true, data });
+  } catch (err) {
+    res.status(err.status || 400).json({ error: err.message });
+  }
+});
+
+app.put('/api/observation-sections/order', requireUsersWrite, async (req, res) => {
+  try {
+    const data = await reorderSections(req.body?.ids);
+    res.json({ ok: true, data });
+  } catch (err) {
+    res.status(err.status || 400).json({ error: err.message });
+  }
+});
+
+app.put('/api/observation-sections/:id', requireUsersWrite, async (req, res) => {
+  try {
+    const data = await updateSection(req.params.id, req.body || {});
+    if (!data) {
+      res.status(404).json({ error: 'Раздел не найден' });
+      return;
+    }
+    res.json({ ok: true, data });
+  } catch (err) {
+    res.status(err.status || 400).json({ error: err.message });
+  }
+});
+
+app.delete('/api/observation-sections/:id', requireUsersWrite, async (req, res) => {
+  try {
+    const { moved } = await deleteSection(req.params.id);
+    res.json({ ok: true, moved });
+  } catch (err) {
+    res.status(err.status || 400).json({ error: err.message });
   }
 });
 
@@ -2955,6 +3033,12 @@ app.listen(PORT, () => {
             console.log(`RBAC: synced ${rbac.clientPermissionsSynced} Client permission row(s).`);
           }
           console.log('RBAC ready.');
+          const obsSections = await ensureObservationSections();
+          if (obsSections.generalCreated) {
+            console.log('Observation sections: created system section «Общие».');
+          } else {
+            console.log('Observation sections ready.');
+          }
           await ensureImpersonationAuditTable();
           console.log('Cabinet impersonation audit ready.');
           await ensureObservationsStore();
