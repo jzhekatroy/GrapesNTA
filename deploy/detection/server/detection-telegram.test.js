@@ -462,6 +462,29 @@ describe('detection-telegram', () => {
     assert.doesNotMatch(text, /ниже обычного/);
   });
 
+  it('ковёр подписан по всему трафику, а не по протоколу одного адреса', () => {
+    // ПИН 16.10 18:16 МСК (PiterIX): UDP 77%, у топ-адреса TCP 443 — было «TCP-флуд по сети».
+    const text = formatAlertMessage({
+      name: 'ООО "ПИН"',
+      scope: 'client',
+      scopeId: '116691',
+      minute: '2026-10-16 15:17:00',
+      byProto: {
+        all: { bps: 35.1e9, growth_bps: 2.7 },
+        tcp: { bps: 8.2e9 },
+        udp: { bps: 26.8e9 },
+      },
+      verdict: { kind: 'carpet', hourRatio: 2.7, hourCeiling: 12.8e9 },
+      investigate: {
+        victim: { ip: '195.2.241.10', port: 443, protoLabel: 'TCP', share: 0.008 },
+        sources: { dstIpCount: 5000, dstNetCount: 40 },
+      },
+      signals: ['volume'],
+    });
+    assert.match(text, /^🔴 <b>UDP-флуд по сети<\/b>/);
+    assert.doesNotMatch(text, /TCP-флуд/);
+  });
+
   it('pickAlertCandidates только proto all и выбранный scope', () => {
     const rows = [
       { scope: 'net', scope_id: '10.0.0.0/24', proto: 'all', growth_bps: 2, growth_pps: 0.1 },

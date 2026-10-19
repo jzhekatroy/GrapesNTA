@@ -96,6 +96,17 @@ test('английские подписи наблюдений совпадаю�
   assert.equal(en['chart.tip.from'], '5 min from {time}');
 });
 
+test('английские подписи страницы DNS-резолверы совпадают с требованиями', () => {
+  const en = loadLocaleMessages('en');
+  assert.equal(
+    en['dnsResolvers.subtitle'],
+    'Directory for badges on the DNS queries page: operator, subscriber, and public resolvers.',
+  );
+  assert.equal(en['dnsResolvers.role.resolver'], 'Operator resolver');
+  assert.equal(en['dnsResolvers.confirm.delete'], 'Delete resolver {prefix} permanently?');
+  assert.equal(en['dnsResolvers.err.prefixRequired'], 'Enter a prefix (CIDR)');
+});
+
 test('английские подписи страницы DNS совпадают с требованиями', () => {
   const en = loadLocaleMessages('en');
   assert.equal(
@@ -183,4 +194,24 @@ test('подпись числа записей в таблице на англи
   const GrapesI18n = loadI18n();
   GrapesI18n.setLocale('en');
   assert.equal(GrapesI18n.t('table.records.many', { count: 50 }), '50 records');
+});
+
+test('английские подписи страницы BMP / BGP совпадают с требованиями', () => {
+  const en = loadLocaleMessages('en');
+  assert.equal(en['period.15m'], '15 minutes');
+  assert.equal(en['bmpPage.title'], 'BMP / BGP');
+  assert.equal(en['bmpPage.tab.health'], 'Overview');
+  assert.equal(en['bmpPage.tab.routes'], 'Routes');
+  assert.equal(en['bmpPage.churn.chartTitle'], 'Announce / withdraw dynamics');
+  assert.equal(en['bmpPage.churn.tipUnit'], 'events');
+  const GrapesI18n = loadI18n();
+  GrapesI18n.setLocale('en');
+  assert.equal(
+    GrapesI18n.t('bmpPage.pager.range', { from: 1, to: 25, total: '100' }),
+    '1–25 of 100',
+  );
+  assert.equal(
+    GrapesI18n.t('bmpPage.err.invalidRange', { key: '7d' }),
+    'Invalid range: 7d',
+  );
 });

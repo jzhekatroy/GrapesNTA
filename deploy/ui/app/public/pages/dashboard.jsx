@@ -528,10 +528,12 @@ function OperatorDashboard({
   );
 }
 
-const CABINET_OVERVIEW_DIRECTIONS = [
-  { id: 'in', label: 'К вам', color: '#51D16D' },
-  { id: 'out', label: 'От вас', color: '#6972F0' },
-];
+function cabinetOverviewDirections() {
+  return [
+    { id: 'in', label: dashT('cabinet.direction.toYou'), color: '#51D16D' },
+    { id: 'out', label: dashT('cabinet.direction.fromYou'), color: '#6972F0' },
+  ];
+}
 
 function cabinetOverviewState(result, emptyData) {
   return {
@@ -582,7 +584,7 @@ function cabinetServiceDonutItems(rows, totalBytes) {
   const colors = ['#6972F0', '#51D16D', '#F0B400', '#22B8CF', '#A4ADFF', '#D16BA5', '#7F7F9D'];
   return cabinetShareItems(rows, totalBytes).map((row, index) => ({
     ...row,
-    label: row.synthetic ? 'Прочее' : formatCabinetServiceLabel(row),
+    label: row.synthetic ? dashT('dashboard.other') : formatCabinetServiceLabel(row),
     value: Number(row.sharePercent) || 0,
     percent: Number(row.sharePercent) || 0,
     trafficGb: ((Number(row.bytes) || 0) * 8) / 1e9,
@@ -592,6 +594,7 @@ function cabinetServiceDonutItems(rows, totalBytes) {
 }
 
 function CabinetDashboard({ onNavigate, timeRange, customPeriod, displayTimezone, onChartRangeSelect }) {
+  const i18nLocale = GrapesI18n.getLocale();
   const periodLabel = timeRangeLabel(timeRange, customPeriod);
   const periodKey = `${timeRange}|${customPeriod?.from || ''}|${customPeriod?.to || ''}`;
   const chartLongRange = isLongChartRange(timeRange, customPeriod);
@@ -658,7 +661,7 @@ function CabinetDashboard({ onNavigate, timeRange, customPeriod, displayTimezone
 
   const chart = useMemo(
     () => cabinetSeriesToChart(series.data, series.meta),
-    [series.data, series.meta?.granularity],
+    [series.data, series.meta?.granularity, i18nLocale],
   );
   const chartPoints = useMemo(
     () => (chart.points || []).map((point) => ({
@@ -673,7 +676,10 @@ function CabinetDashboard({ onNavigate, timeRange, customPeriod, displayTimezone
   );
   const serviceItems = useMemo(
     () => cabinetServiceDonutItems(services.data, services.meta?.totalBytes),
-    [services.data, services.meta?.totalBytes],
+    [services.data, services.meta?.totalBytes, i18nLocale],
+  );
+  const directionSuffix = (dir) => (
+    dir === 'in' ? dashT('cabinet.periodSuffix.toYou') : dashT('cabinet.periodSuffix.fromYou')
   );
   const toggleChartLine = (key) => setChartHidden((previous) => {
     const next = new Set(previous);
@@ -685,8 +691,8 @@ function CabinetDashboard({ onNavigate, timeRange, customPeriod, displayTimezone
     <div className="main__container">
       <div className="page-head">
         <div>
-          <h1>Сводка по сети</h1>
-          <p>Обзор входящего и исходящего трафика вашей сети.</p>
+          <h1>{dashT('dashboard.title')}</h1>
+          <p>{dashT('cabinet.subtitle')}</p>
         </div>
         {onNavigate && (
           <Button
@@ -695,7 +701,7 @@ function CabinetDashboard({ onNavigate, timeRange, customPeriod, displayTimezone
             iconRight="arrowURight"
             onClick={() => openCabinetExplorer(onNavigate, { timeRange, customPeriod })}
           >
-            Разбор трафика
+            {dashT('nav.item.explorer')}
           </Button>
         )}
       </div>
@@ -708,10 +714,10 @@ function CabinetDashboard({ onNavigate, timeRange, customPeriod, displayTimezone
         ) : ['max', 'avg', 'volume'].map((id) => (
           <OverviewTrafficStatTile
             key={id}
-            label={id === 'max' ? 'Максимально' : id === 'avg' ? 'Среднее' : 'Объём'}
+            label={dashT(id === 'max' ? 'dashboard.stat.max' : id === 'avg' ? 'dashboard.stat.avg' : 'dashboard.stat.volume')}
             mode={id === 'volume' ? 'volume' : 'rate'}
             stats={cabinetStatsForTile(stats.data, id)}
-            directionDefs={CABINET_OVERVIEW_DIRECTIONS}
+            directionDefs={cabinetOverviewDirections()}
             loadMs={stats.loadMs}
             serverMs={stats.serverMs}
           />
@@ -720,7 +726,7 @@ function CabinetDashboard({ onNavigate, timeRange, customPeriod, displayTimezone
 
       <DashboardChartRow distributionMode="share" trendSplit={SHARE_RIGHT_SPLIT} onTrendSplitChange={() => {}}>
         <OverviewTrafficChartCard
-          title="Полоса пропускания и pps"
+          title={dashT('dashboard.chart.title')}
           subtitle={periodLabel}
           points={chartPoints}
           lines={chart.lines}
@@ -743,13 +749,13 @@ function CabinetDashboard({ onNavigate, timeRange, customPeriod, displayTimezone
         />
         <Card pad="sm">
           <div className="distribution-card__head">
-            <div className="distribution-card__title">Сервисы</div>
+            <div className="distribution-card__title">{dashT('dashboard.services')}</div>
             <OverviewDirectionToggle value={serviceDirection} onChange={setServiceDirection} />
           </div>
           <div className="distribution-split distribution-split--solo">
             <OverviewDistributionPane
-              title="Сервисы по объёму"
-              subtitle={`${periodLabel} · ${serviceDirection === 'in' ? 'к вам' : 'от вас'}`}
+              title={dashT('cabinet.services.byVolume')}
+              subtitle={`${periodLabel} · ${directionSuffix(serviceDirection)}`}
               items={serviceItems}
               failed={services.source === 'error'}
               error={services.error}
@@ -764,7 +770,7 @@ function CabinetDashboard({ onNavigate, timeRange, customPeriod, displayTimezone
 
       <div className="grid grid--1col grid--mb">
         <OverviewCountryCard
-          subtitle={`${periodLabel} · ${countryDirection === 'in' ? 'к вам' : 'от вас'}`}
+          subtitle={`${periodLabel} · ${directionSuffix(countryDirection)}`}
           rows={countryRows}
           colorMetric={countryMetric}
           onColorMetricChange={setCountryMetric}
@@ -784,7 +790,7 @@ function CabinetDashboard({ onNavigate, timeRange, customPeriod, displayTimezone
         source={recent.source}
         error={recent.error}
         status={recent.status}
-        subtitle="Последние минуты, независимо от выбранного периода"
+        subtitle={dashT('dashboard.flows.recentSubtitle')}
         loadMs={recent.loadMs}
         serverMs={recent.serverMs}
         displayTimezone={displayTimezone}

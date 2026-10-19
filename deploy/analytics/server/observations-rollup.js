@@ -43,7 +43,7 @@ const {
 const {
   explorerTimeseries,
   explorerGroupedTimeseries,
-  explorerDimensions,
+  explorerDimensionsForOptions,
 } = require('./explorer');
 const { explorerGroupFieldId } = require('./explorer-group-mask');
 
@@ -307,12 +307,20 @@ function widenForRecheck(job, from) {
 }
 
 /**
+ * Наблюдение кабинета считается так же, как кабинетный разбор трафика: только
+ * трафик клиента, кабинетный набор полей и «К вам / От вас» относительно него.
+ */
+function explorerOptionsForJob(job) {
+  return job.cabinetClientId ? { cabinetClientId: job.cabinetClientId } : {};
+}
+
+/**
  * Explorer молча выбрасывает неизвестные измерения из groupBy. Для rollup это
  * опаснее ошибки: dim0 заполнился бы вторым измерением, а UI подписал бы его
  * первым. Поэтому проверяем разрез до запроса.
  */
-function assertKnownGroupBy(groupBy) {
-  const known = new Set(Object.keys(explorerDimensions()));
+function assertKnownGroupBy(groupBy, options = {}) {
+  const known = new Set(Object.keys(explorerDimensionsForOptions(options)));
   const unknown = groupBy.filter((g) => !known.has(explorerGroupFieldId(g)));
   if (unknown.length) {
     throw new Error(`Неизвестное измерение разреза: ${unknown.join(', ')}`);
@@ -324,7 +332,8 @@ async function catchupGrouped(job, window, seriesLimit) {
     ? job.groupBy.filter(Boolean).slice(0, ROLLUP_DIM_COUNT)
     : [];
   if (!groupBy.length) return { groupedPoints: 0, values: [] };
-  assertKnownGroupBy(groupBy);
+  const options = explorerOptionsForJob(job);
+  assertKnownGroupBy(groupBy, options);
 
   const groupedBundle = await explorerGroupedTimeseries({
     ...window,
@@ -333,7 +342,7 @@ async function catchupGrouped(job, window, seriesLimit) {
     limit: seriesLimit,
     offset: 0,
     granularity: GRANULARITY,
-  });
+  }, options);
   const { rows: groupedRaw } = await query(groupedBundle.sql, groupedBundle.params, {
     name: `observations/rollup-grouped-${job.id}`,
   });
@@ -427,7 +436,7 @@ async function materializeWindow(job, from, to) {
     granularity: GRANULARITY,
   };
 
-  const totalBundle = await explorerTimeseries(window);
+  const totalBundle = await explorerTimeseries(window, explorerOptionsForJob(job));
   const { rows: totalRaw } = await query(totalBundle.sql, totalBundle.params, {
     name: `observations/rollup-total-${job.id}`,
   });
@@ -845,6 +854,8 @@ module.exports = {
   floorToBucket,
   computeSafeTo,
   widenForRecheck,
+  explorerOptionsForJob,
+  assertKnownGroupBy,
   SAFETY_BUCKETS,
   RECHECK_BUCKETS,
 };

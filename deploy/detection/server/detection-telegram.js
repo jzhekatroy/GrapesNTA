@@ -1450,7 +1450,12 @@ function alertTitle(mode, { byProto, investigate, verdict }) {
   if (mode === 'syn') return 'SYN-флуд';
   if (mode === 'net') return withProtoPrefix(netProtoLabel(netSpikeMetrics(all)), 'флуд в сеть /24');
   if (mode === 'volumetric') return withProtoPrefix(proto, 'флуд в один сервер');
-  if (mode === 'carpet') return withProtoPrefix(verdict?.carpetOnly ? 'UDP' : proto, 'флуд по сети');
+  // Ковёр размазан по сети: протокол одного адреса-цели ничего не говорит о
+  // трафике, поэтому подпись — по долям всего трафика клиента.
+  if (mode === 'carpet') {
+    const netProto = verdict?.carpetOnly ? 'UDP' : protoLabel(null, byProto?.tcp || {}, byProto?.udp || {}, all);
+    return withProtoPrefix(netProto, 'флуд по сети');
+  }
   if (mode === 'geo') return 'Всплеск трафика из-за рубежа';
   if (mode === 'peak') return 'Пик трафика, не атака';
   return 'Рост трафика выше порога';
