@@ -22,6 +22,8 @@ services:
     environment:
       GRAPES_VERSION: ${GRAPES_VERSION:-unknown}
       GRAPES_VERSION_DATE: ${GRAPES_VERSION_DATE:-}
+      UI_DATA_DIR: /app/server/data
+      COMPONENT_VERSIONS_FILE: /app/server/data/component-versions.tsv
     command:
       - sh
       - -c
