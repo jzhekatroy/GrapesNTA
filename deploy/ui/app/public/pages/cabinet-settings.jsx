@@ -1,14 +1,20 @@
 /* Настройки личного кабинета клиента */
 
-const CABINET_BIND_MODE_LABELS = {
-  prefixes: 'По IP-сетям',
-  ports: 'По портам коммутатора',
-};
+function cabinetSettingsT(key, params) {
+  return GrapesI18n.t(key, params);
+}
 
-const CABINET_SOURCE_LABELS = {
-  erp: 'ERP PiterIX',
-  manual: 'Создан вручную',
-};
+function cabinetBindModeLabel(bindMode) {
+  if (bindMode === 'prefixes') return cabinetSettingsT('cabinet.settings.bindMode.prefixes');
+  if (bindMode === 'ports') return cabinetSettingsT('cabinet.settings.bindMode.ports');
+  return bindMode || '—';
+}
+
+function cabinetSourceLabel(source) {
+  if (source === 'erp') return cabinetSettingsT('cabinet.settings.source.erp');
+  if (source === 'manual') return cabinetSettingsT('cabinet.settings.source.manual');
+  return source || '—';
+}
 
 function generatePassword() {
   const groups = [
@@ -60,7 +66,7 @@ function PageCabinetSettings({ readOnly, onAuthRefresh }) {
     setProfileError('');
     const name = fullName.trim();
     if (!name) {
-      setProfileError('Укажите ФИО');
+      setProfileError(cabinetSettingsT('cabinet.settings.fullNameRequired'));
       return;
     }
     setSavingProfile(true);
@@ -68,10 +74,10 @@ function PageCabinetSettings({ readOnly, onAuthRefresh }) {
       const data = await ApiClient.patchCabinetProfile({ fullName: name });
       setProfile(data);
       setFullName(data.fullName || name);
-      pushToast({ kind: 'success', title: 'Профиль сохранён' });
+      pushToast({ kind: 'success', title: cabinetSettingsT('cabinet.settings.profileSaved') });
       if (onAuthRefresh) await onAuthRefresh();
     } catch (err) {
-      setProfileError(err.message || 'Не удалось сохранить профиль');
+      setProfileError(err.message || cabinetSettingsT('cabinet.settings.saveProfileFailed'));
     } finally {
       setSavingProfile(false);
     }
@@ -80,8 +86,8 @@ function PageCabinetSettings({ readOnly, onAuthRefresh }) {
   if (loading) {
     return (
       <div className="page">
-        <Card title="Настройки">
-          <div style={{ color: 'var(--fg-secondary)' }}>Загрузка…</div>
+        <Card title={cabinetSettingsT('cabinet.settings.title')}>
+          <div style={{ color: 'var(--fg-secondary)' }}>{cabinetSettingsT('dashboard.loading')}</div>
         </Card>
       </div>
     );
@@ -90,7 +96,7 @@ function PageCabinetSettings({ readOnly, onAuthRefresh }) {
   if (error) {
     return (
       <div className="page">
-        <Card title="Настройки">
+        <Card title={cabinetSettingsT('cabinet.settings.title')}>
           <div className="form-error">{error}</div>
         </Card>
       </div>
@@ -102,19 +108,19 @@ function PageCabinetSettings({ readOnly, onAuthRefresh }) {
       {readOnly && (
         <Card>
           <div style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-secondary)' }}>
-            Режим просмотра администратора
+            {cabinetSettingsT('cabinet.settings.readOnlyMode')}
           </div>
         </Card>
       )}
 
-      <Card title="Мой профиль" subtitle="Логин и пароль учётной записи">
+      <Card title={cabinetSettingsT('cabinet.settings.myProfile')} subtitle={cabinetSettingsT('cabinet.settings.myProfileSub')}>
         <div className="col" style={{ gap: 14, maxWidth: 520 }}>
           <div className="field">
-            <label>Логин</label>
+            <label>{cabinetSettingsT('cabinet.settings.login')}</label>
             <input className="input mono" value={profile?.username || ''} readOnly disabled />
           </div>
           <div className="field">
-            <label>ФИО</label>
+            <label>{cabinetSettingsT('cabinet.settings.fullName')}</label>
             <input
               className="input"
               value={fullName}
@@ -126,10 +132,10 @@ function PageCabinetSettings({ readOnly, onAuthRefresh }) {
           {!readOnly && (
             <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
               <Button kind="primary" icon="save" onClick={saveProfile} disabled={savingProfile}>
-                {savingProfile ? 'Сохранение…' : 'Сохранить'}
+                {savingProfile ? cabinetSettingsT('cabinet.settings.saving') : cabinetSettingsT('cabinet.settings.save')}
               </Button>
               <Button kind="ghost" icon="key" onClick={() => setPasswordOpen(true)}>
-                Сменить пароль
+                {cabinetSettingsT('cabinet.settings.changePassword')}
               </Button>
             </div>
           )}
@@ -137,35 +143,35 @@ function PageCabinetSettings({ readOnly, onAuthRefresh }) {
         </div>
       </Card>
 
-      <Card title="Компания" subtitle="Сведения о вашей организации">
+      <Card title={cabinetSettingsT('cabinet.settings.company')} subtitle={cabinetSettingsT('cabinet.settings.companySub')}>
         <div className="col" style={{ gap: 14, maxWidth: 520 }}>
           <div className="field">
-            <label>Название</label>
+            <label>{cabinetSettingsT('cabinet.settings.companyName')}</label>
             <input className="input" value={company?.displayName || ''} readOnly disabled />
             {company?.source === 'erp' && (
               <div style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-secondary)', marginTop: 6 }}>
-                Название компании обновляется из ERP. Для изменения обратитесь к оператору.
+                {cabinetSettingsT('cabinet.settings.companyErpHint')}
               </div>
             )}
           </div>
           <div className="field">
-            <label>Идентификатор</label>
+            <label>{cabinetSettingsT('cabinet.settings.clientId')}</label>
             <input className="input mono" value={company?.clientId || ''} readOnly disabled />
           </div>
           <div className="field">
-            <label>Способ учёта трафика</label>
+            <label>{cabinetSettingsT('cabinet.settings.bindMode')}</label>
             <input
               className="input"
-              value={CABINET_BIND_MODE_LABELS[company?.bindMode] || company?.bindMode || '—'}
+              value={cabinetBindModeLabel(company?.bindMode)}
               readOnly
               disabled
             />
           </div>
           <div className="field">
-            <label>Источник данных</label>
+            <label>{cabinetSettingsT('cabinet.settings.dataSource')}</label>
             <input
               className="input"
-              value={CABINET_SOURCE_LABELS[company?.source] || company?.source || '—'}
+              value={cabinetSourceLabel(company?.source)}
               readOnly
               disabled
             />
@@ -178,7 +184,7 @@ function PageCabinetSettings({ readOnly, onAuthRefresh }) {
         onClose={() => setPasswordOpen(false)}
         onSaved={async () => {
           setPasswordOpen(false);
-          pushToast({ kind: 'success', title: 'Пароль изменён' });
+          pushToast({ kind: 'success', title: cabinetSettingsT('cabinet.settings.passwordChanged') });
           await loadProfile();
           if (onAuthRefresh) await onAuthRefresh();
         }}
@@ -203,7 +209,7 @@ function CabinetSettingsPasswordModal({ open, onClose, onSaved }) {
   const submit = async () => {
     setError('');
     if (password.length < 12) {
-      setError('Пароль должен быть не короче 12 символов');
+      setError(cabinetSettingsT('cabinet.settings.passwordMinLength'));
       return;
     }
     setSaving(true);
@@ -211,7 +217,7 @@ function CabinetSettingsPasswordModal({ open, onClose, onSaved }) {
       await ApiClient.changeCabinetProfilePassword({ password });
       if (onSaved) await onSaved();
     } catch (err) {
-      setError(err.message || 'Не удалось сменить пароль');
+      setError(err.message || cabinetSettingsT('cabinet.settings.passwordChangeFailed'));
     } finally {
       setSaving(false);
     }
@@ -221,18 +227,18 @@ function CabinetSettingsPasswordModal({ open, onClose, onSaved }) {
     <Modal
       open={open}
       onClose={onClose}
-      title="Сменить пароль"
+      title={cabinetSettingsT('cabinet.settings.passwordModal.title')}
       footer={(
         <>
-          <Button kind="ghost" onClick={onClose}>Отмена</Button>
+          <Button kind="ghost" onClick={onClose}>{cabinetSettingsT('period.cancel')}</Button>
           <Button kind="primary" icon="key" onClick={submit} disabled={saving}>
-            {saving ? 'Сохранение…' : 'Сменить пароль'}
+            {saving ? cabinetSettingsT('cabinet.settings.saving') : cabinetSettingsT('cabinet.settings.changePassword')}
           </Button>
         </>
       )}
     >
       <div className="field">
-        <label>Новый пароль</label>
+        <label>{cabinetSettingsT('cabinet.settings.newPassword')}</label>
         <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
           <input
             className="input"
@@ -240,8 +246,10 @@ function CabinetSettingsPasswordModal({ open, onClose, onSaved }) {
             value={password}
             onChange={(e) => setPassword(e.target.value)}
           />
-          <Button kind="ghost" onClick={() => setPassword(generatePassword())}>Сгенерировать</Button>
-          <Button kind="ghost" onClick={() => setShowPassword((v) => !v)}>{showPassword ? 'Скрыть' : 'Показать'}</Button>
+          <Button kind="ghost" onClick={() => setPassword(generatePassword())}>{cabinetSettingsT('cabinet.settings.generate')}</Button>
+          <Button kind="ghost" onClick={() => setShowPassword((v) => !v)}>
+            {showPassword ? cabinetSettingsT('cabinet.settings.hide') : cabinetSettingsT('cabinet.settings.show')}
+          </Button>
         </div>
       </div>
       {error && <div className="form-error" style={{ marginTop: 12 }}>{error}</div>}
