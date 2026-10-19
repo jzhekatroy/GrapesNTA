@@ -1515,5 +1515,8 @@
     'cabinet.dns.col.transport': 'Транспорт',
     'cabinet.dns.event.response': 'Ответ',
     'cabinet.dns.event.query': 'Запрос',
+
+    'usersPage.label.startPage': 'Стартовая страница',
+    'usersPage.label.startPageHint': 'Открывается при входе в NTA. По умолчанию — Обзор.',
   };
 })(window);

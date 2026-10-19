@@ -37,6 +37,7 @@ function latestRolesCte() {
         id,
         name,
         display_name,
+        start_page,
         created_at,
         updated_at,
         row_number() OVER (PARTITION BY id ORDER BY updated_at DESC) AS rn
@@ -87,6 +88,7 @@ async function ensureRbacTables() {
         id String,
         name String,
         display_name String,
+        start_page String DEFAULT 'dashboard',
         created_at DateTime64(3) DEFAULT now64(3),
         updated_at DateTime64(3) DEFAULT now64(3)
       )
@@ -95,6 +97,15 @@ async function ensureRbacTables() {
     `,
     {},
     { name: 'rbac/create-roles' },
+  );
+
+  await executeCommand(
+    `
+      ALTER TABLE ${rolesTableRef()}
+      ADD COLUMN IF NOT EXISTS start_page String DEFAULT 'dashboard'
+    `,
+    {},
+    { name: 'rbac/add-roles-start-page' },
   );
 
   await executeCommand(
@@ -173,6 +184,7 @@ async function bootstrapStandardRoles() {
       id: role.id,
       name: role.name,
       display_name: role.displayName,
+      start_page: 'dashboard',
       created_at: now,
       updated_at: now,
     }));

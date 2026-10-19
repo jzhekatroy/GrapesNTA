@@ -1515,5 +1515,8 @@
     'cabinet.dns.col.transport': 'Transport',
     'cabinet.dns.event.response': 'Response',
     'cabinet.dns.event.query': 'Query',
+
+    'usersPage.label.startPage': 'Start page',
+    'usersPage.label.startPageHint': 'Opens when you sign in to NTA. Default is Overview.',
   };
 })(window);

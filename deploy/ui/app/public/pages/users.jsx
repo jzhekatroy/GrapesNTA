@@ -1,5 +1,13 @@
 /* Пользователи и права доступа */
 
+function usersT(key, params) {
+  return GrapesI18n.t(key, params);
+}
+
+function usersRbacPageMeta(page) {
+  return GrapesI18n.localizedPageMeta(page.id, page);
+}
+
 const OVERRIDE_OPTIONS = [
   { id: 'INHERIT', label: 'Наследовать' },
   { id: 'ALLOW', label: 'Разрешить' },
@@ -374,6 +382,7 @@ function UserDrawer({ user, roles, resources, displayTimezone, onClose, onSaved 
 
 function RoleDrawer({ role, resources, onClose, onSaved, onDeleted }) {
   const [displayName, setDisplayName] = useState('');
+  const [startPage, setStartPage] = useState('dashboard');
   const [permissions, setPermissions] = useState({});
   const [writePermissions, setWritePermissions] = useState({});
   const [loading, setLoading] = useState(false);
@@ -389,12 +398,23 @@ function RoleDrawer({ role, resources, onClose, onSaved, onDeleted }) {
     ApiClient.loadRole(role.id)
       .then((data) => {
         setDisplayName(data.displayName || role.displayName);
+        setStartPage(data.startPage || 'dashboard');
         setPermissions(data.permissions || {});
         setWritePermissions(data.writePermissions || {});
       })
       .catch((err) => setError(err.message))
       .finally(() => setLoading(false));
   }, [role?.id]);
+
+  const allowedStartPages = useMemo(
+    () => resources.filter((page) => permissions[page.id]),
+    [resources, permissions],
+  );
+
+  useEffect(() => {
+    if (startPage === 'dashboard') return;
+    if (!permissions[startPage]) setStartPage('dashboard');
+  }, [permissions, startPage]);
 
   const setAccess = (pageId, access) => {
     setPermissions((s) => ({ ...s, [pageId]: access }));
@@ -408,7 +428,12 @@ function RoleDrawer({ role, resources, onClose, onSaved, onDeleted }) {
     setSaving(true);
     setError('');
     try {
-      await ApiClient.updateRole(role.id, { displayName, permissions, writePermissions });
+      await ApiClient.updateRole(role.id, {
+        displayName,
+        startPage,
+        permissions,
+        writePermissions,
+      });
       pushToast({ kind: 'success', title: 'Роль сохранена' });
       await onSaved();
       onClose();
@@ -460,6 +485,27 @@ function RoleDrawer({ role, resources, onClose, onSaved, onDeleted }) {
           <div className="field">
             <label>Отображаемое имя</label>
             <input className="input" value={displayName} onChange={(e) => setDisplayName(e.target.value)} />
+          </div>
+          <div className="field">
+            <label>{usersT('usersPage.label.startPage')}</label>
+            <select
+              className="input"
+              value={startPage}
+              onChange={(e) => setStartPage(e.target.value)}
+              disabled={loading || allowedStartPages.length === 0}
+            >
+              {allowedStartPages.map((page) => {
+                const meta = usersRbacPageMeta(page);
+                return (
+                  <option key={page.id} value={page.id}>
+                    {meta.title}
+                  </option>
+                );
+              })}
+            </select>
+            <div style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-secondary)', marginTop: 6 }}>
+              {usersT('usersPage.label.startPageHint')}
+            </div>
           </div>
           <div>
             <div style={{font: 'var(--pv-text-body-2-bold)', marginBottom: 8}}>Доступ к страницам</div>

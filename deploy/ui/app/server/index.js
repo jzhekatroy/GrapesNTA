@@ -399,6 +399,7 @@ async function sessionUserPayload(user, sessionRecord = null) {
       id: role.id,
       name: role.name,
       displayName: role.displayName,
+      startPage: role.startPage,
     } : null,
     cabinet,
   };
