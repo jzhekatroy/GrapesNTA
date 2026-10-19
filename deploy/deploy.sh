@@ -46,6 +46,7 @@ DETECTION_DIR="${REPO_ROOT}/deploy/detection"
 UI_APP_DIR="${UI_DIR}/app"
 UI_DATA_DIR="${UI_DATA_DIR:-/opt/grapes/ui/data}"
 UI_LEGACY_ENV="${UI_LEGACY_ENV:-/opt/grapes/ui/.env}"
+VERSIONS_FILE="${UI_DATA_DIR}/component-versions.tsv"
 
 DO_PULL=1
 ACTION=""
@@ -169,6 +170,28 @@ component_version() {
 component_version_date() {
   local tag="${1%%+*}"
   git -C "${REPO_ROOT}" log -1 --format=%cI "refs/tags/${tag}" 2>/dev/null || true
+}
+
+# Версии для страницы «Версии» в UI: строка на компонент — имя, версия, дата
+# версии, время выкладки. Переписывается только выложенный компонент, иначе
+# частичная выкладка сдвинула бы «выложен» у всех остальных.
+record_component_version() {
+  local name="$1" version version_date tmp
+  version="$(component_version "${name}")"
+  version_date="$(component_version_date "${version}")"
+  mkdir -p "${UI_DATA_DIR}" || return 1
+  tmp="$(mktemp "${VERSIONS_FILE}.XXXXXX")" || return 1
+  if [[ -f "${VERSIONS_FILE}" ]]; then
+    awk -F'\t' -v n="${name}" '$1 != n' "${VERSIONS_FILE}" > "${tmp}" || { rm -f "${tmp}"; return 1; }
+  fi
+  printf '%s\t%s\t%s\t%s\n' "${name}" "${version}" "${version_date}" \
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "${tmp}" || { rm -f "${tmp}"; return 1; }
+  chmod 644 "${tmp}" && mv "${tmp}" "${VERSIONS_FILE}" || { rm -f "${tmp}"; return 1; }
+}
+
+# Сбой записи версий не должен ронять уже прошедшую выкладку.
+note_component_version() {
+  record_component_version "$1" || log "WARNING: не удалось записать версию $1 в ${VERSIONS_FILE}"
 }
 
 compose_up() {
@@ -513,18 +536,23 @@ case "${ACTION}" in
     bash "${REPO_ROOT}/deploy/clickhouse/install-powerloss-guard.sh"
     if [[ "${SEL_SCHEMA}" -eq 1 || "${SEL_UI}" -eq 1 || "${SEL_DETECTION}" -eq 1 ]]; then
       ensure_clickhouse_schema
+      note_component_version schema
     fi
     if [[ "${SEL_WORKER}" -eq 1 ]]; then
       compose_up "${WORKER_DIR}" grapes-worker "$(component_version worker)"
+      note_component_version worker
     fi
     if [[ "${SEL_ENRICH}" -eq 1 ]]; then
       compose_up "${ENRICH_DIR}" grapes-enrichment "$(component_version enrichment)"
+      note_component_version enrichment
     fi
     if [[ "${SEL_DETECTION}" -eq 1 ]]; then
       detection_up
+      note_component_version detection
     fi
     if [[ "${SEL_UI}" -eq 1 ]]; then
       ui_up
+      note_component_version ui
     fi
     show_status
     log "done. examples: $0 logs ui | $0 logs detection | $0 logs worker"
