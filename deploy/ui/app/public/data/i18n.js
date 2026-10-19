@@ -17,7 +17,6 @@
     'port-services': 'netmodel',
     entities: 'netmodel',
     vlan: 'netmodel',
-    'cabinet-settings': 'cabinet',
     users: 'admin',
     audit: 'admin',
     clients: 'admin',
