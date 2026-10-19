@@ -2168,6 +2168,8 @@
     'usersPage.delete': 'Delete',
     'usersPage.label.systemName': 'System name',
     'usersPage.label.displayName': 'Display name',
+    'usersPage.label.startPage': 'Start page',
+    'usersPage.label.startPageHint': 'Opens when you sign in to NTA. Default is Overview.',
     'usersPage.access.view': 'View',
     'usersPage.access.write': 'Edit',
     'usersPage.roleModal.title': 'Create role',

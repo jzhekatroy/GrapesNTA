@@ -2168,6 +2168,8 @@
     'usersPage.delete': 'Удалить',
     'usersPage.label.systemName': 'Системное имя',
     'usersPage.label.displayName': 'Отображаемое имя',
+    'usersPage.label.startPage': 'Стартовая страница',
+    'usersPage.label.startPageHint': 'Открывается при входе в NTA. По умолчанию — Обзор.',
     'usersPage.access.view': 'Просмотр',
     'usersPage.access.write': 'Изменение',
     'usersPage.roleModal.title': 'Создать роль',

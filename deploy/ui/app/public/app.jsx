@@ -65,7 +65,38 @@ function LazyPage({ pageId, exportName, fallback, ...props }) {
   return <Comp {...props} />;
 }
 
+function canAccessPageForUser(user, pageId) {
+  const perms = user?.effectivePermissions;
+  if (pageId === 'cabinet-settings' && !isCabinetMode(user)) {
+    return false;
+  }
+  if (isCabinetMode(user)) {
+    return CABINET_PAGE_IDS.has(pageId);
+  }
+  if (!perms) return true;
+  if (pageId === 'snmp') return !!(perms.snmp || perms.collectors);
+  if (pageId === 'smtp') return !!perms.diagnostics;
+  if (pageId === 'cidr' || pageId === 'vlan' || pageId === 'entities') {
+    return !!(perms.cidr || perms.vlan || perms.entities);
+  }
+  return !!perms[pageId];
+}
+
+function resolveRoleLandingPage(user, canAccess) {
+  const requested = user?.role?.startPage || 'dashboard';
+  const target = AppPages.resolvePageId(requested, canAccess.validIds);
+  if (canAccessPageForUser(user, target)) return target;
+  if (canAccessPageForUser(user, 'dashboard')) return 'dashboard';
+  return target;
+}
+
+function isEmptyAppHash() {
+  const hash = location.hash || '';
+  return hash === '' || hash === '#';
+}
+
 function App() {
+  const applyStartPageAfterLoginRef = useRef(false);
   const [registryReady, setRegistryReady] = useState(false);
   const [validIds, setValidIds] = useState(new Set(['dashboard']));
   const [hiddenPageIds, setHiddenPageIds] = useState(new Set());
@@ -432,7 +463,10 @@ function App() {
     location.hash = target;
   }, [validIds]);
 
-  const handleLogin = (user) => setAuth({ loading: false, user });
+  const handleLogin = (user) => {
+    applyStartPageAfterLoginRef.current = true;
+    setAuth({ loading: false, user });
+  };
   const handleLogout = async () => {
     try {
       await ApiClient.logout();
@@ -510,22 +544,10 @@ function App() {
     });
   }, []);
 
-  const canAccessPage = useCallback((pageId) => {
-    const perms = auth.user?.effectivePermissions;
-    if (pageId === 'cabinet-settings' && !isCabinetMode(auth.user)) {
-      return false;
-    }
-    if (isCabinetMode(auth.user)) {
-      return CABINET_PAGE_IDS.has(pageId);
-    }
-    if (!perms) return true;
-    if (pageId === 'snmp') return !!(perms.snmp || perms.collectors);
-    if (pageId === 'smtp') return !!perms.diagnostics;
-    if (pageId === 'cidr' || pageId === 'vlan' || pageId === 'entities') {
-      return !!(perms.cidr || perms.vlan || perms.entities);
-    }
-    return !!perms[pageId];
-  }, [auth.user]);
+  const canAccessPage = useCallback(
+    (pageId) => canAccessPageForUser(auth.user, pageId),
+    [auth.user],
+  );
 
   const cabinetMode = isCabinetMode(auth.user);
   const cabinetReadOnly = !!auth.user?.cabinet?.readOnly;
@@ -538,6 +560,19 @@ function App() {
       location.hash = 'dashboard';
     }
   }, [auth.user, registryReady, page]);
+
+  useEffect(() => {
+    if (!auth.user || !registryReady) return;
+    const afterLogin = applyStartPageAfterLoginRef.current;
+    const emptyHash = isEmptyAppHash();
+    if (!afterLogin && !emptyHash) return;
+    applyStartPageAfterLoginRef.current = false;
+    const target = resolveRoleLandingPage(auth.user, { validIds });
+    const currentHash = (location.hash || '').slice(1).split('?')[0];
+    if (currentHash === target && page === target) return;
+    setPage(target);
+    location.hash = target;
+  }, [auth.user, registryReady, validIds, page]);
 
   if (auth.loading || !registryReady) {
     return <AuthFrame title={t('auth.appTitle')} subtitle={t('auth.sessionChecking')} theme={theme} onToggleTheme={toggleTheme} locale={locale} onLocaleChange={handleLocaleChange} />;
