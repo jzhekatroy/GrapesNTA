@@ -51,6 +51,7 @@ const {
   normalizeVlanIdList,
 } = require('./queries');
 const { getVlanNameMap, vlanLabel } = require('./net-l2-vlans');
+const { loadObservationClients } = require('./observation-clients');
 
 const ARTIFACTS_DIR = path.join(__dirname, 'data', 'observation_runs');
 const CHART_IMAGE_FILE = 'chart.png';
@@ -2774,9 +2775,12 @@ function escapeHtml(s) {
 }
 
 async function listMaterializeJobs() {
-  const all = await loadAllObservations();
+  const [all, clients] = await Promise.all([loadAllObservations(), loadObservationClients()]);
+  // Наблюдение кабинета без своих фильтров — весь трафик клиента, а не общий
+  // трафик сети, поэтому его данные готовятся всегда.
   return all
-    .filter((o) => o.materialize?.enabled && classifyScope(o.filters, o.widgets).materializeRequired)
+    .filter((o) => o.materialize?.enabled
+      && (clients.has(o.id) || classifyScope(o.filters, o.widgets).materializeRequired))
     .map((o) => {
       const ts = (o.widgets || []).find((w) => w.type === 'timeseries_bps');
       const top = (o.widgets || []).find((w) => w.type === 'top_table' && w.groupBy?.length);
@@ -2801,6 +2805,7 @@ async function listMaterializeJobs() {
         backfillCursor: mat.backfillCursor || null,
         backfillDone: Boolean(mat.backfillDone),
         filters: o.filters,
+        cabinetClientId: clients.get(o.id) || null,
         groupBy,
         seriesLimit: Math.min(
           50,
