@@ -297,6 +297,11 @@ function isActiveMaterialize(o, exceptId = null) {
     && classifyScope(o.filters, o.widgets).materializeRequired;
 }
 
+function staffMaterializeQuotaPool(items, clientBindings) {
+  if (!clientBindings?.size) return items;
+  return items.filter((o) => !clientBindings.has(o.id));
+}
+
 function countActiveMaterialize(items, exceptId = null) {
   return items.filter((o) => isActiveMaterialize(o, exceptId)).length;
 }
@@ -533,10 +538,14 @@ function normalizeObservation(raw = {}, { userId, existing = null, cabinet = fal
   };
 }
 
-async function withMeta(item, allItems = null, user = null, ctx = null) {
+async function withMeta(item, allItems = null, user = null, ctx = null, clientBindings = null) {
   const scope = classifyScope(item.filters, item.widgets);
   const all = allItems || await loadAllObservations();
-  const active = countActiveMaterialize(all);
+  const bindings = clientBindings !== null && clientBindings !== undefined
+    ? clientBindings
+    : await loadObservationClients();
+  const quotaPool = staffMaterializeQuotaPool(all, bindings);
+  const active = countActiveMaterialize(quotaPool);
   const sectionId = ctx ? sectionIdForObservation(item.id, ctx) : GENERAL_SECTION_ID;
   const canEdit = user && ctx ? canEditInSection(ctx.access, sectionId) : undefined;
   const warnings = [];
@@ -569,7 +578,7 @@ async function withMeta(item, allItems = null, user = null, ctx = null) {
       maxMaterialize: MATERIALIZE_LIMIT_ENABLED ? MAX_MATERIALIZE : null,
       activeMaterialize: active,
       minIntervalSec: MIN_INTERVAL_SEC,
-      occupants: materializeOccupants(all),
+      occupants: materializeOccupants(quotaPool),
     },
     warnings,
     materializeIssue,
@@ -604,7 +613,7 @@ async function listObservations(user) {
       ctx.access,
       sectionIdForObservation(item.id, ctx),
     ));
-  return Promise.all(visible.map((item) => withMeta(item, all, user, ctx)));
+  return Promise.all(visible.map((item) => withMeta(item, all, user, ctx, clientBindings)));
 }
 
 async function getObservation(id, user) {
@@ -629,24 +638,32 @@ async function createObservation(user, payload = {}) {
     err.status = 403;
     throw err;
   }
-  const items = await loadAllObservations();
+  const [items, clientBindings] = await Promise.all([
+    loadAllObservations(),
+    loadObservationClients(),
+  ]);
+  const quotaPool = staffMaterializeQuotaPool(items, clientBindings);
   const item = normalizeObservation(payload, { userId: uid });
   if (MATERIALIZE_LIMIT_ENABLED
     && item.materialize.enabled
-    && countActiveMaterialize(items) >= MAX_MATERIALIZE) {
-    throw quotaError(items);
+    && countActiveMaterialize(quotaPool) >= MAX_MATERIALIZE) {
+    throw quotaError(quotaPool);
   }
   if (item.materialize.enabled) item.materialize.status = 'queued';
   await upsertObservation(item);
   await setObservationSection(item.id, targetSection);
   ctx.sectionMap[item.id] = targetSection;
-  return withMeta(item, [...items, item], user, ctx);
+  return withMeta(item, [...items, item], user, ctx, clientBindings);
 }
 
 async function updateObservation(id, user, payload = {}) {
   const ctx = await createObservationSectionContext(user);
   const uid = userIdOf(user);
-  const items = await loadAllObservations();
+  const [items, clientBindings] = await Promise.all([
+    loadAllObservations(),
+    loadObservationClients(),
+  ]);
+  const quotaPool = staffMaterializeQuotaPool(items, clientBindings);
   const existing = items.find((row) => row.id === id);
   if (!existing) return null;
   try {
@@ -671,8 +688,8 @@ async function updateObservation(id, user, payload = {}) {
   const next = normalizeObservation(payload, { userId: uid, existing });
   if (MATERIALIZE_LIMIT_ENABLED
     && next.materialize.enabled
-    && countActiveMaterialize(items, id) >= MAX_MATERIALIZE) {
-    throw quotaError(items, id);
+    && countActiveMaterialize(quotaPool, id) >= MAX_MATERIALIZE) {
+    throw quotaError(quotaPool, id);
   }
   if (next.materialize.enabled && !existing.materialize?.enabled) {
     next.materialize.status = 'queued';
@@ -688,7 +705,13 @@ async function updateObservation(id, user, payload = {}) {
     next.materialize.cancelRequested = false;
   }
   await upsertObservation(next);
-  return withMeta(next, items.map((row) => (row.id === id ? next : row)), user, ctx);
+  return withMeta(
+    next,
+    items.map((row) => (row.id === id ? next : row)),
+    user,
+    ctx,
+    clientBindings,
+  );
 }
 
 async function duplicateObservation(id, user, payload = {}) {
@@ -818,7 +841,11 @@ async function deleteObservation(id, user) {
 
 async function queueMaterialize(id, user) {
   const ctx = await createObservationSectionContext(user);
-  const items = await loadAllObservations();
+  const [items, clientBindings] = await Promise.all([
+    loadAllObservations(),
+    loadObservationClients(),
+  ]);
+  const quotaPool = staffMaterializeQuotaPool(items, clientBindings);
   const existing = items.find((row) => row.id === id);
   if (!existing) return null;
   try {
@@ -834,9 +861,9 @@ async function queueMaterialize(id, user) {
     throw err;
   }
   if (MATERIALIZE_LIMIT_ENABLED
-    && countActiveMaterialize(items, id) >= MAX_MATERIALIZE
+    && countActiveMaterialize(quotaPool, id) >= MAX_MATERIALIZE
     && !existing.materialize?.enabled) {
-    throw quotaError(items, id);
+    throw quotaError(quotaPool, id);
   }
   const refreshSec = Math.max(
     MIN_REFRESH_SEC,
@@ -859,7 +886,13 @@ async function queueMaterialize(id, user) {
     next.materialize.cursorMinute = existing.createdAt || new Date().toISOString();
   }
   await upsertObservation(next);
-  return withMeta(next, items.map((row) => (row.id === id ? next : row)), user, ctx);
+  return withMeta(
+    next,
+    items.map((row) => (row.id === id ? next : row)),
+    user,
+    ctx,
+    clientBindings,
+  );
 }
 
 const ROLLUP_BUCKET_MS = ROLLUP_BUCKET_SEC * 1000;

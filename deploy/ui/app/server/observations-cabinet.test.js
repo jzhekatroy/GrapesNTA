@@ -139,6 +139,7 @@ test('кабинетное наблюдение не попадает в listObs
     const { listObservations } = require(path.join(__dirname, 'observations'));
     const list = await listObservations({ id: 'u1', roleId: 'Administrator' });
     assert.deepEqual(list.map((o) => o.id), ['obs-staff']);
+    assert.equal(list[0].quotas.activeMaterialize, 1);
   } finally {
     for (const [resolved, mod] of Object.entries(saved)) {
       if (mod) require.cache[resolved] = mod;
