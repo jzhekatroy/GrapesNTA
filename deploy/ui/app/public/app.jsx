@@ -135,6 +135,7 @@ function App() {
   const authRef = useRef(auth);
   authRef.current = auth;
   const [refreshKey, setRefreshKey] = useState(0);
+  const [latestBuildInfo, setLatestBuildInfo] = useState(null);
   const [observationComposeTick, setObservationComposeTick] = useState(0);
   const themeInitialized = useRef(false);
   const lastAuditPageRef = useRef({ pageId: '', at: 0 });
@@ -280,7 +281,10 @@ function App() {
   }, [timeRange, customPeriod]);
 
   useEffect(() => {
-    if (!auth.user) return undefined;
+    if (!auth.user) {
+      setLatestBuildInfo(null);
+      return undefined;
+    }
 
     let cancelled = false;
     let baseline = '';
@@ -294,6 +298,7 @@ function App() {
       try {
         const info = await ApiClient.loadLatestBuildInfo();
         if (cancelled) return;
+        setLatestBuildInfo(info || null);
         const key = versionKey(info);
         if (!key) return;
         if (!baseline) {
@@ -663,6 +668,9 @@ function App() {
       case 'smtp':
         pageEl = <LazyPage pageId="smtp" key={refreshKey} />;
         break;
+      case 'versions':
+        pageEl = <LazyPage pageId="versions" key={refreshKey} displayTimezone={displayTimezone} />;
+        break;
       case 'dns':
         pageEl = cabinetMode
           ? (
@@ -848,6 +856,7 @@ function App() {
         cabinetMode={cabinetMode}
         clientDisplayName={clientDisplayName}
         onStopImpersonation={handleStopImpersonation}
+        buildInfo={latestBuildInfo}
       />
       <main className="main">
         {pageEl}

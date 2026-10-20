@@ -804,6 +804,13 @@ const ApiClient = (() => {
     return body.data || body;
   }
 
+  async function loadComponentVersions() {
+    const body = await getJson('/api/diagnostics/versions', {
+      widget: 'diagnostics/versions',
+    });
+    return body.data || body;
+  }
+
   async function hardReload() {
     if (window.caches) {
       try {
@@ -3185,6 +3192,7 @@ const ApiClient = (() => {
     loadFailedRequestsDiagnostics,
     loadBuildInfo,
     loadLatestBuildInfo,
+    loadComponentVersions,
     hardReload,
     loadObservation,
     createObservation,

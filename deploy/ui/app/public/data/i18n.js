@@ -19,8 +19,10 @@
     vlan: 'netmodel',
     users: 'admin',
     audit: 'admin',
+    versions: 'admin',
     clients: 'admin',
     smtp: 'admin',
+    diagnostics: 'admin',
     ttl: 'admin',
     'cabinet-settings': 'cabinet',
   };
