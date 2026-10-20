@@ -5,6 +5,8 @@
 .env.*
 .clickhouse.env
 deploy/clickhouse/bootstrap_users.local.sql
+.DS_Store
+.idea/
 
 # UI runtime secrets (bootstrapped on server)
 deploy/ui/.env
