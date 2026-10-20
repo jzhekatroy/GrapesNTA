@@ -82,13 +82,21 @@ async function assertObservationBoundToClient(observationId, clientId) {
   return loadObservationById(observationId);
 }
 
-async function countCabinetObservations(clientId) {
-  const bindings = await loadObservationClients();
-  let n = 0;
-  for (const cid of bindings.values()) {
-    if (cid === clientId) n += 1;
+function collectCabinetObservationIds(clientId, bindings, observations) {
+  const liveIds = new Set((observations || []).map((o) => o.id));
+  const ids = new Set();
+  for (const [obsId, cid] of bindings) {
+    if (cid === clientId && liveIds.has(obsId)) ids.add(obsId);
   }
-  return n;
+  return ids;
+}
+
+async function countCabinetObservations(clientId) {
+  const [all, bindings] = await Promise.all([
+    loadAllObservations(),
+    loadObservationClients(),
+  ]);
+  return collectCabinetObservationIds(clientId, bindings, all).size;
 }
 
 function cabinetMaterializeStatus(item) {
@@ -142,10 +150,7 @@ async function listCabinetObservations(clientId, { includeAuthor = false } = {})
     loadAllObservations(),
     loadObservationClients(),
   ]);
-  const ids = new Set();
-  for (const [obsId, cid] of bindings) {
-    if (cid === clientId) ids.add(obsId);
-  }
+  const ids = collectCabinetObservationIds(clientId, bindings, all);
   const usedCount = ids.size;
   const items = all.filter((o) => ids.has(o.id));
   items.sort((a, b) => String(b.updatedAt || '').localeCompare(String(a.updatedAt || '')));
@@ -236,7 +241,7 @@ async function duplicateCabinetObservation(clientId, user, observationId, payloa
     report: { enabled: false },
     createdAt: undefined,
     updatedAt: undefined,
-  }, { userId: uid, cabinet: true });
+  }, { userId: uid, existing: { id: newObservationId }, cabinet: true });
   await upsertObservation(copy);
   return getCabinetObservation(clientId, newObservationId);
 }

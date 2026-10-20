@@ -78,6 +78,9 @@ test('наблюдение клиента A недоступно клиенту 
       loadObservationClients: async () => new Map([['obs-a', 'client-a']]),
     },
     './observations-store': {
+      loadAllObservations: async () => [
+        { id: 'obs-a', name: 'A', filters: [], widgets: validWidgets, materialize: { enabled: true } },
+      ],
       loadObservationById: async (id) => (id === 'obs-a' ? { id: 'obs-a', name: 'A', filters: [], widgets: validWidgets, materialize: { enabled: true } } : null),
     },
   };
@@ -147,14 +150,19 @@ test('кабинетное наблюдение не попадает в listObs
 
 test('шестое наблюдение → 409', async () => {
   const bindings = new Map();
-  for (let i = 0; i < 5; i += 1) bindings.set(`obs-${i}`, 'client-q');
+  const obsRows = [];
+  for (let i = 0; i < 5; i += 1) {
+    const id = `obs-${i}`;
+    bindings.set(id, 'client-q');
+    obsRows.push({ id, name: `n${i}`, filters: [], widgets: validWidgets });
+  }
   const stubs = {
     './observation-clients': {
       loadObservationClients: async () => bindings,
       upsertObservationClient: async () => {},
     },
     './observations-store': {
-      loadAllObservations: async () => [],
+      loadAllObservations: async () => obsRows,
       upsertObservation: async () => {},
     },
     './users': {
@@ -236,6 +244,102 @@ test('createCabinetObservation: привязка до upsert и materialize вк
     assert.equal(order[1][0], 'upsert');
     assert.equal(order[1][2], true);
     assert.ok(order[0][1] === order[1][1]);
+  } finally {
+    for (const [resolved, mod] of Object.entries(saved)) {
+      if (mod) require.cache[resolved] = mod;
+      else delete require.cache[resolved];
+    }
+    delete require.cache[modPath];
+  }
+});
+
+test('квота не считает привязки без живого наблюдения', async () => {
+  const bindings = new Map([
+    ['obs-live', 'client-q'],
+    ['obs-deleted', 'client-q'],
+  ]);
+  const stubs = {
+    './observation-clients': {
+      loadObservationClients: async () => bindings,
+    },
+    './observations-store': {
+      loadAllObservations: async () => [
+        { id: 'obs-live', name: 'live', filters: [], widgets: validWidgets },
+      ],
+    },
+    './users': { getUserById: async () => null },
+  };
+  const modPath = require.resolve('./cabinet/observations');
+  const saved = {};
+  for (const [rel, exports] of Object.entries(stubs)) {
+    const resolved = require.resolve(rel);
+    saved[resolved] = require.cache[resolved];
+    require.cache[resolved] = { id: resolved, filename: resolved, loaded: true, exports };
+  }
+  delete require.cache[modPath];
+  try {
+    const { listCabinetObservations, countCabinetObservations } = require('./cabinet/observations');
+    const list = await listCabinetObservations('client-q');
+    assert.equal(list.length, 1);
+    assert.equal(list[0].quotas.usedObservations, 1);
+    assert.equal(await countCabinetObservations('client-q'), 1);
+  } finally {
+    for (const [resolved, mod] of Object.entries(saved)) {
+      if (mod) require.cache[resolved] = mod;
+      else delete require.cache[resolved];
+    }
+    delete require.cache[modPath];
+  }
+});
+
+test('duplicateCabinetObservation сохраняет id привязки', async () => {
+  const bindings = new Map([['obs-src', 'client-q']]);
+  let upsertedId = null;
+  const stubs = {
+    './observation-clients': {
+      loadObservationClients: async () => bindings,
+      upsertObservationClient: async (obsId) => {
+        bindings.set(obsId, 'client-q');
+      },
+    },
+    './observations-store': {
+      loadAllObservations: async () => [{
+        id: 'obs-src',
+        name: 'Src',
+        filters: [],
+        widgets: validWidgets,
+        materialize: { enabled: true },
+        ownerId: 'u1',
+      }],
+      loadObservationById: async (id) => ({
+        id,
+        name: id === 'obs-src' ? 'Src' : 'Src (копия)',
+        filters: [],
+        widgets: validWidgets,
+        materialize: { enabled: true },
+        ownerId: 'u1',
+      }),
+      upsertObservation: async (item) => {
+        upsertedId = item.id;
+      },
+    },
+    './users': { getUserById: async () => ({ id: 'u1', roleId: 'Client' }) },
+  };
+  const modPath = require.resolve('./cabinet/observations');
+  const saved = {};
+  for (const [rel, exports] of Object.entries(stubs)) {
+    const resolved = require.resolve(rel);
+    saved[resolved] = require.cache[resolved];
+    require.cache[resolved] = { id: resolved, filename: resolved, loaded: true, exports };
+  }
+  delete require.cache[modPath];
+  try {
+    const { duplicateCabinetObservation } = require('./cabinet/observations');
+    const copy = await duplicateCabinetObservation('client-q', { id: 'u1' }, 'obs-src', {});
+    assert.ok(copy);
+    assert.notEqual(copy.id, 'obs-src');
+    assert.equal(upsertedId, copy.id);
+    assert.equal(bindings.get(copy.id), 'client-q');
   } finally {
     for (const [resolved, mod] of Object.entries(saved)) {
       if (mod) require.cache[resolved] = mod;

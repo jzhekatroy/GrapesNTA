@@ -2936,7 +2936,9 @@ function PageObservations({
   }
 
   const cabinetMax = config?.maxObservations ?? sectionItems[0]?.quotas?.maxObservations ?? 5;
-  const cabinetUsed = sectionItems[0]?.quotas?.usedObservations ?? sectionItems.length;
+  const cabinetUsed = isCabinetLike && !obsApi.isStaffClient
+    ? sectionItems.length
+    : (sectionItems[0]?.quotas?.usedObservations ?? sectionItems.length);
   const atCabinetLimit = isCabinetLike && !obsApi.isStaffClient && cabinetUsed >= cabinetMax;
 
   const boardToolbar = (sticky = false) => (
