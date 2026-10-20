@@ -1,6 +1,10 @@
 const express = require('express');
 const { query } = require('../clickhouse');
-const { canWrite } = require('../rbac/permissions');
+const { canAccess, canWrite } = require('../rbac/permissions');
+const {
+  canStaffMutateClientObservations,
+  canStaffViewClientObservations,
+} = require('./staff-observations-access');
 const {
   executeExplorerQueryBundle,
 } = require('../explorer');
@@ -541,7 +545,7 @@ function createCabinetRouter({ sessions }) {
   router.get('/:clientId/observations/config', async (req, res) => {
     try {
       if (rejectCabinetSessionForStaff(req, res)) return;
-      if (!(await canWrite(req.user, CLIENTS_RESOURCE))) {
+      if (!(await canStaffViewClientObservations(req.user))) {
         res.status(403).json({ error: 'Недостаточно прав' });
         return;
       }
@@ -554,7 +558,7 @@ function createCabinetRouter({ sessions }) {
   router.get('/:clientId/observations', async (req, res) => {
     try {
       if (rejectCabinetSessionForStaff(req, res)) return;
-      if (!(await canWrite(req.user, CLIENTS_RESOURCE))) {
+      if (!(await canStaffViewClientObservations(req.user))) {
         res.status(403).json({ error: 'Недостаточно прав' });
         return;
       }
@@ -567,7 +571,7 @@ function createCabinetRouter({ sessions }) {
   router.post('/:clientId/observations', async (req, res) => {
     try {
       if (rejectCabinetSessionForStaff(req, res)) return;
-      if (!(await canWrite(req.user, CLIENTS_RESOURCE))) {
+      if (!(await canStaffMutateClientObservations(req.user))) {
         res.status(403).json({ error: 'Недостаточно прав' });
         return;
       }
@@ -588,7 +592,7 @@ function createCabinetRouter({ sessions }) {
   router.put('/:clientId/observations/:id', async (req, res) => {
     try {
       if (rejectCabinetSessionForStaff(req, res)) return;
-      if (!(await canWrite(req.user, CLIENTS_RESOURCE))) {
+      if (!(await canStaffMutateClientObservations(req.user))) {
         res.status(403).json({ error: 'Недостаточно прав' });
         return;
       }
@@ -613,7 +617,7 @@ function createCabinetRouter({ sessions }) {
   router.delete('/:clientId/observations/:id', async (req, res) => {
     try {
       if (rejectCabinetSessionForStaff(req, res)) return;
-      if (!(await canWrite(req.user, CLIENTS_RESOURCE))) {
+      if (!(await canStaffMutateClientObservations(req.user))) {
         res.status(403).json({ error: 'Недостаточно прав' });
         return;
       }
@@ -639,7 +643,7 @@ function createCabinetRouter({ sessions }) {
   router.post('/:clientId/observations/:id/preview', async (req, res) => {
     try {
       if (rejectCabinetSessionForStaff(req, res)) return;
-      if (!(await canWrite(req.user, CLIENTS_RESOURCE))) {
+      if (!(await canStaffViewClientObservations(req.user))) {
         res.status(403).json({ error: 'Недостаточно прав' });
         return;
       }
@@ -709,7 +713,7 @@ function createClientsRouter({ sessions }) {
 
   router.get('/', async (req, res) => {
     try {
-      if (!(await canWrite(req.user, CLIENTS_RESOURCE))) {
+      if (!(await canAccess(req.user, CLIENTS_RESOURCE))) {
         res.status(403).json({ error: 'Недостаточно прав' });
         return;
       }

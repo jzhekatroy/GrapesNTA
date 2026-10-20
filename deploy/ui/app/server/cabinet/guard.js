@@ -122,11 +122,18 @@ function createCabinetGuard({ sessions, getEnabledClientFn = getEnabledClient })
       }
 
       if (context.readOnly && isMutatingMethod(req.method)) {
-        const allowedWrite = apiPath === '/api/auth/stop-impersonation'
+        let allowedWrite = apiPath === '/api/auth/stop-impersonation'
           || apiPath === '/api/auth/logout'
           || apiPath === '/api/auth/locale'
           || apiPath === '/api/audit/page'
           || isReadOnlyCabinetPost(apiPath);
+        if (!allowedWrite
+          && /^\/api\/cabinet\/observations(\/|$)/.test(apiPath)
+          && !isReadOnlyCabinetPost(apiPath)
+          && req.user) {
+          const { canStaffMutateClientObservations } = require('./staff-observations-access');
+          allowedWrite = await canStaffMutateClientObservations(req.user);
+        }
         if (!allowedWrite) {
           res.status(403).json({ error: 'Режим просмотра кабинета: только чтение' });
           return;

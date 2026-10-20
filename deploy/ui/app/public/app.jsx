@@ -199,6 +199,7 @@ function App() {
   }, []);
 
   useEffect(() => {
+    AuthAccess.setEffectivePermissions(auth.user?.effectivePermissions || null);
     AuthAccess.setEffectiveWritePermissions(auth.user?.effectiveWritePermissions || null);
   }, [auth.user]);
 

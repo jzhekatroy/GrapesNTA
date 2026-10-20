@@ -17,6 +17,11 @@ function isObservationsBoardLayoutPath(path) {
   return p === '/api/observations/board-layout';
 }
 
+function isStaffClientObservationsPath(path) {
+  const p = normalizeApiPath(path);
+  return /^\/api\/cabinet\/[^/]+\/observations(\/|$)/.test(p);
+}
+
 function getResourceForPath(path, method) {
   const p = normalizeApiPath(path);
 
@@ -109,4 +114,5 @@ module.exports = {
   isMutatingRequest,
   isDashboardLayoutPath,
   isObservationsBoardLayoutPath,
+  isStaffClientObservationsPath,
 };

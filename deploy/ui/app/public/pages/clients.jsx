@@ -235,7 +235,9 @@ function sessionStatusBadge(session) {
 }
 
 function PageClients({ onAuthRefresh, onNavigate }) {
+  const canAccessClients = AuthAccess.canAccessPage('clients');
   const canWrite = AuthAccess.canWritePage('clients');
+  const canManageClientObservations = canWrite || AuthAccess.canWritePage('observations');
   const [pageTab, setPageTab] = useState('clients');
   const [rows, setRows] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -250,7 +252,7 @@ function PageClients({ onAuthRefresh, onNavigate }) {
   const reload = useCallback(() => setRefreshKey((k) => k + 1), []);
 
   useEffect(() => {
-    if (!canWrite) {
+    if (!canAccessClients) {
       setLoading(false);
       setLoadError(clientsT('clientsPage.forbidden'));
       setRows([]);
@@ -277,7 +279,7 @@ function PageClients({ onAuthRefresh, onNavigate }) {
       }
     })();
     return () => { cancelled = true; };
-  }, [refreshKey, canWrite]);
+  }, [refreshKey, canAccessClients]);
 
   const filtered = useMemo(() => {
     if (!search) return rows;
@@ -511,7 +513,7 @@ function PageClients({ onAuthRefresh, onNavigate }) {
           selected={selected}
           onSelectChange={setSelected}
           pageSize={15}
-          onRowClick={canWrite ? (r) => setDrawerClient({ ...r }) : undefined}
+          onRowClick={canAccessClients ? (r) => setDrawerClient({ ...r }) : undefined}
           getRowClassName={(r) => (r.enabled ? '' : 'is-disabled')}
           emptyTitle={clientsT('clientsPage.empty.title')}
           emptyDesc={clientsT('clientsPage.empty.desc')}
@@ -557,6 +559,7 @@ function PageClients({ onAuthRefresh, onNavigate }) {
       <ClientDrawer
         client={drawerClient}
         canWrite={canWrite}
+        canManageClientObservations={canManageClientObservations}
         onClose={() => setDrawerClient(null)}
         onSaved={handleClientSaved}
         onImpersonate={handleImpersonate}
@@ -681,7 +684,7 @@ function ClientCreateModal({ open, onClose, onCreated }) {
   );
 }
 
-function ClientDrawer({ client, canWrite, onClose, onSaved, onImpersonate, onUsersChanged }) {
+function ClientDrawer({ client, canWrite, canManageClientObservations = false, onClose, onSaved, onImpersonate, onUsersChanged }) {
   const [tab, setTab] = useState('general');
   const [displayName, setDisplayName] = useState('');
   const [comment, setComment] = useState('');
@@ -811,7 +814,7 @@ function ClientDrawer({ client, canWrite, onClose, onSaved, onImpersonate, onUse
           )}
 
           {tab === 'observations' && (
-            <ClientObservationsTab client={client} canWrite={canWrite} />
+            <ClientObservationsTab client={client} canWrite={canManageClientObservations} />
           )}
 
           {tab === 'audit' && (
