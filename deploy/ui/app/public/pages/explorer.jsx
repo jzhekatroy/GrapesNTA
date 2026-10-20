@@ -3055,6 +3055,7 @@ function createExplorerApi(cabinetMode) {
       supportsSavedFilters: true,
       supportsObservations: true,
       maxRangeDays: EXPLORER_MAX_RANGE_DAYS,
+      isCabinet: false,
     };
   }
   return {
@@ -3066,8 +3067,9 @@ function createExplorerApi(cabinetMode) {
     loadSharedSnapshot: (token) => ApiClient.loadExplorerSharedSnapshot(token, true),
     shareSnapshot: (id) => ApiClient.shareExplorerSnapshot(id, true),
     supportsSavedFilters: false,
-    supportsObservations: false,
+    supportsObservations: true,
     maxRangeDays: 6,
+    isCabinet: true,
   };
 }
 
@@ -3158,8 +3160,34 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
     () => observationSections.filter((s) => s.level === 'edit'),
     [observationSections],
   );
-  const canWriteObservation = !cabinetMode && (AuthAccess.canWritePage('observations') || canWrite);
-  const canCreateObservation = canWriteObservation && observationEditSections.length > 0;
+  const [cabinetObsQuota, setCabinetObsQuota] = useState(null);
+  useEffect(() => {
+    if (!cabinetMode || readOnly) return undefined;
+    let cancelled = false;
+    Promise.all([
+      ApiClient.loadCabinetObservations(),
+      ApiClient.loadCabinetObservationsConfig(),
+    ]).then(([list, cfg]) => {
+      if (cancelled) return;
+      const max = cfg?.maxObservations || 5;
+      setCabinetObsQuota({ used: (list || []).length, max });
+    }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [cabinetMode, readOnly]);
+
+  const atCabinetObsLimit = cabinetMode
+    && cabinetObsQuota
+    && cabinetObsQuota.used >= cabinetObsQuota.max;
+  const canWriteObservation = !readOnly && (
+    cabinetMode
+    || AuthAccess.canWritePage('observations')
+    || canWrite
+  );
+  const canCreateObservation = canWriteObservation && (
+    cabinetMode
+      ? !atCabinetObsLimit
+      : observationEditSections.length > 0
+  );
   const [hasAppliedQuery, setHasAppliedQuery] = useState(false);
   const [appliedSnapshot, setAppliedSnapshot] = useState(null);
   const [queryVersion, setQueryVersion] = useState(0);
@@ -4018,31 +4046,39 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
         }
       }
       if (!updated) {
-        const sectionId = pickObservationCreateSectionId(observationSections);
-        if (!sectionId) {
-          pushToast({ kind: 'error', title: explorerT('explorer.obsSaveFailed'), desc: explorerT('observations.section.empty') });
-          return;
+        if (!cabinetMode) {
+          const sectionId = pickObservationCreateSectionId(observationSections);
+          if (!sectionId) {
+            pushToast({ kind: 'error', title: explorerT('explorer.obsSaveFailed'), desc: explorerT('observations.section.empty') });
+            return;
+          }
         }
         const payload = {
           name: (name || '').trim() || explorerT('explorer.observationDefaultName', { metric: metricLabel }),
           description: '',
           lookback: tileLookback,
-          sectionId,
           explorerQuery: explorerQuerySnapshot,
           filters: nextFilters,
           thresholds: validThresholds,
           widgets: buildCreateWidgets('stack'),
-          materialize: { enabled: materializeEnabled !== false },
-          report: {
+          materialize: { enabled: true },
+          report: { enabled: false },
+        };
+        if (!cabinetMode) {
+          payload.sectionId = pickObservationCreateSectionId(observationSections);
+          payload.materialize = { enabled: materializeEnabled !== false };
+          payload.report = {
             enabled: !!reportEnabled,
             period: reportPeriod || 'yesterday',
             cron: '0 8 * * *',
             timezone: 'Europe/Moscow',
             formats: ['html', 'csv'],
             emailTo: [],
-          },
-        };
-        const res = await ApiClient.createObservation(payload);
+          };
+        }
+        const res = cabinetMode
+          ? await ApiClient.createCabinetObservation(payload)
+          : await ApiClient.createObservation(payload);
         id = res.data?.id;
         pushToast({
           kind: 'success',

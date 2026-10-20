@@ -5228,4 +5228,5 @@ module.exports = {
   summaryFromExplorerFlowRows,
   buildSummaryFromFlowRows: summaryFromExplorerFlowRows,
   combineExplorerFilterSql,
+  validateCabinetExplorerFields,
 };

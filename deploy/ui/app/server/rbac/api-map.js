@@ -58,6 +58,7 @@ function getResourceForPath(path, method) {
     return 'audit';
   }
   if (p.startsWith('/api/diagnostics')) return 'diagnostics';
+  if (/^\/api\/cabinet\/[^/]+\/observations(\/|$)/.test(p)) return 'clients';
   if (p.startsWith('/api/cabinet/')) return null;
   if (p.startsWith('/api/clients')) return 'clients';
   if (p.startsWith('/api/users') || p.startsWith('/api/rbac/')) {
@@ -71,6 +72,7 @@ function isResourceGuardExempt(path) {
   const p = normalizeApiPath(path);
   if (p === '/api/health') return true;
   if (p.startsWith('/api/auth/')) return true;
+  if (/^\/api\/cabinet\/[^/]+\/observations(\/|$)/.test(p)) return false;
   if (p.startsWith('/api/cabinet/')) return true;
   return false;
 }
@@ -79,6 +81,8 @@ function isResourceGuardExempt(path) {
 const READ_ONLY_POST_PATHS = [
   /^\/api\/users\/[^/]+\/password(-reset)?$/,
   /^\/api\/observations\/[^/]+\/preview$/,
+  /^\/api\/cabinet\/observations\/[^/]+\/preview$/,
+  /^\/api\/cabinet\/[^/]+\/observations\/[^/]+\/preview$/,
   /^\/api\/explorer\/query$/,
   /^\/api\/explorer\/flows$/,
   /^\/api\/explorer\/export$/,

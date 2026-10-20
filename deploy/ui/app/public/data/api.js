@@ -923,6 +923,84 @@ const ApiClient = (() => {
     return `/api/observations/${encodeURIComponent(observationId)}/runs/${encodeURIComponent(runId)}/artifact?${q}`;
   }
 
+  function staffClientObservationsBase(clientId) {
+    return `/api/cabinet/${encodeURIComponent(clientId)}/observations`;
+  }
+
+  async function loadCabinetObservationsConfig() {
+    const body = await getJson('/api/cabinet/observations/config', { widget: 'cabinet/observations/config' });
+    return body.data;
+  }
+
+  async function loadCabinetObservations() {
+    const body = await getJson('/api/cabinet/observations', { widget: 'cabinet/observations/list' });
+    return body.data || [];
+  }
+
+  async function loadCabinetObservationsBoardLayout() {
+    const body = await getJson('/api/cabinet/observations/board-layout', { widget: 'cabinet/observations/board-layout' });
+    return { data: body.data || null, updatedAt: body.updatedAt || null };
+  }
+
+  async function saveCabinetObservationsBoardLayout(layout) {
+    return requestJson('/api/cabinet/observations/board-layout', { method: 'PUT', body: layout });
+  }
+
+  async function loadCabinetObservation(id) {
+    const body = await getJson(`/api/cabinet/observations/${encodeURIComponent(id)}`, { widget: 'cabinet/observations/get' });
+    return body.data;
+  }
+
+  async function createCabinetObservation(payload) {
+    return requestJson('/api/cabinet/observations', { method: 'POST', body: payload });
+  }
+
+  async function updateCabinetObservation(id, payload) {
+    return requestJson(`/api/cabinet/observations/${encodeURIComponent(id)}`, { method: 'PUT', body: payload });
+  }
+
+  async function deleteCabinetObservation(id) {
+    return requestJson(`/api/cabinet/observations/${encodeURIComponent(id)}`, { method: 'DELETE' });
+  }
+
+  async function previewCabinetObservation(id, payload = {}) {
+    return requestJson(`/api/cabinet/observations/${encodeURIComponent(id)}/preview`, { method: 'POST', body: payload });
+  }
+
+  async function duplicateCabinetObservation(id, payload = {}) {
+    return requestJson(`/api/cabinet/observations/${encodeURIComponent(id)}/duplicate`, { method: 'POST', body: payload });
+  }
+
+  async function retryCabinetObservation(id) {
+    return requestJson(`/api/cabinet/observations/${encodeURIComponent(id)}/retry`, { method: 'POST', body: {} });
+  }
+
+  async function loadStaffClientObservationsConfig(clientId) {
+    const body = await getJson(`${staffClientObservationsBase(clientId)}/config`, { widget: 'staff/client-observations/config' });
+    return body.data;
+  }
+
+  async function loadStaffClientObservations(clientId) {
+    const body = await getJson(staffClientObservationsBase(clientId), { widget: 'staff/client-observations/list' });
+    return body.data || [];
+  }
+
+  async function createStaffClientObservation(clientId, payload) {
+    return requestJson(staffClientObservationsBase(clientId), { method: 'POST', body: payload });
+  }
+
+  async function updateStaffClientObservation(clientId, id, payload) {
+    return requestJson(`${staffClientObservationsBase(clientId)}/${encodeURIComponent(id)}`, { method: 'PUT', body: payload });
+  }
+
+  async function deleteStaffClientObservation(clientId, id) {
+    return requestJson(`${staffClientObservationsBase(clientId)}/${encodeURIComponent(id)}`, { method: 'DELETE' });
+  }
+
+  async function previewStaffClientObservation(clientId, id, payload = {}) {
+    return requestJson(`${staffClientObservationsBase(clientId)}/${encodeURIComponent(id)}/preview`, { method: 'POST', body: payload });
+  }
+
   async function loadSmtpSettings() {
     const body = await getJson('/api/settings/smtp', { widget: 'settings/smtp' });
     return body.data;
@@ -3238,6 +3316,23 @@ const ApiClient = (() => {
     cancelObservationMaterialize,
     retryObservationMaterialize,
     observationRunArtifactUrl,
+    loadCabinetObservationsConfig,
+    loadCabinetObservations,
+    loadCabinetObservationsBoardLayout,
+    saveCabinetObservationsBoardLayout,
+    loadCabinetObservation,
+    createCabinetObservation,
+    updateCabinetObservation,
+    deleteCabinetObservation,
+    previewCabinetObservation,
+    duplicateCabinetObservation,
+    retryCabinetObservation,
+    loadStaffClientObservationsConfig,
+    loadStaffClientObservations,
+    createStaffClientObservation,
+    updateStaffClientObservation,
+    deleteStaffClientObservation,
+    previewStaffClientObservation,
     loadSmtpSettings,
     saveSmtpSettings,
     testSmtpSettings,

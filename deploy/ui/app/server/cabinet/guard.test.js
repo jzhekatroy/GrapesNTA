@@ -23,6 +23,7 @@ test('client allowlist permits cabinet and auth, denies operator APIs', () => {
   assert.equal(isReadOnlyCabinetPost('/api/cabinet/explorer/query'), true);
   assert.equal(isReadOnlyCabinetPost('/api/cabinet/explorer/flows'), true);
   assert.equal(isReadOnlyCabinetPost('/api/cabinet/explorer/export'), true);
+  assert.equal(isReadOnlyCabinetPost('/api/cabinet/observations/obs-1/preview'), true);
   assert.equal(isReadOnlyCabinetPost('/api/cabinet/explorer/snapshots/x/share'), false);
 });
 
@@ -270,5 +271,7 @@ test('impersonation guard allows read-only cabinet explorer POSTs', async () => 
 
 test('Client role page resources include cabinet pages only', () => {
   const { CLIENT_PAGE_RESOURCES } = require('./constants');
-  assert.deepEqual([...CLIENT_PAGE_RESOURCES].sort(), ['cabinet-settings', 'dashboard', 'dns', 'explorer']);
+  assert.deepEqual([...CLIENT_PAGE_RESOURCES].sort(), [
+    'cabinet-settings', 'dashboard', 'dns', 'explorer', 'observations',
+  ]);
 });

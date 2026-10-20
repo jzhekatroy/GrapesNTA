@@ -23,6 +23,7 @@ const CABINET_READONLY_POST_ALLOWLIST = [
   /^\/api\/cabinet\/explorer\/query$/,
   /^\/api\/cabinet\/explorer\/flows$/,
   /^\/api\/cabinet\/explorer\/export$/,
+  /^\/api\/cabinet\/observations\/[^/]+\/preview$/,
 ];
 
 function pathAllowedForClient(path) {
@@ -100,6 +101,11 @@ function createCabinetGuard({ sessions, getEnabledClientFn = getEnabledClient })
 
       const apiPath = requestApiPath(req);
       if (!pathAllowedForClient(apiPath)) {
+        res.status(403).json({ error: 'Недостаточно прав' });
+        return;
+      }
+
+      if (/^\/api\/cabinet\/[^/]+\/observations(\/|$)/.test(apiPath)) {
         res.status(403).json({ error: 'Недостаточно прав' });
         return;
       }

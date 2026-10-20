@@ -3044,6 +3044,9 @@ app.listen(PORT, () => {
           console.log('Cabinet impersonation audit ready.');
           await ensureObservationsStore();
           console.log('Observations store ready (ClickHouse).');
+          const { ensureObservationClientsTable } = require('./observation-clients');
+          await ensureObservationClientsTable();
+          console.log('Observation client bindings ready (ClickHouse).');
           ensureAnalysisSnapshotsStore();
           console.log('Analysis snapshots store ready (SQLite).');
         })

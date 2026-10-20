@@ -1120,7 +1120,12 @@ function ObservationLiveTile({
   onDragHandleMouseDown,
   onHide,
   onDuplicate,
+  previewFn,
+  hideReports = false,
+  isCabinetLike = false,
+  cabinetStatusLabel = null,
 }) {
+  const previewObservationFn = previewFn || ApiClient.previewObservation.bind(ApiClient);
   const [preview, setPreview] = useState(null);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(true);
@@ -1187,7 +1192,7 @@ function ObservationLiveTile({
     function tick(opts = { initial: true }) {
       if (opts.initial) setLoading(true);
       else setRefreshing(true);
-      ApiClient.previewObservation(item.id, previewPayload)
+      previewObservationFn(item.id, previewPayload)
         .then((body) => {
           if (cancelled) return;
           const data = body.data || body;
@@ -1211,10 +1216,10 @@ function ObservationLiveTile({
       cancelled = true;
       if (timer) clearTimeout(timer);
     };
-  }, [item.id, previewPayload]);
+  }, [item.id, previewPayload, previewObservationFn]);
 
   useEffect(() => {
-    if (!expanded) return undefined;
+    if (!expanded || hideReports) return undefined;
     let cancelled = false;
     ApiClient.loadObservationRuns(item.id)
       .then((rows) => {
@@ -1345,6 +1350,11 @@ function ObservationLiveTile({
         ) : null}
         <div style={{ flex: 1, minWidth: 160 }}>
           <div className="obs-tile__title">{item.name}</div>
+          {cabinetStatusLabel ? (
+            <div style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-secondary)', marginTop: 2 }}>
+              {cabinetStatusLabel}
+            </div>
+          ) : null}
           {item.description ? <div className="obs-tile__desc">{item.description}</div> : null}
           {isNativeAggregate && verboseMeta && nativeSummary ? (
             <div className="obs-tile__filter-scope" style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-secondary)' }}>
@@ -1461,6 +1471,11 @@ function ObservationLiveTile({
       {chartWidget?.warning && (
         <div style={{ color: 'var(--fg-warning)', font: 'var(--pv-text-body-3)' }}>
           {chartWidget.warning}
+        </div>
+      )}
+      {isCabinetLike && !loading && !points.length && !chartWidget?.warning && (
+        <div style={{ color: 'var(--fg-secondary)', font: 'var(--pv-text-body-3)' }}>
+          {obsT('cabinet.observations.tilePending')}
         </div>
       )}
 
@@ -1949,9 +1964,93 @@ function ObservationBoardTilePhantom({
   );
 }
 
-function PageObservations({ onNavigate }) {
+function createObservationsApi({ cabinetMode = false, staffClientId = null } = {}) {
+  if (staffClientId) {
+    const clientId = staffClientId;
+    return {
+      isCabinet: true,
+      isStaffClient: true,
+      loadConfig: () => ApiClient.loadStaffClientObservationsConfig(clientId),
+      loadList: () => ApiClient.loadStaffClientObservations(clientId),
+      loadBoardLayout: async () => ({ data: null, updatedAt: null }),
+      saveBoardLayout: async () => ({ ok: true }),
+      loadSections: async () => [],
+      loadObservation: async (id) => {
+        const list = await ApiClient.loadStaffClientObservations(clientId);
+        return (list || []).find((row) => row.id === id) || null;
+      },
+      create: (payload) => ApiClient.createStaffClientObservation(clientId, payload),
+      update: (id, payload) => ApiClient.updateStaffClientObservation(clientId, id, payload),
+      delete: (id) => ApiClient.deleteStaffClientObservation(clientId, id),
+      preview: (id, payload) => ApiClient.previewStaffClientObservation(clientId, id, payload),
+      duplicate: () => Promise.reject(new Error('Duplicate not available')),
+      retry: () => Promise.reject(new Error('Retry not available')),
+      cancelMaterialize: () => Promise.reject(new Error('Cancel not available')),
+    };
+  }
+  if (cabinetMode) {
+    return {
+      isCabinet: true,
+      isStaffClient: false,
+      loadConfig: () => ApiClient.loadCabinetObservationsConfig(),
+      loadList: () => ApiClient.loadCabinetObservations(),
+      loadBoardLayout: () => ApiClient.loadCabinetObservationsBoardLayout(),
+      saveBoardLayout: (layout) => ApiClient.saveCabinetObservationsBoardLayout(layout),
+      loadSections: async () => [],
+      loadObservation: (id) => ApiClient.loadCabinetObservation(id),
+      create: (payload) => ApiClient.createCabinetObservation(payload),
+      update: (id, payload) => ApiClient.updateCabinetObservation(id, payload),
+      delete: (id) => ApiClient.deleteCabinetObservation(id),
+      preview: (id, payload) => ApiClient.previewCabinetObservation(id, payload),
+      duplicate: (id, payload) => ApiClient.duplicateCabinetObservation(id, payload),
+      retry: (id) => ApiClient.retryCabinetObservation(id),
+      cancelMaterialize: () => Promise.reject(new Error('Cancel not available')),
+    };
+  }
+  return {
+    isCabinet: false,
+    isStaffClient: false,
+    loadConfig: () => ApiClient.loadObservationsConfig(),
+    loadList: () => ApiClient.loadObservations(),
+    loadBoardLayout: () => ApiClient.loadObservationsBoardLayout(),
+    saveBoardLayout: (layout) => ApiClient.saveObservationsBoardLayout(layout),
+    loadSections: () => ApiClient.loadObservationSections(),
+    loadObservation: (id) => ApiClient.loadObservation(id),
+    create: (payload) => ApiClient.createObservation(payload),
+    update: (id, payload) => ApiClient.updateObservation(id, payload),
+    delete: (id) => ApiClient.deleteObservation(id),
+    preview: (id, payload) => ApiClient.previewObservation(id, payload),
+    duplicate: (id, payload) => ApiClient.duplicateObservation(id, payload),
+    retry: (id) => ApiClient.retryObservationMaterialize(id),
+    cancelMaterialize: (id) => ApiClient.cancelObservationMaterialize(id),
+  };
+}
+
+function cabinetObservationStatusLabel(item) {
+  const st = item?.cabinetStatus || item?.materialize?.status;
+  if (st === 'ready') return obsT('cabinet.observations.status.ready');
+  if (st === 'error') return obsT('cabinet.observations.status.error');
+  return obsT('cabinet.observations.status.preparing');
+}
+
+function PageObservations({
+  onNavigate,
+  cabinetMode = false,
+  readOnly = false,
+  staffClientId = null,
+  embedded = false,
+}) {
+  const obsApi = useMemo(
+    () => createObservationsApi({ cabinetMode, staffClientId }),
+    [cabinetMode, staffClientId],
+  );
+  const isCabinetLike = obsApi.isCabinet;
   const canWriteObservations = AuthAccess.canWritePage('observations');
-  const canWrite = canWriteObservations || AuthAccess.canWritePage('explorer');
+  const canWrite = !readOnly && (
+    isCabinetLike
+    || canWriteObservations
+    || AuthAccess.canWritePage('explorer')
+  );
   const [config, setConfig] = useState(null);
   const [sections, setSections] = useState([]);
   const [activeSectionId, setActiveSectionId] = useState(null);
@@ -2003,14 +2102,14 @@ function PageObservations({ onNavigate }) {
 
   const reload = useCallback(async () => {
     const [cfg, list, layoutResp, sectionList] = await Promise.all([
-      ApiClient.loadObservationsConfig(),
-      ApiClient.loadObservations(),
-      ApiClient.loadObservationsBoardLayout(),
-      ApiClient.loadObservationSections(),
+      obsApi.loadConfig(),
+      obsApi.loadList(),
+      obsApi.loadBoardLayout(),
+      obsApi.loadSections(),
     ]);
     setConfig(cfg);
     setItems(list);
-    setSections(sectionList || []);
+    setSections(isCabinetLike ? [] : (sectionList || []));
     const savedIds = layoutResp?.data?.observationIds;
     const savedHiddenIds = layoutResp?.data?.hiddenObservationIds;
     const availableIds = new Set(list.map((item) => item.id));
@@ -2045,7 +2144,7 @@ function PageObservations({ onNavigate }) {
       });
     }
     return list;
-  }, []);
+  }, [obsApi, isCabinetLike]);
 
   useEffect(() => {
     editModeRef.current = editMode;
@@ -2134,7 +2233,7 @@ function PageObservations({ onNavigate }) {
     }
     setBoardSaveStatus('saving');
     try {
-      await ApiClient.saveObservationsBoardLayout({
+      await obsApi.saveBoardLayout({
         version: 1,
         observationIds: nextIds,
         hiddenObservationIds: nextHiddenIds,
@@ -2269,16 +2368,17 @@ function PageObservations({ onNavigate }) {
     () => sections.find((s) => s.id === activeSectionId) || null,
     [sections, activeSectionId],
   );
-  const sectionCanEdit = activeSection?.level === 'edit';
+  const sectionCanEdit = isCabinetLike ? canWrite : activeSection?.level === 'edit';
   const editableSections = useMemo(
     () => sections.filter((s) => s.level === 'edit'),
     [sections],
   );
 
   const sectionItems = useMemo(() => {
+    if (isCabinetLike) return items;
     if (!activeSectionId) return items;
     return items.filter((item) => (item.sectionId || 'general') === activeSectionId);
-  }, [items, activeSectionId]);
+  }, [items, activeSectionId, isCabinetLike]);
 
   const displayItems = useMemo(() => {
     const orderIds = editMode
@@ -2308,6 +2408,7 @@ function PageObservations({ onNavigate }) {
   }, [items, editDraftOrderIds, editDraftHiddenIds, editMode]);
 
   useEffect(() => {
+    if (isCabinetLike) return undefined;
     let cancelled = false;
     ApiClient.loadDashboardCollectors()
       .then(({ collectors: collectorRows, locations: locationRows }) => {
@@ -2322,7 +2423,7 @@ function PageObservations({ onNavigate }) {
         }
       });
     return () => { cancelled = true; };
-  }, []);
+  }, [isCabinetLike]);
 
   useEffect(() => {
     reload()
@@ -2384,14 +2485,14 @@ function PageObservations({ onNavigate }) {
   const runDuplicate = useCallback(async (observationId, targetSectionId) => {
     setError('');
     try {
-      await ApiClient.duplicateObservation(observationId, targetSectionId ? { sectionId: targetSectionId } : {});
+      await obsApi.duplicate(observationId, targetSectionId ? { sectionId: targetSectionId } : {});
       setCopyDialog(null);
       await reload();
       pushToast?.({ kind: 'success', title: obsT('observations.section.copy') });
     } catch (e) {
       setError(e.message);
     }
-  }, [reload]);
+  }, [reload, obsApi]);
 
   const requestDuplicate = useCallback((item) => {
     if (!item?.canEdit && !sectionCanEdit) {
@@ -2457,7 +2558,7 @@ function PageObservations({ onNavigate }) {
     setBusy(true);
     setError('');
     try {
-      await ApiClient.updateObservation(settingsItemId, {
+      await obsApi.update(settingsItemId, {
         name: settings.name,
         description: settings.description,
         folder: settings.folder,
@@ -2487,10 +2588,15 @@ function PageObservations({ onNavigate }) {
   };
 
   const removeItem = async (id) => {
-    if (!sectionCanEdit || !window.confirm(obsT('observations.deleteConfirm'))) return;
+    if (!sectionCanEdit) return;
+    const item = items.find((row) => row.id === id);
+    const confirmMsg = obsApi.isStaffClient && item?.name
+      ? obsT('cabinet.observations.deleteConfirmStaff', { name: item.name })
+      : obsT('observations.deleteConfirm');
+    if (!window.confirm(confirmMsg)) return;
     setError('');
     try {
-      await ApiClient.deleteObservation(id);
+      await obsApi.delete(id);
       setItems((prev) => prev.filter((row) => row.id !== id));
       if (expandedId === id) setExpandedId(null);
       if (settingsItemId === id) {
@@ -2524,7 +2630,7 @@ function PageObservations({ onNavigate }) {
     if (!current?.canEdit) return;
     try {
       // Смена периода не должна выключать подготовку данных.
-      await ApiClient.updateObservation(id, {
+      await obsApi.update(id, {
         ...current,
         lookback,
         explorerQuery: nextExplorerQuery,
@@ -2548,7 +2654,7 @@ function PageObservations({ onNavigate }) {
     });
     if (!current?.canEdit) return;
     try {
-      await ApiClient.updateObservation(id, {
+      await obsApi.update(id, {
         ...current,
         widgets: observationWidgetsWithChartStyle(current.widgets, chartStyle),
         materialize: { ...(current.materialize || {}), enabled: Boolean(current.materialize?.enabled) },
@@ -2645,7 +2751,7 @@ function PageObservations({ onNavigate }) {
                 onChange={(e) => setSettings({ ...settings, description: e.target.value })}
               />
             </label>
-            {!settingsIsNative && (
+            {!settingsIsNative && !isCabinetLike && (
               <>
                 <label className="row" style={{ gap: 8, alignItems: 'center' }}>
                   <input
@@ -2675,6 +2781,7 @@ function PageObservations({ onNavigate }) {
                 />
               </div>
             )}
+            {!isCabinetLike && (
             <label className="row" style={{ gap: 8, alignItems: 'center' }}>
               <input
                 type="checkbox"
@@ -2686,7 +2793,8 @@ function PageObservations({ onNavigate }) {
               />
               {obsT('observations.settings.report')}
             </label>
-            {settings.report.enabled && (
+            )}
+            {!isCabinetLike && settings.report.enabled && (
               <div className="col" style={{ gap: 8, marginLeft: 24 }}>
                 <label className="row" style={{ gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
                   за период
@@ -2802,6 +2910,7 @@ function PageObservations({ onNavigate }) {
                 </label>
               </div>
             )}
+            {!isCabinetLike && (
             <label className="col" style={{ gap: 4 }}>
               <span>{obsT('observations.section.field')}</span>
               <select
@@ -2815,6 +2924,7 @@ function PageObservations({ onNavigate }) {
                 ))}
               </select>
             </label>
+            )}
             <button type="button" className="btn btn--primary" disabled={busy || !settingsCanEdit} onClick={saveSettings}>
               {obsT('observations.settings.save')}
             </button>
@@ -2825,8 +2935,12 @@ function PageObservations({ onNavigate }) {
     );
   }
 
+  const cabinetMax = config?.maxObservations ?? sectionItems[0]?.quotas?.maxObservations ?? 5;
+  const cabinetUsed = sectionItems[0]?.quotas?.usedObservations ?? sectionItems.length;
+  const atCabinetLimit = isCabinetLike && !obsApi.isStaffClient && cabinetUsed >= cabinetMax;
+
   const boardToolbar = (sticky = false) => (
-    sectionItems.length > 0 && sectionCanEdit ? (
+    sectionItems.length > 0 && sectionCanEdit && !obsApi.isStaffClient ? (
       <ObservationsBoardToolbar
         editMode={editMode}
         saveState={boardSaveStatus}
@@ -2843,10 +2957,11 @@ function PageObservations({ onNavigate }) {
 
   return (
     <div className="main__container">
+      {!embedded ? (
       <div className="page-head">
         <div>
           <h1>{obsT('observations.title')}</h1>
-          {sections.length > 1 ? (
+          {!isCabinetLike && sections.length > 1 ? (
             <div className="row" style={{ gap: 8, marginTop: 12, flexWrap: 'wrap' }}>
               {sections.map((sec) => (
                 <button
@@ -2875,13 +2990,23 @@ function PageObservations({ onNavigate }) {
             <button
               type="button"
               className="btn btn--primary"
-              onClick={() => startComposeInExplorer(onNavigate, { mode: 'new' })}
+              disabled={atCabinetLimit}
+              title={atCabinetLimit ? obsT('cabinet.observations.limitHint') : undefined}
+              onClick={() => {
+                if (isCabinetLike && !obsApi.isStaffClient) {
+                  if (typeof onNavigate === 'function') onNavigate('explorer');
+                  else location.hash = 'explorer';
+                  return;
+                }
+                startComposeInExplorer(onNavigate, { mode: 'new' });
+              }}
             >
               + {obsT('observations.new')}
             </button>
           )}
         </div>
       </div>
+      ) : null}
       {editMode ? boardToolbar(true) : null}
       <div className="col" style={{ gap: 16, padding: '0 0 24px' }}>
 
@@ -2891,7 +3016,14 @@ function PageObservations({ onNavigate }) {
         </div>
       )}
 
-      {sectionItems.length > 0 && (
+      {isCabinetLike && !obsApi.isStaffClient && (
+        <div style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-secondary)' }}>
+          {obsT('cabinet.observations.sharedHint')}{' '}
+          {obsT('cabinet.observations.quota', { used: cabinetUsed, max: cabinetMax })}
+        </div>
+      )}
+
+      {sectionItems.length > 0 && !isCabinetLike && (
         <div style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-secondary)' }}>
           {sectionItems[0]?.quotas?.maxMaterialize
             ? obsT('observations.prep.quota', {
@@ -2905,9 +3037,11 @@ function PageObservations({ onNavigate }) {
       {!sectionItems.length && (
         <Card>
           <div style={{ color: 'var(--fg-secondary)' }}>
-            {sections.length
-              ? obsT('observations.section.empty')
-              : 'Пока пусто. Нажмите «+ Новое» — соберите фильтр в разборе трафика и «Добавить в наблюдения».'}
+            {isCabinetLike
+              ? obsT('cabinet.observations.emptyBoard')
+              : (sections.length
+                ? obsT('observations.section.empty')
+                : obsT('observations.emptyHint'))}
           </div>
         </Card>
       )}
@@ -2951,20 +3085,24 @@ function PageObservations({ onNavigate }) {
                 onSettings={() => openSettings(item)}
                 onDuplicate={() => requestDuplicate(item)}
                 onDelete={() => removeItem(item.id)}
-                onCancel={() => ApiClient.cancelObservationMaterialize(item.id)
+                onCancel={!isCabinetLike ? () => obsApi.cancelMaterialize(item.id)
                   .then(() => reload())
                   .then(() => pushToast?.({ kind: 'success', title: 'Подготовка отменена' }))
-                  .catch((e) => setError(e.message))}
-                onRetry={() => ApiClient.retryObservationMaterialize(item.id)
+                  .catch((e) => setError(e.message)) : undefined}
+                onRetry={() => obsApi.retry(item.id)
                   .then(() => reload())
                   .then(() => pushToast?.({ kind: 'success', title: 'Перезапущено', desc: 'Воркер возьмёт наблюдение в течение минуты' }))
                   .catch((e) => setError(e.message))}
                 onLookbackChange={changeTileLookback}
                 onChartStyleChange={changeTileChartStyle}
-                onRunReport={() => ApiClient.runObservationReport(item.id)
+                onRunReport={!isCabinetLike ? () => ApiClient.runObservationReport(item.id)
                   .then(() => pushToast?.({ kind: 'success', title: 'Отчёт сформирован' }))
-                  .catch((e) => setError(e.message))}
-                isNativeAggregate={isNativeAggregateObservation(item)}
+                  .catch((e) => setError(e.message)) : undefined}
+                previewFn={obsApi.preview}
+                hideReports={isCabinetLike}
+                isCabinetLike={isCabinetLike}
+                cabinetStatusLabel={isCabinetLike ? cabinetObservationStatusLabel(item) : null}
+                isNativeAggregate={!isCabinetLike && isNativeAggregateObservation(item)}
                 collectors={collectors}
                 locations={locations}
               />

@@ -730,6 +730,7 @@ function ClientDrawer({ client, canWrite, onClose, onSaved, onImpersonate, onUse
     { id: 'general', label: clientsT('clientsPage.tab.general'), icon: 'info' },
     { id: 'bindings', label: clientsT('clientsPage.tab.bindings'), icon: 'link' },
     { id: 'users', label: clientsT('clientsPage.tab.users'), icon: 'users' },
+    { id: 'observations', label: clientsT('clientsPage.tab.observations'), icon: 'query' },
     { id: 'audit', label: clientsT('clientsPage.tab.audit'), icon: 'clock' },
   ];
 
@@ -807,6 +808,10 @@ function ClientDrawer({ client, canWrite, onClose, onSaved, onImpersonate, onUse
 
           {tab === 'users' && (
             <ClientUsersTab client={client} canWrite={canWrite} onChanged={onUsersChanged} />
+          )}
+
+          {tab === 'observations' && (
+            <ClientObservationsTab client={client} canWrite={canWrite} />
           )}
 
           {tab === 'audit' && (
@@ -1819,6 +1824,201 @@ function SwitchField({ label, hint, checked, onChange, disabled }) {
         {hint && <div style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-secondary)', marginTop: 2 }}>{hint}</div>}
       </span>
     </label>
+  );
+}
+
+function staffClientObservationStatus(item) {
+  const st = item?.cabinetStatus || item?.materialize?.status;
+  if (st === 'ready') return clientsT('cabinet.observations.status.ready');
+  if (st === 'error') return clientsT('cabinet.observations.status.error');
+  return clientsT('cabinet.observations.status.preparing');
+}
+
+function ClientObservationsTab({ client, canWrite }) {
+  const [items, setItems] = useState([]);
+  const [maxObs, setMaxObs] = useState(5);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+  const [editorItem, setEditorItem] = useState(null);
+  const [editName, setEditName] = useState('');
+  const [editLookback, setEditLookback] = useState('1h');
+  const [saving, setSaving] = useState(false);
+
+  const load = useCallback(async () => {
+    if (!client?.clientId) return;
+    setLoading(true);
+    setError('');
+    try {
+      const [list, cfg] = await Promise.all([
+        ApiClient.loadStaffClientObservations(client.clientId),
+        ApiClient.loadStaffClientObservationsConfig(client.clientId),
+      ]);
+      setItems(Array.isArray(list) ? list : []);
+      setMaxObs(cfg?.maxObservations || 5);
+    } catch (err) {
+      setError(err.message);
+      setItems([]);
+    } finally {
+      setLoading(false);
+    }
+  }, [client?.clientId]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const atLimit = items.length >= maxObs;
+
+  const openEditor = (item) => {
+    setEditorItem(item);
+    setEditName(item.name || '');
+    setEditLookback(item.lookback || '1h');
+  };
+
+  const saveEditor = async () => {
+    if (!editorItem || !canWrite) return;
+    setSaving(true);
+    setError('');
+    try {
+      await ApiClient.updateStaffClientObservation(client.clientId, editorItem.id, {
+        ...editorItem,
+        name: editName.trim() || editorItem.name,
+        lookback: editLookback,
+      });
+      setEditorItem(null);
+      await load();
+      pushToast({ kind: 'success', title: clientsT('clientsPage.saveSuccessTitle') });
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const createDefault = async () => {
+    if (!canWrite || atLimit) return;
+    setSaving(true);
+    setError('');
+    try {
+      await ApiClient.createStaffClientObservation(client.clientId, {
+        name: clientsT('clientsPage.observations.defaultName'),
+        lookback: '1h',
+        filters: [],
+        widgets: [
+          {
+            id: 'w-ts',
+            type: 'timeseries_bps',
+            metric: 'bps',
+            groupBy: ['client_direction'],
+            chartStyle: 'stack',
+            seriesLimit: 10,
+          },
+          {
+            id: 'w-top',
+            type: 'top_table',
+            metric: 'bps',
+            groupBy: ['client_direction'],
+            limit: 100,
+          },
+        ],
+      });
+      await load();
+      pushToast({ kind: 'success', title: clientsT('clientsPage.saveSuccessTitle') });
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const removeItem = async (item) => {
+    if (!canWrite || !item) return;
+    if (!window.confirm(clientsT('cabinet.observations.deleteConfirmStaff', { name: item.name }))) return;
+    try {
+      await ApiClient.deleteStaffClientObservation(client.clientId, item.id);
+      await load();
+    } catch (err) {
+      setError(err.message);
+    }
+  };
+
+  const lookbackLabel = (v) => (GrapesI18n.has(`period.${v}`) ? GrapesI18n.t(`period.${v}`) : v);
+
+  return (
+    <div className="col" style={{ gap: 14 }}>
+      <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center', gap: 12 }}>
+        <div style={{ font: 'var(--pv-text-body-2-bold)' }}>
+          {clientsT('clientsPage.observations.quota', { used: items.length, max: maxObs })}
+        </div>
+        {canWrite && (
+          <Button kind="primary" icon="query" disabled={atLimit || saving} onClick={createDefault}>
+            {clientsT('clientsPage.observations.create')}
+          </Button>
+        )}
+      </div>
+      {atLimit && (
+        <div style={{ font: 'var(--pv-text-body-3)', color: 'var(--st-warning)' }}>
+          {clientsT('cabinet.observations.limitHint')}
+        </div>
+      )}
+      {error && <div className="form-error">{error}</div>}
+      {loading ? (
+        <div style={{ color: 'var(--fg-secondary)' }}>{clientsT('clientsPage.loading')}</div>
+      ) : items.length === 0 ? (
+        <div style={{ color: 'var(--fg-secondary)', font: 'var(--pv-text-body-3)' }}>
+          {clientsT('clientsPage.observations.empty')}
+        </div>
+      ) : (
+        <div className="col" style={{ gap: 8 }}>
+          {items.map((item) => (
+            <Card key={item.id} pad="sm">
+              <div className="row" style={{ justifyContent: 'space-between', gap: 12, alignItems: 'flex-start', flexWrap: 'wrap' }}>
+                <div>
+                  <div style={{ font: 'var(--pv-text-body-2-bold)' }}>{item.name}</div>
+                  <div style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-secondary)', marginTop: 4 }}>
+                    {clientsT('clientsPage.observations.col.period')}: {lookbackLabel(item.lookback)}
+                    {' · '}
+                    {clientsT('clientsPage.observations.col.status')}: {staffClientObservationStatus(item)}
+                  </div>
+                  <div style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-secondary)', marginTop: 4 }}>
+                    {clientsT('clientsPage.observations.col.author')}: {item.author?.label || '—'}
+                    {' · '}
+                    {clientsT('clientsPage.observations.col.updated')}: {fmtDateTime(item.updatedAt)}
+                  </div>
+                </div>
+                {canWrite && (
+                  <div className="row" style={{ gap: 6 }}>
+                    <Button kind="ghost" onClick={() => openEditor(item)}>{clientsT('clientsPage.observations.edit')}</Button>
+                    <Button kind="ghost" onClick={() => removeItem(item)}>{clientsT('clientsPage.observations.delete')}</Button>
+                  </div>
+                )}
+              </div>
+            </Card>
+          ))}
+        </div>
+      )}
+      {editorItem && (
+        <div className="modal-backdrop" role="presentation" onClick={() => !saving && setEditorItem(null)}>
+          <div className="modal" role="dialog" onClick={(e) => e.stopPropagation()}>
+            <h2 style={{ marginTop: 0 }}>{clientsT('clientsPage.observations.edit')}</h2>
+            <label className="col" style={{ gap: 4, marginBottom: 12 }}>
+              <span>{clientsT('clientsPage.field.name')}</span>
+              <input className="input" value={editName} onChange={(e) => setEditName(e.target.value)} />
+            </label>
+            <label className="col" style={{ gap: 4, marginBottom: 16 }}>
+              <span>{clientsT('clientsPage.observations.col.period')}</span>
+              <select className="input" value={editLookback} onChange={(e) => setEditLookback(e.target.value)}>
+                {['15m', '30m', '1h', '6h', '24h'].map((v) => (
+                  <option key={v} value={v}>{lookbackLabel(v)}</option>
+                ))}
+              </select>
+            </label>
+            <div className="row" style={{ gap: 8, justifyContent: 'flex-end' }}>
+              <Button kind="ghost" onClick={() => setEditorItem(null)} disabled={saving}>{clientsT('clientsPage.close')}</Button>
+              <Button kind="primary" onClick={saveEditor} disabled={saving}>{clientsT('clientsPage.observations.save')}</Button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
   );
 }
 
