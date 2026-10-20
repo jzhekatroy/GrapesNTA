@@ -98,6 +98,10 @@ type TrafficClassifier struct {
 	// Flows left unclassified because neither network is described. Growth
 	// here is the signal to go and fill in the L3 catalog.
 	networksUnclassified atomic.Uint64
+
+	// bgpSnapshotWarned limits the "snapshot check failed" line to once per
+	// process. The refresh itself keeps running and reloads BGP every time.
+	bgpSnapshotWarned bool
 }
 
 type classifierState struct {
@@ -120,6 +124,12 @@ type classifierState struct {
 	portSides       map[portKey]uint8
 
 	hasLocalConfig bool
+
+	// BGP tries stay shared across refreshes while the table snapshot is the
+	// same. Lookup only reads them; insertRoute must not run after publish.
+	bgpSnapshot  time.Time
+	bgpTableRows uint64
+	bgpLoaded    int
 }
 
 type vlanClass struct {
@@ -273,7 +283,7 @@ func (tc *TrafficClassifier) refreshOnce(ctx context.Context) error {
 		unknownNetworks: UnknownNetworksForeign,
 		portSides:       make(map[portKey]uint8),
 	}
-	bgpRows, err := tc.loadBGP(ctx, st)
+	bgpRows, bgpReloaded, err := tc.refreshBGP(ctx, st)
 	if err != nil {
 		return err
 	}
@@ -302,6 +312,7 @@ func (tc *TrafficClassifier) refreshOnce(ctx context.Context) error {
 	tc.state.Store(st)
 	tc.log.Info("traffic classifier refreshed",
 		"bgp_prefixes", bgpRows,
+		"bgp_reloaded", bgpReloaded,
 		"ip_asn_prefixes", ipASNRows,
 		"l3_prefixes", l3Rows,
 		"vlans", vlanRows,
@@ -444,6 +455,82 @@ func (tc *TrafficClassifier) loadPortSides(ctx context.Context, st *classifierSt
 		tc.log.Warn("interface roles rows skipped", "table", table, "rows", skipped)
 	}
 	return len(switches)
+}
+
+// refreshBGP reloads prefix tries only when bgp_prefix_origin_current has a
+// new snapshot. The table is rebuilt every half hour, while the classifier
+// refresh keeps running every minute so clients, ports and VLANs stay fresh.
+// An unchanged snapshot reuses the previous tries.
+func (tc *TrafficClassifier) refreshBGP(ctx context.Context, st *classifierState) (int, bool, error) {
+	snap, rows, checked := tc.currentBGPSnapshot(ctx)
+	prev := tc.state.Load()
+	if reuseBGPSnapshot(prev, snap, rows, checked) {
+		st.bgp4 = prev.bgp4
+		st.bgp6 = prev.bgp6
+		st.bgpSnapshot = prev.bgpSnapshot
+		st.bgpTableRows = prev.bgpTableRows
+		st.bgpLoaded = prev.bgpLoaded
+		return prev.bgpLoaded, false, nil
+	}
+	n, err := tc.loadBGP(ctx, st)
+	if err != nil {
+		return n, true, err
+	}
+	st.bgpLoaded = n
+	if checked {
+		st.bgpSnapshot = snap
+		st.bgpTableRows = rows
+	}
+	return n, true, nil
+}
+
+// reuseBGPSnapshot is true when the in-memory tries already match the table.
+// A rebuild stamps snapshot_ts on every row, so the same maximum and row
+// count means the same prefix set. An empty table or an epoch stamp is never
+// reused: those are cheap to reread, and a default timestamp would hide a
+// table that has no real snapshot.
+func reuseBGPSnapshot(prev *classifierState, snap time.Time, rows uint64, checked bool) bool {
+	if !checked || prev == nil || rows == 0 || snap.Unix() <= 0 {
+		return false
+	}
+	return snap.Equal(prev.bgpSnapshot) && rows == prev.bgpTableRows
+}
+
+func (tc *TrafficClassifier) currentBGPSnapshot(ctx context.Context) (time.Time, uint64, bool) {
+	rows, err := tc.conn.Query(ctx, "SELECT max(snapshot_ts), count() FROM "+tc.cfg.Tables.BGPOrigins)
+	if err != nil {
+		tc.warnBGPSnapshot(err)
+		return time.Time{}, 0, false
+	}
+	defer rows.Close()
+	if !rows.Next() {
+		if err := rows.Err(); err != nil {
+			tc.warnBGPSnapshot(err)
+		}
+		return time.Time{}, 0, false
+	}
+	var snap time.Time
+	var n uint64
+	if err := rows.Scan(&snap, &n); err != nil {
+		tc.warnBGPSnapshot(err)
+		return time.Time{}, 0, false
+	}
+	if err := rows.Err(); err != nil {
+		tc.warnBGPSnapshot(err)
+		return time.Time{}, 0, false
+	}
+	return snap, n, true
+}
+
+func (tc *TrafficClassifier) warnBGPSnapshot(err error) {
+	if tc.bgpSnapshotWarned {
+		return
+	}
+	tc.bgpSnapshotWarned = true
+	tc.log.Warn("BGP snapshot check failed; reloading prefixes every refresh",
+		"table", tc.cfg.Tables.BGPOrigins,
+		"err", err,
+	)
 }
 
 func (tc *TrafficClassifier) loadBGP(ctx context.Context, st *classifierState) (int, error) {

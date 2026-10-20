@@ -3,6 +3,7 @@ package flowingest
 import (
 	"net/netip"
 	"testing"
+	"time"
 )
 
 func TestDeriveDirection(t *testing.T) {
@@ -545,6 +546,35 @@ func TestInsertRouteKeepsAllNextHops(t *testing.T) {
 	got = st.classify(netip.MustParseAddr("185.26.122.10"), 0)
 	if !sameASPath(got.ASPath, []uint32{9123}) {
 		t.Fatalf("default classify must use shortest path, got %v", got.ASPath)
+	}
+}
+
+func TestReuseBGPSnapshot(t *testing.T) {
+	snap := time.Date(2026, 10, 20, 9, 0, 0, 0, time.UTC)
+	prev := &classifierState{bgpSnapshot: snap, bgpTableRows: 100}
+	cases := []struct {
+		name    string
+		prev    *classifierState
+		snap    time.Time
+		rows    uint64
+		checked bool
+		want    bool
+	}{
+		{name: "same snapshot", prev: prev, snap: snap, rows: 100, checked: true, want: true},
+		{name: "newer snapshot", prev: prev, snap: snap.Add(time.Second), rows: 100, checked: true, want: false},
+		{name: "older snapshot", prev: prev, snap: snap.Add(-time.Second), rows: 100, checked: true, want: false},
+		{name: "same time different rows", prev: prev, snap: snap, rows: 101, checked: true, want: false},
+		{name: "snapshot check failed", prev: prev, snap: snap, rows: 100, checked: false, want: false},
+		{name: "no previous state", prev: nil, snap: snap, rows: 100, checked: true, want: false},
+		{name: "empty table", prev: prev, snap: snap, rows: 0, checked: true, want: false},
+		{name: "epoch stamp", prev: prev, snap: time.Unix(0, 0).UTC(), rows: 100, checked: true, want: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := reuseBGPSnapshot(tc.prev, tc.snap, tc.rows, tc.checked); got != tc.want {
+				t.Fatalf("reuseBGPSnapshot() = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }
 
