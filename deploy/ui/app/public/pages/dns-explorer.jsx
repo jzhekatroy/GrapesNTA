@@ -37,14 +37,19 @@ function dnsRcodeDisplayLabel(value) {
 }
 
 const DNS_EXPLORER_FILTER_LOGIC_OPTIONS = [
-  { id: 'and', labelKey: 'explorer.logic.and', altLabel: 'AND' },
-  { id: 'or', labelKey: 'explorer.logic.or', altLabel: 'OR' },
-  { id: 'and_not', labelKey: 'explorer.logic.andNot', altLabel: 'AND NOT' },
-  { id: 'or_not', labelKey: 'explorer.logic.orNot', altLabel: 'OR NOT' },
+  { id: 'and', labelKey: 'explorer.logic.and', uiLabelKey: 'explorer.logic.andRu', altLabel: 'AND' },
+  { id: 'or', labelKey: 'explorer.logic.or', uiLabelKey: 'explorer.logic.orRu', altLabel: 'OR' },
+  { id: 'and_not', labelKey: 'explorer.logic.andNot', uiLabelKey: 'explorer.logic.andNotRu', altLabel: 'AND NOT' },
+  { id: 'or_not', labelKey: 'explorer.logic.orNot', uiLabelKey: 'explorer.logic.orNotRu', altLabel: 'OR NOT' },
 ];
 
 function dnsExplorerLogicLabel(opt) {
   return opt?.labelKey ? dnsExplorerT(opt.labelKey) : (opt?.altLabel || '');
+}
+
+function dnsExplorerLogicUiLabel(opt) {
+  const key = opt?.uiLabelKey || opt?.labelKey;
+  return key ? dnsExplorerT(key) : (opt?.altLabel || '');
 }
 
 const DNS_EXPLORER_TEXT_TIME_RANGES = ['30m', '1h', '3h', '6h', '12h', '24h', '7d'];
@@ -601,14 +606,34 @@ function getDnsTextareaCaretCoordinates(textarea, pos) {
 }
 
 function dnsLogicAutocompleteEntries() {
-  return DNS_EXPLORER_FILTER_LOGIC_OPTIONS.flatMap((o) => {
-    const localized = dnsExplorerLogicLabel(o);
-    const entries = [{ token: localized, hint: `${o.altLabel}${dnsExplorerT('explorer.logicLinkHint')}` }];
-    if (String(localized).toUpperCase() !== String(o.altLabel).toUpperCase()) {
-      entries.push({ token: o.altLabel, hint: `${localized} · logic` });
-    }
-    return entries;
+  return DNS_EXPLORER_FILTER_LOGIC_OPTIONS.map((o) => {
+    const english = o.altLabel;
+    const ruUi = dnsExplorerLogicUiLabel(o);
+    const aliases = [english, ruUi, dnsExplorerLogicLabel(o)]
+      .map((s) => String(s || '').trim().toLowerCase())
+      .filter(Boolean);
+    return {
+      label: english,
+      insert: `${english} `,
+      hint: `${ruUi}${dnsExplorerT('explorer.logicLinkHint')}`,
+      aliases,
+    };
   });
+}
+
+function dnsLogicSuggestionMatchesNeedle(entry, needle) {
+  if (!needle) return false;
+  if (entry.aliases.some((alias) => alias.startsWith(needle) || needle.startsWith(alias))) return true;
+  const label = String(entry.label || '').toLowerCase();
+  return label.startsWith(needle) || needle.startsWith(label);
+}
+
+function isDnsExplorerLogicAutocompleteContext(trimmed) {
+  const t = String(trimmed || '').trim().toLowerCase();
+  if (!t) return false;
+  if (/^[а-яё\s]+$/i.test(t)) return true;
+  return /^(and(\s+not)?|or(\s+not)?)$/.test(t)
+    || /^(and(\s+n(o(t)?)?)?|or(\s+n(o(t)?)?)?)$/.test(t);
 }
 
 function resolveDnsFieldToken(token, schema) {
@@ -653,10 +678,17 @@ function buildDnsExplorerTextSuggestions({
   [
     lineSuggestion('time range', 'time range 1h', dnsExplorerT('dnsExplorer.dsl.suggestPeriod')),
     lineSuggestion('time between', 'time between "YYYY-MM-DDTHH:mm" and "YYYY-MM-DDTHH:mm"', dnsExplorerT('dnsExplorer.dsl.suggestCustomRange')),
-    ...dnsLogicAutocompleteEntries().map(({ token, hint }) => lineSuggestion(token, `${token} `, hint)),
   ]
     .filter((item) => matchesNeedle(item.label, item.hint))
     .forEach((item) => suggestions.push(item));
+
+  if (trimmed === rest && isDnsExplorerLogicAutocompleteContext(trimmed)) {
+    dnsLogicAutocompleteEntries()
+      .filter((entry) => dnsLogicSuggestionMatchesNeedle(entry, needle))
+      .forEach((entry) => {
+        suggestions.push(lineSuggestion(entry.label, entry.insert.replace(/\s+$/, ''), entry.hint));
+      });
+  }
 
   if (!rest.includes(' ') && !lowerRest.startsWith('time')) {
     const fieldNeedle = rest.toLowerCase();
@@ -1669,7 +1701,7 @@ function DnsExplorerFilterRow({
             title={dnsExplorerT('dnsExplorer.logicLinkWithPrevious')}
           >
             {DNS_EXPLORER_FILTER_LOGIC_OPTIONS.map((opt) => (
-              <option key={opt.id} value={opt.id}>{dnsExplorerLogicLabel(opt)}</option>
+              <option key={opt.id} value={opt.id}>{dnsExplorerLogicUiLabel(opt)}</option>
             ))}
           </select>
         ) : (

@@ -847,14 +847,19 @@ const EXPLORER_RESULT_CACHE_KEY = 'explorer.resultCache';
 const EXPLORER_CACHE_TTL_RELATIVE_MS = 15 * 60 * 1000;
 const EXPLORER_CACHE_TTL_CUSTOM_MS = 30 * 60 * 1000;
 const EXPLORER_FILTER_LOGIC_OPTIONS = [
-  { id: 'and', labelKey: 'explorer.logic.and', altLabel: 'AND' },
-  { id: 'or', labelKey: 'explorer.logic.or', altLabel: 'OR' },
-  { id: 'and_not', labelKey: 'explorer.logic.andNot', altLabel: 'AND NOT' },
-  { id: 'or_not', labelKey: 'explorer.logic.orNot', altLabel: 'OR NOT' },
+  { id: 'and', labelKey: 'explorer.logic.and', uiLabelKey: 'explorer.logic.andRu', altLabel: 'AND' },
+  { id: 'or', labelKey: 'explorer.logic.or', uiLabelKey: 'explorer.logic.orRu', altLabel: 'OR' },
+  { id: 'and_not', labelKey: 'explorer.logic.andNot', uiLabelKey: 'explorer.logic.andNotRu', altLabel: 'AND NOT' },
+  { id: 'or_not', labelKey: 'explorer.logic.orNot', uiLabelKey: 'explorer.logic.orNotRu', altLabel: 'OR NOT' },
 ];
 
 function explorerLogicLabel(opt) {
   return opt?.labelKey ? explorerT(opt.labelKey) : (opt?.label || '');
+}
+
+function explorerLogicUiLabel(opt) {
+  const key = opt?.uiLabelKey || opt?.labelKey;
+  return key ? explorerT(key) : (opt?.label || '');
 }
 
 const EXPLORER_OP_LABEL_KEYS = {
@@ -1658,7 +1663,7 @@ function appendExplorerFilterLeafDsl(f, logicLabel, lines) {
 function appendExplorerFilterNodesDsl(nodes, lines) {
   (nodes || []).forEach((node, index) => {
     const logicOpt = EXPLORER_FILTER_LOGIC_OPTIONS.find((o) => o.id === normalizeFilterLogicValue(node.logic));
-    const logicLabel = index === 0 ? '' : `${logicOpt ? explorerLogicLabel(logicOpt) : explorerT('explorer.logic.andRu')} `;
+    const logicLabel = index === 0 ? '' : `${logicOpt ? explorerLogicLabel(logicOpt) : explorerT('explorer.logic.and')} `;
     if (explorerFilterTreeApi().isExplorerFilterGroup?.(node)) {
       lines.push(`${logicLabel}(`);
       appendExplorerFilterNodesDsl(node.children, lines);
@@ -2068,17 +2073,34 @@ function getTextareaCaretCoordinates(textarea, pos) {
 }
 
 function explorerLogicAutocompleteEntries() {
-  return EXPLORER_FILTER_LOGIC_OPTIONS.flatMap((o) => {
-    const localized = explorerLogicLabel(o);
-    const entries = [{ token: localized, hint: `${o.altLabel} · logic` }];
-    if (String(localized).toUpperCase() !== String(o.altLabel).toUpperCase()) {
-      entries.push({
-        token: o.altLabel,
-        hint: `${localized}${explorerT('explorer.logicLinkHint')}`,
-      });
-    }
-    return entries;
+  return EXPLORER_FILTER_LOGIC_OPTIONS.map((o) => {
+    const english = o.altLabel;
+    const ruUi = explorerLogicUiLabel(o);
+    const aliases = [english, ruUi, explorerLogicLabel(o)]
+      .map((s) => String(s || '').trim().toLowerCase())
+      .filter(Boolean);
+    return {
+      label: english,
+      insert: `${english} `,
+      hint: `${ruUi}${explorerT('explorer.logicLinkHint')}`,
+      aliases,
+    };
   });
+}
+
+function explorerLogicSuggestionMatchesNeedle(entry, needle) {
+  if (!needle) return false;
+  if (entry.aliases.some((alias) => alias.startsWith(needle) || needle.startsWith(alias))) return true;
+  const label = String(entry.label || '').toLowerCase();
+  return label.startsWith(needle) || needle.startsWith(label);
+}
+
+function isExplorerLogicAutocompleteContext(trimmed) {
+  const t = String(trimmed || '').trim().toLowerCase();
+  if (!t) return false;
+  if (/^[а-яё\s]+$/i.test(t)) return true;
+  return /^(and(\s+not)?|or(\s+not)?)$/.test(t)
+    || /^(and(\s+n(o(t)?)?)?|or(\s+n(o(t)?)?)?)$/.test(t);
 }
 
 function buildExplorerTextSuggestions({ value, cursor, schema, entityItems = [] }) {
@@ -2128,10 +2150,17 @@ function buildExplorerTextSuggestions({ value, cursor, schema, entityItems = [] 
     lineSuggestion('group by', 'group by src_ip, dst_ip', explorerT('explorer.dsl.suggestGroupBy')),
     ...(fieldById.direction ? [lineSuggestion('direction', 'direction in (in, out, transit)', explorerT('explorer.dsl.suggestDirections'))] : []),
     ...(fieldById.collector ? [lineSuggestion('collector', 'collector in ("collector-id")', explorerT('explorer.dsl.suggestCollectors'))] : []),
-    ...explorerLogicAutocompleteEntries().map(({ token, hint }) => lineSuggestion(token, `${token} `, hint)),
   ]
     .filter((item) => matchesNeedle(item.label, item.hint))
     .forEach((item) => suggestions.push(item));
+
+  if (trimmed === rest && isExplorerLogicAutocompleteContext(trimmed)) {
+    explorerLogicAutocompleteEntries()
+      .filter((entry) => explorerLogicSuggestionMatchesNeedle(entry, needle))
+      .forEach((entry) => {
+        suggestions.push(lineSuggestion(entry.label, entry.insert.replace(/\s+$/, ''), entry.hint));
+      });
+  }
 
   if (!rest.includes(' ') && !['time', 'direction', 'collector'].some((k) => lowerRest.startsWith(k))
     && !explorerGroupDslApi().isExplorerGroupByDslContext?.(trimmed)) {
@@ -6923,7 +6952,7 @@ function ExplorerLogicChip({ value, onChange }) {
     <>
       <span ref={anchorRef}>
         <button type="button" className="explorer-query-chip explorer-logic-chip" onClick={() => setOpen((v) => !v)}>
-          {explorerLogicLabel(current)}
+          {explorerLogicUiLabel(current)}
           <Icon name="chevD" size={10} />
         </button>
       </span>
@@ -6939,7 +6968,7 @@ function ExplorerLogicChip({ value, onChange }) {
                 setOpen(false);
               }}
             >
-              {explorerLogicLabel(opt)}
+              {explorerLogicUiLabel(opt)}
             </div>
           ))}
         </div>
