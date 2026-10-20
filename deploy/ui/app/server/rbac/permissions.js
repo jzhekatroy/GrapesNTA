@@ -155,12 +155,19 @@ async function buildEffectiveWritePermissions(user) {
   return effective;
 }
 
+function isAdministratorUser(user) {
+  const roleId = String(user?.roleId || '').trim();
+  return roleId === DEFAULT_ROLE_ID || roleId.toLowerCase() === 'administrator' || roleId === 'admin';
+}
+
 async function canAccess(user, resource) {
+  if (isAdministratorUser(user)) return true;
   const effective = await buildEffectivePermissions(user);
   return !!effective[resource];
 }
 
 async function canWrite(user, resource) {
+  if (isAdministratorUser(user)) return true;
   const effective = await buildEffectiveWritePermissions(user);
   return !!effective[resource];
 }

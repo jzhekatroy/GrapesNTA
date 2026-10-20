@@ -130,7 +130,9 @@ async function writeCabinetObservationAudit(req, {
 }
 
 function rejectCabinetSessionForStaff(req, res) {
-  if (isCabinetScoped(req.cabinet)) {
+  // Staff client-card APIs are for operators only; client logins use /api/cabinet/observations.
+  // Impersonation must not block an operator managing observations from the Clients page.
+  if (isClientRole(req.user)) {
     res.status(403).json({ error: 'Недостаточно прав' });
     return true;
   }

@@ -1882,9 +1882,12 @@ function ClientObservationsTab({ client, canWrite }) {
     setError('');
     try {
       await ApiClient.updateStaffClientObservation(client.clientId, editorItem.id, {
-        ...editorItem,
         name: editName.trim() || editorItem.name,
         lookback: editLookback,
+        description: editorItem.description || '',
+        filters: editorItem.filters || [],
+        widgets: editorItem.widgets || [],
+        thresholds: editorItem.thresholds || [],
       });
       setEditorItem(null);
       await load();
