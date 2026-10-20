@@ -256,10 +256,12 @@ Go-коллекторы задачей не затрагиваются. План
 5. **Аудит**: каждое действие писать через `writeAuditEvent`
    (`server/audit-log.js`) с синтетическим актёром
    (`actorUsername: "api:PiterIX"`), чтобы действия ERP были видны в журнале NTA.
-6. **CLI**: `deploy/ui/app/scripts/api-client-create.js` — создаёт запись в
-   `app_api_clients`, печатает `client_id`/`client_secret` один раз. Каталога
-   `scripts/` в вендоренной копии сейчас нет — создать. Запуск на сервере через
-   `docker exec` (см. `deploy/erp-piterix/run.sh`).
+6. **CLI**: `server/api-client-create.js` — создаёт запись в
+   `app_api_clients`, печатает `client_id`/`client_secret` один раз. Запуск:
+   `node server/api-client-create.js --name "PiterIX ERP"` из `deploy/ui/app`
+   (на сервере — `docker exec grapes-nta node server/api-client-create.js
+   --name "..."`). Лежит в `server/`, а не в `scripts/`, потому что Dockerfile
+   копирует в образ только `server/` и `public/` (паттерн `detection-worker.js`).
 7. **Тесты**: `node --test`, по образцу соседних `*.test.js`: выдача/протухание
    токена, маппинг `account+login` → 404/409, лимит 5, fallback query у DELETE.
 8. **Деплой**: код одинаков на всех инсталяциях; на каждой создаётся свой

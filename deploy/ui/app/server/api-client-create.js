@@ -2,12 +2,14 @@
 'use strict';
 
 // Выдача кредов внешнему API-клиенту (ERP). Запуск из deploy/ui/app:
-//   node scripts/api-client-create.js --name "PiterIX ERP"
-// На сервере: docker exec grapes-nta node /app/scripts/api-client-create.js --name "..."
+//   node server/api-client-create.js --name "PiterIX ERP"
+// На сервере: docker exec grapes-nta node server/api-client-create.js --name "..."
+// Живёт в server/, а не scripts/, потому что Dockerfile копирует только
+// server/ и public/ (см. detection-worker.js — тот же паттерн запуска).
 
 const path = require('path');
 require('dotenv').config({ path: path.join(__dirname, '..', '.env') });
-const { createApiClient, ensureApiClientsTable } = require('../server/api-clients');
+const { createApiClient, ensureApiClientsTable } = require('./api-clients');
 
 function parseArgv(argv) {
   const args = { name: '' };
@@ -27,7 +29,7 @@ function parseArgv(argv) {
 
 function printHelp() {
   console.log('Выдача client_id/client_secret для внешнего Bearer-API.');
-  console.log('Использование: node scripts/api-client-create.js --name "PiterIX ERP"');
+  console.log('Использование: node server/api-client-create.js --name "PiterIX ERP"');
 }
 
 async function main() {
