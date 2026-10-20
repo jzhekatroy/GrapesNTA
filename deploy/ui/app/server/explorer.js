@@ -6,6 +6,7 @@ const {
   colOpt,
   config,
   flowCol,
+  flowColumnPresent,
   flowsRawTableRef,
   portServicesExpandedViewRef,
   asnNamesTableRef,
@@ -14,6 +15,8 @@ const {
   entitiesViewRef,
   l2VlansViewRef,
   sourcesTableRef,
+  protocolTableRef,
+  directionTableRef,
   collectorsViewRef,
   netInterfacesCurrentRef,
   snmpAgentsCurrentRef,
@@ -883,7 +886,7 @@ function buildExplorerMetricSpecs(scaled) {
 
 // sFlow на ШПД кладёт VLAN только в src_vlan, dst_vlan всегда 0. Сторона по
 // направлению берётся, только если она не пустая, иначе — вторая.
-function effectiveVlanExpr(prefix = 'f') {
+function effectiveVlanMultiIf(prefix = 'f') {
   const directionCol = flowCol('direction');
   const srcVlanCol = flowCol('srcVlan');
   const dstVlanCol = flowCol('dstVlan');
@@ -896,6 +899,13 @@ function effectiveVlanExpr(prefix = 'f') {
     + `${dir} = 'in' AND ${dst} != 0, ${dst}, `
     + `${src} != 0, ${src}, `
     + `${dst})`;
+}
+
+// Колонка eff_vlan хранит то же выражение, и по ней есть set-индекс.
+// multiIf в условии индекс не подхватывает.
+function effectiveVlanExpr(prefix = 'f') {
+  if (flowColumnPresent('effVlan')) return `${prefix}.${flowCol('effVlan')}`;
+  return effectiveVlanMultiIf(prefix);
 }
 
 function geoCountryExpr(ipExpr, etypeExpr = null) {
@@ -1840,14 +1850,63 @@ async function fetchPrefixesForEntity(entityId) {
   return rows.map((r) => String(r.prefix)).filter(Boolean);
 }
 
+// Адрес в потоке уже лежит байтами в сетевом порядке. isIPAddressInRange на
+// ClickHouse 24.8 принимает только строки, а toString на каждую строку на
+// PiterIX занял 236 с процессора из 379. Сравниваем нужные байты напрямую.
+function cidrBytePredicate(addrExpr, hex, bits) {
+  const full = Math.floor(bits / 8);
+  const rem = bits % 8;
+  const parts = [];
+  if (full > 0) {
+    parts.push(`substring(${addrExpr}, 1, ${full}) = unhex('${hex.slice(0, full * 2)}')`);
+  }
+  if (rem > 0) {
+    const byte = parseInt(hex.slice(full * 2, full * 2 + 2), 16);
+    const mask = (0xff << (8 - rem)) & 0xff;
+    parts.push(`bitAnd(reinterpretAsUInt8(substring(${addrExpr}, ${full + 1}, 1)), ${mask}) = ${byte & mask}`);
+  }
+  return parts.length ? parts.join(' AND ') : '1';
+}
+
+function parseCidrBytes(value) {
+  const text = String(value ?? '').trim();
+  const slash = text.indexOf('/');
+  if (slash <= 0) return null;
+  const addr = text.slice(0, slash);
+  const bits = Number(text.slice(slash + 1));
+  if (net.isIP(addr) === 4) {
+    if (!Number.isInteger(bits) || bits < 0 || bits > 32) return null;
+    const hex = addr.split('.').map((part) => Number(part).toString(16).padStart(2, '0')).join('');
+    return { etype: FLOW_IPV4_ETYPE, bits, hex };
+  }
+  if (net.isIP(addr) === 6) {
+    if (!Number.isInteger(bits) || bits < 0 || bits > 128) return null;
+    const hex = ipv6ToBytesHex(addr);
+    if (!hex || hex.length !== 32) return null;
+    return { etype: FLOW_IPV6_ETYPE, bits, hex };
+  }
+  return null;
+}
+
+function ipInCidrClause(addrExpr, etypeExpr, paramName, params) {
+  const parsed = parseCidrBytes(params?.[paramName]);
+  if (!parsed || !etypeExpr) {
+    return `isIPAddressInRange(IPv6NumToString(${addrExpr}), {${paramName}:String})`;
+  }
+  const bytes = cidrBytePredicate(addrExpr, parsed.hex, parsed.bits);
+  return `(${etypeExpr} = ${parsed.etype} AND ${bytes})`;
+}
+
 function buildPrefixRangeClause(prefixes, params, idxRef) {
   if (!prefixes.length) return '0';
-  const srcIpExpr = flowIpExpr(`f.${col('srcIp')}`);
-  const dstIpExpr = flowIpExpr(`f.${col('dstIp')}`);
+  const etypeCol = flowCol('etype');
+  const etypeExpr = etypeCol ? `f.${etypeCol}` : null;
+  const srcAddr = `f.${col('srcIp')}`;
+  const dstAddr = `f.${col('dstIp')}`;
   const parts = prefixes.map((prefix) => {
     const paramName = `prefix_${idxRef.i++}`;
     params[paramName] = prefix;
-    return `(isIPAddressInRange(${srcIpExpr}, {${paramName}:String}) OR isIPAddressInRange(${dstIpExpr}, {${paramName}:String}))`;
+    return `(${ipInCidrClause(srcAddr, etypeExpr, paramName, params)} OR ${ipInCidrClause(dstAddr, etypeExpr, paramName, params)})`;
   });
   return parts.length === 1 ? parts[0] : `(${parts.join(' OR ')})`;
 }
@@ -2429,7 +2488,11 @@ async function buildExplorerFilterClauses(filters, dims, params) {
     if (dim.filterType === 'ip' || dim.filterType === 'switch_ip') {
       if (op === 'cidr') {
         params[paramName] = String(f.value ?? '').trim();
-        addClause(`isIPAddressInRange(${expr}, {${paramName}:String})`);
+        if (dim.filterAddrExpr) {
+          addClause(ipInCidrClause(dim.filterAddrExpr, dim.filterEtypeExpr, paramName, params));
+        } else {
+          addClause(`isIPAddressInRange(${expr}, {${paramName}:String})`);
+        }
         continue;
       }
       if (dim.filterAddrExpr && dim.filterEtypeExpr && ['=', '!=', '<>', 'in', 'not_in'].includes(op)) {
@@ -3446,6 +3509,235 @@ async function explorerFlows(body = {}, options = {}) {
   });
 }
 
+// Хвост, который минутный rollup мог ещё не дописать или дописывает заново.
+// Старше этой границы берём traffic_direction_1m / traffic_protocol_1m,
+// младше — flows_raw. Минуты на границе не пересекаются.
+const EXPLORER_ROLLUP_TAIL_MINUTES = 15;
+
+function explorerEnabledSourcesSql(columnSql) {
+  return `${columnSql} IN (SELECT source_id FROM ${sourcesTableRef()})`;
+}
+
+function explorerRollupClosedCte() {
+  // max по всей таблице, не по окну: иначе закрытый вчерашний час тоже
+  // уехал бы в сырые данные из-за вычитания хвоста.
+  return `
+        (
+          SELECT max(minute)
+          FROM ${directionTableRef()}
+        ) AS rollup_max,
+        greatest(
+          ts_from,
+          least(
+            ts_to,
+            if(rollup_max < ts_from, ts_from, rollup_max - INTERVAL ${EXPLORER_ROLLUP_TAIL_MINUTES} MINUTE)
+          )
+        ) AS rollup_closed`;
+}
+
+function explorerCanUseTrafficRollup(q, { filterSql, joinSql, whereCount }) {
+  if (q.cabinetClientId || filterSql || String(joinSql || '').trim()) return false;
+  if (whereCount > 2) return false;
+  if (q.metric === 'uniq_src') return false;
+  if (!flowCol('direction') || !flowCol('sourceId')) return false;
+  return true;
+}
+
+function explorerRollupMetricExpr(metric, seconds) {
+  return {
+    bps: `round(sum(part_bytes) * 8 / ${seconds}, 0)`,
+    volume: 'sum(part_bytes)',
+    pps: `round(sum(part_packets) / ${seconds}, 0)`,
+    fps: `round(sum(part_flows) / ${seconds}, 2)`,
+    flows: 'sum(part_flows)',
+  }[metric] || `round(sum(part_bytes) * 8 / ${seconds}, 0)`;
+}
+
+function explorerSummaryMap(q) {
+  return async function mapSummary(rows) {
+    const r = rows[0] || {};
+    const windowSeconds = explorerWindowSeconds({ range: q.range, from: q.from, to: q.to });
+    const totalBytes = Number(r.total_bytes) || 0;
+    return {
+      totalBytes,
+      totalPackets: Number(r.total_packets) || 0,
+      totalFlows: Number(r.total_flows) || 0,
+      avgBps: Number(r.avg_bps) || (windowSeconds > 0 ? Math.round(totalBytes * 8 / windowSeconds) : 0),
+      uniqSrc: null,
+      uniqDst: null,
+      inBytes: Number(r.in_bytes) || null,
+      outBytes: Number(r.out_bytes) || null,
+      topProtocols: (Array.isArray(r.top_protocol_ids) ? r.top_protocol_ids : []).map((id) => protoLabel(id)),
+    };
+  };
+}
+
+// Сумма без фильтров. traffic_dashboard_1h считается по time_flow_start_ns,
+// а разбор трафика режет окно по time_received_ns, поэтому берём
+// traffic_direction_1m и traffic_protocol_1m: они на том же времени.
+// Топ протоколов — по байтам, не по числу строк.
+function explorerSummaryFromRollup(windowSpec, params, q) {
+  const t = col('time');
+  const sourceCol = flowCol('sourceId');
+  const directionCol = flowCol('direction');
+  const scaled = explorerScaledFlowExprs('f');
+  const sources = explorerEnabledSourcesSql('source_id');
+  const rawSources = explorerEnabledSourcesSql(`f.${sourceCol}`);
+  return {
+    sql: `
+      WITH
+        ${windowSpec.cteHead}
+        dateDiff('second', ts_from, ts_to) AS window_seconds,
+        ${explorerRollupClosedCte()}
+      SELECT
+        sum(bytes) AS total_bytes,
+        sum(packets) AS total_packets,
+        sum(flows) AS total_flows,
+        round(sum(bytes) * 8 / window_seconds, 0) AS avg_bps,
+        sumIf(bytes, direction = 'in') AS in_bytes,
+        sumIf(bytes, direction = 'out') AS out_bytes,
+        (
+          SELECT topKWeighted(5)(proto, bytes)
+          FROM (
+            SELECT proto, sum(bytes) AS bytes
+            FROM (
+              SELECT proto, sum(bytes) AS bytes
+              FROM (
+                SELECT
+                  minute,
+                  source_id,
+                  proto,
+                  direction,
+                  sum(bytes) AS bytes
+                FROM ${protocolTableRef()}
+                WHERE minute >= ts_from
+                  AND minute < rollup_closed
+                  AND ${sources}
+                GROUP BY minute, source_id, proto, direction
+              )
+              GROUP BY proto
+              UNION ALL
+              SELECT f.${col('proto')} AS proto, sum(${scaled.bytes}) AS bytes
+              FROM ${flowsRawTableRef()} AS f
+              WHERE f.${t} >= rollup_closed
+                AND f.${t} < ts_to
+                AND ${rawSources}
+              GROUP BY proto
+            )
+            GROUP BY proto
+          )
+        ) AS top_protocol_ids
+      FROM (
+        SELECT
+          direction,
+          sum(bytes) AS bytes,
+          sum(packets) AS packets,
+          sum(flows) AS flows
+        FROM (
+          SELECT
+            direction,
+            sum(bytes) AS bytes,
+            sum(packets) AS packets,
+            sum(flows_count) AS flows
+          FROM ${directionTableRef()}
+          WHERE minute >= ts_from
+            AND minute < rollup_closed
+            AND ${sources}
+          GROUP BY minute, source_id, direction
+        )
+        GROUP BY direction
+        UNION ALL
+        SELECT
+          f.${directionCol} AS direction,
+          sum(${scaled.bytes}) AS bytes,
+          sum(${scaled.packets}) AS packets,
+          sum(${scaled.flowWeight}) AS flows
+        FROM ${flowsRawTableRef()} AS f
+        WHERE f.${t} >= rollup_closed
+          AND f.${t} < ts_to
+          AND ${rawSources}
+        GROUP BY direction
+      )
+    `,
+    params,
+    meta: { kind: 'summary', rollup: 'traffic_direction_1m' },
+    map: explorerSummaryMap(q),
+  };
+}
+
+function explorerTimeseriesFromRollup(windowSpec, params, q) {
+  const gran = resolveExplorerGranularity(q);
+  const t = col('time');
+  const sourceCol = flowCol('sourceId');
+  const scaled = explorerScaledFlowExprs('f');
+  const bucketExpr = explorerBucketExpr(`f.${t}`, gran.key, gran.seconds);
+  const rollupBucket = explorerBucketExpr('minute', gran.key, gran.seconds);
+  const sources = explorerEnabledSourcesSql('source_id');
+  const rawSources = explorerEnabledSourcesSql(`f.${sourceCol}`);
+  return {
+    sql: `
+      WITH
+        ${windowSpec.cteHead}
+        dateDiff('second', ts_from, ts_to) AS window_seconds,
+        ${explorerRollupClosedCte()}
+      SELECT
+        bucket,
+        toUnixTimestamp(bucket) AS bucket_ts,
+        sum(part_bytes) AS bytes,
+        sum(part_packets) AS packets,
+        sum(part_flows) AS flows,
+        round(sum(part_bytes) * 8 / ${gran.seconds}, 0) AS bps,
+        ${explorerRollupMetricExpr(q.metric, gran.seconds)} AS metric_value
+      FROM (
+        SELECT
+          ${rollupBucket} AS bucket,
+          sum(bytes) AS part_bytes,
+          sum(packets) AS part_packets,
+          sum(flows) AS part_flows
+        FROM (
+          SELECT
+            minute,
+            sum(bytes) AS bytes,
+            sum(packets) AS packets,
+            sum(flows_count) AS flows
+          FROM ${directionTableRef()}
+          WHERE minute >= ts_from
+            AND minute < rollup_closed
+            AND ${sources}
+          GROUP BY minute, source_id, direction
+        )
+        GROUP BY bucket
+        UNION ALL
+        SELECT
+          ${bucketExpr} AS bucket,
+          sum(${scaled.bytes}) AS part_bytes,
+          sum(${scaled.packets}) AS part_packets,
+          sum(${scaled.flowWeight}) AS part_flows
+        FROM ${flowsRawTableRef()} AS f
+        WHERE f.${t} >= rollup_closed
+          AND f.${t} < ts_to
+          AND ${rawSources}
+        GROUP BY bucket
+      )
+      GROUP BY bucket
+      ORDER BY bucket
+    `,
+    params,
+    meta: { kind: 'timeseries', granularity: gran.key, rollup: 'traffic_direction_1m' },
+    async map(rows) {
+      return rows.map((r) => ({
+        bucket: r.bucket,
+        bucketMs: explorerBucketMs(r),
+        bytes: Number(r.bytes) || 0,
+        packets: Number(r.packets) || 0,
+        flows: Number(r.flows) || 0,
+        bps: Number(r.bps) || 0,
+        value: Number(r.metric_value) || 0,
+      }));
+    },
+  };
+}
+
 async function explorerSummary(body = {}, options = {}) {
   await ensureFlowsRawSchema();
   const q = normalizeExplorerQuery(body, options);
@@ -3460,6 +3752,9 @@ async function explorerSummary(body = {}, options = {}) {
   const whereClauses = [`f.${t} >= ts_from`, `f.${t} < ts_to`];
   if (filterSql) whereClauses.push(filterSql);
   const scopedParams = applyExplorerScope(whereClauses, params, q);
+  if (explorerCanUseTrafficRollup(q, { filterSql, joinSql, whereCount: whereClauses.length })) {
+    return explorerSummaryFromRollup(windowSpec, scopedParams, q);
+  }
   const directionSelect = q.cabinetClientId
     ? `sumIf(${scaled.bytes}, ${cabinetClientDirectionExpr()} = 'in') AS in_bytes,
         sumIf(${scaled.bytes}, ${cabinetClientDirectionExpr()} = 'out') AS out_bytes,`
@@ -4204,6 +4499,9 @@ async function explorerTimeseries(body = {}, options = {}) {
   const whereClauses = [`f.${t} >= ts_from`, `f.${t} < ts_to`];
   if (filterSql) whereClauses.push(filterSql);
   const scopedParams = applyExplorerScope(whereClauses, params, q);
+  if (explorerCanUseTrafficRollup(q, { filterSql, joinSql, whereCount: whereClauses.length })) {
+    return explorerTimeseriesFromRollup(windowSpec, scopedParams, q);
+  }
   const bucketExpr = explorerBucketExpr(`f.${t}`, gran.key, gran.seconds);
   const metricExpr = {
     bps: `round(sum(${scaled.bytes}) * 8 / ${gran.seconds}, 0)`,
@@ -4374,19 +4672,20 @@ async function executeExplorerQueryBundle(bundle, queryBody, runNamed, namePrefi
       meta: { kind: 'timeseries', granularity: chart.meta?.granularity },
     };
   } else {
-    const [seriesResult, timesResult] = await Promise.all([
-      seriesRows.length
-        ? runNamed(
-          () => explorerResultSeries(queryBody, seriesRows, queryOptions),
-          { name: `${namePrefix}/result-series` },
-        )
-        : null,
-      bundle.timeseriesSpec
-        ? runNamed(() => Promise.resolve(bundle.timeseriesSpec), { name: `${namePrefix}/timeseries` })
-        : null,
-    ]);
-    resultSeriesResult = seriesResult;
-    timeseriesResult = timesResult;
+    // Ряды и общий график читают разные колонки одного окна. На одном диске
+    // два таких чтения сразу мешают друг другу, поэтому они идут по очереди.
+    if (seriesRows.length) {
+      resultSeriesResult = await runNamed(
+        () => explorerResultSeries(queryBody, seriesRows, queryOptions),
+        { name: `${namePrefix}/result-series` },
+      );
+    }
+    if (bundle.timeseriesSpec) {
+      timeseriesResult = await runNamed(
+        () => Promise.resolve(bundle.timeseriesSpec),
+        { name: `${namePrefix}/timeseries` },
+      );
+    }
   }
   const breakdownResults = {};
   for (const item of bundle.breakdownSpecs || []) {

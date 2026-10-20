@@ -5,6 +5,7 @@ const assert = require('node:assert/strict');
 const {
   explorerFlows,
   explorerSummary,
+  explorerTimeseries,
   explorerResultSeries,
 } = require('./explorer');
 
@@ -158,15 +159,62 @@ describe('explorer query shape', () => {
     assert.equal(spec.params.filter_0_etype, 2048);
   });
 
-  it('keeps a CIDR filter as a range check', async () => {
+  it('keeps a CIDR filter as a range check on the stored address', async () => {
     const spec = await explorerFlows({
       ...WINDOW,
       groupBy: ['proto'],
       filters: [{ field: 'src_ip', op: 'cidr', value: '10.0.0.0/8' }],
     });
-    assert.match(spec.sql, /isIPAddressInRange\(/);
+    assert.match(spec.sql, /substring\(f\.`[^`]+`, 1, 1\) = unhex\('0a'\)/);
+    assert.match(spec.sql, /etype` = 2048/);
     assert.equal(spec.params.filter_0, '10.0.0.0/8');
+    assert.doesNotMatch(spec.sql, /isIPAddressInRange/);
     assert.doesNotMatch(spec.sql, /toFixedString\(unhex/);
+  });
+
+  it('masks the leftover bits of a CIDR that is not on a byte boundary', async () => {
+    const spec = await explorerFlows({
+      ...WINDOW,
+      groupBy: ['proto'],
+      filters: [{ field: 'dst_ip', op: 'cidr', value: '213.230.115.0/25' }],
+    });
+    assert.match(spec.sql, /substring\(f\.`[^`]+`, 1, 3\) = unhex\('d5e673'\)/);
+    assert.match(spec.sql, /bitAnd\(reinterpretAsUInt8\(substring\(f\.`[^`]+`, 4, 1\)\), 128\) = 0/);
+  });
+
+  it('сравнивает свою подсеть с адресом, а не с его текстом', async () => {
+    const spec = await explorerFlows({
+      ...WINDOW,
+      groupBy: ['proto'],
+      filters: [{ field: 'own_network', op: '=', value: '2001:db8::/32' }],
+    });
+    assert.match(spec.sql, /unhex\('20010db8'\)/);
+    assert.match(spec.sql, /etype` = 34525/);
+    assert.equal(spec.params.prefix_0, '2001:db8::/32');
+    assert.doesNotMatch(spec.sql, /IPv6NumToString\(f\.`/);
+  });
+
+  it('берёт сумму и ряд без фильтров из минутных rollup', async () => {
+    const summary = await explorerSummary({ ...WINDOW });
+    assert.match(summary.sql, /traffic_direction_1m/);
+    assert.match(summary.sql, /traffic_protocol_1m/);
+    assert.match(summary.sql, /topKWeighted\(5\)\(proto, bytes\)/);
+    assert.match(summary.sql, /rollup_closed/);
+    const series = await explorerTimeseries({ ...WINDOW, metric: 'bps' });
+    assert.match(series.sql, /traffic_direction_1m/);
+    assert.equal(series.meta.rollup, 'traffic_direction_1m');
+  });
+
+  it('не подменяет rollup, если есть фильтр или уникальные IP', async () => {
+    const filtered = await explorerSummary({
+      ...WINDOW,
+      filters: [{ field: 'vlan', op: '=', value: '447' }],
+    });
+    assert.doesNotMatch(filtered.sql, /traffic_direction_1m/);
+    assert.match(filtered.sql, /topK\(5\)/);
+    const uniq = await explorerTimeseries({ ...WINDOW, metric: 'uniq_src' });
+    assert.doesNotMatch(uniq.sql, /traffic_direction_1m/);
+    assert.match(uniq.sql, /uniqCombined/);
   });
 
   it('кладёт сумму всех групп в окно таблицы, до отсечения лимитом', async () => {
