@@ -2068,10 +2068,17 @@ function getTextareaCaretCoordinates(textarea, pos) {
 }
 
 function explorerLogicAutocompleteEntries() {
-  return EXPLORER_FILTER_LOGIC_OPTIONS.flatMap((o) => ([
-    { token: explorerLogicLabel(o), hint: `${o.altLabel} · logic` },
-    { token: o.altLabel, hint: `${explorerLogicLabel(o)}${explorerT('explorer.logicLinkHint')}` },
-  ]));
+  return EXPLORER_FILTER_LOGIC_OPTIONS.flatMap((o) => {
+    const localized = explorerLogicLabel(o);
+    const entries = [{ token: localized, hint: `${o.altLabel} · logic` }];
+    if (String(localized).toUpperCase() !== String(o.altLabel).toUpperCase()) {
+      entries.push({
+        token: o.altLabel,
+        hint: `${localized}${explorerT('explorer.logicLinkHint')}`,
+      });
+    }
+    return entries;
+  });
 }
 
 function buildExplorerTextSuggestions({ value, cursor, schema, entityItems = [] }) {

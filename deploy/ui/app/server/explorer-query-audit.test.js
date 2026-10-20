@@ -39,7 +39,7 @@ test('buildExplorerAuditFiltersText serializes period, metric, group and nested 
   assert.match(text, /metric bps/);
   assert.match(text, /group by src_ip, dst_ip/);
   assert.match(text, /src_ip = 10\.0\.0\.1/);
-  assert.match(text, /ИЛИ dst_port = 443/);
+  assert.match(text, /OR dst_port = 443/);
   assert.match(text, /limit 100/);
 });
 

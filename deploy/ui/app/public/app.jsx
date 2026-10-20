@@ -51,16 +51,16 @@ function LazyPage({ pageId, exportName, fallback, ...props }) {
   if (error) {
     return (
       <div className="other-ports-table__state">
-        {error.message || 'Не удалось загрузить страницу'}
+        {error.message || t('app.pageLoadFailed')}
       </div>
     );
   }
   if (!ready) {
-    return fallback ?? <div className="other-ports-table__state">Загрузка…</div>;
+    return fallback ?? <div className="other-ports-table__state">{t('app.pageLoading')}</div>;
   }
   const Comp = PageChunks.component(pageId, exportName);
   if (!Comp) {
-    return <div className="other-ports-table__state">Компонент не найден</div>;
+    return <div className="other-ports-table__state">{t('app.pageComponentMissing')}</div>;
   }
   return <Comp {...props} />;
 }
@@ -233,7 +233,7 @@ function App() {
       .catch((err) => {
         if (cancelled) return;
         setLocale(pending);
-        pushToast({ kind: 'error', title: 'Не удалось сохранить язык', desc: err.message });
+        pushToast({ kind: 'error', title: t('app.localeSaveFailed'), desc: err.message });
       });
     return () => { cancelled = true; };
   }, [auth.loading, auth.user?.id, auth.user?.locale]);
@@ -304,10 +304,10 @@ function App() {
           notified = true;
           pushToast({
             kind: 'info',
-            title: 'Доступна новая версия',
-            desc: 'Перезагрузите страницу, чтобы использовать актуальную версию.',
+            title: t('app.newVersion.title'),
+            desc: t('app.newVersion.desc'),
             duration: 0,
-            actionLabel: 'Перезагрузить',
+            actionLabel: t('app.newVersion.reload'),
             onAction: () => { ApiClient.hardReload(); },
           });
         }
@@ -484,11 +484,11 @@ function App() {
     try {
       await ApiClient.stopImpersonation();
       await reloadCurrentUser();
-      pushToast({ kind: 'success', title: 'Выход из кабинета клиента' });
+      pushToast({ kind: 'success', title: t('cabinet.impersonation.left') });
       setPage('clients');
       location.hash = 'clients';
     } catch (err) {
-      pushToast({ kind: 'error', title: 'Не удалось выйти из кабинета', desc: err.message });
+      pushToast({ kind: 'error', title: t('cabinet.impersonation.leaveFailed'), desc: err.message });
     }
   };
   const handleRefresh = useCallback(() => setRefreshKey((k) => k + 1), []);
@@ -507,7 +507,7 @@ function App() {
       setAuth((prev) => ({ ...prev, user }));
     } catch (err) {
       setLocale(previous);
-      pushToast({ kind: 'error', title: 'Не удалось сохранить язык', desc: err.message });
+      pushToast({ kind: 'error', title: t('app.localeSaveFailed'), desc: err.message });
     }
   }, [locale]);
 

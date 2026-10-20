@@ -229,6 +229,44 @@ function auditExplorerDetail(parsed) {
   return parsed?.explorer && typeof parsed.explorer === 'object' ? parsed.explorer : null;
 }
 
+const AUDIT_USER_FIELD_KEYS = {
+  username: 'auditPage.field.username',
+  fullName: 'auditPage.field.fullName',
+  roleId: 'auditPage.field.roleId',
+  clientId: 'auditPage.field.clientId',
+  active: 'auditPage.field.active',
+};
+
+function auditChangeFieldLabel(change) {
+  const field = String(change?.field || '').trim();
+  const key = AUDIT_USER_FIELD_KEYS[field];
+  if (key && GrapesI18n.has(key)) return auditT(key);
+  return change?.label || field || '—';
+}
+
+function auditChangeDisplayValue(field, value) {
+  const text = value == null || value === '' ? '—' : String(value);
+  if (text === '—') return text;
+  if (field === 'roleId') {
+    const localized = auditRoleLabel(text);
+    return localized || text;
+  }
+  if (field === 'active') {
+    const low = text.toLowerCase();
+    if (text === 'да' || low === 'true' || text === '1') return auditT('auditPage.value.yes');
+    if (text === 'нет' || low === 'false' || text === '0') return auditT('auditPage.value.no');
+  }
+  return text;
+}
+
+function formatAuditChangeLine(change) {
+  const field = String(change?.field || '').trim();
+  const label = auditChangeFieldLabel(change);
+  const from = auditChangeDisplayValue(field, change?.from);
+  const to = auditChangeDisplayValue(field, change?.to);
+  return `${label}: ${from} → ${to}`;
+}
+
 function auditChangesSummary(row, { maxItems = 3 } = {}) {
   const parsed = parseAuditDetail(row.detail);
   const explorer = auditExplorerDetail(parsed);
@@ -240,9 +278,7 @@ function auditChangesSummary(row, { maxItems = 3 } = {}) {
     return parts.join(' · ');
   }
   if (parsed?.changes?.length) {
-    const parts = parsed.changes.slice(0, maxItems).map(
-      (c) => `${c.label}: ${c.from} → ${c.to}`,
-    );
+    const parts = parsed.changes.slice(0, maxItems).map((c) => formatAuditChangeLine(c));
     if (parsed.changes.length > maxItems) {
       parts.push(auditT('auditPage.changes.more', { count: parsed.changes.length - maxItems }));
     }
@@ -270,15 +306,21 @@ function AuditChangesList({ changes }) {
     <div className="col" style={{ gap: 6 }}>
       <strong>{auditT('auditPage.detail.changes')}</strong>
       <ul style={{ margin: 0, paddingLeft: 18, display: 'flex', flexDirection: 'column', gap: 4 }}>
-        {changes.map((c) => (
-          <li key={`${c.field}-${c.label}-${c.from}-${c.to}`}>
-            <span style={{ font: 'var(--pv-text-body-2-bold)' }}>{c.label}</span>
-            {': '}
-            <span className="mono">{c.from}</span>
-            {' → '}
-            <span className="mono">{c.to}</span>
-          </li>
-        ))}
+        {changes.map((c) => {
+          const field = String(c.field || '').trim();
+          const label = auditChangeFieldLabel(c);
+          const from = auditChangeDisplayValue(field, c.from);
+          const to = auditChangeDisplayValue(field, c.to);
+          return (
+            <li key={`${c.field}-${c.label}-${c.from}-${c.to}`}>
+              <span style={{ font: 'var(--pv-text-body-2-bold)' }}>{label}</span>
+              {': '}
+              <span className="mono">{from}</span>
+              {' → '}
+              <span className="mono">{to}</span>
+            </li>
+          );
+        })}
       </ul>
     </div>
   );

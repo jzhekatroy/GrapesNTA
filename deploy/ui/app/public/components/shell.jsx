@@ -258,7 +258,7 @@ function NavItem({ item, active, onNavigate, collapsed }) {
       <Icon name={item.icon} size={18} className="nav-item__icon" />
       <span className="nav-item__label">{item.label}</span>
       {item.badge && <span className="nav-item__badge">{item.badge}</span>}
-      {item.soon && <span className="tag" style={{ fontSize: 10, padding: '1px 6px' }}>скоро</span>}
+      {item.soon && <span className="tag" style={{ fontSize: 10, padding: '1px 6px' }}>{t('chrome.soon')}</span>}
     </>
   );
 
@@ -897,7 +897,9 @@ function directionSummaryLabel(directions) {
 }
 
 const NO_LOCATION_KEY = '__none__';
-const NO_LOCATION_LABEL = 'Без локации';
+function noLocationLabel() {
+  return t('collectors.noLocation');
+}
 
 function normalizeLocationId(value) {
   const v = String(value ?? '').trim();
@@ -914,7 +916,7 @@ function isLocationScope(value) {
 }
 
 function locationScopeLabel(locations, collectors, locationId) {
-  if (locationId === NO_LOCATION_KEY || !locationId) return NO_LOCATION_LABEL;
+  if (locationId === NO_LOCATION_KEY || !locationId) return noLocationLabel();
   const loc = (locations || []).find((l) => normalizeLocationId(l.locationId) === normalizeLocationId(locationId));
   if (loc?.displayName) return loc.displayName;
   const item = (collectors || []).find((c) => normalizeLocationId(c.locationId) === normalizeLocationId(locationId));
@@ -960,7 +962,7 @@ function buildCollectorFilterGroups(collectors, locations) {
     if (unassigned.length) {
       groups.push({
         locationId: NO_LOCATION_KEY,
-        locationName: NO_LOCATION_LABEL,
+        locationName: noLocationLabel(),
         collectors: unassigned,
       });
     }
@@ -974,7 +976,7 @@ function buildCollectorFilterGroups(collectors, locations) {
     if (!map.has(key)) {
       map.set(key, {
         locationId: locId || NO_LOCATION_KEY,
-        locationName: locId ? (item.locationName || locId) : NO_LOCATION_LABEL,
+        locationName: locId ? (item.locationName || locId) : noLocationLabel(),
         collectors: [],
       });
     }
@@ -992,11 +994,11 @@ function scopeTokenLabel(token, collectors, locations) {
     const locationId = token.slice(4);
     const inLocation = collectorsInLocation(collectors, locationId);
     const name = locationScopeLabel(locations, collectors, locationId);
-    return `${name} · все (${inLocation.length})`;
+    return t('collectors.scopeAllInLocation', { name, n: inLocation.length });
   }
   const item = (collectors || []).find((c) => c.collectorId === token);
   if (!item) return token;
-  const locationName = locationScopeLabel(locations, collectors, item.locationId) || NO_LOCATION_LABEL;
+  const locationName = locationScopeLabel(locations, collectors, item.locationId) || noLocationLabel();
   return `${locationName} · ${item.collectorName}`;
 }
 
@@ -1049,7 +1051,7 @@ function collectorFilterLabel(collectorFilter, collectors, locations) {
   const items = collectorFilter || [];
   if (!items.length) return t('collectors.all');
   if (items.length === 1) return scopeTokenLabel(items[0], collectors, locations);
-  return `${items.length} выбрано`;
+  return t('collectors.picker.selectedCount', { n: items.length });
 }
 
 function useCloseOnOutsideClick(open, setOpen, rootRef) {
@@ -1404,7 +1406,7 @@ function PeriodTimeField({
         <span className="time-filter__time-sep" aria-hidden="true">:</span>
         <TimePartInput
           id={minuteId}
-          ariaLabel={`${label}, минуты`}
+          ariaLabel={t('period.minutesAria', { label })}
           value={endOfDay ? 0 : minute}
           max={59}
           disabled={endOfDay}

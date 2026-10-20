@@ -91,7 +91,19 @@ function Tag({ children, onRemove, color }) {
 function StatusIndicator({ status, label }) {
   const tones = { healthy: 'ok', warning: 'warn', critical: 'err', error: 'err', idle: 'idle', offline: 'idle' };
   const cls = tones[status] || 'idle';
-  const text = label || ({ healthy: 'Здоров', warning: 'Внимание', critical: 'Критично', error: 'Ошибка', idle: 'Отключён', offline: 'Не в сети' }[status] || status);
+  const fallbackKey = {
+    healthy: 'status.healthy',
+    warning: 'status.warning',
+    critical: 'status.critical',
+    error: 'status.error',
+    idle: 'status.idle',
+    offline: 'status.offline',
+  }[status];
+  const text = label || (
+    (typeof GrapesI18n !== 'undefined' && GrapesI18n.t && fallbackKey)
+      ? GrapesI18n.t(fallbackKey)
+      : status
+  );
   return (
     <span className={`status status--${cls}`}>
       <span className="status__dot" />

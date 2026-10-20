@@ -13,10 +13,10 @@ const {
 const AUDIT_DETAIL_MAX_LEN = 8000;
 
 const FILTER_LOGIC_LABELS = {
-  and: 'И',
-  or: 'ИЛИ',
-  and_not: 'И НЕ',
-  or_not: 'ИЛИ НЕ',
+  and: 'AND',
+  or: 'OR',
+  and_not: 'AND NOT',
+  or_not: 'OR NOT',
 };
 
 function quoteFilterVal(value) {

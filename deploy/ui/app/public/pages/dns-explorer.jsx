@@ -601,10 +601,14 @@ function getDnsTextareaCaretCoordinates(textarea, pos) {
 }
 
 function dnsLogicAutocompleteEntries() {
-  return DNS_EXPLORER_FILTER_LOGIC_OPTIONS.flatMap((o) => ([
-    { token: dnsExplorerLogicLabel(o), hint: `${o.altLabel}${dnsExplorerT('explorer.logicLinkHint')}` },
-    { token: o.altLabel, hint: `${dnsExplorerLogicLabel(o)} · logic` },
-  ]));
+  return DNS_EXPLORER_FILTER_LOGIC_OPTIONS.flatMap((o) => {
+    const localized = dnsExplorerLogicLabel(o);
+    const entries = [{ token: localized, hint: `${o.altLabel}${dnsExplorerT('explorer.logicLinkHint')}` }];
+    if (String(localized).toUpperCase() !== String(o.altLabel).toUpperCase()) {
+      entries.push({ token: o.altLabel, hint: `${localized} · logic` });
+    }
+    return entries;
+  });
 }
 
 function resolveDnsFieldToken(token, schema) {
