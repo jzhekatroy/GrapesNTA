@@ -7799,7 +7799,7 @@ function ExplorerFilters({
       {canWrite && (
         <Button kind="ghost" size="sm" icon="save" onClick={onSave}>{explorerT('explorer.save')}</Button>
       )}
-      {canWrite && onSaveAsObservation && (
+      {onSaveAsObservation && (
         <Button kind="primary" size="sm" onClick={onSaveAsObservation}>{saveAsObservationLabel}</Button>
       )}
       {filterMode === 'graphic' && (

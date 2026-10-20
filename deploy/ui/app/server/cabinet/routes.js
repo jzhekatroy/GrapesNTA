@@ -63,8 +63,8 @@ const {
   buildExplorerStoredPayload,
 } = require('../analysis-snapshots');
 const {
-  getObservationsBoardLayout,
-  putObservationsBoardLayout,
+  getLayout: getObservationsBoardLayout,
+  putLayout: putObservationsBoardLayout,
 } = require('../observations-board-layout');
 const { writeAuditEvent } = require('../audit-log');
 const {
