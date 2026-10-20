@@ -458,4 +458,5 @@ module.exports = {
   lastSuccessfulRunAt,
   naiveChToIso,
   sanitizeCreatedAt,
+  observationToRow,
 };
