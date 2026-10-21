@@ -2847,24 +2847,21 @@ function PageObservations({ onNavigate }) {
         <div>
           <h1>{obsT('observations.title')}</h1>
           {sections.length > 1 ? (
-            <div className="row" style={{ gap: 8, marginTop: 12, flexWrap: 'wrap' }}>
+            <div className="row observations-section-tabs" style={{ gap: 8, marginTop: 12, flexWrap: 'wrap' }}>
               {sections.map((sec) => (
-                <button
+                <Button
                   key={sec.id}
-                  type="button"
-                  className={`btn btn--sm ${sec.id === activeSectionId ? 'btn--primary' : 'btn--ghost'}`}
+                  kind={sec.id === activeSectionId ? 'primary' : 'default'}
+                  size="sm"
                   onClick={() => selectSection(sec.id)}
+                  title={sec.level === 'view' ? obsT('observations.section.viewOnly') : undefined}
                 >
-                  {sec.title} {sec.count}
+                  <span>{sec.title}</span>
+                  <span className="observations-section-tab__count">{sec.count}</span>
                   {sec.level === 'view' ? (
-                    <Icon
-                      name="eye"
-                      size={13}
-                      style={{ marginLeft: 6, opacity: 0.55, verticalAlign: 'middle' }}
-                      title={obsT('observations.section.viewOnly')}
-                    />
+                    <Icon name="eye" size={13} style={{ opacity: 0.55 }} />
                   ) : null}
-                </button>
+                </Button>
               ))}
             </div>
           ) : null}

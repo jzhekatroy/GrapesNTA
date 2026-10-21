@@ -11,6 +11,7 @@ const {
 } = require('./clickhouse');
 const { canAccess } = require('./rbac/permissions');
 const { CLIENT_ROLE_ID } = require('./cabinet/constants');
+const { loadAllObservations } = require('./observations-store');
 
 const GENERAL_SECTION_ID = 'general';
 const ADMIN_ROLE_ID = 'Administrator';
@@ -357,9 +358,13 @@ async function observationSectionId(observationId, mapCache = null) {
 }
 
 async function countObservationsBySection() {
-  const map = await loadObservationSectionMap();
+  const [map, all] = await Promise.all([
+    loadObservationSectionMap(),
+    loadAllObservations(),
+  ]);
   const counts = {};
-  for (const sectionId of Object.values(map)) {
+  for (const item of all) {
+    const sectionId = map[item.id] || GENERAL_SECTION_ID;
     counts[sectionId] = (counts[sectionId] || 0) + 1;
   }
   return counts;
@@ -393,6 +398,22 @@ async function setObservationSection(observationId, sectionId) {
     section_id: String(sectionId),
     updated_at: now,
   }], { name: 'obs-sections/map-set' });
+}
+
+/** Явно записать в map все текущие наблюдения в «Общие» (первый пользовательский раздел). */
+async function pinAllObservationsToGeneral() {
+  const items = await loadAllObservations();
+  if (!items.length) return 0;
+  const now = formatDateTime64();
+  const rows = items.map((item) => ({
+    observation_id: String(item.id),
+    section_id: GENERAL_SECTION_ID,
+    updated_at: now,
+  }));
+  await insertRows(config.observationSectionMapTable, rows, {
+    name: 'obs-sections/pin-all-general',
+  });
+  return rows.length;
 }
 
 async function moveObservationsToGeneral(fromSectionId) {
@@ -467,9 +488,13 @@ async function createSection(title) {
     throw err;
   }
   const sections = await listActiveSections();
+  const isFirstCustomSection = sections.every((s) => s.id === GENERAL_SECTION_ID);
   const maxSort = sections.reduce((m, s) => Math.max(m, s.sort), -1);
   const now = formatDateTime64();
   const id = newSectionId();
+  if (isFirstCustomSection) {
+    await pinAllObservationsToGeneral();
+  }
   await insertRows(config.observationSectionsTable, [{
     id,
     title: t,
