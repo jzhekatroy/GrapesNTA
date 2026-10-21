@@ -180,13 +180,19 @@ function filterNav(nav, effectivePermissions) {
 }
 
 /* =============== Sidebar =============== */
-function Sidebar({ current, onNavigate, collapsed, effectivePermissions, cabinetMode, clientDisplayName, locale }) {
+function Sidebar({ current, onNavigate, collapsed, effectivePermissions, cabinetMode, cabinetBindMode, clientDisplayName, locale }) {
   const visibleNav = useMemo(
     () => {
-      const raw = cabinetMode ? CABINET_NAV : filterNav(NAV, effectivePermissions);
+      let raw = cabinetMode ? CABINET_NAV : filterNav(NAV, effectivePermissions);
+      if (cabinetMode && cabinetBindMode === 'ports') {
+        raw = raw.map((sec) => ({
+          ...sec,
+          items: (sec.items || []).filter((it) => it.id !== 'dns'),
+        }));
+      }
       return raw.map(withNavLabels);
     },
-    [cabinetMode, effectivePermissions, locale],
+    [cabinetMode, cabinetBindMode, effectivePermissions, locale],
   );
   const [openSections, setOpenSections] = useState(() => {
     const o = {};

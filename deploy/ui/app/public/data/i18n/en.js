@@ -1949,8 +1949,6 @@
     'clientsPage.bindings.removedPrefix': 'Network {prefix} unbound from "{name}".',
     'clientsPage.bindings.removedPort': 'Port {ip} · ifIndex {ifIndex} unbound from "{name}".',
     'clientsPage.bindings.saveFailed': 'Failed to save the binding',
-    'clientsPage.bindings.dnsTitle': 'DNS limitation',
-    'clientsPage.bindings.dnsDesc': 'A client defined only by ports will not see their DNS queries: the DNS log has neither ports nor VLANs, so binding is possible only by addresses.',
     'clientsPage.bindings.networksTitle': 'Client networks',
     'clientsPage.bindings.portsTitle': 'Client ports',
     'clientsPage.bindings.networksEmpty': 'No networks assigned.',

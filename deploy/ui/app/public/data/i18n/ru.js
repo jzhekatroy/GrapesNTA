@@ -1949,8 +1949,6 @@
     'clientsPage.bindings.removedPrefix': 'Сеть {prefix} отвязана от «{name}».',
     'clientsPage.bindings.removedPort': 'Порт {ip} · ifIndex {ifIndex} отвязан от «{name}».',
     'clientsPage.bindings.saveFailed': 'Не удалось сохранить привязку',
-    'clientsPage.bindings.dnsTitle': 'Ограничение DNS',
-    'clientsPage.bindings.dnsDesc': 'Клиент, заданный только портами, не увидит своих DNS-запросов: в DNS-логе нет ни портов, ни VLAN, привязка возможна только по адресам.',
     'clientsPage.bindings.networksTitle': 'Сети клиента',
     'clientsPage.bindings.portsTitle': 'Порты клиента',
     'clientsPage.bindings.networksEmpty': 'Сети не назначены.',

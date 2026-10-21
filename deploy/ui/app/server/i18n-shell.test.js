@@ -225,7 +225,6 @@ test('английские подписи страницы Клиенты сов
   assert.equal(en['clientsPage.bindMode.ports'], 'By interface ports');
   assert.equal(en['clientsPage.action.openCabinet'], 'Open cabinet');
   assert.equal(en['clientsPage.err.nameRequired'], 'Enter the client name');
-  assert.equal(en['clientsPage.bindings.dnsTitle'], 'DNS limitation');
   assert.equal(en['clientsPage.bindings.free'], 'Available');
   assert.equal(en['clientsPage.users.err.password'], 'Password must be at least 12 characters');
   assert.equal(en['clientsPage.users.resetTip'], 'Reset password');

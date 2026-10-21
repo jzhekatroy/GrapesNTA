@@ -71,6 +71,7 @@ function canAccessPageForUser(user, pageId) {
     return false;
   }
   if (isCabinetMode(user)) {
+    if (user?.cabinet?.bindMode === 'ports' && pageId === 'dns') return false;
     return CABINET_PAGE_IDS.has(pageId);
   }
   if (!perms) return true;
@@ -564,14 +565,19 @@ function App() {
   // write may still configure client observations (server guard allows the same).
   const cabinetObservationsReadOnly = cabinetReadOnly && !canManageCabinetObservations;
   const clientDisplayName = auth.user?.cabinet?.clientDisplayName || '';
+  const cabinetBindMode = auth.user?.cabinet?.bindMode || '';
 
   useEffect(() => {
     if (!auth.user || !registryReady) return;
-    if (isCabinetMode(auth.user) && !CABINET_PAGE_IDS.has(page)) {
+    const cabinetBlocked = isCabinetMode(auth.user) && (
+      !CABINET_PAGE_IDS.has(page)
+      || (cabinetBindMode === 'ports' && page === 'dns')
+    );
+    if (cabinetBlocked) {
       setPage('dashboard');
       location.hash = 'dashboard';
     }
-  }, [auth.user, registryReady, page]);
+  }, [auth.user, registryReady, page, cabinetBindMode]);
 
   useEffect(() => {
     if (!auth.user || !registryReady) return;
@@ -840,6 +846,7 @@ function App() {
         collapsed={collapsed}
         effectivePermissions={auth.user?.effectivePermissions}
         cabinetMode={cabinetMode}
+        cabinetBindMode={cabinetBindMode}
         clientDisplayName={clientDisplayName}
         locale={locale}
       />
