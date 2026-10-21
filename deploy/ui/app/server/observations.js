@@ -301,6 +301,14 @@ function countActiveMaterialize(items, exceptId = null) {
   return items.filter((o) => isActiveMaterialize(o, exceptId)).length;
 }
 
+function filterObservationsVisibleToUser(items, ctx) {
+  if (!ctx) return items || [];
+  return (items || []).filter((item) => canViewInSection(
+    ctx.access,
+    sectionIdForObservation(item.id, ctx),
+  ));
+}
+
 function materializeOccupants(items, exceptId = null) {
   return items
     .filter((o) => isActiveMaterialize(o, exceptId))
@@ -522,7 +530,8 @@ function normalizeObservation(raw = {}, { userId, existing = null } = {}) {
 async function withMeta(item, allItems = null, user = null, ctx = null) {
   const scope = classifyScope(item.filters, item.widgets);
   const all = allItems || await loadAllObservations();
-  const active = countActiveMaterialize(all);
+  const quotaPool = ctx ? filterObservationsVisibleToUser(all, ctx) : all;
+  const active = countActiveMaterialize(quotaPool);
   const sectionId = ctx ? sectionIdForObservation(item.id, ctx) : GENERAL_SECTION_ID;
   const canEdit = user && ctx ? canEditInSection(ctx.access, sectionId) : undefined;
   const warnings = [];
@@ -555,7 +564,7 @@ async function withMeta(item, allItems = null, user = null, ctx = null) {
       maxMaterialize: MATERIALIZE_LIMIT_ENABLED ? MAX_MATERIALIZE : null,
       activeMaterialize: active,
       minIntervalSec: MIN_INTERVAL_SEC,
-      occupants: materializeOccupants(all),
+      occupants: materializeOccupants(quotaPool),
     },
     warnings,
     materializeIssue,
@@ -586,7 +595,7 @@ async function listObservations(user) {
     ctx.access,
     sectionIdForObservation(item.id, ctx),
   ));
-  return Promise.all(visible.map((item) => withMeta(item, all, user, ctx)));
+  return Promise.all(visible.map((item) => withMeta(item, visible, user, ctx)));
 }
 
 async function getObservation(id, user) {
@@ -595,7 +604,9 @@ async function getObservation(id, user) {
   const ctx = await createObservationSectionContext(user);
   const sectionId = sectionIdForObservation(item.id, ctx);
   if (!canViewInSection(ctx.access, sectionId)) return null;
-  return withMeta(item, null, user, ctx);
+  const all = await loadAllObservations();
+  const visible = filterObservationsVisibleToUser(all, ctx);
+  return withMeta(item, visible, user, ctx);
 }
 
 async function createObservation(user, payload = {}) {
@@ -614,7 +625,7 @@ async function createObservation(user, payload = {}) {
   if (MATERIALIZE_LIMIT_ENABLED
     && item.materialize.enabled
     && countActiveMaterialize(items) >= MAX_MATERIALIZE) {
-    throw quotaError(items);
+    throw quotaError(filterObservationsVisibleToUser(items, ctx));
   }
   if (item.materialize.enabled) item.materialize.status = 'queued';
   await upsertObservation(item);
@@ -652,7 +663,7 @@ async function updateObservation(id, user, payload = {}) {
   if (MATERIALIZE_LIMIT_ENABLED
     && next.materialize.enabled
     && countActiveMaterialize(items, id) >= MAX_MATERIALIZE) {
-    throw quotaError(items, id);
+    throw quotaError(filterObservationsVisibleToUser(items, ctx), id);
   }
   if (next.materialize.enabled && !existing.materialize?.enabled) {
     next.materialize.status = 'queued';
@@ -816,7 +827,7 @@ async function queueMaterialize(id, user) {
   if (MATERIALIZE_LIMIT_ENABLED
     && countActiveMaterialize(items, id) >= MAX_MATERIALIZE
     && !existing.materialize?.enabled) {
-    throw quotaError(items, id);
+    throw quotaError(filterObservationsVisibleToUser(items, ctx), id);
   }
   const refreshSec = Math.max(
     MIN_REFRESH_SEC,

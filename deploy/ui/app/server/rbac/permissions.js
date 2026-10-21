@@ -236,7 +236,24 @@ async function getRoleWithPermissions(roleId) {
     permissions[resource] = !!perm.access;
     writePermissions[resource] = !!perm.write;
   }
-  return { ...role, permissions, writePermissions };
+  let observationSections = [];
+  try {
+    const {
+      listSectionsForRoleConfig,
+      loadSectionLevelsForRole,
+    } = require('../observation-sections');
+    const sections = await listSectionsForRoleConfig();
+    const levels = await loadSectionLevelsForRole(roleId);
+    observationSections = sections.map((s) => ({
+      id: s.id,
+      title: s.title,
+      system: s.system,
+      level: levels[s.id] || 'none',
+    }));
+  } catch {
+    observationSections = [];
+  }
+  return { ...role, permissions, writePermissions, observationSections };
 }
 
 async function createRole({ name, displayName }) {
@@ -291,7 +308,9 @@ async function createRole({ name, displayName }) {
   return getRoleWithPermissions(roleName);
 }
 
-async function updateRole(roleId, { displayName, permissions, writePermissions }) {
+async function updateRole(roleId, {
+  displayName, permissions, writePermissions, observationSections,
+}) {
   const existing = await loadRole(roleId);
   if (!existing) {
     const err = new Error('Роль не найдена');
@@ -337,6 +356,11 @@ async function updateRole(roleId, { displayName, permissions, writePermissions }
       };
     });
     await insertRows(config.rolePermissionsTable, permRows, { name: 'rbac/update-role-permissions' });
+  }
+
+  if (observationSections && typeof observationSections === 'object') {
+    const { syncRoleObservationSectionAccess } = require('../observation-sections');
+    await syncRoleObservationSectionAccess(existing.id, observationSections);
   }
 
   return getRoleWithPermissions(existing.id);

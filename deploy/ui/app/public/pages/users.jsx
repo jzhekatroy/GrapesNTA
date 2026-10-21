@@ -393,14 +393,29 @@ function UserDrawer({ user, roles, resources, displayTimezone, onClose, onSaved 
   );
 }
 
+function observationSectionFlagsFromLevel(level) {
+  const l = level === 'edit' ? 'edit' : level === 'view' ? 'view' : 'none';
+  return { view: l === 'view' || l === 'edit', edit: l === 'edit' };
+}
+
+function observationSectionLevelFromFlags(view, edit) {
+  if (edit) return 'edit';
+  if (view) return 'view';
+  return 'none';
+}
+
 function RoleDrawer({ role, resources, onClose, onSaved, onDeleted }) {
   const [displayName, setDisplayName] = useState('');
   const [permissions, setPermissions] = useState({});
   const [writePermissions, setWritePermissions] = useState({});
+  const [observationSectionAccess, setObservationSectionAccess] = useState({});
+  const [observationSectionMeta, setObservationSectionMeta] = useState([]);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
   const isStandard = role && ['Administrator', 'Operator', 'ReadOnly'].includes(role.id);
+  const isAdminRole = role?.id === 'Administrator';
+  const isClientRole = role?.id === 'Client';
 
   useEffect(() => {
     if (!role) return;
@@ -412,15 +427,49 @@ function RoleDrawer({ role, resources, onClose, onSaved, onDeleted }) {
         setDisplayName(data.displayName || role.displayName);
         setPermissions(data.permissions || {});
         setWritePermissions(data.writePermissions || {});
+        const sections = data.observationSections || [];
+        setObservationSectionMeta(sections);
+        const access = {};
+        sections.forEach((sec) => {
+          access[sec.id] = observationSectionFlagsFromLevel(sec.level);
+        });
+        setObservationSectionAccess(access);
       })
       .catch((err) => setError(err.message))
       .finally(() => setLoading(false));
   }, [role?.id]);
 
+  const syncObservationSectionsAfterObsPageChange = (pageId, { viewOff, writeOff }) => {
+    if (pageId !== 'observations' || (!viewOff && !writeOff)) return;
+    setObservationSectionAccess((prev) => {
+      const next = { ...prev };
+      const ids = observationSectionMeta.length
+        ? observationSectionMeta.map((s) => s.id)
+        : Object.keys(prev);
+      ids.forEach((id) => {
+        const cur = prev[id] || { view: false, edit: false };
+        if (viewOff) {
+          next[id] = { view: false, edit: false };
+        } else if (writeOff) {
+          next[id] = { view: cur.view, edit: false };
+        }
+      });
+      return next;
+    });
+  };
+
   const setAccess = (pageId, access) => {
     setPermissions((s) => ({ ...s, [pageId]: access }));
     if (!access) {
       setWritePermissions((s) => ({ ...s, [pageId]: false }));
+      syncObservationSectionsAfterObsPageChange(pageId, { viewOff: true });
+    }
+  };
+
+  const setPageWrite = (pageId, canWrite) => {
+    setWritePermissions((s) => ({ ...s, [pageId]: canWrite }));
+    if (pageId === 'observations' && !canWrite) {
+      syncObservationSectionsAfterObsPageChange(pageId, { writeOff: true });
     }
   };
 
@@ -429,7 +478,17 @@ function RoleDrawer({ role, resources, onClose, onSaved, onDeleted }) {
     setSaving(true);
     setError('');
     try {
-      await ApiClient.updateRole(role.id, { displayName, permissions, writePermissions });
+      const observationSections = {};
+      observationSectionMeta.forEach((sec) => {
+        const flags = observationSectionAccess[sec.id] || { view: false, edit: false };
+        observationSections[sec.id] = observationSectionLevelFromFlags(flags.view, flags.edit);
+      });
+      await ApiClient.updateRole(role.id, {
+        displayName,
+        permissions,
+        writePermissions,
+        observationSections,
+      });
       pushToast({ kind: 'success', title: usersT('usersPage.toast.roleSaved') });
       await onSaved();
       onClose();
@@ -510,7 +569,7 @@ function RoleDrawer({ role, resources, onClose, onSaved, onDeleted }) {
                           <Checkbox
                             checked={canWrite}
                             disabled={!hasAccess}
-                            onChange={(v) => setWritePermissions((s) => ({ ...s, [page.id]: v }))}
+                            onChange={(v) => setPageWrite(page.id, v)}
                           />
                           <span>{usersT('usersPage.access.write')}</span>
                         </label>
@@ -521,6 +580,86 @@ function RoleDrawer({ role, resources, onClose, onSaved, onDeleted }) {
               </div>
             )}
           </div>
+          {!isClientRole && observationSectionMeta.length > 0 ? (
+            <div>
+              <div style={{ font: 'var(--pv-text-body-2-bold)', marginBottom: 8 }}>
+                {usersT('usersPage.observationSections.title')}
+              </div>
+              {isAdminRole ? (
+                <p style={{ color: 'var(--fg-muted)', font: 'var(--pv-text-body-3)', margin: 0 }}>
+                  {usersT('usersPage.observationSections.adminHint')}
+                </p>
+              ) : loading ? (
+                <div style={{ color: 'var(--fg-secondary)' }}>{usersT('usersPage.loading')}</div>
+              ) : (
+                <>
+                  <p style={{ color: 'var(--fg-secondary)', font: 'var(--pv-text-body-3)', marginTop: 0 }}>
+                    {usersT('usersPage.observationSections.subtitle')}
+                  </p>
+                  <div className="col" style={{ gap: 8 }}>
+                    {observationSectionMeta.map((sec) => {
+                      const flags = observationSectionAccess[sec.id] || { view: false, edit: false };
+                      const obsPage = !!permissions.observations;
+                      return (
+                        <div
+                          key={sec.id}
+                          className="row"
+                          style={{ justifyContent: 'space-between', gap: 12, alignItems: 'center' }}
+                        >
+                          <div>
+                            <div style={{ font: 'var(--pv-text-body-2-bold)' }}>{sec.title}</div>
+                            {sec.system ? (
+                              <div style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-muted)' }}>
+                                {usersT('usersPage.observationSections.system')}
+                              </div>
+                            ) : null}
+                          </div>
+                          <div className="row" style={{ gap: 16, flexShrink: 0, opacity: obsPage ? 1 : 0.5 }}>
+                            <label className="row" style={{ gap: 6, cursor: obsPage ? 'pointer' : 'not-allowed', font: 'var(--pv-text-body-3)' }}>
+                              <Checkbox
+                                checked={flags.view}
+                                disabled={!obsPage}
+                                onChange={(v) => setObservationSectionAccess((s) => ({
+                                  ...s,
+                                  [sec.id]: {
+                                    view: v,
+                                    edit: v ? (s[sec.id]?.edit || false) : false,
+                                  },
+                                }))}
+                              />
+                              <span>{usersT('usersPage.access.view')}</span>
+                            </label>
+                            <label className="row" style={{
+                              gap: 6,
+                              cursor: obsPage && flags.view ? 'pointer' : 'not-allowed',
+                              font: 'var(--pv-text-body-3)',
+                              opacity: flags.view ? 1 : 0.45,
+                            }}
+                            >
+                              <Checkbox
+                                checked={flags.edit}
+                                disabled={!obsPage || !flags.view}
+                                onChange={(v) => setObservationSectionAccess((s) => ({
+                                  ...s,
+                                  [sec.id]: { ...s[sec.id], view: true, edit: v },
+                                }))}
+                              />
+                              <span>{usersT('usersPage.access.write')}</span>
+                            </label>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                  {!permissions.observations ? (
+                    <p style={{ color: 'var(--fg-muted)', font: 'var(--pv-text-body-3)', marginBottom: 0 }}>
+                      {usersT('usersPage.observationSections.needObservationsPage')}
+                    </p>
+                  ) : null}
+                </>
+              )}
+            </div>
+          ) : null}
           {error && <div className="form-error">{error}</div>}
         </div>
       )}

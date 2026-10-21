@@ -1739,7 +1739,7 @@ async function requireObservationSectionsManage(req, res, next) {
 
 app.get('/api/observation-sections', requireObservationSectionsManage, async (req, res) => {
   try {
-    res.json({ data: await listSectionsAdmin() });
+    res.json({ data: await listSectionsAdmin(req.user) });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -1747,7 +1747,7 @@ app.get('/api/observation-sections', requireObservationSectionsManage, async (re
 
 app.post('/api/observation-sections', requireObservationSectionsManage, async (req, res) => {
   try {
-    const data = await createSection(req.body?.title);
+    const data = await createSection(req.body?.title, req.user?.roleId);
     res.status(201).json({ ok: true, data });
   } catch (err) {
     res.status(err.status || 400).json({ error: err.message });
@@ -1756,7 +1756,7 @@ app.post('/api/observation-sections', requireObservationSectionsManage, async (r
 
 app.put('/api/observation-sections/order', requireObservationSectionsManage, async (req, res) => {
   try {
-    const data = await reorderSections(req.body?.ids);
+    const data = await reorderSections(req.body?.ids, req.user);
     res.json({ ok: true, data });
   } catch (err) {
     res.status(err.status || 400).json({ error: err.message });
@@ -1765,7 +1765,7 @@ app.put('/api/observation-sections/order', requireObservationSectionsManage, asy
 
 app.put('/api/observation-sections/:id', requireObservationSectionsManage, async (req, res) => {
   try {
-    const data = await updateSection(req.params.id, req.body || {});
+    const data = await updateSection(req.params.id, req.body || {}, req.user);
     if (!data) {
       res.status(404).json({ error: 'Раздел не найден' });
       return;
@@ -1778,7 +1778,7 @@ app.put('/api/observation-sections/:id', requireObservationSectionsManage, async
 
 app.delete('/api/observation-sections/:id', requireObservationSectionsManage, async (req, res) => {
   try {
-    const { moved } = await deleteSection(req.params.id);
+    const { moved } = await deleteSection(req.params.id, req.user);
     res.json({ ok: true, moved });
   } catch (err) {
     res.status(err.status || 400).json({ error: err.message });

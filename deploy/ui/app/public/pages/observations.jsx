@@ -1949,20 +1949,13 @@ function ObservationBoardTilePhantom({
   );
 }
 
-const OBS_SECTION_EXCLUDED_ROLES = new Set(['Administrator', 'Client']);
-
-function ObservationSectionsPanel({ roles, onChanged }) {
+function ObservationSectionsPanel({ onChanged }) {
   const [rows, setRows] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [newTitle, setNewTitle] = useState('');
   const [editSection, setEditSection] = useState(null);
   const [dragId, setDragId] = useState(null);
-
-  const manageableRoles = useMemo(
-    () => roles.filter((r) => !OBS_SECTION_EXCLUDED_ROLES.has(r.id)),
-    [roles],
-  );
 
   const loadSections = useCallback(async () => {
     setLoading(true);
@@ -2041,15 +2034,10 @@ function ObservationSectionsPanel({ roles, onChanged }) {
   };
 
   const openEdit = (section) => {
-    const roleLevels = {};
-    manageableRoles.forEach((r) => {
-      roleLevels[r.id] = section.roles?.[r.id] || 'none';
-    });
     setEditSection({
       id: section.id,
       title: section.title,
       system: section.system,
-      roles: roleLevels,
     });
   };
 
@@ -2058,7 +2046,6 @@ function ObservationSectionsPanel({ roles, onChanged }) {
     try {
       await ApiClient.updateObservationSection(editSection.id, {
         title: editSection.title,
-        roles: editSection.roles,
       });
       pushToast({ kind: 'success', title: obsT('observations.sections.saved') });
       setEditSection(null);
@@ -2081,6 +2068,9 @@ function ObservationSectionsPanel({ roles, onChanged }) {
         />
         <Button kind="primary" onClick={createSection} disabled={!newTitle.trim()}>{obsT('observations.sections.create')}</Button>
       </div>
+      <p style={{ color: 'var(--fg-secondary)', font: 'var(--pv-text-body-3)', margin: 0 }}>
+        {obsT('observations.sections.accessInRolesHint')}
+      </p>
       {loading ? (
         <div style={{ color: 'var(--fg-secondary)' }}>{obsT('observations.sections.loading')}</div>
       ) : (
@@ -2090,20 +2080,23 @@ function ObservationSectionsPanel({ roles, onChanged }) {
               <th style={{ width: 36 }} />
               <th>{obsT('observations.sections.col.title')}</th>
               <th style={{ width: 100 }}>{obsT('observations.sections.col.count')}</th>
-              <th>{obsT('observations.sections.col.roles')}</th>
               <th style={{ width: 120 }} />
             </tr>
           </thead>
           <tbody>
-            {rows.map((section) => (
+            {rows.map((section) => {
+              const canEditSection = section.level === 'edit';
+              return (
               <tr
                 key={section.id}
-                draggable
-                onDragStart={() => setDragId(section.id)}
+                draggable={canEditSection}
+                onDragStart={() => { if (canEditSection) setDragId(section.id); }}
                 onDragOver={(e) => e.preventDefault()}
                 onDrop={() => onDropRow(section.id)}
               >
-                <td style={{ cursor: 'grab' }}><Icon name="drag" size={14} /></td>
+                <td style={{ cursor: canEditSection ? 'grab' : 'default', opacity: canEditSection ? 1 : 0.35 }}>
+                  {canEditSection ? <Icon name="drag" size={14} /> : null}
+                </td>
                 <td>
                   {section.title}
                   {section.system ? (
@@ -2112,81 +2105,43 @@ function ObservationSectionsPanel({ roles, onChanged }) {
                 </td>
                 <td>{section.count ?? 0}</td>
                 <td>
-                  <div className="row" style={{ gap: 6, flexWrap: 'wrap' }}>
-                    {Object.entries(section.roles || {}).map(([roleId, level]) => (
-                      <Badge key={roleId} tone="neutral">
-                        {obsT('observations.sections.roleChip', {
-                          role: GrapesI18n.localizedRoleDisplay(roleId, roleId),
-                          level: level === 'edit'
-                            ? obsT('observations.sections.roleLevel.edit')
-                            : obsT('observations.sections.roleLevel.view'),
-                        })}
-                      </Badge>
-                    ))}
-                  </div>
-                </td>
-                <td>
-                  <div className="row" style={{ gap: 4, justifyContent: 'flex-end' }}>
-                    <button type="button" className="icon-btn" onClick={() => openEdit(section)}><Icon name="edit" size={15} /></button>
-                    {!section.system && (
-                      <button type="button" className="icon-btn" onClick={() => deleteSection(section)}><Icon name="trash" size={15} /></button>
-                    )}
-                  </div>
+                  {canEditSection ? (
+                    <div className="row" style={{ gap: 4, justifyContent: 'flex-end' }}>
+                      <button type="button" className="icon-btn" onClick={() => openEdit(section)}><Icon name="edit" size={15} /></button>
+                      {!section.system && (
+                        <button type="button" className="icon-btn" onClick={() => deleteSection(section)}><Icon name="trash" size={15} /></button>
+                      )}
+                    </div>
+                  ) : null}
                 </td>
               </tr>
-            ))}
+              );
+            })}
           </tbody>
         </table>
       )}
-      {editSection ? (
-        <div className="modal-backdrop" role="presentation" onClick={() => setEditSection(null)}>
-          <div className="modal" role="dialog" style={{ maxWidth: 560 }} onClick={(e) => e.stopPropagation()}>
-            <h2 style={{ marginTop: 0 }}>{obsT('observations.sections.modalTitle')}</h2>
-            <label className="col" style={{ gap: 4, marginBottom: 12 }}>
-              <span>{obsT('observations.sections.col.title')}</span>
-              <input
-                className="input"
-                value={editSection.title}
-                onChange={(e) => setEditSection({ ...editSection, title: e.target.value })}
-              />
-            </label>
-            <table style={{ width: '100%', borderCollapse: 'collapse', font: 'var(--pv-text-body-3)', marginBottom: 12 }}>
-              <thead>
-                <tr>
-                  <th style={{ textAlign: 'left' }}>{obsT('observations.sections.col.role')}</th>
-                  <th style={{ textAlign: 'left' }}>{obsT('observations.sections.col.roles')}</th>
-                </tr>
-              </thead>
-              <tbody>
-                {manageableRoles.map((role) => (
-                  <tr key={role.id}>
-                    <td>{GrapesI18n.localizedRoleDisplay(role.id, role.displayName)}</td>
-                    <td>
-                      <select
-                        className="input"
-                        value={editSection.roles[role.id] || 'none'}
-                        onChange={(e) => setEditSection({
-                          ...editSection,
-                          roles: { ...editSection.roles, [role.id]: e.target.value },
-                        })}
-                      >
-                        <option value="none">{obsT('observations.sections.roleLevel.none')}</option>
-                        <option value="view">{obsT('observations.sections.roleLevel.view')}</option>
-                        <option value="edit">{obsT('observations.sections.roleLevel.edit')}</option>
-                      </select>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-            <p style={{ color: 'var(--fg-muted)', font: 'var(--pv-text-body-3)' }}>{obsT('observations.sections.adminHint')}</p>
-            <div className="row" style={{ gap: 8, justifyContent: 'flex-end' }}>
-              <Button kind="ghost" onClick={() => setEditSection(null)}>{obsT('observations.board.cancel')}</Button>
-              <Button kind="primary" onClick={saveEdit}>{obsT('observations.settings.save')}</Button>
-            </div>
-          </div>
+      <Modal
+        open={!!editSection}
+        onClose={() => setEditSection(null)}
+        title={obsT('observations.sections.modalTitle')}
+        footer={(
+          <>
+            <Button kind="ghost" onClick={() => setEditSection(null)}>{obsT('observations.board.cancel')}</Button>
+            <Button kind="primary" onClick={saveEdit}>{obsT('observations.settings.save')}</Button>
+          </>
+        )}
+      >
+        <div className="field">
+          <label htmlFor="obs-section-rename-title">{obsT('observations.sections.col.title')}</label>
+          <input
+            id="obs-section-rename-title"
+            className="input"
+            value={editSection?.title ?? ''}
+            onChange={(e) => setEditSection((cur) => (cur ? { ...cur, title: e.target.value } : cur))}
+            autoFocus
+          />
         </div>
-      ) : null}
+      </Modal>
     </div>
   );
 }
@@ -2211,7 +2166,6 @@ function PageObservations({ onNavigate }) {
   const [boardHiddenIds, setBoardHiddenIds] = useState([]);
   const [editMode, setEditMode] = useState(false);
   const [manageSections, setManageSections] = useState(false);
-  const [sectionAdminRoles, setSectionAdminRoles] = useState([]);
   const [editDraftOrderIds, setEditDraftOrderIds] = useState([]);
   const [editBaselineOrderIds, setEditBaselineOrderIds] = useState([]);
   const [editDraftHiddenIds, setEditDraftHiddenIds] = useState([]);
@@ -2291,17 +2245,6 @@ function PageObservations({ onNavigate }) {
     }
     return list;
   }, []);
-
-  useEffect(() => {
-    if (!canManageSections) return undefined;
-    let cancelled = false;
-    ApiClient.loadRoles()
-      .then((list) => {
-        if (!cancelled) setSectionAdminRoles(list || []);
-      })
-      .catch(() => {});
-    return () => { cancelled = true; };
-  }, [canManageSections]);
 
   const toggleManageSections = useCallback(() => {
     setManageSections((open) => {
@@ -2567,9 +2510,9 @@ function PageObservations({ onNavigate }) {
   const hiddenItems = useMemo(() => {
     if (!editMode || !editDraftHiddenIds.length) return [];
     const hidden = new Set(editDraftHiddenIds);
-    return mergeObservationBoardOrder(items, editDraftOrderIds)
+    return mergeObservationBoardOrder(sectionItems, editDraftOrderIds)
       .filter((item) => hidden.has(item.id));
-  }, [items, editDraftOrderIds, editDraftHiddenIds, editMode]);
+  }, [sectionItems, editDraftOrderIds, editDraftHiddenIds, editMode]);
 
   useEffect(() => {
     let cancelled = false;
@@ -3164,7 +3107,7 @@ function PageObservations({ onNavigate }) {
       )}
 
       {manageSections ? (
-        <ObservationSectionsPanel roles={sectionAdminRoles} onChanged={reload} />
+        <ObservationSectionsPanel onChanged={reload} />
       ) : (
         <>
           {sectionItems.length > 0 && (

@@ -15,6 +15,8 @@ const { loadAllObservations } = require('./observations-store');
 
 const GENERAL_SECTION_ID = 'general';
 const ADMIN_ROLE_ID = 'Administrator';
+/** Роль, от которой по умолчанию ожидают создание наблюдений. */
+const CREATOR_ROLE_ID = 'Operator';
 const SECTION_LEVELS = new Set(['view', 'edit', 'none']);
 
 function newSectionId() {
@@ -315,21 +317,94 @@ async function bootstrapGeneralSection() {
     updated_at: now,
   }], { name: 'obs-sections/bootstrap-general' });
 
-  const roleIds = await listRoleIdsForBootstrap();
-  const roleRows = roleIds
-    .filter((id) => id !== CLIENT_ROLE_ID)
-    .map((role_id) => ({
-      section_id: GENERAL_SECTION_ID,
-      role_id,
-      level: 'edit',
+  await insertRows(config.observationSectionRolesTable, [{
+    section_id: GENERAL_SECTION_ID,
+    role_id: CREATOR_ROLE_ID,
+    level: 'edit',
+    updated_at: now,
+  }], { name: 'obs-sections/bootstrap-general-roles' });
+  return true;
+}
+
+async function listSectionsForRoleConfig() {
+  const sections = await listActiveSections();
+  return sections.map((s) => ({
+    id: s.id,
+    title: s.title,
+    system: s.system,
+  }));
+}
+
+async function loadSectionLevelsForRole(roleId) {
+  const sections = await listActiveSections();
+  const { rows } = await query(
+    `
+      WITH ${latestSectionRolesCte()}
+      SELECT section_id, level
+      FROM latest
+      WHERE rn = 1 AND role_id = {roleId:String}
+    `,
+    { roleId: String(roleId) },
+    { name: 'obs-sections/load-levels-for-role' },
+  );
+  const bySection = {};
+  for (const r of rows) {
+    bySection[String(r.section_id)] = String(r.level);
+  }
+  const out = {};
+  for (const sec of sections) {
+    const level = bySection[sec.id] || 'none';
+    out[sec.id] = SECTION_LEVELS.has(level) ? level : 'none';
+  }
+  return out;
+}
+
+async function syncRoleObservationSectionAccess(roleId, payload = {}) {
+  const rid = String(roleId || '').trim();
+  if (!rid || rid === ADMIN_ROLE_ID || rid === CLIENT_ROLE_ID) return;
+  const sections = await listActiveSections();
+  const now = formatDateTime64();
+  const rows = [];
+  for (const sec of sections) {
+    let level = 'none';
+    if (Object.prototype.hasOwnProperty.call(payload, sec.id)) {
+      level = String(payload[sec.id] || 'none').toLowerCase();
+    }
+    if (!SECTION_LEVELS.has(level)) {
+      const err = new Error(`Некорректный уровень для раздела ${sec.id}`);
+      err.status = 400;
+      throw err;
+    }
+    rows.push({
+      section_id: sec.id,
+      role_id: rid,
+      level,
       updated_at: now,
-    }));
-  if (roleRows.length) {
-    await insertRows(config.observationSectionRolesTable, roleRows, {
-      name: 'obs-sections/bootstrap-general-roles',
     });
   }
-  return true;
+  if (rows.length) {
+    await insertRows(config.observationSectionRolesTable, rows, {
+      name: 'obs-sections/sync-role-access',
+    });
+  }
+}
+
+async function applyDefaultRolesForNewSection(sectionId, creatorRoleId) {
+  const now = formatDateTime64();
+  const roleIds = new Set([CREATOR_ROLE_ID]);
+  const creator = String(creatorRoleId || '').trim();
+  if (creator && creator !== ADMIN_ROLE_ID && creator !== CLIENT_ROLE_ID) {
+    roleIds.add(creator);
+  }
+  const rows = [...roleIds].map((role_id) => ({
+    section_id: String(sectionId),
+    role_id,
+    level: 'edit',
+    updated_at: now,
+  }));
+  await insertRows(config.observationSectionRolesTable, rows, {
+    name: 'obs-sections/default-creator-access',
+  });
 }
 
 async function loadObservationSectionMap() {
@@ -434,10 +509,22 @@ async function moveObservationsToGeneral(fromSectionId) {
   return rows.length;
 }
 
+async function countObservationsVisibleBySection(user) {
+  const ctx = await createObservationSectionContext(user);
+  const all = await loadAllObservations();
+  const counts = {};
+  for (const item of all) {
+    const sectionId = sectionIdForObservation(item.id, ctx);
+    if (!canViewInSection(ctx.access, sectionId)) continue;
+    counts[sectionId] = (counts[sectionId] || 0) + 1;
+  }
+  return counts;
+}
+
 async function listSectionsForUser(user) {
   const access = await sectionAccess(user);
   const sections = await listActiveSections();
-  const counts = await countObservationsBySection();
+  const counts = await countObservationsVisibleBySection(user);
   return sections
     .filter((s) => canViewInSection(access, s.id))
     .map((s) => ({
@@ -449,18 +536,39 @@ async function listSectionsForUser(user) {
     }));
 }
 
-async function listSectionsAdmin() {
+function mergeVisibleSectionReorder(fullOrder, visibleOrder, visibleSet) {
+  const queue = [...visibleOrder];
+  return fullOrder.map((id) => (visibleSet.has(id) ? queue.shift() : id));
+}
+
+async function assertSectionEditAccess(user, sectionId) {
+  if (user?.roleId === ADMIN_ROLE_ID) return;
+  const access = await sectionAccess(user);
+  if (!canEditInSection(access, sectionId)) {
+    const err = new Error('Недостаточно прав на этот раздел');
+    err.status = 403;
+    throw err;
+  }
+}
+
+async function listSectionsAdmin(user = null) {
   const sections = await listActiveSections();
-  const counts = await countObservationsBySection();
+  const access = user ? await sectionAccess(user) : null;
+  const counts = user
+    ? await countObservationsVisibleBySection(user)
+    : await countObservationsBySection();
   const rolesBySection = await loadRolesBySection();
-  return sections.map((s) => ({
-    id: s.id,
-    title: s.title,
-    system: s.system,
-    sort: s.sort,
-    count: counts[s.id] || 0,
-    roles: { ...(rolesBySection[s.id] || {}) },
-  }));
+  return sections
+    .filter((s) => !user || user.roleId === ADMIN_ROLE_ID || canViewInSection(access, s.id))
+    .map((s) => ({
+      id: s.id,
+      title: s.title,
+      system: s.system,
+      sort: s.sort,
+      count: counts[s.id] || 0,
+      level: !user || user.roleId === ADMIN_ROLE_ID ? 'edit' : (access[s.id] || 'none'),
+      roles: { ...(rolesBySection[s.id] || {}) },
+    }));
 }
 
 function normalizeTitle(title) {
@@ -475,7 +583,7 @@ async function titleTaken(title, excludeId = null) {
     && String(s.id) !== String(excludeId || ''));
 }
 
-async function createSection(title) {
+async function createSection(title, creatorRoleId) {
   const t = normalizeTitle(title);
   if (!t) {
     const err = new Error('Укажите название раздела');
@@ -503,10 +611,12 @@ async function createSection(title) {
     created_at: now,
     updated_at: now,
   }], { name: 'obs-sections/create' });
+  await applyDefaultRolesForNewSection(id, creatorRoleId);
   return getSectionById(id);
 }
 
-async function updateSection(id, payload = {}) {
+async function updateSection(id, payload = {}, user = null) {
+  await assertSectionEditAccess(user, id);
   const existing = await getSectionById(id);
   if (!existing) {
     const err = new Error('Раздел не найден');
@@ -543,9 +653,6 @@ async function updateSection(id, payload = {}) {
     updated_at: now,
   }], { name: 'obs-sections/update' });
 
-  if (payload.roles && typeof payload.roles === 'object') {
-    await syncSectionRoles(id, payload.roles);
-  }
   return getSectionById(id);
 }
 
@@ -586,29 +693,45 @@ async function syncSectionRoles(sectionId, rolesPayload) {
   }
 }
 
-async function reorderSections(ids) {
+async function reorderSections(ids, user = null) {
   if (!Array.isArray(ids) || !ids.length) {
     const err = new Error('Укажите порядок разделов');
     err.status = 400;
     throw err;
   }
   const active = await listActiveSections();
-  const activeIds = new Set(active.map((s) => s.id));
-  for (const id of ids) {
+  const sorted = [...active].sort((a, b) => a.sort - b.sort);
+  const fullOrder = sorted.map((s) => s.id);
+  const activeIds = new Set(fullOrder);
+  let newOrder;
+  if (!user || user.roleId === ADMIN_ROLE_ID) {
+    if (ids.length !== active.length) {
+      const err = new Error('Список разделов должен содержать все разделы');
+      err.status = 400;
+      throw err;
+    }
+    newOrder = ids.map(String);
+  } else {
+    const access = await sectionAccess(user);
+    const visibleSet = new Set(fullOrder.filter((sid) => canViewInSection(access, sid)));
+    const clientIds = ids.map(String);
+    if (clientIds.length !== visibleSet.size || !clientIds.every((id) => visibleSet.has(id))) {
+      const err = new Error('Укажите порядок всех доступных вам разделов');
+      err.status = 400;
+      throw err;
+    }
+    newOrder = mergeVisibleSectionReorder(fullOrder, clientIds, visibleSet);
+  }
+  for (const id of newOrder) {
     if (!activeIds.has(String(id))) {
       const err = new Error(`Неизвестный раздел: ${id}`);
       err.status = 400;
       throw err;
     }
   }
-  if (ids.length !== active.length) {
-    const err = new Error('Список разделов должен содержать все разделы');
-    err.status = 400;
-    throw err;
-  }
   const now = formatDateTime64();
   const byId = Object.fromEntries(active.map((s) => [s.id, s]));
-  const rows = ids.map((id, index) => ({
+  const rows = newOrder.map((id, index) => ({
     id: String(id),
     title: byId[id].title,
     sort: index,
@@ -617,10 +740,11 @@ async function reorderSections(ids) {
     updated_at: now,
   }));
   await insertRows(config.observationSectionsTable, rows, { name: 'obs-sections/reorder' });
-  return listSectionsAdmin();
+  return listSectionsAdmin(user);
 }
 
-async function deleteSection(id) {
+async function deleteSection(id, user = null) {
+  await assertSectionEditAccess(user, id);
   if (String(id) === GENERAL_SECTION_ID) {
     const err = new Error('Системный раздел удалить нельзя');
     err.status = 400;
@@ -670,6 +794,7 @@ function sectionIdForObservation(observationId, ctx) {
 module.exports = {
   GENERAL_SECTION_ID,
   ADMIN_ROLE_ID,
+  CREATOR_ROLE_ID,
   resolveObservationSectionId,
   buildSectionAccess,
   canViewInSection,
@@ -692,4 +817,8 @@ module.exports = {
   loadSectionRolesForSection,
   listActiveSections,
   countObservationsInSection,
+  listSectionsForRoleConfig,
+  loadSectionLevelsForRole,
+  syncRoleObservationSectionAccess,
+  applyDefaultRolesForNewSection,
 };
