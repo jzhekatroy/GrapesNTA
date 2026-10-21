@@ -256,6 +256,9 @@ const {
   stopImpersonationHandler,
 } = require('./cabinet/routes');
 const { createErpPiterixRouter } = require('./erp-piterix-routes');
+const { createApiV1Router } = require('./api-v1-routes');
+const { createApiTokenStore } = require('./api-tokens');
+const { ensureApiClientsTable } = require('./api-clients');
 const { createDetectionRouter } = require('./detection-routes');
 const { createMonitoringRouter } = require('./monitoring-routes');
 const {
@@ -280,6 +283,7 @@ const app = express();
 const SESSION_COOKIE = 'grapes_session';
 const SESSION_TTL_MS = 24 * 60 * 60 * 1000;
 const sessions = createSessionStore();
+const apiTokens = createApiTokenStore();
 const cabinetIsolationGuard = createCabinetGuard({ sessions });
 
 function envBool(name, fallback = false) {
@@ -712,6 +716,9 @@ app.post('/api/auth/stop-impersonation', async (req, res) => {
     sendApiError(res, err);
   }
 });
+
+// Внешний Bearer-API для ERP: монтируется ДО requireSession, авторизация своя.
+app.use('/api/v1', createApiV1Router({ sessions, apiTokens }));
 
 app.use('/api', requireSession);
 app.use('/api', apiResourceGuard);
@@ -3042,6 +3049,8 @@ app.listen(PORT, () => {
           }
           await ensureImpersonationAuditTable();
           console.log('Cabinet impersonation audit ready.');
+          await ensureApiClientsTable();
+          console.log('API clients table ready.');
           await ensureObservationsStore();
           console.log('Observations store ready (ClickHouse).');
           ensureAnalysisSnapshotsStore();
