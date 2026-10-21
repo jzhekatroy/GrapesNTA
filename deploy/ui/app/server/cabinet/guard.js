@@ -23,6 +23,7 @@ const CABINET_READONLY_POST_ALLOWLIST = [
   /^\/api\/cabinet\/explorer\/query$/,
   /^\/api\/cabinet\/explorer\/flows$/,
   /^\/api\/cabinet\/explorer\/export$/,
+  /^\/api\/cabinet\/observations\/[^/]+\/preview$/,
 ];
 
 function pathAllowedForClient(path) {
@@ -104,6 +105,11 @@ function createCabinetGuard({ sessions, getEnabledClientFn = getEnabledClient })
         return;
       }
 
+      if (/^\/api\/cabinet\/[^/]+\/observations(\/|$)/.test(apiPath)) {
+        res.status(403).json({ error: 'Недостаточно прав' });
+        return;
+      }
+
       if (context.mode === 'client'
         && req.method === 'POST'
         && /^\/api\/users\/[^/]+\/password$/.test(apiPath)) {
@@ -116,11 +122,18 @@ function createCabinetGuard({ sessions, getEnabledClientFn = getEnabledClient })
       }
 
       if (context.readOnly && isMutatingMethod(req.method)) {
-        const allowedWrite = apiPath === '/api/auth/stop-impersonation'
+        let allowedWrite = apiPath === '/api/auth/stop-impersonation'
           || apiPath === '/api/auth/logout'
           || apiPath === '/api/auth/locale'
           || apiPath === '/api/audit/page'
           || isReadOnlyCabinetPost(apiPath);
+        if (!allowedWrite
+          && /^\/api\/cabinet\/observations(\/|$)/.test(apiPath)
+          && !isReadOnlyCabinetPost(apiPath)
+          && req.user) {
+          const { canStaffMutateClientObservations } = require('./staff-observations-access');
+          allowedWrite = await canStaffMutateClientObservations(req.user);
+        }
         if (!allowedWrite) {
           res.status(403).json({ error: 'Режим просмотра кабинета: только чтение' });
           return;

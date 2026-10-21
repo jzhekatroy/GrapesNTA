@@ -199,6 +199,7 @@ function App() {
   }, []);
 
   useEffect(() => {
+    AuthAccess.setEffectivePermissions(auth.user?.effectivePermissions || null);
     AuthAccess.setEffectiveWritePermissions(auth.user?.effectiveWritePermissions || null);
   }, [auth.user]);
 
@@ -556,6 +557,12 @@ function App() {
 
   const cabinetMode = isCabinetMode(auth.user);
   const cabinetReadOnly = !!auth.user?.cabinet?.readOnly;
+  const canManageCabinetObservations = cabinetMode && (
+    AuthAccess.canWritePage('clients') || AuthAccess.canWritePage('observations')
+  );
+  // Impersonation is read-only for the cabinet shell, but operators with clients/observations
+  // write may still configure client observations (server guard allows the same).
+  const cabinetObservationsReadOnly = cabinetReadOnly && !canManageCabinetObservations;
   const clientDisplayName = auth.user?.cabinet?.clientDisplayName || '';
 
   useEffect(() => {
@@ -631,7 +638,7 @@ function App() {
             onNavigate={navigate}
             displayTimezone={displayTimezone}
             cabinetMode={cabinetMode}
-            readOnly={cabinetReadOnly}
+            readOnly={cabinetObservationsReadOnly}
           />
         );
         break;
@@ -646,7 +653,16 @@ function App() {
         );
         break;
       case 'observations':
-        pageEl = <LazyPage pageId="observations" key={refreshKey} onNavigate={navigate} />;
+        pageEl = (
+          <LazyPage
+            pageId="observations"
+            key={refreshKey}
+            onNavigate={navigate}
+            cabinetMode={cabinetMode}
+            readOnly={cabinetObservationsReadOnly}
+            displayTimezone={displayTimezone}
+          />
+        );
         break;
       case 'diagnostics':
         pageEl = <LazyPage pageId="diagnostics" key={refreshKey} />;

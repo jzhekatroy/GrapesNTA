@@ -916,6 +916,12 @@ function resolveWriteAction(method, apiPath) {
   if (/^\/api\/observations\/[^/]+$/.test(p) && m === 'PUT') return 'chart_update';
   if (/^\/api\/observations\/[^/]+$/.test(p) && m === 'DELETE') return 'chart_delete';
   if (/^\/api\/observations\/[^/]+\/duplicate$/.test(p) && m === 'POST') return 'chart_create';
+  if (/^\/api\/cabinet\/observations$/.test(p) && m === 'POST') return 'chart_create';
+  if (/^\/api\/cabinet\/observations\/[^/]+$/.test(p) && m === 'PUT') return 'chart_update';
+  if (/^\/api\/cabinet\/observations\/[^/]+$/.test(p) && m === 'DELETE') return 'chart_delete';
+  if (/^\/api\/cabinet\/[^/]+\/observations$/.test(p) && m === 'POST') return 'chart_create';
+  if (/^\/api\/cabinet\/[^/]+\/observations\/[^/]+$/.test(p) && m === 'PUT') return 'chart_update';
+  if (/^\/api\/cabinet\/[^/]+\/observations\/[^/]+$/.test(p) && m === 'DELETE') return 'chart_delete';
 
   if (p === '/api/observation-sections' && m === 'POST') return 'observation_section_create';
   if (p === '/api/observation-sections/order' && m === 'PUT') return 'observation_section_order';

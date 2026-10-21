@@ -297,6 +297,11 @@ function isActiveMaterialize(o, exceptId = null) {
     && classifyScope(o.filters, o.widgets).materializeRequired;
 }
 
+function staffMaterializeQuotaPool(items, clientBindings) {
+  if (!clientBindings?.size) return items;
+  return items.filter((o) => !clientBindings.has(o.id));
+}
+
 function countActiveMaterialize(items, exceptId = null) {
   return items.filter((o) => isActiveMaterialize(o, exceptId)).length;
 }
@@ -420,21 +425,28 @@ function materializeWarning(activeCount) {
   return null;
 }
 
-function normalizeObservation(raw = {}, { userId, existing = null } = {}) {
+const CABINET_LOOKBACKS = new Set(['15m', '30m', '1h', '6h', '24h']);
+
+function normalizeObservation(raw = {}, { userId, existing = null, cabinet = false } = {}) {
   const filters = normalizeFilters(raw.filters != null ? raw.filters : existing?.filters);
   const thresholds = normalizeExplorerThresholds(
     raw.thresholds != null ? raw.thresholds : (existing?.thresholds || []),
   );
   const widgets = normalizeWidgets(raw.widgets != null ? raw.widgets : existing?.widgets);
-  const scope = classifyScope(filters, widgets);
-  const lookback = LOOKBACKS.has(raw.lookback) ? raw.lookback : (existing?.lookback || '1h');
+  const scope = cabinet
+    ? { tier: 'materialize_required', materializeRequired: true, reason: 'cabinet' }
+    : classifyScope(filters, widgets);
+  const lookbackSet = cabinet ? CABINET_LOOKBACKS : LOOKBACKS;
+  const lookback = lookbackSet.has(raw.lookback) ? raw.lookback : (existing?.lookback || '1h');
   // Live не настраивается: доска всегда обновляется раз в 5 минут (запас на late flows).
   const refreshSec = MIN_REFRESH_SEC;
   const liveEnabled = true;
 
   // Подготовка данных (rollup) — отдельное решение: она и создаёт нагрузку на ClickHouse.
-  let materializeEnabled = Boolean(raw.materialize?.enabled ?? existing?.materialize?.enabled);
-  if (!scope.materializeRequired) materializeEnabled = false;
+  let materializeEnabled = cabinet
+    ? true
+    : Boolean(raw.materialize?.enabled ?? existing?.materialize?.enabled);
+  if (!cabinet && !scope.materializeRequired) materializeEnabled = false;
 
   // Worker cadence follows live.refreshSec (same setting as UI), floor 5 minutes.
   let intervalSec = Number(raw.materialize?.intervalSec ?? existing?.materialize?.intervalSec ?? refreshSec);
@@ -445,13 +457,15 @@ function normalizeObservation(raw = {}, { userId, existing = null } = {}) {
   const wasEnabled = Boolean(existing?.materialize?.enabled);
   let cursorMinute = existing?.materialize?.cursorMinute ?? raw.materialize?.cursorMinute ?? null;
   let matStatus = existing?.materialize?.status || (materializeEnabled ? 'queued' : 'idle');
-  let backfill = resolveObservationBackfill({
-    materializeEnabled,
-    wasEnabled,
-    createdAt,
-    existingMat: existing?.materialize || {},
-    rawMat: raw.materialize || {},
-  });
+  let backfill = cabinet
+    ? disabledBackfillFields()
+    : resolveObservationBackfill({
+      materializeEnabled,
+      wasEnabled,
+      createdAt,
+      existingMat: existing?.materialize || {},
+      rawMat: raw.materialize || {},
+    });
   if (materializeEnabled && !wasEnabled) {
     // Live from creation. History backfill only if materialize.backfill === true.
     matStatus = 'queued';
@@ -504,7 +518,12 @@ function normalizeObservation(raw = {}, { userId, existing = null } = {}) {
       dataThrough: existing?.materialize?.dataThrough ?? null,
       ...backfill,
     },
-    report: {
+    report: cabinet ? {
+      enabled: false,
+      period: 'yesterday',
+      schedule: normalizeSchedule({}, {}),
+      emailTo: [],
+    } : {
       enabled: Boolean(reportRaw.enabled ?? false),
       period: ['yesterday', 'last_24h'].includes(reportRaw.period)
         ? reportRaw.period
@@ -519,10 +538,14 @@ function normalizeObservation(raw = {}, { userId, existing = null } = {}) {
   };
 }
 
-async function withMeta(item, allItems = null, user = null, ctx = null) {
+async function withMeta(item, allItems = null, user = null, ctx = null, clientBindings = null) {
   const scope = classifyScope(item.filters, item.widgets);
   const all = allItems || await loadAllObservations();
-  const active = countActiveMaterialize(all);
+  const bindings = clientBindings !== null && clientBindings !== undefined
+    ? clientBindings
+    : await loadObservationClients();
+  const quotaPool = staffMaterializeQuotaPool(all, bindings);
+  const active = countActiveMaterialize(quotaPool);
   const sectionId = ctx ? sectionIdForObservation(item.id, ctx) : GENERAL_SECTION_ID;
   const canEdit = user && ctx ? canEditInSection(ctx.access, sectionId) : undefined;
   const warnings = [];
@@ -555,7 +578,7 @@ async function withMeta(item, allItems = null, user = null, ctx = null) {
       maxMaterialize: MATERIALIZE_LIMIT_ENABLED ? MAX_MATERIALIZE : null,
       activeMaterialize: active,
       minIntervalSec: MIN_INTERVAL_SEC,
-      occupants: materializeOccupants(all),
+      occupants: materializeOccupants(quotaPool),
     },
     warnings,
     materializeIssue,
@@ -581,15 +604,21 @@ function materializeIssueOf(item) {
 
 async function listObservations(user) {
   const ctx = await createObservationSectionContext(user);
-  const all = await loadAllObservations();
-  const visible = all.filter((item) => canViewInSection(
-    ctx.access,
-    sectionIdForObservation(item.id, ctx),
-  ));
-  return Promise.all(visible.map((item) => withMeta(item, all, user, ctx)));
+  const [all, clientBindings] = await Promise.all([
+    loadAllObservations(),
+    loadObservationClients(),
+  ]);
+  const visible = all.filter((item) => !clientBindings.has(item.id)
+    && canViewInSection(
+      ctx.access,
+      sectionIdForObservation(item.id, ctx),
+    ));
+  return Promise.all(visible.map((item) => withMeta(item, all, user, ctx, clientBindings)));
 }
 
 async function getObservation(id, user) {
+  const clientBindings = await loadObservationClients();
+  if (clientBindings.has(id)) return null;
   const item = await loadObservationById(id);
   if (!item) return null;
   const ctx = await createObservationSectionContext(user);
@@ -609,24 +638,32 @@ async function createObservation(user, payload = {}) {
     err.status = 403;
     throw err;
   }
-  const items = await loadAllObservations();
+  const [items, clientBindings] = await Promise.all([
+    loadAllObservations(),
+    loadObservationClients(),
+  ]);
+  const quotaPool = staffMaterializeQuotaPool(items, clientBindings);
   const item = normalizeObservation(payload, { userId: uid });
   if (MATERIALIZE_LIMIT_ENABLED
     && item.materialize.enabled
-    && countActiveMaterialize(items) >= MAX_MATERIALIZE) {
-    throw quotaError(items);
+    && countActiveMaterialize(quotaPool) >= MAX_MATERIALIZE) {
+    throw quotaError(quotaPool);
   }
   if (item.materialize.enabled) item.materialize.status = 'queued';
   await upsertObservation(item);
   await setObservationSection(item.id, targetSection);
   ctx.sectionMap[item.id] = targetSection;
-  return withMeta(item, [...items, item], user, ctx);
+  return withMeta(item, [...items, item], user, ctx, clientBindings);
 }
 
 async function updateObservation(id, user, payload = {}) {
   const ctx = await createObservationSectionContext(user);
   const uid = userIdOf(user);
-  const items = await loadAllObservations();
+  const [items, clientBindings] = await Promise.all([
+    loadAllObservations(),
+    loadObservationClients(),
+  ]);
+  const quotaPool = staffMaterializeQuotaPool(items, clientBindings);
   const existing = items.find((row) => row.id === id);
   if (!existing) return null;
   try {
@@ -651,8 +688,8 @@ async function updateObservation(id, user, payload = {}) {
   const next = normalizeObservation(payload, { userId: uid, existing });
   if (MATERIALIZE_LIMIT_ENABLED
     && next.materialize.enabled
-    && countActiveMaterialize(items, id) >= MAX_MATERIALIZE) {
-    throw quotaError(items, id);
+    && countActiveMaterialize(quotaPool, id) >= MAX_MATERIALIZE) {
+    throw quotaError(quotaPool, id);
   }
   if (next.materialize.enabled && !existing.materialize?.enabled) {
     next.materialize.status = 'queued';
@@ -668,7 +705,13 @@ async function updateObservation(id, user, payload = {}) {
     next.materialize.cancelRequested = false;
   }
   await upsertObservation(next);
-  return withMeta(next, items.map((row) => (row.id === id ? next : row)), user, ctx);
+  return withMeta(
+    next,
+    items.map((row) => (row.id === id ? next : row)),
+    user,
+    ctx,
+    clientBindings,
+  );
 }
 
 async function duplicateObservation(id, user, payload = {}) {
@@ -798,7 +841,11 @@ async function deleteObservation(id, user) {
 
 async function queueMaterialize(id, user) {
   const ctx = await createObservationSectionContext(user);
-  const items = await loadAllObservations();
+  const [items, clientBindings] = await Promise.all([
+    loadAllObservations(),
+    loadObservationClients(),
+  ]);
+  const quotaPool = staffMaterializeQuotaPool(items, clientBindings);
   const existing = items.find((row) => row.id === id);
   if (!existing) return null;
   try {
@@ -814,9 +861,9 @@ async function queueMaterialize(id, user) {
     throw err;
   }
   if (MATERIALIZE_LIMIT_ENABLED
-    && countActiveMaterialize(items, id) >= MAX_MATERIALIZE
+    && countActiveMaterialize(quotaPool, id) >= MAX_MATERIALIZE
     && !existing.materialize?.enabled) {
-    throw quotaError(items, id);
+    throw quotaError(quotaPool, id);
   }
   const refreshSec = Math.max(
     MIN_REFRESH_SEC,
@@ -839,7 +886,13 @@ async function queueMaterialize(id, user) {
     next.materialize.cursorMinute = existing.createdAt || new Date().toISOString();
   }
   await upsertObservation(next);
-  return withMeta(next, items.map((row) => (row.id === id ? next : row)), user, ctx);
+  return withMeta(
+    next,
+    items.map((row) => (row.id === id ? next : row)),
+    user,
+    ctx,
+    clientBindings,
+  );
 }
 
 const ROLLUP_BUCKET_MS = ROLLUP_BUCKET_SEC * 1000;
@@ -1586,7 +1639,7 @@ function mapFlowRowsToObservationRows(flowRows, groupBy = []) {
   });
 }
 
-async function fetchThresholdTopRows(obs, window, { groupBy, limit, metric = 'bps' }) {
+async function fetchThresholdTopRows(obs, window, { groupBy, limit, metric = 'bps', explorerOptions = {} }) {
   const body = {
     range: 'custom',
     from: window.from,
@@ -1599,7 +1652,7 @@ async function fetchThresholdTopRows(obs, window, { groupBy, limit, metric = 'bp
     includeSummary: false,
     includeTimeseries: false,
   };
-  const spec = await explorerFlows(body);
+  const spec = await explorerFlows(body, explorerOptions);
   const result = await runExplorerSpec(spec);
   const windowSeconds = result.meta?.windowSeconds || Math.max(
     60,
@@ -1618,9 +1671,12 @@ async function fetchThresholdGroupedTimeseries(obs, window, {
   groupBy,
   seriesLimit,
   metric: metricKey = 'bps',
+  explorerOptions = {},
 }) {
   const metric = normalizeObservationChartMetric(metricKey);
-  const top = await fetchThresholdTopRows(obs, window, { groupBy, limit: seriesLimit, metric });
+  const top = await fetchThresholdTopRows(obs, window, {
+    groupBy, limit: seriesLimit, metric, explorerOptions,
+  });
   if (!top.rows.length) {
     return {
       points: [],
@@ -1642,7 +1698,7 @@ async function fetchThresholdGroupedTimeseries(obs, window, {
     groupBy,
     granularity: '5m',
   };
-  const seriesSpec = await explorerResultSeries(body, top.rows);
+  const seriesSpec = await explorerResultSeries(body, top.rows, explorerOptions);
   const seriesResult = await runExplorerSpec(seriesSpec);
   const seriesByRow = seriesResult.data?.seriesByRow || {};
   const bucketMap = new Map();
@@ -1672,7 +1728,7 @@ async function fetchThresholdGroupedTimeseries(obs, window, {
   };
 }
 
-async function previewObservationWithThresholds(obs, window) {
+async function previewObservationWithThresholds(obs, window, explorerOptions = {}) {
   const widgets = [];
   let cachedTop = null;
 
@@ -1687,6 +1743,7 @@ async function previewObservationWithThresholds(obs, window) {
             groupBy,
             seriesLimit,
             metric: chartMetric,
+            explorerOptions,
           });
           widgets.push({
             id: w.id,
@@ -1720,7 +1777,7 @@ async function previewObservationWithThresholds(obs, window) {
           filters: obs.filters,
           thresholds: obs.thresholds,
           granularity: '5m',
-        });
+        }, explorerOptions);
         const { rows } = await query(bundle.sql, bundle.params, { name: 'observations/threshold-ts' });
         const series = await bundle.map(rows);
         widgets.push({
@@ -1763,6 +1820,7 @@ async function previewObservationWithThresholds(obs, window) {
           groupBy,
           limit: wantRows,
           metric: tableMetric,
+          explorerOptions,
         });
         widgets.push({
           id: w.id,
@@ -1804,12 +1862,22 @@ function rollupEmptyWarning(obs) {
   return 'В rollup пока нет точек за выбранное окно.';
 }
 
-async function previewObservation(id, user, body = {}) {
-  const obs = await getObservation(id, user);
-  if (!obs) return null;
+async function previewObservation(id, user, body = {}, previewOptions = {}) {
+  const { cabinetClientId } = previewOptions;
+  let obs;
+  if (cabinetClientId) {
+    const bindings = await loadObservationClients();
+    if (bindings.get(id) !== cabinetClientId) return null;
+    obs = await loadObservationById(id);
+    if (!obs) return null;
+  } else {
+    obs = await getObservation(id, user);
+    if (!obs) return null;
+  }
+  const explorerOptions = cabinetClientId ? { cabinetClientId } : {};
   const window = resolvePreviewWindow(obs, body);
   if (explorerThresholdsActive(obs.thresholds)) {
-    return previewObservationWithThresholds(obs, window);
+    return previewObservationWithThresholds(obs, window, explorerOptions);
   }
   const widgets = [];
   let cachedTop = null;
@@ -1903,13 +1971,23 @@ async function previewObservation(id, user, body = {}) {
             series: [],
             warning: 'Live без rollup недоступен — включите подготовку данных.',
           });
+        } else if (cabinetClientId) {
+          widgets.push({
+            id: w.id,
+            type: w.type,
+            mode: 'total',
+            source: 'none',
+            status: 'error',
+            series: [],
+            warning: 'Данные готовятся.',
+          });
         } else {
           const bundle = await explorerTimeseries({
             ...window,
             metric: chartMetric,
             filters: obs.filters,
             granularity: '5m',
-          });
+          }, explorerOptions);
           const { rows } = await query(bundle.sql, bundle.params, { name: 'observations/preview-ts' });
           const series = await bundle.map(rows);
           widgets.push({
@@ -3076,6 +3154,10 @@ async function getObservationAnalyticsDiagnostics() {
 }
 
 module.exports = {
+  newId,
+  CABINET_LOOKBACKS,
+  collectWidgetGroupFields,
+  userIdOf,
   classifyScope,
   normalizeObservation,
   normalizeWidgets,
