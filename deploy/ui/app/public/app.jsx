@@ -168,6 +168,7 @@ function App() {
 
   useEffect(() => {
     AuthAccess.setEffectiveWritePermissions(auth.user?.effectiveWritePermissions || null);
+    AuthAccess.setGrantedActions(auth.user?.permissions || null);
   }, [auth.user]);
 
   useEffect(() => {

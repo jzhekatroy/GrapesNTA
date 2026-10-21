@@ -148,21 +148,32 @@ function canPerformAction(user, action, effectivePermissions, effectiveWritePerm
   if (action === 'users.change_password') {
     return !!(effectivePermissions?.users || user?.roleId === DEFAULT_ROLE_ID);
   }
+  if (action === 'observations.manage_sections') {
+    if (user?.roleId === DEFAULT_ROLE_ID) return true;
+    return !!effectiveWritePermissions?.observations;
+  }
   return false;
 }
 
 async function userPermissions(user) {
   const effective = await buildEffectivePermissions(user);
   const actions = [];
+  const write = await buildEffectiveWritePermissions(user);
   if (canPerformAction(user, 'users.change_password', effective)) {
     actions.push('users.change_password');
+  }
+  if (canPerformAction(user, 'observations.manage_sections', effective, write)) {
+    actions.push('observations.manage_sections');
   }
   return actions;
 }
 
 async function hasPermission(user, permission) {
-  const effective = await buildEffectivePermissions(user);
-  return canPerformAction(user, permission, effective);
+  const [effective, write] = await Promise.all([
+    buildEffectivePermissions(user),
+    buildEffectiveWritePermissions(user),
+  ]);
+  return canPerformAction(user, permission, effective, write);
 }
 
 async function countUsersByRole(roleId) {

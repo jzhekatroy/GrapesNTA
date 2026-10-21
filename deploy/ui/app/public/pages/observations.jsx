@@ -1949,9 +1949,252 @@ function ObservationBoardTilePhantom({
   );
 }
 
+const OBS_SECTION_EXCLUDED_ROLES = new Set(['Administrator', 'Client']);
+
+function ObservationSectionsPanel({ roles, onChanged }) {
+  const [rows, setRows] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+  const [newTitle, setNewTitle] = useState('');
+  const [editSection, setEditSection] = useState(null);
+  const [dragId, setDragId] = useState(null);
+
+  const manageableRoles = useMemo(
+    () => roles.filter((r) => !OBS_SECTION_EXCLUDED_ROLES.has(r.id)),
+    [roles],
+  );
+
+  const loadSections = useCallback(async () => {
+    setLoading(true);
+    setError('');
+    try {
+      const data = await ApiClient.loadObservationSectionsAdmin();
+      setRows(data || []);
+    } catch (err) {
+      setError(err.message || obsT('observations.sections.loadFailed'));
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => { loadSections(); }, [loadSections]);
+
+  const notifyChanged = useCallback(async () => {
+    await loadSections();
+    if (onChanged) await onChanged();
+  }, [loadSections, onChanged]);
+
+  const createSection = async () => {
+    const title = String(newTitle || '').trim();
+    if (!title) return;
+    try {
+      await ApiClient.createObservationSection(title);
+      setNewTitle('');
+      pushToast({ kind: 'success', title: obsT('observations.sections.created') });
+      await notifyChanged();
+    } catch (err) {
+      pushToast({ kind: 'error', title: err.message });
+    }
+  };
+
+  const deleteSection = async (section) => {
+    const ok = window.confirm(obsT('observations.sections.deleteConfirm', {
+      title: section.title,
+      count: section.count ?? 0,
+    }));
+    if (!ok) return;
+    try {
+      const res = await ApiClient.deleteObservationSection(section.id);
+      pushToast({
+        kind: 'success',
+        title: obsT('observations.sections.deleted'),
+        desc: obsT('observations.sections.moved', { n: res.moved ?? 0 }),
+      });
+      await notifyChanged();
+    } catch (err) {
+      pushToast({ kind: 'error', title: err.message });
+    }
+  };
+
+  const persistOrder = async (ordered) => {
+    try {
+      await ApiClient.reorderObservationSections(ordered.map((s) => s.id));
+      setRows(ordered);
+      if (onChanged) await onChanged();
+    } catch (err) {
+      pushToast({ kind: 'error', title: err.message });
+      await loadSections();
+    }
+  };
+
+  const onDropRow = (targetId) => {
+    if (!dragId || dragId === targetId) return;
+    const ids = rows.map((r) => r.id);
+    const from = ids.indexOf(dragId);
+    const to = ids.indexOf(targetId);
+    if (from < 0 || to < 0) return;
+    const next = [...rows];
+    const [moved] = next.splice(from, 1);
+    next.splice(to, 0, moved);
+    setDragId(null);
+    persistOrder(next);
+  };
+
+  const openEdit = (section) => {
+    const roleLevels = {};
+    manageableRoles.forEach((r) => {
+      roleLevels[r.id] = section.roles?.[r.id] || 'none';
+    });
+    setEditSection({
+      id: section.id,
+      title: section.title,
+      system: section.system,
+      roles: roleLevels,
+    });
+  };
+
+  const saveEdit = async () => {
+    if (!editSection) return;
+    try {
+      await ApiClient.updateObservationSection(editSection.id, {
+        title: editSection.title,
+        roles: editSection.roles,
+      });
+      pushToast({ kind: 'success', title: obsT('observations.sections.saved') });
+      setEditSection(null);
+      await notifyChanged();
+    } catch (err) {
+      pushToast({ kind: 'error', title: err.message });
+    }
+  };
+
+  return (
+    <div className="col" style={{ gap: 16 }}>
+      {error && <div className="form-error">{error}</div>}
+      <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
+        <input
+          className="input"
+          style={{ maxWidth: 320 }}
+          placeholder={obsT('observations.sections.newTitle')}
+          value={newTitle}
+          onChange={(e) => setNewTitle(e.target.value)}
+        />
+        <Button kind="primary" onClick={createSection} disabled={!newTitle.trim()}>{obsT('observations.sections.create')}</Button>
+      </div>
+      {loading ? (
+        <div style={{ color: 'var(--fg-secondary)' }}>{obsT('observations.sections.loading')}</div>
+      ) : (
+        <table style={{ width: '100%', borderCollapse: 'collapse', font: 'var(--pv-text-body-3)' }}>
+          <thead>
+            <tr>
+              <th style={{ width: 36 }} />
+              <th>{obsT('observations.sections.col.title')}</th>
+              <th style={{ width: 100 }}>{obsT('observations.sections.col.count')}</th>
+              <th>{obsT('observations.sections.col.roles')}</th>
+              <th style={{ width: 120 }} />
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((section) => (
+              <tr
+                key={section.id}
+                draggable
+                onDragStart={() => setDragId(section.id)}
+                onDragOver={(e) => e.preventDefault()}
+                onDrop={() => onDropRow(section.id)}
+              >
+                <td style={{ cursor: 'grab' }}><Icon name="drag" size={14} /></td>
+                <td>
+                  {section.title}
+                  {section.system ? (
+                    <span style={{ marginLeft: 8, color: 'var(--fg-muted)' }}>({obsT('observations.sections.system')})</span>
+                  ) : null}
+                </td>
+                <td>{section.count ?? 0}</td>
+                <td>
+                  <div className="row" style={{ gap: 6, flexWrap: 'wrap' }}>
+                    {Object.entries(section.roles || {}).map(([roleId, level]) => (
+                      <Badge key={roleId} tone="neutral">
+                        {obsT('observations.sections.roleChip', {
+                          role: GrapesI18n.localizedRoleDisplay(roleId, roleId),
+                          level: level === 'edit'
+                            ? obsT('observations.sections.roleLevel.edit')
+                            : obsT('observations.sections.roleLevel.view'),
+                        })}
+                      </Badge>
+                    ))}
+                  </div>
+                </td>
+                <td>
+                  <div className="row" style={{ gap: 4, justifyContent: 'flex-end' }}>
+                    <button type="button" className="icon-btn" onClick={() => openEdit(section)}><Icon name="edit" size={15} /></button>
+                    {!section.system && (
+                      <button type="button" className="icon-btn" onClick={() => deleteSection(section)}><Icon name="trash" size={15} /></button>
+                    )}
+                  </div>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+      {editSection ? (
+        <div className="modal-backdrop" role="presentation" onClick={() => setEditSection(null)}>
+          <div className="modal" role="dialog" style={{ maxWidth: 560 }} onClick={(e) => e.stopPropagation()}>
+            <h2 style={{ marginTop: 0 }}>{obsT('observations.sections.modalTitle')}</h2>
+            <label className="col" style={{ gap: 4, marginBottom: 12 }}>
+              <span>{obsT('observations.sections.col.title')}</span>
+              <input
+                className="input"
+                value={editSection.title}
+                onChange={(e) => setEditSection({ ...editSection, title: e.target.value })}
+              />
+            </label>
+            <table style={{ width: '100%', borderCollapse: 'collapse', font: 'var(--pv-text-body-3)', marginBottom: 12 }}>
+              <thead>
+                <tr>
+                  <th style={{ textAlign: 'left' }}>{obsT('observations.sections.col.role')}</th>
+                  <th style={{ textAlign: 'left' }}>{obsT('observations.sections.col.roles')}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {manageableRoles.map((role) => (
+                  <tr key={role.id}>
+                    <td>{GrapesI18n.localizedRoleDisplay(role.id, role.displayName)}</td>
+                    <td>
+                      <select
+                        className="input"
+                        value={editSection.roles[role.id] || 'none'}
+                        onChange={(e) => setEditSection({
+                          ...editSection,
+                          roles: { ...editSection.roles, [role.id]: e.target.value },
+                        })}
+                      >
+                        <option value="none">{obsT('observations.sections.roleLevel.none')}</option>
+                        <option value="view">{obsT('observations.sections.roleLevel.view')}</option>
+                        <option value="edit">{obsT('observations.sections.roleLevel.edit')}</option>
+                      </select>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            <p style={{ color: 'var(--fg-muted)', font: 'var(--pv-text-body-3)' }}>{obsT('observations.sections.adminHint')}</p>
+            <div className="row" style={{ gap: 8, justifyContent: 'flex-end' }}>
+              <Button kind="ghost" onClick={() => setEditSection(null)}>{obsT('observations.board.cancel')}</Button>
+              <Button kind="primary" onClick={saveEdit}>{obsT('observations.settings.save')}</Button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function PageObservations({ onNavigate }) {
   const canWriteObservations = AuthAccess.canWritePage('observations');
   const canWrite = canWriteObservations || AuthAccess.canWritePage('explorer');
+  const canManageSections = AuthAccess.can('observations.manage_sections');
   const [config, setConfig] = useState(null);
   const [sections, setSections] = useState([]);
   const [activeSectionId, setActiveSectionId] = useState(null);
@@ -1967,6 +2210,8 @@ function PageObservations({ onNavigate }) {
   const [boardOrderIds, setBoardOrderIds] = useState([]);
   const [boardHiddenIds, setBoardHiddenIds] = useState([]);
   const [editMode, setEditMode] = useState(false);
+  const [manageSections, setManageSections] = useState(false);
+  const [sectionAdminRoles, setSectionAdminRoles] = useState([]);
   const [editDraftOrderIds, setEditDraftOrderIds] = useState([]);
   const [editBaselineOrderIds, setEditBaselineOrderIds] = useState([]);
   const [editDraftHiddenIds, setEditDraftHiddenIds] = useState([]);
@@ -2045,6 +2290,25 @@ function PageObservations({ onNavigate }) {
       });
     }
     return list;
+  }, []);
+
+  useEffect(() => {
+    if (!canManageSections) return undefined;
+    let cancelled = false;
+    ApiClient.loadRoles()
+      .then((list) => {
+        if (!cancelled) setSectionAdminRoles(list || []);
+      })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [canManageSections]);
+
+  const toggleManageSections = useCallback(() => {
+    setManageSections((open) => {
+      const next = !open;
+      if (next) setEditMode(false);
+      return next;
+    });
   }, []);
 
   useEffect(() => {
@@ -2826,7 +3090,7 @@ function PageObservations({ onNavigate }) {
   }
 
   const boardToolbar = (sticky = false) => (
-    sectionItems.length > 0 && sectionCanEdit ? (
+    !manageSections && sectionItems.length > 0 && sectionCanEdit ? (
       <ObservationsBoardToolbar
         editMode={editMode}
         saveState={boardSaveStatus}
@@ -2868,7 +3132,18 @@ function PageObservations({ onNavigate }) {
         </div>
         <div className="page-head__tools" style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
           {!editMode ? boardToolbar() : null}
-          {sectionCanEdit && !editMode && (
+          {canManageSections && !editMode ? (
+            <Button
+              kind={manageSections ? 'primary' : 'ghost'}
+              icon="settings"
+              onClick={toggleManageSections}
+            >
+              {manageSections
+                ? obsT('observations.sections.backToBoard')
+                : obsT('observations.sections.manage')}
+            </Button>
+          ) : null}
+          {sectionCanEdit && !editMode && !manageSections && (
             <button
               type="button"
               className="btn btn--primary"
@@ -2879,7 +3154,7 @@ function PageObservations({ onNavigate }) {
           )}
         </div>
       </div>
-      {editMode ? boardToolbar(true) : null}
+      {editMode && !manageSections ? boardToolbar(true) : null}
       <div className="col" style={{ gap: 16, padding: '0 0 24px' }}>
 
       {error && (
@@ -2888,86 +3163,92 @@ function PageObservations({ onNavigate }) {
         </div>
       )}
 
-      {sectionItems.length > 0 && (
-        <div style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-secondary)' }}>
-          {sectionItems[0]?.quotas?.maxMaterialize
-            ? obsT('observations.prep.quota', {
-              n: sectionItems[0]?.quotas?.activeMaterialize ?? 0,
-              max: sectionItems[0].quotas.maxMaterialize,
-            })
-            : obsT('observations.prep.active', { n: sectionItems[0]?.quotas?.activeMaterialize ?? 0 })}
-        </div>
-      )}
+      {manageSections ? (
+        <ObservationSectionsPanel roles={sectionAdminRoles} onChanged={reload} />
+      ) : (
+        <>
+          {sectionItems.length > 0 && (
+            <div style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-secondary)' }}>
+              {sectionItems[0]?.quotas?.maxMaterialize
+                ? obsT('observations.prep.quota', {
+                  n: sectionItems[0]?.quotas?.activeMaterialize ?? 0,
+                  max: sectionItems[0].quotas.maxMaterialize,
+                })
+                : obsT('observations.prep.active', { n: sectionItems[0]?.quotas?.activeMaterialize ?? 0 })}
+            </div>
+          )}
 
-      {!sectionItems.length && (
-        <Card>
-          <div style={{ color: 'var(--fg-secondary)' }}>
-            {sections.length
-              ? obsT('observations.section.empty')
-              : 'Пока пусто. Нажмите «+ Новое» — соберите фильтр в разборе трафика и «Добавить в наблюдения».'}
-          </div>
-        </Card>
-      )}
+          {!sectionItems.length && (
+            <Card>
+              <div style={{ color: 'var(--fg-secondary)' }}>
+                {sections.length
+                  ? obsT('observations.section.empty')
+                  : 'Пока пусто. Нажмите «+ Новое» — соберите фильтр в разборе трафика и «Добавить в наблюдения».'}
+              </div>
+            </Card>
+          )}
 
-      {sectionItems.length > 0 && (
-          <div
-            ref={boardRef}
-            className={[
-              'observations-board',
-              editMode ? 'observations-board--edit' : '',
-              draggingTileId ? 'observations-board--dragging' : '',
-              dragPreviewOrderIds ? 'observations-board--drag-preview' : '',
-            ].filter(Boolean).join(' ')}
-          >
-            {displayItems.map((item) => {
-              if (draggingTileId === item.id) {
+          {sectionItems.length > 0 && (
+            <div
+              ref={boardRef}
+              className={[
+                'observations-board',
+                editMode ? 'observations-board--edit' : '',
+                draggingTileId ? 'observations-board--dragging' : '',
+                dragPreviewOrderIds ? 'observations-board--drag-preview' : '',
+              ].filter(Boolean).join(' ')}
+            >
+              {displayItems.map((item) => {
+                if (draggingTileId === item.id) {
+                  return (
+                    <ObservationBoardTilePhantom
+                      key={`phantom-${item.id}`}
+                      id={item.id}
+                      title={item.name}
+                      expanded={expandedId === item.id}
+                      height={draggingTileHeight}
+                    />
+                  );
+                }
                 return (
-                  <ObservationBoardTilePhantom
-                    key={`phantom-${item.id}`}
-                    id={item.id}
-                    title={item.name}
+                  <ObservationLiveTile
+                    key={item.id}
+                    item={item}
+                    groupOptions={groupOptions}
+                    filterFields={filterFields}
+                    onNavigate={onNavigate}
+                    lookbackOptions={config?.lookbacks || LOOKBACK_OPTIONS}
                     expanded={expandedId === item.id}
-                    height={draggingTileHeight}
+                    onToggleExpand={() => setExpandedId((cur) => (cur === item.id ? null : item.id))}
+                    canWrite={sectionCanEdit}
+                    editMode={editMode && sectionCanEdit}
+                    onDragHandleMouseDown={onBoardDragHandleMouseDown(item.id)}
+                    onHide={() => hideObservationTile(item.id)}
+                    onSettings={() => openSettings(item)}
+                    onDuplicate={() => requestDuplicate(item)}
+                    onDelete={() => removeItem(item.id)}
+                    onCancel={() => ApiClient.cancelObservationMaterialize(item.id)
+                      .then(() => reload())
+                      .then(() => pushToast?.({ kind: 'success', title: 'Подготовка отменена' }))
+                      .catch((e) => setError(e.message))}
+                    onRetry={() => ApiClient.retryObservationMaterialize(item.id)
+                      .then(() => reload())
+                      .then(() => pushToast?.({ kind: 'success', title: 'Перезапущено', desc: 'Воркер возьмёт наблюдение в течение минуты' }))
+                      .catch((e) => setError(e.message))}
+                    onLookbackChange={changeTileLookback}
+                    onChartStyleChange={changeTileChartStyle}
+                    onRunReport={() => ApiClient.runObservationReport(item.id)
+                      .then(() => pushToast?.({ kind: 'success', title: 'Отчёт сформирован' }))
+                      .catch((e) => setError(e.message))}
+                    isNativeAggregate={isNativeAggregateObservation(item)}
+                    collectors={collectors}
+                    locations={locations}
                   />
                 );
-              }
-              return (
-              <ObservationLiveTile
-                key={item.id}
-                item={item}
-                groupOptions={groupOptions}
-                filterFields={filterFields}
-                onNavigate={onNavigate}
-                lookbackOptions={config?.lookbacks || LOOKBACK_OPTIONS}
-                expanded={expandedId === item.id}
-                onToggleExpand={() => setExpandedId((cur) => (cur === item.id ? null : item.id))}
-                canWrite={sectionCanEdit}
-                editMode={editMode && sectionCanEdit}
-                onDragHandleMouseDown={onBoardDragHandleMouseDown(item.id)}
-                onHide={() => hideObservationTile(item.id)}
-                onSettings={() => openSettings(item)}
-                onDuplicate={() => requestDuplicate(item)}
-                onDelete={() => removeItem(item.id)}
-                onCancel={() => ApiClient.cancelObservationMaterialize(item.id)
-                  .then(() => reload())
-                  .then(() => pushToast?.({ kind: 'success', title: 'Подготовка отменена' }))
-                  .catch((e) => setError(e.message))}
-                onRetry={() => ApiClient.retryObservationMaterialize(item.id)
-                  .then(() => reload())
-                  .then(() => pushToast?.({ kind: 'success', title: 'Перезапущено', desc: 'Воркер возьмёт наблюдение в течение минуты' }))
-                  .catch((e) => setError(e.message))}
-                onLookbackChange={changeTileLookback}
-                onChartStyleChange={changeTileChartStyle}
-                onRunReport={() => ApiClient.runObservationReport(item.id)
-                  .then(() => pushToast?.({ kind: 'success', title: 'Отчёт сформирован' }))
-                  .catch((e) => setError(e.message))}
-                isNativeAggregate={isNativeAggregateObservation(item)}
-                collectors={collectors}
-                locations={locations}
-              />
-              );
-            })}
-          </div>
+              })}
+            </div>
+          )}
+        </>
       )}
       {copyDialog ? (
         <div className="modal-backdrop" role="presentation" onClick={() => setCopyDialog(null)}>

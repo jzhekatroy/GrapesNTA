@@ -1725,9 +1725,9 @@ app.get('/api/observations/:id/runs/:runId/artifact', async (req, res) => {
   }
 });
 
-async function requireUsersWrite(req, res, next) {
+async function requireObservationSectionsManage(req, res, next) {
   try {
-    if (!(await canWrite(req.user, 'users'))) {
+    if (!(await hasPermission(req.user, 'observations.manage_sections'))) {
       res.status(403).json({ error: 'Недостаточно прав' });
       return;
     }
@@ -1737,7 +1737,7 @@ async function requireUsersWrite(req, res, next) {
   }
 }
 
-app.get('/api/observation-sections', requireUsersWrite, async (req, res) => {
+app.get('/api/observation-sections', requireObservationSectionsManage, async (req, res) => {
   try {
     res.json({ data: await listSectionsAdmin() });
   } catch (err) {
@@ -1745,7 +1745,7 @@ app.get('/api/observation-sections', requireUsersWrite, async (req, res) => {
   }
 });
 
-app.post('/api/observation-sections', requireUsersWrite, async (req, res) => {
+app.post('/api/observation-sections', requireObservationSectionsManage, async (req, res) => {
   try {
     const data = await createSection(req.body?.title);
     res.status(201).json({ ok: true, data });
@@ -1754,7 +1754,7 @@ app.post('/api/observation-sections', requireUsersWrite, async (req, res) => {
   }
 });
 
-app.put('/api/observation-sections/order', requireUsersWrite, async (req, res) => {
+app.put('/api/observation-sections/order', requireObservationSectionsManage, async (req, res) => {
   try {
     const data = await reorderSections(req.body?.ids);
     res.json({ ok: true, data });
@@ -1763,7 +1763,7 @@ app.put('/api/observation-sections/order', requireUsersWrite, async (req, res) =
   }
 });
 
-app.put('/api/observation-sections/:id', requireUsersWrite, async (req, res) => {
+app.put('/api/observation-sections/:id', requireObservationSectionsManage, async (req, res) => {
   try {
     const data = await updateSection(req.params.id, req.body || {});
     if (!data) {
@@ -1776,7 +1776,7 @@ app.put('/api/observation-sections/:id', requireUsersWrite, async (req, res) => 
   }
 });
 
-app.delete('/api/observation-sections/:id', requireUsersWrite, async (req, res) => {
+app.delete('/api/observation-sections/:id', requireObservationSectionsManage, async (req, res) => {
   try {
     const { moved } = await deleteSection(req.params.id);
     res.json({ ok: true, moved });
