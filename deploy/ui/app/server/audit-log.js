@@ -187,7 +187,10 @@ function diffRolePermissionsSnapshot(snapshot, body, changes, limit = 40) {
 }
 
 function normalizeAuditApiPath(req) {
-  const rawPath = String(req.path || '').trim();
+  const fromOriginal = req?.originalUrl
+    ? String(req.originalUrl).split('?')[0].trim()
+    : '';
+  const rawPath = fromOriginal || String(req.path || '').trim();
   if (!rawPath) return '/api';
   if (rawPath === '/api' || rawPath.startsWith('/api/')) return rawPath;
   return rawPath.startsWith('/') ? `/api${rawPath}` : `/api/${rawPath}`;
@@ -1072,6 +1075,7 @@ function createAuditMiddleware() {
 }
 
 async function writeMutatingAuditEvent(req, res, sessionId, { beforeState } = {}) {
+  if (req.auditObservationEventLogged) return null;
   const apiPath = normalizeAuditApiPath(req);
   if (!shouldAuditMutatingRequest(req.method, apiPath)) return null;
 

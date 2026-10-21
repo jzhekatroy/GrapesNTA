@@ -102,7 +102,7 @@ async function countCabinetObservations(clientId) {
 function cabinetMaterializeStatus(item) {
   const st = String(item?.materialize?.status || 'queued');
   if (st === 'error') return 'error';
-  if (st === 'ready' || st === 'idle') {
+  if (st === 'ready' || st === 'idle' || st === 'ok') {
     return item?.materialize?.dataThrough ? 'ready' : 'preparing';
   }
   if (st === 'queued' || st === 'running' || st === 'lagging') return 'preparing';
@@ -153,7 +153,11 @@ async function listCabinetObservations(clientId, { includeAuthor = false } = {})
   const ids = collectCabinetObservationIds(clientId, bindings, all);
   const usedCount = ids.size;
   const items = all.filter((o) => ids.has(o.id));
-  items.sort((a, b) => String(b.updatedAt || '').localeCompare(String(a.updatedAt || '')));
+  items.sort((a, b) => {
+    const aTs = String(a.editedAt || a.createdAt || a.updatedAt || '');
+    const bTs = String(b.editedAt || b.createdAt || b.updatedAt || '');
+    return bTs.localeCompare(aTs);
+  });
   const out = [];
   for (const item of items) {
     let author;
@@ -331,5 +335,6 @@ module.exports = {
   setCabinetObservationsMaterialize,
   countCabinetObservations,
   stripCabinetObservation,
+  cabinetMaterializeStatus,
   resolveAuthor,
 };

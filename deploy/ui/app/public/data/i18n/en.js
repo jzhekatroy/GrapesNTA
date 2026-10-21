@@ -948,6 +948,7 @@
     'explorer.groupingLabel': "Grouping:",
     'explorer.name': "Name",
     'explorer.chartWindow': "Chart window",
+    'explorer.lookback15m': "15 minutes",
     'explorer.lookback30m': "30 minutes",
     'explorer.lookback1h': "1 hour",
     'explorer.lookback6h': "6 hours",

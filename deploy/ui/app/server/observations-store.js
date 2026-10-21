@@ -136,6 +136,7 @@ function rowToObservation(row) {
     report: safeJsonParse(row.report_json, {}),
     createdAt: sanitizeCreatedAt(toIso(row.created_at), row.id, toIso(row.updated_at)),
     updatedAt: toIso(row.updated_at) || new Date().toISOString(),
+    editedAt: toIso(row.edited_at) || sanitizeCreatedAt(toIso(row.created_at), row.id, toIso(row.updated_at)),
   };
 }
 
@@ -160,6 +161,7 @@ function observationToRow(item, { deleted = 0 } = {}) {
     deleted: deleted ? 1 : 0,
     created_at: clickhouseDateTime(item.createdAt || new Date()),
     updated_at: clickhouseDateTime(item.updatedAt || new Date()),
+    edited_at: clickhouseDateTime(item.editedAt || item.createdAt || item.updatedAt || new Date()),
   };
 }
 
@@ -282,6 +284,11 @@ async function ensureObservationsStore() {
           ADD COLUMN IF NOT EXISTS email_to String DEFAULT '',
           ADD COLUMN IF NOT EXISTS email_error String DEFAULT ''
       `, {}, { name: 'observations/ensure-runs-email' }).catch(() => {});
+
+      await executeCommand(`
+        ALTER TABLE ${config.database}.${OBSERVATIONS_TABLE}
+          ADD COLUMN IF NOT EXISTS edited_at DateTime64(3) DEFAULT created_at
+      `, {}, { name: 'observations/ensure-edited-at' }).catch(() => {});
 
       await migrateFromJsonIfEmpty();
     })().catch((err) => {

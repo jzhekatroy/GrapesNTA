@@ -4011,7 +4011,9 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
         let existing = null;
         if (id) {
           try {
-            existing = await ApiClient.loadObservation(id);
+            existing = cabinetMode
+              ? await ApiClient.loadCabinetObservation(id)
+              : await ApiClient.loadObservation(id);
           } catch (err) {
             if (observationNotFoundError(err)) {
               id = null;
@@ -4021,14 +4023,14 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
           }
         }
         // Shared observations are visible via GET, but only the owner can PUT.
-        if (id && existing && existing.canEdit === false) {
+        if (!cabinetMode && id && existing && existing.canEdit === false) {
           id = null;
           existing = null;
         }
         if (id && existing) {
           const existingChartStyle = (existing.widgets || []).find((w) => w.type === 'timeseries_bps')?.chartStyle;
           try {
-            await ApiClient.updateObservation(id, {
+            const updatePayload = {
               ...existing,
               name: (name || '').trim() || existing.name,
               lookback: tileLookback,
@@ -4036,7 +4038,12 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
               filters: nextFilters,
               thresholds: validThresholds,
               widgets: buildCreateWidgets(existingChartStyle),
-            });
+            };
+            if (cabinetMode) {
+              await ApiClient.updateCabinetObservation(id, updatePayload);
+            } else {
+              await ApiClient.updateObservation(id, updatePayload);
+            }
             pushToast({ kind: 'success', title: explorerT('explorer.obsFiltersUpdated'), desc: name || existing.name });
             updated = true;
           } catch (err) {
@@ -4930,6 +4937,7 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
         timeRange={timeRange}
         saveMode={observationSaveMode}
         initialName={observationCompose?.name || ''}
+        cabinetMode={cabinetMode}
         onSave={saveAsObservation}
       />
     </div>
@@ -8210,6 +8218,8 @@ function metricAxisUnit(metric) {
   return '';
 }
 
+const CABINET_OBS_LOOKBACKS = new Set(['15m', '30m', '1h', '6h', '24h']);
+
 function SaveObservationModal({
   open,
   onClose,
@@ -8220,11 +8230,14 @@ function SaveObservationModal({
   timeRange,
   saveMode = 'create',
   initialName,
+  cabinetMode = false,
   onSave,
 }) {
   const defaultLookback = timeRange === '15m'
     ? '30m'
-    : (['30m', '1h', '6h', '24h', '7d'].includes(timeRange) ? timeRange : '1h');
+    : (cabinetMode
+      ? (CABINET_OBS_LOOKBACKS.has(timeRange) ? timeRange : '1h')
+      : (['30m', '1h', '6h', '24h', '7d'].includes(timeRange) ? timeRange : '1h'));
   const defaultTop = (groupBy || []).find((g) => (
     ['src_asn', 'dst_asn', 'src_ip', 'dst_ip', 'vlan', 'proto'].includes(explorerGroupFieldId(g))
   ))
@@ -8306,11 +8319,12 @@ function SaveObservationModal({
           <div className="field" style={{ flex: '1 1 140px', minWidth: 140 }}>
             <label>{explorerT('explorer.chartWindow')}</label>
             <select className="input" value={lookback} onChange={(e) => setLookback(e.target.value)}>
+              {cabinetMode && <option value="15m">{explorerT('explorer.lookback15m')}</option>}
               <option value="30m">{explorerT('explorer.lookback30m')}</option>
               <option value="1h">{explorerT('explorer.lookback1h')}</option>
               <option value="6h">{explorerT('explorer.lookback6h')}</option>
               <option value="24h">{explorerT('explorer.lookback24h')}</option>
-              <option value="7d">{explorerT('explorer.lookback7d')}</option>
+              {!cabinetMode && <option value="7d">{explorerT('explorer.lookback7d')}</option>}
             </select>
           </div>
           {!groupSummary && (
@@ -8334,29 +8348,33 @@ function SaveObservationModal({
             {explorerT('explorer.obsSliceRest')}
           </div>
         )}
-        <label className="row" style={{ gap: 8, alignItems: 'center' }}>
-          <input
-            type="checkbox"
-            checked={materializeEnabled}
-            onChange={(e) => setMaterializeEnabled(e.target.checked)}
-          />
-          {explorerT('explorer.materialize')}
-        </label>
-        <div style={{ marginLeft: 24, color: 'var(--fg-muted)', font: 'var(--pv-text-body-3)' }}>
-          {explorerT('explorer.materializeHint')}
-        </div>
-        <label className="row" style={{ gap: 8, alignItems: 'center' }}>
-          <input type="checkbox" checked={reportEnabled} onChange={(e) => setReportEnabled(e.target.checked)} />
-          {explorerT('explorer.dailyReport')}
-        </label>
-        {reportEnabled && (
-          <label className="row" style={{ gap: 8, alignItems: 'center', marginLeft: 24 }}>
-            {explorerT('explorer.forPeriod')}
-            <select className="input" style={{ width: 160 }} value={reportPeriod} onChange={(e) => setReportPeriod(e.target.value)}>
-              <option value="yesterday">{explorerT('explorer.reportYesterday')}</option>
-              <option value="last_24h">{explorerT('explorer.reportLast24h')}</option>
-            </select>
-          </label>
+        {!cabinetMode && (
+          <>
+            <label className="row" style={{ gap: 8, alignItems: 'center' }}>
+              <input
+                type="checkbox"
+                checked={materializeEnabled}
+                onChange={(e) => setMaterializeEnabled(e.target.checked)}
+              />
+              {explorerT('explorer.materialize')}
+            </label>
+            <div style={{ marginLeft: 24, color: 'var(--fg-muted)', font: 'var(--pv-text-body-3)' }}>
+              {explorerT('explorer.materializeHint')}
+            </div>
+            <label className="row" style={{ gap: 8, alignItems: 'center' }}>
+              <input type="checkbox" checked={reportEnabled} onChange={(e) => setReportEnabled(e.target.checked)} />
+              {explorerT('explorer.dailyReport')}
+            </label>
+            {reportEnabled && (
+              <label className="row" style={{ gap: 8, alignItems: 'center', marginLeft: 24 }}>
+                {explorerT('explorer.forPeriod')}
+                <select className="input" style={{ width: 160 }} value={reportPeriod} onChange={(e) => setReportPeriod(e.target.value)}>
+                  <option value="yesterday">{explorerT('explorer.reportYesterday')}</option>
+                  <option value="last_24h">{explorerT('explorer.reportLast24h')}</option>
+                </select>
+              </label>
+            )}
+          </>
         )}
       </div>
     </Modal>

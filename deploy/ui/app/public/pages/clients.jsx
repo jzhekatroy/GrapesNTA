@@ -1987,7 +1987,7 @@ function ClientObservationsTab({ client, canWrite }) {
                   <div style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-secondary)', marginTop: 4 }}>
                     {clientsT('clientsPage.observations.col.author')}: {item.author?.label || '—'}
                     {' · '}
-                    {clientsT('clientsPage.observations.col.updated')}: {fmtDateTime(item.updatedAt)}
+                    {clientsT('clientsPage.observations.col.updated')}: {fmtDateTime(item.editedAt || item.createdAt)}
                   </div>
                 </div>
                 {canWrite && (

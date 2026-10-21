@@ -535,6 +535,7 @@ function normalizeObservation(raw = {}, { userId, existing = null, cabinet = fal
     },
     createdAt,
     updatedAt: new Date().toISOString(),
+    editedAt: new Date().toISOString(),
   };
 }
 
@@ -666,6 +667,7 @@ async function updateObservation(id, user, payload = {}) {
   const quotaPool = staffMaterializeQuotaPool(items, clientBindings);
   const existing = items.find((row) => row.id === id);
   if (!existing) return null;
+  if (clientBindings.has(id)) return null;
   try {
     assertObservationOwner(existing, user, ctx);
   } catch (err) {
@@ -763,7 +765,11 @@ async function duplicateObservation(id, user, payload = {}) {
 
 async function cancelMaterialize(id, user) {
   const ctx = await createObservationSectionContext(user);
-  const items = await loadAllObservations();
+  const [items, clientBindings] = await Promise.all([
+    loadAllObservations(),
+    loadObservationClients(),
+  ]);
+  if (clientBindings.has(id)) return null;
   const existing = items.find((row) => row.id === id);
   if (!existing) return null;
   try {
@@ -792,7 +798,11 @@ async function cancelMaterialize(id, user) {
 
 async function retryMaterialize(id, user) {
   const ctx = await createObservationSectionContext(user);
-  const items = await loadAllObservations();
+  const [items, clientBindings] = await Promise.all([
+    loadAllObservations(),
+    loadObservationClients(),
+  ]);
+  if (clientBindings.has(id)) return null;
   const existing = items.find((row) => row.id === id);
   if (!existing) return null;
   try {
@@ -848,6 +858,7 @@ async function queueMaterialize(id, user) {
   const quotaPool = staffMaterializeQuotaPool(items, clientBindings);
   const existing = items.find((row) => row.id === id);
   if (!existing) return null;
+  if (clientBindings.has(id)) return null;
   try {
     assertObservationOwner(existing, user, ctx);
   } catch (err) {

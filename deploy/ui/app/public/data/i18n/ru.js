@@ -948,6 +948,7 @@
     'explorer.groupingLabel': "Группировка:",
     'explorer.name': "Название",
     'explorer.chartWindow': "Окно графика",
+    'explorer.lookback15m': "15 минут",
     'explorer.lookback30m': "30 минут",
     'explorer.lookback1h': "1 час",
     'explorer.lookback6h': "6 часов",
