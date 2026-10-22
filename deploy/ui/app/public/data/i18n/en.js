@@ -1702,7 +1702,6 @@
     'monitoring.kind.benign_peak': 'benign peak',
     'attackAlert.title': 'Attack started',
     'attackAlert.titleMany': 'Attacks started ({n})',
-    'attackAlert.subtitle': 'Detection opened a new event',
     'attackAlert.startedAt': 'Started: {time}',
     'attackAlert.volume': 'Traffic: {bps}',
     'attackAlert.victim': 'Target: {target}',

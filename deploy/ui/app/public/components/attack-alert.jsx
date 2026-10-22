@@ -93,7 +93,6 @@ function AttackAlertModal({ open, attacks, onClose, onOpenMonitoring, showMonito
       onClose={onClose}
       variant="attack-alert"
       title={attacks.length > 1 ? alertT('attackAlert.titleMany', { n: attacks.length }) : alertT('attackAlert.title')}
-      subtitle={alertT('attackAlert.subtitle')}
       size="lg"
       footer={(
         <>
