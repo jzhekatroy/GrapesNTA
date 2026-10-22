@@ -35,6 +35,7 @@ const {
   explorerFlows,
   explorerSchema,
   explorerQuery,
+  explorerRuntimeOptions,
   executeExplorerQueryBundle,
   searchExplorerEntities,
   listSavedExplorerFilters,
@@ -1159,15 +1160,16 @@ app.post('/api/dashboard/layout/reset', async (req, res) => {
 app.use('/api/explorer', async (req, res, next) => {
   try {
     await ensureFlowsRawSchema();
+    req.explorerOptions = await explorerRuntimeOptions();
     next();
   } catch (err) {
     res.status(503).json({ error: err.message || 'ClickHouse schema unavailable' });
   }
 });
 
-app.get('/api/explorer/schema', async (_req, res) => {
+app.get('/api/explorer/schema', async (req, res) => {
   try {
-    res.json({ data: explorerSchema() });
+    res.json({ data: explorerSchema(req.explorerOptions || {}) });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -1192,7 +1194,7 @@ app.post('/api/explorer/query', async (req, res) => {
   const started = Date.now();
   enableAuditQueryCapture();
   try {
-    const bundle = await explorerQuery(body);
+    const bundle = await explorerQuery(body, req.explorerOptions || {});
     const queryBody = bundle.queryBody || body;
     const {
       flowsResult,
@@ -1250,7 +1252,7 @@ app.post('/api/explorer/flows', async (req, res) => {
   try {
     const body = req.body || {};
     const result = await runNamed(
-      () => explorerFlows(body),
+      () => explorerFlows(body, req.explorerOptions || {}),
       { name: 'explorer/flows' },
     );
     res.json(result);
@@ -1261,7 +1263,7 @@ app.post('/api/explorer/flows', async (req, res) => {
 
 app.post('/api/explorer/export', async (req, res) => {
   try {
-    const csv = await explorerExportCsv(req.body || {});
+    const csv = await explorerExportCsv(req.body || {}, req.explorerOptions || {});
     res.setHeader('Content-Type', 'text/csv; charset=utf-8');
     res.setHeader('Content-Disposition', `attachment; filename="explorer-flows-${Date.now()}.csv"`);
     res.send(`\uFEFF${csv}`);

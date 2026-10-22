@@ -116,6 +116,7 @@ const FILTER_OPS_BY_TYPE = {
   country: ['=', '!=', 'contains', 'not_contains', 'in', 'not_in'],
   entity: ['=', 'in'],
   cabinet_client: ['=', '!=', 'in', 'not_in'],
+  ix_client: ['=', '!=', 'in', 'not_in'],
   vlan_name: ['=', '!=', 'contains', 'not_contains', 'in', 'not_in'],
   as_path: ['contains', 'not_contains', 'in', 'not_in', '=', '!='],
 };
@@ -195,6 +196,20 @@ const EXPLORER_DIM_META = {
     filterType: 'enum',
     aliases: ['к клиенту', 'от клиента', 'client direction', 'incoming client', 'направление клиента'],
     valueHint: 'Считается по привязке клиента (префикс или порт), не по разметке сторон. Клиента в фильтре выбирать не обязательно.',
+  },
+  ix_src_client: {
+    label: 'Клиент-отправитель IX',
+    group: EXPLORER_GROUP.CLIENTS,
+    filterType: 'ix_client',
+    aliases: ['отправитель ix', 'ix отправитель', 'от кого', 'peer src'],
+    valueHint: 'Клиент IX по своему порту или по MAC другой стороны. Пусто — сторона не определена.',
+  },
+  ix_dst_client: {
+    label: 'Клиент-получатель IX',
+    group: EXPLORER_GROUP.CLIENTS,
+    filterType: 'ix_client',
+    aliases: ['получатель ix', 'ix получатель', 'кому', 'peer dst'],
+    valueHint: 'Клиент IX по своему порту или по MAC другой стороны. Пусто — сторона не определена.',
   },
   own_network: {
     label: 'Префикс / CIDR',
@@ -461,6 +476,7 @@ function explorerFilterEntityType(filterType) {
   if (filterType === 'if_name') return 'if_name';
   if (filterType === 'if_alias') return 'if_alias';
   if (filterType === 'cabinet_client') return 'cabinet_client';
+  if (filterType === 'ix_client') return 'cabinet_client';
   return null;
 }
 
@@ -919,7 +935,7 @@ function geoCountryExpr(ipExpr, etypeExpr = null) {
   return `nullIf(nullIf(${country}, ''), '??')`;
 }
 
-function explorerDimensions() {
+function explorerDimensions(options = {}) {
   const t = {
     srcIp: col('srcIp'),
     dstIp: col('dstIp'),
@@ -1358,7 +1374,8 @@ function explorerDimensions() {
     labelFromKey: cabinetClientLabelFromKey,
   };
 
-  const operatorClientDirExpr = operatorClientDirectionExpr();
+  const ix = Boolean(options.ix);
+  const operatorClientDirExpr = operatorClientDirectionExpr('f', { ix });
   dims.client_direction = {
     label: 'Направление относительно клиента / Client-relative direction',
     group: EXPLORER_GROUP.CLIENTS,
@@ -1389,17 +1406,51 @@ function explorerDimensions() {
     };
   }
 
+  if (ix) {
+    dims.ix_src_client = ixClientDimension('f.ix_src_client');
+    dims.ix_dst_client = ixClientDimension('f.ix_dst_client');
+  }
+
   enrichExplorerDimensions(dims);
+  if (ix && dims.client_direction) {
+    dims.client_direction.valueHint = 'В режиме IX: если известны обе стороны, направление «Между клиентами». «К клиенту» и «От клиента» остаются, когда вторая сторона не определена.';
+  }
   return dims;
 }
 
-function operatorClientDirectionExpr(flowAlias = 'f') {
+function operatorClientDirectionExpr(flowAlias = 'f', { ix = false } = {}) {
+  if (ix) {
+    return `multiIf(`
+      + `${flowAlias}.ix_src_client != '' AND ${flowAlias}.ix_dst_client != '' AND ${flowAlias}.ix_src_client = ${flowAlias}.ix_dst_client, 'internal', `
+      + `${flowAlias}.ix_src_client != '' AND ${flowAlias}.ix_dst_client != '', 'between', `
+      + `${flowAlias}.dst_client != '', 'in', `
+      + `${flowAlias}.src_client != '', 'out', `
+      + `'none')`;
+  }
   return `multiIf(`
     + `${flowAlias}.src_client != '' AND ${flowAlias}.dst_client != '' AND ${flowAlias}.src_client = ${flowAlias}.dst_client, 'internal', `
     + `${flowAlias}.src_client != '' AND ${flowAlias}.dst_client != '' AND ${flowAlias}.src_client != ${flowAlias}.dst_client, 'between', `
     + `${flowAlias}.dst_client != '', 'in', `
     + `${flowAlias}.src_client != '', 'out', `
     + `'none')`;
+}
+
+function ixClientKeyExpr(columnExpr) {
+  return `if(${columnExpr} = '', '—', ${columnExpr})`;
+}
+
+function ixClientDimension(columnExpr) {
+  const keyExpr = ixClientKeyExpr(columnExpr);
+  return {
+    group: EXPLORER_GROUP.CLIENTS,
+    kind: 'entity',
+    filterType: 'ix_client',
+    expr: cabinetClientLabelFromKey(keyExpr),
+    filterExpr: columnExpr,
+    groupKeyExpr: keyExpr,
+    labelFromKey: cabinetClientLabelFromKey,
+    columnExpr,
+  };
 }
 
 function operatorClientDirectionLabelFromKey(keyExpr) {
@@ -1443,7 +1494,20 @@ function cabinetExplorerDimensions() {
 function explorerDimensionsForOptions(options = {}) {
   return options.cabinet || options.cabinetClientId
     ? cabinetExplorerDimensions()
-    : explorerDimensions();
+    : explorerDimensions(options);
+}
+
+function explorerDimensionGroups(options = {}) {
+  if (!options.ix || options.cabinet || options.cabinetClientId) return DIMENSION_GROUPS;
+  return {
+    ...DIMENSION_GROUPS,
+    [EXPLORER_GROUP.CLIENTS]: [
+      'cabinet_client',
+      'client_direction',
+      'ix_src_client',
+      'ix_dst_client',
+    ],
+  };
 }
 
 function cabinetExplorerValidationError(message) {
@@ -1565,7 +1629,7 @@ function explorerSchema(options = {}) {
     metricKeys: [...EXPLORER_METRIC_KEYS],
     maxLimit: EXPLORER_MAX_LIMIT,
     maxExportRows: EXPLORER_MAX_EXPORT_ROWS,
-    dimensionGroups: DIMENSION_GROUPS,
+    dimensionGroups: explorerDimensionGroups(options),
     granularities: ['auto', '1m', '5m', '1h', '1d'],
     maxRangeDays: EXPLORER_MAX_RANGE_DAYS,
     maxCabinetClientRangeHours: CABINET_CLIENT_MAX_RANGE_HOURS,
@@ -2165,6 +2229,27 @@ function buildIfPairFilterSql(pairFilter, op, values, rawValue, params, paramNam
   return `${keyExpr} ${negate ? 'NOT IN' : 'IN'} (${pairsFrom} WHERE ${where})`;
 }
 
+function ixClientFilterToken(value) {
+  const text = String(value ?? '').trim();
+  if (!text || text === '—') return '';
+  return text;
+}
+
+function buildIxClientFilterSql(columnExpr, values, op, params, idx) {
+  const column = String(columnExpr || '').trim();
+  if (!column) return null;
+  const normalized = (Array.isArray(values) ? values : [values]).map(ixClientFilterToken);
+  if (!normalized.length) return null;
+  const paramName = `ix_client_${idx}`;
+  const neg = op === '!=' || op === '<>' || op === 'not_in';
+  if (op === 'in' || op === 'not_in') {
+    params[paramName] = normalized;
+    return `${column} ${neg ? 'NOT IN' : 'IN'} {${paramName}:Array(String)}`;
+  }
+  params[paramName] = normalized[0];
+  return `${column} ${neg ? '!=' : '='} {${paramName}:String}`;
+}
+
 async function buildExplorerFilterClauses(filters, dims, params) {
   const joins = new Set();
   let idx = 0;
@@ -2239,6 +2324,16 @@ async function buildExplorerFilterClauses(filters, dims, params) {
     if (dim.filterType === 'cabinet_client') {
       const filterValues = op === 'in' || op === 'not_in' ? values : [String(f.value ?? '').trim()];
       addClause(await buildCabinetClientFilterSql(filterValues, op, params, 'f'));
+      continue;
+    }
+
+    if (dim.filterType === 'ix_client') {
+      const filterValues = op === 'in' || op === 'not_in' ? values : [String(f.value ?? '').trim()];
+      const clause = buildIxClientFilterSql(dim.columnExpr, filterValues, op, params, idx);
+      if (clause) {
+        idx += 1;
+        addClause(clause);
+      }
       continue;
     }
 
@@ -2664,6 +2759,7 @@ function normalizeExplorerQuery(body = {}, options = {}) {
     includeBreakdowns: body.includeBreakdowns !== false,
     collectorId,
     cabinetClientId: options.cabinetClientId || null,
+    ix: Boolean(options.ix) && !options.cabinet && !options.cabinetClientId,
     windowAnchor: body.windowAnchor || undefined,
   };
 }
@@ -2740,7 +2836,9 @@ function mapExplorerFlowRows(
       .map((g, i) => (g === 'src_entity' || g === 'dst_entity' ? i : -1))
       .filter((i) => i >= 0);
     const cabinetClientGroupIndexes = groups
-      .map((g, i) => (g === 'cabinet_client' ? i : -1))
+      .map((g, i) => (
+        g === 'cabinet_client' || g === 'ix_src_client' || g === 'ix_dst_client' ? i : -1
+      ))
       .filter((i) => i >= 0);
     const collectorGroupIndexes = groups
       .map((g, i) => (g === 'collector' ? i : -1))
@@ -3812,7 +3910,7 @@ function explorerSeriesGroupCondition(g, dim, rawValue, paramName, params) {
     params[paramName] = mask;
     return `${dim.filterExpr} = {${paramName}:UInt8}`;
   }
-  if ((EXPLORER_ENTITY_SERIES_DIMS.has(g) || g === 'cabinet_client' || g === 'collector') && dim.groupKeyExpr) {
+  if ((EXPLORER_ENTITY_SERIES_DIMS.has(g) || g === 'cabinet_client' || g === 'collector' || dim.filterType === 'ix_client') && dim.groupKeyExpr) {
     if (raw === '—' || raw === '') {
       return `(${dim.groupKeyExpr} = '' OR ${dim.groupKeyExpr} = '—')`;
     }
@@ -4623,9 +4721,10 @@ async function explorerQuery(body = {}, options = {}) {
 // С группировкой хватает двух проходов: таблица (итог — из её окна) и один
 // график, в котором общий ряд и ряды строк считаются вместе.
 async function executeExplorerQueryBundle(bundle, queryBody, runNamed, namePrefix = 'explorer') {
-  const queryOptions = bundle?.q?.cabinetClientId
-    ? { cabinetClientId: bundle.q.cabinetClientId }
-    : {};
+  const queryOptions = {
+    ...(bundle?.q?.cabinetClientId ? { cabinetClientId: bundle.q.cabinetClientId } : {}),
+    ...(bundle?.q?.ix ? { ix: true } : {}),
+  };
   const flowsResult = bundle.flowsSpec
     ? await runNamed(() => Promise.resolve(bundle.flowsSpec), { name: `${namePrefix}/flows` })
     : null;
@@ -5187,8 +5286,36 @@ function summaryFromExplorerFlowRows(rows, windowSeconds = 3600) {
   };
 }
 
+let explorerIxFlagCache = { at: 0, value: false };
+
+async function explorerIxEnabled() {
+  const now = Date.now();
+  if (now - explorerIxFlagCache.at < 15000) return explorerIxFlagCache.value;
+  let value = false;
+  try {
+    const { rows } = await query(`
+      SELECT ix_enabled
+      FROM default.app_erp_sync_settings
+      WHERE settings_id = 'global'
+      ORDER BY updated_at DESC
+      LIMIT 1
+    `, {}, { name: 'explorer/ix-flag' });
+    value = Number(rows[0]?.ix_enabled) === 1;
+  } catch {
+    value = false;
+  }
+  explorerIxFlagCache = { at: now, value };
+  return value;
+}
+
+async function explorerRuntimeOptions(extra = {}) {
+  const ix = await explorerIxEnabled();
+  return { ...extra, ...(ix ? { ix: true } : {}) };
+}
+
 module.exports = {
   explorerSchema,
+  explorerRuntimeOptions,
   explorerDimensions,
   explorerDimensionsForOptions,
   explorerFieldMatchesQuery,
