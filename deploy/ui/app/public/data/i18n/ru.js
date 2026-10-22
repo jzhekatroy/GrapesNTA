@@ -2204,6 +2204,7 @@
     'auditPage.action.api_client_manual_register': 'API-клиент: свои креды',
     'auditPage.action.api_client_activate': 'API-клиент: включён',
     'auditPage.action.api_client_deactivate': 'API-клиент: отключён',
+    'auditPage.action.api_client_delete': 'API-клиент: удалён',
     'auditPage.action.api_client_tokens_revoke': 'API-клиент: токены отозваны',
     'auditPage.action.api_write': 'Изменение',
     'auditPage.action.writeResource': 'Изменение ({resource})',
