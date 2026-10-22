@@ -131,6 +131,9 @@ function OverviewTrafficChartCard({
           periodStartMs={periodStartMs}
           periodEndMs={periodEndMs}
           skipTrailingGaps
+          tipUnitLabel={mode === 'pps'
+            ? overviewT('dashboard.chart.legend.packetsPerSec')
+            : overviewT('dashboard.chart.legend.bitsPerSec')}
         />
       )}
       <div className="chart-legend chart-legend--below">
@@ -150,7 +153,7 @@ function OverviewTrafficChartCard({
                 className="chart-legend__swatch"
                 style={{ width: 12, height: line.key === 'total' ? 3 : 2, background: line.color, opacity: off ? 0.35 : 1 }}
               />
-              {line.label}, {mode === 'pps' ? overviewT('dashboard.chart.legend.packetsPerSec') : overviewT('dashboard.chart.legend.bitsPerSec')}
+              {chartSeriesLineLabel(line)}, {mode === 'pps' ? overviewT('dashboard.chart.legend.packetsPerSec') : overviewT('dashboard.chart.legend.bitsPerSec')}
             </button>
           );
         })}

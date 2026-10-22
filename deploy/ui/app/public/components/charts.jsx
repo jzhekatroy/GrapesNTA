@@ -318,6 +318,18 @@ function sortLinesForTip(lines) {
   return [...lines].sort((a, b) => (rank[a.key] ?? 99) - (rank[b.key] ?? 99));
 }
 
+function chartSeriesLineLabel(lineOrKey, fallbackLabel) {
+  const key = String(typeof lineOrKey === 'string' ? lineOrKey : lineOrKey?.key || '').trim();
+  const fallback = fallbackLabel
+    ?? (typeof lineOrKey === 'object' ? lineOrKey?.label : undefined)
+    ?? key;
+  const directionKey = key ? `direction.${key}` : '';
+  if (directionKey && typeof GrapesI18n !== 'undefined' && GrapesI18n.has(directionKey)) {
+    return GrapesI18n.t(directionKey);
+  }
+  return fallback || key;
+}
+
 function updateChartHoverIndex(clientX, indexFromClientX, setHoverIdx) {
   const idx = indexFromClientX(clientX);
   if (idx != null) setHoverIdx(idx);
@@ -785,7 +797,9 @@ function ChartHoverTip({
       {children}
       {translucentToggle && (
         <div className="dual-chart__tip-hint">
-          {isTranslucent ? 'Клик — отключить прозрачность' : 'Клик — включить прозрачность'}
+          {(typeof GrapesI18n !== 'undefined' && GrapesI18n.t)
+            ? GrapesI18n.t(isTranslucent ? 'chart.tip.translucentOff' : 'chart.tip.translucentOn')
+            : (isTranslucent ? 'Click to disable transparency' : 'Click to enable transparency')}
         </div>
       )}
     </div>
@@ -1238,7 +1252,7 @@ function DualChart({
             return (
               <div key={ln.key} className="dual-chart__tip-row" style={{ opacity: seriesHighlightOpacity(ln.key) }}>
                 <span className="dual-chart__tip-swatch" style={{ background: ln.color }} />
-                <span className="dual-chart__tip-label">{ln.label}</span>
+                <span className="dual-chart__tip-label">{chartSeriesLineLabel(ln)}</span>
                 <span className="dual-chart__tip-val mono">
                   {stackMode === 'share'
                     ? `${formatChartSharePercent(band.share)} · ${valueFormatter(band.raw)}`
@@ -1256,7 +1270,7 @@ function DualChart({
           {!isStack && sortLinesForTip(activeLines).map((ln) => (
             <div key={ln.key} className="dual-chart__tip-row" style={{ opacity: seriesHighlightOpacity(ln.key) }}>
               <span className="dual-chart__tip-swatch" style={{ background: ln.color }} />
-              <span className="dual-chart__tip-label">{ln.label}</span>
+              <span className="dual-chart__tip-label">{chartSeriesLineLabel(ln)}</span>
               <span className="dual-chart__tip-val mono">
                 {valueFormatter(seriesBwValue(hoverPoint, ln.key))}
               </span>
@@ -1265,7 +1279,7 @@ function DualChart({
           {!isStack && sortLinesForTip(activePpsLines).map((ln) => (
             <div key={`pps-${ln.key}`} className="dual-chart__tip-row" style={{ opacity: seriesHighlightOpacity(ln.key) }}>
               <span className="dual-chart__tip-swatch" style={{ background: ln.color }} />
-              <span className="dual-chart__tip-label">{ln.label}{GrapesI18n.t('dashboard.chart.ppsLineSuffix')}</span>
+              <span className="dual-chart__tip-label">{chartSeriesLineLabel(ln)}{GrapesI18n.t('dashboard.chart.ppsLineSuffix')}</span>
               <span className="dual-chart__tip-val mono">{ppsFormatter(seriesPpsValue(hoverPoint, ln.key))}</span>
             </div>
           ))}
@@ -1564,7 +1578,7 @@ function CategoryTrendChart({
             {sortLinesForTip(visibleLines).map((ln) => (
               <div key={ln.key} className="dual-chart__tip-row">
                 <span className="dual-chart__tip-swatch" style={{ background: ln.color }} />
-                <span className="dual-chart__tip-label">{ln.label}</span>
+                <span className="dual-chart__tip-label">{chartSeriesLineLabel(ln)}</span>
                 <span className="dual-chart__tip-val mono">{fmtBits(chartSeriesNumber(hoverPoint[ln.key]))}</span>
               </div>
             ))}
@@ -1587,7 +1601,7 @@ function CategoryTrendChart({
                 className="chart-legend__swatch"
                 style={{ width: 10, height: 2, background: ln.color, opacity: off ? 0.35 : 1 }}
               />
-              {ln.label}
+              {chartSeriesLineLabel(ln)}
             </button>
           );
         })}
@@ -2091,7 +2105,9 @@ function Donut({ data, size = 180, thickness = 26, centerLabel, centerSub, layou
             type="button"
             className="donut__legend-toggle"
             aria-expanded={legendExpanded}
-            title={legendExpanded ? 'Свернуть список' : 'Показать весь список'}
+            title={(typeof GrapesI18n !== 'undefined' && GrapesI18n.t)
+              ? GrapesI18n.t(legendExpanded ? 'chart.legend.collapse' : 'chart.legend.expand')
+              : (legendExpanded ? 'Collapse list' : 'Show full list')}
             onClick={() => setLegendExpanded((v) => !v)}
           >
             <Icon name={legendExpanded ? 'arrowU' : 'arrowD'} size={14} />
@@ -3285,4 +3301,5 @@ Object.assign(window, {
   dataDatetimeLocalToDisplay, displayDatetimeLocalToData,
   fmtBytes, fmtBits, fmtBitsAxis, fmtNum, formatMetric, formatMetricAxis, fmtGbps, fmtMpps, fmtGbTotal, fmtVolumeSize, fmtMpTotal, fmtCompact, fmtTime, fmtAgo,
   formatChartSharePercent,
+  chartSeriesLineLabel,
 });

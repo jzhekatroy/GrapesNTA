@@ -8,14 +8,10 @@ function obsT(key, params) {
   return GrapesI18n.t(key, params);
 }
 
-const LOOKBACK_LABELS_LEGACY = {
-  '15m': '15 минут',
-};
-
 function observationLookbackLabel(v) {
   const key = `period.${v}`;
   if (GrapesI18n.has(key)) return obsT(key);
-  return LOOKBACK_LABELS_LEGACY[v] || v;
+  return v;
 }
 
 function observationLookbackChip(v) {
@@ -424,7 +420,7 @@ function nativeAggregateSummary(item, collectors = [], locations = []) {
     if (scope.vlanIds?.length) {
       parts.push(`VLAN: ${scope.vlanIds.join(', ')}`);
     } else {
-      parts.push('VLAN не выбраны');
+      parts.push(obsT('observations.vlan.noneSelected'));
     }
   }
   return parts.length ? parts.join(' · ') : null;
@@ -517,7 +513,7 @@ function NativeScopeSettings({
           />
         ) : (
           <div style={{ color: 'var(--fg-secondary)', font: 'var(--pv-text-body-3)' }}>
-            Компонент фильтра коллектора недоступен
+            {obsT('observations.collectorFilterUnavailable')}
           </div>
         )}
       </div>
@@ -526,7 +522,7 @@ function NativeScopeSettings({
           <span>VLAN</span>
           <input
             className="input"
-            placeholder="Поиск VLAN"
+            placeholder={obsT('observations.vlan.searchPlaceholder')}
             value={vlanSearch}
             disabled={disabled}
             onChange={(e) => setVlanSearch(e.target.value)}
@@ -535,7 +531,7 @@ function NativeScopeSettings({
             <input
               className="input"
               style={{ width: 120 }}
-              placeholder="ID VLAN"
+              placeholder={obsT('observations.vlan.idPlaceholder')}
               value={manualVlan}
               disabled={disabled}
               onChange={(e) => setManualVlan(e.target.value)}
@@ -552,7 +548,7 @@ function NativeScopeSettings({
           </div>
           {selectedVlanIds.size > 0 && (
             <div style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-secondary)' }}>
-              Выбрано: {[...selectedVlanIds].sort((a, b) => a - b).join(', ')}
+              {obsT('observations.vlan.selected', { ids: [...selectedVlanIds].sort((a, b) => a - b).join(', ') })}
             </div>
           )}
           <div
@@ -567,11 +563,11 @@ function NativeScopeSettings({
             }}
           >
             {vlanLoading && (
-              <div style={{ color: 'var(--fg-secondary)', font: 'var(--pv-text-body-3)' }}>Загрузка VLAN…</div>
+              <div style={{ color: 'var(--fg-secondary)', font: 'var(--pv-text-body-3)' }}>{obsT('observations.vlan.loading')}</div>
             )}
             {!vlanLoading && !filteredVlanRows.length && (
               <div style={{ color: 'var(--fg-secondary)', font: 'var(--pv-text-body-3)' }}>
-                VLAN не найдены — добавьте ID вручную
+                {obsT('observations.vlan.empty')}
               </div>
             )}
             {filteredVlanRows.map((row) => (
@@ -674,10 +670,10 @@ function formatObservationScopeSummary(item, filterFields, groupOptions) {
   const parts = [];
   parts.push(item.filters?.length ? formatFilterSummary(item.filters, filterFields) : obsT('observations.filters.none'));
   const groupSummary = formatGroupSummary(groupByFromWidgets(item.widgets), groupOptions);
-  if (groupSummary) parts.push(`группировка: ${groupSummary}`);
+  if (groupSummary) parts.push(`${obsT('observations.scope.groupPrefix')} ${groupSummary}`);
   if (item.thresholds?.length && window.ExplorerThresholds?.formatThresholdChipLabel) {
     const thr = item.thresholds.slice(0, 2).map((t) => window.ExplorerThresholds.formatThresholdChipLabel(t)).join(' · ');
-    parts.push(`пороги: ${thr}${item.thresholds.length > 2 ? ' …' : ''}`);
+    parts.push(`${obsT('observations.scope.thresholdsPrefix')} ${thr}${item.thresholds.length > 2 ? ' …' : ''}`);
   }
   return parts.join(' · ');
 }
@@ -685,8 +681,8 @@ function formatObservationScopeSummary(item, filterFields, groupOptions) {
 function reportPeriodLabel(item) {
   const tz = item.report?.schedule?.timezone || 'Europe/Moscow';
   return item.report?.period === 'last_24h'
-    ? `последние 24 часа (${tz})`
-    : `вчера, календарные сутки (${tz})`;
+    ? obsT('observations.report.period.last24h', { tz })
+    : obsT('observations.report.period.yesterday', { tz });
 }
 
 /** Live не настраивается: плитка и воркер всегда идут шагом 5 минут. */
@@ -854,7 +850,7 @@ function ObservationChart({
         color: 'var(--fg-secondary)',
         font: 'var(--pv-text-body-3)',
       }}>
-        Нет данных за окно
+        {obsT('observations.noDataForWindow')}
       </div>
     );
   }
@@ -972,9 +968,9 @@ function ObservationChartStats({ points, lines, mode = 'total', metric = 'bps' }
 function observationSeriesCountLabel(count) {
   const n10 = count % 10;
   const n100 = count % 100;
-  if (n10 === 1 && n100 !== 11) return 'серия';
-  if (n10 >= 2 && n10 <= 4 && (n100 < 12 || n100 > 14)) return 'серии';
-  return 'серий';
+  if (n10 === 1 && n100 !== 11) return obsT('observations.series.one');
+  if (n10 >= 2 && n10 <= 4 && (n100 < 12 || n100 > 14)) return obsT('observations.series.few');
+  return obsT('observations.series.many');
 }
 
 function ObservationSeriesFocus({ lines, focusKeys, onToggle, onClear }) {
@@ -982,14 +978,14 @@ function ObservationSeriesFocus({ lines, focusKeys, onToggle, onClear }) {
   const selected = new Set(focusKeys || []);
   const filtering = selected.size > 0;
   return (
-    <div className="obs-tile__legend" role="group" aria-label="Серии графика">
+    <div className="obs-tile__legend" role="group" aria-label={obsT('observations.series.legendAria')}>
       <button
         type="button"
         className={`obs-tile__chip${!filtering ? ' is-active' : ''}`}
         aria-pressed={!filtering}
         onClick={onClear}
       >
-        Все
+        {obsT('observations.series.all')}
       </button>
       {lines.map((ln) => {
         const on = selected.has(ln.key);
@@ -1017,10 +1013,11 @@ function formatObservationAttemptTime(iso, timeZone) {
   if (!Number.isFinite(at.getTime())) return '';
   const opts = { hour: '2-digit', minute: '2-digit' };
   if (timeZone) opts.timeZone = timeZone;
-  const dayKey = (d) => d.toLocaleDateString('ru-RU', timeZone ? { timeZone } : undefined);
-  const time = at.toLocaleTimeString('ru-RU', opts);
+  const locale = GrapesI18n.intlLocale();
+  const dayKey = (d) => d.toLocaleDateString(locale, timeZone ? { timeZone } : undefined);
+  const time = at.toLocaleTimeString(locale, opts);
   if (dayKey(at) === dayKey(new Date())) return time;
-  const date = at.toLocaleDateString('ru-RU', { day: 'numeric', month: 'short', ...(timeZone ? { timeZone } : {}) });
+  const date = at.toLocaleDateString(locale, { day: 'numeric', month: 'short', ...(timeZone ? { timeZone } : {}) });
   return `${date}, ${time}`;
 }
 
@@ -1031,11 +1028,18 @@ function ObservationMaterializeIssue({ issue, displayTimezone, onRetry }) {
     : '';
   let status;
   if (issue.stopped) {
-    status = `Остановлено после ${issue.maxFailCount} ошибок, само не продолжит.`;
+    status = obsT('observations.materialize.stopped', { max: issue.maxFailCount });
   } else if (nextAt) {
-    status = `Ошибок подряд: ${issue.failCount} из ${issue.maxFailCount}. Следующая попытка в ${nextAt}.`;
+    status = obsT('observations.materialize.errorsNextAt', {
+      count: issue.failCount,
+      max: issue.maxFailCount,
+      time: nextAt,
+    });
   } else {
-    status = `Ошибок подряд: ${issue.failCount} из ${issue.maxFailCount}. Повтор на ближайшем цикле.`;
+    status = obsT('observations.materialize.errorsSoon', {
+      count: issue.failCount,
+      max: issue.maxFailCount,
+    });
   }
   const retry = () => {
     if (!onRetry || busy) return;
@@ -1045,12 +1049,12 @@ function ObservationMaterializeIssue({ issue, displayTimezone, onRetry }) {
   return (
     <div className="obs-tile__issue" role="alert">
       <div className="obs-tile__issue-text">
-        <div className="obs-tile__issue-title">Данные не считаются: {issue.reason}</div>
+        <div className="obs-tile__issue-title">{obsT('observations.materialize.notComputing', { reason: issue.reason })}</div>
         <div className="obs-tile__issue-status">{status}</div>
       </div>
       {onRetry && (
         <button type="button" className="btn btn--sm" disabled={busy} onClick={retry}>
-          {busy ? 'Запуск…' : 'Повторить сейчас'}
+          {busy ? obsT('observations.materialize.retrying') : obsT('observations.materialize.retry')}
         </button>
       )}
     </div>
@@ -1060,7 +1064,7 @@ function ObservationMaterializeIssue({ issue, displayTimezone, onRetry }) {
 function LookbackPicker({ value, options, onChange }) {
   const list = options?.length ? options : LOOKBACK_OPTIONS;
   return (
-    <div className="seg obs-tile__lookback" role="group" aria-label="Период графика">
+    <div className="seg obs-tile__lookback" role="group" aria-label={obsT('observations.lookback.aria')}>
       {list.map((v) => (
         <button
           key={v}
@@ -1229,7 +1233,7 @@ function ObservationLiveTile({
         }
       })
       .catch((e) => {
-        if (!cancelled) setRunsError(e.message || 'Не удалось загрузить отчёты');
+        if (!cancelled) setRunsError(e.message || obsT('observations.reports.loadFailed'));
       });
     return () => { cancelled = true; };
   }, [expanded, item.id, updatedAt]);
@@ -1322,13 +1326,22 @@ function ObservationLiveTile({
 
   const verboseMeta = DashboardLog?.isVerbose?.() === true;
   let footerMeta = null;
-  if (loading && !points.length) footerMeta = 'загрузка…';
-  else if (refreshing) footerMeta = 'обновление…';
+  if (loading && !points.length) footerMeta = obsT('observations.tile.loadingMeta');
+  else if (refreshing) footerMeta = obsT('observations.tile.refreshingMeta');
   else if (verboseMeta) {
-    footerMeta = chartMode === 'grouped'
-      ? `${focusLabel ? `${focusKeys.length} ${observationSeriesCountLabel(focusKeys.length)} · ${focusLabel}` : `${lines.length} серий`} · ${points.length} точек · ${periodLabel}${customRange ? ' · zoom' : ''}`
-      : `${points.length} точек · ${periodLabel}${customRange ? ' · zoom' : ''}`;
-    if (updatedAt) footerMeta += ` · ${updatedAt.toLocaleTimeString('ru-RU')}`;
+    const zoom = customRange ? obsT('observations.tile.zoomSuffix') : '';
+    const pointsLabel = obsT('observations.points');
+    const pointsPart = `${points.length} ${pointsLabel}`;
+    if (chartMode === 'grouped') {
+      const seriesCount = focusLabel ? focusKeys.length : lines.length;
+      const seriesPart = focusLabel
+        ? `${seriesCount} ${observationSeriesCountLabel(seriesCount)} · ${focusLabel}`
+        : `${lines.length} ${observationSeriesCountLabel(lines.length)}`;
+      footerMeta = `${seriesPart} · ${pointsPart} · ${periodLabel}${zoom}`;
+    } else {
+      footerMeta = `${pointsPart} · ${periodLabel}${zoom}`;
+    }
+    if (updatedAt) footerMeta += ` · ${updatedAt.toLocaleTimeString(GrapesI18n.intlLocale())}`;
   }
 
   return (
@@ -1365,7 +1378,7 @@ function ObservationLiveTile({
               type="button"
               className="obs-tile__filter-link"
               onClick={openInExplorer}
-              title="Открыть в разборе трафика"
+              title={obsT('observations.tile.openInExplorer')}
             >
               <span className="obs-tile__filter-scope">
                 <span className="obs-tile__filter-scope-label">{obsT('observations.filters')}:</span>
@@ -1434,8 +1447,8 @@ function ObservationLiveTile({
             <button
               type="button"
               className="obs-tile__icon tt"
-              data-tt="Отменить подготовку"
-              aria-label="Отменить подготовку"
+              data-tt={obsT('observations.tile.cancelMaterialize')}
+              aria-label={obsT('observations.tile.cancelMaterialize')}
               onClick={onCancel}
             >
               <Icon name="x" size={15} />
@@ -1520,11 +1533,11 @@ function ObservationLiveTile({
             <button
               type="button"
               className="time-pill time-pill--reset"
-              title="Вернуть предыдущий период"
+              title={obsT('observations.tile.resetPeriod')}
               onClick={resetTileZoom}
             >
               <Icon name="zoom" size={14} />
-              <span>Сброс</span>
+              <span>{obsT('observations.tile.reset')}</span>
             </button>
           )}
           {chartMode === 'grouped' && lines.length > 1 && (
@@ -1546,18 +1559,18 @@ function ObservationLiveTile({
           <div className="seg" style={{ width: 'fit-content', marginBottom: 10 }}>
             {showTopTab && (
               <button type="button" className={expandedTab === 'top' ? 'is-active' : ''} onClick={() => setExpandedTab('top')}>
-                Топ
+                {obsT('observations.tab.top')}
               </button>
             )}
             <button type="button" className={expandedTab === 'reports' ? 'is-active' : ''} onClick={() => setExpandedTab('reports')}>
-              Отчёты
+              {obsT('observations.tab.reports')}
             </button>
           </div>
 
           {expandedTab === 'top' && showTopTab && (
             <>
               <div style={{ font: 'var(--pv-text-body-2-bold)', marginBottom: 8 }}>
-                Разбивка: топ по {topLabel} ({tableMetricUnit} за {periodLabel})
+                {obsT('observations.top.breakdown', { label: topLabel, unit: tableMetricUnit, period: periodLabel })}
               </div>
               {Array.isArray(topWidget?.rows) && topWidget.rows.length > 0 ? (
                 <table style={{ width: '100%', borderCollapse: 'collapse', font: 'var(--pv-text-body-3)' }}>
@@ -1605,7 +1618,7 @@ function ObservationLiveTile({
                   </tbody>
                 </table>
               ) : (
-                <div style={{ color: 'var(--fg-secondary)', font: 'var(--pv-text-body-3)' }}>Нет строк топа</div>
+                <div style={{ color: 'var(--fg-secondary)', font: 'var(--pv-text-body-3)' }}>{obsT('observations.top.empty')}</div>
               )}
             </>
           )}
@@ -1613,7 +1626,7 @@ function ObservationLiveTile({
           {expandedTab === 'reports' && (
             <div className="col" style={{ gap: 8 }}>
               <div className="row" style={{ justifyContent: 'space-between', gap: 8, flexWrap: 'wrap' }}>
-                <div style={{ font: 'var(--pv-text-body-2-bold)' }}>История запусков</div>
+                <div style={{ font: 'var(--pv-text-body-2-bold)' }}>{obsT('observations.reports.history')}</div>
                 {canEdit && (
                   <button
                     type="button"
@@ -1624,26 +1637,26 @@ function ObservationLiveTile({
                         .catch((e) => setRunsError(e.message));
                     }}
                   >
-                    Сформировать отчёт
+                    {obsT('observations.reports.generate')}
                   </button>
                 )}
               </div>
               <div style={{ color: 'var(--fg-secondary)', font: 'var(--pv-text-body-3)' }}>
-                {`Отчёт за: ${reportPeriodLabel(item)} — период берётся из настроек отчёта, а не из time range плитки.`}
+                {obsT('observations.reports.periodHint', { period: reportPeriodLabel(item) })}
               </div>
               {runsError && <div style={{ color: 'var(--st-critical)', font: 'var(--pv-text-body-3)' }}>{runsError}</div>}
               {!runs.length && !runsError && (
-                <div style={{ color: 'var(--fg-secondary)', font: 'var(--pv-text-body-3)' }}>Пока нет запусков</div>
+                <div style={{ color: 'var(--fg-secondary)', font: 'var(--pv-text-body-3)' }}>{obsT('observations.reports.empty')}</div>
               )}
               {!!runs.length && (
                 <table style={{ width: '100%', borderCollapse: 'collapse', font: 'var(--pv-text-body-3)' }}>
                   <thead>
                     <tr>
-                      <th style={{ textAlign: 'left', padding: 4 }}>Когда</th>
-                      <th style={{ textAlign: 'left', padding: 4 }}>Период</th>
-                      <th style={{ textAlign: 'left', padding: 4 }}>Статус</th>
-                      <th style={{ textAlign: 'left', padding: 4 }}>Письмо</th>
-                      <th style={{ textAlign: 'left', padding: 4 }}>Файлы</th>
+                      <th style={{ textAlign: 'left', padding: 4 }}>{obsT('observations.reports.col.when')}</th>
+                      <th style={{ textAlign: 'left', padding: 4 }}>{obsT('observations.reports.col.period')}</th>
+                      <th style={{ textAlign: 'left', padding: 4 }}>{obsT('observations.reports.col.status')}</th>
+                      <th style={{ textAlign: 'left', padding: 4 }}>{obsT('observations.reports.col.email')}</th>
+                      <th style={{ textAlign: 'left', padding: 4 }}>{obsT('observations.reports.col.files')}</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -1657,10 +1670,14 @@ function ObservationLiveTile({
                           {run.emailError ? ` (${run.emailError})` : ''}
                         </td>
                         <td style={{ padding: 4 }}>
-                          <a href={ApiClient.observationRunArtifactUrl(item.id, run.id, 'report.html')} target="_blank" rel="noreferrer">сводка</a>
+                          <a href={ApiClient.observationRunArtifactUrl(item.id, run.id, 'report.html')} target="_blank" rel="noreferrer">{obsT('observations.reports.artifact.summary')}</a>
                           {(run.tables || []).map((t) => {
                             const label = t.label
-                              || (t.type === 'timeseries_bps' ? 'График' : t.type === 'top_table' ? 'Топ' : t.file);
+                              || (t.type === 'timeseries_bps'
+                                ? obsT('observations.reports.artifact.chart')
+                                : t.type === 'top_table'
+                                  ? obsT('observations.reports.artifact.top')
+                                  : t.file);
                             return (
                               <span key={t.file}>
                                 {' · '}
@@ -1688,7 +1705,7 @@ function ObservationLiveTile({
 function fmtDiagTime(iso) {
   if (!iso) return '—';
   try {
-    return new Date(iso).toLocaleString('ru-RU');
+    return new Date(iso).toLocaleString(GrapesI18n.intlLocale());
   } catch {
     return String(iso);
   }
@@ -2545,13 +2562,13 @@ function PageObservations({
   const saveSettings = async () => {
     if (!settingsCanEdit || !settingsItemId || !settings) return;
     if (settingsItem?.canEdit === false) {
-      setError('Нет прав на изменение этого наблюдения');
+      setError(obsT('observations.err.noEditRights'));
       return;
     }
     if (settingsIsNative && chartWidgetDataSource(settings.widgets) === 'vlan_trend') {
       const scope = chartWidgetNativeScope(settings.widgets);
       if (!scope.vlanIds?.length) {
-        setError('Выберите хотя бы один VLAN');
+        setError(obsT('observations.err.vlanRequired'));
         return;
       }
     }
@@ -2578,7 +2595,10 @@ function PageObservations({
     } catch (e) {
       const occupants = e.occupants || e.body?.occupants;
       if (occupants?.length) {
-        setError(`${e.message} Занято: ${occupants.map((o) => o.name).join(', ')}`);
+        setError(obsT('observations.err.slotOccupied', {
+          message: e.message,
+          names: occupants.map((o) => o.name).join(', '),
+        }));
       } else {
         setError(e.message);
       }
@@ -2605,7 +2625,7 @@ function PageObservations({
       }
       await reload();
     } catch (e) {
-      setError(e.message || 'Не удалось удалить наблюдение');
+      setError(e.message || obsT('observations.err.deleteFailed'));
     }
   };
 
@@ -2698,7 +2718,7 @@ function PageObservations({
               ) : null}
               {settings.thresholds?.length && window.ExplorerThresholds?.formatThresholdChipLabel ? (
                 <div>
-                  Пороги:{' '}
+                  {obsT('observations.settings.thresholds')}{' '}
                   {settings.thresholds.slice(0, 2).map((t) => window.ExplorerThresholds.formatThresholdChipLabel(t)).join(' · ')}
                   {settings.thresholds.length > 2 ? ' …' : ''}
                 </div>
@@ -2725,7 +2745,7 @@ function PageObservations({
               >
                 {settingsItem.canEdit
                   ? obsT('observations.settings.changeFilters')
-                  : 'Скопировать фильтры в разбор трафика'}
+                  : obsT('observations.settings.copyFilters')}
               </button>
             )}
             {settingsIsNative && (
@@ -2797,7 +2817,7 @@ function PageObservations({
             {!isCabinetLike && settings.report.enabled && (
               <div className="col" style={{ gap: 8, marginLeft: 24 }}>
                 <label className="row" style={{ gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-                  за период
+                  {obsT('observations.report.forPeriod')}
                   <select
                     className="input"
                     style={{ width: 160 }}
@@ -2807,12 +2827,12 @@ function PageObservations({
                       report: { ...settings.report, period: e.target.value },
                     })}
                   >
-                    <option value="yesterday">вчера</option>
-                    <option value="last_24h">последние 24 часа</option>
+                    <option value="yesterday">{obsT('observations.report.periodOption.yesterday')}</option>
+                    <option value="last_24h">{obsT('observations.report.periodOption.last24h')}</option>
                   </select>
                 </label>
                 <label className="row" style={{ gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-                  расписание
+                  {obsT('observations.report.schedule')}
                   <select
                     className="input"
                     style={{ width: 140 }}
@@ -2825,11 +2845,11 @@ function PageObservations({
                       },
                     })}
                   >
-                    <option value="daily">ежедневно</option>
-                    <option value="weekly">еженедельно</option>
-                    <option value="monthly">ежемесячно</option>
+                    <option value="daily">{obsT('observations.report.schedule.daily')}</option>
+                    <option value="weekly">{obsT('observations.report.schedule.weekly')}</option>
+                    <option value="monthly">{obsT('observations.report.schedule.monthly')}</option>
                   </select>
-                  в
+                  {obsT('observations.report.at')}
                   <input
                     className="input"
                     style={{ width: 90 }}
@@ -2855,7 +2875,7 @@ function PageObservations({
                 </label>
                 {(settings.report.schedule?.kind || 'daily') === 'weekly' && (
                   <label className="row" style={{ gap: 8, alignItems: 'center' }}>
-                    день недели (1=пн)
+                    {obsT('observations.report.weekday')}
                     <input
                       className="input"
                       style={{ width: 70 }}
@@ -2875,7 +2895,7 @@ function PageObservations({
                 )}
                 {(settings.report.schedule?.kind || 'daily') === 'monthly' && (
                   <label className="row" style={{ gap: 8, alignItems: 'center' }}>
-                    число месяца
+                    {obsT('observations.report.dayOfMonth')}
                     <input
                       className="input"
                       style={{ width: 70 }}
@@ -2894,7 +2914,7 @@ function PageObservations({
                   </label>
                 )}
                 <label className="col" style={{ gap: 4 }}>
-                  <span>Email (через запятую, до 10)</span>
+                  <span>{obsT('observations.report.emailTo')}</span>
                   <input
                     className="input"
                     value={(settings.report.emailTo || []).join(', ')}
@@ -3089,16 +3109,20 @@ function PageObservations({
                 onDelete={() => removeItem(item.id)}
                 onCancel={!isCabinetLike ? () => obsApi.cancelMaterialize(item.id)
                   .then(() => reload())
-                  .then(() => pushToast?.({ kind: 'success', title: 'Подготовка отменена' }))
+                  .then(() => pushToast?.({ kind: 'success', title: obsT('observations.toast.materializeCanceled') }))
                   .catch((e) => setError(e.message)) : undefined}
                 onRetry={() => obsApi.retry(item.id)
                   .then(() => reload())
-                  .then(() => pushToast?.({ kind: 'success', title: 'Перезапущено', desc: 'Воркер возьмёт наблюдение в течение минуты' }))
+                  .then(() => pushToast?.({
+                    kind: 'success',
+                    title: obsT('observations.toast.restarted'),
+                    desc: obsT('observations.toast.restartedDesc'),
+                  }))
                   .catch((e) => setError(e.message))}
                 onLookbackChange={changeTileLookback}
                 onChartStyleChange={changeTileChartStyle}
                 onRunReport={!isCabinetLike ? () => ApiClient.runObservationReport(item.id)
-                  .then(() => pushToast?.({ kind: 'success', title: 'Отчёт сформирован' }))
+                  .then(() => pushToast?.({ kind: 'success', title: obsT('observations.toast.reportGenerated') }))
                   .catch((e) => setError(e.message)) : undefined}
                 previewFn={obsApi.preview}
                 hideReports={isCabinetLike}

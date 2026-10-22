@@ -4,6 +4,12 @@ function versionsT(key, params) {
   return GrapesI18n.t(key, params);
 }
 
+function versionsComponentLabel(componentId, fallbackTitle) {
+  const key = `versionsPage.component.${componentId}`;
+  if (GrapesI18n.has(key)) return versionsT(key);
+  return fallbackTitle || componentId;
+}
+
 function PageVersions({ displayTimezone }) {
   const [payload, setPayload] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -53,7 +59,7 @@ function PageVersions({ displayTimezone }) {
       sortable: false,
       render: (r) => (
         <div className="col" style={{ gap: 2 }}>
-          <span style={{ font: 'var(--pv-text-body-3-bold)' }}>{r.title}</span>
+          <span style={{ font: 'var(--pv-text-body-3-bold)' }}>{versionsComponentLabel(r.id, r.title)}</span>
           <span style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-muted)' }}>{r.id}</span>
         </div>
       ),
