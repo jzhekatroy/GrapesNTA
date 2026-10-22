@@ -5,11 +5,17 @@ const net = require('net');
 const SOURCE_TAG = 'erp:piter_ix';
 const CATEGORY = 'piter_ix';
 
+const PITER_IX_GROUPS = [
+  { id: '710', label: '710 PiterIX' },
+  { id: '726', label: '726 Transroute' },
+];
+
 const CATEGORIES = [
   {
     id: 'piter_ix',
     label: 'PiterIX / Transroute',
     rule: 'группа биллинга 710 (PiterIX) или 726 (Transroute)',
+    groups: PITER_IX_GROUPS,
   },
   {
     id: 'dc',
@@ -25,6 +31,35 @@ const CATEGORIES = [
 
 function sourceTagFor(categoryId) {
   return `erp:${String(categoryId || CATEGORY)}`;
+}
+
+function billingGroupId(client) {
+  const raw = client?.billing_group_id ?? client?.billing_group ?? client?.group_id;
+  const value = raw && typeof raw === 'object' ? (raw.id ?? raw.code ?? '') : raw;
+  const text = value == null ? '' : String(value).trim();
+  return text === '710' || text === '726' ? text : '';
+}
+
+// Обе группы — это сегодняшний ответ by-category/piter_ix, в нём номера группы нет.
+// Одну группу можно оставить только если ERP прислал 710 или 726 на клиенте.
+// Иначе прогон останавливается до записи, чтобы полный прогон не снял чужие ЛС.
+function filterClientsByPiterIxGroups(clients, groupIds) {
+  const list = Array.isArray(clients) ? clients : [];
+  const known = PITER_IX_GROUPS.map((group) => group.id);
+  const selected = [...new Set((groupIds || []).map((id) => String(id)))].filter((id) => known.includes(id));
+  if (!selected.length) {
+    const err = new Error('Для piter_ix выберите группу 710, 726 или обе');
+    err.statusCode = 400;
+    throw err;
+  }
+  if (known.every((id) => selected.includes(id))) return list;
+  const missing = list.filter((client) => !billingGroupId(client)).length;
+  if (missing) {
+    const err = new Error('ERP не присылает группу биллинга, поэтому одну группу из piter_ix отобрать нельзя. Прогон остановлен до изменений.');
+    err.statusCode = 400;
+    throw err;
+  }
+  return list.filter((client) => selected.includes(billingGroupId(client)));
 }
 
 // Binding by ports only ever looks at switch.host + switch.port, so whether the
@@ -262,6 +297,137 @@ function prefixesToDisable(currentPrefixes, desiredPrefixes, disabledClientIds =
   return out;
 }
 
+function normalizeMacHex(value) {
+  const hex = String(value ?? '').toLowerCase().replace(/[^0-9a-f]/g, '');
+  return hex.length === 12 ? hex : '';
+}
+
+function formatMac(hex) {
+  const raw = normalizeMacHex(hex);
+  return raw ? raw.match(/.{2}/g).join(':') : '';
+}
+
+// MAC только с записей ERP, где есть коммутатор и порт, и этот порт синхронизация
+// приняла. Один и тот же MAC на одном порту у нескольких ЛС не записывается.
+function collectIxPortMacs(clients, acceptedPorts) {
+  const accepted = acceptedPorts instanceof Set ? acceptedPorts : new Set(acceptedPorts || []);
+  const groups = new Map();
+  for (const client of clients || []) {
+    if (!isActive(client)) continue;
+    const account = String(client.basic_account ?? '').trim();
+    if (!account) continue;
+    for (const ip of client.ips || []) {
+      const sw = ip.switch && typeof ip.switch === 'object' ? ip.switch : null;
+      if (!sw) continue;
+      const switchIp = String(sw.host || '').trim();
+      const ifIndex = Number(sw.port);
+      if (!switchIp || !Number.isInteger(ifIndex) || ifIndex <= 0) continue;
+      if (!accepted.has(`${account}|${switchIp}|${ifIndex}`)) continue;
+      const mac = normalizeMacHex(ip.mac);
+      if (!mac) continue;
+      const key = `${switchIp}|${ifIndex}|${mac}`;
+      let group = groups.get(key);
+      if (!group) {
+        group = { switchIp, ifIndex, mac, accounts: new Set() };
+        groups.set(key, group);
+      }
+      group.accounts.add(account);
+    }
+  }
+  const bindings = [];
+  const ambiguous = [];
+  for (const group of groups.values()) {
+    const accounts = [...group.accounts].sort();
+    if (accounts.length > 1) {
+      ambiguous.push({ ...group, accounts });
+      continue;
+    }
+    bindings.push({
+      client_id: accounts[0],
+      switch_ip: group.switchIp,
+      if_index: group.ifIndex,
+      mac: group.mac,
+    });
+  }
+  return { bindings, ambiguous };
+}
+
+function clientsWithoutPortMac(labelable, bindings) {
+  const withMac = new Set((bindings || []).map((row) => String(row.client_id)));
+  return (labelable || [])
+    .filter((client) => !withMac.has(String(client.clientId)))
+    .map((client) => ({
+      clientId: String(client.clientId),
+      displayName: String(client.displayName || ''),
+      ports: (client.ports || []).map((port) => ({
+        switchIp: port.switchIp,
+        ifIndex: port.ifIndex,
+      })),
+    }));
+}
+
+function classifyObservedPortMacs(observed, bindings, portOwners) {
+  const owners = portOwners instanceof Map ? portOwners : new Map(portOwners || []);
+  const onPort = new Map();
+  const macClients = new Map();
+  for (const row of bindings || []) {
+    const mac = normalizeMacHex(row.mac);
+    onPort.set(`${row.switch_ip}|${Number(row.if_index)}|${mac}`, String(row.client_id));
+    if (!macClients.has(mac)) macClients.set(mac, new Set());
+    macClients.get(mac).add(String(row.client_id));
+  }
+  const foreign = [];
+  const unlisted = [];
+  for (const row of observed || []) {
+    const switchIp = String(row.switch_ip || row.switchIp || '').trim();
+    const ifIndex = Number(row.if_index ?? row.ifIndex);
+    const mac = normalizeMacHex(row.mac);
+    if (!switchIp || !ifIndex || !mac) continue;
+    const owner = owners.get(`${switchIp}|${ifIndex}`);
+    if (!owner) continue;
+    if (onPort.get(`${switchIp}|${ifIndex}|${mac}`) === owner) continue;
+    const others = macClients.get(mac);
+    const item = {
+      switchIp,
+      ifIndex,
+      mac,
+      owner,
+      bytes: Number(row.bytes) || 0,
+      accounts: others ? [...others] : [],
+    };
+    if (others && [...others].some((id) => id !== owner)) foreign.push(item);
+    else unlisted.push(item);
+  }
+  return { foreign, unlisted };
+}
+
+// Строка таблицы — это (коммутатор, порт, MAC). Если тот же MAC на порту
+// теперь у другого ЛС, отключающая строка с тем же ключом и тем же updated_at
+// затёрла бы новую привязку, поэтому такие ключи не отключаем.
+function portMacsToDisable(currentRows, desiredRows) {
+  const desired = new Set(
+    (desiredRows || [])
+      .filter((row) => row.enabled !== 0)
+      .map((row) => `${row.switch_ip}|${Number(row.if_index)}|${normalizeMacHex(row.mac)}`),
+  );
+  const out = [];
+  const seen = new Set();
+  for (const row of currentRows || []) {
+    const clientId = String(row.client_id || '');
+    const mac = normalizeMacHex(row.mac);
+    const key = `${row.switch_ip}|${Number(row.if_index)}|${mac}`;
+    if (!clientId || seen.has(key) || desired.has(key)) continue;
+    seen.add(key);
+    out.push({
+      client_id: clientId,
+      switch_ip: String(row.switch_ip || ''),
+      if_index: Number(row.if_index) || 0,
+      mac,
+    });
+  }
+  return out;
+}
+
 function portsToDisable(currentPorts, desiredPorts, disabledClientIds = []) {
   const desired = new Set(
     (desiredPorts || []).map((p) => `${p.client_id}|${p.switch_ip}|${p.if_index}`),
@@ -306,7 +472,10 @@ module.exports = {
   SOURCE_TAG,
   CATEGORY,
   CATEGORIES,
+  PITER_IX_GROUPS,
   sourceTagFor,
+  billingGroupId,
+  filterClientsByPiterIxGroups,
   REASON,
   normalizeBindMode,
   isActive,
@@ -319,5 +488,11 @@ module.exports = {
   clientsToDisable,
   portsToDisable,
   prefixesToDisable,
+  normalizeMacHex,
+  formatMac,
+  collectIxPortMacs,
+  clientsWithoutPortMac,
+  classifyObservedPortMacs,
+  portMacsToDisable,
   summarizeSkipped,
 };

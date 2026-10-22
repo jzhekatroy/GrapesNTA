@@ -207,3 +207,130 @@ test('portsToDisable снимает старый порт и порты откл
   assert.equal(dropped.length, 2);
   assert.deepEqual(dropped.map((p) => `${p.client_id}:${p.if_index}`).sort(), ['1:10', '9:1']);
 });
+
+test('включённый piter_ix без сохранённых групп означает обе галки', () => {
+  const { mapSettings } = require('./erp-piterix-settings');
+  const fresh = mapSettings({});
+  assert.deepEqual(fresh.piterIxGroups, { 710: true, 726: true });
+  const off = mapSettings({ cat_piter_ix: 0 });
+  assert.deepEqual(off.piterIxGroups, { 710: false, 726: false });
+  const onlyIx = mapSettings({ cat_piter_ix: 1, piter_ix_g710: 1, piter_ix_g726: 0 });
+  assert.deepEqual(onlyIx.piterIxGroups, { 710: true, 726: false });
+});
+
+test('обе группы piter_ix не отбрасывают клиентов без номера группы', () => {
+  const { filterClientsByPiterIxGroups } = require('./erp-piterix-sync');
+  const clients = [{ basic_account: 1 }, { basic_account: 2, billing_group_id: 710 }];
+  assert.equal(filterClientsByPiterIxGroups(clients, ['710', '726']).length, 2);
+});
+
+test('одна группа piter_ix берёт только клиентов с этим номером', () => {
+  const { filterClientsByPiterIxGroups } = require('./erp-piterix-sync');
+  const clients = [
+    { basic_account: 1, billing_group_id: 710 },
+    { basic_account: 2, billing_group: { id: 726 } },
+    { basic_account: 3, group_id: '710' },
+  ];
+  const kept = filterClientsByPiterIxGroups(clients, ['710']);
+  assert.deepEqual(kept.map((c) => c.basic_account), [1, 3]);
+});
+
+test('одна группа без номера в ответе ERP останавливает прогон', () => {
+  const { filterClientsByPiterIxGroups } = require('./erp-piterix-sync');
+  assert.throws(
+    () => filterClientsByPiterIxGroups([{ basic_account: 1 }], ['726']),
+    /не присылает группу биллинга/,
+  );
+});
+
+test('IX MAC берётся только с принятого порта и не пишется, если ЛС несколько', () => {
+  const { collectIxPortMacs, clientsWithoutPortMac, classifyObservedPortMacs } = require('./erp-piterix-sync');
+  const clients = [
+    {
+      basic_account: '1',
+      int_status: 1,
+      block: { is_blocked: false },
+      ips: [
+        { mac: 'AA:BB:CC:DD:EE:01', switch: { host: '172.18.19.1', port: 10 } },
+        { mac: 'AA:BB:CC:DD:EE:09' },
+      ],
+    },
+    {
+      basic_account: '2',
+      int_status: 1,
+      block: { is_blocked: false },
+      ips: [{ mac: 'aa-bb-cc-dd-ee-01', switch: { host: '172.18.19.1', port: 10 } }],
+    },
+    {
+      basic_account: '3',
+      int_status: 1,
+      block: { is_blocked: false },
+      ips: [{ mac: '001122334455', switch: { host: '172.18.19.1', port: 11 } }],
+    },
+  ];
+  const accepted = new Set(['1|172.18.19.1|10', '2|172.18.19.1|10', '3|172.18.19.1|11']);
+  const planned = collectIxPortMacs(clients, accepted);
+  assert.equal(planned.bindings.length, 1);
+  assert.equal(planned.bindings[0].client_id, '3');
+  assert.equal(planned.bindings[0].mac, '001122334455');
+  assert.equal(planned.ambiguous.length, 1);
+  assert.deepEqual(planned.ambiguous[0].accounts, ['1', '2']);
+
+  const missing = clientsWithoutPortMac([
+    { clientId: '1', displayName: 'A', ports: [{ switchIp: '172.18.19.1', ifIndex: 10 }] },
+    { clientId: '3', displayName: 'C', ports: [{ switchIp: '172.18.19.1', ifIndex: 11 }] },
+  ], planned.bindings);
+  assert.deepEqual(missing.map((row) => row.clientId), ['1']);
+
+  const owners = new Map([['172.18.19.1|11', '3']]);
+  const bindings = [
+    ...planned.bindings,
+    { client_id: '8', switch_ip: '172.18.19.1', if_index: 20, mac: 'aabbccddee08' },
+  ];
+  const seen = classifyObservedPortMacs([
+    { switch_ip: '172.18.19.1', if_index: 11, mac: '00:11:22:33:44:55', bytes: 2e6 },
+    { switch_ip: '172.18.19.1', if_index: 11, mac: 'aabbccddee08', bytes: 3e6 },
+    { switch_ip: '172.18.19.1', if_index: 11, mac: 'ffffffffffff', bytes: 4e6 },
+    { switch_ip: '172.18.19.9', if_index: 1, mac: 'ffffffffffff', bytes: 9e6 },
+  ], bindings, owners);
+  assert.equal(seen.foreign.length, 1);
+  assert.equal(seen.foreign[0].owner, '3');
+  assert.deepEqual(seen.foreign[0].accounts, ['8']);
+  assert.equal(seen.unlisted.length, 1);
+  assert.equal(seen.unlisted[0].mac, 'ffffffffffff');
+});
+
+test('MAC, перешедший на порту к другому ЛС, не отключается поверх новой привязки', () => {
+  const { portMacsToDisable } = require('./erp-piterix-sync');
+  const dropped = portMacsToDisable(
+    [
+      { client_id: '1', switch_ip: '172.18.19.1', if_index: 10, mac: 'aabbccddee01' },
+      { client_id: '1', switch_ip: '172.18.19.1', if_index: 10, mac: 'aabbccddee02' },
+    ],
+    [{ client_id: '2', switch_ip: '172.18.19.1', if_index: 10, mac: 'aabbccddee01', enabled: 1 }],
+  );
+  assert.deepEqual(dropped.map((row) => row.mac), ['aabbccddee02']);
+});
+
+test('отчёт IX пишет ошибку про пустой MAC только при включённой галке', () => {
+  const { buildReportRows } = require('./erp-piterix-report');
+  const ix = {
+    macOnPort: false,
+    noMac: [{ clientId: '19', displayName: 'Без MAC', ports: [{ switchIp: '172.18.19.1', ifIndex: 8 }] }],
+    ambiguous: [{ accounts: ['1', '2'], switchIp: '172.18.19.1', ifIndex: 10, mac: 'aabbccddee01' }],
+    foreign: [{ owner: '3', switchIp: '172.18.19.1', ifIndex: 11, mac: 'aabbccddee01', accounts: ['1'], bytes: 10 }],
+    unlisted: [{ owner: '3', switchIp: '172.18.19.1', ifIndex: 11, mac: 'ffffffffffff', bytes: 10 }],
+    note: '',
+  };
+  const off = buildReportRows({ clients: [], ix, bindMode: 'ports' });
+  assert.equal(off.some((row) => row.section === 'IX: MAC на нескольких ЛС'), true);
+  assert.equal(off.some((row) => row.section === 'IX: нет MAC'), false);
+  assert.equal(off.some((row) => row.section === 'IX: чужой MAC'), false);
+  const on = buildReportRows({ clients: [], ix: { ...ix, macOnPort: true, note: 'учёт IX включён, но ни один VLAN не отмечен как IX' }, bindMode: 'ports' });
+  assert.equal(on.filter((row) => row.section === 'IX: нет MAC').length, 1);
+  assert.equal(on.some((row) => row.section === 'IX: чужой MAC'), true);
+  assert.equal(on.some((row) => row.section === 'IX: MAC нет в ERP'), true);
+  assert.equal(on.some((row) => row.section === 'IX' && /VLAN/.test(row.reason)), true);
+  assert.equal(on.find((row) => row.section === 'IX: нет MAC').macs, '');
+  assert.match(on.find((row) => row.section === 'IX: чужой MAC').macs, /aa:bb:cc:dd:ee:01/);
+});

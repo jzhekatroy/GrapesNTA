@@ -593,6 +593,70 @@ function cabinetServiceDonutItems(rows, totalBytes) {
   }));
 }
 
+function cabinetByteLabel(value) {
+  return typeof fmtBytes === 'function' ? fmtBytes(value) : String(value || 0);
+}
+
+function OverviewIxLocationsCard({ rows, open, onToggle, loading, failed, error }) {
+  const list = Array.isArray(rows) ? rows : [];
+  return (
+    <Card pad="sm" className="grid--mb">
+      <div className="distribution-card__head">
+        <div>
+          <div className="distribution-card__title">{dashT('cabinet.locations.title')}</div>
+          <div style={{ color: 'var(--fg-secondary)', font: 'var(--pv-text-body-3)' }}>
+            {dashT('cabinet.locations.hint')}
+          </div>
+        </div>
+      </div>
+      {failed ? <DataLoadState>{error || dashT('dashboard.loadFailed')}</DataLoadState> : null}
+      {!failed && loading && !list.length ? <DataLoadState>{dashT('dashboard.loading')}</DataLoadState> : null}
+      {!failed && !loading && !list.length ? (
+        <DataLoadState>{dashT('cabinet.locations.empty')}</DataLoadState>
+      ) : null}
+      {list.length ? (
+        <table className="table" style={{ width: '100%', marginTop: 8 }}>
+          <thead>
+            <tr>
+              <th>{dashT('cabinet.locations.title')}</th>
+              <th className="num">{dashT('cabinet.locations.toYou')}</th>
+              <th className="num">{dashT('cabinet.locations.fromYou')}</th>
+              <th className="num">{dashT('cabinet.locations.vlans')}</th>
+            </tr>
+          </thead>
+          <tbody>
+            {list.map((row) => {
+              const expanded = open.has(row.location);
+              return (
+                <React.Fragment key={row.location}>
+                  <tr>
+                    <td>
+                      <button type="button" className="btn btn--ghost btn--sm" onClick={() => onToggle(row.location)}>
+                        {expanded ? '▾' : '▸'} {row.location}
+                      </button>
+                    </td>
+                    <td className="num mono">{cabinetByteLabel(row.inBytes)}</td>
+                    <td className="num mono">{cabinetByteLabel(row.outBytes)}</td>
+                    <td className="num">{(row.vlans || []).length}</td>
+                  </tr>
+                  {expanded ? (row.vlans || []).map((vlan) => (
+                    <tr key={`${row.location}-${vlan.vlanId}`}>
+                      <td style={{ paddingLeft: 28 }}>VLAN {vlan.vlanId}</td>
+                      <td className="num mono">{cabinetByteLabel(vlan.inBytes)}</td>
+                      <td className="num mono">{cabinetByteLabel(vlan.outBytes)}</td>
+                      <td />
+                    </tr>
+                  )) : null}
+                </React.Fragment>
+              );
+            })}
+          </tbody>
+        </table>
+      ) : null}
+    </Card>
+  );
+}
+
 function CabinetDashboard({ onNavigate, timeRange, customPeriod, displayTimezone, onChartRangeSelect }) {
   const i18nLocale = GrapesI18n.getLocale();
   const periodLabel = timeRangeLabel(timeRange, customPeriod);
@@ -605,6 +669,8 @@ function CabinetDashboard({ onNavigate, timeRange, customPeriod, displayTimezone
   const [series, setSeries] = useState({ source: 'loading', data: [], meta: null });
   const [stats, setStats] = useState({ source: 'loading', data: null, meta: null });
   const [countries, setCountries] = useState({ source: 'loading', data: [], meta: null });
+  const [locations, setLocations] = useState({ source: 'loading', data: [], meta: null });
+  const [openLocations, setOpenLocations] = useState(() => new Set());
   const [services, setServices] = useState({ source: 'loading', data: [], meta: null });
   const [recent, setRecent] = useState({ source: 'loading', data: [], meta: null });
   const [countryDirection, setCountryDirection] = useState('in');
@@ -624,6 +690,23 @@ function CabinetDashboard({ onNavigate, timeRange, customPeriod, displayTimezone
       if (cancelled) return;
       setSeries(cabinetOverviewState(seriesResult, []));
       setStats(cabinetOverviewState(statsResult, null));
+    });
+    return () => { cancelled = true; };
+  }, [periodKey]);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLocations((prev) => ({
+      source: 'loading',
+      data: prev.data || [],
+      meta: prev.meta,
+      error: '',
+      status: 0,
+      loadMs: null,
+      serverMs: null,
+    }));
+    ApiClient.loadCabinetOverviewLocations({ timeRange, customPeriod }).then((result) => {
+      if (!cancelled) setLocations(cabinetOverviewState(result, []));
     });
     return () => { cancelled = true; };
   }, [periodKey]);
@@ -767,6 +850,24 @@ function CabinetDashboard({ onNavigate, timeRange, customPeriod, displayTimezone
           </div>
         </Card>
       </DashboardChartRow>
+
+      {locations.meta?.enabled ? (
+        <OverviewIxLocationsCard
+          rows={locations.data}
+          open={openLocations}
+          onToggle={(location) => {
+            setOpenLocations((prev) => {
+              const next = new Set(prev);
+              if (next.has(location)) next.delete(location);
+              else next.add(location);
+              return next;
+            });
+          }}
+          loading={locations.source === 'loading'}
+          failed={locations.source === 'error' || !!locations.meta?.error}
+          error={locations.error || locations.meta?.error}
+        />
+      ) : null}
 
       <div className="grid grid--1col grid--mb">
         <OverviewCountryCard

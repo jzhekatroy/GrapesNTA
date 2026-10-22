@@ -8,11 +8,15 @@ CREATE TABLE IF NOT EXISTS default.app_erp_sync_settings
     `cat_piter_ix` UInt8 DEFAULT 1,
     `cat_dc` UInt8 DEFAULT 0,
     `cat_bb` UInt8 DEFAULT 0,
+    `piter_ix_g710` UInt8 DEFAULT 1,
+    `piter_ix_g726` UInt8 DEFAULT 1,
     `api_base` String DEFAULT 'https://erp.bth.su',
     `api_host` String DEFAULT 'erp.bth.su',
     `api_token` String DEFAULT 'aBZFW5bH1tG80pxqon5S0noQXBX1wni0',
     `api_insecure` UInt8 DEFAULT 1,
     `bind_mode` LowCardinality(String) DEFAULT 'ports',
+    `ix_enabled` UInt8 DEFAULT 0,
+    `ix_mac_on_port` UInt8 DEFAULT 0,
     `updated_at` DateTime DEFAULT now()
 )
 ENGINE = ReplacingMergeTree(updated_at)

@@ -47,11 +47,14 @@ function PageErpPiterix() {
   const [full, setFull] = useState(false);
   const [cronEnabled, setCronEnabled] = useState(false);
   const [categories, setCategories] = useState({ piter_ix: true, dc: false, bb: false });
+  const [piterIxGroups, setPiterIxGroups] = useState({ 710: true, 726: true });
   const [apiBase, setApiBase] = useState('https://erp.bth.su');
   const [apiHost, setApiHost] = useState('erp.bth.su');
   const [apiToken, setApiToken] = useState('');
   const [apiInsecure, setApiInsecure] = useState(true);
   const [bindMode, setBindMode] = useState('ports');
+  const [ixEnabled, setIxEnabled] = useState(false);
+  const [ixMacOnPort, setIxMacOnPort] = useState(false);
 
   const load = useCallback(() => {
     return Promise.all([
@@ -63,10 +66,13 @@ function PageErpPiterix() {
       if (st?.settings) {
         setCronEnabled(!!st.settings.cronEnabled);
         setCategories({ piter_ix: true, dc: false, bb: false, ...st.settings.categories });
+        setPiterIxGroups({ 710: true, 726: true, ...st.settings.piterIxGroups });
         setApiBase(st.settings.apiBase || 'https://erp.bth.su');
         setApiHost(st.settings.apiHost || 'erp.bth.su');
         setApiInsecure(st.settings.apiInsecure !== false);
         setBindMode(st.settings.bindMode === 'prefixes' ? 'prefixes' : 'ports');
+        setIxEnabled(!!st.settings.ixEnabled);
+        setIxMacOnPort(!!st.settings.ixMacOnPort);
         setApiToken('');
       }
       setForbidden(false);
@@ -86,18 +92,24 @@ function PageErpPiterix() {
       const next = await ApiClient.saveErpPiterixSettings({
         cronEnabled,
         categories,
+        piterIxGroups,
         apiBase,
         apiHost,
         apiToken,
         apiInsecure,
         bindMode,
+        ixEnabled: !!categories.piter_ix && ixEnabled,
+        ixMacOnPort: !!categories.piter_ix && ixEnabled && ixMacOnPort,
       });
       setCronEnabled(!!next.cronEnabled);
       setCategories({ piter_ix: true, dc: false, bb: false, ...next.categories });
+      setPiterIxGroups({ 710: true, 726: true, ...next.piterIxGroups });
       setApiBase(next.apiBase || apiBase);
       setApiHost(next.apiHost || apiHost);
       setApiInsecure(next.apiInsecure !== false);
       setBindMode(next.bindMode === 'prefixes' ? 'prefixes' : 'ports');
+      setIxEnabled(!!next.ixEnabled);
+      setIxMacOnPort(!!next.ixMacOnPort);
       setApiToken('');
       pushToast?.({ kind: 'success', title: 'Настройки ERP сохранены' });
       await load();
@@ -229,8 +241,42 @@ function PageErpPiterix() {
             Включить ночной cron (03:15 МСК, полный прогон)
           </label>
           <div>
-            Какие категории забирать из ERP. Критерий задаёт биллинг, мы только включаем выгрузку.
+            Какие категории забирать из ERP. Для piter_ix отметьте группы биллинга, можно несколько.
           </div>
+          {categories.piter_ix ? (
+            <div className="col" style={{ gap: 8, padding: '4px 0 8px' }}>
+              <label className="row" style={{ gap: 8, alignItems: 'center' }}>
+                <input
+                  type="checkbox"
+                  checked={ixEnabled}
+                  disabled={saving}
+                  onChange={(e) => {
+                    const on = e.target.checked;
+                    setIxEnabled(on);
+                    if (!on) setIxMacOnPort(false);
+                  }}
+                />
+                Учёт IX
+              </label>
+              <div style={{ color: 'var(--fg-secondary)', font: 'var(--pv-text-body-3)' }}>
+                В кабинете клиента остаётся только трафик VLAN, отмеченных как IX на странице «Моя сеть → VLAN». Считается только на портах из ERP.
+              </div>
+              <label className="row" style={{ gap: 8, alignItems: 'center' }}>
+                <input
+                  type="checkbox"
+                  checked={ixMacOnPort}
+                  disabled={saving || !ixEnabled}
+                  onChange={(e) => setIxMacOnPort(e.target.checked)}
+                />
+                Учитывать MAC-адреса на порту
+              </label>
+              <div style={{ color: 'var(--fg-secondary)', font: 'var(--pv-text-body-3)' }}>
+                {ixMacOnPort
+                  ? 'Клиента определяет связка порт + MAC из ERP. MAC, которых нет в ERP, и клиенты без MAC в трафик не входят — они попадают в отчёт синхронизации.'
+                  : 'Клиента определяет только порт. MAC не проверяется.'}
+              </div>
+            </div>
+          ) : null}
           <table style={{ width: '100%', borderCollapse: 'collapse' }}>
             <thead>
               <tr>
@@ -248,11 +294,33 @@ function PageErpPiterix() {
                       type="checkbox"
                       checked={!!categories[cat.id]}
                       disabled={saving}
-                      onChange={(e) => setCategories((prev) => ({ ...prev, [cat.id]: e.target.checked }))}
+                      onChange={(e) => {
+                        const checked = e.target.checked;
+                        setCategories((prev) => ({ ...prev, [cat.id]: checked }));
+                        if (cat.id === 'piter_ix' && checked) {
+                          setPiterIxGroups((prev) => (prev[710] || prev[726] ? prev : { 710: true, 726: true }));
+                        }
+                      }}
                     />
                   </td>
                   <td className="mono" style={{ padding: '6px 8px' }}>{cat.id}</td>
-                  <td style={{ padding: '6px 8px', color: 'var(--fg-secondary)' }}>{cat.rule}</td>
+                  <td style={{ padding: '6px 8px', color: 'var(--fg-secondary)' }}>
+                    {cat.groups ? (
+                      <div className="col" style={{ gap: 4 }}>
+                        {cat.groups.map((group) => (
+                          <label key={group.id} className="row" style={{ gap: 8, alignItems: 'center' }}>
+                            <input
+                              type="checkbox"
+                              checked={!!piterIxGroups[group.id]}
+                              disabled={saving || !categories.piter_ix}
+                              onChange={(e) => setPiterIxGroups((prev) => ({ ...prev, [group.id]: e.target.checked }))}
+                            />
+                            {group.label}
+                          </label>
+                        ))}
+                      </div>
+                    ) : cat.rule}
+                  </td>
                   <td style={{ padding: '6px 8px', textAlign: 'right' }}>
                     {status.clientsByCategory?.[cat.id] ?? 0}
                   </td>

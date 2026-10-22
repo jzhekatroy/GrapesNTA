@@ -12,6 +12,7 @@ function PageVlan({ embedded = false, refreshKey: parentRefreshKey = 0, onReload
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(null);
   const [search, setSearch] = useState('');
+  const [ixOnly, setIxOnly] = useState(false);
   const [editing, setEditing] = useState(null);
   const [showAdd, setShowAdd] = useState(false);
   const [localRefreshKey, setLocalRefreshKey] = useState(0);
@@ -56,10 +57,14 @@ function PageVlan({ embedded = false, refreshKey: parentRefreshKey = 0, onReload
       String(r.vlanId).includes(s)
       || (r.displayName || '').toLowerCase().includes(s)
       || (r.comment || '').toLowerCase().includes(s)
+      || (r.ixLocation || '').toLowerCase().includes(s)
     ));
   }, [search]);
 
-  const filteredNamed = useMemo(() => filterRows(namedRows), [namedRows, filterRows]);
+  const filteredNamed = useMemo(() => {
+    const rows = filterRows(namedRows);
+    return ixOnly ? rows.filter((r) => r.ix) : rows;
+  }, [namedRows, filterRows, ixOnly]);
   const filteredSeen = useMemo(() => filterRows(seenRows), [seenRows, filterRows]);
 
   const handleDelete = async (row) => {
@@ -102,6 +107,22 @@ function PageVlan({ embedded = false, refreshKey: parentRefreshKey = 0, onReload
       width: 100,
       sortAccessor: (r) => r.vlanId,
       render: (r) => <span className="mono" style={{ font: 'var(--pv-text-body-2-bold)' }}>{r.vlanId}</span>,
+    },
+    {
+      key: 'ix',
+      title: networkT('network.vlan.col.ix'),
+      width: 70,
+      sortAccessor: (r) => (r.ix ? 1 : 0),
+      render: (r) => (r.ix ? <Badge tone="info" dot>IX</Badge> : networkEmDash()),
+    },
+    {
+      key: 'ixLocation',
+      title: networkT('network.vlan.col.location'),
+      width: 180,
+      sortAccessor: (r) => r.ixLocation || '',
+      render: (r) => (
+        <span style={{ color: 'var(--fg-secondary)' }}>{r.ixLocation || networkEmDash()}</span>
+      ),
     },
     {
       key: 'displayName',
@@ -219,6 +240,10 @@ function PageVlan({ embedded = false, refreshKey: parentRefreshKey = 0, onReload
           <div>
             <div className="row" style={{ justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 10 }}>
               <h2 style={{ margin: 0, font: 'var(--pv-text-h4)' }}>{networkT('network.vlan.section.named')}</h2>
+              <label className="row" style={{ gap: 8, alignItems: 'center', color: 'var(--fg-secondary)', font: 'var(--pv-text-body-3)' }}>
+                <input type="checkbox" checked={ixOnly} onChange={(e) => setIxOnly(e.target.checked)} />
+                {networkT('network.vlan.ixOnly')}
+              </label>
               <span style={{ color: 'var(--fg-muted)', font: 'var(--pv-text-body-3)' }}>
                 {filteredNamed.length}
                 {search && filteredNamed.length !== namedRows.length ? networkT('network.vlan.countOfTotal', { total: namedRows.length }) : ''}
@@ -304,6 +329,8 @@ function VlanFormModal({ open, row, isNew, onClose, onSaved }) {
   const [vlanId, setVlanId] = useState('');
   const [displayName, setDisplayName] = useState('');
   const [comment, setComment] = useState('');
+  const [ix, setIx] = useState(false);
+  const [ixLocation, setIxLocation] = useState('');
   const [saving, setSaving] = useState(false);
   const [formError, setFormError] = useState('');
   const fromSeen = !!row?.fromSeen;
@@ -315,6 +342,8 @@ function VlanFormModal({ open, row, isNew, onClose, onSaved }) {
     setVlanId(row?.vlanId != null ? String(row.vlanId) : '');
     setDisplayName(row?.displayName || '');
     setComment(row?.comment || '');
+    setIx(!!row?.ix);
+    setIxLocation(row?.ixLocation || '');
   }, [open, row]);
 
   const handleSave = async () => {
@@ -337,6 +366,8 @@ function VlanFormModal({ open, row, isNew, onClose, onSaved }) {
         boundary: row?.boundary || 'unknown',
         entityId: row?.entityId || '',
         comment,
+        ix,
+        ixLocation: ix ? ixLocation.trim() : '',
         enabled: 1,
       });
       onSaved();
@@ -398,6 +429,21 @@ function VlanFormModal({ open, row, isNew, onClose, onSaved }) {
           />
         </div>
         <div className="field" style={{ gridColumn: '1 / -1' }}>
+          <label className="row" style={{ gap: 8, alignItems: 'center' }}>
+            <input type="checkbox" checked={ix} onChange={(e) => setIx(e.target.checked)} />
+            {networkT('network.vlan.field.ix')}
+          </label>
+          {ix ? (
+            <div>
+              <label>{networkT('network.vlan.field.location')}</label>
+              <input
+                className="input"
+                value={ixLocation}
+                placeholder={networkT('network.vlan.placeholder.location')}
+                onChange={(e) => setIxLocation(e.target.value)}
+              />
+            </div>
+          ) : null}
           <label>{networkT('network.col.comment')}</label>
           <input
             className="input"

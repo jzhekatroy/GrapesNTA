@@ -151,6 +151,7 @@ const {
 } = require('./flow-exclusions');
 const { listNetEntitiesAdmin, saveNetEntity } = require('./net-entities');
 const {
+  ensureVlanIxColumns,
   listVlansAdmin,
   listUnnamedVlansSeen,
   saveVlan,
@@ -2273,6 +2274,7 @@ app.post('/api/refs/net-entities', async (req, res) => {
 
 app.get('/api/refs/vlans', async (_req, res) => {
   try {
+    await ensureVlanIxColumns();
     const result = await runNamed(() => listVlansAdmin(), { name: 'refs/vlans' });
     res.json(result);
   } catch (err) {

@@ -496,6 +496,100 @@ func TestAttachClientsByPrefixAndPort(t *testing.T) {
 	}
 }
 
+func TestAttachClientsIxVlanAndMac(t *testing.T) {
+	sampler, err := ParseSamplerAddress("192.0.2.10")
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherSampler, err := ParseSamplerAddress("192.0.2.11")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ownMAC := [6]byte{0x00, 0x11, 0x22, 0x33, 0x44, 0x55}
+	foreignMAC := [6]byte{0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff}
+	st := &classifierState{
+		client4:     newIPTrie(),
+		client6:     newIPTrie(),
+		clientPorts: map[portKey]string{},
+		ix: ixConfig{
+			enabled:   true,
+			macOnPort: false,
+			vlans:     map[uint16]struct{}{444: {}},
+			clients:   map[string]struct{}{"ix1": {}},
+			portMacs: map[portMacKey]string{
+				{sampler: sampler, ifIndex: 7, mac: ownMAC}: "ix1",
+			},
+		},
+	}
+	st.client4.Insert(netip.MustParsePrefix("203.0.113.0/24"), prefixClass{EntityID: "ix1"})
+	st.clientPorts[portKey{sampler: sampler, ifIndex: 7}] = "ix1"
+	st.clientPorts[portKey{sampler: otherSampler, ifIndex: 3}] = "other"
+
+	tc := &TrafficClassifier{}
+	tc.state.Store(st)
+
+	offVlan := FlowRow{
+		Etype:          0x0800,
+		SrcAddr:        [16]byte{203, 0, 113, 9},
+		SamplerAddress: sampler,
+		InIf:           7,
+		SrcVLAN:        100,
+		SrcMAC:         ownMAC,
+	}
+	tc.AttachClients(&offVlan)
+	if offVlan.SrcClient != "" {
+		t.Fatalf("IX client off VLAN must stay untagged, got %q", offVlan.SrcClient)
+	}
+
+	onVlan := FlowRow{
+		Etype:          0x0800,
+		SamplerAddress: sampler,
+		InIf:           7,
+		SrcVLAN:        444,
+		SrcMAC:         foreignMAC,
+	}
+	tc.AttachClients(&onVlan)
+	if onVlan.SrcClient != "ix1" {
+		t.Fatalf("IX vlan without MAC check must tag the port, got %q", onVlan.SrcClient)
+	}
+
+	st.ix.macOnPort = true
+	match := FlowRow{
+		Etype:          0x0800,
+		SamplerAddress: sampler,
+		InIf:           7,
+		DstVLAN:        444,
+		SrcMAC:         ownMAC,
+	}
+	tc.AttachClients(&match)
+	if match.SrcClient != "ix1" {
+		t.Fatalf("matching MAC must tag, got %q", match.SrcClient)
+	}
+
+	foreign := FlowRow{
+		Etype:          0x0800,
+		SamplerAddress: sampler,
+		InIf:           7,
+		SrcVLAN:        444,
+		SrcMAC:         foreignMAC,
+	}
+	tc.AttachClients(&foreign)
+	if foreign.SrcClient != "" {
+		t.Fatalf("foreign MAC must not tag, got %q", foreign.SrcClient)
+	}
+
+	other := FlowRow{
+		Etype:          0x0800,
+		SamplerAddress: otherSampler,
+		InIf:           3,
+		SrcVLAN:        100,
+	}
+	tc.AttachClients(&other)
+	if other.SrcClient != "other" {
+		t.Fatalf("non-IX client must keep the port tag, got %q", other.SrcClient)
+	}
+}
+
 func TestPickASPathPrefersMatchingNextHop(t *testing.T) {
 	viaHE := bgpRoute{
 		NextHop: netip.MustParseAddr("198.51.100.1"),
