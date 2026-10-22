@@ -657,6 +657,47 @@ function OverviewIxLocationsCard({ rows, open, onToggle, loading, failed, error 
   );
 }
 
+function OverviewIxPeersCard({ rows, loading, failed, error }) {
+  const list = Array.isArray(rows) ? rows : [];
+  return (
+    <Card pad="sm" className="grid--mb">
+      <div className="distribution-card__head">
+        <div>
+          <div className="distribution-card__title">{dashT('cabinet.ixPeers.title')}</div>
+          <div style={{ color: 'var(--fg-secondary)', font: 'var(--pv-text-body-3)' }}>
+            {dashT('cabinet.ixPeers.hint')}
+          </div>
+        </div>
+      </div>
+      {failed ? <DataLoadState>{error || dashT('dashboard.loadFailed')}</DataLoadState> : null}
+      {!failed && loading && !list.length ? <DataLoadState>{dashT('dashboard.loading')}</DataLoadState> : null}
+      {!failed && !loading && !list.length ? (
+        <DataLoadState>{dashT('cabinet.ixPeers.empty')}</DataLoadState>
+      ) : null}
+      {list.length ? (
+        <table className="table" style={{ width: '100%', marginTop: 8 }}>
+          <thead>
+            <tr>
+              <th>{dashT('cabinet.ixPeers.client')}</th>
+              <th className="num">{dashT('cabinet.locations.toYou')}</th>
+              <th className="num">{dashT('cabinet.locations.fromYou')}</th>
+            </tr>
+          </thead>
+          <tbody>
+            {list.map((row) => (
+              <tr key={row.peerId || 'unknown'}>
+                <td>{row.name || dashT('cabinet.ixPeers.unknown')}</td>
+                <td className="num mono">{cabinetByteLabel(row.inBytes)}</td>
+                <td className="num mono">{cabinetByteLabel(row.outBytes)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      ) : null}
+    </Card>
+  );
+}
+
 function CabinetDashboard({ onNavigate, timeRange, customPeriod, displayTimezone, onChartRangeSelect }) {
   const i18nLocale = GrapesI18n.getLocale();
   const periodLabel = timeRangeLabel(timeRange, customPeriod);
@@ -670,6 +711,7 @@ function CabinetDashboard({ onNavigate, timeRange, customPeriod, displayTimezone
   const [stats, setStats] = useState({ source: 'loading', data: null, meta: null });
   const [countries, setCountries] = useState({ source: 'loading', data: [], meta: null });
   const [locations, setLocations] = useState({ source: 'loading', data: [], meta: null });
+  const [ixPeers, setIxPeers] = useState({ source: 'loading', data: [], meta: null });
   const [openLocations, setOpenLocations] = useState(() => new Set());
   const [services, setServices] = useState({ source: 'loading', data: [], meta: null });
   const [recent, setRecent] = useState({ source: 'loading', data: [], meta: null });
@@ -707,6 +749,23 @@ function CabinetDashboard({ onNavigate, timeRange, customPeriod, displayTimezone
     }));
     ApiClient.loadCabinetOverviewLocations({ timeRange, customPeriod }).then((result) => {
       if (!cancelled) setLocations(cabinetOverviewState(result, []));
+    });
+    return () => { cancelled = true; };
+  }, [periodKey]);
+
+  useEffect(() => {
+    let cancelled = false;
+    setIxPeers((prev) => ({
+      source: 'loading',
+      data: prev.data || [],
+      meta: prev.meta,
+      error: '',
+      status: 0,
+      loadMs: null,
+      serverMs: null,
+    }));
+    ApiClient.loadCabinetOverviewIxPeers({ timeRange, customPeriod }).then((result) => {
+      if (!cancelled) setIxPeers(cabinetOverviewState(result, []));
     });
     return () => { cancelled = true; };
   }, [periodKey]);
@@ -866,6 +925,15 @@ function CabinetDashboard({ onNavigate, timeRange, customPeriod, displayTimezone
           loading={locations.source === 'loading'}
           failed={locations.source === 'error' || !!locations.meta?.error}
           error={locations.error || locations.meta?.error}
+        />
+      ) : null}
+
+      {ixPeers.meta?.enabled ? (
+        <OverviewIxPeersCard
+          rows={ixPeers.data}
+          loading={ixPeers.source === 'loading'}
+          failed={ixPeers.source === 'error' || !!ixPeers.meta?.error}
+          error={ixPeers.error || ixPeers.meta?.error}
         />
       ) : null}
 

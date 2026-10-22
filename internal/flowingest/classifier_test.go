@@ -491,8 +491,8 @@ func TestAttachClientsByPrefixAndPort(t *testing.T) {
 		InIf:           12,
 	}
 	tc.AttachClients(&row3)
-	if row3.SrcClient != "client:prefix" {
-		t.Fatalf("prefix must win over port: src=%q", row3.SrcClient)
+	if row3.SrcClient != "client:prefix" || row3.IxSrcClient != "" || row3.IxDstClient != "" {
+		t.Fatalf("prefix must win over port and IX columns stay empty: src=%q ix=%q/%q", row3.SrcClient, row3.IxSrcClient, row3.IxDstClient)
 	}
 }
 
@@ -587,6 +587,191 @@ func TestAttachClientsIxVlanAndMac(t *testing.T) {
 	tc.AttachClients(&other)
 	if other.SrcClient != "other" {
 		t.Fatalf("non-IX client must keep the port tag, got %q", other.SrcClient)
+	}
+}
+
+func TestIndexIxMacs(t *testing.T) {
+	sampler, err := ParseSamplerAddress("192.0.2.10")
+	if err != nil {
+		t.Fatal(err)
+	}
+	own := [6]byte{1, 2, 3, 4, 5, 6}
+	shared := [6]byte{9, 9, 9, 9, 9, 9}
+	other := [6]byte{7, 7, 7, 7, 7, 7}
+	clients := map[string]struct{}{"ix1": {}, "ix2": {}}
+	rows := []ixMacBinding{
+		{clientID: "ix1", sampler: sampler, ifIndex: 1, mac: own},
+		{clientID: "ix1", sampler: sampler, ifIndex: 2, mac: own},
+		{clientID: "ix1", sampler: sampler, ifIndex: 3, mac: shared},
+		{clientID: "ix2", sampler: sampler, ifIndex: 4, mac: shared},
+		{clientID: "plain", sampler: sampler, ifIndex: 5, mac: other},
+	}
+	portMacs, peer := indexIxMacs(false, clients, rows)
+	if len(portMacs) != 0 {
+		t.Fatalf("checkbox off must not fill the port filter, got %d", len(portMacs))
+	}
+	if peer[own] != "ix1" {
+		t.Fatalf("same client on two ports = %q", peer[own])
+	}
+	if _, ok := peer[shared]; ok {
+		t.Fatal("MAC shared by two clients must be omitted")
+	}
+	if _, ok := peer[other]; ok {
+		t.Fatal("MAC of a non-IX client must be omitted")
+	}
+	portMacs, _ = indexIxMacs(true, clients, rows)
+	if len(portMacs) != 5 {
+		t.Fatalf("checkbox on stored %d port bindings, want 5", len(portMacs))
+	}
+}
+
+func TestAttachClientsIxPeerMAC(t *testing.T) {
+	yandexSwitch, err := ParseSamplerAddress("192.0.2.20")
+	if err != nil {
+		t.Fatal(err)
+	}
+	hetznerSwitch, err := ParseSamplerAddress("192.0.2.21")
+	if err != nil {
+		t.Fatal(err)
+	}
+	plainSwitch, err := ParseSamplerAddress("192.0.2.22")
+	if err != nil {
+		t.Fatal(err)
+	}
+	hetznerMAC := [6]byte{0x11, 0x22, 0x33, 0x44, 0x55, 0x66}
+	sharedMAC := [6]byte{0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0x01}
+	foreignMAC := [6]byte{0xde, 0xad, 0xbe, 0xef, 0x00, 0x01}
+	clients := map[string]struct{}{"80249": {}, "79616": {}, "72703": {}, "83494": {}}
+	_, peer := indexIxMacs(false, clients, []ixMacBinding{
+		{clientID: "79616", sampler: hetznerSwitch, ifIndex: 7, mac: hetznerMAC},
+		{clientID: "72703", sampler: hetznerSwitch, ifIndex: 8, mac: sharedMAC},
+		{clientID: "83494", sampler: hetznerSwitch, ifIndex: 9, mac: sharedMAC},
+		{clientID: "80249", sampler: yandexSwitch, ifIndex: 30, mac: foreignMAC},
+	})
+	st := &classifierState{
+		client4: newIPTrie(),
+		client6: newIPTrie(),
+		clientPorts: map[portKey]string{
+			{sampler: yandexSwitch, ifIndex: 30}: "80249",
+			{sampler: hetznerSwitch, ifIndex: 7}: "79616",
+			{sampler: plainSwitch, ifIndex: 4}:   "plain",
+		},
+		ix: ixConfig{
+			enabled:  true,
+			vlans:    map[uint16]struct{}{444: {}},
+			clients:  clients,
+			peerMacs: peer,
+		},
+	}
+	st.client4.Insert(netip.MustParsePrefix("198.51.100.0/24"), prefixClass{EntityID: "plain"})
+	tc := &TrafficClassifier{}
+	tc.state.Store(st)
+
+	towardYandex := FlowRow{
+		Etype:          0x0800,
+		SamplerAddress: yandexSwitch,
+		InIf:           99,
+		OutIf:          30,
+		SrcVLAN:        444,
+		SrcMAC:         hetznerMAC,
+	}
+	tc.AttachClients(&towardYandex)
+	if towardYandex.SrcClient != "" || towardYandex.DstClient != "80249" {
+		t.Fatalf("port tags: src=%q dst=%q", towardYandex.SrcClient, towardYandex.DstClient)
+	}
+	if towardYandex.IxSrcClient != "79616" || towardYandex.IxDstClient != "80249" {
+		t.Fatalf("IX columns: src=%q dst=%q", towardYandex.IxSrcClient, towardYandex.IxDstClient)
+	}
+
+	shared := towardYandex
+	shared.SrcMAC = sharedMAC
+	shared.SrcClient, shared.DstClient = "", ""
+	shared.IxSrcClient, shared.IxDstClient = "", ""
+	tc.AttachClients(&shared)
+	if shared.SrcClient != "" || shared.DstClient != "80249" || shared.IxSrcClient != "" || shared.IxDstClient != "80249" {
+		t.Fatalf("shared MAC: src=%q dst=%q ix=%q/%q", shared.SrcClient, shared.DstClient, shared.IxSrcClient, shared.IxDstClient)
+	}
+
+	offVlan := towardYandex
+	offVlan.SrcVLAN = 100
+	offVlan.SrcClient, offVlan.DstClient = "", ""
+	offVlan.IxSrcClient, offVlan.IxDstClient = "stale", "stale"
+	tc.AttachClients(&offVlan)
+	if offVlan.SrcClient != "" || offVlan.DstClient != "" || offVlan.IxSrcClient != "" || offVlan.IxDstClient != "" {
+		t.Fatalf("off IX vlan: src=%q dst=%q ix=%q/%q", offVlan.SrcClient, offVlan.DstClient, offVlan.IxSrcClient, offVlan.IxDstClient)
+	}
+
+	disabled := *st
+	disabled.ix.enabled = false
+	tc.state.Store(&disabled)
+	ixOff := towardYandex
+	ixOff.SrcClient, ixOff.DstClient = "", ""
+	ixOff.IxSrcClient, ixOff.IxDstClient = "stale", "stale"
+	tc.AttachClients(&ixOff)
+	if ixOff.SrcClient != "" || ixOff.DstClient != "80249" || ixOff.IxSrcClient != "" || ixOff.IxDstClient != "" {
+		t.Fatalf("IX off must ignore the MAC directory: src=%q dst=%q ix=%q/%q", ixOff.SrcClient, ixOff.DstClient, ixOff.IxSrcClient, ixOff.IxDstClient)
+	}
+
+	tc.state.Store(st)
+	fromHetzner := FlowRow{
+		Etype:          0x0800,
+		SamplerAddress: hetznerSwitch,
+		InIf:           7,
+		OutIf:          99,
+		SrcVLAN:        444,
+		SrcMAC:         hetznerMAC,
+		DstMAC:         foreignMAC,
+	}
+	tc.AttachClients(&fromHetzner)
+	if fromHetzner.SrcClient != "79616" || fromHetzner.DstClient != "" {
+		t.Fatalf("Hetzner port tags: src=%q dst=%q", fromHetzner.SrcClient, fromHetzner.DstClient)
+	}
+	if fromHetzner.IxSrcClient != "79616" || fromHetzner.IxDstClient != "80249" {
+		t.Fatalf("Hetzner IX columns: src=%q dst=%q", fromHetzner.IxSrcClient, fromHetzner.IxDstClient)
+	}
+
+	transit := FlowRow{
+		Etype:          0x0800,
+		SamplerAddress: yandexSwitch,
+		InIf:           50,
+		OutIf:          51,
+		SrcVLAN:        444,
+		SrcMAC:         hetznerMAC,
+		DstMAC:         foreignMAC,
+	}
+	tc.AttachClients(&transit)
+	if transit.SrcClient != "" || transit.DstClient != "" || transit.IxSrcClient != "" || transit.IxDstClient != "" {
+		t.Fatalf("transit must stay empty: src=%q dst=%q ix=%q/%q", transit.SrcClient, transit.DstClient, transit.IxSrcClient, transit.IxDstClient)
+	}
+
+	tc.state.Store(st)
+	plain := FlowRow{
+		Etype:          0x0800,
+		SrcAddr:        [16]byte{198, 51, 100, 9},
+		SamplerAddress: plainSwitch,
+		InIf:           4,
+		SrcVLAN:        100,
+		SrcMAC:         hetznerMAC,
+	}
+	tc.AttachClients(&plain)
+	if plain.SrcClient != "plain" || plain.IxSrcClient != "" || plain.IxDstClient != "" {
+		t.Fatalf("non-IX client must keep its own tag, got src=%q ix=%q/%q", plain.SrcClient, plain.IxSrcClient, plain.IxDstClient)
+	}
+
+	st.ix.macOnPort = true
+	st.ix.portMacs = map[portMacKey]string{
+		{sampler: hetznerSwitch, ifIndex: 7, mac: hetznerMAC}: "79616",
+	}
+	onOwnPort := FlowRow{
+		Etype:          0x0800,
+		SamplerAddress: hetznerSwitch,
+		InIf:           7,
+		SrcVLAN:        444,
+		SrcMAC:         foreignMAC,
+	}
+	tc.AttachClients(&onOwnPort)
+	if onOwnPort.SrcClient != "" || onOwnPort.IxSrcClient != "" {
+		t.Fatalf("foreign MAC on the client port must stay empty, got src=%q ix=%q", onOwnPort.SrcClient, onOwnPort.IxSrcClient)
 	}
 }
 

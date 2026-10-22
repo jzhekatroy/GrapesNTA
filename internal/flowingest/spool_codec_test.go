@@ -64,6 +64,8 @@ func sampleFullRow() FlowRow {
 		DstEntity:             "d-entity",
 		SrcClient:             "client:src",
 		DstClient:             "client:dst",
+		IxSrcClient:           "ix:src",
+		IxDstClient:           "ix:dst",
 		SrcVLAN:               100,
 		DstVLAN:               200,
 		Etype:                 0x86DD,
@@ -461,6 +463,8 @@ func TestBinaryCodecV2FrameDecodesWithoutMAC(t *testing.T) {
 	wantNoMAC.IPTos = 0
 	wantNoMAC.SrcClient = ""
 	wantNoMAC.DstClient = ""
+	wantNoMAC.IxSrcClient = ""
+	wantNoMAC.IxDstClient = ""
 	wantNoMAC.SrcASPath = nil
 	wantNoMAC.DstASPath = nil
 
@@ -489,6 +493,7 @@ func TestSpoolMixedVersionSegment(t *testing.T) {
 	rowV4 := sampleFullRow()
 	rowV5 := sampleFullRow()
 	rowV6 := sampleFullRow()
+	rowV7 := sampleFullRow()
 
 	gobPayload, err := encodeFramePayload([]FlowRow{rowGob})
 	if err != nil {
@@ -498,7 +503,11 @@ func TestSpoolMixedVersionSegment(t *testing.T) {
 	v3Payload := encodeFlowRowsBinaryMACNoMeta([]FlowRow{rowV3})
 	v4Payload := encodeFlowRowsBinaryMetaNoClient([]FlowRow{rowV4})
 	v5Payload := encodeFlowRowsBinaryClientNoASPath([]FlowRow{rowV5})
-	v6Payload, err := encodeFlowRowsBinary([]FlowRow{rowV6})
+	v6Payload, err := encodeFlowRowsBinaryAt([]FlowRow{rowV6}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	v7Payload, err := encodeFlowRowsBinary([]FlowRow{rowV7})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -508,6 +517,7 @@ func TestSpoolMixedVersionSegment(t *testing.T) {
 	frameV4 := buildFrame(4, spoolFrameVersionBinaryMeta, v4Payload)
 	frameV5 := buildFrame(5, spoolFrameVersionBinaryClient, v5Payload)
 	frameV6 := buildFrame(6, spoolFrameVersionBinaryASPath, v6Payload)
+	frameV7 := buildFrame(7, spoolFrameVersionBinaryIx, v7Payload)
 
 	segPath := filepath.Join(segDir, fmt.Sprintf("%016d.seg", uint64(1)))
 	f, err := os.Create(segPath)
@@ -520,6 +530,7 @@ func TestSpoolMixedVersionSegment(t *testing.T) {
 	all = append(all, frameV4...)
 	all = append(all, frameV5...)
 	all = append(all, frameV6...)
+	all = append(all, frameV7...)
 	if _, err := f.Write(all); err != nil {
 		t.Fatal(err)
 	}
@@ -560,6 +571,8 @@ func TestSpoolMixedVersionSegment(t *testing.T) {
 	wantV3.IPTos = 0
 	wantV3.SrcClient = ""
 	wantV3.DstClient = ""
+	wantV3.IxSrcClient = ""
+	wantV3.IxDstClient = ""
 	wantV3.SrcASPath = nil
 	wantV3.DstASPath = nil
 	flowRowsEqual(t, wantV3, rowsV3[0])
@@ -574,6 +587,8 @@ func TestSpoolMixedVersionSegment(t *testing.T) {
 	wantV4 := rowV4
 	wantV4.SrcClient = ""
 	wantV4.DstClient = ""
+	wantV4.IxSrcClient = ""
+	wantV4.IxDstClient = ""
 	wantV4.SrcASPath = nil
 	wantV4.DstASPath = nil
 	flowRowsEqual(t, wantV4, rowsV4[0])
@@ -586,16 +601,30 @@ func TestSpoolMixedVersionSegment(t *testing.T) {
 		t.Fatalf("v5 frame row count: %d", len(rowsV5))
 	}
 	wantV5 := rowV5
+	wantV5.IxSrcClient = ""
+	wantV5.IxDstClient = ""
 	wantV5.SrcASPath = nil
 	wantV5.DstASPath = nil
 	flowRowsEqual(t, wantV5, rowsV5[0])
 
-	_, rowsV6, err := readNextFrame(segDir, next5)
+	next6, rowsV6, err := readNextFrame(segDir, next5)
 	if err != nil {
 		t.Fatalf("read v6 binary frame: %v", err)
 	}
 	if len(rowsV6) != 1 {
 		t.Fatalf("v6 frame row count: %d", len(rowsV6))
 	}
-	flowRowsEqual(t, rowV6, rowsV6[0])
+	wantV6 := rowV6
+	wantV6.IxSrcClient = ""
+	wantV6.IxDstClient = ""
+	flowRowsEqual(t, wantV6, rowsV6[0])
+
+	_, rowsV7, err := readNextFrame(segDir, next6)
+	if err != nil {
+		t.Fatalf("read v7 binary frame: %v", err)
+	}
+	if len(rowsV7) != 1 {
+		t.Fatalf("v7 frame row count: %d", len(rowsV7))
+	}
+	flowRowsEqual(t, rowV7, rowsV7[0])
 }

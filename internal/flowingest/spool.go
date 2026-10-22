@@ -45,10 +45,14 @@ const (
 	// during a rolling restart.
 	spoolFrameVersionBinaryClient = uint32(5)
 	// spoolFrameVersionBinaryASPath appends SrcASPath/DstASPath after the client
-	// ids. Current writer format.
+	// ids. Still decoded so frames written before the IX-peer rollout drain
+	// during a rolling restart.
 	spoolFrameVersionBinaryASPath = uint32(6)
-	spoolFrameMagicBE             = uint32(0x50464c58) // 'PFLX' big-endian on wire
-	spoolFrameHeaderLen           = 24
+	// spoolFrameVersionBinaryIx appends IxSrcClient/IxDstClient after the AS
+	// paths. Current writer format. Empty when IX accounting is off.
+	spoolFrameVersionBinaryIx = uint32(7)
+	spoolFrameMagicBE         = uint32(0x50464c58) // 'PFLX' big-endian on wire
+	spoolFrameHeaderLen       = 24
 )
 
 // spoolFrameVersionSupported reports whether v is a payload version this build
@@ -59,7 +63,8 @@ func spoolFrameVersionSupported(v uint32) bool {
 		v == spoolFrameVersionBinaryMAC ||
 		v == spoolFrameVersionBinaryMeta ||
 		v == spoolFrameVersionBinaryClient ||
-		v == spoolFrameVersionBinaryASPath
+		v == spoolFrameVersionBinaryASPath ||
+		v == spoolFrameVersionBinaryIx
 }
 
 type consumerCheckpoint struct {
@@ -268,15 +273,17 @@ func decodeFramePayloadVersioned(version uint32, b []byte) ([]FlowRow, error) {
 	case spoolFrameVersionGob:
 		return decodeFramePayload(b)
 	case spoolFrameVersionBinary:
-		return decodeFlowRowsBinaryVersion(b, false, false, false, false)
+		return decodeFlowRowsBinaryVersion(b, false, false, false, false, false)
 	case spoolFrameVersionBinaryMAC:
-		return decodeFlowRowsBinaryVersion(b, true, false, false, false)
+		return decodeFlowRowsBinaryVersion(b, true, false, false, false, false)
 	case spoolFrameVersionBinaryMeta:
-		return decodeFlowRowsBinaryVersion(b, true, true, false, false)
+		return decodeFlowRowsBinaryVersion(b, true, true, false, false, false)
 	case spoolFrameVersionBinaryClient:
-		return decodeFlowRowsBinaryVersion(b, true, true, true, false)
+		return decodeFlowRowsBinaryVersion(b, true, true, true, false, false)
 	case spoolFrameVersionBinaryASPath:
-		return decodeFlowRowsBinaryVersion(b, true, true, true, true)
+		return decodeFlowRowsBinaryVersion(b, true, true, true, true, false)
+	case spoolFrameVersionBinaryIx:
+		return decodeFlowRowsBinaryVersion(b, true, true, true, true, true)
 	default:
 		return nil, fmt.Errorf("unsupported spool frame version %d", version)
 	}
@@ -314,7 +321,7 @@ func (w *spoolWriter) appendFrame(rows []FlowRow) (consumerCheckpoint, error) {
 		return cp, err
 	}
 	seq := w.frameSeq.Add(1)
-	frame := buildFrame(seq, spoolFrameVersionBinaryASPath, payload)
+	frame := buildFrame(seq, spoolFrameVersionBinaryIx, payload)
 
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -758,28 +765,28 @@ type SpoolPipeline struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
-	writer       *spoolWriter
-	conn         chdriver.Conn
-	table        string
-	mode         SpoolMode
-	nWorkers     int
-	drainOnClose time.Duration
+	writer          *spoolWriter
+	conn            chdriver.Conn
+	table           string
+	mode            SpoolMode
+	nWorkers        int
+	drainOnClose    time.Duration
 	allowedSourceID string
 
 	checkpointMu sync.Mutex
 	// persisted consumer offset (acked prefix)
 	acked consumerCheckpoint
 
-	recordsSpooled atomic.Uint64
-	recordsAcked   atomic.Uint64
+	recordsSpooled     atomic.Uint64
+	recordsAcked       atomic.Uint64
 	flowPacketsSpooled atomic.Uint64
 	flowBytesSpooled   atomic.Uint64
 	flowPacketsAcked   atomic.Uint64
 	flowBytesAcked     atomic.Uint64
-	insertErrs     atomic.Uint64
-	retries        atomic.Uint64
-	batchesOK      atomic.Uint64
-	sourceRowsSkipped atomic.Uint64
+	insertErrs         atomic.Uint64
+	retries            atomic.Uint64
+	batchesOK          atomic.Uint64
+	sourceRowsSkipped  atomic.Uint64
 
 	// Drainer corruption-recovery counters and progress probe.
 	corruptionFramesSkipped atomic.Uint64
@@ -842,18 +849,18 @@ func NewSpoolPipeline(
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	p := &SpoolPipeline{
-		log:            log,
-		ctx:            ctx,
-		cancel:         cancel,
-		writer:         wr,
-		conn:           conn,
-		table:          table,
-		mode:           mode,
-		nWorkers:       nWorkers,
-		drainOnClose:   drainOnClose,
+		log:             log,
+		ctx:             ctx,
+		cancel:          cancel,
+		writer:          wr,
+		conn:            conn,
+		table:           table,
+		mode:            mode,
+		nWorkers:        nWorkers,
+		drainOnClose:    drainOnClose,
 		allowedSourceID: strings.TrimSpace(allowedSourceID),
-		stallThreshold: stallThreshold,
-		acked:          cp,
+		stallThreshold:  stallThreshold,
+		acked:           cp,
 	}
 	p.lastDrainerProgress.Store(time.Now().UnixNano())
 	p.wg.Add(1)

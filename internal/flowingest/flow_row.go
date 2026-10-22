@@ -14,31 +14,31 @@ const MaxASPathHops = 128
 // FlowRow is the production-shaped row for default.flows_raw (and internal spool).
 // Column order matches INSERT in sink.go.
 type FlowRow struct {
-	Date             time.Time
-	TimeInsertedNs   time.Time
-	TimeReceivedNs   time.Time
-	TimeFlowStartNs  time.Time
-	SequenceNum      uint32
-	SamplingRate     uint64
-	SamplerAddress   [16]byte
-	SourceID         string
-	SrcAddr          [16]byte
-	DstAddr          [16]byte
-	SrcAS            uint32
-	DstAS            uint32
-	SrcASN           uint32
-	DstASN           uint32
+	Date            time.Time
+	TimeInsertedNs  time.Time
+	TimeReceivedNs  time.Time
+	TimeFlowStartNs time.Time
+	SequenceNum     uint32
+	SamplingRate    uint64
+	SamplerAddress  [16]byte
+	SourceID        string
+	SrcAddr         [16]byte
+	DstAddr         [16]byte
+	SrcAS           uint32
+	DstAS           uint32
+	SrcASN          uint32
+	DstASN          uint32
 	// BGP AS path as seen in the origin snapshot at ingest (neighbor first,
 	// origin last). Empty when the IP is not in BMP (iptoasn / L3 only).
-	SrcASPath        []uint32
-	DstASPath        []uint32
-	Direction        string
-	SrcKind          string
-	DstKind          string
-	SrcLabel         string
-	DstLabel         string
-	SrcOperator      string
-	DstOperator      string
+	SrcASPath             []uint32
+	DstASPath             []uint32
+	Direction             string
+	SrcKind               string
+	DstKind               string
+	SrcLabel              string
+	DstLabel              string
+	SrcOperator           string
+	DstOperator           string
 	SrcAttachmentKind     string
 	DstAttachmentKind     string
 	SrcAttachmentBoundary string
@@ -60,16 +60,23 @@ type FlowRow struct {
 	SrcEntity             string
 	DstEntity             string
 	// Cabinet client on each side of the flow (independent from L3 entity).
-	SrcClient             string
-	DstClient             string
-	SrcVLAN          uint16
-	DstVLAN          uint16
-	Etype            uint32
-	Proto            uint32
-	SrcPort          uint32
-	DstPort          uint32
-	Bytes            uint64
-	Packets          uint64
+	// A client is written here only from its own port, so summing these
+	// columns does not count one packet twice.
+	SrcClient string
+	DstClient string
+	// IX view of both sides. Copied from the port tag and completed by MAC on
+	// that client's switch. Empty when IX accounting is off. Not used by
+	// cabinet totals.
+	IxSrcClient string
+	IxDstClient string
+	SrcVLAN     uint16
+	DstVLAN     uint16
+	Etype       uint32
+	Proto       uint32
+	SrcPort     uint32
+	DstPort     uint32
+	Bytes       uint64
+	Packets     uint64
 	// Layer-2 source/destination MAC as seen at the capture point (XDP mirror
 	// interface or sFlow sampled frame). Zero when the producer cannot observe
 	// L2 (e.g. BMP). Stored in flows_raw as FixedString(6); not part of any
