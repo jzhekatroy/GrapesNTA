@@ -52,6 +52,7 @@ const NAV = [
           { id: 'versions', icon: 'tag' },
           { id: 'clients', icon: 'users' },
           { id: 'smtp', icon: 'export' },
+          { id: 'api-integration-erp', icon: 'globe' },
           { id: 'ttl', icon: 'clock' },
         ],
       },
