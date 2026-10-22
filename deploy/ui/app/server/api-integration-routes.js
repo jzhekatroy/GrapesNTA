@@ -14,6 +14,7 @@ const {
   registerApiClient,
   activateApiClient,
   deactivateApiClient,
+  deleteApiClient,
   getClientById,
   listApiClients,
 } = require('./api-clients');
@@ -26,6 +27,7 @@ const JOURNAL_ACTIONS = [
   'api_client_manual_register',
   'api_client_activate',
   'api_client_deactivate',
+  'api_client_delete',
   'api_client_tokens_revoke',
 ];
 
@@ -45,6 +47,20 @@ function requireClientId(body = {}) {
     throw err;
   }
   return clientId;
+}
+
+// Слияние выборок журнала одного подключения (админ-действия по client_id и
+// по названию + операции Bearer-API): дедуп по id, свежие сверху, срез лимита.
+function mergeJournalEvents(lists, limit) {
+  const merged = new Map();
+  for (const list of lists) {
+    for (const row of list || []) {
+      if (row && row.id && !merged.has(row.id)) merged.set(row.id, row);
+    }
+  }
+  return [...merged.values()]
+    .sort((a, b) => String(b.eventAt).localeCompare(String(a.eventAt)))
+    .slice(0, limit);
 }
 
 // Чистая сборка полезной нагрузки списка: связывает клиентов, живые токены
@@ -141,6 +157,19 @@ function createApiIntegrationRouter({ apiTokens } = {}) {
     try {
       const clientId = requireClientId(req.body);
       const result = await deactivateApiClient(clientId);
+      const revokedTokens = apiTokens.revokeByClientId(clientId);
+      res.json({ data: { ...result, revokedTokens } });
+    } catch (err) {
+      sendError(res, err);
+    }
+  });
+
+  // Полное удаление: строки в таблице больше нет, токены отозваны,
+  // история действий остаётся в журнале аудита.
+  router.post('/delete', async (req, res) => {
+    try {
+      const clientId = requireClientId(req.body);
+      const result = await deleteApiClient(clientId);
       const revokedTokens = apiTokens.revokeByClientId(clientId);
       res.json({ data: { ...result, revokedTokens } });
     } catch (err) {
@@ -259,9 +288,32 @@ function createApiIntegrationRouter({ apiTokens } = {}) {
     }
   });
 
+  // Без clientId — журнал раздела (все подключения). С clientId — полный журнал
+  // одного подключения: админ-действия над ним (по client_id или названию) плюс
+  // его операции через Bearer-API (актёр api:<имя>).
   router.get('/journal', async (req, res) => {
     try {
       const limit = Math.min(Math.max(Number(req.query.limit) || 50, 1), 200);
+      if (req.query.clientId) {
+        const clientId = String(req.query.clientId).trim();
+        const client = await getClientById(clientId);
+        if (!client) {
+          const err = new Error('API-клиент не найден');
+          err.statusCode = 404;
+          throw err;
+        }
+        const [byObjectId, byObjectLabel, apiOps] = await Promise.all([
+          listAuditEvents({ actions: JOURNAL_ACTIONS, objectId: client.clientId, limit }),
+          listAuditEvents({ actions: JOURNAL_ACTIONS, objectLabel: client.clientName, limit }),
+          listAuditEvents({ actorUsername: `api:${client.clientName}`, limit }),
+        ]);
+        const data = mergeJournalEvents(
+          [byObjectId.data, byObjectLabel.data, apiOps.data],
+          limit,
+        );
+        res.json({ data, meta: { total: data.length, limit } });
+        return;
+      }
       const result = await listAuditEvents({ actions: JOURNAL_ACTIONS, limit });
       res.json(result);
     } catch (err) {
@@ -276,5 +328,6 @@ module.exports = {
   createApiIntegrationRouter,
   buildClientsPayload,
   requireClientId,
+  mergeJournalEvents,
   JOURNAL_ACTIONS,
 };
