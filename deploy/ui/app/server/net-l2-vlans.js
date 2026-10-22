@@ -57,6 +57,8 @@ function mapVlanAdminRow(r) {
     attachmentType: String(r.attachment_type ?? 'unknown'),
     boundary: String(r.boundary ?? 'unknown'),
     comment: String(r.comment ?? ''),
+    ix: Number(r.ix) === 1 ? 1 : 0,
+    ixLocation: String(r.ix_location ?? ''),
     source: String(r.source ?? ''),
     enabled: enabled === 1 ? 1 : 0,
     updatedAt: r.updated_at ?? null,
@@ -96,6 +98,8 @@ async function fetchLatestVlan(vlanId) {
         boundary,
         display_name,
         comment,
+        ix,
+        ix_location,
         source,
         enabled,
         updated_at
@@ -125,6 +129,8 @@ function listVlansAdmin() {
         v.boundary AS boundary,
         v.display_name AS display_name,
         v.comment AS comment,
+        v.ix AS ix,
+        v.ix_location AS ix_location,
         v.source AS source,
         1 AS enabled,
         v.updated_at AS updated_at
@@ -211,6 +217,8 @@ async function validateVlanPayload(body, { requireActiveFields = true } = {}) {
       boundary,
       display_name: displayName,
       comment: String(body?.comment ?? '').trim(),
+      ix: body?.ix === true || body?.ix === 1 || body?.ix === '1' ? 1 : 0,
+      ix_location: String(body?.ixLocation ?? body?.ix_location ?? '').trim().slice(0, 80),
       enabled,
       source: 'webui',
     },
@@ -218,6 +226,7 @@ async function validateVlanPayload(body, { requireActiveFields = true } = {}) {
 }
 
 async function saveVlan(body) {
+  await ensureVlanIxColumns();
   const validation = await validateVlanPayload(body, { requireActiveFields: true });
   if (!validation.ok) {
     const err = new Error(validation.error);
@@ -237,6 +246,7 @@ async function saveVlan(body) {
 }
 
 async function setVlanEnabled(body) {
+  await ensureVlanIxColumns();
   const parsed = parseVlanId(body?.vlanId ?? body?.vlan_id);
   if (!parsed.ok) {
     const err = new Error(parsed.error);
@@ -266,6 +276,8 @@ async function setVlanEnabled(body) {
     boundary: latest.boundary,
     display_name: latest.displayName,
     comment: latest.comment,
+    ix: latest.ix,
+    ix_location: latest.ixLocation,
     enabled: nextEnabled,
     source: 'webui',
   };
@@ -331,6 +343,70 @@ async function getVlanNameMap() {
   }
 }
 
+const VLAN_IX_VIEW_SQL = `
+CREATE OR REPLACE VIEW default.net_l2_vlans_enabled
+(
+    vlan_id UInt16,
+    entity_id String,
+    attachment_type String,
+    boundary String,
+    display_name String,
+    comment String,
+    ix UInt8,
+    ix_location String,
+    source String,
+    updated_at DateTime
+)
+AS SELECT
+    vlan_id,
+    entity_id,
+    attachment_type,
+    multiIf(boundary_raw IN ('internal', 'external'), boundary_raw, attachment_type IN ('customer', 'internal', 'core'), 'internal', attachment_type IN ('uplink', 'ix', 'peering'), 'external', 'unknown') AS boundary,
+    display_name,
+    comment,
+    ix,
+    ix_location,
+    source,
+    updated_at_latest AS updated_at
+FROM
+(
+    SELECT
+        vlan_id,
+        argMax(entity_id, updated_at) AS entity_id,
+        argMax(attachment_type, updated_at) AS attachment_type,
+        argMax(boundary, updated_at) AS boundary_raw,
+        argMax(display_name, updated_at) AS display_name,
+        argMax(comment, updated_at) AS comment,
+        argMax(ix, updated_at) AS ix,
+        argMax(ix_location, updated_at) AS ix_location,
+        argMax(source, updated_at) AS source,
+        argMax(enabled, updated_at) AS enabled_latest,
+        max(updated_at) AS updated_at_latest
+    FROM ${'default.net_l2_vlans'}
+    GROUP BY vlan_id
+)
+WHERE enabled_latest = 1
+`;
+
+let vlanIxReady = false;
+
+async function ensureVlanIxColumns() {
+  if (vlanIxReady) return;
+  const table = l2VlansTableRef();
+  await executeCommand(
+    `ALTER TABLE ${table} ADD COLUMN IF NOT EXISTS ix UInt8 DEFAULT 0`,
+    {},
+    { name: 'refs/vlan-ix-column' },
+  );
+  await executeCommand(
+    `ALTER TABLE ${table} ADD COLUMN IF NOT EXISTS ix_location String DEFAULT ''`,
+    {},
+    { name: 'refs/vlan-ix-location-column' },
+  );
+  await executeCommand(VLAN_IX_VIEW_SQL, {}, { name: 'refs/vlan-ix-view' });
+  vlanIxReady = true;
+}
+
 function vlanLabel(vlanId, nameMap) {
   const id = Number(vlanId) || 0;
   if (!id) return 'VLAN —';
@@ -344,6 +420,7 @@ module.exports = {
   ATTACHMENT_TYPES,
   ATTACHMENT_TYPE_LABELS,
   BOUNDARY_TYPES,
+  ensureVlanIxColumns,
   listVlansAdmin,
   listUnnamedVlansSeen,
   validateVlanPayload,

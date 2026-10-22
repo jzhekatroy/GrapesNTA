@@ -2710,6 +2710,32 @@ const ApiClient = (() => {
     };
   }
 
+  async function loadCabinetOverviewLocations({
+    timeRange = '24h',
+    customPeriod,
+  } = {}) {
+    const params = cabinetRangeQuery({ timeRange, customPeriod });
+    const result = await fetchCabinet(`/api/cabinet/overview/locations?${params}`, 'cabinet/overview/locations');
+    if (!result.ok) {
+      return {
+        source: 'error',
+        data: [],
+        meta: null,
+        error: result.error?.message || LOAD_FAILED,
+        status: result.error?.status || 0,
+        loadMs: result.loadMs,
+        serverMs: null,
+      };
+    }
+    return {
+      source: 'clickhouse',
+      data: result.data || [],
+      meta: result.meta || null,
+      loadMs: result.loadMs,
+      serverMs: result.serverMs,
+    };
+  }
+
   async function loadCabinetOverviewServices({
     timeRange = '24h',
     customPeriod,
@@ -3230,6 +3256,7 @@ const ApiClient = (() => {
     loadCabinetOverviewSeries,
     loadCabinetOverviewStats,
     loadCabinetOverviewCountries,
+    loadCabinetOverviewLocations,
     loadCabinetOverviewServices,
     loadCabinetOverviewRecentFlows,
     loadCabinetDnsDomains,

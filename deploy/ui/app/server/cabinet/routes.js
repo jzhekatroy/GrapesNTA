@@ -47,6 +47,7 @@ const {
   overviewSeries,
   overviewStats,
   overviewRecentFlows,
+  overviewLocations,
   overviewCountries,
   overviewServices,
   dnsDomains,
@@ -209,6 +210,16 @@ function createCabinetRouter({ sessions }) {
     try {
       const clientId = requireScopedClientId(req.cabinet);
       const result = await overviewRecentFlows(clientId, req.query);
+      res.json(result);
+    } catch (err) {
+      sendError(res, err);
+    }
+  });
+
+  router.get('/overview/locations', async (req, res) => {
+    try {
+      const clientId = requireScopedClientId(req.cabinet);
+      const result = await overviewLocations(clientId, req.query);
       res.json(result);
     } catch (err) {
       sendError(res, err);

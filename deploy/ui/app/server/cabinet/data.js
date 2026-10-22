@@ -499,6 +499,90 @@ async function queryBreakdownTotalBytes(table, bucketColumn, clientId, range, di
   return Number(rows[0]?.bytes) || 0;
 }
 
+async function overviewLocations(clientId, queryParams = {}) {
+  try {
+    const flag = await query(`
+      SELECT
+        (
+          SELECT ix_enabled
+          FROM default.app_erp_sync_settings
+          WHERE settings_id = 'global'
+          ORDER BY updated_at DESC
+          LIMIT 1
+        ) AS ix_enabled,
+        (
+          SELECT count()
+          FROM default.net_clients_enabled
+          WHERE client_id = {clientId:String} AND comment = 'erp:piter_ix'
+        ) AS ix_client
+    `, { clientId }, { name: 'cabinet/ix-flag' });
+    if (Number(flag.rows[0]?.ix_enabled) !== 1 || !Number(flag.rows[0]?.ix_client)) {
+      return { data: [], meta: { enabled: false, clientId } };
+    }
+  } catch {
+    return { data: [], meta: { enabled: false, clientId } };
+  }
+  const range = parseRange(queryParams);
+  const time = `f.${col('time')}`;
+  const filter = timeFilterSql(time, range);
+  const bytes = col('bytes');
+  let rows;
+  let elapsedMs = 0;
+  try {
+    const result = await query(`
+    SELECT
+      v.vlan_id AS vlan_id,
+      if(v.ix_location != '', v.ix_location, concat('VLAN ', toString(v.vlan_id))) AS location,
+      sumIf(f.${bytes}, f.src_client = {clientId:String}) AS out_bytes,
+      sumIf(f.${bytes}, f.dst_client = {clientId:String}) AS in_bytes
+    FROM ${flowsRawTableRef()} AS f
+    INNER JOIN default.net_l2_vlans_enabled AS v
+      ON v.vlan_id = if(f.src_vlan != 0, f.src_vlan, f.dst_vlan)
+    WHERE v.ix = 1
+      AND (${filter.sql})
+      AND (f.src_client = {clientId:String} OR f.dst_client = {clientId:String})
+    GROUP BY location, v.vlan_id
+    ORDER BY (in_bytes + out_bytes) DESC
+    LIMIT 200
+    SETTINGS max_execution_time = 20
+  `, { clientId, ...filter.params }, { name: 'cabinet/overview-locations' });
+    rows = result.rows;
+    elapsedMs = result.elapsedMs;
+  } catch (err) {
+    return {
+      data: [],
+      meta: {
+        enabled: true,
+        clientId,
+        error: String(err.message || err).slice(0, 180),
+      },
+    };
+  }
+  const byLocation = new Map();
+  for (const row of rows) {
+    const location = String(row.location || '');
+    let item = byLocation.get(location);
+    if (!item) {
+      item = { location, inBytes: 0, outBytes: 0, vlans: [] };
+      byLocation.set(location, item);
+    }
+    const inBytes = Number(row.in_bytes) || 0;
+    const outBytes = Number(row.out_bytes) || 0;
+    item.inBytes += inBytes;
+    item.outBytes += outBytes;
+    item.vlans.push({
+      vlanId: Number(row.vlan_id) || 0,
+      inBytes,
+      outBytes,
+    });
+  }
+  const data = [...byLocation.values()].sort((a, b) => (b.inBytes + b.outBytes) - (a.inBytes + a.outBytes));
+  return {
+    data,
+    meta: { enabled: true, elapsedMs, rows: data.length, clientId, range },
+  };
+}
+
 async function overviewCountries(clientId, queryParams = {}) {
   const range = parseRange(queryParams);
   const { table, bucketColumn } = breakdownTablesForRange(range).country;
@@ -737,6 +821,7 @@ module.exports = {
   overviewSeries,
   overviewStats,
   overviewRecentFlows,
+  overviewLocations,
   overviewCountries,
   overviewServices,
   dnsDomains,
