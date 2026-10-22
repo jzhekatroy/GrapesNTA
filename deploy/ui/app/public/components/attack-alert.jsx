@@ -91,6 +91,7 @@ function AttackAlertModal({ open, attacks, onClose, onOpenMonitoring, showMonito
     <Modal
       open={open}
       onClose={onClose}
+      variant="attack-alert"
       title={attacks.length > 1 ? alertT('attackAlert.titleMany', { n: attacks.length }) : alertT('attackAlert.title')}
       subtitle={alertT('attackAlert.subtitle')}
       size="lg"
