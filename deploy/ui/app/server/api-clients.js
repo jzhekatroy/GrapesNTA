@@ -12,7 +12,7 @@ function apiClientsTableRef() {
 }
 
 function clickhouseDateTime(date = new Date()) {
-  return date.toISOString().slice(0, 19).replace('T', ' ');
+  return date.toISOString().slice(0, 23).replace('T', ' ');
 }
 
 function generateClientId() {
