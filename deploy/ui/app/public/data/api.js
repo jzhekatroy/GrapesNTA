@@ -1074,8 +1074,13 @@ const ApiClient = (() => {
     return requestJson('/api/admin/api-clients/verify-pair', { method: 'POST', body: payload });
   }
 
-  async function loadApiClientsJournal() {
-    return requestJson('/api/admin/api-clients/journal');
+  async function loadApiClientsJournal(clientId) {
+    const suffix = clientId ? `?clientId=${encodeURIComponent(clientId)}` : '';
+    return requestJson(`/api/admin/api-clients/journal${suffix}`);
+  }
+
+  async function deleteApiClient(clientId) {
+    return requestJson('/api/admin/api-clients/delete', { method: 'POST', body: { clientId } });
   }
 
   async function loadDetectionLatest() {
@@ -3418,6 +3423,7 @@ const ApiClient = (() => {
     monitorApiClient,
     verifyApiClientPair,
     loadApiClientsJournal,
+    deleteApiClient,
     loadDetectionLatest,
     loadDetectionHistory,
     loadDetectionTelegramSettings,
