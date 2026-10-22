@@ -15,7 +15,6 @@ import (
 func main() {
 	cfg := loadConfig()
 	log := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
-
 	if !cfg.SFlowEnabled && !cfg.NetFlowEnabled {
 		log.Error("no listeners enabled (set FC_SFLOW_ENABLED and/or FC_NETFLOW_ENABLED)")
 		os.Exit(1)
@@ -181,6 +180,9 @@ func main() {
 			for _, l := range listeners {
 				l.LogMetrics()
 			}
+			if s := classifier.IxScopeStats(); s.Rows > 0 {
+				log.Info("ix scope dropped", "rows", s.Rows, "packets", s.Packets, "bytes", s.Bytes)
+			}
 			delivery.LogMetrics()
 		case <-healthTicker.C:
 			h := delivery.HealthSnapshot()
@@ -203,10 +205,17 @@ func main() {
 				)
 			}
 			if healthReporter != nil {
+				// IX scope drops are deliberate too; without them the pipeline
+				// page reads the cut traffic as ingest loss.
+				excluded := exclusions.Stats()
+				ixScope := classifier.IxScopeStats()
+				excluded.Rows += ixScope.Rows
+				excluded.Packets += ixScope.Packets
+				excluded.Bytes += ixScope.Bytes
 				_ = healthReporter.Write(ctx, flowingest.HealthWriteInput{
 					Receiver:               rx,
 					CH:                     h,
-					Exclusions:             exclusions.Stats(),
+					Exclusions:             excluded,
 					InsertErrsDelta:        insertErrsDelta,
 					QueueDropsDelta:        queueDropsDelta,
 					UDPQueueDropsDelta:     udpDropsDelta,

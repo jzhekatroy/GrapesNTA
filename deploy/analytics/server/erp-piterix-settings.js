@@ -18,6 +18,7 @@ const DEFAULTS = {
   bindMode: 'ports',
   ixEnabled: 0,
   ixMacOnPort: 0,
+  ixScopeOnly: 0,
 };
 
 function tableRef(dbName = 'default') {
@@ -41,6 +42,7 @@ CREATE TABLE IF NOT EXISTS default.${SETTINGS_TABLE}
   bind_mode LowCardinality(String) DEFAULT 'ports',
   ix_enabled UInt8 DEFAULT 0,
   ix_mac_on_port UInt8 DEFAULT 0,
+  ix_scope_only UInt8 DEFAULT 0,
   updated_at DateTime DEFAULT now()
 )
 ENGINE = ReplacingMergeTree(updated_at)
@@ -57,6 +59,7 @@ const ENSURE_SETTINGS_COLUMNS = [
   `ALTER TABLE default.${SETTINGS_TABLE} ADD COLUMN IF NOT EXISTS piter_ix_g726 UInt8 DEFAULT 1`,
   `ALTER TABLE default.${SETTINGS_TABLE} ADD COLUMN IF NOT EXISTS ix_enabled UInt8 DEFAULT 0`,
   `ALTER TABLE default.${SETTINGS_TABLE} ADD COLUMN IF NOT EXISTS ix_mac_on_port UInt8 DEFAULT 0`,
+  `ALTER TABLE default.${SETTINGS_TABLE} ADD COLUMN IF NOT EXISTS ix_scope_only UInt8 DEFAULT 0`,
 ];
 
 function boolInt(value, fallback) {
@@ -101,6 +104,7 @@ function mapSettings(row = {}, { includeToken = false } = {}) {
     bindMode: normalizeBindMode(row.bind_mode || process.env.ERP_BIND_MODE, DEFAULTS.bindMode),
     ixEnabled: Number(row.ix_enabled ?? DEFAULTS.ixEnabled) === 1,
     ixMacOnPort: Number(row.ix_mac_on_port ?? DEFAULTS.ixMacOnPort) === 1,
+    ixScopeOnly: Number(row.ix_scope_only ?? DEFAULTS.ixScopeOnly) === 1,
     tokenSet: Boolean(apiToken),
     updatedAt: row.updated_at || null,
   };
@@ -140,7 +144,7 @@ async function getSettingsRaw(db) {
     SELECT cron_enabled, cat_piter_ix, cat_dc, cat_bb,
            piter_ix_g710, piter_ix_g726,
            api_base, api_host, api_token, api_insecure, bind_mode,
-           ix_enabled, ix_mac_on_port, updated_at
+           ix_enabled, ix_mac_on_port, ix_scope_only, updated_at
     FROM default.${SETTINGS_TABLE}
     WHERE settings_id = 'global'
     ORDER BY updated_at DESC
@@ -174,12 +178,17 @@ async function saveSettings(db, body = {}) {
     bind_mode: normalizeBindMode(body.bindMode, current.bindMode || DEFAULTS.bindMode),
     ix_enabled: boolInt(body.ixEnabled, current.ixEnabled ? 1 : 0),
     ix_mac_on_port: boolInt(body.ixMacOnPort, current.ixMacOnPort ? 1 : 0),
+    ix_scope_only: boolInt(body.ixScopeOnly, current.ixScopeOnly ? 1 : 0),
   };
   if (!next.cat_piter_ix) {
     next.ix_enabled = 0;
     next.ix_mac_on_port = 0;
+    next.ix_scope_only = 0;
   }
-  if (!next.ix_enabled) next.ix_mac_on_port = 0;
+  if (!next.ix_enabled) {
+    next.ix_mac_on_port = 0;
+    next.ix_scope_only = 0;
+  }
   if (!next.cat_piter_ix && !next.cat_dc && !next.cat_bb) {
     const err = new Error('Включите хотя бы одну категорию');
     err.statusCode = 400;

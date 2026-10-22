@@ -85,10 +85,12 @@ type portMacKey struct {
 }
 
 // ixConfig is the PiterIX cabinet rule. Zero value keeps the old tagging:
-// prefix, then port, on every VLAN.
+// prefix, then port, on every VLAN. scopeOnly drops flows that are not on an
+// IX VLAN before they are stored. It stays false when the VLAN list is empty.
 type ixConfig struct {
 	enabled   bool
 	macOnPort bool
+	scopeOnly bool
 	vlans     map[uint16]struct{}
 	clients   map[string]struct{}
 	portMacs  map[portMacKey]string
@@ -112,6 +114,10 @@ type TrafficClassifier struct {
 	portsNoIfIndex  atomic.Uint64
 	portsUnmarked   atomic.Uint64
 
+	ixScopeRows    atomic.Uint64
+	ixScopePackets atomic.Uint64
+	ixScopeBytes   atomic.Uint64
+
 	// Flows left unclassified because neither network is described. Growth
 	// here is the signal to go and fill in the L3 catalog.
 	networksUnclassified atomic.Uint64
@@ -120,6 +126,7 @@ type TrafficClassifier struct {
 	// process. The refresh itself keeps running and reloads BGP every time.
 	bgpSnapshotWarned bool
 	ixLoadWarned      bool
+	ixScopeWarned     bool
 }
 
 type classifierState struct {
@@ -347,6 +354,7 @@ func (tc *TrafficClassifier) refreshOnce(ctx context.Context) error {
 		"client_ports", clientPortRows,
 		"ix", st.ix.enabled,
 		"ix_mac", st.ix.macOnPort,
+		"ix_scope", st.ix.scopeOnly,
 		"ix_vlans", ixVlans,
 		"ix_macs", ixMacs,
 		"direction_ports_classified", tc.portsClassified.Load(),
@@ -801,6 +809,49 @@ func (tc *TrafficClassifier) AttachClients(r *FlowRow) {
 	}
 }
 
+// IxScopeStats counts flows dropped because they were outside the IX VLANs.
+type IxScopeStats struct {
+	Rows    uint64
+	Packets uint64
+	Bytes   uint64
+}
+
+// IxScopeStats returns drops since process start.
+func (tc *TrafficClassifier) IxScopeStats() IxScopeStats {
+	if tc == nil {
+		return IxScopeStats{}
+	}
+	return IxScopeStats{
+		Rows:    tc.ixScopeRows.Load(),
+		Packets: tc.ixScopePackets.Load(),
+		Bytes:   tc.ixScopeBytes.Load(),
+	}
+}
+
+// FilterIxScope drops rows that are not on an IX VLAN when that mode is on.
+// An empty VLAN list or a missing setting keeps every row: a bad config must
+// not stop ingest. The input backing array is reused.
+func (tc *TrafficClassifier) FilterIxScope(rows []FlowRow) []FlowRow {
+	if tc == nil || len(rows) == 0 {
+		return rows
+	}
+	st := tc.state.Load()
+	if st == nil || !st.ix.scopeOnly || len(st.ix.vlans) == 0 {
+		return rows
+	}
+	kept := rows[:0]
+	for i := range rows {
+		if st.onIxVlan(&rows[i]) {
+			kept = append(kept, rows[i])
+			continue
+		}
+		tc.ixScopeRows.Add(1)
+		tc.ixScopePackets.Add(rows[i].Packets)
+		tc.ixScopeBytes.Add(rows[i].Bytes)
+	}
+	return kept
+}
+
 func (st *classifierState) onIxVlan(r *FlowRow) bool {
 	if _, ok := st.ix.vlans[r.SrcVLAN]; ok {
 		return true
@@ -859,20 +910,36 @@ func parseMacHex(value string) ([6]byte, bool) {
 // loadIxAccounting reads the ERP flags. Any error leaves IX off, so an
 // installation without these columns keeps the previous client tagging.
 func (tc *TrafficClassifier) loadIxAccounting(ctx context.Context, st *classifierState) (vlans, macs int) {
-	var enabled, macOn uint8
+	var enabled, macOn, scopeOnly uint8
 	err := tc.conn.QueryRow(ctx, `
-		SELECT ix_enabled, ix_mac_on_port
+		SELECT ix_enabled, ix_mac_on_port, ix_scope_only
 		FROM default.app_erp_sync_settings
 		WHERE settings_id = 'global'
 		ORDER BY updated_at DESC
 		LIMIT 1
-	`).Scan(&enabled, &macOn)
-	if err != nil || enabled == 0 {
-		if err != nil {
+	`).Scan(&enabled, &macOn, &scopeOnly)
+	if err != nil {
+		// A collector newer than the settings table must keep tagging and
+		// accept every flow until the column exists.
+		errOld := tc.conn.QueryRow(ctx, `
+			SELECT ix_enabled, ix_mac_on_port
+			FROM default.app_erp_sync_settings
+			WHERE settings_id = 'global'
+			ORDER BY updated_at DESC
+			LIMIT 1
+		`).Scan(&enabled, &macOn)
+		if errOld != nil {
 			tc.warnIxOnce("ix accounting left off", err)
-		} else {
-			tc.ixLoadWarned = false
+			return 0, 0
 		}
+		scopeOnly = 0
+		if !tc.ixScopeWarned && tc.log != nil {
+			tc.ixScopeWarned = true
+			tc.log.Warn("ix scope column missing; accepting all traffic", "err", err)
+		}
+	}
+	if enabled == 0 {
+		tc.ixLoadWarned = false
 		return 0, 0
 	}
 	st.ix = ixConfig{
@@ -910,6 +977,7 @@ func (tc *TrafficClassifier) loadIxAccounting(ctx context.Context, st *classifie
 		return 0, 0
 	}
 	_ = vlanRows.Close()
+	st.ix.scopeOnly = scopeOnly == 1 && len(st.ix.vlans) > 0
 	clientRows, err := tc.conn.Query(ctx, `
 		SELECT client_id FROM default.net_clients_enabled WHERE comment = 'erp:piter_ix'
 	`)

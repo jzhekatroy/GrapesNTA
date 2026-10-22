@@ -54,6 +54,13 @@ func newNFParser(log *slog.Logger, sourceID string, fallbackRate uint64, ttl tim
 	}
 }
 
+func (p *nfParser) FilterIxScope(rows []flowingest.FlowRow) []flowingest.FlowRow {
+	if p == nil || p.classifier == nil {
+		return rows
+	}
+	return p.classifier.FilterIxScope(rows)
+}
+
 func (p *nfParser) parse(d udpDatagram) []flowingest.FlowRow {
 	p.metrics.datagrams.Add(1)
 	if len(d.b) < 2 {

@@ -17,6 +17,7 @@ CREATE TABLE IF NOT EXISTS default.app_erp_sync_settings
     `bind_mode` LowCardinality(String) DEFAULT 'ports',
     `ix_enabled` UInt8 DEFAULT 0,
     `ix_mac_on_port` UInt8 DEFAULT 0,
+    `ix_scope_only` UInt8 DEFAULT 0,
     `updated_at` DateTime DEFAULT now()
 )
 ENGINE = ReplacingMergeTree(updated_at)

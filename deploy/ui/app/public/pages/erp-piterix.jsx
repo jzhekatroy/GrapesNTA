@@ -55,6 +55,7 @@ function PageErpPiterix() {
   const [bindMode, setBindMode] = useState('ports');
   const [ixEnabled, setIxEnabled] = useState(false);
   const [ixMacOnPort, setIxMacOnPort] = useState(false);
+  const [ixScopeOnly, setIxScopeOnly] = useState(false);
 
   const load = useCallback(() => {
     return Promise.all([
@@ -73,6 +74,7 @@ function PageErpPiterix() {
         setBindMode(st.settings.bindMode === 'prefixes' ? 'prefixes' : 'ports');
         setIxEnabled(!!st.settings.ixEnabled);
         setIxMacOnPort(!!st.settings.ixMacOnPort);
+        setIxScopeOnly(!!st.settings.ixScopeOnly);
         setApiToken('');
       }
       setForbidden(false);
@@ -100,6 +102,7 @@ function PageErpPiterix() {
         bindMode,
         ixEnabled: !!categories.piter_ix && ixEnabled,
         ixMacOnPort: !!categories.piter_ix && ixEnabled && ixMacOnPort,
+        ixScopeOnly: !!categories.piter_ix && ixEnabled && ixScopeOnly,
       });
       setCronEnabled(!!next.cronEnabled);
       setCategories({ piter_ix: true, dc: false, bb: false, ...next.categories });
@@ -110,6 +113,7 @@ function PageErpPiterix() {
       setBindMode(next.bindMode === 'prefixes' ? 'prefixes' : 'ports');
       setIxEnabled(!!next.ixEnabled);
       setIxMacOnPort(!!next.ixMacOnPort);
+      setIxScopeOnly(!!next.ixScopeOnly);
       setApiToken('');
       pushToast?.({ kind: 'success', title: 'Настройки ERP сохранены' });
       await load();
@@ -253,7 +257,10 @@ function PageErpPiterix() {
                   onChange={(e) => {
                     const on = e.target.checked;
                     setIxEnabled(on);
-                    if (!on) setIxMacOnPort(false);
+                    if (!on) {
+                      setIxMacOnPort(false);
+                      setIxScopeOnly(false);
+                    }
                   }}
                 />
                 Учёт IX
@@ -274,6 +281,20 @@ function PageErpPiterix() {
                 {ixMacOnPort
                   ? 'Клиента определяет связка порт + MAC из ERP. MAC, которых нет в ERP, и клиенты без MAC в трафик не входят — они попадают в отчёт синхронизации.'
                   : 'Клиента определяет только порт. MAC не проверяется.'}
+              </div>
+              <label className="row" style={{ gap: 8, alignItems: 'center' }}>
+                <input
+                  type="checkbox"
+                  checked={ixScopeOnly}
+                  disabled={saving || !ixEnabled}
+                  onChange={(e) => setIxScopeOnly(e.target.checked)}
+                />
+                Принимать только трафик IX
+              </label>
+              <div style={{ color: 'var(--fg-secondary)', font: 'var(--pv-text-body-3)' }}>
+                {ixScopeOnly
+                  ? 'Коллектор сохраняет только потоки VLAN с отметкой IX. Остальной трафик отбрасывается и в НТА не попадает. Если ни один VLAN не отмечен, принимается всё.'
+                  : 'Коллектор сохраняет весь трафик. Отметка IX влияет только на то, какому клиенту он записывается.'}
               </div>
             </div>
           ) : null}

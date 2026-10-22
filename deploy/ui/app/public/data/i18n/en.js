@@ -2656,6 +2656,8 @@
     'network.vlan.ixOnly': 'IX only',
     'network.vlan.field.ix': 'Count in IX traffic',
     'network.vlan.field.location': 'Location in the client cabinet',
+    'network.vlan.location.none': 'No location',
+    'network.vlan.location.new': 'New location',
     'network.vlan.placeholder.location': 'For example, Saint Petersburg',
     'cabinet.locations.title': 'IX locations',
     'cabinet.locations.hint': 'Traffic only on VLANs marked as IX. The same location name is one row.',
