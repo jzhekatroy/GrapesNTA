@@ -691,3 +691,46 @@ func TestParseSnapshotNextHop(t *testing.T) {
 		t.Fatalf("AddrFromFixed16 = %v", got)
 	}
 }
+
+func TestFilterIxScope(t *testing.T) {
+	rows := []FlowRow{
+		{SrcVLAN: 444, Packets: 2, Bytes: 20},
+		{SrcVLAN: 1698, Packets: 3, Bytes: 30},
+		{DstVLAN: 444, Packets: 4, Bytes: 40},
+		{Packets: 5, Bytes: 50},
+	}
+	copyRows := func() []FlowRow {
+		return append([]FlowRow(nil), rows...)
+	}
+	tc := &TrafficClassifier{}
+	tc.state.Store(&classifierState{ix: ixConfig{
+		enabled: true,
+		vlans:   map[uint16]struct{}{444: {}},
+	}})
+	if got := tc.FilterIxScope(copyRows()); len(got) != 4 {
+		t.Fatalf("scope off kept %d, want 4", len(got))
+	}
+
+	tc.state.Store(&classifierState{ix: ixConfig{
+		enabled:   true,
+		scopeOnly: true,
+		vlans:     map[uint16]struct{}{444: {}},
+	}})
+	got := tc.FilterIxScope(copyRows())
+	if len(got) != 2 || got[0].SrcVLAN != 444 || got[1].DstVLAN != 444 {
+		t.Fatalf("scope on kept %+v", got)
+	}
+	stats := tc.IxScopeStats()
+	if stats.Rows != 2 || stats.Packets != 8 || stats.Bytes != 80 {
+		t.Fatalf("stats %+v", stats)
+	}
+
+	tc.state.Store(&classifierState{ix: ixConfig{enabled: true, scopeOnly: true}})
+	if got := tc.FilterIxScope(copyRows()); len(got) != 4 {
+		t.Fatalf("empty vlan list kept %d, want 4", len(got))
+	}
+	var none *TrafficClassifier
+	if got := none.FilterIxScope(copyRows()); len(got) != 4 {
+		t.Fatalf("nil classifier kept %d, want 4", len(got))
+	}
+}

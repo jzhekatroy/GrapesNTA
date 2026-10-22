@@ -2656,6 +2656,8 @@
     'network.vlan.ixOnly': 'Только IX',
     'network.vlan.field.ix': 'Учитывать в трафике IX',
     'network.vlan.field.location': 'Локация в кабинете клиента',
+    'network.vlan.location.none': 'Без локации',
+    'network.vlan.location.new': 'Новая локация',
     'network.vlan.placeholder.location': 'Например, Санкт-Петербург',
     'cabinet.locations.title': 'Локации IX',
     'cabinet.locations.hint': 'Трафик только по VLAN, отмеченным как IX. Одинаковое название локации складывается в одну строку.',

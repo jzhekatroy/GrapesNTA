@@ -305,6 +305,7 @@ function PageVlan({ embedded = false, refreshKey: parentRefreshKey = 0, onReload
       <VlanFormModal
         open={showAdd || !!editing}
         row={editing}
+        locationRows={namedRows}
         isNew={showAdd || !!editing?.isNew || !!editing?.fromSeen}
         onClose={() => { setShowAdd(false); setEditing(null); }}
         onSaved={() => {
@@ -325,12 +326,22 @@ function PageVlan({ embedded = false, refreshKey: parentRefreshKey = 0, onReload
   return <div className="main__container">{body}</div>;
 }
 
-function VlanFormModal({ open, row, isNew, onClose, onSaved }) {
+function vlanLocationOptions(rows) {
+  const names = new Set();
+  for (const row of rows || []) {
+    const name = String(row.ixLocation || '').trim();
+    if (name) names.add(name);
+  }
+  return [...names].sort((a, b) => a.localeCompare(b, 'ru'));
+}
+
+function VlanFormModal({ open, row, locationRows = [], isNew, onClose, onSaved }) {
   const [vlanId, setVlanId] = useState('');
   const [displayName, setDisplayName] = useState('');
   const [comment, setComment] = useState('');
   const [ix, setIx] = useState(false);
   const [ixLocation, setIxLocation] = useState('');
+  const [locationPick, setLocationPick] = useState('');
   const [saving, setSaving] = useState(false);
   const [formError, setFormError] = useState('');
   const fromSeen = !!row?.fromSeen;
@@ -343,7 +354,10 @@ function VlanFormModal({ open, row, isNew, onClose, onSaved }) {
     setDisplayName(row?.displayName || '');
     setComment(row?.comment || '');
     setIx(!!row?.ix);
-    setIxLocation(row?.ixLocation || '');
+    const current = String(row?.ixLocation || '').trim();
+    const known = (locationRows || []).some((item) => String(item.ixLocation || '').trim() === current);
+    setIxLocation(current);
+    setLocationPick(current && !known ? '__new__' : current);
   }, [open, row]);
 
   const handleSave = async () => {
@@ -436,12 +450,31 @@ function VlanFormModal({ open, row, isNew, onClose, onSaved }) {
           {ix ? (
             <div>
               <label>{networkT('network.vlan.field.location')}</label>
-              <input
+              <select
                 className="input"
-                value={ixLocation}
-                placeholder={networkT('network.vlan.placeholder.location')}
-                onChange={(e) => setIxLocation(e.target.value)}
-              />
+                value={locationPick}
+                onChange={(e) => {
+                  const next = e.target.value;
+                  setLocationPick(next);
+                  setIxLocation(next === '__new__' ? '' : next);
+                }}
+              >
+                <option value="">{networkT('network.vlan.location.none')}</option>
+                {vlanLocationOptions(locationRows).map((name) => (
+                  <option key={name} value={name}>{name}</option>
+                ))}
+                <option value="__new__">{networkT('network.vlan.location.new')}</option>
+              </select>
+              {locationPick === '__new__' ? (
+                <input
+                  className="input"
+                  style={{ marginTop: 8 }}
+                  value={ixLocation}
+                  placeholder={networkT('network.vlan.placeholder.location')}
+                  onChange={(e) => setIxLocation(e.target.value)}
+                  autoFocus
+                />
+              ) : null}
             </div>
           ) : null}
           <label>{networkT('network.col.comment')}</label>
