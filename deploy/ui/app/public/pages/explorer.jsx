@@ -566,7 +566,7 @@ function explorerRowFilterValue(row, dimId, valueIdx, dimensionById) {
       label: null,
     };
   }
-  if (fieldId === 'cabinet_client') {
+  if (fieldId === 'cabinet_client' || fieldId === 'ix_src_client' || fieldId === 'ix_dst_client') {
     const raw = row.rawValues?.[valueIdx] ?? row.values[valueIdx];
     const label = row.values[valueIdx];
     return {

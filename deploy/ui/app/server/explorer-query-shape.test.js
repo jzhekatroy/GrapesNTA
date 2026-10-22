@@ -217,6 +217,23 @@ describe('explorer query shape', () => {
     assert.match(uniq.sql, /uniqCombined/);
   });
 
+  it('в режиме IX группирует отправителя отдельно от порта клиента', async () => {
+    const spec = await explorerFlows({
+      ...WINDOW,
+      groupBy: ['ix_src_client'],
+      filters: [{ field: 'ix_dst_client', op: '=', value: '80249' }],
+    }, { ix: true });
+    assert.match(spec.sql, /if\(f\.ix_src_client = '', '—', f\.ix_src_client\)/);
+    assert.match(spec.sql, /f\.ix_dst_client = \{ix_client_0:String\}/);
+    assert.equal(spec.params.ix_client_0, '80249');
+    assert.doesNotMatch(spec.sql, /f\.src_client = \{ix_client_0:String\}/);
+    const plain = await explorerFlows({
+      ...WINDOW,
+      groupBy: ['client_direction'],
+    });
+    assert.doesNotMatch(plain.sql, /ix_src_client|ix_dst_client/);
+  });
+
   it('кладёт сумму всех групп в окно таблицы, до отсечения лимитом', async () => {
     const spec = await explorerFlows({
       ...WINDOW,

@@ -5,6 +5,7 @@ const assert = require('node:assert/strict');
 const {
   explorerSchema,
   explorerDimensions,
+  explorerDimensionsForOptions,
   explorerFieldMatchesQuery,
 } = require('./explorer');
 
@@ -205,6 +206,41 @@ describe('explorer schema field naming', () => {
     assert.equal(schema.filterFields.some((f) => f.id === 'src_as_path'), false);
     assert.equal(schema.filterFields.some((f) => f.id === 'dst_as_path'), false);
     assert.equal(schema.dimensions.some((d) => d.id === 'src_as_path'), false);
+  });
+
+  it('hides IX peer fields until IX accounting is on', () => {
+    const schema = explorerSchema();
+    assert.equal(schema.filterFields.some((f) => f.id === 'ix_src_client'), false);
+    assert.equal(schema.dimensions.some((d) => d.id === 'ix_dst_client'), false);
+    assert.deepEqual(schema.dimensionGroups[CLIENTS_CATALOG], ['cabinet_client', 'client_direction']);
+    const expr = explorerDimensions().client_direction.filterExpr;
+    assert.doesNotMatch(expr, /ix_src_client|ix_dst_client/);
+  });
+
+  it('exposes IX sender and receiver only for the operator IX explorer', () => {
+    const schema = explorerSchema({ ix: true });
+    const sender = schema.filterFields.find((f) => f.id === 'ix_src_client');
+    const receiver = schema.filterFields.find((f) => f.id === 'ix_dst_client');
+    assert.equal(sender?.label, 'Клиент-отправитель IX');
+    assert.equal(receiver?.label, 'Клиент-получатель IX');
+    assert.equal(sender?.entityType, 'cabinet_client');
+    assert.equal(receiver?.entityType, 'cabinet_client');
+    assert.ok(sender?.ops.includes('='));
+    assert.deepEqual(
+      schema.dimensionGroups[CLIENTS_CATALOG],
+      ['cabinet_client', 'client_direction', 'ix_src_client', 'ix_dst_client'],
+    );
+    const direction = schema.filterFields.find((f) => f.id === 'client_direction');
+    assert.match(direction?.valueHint || '', /Между клиентами/);
+    const expr = explorerDimensions({ ix: true }).client_direction.filterExpr;
+    assert.match(expr, /f\.ix_src_client != '' AND f\.ix_dst_client != '', 'between'/);
+    assert.match(expr, /f\.dst_client != '', 'in'/);
+    const cabinet = explorerSchema({ cabinet: true, ix: true });
+    assert.equal(cabinet.filterFields.some((f) => f.id === 'ix_src_client'), false);
+    assert.doesNotMatch(
+      explorerDimensionsForOptions({ cabinet: true, ix: true }).client_direction.filterExpr,
+      /ix_src_client/,
+    );
   });
 
   it('reserves client alias for cabinet_client field', () => {
