@@ -258,6 +258,7 @@ const {
 } = require('./cabinet/routes');
 const { createErpPiterixRouter } = require('./erp-piterix-routes');
 const { createApiV1Router } = require('./api-v1-routes');
+const { createApiIntegrationRouter } = require('./api-integration-routes');
 const { createApiTokenStore } = require('./api-tokens');
 const { ensureApiClientsTable } = require('./api-clients');
 const { createDetectionRouter } = require('./detection-routes');
@@ -773,6 +774,7 @@ app.get('/api/audit', async (req, res) => {
 app.use('/api/rbac', createRbacRouter());
 app.use('/api/cabinet', createCabinetRouter({ sessions }));
 app.use('/api/clients', createClientsRouter({ sessions }));
+app.use('/api/admin/api-clients', createApiIntegrationRouter({ apiTokens }));
 app.use('/api/erp-piterix', createErpPiterixRouter());
 app.use('/api/detection', createDetectionRouter());
 app.use('/api/monitoring', createMonitoringRouter());
