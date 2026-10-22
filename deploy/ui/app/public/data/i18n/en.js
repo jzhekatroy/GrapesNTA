@@ -2204,6 +2204,7 @@
     'auditPage.action.api_client_manual_register': 'API client: custom credentials',
     'auditPage.action.api_client_activate': 'API client: enabled',
     'auditPage.action.api_client_deactivate': 'API client: disabled',
+    'auditPage.action.api_client_delete': 'API client: deleted',
     'auditPage.action.api_client_tokens_revoke': 'API client: tokens revoked',
     'auditPage.action.api_write': 'Change',
     'auditPage.action.writeResource': 'Change ({resource})',
