@@ -117,6 +117,18 @@ async function verifyApiClient(clientId, clientSecret) {
   return ok ? client : null;
 }
 
+// Имя уникально среди активных подключений: дубликаты в таблице неразличимы.
+// Деактивированная или удалённая запись имя освобождает — пересоздание под
+// тем же именем оставляет в таблице ровно одну активную версию.
+async function ensureClientNameAvailable(clientName) {
+  const clients = await listApiClients();
+  if (clients.some((client) => client.active && client.clientName === clientName)) {
+    const err = new Error('Подключение с таким названием уже существует');
+    err.statusCode = 409;
+    throw err;
+  }
+}
+
 async function createApiClient({ name } = {}) {
   const clientName = String(name ?? '').trim();
   if (!clientName) {
@@ -124,6 +136,7 @@ async function createApiClient({ name } = {}) {
     err.statusCode = 400;
     throw err;
   }
+  await ensureClientNameAvailable(clientName);
   const clientId = generateClientId();
   const clientSecret = generateClientSecret();
   const secretHash = await bcrypt.hash(clientSecret, BCRYPT_ROUNDS);
@@ -233,6 +246,7 @@ async function registerApiClient({ name, clientId, clientSecret } = {}) {
     throw err;
   }
   const { clientName, clientId: id, clientSecret: secret } = check.value;
+  await ensureClientNameAvailable(clientName);
   // client_id — ключ ReplacingMergeTree: совпадение с любой версией (даже
   // отключённой) породило бы новую версию чужой записи, поэтому занятость
   // проверяем по всем строкам, а не только по активным.
@@ -257,6 +271,24 @@ async function registerApiClient({ name, clientId, clientSecret } = {}) {
     updated_at: now,
   }], { name: 'api-clients/register' });
   return { clientId: id, clientName, active: true, manual: true };
+}
+
+// Полное удаление подключения (в отличие от деактивации — мутация ClickHouse,
+// строки не остаётся). История действий сохраняется в audit_log. Отзыв токенов
+// делает вызывающий слой (роутер), у него токен-стор.
+async function deleteApiClient(clientId) {
+  const existing = await getClientById(clientId);
+  if (!existing) {
+    const err = new Error('API-клиент не найден');
+    err.statusCode = 404;
+    throw err;
+  }
+  await executeCommand(
+    `ALTER TABLE ${apiClientsTableRef()} DELETE WHERE client_id = {clientId:String}`,
+    { clientId: existing.clientId },
+    { name: 'api-clients/delete' },
+  );
+  return { clientId: existing.clientId, deleted: true };
 }
 
 async function listApiClients() {
@@ -295,5 +327,6 @@ module.exports = {
   registerApiClient,
   activateApiClient,
   deactivateApiClient,
+  deleteApiClient,
   listApiClients,
 };
