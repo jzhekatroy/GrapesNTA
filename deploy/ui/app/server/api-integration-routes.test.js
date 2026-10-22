@@ -5,6 +5,7 @@ const assert = require('node:assert/strict');
 const {
   buildClientsPayload,
   requireClientId,
+  mergeJournalEvents,
   JOURNAL_ACTIONS,
 } = require('./api-integration-routes');
 
@@ -74,6 +75,30 @@ test('journal actions cover every mutating admin api-client route', () => {
     'api_client_manual_register',
     'api_client_activate',
     'api_client_deactivate',
+    'api_client_delete',
     'api_client_tokens_revoke',
   ]);
+});
+
+test('mergeJournalEvents dedupes by id, sorts newest first and slices to limit', () => {
+  const adminOps = [
+    { id: 'a1', eventAt: '2026-10-22 10:00:01.000', action: 'api_client_create' },
+    { id: 'a2', eventAt: '2026-10-22 09:00:00.000', action: 'api_client_delete' },
+  ];
+  const apiOps = [
+    { id: 'b1', eventAt: '2026-10-22 12:30:00.000', action: 'user_create' },
+    // та же запись, пришедшая из другой выборки — дубль
+    { id: 'a1', eventAt: '2026-10-22 10:00:01.000', action: 'api_client_create' },
+    null,
+  ];
+
+  assert.deepEqual(
+    mergeJournalEvents([adminOps, apiOps], 2).map((row) => row.id),
+    ['b1', 'a1'],
+  );
+  assert.deepEqual(
+    mergeJournalEvents([adminOps, apiOps], 10).map((row) => row.id),
+    ['b1', 'a1', 'a2'],
+  );
+  assert.deepEqual(mergeJournalEvents([[], null, []], 10), []);
 });
