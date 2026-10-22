@@ -1147,15 +1147,6 @@ function ClientBindingsTab({ client, canWrite, onSaved }) {
 
   return (
     <div className="col" style={{ gap: 14 }}>
-      {!isPrefixes && (
-        <Card pad="sm" style={{ background: 'var(--st-warning-bg)', border: '1px solid var(--st-warning)' }}>
-          <div style={{ font: 'var(--pv-text-body-2-bold)', color: 'var(--st-warning)', marginBottom: 4 }}>{clientsT('clientsPage.bindings.dnsTitle')}</div>
-          <div style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-secondary)' }}>
-            {clientsT('clientsPage.bindings.dnsDesc')}
-          </div>
-        </Card>
-      )}
-
       {loading ? (
         <div style={{ color: 'var(--fg-secondary)' }}>{clientsT('clientsPage.loading')}</div>
       ) : (
@@ -1987,7 +1978,7 @@ function ClientObservationsTab({ client, canWrite }) {
                   <div style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-secondary)', marginTop: 4 }}>
                     {clientsT('clientsPage.observations.col.author')}: {item.author?.label || '—'}
                     {' · '}
-                    {clientsT('clientsPage.observations.col.updated')}: {fmtDateTime(item.updatedAt)}
+                    {clientsT('clientsPage.observations.col.updated')}: {fmtDateTime(item.editedAt || item.createdAt)}
                   </div>
                 </div>
                 {canWrite && (

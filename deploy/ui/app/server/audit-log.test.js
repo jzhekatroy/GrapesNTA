@@ -141,6 +141,16 @@ test('normalizeAuditApiPath avoids double /api prefix', () => {
   );
 });
 
+test('normalizeAuditApiPath prefers originalUrl over stripped req.path', () => {
+  assert.equal(
+    normalizeAuditApiPath({
+      originalUrl: '/api/cabinet/observations',
+      path: '/observations',
+    }),
+    '/api/cabinet/observations',
+  );
+});
+
 test('buildMutatingAuditDetail records dns resolver toggle diff', () => {
   const detail = buildMutatingAuditDetail(
     { method: 'POST', body: { resolverId: 'r1', enabled: 0 } },

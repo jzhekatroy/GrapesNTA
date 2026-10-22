@@ -7,6 +7,8 @@ const path = require('path');
 const {
   assertCabinetPayload,
   CABINET_OBSERVATIONS_MAX,
+  cabinetMaterializeStatus,
+  stripCabinetObservation,
 } = require('./cabinet/observations');
 
 const validWidgets = [
@@ -347,6 +349,82 @@ test('duplicateCabinetObservation сохраняет id привязки', async
       else delete require.cache[resolved];
     }
     delete require.cache[modPath];
+  }
+});
+
+test('cabinetMaterializeStatus: ok + dataThrough → ready', () => {
+  const item = {
+    materialize: {
+      status: 'ok',
+      dataThrough: '2026-10-19T10:00:00.000Z',
+    },
+  };
+  assert.equal(cabinetMaterializeStatus(item), 'ready');
+  assert.equal(stripCabinetObservation(item).cabinetStatus, 'ready');
+});
+
+test('cabinetMaterializeStatus: ok без dataThrough → preparing', () => {
+  const item = { materialize: { status: 'ok' } };
+  assert.equal(cabinetMaterializeStatus(item), 'preparing');
+});
+
+test('общие мутации не затрагивают кабинетное наблюдение', async () => {
+  const cabObs = {
+    id: 'obs-cab',
+    name: 'Cab',
+    ownerId: 'u1',
+    filters: [],
+    widgets: validWidgets,
+    materialize: { enabled: true, status: 'error' },
+    createdAt: '2026-01-01T00:00:00.000Z',
+  };
+  const stubs = {
+    './observation-clients': {
+      loadObservationClients: async () => new Map([['obs-cab', 'client-x']]),
+    },
+    './observations-store': {
+      loadAllObservations: async () => [cabObs],
+      upsertObservation: async () => {
+        throw new Error('upsert should not run');
+      },
+    },
+    './observation-sections': {
+      GENERAL_SECTION_ID: 'general',
+      createObservationSectionContext: async () => ({
+        access: { general: 'edit' },
+        sectionMap: { 'obs-cab': 'general' },
+      }),
+      sectionIdForObservation: () => 'general',
+      canViewInSection: () => true,
+      canEditInSection: () => true,
+    },
+  };
+  const observationsPath = require.resolve('./observations');
+  const saved = {};
+  for (const [rel, exports] of Object.entries(stubs)) {
+    const resolved = require.resolve(rel);
+    saved[resolved] = require.cache[resolved];
+    require.cache[resolved] = { id: resolved, filename: resolved, loaded: true, exports };
+  }
+  delete require.cache[observationsPath];
+  try {
+    const {
+      updateObservation,
+      cancelMaterialize,
+      retryMaterialize,
+      queueMaterialize,
+    } = require(path.join(__dirname, 'observations'));
+    const user = { id: 'u1', roleId: 'Administrator' };
+    assert.equal(await updateObservation('obs-cab', user, { name: 'hack' }), null);
+    assert.equal(await cancelMaterialize('obs-cab', user), null);
+    assert.equal(await retryMaterialize('obs-cab', user), null);
+    assert.equal(await queueMaterialize('obs-cab', user), null);
+  } finally {
+    for (const [resolved, mod] of Object.entries(saved)) {
+      if (mod) require.cache[resolved] = mod;
+      else delete require.cache[resolved];
+    }
+    delete require.cache[observationsPath];
   }
 });
 

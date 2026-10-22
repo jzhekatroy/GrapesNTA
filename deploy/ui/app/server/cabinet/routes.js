@@ -127,6 +127,7 @@ async function writeCabinetObservationAudit(req, {
     detail: JSON.stringify({ client_id: String(clientId || '') }),
     sessionId: String(req.sessionId || ''),
   }).catch(() => {});
+  req.auditObservationEventLogged = true;
 }
 
 function rejectCabinetSessionForStaff(req, res) {
