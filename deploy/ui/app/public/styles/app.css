@@ -6441,6 +6441,41 @@ html.modal-open #root {
   box-shadow: var(--pv-shadow-popover);
   animation: pop .2s var(--pv-ease-out);
 }
+.attack-alert-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.attack-alert-list__item {
+  padding: 12px 14px;
+  border: 1px solid var(--bd-soft);
+  border-radius: var(--pv-radius-md);
+  background: var(--bg-subtle);
+}
+.attack-alert-list__head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.attack-alert-list__target {
+  font: var(--pv-text-body-2-bold);
+  color: var(--fg-primary);
+}
+.attack-alert-list__meta {
+  font: var(--pv-text-body-3);
+  color: var(--fg-secondary);
+  margin-top: 4px;
+}
+.attack-alert-list__detail {
+  font: var(--pv-text-body-3);
+  color: var(--fg-secondary);
+  margin-top: 6px;
+  line-height: 1.45;
+}
 .modal--lg { width: 760px; }
 .modal--xl { width: 960px; }
 .modal--map {

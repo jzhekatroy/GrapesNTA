@@ -13,6 +13,7 @@ const { listObjectThresholds, saveObjectThreshold } = require('./detection-thres
 const { loadExcessAsnTop } = require('./detection-investigate');
 const { loadFlowspecReport } = require('./detection-flowspec-report');
 const { loadFlowspecSummary } = require('./detection-flowspec-summary');
+const { createTestAttack } = require('./detection-test-attack');
 
 function sendError(res, err) {
   const status = Number(err.statusCode) || 500;
@@ -176,6 +177,16 @@ function createDetectionRouter() {
       if (!requireAdmin(req, res)) return;
       await sendTestTelegramMessage();
       res.json({ ok: true });
+    } catch (err) {
+      sendError(res, err);
+    }
+  });
+
+  router.post('/test-attack', async (req, res) => {
+    try {
+      if (!requireAdmin(req, res)) return;
+      const attack = await createTestAttack({ triggeredBy: req.user?.username || req.user?.id });
+      res.json({ ok: true, data: attack });
     } catch (err) {
       sendError(res, err);
     }

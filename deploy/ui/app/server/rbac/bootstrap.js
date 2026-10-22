@@ -38,6 +38,7 @@ function latestRolesCte() {
         name,
         display_name,
         start_page,
+        attack_alert,
         created_at,
         updated_at,
         row_number() OVER (PARTITION BY id ORDER BY updated_at DESC) AS rn
@@ -89,6 +90,7 @@ async function ensureRbacTables() {
         name String,
         display_name String,
         start_page String DEFAULT 'dashboard',
+        attack_alert UInt8 DEFAULT 0,
         created_at DateTime64(3) DEFAULT now64(3),
         updated_at DateTime64(3) DEFAULT now64(3)
       )
@@ -106,6 +108,15 @@ async function ensureRbacTables() {
     `,
     {},
     { name: 'rbac/add-roles-start-page' },
+  );
+
+  await executeCommand(
+    `
+      ALTER TABLE ${rolesTableRef()}
+      ADD COLUMN IF NOT EXISTS attack_alert UInt8 DEFAULT 0
+    `,
+    {},
+    { name: 'rbac/add-roles-attack-alert' },
   );
 
   await executeCommand(
@@ -185,6 +196,7 @@ async function bootstrapStandardRoles() {
       name: role.name,
       display_name: role.displayName,
       start_page: 'dashboard',
+      attack_alert: (role.id === 'Administrator' || role.id === 'Operator') ? 1 : 0,
       created_at: now,
       updated_at: now,
     }));

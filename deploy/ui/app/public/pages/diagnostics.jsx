@@ -1650,6 +1650,42 @@ function TrafficReplayPanel() {
   );
 }
 
+function diagnosticsT(key, params) {
+  return GrapesI18n.t(key, params);
+}
+
+function TestAttackTrigger() {
+  const [busy, setBusy] = useState(false);
+  if (!AuthAccess.canWritePage('diagnostics')) return null;
+
+  const run = async () => {
+    const ok = window.confirm(diagnosticsT('diagnostics.testAttackConfirm'));
+    if (!ok) return;
+    setBusy(true);
+    try {
+      const attack = await ApiClient.triggerTestAttack();
+      pushToast({ kind: 'success', title: diagnosticsT('diagnostics.testAttackDone') });
+      if (attack?.id) {
+        window.dispatchEvent(new CustomEvent('grapes-attack-open', { detail: { attacks: [attack] } }));
+      }
+    } catch (err) {
+      pushToast({
+        kind: 'error',
+        title: diagnosticsT('diagnostics.testAttackFailed'),
+        desc: err.message,
+      });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Button kind="ghost" icon="alert" onClick={run} disabled={busy}>
+      {diagnosticsT('diagnostics.testAttack')}
+    </Button>
+  );
+}
+
 function PageDiagnostics() {
   const [tab, setTab] = useState(() => sessionStorage.getItem('grapes-diagnostics-tab') || 'worker');
   const [workerData, setWorkerData] = useState(null);
@@ -1731,6 +1767,8 @@ function PageDiagnostics() {
             Статус периодических сервисов, журнал ошибок API, синхронизация ERP и ссылки на результаты анализа.
           </div>
         </div>
+        <div className="row" style={{ gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+          <TestAttackTrigger />
         <div className="seg">
           <button
             type="button"
@@ -1788,6 +1826,7 @@ function PageDiagnostics() {
           >
             ERP
           </button>
+        </div>
         </div>
       </div>
 

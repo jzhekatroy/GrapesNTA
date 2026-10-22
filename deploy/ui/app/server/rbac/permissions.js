@@ -37,8 +37,23 @@ function mapRoleRow(row) {
     name: String(row.name),
     displayName: String(row.display_name ?? row.name),
     startPage: normalizeStartPage(row.start_page),
+    attackAlert: Number(row.attack_alert ?? 0) === 1,
     createdAt: row.created_at ?? null,
     updatedAt: row.updated_at ?? null,
+  };
+}
+
+function roleInsertRow(existing, { displayName, startPage, attackAlert, now }) {
+  return {
+    id: existing.id,
+    name: existing.name,
+    display_name: displayName !== undefined ? displayName : existing.displayName,
+    start_page: startPage !== undefined ? startPage : existing.startPage,
+    attack_alert: attackAlert !== undefined
+      ? (attackAlert ? 1 : 0)
+      : (existing.attackAlert ? 1 : 0),
+    created_at: existing.createdAt,
+    updated_at: now,
   };
 }
 
@@ -117,7 +132,7 @@ async function loadRole(roleId) {
   const { rows } = await query(
     `
       WITH ${latestRolesCte()}
-      SELECT id, name, display_name, start_page, created_at, updated_at
+      SELECT id, name, display_name, start_page, attack_alert, created_at, updated_at
       FROM latest
       WHERE rn = 1 AND id = {roleId:String}
       LIMIT 1
@@ -222,7 +237,7 @@ async function listRoles() {
   const { rows, elapsedMs } = await query(
     `
       WITH ${latestRolesCte()}
-      SELECT id, name, display_name, start_page, created_at, updated_at
+      SELECT id, name, display_name, start_page, attack_alert, created_at, updated_at
       FROM latest
       WHERE rn = 1
       ORDER BY name
@@ -286,6 +301,7 @@ async function createRole({ name, displayName }) {
     name: roleName,
     display_name: roleDisplayName,
     start_page: DEFAULT_START_PAGE,
+    attack_alert: 0,
     created_at: now,
     updated_at: now,
   };
@@ -303,7 +319,7 @@ async function createRole({ name, displayName }) {
   return getRoleWithPermissions(roleName);
 }
 
-async function updateRole(roleId, { displayName, startPage, permissions, writePermissions }) {
+async function updateRole(roleId, { displayName, startPage, attackAlert, permissions, writePermissions }) {
   const existing = await loadRole(roleId);
   if (!existing) {
     const err = new Error('Роль не найдена');
@@ -336,27 +352,24 @@ async function updateRole(roleId, { displayName, startPage, permissions, writePe
     ? resolveRoleStartPage(startPage, effectivePermissions)
     : resolveRoleStartPage(existing.startPage, effectivePermissions);
 
-  const roleMetaChanged = displayName !== undefined || startPage !== undefined;
+  const nextAttackAlert = attackAlert !== undefined ? !!attackAlert : existing.attackAlert;
+  const roleMetaChanged = displayName !== undefined
+    || startPage !== undefined
+    || attackAlert !== undefined;
   if (roleMetaChanged) {
-    await insertRows(config.rolesTable, [{
-      id: existing.id,
-      name: existing.name,
-      display_name: nextDisplayName,
-      start_page: nextStartPage,
-      created_at: existing.createdAt,
-      updated_at: now,
-    }], { name: 'rbac/update-role' });
+    await insertRows(config.rolesTable, [roleInsertRow(existing, {
+      displayName: nextDisplayName,
+      startPage: nextStartPage,
+      attackAlert: nextAttackAlert,
+      now,
+    })], { name: 'rbac/update-role' });
   } else if (hasAccessUpdates || hasWriteUpdates) {
     const storedStart = resolveRoleStartPage(existing.startPage, effectivePermissions);
     if (storedStart !== existing.startPage) {
-      await insertRows(config.rolesTable, [{
-        id: existing.id,
-        name: existing.name,
-        display_name: existing.displayName,
-        start_page: storedStart,
-        created_at: existing.createdAt,
-        updated_at: now,
-      }], { name: 'rbac/update-role-start-page' });
+      await insertRows(config.rolesTable, [roleInsertRow(existing, {
+        startPage: storedStart,
+        now,
+      })], { name: 'rbac/update-role-start-page' });
     }
   }
 
@@ -478,6 +491,8 @@ module.exports = {
   DEFAULT_ROLE_ID,
   DEFAULT_NEW_USER_ROLE_ID,
   DEFAULT_START_PAGE,
+  mapRoleRow,
+  roleInsertRow,
   normalizeStartPage,
   resolveRoleStartPage,
   OVERRIDE_MODES,

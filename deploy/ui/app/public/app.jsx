@@ -884,6 +884,7 @@ function App() {
       <main className="main">
         {pageEl}
       </main>
+      <AttackAlertHost user={auth.user} onNavigate={navigate} cabinetMode={cabinetMode} />
       <ToastStack />
     </div>
   );

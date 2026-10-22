@@ -9,6 +9,7 @@ const CLIENT_API_ALLOWLIST = [
   /^\/api\/auth\/logout$/,
   /^\/api\/auth\/locale$/,
   /^\/api\/auth\/stop-impersonation$/,
+  /^\/api\/attack-alerts$/,
   /^\/api\/audit\/page$/,
   /^\/api\/cabinet(\/|$)/,
   /^\/api\/users\/[^/]+\/password$/,

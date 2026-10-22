@@ -18,5 +18,6 @@ deploy/schema/10_flows/02_app_flow_storage_settings.sql
 deploy/schema/10_flows/03_flow_thinning_log.sql
 deploy/schema/60_traffic/32_traffic_service_1h.sql
 deploy/schema/80_rbac/08_roles_start_page.sql
+deploy/schema/80_rbac/09_roles_attack_alert.sql
 deploy/clickhouse/grant_ui_read_isp_dict.sql
 deploy/clickhouse/grant_ui_admin_storage.sql

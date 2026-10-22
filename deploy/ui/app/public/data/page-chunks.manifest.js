@@ -157,6 +157,7 @@ const PAGE_CHUNKS_MANIFEST = {
       '/components/ui.jsx',
       '/components/charts.jsx',
       '/components/shell.jsx',
+      '/components/attack-alert.jsx',
       '/pages/access-denied.jsx',
       '/pages/coming-soon.jsx',
       '/app.jsx',
