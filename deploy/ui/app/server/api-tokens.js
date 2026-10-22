@@ -148,7 +148,7 @@ function createApiTokenStore({
   const store = {
     ttlSec,
 
-    issue(clientId, { ttlSec: ttlOverride } = {}) {
+    issue(clientId, { ttlSec: ttlOverride, skipStats } = {}) {
       const id = String(clientId || '');
       if (!id) throw new TypeError('client_id обязателен для выпуска токена');
       const ttl = Number.isFinite(ttlOverride)
@@ -157,7 +157,9 @@ function createApiTokenStore({
       const token = generateToken();
       const expiresAt = Date.now() + ttl * 1000;
       insert.run(token, id, expiresAt);
-      touchStats(id, 'issue');
+      // skipStats — для самотеста «Монитора»: тестовый токен не должен
+      // накручивать счётчик «обменов токеном» за сутки.
+      if (!skipStats) touchStats(id, 'issue');
       return { token, clientId: id, expiresAt };
     },
 
