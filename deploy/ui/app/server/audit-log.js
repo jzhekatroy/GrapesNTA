@@ -936,6 +936,7 @@ function resolveWriteAction(method, apiPath) {
   if (p === '/api/admin/api-clients/manual' && m === 'POST') return 'api_client_manual_register';
   if (p === '/api/admin/api-clients/activate' && m === 'POST') return 'api_client_activate';
   if (p === '/api/admin/api-clients/deactivate' && m === 'POST') return 'api_client_deactivate';
+  if (p === '/api/admin/api-clients/delete' && m === 'POST') return 'api_client_delete';
   if (p === '/api/admin/api-clients/revoke-tokens' && m === 'POST') return 'api_client_tokens_revoke';
 
   return 'api_write';
@@ -1163,6 +1164,14 @@ function buildListSql(filters) {
     conditions.push('actor_username = {actorUsername:String}');
     params.actorUsername = String(filters.actorUsername);
   }
+  if (filters.objectId) {
+    conditions.push('object_id = {objectId:String}');
+    params.objectId = String(filters.objectId);
+  }
+  if (filters.objectLabel) {
+    conditions.push('object_label = {objectLabel:String}');
+    params.objectLabel = String(filters.objectLabel);
+  }
   if (Array.isArray(filters.actions) && filters.actions.length) {
     conditions.push('action IN {actionsFilter:Array(String)}');
     params.actionsFilter = filters.actions.map((a) => String(a || '')).filter(Boolean);
@@ -1220,6 +1229,8 @@ async function listAuditEvents({
   pageId,
   userId,
   actorUsername,
+  objectId,
+  objectLabel,
   actions,
   kind,
   result,
@@ -1229,7 +1240,7 @@ async function listAuditEvents({
   const safeLimit = Math.min(Math.max(Number(limit) || 100, 1), 500);
   const safeOffset = Math.max(Number(offset) || 0, 0);
   const { where, params } = buildListSql({
-    from, to, q, ip, pageId, userId, actorUsername, actions, kind, result,
+    from, to, q, ip, pageId, userId, actorUsername, objectId, objectLabel, actions, kind, result,
   });
 
   const countResult = await query(
