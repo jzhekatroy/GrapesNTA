@@ -40,6 +40,20 @@ const DEFAULT_EXPLORER_PRESETS = [
 const EXPLORER_DEFAULT_VISUAL_LIMIT = 5;
 /** Rollup наблюдений хранит четыре измерения разреза (dim0…dim3). */
 const OBSERVATION_MAX_GROUP_BY = 4;
+const OBSERVATION_SECTION_STORAGE_KEY = 'grapes-observations-section';
+
+function pickObservationCreateSectionId(sections) {
+  const editSections = (sections || []).filter((s) => s.level === 'edit');
+  if (!editSections.length) return null;
+  let stored = null;
+  try {
+    stored = localStorage.getItem(OBSERVATION_SECTION_STORAGE_KEY);
+  } catch {
+    stored = null;
+  }
+  if (stored && editSections.some((s) => s.id === stored)) return stored;
+  return editSections[0].id;
+}
 const OBSERVATION_COMPOSE_KEY = 'grapes-observation-compose';
 const OBSERVATION_COMPOSE_CHANGED_EVENT = 'grapes-observation-compose';
 
@@ -3077,6 +3091,7 @@ function createExplorerApi(cabinetMode) {
       supportsSavedFilters: true,
       supportsObservations: true,
       maxRangeDays: EXPLORER_MAX_RANGE_DAYS,
+      isCabinet: false,
     };
   }
   return {
@@ -3088,8 +3103,9 @@ function createExplorerApi(cabinetMode) {
     loadSharedSnapshot: (token) => ApiClient.loadExplorerSharedSnapshot(token, true),
     shareSnapshot: (id) => ApiClient.shareExplorerSnapshot(id, true),
     supportsSavedFilters: false,
-    supportsObservations: false,
+    supportsObservations: true,
     maxRangeDays: 6,
+    isCabinet: true,
   };
 }
 
@@ -3175,7 +3191,39 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
   const [showObservationSave, setShowObservationSave] = useState(false);
   const [observationSaveMode, setObservationSaveMode] = useState('create');
   const [editingSaved, setEditingSaved] = useState(null);
-  const canWriteObservation = !cabinetMode && (AuthAccess.canWritePage('observations') || canWrite);
+  const [observationSections, setObservationSections] = useState([]);
+  const observationEditSections = useMemo(
+    () => observationSections.filter((s) => s.level === 'edit'),
+    [observationSections],
+  );
+  const [cabinetObsQuota, setCabinetObsQuota] = useState(null);
+  useEffect(() => {
+    if (!cabinetMode || readOnly) return undefined;
+    let cancelled = false;
+    Promise.all([
+      ApiClient.loadCabinetObservations(),
+      ApiClient.loadCabinetObservationsConfig(),
+    ]).then(([list, cfg]) => {
+      if (cancelled) return;
+      const max = cfg?.maxObservations || 5;
+      setCabinetObsQuota({ used: (list || []).length, max });
+    }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [cabinetMode, readOnly]);
+
+  const atCabinetObsLimit = cabinetMode
+    && cabinetObsQuota
+    && cabinetObsQuota.used >= cabinetObsQuota.max;
+  const canWriteObservation = !readOnly && (
+    cabinetMode
+    || AuthAccess.canWritePage('observations')
+    || canWrite
+  );
+  const canCreateObservation = canWriteObservation && (
+    cabinetMode
+      ? !atCabinetObsLimit
+      : observationEditSections.length > 0
+  );
   const [hasAppliedQuery, setHasAppliedQuery] = useState(false);
   const [appliedSnapshot, setAppliedSnapshot] = useState(null);
   const [queryVersion, setQueryVersion] = useState(0);
@@ -3223,6 +3271,15 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
   useEffect(() => {
     window.__GRAPES_CABINET_EXPLORER__ = cabinetMode;
     return () => { window.__GRAPES_CABINET_EXPLORER__ = false; };
+  }, [cabinetMode]);
+
+  useEffect(() => {
+    if (cabinetMode || !AuthAccess.canWritePage('observations')) return undefined;
+    let cancelled = false;
+    ApiClient.loadObservationSections()
+      .then((list) => { if (!cancelled) setObservationSections(list || []); })
+      .catch(() => { if (!cancelled) setObservationSections([]); });
+    return () => { cancelled = true; };
   }, [cabinetMode]);
 
   useEffect(() => {
@@ -4025,6 +4082,13 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
         }
       }
       if (!updated) {
+        if (!cabinetMode) {
+          const sectionId = pickObservationCreateSectionId(observationSections);
+          if (!sectionId) {
+            pushToast({ kind: 'error', title: explorerT('explorer.obsSaveFailed'), desc: explorerT('observations.section.empty') });
+            return;
+          }
+        }
         const payload = {
           name: (name || '').trim() || explorerT('explorer.observationDefaultName', { metric: metricLabel }),
           description: '',
@@ -4033,17 +4097,24 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
           filters: nextFilters,
           thresholds: validThresholds,
           widgets: buildCreateWidgets('stack'),
-          materialize: { enabled: materializeEnabled !== false },
-          report: {
+          materialize: { enabled: true },
+          report: { enabled: false },
+        };
+        if (!cabinetMode) {
+          payload.sectionId = pickObservationCreateSectionId(observationSections);
+          payload.materialize = { enabled: materializeEnabled !== false };
+          payload.report = {
             enabled: !!reportEnabled,
             period: reportPeriod || 'yesterday',
             cron: '0 8 * * *',
             timezone: 'Europe/Moscow',
             formats: ['html', 'csv'],
             emailTo: [],
-          },
-        };
-        const res = await ApiClient.createObservation(payload);
+          };
+        }
+        const res = cabinetMode
+          ? await ApiClient.createCabinetObservation(payload)
+          : await ApiClient.createObservation(payload);
         id = res.data?.id;
         pushToast({
           kind: 'success',
@@ -4531,7 +4602,7 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
                   {explorerT('explorer.saveAsNewObservation')}
                 </Button>
               </>
-            ) : canWriteObservation ? (
+            ) : canCreateObservation ? (
               <Button kind="primary" size="sm" onClick={openSaveAsObservation}>
                 {explorerT('explorer.addToObservations')}
               </Button>
@@ -4597,7 +4668,7 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
             runDisabled={source === 'loading' || refreshing}
             canWrite={canWrite}
             onSave={() => { setEditingSaved(null); setShowSave(true); }}
-            onSaveAsObservation={canWriteObservation ? (
+            onSaveAsObservation={canCreateObservation ? (
               isObservationComposeEdit(observationCompose) ? openUpdateObservation : openSaveAsObservation
             ) : null}
             saveAsObservationLabel={
@@ -7764,7 +7835,7 @@ function ExplorerFilters({
       {canWrite && (
         <Button kind="ghost" size="sm" icon="save" onClick={onSave}>{explorerT('explorer.save')}</Button>
       )}
-      {canWrite && onSaveAsObservation && (
+      {onSaveAsObservation && (
         <Button kind="primary" size="sm" onClick={onSaveAsObservation}>{saveAsObservationLabel}</Button>
       )}
       {filterMode === 'graphic' && (

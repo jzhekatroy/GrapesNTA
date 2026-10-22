@@ -17,11 +17,17 @@ function isObservationsBoardLayoutPath(path) {
   return p === '/api/observations/board-layout';
 }
 
+function isStaffClientObservationsPath(path) {
+  const p = normalizeApiPath(path);
+  return /^\/api\/cabinet\/[^/]+\/observations(\/|$)/.test(p);
+}
+
 function getResourceForPath(path, method) {
   const p = normalizeApiPath(path);
 
   if (p.startsWith('/api/explorer/')) return 'explorer';
   if (p.startsWith('/api/dns-explorer/')) return 'dns-explorer';
+  if (p.startsWith('/api/observation-sections')) return 'users';
   if (p.startsWith('/api/observations')) return 'observations';
   if (p.startsWith('/api/settings/smtp')) return 'diagnostics';
   if (p.startsWith('/api/dashboard/')) return 'dashboard';
@@ -57,6 +63,7 @@ function getResourceForPath(path, method) {
     return 'audit';
   }
   if (p.startsWith('/api/diagnostics')) return 'diagnostics';
+  if (/^\/api\/cabinet\/[^/]+\/observations(\/|$)/.test(p)) return 'clients';
   if (p.startsWith('/api/cabinet/')) return null;
   if (p.startsWith('/api/clients')) return 'clients';
   if (p.startsWith('/api/users') || p.startsWith('/api/rbac/')) {
@@ -70,6 +77,7 @@ function isResourceGuardExempt(path) {
   const p = normalizeApiPath(path);
   if (p === '/api/health') return true;
   if (p.startsWith('/api/auth/')) return true;
+  if (/^\/api\/cabinet\/[^/]+\/observations(\/|$)/.test(p)) return false;
   if (p.startsWith('/api/cabinet/')) return true;
   return false;
 }
@@ -78,6 +86,8 @@ function isResourceGuardExempt(path) {
 const READ_ONLY_POST_PATHS = [
   /^\/api\/users\/[^/]+\/password(-reset)?$/,
   /^\/api\/observations\/[^/]+\/preview$/,
+  /^\/api\/cabinet\/observations\/[^/]+\/preview$/,
+  /^\/api\/cabinet\/[^/]+\/observations\/[^/]+\/preview$/,
   /^\/api\/explorer\/query$/,
   /^\/api\/explorer\/flows$/,
   /^\/api\/explorer\/export$/,
@@ -104,4 +114,5 @@ module.exports = {
   isMutatingRequest,
   isDashboardLayoutPath,
   isObservationsBoardLayoutPath,
+  isStaffClientObservationsPath,
 };

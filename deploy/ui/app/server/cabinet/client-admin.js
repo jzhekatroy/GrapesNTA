@@ -502,10 +502,15 @@ async function updateClient(clientId, body = {}) {
   if (portsTouched && enabledChanged) {
     await refreshEffectiveRolesAfterClientPorts();
   }
+  if (enabledChanged) {
+    const { setCabinetObservationsMaterialize } = require('./observations');
+    await setCabinetObservationsMaterialize(clientId, enabled === 1);
+  }
   return {
     data,
     meta: { elapsedMs },
     clientDisabled: wasEnabled && enabled === 0,
+    clientEnabled: !wasEnabled && enabled === 1,
   };
 }
 

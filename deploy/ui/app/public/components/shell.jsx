@@ -49,6 +49,7 @@ const NAV = [
         items: [
           { id: 'users', icon: 'shield' },
           { id: 'audit', icon: 'clock' },
+          { id: 'versions', icon: 'tag' },
           { id: 'clients', icon: 'users' },
           { id: 'smtp', icon: 'export' },
           { id: 'ttl', icon: 'clock' },
@@ -96,13 +97,14 @@ const CABINET_NAV = [
     items: [
       { id: 'dashboard', label: '', icon: 'dashboard' },
       { id: 'explorer', label: '', icon: 'explorer' },
+      { id: 'observations', label: '', icon: 'query' },
       { id: 'dns', label: '', icon: 'globe' },
       { id: 'cabinet-settings', label: '', icon: 'sliders' },
     ],
   },
 ];
 
-const CABINET_PAGE_IDS = new Set(['dashboard', 'explorer', 'dns', 'cabinet-settings']);
+const CABINET_PAGE_IDS = new Set(['dashboard', 'explorer', 'observations', 'dns', 'cabinet-settings']);
 
 function isCabinetMode(user) {
   const mode = user?.cabinet?.mode;
@@ -136,13 +138,14 @@ const PAGES_WITHOUT_HEADER_FILTERS = new Set([
   'vlan',
   'smtp',
   'ttl',
+  'versions',
 ]);
 
 function hasNavPermission(effectivePermissions, pageId) {
   if (!effectivePermissions) return true;
   if (pageId === 'snmp') return !!(effectivePermissions.snmp || effectivePermissions.collectors);
   // SMTP API и доступ завязаны на diagnostics (только администратор).
-  if (pageId === 'smtp') return !!effectivePermissions.diagnostics;
+  if (pageId === 'smtp' || pageId === 'versions') return !!effectivePermissions.diagnostics;
   // «Моя сеть» — общая оболочка для cidr / entities / vlan.
   if (pageId === 'cidr') {
     return !!(effectivePermissions.cidr || effectivePermissions.entities || effectivePermissions.vlan);
@@ -398,18 +401,26 @@ function parseUserTimestampMs(value) {
   return Number.isNaN(ms) ? null : ms;
 }
 
-function formatUserDateTime(value, displayTimezone) {
+function formatUserDateTime(value, displayTimezone, { dateOnly = false } = {}) {
   const ms = parseUserTimestampMs(value);
   if (ms == null) return value ? String(value) : '—';
   const tz = displayTimezone || (typeof getDisplayTimezone === 'function' ? getDisplayTimezone() : undefined);
-  return new Date(ms).toLocaleString(GrapesI18n.intlLocale(), {
-    dateStyle: 'short',
-    timeStyle: 'short',
-    ...(tz ? { timeZone: tz } : {}),
-  });
+  const opts = dateOnly
+    ? { dateStyle: 'short', ...(tz ? { timeZone: tz } : {}) }
+    : { dateStyle: 'short', timeStyle: 'short', ...(tz ? { timeZone: tz } : {}) };
+  return new Date(ms).toLocaleString(GrapesI18n.intlLocale(), opts);
 }
 
-function UserAccountMenu({ currentUser, pageTitles, hiddenPageIds, locale, displayTimezone }) {
+function UserAccountMenu({
+  currentUser,
+  pageTitles,
+  hiddenPageIds,
+  locale,
+  displayTimezone,
+  buildInfo,
+  onNavigate,
+  cabinetMode,
+}) {
   const [open, setOpen] = useState(false);
   const [menuStyle, setMenuStyle] = useState(null);
   const rootRef = useRef(null);
@@ -438,6 +449,25 @@ function UserAccountMenu({ currentUser, pageTitles, hiddenPageIds, locale, displ
           || a.title.localeCompare(b.title, coll);
       });
   }, [currentUser, pageTitles, hiddenPageIds, locale]);
+
+  const canDiagnostics = !!currentUser?.effectivePermissions?.diagnostics;
+  const menuVersionLine = useMemo(() => {
+    if (cabinetMode) return null;
+    const raw = buildInfo?.version;
+    const vf = typeof window !== 'undefined' ? window.VersionsFormat : null;
+    if (!raw || !vf) return null;
+    const { display } = vf.parseComponentVersion(raw);
+    if (!display) return null;
+    const date = buildInfo?.versionDate
+      ? formatUserDateTime(buildInfo.versionDate, displayTimezone, { dateOnly: true })
+      : '—';
+    const text = t('user.menuVersion', {
+      product: t('versionsPage.product'),
+      version: display,
+      date,
+    });
+    return { text, clickable: canDiagnostics };
+  }, [buildInfo, cabinetMode, canDiagnostics, displayTimezone]);
 
   useLayoutEffect(() => {
     if (!open) {
@@ -496,6 +526,24 @@ function UserAccountMenu({ currentUser, pageTitles, hiddenPageIds, locale, displ
         <span className="user-menu__meta-label">{t('user.lastPasswordChange')}</span>
         <span className="user-menu__meta-value">{formatUserDateTime(currentUser?.passwordChangedAt, displayTimezone)}</span>
       </div>
+      {menuVersionLine && (
+        <div className="user-menu__meta-row">
+          {menuVersionLine.clickable ? (
+            <button
+              type="button"
+              className="user-menu__meta-link"
+              onClick={() => {
+                setOpen(false);
+                onNavigate?.('versions');
+              }}
+            >
+              {menuVersionLine.text}
+            </button>
+          ) : (
+            <span className="user-menu__meta-value">{menuVersionLine.text}</span>
+          )}
+        </div>
+      )}
     </>
   );
 
@@ -531,7 +579,7 @@ function UserAccountMenu({ currentUser, pageTitles, hiddenPageIds, locale, displ
   );
 }
 
-function Header({ current, onNavigate, onToggleSidebar, currentUser, onLogout, onRefresh, theme, onToggleTheme, timeRange, onTimeRangeChange, customPeriod, onCustomPeriodChange, chartZoomDepth, onChartZoomReset, directions, onDirectionsChange, collectorFilter, onCollectorFilterChange, pageTitles, hiddenPageIds, displayTimezone, timezonePref, onTimezonePrefChange, locale, onLocaleChange, cabinetMode, clientDisplayName, onStopImpersonation }) {
+function Header({ current, onNavigate, onToggleSidebar, currentUser, onLogout, onRefresh, theme, onToggleTheme, timeRange, onTimeRangeChange, customPeriod, onCustomPeriodChange, chartZoomDepth, onChartZoomReset, directions, onDirectionsChange, collectorFilter, onCollectorFilterChange, pageTitles, hiddenPageIds, displayTimezone, timezonePref, onTimezonePrefChange, locale, onLocaleChange, cabinetMode, clientDisplayName, onStopImpersonation, buildInfo }) {
   const titles = pageTitles || PAGE_TITLES || {};
   const meta = GrapesI18n.localizedPageMeta(current, titles[current] || titles.dashboard || { title: current, section: '' });
   const hidePageFilters = cabinetMode
@@ -610,7 +658,16 @@ function Header({ current, onNavigate, onToggleSidebar, currentUser, onLogout, o
           </button>
         </PortalTooltip>
         <span className="hr-v" />
-        <UserAccountMenu currentUser={currentUser} pageTitles={pageTitles} hiddenPageIds={hiddenPageIds} locale={locale} displayTimezone={displayTimezone} />
+        <UserAccountMenu
+          currentUser={currentUser}
+          pageTitles={pageTitles}
+          hiddenPageIds={hiddenPageIds}
+          locale={locale}
+          displayTimezone={displayTimezone}
+          buildInfo={buildInfo}
+          onNavigate={onNavigate}
+          cabinetMode={cabinetMode}
+        />
         {isImpersonating(currentUser) && onStopImpersonation && (
           <Button kind="ghost" size="sm" onClick={onStopImpersonation}>{t('cabinet.exit')}</Button>
         )}

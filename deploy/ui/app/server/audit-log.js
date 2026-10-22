@@ -387,6 +387,7 @@ function chartAuditSnapshot(item) {
     id: String(item.id || ''),
     name: String(item.name || '').trim() || 'Без названия',
     folder: String(item.folder || '').trim() || '—',
+    sectionId: String(item.sectionId || 'general'),
     lookback: String(item.lookback || '—'),
     groupBy: chartGroupBySummary(item.widgets),
     materializeEnabled: Boolean(item.materialize?.enabled),
@@ -407,6 +408,8 @@ function recordChartCreate(body, changes, { duplicateSourceName } = {}) {
   if (name) pushChange(changes, { field: 'name', label: 'Название', from: '—', to: name });
   const folder = pickBodyField(body, 'folder');
   if (folder) pushChange(changes, { field: 'folder', label: 'Папка', from: '—', to: folder });
+  const sectionId = pickBodyField(body, 'sectionId', 'section_id');
+  if (sectionId) pushChange(changes, { field: 'sectionId', label: 'Раздел', from: '—', to: sectionId });
   const lookback = pickBodyField(body, 'lookback');
   if (lookback) pushChange(changes, { field: 'lookback', label: 'Окно графика', from: '—', to: lookback });
   const groupBy = chartGroupBySummary(body?.widgets);
@@ -433,6 +436,15 @@ function diffChartSnapshot(before, body, changes) {
   const nextFolder = pickBodyField(body, 'folder');
   if (nextFolder !== undefined && String(nextFolder) !== String(before.folder)) {
     pushChange(changes, { field: 'folder', label: 'Папка', from: before.folder, to: nextFolder });
+  }
+  const nextSectionId = pickBodyField(body, 'sectionId', 'section_id');
+  if (nextSectionId !== undefined && String(nextSectionId) !== String(before.sectionId)) {
+    pushChange(changes, {
+      field: 'sectionId',
+      label: 'Раздел',
+      from: before.sectionId || 'general',
+      to: nextSectionId || 'general',
+    });
   }
   const nextLookback = pickBodyField(body, 'lookback');
   if (nextLookback !== undefined && String(nextLookback) !== String(before.lookback)) {
@@ -465,6 +477,59 @@ function recordChartDelete(snapshot, changes) {
     from: snapshot.name,
     to: 'удалён',
   });
+}
+
+function observationSectionRolesSummary(roles) {
+  if (!roles || typeof roles !== 'object') return '—';
+  const parts = Object.entries(roles)
+    .filter(([, level]) => level === 'view' || level === 'edit')
+    .map(([roleId, level]) => `${roleId}: ${level === 'edit' ? 'редактирует' : 'видит'}`);
+  return parts.length ? parts.join('; ') : '—';
+}
+
+function recordObservationSectionCreate(body, changes) {
+  const title = pickBodyField(body, 'title');
+  if (title) pushChange(changes, { field: 'title', label: 'Раздел наблюдений', from: '—', to: title });
+}
+
+function diffObservationSectionSnapshot(before, body, changes) {
+  if (!before) return;
+  const nextTitle = pickBodyField(body, 'title');
+  if (nextTitle !== undefined && String(nextTitle) !== String(before.title)) {
+    pushChange(changes, { field: 'title', label: 'Название раздела', from: before.title, to: nextTitle });
+  }
+  if (body?.roles && typeof body.roles === 'object') {
+    const nextSummary = observationSectionRolesSummary(body.roles);
+    const prevSummary = observationSectionRolesSummary(before.roles);
+    if (nextSummary !== prevSummary) {
+      pushChange(changes, { field: 'roles', label: 'Роли раздела', from: prevSummary, to: nextSummary });
+    }
+  }
+  if (body?.sort !== undefined && Number(body.sort) !== Number(before.sort)) {
+    pushChange(changes, {
+      field: 'sort',
+      label: 'Порядок раздела',
+      from: String(before.sort),
+      to: String(body.sort),
+    });
+  }
+}
+
+function recordObservationSectionDelete(snapshot, changes) {
+  if (!snapshot) return;
+  pushChange(changes, {
+    field: 'title',
+    label: 'Раздел наблюдений',
+    from: snapshot.title,
+    to: 'удалён',
+  });
+}
+
+function recordObservationSectionOrder(body, changes) {
+  const ids = Array.isArray(body?.ids) ? body.ids.join(', ') : '';
+  if (ids) {
+    pushChange(changes, { field: 'order', label: 'Порядок разделов', from: '—', to: ids });
+  }
 }
 
 function recordUserCreateFields(body, changes) {
@@ -598,15 +663,28 @@ async function captureAuditBeforeState(req, apiPath) {
     match = apiPath.match(/^\/api\/observations\/([^/]+)$/);
     if (match && (method === 'PUT' || method === 'DELETE')) {
       const { getObservation } = require('./observations');
-      const item = await getObservation(decodeURIComponent(match[1]), req.user?.id);
+      const item = await getObservation(decodeURIComponent(match[1]), req.user);
       return item ? { kind: 'chart', snapshot: chartAuditSnapshot(item) } : null;
     }
 
     match = apiPath.match(/^\/api\/observations\/([^/]+)\/duplicate$/);
     if (match && method === 'POST') {
       const { getObservation } = require('./observations');
-      const item = await getObservation(decodeURIComponent(match[1]), req.user?.id);
+      const item = await getObservation(decodeURIComponent(match[1]), req.user);
       return item ? { kind: 'chart', duplicateOf: item.id, snapshot: chartAuditSnapshot(item) } : null;
+    }
+
+    match = apiPath.match(/^\/api\/observation-sections\/([^/]+)$/);
+    if (match && (method === 'PUT' || method === 'DELETE')) {
+      const { getSectionById, loadSectionRolesForSection } = require('./observation-sections');
+      const sectionId = decodeURIComponent(match[1]);
+      const section = await getSectionById(sectionId);
+      if (!section) return null;
+      const roles = await loadSectionRolesForSection(sectionId);
+      return {
+        kind: 'observationSection',
+        snapshot: { id: section.id, title: section.title, sort: section.sort, roles },
+      };
     }
   } catch {
     return null;
@@ -660,6 +738,14 @@ function buildMutatingAuditDetail(req, apiPath, action, beforeState) {
     diffChartSnapshot(beforeState.snapshot, body, changes);
   } else if (action === 'chart_delete' && beforeState?.kind === 'chart') {
     recordChartDelete(beforeState.snapshot, changes);
+  } else if (action === 'observation_section_create' && method === 'POST') {
+    recordObservationSectionCreate(body, changes);
+  } else if (action === 'observation_section_update' && beforeState?.kind === 'observationSection') {
+    diffObservationSectionSnapshot(beforeState.snapshot, body, changes);
+  } else if (action === 'observation_section_delete' && beforeState?.kind === 'observationSection') {
+    recordObservationSectionDelete(beforeState.snapshot, changes);
+  } else if (action === 'observation_section_order' && method === 'PUT') {
+    recordObservationSectionOrder(body, changes);
   }
 
   const payload = { request };
@@ -830,6 +916,17 @@ function resolveWriteAction(method, apiPath) {
   if (/^\/api\/observations\/[^/]+$/.test(p) && m === 'PUT') return 'chart_update';
   if (/^\/api\/observations\/[^/]+$/.test(p) && m === 'DELETE') return 'chart_delete';
   if (/^\/api\/observations\/[^/]+\/duplicate$/.test(p) && m === 'POST') return 'chart_create';
+  if (/^\/api\/cabinet\/observations$/.test(p) && m === 'POST') return 'chart_create';
+  if (/^\/api\/cabinet\/observations\/[^/]+$/.test(p) && m === 'PUT') return 'chart_update';
+  if (/^\/api\/cabinet\/observations\/[^/]+$/.test(p) && m === 'DELETE') return 'chart_delete';
+  if (/^\/api\/cabinet\/[^/]+\/observations$/.test(p) && m === 'POST') return 'chart_create';
+  if (/^\/api\/cabinet\/[^/]+\/observations\/[^/]+$/.test(p) && m === 'PUT') return 'chart_update';
+  if (/^\/api\/cabinet\/[^/]+\/observations\/[^/]+$/.test(p) && m === 'DELETE') return 'chart_delete';
+
+  if (p === '/api/observation-sections' && m === 'POST') return 'observation_section_create';
+  if (p === '/api/observation-sections/order' && m === 'PUT') return 'observation_section_order';
+  if (/^\/api\/observation-sections\/[^/]+$/.test(p) && m === 'PUT') return 'observation_section_update';
+  if (/^\/api\/observation-sections\/[^/]+$/.test(p) && m === 'DELETE') return 'observation_section_delete';
 
   return 'api_write';
 }
@@ -872,6 +969,17 @@ function resolveObjectFromPath(apiPath, method) {
   if (p.startsWith('/api/observations')) {
     match = p.match(/^\/api\/observations\/([^/]+)/);
     return { objectId: match ? decodeURIComponent(match[1]) : '', objectLabel: 'График' };
+  }
+
+  if (p.startsWith('/api/observation-sections')) {
+    if (p === '/api/observation-sections/order') {
+      return { objectId: '', objectLabel: 'Разделы наблюдений' };
+    }
+    match = p.match(/^\/api\/observation-sections\/([^/]+)/);
+    return {
+      objectId: match ? decodeURIComponent(match[1]) : '',
+      objectLabel: 'Раздел наблюдений',
+    };
   }
 
   return { objectId: '', objectLabel: m === 'POST' ? p : '' };

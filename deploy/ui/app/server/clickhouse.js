@@ -60,6 +60,7 @@ const config = {
   dashboardHourTable: env('CLICKHOUSE_DASHBOARD_HOUR_TABLE', 'traffic_dashboard_1h'),
   dashboardDayTable: env('CLICKHOUSE_DASHBOARD_DAY_TABLE', 'traffic_dashboard_1d'),
   protocolTable: env('CLICKHOUSE_PROTOCOL_TABLE', 'traffic_protocol_1m'),
+  directionTable: env('CLICKHOUSE_DIRECTION_TABLE', 'traffic_direction_1m'),
   serviceTable: env('CLICKHOUSE_SERVICE_TABLE', 'traffic_service_1m'),
   serviceHourTable: env('CLICKHOUSE_SERVICE_HOUR_TABLE', 'traffic_service_1h'),
   unknownPortTable: env('CLICKHOUSE_UNKNOWN_PORT_TABLE', 'traffic_unknown_port_1m'),
@@ -123,6 +124,9 @@ const config = {
   rolesTable: env('CLICKHOUSE_ROLES_TABLE', 'roles'),
   rolePermissionsTable: env('CLICKHOUSE_ROLE_PERMISSIONS_TABLE', 'role_permissions'),
   userPermissionsTable: env('CLICKHOUSE_USER_PERMISSIONS_TABLE', 'user_permissions'),
+  observationSectionsTable: env('CLICKHOUSE_OBSERVATION_SECTIONS_TABLE', 'app_observation_sections'),
+  observationSectionRolesTable: env('CLICKHOUSE_OBSERVATION_SECTION_ROLES_TABLE', 'app_observation_section_roles'),
+  observationSectionMapTable: env('CLICKHOUSE_OBSERVATION_SECTION_MAP_TABLE', 'app_observation_section_map'),
   collectorHealthView: envOpt('CLICKHOUSE_COLLECTOR_HEALTH_VIEW', null),
   collectorHealthSnapshotsTable: env('CLICKHOUSE_COLLECTOR_HEALTH_SNAPSHOTS_TABLE', 'collector_health_snapshots'),
   requestTimeoutMs: envInt('CLICKHOUSE_REQUEST_TIMEOUT_MS', 30000),
@@ -156,6 +160,7 @@ const config = {
     dstEntity: envOpt('CH_COL_DST_ENTITY', 'dst_entity'),
     srcVlan: envOpt('CH_COL_SRC_VLAN', 'src_vlan'),
     dstVlan: envOpt('CH_COL_DST_VLAN', 'dst_vlan'),
+    effVlan: envOpt('CH_COL_EFF_VLAN', 'eff_vlan'),
     vlanId: envOpt('CH_COL_VLAN_ID', 'vlan_id'),
     srcAttachmentKind: envOpt('CH_COL_SRC_ATTACHMENT_KIND', 'src_attachment_kind'),
     dstAttachmentKind: envOpt('CH_COL_DST_ATTACHMENT_KIND', 'dst_attachment_kind'),
@@ -338,6 +343,12 @@ function flowCol(key) {
   return qIdent(name);
 }
 
+/** True only after the live flows_raw column list has been read and contains the column. */
+function flowColumnPresent(key) {
+  const name = config.flowColumns[key];
+  return Boolean(name && flowsRawColumnNames && flowsRawColumnNames.has(name));
+}
+
 function dashboardTableRef() {
   return `${qIdent(config.database)}.${qIdent(config.dashboardTable)}`;
 }
@@ -495,6 +506,10 @@ function protocolTableRef() {
   return `${qIdent(config.database)}.${qIdent(config.protocolTable)}`;
 }
 
+function directionTableRef() {
+  return `${qIdent(config.database)}.${qIdent(config.directionTable)}`;
+}
+
 function serviceTableRef() {
   return `${qIdent(config.database)}.${qIdent(config.serviceTable)}`;
 }
@@ -601,6 +616,18 @@ function rolePermissionsTableRef() {
 
 function userPermissionsTableRef() {
   return `${qIdent(config.database)}.${qIdent(config.userPermissionsTable)}`;
+}
+
+function observationSectionsTableRef() {
+  return `${qIdent(config.database)}.${qIdent(config.observationSectionsTable)}`;
+}
+
+function observationSectionRolesTableRef() {
+  return `${qIdent(config.database)}.${qIdent(config.observationSectionRolesTable)}`;
+}
+
+function observationSectionMapTableRef() {
+  return `${qIdent(config.database)}.${qIdent(config.observationSectionMapTable)}`;
 }
 
 function col(key) {
@@ -823,6 +850,9 @@ function getConfig() {
     rolesTable: config.rolesTable,
     rolePermissionsTable: config.rolePermissionsTable,
     userPermissionsTable: config.userPermissionsTable,
+    observationSectionsTable: config.observationSectionsTable,
+    observationSectionRolesTable: config.observationSectionRolesTable,
+    observationSectionMapTable: config.observationSectionMapTable,
     logSql: config.logSql,
     dataTimezone: config.dataTimezone,
     columns: { ...config.columns },
@@ -894,10 +924,12 @@ module.exports = {
   flowsRawTableRef,
   flowsRawWriteTableRef,
   flowCol,
+  flowColumnPresent,
   dashboardTableRef,
   dashboardHourTableRef,
   dashboardDayTableRef,
   protocolTableRef,
+  directionTableRef,
   serviceTableRef,
   serviceHourTableRef,
   unknownPortTableRef,
@@ -959,6 +991,9 @@ module.exports = {
   rolesTableRef,
   rolePermissionsTableRef,
   userPermissionsTableRef,
+  observationSectionsTableRef,
+  observationSectionRolesTableRef,
+  observationSectionMapTableRef,
   insertRows,
   executeCommand,
   ensureFlowsRawSchema,
