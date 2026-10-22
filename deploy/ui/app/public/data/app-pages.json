@@ -26,6 +26,7 @@
   { "id": "versions", "title": "Версии", "section": "Администрирование", "hidden": true },
   { "id": "clients", "title": "Клиенты", "section": "Администрирование" },
   { "id": "smtp", "title": "Почта (SMTP)", "section": "Администрирование" },
+  { "id": "api-integration-erp", "title": "API интеграция ERP", "section": "Администрирование" },
   { "id": "diagnostics", "title": "Диагностика", "section": "Администрирование" },
   { "id": "ttl", "title": "Хранение данных", "section": "Администрирование" }
 ]
