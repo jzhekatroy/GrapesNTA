@@ -55,6 +55,7 @@ function getResourceForPath(path, method) {
   if (p.startsWith('/api/diagnostics/direction/')) return 'traffic-classification';
   if (p.startsWith('/api/admin/ttl')) return 'ttl';
   if (p.startsWith('/api/admin/flow-storage')) return 'ttl';
+  if (p.startsWith('/api/admin/api-clients')) return 'api-integration-erp';
   if (p.startsWith('/api/erp-piterix')) return 'diagnostics';
   if (p.startsWith('/api/monitoring')) return 'monitoring';
   if (p.startsWith('/api/detection')) return 'diagnostics';
@@ -91,6 +92,8 @@ const READ_ONLY_POST_PATHS = [
   /^\/api\/explorer\/query$/,
   /^\/api\/explorer\/flows$/,
   /^\/api\/explorer\/export$/,
+  /^\/api\/admin\/api-clients\/monitor$/,
+  /^\/api\/admin\/api-clients\/verify-pair$/,
 ];
 
 function isReadOnlyPost(path) {
