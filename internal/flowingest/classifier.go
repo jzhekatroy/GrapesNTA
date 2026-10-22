@@ -87,6 +87,8 @@ type portMacKey struct {
 // ixConfig is the PiterIX cabinet rule. Zero value keeps the old tagging:
 // prefix, then port, on every VLAN. scopeOnly drops flows that are not on an
 // IX VLAN before they are stored. It stays false when the VLAN list is empty.
+// peerMacs is used only while enabled is true, and only to fill the separate
+// IX client columns. It never changes src_client or dst_client.
 type ixConfig struct {
 	enabled   bool
 	macOnPort bool
@@ -94,6 +96,7 @@ type ixConfig struct {
 	vlans     map[uint16]struct{}
 	clients   map[string]struct{}
 	portMacs  map[portMacKey]string
+	peerMacs  map[[6]byte]string
 }
 
 type ClassifierConfig struct {
@@ -127,6 +130,7 @@ type TrafficClassifier struct {
 	bgpSnapshotWarned bool
 	ixLoadWarned      bool
 	ixScopeWarned     bool
+	ixPeerWarned      bool
 }
 
 type classifierState struct {
@@ -357,6 +361,7 @@ func (tc *TrafficClassifier) refreshOnce(ctx context.Context) error {
 		"ix_scope", st.ix.scopeOnly,
 		"ix_vlans", ixVlans,
 		"ix_macs", ixMacs,
+		"ix_peer_macs", len(st.ix.peerMacs),
 		"direction_ports_classified", tc.portsClassified.Load(),
 		"direction_ports_no_ifindex", tc.portsNoIfIndex.Load(),
 		"direction_ports_unmarked", tc.portsUnmarked.Load(),
@@ -770,6 +775,11 @@ func (st *classifierState) lookupClientPrefix(addr netip.Addr) string {
 // With IX accounting on, a PiterIX client ignores the prefix and is tagged only
 // on an IX VLAN and an ERP port. The MAC checkbox further requires that the
 // frame MAC is listed for that port.
+// IX client columns (ix_src_client / ix_dst_client) are filled only when IX
+// accounting is on. They copy the port tag and, on that client's own switch,
+// name the other IX client by MAC. src_client and dst_client stay port-only,
+// so cabinet totals do not count the same traffic twice. IX accounting off
+// leaves the IX columns empty and does not change prefix or port tagging.
 func (tc *TrafficClassifier) AttachClients(r *FlowRow) {
 	if tc == nil || r == nil {
 		return
@@ -778,6 +788,8 @@ func (tc *TrafficClassifier) AttachClients(r *FlowRow) {
 	if st == nil {
 		return
 	}
+	r.IxSrcClient = ""
+	r.IxDstClient = ""
 	ipVersion := IPVersionFromEtype(r.Etype)
 	if srcAddr, ok := addrFromFlow(r.SrcAddr, ipVersion); ok {
 		if id := st.lookupClientPrefix(srcAddr); id != "" {
@@ -805,6 +817,28 @@ func (tc *TrafficClassifier) AttachClients(r *FlowRow) {
 	if r.DstClient == "" && r.OutIf != 0 {
 		if id := st.clientOnPort(r.SamplerAddress, r.OutIf, r.DstMAC, r); id != "" {
 			r.DstClient = id
+		}
+	}
+	if !st.ix.enabled || !st.onIxVlan(r) {
+		return
+	}
+	if _, ok := st.ix.clients[r.SrcClient]; ok {
+		r.IxSrcClient = r.SrcClient
+	}
+	if _, ok := st.ix.clients[r.DstClient]; ok {
+		r.IxDstClient = r.DstClient
+	}
+	// Only the switch where one side is already this client's own port. The
+	// other sample of the same packet keeps the port tag in src_client /
+	// dst_client, and a transit switch matches neither side.
+	if r.IxDstClient != "" && r.IxSrcClient == "" && !st.ixClientPort(r.SamplerAddress, r.InIf) {
+		if id := st.ixPeerByMAC(r.SrcMAC); id != "" {
+			r.IxSrcClient = id
+		}
+	}
+	if r.IxSrcClient != "" && r.IxDstClient == "" && !st.ixClientPort(r.SamplerAddress, r.OutIf) {
+		if id := st.ixPeerByMAC(r.DstMAC); id != "" {
+			r.IxDstClient = id
 		}
 	}
 }
@@ -884,6 +918,73 @@ func (st *classifierState) clientOnPort(sampler [16]byte, ifIndex uint32, mac [6
 	return id
 }
 
+func (st *classifierState) ixClientPort(sampler [16]byte, ifIndex uint32) bool {
+	if st == nil || ifIndex == 0 {
+		return false
+	}
+	id, ok := st.clientPorts[portKey{sampler: sampler, ifIndex: ifIndex}]
+	if !ok || id == "" {
+		return false
+	}
+	_, ixClient := st.ix.clients[id]
+	return ixClient
+}
+
+func (st *classifierState) ixPeerByMAC(mac [6]byte) string {
+	if st == nil || mac == ([6]byte{}) {
+		return ""
+	}
+	return st.ix.peerMacs[mac]
+}
+
+type ixMacBinding struct {
+	clientID string
+	sampler  [16]byte
+	ifIndex  uint32
+	mac      [6]byte
+}
+
+// indexIxMacs builds the port filter and the peer directory. The port filter
+// is filled only when the MAC checkbox is on. The peer directory keeps a MAC
+// only when every binding names the same IX client; a shared MAC is omitted
+// so it is never credited to either client.
+func indexIxMacs(macOnPort bool, ixClients map[string]struct{}, rows []ixMacBinding) (map[portMacKey]string, map[[6]byte]string) {
+	portMacs := map[portMacKey]string{}
+	owners := map[[6]byte]string{}
+	conflict := map[[6]byte]struct{}{}
+	var zero [6]byte
+	for _, row := range rows {
+		if row.clientID == "" || row.ifIndex == 0 {
+			continue
+		}
+		if macOnPort {
+			portMacs[portMacKey{sampler: row.sampler, ifIndex: row.ifIndex, mac: row.mac}] = row.clientID
+		}
+		if row.mac == zero {
+			continue
+		}
+		prev, seen := owners[row.mac]
+		if !seen {
+			owners[row.mac] = row.clientID
+			continue
+		}
+		if prev != row.clientID {
+			conflict[row.mac] = struct{}{}
+		}
+	}
+	peer := map[[6]byte]string{}
+	for mac, clientID := range owners {
+		if _, shared := conflict[mac]; shared {
+			continue
+		}
+		if _, ixClient := ixClients[clientID]; !ixClient {
+			continue
+		}
+		peer[mac] = clientID
+	}
+	return portMacs, peer
+}
+
 func parseMacHex(value string) ([6]byte, bool) {
 	var out [6]byte
 	hexOnly := strings.Builder{}
@@ -948,6 +1049,7 @@ func (tc *TrafficClassifier) loadIxAccounting(ctx context.Context, st *classifie
 		vlans:     map[uint16]struct{}{},
 		clients:   map[string]struct{}{},
 		portMacs:  map[portMacKey]string{},
+		peerMacs:  map[[6]byte]string{},
 	}
 	vlanRows, err := tc.conn.Query(ctx, `
 		SELECT vlan_id FROM default.net_l2_vlans_enabled WHERE ix = 1
@@ -1006,43 +1108,63 @@ func (tc *TrafficClassifier) loadIxAccounting(ctx context.Context, st *classifie
 		return 0, 0
 	}
 	_ = clientRows.Close()
-	if !st.ix.macOnPort {
-		tc.ixLoadWarned = false
-		return vlans, 0
-	}
+	// The peer directory is loaded whenever IX accounting is on. A missing
+	// table must not turn IX off while the MAC checkbox is off: port tagging
+	// stays, and the empty side simply stays empty. The checkbox still fails
+	// closed, because skipping its check would credit every MAC on the port.
 	macRows, err := tc.conn.Query(ctx, `
 		SELECT client_id, switch_ip, if_index, mac FROM default.net_client_port_macs_enabled
 	`)
+	failMacs := func(loadErr error) (int, int) {
+		if st.ix.macOnPort {
+			st.ix = ixConfig{}
+			tc.warnIxOnce("ix macs", loadErr)
+			return 0, 0
+		}
+		tc.warnIxPeerOnce(loadErr)
+		tc.ixLoadWarned = false
+		return vlans, 0
+	}
 	if err != nil {
-		st.ix = ixConfig{}
-		tc.warnIxOnce("ix macs", err)
-		return 0, 0
+		return failMacs(err)
 	}
 	defer macRows.Close()
+	var bindings []ixMacBinding
 	for macRows.Next() {
 		var clientID, switchIP, macText string
 		var ifIndex uint32
 		if err := macRows.Scan(&clientID, &switchIP, &ifIndex, &macText); err != nil {
-			st.ix = ixConfig{}
-			tc.warnIxOnce("ix macs", err)
-			return 0, 0
+			return failMacs(err)
 		}
-		sampler, err := ParseSamplerAddress(switchIP)
+		sampler, parseErr := ParseSamplerAddress(switchIP)
 		mac, ok := parseMacHex(macText)
 		clientID = strings.TrimSpace(clientID)
-		if err != nil || !ok || clientID == "" || ifIndex == 0 {
+		if parseErr != nil || !ok || clientID == "" || ifIndex == 0 {
 			continue
 		}
-		st.ix.portMacs[portMacKey{sampler: sampler, ifIndex: ifIndex, mac: mac}] = clientID
-		macs++
+		bindings = append(bindings, ixMacBinding{
+			clientID: clientID,
+			sampler:  sampler,
+			ifIndex:  ifIndex,
+			mac:      mac,
+		})
 	}
 	if err := macRows.Err(); err != nil {
-		st.ix = ixConfig{}
-		tc.warnIxOnce("ix macs", err)
-		return 0, 0
+		return failMacs(err)
 	}
+	st.ix.portMacs, st.ix.peerMacs = indexIxMacs(st.ix.macOnPort, st.ix.clients, bindings)
 	tc.ixLoadWarned = false
-	return vlans, macs
+	return vlans, len(st.ix.portMacs)
+}
+
+func (tc *TrafficClassifier) warnIxPeerOnce(err error) {
+	if tc == nil || err == nil || tc.ixPeerWarned {
+		return
+	}
+	tc.ixPeerWarned = true
+	if tc.log != nil {
+		tc.log.Warn("ix peer macs unavailable; port tagging unchanged", "err", err)
+	}
 }
 
 func (tc *TrafficClassifier) warnIxOnce(msg string, err error) {

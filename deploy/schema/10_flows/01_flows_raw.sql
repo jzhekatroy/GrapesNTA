@@ -82,6 +82,10 @@ CREATE TABLE IF NOT EXISTS default.flows_raw
     `dst_entity` LowCardinality(String) DEFAULT '' CODEC(ZSTD(3)),
     `src_client` LowCardinality(String) DEFAULT '' CODEC(ZSTD(3)),
     `dst_client` LowCardinality(String) DEFAULT '' CODEC(ZSTD(3)),
+    -- Кто отправил и кому ушло внутри IX. Заполняет только коллектор при
+    -- включённом учёте IX. Обычные src_client и dst_client не меняются.
+    `ix_src_client` LowCardinality(String) DEFAULT '' CODEC(ZSTD(3)),
+    `ix_dst_client` LowCardinality(String) DEFAULT '' CODEC(ZSTD(3)),
     `source_id` LowCardinality(String) DEFAULT 'xdp-default' CODEC(ZSTD(3)),
     `src_mac` FixedString(6) DEFAULT '' CODEC(ZSTD(3)),
     `dst_mac` FixedString(6) DEFAULT '' CODEC(ZSTD(3)),

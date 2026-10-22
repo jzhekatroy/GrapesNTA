@@ -583,6 +583,106 @@ async function overviewLocations(clientId, queryParams = {}) {
   };
 }
 
+async function overviewIxPeers(clientId, queryParams = {}) {
+  try {
+    const flag = await query(`
+      SELECT
+        (
+          SELECT ix_enabled
+          FROM default.app_erp_sync_settings
+          WHERE settings_id = 'global'
+          ORDER BY updated_at DESC
+          LIMIT 1
+        ) AS ix_enabled,
+        (
+          SELECT count()
+          FROM default.net_clients_enabled
+          WHERE client_id = {clientId:String} AND comment = 'erp:piter_ix'
+        ) AS ix_client
+    `, { clientId }, { name: 'cabinet/ix-peers-flag' });
+    if (Number(flag.rows[0]?.ix_enabled) !== 1 || !Number(flag.rows[0]?.ix_client)) {
+      return { data: [], meta: { enabled: false, clientId } };
+    }
+  } catch {
+    return { data: [], meta: { enabled: false, clientId } };
+  }
+  const range = parseRange(queryParams);
+  const time = `f.${col('time')}`;
+  const filter = timeFilterSql(time, range);
+  const bytes = col('bytes');
+  let rows;
+  let elapsedMs = 0;
+  try {
+    const result = await query(`
+    SELECT
+      direction,
+      peer_id,
+      any(peer_name) AS peer_name,
+      sum(bytes) AS bytes
+    FROM
+    (
+      SELECT
+        'in' AS direction,
+        f.ix_src_client AS peer_id,
+        c.display_name AS peer_name,
+        f.${bytes} AS bytes
+      FROM ${flowsRawTableRef()} AS f
+      LEFT JOIN default.net_clients_enabled AS c ON c.client_id = f.ix_src_client
+      WHERE (${filter.sql})
+        AND f.dst_client = {clientId:String}
+      UNION ALL
+      SELECT
+        'out' AS direction,
+        f.ix_dst_client AS peer_id,
+        c.display_name AS peer_name,
+        f.${bytes} AS bytes
+      FROM ${flowsRawTableRef()} AS f
+      LEFT JOIN default.net_clients_enabled AS c ON c.client_id = f.ix_dst_client
+      WHERE (${filter.sql})
+        AND f.src_client = {clientId:String}
+    )
+    GROUP BY direction, peer_id
+    ORDER BY bytes DESC
+    LIMIT 400
+    SETTINGS max_execution_time = 20
+  `, { clientId, ...filter.params }, { name: 'cabinet/overview-ix-peers' });
+    rows = result.rows;
+    elapsedMs = result.elapsedMs;
+  } catch (err) {
+    return {
+      data: [],
+      meta: {
+        enabled: true,
+        clientId,
+        error: String(err.message || err).slice(0, 180),
+      },
+    };
+  }
+  const byPeer = new Map();
+  for (const row of rows) {
+    const peerId = String(row.peer_id || '');
+    let item = byPeer.get(peerId);
+    if (!item) {
+      const name = String(row.peer_name || '').trim();
+      item = {
+        peerId,
+        name: name || (peerId ? peerId : ''),
+        inBytes: 0,
+        outBytes: 0,
+      };
+      byPeer.set(peerId, item);
+    }
+    const value = Number(row.bytes) || 0;
+    if (row.direction === 'out') item.outBytes += value;
+    else item.inBytes += value;
+  }
+  const data = [...byPeer.values()].sort((a, b) => (b.inBytes + b.outBytes) - (a.inBytes + a.outBytes));
+  return {
+    data,
+    meta: { enabled: true, elapsedMs, rows: data.length, clientId, range },
+  };
+}
+
 async function overviewCountries(clientId, queryParams = {}) {
   const range = parseRange(queryParams);
   const { table, bucketColumn } = breakdownTablesForRange(range).country;
@@ -822,6 +922,7 @@ module.exports = {
   overviewStats,
   overviewRecentFlows,
   overviewLocations,
+  overviewIxPeers,
   overviewCountries,
   overviewServices,
   dnsDomains,

@@ -48,6 +48,7 @@ const {
   overviewStats,
   overviewRecentFlows,
   overviewLocations,
+  overviewIxPeers,
   overviewCountries,
   overviewServices,
   dnsDomains,
@@ -220,6 +221,16 @@ function createCabinetRouter({ sessions }) {
     try {
       const clientId = requireScopedClientId(req.cabinet);
       const result = await overviewLocations(clientId, req.query);
+      res.json(result);
+    } catch (err) {
+      sendError(res, err);
+    }
+  });
+
+  router.get('/overview/ix-peers', async (req, res) => {
+    try {
+      const clientId = requireScopedClientId(req.cabinet);
+      const result = await overviewIxPeers(clientId, req.query);
       res.json(result);
     } catch (err) {
       sendError(res, err);
