@@ -171,7 +171,7 @@ function ApiErpCreateModal({ open, onClose, onCreated }) {
       open={open}
       onClose={onClose}
       title="Новое подключение"
-      subtitle="ERP будет обменивать client_id и client_secret на токен через /api/v1/oauth/token"
+      subtitle="Потребитель будет обменивать client_id и client_secret на токен через /api/v1/oauth/token"
       footer={
         <>
           <Button kind="ghost" onClick={onClose} disabled={saving}>Отмена</Button>
@@ -300,12 +300,42 @@ function ApiErpClientModal({
           {canWrite
             ? (
               <>
-                <Button kind="ghost" icon="refresh" disabled={busyAll || !row.active} onClick={() => onRecreate(row)}>Пересоздать</Button>
-                <Button kind="ghost" icon="x" disabled={busyAll || row.activeTokens === 0} onClick={() => onRevokeTokens(row)}>Отозвать токены</Button>
-                <Button kind="ghost" icon={row.active ? 'pause' : 'play'} disabled={busyAll} onClick={() => onToggle(row)}>
+                <Button
+                  kind="ghost"
+                  icon="refresh"
+                  disabled={busyAll || !row.active}
+                  title={row.active ? 'Выпустить новые client_id и секрет' : 'Доступно только активным подключениям'}
+                  onClick={() => onRecreate(row)}
+                >
+                  Пересоздать
+                </Button>
+                <Button
+                  kind="ghost"
+                  icon="x"
+                  disabled={busyAll || row.activeTokens === 0}
+                  title={row.activeTokens === 0 ? 'Нет живых токенов — отзывать нечего' : 'Отозвать все живые токены'}
+                  onClick={() => onRevokeTokens(row)}
+                >
+                  Отозвать токены
+                </Button>
+                <Button
+                  kind="ghost"
+                  icon={row.active ? 'pause' : 'play'}
+                  disabled={busyAll}
+                  title={row.active ? 'Отключить: токены будут отозваны' : 'Включить с прежними кредами'}
+                  onClick={() => onToggle(row)}
+                >
                   {row.active ? 'Отключить' : 'Включить'}
                 </Button>
-                <Button kind="ghost" icon="trash" disabled={busyAll} onClick={() => onDelete(row)}>Удалить</Button>
+                <Button
+                  kind="ghost"
+                  icon="trash"
+                  disabled={busyAll}
+                  title="Удалить подключение безвозвратно; история останется в журнале аудита"
+                  onClick={() => onDelete(row)}
+                >
+                  Удалить
+                </Button>
               </>
             )
             : null}
@@ -355,7 +385,7 @@ function ApiErpClientModal({
                   </div>
                 </div>
                 <div className="col" style={{ gap: 6, font: 'var(--pv-text-body-3)', minWidth: 260 }}>
-                  <div style={{ font: 'var(--pv-text-body-2-bold)' }}>Сторона ERP</div>
+                  <div style={{ font: 'var(--pv-text-body-2-bold)' }}>Сторона потребителя</div>
                   <div>Последний приход: {apiErpFormatAgo(erp.lastUsedAt)}</div>
                   <div>Обменов токеном за сутки: {erp.tokensIssuedToday ?? 0}</div>
                   <div>API-запросов за сутки: {erp.requestsToday ?? 0}</div>
@@ -363,8 +393,8 @@ function ApiErpClientModal({
               </div>
             )}
           <div style={{ color: 'var(--fg-secondary)', font: 'var(--pv-text-body-3)', padding: '0 8px 8px' }}>
-            NTA не может опросить ERP: соединение всегда инициирует ERP. Обмены есть, операций нет —
-            ERP подключён, но ничего не делает; «никогда» — креды до ERP не дошли.
+            Проверяем только свою сторону: соединение всегда инициирует потребитель. Обмены есть,
+            а операций нет — потребитель подключён, но бездействует; «никогда» — кредами ещё не пользовались.
           </div>
         </Card>
 
@@ -404,7 +434,7 @@ function ApiErpClientModal({
         <Card title="Проверить пару id+секрет" pad="sm">
           <div className="col" style={{ gap: 10, padding: 8, font: 'var(--pv-text-body-3)' }}>
             <div style={{ color: 'var(--fg-secondary)' }}>
-              Сравним секрет с хэшем так же, как /oauth/token. Вставьте те же данные, что передали в ERP.
+              Сравним секрет с хэшем так же, как /oauth/token. Вставьте секрет, который передали потребителю.
             </div>
             <div className="field">
               <label>client_secret</label>
@@ -436,6 +466,116 @@ function ApiErpClientModal({
         </Card>
       </div>
     </Modal>
+  );
+}
+
+// Кнопка-меню «ещё» для действий строки: карточка вынесена отдельно,
+// остальное — здесь, чтобы не расползаться иконками.
+function ApiErpRowMenu({ row, busy, onRecreate, onToggle, onRevokeTokens, onDelete }) {
+  const [open, setOpen] = useState(false);
+  const wrapRef = useRef(null);
+
+  useEffect(() => {
+    if (!open) return undefined;
+    const onDoc = (e) => {
+      if (wrapRef.current && !wrapRef.current.contains(e.target)) setOpen(false);
+    };
+    document.addEventListener('mousedown', onDoc);
+    return () => document.removeEventListener('mousedown', onDoc);
+  }, [open]);
+
+  const item = ({ icon, label, danger, disabled, reason, onClick }) => (
+    <button
+      key={label}
+      type="button"
+      disabled={disabled}
+      title={disabled ? reason : undefined}
+      style={{
+        gap: 8,
+        alignItems: 'center',
+        width: '100%',
+        padding: '6px 10px',
+        borderRadius: 6,
+        border: 'none',
+        background: 'transparent',
+        cursor: disabled ? 'default' : 'pointer',
+        color: disabled ? 'var(--fg-muted)' : danger ? 'var(--st-critical)' : 'var(--fg-primary)',
+        font: 'var(--pv-text-body-3)',
+        textAlign: 'left',
+      }}
+      onClick={(e) => {
+        e.stopPropagation();
+        if (!disabled) {
+          setOpen(false);
+          onClick();
+        }
+      }}
+    >
+      <Icon name={icon} size={14} />
+      {label}
+    </button>
+  );
+
+  return (
+    <div ref={wrapRef} style={{ position: 'relative' }}>
+      <button
+        className="icon-btn tt"
+        data-tt="Действия"
+        onClick={(e) => { e.stopPropagation(); setOpen((v) => !v); }}
+      >
+        <Icon name="more" size={15} />
+      </button>
+      {open
+        ? (
+          <div
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              position: 'absolute',
+              right: 0,
+              top: 'calc(100% + 4px)',
+              zIndex: 60,
+              minWidth: 240,
+              background: 'var(--bg-surface-2)',
+              border: '1px solid var(--bd-default)',
+              borderRadius: 10,
+              padding: 6,
+              boxShadow: 'var(--pv-shadow-popover)',
+              display: 'flex',
+              flexDirection: 'column',
+              gap: 2,
+            }}
+          >
+            {item({
+              icon: 'refresh',
+              label: 'Пересоздать креды',
+              disabled: busy !== '' || !row.active,
+              reason: 'Доступно только активным подключениям',
+              onClick: () => onRecreate(row),
+            })}
+            {item({
+              icon: 'x',
+              label: 'Отозвать токены',
+              disabled: busy !== '' || row.activeTokens === 0,
+              reason: 'Нет живых токенов — отзывать нечего',
+              onClick: () => onRevokeTokens(row),
+            })}
+            {item({
+              icon: row.active ? 'pause' : 'play',
+              label: row.active ? 'Отключить' : 'Включить',
+              disabled: busy !== '',
+              onClick: () => onToggle(row),
+            })}
+            {item({
+              icon: 'trash',
+              label: 'Удалить',
+              danger: true,
+              disabled: busy !== '',
+              onClick: () => onDelete(row),
+            })}
+          </div>
+        )
+        : null}
+    </div>
   );
 }
 
@@ -577,7 +717,12 @@ function PageApiIntegrationErp({ currentUser }) {
     {
       key: 'clientId',
       title: 'client_id',
-      render: (r) => <span className="mono">{r.clientId}</span>,
+      width: 240,
+      render: (r) => (
+        <span style={{ display: 'block', maxWidth: '100%', overflow: 'hidden' }}>
+          <OverflowText value={r.clientId} className="mono" />
+        </span>
+      ),
       sortAccessor: (r) => r.clientId,
     },
     {
@@ -601,7 +746,7 @@ function PageApiIntegrationErp({ currentUser }) {
     },
     {
       key: 'lastUsedAt',
-      title: 'Последний приход ERP',
+      title: 'Последний приход',
       width: 170,
       sortAccessor: (r) => r.lastUsedAt || 0,
       render: (r) => <span style={{ color: 'var(--fg-secondary)' }}>{apiErpFormatAgo(r.lastUsedAt)}</span>,
@@ -637,8 +782,8 @@ function PageApiIntegrationErp({ currentUser }) {
     <div className="main__container">
       <div className="page-head">
         <div>
-          <h1>API интеграция ERP</h1>
-          <p>Подключения ERP: выдача кредов, пересоздание, токены, журнал. Контракт Bearer-API — docs/ERP_USERS_API.md.</p>
+          <h1>API интеграции</h1>
+          <p>Управление API подключениями: выдача кредов, пересоздание, токены, журнал.</p>
         </div>
         <div className="row" style={{ gap: 8 }}>
           <Button kind="ghost" icon="refresh" onClick={load} disabled={!payload}>Обновить</Button>
@@ -667,7 +812,7 @@ function PageApiIntegrationErp({ currentUser }) {
             onRowClick={(r) => setCardId(r.clientId)}
             getRowClassName={(r) => (r.active ? '' : 'is-disabled')}
             emptyTitle="Подключений ещё нет"
-            emptyDesc={canWrite ? 'Нажмите «Создать», чтобы выпустить креды для ERP.' : 'Нет ни одного подключения.'}
+            emptyDesc={canWrite ? 'Нажмите «Создать», чтобы выпустить креды.' : 'Нет ни одного подключения.'}
             toolbar={{
               search,
               onSearch: setSearch,
@@ -682,40 +827,14 @@ function PageApiIntegrationErp({ currentUser }) {
                 </button>
                 {canWrite
                   ? (
-                    <>
-                      <button
-                        className="icon-btn tt"
-                        data-tt="Пересоздать (новые client_id и секрет)"
-                        disabled={busy !== '' || !r.active}
-                        onClick={(e) => { e.stopPropagation(); recreate(r); }}
-                      >
-                        <Icon name="refresh" size={15} />
-                      </button>
-                      <button
-                        className="icon-btn tt"
-                        data-tt="Отозвать все токены"
-                        disabled={busy !== '' || r.activeTokens === 0}
-                        onClick={(e) => { e.stopPropagation(); revokeTokens(r); }}
-                      >
-                        <Icon name="x" size={15} />
-                      </button>
-                      <button
-                        className="icon-btn tt"
-                        data-tt={r.active ? 'Отключить' : 'Включить'}
-                        disabled={busy !== ''}
-                        onClick={(e) => { e.stopPropagation(); toggle(r); }}
-                      >
-                        <Icon name={r.active ? 'pause' : 'play'} size={15} />
-                      </button>
-                      <button
-                        className="icon-btn tt"
-                        data-tt="Удалить"
-                        disabled={busy !== ''}
-                        onClick={(e) => { e.stopPropagation(); removeClient(r); }}
-                      >
-                        <Icon name="trash" size={15} />
-                      </button>
-                    </>
+                    <ApiErpRowMenu
+                      row={r}
+                      busy={busy}
+                      onRecreate={recreate}
+                      onToggle={toggle}
+                      onRevokeTokens={revokeTokens}
+                      onDelete={removeClient}
+                    />
                   )
                   : null}
               </div>
