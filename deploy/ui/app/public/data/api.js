@@ -506,6 +506,15 @@ const ApiClient = (() => {
     return body.data || [];
   }
 
+  async function searchCabinetExplorerEntities({ type, q = '', limit = 20 } = {}) {
+    const params = new URLSearchParams();
+    params.set('type', type);
+    if (q) params.set('q', q);
+    if (limit) params.set('limit', String(limit));
+    const body = await getJson(`/api/cabinet/explorer/entities?${params}`, { widget: 'cabinet/explorer/entities' });
+    return body.data || [];
+  }
+
   async function loadExplorerQuery({
     metric = 'bps',
     groupBy = [],
@@ -3321,6 +3330,7 @@ const ApiClient = (() => {
     loadVlanTop,
     loadExplorerSchema,
     searchExplorerEntities,
+    searchCabinetExplorerEntities,
     loadExplorerQuery,
     loadExplorerFlows,
     exportExplorerCsv,

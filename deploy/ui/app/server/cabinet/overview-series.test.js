@@ -89,4 +89,19 @@ test('overviewSeries totals match summed points', async () => {
   assert.equal(result.data.reduce((sum, row) => sum + row.bytes, 0), 350);
   assert.equal(result.data[0].bucketMs, 1786359600 * 1000);
   assert.equal(result.data[2].bucketMs, 1786363200 * 1000);
+  assert.equal(result.meta.ix, false);
+});
+
+test('overviewSeries marks an IX client', async () => {
+  resetCalls();
+  queryResults.push(
+    { rows: [] },
+    { rows: [{ data_until: '2026-08-10 12:00:00' }] },
+    { rows: [{ ix_enabled: 1, ix_client: 1 }] },
+  );
+  const result = await overviewSeries('client:demo', { hours: '24', granularity: 'hour' });
+  const ixCall = calls.find((c) => c.opts?.name === 'cabinet/ix-client');
+  assert.match(ixCall.sql, /comment = 'erp:piter_ix'/);
+  assert.equal(ixCall.params.clientId, 'client:demo');
+  assert.equal(result.meta.ix, true);
 });

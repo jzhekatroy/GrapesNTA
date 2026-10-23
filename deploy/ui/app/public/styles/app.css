@@ -4899,6 +4899,13 @@ body.explorer-chip-dragging * {
 .dashboard-chart-row--share .dashboard-chart-row__pane--distribution {
   flex: 1 1 0;
 }
+.dashboard-chart-row--solo .dashboard-chart-row__pane--main {
+  flex: 1 1 auto;
+}
+.dashboard-chart-row--solo .dashboard-chart-row__splitter,
+.dashboard-chart-row--solo .dashboard-chart-row__pane--distribution {
+  display: none;
+}
 .dashboard-chart-row__pane > .card {
   flex: 1;
   display: flex;
@@ -5512,6 +5519,9 @@ body.explorer-chip-dragging * {
   min-width: 0;
   min-height: 0;
   overflow: hidden;
+}
+.dashboard-stack--vertical .dashboard-stack__item:has(.country-choropleth) {
+  overflow: auto;
 }
 .dashboard-stack--edit .dashboard-stack__item {
   overflow: visible;

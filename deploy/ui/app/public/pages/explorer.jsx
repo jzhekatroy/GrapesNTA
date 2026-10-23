@@ -3099,7 +3099,11 @@ function createExplorerApi(cabinetMode) {
     loadQuery: (opts) => ApiClient.loadCabinetExplorerQuery(opts),
     exportCsv: (opts) => ApiClient.exportCabinetExplorerCsv(opts),
     loadSavedFilters: () => Promise.resolve([]),
-    searchEntities: () => Promise.resolve([]),
+    searchEntities: (opts) => (
+      opts?.type === 'ix_location'
+        ? ApiClient.searchCabinetExplorerEntities(opts)
+        : Promise.resolve([])
+    ),
     loadSharedSnapshot: (token) => ApiClient.loadExplorerSharedSnapshot(token, true),
     shareSnapshot: (id) => ApiClient.shareExplorerSnapshot(id, true),
     supportsSavedFilters: false,
@@ -5556,6 +5560,14 @@ function DimensionPicker({ anchorRef, dimensions, schema, selected, onPick, onCl
   );
 }
 
+function searchExplorerEntityRows({ type, q, limit, switchIp }) {
+  if (window.__GRAPES_CABINET_EXPLORER__) {
+    if (type !== 'ix_location') return Promise.resolve([]);
+    return ApiClient.searchCabinetExplorerEntities({ type, q, limit });
+  }
+  return ApiClient.searchExplorerEntities({ type, q, limit, switchIp });
+}
+
 function EntityPicker({ entityType, value, label, onSelect, onClear, placeholder = explorerT('explorer.searchEntity'), switchIp = '', fullWidth = false }) {
   const rootRef = React.useRef(null);
   const inputRef = React.useRef(null);
@@ -5616,12 +5628,7 @@ function EntityPicker({ entityType, value, label, onSelect, onClear, placeholder
     let cancelled = false;
     setLoading(true);
     const timer = setTimeout(() => {
-      if (window.__GRAPES_CABINET_EXPLORER__) {
-        setItems([]);
-        setLoading(false);
-        return;
-      }
-      ApiClient.searchExplorerEntities({ type: entityType, q, limit: 20, switchIp }).then((rows) => {
+      searchExplorerEntityRows({ type: entityType, q, limit: 20, switchIp }).then((rows) => {
         if (!cancelled) {
           setItems(rows || []);
           setLoading(false);
@@ -5793,12 +5800,7 @@ function ExplorerFilterTextEditor({ value, onChange, error, schema, filters = []
     let cancelled = false;
     setEntityLoading(true);
     const timer = setTimeout(() => {
-      if (window.__GRAPES_CABINET_EXPLORER__) {
-        setEntityItems([]);
-        setEntityLoading(false);
-        return;
-      }
-      ApiClient.searchExplorerEntities({
+      searchExplorerEntityRows({
         type: entityType,
         q,
         limit: 8,

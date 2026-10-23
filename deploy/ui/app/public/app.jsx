@@ -129,6 +129,7 @@ function App() {
   const [periodZoomStack, setPeriodZoomStack] = useState([]);
   const periodRef = useRef({ timeRange, customPeriod });
   const [directions, setDirections] = useState(defaultDirectionsEnabled);
+  const [cabinetDirections, setCabinetDirections] = useState(defaultCabinetDirectionsEnabled);
   const [collectorFilter, setCollectorFilter] = useState([]);
   const [timezonePref, setTimezonePref] = useState(() => loadTimezonePreference());
   const displayTimezone = resolveDisplayTimezone(timezonePref);
@@ -557,6 +558,7 @@ function App() {
   );
 
   const cabinetMode = isCabinetMode(auth.user);
+  DashboardLog.setSuppressed(cabinetMode);
   const cabinetReadOnly = !!auth.user?.cabinet?.readOnly;
   const canManageCabinetObservations = cabinetMode && (
     AuthAccess.canWritePage('clients') || AuthAccess.canWritePage('observations')
@@ -626,6 +628,7 @@ function App() {
             key={`${refreshKey}-${displayTimezone}`}
             onNavigate={navigate}
             directions={directions}
+            cabinetDirections={cabinetDirections}
             timeRange={timeRange}
             customPeriod={customPeriod}
             collectorFilter={collectorFilter}
@@ -867,6 +870,8 @@ function App() {
         onChartZoomReset={resetChartRangeZoom}
         directions={directions}
         onDirectionsChange={setDirections}
+        cabinetDirections={cabinetDirections}
+        onCabinetDirectionsChange={setCabinetDirections}
         collectorFilter={collectorFilter}
         onCollectorFilterChange={setCollectorFilter}
         pageTitles={pageTitles}

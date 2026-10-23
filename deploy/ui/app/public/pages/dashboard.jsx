@@ -528,13 +528,6 @@ function OperatorDashboard({
   );
 }
 
-function cabinetOverviewDirections() {
-  return [
-    { id: 'in', label: dashT('cabinet.direction.toYou'), color: '#51D16D' },
-    { id: 'out', label: dashT('cabinet.direction.fromYou'), color: '#6972F0' },
-  ];
-}
-
 function cabinetOverviewState(result, emptyData) {
   return {
     source: result?.source || 'error',
@@ -545,22 +538,6 @@ function cabinetOverviewState(result, emptyData) {
     loadMs: result?.loadMs ?? null,
     serverMs: result?.serverMs ?? null,
   };
-}
-
-function cabinetStatsForTile(data, tile) {
-  const output = {};
-  for (const direction of ['in', 'out']) {
-    const raw = data?.[tile]?.[direction];
-    if (raw && typeof raw === 'object') {
-      output[direction] = raw;
-    } else if (tile === 'volume') {
-      const bytes = Number(raw) || 0;
-      output[direction] = { gb: (bytes * 8) / 1e9, packets: 0 };
-    } else {
-      output[direction] = { bps: Number(raw) || 0, pps: 0 };
-    }
-  }
-  return output;
 }
 
 function cabinetCountryRows(rows, totalBytes, bounds) {
@@ -593,112 +570,90 @@ function cabinetServiceDonutItems(rows, totalBytes) {
   }));
 }
 
-function cabinetByteLabel(value) {
-  return typeof fmtBytes === 'function' ? fmtBytes(value) : String(value || 0);
+function mergeCabinetRows(rows, keyOf) {
+  const map = new Map();
+  for (const row of rows || []) {
+    const key = keyOf(row);
+    const prev = map.get(key);
+    const bytes = Number(row.bytes) || 0;
+    const packets = Number(row.packets) || 0;
+    const flowsCount = Number(row.flowsCount) || 0;
+    if (!prev) {
+      map.set(key, { ...row, bytes, packets, flowsCount });
+      continue;
+    }
+    prev.bytes += bytes;
+    prev.packets += packets;
+    prev.flowsCount += flowsCount;
+  }
+  return [...map.values()].sort((a, b) => b.bytes - a.bytes);
 }
 
-function OverviewIxLocationsCard({ rows, open, onToggle, loading, failed, error }) {
-  const list = Array.isArray(rows) ? rows : [];
-  return (
-    <Card pad="sm" className="grid--mb">
-      <div className="distribution-card__head">
-        <div>
-          <div className="distribution-card__title">{dashT('cabinet.locations.title')}</div>
-          <div style={{ color: 'var(--fg-secondary)', font: 'var(--pv-text-body-3)' }}>
-            {dashT('cabinet.locations.hint')}
-          </div>
-        </div>
-      </div>
-      {failed ? <DataLoadState>{error || dashT('dashboard.loadFailed')}</DataLoadState> : null}
-      {!failed && loading && !list.length ? <DataLoadState>{dashT('dashboard.loading')}</DataLoadState> : null}
-      {!failed && !loading && !list.length ? (
-        <DataLoadState>{dashT('cabinet.locations.empty')}</DataLoadState>
-      ) : null}
-      {list.length ? (
-        <table className="table" style={{ width: '100%', marginTop: 8 }}>
-          <thead>
-            <tr>
-              <th>{dashT('cabinet.locations.title')}</th>
-              <th className="num">{dashT('cabinet.locations.toYou')}</th>
-              <th className="num">{dashT('cabinet.locations.fromYou')}</th>
-              <th className="num">{dashT('cabinet.locations.vlans')}</th>
-            </tr>
-          </thead>
-          <tbody>
-            {list.map((row) => {
-              const expanded = open.has(row.location);
-              return (
-                <React.Fragment key={row.location}>
-                  <tr>
-                    <td>
-                      <button type="button" className="btn btn--ghost btn--sm" onClick={() => onToggle(row.location)}>
-                        {expanded ? '▾' : '▸'} {row.location}
-                      </button>
-                    </td>
-                    <td className="num mono">{cabinetByteLabel(row.inBytes)}</td>
-                    <td className="num mono">{cabinetByteLabel(row.outBytes)}</td>
-                    <td className="num">{(row.vlans || []).length}</td>
-                  </tr>
-                  {expanded ? (row.vlans || []).map((vlan) => (
-                    <tr key={`${row.location}-${vlan.vlanId}`}>
-                      <td style={{ paddingLeft: 28 }}>VLAN {vlan.vlanId}</td>
-                      <td className="num mono">{cabinetByteLabel(vlan.inBytes)}</td>
-                      <td className="num mono">{cabinetByteLabel(vlan.outBytes)}</td>
-                      <td />
-                    </tr>
-                  )) : null}
-                </React.Fragment>
-              );
-            })}
-          </tbody>
-        </table>
-      ) : null}
-    </Card>
-  );
-}
+// Та же сетка, что у операторского дашборда по умолчанию, без протоколов и топа ASN:
+// для них нет агрегата по клиенту. Правка раскладки клиенту недоступна.
+const CABINET_DASHBOARD_LAYOUT = {
+  version: 3,
+  widgets: [
+    { id: 'traffic-chart', x: 0, y: 0, w: 8, h: 2, visible: true },
+    {
+      id: 'stack-v-cabinet',
+      kind: 'stack',
+      direction: 'vertical',
+      x: 8,
+      y: 0,
+      w: 4,
+      h: 2,
+      visible: true,
+      childIds: ['distribution-services'],
+    },
+    { id: 'distribution-services', x: 0, y: 0, w: 12, h: 2, visible: true, parentStack: 'stack-v-cabinet' },
+    {
+      id: 'stack-h-cabinet',
+      kind: 'stack',
+      direction: 'horizontal',
+      x: 0,
+      y: 2,
+      w: 12,
+      h: 2,
+      visible: true,
+      childIds: ['countries'],
+    },
+    { id: 'countries', x: 0, y: 0, w: 12, h: 2, visible: true, parentStack: 'stack-h-cabinet' },
+    { id: 'recent-flows', x: 0, y: 4, w: 12, h: 1, visible: true },
+  ],
+};
 
-function OverviewIxPeersCard({ rows, loading, failed, error }) {
-  const list = Array.isArray(rows) ? rows : [];
-  return (
-    <Card pad="sm" className="grid--mb">
-      <div className="distribution-card__head">
-        <div>
-          <div className="distribution-card__title">{dashT('cabinet.ixPeers.title')}</div>
-          <div style={{ color: 'var(--fg-secondary)', font: 'var(--pv-text-body-3)' }}>
-            {dashT('cabinet.ixPeers.hint')}
-          </div>
-        </div>
-      </div>
-      {failed ? <DataLoadState>{error || dashT('dashboard.loadFailed')}</DataLoadState> : null}
-      {!failed && loading && !list.length ? <DataLoadState>{dashT('dashboard.loading')}</DataLoadState> : null}
-      {!failed && !loading && !list.length ? (
-        <DataLoadState>{dashT('cabinet.ixPeers.empty')}</DataLoadState>
-      ) : null}
-      {list.length ? (
-        <table className="table" style={{ width: '100%', marginTop: 8 }}>
-          <thead>
-            <tr>
-              <th>{dashT('cabinet.ixPeers.client')}</th>
-              <th className="num">{dashT('cabinet.locations.toYou')}</th>
-              <th className="num">{dashT('cabinet.locations.fromYou')}</th>
-            </tr>
-          </thead>
-          <tbody>
-            {list.map((row) => (
-              <tr key={row.peerId || 'unknown'}>
-                <td>{row.name || dashT('cabinet.ixPeers.unknown')}</td>
-                <td className="num mono">{cabinetByteLabel(row.inBytes)}</td>
-                <td className="num mono">{cabinetByteLabel(row.outBytes)}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      ) : null}
-    </Card>
-  );
-}
+// Пока не известно, IX это или нет, сервисы не показываем.
+const CABINET_DASHBOARD_LAYOUT_LOADING = {
+  version: 3,
+  widgets: [
+    { id: 'traffic-chart', x: 0, y: 0, w: 12, h: 2, visible: true },
+    { id: 'recent-flows', x: 0, y: 2, w: 12, h: 1, visible: true },
+  ],
+};
 
-function CabinetDashboard({ onNavigate, timeRange, customPeriod, displayTimezone, onChartRangeSelect }) {
+// IX: вместо сервисов — география источников, в той же колонке справа от графика.
+const CABINET_IX_DASHBOARD_LAYOUT = {
+  version: 3,
+  widgets: [
+    { id: 'traffic-chart', x: 0, y: 0, w: 8, h: 2, visible: true },
+    {
+      id: 'stack-v-cabinet',
+      kind: 'stack',
+      direction: 'vertical',
+      x: 8,
+      y: 0,
+      w: 4,
+      h: 2,
+      visible: true,
+      childIds: ['countries'],
+    },
+    { id: 'countries', x: 0, y: 0, w: 12, h: 2, visible: true, parentStack: 'stack-v-cabinet' },
+    { id: 'recent-flows', x: 0, y: 2, w: 12, h: 1, visible: true },
+  ],
+};
+
+function CabinetDashboard({ onNavigate, timeRange, customPeriod, displayTimezone, onChartRangeSelect, cabinetDirections }) {
   const i18nLocale = GrapesI18n.getLocale();
   const periodLabel = timeRangeLabel(timeRange, customPeriod);
   const periodKey = `${timeRange}|${customPeriod?.from || ''}|${customPeriod?.to || ''}`;
@@ -707,16 +662,13 @@ function CabinetDashboard({ onNavigate, timeRange, customPeriod, displayTimezone
     () => computeChartPeriodBounds(timeRange, customPeriod),
     [timeRange, customPeriod?.from, customPeriod?.to],
   );
+  const beginDragRef = useRef(null);
+  const directionKey = getCabinetTrafficDirections().map((item) => (cabinetDirections?.[item.id] !== false ? '1' : '0')).join('');
+  const directionParam = directionKey === '10' ? 'in' : directionKey === '01' ? 'out' : directionKey === '00' ? null : '';
   const [series, setSeries] = useState({ source: 'loading', data: [], meta: null });
-  const [stats, setStats] = useState({ source: 'loading', data: null, meta: null });
   const [countries, setCountries] = useState({ source: 'loading', data: [], meta: null });
-  const [locations, setLocations] = useState({ source: 'loading', data: [], meta: null });
-  const [ixPeers, setIxPeers] = useState({ source: 'loading', data: [], meta: null });
-  const [openLocations, setOpenLocations] = useState(() => new Set());
   const [services, setServices] = useState({ source: 'loading', data: [], meta: null });
   const [recent, setRecent] = useState({ source: 'loading', data: [], meta: null });
-  const [countryDirection, setCountryDirection] = useState('in');
-  const [serviceDirection, setServiceDirection] = useState('in');
   const [countryMetric, setCountryMetric] = useState('share');
   const [chartMode, setChartMode] = useState('bw');
   const [chartHidden, setChartHidden] = useState(() => new Set());
@@ -724,73 +676,45 @@ function CabinetDashboard({ onNavigate, timeRange, customPeriod, displayTimezone
   useEffect(() => {
     let cancelled = false;
     setSeries({ source: 'loading', data: [], meta: null });
-    setStats({ source: 'loading', data: null, meta: null });
-    Promise.all([
-      ApiClient.loadCabinetOverviewSeries({ timeRange, customPeriod, granularity: 'auto' }),
-      ApiClient.loadCabinetOverviewStats({ timeRange, customPeriod }),
-    ]).then(([seriesResult, statsResult]) => {
+    ApiClient.loadCabinetOverviewSeries({ timeRange, customPeriod, granularity: 'auto' }).then((seriesResult) => {
       if (cancelled) return;
       setSeries(cabinetOverviewState(seriesResult, []));
-      setStats(cabinetOverviewState(statsResult, null));
     });
     return () => { cancelled = true; };
   }, [periodKey]);
 
   useEffect(() => {
-    let cancelled = false;
-    setLocations((prev) => ({
-      source: 'loading',
-      data: prev.data || [],
-      meta: prev.meta,
-      error: '',
-      status: 0,
-      loadMs: null,
-      serverMs: null,
-    }));
-    ApiClient.loadCabinetOverviewLocations({ timeRange, customPeriod }).then((result) => {
-      if (!cancelled) setLocations(cabinetOverviewState(result, []));
-    });
-    return () => { cancelled = true; };
-  }, [periodKey]);
-
-  useEffect(() => {
-    let cancelled = false;
-    setIxPeers((prev) => ({
-      source: 'loading',
-      data: prev.data || [],
-      meta: prev.meta,
-      error: '',
-      status: 0,
-      loadMs: null,
-      serverMs: null,
-    }));
-    ApiClient.loadCabinetOverviewIxPeers({ timeRange, customPeriod }).then((result) => {
-      if (!cancelled) setIxPeers(cabinetOverviewState(result, []));
-    });
-    return () => { cancelled = true; };
-  }, [periodKey]);
-
-  useEffect(() => {
+    if (directionParam == null) {
+      setCountries({ source: 'clickhouse', data: [], meta: { totalBytes: 0 } });
+      return undefined;
+    }
     let cancelled = false;
     setCountries({ source: 'loading', data: [], meta: null });
     ApiClient.loadCabinetOverviewCountries({
-      timeRange, customPeriod, direction: countryDirection, limit: 20,
+      timeRange, customPeriod, direction: directionParam, limit: 20,
     }).then((result) => {
       if (!cancelled) setCountries(cabinetOverviewState(result, []));
     });
     return () => { cancelled = true; };
-  }, [periodKey, countryDirection]);
+  }, [periodKey, directionParam]);
+
+  const ixKnown = series.source !== 'loading';
+  const ixCabinet = series.meta?.ix === true;
 
   useEffect(() => {
+    if (!ixKnown || ixCabinet || directionParam == null) {
+      setServices({ source: 'clickhouse', data: [], meta: { totalBytes: 0 } });
+      return undefined;
+    }
     let cancelled = false;
     setServices({ source: 'loading', data: [], meta: null });
     ApiClient.loadCabinetOverviewServices({
-      timeRange, customPeriod, direction: serviceDirection, limit: 20,
+      timeRange, customPeriod, direction: directionParam, limit: 20,
     }).then((result) => {
       if (!cancelled) setServices(cabinetOverviewState(result, []));
     });
     return () => { cancelled = true; };
-  }, [periodKey, serviceDirection]);
+  }, [periodKey, directionParam, ixKnown, ixCabinet]);
 
   useEffect(() => {
     let cancelled = false;
@@ -805,6 +729,10 @@ function CabinetDashboard({ onNavigate, timeRange, customPeriod, displayTimezone
     () => cabinetSeriesToChart(series.data, series.meta),
     [series.data, series.meta?.granularity, i18nLocale],
   );
+  const chartLines = useMemo(
+    () => (chart.lines || []).filter((line) => cabinetDirections?.[line.key] !== false),
+    [chart.lines, cabinetDirections],
+  );
   const chartPoints = useMemo(
     () => (chart.points || []).map((point) => ({
       ...point,
@@ -813,15 +741,36 @@ function CabinetDashboard({ onNavigate, timeRange, customPeriod, displayTimezone
     [chart.points, chartLongRange, displayTimezone],
   );
   const countryRows = useMemo(
-    () => cabinetCountryRows(countries.data, countries.meta?.totalBytes, bounds),
+    () => cabinetCountryRows(
+      mergeCabinetRows(countries.data, (row) => row.countryCode),
+      countries.meta?.totalBytes,
+      bounds,
+    ),
     [countries.data, countries.meta?.totalBytes, bounds],
   );
   const serviceItems = useMemo(
-    () => cabinetServiceDonutItems(services.data, services.meta?.totalBytes),
+    () => cabinetServiceDonutItems(
+      mergeCabinetRows(services.data, (row) => [
+        row.serviceCode, row.transport, row.category, row.servicePort, row.portOwner,
+      ].join('|')),
+      services.meta?.totalBytes,
+    ),
     [services.data, services.meta?.totalBytes, i18nLocale],
   );
-  const directionSuffix = (dir) => (
-    dir === 'in' ? dashT('cabinet.periodSuffix.toYou') : dashT('cabinet.periodSuffix.fromYou')
+  const recentRows = useMemo(() => {
+    const rows = recent.data || [];
+    const inOn = cabinetDirections?.in !== false;
+    const outOn = cabinetDirections?.out !== false;
+    if (inOn && outOn) return rows;
+    if (!inOn && !outOn) return [];
+    return rows.filter((flow) => {
+      if (flow.clientSide === 'both') return true;
+      return inOn ? flow.clientSide === 'dst' : flow.clientSide === 'src';
+    });
+  }, [recent.data, cabinetDirections]);
+  const directionLabel = directionSummaryLabel(
+    cabinetDirections || defaultCabinetDirectionsEnabled(),
+    getCabinetTrafficDirections(),
   );
   const toggleChartLine = (key) => setChartHidden((previous) => {
     const next = new Set(previous);
@@ -848,122 +797,92 @@ function CabinetDashboard({ onNavigate, timeRange, customPeriod, displayTimezone
         )}
       </div>
 
-      <div className="grid traffic-stat-grid grid--mb">
-        {stats.source === 'error' ? (
-          <Card style={{ gridColumn: '1 / -1' }}>
-            <OverviewDataState error={stats.error} status={stats.status} />
-          </Card>
-        ) : ['max', 'avg', 'volume'].map((id) => (
-          <OverviewTrafficStatTile
-            key={id}
-            label={dashT(id === 'max' ? 'dashboard.stat.max' : id === 'avg' ? 'dashboard.stat.avg' : 'dashboard.stat.volume')}
-            mode={id === 'volume' ? 'volume' : 'rate'}
-            stats={cabinetStatsForTile(stats.data, id)}
-            directionDefs={cabinetOverviewDirections()}
-            loadMs={stats.loadMs}
-            serverMs={stats.serverMs}
-          />
-        ))}
-      </div>
-
-      <DashboardChartRow distributionMode="share" trendSplit={SHARE_RIGHT_SPLIT} onTrendSplitChange={() => {}}>
-        <OverviewTrafficChartCard
-          title={dashT('dashboard.chart.title')}
-          subtitle={periodLabel}
-          points={chartPoints}
-          lines={chart.lines}
-          ppsLines={chart.lines}
-          mode={chartMode}
-          onModeChange={setChartMode}
-          hiddenKeys={chartHidden}
-          onToggleLine={toggleChartLine}
-          loading={series.source === 'loading'}
-          failed={series.source === 'error'}
-          error={series.error}
-          status={series.status}
-          loadMs={series.loadMs}
-          serverMs={series.serverMs}
-          displayTimezone={displayTimezone}
-          periodStartMs={bounds.startMs}
-          periodEndMs={bounds.endMs}
-          bucketSeconds={chart.bucketSeconds}
-          onRangeSelect={onChartRangeSelect}
-        />
-        <Card pad="sm">
-          <div className="distribution-card__head">
-            <div className="distribution-card__title">{dashT('dashboard.services')}</div>
-            <OverviewDirectionToggle value={serviceDirection} onChange={setServiceDirection} />
-          </div>
-          <div className="distribution-split distribution-split--solo">
-            <OverviewDistributionPane
-              title={dashT('cabinet.services.byVolume')}
-              subtitle={`${periodLabel} · ${directionSuffix(serviceDirection)}`}
-              items={serviceItems}
-              failed={services.source === 'error'}
-              error={services.error}
-              status={services.status}
-              loadMs={services.loadMs}
-              serverMs={services.serverMs}
-              centered
+      <DashboardGrid
+        layout={
+          !ixKnown
+            ? CABINET_DASHBOARD_LAYOUT_LOADING
+            : (ixCabinet ? CABINET_IX_DASHBOARD_LAYOUT : CABINET_DASHBOARD_LAYOUT)
+        }
+        distributionModes={{ protocols: 'share', services: 'share' }}
+        editMode={false}
+        beginDragRef={beginDragRef}
+        onMoveWidget={() => {}}
+        onResizeWidget={() => {}}
+        onResizeWidgetHeight={() => {}}
+        onToggleWidgetVisible={() => {}}
+        onExtractFromStack={() => {}}
+        renderers={{
+          'traffic-chart': () => (
+            <OverviewTrafficChartCard
+              title={dashT('dashboard.chart.title')}
+              subtitle={periodLabel}
+              points={chartPoints}
+              lines={chartLines}
+              ppsLines={chartLines}
+              mode={chartMode}
+              onModeChange={setChartMode}
+              hiddenKeys={chartHidden}
+              onToggleLine={toggleChartLine}
+              loading={series.source === 'loading'}
+              failed={series.source === 'error'}
+              error={series.error}
+              status={series.status}
+              loadMs={series.loadMs}
+              serverMs={series.serverMs}
+              displayTimezone={displayTimezone}
+              periodStartMs={bounds.startMs}
+              periodEndMs={bounds.endMs}
+              bucketSeconds={chart.bucketSeconds}
+              onRangeSelect={onChartRangeSelect}
             />
-          </div>
-        </Card>
-      </DashboardChartRow>
-
-      {locations.meta?.enabled ? (
-        <OverviewIxLocationsCard
-          rows={locations.data}
-          open={openLocations}
-          onToggle={(location) => {
-            setOpenLocations((prev) => {
-              const next = new Set(prev);
-              if (next.has(location)) next.delete(location);
-              else next.add(location);
-              return next;
-            });
-          }}
-          loading={locations.source === 'loading'}
-          failed={locations.source === 'error' || !!locations.meta?.error}
-          error={locations.error || locations.meta?.error}
-        />
-      ) : null}
-
-      {ixPeers.meta?.enabled ? (
-        <OverviewIxPeersCard
-          rows={ixPeers.data}
-          loading={ixPeers.source === 'loading'}
-          failed={ixPeers.source === 'error' || !!ixPeers.meta?.error}
-          error={ixPeers.error || ixPeers.meta?.error}
-        />
-      ) : null}
-
-      <div className="grid grid--1col grid--mb">
-        <OverviewCountryCard
-          subtitle={`${periodLabel} · ${directionSuffix(countryDirection)}`}
-          rows={countryRows}
-          colorMetric={countryMetric}
-          onColorMetricChange={setCountryMetric}
-          extraTools={<OverviewDirectionToggle value={countryDirection} onChange={setCountryDirection} />}
-          loading={countries.source === 'loading'}
-          failed={countries.source === 'error'}
-          error={countries.error}
-          status={countries.status}
-          loadMs={countries.loadMs}
-          serverMs={countries.serverMs}
-          listKey={`${periodKey}|${countryDirection}`}
-        />
-      </div>
-
-      <OverviewRecentFlowsCard
-        rows={recent.data}
-        source={recent.source}
-        error={recent.error}
-        status={recent.status}
-        subtitle={dashT('dashboard.flows.recentSubtitle')}
-        loadMs={recent.loadMs}
-        serverMs={recent.serverMs}
-        displayTimezone={displayTimezone}
-        cabinetMode
+          ),
+          'distribution-services': () => (
+            <Card pad="sm">
+              <div className="distribution-card__head">
+                <div className="distribution-card__title">{dashT('dashboard.services')}</div>
+              </div>
+              <OverviewDistributionPane
+                title={dashT('dashboard.services')}
+                subtitle={dashT('dashboard.dist.l7ByVolume', { period: `${periodLabel} · ${directionLabel}` })}
+                items={serviceItems}
+                failed={services.source === 'error'}
+                error={services.error}
+                status={services.status}
+                loadMs={services.loadMs}
+                serverMs={services.serverMs}
+              />
+            </Card>
+          ),
+          countries: () => (
+            <OverviewCountryCard
+              title={dashT('dashboard.geo.title')}
+              subtitle={`${periodLabel} · ${directionLabel}`}
+              rows={countryRows}
+              colorMetric={countryMetric}
+              onColorMetricChange={setCountryMetric}
+              loading={countries.source === 'loading'}
+              failed={countries.source === 'error'}
+              error={countries.error}
+              status={countries.status}
+              loadMs={countries.loadMs}
+              serverMs={countries.serverMs}
+              listKey={`${periodKey}|${directionKey}`}
+            />
+          ),
+          'recent-flows': () => (
+            <OverviewRecentFlowsCard
+              rows={recentRows}
+              source={recent.source}
+              error={recent.error}
+              status={recent.status}
+              subtitle={directionLabel}
+              loadMs={recent.loadMs}
+              serverMs={recent.serverMs}
+              displayTimezone={displayTimezone}
+              cabinetMode
+            />
+          ),
+        }}
       />
     </div>
   );
@@ -1329,6 +1248,7 @@ function DashboardChartRow({ distributionMode, trendSplit, onTrendSplitChange, c
   const distributionPane = childArray[1];
   const isTrend = distributionMode === 'trend';
   const rowModeClass = isTrend ? ' dashboard-chart-row--trend' : ' dashboard-chart-row--share';
+  const soloClass = distributionPane ? '' : ' dashboard-chart-row--solo';
 
   trendSplitRef.current = trendSplit;
 
@@ -1432,7 +1352,7 @@ function DashboardChartRow({ distributionMode, trendSplit, onTrendSplitChange, c
   return (
     <div
       ref={rowRef}
-      className={`dashboard-chart-row${rowModeClass}`}
+      className={`dashboard-chart-row${rowModeClass}${soloClass}`}
     >
       <div ref={mainPaneRef} className="dashboard-chart-row__pane dashboard-chart-row__pane--main">
         {mainPane}

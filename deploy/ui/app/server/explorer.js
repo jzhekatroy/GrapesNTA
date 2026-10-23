@@ -118,6 +118,7 @@ const FILTER_OPS_BY_TYPE = {
   cabinet_client: ['=', '!=', 'in', 'not_in'],
   ix_client: ['=', '!=', 'in', 'not_in'],
   vlan_name: ['=', '!=', 'contains', 'not_contains', 'in', 'not_in'],
+  ix_location: ['=', '!=', 'contains', 'not_contains', 'in', 'not_in'],
   as_path: ['contains', 'not_contains', 'in', 'not_in', '=', '!='],
 };
 
@@ -127,6 +128,7 @@ const EXPLORER_GROUP = {
   PROTO: 'Протоколы и сервисы / Protocols & services',
   CLIENTS: 'Клиенты / Clients',
   L2: 'L2 и VLAN / L2 & VLAN',
+  LOCATION: 'Локация',
   MY_NETWORK: 'Моя сеть / My network',
   EQUIP: 'Сетевое оборудование / Network equipment',
 };
@@ -310,6 +312,13 @@ const EXPLORER_DIM_META = {
     group: EXPLORER_GROUP.L2,
     aliases: ['имя vlan', 'vlan name', 'display_name'],
   },
+  ix_location: {
+    label: 'Локация',
+    group: EXPLORER_GROUP.LOCATION,
+    filterType: 'ix_location',
+    aliases: ['площадка', 'ix локация', 'location', 'ix location'],
+    valueHint: 'Название площадки IX. Номер VLAN не показывается.',
+  },
   // На ШПД полностью повторяет «VLAN»: dst_vlan там пустой. Остаётся для
   // старых сохранённых запросов.
   src_vlan: { label: 'VLAN источника (raw) / Source VLAN', group: EXPLORER_GROUP.L2, hiddenFromPicker: true },
@@ -469,6 +478,7 @@ function explorerFilterEntityType(filterType) {
   if (filterType === 'source_id') return 'source_id';
   if (filterType === 'vlan') return 'vlan';
   if (filterType === 'vlan_name') return 'vlan_name';
+  if (filterType === 'ix_location') return 'ix_location';
   if (filterType === 'asn') return 'asn';
   if (filterType === 'as_path') return 'asn';
   if (filterType === 'service') return 'service';
@@ -1409,6 +1419,17 @@ function explorerDimensions(options = {}) {
   if (ix) {
     dims.ix_src_client = ixClientDimension('f.ix_src_client');
     dims.ix_dst_client = ixClientDimension('f.ix_dst_client');
+    if (effVlan) {
+      const l2View = l2VlansViewRef();
+      dims.ix_location = {
+        kind: 'ix_location',
+        expr: `if(l2_ix_loc.ix = 1 AND l2_ix_loc.ix_location != '', l2_ix_loc.ix_location, '—')`,
+        filterExpr: `if(l2_ix_loc.ix = 1, l2_ix_loc.ix_location, '')`,
+        joinSql: `
+      LEFT JOIN ${l2View} AS l2_ix_loc
+        ON l2_ix_loc.vlan_id = ${effVlan}`,
+      };
+    }
   }
 
   enrichExplorerDimensions(dims);
@@ -1470,7 +1491,7 @@ function cabinetClientDirectionExpr() {
     + `f.src_client = {cabinet_client_id:String}, 'out', '')`;
 }
 
-const CABINET_IX_FIELD_IDS = new Set(['ix_src_client', 'ix_dst_client']);
+const CABINET_IX_FIELD_IDS = new Set(['ix_src_client', 'ix_dst_client', 'ix_location']);
 
 function cabinetExplorerFieldAllowed(id, options = {}) {
   return CABINET_EXPLORER_FIELD_IDS.has(id) || (Boolean(options.ix) && CABINET_IX_FIELD_IDS.has(id));
@@ -1483,13 +1504,13 @@ function cabinetExplorerDimensions(options = {}) {
     Object.entries(base).filter(([id]) => cabinetExplorerFieldAllowed(id, { ix })),
   );
   for (const id of CABINET_IX_FIELD_IDS) {
-    if (dims[id]) {
-      dims[id] = {
-        ...dims[id],
-        cabinetNoEntityPicker: true,
-        valueHint: 'client_id клиента IX. Пусто или «—» — сторона не определена.',
-      };
-    }
+    if (!dims[id]) continue;
+    if (id === 'ix_location') continue;
+    dims[id] = {
+      ...dims[id],
+      cabinetNoEntityPicker: true,
+      valueHint: 'client_id клиента IX. Пусто или «—» — сторона не определена.',
+    };
   }
   const directionExpr = cabinetClientDirectionExpr();
   dims.client_direction = {
@@ -1513,15 +1534,28 @@ function explorerDimensionsForOptions(options = {}) {
     : explorerDimensions(options);
 }
 
+function withIxLocationGroup(groups) {
+  const withoutLocation = Object.fromEntries(
+    Object.entries(groups).map(([group, ids]) => [
+      group,
+      (ids || []).filter((id) => id !== 'ix_location'),
+    ]),
+  );
+  return {
+    [EXPLORER_GROUP.LOCATION]: ['ix_location'],
+    ...withoutLocation,
+  };
+}
+
 function explorerDimensionGroups(options = {}) {
   if (!options.ix) return DIMENSION_GROUPS;
   if (options.cabinet || options.cabinetClientId) {
-    return {
+    return withIxLocationGroup({
       ...DIMENSION_GROUPS,
       [EXPLORER_GROUP.CLIENTS]: ['client_direction', 'ix_src_client', 'ix_dst_client'],
-    };
+    });
   }
-  return {
+  return withIxLocationGroup({
     ...DIMENSION_GROUPS,
     [EXPLORER_GROUP.CLIENTS]: [
       'cabinet_client',
@@ -1529,7 +1563,7 @@ function explorerDimensionGroups(options = {}) {
       'ix_src_client',
       'ix_dst_client',
     ],
-  };
+  });
 }
 
 function cabinetExplorerValidationError(message) {
@@ -2405,7 +2439,7 @@ async function buildExplorerFilterClauses(filters, dims, params) {
       continue;
     }
 
-    if (dim.filterType === 'vlan_name') {
+    if (dim.filterType === 'vlan_name' || dim.filterType === 'ix_location') {
       const compareExpr = explorerStringCompareExpr(dim);
       const paramName = `filter_${idx++}`;
       if (op === 'contains' || op === 'not_contains') {
@@ -4905,6 +4939,28 @@ async function searchExplorerEntities({ type, q = '', limit = 20, switchIp = '' 
     if (!matchesExplorerAs0Search(search)) return mapped.slice(0, lim);
     const withoutAs0 = mapped.filter((r) => Number(r.value) !== 0);
     return [EXPLORER_AS0_ENTITY, ...withoutAs0].slice(0, lim);
+  }
+
+  if (type === 'ix_location') {
+    const view = l2VlansViewRef();
+    const params = { limit: lim };
+    let where = "ix = 1 AND ix_location != ''";
+    if (search) {
+      params.search = `%${search}%`;
+      where += ' AND positionCaseInsensitive(ix_location, trim(BOTH \'%\' FROM {search:String})) > 0';
+    }
+    const { rows } = await query(`
+      SELECT DISTINCT ix_location
+      FROM ${view}
+      WHERE ${where}
+      ORDER BY ix_location
+      LIMIT {limit:UInt32}
+    `, params, { name: 'explorer/entities-ix-location' });
+    return rows.map((r) => ({
+      id: String(r.ix_location),
+      label: String(r.ix_location),
+      value: String(r.ix_location),
+    }));
   }
 
   if (type === 'vlan') {
