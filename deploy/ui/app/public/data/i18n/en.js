@@ -29,7 +29,7 @@
     'nav.item.versions': 'Versions',
     'nav.item.clients': 'Clients',
     'nav.item.smtp': 'Email (SMTP)',
-    'nav.item.api-integration-erp': 'ERP API integration',
+    'nav.item.api-integration-erp': 'API integrations',
     'nav.item.diagnostics': 'Diagnostics',
     'nav.item.ttl': 'Data storage',
     'nav.item.cabinet-settings': 'Settings',

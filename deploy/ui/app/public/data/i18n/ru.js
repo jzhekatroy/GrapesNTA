@@ -29,7 +29,7 @@
     'nav.item.versions': 'Версии',
     'nav.item.clients': 'Клиенты',
     'nav.item.smtp': 'Почта (SMTP)',
-    'nav.item.api-integration-erp': 'API интеграция ERP',
+    'nav.item.api-integration-erp': 'API интеграции',
     'nav.item.diagnostics': 'Диагностика',
     'nav.item.ttl': 'Хранение данных',
     'nav.item.cabinet-settings': 'Настройки',
