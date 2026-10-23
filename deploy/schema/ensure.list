@@ -10,6 +10,9 @@ deploy/clickhouse/migrate_flows_raw_ix_clients.sql
 deploy/schema/20_dns/11_dns_client_domain_1h.sql
 deploy/schema/80_rbac/05_app_audit_log.sql
 deploy/schema/80_rbac/06_app_erp_sync_settings.sql
+deploy/schema/50_net/06_net_l2_vlans.sql
+deploy/clickhouse/migrate_ix_settings_columns.sql
+deploy/schema/50_net/18_net_l2_vlans_enabled.sql
 deploy/schema/80_rbac/07_erp_piterix_sync_log.sql
 deploy/schema/50_net/45_net_client_prefix_dict.sql
 deploy/schema/50_net/46_net_isp_prefix_dict.sql

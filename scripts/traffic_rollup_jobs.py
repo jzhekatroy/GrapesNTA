@@ -797,7 +797,14 @@ FROM
             f.bytes AS bytes,
             f.packets AS packets,
             f.sampling_rate AS sampling_rate,
-            f.eff_vlan AS eff_vlan,
+            -- Same expression as the eff_vlan column, which older stands
+            -- do not have (deploy does not add it there).
+            multiIf(
+                f.direction = 'out' AND f.src_vlan != 0, f.src_vlan,
+                f.direction = 'in' AND f.dst_vlan != 0, f.dst_vlan,
+                f.src_vlan != 0, f.src_vlan,
+                f.dst_vlan
+            ) AS eff_vlan,
             f.src_asn AS src_asn,
             f.dst_asn AS dst_asn,
             f.src_client AS src_client,
