@@ -137,6 +137,29 @@ function overviewTableForGranularity(granularity) {
   return { table: 'traffic_client_1h', bucketColumn: 'hour' };
 }
 
+async function isCabinetIxClient(clientId) {
+  try {
+    const flag = await query(`
+      SELECT
+        (
+          SELECT ix_enabled
+          FROM default.app_erp_sync_settings
+          WHERE settings_id = 'global'
+          ORDER BY updated_at DESC
+          LIMIT 1
+        ) AS ix_enabled,
+        (
+          SELECT count()
+          FROM default.net_clients_enabled
+          WHERE client_id = {clientId:String} AND comment = 'erp:piter_ix'
+        ) AS ix_client
+    `, { clientId }, { name: 'cabinet/ix-client' });
+    return Number(flag.rows[0]?.ix_enabled) === 1 && Number(flag.rows[0]?.ix_client) > 0;
+  } catch {
+    return false;
+  }
+}
+
 async function lastCompleteBucket(table, bucketColumn, clientId) {
   const { rows } = await query(
     `SELECT ${formatDataDatetimeSql(`max(${bucketColumn})`)} AS data_until FROM default.${table} WHERE client_id = {clientId:String}`,
@@ -191,11 +214,12 @@ async function overviewSeries(clientId, queryParams = {}) {
       GROUP BY ${bucketColumn}, direction
       ORDER BY ${bucketColumn} ASC, direction ASC
     `;
-  const [{ rows, elapsedMs }, dataUntil] = await Promise.all([query(
+  const [{ rows, elapsedMs }, dataUntil, ix] = await Promise.all([query(
     seriesSql,
     { clientId, ...filter.params },
     { name: 'cabinet/overview-series' },
-  ), lastCompleteBucket(table, bucketColumn, clientId)]);
+  ), lastCompleteBucket(table, bucketColumn, clientId),
+  isCabinetIxClient(clientId)]);
 
   const data = rows.map((r) => ({
     bucket: r.bucket,
@@ -223,6 +247,7 @@ async function overviewSeries(clientId, queryParams = {}) {
       granularity,
       totals,
       dataUntil,
+      ix,
     },
   };
 }

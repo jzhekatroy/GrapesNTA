@@ -1,8 +1,15 @@
 /* Логи и метрики загрузки виджетов dashboard (LOG_VERBOSE → /runtime-config.js) */
 
 const DashboardLog = (() => {
+  let suppressed = false;
+
+  // Клиентский кабинет не показывает время загрузки даже при LOG_VERBOSE.
+  function setSuppressed(value) {
+    suppressed = !!value;
+  }
+
   function isVerbose() {
-    return window.__GRAPES_RUNTIME__?.verbose === true;
+    return !suppressed && window.__GRAPES_RUNTIME__?.verbose === true;
   }
 
   function tag(widget) {
@@ -49,7 +56,7 @@ const DashboardLog = (() => {
     };
   }
 
-  return { fetchStart, widgetStart, batchStart, isVerbose };
+  return { fetchStart, widgetStart, batchStart, isVerbose, setSuppressed };
 })();
 
 Object.assign(window, { DashboardLog });

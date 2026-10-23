@@ -234,6 +234,21 @@ describe('explorer query shape', () => {
     assert.doesNotMatch(plain.sql, /ix_src_client|ix_dst_client/);
   });
 
+  it('в режиме IX группирует локацию по названию площадки', async () => {
+    const spec = await explorerFlows({
+      ...WINDOW,
+      groupBy: ['ix_location'],
+      filters: [{ field: 'ix_location', op: '=', value: 'Рига' }],
+    }, { ix: true });
+    assert.match(spec.sql, /l2_ix_loc\.ix = 1 AND l2_ix_loc\.ix_location != ''/);
+    assert.match(spec.sql, /l2_ix_loc\.ix_location, ''\)\) = \{filter_0:String\}/);
+    assert.equal(spec.params.filter_0, 'Рига');
+    assert.doesNotMatch(spec.sql, /toString\(l2_ix_loc\.vlan_id\)|concat\('VLAN'/);
+    assert.equal(spec.meta.groupBy[0].label, 'Локация');
+    const plain = await explorerFlows({ ...WINDOW, groupBy: ['vlan'] });
+    assert.doesNotMatch(plain.sql, /l2_ix_loc/);
+  });
+
   it('кладёт сумму всех групп в окно таблицы, до отсечения лимитом', async () => {
     const spec = await explorerFlows({
       ...WINDOW,

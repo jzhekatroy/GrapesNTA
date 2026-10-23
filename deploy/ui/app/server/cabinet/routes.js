@@ -8,6 +8,7 @@ const {
 const {
   executeExplorerQueryBundle,
   explorerRuntimeOptions,
+  searchExplorerEntities,
 } = require('../explorer');
 const { CLIENTS_RESOURCE } = require('./constants');
 const { getEnabledClient, fillClientDisplayName } = require('./clients-lookup');
@@ -282,6 +283,25 @@ function createCabinetRouter({ sessions }) {
     try {
       requireScopedClientId(req.cabinet);
       res.json({ data: cabinetExplorerSchema(await explorerRuntimeOptions()) });
+    } catch (err) {
+      sendError(res, err, err.statusCode || 502);
+    }
+  });
+
+  router.get('/explorer/entities', async (req, res) => {
+    try {
+      requireScopedClientId(req.cabinet);
+      const runtime = await explorerRuntimeOptions();
+      if (!runtime.ix || String(req.query.type || '') !== 'ix_location') {
+        res.json({ data: [] });
+        return;
+      }
+      const data = await searchExplorerEntities({
+        type: 'ix_location',
+        q: req.query.q,
+        limit: req.query.limit,
+      });
+      res.json({ data });
     } catch (err) {
       sendError(res, err, err.statusCode || 502);
     }

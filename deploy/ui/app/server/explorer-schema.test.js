@@ -16,6 +16,7 @@ const HIDDEN_PICKER = new Set([
 ]);
 
 const CLIENTS_CATALOG = 'Клиенты / Clients';
+const L2_GROUP = 'L2 и VLAN / L2 & VLAN';
 const MY_NETWORK_CATALOG = 'Моя сеть / My network';
 
 describe('explorer schema field naming', () => {
@@ -212,6 +213,7 @@ describe('explorer schema field naming', () => {
     const schema = explorerSchema();
     assert.equal(schema.filterFields.some((f) => f.id === 'ix_src_client'), false);
     assert.equal(schema.dimensions.some((d) => d.id === 'ix_dst_client'), false);
+    assert.equal(schema.dimensions.some((d) => d.id === 'ix_location'), false);
     assert.deepEqual(schema.dimensionGroups[CLIENTS_CATALOG], ['cabinet_client', 'client_direction']);
     const expr = explorerDimensions().client_direction.filterExpr;
     assert.doesNotMatch(expr, /ix_src_client|ix_dst_client/);
@@ -235,8 +237,19 @@ describe('explorer schema field naming', () => {
     const expr = explorerDimensions({ ix: true }).client_direction.filterExpr;
     assert.match(expr, /f\.ix_src_client != '' AND f\.ix_dst_client != '', 'between'/);
     assert.match(expr, /f\.dst_client != '', 'in'/);
+    const location = schema.filterFields.find((f) => f.id === 'ix_location');
+    assert.equal(location?.label, 'Локация');
+    assert.equal(location?.entityType, 'ix_location');
+    assert.ok(schema.dimensions.some((d) => d.id === 'ix_location'));
+    assert.deepEqual(schema.dimensionGroups['Локация'], ['ix_location']);
+    assert.equal(schema.dimensionGroups[L2_GROUP].includes('ix_location'), false);
+    assert.doesNotMatch(explorerDimensions({ ix: true }).ix_location.expr, /vlan_id|VLAN/);
     const cabinet = explorerSchema({ cabinet: true, ix: true });
     assert.equal(cabinet.filterFields.find((f) => f.id === 'ix_src_client')?.entityType, null);
+    assert.equal(cabinet.filterFields.find((f) => f.id === 'ix_location')?.label, 'Локация');
+    assert.equal(cabinet.filterFields.find((f) => f.id === 'ix_location')?.entityType, 'ix_location');
+    assert.ok(cabinet.dimensions.some((d) => d.id === 'ix_location'));
+    assert.deepEqual(cabinet.dimensionGroups['Локация'], ['ix_location']);
     assert.equal(cabinet.filterFields.some((f) => f.id === 'cabinet_client'), false);
     assert.doesNotMatch(
       explorerDimensionsForOptions({ cabinet: true, ix: true }).client_direction.filterExpr,

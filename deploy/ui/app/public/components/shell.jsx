@@ -96,8 +96,8 @@ const CABINET_NAV = [
     section: '',
     items: [
       { id: 'dashboard', label: '', icon: 'dashboard' },
-      { id: 'explorer', label: '', icon: 'explorer' },
       { id: 'observations', label: '', icon: 'query' },
+      { id: 'explorer', label: '', icon: 'explorer' },
       { id: 'dns', label: '', icon: 'globe' },
       { id: 'cabinet-settings', label: '', icon: 'sliders' },
     ],
@@ -585,13 +585,14 @@ function UserAccountMenu({
   );
 }
 
-function Header({ current, onNavigate, onToggleSidebar, currentUser, onLogout, onRefresh, theme, onToggleTheme, timeRange, onTimeRangeChange, customPeriod, onCustomPeriodChange, chartZoomDepth, onChartZoomReset, directions, onDirectionsChange, collectorFilter, onCollectorFilterChange, pageTitles, hiddenPageIds, displayTimezone, timezonePref, onTimezonePrefChange, locale, onLocaleChange, cabinetMode, clientDisplayName, onStopImpersonation, buildInfo }) {
+function Header({ current, onNavigate, onToggleSidebar, currentUser, onLogout, onRefresh, theme, onToggleTheme, timeRange, onTimeRangeChange, customPeriod, onCustomPeriodChange, chartZoomDepth, onChartZoomReset, directions, onDirectionsChange, cabinetDirections, onCabinetDirectionsChange, collectorFilter, onCollectorFilterChange, pageTitles, hiddenPageIds, displayTimezone, timezonePref, onTimezonePrefChange, locale, onLocaleChange, cabinetMode, clientDisplayName, onStopImpersonation, buildInfo }) {
   const titles = pageTitles || PAGE_TITLES || {};
   const meta = GrapesI18n.localizedPageMeta(current, titles[current] || titles.dashboard || { title: current, section: '' });
   const hidePageFilters = cabinetMode
     ? (current === 'explorer' || current === 'cabinet-settings')
     : PAGES_WITHOUT_HEADER_FILTERS.has(current);
   const hideDirectionFilter = current === 'dns' || cabinetMode;
+  const showCabinetDirectionFilter = cabinetMode && current === 'dashboard' && !!cabinetDirections;
   const hideCollectorFilter = cabinetMode;
   const sectionLabel = cabinetMode ? (clientDisplayName || t('cabinet.clientPortalFallback')) : meta.section;
   return (
@@ -612,6 +613,13 @@ function Header({ current, onNavigate, onToggleSidebar, currentUser, onLogout, o
                 <DirectionFilter
                   directions={directions}
                   onDirectionsChange={onDirectionsChange}
+                />
+              )}
+              {showCabinetDirectionFilter && (
+                <DirectionFilter
+                  directions={cabinetDirections}
+                  onDirectionsChange={onCabinetDirectionsChange}
+                  items={getCabinetTrafficDirections()}
                 />
               )}
               {!hideCollectorFilter && (
@@ -720,6 +728,19 @@ function getTrafficDirections() {
 
 function defaultDirectionsEnabled() {
   return Object.fromEntries(TRAFFIC_DIRECTION_SPECS.map((d) => [d.id, true]));
+}
+
+const CABINET_DIRECTION_SPECS = [
+  { id: 'in', labelKey: 'cabinet.direction.toYou', color: '#51D16D' },
+  { id: 'out', labelKey: 'cabinet.direction.fromYou', color: '#6972F0' },
+];
+
+function getCabinetTrafficDirections() {
+  return CABINET_DIRECTION_SPECS.map((d) => ({ id: d.id, color: d.color, label: t(d.labelKey) }));
+}
+
+function defaultCabinetDirectionsEnabled() {
+  return Object.fromEntries(CABINET_DIRECTION_SPECS.map((d) => [d.id, true]));
 }
 
 function toDatetimeLocalValue(date) {
@@ -950,8 +971,8 @@ function getTimezonePresets() {
   }));
 }
 
-function directionSummaryLabel(directions) {
-  const dirs = getTrafficDirections();
+function directionSummaryLabel(directions, items) {
+  const dirs = items || getTrafficDirections();
   const enabled = dirs.filter((d) => directions[d.id]);
   if (enabled.length === dirs.length) return t('directions.all');
   if (enabled.length === 0) return t('directions.none');
@@ -1909,18 +1930,18 @@ function TimeFilter({
   );
 }
 
-function DirectionFilter({ directions, onDirectionsChange, embedded = false, formatSummary }) {
+function DirectionFilter({ directions, onDirectionsChange, embedded = false, formatSummary, items }) {
   const [open, setOpen] = useState(false);
   const [menuStyle, setMenuStyle] = useState(null);
   const rootRef = useRef(null);
   const addRef = useRef(null);
   const menuRef = useRef(null);
 
-  const trafficDirections = getTrafficDirections();
+  const trafficDirections = items || getTrafficDirections();
   const enabledDirections = trafficDirections.filter((d) => directions[d.id]);
   const enabledCount = enabledDirections.length;
   const allEnabled = enabledCount === trafficDirections.length;
-  const summary = (formatSummary || directionSummaryLabel)(directions);
+  const summary = formatSummary ? formatSummary(directions) : directionSummaryLabel(directions, items);
 
   const toggleDirection = (id) => {
     onDirectionsChange({ ...directions, [id]: !directions[id] });
@@ -2611,7 +2632,7 @@ function setPageTitles(map) {
 Object.assign(window, {
   Sidebar, Header, NAV, CABINET_NAV, CABINET_PAGE_IDS, PAGE_TITLES, setPageTitles, GrapesGlyph,
   isCabinetMode, isImpersonating, ImpersonationBanner,
-  TRAFFIC_DIRECTION_SPECS, defaultDirectionsEnabled,
+  TRAFFIC_DIRECTION_SPECS, defaultDirectionsEnabled, getCabinetTrafficDirections, defaultCabinetDirectionsEnabled,
   defaultCustomPeriod, formatCustomPeriodLabel, normalizeCustomPeriodValue, normalizeCustomPeriod, validateCustomPeriod, validateExplorerCustomPeriod, explorerRangeLimitDays, timeRangePresetMs, EXPLORER_MAX_RANGE_DAYS, timeRangeLabel, timeRangeChipLabel, yesterdayCustomPeriod, isYesterdayPeriod,
   toDatetimeLocalValue, dnsBucketSecondsFromMode, explorerGranularityBucketSeconds,
   collectorFilterLabel, directionSummaryLabel, LanguageSelector, TimezoneSelector, CollectorFilter,
