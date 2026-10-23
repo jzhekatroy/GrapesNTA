@@ -490,19 +490,7 @@ function ApiErpRowMenu({ row, busy, onRecreate, onToggle, onRevokeTokens, onDele
       type="button"
       disabled={disabled}
       title={disabled ? reason : undefined}
-      style={{
-        gap: 8,
-        alignItems: 'center',
-        width: '100%',
-        padding: '6px 10px',
-        borderRadius: 6,
-        border: 'none',
-        background: 'transparent',
-        cursor: disabled ? 'default' : 'pointer',
-        color: disabled ? 'var(--fg-muted)' : danger ? 'var(--st-critical)' : 'var(--fg-primary)',
-        font: 'var(--pv-text-body-3)',
-        textAlign: 'left',
-      }}
+      className={`api-erp-menu__item${danger ? ' api-erp-menu__item--danger' : ''}`}
       onClick={(e) => {
         e.stopPropagation();
         if (!disabled) {
@@ -527,24 +515,7 @@ function ApiErpRowMenu({ row, busy, onRecreate, onToggle, onRevokeTokens, onDele
       </button>
       {open
         ? (
-          <div
-            onClick={(e) => e.stopPropagation()}
-            style={{
-              position: 'absolute',
-              right: 0,
-              top: 'calc(100% + 4px)',
-              zIndex: 60,
-              minWidth: 240,
-              background: 'var(--bg-surface-2)',
-              border: '1px solid var(--bd-default)',
-              borderRadius: 10,
-              padding: 6,
-              boxShadow: 'var(--pv-shadow-popover)',
-              display: 'flex',
-              flexDirection: 'column',
-              gap: 2,
-            }}
-          >
+          <div className="api-erp-menu" onClick={(e) => e.stopPropagation()}>
             {item({
               icon: 'refresh',
               label: 'Пересоздать креды',
@@ -588,6 +559,7 @@ function PageApiIntegrationErp({ currentUser }) {
   const [error, setError] = useState('');
   const [forbidden, setForbidden] = useState(false);
   const [busy, setBusy] = useState('');
+  const [refreshing, setRefreshing] = useState(false);
   const [search, setSearch] = useState('');
   const [showCreate, setShowCreate] = useState(false);
   const [issued, setIssued] = useState(null);
@@ -610,6 +582,15 @@ function PageApiIntegrationErp({ currentUser }) {
   }, []);
 
   useEffect(() => { load(); }, [load]);
+
+  const refresh = async () => {
+    setRefreshing(true);
+    try {
+      await load();
+    } finally {
+      setRefreshing(false);
+    }
+  };
 
   const run = async (key, fn) => {
     setBusy(key);
@@ -786,7 +767,15 @@ function PageApiIntegrationErp({ currentUser }) {
           <p>Управление API подключениями: выдача кредов, пересоздание, токены, журнал.</p>
         </div>
         <div className="row" style={{ gap: 8 }}>
-          <Button kind="ghost" icon="refresh" onClick={load} disabled={!payload}>Обновить</Button>
+          <Button
+            kind="ghost"
+            icon="refresh"
+            onClick={refresh}
+            disabled={refreshing || !payload}
+            title="Перечитать список подключений и журнал с сервера"
+          >
+            {refreshing ? 'Обновляю…' : 'Обновить'}
+          </Button>
           {canWrite
             ? <Button kind="primary" icon="plus" onClick={() => setShowCreate(true)}>Создать</Button>
             : null}
