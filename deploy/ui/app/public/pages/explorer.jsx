@@ -4732,7 +4732,7 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
                 <Card
                   title={explorerT('explorer.basicsTitle')}
                   pad="sm"
-                  headerBadge={lastQueryElapsedMs != null ? (
+                  headerBadge={!cabinetMode && lastQueryElapsedMs != null ? (
                     <ExplorerQueryElapsedBadge elapsedMs={lastQueryElapsedMs} />
                   ) : null}
                 >
@@ -4744,9 +4744,9 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
                 <Card
                   title={explorerT('explorer.dynamicsTitle', { metric: appliedMetricLabel })}
                   subtitle={`${timeRangeLabel(appliedTimeRange, appliedCustomPeriod)} · ${meta?.dataTable || 'flows_raw'}`}
-                  loadMs={loadMs}
-                  serverMs={serverMs}
-                  headerBadge={lastQueryElapsedMs != null ? (
+                  loadMs={cabinetMode ? null : loadMs}
+                  serverMs={cabinetMode ? null : serverMs}
+                  headerBadge={!cabinetMode && lastQueryElapsedMs != null ? (
                     <ExplorerQueryElapsedBadge elapsedMs={lastQueryElapsedMs} />
                   ) : null}
                 >
@@ -4831,10 +4831,10 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
                     subtitle={isExplorerSankeyVis(vis)
                       ? explorerT('explorer.resultsSubSankey')
                       : explorerT('explorer.resultsSubDefault')}
-                    loadMs={loadMs}
-                    serverMs={serverMs}
+                    loadMs={cabinetMode ? null : loadMs}
+                    serverMs={cabinetMode ? null : serverMs}
                     pad="0"
-                    headerBadge={(!isRefreshingData && source !== 'loading' && lastQueryElapsedMs != null) ? (
+                    headerBadge={(!cabinetMode && !isRefreshingData && source !== 'loading' && lastQueryElapsedMs != null) ? (
                       <ExplorerQueryElapsedBadge elapsedMs={lastQueryElapsedMs} />
                     ) : null}
                     tools={(
@@ -4907,10 +4907,12 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
                                 {meta?.trafficSampled ? explorerT('explorer.footerSampled') : ''}
                                 {meta?.rowsHidden > 0 ? explorerT('explorer.footerHiddenByThreshold', { n: meta.rowsHidden }) : ''}
                               </span>
-                              <span>
-                                {explorerT('explorer.footerQueryTime')}<b style={{ color: 'var(--fg-primary)' }}>{serverMs ?? '—'}{explorerT('explorer.footerQueryTimeMs')}</b>
-                                {explorerT('explorer.footerClickHouse')}{meta?.dataTable || 'flows_raw'}
-                              </span>
+                              {!cabinetMode && (
+                                <span>
+                                  {explorerT('explorer.footerQueryTime')}<b style={{ color: 'var(--fg-primary)' }}>{serverMs ?? '—'}{explorerT('explorer.footerQueryTimeMs')}</b>
+                                  {explorerT('explorer.footerClickHouse')}{meta?.dataTable || 'flows_raw'}
+                                </span>
+                              )}
                             </>
                           )}
                           columns={resultTableColumns}
