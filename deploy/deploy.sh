@@ -295,10 +295,19 @@ ui_up() {
   if [[ -f "${UI_DIR}/SOURCE.txt" ]]; then
     log "UI source: $(tr '\n' ' ' <"${UI_DIR}/SOURCE.txt")"
   fi
+  # The UI build needs the host network (DNS inside the build bridge fails on
+  # some stands). Compose 5 builds through buildx bake, which rejects that
+  # without --allow network.host and has no option to pass it. docker build
+  # takes the flag, so build here and let compose only start the container.
+  local -a build_cmd=(docker build --network host -t grapes-nta:latest "${UI_APP_DIR}")
+  if docker build --help 2>/dev/null | grep -q -- '--allow'; then
+    build_cmd=(docker build --allow network.host --network host -t grapes-nta:latest "${UI_APP_DIR}")
+  fi
+  "${build_cmd[@]}"
   (
     cd "${UI_DIR}"
     UI_DATA_DIR="${UI_DATA_DIR}" GRAPES_VERSION="${version}" GRAPES_VERSION_DATE="${version_date}" \
-      docker compose up -d --build --remove-orphans
+      docker compose up -d --no-build --remove-orphans
   )
   log "grapes-nta is up"
   # brief wait for health
