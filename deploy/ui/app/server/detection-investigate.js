@@ -1394,6 +1394,102 @@ async function loadExcessAsnTop({ scope, scopeId, minute, clientId, parentScope 
   };
 }
 
+// Сети /24 источников атаки за всё окно, не за одну минуту.
+// Срез тот же, что у «Мусорного UDP»: крупный UDP со случайных портов.
+// Доля в команде считается уже по этой выборке, источники без номера AS отброшены.
+async function loadAttackPrefixes({ scope, scopeId, from, to, limit = 20000 } = {}) {
+  const fromTs = parseUtc(from);
+  const toTs = parseUtc(to);
+  if (!Number.isFinite(fromTs) || !Number.isFinite(toTs) || toTs <= fromTs) {
+    const err = new Error('Нужно окно атаки: начало раньше конца');
+    err.statusCode = 400;
+    throw err;
+  }
+  const scopeName = String(scope || '');
+  if (!['client', 'provider', 'net'].includes(scopeName) || !String(scopeId || '')) {
+    const err = new Error('Нужны scope и scopeId');
+    err.statusCode = 400;
+    throw err;
+  }
+  const take = Math.min(100000, Math.max(1, Number(limit) || 20000));
+  const params = {
+    scope: scopeName,
+    scopeId: String(scopeId),
+    from: formatCh(fromTs),
+    to: formatCh(toTs),
+    until: formatCh(toTs + EXPORT_LAG),
+    take: take + 1,
+  };
+  const pred = slicePred(scopeName, '', undefined);
+  const srcAsn = col('srcAsn') ? `f.${col('srcAsn')}` : '0';
+  const srcIp = flowIpExpr(`f.${col('srcIp')}`);
+  const { rows } = await query(`
+    SELECT asn, prefix, bytes
+    FROM (
+      SELECT
+        ${srcAsn} AS asn,
+        ${net24Sql(srcIp)} AS prefix,
+        sum(${scaledBytesSql()}) AS bytes
+      FROM ${flowsRawTableRef()} AS f
+      PREWHERE ${pred}
+      WHERE ${timeFilterSql()}
+        AND ${pred}
+        AND ${excessUdpSql()}
+      GROUP BY asn, prefix
+    )
+    WHERE prefix != '' AND asn != 0 AND bytes > 0
+    ORDER BY bytes DESC
+    LIMIT {take:UInt32}
+  `, params, {
+    name: 'attack-asn/prefixes',
+    clickhouse_settings: {
+      max_execution_time: 120,
+      max_memory_usage: '2000000000',
+    },
+    requestTimeoutMs: 130000,
+  });
+  const truncated = rows.length > take;
+  const kept = truncated ? rows.slice(0, take) : rows;
+  let names = new Map();
+  let namesError = '';
+  try {
+    names = await loadAsnNameMap(kept.map((row) => row.asn));
+  } catch (err) {
+    namesError = err.message || 'имена AS не прочитались';
+  }
+  return {
+    truncated,
+    namesError,
+    rows: kept.map((row) => ({
+      asn: Number(row.asn) || 0,
+      prefix: String(row.prefix || ''),
+      bytes: Number(row.bytes) || 0,
+      asnName: names.get(Number(row.asn)) || '',
+    })),
+  };
+}
+
+async function loadAsnNameMap(asns) {
+  const ids = [...new Set((asns || []).map((value) => Number(value)).filter((value) => value > 0))];
+  if (!ids.length) return new Map();
+  const { rows } = await query(`
+    SELECT asn, argMax(name, updated_at) AS name
+    FROM ${asnNamesTableRef()}
+    WHERE asn IN {asns:Array(UInt32)}
+    GROUP BY asn
+  `, { asns: ids }, {
+    name: 'attack-asn/names',
+    clickhouse_settings: CHEAP,
+    requestTimeoutMs: 20000,
+  });
+  const names = new Map();
+  for (const row of rows) {
+    const name = String(row.name || '').trim();
+    if (name) names.set(Number(row.asn), name);
+  }
+  return names;
+}
+
 module.exports = {
   loadHourEnvelope,
   loadForeignEnvelopes,
@@ -1409,4 +1505,5 @@ module.exports = {
   emptyBinding,
   chooseAsnSlice,
   loadExcessAsnTop,
+  loadAttackPrefixes,
 };
