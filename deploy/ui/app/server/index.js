@@ -263,6 +263,7 @@ const { createApiTokenStore } = require('./api-tokens');
 const { ensureApiClientsTable } = require('./api-clients');
 const { createDetectionRouter } = require('./detection-routes');
 const { createMonitoringRouter } = require('./monitoring-routes');
+const { loadAttackAlertsPayload } = require('./attack-alerts');
 const {
   resolveCabinetContext,
   cabinetPayload,
@@ -416,6 +417,7 @@ async function sessionUserPayload(user, sessionRecord = null) {
       name: role.name,
       displayName: role.displayName,
       startPage: role.startPage,
+      attackAlert: role.attackAlert,
     } : null,
     cabinet,
   };
@@ -777,6 +779,14 @@ app.use('/api/clients', createClientsRouter({ sessions }));
 app.use('/api/erp-piterix', createErpPiterixRouter());
 app.use('/api/detection', createDetectionRouter());
 app.use('/api/monitoring', createMonitoringRouter());
+
+app.get('/api/attack-alerts', async (req, res) => {
+  try {
+    res.json({ data: await loadAttackAlertsPayload(req.user) });
+  } catch (err) {
+    sendApiError(res, err);
+  }
+});
 
 app.get('/api/dashboard/collectors', async (_req, res) => {
   try {

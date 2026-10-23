@@ -1131,6 +1131,16 @@ const ApiClient = (() => {
     return body.data;
   }
 
+  async function loadAttackAlerts() {
+    const body = await requestJson('/api/attack-alerts');
+    return body.data;
+  }
+
+  async function triggerTestAttack() {
+    const body = await requestJson('/api/detection/test-attack', { method: 'POST', body: {} });
+    return body.data;
+  }
+
   async function loadMonitoringAttacks() {
     const body = await requestJson('/api/monitoring/attacks');
     return body.data;
@@ -3417,6 +3427,8 @@ const ApiClient = (() => {
     loadDetectionFlowspecSummary,
     loadDetectionEvents,
     exportDetectionEventsCsv,
+    loadAttackAlerts,
+    triggerTestAttack,
     loadMonitoringAttacks,
     loadMonitoringProblems,
     loadMonitoringAttack,

@@ -156,14 +156,19 @@ function useOverlayLock(open) {
 }
 
 /* =================== Modal =================== */
-function Modal({ open, onClose, title, subtitle, children, footer, size = 'md' }) {
+function Modal({ open, onClose, title, subtitle, children, footer, size = 'md', variant }) {
   useOverlayLock(open);
 
   if (!open) return null;
 
+  const attackEnter = variant === 'attack-alert';
+  const maskClass = attackEnter ? 'modal-mask modal-mask--attack-alert' : 'modal-mask';
   const modal = (
-    <div className="modal-mask" onClick={onClose}>
-      <div className={`modal ${size === 'lg' ? 'modal--lg' : ''} ${size === 'xl' ? 'modal--xl' : ''} ${size === 'map' ? 'modal--map' : ''}`} onClick={(e) => e.stopPropagation()}>
+    <div className={maskClass} onClick={onClose}>
+      <div
+        className={`modal ${size === 'lg' ? 'modal--lg' : ''} ${size === 'xl' ? 'modal--xl' : ''} ${size === 'map' ? 'modal--map' : ''} ${attackEnter ? 'modal--attack-reveal' : ''}`}
+        onClick={(e) => e.stopPropagation()}
+      >
         <div className="modal__head">
           <div style={{flex: 1}}>
             <div className="modal__title">{title}</div>

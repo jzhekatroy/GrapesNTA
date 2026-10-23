@@ -641,6 +641,7 @@ function UserDrawer({ user, roles, resources, displayTimezone, onClose, onSaved 
 function RoleDrawer({ role, resources, onClose, onSaved, onDeleted }) {
   const [displayName, setDisplayName] = useState('');
   const [startPage, setStartPage] = useState('dashboard');
+  const [attackAlert, setAttackAlert] = useState(false);
   const [permissions, setPermissions] = useState({});
   const [writePermissions, setWritePermissions] = useState({});
   const [loading, setLoading] = useState(false);
@@ -657,6 +658,7 @@ function RoleDrawer({ role, resources, onClose, onSaved, onDeleted }) {
       .then((data) => {
         setDisplayName(data.displayName || role.displayName);
         setStartPage(data.startPage || 'dashboard');
+        setAttackAlert(!!data.attackAlert);
         setPermissions(data.permissions || {});
         setWritePermissions(data.writePermissions || {});
       })
@@ -689,6 +691,7 @@ function RoleDrawer({ role, resources, onClose, onSaved, onDeleted }) {
       await ApiClient.updateRole(role.id, {
         displayName,
         startPage,
+        attackAlert,
         permissions,
         writePermissions,
       });
@@ -765,6 +768,15 @@ function RoleDrawer({ role, resources, onClose, onSaved, onDeleted }) {
               {usersT('usersPage.label.startPageHint')}
             </div>
           </div>
+          <label className="row" style={{ gap: 8, cursor: 'pointer', alignItems: 'flex-start' }}>
+            <Checkbox checked={attackAlert} onChange={setAttackAlert} />
+            <div>
+              <div style={{ font: 'var(--pv-text-body-2-bold)' }}>{usersT('usersPage.label.attackAlert')}</div>
+              <div style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-secondary)', marginTop: 4 }}>
+                {usersT('usersPage.label.attackAlertHint')}
+              </div>
+            </div>
+          </label>
           <div>
             <div style={{font: 'var(--pv-text-body-2-bold)', marginBottom: 8}}>{usersT('usersPage.pageAccess')}</div>
             {loading ? (

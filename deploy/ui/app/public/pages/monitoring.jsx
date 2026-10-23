@@ -353,6 +353,9 @@ function AttackCard({ row, muted, onOpen }) {
         <span className={`monitoring-attack-card__state monitoring-attack-card__state--${state.tone}`}>
           {state.text}
         </span>
+        {row.test && (
+          <Badge tone="warning">{monT('attackAlert.testBadge')}</Badge>
+        )}
         <span className="monitoring-attack-card__object">
           {row.name || row.scopeId}
           {' · '}
@@ -365,6 +368,11 @@ function AttackCard({ row, muted, onOpen }) {
       <div className="monitoring-attack-card__sub">
         {[ratio, durLine, peakLine, quietLine].filter(Boolean).join(' · ')}
       </div>
+      {row.test && row.testNote && (
+        <div className="monitoring-attack-card__sub" style={{ marginTop: 4 }}>
+          {row.testNote}
+        </div>
+      )}
       <div className="monitoring-attack-card__foot">
         {monT('monitoring.foot', { victim, sw })}
       </div>
@@ -767,6 +775,9 @@ function MonitoringAttackDetail({ attackId, onBack }) {
             <h1>{event.name || event.scopeId}</h1>
             <div className="monitoring-detail__tags">
               <Badge tone="info">{scopeLabel(event.scope)}</Badge>
+              {event.test && (
+                <Badge tone="warning">{monT('attackAlert.testBadge')}</Badge>
+              )}
               <Badge tone="critical">{kindLabel(event.verdict?.kind)}</Badge>
               <Badge tone={state.tone === 'critical' ? 'critical' : state.tone === 'warning' ? 'warning' : 'neutral'}>
                 {state.text}
