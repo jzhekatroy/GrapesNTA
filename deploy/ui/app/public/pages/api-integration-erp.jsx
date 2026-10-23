@@ -90,7 +90,7 @@ function ApiErpIssuedModal({ issued, onClose }) {
           ? (
             <div style={{ padding: '10px 12px', borderRadius: 8, background: 'var(--st-warning-bg)', color: 'var(--st-warning)' }}>
               Секрет показывается только один раз и нигде не хранится. Скопируйте сейчас
-              и передайте в ERP по защищённому каналу.
+              и передайте по защищённому каналу.
             </div>
           )
           : (
@@ -441,7 +441,7 @@ function ApiErpClientModal({
               <input
                 className="input mono"
                 type="password"
-                placeholder="секрет из ERP"
+                placeholder="секрет"
                 value={pairSecret}
                 autoComplete="off"
                 onChange={(e) => { setPairSecret(e.target.value); setPairResult(null); }}
@@ -637,7 +637,7 @@ function PageApiIntegrationErp({ currentUser }) {
 
   const revokeTokens = (row) => {
     if (!window.confirm(
-      `Отозвать все токены «${row.clientName}»?\nERP переподключится при следующем обмене. Сами креды не меняются.`,
+      `Отозвать все токены «${row.clientName}»?\n переподключится при следующем обмене. Сами креды не меняются.`,
     )) return;
     return run(`revoke:${row.clientId}`, async () => {
       const res = await ApiClient.revokeApiClientTokens(row.clientId);
@@ -663,7 +663,7 @@ function PageApiIntegrationErp({ currentUser }) {
       <div className="main__container">
         <Card>
           <div style={{ color: 'var(--fg-secondary)', font: 'var(--pv-text-body-3)' }}>
-            Раздел только для ролей с доступом «API интеграция ERP».
+            Раздел только для ролей с доступом «API интеграция».
           </div>
         </Card>
       </div>
