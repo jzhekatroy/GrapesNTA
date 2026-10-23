@@ -1981,6 +1981,203 @@ function ObservationBoardTilePhantom({
   );
 }
 
+function ObservationSectionsPanel({ onChanged }) {
+  const [rows, setRows] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+  const [newTitle, setNewTitle] = useState('');
+  const [editSection, setEditSection] = useState(null);
+  const [dragId, setDragId] = useState(null);
+
+  const loadSections = useCallback(async () => {
+    setLoading(true);
+    setError('');
+    try {
+      const data = await ApiClient.loadObservationSectionsAdmin();
+      setRows(data || []);
+    } catch (err) {
+      setError(err.message || obsT('observations.sections.loadFailed'));
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => { loadSections(); }, [loadSections]);
+
+  const notifyChanged = useCallback(async () => {
+    await loadSections();
+    if (onChanged) await onChanged();
+  }, [loadSections, onChanged]);
+
+  const createSection = async () => {
+    const title = String(newTitle || '').trim();
+    if (!title) return;
+    try {
+      await ApiClient.createObservationSection(title);
+      setNewTitle('');
+      pushToast({ kind: 'success', title: obsT('observations.sections.created') });
+      await notifyChanged();
+    } catch (err) {
+      pushToast({ kind: 'error', title: err.message });
+    }
+  };
+
+  const deleteSection = async (section) => {
+    const ok = window.confirm(obsT('observations.sections.deleteConfirm', {
+      title: section.title,
+      count: section.count ?? 0,
+    }));
+    if (!ok) return;
+    try {
+      const res = await ApiClient.deleteObservationSection(section.id);
+      pushToast({
+        kind: 'success',
+        title: obsT('observations.sections.deleted'),
+        desc: obsT('observations.sections.moved', { n: res.moved ?? 0 }),
+      });
+      await notifyChanged();
+    } catch (err) {
+      pushToast({ kind: 'error', title: err.message });
+    }
+  };
+
+  const persistOrder = async (ordered) => {
+    try {
+      await ApiClient.reorderObservationSections(ordered.map((s) => s.id));
+      setRows(ordered);
+      if (onChanged) await onChanged();
+    } catch (err) {
+      pushToast({ kind: 'error', title: err.message });
+      await loadSections();
+    }
+  };
+
+  const onDropRow = (targetId) => {
+    if (!dragId || dragId === targetId) return;
+    const ids = rows.map((r) => r.id);
+    const from = ids.indexOf(dragId);
+    const to = ids.indexOf(targetId);
+    if (from < 0 || to < 0) return;
+    const next = [...rows];
+    const [moved] = next.splice(from, 1);
+    next.splice(to, 0, moved);
+    setDragId(null);
+    persistOrder(next);
+  };
+
+  const openEdit = (section) => {
+    setEditSection({
+      id: section.id,
+      title: section.title,
+      system: section.system,
+    });
+  };
+
+  const saveEdit = async () => {
+    if (!editSection) return;
+    try {
+      await ApiClient.updateObservationSection(editSection.id, {
+        title: editSection.title,
+      });
+      pushToast({ kind: 'success', title: obsT('observations.sections.saved') });
+      setEditSection(null);
+      await notifyChanged();
+    } catch (err) {
+      pushToast({ kind: 'error', title: err.message });
+    }
+  };
+
+  return (
+    <div className="col" style={{ gap: 16 }}>
+      {error && <div className="form-error">{error}</div>}
+      <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
+        <input
+          className="input"
+          style={{ maxWidth: 320 }}
+          placeholder={obsT('observations.sections.newTitle')}
+          value={newTitle}
+          onChange={(e) => setNewTitle(e.target.value)}
+        />
+        <Button kind="primary" onClick={createSection} disabled={!newTitle.trim()}>{obsT('observations.sections.create')}</Button>
+      </div>
+      <p style={{ color: 'var(--fg-secondary)', font: 'var(--pv-text-body-3)', margin: 0 }}>
+        {obsT('observations.sections.accessInRolesHint')}
+      </p>
+      {loading ? (
+        <div style={{ color: 'var(--fg-secondary)' }}>{obsT('observations.sections.loading')}</div>
+      ) : (
+        <table style={{ width: '100%', borderCollapse: 'collapse', font: 'var(--pv-text-body-3)' }}>
+          <thead>
+            <tr>
+              <th style={{ width: 36 }} />
+              <th>{obsT('observations.sections.col.title')}</th>
+              <th style={{ width: 100 }}>{obsT('observations.sections.col.count')}</th>
+              <th style={{ width: 120 }} />
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((section) => {
+              const canEditSection = section.level === 'edit';
+              return (
+              <tr
+                key={section.id}
+                draggable={canEditSection}
+                onDragStart={() => { if (canEditSection) setDragId(section.id); }}
+                onDragOver={(e) => e.preventDefault()}
+                onDrop={() => onDropRow(section.id)}
+              >
+                <td style={{ cursor: canEditSection ? 'grab' : 'default', opacity: canEditSection ? 1 : 0.35 }}>
+                  {canEditSection ? <Icon name="drag" size={14} /> : null}
+                </td>
+                <td>
+                  {section.title}
+                  {section.system ? (
+                    <span style={{ marginLeft: 8, color: 'var(--fg-muted)' }}>({obsT('observations.sections.system')})</span>
+                  ) : null}
+                </td>
+                <td>{section.count ?? 0}</td>
+                <td>
+                  {canEditSection ? (
+                    <div className="row" style={{ gap: 4, justifyContent: 'flex-end' }}>
+                      <button type="button" className="icon-btn" onClick={() => openEdit(section)}><Icon name="edit" size={15} /></button>
+                      {!section.system && (
+                        <button type="button" className="icon-btn" onClick={() => deleteSection(section)}><Icon name="trash" size={15} /></button>
+                      )}
+                    </div>
+                  ) : null}
+                </td>
+              </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      )}
+      <Modal
+        open={!!editSection}
+        onClose={() => setEditSection(null)}
+        title={obsT('observations.sections.modalTitle')}
+        footer={(
+          <>
+            <Button kind="ghost" onClick={() => setEditSection(null)}>{obsT('observations.board.cancel')}</Button>
+            <Button kind="primary" onClick={saveEdit}>{obsT('observations.settings.save')}</Button>
+          </>
+        )}
+      >
+        <div className="field">
+          <label htmlFor="obs-section-rename-title">{obsT('observations.sections.col.title')}</label>
+          <input
+            id="obs-section-rename-title"
+            className="input"
+            value={editSection?.title ?? ''}
+            onChange={(e) => setEditSection((cur) => (cur ? { ...cur, title: e.target.value } : cur))}
+            autoFocus
+          />
+        </div>
+      </Modal>
+    </div>
+  );
+}
+
 function createObservationsApi({ cabinetMode = false, staffClientId = null } = {}) {
   if (staffClientId) {
     const clientId = staffClientId;
@@ -2068,6 +2265,7 @@ function PageObservations({
     || canWriteObservations
     || AuthAccess.canWritePage('explorer')
   );
+  const canManageSections = !isCabinetLike && AuthAccess.can('observations.manage_sections');
   const [config, setConfig] = useState(null);
   const [sections, setSections] = useState([]);
   const [activeSectionId, setActiveSectionId] = useState(null);
@@ -2083,6 +2281,7 @@ function PageObservations({
   const [boardOrderIds, setBoardOrderIds] = useState([]);
   const [boardHiddenIds, setBoardHiddenIds] = useState([]);
   const [editMode, setEditMode] = useState(false);
+  const [manageSections, setManageSections] = useState(false);
   const [editDraftOrderIds, setEditDraftOrderIds] = useState([]);
   const [editBaselineOrderIds, setEditBaselineOrderIds] = useState([]);
   const [editDraftHiddenIds, setEditDraftHiddenIds] = useState([]);
@@ -2162,6 +2361,14 @@ function PageObservations({
     }
     return list;
   }, [obsApi, isCabinetLike]);
+
+  const toggleManageSections = useCallback(() => {
+    setManageSections((open) => {
+      const next = !open;
+      if (next) setEditMode(false);
+      return next;
+    });
+  }, []);
 
   useEffect(() => {
     editModeRef.current = editMode;
@@ -2420,9 +2627,9 @@ function PageObservations({
   const hiddenItems = useMemo(() => {
     if (!editMode || !editDraftHiddenIds.length) return [];
     const hidden = new Set(editDraftHiddenIds);
-    return mergeObservationBoardOrder(items, editDraftOrderIds)
+    return mergeObservationBoardOrder(sectionItems, editDraftOrderIds)
       .filter((item) => hidden.has(item.id));
-  }, [items, editDraftOrderIds, editDraftHiddenIds, editMode]);
+  }, [sectionItems, editDraftOrderIds, editDraftHiddenIds, editMode]);
 
   useEffect(() => {
     if (isCabinetLike) return undefined;
@@ -2962,7 +3169,7 @@ function PageObservations({
   const atCabinetLimit = isCabinetLike && !obsApi.isStaffClient && cabinetUsed >= cabinetMax;
 
   const boardToolbar = (sticky = false) => (
-    sectionItems.length > 0 && sectionCanEdit && !obsApi.isStaffClient ? (
+    !manageSections && sectionItems.length > 0 && sectionCanEdit && !obsApi.isStaffClient ? (
       <ObservationsBoardToolbar
         editMode={editMode}
         saveState={boardSaveStatus}
@@ -2984,31 +3191,39 @@ function PageObservations({
         <div>
           <h1>{obsT('observations.title')}</h1>
           {!isCabinetLike && sections.length > 1 ? (
-            <div className="row" style={{ gap: 8, marginTop: 12, flexWrap: 'wrap' }}>
+            <div className="row observations-section-tabs" style={{ gap: 8, marginTop: 12, flexWrap: 'wrap' }}>
               {sections.map((sec) => (
-                <button
+                <Button
                   key={sec.id}
-                  type="button"
-                  className={`btn btn--sm ${sec.id === activeSectionId ? 'btn--primary' : 'btn--ghost'}`}
+                  kind={sec.id === activeSectionId ? 'primary' : 'default'}
+                  size="sm"
                   onClick={() => selectSection(sec.id)}
+                  title={sec.level === 'view' ? obsT('observations.section.viewOnly') : undefined}
                 >
-                  {sec.title} {sec.count}
+                  <span>{sec.title}</span>
+                  <span className="observations-section-tab__count">{sec.count}</span>
                   {sec.level === 'view' ? (
-                    <Icon
-                      name="eye"
-                      size={13}
-                      style={{ marginLeft: 6, opacity: 0.55, verticalAlign: 'middle' }}
-                      title={obsT('observations.section.viewOnly')}
-                    />
+                    <Icon name="eye" size={13} style={{ opacity: 0.55 }} />
                   ) : null}
-                </button>
+                </Button>
               ))}
             </div>
           ) : null}
         </div>
         <div className="page-head__tools" style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
           {!editMode ? boardToolbar() : null}
-          {sectionCanEdit && !editMode && (
+          {canManageSections && !editMode ? (
+            <Button
+              kind={manageSections ? 'primary' : 'ghost'}
+              icon="settings"
+              onClick={toggleManageSections}
+            >
+              {manageSections
+                ? obsT('observations.sections.backToBoard')
+                : obsT('observations.sections.manage')}
+            </Button>
+          ) : null}
+          {sectionCanEdit && !editMode && !manageSections && (
             <button
               type="button"
               className="btn btn--primary"
@@ -3029,7 +3244,7 @@ function PageObservations({
         </div>
       </div>
       ) : null}
-      {editMode ? boardToolbar(true) : null}
+      {editMode && !manageSections ? boardToolbar(true) : null}
       <div className="col" style={{ gap: 16, padding: '0 0 24px' }}>
 
       {error && (
@@ -3038,6 +3253,10 @@ function PageObservations({
         </div>
       )}
 
+      {manageSections ? (
+        <ObservationSectionsPanel onChanged={reload} />
+      ) : (
+        <>
       {isCabinetLike && !obsApi.isStaffClient && (
         <div style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-secondary)' }}>
           {obsT('cabinet.observations.sharedHint')}{' '}
@@ -3136,6 +3355,9 @@ function PageObservations({
             })}
           </div>
       )}
+        </>
+      )}
+
       {copyDialog ? (
         <div className="modal-backdrop" role="presentation" onClick={() => setCopyDialog(null)}>
           <div className="modal" role="dialog" onClick={(e) => e.stopPropagation()}>

@@ -185,9 +185,6 @@ function PageUsers({ currentUser, onAuthRefresh, onNavigate, displayTimezone }) 
       <div className="row" style={{gap: 8, marginBottom: 16}}>
         <Button kind={tab === 'users' ? 'primary' : 'ghost'} onClick={() => setTab('users')}>{usersT('usersPage.tab.users')}</Button>
         <Button kind={tab === 'roles' ? 'primary' : 'ghost'} onClick={() => setTab('roles')}>{usersT('usersPage.tab.roles')}</Button>
-        {canWrite && (
-          <Button kind={tab === 'sections' ? 'primary' : 'ghost'} onClick={() => setTab('sections')}>{usersT('usersPage.tab.sections')}</Button>
-        )}
       </div>
 
       {error && (
@@ -196,9 +193,7 @@ function PageUsers({ currentUser, onAuthRefresh, onNavigate, displayTimezone }) 
         </Card>
       )}
 
-      {tab === 'sections' && canWrite ? (
-        <ObservationSectionsPanel roles={roles} />
-      ) : tab === 'users' ? (
+      {tab === 'users' ? (
         <DataTable
           key="users-table"
           rows={filtered}
@@ -279,246 +274,6 @@ function PageUsers({ currentUser, onAuthRefresh, onNavigate, displayTimezone }) 
         onClose={() => setRoleFormOpen(false)}
         onCreated={(role) => { setRoleFormOpen(false); loadAll(); setDrawerRole(role); }}
       />
-    </div>
-  );
-}
-
-const OBS_SECTION_EXCLUDED_ROLES = new Set(['Administrator', 'Client']);
-
-function observationSectionRoleLevelLabel(level) {
-  if (level === 'edit') return usersT('users.sections.roleLevel.edit');
-  if (level === 'view') return usersT('users.sections.roleLevel.view');
-  return usersT('users.sections.roleLevel.none');
-}
-
-function ObservationSectionsPanel({ roles }) {
-  const [rows, setRows] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState('');
-  const [newTitle, setNewTitle] = useState('');
-  const [editSection, setEditSection] = useState(null);
-  const [dragId, setDragId] = useState(null);
-
-  const manageableRoles = useMemo(
-    () => roles.filter((r) => !OBS_SECTION_EXCLUDED_ROLES.has(r.id)),
-    [roles],
-  );
-
-  const loadSections = useCallback(async () => {
-    setLoading(true);
-    setError('');
-    try {
-      const data = await ApiClient.loadObservationSectionsAdmin();
-      setRows(data || []);
-    } catch (err) {
-      setError(err.message || usersT('usersPage.loadFailed'));
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  useEffect(() => { loadSections(); }, [loadSections]);
-
-  const createSection = async () => {
-    const title = String(newTitle || '').trim();
-    if (!title) return;
-    try {
-      await ApiClient.createObservationSection(title);
-      setNewTitle('');
-      pushToast({ kind: 'success', title: usersT('users.sections.created') });
-      await loadSections();
-    } catch (err) {
-      pushToast({ kind: 'error', title: err.message });
-    }
-  };
-
-  const deleteSection = async (section) => {
-    const ok = window.confirm(usersT('users.sections.deleteConfirm', {
-      title: section.title,
-      count: section.count ?? 0,
-    }));
-    if (!ok) return;
-    try {
-      const res = await ApiClient.deleteObservationSection(section.id);
-      pushToast({
-        kind: 'success',
-        title: usersT('users.sections.deleted'),
-        desc: usersT('users.sections.moved', { n: res.moved ?? 0 }),
-      });
-      await loadSections();
-    } catch (err) {
-      pushToast({ kind: 'error', title: err.message });
-    }
-  };
-
-  const persistOrder = async (ordered) => {
-    try {
-      await ApiClient.reorderObservationSections(ordered.map((s) => s.id));
-      setRows(ordered);
-    } catch (err) {
-      pushToast({ kind: 'error', title: err.message });
-      await loadSections();
-    }
-  };
-
-  const onDropRow = (targetId) => {
-    if (!dragId || dragId === targetId) return;
-    const ids = rows.map((r) => r.id);
-    const from = ids.indexOf(dragId);
-    const to = ids.indexOf(targetId);
-    if (from < 0 || to < 0) return;
-    const next = [...rows];
-    const [moved] = next.splice(from, 1);
-    next.splice(to, 0, moved);
-    setDragId(null);
-    persistOrder(next);
-  };
-
-  const openEdit = (section) => {
-    const roleLevels = {};
-    manageableRoles.forEach((r) => {
-      roleLevels[r.id] = section.roles?.[r.id] || 'none';
-    });
-    setEditSection({
-      id: section.id,
-      title: section.title,
-      system: section.system,
-      roles: roleLevels,
-    });
-  };
-
-  const saveEdit = async () => {
-    if (!editSection) return;
-    try {
-      await ApiClient.updateObservationSection(editSection.id, {
-        title: editSection.title,
-        roles: editSection.roles,
-      });
-      pushToast({ kind: 'success', title: usersT('users.sections.saved') });
-      setEditSection(null);
-      await loadSections();
-    } catch (err) {
-      pushToast({ kind: 'error', title: err.message });
-    }
-  };
-
-  return (
-    <div className="col" style={{ gap: 16 }}>
-      {error && <div className="form-error">{error}</div>}
-      <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
-        <input
-          className="input"
-          style={{ maxWidth: 320 }}
-          placeholder={usersT('users.sections.newTitle')}
-          value={newTitle}
-          onChange={(e) => setNewTitle(e.target.value)}
-        />
-        <Button kind="primary" onClick={createSection} disabled={!newTitle.trim()}>{usersT('users.sections.create')}</Button>
-      </div>
-      {loading ? (
-        <div style={{ color: 'var(--fg-secondary)' }}>{usersT('usersPage.empty.loadingTitle')}</div>
-      ) : (
-        <table style={{ width: '100%', borderCollapse: 'collapse', font: 'var(--pv-text-body-3)' }}>
-          <thead>
-            <tr>
-              <th style={{ width: 36 }} />
-              <th>{usersT('users.sections.col.title')}</th>
-              <th style={{ width: 100 }}>{usersT('users.sections.col.count')}</th>
-              <th>{usersT('users.sections.col.roles')}</th>
-              <th style={{ width: 120 }} />
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map((section) => (
-              <tr
-                key={section.id}
-                draggable
-                onDragStart={() => setDragId(section.id)}
-                onDragOver={(e) => e.preventDefault()}
-                onDrop={() => onDropRow(section.id)}
-              >
-                <td style={{ cursor: 'grab' }}><Icon name="drag" size={14} /></td>
-                <td>
-                  {section.title}
-                  {section.system ? (
-                    <span style={{ marginLeft: 8, color: 'var(--fg-muted)' }}>({usersT('users.sections.system')})</span>
-                  ) : null}
-                </td>
-                <td>{section.count ?? 0}</td>
-                <td>
-                  <div className="row" style={{ gap: 6, flexWrap: 'wrap' }}>
-                    {Object.entries(section.roles || {}).map(([roleId, level]) => (
-                      <Badge key={roleId} tone="neutral">
-                        {usersT('users.sections.roleChip', {
-                          role: GrapesI18n.localizedRoleDisplay(roleId, roleId),
-                          level: level === 'edit' ? usersT('users.sections.roleLevel.edit') : usersT('users.sections.roleLevel.view'),
-                        })}
-                      </Badge>
-                    ))}
-                  </div>
-                </td>
-                <td>
-                  <div className="row" style={{ gap: 4, justifyContent: 'flex-end' }}>
-                    <button type="button" className="icon-btn" onClick={() => openEdit(section)}><Icon name="edit" size={15} /></button>
-                    {!section.system && (
-                      <button type="button" className="icon-btn" onClick={() => deleteSection(section)}><Icon name="trash" size={15} /></button>
-                    )}
-                  </div>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      )}
-      {editSection ? (
-        <div className="modal-backdrop" role="presentation" onClick={() => setEditSection(null)}>
-          <div className="modal" role="dialog" style={{ maxWidth: 560 }} onClick={(e) => e.stopPropagation()}>
-            <h2 style={{ marginTop: 0 }}>{usersT('users.sections.modalTitle')}</h2>
-            <label className="col" style={{ gap: 4, marginBottom: 12 }}>
-              <span>{usersT('users.sections.col.title')}</span>
-              <input
-                className="input"
-                value={editSection.title}
-                onChange={(e) => setEditSection({ ...editSection, title: e.target.value })}
-              />
-            </label>
-            <table style={{ width: '100%', borderCollapse: 'collapse', font: 'var(--pv-text-body-3)', marginBottom: 12 }}>
-              <thead>
-                <tr>
-                  <th style={{ textAlign: 'left' }}>{usersT('usersPage.col.role')}</th>
-                  <th style={{ textAlign: 'left' }}>{usersT('users.sections.col.roles')}</th>
-                </tr>
-              </thead>
-              <tbody>
-                {manageableRoles.map((role) => (
-                  <tr key={role.id}>
-                    <td>{GrapesI18n.localizedRoleDisplay(role.id, role.displayName)}</td>
-                    <td>
-                      <select
-                        className="input"
-                        value={editSection.roles[role.id] || 'none'}
-                        onChange={(e) => setEditSection({
-                          ...editSection,
-                          roles: { ...editSection.roles, [role.id]: e.target.value },
-                        })}
-                      >
-                        <option value="none">{usersT('users.sections.roleLevel.none')}</option>
-                        <option value="view">{usersT('users.sections.roleLevel.view')}</option>
-                        <option value="edit">{usersT('users.sections.roleLevel.edit')}</option>
-                      </select>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-            <p style={{ color: 'var(--fg-muted)', font: 'var(--pv-text-body-3)' }}>{usersT('users.sections.adminHint')}</p>
-            <div className="row" style={{ gap: 8, justifyContent: 'flex-end' }}>
-              <Button kind="ghost" onClick={() => setEditSection(null)}>{usersT('usersPage.cancel')}</Button>
-              <Button kind="primary" onClick={saveEdit}>{usersT('usersPage.save')}</Button>
-            </div>
-          </div>
-        </div>
-      ) : null}
     </div>
   );
 }
@@ -638,16 +393,31 @@ function UserDrawer({ user, roles, resources, displayTimezone, onClose, onSaved 
   );
 }
 
+function observationSectionFlagsFromLevel(level) {
+  const l = level === 'edit' ? 'edit' : level === 'view' ? 'view' : 'none';
+  return { view: l === 'view' || l === 'edit', edit: l === 'edit' };
+}
+
+function observationSectionLevelFromFlags(view, edit) {
+  if (edit) return 'edit';
+  if (view) return 'view';
+  return 'none';
+}
+
 function RoleDrawer({ role, resources, onClose, onSaved, onDeleted }) {
   const [displayName, setDisplayName] = useState('');
   const [startPage, setStartPage] = useState('dashboard');
   const [attackAlert, setAttackAlert] = useState(false);
   const [permissions, setPermissions] = useState({});
   const [writePermissions, setWritePermissions] = useState({});
+  const [observationSectionAccess, setObservationSectionAccess] = useState({});
+  const [observationSectionMeta, setObservationSectionMeta] = useState([]);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
   const isStandard = role && ['Administrator', 'Operator', 'ReadOnly'].includes(role.id);
+  const isAdminRole = role?.id === 'Administrator';
+  const isClientRole = role?.id === 'Client';
 
   useEffect(() => {
     if (!role) return;
@@ -661,11 +431,36 @@ function RoleDrawer({ role, resources, onClose, onSaved, onDeleted }) {
         setAttackAlert(!!data.attackAlert);
         setPermissions(data.permissions || {});
         setWritePermissions(data.writePermissions || {});
+        const sections = data.observationSections || [];
+        setObservationSectionMeta(sections);
+        const access = {};
+        sections.forEach((sec) => {
+          access[sec.id] = observationSectionFlagsFromLevel(sec.level);
+        });
+        setObservationSectionAccess(access);
       })
       .catch((err) => setError(err.message))
       .finally(() => setLoading(false));
   }, [role?.id]);
 
+  const syncObservationSectionsAfterObsPageChange = (pageId, { viewOff, writeOff }) => {
+    if (pageId !== 'observations' || (!viewOff && !writeOff)) return;
+    setObservationSectionAccess((prev) => {
+      const next = { ...prev };
+      const ids = observationSectionMeta.length
+        ? observationSectionMeta.map((s) => s.id)
+        : Object.keys(prev);
+      ids.forEach((id) => {
+        const cur = prev[id] || { view: false, edit: false };
+        if (viewOff) {
+          next[id] = { view: false, edit: false };
+        } else if (writeOff) {
+          next[id] = { view: cur.view, edit: false };
+        }
+      });
+      return next;
+    });
+  };
   const allowedStartPages = useMemo(
     () => resources.filter((page) => permissions[page.id]),
     [resources, permissions],
@@ -680,6 +475,14 @@ function RoleDrawer({ role, resources, onClose, onSaved, onDeleted }) {
     setPermissions((s) => ({ ...s, [pageId]: access }));
     if (!access) {
       setWritePermissions((s) => ({ ...s, [pageId]: false }));
+      syncObservationSectionsAfterObsPageChange(pageId, { viewOff: true });
+    }
+  };
+
+  const setPageWrite = (pageId, canWrite) => {
+    setWritePermissions((s) => ({ ...s, [pageId]: canWrite }));
+    if (pageId === 'observations' && !canWrite) {
+      syncObservationSectionsAfterObsPageChange(pageId, { writeOff: true });
     }
   };
 
@@ -688,12 +491,18 @@ function RoleDrawer({ role, resources, onClose, onSaved, onDeleted }) {
     setSaving(true);
     setError('');
     try {
+      const observationSections = {};
+      observationSectionMeta.forEach((sec) => {
+        const flags = observationSectionAccess[sec.id] || { view: false, edit: false };
+        observationSections[sec.id] = observationSectionLevelFromFlags(flags.view, flags.edit);
+      });
       await ApiClient.updateRole(role.id, {
         displayName,
         startPage,
         attackAlert,
         permissions,
         writePermissions,
+        observationSections,
       });
       pushToast({ kind: 'success', title: usersT('usersPage.toast.roleSaved') });
       await onSaved();
@@ -805,7 +614,7 @@ function RoleDrawer({ role, resources, onClose, onSaved, onDeleted }) {
                           <Checkbox
                             checked={canWrite}
                             disabled={!hasAccess}
-                            onChange={(v) => setWritePermissions((s) => ({ ...s, [page.id]: v }))}
+                            onChange={(v) => setPageWrite(page.id, v)}
                           />
                           <span>{usersT('usersPage.access.write')}</span>
                         </label>
@@ -816,6 +625,86 @@ function RoleDrawer({ role, resources, onClose, onSaved, onDeleted }) {
               </div>
             )}
           </div>
+          {!isClientRole && observationSectionMeta.length > 0 ? (
+            <div>
+              <div style={{ font: 'var(--pv-text-body-2-bold)', marginBottom: 8 }}>
+                {usersT('usersPage.observationSections.title')}
+              </div>
+              {isAdminRole ? (
+                <p style={{ color: 'var(--fg-muted)', font: 'var(--pv-text-body-3)', margin: 0 }}>
+                  {usersT('usersPage.observationSections.adminHint')}
+                </p>
+              ) : loading ? (
+                <div style={{ color: 'var(--fg-secondary)' }}>{usersT('usersPage.loading')}</div>
+              ) : (
+                <>
+                  <p style={{ color: 'var(--fg-secondary)', font: 'var(--pv-text-body-3)', marginTop: 0 }}>
+                    {usersT('usersPage.observationSections.subtitle')}
+                  </p>
+                  <div className="col" style={{ gap: 8 }}>
+                    {observationSectionMeta.map((sec) => {
+                      const flags = observationSectionAccess[sec.id] || { view: false, edit: false };
+                      const obsPage = !!permissions.observations;
+                      return (
+                        <div
+                          key={sec.id}
+                          className="row"
+                          style={{ justifyContent: 'space-between', gap: 12, alignItems: 'center' }}
+                        >
+                          <div>
+                            <div style={{ font: 'var(--pv-text-body-2-bold)' }}>{sec.title}</div>
+                            {sec.system ? (
+                              <div style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-muted)' }}>
+                                {usersT('usersPage.observationSections.system')}
+                              </div>
+                            ) : null}
+                          </div>
+                          <div className="row" style={{ gap: 16, flexShrink: 0, opacity: obsPage ? 1 : 0.5 }}>
+                            <label className="row" style={{ gap: 6, cursor: obsPage ? 'pointer' : 'not-allowed', font: 'var(--pv-text-body-3)' }}>
+                              <Checkbox
+                                checked={flags.view}
+                                disabled={!obsPage}
+                                onChange={(v) => setObservationSectionAccess((s) => ({
+                                  ...s,
+                                  [sec.id]: {
+                                    view: v,
+                                    edit: v ? (s[sec.id]?.edit || false) : false,
+                                  },
+                                }))}
+                              />
+                              <span>{usersT('usersPage.access.view')}</span>
+                            </label>
+                            <label className="row" style={{
+                              gap: 6,
+                              cursor: obsPage && flags.view ? 'pointer' : 'not-allowed',
+                              font: 'var(--pv-text-body-3)',
+                              opacity: flags.view ? 1 : 0.45,
+                            }}
+                            >
+                              <Checkbox
+                                checked={flags.edit}
+                                disabled={!obsPage || !flags.view}
+                                onChange={(v) => setObservationSectionAccess((s) => ({
+                                  ...s,
+                                  [sec.id]: { ...s[sec.id], view: true, edit: v },
+                                }))}
+                              />
+                              <span>{usersT('usersPage.access.write')}</span>
+                            </label>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                  {!permissions.observations ? (
+                    <p style={{ color: 'var(--fg-muted)', font: 'var(--pv-text-body-3)', marginBottom: 0 }}>
+                      {usersT('usersPage.observationSections.needObservationsPage')}
+                    </p>
+                  ) : null}
+                </>
+              )}
+            </div>
+          ) : null}
           {error && <div className="form-error">{error}</div>}
         </div>
       )}

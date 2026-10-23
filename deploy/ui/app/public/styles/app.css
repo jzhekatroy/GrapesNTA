@@ -7456,6 +7456,24 @@ html.modal-open #root {
   white-space: nowrap;
 }
 
+.observations-section-tabs .btn--primary .observations-section-tab__count {
+  opacity: 0.92;
+  font-weight: 600;
+}
+.observations-section-tabs .btn:not(.btn--primary) .observations-section-tab__count {
+  color: var(--fg-secondary);
+  background: var(--surf-2);
+  border-radius: 999px;
+  padding: 0 6px;
+  min-width: 1.4em;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+.observations-section-tabs .btn:not(.btn--primary):hover {
+  border-color: var(--bd-strong);
+  background: var(--surf-2);
+}
+
 .observations-board {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
