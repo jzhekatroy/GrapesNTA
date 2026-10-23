@@ -25,6 +25,22 @@ FLOWS_RAW_TABLE = os.environ.get("TRAFFIC_ROLLUP_FLOWS_TABLE", "").strip() or DE
 FLOWS_RAW_LIVE_TABLE = os.environ.get("TRAFFIC_ROLLUP_FLOWS_LIVE_TABLE", "").strip() or DEFAULT_FLOWS_RAW_TABLE
 
 
+def adapt_ix_client_columns(select_sql: str, has_columns: bool) -> str:
+    """Не упоминать ix_src_client / ix_dst_client, если их нет в таблице чтения.
+
+    ClickHouse проверяет имена колонок до условия ix_enabled = 0. На обёртке
+    flows_all, созданной до этих колонок, сводка IX падает, хотя учёт IX
+    выключен. Пустые строки совпадают со значением колонки по умолчанию.
+    """
+    if has_columns:
+        return select_sql
+    return (
+        select_sql
+        .replace("f.ix_src_client AS ix_src_client", "'' AS ix_src_client")
+        .replace("f.ix_dst_client AS ix_dst_client", "'' AS ix_dst_client")
+    )
+
+
 @dataclass(frozen=True)
 class RollupJob:
     job_id: str

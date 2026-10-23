@@ -21,7 +21,7 @@ from traffic_rollup_async import (
     recent_five_minute_filter,
     truncate_bucket,
 )
-from traffic_rollup_jobs import sorted_jobs
+from traffic_rollup_jobs import adapt_ix_client_columns, jobs_by_id, sorted_jobs
 
 
 class CoarseBudget(unittest.TestCase):
@@ -246,6 +246,18 @@ class FirstOccupiedMinute(unittest.TestCase):
         ch = EdgeClickHouse(None)
         self.assertIsNone(first_occupied_minute(ch, self.day, "1", display="t"))
         self.assertEqual(len(ch.queries), 1)
+
+
+class IxClientColumns(unittest.TestCase):
+    def test_missing_columns_are_not_named_in_the_ix_rollup(self):
+        sql = jobs_by_id()["traffic_client_ix_1m"].select_sql
+        adapted = adapt_ix_client_columns(sql, False)
+        self.assertNotIn("f.ix_src_client", adapted)
+        self.assertNotIn("f.ix_dst_client", adapted)
+        self.assertIn("'' AS ix_src_client", adapted)
+        self.assertIn("'' AS ix_dst_client", adapted)
+        self.assertIn("if(side.2 = 'out', ix_dst_client, ix_src_client)", adapted)
+        self.assertEqual(adapt_ix_client_columns(sql, True), sql)
 
 
 if __name__ == "__main__":
