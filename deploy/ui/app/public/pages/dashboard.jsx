@@ -649,11 +649,81 @@ const CABINET_IX_DASHBOARD_LAYOUT = {
       childIds: ['countries'],
     },
     { id: 'countries', x: 0, y: 0, w: 12, h: 2, visible: true, parentStack: 'stack-v-cabinet' },
-    { id: 'recent-flows', x: 0, y: 2, w: 12, h: 1, visible: true },
+    {
+      id: 'stack-h-ix-tops',
+      kind: 'stack',
+      direction: 'horizontal',
+      x: 0,
+      y: 2,
+      w: 12,
+      h: 2,
+      visible: true,
+      childIds: ['ix-peers', 'ix-asn'],
+    },
+    { id: 'ix-peers', x: 0, y: 0, w: 6, h: 2, visible: true, parentStack: 'stack-h-ix-tops' },
+    { id: 'ix-asn', x: 6, y: 0, w: 6, h: 2, visible: true, parentStack: 'stack-h-ix-tops' },
+    { id: 'recent-flows', x: 0, y: 4, w: 12, h: 1, visible: true },
   ],
 };
 
-function CabinetDashboard({ onNavigate, timeRange, customPeriod, displayTimezone, onChartRangeSelect, cabinetDirections }) {
+function cabinetIxRankBytes(row, showIn, showOut) {
+  const inn = showIn ? Number(row.inBytes) || 0 : 0;
+  const out = showOut ? Number(row.outBytes) || 0 : 0;
+  return inn + out;
+}
+
+function cabinetIxShare(bytes, total) {
+  const whole = Number(total) || 0;
+  if (whole <= 0) return '0%';
+  return `${((Number(bytes) || 0) / whole * 100).toFixed(1)}%`;
+}
+
+function CabinetIxRankCard({
+  title, columnLabel, rows, totals, showIn, showOut, loading, failed, error, loadMs, serverMs, subtitle,
+}) {
+  const list = rows || [];
+  const inTotal = Number(totals?.inBytes) || list.reduce((sum, row) => sum + (Number(row.inBytes) || 0), 0);
+  const outTotal = Number(totals?.outBytes) || list.reduce((sum, row) => sum + (Number(row.outBytes) || 0), 0);
+  const visible = list
+    .map((row) => ({ ...row, shown: cabinetIxRankBytes(row, showIn, showOut) }))
+    .filter((row) => row.shown > 0)
+    .sort((a, b) => b.shown - a.shown);
+  return (
+    <Card className="cabinet-ix-rank" title={title} subtitle={subtitle} loadMs={loadMs} serverMs={serverMs}>
+      {loading ? (
+        <div style={{ color: 'var(--fg-secondary)' }}>{dashT('dashboard.loading')}</div>
+      ) : failed ? (
+        <div style={{ color: 'var(--fg-secondary)' }}>{error || dashT('dashboard.loadFailed')}</div>
+      ) : !visible.length ? (
+        <div style={{ color: 'var(--fg-secondary)' }}>{dashT('cabinet.ix.empty')}</div>
+      ) : (
+        <table className="table">
+          <thead>
+            <tr>
+              <th>{columnLabel}</th>
+              {showIn ? <th className="num">{dashT('cabinet.direction.toYou')}</th> : null}
+              {showOut ? <th className="num">{dashT('cabinet.direction.fromYou')}</th> : null}
+            </tr>
+          </thead>
+          <tbody>
+            {visible.map((row) => (
+              <tr key={row.id || row.name}>
+                <td>{row.name}</td>
+                {showIn ? <td className="num mono">{cabinetIxShare(row.inBytes, inTotal)}</td> : null}
+                {showOut ? <td className="num mono">{cabinetIxShare(row.outBytes, outTotal)}</td> : null}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </Card>
+  );
+}
+
+function CabinetDashboard({
+  onNavigate, timeRange, customPeriod, displayTimezone, onChartRangeSelect, cabinetDirections,
+  cabinetLocations, cabinetLocationOn,
+}) {
   const i18nLocale = GrapesI18n.getLocale();
   const periodLabel = timeRangeLabel(timeRange, customPeriod);
   const periodKey = `${timeRange}|${customPeriod?.from || ''}|${customPeriod?.to || ''}`;
@@ -665,7 +735,17 @@ function CabinetDashboard({ onNavigate, timeRange, customPeriod, displayTimezone
   const beginDragRef = useRef(null);
   const directionKey = getCabinetTrafficDirections().map((item) => (cabinetDirections?.[item.id] !== false ? '1' : '0')).join('');
   const directionParam = directionKey === '10' ? 'in' : directionKey === '01' ? 'out' : directionKey === '00' ? null : '';
+  const selectedLocations = useMemo(() => {
+    if (!cabinetLocations?.length) return null;
+    const picked = cabinetLocations.filter((name) => cabinetLocationOn?.[name] !== false);
+    if (picked.length === cabinetLocations.length) return null;
+    return picked;
+  }, [cabinetLocations, cabinetLocationOn]);
+  const locationKey = selectedLocations == null
+    ? '*'
+    : (selectedLocations.length ? selectedLocations.join('\n') : '-');
   const [series, setSeries] = useState({ source: 'loading', data: [], meta: null });
+  const [rankings, setRankings] = useState({ source: 'loading', data: { peers: [], asns: [] }, meta: null });
   const [countries, setCountries] = useState({ source: 'loading', data: [], meta: null });
   const [services, setServices] = useState({ source: 'loading', data: [], meta: null });
   const [recent, setRecent] = useState({ source: 'loading', data: [], meta: null });
@@ -675,13 +755,19 @@ function CabinetDashboard({ onNavigate, timeRange, customPeriod, displayTimezone
 
   useEffect(() => {
     let cancelled = false;
-    setSeries({ source: 'loading', data: [], meta: null });
-    ApiClient.loadCabinetOverviewSeries({ timeRange, customPeriod, granularity: 'auto' }).then((seriesResult) => {
+    if (selectedLocations && selectedLocations.length === 0) {
+      setSeries((prev) => ({ source: 'clickhouse', data: [], meta: prev.meta }));
+      return undefined;
+    }
+    setSeries((prev) => ({ source: 'loading', data: [], meta: prev.meta }));
+    ApiClient.loadCabinetOverviewSeries({
+      timeRange, customPeriod, granularity: 'auto', locations: selectedLocations,
+    }).then((seriesResult) => {
       if (cancelled) return;
       setSeries(cabinetOverviewState(seriesResult, []));
     });
     return () => { cancelled = true; };
-  }, [periodKey]);
+  }, [periodKey, locationKey]);
 
   useEffect(() => {
     if (directionParam == null) {
@@ -698,7 +784,7 @@ function CabinetDashboard({ onNavigate, timeRange, customPeriod, displayTimezone
     return () => { cancelled = true; };
   }, [periodKey, directionParam]);
 
-  const ixKnown = series.source !== 'loading';
+  const ixKnown = series.source !== 'loading' || series.meta != null;
   const ixCabinet = series.meta?.ix === true;
 
   useEffect(() => {
@@ -715,6 +801,25 @@ function CabinetDashboard({ onNavigate, timeRange, customPeriod, displayTimezone
     });
     return () => { cancelled = true; };
   }, [periodKey, directionParam, ixKnown, ixCabinet]);
+
+  useEffect(() => {
+    if (!ixCabinet || directionParam == null || (selectedLocations && selectedLocations.length === 0)) {
+      setRankings({ source: 'clickhouse', data: { peers: [], asns: [] }, meta: null });
+      return undefined;
+    }
+    let cancelled = false;
+    setRankings({ source: 'loading', data: { peers: [], asns: [] }, meta: null });
+    ApiClient.loadCabinetIxRankings({
+      timeRange,
+      customPeriod,
+      direction: directionParam,
+      locations: selectedLocations,
+      limit: 10,
+    }).then((result) => {
+      if (!cancelled) setRankings(cabinetOverviewState(result, { peers: [], asns: [] }));
+    });
+    return () => { cancelled = true; };
+  }, [periodKey, directionParam, locationKey, ixCabinet]);
 
   useEffect(() => {
     let cancelled = false;
@@ -768,6 +873,16 @@ function CabinetDashboard({ onNavigate, timeRange, customPeriod, displayTimezone
       return inOn ? flow.clientSide === 'dst' : flow.clientSide === 'src';
     });
   }, [recent.data, cabinetDirections]);
+  const showIn = cabinetDirections?.in !== false;
+  const showOut = cabinetDirections?.out !== false;
+  const peerRows = useMemo(() => (rankings.data?.peers || []).map((row) => ({
+    ...row,
+    name: row.name || (row.id ? row.id : dashT('cabinet.ix.notPeer')),
+  })), [rankings.data, i18nLocale]);
+  const asnRows = useMemo(() => (rankings.data?.asns || []).map((row) => ({
+    ...row,
+    name: row.name || (row.id && row.id !== '0' ? `AS${row.id}` : dashT('dashboard.talkers.noAsn')),
+  })), [rankings.data, i18nLocale]);
   const directionLabel = directionSummaryLabel(
     cabinetDirections || defaultCabinetDirectionsEnabled(),
     getCabinetTrafficDirections(),
@@ -867,6 +982,38 @@ function CabinetDashboard({ onNavigate, timeRange, customPeriod, displayTimezone
               loadMs={countries.loadMs}
               serverMs={countries.serverMs}
               listKey={`${periodKey}|${directionKey}`}
+            />
+          ),
+          'ix-peers': () => (
+            <CabinetIxRankCard
+              title={dashT('cabinet.ix.peers')}
+              columnLabel={dashT('cabinet.ix.peerColumn')}
+              subtitle={`${periodLabel} · ${directionLabel}`}
+              rows={peerRows}
+              totals={rankings.meta?.totals}
+              showIn={showIn}
+              showOut={showOut}
+              loading={rankings.source === 'loading'}
+              failed={rankings.source === 'error'}
+              error={rankings.error}
+              loadMs={rankings.loadMs}
+              serverMs={rankings.serverMs}
+            />
+          ),
+          'ix-asn': () => (
+            <CabinetIxRankCard
+              title={dashT('cabinet.ix.asn')}
+              columnLabel={dashT('cabinet.ix.asnColumn')}
+              subtitle={`${periodLabel} · ${directionLabel}`}
+              rows={asnRows}
+              totals={rankings.meta?.totals}
+              showIn={showIn}
+              showOut={showOut}
+              loading={rankings.source === 'loading'}
+              failed={rankings.source === 'error'}
+              error={rankings.error}
+              loadMs={rankings.loadMs}
+              serverMs={rankings.serverMs}
             />
           ),
           'recent-flows': () => (

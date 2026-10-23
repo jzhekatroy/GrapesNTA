@@ -107,6 +107,7 @@
 60_traffic/29_traffic_client_service_1h.sql
 60_traffic/30_traffic_client_service_1d.sql
 60_traffic/31_traffic_client_anomaly_1m.sql
+60_traffic/33_traffic_client_ix_1m.sql
 70_observations/01_observations.sql
 70_observations/03_observation_rollups_5m.sql
 70_observations/04_observation_runs.sql

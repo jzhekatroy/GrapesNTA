@@ -130,6 +130,8 @@ function App() {
   const periodRef = useRef({ timeRange, customPeriod });
   const [directions, setDirections] = useState(defaultDirectionsEnabled);
   const [cabinetDirections, setCabinetDirections] = useState(defaultCabinetDirectionsEnabled);
+  const [cabinetLocations, setCabinetLocations] = useState(null);
+  const [cabinetLocationOn, setCabinetLocationOn] = useState(null);
   const [collectorFilter, setCollectorFilter] = useState([]);
   const [timezonePref, setTimezonePref] = useState(() => loadTimezonePreference());
   const displayTimezone = resolveDisplayTimezone(timezonePref);
@@ -569,6 +571,37 @@ function App() {
   const cabinetObservationsReadOnly = cabinetReadOnly && !canManageCabinetObservations;
   const clientDisplayName = auth.user?.cabinet?.clientDisplayName || '';
   const cabinetBindMode = auth.user?.cabinet?.bindMode || '';
+  const cabinetClientId = auth.user?.cabinet?.clientId || '';
+
+  useEffect(() => {
+    if (!cabinetMode || !cabinetClientId) {
+      setCabinetLocations(null);
+      setCabinetLocationOn(null);
+      return undefined;
+    }
+    let cancelled = false;
+    ApiClient.loadCabinetIxSites().then((result) => {
+      if (cancelled) return;
+      const names = result?.meta?.enabled ? (result.data || []) : [];
+      if (!names.length) {
+        setCabinetLocations(null);
+        setCabinetLocationOn(null);
+        return;
+      }
+      setCabinetLocations(names);
+      setCabinetLocationOn(Object.fromEntries(names.map((name) => [name, true])));
+      const current = periodRef.current || {};
+      const presetMs = typeof timeRangePresetMs === 'function' ? timeRangePresetMs(current.timeRange) : null;
+      const customMs = current.timeRange === 'custom' && current.customPeriod?.from && current.customPeriod?.to
+        ? (Date.parse(current.customPeriod.to) - Date.parse(current.customPeriod.from))
+        : null;
+      const limitMs = 14 * 86400000;
+      if ((presetMs != null && presetMs > limitMs) || (customMs != null && customMs > limitMs)) {
+        setTimeRange('14d');
+      }
+    });
+    return () => { cancelled = true; };
+  }, [cabinetMode, cabinetClientId]);
 
   useEffect(() => {
     if (!auth.user || !registryReady) return;
@@ -630,6 +663,8 @@ function App() {
             onNavigate={navigate}
             directions={directions}
             cabinetDirections={cabinetDirections}
+            cabinetLocations={cabinetLocations}
+            cabinetLocationOn={cabinetLocationOn}
             timeRange={timeRange}
             customPeriod={customPeriod}
             collectorFilter={collectorFilter}
@@ -882,6 +917,9 @@ function App() {
         onDirectionsChange={setDirections}
         cabinetDirections={cabinetDirections}
         onCabinetDirectionsChange={setCabinetDirections}
+        cabinetLocations={cabinetLocations}
+        cabinetLocationOn={cabinetLocationOn}
+        onCabinetLocationsChange={setCabinetLocationOn}
         collectorFilter={collectorFilter}
         onCollectorFilterChange={setCollectorFilter}
         pageTitles={pageTitles}

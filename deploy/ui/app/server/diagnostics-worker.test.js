@@ -2,7 +2,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { classifyTrafficJob } = require('./diagnostics-worker');
+const { classifyTrafficJob, missingIxRollupRow } = require('./diagnostics-worker');
 
 const HOUR = 3600;
 
@@ -21,6 +21,13 @@ test('a deferred job is reported on its own, not as a silent ok', () => {
   const got = classifyTrafficJob('traffic_client_service_1h', 'deferred', 76 * HOUR, 30);
   assert.equal(got.deferred, true);
   assert.equal(got.stale, false);
+});
+
+test('a stand that already runs rollups but has no IX state row is called out', () => {
+  const row = missingIxRollupRow();
+  assert.equal(row.job, 'traffic_client_ix_1m');
+  assert.equal(row.status, 'missing');
+  assert.equal(row.stale, false);
 });
 
 test('yesterday is normal for a day job, four days is not', () => {

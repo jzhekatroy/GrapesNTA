@@ -5523,6 +5523,17 @@ body.explorer-chip-dragging * {
 .dashboard-stack--vertical .dashboard-stack__item:has(.country-choropleth) {
   overflow: auto;
 }
+.dashboard-stack__item:has(.cabinet-ix-rank) {
+  overflow: auto;
+}
+.cabinet-ix-rank .table {
+  width: 100%;
+}
+.cabinet-ix-rank th.num,
+.cabinet-ix-rank td.num {
+  text-align: right;
+  white-space: nowrap;
+}
 .dashboard-stack--edit .dashboard-stack__item {
   overflow: visible;
 }

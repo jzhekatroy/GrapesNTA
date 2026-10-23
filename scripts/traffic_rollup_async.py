@@ -1437,6 +1437,7 @@ DEFAULT_BACKFILL_JOBS = [
     "traffic_entity_1m",
     "traffic_client_1m",
     # traffic_client_anomaly_1m: not scheduled until detection ships
+    "traffic_client_ix_1m",
     "traffic_vlan_1m",
     "traffic_country_1m",
     "traffic_service_1m",

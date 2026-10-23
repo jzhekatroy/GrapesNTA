@@ -753,6 +753,92 @@ GROUP BY minute, client_id, source_id, direction, transport
         time_filter_column="f.time_received_ns",
     ),
     RollupJob(
+        job_id="traffic_client_ix_1m",
+        dest_table="default.traffic_client_ix_1m",
+        bucket_kind="minute",
+        time_column="time_received_ns",
+        source_table="default.flows_raw",
+        priority=57,
+        depends_on=(),
+        # Same client expansion as traffic_client_1m, keyed further by IX site,
+        # the IX client on the other side and the remote ASN for the IX cabinet.
+        #
+        # The IX flag is read inside the query so the job can stay in the regular
+        # schedule: with IX off the condition is a constant false and the bucket
+        # writes nothing. Sites are resolved after the first GROUP BY, on a few
+        # thousand rows per minute instead of every flow.
+        select_sql="""
+SELECT
+    v.minute AS minute,
+    v.client_id AS client_id,
+    if(l2.ix = 1, l2.ix_location, '') AS ix_location,
+    v.direction AS direction,
+    v.peer_client_id AS peer_client_id,
+    v.remote_asn AS remote_asn,
+    sum(v.bytes) AS bytes,
+    sum(v.packets) AS packets,
+    sum(v.flows_count) AS flows_count
+FROM
+(
+    SELECT
+        toStartOfMinute(time_received_ns) AS minute,
+        side.1 AS client_id,
+        eff_vlan,
+        side.2 AS direction,
+        if(side.2 = 'out', ix_dst_client, ix_src_client) AS peer_client_id,
+        if(side.2 = 'out', dst_asn, src_asn) AS remote_asn,
+        sum(bytes) AS bytes,
+        sum(packets) AS packets,
+        sum(coalesce(sampling_rate, 1)) AS flows_count
+    FROM
+    (
+        SELECT
+            f.time_received_ns AS time_received_ns,
+            f.bytes AS bytes,
+            f.packets AS packets,
+            f.sampling_rate AS sampling_rate,
+            f.eff_vlan AS eff_vlan,
+            f.src_asn AS src_asn,
+            f.dst_asn AS dst_asn,
+            f.src_client AS src_client,
+            f.dst_client AS dst_client,
+            f.ix_src_client AS ix_src_client,
+            f.ix_dst_client AS ix_dst_client
+        FROM default.flows_raw AS f
+        PREWHERE (f.src_client != '') OR (f.dst_client != '')
+        WHERE {time_filter}
+            AND (
+                SELECT argMax(ix_enabled, updated_at)
+                FROM default.app_erp_sync_settings
+                WHERE settings_id = 'global'
+            ) = 1
+    ) AS c
+    ARRAY JOIN arrayFilter(
+        x -> (tupleElement(x, 1) != ''),
+        [
+            (
+                if(src_client != '' AND src_client != dst_client, src_client, ''),
+                'out'
+            ),
+            (
+                if(dst_client != '' AND src_client != dst_client, dst_client, ''),
+                'in'
+            )
+        ]
+    ) AS side
+    GROUP BY minute, client_id, eff_vlan, direction, peer_client_id, remote_asn
+) AS v
+LEFT JOIN
+(
+    SELECT vlan_id, ix, ix_location
+    FROM default.net_l2_vlans_enabled
+) AS l2 ON l2.vlan_id = v.eff_vlan
+GROUP BY minute, client_id, ix_location, direction, peer_client_id, remote_asn
+""",
+        pre_delete_sql="ALTER TABLE default.traffic_client_ix_1m DELETE WHERE minute = {bucket_dt}",
+        time_filter_column="f.time_received_ns",
+    ),
+    RollupJob(
         job_id="traffic_dashboard_1h",
         dest_table="default.traffic_dashboard_1h",
         bucket_kind="hour",
