@@ -7,6 +7,7 @@ const {
 } = require('./staff-observations-access');
 const {
   executeExplorerQueryBundle,
+  explorerRuntimeOptions,
 } = require('../explorer');
 const { CLIENTS_RESOURCE } = require('./constants');
 const { getEnabledClient, fillClientDisplayName } = require('./clients-lookup');
@@ -280,7 +281,7 @@ function createCabinetRouter({ sessions }) {
   router.get('/explorer/schema', async (req, res) => {
     try {
       requireScopedClientId(req.cabinet);
-      res.json({ data: cabinetExplorerSchema() });
+      res.json({ data: cabinetExplorerSchema(await explorerRuntimeOptions()) });
     } catch (err) {
       sendError(res, err, err.statusCode || 502);
     }
@@ -292,7 +293,7 @@ function createCabinetRouter({ sessions }) {
     enableAuditQueryCapture();
     try {
       const clientId = requireScopedClientId(req.cabinet);
-      const bundle = await cabinetExplorerQuery(clientId, body);
+      const bundle = await cabinetExplorerQuery(clientId, body, await explorerRuntimeOptions());
       const queryBody = bundle.queryBody || body;
       const {
         flowsResult,
@@ -353,7 +354,7 @@ function createCabinetRouter({ sessions }) {
     try {
       const clientId = requireScopedClientId(req.cabinet);
       const result = await runNamed(
-        () => cabinetExplorerFlows(clientId, req.body || {}),
+        async () => cabinetExplorerFlows(clientId, req.body || {}, await explorerRuntimeOptions()),
         { name: 'cabinet/explorer/flows-only' },
       );
       res.json(result);
@@ -365,7 +366,7 @@ function createCabinetRouter({ sessions }) {
   router.post('/explorer/export', async (req, res) => {
     try {
       const clientId = requireScopedClientId(req.cabinet);
-      const csv = await cabinetExplorerExportCsv(clientId, req.body || {});
+      const csv = await cabinetExplorerExportCsv(clientId, req.body || {}, await explorerRuntimeOptions());
       res.setHeader('Content-Type', 'text/csv; charset=utf-8');
       res.setHeader('Content-Disposition', `attachment; filename="cabinet-explorer-${Date.now()}.csv"`);
       res.send(`\uFEFF${csv}`);

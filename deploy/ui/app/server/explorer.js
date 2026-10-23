@@ -492,7 +492,7 @@ function explorerFilterFieldMeta(id, d) {
     group: d.group || 'Прочее',
     type,
     ops: FILTER_OPS_BY_TYPE[type] || FILTER_OPS_BY_TYPE.string,
-    entityType: explorerFilterEntityType(type),
+    entityType: d.cabinetNoEntityPicker ? null : explorerFilterEntityType(type),
     valueHint: d.valueHint || EXPLORER_FIELD_HINTS[id] || EXPLORER_FILTER_HINTS[type] || EXPLORER_FILTER_HINTS.string,
     valueOptions,
     aliases: d.aliases || explorerFieldAliases(id, d),
@@ -1470,11 +1470,27 @@ function cabinetClientDirectionExpr() {
     + `f.src_client = {cabinet_client_id:String}, 'out', '')`;
 }
 
-function cabinetExplorerDimensions() {
-  const base = explorerDimensions();
+const CABINET_IX_FIELD_IDS = new Set(['ix_src_client', 'ix_dst_client']);
+
+function cabinetExplorerFieldAllowed(id, options = {}) {
+  return CABINET_EXPLORER_FIELD_IDS.has(id) || (Boolean(options.ix) && CABINET_IX_FIELD_IDS.has(id));
+}
+
+function cabinetExplorerDimensions(options = {}) {
+  const ix = Boolean(options.ix);
+  const base = explorerDimensions({ ix });
   const dims = Object.fromEntries(
-    Object.entries(base).filter(([id]) => CABINET_EXPLORER_FIELD_IDS.has(id)),
+    Object.entries(base).filter(([id]) => cabinetExplorerFieldAllowed(id, { ix })),
   );
+  for (const id of CABINET_IX_FIELD_IDS) {
+    if (dims[id]) {
+      dims[id] = {
+        ...dims[id],
+        cabinetNoEntityPicker: true,
+        valueHint: 'client_id клиента IX. Пусто или «—» — сторона не определена.',
+      };
+    }
+  }
   const directionExpr = cabinetClientDirectionExpr();
   dims.client_direction = {
     label: 'Направление',
@@ -1493,12 +1509,18 @@ function cabinetExplorerDimensions() {
 
 function explorerDimensionsForOptions(options = {}) {
   return options.cabinet || options.cabinetClientId
-    ? cabinetExplorerDimensions()
+    ? cabinetExplorerDimensions(options)
     : explorerDimensions(options);
 }
 
 function explorerDimensionGroups(options = {}) {
-  if (!options.ix || options.cabinet || options.cabinetClientId) return DIMENSION_GROUPS;
+  if (!options.ix) return DIMENSION_GROUPS;
+  if (options.cabinet || options.cabinetClientId) {
+    return {
+      ...DIMENSION_GROUPS,
+      [EXPLORER_GROUP.CLIENTS]: ['client_direction', 'ix_src_client', 'ix_dst_client'],
+    };
+  }
   return {
     ...DIMENSION_GROUPS,
     [EXPLORER_GROUP.CLIENTS]: [
@@ -1516,7 +1538,7 @@ function cabinetExplorerValidationError(message) {
   return error;
 }
 
-function validateCabinetExplorerFields(body = {}) {
+function validateCabinetExplorerFields(body = {}, options = {}) {
   if (body.groupBy != null && !Array.isArray(body.groupBy)) {
     throw cabinetExplorerValidationError('groupBy должен быть массивом');
   }
@@ -1526,7 +1548,7 @@ function validateCabinetExplorerFields(body = {}) {
     const validMask = id === 'src_ip' || id === 'dst_ip'
       ? new RegExp(`^${id}(?:/(?:[1-9]|[12][0-9]|3[0-2]))?$`).test(raw)
       : raw === id;
-    if (!CABINET_EXPLORER_FIELD_IDS.has(id) || !validMask) {
+    if (!cabinetExplorerFieldAllowed(id, options) || !validMask) {
       throw cabinetExplorerValidationError(`Недоступная группировка: ${raw || 'пустое значение'}`);
     }
   }
@@ -1534,7 +1556,7 @@ function validateCabinetExplorerFields(body = {}) {
   if (body.filters != null && !Array.isArray(body.filters)) {
     throw cabinetExplorerValidationError('filters должен быть массивом');
   }
-  const dims = cabinetExplorerDimensions();
+  const dims = cabinetExplorerDimensions(options);
   const validateCabinetFilterNode = (filter) => {
     if (isExplorerFilterGroup(filter)) {
       (filter.children || []).forEach(validateCabinetFilterNode);
@@ -1542,7 +1564,7 @@ function validateCabinetExplorerFields(body = {}) {
     }
     const field = String(filter?.field || filter?.dim || '').trim();
     const dim = dims[field];
-    if (!field || !CABINET_EXPLORER_FIELD_IDS.has(field) || !dim) {
+    if (!field || !cabinetExplorerFieldAllowed(field, options) || !dim) {
       throw cabinetExplorerValidationError(`Недоступное поле фильтра: ${field || 'пустое значение'}`);
     }
     const op = String(filter?.op || '=').trim().toLowerCase();
@@ -1610,10 +1632,10 @@ function explorerSchema(options = {}) {
       maxLimit: EXPLORER_MAX_LIMIT,
       maxExportRows: EXPLORER_MAX_EXPORT_ROWS,
       dimensionGroups: Object.fromEntries(
-        Object.entries(DIMENSION_GROUPS)
+        Object.entries(explorerDimensionGroups(options))
           .map(([group, ids]) => [
             group,
-            ids.filter((id) => CABINET_EXPLORER_FIELD_IDS.has(id)),
+            ids.filter((id) => cabinetExplorerFieldAllowed(id, options)),
           ])
           .filter(([, ids]) => ids.length),
       ),
@@ -2717,7 +2739,7 @@ function collectExplorerJoins(groupBy, dims, filterJoins = []) {
 }
 
 function normalizeExplorerQuery(body = {}, options = {}) {
-  if (options.cabinetClientId) validateCabinetExplorerFields(body);
+  if (options.cabinetClientId) validateCabinetExplorerFields(body, options);
   const range = body.range || body.timeRange || '1h';
   const from = body.from;
   const to = body.to;
@@ -2759,7 +2781,7 @@ function normalizeExplorerQuery(body = {}, options = {}) {
     includeBreakdowns: body.includeBreakdowns !== false,
     collectorId,
     cabinetClientId: options.cabinetClientId || null,
-    ix: Boolean(options.ix) && !options.cabinet && !options.cabinetClientId,
+    ix: Boolean(options.ix),
     windowAnchor: body.windowAnchor || undefined,
   };
 }
@@ -4695,7 +4717,7 @@ async function explorerBreakdown(body = {}, dimension = 'proto', limit = 5, opti
 }
 
 async function explorerQuery(body = {}, options = {}) {
-  if (options.cabinetClientId) validateCabinetExplorerFields(body);
+  if (options.cabinetClientId) validateCabinetExplorerFields(body, options);
   const queryBody = await ensureExplorerWindowSnapshot(body, options);
   const q = normalizeExplorerQuery(queryBody, options);
   const { groups } = resolveExplorerGroupState(
@@ -5239,7 +5261,7 @@ function rowsToCsv(rows, groupBy, metricLabel) {
 }
 
 async function explorerExportCsv(body = {}, options = {}) {
-  if (options.cabinetClientId) validateCabinetExplorerFields(body);
+  if (options.cabinetClientId) validateCabinetExplorerFields(body, options);
   const hasPinnedWindow = body.from && body.to;
   const snapshotBody = hasPinnedWindow
     ? { ...body, range: 'custom', timeRange: undefined }
