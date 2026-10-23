@@ -7,8 +7,11 @@ const {
 
 const CABINET_EXPLORER_OPTIONS = { cabinet: true };
 
-function cabinetExplorerOptions(clientId) {
-  return { cabinetClientId: String(clientId || '').trim() };
+function cabinetExplorerOptions(clientId, runtime = {}) {
+  return {
+    cabinetClientId: String(clientId || '').trim(),
+    ...(runtime.ix ? { ix: true } : {}),
+  };
 }
 
 function sanitizeCabinetExplorerBody(body = {}) {
@@ -22,20 +25,20 @@ function sanitizeCabinetExplorerBody(body = {}) {
   return next;
 }
 
-function cabinetExplorerSchema() {
-  return explorerSchema(CABINET_EXPLORER_OPTIONS);
+function cabinetExplorerSchema(runtime = {}) {
+  return explorerSchema({ ...CABINET_EXPLORER_OPTIONS, ...(runtime.ix ? { ix: true } : {}) });
 }
 
-async function cabinetExplorerQuery(clientId, body = {}) {
-  return explorerQuery(sanitizeCabinetExplorerBody(body), cabinetExplorerOptions(clientId));
+async function cabinetExplorerQuery(clientId, body = {}, runtime = {}) {
+  return explorerQuery(sanitizeCabinetExplorerBody(body), cabinetExplorerOptions(clientId, runtime));
 }
 
-async function cabinetExplorerFlows(clientId, body = {}) {
-  return explorerFlows(sanitizeCabinetExplorerBody(body), cabinetExplorerOptions(clientId));
+async function cabinetExplorerFlows(clientId, body = {}, runtime = {}) {
+  return explorerFlows(sanitizeCabinetExplorerBody(body), cabinetExplorerOptions(clientId, runtime));
 }
 
-async function cabinetExplorerExportCsv(clientId, body = {}) {
-  return explorerExportCsv(sanitizeCabinetExplorerBody(body), cabinetExplorerOptions(clientId));
+async function cabinetExplorerExportCsv(clientId, body = {}, runtime = {}) {
+  return explorerExportCsv(sanitizeCabinetExplorerBody(body), cabinetExplorerOptions(clientId, runtime));
 }
 
 module.exports = {

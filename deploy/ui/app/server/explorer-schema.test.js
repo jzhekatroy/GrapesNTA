@@ -217,7 +217,7 @@ describe('explorer schema field naming', () => {
     assert.doesNotMatch(expr, /ix_src_client|ix_dst_client/);
   });
 
-  it('exposes IX sender and receiver only for the operator IX explorer', () => {
+  it('exposes IX sender and receiver in the IX explorer, cabinet keeps its own direction', () => {
     const schema = explorerSchema({ ix: true });
     const sender = schema.filterFields.find((f) => f.id === 'ix_src_client');
     const receiver = schema.filterFields.find((f) => f.id === 'ix_dst_client');
@@ -236,7 +236,8 @@ describe('explorer schema field naming', () => {
     assert.match(expr, /f\.ix_src_client != '' AND f\.ix_dst_client != '', 'between'/);
     assert.match(expr, /f\.dst_client != '', 'in'/);
     const cabinet = explorerSchema({ cabinet: true, ix: true });
-    assert.equal(cabinet.filterFields.some((f) => f.id === 'ix_src_client'), false);
+    assert.equal(cabinet.filterFields.find((f) => f.id === 'ix_src_client')?.entityType, null);
+    assert.equal(cabinet.filterFields.some((f) => f.id === 'cabinet_client'), false);
     assert.doesNotMatch(
       explorerDimensionsForOptions({ cabinet: true, ix: true }).client_direction.filterExpr,
       /ix_src_client/,
