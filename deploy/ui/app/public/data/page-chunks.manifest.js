@@ -76,6 +76,10 @@ const PAGE_CHUNKS_MANIFEST = {
       scripts: ['/pages/erp-piterix.jsx', '/pages/detection.jsx', '/pages/diagnostics.jsx'],
       exports: { default: 'PageDiagnostics' },
     },
+    'api-integration-erp': {
+      scripts: ['/pages/api-integration-erp.jsx'],
+      exports: { default: 'PageApiIntegrationErp' },
+    },
     snmp: {
       scripts: ['/data/interface-role-labels.js', '/pages/snmp.jsx'],
       exports: { default: 'PageSnmp' },

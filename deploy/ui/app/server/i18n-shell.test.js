@@ -333,3 +333,38 @@ test('английские подписи страницы классифика�
   assert.equal(en['trafficClassification.saveSuccessTitle'], 'Settings saved');
   assert.equal(en['trafficClassification.loadFailed'], 'Failed to load');
 });
+test('английские подписи страницы API интеграций совпадают с требованиями', () => {
+  const en = loadLocaleMessages('en');
+  assert.equal(en['apiErpPage.title'], 'API integrations');
+  assert.equal(en['apiErpPage.subtitle'], 'Manage API connections: issuing credentials, recreation, tokens, journal.');
+  assert.equal(en['apiErpPage.forbidden'], 'This section is only for roles with the "API integrations" access.');
+  assert.equal(en['apiErpPage.col.name'], 'Name');
+  assert.equal(en['apiErpPage.col.status'], 'Status');
+  assert.equal(en['apiErpPage.col.lastUsed'], 'Last seen');
+  assert.equal(en['apiErpPage.col.today'], 'In 24h');
+  assert.equal(en['apiErpPage.status.active'], 'active');
+  assert.equal(en['apiErpPage.status.inactive'], 'disabled');
+  assert.equal(en['apiErpPage.tag.manual'], 'custom credentials');
+  assert.equal(en['apiErpPage.ago.never'], 'never');
+  assert.equal(en['apiErpPage.ago.min'], '{n} min ago');
+  assert.equal(en['apiErpPage.issued.titleRecreate'], 'New credentials issued');
+  assert.equal(en['apiErpPage.create.title'], 'New connection');
+  assert.equal(en['apiErpPage.create.modeManual'], 'Set my own');
+  assert.equal(en['apiErpPage.card.revokeTokens'], 'Revoke tokens');
+  assert.equal(en['apiErpPage.card.deleteTitle'], 'Delete the connection permanently; history remains in the audit log');
+  assert.equal(en['apiErpPage.monitor.consumerSide'], 'Consumer side');
+  assert.equal(en['apiErpPage.journal.empty'], 'No records');
+  assert.equal(en['apiErpPage.pair.title'], 'Verify the id+secret pair');
+  assert.equal(en['apiErpPage.footerNote'], 'Token TTL: {ttl}s. Disabled connections stay in the list for history.');
+  const GrapesI18n = loadI18n();
+  GrapesI18n.setLocale('en');
+  assert.equal(
+    GrapesI18n.t('apiErpPage.confirm.delete', { name: 'Piter-IX', id: 'nta-abc' }),
+    'Delete "Piter-IX" (nta-abc)?\n\nThe row will be permanently deleted from the database and its tokens revoked. Action history remains in the audit log.',
+  );
+  assert.equal(GrapesI18n.t('apiErpPage.toast.copied', { label: 'client_id' }), 'client_id copied');
+  assert.equal(GrapesI18n.t('apiErpPage.ago.day', { n: 2 }), '2 d ago');
+  GrapesI18n.setLocale('ru');
+  assert.equal(GrapesI18n.t('apiErpPage.col.todayValue', { exchanges: 3, requests: 7 }), 'обменов 3 · запросов 7');
+  assert.equal(GrapesI18n.t('apiErpPage.ago.never'), 'никогда');
+});

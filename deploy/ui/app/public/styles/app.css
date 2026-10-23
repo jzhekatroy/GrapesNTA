@@ -8782,3 +8782,41 @@ html.modal-open #root {
   color: var(--fg-primary);
   font: var(--pv-text-body-3);
 }
+
+/* Меню действий в таблице «API интеграции» (api-integration-erp.jsx). */
+.api-erp-menu {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 4px);
+  z-index: 60;
+  min-width: 240px;
+  background: var(--bg-surface-2);
+  border: 1px solid var(--bd-default);
+  border-radius: 10px;
+  padding: 6px;
+  box-shadow: var(--pv-shadow-popover);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.api-erp-menu__item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 10px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  font: var(--pv-text-body-3);
+  color: var(--fg-primary);
+  text-align: left;
+  cursor: pointer;
+}
+
+.api-erp-menu__item:hover:not(:disabled) { background: var(--surf-1); }
+.api-erp-menu__item:active:not(:disabled) { background: var(--surf-2); }
+.api-erp-menu__item:disabled { color: var(--fg-muted); cursor: default; }
+.api-erp-menu__item--danger { color: var(--st-critical); }
+.api-erp-menu__item--danger:disabled { color: var(--st-critical); opacity: 0.5; }

@@ -931,6 +931,14 @@ function resolveWriteAction(method, apiPath) {
   if (/^\/api\/observation-sections\/[^/]+$/.test(p) && m === 'PUT') return 'observation_section_update';
   if (/^\/api\/observation-sections\/[^/]+$/.test(p) && m === 'DELETE') return 'observation_section_delete';
 
+  if (p === '/api/admin/api-clients' && m === 'POST') return 'api_client_create';
+  if (p === '/api/admin/api-clients/recreate' && m === 'POST') return 'api_client_recreate';
+  if (p === '/api/admin/api-clients/manual' && m === 'POST') return 'api_client_manual_register';
+  if (p === '/api/admin/api-clients/activate' && m === 'POST') return 'api_client_activate';
+  if (p === '/api/admin/api-clients/deactivate' && m === 'POST') return 'api_client_deactivate';
+  if (p === '/api/admin/api-clients/delete' && m === 'POST') return 'api_client_delete';
+  if (p === '/api/admin/api-clients/revoke-tokens' && m === 'POST') return 'api_client_tokens_revoke';
+
   return 'api_write';
 }
 
@@ -1087,6 +1095,16 @@ async function writeMutatingAuditEvent(req, res, sessionId, { beforeState } = {}
     const name = pickBodyField(body, 'name') || beforeState?.snapshot?.name;
     if (name) objectLabel = String(name);
   }
+  if (action.startsWith('api_client_')) {
+    // object_id из пути недоступен (client_id приходит в теле), поэтому
+    // подписываем событие именем подключения или самим client_id.
+    const body = req.body && typeof req.body === 'object' ? req.body : {};
+    const label = pickBodyField(body, 'name') || pickBodyField(body, 'clientId');
+    if (label) {
+      objectLabel = String(label);
+      if (!objectId) objectId = String(pickBodyField(body, 'clientId') || '');
+    }
+  }
   const ctx = auditContextFromReq(req, sessionId);
   const result = auditResultFromStatus(res.statusCode);
   const detail = buildMutatingAuditDetail(req, apiPath, action, beforeState);
@@ -1142,6 +1160,22 @@ function buildListSql(filters) {
     conditions.push('actor_user_id = {userId:String}');
     params.userId = String(filters.userId);
   }
+  if (filters.actorUsername) {
+    conditions.push('actor_username = {actorUsername:String}');
+    params.actorUsername = String(filters.actorUsername);
+  }
+  if (filters.objectId) {
+    conditions.push('object_id = {objectId:String}');
+    params.objectId = String(filters.objectId);
+  }
+  if (filters.objectLabel) {
+    conditions.push('object_label = {objectLabel:String}');
+    params.objectLabel = String(filters.objectLabel);
+  }
+  if (Array.isArray(filters.actions) && filters.actions.length) {
+    conditions.push('action IN {actionsFilter:Array(String)}');
+    params.actionsFilter = filters.actions.map((a) => String(a || '')).filter(Boolean);
+  }
   if (filters.ip) {
     const variants = auditIpFilterVariants(filters.ip);
     if (variants.length === 1) {
@@ -1194,6 +1228,10 @@ async function listAuditEvents({
   ip,
   pageId,
   userId,
+  actorUsername,
+  objectId,
+  objectLabel,
+  actions,
   kind,
   result,
   limit = 100,
@@ -1202,7 +1240,7 @@ async function listAuditEvents({
   const safeLimit = Math.min(Math.max(Number(limit) || 100, 1), 500);
   const safeOffset = Math.max(Number(offset) || 0, 0);
   const { where, params } = buildListSql({
-    from, to, q, ip, pageId, userId, kind, result,
+    from, to, q, ip, pageId, userId, actorUsername, objectId, objectLabel, actions, kind, result,
   });
 
   const countResult = await query(

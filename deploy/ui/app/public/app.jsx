@@ -694,6 +694,15 @@ function App() {
       case 'smtp':
         pageEl = <LazyPage pageId="smtp" key={refreshKey} />;
         break;
+      case 'api-integration-erp':
+        pageEl = (
+          <LazyPage
+            pageId="api-integration-erp"
+            key={refreshKey}
+            currentUser={auth.user}
+          />
+        );
+        break;
       case 'versions':
         pageEl = <LazyPage pageId="versions" key={refreshKey} displayTimezone={displayTimezone} />;
         break;

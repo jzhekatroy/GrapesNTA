@@ -1047,6 +1047,51 @@ const ApiClient = (() => {
     return `/api/erp-piterix/runs/${encodeURIComponent(runId)}/report.csv`;
   }
 
+  async function loadApiClients() {
+    return requestJson('/api/admin/api-clients');
+  }
+
+  async function createApiClient(payload) {
+    return requestJson('/api/admin/api-clients', { method: 'POST', body: payload });
+  }
+
+  async function recreateApiClient(clientId) {
+    return requestJson('/api/admin/api-clients/recreate', { method: 'POST', body: { clientId } });
+  }
+
+  async function registerApiClientManual(payload) {
+    return requestJson('/api/admin/api-clients/manual', { method: 'POST', body: payload });
+  }
+
+  async function activateApiClient(clientId) {
+    return requestJson('/api/admin/api-clients/activate', { method: 'POST', body: { clientId } });
+  }
+
+  async function deactivateApiClient(clientId) {
+    return requestJson('/api/admin/api-clients/deactivate', { method: 'POST', body: { clientId } });
+  }
+
+  async function revokeApiClientTokens(clientId) {
+    return requestJson('/api/admin/api-clients/revoke-tokens', { method: 'POST', body: { clientId } });
+  }
+
+  async function monitorApiClient(clientId) {
+    return requestJson('/api/admin/api-clients/monitor', { method: 'POST', body: { clientId } });
+  }
+
+  async function verifyApiClientPair(payload) {
+    return requestJson('/api/admin/api-clients/verify-pair', { method: 'POST', body: payload });
+  }
+
+  async function loadApiClientsJournal(clientId) {
+    const suffix = clientId ? `?clientId=${encodeURIComponent(clientId)}` : '';
+    return requestJson(`/api/admin/api-clients/journal${suffix}`);
+  }
+
+  async function deleteApiClient(clientId) {
+    return requestJson('/api/admin/api-clients/delete', { method: 'POST', body: { clientId } });
+  }
+
   async function loadDetectionLatest() {
     const body = await requestJson('/api/detection/latest');
     return body.data;
@@ -3415,6 +3460,17 @@ const ApiClient = (() => {
     saveErpPiterixSettings,
     runErpPiterixSync,
     erpPiterixReportUrl,
+    loadApiClients,
+    createApiClient,
+    recreateApiClient,
+    registerApiClientManual,
+    activateApiClient,
+    deactivateApiClient,
+    revokeApiClientTokens,
+    monitorApiClient,
+    verifyApiClientPair,
+    loadApiClientsJournal,
+    deleteApiClient,
     loadDetectionLatest,
     loadDetectionHistory,
     loadDetectionTelegramSettings,
