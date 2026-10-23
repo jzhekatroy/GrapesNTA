@@ -37,6 +37,15 @@ CREATE TABLE IF NOT EXISTS default.flows_raw
     `dst_port` UInt32 CODEC(T64, ZSTD(3)),
     `src_vlan` UInt16 CODEC(T64, ZSTD(3)),
     `dst_vlan` UInt16 CODEC(T64, ZSTD(3)),
+    -- То же выражение, что effectiveVlanMultiIf. Индекс по multiIf ClickHouse
+    -- не применяет, индекс по колонке — применяет. Уже созданная таблица
+    -- колонку не получит: см. deploy/clickhouse/migrate_explorer_skip_indexes.sql.
+    `eff_vlan` UInt16 MATERIALIZED multiIf(
+        direction = 'out' AND src_vlan != 0, src_vlan,
+        direction = 'in' AND dst_vlan != 0, dst_vlan,
+        src_vlan != 0, src_vlan,
+        dst_vlan
+    ) CODEC(T64, ZSTD(3)),
     `vlan_id` UInt32 CODEC(ZSTD(3)),
     `bytes` UInt64 CODEC(T64, ZSTD(3)),
     `packets` UInt64 CODEC(T64, ZSTD(3)),
@@ -73,6 +82,10 @@ CREATE TABLE IF NOT EXISTS default.flows_raw
     `dst_entity` LowCardinality(String) DEFAULT '' CODEC(ZSTD(3)),
     `src_client` LowCardinality(String) DEFAULT '' CODEC(ZSTD(3)),
     `dst_client` LowCardinality(String) DEFAULT '' CODEC(ZSTD(3)),
+    -- Кто отправил и кому ушло внутри IX. Заполняет только коллектор при
+    -- включённом учёте IX. Обычные src_client и dst_client не меняются.
+    `ix_src_client` LowCardinality(String) DEFAULT '' CODEC(ZSTD(3)),
+    `ix_dst_client` LowCardinality(String) DEFAULT '' CODEC(ZSTD(3)),
     `source_id` LowCardinality(String) DEFAULT 'xdp-default' CODEC(ZSTD(3)),
     `src_mac` FixedString(6) DEFAULT '' CODEC(ZSTD(3)),
     `dst_mac` FixedString(6) DEFAULT '' CODEC(ZSTD(3)),
@@ -94,7 +107,9 @@ CREATE TABLE IF NOT EXISTS default.flows_raw
     -- Cabinet lookups are "this client on either side", i.e. an OR over both
     -- columns. Per-column indexes cannot decide such an OR on their own, so both
     -- columns live in one set index that evaluates the whole expression.
-    INDEX idx_client (src_client, dst_client) TYPE set(0) GRANULARITY 4
+    INDEX idx_client (src_client, dst_client) TYPE set(0) GRANULARITY 4,
+    INDEX idx_obs_eff_vlan eff_vlan TYPE set(0) GRANULARITY 4,
+    INDEX idx_obs_src_asn src_asn TYPE set(0) GRANULARITY 4
 )
 ENGINE = MergeTree
 PARTITION BY date

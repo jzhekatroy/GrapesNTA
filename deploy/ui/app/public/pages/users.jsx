@@ -406,6 +406,8 @@ function observationSectionLevelFromFlags(view, edit) {
 
 function RoleDrawer({ role, resources, onClose, onSaved, onDeleted }) {
   const [displayName, setDisplayName] = useState('');
+  const [startPage, setStartPage] = useState('dashboard');
+  const [attackAlert, setAttackAlert] = useState(false);
   const [permissions, setPermissions] = useState({});
   const [writePermissions, setWritePermissions] = useState({});
   const [observationSectionAccess, setObservationSectionAccess] = useState({});
@@ -425,6 +427,8 @@ function RoleDrawer({ role, resources, onClose, onSaved, onDeleted }) {
     ApiClient.loadRole(role.id)
       .then((data) => {
         setDisplayName(data.displayName || role.displayName);
+        setStartPage(data.startPage || 'dashboard');
+        setAttackAlert(!!data.attackAlert);
         setPermissions(data.permissions || {});
         setWritePermissions(data.writePermissions || {});
         const sections = data.observationSections || [];
@@ -457,6 +461,15 @@ function RoleDrawer({ role, resources, onClose, onSaved, onDeleted }) {
       return next;
     });
   };
+  const allowedStartPages = useMemo(
+    () => resources.filter((page) => permissions[page.id]),
+    [resources, permissions],
+  );
+
+  useEffect(() => {
+    if (startPage === 'dashboard') return;
+    if (!permissions[startPage]) setStartPage('dashboard');
+  }, [permissions, startPage]);
 
   const setAccess = (pageId, access) => {
     setPermissions((s) => ({ ...s, [pageId]: access }));
@@ -485,6 +498,8 @@ function RoleDrawer({ role, resources, onClose, onSaved, onDeleted }) {
       });
       await ApiClient.updateRole(role.id, {
         displayName,
+        startPage,
+        attackAlert,
         permissions,
         writePermissions,
         observationSections,
@@ -541,6 +556,36 @@ function RoleDrawer({ role, resources, onClose, onSaved, onDeleted }) {
             <label>{usersT('usersPage.label.displayName')}</label>
             <input className="input" value={displayName} onChange={(e) => setDisplayName(e.target.value)} />
           </div>
+          <div className="field">
+            <label>{usersT('usersPage.label.startPage')}</label>
+            <select
+              className="input"
+              value={startPage}
+              onChange={(e) => setStartPage(e.target.value)}
+              disabled={loading || allowedStartPages.length === 0}
+            >
+              {allowedStartPages.map((page) => {
+                const meta = usersRbacPageMeta(page);
+                return (
+                  <option key={page.id} value={page.id}>
+                    {meta.title}
+                  </option>
+                );
+              })}
+            </select>
+            <div style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-secondary)', marginTop: 6 }}>
+              {usersT('usersPage.label.startPageHint')}
+            </div>
+          </div>
+          <label className="row" style={{ gap: 8, cursor: 'pointer', alignItems: 'flex-start' }}>
+            <Checkbox checked={attackAlert} onChange={setAttackAlert} />
+            <div>
+              <div style={{ font: 'var(--pv-text-body-2-bold)' }}>{usersT('usersPage.label.attackAlert')}</div>
+              <div style={{ font: 'var(--pv-text-body-3)', color: 'var(--fg-secondary)', marginTop: 4 }}>
+                {usersT('usersPage.label.attackAlertHint')}
+              </div>
+            </div>
+          </label>
           <div>
             <div style={{font: 'var(--pv-text-body-2-bold)', marginBottom: 8}}>{usersT('usersPage.pageAccess')}</div>
             {loading ? (

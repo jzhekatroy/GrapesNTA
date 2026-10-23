@@ -59,6 +59,7 @@ const spoolZeroTimeSentinel = math.MinInt64
 //	  byte     TCPFlags, IPTTL, IPTos         -- frame version 4+
 //	  string   SrcClient, DstClient           -- frame version 5+
 //	  u32arr   SrcASPath, DstASPath           -- frame version 6+
+//	  string   IxSrcClient, IxDstClient      -- frame version 7+
 //
 // A "string" is uvarint length followed by raw UTF-8 bytes.
 // A "u32arr" is uvarint count followed by that many uvarint ASN values.
@@ -67,10 +68,11 @@ const spoolZeroTimeSentinel = math.MinInt64
 // version record is an exact prefix of a higher one. decodeFlowRowsBinaryVersion
 // reads the MAC pair only when hasMAC is set (frame version 3+), the sFlow
 // metadata only when hasMeta is set (frame version 4+), client ids only when
-// hasClients is set (frame version 5+), and AS paths only when hasASPath is set
-// (frame version 6). Legacy frames still on disk during a rolling restart
-// decode unchanged (missing fields stay zero). Frame version 1 (gob) is decoded
-// via decodeFramePayload. New frames are always written as version 6. See
+// hasClients is set (frame version 5+), AS paths only when hasASPath is set
+// (frame version 6), and IX client ids only when hasIx is set (frame version 7).
+// Legacy frames still on disk during a rolling restart decode unchanged
+// (missing fields stay zero). Frame version 1 (gob) is decoded via
+// decodeFramePayload. New frames are always written as version 7. See
 // spool.go version dispatch.
 
 // spoolMaxFrameRows caps decode-side allocation from a single (possibly torn or
@@ -82,6 +84,10 @@ const spoolMaxFrameRows = 20_000_000
 var spoolEncBufPool = sync.Pool{New: func() any { return new(bytes.Buffer) }}
 
 func encodeFlowRowsBinary(rows []FlowRow) ([]byte, error) {
+	return encodeFlowRowsBinaryAt(rows, true)
+}
+
+func encodeFlowRowsBinaryAt(rows []FlowRow, withIx bool) ([]byte, error) {
 	buf := spoolEncBufPool.Get().(*bytes.Buffer)
 	buf.Reset()
 	defer spoolEncBufPool.Put(buf)
@@ -180,6 +186,10 @@ func encodeFlowRowsBinary(rows []FlowRow) ([]byte, error) {
 		putStr(r.DstClient)
 		putU32Array(r.SrcASPath)
 		putU32Array(r.DstASPath)
+		if withIx {
+			putStr(r.IxSrcClient)
+			putStr(r.IxDstClient)
+		}
 	}
 
 	// Copy out of the pooled buffer: the caller (buildFrame) needs a stable
@@ -290,11 +300,11 @@ func (c *binCursor) str() (string, error) {
 	return s, nil
 }
 
-// decodeFlowRowsBinary decodes a current-format (version 6, AS-path-bearing)
-// binary payload. It is the symmetric counterpart of encodeFlowRowsBinary and
-// is used by round-trip callers and tests.
+// decodeFlowRowsBinary decodes a current-format (version 7) binary payload.
+// It is the symmetric counterpart of encodeFlowRowsBinary and is used by
+// round-trip callers and tests.
 func decodeFlowRowsBinary(b []byte) ([]FlowRow, error) {
-	return decodeFlowRowsBinaryVersion(b, true, true, true, true)
+	return decodeFlowRowsBinaryVersion(b, true, true, true, true, true)
 }
 
 // decodeFlowRowsBinaryVersion decodes a binary payload. When hasMAC is false the
@@ -304,7 +314,8 @@ func decodeFlowRowsBinary(b []byte) ([]FlowRow, error) {
 // (InIf/OutIf/TCPFlags/IPTTL/IPTos) is also read; otherwise those fields stay
 // zero. When hasClients is true (frame version 5+) SrcClient/DstClient follow.
 // When hasASPath is true (frame version 6) SrcASPath/DstASPath follow.
-func decodeFlowRowsBinaryVersion(b []byte, hasMAC, hasMeta, hasClients, hasASPath bool) ([]FlowRow, error) {
+// When hasIx is true (frame version 7) IxSrcClient/IxDstClient follow.
+func decodeFlowRowsBinaryVersion(b []byte, hasMAC, hasMeta, hasClients, hasASPath, hasIx bool) ([]FlowRow, error) {
 	c := binCursor{b: b}
 	count, err := c.uvarint()
 	if err != nil {
@@ -455,6 +466,14 @@ func decodeFlowRowsBinaryVersion(b []byte, hasMAC, hasMeta, hasClients, hasASPat
 				return nil, err
 			}
 			if r.DstASPath, err = c.u32Array(); err != nil {
+				return nil, err
+			}
+		}
+		if hasIx {
+			if r.IxSrcClient, err = c.str(); err != nil {
+				return nil, err
+			}
+			if r.IxDstClient, err = c.str(); err != nil {
 				return nil, err
 			}
 		}

@@ -3076,6 +3076,10 @@ function mapEventRow(row) {
     track: alertSnapshot.track || null,
     binding: alertSnapshot.binding || null,
     focusMinute: alertSnapshot.focusMinute || '',
+    test: alertSnapshot.test === true || String(row.scope || '') === 'test',
+    testExpiresAt: alertSnapshot.testExpiresAt || null,
+    testNote: alertSnapshot.testNote || null,
+    testTriggeredBy: alertSnapshot.testTriggeredBy || null,
   };
 }
 
@@ -3411,9 +3415,17 @@ async function loadDetectionEvents({ status = 'active', limit = 200, from, to, k
     ORDER BY if(status = 'active', alert_minute, if(status = 'peak', alert_minute, normalize_minute)) DESC
     LIMIT {take:UInt16}
   `, params, { name: 'detection/events-list' });
-  const events = rows.map(mapEventRow);
+  let events = rows.map(mapEventRow);
+  const { filterDetectionEventsForList } = require('./detection-test-attack');
+  events = filterDetectionEventsForList(events, {
+    listKind: wanted === 'history' ? 'history' : 'active',
+  });
   await applyProviderCatalogNames(events);
-  if (wanted === 'active') await attachLiveState(events);
+  if (wanted === 'active') {
+    await attachLiveState(events);
+    const { attachTestAttackLiveState } = require('./detection-test-attack');
+    attachTestAttackLiveState(events);
+  }
   return events;
 }
 
@@ -3424,7 +3436,11 @@ async function loadDetectionEvent(eventId) {
   if (!row) throw apiError('Атака не найдена', 404);
   const events = [mapEventRow(row)];
   await applyProviderCatalogNames(events);
-  if (events[0].status === 'active') await attachLiveState(events);
+  if (events[0].status === 'active') {
+    await attachLiveState(events);
+    const { attachTestAttackLiveState } = require('./detection-test-attack');
+    attachTestAttackLiveState(events);
+  }
   return events[0];
 }
 
@@ -3532,12 +3548,14 @@ function liveEventState(rowsAsc, { alertMinute, threshold, signal, normalizeStre
 
 async function attachLiveState(events) {
   if (!events.length) return;
+  const liveEvents = events.filter((event) => event.scope !== 'test' && !event.test);
+  if (!liveEvents.length) return;
   try {
     const nowTs = Date.now();
-    const alertTimes = events.map((e) => parseUtc(e.alertMinute)).filter(Number.isFinite);
+    const alertTimes = liveEvents.map((e) => parseUtc(e.alertMinute)).filter(Number.isFinite);
     if (!alertTimes.length) return;
     const fromTs = Math.max(Math.min(...alertTimes), nowTs - LIVE_LOOKBACK_MS);
-    const scopeFilter = previousRowsScopeFilter(events.map((e) => ({ scope: e.scope, scopeId: e.scopeId })));
+    const scopeFilter = previousRowsScopeFilter(liveEvents.map((e) => ({ scope: e.scope, scopeId: e.scopeId })));
     if (scopeFilter.sql === '0') return;
     const { rows } = await query(`
       SELECT scope, scope_id, proto, toString(minute) AS m, bps, growth_bps, growth_pps, port_entropy
@@ -3560,7 +3578,7 @@ async function attachLiveState(events) {
       byKey.set(key, list);
     }
     const settings = await getDetectionTelegramSettings();
-    for (const event of events) {
+    for (const event of liveEvents) {
       const key = objectKey(event.scope, event.scopeId);
       const hourUsual = Number(event.verdict?.hourP95) || null;
       markCarpetHot(byKey.get(key) || [], () => hourUsual, (row) => udpByMinute.get(`${key}|${row.minute}`));

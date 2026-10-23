@@ -35,6 +35,7 @@ const {
   explorerFlows,
   explorerSchema,
   explorerQuery,
+  explorerRuntimeOptions,
   executeExplorerQueryBundle,
   searchExplorerEntities,
   listSavedExplorerFilters,
@@ -151,6 +152,7 @@ const {
 } = require('./flow-exclusions');
 const { listNetEntitiesAdmin, saveNetEntity } = require('./net-entities');
 const {
+  ensureVlanIxColumns,
   listVlansAdmin,
   listUnnamedVlansSeen,
   saveVlan,
@@ -256,8 +258,12 @@ const {
   stopImpersonationHandler,
 } = require('./cabinet/routes');
 const { createErpPiterixRouter } = require('./erp-piterix-routes');
+const { createApiV1Router } = require('./api-v1-routes');
+const { createApiTokenStore } = require('./api-tokens');
+const { ensureApiClientsTable } = require('./api-clients');
 const { createDetectionRouter } = require('./detection-routes');
 const { createMonitoringRouter } = require('./monitoring-routes');
+const { loadAttackAlertsPayload } = require('./attack-alerts');
 const {
   resolveCabinetContext,
   cabinetPayload,
@@ -280,6 +286,7 @@ const app = express();
 const SESSION_COOKIE = 'grapes_session';
 const SESSION_TTL_MS = 24 * 60 * 60 * 1000;
 const sessions = createSessionStore();
+const apiTokens = createApiTokenStore();
 const cabinetIsolationGuard = createCabinetGuard({ sessions });
 
 function envBool(name, fallback = false) {
@@ -409,6 +416,8 @@ async function sessionUserPayload(user, sessionRecord = null) {
       id: role.id,
       name: role.name,
       displayName: role.displayName,
+      startPage: role.startPage,
+      attackAlert: role.attackAlert,
     } : null,
     cabinet,
   };
@@ -712,6 +721,9 @@ app.post('/api/auth/stop-impersonation', async (req, res) => {
   }
 });
 
+// Внешний Bearer-API для ERP: монтируется ДО requireSession, авторизация своя.
+app.use('/api/v1', createApiV1Router({ sessions, apiTokens }));
+
 app.use('/api', requireSession);
 app.use('/api', apiResourceGuard);
 app.use('/api', cabinetIsolationGuard);
@@ -767,6 +779,14 @@ app.use('/api/clients', createClientsRouter({ sessions }));
 app.use('/api/erp-piterix', createErpPiterixRouter());
 app.use('/api/detection', createDetectionRouter());
 app.use('/api/monitoring', createMonitoringRouter());
+
+app.get('/api/attack-alerts', async (req, res) => {
+  try {
+    res.json({ data: await loadAttackAlertsPayload(req.user) });
+  } catch (err) {
+    sendApiError(res, err);
+  }
+});
 
 app.get('/api/dashboard/collectors', async (_req, res) => {
   try {
@@ -1150,15 +1170,16 @@ app.post('/api/dashboard/layout/reset', async (req, res) => {
 app.use('/api/explorer', async (req, res, next) => {
   try {
     await ensureFlowsRawSchema();
+    req.explorerOptions = await explorerRuntimeOptions();
     next();
   } catch (err) {
     res.status(503).json({ error: err.message || 'ClickHouse schema unavailable' });
   }
 });
 
-app.get('/api/explorer/schema', async (_req, res) => {
+app.get('/api/explorer/schema', async (req, res) => {
   try {
-    res.json({ data: explorerSchema() });
+    res.json({ data: explorerSchema(req.explorerOptions || {}) });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -1183,7 +1204,7 @@ app.post('/api/explorer/query', async (req, res) => {
   const started = Date.now();
   enableAuditQueryCapture();
   try {
-    const bundle = await explorerQuery(body);
+    const bundle = await explorerQuery(body, req.explorerOptions || {});
     const queryBody = bundle.queryBody || body;
     const {
       flowsResult,
@@ -1241,7 +1262,7 @@ app.post('/api/explorer/flows', async (req, res) => {
   try {
     const body = req.body || {};
     const result = await runNamed(
-      () => explorerFlows(body),
+      () => explorerFlows(body, req.explorerOptions || {}),
       { name: 'explorer/flows' },
     );
     res.json(result);
@@ -1252,7 +1273,7 @@ app.post('/api/explorer/flows', async (req, res) => {
 
 app.post('/api/explorer/export', async (req, res) => {
   try {
-    const csv = await explorerExportCsv(req.body || {});
+    const csv = await explorerExportCsv(req.body || {}, req.explorerOptions || {});
     res.setHeader('Content-Type', 'text/csv; charset=utf-8');
     res.setHeader('Content-Disposition', `attachment; filename="explorer-flows-${Date.now()}.csv"`);
     res.send(`\uFEFF${csv}`);
@@ -2272,6 +2293,7 @@ app.post('/api/refs/net-entities', async (req, res) => {
 
 app.get('/api/refs/vlans', async (_req, res) => {
   try {
+    await ensureVlanIxColumns();
     const result = await runNamed(() => listVlansAdmin(), { name: 'refs/vlans' });
     res.json(result);
   } catch (err) {
@@ -3041,8 +3063,13 @@ app.listen(PORT, () => {
           }
           await ensureImpersonationAuditTable();
           console.log('Cabinet impersonation audit ready.');
+          await ensureApiClientsTable();
+          console.log('API clients table ready.');
           await ensureObservationsStore();
           console.log('Observations store ready (ClickHouse).');
+          const { ensureObservationClientsTable } = require('./observation-clients');
+          await ensureObservationClientsTable();
+          console.log('Observation client bindings ready (ClickHouse).');
           ensureAnalysisSnapshotsStore();
           console.log('Analysis snapshots store ready (SQLite).');
         })

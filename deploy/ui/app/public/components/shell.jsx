@@ -49,6 +49,7 @@ const NAV = [
         items: [
           { id: 'users', icon: 'shield' },
           { id: 'audit', icon: 'clock' },
+          { id: 'versions', icon: 'tag' },
           { id: 'clients', icon: 'users' },
           { id: 'smtp', icon: 'export' },
           { id: 'ttl', icon: 'clock' },
@@ -95,6 +96,7 @@ const CABINET_NAV = [
     section: '',
     items: [
       { id: 'dashboard', label: '', icon: 'dashboard' },
+      { id: 'observations', label: '', icon: 'query' },
       { id: 'explorer', label: '', icon: 'explorer' },
       { id: 'dns', label: '', icon: 'globe' },
       { id: 'cabinet-settings', label: '', icon: 'sliders' },
@@ -102,7 +104,7 @@ const CABINET_NAV = [
   },
 ];
 
-const CABINET_PAGE_IDS = new Set(['dashboard', 'explorer', 'dns', 'cabinet-settings']);
+const CABINET_PAGE_IDS = new Set(['dashboard', 'explorer', 'observations', 'dns', 'cabinet-settings']);
 
 function isCabinetMode(user) {
   const mode = user?.cabinet?.mode;
@@ -136,13 +138,14 @@ const PAGES_WITHOUT_HEADER_FILTERS = new Set([
   'vlan',
   'smtp',
   'ttl',
+  'versions',
 ]);
 
 function hasNavPermission(effectivePermissions, pageId) {
   if (!effectivePermissions) return true;
   if (pageId === 'snmp') return !!(effectivePermissions.snmp || effectivePermissions.collectors);
   // SMTP API и доступ завязаны на diagnostics (только администратор).
-  if (pageId === 'smtp') return !!effectivePermissions.diagnostics;
+  if (pageId === 'smtp' || pageId === 'versions') return !!effectivePermissions.diagnostics;
   // «Моя сеть» — общая оболочка для cidr / entities / vlan.
   if (pageId === 'cidr') {
     return !!(effectivePermissions.cidr || effectivePermissions.entities || effectivePermissions.vlan);
@@ -177,13 +180,19 @@ function filterNav(nav, effectivePermissions) {
 }
 
 /* =============== Sidebar =============== */
-function Sidebar({ current, onNavigate, collapsed, effectivePermissions, cabinetMode, clientDisplayName, locale }) {
+function Sidebar({ current, onNavigate, collapsed, effectivePermissions, cabinetMode, cabinetBindMode, clientDisplayName, locale }) {
   const visibleNav = useMemo(
     () => {
-      const raw = cabinetMode ? CABINET_NAV : filterNav(NAV, effectivePermissions);
+      let raw = cabinetMode ? CABINET_NAV : filterNav(NAV, effectivePermissions);
+      if (cabinetMode && cabinetBindMode === 'ports') {
+        raw = raw.map((sec) => ({
+          ...sec,
+          items: (sec.items || []).filter((it) => it.id !== 'dns'),
+        }));
+      }
       return raw.map(withNavLabels);
     },
-    [cabinetMode, effectivePermissions, locale],
+    [cabinetMode, cabinetBindMode, effectivePermissions, locale],
   );
   const [openSections, setOpenSections] = useState(() => {
     const o = {};
@@ -258,7 +267,7 @@ function NavItem({ item, active, onNavigate, collapsed }) {
       <Icon name={item.icon} size={18} className="nav-item__icon" />
       <span className="nav-item__label">{item.label}</span>
       {item.badge && <span className="nav-item__badge">{item.badge}</span>}
-      {item.soon && <span className="tag" style={{ fontSize: 10, padding: '1px 6px' }}>скоро</span>}
+      {item.soon && <span className="tag" style={{ fontSize: 10, padding: '1px 6px' }}>{t('chrome.soon')}</span>}
     </>
   );
 
@@ -398,18 +407,26 @@ function parseUserTimestampMs(value) {
   return Number.isNaN(ms) ? null : ms;
 }
 
-function formatUserDateTime(value, displayTimezone) {
+function formatUserDateTime(value, displayTimezone, { dateOnly = false } = {}) {
   const ms = parseUserTimestampMs(value);
   if (ms == null) return value ? String(value) : '—';
   const tz = displayTimezone || (typeof getDisplayTimezone === 'function' ? getDisplayTimezone() : undefined);
-  return new Date(ms).toLocaleString(GrapesI18n.intlLocale(), {
-    dateStyle: 'short',
-    timeStyle: 'short',
-    ...(tz ? { timeZone: tz } : {}),
-  });
+  const opts = dateOnly
+    ? { dateStyle: 'short', ...(tz ? { timeZone: tz } : {}) }
+    : { dateStyle: 'short', timeStyle: 'short', ...(tz ? { timeZone: tz } : {}) };
+  return new Date(ms).toLocaleString(GrapesI18n.intlLocale(), opts);
 }
 
-function UserAccountMenu({ currentUser, pageTitles, hiddenPageIds, locale, displayTimezone }) {
+function UserAccountMenu({
+  currentUser,
+  pageTitles,
+  hiddenPageIds,
+  locale,
+  displayTimezone,
+  buildInfo,
+  onNavigate,
+  cabinetMode,
+}) {
   const [open, setOpen] = useState(false);
   const [menuStyle, setMenuStyle] = useState(null);
   const rootRef = useRef(null);
@@ -438,6 +455,25 @@ function UserAccountMenu({ currentUser, pageTitles, hiddenPageIds, locale, displ
           || a.title.localeCompare(b.title, coll);
       });
   }, [currentUser, pageTitles, hiddenPageIds, locale]);
+
+  const canDiagnostics = !!currentUser?.effectivePermissions?.diagnostics;
+  const menuVersionLine = useMemo(() => {
+    if (cabinetMode) return null;
+    const raw = buildInfo?.version;
+    const vf = typeof window !== 'undefined' ? window.VersionsFormat : null;
+    if (!raw || !vf) return null;
+    const { display } = vf.parseComponentVersion(raw);
+    if (!display) return null;
+    const date = buildInfo?.versionDate
+      ? formatUserDateTime(buildInfo.versionDate, displayTimezone, { dateOnly: true })
+      : '—';
+    const text = t('user.menuVersion', {
+      product: t('versionsPage.product'),
+      version: display,
+      date,
+    });
+    return { text, clickable: canDiagnostics };
+  }, [buildInfo, cabinetMode, canDiagnostics, displayTimezone]);
 
   useLayoutEffect(() => {
     if (!open) {
@@ -496,6 +532,24 @@ function UserAccountMenu({ currentUser, pageTitles, hiddenPageIds, locale, displ
         <span className="user-menu__meta-label">{t('user.lastPasswordChange')}</span>
         <span className="user-menu__meta-value">{formatUserDateTime(currentUser?.passwordChangedAt, displayTimezone)}</span>
       </div>
+      {menuVersionLine && (
+        <div className="user-menu__meta-row">
+          {menuVersionLine.clickable ? (
+            <button
+              type="button"
+              className="user-menu__meta-link"
+              onClick={() => {
+                setOpen(false);
+                onNavigate?.('versions');
+              }}
+            >
+              {menuVersionLine.text}
+            </button>
+          ) : (
+            <span className="user-menu__meta-value">{menuVersionLine.text}</span>
+          )}
+        </div>
+      )}
     </>
   );
 
@@ -531,13 +585,14 @@ function UserAccountMenu({ currentUser, pageTitles, hiddenPageIds, locale, displ
   );
 }
 
-function Header({ current, onNavigate, onToggleSidebar, currentUser, onLogout, onRefresh, theme, onToggleTheme, timeRange, onTimeRangeChange, customPeriod, onCustomPeriodChange, chartZoomDepth, onChartZoomReset, directions, onDirectionsChange, collectorFilter, onCollectorFilterChange, pageTitles, hiddenPageIds, displayTimezone, timezonePref, onTimezonePrefChange, locale, onLocaleChange, cabinetMode, clientDisplayName, onStopImpersonation }) {
+function Header({ current, onNavigate, onToggleSidebar, currentUser, onLogout, onRefresh, theme, onToggleTheme, timeRange, onTimeRangeChange, customPeriod, onCustomPeriodChange, chartZoomDepth, onChartZoomReset, directions, onDirectionsChange, cabinetDirections, onCabinetDirectionsChange, collectorFilter, onCollectorFilterChange, pageTitles, hiddenPageIds, displayTimezone, timezonePref, onTimezonePrefChange, locale, onLocaleChange, cabinetMode, clientDisplayName, onStopImpersonation, buildInfo }) {
   const titles = pageTitles || PAGE_TITLES || {};
   const meta = GrapesI18n.localizedPageMeta(current, titles[current] || titles.dashboard || { title: current, section: '' });
   const hidePageFilters = cabinetMode
     ? (current === 'explorer' || current === 'cabinet-settings')
     : PAGES_WITHOUT_HEADER_FILTERS.has(current);
   const hideDirectionFilter = current === 'dns' || cabinetMode;
+  const showCabinetDirectionFilter = cabinetMode && current === 'dashboard' && !!cabinetDirections;
   const hideCollectorFilter = cabinetMode;
   const sectionLabel = cabinetMode ? (clientDisplayName || t('cabinet.clientPortalFallback')) : meta.section;
   return (
@@ -558,6 +613,13 @@ function Header({ current, onNavigate, onToggleSidebar, currentUser, onLogout, o
                 <DirectionFilter
                   directions={directions}
                   onDirectionsChange={onDirectionsChange}
+                />
+              )}
+              {showCabinetDirectionFilter && (
+                <DirectionFilter
+                  directions={cabinetDirections}
+                  onDirectionsChange={onCabinetDirectionsChange}
+                  items={getCabinetTrafficDirections()}
                 />
               )}
               {!hideCollectorFilter && (
@@ -610,7 +672,16 @@ function Header({ current, onNavigate, onToggleSidebar, currentUser, onLogout, o
           </button>
         </PortalTooltip>
         <span className="hr-v" />
-        <UserAccountMenu currentUser={currentUser} pageTitles={pageTitles} hiddenPageIds={hiddenPageIds} locale={locale} displayTimezone={displayTimezone} />
+        <UserAccountMenu
+          currentUser={currentUser}
+          pageTitles={pageTitles}
+          hiddenPageIds={hiddenPageIds}
+          locale={locale}
+          displayTimezone={displayTimezone}
+          buildInfo={buildInfo}
+          onNavigate={onNavigate}
+          cabinetMode={cabinetMode}
+        />
         {isImpersonating(currentUser) && onStopImpersonation && (
           <Button kind="ghost" size="sm" onClick={onStopImpersonation}>{t('cabinet.exit')}</Button>
         )}
@@ -657,6 +728,19 @@ function getTrafficDirections() {
 
 function defaultDirectionsEnabled() {
   return Object.fromEntries(TRAFFIC_DIRECTION_SPECS.map((d) => [d.id, true]));
+}
+
+const CABINET_DIRECTION_SPECS = [
+  { id: 'in', labelKey: 'cabinet.direction.toYou', color: '#51D16D' },
+  { id: 'out', labelKey: 'cabinet.direction.fromYou', color: '#6972F0' },
+];
+
+function getCabinetTrafficDirections() {
+  return CABINET_DIRECTION_SPECS.map((d) => ({ id: d.id, color: d.color, label: t(d.labelKey) }));
+}
+
+function defaultCabinetDirectionsEnabled() {
+  return Object.fromEntries(CABINET_DIRECTION_SPECS.map((d) => [d.id, true]));
 }
 
 function toDatetimeLocalValue(date) {
@@ -887,8 +971,8 @@ function getTimezonePresets() {
   }));
 }
 
-function directionSummaryLabel(directions) {
-  const dirs = getTrafficDirections();
+function directionSummaryLabel(directions, items) {
+  const dirs = items || getTrafficDirections();
   const enabled = dirs.filter((d) => directions[d.id]);
   if (enabled.length === dirs.length) return t('directions.all');
   if (enabled.length === 0) return t('directions.none');
@@ -897,7 +981,9 @@ function directionSummaryLabel(directions) {
 }
 
 const NO_LOCATION_KEY = '__none__';
-const NO_LOCATION_LABEL = 'Без локации';
+function noLocationLabel() {
+  return t('collectors.noLocation');
+}
 
 function normalizeLocationId(value) {
   const v = String(value ?? '').trim();
@@ -914,7 +1000,7 @@ function isLocationScope(value) {
 }
 
 function locationScopeLabel(locations, collectors, locationId) {
-  if (locationId === NO_LOCATION_KEY || !locationId) return NO_LOCATION_LABEL;
+  if (locationId === NO_LOCATION_KEY || !locationId) return noLocationLabel();
   const loc = (locations || []).find((l) => normalizeLocationId(l.locationId) === normalizeLocationId(locationId));
   if (loc?.displayName) return loc.displayName;
   const item = (collectors || []).find((c) => normalizeLocationId(c.locationId) === normalizeLocationId(locationId));
@@ -960,7 +1046,7 @@ function buildCollectorFilterGroups(collectors, locations) {
     if (unassigned.length) {
       groups.push({
         locationId: NO_LOCATION_KEY,
-        locationName: NO_LOCATION_LABEL,
+        locationName: noLocationLabel(),
         collectors: unassigned,
       });
     }
@@ -974,7 +1060,7 @@ function buildCollectorFilterGroups(collectors, locations) {
     if (!map.has(key)) {
       map.set(key, {
         locationId: locId || NO_LOCATION_KEY,
-        locationName: locId ? (item.locationName || locId) : NO_LOCATION_LABEL,
+        locationName: locId ? (item.locationName || locId) : noLocationLabel(),
         collectors: [],
       });
     }
@@ -992,11 +1078,11 @@ function scopeTokenLabel(token, collectors, locations) {
     const locationId = token.slice(4);
     const inLocation = collectorsInLocation(collectors, locationId);
     const name = locationScopeLabel(locations, collectors, locationId);
-    return `${name} · все (${inLocation.length})`;
+    return t('collectors.scopeAllInLocation', { name, n: inLocation.length });
   }
   const item = (collectors || []).find((c) => c.collectorId === token);
   if (!item) return token;
-  const locationName = locationScopeLabel(locations, collectors, item.locationId) || NO_LOCATION_LABEL;
+  const locationName = locationScopeLabel(locations, collectors, item.locationId) || noLocationLabel();
   return `${locationName} · ${item.collectorName}`;
 }
 
@@ -1049,7 +1135,7 @@ function collectorFilterLabel(collectorFilter, collectors, locations) {
   const items = collectorFilter || [];
   if (!items.length) return t('collectors.all');
   if (items.length === 1) return scopeTokenLabel(items[0], collectors, locations);
-  return `${items.length} выбрано`;
+  return t('collectors.picker.selectedCount', { n: items.length });
 }
 
 function useCloseOnOutsideClick(open, setOpen, rootRef) {
@@ -1404,7 +1490,7 @@ function PeriodTimeField({
         <span className="time-filter__time-sep" aria-hidden="true">:</span>
         <TimePartInput
           id={minuteId}
-          ariaLabel={`${label}, минуты`}
+          ariaLabel={t('period.minutesAria', { label })}
           value={endOfDay ? 0 : minute}
           max={59}
           disabled={endOfDay}
@@ -1844,18 +1930,18 @@ function TimeFilter({
   );
 }
 
-function DirectionFilter({ directions, onDirectionsChange, embedded = false, formatSummary }) {
+function DirectionFilter({ directions, onDirectionsChange, embedded = false, formatSummary, items }) {
   const [open, setOpen] = useState(false);
   const [menuStyle, setMenuStyle] = useState(null);
   const rootRef = useRef(null);
   const addRef = useRef(null);
   const menuRef = useRef(null);
 
-  const trafficDirections = getTrafficDirections();
+  const trafficDirections = items || getTrafficDirections();
   const enabledDirections = trafficDirections.filter((d) => directions[d.id]);
   const enabledCount = enabledDirections.length;
   const allEnabled = enabledCount === trafficDirections.length;
-  const summary = (formatSummary || directionSummaryLabel)(directions);
+  const summary = formatSummary ? formatSummary(directions) : directionSummaryLabel(directions, items);
 
   const toggleDirection = (id) => {
     onDirectionsChange({ ...directions, [id]: !directions[id] });
@@ -2546,7 +2632,7 @@ function setPageTitles(map) {
 Object.assign(window, {
   Sidebar, Header, NAV, CABINET_NAV, CABINET_PAGE_IDS, PAGE_TITLES, setPageTitles, GrapesGlyph,
   isCabinetMode, isImpersonating, ImpersonationBanner,
-  TRAFFIC_DIRECTION_SPECS, defaultDirectionsEnabled,
+  TRAFFIC_DIRECTION_SPECS, defaultDirectionsEnabled, getCabinetTrafficDirections, defaultCabinetDirectionsEnabled,
   defaultCustomPeriod, formatCustomPeriodLabel, normalizeCustomPeriodValue, normalizeCustomPeriod, validateCustomPeriod, validateExplorerCustomPeriod, explorerRangeLimitDays, timeRangePresetMs, EXPLORER_MAX_RANGE_DAYS, timeRangeLabel, timeRangeChipLabel, yesterdayCustomPeriod, isYesterdayPeriod,
   toDatetimeLocalValue, dnsBucketSecondsFromMode, explorerGranularityBucketSeconds,
   collectorFilterLabel, directionSummaryLabel, LanguageSelector, TimezoneSelector, CollectorFilter,

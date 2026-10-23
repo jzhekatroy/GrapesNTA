@@ -120,6 +120,10 @@ const PAGE_CHUNKS_MANIFEST = {
       scripts: ['/pages/smtp.jsx'],
       exports: { default: 'PageSmtp' },
     },
+    versions: {
+      scripts: ['/pages/versions.jsx'],
+      exports: { default: 'PageVersions' },
+    },
     ttl: {
       scripts: ['/pages/ttl.jsx'],
       exports: { default: 'PageTTL' },
@@ -148,10 +152,12 @@ const PAGE_CHUNKS_MANIFEST = {
       '/data/app-pages.js',
       '/data/page-chunks.manifest.js',
       '/data/page-chunks.js',
+      '/pages/versions-format.js',
       '/components/icons.jsx',
       '/components/ui.jsx',
       '/components/charts.jsx',
       '/components/shell.jsx',
+      '/components/attack-alert.jsx',
       '/pages/access-denied.jsx',
       '/pages/coming-soon.jsx',
       '/app.jsx',

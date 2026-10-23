@@ -1,8 +1,14 @@
 const express = require('express');
 const { query } = require('../clickhouse');
-const { canWrite } = require('../rbac/permissions');
+const { canAccess, canWrite } = require('../rbac/permissions');
+const {
+  canStaffMutateClientObservations,
+  canStaffViewClientObservations,
+} = require('./staff-observations-access');
 const {
   executeExplorerQueryBundle,
+  explorerRuntimeOptions,
+  searchExplorerEntities,
 } = require('../explorer');
 const { CLIENTS_RESOURCE } = require('./constants');
 const { getEnabledClient, fillClientDisplayName } = require('./clients-lookup');
@@ -43,6 +49,8 @@ const {
   overviewSeries,
   overviewStats,
   overviewRecentFlows,
+  overviewLocations,
+  overviewIxPeers,
   overviewCountries,
   overviewServices,
   dnsDomains,
@@ -62,6 +70,22 @@ const {
   buildExplorerStoredQuery,
   buildExplorerStoredPayload,
 } = require('../analysis-snapshots');
+const {
+  getLayout: getObservationsBoardLayout,
+  putLayout: putObservationsBoardLayout,
+} = require('../observations-board-layout');
+const { writeAuditEvent } = require('../audit-log');
+const {
+  listCabinetObservations,
+  getCabinetObservation,
+  createCabinetObservation,
+  updateCabinetObservation,
+  deleteCabinetObservation,
+  duplicateCabinetObservation,
+  previewCabinetObservation,
+  retryCabinetObservation,
+  cabinetObservationsConfig,
+} = require('./observations');
 
 async function runNamed(builder, { name } = {}) {
   const spec = await builder();
@@ -80,7 +104,44 @@ async function runNamed(builder, { name } = {}) {
 }
 
 function sendError(res, err, fallback = 502) {
-  res.status(err.statusCode || fallback).json({ error: err.message });
+  const status = err.status || err.statusCode || fallback;
+  res.status(status).json({ error: err.message });
+}
+
+async function writeCabinetObservationAudit(req, {
+  action,
+  observationId,
+  clientId,
+  objectLabel = '',
+  result = 'ok',
+}) {
+  await writeAuditEvent({
+    actorUserId: req.user?.id,
+    actorUsername: req.user?.username,
+    actorRole: req.user?.roleId,
+    ip: req.ip || '',
+    userAgent: String(req.headers['user-agent'] || ''),
+    action,
+    resource: 'observations',
+    method: req.method,
+    path: String(req.originalUrl || '').split('?')[0],
+    objectId: String(observationId || ''),
+    objectLabel: String(objectLabel || ''),
+    result,
+    detail: JSON.stringify({ client_id: String(clientId || '') }),
+    sessionId: String(req.sessionId || ''),
+  }).catch(() => {});
+  req.auditObservationEventLogged = true;
+}
+
+function rejectCabinetSessionForStaff(req, res) {
+  // Staff client-card APIs are for operators only; client logins use /api/cabinet/observations.
+  // Impersonation must not block an operator managing observations from the Clients page.
+  if (isClientRole(req.user)) {
+    res.status(403).json({ error: 'Недостаточно прав' });
+    return true;
+  }
+  return false;
 }
 
 function createCabinetRouter({ sessions }) {
@@ -158,6 +219,26 @@ function createCabinetRouter({ sessions }) {
     }
   });
 
+  router.get('/overview/locations', async (req, res) => {
+    try {
+      const clientId = requireScopedClientId(req.cabinet);
+      const result = await overviewLocations(clientId, req.query);
+      res.json(result);
+    } catch (err) {
+      sendError(res, err);
+    }
+  });
+
+  router.get('/overview/ix-peers', async (req, res) => {
+    try {
+      const clientId = requireScopedClientId(req.cabinet);
+      const result = await overviewIxPeers(clientId, req.query);
+      res.json(result);
+    } catch (err) {
+      sendError(res, err);
+    }
+  });
+
   router.get('/overview/countries', async (req, res) => {
     try {
       const clientId = requireScopedClientId(req.cabinet);
@@ -201,7 +282,26 @@ function createCabinetRouter({ sessions }) {
   router.get('/explorer/schema', async (req, res) => {
     try {
       requireScopedClientId(req.cabinet);
-      res.json({ data: cabinetExplorerSchema() });
+      res.json({ data: cabinetExplorerSchema(await explorerRuntimeOptions()) });
+    } catch (err) {
+      sendError(res, err, err.statusCode || 502);
+    }
+  });
+
+  router.get('/explorer/entities', async (req, res) => {
+    try {
+      requireScopedClientId(req.cabinet);
+      const runtime = await explorerRuntimeOptions();
+      if (!runtime.ix || String(req.query.type || '') !== 'ix_location') {
+        res.json({ data: [] });
+        return;
+      }
+      const data = await searchExplorerEntities({
+        type: 'ix_location',
+        q: req.query.q,
+        limit: req.query.limit,
+      });
+      res.json({ data });
     } catch (err) {
       sendError(res, err, err.statusCode || 502);
     }
@@ -213,7 +313,7 @@ function createCabinetRouter({ sessions }) {
     enableAuditQueryCapture();
     try {
       const clientId = requireScopedClientId(req.cabinet);
-      const bundle = await cabinetExplorerQuery(clientId, body);
+      const bundle = await cabinetExplorerQuery(clientId, body, await explorerRuntimeOptions());
       const queryBody = bundle.queryBody || body;
       const {
         flowsResult,
@@ -274,7 +374,7 @@ function createCabinetRouter({ sessions }) {
     try {
       const clientId = requireScopedClientId(req.cabinet);
       const result = await runNamed(
-        () => cabinetExplorerFlows(clientId, req.body || {}),
+        async () => cabinetExplorerFlows(clientId, req.body || {}, await explorerRuntimeOptions()),
         { name: 'cabinet/explorer/flows-only' },
       );
       res.json(result);
@@ -286,7 +386,7 @@ function createCabinetRouter({ sessions }) {
   router.post('/explorer/export', async (req, res) => {
     try {
       const clientId = requireScopedClientId(req.cabinet);
-      const csv = await cabinetExplorerExportCsv(clientId, req.body || {});
+      const csv = await cabinetExplorerExportCsv(clientId, req.body || {}, await explorerRuntimeOptions());
       res.setHeader('Content-Type', 'text/csv; charset=utf-8');
       res.setHeader('Content-Disposition', `attachment; filename="cabinet-explorer-${Date.now()}.csv"`);
       res.send(`\uFEFF${csv}`);
@@ -324,6 +424,283 @@ function createCabinetRouter({ sessions }) {
       res.json({ ok: true });
     } catch (err) {
       sendError(res, err, err.statusCode || 400);
+    }
+  });
+
+  router.get('/observations/config', async (req, res) => {
+    try {
+      const clientId = requireScopedClientId(req.cabinet);
+      if (!clientId) return;
+      res.json({ data: cabinetObservationsConfig() });
+    } catch (err) {
+      sendError(res, err);
+    }
+  });
+
+  router.get('/observations/board-layout', async (req, res) => {
+    try {
+      requireScopedClientId(req.cabinet);
+      const stored = getObservationsBoardLayout(req.user.id);
+      res.json({
+        data: stored?.layout || null,
+        updatedAt: stored?.updatedAt || null,
+      });
+    } catch (err) {
+      sendError(res, err);
+    }
+  });
+
+  router.put('/observations/board-layout', async (req, res) => {
+    try {
+      requireScopedClientId(req.cabinet);
+      const saved = putObservationsBoardLayout(req.user.id, req.body || {});
+      res.json({ ok: true, data: saved.layout, updatedAt: saved.updatedAt });
+    } catch (err) {
+      sendError(res, err, err.statusCode || 400);
+    }
+  });
+
+  router.get('/observations', async (req, res) => {
+    try {
+      const clientId = requireScopedClientId(req.cabinet);
+      res.json({ data: await listCabinetObservations(clientId) });
+    } catch (err) {
+      sendError(res, err);
+    }
+  });
+
+  router.post('/observations', async (req, res) => {
+    try {
+      const clientId = requireScopedClientId(req.cabinet);
+      const data = await createCabinetObservation(clientId, req.user, req.body || {});
+      await writeCabinetObservationAudit(req, {
+        action: 'chart_create',
+        observationId: data.id,
+        clientId,
+        objectLabel: data.name,
+      });
+      res.json({ ok: true, data });
+    } catch (err) {
+      sendError(res, err, err.statusCode || 400);
+    }
+  });
+
+  router.get('/observations/:id', async (req, res) => {
+    try {
+      const clientId = requireScopedClientId(req.cabinet);
+      const data = await getCabinetObservation(clientId, req.params.id);
+      if (!data) {
+        res.status(404).json({ error: 'Не найдено' });
+        return;
+      }
+      res.json({ data });
+    } catch (err) {
+      sendError(res, err);
+    }
+  });
+
+  router.put('/observations/:id', async (req, res) => {
+    try {
+      const clientId = requireScopedClientId(req.cabinet);
+      const data = await updateCabinetObservation(clientId, req.params.id, req.user, req.body || {});
+      if (!data) {
+        res.status(404).json({ error: 'Не найдено' });
+        return;
+      }
+      await writeCabinetObservationAudit(req, {
+        action: 'chart_update',
+        observationId: data.id,
+        clientId,
+        objectLabel: data.name,
+      });
+      res.json({ ok: true, data });
+    } catch (err) {
+      sendError(res, err, err.statusCode || 400);
+    }
+  });
+
+  router.delete('/observations/:id', async (req, res) => {
+    try {
+      const clientId = requireScopedClientId(req.cabinet);
+      const existing = await getCabinetObservation(clientId, req.params.id);
+      if (!existing) {
+        res.status(404).json({ error: 'Не найдено' });
+        return;
+      }
+      await deleteCabinetObservation(clientId, req.params.id);
+      await writeCabinetObservationAudit(req, {
+        action: 'chart_delete',
+        observationId: req.params.id,
+        clientId,
+        objectLabel: existing.name,
+      });
+      res.json({ ok: true });
+    } catch (err) {
+      sendError(res, err);
+    }
+  });
+
+  router.post('/observations/:id/duplicate', async (req, res) => {
+    try {
+      const clientId = requireScopedClientId(req.cabinet);
+      const data = await duplicateCabinetObservation(clientId, req.user, req.params.id, req.body || {});
+      if (!data) {
+        res.status(404).json({ error: 'Не найдено' });
+        return;
+      }
+      await writeCabinetObservationAudit(req, {
+        action: 'chart_create',
+        observationId: data.id,
+        clientId,
+        objectLabel: data.name,
+      });
+      res.json({ ok: true, data });
+    } catch (err) {
+      sendError(res, err, err.statusCode || 400);
+    }
+  });
+
+  router.post('/observations/:id/preview', async (req, res) => {
+    try {
+      const clientId = requireScopedClientId(req.cabinet);
+      const data = await previewCabinetObservation(clientId, req.params.id, req.body || {});
+      if (!data) {
+        res.status(404).json({ error: 'Не найдено' });
+        return;
+      }
+      res.json({ data });
+    } catch (err) {
+      sendError(res, err);
+    }
+  });
+
+  router.post('/observations/:id/retry', async (req, res) => {
+    try {
+      const clientId = requireScopedClientId(req.cabinet);
+      const data = await retryCabinetObservation(clientId, req.params.id);
+      if (!data) {
+        res.status(404).json({ error: 'Не найдено' });
+        return;
+      }
+      res.json({ ok: true, data });
+    } catch (err) {
+      sendError(res, err, err.statusCode || 400);
+    }
+  });
+
+  router.get('/:clientId/observations/config', async (req, res) => {
+    try {
+      if (rejectCabinetSessionForStaff(req, res)) return;
+      if (!(await canStaffViewClientObservations(req.user))) {
+        res.status(403).json({ error: 'Недостаточно прав' });
+        return;
+      }
+      res.json({ data: cabinetObservationsConfig() });
+    } catch (err) {
+      sendError(res, err);
+    }
+  });
+
+  router.get('/:clientId/observations', async (req, res) => {
+    try {
+      if (rejectCabinetSessionForStaff(req, res)) return;
+      if (!(await canStaffViewClientObservations(req.user))) {
+        res.status(403).json({ error: 'Недостаточно прав' });
+        return;
+      }
+      res.json({ data: await listCabinetObservations(req.params.clientId, { includeAuthor: true }) });
+    } catch (err) {
+      sendError(res, err);
+    }
+  });
+
+  router.post('/:clientId/observations', async (req, res) => {
+    try {
+      if (rejectCabinetSessionForStaff(req, res)) return;
+      if (!(await canStaffMutateClientObservations(req.user))) {
+        res.status(403).json({ error: 'Недостаточно прав' });
+        return;
+      }
+      const clientId = req.params.clientId;
+      const data = await createCabinetObservation(clientId, req.user, req.body || {});
+      await writeCabinetObservationAudit(req, {
+        action: 'chart_create',
+        observationId: data.id,
+        clientId,
+        objectLabel: data.name,
+      });
+      res.json({ ok: true, data });
+    } catch (err) {
+      sendError(res, err, err.statusCode || 400);
+    }
+  });
+
+  router.put('/:clientId/observations/:id', async (req, res) => {
+    try {
+      if (rejectCabinetSessionForStaff(req, res)) return;
+      if (!(await canStaffMutateClientObservations(req.user))) {
+        res.status(403).json({ error: 'Недостаточно прав' });
+        return;
+      }
+      const clientId = req.params.clientId;
+      const data = await updateCabinetObservation(clientId, req.params.id, req.user, req.body || {});
+      if (!data) {
+        res.status(404).json({ error: 'Не найдено' });
+        return;
+      }
+      await writeCabinetObservationAudit(req, {
+        action: 'chart_update',
+        observationId: data.id,
+        clientId,
+        objectLabel: data.name,
+      });
+      res.json({ ok: true, data });
+    } catch (err) {
+      sendError(res, err, err.statusCode || 400);
+    }
+  });
+
+  router.delete('/:clientId/observations/:id', async (req, res) => {
+    try {
+      if (rejectCabinetSessionForStaff(req, res)) return;
+      if (!(await canStaffMutateClientObservations(req.user))) {
+        res.status(403).json({ error: 'Недостаточно прав' });
+        return;
+      }
+      const clientId = req.params.clientId;
+      const existing = await getCabinetObservation(clientId, req.params.id, { includeAuthor: true });
+      if (!existing) {
+        res.status(404).json({ error: 'Не найдено' });
+        return;
+      }
+      await deleteCabinetObservation(clientId, req.params.id);
+      await writeCabinetObservationAudit(req, {
+        action: 'chart_delete',
+        observationId: req.params.id,
+        clientId,
+        objectLabel: existing.name,
+      });
+      res.json({ ok: true });
+    } catch (err) {
+      sendError(res, err);
+    }
+  });
+
+  router.post('/:clientId/observations/:id/preview', async (req, res) => {
+    try {
+      if (rejectCabinetSessionForStaff(req, res)) return;
+      if (!(await canStaffViewClientObservations(req.user))) {
+        res.status(403).json({ error: 'Недостаточно прав' });
+        return;
+      }
+      const data = await previewCabinetObservation(req.params.clientId, req.params.id, req.body || {});
+      if (!data) {
+        res.status(404).json({ error: 'Не найдено' });
+        return;
+      }
+      res.json({ data });
+    } catch (err) {
+      sendError(res, err);
     }
   });
 
@@ -382,7 +759,7 @@ function createClientsRouter({ sessions }) {
 
   router.get('/', async (req, res) => {
     try {
-      if (!(await canWrite(req.user, CLIENTS_RESOURCE))) {
+      if (!(await canAccess(req.user, CLIENTS_RESOURCE))) {
         res.status(403).json({ error: 'Недостаточно прав' });
         return;
       }

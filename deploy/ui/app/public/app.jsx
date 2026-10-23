@@ -51,21 +51,53 @@ function LazyPage({ pageId, exportName, fallback, ...props }) {
   if (error) {
     return (
       <div className="other-ports-table__state">
-        {error.message || 'Не удалось загрузить страницу'}
+        {error.message || t('app.pageLoadFailed')}
       </div>
     );
   }
   if (!ready) {
-    return fallback ?? <div className="other-ports-table__state">Загрузка…</div>;
+    return fallback ?? <div className="other-ports-table__state">{t('app.pageLoading')}</div>;
   }
   const Comp = PageChunks.component(pageId, exportName);
   if (!Comp) {
-    return <div className="other-ports-table__state">Компонент не найден</div>;
+    return <div className="other-ports-table__state">{t('app.pageComponentMissing')}</div>;
   }
   return <Comp {...props} />;
 }
 
+function canAccessPageForUser(user, pageId) {
+  const perms = user?.effectivePermissions;
+  if (pageId === 'cabinet-settings' && !isCabinetMode(user)) {
+    return false;
+  }
+  if (isCabinetMode(user)) {
+    if (user?.cabinet?.bindMode === 'ports' && pageId === 'dns') return false;
+    return CABINET_PAGE_IDS.has(pageId);
+  }
+  if (!perms) return true;
+  if (pageId === 'snmp') return !!(perms.snmp || perms.collectors);
+  if (pageId === 'smtp') return !!perms.diagnostics;
+  if (pageId === 'cidr' || pageId === 'vlan' || pageId === 'entities') {
+    return !!(perms.cidr || perms.vlan || perms.entities);
+  }
+  return !!perms[pageId];
+}
+
+function resolveRoleLandingPage(user, canAccess) {
+  const requested = user?.role?.startPage || 'dashboard';
+  const target = AppPages.resolvePageId(requested, canAccess.validIds);
+  if (canAccessPageForUser(user, target)) return target;
+  if (canAccessPageForUser(user, 'dashboard')) return 'dashboard';
+  return target;
+}
+
+function isEmptyAppHash() {
+  const hash = location.hash || '';
+  return hash === '' || hash === '#';
+}
+
 function App() {
+  const applyStartPageAfterLoginRef = useRef(false);
   const [registryReady, setRegistryReady] = useState(false);
   const [validIds, setValidIds] = useState(new Set(['dashboard']));
   const [hiddenPageIds, setHiddenPageIds] = useState(new Set());
@@ -97,6 +129,7 @@ function App() {
   const [periodZoomStack, setPeriodZoomStack] = useState([]);
   const periodRef = useRef({ timeRange, customPeriod });
   const [directions, setDirections] = useState(defaultDirectionsEnabled);
+  const [cabinetDirections, setCabinetDirections] = useState(defaultCabinetDirectionsEnabled);
   const [collectorFilter, setCollectorFilter] = useState([]);
   const [timezonePref, setTimezonePref] = useState(() => loadTimezonePreference());
   const displayTimezone = resolveDisplayTimezone(timezonePref);
@@ -104,6 +137,7 @@ function App() {
   const authRef = useRef(auth);
   authRef.current = auth;
   const [refreshKey, setRefreshKey] = useState(0);
+  const [latestBuildInfo, setLatestBuildInfo] = useState(null);
   const [observationComposeTick, setObservationComposeTick] = useState(0);
   const themeInitialized = useRef(false);
   const lastAuditPageRef = useRef({ pageId: '', at: 0 });
@@ -167,6 +201,7 @@ function App() {
   }, []);
 
   useEffect(() => {
+    AuthAccess.setEffectivePermissions(auth.user?.effectivePermissions || null);
     AuthAccess.setEffectiveWritePermissions(auth.user?.effectiveWritePermissions || null);
     AuthAccess.setGrantedActions(auth.user?.permissions || null);
   }, [auth.user]);
@@ -203,7 +238,7 @@ function App() {
       .catch((err) => {
         if (cancelled) return;
         setLocale(pending);
-        pushToast({ kind: 'error', title: 'Не удалось сохранить язык', desc: err.message });
+        pushToast({ kind: 'error', title: t('app.localeSaveFailed'), desc: err.message });
       });
     return () => { cancelled = true; };
   }, [auth.loading, auth.user?.id, auth.user?.locale]);
@@ -250,7 +285,10 @@ function App() {
   }, [timeRange, customPeriod]);
 
   useEffect(() => {
-    if (!auth.user) return undefined;
+    if (!auth.user) {
+      setLatestBuildInfo(null);
+      return undefined;
+    }
 
     let cancelled = false;
     let baseline = '';
@@ -264,6 +302,7 @@ function App() {
       try {
         const info = await ApiClient.loadLatestBuildInfo();
         if (cancelled) return;
+        setLatestBuildInfo(info || null);
         const key = versionKey(info);
         if (!key) return;
         if (!baseline) {
@@ -274,10 +313,10 @@ function App() {
           notified = true;
           pushToast({
             kind: 'info',
-            title: 'Доступна новая версия',
-            desc: 'Перезагрузите страницу, чтобы использовать актуальную версию.',
+            title: t('app.newVersion.title'),
+            desc: t('app.newVersion.desc'),
             duration: 0,
-            actionLabel: 'Перезагрузить',
+            actionLabel: t('app.newVersion.reload'),
             onAction: () => { ApiClient.hardReload(); },
           });
         }
@@ -433,7 +472,10 @@ function App() {
     location.hash = target;
   }, [validIds]);
 
-  const handleLogin = (user) => setAuth({ loading: false, user });
+  const handleLogin = (user) => {
+    applyStartPageAfterLoginRef.current = true;
+    setAuth({ loading: false, user });
+  };
   const handleLogout = async () => {
     try {
       await ApiClient.logout();
@@ -451,11 +493,11 @@ function App() {
     try {
       await ApiClient.stopImpersonation();
       await reloadCurrentUser();
-      pushToast({ kind: 'success', title: 'Выход из кабинета клиента' });
+      pushToast({ kind: 'success', title: t('cabinet.impersonation.left') });
       setPage('clients');
       location.hash = 'clients';
     } catch (err) {
-      pushToast({ kind: 'error', title: 'Не удалось выйти из кабинета', desc: err.message });
+      pushToast({ kind: 'error', title: t('cabinet.impersonation.leaveFailed'), desc: err.message });
     }
   };
   const handleRefresh = useCallback(() => setRefreshKey((k) => k + 1), []);
@@ -474,7 +516,7 @@ function App() {
       setAuth((prev) => ({ ...prev, user }));
     } catch (err) {
       setLocale(previous);
-      pushToast({ kind: 'error', title: 'Не удалось сохранить язык', desc: err.message });
+      pushToast({ kind: 'error', title: t('app.localeSaveFailed'), desc: err.message });
     }
   }, [locale]);
 
@@ -511,34 +553,47 @@ function App() {
     });
   }, []);
 
-  const canAccessPage = useCallback((pageId) => {
-    const perms = auth.user?.effectivePermissions;
-    if (pageId === 'cabinet-settings' && !isCabinetMode(auth.user)) {
-      return false;
-    }
-    if (isCabinetMode(auth.user)) {
-      return CABINET_PAGE_IDS.has(pageId);
-    }
-    if (!perms) return true;
-    if (pageId === 'snmp') return !!(perms.snmp || perms.collectors);
-    if (pageId === 'smtp') return !!perms.diagnostics;
-    if (pageId === 'cidr' || pageId === 'vlan' || pageId === 'entities') {
-      return !!(perms.cidr || perms.vlan || perms.entities);
-    }
-    return !!perms[pageId];
-  }, [auth.user]);
+  const canAccessPage = useCallback(
+    (pageId) => canAccessPageForUser(auth.user, pageId),
+    [auth.user],
+  );
 
   const cabinetMode = isCabinetMode(auth.user);
+  DashboardLog.setSuppressed(cabinetMode);
   const cabinetReadOnly = !!auth.user?.cabinet?.readOnly;
+  const canManageCabinetObservations = cabinetMode && (
+    AuthAccess.canWritePage('clients') || AuthAccess.canWritePage('observations')
+  );
+  // Impersonation is read-only for the cabinet shell, but operators with clients/observations
+  // write may still configure client observations (server guard allows the same).
+  const cabinetObservationsReadOnly = cabinetReadOnly && !canManageCabinetObservations;
   const clientDisplayName = auth.user?.cabinet?.clientDisplayName || '';
+  const cabinetBindMode = auth.user?.cabinet?.bindMode || '';
 
   useEffect(() => {
     if (!auth.user || !registryReady) return;
-    if (isCabinetMode(auth.user) && !CABINET_PAGE_IDS.has(page)) {
+    const cabinetBlocked = isCabinetMode(auth.user) && (
+      !CABINET_PAGE_IDS.has(page)
+      || (cabinetBindMode === 'ports' && page === 'dns')
+    );
+    if (cabinetBlocked) {
       setPage('dashboard');
       location.hash = 'dashboard';
     }
-  }, [auth.user, registryReady, page]);
+  }, [auth.user, registryReady, page, cabinetBindMode]);
+
+  useEffect(() => {
+    if (!auth.user || !registryReady) return;
+    const afterLogin = applyStartPageAfterLoginRef.current;
+    const emptyHash = isEmptyAppHash();
+    if (!afterLogin && !emptyHash) return;
+    applyStartPageAfterLoginRef.current = false;
+    const target = resolveRoleLandingPage(auth.user, { validIds });
+    const currentHash = (location.hash || '').slice(1).split('?')[0];
+    if (currentHash === target && page === target) return;
+    setPage(target);
+    location.hash = target;
+  }, [auth.user, registryReady, validIds, page]);
 
   if (auth.loading || !registryReady) {
     return <AuthFrame title={t('auth.appTitle')} subtitle={t('auth.sessionChecking')} theme={theme} onToggleTheme={toggleTheme} locale={locale} onLocaleChange={handleLocaleChange} />;
@@ -574,6 +629,7 @@ function App() {
             key={`${refreshKey}-${displayTimezone}`}
             onNavigate={navigate}
             directions={directions}
+            cabinetDirections={cabinetDirections}
             timeRange={timeRange}
             customPeriod={customPeriod}
             collectorFilter={collectorFilter}
@@ -592,7 +648,7 @@ function App() {
             onNavigate={navigate}
             displayTimezone={displayTimezone}
             cabinetMode={cabinetMode}
-            readOnly={cabinetReadOnly}
+            readOnly={cabinetObservationsReadOnly}
           />
         );
         break;
@@ -607,7 +663,16 @@ function App() {
         );
         break;
       case 'observations':
-        pageEl = <LazyPage pageId="observations" key={refreshKey} onNavigate={navigate} />;
+        pageEl = (
+          <LazyPage
+            pageId="observations"
+            key={refreshKey}
+            onNavigate={navigate}
+            cabinetMode={cabinetMode}
+            readOnly={cabinetObservationsReadOnly}
+            displayTimezone={displayTimezone}
+          />
+        );
         break;
       case 'diagnostics':
         pageEl = <LazyPage pageId="diagnostics" key={refreshKey} />;
@@ -628,6 +693,9 @@ function App() {
         break;
       case 'smtp':
         pageEl = <LazyPage pageId="smtp" key={refreshKey} />;
+        break;
+      case 'versions':
+        pageEl = <LazyPage pageId="versions" key={refreshKey} displayTimezone={displayTimezone} />;
         break;
       case 'dns':
         pageEl = cabinetMode
@@ -782,6 +850,7 @@ function App() {
         collapsed={collapsed}
         effectivePermissions={auth.user?.effectivePermissions}
         cabinetMode={cabinetMode}
+        cabinetBindMode={cabinetBindMode}
         clientDisplayName={clientDisplayName}
         locale={locale}
       />
@@ -802,6 +871,8 @@ function App() {
         onChartZoomReset={resetChartRangeZoom}
         directions={directions}
         onDirectionsChange={setDirections}
+        cabinetDirections={cabinetDirections}
+        onCabinetDirectionsChange={setCabinetDirections}
         collectorFilter={collectorFilter}
         onCollectorFilterChange={setCollectorFilter}
         pageTitles={pageTitles}
@@ -814,10 +885,12 @@ function App() {
         cabinetMode={cabinetMode}
         clientDisplayName={clientDisplayName}
         onStopImpersonation={handleStopImpersonation}
+        buildInfo={latestBuildInfo}
       />
       <main className="main">
         {pageEl}
       </main>
+      <AttackAlertHost user={auth.user} onNavigate={navigate} cabinetMode={cabinetMode} />
       <ToastStack />
     </div>
   );

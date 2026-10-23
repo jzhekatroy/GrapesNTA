@@ -144,3 +144,74 @@ test('cabinet explorer schema excludes cabinet_client field', () => {
   assert.equal(schema.filterFields.some((f) => f.id === 'cabinet_client'), false);
   assert.equal(schema.dimensions.some((d) => d.id === 'cabinet_client'), false);
 });
+
+test('cabinet explorer hides IX peer fields until IX accounting is on', async () => {
+  const schema = cabinetExplorerSchema();
+  assert.equal(schema.dimensions.some((d) => d.id === 'ix_src_client'), false);
+  assert.equal(schema.filterFields.some((f) => f.id === 'ix_dst_client'), false);
+  await assert.rejects(
+    cabinetExplorerFlows('client:mine', { groupBy: ['ix_src_client'], includeSummary: false, includeTimeseries: false }),
+    (error) => error.statusCode === 400 && /Недоступная группировка: ix_src_client/.test(error.message),
+  );
+});
+
+test('cabinet explorer with IX exposes peer fields without the client catalog picker', () => {
+  const schema = cabinetExplorerSchema({ ix: true });
+  const allowed = new Set([...CABINET_FIELDS, 'ix_src_client', 'ix_dst_client', 'ix_location']);
+  for (const id of ['ix_src_client', 'ix_dst_client']) {
+    assert.ok(schema.dimensions.some((d) => d.id === id));
+    const filter = schema.filterFields.find((f) => f.id === id);
+    assert.ok(filter);
+    assert.equal(filter.entityType, null);
+  }
+  const location = schema.filterFields.find((f) => f.id === 'ix_location');
+  assert.ok(schema.dimensions.some((d) => d.id === 'ix_location'));
+  assert.equal(location?.entityType, 'ix_location');
+  assert.deepEqual(schema.dimensionGroups['Локация'], ['ix_location']);
+  assert.equal(schema.dimensions.every((d) => allowed.has(d.id)), true);
+  assert.equal(schema.filterFields.every((f) => allowed.has(f.id)), true);
+  assert.equal(Object.values(schema.dimensionGroups).flat().every((id) => allowed.has(id)), true);
+  assert.equal(schema.filterFields.some((f) => f.id === 'cabinet_client'), false);
+});
+
+test('cabinet IX peer grouping stays inside the client scope', async () => {
+  const body = {
+    groupBy: ['ix_src_client'],
+    filters: [{ field: 'ix_dst_client', op: '=', value: 'client:other' }],
+    range: 'custom',
+    from: '2026-08-18 10:00:00',
+    to: '2026-08-18 11:00:00',
+    includeSummary: false,
+    includeTimeseries: false,
+  };
+  const spec = await cabinetExplorerFlows('client:mine', body, { ix: true });
+
+  assert.match(spec.sql, /f\.src_client = \{cabinet_client_id:String\}/);
+  assert.match(spec.sql, /f\.dst_client = \{cabinet_client_id:String\}/);
+  assert.match(spec.sql, /f\.ix_src_client/);
+  assert.match(spec.sql, /f\.ix_dst_client = \{ix_client_0:String\}/);
+  assert.equal(spec.params.cabinet_client_id, 'client:mine');
+  assert.equal(spec.params.ix_client_0, 'client:other');
+  assert.equal(spec.meta.groupBy[0].id, 'ix_src_client');
+});
+
+test('cabinet IX location grouping shows the site name and stays in client scope', async () => {
+  const body = {
+    groupBy: ['ix_location'],
+    filters: [{ field: 'ix_location', op: '=', value: 'Рига' }],
+    range: 'custom',
+    from: '2026-08-18 10:00:00',
+    to: '2026-08-18 11:00:00',
+    includeSummary: false,
+    includeTimeseries: false,
+  };
+  const spec = await cabinetExplorerFlows('client:mine', body, { ix: true });
+
+  assert.match(spec.sql, /f\.src_client = \{cabinet_client_id:String\}/);
+  assert.match(spec.sql, /l2_ix_loc\.ix_location/);
+  assert.doesNotMatch(spec.sql, /toString\(l2_ix_loc\.vlan_id\)|concat\('VLAN'/);
+  assert.equal(spec.params.cabinet_client_id, 'client:mine');
+  assert.equal(spec.params.filter_0, 'Рига');
+  assert.equal(spec.meta.groupBy[0].id, 'ix_location');
+  assert.equal(spec.meta.groupBy[0].label, 'Локация');
+});

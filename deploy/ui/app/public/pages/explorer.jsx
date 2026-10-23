@@ -566,7 +566,7 @@ function explorerRowFilterValue(row, dimId, valueIdx, dimensionById) {
       label: null,
     };
   }
-  if (fieldId === 'cabinet_client') {
+  if (fieldId === 'cabinet_client' || fieldId === 'ix_src_client' || fieldId === 'ix_dst_client') {
     const raw = row.rawValues?.[valueIdx] ?? row.values[valueIdx];
     const label = row.values[valueIdx];
     return {
@@ -861,14 +861,19 @@ const EXPLORER_RESULT_CACHE_KEY = 'explorer.resultCache';
 const EXPLORER_CACHE_TTL_RELATIVE_MS = 15 * 60 * 1000;
 const EXPLORER_CACHE_TTL_CUSTOM_MS = 30 * 60 * 1000;
 const EXPLORER_FILTER_LOGIC_OPTIONS = [
-  { id: 'and', labelKey: 'explorer.logic.and', altLabel: 'AND' },
-  { id: 'or', labelKey: 'explorer.logic.or', altLabel: 'OR' },
-  { id: 'and_not', labelKey: 'explorer.logic.andNot', altLabel: 'AND NOT' },
-  { id: 'or_not', labelKey: 'explorer.logic.orNot', altLabel: 'OR NOT' },
+  { id: 'and', labelKey: 'explorer.logic.and', uiLabelKey: 'explorer.logic.andRu', altLabel: 'AND' },
+  { id: 'or', labelKey: 'explorer.logic.or', uiLabelKey: 'explorer.logic.orRu', altLabel: 'OR' },
+  { id: 'and_not', labelKey: 'explorer.logic.andNot', uiLabelKey: 'explorer.logic.andNotRu', altLabel: 'AND NOT' },
+  { id: 'or_not', labelKey: 'explorer.logic.orNot', uiLabelKey: 'explorer.logic.orNotRu', altLabel: 'OR NOT' },
 ];
 
 function explorerLogicLabel(opt) {
   return opt?.labelKey ? explorerT(opt.labelKey) : (opt?.label || '');
+}
+
+function explorerLogicUiLabel(opt) {
+  const key = opt?.uiLabelKey || opt?.labelKey;
+  return key ? explorerT(key) : (opt?.label || '');
 }
 
 const EXPLORER_OP_LABEL_KEYS = {
@@ -1672,7 +1677,7 @@ function appendExplorerFilterLeafDsl(f, logicLabel, lines) {
 function appendExplorerFilterNodesDsl(nodes, lines) {
   (nodes || []).forEach((node, index) => {
     const logicOpt = EXPLORER_FILTER_LOGIC_OPTIONS.find((o) => o.id === normalizeFilterLogicValue(node.logic));
-    const logicLabel = index === 0 ? '' : `${logicOpt ? explorerLogicLabel(logicOpt) : explorerT('explorer.logic.andRu')} `;
+    const logicLabel = index === 0 ? '' : `${logicOpt ? explorerLogicLabel(logicOpt) : explorerT('explorer.logic.and')} `;
     if (explorerFilterTreeApi().isExplorerFilterGroup?.(node)) {
       lines.push(`${logicLabel}(`);
       appendExplorerFilterNodesDsl(node.children, lines);
@@ -2082,10 +2087,34 @@ function getTextareaCaretCoordinates(textarea, pos) {
 }
 
 function explorerLogicAutocompleteEntries() {
-  return EXPLORER_FILTER_LOGIC_OPTIONS.flatMap((o) => ([
-    { token: explorerLogicLabel(o), hint: `${o.altLabel} · logic` },
-    { token: o.altLabel, hint: `${explorerLogicLabel(o)}${explorerT('explorer.logicLinkHint')}` },
-  ]));
+  return EXPLORER_FILTER_LOGIC_OPTIONS.map((o) => {
+    const english = o.altLabel;
+    const ruUi = explorerLogicUiLabel(o);
+    const aliases = [english, ruUi, explorerLogicLabel(o)]
+      .map((s) => String(s || '').trim().toLowerCase())
+      .filter(Boolean);
+    return {
+      label: english,
+      insert: `${english} `,
+      hint: `${ruUi}${explorerT('explorer.logicLinkHint')}`,
+      aliases,
+    };
+  });
+}
+
+function explorerLogicSuggestionMatchesNeedle(entry, needle) {
+  if (!needle) return false;
+  if (entry.aliases.some((alias) => alias.startsWith(needle) || needle.startsWith(alias))) return true;
+  const label = String(entry.label || '').toLowerCase();
+  return label.startsWith(needle) || needle.startsWith(label);
+}
+
+function isExplorerLogicAutocompleteContext(trimmed) {
+  const t = String(trimmed || '').trim().toLowerCase();
+  if (!t) return false;
+  if (/^[а-яё\s]+$/i.test(t)) return true;
+  return /^(and(\s+not)?|or(\s+not)?)$/.test(t)
+    || /^(and(\s+n(o(t)?)?)?|or(\s+n(o(t)?)?)?)$/.test(t);
 }
 
 function buildExplorerTextSuggestions({ value, cursor, schema, entityItems = [] }) {
@@ -2135,10 +2164,17 @@ function buildExplorerTextSuggestions({ value, cursor, schema, entityItems = [] 
     lineSuggestion('group by', 'group by src_ip, dst_ip', explorerT('explorer.dsl.suggestGroupBy')),
     ...(fieldById.direction ? [lineSuggestion('direction', 'direction in (in, out, transit)', explorerT('explorer.dsl.suggestDirections'))] : []),
     ...(fieldById.collector ? [lineSuggestion('collector', 'collector in ("collector-id")', explorerT('explorer.dsl.suggestCollectors'))] : []),
-    ...explorerLogicAutocompleteEntries().map(({ token, hint }) => lineSuggestion(token, `${token} `, hint)),
   ]
     .filter((item) => matchesNeedle(item.label, item.hint))
     .forEach((item) => suggestions.push(item));
+
+  if (trimmed === rest && isExplorerLogicAutocompleteContext(trimmed)) {
+    explorerLogicAutocompleteEntries()
+      .filter((entry) => explorerLogicSuggestionMatchesNeedle(entry, needle))
+      .forEach((entry) => {
+        suggestions.push(lineSuggestion(entry.label, entry.insert.replace(/\s+$/, ''), entry.hint));
+      });
+  }
 
   if (!rest.includes(' ') && !['time', 'direction', 'collector'].some((k) => lowerRest.startsWith(k))
     && !explorerGroupDslApi().isExplorerGroupByDslContext?.(trimmed)) {
@@ -3055,6 +3091,7 @@ function createExplorerApi(cabinetMode) {
       supportsSavedFilters: true,
       supportsObservations: true,
       maxRangeDays: EXPLORER_MAX_RANGE_DAYS,
+      isCabinet: false,
     };
   }
   return {
@@ -3062,12 +3099,17 @@ function createExplorerApi(cabinetMode) {
     loadQuery: (opts) => ApiClient.loadCabinetExplorerQuery(opts),
     exportCsv: (opts) => ApiClient.exportCabinetExplorerCsv(opts),
     loadSavedFilters: () => Promise.resolve([]),
-    searchEntities: () => Promise.resolve([]),
+    searchEntities: (opts) => (
+      opts?.type === 'ix_location'
+        ? ApiClient.searchCabinetExplorerEntities(opts)
+        : Promise.resolve([])
+    ),
     loadSharedSnapshot: (token) => ApiClient.loadExplorerSharedSnapshot(token, true),
     shareSnapshot: (id) => ApiClient.shareExplorerSnapshot(id, true),
     supportsSavedFilters: false,
-    supportsObservations: false,
+    supportsObservations: true,
     maxRangeDays: 6,
+    isCabinet: true,
   };
 }
 
@@ -3158,8 +3200,34 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
     () => observationSections.filter((s) => s.level === 'edit'),
     [observationSections],
   );
-  const canWriteObservation = !cabinetMode && (AuthAccess.canWritePage('observations') || canWrite);
-  const canCreateObservation = canWriteObservation && observationEditSections.length > 0;
+  const [cabinetObsQuota, setCabinetObsQuota] = useState(null);
+  useEffect(() => {
+    if (!cabinetMode || readOnly) return undefined;
+    let cancelled = false;
+    Promise.all([
+      ApiClient.loadCabinetObservations(),
+      ApiClient.loadCabinetObservationsConfig(),
+    ]).then(([list, cfg]) => {
+      if (cancelled) return;
+      const max = cfg?.maxObservations || 5;
+      setCabinetObsQuota({ used: (list || []).length, max });
+    }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [cabinetMode, readOnly]);
+
+  const atCabinetObsLimit = cabinetMode
+    && cabinetObsQuota
+    && cabinetObsQuota.used >= cabinetObsQuota.max;
+  const canWriteObservation = !readOnly && (
+    cabinetMode
+    || AuthAccess.canWritePage('observations')
+    || canWrite
+  );
+  const canCreateObservation = canWriteObservation && (
+    cabinetMode
+      ? !atCabinetObsLimit
+      : observationEditSections.length > 0
+  );
   const [hasAppliedQuery, setHasAppliedQuery] = useState(false);
   const [appliedSnapshot, setAppliedSnapshot] = useState(null);
   const [queryVersion, setQueryVersion] = useState(0);
@@ -3983,7 +4051,9 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
         let existing = null;
         if (id) {
           try {
-            existing = await ApiClient.loadObservation(id);
+            existing = cabinetMode
+              ? await ApiClient.loadCabinetObservation(id)
+              : await ApiClient.loadObservation(id);
           } catch (err) {
             if (observationNotFoundError(err)) {
               id = null;
@@ -3993,14 +4063,14 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
           }
         }
         // Shared observations are visible via GET, but only the owner can PUT.
-        if (id && existing && existing.canEdit === false) {
+        if (!cabinetMode && id && existing && existing.canEdit === false) {
           id = null;
           existing = null;
         }
         if (id && existing) {
           const existingChartStyle = (existing.widgets || []).find((w) => w.type === 'timeseries_bps')?.chartStyle;
           try {
-            await ApiClient.updateObservation(id, {
+            const updatePayload = {
               ...existing,
               name: (name || '').trim() || existing.name,
               lookback: tileLookback,
@@ -4008,7 +4078,12 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
               filters: nextFilters,
               thresholds: validThresholds,
               widgets: buildCreateWidgets(existingChartStyle),
-            });
+            };
+            if (cabinetMode) {
+              await ApiClient.updateCabinetObservation(id, updatePayload);
+            } else {
+              await ApiClient.updateObservation(id, updatePayload);
+            }
             pushToast({ kind: 'success', title: explorerT('explorer.obsFiltersUpdated'), desc: name || existing.name });
             updated = true;
           } catch (err) {
@@ -4018,31 +4093,39 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
         }
       }
       if (!updated) {
-        const sectionId = pickObservationCreateSectionId(observationSections);
-        if (!sectionId) {
-          pushToast({ kind: 'error', title: explorerT('explorer.obsSaveFailed'), desc: explorerT('observations.section.empty') });
-          return;
+        if (!cabinetMode) {
+          const sectionId = pickObservationCreateSectionId(observationSections);
+          if (!sectionId) {
+            pushToast({ kind: 'error', title: explorerT('explorer.obsSaveFailed'), desc: explorerT('observations.section.empty') });
+            return;
+          }
         }
         const payload = {
           name: (name || '').trim() || explorerT('explorer.observationDefaultName', { metric: metricLabel }),
           description: '',
           lookback: tileLookback,
-          sectionId,
           explorerQuery: explorerQuerySnapshot,
           filters: nextFilters,
           thresholds: validThresholds,
           widgets: buildCreateWidgets('stack'),
-          materialize: { enabled: materializeEnabled !== false },
-          report: {
+          materialize: { enabled: true },
+          report: { enabled: false },
+        };
+        if (!cabinetMode) {
+          payload.sectionId = pickObservationCreateSectionId(observationSections);
+          payload.materialize = { enabled: materializeEnabled !== false };
+          payload.report = {
             enabled: !!reportEnabled,
             period: reportPeriod || 'yesterday',
             cron: '0 8 * * *',
             timezone: 'Europe/Moscow',
             formats: ['html', 'csv'],
             emailTo: [],
-          },
-        };
-        const res = await ApiClient.createObservation(payload);
+          };
+        }
+        const res = cabinetMode
+          ? await ApiClient.createCabinetObservation(payload)
+          : await ApiClient.createObservation(payload);
         id = res.data?.id;
         pushToast({
           kind: 'success',
@@ -4653,7 +4736,7 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
                 <Card
                   title={explorerT('explorer.basicsTitle')}
                   pad="sm"
-                  headerBadge={lastQueryElapsedMs != null ? (
+                  headerBadge={!cabinetMode && lastQueryElapsedMs != null ? (
                     <ExplorerQueryElapsedBadge elapsedMs={lastQueryElapsedMs} />
                   ) : null}
                 >
@@ -4665,9 +4748,9 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
                 <Card
                   title={explorerT('explorer.dynamicsTitle', { metric: appliedMetricLabel })}
                   subtitle={`${timeRangeLabel(appliedTimeRange, appliedCustomPeriod)} · ${meta?.dataTable || 'flows_raw'}`}
-                  loadMs={loadMs}
-                  serverMs={serverMs}
-                  headerBadge={lastQueryElapsedMs != null ? (
+                  loadMs={cabinetMode ? null : loadMs}
+                  serverMs={cabinetMode ? null : serverMs}
+                  headerBadge={!cabinetMode && lastQueryElapsedMs != null ? (
                     <ExplorerQueryElapsedBadge elapsedMs={lastQueryElapsedMs} />
                   ) : null}
                 >
@@ -4752,10 +4835,10 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
                     subtitle={isExplorerSankeyVis(vis)
                       ? explorerT('explorer.resultsSubSankey')
                       : explorerT('explorer.resultsSubDefault')}
-                    loadMs={loadMs}
-                    serverMs={serverMs}
+                    loadMs={cabinetMode ? null : loadMs}
+                    serverMs={cabinetMode ? null : serverMs}
                     pad="0"
-                    headerBadge={(!isRefreshingData && source !== 'loading' && lastQueryElapsedMs != null) ? (
+                    headerBadge={(!cabinetMode && !isRefreshingData && source !== 'loading' && lastQueryElapsedMs != null) ? (
                       <ExplorerQueryElapsedBadge elapsedMs={lastQueryElapsedMs} />
                     ) : null}
                     tools={(
@@ -4828,10 +4911,12 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
                                 {meta?.trafficSampled ? explorerT('explorer.footerSampled') : ''}
                                 {meta?.rowsHidden > 0 ? explorerT('explorer.footerHiddenByThreshold', { n: meta.rowsHidden }) : ''}
                               </span>
-                              <span>
-                                {explorerT('explorer.footerQueryTime')}<b style={{ color: 'var(--fg-primary)' }}>{serverMs ?? '—'}{explorerT('explorer.footerQueryTimeMs')}</b>
-                                {explorerT('explorer.footerClickHouse')}{meta?.dataTable || 'flows_raw'}
-                              </span>
+                              {!cabinetMode && (
+                                <span>
+                                  {explorerT('explorer.footerQueryTime')}<b style={{ color: 'var(--fg-primary)' }}>{serverMs ?? '—'}{explorerT('explorer.footerQueryTimeMs')}</b>
+                                  {explorerT('explorer.footerClickHouse')}{meta?.dataTable || 'flows_raw'}
+                                </span>
+                              )}
                             </>
                           )}
                           columns={resultTableColumns}
@@ -4894,6 +4979,7 @@ function PageExplorer({ onNavigate, displayTimezone, cabinetMode = false, readOn
         timeRange={timeRange}
         saveMode={observationSaveMode}
         initialName={observationCompose?.name || ''}
+        cabinetMode={cabinetMode}
         onSave={saveAsObservation}
       />
     </div>
@@ -5474,6 +5560,14 @@ function DimensionPicker({ anchorRef, dimensions, schema, selected, onPick, onCl
   );
 }
 
+function searchExplorerEntityRows({ type, q, limit, switchIp }) {
+  if (window.__GRAPES_CABINET_EXPLORER__) {
+    if (type !== 'ix_location') return Promise.resolve([]);
+    return ApiClient.searchCabinetExplorerEntities({ type, q, limit });
+  }
+  return ApiClient.searchExplorerEntities({ type, q, limit, switchIp });
+}
+
 function EntityPicker({ entityType, value, label, onSelect, onClear, placeholder = explorerT('explorer.searchEntity'), switchIp = '', fullWidth = false }) {
   const rootRef = React.useRef(null);
   const inputRef = React.useRef(null);
@@ -5534,12 +5628,7 @@ function EntityPicker({ entityType, value, label, onSelect, onClear, placeholder
     let cancelled = false;
     setLoading(true);
     const timer = setTimeout(() => {
-      if (window.__GRAPES_CABINET_EXPLORER__) {
-        setItems([]);
-        setLoading(false);
-        return;
-      }
-      ApiClient.searchExplorerEntities({ type: entityType, q, limit: 20, switchIp }).then((rows) => {
+      searchExplorerEntityRows({ type: entityType, q, limit: 20, switchIp }).then((rows) => {
         if (!cancelled) {
           setItems(rows || []);
           setLoading(false);
@@ -5711,12 +5800,7 @@ function ExplorerFilterTextEditor({ value, onChange, error, schema, filters = []
     let cancelled = false;
     setEntityLoading(true);
     const timer = setTimeout(() => {
-      if (window.__GRAPES_CABINET_EXPLORER__) {
-        setEntityItems([]);
-        setEntityLoading(false);
-        return;
-      }
-      ApiClient.searchExplorerEntities({
+      searchExplorerEntityRows({
         type: entityType,
         q,
         limit: 8,
@@ -6951,7 +7035,7 @@ function ExplorerLogicChip({ value, onChange }) {
     <>
       <span ref={anchorRef}>
         <button type="button" className="explorer-query-chip explorer-logic-chip" onClick={() => setOpen((v) => !v)}>
-          {explorerLogicLabel(current)}
+          {explorerLogicUiLabel(current)}
           <Icon name="chevD" size={10} />
         </button>
       </span>
@@ -6967,7 +7051,7 @@ function ExplorerLogicChip({ value, onChange }) {
                 setOpen(false);
               }}
             >
-              {explorerLogicLabel(opt)}
+              {explorerLogicUiLabel(opt)}
             </div>
           ))}
         </div>
@@ -7763,7 +7847,7 @@ function ExplorerFilters({
       {canWrite && (
         <Button kind="ghost" size="sm" icon="save" onClick={onSave}>{explorerT('explorer.save')}</Button>
       )}
-      {canWrite && onSaveAsObservation && (
+      {onSaveAsObservation && (
         <Button kind="primary" size="sm" onClick={onSaveAsObservation}>{saveAsObservationLabel}</Button>
       )}
       {filterMode === 'graphic' && (
@@ -8174,6 +8258,8 @@ function metricAxisUnit(metric) {
   return '';
 }
 
+const CABINET_OBS_LOOKBACKS = new Set(['15m', '30m', '1h', '6h', '24h']);
+
 function SaveObservationModal({
   open,
   onClose,
@@ -8184,11 +8270,14 @@ function SaveObservationModal({
   timeRange,
   saveMode = 'create',
   initialName,
+  cabinetMode = false,
   onSave,
 }) {
   const defaultLookback = timeRange === '15m'
     ? '30m'
-    : (['30m', '1h', '6h', '24h', '7d'].includes(timeRange) ? timeRange : '1h');
+    : (cabinetMode
+      ? (CABINET_OBS_LOOKBACKS.has(timeRange) ? timeRange : '1h')
+      : (['30m', '1h', '6h', '24h', '7d'].includes(timeRange) ? timeRange : '1h'));
   const defaultTop = (groupBy || []).find((g) => (
     ['src_asn', 'dst_asn', 'src_ip', 'dst_ip', 'vlan', 'proto'].includes(explorerGroupFieldId(g))
   ))
@@ -8270,11 +8359,12 @@ function SaveObservationModal({
           <div className="field" style={{ flex: '1 1 140px', minWidth: 140 }}>
             <label>{explorerT('explorer.chartWindow')}</label>
             <select className="input" value={lookback} onChange={(e) => setLookback(e.target.value)}>
+              {cabinetMode && <option value="15m">{explorerT('explorer.lookback15m')}</option>}
               <option value="30m">{explorerT('explorer.lookback30m')}</option>
               <option value="1h">{explorerT('explorer.lookback1h')}</option>
               <option value="6h">{explorerT('explorer.lookback6h')}</option>
               <option value="24h">{explorerT('explorer.lookback24h')}</option>
-              <option value="7d">{explorerT('explorer.lookback7d')}</option>
+              {!cabinetMode && <option value="7d">{explorerT('explorer.lookback7d')}</option>}
             </select>
           </div>
           {!groupSummary && (
@@ -8298,29 +8388,33 @@ function SaveObservationModal({
             {explorerT('explorer.obsSliceRest')}
           </div>
         )}
-        <label className="row" style={{ gap: 8, alignItems: 'center' }}>
-          <input
-            type="checkbox"
-            checked={materializeEnabled}
-            onChange={(e) => setMaterializeEnabled(e.target.checked)}
-          />
-          {explorerT('explorer.materialize')}
-        </label>
-        <div style={{ marginLeft: 24, color: 'var(--fg-muted)', font: 'var(--pv-text-body-3)' }}>
-          {explorerT('explorer.materializeHint')}
-        </div>
-        <label className="row" style={{ gap: 8, alignItems: 'center' }}>
-          <input type="checkbox" checked={reportEnabled} onChange={(e) => setReportEnabled(e.target.checked)} />
-          {explorerT('explorer.dailyReport')}
-        </label>
-        {reportEnabled && (
-          <label className="row" style={{ gap: 8, alignItems: 'center', marginLeft: 24 }}>
-            {explorerT('explorer.forPeriod')}
-            <select className="input" style={{ width: 160 }} value={reportPeriod} onChange={(e) => setReportPeriod(e.target.value)}>
-              <option value="yesterday">{explorerT('explorer.reportYesterday')}</option>
-              <option value="last_24h">{explorerT('explorer.reportLast24h')}</option>
-            </select>
-          </label>
+        {!cabinetMode && (
+          <>
+            <label className="row" style={{ gap: 8, alignItems: 'center' }}>
+              <input
+                type="checkbox"
+                checked={materializeEnabled}
+                onChange={(e) => setMaterializeEnabled(e.target.checked)}
+              />
+              {explorerT('explorer.materialize')}
+            </label>
+            <div style={{ marginLeft: 24, color: 'var(--fg-muted)', font: 'var(--pv-text-body-3)' }}>
+              {explorerT('explorer.materializeHint')}
+            </div>
+            <label className="row" style={{ gap: 8, alignItems: 'center' }}>
+              <input type="checkbox" checked={reportEnabled} onChange={(e) => setReportEnabled(e.target.checked)} />
+              {explorerT('explorer.dailyReport')}
+            </label>
+            {reportEnabled && (
+              <label className="row" style={{ gap: 8, alignItems: 'center', marginLeft: 24 }}>
+                {explorerT('explorer.forPeriod')}
+                <select className="input" style={{ width: 160 }} value={reportPeriod} onChange={(e) => setReportPeriod(e.target.value)}>
+                  <option value="yesterday">{explorerT('explorer.reportYesterday')}</option>
+                  <option value="last_24h">{explorerT('explorer.reportLast24h')}</option>
+                </select>
+              </label>
+            )}
+          </>
         )}
       </div>
     </Modal>

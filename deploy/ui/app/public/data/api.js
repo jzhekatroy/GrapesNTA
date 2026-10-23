@@ -506,6 +506,15 @@ const ApiClient = (() => {
     return body.data || [];
   }
 
+  async function searchCabinetExplorerEntities({ type, q = '', limit = 20 } = {}) {
+    const params = new URLSearchParams();
+    params.set('type', type);
+    if (q) params.set('q', q);
+    if (limit) params.set('limit', String(limit));
+    const body = await getJson(`/api/cabinet/explorer/entities?${params}`, { widget: 'cabinet/explorer/entities' });
+    return body.data || [];
+  }
+
   async function loadExplorerQuery({
     metric = 'bps',
     groupBy = [],
@@ -830,6 +839,13 @@ const ApiClient = (() => {
     return body.data || body;
   }
 
+  async function loadComponentVersions() {
+    const body = await getJson('/api/diagnostics/versions', {
+      widget: 'diagnostics/versions',
+    });
+    return body.data || body;
+  }
+
   async function hardReload() {
     if (window.caches) {
       try {
@@ -914,6 +930,84 @@ const ApiClient = (() => {
   function observationRunArtifactUrl(observationId, runId, file = 'report.html') {
     const q = new URLSearchParams({ file: String(file || 'report.html') });
     return `/api/observations/${encodeURIComponent(observationId)}/runs/${encodeURIComponent(runId)}/artifact?${q}`;
+  }
+
+  function staffClientObservationsBase(clientId) {
+    return `/api/cabinet/${encodeURIComponent(clientId)}/observations`;
+  }
+
+  async function loadCabinetObservationsConfig() {
+    const body = await getJson('/api/cabinet/observations/config', { widget: 'cabinet/observations/config' });
+    return body.data;
+  }
+
+  async function loadCabinetObservations() {
+    const body = await getJson('/api/cabinet/observations', { widget: 'cabinet/observations/list' });
+    return body.data || [];
+  }
+
+  async function loadCabinetObservationsBoardLayout() {
+    const body = await getJson('/api/cabinet/observations/board-layout', { widget: 'cabinet/observations/board-layout' });
+    return { data: body.data || null, updatedAt: body.updatedAt || null };
+  }
+
+  async function saveCabinetObservationsBoardLayout(layout) {
+    return requestJson('/api/cabinet/observations/board-layout', { method: 'PUT', body: layout });
+  }
+
+  async function loadCabinetObservation(id) {
+    const body = await getJson(`/api/cabinet/observations/${encodeURIComponent(id)}`, { widget: 'cabinet/observations/get' });
+    return body.data;
+  }
+
+  async function createCabinetObservation(payload) {
+    return requestJson('/api/cabinet/observations', { method: 'POST', body: payload });
+  }
+
+  async function updateCabinetObservation(id, payload) {
+    return requestJson(`/api/cabinet/observations/${encodeURIComponent(id)}`, { method: 'PUT', body: payload });
+  }
+
+  async function deleteCabinetObservation(id) {
+    return requestJson(`/api/cabinet/observations/${encodeURIComponent(id)}`, { method: 'DELETE' });
+  }
+
+  async function previewCabinetObservation(id, payload = {}) {
+    return requestJson(`/api/cabinet/observations/${encodeURIComponent(id)}/preview`, { method: 'POST', body: payload });
+  }
+
+  async function duplicateCabinetObservation(id, payload = {}) {
+    return requestJson(`/api/cabinet/observations/${encodeURIComponent(id)}/duplicate`, { method: 'POST', body: payload });
+  }
+
+  async function retryCabinetObservation(id) {
+    return requestJson(`/api/cabinet/observations/${encodeURIComponent(id)}/retry`, { method: 'POST', body: {} });
+  }
+
+  async function loadStaffClientObservationsConfig(clientId) {
+    const body = await getJson(`${staffClientObservationsBase(clientId)}/config`, { widget: 'staff/client-observations/config' });
+    return body.data;
+  }
+
+  async function loadStaffClientObservations(clientId) {
+    const body = await getJson(staffClientObservationsBase(clientId), { widget: 'staff/client-observations/list' });
+    return body.data || [];
+  }
+
+  async function createStaffClientObservation(clientId, payload) {
+    return requestJson(staffClientObservationsBase(clientId), { method: 'POST', body: payload });
+  }
+
+  async function updateStaffClientObservation(clientId, id, payload) {
+    return requestJson(`${staffClientObservationsBase(clientId)}/${encodeURIComponent(id)}`, { method: 'PUT', body: payload });
+  }
+
+  async function deleteStaffClientObservation(clientId, id) {
+    return requestJson(`${staffClientObservationsBase(clientId)}/${encodeURIComponent(id)}`, { method: 'DELETE' });
+  }
+
+  async function previewStaffClientObservation(clientId, id, payload = {}) {
+    return requestJson(`${staffClientObservationsBase(clientId)}/${encodeURIComponent(id)}/preview`, { method: 'POST', body: payload });
   }
 
   async function loadSmtpSettings() {
@@ -1034,6 +1128,16 @@ const ApiClient = (() => {
     if (to) params.set('to', to);
     if (kind && kind !== 'all') params.set('kind', kind);
     const body = await requestJson(`/api/detection/events?${params}`);
+    return body.data;
+  }
+
+  async function loadAttackAlerts() {
+    const body = await requestJson('/api/attack-alerts');
+    return body.data;
+  }
+
+  async function triggerTestAttack() {
+    const body = await requestJson('/api/detection/test-attack', { method: 'POST', body: {} });
     return body.data;
   }
 
@@ -2625,6 +2729,58 @@ const ApiClient = (() => {
     };
   }
 
+  async function loadCabinetOverviewIxPeers({
+    timeRange = '24h',
+    customPeriod,
+  } = {}) {
+    const params = cabinetRangeQuery({ timeRange, customPeriod });
+    const result = await fetchCabinet(`/api/cabinet/overview/ix-peers?${params}`, 'cabinet/overview/ix-peers');
+    if (!result.ok) {
+      return {
+        source: 'error',
+        data: [],
+        meta: null,
+        error: result.error?.message || LOAD_FAILED,
+        status: result.error?.status || 0,
+        loadMs: result.loadMs,
+        serverMs: null,
+      };
+    }
+    return {
+      source: 'clickhouse',
+      data: result.data || [],
+      meta: result.meta || null,
+      loadMs: result.loadMs,
+      serverMs: result.serverMs,
+    };
+  }
+
+  async function loadCabinetOverviewLocations({
+    timeRange = '24h',
+    customPeriod,
+  } = {}) {
+    const params = cabinetRangeQuery({ timeRange, customPeriod });
+    const result = await fetchCabinet(`/api/cabinet/overview/locations?${params}`, 'cabinet/overview/locations');
+    if (!result.ok) {
+      return {
+        source: 'error',
+        data: [],
+        meta: null,
+        error: result.error?.message || LOAD_FAILED,
+        status: result.error?.status || 0,
+        loadMs: result.loadMs,
+        serverMs: null,
+      };
+    }
+    return {
+      source: 'clickhouse',
+      data: result.data || [],
+      meta: result.meta || null,
+      loadMs: result.loadMs,
+      serverMs: result.serverMs,
+    };
+  }
+
   async function loadCabinetOverviewServices({
     timeRange = '24h',
     customPeriod,
@@ -3145,6 +3301,8 @@ const ApiClient = (() => {
     loadCabinetOverviewSeries,
     loadCabinetOverviewStats,
     loadCabinetOverviewCountries,
+    loadCabinetOverviewLocations,
+    loadCabinetOverviewIxPeers,
     loadCabinetOverviewServices,
     loadCabinetOverviewRecentFlows,
     loadCabinetDnsDomains,
@@ -3182,6 +3340,7 @@ const ApiClient = (() => {
     loadVlanTop,
     loadExplorerSchema,
     searchExplorerEntities,
+    searchCabinetExplorerEntities,
     loadExplorerQuery,
     loadExplorerFlows,
     exportExplorerCsv,
@@ -3217,6 +3376,7 @@ const ApiClient = (() => {
     loadFailedRequestsDiagnostics,
     loadBuildInfo,
     loadLatestBuildInfo,
+    loadComponentVersions,
     hardReload,
     loadObservation,
     createObservation,
@@ -3230,6 +3390,23 @@ const ApiClient = (() => {
     cancelObservationMaterialize,
     retryObservationMaterialize,
     observationRunArtifactUrl,
+    loadCabinetObservationsConfig,
+    loadCabinetObservations,
+    loadCabinetObservationsBoardLayout,
+    saveCabinetObservationsBoardLayout,
+    loadCabinetObservation,
+    createCabinetObservation,
+    updateCabinetObservation,
+    deleteCabinetObservation,
+    previewCabinetObservation,
+    duplicateCabinetObservation,
+    retryCabinetObservation,
+    loadStaffClientObservationsConfig,
+    loadStaffClientObservations,
+    createStaffClientObservation,
+    updateStaffClientObservation,
+    deleteStaffClientObservation,
+    previewStaffClientObservation,
     loadSmtpSettings,
     saveSmtpSettings,
     testSmtpSettings,
@@ -3250,6 +3427,8 @@ const ApiClient = (() => {
     loadDetectionFlowspecSummary,
     loadDetectionEvents,
     exportDetectionEventsCsv,
+    loadAttackAlerts,
+    triggerTestAttack,
     loadMonitoringAttacks,
     loadMonitoringProblems,
     loadMonitoringAttack,

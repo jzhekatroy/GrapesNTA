@@ -35,11 +35,17 @@ async function getEnabledClient(clientId) {
  * the id is better than an empty header.
  */
 async function fillClientDisplayName(cabinet) {
-  if (!cabinet || cabinet.mode !== 'client' || !cabinet.clientId || cabinet.clientDisplayName) {
-    return cabinet;
-  }
+  if (!cabinet?.clientId) return cabinet;
+  if (cabinet.mode !== 'client' && cabinet.mode !== 'impersonation') return cabinet;
+
   const client = await getEnabledClient(cabinet.clientId).catch(() => null);
-  return { ...cabinet, clientDisplayName: client ? client.displayName : cabinet.clientId };
+  if (!client) return cabinet;
+
+  const enriched = { ...cabinet, bindMode: client.bindMode };
+  if (cabinet.mode === 'client' && !cabinet.clientDisplayName) {
+    enriched.clientDisplayName = client.displayName;
+  }
+  return enriched;
 }
 
 /**

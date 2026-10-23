@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/netip"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -77,6 +78,27 @@ type portKey struct {
 	ifIndex uint32
 }
 
+type portMacKey struct {
+	sampler [16]byte
+	ifIndex uint32
+	mac     [6]byte
+}
+
+// ixConfig is the PiterIX cabinet rule. Zero value keeps the old tagging:
+// prefix, then port, on every VLAN. scopeOnly drops flows that are not on an
+// IX VLAN before they are stored. It stays false when the VLAN list is empty.
+// peerMacs is used only while enabled is true, and only to fill the separate
+// IX client columns. It never changes src_client or dst_client.
+type ixConfig struct {
+	enabled   bool
+	macOnPort bool
+	scopeOnly bool
+	vlans     map[uint16]struct{}
+	clients   map[string]struct{}
+	portMacs  map[portMacKey]string
+	peerMacs  map[[6]byte]string
+}
+
 type ClassifierConfig struct {
 	Enabled bool
 	DSN     string
@@ -95,9 +117,20 @@ type TrafficClassifier struct {
 	portsNoIfIndex  atomic.Uint64
 	portsUnmarked   atomic.Uint64
 
+	ixScopeRows    atomic.Uint64
+	ixScopePackets atomic.Uint64
+	ixScopeBytes   atomic.Uint64
+
 	// Flows left unclassified because neither network is described. Growth
 	// here is the signal to go and fill in the L3 catalog.
 	networksUnclassified atomic.Uint64
+
+	// bgpSnapshotWarned limits the "snapshot check failed" line to once per
+	// process. The refresh itself keeps running and reloads BGP every time.
+	bgpSnapshotWarned bool
+	ixLoadWarned      bool
+	ixScopeWarned     bool
+	ixPeerWarned      bool
 }
 
 type classifierState struct {
@@ -109,9 +142,10 @@ type classifierState struct {
 	l3v6 *ipTrie
 
 	// Cabinet clients: prefix -> client_id (EntityID slot) and port -> client_id.
-	client4    *ipTrie
-	client6    *ipTrie
+	client4     *ipTrie
+	client6     *ipTrie
 	clientPorts map[portKey]string
+	ix          ixConfig
 
 	vlans map[uint16]vlanClass
 
@@ -120,6 +154,12 @@ type classifierState struct {
 	portSides       map[portKey]uint8
 
 	hasLocalConfig bool
+
+	// BGP tries stay shared across refreshes while the table snapshot is the
+	// same. Lookup only reads them; insertRoute must not run after publish.
+	bgpSnapshot  time.Time
+	bgpTableRows uint64
+	bgpLoaded    int
 }
 
 type vlanClass struct {
@@ -149,18 +189,18 @@ type bgpRoute struct {
 }
 
 type EndpointClass struct {
-	ASN           uint32
-	ASPath        []uint32
-	Role          string
-	Entity        string
-	DisplayName   string
-	Source        string
-	Scope         string
-	NetworkName   string
-	NetworkRole   string
-	Label         string
-	OperatorID    string
-	Attachment    attachmentClass
+	ASN         uint32
+	ASPath      []uint32
+	Role        string
+	Entity      string
+	DisplayName string
+	Source      string
+	Scope       string
+	NetworkName string
+	NetworkRole string
+	Label       string
+	OperatorID  string
+	Attachment  attachmentClass
 }
 
 type attachmentClass struct {
@@ -273,7 +313,7 @@ func (tc *TrafficClassifier) refreshOnce(ctx context.Context) error {
 		unknownNetworks: UnknownNetworksForeign,
 		portSides:       make(map[portKey]uint8),
 	}
-	bgpRows, err := tc.loadBGP(ctx, st)
+	bgpRows, bgpReloaded, err := tc.refreshBGP(ctx, st)
 	if err != nil {
 		return err
 	}
@@ -298,10 +338,12 @@ func (tc *TrafficClassifier) refreshOnce(ctx context.Context) error {
 	portSwitches := tc.loadPortSides(ctx, st)
 	clientPrefixRows := tc.loadClientPrefixes(ctx, st)
 	clientPortRows := tc.loadClientPorts(ctx, st)
+	ixVlans, ixMacs := tc.loadIxAccounting(ctx, st)
 	st.hasLocalConfig = l3Rows > 0
 	tc.state.Store(st)
 	tc.log.Info("traffic classifier refreshed",
 		"bgp_prefixes", bgpRows,
+		"bgp_reloaded", bgpReloaded,
 		"ip_asn_prefixes", ipASNRows,
 		"l3_prefixes", l3Rows,
 		"vlans", vlanRows,
@@ -314,6 +356,12 @@ func (tc *TrafficClassifier) refreshOnce(ctx context.Context) error {
 		"port_switches", portSwitches,
 		"client_prefixes", clientPrefixRows,
 		"client_ports", clientPortRows,
+		"ix", st.ix.enabled,
+		"ix_mac", st.ix.macOnPort,
+		"ix_scope", st.ix.scopeOnly,
+		"ix_vlans", ixVlans,
+		"ix_macs", ixMacs,
+		"ix_peer_macs", len(st.ix.peerMacs),
 		"direction_ports_classified", tc.portsClassified.Load(),
 		"direction_ports_no_ifindex", tc.portsNoIfIndex.Load(),
 		"direction_ports_unmarked", tc.portsUnmarked.Load(),
@@ -444,6 +492,82 @@ func (tc *TrafficClassifier) loadPortSides(ctx context.Context, st *classifierSt
 		tc.log.Warn("interface roles rows skipped", "table", table, "rows", skipped)
 	}
 	return len(switches)
+}
+
+// refreshBGP reloads prefix tries only when bgp_prefix_origin_current has a
+// new snapshot. The table is rebuilt every half hour, while the classifier
+// refresh keeps running every minute so clients, ports and VLANs stay fresh.
+// An unchanged snapshot reuses the previous tries.
+func (tc *TrafficClassifier) refreshBGP(ctx context.Context, st *classifierState) (int, bool, error) {
+	snap, rows, checked := tc.currentBGPSnapshot(ctx)
+	prev := tc.state.Load()
+	if reuseBGPSnapshot(prev, snap, rows, checked) {
+		st.bgp4 = prev.bgp4
+		st.bgp6 = prev.bgp6
+		st.bgpSnapshot = prev.bgpSnapshot
+		st.bgpTableRows = prev.bgpTableRows
+		st.bgpLoaded = prev.bgpLoaded
+		return prev.bgpLoaded, false, nil
+	}
+	n, err := tc.loadBGP(ctx, st)
+	if err != nil {
+		return n, true, err
+	}
+	st.bgpLoaded = n
+	if checked {
+		st.bgpSnapshot = snap
+		st.bgpTableRows = rows
+	}
+	return n, true, nil
+}
+
+// reuseBGPSnapshot is true when the in-memory tries already match the table.
+// A rebuild stamps snapshot_ts on every row, so the same maximum and row
+// count means the same prefix set. An empty table or an epoch stamp is never
+// reused: those are cheap to reread, and a default timestamp would hide a
+// table that has no real snapshot.
+func reuseBGPSnapshot(prev *classifierState, snap time.Time, rows uint64, checked bool) bool {
+	if !checked || prev == nil || rows == 0 || snap.Unix() <= 0 {
+		return false
+	}
+	return snap.Equal(prev.bgpSnapshot) && rows == prev.bgpTableRows
+}
+
+func (tc *TrafficClassifier) currentBGPSnapshot(ctx context.Context) (time.Time, uint64, bool) {
+	rows, err := tc.conn.Query(ctx, "SELECT max(snapshot_ts), count() FROM "+tc.cfg.Tables.BGPOrigins)
+	if err != nil {
+		tc.warnBGPSnapshot(err)
+		return time.Time{}, 0, false
+	}
+	defer rows.Close()
+	if !rows.Next() {
+		if err := rows.Err(); err != nil {
+			tc.warnBGPSnapshot(err)
+		}
+		return time.Time{}, 0, false
+	}
+	var snap time.Time
+	var n uint64
+	if err := rows.Scan(&snap, &n); err != nil {
+		tc.warnBGPSnapshot(err)
+		return time.Time{}, 0, false
+	}
+	if err := rows.Err(); err != nil {
+		tc.warnBGPSnapshot(err)
+		return time.Time{}, 0, false
+	}
+	return snap, n, true
+}
+
+func (tc *TrafficClassifier) warnBGPSnapshot(err error) {
+	if tc.bgpSnapshotWarned {
+		return
+	}
+	tc.bgpSnapshotWarned = true
+	tc.log.Warn("BGP snapshot check failed; reloading prefixes every refresh",
+		"table", tc.cfg.Tables.BGPOrigins,
+		"err", err,
+	)
 }
 
 func (tc *TrafficClassifier) loadBGP(ctx context.Context, st *classifierState) (int, error) {
@@ -648,6 +772,14 @@ func (st *classifierState) lookupClientPrefix(addr netip.Addr) string {
 
 // AttachClients sets src_client / dst_client on a flow row.
 // Prefix match wins; if empty, ingress ifIndex -> src, egress ifIndex -> dst.
+// With IX accounting on, a PiterIX client ignores the prefix and is tagged only
+// on an IX VLAN and an ERP port. The MAC checkbox further requires that the
+// frame MAC is listed for that port.
+// IX client columns (ix_src_client / ix_dst_client) are filled only when IX
+// accounting is on. They copy the port tag and, on that client's own switch,
+// name the other IX client by MAC. src_client and dst_client stay port-only,
+// so cabinet totals do not count the same traffic twice. IX accounting off
+// leaves the IX columns empty and does not change prefix or port tagging.
 func (tc *TrafficClassifier) AttachClients(r *FlowRow) {
 	if tc == nil || r == nil {
 		return
@@ -656,6 +788,8 @@ func (tc *TrafficClassifier) AttachClients(r *FlowRow) {
 	if st == nil {
 		return
 	}
+	r.IxSrcClient = ""
+	r.IxDstClient = ""
 	ipVersion := IPVersionFromEtype(r.Etype)
 	if srcAddr, ok := addrFromFlow(r.SrcAddr, ipVersion); ok {
 		if id := st.lookupClientPrefix(srcAddr); id != "" {
@@ -667,15 +801,379 @@ func (tc *TrafficClassifier) AttachClients(r *FlowRow) {
 			r.DstClient = id
 		}
 	}
+	if st.ix.enabled {
+		if _, ok := st.ix.clients[r.SrcClient]; ok {
+			r.SrcClient = ""
+		}
+		if _, ok := st.ix.clients[r.DstClient]; ok {
+			r.DstClient = ""
+		}
+	}
 	if r.SrcClient == "" && r.InIf != 0 {
-		if id, ok := st.clientPorts[portKey{sampler: r.SamplerAddress, ifIndex: r.InIf}]; ok {
+		if id := st.clientOnPort(r.SamplerAddress, r.InIf, r.SrcMAC, r); id != "" {
 			r.SrcClient = id
 		}
 	}
 	if r.DstClient == "" && r.OutIf != 0 {
-		if id, ok := st.clientPorts[portKey{sampler: r.SamplerAddress, ifIndex: r.OutIf}]; ok {
+		if id := st.clientOnPort(r.SamplerAddress, r.OutIf, r.DstMAC, r); id != "" {
 			r.DstClient = id
 		}
+	}
+	if !st.ix.enabled || !st.onIxVlan(r) {
+		return
+	}
+	if _, ok := st.ix.clients[r.SrcClient]; ok {
+		r.IxSrcClient = r.SrcClient
+	}
+	if _, ok := st.ix.clients[r.DstClient]; ok {
+		r.IxDstClient = r.DstClient
+	}
+	// Only the switch where one side is already this client's own port. The
+	// other sample of the same packet keeps the port tag in src_client /
+	// dst_client, and a transit switch matches neither side.
+	if r.IxDstClient != "" && r.IxSrcClient == "" && !st.ixClientPort(r.SamplerAddress, r.InIf) {
+		if id := st.ixPeerByMAC(r.SrcMAC); id != "" {
+			r.IxSrcClient = id
+		}
+	}
+	if r.IxSrcClient != "" && r.IxDstClient == "" && !st.ixClientPort(r.SamplerAddress, r.OutIf) {
+		if id := st.ixPeerByMAC(r.DstMAC); id != "" {
+			r.IxDstClient = id
+		}
+	}
+}
+
+// IxScopeStats counts flows dropped because they were outside the IX VLANs.
+type IxScopeStats struct {
+	Rows    uint64
+	Packets uint64
+	Bytes   uint64
+}
+
+// IxScopeStats returns drops since process start.
+func (tc *TrafficClassifier) IxScopeStats() IxScopeStats {
+	if tc == nil {
+		return IxScopeStats{}
+	}
+	return IxScopeStats{
+		Rows:    tc.ixScopeRows.Load(),
+		Packets: tc.ixScopePackets.Load(),
+		Bytes:   tc.ixScopeBytes.Load(),
+	}
+}
+
+// FilterIxScope drops rows that are not on an IX VLAN when that mode is on.
+// An empty VLAN list or a missing setting keeps every row: a bad config must
+// not stop ingest. The input backing array is reused.
+func (tc *TrafficClassifier) FilterIxScope(rows []FlowRow) []FlowRow {
+	if tc == nil || len(rows) == 0 {
+		return rows
+	}
+	st := tc.state.Load()
+	if st == nil || !st.ix.scopeOnly || len(st.ix.vlans) == 0 {
+		return rows
+	}
+	kept := rows[:0]
+	for i := range rows {
+		if st.onIxVlan(&rows[i]) {
+			kept = append(kept, rows[i])
+			continue
+		}
+		tc.ixScopeRows.Add(1)
+		tc.ixScopePackets.Add(rows[i].Packets)
+		tc.ixScopeBytes.Add(rows[i].Bytes)
+	}
+	return kept
+}
+
+func (st *classifierState) onIxVlan(r *FlowRow) bool {
+	if _, ok := st.ix.vlans[r.SrcVLAN]; ok {
+		return true
+	}
+	_, ok := st.ix.vlans[r.DstVLAN]
+	return ok
+}
+
+func (st *classifierState) clientOnPort(sampler [16]byte, ifIndex uint32, mac [6]byte, r *FlowRow) string {
+	id, ok := st.clientPorts[portKey{sampler: sampler, ifIndex: ifIndex}]
+	if !ok || id == "" {
+		return ""
+	}
+	if !st.ix.enabled {
+		return id
+	}
+	if _, ixClient := st.ix.clients[id]; !ixClient {
+		return id
+	}
+	if !st.onIxVlan(r) {
+		return ""
+	}
+	if !st.ix.macOnPort {
+		return id
+	}
+	bound, ok := st.ix.portMacs[portMacKey{sampler: sampler, ifIndex: ifIndex, mac: mac}]
+	if !ok || bound != id {
+		return ""
+	}
+	return id
+}
+
+func (st *classifierState) ixClientPort(sampler [16]byte, ifIndex uint32) bool {
+	if st == nil || ifIndex == 0 {
+		return false
+	}
+	id, ok := st.clientPorts[portKey{sampler: sampler, ifIndex: ifIndex}]
+	if !ok || id == "" {
+		return false
+	}
+	_, ixClient := st.ix.clients[id]
+	return ixClient
+}
+
+func (st *classifierState) ixPeerByMAC(mac [6]byte) string {
+	if st == nil || mac == ([6]byte{}) {
+		return ""
+	}
+	return st.ix.peerMacs[mac]
+}
+
+type ixMacBinding struct {
+	clientID string
+	sampler  [16]byte
+	ifIndex  uint32
+	mac      [6]byte
+}
+
+// indexIxMacs builds the port filter and the peer directory. The port filter
+// is filled only when the MAC checkbox is on. The peer directory keeps a MAC
+// only when every binding names the same IX client; a shared MAC is omitted
+// so it is never credited to either client.
+func indexIxMacs(macOnPort bool, ixClients map[string]struct{}, rows []ixMacBinding) (map[portMacKey]string, map[[6]byte]string) {
+	portMacs := map[portMacKey]string{}
+	owners := map[[6]byte]string{}
+	conflict := map[[6]byte]struct{}{}
+	var zero [6]byte
+	for _, row := range rows {
+		if row.clientID == "" || row.ifIndex == 0 {
+			continue
+		}
+		if macOnPort {
+			portMacs[portMacKey{sampler: row.sampler, ifIndex: row.ifIndex, mac: row.mac}] = row.clientID
+		}
+		if row.mac == zero {
+			continue
+		}
+		prev, seen := owners[row.mac]
+		if !seen {
+			owners[row.mac] = row.clientID
+			continue
+		}
+		if prev != row.clientID {
+			conflict[row.mac] = struct{}{}
+		}
+	}
+	peer := map[[6]byte]string{}
+	for mac, clientID := range owners {
+		if _, shared := conflict[mac]; shared {
+			continue
+		}
+		if _, ixClient := ixClients[clientID]; !ixClient {
+			continue
+		}
+		peer[mac] = clientID
+	}
+	return portMacs, peer
+}
+
+func parseMacHex(value string) ([6]byte, bool) {
+	var out [6]byte
+	hexOnly := strings.Builder{}
+	hexOnly.Grow(12)
+	for _, r := range strings.ToLower(value) {
+		if (r >= '0' && r <= '9') || (r >= 'a' && r <= 'f') {
+			hexOnly.WriteRune(r)
+		}
+	}
+	raw := hexOnly.String()
+	if len(raw) != 12 {
+		return out, false
+	}
+	for i := 0; i < 6; i++ {
+		n, err := strconv.ParseUint(raw[i*2:i*2+2], 16, 8)
+		if err != nil {
+			return [6]byte{}, false
+		}
+		out[i] = byte(n)
+	}
+	return out, true
+}
+
+// loadIxAccounting reads the ERP flags. Any error leaves IX off, so an
+// installation without these columns keeps the previous client tagging.
+func (tc *TrafficClassifier) loadIxAccounting(ctx context.Context, st *classifierState) (vlans, macs int) {
+	var enabled, macOn, scopeOnly uint8
+	err := tc.conn.QueryRow(ctx, `
+		SELECT ix_enabled, ix_mac_on_port, ix_scope_only
+		FROM default.app_erp_sync_settings
+		WHERE settings_id = 'global'
+		ORDER BY updated_at DESC
+		LIMIT 1
+	`).Scan(&enabled, &macOn, &scopeOnly)
+	if err != nil {
+		// A collector newer than the settings table must keep tagging and
+		// accept every flow until the column exists.
+		errOld := tc.conn.QueryRow(ctx, `
+			SELECT ix_enabled, ix_mac_on_port
+			FROM default.app_erp_sync_settings
+			WHERE settings_id = 'global'
+			ORDER BY updated_at DESC
+			LIMIT 1
+		`).Scan(&enabled, &macOn)
+		if errOld != nil {
+			tc.warnIxOnce("ix accounting left off", err)
+			return 0, 0
+		}
+		scopeOnly = 0
+		if !tc.ixScopeWarned && tc.log != nil {
+			tc.ixScopeWarned = true
+			tc.log.Warn("ix scope column missing; accepting all traffic", "err", err)
+		}
+	}
+	if enabled == 0 {
+		tc.ixLoadWarned = false
+		return 0, 0
+	}
+	st.ix = ixConfig{
+		enabled:   true,
+		macOnPort: macOn == 1,
+		vlans:     map[uint16]struct{}{},
+		clients:   map[string]struct{}{},
+		portMacs:  map[portMacKey]string{},
+		peerMacs:  map[[6]byte]string{},
+	}
+	vlanRows, err := tc.conn.Query(ctx, `
+		SELECT vlan_id FROM default.net_l2_vlans_enabled WHERE ix = 1
+	`)
+	if err != nil {
+		st.ix = ixConfig{}
+		tc.warnIxOnce("ix vlans", err)
+		return 0, 0
+	}
+	for vlanRows.Next() {
+		var id uint16
+		if err := vlanRows.Scan(&id); err != nil {
+			_ = vlanRows.Close()
+			st.ix = ixConfig{}
+			tc.warnIxOnce("ix vlans", err)
+			return 0, 0
+		}
+		if id != 0 {
+			st.ix.vlans[id] = struct{}{}
+			vlans++
+		}
+	}
+	if err := vlanRows.Err(); err != nil {
+		_ = vlanRows.Close()
+		st.ix = ixConfig{}
+		tc.warnIxOnce("ix vlans", err)
+		return 0, 0
+	}
+	_ = vlanRows.Close()
+	st.ix.scopeOnly = scopeOnly == 1 && len(st.ix.vlans) > 0
+	clientRows, err := tc.conn.Query(ctx, `
+		SELECT client_id FROM default.net_clients_enabled WHERE comment = 'erp:piter_ix'
+	`)
+	if err != nil {
+		st.ix = ixConfig{}
+		tc.warnIxOnce("ix clients", err)
+		return 0, 0
+	}
+	for clientRows.Next() {
+		var id string
+		if err := clientRows.Scan(&id); err != nil {
+			_ = clientRows.Close()
+			st.ix = ixConfig{}
+			tc.warnIxOnce("ix clients", err)
+			return 0, 0
+		}
+		id = strings.TrimSpace(id)
+		if id != "" {
+			st.ix.clients[id] = struct{}{}
+		}
+	}
+	if err := clientRows.Err(); err != nil {
+		_ = clientRows.Close()
+		st.ix = ixConfig{}
+		tc.warnIxOnce("ix clients", err)
+		return 0, 0
+	}
+	_ = clientRows.Close()
+	// The peer directory is loaded whenever IX accounting is on. A missing
+	// table must not turn IX off while the MAC checkbox is off: port tagging
+	// stays, and the empty side simply stays empty. The checkbox still fails
+	// closed, because skipping its check would credit every MAC on the port.
+	macRows, err := tc.conn.Query(ctx, `
+		SELECT client_id, switch_ip, if_index, mac FROM default.net_client_port_macs_enabled
+	`)
+	failMacs := func(loadErr error) (int, int) {
+		if st.ix.macOnPort {
+			st.ix = ixConfig{}
+			tc.warnIxOnce("ix macs", loadErr)
+			return 0, 0
+		}
+		tc.warnIxPeerOnce(loadErr)
+		tc.ixLoadWarned = false
+		return vlans, 0
+	}
+	if err != nil {
+		return failMacs(err)
+	}
+	defer macRows.Close()
+	var bindings []ixMacBinding
+	for macRows.Next() {
+		var clientID, switchIP, macText string
+		var ifIndex uint32
+		if err := macRows.Scan(&clientID, &switchIP, &ifIndex, &macText); err != nil {
+			return failMacs(err)
+		}
+		sampler, parseErr := ParseSamplerAddress(switchIP)
+		mac, ok := parseMacHex(macText)
+		clientID = strings.TrimSpace(clientID)
+		if parseErr != nil || !ok || clientID == "" || ifIndex == 0 {
+			continue
+		}
+		bindings = append(bindings, ixMacBinding{
+			clientID: clientID,
+			sampler:  sampler,
+			ifIndex:  ifIndex,
+			mac:      mac,
+		})
+	}
+	if err := macRows.Err(); err != nil {
+		return failMacs(err)
+	}
+	st.ix.portMacs, st.ix.peerMacs = indexIxMacs(st.ix.macOnPort, st.ix.clients, bindings)
+	tc.ixLoadWarned = false
+	return vlans, len(st.ix.portMacs)
+}
+
+func (tc *TrafficClassifier) warnIxPeerOnce(err error) {
+	if tc == nil || err == nil || tc.ixPeerWarned {
+		return
+	}
+	tc.ixPeerWarned = true
+	if tc.log != nil {
+		tc.log.Warn("ix peer macs unavailable; port tagging unchanged", "err", err)
+	}
+}
+
+func (tc *TrafficClassifier) warnIxOnce(msg string, err error) {
+	if tc == nil || err == nil || tc.ixLoadWarned {
+		return
+	}
+	tc.ixLoadWarned = true
+	if tc.log != nil {
+		tc.log.Warn(msg, "err", err)
 	}
 }
 

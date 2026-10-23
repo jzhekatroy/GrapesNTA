@@ -44,8 +44,19 @@ ENRICH_DIR="${REPO_ROOT}/deploy/enrichment"
 UI_DIR="${REPO_ROOT}/deploy/ui"
 DETECTION_DIR="${REPO_ROOT}/deploy/detection"
 UI_APP_DIR="${UI_DIR}/app"
-UI_DATA_DIR="${UI_DATA_DIR:-/opt/grapes/ui/data}"
 UI_LEGACY_ENV="${UI_LEGACY_ENV:-/opt/grapes/ui/.env}"
+
+# Каталог данных UI: deploy/ui/.env (для docker volume) и запись component-versions.tsv
+# должны совпадать, иначе страница «Версии» видит только ui из процесса.
+ui_data_dir_from_env_file() {
+  [[ -f "${UI_DIR}/.env" ]] || return 1
+  grep -E '^UI_DATA_DIR=' "${UI_DIR}/.env" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d '\r' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//;s/^["'\''"]//;s/["'\''"]$//'
+}
+
+if [[ -z "${UI_DATA_DIR:-}" ]]; then
+  UI_DATA_DIR="$(ui_data_dir_from_env_file || true)"
+fi
+UI_DATA_DIR="${UI_DATA_DIR:-/opt/grapes/ui/data}"
 VERSIONS_FILE="${UI_DATA_DIR}/component-versions.tsv"
 
 DO_PULL=1

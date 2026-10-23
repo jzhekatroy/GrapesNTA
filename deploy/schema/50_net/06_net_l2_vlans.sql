@@ -6,6 +6,8 @@ CREATE TABLE IF NOT EXISTS default.net_l2_vlans
     `boundary` LowCardinality(String) DEFAULT 'unknown',
     `display_name` String DEFAULT '',
     `comment` String DEFAULT '',
+    `ix` UInt8 DEFAULT 0,
+    `ix_location` String DEFAULT '',
     `enabled` UInt8,
     `source` LowCardinality(String) DEFAULT 'manual',
     `updated_at` DateTime DEFAULT now()

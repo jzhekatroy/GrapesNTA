@@ -572,7 +572,7 @@ function PageFlowExclusions({ embedded = false, refreshKey: parentRefreshKey = 0
 
       {loading ? (
         <Card pad="sm">
-          <div style={{ padding: 32, textAlign: 'center', color: 'var(--fg-secondary)' }}>Загрузка…</div>
+          <div style={{ padding: 32, textAlign: 'center', color: 'var(--fg-secondary)' }}>{collectorsT('collectorsPage.exclusion.loading')}</div>
         </Card>
       ) : loadError ? (
         <Empty icon="db" title={collectorsT('collectorsPage.empty.loadFailed')} desc={loadError} action={<Button kind="primary" icon="refresh" onClick={reload}>{collectorsT('collectorsPage.retry')}</Button>} />

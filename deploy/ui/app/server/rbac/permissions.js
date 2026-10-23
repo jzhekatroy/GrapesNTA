@@ -13,6 +13,49 @@ const { latestRolesCte, latestRolePermissionsCte } = require('./bootstrap');
 const OVERRIDE_MODES = new Set(['INHERIT', 'ALLOW', 'DENY']);
 const DEFAULT_ROLE_ID = 'Administrator';
 const DEFAULT_NEW_USER_ROLE_ID = 'Operator';
+const DEFAULT_START_PAGE = 'dashboard';
+
+function normalizeStartPage(pageId) {
+  const id = String(pageId ?? '').trim();
+  if (!id) return DEFAULT_START_PAGE;
+  const valid = new Set(pageIds());
+  return valid.has(id) ? id : DEFAULT_START_PAGE;
+}
+
+function resolveRoleStartPage(startPage, permissions) {
+  const normalized = normalizeStartPage(startPage);
+  if (normalized === DEFAULT_START_PAGE) return DEFAULT_START_PAGE;
+  if (permissions && typeof permissions === 'object' && permissions[normalized] === false) {
+    return DEFAULT_START_PAGE;
+  }
+  return normalized;
+}
+
+function mapRoleRow(row) {
+  return {
+    id: String(row.id),
+    name: String(row.name),
+    displayName: String(row.display_name ?? row.name),
+    startPage: normalizeStartPage(row.start_page),
+    attackAlert: Number(row.attack_alert ?? 0) === 1,
+    createdAt: row.created_at ?? null,
+    updatedAt: row.updated_at ?? null,
+  };
+}
+
+function roleInsertRow(existing, { displayName, startPage, attackAlert, now }) {
+  return {
+    id: existing.id,
+    name: existing.name,
+    display_name: displayName !== undefined ? displayName : existing.displayName,
+    start_page: startPage !== undefined ? startPage : existing.startPage,
+    attack_alert: attackAlert !== undefined
+      ? (attackAlert ? 1 : 0)
+      : (existing.attackAlert ? 1 : 0),
+    created_at: existing.createdAt,
+    updated_at: now,
+  };
+}
 
 function latestUserPermissionsCte() {
   return `
@@ -89,7 +132,7 @@ async function loadRole(roleId) {
   const { rows } = await query(
     `
       WITH ${latestRolesCte()}
-      SELECT id, name, display_name, created_at, updated_at
+      SELECT id, name, display_name, start_page, attack_alert, created_at, updated_at
       FROM latest
       WHERE rn = 1 AND id = {roleId:String}
       LIMIT 1
@@ -98,14 +141,7 @@ async function loadRole(roleId) {
     { name: 'rbac/load-role' },
   );
   if (!rows[0]) return null;
-  const row = rows[0];
-  return {
-    id: String(row.id),
-    name: String(row.name),
-    displayName: String(row.display_name ?? row.name),
-    createdAt: row.created_at ?? null,
-    updatedAt: row.updated_at ?? null,
-  };
+  return mapRoleRow(rows[0]);
 }
 
 async function buildEffectivePermissions(user) {
@@ -134,12 +170,19 @@ async function buildEffectiveWritePermissions(user) {
   return effective;
 }
 
+function isAdministratorUser(user) {
+  const roleId = String(user?.roleId || '').trim();
+  return roleId === DEFAULT_ROLE_ID || roleId.toLowerCase() === 'administrator' || roleId === 'admin';
+}
+
 async function canAccess(user, resource) {
+  if (isAdministratorUser(user)) return true;
   const effective = await buildEffectivePermissions(user);
   return !!effective[resource];
 }
 
 async function canWrite(user, resource) {
+  if (isAdministratorUser(user)) return true;
   const effective = await buildEffectiveWritePermissions(user);
   return !!effective[resource];
 }
@@ -205,7 +248,7 @@ async function listRoles() {
   const { rows, elapsedMs } = await query(
     `
       WITH ${latestRolesCte()}
-      SELECT id, name, display_name, created_at, updated_at
+      SELECT id, name, display_name, start_page, attack_alert, created_at, updated_at
       FROM latest
       WHERE rn = 1
       ORDER BY name
@@ -214,13 +257,7 @@ async function listRoles() {
     { name: 'rbac/list-roles' },
   );
   return {
-    data: rows.map((row) => ({
-      id: String(row.id),
-      name: String(row.name),
-      displayName: String(row.display_name ?? row.name),
-      createdAt: row.created_at ?? null,
-      updatedAt: row.updated_at ?? null,
-    })),
+    data: rows.map((row) => mapRoleRow(row)),
     meta: { elapsedMs, rows: rows.length },
   };
 }
@@ -291,6 +328,8 @@ async function createRole({ name, displayName }) {
     id: roleName,
     name: roleName,
     display_name: roleDisplayName,
+    start_page: DEFAULT_START_PAGE,
+    attack_alert: 0,
     created_at: now,
     updated_at: now,
   };
@@ -309,7 +348,7 @@ async function createRole({ name, displayName }) {
 }
 
 async function updateRole(roleId, {
-  displayName, permissions, writePermissions, observationSections,
+  displayName, startPage, attackAlert, permissions, writePermissions, observationSections,
 }) {
   const existing = await loadRole(roleId);
   if (!existing) {
@@ -319,31 +358,55 @@ async function updateRole(roleId, {
   }
 
   const now = clickhouseDateTime();
-  if (displayName !== undefined) {
-    const nextDisplayName = String(displayName).trim();
-    if (!nextDisplayName) {
-      const err = new Error('Укажите отображаемое имя роли');
-      err.statusCode = 400;
-      throw err;
-    }
-    await insertRows(config.rolesTable, [{
-      id: existing.id,
-      name: existing.name,
-      display_name: nextDisplayName,
-      created_at: existing.createdAt,
-      updated_at: now,
-    }], { name: 'rbac/update-role' });
-  }
-
   const hasAccessUpdates = permissions && typeof permissions === 'object';
   const hasWriteUpdates = writePermissions && typeof writePermissions === 'object';
+  const current = await loadRolePermissions(existing.id);
+  const effectivePermissions = {};
+  for (const resource of pageIds()) {
+    const prev = current[resource] || { access: false, write: false };
+    effectivePermissions[resource] = hasAccessUpdates && permissions[resource] !== undefined
+      ? !!permissions[resource]
+      : prev.access;
+  }
+
+  const nextDisplayName = displayName !== undefined
+    ? String(displayName).trim()
+    : existing.displayName;
+  if (displayName !== undefined && !nextDisplayName) {
+    const err = new Error('Укажите отображаемое имя роли');
+    err.statusCode = 400;
+    throw err;
+  }
+
+  const nextStartPage = startPage !== undefined
+    ? resolveRoleStartPage(startPage, effectivePermissions)
+    : resolveRoleStartPage(existing.startPage, effectivePermissions);
+
+  const nextAttackAlert = attackAlert !== undefined ? !!attackAlert : existing.attackAlert;
+  const roleMetaChanged = displayName !== undefined
+    || startPage !== undefined
+    || attackAlert !== undefined;
+  if (roleMetaChanged) {
+    await insertRows(config.rolesTable, [roleInsertRow(existing, {
+      displayName: nextDisplayName,
+      startPage: nextStartPage,
+      attackAlert: nextAttackAlert,
+      now,
+    })], { name: 'rbac/update-role' });
+  } else if (hasAccessUpdates || hasWriteUpdates) {
+    const storedStart = resolveRoleStartPage(existing.startPage, effectivePermissions);
+    if (storedStart !== existing.startPage) {
+      await insertRows(config.rolesTable, [roleInsertRow(existing, {
+        startPage: storedStart,
+        now,
+      })], { name: 'rbac/update-role-start-page' });
+    }
+  }
+
   if (hasAccessUpdates || hasWriteUpdates) {
-    const current = await loadRolePermissions(existing.id);
     const permRows = pageIds().map((resource) => {
       const prev = current[resource] || { access: false, write: false };
-      const access = hasAccessUpdates && permissions[resource] !== undefined
-        ? !!permissions[resource]
-        : prev.access;
+      const access = effectivePermissions[resource];
       const write = hasWriteUpdates && writePermissions[resource] !== undefined
         ? !!writePermissions[resource]
         : prev.write;
@@ -462,6 +525,11 @@ async function assignUserRole(userId, roleId) {
 module.exports = {
   DEFAULT_ROLE_ID,
   DEFAULT_NEW_USER_ROLE_ID,
+  DEFAULT_START_PAGE,
+  mapRoleRow,
+  roleInsertRow,
+  normalizeStartPage,
+  resolveRoleStartPage,
   OVERRIDE_MODES,
   resolvePageAccess,
   resolvePageWrite,

@@ -9,13 +9,14 @@ const CLIENT_API_ALLOWLIST = [
   /^\/api\/auth\/logout$/,
   /^\/api\/auth\/locale$/,
   /^\/api\/auth\/stop-impersonation$/,
+  /^\/api\/attack-alerts$/,
   /^\/api\/audit\/page$/,
   /^\/api\/cabinet(\/|$)/,
   /^\/api\/users\/[^/]+\/password$/,
 ];
 
 /** Page resources the Client role may see in the future UI menu. */
-const CLIENT_PAGE_RESOURCES = new Set(['dashboard', 'explorer', 'dns', 'cabinet-settings']);
+const CLIENT_PAGE_RESOURCES = new Set(['dashboard', 'explorer', 'observations', 'dns', 'cabinet-settings']);
 
 module.exports = {
   CLIENT_ROLE_ID,

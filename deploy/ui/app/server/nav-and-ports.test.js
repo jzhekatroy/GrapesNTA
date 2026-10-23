@@ -120,6 +120,7 @@ test('api-map maps direction diagnostics before generic diagnostics', () => {
 });
 
 test('api-map maps monitoring endpoints', () => {
+  assert.equal(getResourceForPath('/api/attack-alerts'), null);
   assert.equal(getResourceForPath('/api/monitoring/attacks'), 'monitoring');
   assert.equal(getResourceForPath('/api/monitoring/problems'), 'monitoring');
   assert.equal(getResourceForPath('/api/monitoring/attacks/foo%7Cbar/history'), 'monitoring');

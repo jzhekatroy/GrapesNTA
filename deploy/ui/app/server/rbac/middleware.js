@@ -5,7 +5,12 @@ const {
   isMutatingRequest,
   isDashboardLayoutPath,
   isObservationsBoardLayoutPath,
+  isStaffClientObservationsPath,
 } = require('./api-map');
+const {
+  canStaffMutateClientObservations,
+  canStaffViewClientObservations,
+} = require('../cabinet/staff-observations-access');
 
 async function checkResourceAccess(req, res, resource) {
   const mutating = isMutatingRequest(req.path, req.method);
@@ -47,6 +52,20 @@ async function apiResourceGuard(req, res, next) {
     if (!req.user) {
       res.status(401).json({ error: 'Требуется авторизация' });
       return;
+    }
+
+    if (isStaffClientObservationsPath(req.path)) {
+      const mutating = isMutatingRequest(req.path, req.method);
+      const allowed = mutating
+        ? await canStaffMutateClientObservations(req.user)
+        : await canStaffViewClientObservations(req.user);
+      if (!allowed) {
+        res.status(403).json({
+          error: mutating ? 'Недостаточно прав для изменения данных' : 'Недостаточно прав',
+        });
+        return;
+      }
+      return next();
     }
 
     if (!(await checkResourceAccess(req, res, resource))) return;

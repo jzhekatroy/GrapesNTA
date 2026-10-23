@@ -33,6 +33,13 @@ func (p *sflowParser) parse(d udpDatagram) []flowingest.FlowRow {
 	return parseSFlowV5(d.b, d.receivedAt, p.sourceID, p.classifier, nil, &p.metrics, p.ingress)
 }
 
+func (p *sflowParser) FilterIxScope(rows []flowingest.FlowRow) []flowingest.FlowRow {
+	if p == nil || p.classifier == nil {
+		return rows
+	}
+	return p.classifier.FilterIxScope(rows)
+}
+
 func (p *sflowParser) logMetrics(log *slog.Logger) {
 	if p == nil {
 		return

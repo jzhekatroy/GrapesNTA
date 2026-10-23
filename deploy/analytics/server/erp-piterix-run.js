@@ -20,12 +20,17 @@ const {
   CATEGORY,
   CATEGORIES,
   sourceTagFor,
+  filterClientsByPiterIxGroups,
   classifyClients,
   clickhouseDateTime,
   portComment,
   clientsToDisable,
   portsToDisable,
   prefixesToDisable,
+  portMacsToDisable,
+  collectIxPortMacs,
+  clientsWithoutPortMac,
+  classifyObservedPortMacs,
   normalizeBindMode,
   summarizeSkipped,
 } = require('./erp-piterix-sync');
@@ -126,6 +131,40 @@ const ENSURE_SQL = [
   TTL started_at + toIntervalDay(90)`,
   // CREATE IF NOT EXISTS не добавляет колонку в уже живую таблицу.
   `ALTER TABLE default.${REPORT_TABLE} ADD COLUMN IF NOT EXISTS macs String DEFAULT '' AFTER services`,
+  `CREATE TABLE IF NOT EXISTS default.net_client_port_macs
+  (
+    client_id LowCardinality(String),
+    switch_ip String,
+    if_index UInt32,
+    mac String,
+    enabled UInt8,
+    updated_at DateTime DEFAULT now()
+  )
+  ENGINE = ReplacingMergeTree(updated_at)
+  ORDER BY (switch_ip, if_index, mac)`,
+  `CREATE OR REPLACE VIEW default.net_client_port_macs_enabled AS
+  SELECT
+    client_id,
+    switch_ip,
+    if_index,
+    mac,
+    updated_at_latest AS updated_at
+  FROM
+  (
+    SELECT
+      switch_ip,
+      if_index,
+      mac,
+      argMax(client_id, updated_at) AS client_id,
+      argMax(enabled, updated_at) AS enabled_latest,
+      max(updated_at) AS updated_at_latest
+    FROM default.net_client_port_macs
+    GROUP BY switch_ip, if_index, mac
+  )
+  WHERE enabled_latest = 1
+    AND client_id IN (
+      SELECT client_id FROM default.net_clients_enabled WHERE bind_mode = 'ports'
+    )`,
 ];
 
 const FIELD_MAP = [
@@ -317,6 +356,97 @@ async function loadOwnPrefixes(db) {
   }
 }
 
+async function loadIxTrafficMacs(db) {
+  return db.query(`
+    SELECT switch_ip, if_index, mac, sum(bytes) AS bytes
+    FROM
+    (
+      SELECT
+        IPv4NumToString(reinterpretAsUInt32(reverse(substring(sampler_address, 1, 4)))) AS switch_ip,
+        in_if AS if_index,
+        lower(hex(src_mac)) AS mac,
+        bytes
+      FROM default.flows_raw
+      WHERE time_received_ns >= now() - INTERVAL 1 HOUR
+        AND date >= today() - 1
+        AND in_if != 0
+        AND src_vlan IN (SELECT vlan_id FROM default.net_l2_vlans_enabled WHERE ix = 1)
+        AND src_mac != toFixedString(unhex('000000000000'), 6)
+      UNION ALL
+      SELECT
+        IPv4NumToString(reinterpretAsUInt32(reverse(substring(sampler_address, 1, 4)))) AS switch_ip,
+        out_if AS if_index,
+        lower(hex(dst_mac)) AS mac,
+        bytes
+      FROM default.flows_raw
+      WHERE time_received_ns >= now() - INTERVAL 1 HOUR
+        AND date >= today() - 1
+        AND out_if != 0
+        AND dst_vlan IN (SELECT vlan_id FROM default.net_l2_vlans_enabled WHERE ix = 1)
+        AND dst_mac != toFixedString(unhex('000000000000'), 6)
+    )
+    GROUP BY switch_ip, if_index, mac
+    HAVING bytes >= 1000000
+    ORDER BY bytes DESC
+    LIMIT 5000
+    SETTINGS max_execution_time = 25
+  `);
+}
+
+async function syncIxPortMacs(db, { clients, classified, sourceTag, now, full }) {
+  if (sourceTag !== SOURCE_TAG || classified.bindMode !== 'ports') return null;
+  const settings = await getSettings(db);
+  const accepted = new Set();
+  const portOwners = new Map();
+  for (const client of classified.labelable) {
+    for (const port of client.ports || []) {
+      accepted.add(`${client.clientId}|${port.switchIp}|${port.ifIndex}`);
+      portOwners.set(`${port.switchIp}|${port.ifIndex}`, client.clientId);
+    }
+  }
+  const planned = collectIxPortMacs(clients, accepted);
+  const macRows = planned.bindings.map((row) => ({ ...row, enabled: 1, updated_at: now }));
+  if (full) {
+    const current = await db.query(`
+      SELECT p.client_id, p.switch_ip, p.if_index, p.mac
+      FROM default.net_client_port_macs_enabled AS p
+      INNER JOIN default.net_clients_enabled AS c ON c.client_id = p.client_id
+      WHERE c.comment = {tag:String}
+    `, { tag: sourceTag });
+    for (const row of portMacsToDisable(current, macRows)) {
+      macRows.push({ ...row, enabled: 0, updated_at: now });
+    }
+  }
+  if (macRows.length) await db.insert('net_client_port_macs', macRows);
+  const ix = {
+    macOnPort: Boolean(settings.ixEnabled && settings.ixMacOnPort),
+    noMac: [],
+    ambiguous: planned.ambiguous,
+    foreign: [],
+    unlisted: [],
+    note: '',
+  };
+  if (settings.ixEnabled && settings.ixMacOnPort) {
+    ix.noMac = clientsWithoutPortMac(classified.labelable, planned.bindings);
+    try {
+      const vlans = await db.query(`
+        SELECT count() AS n FROM default.net_l2_vlans_enabled WHERE ix = 1
+      `);
+      if (!Number(vlans[0]?.n)) {
+        ix.note = 'учёт IX включён, но ни один VLAN не отмечен как IX';
+      } else {
+        const observed = await loadIxTrafficMacs(db);
+        const seen = classifyObservedPortMacs(observed, planned.bindings, portOwners);
+        ix.foreign = seen.foreign;
+        ix.unlisted = seen.unlisted;
+      }
+    } catch (err) {
+      ix.note = `не удалось снять MAC из трафика: ${String(err.message || err).slice(0, 180)}`;
+    }
+  }
+  return ix;
+}
+
 async function applySync(db, {
   clients,
   full = false,
@@ -440,6 +570,14 @@ async function applySync(db, {
     await refreshEffectiveRolesAfterClientPorts();
   }
 
+  const ix = await syncIxPortMacs(db, {
+    clients,
+    classified,
+    sourceTag,
+    now,
+    full,
+  });
+
   const reportRows = buildReportRows({
     clients,
     catalog,
@@ -448,6 +586,7 @@ async function applySync(db, {
     goneNames: names,
     category,
     bindMode: mode,
+    ix,
   });
 
   return {
@@ -552,13 +691,17 @@ async function runSync(db, options = {}) {
     const parts = [];
     const reportRows = [];
     for (const category of categories) {
-      const clients = options.clients && categories.length === 1
+      let clients = options.clients && categories.length === 1
         ? options.clients
         : await fetchErpClients(db, {
           category,
           full: !!options.full,
           fetchCap: options.full ? 0 : Math.max(Number(options.limit) || 50, 2) * 20,
         });
+      if (category === CATEGORY) {
+        const selected = ['710', '726'].filter((id) => settings.piterIxGroups?.[id]);
+        clients = filterClientsByPiterIxGroups(clients, selected);
+      }
       // Report rows stay out of the part summary: it is serialised into the API
       // response and the journal, and a full run carries tens of thousands.
       const { reportRows: partRows = [], ...part } = await applySync(db, {

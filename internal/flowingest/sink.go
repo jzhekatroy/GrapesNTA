@@ -28,15 +28,15 @@ type Sink struct {
 
 	ch chan []FlowRow
 
-	recordsQueued  atomic.Uint64
-	recordsWritten atomic.Uint64
+	recordsQueued      atomic.Uint64
+	recordsWritten     atomic.Uint64
 	flowPacketsQueued  atomic.Uint64
 	flowBytesQueued    atomic.Uint64
 	flowPacketsWritten atomic.Uint64
 	flowBytesWritten   atomic.Uint64
-	batchesOK      atomic.Uint64
-	insertErrs     atomic.Uint64
-	queueDrops     atomic.Uint64
+	batchesOK          atomic.Uint64
+	insertErrs         atomic.Uint64
+	queueDrops         atomic.Uint64
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -295,7 +295,7 @@ func insertEnrichedBatchRows(ctx context.Context, log *slog.Logger, conn chdrive
     src_entity,
     dst_entity,
     src_client,
-    dst_client,
+    dst_client,%s
     src_vlan,
     dst_vlan,
     etype,
@@ -314,7 +314,15 @@ func insertEnrichedBatchRows(ctx context.Context, log *slog.Logger, conn chdrive
     ip_tos
 )`
 
-	q := fmt.Sprintf(stmt, table)
+	// IX columns go into the statement only when the batch carries an IX tag.
+	// With IX accounting off the column list is the same as before, so an
+	// installation that has not yet applied the IX schema keeps writing.
+	withIx := RowsHaveIxClients(rows)
+	ixCols := ""
+	if withIx {
+		ixCols = "\n    ix_src_client,\n    ix_dst_client,"
+	}
+	q := fmt.Sprintf(stmt, table, ixCols)
 	batch, err := conn.PrepareBatch(ctx, q)
 	if err != nil {
 		insertErrs.Add(1)
@@ -322,70 +330,12 @@ func insertEnrichedBatchRows(ctx context.Context, log *slog.Logger, conn chdrive
 		return false
 	}
 
+	args := make([]any, 0, 64)
 	for i := range rows {
 		r := &rows[i]
 		ApplyInsertDefaults(r)
-		err := batch.Append(
-			r.Date,
-			r.TimeInsertedNs,
-			r.TimeReceivedNs,
-			r.TimeFlowStartNs,
-			r.SequenceNum,
-			r.SamplingRate,
-			r.SamplerAddress[:],
-			r.SrcAddr[:],
-			r.DstAddr[:],
-			r.SrcASN,
-			r.DstASN,
-			r.SrcASPath,
-			r.DstASPath,
-			r.Direction,
-			r.SrcKind,
-			r.DstKind,
-			r.SrcLabel,
-			r.DstLabel,
-			r.SrcOperator,
-			r.DstOperator,
-			r.SrcAttachmentKind,
-			r.DstAttachmentKind,
-			r.SrcAttachmentBoundary,
-			r.DstAttachmentBoundary,
-			r.SrcAttachmentLabel,
-			r.DstAttachmentLabel,
-			r.SrcAttachmentOperator,
-			r.DstAttachmentOperator,
-			r.SrcEndpointScope,
-			r.DstEndpointScope,
-			r.SrcEndpointSource,
-			r.DstEndpointSource,
-			r.SrcNetworkName,
-			r.DstNetworkName,
-			r.SrcNetworkRole,
-			r.DstNetworkRole,
-			r.SrcRole,
-			r.DstRole,
-			r.SrcEntity,
-			r.DstEntity,
-			r.SrcClient,
-			r.DstClient,
-			r.SrcVLAN,
-			r.DstVLAN,
-			r.Etype,
-			r.Proto,
-			r.SrcPort,
-			r.DstPort,
-			r.Bytes,
-			r.Packets,
-			r.SourceID,
-			r.SrcMAC[:],
-			r.DstMAC[:],
-			r.InIf,
-			r.OutIf,
-			r.TCPFlags,
-			r.IPTTL,
-			r.IPTos,
-		)
-		if err != nil {
+		args = enrichedInsertArgs(args[:0], r, withIx)
+		if err := batch.Append(args...); err != nil {
 			insertErrs.Add(1)
 			log.Warn("clickhouse batch append", "err", err)
 			return false
@@ -397,6 +347,85 @@ func insertEnrichedBatchRows(ctx context.Context, log *slog.Logger, conn chdrive
 		return false
 	}
 	return true
+}
+
+// RowsHaveIxClients reports whether any row carries an IX client id.
+func RowsHaveIxClients(rows []FlowRow) bool {
+	for i := range rows {
+		if rows[i].IxSrcClient != "" || rows[i].IxDstClient != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// enrichedInsertArgs appends one row in the enriched INSERT column order.
+func enrichedInsertArgs(args []any, r *FlowRow, withIx bool) []any {
+	args = append(args,
+		r.Date,
+		r.TimeInsertedNs,
+		r.TimeReceivedNs,
+		r.TimeFlowStartNs,
+		r.SequenceNum,
+		r.SamplingRate,
+		r.SamplerAddress[:],
+		r.SrcAddr[:],
+		r.DstAddr[:],
+		r.SrcASN,
+		r.DstASN,
+		r.SrcASPath,
+		r.DstASPath,
+		r.Direction,
+		r.SrcKind,
+		r.DstKind,
+		r.SrcLabel,
+		r.DstLabel,
+		r.SrcOperator,
+		r.DstOperator,
+		r.SrcAttachmentKind,
+		r.DstAttachmentKind,
+		r.SrcAttachmentBoundary,
+		r.DstAttachmentBoundary,
+		r.SrcAttachmentLabel,
+		r.DstAttachmentLabel,
+		r.SrcAttachmentOperator,
+		r.DstAttachmentOperator,
+		r.SrcEndpointScope,
+		r.DstEndpointScope,
+		r.SrcEndpointSource,
+		r.DstEndpointSource,
+		r.SrcNetworkName,
+		r.DstNetworkName,
+		r.SrcNetworkRole,
+		r.DstNetworkRole,
+		r.SrcRole,
+		r.DstRole,
+		r.SrcEntity,
+		r.DstEntity,
+		r.SrcClient,
+		r.DstClient,
+	)
+	if withIx {
+		args = append(args, r.IxSrcClient, r.IxDstClient)
+	}
+	return append(args,
+		r.SrcVLAN,
+		r.DstVLAN,
+		r.Etype,
+		r.Proto,
+		r.SrcPort,
+		r.DstPort,
+		r.Bytes,
+		r.Packets,
+		r.SourceID,
+		r.SrcMAC[:],
+		r.DstMAC[:],
+		r.InIf,
+		r.OutIf,
+		r.TCPFlags,
+		r.IPTTL,
+		r.IPTos,
+	)
 }
 
 func RowsHaveEnrichment(rows []FlowRow) bool {

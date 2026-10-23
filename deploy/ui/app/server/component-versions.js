@@ -42,13 +42,45 @@ function parseComponentVersions(text) {
   return out;
 }
 
-function readComponentVersions(file = process.env.COMPONENT_VERSIONS_FILE || DEFAULT_FILE) {
-  try {
-    return parseComponentVersions(fs.readFileSync(file, 'utf8'));
-  } catch (err) {
-    if (err.code === 'ENOENT') return {};
-    throw err;
+function componentVersionsFileCandidates() {
+  const seen = new Set();
+  const out = [];
+  const add = (file) => {
+    const p = String(file || '').trim();
+    if (!p || seen.has(p)) return;
+    seen.add(p);
+    out.push(p);
+  };
+  add(process.env.COMPONENT_VERSIONS_FILE);
+  add(DEFAULT_FILE);
+  if (process.env.UI_DATA_DIR) {
+    add(path.join(process.env.UI_DATA_DIR, 'component-versions.tsv'));
   }
+  add('/opt/grapes/ui/data/component-versions.tsv');
+  return out;
+}
+
+function readComponentVersions(explicitFile) {
+  if (explicitFile) {
+    try {
+      return parseComponentVersions(fs.readFileSync(explicitFile, 'utf8'));
+    } catch (err) {
+      if (err.code === 'ENOENT') return {};
+      throw err;
+    }
+  }
+  let merged = {};
+  let readAny = false;
+  for (const file of componentVersionsFileCandidates()) {
+    try {
+      merged = { ...merged, ...parseComponentVersions(fs.readFileSync(file, 'utf8')) };
+      readAny = true;
+    } catch (err) {
+      if (err.code === 'ENOENT') continue;
+      throw err;
+    }
+  }
+  return readAny ? merged : {};
 }
 
 /**

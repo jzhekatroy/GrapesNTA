@@ -13,6 +13,18 @@ import (
 	"xdpflowd/internal/flowingest"
 )
 
+type ixScopeFilter interface {
+	FilterIxScope(rows []flowingest.FlowRow) []flowingest.FlowRow
+}
+
+func filterIxScope(p protocolParser, rows []flowingest.FlowRow) []flowingest.FlowRow {
+	f, ok := p.(ixScopeFilter)
+	if !ok || f == nil {
+		return rows
+	}
+	return f.FilterIxScope(rows)
+}
+
 type udpListener struct {
 	log        *slog.Logger
 	name       string
@@ -247,6 +259,7 @@ func (l *udpListener) runWorker(ctx context.Context, datagrams <-chan udpDatagra
 			// Drop excluded rows before they take sequence numbers, so the
 			// numbering stays continuous for what actually reaches ClickHouse.
 			rows = l.exclusions.FilterRows(rows)
+			rows = filterIxScope(l.parser, rows)
 			for i := range rows {
 				rows[i].SequenceNum = l.seq.Add(1)
 			}

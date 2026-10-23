@@ -20,6 +20,7 @@ const {
   isActive,
   uniquePorts,
   uniquePrefixes,
+  formatMac,
 } = require('./erp-piterix-sync');
 
 const SECTION = {
@@ -474,6 +475,74 @@ function buildGoneRows(gone, goneNames, category) {
   }));
 }
 
+function ixIssueRow(section, category, fields = {}) {
+  return {
+    ...emptyRow(section, category),
+    verdict: 'нет',
+    ...fields,
+    macs: fields.mac ? formatMac(fields.mac) : (fields.macs || ''),
+  };
+}
+
+function buildIxIssueRows({
+  category = '',
+  macOnPort = false,
+  noMac = [],
+  ambiguous = [],
+  foreign = [],
+  unlisted = [],
+  note = '',
+} = {}) {
+  const rows = [];
+  for (const item of ambiguous) {
+    rows.push(ixIssueRow('IX: MAC на нескольких ЛС', category, {
+      account: (item.accounts || []).join(', '),
+      switch_host: item.switchIp,
+      if_index: item.ifIndex,
+      mac: item.mac,
+      reason: 'один MAC на порту указан у нескольких лицевых счетов и не размечается',
+    }));
+  }
+  if (macOnPort) {
+    for (const client of noMac) {
+      const ports = client.ports?.length ? client.ports : [{ switchIp: '', ifIndex: 0 }];
+      for (const port of ports) {
+        rows.push(ixIssueRow('IX: нет MAC', category, {
+          account: client.clientId,
+          client_name: client.displayName,
+          switch_host: port.switchIp,
+          if_index: port.ifIndex,
+          reason: 'у клиента не заполнен MAC, трафик порта не учитывается',
+        }));
+      }
+    }
+    for (const item of foreign) {
+      rows.push(ixIssueRow('IX: чужой MAC', category, {
+        account: item.owner,
+        switch_host: item.switchIp,
+        if_index: item.ifIndex,
+        mac: item.mac,
+        reason: 'на порту виден MAC другого клиента, в трафик порта не входит',
+        notes: `ЛС MAC: ${(item.accounts || []).join(', ')}; байт за час ${item.bytes || 0}`,
+      }));
+    }
+    for (const item of unlisted) {
+      rows.push(ixIssueRow('IX: MAC нет в ERP', category, {
+        account: item.owner,
+        switch_host: item.switchIp,
+        if_index: item.ifIndex,
+        mac: item.mac,
+        reason: 'на порту виден MAC, которого нет в ERP у этого клиента',
+        notes: `байт за час ${item.bytes || 0}`,
+      }));
+    }
+  }
+  if (note) {
+    rows.push(ixIssueRow('IX', category, { reason: note }));
+  }
+  return rows;
+}
+
 function buildReportRows({
   clients = [],
   catalog = {},
@@ -482,6 +551,7 @@ function buildReportRows({
   goneNames = new Map(),
   category = '',
   bindMode = 'ports',
+  ix = null,
 } = {}) {
   const active = clients.filter(isActive);
   const mode = normalizeBindMode(bindMode);
@@ -497,7 +567,8 @@ function buildReportRows({
     }
     main.push(...buildPrefixRows(active, l3Index, category, { l3Known }));
   }
-  return [...main, ...buildGoneRows(gone, goneNames, category)];
+  const issues = ix ? buildIxIssueRows({ category, ...ix }) : [];
+  return [...main, ...issues, ...buildGoneRows(gone, goneNames, category)];
 }
 
 function summarizeReport(rows = []) {
@@ -532,7 +603,7 @@ const BLANK_WHEN_ZERO = new Set(['if_index', 'speed_mbps']);
  *  before the report became mode-specific carry both sections and keep the
  *  full set. */
 function reportColumns(rows = []) {
-  const ports = rows.some((row) => row.section === SECTION.ports);
+  const ports = rows.some((row) => row.section === SECTION.ports || String(row.section || '').startsWith('IX'));
   const prefixes = rows.some((row) => row.section === SECTION.prefixes);
   if (ports && prefixes) return REPORT_COLUMNS;
   return [
