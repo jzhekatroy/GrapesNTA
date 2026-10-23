@@ -818,7 +818,7 @@ function WorkerPanel({ data, loading, onReload }) {
             </thead>
             <tbody>
               {traffic.map((r) => (
-                <tr key={r.job} style={{ background: r.stale || r.status === 'failed' || r.status === 'error' || r.status === 'deferred' ? 'var(--st-warning-bg)' : 'transparent' }}>
+                <tr key={r.job} style={{ background: r.stale || r.status === 'failed' || r.status === 'error' || r.status === 'deferred' || r.status === 'missing' ? 'var(--st-warning-bg)' : 'transparent' }}>
                   <td style={{ padding: 6 }} className="mono">{r.job}</td>
                   <td style={{ padding: 6 }}>
                     <StatusIndicator

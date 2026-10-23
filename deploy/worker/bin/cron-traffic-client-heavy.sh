@@ -17,8 +17,11 @@ export CLICKHOUSE_HTTP_PASSWORD="${TRAFFIC_ROLLUP_CH_PASSWORD:-}"
 # Client×service and client×country read a whole hour of flows_raw: 13–45s
 # each on m61. Inside the minute tick they got ~30s after the minute jobs and
 # timed out two times in three, so catch-up crawled at a few hours per hour.
+# traffic_client_ix_1m is a minute job but runs here too: it is another full
+# pass over the client rows of flows_raw, and the minute tick has no room for it.
+# With IX mode off it writes nothing.
 export TRAFFIC_ROLLUP_LIVE_WALL_SEC="${TRAFFIC_CLIENT_HEAVY_LIVE_WALL_SEC:-240}"
 
 exec timeout -k 10 "${TRAFFIC_CLIENT_HEAVY_TIMEOUT_SEC:-270}" \
   python3 /app/scripts/traffic_rollup_async.py \
-  --jobs traffic_client_country_1h,traffic_client_service_1h,traffic_client_country_1d,traffic_client_service_1d
+  --jobs traffic_client_ix_1m,traffic_client_country_1h,traffic_client_service_1h,traffic_client_country_1d,traffic_client_service_1d

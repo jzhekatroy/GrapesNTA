@@ -137,6 +137,25 @@ function overviewTableForGranularity(granularity) {
   return { table: 'traffic_client_1h', bucketColumn: 'hour' };
 }
 
+// Repeated ?location= names. Absent means every site, including traffic that
+// is not tied to an IX VLAN, so the chart stays the same as the base aggregate.
+function parseLocationList(queryParams = {}) {
+  const raw = queryParams.locations ?? queryParams.location;
+  if (raw == null || raw === '') return null;
+  const list = (Array.isArray(raw) ? raw : [raw])
+    .map((item) => String(item || '').trim())
+    .filter(Boolean);
+  return list.length ? list : null;
+}
+
+function ixMinuteRangeOrThrow(range) {
+  if (rangeSpanHours(range) > MINUTE_RETENTION_HOURS) {
+    const err = new Error('Для IX доступны последние 14 суток');
+    err.statusCode = 400;
+    throw err;
+  }
+}
+
 async function isCabinetIxClient(clientId) {
   try {
     const flag = await query(`
@@ -172,9 +191,18 @@ async function lastCompleteBucket(table, bucketColumn, clientId) {
 
 async function overviewSeries(clientId, queryParams = {}) {
   const range = parseRange(queryParams);
-  const granularity = resolveOverviewGranularity(range, queryParams.granularity);
-  const { table, bucketColumn } = overviewTableForGranularity(granularity);
+  const locations = parseLocationList(queryParams);
+  if (locations) ixMinuteRangeOrThrow(range);
+  let granularity = resolveOverviewGranularity(range, queryParams.granularity);
+  // The IX table is minute-only. A subset of sites cannot use the hour or day
+  // client tables, which have no location.
+  if (locations && (granularity === 'hour' || granularity === 'day')) granularity = '5m';
+  const resolved = overviewTableForGranularity(granularity);
+  const table = locations ? 'traffic_client_ix_1m' : resolved.table;
+  const { bucketColumn } = resolved;
   const filter = timeFilterSql(bucketColumn, range);
+  const locationSql = locations ? ' AND ix_location IN {locations:Array(String)}' : '';
+  const locationParams = locations ? { locations } : {};
   const seriesSql = granularity === '5m'
     ? `
       SELECT
@@ -194,7 +222,7 @@ async function overviewSeries(clientId, queryParams = {}) {
           flows_count
         FROM default.${table}
         WHERE client_id = {clientId:String}
-          AND (${filter.sql})
+          AND (${filter.sql})${locationSql}
       )
       WHERE ${closedFiveMinuteBucketSql('inner_bucket')}
       GROUP BY inner_bucket, direction
@@ -210,13 +238,13 @@ async function overviewSeries(clientId, queryParams = {}) {
         sum(flows_count) AS flows_count
       FROM default.${table}
       WHERE client_id = {clientId:String}
-        AND (${filter.sql})
+        AND (${filter.sql})${locationSql}
       GROUP BY ${bucketColumn}, direction
       ORDER BY ${bucketColumn} ASC, direction ASC
     `;
   const [{ rows, elapsedMs }, dataUntil, ix] = await Promise.all([query(
     seriesSql,
-    { clientId, ...filter.params },
+    { clientId, ...filter.params, ...locationParams },
     { name: 'cabinet/overview-series' },
   ), lastCompleteBucket(table, bucketColumn, clientId),
   isCabinetIxClient(clientId)]);
@@ -939,8 +967,140 @@ async function dnsQueries(clientId, queryParams = {}) {
   };
 }
 
+async function overviewIxSites(clientId) {
+  if (!await isCabinetIxClient(clientId)) {
+    return { data: [], meta: { enabled: false, clientId } };
+  }
+  const { rows, elapsedMs } = await query(`
+    SELECT DISTINCT ix_location
+    FROM default.net_l2_vlans_enabled
+    WHERE ix = 1 AND ix_location != ''
+    ORDER BY ix_location
+  `, {}, { name: 'cabinet/ix-sites' });
+  return {
+    data: rows.map((row) => String(row.ix_location || '')).filter(Boolean),
+    meta: { enabled: true, elapsedMs, clientId },
+  };
+}
+
+function ixRankOrderExpr(direction) {
+  if (direction === 'in') return 'in_bytes';
+  if (direction === 'out') return 'out_bytes';
+  return '(in_bytes + out_bytes)';
+}
+
+function mapIxRankRows(rows) {
+  return rows.map((row) => ({
+    id: String(row.id ?? ''),
+    name: String(row.name || ''),
+    inBytes: Number(row.in_bytes) || 0,
+    outBytes: Number(row.out_bytes) || 0,
+  }));
+}
+
+// Tops for the IX cabinet. One minute table, split by direction columns so the
+// header toggle can show «К вам», «От вас» or both. Location names are optional.
+async function overviewIxRankings(clientId, queryParams = {}) {
+  if (!await isCabinetIxClient(clientId)) {
+    return { data: { peers: [], asns: [] }, meta: { enabled: false, clientId } };
+  }
+  const range = parseRange(queryParams);
+  ixMinuteRangeOrThrow(range);
+  const locations = parseLocationList(queryParams);
+  const direction = ['in', 'out'].includes(String(queryParams.direction || ''))
+    ? String(queryParams.direction)
+    : '';
+  const limit = Math.min(Math.max(Number(queryParams.limit) || 10, 1), 50);
+  const filter = timeFilterSql('minute', range);
+  const locationSql = locations ? ' AND ix_location IN {locations:Array(String)}' : '';
+  const params = {
+    clientId,
+    ...filter.params,
+    ...(locations ? { locations } : {}),
+  };
+  const rankParams = { ...params, limit };
+  const where = `
+    FROM default.traffic_client_ix_1m
+    WHERE client_id = {clientId:String}
+      AND (${filter.sql})${locationSql}
+  `;
+  const order = ixRankOrderExpr(direction);
+  const [peersRes, asnRes, totalRes] = await Promise.all([
+    query(`
+      SELECT
+        v.peer_client_id AS id,
+        any(if(v.peer_client_id = '', '', ifNull(c.display_name, ''))) AS name,
+        any(v.in_bytes) AS in_bytes,
+        any(v.out_bytes) AS out_bytes
+      FROM
+      (
+        SELECT
+          peer_client_id,
+          sumIf(bytes, direction = 'in') AS in_bytes,
+          sumIf(bytes, direction = 'out') AS out_bytes
+        ${where}
+        GROUP BY peer_client_id
+      ) AS v
+      LEFT JOIN default.net_clients_enabled AS c ON c.client_id = v.peer_client_id
+      GROUP BY v.peer_client_id
+      ORDER BY ${order} DESC
+      LIMIT {limit:UInt32}
+    `, rankParams, { name: 'cabinet/ix-peers-rank' }),
+    query(`
+      SELECT
+        toString(v.remote_asn) AS id,
+        any(multiIf(
+          v.remote_asn = 0, '',
+          a.name != '', a.name,
+          concat('AS', toString(v.remote_asn))
+        )) AS name,
+        any(v.in_bytes) AS in_bytes,
+        any(v.out_bytes) AS out_bytes
+      FROM
+      (
+        SELECT
+          remote_asn,
+          sumIf(bytes, direction = 'in') AS in_bytes,
+          sumIf(bytes, direction = 'out') AS out_bytes
+        ${where}
+        GROUP BY remote_asn
+      ) AS v
+      LEFT JOIN default.asn_registry_enriched AS a ON a.asn = v.remote_asn
+      GROUP BY v.remote_asn
+      ORDER BY ${order} DESC
+      LIMIT {limit:UInt32}
+    `, rankParams, { name: 'cabinet/ix-asn-rank' }),
+    query(`
+      SELECT
+        sumIf(bytes, direction = 'in') AS in_bytes,
+        sumIf(bytes, direction = 'out') AS out_bytes
+      ${where}
+    `, params, { name: 'cabinet/ix-rank-totals' }),
+  ]);
+  const total = totalRes.rows[0] || {};
+  return {
+    data: {
+      peers: mapIxRankRows(peersRes.rows),
+      asns: mapIxRankRows(asnRes.rows),
+    },
+    meta: {
+      enabled: true,
+      elapsedMs: Math.max(peersRes.elapsedMs || 0, asnRes.elapsedMs || 0, totalRes.elapsedMs || 0),
+      clientId,
+      range,
+      direction,
+      locations,
+      totals: {
+        inBytes: Number(total.in_bytes) || 0,
+        outBytes: Number(total.out_bytes) || 0,
+      },
+    },
+  };
+}
+
 module.exports = {
   parseRange,
+  parseLocationList,
   parseGranularity,
   resolveOverviewGranularity,
   overviewSeries,
@@ -948,6 +1108,8 @@ module.exports = {
   overviewRecentFlows,
   overviewLocations,
   overviewIxPeers,
+  overviewIxSites,
+  overviewIxRankings,
   overviewCountries,
   overviewServices,
   dnsDomains,

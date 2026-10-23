@@ -35,6 +35,9 @@ const ACTIVE_TRAFFIC_JOBS = [
   'traffic_role_1m',
   'traffic_entity_1m',
   'traffic_client_1m',
+  // Minute job, but the worker runs it every 5 minutes (cron-traffic-client-heavy).
+  // The 12-minute lag warning still fits: safety lag is 4 minutes.
+  'traffic_client_ix_1m',
   'traffic_vlan_1m',
   'traffic_country_1m',
   'traffic_service_1m',
@@ -82,6 +85,22 @@ function formatLag(ageSec) {
 
 function problem(level, code, message, meta = {}) {
   return { level, code, message, ...meta };
+}
+
+function missingIxRollupRow() {
+  return {
+    job: 'traffic_client_ix_1m',
+    lastBucket: null,
+    status: 'missing',
+    lastError: null,
+    rowsWritten: 0,
+    durationMs: null,
+    updatedAt: null,
+    bucketLagSec: null,
+    updateAgeSec: null,
+    stale: false,
+    lagWarnSec: TRAFFIC_1M_LAG_WARN_SEC,
+  };
 }
 
 function trafficStaleUpdateSec(jobName) {
@@ -152,9 +171,15 @@ async function loadTrafficRollupState() {
         };
       });
 
+    // Other jobs already have a state row on a live stand. This one stays
+    // invisible until the worker image that schedules it is deployed.
+    if (mapped.length && !mapped.some((row) => row.job === 'traffic_client_ix_1m')) {
+      mapped.push(missingIxRollupRow());
+    }
+
     const order = new Map(ACTIVE_TRAFFIC_JOBS.map((j, i) => [j, i]));
     mapped.sort((a, b) => {
-      const bad = (row) => row.status === 'failed' || row.status === 'error' || row.status === 'deferred' || row.stale;
+      const bad = (row) => row.status === 'failed' || row.status === 'error' || row.status === 'deferred' || row.status === 'missing' || row.stale;
       const ra = bad(a) ? 0 : 1;
       const rb = bad(b) ? 0 : 1;
       if (ra !== rb) return ra - rb;
@@ -364,6 +389,13 @@ function buildProblems({ worker, jobs, trafficRows, trafficError }) {
         `Traffic rollup «${r.job}»: status=${r.status}${r.lastError ? ` — ${r.lastError}` : ''}`,
         { job: r.job },
       ));
+    } else if (r.status === 'missing') {
+      problems.push(problem(
+        'warning',
+        'traffic_job_missing',
+        `Traffic «${r.job}»: нет строки состояния — воркер с этой задачей ещё не выложен или не успел запуститься`,
+        { job: r.job },
+      ));
     } else if (r.status === 'deferred') {
       problems.push(problem(
         'warning',
@@ -476,4 +508,5 @@ async function getWorkerDiagnostics() {
 module.exports = {
   getWorkerDiagnostics,
   classifyTrafficJob,
+  missingIxRollupRow,
 };

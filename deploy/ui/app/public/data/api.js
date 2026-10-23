@@ -2620,7 +2620,7 @@ const ApiClient = (() => {
     '30d': 720,
   };
 
-  function cabinetRangeQuery({ timeRange = '24h', customPeriod } = {}) {
+  function cabinetRangeQuery({ timeRange = '24h', customPeriod, locations } = {}) {
     const params = new URLSearchParams();
     if (timeRange === 'custom' && customPeriod?.from && customPeriod?.to) {
       const apiPeriod = apiCustomPeriodParams(customPeriod);
@@ -2629,6 +2629,9 @@ const ApiClient = (() => {
     } else {
       params.set('hours', String(CABINET_TIME_RANGE_HOURS[timeRange] || 24));
     }
+    (locations || []).forEach((name) => {
+      if (name) params.append('location', name);
+    });
     return params;
   }
 
@@ -2652,8 +2655,10 @@ const ApiClient = (() => {
     }
   }
 
-  async function loadCabinetOverviewSeries({ timeRange = '24h', customPeriod, granularity = 'auto' } = {}) {
-    const params = cabinetRangeQuery({ timeRange, customPeriod });
+  async function loadCabinetOverviewSeries({
+    timeRange = '24h', customPeriod, granularity = 'auto', locations,
+  } = {}) {
+    const params = cabinetRangeQuery({ timeRange, customPeriod, locations });
     params.set('granularity', granularity || 'auto');
     const result = await fetchCabinet(`/api/cabinet/overview/series?${params}`, 'cabinet/overview/series');
     if (!result.ok) {
@@ -2723,6 +2728,45 @@ const ApiClient = (() => {
     return {
       source: 'clickhouse',
       data: result.data || [],
+      meta: result.meta || null,
+      loadMs: result.loadMs,
+      serverMs: result.serverMs,
+    };
+  }
+
+  async function loadCabinetIxSites() {
+    const result = await fetchCabinet('/api/cabinet/overview/ix-sites', 'cabinet/overview/ix-sites');
+    if (!result.ok) {
+      return { data: [], meta: { enabled: false }, error: result.error?.message || LOAD_FAILED };
+    }
+    return { data: result.data || [], meta: result.meta || { enabled: false } };
+  }
+
+  async function loadCabinetIxRankings({
+    timeRange = '24h',
+    customPeriod,
+    direction,
+    locations,
+    limit = 10,
+  } = {}) {
+    const params = cabinetRangeQuery({ timeRange, customPeriod, locations });
+    if (direction) params.set('direction', direction);
+    if (limit != null) params.set('limit', String(limit));
+    const result = await fetchCabinet(`/api/cabinet/overview/ix-rankings?${params}`, 'cabinet/overview/ix-rankings');
+    if (!result.ok) {
+      return {
+        source: 'error',
+        data: { peers: [], asns: [] },
+        meta: null,
+        error: result.error?.message || LOAD_FAILED,
+        status: result.error?.status || 0,
+        loadMs: result.loadMs,
+        serverMs: null,
+      };
+    }
+    return {
+      source: 'clickhouse',
+      data: result.data || { peers: [], asns: [] },
       meta: result.meta || null,
       loadMs: result.loadMs,
       serverMs: result.serverMs,
@@ -3303,6 +3347,8 @@ const ApiClient = (() => {
     loadCabinetOverviewCountries,
     loadCabinetOverviewLocations,
     loadCabinetOverviewIxPeers,
+    loadCabinetIxSites,
+    loadCabinetIxRankings,
     loadCabinetOverviewServices,
     loadCabinetOverviewRecentFlows,
     loadCabinetDnsDomains,

@@ -32,6 +32,8 @@ const OPERATOR_WIDGET_REGISTRY = {
   'top-talkers': { labelKey: 'dashboard.widget.top-talkers', allowedW: [6, 7, 8, 12], minH: 2, maxH: 3 },
   countries: { labelKey: 'dashboard.widget.countries', allowedW: [4, 5, 6, 12], minH: 2, maxH: 3 },
   'recent-flows': { labelKey: 'dashboard.widget.recent-flows', allowedW: [4, 5, 6, 7, 8, 9, 10, 11, 12], minH: 1, maxH: 2 },
+  'ix-peers': { labelKey: 'cabinet.ix.peers', allowedW: [6, 12], minH: 2, maxH: 3 },
+  'ix-asn': { labelKey: 'cabinet.ix.asn', allowedW: [6, 12], minH: 2, maxH: 3 },
 };
 
 const STACK_WIDGET_TEMPLATES = {

@@ -12,7 +12,7 @@ clickhouse.query = async (sql, params, opts) => {
   return next || { rows: [], elapsedMs: 1 };
 };
 
-const { overviewSeries, parseRange } = require('./data');
+const { overviewSeries, overviewIxRankings, parseRange } = require('./data');
 
 function resetCalls() {
   calls.length = 0;
@@ -104,4 +104,59 @@ test('overviewSeries marks an IX client', async () => {
   assert.match(ixCall.sql, /comment = 'erp:piter_ix'/);
   assert.equal(ixCall.params.clientId, 'client:demo');
   assert.equal(result.meta.ix, true);
+});
+
+test('overviewSeries filters a subset of IX sites on the minute table', async () => {
+  resetCalls();
+  queryResults.push(
+    { rows: [] },
+    { rows: [{ data_until: '2026-08-10 12:00:00' }] },
+  );
+  await overviewSeries('client:demo', { hours: '6', location: ['Рига', 'Москва'] });
+  const seriesCall = calls.find((c) => c.opts?.name === 'cabinet/overview-series');
+  assert.match(seriesCall.sql, /default\.traffic_client_ix_1m/);
+  assert.doesNotMatch(seriesCall.sql, /default\.traffic_client_1m\b/);
+  assert.match(seriesCall.sql, /ix_location IN \{locations:Array\(String\)\}/);
+  assert.deepEqual(seriesCall.params.locations, ['Рига', 'Москва']);
+});
+
+test('overviewSeries rejects an IX location range past 14 days', async () => {
+  resetCalls();
+  await assert.rejects(
+    () => overviewSeries('client:demo', {
+      from: '2026-01-01T00:00:00Z',
+      to: '2026-03-01T00:00:00Z',
+      location: 'Рига',
+    }),
+    (err) => err.statusCode === 400,
+  );
+  assert.equal(calls.length, 0);
+});
+
+test('overviewIxRankings stays off for a client that is not IX', async () => {
+  resetCalls();
+  queryResults.push({ rows: [{ ix_enabled: 0, ix_client: 0 }] });
+  const result = await overviewIxRankings('client:demo', { hours: '24' });
+  assert.equal(result.meta.enabled, false);
+  assert.equal(calls.length, 1);
+});
+
+test('overviewIxRankings orders peers by the selected direction', async () => {
+  resetCalls();
+  queryResults.push(
+    { rows: [{ ix_enabled: 1, ix_client: 1 }] },
+    { rows: [{ id: 'peer-1', name: 'Питер', in_bytes: 10, out_bytes: 0 }], elapsedMs: 3 },
+    { rows: [{ id: '0', name: '', in_bytes: 0, out_bytes: 4 }], elapsedMs: 4 },
+    { rows: [{ in_bytes: 100, out_bytes: 40 }], elapsedMs: 2 },
+  );
+  const result = await overviewIxRankings('client:demo', { hours: '24', direction: 'out', location: 'Рига' });
+  const peerCall = calls.find((c) => c.opts?.name === 'cabinet/ix-peers-rank');
+  assert.match(peerCall.sql, /ORDER BY out_bytes DESC/);
+  assert.match(peerCall.sql, /traffic_client_ix_1m/);
+  assert.deepEqual(peerCall.params.locations, ['Рига']);
+  assert.equal(result.meta.enabled, true);
+  assert.equal(result.data.peers[0].name, 'Питер');
+  assert.equal(result.data.asns[0].id, '0');
+  assert.equal(result.data.asns[0].name, '');
+  assert.deepEqual(result.meta.totals, { inBytes: 100, outBytes: 40 });
 });

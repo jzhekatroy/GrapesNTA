@@ -585,7 +585,7 @@ function UserAccountMenu({
   );
 }
 
-function Header({ current, onNavigate, onToggleSidebar, currentUser, onLogout, onRefresh, theme, onToggleTheme, timeRange, onTimeRangeChange, customPeriod, onCustomPeriodChange, chartZoomDepth, onChartZoomReset, directions, onDirectionsChange, cabinetDirections, onCabinetDirectionsChange, collectorFilter, onCollectorFilterChange, pageTitles, hiddenPageIds, displayTimezone, timezonePref, onTimezonePrefChange, locale, onLocaleChange, cabinetMode, clientDisplayName, onStopImpersonation, buildInfo }) {
+function Header({ current, onNavigate, onToggleSidebar, currentUser, onLogout, onRefresh, theme, onToggleTheme, timeRange, onTimeRangeChange, customPeriod, onCustomPeriodChange, chartZoomDepth, onChartZoomReset, directions, onDirectionsChange, cabinetDirections, onCabinetDirectionsChange, cabinetLocations, cabinetLocationOn, onCabinetLocationsChange, collectorFilter, onCollectorFilterChange, pageTitles, hiddenPageIds, displayTimezone, timezonePref, onTimezonePrefChange, locale, onLocaleChange, cabinetMode, clientDisplayName, onStopImpersonation, buildInfo }) {
   const titles = pageTitles || PAGE_TITLES || {};
   const meta = GrapesI18n.localizedPageMeta(current, titles[current] || titles.dashboard || { title: current, section: '' });
   const hidePageFilters = cabinetMode
@@ -593,6 +593,7 @@ function Header({ current, onNavigate, onToggleSidebar, currentUser, onLogout, o
     : PAGES_WITHOUT_HEADER_FILTERS.has(current);
   const hideDirectionFilter = current === 'dns' || cabinetMode;
   const showCabinetDirectionFilter = cabinetMode && current === 'dashboard' && !!cabinetDirections;
+  const showCabinetLocations = showCabinetDirectionFilter && cabinetLocations?.length > 0;
   const hideCollectorFilter = cabinetMode;
   const sectionLabel = cabinetMode ? (clientDisplayName || t('cabinet.clientPortalFallback')) : meta.section;
   return (
@@ -622,6 +623,13 @@ function Header({ current, onNavigate, onToggleSidebar, currentUser, onLogout, o
                   items={getCabinetTrafficDirections()}
                 />
               )}
+              {showCabinetLocations && (
+                <CabinetLocationFilter
+                  locations={cabinetLocations}
+                  selected={cabinetLocationOn}
+                  onChange={onCabinetLocationsChange}
+                />
+              )}
               {!hideCollectorFilter && (
                 <CollectorFilter
                   collectorFilter={collectorFilter}
@@ -633,7 +641,7 @@ function Header({ current, onNavigate, onToggleSidebar, currentUser, onLogout, o
                 onTimeRangeChange={onTimeRangeChange}
                 customPeriod={customPeriod}
                 onCustomPeriodChange={onCustomPeriodChange}
-                maxRangeDays={cabinetMode && current === 'dashboard' ? 730 : null}
+                maxRangeDays={cabinetMode && current === 'dashboard' ? (showCabinetLocations ? 14 : 730) : null}
                 locale={locale}
               />
             </>
@@ -1926,6 +1934,115 @@ function TimeFilter({
         </button>
       )}
       {menu && ReactDOM.createPortal(menu, document.body)}
+    </div>
+  );
+}
+
+function CabinetLocationFilter({ locations, selected, onChange }) {
+  const [open, setOpen] = useState(false);
+  const [menuStyle, setMenuStyle] = useState(null);
+  const rootRef = useRef(null);
+  const menuRef = useRef(null);
+  const names = locations || [];
+  const onMap = selected || {};
+  const enabled = names.filter((name) => onMap[name] !== false);
+  const allOn = enabled.length === names.length;
+
+  const summary = allOn
+    ? t('cabinet.location.all')
+    : enabled.length === 0
+      ? t('cabinet.location.none')
+      : enabled.length === 1
+        ? enabled[0]
+        : t('cabinet.location.count', { n: enabled.length, total: names.length });
+
+  const toggle = (name) => {
+    onChange?.({ ...onMap, [name]: onMap[name] === false });
+  };
+
+  const setAll = (on) => {
+    onChange?.(Object.fromEntries(names.map((name) => [name, on])));
+  };
+
+  useLayoutEffect(() => {
+    if (!open) {
+      setMenuStyle(null);
+      return undefined;
+    }
+    const anchor = rootRef.current;
+    if (!anchor) return undefined;
+    const updatePosition = () => {
+      const rect = anchor.getBoundingClientRect();
+      setMenuStyle({
+        position: 'fixed',
+        top: rect.bottom + 6,
+        left: Math.max(8, rect.left),
+        width: Math.max(rect.width, 248),
+        maxHeight: 360,
+        zIndex: 1400,
+        overflowY: 'auto',
+      });
+    };
+    updatePosition();
+    window.addEventListener('resize', updatePosition);
+    window.addEventListener('scroll', updatePosition, true);
+    return () => {
+      window.removeEventListener('resize', updatePosition);
+      window.removeEventListener('scroll', updatePosition, true);
+    };
+  }, [open]);
+
+  useEffect(() => {
+    if (!open) return undefined;
+    const onPointerDown = (e) => {
+      if (rootRef.current?.contains(e.target) || menuRef.current?.contains(e.target)) return;
+      setOpen(false);
+    };
+    document.addEventListener('mousedown', onPointerDown);
+    return () => document.removeEventListener('mousedown', onPointerDown);
+  }, [open]);
+
+  const menu = open && menuStyle ? ReactDOM.createPortal(
+    <div
+      ref={menuRef}
+      className="direction-filter__menu direction-filter__menu--portal"
+      style={menuStyle}
+      role="menu"
+    >
+      <div className="time-filter__heading">
+        <span>{t('cabinet.location.title')}</span>
+        <button type="button" className="time-filter__link" onClick={() => setAll(!allOn)}>
+          {allOn ? t('directions.clearAll') : t('directions.selectAll')}
+        </button>
+      </div>
+      <div className="time-filter__section time-filter__section--directions">
+        {names.map((name) => {
+          const on = onMap[name] !== false;
+          return (
+            <label key={name} className={`direction-option ${on ? 'is-on' : ''}`}>
+              <input type="checkbox" checked={on} onChange={() => toggle(name)} />
+              <span className="direction-option__label">{name}</span>
+            </label>
+          );
+        })}
+      </div>
+    </div>,
+    document.body,
+  ) : null;
+
+  return (
+    <div className="direction-filter" ref={rootRef}>
+      <button
+        type="button"
+        className="direction-pill"
+        onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+        title={t('cabinet.location.title')}
+      >
+        <span className="direction-pill__label">{summary}</span>
+        <Icon name="chevD" size={14} />
+      </button>
+      {menu}
     </div>
   );
 }
