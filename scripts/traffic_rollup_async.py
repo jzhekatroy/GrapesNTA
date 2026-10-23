@@ -42,6 +42,7 @@ from traffic_rollup_jobs import (
     FLOWS_RAW_LIVE_TABLE,
     FLOWS_RAW_TABLE,
     RollupJob,
+    adapt_ix_client_columns,
     sorted_jobs,
 )
 
@@ -959,6 +960,38 @@ def split_window(
     return skip_last, empty[0], add_bucket(empty[-1], kind)
 
 
+def flows_has_ix_client_columns(ch: ClickHouseClient) -> bool:
+    """Обе колонки IX есть в таблице, из которой сводка читает потоки.
+
+    Неизвестный ответ не подменяет запрос: лучше прежняя ошибка, чем тихие
+    пустые участники на стенде, где колонки на самом деле есть.
+    """
+    cached = getattr(ch, "flows_has_ix_client_columns", None)
+    if cached is not None:
+        return cached
+    qualified = FLOWS_RAW_TABLE
+    if qualified.count(".") == 1:
+        database, table = qualified.split(".", 1)
+    else:
+        database, table = "default", qualified
+    if not database.replace("_", "").isalnum() or not table.replace("_", "").isalnum():
+        ch.flows_has_ix_client_columns = True
+        return True
+    sql = (
+        "SELECT count() FROM system.columns "
+        f"WHERE database = '{database}' AND table = '{table}' "
+        "AND name IN ('ix_src_client', 'ix_dst_client')"
+    )
+    try:
+        raw = ch.query(sql, display="ix client columns")
+    except RuntimeError:
+        ch.flows_has_ix_client_columns = True
+        return True
+    present = raw.strip() == "2"
+    ch.flows_has_ix_client_columns = present
+    return present
+
+
 def _insert_window(
     ch: ClickHouseClient,
     logger: logging.Logger,
@@ -968,7 +1001,17 @@ def _insert_window(
     args: argparse.Namespace,
 ) -> Tuple[datetime, int, str]:
     time_filter = build_time_filter(job, start, end)
-    select_sql = job.select_sql.format(time_filter=time_filter)
+    select_sql = job.select_sql
+    if job.job_id == "traffic_client_ix_1m" and not flows_has_ix_client_columns(ch):
+        if not getattr(ch, "ix_client_columns_warned", False):
+            logger.warning(
+                "job=%s table=%s has no ix_src_client/ix_dst_client; peer clients stay empty",
+                job.job_id,
+                FLOWS_RAW_TABLE,
+            )
+            ch.ix_client_columns_warned = True
+        select_sql = adapt_ix_client_columns(select_sql, False)
+    select_sql = select_sql.format(time_filter=time_filter)
     insert_sql = f"INSERT INTO {job.dest_table}\n{select_sql}"
     source_rows = None
     if args.preflight_count:
