@@ -229,7 +229,7 @@ function ApiErpCreateModal({ open, onClose, onCreated }) {
                   autoComplete="off"
                   onChange={(e) => setClientSecret(e.target.value)}
                 />
-                <div className="hint">Сохраняется хэшем и больше не показывается. Передайте точную строку в ERP.</div>
+                <div className="hint">Сохраняется хэшем и больше не показывается. Передайте точную строку.</div>
               </div>
             </>
           )
